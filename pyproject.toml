@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dynameta"
+version = "0.1.0"
+description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DC carrier transport + Drude + 3D FEM optics)."
+readme = "README.md"
+authors = [{name = "Metacept / Neurophos"}]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "h5py>=3.8",
+    "zarr>=3.0",
+    "devsim>=2.10",
+    "ngsolve>=6.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["dynameta*"]
