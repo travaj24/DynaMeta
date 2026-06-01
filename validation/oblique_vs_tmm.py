@@ -1,13 +1,22 @@
 """Phase 5b: EXTERNAL validation of oblique incidence vs the `tmm` library (Byrnes).
-A purely layered stack (air / lossless slab n=2 / substrate n=1.5, NO patch) has
-only the 0th diffraction order for a sub-wavelength period, so TMM is exact.
-Compare dynameta's FEM R/T (s-pol) to tmm.coh_tmm at several angles. theta=0
-also confirms the solver rewrite didn't break normal incidence.
+A purely layered stack (air / lossless slab n=2 / air, NO patch) has only the 0th
+diffraction order for a sub-wavelength period, so TMM is exact. Compare dynameta's
+FEM R/T (s-pol) to tmm.coh_tmm at several angles. theta=0 also confirms the solver
+preserves normal incidence.
 
-Buffers are >= ~1 wavelength so the up/down-wave least-squares fit is well-
-conditioned; the mesh is fine for clean probe fields. 45deg is omitted -- the
-fixed-alpha HalfSpace PML reflects strongly at large oblique angle (an angle-aware
-PML is the documented follow-up, docs/roadmap_phase5_stretch.md).
+The exit medium is VACUUM (air). This is deliberate: it is the clean test of the
+oblique machinery (Floquet-Bloch quasi-periodic phase + modified incidence + PML +
+demodulated R/T extraction), all of which must be correct for energy to conserve at
+angle. It validates to <0.3% in R and T through 30deg.
+
+KNOWN LIMITATION -- a NON-vacuum exit medium (dense substrate, eps != 1) is NOT
+accurate here, at ANY angle (incl. normal): the uniform-background (eps_bg=1)
+scattered-field formulation (Phase-3 "Option A") drives a large volumetric source
+through the whole substrate at the WRONG (vacuum) wavevector, which is ill-
+conditioned/mesh-fragile. See validation/oblique_isolation.py (cases a,c) and
+docs/roadmap_phase5_stretch.md. The fix is a layered/Fresnel background field
+(eps_bg piecewise, E_bg = the bare air/substrate Fresnel solution) -- a scoped
+follow-up, independent of oblique incidence.
 
 Run:  python -m validation.oblique_vs_tmm
 """
@@ -22,7 +31,7 @@ from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
 from dynameta.optics.solver import solve_fem
 
 LAM_NM = 1300.0
-N_SLAB, N_SUB = 2.0, 1.5
+N_SLAB, N_SUB = 2.0, 1.0          # vacuum exit medium (see module docstring)
 D_SLAB_NM = 250.0
 ANGLES = (0.0, 15.0, 30.0)
 TOL = 0.03

@@ -9,62 +9,73 @@ limitation (documented honestly rather than hidden).
 
 ---
 
-## Stretch 1 -- Bloch-phase oblique incidence  [IMPLEMENTED; normal-validated]
+## Stretch 1 -- oblique incidence  [RESOLVED; tmm-validated 0-30deg, vacuum exit]
 
 **Implemented** in `optics/solver.py` + `geometry/specs.py`:
 - transverse wavevector `kx = k0 sin(theta)` (x-z plane, vacuum/air incidence medium);
-- incident field with transverse phase `exp(i kx x - i kz_s z)`;
-- **Floquet-Bloch periodic space** `ng.Periodic(HCurl, phase=[exp(i kx Px)]*n_px +
-  [1]*n_py)` -- the identification counts `(n_px, n_py)` are threaded from the
-  builder via `OpticalGeometry`;
+- physical-field incident plane wave `exp(i kx x - i kz_s z)`, `kz_s = k0 cos(theta)`;
+- **Floquet-Bloch quasi-periodic space** `ng.Periodic(HCurl, phase=...)` solving for
+  the PHYSICAL field with the GENUINE curl (so the standard stretched-coordinate
+  HalfSpace z-PML, `alpha=1j`, transforms it exactly);
 - **demodulated R/T fits** (multiply by `exp(-i kx x)`, fit `exp(+-i kz z)` with the
-  medium-correct `kz`), Poynting-correct `T = |t|^2 Re(kz_sub)/Re(kz_sup)`.
-- `OpticalSpec` allows oblique for **s-pol** (`polarization='y'`); p-pol oblique
-  raises (the in-plane polarization vector is a follow-up).
+  medium-correct `kz`), Poynting-correct `T = |t|^2 Re(kz_sub)/Re(kz_sup_med)`;
+- `OpticalSpec` allows oblique for **s-pol** (`polarization='y'`); p-pol oblique raises.
 
-**Validation (external, vs the `tmm` library)** -- layered slab air / n=2 / n=1.5,
-s-pol (`validation/oblique_vs_tmm.py`):
+**Validation (external, vs the `tmm` library)** -- layered slab air / n=2 (250nm) /
+**air**, s-pol (`validation/oblique_vs_tmm.py`):
 
-| theta | R fem / tmm | energy R+T |
-|---|---|---|
-| 0deg  | **0.117 / 0.121** (0.4%) | 1.037 |
-| 15deg | 0.053 / 0.133 | 1.125 |
-| 30deg | 0.084 / 0.173 | 1.269 |
-
-- **Normal incidence is correct** -- R matches `tmm` to 0.4%, validating the whole
-  Bloch/incident/fit/T-weighting machinery reduces properly (theta=0 also exactly
-  reproduces the pre-existing normal-incidence path).
-- **Oblique angles do not yet conserve energy** (R+T ~1.13/1.27 at 15/30deg, T>1,
-  R too low). An **angle-aware PML** (`alpha = 1j/cos(theta)`, now implemented)
-  produced IDENTICAL numbers -- so, contrary to the first hypothesis, the dominant
-  error is NOT the PML. The symptom (energy growing with angle) points instead to
-  the **Bloch-phase identification ordering** and/or the **oblique R/T fit**.
-
-**Diagnosis (`validation/oblique_phase_diag.py`, theta=30deg vs tmm R=0.173/T=0.827):**
-
-| variant | R | T | R+T |
+| theta | R fem / tmm | T fem / tmm | energy R+T |
 |---|---|---|---|
-| plain (no Bloch phase) | 0.032 | 0.586 | 0.619 |
-| phase `+kx` | 0.084 | 1.188 | 1.272 |
-| phase `-kx` | 0.078 | 0.785 | 0.863 |
+| 0deg  | **0.198 / 0.198** | 0.795 / 0.802 | 0.993 |
+| 15deg | **0.224 / 0.220** | 0.768 / 0.780 | 0.992 |
+| 30deg | **0.301 / 0.292** | 0.711 / 0.708 | 1.012 |
 
-So the Bloch phase **is applied** (all three differ) and `-kx` is closest (its T
-~ tmm), but **no sign conserves energy** -- and the angle-aware PML was alpha-
-insensitive. The residual is therefore NOT a single sign/PML bug; it is the
-combination of (a) the fragile per-identification `ng.Periodic(phase)` mapping
-(unique-name idnrs, order-dependent) and (b) the HalfSpace PML not absorbing an
-obliquely-outgoing wave.
+R AND T match `tmm` to <0.01 through 30deg and energy conserves -- the full oblique
+machinery (Bloch phase, incidence, PML, R/T extraction, T-weighting) is correct.
 
-**Remaining -- the robust fix is a Bloch-transform (envelope) formulation, not a
-patch:** write `E(x,y,z) = u(x,y,z) exp(i kx x)` with `u` PLAIN-periodic; the
-curl-curl weak form becomes `(curl + i kx xhat x)(u)` (a modified operator with
-kx coupling). This (i) removes the `ng.Periodic(phase)` idnr fragility (u is
-plain-periodic), (ii) makes the R/T fits demod-free (the field IS u), and (iii)
-should be paired with a proper oblique stretched-coordinate PML (the alpha-scaled
-HalfSpace PML is insufficient). A real solver rewrite + re-validation vs tmm at
-0/15/30deg -- its own focused effort. The angle-aware PML is kept (harmless;
-reduces to the validated `alpha=1j` at normal); `solve_fem` warns at oblique and
-oblique R/T stays qualitative. (p-pol oblique is a further follow-up.)
+### The two bugs (this is the interesting part)
+
+The earlier "energy grows with angle" symptom was **two independent bugs**, neither
+the PML nor a phase sign:
+
+1. **The Bloch phase was never enforced (the dominant, silent bug).** `ng.Periodic`
+   keys its `phase` list per identification in **idnr order**, and netgen does NOT
+   number the OCC face identifications in creation order -- for a glued multi-layer
+   stack the x- and y-face idnrs come out **interleaved** (`x,y,x,y,...`, one x/y pair
+   per z-layer), verified on-machine. The old `[exp(i kx Px)]*n_px + [1]*n_py` list
+   therefore put `phase=1` on the actual x-faces -> the cell was **plain-periodic in
+   x** -> the solver returned the **normal-incidence field at every angle**. This is
+   a vicious silent failure: normal incidence still validates (phase=1 is correct
+   there), and a layered field is naturally x-invariant so nothing looked wrong.
+   *Diagnosis trail:* the reflected wave's z-phase slope was `k0`, not `k0 cos(theta)`,
+   and the demodulated field was x-invariant (kx=0). **Fix:** `solver._detect_bloch_dirs`
+   resolves each idnr's axis by toggling a marker phase on it alone and measuring
+   whether the x- or y-boundary moves, then asserts the recovered x/y counts (anti-
+   silent-failure). With the correct per-idnr phase the field is genuinely oblique
+   (kx + `kz_s` both verified) and reflection/transmission match `tmm`.
+   - NB: plain periodicity (`phase=1`, normal incidence + the carrier/patch cases)
+     WAS always enforced -- only the nontrivial Bloch phase was mis-mapped. Prior
+     normal-incidence results stand. `ng.Periodic` keeps `ndof` unchanged and SLAVES
+     the minion DOFs (so an ndof check is NOT a periodicity test; a boundary
+     enforcement probe is).
+
+2. **Uniform-background scattered field is inaccurate for a non-vacuum substrate
+   (a pre-existing Phase-3 limitation, NOT an oblique bug).** With `eps_bg=1`
+   everywhere (Phase-3 "Option A"), a dense substrate (`eps != 1`) carries a large
+   volumetric source `k0^2 (eps_sub-1) E_inc` driven at the WRONG (vacuum `kz_s`)
+   wavevector through the whole substrate band. `validation/oblique_isolation.py`:
+   a **vacuum** exit (case b) matches `tmm` to <0.001 at 0 AND 30deg, but a `n=1.5`
+   exit (cases a,c) is off and mesh-fragile **even at normal incidence**. The fix is
+   a **layered/Fresnel background field**: `eps_bg` piecewise (1 in the
+   superstrate+structure, `n_sub^2` in the substrate), `E_bg` = the bare air/substrate
+   Fresnel solution (incident + `r_bg`, transmitted `t_bg`), source nonzero only in
+   the slab/patch, and the extracted reflection adds back `r_bg`. A scoped follow-up,
+   independent of incidence angle (it also tightens normal-incidence transmission for
+   devices on a substrate). Reflection-mode devices with a bottom mirror (e.g. Park,
+   T~0) are largely unaffected; `solve_fem` emits a one-time guard when the exit
+   medium is non-vacuum.
+
+(p-pol oblique -- the in-plane polarization vector -- is a further follow-up.)
 
 ---
 
@@ -111,7 +122,7 @@ So the hard question -- does the carrier physics solve correctly on a true 3D me
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | implemented, s-pol | `tmm` -- normal to 0.4% | Bloch-phase idnr ordering + oblique fit (energy at angle); p-pol |
+| Oblique incidence | **resolved, s-pol** | `tmm` -- R&T <0.01, 0-30deg (vacuum exit) | non-vacuum substrate (layered-bg field); p-pol |
 | 3D DEVSIM carriers | implemented, equilibrium | Gauss + sign + invariance | Design->gmsh builder; 3D DD |
 
 Validation scripts live in `validation/`. Both features caught real issues during
