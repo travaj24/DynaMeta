@@ -128,5 +128,10 @@ def setup_contact_ohmic_dd(device: str, contact: str) -> None:
     ds.contact_node_model(device=device, contact=contact, name=ce, equation="Electrons - N_D")
     ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
                               equation="1")
+    # edge_current_model is REQUIRED for get_contact_current to return the terminal
+    # current (else it reads 0). The Dirichlet node_model still pins n at the contact;
+    # adding the current model only enables current extraction (it does not change the
+    # boundary condition). Omitting it was harmless for the MOS-cap (no current queried)
+    # but made the unipolar terminal current unreadable -- exposed by a 3D resistor test.
     _R.record_contact_equation(device, contact, name="ElectronContinuityEquation",
-                            node_model=ce)
+                            node_model=ce, edge_current_model="ElectronCurrent")
