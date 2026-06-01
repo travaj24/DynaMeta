@@ -7,6 +7,7 @@ Stage 3 produces -- not tied to any particular design.
 
 from __future__ import annotations
 
+import warnings
 from typing import List, Sequence, Tuple
 
 import numpy as np
@@ -38,6 +39,12 @@ def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
 
     Returns (Vg, Q, Vmid, C): Vg (V, sorted) and Q (C/m^2) per bias; Vmid (V) and
     C (F/m^2) on the midpoints (central differences need >= 2 biases).
+
+    Note: Q is the EXCESS sheet charge over the flat doping n_bg. For a
+    Schrodinger-Poisson carrier the hard-wall dead layer makes n < n_bg near the body
+    contact at every bias, so the absolute Q(0) is slightly negative and only the
+    DIFFERENTIAL C = dQ/dVg (in which that constant offset cancels) is physically
+    meaningful for SP fields; a classical/DD carrier gives Q(0) ~ 0.
     """
     Vg: List[float] = []
     Q: List[float] = []
@@ -63,6 +70,10 @@ def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
     Vg_a, Q_a = Vg_a[order], Q_a[order]
     if Vg_a.size < 2:
         return Vg_a, Q_a, np.array([]), np.array([])
+    if np.any(np.diff(Vg_a) == 0.0):                  # coincident biases -> dQ/dVg = 0/0 = NaN
+        dup = np.unique(Vg_a[:-1][np.diff(Vg_a) == 0.0]).tolist()
+        raise ValueError("gate_cv: duplicate gate-bias point(s) {} V -> dQ/dVg undefined; "
+                         "supply one CarrierField per distinct voltage".format(dup))
     Vmid = 0.5 * (Vg_a[1:] + Vg_a[:-1])
     C = np.diff(Q_a) / np.diff(Vg_a)
     return Vg_a, Q_a, Vmid, C
@@ -88,9 +99,18 @@ def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
     Returns (R_access_ohm, C_cell_F, f_3dB_Hz), each broadcasting over C_F_per_m2.
     """
     C_per = np.asarray(C_F_per_m2, dtype=np.float64)
+    if np.any(C_per <= 0.0):
+        warnings.warn("lumped_rc_bandwidth: non-positive capacitance encountered "
+                      "(depletion branch?); f_3dB is NaN there. Pass the accumulation-"
+                      "branch (C>0) capacitance for a physical bandwidth.", stacklevel=2)
     R = float(sheet_resistance_ohm_sq) * float(path_length_m) / float(pad_width_m)
     C_cell = C_per * float(cell_area_m2)
-    f3db = 1.0 / (2.0 * np.pi * R * C_cell)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f3db = 1.0 / (2.0 * np.pi * R * C_cell)
+    if np.ndim(f3db) == 0:                            # preserve scalar-in -> scalar-out
+        f3db = float(f3db) if C_cell > 0.0 else float("nan")
+    else:
+        f3db = np.where(C_cell > 0.0, f3db, np.nan)
     return R, C_cell, f3db
 
 
@@ -127,6 +147,13 @@ def resonance_dip(wavelengths_nm: Sequence[float],
     y = np.asarray(spectrum, dtype=np.float64).ravel()
     if lam.shape != y.shape:
         raise ValueError("wavelengths_nm and spectrum must have equal length")
+    finite = np.isfinite(lam) & np.isfinite(y)
+    if not finite.any():
+        raise ValueError("spectrum has no finite values to locate a dip")
+    if not finite.all():
+        # a NaN/inf sample (e.g. a failed solve point) must not hijack argmin or the
+        # parabolic fit; locate the dip among the finite samples only.
+        lam, y = lam[finite], y[finite]
     order = np.argsort(lam)
     lam, y = lam[order], y[order]
 
@@ -142,10 +169,10 @@ def resonance_dip(wavelengths_nm: Sequence[float],
     # uniform grid -- it biased the dip by up to a full step on a non-uniform one.)
     a, b, c = np.polyfit(xs, ys, 2)
     if a <= 1e-30:                       # not an upward parabola -> no interior min
-        return float(x1), float(y1)
+        return float(lam[i]), float(y[i])
     lam_dip = -b / (2.0 * a)
     if not (xs[0] <= lam_dip <= xs[-1]):  # vertex outside the bracket -> fall back
-        return float(x1), float(y1)
+        return float(lam[i]), float(y[i])
     val_dip = a * lam_dip ** 2 + b * lam_dip + c
     return float(lam_dip), float(val_dip)
 
