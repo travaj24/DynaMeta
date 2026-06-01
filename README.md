@@ -171,8 +171,21 @@ Known limitations:
   `TransportModel(physics="drift_diffusion", ...)` adds the full
   Scharfetter-Gummel continuity solve. Neither does Schrödinger-Poisson quantum
   confinement.
-- Non-normal incidence is not yet supported (`OpticalSpec.incidence_angle_deg`
-  must be 0).
+- Oblique incidence (`OpticalSpec.incidence_angle_deg != 0`) is implemented for
+  s-polarization (Bloch-Floquet periodicity) and validated against the `tmm`
+  library at normal incidence (R to 0.4%); at finite angle the fixed-α HalfSpace
+  PML is not yet angle-aware, so energy conservation degrades with angle (the
+  solver warns and oblique R/T should be treated as qualitative). p-pol oblique
+  is not yet implemented.
 - The optical linear solve defaults to BDDC + GMRes
   (`OpticalSpec.linear_solver = "bddc_gmres"`); the AMS preconditioner is not
   used because of sign-changing α/β in the ENZ regime.
+
+**Native 3D carriers** (`validation/carriers_3d.py`) are validated for the
+equilibrium solve (the dimension-agnostic physics attaches to a gmsh 3D mesh);
+full 3D drift-diffusion and a pipeline-integrated 3D `Design` builder are on the
+roadmap.
+
+**Roadmap** (angle-aware PML, 3D drift-diffusion, bipolar DD, Schrödinger-Poisson
+quantum confinement, boundary-spanning inclusions): see
+[docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md).
