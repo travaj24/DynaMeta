@@ -66,7 +66,8 @@ def main():
           and abs(spec.gate_patch_frac - 175.0 / 370.0) < 1e-3
           and abs(spec.n_bg_m3 - ITO_NBG) < 1e18)
     print("[t] *** MULTI-DIELECTRIC from_design: {} ***".format("PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

@@ -65,7 +65,8 @@ def main():
     ok = derived_ok and compatible
     print("[t] *** DESIGN-DRIVEN 3D BUILDER: derived={} run_pipeline_compatible={} -> {} ***".format(
         bool(derived_ok), bool(compatible), "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

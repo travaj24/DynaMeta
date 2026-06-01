@@ -151,6 +151,7 @@ def main():
         inv_ok, sign_ok, gauss_ok), flush=True)
     print("[t] *** 3D DEVSIM CARRIERS: {} ***".format(
         "PASS" if (inv_ok and sign_ok and gauss_ok) else "PARTIAL"), flush=True)
+    return inv_ok and sign_ok and gauss_ok
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

@@ -101,7 +101,8 @@ def main():
     print("[t] *** 3D PIPELINE END-TO-END: chain_runs={} bias_modulates_eps={} -> {} ***".format(
         "OK" if ran else "FAIL", "OK" if eps_modulated else "NULL",
         "PASS" if (ran and eps_modulated) else "CHECK"), flush=True)
+    return ran and eps_modulated
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

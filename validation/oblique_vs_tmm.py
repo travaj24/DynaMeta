@@ -6,8 +6,9 @@ preserves normal incidence.
 
 The exit medium here is VACUUM (air) -- the clean test of the oblique machinery
 (Floquet-Bloch quasi-periodic phase + incidence + PML + demodulated R/T extraction),
-all of which must be correct for energy to conserve at angle. Validates to <0.3% in
-R and T through 30deg.
+all of which must be correct for energy to conserve at angle. Accuracy is <0.3% at
+normal incidence and grows to ~1% in R (and a ~1% energy residual) by 30 deg as the
+fixed-alpha PML becomes less angle-accurate; the gate is TOL=0.03 (3%).
 
 NON-vacuum (dense) substrates are now ALSO handled correctly by the layered (Fresnel
 two-region) background field in optics/solver.py (eps_bg piecewise + analytic bare
@@ -77,6 +78,7 @@ def main():
             "OK" if good else "MISMATCH(dR={:.3f},dT={:.3f})".format(dR, dT)), flush=True)
     print("[t] *** OBLIQUE vs TMM (0-30deg, s-pol): {} ***".format("PASS" if ok else "FAIL"),
            flush=True)
+    return ok
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

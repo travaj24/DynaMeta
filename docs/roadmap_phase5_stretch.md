@@ -158,9 +158,14 @@ names the emitted CarrierField region after the Design's semiconductor layer, so
 matches the optics builder's alignment source_region -> `run_pipeline` with NO hand-built
 alignment (`validation/carriers_3d_from_design.py`, PASS: derived spec + region match).
 
-**Remaining:** `from_design` covers a single semiconductor + single gate-dielectric stack;
-a multi-dielectric stack (e.g. the full Park mirror/Al2O3/HfO2/patch) or true lateral
-material inclusions still need a manual `Stacked3DSpec` or a further general OCC builder.
+**`from_design` constraints (now enforced, not silent):** it handles a MULTI-dielectric
+stack (e.g. the full Park mirror/Al2O3/HfO2/ITO/HfO2/patch -- it walks to the gate-side
+dielectric; `validation/from_design_multidielectric.py` PASS), selects the gate by
+`electrode.role=='biased'`, and threads the gate/body electrode NAMES into the bias lookup.
+It requires a SINGLE semiconductor layer, a SQUARE cell, and an (approximately) centered
+square gate footprint -- each now RAISES/WARNS rather than silently mis-modeling (audit
+F1-F4). True lateral material inclusions in the semiconductor still need a manual
+`Stacked3DSpec` or a further general OCC builder.
 
 ---
 

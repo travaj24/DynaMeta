@@ -54,7 +54,8 @@ def main():
             "OK" if good else "ENERGY NOT CONSERVED (|R+T-1|={:.3f})".format(abs(RpT - 1.0))), flush=True)
     print("[t] *** ADVERSARIAL OBLIQUE PATCH (energy conservation, non-separable): {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

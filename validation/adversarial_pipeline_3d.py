@@ -65,7 +65,8 @@ def main():
     print("[t] *** ADVERSARIAL run_pipeline 3D (no hand-alignment): completes={} finite_R={} "
           "bias_propagates={} -> {} ***".format(
         len(rows) == 2, finite, dR > 1e-7, "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)
