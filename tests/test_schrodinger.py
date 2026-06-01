@@ -48,3 +48,18 @@ def test_uniform_grid_required():
     z = np.concatenate([np.linspace(0, 5e-9, 50), np.linspace(5e-9, 1e-8, 80)])
     with pytest.raises(ValueError):
         SchrodingerPoisson1D(z, MSTAR)
+
+
+def test_degenerate_slab_recovers_bulk():
+    # slab mode (keep all sub-bands) must recover the bulk degenerate density of a
+    # heavily-doped semiconductor; the default bound-state rejection (isolated well)
+    # collapses it to ~0. Flat-band square slab, E_F from the bulk degenerate relation.
+    from dynameta.carriers.schrodinger_poisson import HBAR
+    n_bg, t = 4e26, 12e-9
+    z = np.linspace(0.0, t, 401)
+    sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
+    E_F = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * n_bg) ** (2.0 / 3.0)
+    n_mid = sp.density(np.zeros_like(z), E_F, n_states=60, bound_tol=1e9).density_m3[200]
+    assert 0.85 < n_mid / n_bg < 1.15          # bulk recovered
+    n_reject = sp.density(np.zeros_like(z), E_F, n_states=60, bound_tol=1e-3).density_m3[200]
+    assert n_reject < 0.8 * n_bg               # rejection under-counts the continuum

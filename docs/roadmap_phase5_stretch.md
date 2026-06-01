@@ -149,7 +149,7 @@ the 3D equilibrium accumulation to **0.8%** at +1V (the zero-current MOS-cap lim
 |---|---|---|---|
 | Oblique incidence | **resolved, s+p-pol** | `tmm` s & p -- R&T <0.01, 0-30deg, vacuum AND dense substrate | conical (phi!=0) |
 | 3D DEVSIM carriers | equilibrium + DD + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline + DD reduces-to-eq 0.8% | general Design->gmsh builder |
-| Quantum confinement (S-P) | **implemented** | analytic square/triangular wells (~1e-5) | couple as CarrierSolver; ITO nonparabolic m* |
+| Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge | per-column SP (patch); oxide V-division; nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
 | Boundary-spanning inclusions | scoped only | -- | OCC boundary-split + paired Identify |
 
@@ -159,10 +159,11 @@ binning-metric artifact) -- exactly what external/physical checks are for.
 
 ---
 
-## Further physics extensions (beyond Phase 5 -- designed, NOT implemented)
+## Further physics extensions (beyond Phase 5)
 
-Larger research efforts; the design + hook points are recorded so they can be
-picked up cleanly. None is implemented -- no unvalidated physics is shipped.
+Larger research efforts. Bipolar DD and Schrodinger-Poisson quantum confinement are
+now IMPLEMENTED + validated (below); boundary-spanning inclusions remain designed-only.
+No unvalidated physics is shipped.
 
 ### Bipolar drift-diffusion (holes + recombination)  [IMPLEMENTED; diode-validated]
 `carriers/physics_bipolar_dd.py` -- opt-in 3-variable (Potential, Electrons, Holes)
@@ -190,7 +191,7 @@ converge" note is orthogonal (weak 2-node lateral ITO contacts, not the formulat
 NB: unipolar degenerate ITO is correctly electrons-only, so bipolar DD is a generality
 feature, not Park-critical.
 
-### Quantum confinement (Schrodinger-Poisson)  [IMPLEMENTED; analytically validated]
+### Quantum confinement (Schrodinger-Poisson)  [IMPLEMENTED + coupled as CarrierSolver]
 `carriers/schrodinger_poisson.py` -- a 1D effective-mass `SchrodingerPoisson1D`:
 BenDaniel-Duke tridiagonal Schrodinger (mass at half-nodes, Dirichlet ends, unbound
 states discarded), DEGENERATE 2D sub-band filling
@@ -207,9 +208,24 @@ function Jacobian -- robust where naive Picard sloshes).
 - self-consistent ITO accumulation (0.5 V, 20 nm): converges, forms a ~nm gate-side
   accumulation layer (bound ground state, E0~-0.29 eV).
 
-Remaining: couple as an alternative `CarrierSolver` on the semiconductor region
-(per-lateral-column SP, or the device-coupled density-gradient route in the notes);
-ITO band nonparabolicity (density-dependent m*) for quantitative sub-band spacing.
+**Coupled as a CarrierSolver (DONE).** `carriers/sp_carrier.py` `SchrodingerPoissonCarrier`
+implements the `CarrierSolver` Protocol: E_F from the bulk degenerate relation
+`E_F-E_c=(hbar^2/2m*)(3 pi^2 n_bg)^(2/3)`, self-consistent SP at the gate-induced surface
+potential, and a `CarrierField(ndim=3)` (the through-stack quantum profile broadcast over
+the cell) the bridge turns into eps. **KEY finding:** for a DEGENERATE-bulk slab the
+sub-band rejection (`bound_tol`) must be DISABLED (`bound_tol=1e9`, slab mode) -- it is
+right for an isolated well but discards the high sub-bands that carry the bulk continuum,
+collapsing the bulk density to ~0 (the default kept 3 of ~8 sub-bands -> 0.64 n_bg; slab
+mode -> 1.00 n_bg). Validated (`validation/sp_carrier.py`, PASS): bulk recovers n_bg
+(0.996); +0.3 V accumulates (peak 1.42 n_bg); the QUANTUM dead layer / charge-centroid
+setback (peak ~1 nm from the interface, n->0 AT it); the bridge shows accumulation deepens
+ENZ (min Re(eps) 1.15 -> 0.45). Directly informs the Park tuning: the quantum setback
+offsets the sub-ENZ region ~1 nm from the oxide vs the classical (peak-at-interface) model.
+
+Remaining: per-lateral-column SP for laterally-VARYING devices (the patch; this version is
+laterally uniform -- right for the vertically-gated layer); fold the oxide-capacitance
+voltage division into `surface_potential_of_gate` for quantitative gate coupling; ITO band
+nonparabolicity (density-dependent m*) for quantitative sub-band spacing.
 
 ### Boundary-spanning inclusion topologies
 Phase 3 inclusions are interior-only (the four periodic faces stay clean
