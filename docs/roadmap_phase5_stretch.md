@@ -222,10 +222,16 @@ setback (peak ~1 nm from the interface, n->0 AT it); the bridge shows accumulati
 ENZ (min Re(eps) 1.15 -> 0.45). Directly informs the Park tuning: the quantum setback
 offsets the sub-ENZ region ~1 nm from the oxide vs the classical (peak-at-interface) model.
 
-Remaining: per-lateral-column SP for laterally-VARYING devices (the patch; this version is
-laterally uniform -- right for the vertically-gated layer); fold the oxide-capacitance
-voltage division into `surface_potential_of_gate` for quantitative gate coupling; ITO band
-nonparabolicity (density-dependent m*) for quantitative sub-band spacing.
+**Per-lateral-column SP (DONE)** for laterally-VARYING devices: pass `surface_potential_xy
+(x,y,Vg)->V` and the solver runs a 1D SP per lateral column, CACHING by psi_s value (a
+~equipotential patch costs only ~2 solves). Validated (`validation/sp_per_column.py`, PASS):
+a central patch at +0.4V over an ungated gap gives accumulation only under the patch
+(peak 1.53 vs 1.16 n_bg) and a laterally-varying eps -- min Re(eps) **0.16 under the patch
+vs 1.15 in the gap** (deep sub-ENZ only where gated). Only 2 cached solves for the step.
+
+Remaining: fold the oxide-capacitance voltage division into `surface_potential_of_gate`
+for quantitative gate coupling; ITO band nonparabolicity (density-dependent m*) for
+quantitative sub-band spacing.
 
 ### Boundary-spanning inclusion topologies
 Phase 3 inclusions are interior-only (the four periodic faces stay clean
