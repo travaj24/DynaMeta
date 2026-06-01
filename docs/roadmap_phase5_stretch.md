@@ -76,7 +76,17 @@ the PML nor a phase sign:
    substrate** all match `tmm` R and T to **<0.003** at 0 AND 30deg, energy-conserving.
    This also tightens normal-incidence transmission for any device on a substrate.
 
-(p-pol oblique -- the in-plane polarization vector -- is the remaining oblique follow-up.)
+3. **p-polarization (TM) oblique -- IMPLEMENTED.** p-pol has E in the x-z plane (Ex,
+   Ez). The background reflection/transmission E-vector amplitudes come from solving the
+   physical interface BCs (tangential Ex + Hy continuity) NUMERICALLY at z_int (no
+   Fresnel sign-convention ambiguity; Hy ~ Ex*eps/qz), and R/T are extracted from the
+   reconstructed TOTAL field's tangential Ex with the p-pol z-flux factor Sz ~
+   |Ex|^2 eps/kz: `R=|Ex_up/Ex_down|^2`, `T=|Ex_t/Ex_i|^2 Re((eps_sub/eps_sup)(kz_s/kz_sub))`.
+   **Validated** (`validation/oblique_ppol_vs_tmm.py`, PASS): vs `tmm('p')` for a
+   vacuum-exit AND a dense (n=1.5) substrate slab, R and T match to **<0.001** at
+   0/15/30deg, energy-conserving (R+T=1.0000). `OpticalSpec.polarization='p'`.
+
+(Conical incidence -- azimuth phi != 0, ky != 0 -- is a further follow-up.)
 
 ---
 
@@ -132,7 +142,7 @@ negligible at 1300 nm (dR~1e-5); the ENZ shift only converts to dR in a patch/ca
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | **resolved, s-pol** | `tmm` -- R&T <0.01, 0-30deg, vacuum AND dense substrate | p-pol oblique |
+| Oblique incidence | **resolved, s+p-pol** | `tmm` s & p -- R&T <0.01, 0-30deg, vacuum AND dense substrate | conical (phi!=0) |
 | 3D DEVSIM carriers | equilibrium + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline | general Design->gmsh builder; 3D DD |
 | Quantum confinement (S-P) | **implemented** | analytic square/triangular wells (~1e-5) | couple as CarrierSolver; ITO nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
