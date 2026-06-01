@@ -16,9 +16,12 @@ Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumula
 -Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
 (DD: converges, sign-correct, reduces to the equilibrium accumulation to 0.8% at +1V).
 
-SCOPE / remaining (see docs/roadmap_phase5_stretch.md): builds a STACKED (full-cell,
-no-inclusion) geometry; a general Design -> gmsh builder (lateral inclusions, arbitrary
-electrodes, shared optics lateral extent/region naming) is the last pipeline piece.
+A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
+surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
+derives the spec from a Design and names the region to match the optics alignment
+(-> run_pipeline, no hand-alignment). SCOPE / remaining: a single semiconductor + single
+gate-dielectric stack; a multi-dielectric stack or true lateral material inclusions need
+a manual spec or a further general OCC builder (docs/roadmap_phase5_stretch.md).
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -56,9 +59,62 @@ class Stacked3DSpec:
     dos_mass_kg:     float = 0.35 * M_E
     mobility_m2Vs:   float = 0.004       # electron mobility (DD only); ITO ~40 cm^2/Vs
     physics:         str = "equilibrium" # "equilibrium" or "drift_diffusion"
+    gate_patch_frac: float = 1.0         # gate footprint as a fraction of the cell (centered
+                                          # square). 1.0 = full-cell gate; <1 = a PATCH gate
+                                          # (laterally-varying accumulation: gated under the
+                                          # patch, free surface in the gap -- the non-separable
+                                          # topology the 2D+symmetrization path approximates).
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
+    field_region_name: str = "semi"      # emitted CarrierField region key (match the optics
+                                          # alignment source_region for run_pipeline integration)
+
+    @classmethod
+    def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
+                     mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
+        """Derive a stacked 3D spec from a `Design`: the (single) semiconductor layer +
+        the (single) gate-dielectric layer + the square cell period + the gate footprint
+        -> gate_patch_frac. The emitted CarrierField region is named after the Design's
+        semiconductor layer so it matches the optics builder's alignment source_region
+        (-> run_pipeline with no hand-built alignment). Raises on cases the stacked
+        builder does not yet cover (lateral inclusions, >1 semi/dielectric layer)."""
+        semi_L = ox_L = None
+        for L in design.stack.layers:
+            if L.inclusions:
+                raise ValueError("from_design: lateral inclusions in layer '{}' are not yet "
+                                  "meshed by the stacked 3D builder (a gate PATCH is modeled "
+                                  "via gate_patch_frac).".format(L.name))
+            role = design.material_role(L.background_material)
+            if role == "semiconductor" and semi_L is None: semi_L = L
+            elif role == "dielectric" and ox_L is None: ox_L = L
+        if semi_L is None or ox_L is None:
+            raise ValueError("from_design needs exactly one semiconductor + one dielectric layer")
+        tr = design.materials.get(semi_L.background_material).transport
+        if tr is None:
+            raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
+        eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
+        if eps_ox is None:
+            raise ValueError("dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
+        cell = design.unit_cell
+        frac = gate_patch_frac
+        if frac is None:                                  # derive from a patch-footprint electrode
+            frac = 1.0
+            for e in design.electrodes:
+                if not isinstance(e.footprint, str):
+                    xlo, xhi, ylo, yhi = e.footprint.bbox_m()
+                    frac = min(1.0, max((xhi - xlo) / cell.period_x_m, (yhi - ylo) / cell.period_y_m))
+                    break
+        n_bg = tr.n_bg_m3
+        mob = (float(tr.mobility_m2Vs_of_n_m3(n_bg)) if tr.mobility_m2Vs_of_n_m3 is not None else 0.004)
+        return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
+                    lateral_m=min(cell.period_x_m, cell.period_y_m),
+                    semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
+                    n_bg_m3=n_bg, eps_semi=tr.eps_static, eps_oxide=float(eps_ox),
+                    dos_mass_kg=float(tr.dos_mass_kg_of_n_m3(n_bg)), mobility_m2Vs=mob,
+                    physics=tr.physics, gate_patch_frac=float(frac),
+                    field_region_name=semi_L.name, grid_n=grid_n,
+                    mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm)
 
 
 class Devsim3DEquilibrium:
@@ -84,7 +140,7 @@ class Devsim3DEquilibrium:
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
         s = self.spec
-        return [RegionInfo(name="semi", role="semiconductor", material=s.semi_material,
+        return [RegionInfo(name=s.field_region_name, role="semiconductor", material=s.semi_material,
                             bbox_m=(0.0, s.lateral_m, 0.0, s.lateral_m, *self._z_semi),
                             ndim=3)]
 
@@ -158,15 +214,16 @@ class Devsim3DEquilibrium:
         nodes = np.column_stack([x, y, z])
         grid = resample_to_grid(nodes, {ELECTRON_DENSITY: n, POTENTIAL: pot},
                                   self.spec.grid_n)            # ndim-general resampler
+        rname = self.spec.field_region_name
         reg = CarrierRegion(
-            name="semi", role="semiconductor", material=self.spec.semi_material,
+            name=rname, role="semiconductor", material=self.spec.semi_material,
             nodes_m=nodes, node_fields={ELECTRON_DENSITY: n, POTENTIAL: pot},
             grid_axes_m={"x": grid["axis_0"], "y": grid["axis_1"], "z": grid["axis_2"]},
             grid_fields={ELECTRON_DENSITY: grid[ELECTRON_DENSITY], POTENTIAL: grid[POTENTIAL]})
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
-            temperature_K=PE.T_REF, regions={"semi": reg},
-            n_bg_by_region={"semi": self.spec.n_bg_m3},
+            temperature_K=PE.T_REF, regions={rname: reg},
+            n_bg_by_region={rname: self.spec.n_bg_m3},
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m))
 
     def teardown(self) -> None:
@@ -190,18 +247,36 @@ class Devsim3DEquilibrium:
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
         occ = gmsh.model.occ
+        ztop = tsemi + tox
+        frac = float(s.gate_patch_frac)
+        patterned = frac < 1.0 - 1e-9
+        ph = Lnm * frac / 2.0                                   # patch half-width (centered)
         vb = occ.addBox(0, 0, 0, Lnm, Lnm, tsemi)
         vt = occ.addBox(0, 0, tsemi, Lnm, Lnm, tox)
         occ.synchronize()
         occ.fragment([(3, vb)], [(3, vt)])
         occ.synchronize()
+        if patterned:
+            # imprint the gate-patch rectangle onto the oxide top face so it splits into
+            # the patch (gate contact) + the surrounding free surface (ungated gap).
+            rect = occ.addRectangle(Lnm / 2 - ph, Lnm / 2 - ph, ztop, 2 * ph, 2 * ph)
+            occ.synchronize()
+            occ.fragment([(d, t) for d, t in gmsh.model.getEntities(3)], [(2, rect)])
+            occ.synchronize()
         for dim, tag in gmsh.model.getEntities(3):
             zc = occ.getCenterOfMass(dim, tag)[2]
             gmsh.model.addPhysicalGroup(3, [tag], name=("semi" if zc < tsemi else "oxide"))
         gate, body, iface = [], [], []
         for dim, tag in gmsh.model.getEntities(2):
             zc = occ.getCenterOfMass(dim, tag)[2]
-            if abs(zc - (tsemi + tox)) < 1e-4: gate.append(tag)
+            if abs(zc - ztop) < 1e-4:
+                if patterned:
+                    bb = occ.getBoundingBox(dim, tag)
+                    is_patch = (bb[3] - bb[0]) < Lnm - 1.0    # narrower than the full cell
+                    if is_patch:
+                        gate.append(tag)                      # else: ungated free surface
+                else:
+                    gate.append(tag)
             elif abs(zc) < 1e-4: body.append(tag)
             elif abs(zc - tsemi) < 1e-4: iface.append(tag)
         gmsh.model.addPhysicalGroup(2, gate, name="gate")

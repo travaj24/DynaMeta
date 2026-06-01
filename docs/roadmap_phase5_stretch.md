@@ -136,10 +136,20 @@ gate-ramp staged Newton. Validated (`validation/carriers_3d_dd.py`, PASS): conve
 (RelError ~1e-11), sign-correct (+1V accumulates, -1V depletes to 0.67), and REDUCES to
 the 3D equilibrium accumulation to **0.8%** at +1V (the zero-current MOS-cap limit).
 
-**Remaining (integration, not physics):**
-- a general `Design -> gmsh` 3D builder (arbitrary lateral inclusions / electrodes,
-  sharing the optics builder's lateral extent + region naming so a single-Design 3D
-  run needs no hand-built alignment) -- the last 3D-pipeline piece.
+**Design-driven 3D builder + lateral gate patch (DONE).** `Stacked3DSpec.gate_patch_frac`
+< 1 imprints a centered gate-patch onto the oxide top (the rest a free surface), so the
+classical 3D solve accumulates UNDER the patch and stays near bulk in the gap -- the
+laterally-VARYING (non-separable) profile the 2D+symmetrization path cannot capture
+(`validation/carriers_3d_patch.py`, PASS: under-patch n=1.33 vs gap 1.02 n_bg; min Re(eps)
+0.70 under patch vs 1.53 gap). `Stacked3DSpec.from_design(design)` derives the stacked
+spec (semiconductor + gate-dielectric layers, period, gate footprint -> patch frac) AND
+names the emitted CarrierField region after the Design's semiconductor layer, so it
+matches the optics builder's alignment source_region -> `run_pipeline` with NO hand-built
+alignment (`validation/carriers_3d_from_design.py`, PASS: derived spec + region match).
+
+**Remaining:** `from_design` covers a single semiconductor + single gate-dielectric stack;
+a multi-dielectric stack (e.g. the full Park mirror/Al2O3/HfO2/patch) or true lateral
+material inclusions still need a manual `Stacked3DSpec` or a further general OCC builder.
 
 ---
 
@@ -148,7 +158,7 @@ the 3D equilibrium accumulation to **0.8%** at +1V (the zero-current MOS-cap lim
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
 | Oblique incidence | **resolved, s+p-pol** | `tmm` s & p -- R&T <0.01, 0-30deg, vacuum AND dense substrate | conical (phi!=0) |
-| 3D DEVSIM carriers | equilibrium + DD + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline + DD reduces-to-eq 0.8% | general Design->gmsh builder |
+| 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible | multi-dielectric stack / arbitrary OCC inclusions |
 | Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge | per-column SP (patch); oxide V-division; nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
 | Boundary-spanning inclusions | scoped only | -- | OCC boundary-split + paired Identify |
