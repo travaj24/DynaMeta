@@ -40,16 +40,31 @@ s-pol (`validation/oblique_vs_tmm.py`):
   error is NOT the PML. The symptom (energy growing with angle) points instead to
   the **Bloch-phase identification ordering** and/or the **oblique R/T fit**.
 
-**Remaining (deeper than first thought):**
-1. Debug the **Bloch-phase application** -- the phase list assumes the mesh's
-   periodic identifications are numbered "all px then all py", which may not match
-   the actual idnr order; instrument the `ng.Periodic` phase<->idnr mapping and
-   test a phase-sign flip.
-2. Audit the **oblique transmission fit** -- the fitted `|t|` comes out ~1.2x high
-   at 30deg (so `T>1`); the demodulated substrate fit needs checking at angle.
-The angle-aware PML is kept (correct physics; reduces to the validated `alpha=1j`
-at normal). Until this validates, `solve_fem` **warns** and oblique R/T is
-qualitative. (p-pol oblique remains a separate follow-up.)
+**Diagnosis (`validation/oblique_phase_diag.py`, theta=30deg vs tmm R=0.173/T=0.827):**
+
+| variant | R | T | R+T |
+|---|---|---|---|
+| plain (no Bloch phase) | 0.032 | 0.586 | 0.619 |
+| phase `+kx` | 0.084 | 1.188 | 1.272 |
+| phase `-kx` | 0.078 | 0.785 | 0.863 |
+
+So the Bloch phase **is applied** (all three differ) and `-kx` is closest (its T
+~ tmm), but **no sign conserves energy** -- and the angle-aware PML was alpha-
+insensitive. The residual is therefore NOT a single sign/PML bug; it is the
+combination of (a) the fragile per-identification `ng.Periodic(phase)` mapping
+(unique-name idnrs, order-dependent) and (b) the HalfSpace PML not absorbing an
+obliquely-outgoing wave.
+
+**Remaining -- the robust fix is a Bloch-transform (envelope) formulation, not a
+patch:** write `E(x,y,z) = u(x,y,z) exp(i kx x)` with `u` PLAIN-periodic; the
+curl-curl weak form becomes `(curl + i kx xhat x)(u)` (a modified operator with
+kx coupling). This (i) removes the `ng.Periodic(phase)` idnr fragility (u is
+plain-periodic), (ii) makes the R/T fits demod-free (the field IS u), and (iii)
+should be paired with a proper oblique stretched-coordinate PML (the alpha-scaled
+HalfSpace PML is insufficient). A real solver rewrite + re-validation vs tmm at
+0/15/30deg -- its own focused effort. The angle-aware PML is kept (harmless;
+reduces to the validated `alpha=1j` at normal); `solve_fem` warns at oblique and
+oblique R/T stays qualitative. (p-pol oblique is a further follow-up.)
 
 ---
 
