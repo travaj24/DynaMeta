@@ -96,7 +96,8 @@ def main():
           and 0.02 < Ri < 0.98)   # guard against the trivial R~0/R~1 degenerate match
     print("[t] *** BOUNDARY-SPANNING INCLUSION (grating translation-invariance + energy): {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

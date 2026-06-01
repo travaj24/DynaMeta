@@ -66,7 +66,8 @@ def main():
     print("[t] *** SP CARRIER SOLVER: bulk_recover={} accumulates={} quantum_dead_layer={} eps_ENZ={} -> {} ***".format(
         bool(0.7 < bulk0 < 1.3), bool(peak_ratio > 1.1), bool(0.2 < peak_nm < 4.0),
         bool(reV.min() < re0.min() - 1e-3), "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

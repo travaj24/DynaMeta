@@ -54,7 +54,8 @@ def main():
     ok = bool(np.isfinite(center) and lateral_contrast and eps_contrast)
     print("[t] *** 3D GATE-PATCH: builds+solves={} lateral_accumulation={} eps_contrast={} -> {} ***".format(
         bool(np.isfinite(center)), bool(lateral_contrast), bool(eps_contrast), "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

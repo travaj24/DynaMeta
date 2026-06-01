@@ -172,20 +172,33 @@ Known limitations:
   Scharfetter-Gummel continuity solve. Neither does Schrödinger-Poisson quantum
   confinement.
 - Oblique incidence (`OpticalSpec.incidence_angle_deg != 0`) is implemented for
-  s-polarization (Bloch-Floquet periodicity) and validated against the `tmm`
-  library at normal incidence (R to 0.4%); at finite angle the fixed-α HalfSpace
-  PML is not yet angle-aware, so energy conservation degrades with angle (the
-  solver warns and oblique R/T should be treated as qualitative). p-pol oblique
-  is not yet implemented.
+  s-polarization AND p-polarization (Bloch-Floquet periodicity), plus conical
+  incidence (`azimuth_deg != 0`, s-pol), each validated against the `tmm` library
+  (s/p R&T to ~1% through 30 deg; conical phi-invariance + structured-cell symmetry).
+  It REQUIRES a vacuum/air incidence medium (`n_super = 1`; `solve_fem` raises on a
+  non-vacuum superstrate at angle) and the polar angle is capped at `|theta| <= 60`
+  deg. The fixed-alpha HalfSpace PML is not angle-aware, so energy conservation
+  degrades with angle (~1% by 30 deg) -- `solve_fem` emits a warning and oblique
+  R/T should be treated as approximate. Absorption is reported as the budget closure
+  `A = 1 - R - T`; `OpticalResult.A_independent` is the independent volumetric-loss
+  measurement (their difference is the energy diagnostic).
 - The optical linear solve defaults to BDDC + GMRes
   (`OpticalSpec.linear_solver = "bddc_gmres"`); the AMS preconditioner is not
   used because of sign-changing α/β in the ENZ regime.
 
-**Native 3D carriers** (`validation/carriers_3d.py`) are validated for the
-equilibrium solve (the dimension-agnostic physics attaches to a gmsh 3D mesh);
-full 3D drift-diffusion and a pipeline-integrated 3D `Design` builder are on the
-roadmap.
+**Native 3D carriers** are validated for both the equilibrium solve and full 3D
+drift-diffusion (`validation/carriers_3d.py`, `carriers_3d_dd.py`, transport via
+`carriers_3d_resistor.py`), and `Stacked3DSpec.from_design` drives `run_pipeline`
+from a `Design` with no hand-built alignment (`carriers_3d_from_design.py`).
 
-**Roadmap** (angle-aware PML, 3D drift-diffusion, bipolar DD, Schrödinger-Poisson
-quantum confinement, boundary-spanning inclusions): see
-[docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md).
+**Testing & validation.** `python -m pytest tests/` is the fast CI gate
+(numpy/scipy only -- data model, dielectric DB, Schrodinger-Poisson, and the
+solver-free bridge spine). The heavier solver-backed physics lives in
+`validation/*.py`; each ends `raise SystemExit(0 if ok else 1)`, so
+`python -m validation.run_all` runs and gates the whole set by exit code (needs the
+`[solvers]` extra: ngsolve/devsim/gmsh; budget tens of minutes).
+
+**Roadmap** (angle-aware PML, conical p-pol, optimization/inverse-design, an
+independent RCWA cross-check, AC/transient carriers): see
+[docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md) and the audit at
+[docs/audit/](docs/audit/).

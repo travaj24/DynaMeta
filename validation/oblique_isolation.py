@@ -66,6 +66,7 @@ def main():
     r.append(run("(c) air|slab2,250|sub1.5", 2.0, 250.0, 1.5))       # dense substrate (the fix)
     print("[t] *** OBLIQUE NON-VACUUM SUBSTRATE (layered-bg field) vs tmm: {} ***".format(
         "PASS" if all(r) else "FAIL"), flush=True)
+    return all(r)
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

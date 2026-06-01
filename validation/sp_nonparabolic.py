@@ -49,7 +49,8 @@ def main():
     ok = matches_cf and enhanced and (ns_np > ns_par)
     print("[t] *** SP NONPARABOLICITY: matches_closed_form={} DOS_enhanced={} -> {} ***".format(
         bool(matches_cf), bool(enhanced and ns_np > ns_par), "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)
