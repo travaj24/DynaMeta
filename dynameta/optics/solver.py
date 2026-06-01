@@ -37,26 +37,19 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
-    z_air_top = geo.z_super_interface_nm
-    z_sub_top = geo.z_sub_interface_nm
-    try:
-        mesh.UnSetPML("pml_top"); mesh.UnSetPML("pml_bot")
-    except Exception:
-        pass
-    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=1j), "pml_top")
-    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=1j), "pml_bot")
-
     # ---- incidence: plane wave in the x-z plane (phi=0) ----
     theta = math.radians(float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0))
     oblique = abs(theta) > 1e-9
     if oblique:
         global _OBLIQUE_WARNED
         if not _OBLIQUE_WARNED:
-            print("[DynaMeta WARNING] oblique incidence uses an angle-INDEPENDENT "
-                  "HalfSpace PML; energy conservation degrades with angle. Validated vs "
-                  "the tmm library at NORMAL incidence (R to 0.4%); R+T energy error is "
-                  "~12%/27% at 15/30deg. Treat oblique R/T as QUALITATIVE pending an "
-                  "angle-aware PML (see docs/roadmap_phase5_stretch.md).", flush=True)
+            print("[DynaMeta WARNING] oblique incidence is validated only at NORMAL "
+                  "incidence (vs the tmm library, R to 0.4%). At finite angle the s-pol "
+                  "R/T do not yet conserve energy (R+T ~1.1/1.3 at 15/30deg) -- an open "
+                  "issue in the Bloch-phase identification ordering / oblique fit "
+                  "extraction (the angle-aware PML alone did not resolve it). Treat "
+                  "oblique R/T as QUALITATIVE. See docs/roadmap_phase5_stretch.md.",
+                  flush=True)
             _OBLIQUE_WARNED = True
     if oblique and optical.polarization != "y":
         raise NotImplementedError(
@@ -66,6 +59,22 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "(docs/roadmap_phase5_stretch.md).")
     kx = k0 * math.sin(theta)          # transverse wavevector (vacuum incidence medium)
     kz_s = k0 * math.cos(theta)        # normal wavevector in the vacuum background
+
+    # Angle-aware PML: a stretched-coordinate HalfSpace PML's per-length absorption
+    # scales with the OUTGOING normal wavevector kz=k0*cos(theta), so at oblique
+    # incidence it under-absorbs and reflects (corrupting R/T + energy). Scaling
+    # alpha by 1/cos(theta) restores the normal-incidence absorption rate.
+    # theta=0 -> alpha=1j, exactly the proven normal-incidence path.
+    pml_alpha = 1j / math.cos(theta)
+    z_air_top = geo.z_super_interface_nm
+    z_sub_top = geo.z_sub_interface_nm
+    try:
+        mesh.UnSetPML("pml_top"); mesh.UnSetPML("pml_bot")
+    except Exception:
+        pass
+    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=pml_alpha), "pml_top")
+    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=pml_alpha), "pml_bot")
+
     inc_phase = ng.exp(1j * kx * ng.x - 1j * kz_s * ng.z)
     if optical.polarization == "x":
         E_inc = ng.CoefficientFunction((inc_phase, 0.0, 0.0))

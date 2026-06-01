@@ -7,20 +7,28 @@ name = "dynameta"
 version = "0.1.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DC carrier transport + Drude + 3D FEM optics)."
 readme = "README.md"
+license = {text = "Apache-2.0"}
 authors = [{name = "Metacept / Neurophos"}]
 requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+# Core data model + bridge (`import dynameta`) is pure numpy/scipy. The heavy
+# solver stack and IO backends are optional extras (see below).
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "matplotlib>=3.7",
-    "h5py>=3.8",
-    "zarr>=3.0",
-    "devsim>=2.10",
-    "ngsolve>=6.2",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov", "ruff"]
+solvers = ["devsim>=2.10", "ngsolve>=6.2", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve
+io = ["zarr>=3.0", "h5py>=3.8"]                            # CarrierField / eps dump+load
+plot = ["matplotlib>=3.7"]
+materials-db = ["jarvis-tools", "mp-api"]                  # DielectricDB live backends
+dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
+# Everything: pip install dynameta[solvers,io,plot,materials-db]
 
 [tool.setuptools.packages.find]
 include = ["dynameta*"]
