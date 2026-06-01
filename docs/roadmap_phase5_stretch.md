@@ -34,15 +34,22 @@ s-pol (`validation/oblique_vs_tmm.py`):
 - **Normal incidence is correct** -- R matches `tmm` to 0.4%, validating the whole
   Bloch/incident/fit/T-weighting machinery reduces properly (theta=0 also exactly
   reproduces the pre-existing normal-incidence path).
-- **Oblique angles do not conserve energy** (R+T climbs to 1.27, T>1) -- the
-  fixed-alpha `ng.pml.HalfSpace` PML, tuned for a normal (kz=k0) outgoing wave,
-  partially reflects the oblique transmitted wave and contaminates the fit.
+- **Oblique angles do not yet conserve energy** (R+T ~1.13/1.27 at 15/30deg, T>1,
+  R too low). An **angle-aware PML** (`alpha = 1j/cos(theta)`, now implemented)
+  produced IDENTICAL numbers -- so, contrary to the first hypothesis, the dominant
+  error is NOT the PML. The symptom (energy growing with angle) points instead to
+  the **Bloch-phase identification ordering** and/or the **oblique R/T fit**.
 
-**Remaining (the one real limitation): an angle-aware PML.** Scale the PML
-absorption by the outgoing `kz = k0 cos(theta)` (e.g. a stretched-coordinate PML
-keyed to kz, or `alpha ~ 1/cos(theta)`), then re-validate `R+T==1` + Fresnel at
-angle. Until then `solve_fem` **warns loudly** at oblique incidence and oblique
-R/T should be treated as qualitative.
+**Remaining (deeper than first thought):**
+1. Debug the **Bloch-phase application** -- the phase list assumes the mesh's
+   periodic identifications are numbered "all px then all py", which may not match
+   the actual idnr order; instrument the `ng.Periodic` phase<->idnr mapping and
+   test a phase-sign flip.
+2. Audit the **oblique transmission fit** -- the fitted `|t|` comes out ~1.2x high
+   at 30deg (so `T>1`); the demodulated substrate fit needs checking at angle.
+The angle-aware PML is kept (correct physics; reduces to the validated `alpha=1j`
+at normal). Until this validates, `solve_fem` **warns** and oblique R/T is
+qualitative. (p-pol oblique remains a separate follow-up.)
 
 ---
 
@@ -89,9 +96,45 @@ So the hard question -- does the carrier physics solve correctly on a true 3D me
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | implemented, s-pol | `tmm` -- normal to 0.4% | angle-aware PML (oblique energy) |
+| Oblique incidence | implemented, s-pol | `tmm` -- normal to 0.4% | Bloch-phase idnr ordering + oblique fit (energy at angle); p-pol |
 | 3D DEVSIM carriers | implemented, equilibrium | Gauss + sign + invariance | Design->gmsh builder; 3D DD |
 
 Validation scripts live in `validation/`. Both features caught real issues during
 verification (the PML angle-limit, the gmsh-scale + MSH-version + NumPy-2 bugs, a
 binning-metric artifact) -- exactly what external/physical checks are for.
+
+---
+
+## Further physics extensions (beyond Phase 5 -- designed, NOT implemented)
+
+Larger research efforts; the design + hook points are recorded so they can be
+picked up cleanly. None is implemented -- no unvalidated physics is shipped.
+
+### Bipolar drift-diffusion (holes + recombination)
+Current DD is electrons-only (correct for unipolar degenerate ITO). For bipolar
+devices add a `Holes` solution variable mirroring `Electrons` in
+`physics_drift_diffusion.py`: a hole continuity equation with an FD-enhanced
+Scharfetter-Gummel current (sign-flipped drift), an SRH (optionally Auger/
+radiative) recombination node model coupling the two continuities, and the Poisson
+charge `q(p - n + N_D - N_A)`. Contacts pin both n and p to charge-neutral
+equilibrium. **Validation gate:** a p-n diode J-V (monotonic, sign- and
+ideality-correct) + reduction to the electron-only result in the unipolar limit.
+
+### Quantum confinement (Schrodinger-Poisson)
+The ~1 nm accumulation layer in degenerate ITO has sub-band quantization the
+classical Poisson/DD misses. Add a 1D through-stack effective-mass Schrodinger
+solve per lateral column (eigen-solve `-hbar^2/2m* d2psi/dz2 - qV psi = E psi`,
+fill sub-bands via the 2D DOS to E_F, build `n(z)` from `|psi|^2`), iterated
+self-consistently with Poisson (predictor-corrector / Anderson mixing). Plugs in
+as an alternative carrier model on the semiconductor region. **Validation gate:**
+analytic square-/triangular-well sub-band energies; the quantum `n(z)` must recover
+the classical Fermi-Dirac profile in the bulk away from the interface.
+
+### Boundary-spanning inclusion topologies
+Phase 3 inclusions are interior-only (the four periodic faces stay clean
+rectangles so the proven face `Identify` works). For features that touch/cross the
+cell boundary (connected gratings, wires), the OCC build must split the boundary-
+crossing solid at the cell faces and pair the resulting partial faces in the
+periodic `Identify` (matching sub-face signatures across the translation).
+**Validation gate:** a boundary-spanning grating's periodic-ndof + energy
+conservation match an interior-inclusion or TMM/RCWA reference.
