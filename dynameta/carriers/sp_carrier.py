@@ -31,7 +31,7 @@ import numpy as np
 from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, ELECTRON_DENSITY, POTENTIAL)
 from dynameta.core.interfaces import RegionInfo
-from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, HBAR, M_E, Q
+from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, HBAR, M_E, Q, EPS0
 
 
 class SchrodingerPoissonCarrier:
@@ -43,6 +43,7 @@ class SchrodingerPoissonCarrier:
                  m_eff_kg: float = 0.35 * M_E, eps_static: float = 9.5,
                  T_K: float = 300.0, lateral_m: float = 12e-9, semi_material: str = "ITO",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
+                 oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
                  surface_potential_of_gate: Optional[Callable[[float], float]] = None,
                  surface_potential_xy: Optional[Callable[[float, float, float], float]] = None) -> None:
         self.semi_thk_m = float(semi_thk_m)
@@ -55,7 +56,21 @@ class SchrodingerPoissonCarrier:
         self.nz = int(nz)
         self.n_lateral = int(n_lateral)
         self.n_states = int(n_states)
-        self._psi_s = surface_potential_of_gate or (lambda vg: vg)
+        # gate -> semiconductor surface-potential map. Priority:
+        #   1. an explicit surface_potential_of_gate callable;
+        #   2. else, if a gate oxide is given, the physical series-capacitor division
+        #      Vg = psi_s + q*N_excess(psi_s)/C_ox (C_ox = eps_ox*eps0/t_ox) -- solved
+        #      for psi_s. This is the CALIBRATED map: most of Vg drops across the oxide
+        #      once the channel accumulates, so psi_s << Vg (the old identity map
+        #      psi_s=Vg grossly over-estimated the accumulation).
+        #   3. else identity psi_s=Vg (qualitative only; documented over-estimate).
+        self._C_ox = (eps_oxide * EPS0 / float(oxide_thk_m)) if oxide_thk_m else None
+        if surface_potential_of_gate is not None:
+            self._psi_s = surface_potential_of_gate
+        elif self._C_ox is not None:
+            self._psi_s = self._gate_to_psi_s
+        else:
+            self._psi_s = lambda vg: vg
         # optional LATERAL surface-potential map psi_s(x_m, y_m, Vg) -> V for a
         # laterally-VARYING device (e.g. under a patch vs the gap). When given, the
         # solver runs a 1D SP per lateral column (caching by psi_s value); when None it
@@ -78,6 +93,35 @@ class SchrodingerPoissonCarrier:
             phi_left_V=0.0, phi_right_V=psi_s, n_states=self.n_states,
             bound_tol=1e9, max_outer=80, tol_V=1e-5)          # slab mode: keep all sub-bands
         return phi, n_z
+
+    def _gate_to_psi_s(self, vg: float) -> float:
+        """Resolve the semiconductor surface potential psi_s from the gate voltage via
+        the oxide series capacitance: Vg = psi_s + q*N_excess(psi_s)/C_ox, solved by
+        bisection (N_excess = net accumulated electron sheet density from a 1D SP solve
+        at psi_s; monotonic in psi_s, so f(0)=-Vg<0 and f(Vg)>0 bracket the root).
+        Returns psi_s (same sign as Vg). This is what makes the accumulation magnitude
+        physical -- with a thin high-k gate oxide most of Vg drops across the oxide."""
+        if self._C_ox is None or abs(vg) < 1e-12:
+            return float(vg)
+        s = 1.0 if vg > 0 else -1.0
+        Vg = abs(float(vg))
+        z = np.linspace(0.0, self.semi_thk_m, self.nz)
+        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
+        Nd = np.full_like(z, self.n_bg_m3)
+
+        def residual(psi):
+            _, n_z = self._solve_column(sp, Nd, s * psi)
+            n_exc = float(np.sum(0.5 * ((n_z[:-1] + n_z[1:]) - 2.0 * self.n_bg_m3) * np.diff(z)))
+            return psi + Q * n_exc / self._C_ox - Vg          # Vg residual at trial psi_s
+
+        lo, hi = 0.0, Vg
+        for _ in range(8):                                     # ~Vg/256 resolution
+            mid = 0.5 * (lo + hi)
+            if residual(mid) < 0.0:
+                lo = mid
+            else:
+                hi = mid
+        return s * 0.5 * (lo + hi)
 
     def solve(self, bias) -> CarrierField:
         vg = float(bias.voltages.get("gate", 0.0))
