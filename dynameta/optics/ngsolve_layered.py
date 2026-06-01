@@ -19,6 +19,7 @@ proven face Identify working).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -71,9 +72,27 @@ class LayeredOpticalBuilder:
             cx, cy = inc_shape.center_m()
             return occ.Cylinder(occ.Pnt(cx * S, cy * S, z_lo), occ.Z,
                                   r=inc_shape.radius_m * S, h=(z_hi - z_lo))
+        if k in ("polygon", "regular_polygon"):
+            return self._polygon_prism([(x * S, y * S) for x, y in inc_shape.vertices_m()],
+                                        z_lo, z_hi)
+        if k == "ellipse":
+            cx, cy = inc_shape.center_m()
+            n = 72
+            pts = [((cx + inc_shape.rx_m * math.cos(t)) * S, (cy + inc_shape.ry_m * math.sin(t)) * S)
+                    for t in (2.0 * math.pi * i / n for i in range(n))]
+            return self._polygon_prism(pts, z_lo, z_hi)
         raise NotImplementedError(
-            "inclusion shape '{}' not yet supported by the default OCC builder "
-            "(Phase 3)".format(k))
+            "inclusion shape '{}' not supported by the default OCC builder".format(k))
+
+    def _polygon_prism(self, pts_nm, z_lo, z_hi):
+        """A vertical prism over a closed polygon (vertices in nm) -- the OCC primitive for
+        polygon/regular_polygon inclusions and (via a fine vertex sampling) ellipses."""
+        wp = occ.WorkPlane(occ.Axes((0.0, 0.0, z_lo), occ.Z))
+        wp.MoveTo(*pts_nm[0])
+        for p in pts_nm[1:]:
+            wp.LineTo(*p)
+        wp.Close()
+        return wp.Face().Extrude(z_hi - z_lo)
 
     def _inclusion_solids_clipped(self, inc_shape, z_lo, z_hi, Px, Py):
         """The inclusion intersected with the unit cell, UNIONED with its periodic
