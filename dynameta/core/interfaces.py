@@ -27,14 +27,22 @@ class RegionInfo:
 
 @dataclass
 class OpticalResult:
-    """Outcome of one optical solve. t/T/A are None until Phase 3 transmission."""
-    r:            complex
-    R:            float
-    phase_deg:    float
-    solve_time_s: float
-    t:            Optional[complex] = None
-    T:            Optional[float] = None
-    A:            Optional[float] = None
+    """Outcome of one optical solve. t/T/A are None until Phase 3 transmission.
+
+    A is the energy-budget closure 1 - R - T. A_independent (when not None) is the
+    INDEPENDENTLY measured absorbed fraction -- the normalized volumetric loss
+    integral k0 * Int Im(eps)|E|^2 dV / (cos(theta) * cell_area) over the physical
+    (non-PML) domain. |A - A_independent| is then a genuine (non-tautological)
+    energy/numerics diagnostic; they agree only if R, T and the in-structure field
+    are all consistent."""
+    r:             complex
+    R:             float
+    phase_deg:     float
+    solve_time_s:  float
+    t:             Optional[complex] = None
+    T:             Optional[float] = None
+    A:             Optional[float] = None
+    A_independent: Optional[float] = None
 
 
 @runtime_checkable
