@@ -86,10 +86,21 @@ class LayeredOpticalBuilder:
 
     def _polygon_prism(self, pts_nm, z_lo, z_hi):
         """A vertical prism over a closed polygon (vertices in nm) -- the OCC primitive for
-        polygon/regular_polygon inclusions and (via a fine vertex sampling) ellipses."""
+        polygon/regular_polygon inclusions and (via a fine vertex sampling) ellipses.
+
+        The vertex list is normalized to counter-clockwise (positive signed area) so the
+        extruded face is positively oriented regardless of the caller's winding. A
+        clockwise (negative-area) face would extrude to a negative-volume solid whose
+        cell-intersection captures the COMPLEMENT of the footprint, silently swapping the
+        inclusion and background regions (audit GEO-1)."""
+        pts = list(pts_nm)
+        area2 = sum(x0 * y1 - x1 * y0
+                    for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1]))
+        if area2 < 0.0:
+            pts = pts[::-1]
         wp = occ.WorkPlane(occ.Axes((0.0, 0.0, z_lo), occ.Z))
-        wp.MoveTo(*pts_nm[0])
-        for p in pts_nm[1:]:
+        wp.MoveTo(*pts[0])
+        for p in pts[1:]:
             wp.LineTo(*p)
         wp.Close()
         return wp.Face().Extrude(z_hi - z_lo)
@@ -203,6 +214,10 @@ class LayeredOpticalBuilder:
                 bg = occ.Box(occ.Pnt(0, 0, z_lo), occ.Pnt(Px, Py, z_hi))
                 for inc in L.inclusions:
                     bg = bg - self._inclusion_solids_clipped(inc.shape, z_lo, z_hi, Px, Py)
+                if len(bg.solids) == 0:
+                    raise ValueError(
+                        "layer '{}' inclusion(s) leave no background region -- they cover "
+                        "the entire unit cell (check inclusion size/winding).".format(L.name))
                 for k_idx, s in enumerate(bg.solids):
                     bn = L.name if k_idx == 0 else "{}__bg{}".format(L.name, k_idx)
                     s.name = bn; s.bc("default")

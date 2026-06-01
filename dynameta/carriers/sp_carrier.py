@@ -155,7 +155,19 @@ class SchrodingerPoissonCarrier:
             return psi + Q * n_exc / self._C_ox - Vg          # Vg residual at trial psi_s
 
         lo, hi = 0.0, Vg
-        for _ in range(8):                                     # ~Vg/256 resolution
+        r_lo, r_hi = residual(lo), residual(hi)   # r_lo = -Vg < 0 (flat-band baseline -> N_exc(0)=0)
+        grow = 0
+        while r_lo * r_hi > 0.0 and grow < 6:      # depletion root lies beyond psi=Vg: expand bracket
+            hi *= 2.0
+            r_hi = residual(hi)
+            grow += 1
+        if r_lo * r_hi > 0.0:                       # never bracketed -> warn, don't silently lie (SP-NEG-1)
+            warnings.warn(
+                "SchrodingerPoissonCarrier: gate->psi_s bisection could not bracket a root for "
+                "Vg={:.3g} V. The oxide series-cap map is calibrated for accumulation; a depletion "
+                "bias on a degenerate film may not converge, so the surface potential (hence the "
+                "returned density) may be unreliable.".format(vg), stacklevel=2)
+        for _ in range(8):                          # ~bracket/256 resolution
             mid = 0.5 * (lo + hi)
             if residual(mid) < 0.0:
                 lo = mid

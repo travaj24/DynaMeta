@@ -62,6 +62,11 @@ class Rectangle(CrossSection):
     height_m: float
     kind: str = field(default="rectangle", init=False)
 
+    def __post_init__(self):
+        if not (self.width_m > 0.0 and self.height_m > 0.0):
+            raise ValueError("Rectangle requires width_m>0 and height_m>0 (got {}, {})".format(
+                self.width_m, self.height_m))
+
     def center_m(self):
         return (self.cx_m, self.cy_m)
 
@@ -85,6 +90,10 @@ class Circle(CrossSection):
     radius_m: float
     kind: str = field(default="circle", init=False)
 
+    def __post_init__(self):
+        if not (self.radius_m > 0.0):
+            raise ValueError("Circle requires radius_m>0 (got {})".format(self.radius_m))
+
     def center_m(self):
         return (self.cx_m, self.cy_m)
 
@@ -107,6 +116,11 @@ class Ellipse(CrossSection):
     rx_m: float
     ry_m: float
     kind: str = field(default="ellipse", init=False)
+
+    def __post_init__(self):
+        if not (self.rx_m > 0.0 and self.ry_m > 0.0):
+            raise ValueError("Ellipse requires rx_m>0 and ry_m>0 (got {}, {})".format(
+                self.rx_m, self.ry_m))
 
     def center_m(self):
         return (self.cx_m, self.cy_m)
@@ -132,6 +146,12 @@ class RegularPolygon(CrossSection):
     n_sides: int
     rotation_deg: float = 0.0
     kind: str = field(default="regular_polygon", init=False)
+
+    def __post_init__(self):
+        if self.n_sides < 3:
+            raise ValueError("RegularPolygon requires n_sides>=3 (got {})".format(self.n_sides))
+        if not (self.radius_m > 0.0):
+            raise ValueError("RegularPolygon requires radius_m>0 (got {})".format(self.radius_m))
 
     def vertices_m(self) -> np.ndarray:
         a0 = math.radians(self.rotation_deg)
@@ -159,6 +179,15 @@ class RegularPolygon(CrossSection):
 class Polygon(CrossSection):
     points_m: List[Tuple[float, float]]
     kind: str = field(default="polygon", init=False)
+
+    def __post_init__(self):
+        v = np.asarray(self.points_m, dtype=np.float64)
+        if v.ndim != 2 or v.shape[0] < 3 or v.shape[1] != 2:
+            raise ValueError("Polygon requires >=3 (x,y) vertices (got shape {})".format(v.shape))
+        # signed shoelace area; zero -> collinear/degenerate (no enclosed region)
+        area2 = float(np.sum(v[:, 0] * np.roll(v[:, 1], -1) - np.roll(v[:, 0], -1) * v[:, 1]))
+        if abs(area2) < 1e-30:
+            raise ValueError("Polygon vertices are collinear / enclose zero area")
 
     def vertices_m(self) -> np.ndarray:
         return np.asarray(self.points_m, dtype=np.float64)
