@@ -175,9 +175,10 @@ F1-F4). True lateral material inclusions in the semiconductor still need a manua
 |---|---|---|---|
 | Oblique incidence | **resolved, s+p-pol, +conical** | `tmm` s & p, 0-30deg, vacuum/dense/lossy; conical phi-invariant + tmm | p-pol conical |
 | 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible | multi-dielectric stack / arbitrary OCC inclusions |
-| Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge | per-column SP (patch); oxide V-division; nonparabolic m* |
+| Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge; nonparabolic reachable via carrier | fully self-consistent nonparabolic solve; Neumann body BC |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
-| Boundary-spanning inclusions | **resolved** | grating(1D edge) + disk(2D corner) translation-invariance |dR|<=1e-4 + energy R+T~1 | arbitrary polygon spanning |
+| Boundary-spanning inclusions | **resolved** | grating(1D edge) + disk(2D corner) translation-invariance |dR|<=1e-4 + energy R+T~1 | -- |
+| Inclusion shapes | **rect/circle/ellipse/polygon** | ellipse + hexagon build/solve + energy R+T~1 (validation/inclusion_shapes.py) | -- |
 
 Validation scripts live in `validation/`. Both features caught real issues during
 verification (the PML angle-limit, the gmsh-scale + MSH-version + NumPy-2 bugs, a
@@ -268,8 +269,12 @@ density is `(g_s g_v m*0/2 pi hbar^2) Int (1+2 alpha eps) f deps`. Validated
 `m*(E_F)/m*0 = 1.16` for ITO-like alpha=0.5/eV, dE=0.16 eV. Remaining: a fully self-
 consistent nonparabolic SOLVE (the Trellakis inner Newton's a-priori density + Jacobian,
 and the bulk E_F<->n calibration, must also use the nonparabolic DOS) -- the parabolic
-`solve_self_consistent` is unchanged, so nonparabolicity is exposed at the `density()`
-level (the dominant degenerate effect) pending that consistent coupling.
+`solve_self_consistent` is unchanged. Nonparabolicity is now ALSO reachable THROUGH the
+device path: `SchrodingerPoissonCarrier(alpha_np_per_eV=...)` applies a POST-HOC
+nonparabolic 2D fill on the converged (parabolic) potential (`validation/
+sp_carrier_nonparabolic.py` PASS: peak-density DOS enhancement ratio 1.25 at alpha=0.5/eV,
+Vg=+0.5V). The self-consistent potential + bulk E_F stay parabolic (documented), so the
+fully-consistent nonparabolic solve remains the only open piece.
 
 ### Boundary-spanning inclusion topologies -- IMPLEMENTED + validated
 Phase 3 inclusions were interior-only (the four periodic faces stayed clean
