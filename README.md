@@ -198,7 +198,9 @@ solver-free bridge spine). The heavier solver-backed physics lives in
 `python -m validation.run_all` runs and gates the whole set by exit code (needs the
 `[solvers]` extra: ngsolve/devsim/gmsh; budget tens of minutes).
 
-**Roadmap** (angle-aware PML, conical p-pol, optimization/inverse-design, an
-independent RCWA cross-check, AC/transient carriers): see
-[docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md) and the audit at
+**Roadmap.** The forward plan to broaden DynaMeta into a general modulation-physics
+simulator (field-effect EO/Pockels, thermo-optic, QCSE electro-absorption, and
+reconfigurable PCM/LC/graphene -- via a generalized field-aware + tensor-eps bridge) is
+[docs/roadmap_v0.3_modulation.md](docs/roadmap_v0.3_modulation.md). Prior phases:
+[docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md); the independent audit:
 [docs/audit/](docs/audit/).
