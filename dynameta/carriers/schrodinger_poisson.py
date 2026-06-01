@@ -198,6 +198,7 @@ class SchrodingerPoisson1D:
         main, off = laplacian_matrix()
         last_phi = phi.copy()
         result = None
+        dV = float("inf")          # guard: max_outer<1 -> loop body never runs (report non-converged)
         for it in range(max_outer):
             U = -Q * phi + U_band
             res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
