@@ -59,7 +59,6 @@ def _solve(cx_nm, label):
     d = _grating(cx_nm)
     geo = LayeredOpticalBuilder(d).build()
     mats = list(geo.mesh.GetMaterials())
-    n_incl_solids = sum(1 for m in mats if "__incl" in m)
     # one region name per inclusion, but it can be backed by >1 solid; report the material map
     incl_regions = sorted({m for m in mats if "__incl" in m})
     # BI-2: assert the periodic Identify actually paired faces (it is load-bearing here);

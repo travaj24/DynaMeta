@@ -13,7 +13,7 @@ from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.core.carrier_field import CarrierField, CarrierRegion, ELECTRON_DENSITY
 from dynameta.core.lift import IdentityLift, ExtrudeLift, SeparableXYLift, choose_lift
 from dynameta.materials import Material, MaterialRegistry, ConstantOptical, DrudeOptical, M_E
-from dynameta.analysis import resonance_dip
+from dynameta.analysis import resonance_dip, gate_cv
 
 N_BG = 4e26
 PERIOD = 300e-9
@@ -174,3 +174,26 @@ def test_resonance_dip_exact_vertex():
     lam_n, val_n = resonance_dip(nonuni, parab(nonuni))
     assert abs(lam_n - 1305.0) < 1e-6
     assert abs(val_n - 0.02) < 1e-9
+
+
+# ---- analysis.gate_cv: DC gate charge + capacitance from a synthetic voltage sweep ----
+def test_gate_cv():
+    Q_E = 1.602176634e-19
+    L, nz = 12e-9, 41
+    z = np.linspace(0.0, L, nz)
+    S = 3.0e17          # excess sheet density per volt (m^-2 / V) -> Q = q*S*Vg, C = q*S
+    fields = []
+    for vg in (0.0, 0.5, 1.0, 1.5):
+        delta = S * vg / L                                # uniform excess so INT(n-n_bg)dz = S*vg
+        n3d = np.full((2, 2, nz), N_BG + delta)
+        reg = CarrierRegion(name="semi", role="semiconductor", material="ito",
+                            nodes_m=np.zeros((1, 3)), node_fields={},
+                            grid_axes_m={"x": np.array([0.0, PERIOD]), "y": np.array([0.0, PERIOD]), "z": z},
+                            grid_fields={ELECTRON_DENSITY: n3d})
+        fields.append(CarrierField(bias_label="vg", voltages={"gate": vg, "body": 0.0}, ndim=3,
+                                   temperature_K=300.0, regions={"semi": reg},
+                                   n_bg_by_region={"semi": N_BG}, unit_cell_m=(PERIOD, PERIOD)))
+    Vg, Q, Vmid, C = gate_cv(fields, "semi", voltage_key="gate")
+    assert np.all(np.diff(Q) > 0)                          # Q rises with gate bias (accumulation)
+    assert np.allclose(Q, Q_E * S * Vg, rtol=1e-6)         # Q(Vg) = q*S*Vg
+    assert np.allclose(C, Q_E * S, rtol=1e-6)              # C = dQ/dVg = q*S (constant here)

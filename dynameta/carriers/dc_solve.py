@@ -75,12 +75,17 @@ def _snapshot(device, regions):
 
 
 def _max_rel_change(after, before):
+    # Symmetric relative change with a sane floor: denominator = max(|after|,|before|,1e-6).
+    # The old 1e-30 floor made a variable that legitimately passes through 0 (Potential
+    # starts near 0) report an enormous spurious relative change (gummel-only; the path is
+    # experimental, but the convergence proxy should still be meaningful).
     m = 0.0
     for k, va in after.items():
         vb = before.get(k)
         if vb is None:
             continue
-        m = max(m, float(np.max(np.abs(va - vb) / np.maximum(np.abs(vb), 1e-30))))
+        denom = np.maximum(np.maximum(np.abs(va), np.abs(vb)), 1e-6)
+        m = max(m, float(np.max(np.abs(va - vb) / denom)))
     return m
 
 
