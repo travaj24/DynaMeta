@@ -80,6 +80,10 @@ def _coh_tmm_stack(stack, lambda_m, theta_deg, pol):
     if not stack.is_unstructured:
         raise ValueError("layered TMM requires an unstructured (all-scalar-slab) stack; "
                          "a laterally-structured slab needs the FEM solver / RCWA.")
+    if abs(complex(stack.n_super).imag) > 1e-9:                # LTM-5: mirror the FEM OPT-1 contract
+        raise ValueError("layered TMM: R/T/A and the energy budget A=1-R-T are defined only "
+                         "for a LOSSLESS incidence medium (Im(n_super)=0); got n_super={}."
+                         .format(stack.n_super))
     n_list = ([complex(stack.n_super)] + [np.sqrt(complex(s.eps)) for s in stack.slabs]
               + [complex(stack.n_sub)])
     d_list = [np.inf] + [float(s.thickness_m) * 1e9 for s in stack.slabs] + [np.inf]
