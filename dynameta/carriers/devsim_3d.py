@@ -251,13 +251,24 @@ class Devsim3DEquilibrium:
             self.build_device()
         gn, bn = self.spec.gate_name, self.spec.body_name
         # Map the Design electrode names (BiasPoint keys) to the internal gate/body
-        # contacts. If a bias is given but matches NEITHER name, it is a wiring error --
-        # warn rather than silently solve at Vg=0 (verifier HIGH).
-        if bias.voltages and gn not in bias.voltages and bn not in bias.voltages:
-            warnings.warn(
-                "Devsim3DEquilibrium.solve: BiasPoint has voltages {} but neither gate_name "
-                "'{}' nor body_name '{}' is among them -- solving at Vg=0. Check the electrode "
-                "names.".format(sorted(bias.voltages), gn, bn))
+        # contacts. The stacked builder drives ONLY these two, so warn on (a) a bias that
+        # matches NEITHER name (would solve at Vg=0) and (b) any EXTRA key that matches
+        # neither and is therefore silently dropped (e.g. a biased back contact on a
+        # collapsed layer -- audit AD-2 extends the original verifier-HIGH guard).
+        if bias.voltages:
+            if gn not in bias.voltages and bn not in bias.voltages:
+                warnings.warn(
+                    "Devsim3DEquilibrium.solve: BiasPoint has voltages {} but neither gate_name "
+                    "'{}' nor body_name '{}' is among them -- solving at Vg=0. Check the electrode "
+                    "names.".format(sorted(bias.voltages), gn, bn))
+            else:
+                unknown = [k for k in bias.voltages if k not in (gn, bn)]
+                if unknown:
+                    warnings.warn(
+                        "Devsim3DEquilibrium.solve: BiasPoint voltage key(s) {} match neither "
+                        "gate_name '{}' nor body_name '{}' and are SILENTLY IGNORED -- the stacked "
+                        "builder drives only the gate and body contact. Check the electrode "
+                        "names.".format(unknown, gn, bn))
         vg = float(bias.voltages.get(gn, 0.0))
         vb = float(bias.voltages.get(bn, 0.0))
         ds.set_parameter(device=self.device, name="body_bias", value=vb)

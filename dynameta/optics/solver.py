@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import cmath
 import math
+import re
 import time
 import warnings
 
@@ -295,6 +296,22 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                                 printrates=verbose)
     dt = time.time() - t0
 
+    # OS-1: bddc_gmres/bddc_cg can stop at maxsteps without reaching tol (the ill-conditioned
+    # ENZ / lossy-metal regime) and silently return a wrong field. Independently measure the
+    # relative residual ||b - A x|| / ||b|| and warn so a non-converged solve is not trusted.
+    if optical.linear_solver != "umfpack":
+        rvec = gfu.vec.CreateVector()
+        rvec.data = f.vec - a.mat * gfu.vec
+        rn = float(np.linalg.norm(rvec.FV().NumPy()))
+        bn = float(np.linalg.norm(f.vec.FV().NumPy()))
+        relres = rn / bn if bn > 0.0 else rn
+        if relres > 1e-3:
+            warnings.warn(
+                "solve_fem: iterative solver '{}' did not converge (relative residual {:.2e} "
+                "> 1e-3 after {} steps); R/T/A are unreliable. Use linear_solver='umfpack', "
+                "raise gmres_max_iter, or refine the mesh.".format(
+                    optical.linear_solver, relres, optical.gmres_max_iter), stacklevel=2)
+
     # Demodulation: phase_in_space holds the physical field E=u exp(i(kx x+ky y)) -> demod
     # by exp(-i(kx x+ky y)) to recover the 0-order Fourier coefficient. envelope already
     # holds u (kx=ky=0 in the demod).
@@ -449,11 +466,18 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
     catches energy/numerics errors that the R/T extraction alone cannot. The PML
     materials are excluded -- their stretched-coordinate eps would corrupt the integral
-    (and a lossy substrate makes the bottom-PML contribution spurious)."""
-    non_pml = [m for m in dict.fromkeys(mesh.GetMaterials()) if not m.startswith("pml")]
+    (and a lossy substrate makes the bottom-PML contribution spurious). NOTE: a lossy
+    super/substrate BUFFER (between the structure and its PML) is still integrated, so A is
+    a clean measurement only for LOSSLESS cladding media (the validated cases); for a lossy
+    cladding treat A as qualitative (audit OS-4)."""
+    # Exclude PML regions only. Use the 'pml_' prefix (the builder names PML 'pml_top'/
+    # 'pml_bot') so a physical material like 'pmlayer' is NOT dropped (OS-3), and re.escape
+    # each name so a regex-metacharacter material name (e.g. 'ito.n+') is matched literally
+    # rather than silently missed by mesh.Materials' regex (OS-2).
+    non_pml = [m for m in dict.fromkeys(mesh.GetMaterials()) if not m.startswith("pml_")]
     if not non_pml:
         return None
-    defon = mesh.Materials("|".join(non_pml))
+    defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
     im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j                  # Im(eps) as a real CF
     e2 = ng.InnerProduct(E_tot, ng.Conj(E_tot))               # |E|^2 (real)
     integ = ng.Integrate(im_eps * e2, mesh, definedon=defon)
