@@ -86,7 +86,13 @@ the PML nor a phase sign:
    vacuum-exit AND a dense (n=1.5) substrate slab, R and T match to **<0.001** at
    0/15/30deg, energy-conserving (R+T=1.0000). `OpticalSpec.polarization='p'`.
 
-(Conical incidence -- azimuth phi != 0, ky != 0 -- is a further follow-up.)
+4. **Conical incidence (azimuth phi != 0) -- IMPLEMENTED (s-pol).** `OpticalSpec.azimuth_deg`.
+   kx=k0 sin(th) cos(phi), ky=k0 sin(th) sin(phi); a 2D Bloch phase (exp(i kx Px) on x-faces
+   AND exp(i ky Py) on y-faces, via the per-idnr detection); the in-plane s-pol direction
+   Es=(-sin phi, cos phi, 0); and a 2D-demodulated, projected R/T extraction. **Validated**
+   (`validation/oblique_conical_vs_tmm.py`, PASS): an isotropic layered stack is azimuthally
+   symmetric, so at theta=30deg the R/T are phi-INVARIANT (spread 0.0000 over phi=0/30/60/90)
+   and match `tmm(theta,'s')` to <0.001. p-pol conical is the remaining follow-up.
 
 ---
 
@@ -162,7 +168,7 @@ material inclusions still need a manual `Stacked3DSpec` or a further general OCC
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | **resolved, s+p-pol** | `tmm` s & p -- R&T <0.01, 0-30deg, vacuum AND dense substrate | conical (phi!=0) |
+| Oblique incidence | **resolved, s+p-pol, +conical** | `tmm` s & p, 0-30deg, vacuum/dense/lossy; conical phi-invariant + tmm | p-pol conical |
 | 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible | multi-dielectric stack / arbitrary OCC inclusions |
 | Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge | per-column SP (patch); oxide V-division; nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
