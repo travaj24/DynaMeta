@@ -73,38 +73,53 @@ class Stacked3DSpec:
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
-        """Derive a stacked 3D spec from a `Design`: the (single) semiconductor layer +
-        the (single) gate-dielectric layer + the square cell period + the gate footprint
-        -> gate_patch_frac. The emitted CarrierField region is named after the Design's
-        semiconductor layer so it matches the optics builder's alignment source_region
-        (-> run_pipeline with no hand-built alignment). Raises on cases the stacked
-        builder does not yet cover (lateral inclusions, >1 semi/dielectric layer)."""
-        semi_L = ox_L = None
-        for L in design.stack.layers:
-            if L.inclusions:
-                raise ValueError("from_design: lateral inclusions in layer '{}' are not yet "
-                                  "meshed by the stacked 3D builder (a gate PATCH is modeled "
-                                  "via gate_patch_frac).".format(L.name))
-            role = design.material_role(L.background_material)
-            if role == "semiconductor" and semi_L is None: semi_L = L
-            elif role == "dielectric" and ox_L is None: ox_L = L
-        if semi_L is None or ox_L is None:
-            raise ValueError("from_design needs exactly one semiconductor + one dielectric layer")
+        """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
+        full Park mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer +
+        the nearest dielectric layer on the GATE side (the direction of the gate
+        electrode), and collapses the rest to that semiconductor + gate-oxide pair (the
+        layers that set the accumulation; the others are not meshed by the stacked
+        builder). gate_patch_frac is derived from the gate electrode footprint. The
+        emitted CarrierField region is named after the Design's semiconductor layer so it
+        matches the optics alignment source_region (-> run_pipeline, no hand alignment).
+        Inclusions are allowed in non-semiconductor layers (e.g. the patch); the
+        semiconductor layer itself must be laterally uniform."""
+        layers = design.stack.layers
+        semi_idx = next((i for i, L in enumerate(layers)
+                          if design.material_role(L.background_material) == "semiconductor"), None)
+        if semi_idx is None:
+            raise ValueError("from_design needs a semiconductor layer (a material with a transport model)")
+        semi_L = layers[semi_idx]
+        if semi_L.inclusions:
+            raise ValueError("from_design: the semiconductor layer '{}' must be laterally uniform "
+                              "(no material inclusions); a gate PATCH is modeled via gate_patch_frac"
+                              .format(semi_L.name))
+        # gate electrode (a patch footprint = a CrossSection); sets the gate side + patch frac
+        gate_e = next((e for e in design.electrodes if not isinstance(e.footprint, str)), None)
+        gate_idx = (next((i for i, L in enumerate(layers) if L.name == gate_e.layer), len(layers))
+                     if gate_e is not None else len(layers))   # default: gate above the semiconductor
+        step = 1 if gate_idx > semi_idx else -1
+        ox_L = None
+        j = semi_idx + step
+        while 0 <= j < len(layers):
+            if design.material_role(layers[j].background_material) == "dielectric":
+                ox_L = layers[j]; break
+            j += step
+        if ox_L is None:
+            raise ValueError("from_design found no gate-side dielectric layer adjacent to "
+                              "semiconductor '{}'".format(semi_L.name))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
         eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
         if eps_ox is None:
-            raise ValueError("dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
+            raise ValueError("gate dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
         cell = design.unit_cell
         frac = gate_patch_frac
-        if frac is None:                                  # derive from a patch-footprint electrode
+        if frac is None:                                  # derive from the gate-patch footprint
             frac = 1.0
-            for e in design.electrodes:
-                if not isinstance(e.footprint, str):
-                    xlo, xhi, ylo, yhi = e.footprint.bbox_m()
-                    frac = min(1.0, max((xhi - xlo) / cell.period_x_m, (yhi - ylo) / cell.period_y_m))
-                    break
+            if gate_e is not None:
+                xlo, xhi, ylo, yhi = gate_e.footprint.bbox_m()
+                frac = min(1.0, max((xhi - xlo) / cell.period_x_m, (yhi - ylo) / cell.period_y_m))
         n_bg = tr.n_bg_m3
         mob = (float(tr.mobility_m2Vs_of_n_m3(n_bg)) if tr.mobility_m2Vs_of_n_m3 is not None else 0.004)
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
