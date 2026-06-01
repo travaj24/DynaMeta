@@ -155,6 +155,19 @@ class LayeredOpticalBuilder:
             is_cavity = (bg_role in ("dielectric", "semiconductor")) and footprint is not None and not L.inclusions
 
             if L.inclusions:
+                # BI-1: a semiconductor in an inclusion layer (as background OR as an
+                # inclusion) would be SILENTLY frozen at its nominal eps -- this branch
+                # registers no carrier alignment, and the inclusion vs background region
+                # naming diverges from the DEVSIM builder. Fail loudly until the
+                # charge->optics bridge supports it (move the semiconductor to its own
+                # full-cell layer, or supply a manual GeometryAlignment).
+                if is_semi_bg or any(d.material_role(inc.material) == "semiconductor"
+                                      for inc in L.inclusions):
+                    raise NotImplementedError(
+                        "layer '{}' has inclusions AND a semiconductor; the carrier->eps "
+                        "bridge cannot align an inclusion-layer semiconductor (it would be "
+                        "frozen at nominal eps). Put the semiconductor in its own full-cell "
+                        "layer, or build a manual GeometryAlignment.".format(L.name))
                 # inclusion solid(s) + background-minus-inclusions. Each inclusion is
                 # clipped to the cell and unioned with its periodic translates, so a
                 # boundary-spanning inclusion contributes >1 sub-solid (the wrapped
@@ -312,8 +325,24 @@ def _identify_periodic(shape, Px: float, Py: float) -> Tuple[int, int]:
         elif abs(c.y - Py) < tol: yP.append(f)
     sig_yz = lambda f: (round(f.center.y * 1e3), round(f.center.z * 1e3))
     sig_xz = lambda f: (round(f.center.x * 1e3), round(f.center.z * 1e3))
-    xP_by = {sig_yz(f): f for f in xP}
-    yP_by = {sig_xz(f): f for f in yP}
+
+    def _by_sig(faces, sig, axis):
+        # BI-5: build the centroid-signature -> face map, but RAISE on a collision instead
+        # of silently overwriting (which would drop a face's periodic partner to a natural
+        # BC). Unreachable for the supported rectangle/circle inclusions, but guarded.
+        out = {}
+        for f in faces:
+            s = sig(f)
+            if s in out:
+                raise RuntimeError(
+                    "periodic {}-boundary face-centroid collision at {}; two distinct faces "
+                    "share a centroid signature so their periodic partners cannot be paired "
+                    "uniquely. Refine the inclusion topology or the signature.".format(axis, s))
+            out[s] = f
+        return out
+
+    xP_by = _by_sig(xP, sig_yz, "x")
+    yP_by = _by_sig(yP, sig_xz, "y")
     tx = occ.gp_Trsf.Translation(occ.Vec(Px, 0, 0))
     ty = occ.gp_Trsf.Translation(occ.Vec(0, Py, 0))
     n_px = 0
