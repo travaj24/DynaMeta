@@ -167,11 +167,14 @@ class SchrodingerPoisson1D:
         sub-bands up to E_F are kept -- they carry the bulk continuum, and rejecting
         them collapses the bulk density to ~0 (use n_states >= the # of sub-bands < E_F).
 
-        `relax`: outer-loop under-relaxation factor in (0, 1]. The kept-state set can
-        churn across the bound_tol edge threshold between outer iterations and make the
-        bare update limit-cycle (the isolated-well default mode), so the potential update
-        is damped: phi <- last_phi + relax*(phi_new - last_phi). relax=1 recovers the
-        undamped update.
+        `relax`: outer-loop under-relaxation factor in (0, 1]. The potential update is
+        damped: phi <- last_phi + relax*(phi_new - last_phi); relax=1 recovers the undamped
+        update. CAVEAT (audit SP-RELAX-2): damping phi does NOT cure the kept-state-SET churn
+        across the bound_tol edge threshold, so the isolated-well default mode (small
+        bound_tol) is NOT expected to converge at any relax -- it limit-cycles and stays
+        max_outer-parity-sensitive. For the degenerate-bulk slab use a LARGE bound_tol (slab
+        mode): it keeps all sub-bands, has no set churn, and converges; `.converged` flags
+        the isolated-well non-convergence.
 
         Returns (phi_V, n_m3, SubbandResult). The result carries `.converged` (bool):
         if the outer loop did not reach tol_V in max_outer iterations, `.converged` is

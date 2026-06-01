@@ -15,11 +15,13 @@ hangs DEVSIM's expr system, whether via a node-model reference or inlined).
 The exact g needs eta = invF_1/2(n/N_c), which is not expressible in DEVSIM. We use a
 RATIONAL FIT of g as a function of x = n/N_c in u = x^(1/3):
   g(x) = 1 + (a x + c x^(4/3)) / (1 + b x^(1/3) + d x^(2/3))
-with (a,b,c,d) fit so g is exact in BOTH limits -- Boltzmann g->1 (x->0) and degenerate
-g->(2/3)(c1 x)^(2/3) (x->inf, c1=3 sqrt(pi)/4) -- and accurate to <1% for eta in [-4, 32]
-(x up to ~80, covering ITO's eta~22). This REPLACES the old degenerate-asymptote
+with (a,b,c,d) a least-squares fit accurate to ~1.1% PEAK (near eta~1-2) and <0.5% across
+ITO's regime (eta>=10; 0.33% at eta~22, x up to ~80). The Boltzmann VALUE limit is exact
+(g(0)=1); the degenerate leading coefficient is NOT anchored (the fit -> (c/d) x^(2/3) =
+0.69 x^(2/3) vs the true (2/3)(c1)^(2/3) x^(2/3) = 0.81 x^(2/3), ~15% low), so the fit is
+valid to ~eta=32 and undershoots beyond. This REPLACES the old degenerate-asymptote
 1+(2/3)(c1 x)^(2/3), which was 6.6% high at ITO's operating point and 25-35% high through
-the moderate-degeneracy transition (audit F1). g still enters only as pow()s of the
+the moderate-degeneracy transition (audit F1; accuracy bounds re-measured audit DD-1/DD-2). g still enters only as pow()s of the
 SOLUTION variable Electrons, so the SG derivatives differentiate cleanly (putting the full
 F_1/2 in an edge model instead hangs DEVSIM). At equilibrium (Jn = 0) the enhanced SG
 gives n ~ exp(psi/(g V_t)), the Fermi-Dirac softening.
@@ -49,8 +51,8 @@ from dynameta.carriers.physics_equilibrium import (
 from dynameta.carriers import eq_registry as _R
 
 # Generalized-Einstein degeneracy factor g(x)=F_1/2(eta)/F_-1/2(eta) as a rational fit in
-# u=x^(1/3), x=n/N_c (accurate to <1% for eta in [-4,32]; exact in both limits). See the
-# module docstring. Coefficients from a least-squares fit to the exact Fermi-Dirac ratio.
+# u=x^(1/3), x=n/N_c (~1.1% peak, <0.5% over ITO's eta>=10; exact VALUE at the Boltzmann
+# limit g(0)=1; valid to eta~32). See the module docstring. Least-squares fit to F_1/2/F_-1/2.
 _GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
 _P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
 
