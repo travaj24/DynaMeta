@@ -120,16 +120,19 @@ work that was never fully used for the Park experiment but is directly portable.
 1. **Lumped-RC -> intrinsic f_3dB bandwidth** (`stage4_system/access_R_f3dB.py`). Model:
    `R_access = rho_sheet * L_path / W_pad`, `rho_sheet = 1/(q n mu t)`,
    `f_3dB = 1/(2 pi R_access C_cell)`; C_cell from the C(V) curve. It produced ~15 GHz for
-   the Park cell. **HIGH-VALUE near-term port:** DynaMeta already has the C(V) piece
-   (`analysis.gate_cv`, added 2026-06-01); add `analysis.lumped_rc_bandwidth(cv, rho_sheet,
-   geometry)` to get an intrinsic f_3dB **with zero new solver**. This is the cheapest real
-   modulator figure-of-merit and the on-ramp to the full AC/transient phase.
+   the Park cell. **PORTED (2026-06-01).** `analysis.sheet_resistance_ohm_sq`,
+   `analysis.lumped_rc_bandwidth` (-> R_access, C_cell, f_3dB) and
+   `analysis.switching_energy_per_area` (0.5 C V^2) now compose with `gate_cv` for an
+   intrinsic f_3dB **with zero new solver**. Validated: the synthetic pytest reproduces the
+   Modulator's ~15.4 GHz Park number; `validation/bandwidth_cv.py` runs a real SP-carrier C-V
+   sweep -> f_3dB ~5 GHz (GHz band, monotonic). The on-ramp to the full AC/transient phase.
 2. **The "HYPRE"/iterative-solver work** (`stage3_optical/fem/{compare_solvers,
    fine_mesh_with_iterative,smoke_gmres}.py`). *Correction:* there is no literal HYPRE/AMS
    code -- the only preconditioner is NGSolve **BDDC** (`driver_3d.py:179`), which DynaMeta
    already ported (`linear_solver` in {umfpack, bddc_cg, bddc_gmres}). What IS portable:
-   (a) a **direct-vs-iterative benchmark harness** (|r|^2 agreement + wall time + peak RSS) --
-   port as a solver-regression validation; (b) the **scaling lesson**: UMFPACK is infeasible
+   (a) a **direct-vs-iterative benchmark harness** (|r|^2 agreement + wall time) --
+   **PORTED (2026-06-01)** as `validation/solver_comparison.py` (umfpack/bddc_gmres/bddc_cg
+   agree to ~8e-9; bddc_cg fastest); (b) the **scaling lesson**: UMFPACK is infeasible
    at fine meshes (100s of GB) -> BDDC-GMRes is the O(n)-memory path. **Strategic reframe:**
    the audit flagged AMS/HYPRE as an ENZ dead end (indefinite near-zero-eps), but the new
    EO / thermo-optic / dielectric mechanisms are **well-conditioned and physically larger**

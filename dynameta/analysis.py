@@ -68,6 +68,38 @@ def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
     return Vg_a, Q_a, Vmid, C
 
 
+def sheet_resistance_ohm_sq(n_m3, mobility_m2Vs, thickness_m):
+    """Sheet resistance [Ohm/sq] of a conductive layer: rho_s = 1/(q n mu t)."""
+    sigma = _Q_E * np.asarray(n_m3, dtype=np.float64) * float(mobility_m2Vs)   # S/m
+    return 1.0 / (sigma * float(thickness_m))
+
+
+def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
+                        path_length_m, pad_width_m, cell_area_m2):
+    """Intrinsic single-cell electrical RC 3-dB bandwidth of a gated modulator cell
+    (ported from the Metasurface_Modulator Stage-4 lumped model).
+
+    The gate charges through the in-plane ACCESS resistance
+    R_access = rho_sheet * (path_length / pad_width) into the per-cell capacitance
+    C_cell = C_per_area * cell_area, so f_3dB = 1 / (2 pi R_access C_cell). Pair it with
+    gate_cv()'s differential capacitance (which may be an array over bias) for f_3dB(Vg).
+    The access path geometry is a MODELING CHOICE -- sweep a few plausible (path, pad).
+
+    Returns (R_access_ohm, C_cell_F, f_3dB_Hz), each broadcasting over C_F_per_m2.
+    """
+    C_per = np.asarray(C_F_per_m2, dtype=np.float64)
+    R = float(sheet_resistance_ohm_sq) * float(path_length_m) / float(pad_width_m)
+    C_cell = C_per * float(cell_area_m2)
+    f3db = 1.0 / (2.0 * np.pi * R * C_cell)
+    return R, C_cell, f3db
+
+
+def switching_energy_per_area(C_F_per_m2, voltage_swing_V):
+    """Dynamic switching energy per unit area of a capacitive gate: E = 0.5 C V^2 [J/m^2]
+    (C the gate areal capacitance, V the full drive swing). x cell_area -> J/event."""
+    return 0.5 * np.asarray(C_F_per_m2, dtype=np.float64) * float(voltage_swing_V) ** 2
+
+
 def resonance_dip(wavelengths_nm: Sequence[float],
                   spectrum: Sequence[float]) -> Tuple[float, float]:
     """Locate a resonance dip (minimum) in a spectrum with sub-grid accuracy.
