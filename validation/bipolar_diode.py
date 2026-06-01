@@ -319,12 +319,16 @@ def main():
               p_minority_eq, p_minority_fwd, inj_ratio), flush=True)
     minority_injected = inj_ratio > 10.0
 
-    # Boltzmann-limit cross-check. The FD g-factor is genuinely active at the
-    # primary doping (N/N_dos ~ 0.036 -> g(majority) ~ 1.087, an ~14% current
-    # enhancement -- that is correct FD physics, NOT a no-op), so we test the
-    # REDUCTION on a deliberately LOW-doped diode (Na=Nd=1e22 -> N/N_dos ~ 4e-4 ->
-    # g ~ 1.004): there the FD path must collapse onto standard Boltzmann SG.
-    g_majority_primary = 1.0 + (2.0 / 3.0) * (1.3293403881791 * NA_M3 / N_DOS_M3) ** (2.0 / 3.0)
+    # Boltzmann-limit cross-check. The accurate generalized-Einstein g (the fit in
+    # physics_drift_diffusion) gives g(majority) ~ 1.012 at the primary doping
+    # (N/N_dos ~ 0.036) -- a small but real ~1.2% FD enhancement, NOT a no-op -- so we
+    # test the REDUCTION on a deliberately LOW-doped diode (Na=Nd=1e22 -> N/N_dos ~ 4e-4):
+    # there the FD path must collapse onto standard Boltzmann SG. (The old code printed
+    # 1.087 here from the degenerate-asymptote g, which was ~7% too high; audit F1.)
+    def _g_einstein(x):   # matches the physics_drift_diffusion rational fit
+        return 1.0 + (0.33717 * x + 0.14143 * x ** (4.0 / 3.0)) / (
+            1.0 + 0.13356 * x ** (1.0 / 3.0) + 0.20570 * x ** (2.0 / 3.0))
+    g_majority_primary = _g_einstein(NA_M3 / N_DOS_M3)
     NA_LOW = 1.0e22
     build_diode(fd_enhancement=True, na_m3=NA_LOW, nd_m3=NA_LOW)
     staged_equilibrium_solve(verbose=False)
@@ -340,13 +344,16 @@ def main():
               NA_LOW, j_fd_low, j_bz_low, fd_vs_bz_rel), flush=True)
     boltzmann_reduces = fd_vs_bz_rel < 0.02      # within 2% -> FD path == standard SG
 
-    gate_a = monotonic and rectifying
+    ideality_sane = 1.0 <= n_ideality <= 2.0        # F6: a real diode, not eyeballed
+    gate_a = monotonic and rectifying and ideality_sane
     gate_b = minority_injected and boltzmann_reduces
     overall = gate_a and gate_b
 
     print("[t]", flush=True)
-    print("[t] GATE A (J-V monotonic & rectifying): monotonic={} rectifying={} -> {}".format(
-        monotonic, rectifying, "PASS" if gate_a else "FAIL"), flush=True)
+    print("[t] GATE A (J-V monotonic & rectifying & ideality in [1,2]): monotonic={} "
+          "rectifying={} ideality={:.3f}({}) -> {}".format(
+        monotonic, rectifying, n_ideality, "ok" if ideality_sane else "BAD",
+        "PASS" if gate_a else "FAIL"), flush=True)
     print("[t] GATE B (minority injection & Boltzmann reduction): injected={} "
           "reduces={} -> {}".format(
               minority_injected, boltzmann_reduces, "PASS" if gate_b else "FAIL"), flush=True)

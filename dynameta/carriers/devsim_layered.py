@@ -17,6 +17,7 @@ Contacts:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -217,6 +218,14 @@ class LayeredDevsimBuilder:
                 tr = self.design.materials.get(s.material).transport
                 dos = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
                 if tr.physics == "drift_diffusion":
+                    # The 2D-layered DD path is NOT validated for a GATED capacitor with
+                    # weak edge-only ohmic grounds -- it is ill-conditioned and may not
+                    # converge (physics_drift_diffusion KNOWN LIMITATION). Equilibrium is
+                    # the validated tool for DC gate accumulation (audit F4).
+                    warnings.warn(
+                        "layered drift-diffusion on semiconductor '{}': a gated device with "
+                        "weak edge-only ohmic grounds may not converge; use the equilibrium "
+                        "physics mode for DC gate accumulation.".format(s.name))
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
@@ -234,7 +243,7 @@ class LayeredDevsimBuilder:
             PE.setup_interface(self.device, iface)
         for c in ds.get_contact_list(device=self.device):
             if self._contact_region.get(c) in self._dd_regions:
-                DD.setup_contact_ohmic_dd(self.device, c)   # pin Potential + ElectronQFL
+                DD.setup_contact_ohmic_dd(self.device, c)   # pin Potential + Electrons (=N_D)
             else:
                 PE.setup_contact(self.device, c)            # pin Potential only
         self._built = True
@@ -242,18 +251,15 @@ class LayeredDevsimBuilder:
     def _dielectric_eps_static(self, material_name: str) -> float:
         mat = self.design.materials.get(material_name)
         eps_dc = mat.dc_permittivity()
-        if eps_dc is not None:
-            return float(eps_dc)
-        # No DC permittivity set -> fall back to the OPTICAL eps. This is WRONG
-        # for a gate dielectric (HfO2 optical ~4 vs DC ~18; Al2O3 ~2.8 vs ~9) and
-        # silently under-predicts gate accumulation, so warn loudly (house style:
-        # no silent physics errors). Set Material.eps_static_dc to fix.
-        eps_opt = float(np.real(mat.eps(1300e-9)))
-        print("[DynaMeta WARNING] dielectric '{}' has no eps_static_dc; "
-              "Stage-1 Poisson falls back to OPTICAL eps={:.3f}, NOT the DC value "
-              "-- this under-predicts gate accumulation. Set Material.eps_static_dc."
-              .format(material_name, eps_opt), flush=True)
-        return eps_opt
+        if eps_dc is None:
+            # The old code fell back to the OPTICAL eps with only a printed warning --
+            # WRONG for a gate dielectric (HfO2 optical ~4 vs DC ~18) and a silent-physics
+            # path. RAISE instead, matching the 3D builder (audit F4 / cross-cutting F4).
+            raise ValueError(
+                "dielectric '{}' has no eps_static_dc; the Stage-1 Poisson solve needs the "
+                "DC permittivity (the optical eps would under-predict gate accumulation). "
+                "Set Material.eps_static_dc.".format(material_name))
+        return float(eps_dc)
 
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
