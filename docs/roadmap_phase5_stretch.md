@@ -172,7 +172,7 @@ material inclusions still need a manual `Stacked3DSpec` or a further general OCC
 | 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible | multi-dielectric stack / arbitrary OCC inclusions |
 | Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge | per-column SP (patch); oxide V-division; nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
-| Boundary-spanning inclusions | scoped only | -- | OCC boundary-split + paired Identify |
+| Boundary-spanning inclusions | **resolved** | grating(1D edge) + disk(2D corner) translation-invariance |dR|<=1e-4 + energy R+T~1 | arbitrary polygon spanning |
 
 Validation scripts live in `validation/`. Both features caught real issues during
 verification (the PML angle-limit, the gmsh-scale + MSH-version + NumPy-2 bugs, a
@@ -182,8 +182,8 @@ binning-metric artifact) -- exactly what external/physical checks are for.
 
 ## Further physics extensions (beyond Phase 5)
 
-Larger research efforts. Bipolar DD and Schrodinger-Poisson quantum confinement are
-now IMPLEMENTED + validated (below); boundary-spanning inclusions remain designed-only.
+Larger research efforts. Bipolar DD, Schrodinger-Poisson quantum confinement, and
+boundary-spanning inclusions are now all IMPLEMENTED + validated (below).
 No unvalidated physics is shipped.
 
 ### Bipolar drift-diffusion (holes + recombination)  [IMPLEMENTED; diode-validated]
@@ -266,11 +266,29 @@ and the bulk E_F<->n calibration, must also use the nonparabolic DOS) -- the par
 `solve_self_consistent` is unchanged, so nonparabolicity is exposed at the `density()`
 level (the dominant degenerate effect) pending that consistent coupling.
 
-### Boundary-spanning inclusion topologies
-Phase 3 inclusions are interior-only (the four periodic faces stay clean
-rectangles so the proven face `Identify` works). For features that touch/cross the
-cell boundary (connected gratings, wires), the OCC build must split the boundary-
-crossing solid at the cell faces and pair the resulting partial faces in the
-periodic `Identify` (matching sub-face signatures across the translation).
-**Validation gate:** a boundary-spanning grating's periodic-ndof + energy
-conservation match an interior-inclusion or TMM/RCWA reference.
+### Boundary-spanning inclusion topologies -- IMPLEMENTED + validated
+Phase 3 inclusions were interior-only (the four periodic faces stayed clean
+rectangles so the proven face `Identify` works). Features that touch/cross the cell
+boundary (connected gratings, wires, corner-shared pillars) are now supported by
+`LayeredOpticalBuilder._inclusion_solids_clipped`: each inclusion is intersected
+with the unit cell AND unioned with its periodic translates (the 3x3 set of
++/-Px, +/-Py shifts), each also clipped to the cell. A boundary-crossing solid thus
+contributes its WRAPPED piece(s) at the opposite face -- a stripe centered on x=0
+becomes `[0, w/2] U [Px-w/2, Px]` (2 sub-solids); a disk on a corner becomes 4
+quarter-disks. The resulting inclusion-material sub-faces on x=0/x=Px (and
+y=0/y=Py) carry matching `(y,z)`/`(x,z)` signatures, so the existing
+`_identify_periodic` pairs them with no change. Strictly-interior inclusions keep
+only the `(0,0)` translate, so the path reduces exactly to the old build (no
+regression). Each sub-solid is named the same region name -> one material.
+
+**Validated** -- the oracle is translation invariance: a periodic structure's
+specular (0th-order) R/T at normal incidence is independent of a lateral shift of
+the cell origin, so a boundary-spanning inclusion must match the SAME inclusion
+built interior, and a lossless subwavelength grating/array must conserve energy.
+- `validation/boundary_inclusion_grating.py` (PASS): a full-y n=2.5 stripe in air,
+  Px=400nm (subwavelength, lambda/Px=3.25 -> only 0th order). Centered at x=Px/2
+  (interior path) vs x=0 (crosses the face): R/T match to |dR|=|dT|=0.0000 and
+  R+T=1.0003 for both.
+- `validation/boundary_inclusion_corner_circle.py` (PASS): the 2D diagonal-translate
+  case -- a disk at the corner (0,0) splits into 4 quarter-disks vs a centered disk;
+  R/T match within TOL and R+T~1.
