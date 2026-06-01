@@ -7,7 +7,7 @@ gate contact on top, body contact on bottom) and solves, on the 3D mesh, either:
     (`physics_equilibrium`); or
   * DRIFT-DIFFUSION (`Stacked3DSpec.physics='drift_diffusion'`): FD-enhanced
     Scharfetter-Gummel electron continuity + Poisson (`physics_drift_diffusion`),
-    body contact pinning the electron QFL, abs_tol scaled to n_bg, staged
+    body contact pinning Electrons (= N_D), abs_tol scaled to n_bg, staged
     zero-bias-seed -> gate-ramp Newton.
 Emits a `CarrierField(ndim=3)` the bridge consumes via `IdentityLift` -- the
 physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
@@ -30,6 +30,7 @@ reads MSH 2.2.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -69,6 +70,10 @@ class Stacked3DSpec:
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
     field_region_name: str = "semi"      # emitted CarrierField region key (match the optics
                                           # alignment source_region for run_pipeline integration)
+    gate_name:       str = "gate"        # Design electrode name driving the gate -> the key
+                                          # solve() reads from BiasPoint.voltages (the internal
+                                          # DEVSIM contact stays "gate"). from_design sets this.
+    body_name:       str = "body"        # Design electrode name for the body/back contact
 
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
@@ -84,17 +89,29 @@ class Stacked3DSpec:
         Inclusions are allowed in non-semiconductor layers (e.g. the patch); the
         semiconductor layer itself must be laterally uniform."""
         layers = design.stack.layers
-        semi_idx = next((i for i, L in enumerate(layers)
-                          if design.material_role(L.background_material) == "semiconductor"), None)
-        if semi_idx is None:
+        semi_idxs = [i for i, L in enumerate(layers)
+                      if design.material_role(L.background_material) == "semiconductor"]
+        if not semi_idxs:
             raise ValueError("from_design needs a semiconductor layer (a material with a transport model)")
+        if len(semi_idxs) > 1:
+            # The stacked builder models ONE gated semiconductor; with several it cannot
+            # know which the gate drives (audit F2). Fail loudly rather than pick index 0.
+            raise ValueError(
+                "from_design: {} semiconductor layers ({}); the stacked 3D builder models a "
+                "single gated semiconductor. Build a manual Stacked3DSpec for the one the gate "
+                "drives.".format(len(semi_idxs), [layers[i].name for i in semi_idxs]))
+        semi_idx = semi_idxs[0]
         semi_L = layers[semi_idx]
         if semi_L.inclusions:
             raise ValueError("from_design: the semiconductor layer '{}' must be laterally uniform "
                               "(no material inclusions); a gate PATCH is modeled via gate_patch_frac"
                               .format(semi_L.name))
-        # gate electrode (a patch footprint = a CrossSection); sets the gate side + patch frac
-        gate_e = next((e for e in design.electrodes if not isinstance(e.footprint, str)), None)
+        # gate electrode = the BIASED electrode (audit F1: do NOT pick the first electrode
+        # with a CrossSection footprint, which could be a ground pad). Prefer a biased
+        # electrode with a patch (CrossSection) footprint for the frac; else any biased one.
+        biased = [e for e in design.electrodes if getattr(e, "role", "biased") == "biased"]
+        gate_e = next((e for e in biased if not isinstance(e.footprint, str)),
+                       (biased[0] if biased else None))
         gate_idx = (next((i for i, L in enumerate(layers) if L.name == gate_e.layer), len(layers))
                      if gate_e is not None else len(layers))   # default: gate above the semiconductor
         step = 1 if gate_idx > semi_idx else -1
@@ -114,12 +131,31 @@ class Stacked3DSpec:
         if eps_ox is None:
             raise ValueError("gate dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
         cell = design.unit_cell
+        # F3: the stacked carrier box is SQUARE (lateral_m is one side). A non-square cell
+        # would mis-place the accumulation laterally in the optics (the carrier eps would
+        # span only min(px,py)); refuse it rather than silently clamp.
+        if abs(cell.period_x_m - cell.period_y_m) > 1e-3 * max(cell.period_x_m, cell.period_y_m):
+            raise ValueError(
+                "from_design: non-square unit cell (px={:.3g}, py={:.3g} m) is not supported "
+                "by the square 3D carrier box; build a manual Stacked3DSpec.".format(
+                    cell.period_x_m, cell.period_y_m))
         frac = gate_patch_frac
         if frac is None:                                  # derive from the gate-patch footprint
             frac = 1.0
-            if gate_e is not None:
+            if gate_e is not None and not isinstance(gate_e.footprint, str):
                 xlo, xhi, ylo, yhi = gate_e.footprint.bbox_m()
-                frac = min(1.0, max((xhi - xlo) / cell.period_x_m, (yhi - ylo) / cell.period_y_m))
+                wx, wy = xhi - xlo, yhi - ylo
+                if abs(wx - wy) > 0.05 * max(wx, wy):     # F4: the patch model is a centered SQUARE
+                    warnings.warn(
+                        "from_design: gate footprint {:.3g}x{:.3g} m is not square; it is "
+                        "collapsed to a centered square of the larger side (gate_patch_frac is "
+                        "a single scalar).".format(wx, wy))
+                frac = min(1.0, max(wx / cell.period_x_m, wy / cell.period_y_m))
+        # gate/body electrode names so run_pipeline's BiasPoint (keyed by electrode name)
+        # maps to the right contact instead of silently defaulting Vg=0 (verifier HIGH).
+        gate_name = gate_e.name if gate_e is not None else "gate"
+        ground_e = next((e for e in design.electrodes if getattr(e, "role", "") == "ground"), None)
+        body_name = ground_e.name if ground_e is not None else "body"
         n_bg = tr.n_bg_m3
         mob = (float(tr.mobility_m2Vs_of_n_m3(n_bg)) if tr.mobility_m2Vs_of_n_m3 is not None else 0.004)
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
@@ -128,8 +164,8 @@ class Stacked3DSpec:
                     n_bg_m3=n_bg, eps_semi=tr.eps_static, eps_oxide=float(eps_ox),
                     dos_mass_kg=float(tr.dos_mass_kg_of_n_m3(n_bg)), mobility_m2Vs=mob,
                     physics=tr.physics, gate_patch_frac=float(frac),
-                    field_region_name=semi_L.name, grid_n=grid_n,
-                    mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm)
+                    field_region_name=semi_L.name, gate_name=gate_name, body_name=body_name,
+                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm)
 
 
 class Devsim3DEquilibrium:
@@ -191,7 +227,7 @@ class Devsim3DEquilibrium:
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
             # the "body" contact is on the semiconductor; for DD it must also pin the
-            # electron quasi-Fermi level. "gate" is on the oxide (Potential only).
+            # electron density (Electrons = N_D). "gate" is on the oxide (Potential only).
             if self._dd and c == "body":
                 DD.setup_contact_ohmic_dd(self.device, c)
             else:
@@ -202,8 +238,17 @@ class Devsim3DEquilibrium:
         import devsim as ds
         if not self._built:
             self.build_device()
-        vg = float(bias.voltages.get("gate", 0.0))
-        vb = float(bias.voltages.get("body", 0.0))
+        gn, bn = self.spec.gate_name, self.spec.body_name
+        # Map the Design electrode names (BiasPoint keys) to the internal gate/body
+        # contacts. If a bias is given but matches NEITHER name, it is a wiring error --
+        # warn rather than silently solve at Vg=0 (verifier HIGH).
+        if bias.voltages and gn not in bias.voltages and bn not in bias.voltages:
+            warnings.warn(
+                "Devsim3DEquilibrium.solve: BiasPoint has voltages {} but neither gate_name "
+                "'{}' nor body_name '{}' is among them -- solving at Vg=0. Check the electrode "
+                "names.".format(sorted(bias.voltages), gn, bn))
+        vg = float(bias.voltages.get(gn, 0.0))
+        vb = float(bias.voltages.get(bn, 0.0))
         ds.set_parameter(device=self.device, name="body_bias", value=vb)
         if getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity

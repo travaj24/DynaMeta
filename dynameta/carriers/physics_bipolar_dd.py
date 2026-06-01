@@ -18,12 +18,14 @@ DEVSIM sign convention (residual = q*divergence form), per docs/implementation_n
                         ElectronGeneration = -q USRH  (into ElectronContinuityEquation)
                         HoleGeneration     = +q USRH  (into HoleContinuityEquation)
 
-FD enhancement (degenerate-limit, simple pow of the solution variable -- the only
-form DEVSIM differentiates without hanging; see physics_drift_diffusion.py):
-  g(c) = 1 + (2/3)(c1 c/N_dos)^(2/3),  c1 = 3 sqrt(pi)/4
+FD enhancement (accurate rational fit of the generalized-Einstein ratio g=F_1/2/F_-1/2
+in pow()s of the solution variable -- the only form DEVSIM differentiates without hanging;
+see physics_drift_diffusion.py for the fit + coefficients):
+  g(x) = 1 + (a x + c x^(4/3))/(1 + b x^(1/3) + d x^(2/3)),  x = c/N_dos
   replace vdiff/V_t by (vdiff/V_t)/g and scale the current by g.
-For a non-degenerate Si diode (c/N_dos << 1) g -> 1 and the current reduces
-EXACTLY to standard Boltzmann Scharfetter-Gummel; for ITO it is the FD softening.
+For a non-degenerate Si diode (c/N_dos << 1) g -> 1 and the current reduces EXACTLY to
+standard Boltzmann Scharfetter-Gummel; for ITO it is the FD softening (accurate to <1%
+vs the old degenerate-asymptote form, which was 6-35% high; audit F1).
 
 Charge-neutral ohmic contact (recipe): pin
   n0 = 1/2 ( NetDoping + sqrt(NetDoping^2 + 4 n_i^2) )   (majority on n-side),
@@ -44,8 +46,18 @@ from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
 
-_C1 = 1.3293403881791       # 3*sqrt(pi)/4
-_C23 = 0.66666666666667     # 2/3
+# Generalized-Einstein g(x)=F_1/2/F_-1/2 rational fit, x=c/N_dos (see physics_drift_diffusion;
+# <1% for eta in [-4,32], exact in both limits). Same coefficients for electrons and holes.
+_GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
+_P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
+
+
+def _g_expr(var: str, s: str) -> str:
+    """g(var{s}/N_dos) as a DEVSIM edge expression (pow()s of the solution variable)."""
+    X = "({}{}/N_dos)".format(var, s)
+    return ("(1.0 + ({a}*{X} + {c}*pow({X},{p43}))/(1.0 + {b}*pow({X},{p13}) + "
+            "{d}*pow({X},{p23})))").format(a=_GA, b=_GB, c=_GC, d=_GD, X=X,
+                                            p13=_P13, p23=_P23, p43=_P43)
 
 
 def _edge_with_derivs(device, region, name, eq, wrt):
@@ -122,15 +134,11 @@ def setup_bipolar_region(device: str, region: str, *,
     _edge_with_derivs(device, region, "vdiff",
                       "(Potential@n0 - Potential@n1)/V_t", ("Potential",))
 
-    # --- FD diffusion enhancement g(c) (degenerate-limit simple pow) ---
-    # g(x) = 1 + (2/3)(c1 x/N_dos)^(2/3); edge value = average over the edge.
+    # --- FD diffusion enhancement g(c) (accurate rational fit; see module docstring) ---
+    # edge value = average of g(c/N_dos) over the edge's two nodes.
     if fd_enhancement:
-        gx_n = lambda s: "(1.0 + {c23}*pow({c1}*Electrons{s}/N_dos, {c23}))".format(
-            c23=_C23, c1=_C1, s=s)
-        gx_p = lambda s: "(1.0 + {c23}*pow({c1}*Holes{s}/N_dos, {c23}))".format(
-            c23=_C23, c1=_C1, s=s)
-        g_n = "(0.5*({} + {}))".format(gx_n("@n0"), gx_n("@n1"))
-        g_p = "(0.5*({} + {}))".format(gx_p("@n0"), gx_p("@n1"))
+        g_n = "(0.5*({} + {}))".format(_g_expr("Electrons", "@n0"), _g_expr("Electrons", "@n1"))
+        g_p = "(0.5*({} + {}))".format(_g_expr("Holes", "@n0"), _g_expr("Holes", "@n1"))
         _edge_with_derivs(device, region, "g_enh", g_n, ("Electrons",))
         _edge_with_derivs(device, region, "g_enh_p", g_p, ("Holes",))
     else:

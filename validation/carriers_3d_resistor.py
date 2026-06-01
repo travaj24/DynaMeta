@@ -76,10 +76,13 @@ def main():
     # 3D DD carries current per Ohm's law (I ~ V*sigma*A/L); the residual is MESH
     # discretization, which shrinks under refinement (rel-diff 0.20 -> 0.14 from a
     # coarse 12-18nm to a 5-8nm mesh). The FD g-factor cancels in the pure-drift limit,
-    # so Boltzmann sigma=q*n*mu is the correct reference. <=0.18 = Ohmic to mesh accuracy.
-    ok = 0.0 < rel < 0.18
+    # so Boltzmann sigma=q*n*mu is the correct reference. Gate tightened to <=0.16 (just
+    # above the observed 0.142 at this mesh) so a regression cannot drift unnoticed
+    # (audit F3); refine the mesh to push it lower.
+    ok = 0.0 < rel < 0.16
     print("[t] *** 3D DD TRANSPORT (Ohm's law, mesh-limited): {} ***".format("PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)
