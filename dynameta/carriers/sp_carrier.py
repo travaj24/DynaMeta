@@ -55,6 +55,7 @@ class SchrodingerPoissonCarrier:
                  T_K: float = 300.0, lateral_m: float = 12e-9, semi_material: str = "ITO",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
                  oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
+                 alpha_np_per_eV: float = 0.0,
                  surface_potential_of_gate: Optional[Callable[[float], float]] = None,
                  surface_potential_xy: Optional[Callable[[float, float, float], float]] = None) -> None:
         self.semi_thk_m = float(semi_thk_m)
@@ -67,6 +68,12 @@ class SchrodingerPoissonCarrier:
         self.nz = int(nz)
         self.n_lateral = int(n_lateral)
         self.n_states = int(n_states)
+        # Kane in-plane nonparabolicity (eV^-1) applied to the emitted density as a
+        # POST-HOC nonparabolic 2D fill on the converged (parabolic) self-consistent
+        # potential -- captures ITO's DOS-mass flattening where it matters for the optical
+        # eps. The self-consistent potential and the bulk E_F stay parabolic (so the bulk
+        # density may shift ~by the DOS enhancement); 0 = parabolic (default).
+        self.alpha_np = float(alpha_np_per_eV)
         # gate -> semiconductor surface-potential map. Priority:
         #   1. an explicit surface_potential_of_gate callable;
         #   2. else, if a gate oxide is given, the physical series-capacitor division
@@ -108,10 +115,17 @@ class SchrodingerPoissonCarrier:
     def _solve_column(self, sp, Nd, psi_s):
         """One 1D self-consistent SP solve at gate-side surface potential psi_s
         (phi=0 at body z=0, psi_s at the gate/oxide side z=t). Returns (phi, n_z)."""
+        from dynameta.carriers.schrodinger_poisson import Q
         phi, n_z, _res = sp.solve_self_consistent(
             eps_r=self.eps_static, doping_m3=Nd, E_F_J=self.E_F_J,
             phi_left_V=0.0, phi_right_V=psi_s, n_states=self.n_states,
             bound_tol=1e9, max_outer=80, tol_V=1e-5)          # slab mode: keep all sub-bands
+        if self.alpha_np > 0.0:
+            # post-hoc nonparabolic 2D fill on the converged (parabolic) potential
+            res_np = sp.density(-Q * phi, self.E_F_J, n_states=self.n_states,
+                                 bound_tol=1e9, alpha_np_per_eV=self.alpha_np)
+            n_z = np.zeros_like(phi)
+            n_z[1:-1] = res_np.density_m3
         return phi, n_z
 
     def _gate_to_psi_s(self, vg: float) -> float:
