@@ -54,11 +54,17 @@ def main():
             phi, res.R, Rt, Tf, Tt, res.R + (Tf if Tf == Tf else 0),
             "OK" if good else "MISMATCH(dR={:.3f},dT={:.3f})".format(dR, dT)), flush=True)
     phi_spread = max(Rs) - min(Rs)
-    print("[t] R phi-spread = {:.4f} (should be ~0 for an isotropic layered stack)".format(phi_spread), flush=True)
-    ok = ok and phi_spread < TOL
+    # phi-spread is a SAME-MESH azimuthal difference for an isotropic stack -> it should be
+    # at quadrature-noise level, far below the per-phi tmm tolerance. Gate it tightly so a
+    # transverse-phase/extraction defect cannot hide under the loose 0.03 (audit F3).
+    SPREAD_TOL = 5e-3
+    print("[t] R phi-spread = {:.4f} (should be ~0 for an isotropic layered stack; tol {:.0e})".format(
+        phi_spread, SPREAD_TOL), flush=True)
+    ok = ok and phi_spread < SPREAD_TOL
     print("[t] *** CONICAL INCIDENCE (s-pol, phi-invariance + tmm): {} ***".format("PASS" if ok else "FAIL"),
            flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

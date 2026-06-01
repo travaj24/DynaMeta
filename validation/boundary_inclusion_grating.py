@@ -14,9 +14,14 @@ that as an oracle-free check of the new boundary-spanning machinery:
 
 By translation invariance the two MUST give the same R and T; and a lossless subwavelength
 grating MUST conserve energy R+T ~ 1 (all higher diffraction orders evanescent: lambda/Px > n
-for every material, so only the 0th order propagates). A silently-failed periodic Identify on
-the boundary case would leak energy (R+T != 1) OR diverge from the interior reference -- either
-breaks the test. Run: python -m validation.boundary_inclusion_grating
+for every material, so only the 0th order propagates).
+
+Note (audit BI-2): translation-invariance + energy-conservation do NOT, by themselves, catch a
+GLOBALLY-broken periodic Identify -- if NO face is identified the two cases stay degenerate and
+still conserve energy. The real discriminators here are (a) the non-trivial R-range guard
+(0.02 < R < 0.98: a broken Identify collapses R toward 0), and (b) the explicit assertion that
+the build actually paired periodic faces (geo.n_px/n_py > 0). Both are checked below.
+Run: python -m validation.boundary_inclusion_grating
 """
 import sys, os
 import numpy as np
@@ -57,8 +62,12 @@ def _solve(cx_nm, label):
     n_incl_solids = sum(1 for m in mats if "__incl" in m)
     # one region name per inclusion, but it can be backed by >1 solid; report the material map
     incl_regions = sorted({m for m in mats if "__incl" in m})
-    print("[t] {}: cx={:.0f}nm  regions={}  inclusion-regions={}".format(
-        label, cx_nm, len(mats), incl_regions), flush=True)
+    # BI-2: assert the periodic Identify actually paired faces (it is load-bearing here);
+    # a build that paired nothing -> n_px==n_py==0 -> open boundaries -> caught here.
+    assert geo.n_px > 0 and geo.n_py > 0, \
+        "periodic Identify paired no faces (n_px={}, n_py={})".format(geo.n_px, geo.n_py)
+    print("[t] {}: cx={:.0f}nm  regions={}  inclusion-regions={}  periodic n_px/n_py={}/{}".format(
+        label, cx_nm, len(mats), incl_regions, geo.n_px, geo.n_py), flush=True)
     lam_m = LAM * 1e-9
     eps_vals = {r: complex(d.materials.get(geo.material_by_region[r]).eps(lam_m))
                 for r in geo.mesh.GetMaterials()}
