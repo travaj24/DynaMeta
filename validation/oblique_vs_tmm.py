@@ -4,19 +4,16 @@ diffraction order for a sub-wavelength period, so TMM is exact. Compare dynameta
 FEM R/T (s-pol) to tmm.coh_tmm at several angles. theta=0 also confirms the solver
 preserves normal incidence.
 
-The exit medium is VACUUM (air). This is deliberate: it is the clean test of the
-oblique machinery (Floquet-Bloch quasi-periodic phase + modified incidence + PML +
-demodulated R/T extraction), all of which must be correct for energy to conserve at
-angle. It validates to <0.3% in R and T through 30deg.
+The exit medium here is VACUUM (air) -- the clean test of the oblique machinery
+(Floquet-Bloch quasi-periodic phase + incidence + PML + demodulated R/T extraction),
+all of which must be correct for energy to conserve at angle. Validates to <0.3% in
+R and T through 30deg.
 
-KNOWN LIMITATION -- a NON-vacuum exit medium (dense substrate, eps != 1) is NOT
-accurate here, at ANY angle (incl. normal): the uniform-background (eps_bg=1)
-scattered-field formulation (Phase-3 "Option A") drives a large volumetric source
-through the whole substrate at the WRONG (vacuum) wavevector, which is ill-
-conditioned/mesh-fragile. See validation/oblique_isolation.py (cases a,c) and
-docs/roadmap_phase5_stretch.md. The fix is a layered/Fresnel background field
-(eps_bg piecewise, E_bg = the bare air/substrate Fresnel solution) -- a scoped
-follow-up, independent of oblique incidence.
+NON-vacuum (dense) substrates are now ALSO handled correctly by the layered (Fresnel
+two-region) background field in optics/solver.py (eps_bg piecewise + analytic bare
+air/substrate E_bg, so the substrate carries no spurious volumetric source) -- see
+validation/oblique_isolation.py, which validates a dense (n=1.5) substrate to <0.3%
+at 0 and 30deg (it was R=0.26 vs tmm 0.12 at normal under the old uniform background).
 
 Run:  python -m validation.oblique_vs_tmm
 """

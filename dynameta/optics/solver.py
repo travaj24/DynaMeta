@@ -43,7 +43,6 @@ from dynameta.optics.ngsolve_layered import OpticalGeometry, S
 # PML -- the validated route) or "envelope" (plain-periodic envelope, modified
 # curl -- diagnostic only). Both are identical at normal incidence.
 _OBLIQUE_FORMULATION = "phase_in_space"
-_NONVAC_SUB_WARNED = False
 # Sign of the transverse-phase term on the TEST envelope's modified curl (envelope
 # route only): trial carries exp(+i k_par.r) (+kcross), test the conjugate (-kcross).
 _TEST_KCROSS_SIGN = -1.0
@@ -154,16 +153,34 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=pml_alpha), "pml_top")
     mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=pml_alpha), "pml_bot")
 
-    # Incident field. phase_in_space solves for the physical field -> full plane
-    # wave exp(i kx x - i kz_s z). envelope solves for u -> envelope exp(-i kz_s z)
-    # (the exp(i kx x) is divided out). Both equal exp(-i kz_s z)*pol at theta=0.
+    # ---- layered (Fresnel two-region) background ----
+    # eps_bg(z) = superstrate medium above the substrate-top interface z_int, substrate
+    # medium below. E_bg = the analytic bare air/substrate Fresnel field (incident +
+    # background reflection R0 above, background transmission T0 below). The scattered
+    # source k0^2 (eps - eps_bg) E_bg is then nonzero ONLY in the structure layers
+    # (slab/oxide/patch/carrier) -- the substrate carries NO volumetric source
+    # (eps==eps_bg there). This is what makes a dense (non-vacuum) substrate accurate:
+    # the old uniform eps_bg=1 drove a huge source through the whole substrate at the
+    # WRONG (vacuum) wavevector. Reduces exactly to the plain incident wave when
+    # n_sub==n_super==1 (R0=0, T0=1). Incidence medium assumed vacuum (kx=k0 sin th).
+    kz_sub = complex(np.sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2)))
+    kz_s_c = complex(kz_s)
+    z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
+              else geo.z_sub_interface_nm)                       # substrate-top interface (nm)
+    r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)                  # s-pol Fresnel (field amplitude)
+    t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
+    R0 = r_f * cmath.exp(-2j * kz_s_c * z_int)                   # bg reflection, z=0 reference
+    T0 = t_f * cmath.exp(-1j * (kz_s_c - kz_sub) * z_int)        # bg transmission, z=0 reference
+
     inc_x_phase = (1.0 if envelope else ng.exp(1j * kx * ng.x))
-    inc_field = inc_x_phase * ng.exp(-1j * kz_s * ng.z)
+    sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
+    sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
+    bg_field = inc_x_phase * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
     if optical.polarization == "x":
-        E_inc = ng.CoefficientFunction((inc_field, 0.0, 0.0))
+        E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
     else:
-        E_inc = ng.CoefficientFunction((0.0, inc_field, 0.0))
-    eps_bg = 1.0
+        E_bg = ng.CoefficientFunction((0.0, bg_field, 0.0))
+    eps_bg_cf = ng.IfPos(ng.z - z_int, complex(n_super) ** 2, complex(n_sub) ** 2)
 
     # ---- periodic HCurl space ----
     if oblique and not envelope and (geo.n_px or geo.n_py):
@@ -189,7 +206,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     a = ng.BilinearForm(fes, symmetric=not envelope)
     a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
     f = ng.LinearForm(fes)
-    f += (k0 ** 2 * (eps_cf - eps_bg) * (E_inc * v)) * ng.dx
+    f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
     pre = ng.Preconditioner(a, "bddc") if optical.linear_solver.startswith("bddc") else None
 
     gfu = ng.GridFunction(fes)
@@ -211,24 +228,14 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # Demodulation: phase_in_space holds the physical field E=u exp(i kx x) -> demod
     # by exp(-i kx x) to recover the 0-order envelope. envelope already holds u.
     demod_kx = 0.0 if envelope else kx
-    r = _reflection(mesh, gfu, kz_s, demod_kx, geo, optical)
+    # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
+    r = complex(R0) + _reflection(mesh, gfu, kz_s, demod_kx, geo, optical)
     R = float(abs(r) ** 2)
-    kz_sub = complex(np.sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2)))
-    t = _transmission(mesh, gfu, kz_s, kz_sub, demod_kx, geo, optical)
-    if t is None:
-        T = A = None
+    t_scat = _transmission(mesh, gfu, kz_sub, demod_kx, geo, optical)
+    if t_scat is None:
+        t = T = A = None
     else:
-        if abs(complex(n_sub) - 1.0) > 0.01:
-            global _NONVAC_SUB_WARNED
-            if not _NONVAC_SUB_WARNED:
-                print("[DynaMeta WARNING] exit medium is non-vacuum (n_sub={:.3f}). The "
-                      "uniform-background scattered-field formulation (eps_bg=1) drives a "
-                      "large volumetric source through the dense substrate at the vacuum "
-                      "wavevector; transmission (and R for transmissive stacks) is "
-                      "inaccurate/mesh-fragile at ALL angles. Reflection-mode stacks with a "
-                      "bottom mirror are fine. See docs/roadmap_phase5_stretch.md (layered-"
-                      "background-field fix).".format(complex(n_sub).real), flush=True)
-                _NONVAC_SUB_WARNED = True
+        t = complex(T0) + t_scat
         kz_sup_med = complex(n_super) * k0 * math.cos(theta)
         T = float(abs(t) ** 2 * (kz_sub.real / max(kz_sup_med.real, 1e-12)))
         A = float(1.0 - R - T)
@@ -277,9 +284,10 @@ def _reflection(mesh, gfu, kz_s, demod_kx, geo: OpticalGeometry, optical) -> com
     return complex(coeffs[0])
 
 
-def _transmission(mesh, gfu, kz_s, kz_sub, demod_kx, geo: OpticalGeometry, optical):
-    """0-order transmission amplitude t: fit the cell-averaged TOTAL envelope in the
-    substrate buffer to a downward wave exp(-i kz_sub z). Returns None if there is no
+def _transmission(mesh, gfu, kz_sub, demod_kx, geo: OpticalGeometry, optical):
+    """0-order SCATTERED transmission amplitude: fit the cell-averaged scattered field
+    in the substrate buffer to a downward wave exp(-i kz_sub z). The background
+    transmission T0 is added analytically by the caller. Returns None if there is no
     usable substrate buffer."""
     if "substrate" not in geo.z_intervals_nm:
         return None
@@ -291,10 +299,8 @@ def _transmission(mesh, gfu, kz_s, kz_sub, demod_kx, geo: OpticalGeometry, optic
         return None
     z_probes = np.linspace(z_lo, z_hi, 7)
     pol = 0 if optical.polarization == "x" else 1
-    # scattered envelope (cell-averaged, demodulated) + incident envelope exp(-i kz_s z)
     Es = _cell_average(mesh, gfu, z_probes, Px, Py, pol, demod_kx)
-    Et = Es + np.exp(-1j * kz_s * z_probes)
     # downward (transmitted) exp(-i kz_sub z) + any upward residual exp(+i kz_sub z)
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
-    coeffs, *_ = np.linalg.lstsq(M, Et, rcond=None)
+    coeffs, *_ = np.linalg.lstsq(M, Es, rcond=None)
     return complex(coeffs[0])
