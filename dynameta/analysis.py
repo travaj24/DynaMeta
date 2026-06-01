@@ -7,9 +7,65 @@ Stage 3 produces -- not tied to any particular design.
 
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
+
+from dynameta.core.carrier_field import ELECTRON_DENSITY
+
+_Q_E = 1.602176634e-19   # C
+
+
+def _trapz(y: np.ndarray, x: np.ndarray) -> float:
+    """Trapezoidal integral (np.trapz was removed in NumPy 2.x)."""
+    y = np.asarray(y, dtype=np.float64); x = np.asarray(x, dtype=np.float64)
+    return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)))
+
+
+def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
+            density_field: str = ELECTRON_DENSITY):
+    """DC gate charge Q(Vg) and differential capacitance C = dQ/dVg from a VOLTAGE SWEEP
+    of CarrierFields (the per-bias fields run_pipeline / a Sweep already produces -- NO new
+    solver). For an n-type accumulation gate the mirror gate charge per unit cell area is
+    Q(Vg) = q * INT (n(z) - n_bg) dz (the accumulated excess electrons), laterally averaged;
+    C(Vg) = dQ/dVg is the small-signal gate capacitance and is the first dynamic-adjacent
+    figure of merit (with an access/sheet resistance it sets the RC modulation bandwidth).
+
+    Args:
+      carrier_fields : iterable of CarrierField at different gate biases (same device).
+      region         : the semiconductor region key.
+      voltage_key    : the electrode-name key into CarrierField.voltages for the gate bias.
+
+    Returns (Vg, Q, Vmid, C): Vg (V, sorted) and Q (C/m^2) per bias; Vmid (V) and
+    C (F/m^2) on the midpoints (central differences need >= 2 biases).
+    """
+    Vg: List[float] = []
+    Q: List[float] = []
+    for cf in carrier_fields:
+        reg = cf.regions[region]
+        if reg.grid_fields is None or density_field not in reg.grid_fields:
+            raise ValueError("region '{}' has no gridded '{}'".format(region, density_field))
+        n = np.asarray(reg.grid_fields[density_field], dtype=np.float64)
+        n_bg = float(cf.n_bg_by_region[region])
+        if n.ndim == 3:                                   # (Nx, Ny, Nz) -> n(z)
+            zc = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
+            prof = n.mean(axis=(0, 1))
+        elif n.ndim == 2:                                 # (Nx, Nv) -> n(v); 2D vertical axis = 'y'
+            zc = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
+            prof = n.mean(axis=0)
+        else:
+            raise ValueError("density grid must be 2D or 3D")
+        Q.append(_Q_E * _trapz(prof - n_bg, zc))          # C/m^2 (excess electron sheet charge)
+        Vg.append(float(cf.voltages[voltage_key]))
+    Vg_a = np.asarray(Vg, dtype=np.float64)
+    Q_a = np.asarray(Q, dtype=np.float64)
+    order = np.argsort(Vg_a)
+    Vg_a, Q_a = Vg_a[order], Q_a[order]
+    if Vg_a.size < 2:
+        return Vg_a, Q_a, np.array([]), np.array([])
+    Vmid = 0.5 * (Vg_a[1:] + Vg_a[:-1])
+    C = np.diff(Q_a) / np.diff(Vg_a)
+    return Vg_a, Q_a, Vmid, C
 
 
 def resonance_dip(wavelengths_nm: Sequence[float],

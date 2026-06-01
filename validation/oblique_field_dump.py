@@ -1,3 +1,4 @@
+# DIAGNOSTIC: a developer diagnostic with no PASS/FAIL gate (not run by validation.run_all).
 """Both oblique formulations under-capture R (~0.05 vs tmm 0.173 at 30deg). Dump the
 actual solved scattered field to localize the bug: is the reflected field weak
 (solve), x-structured (BC/diffraction), or mis-fit (extraction)? Solve the slab at

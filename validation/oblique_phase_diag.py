@@ -1,3 +1,4 @@
+# DIAGNOSTIC: a developer diagnostic with no PASS/FAIL gate (not run by validation.run_all).
 """Diagnostic for oblique-at-angle: at theta=30deg on the layered slab, solve THREE
 ways -- plain periodic (no Bloch phase), phase=+kx, phase=-kx -- and compare R/T/
 energy to tmm. Tells us (a) whether ng.Periodic(phase) is applied at all (plain vs

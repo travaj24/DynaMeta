@@ -1,3 +1,4 @@
+# DIAGNOSTIC: a developer diagnostic with no PASS/FAIL gate (not run by validation.run_all).
 """Diagnose the residual oblique error: is it the TEST-side kcross sign (-1 from the
 Galerkin derivation vs +1 in the research sketch) or the PML thickness (500nm < lam)?
 Solve the air / n=2 (250nm) / n=1.5 slab at theta=30deg over the 2x2 grid
