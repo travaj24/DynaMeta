@@ -17,7 +17,8 @@ from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
 from dynameta.pipeline import run_pipeline
 from dynameta.sweep import Sweep, BiasPoint
 
-PERIOD = 220e-9
+PERIOD = 80e-9      # small cell so the 3D gate-patch mesh solves quickly (this checks
+                     # the run_pipeline INTEGRATION, not a converged device result)
 
 
 def build_design():
@@ -30,17 +31,17 @@ def build_design():
     cell = UnitCell.square(PERIOD)
     layers = [Layer("ito", 10e-9, "ITO"), Layer("hfo2", 8e-9, "HfO2")]
     stack = Stack(layers=layers, superstrate_material="air", substrate_material="air")  # vacuum exit
-    electrodes = [Electrode("gate", "hfo2", centered_square(cell, 120e-9), role="biased"),
+    electrodes = [Electrode("gate", "hfo2", centered_square(cell, 44e-9), role="biased"),  # ~0.55 frac
                   Electrode("gnd", "ito", "x_lo", role="ground", fixed_voltage_V=0.0)]
-    m3 = Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
-                     maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=12e-9)
+    m3 = Mesh3DSpec(pml_thk_m=400e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
+                     maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=20e-9)
     return Design(name="gated_ito_3d", unit_cell=cell, stack=stack, electrodes=electrodes,
                    materials=reg, mesh_3d=m3, optical=OpticalSpec(polarization="x", linear_solver="umfpack"))
 
 
 def main():
     d = build_design()
-    spec = Stacked3DSpec.from_design(d)
+    spec = Stacked3DSpec.from_design(d, mesh_min_nm=1.0, mesh_max_nm=4.0)  # coarse: fast solve
     print("[t] from_design spec: region={} frac={:.3f} semi={:.0f}nm".format(
         spec.field_region_name, spec.gate_patch_frac, spec.semi_thk_m * 1e9), flush=True)
     carrier = Devsim3DEquilibrium(spec)
@@ -55,7 +56,7 @@ def main():
         print("[t] *** ADVERSARIAL run_pipeline 3D: FAILED to run end-to-end: {} ***".format(
             type(e).__name__), flush=True)
         return
-    Rs = {r.bias_label: r.R for r in rows}
+    Rs = {r.bias_label: r.result.R for r in rows}
     print("[t] run_pipeline rows: {}".format({k: round(v, 6) for k, v in Rs.items()}), flush=True)
     finite = all(np.isfinite(list(Rs.values())))
     dR = abs(Rs.get("+1V", 0) - Rs.get("0V", 0))
