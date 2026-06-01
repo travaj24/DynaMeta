@@ -62,3 +62,12 @@ class OpticalGeometryBuilder(Protocol):
 class OpticalSolver(Protocol):
     def solve(self, geometry, eps_by_region: Dict[str, EpsField],
               lambda_m: float, optical) -> OpticalResult: ...
+
+
+@runtime_checkable
+class LayeredStackSolver(Protocol):
+    """Solves a LayeredStack (Fourier-modal / TMM family) -- the seam a future RCWA backend
+    and the present TMM oracle share. Distinct from OpticalSolver because it consumes the
+    layered-slab representation (core.layered.LayeredStack), not the per-mesh-region voxel eps
+    the FEM uses. Minimal by design; the RCWA adapter may widen it when ported."""
+    def solve(self, stack, lambda_m: float, optical) -> OpticalResult: ...
