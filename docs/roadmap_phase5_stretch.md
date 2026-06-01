@@ -136,15 +136,31 @@ binning-metric artifact) -- exactly what external/physical checks are for.
 Larger research efforts; the design + hook points are recorded so they can be
 picked up cleanly. None is implemented -- no unvalidated physics is shipped.
 
-### Bipolar drift-diffusion (holes + recombination)
-Current DD is electrons-only (correct for unipolar degenerate ITO). For bipolar
-devices add a `Holes` solution variable mirroring `Electrons` in
-`physics_drift_diffusion.py`: a hole continuity equation with an FD-enhanced
-Scharfetter-Gummel current (sign-flipped drift), an SRH (optionally Auger/
-radiative) recombination node model coupling the two continuities, and the Poisson
-charge `q(p - n + N_D - N_A)`. Contacts pin both n and p to charge-neutral
-equilibrium. **Validation gate:** a p-n diode J-V (monotonic, sign- and
-ideality-correct) + reduction to the electron-only result in the unipolar limit.
+### Bipolar drift-diffusion (holes + recombination)  [IMPLEMENTED; diode-validated]
+`carriers/physics_bipolar_dd.py` -- opt-in 3-variable (Potential, Electrons, Holes)
+DD in SI, mirroring the electron-only module's FD-enhanced Scharfetter-Gummel and
+reusing `physics_equilibrium`/`eq_registry`. Hole current = electron expression with
+`q->-q` and the `vdiff` drift term on the `@n0` node (+ a parallel FD g-factor); SRH
+`USRH=(np-n_i^2)/(taup(n+n1)+taun(p+p1))` wired as `Gn=-qUSRH`/`Gp=+qUSRH` into the two
+continuities; bipolar Poisson charge `-q(p-n+NetDoping)`; charge-neutral ohmic
+contacts (n0/p0 + built-in offset). Staged solve: potential-only pre-solve ->
+equilibrium carrier seed -> coupled Newton -> bias ramp; the decisive convergence
+trick is SI abs_tol scaling (continuity residual ~1e24, so abs=1e18/rel=1e-6 for the
+coupled system -- the same lesson as `_dc_abs_tol`).
+
+**Validation (`validation/bipolar_diode.py`, 1D Si p-n diode, both gates PASS):**
+- Vbi = 0.9524 V (pre-solve span matches analytic exactly); equilibrium minority =
+  `n_i^2/N` (mass-action correct);
+- forward J-V rises ~exponentially, reverse saturates (~6e-8 A/m^2 opposite sign):
+  monotonic + rectifying, ratio **1.8e10**, ideality **1.20**;
+- minority injection ratio **1.6e11** at +0.7 V (the bipolar signature);
+- FD path reduces to Boltzmann SG in the non-degenerate limit (FD-on vs off **0.58%**).
+
+Remaining: wire into the 2D `LayeredDevsimBuilder` (extend the Gummel `CARRIER_EQS`/
+`_TRACK_VARS` for `Holes`); the pre-existing electron-only "gated-cap DD does not
+converge" note is orthogonal (weak 2-node lateral ITO contacts, not the formulation).
+NB: unipolar degenerate ITO is correctly electrons-only, so bipolar DD is a generality
+feature, not Park-critical.
 
 ### Quantum confinement (Schrodinger-Poisson)  [IMPLEMENTED; analytically validated]
 `carriers/schrodinger_poisson.py` -- a 1D effective-mass `SchrodingerPoisson1D`:
