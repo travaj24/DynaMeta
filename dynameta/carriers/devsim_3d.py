@@ -1,24 +1,24 @@
 """
-Native 3D DEVSIM carriers (FOUNDATION -- equilibrium).
+Native 3D DEVSIM carriers (equilibrium AND drift-diffusion).
 
 Builds a 3D gmsh mesh of a stacked gated capacitor (semiconductor + gate oxide,
-gate contact on top, body contact on bottom), solves the EXISTING dimension-
-agnostic equilibrium physics (`physics_equilibrium`: single-variable Poisson +
-Aymerich-Humet F_1/2) on the 3D mesh, and emits a `CarrierField(ndim=3)` that the
-bridge consumes via `IdentityLift` -- the physically-correct route for non-
-separable topologies, replacing the 2D + `SeparableXYLift` approximation.
+gate contact on top, body contact on bottom) and solves, on the 3D mesh, either:
+  * EQUILIBRIUM (default): single-variable Poisson + Aymerich-Humet F_1/2
+    (`physics_equilibrium`); or
+  * DRIFT-DIFFUSION (`Stacked3DSpec.physics='drift_diffusion'`): FD-enhanced
+    Scharfetter-Gummel electron continuity + Poisson (`physics_drift_diffusion`),
+    body contact pinning the electron QFL, abs_tol scaled to n_bg, staged
+    zero-bias-seed -> gate-ramp Newton.
+Emits a `CarrierField(ndim=3)` the bridge consumes via `IdentityLift` -- the
+physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
 
-Validated (equilibrium) in `validation/carriers_3d.py`: converges (RelError~1e-8),
-sign-correct (+Vg accumulates / -Vg depletes), Gauss's-law charge balance to ~12%
-(tightens with interface refinement), lateral invariance ~1e-13.
+Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumulates/
+-Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
+(DD: converges, sign-correct, reduces to the equilibrium accumulation to 0.8% at +1V).
 
-SCOPE / remaining (see docs/roadmap_phase5_stretch.md):
-  * This builds a STACKED (full-cell, no-inclusion) geometry; a general
-    Design -> gmsh builder (lateral inclusions, arbitrary electrodes) is the next
-    step toward full pipeline integration.
-  * EQUILIBRIUM only here; 3D drift-diffusion (stiffer/larger than 2D) is a
-    follow-on -- the DD node/edge models in physics_drift_diffusion are
-    dimension-agnostic and the abs_tol/seeding lessons carry over.
+SCOPE / remaining (see docs/roadmap_phase5_stretch.md): builds a STACKED (full-cell,
+no-inclusion) geometry; a general Design -> gmsh builder (lateral inclusions, arbitrary
+electrodes, shared optics lateral extent/region naming) is the last pipeline piece.
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -37,6 +37,8 @@ from dynameta.core.carrier_field import (
 from dynameta.core.interfaces import RegionInfo
 from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
+from dynameta.carriers import physics_drift_diffusion as DD
+from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E
 
 
@@ -52,6 +54,8 @@ class Stacked3DSpec:
     eps_semi:        float = 9.5
     eps_oxide:       float = 18.0
     dos_mass_kg:     float = 0.35 * M_E
+    mobility_m2Vs:   float = 0.004       # electron mobility (DD only); ITO ~40 cm^2/Vs
+    physics:         str = "equilibrium" # "equilibrium" or "drift_diffusion"
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
@@ -101,25 +105,52 @@ class Devsim3DEquilibrium:
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
         s = self.spec
-        PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
-                                       eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
+        self._dd = (s.physics == "drift_diffusion")
+        if self._dd:
+            # full drift-diffusion: electron continuity (FD-enhanced Scharfetter-
+            # Gummel) + Poisson on the 3D semi region (dimension-agnostic models).
+            DD.setup_semiconductor_region_dd(self.device, "semi", n_bg_m3=s.n_bg_m3,
+                                              eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg,
+                                              mobility_m2Vs=s.mobility_m2Vs)
+        else:
+            PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
+                                           eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
         PE.setup_dielectric_region(self.device, "oxide", s.eps_oxide)
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
-            PE.setup_contact(self.device, c)
+            # the "body" contact is on the semiconductor; for DD it must also pin the
+            # electron quasi-Fermi level. "gate" is on the oxide (Potential only).
+            if self._dd and c == "body":
+                DD.setup_contact_ohmic_dd(self.device, c)
+            else:
+                PE.setup_contact(self.device, c)
         self._built = True
 
     def solve(self, bias) -> CarrierField:
         import devsim as ds
         if not self._built:
             self.build_device()
-        ds.set_parameter(device=self.device, name="gate_bias",
-                          value=float(bias.voltages.get("gate", 0.0)))
-        ds.set_parameter(device=self.device, name="body_bias",
-                          value=float(bias.voltages.get("body", 0.0)))
-        ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
-                  relative_error=1e-5, maximum_iterations=80)
+        vg = float(bias.voltages.get("gate", 0.0))
+        vb = float(bias.voltages.get("body", 0.0))
+        ds.set_parameter(device=self.device, name="body_bias", value=vb)
+        if getattr(self, "_dd", False):
+            # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
+            # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
+            # gate in 0.25 V steps (coupled Newton at each step).
+            abs_tol = max(1e10, self.spec.n_bg_m3 * 1e-12)
+            ds.set_parameter(device=self.device, name="gate_bias", value=0.0)
+            solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                      max_iter=100, semiconductor_regions=["semi"])
+            n_steps = max(1, int(abs(vg) / 0.25 + 0.5))
+            for k in range(1, n_steps + 1):
+                ds.set_parameter(device=self.device, name="gate_bias", value=vg * k / n_steps)
+                solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                          max_iter=100, semiconductor_regions=["semi"])
+        else:
+            ds.set_parameter(device=self.device, name="gate_bias", value=vg)
+            ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
+                      relative_error=1e-5, maximum_iterations=80)
         g = lambda nm: np.array(ds.get_node_model_values(device=self.device,
                                                           region="semi", name=nm))
         x, y, z = g("x"), g("y"), g("z")

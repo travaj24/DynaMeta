@@ -128,13 +128,18 @@ eps the solver consumes (gate-side Re(eps) 1.57 at 0V -> 0.71 at +1V). NB: a mea
 optical dR needs a RESONANT geometry -- a bare 12 nm ITO layer in air is optically
 negligible at 1300 nm (dR~1e-5); the ENZ shift only converts to dR in a patch/cavity.
 
+**3D drift-diffusion (DONE).** `Stacked3DSpec(physics='drift_diffusion')` attaches the
+FD-enhanced Scharfetter-Gummel electron continuity + Poisson (`physics_drift_diffusion`,
+dimension-agnostic) on the 3D semi region, with the body contact pinning the electron
+QFL, an abs_tol scaled to n_bg (the `_dc_abs_tol` lesson), and a zero-bias-seed ->
+gate-ramp staged Newton. Validated (`validation/carriers_3d_dd.py`, PASS): converges
+(RelError ~1e-11), sign-correct (+1V accumulates, -1V depletes to 0.67), and REDUCES to
+the 3D equilibrium accumulation to **0.8%** at +1V (the zero-current MOS-cap limit).
+
 **Remaining (integration, not physics):**
-- a `Devsim3DEquilibrium` that meshes an arbitrary `Design` (not just a stacked
-  MOS-cap, and sharing the optics builder's lateral extent + region naming so a
-  single-Design 3D run needs no hand-built alignment);
-- 3D **drift-diffusion** (the equilibrium path is validated; 3D DD is stiffer and
-  larger -- the `abs_tol`/seeding lessons + the new `physics_bipolar_dd.py` carry
-  over but it needs its own convergence pass).
+- a general `Design -> gmsh` 3D builder (arbitrary lateral inclusions / electrodes,
+  sharing the optics builder's lateral extent + region naming so a single-Design 3D
+  run needs no hand-built alignment) -- the last 3D-pipeline piece.
 
 ---
 
@@ -143,7 +148,7 @@ negligible at 1300 nm (dR~1e-5); the ENZ shift only converts to dR in a patch/ca
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
 | Oblique incidence | **resolved, s+p-pol** | `tmm` s & p -- R&T <0.01, 0-30deg, vacuum AND dense substrate | conical (phi!=0) |
-| 3D DEVSIM carriers | equilibrium + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline | general Design->gmsh builder; 3D DD |
+| 3D DEVSIM carriers | equilibrium + DD + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline + DD reduces-to-eq 0.8% | general Design->gmsh builder |
 | Quantum confinement (S-P) | **implemented** | analytic square/triangular wells (~1e-5) | couple as CarrierSolver; ITO nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
 | Boundary-spanning inclusions | scoped only | -- | OCC boundary-split + paired Identify |
