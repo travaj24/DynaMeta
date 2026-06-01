@@ -53,15 +53,23 @@ def assemble_eps(field: CarrierField,
             raise ValueError("source region '{}' grid missing '{}' (have {})".format(
                 ra.source_region, density_field, sorted(reg.grid_fields)))
 
-        n_grid = np.asarray(reg.grid_fields[density_field], dtype=np.float64)  # (Nx, Nv)
-        x_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
-        v_m = np.asarray(reg.grid_axes_m[ra.stack_axis], dtype=np.float64)
+        n_grid = np.asarray(reg.grid_fields[density_field], dtype=np.float64)
         n_bg = float(field.n_bg_by_region[ra.source_region])
 
-        # 2D -> 3D carrier reconstruction (SI axes)
-        n_3d, x3_m, y3_m, z3_m = lift.apply(n_grid, x_m, v_m, n_bg=n_bg)
-        # n -> eps (exp(-iwt) passive convention straight from the OpticalModel)
-        eps_3d = n_to_eps.eps_grid(reg.material, n_3d, lambda_m)               # (Nx,Ny,Nz)
+        if n_grid.ndim == 3:
+            # Native 3D carrier field (e.g. carriers/devsim_3d): real x/y/z axes,
+            # NO lift synthesis (z is the through-stack axis by convention).
+            x3_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
+            y3_m = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
+            z3_m = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
+            eps_3d = n_to_eps.eps_grid(reg.material, n_grid, lambda_m)          # (Nx,Ny,Nz)
+        else:
+            # 2D (x, v=through-stack) carrier solve -> the FieldLift synthesizes
+            # the 2nd lateral axis (SeparableXY / Extrude).
+            x_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
+            v_m = np.asarray(reg.grid_axes_m[ra.stack_axis], dtype=np.float64)
+            n_3d, x3_m, y3_m, z3_m = lift.apply(n_grid, x_m, v_m, n_bg=n_bg)
+            eps_3d = n_to_eps.eps_grid(reg.material, n_3d, lambda_m)            # (Nx,Ny,Nz)
 
         # Affine placement into the region bbox. Lateral axes scale directly
         # (the carrier solve already spans the cell laterally); the vertical
