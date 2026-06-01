@@ -19,6 +19,7 @@ in m^-3, sheet densities in m^-2.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -151,7 +152,7 @@ class SchrodingerPoisson1D:
                                 m_eff_z_kg: Optional[np.ndarray] = None,
                                 max_outer: int = 60, tol_V: float = 1e-4,
                                 n_states: Optional[int] = None, bound_tol: float = 1e-3,
-                                verbose: bool = False):
+                                relax: float = 0.7, verbose: bool = False):
         """Self-consistent solve on the FULL grid (Dirichlet phi at both ends).
         Poisson: d/dz(eps eps0 dphi/dz) = -q (N_D+ - n), electron PE U = -q*phi + U_band.
         The Trellakis predictor-corrector folds an a-priori quantum density that rigidly
@@ -164,7 +165,18 @@ class SchrodingerPoisson1D:
         rejects unbound states (isolated quantum well). For a DEGENERATE-bulk slab
         (e.g. ITO, E_F far above many sub-bands) pass a LARGE value (e.g. 1e9) so ALL
         sub-bands up to E_F are kept -- they carry the bulk continuum, and rejecting
-        them collapses the bulk density to ~0 (use n_states >= the # of sub-bands < E_F)."""
+        them collapses the bulk density to ~0 (use n_states >= the # of sub-bands < E_F).
+
+        `relax`: outer-loop under-relaxation factor in (0, 1]. The kept-state set can
+        churn across the bound_tol edge threshold between outer iterations and make the
+        bare update limit-cycle (the isolated-well default mode), so the potential update
+        is damped: phi <- last_phi + relax*(phi_new - last_phi). relax=1 recovers the
+        undamped update.
+
+        Returns (phi_V, n_m3, SubbandResult). The result carries `.converged` (bool):
+        if the outer loop did not reach tol_V in max_outer iterations, `.converged` is
+        False and a warning is emitted -- the returned (phi, n) is NOT trustworthy and
+        is sensitive to max_outer (audit SP-1). Callers should check it."""
         N = self.z.size
         h = self.h
         ee = eps_r * EPS0
@@ -219,7 +231,8 @@ class SchrodingerPoisson1D:
                 phi_in[1:-1] += dphi
                 if np.max(np.abs(dphi)) < 1e-9:
                     break
-            phi = phi_in
+            # outer under-relaxation: damp the kept-state-set churn (audit SP-1)
+            phi = last_phi + float(relax) * (phi_in - last_phi)
             result = res
             dV = float(np.max(np.abs(phi - last_phi)))
             if verbose:
@@ -228,8 +241,17 @@ class SchrodingerPoisson1D:
             last_phi = phi.copy()
             if dV < tol_V:
                 break
+        converged = dV < tol_V
+        if not converged:
+            warnings.warn(
+                "SchrodingerPoisson.solve_self_consistent did NOT converge: max|dphi|="
+                "{:.3e} V >= tol_V={:.1e} after {} outer iterations. The returned (phi, n) "
+                "is unreliable and sensitive to max_outer; try a smaller `relax`, a larger "
+                "bound_tol (slab mode), or more iterations.".format(dV, tol_V, max_outer),
+                stacklevel=2)
         U = -Q * phi + U_band
         result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
+        result.converged = converged   # type: ignore[attr-defined]
         n_full = np.zeros(N)
         n_full[1:-1] = result.density_m3   # type: ignore[attr-defined]
         return phi, n_full, result

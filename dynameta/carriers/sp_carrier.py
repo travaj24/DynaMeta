@@ -20,10 +20,21 @@ Surface potential: `surface_potential_of_gate(Vg)` maps the gate voltage to the
 semiconductor surface potential at the oxide interface (default: identity, i.e. the
 full gate drop -- a simplification; supply a callable folding the oxide capacitance
 voltage division for quantitative device matching).
+
+Known limitations (audit SP-3/SP-4):
+  - The self-consistent solve is PARABOLIC (m* constant). Kane nonparabolicity exists
+    only at the SchrodingerPoisson1D.density() level, not through this CarrierSolver,
+    and the bulk E_F here uses the parabolic (3 pi^2 n)^(2/3) relation. Do not treat the
+    accumulation magnitude as nonparabolic-accurate for ITO at >1e26 m^-3.
+  - The body side (z=0) is a Dirichlet hard wall, so the emitted density carries a small
+    (~0.4 nm) unphysical depletion at z=0 at every bias (a real device body is a contact
+    into the bulk, not an infinite barrier). The gate-side dead layer IS the physical
+    quantum effect; the body-side one is a boundary-condition artifact.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -76,6 +87,15 @@ class SchrodingerPoissonCarrier:
         # solver runs a 1D SP per lateral column (caching by psi_s value); when None it
         # is laterally uniform (the through-stack profile broadcast over the cell).
         self._psi_xy = surface_potential_xy
+        # SP-5: the per-column path uses _psi_xy directly and does NOT apply the oxide
+        # series-cap division, so supplying both is ambiguous -- warn that psi_xy is taken
+        # as the FINAL surface potential (it must already include any oxide division).
+        if self._psi_xy is not None and self._C_ox is not None:
+            warnings.warn(
+                "SchrodingerPoissonCarrier: surface_potential_xy is used as the final "
+                "per-column surface potential; the oxide voltage division (oxide_thk_m/"
+                "eps_oxide) is NOT applied to it. Fold any oxide division into psi_xy.",
+                stacklevel=2)
         # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0)
         self.E_F_J = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (3.0 * np.pi ** 2 * self.n_bg_m3) ** (2.0 / 3.0)
 
@@ -97,10 +117,14 @@ class SchrodingerPoissonCarrier:
     def _gate_to_psi_s(self, vg: float) -> float:
         """Resolve the semiconductor surface potential psi_s from the gate voltage via
         the oxide series capacitance: Vg = psi_s + q*N_excess(psi_s)/C_ox, solved by
-        bisection (N_excess = net accumulated electron sheet density from a 1D SP solve
-        at psi_s; monotonic in psi_s, so f(0)=-Vg<0 and f(Vg)>0 bracket the root).
-        Returns psi_s (same sign as Vg). This is what makes the accumulation magnitude
-        physical -- with a thin high-k gate oxide most of Vg drops across the oxide."""
+        bisection. N_excess(psi_s) is the accumulated sheet density RELATIVE TO THE
+        FLAT-BAND (psi_s=0) self-consistent profile -- NOT relative to the flat doping
+        n_bg. This matters because the hard-wall Dirichlet boundary conditions make the
+        flat-band slab itself deficient near the walls (a ~0.4 nm dead layer per wall),
+        so baselining against n_bg injected a spurious negative offset that biased psi_s
+        several hundred mV high (audit SP-2). With the flat-band baseline, N_excess(0)=0
+        exactly, so f(0)=-Vg<0 and f(Vg)>0 genuinely bracket the root; psi_s comes out
+        the true accumulation potential (most of Vg drops across a thin high-k oxide)."""
         if self._C_ox is None or abs(vg) < 1e-12:
             return float(vg)
         s = 1.0 if vg > 0 else -1.0
@@ -108,10 +132,12 @@ class SchrodingerPoissonCarrier:
         z = np.linspace(0.0, self.semi_thk_m, self.nz)
         sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
         Nd = np.full_like(z, self.n_bg_m3)
+        _, n0_z = self._solve_column(sp, Nd, 0.0)             # flat-band baseline density
 
         def residual(psi):
             _, n_z = self._solve_column(sp, Nd, s * psi)
-            n_exc = float(np.sum(0.5 * ((n_z[:-1] + n_z[1:]) - 2.0 * self.n_bg_m3) * np.diff(z)))
+            # excess vs the FLAT-BAND profile (removes the hard-wall dead-layer offset)
+            n_exc = float(np.sum(0.5 * ((n_z[:-1] + n_z[1:]) - (n0_z[:-1] + n0_z[1:])) * np.diff(z)))
             return psi + Q * n_exc / self._C_ox - Vg          # Vg residual at trial psi_s
 
         lo, hi = 0.0, Vg
