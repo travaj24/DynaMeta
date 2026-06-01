@@ -43,7 +43,8 @@ class SchrodingerPoissonCarrier:
                  m_eff_kg: float = 0.35 * M_E, eps_static: float = 9.5,
                  T_K: float = 300.0, lateral_m: float = 12e-9, semi_material: str = "ITO",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
-                 surface_potential_of_gate: Optional[Callable[[float], float]] = None) -> None:
+                 surface_potential_of_gate: Optional[Callable[[float], float]] = None,
+                 surface_potential_xy: Optional[Callable[[float, float, float], float]] = None) -> None:
         self.semi_thk_m = float(semi_thk_m)
         self.n_bg_m3 = float(n_bg_m3)
         self.m_eff_kg = float(m_eff_kg)
@@ -55,6 +56,11 @@ class SchrodingerPoissonCarrier:
         self.n_lateral = int(n_lateral)
         self.n_states = int(n_states)
         self._psi_s = surface_potential_of_gate or (lambda vg: vg)
+        # optional LATERAL surface-potential map psi_s(x_m, y_m, Vg) -> V for a
+        # laterally-VARYING device (e.g. under a patch vs the gap). When given, the
+        # solver runs a 1D SP per lateral column (caching by psi_s value); when None it
+        # is laterally uniform (the through-stack profile broadcast over the cell).
+        self._psi_xy = surface_potential_xy
         # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0)
         self.E_F_J = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (3.0 * np.pi ** 2 * self.n_bg_m3) ** (2.0 / 3.0)
 
@@ -64,24 +70,47 @@ class SchrodingerPoissonCarrier:
         return [RegionInfo(name="semi", role="semiconductor", material=self.semi_material,
                             bbox_m=(0.0, L, 0.0, L, 0.0, t), ndim=3)]
 
-    def solve(self, bias) -> CarrierField:
-        vg = float(bias.voltages.get("gate", 0.0))
-        psi_s = float(self._psi_s(vg))                    # surface potential at the oxide side
-        z = np.linspace(0.0, self.semi_thk_m, self.nz)    # z=0 body, z=t gate/oxide interface
-        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
-        Nd = np.full_like(z, self.n_bg_m3)
-        # phi=0 at body (z=0), psi_s at the gate side (z=t): +psi_s accumulates electrons.
+    def _solve_column(self, sp, Nd, psi_s):
+        """One 1D self-consistent SP solve at gate-side surface potential psi_s
+        (phi=0 at body z=0, psi_s at the gate/oxide side z=t). Returns (phi, n_z)."""
         phi, n_z, _res = sp.solve_self_consistent(
             eps_r=self.eps_static, doping_m3=Nd, E_F_J=self.E_F_J,
             phi_left_V=0.0, phi_right_V=psi_s, n_states=self.n_states,
-            bound_tol=1e9, max_outer=80, tol_V=1e-5)        # slab mode: keep all sub-bands
+            bound_tol=1e9, max_outer=80, tol_V=1e-5)          # slab mode: keep all sub-bands
+        return phi, n_z
 
-        # broadcast the through-stack quantum profile over the (x, y) cell (laterally uniform)
+    def solve(self, bias) -> CarrierField:
+        vg = float(bias.voltages.get("gate", 0.0))
+        z = np.linspace(0.0, self.semi_thk_m, self.nz)        # z=0 body, z=t gate/oxide interface
+        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
+        Nd = np.full_like(z, self.n_bg_m3)
         xs = np.linspace(0.0, self.lateral_m, self.n_lateral)
         ys = np.linspace(0.0, self.lateral_m, self.n_lateral)
         nx, ny, nz = xs.size, ys.size, z.size
-        n3d = np.broadcast_to(n_z[None, None, :], (nx, ny, nz)).copy()
-        pot3d = np.broadcast_to(phi[None, None, :], (nx, ny, nz)).copy()
+
+        if self._psi_xy is None:
+            # laterally uniform: one column broadcast over the cell
+            psi_s = float(self._psi_s(vg))
+            phi, n_z = self._solve_column(sp, Nd, psi_s)
+            n3d = np.broadcast_to(n_z[None, None, :], (nx, ny, nz)).copy()
+            pot3d = np.broadcast_to(phi[None, None, :], (nx, ny, nz)).copy()
+            psi_extra = {"surface_potential_V": psi_s}
+        else:
+            # per-column: solve a 1D SP at each lateral psi_s, caching by value (a
+            # patch is ~equipotential -> few distinct psi_s -> few solves)
+            n3d = np.empty((nx, ny, nz)); pot3d = np.empty((nx, ny, nz))
+            cache = {}
+            for i, xv in enumerate(xs):
+                for j, yv in enumerate(ys):
+                    psi_s = float(self._psi_xy(float(xv), float(yv), vg))
+                    key = round(psi_s, 4)                     # ~mV resolution
+                    if key not in cache:
+                        cache[key] = self._solve_column(sp, Nd, psi_s)
+                    phi, n_z = cache[key]
+                    pot3d[i, j, :] = phi; n3d[i, j, :] = n_z
+            keys = sorted(cache)
+            psi_extra = {"surface_potential_range_V": [keys[0], keys[-1]],
+                          "n_distinct_columns": len(cache), "laterally_varying": True}
         X, Y, Z = np.meshgrid(xs, ys, z, indexing="ij")
         nodes = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
         node_fields = {ELECTRON_DENSITY: n3d.ravel(), POTENTIAL: pot3d.ravel()}
@@ -95,8 +124,7 @@ class SchrodingerPoissonCarrier:
             temperature_K=self.T_K, regions={"semi": reg},
             n_bg_by_region={"semi": self.n_bg_m3},
             unit_cell_m=(self.lateral_m, self.lateral_m),
-            extras={"quantum": True, "E_F_eV": self.E_F_J / Q,
-                    "surface_potential_V": psi_s})
+            extras=dict({"quantum": True, "E_F_eV": self.E_F_J / Q}, **psi_extra))
 
     def teardown(self) -> None:
         pass
