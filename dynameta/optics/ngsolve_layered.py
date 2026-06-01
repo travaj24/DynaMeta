@@ -75,6 +75,36 @@ class LayeredOpticalBuilder:
             "inclusion shape '{}' not yet supported by the default OCC builder "
             "(Phase 3)".format(k))
 
+    def _inclusion_solids_clipped(self, inc_shape, z_lo, z_hi, Px, Py):
+        """The inclusion intersected with the unit cell, UNIONED with its periodic
+        translates (+/-Px, +/-Py) each also intersected with the cell. An inclusion
+        that crosses a cell boundary therefore contributes its wrapped piece(s) at the
+        OPPOSITE boundary, so the periodic faces carry matching inclusion sub-faces
+        that _identify_periodic pairs by (y,z)/(x,z) signature -- this is what makes a
+        boundary-spanning (e.g. a connected grating stripe) inclusion periodic-correct.
+        For a strictly-interior inclusion only the (0,0) translate survives the clip and
+        this reduces exactly to the plain solid. Returns one (possibly multi-piece) OCC
+        solid; rebuild the base per translate so an in-place .Move cannot alias."""
+        cell = occ.Box(occ.Pnt(0.0, 0.0, z_lo), occ.Pnt(Px, Py, z_hi))
+        pieces = []
+        for dx in (-Px, 0.0, Px):
+            for dy in (-Py, 0.0, Py):
+                t = self._inclusion_solid(inc_shape, z_lo, z_hi)
+                if dx != 0.0 or dy != 0.0:
+                    t = t.Move(occ.Vec(dx, dy, 0.0))
+                clipped = t * cell
+                if len(clipped.solids) > 0:
+                    pieces.append(clipped)
+        if not pieces:
+            raise ValueError(
+                "inclusion '{}' does not intersect the unit cell "
+                "[0,{:.3g}]x[0,{:.3g}] nm; check its center/size".format(
+                    inc_shape.kind, Px, Py))
+        out = pieces[0]
+        for p in pieces[1:]:
+            out = out + p
+        return out
+
     # ---- build ----
     def build(self) -> OpticalGeometry:
         d = self.design
@@ -125,18 +155,22 @@ class LayeredOpticalBuilder:
             is_cavity = (bg_role in ("dielectric", "semiconductor")) and footprint is not None and not L.inclusions
 
             if L.inclusions:
-                # inclusion solid(s) + background-minus-inclusions
+                # inclusion solid(s) + background-minus-inclusions. Each inclusion is
+                # clipped to the cell and unioned with its periodic translates, so a
+                # boundary-spanning inclusion contributes >1 sub-solid (the wrapped
+                # pieces); name every sub-solid the same region name (one material).
                 for j, inc in enumerate(L.inclusions):
-                    inc_solid = self._inclusion_solid(inc.shape, z_lo, z_hi)
+                    inc_solid = self._inclusion_solids_clipped(inc.shape, z_lo, z_hi, Px, Py)
                     iname = "{}__incl{}".format(L.name, j)
-                    inc_solid.name = iname; inc_solid.bc("default")
-                    solids.append(inc_solid)
+                    for s in inc_solid.solids:
+                        s.name = iname; s.bc("default")
+                        solids.append(s)
                     z_intervals_nm[iname] = (z_lo, z_hi)
                     material_by_region[iname] = inc.material
-                # background = full cell minus inclusions
+                # background = full cell minus the (cell-clipped) inclusions
                 bg = occ.Box(occ.Pnt(0, 0, z_lo), occ.Pnt(Px, Py, z_hi))
                 for inc in L.inclusions:
-                    bg = bg - self._inclusion_solid(inc.shape, z_lo, z_hi)
+                    bg = bg - self._inclusion_solids_clipped(inc.shape, z_lo, z_hi, Px, Py)
                 for k_idx, s in enumerate(bg.solids):
                     bn = L.name if k_idx == 0 else "{}__bg{}".format(L.name, k_idx)
                     s.name = bn; s.bc("default")
