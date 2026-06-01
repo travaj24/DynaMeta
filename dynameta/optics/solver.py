@@ -21,10 +21,16 @@ proven normal-incidence curl-curl form at theta=0:
       periodicity but the z-PML mishandles the algebraic cross term at oblique
       (R is under-captured) -- kept for reference/diagnostics.
 
-PML is the ordinary normal z-stretch (alpha=1j constant; a 1/cos(theta) rescaling
-only changes absorption length, not conservation). Oblique assumes a vacuum/air
-incidence medium (scattered-field background eps_bg=1). Validated against the `tmm`
-library (validation/oblique_vs_tmm.py).
+p-pol (TM, E in the x-z plane) oblique and conical s-pol (azimuth phi != 0) are also
+implemented (each tmm-validated at phi=0 / phi-invariance).
+
+PML is the ordinary normal z-stretch (alpha=1j CONSTANT; it is NOT angle-aware, so
+energy conservation degrades with angle -- validated to ~1% through 30 deg). solve_fem
+emits a runtime warning at oblique incidence and the OpticalSpec caps the polar angle.
+Oblique REQUIRES a vacuum/air incidence medium (n_super=1): the in-plane wavevector
+kx=k0 sin(theta) uses the vacuum dispersion, so solve_fem RAISES on a non-vacuum
+superstrate at angle rather than returning a silently-wrong result. Validated against
+the `tmm` library (validation/oblique_vs_tmm.py).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from __future__ import annotations
 import cmath
 import math
 import time
+import warnings
 
 import numpy as np
 import ngsolve as ng
@@ -126,8 +133,13 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
-    substrate) transmission t/T plus absorption A = 1 - R - T. n_super/n_sub are
-    the semi-infinite superstrate/substrate refractive indices = sqrt(eps)."""
+    substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
+    substrate refractive indices = sqrt(eps).
+
+    A = 1 - R - T is the energy-budget CLOSURE (it is identically 1-R-T, not an
+    independent measurement). result.A_independent is the INDEPENDENTLY measured
+    absorbed fraction (volumetric Im(eps)|E|^2 integral); |A - A_independent| is the
+    genuine, non-tautological energy/numerics diagnostic."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -142,6 +154,26 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
     if conical and optical.polarization != "y":
         raise NotImplementedError("conical incidence (azimuth != 0) is s-pol only")
+    if getattr(optical, "incidence_side", "top") != "top":
+        raise NotImplementedError(
+            "solve_fem implements top-side incidence only; incidence_side='{}' is not "
+            "supported (the source + R/T extraction are hardwired to top illumination)."
+            .format(getattr(optical, "incidence_side", "top")))
+    if oblique and abs(complex(n_super) - 1.0) > 1e-6:
+        # The in-plane wavevector below uses kx = k0 sin(theta) (the VACUUM dispersion).
+        # A dense incidence medium would need kx = Re(n_super) k0 sin(theta) and a
+        # matched T-normalization; without it the result is silently wrong (audit OPT-1).
+        raise NotImplementedError(
+            "oblique incidence assumes a vacuum/air incidence medium (n_super=1); got "
+            "n_super={:.4g}. Use normal incidence for a non-vacuum superstrate, or extend "
+            "solve_fem with the dense-incidence dispersion.".format(complex(n_super)))
+    if oblique:
+        # The fixed-alpha HalfSpace PML is not angle-aware; energy conservation degrades
+        # with angle (audit OPT-3 / cross-cutting F5 -- the warning the README promised).
+        warnings.warn(
+            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware, so "
+            "R/T/energy-conservation degrade with angle (validated to ~1% through 30 deg). "
+            "Treat oblique R/T as approximate.", stacklevel=2)
     pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
     envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p and not conical
     # in-plane wavevector k_par = (kx, ky); kz_s = k0 cos(theta) (vacuum incidence medium)
@@ -215,7 +247,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         if optical.polarization == "x":
             E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
         else:
-            # s-pol along the (conical) in-plane direction Ê_s = (-sin phi, cos phi, 0);
+            # s-pol along the (conical) in-plane direction E_s = (-sin phi, cos phi, 0);
             # reduces to (0, bg_field, 0) at phi=0.
             E_bg = ng.CoefficientFunction((es_x * bg_field, es_y * bg_field, 0.0))
     eps_bg_cf = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
@@ -290,8 +322,17 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             kz_sup_med = complex(n_super) * k0 * math.cos(theta)
             T = float(abs(t) ** 2 * (kz_sub.real / max(kz_sup_med.real, 1e-12)))
             A = float(1.0 - R - T)
+    # Independent absorption diagnostic (audit OPT-2): the normalized volumetric loss
+    # integral, computed from the reconstructed TOTAL field. Best-effort -- a diagnostic
+    # must not break the solve, so a failure warns (not silent) and yields None.
+    try:
+        A_independent = _absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                            geo.period_x_nm, geo.period_y_nm)
+    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+        warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
+        A_independent = None
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                          solve_time_s=dt, t=t, T=T, A=A)
+                          solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent)
 
 
 def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
@@ -300,8 +341,10 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
     polarization of interest (the s-pol unit vector, or (1,0,0) for tangential Ex). The
     demod removes the transverse Bloch phase so the cell-average IS the 0-order Fourier
     coefficient; kx=ky=0 (envelope formulation) leaves it unchanged."""
-    xs = np.linspace(0.0, Px, 6, endpoint=False)
-    ys = np.linspace(0.0, Py, 6, endpoint=False)
+    # cell-centred probe grid: offset off the x=0 / y=0 periodic-boundary lines (where
+    # quasi-periodic point evaluation can fail) by half a step (audit OPT-7).
+    xs = (np.arange(6) + 0.5) * (Px / 6.0)
+    ys = (np.arange(6) + 0.5) * (Py / 6.0)
     p0, p1, p2 = proj
     out = []
     for zv in z_probes:
@@ -314,7 +357,15 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
                     vals.append(proj_val * np.exp(-1j * (kx * xv + ky * yv)))
                 except Exception:
                     pass
-        out.append(complex(np.mean(vals)) if vals else 0 + 0j)
+        if not vals:
+            # A whole z-plane with zero valid samples means the probe points all fell
+            # outside the mesh (a geometry/units contract break) -- fail loudly instead
+            # of feeding a silent 0+0j into the least-squares R/T fit (audit OPT-7/F6).
+            raise RuntimeError(
+                "cell-average got no valid field samples at z={:.3f} nm; the probe grid "
+                "missed the mesh (check the geometry/units and z-interval bounds).".format(
+                    float(zv)))
+        out.append(complex(np.mean(vals)))
     return np.array(out)
 
 
@@ -389,3 +440,24 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, geo: OpticalGeometry, eps_sup, 
     factor = (eps_sub / eps_sup) * (kz_s / kz_sub)
     T = float(abs(t) ** 2 * factor.real)
     return r, R, t, T
+
+
+def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+    """Independently measured absorbed fraction (audit OPT-2): the normalized
+    volumetric loss integral A = k0 * Int_V Im(eps) |E|^2 dV / (cos(theta) * cell_area),
+    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave. This
+    is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
+    catches energy/numerics errors that the R/T extraction alone cannot. The PML
+    materials are excluded -- their stretched-coordinate eps would corrupt the integral
+    (and a lossy substrate makes the bottom-PML contribution spurious)."""
+    non_pml = [m for m in dict.fromkeys(mesh.GetMaterials()) if not m.startswith("pml")]
+    if not non_pml:
+        return None
+    defon = mesh.Materials("|".join(non_pml))
+    im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j                  # Im(eps) as a real CF
+    e2 = ng.InnerProduct(E_tot, ng.Conj(E_tot))               # |E|^2 (real)
+    integ = ng.Integrate(im_eps * e2, mesh, definedon=defon)
+    area = float(Px) * float(Py)
+    if area <= 0:
+        return None
+    return float(complex(integ).real * k0 / (max(math.cos(theta), 1e-12) * area))

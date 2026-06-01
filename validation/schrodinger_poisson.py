@@ -73,11 +73,21 @@ def test_degenerate_filling():
     sheet_from_nz = float(np.sum(0.5 * (n_z[:-1] + n_z[1:]) * np.diff(zz)))  # trapz (NumPy-2 safe)
     sheet_from_subbands = float(np.sum(res.sheet_density_m2))
     rel = abs(sheet_from_nz - sheet_from_subbands) / sheet_from_subbands
+    # SP-6: also check the sub-band sheet density against the CLOSED-FORM square-well 2D
+    # fill (n_s,i = pref ln(1+exp((E_F-E_an,i)/kT)) with analytic E_an,i) -- the real
+    # physics check, not the int-n-dz-vs-sum-subbands tautology (which holds by
+    # construction since n(z)=|psi|^2 @ ns with psi normalized).
+    n_idx = np.arange(1, res.energies_J.size + 1)
+    E_an = n_idx ** 2 * np.pi ** 2 * HBAR ** 2 / (2.0 * MSTAR * L ** 2)
+    pref = sp.g_s * sp.g_v * MSTAR * KB * 300.0 / (2.0 * np.pi * HBAR ** 2)
+    ns_closed = pref * np.log1p(np.exp(np.clip((E_F - E_an) / (KB * 300.0), -700, 700)))
+    sheet_closed = float(np.sum(ns_closed))
+    rel_phys = abs(sheet_from_subbands - sheet_closed) / sheet_closed
     print("[t] (3) degenerate filling (E_F=0.15 eV): n_bound_states={}".format(
         res.energies_J.size), flush=True)
-    print("[t]   sheet(int n dz)={:.4e}  sheet(sum subbands)={:.4e} m^-2  rel={:.2e}".format(
-        sheet_from_nz, sheet_from_subbands, rel), flush=True)
-    return rel < 1e-3
+    print("[t]   sheet(sum subbands)={:.4e}  sheet(closed-form 2D fill)={:.4e} m^-2  rel={:.2e}".format(
+        sheet_from_subbands, sheet_closed, rel_phys), flush=True)
+    return rel < 1e-3 and rel_phys < 0.02
 
 
 def test_self_consistent_accumulation():
@@ -90,19 +100,26 @@ def test_self_consistent_accumulation():
     Nd = np.full_like(z, 1.0e25)     # light background donor (m^-3) so a flatband ref exists
     E_F = 0.0                  # reference Fermi level (J)
     dphi = 0.5                 # 0.5 V across the slab (gate side positive -> accumulation)
+    # SP-1: use SLAB mode (bound_tol=1e9, keep all sub-bands). The isolated-well default
+    # mode limit-cycles for a degenerate bulk (it now WARNS + reports converged=False
+    # instead of silently returning a parity-dependent result); slab mode converges, and
+    # we gate on the real res.converged flag -- not a homegrown accumulation-ratio proxy.
     phi, n_full, res = sp.solve_self_consistent(
         eps_r=eps_r, doping_m3=Nd, E_F_J=E_F, phi_left_V=dphi, phi_right_V=0.0,
-        max_outer=60, tol_V=1e-5, n_states=12, verbose=False)
-    # accumulation layer at the gate side (z=0, higher phi -> lower electron PE)
-    n_gate = n_full[1]
-    n_bulk = n_full[len(n_full) // 2]
-    converged = np.isfinite(phi).all() and n_gate > 5 * max(n_bulk, 1.0)
-    print("[t] (4) self-consistent accumulation (0.5V, ITO 20nm):", flush=True)
+        max_outer=80, tol_V=1e-5, n_states=40, bound_tol=1e9, verbose=False)
+    # gate side = z=0 (phi=dphi, high) -> accumulation; body side = z=t (phi=0). Compare
+    # the PEAK in each half (not node 1, which sits in the hard-wall dead layer).
+    half = len(n_full) // 2
+    gate_peak = float(np.max(n_full[1:half]))
+    body_peak = float(np.max(n_full[half:-1]))
+    converged = bool(getattr(res, "converged", False))
+    accum = np.isfinite(phi).all() and gate_peak > body_peak     # gate-side accumulation present
+    print("[t] (4) self-consistent accumulation (0.5V, ITO 20nm, slab mode):", flush=True)
     print("[t]   n_states bound={}  E0={:.4f} eV".format(
         res.energies_J.size, res.energies_J[0] / Q), flush=True)
-    print("[t]   n(gate)={:.3e}  n(bulk)={:.3e} m^-3  ratio={:.1f}  converged={}".format(
-        n_gate, n_bulk, n_gate / max(n_bulk, 1.0), converged), flush=True)
-    return bool(converged)
+    print("[t]   gate-side peak={:.3e}  body-side peak={:.3e} m^-3  ratio={:.2f}  res.converged={}".format(
+        gate_peak, body_peak, gate_peak / max(body_peak, 1.0), converged), flush=True)
+    return converged and accum
 
 
 def main():
@@ -114,7 +131,8 @@ def main():
     print("[t] *** SCHRODINGER-POISSON: square={} triangular={} filling={} self-consistent={} -> {} ***".format(
         "OK" if r1 else "FAIL", "OK" if r2 else "FAIL", "OK" if r3 else "FAIL",
         "OK" if r4 else "FAIL", "PASS" if allok else "FAIL"), flush=True)
+    return allok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

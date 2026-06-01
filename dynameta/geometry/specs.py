@@ -77,6 +77,14 @@ class OpticalSpec:
             raise NotImplementedError(
                 "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
                 "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
+        # Polar-angle cap: the fixed-alpha HalfSpace PML is validated to ~1% only through
+        # 30 deg and degrades badly toward grazing -- reject clearly-unsupported angles
+        # rather than return a silently-wrong result (audit conical-verifier).
+        if abs(self.incidence_angle_deg) > 60.0:
+            raise NotImplementedError(
+                "incidence_angle_deg={:.1f} exceeds the supported range (|theta| <= 60 "
+                "deg); the fixed-alpha z-PML is validated to ~1% through 30 deg only."
+                .format(self.incidence_angle_deg))
         # Conical incidence (azimuth != 0) is implemented for s-pol only (the in-plane
         # s-pol vector rotates with phi); conical p-pol is a follow-up.
         if abs(self.azimuth_deg) > 1e-6 and self.polarization != "y":
