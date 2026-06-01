@@ -13,7 +13,8 @@ from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.core.carrier_field import CarrierField, CarrierRegion, ELECTRON_DENSITY
 from dynameta.core.lift import IdentityLift, ExtrudeLift, SeparableXYLift, choose_lift
 from dynameta.materials import Material, MaterialRegistry, ConstantOptical, DrudeOptical, M_E
-from dynameta.analysis import resonance_dip, gate_cv
+from dynameta.analysis import (resonance_dip, gate_cv, sheet_resistance_ohm_sq,
+                               lumped_rc_bandwidth, switching_energy_per_area)
 
 N_BG = 4e26
 PERIOD = 300e-9
@@ -197,3 +198,25 @@ def test_gate_cv():
     assert np.all(np.diff(Q) > 0)                          # Q rises with gate bias (accumulation)
     assert np.allclose(Q, Q_E * S * Vg, rtol=1e-6)         # Q(Vg) = q*S*Vg
     assert np.allclose(C, Q_E * S, rtol=1e-6)              # C = dQ/dVg = q*S (constant here)
+
+
+# ---- lumped-RC bandwidth + switching energy (ported from Metasurface_Modulator Stage 4) ----
+def test_lumped_rc_bandwidth_reproduces_modulator():
+    # Park-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; C(V=0)=0.0145 F/m^2;
+    # 370 nm cell; medium access 5 um path / 1 um pad -> ~15.4 GHz (the Modulator's result).
+    rho_s = sheet_resistance_ohm_sq(4e26, 30e-4, 5e-9)
+    assert abs(rho_s - 1040.0) < 5.0                       # ~1040 Ohm/sq
+    C_area = 0.0145                                         # F/m^2
+    cell_area = (370e-9) ** 2
+    R, C_cell, f3db = lumped_rc_bandwidth(C_area, rho_s, path_length_m=5e-6,
+                                          pad_width_m=1e-6, cell_area_m2=cell_area)
+    assert abs(C_cell - 1.985e-15) < 1e-17                 # ~1.99 fF/cell
+    assert abs(f3db / 1e9 - 15.4) < 0.3                    # ~15.4 GHz
+    assert abs(f3db - 1.0 / (2 * np.pi * R * C_cell)) < 1.0  # closed form
+    # tighter access (shorter path) -> higher bandwidth
+    _, _, f3db_tight = lumped_rc_bandwidth(C_area, rho_s, path_length_m=0.5e-6,
+                                           pad_width_m=1e-6, cell_area_m2=cell_area)
+    assert f3db_tight > f3db
+    # switching energy 0.5 C V^2 over an 8 V swing
+    E = switching_energy_per_area(C_area, 8.0)
+    assert np.isclose(E, 0.5 * C_area * 64.0)
