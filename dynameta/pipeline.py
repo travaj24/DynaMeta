@@ -25,10 +25,10 @@ from dynameta.core.n_to_eps import MaterialEpsMap
 from dynameta.core.interfaces import OpticalResult
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
-from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
-from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
-from dynameta.optics.eps_assembler import assemble_eps_cf
-from dynameta.optics.solver import solve_fem
+# NOTE: the FEM trio (LayeredOpticalBuilder / assemble_eps_cf / solve_fem) and the default
+# DEVSIM carrier builder are imported LAZILY inside the functions below, so a pure
+# layered/TMM path (run_pipeline with carrier_solver + optical_builder + optical_solver all
+# supplied) can `import dynameta.pipeline` and run without ngsolve/devsim installed (BLP-2).
 
 
 @dataclass
@@ -40,6 +40,8 @@ class SweepRow:
 
 def _fem_optical_solver(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult:
     """Default optical solve: assemble the NGSolve VoxelCoefficient + run the FEM."""
+    from dynameta.optics.eps_assembler import assemble_eps_cf
+    from dynameta.optics.solver import solve_fem
     eps_cf = assemble_eps_cf(geo, eps_by_region)
     return solve_fem(geo, lam_m, eps_cf, design.optical,
                       order=design.mesh_3d.fem_order, n_super=n_super, n_sub=n_sub)
@@ -57,12 +59,18 @@ def run_pipeline(design: Design, sweep: Sweep, *,
 
     optical_solver: an optional callable
     ``fn(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult`` that replaces
-    the default per-(bias, wavelength) FEM solve. This is the seam for an alternative optical
-    backend (e.g. a layered TMM/RCWA solver via
-    ``dynameta.optics.tmm_reference.layered_stack_from_design`` + a LayeredStackSolver); the
-    default is the NGSolve FEM (`_fem_optical_solver`).
+    the default per-(bias, wavelength) FEM solve (the default is the NGSolve FEM,
+    `_fem_optical_solver`). For a laterally-uniform/graded stack, pass the ready-made
+    ``dynameta.optics.tmm_reference.make_layered_tmm_solver()`` to solve with the layered TMM
+    instead (a future RCWA backend plugs in the same way). NOTE: run_pipeline still calls
+    ``optical_builder.build()`` (the FEM mesh) unless you ALSO supply an ``optical_builder``
+    that exposes only ``alignment()`` / ``mesh_regions()`` -- pass such a stub to skip the
+    mesh build and the ngsolve dependency entirely.
     """
-    carrier = carrier_solver or LayeredDevsimBuilder(design)
+    if carrier_solver is None:
+        from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+        carrier_solver = LayeredDevsimBuilder(design)
+    carrier = carrier_solver
     # 1) carriers: solve every bias, collect CarrierFields, then free DEVSIM
     fields = {}
     for bp in sweep.bias_points:
@@ -73,7 +81,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
         carrier.teardown()
 
     # 2) optical geometry: build mesh once + the alignment contract
-    optical = optical_builder or LayeredOpticalBuilder(design)
+    if optical_builder is None:
+        from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
+        optical_builder = LayeredOpticalBuilder(design)
+    optical = optical_builder
     geo = optical.build()
     align = optical.alignment()
     mesh_regions = optical.mesh_regions()
