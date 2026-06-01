@@ -146,15 +146,26 @@ charge `q(p - n + N_D - N_A)`. Contacts pin both n and p to charge-neutral
 equilibrium. **Validation gate:** a p-n diode J-V (monotonic, sign- and
 ideality-correct) + reduction to the electron-only result in the unipolar limit.
 
-### Quantum confinement (Schrodinger-Poisson)
-The ~1 nm accumulation layer in degenerate ITO has sub-band quantization the
-classical Poisson/DD misses. Add a 1D through-stack effective-mass Schrodinger
-solve per lateral column (eigen-solve `-hbar^2/2m* d2psi/dz2 - qV psi = E psi`,
-fill sub-bands via the 2D DOS to E_F, build `n(z)` from `|psi|^2`), iterated
-self-consistently with Poisson (predictor-corrector / Anderson mixing). Plugs in
-as an alternative carrier model on the semiconductor region. **Validation gate:**
-analytic square-/triangular-well sub-band energies; the quantum `n(z)` must recover
-the classical Fermi-Dirac profile in the bulk away from the interface.
+### Quantum confinement (Schrodinger-Poisson)  [IMPLEMENTED; analytically validated]
+`carriers/schrodinger_poisson.py` -- a 1D effective-mass `SchrodingerPoisson1D`:
+BenDaniel-Duke tridiagonal Schrodinger (mass at half-nodes, Dirichlet ends, unbound
+states discarded), DEGENERATE 2D sub-band filling
+`n(z)=sum_i (g_s g_v m* kT/2pi hbar^2) ln(1+exp((E_F-E_i)/kT)) |psi_i|^2` (ITO g_v=1;
+overflow-safe `ln(1+e^x)`), and a self-consistent Poisson loop via the **Trellakis
+predictor-corrector** (a nonlinear-Poisson Newton inner solve with the exact Fermi-
+function Jacobian -- robust where naive Picard sloshes).
+
+**Validation (`validation/schrodinger_poisson.py`, all PASS):**
+- infinite square well `E_n = n^2 pi^2 hbar^2/2mL^2`: rel **1e-6 to 2e-5** (n=1..4);
+- triangular well `U=qFz` vs the Airy zeros `E_n=|a_n|(qF)^(2/3)(hbar^2/2m)^(1/3)`:
+  rel **2e-5 to 7e-5** (n=1..4);
+- degenerate filling: `Int n(z) dz` == `sum_i n_s,i` to **1e-7**;
+- self-consistent ITO accumulation (0.5 V, 20 nm): converges, forms a ~nm gate-side
+  accumulation layer (bound ground state, E0~-0.29 eV).
+
+Remaining: couple as an alternative `CarrierSolver` on the semiconductor region
+(per-lateral-column SP, or the device-coupled density-gradient route in the notes);
+ITO band nonparabolicity (density-dependent m*) for quantitative sub-band spacing.
 
 ### Boundary-spanning inclusion topologies
 Phase 3 inclusions are interior-only (the four periodic faces stay clean
