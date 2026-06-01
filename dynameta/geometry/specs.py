@@ -57,7 +57,6 @@ class OpticalSpec:
     azimuth_deg:         float = 0.0        # in-plane azimuth phi (0 = x-z plane of incidence;
                                              # !=0 = CONICAL incidence, s-pol only)
     incidence_side:      Literal["top", "bottom"] = "top"   # which semi-infinite medium
-    outputs:             tuple = ("R", "T", "A")            # which to compute/report
     # Carrier-field lift (2D DEVSIM -> 3D eps): "auto" picks SeparableXYLift for a
     # square centered c4v device, else ExtrudeLift; explicit values force a choice
     # and are validated against the device symmetry.

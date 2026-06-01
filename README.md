@@ -5,23 +5,23 @@ library for tunable metasurface modulators.
 
 Combines three stages:
 
-1. **Stage 1 — DC carriers.** DEVSIM Poisson in the device `(x, z)`
+1. **Stage 1 -- DC carriers.** DEVSIM Poisson in the device `(x, z)`
    cross-section. The default `"equilibrium"` model is a single-variable
-   nonlinear Poisson with a Fermi-Dirac electron density — the exact steady
+   nonlinear Poisson with a Fermi-Dirac electron density -- the exact steady
    state of the gated capacitor (no currents); `physics="drift_diffusion"`
    adds the full Scharfetter-Gummel continuity solve. A density-dependent DOS
    effective mass (Kane non-parabolic) sets the conduction-band `Nc`, and a
-   self-contained Aymerich-Humet F₁/₂ approximation replaces DEVSIM's broken
-   Fermi integral. The gate-oxide DC permittivity drives the accumulation —
+   self-contained Aymerich-Humet F1/2 approximation replaces DEVSIM's broken
+   Fermi integral. The gate-oxide DC permittivity drives the accumulation --
    see [docs/dielectrics.md](docs/dielectrics.md).
 
-2. **Stage 2 — Drude.** Maps `n(x, z, V_bias)` to complex permittivity
-   `ε(x, z, V, λ)` via the density-dependent `DrudeOptical` model, then lifts
+2. **Stage 2 -- Drude.** Maps `n(x, z, V_bias)` to complex permittivity
+   `eps(x, z, V, lambda)` via the density-dependent `DrudeOptical` model, then lifts
    the `(x, z)` field into the 3D unit cell with the carrier-field lift
-   (`OpticalSpec.lift`) — xy-product symmetrization for square-patch geometries.
+   (`OpticalSpec.lift`) -- xy-product symmetrization for square-patch geometries.
 
-3. **Stage 3 — Optical FEM.** 3D NGSolve HCurl Maxwell solve in a periodic
-   unit cell (Bloch boundaries, PML top + bottom). Loads the bias-dependent ε
+3. **Stage 3 -- Optical FEM.** 3D NGSolve HCurl Maxwell solve in a periodic
+   unit cell (Bloch boundaries, PML top + bottom). Loads the bias-dependent eps
    and reports the complex reflection coefficient `r` (plus optional
    transmission/absorption) at normal incidence.
 
@@ -49,8 +49,8 @@ reg.add(Material("air", ConstantOptical(1.0 + 0j)))
 reg.add(Material("Si",  ConstantOptical(12.0 + 0j)))
 # Dielectrics carry an OPTICAL eps (Stage 2/3) AND a DC eps (eps_static_dc) for
 # the Stage-1 gate capacitance. For gate oxides the two differ a lot (HfO2 ~4
-# optical vs ~18 DC) and eps_static_dc is REQUIRED -- Stage 1 warns loudly and
-# falls back to the optical eps if it is unset. See docs/dielectrics.md.
+# optical vs ~18 DC) and eps_static_dc is REQUIRED -- Stage 1 RAISES if it is
+# unset (the optical eps would under-predict gate accumulation). See docs/dielectrics.md.
 reg.add(Material("Al2O3", ConstantOptical(2.756 + 0j), eps_static_dc=9.0))
 reg.add(Material("HfO2",  ConstantOptical(4.0 + 0j),   eps_static_dc=18.0))
 reg.add(Material("Al-Nd", ConstantOptical(-180 + 30j), is_metal=True))
@@ -121,7 +121,7 @@ python -m examples.park_2021 --drift-diffusion  # solve Stage 1 with full drift-
 
 ## Results
 
-`run_pipeline` returns a `list[SweepRow]` — one row per `(bias, wavelength)`
+`run_pipeline` returns a `list[SweepRow]` -- one row per `(bias, wavelength)`
 solve, in memory. Nothing is written to disk; you choose how to persist.
 
 Each `SweepRow` carries:
@@ -152,7 +152,7 @@ print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 
 ## Status
 
-v0.2 (clean-break) — general bridge API: the `OpticalModel`/`TransportModel`
+v0.2 (clean-break) -- general bridge API: the `OpticalModel`/`TransportModel`
 materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 `Inclusion`s) + `Electrode` geometry, and `run_pipeline`. The Park 2021
 reference design ([examples/park_2021.py](examples/park_2021.py)) is the
@@ -160,7 +160,7 @@ validated end-to-end run.
 
 Known limitations:
 
-- The 2D DEVSIM carrier field is lifted to the 3D optical ε by a *carrier-field
+- The 2D DEVSIM carrier field is lifted to the 3D optical eps by a *carrier-field
   lift* (`OpticalSpec.lift`). `"auto"` (the default) picks the xy-product
   `SeparableXYLift` for a centred 4-fold (c4v) square device and an extrusion
   otherwise; it captures square symmetry but not full 3D patch-corner
@@ -169,7 +169,7 @@ Known limitations:
   over-pin the ITO potential; physically the ground pads are mm-scale away.
 - Stage 1 defaults to the equilibrium Fermi-Dirac Poisson solve (no currents);
   `TransportModel(physics="drift_diffusion", ...)` adds the full
-  Scharfetter-Gummel continuity solve. Neither does Schrödinger-Poisson quantum
+  Scharfetter-Gummel continuity solve. Neither does Schrodinger-Poisson quantum
   confinement.
 - Oblique incidence (`OpticalSpec.incidence_angle_deg != 0`) is implemented for
   s-polarization AND p-polarization (Bloch-Floquet periodicity), plus conical
@@ -184,7 +184,7 @@ Known limitations:
   measurement (their difference is the energy diagnostic).
 - The optical linear solve defaults to BDDC + GMRes
   (`OpticalSpec.linear_solver = "bddc_gmres"`); the AMS preconditioner is not
-  used because of sign-changing α/β in the ENZ regime.
+  used because of sign-changing alpha/beta in the ENZ regime.
 
 **Native 3D carriers** are validated for both the equilibrium solve and full 3D
 drift-diffusion (`validation/carriers_3d.py`, `carriers_3d_dd.py`, transport via

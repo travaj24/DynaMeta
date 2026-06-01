@@ -75,6 +75,17 @@ class Stacked3DSpec:
                                           # DEVSIM contact stays "gate"). from_design sets this.
     body_name:       str = "body"        # Design electrode name for the body/back contact
 
+    def __post_init__(self):
+        # Sanity-check the relative permittivities so a bogus/omitted value fails at
+        # construction instead of silently producing wrong gate capacitance. eps_oxide
+        # DEFAULTS to HfO2 (18.0); set it for a different gate dielectric. (Consistency
+        # with the 2D builder, which raises, and from_design, which derives it.)
+        if not (self.eps_oxide >= 1.0):
+            raise ValueError("Stacked3DSpec.eps_oxide must be >= 1 (a DC relative "
+                              "permittivity); got {}".format(self.eps_oxide))
+        if not (self.eps_semi >= 1.0):
+            raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
+
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":

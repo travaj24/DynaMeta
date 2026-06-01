@@ -294,6 +294,13 @@ def main():
     big_ratio = abs(j_fwd_06) > 100.0 * max(abs(j_rev_05), 1e-300)
     rectifying = opposite_sign and big_ratio
     rect_ratio = abs(j_fwd_06) / max(abs(j_rev_05), 1e-300)
+    # Reverse SATURATION: a diode's reverse current is ~flat in |V| past the knee, so
+    # |J_rev(-2V)|/|J_rev(-0.5V)| ~ 1; a non-rectifying OHMIC leak would grow ~linearly
+    # (ratio ~4). Asserting this distinguishes a diode from a resistor that merely passes
+    # the monotonic + single-point rectification checks (audit carriers-verifier C).
+    j_rev_2 = rev_j[rev_V.index(-2.0)]
+    rev_sat_ratio = abs(j_rev_2) / max(abs(j_rev_05), 1e-300)
+    rev_saturates = rev_sat_ratio < 2.0
 
     # ~exponential forward rise: successive decades per ~60 mV (ideality ~1-2).
     # Check the slope d(ln|J|)/dV over the clean injection region (0.2 -> 0.5 V).
@@ -345,14 +352,15 @@ def main():
     boltzmann_reduces = fd_vs_bz_rel < 0.02      # within 2% -> FD path == standard SG
 
     ideality_sane = 1.0 <= n_ideality <= 2.0        # F6: a real diode, not eyeballed
-    gate_a = monotonic and rectifying and ideality_sane
+    gate_a = monotonic and rectifying and ideality_sane and rev_saturates
     gate_b = minority_injected and boltzmann_reduces
     overall = gate_a and gate_b
 
     print("[t]", flush=True)
-    print("[t] GATE A (J-V monotonic & rectifying & ideality in [1,2]): monotonic={} "
-          "rectifying={} ideality={:.3f}({}) -> {}".format(
+    print("[t] GATE A (monotonic & rectifying & ideality in [1,2] & reverse-saturating): "
+          "monotonic={} rectifying={} ideality={:.3f}({}) rev_sat_ratio={:.2f}({}) -> {}".format(
         monotonic, rectifying, n_ideality, "ok" if ideality_sane else "BAD",
+        rev_sat_ratio, "ok" if rev_saturates else "BAD",
         "PASS" if gate_a else "FAIL"), flush=True)
     print("[t] GATE B (minority injection & Boltzmann reduction): injected={} "
           "reduces={} -> {}".format(
