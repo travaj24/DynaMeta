@@ -177,6 +177,17 @@ def test_resonance_dip_exact_vertex():
     assert abs(val_n - 0.02) < 1e-9
 
 
+def test_resonance_dip_handles_nonfinite_spectrum():
+    # a NaN/inf sample (e.g. a failed solve point) must NOT crash (was a NameError on the
+    # undefined x1/y1 fallback, audit AN-1/CC-1/AD-1) -- drop it and find the dip among the
+    # finite samples; an all-nonfinite spectrum is a clear ValueError, not a crash.
+    lam = [1250.0, 1300.0, 1350.0, 1400.0]
+    dip_nm, dip_val = resonance_dip(lam, [0.5, 0.04, float("nan"), 0.4])
+    assert np.isfinite(dip_nm) and np.isfinite(dip_val)
+    with pytest.raises(ValueError):
+        resonance_dip(lam, [float("nan")] * 4)
+
+
 # ---- analysis.gate_cv: DC gate charge + capacitance from a synthetic voltage sweep ----
 def test_gate_cv():
     Q_E = 1.602176634e-19
@@ -200,10 +211,31 @@ def test_gate_cv():
     assert np.allclose(C, Q_E * S, rtol=1e-6)              # C = dQ/dVg = q*S (constant here)
 
 
+def test_gate_cv_rejects_duplicate_bias():
+    # two CarrierFields at the SAME gate voltage make dQ/dVg = 0/0 -> NaN; gate_cv must RAISE
+    # rather than return a silent NaN capacitance (audit AN-3).
+    z = np.linspace(0.0, 12e-9, 9)
+
+    def _cf(vg):
+        reg = CarrierRegion(name="semi", role="semiconductor", material="ito",
+                            nodes_m=np.zeros((1, 3)), node_fields={},
+                            grid_axes_m={"x": np.array([0.0, PERIOD]),
+                                         "y": np.array([0.0, PERIOD]), "z": z},
+                            grid_fields={ELECTRON_DENSITY: np.full((2, 2, z.size), N_BG)})
+        return CarrierField(bias_label="vg", voltages={"gate": vg, "body": 0.0}, ndim=3,
+                            temperature_K=300.0, regions={"semi": reg},
+                            n_bg_by_region={"semi": N_BG}, unit_cell_m=(PERIOD, PERIOD))
+    with pytest.raises(ValueError):
+        gate_cv([_cf(0.0), _cf(0.5), _cf(0.5)], "semi", voltage_key="gate")
+
+
 # ---- lumped-RC bandwidth + switching energy (ported from Metasurface_Modulator Stage 4) ----
-def test_lumped_rc_bandwidth_reproduces_modulator():
-    # Park-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; C(V=0)=0.0145 F/m^2;
-    # 370 nm cell; medium access 5 um path / 1 um pad -> ~15.4 GHz (the Modulator's result).
+def test_lumped_rc_bandwidth_formula_with_modulator_C():
+    # Checks the RC-bandwidth FORMULA against the Metasurface_Modulator's MEASURED areal
+    # capacitance C=0.0145 F/m^2 (a fixed INPUT, not a carrier-derived reproduction -- the
+    # end-to-end carrier->C->f_3dB chain is exercised in validation/bandwidth_cv.py; audit AN-2).
+    # Park-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; 370 nm cell; medium access
+    # 5 um path / 1 um pad -> ~15.4 GHz (the Modulator's result).
     rho_s = sheet_resistance_ohm_sq(4e26, 30e-4, 5e-9)
     assert abs(rho_s - 1040.0) < 5.0                       # ~1040 Ohm/sq
     C_area = 0.0145                                         # F/m^2

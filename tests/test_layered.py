@@ -6,7 +6,7 @@ RCWA backend will reuse. Run: python -m pytest tests/test_layered.py -q
 import numpy as np
 import pytest
 
-from dynameta.core.layered import LayeredSlab, LayeredStack, slice_profile
+from dynameta.core.layered import (LayeredSlab, LayeredStack, slice_profile, slice_eps_field)
 from dynameta.optics.tmm_reference import (stack_rta, layered_rta, TmmLayeredSolver,
                                            make_layered_tmm_solver, layered_stack_from_design)
 
@@ -102,3 +102,47 @@ def test_make_layered_tmm_solver_seam():
     assert abs(res.R - R) < 1e-12 and abs(res.T - T) < 1e-12
     assert abs(res.R + res.T + res.A - 1.0) < 1e-9
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9
+
+
+def test_slice_eps_field_uniform_and_structured():
+    # exercise BOTH slice_eps_field branches (the structured/eps_cell path was dead, LTM-3).
+    class _EF:                                             # minimal gridded-EpsField stand-in
+        def __init__(self, v_zyx, z_u, uniform):
+            self.values_zyx = np.asarray(v_zyx, dtype=complex)   # (Nz, Ny, Nx)
+            self.z_axis_u = np.asarray(z_u, dtype=float)
+            self.is_uniform = uniform
+    # laterally-uniform field -> SCALAR slabs (xy-mean, midpoint over z)
+    vu = np.zeros((3, 2, 2), complex); vu[0] = 4.0; vu[1] = 6.0; vu[2] = 9.0
+    su = slice_eps_field(_EF(vu, [0.0, 50.0, 100.0], False), 1e-9)
+    assert len(su) == 2 and all(s.is_uniform for s in su)
+    assert np.isclose(su[0].eps, 5.0) and np.isclose(su[1].eps, 7.5)   # midpoints of 4/6, 6/9
+    assert np.isclose(su[0].thickness_m, 50e-9)
+    # laterally-structured field -> eps_cell slab with the documented (Ny,Nx)->(Nx,Ny) transpose
+    vs = np.zeros((2, 2, 3), complex)                      # (Nz=2, Ny=2, Nx=3)
+    vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 1.0
+    ss = slice_eps_field(_EF(vs, [0.0, 40.0], False), 1e-9)
+    assert len(ss) == 1 and ss[0].eps_cell is not None and not ss[0].is_uniform
+    assert ss[0].eps_cell.shape == (3, 2)                  # (Ny,Nx)=(2,3) -> (Nx,Ny)=(3,2)
+    stk = LayeredStack(1.0 + 0j, 1.0 + 0j, ss)
+    assert stk.is_unstructured is False                    # a structured slab -> TMM must refuse
+    with pytest.raises(ValueError):
+        layered_rta(stk, 1300e-9)
+
+
+def test_layered_order_sensitivity_on_asymmetric_lossy_stack():
+    # The graded_tmm_vs_fem validation uses a symmetric LOSSLESS profile, for which R is
+    # order-INsensitive, so it cannot catch a slab-order / double-reversal regression (LTM-1).
+    # Pin the property directly: an ASYMMETRIC LOSSY stack gives a DIFFERENT R when reversed,
+    # so layered_rta (hence layered_stack_from_design's ordering) is genuinely order-sensitive.
+    slabs = [LayeredSlab(40e-9, eps=complex(n) ** 2) for n in (2.0 + 0.05j, 2.5 + 0.2j, 3.0 + 0.4j)]
+    R_f, _, _ = layered_rta(LayeredStack(1.0 + 0j, 1.0 + 0j, slabs), 1300e-9)
+    R_r, _, _ = layered_rta(LayeredStack(1.0 + 0j, 1.0 + 0j, slabs[::-1]), 1300e-9)
+    assert abs(R_f - R_r) > 0.02                           # order matters -> a reversal is detectable
+
+
+def test_layered_rta_rejects_lossy_superstrate():
+    # R/T/A and the budget A=1-R-T are defined only for a lossless incidence medium (LTM-5,
+    # mirroring the FEM OPT-1 guard).
+    stk = LayeredStack(1.0 + 0.3j, 1.0 + 0j, [LayeredSlab(100e-9, eps=4.0 + 0j)])
+    with pytest.raises(ValueError):
+        layered_rta(stk, 1300e-9)

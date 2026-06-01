@@ -24,8 +24,10 @@ see physics_drift_diffusion.py for the fit + coefficients):
   g(x) = 1 + (a x + c x^(4/3))/(1 + b x^(1/3) + d x^(2/3)),  x = c/N_dos
   replace vdiff/V_t by (vdiff/V_t)/g and scale the current by g.
 For a non-degenerate Si diode (c/N_dos << 1) g -> 1 and the current reduces EXACTLY to
-standard Boltzmann Scharfetter-Gummel; for ITO it is the FD softening (accurate to <1%
-vs the old degenerate-asymptote form, which was 6-35% high; audit F1).
+standard Boltzmann Scharfetter-Gummel; for ITO it is the FD softening (~1.1% peak, <0.5%
+over eta>=10, valid to eta~32; vs the old degenerate-asymptote form's 6-35% error; audit F1,
+bounds re-measured DD-1/DD-2). NOTE: holes use this SAME N_dos (~N_c); a degenerate p-type
+material would need a separate valence-band N_v for the hole g-factor (audit DD-5).
 
 Charge-neutral ohmic contact (recipe): pin
   n0 = 1/2 ( NetDoping + sqrt(NetDoping^2 + 4 n_i^2) )   (majority on n-side),
@@ -47,7 +49,7 @@ from dynameta.carriers.physics_equilibrium import (
 from dynameta.carriers import eq_registry as _R
 
 # Generalized-Einstein g(x)=F_1/2/F_-1/2 rational fit, x=c/N_dos (see physics_drift_diffusion;
-# <1% for eta in [-4,32], exact in both limits). Same coefficients for electrons and holes.
+# ~1.1% peak, exact VALUE at g(0)=1, valid to eta~32). Same coefficients for electrons and holes.
 _GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
 _P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
 
