@@ -100,12 +100,21 @@ import (DynaMeta uses the raw R/T/A + complex 0-order amplitudes, not JonesField
 
 ## DynaMeta-side adapter work (NOT Lumenairy's job -- listed for the port)
 
-1. **`LayeredStackSolver` Protocol + `RcwaSolver` adapter** behind DynaMeta's optical seam:
-   wrap `RCWAStack` so `run_pipeline` can use RCWA as an alternative to the FEM solver.
-2. **z-slicer**: convert a DynaMeta per-region `EpsField` (graded, possibly tensor) into
-   `RCWAStack` layers -- sample each z-slice's in-plane eps(x,y) onto the cell grid ->
-   `eps_cell` (scalar) or `eps_tensor_cell` (Pockels/LC), spacers for uniform bands. (If P4
-   lands, this delegates to `add_graded_layer`.)
+**RCWA-independent prep BUILT 2026-06-01 (commits/files noted), so the port is now "wire
+RCWAStack to an existing, validated seam":**
+
+1. **`LayeredStackSolver` Protocol** (`core/interfaces.py`) + a concrete first impl
+   **`TmmLayeredSolver`** (`optics/tmm_reference.py`) -- DONE. The seam exists and is proven by
+   a real solver now; the `RcwaSolver` adapter is the SAME shape (build a `LayeredStack`, solve)
+   and its body is the only part that waits for the RCWA code.
+2. **z-slicer** -- DONE for the laterally-uniform/graded case: `core/layered.LayeredStack`/
+   `LayeredSlab` (slab specs mirror `RCWAStack.add_layer`: scalar/`eps_cell`/`eps_tensor_cell`/
+   `shapes`), `slice_profile` (graded eps(z) -> uniform slabs), `slice_eps_field` (gridded
+   EpsField -> slabs; scalar if laterally uniform, else `eps_cell`), and
+   `tmm_reference.layered_stack_from_design`. VALIDATED vs the FEM on a graded 8-sublayer slab
+   (graded-TMM R 0.3372 vs FEM 0.3362, |dR|=0.0010; `validation/graded_tmm_vs_fem.py`) and by
+   `tests/test_layered.py`. The structured (in-plane `eps_cell`/tensor per slab) path is stubbed
+   in the data model and finalized with the RCWA port.
 3. **Result mapping**: `RCWAResult` -> DynaMeta `OpticalResult` (R, T, A; complex r/t and
    phase from the 0-order Jones; `A_independent` cross-check vs 1-R-T).
 4. **Validation gate**: RCWA vs the NGSolve FEM on the real Park lossy-Au-patch + ENZ-ITO cell
