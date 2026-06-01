@@ -247,8 +247,18 @@ vs 1.15 in the gap** (deep sub-ENZ only where gated). Only 2 cached solves for t
 **Gate-oxide voltage division (DONE):** pass `oxide_thk_m` + `eps_oxide` and the gate->psi_s
 map solves the series-capacitor relation `Vg = psi_s + q*N_excess(psi_s)/C_ox` by bisection
 (`validation/sp_oxide_cap.py` PASS: Vg=1V -> psi_s=0.64V, accumulation 6x smaller than the
-naive psi_s=Vg, self-consistent) -- the calibrated map. Remaining: ITO band nonparabolicity
-(density-dependent m*) for quantitative sub-band spacing.
+naive psi_s=Vg, self-consistent) -- the calibrated map.
+
+**ITO band nonparabolicity (DONE in the 2D filling):** `density(..., alpha_np_per_eV=...)`
+uses the Kane energy-dependent mass `m*(eps)=m*0(1+2 alpha eps)`, so the 2D sub-band sheet
+density is `(g_s g_v m*0/2 pi hbar^2) Int (1+2 alpha eps) f deps`. Validated
+(`validation/sp_nonparabolic.py` PASS): matches the analytic T=0 closed form
+`pref0*(dE + alpha*dE^2)` to <0.1%, the DOS enhancement is exactly `1+alpha*dE`, and
+`m*(E_F)/m*0 = 1.16` for ITO-like alpha=0.5/eV, dE=0.16 eV. Remaining: a fully self-
+consistent nonparabolic SOLVE (the Trellakis inner Newton's a-priori density + Jacobian,
+and the bulk E_F<->n calibration, must also use the nonparabolic DOS) -- the parabolic
+`solve_self_consistent` is unchanged, so nonparabolicity is exposed at the `density()`
+level (the dominant degenerate effect) pending that consistent coupling.
 
 ### Boundary-spanning inclusion topologies
 Phase 3 inclusions are interior-only (the four periodic faces stay clean
