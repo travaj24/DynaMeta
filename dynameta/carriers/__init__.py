@@ -12,12 +12,15 @@ __all__ = ["LayeredDevsimBuilder", "physics_equilibrium"]
 
 
 def __getattr__(name):
+    # Only the re-exported CLASS needs lazy handling. SUBMODULES (e.g.
+    # physics_equilibrium) must NOT be handled here -- `from dynameta.carriers import
+    # physics_equilibrium` is resolved by the normal submodule-import machinery once
+    # this raises AttributeError; intercepting it would recurse into __getattr__
+    # (the bug an end-to-end run_pipeline test caught). Use importlib so the class
+    # lookup never re-enters this function either.
     if name == "LayeredDevsimBuilder":
-        from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
-        return LayeredDevsimBuilder
-    if name == "physics_equilibrium":
-        from dynameta.carriers import physics_equilibrium
-        return physics_equilibrium
+        import importlib
+        return importlib.import_module("dynameta.carriers.devsim_layered").LayeredDevsimBuilder
     raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
 
 
