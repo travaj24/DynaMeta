@@ -132,13 +132,12 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # ---- incidence: plane wave in the x-z plane (phi=0) ----
     theta = math.radians(float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0))
     oblique = abs(theta) > 1e-9
-    if oblique and optical.polarization != "y":
+    if oblique and optical.polarization == "x":
         raise NotImplementedError(
-            "oblique incidence is implemented for s-polarization only "
-            "(OpticalSpec.polarization='y'; E perpendicular to the x-z plane of "
-            "incidence). p-pol oblique is a documented follow-up "
-            "(docs/roadmap_phase5_stretch.md).")
-    envelope = oblique and _OBLIQUE_FORMULATION == "envelope"
+            "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
+            "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
+    pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
+    envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p
     kx = k0 * math.sin(theta)          # transverse wavevector (vacuum incidence medium)
     kz_s = k0 * math.cos(theta)        # normal wavevector in the vacuum background
 
@@ -167,20 +166,46 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     kz_s_c = complex(kz_s)
     z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
               else geo.z_sub_interface_nm)                       # substrate-top interface (nm)
-    r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)                  # s-pol Fresnel (field amplitude)
-    t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
-    R0 = r_f * cmath.exp(-2j * kz_s_c * z_int)                   # bg reflection, z=0 reference
-    T0 = t_f * cmath.exp(-1j * (kz_s_c - kz_sub) * z_int)        # bg transmission, z=0 reference
-
+    eps_sup_c, eps_sub_c = complex(n_super) ** 2, complex(n_sub) ** 2
     inc_x_phase = (1.0 if envelope else ng.exp(1j * kx * ng.x))
-    sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
-    sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
-    bg_field = inc_x_phase * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
-    if optical.polarization == "x":
-        E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
+
+    if pol_p:
+        # p-pol: E in the x-z plane (Ex, Ez). The background reflection/transmission
+        # E-vector amplitudes (rho, tau) come from the physical interface BCs at z_int
+        # -- tangential Ex and Hy continuity -- solved NUMERICALLY (no Fresnel sign-
+        # convention ambiguity). Hy ~ Ex*eps/qz (qz the z-wavevector: -kz down, +kz up).
+        cth, sth = kz_s_c / (complex(n_super) * k0), kx / (complex(n_super) * k0)
+        cth_t, sth_t = kz_sub / (complex(n_sub) * k0), kx / (complex(n_sub) * k0)
+        A = cmath.exp(-1j * kz_s_c * z_int); B = cmath.exp(1j * kz_s_c * z_int)
+        C = cmath.exp(-1j * kz_sub * z_int)
+        M = np.array([[cth * B,                   -cth_t * C],
+                      [cth * B * eps_sup_c / kz_s_c, cth_t * C * eps_sub_c / kz_sub]], dtype=complex)
+        rhs = np.array([-cth * A, cth * A * eps_sup_c / kz_s_c], dtype=complex)
+        pp_rho, pp_tau = (complex(val) for val in np.linalg.solve(M, rhs))
+        ex_sup = cth * ng.exp((-1j * kz_s_c) * ng.z) + pp_rho * cth * ng.exp((1j * kz_s_c) * ng.z)
+        ez_sup = sth * ng.exp((-1j * kz_s_c) * ng.z) - pp_rho * sth * ng.exp((1j * kz_s_c) * ng.z)
+        ex_sub = pp_tau * cth_t * ng.exp((-1j * kz_sub) * ng.z)
+        ez_sub = pp_tau * sth_t * ng.exp((-1j * kz_sub) * ng.z)
+        E_bg = ng.CoefficientFunction((inc_x_phase * ng.IfPos(ng.z - z_int, ex_sup, ex_sub),
+                                        0.0,
+                                        inc_x_phase * ng.IfPos(ng.z - z_int, ez_sup, ez_sub)))
+        R0 = T0 = None                          # p-pol extracts the total field directly
     else:
-        E_bg = ng.CoefficientFunction((0.0, bg_field, 0.0))
-    eps_bg_cf = ng.IfPos(ng.z - z_int, complex(n_super) ** 2, complex(n_sub) ** 2)
+        # s-pol (E along y) / x-pol: scalar tangential field. Fresnel R0/T0 (field
+        # amplitude), z=0 reference. The extractor returns the scattered amplitude and
+        # the caller adds R0/T0 back.
+        r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)
+        t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
+        R0 = r_f * cmath.exp(-2j * kz_s_c * z_int)
+        T0 = t_f * cmath.exp(-1j * (kz_s_c - kz_sub) * z_int)
+        sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
+        sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
+        bg_field = inc_x_phase * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
+        if optical.polarization == "x":
+            E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
+        else:
+            E_bg = ng.CoefficientFunction((0.0, bg_field, 0.0))
+    eps_bg_cf = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
 
     # ---- periodic HCurl space ----
     if oblique and not envelope and (geo.n_px or geo.n_py):
@@ -228,17 +253,25 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # Demodulation: phase_in_space holds the physical field E=u exp(i kx x) -> demod
     # by exp(-i kx x) to recover the 0-order envelope. envelope already holds u.
     demod_kx = 0.0 if envelope else kx
-    # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
-    r = complex(R0) + _reflection(mesh, gfu, kz_s, demod_kx, geo, optical)
-    R = float(abs(r) ** 2)
-    t_scat = _transmission(mesh, gfu, kz_sub, demod_kx, geo, optical)
-    if t_scat is None:
-        t = T = A = None
+    if pol_p:
+        # p-pol: reconstruct the TOTAL field (E_bg + scattered gfu) and extract from the
+        # tangential Ex up/down ratio (convention-robust). T carries the p-pol Poynting
+        # factor (Sz ~ |Ex|^2 eps/kz).
+        r, R, t, T = _ppol_extract(mesh, E_bg + gfu, kz_s, kz_sub, kx, geo,
+                                     eps_sup_c, eps_sub_c)
+        A = None if T is None else float(1.0 - R - T)
     else:
-        t = complex(T0) + t_scat
-        kz_sup_med = complex(n_super) * k0 * math.cos(theta)
-        T = float(abs(t) ** 2 * (kz_sub.real / max(kz_sup_med.real, 1e-12)))
-        A = float(1.0 - R - T)
+        # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
+        r = complex(R0) + _reflection(mesh, gfu, kz_s, demod_kx, geo, optical)
+        R = float(abs(r) ** 2)
+        t_scat = _transmission(mesh, gfu, kz_sub, demod_kx, geo, optical)
+        if t_scat is None:
+            t = T = A = None
+        else:
+            t = complex(T0) + t_scat
+            kz_sup_med = complex(n_super) * k0 * math.cos(theta)
+            T = float(abs(t) ** 2 * (kz_sub.real / max(kz_sup_med.real, 1e-12)))
+            A = float(1.0 - R - T)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A)
 
@@ -304,3 +337,36 @@ def _transmission(mesh, gfu, kz_sub, demod_kx, geo: OpticalGeometry, optical):
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
     coeffs, *_ = np.linalg.lstsq(M, Es, rcond=None)
     return complex(coeffs[0])
+
+
+def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, geo: OpticalGeometry, eps_sup, eps_sub):
+    """p-pol R/T from the reconstructed TOTAL field (E_bg + scattered) tangential Ex.
+    R = |Ex_up/Ex_down|^2 in the superstrate (the eps/kz Poynting factors cancel in the
+    same medium); T = |Ex_down_sub/Ex_down_super|^2 * Re((eps_sub/eps_sup)(kz_s/kz_sub))
+    -- the p-pol z-flux Sz ~ |Ex|^2 eps/kz. Returns (r, R, t, T)."""
+    Px, Py = geo.period_x_nm, geo.period_y_nm
+    z0, z1 = geo.z_intervals_nm["superstrate"]
+    zlo, zhi = z0 + 50.0, z1 - 50.0
+    if zhi <= zlo:
+        zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
+    zr = np.linspace(zlo, zhi, 7)
+    Exr = _cell_average(mesh, E_tot, zr, Px, Py, 0, kx)            # tangential Ex, demod by kx
+    Mr = np.column_stack([np.exp(-1j * kz_s * zr), np.exp(+1j * kz_s * zr)])
+    cr, *_ = np.linalg.lstsq(Mr, Exr, rcond=None)
+    a_d, a_u = complex(cr[0]), complex(cr[1])                     # incident-dir, reflected-dir Ex
+    r = a_u / a_d if abs(a_d) > 1e-30 else 0j
+    R = float(abs(r) ** 2)
+    if "substrate" not in geo.z_intervals_nm:
+        return r, R, None, None
+    zs_lo, zs_hi = geo.z_intervals_nm["substrate"]
+    pad = 0.1 * (zs_hi - zs_lo)
+    if zs_hi - pad <= zs_lo + pad:
+        return r, R, None, None
+    zt = np.linspace(zs_lo + pad, zs_hi - pad, 7)
+    Ext = _cell_average(mesh, E_tot, zt, Px, Py, 0, kx)
+    Mt = np.column_stack([np.exp(-1j * kz_sub * zt), np.exp(+1j * kz_sub * zt)])
+    ct, *_ = np.linalg.lstsq(Mt, Ext, rcond=None)
+    t = complex(ct[0]) / a_d if abs(a_d) > 1e-30 else 0j          # transmitted Ex / incident Ex
+    factor = (eps_sub / eps_sup) * (kz_s / kz_sub)
+    T = float(abs(t) ** 2 * factor.real)
+    return r, R, t, T
