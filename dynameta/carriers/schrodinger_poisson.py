@@ -104,11 +104,18 @@ class SchrodingerPoisson1D:
     def density(self, U_J: np.ndarray, E_F_J: float, *,
                  m_eff_z_kg: Optional[np.ndarray] = None,
                  n_states: Optional[int] = None,
-                 bound_tol: float = 1e-3) -> SubbandResult:
+                 bound_tol: float = 1e-3,
+                 alpha_np_per_eV: float = 0.0) -> SubbandResult:
         """Electron density n(z) from degenerate 2D sub-bands filled to E_F:
             n(z) = sum_i (g_s g_v m* kT / (2 pi hbar^2)) ln(1+exp((E_F-E_i)/kT)) |psi_i(z)|^2
         Unbound states (psi not ~0 at the domain edge) are discarded. Returns a
-        SubbandResult; n(z) on the interior grid is `result.density_m3` (attached)."""
+        SubbandResult; n(z) on the interior grid is `result.density_m3` (attached).
+
+        `alpha_np_per_eV`: Kane in-plane nonparabolicity (eV^-1). The 2D DOS per sub-band
+        becomes m*(eps)/(2 pi hbar^2) with the energy-dependent mass m*(eps)=m*0(1+2 alpha
+        eps), so the sheet density n_s,i = (g_s g_v m*0/2 pi hbar^2) Int (1+2 alpha eps)
+        f(E_i+eps) deps (numerically). alpha=0 reduces to the parabolic kT*ln(1+e^eta).
+        Captures ITO's band flattening (heavier DOS mass at high density)."""
         E, psi, zi = self.solve_schrodinger(U_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states)
         # keep states that are actually localized (small amplitude at both edges)
         edge = np.maximum(np.abs(psi[0, :]), np.abs(psi[-1, :])) * np.sqrt(self.h)
@@ -116,8 +123,21 @@ class SchrodingerPoisson1D:
         if not np.any(keep):
             keep = np.zeros(E.size, dtype=bool); keep[0] = True   # keep ground state at least
         E, psi = E[keep], psi[:, keep]
-        pref = self.g_s * self.g_v * self.m * KB * self.T / (2.0 * np.pi * HBAR ** 2)  # m^-2
-        ns = pref * _fermi_log((E_F_J - E) / (KB * self.T))       # per-subband sheet density (m^-2)
+        if alpha_np_per_eV and alpha_np_per_eV > 0.0:
+            a = float(alpha_np_per_eV) / Q                        # J^-1
+            kT = KB * self.T
+            pref0 = self.g_s * self.g_v * self.m / (2.0 * np.pi * HBAR ** 2)  # m^-2 J^-1
+            eg = np.linspace(0.0, max(0.0, float(E_F_J - float(E.min()))) + 30.0 * kT, 800)
+            dos = 1.0 + 2.0 * a * eg                              # m*(eps)/m*0 (nonparabolic DOS)
+            de = np.diff(eg)
+            ns = np.empty(E.size)
+            for i in range(E.size):
+                occ = 1.0 / (1.0 + np.exp(np.clip((E[i] + eg - E_F_J) / kT, -700.0, 700.0)))
+                g = dos * occ
+                ns[i] = pref0 * float(np.sum(0.5 * (g[:-1] + g[1:]) * de))
+        else:
+            pref = self.g_s * self.g_v * self.m * KB * self.T / (2.0 * np.pi * HBAR ** 2)  # m^-2
+            ns = pref * _fermi_log((E_F_J - E) / (KB * self.T))   # per-subband sheet density (m^-2)
         n_z = (np.abs(psi) ** 2) @ ns                              # (n_interior,) m^-3
         res = SubbandResult(energies_J=E, psi=psi, z_m=zi, sheet_density_m2=ns)
         res.density_m3 = n_z                                       # type: ignore[attr-defined]

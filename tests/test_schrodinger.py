@@ -44,6 +44,25 @@ def test_degenerate_filling_consistency():
     assert abs(sheet_nz - sheet_sub) / sheet_sub < 1e-3
 
 
+def test_nonparabolic_2d_filling():
+    # Kane in-plane nonparabolicity: a single deep-well sub-band's T=0 sheet density is
+    # n_s = pref0*(dE + alpha*dE^2); it must exceed the parabolic n_s by (1+alpha*dE).
+    from dynameta.carriers.schrodinger_poisson import HBAR, Q
+    L = 3e-9
+    z = np.linspace(0.0, L, 401)
+    sp = SchrodingerPoisson1D(z, 0.30 * M_E, T_K=50.0)
+    E, _, _ = sp.solve_schrodinger(np.zeros_like(z), n_states=3)
+    E_F = E[0] + 0.16 * Q
+    assert E[1] > E_F                                   # only the ground sub-band fills
+    ns_np = sp.density(np.zeros_like(z), E_F, n_states=3, alpha_np_per_eV=0.5).sheet_density_m2[0]
+    ns_par = sp.density(np.zeros_like(z), E_F, n_states=3, alpha_np_per_eV=0.0).sheet_density_m2[0]
+    pref0 = sp.g_s * sp.g_v * (0.30 * M_E) / (2.0 * np.pi * HBAR ** 2)
+    dE, a = E_F - E[0], 0.5 / Q
+    ns_cf = pref0 * (dE + a * dE ** 2)
+    assert abs(ns_np - ns_cf) / ns_cf < 0.03           # matches the T=0 closed form
+    assert abs(ns_np / ns_par - (1.0 + a * dE)) < 0.02 # DOS enhancement
+
+
 def test_uniform_grid_required():
     z = np.concatenate([np.linspace(0, 5e-9, 50), np.linspace(5e-9, 1e-8, 80)])
     with pytest.raises(ValueError):
