@@ -54,6 +54,8 @@ class OpticalSpec:
     """Incidence + polarization + linear solver + carrier-field lift control."""
     polarization:        Literal["x", "y", "p"] = "x"  # 'y'=s-pol; 'p'=p-pol (E in x-z plane)
     incidence_angle_deg: float = 0.0
+    azimuth_deg:         float = 0.0        # in-plane azimuth phi (0 = x-z plane of incidence;
+                                             # !=0 = CONICAL incidence, s-pol only)
     incidence_side:      Literal["top", "bottom"] = "top"   # which semi-infinite medium
     outputs:             tuple = ("R", "T", "A")            # which to compute/report
     # Carrier-field lift (2D DEVSIM -> 3D eps): "auto" picks SeparableXYLift for a
@@ -75,6 +77,12 @@ class OpticalSpec:
             raise NotImplementedError(
                 "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
                 "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
+        # Conical incidence (azimuth != 0) is implemented for s-pol only (the in-plane
+        # s-pol vector rotates with phi); conical p-pol is a follow-up.
+        if abs(self.azimuth_deg) > 1e-6 and self.polarization != "y":
+            raise NotImplementedError(
+                "conical incidence (azimuth != 0) is implemented for s-pol (polarization='y') "
+                "only; conical p-pol is a follow-up.")
         if self.incidence_side not in ("top", "bottom"):
             raise ValueError("incidence_side must be 'top' or 'bottom'")
         if self.ny_sym < 4:
