@@ -107,14 +107,23 @@ Two build gotchas found + fixed:
 So the hard question -- does the carrier physics solve correctly on a true 3D mesh
 -- is answered **yes**.
 
+**End-to-end (DONE):** `carriers/devsim_3d.py` `Devsim3DEquilibrium` emits a native
+`CarrierField(ndim=3)`; `core/bridge.py` has the ndim=3 branch (real x/y/z axes,
+IdentityLift, no lift synthesis) validated by `validation/bridge_3d_field.py` (3D
+field -> `assemble_eps` -> `EpsField`, gate accumulation lowers Re(eps) 1.571->0.59
+toward ENZ). `validation/pipeline_3d_end_to_end.py` closes the chain: 3D carriers ->
+bridge -> `assemble_eps_cf` -> `solve_fem` runs and the gate bias modulates the optical
+eps the solver consumes (gate-side Re(eps) 1.57 at 0V -> 0.71 at +1V). NB: a measurable
+optical dR needs a RESONANT geometry -- a bare 12 nm ITO layer in air is optically
+negligible at 1300 nm (dR~1e-5); the ENZ shift only converts to dR in a patch/cavity.
+
 **Remaining (integration, not physics):**
-- a `carriers/devsim_3d.py` `CarrierSolver` that meshes an arbitrary `Design` (not
-  just a stacked MOS-cap) via gmsh and emits a `CarrierField(ndim=3)` for the
-  bridge (the bridge / `IdentityLift` / `RegionAlignment` ndim=3 path is designed
-  and ready; emitting + consuming a 3D field end-to-end is the next step);
-- 3D **drift-diffusion** (the equilibrium path is validated here; 3D DD is stiffer
-  and larger -- the `abs_tol`/seeding lessons carry over but it needs its own
-  convergence pass).
+- a `Devsim3DEquilibrium` that meshes an arbitrary `Design` (not just a stacked
+  MOS-cap, and sharing the optics builder's lateral extent + region naming so a
+  single-Design 3D run needs no hand-built alignment);
+- 3D **drift-diffusion** (the equilibrium path is validated; 3D DD is stiffer and
+  larger -- the `abs_tol`/seeding lessons + the new `physics_bipolar_dd.py` carry
+  over but it needs its own convergence pass).
 
 ---
 
@@ -123,7 +132,10 @@ So the hard question -- does the carrier physics solve correctly on a true 3D me
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
 | Oblique incidence | **resolved, s-pol** | `tmm` -- R&T <0.01, 0-30deg (vacuum exit) | non-vacuum substrate (layered-bg field); p-pol |
-| 3D DEVSIM carriers | implemented, equilibrium | Gauss + sign + invariance | Design->gmsh builder; 3D DD |
+| 3D DEVSIM carriers | equilibrium + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline | general Design->gmsh builder; 3D DD |
+| Quantum confinement (S-P) | **implemented** | analytic square/triangular wells (~1e-5) | couple as CarrierSolver; ITO nonparabolic m* |
+| Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
+| Boundary-spanning inclusions | scoped only | -- | OCC boundary-split + paired Identify |
 
 Validation scripts live in `validation/`. Both features caught real issues during
 verification (the PML angle-limit, the gmsh-scale + MSH-version + NumPy-2 bugs, a
