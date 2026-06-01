@@ -7,16 +7,20 @@ Pluggable Stage-1 DC solve methods.
   "gummel" : decoupled (Gummel) outer iteration -- alternately solve the Poisson
              equations with the carrier densities frozen, then the carrier
              continuity equations with the potential frozen, until both stop
-             changing. Slower but robust to the stiff Poisson<->continuity
+             changing. Intended to be robust to the stiff Poisson<->continuity
              coupling that makes coupled Newton diverge on degenerate gated
              accumulation. Variables are frozen by DELETING their equations
              (via eq_registry) for one sub-solve and re-adding them after.
+             EXPERIMENTAL: it has no validation coverage and is NOT yet known to
+             converge the gated-accumulation case it was built for (see
+             physics_drift_diffusion KNOWN LIMITATION); "newton" is the default.
 
 Add new methods by extending solve_dc's dispatch.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -26,7 +30,9 @@ from dynameta.carriers import eq_registry as R
 
 POTENTIAL_EQ = "PotentialEquation"
 CARRIER_EQS = ("ElectronContinuityEquation",)   # extensible (e.g. holes)
-_TRACK_VARS = ("Potential", "Electrons", "ElectronQFL")
+# Solution variables tracked for the Gummel convergence snapshot. (No ElectronQFL: there
+# is no quasi-Fermi-level formulation -- Electrons/Holes are the solution variables; F7.)
+_TRACK_VARS = ("Potential", "Electrons", "Holes")
 
 
 def solve_dc(device: str, *, method: str = "newton",
@@ -40,6 +46,10 @@ def solve_dc(device: str, *, method: str = "newton",
                   relative_error=rel_tol, maximum_iterations=max_iter)
         return
     if method == "gummel":
+        warnings.warn(
+            "solve_dc(method='gummel') is EXPERIMENTAL: no validation coverage and not yet "
+            "known to converge the gated-accumulation case it targets. Use method='newton' "
+            "(default) or the equilibrium physics mode.", stacklevel=2)
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):

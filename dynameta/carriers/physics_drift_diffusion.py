@@ -12,14 +12,17 @@ hangs DEVSIM's expr system, whether via a node-model reference or inlined).
                    g(n) = generalized-Einstein ratio F_1/2(eta)/F_-1/2(eta).
   Continuity: div(Jn) = 0 (DC, no recombination).
 
-The exact g needs eta = invF_1/2(n/N_c), which is not expressible in DEVSIM.
-We use the DEGENERATE-LIMIT closed form (correct for ITO, n/N_c ~ 77, eta ~ 22):
-  eta_deg = (c1 * n/N_c)^(2/3),  c1 = 3 sqrt(pi)/4 ;  g = 1 + (2/3) eta_deg
-g -> 1 as n/N_c -> 0 (Boltzmann limit) and grows ~ (n/N_c)^(2/3) when degenerate.
-Because g enters only as a simple pow() of the SOLUTION variable Electrons, the
-SG derivatives differentiate cleanly (putting the full F_1/2 in an edge model
-instead hangs DEVSIM). At equilibrium (Jn = 0) the enhanced SG gives
-n ~ exp(psi/(g V_t)), the Fermi-Dirac softening.
+The exact g needs eta = invF_1/2(n/N_c), which is not expressible in DEVSIM. We use a
+RATIONAL FIT of g as a function of x = n/N_c in u = x^(1/3):
+  g(x) = 1 + (a x + c x^(4/3)) / (1 + b x^(1/3) + d x^(2/3))
+with (a,b,c,d) fit so g is exact in BOTH limits -- Boltzmann g->1 (x->0) and degenerate
+g->(2/3)(c1 x)^(2/3) (x->inf, c1=3 sqrt(pi)/4) -- and accurate to <1% for eta in [-4, 32]
+(x up to ~80, covering ITO's eta~22). This REPLACES the old degenerate-asymptote
+1+(2/3)(c1 x)^(2/3), which was 6.6% high at ITO's operating point and 25-35% high through
+the moderate-degeneracy transition (audit F1). g still enters only as pow()s of the
+SOLUTION variable Electrons, so the SG derivatives differentiate cleanly (putting the full
+F_1/2 in an edge model instead hangs DEVSIM). At equilibrium (Jn = 0) the enhanced SG
+gives n ~ exp(psi/(g V_t)), the Fermi-Dirac softening.
 
 VALIDATED REGIME: transport / current-flow and zero bias -- the clean
 [metal/ITO/metal] slab converges, and Park zero-bias gives n = n_bg. This is the
@@ -45,8 +48,19 @@ from dynameta.carriers.physics_equilibrium import (
     Q_E, V_T, setup_phi_c0, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
 
-_C1 = 1.3293403881791       # 3*sqrt(pi)/4
-_C23 = 0.66666666666667     # 2/3
+# Generalized-Einstein degeneracy factor g(x)=F_1/2(eta)/F_-1/2(eta) as a rational fit in
+# u=x^(1/3), x=n/N_c (accurate to <1% for eta in [-4,32]; exact in both limits). See the
+# module docstring. Coefficients from a least-squares fit to the exact Fermi-Dirac ratio.
+_GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
+_P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
+
+
+def _g_expr(s: str) -> str:
+    """g(Electrons{s}/N_c) as a DEVSIM edge expression (pow()s of the solution variable)."""
+    X = "(Electrons{}/N_c)".format(s)
+    return ("(1.0 + ({a}*{X} + {c}*pow({X},{p43}))/(1.0 + {b}*pow({X},{p13}) + "
+            "{d}*pow({X},{p23})))").format(a=_GA, b=_GB, c=_GC, d=_GD, X=X,
+                                            p13=_P13, p23=_P23, p43=_P43)
 
 
 def _edge_with_derivs(device, region, name, eq, wrt):
@@ -88,11 +102,9 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                   variable_name="Potential", node_model="PotentialNodeCharge",
                   edge_model="PotentialEdgeFlux", variable_update="log_damp")
 
-    # --- FD diffusion-enhancement g(n) (degenerate-limit, simple pow) ---
-    # g(x) = 1 + (2/3)(c1 x/N_c)^(2/3); edge value g_enh = average over the edge.
-    gx = lambda s: "(1.0 + {c23}*pow({c1}*Electrons{s}/N_c, {c23}))".format(
-        c23=_C23, c1=_C1, s=s)
-    g_avg = "(0.5*({} + {}))".format(gx("@n0"), gx("@n1"))
+    # --- FD diffusion-enhancement g(n) (accurate rational fit; see module docstring) ---
+    # edge value g_enh = average of g(Electrons/N_c) over the edge's two nodes.
+    g_avg = "(0.5*({} + {}))".format(_g_expr("@n0"), _g_expr("@n1"))
     _edge_with_derivs(device, region, "g_enh", g_avg, ("Electrons",))
 
     # vdiff and the FD-scaled argument vdiff_g = vdiff / g_enh
