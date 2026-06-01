@@ -94,8 +94,15 @@ Two things block the entire right-hand column: (1) the response map sees only `n
 
 ### Cross-cutting enablers (interleaved; shared by every mechanism)
 - **Lumped-RC bandwidth** (near-term; PORT from Modulator, Part D) -- a real modulator FOM now.
-- **RCWA backend** -- slot right after Phase 1 so it supports anisotropy from the start; fast
-  forward + independent oracle + the optimization enabler. (PORT the integration + lessons.)
+- **RCWA backend** -- **PORT Lumenairy's native RCWA (`RCWAStack`, ~v5.6), do NOT rebuild.** It
+  already provides multi-layer 1-D/2-D periodic, conical, uniform/`eps_cell`/full-tensor
+  `eps_tensor_cell`/analytic-`shapes` layers, R/T/A + 0-order complex Jones, in the SAME
+  `exp(-i omega t)`/`Im(eps)>0` convention (no sign bridge). DynaMeta adds a `LayeredStackSolver`
+  Protocol + an `RcwaSolver` adapter + a z-slicer (graded/tensor `EpsField` -> `RCWAStack`
+  layers). Slot right after Phase 1 (tensor eps) so it serves the EO mechanisms; it is the fast
+  forward + independent oracle + the optimization enabler. Lumenairy gaps to close first (P1
+  2-D/stack autodiff, P2 normal-vector FFF, P3 2-D patterned-tensor rigor) are itemized in
+  `docs/lumenairy_rcwa_port_wishlist.md`.
 - **Iterative/scaling solver** -- BDDC is in; a NGSolve-AMS/HYPRE binding is the next rung for
   large 3D (Part D). The non-ENZ mechanisms are well-conditioned, so this is now viable.
 - **AC/transient carriers** -- the full dynamics axis (after the lumped-RC stopgap).
@@ -129,13 +136,14 @@ work that was never fully used for the Park experiment but is directly portable.
    than the deep-subwavelength ENZ patch -- so a real NGSolve-AMS/HYPRE binding (the rung
    above BDDC) becomes worthwhile EXACTLY as we broaden the mechanism set. This is the right
    home for the "HYPRE" item, and it was not viable in the ENZ-only world.
-3. **grcwa RCWA pipeline** (`stage3_optical/rcwa/`) + its hard-won convergence lessons:
-   grcwa lacks **Li factorization**, so it is erratic in Fourier order (nG) for 2-D metallic
-   patches (~+/-25 nm resonance noise) -- fine for dielectric/low-contrast, unreliable for
-   metal gratings. **Port the integration pattern + the lesson** into the RCWA enabler: use a
-   Li-factorized RCWA (e.g. inkstone) for metallic/high-contrast, grcwa for dielectric; and
-   reuse the eps sign-convention bridge (Stage-2 exp(+iwt) -> grcwa exp(-iwt), conjugate at
-   the boundary). Do NOT port grcwa wholesale (it was under-converged for the Park metal patch).
+3. **RCWA -- SUPERSEDED by the Lumenairy port.** The Modulator's grcwa pipeline
+   (`stage3_optical/rcwa/`) was under-converged for the Park metal patch precisely because grcwa
+   lacks Li factorization (erratic ~+/-25 nm resonance noise in 2-D metals). Lumenairy's native
+   RCWA already fixes this (correct Li inverse-rule, principal-branch stability, dual-Laurent
+   2-D, Wood-anomaly regularization), so the plan is to **port Lumenairy's `RCWAStack`** (Part C
+   "RCWA backend" + `docs/lumenairy_rcwa_port_wishlist.md`), NOT grcwa. The Modulator's grcwa
+   work is retained only as a cautionary lesson (use a Li-factorized solver for metals) and as a
+   3rd-party numerical oracle.
 4. **Already ported / present in DynaMeta (no action):** DielectricDB (JARVIS/MP DFPT static
    eps + override/provenance, `materials/db.py`), `fit_drude_params`, prismatic semiconductor
    boundary layers (`Mesh3DSpec.semi_prism_thk_m`), the DD abs-tol-vs-SI-units convergence
