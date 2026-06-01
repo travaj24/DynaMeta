@@ -59,23 +59,24 @@ the PML nor a phase sign:
      the minion DOFs (so an ndof check is NOT a periodicity test; a boundary
      enforcement probe is).
 
-2. **Uniform-background scattered field is inaccurate for a non-vacuum substrate
-   (a pre-existing Phase-3 limitation, NOT an oblique bug).** With `eps_bg=1`
-   everywhere (Phase-3 "Option A"), a dense substrate (`eps != 1`) carries a large
-   volumetric source `k0^2 (eps_sub-1) E_inc` driven at the WRONG (vacuum `kz_s`)
-   wavevector through the whole substrate band. `validation/oblique_isolation.py`:
-   a **vacuum** exit (case b) matches `tmm` to <0.001 at 0 AND 30deg, but a `n=1.5`
-   exit (cases a,c) is off and mesh-fragile **even at normal incidence**. The fix is
-   a **layered/Fresnel background field**: `eps_bg` piecewise (1 in the
-   superstrate+structure, `n_sub^2` in the substrate), `E_bg` = the bare air/substrate
-   Fresnel solution (incident + `r_bg`, transmitted `t_bg`), source nonzero only in
-   the slab/patch, and the extracted reflection adds back `r_bg`. A scoped follow-up,
-   independent of incidence angle (it also tightens normal-incidence transmission for
-   devices on a substrate). Reflection-mode devices with a bottom mirror (e.g. Park,
-   T~0) are largely unaffected; `solve_fem` emits a one-time guard when the exit
-   medium is non-vacuum.
+2. **Uniform-background scattered field was inaccurate for a non-vacuum substrate
+   (a pre-existing Phase-3 issue, NOT an oblique bug) -- NOW FIXED.** With `eps_bg=1`
+   everywhere (Phase-3 "Option A"), a dense substrate (`eps != 1`) carried a large
+   volumetric source driven at the WRONG (vacuum) wavevector through the whole
+   substrate band (mesh-fragile even at normal: case (c) gave R=0.26 vs `tmm` 0.12).
+   **Fix (implemented in `optics/solver.py`):** a **layered / Fresnel two-region
+   background**. `eps_bg(z)` is piecewise -- superstrate medium above the substrate-top
+   interface `z_int`, substrate medium below -- and `E_bg` is the analytic bare
+   air/substrate Fresnel field (incident + background reflection `R0` above,
+   transmission `T0` below). The scattered source `k0^2 (eps - eps_bg) E_bg` is then
+   nonzero ONLY in the structure layers; the substrate carries no spurious source. R/T
+   add back the analytic `R0`/`T0`. Reduces exactly to the plain incident wave when
+   `n_sub == n_super == 1` (`R0=0, T0=1`). **Validated** (`validation/oblique_isolation.py`,
+   all PASS): a single air/1.5 interface, a vacuum-exit slab, and a **dense n=1.5
+   substrate** all match `tmm` R and T to **<0.003** at 0 AND 30deg, energy-conserving.
+   This also tightens normal-incidence transmission for any device on a substrate.
 
-(p-pol oblique -- the in-plane polarization vector -- is a further follow-up.)
+(p-pol oblique -- the in-plane polarization vector -- is the remaining oblique follow-up.)
 
 ---
 
@@ -131,7 +132,7 @@ negligible at 1300 nm (dR~1e-5); the ENZ shift only converts to dR in a patch/ca
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | **resolved, s-pol** | `tmm` -- R&T <0.01, 0-30deg (vacuum exit) | non-vacuum substrate (layered-bg field); p-pol |
+| Oblique incidence | **resolved, s-pol** | `tmm` -- R&T <0.01, 0-30deg, vacuum AND dense substrate | p-pol oblique |
 | 3D DEVSIM carriers | equilibrium + end-to-end | Gauss/sign/invariance + bridge ndim=3 + pipeline | general Design->gmsh builder; 3D DD |
 | Quantum confinement (S-P) | **implemented** | analytic square/triangular wells (~1e-5) | couple as CarrierSolver; ITO nonparabolic m* |
 | Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
