@@ -6,6 +6,18 @@
 
 This report is a snapshot for planning. Nothing here was changed in the code; it is an assessment only.
 
+> **Resolution (2026-06-01).** The Part-I functional findings were subsequently fixed
+> (commits `38a5826`..`1b25aec`): all HIGH items (OPT-1, SP-1, SP-2, from_design role +
+> gate-name, the test/CI gaps) and the substantive MEDIUM/LOW items. Highlights: the FD
+> g-factor was replaced with an accurate <1% rational fit; the SP self-consistent solve now
+> reports convergence + warns; oblique raises on a non-vacuum superstrate and warns on the
+> non-angle-aware PML; an independent volumetric absorption `A_independent` was added; the
+> solver-free bridge spine is now pytest-covered in CI; and all 27 PASS/FAIL validations exit
+> non-zero on failure (`validation/run_all.py` gates the set). The conical ky-Bloch phase was
+> adversarially CONFIRMED correct (not a bug) and now has observable structured-cell coverage.
+> The Part-II strategic items (RCWA oracle, AC/transient, optimization, field-aware seam)
+> remain as the forward roadmap.
+
 ---
 
 ## Severity legend
