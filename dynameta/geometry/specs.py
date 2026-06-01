@@ -52,7 +52,7 @@ class Mesh3DSpec:
 @dataclass
 class OpticalSpec:
     """Incidence + polarization + linear solver + carrier-field lift control."""
-    polarization:        Literal["x", "y"] = "x"
+    polarization:        Literal["x", "y", "p"] = "x"  # 'y'=s-pol; 'p'=p-pol (E in x-z plane)
     incidence_angle_deg: float = 0.0
     incidence_side:      Literal["top", "bottom"] = "top"   # which semi-infinite medium
     outputs:             tuple = ("R", "T", "A")            # which to compute/report
@@ -66,14 +66,15 @@ class OpticalSpec:
     gmres_max_iter:      int = 800
 
     def __post_init__(self) -> None:
-        if self.polarization not in ("x", "y"):
-            raise ValueError("polarization must be 'x' or 'y'")
-        # Oblique incidence (Bloch-Floquet) is implemented for s-pol (E along y,
-        # perpendicular to the x-z plane of incidence); p-pol oblique is a follow-up.
-        if abs(self.incidence_angle_deg) > 1e-6 and self.polarization != "y":
+        if self.polarization not in ("x", "y", "p"):
+            raise ValueError("polarization must be 'x', 'y' (s-pol), or 'p' (p-pol)")
+        # Oblique incidence (Bloch-Floquet) is implemented for s-pol ('y', E along y
+        # perpendicular to the x-z plane) and p-pol ('p', E in the x-z plane). 'x'
+        # (E along x) is not transverse at oblique incidence.
+        if abs(self.incidence_angle_deg) > 1e-6 and self.polarization == "x":
             raise NotImplementedError(
-                "oblique incidence requires polarization='y' (s-pol); p-pol "
-                "oblique is a documented follow-up (docs/roadmap_phase5_stretch.md).")
+                "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
+                "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
         if self.incidence_side not in ("top", "bottom"):
             raise ValueError("incidence_side must be 'top' or 'bottom'")
         if self.ny_sym < 4:
