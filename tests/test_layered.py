@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 from dynameta.core.layered import LayeredSlab, LayeredStack, slice_profile
-from dynameta.optics.tmm_reference import (stack_rta, layered_rta, TmmLayeredSolver)
+from dynameta.optics.tmm_reference import (stack_rta, layered_rta, TmmLayeredSolver,
+                                           make_layered_tmm_solver, layered_stack_from_design)
 
 
 def test_layeredslab_requires_exactly_one_spec():
@@ -76,3 +77,28 @@ def test_tmm_layered_solver_optical_result():
     assert abs(res.R + res.T + res.A - 1.0) < 1e-9     # lossless
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9         # |r|^2 == R
     assert -180.0 <= res.phase_deg <= 180.0
+
+
+def test_make_layered_tmm_solver_seam():
+    # make_layered_tmm_solver() must return an optical_solver with the EXACT run_pipeline
+    # seam signature fn(design, geo, eps_by_region, lam_m, n_super, n_sub) and reproduce
+    # layered_stack_from_design + TmmLayeredSolver on a uniform stack. This is the adapter
+    # that lets the layered/TMM (and future RCWA) backend drop into run_pipeline (LTM-4/BLP-1).
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import OpticalSpec
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("hi", ConstantOptical(complex(2.2 ** 2, 0.0))))
+    d = Design(name="u", unit_cell=UnitCell.square(300e-9),
+               stack=Stack(layers=[Layer("film", 180e-9, "hi")],
+                           superstrate_material="air", substrate_material="air"),
+               electrodes=[], materials=reg,
+               optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+    lam = 1300e-9
+    solve = make_layered_tmm_solver()
+    res = solve(d, None, {}, lam, 1.0 + 0j, 1.0 + 0j)   # geo/n_super/n_sub unused by TMM
+    R, T, A = layered_rta(layered_stack_from_design(d, lam), lam, theta_deg=0.0, pol="s")
+    assert abs(res.R - R) < 1e-12 and abs(res.T - T) < 1e-12
+    assert abs(res.R + res.T + res.A - 1.0) < 1e-9
+    assert abs(abs(res.r) ** 2 - res.R) < 1e-9

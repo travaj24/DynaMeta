@@ -19,7 +19,9 @@ from dynameta.core.alignment import RegionAlignment, GeometryAlignment
 from dynameta.core.n_to_eps import NToEpsMap, MaterialEpsMap
 from dynameta.core.interfaces import (
     RegionInfo, OpticalResult, CarrierSolver, OpticalGeometryBuilder, OpticalSolver,
+    LayeredStackSolver,
 )
+from dynameta.core.layered import LayeredSlab, LayeredStack, slice_profile, slice_eps_field
 from dynameta.core.bridge import assemble_eps
 
 __all__ = [
@@ -32,5 +34,7 @@ __all__ = [
     "RegionAlignment", "GeometryAlignment",
     "NToEpsMap", "MaterialEpsMap",
     "RegionInfo", "OpticalResult", "CarrierSolver", "OpticalGeometryBuilder", "OpticalSolver",
+    "LayeredStackSolver",
+    "LayeredSlab", "LayeredStack", "slice_profile", "slice_eps_field",
     "assemble_eps",
 ]

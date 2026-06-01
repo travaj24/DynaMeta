@@ -137,3 +137,26 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
     return LayeredStack(complex(n_super), complex(n_sub), slabs_top_down,
                         period_x_m=design.unit_cell.period_x_m,
                         period_y_m=design.unit_cell.period_y_m)
+
+
+def make_layered_tmm_solver(*, n_slices=None):
+    """Build an `optical_solver` callable for `run_pipeline(optical_solver=...)` that solves
+    each (bias, wavelength) with the layered TMM instead of the FEM -- the FIRST concrete
+    wiring of the pluggable seam (a future RCWA backend plugs in the same way). It assembles
+    a LayeredStack from the Design + the bridge's `eps_by_region` (slicing a graded carrier
+    region via slice_eps_field) and runs TmmLayeredSolver. Laterally-UNIFORM stacks only -- a
+    layer with inclusions, or a laterally-structured eps_by_region entry, raises (use the FEM
+    or RCWA).
+
+    The returned callable has the exact seam signature
+    ``fn(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult``; `geo`,
+    `n_super`, `n_sub` are accepted for compatibility but unused (the LayeredStack re-derives
+    the end media from the Design's super/substrate materials)."""
+    solver = TmmLayeredSolver()
+
+    def _solve(design, geo, eps_by_region, lam_m, n_super, n_sub):
+        stack = layered_stack_from_design(design, lam_m, eps_by_region=eps_by_region,
+                                          n_slices=n_slices)
+        return solver.solve(stack, lam_m, design.optical)
+
+    return _solve
