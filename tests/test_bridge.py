@@ -1,0 +1,176 @@
+"""Fast, solver-free (numpy-only) unit tests for the reusable bridge spine:
+assemble_eps (2D-lift and native-3D branches), GeometryAlignment.validate_coverage,
+choose_lift symmetry gating, the SeparableXYLift einsum + its new preconditions,
+the time-convention guard, and analysis.resonance_dip. None of this needs devsim or
+ngsolve, so it is the CI gate the heavy validation/ scripts lack (audit cross-cutting
+F1/F2). Run: python -m pytest tests/test_bridge.py -q
+"""
+import numpy as np
+import pytest
+
+from dynameta.core import NM, MaterialEpsMap, assemble_eps
+from dynameta.core.alignment import GeometryAlignment, RegionAlignment
+from dynameta.core.carrier_field import CarrierField, CarrierRegion, ELECTRON_DENSITY
+from dynameta.core.lift import IdentityLift, ExtrudeLift, SeparableXYLift, choose_lift
+from dynameta.materials import Material, MaterialRegistry, ConstantOptical, DrudeOptical, M_E
+from dynameta.analysis import resonance_dip
+
+N_BG = 4e26
+PERIOD = 300e-9
+
+
+def _registry():
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("ito", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
+    return reg
+
+
+def _field_2d(n2d, x_m, y_m, conv="exp(-iwt)"):
+    """A minimal 2D CarrierField with one gridded 'ito' region (x lateral, y vertical)."""
+    reg = CarrierRegion(name="ito", role="semiconductor", material="ito",
+                        nodes_m=np.zeros((1, 2)), node_fields={},
+                        grid_axes_m={"x": x_m, "y": y_m},
+                        grid_fields={ELECTRON_DENSITY: n2d})
+    return CarrierField(bias_label="t", voltages={}, ndim=2, temperature_K=300.0,
+                        regions={"ito": reg}, n_bg_by_region={"ito": N_BG},
+                        unit_cell_m=(PERIOD, PERIOD), time_convention=conv)
+
+
+def _field_3d(n3d, x_m, y_m, z_m):
+    reg = CarrierRegion(name="semi", role="semiconductor", material="ito",
+                        nodes_m=np.zeros((1, 3)), node_fields={},
+                        grid_axes_m={"x": x_m, "y": y_m, "z": z_m},
+                        grid_fields={ELECTRON_DENSITY: n3d})
+    return CarrierField(bias_label="t", voltages={}, ndim=3, temperature_K=300.0,
+                        regions={"semi": reg}, n_bg_by_region={"semi": N_BG},
+                        unit_cell_m=(PERIOD, PERIOD))
+
+
+def _align(mesh_region, source, stack_axis="y", fixed=None):
+    return GeometryAlignment(
+        unit_scale=NM,
+        region_alignments=[RegionAlignment(mesh_region, source,
+                            (0.0, PERIOD, 0.0, PERIOD, 0.0, 10e-9), stack_axis=stack_axis)],
+        fixed_eps_regions=fixed or {})
+
+
+# ---- assemble_eps: 2D-lift (Extrude) path ----
+def test_assemble_eps_2d_extrude_shape_and_bg():
+    nx, nv = 16, 5
+    x = np.linspace(0.0, PERIOD, nx)
+    y = np.linspace(0.0, 10e-9, nv)
+    n2d = np.full((nx, nv), N_BG)
+    n2d[nx // 2, -1] = 2.0 * N_BG                       # a gate-side accumulation spike
+    field = _field_2d(n2d, x, y)
+    out = assemble_eps(field, _align("ito", "ito"), MaterialEpsMap(_registry()),
+                       ExtrudeLift(period_y_m=PERIOD), 1300e-9, mesh_regions=["ito"])
+    ef = out["ito"]
+    assert ef.values_zyx.shape == (nv, 2, nx)           # (Nz, Ny, Nx)
+    # the n_bg columns reduce to the Drude eps at n_bg (density-dependent material,
+    # so the background flows through eps_grid(n_bg), not scalar_eps); the spike differs
+    bg = complex(MaterialEpsMap(_registry()).eps_grid("ito", np.array([N_BG]), 1300e-9)[0])
+    assert np.isclose(ef.values_zyx[0, 0, 0], bg, rtol=1e-9)
+    assert ef.values_zyx[-1, 0, nx // 2].real < bg.real  # accumulation lowers Re(eps)
+
+
+# ---- assemble_eps: native-3D (Identity) path ----
+def test_assemble_eps_3d_identity():
+    nx, ny, nz = 4, 4, 6
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    n3d = np.full((nx, ny, nz), N_BG)
+    n3d[:, :, -1] = 1.5 * N_BG                            # gate-side accumulation
+    out = assemble_eps(_field_3d(n3d, x, y, z), _align("semi", "semi", stack_axis="z"),
+                       MaterialEpsMap(_registry()), IdentityLift(), 1300e-9, mesh_regions=["semi"])
+    v = out["semi"].values_zyx
+    assert v.shape == (nz, ny, nx)
+    assert v[-1].real.mean() < v[0].real.mean()          # accumulation toward ENZ at the gate side
+
+
+def test_assemble_eps_3d_missing_axis_raises():
+    nx, ny, nz = 4, 4, 6
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    field = _field_3d(np.full((nx, ny, nz), N_BG), x, y, z)
+    del field.regions["semi"].grid_axes_m["z"]           # break the 3D axis contract
+    with pytest.raises(ValueError):
+        assemble_eps(field, _align("semi", "semi"), MaterialEpsMap(_registry()),
+                     IdentityLift(), 1300e-9, mesh_regions=["semi"])
+
+
+# ---- time-convention guard (audit F2/F7) ----
+def test_assemble_eps_rejects_wrong_time_convention():
+    x = np.linspace(0.0, PERIOD, 8); y = np.linspace(0.0, 10e-9, 4)
+    field = _field_2d(np.full((8, 4), N_BG), x, y, conv="exp(+iwt)")
+    with pytest.raises(ValueError):
+        assemble_eps(field, _align("ito", "ito"), MaterialEpsMap(_registry()),
+                     ExtrudeLift(period_y_m=PERIOD), 1300e-9, mesh_regions=["ito"])
+
+
+# ---- validate_coverage ----
+def test_validate_coverage_raises():
+    al = _align("ito", "ito", fixed={"air": "air"})
+    al.validate_coverage(["ito", "air"])                 # exact -> ok
+    with pytest.raises(ValueError):
+        al.validate_coverage(["ito"])                    # 'air' extra (not in mesh)
+    with pytest.raises(ValueError):
+        al.validate_coverage(["ito", "air", "pml"])      # 'pml' unmapped
+    dup = GeometryAlignment(NM, al.region_alignments, {"ito": "air"})
+    with pytest.raises(ValueError):
+        dup.validate_coverage(["ito"])                   # 'ito' both spatial and fixed
+
+
+def test_assemble_eps_internal_dup_without_mesh_regions():
+    dup = GeometryAlignment(NM, _align("ito", "ito").region_alignments, {"ito": "air"})
+    x = np.linspace(0.0, PERIOD, 8); y = np.linspace(0.0, 10e-9, 4)
+    with pytest.raises(ValueError):
+        assemble_eps(_field_2d(np.full((8, 4), N_BG), x, y), dup,
+                     MaterialEpsMap(_registry()), ExtrudeLift(period_y_m=PERIOD), 1300e-9)
+
+
+# ---- choose_lift gating ----
+def test_choose_lift_gating():
+    assert isinstance(choose_lift("c4v", "auto", period_y_m=PERIOD), SeparableXYLift)
+    assert isinstance(choose_lift("none", "auto", period_y_m=PERIOD), ExtrudeLift)
+    assert isinstance(choose_lift("none", "identity", period_y_m=PERIOD), IdentityLift)
+    with pytest.raises(ValueError):
+        choose_lift("none", "separable_xy", period_y_m=PERIOD)   # separable needs c4v
+
+
+# ---- SeparableXYLift: correctness + new preconditions ----
+def test_separable_xy_outer_product():
+    nx, nv = 32, 3
+    x = np.linspace(0.0, PERIOD, nx)
+    bump = N_BG + 1e26 * np.exp(-((x - PERIOD / 2) / (PERIOD / 8)) ** 2)
+    n2d = np.repeat(bump[:, None], nv, axis=1)
+    lift = SeparableXYLift(period_y_m=PERIOD, ny=nx)
+    n3d, xo, yo, zo = lift.apply(n2d, x, np.linspace(0, 10e-9, nv), n_bg=N_BG)
+    assert n3d.shape == (nx, nx, nv)
+    # center peak is the separable product of the 1D peak deviation; corners ~ n_bg
+    assert n3d[nx // 2, nx // 2, 0] > n3d[0, 0, 0]
+    assert np.isclose(n3d[0, 0, 0], N_BG, rtol=1e-6)
+
+
+def test_separable_xy_rejects_nonsquare_and_mixed_sign():
+    nx, nv = 16, 2
+    x = np.linspace(0.0, PERIOD, nx)
+    n2d = np.full((nx, nv), N_BG); n2d[nx // 2] = 1.2 * N_BG
+    with pytest.raises(ValueError):                       # x-span != period_y -> not square
+        SeparableXYLift(period_y_m=2 * PERIOD).apply(n2d, x, np.zeros(nv), n_bg=N_BG)
+    mixed = np.full((nx, nv), N_BG)
+    mixed[: nx // 2] = 1.3 * N_BG                          # accumulation on one side
+    mixed[nx // 2:] = 0.7 * N_BG                           # depletion on the other -> mixed sign
+    with pytest.raises(ValueError):
+        SeparableXYLift(period_y_m=PERIOD).apply(mixed, x, np.zeros(nv), n_bg=N_BG)
+
+
+# ---- analysis.resonance_dip: exact on uniform AND non-uniform grids (audit F6) ----
+def test_resonance_dip_exact_vertex():
+    def parab(xs):
+        return [(xx - 1305.0) ** 2 * 1e-5 + 0.02 for xx in xs]
+    uni = [1250.0, 1300.0, 1350.0, 1400.0]
+    lam_u, _ = resonance_dip(uni, parab(uni))
+    assert abs(lam_u - 1305.0) < 1e-6
+    nonuni = [1250.0, 1300.0, 1370.0, 1400.0]             # the old code biased this by ~10 nm
+    lam_n, val_n = resonance_dip(nonuni, parab(nonuni))
+    assert abs(lam_n - 1305.0) < 1e-6
+    assert abs(val_n - 0.02) < 1e-9

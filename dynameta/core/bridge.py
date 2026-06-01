@@ -24,6 +24,9 @@ from dynameta.core.eps_field import EpsField
 from dynameta.core.lift import FieldLift
 from dynameta.core.n_to_eps import NToEpsMap
 
+# The sign convention the whole library + NGSolve assume (passive loss => Im(eps)>0).
+SOLVER_TIME_CONVENTION = "exp(-iwt)"
+
 
 def assemble_eps(field: CarrierField,
                    alignment: GeometryAlignment,
@@ -35,8 +38,26 @@ def assemble_eps(field: CarrierField,
                    density_field: str = ELECTRON_DENSITY) -> Dict[str, EpsField]:
     """Return {mesh_region: EpsField}. Spatial (carrier-derived) EpsFields for
     the aligned semiconductor regions; uniform scalar EpsFields for the rest."""
+    # The whole library (Drude Im(eps) sign + NGSolve PML) is exp(-iwt). A field
+    # carrying a different convention would be fed to the solver with the wrong
+    # Im(eps) sign -- fail loudly instead of silently (audit F2/F7).
+    if field.time_convention != SOLVER_TIME_CONVENTION:
+        raise ValueError(
+            "CarrierField.time_convention {!r} != the library/solver convention {!r}; "
+            "the Drude Im(eps) sign and the NGSolve PML both assume exp(-iwt). Convert "
+            "the field (conjugate eps) before assembling.".format(
+                field.time_convention, SOLVER_TIME_CONVENTION))
+
     if mesh_regions is not None:
         alignment.validate_coverage(mesh_regions)
+    else:
+        # Even without the mesh-region list we still enforce the internal half of
+        # the exactly-once guarantee: no region may be BOTH spatial and fixed
+        # (the full mesh-coverage check needs mesh_regions; see assemble_eps_cf).
+        _spatial = {ra.mesh_region for ra in alignment.region_alignments}
+        _dup = _spatial & set(alignment.fixed_eps_regions)
+        if _dup:
+            raise ValueError("Regions mapped both spatial and fixed: {}".format(sorted(_dup)))
 
     mpp = alignment.unit_scale.metres_per_unit
     out: Dict[str, EpsField] = {}
@@ -58,7 +79,15 @@ def assemble_eps(field: CarrierField,
 
         if n_grid.ndim == 3:
             # Native 3D carrier field (e.g. carriers/devsim_3d): real x/y/z axes,
-            # NO lift synthesis (z is the through-stack axis by convention).
+            # NO lift synthesis. z is the through-stack axis BY THE 3D-FIELD
+            # CONVENTION; RegionAlignment.stack_axis applies to 2D fields only
+            # (the auto-built alignment may carry its 2D default here -- ignored).
+            for _k in ("x", "y", "z"):
+                if _k not in reg.grid_axes_m:
+                    raise ValueError(
+                        "3D source region '{}' grid missing axis '{}' (have {}); the 3D "
+                        "bridge requires x/y/z axes with z through-stack".format(
+                            ra.source_region, _k, sorted(reg.grid_axes_m)))
             x3_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             y3_m = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
             z3_m = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
@@ -85,5 +114,5 @@ def assemble_eps(field: CarrierField,
 
     for region, mat_name in alignment.fixed_eps_regions.items():
         out[region] = EpsField(scalar=n_to_eps.scalar_eps(mat_name, lambda_m),
-                                  time_convention="exp(-iwt)")
+                                  time_convention=field.time_convention)
     return out

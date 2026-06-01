@@ -24,7 +24,10 @@ class RegionAlignment:
     mesh_region:   str                                   # optical mesh material name
     source_region: str                                   # CarrierField region key
     bbox_m: Tuple[float, float, float, float, float, float]  # xlo,xhi,ylo,yhi,zlo,zhi (SI)
-    stack_axis: Literal["x", "y", "z"] = "y"             # carrier-field through-stack axis
+    stack_axis: Literal["x", "y", "z"] = "y"             # 2D carrier-field through-stack axis
+    # NOTE: stack_axis applies to 2D carrier fields only (it selects which of the
+    # two carrier-grid axes is vertical). A native 3D carrier field is z-stacked by
+    # convention and the bridge ignores stack_axis for it.
 
 
 @dataclass
