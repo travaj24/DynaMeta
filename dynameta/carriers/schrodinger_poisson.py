@@ -130,14 +130,21 @@ class SchrodingerPoisson1D:
                                 phi_left_V: float = 0.0, phi_right_V: float = 0.0,
                                 m_eff_z_kg: Optional[np.ndarray] = None,
                                 max_outer: int = 60, tol_V: float = 1e-4,
-                                n_states: Optional[int] = None, verbose: bool = False):
+                                n_states: Optional[int] = None, bound_tol: float = 1e-3,
+                                verbose: bool = False):
         """Self-consistent solve on the FULL grid (Dirichlet phi at both ends).
         Poisson: d/dz(eps eps0 dphi/dz) = -q (N_D+ - n), electron PE U = -q*phi + U_band.
         The Trellakis predictor-corrector folds an a-priori quantum density that rigidly
         shifts each sub-band floor with the local potential into a NONLINEAR Poisson
         Newton solve (exact Jacobian = Fermi function), then re-solves Schrodinger --
         far more robust than naive Picard. Returns (phi_V, n_m3, SubbandResult).
-        `doping_m3` is the ionized net donor profile N_D+ (m^-3) on the full grid."""
+        `doping_m3` is the ionized net donor profile N_D+ (m^-3) on the full grid.
+
+        `bound_tol`: edge-amplitude threshold for keeping a state. The default 1e-3
+        rejects unbound states (isolated quantum well). For a DEGENERATE-bulk slab
+        (e.g. ITO, E_F far above many sub-bands) pass a LARGE value (e.g. 1e9) so ALL
+        sub-bands up to E_F are kept -- they carry the bulk continuum, and rejecting
+        them collapses the bulk density to ~0 (use n_states >= the # of sub-bands < E_F)."""
         N = self.z.size
         h = self.h
         ee = eps_r * EPS0
@@ -161,7 +168,7 @@ class SchrodingerPoisson1D:
         result = None
         for it in range(max_outer):
             U = -Q * phi + U_band
-            res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states)
+            res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
             E_k, psi_k = res.energies_J.copy(), res.psi.copy()
             ns_pref = self.g_s * self.g_v * self.m * kT / (2.0 * np.pi * HBAR ** 2)
             phi_k = phi.copy()
@@ -202,7 +209,7 @@ class SchrodingerPoisson1D:
             if dV < tol_V:
                 break
         U = -Q * phi + U_band
-        result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states)
+        result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
         n_full = np.zeros(N)
         n_full[1:-1] = result.density_m3   # type: ignore[attr-defined]
         return phi, n_full, result
