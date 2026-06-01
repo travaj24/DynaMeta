@@ -135,6 +135,11 @@ QFL, an abs_tol scaled to n_bg (the `_dc_abs_tol` lesson), and a zero-bias-seed 
 gate-ramp staged Newton. Validated (`validation/carriers_3d_dd.py`, PASS): converges
 (RelError ~1e-11), sign-correct (+1V accumulates, -1V depletes to 0.67), and REDUCES to
 the 3D equilibrium accumulation to **0.8%** at +1V (the zero-current MOS-cap limit).
+The MOS-cap carries no current, so transport is tested separately by a 3D RESISTOR
+(`validation/carriers_3d_resistor.py`, PASS): an ITO bar with ohmic end contacts obeys
+Ohm's law `I = V*sigma*A/L` to mesh accuracy (rel-diff 0.20->0.14 on refinement). That
+test exposed + fixed a real bug: `setup_contact_ohmic_dd` omitted `edge_current_model`,
+so `get_contact_current` read 0 (now added; the Dirichlet pinning is unchanged).
 
 **Design-driven 3D builder + lateral gate patch (DONE).** `Stacked3DSpec.gate_patch_frac`
 < 1 imprints a centered gate-patch onto the oxide top (the rest a free surface), so the
@@ -239,9 +244,11 @@ a central patch at +0.4V over an ungated gap gives accumulation only under the p
 (peak 1.53 vs 1.16 n_bg) and a laterally-varying eps -- min Re(eps) **0.16 under the patch
 vs 1.15 in the gap** (deep sub-ENZ only where gated). Only 2 cached solves for the step.
 
-Remaining: fold the oxide-capacitance voltage division into `surface_potential_of_gate`
-for quantitative gate coupling; ITO band nonparabolicity (density-dependent m*) for
-quantitative sub-band spacing.
+**Gate-oxide voltage division (DONE):** pass `oxide_thk_m` + `eps_oxide` and the gate->psi_s
+map solves the series-capacitor relation `Vg = psi_s + q*N_excess(psi_s)/C_ox` by bisection
+(`validation/sp_oxide_cap.py` PASS: Vg=1V -> psi_s=0.64V, accumulation 6x smaller than the
+naive psi_s=Vg, self-consistent) -- the calibrated map. Remaining: ITO band nonparabolicity
+(density-dependent m*) for quantitative sub-band spacing.
 
 ### Boundary-spanning inclusion topologies
 Phase 3 inclusions are interior-only (the four periodic faces stay clean
