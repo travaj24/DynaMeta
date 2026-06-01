@@ -102,7 +102,10 @@ Two things block the entire right-hand column: (1) the response map sees only `n
   layers). Slot right after Phase 1 (tensor eps) so it serves the EO mechanisms; it is the fast
   forward + independent oracle + the optimization enabler. Lumenairy gaps to close first (P1
   2-D/stack autodiff, P2 normal-vector FFF, P3 2-D patterned-tensor rigor) are itemized in
-  `docs/lumenairy_rcwa_port_wishlist.md`.
+  `docs/lumenairy_rcwa_port_wishlist.md`. **RCWA-independent prep DONE (2026-06-01):** the
+  `LayeredStackSolver` seam + a concrete `TmmLayeredSolver`, the `core.layered` slab model +
+  z-slicer, and a pluggable `run_pipeline(optical_solver=...)` are built and validated vs the
+  FEM -- so the port reduces to wiring `RCWAStack` to the seam + the structured-slab path.
 - **Iterative/scaling solver** -- BDDC is in; a NGSolve-AMS/HYPRE binding is the next rung for
   large 3D (Part D). The non-ENZ mechanisms are well-conditioned, so this is now viable.
 - **AC/transient carriers** -- the full dynamics axis (after the lumped-RC stopgap).
