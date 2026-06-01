@@ -46,18 +46,20 @@ def resonance_dip(wavelengths_nm: Sequence[float],
     if len(lam) < 3 or i == 0 or i == len(lam) - 1:
         return float(lam[i]), float(y[i])
 
-    x0, x1, x2 = lam[i - 1], lam[i], lam[i + 1]
-    y0, y1, y2 = y[i - 1], y[i], y[i + 1]
-    denom = (y0 - 2.0 * y1 + y2)
-    if abs(denom) < 1e-30:
+    xs = lam[i - 1:i + 2]
+    ys = y[i - 1:i + 2]
+    # Exact parabola through the 3 (possibly unequally-spaced) points: y = a x^2
+    # + b x + c. np.polyfit on exactly 3 points is the exact interpolant; the
+    # vertex is -b/2a. (The old symmetric-step formula was exact only on a
+    # uniform grid -- it biased the dip by up to a full step on a non-uniform one.)
+    a, b, c = np.polyfit(xs, ys, 2)
+    if a <= 1e-30:                       # not an upward parabola -> no interior min
         return float(x1), float(y1)
-    # Vertex offset for a parabola through 3 (here unequally-spaced-safe via
-    # the symmetric-step approximation; exact for uniform spacing).
-    h = 0.5 * (x2 - x0)
-    dx = 0.5 * (y0 - y2) / denom * h
-    lam_dip = float(x1 + dx)
-    val_dip = float(y1 - 0.25 * (y0 - y2) * dx / h) if h != 0 else float(y1)
-    return lam_dip, val_dip
+    lam_dip = -b / (2.0 * a)
+    if not (xs[0] <= lam_dip <= xs[-1]):  # vertex outside the bracket -> fall back
+        return float(x1), float(y1)
+    val_dip = a * lam_dip ** 2 + b * lam_dip + c
+    return float(lam_dip), float(val_dip)
 
 
 def resonance_shift(wavelengths_nm: Sequence[float],
