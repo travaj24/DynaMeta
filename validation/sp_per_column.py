@@ -58,7 +58,8 @@ def main():
     ok = lateral_varying and few_solves and eps_varies
     print("[t] *** PER-COLUMN SP: lateral_varying={} cached_solves={} eps_lateral_contrast={} -> {} ***".format(
         bool(lateral_varying), bool(few_solves), bool(eps_varies), "PASS" if ok else "FAIL"), flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

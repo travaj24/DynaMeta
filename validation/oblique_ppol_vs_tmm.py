@@ -57,7 +57,8 @@ def main():
     r = [run("air|slab2|air", 1.0), run("air|slab2|sub1.5", 1.5)]
     print("[t] *** P-POL OBLIQUE vs TMM (0-30deg): {} ***".format("PASS" if all(r) else "FAIL"),
            flush=True)
+    return all(r)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

@@ -19,3 +19,4 @@ print("[t] gate+1V: n_top/n_bg={:.3f} (accum)  n_bot/n_bg={:.3f}".format(
 ok = cf.ndim == 3 and n.ndim == 3 and n[:, :, -1].mean() > n[:, :, 0].mean()
 print("[t] *** devsim_3d -> CarrierField(ndim=3): {} ***".format("OK" if ok else "FAIL"), flush=True)
 solver.teardown()
+raise SystemExit(0 if ok else 1)

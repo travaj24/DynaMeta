@@ -51,7 +51,8 @@ def main():
                 "OK" if good else "MISMATCH(dR={:.3f},dT={:.3f},dA={:.3f})".format(dR, dT, dA)), flush=True)
     print("[t] *** ADVERSARIAL LOSSY OBLIQUE vs tmm (s+p, R/T/A): {} ***".format("PASS" if ok else "FAIL"),
            flush=True)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

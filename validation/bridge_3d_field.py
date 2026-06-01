@@ -43,3 +43,4 @@ ok = v.ndim == 3 and re_top < re_bot     # accumulation lowers Re(eps) toward EN
 print("[t] *** bridge ndim=3 path: {} (accumulation lowers Re(eps) at the gate) ***".format(
     "OK" if ok else "FAIL"), flush=True)
 solver.teardown()
+raise SystemExit(0 if ok else 1)
