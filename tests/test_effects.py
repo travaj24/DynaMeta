@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, DeltaEffect, as_tensor,
-                                   PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel)
+                                   PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel,
+                                   MagnetoOpticModel)
 from dynameta.materials.optical_model import ConstantOptical
 
 
@@ -124,3 +125,21 @@ def test_thermo_optic_reduces_and_shifts_index():
     assert complex(m0.eps({"T": 500.0}, 1300e-9)) == pytest.approx(complex(n0 ** 2, 0.0))  # dn/dT=0
     with pytest.raises(ValueError):
         m.eps({}, 1300e-9)                                                   # T required
+
+
+def test_magneto_optic_gyrotropic_tensor():
+    eps_r, g = 2.25, 0.05
+    mo = MagnetoOpticModel(eps_r=eps_r, g=g)
+    T = np.asarray(mo.eps({}, 1550e-9))                                       # default magnetization=1
+    assert T.shape == (3, 3)
+    # gyrotropic structure: diagonal eps_r, off-diagonal +/- i g, Hermitian
+    assert np.allclose(np.diag(T), eps_r)
+    assert T[0, 1] == pytest.approx(1j * g) and T[1, 0] == pytest.approx(-1j * g)
+    assert T[0, 2] == 0 and T[2, 0] == 0 and T[1, 2] == 0
+    assert np.allclose(T, T.conj().T)                                        # Hermitian -> lossless
+    # circular + axial eigenvalues {eps_r - g, eps_r, eps_r + g}
+    assert np.allclose(np.sort(np.linalg.eigvals(T).real), [eps_r - g, eps_r, eps_r + g])
+    # magnetization scales/flips g; 0 reduces to isotropic eps_r*I
+    assert np.asarray(mo.eps({"magnetization": -1.0}, 1550e-9))[0, 1] == pytest.approx(-1j * g)
+    assert np.allclose(np.asarray(mo.eps({"magnetization": 0.0}, 1550e-9)), eps_r * np.eye(3))
+    assert np.allclose(np.asarray(MagnetoOpticModel(eps_r, 0.0).eps({}, 1550e-9)), eps_r * np.eye(3))

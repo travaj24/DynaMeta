@@ -431,3 +431,42 @@ class LiquidCrystalModel:
         nhat = xp.stack([c, xp.zeros_like(c), s])         # (3,) optic axis (no in-place build)
         eps = (self.n_o ** 2) * xp.eye(3) + (self.n_e ** 2 - self.n_o ** 2) * xp.outer(nhat, nhat)
         return eps + 0j                                   # complex (Im=0 here)
+
+
+@dataclass
+class MagnetoOpticModel:
+    """Magneto-optic (gyrotropic) EffectModel -- a magnetized medium in the polar Faraday geometry
+    (magnetization along z, propagation along z). The permittivity is the gyrotropic tensor
+
+        eps = [[eps_r, i g, 0], [-i g, eps_r, 0], [0, 0, eps_r]]        (3x3, Hermitian for real g)
+
+    with `eps_r` the base (isotropic) permittivity and `g` the gyration -- the off-diagonal
+    magneto-optic coupling (~ Verdet constant x B). The two normal modes for z-propagation are
+    circular polarizations with indices n_pm = sqrt(eps_r +/- g), so a linearly polarized wave through
+    thickness L has its plane of polarization rotated by the Faraday angle
+    theta_F = (pi L / lambda) Re(n_+ - n_-). Reads an optional fields['magnetization'] in [-1, 1] that
+    SCALES g (sign = magnetization direction; default +1), so the same model serves a static film or a
+    field-driven magnetization. Reduces EXACTLY to the isotropic eps_r * I when g (or magnetization)
+    is 0. Backend-agnostic in the magnetization (numpy / cupy / jax).
+
+    For real eps_r and real g the tensor is HERMITIAN -> the medium is LOSSLESS (energy-conserving,
+    consistent with exp(-i omega t), Im(eps) > 0 for absorbers). Validated against an analytic
+    circular-eigenmode Faraday-rotation reference in validation/magneto_optic_faraday.py.
+
+    FEM NOTE: the gyrotropic tensor has nonzero (imaginary) OFF-DIAGONAL entries, which NGSolve
+    6.2.2604 mis-assembles under PML (the confirmed limitation eps_assembler._check_diagonal guards;
+    every formulation tested gives the same energy-non-conserving result, and 6.2.2604 is the latest
+    release). The constitutive model + the Faraday physics are validated analytically here; the
+    off-diagonal FEM solve is deferred until a fixed NGSolve ships."""
+    eps_r: float
+    g: float
+
+    def eps(self, fields: dict, lambda_m: float):
+        m_in = (fields or {}).get("magnetization", 1.0)
+        xp = array_namespace(m_in)
+        g = self.g * xp.asarray(m_in) + 0j
+        e = xp.asarray(self.eps_r) + 0j
+        zero = xp.asarray(0.0) + 0j
+        return xp.stack([xp.stack([e, 1j * g, zero]),
+                         xp.stack([-1j * g, e, zero]),
+                         xp.stack([zero, zero, e])])       # (3,3) gyrotropic, Hermitian for real g
