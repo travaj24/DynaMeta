@@ -30,3 +30,15 @@ def test_thermal_rejects_bad_input():
         steady_layered_temperature([1.4, 2.0], [100e-9], 1e6)     # mismatched lengths
     with pytest.raises(ValueError):
         steady_layered_temperature([0.0], [100e-9], 1e6)          # non-positive k
+    with pytest.raises(ValueError):
+        steady_layered_temperature([np.nan, 1.0], [1e-7, 1e-7], 1e6)   # non-finite k
+
+
+def test_uniform_temperature_rise_rejects_bad_input():
+    # the lumped helper must reject a k/d length mismatch (else np broadcasts a wrong R_total) ...
+    with pytest.raises(ValueError):
+        uniform_temperature_rise(1e6, [1.4, 2.0, 3.0], [100e-9])  # mismatched lengths
+    with pytest.raises(ValueError):
+        uniform_temperature_rise(1e6, [0.0], [100e-9])            # non-positive k
+    with pytest.raises(ValueError):
+        uniform_temperature_rise(1e6, [np.inf], [100e-9])         # non-finite k
