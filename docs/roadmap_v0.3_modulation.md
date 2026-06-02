@@ -131,7 +131,26 @@ line, a rigorous 2D exciton binding(F), and an MQW stack/coupled-well variant ar
   sub-bands + a simple exciton model -> `ElectroAbsorptionModel` (d(alpha), d(n) via KK).
 - *Oracle:* known QCSE redshift vs field; flat-band reduction. (Biggest reuse of what exists.)
 
-### Phase 4 -- Reconfigurable (PCM / LC / graphene)
+### Phase 4 -- Reconfigurable (PCM / LC / graphene)  **[DONE 2026-06-02]**
+*Built all three families on the spine: `core/effects.PCMModel` (Bruggeman effective-medium mix of
+amorphous/crystalline eps by crystalline fraction; exact end-state reduction, passive branch),
+`core/effects.LiquidCrystalModel` (uniaxial tensor eps = n_o^2 I + (n_e^2-n_o^2) n-hat(x)n-hat from
+a director tilt -> the Phase-0b tensor FEM) + `carriers/lc_director.py` (1-constant Frank-elastic
+Freedericksz driver: exact threshold V_th = pi sqrt(K/(eps0 dEps)), supercritical theta_max(V) by
+monotone elliptic-quadrature bisection), and `core/graphene.py` (Kubo surface conductivity
+sigma(E_F,omega) intraband Drude + universal interband sigma0=e^2/4hbar + the analytic conductive-
+sheet Fresnel r=(n1-n2-Z0 sigma)/(n1+n2+Z0 sigma)). ORACLES: `validation/reconfigurable_modulators.py`
+(pure numpy, no FEM) -- PCM endpoint/monotonic/passive/Wiener-bounds; LC Freedericksz threshold +
+rotation-invariant uniaxial eigenvalues {n_o^2,n_o^2,n_e^2} + isotropic reduction + n_eff(theta);
+graphene universal-sigma0 + Pauli blocking (Re(sigma)->0 once 2E_F>hbar*omega) + gate-tunable
+absorption + R+T+A=1 + sigma->0 Fresnel -- and `validation/lc_uniaxial_fem.py` (tensor FEM: the
+PLANAR (theta=0) and HOMEOTROPIC (theta=90) principal director states == TMM at n_o/n_e). REMAINING:
+(a) **off-diagonal-tensor FEM** -- this LC oracle SURFACED a pre-existing P0b gap: the per-region
+matrix-CF matvec mis-evaluates a tensor with nonzero off-diagonal entries under PML (a tilted
+director, magneto-optic), so the intermediate-tilt FEM is deferred and assemble_eps_cf now WARNS;
+the tilted angular physics is validated analytically. (b) a graphene FEM surface-current boundary
+condition (the analytic sheet oracle + conductivity model ship now); (c) an LC/PCM thermal-pulse
+switching driver and elastic anisotropy (K11!=K33) are follow-ons.*
 - `PCMModel`: crystalline-fraction state -> effective (n,k) (GST/Sb2S3/VO2); optional
   thermal-pulse switching driver.
 - **LC director driver** (Frank-elastic + field) -> uniaxial tensor along n-hat (reuses
