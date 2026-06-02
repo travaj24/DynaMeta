@@ -19,14 +19,9 @@ import devsim as ds
 
 from dynameta.carriers import eq_registry as _R
 
-# Constants (SI)
-Q_E   = 1.602176634e-19
-EPS0  = 8.8541878128e-12
-KB    = 1.380649e-23
-HBAR  = 1.054571817e-34
-M_E   = 9.1093837015e-31
-T_REF = 300.0
-V_T   = KB * T_REF / Q_E
+# Physical constants (SI): single source in core/constants. Re-exported here because several
+# carrier modules historically import Q_E / V_T / EPS0 / M_E from physics_equilibrium.
+from dynameta.constants import Q_E, EPS0, KB, HBAR, M_E, T_REF, V_T  # noqa: E402,F401
 
 _AH_C = 3.0 * math.sqrt(math.pi) / 4.0
 

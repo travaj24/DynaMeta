@@ -47,7 +47,7 @@ from __future__ import annotations
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, V_T, setup_phi_c0, _poisson_edge_models)
+    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.einstein import GA as _GA, GB as _GB, GC as _GC, GD as _GD
 
@@ -78,7 +78,6 @@ def _edge_with_derivs(device, region, name, eq, wrt):
 def setup_semiconductor_region_dd(device: str, region: str, *,
                                     n_bg_m3: float, eps_static: float,
                                     dos_mass_kg: float, mobility_m2Vs: float) -> None:
-    EPS0 = 8.8541878128e-12
     setup_phi_c0(device, region, n_bg_m3, dos_mass_kg)   # Phi_c0, N_c, N_D
     ds.set_parameter(device=device, region=region, name="Permittivity", value=eps_static * EPS0)
     ds.set_parameter(device=device, region=region, name="ElectronCharge", value=Q_E)
