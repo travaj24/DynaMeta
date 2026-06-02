@@ -56,7 +56,14 @@ Two things block the entire right-hand column: (1) the response map sees only `n
 
 ## Part C -- The plan
 
-### Phase 0 -- Architectural keystones (shared by all four families; build ONCE)
+### Phase 0 -- Architectural keystones (shared by all four families; build ONCE)  **[DONE 2026-06-02]**
+*Built: `core/effects.py` (`EffectModel` Protocol + `OpticalModelEffect`/`ComposedEffect`); the
+bridge now passes a `fields` dict (`{n, E, T, ...}`) to the response (`MaterialEpsMap.eps_grid`);
+`EpsField` carries a per-point 3x3 tensor; the assembler builds a domain-wise 3x3 matrix CF and
+`solve_fem` uses the matvec `(eps.u).v` weak form + a tensor `A_independent`. Isotropic-reduction
+gate `validation/tensor_isotropic_gate.py`: a diagonal `eps*I` reproduces the scalar R/T/A to
+~1e-16. (NGSolve gotchas captured in the assembler/solver comments: domain dispatch must be the
+OUTER CF list; matrix zero-entries must be literal int 0, not complex 0j.)*
 - **0a FieldBundle seam.** Generalize `NToEpsMap` -> `EffectModel(fields: dict, lambda) -> eps`;
   the bridge assembles + passes the full local-field dict `{E = -grad(phi), n, T, ...}` on
   the aligned grid. Drude becomes one `EffectModel`. An `EffectModel` registry + composition
@@ -65,7 +72,16 @@ Two things block the entire right-hand column: (1) the response map sees only `n
   `VoxelCoefficient`/assembler + the FEM curl-curl weak form handle a tensor coefficient.
   *Gate:* reduces EXACTLY to today's scalar results when the tensor is isotropic.
 
-### Phase 1 -- Field-effect EO (Pockels / Kerr / Franz-Keldysh)  [highest leverage]
+### Phase 1 -- Field-effect EO (Pockels / Kerr / Franz-Keldysh)  [highest leverage]  **[DONE 2026-06-02]**
+*Built: `core/effects.PockelsEffect` (full 6x3 r-tensor, eps(E)=(B0+dB)^-1), `KerrEffect`
+(isotropic quadratic), `FranzKeldyshEffect` (simplified electro-absorption); `carriers/
+electrostatics.py` (series-capacitor E-field driver). ORACLE `validation/
+pockels_phase_modulator.py`: electrostatics -> Pockels tensor -> tensor FEM reproduces the
+independent TMM scalar-n_y solve (|dR|=2e-3, dphi modulation matched to 2.5e-4 rad, 3.9 deg over
+0-6 V) -- proves the generalized spine on a real non-carrier modulator. REMAINING: 1a is the
+analytic series-cap field (exact for a layered parallel-plate); a full Laplace/Poisson FEM driver
+for laterally non-uniform geometries, the crystal-orientation rotation, and a rigorous
+Airy/Kramers-Kronig Franz-Keldysh are follow-ons.*
 - **1a Electrostatics driver:** a pure-dielectric Laplace/Poisson solve for E = -grad(phi)
   (no mobile carriers) -- cheap, a subset of the existing DEVSIM Poisson.
 - **1b `PockelsModel`** (EO tensor r + crystal orientation), `KerrModel`, `FranzKeldyshModel`
