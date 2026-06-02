@@ -21,6 +21,43 @@ from dynameta.core.units import NM_PER_M
 S = NM_PER_M   # m -> nm (tmm's d_list uses the same unit as the wavelength); single source
 
 
+def _passive_sqrt(eps) -> complex:
+    """n = sqrt(eps) on the PASSIVE branch (Im(n) >= 0, decaying). For a LOSSLESS medium with
+    Re(eps) < 0 (an ideal metal / ENZ below plasma) the sign of the +/-0.0j imaginary part decides
+    the branch: np.sqrt(-2+0.0j)=+1.41j (decaying, physical) but np.sqrt(-2-0.0j)=-1.41j (GAIN). A
+    spurious -0.0j (from a fit/interp/ConstantOptical) would silently flip a metal into a gain
+    medium, so when Im(eps) is negligible we force Im(n) >= 0. A GENUINELY lossy/gain eps (|Im| not
+    negligible) is left to the principal branch and caught downstream by the energy-budget guard."""
+    eps = complex(eps)
+    n = np.sqrt(eps)
+    if abs(eps.imag) <= 1e-12 * (abs(eps.real) + 1.0) and n.imag < 0.0:
+        n = -n
+    return complex(n)
+
+
+def _require_theta(theta_deg) -> float:
+    """Validate a real incidence angle in [0, 90) deg (>=90 is grazing/unphysical for a lossless
+    superstrate; tmm's internal assert there is opaque). Returns the float angle."""
+    t = float(theta_deg)
+    if not (0.0 <= t < 90.0):
+        raise ValueError("theta_deg must be in [0, 90) degrees; got {}.".format(theta_deg))
+    return t
+
+
+def _check_energy_budget(R: float, T: float, *, where: str, tol: float = 1e-6) -> float:
+    """Return A = 1 - R - T, but RAISE if the energy budget is violated (R, T, or A < -tol). tmm's
+    gain-guard only checks the two semi-infinite END media; an INTERIOR slab with Im(eps) < 0 (a
+    sign/convention mistake = gain) silently yields T > 1, A < 0. Since this module is the FEM
+    validation ORACLE, a wrong-but-plausible R/T must not pass silently."""
+    A = 1.0 - R - T
+    if R < -tol or T < -tol or A < -tol:
+        raise ValueError(
+            "{}: TMM energy budget violated (R={:.6f}, T={:.6f}, A=1-R-T={:.6f}); a layer likely "
+            "has Im(eps) < 0 (GAIN) -- check the eps sign convention (exp(-iwt) => Im(eps) >= 0 "
+            "for a passive/absorbing medium).".format(where, R, T, A))
+    return A
+
+
 def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: complex,
               lambda_m: float, *, theta_deg: float = 0.0, pol: str = "s") -> Tuple[float, float, float]:
     """Coherent-TMM (R, T, A) for super | layers | sub at wavelength lambda_m.
@@ -33,28 +70,37 @@ def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: 
       pol            : 's' or 'p'.
 
     Returns (R, T, A) with A = 1 - R - T (TMM's exact absorbed fraction). T already
-    carries the correct angle/index power factor (tmm handles it).
+    carries the correct angle/index power factor (tmm handles it). RAISES if the energy
+    budget is violated (an interior gain layer; see _check_energy_budget).
+
+    NOTE: for a near-opaque layer (Im(delta) > 35) tmm clamps the layer and emits a one-time
+    stdout notice (it modifies the layer to "let ~1 photon in 1e30 through"); the numerical
+    effect on R/T is negligible (T ~ 1e-31).
     """
     import tmm
     if pol not in ("s", "p"):
         raise ValueError("pol must be 's' or 'p'")
+    theta_deg = _require_theta(theta_deg)
+    if abs(complex(n_super).imag) > 1e-9:                      # mirror _coh_tmm_stack's LTM-5 guard
+        raise ValueError("stack_rta: R/T/A and the energy budget A=1-R-T are defined only for a "
+                         "LOSSLESS incidence medium (Im(n_super)=0); got n_super={}.".format(n_super))
     n_list = [complex(n_super)] + [complex(n) for n, _ in layers] + [complex(n_sub)]
     # tmm wants d in the SAME unit as the wavelength; use nm for both. Ends are semi-infinite.
     lam_nm = float(lambda_m) * S
     d_list = [np.inf] + [float(d) * S for _, d in layers] + [np.inf]
-    res = tmm.coh_tmm(pol, n_list, d_list, math.radians(float(theta_deg)), lam_nm)
+    res = tmm.coh_tmm(pol, n_list, d_list, math.radians(theta_deg), lam_nm)
     R = float(res["R"])
     T = float(res["T"])
-    return R, T, float(1.0 - R - T)
+    return R, T, _check_energy_budget(R, T, where="stack_rta")
 
 
 def end_media_indices(design, lambda_m: float) -> Tuple[complex, complex]:
     """(n_super, n_sub) = sqrt(eps) of the Design's semi-infinite superstrate/substrate media
     at lambda_m. One helper so the complex-sqrt branch (which matters for a lossy cladding) is
     chosen in exactly one place -- used by run_pipeline and both layered extractors."""
-    n_super = np.sqrt(complex(design.materials.get(design.stack.superstrate_material).eps(lambda_m)))
-    n_sub = np.sqrt(complex(design.materials.get(design.stack.substrate_material).eps(lambda_m)))
-    return complex(n_super), complex(n_sub)
+    n_super = _passive_sqrt(design.materials.get(design.stack.superstrate_material).eps(lambda_m))
+    n_sub = _passive_sqrt(design.materials.get(design.stack.substrate_material).eps(lambda_m))
+    return n_super, n_sub
 
 
 def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[complex, float]], complex]:
@@ -69,8 +115,8 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
             raise ValueError(
                 "design_layer_stack: layer '{}' has inclusions -- the cell is laterally "
                 "structured and TMM does not apply; use the FEM solver.".format(L.name))
-        eps = complex(design.materials.get(L.background_material).eps(lambda_m))
-        layers.append((np.sqrt(eps), float(L.thickness_m)))
+        eps = design.materials.get(L.background_material).eps(lambda_m)
+        layers.append((_passive_sqrt(eps), float(L.thickness_m)))
     n_super, n_sub = end_media_indices(design, lambda_m)
     return n_super, layers, n_sub
 
@@ -92,14 +138,15 @@ def _coh_tmm_stack(stack, lambda_m, theta_deg, pol):
     if not stack.is_unstructured:
         raise ValueError("layered TMM requires an unstructured (all-scalar-slab) stack; "
                          "a laterally-structured slab needs the FEM solver / RCWA.")
+    theta_deg = _require_theta(theta_deg)
     if abs(complex(stack.n_super).imag) > 1e-9:                # LTM-5: mirror the FEM OPT-1 contract
         raise ValueError("layered TMM: R/T/A and the energy budget A=1-R-T are defined only "
                          "for a LOSSLESS incidence medium (Im(n_super)=0); got n_super={}."
                          .format(stack.n_super))
-    n_list = ([complex(stack.n_super)] + [np.sqrt(complex(s.eps)) for s in stack.slabs]
+    n_list = ([complex(stack.n_super)] + [_passive_sqrt(s.eps) for s in stack.slabs]
               + [complex(stack.n_sub)])
     d_list = [np.inf] + [float(s.thickness_m) * S for s in stack.slabs] + [np.inf]
-    return tmm.coh_tmm(pol, n_list, d_list, math.radians(float(theta_deg)), float(lambda_m) * S)
+    return tmm.coh_tmm(pol, n_list, d_list, math.radians(theta_deg), float(lambda_m) * S)
 
 
 def layered_rta(stack, lambda_m, *, theta_deg: float = 0.0, pol: str = "s"):
@@ -107,7 +154,7 @@ def layered_rta(stack, lambda_m, *, theta_deg: float = 0.0, pol: str = "s"):
     (slice a graded eps(z) with core.layered.slice_profile, then call this)."""
     res = _coh_tmm_stack(stack, lambda_m, theta_deg, pol)
     R, T = float(res["R"]), float(res["T"])
-    return R, T, float(1.0 - R - T)
+    return R, T, _check_energy_budget(R, T, where="layered_rta")
 
 
 class TmmLayeredSolver:
@@ -121,8 +168,9 @@ class TmmLayeredSolver:
         res = _coh_tmm_stack(stack, lambda_m, theta, _pol_for(optical))
         r, t = complex(res["r"]), complex(res["t"])
         R, T = float(res["R"]), float(res["T"])
+        A = _check_energy_budget(R, T, where="TmmLayeredSolver")
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                             solve_time_s=0.0, t=t, T=T, A=float(1.0 - R - T))
+                             solve_time_s=0.0, t=t, T=T, A=A)
 
 
 def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None):

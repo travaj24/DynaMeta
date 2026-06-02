@@ -98,6 +98,17 @@ def assemble_eps_cf(geo: OpticalGeometry,
         if region not in eps_by_region:
             raise ValueError("no EpsField for mesh region '{}' (bridge/alignment "
                               "coverage gap)".format(region))
+    # Reverse coverage: an eps_by_region key with no matching mesh material is a stale region name
+    # / bridge-vs-mesh naming drift. The CF is built by iterating `mats`, so the extra entry is
+    # SILENTLY dropped -- and the physics it carried (e.g. a biased-carrier eps) never reaches the
+    # solve while some other key satisfies that material. Fail loudly (anti-silent-failure).
+    extra = [k for k in eps_by_region if k not in set(mats)]
+    if extra:
+        raise ValueError(
+            "assemble_eps_cf: eps_by_region has {} entr{} with no matching mesh material: {} "
+            "(stale region name / bridge-vs-mesh naming drift; silently ignored otherwise). Mesh "
+            "materials are: {}.".format(len(extra), "y" if len(extra) == 1 else "ies",
+                                        sorted(extra), sorted(mats)))
     if not any(eps_by_region[m].is_tensor for m in mats):
         # scalar path (unchanged): one domain-wise scalar CF keyed by material ordinal
         return ng.CoefficientFunction([_scalar_region_cf(eps_by_region[m]) for m in mats])

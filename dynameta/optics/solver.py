@@ -59,6 +59,11 @@ _OBLIQUE_FORMULATION = "phase_in_space"
 # Sign of the transverse-phase term on the TEST envelope's modified curl (envelope
 # route only): trial carries exp(+i k_par.r) (+kcross), test the conjugate (-kcross).
 _TEST_KCROSS_SIGN = -1.0
+# Relative-residual threshold above which the two-wave (up/down) R/T fit is flagged unreliable: the
+# probe band is then not a clean up/down field (super/substrate buffer too thin -> undecayed
+# diffraction orders, or PML leak-back). Conservative -- the real failure mode gives O(1) residuals,
+# while a clean propagating 0-order fits to far below this, so validated cases do not false-fire.
+_FIT_RELRES_WARN = 5e-2
 
 
 def _detect_bloch_dirs(geo: OpticalGeometry):
@@ -143,6 +148,14 @@ def _incidence_geometry(optical, n_super):
     phi = math.radians(float(getattr(optical, "azimuth_deg", 0.0) or 0.0))
     oblique = abs(theta) > 1e-9
     conical = abs(phi) > 1e-9
+    if abs(complex(n_super).imag) > 1e-9:
+        # R/R0/T normalization and the up/down-wave separation assume the incident wave does not
+        # itself decay; a lossy incidence medium makes the energy budget A=1-R-T meaningless. The
+        # TMM oracle raises on this (LTM-5); mirror it so the FEM path is not silently wrong at
+        # NORMAL incidence too (the n_super!=1 guard below is oblique-only). (Audit OPT-1 mirror.)
+        raise NotImplementedError(
+            "solve_fem: R/T/A and the energy budget A=1-R-T are defined only for a LOSSLESS "
+            "incidence medium (Im(n_super)=0); got n_super={:.4g}.".format(complex(n_super)))
     if oblique and optical.polarization == "x":
         raise NotImplementedError(
             "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
@@ -220,6 +233,17 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # WRONG (vacuum) wavevector. Reduces exactly to the plain incident wave when
     # n_sub==n_super==1 (R0=0, T0=1). Incidence medium assumed vacuum (kx=k0 sin th).
     kz_sub = complex(np.sqrt(complex((complex(n_sub) * k0) ** 2 - kx ** 2 - ky ** 2)))
+    if abs(kz_sub) <= 1e-6 * k0:
+        # At the grazing cutoff the substrate 0-order is non-propagating and |kz_sub| ~ 0. kz_sub
+        # is a DIVISOR in the p-pol interface BC matrix and the T power factor (and the s-pol
+        # substrate fit degenerates to a rank-deficient DC fit), so R/T blow up to inf/NaN here.
+        # Refuse rather than return nonsense. (A deep-evanescent substrate keeps |kz_sub| large --
+        # that case returns T~0 sensibly and is NOT caught here.)
+        raise NotImplementedError(
+            "solve_fem: substrate 0-order is at the grazing cutoff (|kz_sub|={:.3e} ~ 0 nm^-1): no "
+            "propagating transmitted order and R/T are singular. n_sub={:.4g}, sin(theta)={:.4g}. "
+            "Nudge the angle/wavelength off the exact cutoff.".format(
+                abs(kz_sub), complex(n_sub), math.sin(theta)))
     kz_s_c = complex(kz_s)
     z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
               else geo.z_sub_interface_nm)                       # substrate-top interface (nm)
@@ -371,6 +395,31 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
+    # Backstop sanity: a bad fit / near-grazing case can push R or T well outside [0,1] or make
+    # A=1-R-T strongly negative (energy created). Thresholds are LOOSE (5e-2): the documented
+    # non-angle-aware-PML oblique error and ordinary FEM numerical error put A slightly negative
+    # (~1-2%) on VALIDATED cases, so a tight bound would false-fire there. This backstop is for
+    # GROSS violations only (a broken fit / grazing blow-up gives A ~ -0.2 or R/T >> 1); the
+    # finer-grained signals are the fit-residual and energy-closure warnings above.
+    for _nm, _v in (("R", R), ("T", T)):
+        if _v is not None and (not math.isfinite(_v) or _v < -5e-2 or _v > 1.0 + 5e-2):
+            warnings.warn("solve_fem: unphysical {}={} (well outside [0,1]); the solve/fit is "
+                          "unreliable.".format(_nm, _v), stacklevel=2)
+    if A is not None and A < -5e-2:
+        warnings.warn("solve_fem: unphysical A=1-R-T={:.4f} << 0 (energy created); R/T are "
+                      "unreliable.".format(A), stacklevel=2)
+    # Energy-closure check: the budget A=1-R-T and the INDEPENDENTLY measured volumetric absorption
+    # must agree for lossless cladding (audit OS-4). A large gap means the R/T extraction or the
+    # field is inconsistent -- surface it on the SOLVE path (previously only validation scripts
+    # compared the two). The 5e-2 band tolerates the OS-4 lossy-cladding case without false-firing
+    # on the validated lossless ones.
+    if A is not None and A_independent is not None and abs(A - A_independent) > 5e-2:
+        warnings.warn(
+            "solve_fem: energy-closure mismatch -- budget A=1-R-T={:.4f} vs independently measured "
+            "volumetric absorption A_independent={:.4f} (|diff|={:.2e} > 5e-2); R/T are "
+            "inconsistent with the field (or the cladding is lossy, where A_independent is only "
+            "qualitative). Treat R/T/A as suspect.".format(
+                A, A_independent, abs(A - A_independent)), stacklevel=2)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent)
 
@@ -409,6 +458,25 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
     return np.array(out)
 
 
+def _lstsq_2wave(M, Es, *, where):
+    """Two-wave (up/down) least-squares fit M @ c = Es WITH a goodness-of-fit guard. lstsq
+    silently returns the best 2-parameter projection even when Es is NOT a clean two-wave field
+    (buffer too thin -> undecayed diffraction orders, or PML leak-back), giving a silently-wrong
+    0-order coefficient. Warn when the relative residual exceeds _FIT_RELRES_WARN so the resulting
+    R/T are not trusted. Returns the fit coefficients."""
+    coeffs, *_ = np.linalg.lstsq(M, Es, rcond=None)
+    denom = float(np.linalg.norm(Es))
+    if denom > 1e-300:
+        relres = float(np.linalg.norm(np.asarray(Es) - M @ coeffs) / denom)
+        if relres > _FIT_RELRES_WARN:
+            warnings.warn(
+                "solve_fem {} fit: two-wave 0-order residual {:.2e} (> {:.0e}) -- the probe band "
+                "is not a clean up/down field (super/substrate buffer too thin, undecayed "
+                "diffraction orders, or PML leak-back); R/T are unreliable. Thicken the buffer or "
+                "refine the mesh.".format(where, relres, _FIT_RELRES_WARN), stacklevel=3)
+    return coeffs
+
+
 def _reflection(mesh, gfu, kz_s, proj, kx, ky, geo: OpticalGeometry) -> complex:
     """0-order reflection: least-squares fit of the cell-averaged (proj-projected,
     demodulated) scattered field over z-planes in the superstrate buffer."""
@@ -424,7 +492,7 @@ def _reflection(mesh, gfu, kz_s, proj, kx, ky, geo: OpticalGeometry) -> complex:
     Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
     # upward (reflected) exp(+i kz_s z) + residual downward exp(-i kz_s z)
     M = np.column_stack([np.exp(+1j * kz_s * z_probes), np.exp(-1j * kz_s * z_probes)])
-    coeffs, *_ = np.linalg.lstsq(M, Es, rcond=None)
+    coeffs = _lstsq_2wave(M, Es, where="reflection")
     return complex(coeffs[0])
 
 
@@ -445,7 +513,7 @@ def _transmission(mesh, gfu, kz_sub, proj, kx, ky, geo: OpticalGeometry):
     Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
     # downward (transmitted) exp(-i kz_sub z) + any upward residual exp(+i kz_sub z)
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
-    coeffs, *_ = np.linalg.lstsq(M, Es, rcond=None)
+    coeffs = _lstsq_2wave(M, Es, where="transmission")
     return complex(coeffs[0])
 
 
@@ -462,7 +530,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, geo: OpticalGeometry, eps_sup, 
     zr = np.linspace(zlo, zhi, 7)
     Exr = _cell_average(mesh, E_tot, zr, Px, Py, (1.0, 0.0, 0.0), kx, 0.0)   # tangential Ex (p-pol: phi=0)
     Mr = np.column_stack([np.exp(-1j * kz_s * zr), np.exp(+1j * kz_s * zr)])
-    cr, *_ = np.linalg.lstsq(Mr, Exr, rcond=None)
+    cr = _lstsq_2wave(Mr, Exr, where="p-pol reflection")
     a_d, a_u = complex(cr[0]), complex(cr[1])                     # incident-dir, reflected-dir Ex
     r = a_u / a_d if abs(a_d) > 1e-30 else 0j
     R = float(abs(r) ** 2)
@@ -475,7 +543,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, geo: OpticalGeometry, eps_sup, 
     zt = np.linspace(zs_lo + pad, zs_hi - pad, 7)
     Ext = _cell_average(mesh, E_tot, zt, Px, Py, (1.0, 0.0, 0.0), kx, 0.0)
     Mt = np.column_stack([np.exp(-1j * kz_sub * zt), np.exp(+1j * kz_sub * zt)])
-    ct, *_ = np.linalg.lstsq(Mt, Ext, rcond=None)
+    ct = _lstsq_2wave(Mt, Ext, where="p-pol transmission")
     t = complex(ct[0]) / a_d if abs(a_d) > 1e-30 else 0j          # transmitted Ex / incident Ex
     factor = (eps_sub / eps_sup) * (kz_s / kz_sub)
     T = float(abs(t) ** 2 * factor.real)
