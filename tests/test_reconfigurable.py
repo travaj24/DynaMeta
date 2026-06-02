@@ -7,7 +7,7 @@ import pytest
 
 from dynameta.constants import HBAR, C_LIGHT, Q_E as Q
 from dynameta.core.effects import PCMModel, LiquidCrystalModel
-from dynameta.core.graphene import graphene_sigma, sheet_rt, SIGMA0
+from dynameta.core.graphene import graphene_sigma, sheet_rt, SIGMA0, Z0
 
 LAM = 1.55e-6
 
@@ -18,6 +18,11 @@ def test_pcm_reduces_to_end_states():
     assert pcm.eps({"crystalline_fraction": 0.0}, LAM) == pytest.approx(ea, abs=1e-12)  # amorphous
     assert pcm.eps({"crystalline_fraction": 1.0}, LAM) == pytest.approx(ec, abs=1e-12)  # crystalline
     assert pcm.eps({}, LAM) == pytest.approx(ea, abs=1e-12)                             # default f=0
+    # lossless negative-real endpoint (ENZ/metal idealization): exact by short-circuit, NOT the
+    # wrong tie-break root (-eps_a/2) the bare quadratic would pick at the boundary (audit PCM-1)
+    enz = PCMModel(eps_amorphous=complex(6.0, 0.0), eps_crystalline=complex(-10.0, 0.0))
+    assert enz.eps({"crystalline_fraction": 1.0}, LAM) == pytest.approx(complex(-10.0, 0.0), abs=1e-12)
+    assert enz.eps({"crystalline_fraction": 0.0}, LAM) == pytest.approx(complex(6.0, 0.0), abs=1e-12)
 
 
 def test_pcm_monotonic_passive_and_bounded():
@@ -72,18 +77,34 @@ def test_graphene_universal_conductivity_and_pauli_blocking():
     assert np.all(np.diff(re) < 0)                            # monotone collapse with gating
     assert graphene_sigma(2.0 * Q, LAM).real > 0              # passive (Re(sigma) > 0)
     assert hw / Q == pytest.approx(0.80, abs=0.02)
+    # the EXACT finite-T (sinh/cosh) interband form gives a VANISHING blocked-tail deep in the
+    # Pauli-blocked region (2E_F >> hbar omega) -- an arctan smoothing would leave ~1.3% (audit
+    # GRAPH-1). Use a long tau so the intraband Drude loss is negligible and the interband tail shows.
+    assert graphene_sigma(1.0 * Q, LAM, tau_s=1e-11).real / SIGMA0 < 1e-3
 
 
 def test_graphene_sheet_energy_conservation_and_fresnel_limit():
     n1, n2 = 1.0, 1.5
-    # energy budget R + T + A = 1, A >= 0 for a passive sheet
-    r, t, R, T, A = sheet_rt(n1, n2, graphene_sigma(0.0, LAM))
-    assert R + T + A == pytest.approx(1.0, abs=1e-9) and A >= 0.0
+    # INDEPENDENT energy balance (not the tautological A:=1-R-T): the flux deficit equals the Ohmic
+    # sheet dissipation A_poynting = Z0 Re(sigma) |t|^2 / n1 computed separately (audit F1).
+    s = graphene_sigma(0.0, LAM)
+    r, t, R, T, A = sheet_rt(n1, n2, s)
+    assert A == pytest.approx(Z0 * s.real * abs(t) ** 2 / n1, abs=1e-9) and A >= 0.0
     # gate-tunable absorption: ON (E_F=0) >> OFF (Pauli-blocked at E_F=0.6 eV)
     A_off = sheet_rt(n1, n2, graphene_sigma(0.6 * Q, LAM))[4]
     assert A > 5.0 * A_off
     # sigma -> 0 recovers the bare Fresnel reflection
     assert sheet_rt(n1, n2, 0.0)[0] == pytest.approx((n1 - n2) / (n1 + n2), abs=1e-12)
+
+
+def test_graphene_sheet_warns_on_gain_sheet():
+    import warnings
+    # a gain sheet (Re(sigma) < 0) violates passivity for exp(-iwt): sheet_rt must WARN (audit GRAPH-2)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _, _, R, T, A = sheet_rt(1.0, 1.0, complex(-1e-4, 0.0))
+    assert any(issubclass(x.category, RuntimeWarning) for x in w)
+    assert A < 0.0 and T > 1.0                                 # active sheet -> negative absorption
 
 
 def test_graphene_input_guards():

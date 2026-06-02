@@ -372,6 +372,13 @@ class PCMModel:
         if not (0.0 <= f <= 1.0):
             raise ValueError("fields['crystalline_fraction'] must be in [0, 1]")
         ea, ec = complex(self.eps_amorphous), complex(self.eps_crystalline)
+        # Exact end states by construction (independent of the root-pick tie-break): for a lossless
+        # negative-real endpoint the Im>=Im tie-break would otherwise pick the wrong real root at
+        # the boundary (audit PCM-1/PCM-2).
+        if f == 0.0:
+            return ea
+        if f == 1.0:
+            return ec
         b = ec * (3.0 * f - 1.0) + ea * (2.0 - 3.0 * f)
         s = np.sqrt(b * b + 8.0 * ea * ec)
         e_plus, e_minus = (b + s) / 4.0, (b - s) / 4.0
@@ -393,9 +400,10 @@ class LiquidCrystalModel:
     FEM NOTE: the two PRINCIPAL orientations -- planar (theta=0) and homeotropic (theta=pi/2) -- are
     DIAGONAL and flow correctly through the Phase-0b tensor-eps FEM (validation/lc_uniaxial_fem.py).
     An INTERMEDIATE tilt gives a nonzero off-diagonal eps_xz, which the current FEM matrix-CF matvec
-    mis-evaluates under PML (a tracked P0b follow-on; assemble_eps_cf warns). The tilted-director
-    ANGULAR physics is validated analytically (validation/reconfigurable_modulators.py); only the FEM
-    solve of an off-diagonal tensor is deferred."""
+    mis-evaluates under PML (a tracked P0b follow-on; assemble_eps_cf RAISES NotImplementedError for
+    off-diagonal tensors rather than return a silently-wrong result). The tilted-director ANGULAR
+    physics is validated analytically (validation/reconfigurable_modulators.py); only the FEM solve
+    of an off-diagonal tensor is deferred."""
     n_o: float
     n_e: float
 

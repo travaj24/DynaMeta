@@ -14,7 +14,7 @@ assembler + curl-curl matvec validated isotropically by tensor_isotropic_gate.py
 KNOWN LIMITATION (tracked P0b follow-on, surfaced by this oracle): an INTERMEDIATE tilt (0 < theta
 < 90) gives a tensor with nonzero OFF-DIAGONAL eps_xz, and the per-region matrix-CF matvec on the
 periodic PML mesh currently MIS-EVALUATES off-diagonal tensors (a y-ordinary wave that must see only
-eps_yy is corrupted by eps_xz). assemble_eps_cf now WARNS on off-diagonal tensors. The tilted-director
+eps_yy is corrupted by eps_xz). assemble_eps_cf now RAISES on off-diagonal tensors. The tilted-director
 ANGULAR physics is validated analytically in validation/reconfigurable_modulators.py (Freedericksz +
 rotation-invariant uniaxial eigenvalues + n_eff(theta)); only the FEM solve of an off-diagonal tensor
 is deferred. Run: python -m validation.lc_uniaxial_fem
