@@ -422,6 +422,46 @@ class LayeredDevsimBuilder:
                 n_scale = max(n_scale, float(t.n_bg_m3))
         return max(1e10, n_scale * 1e-12)
 
+    def set_ssac_gate(self, electrode_name: str, *, source_name: str = "V1",
+                      node_name: str = "vac") -> Tuple[str, str]:
+        """Repoint an already-built electrode from its bias-parameter Dirichlet to a CIRCUIT-DRIVEN
+        gate, so a small-signal AC sweep (ac_analysis.ssac_admittance) or a large-signal transient
+        (transient.transient_step) can excite it. Replaces the electrode's bias-Dirichlet
+        PotentialEquation with a circuit-node contact carrying an AC voltage source `source_name`
+        (circuit node `node_name` -> ground).
+
+        Call AFTER build_device()/solve() (the contact must exist). Then set the DC operating point
+        with ds.circuit_alter(name=source_name, value=Vg) + a DC solve before the ssac/transient
+        call. Returns (source_name, node_name).
+
+        This is the first-class form of the post-solve delete_contact_equation + setup_circuit_contact
+        reconfiguration. It also keeps the equation registry consistent -- forgets the stale
+        bias-contact record and records the circuit one -- so a later Gummel/staged solve restores the
+        AC drive, not the bias Dirichlet. Intended for the modulating GATE (a dielectric contact); on
+        a drift-diffusion ohmic ground it would repoint only Potential and leave the Electrons pin, so
+        a warning is issued in that case."""
+        if not self._built:
+            raise RuntimeError(
+                "set_ssac_gate('{}') requires a built device; call build_device() or solve() first "
+                "(the electrode contact must exist).".format(electrode_name))
+        if electrode_name not in self._contact_region:
+            raise ValueError("unknown electrode '{}'; built contacts are {}.".format(
+                electrode_name, sorted(self._contact_region)))
+        if self._contact_region.get(electrode_name) in getattr(self, "_dd_regions", set()):
+            warnings.warn(
+                "set_ssac_gate('{}'): this contact is a drift-diffusion ohmic carrier contact -- "
+                "repointing it circuit-driven replaces only its Potential Dirichlet and leaves the "
+                "Electrons pin in place. Drive the modulating GATE (a dielectric contact), not the "
+                "carrier ground.".format(electrode_name))
+        from dynameta.carriers import ac_analysis as _AC
+        # drop the bias-Dirichlet contact equation (live) and its stale registry record, then attach
+        # the circuit-driven replacement (setup_circuit_contact records the new one).
+        ds.delete_contact_equation(device=self.device, contact=electrode_name,
+                                   name="PotentialEquation")
+        _R.forget(self.device, "PotentialEquation", loc=electrode_name)
+        return _AC.setup_circuit_contact(self.device, electrode_name, source_name=source_name,
+                                         node_name=node_name)
+
     def _to_carrier_field(self, bias, grid_n_x, grid_n_z) -> CarrierField:
         d = self.design
         regions: Dict[str, CarrierRegion] = {}
