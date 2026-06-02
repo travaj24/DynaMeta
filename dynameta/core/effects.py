@@ -155,3 +155,22 @@ class FranzKeldyshEffect:
         E = _E_vec(fields)
         mag = np.sqrt(np.sum(E ** 2, axis=-1))                        # (...,) |E|
         return complex(self.eps_bg) + 1j * float(self.beta) * mag     # scalar grid (...,)
+
+
+@dataclass
+class ThermoOpticModel:
+    """Thermo-optic (dn/dT) SCALAR response -- an EffectModel reading fields['T'] (kelvin). The
+    refractive index varies linearly with temperature: eps(T) = (n_ref + dn_dT*(T - T_ref))^2 with
+    n_ref = sqrt(eps_ref). At T = T_ref (or dn_dT = 0) eps -> eps_ref exactly. Isotropic (the
+    common case for thermo-optic media); an anisotropic dn/dT would use a tensor variant."""
+    eps_ref: complex     # permittivity at T_ref
+    dn_dT: float         # dn/dT [1/K]
+    T_ref: float = 300.0
+
+    def eps(self, fields: dict, lambda_m: float):
+        if "T" not in fields or fields["T"] is None:
+            raise ValueError("ThermoOpticModel requires fields['T'] (kelvin); none supplied "
+                             "(run the thermal driver first)")
+        T = np.asarray(fields["T"], dtype=np.float64)
+        n = np.sqrt(complex(self.eps_ref)) + float(self.dn_dT) * (T - float(self.T_ref))
+        return n ** 2
