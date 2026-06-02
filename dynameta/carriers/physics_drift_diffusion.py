@@ -30,16 +30,22 @@ VALIDATED REGIME: transport / current-flow and zero bias -- the clean
 [metal/ITO/metal] slab converges, and Park zero-bias gives n = n_bg. This is the
 regime DD is for (currents, J-V, dynamics).
 
-KNOWN LIMITATION: a GATED CAPACITOR (e.g. Park under gate bias) still does NOT
-converge. With no DC current path the continuity equation must propagate the
-carrier level across the gate-field region from only the weak 2-node ITO-edge
-grounds -- ill-conditioned regardless of Boltzmann-vs-Fermi-Dirac (the g
-enhancement and a relaxation regularization were both tried; neither fixed it).
-For DC gate accumulation use the equilibrium physics mode -- it is the physically
-AND numerically correct tool there (n is local, no continuity equation; no DC
-current flows through the gate oxide). Closing gated-DD would need full-edge
-(not 2-node) ITO ohmic contacts or a Gummel-style outer iteration -- a scoped
-future effort.
+GATED CAPACITOR (no DC current path): CONVERGES in 1D and reduces to the equilibrium Fermi-Dirac
+profile in the zero-current limit (validation/gated_dd.py: DD profile == equilibrium to ~1e-4, the
+gate charge Q(Vg) / C-V matches to ~1e-4). The recipe: (1) a FULL-BOUNDARY ohmic contact pinning
+Electrons = N_D (in 1D the ITO ohmic end IS the full boundary, so the continuity equation is well
+anchored); (2) a relaxed RELATIVE tolerance (at the trivial bias Potential ~ 0 makes ||du||/||u||
+floor at the numerical-precision ~1e-6, so a 1e-10 rel target never converges -- the ABSOLUTE error
+is the real gate); (3) a staged solve -- a potential-only Poisson pre-solve (continuity frozen via
+eq_registry) then coupled Newton.
+
+2D/3D METASURFACE still needs work: there the ITO ohmic ground is a weak ~2-node edge contact
+(DEVSIM captures only the box corners of a lateral contact at a domain boundary; carriers/
+devsim_layered.py), which cannot anchor the continuity equation -- so gated DD is ill-conditioned
+there. The fix is to promote that to a FULL-EDGE ohmic contact via a thin adjacent edge-metal region
+(so the ground is a region-region interface with full-line node capture, like a horizontal-face
+contact); pending builder change. Equilibrium remains the validated tool for DC gate accumulation in
+2D/3D meanwhile.
 """
 
 from __future__ import annotations
