@@ -33,7 +33,7 @@ the textbook ground-state polarizability of an infinite square well (2nd-order p
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
 
 import numpy as np
@@ -91,6 +91,7 @@ class QuantumWell:
     n_pad: float = 2.5
     nz: int = 1501
     n_solve: int = 40
+    _solve_cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     def __post_init__(self):
         if not (self.well_width_m > 0 and self.nz >= 21):
@@ -129,8 +130,13 @@ class QuantumWell:
 
     def solve(self, field_V_per_m: float) -> StarkState:
         """Solve the electron + heavy-hole ground subbands under a perpendicular field F and
-        return the (redshifted) interband transition energy + the e-h overlap."""
+        return the (redshifted) interband transition energy + the e-h overlap. Results are CACHED
+        by field value: an EAM sweep recomputes the F=0 baseline and repeated fields for free
+        (bit-identical -- the same StarkState object is returned, and callers only read it)."""
         F = float(field_V_per_m)
+        cached = self._solve_cache.get(F)
+        if cached is not None:
+            return cached
         z = self._grid()
         zi = z[1:-1]
         in_well = (zi >= 0.0) & (zi <= self.well_width_m)
@@ -162,9 +168,11 @@ class QuantumWell:
         h = float(z[1] - z[0])
         overlap = float(abs(np.sum(psi_e * psi_h) * h) ** 2)           # |<psi_e|psi_hh>|^2
         E_T = float(self.E_g_J + E_e1 + E_hh1 - self.exciton_binding_J)
-        return StarkState(field_V_per_m=F, E_e1_J=E_e1, E_hh1_J=E_hh1, E_transition_J=E_T,
-                          overlap=overlap, z_m=zi, psi_e=psi_e, psi_h=psi_h,
-                          ionized=ionized, p_in_min=p_in_min)
+        state = StarkState(field_V_per_m=F, E_e1_J=E_e1, E_hh1_J=E_hh1, E_transition_J=E_T,
+                           overlap=overlap, z_m=zi, psi_e=psi_e, psi_h=psi_h,
+                           ionized=ionized, p_in_min=p_in_min)
+        self._solve_cache[F] = state
+        return state
 
     def transition_energy_J(self, field_V_per_m: float) -> float:
         """Interband transition energy E_T(F) (J) -- the QCSE-redshifted absorption edge."""
