@@ -27,11 +27,11 @@ import netgen.occ as occ
 import ngsolve as ng
 from netgen.meshing import BoundaryLayerParameters, MeshingStep, IdentificationType
 
-from dynameta.core.units import NM
+from dynameta.core.units import NM, NM_PER_M
 from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.geometry.design import Design
 
-S = 1e9   # m -> nm (OCC works in nm); == 1/NM.metres_per_unit
+S = NM_PER_M   # m -> nm (OCC works in nm); single source = core.units.NM_PER_M
 
 
 @dataclass

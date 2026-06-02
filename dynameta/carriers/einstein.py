@@ -26,3 +26,14 @@ def g_einstein(x):
     x = np.asarray(x, dtype=np.float64)
     return 1.0 + (GA * x + GC * np.power(x, _P43)) / (
         1.0 + GB * np.power(x, _P13) + GD * np.power(x, _P23))
+
+
+def g_expr_devsim(var: str, denom: str, s: str = "") -> str:
+    """The same g(x) as a DEVSIM edge/node expression string -- pow()s of the solution
+    variable (the only form DEVSIM differentiates without hanging). x = var{s}/denom, e.g.
+    var='Electrons', denom='N_c' (unipolar) or var=<carrier>, denom='N_dos' (bipolar). Shares
+    the GA/GB/GC/GD coefficients with g_einstein so the numpy and DEVSIM forms cannot drift."""
+    X = "({}{}/{})".format(var, s, denom)
+    return ("(1.0 + ({a}*{X} + {c}*pow({X},{p43}))/(1.0 + {b}*pow({X},{p13}) + "
+            "{d}*pow({X},{p23})))").format(a=GA, b=GB, c=GC, d=GD, X=X,
+                                            p13=_P13, p23=_P23, p43=_P43)
