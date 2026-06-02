@@ -32,16 +32,19 @@ _OFFDIAG_TOL = 1e-9     # |off-diag| / |diag| above which a tensor is rejected a
 def _check_diagonal(off_max: float, diag_max: float) -> None:
     """RAISE if a tensor has significant OFF-DIAGONAL entries (relative to its diagonal).
 
-    KNOWN LIMITATION (tracked P0b follow-on): the per-region matrix-CF matvec ((eps.u).v) on the
-    periodic PML mesh is validated ONLY for DIAGONAL (principal-axis) tensors -- the isotropic gate,
-    the Pockels z-cut oracle, and the LC planar/homeotropic states are all diagonal. A tensor with
-    nonzero off-diagonal entries (a tilted optic axis, magneto-optic, ...) MIS-EVALUATES in the
-    matvec under PML (validation/lc_uniaxial_fem.py: a y-polarized ordinary wave that must see only
-    eps_yy is corrupted by eps_xz, and energy is not conserved -- even eps_xz ~ 1e-3 flips the
-    result). It is a HARD ERROR, not a warning, because a suppressed warning would yield a
-    silently-wrong, energy-non-conserving result (audit LC-1). The constitutive model is correct;
-    only the FEM solve of an off-diagonal tensor is deferred -- work in the tensor's PRINCIPAL
-    FRAME (a diagonal tensor) until this is fixed."""
+    CONFIRMED NGSolve LIMITATION (diagnosed 2026-06-02 on NGSolve 6.2.2604, the latest PyPI release):
+    the scattered-field HCurl solve MIS-ASSEMBLES a permittivity tensor with nonzero OFF-DIAGONAL
+    entries on the periodic PML mesh. Decisive probe: a y-polarized ORDINARY wave through a uniaxial
+    slab tilted in x-z (eps_yy unchanged, eps_xz != 0) must be tilt-invariant, but instead it CREATES
+    energy (T = 1.07, R+T = 1.11). The defect is in NGSolve's assembly of mixed-component HCurl proxy
+    cross-terms (u[j] v[i], i != j) on the complex periodic space; it is INDEPENDENT of how eps is
+    expressed -- the matrix-CF matvec, an explicit scalar component sum, a .Compile()'d CF, and
+    real-vs-complex entries ALL gave the identical broken result. There is no code-side workaround on
+    this version and no newer NGSolve to upgrade to, so this stays a HARD ERROR (a suppressed warning
+    would yield a silently-wrong, energy-non-conserving solve -- audit LC-1). The constitutive models
+    (tilted LC, magneto-optic) are CORRECT and validated analytically / in their PRINCIPAL FRAME; only
+    the off-diagonal FEM solve is deferred until a fixed NGSolve ships. Diagonalize the tensor (use its
+    principal frame) to solve in the meantime."""
     if off_max > _OFFDIAG_TOL * (diag_max or 1.0):
         raise NotImplementedError(
             "assemble_eps_cf: eps tensor has significant OFF-DIAGONAL entries (max |off-diag|="
@@ -71,10 +74,21 @@ def _region_matrix_cf(ef: EpsField):
         return _scalar_region_cf(ef) * _ID3
     if ef.tensor is not None:                                  # uniform 3x3
         T = np.asarray(ef.tensor, dtype=np.complex128)
+        diag_max = float(np.max(np.abs(np.diag(T))))
         off = np.abs(T - np.diag(np.diag(T)))
-        _check_diagonal(float(np.max(off)), float(np.max(np.abs(np.diag(T)))))
-        entries = tuple(complex(T[i, j]) if T[i, j] != 0 else 0
-                        for i in range(3) for j in range(3))
+        _check_diagonal(float(np.max(off)), diag_max)
+        # Snap sub-tolerance off-diagonals (e.g. the ~1e-17 cos(pi/2) residual of a homeotropic LC
+        # director) to EXACT int 0 so they stay on the proven sparse matrix-CF path, not a tiny
+        # dense complex entry (gotcha below). Past _check_diagonal every off-diagonal is <= tol, so
+        # this yields a clean diagonal matrix for the guarded (diagonal-within-tol) cases.
+        tol = _OFFDIAG_TOL * (diag_max or 1.0)
+
+        def _ent(i, j):
+            z = T[i, j]
+            if i != j and abs(z) <= tol:
+                return 0
+            return complex(z) if z != 0 else 0
+        entries = tuple(_ent(i, j) for i in range(3) for j in range(3))
         return ng.CoefficientFunction(entries, dims=(3, 3))
     v = np.asarray(ef.values_zyx)                              # graded tensor (Nz,Ny,Nx,3,3)
     start, end = ef.voxel_bounds_u()
