@@ -35,7 +35,6 @@ GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
 
 class OpticalModel:
     """Base class. Subclasses implement eps(lambda_m, *, n_m3=None)."""
-    requires_density: bool = False
 
     def eps(self, lambda_m: float, *, n_m3=None):
         raise NotImplementedError
@@ -45,7 +44,6 @@ class OpticalModel:
 class ConstantOptical(OpticalModel):
     """Wavelength-independent complex eps (metals as fixed eps, simple dielectrics)."""
     value: complex
-    requires_density: bool = False
 
     def eps(self, lambda_m: float, *, n_m3=None):
         v = complex(self.value)
@@ -58,7 +56,6 @@ class TabulatedOptical(OpticalModel):
     (e.g. measured n,k for a metal or substrate)."""
     lambda_m: np.ndarray
     eps_complex: np.ndarray
-    requires_density: bool = False
 
     def __post_init__(self) -> None:
         order = np.argsort(np.asarray(self.lambda_m, dtype=np.float64))
@@ -86,7 +83,6 @@ class DrudeOptical(OpticalModel):
     eps_inf:     float
     m_opt_kg:    MassOrFn
     gamma_rad_s: GammaOrFn
-    requires_density: bool = True
 
     def eps(self, lambda_m: float, *, n_m3=None):
         if n_m3 is None:

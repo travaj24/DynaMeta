@@ -31,8 +31,6 @@ import numpy as np
 
 
 class FieldLift:
-    requires_symmetry: str = "none"
-
     def apply(self, n_2d, x_m, v_m, *, n_bg):
         """Return (n_3d (Nx,Ny,Nz), x_m (Nx), y_m (Ny), z_m (Nz=Nv))."""
         raise NotImplementedError
@@ -42,7 +40,6 @@ class FieldLift:
 class IdentityLift(FieldLift):
     """For a native 3D carrier field already shaped (Nx, Ny, Nz). n_2d here is
     actually the 3D array; axes are passed straight through."""
-    requires_symmetry: str = "none"
 
     def apply(self, n_3d, x_m, v_m, *, n_bg):
         arr = np.asarray(n_3d, dtype=np.float64)
@@ -58,7 +55,6 @@ class ExtrudeLift(FieldLift):
     """Invariant along the synthesized 2nd lateral (y) axis. Honest only for a
     y-translationally-invariant device (e.g. a 1D grating)."""
     period_y_m: float
-    requires_symmetry: str = "none"
 
     def apply(self, n_2d, x_m, v_m, *, n_bg):
         n_2d = np.asarray(n_2d, dtype=np.float64)        # (Nx, Nv)
@@ -74,7 +70,6 @@ class SeparableXYLift(FieldLift):
     single-sign lateral deviation (see module docstring)."""
     period_y_m: float
     ny: int = 256
-    requires_symmetry: str = "c4v"
 
     def apply(self, n_2d, x_m, v_m, *, n_bg):
         n_2d = np.asarray(n_2d, dtype=np.float64)        # (Nx, Nv)

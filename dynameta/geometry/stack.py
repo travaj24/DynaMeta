@@ -46,9 +46,6 @@ class Layer:
         out += [inc.material for inc in self.inclusions]
         return out
 
-    def has_inclusions(self) -> bool:
-        return len(self.inclusions) > 0
-
 
 @dataclass
 class Feature:
@@ -90,9 +87,3 @@ class Stack:
 
     def total_thickness_m(self) -> float:
         return sum(L.thickness_m for L in self.layers)
-
-    def find_layer(self, name: str) -> Layer:
-        for L in self.layers:
-            if L.name == name:
-                return L
-        raise KeyError("No layer named '{}'".format(name))

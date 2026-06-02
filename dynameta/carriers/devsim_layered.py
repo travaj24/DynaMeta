@@ -272,7 +272,7 @@ class LayeredDevsimBuilder:
 
     def solve(self, bias, *, grid_n_x: int = 256, grid_n_z: int = 32,
                 rel_tol: float = 1e-5, max_iter: int = 60,
-                v_step: float = 0.25, abs_tol: float = None,
+                v_step: float = 0.25, abs_tol: Optional[float] = None,
                 verbose: bool = False) -> CarrierField:
         if not self._built:
             self.build_device()

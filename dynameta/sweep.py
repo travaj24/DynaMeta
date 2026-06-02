@@ -20,4 +20,3 @@ class BiasPoint:
 class Sweep:
     bias_points:    List[BiasPoint]
     wavelengths_nm: List[float] = field(default_factory=list)
-    voltage_step_V: float = 0.25    # bias-ramp increment for Newton stability
