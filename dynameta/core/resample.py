@@ -48,9 +48,18 @@ def resample_to_grid(nodes_m: np.ndarray,
     for d in range(ndim):
         out["axis_{}".format(d)] = axes[d]
 
+    # Build the Delaunay triangulation ONCE and reuse it for every field (it depends only on the
+    # node coordinates, not the values) -- avoids re-triangulating per field. Bit-identical: a
+    # LinearNDInterpolator built from this tri interpolates exactly as one built from `nodes`.
+    try:
+        from scipy.spatial import Delaunay
+        tri = Delaunay(nodes)
+    except Exception:
+        tri = None                                            # degenerate/collinear -> let scipy handle
+
     for name, vals in fields.items():
         vals = np.asarray(vals, dtype=np.float64)
-        lin = LinearNDInterpolator(nodes, vals)
+        lin = LinearNDInterpolator(tri if tri is not None else nodes, vals)
         grid = lin(qpts).reshape(tuple(int(n) for n in n_per_axis))
         nan = np.isnan(grid)
         if nan.any():
