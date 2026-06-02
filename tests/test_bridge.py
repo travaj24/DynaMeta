@@ -70,7 +70,7 @@ def test_assemble_eps_2d_extrude_shape_and_bg():
     assert ef.values_zyx.shape == (nv, 2, nx)           # (Nz, Ny, Nx)
     # the n_bg columns reduce to the Drude eps at n_bg (density-dependent material,
     # so the background flows through eps_grid(n_bg), not scalar_eps); the spike differs
-    bg = complex(MaterialEpsMap(_registry()).eps_grid("ito", np.array([N_BG]), 1300e-9)[0])
+    bg = complex(MaterialEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG])}, 1300e-9)[0])
     assert np.isclose(ef.values_zyx[0, 0, 0], bg, rtol=1e-9)
     assert ef.values_zyx[-1, 0, nx // 2].real < bg.real  # accumulation lowers Re(eps)
 

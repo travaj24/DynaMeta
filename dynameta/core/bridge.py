@@ -91,14 +91,14 @@ def assemble_eps(field: CarrierField,
             x3_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             y3_m = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
             z3_m = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
-            eps_3d = n_to_eps.eps_grid(reg.material, n_grid, lambda_m)          # (Nx,Ny,Nz)
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_grid}, lambda_m)   # (Nx,Ny,Nz)
         else:
             # 2D (x, v=through-stack) carrier solve -> the FieldLift synthesizes
             # the 2nd lateral axis (SeparableXY / Extrude).
             x_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             v_m = np.asarray(reg.grid_axes_m[ra.stack_axis], dtype=np.float64)
             n_3d, x3_m, y3_m, z3_m = lift.apply(n_grid, x_m, v_m, n_bg=n_bg)
-            eps_3d = n_to_eps.eps_grid(reg.material, n_3d, lambda_m)            # (Nx,Ny,Nz)
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_3d}, lambda_m)     # (Nx,Ny,Nz)
 
         # Affine placement into the region bbox. Lateral axes scale directly
         # (the carrier solve already spans the cell laterally); the vertical
