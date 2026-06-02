@@ -1,7 +1,11 @@
 """
 Steady-state thermal driver for thermo-optic / electro-thermal modulators (roadmap Phase 2a).
-It emits the temperature field T into the bridge's field bundle, which a ThermoOpticModel turns
-into a temperature-shifted eps. For a LAYERED stack with a heat flux conducted to a sink (the
+It PRODUCES a per-layer temperature field T that the caller places in a field bundle (the
+`{"T": ...}` dict a ThermoOpticModel reads) to obtain a temperature-shifted eps. (The bridge does
+not yet auto-assemble T from a driver -- assemble_eps currently builds only the carrier field 'n';
+wiring drivers for {E, T} into the bridge is a tracked seam. The driver + ThermoOpticModel are
+validated end-to-end at the FEM level in validation/thermo_optic_modulator.py.) For a LAYERED
+stack with a heat flux conducted to a sink (the
 thermo-optic analog of the electrostatics series-capacitor driver), 1D steady conduction gives a
 series-THERMAL-RESISTANCE temperature profile:
 
@@ -28,6 +32,8 @@ def steady_layered_temperature(k_thermal, thickness_m, flux_W_m2, T_sink_K: floa
     d = np.asarray(thickness_m, dtype=np.float64)
     if k.ndim != 1 or k.shape != d.shape:
         raise ValueError("k_thermal and thickness_m must be 1D arrays of equal length")
+    if not (np.all(np.isfinite(k)) and np.all(np.isfinite(d))):
+        raise ValueError("k_thermal and thickness_m must be finite")
     if np.any(k <= 0.0) or np.any(d <= 0.0):
         raise ValueError("k_thermal and thickness_m must be strictly positive")
     R = d / k                                              # per-layer thermal resistance per area
@@ -38,9 +44,16 @@ def steady_layered_temperature(k_thermal, thickness_m, flux_W_m2, T_sink_K: floa
 def uniform_temperature_rise(power_per_area_W_m2, k_thermal, thickness_m,
                               T_sink_K: float = 300.0) -> float:
     """Lumped temperature of an active region: T = T_sink + q * R_total, R_total = sum(d_i/k_i) to
-    the sink (one number; the simplest thermo-optic drive)."""
+    the sink (one number; the simplest thermo-optic drive). `power_per_area_W_m2` is the heater
+    flux conducted to the sink (>= 0 in the intended regime; a negative value would drive T below
+    the sink, which is unphysical for a resistive heater -- the caller must supply physical T to a
+    ThermoOpticModel)."""
     k = np.asarray(k_thermal, dtype=np.float64)
     d = np.asarray(thickness_m, dtype=np.float64)
+    if k.ndim != 1 or k.shape != d.shape:
+        raise ValueError("k_thermal and thickness_m must be 1D arrays of equal length")
+    if not (np.all(np.isfinite(k)) and np.all(np.isfinite(d))):
+        raise ValueError("k_thermal and thickness_m must be finite")
     if np.any(k <= 0.0) or np.any(d <= 0.0):
         raise ValueError("k_thermal and thickness_m must be strictly positive")
     return float(T_sink_K) + float(power_per_area_W_m2) * float(np.sum(d / k))

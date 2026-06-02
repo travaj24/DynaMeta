@@ -1,11 +1,14 @@
 """Phase-2 thermo-optic modulator validation (roadmap 2b oracle): a Si thermo-optic phase
 shifter built from the spine -- thermal driver -> ThermoOpticModel (eps(T)) -> FEM. Validated:
 
-  (1) ORACLE: ThermoOpticModel is a scalar response, so the FEM must reproduce the independent
-      TMM scalar solve at n(T) = n0 + (dn/dT) dT -- same R/T and the SAME transmission-phase
-      modulation dphi(dT).
-  (2) PHYSICS: small-signal slope d(phi)/d(dT) ~ (2pi/lambda) (dn/dT) L (single-pass), and NO
-      shift at dT = 0.
+  (1) ORACLE: ThermoOpticModel is a SCALAR response, so this gate exercises the scalar EpsField
+      assembly + scalar curl-curl solve (the tensor-eps FEM path is covered separately by
+      tensor_isotropic_gate.py and pockels_phase_modulator.py). The FEM must reproduce the
+      independent TMM scalar solve at n(T) = n0 + (dn/dT) dT -- same R/T and the SAME
+      transmission-phase modulation dphi(dT).
+  (2) PHYSICS: NO shift at dT = 0 (checked at the model level: eps(T_ref) == eps_ref), and the FEM
+      modulation slope d(phi)/d(dT) matches the single-pass estimate (2pi/lambda)(dn/dT)L to within
+      the Fabry-Perot factor (a loose sanity band; the rigorous check is FEM-vs-TMM dphi agreement).
 
 Real Si numbers (n0=3.48, dn/dT=1.8e-4/K) give a resolvable few-degree phase modulation over a
 ~150 K rise. Run: python -m validation.thermo_optic_modulator
@@ -77,13 +80,23 @@ def main():
     dphi_err = float(np.max(np.abs(dphi_fem - dphi_tmm)))
     modulation = abs(dphi_fem[-1])
     slope_fem = dphi_fem[-1] / (DTS[-1] - DTS[0])
-    slope_ana = (2 * np.pi / lam_m) * DN_DT * (L * 1e-9)             # single-pass (no FP)
-    no_shift = abs(dphi_fem[0]) < 1e-9                               # dT=0 -> no shift (by construction)
+    slope_ana = (2 * np.pi / lam_m) * DN_DT * (L * 1e-9)             # single-pass (no Fabry-Perot)
+    # NO-shift physics, checked at the MODEL level (NOT the structurally-zero dphi_fem[0], which is
+    # identically 0 for any input): at T = T_ref the ThermoOpticModel must return eps_ref exactly.
+    no_shift = abs(complex(tom.eps({"T": T_REF}, lam_m)) - complex(N0 ** 2, 0.0)) < 1e-12
+    # slope sanity: the FEM modulation slope must match the single-pass estimate to within the
+    # Fabry-Perot factor (the etalon over/under-counts vs a single pass) -- loose enough to tolerate
+    # the cavity correction, tight enough to catch a gross unit/sign slip. (The rigorous agreement
+    # is dphi_err < TOL_PHASE: FEM vs an independent TMM solve fed the same eps(T).)
+    slope_ratio = slope_fem / slope_ana
+    slope_ok = 0.2 < slope_ratio < 2.0
     print("[t] FEM-vs-TMM: max|dR|={:.2e} max|dT|={:.2e} (TOL_RT={:.0e}); max|d(dphi)|={:.2e} rad "
           "(TOL_PHASE={:.0e})".format(dR, dT_, TOL_RT, dphi_err, TOL_PHASE), flush=True)
     print("[t] modulation dT 0->{:.0f}K: dphi={:.4f} rad ({:.2f} deg); slope_fem={:.3e} rad/K "
-          "single-pass {:.3e}".format(DTS[-1], modulation, np.degrees(modulation), slope_fem, slope_ana), flush=True)
-    ok = (dR < TOL_RT and dT_ < TOL_RT and dphi_err < TOL_PHASE and modulation > 1e-3 and no_shift)
+          "single-pass {:.3e} (ratio {:.2f})".format(
+              DTS[-1], modulation, np.degrees(modulation), slope_fem, slope_ana, slope_ratio), flush=True)
+    ok = (dR < TOL_RT and dT_ < TOL_RT and dphi_err < TOL_PHASE and modulation > 1e-3
+          and no_shift and slope_ok)
     print("[t] *** THERMO-OPTIC MODULATOR (FEM eps(T) == TMM scalar-n(T); modulates): {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
     return ok

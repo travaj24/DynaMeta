@@ -89,7 +89,21 @@ Airy/Kramers-Kronig Franz-Keldysh are follow-ons.*
 - *Oracle:* analytic Vpi*L for a thin-film LiNbO3 phase arm; eps -> isotropic at r=0.
   **Delivers a complete non-carrier modulator end to end -> proves the generalized spine.**
 
-### Phase 2 -- Thermo-optic / electro-thermal
+### Phase 2 -- Thermo-optic / electro-thermal  **[DONE 2026-06-02]**
+*Built: `carriers/thermal.py` (steady series-thermal-resistance driver: `steady_layered_temperature`
+mean-T per layer + `uniform_temperature_rise` lumped helper) and `core/effects.ThermoOpticModel`
+(eps(T) = (sqrt(eps_ref) + dn_dT*(T - T_ref))^2, scalar/isotropic). ORACLE
+`validation/thermo_optic_modulator.py`: a real-Si (n0=3.48, dn/dT=1.8e-4/K) thermo-optic phase
+shifter -- the scalar-eps FEM reproduces an independent TMM scalar-n(T) solve (max|dR|=4e-3,
+max|d(dphi)|=2e-5 rad over 0-150 K) with a few-degree phase modulation; gated on FEM-vs-TMM dphi
+agreement + a Fabry-Perot-aware modulation-slope sanity band + model-level no-shift at T_ref.
+Composition for stacking shifts on a region added via `core/effects.DeltaEffect` (subtract a
+zero-drive baseline so a ComposedEffect does not double-count the background). Post-phase
+adversarial audit (6 agents): all findings fixed -- uniform_temperature_rise shape/finite guard,
+ASCII-only docstrings (removed 3 Greek glyphs), honest driver docstrings (the bridge does not yet
+auto-assemble {E,T} -- a tracked seam), and the validation no-shift/slope gates made non-tautological.
+REMAINING: a transient + volumetric-Joule heat-equation FEM (electro-thermal coupling) and an
+anisotropic dn/dT tensor variant are follow-ons.*
 - **2a Thermal driver:** steady + transient heat equation (FEM), Joule source from the
   electrical solve (electro-thermal). Emits T into the FieldBundle.
 - **2b `ThermoOpticModel`** (dn/dT) + material thermal params (k, Cp, dn/dT).
