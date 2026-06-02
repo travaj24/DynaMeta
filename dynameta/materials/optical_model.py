@@ -20,6 +20,7 @@ shape of n_m3.
 
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -31,6 +32,23 @@ from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E  # noqa: F401
 
 MassOrFn  = Union[float, Callable[[np.ndarray], np.ndarray]]
 GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
+
+# Optional `refractiveindex` package (the refractiveindex.info database) -- detected lazily (free)
+# and imported only on first use, mirroring the sibling Lumenairy library's glass.py pattern.
+_REFRACTIVEINDEX_AVAILABLE = _importlib_util.find_spec("refractiveindex") is not None
+
+
+def _get_refractiveindex_material():
+    """Return the refractiveindex.RefractiveIndexMaterial class (raises a helpful error if the
+    optional package is absent)."""
+    if not _REFRACTIVEINDEX_AVAILABLE:
+        raise ImportError(
+            "RefractiveIndexInfoOptical requires the optional `refractiveindex` package: "
+            "`pip install refractiveindex` (it bundles the refractiveindex.info database, so it "
+            "works offline). Browse https://refractiveindex.info for the shelf/book/page of a "
+            "material; or hand-enter n,k via TabulatedOptical / ConstantOptical instead.")
+    from refractiveindex import RefractiveIndexMaterial
+    return RefractiveIndexMaterial
 
 
 class OpticalModel:
@@ -67,6 +85,71 @@ class TabulatedOptical(OpticalModel):
         im = np.interp(lambda_m, self.lambda_m, self.eps_complex.imag)
         v = complex(re, im)
         return v if n_m3 is None else np.full(np.shape(n_m3), v, dtype=np.complex128)
+
+
+@dataclass
+class RefractiveIndexInfoOptical(OpticalModel):
+    """Complex eps from a refractiveindex.info entry, via the optional `refractiveindex` package
+    (ported from the sibling Lumenairy library's glass.py lookup). Identify the entry by
+    (shelf, book, page) -- browse https://refractiveindex.info (e.g. 'main','Au','Johnson' or
+    'main','SiO2','Malitson'). eps = (n + i k)^2 with k >= 0, so Im(eps) = 2 n k >= 0 -- the
+    exp(-i omega t) passive convention used throughout DynaMeta. Density-independent (n_m3 ignored).
+
+    The RefractiveIndexMaterial is constructed once and cached on first eps() call (lazy import).
+    An n-only (lossless) entry reports k = 0. Querying outside the entry's tabulated wavelength
+    range raises (the index comes back non-finite). Use to_tabulated() to snapshot the entry onto a
+    fixed wavelength grid as a portable, offline TabulatedOptical (no runtime dependency once
+    frozen)."""
+    shelf: str
+    book: str
+    page: str
+
+    def _material(self):
+        m = getattr(self, "_ri_mat", None)
+        if m is None:
+            m = _get_refractiveindex_material()(shelf=self.shelf, book=self.book, page=self.page)
+            object.__setattr__(self, "_ri_mat", m)           # cache (not a dataclass field)
+        return m
+
+    def _nk(self, lambda_m: float):
+        m = self._material()
+        lam_nm = float(lambda_m) * 1e9
+        # Enforce the entry's stated wavelength range -- a Sellmeier/formula entry would otherwise
+        # SILENTLY EXTRAPOLATE to a physically-invalid value outside its fit range (a tabulated
+        # entry returns NaN, caught below). No silent extrapolation (house anti-silent-failure rule).
+        try:
+            lo_nm, hi_nm = (float(b) for b in m.get_wl_range(unit="nm"))
+        except Exception:
+            lo_nm, hi_nm = None, None
+        if lo_nm is not None and not (lo_nm <= lam_nm <= hi_nm):
+            raise ValueError(
+                "refractiveindex.info entry {}/{}/{}: wavelength {:.3f} nm is outside the entry's "
+                "valid range [{:.1f}, {:.1f}] nm (no silent extrapolation)".format(
+                    self.shelf, self.book, self.page, lam_nm, lo_nm, hi_nm))
+        n = float(m.get_refractive_index(lam_nm, unit="nm"))
+        if not np.isfinite(n):
+            raise ValueError(
+                "refractiveindex.info entry {}/{}/{} has no data at {:.3f} nm (outside the entry's "
+                "tabulated wavelength range)".format(self.shelf, self.book, self.page, lam_nm))
+        try:
+            k = float(m.get_extinction_coefficient(lam_nm, unit="nm"))
+            if not np.isfinite(k):
+                k = 0.0
+        except Exception:                                    # NoExtinctionCoefficient: lossless entry
+            k = 0.0
+        return n, k
+
+    def eps(self, lambda_m: float, *, n_m3=None):
+        n, k = self._nk(lambda_m)
+        v = complex((n + 1j * k) ** 2)                       # Im(eps)=2nk>=0 (exp(-iwt) passive)
+        return v if n_m3 is None else np.full(np.shape(n_m3), v, dtype=np.complex128)
+
+    def to_tabulated(self, lambdas_m) -> "TabulatedOptical":
+        """Snapshot the entry onto `lambdas_m` as a portable TabulatedOptical (offline; no runtime
+        refractiveindex dependency once frozen -- useful for reproducible, shippable material data)."""
+        lam = np.atleast_1d(np.asarray(lambdas_m, dtype=np.float64))
+        eps = np.array([complex(self.eps(float(L))) for L in lam], dtype=np.complex128)
+        return TabulatedOptical(lambda_m=lam, eps_complex=eps)
 
 
 @dataclass
