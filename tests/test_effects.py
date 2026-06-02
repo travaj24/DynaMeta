@@ -43,3 +43,15 @@ def test_composed_effect_sums_background_plus_deltas_as_tensors():
     comp = ComposedEffect(background=_Const(4.0 + 0j), deltas=[_Const(0.1 + 0j), _Const(0.05 + 0j)])
     out = comp.eps({}, 1300e-9)
     assert out.shape == (3, 3) and np.allclose(out, 4.15 * np.eye(3))
+
+
+def test_eps_field_tensor_flags():
+    from dynameta.core.eps_field import EpsField
+    ax = np.array([0.0, 1.0])
+    assert EpsField(scalar=4 + 0j).is_uniform and not EpsField(scalar=4 + 0j).is_tensor
+    ut = EpsField(tensor=4.0 * np.eye(3, dtype=complex))
+    assert ut.is_uniform and ut.is_tensor                                    # uniform tensor
+    gs = EpsField(x_axis_u=ax, y_axis_u=ax, z_axis_u=ax, values_zyx=np.ones((2, 2, 2), complex))
+    assert not gs.is_uniform and not gs.is_tensor                            # graded scalar
+    gt = EpsField(x_axis_u=ax, y_axis_u=ax, z_axis_u=ax, values_zyx=np.ones((2, 2, 2, 3, 3), complex))
+    assert not gt.is_uniform and gt.is_tensor                                # graded tensor

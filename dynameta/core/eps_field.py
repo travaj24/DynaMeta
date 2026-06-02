@@ -27,12 +27,20 @@ class EpsField:
     x_axis_u:        Optional[np.ndarray] = None      # target units
     y_axis_u:        Optional[np.ndarray] = None
     z_axis_u:        Optional[np.ndarray] = None
-    values_zyx:      Optional[np.ndarray] = None       # complex (Nz, Ny, Nx)
+    values_zyx:      Optional[np.ndarray] = None       # complex (Nz,Ny,Nx) scalar OR (Nz,Ny,Nx,3,3) tensor
+    tensor:          Optional[np.ndarray] = None        # uniform anisotropic 3x3 (complex)
     time_convention: str = "exp(-iwt)"
 
     @property
     def is_uniform(self) -> bool:
-        return self.scalar is not None
+        return self.scalar is not None or self.tensor is not None
+
+    @property
+    def is_tensor(self) -> bool:
+        """True if this region's eps is a 3x3 TENSOR (a uniform `tensor`, or a graded
+        `values_zyx` with a trailing (3,3) -> ndim 5) rather than a scalar."""
+        return self.tensor is not None or (
+            self.values_zyx is not None and np.asarray(self.values_zyx).ndim == 5)
 
     def voxel_bounds_u(self) -> Tuple[Tuple[float, float, float],
                                         Tuple[float, float, float]]:
