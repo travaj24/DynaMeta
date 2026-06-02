@@ -8,7 +8,7 @@ without the heavy solver stack installed. `from dynameta.carriers import
 LayeredDevsimBuilder` still works (the import happens on first attribute access).
 """
 
-__all__ = ["LayeredDevsimBuilder", "physics_equilibrium"]
+__all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis"]
 
 
 def __getattr__(name):
