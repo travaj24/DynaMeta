@@ -16,10 +16,7 @@ from dynameta.core.carrier_field import ELECTRON_DENSITY
 from dynameta.constants import Q_E as _Q_E   # elementary charge, C
 
 
-def _trapz(y: np.ndarray, x: np.ndarray) -> float:
-    """Trapezoidal integral (np.trapz was removed in NumPy 2.x)."""
-    y = np.asarray(y, dtype=np.float64); x = np.asarray(x, dtype=np.float64)
-    return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)))
+from dynameta.core.numerics import trapz as _trapz   # shared (np.trapz removed in NumPy 2.x)
 
 
 def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,

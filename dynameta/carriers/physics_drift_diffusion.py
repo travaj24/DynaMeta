@@ -49,30 +49,15 @@ import devsim as ds
 from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
-from dynameta.carriers.einstein import GA as _GA, GB as _GB, GC as _GC, GD as _GD
-
-# Generalized-Einstein degeneracy factor g(x)=F_1/2(eta)/F_-1/2(eta) as a rational fit in
-# u=x^(1/3), x=n/N_c (~1.1% peak, <0.5% over ITO's eta>=10; exact VALUE at the Boltzmann
-# limit g(0)=1; valid to eta~32). Coefficients live in carriers/einstein.py (single source,
-# shared with physics_bipolar_dd, unit-tested in tests/test_carriers_gfactor.py).
-_P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
+from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
+from dynameta.carriers.einstein import g_expr_devsim
 
 
 def _g_expr(s: str) -> str:
-    """g(Electrons{s}/N_c) as a DEVSIM edge expression (pow()s of the solution variable)."""
-    X = "(Electrons{}/N_c)".format(s)
-    return ("(1.0 + ({a}*{X} + {c}*pow({X},{p43}))/(1.0 + {b}*pow({X},{p13}) + "
-            "{d}*pow({X},{p23})))").format(a=_GA, b=_GB, c=_GC, d=_GD, X=X,
-                                            p13=_P13, p23=_P23, p43=_P43)
-
-
-def _edge_with_derivs(device, region, name, eq, wrt):
-    ds.edge_model(device=device, region=region, name=name, equation=eq)
-    for w in wrt:
-        for nd in ("n0", "n1"):
-            ds.edge_model(device=device, region=region,
-                            name="{}:{}@{}".format(name, w, nd),
-                            equation="simplify(diff({}, {}@{}))".format(eq, w, nd))
+    """g(Electrons{s}/N_c) as a DEVSIM edge expression -- the rational fit + its coefficients
+    live in carriers/einstein.g_expr_devsim (the single source, shared with physics_bipolar_dd
+    and unit-tested in tests/test_carriers_gfactor.py)."""
+    return g_expr_devsim("Electrons", "N_c", s)
 
 
 def setup_semiconductor_region_dd(device: str, region: str, *,

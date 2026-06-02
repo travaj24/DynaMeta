@@ -42,6 +42,7 @@ import numpy as np
 from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, ELECTRON_DENSITY, POTENTIAL)
 from dynameta.core.interfaces import RegionInfo
+from dynameta.core.numerics import trapz
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, HBAR, M_E, Q, EPS0
 
 
@@ -151,7 +152,7 @@ class SchrodingerPoissonCarrier:
         def residual(psi):
             _, n_z = self._solve_column(sp, Nd, s * psi)
             # excess vs the FLAT-BAND profile (removes the hard-wall dead-layer offset)
-            n_exc = float(np.sum(0.5 * ((n_z[:-1] + n_z[1:]) - (n0_z[:-1] + n0_z[1:])) * np.diff(z)))
+            n_exc = trapz(n_z - n0_z, z)
             return psi + Q * n_exc / self._C_ox - Vg          # Vg residual at trial psi_s
 
         lo, hi = 0.0, Vg

@@ -37,3 +37,9 @@ class UnitScale:
 # Convenience singletons
 SI = UnitScale(1.0)        # DEVSIM and the canonical data model
 NM = UnitScale(1e-9)       # OCC / NGSolve geometry
+
+# Exact m -> nm factor: the single source of the conversion the OCC/NGSolve geometry and the
+# TMM d_list use. Kept as the exact literal 1e9 (NOT 1.0/NM.metres_per_unit, which drifts by
+# ~1e-16 because 1e-9 is not exactly representable) so coordinates stay byte-identical to the
+# old hardcoded `* 1e9`.
+NM_PER_M = 1e9
