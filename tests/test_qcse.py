@@ -13,7 +13,9 @@ ME, MHH = 0.067 * M_E, 0.34 * M_E
 
 
 def _gaas(nz=801):
-    return QuantumWell(well_width_m=10e-9, barrier_e_J=0.25 * Q, barrier_h_J=0.15 * Q,
+    # deep enough barriers (0.30/0.20 eV) that both carriers stay bound through the tested fields
+    # (the shallower 0.15 eV hole barrier field-ionizes by ~7e6 V/m -- audit QC-1/QC-2)
+    return QuantumWell(well_width_m=10e-9, barrier_e_J=0.30 * Q, barrier_h_J=0.20 * Q,
                        m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q,
                        exciton_binding_J=0.010 * Q, nz=nz, n_pad=2.0)
 
@@ -25,8 +27,16 @@ def test_infinite_well_stark_beta_constant():
 def test_quantum_well_flat_band_state():
     s = _gaas().solve(0.0)
     assert isinstance(s, StarkState)
-    assert s.E_e1_J > 0 and s.E_hh1_J > 0                      # confinement energies above edges
+    assert s.E_e1_J > 0 and s.E_hh1_J > 0 and not s.ionized    # bound confinement at F=0
     assert 0.9 < s.overlap <= 1.0                              # symmetric well -> near-unity overlap
+    # INDEPENDENT magnitude checks (not the assembly tautology): the QW edge sits ABOVE the bulk
+    # gap by the confinement, both confinements are physically sized for a 10nm well, and the light
+    # electron confines deeper than the heavy hole.
+    assert s.E_transition_J > 1.42 * Q                         # above the bulk GaAs gap
+    assert (10e-3 * Q) < s.E_e1_J < (60e-3 * Q)                # physical 10nm-well e1
+    assert (2e-3 * Q) < s.E_hh1_J < (25e-3 * Q)                # physical 10nm-well hh1
+    assert s.E_e1_J > s.E_hh1_J                                # lighter mass -> deeper confinement
+    # assembly-consistency (NOT a physics oracle): E_T = E_g + E_e1 + E_hh1 - exciton
     assert s.E_transition_J == pytest.approx(1.42 * Q + s.E_e1_J + s.E_hh1_J - 0.010 * Q)
 
 
@@ -63,6 +73,32 @@ def test_quantum_well_rejects_bad_input():
     with pytest.raises(ValueError):
         QuantumWell(well_width_m=10e-9, barrier_e_J=0.0, barrier_h_J=0.15 * Q,
                     m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q)    # non-positive barrier
+    with pytest.raises(ValueError):
+        QuantumWell(well_width_m=10e-9, barrier_e_J=0.25 * Q, barrier_h_J=0.15 * Q,
+                    m_e_kg=-ME, m_h_kg=MHH, E_g_J=1.42 * Q)   # negative effective mass (audit QC-3)
+    with pytest.raises(ValueError):
+        QuantumWell(well_width_m=10e-9, barrier_e_J=0.25 * Q, barrier_h_J=0.15 * Q,
+                    m_e_kg=ME, m_h_kg=MHH, E_g_J=0.0)         # non-positive bandgap
+
+
+def test_quantum_well_warns_and_flags_field_ionization():
+    import warnings
+    # a shallow narrow well at an extreme tilt field-ionizes (the most-localized state drops below
+    # half in-well weight): the solver must WARN + flag, not silently return a box-corner artifact
+    # (audit QC-1/QC-2). (The adaptive n_solve already RECOVERS the in-well resonance for milder
+    # tilts where the old fixed n_states=8 returned a p_in~0 edge state -- this exercises the
+    # genuinely-delocalized backstop.)
+    qw = QuantumWell(well_width_m=6e-9, barrier_e_J=0.05 * Q, barrier_h_J=0.04 * Q,
+                     m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q, nz=1201, n_pad=2.5)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        s = qw.solve(8e7)                                      # well above the ionization onset
+    assert s.ionized and s.p_in_min < 0.5
+    assert any(issubclass(x.category, RuntimeWarning) for x in w)
+    with warnings.catch_warnings(record=True) as w2:           # the bound regime is silent + unflagged
+        warnings.simplefilter("always")
+        s0 = _gaas().solve(2e6)
+    assert (not s0.ionized) and not any(issubclass(x.category, RuntimeWarning) for x in w2)
 
 
 def test_kramers_kronig_sign_structure():
@@ -91,7 +127,7 @@ def test_electroabsorption_flat_band_reduces_to_background():
     eam = ElectroAbsorptionModel(qw=qw, eps_bg=eps_bg, alpha0_per_m=1e6, broadening_J=sig,
                                  e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
     lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 - 2.0 * sig)
-    assert eam.eps({"E": np.zeros(3)}, lam) == pytest.approx(eps_bg, abs=1e-9)   # F=0 -> eps_bg
+    assert eam.eps({"E": np.zeros(3)}, lam) == pytest.approx(eps_bg, abs=1e-12)  # F=0 -> eps_bg
 
 
 def test_electroabsorption_field_turns_on_absorption():
@@ -120,3 +156,40 @@ def test_electroabsorption_requires_field_and_straddling_grid():
                                  broadening_J=0.006 * Q, e_grid_J=(0.1 * Q, 0.2 * Q, 1001))
     with pytest.raises(ValueError):
         bad.eps({"E": np.zeros(3)}, lam)                      # grid does not straddle E_T
+    # straddles the CENTER but not several sigma -> KK truncation guard must raise (audit QC-2)
+    narrow = ElectroAbsorptionModel(qw=qw, eps_bg=complex(13.0, 0.0), alpha0_per_m=1e6,
+                                    broadening_J=0.006 * Q, e_grid_J=(ET0 - 0.02 * Q, ET0 + 0.02 * Q, 801))
+    with pytest.raises(ValueError):
+        narrow.eps({"E": np.array([0., 0., 3e6])}, lam)       # 0.02 eV < 6*sigma (0.036 eV) margin
+
+
+def test_electroabsorption_inplane_field_no_response_and_warns():
+    import warnings
+    # the QCSE field is the growth-axis (z) component; a purely in-plane field gives no modulation
+    # AND must warn (a mis-oriented field bundle should not look like a dead modulator -- audit QC-5)
+    qw = _gaas()
+    ET0 = qw.transition_energy_J(0.0); sig = 0.006 * Q
+    eam = ElectroAbsorptionModel(qw=qw, eps_bg=complex(3.6 ** 2, 0.01), alpha0_per_m=1e6,
+                                 broadening_J=sig, e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
+    lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 - 2.0 * sig)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        da = eam.delta_alpha_per_m({"E": np.array([7e6, 0.0, 0.0])}, lam)   # purely in-plane (x)
+    assert da == 0.0                                          # no QCSE for a transverse field
+    assert any(issubclass(x.category, RuntimeWarning) for x in w)
+
+
+def test_electroabsorption_clamps_gain_in_bleaching_regime():
+    import warnings
+    # a smooth (small-kappa) eps_bg + a probe ABOVE the F=0 line bleaches absorption (dalpha<0);
+    # the model must FLOOR Im(eps) at 0 (no gain) and warn (audit QC-1).
+    qw = _gaas()
+    ET0 = qw.transition_energy_J(0.0); sig = 0.006 * Q
+    eam = ElectroAbsorptionModel(qw=qw, eps_bg=complex(3.5 ** 2, 1e-4), alpha0_per_m=2e6,
+                                 broadening_J=sig, e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 3001))
+    lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 + 1.0 * sig)     # probe ABOVE the F=0 edge -> bleaching
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        eps = eam.eps({"E": np.array([0., 0., 6e6])}, lam)
+    assert eps.imag >= 0.0                                     # passive: no gain
+    assert any(issubclass(x.category, RuntimeWarning) for x in w)

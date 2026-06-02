@@ -56,25 +56,33 @@ def part1_solver_vs_analytic():
 
 
 def _gaas_well():
-    return QuantumWell(well_width_m=10e-9, barrier_e_J=0.25 * Q, barrier_h_J=0.15 * Q,
+    # Deep enough barriers (0.30/0.20 eV) that BOTH carriers stay bound (in-well prob > 0.95,
+    # redshift n_pad-stable to ~2%) through the on-state fields -- the shallower 0.15 eV hole
+    # barrier field-ionizes by ~7e6 V/m (audit QC-2), which the solver now flags with a warning.
+    return QuantumWell(well_width_m=10e-9, barrier_e_J=0.30 * Q, barrier_h_J=0.20 * Q,
                        m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q,
                        exciton_binding_J=0.010 * Q, nz=1201, n_pad=2.0)
 
 
 def part2_qcse_physics():
-    """Physical GaAs well: quadratic edge redshift, overlap reduction, no shift at F=0."""
+    """Physical GaAs well: quadratic edge redshift, overlap reduction, F^2-law through the origin."""
     qw = _gaas_well()
     ET0 = qw.transition_energy_J(0.0)
     Fs = np.array([0.0, 1e6, 2e6, 3e6, 4e6, 5e6])
     red = np.array([(ET0 - qw.solve(F).E_transition_J) for F in Fs])    # redshift (J), >=0
     ov = np.array([qw.solve(F).overlap for F in Fs])
-    r2, slope = _r2(Fs ** 2, red)
-    no_shift = abs(red[0]) < 1e-30 and abs(ov[0] - qw.solve(0.0).overlap) < 1e-12
-    quad = (slope > 0) and (r2 > 0.998) and np.all(red[1:] > 0)
-    overlap_drop = np.all(np.diff(ov) < 0) and (ov[-1] < ov[0])
-    print("[q] (2) GaAs well: redshift@5e6={:.2f} meV  quad-R2={:.5f}  overlap {:.3f}->{:.3f}  "
-          "no_shift={}".format(red[-1] / Q * 1e3, r2, ov[0], ov[-1], no_shift), flush=True)
-    return bool(no_shift and quad and overlap_drop)
+    slope, intercept = np.polyfit(Fs ** 2, red, 1)
+    r2 = _r2(Fs ** 2, red)[0]
+    # Independent zero-field check (NOT the tautological red[0]==0 self-comparison, audit QC-1):
+    # the fitted F^2-law must extrapolate THROUGH the origin -- a spurious constant offset in
+    # E_T(F) - E_T(0) would surface as a nonzero intercept.
+    zero_field_ok = abs(intercept) < 0.05 * red[-1]
+    quad = (slope > 0) and (r2 > 0.998) and bool(np.all(red[1:] > 0))
+    overlap_drop = bool(np.all(np.diff(ov) < 0) and ov[-1] < ov[0])
+    print("[q] (2) GaAs well: redshift@5e6={:.2f} meV  quad-R2={:.5f}  fit-intercept={:.1e} meV  "
+          "overlap {:.3f}->{:.3f}".format(red[-1] / Q * 1e3, r2, intercept / Q * 1e3,
+                                          ov[0], ov[-1]), flush=True)
+    return bool(zero_field_ok and quad and overlap_drop)
 
 
 def part3_electroabsorption():
@@ -87,17 +95,20 @@ def part3_electroabsorption():
                                  e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 3001))
     lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 - 2.0 * sigma)            # probe 2 sigma below edge
     eps0 = eam.eps({"E": np.zeros(3)}, lam)
-    flat_band = abs(eps0 - eps_bg) < 1e-9                              # F=0 reduces to background
+    # F=0 -> dalpha identically 0 -> eps == eps_bg (a structural reduction-to-known-limit); the
+    # 1e-12 tol is ~1000x above the ~1e-15 sqrt-then-square roundoff floor (audit QC-2).
+    flat_band = abs(eps0 - eps_bg) < 1e-12
     Fs = [0.0, 3e6, 5e6, 7e6, 9e6]
     da = np.array([eam.delta_alpha_per_m({"E": np.array([0., 0., F])}, lam) for F in Fs])
     im = np.array([eam.eps({"E": np.array([0., 0., F])}, lam).imag for F in Fs])
     kmax = int(np.argmax(da))
-    on_state = (da[kmax] > 0.1e6) and (0 < kmax < len(Fs) - 1)         # interior on-state max
-    absorb_up = (im[kmax] > eps_bg.imag) and np.all(im > 0)            # Im(eps)>0 (absorber)
+    on_state = (da[kmax] > 0.1e6) and (0 < kmax < len(Fs) - 1)         # absorption ON at interior F
+    absorb_up = im[kmax] > eps_bg.imag                                # load-bearing: Im(eps) RISES
+    passive = bool(np.all(im > 0))                                    # exp(-iwt) absorber-sign guard
     print("[q] (3) EAM: flat-band |eps0-eps_bg|={:.1e}  max d-alpha={:.0f} 1/m @F={:.0e}  "
           "Im(eps) {:.3f}->{:.3f}".format(abs(eps0 - eps_bg), da[kmax], Fs[kmax],
                                           eps_bg.imag, im[kmax]), flush=True)
-    return bool(flat_band and on_state and absorb_up)
+    return bool(flat_band and on_state and absorb_up and passive)
 
 
 def main():

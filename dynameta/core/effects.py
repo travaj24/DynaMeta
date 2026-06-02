@@ -24,6 +24,7 @@ Pure numpy: no devsim/ngsolve. Convention: exp(-i omega t), Im(eps) > 0 for abso
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import List, Protocol, runtime_checkable
 
@@ -254,29 +255,50 @@ class ElectroAbsorptionModel:
 
     (a Gaussian exciton line: redshifts with F and weakens with the overlap), forms the field-on
     minus field-off change dalpha on a photon-energy grid, and returns a complex scalar permittivity
-    eps = (n + i kappa)^2 with kappa = kappa_bg + dalpha*hbar c/(2 E_photon) and n = n_bg + dn,
-    dn the Kramers-Kronig transform of dalpha. At F = 0 (dalpha = 0) eps -> eps_bg exactly.
-    Convention exp(-i omega t), Im(eps) > 0 for the field-induced absorption.
+    eps = (n + i kappa)^2 with kappa = max(kappa_bg + dalpha*hbar c/(2 E_photon), 0) and n = n_bg +
+    dn, dn the Kramers-Kronig transform of dalpha. At F = 0 (dalpha = 0) eps -> eps_bg exactly.
+    Convention exp(-i omega t): a passive medium has Im(eps) >= 0, so the total kappa is FLOORED at
+    0 (and a warning fires) -- see the eps_bg note for when that floor would otherwise engage.
 
     SIMPLIFIED model (a first QCSE electro-absorption modulator): a single excitonic line, no
-    band-to-band continuum, and a uniform well field (one Stark solve at the peak |E_z|). eps_bg is
-    the zero-field permittivity at the operating wavelength; alpha0_per_m the zero-field peak
+    band-to-band continuum, and a UNIFORM well field -- ONE Stark solve at the PEAK |E_z| over the
+    field bundle. It therefore returns a SCALAR eps even if fields['E'] is a grid (it does NOT
+    broadcast to a per-point grid -- do not compose it where a pointwise eps grid is required).
+    Only the growth-axis (field_axis, z by default) component drives the QCSE; a purely in-plane
+    field gives no modulation (a warning fires if |E| > 0 but the selected component is ~0).
+
+    eps_bg is the zero-field permittivity at the operating wavelength. IMPORTANT (bleaching regime):
+    for a probe near/above the F=0 exciton -- where the field moves the line AWAY and dalpha < 0 --
+    eps_bg's IMAGINARY part must embed the full zero-field excitonic absorption at the probe, so the
+    differential dalpha stays a physical reduction of an absorption that is actually present; the
+    kappa >= 0 floor enforces passivity regardless. alpha0_per_m is the zero-field peak excitonic
     absorption; broadening_J the exciton linewidth (Gaussian sigma); e_grid_J = (lo, hi, N) the
-    photon-energy KK grid (J), which must straddle E_T."""
+    photon-energy KK grid (J), which MUST span several broadening_J beyond E_T(0) AND E_T(F) on both
+    sides (the KK integral truncates otherwise) and MUST contain the probe photon energy."""
     qw: object                 # QuantumWell-like: .solve(F) -> state(.E_transition_J, .overlap)
     eps_bg: complex            # zero-field permittivity at the operating wavelength
     alpha0_per_m: float        # zero-field peak excitonic absorption [1/m]
     broadening_J: float        # exciton-line Gaussian sigma [J]
-    e_grid_J: tuple            # (E_lo_J, E_hi_J, N) photon-energy grid straddling E_T
+    e_grid_J: tuple            # (E_lo_J, E_hi_J, N) photon-energy grid spanning >> sigma around E_T
     field_axis: int = 2        # component of fields['E'] taken as the well field (z by default)
+
+    _KK_MARGIN_SIGMA = 6.0     # required grid coverage beyond E_T on each side, in broadening_J
 
     def _alpha(self, E_eval, E_T, overlap, overlap0):
         g = np.exp(-0.5 * ((np.asarray(E_eval, float) - E_T) / float(self.broadening_J)) ** 2)
         return self.alpha0_per_m * (overlap / overlap0) * g
 
     def _field_magnitude(self, fields: dict) -> float:
-        E = _E_vec(fields)
-        return float(np.max(np.abs(np.asarray(E)[..., int(self.field_axis)])))
+        E = np.asarray(_E_vec(fields))
+        f_axis = float(np.max(np.abs(E[..., int(self.field_axis)])))
+        f_tot = float(np.max(np.abs(E)))
+        if f_tot > 0.0 and f_axis < 1e-6 * f_tot:
+            warnings.warn(
+                "ElectroAbsorptionModel: fields['E'] has |E[axis]| ~ 0 but |E| > 0 -- the QCSE "
+                "field is the growth-axis (field_axis={}) component only; a transverse field gives "
+                "NO modulation. Check field_axis / the field orientation.".format(self.field_axis),
+                RuntimeWarning, stacklevel=3)
+        return f_axis
 
     def eps(self, fields: dict, lambda_m: float):
         F = self._field_magnitude(fields)
@@ -286,8 +308,19 @@ class ElectroAbsorptionModel:
         ov0 = s0.overlap
         lo, hi, n = self.e_grid_J
         grid = np.linspace(float(lo), float(hi), int(n))
-        if not (grid[0] < s0.E_transition_J < grid[-1] and grid[0] < sF.E_transition_J < grid[-1]):
-            raise ValueError("e_grid_J must straddle the transition energy E_T(F) for both F=0 and F")
+        # the KK integral needs the grid to COVER the line several sigma beyond E_T on both sides
+        # (a center-only straddle silently truncates dn by tens of percent -- audit QC-2):
+        margin = self._KK_MARGIN_SIGMA * float(self.broadening_J)
+        e_lo = min(s0.E_transition_J, sF.E_transition_J) - margin
+        e_hi = max(s0.E_transition_J, sF.E_transition_J) + margin
+        if not (grid[0] <= e_lo and e_hi <= grid[-1]):
+            raise ValueError("e_grid_J must span at least {:.0f}*broadening_J beyond E_T(0) and "
+                             "E_T(F) on BOTH sides (the KK integral truncates otherwise)".format(
+                                 self._KK_MARGIN_SIGMA))
+        # E_photon must be IN the grid: np.interp clamps to the edge outside it, diverging from the
+        # analytic dkappa path (audit QC-3).
+        if not (grid[0] <= E_ph <= grid[-1]):
+            raise ValueError("the probe photon energy h c/lambda must lie within e_grid_J")
         dalpha_grid = (self._alpha(grid, sF.E_transition_J, sF.overlap, ov0)
                        - self._alpha(grid, s0.E_transition_J, s0.overlap, ov0))
         dn = float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
@@ -295,7 +328,14 @@ class ElectroAbsorptionModel:
                           - self._alpha(E_ph, s0.E_transition_J, s0.overlap, ov0))
         dkappa = dalpha_ph * HBAR * C_LIGHT / (2.0 * E_ph)
         nb = np.sqrt(complex(self.eps_bg))
-        return complex((nb.real + dn) + 1j * (nb.imag + dkappa)) ** 2
+        kappa = nb.imag + dkappa
+        if kappa < 0.0:                                   # passivity: no gain (audit QC-1)
+            warnings.warn(
+                "ElectroAbsorptionModel: kappa_bg + dkappa < 0 -- the differential model implies "
+                "GAIN in the bleaching regime; clamping Im to 0. Supply an eps_bg whose Im embeds "
+                "the zero-field exciton absorption at the probe.", RuntimeWarning, stacklevel=2)
+            kappa = 0.0
+        return complex((nb.real + dn) + 1j * kappa) ** 2
 
     def delta_alpha_per_m(self, fields: dict, lambda_m: float) -> float:
         """Field-induced absorption change dalpha = alpha(F) - alpha(0) [1/m] at the probe photon
