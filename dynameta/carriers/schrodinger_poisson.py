@@ -25,11 +25,9 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-HBAR = 1.054571817e-34       # J s
-M_E = 9.1093837015e-31       # kg
-KB = 1.380649e-23            # J/K
-Q = 1.602176634e-19          # C
-EPS0 = 8.8541878128e-12      # F/m
+# Physical constants (SI): single source in core/constants. `Q` is this module's local alias
+# for the elementary charge (used pervasively in the band-physics expressions, e.g. -Q*phi).
+from dynameta.constants import EPS0, KB, HBAR, M_E, Q_E as Q  # noqa: F401
 
 
 def _fermi_log(x: np.ndarray) -> np.ndarray:

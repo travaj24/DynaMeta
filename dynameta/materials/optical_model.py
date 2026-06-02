@@ -26,11 +26,8 @@ from typing import Callable, Optional, Union
 import numpy as np
 
 
-# Physical constants (SI)
-Q_E     = 1.602176634e-19
-EPS0    = 8.8541878128e-12
-C_LIGHT = 2.99792458e8
-M_E     = 9.1093837015e-31
+# Physical constants (SI): single source in core/constants.
+from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E  # noqa: F401
 
 MassOrFn  = Union[float, Callable[[np.ndarray], np.ndarray]]
 GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
