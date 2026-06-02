@@ -109,7 +109,24 @@ anisotropic dn/dT tensor variant are follow-ons.*
 - **2b `ThermoOpticModel`** (dn/dT) + material thermal params (k, Cp, dn/dT).
 - *Oracle:* Si-heater d(lambda)/d(power); no shift at dT=0. (Reuses the Phase-0 seam.)
 
-### Phase 3 -- QCSE / MQW electro-absorption
+### Phase 3 -- QCSE / MQW electro-absorption  **[DONE 2026-06-02]**
+*Built: `carriers/qcse.py` (`QuantumWell` Stark driver: tilts a finite electron + heavy-hole well
+by a perpendicular field and solves both ground subbands via the existing BenDaniel-Duke kernel
+`SchrodingerPoisson1D.solve_schrodinger`, returning the redshifted interband edge E_T(F) + the e-h
+overlap; in-well localization picks the ground state so a strong tilt does not return a field-
+ionized edge state; per-carrier confinement energies are referenced to the well-centre band floor
+so the linear tilt cancels and the pure quadratic Stark shift remains) and `core/effects.
+ElectroAbsorptionModel` (excitonic Gaussian edge alpha(E_photon;F) ~ overlap(F)*line(E_T(F)),
+d-alpha = alpha(F)-alpha(0), d-kappa from d-alpha, d-n from a Kramers-Kronig transform of d-alpha
+via the Maclaurin alternate-point method `kramers_kronig_dn`; returns a complex scalar eps).
+ORACLE `validation/qcse_electroabsorption.py` (pure numpy/scipy, no FEM): (1) deep-well limit
+matches the analytic infinite-square-well E1 (0.985) AND the 2nd-order Stark coefficient
+dE1 = -beta q^2 m F^2 L^4/hbar^2, beta = (128/pi^6)sum n^2/(n^2-1)^5 = 2.1944e-3 (C_num/C_ana=1.05,
+quad-fit R2=0.9998); (2) a physical GaAs well shows a quadratic edge redshift (R2=0.9997) + a
+monotonic e-h overlap drop + no shift at F=0; (3) the device turns ON absorption (d-alpha>0, Im(eps)
+0.01->0.245) at a probe 2 sigma below the zero-field exciton, and reduces EXACTLY to eps_bg at F=0
+(|eps0-eps_bg|=2e-15). REMAINING: a band-to-band continuum (Elliott) on top of the single exciton
+line, a rigorous 2D exciton binding(F), and an MQW stack/coupled-well variant are follow-ons.*
 - Extend the **existing `SchrodingerPoisson1D`** with an in-well field -> Stark-shifted
   sub-bands + a simple exciton model -> `ElectroAbsorptionModel` (d(alpha), d(n) via KK).
 - *Oracle:* known QCSE redshift vs field; flat-band reduction. (Biggest reuse of what exists.)

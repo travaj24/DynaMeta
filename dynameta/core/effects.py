@@ -29,6 +29,8 @@ from typing import List, Protocol, runtime_checkable
 
 import numpy as np
 
+from dynameta.constants import HBAR, C_LIGHT
+
 
 @runtime_checkable
 class EffectModel(Protocol):
@@ -206,3 +208,101 @@ class ThermoOpticModel:
         T = np.asarray(fields["T"], dtype=np.float64)
         n = np.sqrt(complex(self.eps_ref)) + float(self.dn_dT) * (T - float(self.T_ref))
         return n ** 2
+
+
+# ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
+
+def _photon_energy_J(lambda_m: float) -> float:
+    """Photon energy E = h c / lambda = 2 pi hbar c / lambda (J)."""
+    return 2.0 * np.pi * HBAR * C_LIGHT / float(lambda_m)
+
+
+def kramers_kronig_dn(e_grid_J: np.ndarray, dalpha_per_m: np.ndarray) -> np.ndarray:
+    """Refractive-index change dn(E) from an absorption-coefficient change dalpha(E) via the
+    Kramers-Kronig relation
+
+        dn(E) = (hbar c / pi) P int_0^inf dalpha(E') / (E'^2 - E^2) dE' .
+
+    Evaluated AT each grid point by the Maclaurin (alternate-point) method on a UNIFORM grid: the
+    principal value is approximated by summing only grid points of opposite parity to the
+    evaluation index (which omits the singular E'=E term), giving an O(h^2) estimate with no
+    explicit pole handling. dalpha in 1/m, E in J; returns dn dimensionless on the same grid."""
+    E = np.asarray(e_grid_J, dtype=np.float64)
+    a = np.asarray(dalpha_per_m, dtype=np.float64)
+    if E.ndim != 1 or E.shape != a.shape or E.size < 3:
+        raise ValueError("e_grid_J and dalpha_per_m must be 1D arrays of equal length >= 3")
+    h = E[1] - E[0]
+    if not np.allclose(np.diff(E), h, rtol=1e-6, atol=0.0):
+        raise ValueError("e_grid_J must be uniformly spaced (Maclaurin KK assumes it)")
+    pref = (HBAR * C_LIGHT / np.pi) * 2.0 * h
+    idx = np.arange(E.size)
+    dn = np.empty(E.size)
+    for i in range(E.size):
+        mask = ((idx - i) & 1).astype(bool)             # (j - i) odd -> Maclaurin alternate points
+        dn[i] = pref * np.sum(a[mask] / (E[mask] ** 2 - E[i] ** 2))
+    return dn
+
+
+@dataclass
+class ElectroAbsorptionModel:
+    """QCSE / MQW electro-absorption -- an EffectModel reading fields['E'] (uses the |E_z| field
+    across the well). A quantum-well Stark driver (`qw`, any object exposing .solve(F) -> a state
+    with .E_transition_J and .overlap) supplies the field-redshifted interband edge E_T(F) and the
+    reduced e-h overlap. The model builds an excitonic absorption edge
+
+        alpha(E_photon; F) = alpha0 * (overlap(F)/overlap(0)) * exp(-0.5 ((E_photon - E_T(F))/sigma)^2)
+
+    (a Gaussian exciton line: redshifts with F and weakens with the overlap), forms the field-on
+    minus field-off change dalpha on a photon-energy grid, and returns a complex scalar permittivity
+    eps = (n + i kappa)^2 with kappa = kappa_bg + dalpha*hbar c/(2 E_photon) and n = n_bg + dn,
+    dn the Kramers-Kronig transform of dalpha. At F = 0 (dalpha = 0) eps -> eps_bg exactly.
+    Convention exp(-i omega t), Im(eps) > 0 for the field-induced absorption.
+
+    SIMPLIFIED model (a first QCSE electro-absorption modulator): a single excitonic line, no
+    band-to-band continuum, and a uniform well field (one Stark solve at the peak |E_z|). eps_bg is
+    the zero-field permittivity at the operating wavelength; alpha0_per_m the zero-field peak
+    absorption; broadening_J the exciton linewidth (Gaussian sigma); e_grid_J = (lo, hi, N) the
+    photon-energy KK grid (J), which must straddle E_T."""
+    qw: object                 # QuantumWell-like: .solve(F) -> state(.E_transition_J, .overlap)
+    eps_bg: complex            # zero-field permittivity at the operating wavelength
+    alpha0_per_m: float        # zero-field peak excitonic absorption [1/m]
+    broadening_J: float        # exciton-line Gaussian sigma [J]
+    e_grid_J: tuple            # (E_lo_J, E_hi_J, N) photon-energy grid straddling E_T
+    field_axis: int = 2        # component of fields['E'] taken as the well field (z by default)
+
+    def _alpha(self, E_eval, E_T, overlap, overlap0):
+        g = np.exp(-0.5 * ((np.asarray(E_eval, float) - E_T) / float(self.broadening_J)) ** 2)
+        return self.alpha0_per_m * (overlap / overlap0) * g
+
+    def _field_magnitude(self, fields: dict) -> float:
+        E = _E_vec(fields)
+        return float(np.max(np.abs(np.asarray(E)[..., int(self.field_axis)])))
+
+    def eps(self, fields: dict, lambda_m: float):
+        F = self._field_magnitude(fields)
+        E_ph = _photon_energy_J(lambda_m)
+        s0 = self.qw.solve(0.0)
+        sF = self.qw.solve(F)
+        ov0 = s0.overlap
+        lo, hi, n = self.e_grid_J
+        grid = np.linspace(float(lo), float(hi), int(n))
+        if not (grid[0] < s0.E_transition_J < grid[-1] and grid[0] < sF.E_transition_J < grid[-1]):
+            raise ValueError("e_grid_J must straddle the transition energy E_T(F) for both F=0 and F")
+        dalpha_grid = (self._alpha(grid, sF.E_transition_J, sF.overlap, ov0)
+                       - self._alpha(grid, s0.E_transition_J, s0.overlap, ov0))
+        dn = float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
+        dalpha_ph = float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, ov0)
+                          - self._alpha(E_ph, s0.E_transition_J, s0.overlap, ov0))
+        dkappa = dalpha_ph * HBAR * C_LIGHT / (2.0 * E_ph)
+        nb = np.sqrt(complex(self.eps_bg))
+        return complex((nb.real + dn) + 1j * (nb.imag + dkappa)) ** 2
+
+    def delta_alpha_per_m(self, fields: dict, lambda_m: float) -> float:
+        """Field-induced absorption change dalpha = alpha(F) - alpha(0) [1/m] at the probe photon
+        energy -- the electro-absorption-modulator extinction signal (>0 below the F=0 edge)."""
+        F = self._field_magnitude(fields)
+        E_ph = _photon_energy_J(lambda_m)
+        s0 = self.qw.solve(0.0)
+        sF = self.qw.solve(F)
+        return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap)
+                     - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap))
