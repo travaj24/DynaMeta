@@ -16,6 +16,7 @@ from dynameta.core.lift import (
     FieldLift, IdentityLift, ExtrudeLift, SeparableXYLift, choose_lift,
 )
 from dynameta.core.alignment import RegionAlignment, GeometryAlignment
+from dynameta.core.effects import EffectModel, OpticalModelEffect, ComposedEffect, as_tensor
 from dynameta.core.n_to_eps import NToEpsMap, MaterialEpsMap
 from dynameta.core.interfaces import (
     RegionInfo, OpticalResult, CarrierSolver, OpticalGeometryBuilder, OpticalSolver,
@@ -33,6 +34,7 @@ __all__ = [
     "FieldLift", "IdentityLift", "ExtrudeLift", "SeparableXYLift", "choose_lift",
     "RegionAlignment", "GeometryAlignment",
     "NToEpsMap", "MaterialEpsMap",
+    "EffectModel", "OpticalModelEffect", "ComposedEffect", "as_tensor",
     "RegionInfo", "OpticalResult", "CarrierSolver", "OpticalGeometryBuilder", "OpticalSolver",
     "LayeredStackSolver",
     "LayeredSlab", "LayeredStack", "slice_profile", "slice_eps_field",
