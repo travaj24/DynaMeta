@@ -3,10 +3,9 @@ Frequency-resolved gate capacitance of the FULL Park metasurface (2D drift-diffu
 the resolved-bandwidth capability on the real geometry, completing the gated-DD arc.
 
 Builds the Park DD metasurface (LayeredDevsimBuilder, ITO = drift_diffusion with the full-edge
-ground), DC-solves to a gate operating point, then reconfigures the gate (top_contact) as a
-CIRCUIT-DRIVEN contact (delete its bias Dirichlet, re-add via ac_analysis.setup_circuit_contact) and
-runs ssac -> C(omega), G(omega) of the gate. (A clean builder API for an ssac gate is a future
-polish; this demonstrates the capability via a post-solve reconfiguration.)
+ground), DC-solves to a gate operating point, then repoints the gate (top_contact) CIRCUIT-DRIVEN
+via the first-class builder API (LayeredDevsimBuilder.set_ssac_gate) and runs ssac -> C(omega),
+G(omega) of the gate.
 
 ORACLE: the ssac gate capacitance must equal the QUASI-STATIC dQ/dVg, where Q is the ITO
 accumulated electron charge q*sum(NodeVolume*(n - n_bg)) over the ITO region -- both in 2D per-unit-y
@@ -81,9 +80,8 @@ def main():
     print("[t] DD Park solved at gate +{:.1f} V; gate region = {}".format(
         VG, b._contact_region.get(GATE)), flush=True)
 
-    # reconfigure the gate circuit-driven (delete bias Dirichlet -> circuit contact) and re-settle
-    ds.delete_contact_equation(device=b.device, contact=GATE, name="PotentialEquation")
-    AC.setup_circuit_contact(b.device, GATE, node_name="vg", source_name="V1")
+    # repoint the gate circuit-driven via the first-class builder API, then re-settle
+    b.set_ssac_gate(GATE, source_name="V1")
     _resolve_gate(b.device, VG)
 
     freqs, C, G = AC.ssac_admittance(FREQS, source_name="V1")     # F/m (2D per unit y)

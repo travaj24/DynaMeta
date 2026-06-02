@@ -65,6 +65,21 @@ def reapply_by_name(device: str, eq_name: str) -> None:
             ds.interface_equation(device=device, interface=e["loc"], **e["kwargs"])
 
 
+def forget(device: str, eq_name: str, *, loc: str = None) -> None:
+    """Drop recorded equation entries matching `eq_name` (and `loc`, if given) from the registry
+    WITHOUT touching the live DEVSIM equation. Use when REPOINTING a contact -- e.g. swapping a
+    bias-Dirichlet gate for a circuit-driven one: the caller ds.delete_contact_equation's the stale
+    equation, forget()s its record here, then records the replacement, so a later Gummel/staged
+    delete_by_name -> reapply_by_name does NOT resurrect the deleted equation. (delete_by_name both
+    deletes the live equation AND re-adds it on reapply; forget only removes the bookkeeping, leaving
+    the live equation as the caller left it.)"""
+    reg = _REG.get(device)
+    if not reg:
+        return
+    _REG[device] = [e for e in reg
+                    if not (e["name"] == eq_name and (loc is None or e["loc"] == loc))]
+
+
 def edge_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
     """Create an edge model + its @n0/@n1 derivatives w.r.t. each variable in `wrt` (the
     Jacobian entries DEVSIM's coupled Newton consumes). Shared by the unipolar and bipolar

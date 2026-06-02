@@ -56,3 +56,40 @@ def test_equilibrium_edge_ground_not_carved():
     ito = next(s for s in b._specs if s.name == "ito")
     assert ito.x_lo == 0.0 and abs(ito.x_hi - 200e-9) < 1e-15
     assert b._dd_full_edge_grounds() == {}
+
+
+def test_eq_registry_forget_is_targeted():
+    """forget(name, loc) drops ONLY the matching recorded entry (and forget(name) drops all by
+    name) without touching the live equation -- the bookkeeping half of repointing a contact."""
+    R = pytest.importorskip("dynameta.carriers.eq_registry")
+    dev = "utest_forget_dev"
+    R._REG[dev] = [
+        {"scope": "region", "loc": "ito", "name": "PotentialEquation", "kwargs": {}},
+        {"scope": "contact", "loc": "gate", "name": "PotentialEquation", "kwargs": {}},
+        {"scope": "contact", "loc": "gnd", "name": "PotentialEquation", "kwargs": {}},
+        {"scope": "contact", "loc": "gate", "name": "ElectronContinuityEquation", "kwargs": {}},
+    ]
+    try:
+        R.forget(dev, "PotentialEquation", loc="gate")          # only the gate's Potential record
+        present = {(e["scope"], e["loc"], e["name"]) for e in R._REG[dev]}
+        assert ("contact", "gate", "PotentialEquation") not in present
+        assert ("region", "ito", "PotentialEquation") in present        # region kept
+        assert ("contact", "gnd", "PotentialEquation") in present       # other contact kept
+        assert ("contact", "gate", "ElectronContinuityEquation") in present  # other name kept
+        R.forget(dev, "PotentialEquation")                      # no loc -> drop all by name
+        names = {(e["loc"], e["name"]) for e in R._REG[dev]}
+        assert names == {("gate", "ElectronContinuityEquation")}
+        R.forget("no_such_device", "PotentialEquation")         # missing device is a no-op
+    finally:
+        R.clear(dev)
+
+
+def test_set_ssac_gate_requires_built_device():
+    """set_ssac_gate raises (does not silently no-op) if called before the device is built."""
+    pytest.importorskip("devsim")
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    b = LayeredDevsimBuilder(_design("drift_diffusion"), mesh_name="ut_ssac_m",
+                             device_name="ut_ssac_d")
+    assert not b._built
+    with pytest.raises(RuntimeError):
+        b.set_ssac_gate("gl")
