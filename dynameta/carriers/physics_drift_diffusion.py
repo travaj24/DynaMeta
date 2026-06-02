@@ -57,7 +57,8 @@ import devsim as ds
 from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12)
 from dynameta.carriers import eq_registry as _R
-from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
+from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
+                                           node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_expr_devsim
 
 
@@ -128,9 +129,16 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
            "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
     _edge_with_derivs(device, region, "ElectronCurrent", jn, ("Electrons", "Potential"))
 
+    # transient/AC charge: the d(q n)/dt time term (NCharge = -q n, the electron charge density).
+    # Defined ALWAYS -- a steady-state DC solve ignores time_node_model, while a transient
+    # (solve type="transient_*") or small-signal ssac solve USES it. It is what makes the
+    # carrier-charge (gate-accumulation) capacitance appear in the ssac admittance; without it ssac
+    # on this unipolar DD device would see only the resistive part (mirrors the bipolar
+    # NCharge/PCharge). No recombination in this model -> no node_model on the continuity equation.
+    _node_with_derivs(device, region, "NCharge", "-ElectronCharge * Electrons", ("Electrons",))
     _R.record_region_equation(device, region, name="ElectronContinuityEquation",
                   variable_name="Electrons", edge_model="ElectronCurrent",
-                  variable_update="positive")
+                  time_node_model="NCharge", variable_update="positive")
 
 
 def setup_contact_ohmic_dd(device: str, contact: str) -> None:
