@@ -16,6 +16,7 @@ defaults are the layered DEVSIM/NGSolve builders.
 
 from __future__ import annotations
 
+import cmath
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -98,7 +99,6 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     n_to_eps = MaterialEpsMap(design.materials)
     lift = choose_lift(design.device_symmetry(), design.optical.lift,
                         period_y_m=design.unit_cell.period_y_m, ny=design.optical.ny_sym)
-    import cmath
     sup_mat = design.stack.superstrate_material
     sub_mat = design.stack.substrate_material
 

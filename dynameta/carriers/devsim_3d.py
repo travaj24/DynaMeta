@@ -289,8 +289,8 @@ class Devsim3DEquilibrium:
             ds.set_parameter(device=self.device, name="gate_bias", value=vg)
             ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
                       relative_error=1e-5, maximum_iterations=80)
-        g = lambda nm: np.array(ds.get_node_model_values(device=self.device,
-                                                          region="semi", name=nm))
+        def g(nm):
+            return np.array(ds.get_node_model_values(device=self.device, region="semi", name=nm))
         x, y, z = g("x"), g("y"), g("z")
         n, pot = g("Electrons"), g("Potential")
         nodes = np.column_stack([x, y, z])

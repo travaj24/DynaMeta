@@ -47,6 +47,9 @@ class SubbandResult:
     psi: np.ndarray              # (n_interior, n_states) normalized so sum |psi|^2 dz = 1
     z_m: np.ndarray              # interior z nodes (Dirichlet ends excluded)
     sheet_density_m2: np.ndarray # per-subband 2D sheet density n_s,i (m^-2)
+    density_m3: Optional[np.ndarray] = None   # n(z), filled by density() post-construction
+    fermi_level_J: Optional[float] = None     # E_F used, filled by density()
+    converged: Optional[bool] = None          # set by solve_self_consistent (None if N/A)
 
 
 class SchrodingerPoisson1D:
@@ -139,8 +142,8 @@ class SchrodingerPoisson1D:
             ns = pref * _fermi_log((E_F_J - E) / (KB * self.T))   # per-subband sheet density (m^-2)
         n_z = (np.abs(psi) ** 2) @ ns                              # (n_interior,) m^-3
         res = SubbandResult(energies_J=E, psi=psi, z_m=zi, sheet_density_m2=ns)
-        res.density_m3 = n_z                                       # type: ignore[attr-defined]
-        res.fermi_level_J = float(E_F_J)                           # type: ignore[attr-defined]
+        res.density_m3 = n_z
+        res.fermi_level_J = float(E_F_J)
         return res
 
     # ---- self-consistent Schrodinger-Poisson (Trellakis predictor-corrector) ----
@@ -190,10 +193,9 @@ class SchrodingerPoisson1D:
 
         def laplacian_matrix():
             # second-difference operator on interior nodes (uniform grid), Dirichlet ends
-            import numpy as _np
             n = N - 2
-            main = -2.0 * _np.ones(n)
-            off = _np.ones(n - 1)
+            main = -2.0 * np.ones(n)
+            off = np.ones(n - 1)
             return main, off
 
         main, off = laplacian_matrix()
@@ -253,7 +255,7 @@ class SchrodingerPoisson1D:
                 stacklevel=2)
         U = -Q * phi + U_band
         result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
-        result.converged = converged   # type: ignore[attr-defined]
+        result.converged = converged
         n_full = np.zeros(N)
-        n_full[1:-1] = result.density_m3   # type: ignore[attr-defined]
+        n_full[1:-1] = result.density_m3
         return phi, n_full, result
