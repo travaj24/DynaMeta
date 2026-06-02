@@ -346,3 +346,61 @@ class ElectroAbsorptionModel:
         sF = self.qw.solve(F)
         return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap)
                      - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap))
+
+
+# ---- reconfigurable: phase-change + liquid-crystal (Phase 4) -------------------------------
+
+@dataclass
+class PCMModel:
+    """Phase-change-material EffectModel (GST / Sb2S3 / VO2): a crystalline volume fraction f in
+    [0, 1] blends the amorphous and crystalline permittivities via the Bruggeman effective-medium
+    approximation (the standard intermediate-state optical model). Reads
+    fields['crystalline_fraction'] (scalar in [0, 1]; default 0 = fully amorphous) and returns the
+    self-consistent Bruggeman root of
+
+        f (eps_c - eps)/(eps_c + 2 eps) + (1 - f)(eps_a - eps)/(eps_a + 2 eps) = 0
+        => 2 eps^2 - b eps - eps_a eps_c = 0,  b = eps_c (3f - 1) + eps_a (2 - 3f),
+
+    taking the passive branch (Im(eps) >= 0 for exp(-i omega t)). At f = 0 eps -> eps_a and at
+    f = 1 eps -> eps_c EXACTLY. Scalar (isotropic) response. eps_amorphous/eps_crystalline are the
+    two end-state permittivities at the operating wavelength."""
+    eps_amorphous: complex
+    eps_crystalline: complex
+
+    def eps(self, fields: dict, lambda_m: float):
+        f = float(fields.get("crystalline_fraction", 0.0)) if fields else 0.0
+        if not (0.0 <= f <= 1.0):
+            raise ValueError("fields['crystalline_fraction'] must be in [0, 1]")
+        ea, ec = complex(self.eps_amorphous), complex(self.eps_crystalline)
+        b = ec * (3.0 * f - 1.0) + ea * (2.0 - 3.0 * f)
+        s = np.sqrt(b * b + 8.0 * ea * ec)
+        e_plus, e_minus = (b + s) / 4.0, (b - s) / 4.0
+        return e_plus if e_plus.imag >= e_minus.imag else e_minus   # passive branch (Im >= 0)
+
+
+@dataclass
+class LiquidCrystalModel:
+    """Liquid-crystal uniaxial EffectModel -- the optical companion to the lc_director Freedericksz
+    driver. A director tilt angle theta (from the plate plane, rotating in the x-z plane) sets the
+    optic axis n-hat = (cos theta, 0, sin theta) and the UNIAXIAL permittivity tensor
+
+        eps = n_o^2 I + (n_e^2 - n_o^2) (n-hat (x) n-hat)            (3x3, anisotropic)
+
+    Reads fields['director_angle_rad'] (scalar, default 0 = planar -> optic axis along x). At
+    theta = 0 the extraordinary axis is x (eps_xx = n_e^2, eps_yy = eps_zz = n_o^2); rotating to
+    theta = pi/2 puts it along z. Reduces EXACTLY to the isotropic n_o^2 I when n_e = n_o.
+
+    FEM NOTE: the two PRINCIPAL orientations -- planar (theta=0) and homeotropic (theta=pi/2) -- are
+    DIAGONAL and flow correctly through the Phase-0b tensor-eps FEM (validation/lc_uniaxial_fem.py).
+    An INTERMEDIATE tilt gives a nonzero off-diagonal eps_xz, which the current FEM matrix-CF matvec
+    mis-evaluates under PML (a tracked P0b follow-on; assemble_eps_cf warns). The tilted-director
+    ANGULAR physics is validated analytically (validation/reconfigurable_modulators.py); only the FEM
+    solve of an off-diagonal tensor is deferred."""
+    n_o: float
+    n_e: float
+
+    def eps(self, fields: dict, lambda_m: float):
+        th = float((fields or {}).get("director_angle_rad", 0.0))
+        nhat = np.array([np.cos(th), 0.0, np.sin(th)], dtype=np.complex128)
+        return (self.n_o ** 2) * np.eye(3, dtype=np.complex128) \
+            + (self.n_e ** 2 - self.n_o ** 2) * np.outer(nhat, nhat)
