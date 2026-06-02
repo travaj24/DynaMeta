@@ -2,9 +2,9 @@
 CrossSection: the lateral (x, y) shape of an inclusion within a layer.
 
 These are pure geometry (SI metres, absolute coordinates in the unit cell);
-they carry NO solver code. The DEVSIM builder reads `x_edges_m`/`y_edges_m`
-to place mesh-refinement lines; the NGSolve builder reads `kind` + the shape
-parameters to construct the OCC face; both can use `contains_m` to rasterize.
+they carry NO solver code. The DEVSIM builder reads `bbox_m()` to place mesh-
+refinement lines; the NGSolve builder reads `kind` + the shape parameters to
+construct the OCC face; both can use `contains_m` to rasterize.
 
 A layer's full-cell fill is its BACKGROUND material -- it is NOT a CrossSection.
 Inclusions are always sub-cell shapes placed on top of the background. So a
@@ -40,14 +40,6 @@ class CrossSection:
         """Coarse point-group tag about the shape's own center:
         'c4v' (4-fold), 'c2v' (2 mirror axes), or 'none'."""
         return "none"
-
-    def x_edges_m(self) -> List[float]:
-        xlo, xhi, _, _ = self.bbox_m()
-        return [xlo, xhi]
-
-    def y_edges_m(self) -> List[float]:
-        _, _, ylo, yhi = self.bbox_m()
-        return [ylo, yhi]
 
     def contains_m(self, x, y):
         """Boolean (array-broadcasting) point-in-shape test."""

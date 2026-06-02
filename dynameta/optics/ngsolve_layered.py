@@ -358,8 +358,11 @@ def _identify_periodic(shape, Px: float, Py: float) -> Tuple[int, int]:
         elif abs(c.x - Px) < tol: xP.append(f)
         elif abs(c.y) < tol:      y0.append(f)
         elif abs(c.y - Py) < tol: yP.append(f)
-    sig_yz = lambda f: (round(f.center.y * 1e3), round(f.center.z * 1e3))
-    sig_xz = lambda f: (round(f.center.x * 1e3), round(f.center.z * 1e3))
+    def sig_yz(f):
+        return (round(f.center.y * 1e3), round(f.center.z * 1e3))
+
+    def sig_xz(f):
+        return (round(f.center.x * 1e3), round(f.center.z * 1e3))
 
     def _by_sig(faces, sig, axis):
         # BI-5: build the centroid-signature -> face map, but RAISE on a collision instead
