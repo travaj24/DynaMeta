@@ -160,14 +160,24 @@ def setup_bipolar_region(device: str, region: str, *,
     _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
     _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
 
-    # --- continuity equations (DC: no time_node_model) ---
+    # --- transient / AC charge: the d(q n)/dt time term of each continuity equation. NCharge =
+    #     -q n (electron charge density), PCharge = +q p. Defined ALWAYS: a steady-state DC solve
+    #     ignores time_node_model, while a transient (solve type="transient_*") or a small-signal
+    #     ssac solve USES it -- it is what makes the carrier-charge (junction / diffusion)
+    #     capacitance appear in the ssac admittance and the large-signal transient response. (Was
+    #     absent before, so ssac on a DD device saw only the resistive part; verified the diode
+    #     junction C then matches the analytic depletion C.)
+    _node_with_derivs(device, region, "NCharge", "-ElectronCharge * Electrons", ("Electrons",))
+    _node_with_derivs(device, region, "PCharge", "ElectronCharge * Holes", ("Holes",))
+
+    # --- continuity equations (time_node_model -> transient/AC-ready; ignored by a DC solve) ---
     _R.record_region_equation(device, region, name="ElectronContinuityEquation",
                               variable_name="Electrons", edge_model="ElectronCurrent",
-                              node_model="ElectronGeneration",
+                              node_model="ElectronGeneration", time_node_model="NCharge",
                               variable_update="positive")
     _R.record_region_equation(device, region, name="HoleContinuityEquation",
                               variable_name="Holes", edge_model="HoleCurrent",
-                              node_model="HoleGeneration",
+                              node_model="HoleGeneration", time_node_model="PCharge",
                               variable_update="positive")
 
 
@@ -224,3 +234,53 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
                           name="{}:Holes".format(ch), equation="1")
     _R.record_contact_equation(device, contact, name="HoleContinuityEquation",
                                node_model=ch, edge_current_model="HoleCurrent")
+
+
+def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
+                                        node_name: str = "vac",
+                                        source_name: str = "V1") -> tuple:
+    """Circuit-driven bipolar ohmic contact -- the small-signal-AC (ssac) / transient analogue of
+    setup_contact_ohmic_bipolar. The Potential is tied to a CIRCUIT NODE `node_name` (driven by an
+    AC voltage source `source_name`) instead of a bias PARAMETER, and the Potential + Electron +
+    Hole contact currents all couple into that node, so the source current `<source_name>.I` is the
+    TOTAL small-signal terminal current. Use this on the contact you want to AC/transient-probe; the
+    OTHER contact stays an ordinary grounded setup_contact_ohmic_bipolar. The region must be
+    transient-ready (setup_bipolar_region defines the NCharge/PCharge time-node models -- the
+    carrier-charge capacitance the ssac admittance needs).
+
+    DC operating point: set the source DC value with ds.circuit_alter(name=source_name, value=V)
+    and ramp; acreal=1 is a unit AC excitation. Extract C(f), G(f) with
+    ac_analysis.ssac_admittance(frequencies, source_name=source_name). Returns (source_name,
+    node_name). (Validated: a reverse-biased diode's ssac junction C matches the analytic depletion
+    C_j; see validation/ac_diode.py.)"""
+    ds.add_circuit_node(name=node_name, variable_update="default")
+    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0, acreal=1.0, acimag=0.0)
+    # Potential: Dirichlet tied to the circuit node + built-in offset (Boltzmann reference n_i).
+    cp = "{}_potential_circuit".format(contact)
+    pot_eq = ("Potential - {n} + ifelse(NetDoping > 0, -V_t*log({ce}/n_i), V_t*log({ch}/n_i))"
+              .format(n=node_name, ce=CELEC, ch=CHOLE))
+    ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
+    ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
+                          equation="1")
+    ds.contact_node_model(device=device, contact=contact, name="{}:{}".format(cp, node_name),
+                          equation="-1")
+    _R.record_contact_equation(device, contact, name="PotentialEquation", node_model=cp,
+                               edge_charge_model="PotentialEdgeFlux", circuit_node=node_name)
+    # Electrons / Holes pinned to charge-neutral equilibrium; their currents couple to the node.
+    ce = "{}_electrons_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=ce,
+                          equation="Electrons - ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(
+                              ce=CELEC, ch=CHOLE))
+    ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="ElectronContinuityEquation", node_model=ce,
+                               edge_current_model="ElectronCurrent", circuit_node=node_name)
+    ch = "{}_holes_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=ch,
+                          equation="Holes - ifelse(NetDoping < 0, {ch}, n_i^2/{ce})".format(
+                              ce=CELEC, ch=CHOLE))
+    ds.contact_node_model(device=device, contact=contact, name="{}:Holes".format(ch),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="HoleContinuityEquation", node_model=ch,
+                               edge_current_model="HoleCurrent", circuit_node=node_name)
+    return source_name, node_name
