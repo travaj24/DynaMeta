@@ -18,7 +18,8 @@ from dynameta.core.lift import (
 from dynameta.core.alignment import RegionAlignment, GeometryAlignment
 from dynameta.core.effects import (EffectModel, OpticalModelEffect, ComposedEffect, DeltaEffect,
                                    as_tensor, PockelsEffect, KerrEffect, FranzKeldyshEffect,
-                                   ThermoOpticModel, ElectroAbsorptionModel, kramers_kronig_dn)
+                                   ThermoOpticModel, ElectroAbsorptionModel, kramers_kronig_dn,
+                                   PCMModel, LiquidCrystalModel)
 from dynameta.core.n_to_eps import NToEpsMap, MaterialEpsMap
 from dynameta.core.interfaces import (
     RegionInfo, OpticalResult, CarrierSolver, OpticalGeometryBuilder, OpticalSolver,
@@ -38,7 +39,7 @@ __all__ = [
     "NToEpsMap", "MaterialEpsMap",
     "EffectModel", "OpticalModelEffect", "ComposedEffect", "DeltaEffect", "as_tensor",
     "PockelsEffect", "KerrEffect", "FranzKeldyshEffect", "ThermoOpticModel",
-    "ElectroAbsorptionModel", "kramers_kronig_dn",
+    "ElectroAbsorptionModel", "kramers_kronig_dn", "PCMModel", "LiquidCrystalModel",
     "RegionInfo", "OpticalResult", "CarrierSolver", "OpticalGeometryBuilder", "OpticalSolver",
     "LayeredStackSolver",
     "LayeredSlab", "LayeredStack", "slice_profile", "slice_eps_field",
