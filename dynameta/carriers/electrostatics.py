@@ -1,7 +1,10 @@
 """
 Electrostatic driving-field solver for field-effect (Pockels / Kerr / Franz-Keldysh) modulators
--- the Phase-1 driver (roadmap 1a). It emits the applied static E-field into the bridge's field
-bundle, which a field-dependent EffectModel (PockelsEffect, ...) turns into a tensor eps.
+-- the Phase-1 driver (roadmap 1a). It PRODUCES the applied static E-field that the caller places
+in a field bundle (the `{"E": ...}` dict a field-dependent EffectModel -- PockelsEffect, ... --
+reads) to obtain a tensor eps. (The bridge does not yet auto-assemble E from a driver; that wiring
+is a tracked seam. The driver + EffectModels are validated end-to-end at the FEM level in
+validation/pockels_phase_modulator.py.)
 
 For a LAYERED dielectric stack with a voltage applied across it (no mobile carriers, no free
 charge), the normal displacement D is continuous between layers, so the per-layer static field is

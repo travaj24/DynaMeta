@@ -5,7 +5,7 @@ Run: python -m pytest tests/test_effects.py -q
 import numpy as np
 import pytest
 
-from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, as_tensor,
+from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, DeltaEffect, as_tensor,
                                    PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel)
 from dynameta.materials.optical_model import ConstantOptical
 
@@ -44,6 +44,23 @@ def test_composed_effect_sums_background_plus_deltas_as_tensors():
     comp = ComposedEffect(background=_Const(4.0 + 0j), deltas=[_Const(0.1 + 0j), _Const(0.05 + 0j)])
     out = comp.eps({}, 1300e-9)
     assert out.shape == (3, 3) and np.allclose(out, 4.15 * np.eye(3))
+
+
+def test_delta_effect_prevents_background_double_count():
+    # The bundled effects return ABSOLUTE eps (own background + shift). Composing one DIRECTLY as a
+    # delta double-counts the background; DeltaEffect (subtract zero-drive baseline) fixes it.
+    no, ne, r13, r33, eps_bg, r = _linbo3()
+    pk = PockelsEffect(eps_bg=eps_bg, r_voigt=r)
+    base = OpticalModelEffect(ConstantOptical(complex(4.0, 0.0)))          # eps_bg = 4*I background
+    Ez = 1.0e7
+    # WRONG: composing the absolute-eps Pockels directly adds eps_bg on top of the 4.0 background
+    naive = ComposedEffect(background=base, deltas=[pk]).eps({"E": np.zeros(3)}, 1300e-9)
+    assert np.allclose(np.diag(naive), [4.0 + no ** 2, 4.0 + no ** 2, 4.0 + ne ** 2])  # bg twice
+    # RIGHT: wrap in DeltaEffect with a zero-field baseline -> only the field-induced shift adds
+    comp = ComposedEffect(background=base, deltas=[DeltaEffect(pk, {"E": np.zeros(3)})])
+    assert np.allclose(comp.eps({"E": np.zeros(3)}, 1300e-9), 4.0 * np.eye(3))   # E=0 -> just bg
+    shift = as_tensor(pk.eps({"E": [0, 0, Ez]}, 1300e-9)) - as_tensor(eps_bg)
+    assert np.allclose(comp.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), 4.0 * np.eye(3) + shift)
 
 
 def test_eps_field_tensor_flags():

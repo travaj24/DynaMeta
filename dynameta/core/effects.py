@@ -3,8 +3,11 @@ EffectModel: the generalized material-response seam (the v0.3 keystone).
 
 Where the original NToEpsMap mapped ONLY carrier density n -> a scalar eps, an EffectModel maps
 the full local-field bundle {n, E, T, ...} -> eps, which may be a TENSOR (3x3 per point) for
-anisotropic effects (Pockels, liquid-crystal, ...). The bridge assembles the per-region field
-bundle on the aligned grid and calls EffectModel.eps(fields, lambda).
+anisotropic effects (Pockels, liquid-crystal, ...). A caller assembles the per-region field bundle
+and calls EffectModel.eps(fields, lambda). (Today the bridge auto-assembles only the carrier field
+'n'; the field-effect drivers for {E, T} produce their fields for the caller to place in the
+bundle -- wiring them through the bridge is a tracked seam. The richer effects are validated
+end-to-end at the FEM level by the Phase-1/2 oracles.)
 
   eps(fields, lambda_m) -> ndarray
       scalar response: shape (...,)            (broadcast of the field grids)
@@ -58,10 +61,16 @@ def as_tensor(eps) -> np.ndarray:
 @dataclass
 class ComposedEffect:
     """Compose effects on a background: eps = background.eps + sum(delta.eps). All contributions
-    are promoted to (...,3,3) tensors via as_tensor before summing, so a scalar background (e.g.
-    a Drude/Constant response) and tensor deltas (e.g. Pockels) add consistently. Used for an
-    EO layer with a background index + a field-induced birefringence, or thermo-optic + free
-    carrier on the same region."""
+    are promoted to (...,3,3) tensors via as_tensor before summing, so a scalar background (e.g. a
+    Drude/Constant response) and tensor deltas (e.g. Pockels) add consistently.
+
+    IMPORTANT: each entry in `deltas` MUST be a TRUE delta-eps model -- one that returns ~0 at zero
+    drive, i.e. a SHIFT to add on top of `background`. The bundled field-effect models
+    (PockelsEffect, KerrEffect, ThermoOpticModel, ...) instead each return the FULL eps (their own
+    background PLUS the shift), so composing them DIRECTLY would add a background once per model
+    (double-counting). Wrap each such model in a DeltaEffect (which subtracts its zero-drive
+    baseline) before composing. Use for an EO layer with a background index + a field-induced
+    birefringence, or thermo-optic + free-carrier shifts on the same region."""
     background: EffectModel
     deltas: List[EffectModel]
 
@@ -70,6 +79,29 @@ class ComposedEffect:
         for d in self.deltas:
             total = total + as_tensor(d.eps(fields, lambda_m))
         return total
+
+
+@dataclass
+class DeltaEffect:
+    """Adapt an absolute-eps EffectModel into a delta-eps contribution for ComposedEffect.
+
+    The bundled field-effect models (PockelsEffect, KerrEffect, ThermoOpticModel, ...) each return
+    the FULL permittivity -- their own background PLUS the field/temperature-induced shift -- so
+    summing several directly in a ComposedEffect would add a background once per model
+    (double-counting). DeltaEffect returns ONLY the shift relative to a zero-drive reference:
+
+        delta_eps(fields) = as_tensor(effect.eps(fields)) - as_tensor(effect.eps(baseline_fields))
+
+    so ComposedEffect(background=base, deltas=[DeltaEffect(pockels, {'E': zeros(3)}), ...]) adds the
+    background exactly once and each effect's shift on top. `baseline_fields` is the zero-drive
+    reference for THIS effect (e.g. {'E': np.zeros(3)} for Pockels/Kerr, {'T': T_ref} for a
+    thermo-optic model)."""
+    effect: EffectModel
+    baseline_fields: dict
+
+    def eps(self, fields: dict, lambda_m: float):
+        return (as_tensor(self.effect.eps(fields, lambda_m))
+                - as_tensor(self.effect.eps(self.baseline_fields, lambda_m)))
 
 
 # ---- field-effect electro-optic mechanisms (Phase 1) -------------------------------------
@@ -104,8 +136,8 @@ def _E_vec(fields: dict) -> np.ndarray:
 @dataclass
 class PockelsEffect:
     """Linear electro-optic (Pockels) tensor response -- an EffectModel reading fields['E'].
-    The impermeability B = eps^-1 shifts LINEARLY with the applied field, ΔB_I = sum_k r_Ik E_k
-    (Voigt I=1..6, k=x,y,z), so eps(E) = (B0 + ΔB)^-1 with B0 = eps_bg^-1. Crystal principal axes
+    The impermeability B = eps^-1 shifts LINEARLY with the applied field, dB_I = sum_k r_Ik E_k
+    (Voigt I=1..6, k=x,y,z), so eps(E) = (B0 + dB)^-1 with B0 = eps_bg^-1. Crystal principal axes
     are assumed aligned with the lab x,y,z (a rotation can be composed/added later). At E=0 (or
     r=0) eps -> eps_bg exactly. eps_bg is the zero-field permittivity (e.g. diag(no^2,no^2,ne^2)
     for a uniaxial crystal); r_voigt is the 6x3 EO tensor in m/V; E is in V/m."""
@@ -124,7 +156,7 @@ class PockelsEffect:
 @dataclass
 class KerrEffect:
     """DC-Kerr (quadratic EO) tensor response -- an EffectModel reading fields['E']. Simplified
-    ISOTROPIC quadratic model: the impermeability shifts as ΔB = s_kerr * |E|^2 * I, so
+    ISOTROPIC quadratic model: the impermeability shifts as dB = s_kerr * |E|^2 * I, so
     eps(E) = (eps_bg^-1 + s_kerr |E|^2 I)^-1. At E=0 or s_kerr=0, eps -> eps_bg. s_kerr in m^2/V^2.
     (A full Kerr uses the rank-4 s_ijkl tensor; this isotropic form is the common scalar-Kerr
     approximation, adequate for centrosymmetric media without an in-plane preferred axis.)"""
