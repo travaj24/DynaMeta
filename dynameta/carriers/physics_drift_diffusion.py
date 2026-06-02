@@ -44,10 +44,12 @@ future effort.
 
 from __future__ import annotations
 
+import warnings
+
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models)
+    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.einstein import g_expr_devsim
@@ -63,7 +65,20 @@ def _g_expr(s: str) -> str:
 def setup_semiconductor_region_dd(device: str, region: str, *,
                                     n_bg_m3: float, eps_static: float,
                                     dos_mass_kg: float, mobility_m2Vs: float) -> None:
+    require_positive(n_bg_m3=n_bg_m3, eps_static=eps_static, dos_mass_kg=dos_mass_kg,
+                     mobility_m2Vs=mobility_m2Vs)
     setup_phi_c0(device, region, n_bg_m3, dos_mass_kg)   # Phi_c0, N_c, N_D
+    # FD g-factor honesty guard: the rational fit is accurate to ~eta=32 and undershoots beyond
+    # (module docstring). Gate ACCUMULATION drives the local eta above the background eta_bg, so a
+    # high eta_bg means the solve operates near/over the fit's validity edge -- warn at setup.
+    N_c = float(ds.get_parameter(device=device, region=region, name="N_c"))
+    eta_bg = invert_F12(n_bg_m3 / N_c)
+    if eta_bg > 28.0:
+        warnings.warn(
+            "setup_semiconductor_region_dd: background degeneracy eta_bg={:.1f} is near the FD "
+            "g-factor fit's validity edge (~eta=32); gate accumulation pushes the local eta "
+            "higher, where g undershoots (the diffusion/Einstein term grows ~1-2% inaccurate). "
+            "Treat strong-accumulation DD results as approximate.".format(eta_bg), stacklevel=2)
     ds.set_parameter(device=device, region=region, name="Permittivity", value=eps_static * EPS0)
     ds.set_parameter(device=device, region=region, name="ElectronCharge", value=Q_E)
     ds.set_parameter(device=device, region=region, name="V_t", value=V_T)

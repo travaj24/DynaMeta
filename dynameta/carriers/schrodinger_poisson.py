@@ -72,6 +72,17 @@ class SchrodingerPoisson1D:
         self.T = float(T_K)
         self.g_s = int(g_s)
         self.g_v = int(g_v)
+        # Anti-silent-failure: a negative/zero/NaN effective mass inverts the kinetic operator
+        # (well -> barrier) and returns a meaningless spectrum; T<=0 makes the Fermi occupation
+        # 0*inf=NaN. Guard here (the sibling QuantumWell already guards its inputs).
+        if not (np.isfinite(self.m) and self.m > 0.0):
+            raise ValueError("m_eff_kg must be a finite positive effective mass (kg), got "
+                             "{!r}".format(m_eff_kg))
+        if not (np.isfinite(self.T) and self.T > 0.0):
+            raise ValueError("T_K must be a finite positive temperature (K), got {!r}".format(T_K))
+        if self.g_s < 1 or self.g_v < 1:
+            raise ValueError("g_s and g_v must be >= 1 (degeneracy factors), got g_s={}, "
+                             "g_v={}".format(self.g_s, self.g_v))
 
     # ---- Schrodinger ----
     def solve_schrodinger(self, U_J: np.ndarray, *,
@@ -85,6 +96,9 @@ class SchrodingerPoisson1D:
         U = np.asarray(U_J, dtype=np.float64)
         m_node = (np.full_like(self.z, self.m) if m_eff_z_kg is None
                    else np.asarray(m_eff_z_kg, dtype=np.float64))
+        if np.any(~np.isfinite(m_node)) or np.any(m_node <= 0.0):
+            raise ValueError("m_eff_z_kg must be finite and > 0 at every node (a non-positive "
+                             "mass inverts the BenDaniel-Duke kinetic operator -> nonsense spectrum)")
         # interior nodes 1..N-2 (Dirichlet at 0 and N-1)
         Ui = U[1:-1]
         zi = self.z[1:-1]
@@ -125,6 +139,19 @@ class SchrodingerPoisson1D:
         f(E_i+eps) deps (numerically). alpha=0 reduces to the parabolic kT*ln(1+e^eta).
         Captures ITO's band flattening (heavier DOS mass at high density)."""
         E, psi, zi = self.solve_schrodinger(U_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states)
+        # Completeness guard (anti-silent-failure): if n_states truncated the ladder, the HIGHEST
+        # SOLVED sub-band is still at/below E_F, so occupied states above it were never solved and
+        # n(z) is silently UNDER-counted (verified ~27% at 150 nm / 1e27 m^-3 with n_states=80).
+        # Require the top solved state to sit > 5 kT above E_F (Fermi factor < 0.7%). In isolated-
+        # well mode the top solved state is an unbound continuum state far above E_F, so this
+        # never false-fires there.
+        if n_states is not None and E.size and (E_F_J - E[-1]) > -5.0 * KB * self.T:
+            warnings.warn(
+                "SchrodingerPoisson.density: highest solved sub-band E[{}]={:.4f} eV is not "
+                ">5kT above E_F={:.4f} eV (E_F-E_top={:.1f} kT); n_states={} likely truncates "
+                "the occupied sub-band ladder and UNDER-counts the density. Increase "
+                "n_states.".format(E.size - 1, E[-1] / Q, E_F_J / Q,
+                                   (E_F_J - E[-1]) / (KB * self.T), n_states), stacklevel=2)
         # keep states that are actually localized (small amplitude at both edges)
         edge = np.maximum(np.abs(psi[0, :]), np.abs(psi[-1, :])) * np.sqrt(self.h)
         keep = edge < bound_tol
@@ -208,6 +235,7 @@ class SchrodingerPoisson1D:
         last_phi = phi.copy()
         result = None
         dV = float("inf")          # guard: max_outer<1 -> loop body never runs (report non-converged)
+        inner_ok = True            # tracks whether the LAST outer iteration's inner Newton converged
         for it in range(max_outer):
             U = -Q * phi + U_band
             res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
@@ -219,6 +247,7 @@ class SchrodingerPoisson1D:
             #     bound sub-band floor rigidly with the local potential change ---
             from scipy.linalg import solve_banded
             phi_in = phi.copy()
+            inner_ok = True
             for _newton in range(40):
                 Uloc = -Q * phi_in + U_band
                 # a-priori quantum density with potential-shifted sub-band energies
@@ -241,6 +270,8 @@ class SchrodingerPoisson1D:
                 phi_in[1:-1] += dphi
                 if np.max(np.abs(dphi)) < 1e-9:
                     break
+            else:
+                inner_ok = False     # inner nonlinear-Poisson Newton never reached 1e-9 in 40 its
             # outer under-relaxation: damp the kept-state-set churn (audit SP-1)
             phi = last_phi + float(relax) * (phi_in - last_phi)
             result = res
@@ -251,14 +282,18 @@ class SchrodingerPoisson1D:
             last_phi = phi.copy()
             if dV < tol_V:
                 break
-        converged = dV < tol_V
+        converged = (dV < tol_V) and inner_ok
         if not converged:
+            why = []
+            if dV >= tol_V:
+                why.append("outer max|dphi|={:.3e} V >= tol_V={:.1e}".format(dV, tol_V))
+            if not inner_ok:
+                why.append("the inner nonlinear-Poisson Newton did not reach 1e-9 in 40 steps")
             warnings.warn(
-                "SchrodingerPoisson.solve_self_consistent did NOT converge: max|dphi|="
-                "{:.3e} V >= tol_V={:.1e} after {} outer iterations. The returned (phi, n) "
-                "is unreliable and sensitive to max_outer; try a smaller `relax`, a larger "
-                "bound_tol (slab mode), or more iterations.".format(dV, tol_V, max_outer),
-                stacklevel=2)
+                "SchrodingerPoisson.solve_self_consistent did NOT converge after {} outer "
+                "iterations ({}). The returned (phi, n) is unreliable and sensitive to "
+                "max_outer; try a smaller `relax`, a larger bound_tol (slab mode), or more "
+                "iterations.".format(max_outer, "; ".join(why)), stacklevel=2)
         U = -Q * phi + U_band
         result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
         result.converged = converged
