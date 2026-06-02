@@ -45,7 +45,7 @@ from __future__ import annotations
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, _poisson_edge_models)
+    Q_E, EPS0, V_T, _poisson_edge_models, require_positive)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
@@ -73,13 +73,17 @@ def setup_bipolar_region(device: str, region: str, *,
       n_i_m3           : intrinsic carrier density (m^-3)
       mobility_n_m2Vs  : electron mobility (m^2/(V s))
       mobility_p_m2Vs  : hole mobility (m^2/(V s))
-      tau_n_s, tau_p_s : SRH lifetimes (s)
+      tau_n_s, tau_p_s : SRH lifetimes (s); must be > 0 -- use a LARGE value to suppress
+                         recombination (tau=0 would make the SRH denominator 0/0 -> NaN)
       fd_enhancement   : if True, apply the degenerate FD g-factor to BOTH currents;
                          if False, plain Boltzmann Scharfetter-Gummel (g==1).
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
     """
+    require_positive(eps_static=eps_static, n_dos_m3=n_dos_m3, n_i_m3=n_i_m3,
+                     mobility_n_m2Vs=mobility_n_m2Vs, mobility_p_m2Vs=mobility_p_m2Vs,
+                     tau_n_s=tau_n_s, tau_p_s=tau_p_s)
     ds.set_parameter(device=device, region=region, name="Permittivity",
                      value=eps_static * EPS0)
     ds.set_parameter(device=device, region=region, name="ElectronCharge", value=Q_E)

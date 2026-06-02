@@ -85,9 +85,9 @@ def test_quantum_well_warns_and_flags_field_ionization():
     import warnings
     # a shallow narrow well at an extreme tilt field-ionizes (the most-localized state drops below
     # half in-well weight): the solver must WARN + flag, not silently return a box-corner artifact
-    # (audit QC-1/QC-2). (The adaptive n_solve already RECOVERS the in-well resonance for milder
-    # tilts where the old fixed n_states=8 returned a p_in~0 edge state -- this exercises the
-    # genuinely-delocalized backstop.)
+    # (audit QC-1/QC-2). (qcse.py solves a fixed min(self.n_solve, ...) states -- enough to RECOVER
+    # the in-well resonance for milder tilts where the old fixed n_states=8 returned a p_in~0 edge
+    # state; this test exercises the genuinely-delocalized backstop.)
     qw = QuantumWell(well_width_m=6e-9, barrier_e_J=0.05 * Q, barrier_h_J=0.04 * Q,
                      m_e_kg=ME, m_h_kg=MHH, E_g_J=1.42 * Q, nz=1201, n_pad=2.5)
     with warnings.catch_warnings(record=True) as w:
