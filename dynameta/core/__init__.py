@@ -6,6 +6,10 @@ CarrierField, an NToEpsMap, and a FieldLift -- not a Design or a mesh.
 """
 
 from dynameta.core.units import UnitScale, SI, NM
+from dynameta.core.backend import (
+    array_namespace, backend_name, to_numpy, to_backend,
+    is_numpy_array, is_cupy_array, is_jax_array, CUPY_AVAILABLE, JAX_AVAILABLE,
+)
 from dynameta.core.eps_field import EpsField
 from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, dump_carrier_field, load_carrier_field,
@@ -30,6 +34,8 @@ from dynameta.core.bridge import assemble_eps
 
 __all__ = [
     "UnitScale", "SI", "NM",
+    "array_namespace", "backend_name", "to_numpy", "to_backend",
+    "is_numpy_array", "is_cupy_array", "is_jax_array", "CUPY_AVAILABLE", "JAX_AVAILABLE",
     "EpsField",
     "CarrierField", "CarrierRegion", "dump_carrier_field", "load_carrier_field",
     "SCHEMA_VERSION", "ELECTRON_DENSITY", "POTENTIAL",
