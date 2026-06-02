@@ -134,22 +134,11 @@ def _bloch_phase_list(geo: OpticalGeometry, kx_per_nm: float, ky_per_nm: float =
     return [(px_phase if d == "x" else py_phase) for d in dirs]
 
 
-def solve_fem(geo: OpticalGeometry, lambda_m: float,
-                eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
-                *, order: int = 2, n_super: complex = 1.0 + 0j,
-                n_sub: complex = 1.0 + 0j, verbose: bool = False) -> OpticalResult:
-    """Solve and extract reflection r/R and (if a transmitted wave reaches the
-    substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
-    substrate refractive indices = sqrt(eps).
-
-    A = 1 - R - T is the energy-budget CLOSURE (it is identically 1-R-T, not an
-    independent measurement). result.A_independent is the INDEPENDENTLY measured
-    absorbed fraction (volumetric Im(eps)|E|^2 integral); |A - A_independent| is the
-    genuine, non-tautological energy/numerics diagnostic."""
-    k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
-    mesh = geo.mesh
-
-    # ---- incidence: plane wave, polar angle theta, azimuth phi ----
+def _incidence_geometry(optical, n_super):
+    """Derive (theta, phi, oblique, conical) [radians/bools] from the OpticalSpec and VALIDATE
+    the incidence against solve_fem's implemented regime: top-side only; vacuum superstrate if
+    oblique; pol constraints for oblique/conical. Raises NotImplementedError on an unsupported
+    combination and warns on a non-angle-aware oblique solve. (Audit OPT-1/OPT-3/OPT-4 guards.)"""
     theta = math.radians(float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0))
     phi = math.radians(float(getattr(optical, "azimuth_deg", 0.0) or 0.0))
     oblique = abs(theta) > 1e-9
@@ -166,9 +155,9 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "supported (the source + R/T extraction are hardwired to top illumination)."
             .format(getattr(optical, "incidence_side", "top")))
     if oblique and abs(complex(n_super) - 1.0) > 1e-6:
-        # The in-plane wavevector below uses kx = k0 sin(theta) (the VACUUM dispersion).
-        # A dense incidence medium would need kx = Re(n_super) k0 sin(theta) and a
-        # matched T-normalization; without it the result is silently wrong (audit OPT-1).
+        # The in-plane wavevector uses kx = k0 sin(theta) (the VACUUM dispersion). A dense
+        # incidence medium would need kx = Re(n_super) k0 sin(theta) and a matched
+        # T-normalization; without it the result is silently wrong (audit OPT-1).
         raise NotImplementedError(
             "oblique incidence assumes a vacuum/air incidence medium (n_super=1); got "
             "n_super={:.4g}. Use normal incidence for a non-vacuum superstrate, or extend "
@@ -180,6 +169,26 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware, so "
             "R/T/energy-conservation degrade with angle (validated to ~1% through 30 deg). "
             "Treat oblique R/T as approximate.", stacklevel=2)
+    return theta, phi, oblique, conical
+
+
+def solve_fem(geo: OpticalGeometry, lambda_m: float,
+                eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
+                *, order: int = 2, n_super: complex = 1.0 + 0j,
+                n_sub: complex = 1.0 + 0j, verbose: bool = False) -> OpticalResult:
+    """Solve and extract reflection r/R and (if a transmitted wave reaches the
+    substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
+    substrate refractive indices = sqrt(eps).
+
+    A = 1 - R - T is the energy-budget CLOSURE (it is identically 1-R-T, not an
+    independent measurement). result.A_independent is the INDEPENDENTLY measured
+    absorbed fraction (volumetric Im(eps)|E|^2 integral); |A - A_independent| is the
+    genuine, non-tautological energy/numerics diagnostic."""
+    k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
+    mesh = geo.mesh
+
+    # ---- incidence: plane wave, polar angle theta, azimuth phi (derived + validated) ----
+    theta, phi, oblique, conical = _incidence_geometry(optical, n_super)
     pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
     envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p and not conical
     # in-plane wavevector k_par = (kx, ky); kz_s = k0 cos(theta) (vacuum incidence medium)
