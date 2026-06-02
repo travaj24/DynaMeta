@@ -8,11 +8,15 @@ library ships default layered implementations of each.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable, TYPE_CHECKING
 
 from dynameta.core.alignment import GeometryAlignment
 from dynameta.core.carrier_field import CarrierField
 from dynameta.core.eps_field import EpsField
+
+if TYPE_CHECKING:                  # type-only annotations (no runtime core->sweep/geometry dep)
+    from dynameta.sweep import BiasPoint
+    from dynameta.geometry.specs import OpticalSpec
 
 
 @dataclass
@@ -48,7 +52,7 @@ class OpticalResult:
 @runtime_checkable
 class CarrierSolver(Protocol):
     def regions(self) -> List[RegionInfo]: ...
-    def solve(self, bias) -> CarrierField: ...
+    def solve(self, bias: "BiasPoint") -> CarrierField: ...
 
 
 @runtime_checkable
@@ -61,7 +65,7 @@ class OpticalGeometryBuilder(Protocol):
 @runtime_checkable
 class OpticalSolver(Protocol):
     def solve(self, geometry, eps_by_region: Dict[str, EpsField],
-              lambda_m: float, optical) -> OpticalResult: ...
+              lambda_m: float, optical: "OpticalSpec") -> OpticalResult: ...
 
 
 @runtime_checkable
@@ -70,4 +74,4 @@ class LayeredStackSolver(Protocol):
     and the present TMM oracle share. Distinct from OpticalSolver because it consumes the
     layered-slab representation (core.layered.LayeredStack), not the per-mesh-region voxel eps
     the FEM uses. Minimal by design; the RCWA adapter may widen it when ported."""
-    def solve(self, stack, lambda_m: float, optical) -> OpticalResult: ...
+    def solve(self, stack, lambda_m: float, optical: "OpticalSpec") -> OpticalResult: ...

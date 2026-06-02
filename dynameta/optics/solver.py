@@ -44,8 +44,13 @@ import warnings
 import numpy as np
 import ngsolve as ng
 
+from typing import TYPE_CHECKING
+
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.ngsolve_layered import OpticalGeometry, S
+
+if TYPE_CHECKING:                       # type-only; OpticalSpec lives in geometry (no runtime dep)
+    from dynameta.geometry.specs import OpticalSpec
 
 # Oblique formulation: "phase_in_space" (physical field, genuine curl, standard
 # PML -- the validated route) or "envelope" (plain-periodic envelope, modified
@@ -130,7 +135,7 @@ def _bloch_phase_list(geo: OpticalGeometry, kx_per_nm: float, ky_per_nm: float =
 
 
 def solve_fem(geo: OpticalGeometry, lambda_m: float,
-                eps_cf: ng.CoefficientFunction, optical,
+                eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
