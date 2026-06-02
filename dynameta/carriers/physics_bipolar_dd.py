@@ -47,10 +47,11 @@ import devsim as ds
 from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers.einstein import GA as _GA, GB as _GB, GC as _GC, GD as _GD
 
 # Generalized-Einstein g(x)=F_1/2/F_-1/2 rational fit, x=c/N_dos (see physics_drift_diffusion;
-# ~1.1% peak, exact VALUE at g(0)=1, valid to eta~32). Same coefficients for electrons and holes.
-_GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
+# ~1.1% peak, exact VALUE at g(0)=1, valid to eta~32). Coefficients from carriers/einstein.py
+# (single source); same coefficients for electrons and holes.
 _P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
 
 

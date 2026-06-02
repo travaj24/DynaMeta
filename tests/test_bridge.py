@@ -229,6 +229,22 @@ def test_gate_cv_rejects_duplicate_bias():
         gate_cv([_cf(0.0), _cf(0.5), _cf(0.5)], "semi", voltage_key="gate")
 
 
+def test_gate_cv_rejects_transposed_grid():
+    # a BYO carrier that lays its density grid out transposed must be REJECTED, not silently
+    # integrated against the wrong axis (audit AN-4). Distinct axis lengths make it visible.
+    z = np.linspace(0.0, 12e-9, 5)
+    x = np.linspace(0.0, PERIOD, 4)
+    n_bad = np.full((z.size, x.size, x.size), N_BG)        # (Nz,Ny,Nx) instead of (Nx,Ny,Nz)
+    reg = CarrierRegion(name="semi", role="semiconductor", material="ito",
+                        nodes_m=np.zeros((1, 3)), node_fields={},
+                        grid_axes_m={"x": x, "y": x, "z": z}, grid_fields={ELECTRON_DENSITY: n_bad})
+    cf = CarrierField(bias_label="vg", voltages={"gate": 0.0, "body": 0.0}, ndim=3,
+                      temperature_K=300.0, regions={"semi": reg},
+                      n_bg_by_region={"semi": N_BG}, unit_cell_m=(PERIOD, PERIOD))
+    with pytest.raises(ValueError):
+        gate_cv([cf], "semi", voltage_key="gate")
+
+
 # ---- lumped-RC bandwidth + switching energy (ported from Metasurface_Modulator Stage 4) ----
 def test_lumped_rc_bandwidth_formula_with_modulator_C():
     # Checks the RC-bandwidth FORMULA against the Metasurface_Modulator's MEASURED areal

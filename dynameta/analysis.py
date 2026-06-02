@@ -55,10 +55,20 @@ def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
         n = np.asarray(reg.grid_fields[density_field], dtype=np.float64)
         n_bg = float(cf.n_bg_by_region[region])
         if n.ndim == 3:                                   # (Nx, Ny, Nz) -> n(z)
+            xc = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
+            yc = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
             zc = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
+            if n.shape != (xc.size, yc.size, zc.size):    # AN-4: reject a transposed/mis-laid grid
+                raise ValueError("gate_cv: 3D density shape {} != (len(x),len(y),len(z))={}; "
+                                 "the grid is transposed or mis-laid".format(
+                                     n.shape, (xc.size, yc.size, zc.size)))
             prof = n.mean(axis=(0, 1))
-        elif n.ndim == 2:                                 # (Nx, Nv) -> n(v); 2D vertical axis = 'y'
+        elif n.ndim == 2:                                 # (Nx, Nv); 2D vertical axis = 'y'
+            xc = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             zc = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
+            if n.shape != (xc.size, zc.size):             # AN-4: reject a transposed/mis-laid grid
+                raise ValueError("gate_cv: 2D density shape {} != (len(x),len(y))={}; the grid "
+                                 "is transposed or mis-laid".format(n.shape, (xc.size, zc.size)))
             prof = n.mean(axis=0)
         else:
             raise ValueError("density grid must be 2D or 3D")

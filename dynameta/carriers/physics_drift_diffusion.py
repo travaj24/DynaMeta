@@ -49,11 +49,12 @@ import devsim as ds
 from dynameta.carriers.physics_equilibrium import (
     Q_E, V_T, setup_phi_c0, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers.einstein import GA as _GA, GB as _GB, GC as _GC, GD as _GD
 
 # Generalized-Einstein degeneracy factor g(x)=F_1/2(eta)/F_-1/2(eta) as a rational fit in
 # u=x^(1/3), x=n/N_c (~1.1% peak, <0.5% over ITO's eta>=10; exact VALUE at the Boltzmann
-# limit g(0)=1; valid to eta~32). See the module docstring. Least-squares fit to F_1/2/F_-1/2.
-_GA, _GB, _GC, _GD = 0.33717, 0.13356, 0.14143, 0.20570
+# limit g(0)=1; valid to eta~32). Coefficients live in carriers/einstein.py (single source,
+# shared with physics_bipolar_dd, unit-tested in tests/test_carriers_gfactor.py).
 _P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
 
 
