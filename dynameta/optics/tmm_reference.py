@@ -16,6 +16,10 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
+from dynameta.core.units import NM_PER_M
+
+S = NM_PER_M   # m -> nm (tmm's d_list uses the same unit as the wavelength); single source
+
 
 def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: complex,
               lambda_m: float, *, theta_deg: float = 0.0, pol: str = "s") -> Tuple[float, float, float]:
@@ -36,8 +40,8 @@ def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: 
         raise ValueError("pol must be 's' or 'p'")
     n_list = [complex(n_super)] + [complex(n) for n, _ in layers] + [complex(n_sub)]
     # tmm wants d in the SAME unit as the wavelength; use nm for both. Ends are semi-infinite.
-    lam_nm = float(lambda_m) * 1e9
-    d_list = [np.inf] + [float(d) * 1e9 for _, d in layers] + [np.inf]
+    lam_nm = float(lambda_m) * S
+    d_list = [np.inf] + [float(d) * S for _, d in layers] + [np.inf]
     res = tmm.coh_tmm(pol, n_list, d_list, math.radians(float(theta_deg)), lam_nm)
     R = float(res["R"])
     T = float(res["T"])
@@ -86,8 +90,8 @@ def _coh_tmm_stack(stack, lambda_m, theta_deg, pol):
                          .format(stack.n_super))
     n_list = ([complex(stack.n_super)] + [np.sqrt(complex(s.eps)) for s in stack.slabs]
               + [complex(stack.n_sub)])
-    d_list = [np.inf] + [float(s.thickness_m) * 1e9 for s in stack.slabs] + [np.inf]
-    return tmm.coh_tmm(pol, n_list, d_list, math.radians(float(theta_deg)), float(lambda_m) * 1e9)
+    d_list = [np.inf] + [float(s.thickness_m) * S for s in stack.slabs] + [np.inf]
+    return tmm.coh_tmm(pol, n_list, d_list, math.radians(float(theta_deg)), float(lambda_m) * S)
 
 
 def layered_rta(stack, lambda_m, *, theta_deg: float = 0.0, pol: str = "s"):
@@ -120,7 +124,6 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
     with material inclusions raises (laterally structured -> FEM/RCWA, not this extractor).
     Slabs are ordered superstrate-side first (the Stack lists bottom->top, so reversed)."""
     from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
-    S = 1e9
     slabs_top_down = []
     for L in reversed(design.stack.layers):          # superstrate side first
         if L.inclusions:

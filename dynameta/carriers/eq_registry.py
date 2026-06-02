@@ -65,6 +65,26 @@ def reapply_by_name(device: str, eq_name: str) -> None:
             ds.interface_equation(device=device, interface=e["loc"], **e["kwargs"])
 
 
+def edge_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
+    """Create an edge model + its @n0/@n1 derivatives w.r.t. each variable in `wrt` (the
+    Jacobian entries DEVSIM's coupled Newton consumes). Shared by the unipolar and bipolar
+    drift-diffusion modules (was duplicated verbatim in both)."""
+    ds.edge_model(device=device, region=region, name=name, equation=eq)
+    for w in wrt:
+        for nd in ("n0", "n1"):
+            ds.edge_model(device=device, region=region,
+                          name="{}:{}@{}".format(name, w, nd),
+                          equation="simplify(diff({}, {}@{}))".format(eq, w, nd))
+
+
+def node_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
+    """Create a node model + its derivatives w.r.t. each variable in `wrt`."""
+    ds.node_model(device=device, region=region, name=name, equation=eq)
+    for w in wrt:
+        ds.node_model(device=device, region=region, name="{}:{}".format(name, w),
+                      equation="simplify(diff({}, {}))".format(eq, w))
+
+
 def equation_names(device: str) -> set:
     return {e["name"] for e in _REG.get(device, [])}
 

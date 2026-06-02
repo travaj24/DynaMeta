@@ -47,38 +47,16 @@ import devsim as ds
 from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, _poisson_edge_models)
 from dynameta.carriers import eq_registry as _R
-from dynameta.carriers.einstein import GA as _GA, GB as _GB, GC as _GC, GD as _GD
-
-# Generalized-Einstein g(x)=F_1/2/F_-1/2 rational fit, x=c/N_dos (see physics_drift_diffusion;
-# ~1.1% peak, exact VALUE at g(0)=1, valid to eta~32). Coefficients from carriers/einstein.py
-# (single source); same coefficients for electrons and holes.
-_P13, _P23, _P43 = 1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0
+from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
+                                           node_with_derivs as _node_with_derivs)
+from dynameta.carriers.einstein import g_expr_devsim
 
 
 def _g_expr(var: str, s: str) -> str:
-    """g(var{s}/N_dos) as a DEVSIM edge expression (pow()s of the solution variable)."""
-    X = "({}{}/N_dos)".format(var, s)
-    return ("(1.0 + ({a}*{X} + {c}*pow({X},{p43}))/(1.0 + {b}*pow({X},{p13}) + "
-            "{d}*pow({X},{p23})))").format(a=_GA, b=_GB, c=_GC, d=_GD, X=X,
-                                            p13=_P13, p23=_P23, p43=_P43)
-
-
-def _edge_with_derivs(device, region, name, eq, wrt):
-    """Create an edge model + its @n0/@n1 derivatives w.r.t. each variable."""
-    ds.edge_model(device=device, region=region, name=name, equation=eq)
-    for w in wrt:
-        for nd in ("n0", "n1"):
-            ds.edge_model(device=device, region=region,
-                          name="{}:{}@{}".format(name, w, nd),
-                          equation="simplify(diff({}, {}@{}))".format(eq, w, nd))
-
-
-def _node_with_derivs(device, region, name, eq, wrt):
-    """Create a node model + its derivatives w.r.t. each listed variable."""
-    ds.node_model(device=device, region=region, name=name, equation=eq)
-    for w in wrt:
-        ds.node_model(device=device, region=region, name="{}:{}".format(name, w),
-                      equation="simplify(diff({}, {}))".format(eq, w))
+    """g(var{s}/N_dos) as a DEVSIM edge expression -- the rational fit + its coefficients live
+    in carriers/einstein.g_expr_devsim (the single source, shared with physics_drift_diffusion;
+    same coefficients for electrons and holes)."""
+    return g_expr_devsim(var, "N_dos", s)
 
 
 def setup_bipolar_region(device: str, region: str, *,
