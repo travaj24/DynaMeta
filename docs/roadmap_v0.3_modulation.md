@@ -147,8 +147,8 @@ absorption + R+T+A=1 + sigma->0 Fresnel -- and `validation/lc_uniaxial_fem.py` (
 PLANAR (theta=0) and HOMEOTROPIC (theta=90) principal director states == TMM at n_o/n_e). REMAINING:
 (a) **off-diagonal-tensor FEM** -- this LC oracle SURFACED a pre-existing P0b gap: the per-region
 matrix-CF matvec mis-evaluates a tensor with nonzero off-diagonal entries under PML (a tilted
-director, magneto-optic), so the intermediate-tilt FEM is deferred and assemble_eps_cf now WARNS;
-the tilted angular physics is validated analytically. (b) a graphene FEM surface-current boundary
+director, magneto-optic), so the intermediate-tilt FEM is deferred and assemble_eps_cf now RAISES
+NotImplementedError (no silently-wrong result); the tilted angular physics is validated analytically. (b) a graphene FEM surface-current boundary
 condition (the analytic sheet oracle + conductivity model ship now); (c) an LC/PCM thermal-pulse
 switching driver and elastic anisotropy (K11!=K33) are follow-ons.*
 - `PCMModel`: crystalline-fraction state -> effective (n,k) (GST/Sb2S3/VO2); optional

@@ -22,6 +22,8 @@ delivers the conductivity model + the analytic sheet oracle that validates it.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from dynameta.constants import Q_E, HBAR, KB, EPS0, C_LIGHT
@@ -43,8 +45,11 @@ def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = 300.
     # intraband Drude: i e^2 * W / (pi hbar^2 (omega + i/tau)),  W = E_F + 2 kT ln(1+exp(-E_F/kT))
     W = EF + 2.0 * kT * np.log1p(np.exp(-EF / kT))
     sigma_intra = 1j * Q_E ** 2 * W / (np.pi * HBAR ** 2 * (omega + 1j / float(tau_s)))
-    # interband (Falkovsky finite-T): Re is the smoothed universal step at hbar*omega = 2 E_F
-    re = SIGMA0 * (0.5 + (1.0 / np.pi) * np.arctan((hw - 2.0 * EF) / (2.0 * kT)))
+    # interband (Falkovsky-Varlamov 2007): the EXACT finite-T universal-conductivity real part
+    # Re = sigma0 sinh(hw/2kT)/(cosh(E_F/kT)+cosh(hw/2kT)) -- the thermal factor that -> a hard Pauli
+    # step (sigma0 for hw>2E_F, 0 below) as T->0, with the correct (small) blocked-tail residual
+    # (an arctan smoothing overestimates that tail ~100x; audit GRAPH-1). Im is the matching KK log.
+    re = SIGMA0 * np.sinh(hw / (2.0 * kT)) / (np.cosh(EF / kT) + np.cosh(hw / (2.0 * kT)))
     im = -SIGMA0 * (1.0 / (2.0 * np.pi)) * np.log((hw + 2.0 * EF) ** 2
                                                   / ((hw - 2.0 * EF) ** 2 + (2.0 * kT) ** 2))
     return complex(sigma_intra + (re + 1j * im))
@@ -60,6 +65,10 @@ def sheet_rt(n1, n2, sigma, *, theta_deg: float = 0.0):
     n1, n2, s = complex(n1), complex(n2), complex(sigma)
     if n1.imag != 0.0:
         raise ValueError("incidence medium n1 must be lossless (Im(n1)=0) for the R/T/A budget")
+    if s.real < -1e-15:                          # passivity (exp(-i omega t)): Re(sigma) >= 0
+        warnings.warn("sheet_rt: Re(sigma) < 0 is an ACTIVE/gain sheet (violates passivity for "
+                      "exp(-i omega t)); the returned A = 1 - R - T will be negative (T > 1).",
+                      RuntimeWarning, stacklevel=2)
     denom = n1 + n2 + Z0 * s
     r = (n1 - n2 - Z0 * s) / denom
     t = 2.0 * n1 / denom

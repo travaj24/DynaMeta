@@ -17,7 +17,6 @@ stay outermost. Solver-specific -- keeps NGSolve out of core/.
 
 from __future__ import annotations
 
-import warnings
 from typing import Dict
 
 import numpy as np
@@ -27,25 +26,28 @@ from dynameta.core.eps_field import EpsField
 from dynameta.optics.ngsolve_layered import OpticalGeometry
 
 _ID3 = ng.CoefficientFunction((1, 0, 0, 0, 1, 0, 0, 0, 1), dims=(3, 3))
+_OFFDIAG_TOL = 1e-9     # |off-diag| / |diag| above which a tensor is rejected as non-diagonal
 
 
-def _warn_if_offdiagonal(T: np.ndarray) -> None:
-    """Warn that a tensor with significant OFF-DIAGONAL entries is currently unreliable in the FEM.
+def _check_diagonal(off_max: float, diag_max: float) -> None:
+    """RAISE if a tensor has significant OFF-DIAGONAL entries (relative to its diagonal).
 
     KNOWN LIMITATION (tracked P0b follow-on): the per-region matrix-CF matvec ((eps.u).v) on the
-    periodic PML mesh is validated only for DIAGONAL (principal-axis) tensors -- the isotropic gate,
+    periodic PML mesh is validated ONLY for DIAGONAL (principal-axis) tensors -- the isotropic gate,
     the Pockels z-cut oracle, and the LC planar/homeotropic states are all diagonal. A tensor with
-    nonzero off-diagonal entries (a tilted optic axis, magneto-optic, ...) mis-evaluates in the
-    matvec (validation/lc_uniaxial_fem.py: a y-polarized ordinary wave that must see only eps_yy is
-    instead corrupted by eps_xz). The constitutive model is correct; the FEM solve of an off-diagonal
-    tensor is not yet. Diagonalize the tensor (work in its principal frame) until this is fixed."""
-    od = np.abs(T) - np.diag(np.diag(np.abs(T)))
-    if float(np.max(od)) > 1e-9 * float(np.max(np.abs(np.diag(T))) or 1.0):
-        warnings.warn(
-            "assemble_eps_cf: a region eps tensor has significant OFF-DIAGONAL entries; the FEM "
-            "tensor matvec is currently validated only for DIAGONAL (principal-axis) tensors and "
-            "mis-evaluates off-diagonal ones under PML (tracked P0b follow-on). Use the principal "
-            "frame (a diagonal tensor) for a trustworthy FEM result.", RuntimeWarning, stacklevel=3)
+    nonzero off-diagonal entries (a tilted optic axis, magneto-optic, ...) MIS-EVALUATES in the
+    matvec under PML (validation/lc_uniaxial_fem.py: a y-polarized ordinary wave that must see only
+    eps_yy is corrupted by eps_xz, and energy is not conserved -- even eps_xz ~ 1e-3 flips the
+    result). It is a HARD ERROR, not a warning, because a suppressed warning would yield a
+    silently-wrong, energy-non-conserving result (audit LC-1). The constitutive model is correct;
+    only the FEM solve of an off-diagonal tensor is deferred -- work in the tensor's PRINCIPAL
+    FRAME (a diagonal tensor) until this is fixed."""
+    if off_max > _OFFDIAG_TOL * (diag_max or 1.0):
+        raise NotImplementedError(
+            "assemble_eps_cf: eps tensor has significant OFF-DIAGONAL entries (max |off-diag|="
+            "{:.3e} vs max |diag|={:.3e}); the FEM tensor matvec is validated ONLY for diagonal "
+            "(principal-axis) tensors and mis-evaluates off-diagonal ones under PML (tracked P0b "
+            "follow-on). Diagonalize the tensor (use its principal frame).".format(off_max, diag_max))
 
 
 def _scalar_region_cf(ef: EpsField):
@@ -69,16 +71,16 @@ def _region_matrix_cf(ef: EpsField):
         return _scalar_region_cf(ef) * _ID3
     if ef.tensor is not None:                                  # uniform 3x3
         T = np.asarray(ef.tensor, dtype=np.complex128)
-        _warn_if_offdiagonal(T)
+        off = np.abs(T - np.diag(np.diag(T)))
+        _check_diagonal(float(np.max(off)), float(np.max(np.abs(np.diag(T)))))
         entries = tuple(complex(T[i, j]) if T[i, j] != 0 else 0
                         for i in range(3) for j in range(3))
         return ng.CoefficientFunction(entries, dims=(3, 3))
     v = np.asarray(ef.values_zyx)                              # graded tensor (Nz,Ny,Nx,3,3)
     start, end = ef.voxel_bounds_u()
-    diag_max = max(float(np.max(np.abs(v[..., k, k]))) for k in range(3))
+    diag_max = max(float(np.max(np.abs(v[..., k, k]))) for k in range(3))      # same metric as uniform
     off_max = max(float(np.max(np.abs(v[..., i, j]))) for i in range(3) for j in range(3) if i != j)
-    if off_max > 1e-9 * (diag_max or 1.0):
-        _warn_if_offdiagonal(np.array([[1.0, off_max, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+    _check_diagonal(off_max, diag_max)
 
     def _comp(i, j):
         if not np.any(v[..., i, j]):                           # identically-zero component -> int 0
