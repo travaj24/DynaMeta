@@ -13,8 +13,13 @@ those into a field-dependent complex eps. Pure numpy/scipy, SI.
 
 Convention: z in metres, energies in Joules; the field tilt is +q F z for the electron PE and
 -q F z for the hole envelope (opposite signs -> opposite-wall displacement). The ground state is
-chosen by IN-WELL localization (not merely the lowest eigenvalue), so a strong tilt that drops the
-downhill barrier below the well floor does not return a spurious field-ionized edge state.
+chosen by IN-WELL localization (the lowest-index state whose in-well probability exceeds 0.5, else
+the most-localized of the solved set) rather than merely the lowest eigenvalue. VALID-FIELD CAVEAT:
+at strong tilt the downhill barrier drops below the well floor and the state FIELD-IONIZES; even the
+most-localized state then delocalizes and its energy becomes dependent on the grid padding (n_pad)
+-- a Dirichlet-wall artifact, not a true bound state. The solver emits a RuntimeWarning when the
+picked state's in-well probability falls below 0.5, flagging the result as an unreliable
+quasi-bound resonance; keep the field below that onset for trustworthy E_T(F)/overlap.
 
 Oracle (validation/qcse_electroabsorption.py): the small-field electron shift matches the analytic
 infinite-well second-order Stark coefficient
@@ -27,6 +32,7 @@ the textbook ground-state polarizability of an infinite square well (2nd-order p
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -52,6 +58,9 @@ class StarkState:
     z_m: np.ndarray        # interior z nodes
     psi_e: np.ndarray      # electron ground envelope (interior, normalized)
     psi_h: np.ndarray      # hole ground envelope (interior, normalized)
+    ionized: bool = False  # True if a carrier field-ionized (in-well prob < 0.5): E_T/overlap then
+                           # become a Dirichlet-box artifact (n_pad-dependent) -- a warning was raised
+    p_in_min: float = 1.0  # the smaller of the two carriers' in-well probabilities (localization)
 
 
 @dataclass
@@ -67,6 +76,10 @@ class QuantumWell:
     n_pad          : barrier padding each side, in well widths (the bound state must decay before
                      the Dirichlet grid ends; too large + strong tilt drops the downhill barrier)
     nz             : number of grid nodes
+    n_solve        : number of lowest eigenstates scanned for the in-well ground (must exceed the
+                     count of field-ionized triangular-corner states that accumulate below the
+                     in-well level at strong tilt -- the HEAVY-HOLE channel needs the most; 40 covers
+                     well past the onset of ionization, where results are flagged unreliable anyway)
     """
     well_width_m: float
     barrier_e_J: float
@@ -77,12 +90,17 @@ class QuantumWell:
     exciton_binding_J: float = 0.0
     n_pad: float = 2.5
     nz: int = 1501
+    n_solve: int = 40
 
     def __post_init__(self):
         if not (self.well_width_m > 0 and self.nz >= 21):
             raise ValueError("well_width_m must be > 0 and nz >= 21")
         if self.barrier_e_J <= 0 or self.barrier_h_J <= 0:
             raise ValueError("barrier heights must be > 0 (finite confining well)")
+        if self.m_e_kg <= 0 or self.m_h_kg <= 0:
+            raise ValueError("m_e_kg and m_h_kg must be > 0 (effective masses)")
+        if self.E_g_J <= 0:
+            raise ValueError("E_g_J must be > 0")
 
     def _grid(self) -> np.ndarray:
         pad = float(self.n_pad) * self.well_width_m
@@ -92,17 +110,22 @@ class QuantumWell:
         inside = (z >= 0.0) & (z <= self.well_width_m)
         return np.where(inside, 0.0, float(barrier_J))
 
-    @staticmethod
-    def _ground_localized(sp: SchrodingerPoisson1D, U_J: np.ndarray,
-                           in_well_interior: np.ndarray) -> Tuple[float, np.ndarray]:
-        """Lowest-energy state that is actually localized IN the well (in-well probability > 0.5),
-        falling back to the most-localized state. Guards against a field-ionized downhill-wall
-        state being returned as the 'ground' under a strong tilt."""
-        E, psi, _zi = sp.solve_schrodinger(U_J, n_states=8)
+    def _ground_localized(self, sp: SchrodingerPoisson1D, U_J: np.ndarray,
+                           in_well_interior: np.ndarray) -> Tuple[float, np.ndarray, float]:
+        """Lowest-INDEX state that is actually localized IN the well (in-well probability > 0.5),
+        scanning the n_solve lowest eigenstates; falls back to the most-localized of them. Returns
+        (E, psi, p_in) where p_in is the picked state's in-well probability. Because field-ionized
+        triangular-corner states accumulate BELOW the in-well level as the tilt grows, the in-well
+        ground can sit well above index 0; n_solve must exceed that count (the heavy hole needs the
+        most). A low returned p_in flags the field-ionized regime (handled by the caller)."""
+        n = min(int(self.n_solve), in_well_interior.size)
+        E, psi, _zi = sp.solve_schrodinger(U_J, n_states=n)
         p_in = np.sum((psi ** 2)[in_well_interior, :], axis=0) * sp.h   # in-well probability/state
         cand = np.where(p_in > 0.5)[0]
         k = int(cand[0]) if cand.size else int(np.argmax(p_in))
-        return float(E[k]), psi[:, k]
+        return float(E[k]), psi[:, k], float(p_in[k])
+
+    _IONIZE_TOL = 0.5      # in-well probability below this => field-ionized / box-corner artifact
 
     def solve(self, field_V_per_m: float) -> StarkState:
         """Solve the electron + heavy-hole ground subbands under a perpendicular field F and
@@ -116,8 +139,17 @@ class QuantumWell:
         U_h = self._well(z, self.barrier_h_J) - Q * F * z
         spe = SchrodingerPoisson1D(z, self.m_e_kg)
         sph = SchrodingerPoisson1D(z, self.m_h_kg)
-        E_e1_raw, psi_e = self._ground_localized(spe, U_e, in_well)
-        E_hh1_raw, psi_h = self._ground_localized(sph, U_h, in_well)
+        E_e1_raw, psi_e, p_e = self._ground_localized(spe, U_e, in_well)
+        E_hh1_raw, psi_h, p_h = self._ground_localized(sph, U_h, in_well)
+        p_in_min = min(p_e, p_h)
+        ionized = p_in_min < self._IONIZE_TOL
+        if ionized:
+            warnings.warn(
+                "QuantumWell.solve(F={:.3g} V/m): a carrier FIELD-IONIZED (min in-well "
+                "probability {:.2f} < {:.1f}) -- the downhill barrier has dropped below the well "
+                "floor, so E_T(F)/overlap are a Dirichlet-box artifact (n_pad-dependent), NOT a "
+                "true bound state. Reduce the field below the ionization onset for a trustworthy "
+                "result.".format(F, p_in_min, self._IONIZE_TOL), RuntimeWarning, stacklevel=2)
         # Reference each confinement energy to its band floor at the WELL CENTRE (z = L/2): the raw
         # eigenvalue carries a LINEAR tilt offset (+qF*L/2 for U_e = well + qFz, -qF*L/2 for U_h =
         # well - qFz). The linear parts cancel in the SUM E_e1 + E_hh1, but subtracting them
@@ -131,7 +163,8 @@ class QuantumWell:
         overlap = float(abs(np.sum(psi_e * psi_h) * h) ** 2)           # |<psi_e|psi_hh>|^2
         E_T = float(self.E_g_J + E_e1 + E_hh1 - self.exciton_binding_J)
         return StarkState(field_V_per_m=F, E_e1_J=E_e1, E_hh1_J=E_hh1, E_transition_J=E_T,
-                          overlap=overlap, z_m=zi, psi_e=psi_e, psi_h=psi_h)
+                          overlap=overlap, z_m=zi, psi_e=psi_e, psi_h=psi_h,
+                          ionized=ionized, p_in_min=p_in_min)
 
     def transition_energy_J(self, field_V_per_m: float) -> float:
         """Interband transition energy E_T(F) (J) -- the QCSE-redshifted absorption edge."""
