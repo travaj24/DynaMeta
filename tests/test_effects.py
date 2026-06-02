@@ -5,7 +5,8 @@ Run: python -m pytest tests/test_effects.py -q
 import numpy as np
 import pytest
 
-from dynameta.core.effects import OpticalModelEffect, ComposedEffect, as_tensor
+from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, as_tensor,
+                                   PockelsEffect, KerrEffect, FranzKeldyshEffect)
 from dynameta.materials.optical_model import ConstantOptical
 
 
@@ -55,3 +56,42 @@ def test_eps_field_tensor_flags():
     assert not gs.is_uniform and not gs.is_tensor                            # graded scalar
     gt = EpsField(x_axis_u=ax, y_axis_u=ax, z_axis_u=ax, values_zyx=np.ones((2, 2, 2, 3, 3), complex))
     assert not gt.is_uniform and gt.is_tensor                                # graded tensor
+
+
+# ---- field-effect electro-optic EffectModels (Phase 1) ----
+def _linbo3():
+    no, ne, r13, r33 = 2.21, 2.14, 9.6e-12, 30.9e-12
+    eps_bg = np.diag([no ** 2, no ** 2, ne ** 2]).astype(complex)
+    r = np.zeros((6, 3)); r[0, 2] = r13; r[1, 2] = r13; r[2, 2] = r33
+    return no, ne, r13, r33, eps_bg, r
+
+
+def test_pockels_reduces_to_background_and_shifts_index():
+    no, ne, r13, r33, eps_bg, r = _linbo3()
+    pk = PockelsEffect(eps_bg=eps_bg, r_voigt=r)
+    assert np.allclose(pk.eps({"E": np.zeros(3)}, 1300e-9), eps_bg)          # E=0 -> background
+    Ez = 1.0e7
+    eps = pk.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9)
+    assert abs(eps[0, 1]) < 1e-12 and abs(eps[0, 2]) < 1e-12                 # stays diagonal
+    nx, nz = np.sqrt(eps[0, 0].real), np.sqrt(eps[2, 2].real)
+    assert nx == pytest.approx(no - 0.5 * no ** 3 * r13 * Ez, rel=1e-3)      # Pockels: n_o via r13
+    assert nz == pytest.approx(ne - 0.5 * ne ** 3 * r33 * Ez, rel=1e-3)      # Pockels: n_e via r33
+    pk0 = PockelsEffect(eps_bg=eps_bg, r_voigt=np.zeros((6, 3)))             # r=0 -> background
+    assert np.allclose(pk0.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), eps_bg)
+
+
+def test_kerr_reduces_and_is_quadratic_in_field():
+    eps_bg = (2.0 ** 2) * np.eye(3, dtype=complex)
+    kr = KerrEffect(eps_bg=eps_bg, s_kerr=1e-18)
+    assert np.allclose(kr.eps({"E": np.zeros(3)}, 1300e-9), eps_bg)
+    dB1 = 1.0 / kr.eps({"E": [0, 0, 1e8]}, 1300e-9)[0, 0] - 1.0 / eps_bg[0, 0]
+    dB2 = 1.0 / kr.eps({"E": [0, 0, 2e8]}, 1300e-9)[0, 0] - 1.0 / eps_bg[0, 0]
+    assert (dB2 / dB1).real == pytest.approx(4.0, rel=1e-6)                  # |E|^2 -> 2x field, 4x shift
+    assert np.allclose(KerrEffect(eps_bg, 0.0).eps({"E": [0, 0, 1e8]}, 1300e-9), eps_bg)
+
+
+def test_franz_keldysh_opens_field_absorption():
+    fk = FranzKeldyshEffect(eps_bg=complex(12.0, 0.1), beta=1e-8)
+    assert complex(fk.eps({"E": np.zeros(3)}, 1300e-9)) == pytest.approx(complex(12.0, 0.1))
+    e = complex(fk.eps({"E": [0, 0, 1e6]}, 1300e-9))
+    assert e.imag > 0.1 and e.real == pytest.approx(12.0)                    # field-on -> more loss
