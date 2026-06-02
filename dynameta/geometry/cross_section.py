@@ -208,6 +208,8 @@ def _polygon_contains(verts: np.ndarray, x, y):
     j = n - 1
     for i in range(n):
         xi, yi = verts[i]; xj, yj = verts[j]
+        # the (yi>y)!=(yj>y) test already excludes horizontal edges (yi==yj); the +1e-300 only
+        # avoids a 0/0 RuntimeWarning on those edges (the result is masked off either way).
         cond = ((yi > y) != (yj > y)) & (
             x < (xj - xi) * (y - yi) / (yj - yi + 1e-300) + xi)
         inside ^= cond

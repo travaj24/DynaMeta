@@ -51,6 +51,10 @@ class OpticalResult:
 
 @runtime_checkable
 class CarrierSolver(Protocol):
+    """A carrier solver the pipeline drives. `solve` is the workhorse; `regions` is an OPTIONAL
+    introspection hook (what the solver advertises about each region) -- the default pipeline
+    builds its alignment from the OPTICAL builder, so `regions()` is not on the hot path, but a
+    BYO solver may implement it for tooling/inspection."""
     def regions(self) -> List[RegionInfo]: ...
     def solve(self, bias: "BiasPoint") -> CarrierField: ...
 
