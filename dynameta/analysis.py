@@ -13,8 +13,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from dynameta.core.carrier_field import ELECTRON_DENSITY
-
-_Q_E = 1.602176634e-19   # C
+from dynameta.constants import Q_E as _Q_E   # elementary charge, C
 
 
 def _trapz(y: np.ndarray, x: np.ndarray) -> float:
