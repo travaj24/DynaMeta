@@ -41,6 +41,10 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
     + a dc solve before calling."""
     if t_end <= 0.0 or dt0 <= 0.0:
         raise ValueError("t_end and dt0 must be > 0")
+    if dt_growth <= 1.0 or dt_cap_frac <= 0.0:
+        raise ValueError("dt_growth must be > 1 and dt_cap_frac > 0 (a non-growing or "
+                         "negative cap gives a stuck or backward-in-time step); got "
+                         "dt_growth={}, dt_cap_frac={}".format(dt_growth, dt_cap_frac))
     # establish the transient initial condition at the current DC state
     ds.solve(type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
              maximum_iterations=maximum_iterations)
@@ -55,8 +59,13 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
             ds.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
                      absolute_error=absolute_error, relative_error=relative_error,
                      maximum_iterations=maximum_iterations)
-        except ds.error as msg:                                      # DEVSIM convergence failure
-            if "onvergence" not in str(msg):
+        except ds.error as msg:                                      # DEVSIM solver failure
+            # Halve + retry on the RECOVERABLE, step-size-related failures: Newton
+            # non-convergence, a singular/ill-conditioned factorization, or an exp overflow --
+            # all eased by a smaller tdelta. Re-raise anything else (a genuine setup error must
+            # not be silently retried into the dt floor).
+            s = str(msg)
+            if not any(k in s for k in ("onvergence", "factoriz", "verflow", "teration")):
                 raise
             dt *= 0.5
             if dt < 1.0e-19:
@@ -70,4 +79,9 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
         ts.append(t)
         Is.append(float(ds.get_circuit_node_value(node=src_i, solution="dcop")))
         dt = min(dt * float(dt_growth), cap)
+    if t < t_end:                                                    # anti-silent-failure
+        raise RuntimeError(
+            "transient_step: hit max_steps={} at t={:.3e} s < t_end={:.3e} s -- the returned "
+            "waveform is INCOMPLETE (it never reached t_end). Raise max_steps, increase dt0 / "
+            "dt_cap_frac, or soften the bias step.".format(max_steps, t, t_end))
     return np.asarray(ts, dtype=np.float64), np.asarray(Is, dtype=np.float64)

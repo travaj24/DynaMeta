@@ -26,6 +26,8 @@ import math
 import numpy as np
 import devsim as ds
 
+from dynameta.carriers import eq_registry as _R
+
 
 def setup_circuit_contact(device: str, contact: str, *,
                           edge_charge_model: str = "PotentialEdgeFlux",
@@ -45,8 +47,12 @@ def setup_circuit_contact(device: str, contact: str, *,
                           equation="1")
     ds.contact_node_model(device=device, contact=contact, name="{}:{}".format(cn, node_name),
                           equation="-1")
-    ds.contact_equation(device=device, contact=contact, name="PotentialEquation",
-                        node_model=cn, edge_charge_model=edge_charge_model, circuit_node=node_name)
+    # Record via the equation registry (not a raw ds.contact_equation) so a Gummel / staged solve
+    # that freezes Potential (eq_registry.delete_by_name -> reapply_by_name) restores this circuit
+    # contact too -- a raw contact_equation would be deleted and never re-applied, silently dropping
+    # the AC drive. (Parity with setup_contact_ohmic_bipolar_circuit.)
+    _R.record_contact_equation(device, contact, name="PotentialEquation", node_model=cn,
+                               edge_charge_model=edge_charge_model, circuit_node=node_name)
     return source_name, node_name
 
 
@@ -59,6 +65,9 @@ def ssac_admittance(frequencies, *, source_name: str = "V1", v_ac: float = 1.0):
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=np.float64))
     if np.any(freqs <= 0.0):
         raise ValueError("frequencies must be > 0 Hz")
+    if not (float(v_ac) > 0.0):
+        raise ValueError("v_ac must be > 0 (the excitation scale for Y = -I/V_ac); got "
+                         "{!r}".format(v_ac))
     src_i = "{}.I".format(source_name)
     C = np.empty(freqs.size)
     G = np.empty(freqs.size)

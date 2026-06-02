@@ -50,11 +50,13 @@ def _check_energy_budget(R: float, T: float, *, where: str, tol: float = 1e-6) -
     sign/convention mistake = gain) silently yields T > 1, A < 0. Since this module is the FEM
     validation ORACLE, a wrong-but-plausible R/T must not pass silently."""
     A = 1.0 - R - T
-    if R < -tol or T < -tol or A < -tol:
+    # NaN must NOT pass (nan < -tol is False); the oracle has to be at least as strict as the FEM
+    # backstop in solver.py. A finite negative R/T/A flags an interior gain layer (Im(eps) < 0).
+    if not (math.isfinite(R) and math.isfinite(T)) or R < -tol or T < -tol or A < -tol:
         raise ValueError(
-            "{}: TMM energy budget violated (R={:.6f}, T={:.6f}, A=1-R-T={:.6f}); a layer likely "
-            "has Im(eps) < 0 (GAIN) -- check the eps sign convention (exp(-iwt) => Im(eps) >= 0 "
-            "for a passive/absorbing medium).".format(where, R, T, A))
+            "{}: TMM R/T/A not finite or energy budget violated (R={}, T={}, A=1-R-T={}); a layer "
+            "likely has Im(eps) < 0 (GAIN) -- check the eps sign convention (exp(-iwt) => Im(eps) "
+            ">= 0 for a passive/absorbing medium).".format(where, R, T, A))
     return A
 
 

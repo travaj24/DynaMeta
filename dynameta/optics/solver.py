@@ -413,7 +413,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # field is inconsistent -- surface it on the SOLVE path (previously only validation scripts
     # compared the two). The 5e-2 band tolerates the OS-4 lossy-cladding case without false-firing
     # on the validated lossless ones.
-    if A is not None and A_independent is not None and abs(A - A_independent) > 5e-2:
+    if (A is not None and A_independent is not None
+            and (not math.isfinite(A_independent) or abs(A - A_independent) > 5e-2)):
         warnings.warn(
             "solve_fem: energy-closure mismatch -- budget A=1-R-T={:.4f} vs independently measured "
             "volumetric absorption A_independent={:.4f} (|diff|={:.2e} > 5e-2); R/T are "
