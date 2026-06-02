@@ -288,10 +288,19 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     else:
         curlE, curlV = ng.curl(u), ng.curl(v)
 
-    a = ng.BilinearForm(fes, symmetric=not envelope)
-    a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
+    eps_is_tensor = (tuple(getattr(eps_cf, "dims", ())) == (3, 3))
+    # a tensor eps makes the matvec term (eps.u).v non-symmetric in general (e.g. magneto-optic);
+    # assemble non-symmetric so NGSolve does not symmetrize it (only the scalar path is symmetric).
+    a = ng.BilinearForm(fes, symmetric=(not envelope) and not eps_is_tensor)
     f = ng.LinearForm(fes)
-    f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
+    if eps_is_tensor:
+        # anisotropic eps: matvec (eps . E) . v; eps_bg (scalar) -> eps_bg * I to subtract.
+        Id3 = ng.CoefficientFunction((1, 0, 0, 0, 1, 0, 0, 0, 1), dims=(3, 3))
+        a += (curlE * curlV - k0 ** 2 * ((eps_cf * u) * v)) * ng.dx
+        f += (k0 ** 2 * (((eps_cf - eps_bg_cf * Id3) * E_bg) * v)) * ng.dx
+    else:
+        a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
+        f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
     pre = ng.Preconditioner(a, "bddc") if optical.linear_solver.startswith("bddc") else None
 
     gfu = ng.GridFunction(fes)
@@ -492,9 +501,15 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     if not non_pml:
         return None
     defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
-    im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j                  # Im(eps) as a real CF
-    e2 = ng.InnerProduct(E_tot, ng.Conj(E_tot))               # |E|^2 (real)
-    integ = ng.Integrate(im_eps * e2, mesh, definedon=defon)
+    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
+        # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
+        # reduces to it for eps = eps_scalar * I)
+        q = ng.InnerProduct(eps_cf * E_tot, ng.Conj(E_tot))   # E^* . eps . E
+        loss = (q - ng.Conj(q)) / 2j
+    else:
+        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j              # Im(eps) as a real CF
+        loss = im_eps * ng.InnerProduct(E_tot, ng.Conj(E_tot))  # Im(eps) |E|^2
+    integ = ng.Integrate(loss, mesh, definedon=defon)
     area = float(Px) * float(Py)
     if area <= 0:
         return None

@@ -107,10 +107,14 @@ def assemble_eps(field: CarrierField,
         zspan = z3_m[-1] - z3_m[0]
         z_remap_m = (zlo + (z3_m - z3_m[0]) * ((zhi - zlo) / zspan)
                       if zspan > 0 else np.full_like(z3_m, zlo))
+        eps_3d = np.asarray(eps_3d)
+        if eps_3d.ndim == 5:                                   # tensor (Nx,Ny,Nz,3,3) -> (Nz,Ny,Nx,3,3)
+            vals = np.transpose(eps_3d, (2, 1, 0, 3, 4)).astype(np.complex128)
+        else:                                                  # scalar (Nx,Ny,Nz) -> (Nz,Ny,Nx)
+            vals = np.transpose(eps_3d, (2, 1, 0)).astype(np.complex128)
         out[ra.mesh_region] = EpsField(
             x_axis_u=x3_m / mpp, y_axis_u=y3_m / mpp, z_axis_u=z_remap_m / mpp,
-            values_zyx=np.transpose(eps_3d, (2, 1, 0)).astype(np.complex128),
-            time_convention=field.time_convention)
+            values_zyx=vals, time_convention=field.time_convention)
 
     for region, mat_name in alignment.fixed_eps_regions.items():
         out[region] = EpsField(scalar=n_to_eps.scalar_eps(mat_name, lambda_m),
