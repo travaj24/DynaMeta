@@ -20,9 +20,9 @@ Run: python -m validation.reconfigurable_modulators
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from dynameta.constants import HBAR, C_LIGHT, EPS0, Q_E as Q
+from dynameta.constants import HBAR, C_LIGHT, Q_E as Q
 from dynameta.core.effects import PCMModel, LiquidCrystalModel
-from dynameta.core.graphene import graphene_sigma, sheet_rt, SIGMA0
+from dynameta.core.graphene import graphene_sigma, sheet_rt, SIGMA0, Z0
 from dynameta.carriers.lc_director import freedericksz_threshold_V, director_profile
 
 LAM = 1.55e-6
@@ -53,16 +53,25 @@ def part1_pcm():
 
 
 def part2_liquid_crystal():
-    """LC: Freedericksz threshold, uniaxial eigenvalue invariance, isotropic reduction, n_eff(theta)."""
+    """LC: Freedericksz transition (independent supercritical-law bifurcation at V_th) + uniaxial
+    eigenvalue invariance + isotropic reduction."""
     K, dEps, ep, d = 6.5e-12, 11.0, 7.0, 5e-6
     Vth = freedericksz_threshold_V(K, dEps)
-    Vth_ana = np.pi * np.sqrt(K / (EPS0 * dEps))
-    th_below = director_profile(K, dEps, ep, d, 0.8 * Vth).theta_max_rad
-    th_above = director_profile(K, dEps, ep, d, 1.5 * Vth).theta_max_rad
-    threshold_ok = abs(Vth - Vth_ana) < 1e-12 and th_below == 0.0 and th_above > 0.0
+    # INDEPENDENT threshold check (NOT the tautological V_th-vs-same-formula, audit F3): the
+    # director PROFILE solver (an elliptic quadrature + bisection, independent of the threshold
+    # FORMULA) must (a) stay planar below V_th and (b) rise with the supercritical pitchfork law
+    # theta_max^2 ~ (V/V_th - 1) just above it -- the physical signature of the transition AT V_th.
+    below = director_profile(K, dEps, ep, d, 0.9 * Vth).theta_max_rad == 0.0
+    rs = np.array([1.02, 1.05, 1.10])
+    tm = np.array([director_profile(K, dEps, ep, d, r * Vth).theta_max_rad for r in rs])
+    ratio = tm ** 2 / (rs - 1.0)
+    sqrt_law = bool(np.all(tm > 0) and (ratio.max() / ratio.min() < 1.3))
+    threshold_ok = below and sqrt_law
     no, ne = 1.53, 1.71
     lc = LiquidCrystalModel(n_o=no, n_e=ne)
-    # eigenvalues are the rotation invariant {n_o^2, n_o^2, n_e^2} for ANY tilt
+    # the uniaxial tensor's eigenvalues are the rotation-invariant {n_o^2, n_o^2, n_e^2} for ANY tilt
+    # (a genuine invariant -- the e-wave principal index n_e and the o-wave n_o; the angular
+    # extraordinary index n_eff(theta) is validated through the FEM in lc_uniaxial_fem.py)
     eig_ok = True
     for th in (0.0, 0.3, 0.9, np.pi / 2):
         ev = np.sort(np.linalg.eigvals(lc.eps({"director_angle_rad": th}, LAM)).real)
@@ -70,19 +79,9 @@ def part2_liquid_crystal():
             eig_ok = False
     iso_ok = np.allclose(LiquidCrystalModel(1.6, 1.6).eps({"director_angle_rad": 0.7}, LAM),
                          1.6 ** 2 * np.eye(3))
-    # extraordinary effective index for a normal-incidence x-polarized wave vs analytic
-    neff_ok = True
-    for th in (0.0, 0.4, 1.0):
-        eps_xx = lc.eps({"director_angle_rad": th}, LAM)[0, 0].real
-        # x-wave at normal incidence sees eps_xx = n_o^2 + (n_e^2-n_o^2)cos^2(theta); compare the
-        # uniaxial extraordinary index 1/n_eff^2 = sin^2/n_o^2 + cos^2/n_e^2 via the tensor entry.
-        n_eff = 1.0 / np.sqrt(np.sin(th) ** 2 / no ** 2 + np.cos(th) ** 2 / ne ** 2)
-        if abs(eps_xx - (no ** 2 + (ne ** 2 - no ** 2) * np.cos(th) ** 2)) > 1e-9:
-            neff_ok = False
-        _ = n_eff
-    ok = threshold_ok and eig_ok and iso_ok and neff_ok
-    print("[r] (2) LC: V_th={:.4f} V (analytic match) threshold={} eig-invariant={} iso-reduction={} "
-          "n_eff={}".format(Vth, threshold_ok, eig_ok, iso_ok, neff_ok), flush=True)
+    ok = threshold_ok and eig_ok and iso_ok
+    print("[r] (2) LC: V_th={:.4f} V  bifurcation+sqrt-law={} eig-invariant={} iso-reduction={}".format(
+        Vth, threshold_ok, eig_ok, iso_ok), flush=True)
     return ok
 
 
@@ -98,16 +97,21 @@ def part3_graphene():
     re_ratio = [graphene_sigma(EF * Q, LAM).real / SIGMA0 for EF in (0.0, 0.3, 0.5, 0.7)]
     pauli = re_ratio[0] > 0.9 and re_ratio[-1] < 0.1 and bool(np.all(np.diff(re_ratio) < 0))
     passive = bool(np.all([graphene_sigma(EF * Q, LAM).real > 0 for EF in (0.0, 0.5, 1.0)]))
-    # gate-tunable absorption + energy conservation
-    A_on = sheet_rt(n1, n2, graphene_sigma(0.0, LAM))[4]       # E_F=0  -> interband ON
-    R, T, A_off = sheet_rt(n1, n2, graphene_sigma(0.6 * Q, LAM))[2:]   # Pauli-blocked
+    # INDEPENDENT energy balance (NOT the tautological A:=1-R-T, audit F1): the flux deficit
+    # 1-R-T must equal the Ohmic SHEET DISSIPATION A_poynting = Z0 Re(sigma) |t|^2 / n1 computed
+    # separately from sigma and the transmitted amplitude.
+    s_on = graphene_sigma(0.0, LAM)
+    r, t, R, T, A_on = sheet_rt(n1, n2, s_on)                  # E_F=0 -> interband ON
+    A_poynting = Z0 * s_on.real * abs(t) ** 2 / n1
+    energy = abs(A_on - A_poynting) < 1e-9 and A_on >= 0.0     # flux deficit == sheet absorption
+    # gate-tunable absorption: ON (E_F=0) >> OFF (Pauli-blocked at E_F=0.6 eV)
+    A_off = sheet_rt(n1, n2, graphene_sigma(0.6 * Q, LAM))[4]
     tunable = A_on > 5.0 * A_off and A_on > 0.0
-    energy = abs((R + T + A_off) - 1.0) < 1e-9 and A_off >= -1e-12
     # sigma -> 0 recovers the bare Fresnel
     fresnel = abs(sheet_rt(n1, n2, 0.0)[0] - (n1 - n2) / (n1 + n2)) < 1e-12
     ok = universal and pauli and passive and tunable and energy and fresnel
     print("[r] (3) graphene (hw={:.2f} eV): sigma0-universal={} Pauli-block={} passive={} "
-          "A {:.4f}->{:.4f} (tunable={}) R+T+A=1:{} Fresnel={}".format(
+          "A {:.4f}->{:.4f} (tunable={}) energy(Poynting)={} Fresnel={}".format(
               hw_eV, universal, pauli, passive, A_on, A_off, tunable, energy, fresnel), flush=True)
     return ok
 
