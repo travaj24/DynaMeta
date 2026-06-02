@@ -77,7 +77,8 @@ class LayeredOpticalBuilder:
                                         z_lo, z_hi)
         if k == "ellipse":
             cx, cy = inc_shape.center_m()
-            n = 72
+            n = 72   # inscribed n-gon: area 0.127% below the true ellipse, aspect-INdependent
+            #          (audit GEO-3; far below mesh/validation tolerance -- raise n if needed)
             pts = [((cx + inc_shape.rx_m * math.cos(t)) * S, (cy + inc_shape.ry_m * math.sin(t)) * S)
                     for t in (2.0 * math.pi * i / n for i in range(n))]
             return self._polygon_prism(pts, z_lo, z_hi)
