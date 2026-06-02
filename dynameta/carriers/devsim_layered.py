@@ -35,6 +35,15 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.geometry.electrode import Electrode
 
+# Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
+# the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
+# domain-boundary contact -- the fix that makes GATED DD converge (validation/gated_dd_2d.py). Kept
+# thin (~1 nm) so the carrier-side x-seam vs the full-cell optics ITO is negligible: the carrier
+# ITO grid then spans [w, P-w], and the optics NGSolve VoxelCoefficient (linear=True) edge-clamps
+# the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
+# eps there.
+_EDGE_METAL_W_M = 1.5e-9
+
 
 @dataclass
 class _RegionSpec:
@@ -62,11 +71,62 @@ class LayeredDevsimBuilder:
         s = self.design.stack
         return {s.superstrate_material, s.substrate_material}
 
+    def _metal_material(self) -> Optional[str]:
+        """A material name with role 'metal' in the stack (for the inert edge-metal strip). The
+        strip's properties are irrelevant (it carries no physics); only role=='metal' matters."""
+        d = self.design
+        for L in d.stack.layers:
+            if d.material_role(L.background_material) == "metal":
+                return L.background_material
+            for inc in L.inclusions:
+                if d.material_role(inc.material) == "metal":
+                    return inc.material
+        return None
+
+    def _dd_full_edge_grounds(self) -> Dict[str, set]:
+        """Map layer-name -> set of edge SIDES ({'x_lo','x_hi'}) carrying a GROUND electrode on a
+        drift-diffusion semiconductor layer (no inclusions). Each such edge needs a FULL-EDGE ohmic
+        ground -- a thin adjacent edge-metal region so the ground is a region-region interface
+        (full-line node capture) instead of a weak 2-node domain-boundary contact, which cannot
+        anchor the continuity equation (gated DD otherwise does not converge). A layer may be
+        grounded on BOTH edges (e.g. the Park ITO). Equilibrium layers are NOT affected."""
+        d = self.design
+        out: Dict[str, set] = {}
+        for E in d.electrodes:
+            if not (E.is_edge and E.role == "ground" and E.footprint in ("x_lo", "x_hi")):
+                continue
+            L = next((ly for ly in d.stack.layers if ly.name == E.layer), None)
+            if L is None or L.inclusions:
+                continue
+            tr = getattr(d.materials.get(L.background_material), "transport", None)
+            if tr is not None and getattr(tr, "physics", None) == "drift_diffusion":
+                out.setdefault(E.layer, set()).add(E.footprint)
+        return out
+
     def _region_specs(self) -> List[_RegionSpec]:
         d = self.design
         P = d.unit_cell.period_x_m
         z_iv = d.z_intervals()
         ambient = self._ambient()
+        fe = self._dd_full_edge_grounds()                 # DD edge grounds -> full-edge treatment
+        metal_mat = self._metal_material() if fe else None
+        if fe and metal_mat is None:
+            warnings.warn(
+                "layered DD full-edge ground needed for layer(s) {} but the stack has no metal "
+                "material to form the edge-metal strip; falling back to the weak 2-node ground "
+                "(gated DD may not converge).".format(sorted(fe)))
+        # y-edge grounds are not resolved in the 2D (x,z) cross-section -> they get no full-edge
+        # ohmic ground (and the legacy contact placement mis-locates them at the x-hi edge), so a
+        # gated DD device with only a y-edge ground may not converge. Warn rather than fail silently.
+        for E in d.electrodes:
+            if E.is_edge and E.role == "ground" and E.footprint in ("y_lo", "y_hi"):
+                L = next((ly for ly in d.stack.layers if ly.name == E.layer), None)
+                tr = getattr(d.materials.get(L.background_material), "transport", None) if L else None
+                if tr is not None and getattr(tr, "physics", None) == "drift_diffusion":
+                    warnings.warn(
+                        "electrode '{}': a y-edge ground on a drift-diffusion layer is not resolved "
+                        "in the 2D (x,z) builder -- no full-edge ohmic ground is formed and gated DD "
+                        "may not converge. Use an x_lo/x_hi edge ground.".format(E.name))
         specs: List[_RegionSpec] = []
         for L in d.stack.layers:
             zlo, zhi = z_iv[L.name]
@@ -75,9 +135,29 @@ class LayeredDevsimBuilder:
             n_incl = len(L.inclusions)
             if not bg_ambient:
                 # background region over the full cell (x split by inclusions is
-                # ignored for the background's DC role; inclusions overlay it)
+                # ignored for the background's DC role; inclusions overlay it). For a
+                # DD-semiconductor layer with an edge GROUND, carve a thin edge-metal strip
+                # at that edge so the ground is a region-region INTERFACE (full-edge ohmic
+                # capture) instead of a weak 2-node domain-boundary contact.
+                x0, x1 = 0.0, P
+                sides = fe.get(L.name, set()) if metal_mat is not None else set()
+                w = _EDGE_METAL_W_M
+                if "x_lo" in sides:
+                    specs.append(_RegionSpec(L.name + "_egnd_lo", metal_mat, "metal",
+                                              0.0, w, zlo, zhi))
+                    x0 = w
+                if "x_hi" in sides:
+                    specs.append(_RegionSpec(L.name + "_egnd_hi", metal_mat, "metal",
+                                              P - w, P, zlo, zhi))
+                    x1 = P - w
+                if sides and (x1 - x0) < 4.0 * w:
+                    raise ValueError(
+                        "layer '{}': the edge-metal ground strip(s) ({:.2g} nm each) leave a "
+                        "degenerate semiconductor width {:.2g} nm at period {:.2g} nm -- use a "
+                        "larger period or a smaller _EDGE_METAL_W_M.".format(
+                            L.name, w * 1e9, (x1 - x0) * 1e9, P * 1e9))
                 specs.append(_RegionSpec(L.name, L.background_material, bg_role,
-                                          0.0, P, zlo, zhi))
+                                          x0, x1, zlo, zhi))
             for i, inc in enumerate(L.inclusions):
                 xlo, xhi, _, _ = inc.shape.bbox_m()
                 role = d.material_role(inc.material)
@@ -125,14 +205,23 @@ class LayeredDevsimBuilder:
                 xlo, xhi, _, _ = inc.shape.bbox_m()
                 x_lines[xlo] = spec.x_spacing_feature_edge_m
                 x_lines[xhi] = spec.x_spacing_feature_edge_m
+        # edge-metal interface line(s) for DD full-edge grounds (the strip boundaries)
+        if self._metal_material() is not None:
+            for _ln, _sides in self._dd_full_edge_grounds().items():
+                if "x_lo" in _sides:
+                    x_lines[_EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
+                if "x_hi" in _sides:
+                    x_lines[P - _EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
         for pos in sorted(x_lines):
             ds.add_2d_mesh_line(mesh=self.mesh_name, dir="x", pos=pos,
                                   ns=x_lines[pos], ps=x_lines[pos])
 
         # y mesh lines: interface-zone refinement over meshed layers
         izone = spec.interface_zone_m
-        meshed_layer_names = sorted({s.name.split("__incl")[0] for s in self._specs},
-                                     key=lambda nm: z_iv[nm][0])
+        # map region names back to their parent layer for z lookup; the edge-metal strip
+        # ("<layer>_egnd") shares its layer's z-range (already covered), so drop names not in z_iv.
+        meshed_layer_names = sorted({nm for nm in (s.name.split("__incl")[0] for s in self._specs)
+                                     if nm in z_iv}, key=lambda nm: z_iv[nm][0])
         for nm in meshed_layer_names:
             zlo, zhi = z_iv[nm]
             thk = zhi - zlo
@@ -182,21 +271,24 @@ class LayeredDevsimBuilder:
             zlo, zhi = z_iv[E.layer]
             if E.is_edge:
                 region = E.layer
-                # Thin x-slab at the cell edge, full layer z-range. NOTE: DEVSIM
-                # captures only ~2 box-corner nodes here -- full-edge lateral
-                # capture is impossible at a domain boundary (it needs an adjacent
-                # region, as a horizontal-face contact like bot_contact has). This
-                # weak 2-node carrier pin is fine for the equilibrium solve (n is
-                # local) but is why gated drift-diffusion does not converge here: the
-                # continuity equation needs strong carrier pinning, which a lateral
-                # edge ground cannot provide in DEVSIM. (Gated DD itself is sound:
-                # with a FULL-boundary ohmic contact it converges and reduces to the
-                # equilibrium profile -- proven in 1D by validation/gated_dd.py. The
-                # 2D fix is to add a thin adjacent edge-metal region so this ground
-                # becomes a region-region interface contact with full-line capture;
-                # pending. See physics_drift_diffusion's module docstring.)
-                xlo = (0.0 - 1e-10) if E.footprint == "x_lo" else (P - 1e-10)
-                xhi = (0.0 + 1e-10) if E.footprint == "x_lo" else (P + 1e-10)
+                if (self._metal_material() is not None
+                        and E.footprint in self._dd_full_edge_grounds().get(E.layer, set())):
+                    # FULL-EDGE ohmic ground (drift-diffusion): the contact sits at the
+                    # semiconductor/edge-metal INTERFACE (x=w, full layer z-range). The adjacent
+                    # edge-metal region (_region_specs carved it) makes this an interior region
+                    # boundary -> full-line node capture, enough to anchor the continuity equation,
+                    # so GATED DD converges (validation/gated_dd_2d.py). The carrier-side ITO grid
+                    # is now x in [w, P-w] (both edges grounded) or [w, P] (one); the optics
+                    # VoxelCoefficient edge-clamps the ~1nm seam to the adjacent ~n_bg value.
+                    xb = _EDGE_METAL_W_M if E.footprint == "x_lo" else (P - _EDGE_METAL_W_M)
+                    xlo, xhi = xb - 1e-10, xb + 1e-10
+                else:
+                    # Thin x-slab at the cell DOMAIN boundary. DEVSIM captures only ~2 box-corner
+                    # nodes here (no adjacent region) -- a weak 2-node carrier pin, fine for the
+                    # equilibrium solve (n is local) but too weak to anchor a continuity equation.
+                    # The full-edge branch above is the DD fix; this remains for equilibrium grounds.
+                    xlo = (0.0 - 1e-10) if E.footprint == "x_lo" else (P - 1e-10)
+                    xhi = (0.0 + 1e-10) if E.footprint == "x_lo" else (P + 1e-10)
                 yl_c, yh_c = zlo, zhi
             else:
                 # metal gate: footprint x-range + nearest non-metal neighbour
@@ -223,14 +315,17 @@ class LayeredDevsimBuilder:
                 tr = self.design.materials.get(s.material).transport
                 dos = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
                 if tr.physics == "drift_diffusion":
-                    # The 2D-layered DD path is NOT validated for a GATED capacitor with
-                    # weak edge-only ohmic grounds -- it is ill-conditioned and may not
-                    # converge (physics_drift_diffusion KNOWN LIMITATION). Equilibrium is
-                    # the validated tool for DC gate accumulation (audit F4).
-                    warnings.warn(
-                        "layered drift-diffusion on semiconductor '{}': a gated device with "
-                        "weak edge-only ohmic grounds may not converge; use the equilibrium "
-                        "physics mode for DC gate accumulation.".format(s.name))
+                    # Gated DD needs a strong ohmic ground to anchor the continuity equation. A
+                    # FULL-EDGE ground (edge-metal interface, wired automatically when this layer
+                    # has an edge GROUND electrode) converges -- validation/gated_dd_2d.py. Without
+                    # one, the only ground is a weak 2-node domain-boundary edge contact and a gated
+                    # solve may not converge (use equilibrium mode, or add an edge ground here).
+                    if s.name not in self._dd_full_edge_grounds() or self._metal_material() is None:
+                        warnings.warn(
+                            "layered drift-diffusion on semiconductor '{}': no full-edge ohmic "
+                            "ground (only a weak 2-node edge ground) -- a gated device may not "
+                            "converge; add an edge GROUND electrode on this layer, or use the "
+                            "equilibrium physics mode for DC gate accumulation.".format(s.name))
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
