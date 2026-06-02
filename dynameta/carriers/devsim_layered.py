@@ -187,9 +187,14 @@ class LayeredDevsimBuilder:
                 # capture is impossible at a domain boundary (it needs an adjacent
                 # region, as a horizontal-face contact like bot_contact has). This
                 # weak 2-node carrier pin is fine for the equilibrium solve (n is
-                # local) but is why gated drift-diffusion does not converge: the
+                # local) but is why gated drift-diffusion does not converge here: the
                 # continuity equation needs strong carrier pinning, which a lateral
-                # edge ground cannot provide in DEVSIM.
+                # edge ground cannot provide in DEVSIM. (Gated DD itself is sound:
+                # with a FULL-boundary ohmic contact it converges and reduces to the
+                # equilibrium profile -- proven in 1D by validation/gated_dd.py. The
+                # 2D fix is to add a thin adjacent edge-metal region so this ground
+                # becomes a region-region interface contact with full-line capture;
+                # pending. See physics_drift_diffusion's module docstring.)
                 xlo = (0.0 - 1e-10) if E.footprint == "x_lo" else (P - 1e-10)
                 xhi = (0.0 + 1e-10) if E.footprint == "x_lo" else (P + 1e-10)
                 yl_c, yh_c = zlo, zhi
