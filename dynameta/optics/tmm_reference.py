@@ -48,6 +48,15 @@ def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: 
     return R, T, float(1.0 - R - T)
 
 
+def end_media_indices(design, lambda_m: float) -> Tuple[complex, complex]:
+    """(n_super, n_sub) = sqrt(eps) of the Design's semi-infinite superstrate/substrate media
+    at lambda_m. One helper so the complex-sqrt branch (which matters for a lossy cladding) is
+    chosen in exactly one place -- used by run_pipeline and both layered extractors."""
+    n_super = np.sqrt(complex(design.materials.get(design.stack.superstrate_material).eps(lambda_m)))
+    n_sub = np.sqrt(complex(design.materials.get(design.stack.substrate_material).eps(lambda_m)))
+    return complex(n_super), complex(n_sub)
+
+
 def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[complex, float]], complex]:
     """Extract (n_super, [(n, thk_m), ...], n_sub) from a Design whose layers are all
     laterally UNIFORM (no inclusions) -- so TMM applies. Raises if any layer has an
@@ -62,9 +71,8 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
                 "structured and TMM does not apply; use the FEM solver.".format(L.name))
         eps = complex(design.materials.get(L.background_material).eps(lambda_m))
         layers.append((np.sqrt(eps), float(L.thickness_m)))
-    n_super = np.sqrt(complex(design.materials.get(design.stack.superstrate_material).eps(lambda_m)))
-    n_sub = np.sqrt(complex(design.materials.get(design.stack.substrate_material).eps(lambda_m)))
-    return complex(n_super), layers, complex(n_sub)
+    n_super, n_sub = end_media_indices(design, lambda_m)
+    return n_super, layers, n_sub
 
 
 # ---- LayeredStack consumer: the graded-TMM oracle + a LayeredStackSolver impl ----
@@ -135,9 +143,8 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
         else:
             eps = complex(design.materials.get(L.background_material).eps(lambda_m))
             slabs_top_down.append(LayeredSlab(float(L.thickness_m), eps=eps))
-    n_super = np.sqrt(complex(design.materials.get(design.stack.superstrate_material).eps(lambda_m)))
-    n_sub = np.sqrt(complex(design.materials.get(design.stack.substrate_material).eps(lambda_m)))
-    return LayeredStack(complex(n_super), complex(n_sub), slabs_top_down,
+    n_super, n_sub = end_media_indices(design, lambda_m)
+    return LayeredStack(n_super, n_sub, slabs_top_down,
                         period_x_m=design.unit_cell.period_x_m,
                         period_y_m=design.unit_cell.period_y_m)
 
@@ -152,14 +159,14 @@ def make_layered_tmm_solver(*, n_slices=None):
     or RCWA).
 
     The returned callable has the exact seam signature
-    ``fn(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult``; `geo`,
+    ``fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult``; `geo`,
     `n_super`, `n_sub` are accepted for compatibility but unused (the LayeredStack re-derives
     the end media from the Design's super/substrate materials)."""
     solver = TmmLayeredSolver()
 
-    def _solve(design, geo, eps_by_region, lam_m, n_super, n_sub):
-        stack = layered_stack_from_design(design, lam_m, eps_by_region=eps_by_region,
+    def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+        stack = layered_stack_from_design(design, lambda_m, eps_by_region=eps_by_region,
                                           n_slices=n_slices)
-        return solver.solve(stack, lam_m, design.optical)
+        return solver.solve(stack, lambda_m, design.optical)
 
     return _solve

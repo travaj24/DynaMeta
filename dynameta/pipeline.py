@@ -16,16 +16,16 @@ defaults are the layered DEVSIM/NGSolve builders.
 
 from __future__ import annotations
 
-import cmath
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 from dynameta.core.bridge import assemble_eps
 from dynameta.core.lift import choose_lift
 from dynameta.core.n_to_eps import MaterialEpsMap
-from dynameta.core.interfaces import OpticalResult
+from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeometryBuilder
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
+from dynameta.optics.tmm_reference import end_media_indices   # pure (no ngsolve); shared n_super/n_sub
 # NOTE: the FEM trio (LayeredOpticalBuilder / assemble_eps_cf / solve_fem) and the default
 # DEVSIM carrier builder are imported LAZILY inside the functions below, so a pure
 # layered/TMM path (run_pipeline with carrier_solver + optical_builder + optical_solver all
@@ -39,27 +39,27 @@ class SweepRow:
     result:       OpticalResult
 
 
-def _fem_optical_solver(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult:
+def _fem_optical_solver(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
     """Default optical solve: assemble the NGSolve VoxelCoefficient + run the FEM."""
     from dynameta.optics.eps_assembler import assemble_eps_cf
     from dynameta.optics.solver import solve_fem
     eps_cf = assemble_eps_cf(geo, eps_by_region)
-    return solve_fem(geo, lam_m, eps_cf, design.optical,
+    return solve_fem(geo, lambda_m, eps_cf, design.optical,
                       order=design.mesh_3d.fem_order, n_super=n_super, n_sub=n_sub)
 
 
 def run_pipeline(design: Design, sweep: Sweep, *,
                    verbose: bool = True,
-                   carrier_solver=None,
-                   optical_builder=None,
-                   optical_solver=None) -> List[SweepRow]:
+                   carrier_solver: Optional[CarrierSolver] = None,
+                   optical_builder: Optional[OpticalGeometryBuilder] = None,
+                   optical_solver: Optional[Callable[..., OpticalResult]] = None) -> List[SweepRow]:
     """Run the full Design + Sweep through carriers -> bridge -> optics.
 
     carrier_solver / optical_builder may be supplied to override the defaults
     (bring-your-own); each must satisfy the corresponding core Protocol.
 
     optical_solver: an optional callable
-    ``fn(design, geo, eps_by_region, lam_m, n_super, n_sub) -> OpticalResult`` that replaces
+    ``fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult`` that replaces
     the default per-(bias, wavelength) FEM solve (the default is the NGSolve FEM,
     `_fem_optical_solver`). For a laterally-uniform/graded stack, pass the ready-made
     ``dynameta.optics.tmm_reference.make_layered_tmm_solver()`` to solve with the layered TMM
@@ -99,20 +99,17 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     n_to_eps = MaterialEpsMap(design.materials)
     lift = choose_lift(design.device_symmetry(), design.optical.lift,
                         period_y_m=design.unit_cell.period_y_m, ny=design.optical.ny_sym)
-    sup_mat = design.stack.superstrate_material
-    sub_mat = design.stack.substrate_material
 
     # 3) bridge + solve per (bias, wavelength)
     rows: List[SweepRow] = []
     for bp in sweep.bias_points:
         cf = fields[bp.label]
         for lam_nm in sweep.wavelengths_nm:
-            lam_m = float(lam_nm) * 1e-9
-            n_super = cmath.sqrt(complex(design.materials.get(sup_mat).eps(lam_m)))
-            n_sub = cmath.sqrt(complex(design.materials.get(sub_mat).eps(lam_m)))
-            eps_by_region = assemble_eps(cf, align, n_to_eps, lift, lam_m,
+            lambda_m = float(lam_nm) * 1e-9
+            n_super, n_sub = end_media_indices(design, lambda_m)
+            eps_by_region = assemble_eps(cf, align, n_to_eps, lift, lambda_m,
                                           mesh_regions=mesh_regions)
-            res = solve_optics(design, geo, eps_by_region, lam_m, n_super, n_sub)
+            res = solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub)
             rows.append(SweepRow(bp.label, float(lam_nm), res))
             if verbose:
                 tstr = ("T={:.4f} A={:+.4f}".format(res.T, res.A)
