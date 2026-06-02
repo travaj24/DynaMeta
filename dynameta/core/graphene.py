@@ -27,32 +27,39 @@ import warnings
 import numpy as np
 
 from dynameta.constants import Q_E, HBAR, KB, EPS0, C_LIGHT
+from dynameta.core.backend import array_namespace
 
 Z0 = 1.0 / (EPS0 * C_LIGHT)             # free-space wave impedance, ~376.730 ohm
 SIGMA0 = Q_E ** 2 / (4.0 * HBAR)        # universal interband AC conductivity of graphene, ~6.085e-5 S
 
 
-def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = 300.0) -> complex:
+def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = 300.0):
     """Complex sheet conductivity sigma(E_F, omega) [S] (Kubo, finite T) = intraband Drude +
     interband. `E_F_J` is the Fermi level relative to the Dirac point (J), `tau_s` the carrier
-    relaxation time, `T_K` the temperature. Re(sigma) > 0 (passive, exp(-i omega t))."""
+    relaxation time, `T_K` the temperature. Re(sigma) > 0 (passive, exp(-i omega t)).
+
+    Backend-agnostic in E_F (numpy / cupy / jax via array_namespace): dispatching on E_F_J -- the
+    gate-tunable knob -- keeps the conductivity inside a JAX trace, so d sigma / d E_F is available
+    for gate-tuned-modulator inverse design. lambda/tau/T are fixed scalars. (NumPy path returns a
+    0-d complex array, which complex()/.real consume exactly as the old python-complex return.)"""
     if not (tau_s > 0 and T_K > 0 and lambda_m > 0):
         raise ValueError("tau_s, T_K, lambda_m must be > 0")
+    xp = array_namespace(E_F_J)
     omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
     kT = KB * float(T_K)
-    EF = abs(float(E_F_J))
+    EF = xp.abs(xp.asarray(E_F_J))
     hw = HBAR * omega
     # intraband Drude: i e^2 * W / (pi hbar^2 (omega + i/tau)),  W = E_F + 2 kT ln(1+exp(-E_F/kT))
-    W = EF + 2.0 * kT * np.log1p(np.exp(-EF / kT))
+    W = EF + 2.0 * kT * xp.log1p(xp.exp(-EF / kT))
     sigma_intra = 1j * Q_E ** 2 * W / (np.pi * HBAR ** 2 * (omega + 1j / float(tau_s)))
     # interband (Falkovsky-Varlamov 2007): the EXACT finite-T universal-conductivity real part
     # Re = sigma0 sinh(hw/2kT)/(cosh(E_F/kT)+cosh(hw/2kT)) -- the thermal factor that -> a hard Pauli
     # step (sigma0 for hw>2E_F, 0 below) as T->0, with the correct (small) blocked-tail residual
     # (an arctan smoothing overestimates that tail ~100x; audit GRAPH-1). Im is the matching KK log.
-    re = SIGMA0 * np.sinh(hw / (2.0 * kT)) / (np.cosh(EF / kT) + np.cosh(hw / (2.0 * kT)))
-    im = -SIGMA0 * (1.0 / (2.0 * np.pi)) * np.log((hw + 2.0 * EF) ** 2
+    re = SIGMA0 * xp.sinh(hw / (2.0 * kT)) / (xp.cosh(EF / kT) + xp.cosh(hw / (2.0 * kT)))
+    im = -SIGMA0 * (1.0 / (2.0 * np.pi)) * xp.log((hw + 2.0 * EF) ** 2
                                                   / ((hw - 2.0 * EF) ** 2 + (2.0 * kT) ** 2))
-    return complex(sigma_intra + (re + 1j * im))
+    return sigma_intra + (re + 1j * im)
 
 
 def sheet_rt(n1, n2, sigma, *, theta_deg: float = 0.0):

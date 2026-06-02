@@ -31,6 +31,7 @@ from typing import List, Protocol, runtime_checkable
 import numpy as np
 
 from dynameta.constants import HBAR, C_LIGHT
+from dynameta.core.backend import array_namespace, to_backend, is_jax_array
 
 
 @runtime_checkable
@@ -50,15 +51,15 @@ class OpticalModelEffect:
         return self.optical.eps(lambda_m, n_m3=fields.get("n"))
 
 
-def as_tensor(eps) -> np.ndarray:
+def as_tensor(eps):
     """Promote a scalar eps (or scalar grid) to a (..., 3, 3) isotropic tensor eps*I, so a scalar
     and a tensor effect can be summed/composed uniformly. A value already shaped (..., 3, 3) is
-    returned unchanged."""
-    eps = np.asarray(eps, dtype=np.complex128)
-    if eps.ndim >= 2 and eps.shape[-2:] == (3, 3):
+    returned unchanged. Backend-agnostic (numpy / cupy / jax via array_namespace)."""
+    xp = array_namespace(eps)
+    eps = xp.asarray(eps) + 0j                            # promote to complex on any backend
+    if eps.ndim >= 2 and tuple(eps.shape[-2:]) == (3, 3):
         return eps
-    eye = np.eye(3, dtype=np.complex128)
-    return eps[..., None, None] * eye
+    return eps[..., None, None] * (xp.eye(3) + 0j)
 
 
 @dataclass
@@ -114,23 +115,24 @@ class DeltaEffect:
 _VOIGT = ((0, 5, 4), (5, 1, 3), (4, 3, 2))
 
 
-def _voigt6_to_full(b6: np.ndarray) -> np.ndarray:
-    """(...,6) Voigt vector -> (...,3,3) symmetric tensor."""
-    b6 = np.asarray(b6)
-    out = np.empty(b6.shape[:-1] + (3, 3), dtype=b6.dtype)
-    for i in range(3):
-        for j in range(3):
-            out[..., i, j] = b6[..., _VOIGT[i][j]]
-    return out
+def _voigt6_to_full(b6):
+    """(...,6) Voigt vector -> (...,3,3) symmetric tensor. Built by stacking (no in-place
+    assignment) so it stays inside a JAX trace; backend-agnostic."""
+    xp = array_namespace(b6)
+    b6 = xp.asarray(b6)
+    rows = [xp.stack([b6[..., _VOIGT[i][j]] for j in range(3)], axis=-1) for i in range(3)]
+    return xp.stack(rows, axis=-2)
 
 
-def _E_vec(fields: dict) -> np.ndarray:
+def _E_vec(fields: dict):
     """The applied field from the bundle as (...,3). Accepts a 3-vector (uniform) or a (...,3)
-    grid. Raises if absent -- a field-effect model needs E."""
+    grid. Raises if absent -- a field-effect model needs E. Backend-agnostic (the returned array's
+    backend is whatever fields['E'] is on -- numpy / cupy / jax)."""
     if "E" not in fields or fields["E"] is None:
         raise ValueError("field-effect EffectModel requires fields['E'] (V/m); none supplied "
                          "(run the electrostatic driver first)")
-    E = np.asarray(fields["E"], dtype=np.float64)
+    xp = array_namespace(fields["E"])
+    E = xp.asarray(fields["E"])
     if E.shape[-1] != 3:
         raise ValueError("fields['E'] must have a trailing length-3 axis (Ex,Ey,Ez)")
     return E
@@ -149,11 +151,13 @@ class PockelsEffect:
 
     def eps(self, fields: dict, lambda_m: float):
         E = _E_vec(fields)                                           # (...,3)
-        B0 = np.linalg.inv(np.asarray(self.eps_bg, dtype=np.complex128))   # (3,3)
-        dB6 = np.tensordot(E, np.asarray(self.r_voigt, dtype=np.float64),
-                           axes=([-1], [1]))                         # (...,6): dB_I = r_Ik E_k
-        B = B0 + _voigt6_to_full(dB6).astype(np.complex128)          # (...,3,3)
-        return np.linalg.inv(B)
+        xp = array_namespace(E)                                      # dispatch on the runtime field
+        eps_bg = to_backend(self.eps_bg, xp)                         # lift stored params to E's backend
+        r_voigt = to_backend(self.r_voigt, xp)
+        B0 = xp.linalg.inv(xp.asarray(eps_bg) + 0j)                  # (3,3)
+        dB6 = xp.tensordot(E, xp.asarray(r_voigt), axes=([-1], [1]))  # (...,6): dB_I = r_Ik E_k
+        B = B0 + (_voigt6_to_full(dB6) + 0j)                         # (...,3,3)
+        return xp.linalg.inv(B)
 
 
 @dataclass
@@ -168,11 +172,13 @@ class KerrEffect:
 
     def eps(self, fields: dict, lambda_m: float):
         E = _E_vec(fields)
-        e2 = np.sum(E ** 2, axis=-1)                                  # (...,) |E|^2
-        B0 = np.linalg.inv(np.asarray(self.eps_bg, dtype=np.complex128))
-        eye = np.eye(3, dtype=np.complex128)
+        xp = array_namespace(E)
+        eps_bg = to_backend(self.eps_bg, xp)
+        e2 = xp.sum(E ** 2, axis=-1)                                  # (...,) |E|^2
+        B0 = xp.linalg.inv(xp.asarray(eps_bg) + 0j)
+        eye = xp.eye(3) + 0j
         B = B0 + float(self.s_kerr) * e2[..., None, None] * eye       # (...,3,3)
-        return np.linalg.inv(B)
+        return xp.linalg.inv(B)
 
 
 @dataclass
@@ -188,8 +194,9 @@ class FranzKeldyshEffect:
 
     def eps(self, fields: dict, lambda_m: float):
         E = _E_vec(fields)
-        mag = np.sqrt(np.sum(E ** 2, axis=-1))                        # (...,) |E|
-        return complex(self.eps_bg) + 1j * float(self.beta) * mag     # scalar grid (...,)
+        xp = array_namespace(E)
+        mag = xp.sqrt(xp.sum(E ** 2, axis=-1))                        # (...,) |E|
+        return xp.asarray(self.eps_bg) + 1j * float(self.beta) * mag  # scalar grid (...,)
 
 
 @dataclass
@@ -206,8 +213,9 @@ class ThermoOpticModel:
         if "T" not in fields or fields["T"] is None:
             raise ValueError("ThermoOpticModel requires fields['T'] (kelvin); none supplied "
                              "(run the thermal driver first)")
-        T = np.asarray(fields["T"], dtype=np.float64)
-        n = np.sqrt(complex(self.eps_ref)) + float(self.dn_dT) * (T - float(self.T_ref))
+        xp = array_namespace(fields["T"])
+        T = xp.asarray(fields["T"])
+        n = xp.sqrt(xp.asarray(self.eps_ref) + 0j) + float(self.dn_dT) * (T - float(self.T_ref))
         return n ** 2
 
 
@@ -374,21 +382,23 @@ class PCMModel:
     eps_crystalline: complex
 
     def eps(self, fields: dict, lambda_m: float):
-        f = float(fields.get("crystalline_fraction", 0.0)) if fields else 0.0
-        if not (0.0 <= f <= 1.0):
+        f_in = fields.get("crystalline_fraction", 0.0) if fields else 0.0
+        xp = array_namespace(f_in)                       # numpy by default; jax if f is a jax scalar
+        if not is_jax_array(f_in) and not (0.0 <= float(f_in) <= 1.0):
             raise ValueError("fields['crystalline_fraction'] must be in [0, 1]")
-        ea, ec = complex(self.eps_amorphous), complex(self.eps_crystalline)
-        # Exact end states by construction (independent of the root-pick tie-break): for a lossless
-        # negative-real endpoint the Im>=Im tie-break would otherwise pick the wrong real root at
-        # the boundary (audit PCM-1/PCM-2).
-        if f == 0.0:
-            return ea
-        if f == 1.0:
-            return ec
+        f = xp.asarray(f_in)
+        ea = xp.asarray(self.eps_amorphous) + 0j
+        ec = xp.asarray(self.eps_crystalline) + 0j
         b = ec * (3.0 * f - 1.0) + ea * (2.0 - 3.0 * f)
-        s = np.sqrt(b * b + 8.0 * ea * ec)
+        s = xp.sqrt(b * b + 8.0 * ea * ec)
         e_plus, e_minus = (b + s) / 4.0, (b - s) / 4.0
-        return e_plus if e_plus.imag >= e_minus.imag else e_minus   # passive branch (Im >= 0)
+        eps = xp.where(e_plus.imag >= e_minus.imag, e_plus, e_minus)  # passive branch (Im >= 0)
+        # exact end states (xp.where, not a Python `if`, so it also traces under JAX): for a
+        # lossless negative-real endpoint the Im>=Im tie-break would otherwise pick the wrong real
+        # root at the boundary (audit PCM-1/PCM-2).
+        eps = xp.where(f == 0.0, ea, eps)
+        eps = xp.where(f == 1.0, ec, eps)
+        return eps
 
 
 @dataclass
@@ -414,7 +424,10 @@ class LiquidCrystalModel:
     n_e: float
 
     def eps(self, fields: dict, lambda_m: float):
-        th = float((fields or {}).get("director_angle_rad", 0.0))
-        nhat = np.array([np.cos(th), 0.0, np.sin(th)], dtype=np.complex128)
-        return (self.n_o ** 2) * np.eye(3, dtype=np.complex128) \
-            + (self.n_e ** 2 - self.n_o ** 2) * np.outer(nhat, nhat)
+        th_in = (fields or {}).get("director_angle_rad", 0.0)
+        xp = array_namespace(th_in)
+        th = xp.asarray(th_in)
+        c, s = xp.cos(th), xp.sin(th)
+        nhat = xp.stack([c, xp.zeros_like(c), s])         # (3,) optic axis (no in-place build)
+        eps = (self.n_o ** 2) * xp.eye(3) + (self.n_e ** 2 - self.n_o ** 2) * xp.outer(nhat, nhat)
+        return eps + 0j                                   # complex (Im=0 here)

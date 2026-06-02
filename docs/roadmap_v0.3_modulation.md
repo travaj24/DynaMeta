@@ -175,7 +175,14 @@ switching driver and elastic anisotropy (K11!=K33) are follow-ons.*
 - **Iterative/scaling solver** -- BDDC is in; a NGSolve-AMS/HYPRE binding is the next rung for
   large 3D (Part D). The non-ENZ mechanisms are well-conditioned, so this is now viable.
 - **AC/transient carriers** -- the full dynamics axis (after the lumped-RC stopgap).
-- **Optimization / inverse-design** -- rides on a fast forward solver (RCWA).
+- **Optimization / inverse-design** -- rides on a fast forward solver (RCWA). **Groundwork DONE
+  (2026-06-02):** a scoped Lumenairy-style array-backend seam (`core/backend.py`: `array_namespace`
+  + lazy numpy/cupy/jax dispatch, jax forced to float64) makes the pure-array CONSTITUTIVE maps
+  (Pockels/Kerr/FK/thermo-optic/PCM/LC/graphene-sigma) backend-agnostic and JAX-DIFFERENTIABLE -- so
+  once the differentiable RCWA optical backend lands, the gradient flows design -> fields -> eps
+  through these maps for free (validation/backend_autodiff.py: jax.grad of the Pockels eps matches
+  the analytic slope; numpy/jax agree to 0). The NumPy path is bit-identical float64 and never
+  imports jax/cupy; the FEM/DEVSIM solvers (C++/host-numpy) are deliberately untouched.
 - **FDTD** -- last, for nonlinear/ultrafast/broadband (Kerr, all-optical).
 
 ---
