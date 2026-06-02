@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, as_tensor,
-                                   PockelsEffect, KerrEffect, FranzKeldyshEffect)
+                                   PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel)
 from dynameta.materials.optical_model import ConstantOptical
 
 
@@ -95,3 +95,15 @@ def test_franz_keldysh_opens_field_absorption():
     assert complex(fk.eps({"E": np.zeros(3)}, 1300e-9)) == pytest.approx(complex(12.0, 0.1))
     e = complex(fk.eps({"E": [0, 0, 1e6]}, 1300e-9))
     assert e.imag > 0.1 and e.real == pytest.approx(12.0)                    # field-on -> more loss
+
+
+def test_thermo_optic_reduces_and_shifts_index():
+    n0 = 3.48                                                                # Si
+    m = ThermoOpticModel(eps_ref=complex(n0 ** 2, 0.0), dn_dT=1.8e-4, T_ref=300.0)
+    assert complex(m.eps({"T": 300.0}, 1300e-9)) == pytest.approx(complex(n0 ** 2, 0.0))  # T=T_ref
+    e = complex(m.eps({"T": 350.0}, 1300e-9))
+    assert np.sqrt(e.real) == pytest.approx(n0 + 1.8e-4 * 50.0, rel=1e-9)    # n(T) = n0 + dn/dT*dT
+    m0 = ThermoOpticModel(eps_ref=complex(n0 ** 2, 0.0), dn_dT=0.0)
+    assert complex(m0.eps({"T": 500.0}, 1300e-9)) == pytest.approx(complex(n0 ** 2, 0.0))  # dn/dT=0
+    with pytest.raises(ValueError):
+        m.eps({}, 1300e-9)                                                   # T required
