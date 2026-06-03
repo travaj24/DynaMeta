@@ -7,7 +7,7 @@ import pytest
 
 from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, DeltaEffect, as_tensor,
                                    PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel,
-                                   MagnetoOpticModel)
+                                   MagnetoOpticModel, AnisotropicThermoOpticModel)
 from dynameta.materials.optical_model import ConstantOptical
 
 
@@ -143,3 +143,24 @@ def test_magneto_optic_gyrotropic_tensor():
     assert np.asarray(mo.eps({"magnetization": -1.0}, 1550e-9))[0, 1] == pytest.approx(-1j * g)
     assert np.allclose(np.asarray(mo.eps({"magnetization": 0.0}, 1550e-9)), eps_r * np.eye(3))
     assert np.allclose(np.asarray(MagnetoOpticModel(eps_r, 0.0).eps({}, 1550e-9)), eps_r * np.eye(3))
+
+
+def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
+    no, ne = 2.20, 2.30
+    dno, dne = 1.0e-4, 3.0e-4
+    m = AnisotropicThermoOpticModel(eps_ref_diag=(no ** 2, no ** 2, ne ** 2),
+                                    dn_dT_diag=(dno, dno, dne), T_ref=300.0)
+    T0 = np.asarray(m.eps({"T": 300.0}, 1550e-9))                    # at T_ref -> diag(eps_ref)
+    assert T0.shape == (3, 3) and np.allclose(np.diag(T0), [no ** 2, no ** 2, ne ** 2])
+    assert np.allclose(T0 - np.diag(np.diag(T0)), 0)                 # strictly diagonal
+    dT = 50.0
+    Tt = np.asarray(m.eps({"T": 300.0 + dT}, 1550e-9))
+    assert np.sqrt(Tt[0, 0].real) == pytest.approx(no + dno * dT, rel=1e-9)   # ordinary axis
+    assert np.sqrt(Tt[2, 2].real) == pytest.approx(ne + dne * dT, rel=1e-9)   # extraordinary axis
+    # isotropic dn/dT reduces EXACTLY to the scalar ThermoOpticModel * I
+    iso = AnisotropicThermoOpticModel((no ** 2,) * 3, (dno,) * 3)
+    sca = ThermoOpticModel(eps_ref=complex(no ** 2, 0.0), dn_dT=dno)
+    assert np.allclose(np.asarray(iso.eps({"T": 360.0}, 1550e-9)),
+                       complex(sca.eps({"T": 360.0}, 1550e-9)) * np.eye(3))
+    with pytest.raises(ValueError):
+        m.eps({}, 1550e-9)                                          # T required
