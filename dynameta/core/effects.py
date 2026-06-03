@@ -219,6 +219,35 @@ class ThermoOpticModel:
         return n ** 2
 
 
+@dataclass
+class AnisotropicThermoOpticModel:
+    """Anisotropic thermo-optic (dn/dT) TENSOR response -- the principal-axis (diagonal) companion to
+    ThermoOpticModel for a birefringent heater whose principal indices have DIFFERENT dn/dT (a uniaxial
+    crystal: dn_o/dT != dn_e/dT). Reads fields['T'] (kelvin) and returns the DIAGONAL permittivity
+    tensor diag( (n_i + dn_dT_i (T - T_ref))^2 ), i = x,y,z, with n_i = sqrt(eps_ref_i). Reduces
+    EXACTLY to the scalar ThermoOpticModel * I when the three axes are equal. The tensor is DIAGONAL
+    (principal frame), so it flows through the tensor-eps FEM; a tilted principal frame (off-diagonal)
+    is subject to the NGSolve off-diagonal limitation (eps_assembler._check_diagonal)."""
+    eps_ref_diag: tuple        # (eps_xx, eps_yy, eps_zz) at T_ref
+    dn_dT_diag: tuple          # (dn/dT_x, dn/dT_y, dn/dT_z) [1/K]
+    T_ref: float = 300.0
+
+    def eps(self, fields: dict, lambda_m: float):
+        if "T" not in fields or fields["T"] is None:
+            raise ValueError("AnisotropicThermoOpticModel requires fields['T'] (kelvin); none "
+                             "supplied (run the thermal driver first)")
+        if len(self.eps_ref_diag) != 3 or len(self.dn_dT_diag) != 3:
+            raise ValueError("eps_ref_diag and dn_dT_diag must each have 3 entries (x, y, z)")
+        xp = array_namespace(fields["T"])
+        dT = xp.asarray(fields["T"]) - float(self.T_ref)
+        d = [(xp.sqrt(xp.asarray(er) + 0j) + float(dndt) * dT) ** 2
+             for er, dndt in zip(self.eps_ref_diag, self.dn_dT_diag)]
+        zero = xp.zeros_like(d[0]) + 0j
+        return xp.stack([xp.stack([d[0], zero, zero]),
+                         xp.stack([zero, d[1], zero]),
+                         xp.stack([zero, zero, d[2]])])      # diagonal principal-axis tensor
+
+
 # ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
 
 def _photon_energy_J(lambda_m: float) -> float:
@@ -295,12 +324,26 @@ class ElectroAbsorptionModel:
     broadening_J: float        # exciton-line Gaussian sigma [J]
     e_grid_J: tuple            # (E_lo_J, E_hi_J, N) photon-energy grid spanning >> sigma around E_T
     field_axis: int = 2        # component of fields['E'] taken as the well field (z by default)
+    continuum_alpha0_per_m: float = 0.0   # Elliott band-to-band continuum step strength (0 -> off)
+    continuum_binding_J: float = 0.0      # 2D exciton binding = continuum onset above E_T (0 -> off)
 
     _KK_MARGIN_SIGMA = 6.0     # required grid coverage beyond E_T on each side, in broadening_J
 
     def _alpha(self, E_eval, E_T, overlap, overlap0):
-        g = np.exp(-0.5 * ((np.asarray(E_eval, float) - E_T) / float(self.broadening_J)) ** 2)
-        return self.alpha0_per_m * (overlap / overlap0) * g
+        E = np.asarray(E_eval, dtype=np.float64)
+        ratio = overlap / overlap0
+        g = np.exp(-0.5 * ((E - E_T) / float(self.broadening_J)) ** 2)
+        a = self.alpha0_per_m * ratio * g                              # 1s excitonic Gaussian line
+        if self.continuum_alpha0_per_m > 0.0 and self.continuum_binding_J > 0.0:
+            # Elliott band-to-band continuum above the UNBOUND edge E_cont = E_T + E_binding, with the
+            # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi sqrt(E_b/dE))) -> 2 at the edge and
+            # -> 1 far above (a step joint-DOS, edge-enhanced); also scales with the e-h overlap.
+            xb = float(self.continuum_binding_J)
+            dE = E - (E_T + xb)
+            safe = np.where(dE > 0.0, dE, 1.0)                         # avoid sqrt of <=0
+            s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / safe))), 0.0)
+            a = a + self.continuum_alpha0_per_m * ratio * s2d
+        return a
 
     def _field_magnitude(self, fields: dict) -> float:
         E = np.asarray(_E_vec(fields))

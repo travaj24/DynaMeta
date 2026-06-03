@@ -111,6 +111,16 @@ class QuantumWell:
         inside = (z >= 0.0) & (z <= self.well_width_m)
         return np.where(inside, 0.0, float(barrier_J))
 
+    def _in_well_mask(self, zi: np.ndarray) -> np.ndarray:
+        """Interior-node mask of the conducting well region(s) (single well: [0, L]). Overridden by
+        MultiQuantumWell to span all wells of the stack."""
+        return (zi >= 0.0) & (zi <= self.well_width_m)
+
+    def _well_centre(self) -> float:
+        """z of the well-region centre -- the reference for the linear-tilt removal in solve()
+        (single well: L/2). Overridden by MultiQuantumWell to the stack centre."""
+        return 0.5 * self.well_width_m
+
     def _ground_localized(self, sp: SchrodingerPoisson1D, U_J: np.ndarray,
                            in_well_interior: np.ndarray) -> Tuple[float, np.ndarray, float]:
         """Lowest-INDEX state that is actually localized IN the well (in-well probability > 0.5),
@@ -139,7 +149,7 @@ class QuantumWell:
             return cached
         z = self._grid()
         zi = z[1:-1]
-        in_well = (zi >= 0.0) & (zi <= self.well_width_m)
+        in_well = self._in_well_mask(zi)
         # electron PE: well + (+q F z); hole envelope: well + (-q F z) -> opposite-wall displacement
         U_e = self._well(z, self.barrier_e_J) + Q * F * z
         U_h = self._well(z, self.barrier_h_J) - Q * F * z
@@ -162,7 +172,7 @@ class QuantumWell:
         # per-carrier leaves the pure (quadratic) Stark shift, so E_e1 is the true confinement
         # energy -- validated against the analytic infinite-well 2nd-order coefficient -- and E_T(F)
         # is still the correctly redshifted edge.
-        zc = 0.5 * self.well_width_m
+        zc = self._well_centre()
         E_e1 = E_e1_raw - Q * F * zc
         E_hh1 = E_hh1_raw + Q * F * zc
         h = float(z[1] - z[0])
@@ -177,3 +187,56 @@ class QuantumWell:
     def transition_energy_J(self, field_V_per_m: float) -> float:
         """Interband transition energy E_T(F) (J) -- the QCSE-redshifted absorption edge."""
         return self.solve(field_V_per_m).E_transition_J
+
+
+@dataclass
+class MultiQuantumWell(QuantumWell):
+    """A MULTI-quantum-well stack: `n_wells` identical wells of width well_width_m separated by
+    barriers of width barrier_width_m (barrier heights = the single-well offsets). The ground
+    MINIBAND state is solved with the SAME BenDaniel-Duke kernel + in-well-localization picker as
+    QuantumWell, on the full N-well potential -- so a thick barrier gives an UNCOUPLED stack (ground
+    ~ the single-well E_1, an N-fold near-degenerate manifold) and a thin barrier gives a COUPLED
+    miniband (the ground subband drops as the wells hybridize). Reduces EXACTLY to QuantumWell when
+    n_wells == 1 (barrier_width_m irrelevant). The interband edge E_T(F) + e-h overlap feed the same
+    ElectroAbsorptionModel; the MQW carries n_wells x the absorption (more wells in the optical path).
+
+    A wider stack needs a denser grid -- raise nz for n_wells > ~2 (the default 1501 over a longer
+    extent thins the per-well resolution)."""
+    n_wells: int = 1
+    barrier_width_m: float = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if int(self.n_wells) < 1:
+            raise ValueError("n_wells must be >= 1")
+        if int(self.n_wells) > 1 and not (self.barrier_width_m > 0.0):
+            raise ValueError("barrier_width_m must be > 0 for n_wells > 1")
+
+    def _period(self) -> float:
+        return self.well_width_m + self.barrier_width_m
+
+    def _stack_len(self) -> float:
+        return int(self.n_wells) * self.well_width_m + (int(self.n_wells) - 1) * self.barrier_width_m
+
+    def _well_starts(self):
+        p = self._period()
+        return [i * p for i in range(int(self.n_wells))]          # left edge of each well
+
+    def _grid(self) -> np.ndarray:
+        pad = float(self.n_pad) * self.well_width_m
+        return np.linspace(-pad, self._stack_len() + pad, int(self.nz))
+
+    def _well(self, z: np.ndarray, barrier_J: float) -> np.ndarray:
+        inside = np.zeros(np.shape(z), dtype=bool)
+        for s in self._well_starts():
+            inside = inside | ((z >= s) & (z <= s + self.well_width_m))
+        return np.where(inside, 0.0, float(barrier_J))
+
+    def _in_well_mask(self, zi: np.ndarray) -> np.ndarray:
+        m = np.zeros(np.shape(zi), dtype=bool)
+        for s in self._well_starts():
+            m = m | ((zi >= s) & (zi <= s + self.well_width_m))
+        return m
+
+    def _well_centre(self) -> float:
+        return 0.5 * self._stack_len()
