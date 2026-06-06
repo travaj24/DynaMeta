@@ -11,13 +11,11 @@ states:
 The tensor FEM R/T must match the scalar TMM at the corresponding index. Reuses the tensor
 assembler + curl-curl matvec validated isotropically by tensor_isotropic_gate.py.
 
-KNOWN LIMITATION (tracked P0b follow-on, surfaced by this oracle): an INTERMEDIATE tilt (0 < theta
-< 90) gives a tensor with nonzero OFF-DIAGONAL eps_xz, and the per-region matrix-CF matvec on the
-periodic PML mesh currently MIS-EVALUATES off-diagonal tensors (a y-ordinary wave that must see only
-eps_yy is corrupted by eps_xz). assemble_eps_cf now RAISES on off-diagonal tensors. The tilted-director
-ANGULAR physics is validated analytically in validation/reconfigurable_modulators.py (Freedericksz +
-rotation-invariant uniaxial eigenvalues + n_eff(theta)); only the FEM solve of an off-diagonal tensor
-is deferred. Run: python -m validation.lc_uniaxial_fem
+The INTERMEDIATE-tilt (0 < theta < 90) off-diagonal case -- once a tracked limitation -- is now
+SOLVED and has its own end-to-end oracle in validation/lc_tilted_fem.py (the off-diagonal failure was
+mesh.SetPML's coordinate stretch being wrong for an anisotropic medium, fixed by the explicit UPML in
+solver.solve_fem). This file keeps the two principal (diagonal) states as the focused isotropic-
+reduction gate. Run: python -m validation.lc_uniaxial_fem
 """
 import sys, os
 import numpy as np
@@ -93,7 +91,7 @@ def main():
         ok = ok and dR < TOL_RT and dT < TOL_RT
 
     print("[lc] *** LC UNIAXIAL TENSOR FEM (planar + homeotropic principal states == TMM; "
-          "tilted/off-diagonal is a tracked P0b follow-on): {} ***".format("PASS" if ok else "FAIL"),
+          "tilted/off-diagonal now solved -- see lc_tilted_fem): {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
     return ok
 

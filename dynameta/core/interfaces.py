@@ -47,6 +47,14 @@ class OpticalResult:
     T:             Optional[float] = None
     A:             Optional[float] = None
     A_independent: Optional[float] = None
+    # Fit-INDEPENDENT R/T from the time-averaged z-Poynting flux of the reconstructed total field
+    # (Sz = 0.5 Re(Ex Hy* - Ey Hx*)); these read energy straight from the field, bypassing the
+    # up/down least-squares amplitude fit. For a clean propagating 0-order they agree with R/T; a
+    # large gap flags an extraction problem -- the flux measure captures the FULL transmitted power
+    # (both polarizations), so it is the trustworthy R/T for an off-diagonal / gyrotropic tensor
+    # whose transmitted field is elliptical (the single-projection fit cannot see the cross-pol).
+    R_flux:        Optional[float] = None
+    T_flux:        Optional[float] = None
 
 
 @runtime_checkable

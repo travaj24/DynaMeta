@@ -212,16 +212,31 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # s-pol unit E (perpendicular to the plane of incidence); reduces to +y at phi=0
     es_x, es_y = -math.sin(phi), math.cos(phi)
 
-    # PML: ordinary normal HalfSpace z-stretch, alpha=1j CONSTANT.
+    # PML: by default the ordinary normal HalfSpace z-stretch (alpha=1j CONSTANT). BUT mesh.SetPML's
+    # coordinate stretch is WRONG for an OFF-DIAGONAL anisotropic eps -- it perturbs the physically
+    # decoupled component by a resolution-INDEPENDENT ~3% (B-fix diagnosis: with the PML removed the
+    # off-diagonal-tensor field is identical to the diagonal one to ~1e-6; SetPML alone breaks it).
+    # So for a TENSOR eps we instead use an explicit UPML: the anisotropic PML material tensor
+    # Lambda = diag(s_z, s_z, 1/s_z) folded directly into the weak form (curl . Lambda^-1 curl
+    # - k0^2 Lambda eps). That is the rigorous stretched-coordinate PML for an arbitrary medium and
+    # reduces to the SetPML answer for isotropic/diagonal eps; the scalar path keeps the heavily
+    # validated SetPML (zero regression). s_z = 1 + alpha inside either PML region, else 1.
     pml_alpha = 1j
     z_air_top = geo.z_super_interface_nm
     z_sub_top = geo.z_sub_interface_nm
+    eps_is_tensor = (tuple(getattr(eps_cf, "dims", ())) == (3, 3))
+    use_upml = eps_is_tensor and not envelope
     try:
         mesh.UnSetPML("pml_top"); mesh.UnSetPML("pml_bot")
     except Exception:
         pass
-    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=pml_alpha), "pml_top")
-    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=pml_alpha), "pml_bot")
+    if not use_upml:
+        mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=pml_alpha), "pml_top")
+        mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=pml_alpha), "pml_bot")
+    _pml_mask = ng.IfPos(ng.z - z_air_top, 1.0, 0.0) + ng.IfPos(z_sub_top - ng.z, 1.0, 0.0)
+    _s_z = 1.0 + pml_alpha * _pml_mask
+    upml_Linv = (1.0 / _s_z, 1.0 / _s_z, _s_z)     # Lambda^-1 diag, for curl . Lambda^-1 curl
+    upml_Ldiag = (_s_z, _s_z, 1.0 / _s_z)          # Lambda diag, for the mass term Lambda . eps
 
     # ---- layered (Fresnel two-region) background ----
     # eps_bg(z) = superstrate medium above the substrate-top interface z_int, substrate
@@ -272,6 +287,9 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         E_bg = ng.CoefficientFunction((inc_x_phase * ng.IfPos(ng.z - z_int, ex_sup, ex_sub),
                                         0.0,
                                         inc_x_phase * ng.IfPos(ng.z - z_int, ez_sup, ez_sub)))
+        # incident-only field (no background reflection/transmission) for the Poynting-flux reference
+        E_inc = ng.CoefficientFunction((inc_x_phase * cth * ng.exp((-1j * kz_s_c) * ng.z), 0.0,
+                                         inc_x_phase * sth * ng.exp((-1j * kz_s_c) * ng.z)))
         R0 = T0 = None                          # p-pol extracts the total field directly
     else:
         # s-pol (E along y) / x-pol: scalar tangential field. Fresnel R0/T0 (field
@@ -284,12 +302,15 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
         sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
         bg_field = inc_x_phase * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
+        inc_only = inc_x_phase * ng.exp((-1j * kz_s_c) * ng.z)   # incident-only (flux reference)
         if optical.polarization == "x":
             E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
+            E_inc = ng.CoefficientFunction((inc_only, 0.0, 0.0))
         else:
             # s-pol along the (conical) in-plane direction E_s = (-sin phi, cos phi, 0);
             # reduces to (0, bg_field, 0) at phi=0.
             E_bg = ng.CoefficientFunction((es_x * bg_field, es_y * bg_field, 0.0))
+            E_inc = ng.CoefficientFunction((es_x * inc_only, es_y * inc_only, 0.0))
     eps_bg_cf = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
 
     # ---- periodic HCurl space ----
@@ -313,16 +334,26 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     else:
         curlE, curlV = ng.curl(u), ng.curl(v)
 
-    eps_is_tensor = (tuple(getattr(eps_cf, "dims", ())) == (3, 3))
     # a tensor eps makes the matvec term (eps.u).v non-symmetric in general (e.g. magneto-optic);
     # assemble non-symmetric so NGSolve does not symmetrize it (only the scalar path is symmetric).
     a = ng.BilinearForm(fes, symmetric=(not envelope) and not eps_is_tensor)
     f = ng.LinearForm(fes)
     if eps_is_tensor:
-        # anisotropic eps: matvec (eps . E) . v; eps_bg (scalar) -> eps_bg * I to subtract.
-        Id3 = ng.CoefficientFunction((1, 0, 0, 0, 1, 0, 0, 0, 1), dims=(3, 3))
-        a += (curlE * curlV - k0 ** 2 * ((eps_cf * u) * v)) * ng.dx
-        f += (k0 ** 2 * (((eps_cf - eps_bg_cf * Id3) * E_bg) * v)) * ng.dx
+        # anisotropic eps: (eps . E) . v expanded as the explicit scalar component sum
+        # sum_ij eps_ij u[j] v[i] (the matrix-vector CF (eps_cf*u)*v of a per-material domain-list
+        # is a known assembly footgun). eps_bg (scalar) subtracts on the diagonal only.
+        if use_upml:
+            # explicit UPML: curl . Lambda^-1 curl - k0^2 (Lambda . eps); Lambda = I outside the PML.
+            curl_term = sum(upml_Linv[i] * curlE[i] * curlV[i] for i in range(3))
+            mass = sum(upml_Ldiag[i] * eps_cf[i, j] * u[j] * v[i] for i in range(3) for j in range(3))
+            a += (curl_term - k0 ** 2 * mass) * ng.dx
+        else:
+            a += (curlE * curlV - k0 ** 2 * sum(eps_cf[i, j] * u[j] * v[i]
+                                                for i in range(3) for j in range(3))) * ng.dx
+        # the scattered source is nonzero only where eps != eps_bg (the structure, Lambda = I there),
+        # so no UPML factor is needed on it.
+        f += (k0 ** 2 * sum((eps_cf[i, j] - (eps_bg_cf if i == j else 0.0)) * E_bg[j] * v[i]
+                            for i in range(3) for j in range(3))) * ng.dx
     else:
         a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
         f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
@@ -414,6 +445,18 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
+    # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
+    # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
+    # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
+    # break the solve. Skipped for the envelope formulation (its modified curl != mesh curl).
+    try:
+        if envelope:
+            R_flux = T_flux = None
+        else:
+            R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
+    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+        warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e))
+        R_flux = T_flux = None
     # Backstop sanity: a bad fit / near-grazing case can push R or T well outside [0,1] or make
     # A=1-R-T strongly negative (energy created). Thresholds are LOOSE (5e-2): the documented
     # non-angle-aware-PML oblique error and ordinary FEM numerical error put A slightly negative
@@ -441,7 +484,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "qualitative). Treat R/T/A as suspect.".format(
                 A, A_independent, abs(A - A_independent)), stacklevel=2)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                          solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent)
+                          solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
+                          R_flux=R_flux, T_flux=T_flux)
 
 
 def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
@@ -602,3 +646,50 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     if area <= 0:
         return None
     return float(complex(integ).real * k0 / (max(math.cos(theta), 1e-12) * area))
+
+
+def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):
+    """Fit-INDEPENDENT R/T from the time-averaged z-Poynting flux of the reconstructed TOTAL
+    field. Sz = 0.5 Re(Ex Hy* - Ey Hx*) with H = curl(E)/(i omega mu0); the omega*mu0 and the
+    nm->m curl-scale constants are COMMON to numerator and the incident reference, so they cancel
+    in the flux RATIO and we use the bare mesh curl. This is to the up/down least-squares fit what
+    _absorbed_fraction is to 1-R-T: a second, independent measurement.
+
+    Why it matters for the off-diagonal / gyrotropic tensor: the transmitted field is elliptical
+    (co- AND cross-polarized), and the single-projection _transmission fit measures only the
+    co-pol amplitude -- so it can report T > 1 / energy non-closure. The Poynting flux integrates
+    the FULL z-power (every component), so R_flux + T_flux closes for a lossless slab regardless of
+    polarization mixing. R = 1 - <Sz>_super/<Sz>_inc, T = <Sz>_sub/<Sz>_inc (incident is down-going,
+    Sz < 0; the ratios are positive). Returns (R_flux, T_flux); T_flux is None with no substrate."""
+    mesh = geo.mesh
+    Etot = ng.GridFunction(fes); Etot.Set(E_bg); Etot.vec.data += gfu.vec      # interp(bg) + scattered
+    Einc = ng.GridFunction(fes); Einc.Set(E_inc)                               # bare incident reference
+
+    def _sz(E):
+        H = ng.curl(E) / 1j                                  # proxy H (omega*mu0, S cancel in the ratio)
+        w = E[0] * ng.Conj(H[1]) - E[1] * ng.Conj(H[0])      # Ex Hy* - Ey Hx*
+        return 0.25 * (w + ng.Conj(w))                       # 0.5 * Re(w)
+
+    def _avg_sz(E, zlo, zhi):
+        mask = ng.IfPos(ng.z - zlo, 1.0, 0.0) * ng.IfPos(zhi - ng.z, 1.0, 0.0)
+        num = complex(ng.Integrate(_sz(E) * mask, mesh)).real
+        den = complex(ng.Integrate(mask, mesh)).real         # cell_area * (zhi - zlo)
+        return num / den if abs(den) > 1e-30 else 0.0
+
+    z0s, z1s = geo.z_intervals_nm["superstrate"]
+    zlo_s, zhi_s = z0s + 50.0, z1s - 50.0
+    if zhi_s <= zlo_s:
+        zlo_s, zhi_s = z0s + 0.2 * (z1s - z0s), z0s + 0.8 * (z1s - z0s)
+    ref = _avg_sz(Einc, zlo_s, zhi_s)                        # incident-only reference (super); < 0
+    if abs(ref) < 1e-30:
+        return None, None
+    R_flux = 1.0 - _avg_sz(Etot, zlo_s, zhi_s) / ref
+    if "substrate" not in geo.z_intervals_nm:
+        return float(R_flux), None
+    z0b, z1b = geo.z_intervals_nm["substrate"]
+    pad = 0.1 * (z1b - z0b)
+    zlo_b, zhi_b = z0b + pad, z1b - pad
+    if zhi_b <= zlo_b:
+        return float(R_flux), None
+    T_flux = _avg_sz(Etot, zlo_b, zhi_b) / ref
+    return float(R_flux), float(T_flux)
