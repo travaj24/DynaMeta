@@ -1,17 +1,16 @@
 """
 Magneto-optic (gyrotropic) Faraday-rotation oracle -- the magneto-optic row of the modulation-
 mechanism landscape. Validates core.effects.MagnetoOpticModel (the gyrotropic permittivity tensor
-eps = [[eps_r, i g, 0], [-i g, eps_r, 0], [0, 0, eps_r]]) against an INDEPENDENT analytic
-circular-eigenmode transfer-matrix reference -- PURE NUMPY, no FEM.
+eps = [[eps_r, i g, 0], [-i g, eps_r, 0], [0, 0, eps_r]]) against an INDEPENDENT circular-eigenmode
+transfer-matrix reference -- both as a pure-numpy analytic check AND end-to-end through the FEM.
 
-WHY NO FEM: the gyrotropic tensor has nonzero (imaginary) OFF-DIAGONAL entries, which NGSolve 6.2.2604
-mis-assembles under PML (confirmed limitation, guarded by eps_assembler._check_diagonal; every
-formulation tested gives the same energy-non-conserving result and 6.2.2604 is the latest release).
-The constitutive model + the Faraday physics are validated analytically here; the off-diagonal FEM
-solve is deferred until a fixed NGSolve ships (the same status as the tilted-LC FEM).
+The gyrotropic tensor is genuinely off-diagonal (imaginary, NON-symmetric) -- the hardest anisotropic
+case. The off-diagonal FEM solve is now SUPPORTED (GATE D): the earlier failure was mesh.SetPML's
+coordinate stretch being wrong for an anisotropic medium, not an NGSolve assembly defect, and
+solve_fem now uses an explicit UPML for tensor eps.
 
 PHYSICS: for z-propagation the two normal modes are circular polarizations with n_pm =
-sqrt(eps_r +/- g). A linearly (x) polarized wave through a slab of thickness L rotates its plane of
+sqrt(eps_r +/- g). A linearly polarized wave through a slab of thickness L rotates its plane of
 polarization by the Faraday angle theta_F = (pi L / lambda) Re(n_+ - n_-). Each circular mode is solved
 as an isotropic slab (vacuum | n_pm | vacuum, Airy) and recombined into the transmitted Jones vector.
 
@@ -21,12 +20,18 @@ GATE B: the full circular-TMM transmitted-polarization rotation == the analytic 
         5% (relative) over a range of gyration g (and g = 0 gives no rotation). The small residual is
         the Fabry-Perot / interface correction the bulk theta_F omits but the exact TMM includes.
 GATE C: real eps_r + real g -> the tensor is HERMITIAN -> LOSSLESS: R + T = 1 at every g.
+GATE D: the FEM (UPML off-diagonal tensor solve) transmitted power matches the circular-eigenmode
+        Jones-TMM -- the fit-independent Poynting flux T_total == 0.5(|t_+|^2+|t_-|^2), the
+        single-projection (co-polarized) lstsq T == the co-pol reference, and the Hermitian tensor is
+        lossless (R_flux + T_flux = 1, A_independent ~ 0; the energy is rotated into cross-pol, not
+        absorbed).
 
 Run: python -m validation.magneto_optic_faraday
 """
 
 import os
 import sys
+import warnings
 
 import numpy as np
 
@@ -40,6 +45,10 @@ L = 5.0e-6
 G_LIST = [0.0, 0.02, 0.05, 0.08]
 ROT_RTOL = 0.05            # bulk theta_F omits the (~4%) Fabry-Perot/interface correction the TMM has
 ROT_ABS_DEG = 0.05         # absolute floor (the g=0 zero-rotation case)
+# GATE D (FEM) parameters -- a short slab + strong gyration for a clear, fast cross-pol signal.
+EPS_R_FEM, G_FEM, L_FEM_NM = 4.0, 0.4, 1000.0
+TOL_FEM_T = 3e-2           # FEM vs circular-eigenmode Jones-TMM
+TOL_FEM_E = 2e-2           # lossless energy closure (flux R+T = 1)
 
 
 def _slab_rt(n, k0, L):
@@ -69,6 +78,58 @@ def _faraday(eps_r, g, k0, L):
     return float(np.degrees(rot)), float(R), float(T)
 
 
+def _gate_d_fem():
+    """GATE D: the off-diagonal gyrotropic tensor through the actual UPML FEM, vs the circular-
+    eigenmode Jones-TMM reference. Returns (ok, message)."""
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import OpticalSpec, Mesh3DSpec
+    from dynameta.core.eps_field import EpsField
+    from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
+    from dynameta.optics.eps_assembler import assemble_eps_cf
+    from dynameta.optics.solver import solve_fem
+
+    lam_m, k0 = LAM, 2.0 * np.pi / LAM
+    n_p, n_m = np.sqrt(EPS_R_FEM + G_FEM), np.sqrt(EPS_R_FEM - G_FEM)
+    _, tp = _slab_rt(n_p, k0, L_FEM_NM * 1e-9)
+    _, tm = _slab_rt(n_m, k0, L_FEM_NM * 1e-9)
+    # x-pol input: transmitted Ex(co)=0.5(tp+tm), Ey(cross)=0.5j(tp-tm)
+    T_total_ref = 0.5 * (abs(tp) ** 2 + abs(tm) ** 2)
+    T_co_ref = abs(0.5 * (tp + tm)) ** 2
+
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("mo", ConstantOptical(complex(EPS_R_FEM, 0.0))))
+    cell = UnitCell.square(300e-9)
+    stack = Stack(layers=[Layer("s", L_FEM_NM * 1e-9, "mo")],
+                  superstrate_material="air", substrate_material="air")
+    m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
+                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=25e-9)
+    design = Design(name="mo", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
+
+    eps_tensor = np.asarray(MagnetoOpticModel(eps_r=EPS_R_FEM, g=G_FEM).eps({}, lam_m), dtype=complex)
+    geo = LayeredOpticalBuilder(design).build()
+    mats = list(geo.mesh.GetMaterials())
+    slab = [r for r in mats if geo.material_by_region[r] == "mo"][0]
+    ebr = {rg: EpsField(scalar=complex(1.0, 0.0)) for rg in mats}
+    ebr[slab] = EpsField(tensor=eps_tensor)
+    opt = OpticalSpec(polarization="x", incidence_angle_deg=0.0, linear_solver="umfpack")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = solve_fem(geo, lam_m, assemble_eps_cf(geo, ebr), opt, order=2,
+                        n_super=1.0 + 0j, n_sub=1.0 + 0j)
+    d_total = abs(res.T_flux - T_total_ref)
+    d_co = abs(res.T - T_co_ref)
+    e_flux = abs((res.R_flux + res.T_flux) - 1.0)
+    a_ind = abs(res.A_independent) if res.A_independent is not None else 0.0
+    ok = d_total < TOL_FEM_T and d_co < TOL_FEM_T and e_flux < TOL_FEM_E and a_ind < TOL_FEM_E
+    msg = ("[mo] FEM (e={:.1f} g={:.1f} L={:.0f}nm): flux T_total={:.4f} ref={:.4f} dT={:.1e} | "
+           "lstsq T_co={:.4f} ref={:.4f} dT={:.1e} | R_flux+T_flux={:.4f} A_ind={:+.4f}".format(
+               EPS_R_FEM, G_FEM, L_FEM_NM, res.T_flux, T_total_ref, d_total,
+               res.T, T_co_ref, d_co, res.R_flux + res.T_flux, res.A_independent or 0.0))
+    return ok, msg
+
+
 def main():
     print("[mo] === Magneto-optic Faraday rotation (gyrotropic tensor) vs analytic ===", flush=True)
     k0 = 2.0 * np.pi / LAM
@@ -93,7 +154,11 @@ def main():
         print("[mo] g={:.2f}: rot_tmm={:+7.3f} deg  theta_analytic={:+7.3f} deg  |d|={:.3e} deg | "
               "R+T-1={:.2e}".format(g, rot_deg, theta_an, d_rot, e_close), flush=True)
 
-    overall = gate_a and gate_b and gate_c
+    # GATE D: end-to-end through the off-diagonal UPML FEM
+    gate_d, msg_d = _gate_d_fem()
+    print(msg_d, flush=True)
+
+    overall = gate_a and gate_b and gate_c and gate_d
     print("[mo]", flush=True)
     print("[mo] GATE A (tensor eigenvalues eps_r, eps_r +/- g): {}".format(
         "PASS" if gate_a else "FAIL"), flush=True)
@@ -101,6 +166,8 @@ def main():
           "{}".format(ROT_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
     print("[mo] GATE C (Hermitian gyrotropic -> lossless R+T=1): {}".format(
         "PASS" if gate_c else "FAIL"), flush=True)
+    print("[mo] GATE D (off-diagonal UPML FEM == circular-eigenmode Jones-TMM, lossless): {}".format(
+        "PASS" if gate_d else "FAIL"), flush=True)
     print("[mo] *** MAGNETO-OPTIC FARADAY (gyrotropic tensor): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall

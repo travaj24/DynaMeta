@@ -496,11 +496,14 @@ class MagnetoOpticModel:
     consistent with exp(-i omega t), Im(eps) > 0 for absorbers). Validated against an analytic
     circular-eigenmode Faraday-rotation reference in validation/magneto_optic_faraday.py.
 
-    FEM NOTE: the gyrotropic tensor has nonzero (imaginary) OFF-DIAGONAL entries, which NGSolve
-    6.2.2604 mis-assembles under PML (the confirmed limitation eps_assembler._check_diagonal guards;
-    every formulation tested gives the same energy-non-conserving result, and 6.2.2604 is the latest
-    release). The constitutive model + the Faraday physics are validated analytically here; the
-    off-diagonal FEM solve is deferred until a fixed NGSolve ships."""
+    FEM NOTE: the gyrotropic tensor has nonzero (imaginary) OFF-DIAGONAL entries. The off-diagonal
+    FEM solve is now SUPPORTED end-to-end -- the earlier failure was NOT an NGSolve assembly defect
+    but mesh.SetPML's coordinate stretch being wrong for an anisotropic medium, fixed by the explicit
+    UPML in solver.solve_fem. The FEM transmitted field is Faraday-rotated (co- AND cross-polarized),
+    conserves energy exactly (Hermitian eps -> R_flux + T_flux = 1, A_independent ~ 0), and matches
+    the circular-eigenmode Jones-TMM reference to ~2% (validation/magneto_optic_faraday.py). The
+    single-projection R/T (result.R/T) measures the CO-polarized channel; result.R_flux/T_flux
+    measure the full (co + cross) power."""
     eps_r: float
     g: float
 
