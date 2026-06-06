@@ -62,7 +62,10 @@ class OpticalSpec:
     # and are validated against the device symmetry.
     lift:                Literal["auto", "separable_xy", "extrude", "identity"] = "auto"
     ny_sym:              int = 256
-    linear_solver:       Literal["umfpack", "bddc_cg", "bddc_gmres"] = "bddc_gmres"
+    # "ams"/"hypre" request a HYPRE auxiliary-space Maxwell (AMS) preconditioner (large-3D scaling,
+    # the rung above BDDC); they require an NGSolve built with HYPRE and otherwise fall back to
+    # bddc_gmres (the standard pip wheel lacks HYPRE) -- see docs/installing_hypre_windows.md.
+    linear_solver:       Literal["umfpack", "bddc_cg", "bddc_gmres", "ams", "hypre"] = "bddc_gmres"
     gmres_rtol:          float = 1e-6
     gmres_max_iter:      int = 800
 
