@@ -128,6 +128,49 @@ def test_assemble_eps_internal_dup_without_mesh_regions():
                      MaterialEpsMap(_registry()), ExtrudeLift(period_y_m=PERIOD), 1300e-9)
 
 
+# ---- C7: FieldBundle {E,T,...} auto-assembly seam (extra_fields + EffectEpsMap) ----
+def test_assemble_eps_extra_fields_thermo_uniform_scalar():
+    from dynameta.core import EffectEpsMap
+    from dynameta.core.effects import ThermoOpticModel
+    nx, ny, nz = 3, 3, 4
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    field = _field_3d(np.full((nx, ny, nz), N_BG), x, y, z)
+    tom = ThermoOpticModel(eps_ref=complex(3.48 ** 2, 0.0), dn_dT=1.8e-4, T_ref=300.0)
+    emap = EffectEpsMap(_registry(), effects={"ito": tom})
+    out = assemble_eps(field, _align("semi", "semi", stack_axis="z"), emap, IdentityLift(),
+                       1300e-9, mesh_regions=["semi"], extra_fields={"T": 360.0})
+    ef = out["semi"]
+    assert ef.is_uniform and not ef.is_tensor                     # uniform field-effect -> scalar EpsField
+    assert np.isclose(ef.scalar, complex(tom.eps({"T": 360.0}, 1300e-9)), rtol=1e-12)
+
+
+def test_assemble_eps_extra_fields_pockels_tensor():
+    from dynameta.core import EffectEpsMap
+    from dynameta.core.effects import PockelsEffect
+    no, ne, r33 = 2.21, 2.14, 30.9e-12
+    pk = PockelsEffect(eps_bg=np.diag([no ** 2, no ** 2, ne ** 2]).astype(complex),
+                       r_voigt=np.array([[0, 0, 0], [0, 0, 0], [0, 0, r33], [0, 0, 0],
+                                         [0, 0, 0], [0, 0, 0]], dtype=float))
+    nx, ny, nz = 3, 3, 4
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    field = _field_3d(np.full((nx, ny, nz), N_BG), x, y, z)
+    emap = EffectEpsMap(_registry(), effects={"ito": pk})
+    out = assemble_eps(field, _align("semi", "semi", stack_axis="z"), emap, IdentityLift(),
+                       1300e-9, mesh_regions=["semi"], extra_fields={"E": [0.0, 0.0, 1.0e7]})
+    ef = out["semi"]
+    assert ef.is_tensor and ef.tensor.shape == (3, 3)             # uniform field-effect -> tensor EpsField
+    assert np.allclose(ef.tensor, np.asarray(pk.eps({"E": [0.0, 0.0, 1.0e7]}, 1300e-9)))
+
+
+def test_effect_eps_map_falls_back_without_registered_effect():
+    from dynameta.core import EffectEpsMap
+    # a material with NO registered effect uses OpticalModelEffect (reads 'n' only) == MaterialEpsMap;
+    # an extra 'T' in the bundle is harmlessly ignored (back-compat for the carrier-only path).
+    a = EffectEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG]), "T": 999.0}, 1300e-9)
+    b = MaterialEpsMap(_registry()).eps_grid("ito", {"n": np.array([N_BG])}, 1300e-9)
+    assert np.allclose(a, b)
+
+
 # ---- choose_lift gating ----
 def test_choose_lift_gating():
     assert isinstance(choose_lift("c4v", "auto", period_y_m=PERIOD), SeparableXYLift)

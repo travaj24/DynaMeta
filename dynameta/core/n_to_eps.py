@@ -12,8 +12,8 @@ through the SAME formula (no grid-corner proxy).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Dict, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -36,6 +36,28 @@ class MaterialEpsMap:
     materials: MaterialRegistry
 
     def eps_grid(self, material_name, fields, lambda_m):
+        mat = self.materials.get(material_name)
+        return np.asarray(OpticalModelEffect(mat).eps(fields, lambda_m), dtype=np.complex128)
+
+    def scalar_eps(self, material_name, lambda_m):
+        return complex(self.materials.get(material_name).eps(lambda_m))
+
+
+@dataclass
+class EffectEpsMap:
+    """An NToEpsMap that dispatches each material to an explicit EffectModel reading the FULL field
+    bundle {n, E, T, director_angle_rad, ...} -- vs MaterialEpsMap, which reads only 'n' via
+    OpticalModelEffect. Register field-effect models per material name (`effects`); a material with no
+    registered effect falls back to OpticalModelEffect (the carrier/Drude path). Pair with
+    assemble_eps(extra_fields=...) so the field bundle auto-assembles E/T/... for the field-effect
+    models (Pockels / ThermoOptic / LiquidCrystal / ...) without a manual per-region eps call (C7)."""
+    materials: MaterialRegistry
+    effects: Dict[str, object] = field(default_factory=dict)   # material_name -> EffectModel
+
+    def eps_grid(self, material_name, fields, lambda_m):
+        eff = self.effects.get(material_name)
+        if eff is not None:
+            return np.asarray(eff.eps(fields, lambda_m), dtype=np.complex128)
         mat = self.materials.get(material_name)
         return np.asarray(OpticalModelEffect(mat).eps(fields, lambda_m), dtype=np.complex128)
 

@@ -23,8 +23,9 @@ from dynameta.core.alignment import RegionAlignment, GeometryAlignment
 from dynameta.core.effects import (EffectModel, OpticalModelEffect, ComposedEffect, DeltaEffect,
                                    as_tensor, PockelsEffect, KerrEffect, FranzKeldyshEffect,
                                    ThermoOpticModel, ElectroAbsorptionModel, kramers_kronig_dn,
-                                   PCMModel, LiquidCrystalModel)
-from dynameta.core.n_to_eps import NToEpsMap, MaterialEpsMap
+                                   PCMModel, LiquidCrystalModel, MagnetoOpticModel,
+                                   AnisotropicThermoOpticModel)
+from dynameta.core.n_to_eps import NToEpsMap, MaterialEpsMap, EffectEpsMap
 from dynameta.core.interfaces import (
     RegionInfo, OpticalResult, CarrierSolver, OpticalGeometryBuilder, OpticalSolver,
     LayeredStackSolver,
@@ -42,10 +43,11 @@ __all__ = [
     "resample_to_grid",
     "FieldLift", "IdentityLift", "ExtrudeLift", "SeparableXYLift", "choose_lift",
     "RegionAlignment", "GeometryAlignment",
-    "NToEpsMap", "MaterialEpsMap",
+    "NToEpsMap", "MaterialEpsMap", "EffectEpsMap",
     "EffectModel", "OpticalModelEffect", "ComposedEffect", "DeltaEffect", "as_tensor",
     "PockelsEffect", "KerrEffect", "FranzKeldyshEffect", "ThermoOpticModel",
     "ElectroAbsorptionModel", "kramers_kronig_dn", "PCMModel", "LiquidCrystalModel",
+    "MagnetoOpticModel", "AnisotropicThermoOpticModel",
     "RegionInfo", "OpticalResult", "CarrierSolver", "OpticalGeometryBuilder", "OpticalSolver",
     "LayeredStackSolver",
     "LayeredSlab", "LayeredStack", "slice_profile", "slice_eps_field",
