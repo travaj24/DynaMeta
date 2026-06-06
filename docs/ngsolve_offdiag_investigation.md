@@ -1,15 +1,19 @@
-# Off-diagonal tensor eps in the FEM optical solver: is it an NGSolve bug?
+# Off-diagonal tensor eps in the FEM optical solver: is it an NGSolve bug? (RESOLVED)
 
 ## Short answer
 
-**No -- it is NOT a confirmed NGSolve bug.** A minimal, self-contained reproducer
+**No -- it is NOT an NGSolve bug, and it is now FIXED.** A minimal, self-contained reproducer
 (`docs/ngsolve_offdiag_check.py`) shows that NGSolve 6.2.2604 assembles an off-diagonal
 (anisotropic) matrix-valued coefficient in an HCurl bilinear form **correctly, to machine
 precision**, in every construct DynaMeta uses. An earlier note in this repo attributed the
 off-diagonal optical-solve failure to an "NGSolve assembly defect"; that attribution was
-**overstated and is retracted here**. The symptom (a wrong, energy-non-conserving reflectance for a
-tilted/gyrotropic tensor through `optics/solver.solve_fem`) is real, but its cause is **inside the
-DynaMeta pipeline**, not the NGSolve matrix assembly.
+**overstated and is retracted**. The symptom (a wrong, energy-non-conserving reflectance for a
+tilted/gyrotropic tensor through `optics/solver.solve_fem`) was real, and its cause was **inside the
+DynaMeta pipeline**: **`mesh.SetPML`'s automatic coordinate stretch is correct only for isotropic
+media; for an anisotropic (off-diagonal) eps it perturbs the physically decoupled field component by
+a resolution-independent ~3%.** The fix is an explicit **UPML** (anisotropic PML material tensor) for
+the tensor path -- see "The fix" below. Off-diagonal tensor FEM (tilted LC, magneto-optic) is now
+fully supported and validated.
 
 ## What was claimed, and how it was tested
 
@@ -61,35 +65,67 @@ no assembly defect, no Periodic-space defect, and no int-0-vs-dense issue at the
 - The NGSolve GitHub issue tracker has no matching issue (the project routes user issues to its
   forum). No documented limitation matches the claimed assembly defect.
 
-## So where does the real failure come from?
+## Where the real failure came from (root cause)
 
-The off-diagonal optical solve gives a wrong R/T, but the matrix is assembled correctly. The
-remaining suspects are all **DynaMeta-side** and still being isolated:
+The matrix is assembled correctly, so a sequence of decisive probes localized the failure:
 
-- the PML coordinate stretch (`mesh.SetPML`, a complex z-stretch) combined with the full curl-curl +
-  anisotropic mass operator;
-- the scattered-field source term `((eps - eps_bg I) . E_bg) . v`;
-- the R/T extraction (`_lstsq_2wave` / `_reflection` / `_transmission`), which fits a single-
-  polarization plane-wave pair and may misread an off-diagonal-perturbed transmitted field.
+1. **The coefficient is right.** The assembled domain-list `eps_cf` evaluated at a slab point equals
+   the intended tensor to **0.0**, and `eps_cf @ e_y = (0, eps_yy, 0)` -- no spurious y-coupling at the
+   coefficient level.
+2. **The weak-form expansion is irrelevant.** The matrix-CF matvec `(eps_cf*u)*v` and the explicit
+   component sum `sum_ij eps_ij u[j] v[i]` give a **bit-identical** (and identically wrong) field --
+   so it is not a matvec-assembly footgun.
+3. **The error is resolution-INDEPENDENT.** The transmitted ordinary-wave amplitude was 1.0272 at
+   order 2 and order 3, and at two mesh densities -- bit-identical. A convergent Galerkin error of a
+   *correct* operator would shrink under p- and h-refinement; a fixed error means the discrete operator
+   converges to the **wrong continuous operator**.
+4. **It is the PML.** With `mesh.SetPML` removed (a uniform absorbing-loss regularization in its
+   place), the off-diagonal FULL-tensor field is **identical to the diagonal field to ~1e-6** -- i.e.
+   the off-diagonal eps does NOT couple into the decoupled component without the PML. With `SetPML`
+   active, it perturbs it by ~3%. So `mesh.SetPML`'s coordinate stretch is wrong for an anisotropic
+   medium (it is exact only for the isotropic case, where it equals the UPML tensor -- the
+   `tensor_isotropic_gate` confirms UPML and SetPML agree to ~2e-15 for isotropic eps).
 
-Note that `A_independent` (the volumetric Im(eps)|E|^2 loss integral) was ~0 in the failing case, as
-it must be for a lossless medium -- which does NOT by itself prove the field is correct, so it does
-not yet localize the cause.
+`A_independent` (the volumetric Im(eps)|E|^2 loss) was ~0 in the failing case, as it must be for a
+lossless medium -- which by itself did not localize the cause; the decisive evidence was the
+PML-on/PML-off field comparison.
 
-## Implications
+## The fix
 
-- **`eps_assembler._check_diagonal` stays a guard** (an off-diagonal tensor still produces a wrong
-  R/T end-to-end, so returning one silently would be worse), but its rationale is corrected: the
-  block is a DynaMeta-pipeline limitation under investigation, NOT a proven NGSolve assembly defect.
-- **Off-diagonal tensor FEM (tilted-LC, magneto-optic) is therefore likely DynaMeta-fixable**, not
-  NGSolve-blocked -- a real fix (most likely a two-projection R/T extractor and/or the PML
-  interaction) is the path, rather than waiting on an upstream NGSolve release.
-- The constitutive models (`LiquidCrystalModel`, `MagnetoOpticModel`) remain correct and are
-  validated analytically; only the off-diagonal FEM *solve+extraction* is deferred.
+For a **tensor** eps, `solve_fem` no longer calls `mesh.SetPML`; it folds an explicit **UPML** into
+the weak form. For a z-stretch PML the UPML material tensor is `Lambda = diag(s_z, s_z, 1/s_z)`
+(`s_z = 1 + alpha` inside the PML, `1` outside; `alpha = 1j` matches the old HalfSpace), giving
+
+```
+INT  sum_i Lambda^-1_i  curl(u)_i curl(v)_i   -   k0^2  sum_ij (Lambda eps)_ij  u[j] v[i]   dx
+```
+
+This is the rigorous stretched-coordinate PML for an arbitrary (anisotropic) medium and reduces to
+the `SetPML` answer for isotropic/diagonal eps (so the validated scalar path keeps `SetPML`
+untouched; only the tensor path switches to UPML). A fit-independent **Poynting-flux** R/T
+(`OpticalResult.R_flux/T_flux`) was also added: it reads the full z-power straight from the field, so
+it correctly measures the TOTAL (co + cross) transmission for a gyrotropic medium whose transmitted
+wave is elliptical (the single-projection lstsq `R/T` sees only the co-polarized channel).
+
+## Validation
+
+- `validation/lc_tilted_fem.py` -- tilted LC at theta = 0,30,45,60,90 deg: the ordinary (y) wave is
+  tilt-invariant to dT ~ 1.6e-4 (was T = 1.07); the extraordinary (x) wave matches the n_eff(theta)
+  scalar TMM to dT < 2.4e-3; energy and the flux R/T close to ~1e-4.
+- `validation/magneto_optic_faraday.py` GATE D -- the gyrotropic (Hermitian, complex off-diagonal)
+  tensor through the FEM matches the circular-eigenmode Jones-TMM (flux T_total and lstsq co-pol T to
+  ~1.4e-2) and is lossless (R_flux + T_flux = 1, A_independent ~ 0).
+- `validation/tensor_isotropic_gate.py`, `lc_uniaxial_fem.py`, `pockels_phase_modulator.py`,
+  `thermo_optic_modulator.py`, `reconfigurable_modulators.py` -- unchanged (no regression).
+
+`eps_assembler._check_diagonal` (the hard off-diagonal guard) is **removed**; the constitutive models
+(`LiquidCrystalModel`, `MagnetoOpticModel`) were always correct and are now validated end-to-end
+through the FEM, not just analytically.
 
 ## Reproduce
 
 ```
-python docs/ngsolve_offdiag_check.py
-# -> "*** NGSolve off-diagonal tensor assembly is CORRECT: CONFIRMED ***"
+python docs/ngsolve_offdiag_check.py        # NGSolve assembly is correct (unchanged)
+python -m validation.lc_tilted_fem          # off-diagonal FEM fixed (UPML)
+python -m validation.magneto_optic_faraday  # gyrotropic FEM vs Jones-TMM
 ```

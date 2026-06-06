@@ -26,33 +26,15 @@ from dynameta.core.eps_field import EpsField
 from dynameta.optics.ngsolve_layered import OpticalGeometry
 
 _ID3 = ng.CoefficientFunction((1, 0, 0, 0, 1, 0, 0, 0, 1), dims=(3, 3))
-_OFFDIAG_TOL = 1e-9     # |off-diag| / |diag| above which a tensor is rejected as non-diagonal
-
-
-def _check_diagonal(off_max: float, diag_max: float) -> None:
-    """RAISE if a tensor has significant OFF-DIAGONAL entries (relative to its diagonal).
-
-    KNOWN LIMITATION -- the off-diagonal FEM SOLVE is unreliable, but (correcting an earlier claim in
-    this repo) it is NOT an NGSolve assembly defect. Symptom: a y-polarized ordinary wave through a
-    uniaxial slab tilted in x-z (eps_yy unchanged, eps_xz != 0) must be tilt-invariant, yet solve_fem
-    returns T = 1.07, R+T = 1.11 (energy created). A minimal reproducer (docs/ngsolve_offdiag_check.py)
-    PROVES NGSolve 6.2.2604 assembles off-diagonal / Hermitian tensor coefficients CORRECTLY to machine
-    precision: the matrix-CF matvec == the explicit scalar-component sum to ~1e-16, and the assembled
-    mass matrix is Hermitian/symmetric to ~4e-17 -- for a single matrix AND the multi-material
-    domain-list this assembler emits, on plain AND periodic HCurl, with int-0 AND dense zeros. So the
-    cause is DOWNSTREAM in the DynaMeta pipeline (the PML coordinate stretch combined with the
-    anisotropic operator, and/or the single-polarization R/T extractor _lstsq_2wave) -- see
-    docs/ngsolve_offdiag_investigation.md. This stays a HARD ERROR (returning a wrong, energy-non-
-    conserving R/T silently would be worse), but it is LIKELY DynaMeta-FIXABLE (a two-projection R/T
-    extractor + the PML interaction), not NGSolve-blocked. The constitutive models (tilted LC,
-    magneto-optic) are correct and validated analytically; work in the tensor's PRINCIPAL FRAME (a
-    diagonal tensor) until the off-diagonal solve is fixed."""
-    if off_max > _OFFDIAG_TOL * (diag_max or 1.0):
-        raise NotImplementedError(
-            "assemble_eps_cf: eps tensor has significant OFF-DIAGONAL entries (max |off-diag|="
-            "{:.3e} vs max |diag|={:.3e}); the FEM tensor matvec is validated ONLY for diagonal "
-            "(principal-axis) tensors and mis-evaluates off-diagonal ones under PML (tracked P0b "
-            "follow-on). Diagonalize the tensor (use its principal frame).".format(off_max, diag_max))
+# |off-diag| / |diag| at or below which an off-diagonal entry is snapped to EXACT int 0 (the
+# ~1e-17 cos(pi/2) residual of a homeotropic LC director), keeping the proven sparse matrix-CF path.
+# OFF-DIAGONAL tensors are now FULLY SUPPORTED in the FEM solve: the earlier failure was NOT an
+# NGSolve assembly defect (docs/ngsolve_offdiag_check.py proves the assembly is exact to ~1e-16) but
+# mesh.SetPML's coordinate stretch being wrong for an anisotropic medium. solve_fem now uses an
+# explicit UPML (anisotropic PML material tensor) for tensor eps -- see solver.solve_fem -- so a
+# tilted-LC / magneto-optic off-diagonal tensor solves correctly (energy-conserving, tilt-invariant
+# ordinary wave). No off-diagonal rejection remains.
+_OFFDIAG_TOL = 1e-9
 
 
 def _scalar_region_cf(ef: EpsField):
@@ -77,8 +59,6 @@ def _region_matrix_cf(ef: EpsField):
     if ef.tensor is not None:                                  # uniform 3x3
         T = np.asarray(ef.tensor, dtype=np.complex128)
         diag_max = float(np.max(np.abs(np.diag(T))))
-        off = np.abs(T - np.diag(np.diag(T)))
-        _check_diagonal(float(np.max(off)), diag_max)
         # Snap sub-tolerance off-diagonals (e.g. the ~1e-17 cos(pi/2) residual of a homeotropic LC
         # director) to EXACT int 0 so they stay on the proven sparse matrix-CF path, not a tiny
         # dense complex entry (gotcha below). Past _check_diagonal every off-diagonal is <= tol, so
@@ -95,8 +75,6 @@ def _region_matrix_cf(ef: EpsField):
     v = np.asarray(ef.values_zyx)                              # graded tensor (Nz,Ny,Nx,3,3)
     start, end = ef.voxel_bounds_u()
     diag_max = max(float(np.max(np.abs(v[..., k, k]))) for k in range(3))      # same metric as uniform
-    off_max = max(float(np.max(np.abs(v[..., i, j]))) for i in range(3) for j in range(3) if i != j)
-    _check_diagonal(off_max, diag_max)
 
     def _comp(i, j):
         if not np.any(v[..., i, j]):                           # identically-zero component -> int 0
