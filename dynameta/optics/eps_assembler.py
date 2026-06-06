@@ -32,19 +32,21 @@ _OFFDIAG_TOL = 1e-9     # |off-diag| / |diag| above which a tensor is rejected a
 def _check_diagonal(off_max: float, diag_max: float) -> None:
     """RAISE if a tensor has significant OFF-DIAGONAL entries (relative to its diagonal).
 
-    CONFIRMED NGSolve LIMITATION (diagnosed 2026-06-02 on NGSolve 6.2.2604, the latest PyPI release):
-    the scattered-field HCurl solve MIS-ASSEMBLES a permittivity tensor with nonzero OFF-DIAGONAL
-    entries on the periodic PML mesh. Decisive probe: a y-polarized ORDINARY wave through a uniaxial
-    slab tilted in x-z (eps_yy unchanged, eps_xz != 0) must be tilt-invariant, but instead it CREATES
-    energy (T = 1.07, R+T = 1.11). The defect is in NGSolve's assembly of mixed-component HCurl proxy
-    cross-terms (u[j] v[i], i != j) on the complex periodic space; it is INDEPENDENT of how eps is
-    expressed -- the matrix-CF matvec, an explicit scalar component sum, a .Compile()'d CF, and
-    real-vs-complex entries ALL gave the identical broken result. There is no code-side workaround on
-    this version and no newer NGSolve to upgrade to, so this stays a HARD ERROR (a suppressed warning
-    would yield a silently-wrong, energy-non-conserving solve -- audit LC-1). The constitutive models
-    (tilted LC, magneto-optic) are CORRECT and validated analytically / in their PRINCIPAL FRAME; only
-    the off-diagonal FEM solve is deferred until a fixed NGSolve ships. Diagonalize the tensor (use its
-    principal frame) to solve in the meantime."""
+    KNOWN LIMITATION -- the off-diagonal FEM SOLVE is unreliable, but (correcting an earlier claim in
+    this repo) it is NOT an NGSolve assembly defect. Symptom: a y-polarized ordinary wave through a
+    uniaxial slab tilted in x-z (eps_yy unchanged, eps_xz != 0) must be tilt-invariant, yet solve_fem
+    returns T = 1.07, R+T = 1.11 (energy created). A minimal reproducer (docs/ngsolve_offdiag_check.py)
+    PROVES NGSolve 6.2.2604 assembles off-diagonal / Hermitian tensor coefficients CORRECTLY to machine
+    precision: the matrix-CF matvec == the explicit scalar-component sum to ~1e-16, and the assembled
+    mass matrix is Hermitian/symmetric to ~4e-17 -- for a single matrix AND the multi-material
+    domain-list this assembler emits, on plain AND periodic HCurl, with int-0 AND dense zeros. So the
+    cause is DOWNSTREAM in the DynaMeta pipeline (the PML coordinate stretch combined with the
+    anisotropic operator, and/or the single-polarization R/T extractor _lstsq_2wave) -- see
+    docs/ngsolve_offdiag_investigation.md. This stays a HARD ERROR (returning a wrong, energy-non-
+    conserving R/T silently would be worse), but it is LIKELY DynaMeta-FIXABLE (a two-projection R/T
+    extractor + the PML interaction), not NGSolve-blocked. The constitutive models (tilted LC,
+    magneto-optic) are correct and validated analytically; work in the tensor's PRINCIPAL FRAME (a
+    diagonal tensor) until the off-diagonal solve is fixed."""
     if off_max > _OFFDIAG_TOL * (diag_max or 1.0):
         raise NotImplementedError(
             "assemble_eps_cf: eps tensor has significant OFF-DIAGONAL entries (max |off-diag|="
