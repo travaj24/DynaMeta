@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import cmath
 import math
+import os
 import re
 import time
 import warnings
@@ -325,19 +326,37 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     else:
         a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
         f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
-    pre = ng.Preconditioner(a, "bddc") if optical.linear_solver.startswith("bddc") else None
+    # C8: resolve the linear solver. "ams"/"hypre" request a HYPRE auxiliary-space-Maxwell (AMS)
+    # preconditioner -- the rung above BDDC for large 3D -- but the standard pip NGSolve wheel is
+    # built WITHOUT HYPRE and naively constructing it SEGFAULTS (not a catchable Python error). So by
+    # default we DO NOT attempt it: warn and fall back to bddc_gmres. A user whose NGSolve IS built
+    # with HYPRE/AMS opts in with DYNAMETA_AMG_OK=1 (see docs/installing_hypre_windows.md).
+    _ls = optical.linear_solver
+    if _ls in ("ams", "hypre"):
+        if os.environ.get("DYNAMETA_AMG_OK"):
+            pre = ng.Preconditioner(a, "hypre_ams")     # HCurl AMS (caller vouches the build has it)
+            _ls = "amg_gmres"
+        else:
+            warnings.warn(
+                "linear_solver='{}' needs an NGSolve built with HYPRE/AMS; the standard pip wheel "
+                "lacks it and ATTEMPTING it segfaults, so falling back to 'bddc_gmres'. Build a "
+                "HYPRE-enabled NGSolve (docs/installing_hypre_windows.md) and set DYNAMETA_AMG_OK=1 "
+                "to use it.".format(optical.linear_solver), RuntimeWarning, stacklevel=2)
+            _ls, pre = "bddc_gmres", ng.Preconditioner(a, "bddc")
+    else:
+        pre = ng.Preconditioner(a, "bddc") if _ls.startswith("bddc") else None
 
     gfu = ng.GridFunction(fes)
     t0 = time.time()
     with ng.TaskManager():
         a.Assemble(); f.Assemble()
-        if optical.linear_solver == "umfpack":
+        if _ls == "umfpack":
             gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
-        elif optical.linear_solver == "bddc_cg":
+        elif _ls == "bddc_cg":
             inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
                                         maxiter=optical.gmres_max_iter)
             gfu.vec.data = inv * f.vec
-        else:  # bddc_gmres
+        else:  # bddc_gmres / amg_gmres
             ng.solvers.GMRes(A=a.mat, b=f.vec, pre=pre.mat, x=gfu.vec,
                                 tol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
                                 printrates=verbose)

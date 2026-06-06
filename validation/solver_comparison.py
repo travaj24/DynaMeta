@@ -4,7 +4,9 @@ Maxwell solve is run with the UMFPACK direct solver and the two BDDC-preconditio
 iterative solvers (GMRes, CG); the reflectance |r|^2 must AGREE to the iterative tolerance.
 This regression-guards the iterative path -- the O(n)-memory route that scales to fine
 meshes where the direct solver is infeasible (the audit's "HYPRE"/scaling item). It also
-reports wall time per solver. Run: python -m validation.solver_comparison
+reports wall time per solver, and exercises the C8 "ams"/HYPRE seam: without a HYPRE-enabled
+NGSolve (the default) linear_solver="ams" must WARN and fall back to bddc_gmres, so its |r|^2
+agrees with the others (the safe-fallback gate). Run: python -m validation.solver_comparison
 """
 import sys, os, time
 import numpy as np
@@ -36,7 +38,7 @@ def main():
     eps_cf = geo.mesh.MaterialCF(eps_vals, default=1.0)
     print("[t] FEM solver cross-check: air/slab(n={})/air, ne={}".format(N_SLAB, geo.mesh.ne), flush=True)
     Rs = {}
-    for solver in ("umfpack", "bddc_gmres", "bddc_cg"):
+    for solver in ("umfpack", "bddc_gmres", "bddc_cg", "ams"):    # "ams" -> C8 safe fallback path
         opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0, linear_solver=solver,
                            gmres_rtol=1e-7, gmres_max_iter=400)
         t0 = time.time()
