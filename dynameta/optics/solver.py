@@ -189,7 +189,8 @@ def _incidence_geometry(optical, n_super):
 def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
-                n_sub: complex = 1.0 + 0j, verbose: bool = False) -> OpticalResult:
+                n_sub: complex = 1.0 + 0j, verbose: bool = False,
+                sheet_bcs: "dict | None" = None) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
@@ -197,7 +198,15 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     A = 1 - R - T is the energy-budget CLOSURE (it is identically 1-R-T, not an
     independent measurement). result.A_independent is the INDEPENDENTLY measured
     absorbed fraction (volumetric Im(eps)|E|^2 integral); |A - A_independent| is the
-    genuine, non-tautological energy/numerics diagnostic."""
+    genuine, non-tautological energy/numerics diagnostic.
+
+    sheet_bcs (C3): {boundary_name: sigma_S} applies a conductive-SHEET surface-current
+    boundary condition (e.g. graphene) on the named internal interface(s). A sheet of
+    conductivity sigma (siemens) carries J_s = sigma E_tan, giving the tangential-trace
+    Robin term + i k0 Z0 sigma (E_tan . v_tan) over the interface (Z0 = free-space
+    impedance); in the scattered-field formulation the sheet-free background E_bg also
+    drives it, so the same term enters the RHS on E_bg. Validated vs the analytic
+    core.graphene.sheet_rt in validation/graphene_sheet_fem.py."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -357,6 +366,19 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     else:
         a += (curlE * curlV - k0 ** 2 * eps_cf * (u * v)) * ng.dx
         f += (k0 ** 2 * (eps_cf - eps_bg_cf) * (E_bg * v)) * ng.dx
+    # C3: conductive-sheet (graphene) surface-current BC on named internal interface(s). The sheet
+    # current J_s = sigma E_tan makes [n x H] = sigma E_tan, contributing the tangential-trace Robin
+    # term + i k0 Z0 sigma (E_tan . v_tan) over the interface (Z0 free-space impedance; k0 in nm^-1
+    # and ds in nm^2 keep it dimensionally consistent with the k0^2 eps volume term). The sheet-free
+    # background E_bg drives the scattered field, so the SAME term enters the RHS on E_bg.
+    if sheet_bcs:
+        _Z0 = 376.730313668                                  # free-space wave impedance (ohm)
+        for _bnd, _sigma in sheet_bcs.items():
+            # sign: with exp(-i omega t) and Im(eps)>0 = loss, a passive sheet (Re sigma > 0) must
+            # ABSORB, so the dissipative operator term is - i k0 Z0 sigma (E_tan . v_tan).
+            _ds = ng.ds(definedon=mesh.Boundaries(_bnd))
+            a += (-1j * k0 * _Z0 * complex(_sigma) * (u.Trace() * v.Trace())) * _ds
+            f += (1j * k0 * _Z0 * complex(_sigma) * (E_bg * v.Trace())) * _ds
     # C8: resolve the linear solver. "ams"/"hypre" request a HYPRE auxiliary-space-Maxwell (AMS)
     # preconditioner -- the rung above BDDC for large 3D -- but the standard pip NGSolve wheel is
     # built WITHOUT HYPRE and naively constructing it SEGFAULTS (not a catchable Python error). So by
