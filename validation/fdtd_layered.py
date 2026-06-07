@@ -8,8 +8,10 @@ GATE A: FDTD R(f), T(f) of a non-dispersive slab (n=2, 300 nm) == the analytic A
         error < 1e-2, and R+T = 1 (lossless).
 GATE B: FDTD R(f), T(f) of a Drude slab (eps = eps_inf - wp^2/(w^2 + i gamma w)) == the analytic
         complex-n Airy R/T, max abs error < 4e-2 (the ADE dispersion); R+T+A consistent.
-GATE C: a Kerr slab at chi3 = 0 (kerr on) reproduces the linear T exactly (reduction); a large chi3
-        at finite amplitude CHANGES T (the nonlinearity is active -- the all-optical axis).
+GATE C: a Kerr slab at chi3 = 0 (kerr on) reproduces the linear T exactly (reduction); and in the
+        WEAK regime the T-modulation is LINEAR in chi3 -- both max|dT| and the signed resonance shift
+        double when chi3 doubles (the genuine Kerr signature; a wrong power/factor/sign breaks the
+        scaling, vs the old vacuous "T moved by >2%").
 
 Run: python -m validation.fdtd_layered
 """
@@ -68,19 +70,35 @@ def main():
     print("[fd] B Drude: n in [{:.2f},{:.2f}] ; max|dR|={:.2e} max|dT|={:.2e}".format(
         float(nB.real.min()), float(nB.real.max()), dRB, dTB), flush=True)
 
-    # GATE C: Kerr -- reduces at chi3=0, active at large chi3
+    # GATE C: Kerr -- chi3=0 reduces to linear; in the WEAK regime the T-modulation is LINEAR in chi3
+    # (the genuine Kerr signature: a wrong power of E, factor, or inconsistent sign breaks the scaling
+    # -- unlike a vacuous "T moved by >x%"). Both the magnitude max|dT| AND the signed resonance shift
+    # must double when chi3 doubles.
     base = dict(lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=40, source_amp=3.0)
-    lin = solve_fdtd_1d([FDTDLayer(thickness_m=400e-9, eps_inf=4.0)], kerr=False, **base)
-    k0_ = solve_fdtd_1d([FDTDLayer(thickness_m=400e-9, eps_inf=4.0, chi3_m2_V2=0.0)], kerr=True, **base)
-    kbig = solve_fdtd_1d([FDTDLayer(thickness_m=400e-9, eps_inf=4.0, chi3_m2_V2=0.3)],
-                         kerr=True, **base)
-    m = lin.band & k0_.band & kbig.band
+
+    def _run(chi3, kerr=True):
+        return solve_fdtd_1d([FDTDLayer(thickness_m=400e-9, eps_inf=4.0, chi3_m2_V2=chi3)],
+                             kerr=kerr, **base)
+    lin = _run(0.0, kerr=False)
+    k0_ = _run(0.0, kerr=True)
+    kc = _run(0.05)
+    k2c = _run(0.10)                                                    # chi3 doubled
+    m = lin.band & k0_.band & kc.band & k2c.band
     reduce_ok = bool(np.max(np.abs(k0_.T[m] - lin.T[m])) < 1e-9)        # chi3=0 -> identical
-    active = float(np.max(np.abs(kbig.T[m] - lin.T[m])))
-    active_ok = bool(active > 2e-2)                                     # large chi3 -> changes T
-    gate_c = reduce_ok and active_ok
-    print("[fd] C Kerr: chi3=0 reduces (max|dT|<1e-9)={} ; large-chi3 active max|dT|={:.3e}".format(
-        reduce_ok, active), flush=True)
+    d1 = float(np.max(np.abs(kc.T[m] - lin.T[m])))
+    d2 = float(np.max(np.abs(k2c.T[m] - lin.T[m])))
+    ratio = d2 / d1 if d1 > 0 else 0.0
+    # signed resonance shift: project dT onto the linear slope (dT ~ -shift * dT_lin/df)
+    dTdf = np.gradient(lin.T[m], lin.freqs_Hz[m])
+    denom = float(np.sum(dTdf ** 2)) + 1e-30
+    p1 = float(np.sum((kc.T[m] - lin.T[m]) * dTdf) / denom)
+    p2 = float(np.sum((k2c.T[m] - lin.T[m]) * dTdf) / denom)
+    pratio = p2 / p1 if abs(p1) > 0 else 0.0
+    linear_ok = bool(d1 > 1e-3 and 1.7 < ratio < 2.3 and 1.7 < pratio < 2.3)
+    gate_c = reduce_ok and linear_ok
+    print("[fd] C Kerr: chi3=0 reduces={} ; weak-regime LINEAR in chi3: max|dT| {:.2e}->{:.2e} "
+          "(x{:.2f}), signed shift x{:.2f} (want ~2)".format(reduce_ok, d1, d2, ratio, pratio),
+          flush=True)
 
     print("[fd] GATE A (non-dispersive vs analytic): {}".format("PASS" if gate_a else "FAIL"),
           flush=True)
