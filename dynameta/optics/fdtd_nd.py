@@ -424,3 +424,215 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
     return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band)
+
+
+# =====================================================================================================
+# 3D: full-vector Yee engine for a 2D-periodic (x AND y) unit cell at normal incidence.
+# The 2D-TE engine above is the (d/dy = 0, {Ey,Hx,Hz}) reduction of this; this carries all six field
+# components so a genuinely 2D-periodic structure (pillars/holes/crosses) couples into every order.
+# =====================================================================================================
+@dataclass
+class FDTD3DResult:
+    """Broadband R(f)/T(f) of a 2D-periodic unit cell (normal incidence, y-polarized source). R0/T0 = the
+    specular (0-order) co-pol from the x,y-mean field (== 1D/TMM for a laterally-uniform stack); R_flux/
+    T_flux = the total over ALL (kx,ky) diffraction orders from the full Poynting flux S_z = ExHy* - EyHx*."""
+    freqs_Hz: np.ndarray
+    R0: np.ndarray
+    T0: np.ndarray
+    R_flux: np.ndarray
+    T_flux: np.ndarray
+    band: np.ndarray
+
+
+def _flux3d(ex, ey, hx, hy):
+    """Total time-averaged +z Poynting power per frequency, S_z = Re(Ex Hy* - Ey Hx*) summed over the
+    whole (x,y) probe plane (Parseval: the real-space sum over the plane already includes every (kx,ky)
+    diffraction order). Each probe array is (nsteps, nx, ny). Reduces to -Re(Ey Hx*) (the 2D _flux) when
+    Ex = Hy = 0. The half-cell stagger is common to numerator and incident reference, so it cancels."""
+    EX = np.fft.rfft(ex, axis=0); EY = np.fft.rfft(ey, axis=0)
+    HX = np.fft.rfft(hx, axis=0); HY = np.fft.rfft(hy, axis=0)
+    S = np.real(EX * np.conj(HY) - EY * np.conj(HX))
+    return np.sum(S, axis=(1, 2))                            # (nfreq,) signed z-power per frequency
+
+
+def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+    """One full-vector 3D-FDTD pass over a cell-wise (nx,ny,nz) (eps_inf, wp, gamma, chi3) profile.
+    Periodic in x and y (roll = Bloch at normal incidence, zero phase), CFS-CPML + PEC backing in z.
+    Standard Yee staggering: Ex@(i+1/2,j,k) Ey@(i,j+1/2,k) Ez@(i,j,k+1/2); Hx@(i,j+1/2,k+1/2)
+    Hy@(i+1/2,j,k+1/2) Hz@(i+1/2,j+1/2,k). Semi-implicit Drude ADE per E-component + instantaneous Kerr
+    (eps_eff = eps_inf + chi3|E|^2). Only the d/dz derivatives are CPML-stretched (x,y are periodic), so
+    four psi memories: dEy/dz & dEx/dz (H update), dHx/dz & dHy/dz (E update). Records Ex,Ey,Hx,Hy on the
+    left/right z-probe planes (the components that carry S_z). Returns 8 arrays of shape (nsteps,nx,ny)."""
+    nx, ny, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    r = (lambda a: xp.asarray(a).reshape(1, 1, nz))          # z-profile -> broadcast over (nx,ny,nz)
+    ke, be, ce = r(ke), r(be), r(ce)
+    kh, bh, ch = r(kh), r(bh), r(ch)
+    z3 = (lambda: xp.zeros((nx, ny, nz)))
+    Ex, Ey, Ez = z3(), z3(), z3()
+    Hx, Hy, Hz = z3(), z3(), z3()
+    Jx, Jy, Jz = z3(), z3(), z3()                            # Drude polarization currents (per E-component)
+    psi_Hx, psi_Hy = z3(), z3()                              # CPML memory for dEy/dz, dEx/dz (H-grid)
+    psi_Ex, psi_Ey = z3(), z3()                              # CPML memory for dHy/dz, dHx/dz (E-grid)
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    cmu = dt / MU0
+    sh = (nsteps, nx, ny)
+    exL, eyL, hxL, hyL = xp.empty(sh), xp.empty(sh), xp.empty(sh), xp.empty(sh)
+    exR, eyR, hxR, hyR = xp.empty(sh), xp.empty(sh), xp.empty(sh), xp.empty(sh)
+    for n in range(nsteps):
+        # ---------------- H update: dH/dt = -(1/mu) curl E ----------------
+        # Hx: -(dEz/dy - dEy/dz) ; dEy/dz is CPML-stretched
+        dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
+        psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
+        sEy_dz = z3(); sEy_dz[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
+        dEz_dy = (xp.roll(Ez, -1, axis=1) - Ez) / dy
+        Hx -= cmu * (dEz_dy - sEy_dz)
+        # Hy: -(dEx/dz - dEz/dx) ; dEx/dz is CPML-stretched
+        dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
+        psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
+        sEx_dz = z3(); sEx_dz[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
+        dEz_dx = (xp.roll(Ez, -1, axis=0) - Ez) / dx
+        Hy -= cmu * (sEx_dz - dEz_dx)
+        # Hz: -(dEy/dx - dEx/dy) ; both transverse (no CPML)
+        dEy_dx = (xp.roll(Ey, -1, axis=0) - Ey) / dx
+        dEx_dy = (xp.roll(Ex, -1, axis=1) - Ex) / dy
+        Hz -= cmu * (dEy_dx - dEx_dy)
+        # ---------------- E update: eps0 eps_eff dE/dt = curl H - J ----------------
+        eps_eff = eps_inf + chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
+        ce_dt = EPS0 * eps_eff / dt
+        denom = ce_dt + bJ / 2.0
+        # Ex: (dHz/dy - dHy/dz) ; dHy/dz CPML-stretched
+        dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
+        psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
+        sHy_dz = z3(); sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
+        dHz_dy = (Hz - xp.roll(Hz, 1, axis=1)) / dy
+        curlx = dHz_dy - sHy_dz
+        Exn = (ce_dt * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+        Jx = aJ * Jx + bJ * (Exn + Ex)
+        # Ey: (dHx/dz - dHz/dx) ; dHx/dz CPML-stretched
+        dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
+        psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
+        sHx_dz = z3(); sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
+        dHz_dx = (Hz - xp.roll(Hz, 1, axis=0)) / dx
+        curly = sHx_dz - dHz_dx
+        Eyn = (ce_dt * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        # Ez: (dHy/dx - dHx/dy) ; both transverse (no CPML)
+        dHy_dx = (Hy - xp.roll(Hy, 1, axis=0)) / dx
+        dHx_dy = (Hx - xp.roll(Hx, 1, axis=1)) / dy
+        curlz = dHy_dx - dHx_dy
+        Ezn = (ce_dt * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
+        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML
+        Eyn[:, :, k_src] += src[n]
+        for F in (Exn, Eyn, Ezn):
+            F[:, :, 0] = 0.0; F[:, :, -1] = 0.0
+        Ex, Ey, Ez = Exn, Eyn, Ezn
+        # probe planes: co-locate Hx,Hy (at k+/-1/2) onto the E-plane (k) so S_z co-locates in z
+        exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
+        hxL[n] = 0.5 * (Hx[:, :, k_pL] + Hx[:, :, k_pL - 1]); hyL[n] = 0.5 * (Hy[:, :, k_pL] + Hy[:, :, k_pL - 1])
+        exR[n] = Ex[:, :, k_pR]; eyR[n] = Ey[:, :, k_pR]
+        hxR[n] = 0.5 * (Hx[:, :, k_pR] + Hx[:, :, k_pR - 1]); hyR[n] = 0.5 * (Hy[:, :, k_pR] + Hy[:, :, k_pR - 1])
+    return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
+
+
+def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: float,
+                  nx: Optional[int] = None, ny: Optional[int] = None,
+                  lateral_eps_inf: Optional[np.ndarray] = None,
+                  lambda_min_m: float, lambda_max_m: float, resolution: int = 24,
+                  courant: float = 0.5, n_pad_wave: float = 4.0, settle: float = 12.0,
+                  kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
+                  backend: str = "numpy", xp=np) -> FDTD3DResult:
+    """Broadband R(f)/T(f) of a doubly-periodic (period_x_m x period_y_m) unit cell at NORMAL incidence,
+    y-polarized. `layers` = the through-stack (z) profile (vacuum super/substrate); supply
+    `lateral_eps_inf` (an (nx,ny,nz) array, or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a
+    2D-periodic structure, else the stack is laterally UNIFORM (and the result reduces to 1D/TMM). Returns
+    both the specular 0-order and the total-flux (all (kx,ky) orders) R/T. backend: 'numpy' (reference) or
+    'cupy'/xp for the GPU; the fused numba/jax 3D kernels are a follow-on (2D already has all four)."""
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    f_c = 0.5 * (f_min + f_max)
+    w_min = 2.0 * np.pi * f_min
+
+    def _n_band_max(L):
+        eps = complex(L.eps_inf)
+        if L.drude_wp_rad_s > 0.0:
+            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
+        return abs(np.sqrt(eps))
+    n_max = max(1.0, max(_n_band_max(L) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    if nx is None:
+        nx = max(4, int(round(period_x_m / dz)))
+    if ny is None:
+        ny = max(4, int(round(period_y_m / dz)))
+    dx = period_x_m / nx
+    dy = period_y_m / ny
+    # 3D CFL: dt <= courant / (c sqrt(1/dx^2 + 1/dy^2 + 1/dz^2))
+    dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
+
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+
+    shape = (nx, ny, nz)
+    eps_inf = np.ones(shape); wp = np.zeros(shape); gam = np.zeros(shape); chi3 = np.zeros(shape)
+    zc = (np.arange(nz) + 0.5) * dz
+    z = pad
+    for L in layers:
+        m = (zc >= z) & (zc < z + L.thickness_m)
+        eps_inf[:, :, m] = L.eps_inf
+        wp[:, :, m] = L.drude_wp_rad_s
+        gam[:, :, m] = L.drude_gamma_rad_s
+        if kerr:
+            chi3[:, :, m] = L.chi3_m2_V2
+        z += L.thickness_m
+    if lateral_eps_inf is not None:
+        lat = lateral_eps_inf(nx, ny, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
+        eps_inf = np.asarray(lat, dtype=float)
+
+    k_src = max(2, int(round((0.35 * pad) / dz)))
+    k_pL = int(round((0.7 * pad) / dz))
+    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    t0 = settle * tau
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    tgrid = np.arange(nsteps) * dt
+    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+
+    cpml = _cpml_z(nz, dz, dt, npml)
+    name = _resolve_backend(backend)
+    if name not in ("numpy", "cupy"):                       # the fused numba/jax 3D kernels are not built yet
+        raise RuntimeError("solve_fdtd_3d backend '{}' not implemented yet; use 'numpy' or 'cupy' "
+                           "(the fused numba/jax 3D kernels are the next increment).".format(backend))
+    xpm = xp
+    if name == "cupy" and xpm is np:
+        import cupy as xpm
+    one = np.ones(shape); zero = np.zeros(shape)
+
+    def run(ei, w, g_, c3):
+        a = tuple(xpm.asarray(v) for v in (ei, w, g_, c3))
+        out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xpm.asarray(src), cpml, xpm)
+        to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
+        return tuple(to_np(v) for v in out)
+
+    exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(one, zero, zero, zero)   # vacuum
+    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3)  # structure
+
+    f = np.fft.rfftfreq(nsteps, dt)
+    # 0-order specular co-pol (E_y) from the x,y-MEAN field (== the 1D two-run method)
+    mL_inc = np.fft.rfft(eyL_i.mean(axis=(1, 2))); mR_inc = np.fft.rfft(eyR_i.mean(axis=(1, 2)))
+    mRefl = np.fft.rfft((eyL_t - eyL_i).mean(axis=(1, 2))); mTrans = np.fft.rfft(eyR_t.mean(axis=(1, 2)))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R0 = np.abs(mRefl / mL_inc) ** 2
+        T0 = np.abs(mTrans / mR_inc) ** 2
+    # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
+    P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
+    P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i)
+    P_trans = _flux3d(exR_t, eyR_t, hxR_t, hyR_t)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R_flux = np.abs(P_refl) / np.abs(P_inc)
+        T_flux = np.abs(P_trans) / np.abs(P_inc)
+    band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
+    return FDTD3DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band)
