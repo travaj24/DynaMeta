@@ -5,7 +5,7 @@ PHASE 0 -- a 2D TE (E_y, H_x, H_z) Yee solver: a plane wave propagating in +z on
 PERIODIC in x (a 1D grating / laterally-structured slab), at NORMAL incidence. Carries the same physics
 as the 1D baseline: a semi-implicit Drude ADE per E-component, an instantaneous Kerr chi3, a
 modulated-Gaussian soft source, and the TWO-RUN (vacuum reference + structure) broadband R(omega)/
-T(omega) extraction. Mur 1st-order ABC at the z ends; periodic in x.
+T(omega) extraction. CFS-CPML absorbing layers (+ PEC backing) at the z ends; periodic in x.
 
 This is the BACKEND-AGNOSTIC NumPy REFERENCE -- the correctness oracle and CPU/small-grid path that
 every faster kernel (Taichi / CuPy RawKernel / JAX) is validated against. The hot run loop takes an
@@ -40,32 +40,62 @@ class FDTD2DResult:
     band: np.ndarray            # boolean mask of the well-excited frequency band
 
 
-def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, xp=np):
+def _cpml_z(nz, dz, dt, npml, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
+    """CFS-CPML stretched-coordinate coefficients along z (the propagation axis; x is periodic so needs
+    no PML). Returns (kappa, b, c) on the E-grid (z=k*dz) and the H-grid (z=(k+1/2)*dz). Roden-Gedney:
+    sigma/kappa graded polynomially over the outer `npml` cells each end, alpha (CFS) graded the other
+    way; b=exp(-(sigma/kappa+alpha)dt/eps0), c=sigma/(sigma*kappa+kappa^2*alpha)(b-1). Outside the PML
+    sigma=alpha=0 -> b=1,c=0 -> plain FDTD."""
+    eta0 = np.sqrt(MU0 / EPS0)
+    sig_max = -(m + 1.0) * np.log(R0) / (2.0 * eta0 * npml * dz)
+
+    def _coeffs(zpos):                                   # zpos: cell-index position along z (nz,)
+        d_lo = np.clip(npml - zpos, 0.0, None)           # depth into the low-z PML (cells)
+        d_hi = np.clip(zpos - (nz - 1 - npml), 0.0, None)  # depth into the high-z PML
+        rho = np.clip(np.maximum(d_lo, d_hi) / npml, 0.0, 1.0)
+        sig = sig_max * rho ** m
+        kap = 1.0 + (kappa_max - 1.0) * rho ** m
+        alp = alpha_max * (1.0 - rho) ** ma
+        b = np.exp(-(sig / kap + alp) * dt / EPS0)
+        denom = sig * kap + kap ** 2 * alp
+        c = np.where(denom > 0.0, sig / np.where(denom > 0.0, denom, 1.0) * (b - 1.0), 0.0)
+        return kap, b, c
+    ke, be, ce = _coeffs(np.arange(nz, dtype=float))
+    kh, bh, ch = _coeffs(np.arange(nz, dtype=float) + 0.5)
+    return (ke, be, ce), (kh, bh, ch)
+
+
+def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
-    Mur ABC in z. Records the E_y and H_x x-lines at the left/right z-probe planes (for both the
-    x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE + instantaneous Kerr."""
+    CFS-CPML absorbing layers + PEC backing in z. Records the E_y and H_x x-lines at the left/right
+    z-probe planes (for both the x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE +
+    instantaneous Kerr. `cpml` = ((kappa_e,b_e,c_e),(kappa_h,b_h,c_h)) from _cpml_z (z-broadcast)."""
     nx, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    ke = xp.asarray(ke); be = xp.asarray(be); ce = xp.asarray(ce)
+    kh = xp.asarray(kh); bh = xp.asarray(bh); ch = xp.asarray(ch)
     Ey = xp.zeros((nx, nz))
     Hx = xp.zeros((nx, nz))                 # Hx[i,k] at (i, k+1/2)
     Hz = xp.zeros((nx, nz))                 # Hz[i,k] at (i+1/2, k)
     Jy = xp.zeros((nx, nz))                 # Drude polarization current (on E_y)
+    psi_hxz = xp.zeros((nx, nz))            # CPML convolution memory for dEy/dz (H-grid)
+    psi_eyz = xp.zeros((nx, nz))            # CPML convolution memory for dHx/dz (E-grid)
     aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
-    mur = (C_LIGHT * dt - dz) / (C_LIGHT * dt + dz)
     eyL = xp.empty((nsteps, nx)); hxL = xp.empty((nsteps, nx))
     eyR = xp.empty((nsteps, nx)); hxR = xp.empty((nsteps, nx))
-    chx = dt / (MU0 * dz)
-    chz = dt / (MU0 * dx)
+    cmu = dt / MU0
     for n in range(nsteps):
-        # old z-edge cells for the Mur ABC (per x-column)
-        Ey_L0, Ey_L1 = Ey[:, 0].copy(), Ey[:, 1].copy()
-        Ey_R0, Ey_R1 = Ey[:, -1].copy(), Ey[:, -2].copy()
-        # H updates: dHx/dt = (1/mu0) dEy/dz ; dHz/dt = -(1/mu0) dEy/dx (periodic in x)
-        Hx[:, :-1] += chx * (Ey[:, 1:] - Ey[:, :-1])
-        Hz += -chz * (xp.roll(Ey, -1, axis=0) - Ey)
-        # curl_y(H) = dHx/dz - dHz/dx at the E_y points (interior in z; periodic in x)
+        # H update: dHx/dt = (1/mu0) (CPML-stretched dEy/dz) ; dHz/dt = -(1/mu0) dEy/dx (periodic x)
+        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz                      # at H positions k=0..nz-2
+        psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
+        Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
+        Hz += -cmu * (xp.roll(Ey, -1, axis=0) - Ey) / dx
+        # curl_y(H) = (CPML-stretched dHx/dz) - dHz/dx at the E_y points
+        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz                      # at E positions k=1..nz-1
+        psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
         curl = xp.zeros((nx, nz))
-        curl[:, 1:] += (Hx[:, 1:] - Hx[:, :-1]) / dz
+        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
         curl -= (Hz - xp.roll(Hz, 1, axis=0)) / dx
         # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr
         eps_eff = eps_inf + chi3 * Ey ** 2
@@ -73,12 +103,13 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         Eynew = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eynew + Ey)
         Eynew[:, k_src] += src[n]            # soft plane source (uniform in x -> normal-incidence plane wave)
-        # Mur 1st-order ABC at both z ends
-        Eynew[:, 0] = Ey_L1 + mur * (Eynew[:, 1] - Ey_L0)
-        Eynew[:, -1] = Ey_R1 + mur * (Eynew[:, -2] - Ey_R0)
+        Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0  # PEC backing the CPML
         Ey = Eynew
-        eyL[n] = Ey[:, k_pL]; hxL[n] = Hx[:, k_pL]
-        eyR[n] = Ey[:, k_pR]; hxR[n] = Hx[:, k_pR]
+        # record E_y and H_x at the probe planes; AVERAGE H_x (at k+/-1/2) onto the E_y plane (at k) so
+        # the Poynting flux E_y*H_x co-locates spatially -- else the half-cell z-offset carries a
+        # per-diffraction-order phase (each order has a different k_z) that does NOT cancel in the ratio.
+        eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
+        eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
     return eyL, hxL, eyR, hxR
 
 
@@ -95,7 +126,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   lateral_eps_inf: Optional[np.ndarray] = None,
                   lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                   courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
-                  kerr: bool = False, source_amp: float = 1.0, xp=np) -> FDTD2DResult:
+                  kerr: bool = False, source_amp: float = 1.0, npml: int = 12, xp=np) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
     is the through-stack (z) profile (vacuum super/substrate); supply `lateral_eps_inf` (shape
     (nx, n_layer_cells) or a callable building the (nx,nz) eps_inf) to make a laterally-structured
@@ -151,12 +182,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
+    cpml = _cpml_z(nz, dz, dt, npml)                  # CFS-CPML coefficients in z (material-independent)
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
     a = (xp.asarray(eps_inf), xp.asarray(wp), xp.asarray(gam), xp.asarray(chi3))
+    srcx = xp.asarray(src)
     eyL_i, hxL_i, eyR_i, hxR_i = _run_2d_te(xp.asarray(one), xp.asarray(zero), xp.asarray(zero),
                                             xp.asarray(zero), dx, dz, dt, nsteps, k_src, k_pL, k_pR,
-                                            xp.asarray(src), xp)
-    eyL_t, hxL_t, eyR_t, hxR_t = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), xp)
+                                            srcx, cpml, xp)
+    eyL_t, hxL_t, eyR_t, hxR_t = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, srcx, cpml, xp)
     # back to numpy for the FFT extraction
     g = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     eyL_i, hxL_i, eyR_i, hxR_i = map(g, (eyL_i, hxL_i, eyR_i, hxR_i))
