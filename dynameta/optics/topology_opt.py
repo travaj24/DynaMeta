@@ -31,31 +31,38 @@ def _conic_offsets(radius):
     return offs
 
 
-def _shift_z(arr, dz):
-    """Shift along axis 1 (z) by dz with EDGE-clamp padding (so the filter does not wrap in z)."""
-    if dz == 0:
+def _shift_clamp(arr, shift, axis):
+    """Shift along `axis` by `shift` with EDGE-clamp padding (the filter does not wrap on this axis)."""
+    if shift == 0:
         return arr
     import jax.numpy as jnp
-    if dz > 0:
-        pad = jnp.repeat(arr[:, :1], dz, axis=1)
-        return jnp.concatenate([pad, arr[:, :-dz]], axis=1)
-    k = -dz
-    pad = jnp.repeat(arr[:, -1:], k, axis=1)
-    return jnp.concatenate([arr[:, k:], pad], axis=1)
+    n = arr.shape[axis]
+    lead = [slice(None)] * arr.ndim
+    if shift > 0:
+        lead[axis] = slice(0, 1)
+        pad = jnp.repeat(arr[tuple(lead)], shift, axis=axis)
+        keep = [slice(None)] * arr.ndim; keep[axis] = slice(0, n - shift)
+        return jnp.concatenate([pad, arr[tuple(keep)]], axis=axis)
+    k = -shift
+    lead[axis] = slice(n - 1, n)
+    pad = jnp.repeat(arr[tuple(lead)], k, axis=axis)
+    keep = [slice(None)] * arr.ndim; keep[axis] = slice(k, n)
+    return jnp.concatenate([arr[tuple(keep)], pad], axis=axis)
 
 
-def density_filter(rho, radius):
-    """Conic spatial filter on a (nx, nz) density region -- imposes a minimum feature size (kills
-    pixel-scale / checkerboard designs). PERIODIC in x (axis 0, via roll) and EDGE-clamped in z (axis 1).
-    Differentiable (a fixed linear convolution). radius <= 0 -> identity (no filtering)."""
+def density_filter(rho, radius, periodic_axes=(0,)):
+    """Conic spatial filter on a 2D density region -- imposes a minimum feature size (kills pixel-scale /
+    checkerboard designs). Axes in `periodic_axes` wrap (jnp.roll); the rest are EDGE-clamped. Defaults
+    to (0,) = periodic axis-0 (x), clamped axis-1 (z) -- the 2D-FDTD pattern. For a 3D-FDTD LATERAL
+    pattern (x AND y periodic) pass periodic_axes=(0, 1). Differentiable; radius <= 0 -> identity."""
     if radius is None or radius <= 0:
         return rho
     import jax.numpy as jnp
     acc = jnp.zeros_like(rho)
     wsum = 0.0
-    for dx, dz, w in _conic_offsets(radius):
-        s = jnp.roll(rho, dx, axis=0)                       # periodic in x
-        s = _shift_z(s, dz)                                 # clamped in z
+    for da, db, w in _conic_offsets(radius):
+        s = jnp.roll(rho, da, axis=0) if 0 in periodic_axes else _shift_clamp(rho, da, 0)
+        s = jnp.roll(s, db, axis=1) if 1 in periodic_axes else _shift_clamp(s, db, 1)
         acc = acc + w * s
         wsum += w
     return acc / wsum
@@ -83,8 +90,9 @@ def binarization(rho_p, tol=0.05):
     return float(np.mean((r < tol) | (r > 1.0 - tol)))
 
 
-def topology_optimize(forward_loss, rho0, *, filter_radius, betas=(1.0, 2.0, 4.0, 8.0, 16.0),
-                      steps_per_beta=20, lr=0.05, eta=0.5, callback=None):
+def topology_optimize(forward_loss, rho0, *, filter_radius, periodic_axes=(0,),
+                      betas=(1.0, 2.0, 4.0, 8.0, 16.0), steps_per_beta=20, lr=0.05, eta=0.5,
+                      callback=None):
     """Density topology optimisation. `forward_loss(rho_projected) -> scalar` builds the FDTD eps from the
     PROJECTED density (eps_from_density into the caller's grid), runs the JAX FDTD, and returns the
     objective to MINIMISE. This driver applies the filter + tanh projection inside the loss and Adam-steps
@@ -96,11 +104,11 @@ def topology_optimize(forward_loss, rho0, *, filter_radius, betas=(1.0, 2.0, 4.0
     history = []
     for beta in betas:
         def loss(r, _beta=beta):
-            return forward_loss(project(density_filter(r, filter_radius), _beta, eta))
+            return forward_loss(project(density_filter(r, filter_radius, periodic_axes), _beta, eta))
         rho_np, h = optimize_fdtd(loss, rho, n_steps=steps_per_beta, lr=lr, clip=(0.0, 1.0))
         rho = jnp.asarray(rho_np)
         history.extend(h)
         if callback is not None:
             callback(float(beta), h)
-    rho_p = np.asarray(project(density_filter(rho, filter_radius), betas[-1], eta))
+    rho_p = np.asarray(project(density_filter(rho, filter_radius, periodic_axes), betas[-1], eta))
     return np.asarray(rho), rho_p, history

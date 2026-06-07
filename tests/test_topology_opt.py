@@ -35,6 +35,12 @@ def test_filter_clamped_in_z_no_wrap():
     assert f[0, 5] == 0.0                                   # does NOT wrap to the far z edge
 
 
+def test_filter_both_periodic_for_3d_lateral():
+    spike = jnp.zeros((6, 6)).at[0, 0].set(1.0)
+    f = np.asarray(density_filter(spike, 2.0, periodic_axes=(0, 1)))   # 3D lateral pattern: x AND y periodic
+    assert f[5, 0] > 0.0 and f[0, 5] > 0.0                  # wraps in BOTH axes
+
+
 def test_eps_from_density_endpoints():
     assert float(eps_from_density(jnp.array(0.0), 1.0, 12.0)) == 1.0
     assert float(eps_from_density(jnp.array(1.0), 1.0, 12.0)) == 12.0
