@@ -19,7 +19,10 @@ GATE A: the model tensor's eigenvalues are {eps_r - g, eps_r, eps_r + g} (the tw
 GATE B: the full circular-TMM transmitted-polarization rotation == the analytic bulk theta_F within
         5% (relative) over a range of gyration g (and g = 0 gives no rotation). The small residual is
         the Fabry-Perot / interface correction the bulk theta_F omits but the exact TMM includes.
-GATE C: real eps_r + real g -> the tensor is HERMITIAN -> LOSSLESS: R + T = 1 at every g.
+GATE C: real eps_r + real g -> the tensor is HERMITIAN (eps == eps^H) = an INDEPENDENT proof of
+        losslessness that also catches an off-diagonal SIGN error (ig/-ig vs ig/+ig) the real-n_pm
+        circular-TMM cannot; a complex-eps_r (absorbing) variant must FAIL Hermiticity. (NOT the
+        circular-TMM R+T=1, which a lossless TMM gives for free -- the lossless trap.)
 GATE D: the FEM (UPML off-diagonal tensor solve) transmitted power matches the circular-eigenmode
         Jones-TMM -- the fit-independent Poynting flux T_total == 0.5(|t_+|^2+|t_-|^2), the
         single-projection (co-polarized) lstsq T == the co-pol reference, and the Hermitian tensor is
@@ -148,11 +151,21 @@ def main():
         n_p, n_m = np.sqrt(EPS_R + g), np.sqrt(EPS_R - g)
         theta_an = float(np.degrees(np.pi * L / LAM * (n_p - n_m)))     # analytic bulk Faraday angle
         d_rot = abs(abs(rot_deg) - abs(theta_an))                      # magnitudes (sign convention)
-        e_close = abs(R + T - 1.0)
         gate_b = gate_b and (d_rot < ROT_RTOL * abs(theta_an) + ROT_ABS_DEG)
-        gate_c = gate_c and (e_close < 1e-9)
+        # GATE C (INDEPENDENT losslessness): for real eps_r,g the gyrotropic tensor must be HERMITIAN
+        # -- that is the physical reason the medium is lossless, and it catches an off-diagonal SIGN
+        # error (ig/-ig vs ig/+ig) that the real-n_pm circular-TMM cannot. (NOT R+T=1, which any
+        # lossless TMM gives for free -- the lossless trap.)
+        Tg = np.asarray(MagnetoOpticModel(eps_r=EPS_R, g=g).eps({}, LAM))
+        herm_viol = float(np.max(np.abs(Tg - Tg.conj().T)))
+        gate_c = gate_c and (herm_viol < 1e-12 * (float(np.max(np.abs(Tg))) + 1e-30))
         print("[mo] g={:.2f}: rot_tmm={:+7.3f} deg  theta_analytic={:+7.3f} deg  |d|={:.3e} deg | "
-              "R+T-1={:.2e}".format(g, rot_deg, theta_an, d_rot, e_close), flush=True)
+              "Hermiticity-viol={:.1e}".format(g, rot_deg, theta_an, d_rot, herm_viol), flush=True)
+    # counter-check that GATE C has teeth: an ABSORBING variant (complex eps_r) is NON-Hermitian
+    Tlossy = np.asarray(MagnetoOpticModel(eps_r=complex(EPS_R, 0.1), g=0.05).eps({}, LAM))
+    gate_c = gate_c and (float(np.max(np.abs(Tlossy - Tlossy.conj().T))) > 1e-3)   # must FAIL Hermiticity
+    print("[mo] Hermiticity discriminates: a complex-eps_r (lossy) gyrotropic tensor is non-Hermitian "
+          "(viol={:.2f})".format(float(np.max(np.abs(Tlossy - Tlossy.conj().T)))), flush=True)
 
     # GATE D: end-to-end through the off-diagonal UPML FEM
     gate_d, msg_d = _gate_d_fem()
@@ -164,8 +177,8 @@ def main():
         "PASS" if gate_a else "FAIL"), flush=True)
     print("[mo] GATE B (circular-TMM rotation == analytic theta_F within {:.0%} rel; g=0 -> 0): "
           "{}".format(ROT_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
-    print("[mo] GATE C (Hermitian gyrotropic -> lossless R+T=1): {}".format(
-        "PASS" if gate_c else "FAIL"), flush=True)
+    print("[mo] GATE C (gyrotropic tensor is HERMITIAN = independent losslessness, catches off-diag "
+          "sign; a complex-eps_r variant fails it): {}".format("PASS" if gate_c else "FAIL"), flush=True)
     print("[mo] GATE D (off-diagonal UPML FEM == circular-eigenmode Jones-TMM, lossless): {}".format(
         "PASS" if gate_d else "FAIL"), flush=True)
     print("[mo] *** MAGNETO-OPTIC FARADAY (gyrotropic tensor): {} ***".format(
