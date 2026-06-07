@@ -21,7 +21,7 @@ from typing import Callable, List, Optional
 
 from dynameta.core.bridge import assemble_eps
 from dynameta.core.lift import choose_lift
-from dynameta.core.n_to_eps import MaterialEpsMap
+from dynameta.core.n_to_eps import MaterialEpsMap, NToEpsMap
 from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeometryBuilder
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
@@ -52,7 +52,9 @@ def run_pipeline(design: Design, sweep: Sweep, *,
                    verbose: bool = True,
                    carrier_solver: Optional[CarrierSolver] = None,
                    optical_builder: Optional[OpticalGeometryBuilder] = None,
-                   optical_solver: Optional[Callable[..., OpticalResult]] = None) -> List[SweepRow]:
+                   optical_solver: Optional[Callable[..., OpticalResult]] = None,
+                   n_to_eps: Optional[NToEpsMap] = None,
+                   extra_fields: Optional[object] = None) -> List[SweepRow]:
     """Run the full Design + Sweep through carriers -> bridge -> optics.
 
     carrier_solver / optical_builder may be supplied to override the defaults
@@ -67,6 +69,20 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     ``optical_builder.build()`` (the FEM mesh) unless you ALSO supply an ``optical_builder``
     that exposes only ``alignment()`` / ``mesh_regions()`` -- pass such a stub to skip the
     mesh build and the ngsolve dependency entirely.
+
+    n_to_eps: the per-region RESPONSE map (NToEpsMap). Defaults to ``MaterialEpsMap(design.materials)``
+    (the carrier/Drude path reading 'n'). Pass an ``EffectEpsMap(design.materials, effects={...})`` to
+    drive the field/temperature/state EFFECT MODELS (Pockels / Kerr / Franz-Keldysh / thermo-optic /
+    QCSE / PCM / LC / magneto-optic) through the SAME bridge -- this is how the modulation-mechanism
+    family is reached from the orchestrator (otherwise it is reachable only by a hand-rolled
+    assemble_eps loop).
+
+    extra_fields: the field bundle the effect models read alongside 'n' -- {'E': ..., 'T': ...,
+    'director_angle_rad': ..., 'crystalline_fraction': ..., 'magnetization': ...}. Either a static
+    dict (same for every bias) or a CALLABLE ``fn(bias_point) -> dict`` (the usual case: the applied
+    field/temperature changes with bias -- e.g. run ``carriers.electrostatics_fem.solve_electrostatics_fem``
+    / ``thermal_fem.solve_thermal_fem`` per bias and thread the resulting E / T here). None (the
+    default) leaves the carrier-only path byte-identical.
     """
     if carrier_solver is None:
         from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
@@ -96,7 +112,8 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             len(align.fixed_eps_regions)), flush=True)
 
     solve_optics = optical_solver or _fem_optical_solver
-    n_to_eps = MaterialEpsMap(design.materials)
+    if n_to_eps is None:
+        n_to_eps = MaterialEpsMap(design.materials)
     lift = choose_lift(design.device_symmetry(), design.optical.lift,
                         period_y_m=design.unit_cell.period_y_m, ny=design.optical.ny_sym)
 
@@ -104,11 +121,14 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     rows: List[SweepRow] = []
     for bp in sweep.bias_points:
         cf = fields[bp.label]
+        # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
+        # dict is reused; None keeps the carrier-only path byte-identical)
+        ef = extra_fields(bp) if callable(extra_fields) else extra_fields
         for lam_nm in sweep.wavelengths_nm:
             lambda_m = float(lam_nm) * 1e-9
             n_super, n_sub = end_media_indices(design, lambda_m)
             eps_by_region = assemble_eps(cf, align, n_to_eps, lift, lambda_m,
-                                          mesh_regions=mesh_regions)
+                                          mesh_regions=mesh_regions, extra_fields=ef)
             res = solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub)
             rows.append(SweepRow(bp.label, float(lam_nm), res))
             if verbose:
