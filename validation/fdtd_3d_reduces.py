@@ -160,20 +160,24 @@ def main():
     print("[f3] F Kerr self-action: max|T0(hi)-T0(lo)|={:.2e} (>0 = SPM) ; low-amp energy |R+T-1|={:.2e} "
           "(lossless) -> {}".format(dshift, enF, "PASS" if gate_f else "FAIL"), flush=True)
 
-    # GATE G (cross-backend): the fused numba 3D kernel (the fast threaded CPU path) reproduces the numpy
-    # reference to machine precision -- same six-component physics, just compiled. Skipped if numba absent.
+    # GATE G (cross-backend): every compiled-kernel 3D backend present -- numba (fused threaded CPU) and
+    # jax (XLA lax.scan, differentiable) -- reproduces the numpy reference to machine precision (same
+    # six-component physics, just compiled). Backends not installed are skipped.
     from dynameta.optics.fdtd_nd import available_backends
-    if "numba" in available_backends():
+    avail = available_backends()
+    gate_g = True
+    for bk in ("numba", "jax"):
+        if bk not in avail:
+            print("[f3] G {} backend: SKIP (not installed)".format(bk), flush=True)
+            continue
         rG = solve_fdtd_3d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9, period_y_m=300e-9,
-                           nx=4, ny=4, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=18, backend="numba")
+                           nx=4, ny=4, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=18, backend=bk)
         mG = rA.band & rG.band
         dG = max(float(np.max(np.abs(rA.R0[mG] - rG.R0[mG]))), float(np.max(np.abs(rA.T0[mG] - rG.T0[mG]))))
-        gate_g = bool(dG < 1e-9)
-        print("[f3] G numba==numpy (3D): max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
-            dG, "PASS" if gate_g else "FAIL"), flush=True)
-    else:
-        gate_g = True
-        print("[f3] G numba backend: SKIP (not installed)", flush=True)
+        ok = bool(dG < 1e-9)
+        gate_g = gate_g and ok
+        print("[f3] G {}==numpy (3D): max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
+            bk, dG, "PASS" if ok else "FAIL"), flush=True)
 
     overall = gate_a and gate_b and gate_c and gate_d and gate_e and gate_f and gate_g
     print("[f3] *** 3D FULL-VECTOR FDTD (reduces to 1D/TMM; reduces to 2D engine; 3D diffraction; "
