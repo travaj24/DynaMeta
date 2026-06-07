@@ -84,6 +84,31 @@ def test_sweep_guards():
         fdtd_sweep_spectrum(d, lambda_min_m=1200e-9, lambda_max_m=1400e-9, n_super=1.5 + 0j)
 
 
+def test_fit_drude_recovers_known_drude():
+    import numpy as np
+    from dynameta.optics.fdtd_seam import fit_drude_to_eps
+    Cc = 299792458.0
+    einf, wp, g = 3.0, 1.2e15, 3.0e13
+    lam = np.linspace(1100e-9, 1700e-9, 9)
+    w = 2.0 * np.pi * Cc / lam
+    eps = einf - wp ** 2 / (w ** 2 + 1j * w * g)
+    fi, fwp, fg = fit_drude_to_eps(lam, eps)
+    assert abs(fi - einf) < 1e-2 and abs(fwp - wp) / wp < 1e-3 and abs(fg - g) / g < 1e-2
+    model = fi - fwp ** 2 / (w ** 2 + 1j * w * fg)
+    assert np.max(np.abs(model - eps)) < 1e-3 * np.max(np.abs(eps))   # reproduces eps across the band
+
+
+def test_fit_drude_lossless_dielectric():
+    import numpy as np
+    from dynameta.optics.fdtd_seam import fit_drude_to_eps
+    Cc = 299792458.0
+    lam = np.linspace(1100e-9, 1700e-9, 7)
+    w = 2.0 * np.pi * Cc / lam
+    fi, fwp, fg = fit_drude_to_eps(lam, np.full(7, 4.0 + 0j))
+    model = fi - fwp ** 2 / (w ** 2 + 1j * w * fg)
+    assert np.max(np.abs(model - 4.0)) < 5e-3               # non-dispersive eps=4 reproduced across the band
+
+
 # ---- lateral-inclusion rasterization (structured cells) -------------------------------------------
 
 def test_rasterize_circle_fill_fraction_and_placement():
