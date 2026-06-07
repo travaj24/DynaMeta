@@ -58,7 +58,9 @@ if TYPE_CHECKING:                       # type-only; OpticalSpec lives in geomet
 
 # Oblique formulation: "phase_in_space" (physical field, genuine curl, standard
 # PML -- the validated route) or "envelope" (plain-periodic envelope, modified
-# curl -- diagnostic only). Both are identical at normal incidence.
+# curl -- diagnostic only). Both are identical at normal incidence. This is a module-level
+# switch (NOT a solve_fem kwarg): the "envelope" branch is reachable only by editing it here, so it
+# is effectively dead on the public path -- kept for reference/diagnostics, not for production use.
 _OBLIQUE_FORMULATION = "phase_in_space"
 # Sign of the transverse-phase term on the TEST envelope's modified curl (envelope
 # route only): trial carries exp(+i k_par.r) (+kcross), test the conjugate (-kcross).
