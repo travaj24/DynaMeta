@@ -7,8 +7,10 @@ natively -- putting the carrier density / F_1/2 expression inside an edge model
 hangs DEVSIM's expr system, whether via a node-model reference or inlined).
 
   Poisson:  div(eps grad psi) = q (n - N_D)
-  SG (Boltzmann):  Jn = q mu EdgeInvLength V_t [n@n1 B(dpsi/V_t) - n@n0 B(-dpsi/V_t)]
-  FD enhancement:  replace dpsi/V_t by (dpsi/V_t)/g and scale the current by g,
+  SG (Boltzmann):  with vdiff = (psi@n0 - psi@n1)/V_t (the library's edge sign convention),
+                   Jn = q mu EdgeInvLength V_t [n@n1 B(-vdiff) - n@n0 B(vdiff)] -- equivalently the
+                   kahan3 form below via the Bernoulli identity B(x)+x = B(-x).
+  FD enhancement:  replace vdiff by vdiff/g and scale the current by g,
                    g(n) = generalized-Einstein ratio F_1/2(eta)/F_-1/2(eta).
   Continuity: div(Jn) = 0 (DC, no recombination).
 

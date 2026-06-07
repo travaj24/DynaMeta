@@ -26,8 +26,9 @@ see physics_drift_diffusion.py for the fit + coefficients):
 For a non-degenerate Si diode (c/N_dos << 1) g -> 1 and the current reduces EXACTLY to
 standard Boltzmann Scharfetter-Gummel; for ITO it is the FD softening (~1.1% peak, <0.5%
 over eta>=10, valid to eta~32; vs the old degenerate-asymptote form's 6-35% error; audit F1,
-bounds re-measured DD-1/DD-2). NOTE: holes use this SAME N_dos (~N_c); a degenerate p-type
-material would need a separate valence-band N_v for the hole g-factor (audit DD-5).
+bounds re-measured DD-1/DD-2). The hole g-factor uses its OWN valence DOS N_dos_p (~N_v),
+passed via setup_bipolar_region(n_dos_p_m3=...); it defaults to N_dos (N_v == N_c) for the
+non-degenerate case, so a degenerate p-region is now correct too (audit DD-5).
 
 Charge-neutral ohmic contact (recipe): pin
   n0 = 1/2 ( NetDoping + sqrt(NetDoping^2 + 4 n_i^2) )   (majority on n-side),
@@ -52,24 +53,28 @@ from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.einstein import g_expr_devsim
 
 
-def _g_expr(var: str, s: str) -> str:
-    """g(var{s}/N_dos) as a DEVSIM edge expression -- the rational fit + its coefficients live
+def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:
+    """g(var{s}/dos) as a DEVSIM edge expression -- the rational fit + its coefficients live
     in carriers/einstein.g_expr_devsim (the single source, shared with physics_drift_diffusion;
-    same coefficients for electrons and holes)."""
-    return g_expr_devsim(var, "N_dos", s)
+    same coefficients for electrons and holes). `dos` is the band DOS parameter name (N_dos ~ N_c
+    for electrons, N_dos_p ~ N_v for holes)."""
+    return g_expr_devsim(var, dos, s)
 
 
 def setup_bipolar_region(device: str, region: str, *,
                          eps_static: float, n_dos_m3: float, n_i_m3: float,
                          mobility_n_m2Vs: float, mobility_p_m2Vs: float,
                          tau_n_s: float, tau_p_s: float,
-                         fd_enhancement: bool = True) -> None:
+                         fd_enhancement: bool = True,
+                         n_dos_p_m3: "float | None" = None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
       eps_static       : static relative permittivity (dimensionless)
-      n_dos_m3         : effective DOS used by the FD g-factor (~N_c, m^-3). For a
-                         non-degenerate diode the exact value is irrelevant (g~1).
+      n_dos_m3         : CONDUCTION-band effective DOS (~N_c, m^-3) for the electron FD g-factor.
+                         For a non-degenerate diode the exact value is irrelevant (g~1).
+      n_dos_p_m3       : VALENCE-band effective DOS (~N_v, m^-3) for the HOLE FD g-factor; defaults
+                         to n_dos_m3 (N_v == N_c) -- supply N_v for a degenerate p-region (audit DD-5).
       n_i_m3           : intrinsic carrier density (m^-3)
       mobility_n_m2Vs  : electron mobility (m^2/(V s))
       mobility_p_m2Vs  : hole mobility (m^2/(V s))
@@ -91,6 +96,8 @@ def setup_bipolar_region(device: str, region: str, *,
     ds.set_parameter(device=device, region=region, name="mu_n", value=mobility_n_m2Vs)
     ds.set_parameter(device=device, region=region, name="mu_p", value=mobility_p_m2Vs)
     ds.set_parameter(device=device, region=region, name="N_dos", value=n_dos_m3)
+    ds.set_parameter(device=device, region=region, name="N_dos_p",
+                     value=float(n_dos_p_m3) if n_dos_p_m3 is not None else n_dos_m3)
     ds.set_parameter(device=device, region=region, name="n_i", value=n_i_m3)
     ds.set_parameter(device=device, region=region, name="taun", value=tau_n_s)
     ds.set_parameter(device=device, region=region, name="taup", value=tau_p_s)
@@ -123,7 +130,8 @@ def setup_bipolar_region(device: str, region: str, *,
     # edge value = average of g(c/N_dos) over the edge's two nodes.
     if fd_enhancement:
         g_n = "(0.5*({} + {}))".format(_g_expr("Electrons", "@n0"), _g_expr("Electrons", "@n1"))
-        g_p = "(0.5*({} + {}))".format(_g_expr("Holes", "@n0"), _g_expr("Holes", "@n1"))
+        g_p = "(0.5*({} + {}))".format(_g_expr("Holes", "@n0", dos="N_dos_p"),
+                                       _g_expr("Holes", "@n1", dos="N_dos_p"))
         _edge_with_derivs(device, region, "g_enh", g_n, ("Electrons",))
         _edge_with_derivs(device, region, "g_enh_p", g_p, ("Holes",))
     else:
@@ -139,7 +147,7 @@ def setup_bipolar_region(device: str, region: str, *,
     jn = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
           "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
     _edge_with_derivs(device, region, "ElectronCurrent", jn,
-                      ("Electrons", "Potential", "Holes"))
+                      ("Electrons", "Potential"))            # Jn has no Holes dependence (no dead dJn/dp)
 
     # --- hole current (q -> -q; vdiff drift term moved to @n0) ---
     # vdiff_gp = vdiff/g_enh_p ; Bern_gp = B(vdiff_gp) ; Jp scaled by g_enh_p.
@@ -150,7 +158,7 @@ def setup_bipolar_region(device: str, region: str, *,
     jp = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
           "kahan3(Holes@n1*Bern_gp, -Holes@n0*Bern_gp, -Holes@n0*vdiff_gp)")
     _edge_with_derivs(device, region, "HoleCurrent", jp,
-                      ("Holes", "Potential", "Electrons"))
+                      ("Holes", "Potential"))                # Jp has no Electrons dependence
 
     # --- SRH recombination: one node model into BOTH continuity equations ---
     usrh = "(Electrons*Holes - n_i^2)/(taup*(Electrons + n1) + taun*(Holes + p1))"

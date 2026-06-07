@@ -31,7 +31,7 @@ from typing import List, Protocol, runtime_checkable
 import numpy as np
 
 from dynameta.constants import HBAR, C_LIGHT
-from dynameta.core.backend import array_namespace, to_backend, is_jax_array
+from dynameta.core.backend import array_namespace, to_backend, is_jax_array, is_numpy_array
 
 
 @runtime_checkable
@@ -82,6 +82,19 @@ class ComposedEffect:
         total = as_tensor(self.background.eps(fields, lambda_m))
         for d in self.deltas:
             total = total + as_tensor(d.eps(fields, lambda_m))
+        # passivity check (exp(-iwt), Im(eps)>0 = loss): a DeltaEffect that LOWERS Im (bleaching /
+        # Franz-Keldysh / QCSE) can push the composed eps into GAIN. Warn at the constitutive seam
+        # (the anti-Hermitian part must be >= 0) rather than letting it surface 3 layers down at the
+        # FEM energy tripwire. Numpy-only check (skip a traced/cupy array to stay backend-agnostic).
+        if is_numpy_array(total):
+            herm = 0.5 * (total + np.conjugate(np.swapaxes(total, -1, -2)))   # ((eps + eps^H)/2)
+            anti_im = np.linalg.eigvalsh((total - herm) / 1j)                 # eigs of Im-part (Herm)
+            if np.min(anti_im) < -1e-6 * (np.max(np.abs(total)) + 1e-30):
+                warnings.warn(
+                    "ComposedEffect.eps: the composed permittivity has a NEGATIVE imaginary eigenvalue "
+                    "(min {:.2e}) -- with exp(-iwt) that is GAIN, not loss. A DeltaEffect is lowering "
+                    "Im(eps) below the background absorption; check the bleaching/FK/QCSE delta or the "
+                    "background Im.".format(float(np.min(anti_im))), RuntimeWarning, stacklevel=2)
         return total
 
 
@@ -351,6 +364,13 @@ class ElectroAbsorptionModel:
         return a
 
     def _field_magnitude(self, fields: dict) -> float:
+        # numpy-ONLY: unlike the other effect models this one wraps scipy eigensolvers (the QCSE
+        # Schrodinger solve) + np.interp (the Kramers-Kronig transform), so it is not JAX-traceable.
+        # Give a clear error instead of an opaque concretization failure if a JAX array is passed.
+        if is_jax_array((fields or {}).get("E")):
+            raise TypeError("ElectroAbsorptionModel is numpy-only (it wraps scipy eigensolvers + "
+                            "Kramers-Kronig np.interp) and cannot be JAX-traced; pass a numpy E field "
+                            "(use jax.pure_callback / a numpy boundary if differentiating around it).")
         E = np.asarray(_E_vec(fields))
         f_axis = float(np.max(np.abs(E[..., int(self.field_axis)])))
         f_tot = float(np.max(np.abs(E)))

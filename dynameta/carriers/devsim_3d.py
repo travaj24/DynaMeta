@@ -9,8 +9,9 @@ gate contact on top, body contact on bottom) and solves, on the 3D mesh, either:
     Scharfetter-Gummel electron continuity + Poisson (`physics_drift_diffusion`),
     body contact pinning Electrons (= N_D), abs_tol scaled to n_bg, staged
     zero-bias-seed -> gate-ramp Newton.
-Emits a `CarrierField(ndim=3)` the bridge consumes via `IdentityLift` -- the
-physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
+Emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY: the native 3D-grid branch of
+assemble_eps places the (x,y,z) density with NO FieldLift synthesis (a lift applies to 2D
+fields only) -- the physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
 
 Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumulates/
 -Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
