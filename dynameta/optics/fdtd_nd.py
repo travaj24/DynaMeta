@@ -648,6 +648,72 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
     return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
 
 
+def _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
+    """JAX (XLA lax.scan) 3D backend -- the SAME six-component physics as _run_3d, but DIFFERENTIABLE end
+    to end: a downstream jax.grad gives d(R,T)/d(geometry/material) for 3D inverse design. Functional
+    (immutable .at[]) updates, float64 forced to match the reference. Returns the eight probe planes as JAX
+    arrays (the dispatcher converts to NumPy; staying in JAX lets a caller grad straight through the loop)."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from jax import lax
+    (ke, be, ce), (kh, bh, ch) = cpml
+    nx, ny, nz = eps_inf.shape
+    rs = (lambda a: jnp.asarray(a).reshape(1, 1, nz))       # z-profile -> broadcast
+    ke, be, ce = rs(ke), rs(be), rs(ce)
+    kh, bh, ch = rs(kh), rs(bh), rs(ch)
+    eps_inf = jnp.asarray(eps_inf); chi3 = jnp.asarray(chi3)
+    gam = jnp.asarray(gam); wp = jnp.asarray(wp)
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    cmu = dt / MU0
+    zz = jnp.zeros((nx, ny, nz))
+
+    def step(carry, src_n):
+        Ex, Ey, Ez, Hx, Hy, Hz, Jx, Jy, Jz, psi_Hx, psi_Hy, psi_Ex, psi_Ey = carry
+        # ---- H update ----
+        dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
+        psi_Hx = psi_Hx.at[:, :, :-1].set(bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz)
+        sEy = zz.at[:, :, :-1].set(dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1])
+        Hx = Hx - cmu * ((jnp.roll(Ez, -1, axis=1) - Ez) / dy - sEy)
+        dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
+        psi_Hy = psi_Hy.at[:, :, :-1].set(bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz)
+        sEx = zz.at[:, :, :-1].set(dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1])
+        Hy = Hy - cmu * (sEx - (jnp.roll(Ez, -1, axis=0) - Ez) / dx)
+        Hz = Hz - cmu * ((jnp.roll(Ey, -1, axis=0) - Ey) / dx - (jnp.roll(Ex, -1, axis=1) - Ex) / dy)
+        # ---- E update (per-component Drude ADE + Kerr) ----
+        eps_eff = eps_inf + chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
+        ce_dt = EPS0 * eps_eff / dt
+        denom = ce_dt + bJ / 2.0
+        coef = 0.5 * (1.0 + aJ)
+        dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
+        psi_Ex = psi_Ex.at[:, :, 1:].set(be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz)
+        sHy = zz.at[:, :, 1:].set(dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:])
+        Exn = (ce_dt * Ex + ((Hz - jnp.roll(Hz, 1, axis=1)) / dy - sHy) - coef * Jx - 0.5 * bJ * Ex) / denom
+        Jx = aJ * Jx + bJ * (Exn + Ex)
+        dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
+        psi_Ey = psi_Ey.at[:, :, 1:].set(be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz)
+        sHx = zz.at[:, :, 1:].set(dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:])
+        Eyn = (ce_dt * Ey + (sHx - (Hz - jnp.roll(Hz, 1, axis=0)) / dx) - coef * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        curlz = (Hy - jnp.roll(Hy, 1, axis=0)) / dx - (Hx - jnp.roll(Hx, 1, axis=1)) / dy
+        Ezn = (ce_dt * Ez + curlz - coef * Jz - 0.5 * bJ * Ez) / denom
+        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Eyn = Eyn.at[:, :, k_src].add(src_n)                # soft y-pol source
+        Exn = Exn.at[:, :, 0].set(0.0).at[:, :, nz - 1].set(0.0)   # PEC: tangential Ex,Ey only
+        Eyn = Eyn.at[:, :, 0].set(0.0).at[:, :, nz - 1].set(0.0)
+        Ex, Ey, Ez = Exn, Eyn, Ezn
+        out = (Ex[:, :, k_pL], Ey[:, :, k_pL],
+               0.5 * (Hx[:, :, k_pL] + Hx[:, :, k_pL - 1]), 0.5 * (Hy[:, :, k_pL] + Hy[:, :, k_pL - 1]),
+               Ex[:, :, k_pR], Ey[:, :, k_pR],
+               0.5 * (Hx[:, :, k_pR] + Hx[:, :, k_pR - 1]), 0.5 * (Hy[:, :, k_pR] + Hy[:, :, k_pR - 1]))
+        return (Ex, Ey, Ez, Hx, Hy, Hz, Jx, Jy, Jz, psi_Hx, psi_Hy, psi_Ex, psi_Ey), out
+
+    carry0 = tuple(zz for _ in range(13))
+    _, outs = lax.scan(step, carry0, jnp.asarray(src))
+    return outs                                             # 8-tuple of (nsteps,nx,ny) JAX arrays
+
+
 def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
     """Run ONE 3D pass on the named backend, returning the eight probe planes as NumPy arrays (so the
     downstream FFT / R-T extraction is backend-agnostic). 'numba' = the fused threaded CPU kernel (the
@@ -657,8 +723,8 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
         return _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                            nsteps, k_src, k_pL, k_pR, src)
     if name == "jax":
-        raise RuntimeError("solve_fdtd_3d backend='jax' is not implemented yet (the 3D XLA scan is a "
-                           "follow-on); use 'auto', 'numpy', 'numba', or 'cupy'.")
+        out = _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
@@ -679,8 +745,8 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     `lateral_eps_inf` (an (nx,ny,nz) array, or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a
     2D-periodic structure, else the stack is laterally UNIFORM (and the result reduces to 1D/TMM). Returns
     both the specular 0-order and the total-flux (all (kx,ky) orders) R/T. backend: 'auto'/'numba' (the
-    fused threaded CPU kernel = the fast 3D path), 'numpy' (reference), or 'cupy'/xp for the GPU; the
-    differentiable jax 3D kernel is the one remaining follow-on (raises for now)."""
+    fused threaded CPU kernel = the fast 3D path), 'numpy' (reference), 'jax' (the differentiable XLA scan,
+    for 3D inverse design), or 'cupy'/xp for the GPU."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_min = 2.0 * np.pi * f_min
