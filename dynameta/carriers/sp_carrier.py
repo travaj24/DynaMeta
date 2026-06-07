@@ -2,12 +2,15 @@
 Schrodinger-Poisson CarrierSolver: a quantum-corrected alternative to the classical
 DEVSIM Stage-1, for the degenerate ITO accumulation layer. Wraps the validated
 `SchrodingerPoisson1D` (BenDaniel-Duke + degenerate 2D filling + Trellakis self-
-consistency) and emits a `CarrierField(ndim=3)` the bridge consumes via IdentityLift
-(laterally uniform: the through-stack quantum profile broadcast over the cell -- the
-right first-order model for the vertically-gated accumulation layer).
+consistency) and emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY -- the native
+3D-grid branch of assemble_eps places the (x,y,z) density without any FieldLift synthesis (the
+lift applies to 2D fields only). The emitted field is laterally uniform (the through-stack
+quantum profile broadcast over the cell -- the right first-order model for the vertically-gated
+accumulation layer).
 
 Degenerate-bulk handling: E_F is set from the bulk 3D degenerate relation
-E_F - E_c = (hbar^2/2m*)(3 pi^2 n_bg)^(2/3), and the sub-band rejection is disabled
+E_F - E_c = (hbar^2/2m*)(6 pi^2 n_bg/(g_s g_v))^(2/3) (the (3 pi^2 n)^(2/3) special case is the
+g_s=2, g_v=1 ITO default; g_s/g_v are threaded to the SP1D fill), and the sub-band rejection is disabled
 (bound_tol=1e9) so ALL sub-bands up to E_F are kept -- they carry the bulk continuum
 of a degenerate semiconductor (rejecting them, as for an isolated well, collapses the
 bulk density to ~0). Validated to recover n_bg in the bulk.
@@ -56,12 +59,13 @@ class SchrodingerPoissonCarrier:
                  T_K: float = 300.0, lateral_m: float = 12e-9, semi_material: str = "ITO",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
                  oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
-                 alpha_np_per_eV: float = 0.0,
+                 alpha_np_per_eV: float = 0.0, g_s: int = 2, g_v: int = 1,
                  surface_potential_of_gate: Optional[Callable[[float], float]] = None,
                  surface_potential_xy: Optional[Callable[[float, float, float], float]] = None) -> None:
         self.semi_thk_m = float(semi_thk_m)
         self.n_bg_m3 = float(n_bg_m3)
         self.m_eff_kg = float(m_eff_kg)
+        self.g_s, self.g_v = int(g_s), int(g_v)        # spin + valley degeneracy (ITO: 2, 1)
         self.eps_static = float(eps_static)
         self.T_K = float(T_K)
         self.lateral_m = float(lateral_m)
@@ -104,8 +108,11 @@ class SchrodingerPoissonCarrier:
                 "per-column surface potential; the oxide voltage division (oxide_thk_m/"
                 "eps_oxide) is NOT applied to it. Fold any oxide division into psi_xy.",
                 stacklevel=2)
-        # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0)
-        self.E_F_J = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (3.0 * np.pi ** 2 * self.n_bg_m3) ** (2.0 / 3.0)
+        # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0). General form
+        # k_F = (6 pi^2 n / (g_s g_v))^(1/3); the (3 pi^2 n)^(1/3) special case is g_s=2, g_v=1 (the
+        # ITO default). Threading g_s/g_v keeps it consistent with the SchrodingerPoisson1D filling.
+        self.E_F_J = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (
+            6.0 * np.pi ** 2 * self.n_bg_m3 / (self.g_s * self.g_v)) ** (2.0 / 3.0)
 
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
@@ -145,7 +152,7 @@ class SchrodingerPoissonCarrier:
         s = 1.0 if vg > 0 else -1.0
         Vg = abs(float(vg))
         z = np.linspace(0.0, self.semi_thk_m, self.nz)
-        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
+        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K, g_s=self.g_s, g_v=self.g_v)
         Nd = np.full_like(z, self.n_bg_m3)
         _, n0_z = self._solve_column(sp, Nd, 0.0)             # flat-band baseline density
 
@@ -179,7 +186,7 @@ class SchrodingerPoissonCarrier:
     def solve(self, bias) -> CarrierField:
         vg = float(bias.voltages.get("gate", 0.0))
         z = np.linspace(0.0, self.semi_thk_m, self.nz)        # z=0 body, z=t gate/oxide interface
-        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K)
+        sp = SchrodingerPoisson1D(z, self.m_eff_kg, T_K=self.T_K, g_s=self.g_s, g_v=self.g_v)
         Nd = np.full_like(z, self.n_bg_m3)
         xs = np.linspace(0.0, self.lateral_m, self.n_lateral)
         ys = np.linspace(0.0, self.lateral_m, self.n_lateral)
