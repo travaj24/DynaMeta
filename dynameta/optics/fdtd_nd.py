@@ -14,10 +14,14 @@ Backends (solve_fdtd_2d(backend=...)):
     because a small grid cannot fill a GPU and pays launch/PCIe overhead).
   * 'numpy' (the REFERENCE oracle) -- the vectorized run loop, the correctness baseline every faster
     kernel is validated against, and the dependency-free default.
-  * GPU via xp=cupy on the vectorized loop -- wins only on LARGE grids (big 3D volumes) that exceed
-    cache and fill the device; a fused CuPy RawKernel / Numba-CUDA kernel is the next step there.
-The hot loop is a swappable kernel boundary, so a Taichi backend (one-source CPU+CUDA+Vulkan, when a
-Python-3.14 wheel exists) drops in with no change to the physics or the OpticalSolver seam.
+  * 'cupy' (NVIDIA GPU) -- the vectorized loop on the device; wins only on LARGE grids (big 3D volumes)
+    that exceed cache and fill the GPU. A fused CuPy RawKernel / Numba-CUDA kernel is the next step there.
+  * 'jax' (DIFFERENTIABLE) -- the same loop as a compiled XLA lax.scan, so jax.grad gives
+    d(R,T)/d(geometry/material) for gradient-based inverse design; XLA-fused on CPU (GPU is WSL2-only on
+    Windows). Plus the convenience aliases 'auto' (fastest CPU present), 'cpu', 'gpu'.
+available_backends() reports what is runnable here; _resolve_backend() maps the request (raising a clear
+error with an install hint for an unavailable explicit pick). The hot loop is a swappable kernel boundary,
+so a Taichi backend (one-source CPU+CUDA+Vulkan, when a Python-3.14 wheel exists) drops in unchanged.
 Convention exp(-i omega t), SI; Im(eps) > 0 = loss. Reduces EXACTLY to the 1D solver + TMM for a
 laterally-uniform stack at normal incidence (validation/fdtd_2d_reduces.py).
 
@@ -52,6 +56,70 @@ except Exception:                                            # pragma: no cover
             return f
         return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
     prange = range
+
+
+# --- Optional GPU / autodiff backends, lazily probed (importing cupy/jax is slow, so only on demand). ---
+_CUPY_OK = None
+_JAX_OK = None
+
+
+def _have_cupy():
+    """True if CuPy imports AND a CUDA device is present -- the vectorized loop runs on it via xp=cupy."""
+    global _CUPY_OK
+    if _CUPY_OK is None:
+        try:
+            import cupy as cp
+            _CUPY_OK = bool(cp.cuda.runtime.getDeviceCount() > 0)
+        except Exception:                                    # pragma: no cover
+            _CUPY_OK = False
+    return _CUPY_OK
+
+
+def _have_jax():
+    """True if JAX imports -- the differentiable XLA lax.scan backend (GPU is WSL2-only on Windows -> CPU)."""
+    global _JAX_OK
+    if _JAX_OK is None:
+        try:
+            import jax                                       # noqa: F401
+            _JAX_OK = True
+        except Exception:                                    # pragma: no cover
+            _JAX_OK = False
+    return _JAX_OK
+
+
+def available_backends():
+    """The FDTD backends actually runnable on THIS machine. 'numpy' is always present (the dependency-free
+    reference); 'numba' = the fused threaded CPU kernel (fastest for cache-resident unit cells, ~500-1900
+    MC/s); 'cupy' = NVIDIA GPU via the vectorized loop (wins on large 3D volumes that fill the device);
+    'jax' = the differentiable XLA scan loop (grad-through-FDTD for inverse design; XLA-fused CPU here).
+    Not listed because it needs a CUDA toolkit (numba.cuda.is_available()==False here): 'numba-cuda', a
+    fused GPU kernel -- the planned large-3D path once the toolkit is present."""
+    bk = []
+    if _HAVE_NUMBA:
+        bk.append("numba")
+    bk.append("numpy")
+    if _have_cupy():
+        bk.append("cupy")
+    if _have_jax():
+        bk.append("jax")
+    return bk
+
+
+def _resolve_backend(backend):
+    """Map a requested backend -- including 'auto' and the 'cpu'/'gpu' aliases -- to a concrete available
+    one, or raise a clear error (available list + install hint) for an unavailable EXPLICIT request. 'auto'
+    picks the fastest CPU backend present (numba else numpy) and NEVER silently picks the GPU, because a
+    cache-resident metasurface unit cell runs faster on the threaded CPU kernel than on a launch-bound GPU
+    (the benchmark: numba 561-1882 MC/s vs cupy 20-120 MC/s on unit-cell grids)."""
+    avail = available_backends()
+    fast_cpu = "numba" if _HAVE_NUMBA else "numpy"
+    name = {"auto": fast_cpu, "cpu": fast_cpu, "gpu": "cupy"}.get(str(backend).lower(), str(backend).lower())
+    if name not in avail:
+        hint = {"numba": "pip install numba", "cupy": "pip install cupy-cuda12x (and an NVIDIA GPU)",
+                "jax": "pip install jax"}.get(name, "")
+        raise RuntimeError("FDTD backend '{}' is not available here; available = {}.{}".format(
+            backend, avail, (" Try: " + hint) if hint else ""))
+    return name
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -185,6 +253,55 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     return eyL, hxL, eyR, hxR
 
 
+def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
+    """JAX (XLA) backend -- the SAME 2D-TE physics as _run_2d_te, expressed as a single traced, compiled
+    lax.scan time loop. Two payoffs: (1) it is DIFFERENTIABLE end-to-end, so a downstream jax.grad gives
+    d(R,T)/d(geometry/material) for gradient-based inverse design; (2) XLA fuses the whole step (no
+    per-op Python overhead) on CPU and, on a JAX-GPU build (WSL2 on Windows), on the device. Functional
+    (immutable .at[]) updates replace the in-place ones; float64 is forced so it matches the reference.
+    Returns the four probe x-lines as JAX arrays (the dispatcher converts to NumPy for the FFT/R-T
+    extraction; staying in JAX lets a caller jax.grad a scalar objective straight through the time loop,
+    the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from _cpml_z."""
+    import jax
+    jax.config.update("jax_enable_x64", True)               # FDTD needs float64 to match the reference
+    import jax.numpy as jnp
+    from jax import lax
+    (ke, be, ce), (kh, bh, ch) = cpml
+    ke, be, ce = jnp.asarray(ke), jnp.asarray(be), jnp.asarray(ce)
+    kh, bh, ch = jnp.asarray(kh), jnp.asarray(bh), jnp.asarray(ch)
+    eps_inf = jnp.asarray(eps_inf); chi3 = jnp.asarray(chi3)
+    gam = jnp.asarray(gam); wp = jnp.asarray(wp)
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    nx, nz = eps_inf.shape
+    cmu = dt / MU0
+
+    def step(carry, src_n):
+        Ey, Hx, Hz, Jy, psi_h, psi_e = carry
+        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
+        psi_h = psi_h.at[:, :-1].set(bh[:-1] * psi_h[:, :-1] + ch[:-1] * dEy_dz)
+        Hx = Hx.at[:, :-1].add(cmu * (dEy_dz / kh[:-1] + psi_h[:, :-1]))
+        Hz = Hz - cmu * (jnp.roll(Ey, -1, axis=0) - Ey) / dx
+        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
+        psi_e = psi_e.at[:, 1:].set(be[1:] * psi_e[:, 1:] + ce[1:] * dHx_dz)
+        curl = jnp.zeros((nx, nz))
+        curl = curl.at[:, 1:].add(dHx_dz / ke[1:] + psi_e[:, 1:])
+        curl = curl - (Hz - jnp.roll(Hz, 1, axis=0)) / dx
+        eps_eff = eps_inf + chi3 * Ey ** 2
+        denom = EPS0 * eps_eff / dt + bJ / 2.0
+        Eyn = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        Eyn = Eyn.at[:, k_src].add(src_n)                   # soft plane source
+        Eyn = Eyn.at[:, 0].set(0.0).at[:, nz - 1].set(0.0)  # PEC backing the CPML
+        out = (Eyn[:, k_pL], 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1]),
+               Eyn[:, k_pR], 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1]))
+        return (Eyn, Hx, Hz, Jy, psi_h, psi_e), out
+
+    z0 = jnp.zeros((nx, nz))
+    _, (eyL, hxL, eyR, hxR) = lax.scan(step, (z0, z0, z0, z0, z0, z0), jnp.asarray(src))
+    return eyL, hxL, eyR, hxR                               # JAX arrays (differentiable); dispatcher -> NumPy
+
+
 def _flux(ey, hx):
     """Per-frequency time-averaged +z Poynting power S_z = -Re(E_y H_x*) summed over x, from the rfft
     of the recorded probe x-lines (shape (nsteps, nx)). Half-cell / half-step staggering offsets are
@@ -192,6 +309,26 @@ def _flux(ey, hx):
     Ey = np.fft.rfft(ey, axis=0)
     Hx = np.fft.rfft(hx, axis=0)
     return -np.sum(np.real(Ey * np.conj(Hx)), axis=1)        # (nfreq,) signed z-power per frequency
+
+
+def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+    """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
+    downstream FFT / R-T extraction stays backend-agnostic. 'numba' = the fused threaded CPU kernel;
+    'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
+    array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API)."""
+    (ke, be, ce), (kh, bh, ch) = cpml
+    if name == "numba":
+        return _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
+                           nsteps, k_src, k_pL, k_pR, src)
+    if name == "jax":
+        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
+    if name == "cupy" and xp is np:
+        import cupy as xp                                    # backend='cupy' auto-selects the device module
+    a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
+    out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp)
+    to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
+    return tuple(to_np(v) for v in out)
 
 
 def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[int] = None,
@@ -204,7 +341,12 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     is the through-stack (z) profile (vacuum super/substrate); supply `lateral_eps_inf` (shape
     (nx, n_layer_cells) or a callable building the (nx,nz) eps_inf) to make a laterally-structured
     grating, else the stack is laterally UNIFORM (and the result reduces to the 1D solver / TMM).
-    Returns both the 0-order (specular, x-mean) and the total-flux (all-diffraction-order) R/T."""
+    Returns both the 0-order (specular, x-mean) and the total-flux (all-diffraction-order) R/T.
+
+    backend selects the compute kernel (see available_backends()): 'auto' (default-fastest CPU present),
+    'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
+    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. All backends are byte-for-byte equivalent on
+    R/T (validation/fdtd_2d_reduces.py GATE D); xp is an advanced override for a custom array module."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_min = 2.0 * np.pi * f_min
@@ -256,25 +398,15 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
     (ke, be, ce), (kh, bh, ch) = _cpml_z(nz, dz, dt, npml)   # CFS-CPML coeffs in z (material-independent)
+    cpml = ((ke, be, ce), (kh, bh, ch))
+    name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
-    if backend == "numba":
-        if not _HAVE_NUMBA:
-            raise RuntimeError("backend='numba' requires numba (pip install numba)")
-        run = (lambda ei, w, g_, c3: _te2d_numba(ei, w, g_, c3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                                                 nsteps, k_src, k_pL, k_pR, src))
-        eyL_i, hxL_i, eyR_i, hxR_i = run(one, zero, zero, zero)
-        eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3)
-    else:                                                   # 'numpy' (xp=np) or GPU (xp=cupy)
-        cpml = ((ke, be, ce), (kh, bh, ch))
-        a = (xp.asarray(eps_inf), xp.asarray(wp), xp.asarray(gam), xp.asarray(chi3))
-        srcx = xp.asarray(src)
-        eyL_i, hxL_i, eyR_i, hxR_i = _run_2d_te(xp.asarray(one), xp.asarray(zero), xp.asarray(zero),
-                                                xp.asarray(zero), dx, dz, dt, nsteps, k_src, k_pL, k_pR,
-                                                srcx, cpml, xp)
-        eyL_t, hxL_t, eyR_t, hxR_t = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, srcx, cpml, xp)
-        g = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
-        eyL_i, hxL_i, eyR_i, hxR_i = map(g, (eyL_i, hxL_i, eyR_i, hxR_i))
-        eyL_t, hxL_t, eyR_t, hxR_t = map(g, (eyL_t, hxL_t, eyR_t, hxR_t))
+
+    def run(ei, w, g_, c3):
+        return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
+
+    eyL_i, hxL_i, eyR_i, hxR_i = run(one, zero, zero, zero)  # vacuum reference run
+    eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3)  # structure run
 
     f = np.fft.rfftfreq(nsteps, dt)
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----

@@ -1,6 +1,6 @@
 """2D FDTD reference-engine oracle: optics.fdtd_nd.solve_fdtd_2d is a 2D TE Yee solver (periodic in
-x, CFS-CPML absorbing layers in z) and is the backend-agnostic NumPy reference the later
-Taichi/CuPy/JAX fast kernels are validated against. Three gates establish it is correct:
+x, CFS-CPML absorbing layers in z) and is the backend-agnostic NumPy reference the faster
+numba/cupy/jax kernels are validated against. Four gates establish it is correct:
 
 GATE A (reduces to TMM/1D): a laterally-UNIFORM non-dispersive slab at normal incidence -- the
         x-mean 0-order R0/T0 AND the all-order Poynting-flux R_flux/T_flux both == the analytic Airy
@@ -10,6 +10,9 @@ GATE C (genuine 2D diffraction + energy): a lossless binary grating -- the all-o
         energy (CFS-CPML: MEDIAN |R+T-1| ~ 1e-3; the max spikes only at the grazing emergence of
         diffraction orders, a fundamental npml-independent PML limit), WHILE the 0-order specular
         R0+T0 dips well below 1 (energy correctly diffracted into higher orders).
+GATE D (cross-backend equivalence): each compiled-kernel backend installed -- numba (fused threaded
+        CPU) and jax (XLA scan, differentiable) -- reproduces the NumPy reference R/T to machine
+        precision (cupy is byte-exact too but launch-bound on unit cells, so it is probe-only).
 
 Run: python -m validation.fdtd_2d_reduces
 """
@@ -88,22 +91,32 @@ def main():
           "0-order min(R0+T0)={:.3f} (<1 = diffracted) -> {}".format(
               en_med, en_max, spec_min, "PASS" if gate_c else "FAIL"), flush=True)
 
-    # GATE D: the fast Numba CPU kernel reproduces the NumPy reference to machine precision (the
-    # compiled+threaded backend is byte-for-byte the same physics; it is the fastest backend for the
-    # cache-resident unit-cell grids -- ~500-1900 MC/s, beating naive GPU). Skipped if numba absent.
-    from dynameta.optics.fdtd_nd import _HAVE_NUMBA
-    if _HAVE_NUMBA:
+    # GATE D (cross-backend equivalence): every COMPILED-kernel backend present -- numba (fused threaded
+    # CPU) and jax (XLA lax.scan, differentiable) -- reproduces the NumPy reference to machine precision.
+    # Same physics, just compiled differently; numba is also the FASTEST backend for cache-resident unit
+    # cells (~500-1900 MC/s, beating GPU). cupy is byte-exact too (proven 0.0 in the cross-backend probe)
+    # but is launch-bound on this tiny unit-cell grid (its win is large 3D), so it is NOT re-run in this
+    # auto-discovered validation. Backends not installed are skipped.
+    from dynameta.optics.fdtd_nd import available_backends
+    avail = available_backends()
+    gate_d = True
+    tested = []
+    for bk in ("numba", "jax"):
+        if bk not in avail:
+            print("[f2] D {} backend: SKIP (not installed)".format(bk), flush=True)
+            continue
         rD = solve_fdtd_2d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9,
-                           lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=40, backend="numba")
+                           lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=40, backend=bk)
         mD = mA & rD.band
         dnb = max(float(np.max(np.abs(rA.R0[mD] - rD.R0[mD]))),
                   float(np.max(np.abs(rA.T0[mD] - rD.T0[mD]))))
-        gate_d = bool(dnb < 1e-9)
-        print("[f2] D numba==numpy: max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
-            dnb, "PASS" if gate_d else "FAIL"), flush=True)
-    else:
-        gate_d = True
-        print("[f2] D numba backend: SKIP (numba not installed)", flush=True)
+        ok = bool(dnb < 1e-9)
+        gate_d = gate_d and ok
+        tested.append(bk)
+        print("[f2] D {}==numpy: max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
+            bk, dnb, "PASS" if ok else "FAIL"), flush=True)
+    print("[f2] D available backends: {} (cupy byte-exact but launch-bound on unit cells -> probe-only)".format(
+        avail), flush=True)
 
     overall = gate_a and gate_b and gate_c and gate_d
     print("[f2] *** 2D FDTD REFERENCE ENGINE (reduces to 1D/TMM; Drude; grating diffraction; "
