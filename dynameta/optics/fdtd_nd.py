@@ -178,6 +178,8 @@ class FDTD2DResult:
     R_flux: np.ndarray         # TOTAL reflectance from the Poynting flux (all diffraction orders)
     T_flux: np.ndarray         # TOTAL transmittance from the Poynting flux (all diffraction orders)
     band: np.ndarray            # boolean mask of the well-excited frequency band
+    r0: Optional[np.ndarray] = None   # COMPLEX 0-order reflection coeff, phase de-embedded to the front face
+    t0: Optional[np.ndarray] = None   # COMPLEX 0-order transmission coeff, de-embedded across the structure
 
 
 def _cpml_z(nz, dz, dt, npml, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
@@ -412,9 +414,16 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----
     mL_inc = np.fft.rfft(eyL_i.mean(axis=1)); mR_inc = np.fft.rfft(eyR_i.mean(axis=1))
     mRefl = np.fft.rfft((eyL_t - eyL_i).mean(axis=1)); mTrans = np.fft.rfft(eyR_t.mean(axis=1))
+    k0 = 2.0 * np.pi * f / C_LIGHT
     with np.errstate(divide="ignore", invalid="ignore"):
         R0 = np.abs(mRefl / mL_inc) ** 2
         T0 = np.abs(mTrans / mR_inc) ** 2
+        # COMPLEX 0-order coeffs. np.fft.rfft yields exp(+i w t) phasors, but the library convention is
+        # exp(-i w t), so conjugate to get the physical complex amplitudes; then de-embed the probe<->face
+        # propagation phase (vacuum pad, n=1): r0c referenced to the front face z=pad (probe at k_pL); t0c
+        # across the structure (the common probe phase cancels in t, leaving the traversal z_struct).
+        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * k0 * (pad - k_pL * dz))
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
     P_inc = _flux(eyL_i, hxL_i)
     P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i)
@@ -423,7 +432,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         R_flux = np.abs(P_refl) / np.abs(P_inc)
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
-    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band)
+    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)
 
 
 # =====================================================================================================
@@ -442,6 +451,8 @@ class FDTD3DResult:
     R_flux: np.ndarray
     T_flux: np.ndarray
     band: np.ndarray
+    r0: Optional[np.ndarray] = None   # COMPLEX co-pol 0-order reflection coeff, de-embedded to the front face
+    t0: Optional[np.ndarray] = None   # COMPLEX co-pol 0-order transmission coeff, de-embedded across the cell
 
 
 def _flux3d(ex, ey, hx, hy):
@@ -735,9 +746,15 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     # 0-order specular co-pol (E_y) from the x,y-MEAN field (== the 1D two-run method)
     mL_inc = np.fft.rfft(eyL_i.mean(axis=(1, 2))); mR_inc = np.fft.rfft(eyR_i.mean(axis=(1, 2)))
     mRefl = np.fft.rfft((eyL_t - eyL_i).mean(axis=(1, 2))); mTrans = np.fft.rfft(eyR_t.mean(axis=(1, 2)))
+    k0 = 2.0 * np.pi * f / C_LIGHT
     with np.errstate(divide="ignore", invalid="ignore"):
         R0 = np.abs(mRefl / mL_inc) ** 2
         T0 = np.abs(mTrans / mR_inc) ** 2
+        # COMPLEX co-pol 0-order coeffs: conjugate (rfft is exp(+iwt); convention is exp(-iwt)), then
+        # de-embed the propagation phase (vacuum pad): r0c to the front face z=pad (probe k_pL); t0c
+        # across the cell (the common probe phase cancels in t).
+        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * k0 * (pad - k_pL * dz))
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
     # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
     P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
     P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i)
@@ -746,4 +763,4 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         R_flux = np.abs(P_refl) / np.abs(P_inc)
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
-    return FDTD3DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band)
+    return FDTD3DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)

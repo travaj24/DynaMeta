@@ -1,0 +1,127 @@
+"""FDTD OpticalSolver adapter -- wrap the time-domain FDTD (optics.fdtd_nd) as a drop-in
+`optical_solver` for run_pipeline(optical_solver=...), the same pluggable seam the TMM/RCWA/FEM
+backends use (core.interfaces.OpticalSolver; the TMM analogue is optics.tmm_reference.make_layered_tmm_solver).
+
+The pipeline invokes the solver once per (bias, wavelength) with (design, geometry, eps_by_region,
+lambda_m, n_super, n_sub) and expects an OpticalResult. This adapter maps the Design's through-stack to
+FDTD layers (eps frozen at lambda_m), runs a narrow-band 2D/3D FDTD around lambda_m, and reads the
+0-order R/T plus the complex (phase-de-embedded) reflection/transmission at lambda_m -- so a
+laterally-uniform dielectric/absorbing stack reproduces the TMM/FEM R/T to the FDTD discretization.
+
+WHY FDTD here: dispersion (Drude ADE) and the chi3/all-optical nonlinearity are native, and R_flux/T_flux
+carry the full multi-order / cross-pol power. Phase-0 SCOPE (clear, like the TMM seam's inclusion guard):
+  * laterally-uniform stacks only (a layer with lateral inclusions raises -> FEM, or a future raster adapter);
+  * a VACUUM superstrate/substrate (non-vacuum semi-infinite end media raise -> a later increment);
+  * strong metals / ENZ are impractical (a Drude band-edge index blows the grid up) -> keep FEM/RCWA there,
+    exactly the build-vs-buy verdict (FDTD = broadband / nonlinear / transient, not the ENZ accumulation layer).
+ACCURACY: a laterally-uniform stack matches TMM to the FDTD discretization (~1e-4 near a reflection
+minimum; ~1-2% for a single THIN resonant slab whose Fabry-Perot fringe shifts with the FDTD's numerical
+dispersion -- a general single-slab FDTD effect, identical lossless/lossy, that tightens with resolution).
+The lossy/absorbing path (one inverted Drude pole, exact eps at lambda) matches TMM to ~few 1e-3 when not
+FP-dominated. Convention exp(-i omega t), SI; Im(eps) > 0 = loss.
+"""
+from __future__ import annotations
+
+import math
+import time
+from typing import Dict, Optional
+
+import numpy as np
+
+from dynameta.constants import C_LIGHT
+from dynameta.core.interfaces import OpticalResult
+from dynameta.optics.fdtd import FDTDLayer
+from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
+
+_VAC_TOL = 1.0e-3                                            # |n - 1| under this counts as vacuum end medium
+
+
+def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> FDTDLayer:
+    """Map a single complex eps(lambda_m) to an FDTDLayer. A pure positive-real eps -> a non-dispersive
+    dielectric. A lossy and/or negative-real eps (absorber / metal) -> ONE Drude pole inverted to
+    reproduce eps EXACTLY at this omega, with eps_inf held >= 1 so the FDTD background stays stable:
+        eps(w) = eps_inf - wp^2/(w^2 + i gamma w),  matched at w0 = 2*pi*c/lambda_m.
+    Only this omega is read out, so the Drude's off-omega dispersion is irrelevant to the result."""
+    eps = complex(eps)
+    er = eps.real
+    ei = max(0.0, eps.imag)                                 # passive (Im(eps) >= 0); clamp tiny negatives
+    if ei <= loss_tol * (abs(er) + 1.0) and er > 0.0:
+        return FDTDLayer(thickness_m=float(thickness_m), eps_inf=float(er))   # pure dielectric
+    omega0 = 2.0 * math.pi * C_LIGHT / lambda_m
+    if er < 1.0:                                            # absorber/metal: pin eps_inf = 1
+        gamma = ei * omega0 / (1.0 - er) if (1.0 - er) > 0.0 else omega0
+        eps_inf = 1.0
+        wp2 = (1.0 - er) * (omega0 ** 2 + gamma ** 2)
+    else:                                                  # high-index lossy: eps_inf = er + ei
+        gamma = omega0
+        eps_inf = er + ei
+        wp2 = 2.0 * ei * omega0 ** 2
+    return FDTDLayer(thickness_m=float(thickness_m), eps_inf=float(eps_inf),
+                     drude_wp_rad_s=float(math.sqrt(max(wp2, 0.0))), drude_gamma_rad_s=float(gamma))
+
+
+def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
+    """[FDTDLayer] for the through-stack in SUPERSTRATE-FIRST (incidence) order -- the order solve_fdtd_*
+    places layers (the Stack lists bottom->top, so reversed). A uniform layer uses the bridge's
+    eps_by_region scalar when present (the bias-modulated value), else the material eps(lambda_m). A layer
+    with lateral inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
+    layers = []
+    for L in reversed(design.stack.layers):                # incidence order: superstrate side first
+        if getattr(L, "inclusions", None):
+            raise NotImplementedError("design_to_fdtd_layers: layer '{}' has lateral inclusions; the FDTD "
+                                      "seam Phase 0 handles laterally-uniform stacks only.".format(L.name))
+        ef = (eps_by_region or {}).get(L.name)
+        if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+            eps = complex(ef.scalar)
+        else:
+            eps = complex(design.materials.get(L.background_material).eps(lambda_m))
+        layers.append(_eps_to_fdtd_layer(L.thickness_m, eps, lambda_m))
+    return layers
+
+
+def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
+                             courant: float = 0.5, settle: float = 12.0, n_pad_wave: float = 4.0,
+                             band_frac: float = 0.06):
+    """Build an `optical_solver` callable wrapping the 2D (dim=2) or 3D (dim=3) FDTD, for
+    run_pipeline(optical_solver=make_fdtd_optical_solver(...)). Each (bias, wavelength) call freezes the
+    materials at lambda_m, runs a narrow-band FDTD around lambda_m, and returns the 0-order R/T/phase at
+    lambda_m as an OpticalResult (with R_flux/T_flux = all-order flux). backend='auto' -> the fast numba
+    kernel. A laterally-uniform stack gives the same result for dim=2 or 3, so 2 (faster) is the default.
+
+    Raises NotImplementedError for a non-vacuum superstrate/substrate or a laterally-structured layer
+    (use the FEM/TMM solver there). See the module docstring for the Phase-0 scope."""
+    if dim not in (2, 3):
+        raise ValueError("make_fdtd_optical_solver: dim must be 2 or 3")
+
+    def _solve(design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
+        if abs(complex(n_super) - 1.0) > _VAC_TOL or abs(complex(n_sub) - 1.0) > _VAC_TOL:
+            raise NotImplementedError(
+                "FDTD seam Phase 0 models a vacuum superstrate/substrate (got n_super={:.4g}, n_sub={:.4g}); "
+                "use the FEM/TMM solver for non-vacuum semi-infinite end media.".format(
+                    complex(n_super).real, complex(n_sub).real))
+        layers = design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region)
+        lo, hi = lambda_m * (1.0 - band_frac), lambda_m * (1.0 + band_frac)
+        kw = dict(lambda_min_m=lo, lambda_max_m=hi, resolution=resolution, courant=courant,
+                  settle=settle, n_pad_wave=n_pad_wave, backend=backend)
+        t_start = time.time()
+        if dim == 2:
+            res = solve_fdtd_2d(layers, period_x_m=design.unit_cell.period_x_m, **kw)
+        else:
+            res = solve_fdtd_3d(layers, period_x_m=design.unit_cell.period_x_m,
+                                period_y_m=design.unit_cell.period_y_m, **kw)
+        solve_time_s = time.time() - t_start
+        # Interpolate the spectrum to EXACTLY f=c/lambda (not the nearest FFT bin): for a dispersive Drude
+        # layer the eps at an off-by-half-bin frequency differs from the target eps(lambda), which would
+        # bias R/A; at exactly c/lambda the inverted Drude reproduces eps(lambda). freqs are increasing.
+        ft = C_LIGHT / lambda_m
+        f = res.freqs_Hz
+        at = (lambda a: float(np.interp(ft, f, a)))
+        cx = (lambda a: complex(np.interp(ft, f, a.real), np.interp(ft, f, a.imag)))
+        R = at(res.R0); T = at(res.T0)
+        r = cx(res.r0) if res.r0 is not None else complex(math.sqrt(max(R, 0.0)))
+        t = cx(res.t0) if res.t0 is not None else None
+        return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))), solve_time_s=solve_time_s,
+                             t=t, T=T, A=float(1.0 - R - T),
+                             R_flux=at(res.R_flux), T_flux=at(res.T_flux))
+
+    return _solve
