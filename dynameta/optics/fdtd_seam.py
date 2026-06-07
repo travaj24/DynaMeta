@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
@@ -202,3 +203,64 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
                              R_flux=at(res.R_flux), T_flux=at(res.T_flux))
 
     return _solve
+
+
+@dataclass
+class FDTDSweepResult:
+    """The full R/T spectrum of ONE broadband FDTD solve, on the well-excited band (sorted by wavelength).
+    R/T are the 0-order specular; R_flux/T_flux the all-(kx,ky)-order flux; r/t the complex de-embedded
+    0-order coefficients (phase). solve_time_s is the wall time of the single solve."""
+    lambda_m: np.ndarray
+    R: np.ndarray
+    T: np.ndarray
+    A: np.ndarray
+    R_flux: np.ndarray
+    T_flux: np.ndarray
+    r: np.ndarray
+    t: np.ndarray
+    solve_time_s: float
+
+
+def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=None, dim=2,
+                        resolution=32, backend="auto", courant=0.5, settle=12.0, n_pad_wave=4.0,
+                        n_super=1.0 + 0j, n_sub=1.0 + 0j):
+    """ONE broadband FDTD over [lambda_min_m, lambda_max_m] -> the WHOLE R/T spectrum, vs the per-wavelength
+    OpticalSolver seam (make_fdtd_optical_solver) which re-solves each wavelength. This is FDTD's native
+    strength: one solve serves the whole sweep -- the fast path for a wavelength sweep at a fixed bias
+    (N wavelengths in ~1 solve instead of N). Returns an FDTDSweepResult over the well-excited band.
+
+    The materials are FROZEN at the band center, so the spectrum is EXACT across the band for a
+    NON-DISPERSIVE (dielectric) design; for a dispersive material the across-band dispersion is
+    approximated (use a narrow band, or the per-wavelength seam, for strong dispersion). Same scope as the
+    seam: vacuum end media, laterally-uniform OR structured (dim=3) -- a lossy structured layer raises.
+    Tip: request a band ~10-20%% wider than your target so the pulse-tapered edges fall outside it."""
+    if abs(complex(n_super) - 1.0) > _VAC_TOL or abs(complex(n_sub) - 1.0) > _VAC_TOL:
+        raise NotImplementedError("fdtd_sweep_spectrum models a vacuum superstrate/substrate (got "
+                                  "n_super={:.4g}, n_sub={:.4g}).".format(complex(n_super).real, complex(n_sub).real))
+    lam_c = 0.5 * (lambda_min_m + lambda_max_m)              # freeze the structure at the band center
+    px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
+    kw = dict(lambda_min_m=lambda_min_m, lambda_max_m=lambda_max_m, resolution=resolution,
+              courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend)
+    structured = design_has_inclusions(design)
+    if structured and dim != 3:
+        raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
+    t_start = time.time()
+    if structured:
+        layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region)
+        res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
+    elif dim == 2:
+        res = solve_fdtd_2d(design_to_fdtd_layers(design, lam_c, eps_by_region=eps_by_region),
+                            period_x_m=px, **kw)
+    else:
+        res = solve_fdtd_3d(design_to_fdtd_layers(design, lam_c, eps_by_region=eps_by_region),
+                            period_x_m=px, period_y_m=py, **kw)
+    solve_time_s = time.time() - t_start
+    f = res.freqs_Hz
+    m = res.band & (f > 0)
+    lam = C_LIGHT / f[m]
+    order = np.argsort(lam)
+    sel = (lambda a: np.asarray(a)[m][order])
+    R, T = sel(res.R0), sel(res.T0)
+    return FDTDSweepResult(lambda_m=lam[order], R=R, T=T, A=1.0 - R - T,
+                           R_flux=sel(res.R_flux), T_flux=sel(res.T_flux),
+                           r=sel(res.r0), t=sel(res.t0), solve_time_s=solve_time_s)
