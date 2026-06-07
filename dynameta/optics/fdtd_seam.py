@@ -9,8 +9,11 @@ FDTD layers (eps frozen at lambda_m), runs a narrow-band 2D/3D FDTD around lambd
 laterally-uniform dielectric/absorbing stack reproduces the TMM/FEM R/T to the FDTD discretization.
 
 WHY FDTD here: dispersion (Drude ADE) and the chi3/all-optical nonlinearity are native, and R_flux/T_flux
-carry the full multi-order / cross-pol power. Phase-0 SCOPE (clear, like the TMM seam's inclusion guard):
-  * laterally-uniform stacks only (a layer with lateral inclusions raises -> FEM, or a future raster adapter);
+carry the full multi-order / cross-pol power. SCOPE:
+  * laterally-STRUCTURED cells (pillars/holes/gratings) ARE supported for dim=3: each layer's inclusions
+    are rasterized (CrossSection.contains_m) onto the (nx,ny,nz) eps grid -- this is where FDTD earns its
+    keep (arbitrary geometry, vs TMM which is exact only for uniform stacks). The lateral grid carries
+    REAL eps, so a LOSSY structured layer raises (lossy patterned -> FEM/RCWA);
   * a VACUUM superstrate/substrate (non-vacuum semi-infinite end media raise -> a later increment);
   * strong metals / ENZ are impractical (a Drude band-edge index blows the grid up) -> keep FEM/RCWA there,
     exactly the build-vs-buy verdict (FDTD = broadband / nonlinear / transient, not the ENZ accumulation layer).
@@ -79,6 +82,71 @@ def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Di
     return layers
 
 
+def _cell_axes(nx, ny, period_x_m, period_y_m):
+    """Cell-centered FDTD lateral sample points (cell frame [0,period], shapes in absolute coords)."""
+    xs = (np.arange(nx) + 0.5) * (period_x_m / nx)
+    ys = (np.arange(ny) + 0.5) * (period_y_m / ny)
+    return xs, ys
+
+
+def _layer_bg_eps(layer, lambda_m, materials, eps_by_region):
+    ef = (eps_by_region or {}).get(layer.name)
+    if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+        return complex(ef.scalar)
+    return complex(materials.get(layer.background_material).eps(lambda_m))
+
+
+def _layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region):
+    """The (nx,ny) COMPLEX eps cross-section of one layer: the background eps, overpainted by each
+    inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps."""
+    eps = np.full(X.shape, _layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
+    for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
+        mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
+        eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
+    return eps
+
+
+def design_has_inclusions(design):
+    """True if any layer is laterally STRUCTURED (has inclusions) -> needs the rasterized 3D path."""
+    return any(getattr(L, "inclusions", None) for L in design.stack.layers)
+
+
+def make_structured_lateral(design, lambda_m, *, eps_by_region=None):
+    """For a laterally-STRUCTURED design, return (layers_for_grid, lateral_fn): `layers_for_grid` are the
+    superstrate-first FDTDLayers (eps_inf = the layer's MAX real eps, for grid sizing / z-placement; no
+    Drude -> the lateral path is lossless), and `lateral_fn(nx,ny,nz,zc,pad,zs)` paints the real
+    cross-section eps onto the (nx,ny,nz) eps_inf grid (vacuum pad; layers from z=pad superstrate-first,
+    matching solve_fdtd_3d). The lateral grid carries REAL eps only -> a lossy inclusion raises."""
+    mats = design.materials
+    layers_sf = list(reversed(design.stack.layers))         # incidence order: superstrate side first
+    px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
+
+    def _layer_max_eps(L):
+        vals = [_layer_bg_eps(L, lambda_m, mats, eps_by_region)]
+        vals += [complex(mats.get(inc.material).eps(lambda_m)) for inc in L.inclusions]
+        return max(1.0, max(v.real for v in vals))
+    layers_for_grid = [FDTDLayer(thickness_m=float(L.thickness_m), eps_inf=float(_layer_max_eps(L)))
+                       for L in layers_sf]
+
+    def lateral_fn(nx, ny, nz, zc, pad, z_struct):
+        xs, ys = _cell_axes(nx, ny, px, py)
+        X, Y = np.meshgrid(xs, ys, indexing="ij")           # (nx,ny)
+        eps = np.ones((nx, ny, nz))
+        z = pad
+        for L in layers_sf:
+            zmask = (zc >= z) & (zc < z + L.thickness_m)
+            cell = _layer_eps_cell(L, X, Y, lambda_m, mats, eps_by_region)
+            if np.max(np.abs(cell.imag)) > 1e-6 * (np.max(np.abs(cell.real)) + 1.0):
+                raise NotImplementedError(
+                    "structured FDTD layer '{}' has lossy eps (Im != 0); the lateral grid carries real "
+                    "eps_inf only -> use FEM/RCWA for lossy structured cells.".format(L.name))
+            eps[:, :, zmask] = cell.real[:, :, None]
+            z += L.thickness_m
+        return eps
+
+    return layers_for_grid, lateral_fn
+
+
 def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
                              courant: float = 0.5, settle: float = 12.0, n_pad_wave: float = 4.0,
                              band_frac: float = 0.06):
@@ -86,10 +154,11 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
     run_pipeline(optical_solver=make_fdtd_optical_solver(...)). Each (bias, wavelength) call freezes the
     materials at lambda_m, runs a narrow-band FDTD around lambda_m, and returns the 0-order R/T/phase at
     lambda_m as an OpticalResult (with R_flux/T_flux = all-order flux). backend='auto' -> the fast numba
-    kernel. A laterally-uniform stack gives the same result for dim=2 or 3, so 2 (faster) is the default.
+    kernel. A laterally-uniform stack gives the same result for dim=2 or 3, so 2 (faster) is the default;
+    a laterally-STRUCTURED cell (layer inclusions) is rasterized onto the 3D grid and REQUIRES dim=3.
 
-    Raises NotImplementedError for a non-vacuum superstrate/substrate or a laterally-structured layer
-    (use the FEM/TMM solver there). See the module docstring for the Phase-0 scope."""
+    Raises NotImplementedError for a non-vacuum superstrate/substrate, a structured cell with dim!=3, or a
+    LOSSY structured layer (use the FEM/RCWA solver there). See the module docstring for the scope."""
     if dim not in (2, 3):
         raise ValueError("make_fdtd_optical_solver: dim must be 2 or 3")
 
@@ -99,16 +168,24 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
                 "FDTD seam Phase 0 models a vacuum superstrate/substrate (got n_super={:.4g}, n_sub={:.4g}); "
                 "use the FEM/TMM solver for non-vacuum semi-infinite end media.".format(
                     complex(n_super).real, complex(n_sub).real))
-        layers = design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region)
+        structured = design_has_inclusions(design)
+        if structured and dim != 3:
+            raise NotImplementedError(
+                "a laterally-structured cell (layer inclusions) needs dim=3; got dim={}.".format(dim))
         lo, hi = lambda_m * (1.0 - band_frac), lambda_m * (1.0 + band_frac)
         kw = dict(lambda_min_m=lo, lambda_max_m=hi, resolution=resolution, courant=courant,
                   settle=settle, n_pad_wave=n_pad_wave, backend=backend)
+        px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
         t_start = time.time()
-        if dim == 2:
-            res = solve_fdtd_2d(layers, period_x_m=design.unit_cell.period_x_m, **kw)
+        if structured:
+            layers, lateral_fn = make_structured_lateral(design, lambda_m, eps_by_region=eps_by_region)
+            res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
+        elif dim == 2:
+            res = solve_fdtd_2d(design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region),
+                                period_x_m=px, **kw)
         else:
-            res = solve_fdtd_3d(layers, period_x_m=design.unit_cell.period_x_m,
-                                period_y_m=design.unit_cell.period_y_m, **kw)
+            res = solve_fdtd_3d(design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region),
+                                period_x_m=px, period_y_m=py, **kw)
         solve_time_s = time.time() - t_start
         # Interpolate the spectrum to EXACTLY f=c/lambda (not the nearest FFT bin): for a dispersive Drude
         # layer the eps at an off-by-half-bin frequency differs from the target eps(lambda), which would
