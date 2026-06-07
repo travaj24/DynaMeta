@@ -59,8 +59,10 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
     c = C_LIGHT
     mur = (c * dt - dz) / (c * dt + dz)
     for n in range(nsteps):
-        Ex_old0, Ex_old1 = Ex[0], Ex[1]
-        Ex_oldL, Ex_oldR = Ex[-1], Ex[-2]
+        # old edge + adjacent cells for the Mur ABC. Position-matched names: L = left end (cells 0,1),
+        # R = right end (cells -1,-2); *0 = the boundary cell, *1 = the adjacent interior cell.
+        Ex_oldL0, Ex_oldL1 = Ex[0], Ex[1]
+        Ex_oldR0, Ex_oldR1 = Ex[-1], Ex[-2]
         # H update (Hy[i] between Ex[i], Ex[i+1])
         Hy += (dt / (MU0 * dz)) * (Ex[1:] - Ex[:-1])
         # E update (interior): eps0 eps_eff dE/dt = -dHy/dz - (J^{n+1}+J^n)/2, with the Kerr eps_eff
@@ -73,8 +75,8 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
         Ex_int = Enew
         Ex_int[i_src] += src[n]                        # soft source
         # 1st-order Mur ABC at both ends (overwrite the edge cells)
-        Ex_int[0] = Ex_old1 + mur * (Ex_int[1] - Ex_old0)
-        Ex_int[-1] = Ex_oldR + mur * (Ex_int[-2] - Ex_oldL)
+        Ex_int[0] = Ex_oldL1 + mur * (Ex_int[1] - Ex_oldL0)
+        Ex_int[-1] = Ex_oldR1 + mur * (Ex_int[-2] - Ex_oldR0)
         Ex = Ex_int
         J = Jnew
         eL[n] = Ex[i_pL]
