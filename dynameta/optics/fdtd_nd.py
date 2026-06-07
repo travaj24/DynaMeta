@@ -539,6 +539,123 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
     return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
 
 
+@njit(parallel=True, fastmath=True, cache=True)
+def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
+                nsteps, k_src, k_pL, k_pR, src):
+    """Fused, prange-threaded full-vector 3D timestep (the Numba CPU kernel) -- byte-near-identical physics
+    to _run_3d (six-component Yee + per-component semi-implicit Drude ADE + Kerr + CFS-CPML in z + PEC,
+    Bloch-periodic x,y), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass.
+    Parallel-safe over x: the H-phase writes Hx/Hy/Hz[i] (disjoint) reading only E (read-only); the E-phase
+    writes Ex/Ey/Ez[i] (disjoint) reading only H. Returns the Ex,Ey,Hx,Hy probe planes (left/right)."""
+    nx, ny, nz = eps_inf.shape
+    Ex = np.zeros((nx, ny, nz)); Ey = np.zeros((nx, ny, nz)); Ez = np.zeros((nx, ny, nz))
+    Hx = np.zeros((nx, ny, nz)); Hy = np.zeros((nx, ny, nz)); Hz = np.zeros((nx, ny, nz))
+    Jx = np.zeros((nx, ny, nz)); Jy = np.zeros((nx, ny, nz)); Jz = np.zeros((nx, ny, nz))
+    psi_Hx = np.zeros((nx, ny, nz)); psi_Hy = np.zeros((nx, ny, nz))
+    psi_Ex = np.zeros((nx, ny, nz)); psi_Ey = np.zeros((nx, ny, nz))
+    sh = (nsteps, nx, ny)
+    exL = np.empty(sh); eyL = np.empty(sh); hxL = np.empty(sh); hyL = np.empty(sh)
+    exR = np.empty(sh); eyR = np.empty(sh); hxR = np.empty(sh); hyR = np.empty(sh)
+    cmu = dt / MU0
+    e0dt = EPS0 / dt
+    for n in range(nsteps):
+        # ---- H update (dH/dt = -(1/mu) curl E); only d/dz is CPML-stretched ----
+        for i in prange(nx):
+            ip1 = i + 1 if i + 1 < nx else 0
+            for j in range(ny):
+                jp1 = j + 1 if j + 1 < ny else 0
+                for k in range(nz):
+                    dEz_dy = (Ez[i, jp1, k] - Ez[i, j, k]) / dy
+                    if k < nz - 1:
+                        d = (Ey[i, j, k + 1] - Ey[i, j, k]) / dz
+                        psi_Hx[i, j, k] = bh[k] * psi_Hx[i, j, k] + ch[k] * d
+                        sEy = d / kh[k] + psi_Hx[i, j, k]
+                    else:
+                        sEy = 0.0
+                    Hx[i, j, k] -= cmu * (dEz_dy - sEy)
+                    dEz_dx = (Ez[ip1, j, k] - Ez[i, j, k]) / dx
+                    if k < nz - 1:
+                        d2 = (Ex[i, j, k + 1] - Ex[i, j, k]) / dz
+                        psi_Hy[i, j, k] = bh[k] * psi_Hy[i, j, k] + ch[k] * d2
+                        sEx = d2 / kh[k] + psi_Hy[i, j, k]
+                    else:
+                        sEx = 0.0
+                    Hy[i, j, k] -= cmu * (sEx - dEz_dx)
+                    Hz[i, j, k] -= cmu * ((Ey[ip1, j, k] - Ey[i, j, k]) / dx - (Ex[i, jp1, k] - Ex[i, j, k]) / dy)
+        # ---- E update (eps0 eps_eff dE/dt = curl H - J); per-component Drude ADE + Kerr ----
+        for i in prange(nx):
+            im1 = i - 1 if i - 1 >= 0 else nx - 1
+            for j in range(ny):
+                jm1 = j - 1 if j - 1 >= 0 else ny - 1
+                for k in range(nz):
+                    exo = Ex[i, j, k]; eyo = Ey[i, j, k]; ezo = Ez[i, j, k]
+                    g = gam[i, j, k]
+                    aJ = (1.0 - g * dt / 2.0) / (1.0 + g * dt / 2.0)
+                    bJ = (EPS0 * wp[i, j, k] ** 2 * dt / 2.0) / (1.0 + g * dt / 2.0)
+                    eps_eff = eps_inf[i, j, k] + chi3[i, j, k] * (exo * exo + eyo * eyo + ezo * ezo)
+                    denom = e0dt * eps_eff + bJ / 2.0
+                    coef = 0.5 * (1.0 + aJ)
+                    # Ex: curl_x H = dHz/dy - dHy/dz (CPML)
+                    dHz_dy = (Hz[i, j, k] - Hz[i, jm1, k]) / dy
+                    if k >= 1:
+                        dHy_dz = (Hy[i, j, k] - Hy[i, j, k - 1]) / dz
+                        psi_Ex[i, j, k] = be[k] * psi_Ex[i, j, k] + ce[k] * dHy_dz
+                        sHy = dHy_dz / ke[k] + psi_Ex[i, j, k]
+                    else:
+                        sHy = 0.0
+                    exn = (e0dt * eps_eff * exo + (dHz_dy - sHy) - coef * Jx[i, j, k] - 0.5 * bJ * exo) / denom
+                    Jx[i, j, k] = aJ * Jx[i, j, k] + bJ * (exn + exo)
+                    # Ey: curl_y H = dHx/dz (CPML) - dHz/dx
+                    dHz_dx = (Hz[i, j, k] - Hz[im1, j, k]) / dx
+                    if k >= 1:
+                        dHx_dz = (Hx[i, j, k] - Hx[i, j, k - 1]) / dz
+                        psi_Ey[i, j, k] = be[k] * psi_Ey[i, j, k] + ce[k] * dHx_dz
+                        sHx = dHx_dz / ke[k] + psi_Ey[i, j, k]
+                    else:
+                        sHx = 0.0
+                    eyn = (e0dt * eps_eff * eyo + (sHx - dHz_dx) - coef * Jy[i, j, k] - 0.5 * bJ * eyo) / denom
+                    Jy[i, j, k] = aJ * Jy[i, j, k] + bJ * (eyn + eyo)
+                    # Ez: curl_z H = dHy/dx - dHx/dy (transverse, no CPML)
+                    curlz = (Hy[i, j, k] - Hy[im1, j, k]) / dx - (Hx[i, j, k] - Hx[i, jm1, k]) / dy
+                    ezn = (e0dt * eps_eff * ezo + curlz - coef * Jz[i, j, k] - 0.5 * bJ * ezo) / denom
+                    Jz[i, j, k] = aJ * Jz[i, j, k] + bJ * (ezn + ezo)
+                    Ex[i, j, k] = exn; Ey[i, j, k] = eyn; Ez[i, j, k] = ezn
+        # soft y-pol source + PEC (tangential Ex,Ey only); then co-located probes
+        for i in prange(nx):
+            for j in range(ny):
+                Ey[i, j, k_src] += src[n]
+                Ex[i, j, 0] = 0.0; Ex[i, j, nz - 1] = 0.0
+                Ey[i, j, 0] = 0.0; Ey[i, j, nz - 1] = 0.0
+        for i in prange(nx):
+            for j in range(ny):
+                exL[n, i, j] = Ex[i, j, k_pL]; eyL[n, i, j] = Ey[i, j, k_pL]
+                hxL[n, i, j] = 0.5 * (Hx[i, j, k_pL] + Hx[i, j, k_pL - 1])
+                hyL[n, i, j] = 0.5 * (Hy[i, j, k_pL] + Hy[i, j, k_pL - 1])
+                exR[n, i, j] = Ex[i, j, k_pR]; eyR[n, i, j] = Ey[i, j, k_pR]
+                hxR[n, i, j] = 0.5 * (Hx[i, j, k_pR] + Hx[i, j, k_pR - 1])
+                hyR[n, i, j] = 0.5 * (Hy[i, j, k_pR] + Hy[i, j, k_pR - 1])
+    return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
+
+
+def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+    """Run ONE 3D pass on the named backend, returning the eight probe planes as NumPy arrays (so the
+    downstream FFT / R-T extraction is backend-agnostic). 'numba' = the fused threaded CPU kernel (the
+    fast 3D path); 'numpy'/'cupy' = the vectorized reference loop. (The jax 3D kernel is a follow-on.)"""
+    (ke, be, ce), (kh, bh, ch) = cpml
+    if name == "numba":
+        return _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
+                           nsteps, k_src, k_pL, k_pR, src)
+    if name == "jax":
+        raise RuntimeError("solve_fdtd_3d backend='jax' is not implemented yet (the 3D XLA scan is a "
+                           "follow-on); use 'auto', 'numpy', 'numba', or 'cupy'.")
+    if name == "cupy" and xp is np:
+        import cupy as xp
+    a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
+    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp)
+    to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
+    return tuple(to_np(v) for v in out)
+
+
 def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: float,
                   nx: Optional[int] = None, ny: Optional[int] = None,
                   lateral_eps_inf: Optional[np.ndarray] = None,
@@ -550,8 +667,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     y-polarized. `layers` = the through-stack (z) profile (vacuum super/substrate); supply
     `lateral_eps_inf` (an (nx,ny,nz) array, or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a
     2D-periodic structure, else the stack is laterally UNIFORM (and the result reduces to 1D/TMM). Returns
-    both the specular 0-order and the total-flux (all (kx,ky) orders) R/T. backend: 'numpy' (reference) or
-    'cupy'/xp for the GPU; the fused numba/jax 3D kernels are a follow-on (2D already has all four)."""
+    both the specular 0-order and the total-flux (all (kx,ky) orders) R/T. backend: 'auto'/'numba' (the
+    fused threaded CPU kernel = the fast 3D path), 'numpy' (reference), or 'cupy'/xp for the GPU; the
+    differentiable jax 3D kernel is the one remaining follow-on (raises for now)."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_min = 2.0 * np.pi * f_min
@@ -604,20 +722,11 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
     cpml = _cpml_z(nz, dz, dt, npml)
-    name = _resolve_backend(backend)
-    if name not in ("numpy", "cupy"):                       # the fused numba/jax 3D kernels are not built yet
-        raise RuntimeError("solve_fdtd_3d backend '{}' not implemented yet; use 'numpy' or 'cupy' "
-                           "(the fused numba/jax 3D kernels are the next increment).".format(backend))
-    xpm = xp
-    if name == "cupy" and xpm is np:
-        import cupy as xpm
+    name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
     def run(ei, w, g_, c3):
-        a = tuple(xpm.asarray(v) for v in (ei, w, g_, c3))
-        out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xpm.asarray(src), cpml, xpm)
-        to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
-        return tuple(to_np(v) for v in out)
+        return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
 
     exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(one, zero, zero, zero)   # vacuum
     exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3)  # structure
