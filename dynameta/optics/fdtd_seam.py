@@ -83,6 +83,65 @@ def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Di
     return layers
 
 
+def fit_drude_to_eps(lambdas_m, eps_values, *, eps_inf0=None, wp0=None, gamma0=None):
+    """Least-squares fit of ONE FDTD Drude pole  eps(w) = eps_inf - wp^2/(w^2 + i*w*gamma)  (the FDTDLayer
+    convention) to sampled complex eps(lambda). Returns (eps_inf, wp_rad_s, gamma_rad_s) that plug
+    straight into an FDTDLayer so the broadband FDTD runs the material's real dispersion ACROSS the band,
+    rather than freezing eps at the band centre. Exact for a lossless dielectric (-> wp~0, eps_inf=eps) or
+    a genuine single-Drude metal; a least-squares approximation for multi-resonance media over a modest
+    band. Convention: Im(eps) > 0 = loss (matches DrudeOptical / the FDTD ADE)."""
+    from scipy.optimize import least_squares
+    lam = np.asarray(lambdas_m, dtype=float).ravel()
+    eps = np.asarray(eps_values, dtype=complex).ravel()
+    w = 2.0 * math.pi * C_LIGHT / lam
+    er, wmid = eps.real, float(np.median(w))
+    if eps_inf0 is None:
+        eps_inf0 = max(1.0, float(np.max(er)))             # high-frequency limit
+    if wp0 is None:
+        wp0 = math.sqrt(max(0.0, eps_inf0 - float(np.min(er)))) * wmid  # from the Re(eps) depression
+        if wp0 < 1.0e9:
+            wp0 = 0.05 * wmid
+    if gamma0 is None:
+        gamma0 = 0.1 * wmid
+
+    def resid(p):
+        einf, wp, g = p
+        model = einf - wp ** 2 / (w ** 2 + 1j * w * g)
+        d = model - eps
+        return np.concatenate([d.real, d.imag])
+
+    lo = [0.0, 0.0, 1.0e10]
+    hi = [60.0, 60.0 * float(np.max(w)), 1.0e17]
+    sol = least_squares(resid, [eps_inf0, wp0, gamma0], bounds=(lo, hi))
+    einf, wp, g = sol.x
+    return float(einf), float(wp), float(g)
+
+
+def _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m, *, eps_band_by_region=None,
+                                      n_fit=7):
+    """Like design_to_fdtd_layers but DISPERSIVE: each uniform layer's eps(lambda) is sampled across the
+    band (from a supplied per-region eps band, else the material as a lambda-function) and fitted to ONE
+    FDTD Drude pole, so the broadband FDTD reproduces the material dispersion across the whole band (not
+    just at the centre). eps_band_by_region: optional {layer_name -> complex array over the n_fit sample
+    wavelengths} for bias-modulated / carrier regions whose eps is not a plain material lambda-function."""
+    lams = np.linspace(lambda_min_m, lambda_max_m, int(n_fit))
+    layers = []
+    for L in reversed(design.stack.layers):                # incidence order: superstrate side first
+        if getattr(L, "inclusions", None):
+            raise NotImplementedError("dispersive sweep handles laterally-uniform stacks only; layer "
+                                      "'{}' has inclusions.".format(L.name))
+        band = (eps_band_by_region or {}).get(L.name)
+        if band is not None:
+            eps_band = np.asarray(band, dtype=complex).ravel()
+        else:
+            mat = design.materials.get(L.background_material)
+            eps_band = np.array([complex(mat.eps(float(l))) for l in lams], dtype=complex)
+        einf, wp, g = fit_drude_to_eps(lams, eps_band)
+        layers.append(FDTDLayer(thickness_m=float(L.thickness_m), eps_inf=einf,
+                                drude_wp_rad_s=wp, drude_gamma_rad_s=g))
+    return layers
+
+
 def _cell_axes(nx, ny, period_x_m, period_y_m):
     """Cell-centered FDTD lateral sample points (cell frame [0,period], shapes in absolute coords)."""
     xs = (np.arange(nx) + 0.5) * (period_x_m / nx)
@@ -223,21 +282,24 @@ class FDTDSweepResult:
 
 def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=None, dim=2,
                         resolution=32, backend="auto", courant=0.5, settle=12.0, n_pad_wave=4.0,
-                        n_super=1.0 + 0j, n_sub=1.0 + 0j):
+                        n_super=1.0 + 0j, n_sub=1.0 + 0j, dispersive=True, eps_band_by_region=None, n_fit=7):
     """ONE broadband FDTD over [lambda_min_m, lambda_max_m] -> the WHOLE R/T spectrum, vs the per-wavelength
     OpticalSolver seam (make_fdtd_optical_solver) which re-solves each wavelength. This is FDTD's native
     strength: one solve serves the whole sweep -- the fast path for a wavelength sweep at a fixed bias
     (N wavelengths in ~1 solve instead of N). Returns an FDTDSweepResult over the well-excited band.
 
-    The materials are FROZEN at the band center, so the spectrum is EXACT across the band for a
-    NON-DISPERSIVE (dielectric) design; for a dispersive material the across-band dispersion is
-    approximated (use a narrow band, or the per-wavelength seam, for strong dispersion). Same scope as the
-    seam: vacuum end media, laterally-uniform OR structured (dim=3) -- a lossy structured layer raises.
-    Tip: request a band ~10-20%% wider than your target so the pulse-tapered edges fall outside it."""
+    DISPERSION: with dispersive=True (default) each uniform layer's eps(lambda) is sampled across the band
+    and fitted to ONE Drude pole the FDTD runs natively -> the spectrum is accurate across the band for a
+    DISPERSIVE material (metal/ITO/Drude), not just a dielectric. Pass eps_band_by_region={name -> complex
+    array over n_fit sample wavelengths} for bias-modulated carrier regions whose eps is not a plain
+    material lambda-function (see run_fdtd_sweep). dispersive=False freezes eps at the band centre (exact
+    only for a non-dispersive design). STRUCTURED cells stay frozen-at-centre (the lateral grid is real
+    eps; a lossy/dispersive structured layer is out of scope -> FEM/RCWA). Scope: vacuum end media; uniform
+    or structured (dim=3). Tip: request a band ~10-20%% wider than your target so the tapered edges fall out."""
     if abs(complex(n_super) - 1.0) > _VAC_TOL or abs(complex(n_sub) - 1.0) > _VAC_TOL:
         raise NotImplementedError("fdtd_sweep_spectrum models a vacuum superstrate/substrate (got "
                                   "n_super={:.4g}, n_sub={:.4g}).".format(complex(n_super).real, complex(n_sub).real))
-    lam_c = 0.5 * (lambda_min_m + lambda_max_m)              # freeze the structure at the band center
+    lam_c = 0.5 * (lambda_min_m + lambda_max_m)              # band centre (the eps freeze point if non-dispersive)
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
     kw = dict(lambda_min_m=lambda_min_m, lambda_max_m=lambda_max_m, resolution=resolution,
               courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend)
@@ -245,15 +307,17 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     if structured and dim != 3:
         raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
     t_start = time.time()
-    if structured:
+    if structured:                                          # structured -> frozen-at-centre, real lateral eps
         layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region)
         res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
-    elif dim == 2:
-        res = solve_fdtd_2d(design_to_fdtd_layers(design, lam_c, eps_by_region=eps_by_region),
-                            period_x_m=px, **kw)
     else:
-        res = solve_fdtd_3d(design_to_fdtd_layers(design, lam_c, eps_by_region=eps_by_region),
-                            period_x_m=px, period_y_m=py, **kw)
+        if dispersive:                                      # fit one Drude pole per layer across the band
+            layers = _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m,
+                                                        eps_band_by_region=eps_band_by_region, n_fit=n_fit)
+        else:
+            layers = design_to_fdtd_layers(design, lam_c, eps_by_region=eps_by_region)
+        res = (solve_fdtd_2d(layers, period_x_m=px, **kw) if dim == 2
+               else solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, **kw))
     solve_time_s = time.time() - t_start
     f = res.freqs_Hz
     m = res.band & (f > 0)
@@ -264,3 +328,28 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     return FDTDSweepResult(lambda_m=lam[order], R=R, T=T, A=1.0 - R - T,
                            R_flux=sel(res.R_flux), T_flux=sel(res.T_flux),
                            r=sel(res.r0), t=sel(res.t0), solve_time_s=solve_time_s)
+
+
+def run_fdtd_sweep(design, lambdas_m, *, dim=2, resolution=32, backend="auto", eps_band_by_region=None,
+                   band_pad=0.12, n_super=1.0 + 0j, n_sub=1.0 + 0j, **kw):
+    """Sweep-aware FAST PATH: ONE broadband FDTD over the span of `lambdas_m`, then serve EACH wavelength
+    by interpolation -> a list of OpticalResult (one per wavelength) -- the SAME per-(bias,wavelength)
+    output run_pipeline's optical_solver produces, but from a SINGLE solve instead of N. This is the fix
+    for the per-wavelength seam re-running the full settling tail at every wavelength (the audit's medium
+    finding). dispersive=True (passed through, default) makes it accurate for dispersive layers; pass
+    eps_band_by_region={name -> complex array over the fit wavelengths} for bias-modulated carrier regions.
+    `band_pad` widens the solved band beyond the requested wavelengths so the pulse-tapered band edges fall
+    OUTSIDE the served range. Use one call per bias in place of the per-wavelength FDTD seam loop."""
+    lams = np.asarray(lambdas_m, dtype=float).ravel()
+    lo, hi = float(lams.min()) * (1.0 - band_pad), float(lams.max()) * (1.0 + band_pad)
+    sw = fdtd_sweep_spectrum(design, lambda_min_m=lo, lambda_max_m=hi, dim=dim, resolution=resolution,
+                             backend=backend, eps_band_by_region=eps_band_by_region,
+                             n_super=n_super, n_sub=n_sub, **kw)
+    ip = (lambda a: np.interp(lams, sw.lambda_m, a))         # sw.lambda_m is increasing (well-excited band)
+    R, T, Rf, Tf = ip(sw.R), ip(sw.T), ip(sw.R_flux), ip(sw.T_flux)
+    rr = ip(sw.r.real) + 1j * ip(sw.r.imag)
+    tt = ip(sw.t.real) + 1j * ip(sw.t.imag)
+    return [OpticalResult(r=complex(rr[i]), R=float(R[i]), phase_deg=float(np.degrees(np.angle(rr[i]))),
+                          solve_time_s=(float(sw.solve_time_s) if i == 0 else 0.0), t=complex(tt[i]),
+                          T=float(T[i]), A=float(1.0 - R[i] - T[i]), R_flux=float(Rf[i]), T_flux=float(Tf[i]))
+            for i in range(lams.size)]
