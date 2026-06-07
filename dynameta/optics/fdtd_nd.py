@@ -524,9 +524,11 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         curlz = dHy_dx - dHx_dy
         Ezn = (ce_dt * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
         Jz = aJ * Jz + bJ * (Ezn + Ez)
-        # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML
+        # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML:
+        # a z=const PEC plane forces only the TANGENTIAL E (Ex,Ey) to zero; the normal Ez sits half a
+        # cell inside and is left to its (purely transverse-curl, in-bounds) update.
         Eyn[:, :, k_src] += src[n]
-        for F in (Exn, Eyn, Ezn):
+        for F in (Exn, Eyn):
             F[:, :, 0] = 0.0; F[:, :, -1] = 0.0
         Ex, Ey, Ez = Exn, Eyn, Ezn
         # probe planes: co-locate Hx,Hy (at k+/-1/2) onto the E-plane (k) so S_z co-locates in z
