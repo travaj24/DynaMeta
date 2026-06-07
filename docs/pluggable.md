@@ -13,8 +13,8 @@ NGSolve builders.
 |---|---|---|
 | `CarrierSolver` | `regions() -> [RegionInfo]`, `solve(bias) -> CarrierField` | `LayeredDevsimBuilder` |
 | `OpticalGeometryBuilder` | `build()`, `mesh_regions() -> [str]`, `alignment() -> GeometryAlignment` | `LayeredOpticalBuilder` |
-| `OpticalSolver` | `solve(geometry, eps_by_region, lambda_m, optical) -> OpticalResult` | `solve_fem` |
-| `NToEpsMap` | `eps(n, lambda)` per region | `MaterialEpsMap` |
+| `OpticalSolver` | a CALLABLE `(design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult` (NOT a `.solve` method, and NOT `solve_fem`'s own arg order -- `solve_fem` takes an already-assembled CF) | `_fem_optical_solver` (wraps `solve_fem`) |
+| `NToEpsMap` | `eps_grid(...)` / `scalar_eps(...)` per region | `MaterialEpsMap` (carrier `n`), `EffectEpsMap` (field/state effect models) |
 
 `run_pipeline` takes overrides for the two builders:
 

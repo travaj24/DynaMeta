@@ -121,19 +121,48 @@ class QuantumWell:
         (single well: L/2). Overridden by MultiQuantumWell to the stack centre."""
         return 0.5 * self.well_width_m
 
+    def _well_centres(self):
+        """Centre z of EACH well (single well: [L/2]). Used to assign a state to its well by nearest
+        centre (robust to the field-induced intra-well shift). Overridden by MultiQuantumWell."""
+        return [0.5 * self.well_width_m]
+
     def _ground_localized(self, sp: SchrodingerPoisson1D, U_J: np.ndarray,
-                           in_well_interior: np.ndarray) -> Tuple[float, np.ndarray, float]:
+                           in_well_interior: np.ndarray, prefer_z: float = None
+                           ) -> Tuple[float, np.ndarray, float]:
         """Lowest-INDEX state that is actually localized IN the well (in-well probability > 0.5),
         scanning the n_solve lowest eigenstates; falls back to the most-localized of them. Returns
         (E, psi, p_in) where p_in is the picked state's in-well probability. Because field-ionized
         triangular-corner states accumulate BELOW the in-well level as the tilt grows, the in-well
         ground can sit well above index 0; n_solve must exceed that count (the heavy hole needs the
-        most). A low returned p_in flags the field-ionized regime (handled by the caller)."""
+        most). A low returned p_in flags the field-ionized regime (handled by the caller).
+
+        prefer_z (MQW e-h PAIRING): when given, pick the in-well candidate whose probability centroid
+        is CLOSEST to prefer_z instead of the lowest-index one. In a multi-well stack the N ground
+        states are near-degenerate and fp symmetry-breaking can localize the electron and the hole in
+        DIFFERENT wells (spurious overlap ~ 0); passing the electron's centroid as the hole's prefer_z
+        forces the same well. For a single well there is exactly one in-well state, so prefer_z is a
+        no-op (byte-identical to the lowest-index pick)."""
         n = min(int(self.n_solve), in_well_interior.size)
-        E, psi, _zi = sp.solve_schrodinger(U_J, n_states=n)
+        E, psi, zi = sp.solve_schrodinger(U_J, n_states=n)
         p_in = np.sum((psi ** 2)[in_well_interior, :], axis=0) * sp.h   # in-well probability/state
         cand = np.where(p_in > 0.5)[0]
-        k = int(cand[0]) if cand.size else int(np.argmax(p_in))
+        if cand.size == 0:
+            k = int(np.argmax(p_in))
+        elif prefer_z is None:
+            k = int(cand[0])                                           # lowest-index in-well (default)
+        else:
+            # assign prefer_z (the electron) and each in-well hole candidate to a well by NEAREST well
+            # CENTRE (robust to the field-induced intra-well shift -- the centroid stays nearest its own
+            # well), then take the LOWEST-INDEX (ground) candidate in the electron's well. For a single
+            # well there is one centre, so every candidate maps to it -> byte-identical to cand[0]; for a
+            # multi-well stack it picks the electron's-well ground hole instead of an arbitrary other-well
+            # one (the spurious overlap ~ 0 bug).
+            centres = np.asarray(self._well_centres(), dtype=float)
+            cz = np.array([float(np.sum(zi * (psi[:, j] ** 2)) * sp.h) for j in cand])
+            w_e = int(np.argmin(np.abs(centres - float(prefer_z))))
+            cand_well = np.array([int(np.argmin(np.abs(centres - c))) for c in cz])
+            same = cand[cand_well == w_e]
+            k = int(same[0]) if same.size else int(cand[int(np.argmin(np.abs(cz - float(prefer_z))))])
         return float(E[k]), psi[:, k], float(p_in[k])
 
     _IONIZE_TOL = 0.5      # in-well probability below this => field-ionized / box-corner artifact
@@ -156,7 +185,24 @@ class QuantumWell:
         spe = SchrodingerPoisson1D(z, self.m_e_kg)
         sph = SchrodingerPoisson1D(z, self.m_h_kg)
         E_e1_raw, psi_e, p_e = self._ground_localized(spe, U_e, in_well)
-        E_hh1_raw, psi_h, p_h = self._ground_localized(sph, U_h, in_well)
+        # pair the hole to the SAME well as the electron (the electron's probability centroid) so a
+        # multi-well stack does not localize e and h in different wells -> spurious overlap ~ 0
+        e_centroid = float(np.sum(zi * (psi_e ** 2)) * (z[1] - z[0]))
+        E_hh1_raw, psi_h, p_h = self._ground_localized(sph, U_h, in_well, prefer_z=e_centroid)
+        # MULTI-well strong-tilt guard: if the e and h still localize in different wells, the field has
+        # pushed the global e/h ground states to OPPOSITE ENDS of the stack (a physical tilt effect, not
+        # the fp-degeneracy bug the pairing fixes), and no same-well hole exists among the computed
+        # states -> the overlap (~0) is a multi-well artifact, NOT the per-well QCSE. Warn (non-silent).
+        centres = np.asarray(self._well_centres(), dtype=float)
+        if centres.size > 1:
+            h_centroid = float(np.sum(zi * (psi_h ** 2)) * (z[1] - z[0]))
+            if int(np.argmin(np.abs(centres - e_centroid))) != int(np.argmin(np.abs(centres - h_centroid))):
+                warnings.warn(
+                    "MultiQuantumWell.solve(F={:.3g} V/m): the electron and heavy hole localize in "
+                    "DIFFERENT wells (strong-tilt regime -- the field separates the global ground states "
+                    "across the stack), so the e-h overlap is a multi-well artifact, not the per-well "
+                    "QCSE. Model a SINGLE QuantumWell at the local field for the EAM overlap here."
+                    .format(F), RuntimeWarning, stacklevel=2)
         p_in_min = min(p_e, p_h)
         ionized = p_in_min < self._IONIZE_TOL
         if ionized:
@@ -240,3 +286,6 @@ class MultiQuantumWell(QuantumWell):
 
     def _well_centre(self) -> float:
         return 0.5 * self._stack_len()
+
+    def _well_centres(self):
+        return [s + 0.5 * self.well_width_m for s in self._well_starts()]

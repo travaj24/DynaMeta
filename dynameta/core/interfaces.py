@@ -76,8 +76,14 @@ class OpticalGeometryBuilder(Protocol):
 
 @runtime_checkable
 class OpticalSolver(Protocol):
-    def solve(self, geometry, eps_by_region: Dict[str, EpsField],
-              lambda_m: float, optical: "OpticalSpec") -> OpticalResult: ...
+    """The CALLABLE a frequency-domain optical backend implements -- the pipeline invokes it once per
+    (bias, wavelength). The DEFAULT is optics.solver._fem_optical_solver (a thin wrapper that assembles
+    the eps CoefficientFunction and calls solver.solve_fem); a BYO backend (e.g. a future RCWA adapter)
+    is supplied via run_pipeline(optical_solver=...). NOTE: it is a plain callable with the signature
+    below (NOT a class with a .solve method, and NOT solve_fem's own argument order -- solve_fem takes
+    an already-assembled CF). Distinct from LayeredStackSolver, which consumes a LayeredStack."""
+    def __call__(self, design, geometry, eps_by_region: Dict[str, EpsField],
+                 lambda_m: float, n_super: complex, n_sub: complex) -> OpticalResult: ...
 
 
 @runtime_checkable

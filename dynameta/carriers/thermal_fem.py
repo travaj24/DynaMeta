@@ -109,10 +109,12 @@ def solve_thermal_fem(layers: List[ThermalLayer], *, period_x_m: float, period_y
         else:
             q_cf = joule_W_m3                                 # an ng CF (mesh coords)
         f += (q_cf / _S ** 2) * v * ng.dx
+    if linear_solver not in ("umfpack", "sparsecholesky"):       # no silent substitution
+        raise ValueError("linear_solver must be 'umfpack' or 'sparsecholesky', got {!r}".format(
+            linear_solver))
     with ng.TaskManager():
         a.Assemble(); f.Assemble()
         res = f.vec - a.mat * T.vec
-        inv = a.mat.Inverse(fes.FreeDofs(), inverse=("umfpack" if linear_solver == "umfpack"
-                                                     else "sparsecholesky"))
+        inv = a.mat.Inverse(fes.FreeDofs(), inverse=linear_solver)
         T.vec.data += inv * res
     return ThermalResult(mesh=mesh, T=T, layers=list(layers))

@@ -55,6 +55,7 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
     cap = float(t_end) / float(dt_cap_frac)
     steps = 0
     while t < t_end and steps < max_steps:
+        dt = min(dt, t_end - t)         # clamp the final step so it lands ON t_end (audit: was ~5% over)
         try:
             ds.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
                      absolute_error=absolute_error, relative_error=relative_error,

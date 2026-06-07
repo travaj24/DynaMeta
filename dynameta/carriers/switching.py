@@ -23,8 +23,10 @@ from dynameta.constants import KB
 
 @dataclass
 class PCMSwitching:
-    """PCM crystallization kinetics under a thermal pulse (GST/Sb2S3/VO2-like). Crystalline fraction
-    x in [0,1]:
+    """PCM crystallization kinetics under a thermal pulse (amorphous<->crystalline chalcogenides:
+    GST, Sb2S3). NOT VO2 -- VO2 is a Mott/Peierls insulator-to-metal transition, not an
+    amorphous<->crystalline melt-quench, so it is NOT described by this JMAK model (use a two-endpoint
+    Bruggeman blend for VO2). Crystalline fraction x in [0,1]:
       * CRYSTALLIZE (T_glass_K < T < T_melt_K): JMAK isokinetic additivity x = 1 - exp(-theta^n),
         theta += K(T) dt, K(T) = K0 exp(-E_a / kB T).
       * MELT-QUENCH (T >= T_melt_K): theta -> 0, x -> 0 (amorphous).

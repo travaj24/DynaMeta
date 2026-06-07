@@ -226,8 +226,9 @@ class AnisotropicThermoOpticModel:
     crystal: dn_o/dT != dn_e/dT). Reads fields['T'] (kelvin) and returns the DIAGONAL permittivity
     tensor diag( (n_i + dn_dT_i (T - T_ref))^2 ), i = x,y,z, with n_i = sqrt(eps_ref_i). Reduces
     EXACTLY to the scalar ThermoOpticModel * I when the three axes are equal. The tensor is DIAGONAL
-    (principal frame), so it flows through the tensor-eps FEM; a tilted principal frame (off-diagonal)
-    is subject to the NGSolve off-diagonal limitation (eps_assembler._check_diagonal)."""
+    (principal frame); a tilted principal frame (off-diagonal) is ALSO supported by the FEM now -- the
+    solver's explicit UPML path solves off-diagonal tensors end-to-end (validated by
+    validation/lc_tilted_fem.py)."""
     eps_ref_diag: tuple        # (eps_xx, eps_yy, eps_zz) at T_ref
     dn_dT_diag: tuple          # (dn/dT_x, dn/dT_y, dn/dT_z) [1/K]
     T_ref: float = 300.0
@@ -243,9 +244,13 @@ class AnisotropicThermoOpticModel:
         d = [(xp.sqrt(xp.asarray(er) + 0j) + float(dndt) * dT) ** 2
              for er, dndt in zip(self.eps_ref_diag, self.dn_dT_diag)]
         zero = xp.zeros_like(d[0]) + 0j
-        return xp.stack([xp.stack([d[0], zero, zero]),
-                         xp.stack([zero, d[1], zero]),
-                         xp.stack([zero, zero, d[2]])])      # diagonal principal-axis tensor
+        # build with TRAILING (...,3,3) axes (stack rows on -1, rows on -2) so a GRIDDED T of shape
+        # (...,) yields (...,3,3) -- the documented convention as_tensor/bridge expect. The old
+        # leading-axis xp.stack([xp.stack([...]),...]) produced (3,3,...) and corrupted a gridded T.
+        rows = [xp.stack([d[0], zero, zero], axis=-1),
+                xp.stack([zero, d[1], zero], axis=-1),
+                xp.stack([zero, zero, d[2]], axis=-1)]
+        return xp.stack(rows, axis=-2)                       # (...,3,3) diagonal principal-axis tensor
 
 
 # ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
@@ -370,10 +375,17 @@ class ElectroAbsorptionModel:
         margin = self._KK_MARGIN_SIGMA * float(self.broadening_J)
         e_lo = min(s0.E_transition_J, sF.E_transition_J) - margin
         e_hi = max(s0.E_transition_J, sF.E_transition_J) + margin
+        if self.continuum_alpha0_per_m:
+            # the band-to-band Elliott continuum onset is at E_T + continuum_binding_J (with a slow
+            # s2d -> 1 tail above it), which can sit FAR above E_T + margin; require the grid to reach
+            # it + a margin so the KK integral does not silently truncate the continuum (audit QC-2b).
+            e_hi = max(e_hi, max(s0.E_transition_J, sF.E_transition_J)
+                       + float(self.continuum_binding_J) + margin)
         if not (grid[0] <= e_lo and e_hi <= grid[-1]):
-            raise ValueError("e_grid_J must span at least {:.0f}*broadening_J beyond E_T(0) and "
-                             "E_T(F) on BOTH sides (the KK integral truncates otherwise)".format(
-                                 self._KK_MARGIN_SIGMA))
+            raise ValueError("e_grid_J must span at least {:.0f}*broadening_J below E_T(0)/E_T(F) and "
+                             "(when the continuum is on) up to E_T + continuum_binding_J + {:.0f}*"
+                             "broadening_J above (the KK integral truncates otherwise)".format(
+                                 self._KK_MARGIN_SIGMA, self._KK_MARGIN_SIGMA))
         # E_photon must be IN the grid: np.interp clamps to the edge outside it, diverging from the
         # analytic dkappa path (audit QC-3).
         if not (grid[0] <= E_ph <= grid[-1]):
@@ -409,9 +421,12 @@ class ElectroAbsorptionModel:
 
 @dataclass
 class PCMModel:
-    """Phase-change-material EffectModel (GST / Sb2S3 / VO2): a crystalline volume fraction f in
-    [0, 1] blends the amorphous and crystalline permittivities via the Bruggeman effective-medium
-    approximation (the standard intermediate-state optical model). Reads
+    """Phase-change-material EffectModel (GST / Sb2S3; also VO2 as a two-endpoint insulator/metal
+    blend): a state fraction f in [0, 1] blends the two endpoint permittivities via the Bruggeman
+    effective-medium approximation (the standard intermediate-state optical model). NOTE: f here is a
+    generic two-endpoint mixing fraction -- for GST/Sb2S3 it is the JMAK crystalline fraction from
+    carriers.switching.PCMSwitching, but VO2's insulator->metal transition is NOT that JMAK
+    crystallization kinetics (see PCMSwitching); only the optical blend is shared. Reads
     fields['crystalline_fraction'] (scalar in [0, 1]; default 0 = fully amorphous) and returns the
     self-consistent Bruggeman root of
 
@@ -456,13 +471,12 @@ class LiquidCrystalModel:
     theta = 0 the extraordinary axis is x (eps_xx = n_e^2, eps_yy = eps_zz = n_o^2); rotating to
     theta = pi/2 puts it along z. Reduces EXACTLY to the isotropic n_o^2 I when n_e = n_o.
 
-    FEM NOTE: the two PRINCIPAL orientations -- planar (theta=0) and homeotropic (theta=pi/2) -- are
-    DIAGONAL and flow correctly through the Phase-0b tensor-eps FEM (validation/lc_uniaxial_fem.py).
-    An INTERMEDIATE tilt gives a nonzero off-diagonal eps_xz, which the current FEM matrix-CF matvec
-    mis-evaluates under PML (a tracked P0b follow-on; assemble_eps_cf RAISES NotImplementedError for
-    off-diagonal tensors rather than return a silently-wrong result). The tilted-director ANGULAR
-    physics is validated analytically (validation/reconfigurable_modulators.py); only the FEM solve
-    of an off-diagonal tensor is deferred."""
+    FEM NOTE: both the PRINCIPAL orientations -- planar (theta=0) and homeotropic (theta=pi/2),
+    DIAGONAL (validation/lc_uniaxial_fem.py) -- AND an INTERMEDIATE tilt (nonzero off-diagonal eps_xz)
+    flow correctly through the tensor-eps FEM. The off-diagonal solve is supported end-to-end via the
+    solver's explicit UPML path (the earlier failure was mesh.SetPML's coordinate stretch being wrong
+    for an anisotropic medium, not an assembly defect); the tilted ordinary wave is tilt-invariant and
+    the extraordinary wave matches n_eff(theta) (validation/lc_tilted_fem.py)."""
     n_o: float
     n_e: float
 
@@ -471,8 +485,11 @@ class LiquidCrystalModel:
         xp = array_namespace(th_in)
         th = xp.asarray(th_in)
         c, s = xp.cos(th), xp.sin(th)
-        nhat = xp.stack([c, xp.zeros_like(c), s])         # (3,) optic axis (no in-place build)
-        eps = (self.n_o ** 2) * xp.eye(3) + (self.n_e ** 2 - self.n_o ** 2) * xp.outer(nhat, nhat)
+        # trailing-axis build so a GRIDDED director_angle of shape (...,) yields (...,3,3) (the
+        # documented convention); xp.stack([...]) + xp.outer flattened a grid to (3N,3N) and raised.
+        nhat = xp.stack([c, xp.zeros_like(c), s], axis=-1)            # (...,3) optic axis
+        outer = nhat[..., :, None] * nhat[..., None, :]              # (...,3,3) = nhat (x) nhat
+        eps = (self.n_o ** 2) * (xp.eye(3) + 0j) + (self.n_e ** 2 - self.n_o ** 2) * outer
         return eps + 0j                                   # complex (Im=0 here)
 
 
@@ -511,8 +528,11 @@ class MagnetoOpticModel:
         m_in = (fields or {}).get("magnetization", 1.0)
         xp = array_namespace(m_in)
         g = self.g * xp.asarray(m_in) + 0j
-        e = xp.asarray(self.eps_r) + 0j
-        zero = xp.asarray(0.0) + 0j
-        return xp.stack([xp.stack([e, 1j * g, zero]),
-                         xp.stack([-1j * g, e, zero]),
-                         xp.stack([zero, zero, e])])       # (3,3) gyrotropic, Hermitian for real g
+        e = xp.asarray(self.eps_r) + 0j + xp.zeros_like(g)   # broadcast e to the field shape
+        zero = xp.zeros_like(g)
+        # TRAILING (...,3,3) axes so a GRIDDED magnetization of shape (...,) yields (...,3,3) (the
+        # documented convention); the old leading-axis stack gave (3,3,...) and raised on a grid.
+        rows = [xp.stack([e, 1j * g, zero], axis=-1),
+                xp.stack([-1j * g, e, zero], axis=-1),
+                xp.stack([zero, zero, e], axis=-1)]
+        return xp.stack(rows, axis=-2)                       # (...,3,3) gyrotropic, Hermitian for real g
