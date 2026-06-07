@@ -1,6 +1,6 @@
 """3D full-vector FDTD oracle: optics.fdtd_nd.solve_fdtd_3d is a doubly-periodic (x AND y) 6-component
 Yee solver (Bloch-periodic x/y at normal incidence, CFS-CPML + PEC in z) -- the 2D-TE engine is its
-d/dy=0, {Ey,Hx,Hz} reduction. Four gates establish it is correct:
+d/dy=0, {Ey,Hx,Hz} reduction. Six gates establish it is correct:
 
 GATE A (reduces to TMM/1D): a laterally-UNIFORM non-dispersive slab -- the specular 0-order R0/T0 AND
         the all-order Poynting flux R_flux/T_flux both == the analytic Airy R/T (so the full vector 3D
@@ -124,9 +124,45 @@ def main():
     print("[f3] D Drude slab (lossy): n in [{:.2f},{:.2f}] ; 0-order max|d-Airy|={:.2e} -> {}".format(
         float(nD.real.min()), float(nD.real.max()), dD, "PASS" if gate_d else "FAIL"), flush=True)
 
-    overall = gate_a and gate_b and gate_c and gate_d
+    # GATE E (cross-polarization): an ASYMMETRIC (L-shaped) 2D-periodic pillar has no mirror symmetry, so
+    # a y-polarized input generates x-pol (the full Ex/Ez/Hy coupling + the Ex Hy* cross term in S_z). The
+    # all-order flux STILL conserves energy -- a wrong cross-term sign or a missing component would break
+    # energy badly here (a dedicated probe measured cross-pol |Ex|/|Ey| 0-order = 0.87 for this cell).
+    def lshape(nx, ny, nz, zc, pad, zs):
+        e = np.ones((nx, ny, nz)); inb = (zc >= pad) & (zc < pad + zs)
+        blk = np.zeros((nx, ny), dtype=bool)
+        blk[nx // 4:nx - nx // 4, ny // 4:ny // 2] = True
+        blk[nx // 4:nx // 2, ny // 4:ny - ny // 4] = True    # L (no mirror symmetry -> y->x conversion)
+        for k in np.where(inb)[0]:
+            e[:, :, k] = np.where(blk, 6.25, 1.0)
+        return e
+    rE = solve_fdtd_3d([FDTDLayer(thickness_m=450e-9, eps_inf=1.0)], period_x_m=950e-9, period_y_m=950e-9,
+                       lateral_eps_inf=lshape, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=12, n_pad_wave=4.0)
+    mE = rE.band
+    eE = np.abs(rE.R_flux[mE] + rE.T_flux[mE] - 1.0)
+    eE_med = float(np.median(eE)); spec_minE = float((rE.R0[mE] + rE.T0[mE]).min())
+    gate_e = bool(eE_med < 1e-2 and spec_minE < 0.9)
+    print("[f3] E cross-pol (asymmetric L-pillar): flux |R+T-1| median={:.2e} ; co-pol 0-order "
+          "min(R0+T0)={:.3f} (strong cross-pol + diffraction, energy still closes) -> {}".format(
+              eE_med, spec_minE, "PASS" if gate_e else "FAIL"), flush=True)
+
+    # GATE F (Kerr self-action): a chi3 slab at low vs high source amplitude must SHIFT the transmission
+    # (intensity-dependent eps_eff = eps_inf + chi3|E|^2 = self-phase modulation) and stay lossless.
+    slab = [FDTDLayer(thickness_m=400e-9, eps_inf=4.0, chi3_m2_V2=2e-19)]
+    fkw = dict(period_x_m=300e-9, period_y_m=300e-9, nx=4, ny=4, kerr=True,
+               lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=20)
+    lo = solve_fdtd_3d(slab, source_amp=1.0, **fkw)
+    hi = solve_fdtd_3d(slab, source_amp=6.0e8, **fkw)
+    mF = lo.band & hi.band
+    dshift = float(np.max(np.abs(hi.T0[mF] - lo.T0[mF])))
+    enF = float(np.max(np.abs(lo.R_flux[mF] + lo.T_flux[mF] - 1.0)))
+    gate_f = bool(dshift > 1e-4 and enF < 1e-2)
+    print("[f3] F Kerr self-action: max|T0(hi)-T0(lo)|={:.2e} (>0 = SPM) ; low-amp energy |R+T-1|={:.2e} "
+          "(lossless) -> {}".format(dshift, enF, "PASS" if gate_f else "FAIL"), flush=True)
+
+    overall = gate_a and gate_b and gate_c and gate_d and gate_e and gate_f
     print("[f3] *** 3D FULL-VECTOR FDTD (reduces to 1D/TMM; reduces to 2D engine; 3D diffraction; "
-          "lossy Drude): {} ***".format("PASS" if overall else "FAIL"), flush=True)
+          "lossy Drude; cross-pol; Kerr): {} ***".format("PASS" if overall else "FAIL"), flush=True)
     return overall
 
 
