@@ -77,6 +77,13 @@ def test_bad_dim_raises():
         make_fdtd_optical_solver(dim=4)
 
 
+def test_sweep_guards():
+    from dynameta.optics.fdtd_seam import fdtd_sweep_spectrum
+    d = _design([(4.0, 100e-9, [])])
+    with pytest.raises(NotImplementedError):                # non-vacuum end media -> raise before solving
+        fdtd_sweep_spectrum(d, lambda_min_m=1200e-9, lambda_max_m=1400e-9, n_super=1.5 + 0j)
+
+
 # ---- lateral-inclusion rasterization (structured cells) -------------------------------------------
 
 def test_rasterize_circle_fill_fraction_and_placement():
