@@ -50,6 +50,7 @@ import ngsolve as ng
 
 from typing import TYPE_CHECKING
 
+from dynameta.constants import C_LIGHT, EPS0
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.ngsolve_layered import OpticalGeometry, S
 
@@ -382,7 +383,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # and ds in nm^2 keep it dimensionally consistent with the k0^2 eps volume term). The sheet-free
     # background E_bg drives the scattered field, so the SAME term enters the RHS on E_bg.
     if sheet_bcs:
-        _Z0 = 376.730313668                                  # free-space wave impedance (ohm)
+        _Z0 = 1.0 / (EPS0 * C_LIGHT)                         # free-space wave impedance (ohm), from constants.py
         for _bnd, _sigma in sheet_bcs.items():
             # sign: with exp(-i omega t) and Im(eps)>0 = loss, a passive sheet (Re sigma > 0) must
             # ABSORB, so the dissipative operator term is - i k0 Z0 sigma (E_tan . v_tan).
