@@ -29,10 +29,13 @@ import devsim as ds
 from dynameta.carriers import eq_registry as R
 
 POTENTIAL_EQ = "PotentialEquation"
-CARRIER_EQS = ("ElectronContinuityEquation",)   # extensible (e.g. holes)
-# Solution variables tracked for the Gummel convergence snapshot. (No ElectronQFL: there
-# is no quasi-Fermi-level formulation -- Electrons/Holes are the solution variables; F7.)
-_TRACK_VARS = ("Potential", "Electrons", "Holes")
+# The Gummel path is UNIPOLAR (electron-only): it freezes exactly these continuity equations during
+# the Poisson sub-solve. A bipolar device would also need HoleContinuityEquation frozen -- use the
+# Newton method (method="newton") for bipolar, which solves all equations together.
+CARRIER_EQS = ("ElectronContinuityEquation",)
+# Solution variables tracked for the Gummel convergence snapshot (electron-only -> no 'Holes'; there
+# is also no ElectronQFL -- Electrons is the solution variable, not a quasi-Fermi level; F7).
+_TRACK_VARS = ("Potential", "Electrons")
 
 
 def solve_dc(device: str, *, method: str = "newton",
