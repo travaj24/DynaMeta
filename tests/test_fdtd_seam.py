@@ -75,3 +75,58 @@ def test_non_vacuum_end_media_raises():
 def test_bad_dim_raises():
     with pytest.raises(ValueError):
         make_fdtd_optical_solver(dim=4)
+
+
+# ---- lateral-inclusion rasterization (structured cells) -------------------------------------------
+
+def test_rasterize_circle_fill_fraction_and_placement():
+    import numpy as np
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.fdtd_seam import _cell_axes, _layer_eps_cell
+    P, r = 200e-9, 60e-9
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j))); reg.add(Material("hi", ConstantOptical(9.0 + 0j)))
+    L = Layer("s", 100e-9, "air", inclusions=[Inclusion(Circle(P / 2, P / 2, r), "hi")])
+    nx = ny = 240
+    xs, ys = _cell_axes(nx, ny, P, P)
+    X, Y = np.meshgrid(xs, ys, indexing="ij")
+    cell = _layer_eps_cell(L, X, Y, 1300e-9, reg, {})
+    fill = float((np.abs(cell.real - 9.0) < 1e-9).mean())
+    assert abs(fill - np.pi * r ** 2 / P ** 2) < 5e-3           # area matches the circle, to the grid res
+    assert abs(cell[nx // 2, ny // 2].real - 9.0) < 1e-9        # center -> inclusion
+    assert abs(cell[0, 0].real - 1.0) < 1e-9                    # corner -> background
+
+
+def test_rasterize_priority_overlap():
+    import numpy as np
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.fdtd_seam import _cell_axes, _layer_eps_cell
+    P = 200e-9
+    reg = MaterialRegistry()
+    for nm, e in [("air", 1.0), ("a", 4.0), ("b", 9.0)]:
+        reg.add(Material(nm, ConstantOptical(complex(e))))
+    L = Layer("s", 100e-9, "air", inclusions=[Inclusion(Circle(P / 2, P / 2, 80e-9), "a", priority=0),
+                                              Inclusion(Circle(P / 2, P / 2, 40e-9), "b", priority=5)])
+    nx = ny = 120
+    X, Y = np.meshgrid(*_cell_axes(nx, ny, P, P), indexing="ij")
+    cell = _layer_eps_cell(L, X, Y, 1300e-9, reg, {})
+    assert abs(cell[nx // 2, ny // 2].real - 9.0) < 1e-9        # higher-priority 'b' wins the overlap
+
+
+def test_structured_lateral_grid_and_dispatch_guard():
+    import numpy as np
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.fdtd_seam import design_has_inclusions, make_structured_lateral
+    P = 220e-9
+    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, 60e-9), "m0")])])
+    # the m0 inclusion sits in an air background layer; give the layer an air bg via a 2nd uniform material
+    assert design_has_inclusions(d)
+    layers, lateral_fn = make_structured_lateral(d, LAM)
+    eps = lateral_fn(40, 40, 60, (np.arange(60) + 0.5) * 10e-9, 100e-9, 150e-9)
+    assert eps.shape == (40, 40, 60)
+    inb = (((np.arange(60) + 0.5) * 10e-9) >= 100e-9) & (((np.arange(60) + 0.5) * 10e-9) < 250e-9)
+    assert eps[:, :, ~inb].max() <= 1.0 + 1e-9                  # vacuum pad outside the structure
+    assert eps[:, :, inb].max() > 1.0                          # patterned eps inside the structure band
+    # dim=2 + inclusions must raise
+    with pytest.raises(NotImplementedError):
+        make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
