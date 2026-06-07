@@ -1,6 +1,6 @@
 """3D full-vector FDTD oracle: optics.fdtd_nd.solve_fdtd_3d is a doubly-periodic (x AND y) 6-component
 Yee solver (Bloch-periodic x/y at normal incidence, CFS-CPML + PEC in z) -- the 2D-TE engine is its
-d/dy=0, {Ey,Hx,Hz} reduction. Six gates establish it is correct:
+d/dy=0, {Ey,Hx,Hz} reduction. Seven gates establish it is correct (the last = backend equivalence):
 
 GATE A (reduces to TMM/1D): a laterally-UNIFORM non-dispersive slab -- the specular 0-order R0/T0 AND
         the all-order Poynting flux R_flux/T_flux both == the analytic Airy R/T (so the full vector 3D
@@ -160,9 +160,24 @@ def main():
     print("[f3] F Kerr self-action: max|T0(hi)-T0(lo)|={:.2e} (>0 = SPM) ; low-amp energy |R+T-1|={:.2e} "
           "(lossless) -> {}".format(dshift, enF, "PASS" if gate_f else "FAIL"), flush=True)
 
-    overall = gate_a and gate_b and gate_c and gate_d and gate_e and gate_f
+    # GATE G (cross-backend): the fused numba 3D kernel (the fast threaded CPU path) reproduces the numpy
+    # reference to machine precision -- same six-component physics, just compiled. Skipped if numba absent.
+    from dynameta.optics.fdtd_nd import available_backends
+    if "numba" in available_backends():
+        rG = solve_fdtd_3d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9, period_y_m=300e-9,
+                           nx=4, ny=4, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=18, backend="numba")
+        mG = rA.band & rG.band
+        dG = max(float(np.max(np.abs(rA.R0[mG] - rG.R0[mG]))), float(np.max(np.abs(rA.T0[mG] - rG.T0[mG]))))
+        gate_g = bool(dG < 1e-9)
+        print("[f3] G numba==numpy (3D): max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
+            dG, "PASS" if gate_g else "FAIL"), flush=True)
+    else:
+        gate_g = True
+        print("[f3] G numba backend: SKIP (not installed)", flush=True)
+
+    overall = gate_a and gate_b and gate_c and gate_d and gate_e and gate_f and gate_g
     print("[f3] *** 3D FULL-VECTOR FDTD (reduces to 1D/TMM; reduces to 2D engine; 3D diffraction; "
-          "lossy Drude; cross-pol; Kerr): {} ***".format("PASS" if overall else "FAIL"), flush=True)
+          "lossy Drude; cross-pol; Kerr; numba==numpy): {} ***".format("PASS" if overall else "FAIL"), flush=True)
     return overall
 
 
