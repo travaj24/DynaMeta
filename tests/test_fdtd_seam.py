@@ -98,6 +98,23 @@ def test_fit_drude_recovers_known_drude():
     assert np.max(np.abs(model - eps)) < 1e-3 * np.max(np.abs(eps))   # reproduces eps across the band
 
 
+def test_graded_eps_from_carrier_and_layers():
+    import numpy as np
+    from dynameta.materials import DrudeOptical, M_E
+    from dynameta.optics.fdtd_seam import eps_profile_from_carrier, graded_fdtd_layers
+    drude = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)
+    n = np.array([4.0e26, 1.0e27])                         # m^-3
+    eps = eps_profile_from_carrier(n, 1500e-9, drude)
+    assert eps.shape == (2,) and np.all(eps.imag > 0)      # passive loss
+    assert abs(eps[0] - complex(drude.eps(1500e-9, n_m3=4.0e26))) < 1e-12
+    layers = graded_fdtd_layers(400e-9, eps, 1500e-9)
+    assert len(layers) == 2 and abs(layers[0].thickness_m - 200e-9) < 1e-15
+    w = 2.0 * np.pi * 299792458.0 / 1500e-9
+    for i, L in enumerate(layers):                         # each sublayer reproduces eps at lambda
+        e = L.eps_inf - L.drude_wp_rad_s ** 2 / (w ** 2 + 1j * w * L.drude_gamma_rad_s)
+        assert abs(e - eps[i]) < 1e-6 * (abs(eps[i]) + 1.0)
+
+
 def test_fit_drude_lossless_dielectric():
     import numpy as np
     from dynameta.optics.fdtd_seam import fit_drude_to_eps

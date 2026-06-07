@@ -142,6 +142,32 @@ def _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m, *, eps
     return layers
 
 
+def eps_profile_from_carrier(n_m3_profile, lambda_m, drude_model):
+    """Per-DEPTH complex eps from a carrier-density profile n(z) via a DrudeOptical model -- e.g. an ITO
+    accumulation / ENZ profile from a DEVSIM n(z) solve. Returns the eps(z) array (same length as n(z)).
+    This is the bridge that makes the gated-ITO optics QUANTITATIVE: the few-nm accumulation has a steep
+    eps(z), so a single homogenized eps misses the ENZ; a graded profile (graded_fdtd_layers) captures it."""
+    n = np.asarray(n_m3_profile, dtype=float).ravel()
+    return np.array([complex(drude_model.eps(float(lambda_m), n_m3=float(ni))) for ni in n], dtype=complex)
+
+
+def graded_fdtd_layers(thickness_m, eps_z, lambda_m, *, n_slices=None):
+    """Slice a graded complex eps(z) profile into thin UNIFORM FDTDLayers (each via the one-Drude inversion
+    _eps_to_fdtd_layer), so the FDTD reproduces the DEPTH profile (a quantitative graded ITO/ENZ layer, vs
+    a single homogenized eps). eps_z[0] is the FRONT (incidence-side) of the layer; the returned layers are
+    in that incidence order. With n_slices < len(eps_z) the profile is resampled to n_slices sublayers.
+    The FDTD grid must resolve the slices (the documented ENZ caveat: a few-nm profile needs a fine dz)."""
+    eps_z = np.asarray(eps_z, dtype=complex).ravel()
+    if n_slices is not None and 0 < n_slices < len(eps_z):
+        u = np.linspace(0.0, len(eps_z) - 1.0, int(n_slices))
+        idx = np.arange(len(eps_z), dtype=float)
+        eps_s = np.interp(u, idx, eps_z.real) + 1j * np.interp(u, idx, eps_z.imag)
+    else:
+        eps_s = eps_z
+    d_sub = float(thickness_m) / len(eps_s)
+    return [_eps_to_fdtd_layer(d_sub, e, lambda_m) for e in eps_s]
+
+
 def _cell_axes(nx, ny, period_x_m, period_y_m):
     """Cell-centered FDTD lateral sample points (cell frame [0,period], shapes in absolute coords)."""
     xs = (np.arange(nx) + 0.5) * (period_x_m / nx)
