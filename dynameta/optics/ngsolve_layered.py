@@ -285,18 +285,21 @@ class LayeredOpticalBuilder:
         # glue + periodic identify (before OCCGeometry)
         glued = occ.Glue(solids)
         n_px, n_py = _identify_periodic(glued, Px, Py)
-        # Name horizontal full-cell layer interfaces by z (nm), PRE-OCCGeometry via f.name -- a
-        # post-OCCGeometry face.bc() does NOT propagate to the mesh boundary, but f.name on the glued
-        # shape does. This lets a surface boundary condition (e.g. a graphene conductive sheet, via
-        # solver.solve_fem(sheet_bcs={'iface_z<nm>': sigma})) target an internal interface. The tight
-        # center tolerance matches only true full-cell horizontal faces; the semi-prism boundary-layer
-        # case is skipped to avoid clobbering its named faces.
+        # Name horizontal full-cell layer INTERFACES (interior faces) by z (nm) here, PRE-OCCGeometry,
+        # via f.name: an interior interface is not an exterior boundary, so it must be named on the glued
+        # shape BEFORE OCCGeometry to reach the mesh (an exterior boundary can be (re)labelled after, as
+        # the periodic faces are below). This lets a surface boundary condition (e.g. a graphene sheet,
+        # solver.solve_fem(sheet_bcs={'iface_z<nm>': sigma})) target an interior interface. The tight
+        # center tolerance matches only true full-cell horizontal faces; semi-prism is skipped to avoid
+        # clobbering its named boundary-layer faces.
         if not spec.semi_prism_thk_m:
             for f in glued.faces:
                 c = f.center
                 if abs(c.x - 0.5 * Px) < 1e-3 * Px and abs(c.y - 0.5 * Py) < 1e-3 * Py:
                     f.name = "iface_z{}".format(int(round(c.z)))
         geo = occ.OCCGeometry(glued)
+        # Label the exterior periodic side faces (diagnostic names; the Bloch periodicity itself is
+        # driven by the _identify_periodic Identify() calls above, keyed by idnr -- not by these names).
         for face in geo.shape.faces:
             c = face.center
             if abs(c.x) < 1e-6:        face.bc("periodic_x_lo")

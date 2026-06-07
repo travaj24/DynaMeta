@@ -93,7 +93,17 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     FDTD1DResult(freqs_Hz, R, T, band) over the well-excited band."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
-    n_max = max(1.0, max(np.sqrt(L.eps_inf) for L in layers))
+    # Size the grid from the DISPERSIVE |n| over the band, not just sqrt(eps_inf): a below-plasma Drude
+    # metal has |eps(w)| >> eps_inf (largest at the band's low-frequency end), so the short skin depth
+    # is otherwise silently under-resolved (audit). eps(w) = eps_inf - wp^2/(w^2 + i gamma w).
+    w_min = 2.0 * np.pi * f_min
+
+    def _n_band_max(L):
+        eps = complex(L.eps_inf)
+        if L.drude_wp_rad_s > 0.0:
+            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
+        return abs(np.sqrt(eps))                       # |n| (sets both the wavelength and the skin depth)
+    n_max = max(1.0, max(_n_band_max(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     dt = courant * dz / C_LIGHT
     pad = n_pad_wave * lambda_max_m

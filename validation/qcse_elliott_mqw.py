@@ -79,8 +79,9 @@ def main():
     mqw1 = MultiQuantumWell(n_wells=1, barrier_width_m=0.0, exciton_binding_J=E_BIND, **GAAS)
     d1 = abs(mqw1.solve(0.0).E_transition_J - E_T)
     e1 = qw.solve(0.0).E_e1_J
-    thick = MultiQuantumWell(n_wells=3, barrier_width_m=12e-9, nz=2601,
-                             exciton_binding_J=E_BIND, **GAAS).solve(0.0)
+    mqw_thick = MultiQuantumWell(n_wells=3, barrier_width_m=12e-9, nz=2601,
+                                 exciton_binding_J=E_BIND, **GAAS)
+    thick = mqw_thick.solve(0.0)
     thin = MultiQuantumWell(n_wells=3, barrier_width_m=1.5e-9, nz=2601,
                             exciton_binding_J=E_BIND, **GAAS).solve(0.0)
     red_ok = bool(d1 < 1e-6 * EV)
@@ -92,7 +93,17 @@ def main():
     print("[qe] GATE B (MQW n=1 == single well; thick uncoupled ~E_1; thin coupled drops): {}".format(
         "PASS" if gate_b else "FAIL"), flush=True)
 
-    overall = gate_a and gate_b
+    # GATE C (overlap pairing regression): an uncoupled multi-well stack hosts an N-fold near-degenerate
+    # ground manifold; the e and h must be paired into the SAME well, so the MQW e-h overlap equals the
+    # single-well value -- NOT the spurious ~0 a per-carrier lowest-index pick gives when fp symmetry-
+    # breaking localizes them in different wells (audit Finding 3).
+    ov_sw = qw.solve(0.0).overlap
+    ov_mqw = thick.overlap
+    gate_c = bool(abs(ov_mqw - ov_sw) < 0.05 and ov_mqw > 0.5)
+    print("[qe] MQW overlap (F=0, uncoupled): single={:.4f} 3-well={:.4f}  (must match, not ~0): {}".format(
+        ov_sw, ov_mqw, "PASS" if gate_c else "FAIL"), flush=True)
+
+    overall = gate_a and gate_b and gate_c
     print("[qe] *** QCSE ELLIOTT CONTINUUM + MQW: {} ***".format("PASS" if overall else "FAIL"),
           flush=True)
     return overall

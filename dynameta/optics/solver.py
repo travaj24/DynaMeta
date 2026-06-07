@@ -1,6 +1,9 @@
 """
 Default optical solver: scattered-field complex HCurl on the periodic unit cell,
-HalfSpace PML in z, BDDC+GMRes (or UMFPACK). Implements OpticalSolver.
+HalfSpace PML in z, BDDC+GMRes (or UMFPACK). solve_fem is the workhorse (it takes an
+already-assembled eps CoefficientFunction); the pipeline drives it through the thin
+_fem_optical_solver wrapper, which is the callable that satisfies the core.interfaces
+OpticalSolver seam.
 
 Incidence: a plane wave in the x-z plane (azimuth phi=0). Oblique incidence
 (theta != 0) is supported for s-polarization (E along y) by two selectable
@@ -214,10 +217,15 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     theta, phi, oblique, conical = _incidence_geometry(optical, n_super)
     pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
     envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p and not conical
-    # in-plane wavevector k_par = (kx, ky); kz_s = k0 cos(theta) (vacuum incidence medium)
+    # in-plane wavevector k_par = (kx, ky) (vacuum dispersion; oblique requires n_super=1).
     kx = k0 * math.sin(theta) * math.cos(phi)
     ky = k0 * math.sin(theta) * math.sin(phi)
-    kz_s = k0 * math.cos(theta)
+    # incidence-medium z-wavevector kz_s = sqrt((n_super k0)^2 - k_par^2). At NORMAL incidence this
+    # is n_super*k0 -- the old k0*cos(theta) silently used the VACUUM dispersion and gave wrong R/T for
+    # a dense (n_super != 1) superstrate (audit P1). For the oblique path n_super is guaranteed 1
+    # (vacuum incidence), so this reduces EXACTLY to k0*cos(theta) (byte-identical for every validated
+    # case). n_super is real here (Im(n_super) is screened upstream).
+    kz_s = math.sqrt(max((complex(n_super).real * k0) ** 2 - kx ** 2 - ky ** 2, 0.0))
     # s-pol unit E (perpendicular to the plane of incidence); reduces to +y at phi=0
     es_x, es_y = -math.sin(phi), math.cos(phi)
 
@@ -471,8 +479,13 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
     # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
     # break the solve. Skipped for the envelope formulation (its modified curl != mesh curl).
+    # The flux band-averages Sz over the cladding buffer, which is z-CONSTANT only for LOSSLESS
+    # cladding; a lossy super/substrate makes Sz decay through the buffer and biases the ratio (same
+    # caveat _absorbed_fraction carries). Skip it (leave None) for the envelope formulation or a lossy
+    # cladding rather than report a silently-biased "independent" R/T.
+    lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
     try:
-        if envelope:
+        if envelope or not lossless_clad:
             R_flux = T_flux = None
         else:
             R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
@@ -655,14 +668,18 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     if not non_pml:
         return None
     defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
+    # Use the plain vector product a*b (the sum a_i b_i, NO conjugation) with an explicit Conj(E_tot),
+    # NOT ng.InnerProduct(.,Conj(E_tot)): InnerProduct now conjugates its 2nd argument, and the code
+    # only worked because NGSolve happens to detect the already-Conj arg and skip the extra conjugate
+    # (the "c2 is already a Conjugate" notice). a*Conj(E) makes E^* . (.) explicit and version-robust.
     if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
         # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
         # reduces to it for eps = eps_scalar * I)
-        q = ng.InnerProduct(eps_cf * E_tot, ng.Conj(E_tot))   # E^* . eps . E
+        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E
         loss = (q - ng.Conj(q)) / 2j
     else:
         im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j              # Im(eps) as a real CF
-        loss = im_eps * ng.InnerProduct(E_tot, ng.Conj(E_tot))  # Im(eps) |E|^2
+        loss = im_eps * (E_tot * ng.Conj(E_tot))              # Im(eps) |E|^2
     integ = ng.Integrate(loss, mesh, definedon=defon)
     area = float(Px) * float(Py)
     if area <= 0:

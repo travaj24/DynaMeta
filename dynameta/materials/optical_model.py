@@ -21,6 +21,7 @@ shape of n_m3.
 from __future__ import annotations
 
 import importlib.util as _importlib_util
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -217,6 +218,21 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     if bounds is None:
         bounds = ([1.0, 0.05, 1.0e13], [8.0, 1.0, 1.0e15])
     sol = least_squares(residual, [eps_inf0, m_eff_ratio0, gamma0], bounds=bounds)
+    # anti-silent-failure: least_squares returns its best iterate even on a failed/early-terminated
+    # solve, and a parameter pinned at a bound usually means the model cannot fit the data (or the
+    # bounds are wrong) -- surface both rather than hand back a quietly-bad Drude fit.
+    if not sol.success:
+        warnings.warn("fit_drude_params: least_squares did not converge (status={}: {}); the returned "
+                      "Drude parameters are the best-so-far iterate and may be unreliable.".format(
+                          sol.status, sol.message), RuntimeWarning, stacklevel=2)
+    lo, hi = np.asarray(bounds[0], float), np.asarray(bounds[1], float)
+    span = np.where((hi - lo) > 0, hi - lo, 1.0)
+    pinned = [nm for nm, x, l, h, s in zip(("eps_inf", "m_eff_ratio", "gamma_rad_s"), sol.x, lo, hi, span)
+              if min(x - l, h - x) < 1e-3 * s]
+    if pinned:
+        warnings.warn("fit_drude_params: parameter(s) {} pinned at a fit bound -- the Drude model likely "
+                      "cannot represent the data (or the bounds are too tight); widen the bounds or "
+                      "check the input n,k.".format(pinned), RuntimeWarning, stacklevel=2)
     eps_inf, m_ratio, gamma = sol.x
     return {
         "eps_inf":      float(eps_inf),
