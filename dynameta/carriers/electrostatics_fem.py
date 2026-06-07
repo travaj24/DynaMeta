@@ -106,11 +106,13 @@ def solve_electrostatics_fem(layers: List[ElectrostaticLayer], applied_V: float,
     a = ng.BilinearForm(fes)
     a += eps_cf * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
+    if linear_solver not in ("umfpack", "sparsecholesky"):       # no silent substitution
+        raise ValueError("linear_solver must be 'umfpack' or 'sparsecholesky', got {!r}".format(
+            linear_solver))
     with ng.TaskManager():
         a.Assemble(); f.Assemble()
         res = f.vec - a.mat * phi.vec
-        inv = a.mat.Inverse(fes.FreeDofs(), inverse=("umfpack" if linear_solver == "umfpack"
-                                                     else "sparsecholesky"))
+        inv = a.mat.Inverse(fes.FreeDofs(), inverse=linear_solver)
         phi.vec.data += inv * res
     E_cf = -_S * ng.grad(phi)                                  # V/m
     return ElectrostaticResult(mesh=mesh, phi=phi, E_cf=E_cf, layers=list(layers))

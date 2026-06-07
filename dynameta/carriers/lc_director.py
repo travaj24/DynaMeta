@@ -9,9 +9,10 @@ Freedericksz threshold
 
 It PRODUCES the equilibrium tilt profile theta(z); a LiquidCrystalModel (core/effects) turns the
 director into a UNIAXIAL optical tensor eps along n-hat = (cos theta, 0, sin theta) (reusing the
-Phase-0b tensor-eps FEM path). The bridge does not yet auto-assemble the director field -- the
-driver produces theta for the caller to place in the bundle (a tracked seam; validated end-to-end
-in validation/lc_freedericksz.py).
+tensor-eps FEM path, incl. the off-diagonal UPML solve for an intermediate tilt). The bridge does
+not yet auto-assemble the director field -- the driver produces theta for the caller to place in the
+bundle (a tracked seam; the Freedericksz threshold + uniaxial response are validated in
+validation/reconfigurable_modulators.py and tests/test_lc_director.py).
 
 Method: the 1-constant Frank torque balance has a first integral (1/2 K theta'^2 = g(theta) -
 g(theta_m), g = D^2/(2 eps0 eps(theta)), eps(theta) = eps_perp + dEps_static sin^2 theta) whose

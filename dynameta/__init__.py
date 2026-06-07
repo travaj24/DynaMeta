@@ -3,9 +3,11 @@ dynameta -- a general bridge connecting DEVSIM (DC carrier transport) to
 NGSolve (3D FEM optics) through a Drude n->eps map, for tunable metasurface
 modulators of arbitrary geometry.
 
-Architecture (clean-break v0.2):
+Architecture (clean-break; v0.4 adds the modulation-mechanism EffectModel family --
+Pockels/Kerr/FK/thermo-optic/QCSE/PCM/LC/graphene/magneto-optic -- the off-diagonal
+anisotropic FEM (UPML), and the graphene surface-current BC):
   core/       solver-agnostic bridge spine (CarrierField, EpsField, alignment,
-              n->eps, field lift, bridge) -- pure numpy, no devsim/ngsolve
+              n->eps + EffectModel response, field lift, bridge) -- pure numpy, no devsim/ngsolve
   geometry/   declarative device: UnitCell + Stack(Layer = background +
               Inclusions) + Electrodes + Design
   materials/  OpticalModel (Drude/Constant/Tabulated) + TransportModel
@@ -24,7 +26,7 @@ Advanced users can supply their own CarrierSolver / OpticalGeometryBuilder /
 OpticalSolver (see dynameta.core.interfaces).
 """
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 # Geometry + materials data model (lightweight)
 from dynameta.geometry import (
@@ -41,7 +43,14 @@ from dynameta.sweep import Sweep, BiasPoint
 # Bridge core (data + alignment + bridge; still no devsim/ngsolve)
 from dynameta.core import (
     CarrierField, EpsField, GeometryAlignment, RegionAlignment,
-    MaterialEpsMap, assemble_eps, choose_lift, UnitScale, SI, NM,
+    MaterialEpsMap, EffectEpsMap, assemble_eps, choose_lift, UnitScale, SI, NM,
+)
+# Modulation-mechanism EffectModel family (v0.3+) -- the field/temperature/state -> eps response maps
+from dynameta.core import (
+    EffectModel, as_tensor, ComposedEffect, DeltaEffect, OpticalModelEffect,
+    PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel,
+    AnisotropicThermoOpticModel, ElectroAbsorptionModel, PCMModel, LiquidCrystalModel,
+    MagnetoOpticModel,
 )
 from dynameta.analysis import resonance_dip, resonance_shift
 
@@ -59,7 +68,12 @@ __all__ = [
     "Sweep", "BiasPoint",
     # bridge core
     "CarrierField", "EpsField", "GeometryAlignment", "RegionAlignment",
-    "MaterialEpsMap", "assemble_eps", "choose_lift", "UnitScale", "SI", "NM",
+    "MaterialEpsMap", "EffectEpsMap", "assemble_eps", "choose_lift", "UnitScale", "SI", "NM",
+    # modulation-mechanism effect models
+    "EffectModel", "as_tensor", "ComposedEffect", "DeltaEffect", "OpticalModelEffect",
+    "PockelsEffect", "KerrEffect", "FranzKeldyshEffect", "ThermoOpticModel",
+    "AnisotropicThermoOpticModel", "ElectroAbsorptionModel", "PCMModel", "LiquidCrystalModel",
+    "MagnetoOpticModel",
     # analysis
     "resonance_dip", "resonance_shift",
 ]
