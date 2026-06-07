@@ -126,6 +126,34 @@ def switching_energy_per_area(C_F_per_m2, voltage_swing_V):
     return 0.5 * np.asarray(C_F_per_m2, dtype=np.float64) * float(voltage_swing_V) ** 2
 
 
+def modulator_figure_of_merit(*, optical_contrast, contrast_lambda_nm, gate_C_per_area_F_m2,
+                              voltage_swing_V, sheet_resistance_ohm_sq, path_length_m, pad_width_m,
+                              cell_area_m2):
+    """Assemble a gated electro-optic modulator's DEVICE SPEC SHEET by fusing its two validated halves:
+    the OPTICAL modulation contrast (e.g. peak |R_on - R_off| between bias states, from the FDTD sweep)
+    and the ELECTRICAL gate (areal capacitance + the in-plane access geometry). Returns the RC switching
+    bandwidth f_3dB = 1/(2 pi R_access C_cell), the per-event switching energy E = 0.5 C V^2 * cell_area,
+    and a contrast-per-energy figure of merit (optical modulation delivered per fJ switched). All SI in,
+    convenience units (GHz, fJ) in the returned dict.
+
+    Returns a dict: optical_contrast, contrast_lambda_nm, f_3dB_GHz, switching_energy_fJ, gate_C_fF,
+    R_access_ohm, contrast_per_fJ."""
+    R, C_cell, f3db = lumped_rc_bandwidth(gate_C_per_area_F_m2, sheet_resistance_ohm_sq,
+                                          path_length_m=path_length_m, pad_width_m=pad_width_m,
+                                          cell_area_m2=cell_area_m2)
+    E_event = float(switching_energy_per_area(gate_C_per_area_F_m2, voltage_swing_V)) * float(cell_area_m2)
+    fom = float(optical_contrast) / (E_event * 1e15) if E_event > 0 else float("nan")  # contrast / fJ
+    return {
+        "optical_contrast":      float(optical_contrast),
+        "contrast_lambda_nm":    float(contrast_lambda_nm),
+        "f_3dB_GHz":             float(f3db) * 1e-9,
+        "switching_energy_fJ":   E_event * 1e15,
+        "gate_C_fF":             float(C_cell) * 1e15,
+        "R_access_ohm":          float(R),
+        "contrast_per_fJ":       fom,
+    }
+
+
 def resonance_dip(wavelengths_nm: Sequence[float],
                   spectrum: Sequence[float]) -> Tuple[float, float]:
     """Locate a resonance dip (minimum) in a spectrum with sub-grid accuracy.
