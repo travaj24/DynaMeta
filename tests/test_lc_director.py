@@ -158,6 +158,46 @@ def test_bridge_into_liquid_crystal_model_is_uniaxial_with_right_axis():
         assert abs(abs(float(np.dot(ext, want))) - 1.0) < 1e-6
 
 
+def test_bvp_high_drive_does_not_rail_to_n_o():
+    # AUDIT FIX (voltage continuation): at high overdrive the tilted branch has a thin homeotropic
+    # boundary layer; without continuation the solver railed n_eff back to n_o. Now it must climb
+    # toward n_e and report success.
+    thb = np.radians(89.9)
+    last = 0.0
+    for V in (4.0, 8.0, 14.0):
+        r = director_profile_bvp(V_app=V, K11=17e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0,
+                                 d_planar=2e-6, theta_b_rad=thb, field_model="uniform", nz=161,
+                                 n_o=1.56, n_e=1.92)
+        assert r.success and r.n_eff > 1.80 and r.n_eff <= 1.92 + 1e-9   # toward n_e, NOT railed to 1.56
+        assert r.n_eff >= last - 1e-6                                    # monotone non-decreasing in V
+        last = r.n_eff
+
+
+def test_bvp_high_splay_contrast_tilts():
+    # AUDIT FIX: K11 >> K33 near-planar cells used to return the undistorted branch above threshold.
+    r = director_profile_bvp(V_app=1.5, K11=17e-12, K33=4e-12, eps_para=18.7, eps_perp=4.0,
+                             d_planar=2e-6, theta_b_rad=np.radians(89.99), field_model="uniform", nz=161)
+    mid = r.theta_field_rad[r.theta_field_rad.size // 2]
+    assert mid < np.radians(89.99) - np.radians(30.0)                   # genuinely tilted, not ~planar
+
+
+def test_bvp_negative_anisotropy_van_tilts():
+    # AUDIT FIX: negative anisotropy (VAN, dEps<0) used to collapse to the untilted (linearly unstable)
+    # root because V_th was forced to inf. The director must now tilt toward planar (theta -> pi/2).
+    r = director_profile_bvp(V_app=2.0, K11=10e-12, K33=10e-12, eps_para=4.0, eps_perp=18.7,
+                             d_planar=2e-6, theta_b_rad=np.radians(1.0), field_model="uniform", nz=161)
+    mid = r.theta_field_rad[r.theta_field_rad.size // 2]
+    assert mid > np.radians(60.0)                                       # swung far toward planar (pi/2)
+
+
+def test_bvp_below_threshold_untilted():
+    Vth = freedericksz_threshold_V(17e-12, 14.7)
+    r = director_profile_bvp(V_app=0.5 * Vth, K11=17e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0,
+                             d_planar=1e-6, theta_b_rad=np.radians(89.9), field_model="uniform", nz=81)
+    mid = r.theta_field_rad[r.theta_field_rad.size // 2]
+    assert abs(mid - np.radians(89.9)) < np.radians(0.5)                # stays planar below V_th
+
+
 def test_cyl_geometry_bvp_tilts_above_threshold():
     # coaxial cell, Poisson voltage division: a moderate drive tilts the midplane toward the field
     # (theta drops well below the planar theta_b).
