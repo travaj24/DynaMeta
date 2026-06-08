@@ -38,10 +38,8 @@ from typing import List, Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
 from dynameta.optics.fdtd import FDTDLayer
-
-MU0 = 1.0 / (EPS0 * C_LIGHT ** 2)
 
 # Optional Numba fast CPU kernel (the fused single-pass, prange-threaded backend). Numba JITs the whole
 # timestep into one compiled function -> no per-op kernel/launch overhead (the cure for the small-grid

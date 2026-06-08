@@ -25,10 +25,8 @@ from typing import List, Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
 from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _resolve_backend, njit
-
-MU0 = 1.0 / (EPS0 * C_LIGHT ** 2)
 
 
 @dataclass

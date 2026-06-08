@@ -17,5 +17,6 @@ KB      = 1.380649e-23        # Boltzmann constant, J/K
 HBAR    = 1.054571817e-34     # reduced Planck constant, J s
 M_E     = 9.1093837015e-31    # electron rest mass, kg
 C_LIGHT = 2.99792458e8        # speed of light in vacuum, m/s
+MU0     = 1.0 / (EPS0 * C_LIGHT ** 2)   # vacuum permeability, H/m (= 1/(eps0 c^2); the FDTD modules used to re-derive this locally)
 T_REF   = 300.0               # reference temperature, K
 V_T     = KB * T_REF / Q_E    # thermal voltage at T_REF, V
