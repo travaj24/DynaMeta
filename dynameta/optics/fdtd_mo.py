@@ -26,6 +26,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
+from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _resolve_backend, njit
 
 MU0 = 1.0 / (EPS0 * C_LIGHT ** 2)
 
@@ -79,9 +80,62 @@ def _2x2_inv(M):
     return out
 
 
-def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
+@njit(fastmath=True, cache=True)
+def _mo_loop_numba(iv00, iv01, iv10, iv11, ep00, ep01, ep10, ep11, jc00, jc01, jc10, jc11,
+                   ma00, ma01, ma10, ma11, mb00, mb01, mb10, mb11,
+                   dz, dt, nsteps, i_src, i_pL, i_pR, src, src_on_y):
+    """JIT-compiled bi-polarization 1-D MO time loop -- the SAME physics as the _run_mo NumPy loop
+    (staggered Ex/Ey, Hx/Hy leapfrog; per-cell magnetized-Drude 2x2 Crank-Nicolson via the precomputed
+    scalar components iv/ep/jc/ma/mb; soft source on `src_on_y`; 1st-order Mur ABC both ends), fused into
+    one compiled pass with no per-step temporary arrays. Returns the (Ex,Ey) probe time series eL/eR."""
+    nz = iv00.size
+    Ex = np.zeros(nz); Ey = np.zeros(nz)
+    Hx = np.zeros(nz - 1); Hy = np.zeros(nz - 1)
+    J0 = np.zeros(nz); J1 = np.zeros(nz)
+    Exn = np.empty(nz); Eyn = np.empty(nz)
+    eL = np.empty((nsteps, 2)); eR = np.empty((nsteps, 2))
+    cmu = dt / (MU0 * dz)
+    mur = (C_LIGHT * dt - dz) / (C_LIGHT * dt + dz)
+    for n in range(nsteps):
+        ex_oL0 = Ex[0]; ex_oL1 = Ex[1]; ey_oL0 = Ey[0]; ey_oL1 = Ey[1]
+        ex_oR0 = Ex[nz - 1]; ex_oR1 = Ex[nz - 2]; ey_oR0 = Ey[nz - 1]; ey_oR1 = Ey[nz - 2]
+        for k in range(nz - 1):                                # H update
+            Hx[k] += cmu * (Ey[k + 1] - Ey[k])
+            Hy[k] -= cmu * (Ex[k + 1] - Ex[k])
+        for k in range(nz):                                    # E + J update (curl=0 at the ends -> Mur)
+            if k == 0 or k == nz - 1:
+                c0 = 0.0; c1 = 0.0
+            else:
+                c0 = -(Hy[k] - Hy[k - 1]) / dz
+                c1 = (Hx[k] - Hx[k - 1]) / dz
+            r0 = ep00[k] * Ex[k] + ep01[k] * Ey[k] + c0 - (jc00[k] * J0[k] + jc01[k] * J1[k])
+            r1 = ep10[k] * Ex[k] + ep11[k] * Ey[k] + c1 - (jc10[k] * J0[k] + jc11[k] * J1[k])
+            exn = iv00[k] * r0 + iv01[k] * r1
+            eyn = iv10[k] * r0 + iv11[k] * r1
+            Exn[k] = exn; Eyn[k] = eyn
+            sx = exn + Ex[k]; sy = eyn + Ey[k]                 # J^{n+1} uses OLD J0/J1 of THIS cell only
+            j0n = ma00[k] * J0[k] + ma01[k] * J1[k] + mb00[k] * sx + mb01[k] * sy
+            j1n = ma10[k] * J0[k] + ma11[k] * J1[k] + mb10[k] * sx + mb11[k] * sy
+            J0[k] = j0n; J1[k] = j1n
+        if src_on_y:
+            Eyn[i_src] += src[n]
+        else:
+            Exn[i_src] += src[n]
+        Exn[0] = ex_oL1 + mur * (Exn[1] - ex_oL0); Eyn[0] = ey_oL1 + mur * (Eyn[1] - ey_oL0)
+        Exn[nz - 1] = ex_oR1 + mur * (Exn[nz - 2] - ex_oR0)
+        Eyn[nz - 1] = ey_oR1 + mur * (Eyn[nz - 2] - ey_oR0)
+        for k in range(nz):
+            Ex[k] = Exn[k]; Ey[k] = Eyn[k]
+        eL[n, 0] = Ex[i_pL]; eL[n, 1] = Ey[i_pL]
+        eR[n, 0] = Ex[i_pR]; eR[n, 1] = Ey[i_pR]
+    return eL, eR
+
+
+def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, backend="numpy"):
     """One 1-D bi-polarization pass. Per-cell diagonal eps (exx,eyy) + magnetized-Drude ADE (wp,gam,wc).
-    Returns the Ex,Ey time series at the left (reflection) and right (transmission) probes."""
+    Returns the Ex,Ey time series at the left (reflection) and right (transmission) probes. backend='numba'
+    runs the JIT-compiled time loop (the precompute below is identical); any other value runs the NumPy
+    reference loop."""
     nz = exx.size
     Ex = np.zeros(nz); Ey = np.zeros(nz)
     Hx = np.zeros(nz - 1); Hy = np.zeros(nz - 1)
@@ -107,6 +161,12 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
     (jc00, jc01, jc10, jc11) = (Jc[:, 0, 0], Jc[:, 0, 1], Jc[:, 1, 0], Jc[:, 1, 1])
     (ma00, ma01, ma10, ma11) = (Ma[:, 0, 0], Ma[:, 0, 1], Ma[:, 1, 0], Ma[:, 1, 1])
     (mb00, mb01, mb10, mb11) = (Mb[:, 0, 0], Mb[:, 0, 1], Mb[:, 1, 0], Mb[:, 1, 1])
+    if backend == "numba" and _HAVE_NUMBA:                      # JIT the hot time loop (same precompute)
+        ac = (lambda a: np.ascontiguousarray(a, dtype=np.float64))
+        return _mo_loop_numba(ac(iv00), ac(iv01), ac(iv10), ac(iv11), ac(ep00), ac(ep01), ac(ep10), ac(ep11),
+                              ac(jc00), ac(jc01), ac(jc10), ac(jc11), ac(ma00), ac(ma01), ac(ma10), ac(ma11),
+                              ac(mb00), ac(mb01), ac(mb10), ac(mb11), dz, dt, nsteps, i_src, i_pL, i_pR,
+                              ac(src), 1 if pol == "y" else 0)
     c = C_LIGHT
     mur = (c * dt - dz) / (c * dt + dz)
     eL = np.empty((nsteps, 2)); eR = np.empty((nsteps, 2))
@@ -146,11 +206,13 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
 
 def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m: float,
                      resolution: int = 60, courant: float = 0.5, n_pad_wave: float = 6.0,
-                     settle: float = 14.0, pol: str = "y", source_amp: float = 1.0) -> FDTDMOResult:
+                     settle: float = 14.0, pol: str = "y", source_amp: float = 1.0,
+                     backend: str = "numpy") -> FDTDMOResult:
     """Broadband co/cross R/T + Faraday rotation of a 1-D anisotropic / magneto-optic stack (vacuum ends),
     input linearly polarized along `pol` ('x' or 'y'). The two-run reference method gives the COMPLEX
     co-pol (same axis as input) and cross-pol (orthogonal) reflection/transmission; the Faraday angle is
-    the major-axis rotation of the transmitted polarization ellipse."""
+    the major-axis rotation of the transmitted polarization ellipse. backend='numba' JITs the time loop
+    (~same answer to ~1e-12); 'auto'/'cpu' select it when present, else the NumPy reference runs."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -185,8 +247,10 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
     one = np.ones(nz); zero = np.zeros(nz)
-    eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol)   # vacuum
-    eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol)          # structure
+    rb = _resolve_backend(backend)                              # 'numba' = JIT loop; else NumPy reference
+    bk = "numba" if (rb == "numba" and _HAVE_NUMBA) else "numpy"
+    eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)   # vacuum
+    eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)         # structure
 
     f = np.fft.rfftfreq(nsteps, dt)
     co, cr = (1, 0) if pol == "y" else (0, 1)               # co = input axis index, cr = orthogonal
