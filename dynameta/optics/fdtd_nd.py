@@ -498,6 +498,125 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
 
 # =====================================================================================================
+# OBLIQUE incidence (2D-TE / s-pol) via the COMPLEX-ENVELOPE (field-transform) Bloch method.
+# The physical field carries a fixed transverse wavevector k_par: E_phys = Psi(x,z,t) exp(i k_par x), so
+# the periodic envelope Psi is solved with d/dx -> (d/dx + i k_par) and a ZERO-PHASE periodic roll. Psi is
+# complex; at k_par=0 (normal incidence) it reduces to the real solver. A FIXED k_par means the physical
+# angle is frequency-dependent, theta(f) = asin(k_par c / (2 pi f)) -- a constant-k_par broadband sweep,
+# the natural object for periodic FDTD (a constant-ANGLE sweep needs one run per frequency or a re-scaled
+# source). Validated vs s-pol TMM at theta(f). Vacuum ends; uniform or laterally-uniform (the envelope of a
+# plane wave has no transverse variation, so nx is small).
+# =====================================================================================================
+@dataclass
+class FDTD2DObliqueResult:
+    freqs_Hz: np.ndarray
+    theta_deg: np.ndarray       # the frequency-dependent physical angle for the fixed k_par
+    R0: np.ndarray              # specular reflectance |r|^2 (s-pol)
+    T0: np.ndarray              # specular transmittance |t|^2 (s-pol; vacuum ends -> kz factors cancel)
+    band: np.ndarray            # well-excited + below-the-light-line (propagating) frequency mask
+
+
+def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+    """Complex-envelope oblique 2D-TE (s-pol): Ey,Hx,Hz are the PERIODIC Bloch envelope (physical field =
+    envelope * exp(i kx x)), so every x-derivative gains a + i kx term and the periodic roll stays
+    zero-phase. Fields are complex; at kx=0 with a real source they stay real (the normal-incidence solver).
+    Semi-implicit Drude ADE; CFS-CPML + PEC in z (vacuum ends). Records complex Ey,Hx probe x-lines."""
+    nx, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    z = (lambda: np.zeros((nx, nz), dtype=complex))
+    Ey, Hx, Hz, Jy, psi_hxz, psi_eyz = z(), z(), z(), z(), z(), z()
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    eyL = np.empty((nsteps, nx), complex); hxL = np.empty((nsteps, nx), complex)
+    eyR = np.empty((nsteps, nx), complex); hxR = np.empty((nsteps, nx), complex)
+    cmu = dt / MU0; ikx = 1j * kx
+    for n in range(nsteps):
+        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
+        psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
+        Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
+        Hz += -cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx + ikx * Ey)      # dEy/dx -> d/dx + i kx
+        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
+        psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
+        curl = np.zeros((nx, nz), complex)
+        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        curl -= (Hz - np.roll(Hz, 1, axis=0)) / dx + ikx * Hz              # dHz/dx -> d/dx + i kx
+        denom = EPS0 * eps_inf / dt + bJ / 2.0
+        Eynew = (EPS0 * eps_inf / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eynew + Ey)
+        Eynew[:, k_src] += src[n]
+        Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0
+        Ey = Eynew
+        eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
+        eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
+    return eyL, hxL, eyR, hxR
+
+
+def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_deg: float,
+                          lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
+                          courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
+                          source_amp: float = 1.0, npml: int = 12, nx: int = 8) -> FDTD2DObliqueResult:
+    """Broadband s-pol (TE) reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence,
+    via the complex-envelope Bloch method with a FIXED transverse wavevector k_par = (2 pi / lambda_c)
+    sin(angle_deg) (angle_deg the physical angle at the band centre). Because k_par is fixed, the physical
+    angle varies with frequency: theta(f) = asin(k_par c/(2 pi f)); the result carries theta_deg(f) and the
+    band mask excludes frequencies below the light line (k_par > w/c, evanescent). Vacuum ends. angle_deg=0
+    reduces to the normal-incidence solver."""
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    f_c = 0.5 * (f_min + f_max)
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
+
+    def _n_band_max(L):
+        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
+    n_max = max(1.0, max(_n_band_max(L) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    dx = period_x_m / nx
+    dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
+    kx = (2.0 * np.pi * f_c / C_LIGHT) * np.sin(np.radians(angle_deg))   # fixed transverse wavevector
+
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+    eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz))
+    zc = (np.arange(nz) + 0.5) * dz
+    z = pad
+    for L in layers:
+        m = (zc >= z) & (zc < z + L.thickness_m)
+        eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
+        z += L.thickness_m
+
+    k_src = max(2, int(round((0.35 * pad) / dz)))
+    k_pL = int(round((0.7 * pad) / dz))
+    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    t0 = settle * tau
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    tgrid = np.arange(nsteps) * dt
+    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+
+    cpml = _cpml_z(nz, dz, dt, npml)
+    one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
+    eyL_i, hxL_i, eyR_i, hxR_i = _run_2d_te_oblique(one, zero, zero, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
+                                                    src, cpml, kx)
+    eyL_t, hxL_t, eyR_t, hxR_t = _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
+                                                    src, cpml, kx)
+    # complex envelope -> full FFT; take the positive-frequency half (the forward exp(-iwt) response).
+    # rfftfreq gives the monotonic positive-frequency axis matching fft(...)[:nf] within the band.
+    nf = nsteps // 2 + 1
+    f = np.fft.rfftfreq(nsteps, dt)
+    mean = (lambda a: np.fft.fft(a.mean(axis=1))[:nf])
+    inc_L = mean(eyL_i); inc_R = mean(eyR_i)
+    refl = mean(eyL_t - eyL_i); trans = mean(eyR_t)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R0 = np.abs(refl / inc_L) ** 2
+        T0 = np.abs(trans / inc_R) ** 2
+    sin_t = np.divide(kx * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))   # sin theta(f) = k_par c / w
+    theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
+    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
+
+
+# =====================================================================================================
 # 3D: full-vector Yee engine for a 2D-periodic (x AND y) unit cell at normal incidence.
 # The 2D-TE engine above is the (d/dy = 0, {Ey,Hx,Hz}) reduction of this; this carries all six field
 # components so a genuinely 2D-periodic structure (pillars/holes/crosses) couples into every order.
