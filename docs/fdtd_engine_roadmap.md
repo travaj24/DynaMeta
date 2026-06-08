@@ -54,15 +54,16 @@ stand-in.
   `eps_xx / eps_yy / eps_zz` (each E-component uses its own, no coupling); validate by birefringence
   (an x-pol vs y-pol source against an anisotropic-TMM `n_o` / `n_e`). A clean additive change to the
   three 3D kernels + an x-pol source option.
-- **Off-diagonal / gyrotropic (magneto-optic Faraday), the valuable case:** this is what the FEM backend
-  CANNOT do (its off-diagonal assembly is blocked, see below), so an FDTD path would unblock gyrotropic
-  optics. IMPORTANT correction to the design spec: the proposed "E = inv(eps) @ D with a complex
-  pre-inverted `eps`" does NOT work for a real-time FDTD -- an imaginary off-diagonal `i*g` is a
-  frequency-domain stand-in for a TIME-DERIVATIVE coupling, so a complex algebraic inverse on real fields
-  yields complex (unphysical) E. The correct path is a magneto-optic auxiliary-differential-equation
-  (the gyration as a `g * dE_perp/dt` antisymmetric polarization-current coupling), then validate vs the
-  circular-eigenmode (`n_pm = sqrt(eps +/- g)`) Faraday-rotation oracle (the `magneto_optic_faraday.py`
-  pattern). A genuine kernel effort; not the spec's one-liner.
+- **Off-diagonal / gyrotropic (magneto-optic Faraday):** the frequency-domain FEM backend ALREADY does
+  this (gyrotropic / tilted-anisotropic tensor via an explicit UPML -- `validation/magneto_optic_faraday.py`
+  GATE D and `lc_tilted_fem.py` pass), so an FDTD path would be a complementary TIME-DOMAIN route (broadband
+  in one solve, nonlinear MO), not a missing capability. IMPORTANT correction to the design spec: the
+  proposed "E = inv(eps) @ D with a complex pre-inverted `eps`" does NOT work for a real-time FDTD -- an
+  imaginary off-diagonal `i*g` is a frequency-domain stand-in for a TIME-DERIVATIVE coupling, so a complex
+  algebraic inverse on real fields yields complex (unphysical) E. The correct path is a magneto-optic
+  auxiliary-differential-equation (the gyration as a `g * dE_perp/dt` antisymmetric polarization-current
+  coupling), then validate vs the circular-eigenmode (`n_pm = sqrt(eps +/- g)`) Faraday oracle. A genuine
+  kernel effort; not the spec's one-liner.
 
 ### Oblique Bloch incidence (2D first)
 Split-field (`Ey_cos`, `Ey_sin`) Bloch-phase periodic BC in the 2D-TE kernel (numpy + numba), a plane-wave
@@ -79,9 +80,16 @@ A fused `numba.cuda` GPU kernel is the planned large-3D fast path, but `numba.cu
 drops in once a CUDA toolkit is present. The CuPy backend already runs the vectorized loop on a device
 when one is available; on Windows a JAX-GPU build is WSL2-only.
 
+## Already resolved (correction)
+
 ### FEM off-diagonal (gyrotropic / tilted-anisotropic) tensor -- "B1"
-NGSolve 6.2.2604 mis-assembles a complex periodic HCurl bilinear form with a genuine off-diagonal tensor
-coefficient (a spurious mixed-component coupling that only the int-0 sparse pruning neutralizes); the
-assembler raises rather than return a wrong answer. This is an NGSolve-version assembly defect, not a
-DynaMeta bug. The fix is an NGSolve upgrade (authorized, pending a de-risk probe on a newer build) or the
-FDTD magneto-optic ADE above as the alternative path to gyrotropic optical response.
+NOT blocked. An earlier note attributed the off-diagonal optical-solve failure to an "NGSolve 6.2.2604
+assembly defect"; that attribution was **overstated and retracted** (`docs/ngsolve_offdiag_investigation.md`).
+A minimal reproducer (`docs/ngsolve_offdiag_check.py`) proves NGSolve assembles off-diagonal HCurl tensor
+coefficients correctly to ~1.6e-16 in every construct DynaMeta uses. The real cause was inside DynaMeta:
+`mesh.SetPML`'s coordinate stretch is exact only for ISOTROPIC media; for an anisotropic eps it perturbs
+the decoupled field component by a resolution-independent ~3% (a y-pol ordinary wave gave T=1.07). The fix
+(shipped) is an explicit anisotropic **UPML** folded into the weak form for the tensor path
+(`solver.solve_fem`), plus a Poynting-flux R/T for the elliptical gyrotropic transmission. The
+`_check_diagonal` guard is removed. Validated: `lc_tilted_fem.py` (ordinary wave tilt-invariant to ~1.6e-4)
+and `magneto_optic_faraday.py` GATE D (gyrotropic FEM == circular-eigenmode Jones-TMM, lossless).
