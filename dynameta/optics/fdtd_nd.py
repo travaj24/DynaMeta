@@ -993,6 +993,91 @@ def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
     return exL, eyL, exR, eyR
 
 
+def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, pol):
+    """Full-vector 3D-FDTD with a per-cell DIAGONAL anisotropy (exx,eyy,ezz) AND a gyrotropic
+    MAGNETO-OPTIC response (magnetization along z) via the magnetized-Drude ADE -- the 3D analog of the
+    1-D fdtd_mo. The polarization current obeys dJ/dt + gamma J + wc (zhat x J) = eps0 wp^2 E: the
+    cyclotron term couples Jx<->Jy (a per-cell 2x2 Crank-Nicolson, semi-implicit with the Ex,Ey update),
+    while Jz is a plain scalar Drude. This is the PHYSICALLY-CORRECT time-domain origin of the
+    frequency-domain off-diagonal i*g. Normal incidence (Bloch zero-phase rolls), CFS-CPML + PEC in z,
+    real fields, soft plane source on `pol` ('x'/'y'). Records the Ex,Ey probe planes (the co/cross-pol
+    transmission + Faraday come from them). Reduces to the 1-D fdtd_mo for a laterally-uniform slab."""
+    nx, ny, nz = exx.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    r = (lambda a: np.asarray(a).reshape(1, 1, nz))
+    ke, be, ce = r(ke), r(be), r(ce)
+    kh, bh, ch = r(kh), r(bh), r(ch)
+    # per-cell 2x2 magnetized-Drude Crank-Nicolson + E-update matrices, split into scalar components
+    # (same algebra as fdtd_mo._run_mo, here per (nx,ny,nz) cell). A J^{n+1}=B J^n + eps0 wp^2(E^{n+1}+E^n)/2
+    # with G = gamma I + [[0,-wc],[wc,0]]; A=I/dt+G/2, B=I/dt-G/2.
+    a_ = 1.0 / dt + 0.5 * gam; off = 0.5 * wc                    # A=[[a_,-off],[off,a_]]
+    detA = a_ ** 2 + off ** 2
+    Ai00, Ai01, Ai10, Ai11 = a_ / detA, off / detA, -off / detA, a_ / detA
+    b_ = 1.0 / dt - 0.5 * gam                                    # B=[[b_,off],[-off,b_]]
+    Ma00 = Ai00 * b_ + Ai01 * (-off); Ma01 = Ai00 * off + Ai01 * b_
+    Ma10 = Ai10 * b_ + Ai11 * (-off); Ma11 = Ai10 * off + Ai11 * b_
+    s = EPS0 * wp ** 2 * 0.5
+    Mb00, Mb01, Mb10, Mb11 = Ai00 * s, Ai01 * s, Ai10 * s, Ai11 * s
+    D00, D11 = EPS0 * exx / dt, EPS0 * eyy / dt                  # D = diag(eps0 exx/dt, eps0 eyy/dt)
+    M00, M01, M10, M11 = D00 + 0.5 * Mb00, 0.5 * Mb01, 0.5 * Mb10, D11 + 0.5 * Mb11
+    detM = M00 * M11 - M01 * M10
+    Iv00, Iv01, Iv10, Iv11 = M11 / detM, -M01 / detM, -M10 / detM, M00 / detM   # Einv
+    Ep00, Ep01, Ep10, Ep11 = D00 - 0.5 * Mb00, -0.5 * Mb01, -0.5 * Mb10, D11 - 0.5 * Mb11
+    Jc00, Jc01, Jc10, Jc11 = 0.5 * (Ma00 + 1.0), 0.5 * Ma01, 0.5 * Ma10, 0.5 * (Ma11 + 1.0)
+    aJz = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)        # Ez: plain scalar Drude (no gyro)
+    bJz = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    z3 = (lambda: np.zeros((nx, ny, nz)))
+    Ex, Ey, Ez = z3(), z3(), z3()
+    Hx, Hy, Hz = z3(), z3(), z3()
+    Jx, Jy, Jz = z3(), z3(), z3()
+    psi_Hx, psi_Hy, psi_Ex, psi_Ey = z3(), z3(), z3(), z3()
+    cmu = dt / MU0
+    sh = (nsteps, nx, ny)
+    exL, eyL, exR, eyR = np.empty(sh), np.empty(sh), np.empty(sh), np.empty(sh)
+    for n in range(nsteps):
+        # ---- H update (dH/dt = -(1/mu) curl E); only d/dz CPML-stretched ----
+        dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
+        psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
+        sEy = z3(); sEy[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
+        Hx -= cmu * ((np.roll(Ez, -1, axis=1) - Ez) / dy - sEy)
+        dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
+        psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
+        sEx = z3(); sEx[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
+        Hy -= cmu * (sEx - (np.roll(Ez, -1, axis=0) - Ez) / dx)
+        Hz -= cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx - (np.roll(Ex, -1, axis=1) - Ex) / dy)
+        # ---- E update: curls, then the 2x2 magnetized-Drude CN on (Ex,Ey) + scalar Ez ----
+        dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
+        psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
+        sHy = z3(); sHy[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
+        curlx = (Hz - np.roll(Hz, 1, axis=1)) / dy - sHy
+        dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
+        psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
+        sHx = z3(); sHx[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
+        curly = sHx - (Hz - np.roll(Hz, 1, axis=0)) / dx
+        curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx - (Hx - np.roll(Hx, 1, axis=1)) / dy
+        rhs0 = Ep00 * Ex + Ep01 * Ey + curlx - (Jc00 * Jx + Jc01 * Jy)
+        rhs1 = Ep10 * Ex + Ep11 * Ey + curly - (Jc10 * Jx + Jc11 * Jy)
+        Exn = Iv00 * rhs0 + Iv01 * rhs1
+        Eyn = Iv10 * rhs0 + Iv11 * rhs1
+        sx, sy = Exn + Ex, Eyn + Ey                              # J^{n+1} uses OLD J (write to fresh names)
+        Jxn = Ma00 * Jx + Ma01 * Jy + Mb00 * sx + Mb01 * sy
+        Jyn = Ma10 * Jx + Ma11 * Jy + Mb10 * sx + Mb11 * sy
+        Jx, Jy = Jxn, Jyn
+        denomz = EPS0 * ezz / dt + bJz / 2.0
+        Ezn = (EPS0 * ezz / dt * Ez + curlz - 0.5 * (1.0 + aJz) * Jz - 0.5 * bJz * Ez) / denomz
+        Jz = aJz * Jz + bJz * (Ezn + Ez)
+        if pol == "y":
+            Eyn[:, :, k_src] += src[n]
+        else:
+            Exn[:, :, k_src] += src[n]
+        for F in (Exn, Eyn):
+            F[:, :, 0] = 0.0; F[:, :, -1] = 0.0
+        Ex, Ey, Ez = Exn, Eyn, Ezn
+        exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
+        exR[n] = Ex[:, :, k_pR]; eyR[n] = Ey[:, :, k_pR]
+    return exL, eyL, exR, eyR
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                 nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
@@ -1392,3 +1477,91 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
     band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
     return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
+
+
+@dataclass
+class FDTD3DMOResult:
+    """Broadband co/cross R/T + Faraday rotation of a 3D (laterally-uniform OR patterned) magneto-optic
+    stack at normal incidence, input linearly polarized along `pol`."""
+    freqs_Hz: np.ndarray
+    band: np.ndarray
+    t_co: np.ndarray
+    t_cross: np.ndarray
+    r_co: np.ndarray
+    r_cross: np.ndarray
+    R: np.ndarray
+    T: np.ndarray
+    faraday_deg: np.ndarray
+
+
+def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min_m: float,
+                     lambda_max_m: float, resolution: int = 40, courant: float = 0.5,
+                     n_pad_wave: float = 6.0, settle: float = 14.0, pol: str = "y",
+                     source_amp: float = 1.0, nx: int = 4, ny: int = 4, npml: int = 12) -> FDTD3DMOResult:
+    """Broadband co/cross R/T + Faraday rotation of a 3D anisotropic / magneto-optic stack (the full-vector
+    gyrotropic engine, _run_3d_mo). `layers` are MO layers (duck-typed: .thickness_m, .eps_xx, .eps_yy,
+    optional .eps_zz, .drude_wp_rad_s, .drude_gamma_rad_s, .cyclotron_wc_rad_s); the magnetized-Drude
+    cyclotron term gives the gyrotropy. For a laterally-uniform stack the result reduces to the 1-D
+    fdtd_mo (validated vs the circular-eigenmode Jones-TMM); nx,ny small. Vacuum ends, convention
+    exp(-i w t)."""
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    f_c = 0.5 * (f_min + f_max)
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
+
+    def _ncell(L):
+        wpL = getattr(L, "drude_wp_rad_s", 0.0)
+        if wpL > 0:                                              # circular-mode index bound for grid sizing
+            eps_inf = 0.5 * (L.eps_xx + L.eps_yy)
+            return max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - L.cyclotron_wc_rad_s) + 1j * w * L.drude_gamma_rad_s)))
+                       for w in w_band)
+        return max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
+    n_max = max(1.0, max(_ncell(L) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    dx = period_x_m / nx; dy = period_y_m / ny
+    dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+    o = np.ones((nx, ny, nz)); zr = np.zeros((nx, ny, nz))
+    exx, eyy, ezz = o.copy(), o.copy(), o.copy()
+    wp, gam, wc = zr.copy(), zr.copy(), zr.copy()
+    zc = (np.arange(nz) + 0.5) * dz
+    z = pad
+    for L in layers:
+        m = (zc >= z) & (zc < z + L.thickness_m)
+        exx[:, :, m] = L.eps_xx; eyy[:, :, m] = L.eps_yy
+        ezz[:, :, m] = getattr(L, "eps_zz", None) if getattr(L, "eps_zz", None) else 0.5 * (L.eps_xx + L.eps_yy)
+        wp[:, :, m] = getattr(L, "drude_wp_rad_s", 0.0)
+        gam[:, :, m] = getattr(L, "drude_gamma_rad_s", 0.0)
+        wc[:, :, m] = getattr(L, "cyclotron_wc_rad_s", 0.0)
+        z += L.thickness_m
+    k_src = max(2, int(round(0.35 * pad / dz)))
+    k_pL = int(round(0.7 * pad / dz))
+    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    t0 = settle * tau
+    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau) / dt))
+    tgrid = np.arange(nsteps) * dt
+    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    cpml = _cpml_z(nz, dz, dt, npml)
+    exL_i, eyL_i, exR_i, eyR_i = _run_3d_mo(o, o, o, zr, zr, zr, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
+                                            src, cpml, pol)                                  # vacuum
+    exL_t, eyL_t, exR_t, eyR_t = _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src,
+                                            k_pL, k_pR, src, cpml, pol)                       # structure
+    f = np.fft.rfftfreq(nsteps, dt)
+    m_ = (lambda a: np.conj(np.fft.rfft(a.mean(axis=(1, 2)))))   # x,y-mean 0-order; conj -> exp(-iwt)
+    if pol == "y":
+        coL_i, coR_i, coL_t, coR_t, crL_t, crR_t = eyL_i, eyR_i, eyL_t, eyR_t, exL_t, exR_t
+    else:
+        coL_i, coR_i, coL_t, coR_t, crL_t, crR_t = exL_i, exR_i, exL_t, exR_t, eyL_t, eyR_t
+    inc_L, inc_R = m_(coL_i), m_(coR_i)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r_co = m_(coL_t - coL_i) / inc_L; r_cr = m_(crL_t) / inc_L
+        t_co = m_(coR_t) / inc_R; t_cr = m_(crR_t) / inc_R
+        R = np.abs(r_co) ** 2 + np.abs(r_cr) ** 2
+        T = np.abs(t_co) ** 2 + np.abs(t_cr) ** 2
+        far = 0.5 * np.arctan2(2.0 * np.real(t_co * np.conj(t_cr)), np.abs(t_co) ** 2 - np.abs(t_cr) ** 2)
+    band = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    return FDTD3DMOResult(freqs_Hz=f, band=band, t_co=t_co, t_cross=t_cr, r_co=r_co, r_cross=r_cr,
+                          R=R, T=T, faraday_deg=np.degrees(far))
