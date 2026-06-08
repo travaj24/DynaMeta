@@ -385,8 +385,9 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     material lambda-function (see run_fdtd_sweep). dispersive=False freezes eps at the band centre (exact
     only for a non-dispersive design). STRUCTURED cells stay frozen-at-centre (the lateral grid is real
     eps; a lossy/dispersive structured layer is out of scope -> FEM/RCWA). Scope: vacuum end media; uniform
-    or structured (dim=3, vacuum end media only). Tip: request a band ~10-20%% wider than your target so the
-tapered edges fall out. LOSSLESS non-vacuum end media (real n_super/n_sub) are supported for uniform stacks."""
+    or structured (dim=3, vacuum end media only). Tip: request a band ~10-20% wider than your target so the
+    tapered edges fall out. LOSSLESS non-vacuum end media (real n_super/n_sub) are supported for uniform
+    stacks."""
     ns, nb = complex(n_super), complex(n_sub)
     if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
         raise NotImplementedError("fdtd_sweep_spectrum supports LOSSLESS end media; got n_super={:.4g}, "
