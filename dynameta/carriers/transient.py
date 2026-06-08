@@ -65,8 +65,9 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
             # non-convergence, a singular/ill-conditioned factorization, or an exp overflow --
             # all eased by a smaller tdelta. Re-raise anything else (a genuine setup error must
             # not be silently retried into the dt floor).
-            s = str(msg)
-            if not any(k in s for k in ("onvergence", "factoriz", "verflow", "teration")):
+            s = str(msg).lower()                                     # case-robust + full words (was the
+            # over-broad fragments "onvergence"/"teration"/"verflow" that could match unrelated text)
+            if not any(k in s for k in ("convergence", "factoriz", "overflow", "iteration")):
                 raise
             dt *= 0.5
             if dt < 1.0e-19:
