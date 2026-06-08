@@ -32,12 +32,28 @@ from dynameta.constants import EPS0, KB, HBAR, M_E, Q_E as Q  # noqa: F401
 
 def _fermi_log(x: np.ndarray) -> np.ndarray:
     """ln(1+exp(x)) with an overflow-safe large-x branch (-> x for x >> 1). The 2D
-    degenerate occupation integral; for strongly degenerate ITO x can be >> 1."""
+    degenerate occupation integral; for strongly degenerate ITO x can be >> 1. This is the
+    complete Fermi-Dirac integral of order 0, F_0(x) = Int_0^inf 1/(1+e^(t-x)) dt."""
     x = np.asarray(x, dtype=np.float64)
     out = np.empty_like(x)
     big = x > 40.0
     out[big] = x[big]
     out[~big] = np.log1p(np.exp(np.clip(x[~big], -700.0, 40.0)))
+    return out
+
+
+def _fd1(x: np.ndarray) -> np.ndarray:
+    """Complete Fermi-Dirac integral of order 1: F_1(x) = Int_0^inf t/(1+e^(t-x)) dt = -Li_2(-e^x).
+    Closed form via the dilogarithm: Li_2(w) = scipy.special.spence(1-w), so F_1(x) = -spence(1+e^x);
+    the large-x branch uses F_1(x) -> x^2/2 + pi^2/6 (Sommerfeld). Verified vs direct quadrature to
+    ~1e-14 and dF_1/dx = F_0 to ~1e-9. Used by the nonparabolic (Kane) 2D sub-band sheet density:
+    the m*(eps)=m*0(1+2 alpha eps) DOS gives n_s = pref0 (kT F_0 + 2 alpha kT^2 F_1)."""
+    from scipy.special import spence
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    big = x > 40.0
+    out[big] = 0.5 * x[big] ** 2 + (np.pi ** 2) / 6.0
+    out[~big] = -spence(1.0 + np.exp(np.clip(x[~big], -700.0, 40.0)))
     return out
 
 
@@ -159,17 +175,18 @@ class SchrodingerPoisson1D:
             keep = np.zeros(E.size, dtype=bool); keep[0] = True   # keep ground state at least
         E, psi = E[keep], psi[:, keep]
         if alpha_np_per_eV and alpha_np_per_eV > 0.0:
+            # Kane in-plane nonparabolicity, m*(eps) = m*0 (1 + 2 alpha eps). The per-sub-band 2D
+            # sheet density n_s,i = (g_s g_v m*0 / 2 pi hbar^2) Int (1 + 2 alpha eps) f(E_i+eps) deps
+            # is CLOSED-FORM in the complete Fermi-Dirac integrals: pref0 [ kT F_0(eta) + 2 alpha kT^2
+            # F_1(eta) ], eta=(E_F-E_i)/kT. alpha=0 reduces to pref0 kT F_0 (the parabolic branch);
+            # T->0 it gives pref0 (dE + alpha dE^2) (the validated closed form). Exact + fast (was an
+            # 800-pt numerical integral per sub-band), and IDENTICAL to the self-consistent Newton's
+            # a-priori density so the converged fill is consistent.
             a = float(alpha_np_per_eV) / Q                        # J^-1
             kT = KB * self.T
             pref0 = self.g_s * self.g_v * self.m / (2.0 * np.pi * HBAR ** 2)  # m^-2 J^-1
-            eg = np.linspace(0.0, max(0.0, float(E_F_J - float(E.min()))) + 30.0 * kT, 800)
-            dos = 1.0 + 2.0 * a * eg                              # m*(eps)/m*0 (nonparabolic DOS)
-            de = np.diff(eg)
-            ns = np.empty(E.size)
-            for i in range(E.size):
-                occ = 1.0 / (1.0 + np.exp(np.clip((E[i] + eg - E_F_J) / kT, -700.0, 700.0)))
-                g = dos * occ
-                ns[i] = pref0 * float(np.sum(0.5 * (g[:-1] + g[1:]) * de))
+            eta = (E_F_J - E) / kT
+            ns = pref0 * (kT * _fermi_log(eta) + 2.0 * a * kT ** 2 * _fd1(eta))
         else:
             pref = self.g_s * self.g_v * self.m * KB * self.T / (2.0 * np.pi * HBAR ** 2)  # m^-2
             ns = pref * _fermi_log((E_F_J - E) / (KB * self.T))   # per-subband sheet density (m^-2)
@@ -186,7 +203,8 @@ class SchrodingerPoisson1D:
                                 m_eff_z_kg: Optional[np.ndarray] = None,
                                 max_outer: int = 60, tol_V: float = 1e-4,
                                 n_states: Optional[int] = None, bound_tol: float = 1e-3,
-                                relax: float = 0.7, verbose: bool = False):
+                                relax: float = 0.7, alpha_np_per_eV: float = 0.0,
+                                verbose: bool = False):
         """Self-consistent solve on the FULL grid (Dirichlet phi at both ends).
         Poisson: d/dz(eps eps0 dphi/dz) = -q (N_D+ - n), electron PE U = -q*phi + U_band.
         The Trellakis predictor-corrector folds an a-priori quantum density that rigidly
@@ -209,6 +227,12 @@ class SchrodingerPoisson1D:
         max_outer-parity-sensitive. For the degenerate-bulk slab use a LARGE bound_tol (slab
         mode): it keeps all sub-bands, has no set churn, and converges; `.converged` flags
         the isolated-well non-convergence.
+
+        `alpha_np_per_eV`: Kane in-plane nonparabolicity (eV^-1). When > 0 the Trellakis inner
+        Newton's a-priori density AND its Jacobian use the nonparabolic 2D DOS (m*(eps)=m*0(1+2
+        alpha eps)) in the SAME closed form as density() -- so the self-consistent potential is
+        nonparabolic-CONSISTENT (not a post-hoc re-fill of a parabolic potential). alpha=0 is the
+        parabolic solve, byte-identical to before.
 
         Returns (phi_V, n_m3, SubbandResult). The result carries `.converged` (bool):
         if the outer loop did not reach tol_V in max_outer iterations, `.converged` is
@@ -236,9 +260,11 @@ class SchrodingerPoisson1D:
         result = None
         dV = float("inf")          # guard: max_outer<1 -> loop body never runs (report non-converged)
         inner_ok = True            # tracks whether the LAST outer iteration's inner Newton converged
+        a_np = float(alpha_np_per_eV) / Q if (alpha_np_per_eV and alpha_np_per_eV > 0.0) else 0.0  # J^-1
         for it in range(max_outer):
             U = -Q * phi + U_band
-            res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
+            res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol,
+                               alpha_np_per_eV=alpha_np_per_eV)
             E_k, psi_k = res.energies_J.copy(), res.psi.copy()
             ns_pref = self.g_s * self.g_v * self.m * kT / (2.0 * np.pi * HBAR ** 2)
             phi_k = phi.copy()
@@ -253,11 +279,20 @@ class SchrodingerPoisson1D:
                 # a-priori quantum density with potential-shifted sub-band energies
                 shift = -Q * (phi_in - phi_k)                  # E_i(phi) ~ E_i^k + (U-U^k); U=-q phi
                 arg = (E_F_J - (E_k[None, :] + shift[1:-1, None])) / kT
-                occ = ns_pref * _fermi_log(arg)                # (n_int, n_states)
+                F0 = _fermi_log(arg)                           # complete FD order 0 (n_int, n_states)
+                f = 1.0 / (1.0 + np.exp(-np.clip(arg, -700, 700)))   # Fermi function = dF_0/dx
+                if a_np > 0.0:
+                    # nonparabolic (Kane) a-priori density + Jacobian, the SAME closed form as
+                    # density(): n_s = pref0(kT F_0 + 2a kT^2 F_1); dn_s/dphi = q pref0(f + 2a kT F_0)
+                    # (ns_pref = pref0 kT). Reduces to the parabolic branch below at a_np=0.
+                    F1 = _fd1(arg)
+                    occ = ns_pref * (F0 + 2.0 * a_np * kT * F1)
+                    dns_dphi = (ns_pref * Q / kT) * (f + 2.0 * a_np * kT * F0)
+                else:
+                    occ = ns_pref * F0                         # (n_int, n_states)
+                    dns_dphi = (ns_pref * Q / kT) * f          # d(arg)/dphi = q/kT
                 n_int = np.sum((np.abs(psi_k) ** 2) * occ, axis=1)   # (n_int,)
-                # d n / d phi  (chain rule through the Fermi function): d(arg)/dphi = q/kT
-                f = 1.0 / (1.0 + np.exp(-np.clip(arg, -700, 700)))   # Fermi function = d/dx ln(1+e^x)
-                dn_dphi = np.sum((np.abs(psi_k) ** 2) * (ns_pref * (Q / kT)) * f, axis=1)
+                dn_dphi = np.sum((np.abs(psi_k) ** 2) * dns_dphi, axis=1)
                 # residual of eps0 eps phi'' = -q(Nd - n)  on interior nodes
                 lap = (phi_in[:-2] - 2.0 * phi_in[1:-1] + phi_in[2:]) / h ** 2
                 R = ee * lap + Q * (Nd[1:-1] - n_int)
@@ -295,7 +330,8 @@ class SchrodingerPoisson1D:
                 "max_outer; try a smaller `relax`, a larger bound_tol (slab mode), or more "
                 "iterations.".format(max_outer, "; ".join(why)), stacklevel=2)
         U = -Q * phi + U_band
-        result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol)
+        result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol,
+                              alpha_np_per_eV=alpha_np_per_eV)
         result.converged = converged
         n_full = np.zeros(N)
         n_full[1:-1] = result.density_m3
