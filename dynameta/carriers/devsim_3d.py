@@ -20,9 +20,13 @@ Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumula
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
 derives the spec from a Design and names the region to match the optics alignment
-(-> run_pipeline, no hand-alignment). SCOPE / remaining: a single semiconductor + single
-gate-dielectric stack; a multi-dielectric stack or true lateral material inclusions need
-a manual spec or a further general OCC builder (docs/roadmap_phase5_stretch.md).
+(-> run_pipeline, no hand-alignment). A MULTI-DIELECTRIC gate stack is meshed as DISTINCT
+regions (semi | oxide | diel1 | ... | gate on top) via `extra_dielectrics`, so the gate
+voltage division is the exact series capacitance (from_design now keeps ALL gate-side
+dielectric layers instead of collapsing to the nearest one). SCOPE / remaining: a single
+gated semiconductor; arbitrary LATERAL material inclusions inside the carrier mesh (beyond
+the centered gate patch) would need a further general OCC fragment builder
+(docs/roadmap_phase5_stretch.md).
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -75,6 +79,21 @@ class Stacked3DSpec:
                                           # solve() reads from BiasPoint.voltages (the internal
                                           # DEVSIM contact stays "gate"). from_design sets this.
     body_name:       str = "body"        # Design electrode name for the body/back contact
+    # EXTRA gate-side dielectric layers BEYOND the (nearest-semi) gate oxide, ordered from the oxide
+    # OUTWARD toward the gate: each (material, thickness_m, eps_static). Empty (default) = the single
+    # semi+oxide stack (byte-identical to before). With entries the builder meshes the FULL
+    # multi-dielectric stack as DISTINCT regions (semi | oxide | extra0 | ... | gate on top), so the
+    # gate voltage division across the series dielectric capacitance is exact (vs collapsing to one
+    # oxide). from_design populates this from all the gate-side dielectric layers of a Design.
+    extra_dielectrics: List[Tuple[str, float, float]] = field(default_factory=list)
+
+    def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
+        """Ordered gate-side dielectric layers from the semiconductor outward, as
+        (region_name, material, thickness_m, eps_static). Region names are unique + stable."""
+        out = [("oxide", self.oxide_material, float(self.oxide_thk_m), float(self.eps_oxide))]
+        for k, (mat, thk, eps) in enumerate(self.extra_dielectrics):
+            out.append(("diel{}".format(k + 1), str(mat), float(thk), float(eps)))
+        return out
 
     def __post_init__(self):
         # Sanity-check the relative permittivities so a bogus/omitted value fails at
@@ -86,20 +105,39 @@ class Stacked3DSpec:
                               "permittivity); got {}".format(self.eps_oxide))
         if not (self.eps_semi >= 1.0):
             raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
+        for mat, thk, eps in self.extra_dielectrics:
+            if not (eps >= 1.0) or not (thk > 0.0):
+                raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
+                                  "thk={}, eps={}".format(mat, thk, eps))
+
+    def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
+        """The full ordered stack from the body up to the gate as
+        (region_name, material, role, z_lo_nm, z_hi_nm, eps_static): the semiconductor then each
+        gate-side dielectric. z in NANOMETRES (the gmsh-OCC build scale). Reduces to [semi, oxide]
+        when there are no extra dielectrics."""
+        z = 0.0
+        out = [("semi", self.semi_material, "semiconductor", 0.0, self.semi_thk_m * 1e9,
+                float(self.eps_semi))]
+        z = self.semi_thk_m * 1e9
+        for name, mat, thk_m, eps in self.dielectric_stack_m():
+            out.append((name, mat, "dielectric", z, z + thk_m * 1e9, eps))
+            z += thk_m * 1e9
+        return out
 
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
-        full Park mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer +
-        the nearest dielectric layer on the GATE side (the direction of the gate
-        electrode), and collapses the rest to that semiconductor + gate-oxide pair (the
-        layers that set the accumulation; the others are not meshed by the stacked
-        builder). gate_patch_frac is derived from the gate electrode footprint. The
-        emitted CarrierField region is named after the Design's semiconductor layer so it
-        matches the optics alignment source_region (-> run_pipeline, no hand alignment).
-        Inclusions are allowed in non-semiconductor layers (e.g. the patch); the
-        semiconductor layer itself must be laterally uniform."""
+        full Park mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
+        ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
+        meshes them as distinct regions (the nearest -> the gate "oxide", the rest ->
+        extra_dielectrics) so the gate voltage division is the exact SERIES capacitance.
+        Layers on the body side of the semiconductor (e.g. the mirror/back oxides) are not
+        meshed (they do not set the gate accumulation). gate_patch_frac is derived from the
+        gate electrode footprint. The emitted CarrierField region is named after the Design's
+        semiconductor layer so it matches the optics alignment source_region (-> run_pipeline,
+        no hand alignment). Inclusions are allowed in non-semiconductor layers (e.g. the
+        patch); the semiconductor layer itself must be laterally uniform."""
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
                       if design.material_role(L.background_material) == "semiconductor"]
@@ -127,15 +165,36 @@ class Stacked3DSpec:
         gate_idx = (next((i for i, L in enumerate(layers) if L.name == gate_e.layer), len(layers))
                      if gate_e is not None else len(layers))   # default: gate above the semiconductor
         step = 1 if gate_idx > semi_idx else -1
-        ox_L = None
+        # Collect ALL gate-side dielectric layers from the semiconductor outward toward the gate (the
+        # full multi-dielectric stack, e.g. Park's upper HfO2 + Al2O3). Stop at the gate layer or a
+        # non-dielectric (metal/ambient). The nearest becomes the gate "oxide"; the rest are meshed as
+        # distinct regions via extra_dielectrics -> the gate voltage division is the exact series
+        # capacitance (the old code collapsed to just the nearest oxide).
+        diel_layers = []
         j = semi_idx + step
         while 0 <= j < len(layers):
-            if design.material_role(layers[j].background_material) == "dielectric":
-                ox_L = layers[j]; break
+            Lj = layers[j]
+            # a REAL gate dielectric is a dielectric WITH a DC permittivity (so the ambient 'air'
+            # patch layer -- role 'dielectric' but no eps_static_dc -- stops the collection rather than
+            # being meshed as a gate oxide).
+            is_diel = (design.material_role(Lj.background_material) == "dielectric"
+                       and design.materials.get(Lj.background_material).dc_permittivity() is not None)
+            if not is_diel:
+                break
+            diel_layers.append(Lj)
+            if j == gate_idx:        # the gate sits ON this dielectric -> it is the topmost gate oxide
+                break
             j += step
-        if ox_L is None:
+        if not diel_layers:
             raise ValueError("from_design found no gate-side dielectric layer adjacent to "
                               "semiconductor '{}'".format(semi_L.name))
+        ox_L = diel_layers[0]
+        extra_diels = []
+        for L in diel_layers[1:]:
+            e = design.materials.get(L.background_material).dc_permittivity()
+            if e is None:
+                raise ValueError("gate dielectric '{}' has no eps_static_dc".format(L.background_material))
+            extra_diels.append((L.background_material, float(L.thickness_m), float(e)))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
@@ -177,7 +236,8 @@ class Stacked3DSpec:
                     dos_mass_kg=float(tr.dos_mass_kg_of_n_m3(n_bg)), mobility_m2Vs=mob,
                     physics=tr.physics, gate_patch_frac=float(frac),
                     field_region_name=semi_L.name, gate_name=gate_name, body_name=body_name,
-                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm)
+                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
+                    extra_dielectrics=extra_diels)
 
 
 class Devsim3DEquilibrium:
@@ -211,19 +271,20 @@ class Devsim3DEquilibrium:
         import devsim as ds
         self._build_mesh()
         ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
-        ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name="semi", region="semi",
-                            material=self.spec.semi_material)
-        ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name="oxide", region="oxide",
-                            material=self.spec.oxide_material)
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region="oxide",
+        s = self.spec
+        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
+        for (name, mat, _role, _zlo, _zhi, _eps) in stack:
+            ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
+        top_diel = stack[-1][0]                                 # the gate sits on the topmost dielectric
+        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=top_diel,
                               name="gate", material="metal")
         ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
                               name="body", material="metal")
-        ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name="semi_oxide",
-                                region0="semi", region1="oxide", name="si_ox")
+        for k in range(1, len(stack)):                          # one interface per adjacent layer pair
+            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name="if_{}".format(k),
+                                    region0=stack[k - 1][0], region1=stack[k][0], name="if_{}".format(k))
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
-        s = self.spec
         self._dd = (s.physics == "drift_diffusion")
         if self._dd:
             # full drift-diffusion: electron continuity (FD-enhanced Scharfetter-
@@ -234,7 +295,9 @@ class Devsim3DEquilibrium:
         else:
             PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                            eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
-        PE.setup_dielectric_region(self.device, "oxide", s.eps_oxide)
+        for (name, mat, role, _zlo, _zhi, eps) in stack:        # each gate-side dielectric as its own region
+            if role == "dielectric":
+                PE.setup_dielectric_region(self.device, name, eps)
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
@@ -330,43 +393,62 @@ class Devsim3DEquilibrium:
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
         occ = gmsh.model.occ
-        ztop = tsemi + tox
+        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
+        ztop = stack[-1][4]                                     # top of the topmost dielectric
+        z_semi_top = stack[0][4]                                # semi/oxide interface (= tsemi)
+        boundaries = [stack[k][3] for k in range(1, len(stack))]   # interior z-boundaries (semi/ox, ox/diel1,...)
         frac = float(s.gate_patch_frac)
         patterned = frac < 1.0 - 1e-9
         ph = Lnm * frac / 2.0                                   # patch half-width (centered)
-        vb = occ.addBox(0, 0, 0, Lnm, Lnm, tsemi)
-        vt = occ.addBox(0, 0, tsemi, Lnm, Lnm, tox)
+        # one box per layer (semiconductor + each gate-side dielectric), fragmented into a conformal stack
+        boxes = [occ.addBox(0, 0, zlo, Lnm, Lnm, zhi - zlo) for (_n, _m, _r, zlo, zhi, _e) in stack]
         occ.synchronize()
-        occ.fragment([(3, vb)], [(3, vt)])
-        occ.synchronize()
+        if len(boxes) > 1:
+            occ.fragment([(3, boxes[0])], [(3, b) for b in boxes[1:]])
+            occ.synchronize()
         if patterned:
-            # imprint the gate-patch rectangle onto the oxide top face so it splits into
+            # imprint the gate-patch rectangle onto the topmost dielectric top face so it splits into
             # the patch (gate contact) + the surrounding free surface (ungated gap).
             rect = occ.addRectangle(Lnm / 2 - ph, Lnm / 2 - ph, ztop, 2 * ph, 2 * ph)
             occ.synchronize()
             occ.fragment([(d, t) for d, t in gmsh.model.getEntities(3)], [(2, rect)])
             occ.synchronize()
-        for dim, tag in gmsh.model.getEntities(3):
-            zc = occ.getCenterOfMass(dim, tag)[2]
-            gmsh.model.addPhysicalGroup(3, [tag], name=("semi" if zc < tsemi else "oxide"))
-        gate, body, iface = [], [], []
+        # classify each fragmented volume into its layer by z-centre -> a physical group per region
+        for (name, mat, role, zlo, zhi, eps) in stack:
+            tags = [t for (d, t) in gmsh.model.getEntities(3)
+                    if zlo - 1e-6 < occ.getCenterOfMass(d, t)[2] < zhi + 1e-6]
+            if tags:
+                gmsh.model.addPhysicalGroup(3, tags, name=name)
+        # surfaces: gate (topmost top), body (z=0), one interface per interior boundary
+        gate, body = [], []
+        ifaces = {round(zb, 6): [] for zb in boundaries}
         for dim, tag in gmsh.model.getEntities(2):
             zc = occ.getCenterOfMass(dim, tag)[2]
             if abs(zc - ztop) < 1e-4:
                 if patterned:
                     bb = occ.getBoundingBox(dim, tag)
-                    is_patch = (bb[3] - bb[0]) < Lnm - 1.0    # narrower than the full cell
-                    if is_patch:
+                    if (bb[3] - bb[0]) < Lnm - 1.0:           # narrower than the full cell -> the patch
                         gate.append(tag)                      # else: ungated free surface
                 else:
                     gate.append(tag)
-            elif abs(zc) < 1e-4: body.append(tag)
-            elif abs(zc - tsemi) < 1e-4: iface.append(tag)
+            elif abs(zc) < 1e-4:
+                body.append(tag)
+            else:
+                for zb in boundaries:
+                    if abs(zc - zb) < 1e-4:
+                        ifaces[round(zb, 6)].append(tag); break
         gmsh.model.addPhysicalGroup(2, gate, name="gate")
         gmsh.model.addPhysicalGroup(2, body, name="body")
-        gmsh.model.addPhysicalGroup(2, iface, name="semi_oxide")
+        semi_ox = []
+        for k in range(1, len(stack)):
+            zb = round(stack[k][3], 6)
+            ifname = "if_{}".format(k)                         # interface between stack[k-1] and stack[k]
+            if ifaces[zb]:
+                gmsh.model.addPhysicalGroup(2, ifaces[zb], name=ifname)
+            if k == 1:
+                semi_ox = ifaces[zb]                           # the semi/oxide interface (mesh refinement)
         fd = gmsh.model.mesh.field.add("Distance")
-        gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", iface)
+        gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", semi_ox)
         ft = gmsh.model.mesh.field.add("Threshold")
         gmsh.model.mesh.field.setNumber(ft, "InField", fd)
         gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.mesh_min_nm)
