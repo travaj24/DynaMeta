@@ -47,30 +47,33 @@ layers from those REAL profiles, and runs the jax.grad topology optimizer to sha
 maximises the actual device's reflection contrast -- closing the device->design loop with no synthetic
 stand-in.
 
-## Deferred (spec ready)
+### Per-cell tensor / magneto-optic eps (1-D)
+`dynameta/optics/fdtd_mo.py` -- a normal-incidence, z-propagation, full transverse-polarization (Ex,Ey)
+solver with per-cell DIAGONAL anisotropy (`eps_xx`, `eps_yy`) AND a gyrotropic magneto-optic response via
+a magnetized-Drude auxiliary-differential-equation (the cyclotron `wc*(zhat x J)` coupling that mixes
+Jx<->Jy). This is the physically-correct time-domain route: the off-diagonal `i*g` is a frequency-domain
+stand-in for exactly this TIME-DERIVATIVE coupling (a complex algebraic `E = inv(eps) @ D` on real fields
+is unphysical -- the design spec was wrong on this point). Implemented as a per-cell 2x2 Crank-Nicolson
+solve coupled semi-implicitly to the E-update. Faraday rotation falls out (the +/- circular modes see
+`eps_pm = eps_inf - wp^2/(w(w -/+ wc) + i w gamma)`). Validated (`validation/fdtd_mo_vs_tmm.py`):
+birefringence vs per-pol TMM (~1e-2), Faraday vs circular-eigenmode Jones-TMM (rotation to 0.04 deg),
+reduction at `wc=0`. Complements the frequency-domain FEM gyrotropic path (UPML) with a broadband
+time-domain route.
 
-### Per-cell tensor / magneto-optic eps
-- **Diagonal anisotropic (uniaxial / birefringent), tractable:** give the 3D kernels a per-component
-  `eps_xx / eps_yy / eps_zz` (each E-component uses its own, no coupling); validate by birefringence
-  (an x-pol vs y-pol source against an anisotropic-TMM `n_o` / `n_e`). A clean additive change to the
-  three 3D kernels + an x-pol source option.
-- **Off-diagonal / gyrotropic (magneto-optic Faraday):** the frequency-domain FEM backend ALREADY does
-  this (gyrotropic / tilted-anisotropic tensor via an explicit UPML -- `validation/magneto_optic_faraday.py`
-  GATE D and `lc_tilted_fem.py` pass), so an FDTD path would be a complementary TIME-DOMAIN route (broadband
-  in one solve, nonlinear MO), not a missing capability. IMPORTANT correction to the design spec: the
-  proposed "E = inv(eps) @ D with a complex pre-inverted `eps`" does NOT work for a real-time FDTD -- an
-  imaginary off-diagonal `i*g` is a frequency-domain stand-in for a TIME-DERIVATIVE coupling, so a complex
-  algebraic inverse on real fields yields complex (unphysical) E. The correct path is a magneto-optic
-  auxiliary-differential-equation (the gyration as a `g * dE_perp/dt` antisymmetric polarization-current
-  coupling), then validate vs the circular-eigenmode (`n_pm = sqrt(eps +/- g)`) Faraday oracle. A genuine
-  kernel effort; not the spec's one-liner.
+### Oblique Bloch incidence (2D-TE / s-pol)
+`solve_fdtd_2d_oblique` in `fdtd_nd.py` -- the complex-envelope (field-transform) Bloch method: the
+physical field carries a fixed transverse wavevector `k_par`, so the periodic envelope is solved with
+`d/dx -> d/dx + i*k_par` and a zero-phase roll (cleaner than the split cos/sin spec; reduces to the real
+normal-incidence kernel at `k_par=0`). A fixed `k_par` makes the physical angle frequency-dependent,
+`theta(f) = asin(k_par c/w)`. Validated (`validation/fdtd_2d_oblique_vs_tmm.py`) vs s-pol TMM at
+`theta(f)`: reduction at angle 0, tracks TMM to ~2% (the thin-slab discretization floor) at 30/45 deg with
+the genuine angle-effect far exceeding that error, energy closes.
 
-### Oblique Bloch incidence (2D first)
-Split-field (`Ey_cos`, `Ey_sin`) Bloch-phase periodic BC in the 2D-TE kernel (numpy + numba), a plane-wave
-oblique source, and an m=0-order spatial-DFT probe extraction with `k_z(k_par)` de-embedding. Validate vs
-coherent TMM at angles {0,15,30,45} deg (the laterally-uniform slab must reduce to TMM). The full spec
-(state, update equations, plumbing, gates) is in the design workflow output. Note the FEM backend already
-provides oblique/conical incidence, so this is the time-domain complement, not a gap.
+## Deferred (extensions of the above)
+- Full 3-D / structured tensor FDTD (the 1-D MO solver covers normal-incidence Faraday + birefringence;
+  a per-cell 3x3 tensor in the 3-D engine with the magnetized-Drude ADE is the larger version).
+- Oblique on the numba/jax backends, p-pol (TM), and structured/3-D oblique (the numpy s-pol path is the
+  reference).
 
 ## Blocked (environment)
 
