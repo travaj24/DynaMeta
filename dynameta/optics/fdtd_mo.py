@@ -1,0 +1,194 @@
+"""
+1-D magneto-optic / anisotropic FDTD: a normal-incidence, z-propagation, FULL-transverse-polarization
+(Ex, Ey) time-domain solver carrying a per-cell DIAGONAL anisotropy (eps_xx, eps_yy) AND a gyrotropic
+MAGNETO-OPTIC response via a magnetized-Drude auxiliary-differential-equation (the cyclotron coupling
+wc * (zhat x J) that mixes Jx <-> Jy). This is the PHYSICALLY-CORRECT time-domain route to gyrotropic
+optics: the frequency-domain off-diagonal i*g is a stand-in for exactly this TIME-DERIVATIVE coupling, so
+a real-time FDTD must carry the cyclotron ADE (a complex algebraic E = inv(eps) @ D on real fields would
+be unphysical). Faraday rotation falls out for free -- the two circular eigenmodes see eps_pm = eps_inf -
+wp^2/(w(w -/+ wc) + i w gamma) and accumulate a differential phase.
+
+Method: staggered Ex/Ey (E-grid) and Hx/Hy (H-grid) leapfrog; 1st-order Mur ABC at both vacuum ends; a
+soft modulated-Gaussian plane-wave source (a chosen input polarization). The magnetized-Drude ADE is a
+per-cell 2x2 Crank-Nicolson solve coupled semi-implicitly to the E-update (so the E^{n+1} <-> J^{n+1}
+coupling is resolved with one precomputed 2x2 inverse per cell). The TWO-RUN reference method gives the
+broadband complex co- and cross-polarized reflection / transmission, from which R/T and the Faraday
+rotation angle are read. Convention exp(-i w t), SI, Im(eps) > 0 = loss.
+
+Validated (validation/fdtd_mo_vs_tmm.py) vs (a) per-polarization scalar TMM for a birefringent
+(eps_xx != eps_yy) slab and (b) the circular-eigenmode Jones-TMM Faraday rotation for a gyrotropic slab.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+
+import numpy as np
+
+from dynameta.constants import C_LIGHT, EPS0
+
+MU0 = 1.0 / (EPS0 * C_LIGHT ** 2)
+
+
+@dataclass
+class MOLayer:
+    """One layer of the 1-D magneto-optic / anisotropic stack. Diagonal background eps_xx / eps_yy (the
+    transverse principal permittivities -> birefringence), an optional magnetized-Drude free-carrier pole
+    (plasma frequency wp, damping gamma) and its cyclotron frequency wc = q B0 / m* (the gyration; wc=0 ->
+    a plain anisotropic Drude). eps_pm(w) = eps_inf - wp^2/(w(w -/+ wc) + i w gamma) for the +/- circular
+    modes."""
+    thickness_m: float
+    eps_xx: float = 1.0
+    eps_yy: float = 1.0
+    drude_wp_rad_s: float = 0.0
+    drude_gamma_rad_s: float = 0.0
+    cyclotron_wc_rad_s: float = 0.0
+
+    def eps_circular(self, w_rad_s, sign):
+        """The +/- circular-eigenmode permittivity (sign = +1 for the '+' mode, -1 for '-'); the diagonal
+        background is taken isotropic at 0.5(eps_xx+eps_yy) for this scalar circular model (used only as
+        the gyrotropic oracle, where eps_xx == eps_yy)."""
+        eps_inf = 0.5 * (self.eps_xx + self.eps_yy)
+        if self.drude_wp_rad_s <= 0.0:
+            return complex(eps_inf)
+        wc = self.cyclotron_wc_rad_s
+        return eps_inf - self.drude_wp_rad_s ** 2 / (w_rad_s * (w_rad_s - sign * wc) + 1j * w_rad_s * self.drude_gamma_rad_s)
+
+
+@dataclass
+class FDTDMOResult:
+    freqs_Hz: np.ndarray
+    band: np.ndarray
+    # complex co/cross 0-order coefficients at the probes (input along `pol`); co = same axis as input
+    t_co: np.ndarray
+    t_cross: np.ndarray
+    r_co: np.ndarray
+    r_cross: np.ndarray
+    R: np.ndarray               # total reflectance |r_co|^2 + |r_cross|^2
+    T: np.ndarray               # total transmittance |t_co|^2 + |t_cross|^2
+    faraday_deg: np.ndarray     # polarization-ellipse major-axis rotation of the transmitted wave [deg]
+
+
+def _2x2_inv(M):
+    """Vectorized inverse of a stack of 2x2 matrices, shape (...,2,2)."""
+    a, b, c, d = M[..., 0, 0], M[..., 0, 1], M[..., 1, 0], M[..., 1, 1]
+    det = a * d - b * c
+    out = np.empty_like(M)
+    out[..., 0, 0] = d / det; out[..., 0, 1] = -b / det
+    out[..., 1, 0] = -c / det; out[..., 1, 1] = a / det
+    return out
+
+
+def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
+    """One 1-D bi-polarization pass. Per-cell diagonal eps (exx,eyy) + magnetized-Drude ADE (wp,gam,wc).
+    Returns the Ex,Ey time series at the left (reflection) and right (transmission) probes."""
+    nz = exx.size
+    Ex = np.zeros(nz); Ey = np.zeros(nz)
+    Hx = np.zeros(nz - 1); Hy = np.zeros(nz - 1)
+    J = np.zeros((nz, 2))                                   # magnetized-Drude current (Jx,Jy)
+    # per-cell magnetized-Drude Crank-Nicolson + E-update matrices (all (nz,2,2)):
+    #   A J^{n+1} = B J^n + eps0 wp^2 (E^{n+1}+E^n)/2 ; (gamma I + Wg), Wg = [[0,-wc],[wc,0]]
+    I2 = np.broadcast_to(np.eye(2), (nz, 2, 2)).copy()
+    Wg = np.zeros((nz, 2, 2)); Wg[:, 0, 1] = -wc; Wg[:, 1, 0] = wc
+    G = gam[:, None, None] * I2 + Wg
+    A = I2 / dt + 0.5 * G
+    B = I2 / dt - 0.5 * G
+    Ainv = _2x2_inv(A)
+    Ma = np.einsum("zij,zjk->zik", Ainv, B)                 # J^{n+1} = Ma J^n + Mb (E^{n+1}+E^n)
+    Mb = Ainv * (EPS0 * wp ** 2 * 0.5)[:, None, None]
+    D = np.zeros((nz, 2, 2)); D[:, 0, 0] = EPS0 * exx / dt; D[:, 1, 1] = EPS0 * eyy / dt
+    Einv = _2x2_inv(D + 0.5 * Mb)                           # E^{n+1} = Einv [ (D-Mb/2)E^n + curl - (Ma+I)/2 J^n ]
+    Epre = D - 0.5 * Mb
+    Jc = 0.5 * (Ma + I2)
+    c = C_LIGHT
+    mur = (c * dt - dz) / (c * dt + dz)
+    eL = np.empty((nsteps, 2)); eR = np.empty((nsteps, 2))
+    cmu = dt / (MU0 * dz)
+    for n in range(nsteps):
+        ex_oL0, ex_oL1 = Ex[0], Ex[1]; ey_oL0, ey_oL1 = Ey[0], Ey[1]
+        ex_oR0, ex_oR1 = Ex[-1], Ex[-2]; ey_oR0, ey_oR1 = Ey[-1], Ey[-2]
+        # H update: dHx/dt = (1/mu) dEy/dz ; dHy/dt = -(1/mu) dEx/dz
+        Hx += cmu * (Ey[1:] - Ey[:-1])
+        Hy -= cmu * (Ex[1:] - Ex[:-1])
+        # curl H at E points (interior): curl_x = -dHy/dz, curl_y = dHx/dz
+        curl = np.zeros((nz, 2))
+        curl[1:-1, 0] = -(Hy[1:] - Hy[:-1]) / dz
+        curl[1:-1, 1] = (Hx[1:] - Hx[:-1]) / dz
+        Eold = np.stack([Ex, Ey], axis=1)
+        rhs = np.einsum("zij,zj->zi", Epre, Eold) + curl - np.einsum("zij,zj->zi", Jc, J)
+        Enew = np.einsum("zij,zj->zi", Einv, rhs)
+        J = np.einsum("zij,zj->zi", Ma, J) + np.einsum("zij,zj->zi", Mb, Enew + Eold)
+        Exn, Eyn = Enew[:, 0].copy(), Enew[:, 1].copy()
+        # soft source (input polarization) on the chosen axis
+        if pol == "y":
+            Eyn[i_src] += src[n]
+        else:
+            Exn[i_src] += src[n]
+        # 1st-order Mur ABC at both vacuum ends (each component independently)
+        Exn[0] = ex_oL1 + mur * (Exn[1] - ex_oL0); Eyn[0] = ey_oL1 + mur * (Eyn[1] - ey_oL0)
+        Exn[-1] = ex_oR1 + mur * (Exn[-2] - ex_oR0); Eyn[-1] = ey_oR1 + mur * (Eyn[-2] - ey_oR0)
+        Ex, Ey = Exn, Eyn
+        eL[n] = (Ex[i_pL], Ey[i_pL]); eR[n] = (Ex[i_pR], Ey[i_pR])
+    return eL, eR
+
+
+def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m: float,
+                     resolution: int = 60, courant: float = 0.5, n_pad_wave: float = 6.0,
+                     settle: float = 14.0, pol: str = "y", source_amp: float = 1.0) -> FDTDMOResult:
+    """Broadband co/cross R/T + Faraday rotation of a 1-D anisotropic / magneto-optic stack (vacuum ends),
+    input linearly polarized along `pol` ('x' or 'y'). The two-run reference method gives the COMPLEX
+    co-pol (same axis as input) and cross-pol (orthogonal) reflection/transmission; the Faraday angle is
+    the major-axis rotation of the transmitted polarization ellipse."""
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    f_c = 0.5 * (f_min + f_max)
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
+
+    def _n_max(L):
+        return max(abs(np.sqrt(L.eps_circular(w, +1))) for w in w_band) \
+            if L.drude_wp_rad_s > 0 else max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
+    n_max = max(1.0, max(_n_max(L) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    dt = courant * dz / C_LIGHT
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+
+    exx = np.ones(nz); eyy = np.ones(nz); wp = np.zeros(nz); gam = np.zeros(nz); wc = np.zeros(nz)
+    zc = np.arange(nz) * dz
+    z = pad
+    for L in layers:
+        m = (zc >= z) & (zc < z + L.thickness_m)
+        exx[m] = L.eps_xx; eyy[m] = L.eps_yy
+        wp[m] = L.drude_wp_rad_s; gam[m] = L.drude_gamma_rad_s; wc[m] = L.cyclotron_wc_rad_s
+        z += L.thickness_m
+
+    i_src = max(2, int(round(0.35 * pad / dz)))
+    i_pL = int(round(0.7 * pad / dz))
+    i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    t0 = settle * tau
+    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau) / dt))
+    tgrid = np.arange(nsteps) * dt
+    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+
+    one = np.ones(nz); zero = np.zeros(nz)
+    eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol)   # vacuum
+    eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol)          # structure
+
+    f = np.fft.rfftfreq(nsteps, dt)
+    co, cr = (1, 0) if pol == "y" else (0, 1)               # co = input axis index, cr = orthogonal
+    # rfft is exp(+iwt); conjugate to the exp(-iwt) convention. Incident reference = the co-pol input field.
+    inc_L = np.conj(np.fft.rfft(eL_i[:, co])); inc_R = np.conj(np.fft.rfft(eR_i[:, co]))
+    refl_co = np.conj(np.fft.rfft(eL_t[:, co] - eL_i[:, co])); refl_cr = np.conj(np.fft.rfft(eL_t[:, cr]))
+    tr_co = np.conj(np.fft.rfft(eR_t[:, co])); tr_cr = np.conj(np.fft.rfft(eR_t[:, cr]))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r_co = refl_co / inc_L; r_cr = refl_cr / inc_L
+        t_co = tr_co / inc_R; t_cr = tr_cr / inc_R
+        R = np.abs(r_co) ** 2 + np.abs(r_cr) ** 2
+        T = np.abs(t_co) ** 2 + np.abs(t_cr) ** 2
+        # Faraday: major-axis rotation of the transmitted (E_co, E_cross) ellipse, signed toward +cross
+        far = 0.5 * np.arctan2(2.0 * np.real(t_co * np.conj(t_cr)), np.abs(t_co) ** 2 - np.abs(t_cr) ** 2)
+    band = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    return FDTDMOResult(freqs_Hz=f, band=band, t_co=t_co, t_cross=t_cr, r_co=r_co, r_cross=r_cr,
+                        R=R, T=T, faraday_deg=np.degrees(far))
