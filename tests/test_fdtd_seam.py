@@ -127,6 +127,37 @@ def test_fit_drude_lossless_dielectric():
     assert np.max(np.abs(model - 4.0)) < 5e-3               # non-dispersive eps=4 reproduced across the band
 
 
+def test_fit_drude_lorentz_recovers_known_poles():
+    import numpy as np
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_seam import fit_drude_lorentz
+    Cc = 299792458.0
+    L = FDTDLayer(thickness_m=1.0, eps_inf=2.0, drude_wp_rad_s=1.4e15, drude_gamma_rad_s=5.0e13,
+                  lorentz_w0_rad_s=1.30e15, lorentz_gamma_rad_s=1.2e14, lorentz_delta_eps=1.0)
+    lam = np.linspace(1200e-9, 1800e-9, 13)
+    w = 2.0 * np.pi * Cc / lam
+    eps = np.array([L.eps_at(wi) for wi in w])
+    fit = fit_drude_lorentz(lam, eps)
+    model = np.array([FDTDLayer(thickness_m=1.0, **fit).eps_at(wi) for wi in w])
+    assert np.max(np.abs(model - eps)) < 1e-2 * np.max(np.abs(eps))   # reproduces eps across the band
+
+
+def test_fit_pure_lorentz_no_drude():
+    import numpy as np
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_seam import fit_drude_lorentz
+    Cc = 299792458.0
+    L = FDTDLayer(thickness_m=1.0, eps_inf=2.25, lorentz_w0_rad_s=1.30e15,
+                  lorentz_gamma_rad_s=1.2e14, lorentz_delta_eps=1.5)
+    lam = np.linspace(1200e-9, 1800e-9, 11)
+    w = 2.0 * np.pi * Cc / lam
+    eps = np.array([L.eps_at(wi) for wi in w])
+    fit = fit_drude_lorentz(lam, eps, with_drude=False)
+    assert fit["drude_wp_rad_s"] < 1e12                    # no Drude pole fitted
+    model = np.array([FDTDLayer(thickness_m=1.0, **fit).eps_at(wi) for wi in w])
+    assert np.max(np.abs(model - eps)) < 1e-2 * np.max(np.abs(eps))
+
+
 # ---- lateral-inclusion rasterization (structured cells) -------------------------------------------
 
 def test_rasterize_circle_fill_fraction_and_placement():
