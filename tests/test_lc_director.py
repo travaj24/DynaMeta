@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 
 from dynameta.constants import EPS0
-from dynameta.carriers.lc_director import freedericksz_threshold_V, director_profile
+from dynameta.carriers.lc_director import (
+    freedericksz_threshold_V, director_profile, director_profile_bvp, solve_lc_field_profile,
+    compute_lc_geometry, n_local_from_theta, n_eff_from_theta_profile, eps_along_field,
+    flexo_p_along_field, director_to_extra_fields)
 
 K, DEPS, EP, D = 6.5e-12, 11.0, 7.0, 5e-6     # ~5CB nematic cell
 
@@ -67,3 +70,71 @@ def test_director_profile_rejects_bad_input():
         director_profile(0.0, DEPS, EP, D, 1.0)            # K <= 0
     with pytest.raises(ValueError):
         director_profile(K, DEPS, EP, D, 1.0, nz=5)        # nz too small
+
+
+# -------------------------------------------------------------------------
+# Two-constant (K11/K33) statics: helpers + BVP reduction (FIELD-AXIS convention)
+# -------------------------------------------------------------------------
+def test_eps_along_field_limits():
+    # FIELD-AXIS: theta=0 (along field) -> eps_para; theta=pi/2 (planar) -> eps_perp
+    assert eps_along_field(0.0, 18.7, 4.0) == pytest.approx(18.7)
+    assert eps_along_field(0.5 * np.pi, 18.7, 4.0) == pytest.approx(4.0)
+
+
+def test_n_local_limits_and_models():
+    n_o, n_e = 1.56, 1.92
+    # extra_k_radial: theta=0 (homeotropic, along field) -> n_e; theta=pi/2 (planar) -> n_o
+    assert n_local_from_theta(0.0, n_o, n_e, "extra_k_radial") == pytest.approx(n_e)
+    assert n_local_from_theta(0.5 * np.pi, n_o, n_e, "extra_k_radial") == pytest.approx(n_o)
+    assert n_local_from_theta(0.3, n_o, n_e, "ordinary") == pytest.approx(n_o)
+    with pytest.raises(ValueError):
+        n_local_from_theta(0.1, n_o, n_e, "nonsense")
+
+
+def test_field_profile_uniform_exact_and_poisson_division():
+    geo = compute_lc_geometry(geometry="planar", nz=64, d_planar=1e-6)
+    th = np.full(64, np.radians(89.9))
+    E_u, vlc_u = solve_lc_field_profile(th, 2.0, geo, eps_para=18.7, eps_perp=4.0, field_model="uniform")
+    assert vlc_u == pytest.approx(2.0)                     # uniform: V_lc == V_app
+    assert np.allclose(E_u, 2.0 / geo.d_lc)                # E == V/d everywhere
+    geo_f = compute_lc_geometry(geometry="planar", nz=64, d_planar=1e-6, t_in=100e-9, t_out=100e-9)
+    _Ef, vlc_f = solve_lc_field_profile(th, 2.0, geo_f, eps_para=18.7, eps_perp=4.0,
+                                        field_model="poisson", t_in=100e-9, t_out=100e-9,
+                                        eps_in=7.5, eps_out=7.5)
+    assert 0.0 < vlc_f < 2.0                                # series fixed layers drop part of V_app
+
+
+def test_bvp_reduces_to_one_constant_director_profile():
+    # the two-constant BVP at K11==K33 (constant-displacement 'poisson' field, no fixed layers)
+    # reproduces the existing 1-constant elliptic-quadrature director_profile THROUGH the pi/2 bridge.
+    Kc, dEps, ep, d = 17e-12, 14.7, 4.0, 1e-6
+    V = 1.8
+    dp = director_profile(Kc, dEps, ep, d, V)
+    bv = director_profile_bvp(V_app=V, K11=Kc, K33=Kc, eps_para=ep + dEps, eps_perp=ep, d_planar=d,
+                              theta_b_rad=np.radians(89.97), field_model="poisson", nz=201)
+    th_bridge = 0.5 * np.pi - bv.theta_field_rad[bv.theta_field_rad.size // 2]
+    assert abs(dp.theta_max_rad - th_bridge) < 2e-2
+
+
+def test_bvp_freedericksz_threshold_and_branch():
+    Vth = freedericksz_threshold_V(17e-12, 14.7)
+    thb = np.radians(89.9)
+    kw = dict(K11=17e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=1e-6,
+              theta_b_rad=thb, field_model="uniform", nz=81)
+    below = director_profile_bvp(V_app=0.6 * Vth, **kw)
+    above = director_profile_bvp(V_app=1.5 * Vth, **kw)
+    cen = lambda r: r.theta_field_rad[r.theta_field_rad.size // 2]
+    assert abs(cen(below) - thb) < np.radians(0.5)         # below: stays ~planar (theta_b)
+    assert cen(above) < thb - np.radians(5.0)              # above: tilts toward the field
+
+
+def test_flexo_zero_when_coeffs_zero():
+    th = np.linspace(0.2, 1.2, 11); dth = np.gradient(th)
+    assert np.allclose(flexo_p_along_field(th, dth, 0.0, 0.0), 0.0)
+
+
+def test_director_to_extra_fields_bridge():
+    out = director_to_extra_fields(np.array([0.0, 0.5 * np.pi]))
+    assert "director_angle_rad" in out
+    assert out["director_angle_rad"][0] == pytest.approx(0.5 * np.pi)   # homeotropic field-axis -> optic pi/2
+    assert out["director_angle_rad"][1] == pytest.approx(0.0)           # planar field-axis -> optic 0
