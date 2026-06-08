@@ -18,15 +18,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Install the light core + dev + the io/plot extras (h5py/zarr/matplotlib are
-      # pure-python or wheels -- no system libs needed) so the results/IO/viz/cache
-      # layer is exercised. The heavy solver stack (devsim/ngsolve/gmsh) is the
-      # optional `solvers` extra and is NOT exercised here -- the fast tests cover the
-      # pure-numpy data model + bridge + DielectricDB + the serialization layer. The
-      # FEM/DEVSIM checks live in validation/ and run where those solvers are available.
-      - name: Install (core + dev + io + plot)
+      # Install core + dev + plot (matplotlib) and h5py directly so the results/IO/viz/
+      # cache layer is exercised on every Python. NOTE: the `io` extra pins zarr>=3.0,
+      # which requires Python >=3.11 -- installing it would break the py3.10 leg, so we
+      # install h5py here (wheels on all CI Pythons) and let the IDENTICAL zarr code path
+      # be covered locally on 3.11+; the io tests pick whichever backend is installed and
+      # skip the rest. The heavy solver stack (devsim/ngsolve/gmsh) is NOT exercised here.
+      - name: Install (core + dev + plot + h5py)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,io,plot]"
+          pip install -e ".[dev,plot]" "h5py>=3.8"
       - name: Run fast tests
         run: pytest tests/ -q
