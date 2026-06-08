@@ -173,10 +173,10 @@ F1-F4). True lateral material inclusions in the semiconductor still need a manua
 
 | Item | Status | Validated by | Remaining |
 |---|---|---|---|
-| Oblique incidence | **resolved, s+p-pol, +conical** | `tmm` s & p, 0-30deg, vacuum/dense/lossy; conical phi-invariant + tmm | p-pol conical |
-| 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible | multi-dielectric stack / arbitrary OCC inclusions |
-| Quantum confinement (S-P) | **implemented + CarrierSolver** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge; nonparabolic reachable via carrier | fully self-consistent nonparabolic solve; Neumann body BC |
-| Bipolar DD (holes+SRH) | **implemented** | 1D Si diode J-V (rectify 1.8e10, n=1.20) | wire into 2D builder |
+| Oblique incidence | **resolved, s+p-pol, +conical (s AND p)** | `tmm` s & p, 0-30deg, vacuum/dense/lossy; s+p-pol conical phi-invariant + tmm (conical_ppol_vs_tmm 7e-4) | -- |
+| 3D DEVSIM carriers | equilibrium + DD + lateral patch + Design-driven + **multi-dielectric** | Gauss/sign/invariance, DD reduces-to-eq 0.8%, gate-patch lateral accumulation, from_design run_pipeline-compatible, multi-dielectric series-C oracle 4.6e-4 | arbitrary LATERAL material inclusions inside the carrier mesh (beyond the centered gate patch) |
+| Quantum confinement (S-P) | **implemented + CarrierSolver + self-consistent nonparabolic** | analytic wells ~1e-5; ITO bulk-recover + accumulation + ENZ via bridge; self-consistent Kane nonparabolic (bulk-recover 1.000, self-consistent vs post-hoc 22%) | Neumann body BC (body-side ~0.4nm dead layer; low-payoff, far from the gate-side ENZ) |
+| Bipolar DD (holes+SRH) | **implemented + 2D-builder-wired** | 1D Si diode J-V (rectify 1.8e10, n=1.20); 2D p-n through LayeredDevsimBuilder (rectify 9.1e3, opposite sign) | wire into the gated-cap (ITO is unipolar; bipolar is a generality feature) |
 | Boundary-spanning inclusions | **resolved** | grating(1D edge) + disk(2D corner) translation-invariance |dR|<=1e-4 + energy R+T~1 | -- |
 | Inclusion shapes | **rect/circle/ellipse/polygon** | ellipse + hexagon build/solve + energy R+T~1 (validation/inclusion_shapes.py) | -- |
 
