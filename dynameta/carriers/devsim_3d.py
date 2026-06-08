@@ -8,7 +8,14 @@ gate contact on top, body contact on bottom) and solves, on the 3D mesh, either:
   * DRIFT-DIFFUSION (`Stacked3DSpec.physics='drift_diffusion'`): FD-enhanced
     Scharfetter-Gummel electron continuity + Poisson (`physics_drift_diffusion`),
     body contact pinning Electrons (= N_D), abs_tol scaled to n_bg, staged
-    zero-bias-seed -> gate-ramp Newton.
+    zero-bias-seed -> gate-ramp Newton; or
+  * BIPOLAR DRIFT-DIFFUSION (`Stacked3DSpec.physics='bipolar_dd'`): 3-variable
+    Potential + Electrons + Holes + SRH (`physics_bipolar_dd`), the body contact
+    pinning Electrons AND Holes to their charge-neutral equilibrium, staged
+    built-in-seed -> coupled 3-variable Newton -> fine gate ramp (the 3D analogue
+    of the 2D LayeredDevsimBuilder bipolar path). Requires n_i_m3, mobility_p_m2Vs,
+    tau_srh_s; the emitted CarrierField still carries Electrons + Potential (the
+    free-electron density the optics Drude model consumes).
 Emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY: the native 3D-grid branch of
 assemble_eps places the (x,y,z) density with NO FieldLift synthesis (a lift applies to 2D
 fields only) -- the physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
@@ -49,8 +56,17 @@ from dynameta.core.interfaces import RegionInfo
 from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
+from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.carriers.physics_equilibrium import M_E
+from dynameta.carriers.physics_equilibrium import M_E, V_T
+from dynameta.constants import HBAR, KB
+
+
+def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
+    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass -- the
+    conduction N_c (or valence N_v) for the bipolar FD g-factor. (Same formula as the 2D builder;
+    for a non-degenerate diode its exact value barely matters, g~1.)"""
+    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
 
 
 @dataclass
@@ -83,7 +99,14 @@ class Stacked3DSpec:
     eps_oxide:       float = 18.0
     dos_mass_kg:     float = 0.35 * M_E
     mobility_m2Vs:   float = 0.004       # electron mobility (DD only); ITO ~40 cm^2/Vs
-    physics:         str = "equilibrium" # "equilibrium" or "drift_diffusion"
+    physics:         str = "equilibrium" # "equilibrium" | "drift_diffusion" | "bipolar_dd"
+    # --- bipolar drift-diffusion params (physics == "bipolar_dd": Potential+Electrons+Holes+SRH) ---
+    n_i_m3:          Optional[float] = None    # intrinsic carrier density (required for bipolar_dd)
+    mobility_p_m2Vs: float = 0.001             # hole mobility (m^2/V/s; bipolar only)
+    tau_srh_s:       float = 1.0e-7            # shared SRH lifetime (s; bipolar only); large -> suppress
+    dos_mass_p_kg:   Optional[float] = None    # VALENCE DOS mass -> N_v (bipolar FD g-factor); None -> N_c
+    acceptor:        bool = False              # True -> uniform p-type (NetDoping = -n_bg); False -> n-type
+    net_doping_expr: Optional[str] = None      # position-dependent junction (a DEVSIM node expression)
     gate_patch_frac: float = 1.0         # gate footprint as a fraction of the cell (centered
                                           # square). 1.0 = full-cell gate; <1 = a PATCH gate
                                           # (laterally-varying accumulation: gated under the
@@ -127,6 +150,19 @@ class Stacked3DSpec:
                               "permittivity); got {}".format(self.eps_oxide))
         if not (self.eps_semi >= 1.0):
             raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
+        if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
+            raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
+                              "'bipolar_dd'; got {!r}".format(self.physics))
+        if self.physics == "bipolar_dd":
+            # holes + recombination need an intrinsic density and positive lifetimes (the SRH
+            # denominator is 0/0 at tau=0). Fail at construction, not deep in the Newton solve.
+            if self.n_i_m3 is None or not (self.n_i_m3 > 0.0):
+                raise ValueError("bipolar_dd 3D spec requires n_i_m3 > 0 (intrinsic density)")
+            if not (self.tau_srh_s > 0.0):
+                raise ValueError("bipolar_dd 3D spec requires tau_srh_s > 0 (use a large value to "
+                                  "suppress recombination)")
+            if not (self.mobility_p_m2Vs > 0.0):
+                raise ValueError("bipolar_dd 3D spec requires mobility_p_m2Vs > 0 (hole mobility)")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -251,6 +287,17 @@ class Stacked3DSpec:
         body_name = ground_e.name if ground_e is not None else "body"
         n_bg = tr.n_bg_m3
         mob = (float(tr.mobility_m2Vs_of_n_m3(n_bg)) if tr.mobility_m2Vs_of_n_m3 is not None else 0.004)
+        # bipolar (holes + SRH): derive the hole mobility / intrinsic density / lifetime / valence DOS
+        # from the transport model (the transport model's __post_init__ already required them).
+        bip = {}
+        if tr.physics == "bipolar_dd":
+            bip = dict(
+                n_i_m3=float(tr.n_i_m3),
+                mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(n_bg)),
+                tau_srh_s=float(tr.tau_srh_s),
+                dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
+                acceptor=bool(tr.acceptor),
+                net_doping_expr=tr.net_doping_expr)
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -259,7 +306,7 @@ class Stacked3DSpec:
                     physics=tr.physics, gate_patch_frac=float(frac),
                     field_region_name=semi_L.name, gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
-                    extra_dielectrics=extra_diels)
+                    extra_dielectrics=extra_diels, **bip)
 
 
 class Devsim3DEquilibrium:
@@ -305,7 +352,12 @@ class Devsim3DEquilibrium:
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
         self._dd = (s.physics == "drift_diffusion")
-        if self._dd:
+        self._bipolar = (s.physics == "bipolar_dd")
+        if self._bipolar:
+            # bipolar drift-diffusion: Potential + Electrons + Holes + SRH (FD-enhanced
+            # Scharfetter-Gummel), the 3D analogue of the 2D LayeredDevsimBuilder path.
+            self._setup_bipolar_semi("semi", s.n_bg_m3, s.eps_semi)
+        elif self._dd:
             # full drift-diffusion: electron continuity (FD-enhanced Scharfetter-
             # Gummel) + Poisson on the 3D semi region (dimension-agnostic models).
             DD.setup_semiconductor_region_dd(self.device, "semi", n_bg_m3=s.n_bg_m3,
@@ -326,13 +378,38 @@ class Devsim3DEquilibrium:
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
-            # the "body" contact is on the semiconductor; for DD it must also pin the
-            # electron density (Electrons = N_D). "gate" is on the oxide (Potential only).
-            if self._dd and c == "body":
+            # the "body" contact is on the semiconductor; for unipolar DD it must also pin the
+            # electron density (Electrons = N_D), for bipolar it pins Electrons AND Holes to their
+            # charge-neutral equilibrium. "gate" is on the oxide (Potential only).
+            if c == "body" and self._bipolar:
+                BP.setup_contact_ohmic_bipolar(self.device, c)
+            elif c == "body" and self._dd:
                 DD.setup_contact_ohmic_dd(self.device, c)
             else:
                 PE.setup_contact(self.device, c)
         self._built = True
+
+    def _setup_bipolar_semi(self, region: str, n_bg_m3: float, eps_static: float) -> None:
+        """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a 3D semiconductor
+        region: set the signed NetDoping FIRST (the bipolar models reference it -- a position-dependent
+        junction expression if given, else uniform +n_bg donor / -n_bg acceptor), then the FD-enhanced
+        Scharfetter-Gummel physics + the charge-neutral equilibrium seed models. Mirrors the 2D
+        LayeredDevsimBuilder._setup_bipolar_region."""
+        import devsim as ds
+        s = self.spec
+        if s.net_doping_expr:
+            ds.node_model(device=self.device, region=region, name="NetDoping", equation=s.net_doping_expr)
+        else:
+            nd = (-1.0 if s.acceptor else 1.0) * float(n_bg_m3)
+            ds.node_model(device=self.device, region=region, name="NetDoping",
+                          equation="{:.10e}".format(nd))
+        Nc = _effective_dos_m3(s.dos_mass_kg)
+        Nv = _effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
+        BP.setup_bipolar_region(
+            self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
+            mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
+            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+        BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
         import devsim as ds
@@ -361,7 +438,45 @@ class Devsim3DEquilibrium:
         vg = float(bias.voltages.get(gn, 0.0))
         vb = float(bias.voltages.get(bn, 0.0))
         ds.set_parameter(device=self.device, name="body_bias", value=vb)
-        if getattr(self, "_dd", False):
+        if getattr(self, "_bipolar", False):
+            # 3D bipolar DD: seed Potential/Electrons/Holes from the charge-neutral equilibrium node
+            # models (built-in potential psi = V_t log(n0/n_i)), then coupled 3-variable Newton at the
+            # FLAT-BAND gate DIRECTLY from that seed (the good built-in seed makes it converge without a
+            # separate frozen-Poisson pre-solve, which is under-determined on the 3D mesh with the inert
+            # oxide), then ramp the gate in fine steps. abs_tol density-scaled (continuity residual ~n_bg).
+            #
+            # REFERENCE-FRAME FIX: the bipolar body contact pins the body node at the INTRINSIC-referenced
+            # built-in potential phi_bi = +V_t ln(n0/n_i) (n-type) -- i.e. the neutral bulk sits at +phi_bi,
+            # NOT 0 as in the equilibrium/unipolar (bulk-referenced) frame. The gate contact (PE.setup_contact)
+            # pins a RAW Potential = gate_bias. To make the applied Vg = (gate terminal - body terminal) map
+            # to the correct gate-to-bulk field, the gate node must carry the SAME built-in offset; otherwise
+            # a raw gate at Vg sits only (Vg - phi_bi) above the bulk and the cap badly UNDER-accumulates
+            # (measured 7x low before this fix). So drive gate_bias = applied_Vg + phi_bi; at applied_Vg=0
+            # the gate equals the body node -> flat band -> the equilibrium profile.
+            abs_tol = max(1e13, self.spec.n_bg_m3 * 1e-12)
+            ni = float(self.spec.n_i_m3); nb = float(self.spec.n_bg_m3)
+            n0 = 0.5 * (nb + np.sqrt(nb * nb + 4.0 * ni * ni))      # = CELEC/CHOLE majority (bulk)
+            phi_bi = (-1.0 if self.spec.acceptor else 1.0) * V_T * np.log(n0 / ni)
+            ds.node_model(device=self.device, region="semi", name="_seed_psi",
+                          equation="V_t*log(IntrinsicElectrons/n_i)")
+            ds.set_node_values(device=self.device, region="semi", name="Potential",
+                               values=ds.get_node_model_values(device=self.device, region="semi",
+                                                               name="_seed_psi"))
+            ds.set_node_values(device=self.device, region="semi", name="Electrons",
+                               values=ds.get_node_model_values(device=self.device, region="semi",
+                                                               name="IntrinsicElectrons"))
+            ds.set_node_values(device=self.device, region="semi", name="Holes",
+                               values=ds.get_node_model_values(device=self.device, region="semi",
+                                                               name="IntrinsicHoles"))
+            ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi)   # flat band
+            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+                     relative_error=1e-5, maximum_iterations=100)
+            n_steps = max(1, int(abs(vg) / 0.05 + 0.5))      # fine gate steps (the coupled Newton is stiff)
+            for k in range(1, n_steps + 1):
+                ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi + vg * k / n_steps)
+                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+                         relative_error=1e-5, maximum_iterations=100)
+        elif getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
             # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
             # gate in 0.25 V steps (coupled Newton at each step).
