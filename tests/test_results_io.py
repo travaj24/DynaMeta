@@ -68,6 +68,8 @@ def _design():
 
 
 def test_cache_hit_miss_and_persist(tmp_path):
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
     from dynameta.cache import OpticalSolverCache
     calls = {"n": 0}
 
@@ -77,7 +79,7 @@ def test_cache_hit_miss_and_persist(tmp_path):
         return OpticalResult(r=complex(R, 0), R=R, phase_deg=0.0, solve_time_s=0.5, T=1 - R, A=0.0)
 
     d = _design()
-    p = str(tmp_path / "cache.zarr")
+    p = str(tmp_path / ("cache" + _EXT[_FORMATS[0]]))         # use an installed backend (skip if none)
     eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
     grid = [(b, lam) for b in (4.0, 9.0) for lam in (1.4e-6, 1.5e-6)]
 
