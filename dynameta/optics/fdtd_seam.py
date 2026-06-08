@@ -243,24 +243,32 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
     kernel. A laterally-uniform stack gives the same result for dim=2 or 3, so 2 (faster) is the default;
     a laterally-STRUCTURED cell (layer inclusions) is rasterized onto the 3D grid and REQUIRES dim=3.
 
-    Raises NotImplementedError for a non-vacuum superstrate/substrate, a structured cell with dim!=3, or a
-    LOSSY structured layer (use the FEM/RCWA solver there). See the module docstring for the scope."""
+    Supports LOSSLESS semi-infinite end media (real n_super/n_sub, e.g. metasurface-on-glass); raises
+    NotImplementedError for a LOSSY (complex) end medium, a structured cell with dim!=3, or a LOSSY
+    structured layer (use the FEM/RCWA solver there). See the module docstring for the scope."""
     if dim not in (2, 3):
         raise ValueError("make_fdtd_optical_solver: dim must be 2 or 3")
 
     def _solve(design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
-        if abs(complex(n_super) - 1.0) > _VAC_TOL or abs(complex(n_sub) - 1.0) > _VAC_TOL:
+        ns, nb = complex(n_super), complex(n_sub)
+        if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
             raise NotImplementedError(
-                "FDTD seam Phase 0 models a vacuum superstrate/substrate (got n_super={:.4g}, n_sub={:.4g}); "
-                "use the FEM/TMM solver for non-vacuum semi-infinite end media.".format(
-                    complex(n_super).real, complex(n_sub).real))
+                "FDTD seam supports LOSSLESS semi-infinite end media; got n_super={:.4g}, n_sub={:.4g} "
+                "(absorbing incidence/exit medium -> use the FEM/TMM solver).".format(ns, nb))
         structured = design_has_inclusions(design)
         if structured and dim != 3:
             raise NotImplementedError(
                 "a laterally-structured cell (layer inclusions) needs dim=3; got dim={}.".format(dim))
+        nonvac = abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL
+        if structured and nonvac:
+            raise NotImplementedError(
+                "non-vacuum end media + a laterally-structured cell is not yet supported (the lateral "
+                "rasterizer rebuilds the eps grid and would drop the end-media pads); use a uniform stack "
+                "or the FEM/RCWA solver.")
         lo, hi = lambda_m * (1.0 - band_frac), lambda_m * (1.0 + band_frac)
         kw = dict(lambda_min_m=lo, lambda_max_m=hi, resolution=resolution, courant=courant,
-                  settle=settle, n_pad_wave=n_pad_wave, backend=backend)
+                  settle=settle, n_pad_wave=n_pad_wave, backend=backend,
+                  n_super=ns.real, n_sub=nb.real)
         px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
         t_start = time.time()
         if structured:
@@ -321,17 +329,23 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     material lambda-function (see run_fdtd_sweep). dispersive=False freezes eps at the band centre (exact
     only for a non-dispersive design). STRUCTURED cells stay frozen-at-centre (the lateral grid is real
     eps; a lossy/dispersive structured layer is out of scope -> FEM/RCWA). Scope: vacuum end media; uniform
-    or structured (dim=3). Tip: request a band ~10-20%% wider than your target so the tapered edges fall out."""
-    if abs(complex(n_super) - 1.0) > _VAC_TOL or abs(complex(n_sub) - 1.0) > _VAC_TOL:
-        raise NotImplementedError("fdtd_sweep_spectrum models a vacuum superstrate/substrate (got "
-                                  "n_super={:.4g}, n_sub={:.4g}).".format(complex(n_super).real, complex(n_sub).real))
+    or structured (dim=3, vacuum end media only). Tip: request a band ~10-20%% wider than your target so the
+tapered edges fall out. LOSSLESS non-vacuum end media (real n_super/n_sub) are supported for uniform stacks."""
+    ns, nb = complex(n_super), complex(n_sub)
+    if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
+        raise NotImplementedError("fdtd_sweep_spectrum supports LOSSLESS end media; got n_super={:.4g}, "
+                                  "n_sub={:.4g} (absorbing -> FEM/TMM).".format(ns, nb))
     lam_c = 0.5 * (lambda_min_m + lambda_max_m)              # band centre (the eps freeze point if non-dispersive)
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
     kw = dict(lambda_min_m=lambda_min_m, lambda_max_m=lambda_max_m, resolution=resolution,
-              courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend)
+              courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend,
+              n_super=ns.real, n_sub=nb.real)
     structured = design_has_inclusions(design)
     if structured and dim != 3:
         raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
+    if structured and (abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL):
+        raise NotImplementedError("non-vacuum end media + a structured cell is not yet supported "
+                                  "(the lateral rasterizer drops the end-media pads); use a uniform stack.")
     t_start = time.time()
     if structured:                                          # structured -> frozen-at-centre, real lateral eps
         layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region)
