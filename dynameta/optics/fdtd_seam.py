@@ -342,9 +342,14 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         R = at(res.R0); T = at(res.T0)
         r = cx(res.r0) if res.r0 is not None else complex(math.sqrt(max(R, 0.0)))
         t = cx(res.t0) if res.t0 is not None else None
+        # absorption from the ALL-ORDER flux (R_flux/T_flux), NOT the 0-order specular R0/T0: for a
+        # diffracting (structured) cell the diffracted power leaves through non-specular orders, so
+        # 1 - R0 - T0 would count it as spurious absorption. Falls back to specular only if flux is
+        # absent (uniform path: R_flux==R0, T_flux==T0, so this is byte-stable there).
+        Rf = at(res.R_flux) if res.R_flux is not None else R
+        Tf = at(res.T_flux) if res.T_flux is not None else T
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))), solve_time_s=solve_time_s,
-                             t=t, T=T, A=float(1.0 - R - T),
-                             R_flux=at(res.R_flux), T_flux=at(res.T_flux))
+                             t=t, T=T, A=float(1.0 - Rf - Tf), R_flux=Rf, T_flux=Tf)
 
     return _solve
 
@@ -416,8 +421,10 @@ tapered edges fall out. LOSSLESS non-vacuum end media (real n_super/n_sub) are s
     order = np.argsort(lam)
     sel = (lambda a: np.asarray(a)[m][order])
     R, T = sel(res.R0), sel(res.T0)
-    return FDTDSweepResult(lambda_m=lam[order], R=R, T=T, A=1.0 - R - T,
-                           R_flux=sel(res.R_flux), T_flux=sel(res.T_flux),
+    Rf = sel(res.R_flux) if res.R_flux is not None else R
+    Tf = sel(res.T_flux) if res.T_flux is not None else T
+    return FDTDSweepResult(lambda_m=lam[order], R=R, T=T, A=1.0 - Rf - Tf,   # all-order flux, not 0-order
+                           R_flux=Rf, T_flux=Tf,
                            r=sel(res.r0), t=sel(res.t0), solve_time_s=solve_time_s)
 
 
@@ -442,7 +449,8 @@ def run_fdtd_sweep(design, lambdas_m, *, dim=2, resolution=32, backend="auto", e
     tt = ip(sw.t.real) + 1j * ip(sw.t.imag)
     return [OpticalResult(r=complex(rr[i]), R=float(R[i]), phase_deg=float(np.degrees(np.angle(rr[i]))),
                           solve_time_s=(float(sw.solve_time_s) if i == 0 else 0.0), t=complex(tt[i]),
-                          T=float(T[i]), A=float(1.0 - R[i] - T[i]), R_flux=float(Rf[i]), T_flux=float(Tf[i]))
+                          T=float(T[i]), A=float(1.0 - Rf[i] - Tf[i]),       # all-order flux, not 0-order
+                          R_flux=float(Rf[i]), T_flux=float(Tf[i]))
             for i in range(lams.size)]
 
 
