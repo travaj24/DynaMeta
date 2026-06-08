@@ -69,11 +69,27 @@ normal-incidence kernel at `k_par=0`). A fixed `k_par` makes the physical angle 
 `theta(f)`: reduction at angle 0, tracks TMM to ~2% (the thin-slab discretization floor) at 30/45 deg with
 the genuine angle-effect far exceeding that error, energy closes.
 
+### Numba JIT kernels for the MO + oblique solvers
+Both `solve_fdtd_mo_1d` and `solve_fdtd_2d_oblique` accept `backend='numba'` (and `'auto'`/`'cpu'` select
+it when present), a fused JIT-compiled time loop byte-for-byte equal to the NumPy reference to ~1e-15
+(`validation/fdtd_numba_kernels.py`). MO: the per-cell magnetized-Drude 2x2 Crank-Nicolson loop, ~11x (the
+O(nz) 2x2-inverse precompute stays in NumPy; only the hot loop is JITed). Oblique: the complex128 Bloch
+envelope loop, ~5x -- this kernel is **serial, not prange-threaded**, because the oblique envelope is
+laterally smooth so nx is small (~6-8) and threading that tiny x-extent loses to per-step thread overhead
+(measured 0.6x with `parallel=True`); serial JIT wins. Mirrors the existing `_te2d_numba` /
+`_te3d_numba` normal-incidence kernels.
+
+### Multi-objective / multi-wavelength adjoint inverse design
+`Fdtd2dDesignProblem` + `weighted_objective` (`optics/inverse_design.py`): a differentiable 2D-TE FDTD
+over a designable density slab whose `spectrum(rho_p)` returns (R,T) at every target wavelength from ONE
+adjoint solve, and a combiner that folds per-wavelength goals ({value, weight, sense 'max'/'min' or target})
+into one loss for `topology_optimize`. Validated as a dichroic reflector (`validation/fdtd_multiobjective_design.py`):
+max R@1500nm + min R@1300nm grows the spectral separation 12x to a binary design.
+
 ## Deferred (extensions of the above)
 - Full 3-D / structured tensor FDTD (the 1-D MO solver covers normal-incidence Faraday + birefringence;
   a per-cell 3x3 tensor in the 3-D engine with the magnetized-Drude ADE is the larger version).
-- Oblique on the numba/jax backends, p-pol (TM), and structured/3-D oblique (the numpy s-pol path is the
-  reference).
+- Oblique on the jax backend, p-pol (TM), and structured/3-D oblique (numpy + numba carry the s-pol path).
 
 ## Blocked (environment)
 
