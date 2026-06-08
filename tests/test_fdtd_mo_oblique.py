@@ -1,10 +1,11 @@
 """Fast unit tests for the magneto-optic 1-D FDTD (fdtd_mo) and the oblique complex-envelope 2D-TE
 solver (low resolution -- the rigorous oracle checks live in validation/)."""
 import numpy as np
+import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
-from dynameta.optics.fdtd_nd import solve_fdtd_2d_oblique
+from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d_oblique
 
 LMIN, LMAX = 1400e-9, 1600e-9
 
@@ -59,3 +60,27 @@ def test_oblique_angle_is_frequency_dependent():
     th = r.theta_deg[b]
     assert th.max() > th.min() + 1.0                             # fixed k_par -> theta varies with f
     assert 20.0 < float(np.median(th)) < 60.0                    # near the requested 40 deg
+
+
+@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+def test_mo_numba_matches_numpy():
+    L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=1.6e15,
+                drude_gamma_rad_s=8.0e13, cyclotron_wc_rad_s=2.5e14)
+    kw = dict(lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, pol="y")
+    a = solve_fdtd_mo_1d([L], backend="numpy", **kw)
+    b = solve_fdtd_mo_1d([L], backend="numba", **kw)
+    m = a.band
+    assert float(np.max(np.abs(a.R[m] - b.R[m]))) < 1e-10        # JIT loop == reference
+    assert float(np.max(np.abs(a.T[m] - b.T[m]))) < 1e-10
+    assert float(np.max(np.abs(a.faraday_deg[m] - b.faraday_deg[m]))) < 1e-8
+
+
+@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+def test_oblique_numba_matches_numpy():
+    ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0)]
+    kw = dict(period_x_m=300e-9, angle_deg=30.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, nx=4)
+    a = solve_fdtd_2d_oblique(ol, backend="numpy", **kw)
+    b = solve_fdtd_2d_oblique(ol, backend="numba", **kw)
+    m = a.band
+    assert float(np.max(np.abs(a.R0[m] - b.R0[m]))) < 1e-10      # complex-envelope JIT loop == reference
+    assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
