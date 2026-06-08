@@ -437,9 +437,10 @@ class LayeredDevsimBuilder:
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
         out = []
+        py = float(self.design.unit_cell.period_y_m)   # y-bbox is the cell y-period, NOT a copy of x
         for s in self._specs:
             out.append(RegionInfo(name=s.name, role=s.role, material=s.material,
-                                    bbox_m=(s.x_lo, s.x_hi, s.x_lo, s.x_hi, s.z_lo, s.z_hi),
+                                    bbox_m=(s.x_lo, s.x_hi, 0.0, py, s.z_lo, s.z_hi),
                                     ndim=2))
         return out
 
@@ -488,6 +489,25 @@ class LayeredDevsimBuilder:
         lesson: the continuity residual is in carrier-density units ~n_bg)."""
         d = self.design
         abs_tol = max(self._dc_abs_tol(), 1.0e13) if abs_tol is None else abs_tol
+
+        # KNOWN LIMITATION (library audit): a GATE electrode on a non-semiconductor layer (a Potential-only
+        # Dirichlet on an oxide) does NOT inject the bipolar built-in-potential offset phi_bi the way an
+        # ohmic semiconductor contact does, so a GATED bipolar 2D device UNDER-ACCUMULATES (the 3D
+        # gated-cap builder applies gate_bias = Vg + phi_bi). Warn LOUDLY rather than return a silently-
+        # wrong profile. Bipolar p-n DIODES with ohmic semiconductor contacts are unaffected (validated).
+        try:
+            import warnings as _w
+            semi_layers = {L.name for L in d.stack.layers
+                           if d.material_role(L.background_material) == "semiconductor"}
+            gated = [E.name for E in d.electrodes if getattr(E, "role", "biased") != "ground"
+                     and getattr(E, "layer", None) not in semi_layers]
+            if gated and bias.voltages:
+                _w.warn("LayeredDevsimBuilder bipolar solve: gate electrode(s) {} sit on a non-"
+                        "semiconductor layer and do NOT carry the bipolar built-in-potential offset, so a "
+                        "GATED bipolar 2D device under-accumulates. Use the 3D gated-cap builder "
+                        "(devsim_3d) for a quantitative gated-bipolar result.".format(gated), stacklevel=2)
+        except Exception:
+            pass
 
         # (1) seed the built-in (charge-neutral) potential + carriers
         for s in sorted(self._bipolar_regions):

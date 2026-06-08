@@ -41,6 +41,14 @@ class LayeredSlab:
                              "eps_tensor_cell, shapes (got {}).".format(n))
         if self.shapes is not None and self.eps_background is None:
             raise ValueError("LayeredSlab: shapes requires eps_background.")
+        if self.eps_cell is not None and np.asarray(self.eps_cell).ndim != 2:
+            raise ValueError("LayeredSlab.eps_cell must be a 2D (Sx, Sy) in-plane grid; got shape "
+                             "{}.".format(np.shape(self.eps_cell)))
+        if self.eps_tensor_cell is not None:
+            sh = np.shape(self.eps_tensor_cell)
+            if len(sh) != 4 or sh[-2:] != (3, 3):
+                raise ValueError("LayeredSlab.eps_tensor_cell must be (Sx, Sy, 3, 3); got shape "
+                                 "{}.".format(sh))
         if not (float(self.thickness_m) > 0.0):
             raise ValueError("LayeredSlab.thickness_m must be > 0.")
 
@@ -114,12 +122,27 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     metres via `metres_per_unit` (the EpsField axes are in the solver's units, e.g. nm)."""
     if eps_field.is_uniform:
         raise ValueError("slice_eps_field: EpsField is a uniform scalar (nothing to slice).")
-    v = np.asarray(eps_field.values_zyx, dtype=np.complex128)        # (Nz, Ny, Nx)
+    v = np.asarray(eps_field.values_zyx, dtype=np.complex128)        # (Nz, Ny, Nx) or (Nz, Ny, Nx, 3, 3)
     z_m = np.asarray(eps_field.z_axis_u, dtype=np.float64) * float(metres_per_unit)
+    is_tensor = (v.ndim == 5 and v.shape[-2:] == (3, 3))             # a graded 3x3 anisotropic eps field
+    if not is_tensor and v.ndim != 3:
+        raise ValueError("slice_eps_field: values_zyx must be (Nz,Ny,Nx) scalar or (Nz,Ny,Nx,3,3) tensor; "
+                         "got shape {}.".format(v.shape))
     laterally_uniform = bool(np.allclose(v, v.mean(axis=(1, 2), keepdims=True)))
+    if is_tensor:
+        # one eps_tensor_cell (Ny,Nx,3,3)->(Nx,Ny,3,3) per native z-slice; uniform -> a 1x1x3x3 cell.
+        slabs = []
+        for k in range(z_m.size - 1):
+            avg = 0.5 * (v[k] + v[k + 1])                            # (Ny, Nx, 3, 3)
+            if laterally_uniform:
+                cell = avg.mean(axis=(0, 1)).reshape(1, 1, 3, 3)
+            else:
+                cell = np.transpose(avg, (1, 0, 2, 3))               # (Nx, Ny, 3, 3) -- explicit, never bare T
+            slabs.append(LayeredSlab(float(z_m[k + 1] - z_m[k]), eps_tensor_cell=cell))
+        return slabs
     if laterally_uniform:
         return slice_profile(v.mean(axis=(1, 2)), z_m, n_slices=n_slices)
-    # structured: one eps_cell (Ny,Nx)->(Nx,Ny) per native z-slice (n_slices resampling NA)
+    # structured scalar: one eps_cell (Ny,Nx)->(Nx,Ny) per native z-slice (n_slices resampling NA)
     slabs = []
     for k in range(z_m.size - 1):
         cell = np.transpose(0.5 * (v[k] + v[k + 1]))                 # (Nx, Ny)

@@ -132,7 +132,8 @@ class OpticalSolverCache:
         d = {k: v[i] for i, k in enumerate(_VEC)}
         opt = (lambda x: None if np.isnan(x) else float(x))
         t = None if np.isnan(d["t_re"]) else complex(d["t_re"], d["t_im"])
-        return OpticalResult(r=complex(d["r_re"], d["r_im"]), R=float(d["R"]), phase_deg=float(d["phase_deg"]),
+        r = None if np.isnan(d["r_re"]) else complex(d["r_re"], d["r_im"])   # mirror t (None round-trips, not nan+nanj)
+        return OpticalResult(r=r, R=float(d["R"]), phase_deg=float(d["phase_deg"]),
                              solve_time_s=0.0, t=t, T=opt(d["T"]), A=opt(d["A"]),
                              A_independent=opt(d["A_independent"]), R_flux=opt(d["R_flux"]),
                              T_flux=opt(d["T_flux"]))
