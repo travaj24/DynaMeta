@@ -648,6 +648,51 @@ def _te2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
     return eyL, hxL, eyR, hxR
 
 
+def _run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+    """JAX (XLA, lax.scan) twin of _run_2d_te_oblique (s-pol complex-envelope Bloch): the SAME physics
+    (d/dx -> d/dx + i kx, semi-implicit Drude ADE, CFS-CPML + PEC in z), as a single traced/compiled
+    DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry/material) straight through
+    the oblique scan (the inverse-design path at angle). kx=0 with a real source stays real. Byte-equal to
+    the NumPy kernel to ~1e-12. Drude only (no Lorentz/Kerr -- the oblique kernel carries Drude)."""
+    import jax
+    jax.config.update("jax_enable_x64", True)               # complex128 + match the reference
+    import jax.numpy as jnp
+    from jax import lax
+    (ke, be, ce), (kh, bh, ch) = cpml
+    ke, be, ce = jnp.asarray(ke), jnp.asarray(be), jnp.asarray(ce)
+    kh, bh, ch = jnp.asarray(kh), jnp.asarray(bh), jnp.asarray(ch)
+    eps_inf = jnp.asarray(eps_inf); gam = jnp.asarray(gam); wp = jnp.asarray(wp)
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    nx, nz = eps_inf.shape
+    cmu = dt / MU0; ikx = 1j * kx
+
+    def step(carry, src_n):
+        Ey, Hx, Hz, Jy, psi_h, psi_e = carry
+        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
+        psi_h = psi_h.at[:, :-1].set(bh[:-1] * psi_h[:, :-1] + ch[:-1] * dEy_dz)
+        Hx = Hx.at[:, :-1].add(cmu * (dEy_dz / kh[:-1] + psi_h[:, :-1]))
+        Hz = Hz - cmu * ((jnp.roll(Ey, -1, axis=0) - Ey) / dx + ikx * Ey)
+        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
+        psi_e = psi_e.at[:, 1:].set(be[1:] * psi_e[:, 1:] + ce[1:] * dHx_dz)
+        curl = jnp.zeros((nx, nz), dtype=jnp.complex128)
+        curl = curl.at[:, 1:].add(dHx_dz / ke[1:] + psi_e[:, 1:])
+        curl = curl - ((Hz - jnp.roll(Hz, 1, axis=0)) / dx + ikx * Hz)
+        denom = EPS0 * eps_inf / dt + bJ / 2.0
+        Eyn = (EPS0 * eps_inf / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        Eyn = Eyn.at[:, k_src].add(src_n)
+        Eyn = Eyn.at[:, 0].set(0.0 + 0.0j).at[:, nz - 1].set(0.0 + 0.0j)
+        out = (Eyn[:, k_pL], 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1]),
+               Eyn[:, k_pR], 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1]))
+        return (Eyn, Hx, Hz, Jy, psi_h, psi_e), out
+
+    z0 = jnp.zeros((nx, nz), dtype=jnp.complex128)
+    _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(6)),
+                                       jnp.asarray(src, dtype=jnp.complex128))
+    return eyL, hxL, eyR, hxR
+
+
 def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s"):
     """Run ONE complex-envelope oblique 2D pass on the named backend. pol='s' = TE (Ey,Hx,Hz); pol='p' =
     TM (Hy,Ex,Ez). Returns the four complex probe x-lines (tangential E + co-located tangential H).
@@ -655,6 +700,9 @@ def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     """
     if pol == "p":
         return _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
+    if name == "jax":
+        out = _run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
+        return tuple(np.asarray(v) for v in out)            # JAX -> NumPy for the FFT/R-T stage
     if name == "numba":
         (ke, be, ce), (kh, bh, ch) = cpml
         return _te2d_oblique_numba(np.asarray(eps_inf, float), np.asarray(wp, float), np.asarray(gam, float),
@@ -719,7 +767,14 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # 'numba' = the fused threaded complex-envelope kernel; 'auto'/'cpu' pick it when present; everything else
     # falls back to the vectorized NumPy reference (the oblique path is normal-incidence-free of jax/cupy).
     rb = _resolve_backend(backend)
-    name = "numba" if (rb == "numba" and _HAVE_NUMBA) else "numpy"
+    if pol == "p":
+        name = "numpy"                                       # TM is the NumPy reference (no jax/numba twin)
+    elif rb == "jax" and _have_jax():
+        name = "jax"                                         # differentiable s-pol oblique scan
+    elif rb == "numba" and _HAVE_NUMBA:
+        name = "numba"
+    else:
+        name = "numpy"
     eyL_i, hxL_i, eyR_i, hxR_i = _run_oblique(name, one, zero, zero, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
                                               src, cpml, kx, pol)
     eyL_t, hxL_t, eyR_t, hxR_t = _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
