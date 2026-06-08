@@ -35,8 +35,10 @@ from dynameta.core.interfaces import RegionInfo
 from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
+from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
+from dynameta.constants import HBAR, KB, M_E  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
 from dynameta.geometry.electrode import Electrode
 
@@ -48,6 +50,12 @@ from dynameta.geometry.electrode import Electrode
 # the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
 # eps there.
 _EDGE_METAL_W_M = 1.5e-9
+
+
+def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
+    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass. Used for the
+    bipolar FD g-factor (N_c / N_v); for a non-degenerate diode its exact value barely matters (g~1)."""
+    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
 
 
 @dataclass
@@ -86,7 +94,39 @@ class LayeredDevsimBuilder:
             for inc in L.inclusions:
                 if d.material_role(inc.material) == "metal":
                     return inc.material
+        # fallback: ANY registered is_metal material (a bipolar diode has no metal LAYER, but still
+        # needs the inert edge-metal strip for its full-edge contacts -- the strip is just a label).
+        for nm in d.materials.names():
+            if d.material_role(nm) == "metal":
+                return nm
         return None
+
+    def _bipolar_edge_contacts(self) -> Dict[str, set]:
+        """Layer -> set of x-edge SIDES carrying ANY edge contact (anode/cathode, any role) on a
+        bipolar_dd semiconductor layer. Like the DD grounds, each needs a full-edge metal strip so the
+        contact is a region-region interface (full-line node capture); a 2-node domain-boundary contact
+        cannot anchor the 2D bipolar (3-variable) solve and it diverges."""
+        d = self.design
+        out: Dict[str, set] = {}
+        for E in d.electrodes:
+            if not (E.is_edge and E.footprint in ("x_lo", "x_hi")):
+                continue
+            L = next((ly for ly in d.stack.layers if ly.name == E.layer), None)
+            if L is None or L.inclusions:
+                continue
+            tr = getattr(d.materials.get(L.background_material), "transport", None)
+            if tr is not None and getattr(tr, "physics", None) == "bipolar_dd":
+                out.setdefault(E.layer, set()).add(E.footprint)
+        return out
+
+    def _full_edge_strips(self) -> Dict[str, set]:
+        """Union of the electron-DD edge GROUNDS and ALL bipolar_dd edge contacts -> the layers/sides
+        that get an adjacent edge-metal strip (full-line node capture). Used by the region carve, the
+        mesh lines, and the contact placement so both DD grounds and bipolar anode/cathode are strong."""
+        out: Dict[str, set] = {k: set(v) for k, v in self._dd_full_edge_grounds().items()}
+        for k, v in self._bipolar_edge_contacts().items():
+            out.setdefault(k, set()).update(v)
+        return out
 
     def _dd_full_edge_grounds(self) -> Dict[str, set]:
         """Map layer-name -> set of edge SIDES ({'x_lo','x_hi'}) carrying a GROUND electrode on a
@@ -113,13 +153,13 @@ class LayeredDevsimBuilder:
         P = d.unit_cell.period_x_m
         z_iv = d.z_intervals()
         ambient = self._ambient()
-        fe = self._dd_full_edge_grounds()                 # DD edge grounds -> full-edge treatment
+        fe = self._full_edge_strips()                     # DD grounds + bipolar contacts -> full-edge
         metal_mat = self._metal_material() if fe else None
         if fe and metal_mat is None:
             warnings.warn(
-                "layered DD full-edge ground needed for layer(s) {} but the stack has no metal "
-                "material to form the edge-metal strip; falling back to the weak 2-node ground "
-                "(gated DD may not converge).".format(sorted(fe)))
+                "layered full-edge contact needed for layer(s) {} but the design has no metal "
+                "material to form the edge-metal strip; falling back to the weak 2-node contact "
+                "(gated DD / 2D bipolar may not converge).".format(sorted(fe)))
         # y-edge grounds are not resolved in the 2D (x,z) cross-section -> they get no full-edge
         # ohmic ground (and the legacy contact placement mis-locates them at the x-hi edge), so a
         # gated DD device with only a y-edge ground may not converge. Warn rather than fail silently.
@@ -210,9 +250,9 @@ class LayeredDevsimBuilder:
                 xlo, xhi, _, _ = inc.shape.bbox_m()
                 x_lines[xlo] = spec.x_spacing_feature_edge_m
                 x_lines[xhi] = spec.x_spacing_feature_edge_m
-        # edge-metal interface line(s) for DD full-edge grounds (the strip boundaries)
+        # edge-metal interface line(s) for full-edge contacts (DD grounds + bipolar) -- strip boundaries
         if self._metal_material() is not None:
-            for _ln, _sides in self._dd_full_edge_grounds().items():
+            for _ln, _sides in self._full_edge_strips().items():
                 if "x_lo" in _sides:
                     x_lines[_EDGE_METAL_W_M] = spec.x_spacing_feature_edge_m
                 if "x_hi" in _sides:
@@ -277,7 +317,7 @@ class LayeredDevsimBuilder:
             if E.is_edge:
                 region = E.layer
                 if (self._metal_material() is not None
-                        and E.footprint in self._dd_full_edge_grounds().get(E.layer, set())):
+                        and E.footprint in self._full_edge_strips().get(E.layer, set())):
                     # FULL-EDGE ohmic ground (drift-diffusion): the contact sits at the
                     # semiconductor/edge-metal INTERFACE (x=w, full layer z-range). The adjacent
                     # edge-metal region (_region_specs carved it) makes this an interior region
@@ -315,11 +355,16 @@ class LayeredDevsimBuilder:
         # per-region physics. Track drift-diffusion semiconductor regions so
         # their ohmic contacts also pin the electron quasi-Fermi level.
         self._dd_regions = set()
+        self._bipolar_regions = set()
         for s in self._specs:
             if s.role == "semiconductor":
                 tr = self.design.materials.get(s.material).transport
                 dos = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
-                if tr.physics == "drift_diffusion":
+                if tr.physics == "bipolar_dd":
+                    self._setup_bipolar_region(s, tr, dos)
+                    self._dd_regions.add(s.name)         # treated as DD for the abs-tol scaling
+                    self._bipolar_regions.add(s.name)
+                elif tr.physics == "drift_diffusion":
                     # Gated DD needs a strong ohmic ground to anchor the continuity equation. A
                     # FULL-EDGE ground (edge-metal interface, wired automatically when this layer
                     # has an edge GROUND electrode) converges -- validation/gated_dd_2d.py. Without
@@ -347,11 +392,34 @@ class LayeredDevsimBuilder:
         for iface in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, iface)
         for c in ds.get_contact_list(device=self.device):
-            if self._contact_region.get(c) in self._dd_regions:
+            cr = self._contact_region.get(c)
+            if cr in self._bipolar_regions:
+                BP.setup_contact_ohmic_bipolar(self.device, c)  # pin Potential + Electrons + Holes
+            elif cr in self._dd_regions:
                 DD.setup_contact_ohmic_dd(self.device, c)   # pin Potential + Electrons (=N_D)
             else:
                 PE.setup_contact(self.device, c)            # pin Potential only
         self._built = True
+
+    def _setup_bipolar_region(self, s, tr, dos: float) -> None:
+        """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a semiconductor region.
+        Sets the signed NetDoping FIRST (an in-region junction expression if given, else uniform
+        +n_bg donor / -n_bg acceptor) since the bipolar models reference it, then the FD-enhanced
+        Scharfetter-Gummel physics + the charge-neutral equilibrium seed models."""
+        if tr.net_doping_expr:                              # a position-dependent junction (e.g. ifelse(x<...))
+            ds.node_model(device=self.device, region=s.name, name="NetDoping", equation=tr.net_doping_expr)
+        else:                                               # uniform: -n_bg (p / acceptor) or +n_bg (n / donor)
+            nd = (-1.0 if tr.acceptor else 1.0) * float(tr.n_bg_m3)
+            ds.node_model(device=self.device, region=s.name, name="NetDoping",
+                          equation="{:.10e}".format(nd))
+        Nc = _effective_dos_m3(dos)
+        Nv = _effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
+        BP.setup_bipolar_region(
+            self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
+            mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
+            mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
+            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+        BP.setup_equilibrium_seed_models(self.device, s.name)
 
     def _dielectric_eps_static(self, material_name: str) -> float:
         mat = self.design.materials.get(material_name)
@@ -381,6 +449,9 @@ class LayeredDevsimBuilder:
                 verbose: bool = False) -> CarrierField:
         if not self._built:
             self.build_device()
+        if self._bipolar_regions:
+            return self._solve_bipolar(bias, grid_n_x=grid_n_x, grid_n_z=grid_n_z, rel_tol=rel_tol,
+                                       max_iter=max_iter, v_step=v_step, abs_tol=abs_tol, verbose=verbose)
         d = self.design
         method = d.mesh_2d.dc_method
         semi = sorted(self._dd_regions)
@@ -404,6 +475,53 @@ class LayeredDevsimBuilder:
                                   value=v_now)
                 solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
                           max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
+        return self._to_carrier_field(bias, grid_n_x, grid_n_z)
+
+    def _solve_bipolar(self, bias, *, grid_n_x: int, grid_n_z: int, rel_tol: float, max_iter: int,
+                       v_step: float, abs_tol: Optional[float], verbose: bool) -> CarrierField:
+        """Coupled-Newton solve for a bipolar (3-variable) device: (1) seed Potential/Electrons/Holes
+        from the charge-neutral equilibrium node models (built-in potential psi = V_t log(n0/n_i));
+        (2) coupled 3-variable Newton at 0 bias DIRECTLY from that seed; (3) ramp the biased electrodes.
+        The good built-in seed makes the coupled Newton converge without the 1D diode's separate frozen
+        Poisson pre-solve -- which is under-determined on the 2D mesh with the inert edge-metal strips
+        (no Potential variable there) and diverges. The abs_tol is density-scaled (the _dc_abs_tol
+        lesson: the continuity residual is in carrier-density units ~n_bg)."""
+        d = self.design
+        abs_tol = max(self._dc_abs_tol(), 1.0e13) if abs_tol is None else abs_tol
+
+        # (1) seed the built-in (charge-neutral) potential + carriers
+        for s in sorted(self._bipolar_regions):
+            ds.node_model(device=self.device, region=s, name="_seed_psi",
+                          equation="V_t*log(IntrinsicElectrons/n_i)")
+            ds.set_node_values(device=self.device, region=s, name="Potential",
+                               values=ds.get_node_model_values(device=self.device, region=s, name="_seed_psi"))
+            ds.set_node_values(device=self.device, region=s, name="Electrons",
+                               values=ds.get_node_model_values(device=self.device, region=s,
+                                                               name="IntrinsicElectrons"))
+            ds.set_node_values(device=self.device, region=s, name="Holes",
+                               values=ds.get_node_model_values(device=self.device, region=s,
+                                                               name="IntrinsicHoles"))
+        for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
+            v = E.fixed_voltage_V if E.role == "ground" else 0.0
+            ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
+        # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed
+        ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
+                 maximum_iterations=max_iter)
+        # (5) ramp the biased electrodes to their targets (a fine step -- the diode I-V is exponential,
+        # so a coarse step overshoots and the coupled Newton diverges).
+        vbip = min(v_step, 0.05)
+        for E in d.electrodes:
+            target = bias.voltages.get(E.name, E.fixed_voltage_V if E.role == "ground" else 0.0)
+            v_now = E.fixed_voltage_V if E.role == "ground" else 0.0
+            n_steps = max(1, int(abs(target - v_now) / vbip + 0.5))
+            dv = (target - v_now) / n_steps
+            for _ in range(n_steps):
+                v_now += dv
+                ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v_now)
+                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
+                         maximum_iterations=max_iter)
+        if verbose:
+            print("[carriers] bipolar staged solve done (bias={})".format(bias.voltages), flush=True)
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)
 
     def _dc_abs_tol(self) -> float:
