@@ -62,6 +62,17 @@ def test_oblique_angle_is_frequency_dependent():
     assert 20.0 < float(np.median(th)) < 60.0                    # near the requested 40 deg
 
 
+def test_oblique_tm_ppol_energy_and_angle():
+    # TM (p-pol: Hy,Ex,Ez) oblique kernel: lossless energy closes + the physical angle varies with f.
+    r = solve_fdtd_2d_oblique([FDTDLayer(thickness_m=250e-9, eps_inf=4.0)], period_x_m=300e-9,
+                              angle_deg=30.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=20,
+                              nx=4, pol="p")
+    b = r.band
+    assert float(np.max(np.abs(r.R0[b] + r.T0[b] - 1.0))) < 3e-2  # lossless TM energy closes
+    th = r.theta_deg[b]
+    assert th.max() > th.min() + 1.0                             # fixed k_par -> theta varies with f
+
+
 @pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
 def test_mo_numba_matches_numpy():
     L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=1.6e15,
