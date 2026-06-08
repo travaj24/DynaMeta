@@ -66,6 +66,22 @@ def test_pulse_turns_on_and_relaxes():
     assert abs(float(r.theta_mid_rad[-1]) - thb) < math.radians(2.0)   # relaxed back near theta_b
 
 
+def test_decay_metric_swing_guard():
+    # AUDIT FIX: a barely-switching trace (decay swing below the floor / a small fraction of the ON
+    # swing) must return NaN, not solver-noise-driven garbage.
+    t = np.linspace(0.0, 10.0, 201)
+    Ton = 4.0
+    # essentially flat (tiny noise) -> NaN
+    rng = np.zeros_like(t) + 1.5
+    rng += 1e-6 * np.sin(37.0 * t)
+    assert math.isnan(step_decay_90_10(t, rng, Ton))
+    # a genuine rise-then-decay -> finite
+    on = (t <= Ton)
+    y = np.where(on, 1.5 + 0.3 * (t / Ton), 1.8 - 0.3 * (1.0 - np.exp(-(t - Ton))))
+    d = step_decay_90_10(t, y, Ton)
+    assert math.isfinite(d) and d > 0
+
+
 def test_simulate_rejects_bad_inputs():
     d = LCDynamics(K11=17e-12, K33=18e-12, gamma1=0.085, eps_para=18.7, eps_perp=4.0,
                    geometry="planar", d_planar=1e-6, field_model="uniform", nz=41)
