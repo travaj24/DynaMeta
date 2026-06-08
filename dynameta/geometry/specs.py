@@ -87,12 +87,13 @@ class OpticalSpec:
                 "incidence_angle_deg={:.1f} exceeds the supported range (|theta| <= 60 "
                 "deg); the fixed-alpha z-PML is validated to ~1% through 30 deg only."
                 .format(self.incidence_angle_deg))
-        # Conical incidence (azimuth != 0) is implemented for s-pol only (the in-plane
-        # s-pol vector rotates with phi); conical p-pol is a follow-up.
-        if abs(self.azimuth_deg) > 1e-6 and self.polarization != "y":
+        # Conical incidence (azimuth != 0) supports s-pol ('y', the in-plane Es rotates with phi)
+        # AND p-pol ('p', the in-plane p-pol component splits over (cos phi, sin phi)); only 'x'
+        # (E along x) is not a transverse polarization for an oblique/conical wavevector.
+        if abs(self.azimuth_deg) > 1e-6 and self.polarization == "x":
             raise NotImplementedError(
-                "conical incidence (azimuth != 0) is implemented for s-pol (polarization='y') "
-                "only; conical p-pol is a follow-up.")
+                "conical incidence (azimuth != 0) supports s-pol (polarization='y') or p-pol "
+                "(polarization='p'); 'x' (E along x) is not transverse to the wavevector.")
         if self.incidence_side not in ("top", "bottom"):
             raise ValueError("incidence_side must be 'top' or 'bottom'")
         if self.ny_sym < 4:
