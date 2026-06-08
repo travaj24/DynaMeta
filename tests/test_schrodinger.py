@@ -99,3 +99,34 @@ def test_degenerate_slab_recovers_bulk():
     assert 0.85 < n_mid / n_bg < 1.15          # bulk recovered
     n_reject = sp.density(np.zeros_like(z), E_F, n_states=60, bound_tol=1e-3).density_m3[200]
     assert n_reject < 0.8 * n_bg               # rejection under-counts the continuum
+
+
+def _open_body_setup():
+    import warnings
+    warnings.filterwarnings("ignore")          # the SP non-convergence warning is not under test
+    n_bg, t = 4e26, 12e-9
+    z = np.linspace(0.0, t, 51)
+    sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
+    E_F = (HBAR ** 2 / (2.0 * MSTAR)) * (3.0 * np.pi ** 2 * n_bg) ** (2.0 / 3.0)   # bulk degenerate
+    kw = dict(eps_r=9.5, doping_m3=np.full(z.size, n_bg), E_F_J=E_F, phi_left_V=0.0, phi_right_V=0.0,
+              max_outer=25, tol_V=1e-4, bound_tol=1e9, relax=0.8)
+    interior = (z > 5e-9) & (z < 8e-9)
+    return sp, z, n_bg, kw, interior
+
+
+def test_open_body_recovers_bulk_no_pileup():
+    # the OPEN body (bulk buffer) recovers n_bg at the body with NO boundary layer, where the Neumann
+    # body PILES UP -- the rigorous oracle is validation/sp_open_body.
+    sp, z, n_bg, kw, interior = _open_body_setup()
+    _, n_open, _ = sp.solve_self_consistent(bulk_buffer_m=8e-9, **kw)
+    _, n_neu, _ = sp.solve_self_consistent(neumann_left=True, **kw)
+    ni_o = float(np.median(n_open[interior]))
+    assert 0.9 < ni_o / n_bg < 1.1                       # interior recovers n_bg
+    assert abs(n_open[1] / ni_o - 1.0) < 0.12            # near-body is FLAT (no pile-up / dead layer)
+    assert n_neu[1] / float(np.median(n_neu[interior])) > 1.3   # Neumann body PILES UP (the BC it fixes)
+
+
+def test_open_body_and_neumann_mutually_exclusive():
+    sp, z, n_bg, kw, _ = _open_body_setup()
+    with pytest.raises(ValueError):
+        sp.solve_self_consistent(bulk_buffer_m=8e-9, neumann_left=True, **kw)
