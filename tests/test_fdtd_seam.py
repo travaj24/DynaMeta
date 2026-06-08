@@ -142,6 +142,14 @@ def test_fit_drude_lorentz_recovers_known_poles():
     assert np.max(np.abs(model - eps)) < 1e-2 * np.max(np.abs(eps))   # reproduces eps across the band
 
 
+def test_fit_drude_lorentz_degenerate_raises():
+    import numpy as np
+    from dynameta.optics.fdtd_seam import fit_drude_lorentz
+    lam = np.linspace(1200e-9, 1800e-9, 5)
+    with pytest.raises(RuntimeError):                       # all multi-starts fail -> clear error, not NoneType
+        fit_drude_lorentz(lam, np.full(5, np.nan + 0j))
+
+
 def test_fit_pure_lorentz_no_drude():
     import numpy as np
     from dynameta.optics.fdtd import FDTDLayer

@@ -391,6 +391,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
     'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. All backends are byte-for-byte equivalent on
     R/T (validation/fdtd_2d_reduces.py GATE D); xp is an advanced override for a custom array module."""
+    if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM guard
+        raise NotImplementedError("solve_fdtd_2d: R/T and the energy budget are defined only for LOSSLESS "
+                                  "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
+                                  "for an absorbing incidence/exit medium).".format(n_super, n_sub))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
@@ -561,6 +565,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     angle varies with frequency: theta(f) = asin(k_par c/(2 pi f)); the result carries theta_deg(f) and the
     band mask excludes frequencies below the light line (k_par > w/c, evanescent). Vacuum ends. angle_deg=0
     reduces to the normal-incidence solver."""
+    if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
+        raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
+                                  "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -938,6 +945,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     if any(L.lorentz_delta_eps != 0.0 for L in layers):
         raise NotImplementedError("the Lorentz ADE pole is implemented in the 2D-TE kernels only; for a "
                                   "uniform Lorentz stack use solve_fdtd_2d (dim=2). 3D is a follow-on.")
+    if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM/2D guard
+        raise NotImplementedError("solve_fdtd_3d: R/T and the energy budget are defined only for LOSSLESS "
+                                  "end media (Im(n)=0); got n_super={}, n_sub={}.".format(n_super, n_sub))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
