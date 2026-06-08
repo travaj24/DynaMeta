@@ -65,11 +65,12 @@ def test_inclusions_layer_raises():
         design_to_fdtd_layers(d, LAM)
 
 
-def test_non_vacuum_end_media_raises():
+def test_lossy_end_media_raises():
+    """Lossless non-vacuum end media are supported; a LOSSY (complex) end medium still raises."""
     d = _design([(4.0, 100e-9, [])])
     solver = make_fdtd_optical_solver(dim=2)
     with pytest.raises(NotImplementedError):
-        solver(d, None, {}, LAM, 1.5 + 0j, 1.0 + 0j)          # glass superstrate -> Phase-0 guard fires
+        solver(d, None, {}, LAM, 1.5 + 0.2j, 1.0 + 0j)        # absorbing superstrate -> raise
 
 
 def test_bad_dim_raises():
@@ -80,8 +81,8 @@ def test_bad_dim_raises():
 def test_sweep_guards():
     from dynameta.optics.fdtd_seam import fdtd_sweep_spectrum
     d = _design([(4.0, 100e-9, [])])
-    with pytest.raises(NotImplementedError):                # non-vacuum end media -> raise before solving
-        fdtd_sweep_spectrum(d, lambda_min_m=1200e-9, lambda_max_m=1400e-9, n_super=1.5 + 0j)
+    with pytest.raises(NotImplementedError):                # LOSSY end media -> raise before solving
+        fdtd_sweep_spectrum(d, lambda_min_m=1200e-9, lambda_max_m=1400e-9, n_super=1.5 + 0.2j)
 
 
 def test_fit_drude_recovers_known_drude():

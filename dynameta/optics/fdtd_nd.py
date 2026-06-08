@@ -182,12 +182,17 @@ class FDTD2DResult:
     t0: Optional[np.ndarray] = None   # COMPLEX 0-order transmission coeff, de-embedded across the structure
 
 
-def _cpml_z(nz, dz, dt, npml, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
+def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
     """CFS-CPML stretched-coordinate coefficients along z (the propagation axis; x is periodic so needs
     no PML). Returns (kappa, b, c) on the E-grid (z=k*dz) and the H-grid (z=(k+1/2)*dz). Roden-Gedney:
     sigma/kappa graded polynomially over the outer `npml` cells each end, alpha (CFS) graded the other
     way; b=exp(-(sigma/kappa+alpha)dt/eps0), c=sigma/(sigma*kappa+kappa^2*alpha)(b-1). Outside the PML
-    sigma=alpha=0 -> b=1,c=0 -> plain FDTD."""
+    sigma=alpha=0 -> b=1,c=0 -> plain FDTD.
+
+    n_super / n_sub (default 1 = vacuum) impedance-match the conductivity to the END MEDIUM each PML
+    terminates: the matched conductivity for a medium of refractive index n is sigma ~ n / eta0 (wave
+    impedance eta0/n), so the low-z PML scales sig_max by n_super and the high-z PML by n_sub. With the
+    defaults the per-cell scale is 1.0 everywhere -> coefficients are byte-identical to the vacuum case."""
     eta0 = np.sqrt(MU0 / EPS0)
     sig_max = -(m + 1.0) * np.log(R0) / (2.0 * eta0 * npml * dz)
 
@@ -195,7 +200,8 @@ def _cpml_z(nz, dz, dt, npml, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.
         d_lo = np.clip(npml - zpos, 0.0, None)           # depth into the low-z PML (cells)
         d_hi = np.clip(zpos - (nz - 1 - npml), 0.0, None)  # depth into the high-z PML
         rho = np.clip(np.maximum(d_lo, d_hi) / npml, 0.0, 1.0)
-        sig = sig_max * rho ** m
+        nfac = np.where(d_lo >= d_hi, n_super, n_sub)    # which end-medium this PML terminates (low->super)
+        sig = sig_max * nfac * rho ** m
         kap = 1.0 + (kappa_max - 1.0) * rho ** m
         alp = alpha_max * (1.0 - rho) ** ma
         b = np.exp(-(sig / kap + alp) * dt / EPS0)
@@ -338,12 +344,19 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                   courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
+                  n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
-    is the through-stack (z) profile (vacuum super/substrate); supply `lateral_eps_inf` (shape
-    (nx, n_layer_cells) or a callable building the (nx,nz) eps_inf) to make a laterally-structured
-    grating, else the stack is laterally UNIFORM (and the result reduces to the 1D solver / TMM).
-    Returns both the 0-order (specular, x-mean) and the total-flux (all-diffraction-order) R/T.
+    is the through-stack (z) profile; supply `lateral_eps_inf` (shape (nx, n_layer_cells) or a callable
+    building the (nx,nz) eps_inf) to make a laterally-structured grating, else the stack is laterally
+    UNIFORM (and the result reduces to the 1D solver / TMM). Returns both the 0-order (specular, x-mean)
+    and the total-flux (all-diffraction-order) R/T.
+
+    n_super / n_sub (default 1 = vacuum) are the lossless semi-infinite superstrate / substrate indices
+    (metasurface-on-glass etc.): the z-pad regions are filled with n_super^2 / n_sub^2, the CPML is
+    impedance-matched per end, and the incident reference is a homogeneous-superstrate run so R/T are
+    correctly normalized (T carries the n_sub/n_super flux ratio). Reduces byte-identically to vacuum
+    at n_super=n_sub=1.
 
     backend selects the compute kernel (see available_backends()): 'auto' (default-fastest CPU present),
     'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
@@ -358,7 +371,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         if L.drude_wp_rad_s > 0.0:
             eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
         return abs(np.sqrt(eps))
-    n_max = max(1.0, max(_n_band_max(L) for L in layers))
+    n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     if nx is None:
         nx = max(4, int(round(period_x_m / dz)))
@@ -374,6 +387,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     # z-profile, replicated over nx columns (laterally uniform unless lateral_eps_inf given)
     eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz)); chi3 = np.zeros((nx, nz))
     zc = (np.arange(nz) + 0.5) * dz
+    # fill the semi-infinite super/substrate pads with the end-media permittivity (so the incident wave is
+    # truly in n_super and the structure sees the n_sub backing); vacuum (n=1) leaves this as ones
+    eps_inf[:, zc < pad] = n_super ** 2
+    eps_inf[:, zc >= pad + z_struct] = n_sub ** 2
     z = pad
     for L in layers:
         m = (zc >= z) & (zc < z + L.thickness_m)
@@ -399,16 +416,18 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
-    (ke, be, ce), (kh, bh, ch) = _cpml_z(nz, dz, dt, npml)   # CFS-CPML coeffs in z (material-independent)
-    cpml = ((ke, be, ce), (kh, bh, ch))
+    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched to super (low z) + sub (high z)
+    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference -> super both ends
     name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
-    def run(ei, w, g_, c3):
+    def run(ei, w, g_, c3, cpml):
         return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
 
-    eyL_i, hxL_i, eyR_i, hxR_i = run(one, zero, zero, zero)  # vacuum reference run
-    eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3)  # structure run
+    # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
+    # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run)
+    eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
+    eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct)  # structure run
 
     f = np.fft.rfftfreq(nsteps, dt)
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----
@@ -417,12 +436,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     k0 = 2.0 * np.pi * f / C_LIGHT
     with np.errstate(divide="ignore", invalid="ignore"):
         R0 = np.abs(mRefl / mL_inc) ** 2
-        T0 = np.abs(mTrans / mR_inc) ** 2
+        # power transmittance carries the n_sub/n_super impedance (flux) ratio: the incident reference is
+        # measured in n_super, the transmitted field in n_sub (Snell power continuity)
+        T0 = np.abs(mTrans / mR_inc) ** 2 * (n_sub / n_super)
         # COMPLEX 0-order coeffs. np.fft.rfft yields exp(+i w t) phasors, but the library convention is
         # exp(-i w t), so conjugate to get the physical complex amplitudes; then de-embed the probe<->face
-        # propagation phase (vacuum pad, n=1): r0c referenced to the front face z=pad (probe at k_pL); t0c
-        # across the structure (the common probe phase cancels in t, leaving the traversal z_struct).
-        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * k0 * (pad - k_pL * dz))
+        # propagation phase. The superstrate phase velocity is c/n_super, so r0c (referenced to the front
+        # face z=pad, probe at k_pL) carries n_super in k; t0c keeps the structure traversal phase.
+        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
         t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
     P_inc = _flux(eyL_i, hxL_i)
@@ -739,14 +760,21 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
                   lambda_min_m: float, lambda_max_m: float, resolution: int = 24,
                   courant: float = 0.5, n_pad_wave: float = 4.0, settle: float = 12.0,
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
+                  n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np) -> FDTD3DResult:
     """Broadband R(f)/T(f) of a doubly-periodic (period_x_m x period_y_m) unit cell at NORMAL incidence,
-    y-polarized. `layers` = the through-stack (z) profile (vacuum super/substrate); supply
-    `lateral_eps_inf` (an (nx,ny,nz) array, or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a
-    2D-periodic structure, else the stack is laterally UNIFORM (and the result reduces to 1D/TMM). Returns
-    both the specular 0-order and the total-flux (all (kx,ky) orders) R/T. backend: 'auto'/'numba' (the
-    fused threaded CPU kernel = the fast 3D path), 'numpy' (reference), 'jax' (the differentiable XLA scan,
-    for 3D inverse design), or 'cupy'/xp for the GPU."""
+    y-polarized. `layers` = the through-stack (z) profile; supply `lateral_eps_inf` (an (nx,ny,nz) array,
+    or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a 2D-periodic structure, else the stack is
+    laterally UNIFORM (and the result reduces to 1D/TMM). Returns both the specular 0-order and the
+    total-flux (all (kx,ky) orders) R/T.
+
+    n_super / n_sub (default 1 = vacuum): the lossless semi-infinite superstrate / substrate indices
+    (metasurface-on-glass), filling the z-pads with n_super^2 / n_sub^2, with an impedance-matched CPML
+    and a homogeneous-superstrate incident reference (T carries the n_sub/n_super flux ratio). Reduces
+    byte-identically to vacuum at n_super=n_sub=1.
+
+    backend: 'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path), 'numpy' (reference),
+    'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_min = 2.0 * np.pi * f_min
@@ -756,7 +784,7 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         if L.drude_wp_rad_s > 0.0:
             eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
         return abs(np.sqrt(eps))
-    n_max = max(1.0, max(_n_band_max(L) for L in layers))
+    n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     if nx is None:
         nx = max(4, int(round(period_x_m / dz)))
@@ -775,6 +803,8 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     shape = (nx, ny, nz)
     eps_inf = np.ones(shape); wp = np.zeros(shape); gam = np.zeros(shape); chi3 = np.zeros(shape)
     zc = (np.arange(nz) + 0.5) * dz
+    eps_inf[:, :, zc < pad] = n_super ** 2                   # fill the semi-infinite super/substrate pads
+    eps_inf[:, :, zc >= pad + z_struct] = n_sub ** 2
     z = pad
     for L in layers:
         m = (zc >= z) & (zc < z + L.thickness_m)
@@ -798,15 +828,17 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched super (low z) + sub (high z)
+    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference
     name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
-    def run(ei, w, g_, c3):
+    def run(ei, w, g_, c3, cpml):
         return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
 
-    exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(one, zero, zero, zero)   # vacuum
-    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3)  # structure
+    exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
+        n_super ** 2 * one, zero, zero, zero, cpml_ref)                  # homogeneous-superstrate reference
+    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct)  # struct
 
     f = np.fft.rfftfreq(nsteps, dt)
     # 0-order specular co-pol (E_y) from the x,y-MEAN field (== the 1D two-run method)
@@ -815,11 +847,11 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     k0 = 2.0 * np.pi * f / C_LIGHT
     with np.errstate(divide="ignore", invalid="ignore"):
         R0 = np.abs(mRefl / mL_inc) ** 2
-        T0 = np.abs(mTrans / mR_inc) ** 2
+        T0 = np.abs(mTrans / mR_inc) ** 2 * (n_sub / n_super)   # Snell power-flux ratio (incident in super)
         # COMPLEX co-pol 0-order coeffs: conjugate (rfft is exp(+iwt); convention is exp(-iwt)), then
-        # de-embed the propagation phase (vacuum pad): r0c to the front face z=pad (probe k_pL); t0c
-        # across the cell (the common probe phase cancels in t).
-        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * k0 * (pad - k_pL * dz))
+        # de-embed the propagation phase (superstrate phase velocity c/n_super): r0c to the front face
+        # z=pad (probe k_pL); t0c across the cell (the common probe phase cancels in t).
+        r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
         t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
     # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
     P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
