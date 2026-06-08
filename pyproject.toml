@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.1.0"
-description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DC carrier transport + Drude + 3D FEM optics)."
+version = "0.4.0"
+description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Metacept / Neurophos"}]
@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 solvers = ["devsim>=2.10", "ngsolve>=6.2", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve
-io = ["zarr>=3.0", "h5py>=3.8"]                            # CarrierField / eps dump+load
+io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps dump+load (zarr 3.x needs py>=3.11)
 plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api"]                  # DielectricDB live backends
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
