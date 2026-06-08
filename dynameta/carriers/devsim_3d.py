@@ -23,10 +23,12 @@ derives the spec from a Design and names the region to match the optics alignmen
 (-> run_pipeline, no hand-alignment). A MULTI-DIELECTRIC gate stack is meshed as DISTINCT
 regions (semi | oxide | diel1 | ... | gate on top) via `extra_dielectrics`, so the gate
 voltage division is the exact series capacitance (from_design now keeps ALL gate-side
-dielectric layers instead of collapsing to the nearest one). SCOPE / remaining: a single
-gated semiconductor; arbitrary LATERAL material inclusions inside the carrier mesh (beyond
-the centered gate patch) would need a further general OCC fragment builder
-(docs/roadmap_phase5_stretch.md).
+dielectric layers instead of collapsing to the nearest one). Arbitrary LATERAL material
+INCLUSIONS (centered pillars of a different material in a layer, beyond the centered gate
+patch) are also supported (Stacked3DSpec.inclusions / Inclusion3D): a separate adjacency-based
+OCC build fragments them in as distinct regions and finds every region-region interface +
+the contacts from surface->volume adjacency. SCOPE / remaining: a single gated semiconductor
+(one semiconductor layer).
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
