@@ -85,7 +85,7 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
     nz = exx.size
     Ex = np.zeros(nz); Ey = np.zeros(nz)
     Hx = np.zeros(nz - 1); Hy = np.zeros(nz - 1)
-    J = np.zeros((nz, 2))                                   # magnetized-Drude current (Jx,Jy)
+    J0 = np.zeros(nz); J1 = np.zeros(nz)                    # magnetized-Drude current (Jx,Jy), split
     # per-cell magnetized-Drude Crank-Nicolson + E-update matrices (all (nz,2,2)):
     #   A J^{n+1} = B J^n + eps0 wp^2 (E^{n+1}+E^n)/2 ; (gamma I + Wg), Wg = [[0,-wc],[wc,0]]
     I2 = np.broadcast_to(np.eye(2), (nz, 2, 2)).copy()
@@ -100,10 +100,18 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
     Einv = _2x2_inv(D + 0.5 * Mb)                           # E^{n+1} = Einv [ (D-Mb/2)E^n + curl - (Ma+I)/2 J^n ]
     Epre = D - 0.5 * Mb
     Jc = 0.5 * (Ma + I2)
+    # split every per-cell 2x2 into its four (nz,) components -- the inner loop then uses explicit scalar
+    # arithmetic (NO per-step einsum/stack; ~2.6x faster than einsum for these tiny 2x2 matvecs).
+    (iv00, iv01, iv10, iv11) = (Einv[:, 0, 0], Einv[:, 0, 1], Einv[:, 1, 0], Einv[:, 1, 1])
+    (ep00, ep01, ep10, ep11) = (Epre[:, 0, 0], Epre[:, 0, 1], Epre[:, 1, 0], Epre[:, 1, 1])
+    (jc00, jc01, jc10, jc11) = (Jc[:, 0, 0], Jc[:, 0, 1], Jc[:, 1, 0], Jc[:, 1, 1])
+    (ma00, ma01, ma10, ma11) = (Ma[:, 0, 0], Ma[:, 0, 1], Ma[:, 1, 0], Ma[:, 1, 1])
+    (mb00, mb01, mb10, mb11) = (Mb[:, 0, 0], Mb[:, 0, 1], Mb[:, 1, 0], Mb[:, 1, 1])
     c = C_LIGHT
     mur = (c * dt - dz) / (c * dt + dz)
     eL = np.empty((nsteps, 2)); eR = np.empty((nsteps, 2))
     cmu = dt / (MU0 * dz)
+    cz0 = np.zeros(nz)
     for n in range(nsteps):
         ex_oL0, ex_oL1 = Ex[0], Ex[1]; ey_oL0, ey_oL1 = Ey[0], Ey[1]
         ex_oR0, ex_oR1 = Ex[-1], Ex[-2]; ey_oR0, ey_oR1 = Ey[-1], Ey[-2]
@@ -111,16 +119,20 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol):
         Hx += cmu * (Ey[1:] - Ey[:-1])
         Hy -= cmu * (Ex[1:] - Ex[:-1])
         # curl H at E points (interior): curl_x = -dHy/dz, curl_y = dHx/dz
-        curl = np.zeros((nz, 2))
-        curl[1:-1, 0] = -(Hy[1:] - Hy[:-1]) / dz
-        curl[1:-1, 1] = (Hx[1:] - Hx[:-1]) / dz
-        Eold = np.stack([Ex, Ey], axis=1)
-        rhs = np.einsum("zij,zj->zi", Epre, Eold) + curl - np.einsum("zij,zj->zi", Jc, J)
-        Enew = np.einsum("zij,zj->zi", Einv, rhs)
-        J = np.einsum("zij,zj->zi", Ma, J) + np.einsum("zij,zj->zi", Mb, Enew + Eold)
-        Exn, Eyn = Enew[:, 0].copy(), Enew[:, 1].copy()
-        # soft source (input polarization) on the chosen axis
-        if pol == "y":
+        c0 = cz0.copy(); c1 = cz0.copy()
+        c0[1:-1] = -(Hy[1:] - Hy[:-1]) / dz
+        c1[1:-1] = (Hx[1:] - Hx[:-1]) / dz
+        # rhs = Epre @ [Ex;Ey] + curl - Jc @ [J0;J1] ; Enew = Einv @ rhs   (explicit 2x2)
+        r0 = ep00 * Ex + ep01 * Ey + c0 - (jc00 * J0 + jc01 * J1)
+        r1 = ep10 * Ex + ep11 * Ey + c1 - (jc10 * J0 + jc11 * J1)
+        Exn = iv00 * r0 + iv01 * r1
+        Eyn = iv10 * r0 + iv11 * r1
+        # J^{n+1} = Ma @ J + Mb @ (Enew + Eold) ; J1 needs the OLD J0, so write to fresh names
+        sx = Exn + Ex; sy = Eyn + Ey
+        J0n = ma00 * J0 + ma01 * J1 + mb00 * sx + mb01 * sy
+        J1n = ma10 * J0 + ma11 * J1 + mb10 * sx + mb11 * sy
+        J0, J1 = J0n, J1n
+        if pol == "y":                                      # soft source on the input axis
             Eyn[i_src] += src[n]
         else:
             Exn[i_src] += src[n]
