@@ -54,7 +54,7 @@ def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, dr
     R = np.empty(t.size); T = np.empty(t.size); eps_front = np.empty(t.size, dtype=complex)
     for i, ti in enumerate(t):
         nz = np.atleast_1d(np.asarray(n_of_t(float(ti)), dtype=float))
-        eps_ito = np.array([complex(drude_model.eps(lambda_m, n_m3=float(nn))) for nn in nz], dtype=complex)
+        eps_ito = np.atleast_1d(np.asarray(drude_model.eps(lambda_m, n_m3=nz), dtype=complex))  # vectorized
         eps_front[i] = eps_ito[0]
         stack = build_stack(eps_ito, lambda_m)
         R[i], T[i], _A = layered_rta(stack, lambda_m)
