@@ -111,8 +111,18 @@ class SchrodingerPoissonCarrier:
         # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0). General form
         # k_F = (6 pi^2 n / (g_s g_v))^(1/3); the (3 pi^2 n)^(1/3) special case is g_s=2, g_v=1 (the
         # ITO default). Threading g_s/g_v keeps it consistent with the SchrodingerPoisson1D filling.
-        self.E_F_J = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (
+        gamma_F = (HBAR ** 2 / (2.0 * self.m_eff_kg)) * (
             6.0 * np.pi ** 2 * self.n_bg_m3 / (self.g_s * self.g_v)) ** (2.0 / 3.0)
+        if self.alpha_np > 0.0:
+            # NONPARABOLIC bulk E_F: the Kane dispersion hbar^2 k^2/2m*0 = gamma(E) = E(1+alpha E)
+            # keeps the SAME k_F (hence the same parabolic combination gamma_F above), so invert
+            # alpha E_F^2 + E_F - gamma_F = 0 -> E_F = (-1 + sqrt(1+4 alpha gamma_F))/(2 alpha). This
+            # makes the bulk E_F<->n calibration consistent with the nonparabolic 2D sub-band fill
+            # (alpha=0 recovers gamma_F exactly).
+            a = self.alpha_np / Q                            # eV^-1 -> J^-1
+            self.E_F_J = (-1.0 + np.sqrt(1.0 + 4.0 * a * gamma_F)) / (2.0 * a)
+        else:
+            self.E_F_J = gamma_F
 
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
@@ -122,18 +132,15 @@ class SchrodingerPoissonCarrier:
 
     def _solve_column(self, sp, Nd, psi_s):
         """One 1D self-consistent SP solve at gate-side surface potential psi_s
-        (phi=0 at body z=0, psi_s at the gate/oxide side z=t). Returns (phi, n_z)."""
-        from dynameta.carriers.schrodinger_poisson import Q
+        (phi=0 at body z=0, psi_s at the gate/oxide side z=t). Returns (phi, n_z). When
+        alpha_np>0 the solve is FULLY self-consistent nonparabolic: the Trellakis Newton's
+        a-priori density + Jacobian use the Kane DOS, so the converged potential AND density
+        (and the bulk E_F above) all carry the nonparabolicity (no longer a post-hoc re-fill)."""
         phi, n_z, _res = sp.solve_self_consistent(
             eps_r=self.eps_static, doping_m3=Nd, E_F_J=self.E_F_J,
             phi_left_V=0.0, phi_right_V=psi_s, n_states=self.n_states,
-            bound_tol=1e9, max_outer=80, tol_V=1e-5)          # slab mode: keep all sub-bands
-        if self.alpha_np > 0.0:
-            # post-hoc nonparabolic 2D fill on the converged (parabolic) potential
-            res_np = sp.density(-Q * phi, self.E_F_J, n_states=self.n_states,
-                                 bound_tol=1e9, alpha_np_per_eV=self.alpha_np)
-            n_z = np.zeros_like(phi)
-            n_z[1:-1] = res_np.density_m3
+            bound_tol=1e9, max_outer=80, tol_V=1e-5,          # slab mode: keep all sub-bands
+            alpha_np_per_eV=self.alpha_np)
         return phi, n_z
 
     def _gate_to_psi_s(self, vg: float) -> float:
