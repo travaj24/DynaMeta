@@ -22,6 +22,15 @@ perturbation (1-constant limit). Produces rise/decay (10-90 / 90-10) and settle-
 and the n_eff(t) optical trace (via lc_director.n_eff_from_theta_profile). Bridge a director frame to the
 optical LiquidCrystalModel with lc_director.director_to_extra_fields. Pure numpy/scipy; SI units.
 
+NO-BACKFLOW APPROXIMATION (physical-accuracy caveat): only the rotational viscosity gamma1 is used; the
+full Leslie-Ericksen coupling of the director to the induced fluid flow (backflow, the alpha_i Leslie
+coefficients) is neglected. This is the standard single-relaxation model and is thermodynamically valid
+(the free energy decreases monotonically toward the static equilibrium), but it makes the reported
+rise/decay switching times roughly 10-20% SHORTER than a real cell (backflow speeds turn-on and slows the
+"optical bounce" on turn-off) and cannot reproduce the director-reorientation kickback. Treat the
+switching times as the no-backflow estimate. Validated: the dynamics steady state matches the static BVP
+(lc_director.director_profile_bvp) to < 0.04 deg at fixed V (same torque balance).
+
 Ported/adapted from the external lc_dynamics_base solver. The 1-constant static planar driver
 (lc_director.director_profile) + the thermal-pulse LCRelaxation (switching.py) are complementary and
 untouched.
@@ -39,6 +48,12 @@ from dynameta.constants import EPS0
 from dynameta.carriers.lc_director import (
     LCGeometry, compute_lc_geometry, solve_lc_field_profile, flexo_direct_torque,
     n_eff_from_theta_profile, freedericksz_threshold_V)
+
+__all__ = [
+    "LCDynamics", "LCDynamicsResult",
+    "v_step", "v_rc_mirrored", "make_three_stage_voltage_func",
+    "crossing_time", "step_rise_10_90", "step_decay_90_10",
+]
 
 
 # -----------------------------------------------------------------------------
@@ -127,16 +142,21 @@ def step_rise_10_90(t, y, Ton: float) -> float:
     return dt if (math.isfinite(dt) and dt >= 0) else float("nan")
 
 
-def step_decay_90_10(t, y, Ton: float) -> float:
-    """90-10 (or 10-90) transition time on the OFF segment t >= Ton."""
+def step_decay_90_10(t, y, Ton: float, *, min_swing: float = 1e-3, on_swing_frac: float = 0.1) -> float:
+    """90-10 (or 10-90) transition time on the OFF segment t >= Ton. Returns NaN when the cell barely
+    switched: the decay amplitude must exceed BOTH an absolute floor `min_swing` AND `on_swing_frac` of
+    the ON-segment swing -- otherwise the '90%'/'10%' levels straddle solver noise and the reported decay
+    time flips wildly with atol/n_t (a real noise bug the swing guard removes)."""
     t = np.asarray(t, dtype=float); y = np.asarray(y, dtype=float)
     off = t >= float(Ton)
     if np.count_nonzero(off) < 5:
         return float("nan")
+    on = t <= float(Ton)
+    on_swing = (float(np.nanmax(y[on])) - float(np.nanmin(y[on]))) if np.count_nonzero(on) >= 2 else 0.0
     to, yo = t[off], y[off]
     y_start = float(yo[0]); n_tail = max(3, int(0.05 * yo.size)); y_end = float(np.nanmean(yo[-n_tail:]))
     amp = y_start - y_end
-    if not math.isfinite(amp) or abs(amp) < 1e-18:
+    if not math.isfinite(amp) or abs(amp) < max(float(min_swing), float(on_swing_frac) * on_swing):
         return float("nan")
     y90, y10 = y_end + 0.9 * amp, y_end + 0.1 * amp
     d = "falling" if amp > 0 else "rising"
@@ -245,8 +265,12 @@ class LCDynamics:
         def rhs(t, th_vec):
             th = np.array(th_vec, dtype=float, copy=True)
             th[0] = th[-1] = thb
-            dth = np.gradient(th, dz)
-            d2th = np.gradient(dth, dz)
+            dth = np.gradient(th, dz)                              # 1st derivative (term2 + cyl correction)
+            # 2nd derivative via the proper 3-point tridiagonal stencil (the dz-exact Laplacian), NOT
+            # np.gradient(np.gradient(.)) which is a 2*dz-wide stencil ~4-6x less accurate near the walls.
+            d2th = np.empty_like(th)
+            d2th[1:-1] = (th[2:] - 2.0 * th[1:-1] + th[:-2]) / (dz * dz)
+            d2th[0] = d2th[-1] = 0.0                               # boundary nodes are clamped (dth_dt=0)
             E, _vlc = solve_lc_field_profile(th, float(V_func(float(t))), geo, **fkw)
             s = np.sin(th); c = np.cos(th)
             Keff = K11 * s * s + K33 * c * c

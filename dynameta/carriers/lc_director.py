@@ -40,11 +40,25 @@ import numpy as np
 from dynameta.constants import EPS0
 from dynameta.core.numerics import trapz
 
+__all__ = [
+    "DirectorProfile", "LCGeometry", "LCStaticResult",
+    "freedericksz_threshold_V", "director_profile", "director_profile_bvp",
+    "compute_lc_geometry", "solve_lc_field_profile", "eps_along_field",
+    "flexo_p_along_field", "flexo_direct_torque",
+    "n_local_from_theta", "n_eff_from_theta_profile",
+    "director_to_extra_fields", "reduce_director",
+]
+
 
 def freedericksz_threshold_V(K_elastic: float, dEps_static: float) -> float:
     """Freedericksz threshold voltage V_th = pi sqrt(K/(eps0 dEps)) for a planar nematic cell with
     positive dielectric anisotropy (independent of cell thickness). Raises for dEps <= 0 (no
-    threshold instability -- the field does not tilt a negative/zero-anisotropy planar cell)."""
+    threshold instability -- the field does not tilt a negative/zero-anisotropy planar cell).
+
+    K-SELECTION (two-constant cells): pass the elastic constant that governs the FIRST deformation of
+    the cell -- K11 (splay) for a PLANAR cell (theta_b ~ pi/2), K33 (bend) for a HOMEOTROPIC cell
+    (theta_b ~ 0). Using the wrong constant rescales V_th by sqrt(K_used/K_correct). For a VAN cell
+    (negative anisotropy, homeotropic anchoring) the magnitude threshold is pi sqrt(K33/(eps0 |dEps|))."""
     if not (K_elastic > 0.0):
         raise ValueError("K_elastic must be > 0")
     if not (dEps_static > 0.0):
@@ -336,6 +350,23 @@ def director_to_extra_fields(theta_field_rad) -> dict:
     return {"director_angle_rad": 0.5 * np.pi - np.asarray(theta_field_rad, dtype=float)}
 
 
+def reduce_director(theta_zt_rad, *, t_index: int = -1, reduce: str = "profile") -> dict:
+    """Convenience for the dynamics: select a time column from an LCDynamicsResult.theta_zt_rad (nz, nt)
+    and turn it into the optics 'director_angle_rad' bundle (applies the same pi/2 field-axis ->
+    plate-plane flip as director_to_extra_fields). reduce='profile' returns the full theta(z) (a gridded
+    director, the documented (...,)->(...,3,3) convention); 'midplane'/'mean' collapse to a single scalar
+    tilt. t_index selects the time slice (-1 = final)."""
+    th = np.asarray(theta_zt_rad, dtype=float)
+    col = th[:, int(t_index)] if th.ndim == 2 else th
+    if reduce == "midplane":
+        col = np.asarray(float(col[col.size // 2]))
+    elif reduce == "mean":
+        col = np.asarray(float(np.mean(col)))
+    elif reduce != "profile":
+        raise ValueError("reduce must be 'profile', 'midplane' or 'mean'")
+    return director_to_extra_fields(col)
+
+
 def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: float, V_app: float,
                          geo: "Optional[LCGeometry]" = None, geometry: str = "planar",
                          d_planar: "Optional[float]" = None,
@@ -371,9 +402,6 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                eps_in=eps_in, eps_out=eps_out, a=a, b=b, e1=e1e, e3=e3e, flexo_self_consistent=fsc)
     u = (z - float(z[0])) / d_lc
 
-    def _field(theta):
-        return solve_lc_field_profile(theta, float(V_app), geo, **fkw)
-
     def _prepare(g):
         gg = np.asarray(g, dtype=float).copy()
         if gg.size != z.size:
@@ -381,32 +409,36 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
         gg[0] = gg[-1] = theta_b
         return np.clip(gg, -0.499 * math.pi, 0.999 * math.pi)
 
-    # one-hump initial guess: a positive dEps field drives theta DOWN (toward homeotropic, 0)
-    V_th = freedericksz_threshold_V(K11, dEps) if dEps > 0 else float("inf")
-    try:
-        _e0, vlc0 = _field(np.full_like(z, theta_b))
-        drive = abs(float(vlc0)) if math.isfinite(vlc0) else abs(float(V_app))
-    except Exception:
-        drive = abs(float(V_app))
-    drive_frac = math.tanh(max(0.0, drive / V_th - 0.85)) if math.isfinite(V_th) and V_th > 0 else 0.35
+    # ---- robust branch selection via voltage CONTINUATION + an amplitude-seed ladder. The Freedericksz
+    #      pitchfork, high overdrive, high splay/bend contrast (K11>>K33) and negative anisotropy (VAN)
+    #      all have a thin-boundary-layer tilted branch that a single drive-scaled guess can miss
+    #      (solve_bvp then converges only the trivial theta=theta_b branch -> n_eff silently rails). We
+    #      ramp the voltage up from ~1.05 V_th, carrying each converged tilted profile as the next seed.
+    Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
+    # MAGNITUDE-based seeding threshold (finite for dEps<0 too; only used for seeding, not a reported #)
+    K_eff_mean = 0.5 * (K11 + K33)
+    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    # tilt direction + the destabilized far anchoring the midplane swings toward: dEps>0 -> toward the
+    # field (theta -> 0, homeotropic); dEps<0 -> toward planar (theta -> pi/2).
     sign = -1.0 if dEps >= 0.0 else 1.0
-    max_amp = min(theta_b * 0.85, math.radians(82.0)) if theta_b < 0.5 * math.pi else math.radians(82.0)
-    base = theta_b + sign * (max_amp * max(0.0, min(1.0, drive_frac))) * np.sin(math.pi * u)
-    base[0] = base[-1] = theta_b
-    guesses: List[np.ndarray] = []
-    for g in (base, theta_b - (base - theta_b), np.full_like(z, theta_b)):
-        gg = _prepare(g)
-        if not any(o.shape == gg.shape and np.allclose(o, gg, atol=1e-9) for o in guesses):
-            guesses.append(gg)
+    reach = theta_b if dEps >= 0.0 else (0.5 * math.pi - theta_b)
+    max_amp = min(abs(reach) * 0.98, math.radians(89.0))
+    direction = -1.0 if dEps >= 0.0 else 1.0
+    use_score = Vmag > 1e-14 and abs(dEps) > 1e-14
 
-    def _energy(theta):
+    def _field_at(theta, Vk):
+        return solve_lc_field_profile(theta, float(Vk), geo, **fkw)
+
+    def _energy(theta, Vk):
         try:
             th = np.asarray(theta, float).copy(); th[0] = th[-1] = theta_b
             dth = np.gradient(th, z)
-            E, _v = _field(th)
+            E, _v = _field_at(th, Vk)
             s = np.sin(th); c = np.cos(th)
             Keff = K11 * s * s + K33 * c * c
-            dens = 0.5 * Keff * dth * dth + 0.5 * EPS0 * dEps * (E * E) * (c * c)
+            # FIELD-AXIS dielectric free-energy density is +0.5 eps0 dEps E^2 sin^2(theta) (its gradient
+            # +dEps E^2 sin cos = -t3, the torque solved below); sin^2 (NOT cos^2) is the correct sign.
+            dens = 0.5 * Keff * dth * dth + 0.5 * EPS0 * dEps * (E * E) * (s * s)
             if e1e or e3e:
                 dens = dens - flexo_p_along_field(th, dth, e1e, e3e, geometry=geo.geometry, r=r) * E
             val = trapz(dens * (np.maximum(r, 1e-30) if geo.geometry == "cyl" else 1.0), z)
@@ -414,7 +446,7 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
         except Exception:
             return float("inf")
 
-    def _solve(guess):
+    def _solve_at(guess, Vk):
         y0 = np.vstack((guess, np.gradient(guess, u)))
 
         def fun(x, y):
@@ -422,7 +454,7 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
             rr = (geo.r_in + zz) if geo.geometry == "cyl" else zz
             th = np.asarray(y[0], float); dth_du = np.asarray(y[1], float); dth_dz = dth_du / d_lc
             gloc = LCGeometry(geo.geometry, d_lc, zz, rr, geo.r_in, geo.r_out)
-            E, _v = solve_lc_field_profile(th, float(V_app), gloc, **fkw)
+            E, _v = solve_lc_field_profile(th, float(Vk), gloc, **fkw)
             s = np.sin(th); c = np.cos(th)
             Keff = np.where(np.abs(K11 * s * s + K33 * c * c) < 1e-300, 1e-300, K11 * s * s + K33 * c * c)
             t2 = (K11 - K33) * s * c * (dth_dz * dth_dz)
@@ -444,25 +476,63 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
         if not sol.success:
             raise RuntimeError(str(sol.message))
         th = np.asarray(sol.sol(u)[0], float); th[0] = th[-1] = theta_b
-        _E, V_lc = _field(th)
-        neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
-                if (n_o is not None and n_e is not None) else float("nan"))
-        return LCStaticResult(V_app=float(V_app), V_lc=float(V_lc), n_eff=float(neff), z_m=z,
-                              theta_field_rad=th, theta_b_rad=theta_b, success=True, message=str(sol.message))
+        return th
 
-    cands: List[Tuple[float, float, LCStaticResult]] = []
-    direction = -1.0 if dEps >= 0.0 else 1.0
-    use_score = abs(float(V_app)) > 1e-14 and abs(dEps) > 1e-14
-    last = ""
-    for g in guesses:
-        try:
-            res = _solve(g)
-            score = direction * float(np.nanmean(res.theta_field_rad - theta_b)) if use_score else 0.0
-            cands.append((score, _energy(res.theta_field_rad), res))
-        except Exception as exc:
-            last = str(exc)
-    if not cands:
-        raise RuntimeError("director_profile_bvp failed at V={:.6g}: {}".format(float(V_app),
-                                                                                last or "no candidate"))
-    cands.sort(key=lambda it: (-it[0], it[1]))
-    return cands[0][2]
+    def _seeds(Vk, carried):
+        gs = []
+        if carried is not None:
+            gs.append(_prepare(carried))                          # CONTINUATION: previous converged tilt
+        df = (math.tanh(max(0.0, abs(Vk) / V_th - 0.85)) if (math.isfinite(V_th) and V_th > 0) else 0.5)
+        flat = np.full_like(z, theta_b)
+        for frac in (df, 0.3, 0.6, 0.85, 0.98):                   # amplitude ladder toward the far anchoring
+            gs.append(_prepare(flat + sign * (max_amp * max(0.0, min(1.0, frac))) * np.sin(math.pi * u)))
+        gs.append(_prepare(flat))                                 # trivial (untilted) fallback
+        uniq: List[np.ndarray] = []
+        for g in gs:
+            if not any(o.shape == g.shape and np.allclose(o, g, atol=1e-9) for o in uniq):
+                uniq.append(g)
+        return uniq
+
+    def _best_at(Vk, carried):
+        cands: List[Tuple[float, float, np.ndarray]] = []
+        last = ""
+        for g in _seeds(Vk, carried):
+            try:
+                th = _solve_at(g, Vk)
+                score = direction * float(np.nanmean(th - theta_b)) if use_score else 0.0
+                cands.append((score, _energy(th, Vk), th))
+            except Exception as exc:
+                last = str(exc)
+        if not cands:
+            raise RuntimeError("no converged candidate (last: {})".format(last))
+        cands.sort(key=lambda it: (-it[0], it[1]))                # most field-driven tilt, energy tie-break
+        return cands[0][2]
+
+    if (not use_score) or (not math.isfinite(V_th)) or Vmag <= 1.02 * V_th:
+        ladder = [Vmag]                                           # below threshold: untilted is correct
+    else:
+        n_steps = int(min(14, max(2, math.ceil((Vmag - V_th) / max(0.75, 0.5 * V_th)) + 1)))
+        ladder = list(np.linspace(min(1.05 * V_th, Vmag), Vmag, n_steps))
+    carried = None
+    try:
+        for Vk in ladder:
+            carried = _best_at(sgn_V * float(Vk), carried)
+    except RuntimeError as exc:
+        raise RuntimeError("director_profile_bvp failed at V={:.6g}: {}".format(float(V_app), exc))
+
+    th = carried; th[0] = th[-1] = theta_b
+    _E, V_lc = _field_at(th, float(V_app))
+    neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
+            if (n_o is not None and n_e is not None) else float("nan"))
+    # wrong-branch safety net: well above threshold the cell MUST be tilted; a residual ~untilted result
+    # is a solver miss, not physics -> flag it (success=False) rather than silently returning a railed n_eff.
+    success, message = True, "ok"
+    if use_score and math.isfinite(V_th) and Vmag > 1.3 * V_th:
+        tilt = direction * float(np.mean(th - theta_b))           # > 0 if correctly tilted toward the field
+        if tilt < math.radians(1.0):
+            success = False
+            message = ("director_profile_bvp: V={:.3g} > 1.3 V_th(~{:.3g}) but the solver stayed on the "
+                       "~untilted branch (mean tilt {:.3g} rad); tilted branch not found".format(
+                           Vmag, V_th, tilt))
+    return LCStaticResult(V_app=float(V_app), V_lc=float(V_lc), n_eff=float(neff), z_m=z,
+                          theta_field_rad=th, theta_b_rad=theta_b, success=success, message=message)
