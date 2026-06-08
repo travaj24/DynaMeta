@@ -34,8 +34,13 @@ dielectric layers instead of collapsing to the nearest one). Arbitrary LATERAL m
 INCLUSIONS (centered pillars of a different material in a layer, beyond the centered gate
 patch) are also supported (Stacked3DSpec.inclusions / Inclusion3D): a separate adjacency-based
 OCC build fragments them in as distinct regions and finds every region-region interface +
-the contacts from surface->volume adjacency. SCOPE / remaining: a single gated semiconductor
-(one semiconductor layer).
+the contacts from surface->volume adjacency. A MULTI-SEMICONDUCTOR heterostack under the gate is
+also supported (Stacked3DSpec.extra_semiconductors / from_design's contiguous gate-ward run): the
+body-most semiconductor is the primary 'semi', the rest are meshed gate-ward as distinct equilibrium
+regions with Potential-continuity interfaces, and the gate-adjacent semiconductor (where the
+accumulation forms) is emitted as the CarrierField. SCOPE / remaining: the multi-semiconductor path
+is EQUILIBRIUM-only (the semi-semi carrier-continuity interface for drift_diffusion/bipolar_dd is
+not yet wired); from_design orders only a gate-ABOVE contiguous run.
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -128,6 +133,16 @@ class Stacked3DSpec:
     # gate voltage division across the series dielectric capacitance is exact (vs collapsing to one
     # oxide). from_design populates this from all the gate-side dielectric layers of a Design.
     extra_dielectrics: List[Tuple[str, float, float]] = field(default_factory=list)
+    # EXTRA SEMICONDUCTOR layers stacked on the GATE SIDE of the primary 'semi' (a semiconductor
+    # heterostack under the gate), ordered from the primary semi OUTWARD toward the oxide: each
+    # (region_name, material, thickness_m, eps_static, n_bg_m3). Empty (default) = a single gated
+    # semiconductor (byte-identical to before). With entries the stack is [semi | xsemi... | oxide |
+    # diel... | gate], each semiconductor a DISTINCT region with Potential-continuity interfaces; the
+    # gate-adjacent (LAST) semiconductor is where accumulation forms and is emitted as the CarrierField.
+    # SCOPE: multi-semiconductor is supported for the EQUILIBRIUM solve (Potential continuity suffices
+    # for the local n(psi) closure); for physics in {drift_diffusion, bipolar_dd} the semiconductor-
+    # semiconductor carrier-continuity interface is not yet wired, so extra_semiconductors raises there.
+    extra_semiconductors: List[Tuple[str, str, float, float, float]] = field(default_factory=list)
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
@@ -139,6 +154,18 @@ class Stacked3DSpec:
         for k, (mat, thk, eps) in enumerate(self.extra_dielectrics):
             out.append(("diel{}".format(k + 1), str(mat), float(thk), float(eps)))
         return out
+
+    def field_devsim_region(self) -> str:
+        """The DEVSIM region whose carriers are emitted as the CarrierField: the gate-adjacent (last)
+        semiconductor where the gate accumulation forms (= 'semi' when there are no extra semiconductors)."""
+        return self.extra_semiconductors[-1][0] if self.extra_semiconductors else "semi"
+
+    def semiconductor_nbg(self, region_name: str) -> float:
+        """Background donor/intrinsic density for a semiconductor region ('semi' or an extra one)."""
+        for (nm, _mat, _thk, _eps, nbg) in self.extra_semiconductors:
+            if nm == region_name:
+                return float(nbg)
+        return float(self.n_bg_m3)
 
     def __post_init__(self):
         # Sanity-check the relative permittivities so a bogus/omitted value fails at
@@ -167,16 +194,37 @@ class Stacked3DSpec:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
                                   "thk={}, eps={}".format(mat, thk, eps))
+        if self.extra_semiconductors:
+            names = {"semi"}
+            for nm, mat, thk, eps, nbg in self.extra_semiconductors:
+                if nm in names:
+                    raise ValueError("extra_semiconductors region name '{}' is not unique (clashes with "
+                                      "'semi' or another extra semiconductor)".format(nm))
+                names.add(nm)
+                if not (thk > 0.0) or not (eps >= 1.0) or not (nbg > 0.0):
+                    raise ValueError("extra_semiconductors entry '{}' needs thickness>0, eps>=1, "
+                                      "n_bg>0; got thk={}, eps={}, n_bg={}".format(nm, thk, eps, nbg))
+            if self.physics != "equilibrium":
+                # the semiconductor-semiconductor carrier-continuity interface is not yet wired for the
+                # DD/bipolar continuity equations (PE.setup_interface enforces only Potential continuity,
+                # which is exact for the equilibrium n(psi) closure). Fail loudly rather than silently
+                # drop carrier flux across the internal junction.
+                raise ValueError(
+                    "extra_semiconductors (a multi-semiconductor heterostack) is supported only for "
+                    "physics='equilibrium'; got physics={!r}. The semi-semi carrier-continuity "
+                    "interface for drift_diffusion/bipolar_dd is not yet implemented.".format(self.physics))
 
     def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
         """The full ordered stack from the body up to the gate as
-        (region_name, material, role, z_lo_nm, z_hi_nm, eps_static): the semiconductor then each
-        gate-side dielectric. z in NANOMETRES (the gmsh-OCC build scale). Reduces to [semi, oxide]
-        when there are no extra dielectrics."""
-        z = 0.0
+        (region_name, material, role, z_lo_nm, z_hi_nm, eps_static): the primary semiconductor, then any
+        EXTRA semiconductors (gate-ward heterostack), then each gate-side dielectric. z in NANOMETRES
+        (the gmsh-OCC build scale). Reduces to [semi, oxide] when there are no extra layers."""
         out = [("semi", self.semi_material, "semiconductor", 0.0, self.semi_thk_m * 1e9,
                 float(self.eps_semi))]
         z = self.semi_thk_m * 1e9
+        for nm, mat, thk_m, eps, _nbg in self.extra_semiconductors:    # stacked gate-ward, before the oxide
+            out.append((nm, mat, "semiconductor", z, z + thk_m * 1e9, float(eps)))
+            z += thk_m * 1e9
         for name, mat, thk_m, eps in self.dielectric_stack_m():
             out.append((name, mat, "dielectric", z, z + thk_m * 1e9, eps))
             z += thk_m * 1e9
@@ -201,19 +249,7 @@ class Stacked3DSpec:
                       if design.material_role(L.background_material) == "semiconductor"]
         if not semi_idxs:
             raise ValueError("from_design needs a semiconductor layer (a material with a transport model)")
-        if len(semi_idxs) > 1:
-            # The stacked builder models ONE gated semiconductor; with several it cannot
-            # know which the gate drives (audit F2). Fail loudly rather than pick index 0.
-            raise ValueError(
-                "from_design: {} semiconductor layers ({}); the stacked 3D builder models a "
-                "single gated semiconductor. Build a manual Stacked3DSpec for the one the gate "
-                "drives.".format(len(semi_idxs), [layers[i].name for i in semi_idxs]))
-        semi_idx = semi_idxs[0]
-        semi_L = layers[semi_idx]
-        if semi_L.inclusions:
-            raise ValueError("from_design: the semiconductor layer '{}' must be laterally uniform "
-                              "(no material inclusions); a gate PATCH is modeled via gate_patch_frac"
-                              .format(semi_L.name))
+        semi_idxs = sorted(semi_idxs)
         # gate electrode = the BIASED electrode (audit F1: do NOT pick the first electrode
         # with a CrossSection footprint, which could be a ground pad). Prefer a biased
         # electrode with a patch (CrossSection) footprint for the frac; else any biased one.
@@ -222,14 +258,41 @@ class Stacked3DSpec:
                        (biased[0] if biased else None))
         gate_idx = (next((i for i, L in enumerate(layers) if L.name == gate_e.layer), len(layers))
                      if gate_e is not None else len(layers))   # default: gate above the semiconductor
-        step = 1 if gate_idx > semi_idx else -1
-        # Collect ALL gate-side dielectric layers from the semiconductor outward toward the gate (the
-        # full multi-dielectric stack, e.g. Park's upper HfO2 + Al2O3). Stop at the gate layer or a
-        # non-dielectric (metal/ambient). The nearest becomes the gate "oxide"; the rest are meshed as
+        # Resolve the semiconductor run. One gated semiconductor (the common case) OR a CONTIGUOUS
+        # heterostack under the gate: the body-most semiconductor is the PRIMARY ('semi'), the rest are
+        # meshed gate-ward as extra_semiconductors. A non-contiguous set (semiconductors separated by a
+        # dielectric/metal), or a gate-below / gate-inside multi-semiconductor stack, is ambiguous -> raise.
+        contiguous = (semi_idxs == list(range(semi_idxs[0], semi_idxs[-1] + 1)))
+        if len(semi_idxs) > 1 and not contiguous:
+            raise ValueError(
+                "from_design: {} semiconductor layers ({}) are NOT contiguous; the 3D builder meshes a "
+                "single gated semiconductor or a contiguous gate-ward heterostack. Build a manual "
+                "Stacked3DSpec.".format(len(semi_idxs), [layers[i].name for i in semi_idxs]))
+        if gate_idx > semi_idxs[-1]:            # gate ABOVE the run (standard): body-most is the primary
+            primary_idx, gate_adj_idx, extra_idxs, step = semi_idxs[0], semi_idxs[-1], semi_idxs[1:], 1
+        elif len(semi_idxs) > 1:
+            # gate below or inside a multi-semiconductor run -- from_design cannot order it unambiguously.
+            raise ValueError(
+                "from_design: a gate-below / gate-inside multi-semiconductor heterostack ({}) is not "
+                "supported by from_design; build a manual Stacked3DSpec.".format(
+                    [layers[i].name for i in semi_idxs]))
+        else:                                   # single semiconductor (gate above OR below)
+            primary_idx, gate_adj_idx, extra_idxs = semi_idxs[0], semi_idxs[0], []
+            step = 1 if gate_idx > semi_idxs[0] else -1
+        semi_idx = primary_idx
+        semi_L = layers[primary_idx]
+        for i in semi_idxs:                     # every semiconductor in the run must be laterally uniform
+            if layers[i].inclusions:
+                raise ValueError("from_design: the semiconductor layer '{}' must be laterally uniform "
+                                  "(no material inclusions); a gate PATCH is modeled via gate_patch_frac"
+                                  .format(layers[i].name))
+        # Collect ALL gate-side dielectric layers from the GATE-ADJACENT semiconductor outward toward the
+        # gate (the full multi-dielectric stack, e.g. Park's upper HfO2 + Al2O3). Stop at the gate layer or
+        # a non-dielectric (metal/ambient). The nearest becomes the gate "oxide"; the rest are meshed as
         # distinct regions via extra_dielectrics -> the gate voltage division is the exact series
         # capacitance (the old code collapsed to just the nearest oxide).
         diel_layers = []
-        j = semi_idx + step
+        j = gate_adj_idx + step
         while 0 <= j < len(layers):
             Lj = layers[j]
             # a REAL gate dielectric is a dielectric WITH a DC permittivity (so the ambient 'air'
@@ -245,7 +308,7 @@ class Stacked3DSpec:
             j += step
         if not diel_layers:
             raise ValueError("from_design found no gate-side dielectric layer adjacent to "
-                              "semiconductor '{}'".format(semi_L.name))
+                              "semiconductor '{}'".format(layers[gate_adj_idx].name))
         ox_L = diel_layers[0]
         extra_diels = []
         for L in diel_layers[1:]:
@@ -253,6 +316,17 @@ class Stacked3DSpec:
             if e is None:
                 raise ValueError("gate dielectric '{}' has no eps_static_dc".format(L.background_material))
             extra_diels.append((L.background_material, float(L.thickness_m), float(e)))
+        # extra (gate-ward) semiconductors of a heterostack, ordered from the primary OUTWARD toward the
+        # gate: each carries its own material/thickness/eps/n_bg (a distinct equilibrium region).
+        extra_semis = []
+        for i in extra_idxs:
+            Li = layers[i]
+            tri = design.materials.get(Li.background_material).transport
+            if tri is None:
+                raise ValueError("extra semiconductor '{}' has no transport model".format(
+                    Li.background_material))
+            extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
+                                float(tri.eps_static), float(tri.n_bg_m3)))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
@@ -304,9 +378,10 @@ class Stacked3DSpec:
                     n_bg_m3=n_bg, eps_semi=tr.eps_static, eps_oxide=float(eps_ox),
                     dos_mass_kg=float(tr.dos_mass_kg_of_n_m3(n_bg)), mobility_m2Vs=mob,
                     physics=tr.physics, gate_patch_frac=float(frac),
-                    field_region_name=semi_L.name, gate_name=gate_name, body_name=body_name,
+                    field_region_name=layers[gate_adj_idx].name,   # the gate-adjacent (accumulation) layer
+                    gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
-                    extra_dielectrics=extra_diels, **bip)
+                    extra_dielectrics=extra_diels, extra_semiconductors=extra_semis, **bip)
 
 
 class Devsim3DEquilibrium:
@@ -326,13 +401,23 @@ class Devsim3DEquilibrium:
             os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
         self._built = False
         s = spec
+        # the emitted CarrierField region is the GATE-ADJACENT semiconductor (where accumulation forms):
+        # 'semi' for a single semiconductor, else the last extra semiconductor of the heterostack. Find
+        # its DEVSIM region name + z-range + material from the stack (z in nm -> m).
+        self._field_dev_region = s.field_devsim_region()
         self._z_semi = (0.0, s.semi_thk_m)
+        self._field_material = s.semi_material
+        for (nm, mat, _role, zl, zh, _eps) in s.layer_stack_nm():
+            if nm == self._field_dev_region:
+                self._z_semi = (zl * 1e-9, zh * 1e-9)
+                self._field_material = mat
+                break
         self._z_ox = (s.semi_thk_m, s.semi_thk_m + s.oxide_thk_m)
 
     # ---- CarrierSolver Protocol ----
     def regions(self) -> List[RegionInfo]:
         s = self.spec
-        return [RegionInfo(name=s.field_region_name, role="semiconductor", material=s.semi_material,
+        return [RegionInfo(name=s.field_region_name, role="semiconductor", material=self._field_material,
                             bbox_m=(0.0, s.lateral_m, 0.0, s.lateral_m, *self._z_semi),
                             ndim=3)]
 
@@ -372,7 +457,10 @@ class Devsim3DEquilibrium:
             if role == "dielectric":
                 PE.setup_dielectric_region(self.device, name, eps)
             elif role == "semiconductor":
-                PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.n_bg_m3,
+                # an EXTRA gate-ward semiconductor (heterostack); equilibrium n(psi) physics with its
+                # OWN background density (the spec's extra_semiconductors n_bg). Multi-semiconductor is
+                # equilibrium-only (the post_init guard rejects DD/bipolar + extra_semiconductors).
+                PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
                                                eps_static=eps, dos_mass_kg=s.dos_mass_kg)
             # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
         for itf in ds.get_interface_list(device=self.device):
@@ -493,8 +581,11 @@ class Devsim3DEquilibrium:
             ds.set_parameter(device=self.device, name="gate_bias", value=vg)
             ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
                       relative_error=1e-5, maximum_iterations=80)
+        # emit the GATE-ADJACENT semiconductor (where accumulation forms) -- 'semi' for a single
+        # semiconductor, the last extra semiconductor for a heterostack.
+        fdr = self._field_dev_region
         def g(nm):
-            return np.array(ds.get_node_model_values(device=self.device, region="semi", name=nm))
+            return np.array(ds.get_node_model_values(device=self.device, region=fdr, name=nm))
         x, y, z = g("x"), g("y"), g("z")
         n, pot = g("Electrons"), g("Potential")
         nodes = np.column_stack([x, y, z])
@@ -502,14 +593,14 @@ class Devsim3DEquilibrium:
                                   self.spec.grid_n)            # ndim-general resampler
         rname = self.spec.field_region_name
         reg = CarrierRegion(
-            name=rname, role="semiconductor", material=self.spec.semi_material,
+            name=rname, role="semiconductor", material=self._field_material,
             nodes_m=nodes, node_fields={ELECTRON_DENSITY: n, POTENTIAL: pot},
             grid_axes_m={"x": grid["axis_0"], "y": grid["axis_1"], "z": grid["axis_2"]},
             grid_fields={ELECTRON_DENSITY: grid[ELECTRON_DENSITY], POTENTIAL: grid[POTENTIAL]})
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
             temperature_K=PE.T_REF, regions={rname: reg},
-            n_bg_by_region={rname: self.spec.n_bg_m3},
+            n_bg_by_region={rname: self.spec.semiconductor_nbg(fdr)},
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m))
 
     def teardown(self) -> None:
@@ -587,8 +678,9 @@ class Devsim3DEquilibrium:
             ifname = "if_{}".format(k)                         # interface between stack[k-1] and stack[k]
             if ifaces[zb]:
                 gmsh.model.addPhysicalGroup(2, ifaces[zb], name=ifname)
-            if k == 1:
-                semi_ox = ifaces[zb]                           # the semi/oxide interface (mesh refinement)
+            if stack[k - 1][2] == "semiconductor" and stack[k][2] == "dielectric":
+                semi_ox = ifaces[zb]                           # the (last)semiconductor/oxide interface
+                                                               # = the gate accumulation front (mesh refine)
         # device-build handoff (consumed by build_device): regions, interfaces, the gate dielectric
         self._mesh_regions = [(nm, mt, rl, ep) for (nm, mt, rl, _zl, _zh, ep) in stack]
         self._iface_pairs = [("if_{}".format(k), stack[k - 1][0], stack[k][0])
