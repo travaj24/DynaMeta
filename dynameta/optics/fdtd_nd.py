@@ -555,6 +555,49 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     return eyL, hxL, eyR, hxR
 
 
+def _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+    """Complex-envelope oblique 2D-TM (p-pol): the in-plane E (Ex, Ez) + the single H_y, all the PERIODIC
+    Bloch envelope (physical field = envelope * exp(i kx x)), so every x-derivative gains a + i kx term.
+    mu0 dHy/dt = dEz/dx - dEx/dz ; eps dEx/dt = -dHy/dz - Jx ; eps dEz/dt = +dHy/dx - Jz, with the
+    semi-implicit Drude ADE on BOTH transverse + longitudinal E-components (Jx, Jz) and CFS-CPML on the z
+    derivatives. Source + PEC on the tangential Ex (the dual of the TE Ey). Records the complex tangential
+    Ex and co-located Hy probe x-lines (the p-pol R/T come from the Ex up/down ratio, like TE's Ey)."""
+    nx, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    z = (lambda: np.zeros((nx, nz), dtype=complex))
+    Ex, Ez, Hy, Jx, Jz, psi_hyz, psi_exz = z(), z(), z(), z(), z(), z(), z()
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    exL = np.empty((nsteps, nx), complex); hyL = np.empty((nsteps, nx), complex)
+    exR = np.empty((nsteps, nx), complex); hyR = np.empty((nsteps, nx), complex)
+    cmu = dt / MU0; ikx = 1j * kx; e0dt = EPS0 / dt
+    for n in range(nsteps):
+        # H update: mu0 dHy/dt = dEz/dx - dEx/dz  (Hy at k+1/2; CPML-stretched dEx/dz)
+        dEx_dz = (Ex[:, 1:] - Ex[:, :-1]) / dz
+        psi_hyz[:, :-1] = bh[:-1] * psi_hyz[:, :-1] + ch[:-1] * dEx_dz
+        dEz_dx = (np.roll(Ez, -1, axis=0) - Ez) / dx + ikx * Ez            # dEz/dx -> d/dx + i kx
+        Hy[:, :-1] += cmu * (dEz_dx[:, :-1] - (dEx_dz / kh[:-1] + psi_hyz[:, :-1]))
+        # E update -- Ex: eps dEx/dt = -dHy/dz (CPML-stretched) - Jx
+        dHy_dz = (Hy[:, 1:] - Hy[:, :-1]) / dz
+        psi_exz[:, 1:] = be[1:] * psi_exz[:, 1:] + ce[1:] * dHy_dz
+        curlx = np.zeros((nx, nz), complex)
+        curlx[:, 1:] = -(dHy_dz / ke[1:] + psi_exz[:, 1:])
+        denom = e0dt * eps_inf + bJ / 2.0
+        Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+        Jx = aJ * Jx + bJ * (Exn + Ex)
+        Exn[:, k_src] += src[n]
+        Exn[:, 0] = 0.0; Exn[:, -1] = 0.0                                  # PEC backing (tangential E)
+        Ex = Exn
+        # E update -- Ez: eps dEz/dt = +dHy/dx (periodic x) - Jz
+        curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx + ikx * Hy             # dHy/dx -> d/dx + i kx
+        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
+        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Ez = Ezn
+        exL[n] = Ex[:, k_pL]; hyL[n] = 0.5 * (Hy[:, k_pL] + Hy[:, k_pL - 1])
+        exR[n] = Ex[:, k_pR]; hyR[n] = 0.5 * (Hy[:, k_pR] + Hy[:, k_pR - 1])
+    return exL, hyL, exR, hyR
+
+
 @njit(fastmath=True, cache=True)
 def _te2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
                         nsteps, k_src, k_pL, k_pR, src, kx):
@@ -605,10 +648,13 @@ def _te2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
     return eyL, hxL, eyR, hxR
 
 
-def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
-    """Run ONE complex-envelope oblique 2D-TE pass on the named backend (only 'numpy' and 'numba' carry the
-    complex-envelope path; the JAX/CuPy backends are normal-incidence-only). Returns the four complex probe
-    x-lines. 'numba' = the fused threaded kernel; anything else = the vectorized reference loop."""
+def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s"):
+    """Run ONE complex-envelope oblique 2D pass on the named backend. pol='s' = TE (Ey,Hx,Hz); pol='p' =
+    TM (Hy,Ex,Ez). Returns the four complex probe x-lines (tangential E + co-located tangential H).
+    'numba' = the fused threaded TE kernel (TM is the NumPy reference); 'jax' = the differentiable TE scan.
+    """
+    if pol == "p":
+        return _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
     if name == "numba":
         (ke, be, ce), (kh, bh, ch) = cpml
         return _te2d_oblique_numba(np.asarray(eps_inf, float), np.asarray(wp, float), np.asarray(gam, float),
@@ -621,13 +667,17 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                           source_amp: float = 1.0, npml: int = 12, nx: int = 8,
-                          backend: str = "numpy") -> FDTD2DObliqueResult:
-    """Broadband s-pol (TE) reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence,
-    via the complex-envelope Bloch method with a FIXED transverse wavevector k_par = (2 pi / lambda_c)
-    sin(angle_deg) (angle_deg the physical angle at the band centre). Because k_par is fixed, the physical
-    angle varies with frequency: theta(f) = asin(k_par c/(2 pi f)); the result carries theta_deg(f) and the
-    band mask excludes frequencies below the light line (k_par > w/c, evanescent). Vacuum ends. angle_deg=0
-    reduces to the normal-incidence solver."""
+                          backend: str = "numpy", pol: str = "s") -> FDTD2DObliqueResult:
+    """Broadband reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence, via the
+    complex-envelope Bloch method with a FIXED transverse wavevector k_par = (2 pi / lambda_c)
+    sin(angle_deg) (angle_deg the physical angle at the band centre). pol='s' = TE (Ey,Hx,Hz); pol='p' =
+    TM (Hy,Ex,Ez) -- the p-pol R/T come from the tangential-Ex up/down ratio. Because k_par is fixed, the
+    physical angle varies with frequency: theta(f) = asin(k_par c/(2 pi f)); the result carries theta_deg(f)
+    and the band mask excludes frequencies below the light line (k_par > w/c, evanescent). Vacuum ends.
+    angle_deg=0 reduces to the normal-incidence solver. backend selects the TE kernel (numpy/numba); TM is
+    the NumPy reference."""
+    if pol not in ("s", "p"):
+        raise ValueError("pol must be 's' (TE) or 'p' (TM); got {!r}".format(pol))
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
         raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
                                   "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")
@@ -671,9 +721,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     rb = _resolve_backend(backend)
     name = "numba" if (rb == "numba" and _HAVE_NUMBA) else "numpy"
     eyL_i, hxL_i, eyR_i, hxR_i = _run_oblique(name, one, zero, zero, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
-                                              src, cpml, kx)
+                                              src, cpml, kx, pol)
     eyL_t, hxL_t, eyR_t, hxR_t = _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
-                                              src, cpml, kx)
+                                              src, cpml, kx, pol)
     # complex envelope -> full FFT; take the positive-frequency half (the forward exp(-iwt) response).
     # rfftfreq gives the monotonic positive-frequency axis matching fft(...)[:nf] within the band.
     nf = nsteps // 2 + 1
