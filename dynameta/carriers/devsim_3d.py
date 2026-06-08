@@ -52,6 +52,23 @@ from dynameta.carriers.physics_equilibrium import M_E
 
 
 @dataclass
+class Inclusion3D:
+    """A lateral material INCLUSION embedded in one layer of the 3D stack: a centered rectangular
+    pillar (x_frac x y_frac of the cell) of a different material spanning the FULL z-range of `in_layer`
+    (a region name from the stack: 'semi', 'oxide', 'diel1', ...). role in {dielectric, semiconductor,
+    metal}; eps = its DC permittivity (dielectric / semiconductor). The builder OCC-fragments it into the
+    mesh as its own region, so the gate field couples differently through it -> laterally-varying
+    accumulation (the non-separable carrier topology a 2D+symmetrization path cannot capture)."""
+    name: str
+    material: str
+    role: str = "dielectric"
+    eps: float = 1.0
+    in_layer: str = "oxide"
+    x_frac: float = 0.5
+    y_frac: float = 0.5
+
+
+@dataclass
 class Stacked3DSpec:
     """A simple stacked gated capacitor for the 3D equilibrium solve (all SI)."""
     semi_material:   str = "ITO"
@@ -86,6 +103,9 @@ class Stacked3DSpec:
     # gate voltage division across the series dielectric capacitance is exact (vs collapsing to one
     # oxide). from_design populates this from all the gate-side dielectric layers of a Design.
     extra_dielectrics: List[Tuple[str, float, float]] = field(default_factory=list)
+    # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
+    # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
+    inclusions: List[Inclusion3D] = field(default_factory=list)
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -269,20 +289,17 @@ class Devsim3DEquilibrium:
 
     def build_device(self) -> None:
         import devsim as ds
-        self._build_mesh()
+        self._build_mesh()                                      # sets _mesh_regions, _iface_pairs, _top_diel
         ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
         s = self.spec
-        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
-        for (name, mat, _role, _zlo, _zhi, _eps) in stack:
+        for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
             ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
-        top_diel = stack[-1][0]                                 # the gate sits on the topmost dielectric
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=top_diel,
-                              name="gate", material="metal")
+        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
+                              name="gate", material="metal")     # gate on the topmost (stack) dielectric
         ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
                               name="body", material="metal")
-        for k in range(1, len(stack)):                          # one interface per adjacent layer pair
-            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name="if_{}".format(k),
-                                    region0=stack[k - 1][0], region1=stack[k][0], name="if_{}".format(k))
+        for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
+            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
         self._dd = (s.physics == "drift_diffusion")
@@ -295,9 +312,15 @@ class Devsim3DEquilibrium:
         else:
             PE.setup_semiconductor_region(self.device, "semi", n_bg_m3=s.n_bg_m3,
                                            eps_static=s.eps_semi, dos_mass_kg=s.dos_mass_kg)
-        for (name, mat, role, _zlo, _zhi, eps) in stack:        # each gate-side dielectric as its own region
+        for (name, mat, role, eps) in self._mesh_regions:       # dielectric layers + dielectric inclusions
+            if name == "semi":
+                continue                                         # the gated semiconductor, set above
             if role == "dielectric":
                 PE.setup_dielectric_region(self.device, name, eps)
+            elif role == "semiconductor":
+                PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.n_bg_m3,
+                                               eps_static=eps, dos_mass_kg=s.dos_mass_kg)
+            # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
@@ -384,6 +407,8 @@ class Devsim3DEquilibrium:
 
     # ---- gmsh mesh (nm geometry -> metre mesh) ----
     def _build_mesh(self) -> None:
+        if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
+            return self._build_mesh_incl()
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
@@ -447,6 +472,11 @@ class Devsim3DEquilibrium:
                 gmsh.model.addPhysicalGroup(2, ifaces[zb], name=ifname)
             if k == 1:
                 semi_ox = ifaces[zb]                           # the semi/oxide interface (mesh refinement)
+        # device-build handoff (consumed by build_device): regions, interfaces, the gate dielectric
+        self._mesh_regions = [(nm, mt, rl, ep) for (nm, mt, rl, _zl, _zh, ep) in stack]
+        self._iface_pairs = [("if_{}".format(k), stack[k - 1][0], stack[k][0])
+                              for k in range(1, len(stack))]
+        self._top_diel = stack[-1][0]
         fd = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", semi_ox)
         ft = gmsh.model.mesh.field.add("Threshold")
@@ -462,5 +492,122 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)     # nm -> metre
+        gmsh.write(self.msh_path)
+        gmsh.finalize()
+
+    def _build_mesh_incl(self) -> None:
+        """Adjacency-based 3D OCC build supporting lateral material INCLUSIONS (centered pillars in a
+        layer). Builds a box per layer + per inclusion, fragments them all, classifies each resulting
+        volume into a region (inclusion footprint first, else the layer by z-centre), then finds every
+        region-region INTERFACE and the gate/body CONTACTS from surface->volume adjacency (so the
+        inclusions' LATERAL interfaces are captured, not just the stacked z-interfaces). Sets
+        _mesh_regions / _iface_pairs / _top_diel for build_device."""
+        import gmsh
+        from collections import defaultdict
+        s = self.spec
+        Lnm = s.lateral_m * 1e9
+        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        gmsh.initialize()
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("ms3d")
+        occ = gmsh.model.occ
+        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)]
+        z_of = {nm: (zlo, zhi) for (nm, _m, _r, zlo, zhi, _e) in stack}
+        ztop = stack[-1][4]
+        frac = float(s.gate_patch_frac); patterned = frac < 1.0 - 1e-9; ph = Lnm * frac / 2.0
+        for (_n, _m, _r, zlo, zhi, _e) in stack:               # a box per layer
+            occ.addBox(0, 0, zlo, Lnm, Lnm, zhi - zlo)
+        inc_geo = []                                            # (inc, x0,x1,y0,y1,zlo,zhi) nm footprints
+        for inc in s.inclusions:                               # a centered pillar per inclusion
+            if inc.in_layer not in z_of:
+                raise ValueError("Inclusion3D.in_layer '{}' is not a stack region {}".format(
+                    inc.in_layer, sorted(z_of)))
+            zlo, zhi = z_of[inc.in_layer]
+            wx, wy = inc.x_frac * Lnm, inc.y_frac * Lnm
+            x0, y0 = Lnm / 2 - wx / 2, Lnm / 2 - wy / 2
+            occ.addBox(x0, y0, zlo, wx, wy, zhi - zlo)
+            inc_geo.append((inc, x0, x0 + wx, y0, y0 + wy, zlo, zhi))
+        occ.synchronize()
+        vols = [t for (_d, t) in gmsh.model.getEntities(3)]
+        occ.fragment([(3, vols[0])], [(3, t) for t in vols[1:]])
+        occ.synchronize()
+        if patterned:
+            rect = occ.addRectangle(Lnm / 2 - ph, Lnm / 2 - ph, ztop, 2 * ph, 2 * ph)
+            occ.synchronize()
+            occ.fragment([(d, t) for d, t in gmsh.model.getEntities(3)], [(2, rect)])
+            occ.synchronize()
+
+        def region_of(tag):                                     # classify by the volume's BOUNDING BOX
+            # (NOT its centre of mass -- the oxide-minus-pillar FRAME has its COM at the cell centre,
+            # inside the pillar footprint, so a COM test would misclassify the frame as the inclusion).
+            bb = occ.getBoundingBox(3, tag)                     # xmin,ymin,zmin, xmax,ymax,zmax (nm)
+            for (inc, x0, x1, y0, y1, zl, zh) in inc_geo:       # the inclusion = a box CONTAINED in its footprint
+                if (bb[0] >= x0 - 1e-3 and bb[3] <= x1 + 1e-3 and bb[1] >= y0 - 1e-3 and
+                        bb[4] <= y1 + 1e-3 and bb[2] >= zl - 1e-3 and bb[5] <= zh + 1e-3):
+                    return inc.name
+            cz = 0.5 * (bb[2] + bb[5])
+            for (nm, _m, _r, zl, zh, _e) in stack:
+                if zl - 1e-6 < cz < zh + 1e-6:
+                    return nm
+            return None
+        vol_region = {}
+        reg_tags = defaultdict(list)
+        for (d, t) in gmsh.model.getEntities(3):
+            r = region_of(t)
+            vol_region[t] = r
+            if r is not None:
+                reg_tags[r].append(t)
+        for r, tags in reg_tags.items():
+            gmsh.model.addPhysicalGroup(3, tags, name=r)
+        # surfaces via adjacency: 2 bounding vols of DIFFERENT regions -> interface; 1 vol -> a boundary
+        gate, body, semi_ox = [], [], []
+        ifsurf = defaultdict(list)
+        for (d, t) in gmsh.model.getEntities(2):
+            up, _down = gmsh.model.getAdjacencies(2, t)
+            if len(up) == 2:
+                r0, r1 = vol_region.get(int(up[0])), vol_region.get(int(up[1]))
+                if r0 is not None and r1 is not None and r0 != r1:
+                    ifsurf[tuple(sorted((r0, r1)))].append(t)
+            else:
+                cz = occ.getCenterOfMass(d, t)[2]
+                if abs(cz - ztop) < 1e-4:
+                    if patterned:
+                        bb = occ.getBoundingBox(d, t)
+                        if (bb[3] - bb[0]) < Lnm - 1.0:
+                            gate.append(t)
+                    else:
+                        gate.append(t)
+                elif abs(cz) < 1e-4:
+                    body.append(t)
+                # else: a lateral domain-boundary face -> natural zero-flux, no contact needed
+        gmsh.model.addPhysicalGroup(2, gate, name="gate")
+        gmsh.model.addPhysicalGroup(2, body, name="body")
+        iface_pairs = []
+        for i, (key, tags) in enumerate(sorted(ifsurf.items())):
+            ifn = "if_{}".format(i)
+            gmsh.model.addPhysicalGroup(2, tags, name=ifn)
+            iface_pairs.append((ifn, key[0], key[1]))
+            if {"semi", "oxide"} == set(key):
+                semi_ox = tags
+        self._mesh_regions = [(nm, mt, rl, ep) for (nm, mt, rl, _zl, _zh, ep) in stack] + \
+                             [(inc.name, inc.material, inc.role, inc.eps) for inc in s.inclusions]
+        self._iface_pairs = iface_pairs
+        self._top_diel = stack[-1][0]
+        if semi_ox:                                             # refine at the semi/oxide interface
+            fd = gmsh.model.mesh.field.add("Distance")
+            gmsh.model.mesh.field.setNumbers(fd, "SurfacesList", semi_ox)
+            ft = gmsh.model.mesh.field.add("Threshold")
+            gmsh.model.mesh.field.setNumber(ft, "InField", fd)
+            gmsh.model.mesh.field.setNumber(ft, "SizeMin", s.mesh_min_nm)
+            gmsh.model.mesh.field.setNumber(ft, "SizeMax", s.mesh_max_nm)
+            gmsh.model.mesh.field.setNumber(ft, "DistMin", 1.0)
+            gmsh.model.mesh.field.setNumber(ft, "DistMax", 6.0)
+            gmsh.model.mesh.field.setAsBackgroundMesh(ft)
+        for opt in ("Mesh.MeshSizeExtendFromBoundary", "Mesh.MeshSizeFromPoints", "Mesh.MeshSizeFromCurvature"):
+            gmsh.option.setNumber(opt, 0)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", s.mesh_max_nm)   # cap everywhere (the inclusion has no Distance field)
+        gmsh.model.mesh.generate(3)
+        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+        gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
         gmsh.write(self.msh_path)
         gmsh.finalize()
