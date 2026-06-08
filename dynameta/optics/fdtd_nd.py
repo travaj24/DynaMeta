@@ -928,6 +928,71 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
     return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
 
 
+def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy):
+    """Full-vector 3D-FDTD at OBLIQUE incidence via the complex-envelope Bloch method with a 2D transverse
+    wavevector (kx,ky): the physical field = envelope * exp(i(kx x + ky y)), so EVERY x-derivative gains
+    +i kx and every y-derivative +i ky (the x,y rolls stay zero-phase); only d/dz is CFS-CPML-stretched.
+    Fields complex; (kx,ky)=0 reduces to the real normal-incidence engine. Semi-implicit Drude ADE per
+    E-component; the incident plane wave is injected along the (sx,sy) in-plane E-direction at k_src
+    (s-pol = (-sin phi, cos phi)); PEC on the tangential (Ex,Ey). Records the complex tangential Ex,Ey
+    probe planes (the s-pol R/T come from their projection onto (sx,sy)). Drude only (no Lorentz)."""
+    nx, ny, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    r = (lambda a: np.asarray(a).reshape(1, 1, nz))
+    ke, be, ce = r(ke), r(be), r(ce)
+    kh, bh, ch = r(kh), r(bh), r(ch)
+    z3 = (lambda: np.zeros((nx, ny, nz), dtype=complex))
+    Ex, Ey, Ez = z3(), z3(), z3()
+    Hx, Hy, Hz = z3(), z3(), z3()
+    Jx, Jy, Jz = z3(), z3(), z3()
+    psi_Hx, psi_Hy, psi_Ex, psi_Ey = z3(), z3(), z3(), z3()
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    cmu = dt / MU0; e0dt = EPS0 / dt
+    ikx, iky = 1j * kx, 1j * ky
+    dxf = (lambda F: (np.roll(F, -1, axis=0) - F) / dx + ikx * F)   # forward x-deriv + envelope
+    dyf = (lambda F: (np.roll(F, -1, axis=1) - F) / dy + iky * F)   # forward y-deriv + envelope
+    dxb = (lambda F: (F - np.roll(F, 1, axis=0)) / dx + ikx * F)    # backward x-deriv + envelope
+    dyb = (lambda F: (F - np.roll(F, 1, axis=1)) / dy + iky * F)    # backward y-deriv + envelope
+    sh = (nsteps, nx, ny)
+    exL, eyL, exR, eyR = np.empty(sh, complex), np.empty(sh, complex), np.empty(sh, complex), np.empty(sh, complex)
+    for n in range(nsteps):
+        # ---- H update: dH/dt = -(1/mu) curl E ; only d/dz CPML-stretched ----
+        dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
+        psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
+        sEy_dz = z3(); sEy_dz[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
+        Hx -= cmu * (dyf(Ez) - sEy_dz)
+        dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
+        psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
+        sEx_dz = z3(); sEx_dz[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
+        Hy -= cmu * (sEx_dz - dxf(Ez))
+        Hz -= cmu * (dxf(Ey) - dyf(Ex))
+        # ---- E update: eps0 eps dE/dt = curl H - J ; only d/dz CPML-stretched ----
+        denom = e0dt * eps_inf + bJ / 2.0
+        dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
+        psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
+        sHy_dz = z3(); sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
+        curlx = dyb(Hz) - sHy_dz
+        Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+        Jx = aJ * Jx + bJ * (Exn + Ex)
+        dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
+        psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
+        sHx_dz = z3(); sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
+        curly = sHx_dz - dxb(Hz)
+        Eyn = (e0dt * eps_inf * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        curlz = dxb(Hy) - dyb(Hx)
+        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
+        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Exn[:, :, k_src] += sx * src[n]; Eyn[:, :, k_src] += sy * src[n]    # s-pol plane source
+        for F in (Exn, Eyn):
+            F[:, :, 0] = 0.0; F[:, :, -1] = 0.0                             # PEC backing
+        Ex, Ey, Ez = Exn, Eyn, Ezn
+        exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
+        exR[n] = Ex[:, :, k_pR]; eyR[n] = Ey[:, :, k_pR]
+    return exL, eyL, exR, eyR
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                 nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
@@ -1260,3 +1325,70 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
     return FDTD3DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)
+
+
+def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: float,
+                          angle_deg: float, azimuth_deg: float = 0.0,
+                          lambda_min_m: float, lambda_max_m: float, resolution: int = 36,
+                          courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
+                          source_amp: float = 1.0, npml: int = 12, nx: int = 6,
+                          ny: int = 6) -> FDTD2DObliqueResult:
+    """Broadband s-pol reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence in the
+    FULL-VECTOR 3D engine, via the complex-envelope Bloch method with a 2D transverse wavevector
+    k_par=(kx,ky), |k_par| = (2 pi/lambda_c) sin(angle_deg), azimuth phi=azimuth_deg (kx=|k_par|cos phi,
+    ky=|k_par|sin phi). The s-pol E-vector (-sin phi, cos phi, 0) is injected; the R/T come from its
+    x,y-mean projection. Fixed k_par -> theta(f)=asin(k_par c/w). For a uniform stack the result is
+    azimuth-INVARIANT and equals tmm(theta(f),'s') -- this exercises the genuine 2D transverse Bloch
+    envelope (kx AND ky). Vacuum ends; Drude only. angle_deg=0 reduces to normal incidence."""
+    if any(L.lorentz_delta_eps != 0.0 for L in layers):
+        raise NotImplementedError("solve_fdtd_3d_oblique supports Drude dispersion only (no Lorentz pole).")
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    f_c = 0.5 * (f_min + f_max)
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
+    n_max = max(1.0, max(max(abs(np.sqrt(L.eps_at(w))) for w in w_band) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    dx = period_x_m / nx; dy = period_y_m / ny
+    dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
+    k_par = (2.0 * np.pi * f_c / C_LIGHT) * np.sin(np.radians(angle_deg))
+    phi = np.radians(azimuth_deg)
+    kx, ky = k_par * np.cos(phi), k_par * np.sin(phi)
+    sx, sy = -np.sin(phi), np.cos(phi)                           # s-pol in-plane E direction
+
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+    eps_inf = np.ones((nx, ny, nz)); wp = np.zeros((nx, ny, nz)); gam = np.zeros((nx, ny, nz))
+    zc = (np.arange(nz) + 0.5) * dz
+    z = pad
+    for L in layers:
+        m = (zc >= z) & (zc < z + L.thickness_m)
+        eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
+        z += L.thickness_m
+    k_src = max(2, int(round((0.35 * pad) / dz)))
+    k_pL = int(round((0.7 * pad) / dz))
+    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    t0 = settle * tau
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    tgrid = np.arange(nsteps) * dt
+    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    cpml = _cpml_z(nz, dz, dt, npml)
+    one = np.ones((nx, ny, nz)); zero = np.zeros((nx, ny, nz))
+    exL_i, eyL_i, exR_i, eyR_i = _run_3d_oblique(one, zero, zero, dx, dy, dz, dt, nsteps, k_src, k_pL,
+                                                 k_pR, src, cpml, kx, ky, sx, sy)
+    exL_t, eyL_t, exR_t, eyR_t = _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL,
+                                                 k_pR, src, cpml, kx, ky, sx, sy)
+    nf = nsteps // 2 + 1
+    f = np.fft.rfftfreq(nsteps, dt)
+    proj = (lambda ex, ey: sx * ex.mean(axis=(1, 2)) + sy * ey.mean(axis=(1, 2)))   # s-pol of the x,y-mean
+    meanf = (lambda a: np.fft.fft(a)[:nf])
+    inc_L = meanf(proj(exL_i, eyL_i)); inc_R = meanf(proj(exR_i, eyR_i))
+    refl = meanf(proj(exL_t - exL_i, eyL_t - eyL_i)); trans = meanf(proj(exR_t, eyR_t))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R0 = np.abs(refl / inc_L) ** 2
+        T0 = np.abs(trans / inc_R) ** 2
+    sin_t = np.divide(k_par * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))
+    theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
+    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
