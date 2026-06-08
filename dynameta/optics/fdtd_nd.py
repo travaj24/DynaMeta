@@ -654,12 +654,13 @@ def _flux3d(ex, ey, hx, hy):
     return np.sum(S, axis=(1, 2))                            # (nfreq,) signed z-power per frequency
 
 
-def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None):
     """One full-vector 3D-FDTD pass over a cell-wise (nx,ny,nz) (eps_inf, wp, gamma, chi3) profile.
     Periodic in x and y (roll = Bloch at normal incidence, zero phase), CFS-CPML + PEC backing in z.
     Standard Yee staggering: Ex@(i+1/2,j,k) Ey@(i,j+1/2,k) Ez@(i,j,k+1/2); Hx@(i,j+1/2,k+1/2)
     Hy@(i+1/2,j,k+1/2) Hz@(i+1/2,j+1/2,k). Semi-implicit Drude ADE per E-component + instantaneous Kerr
-    (eps_eff = eps_inf + chi3|E|^2). Only the d/dz derivatives are CPML-stretched (x,y are periodic), so
+    (eps_eff = eps_inf + chi3|E|^2) + an optional Lorentz ADE per E-component (`lor`=(C1,C2,C3), a
+    polarization PL{x,y,z}). Only the d/dz derivatives are CPML-stretched (x,y are periodic), so
     four psi memories: dEy/dz & dEx/dz (H update), dHx/dz & dHy/dz (E update). Records Ex,Ey,Hx,Hy on the
     left/right z-probe planes (the components that carry S_z). Returns 8 arrays of shape (nsteps,nx,ny)."""
     nx, ny, nz = eps_inf.shape
@@ -673,6 +674,11 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
     Jx, Jy, Jz = z3(), z3(), z3()                            # Drude polarization currents (per E-component)
     psi_Hx, psi_Hy = z3(), z3()                              # CPML memory for dEy/dz, dEx/dz (H-grid)
     psi_Ex, psi_Ey = z3(), z3()                              # CPML memory for dHy/dz, dHx/dz (E-grid)
+    do_lor = lor is not None
+    if do_lor:                                               # Lorentz ADE: a polarization PL per E-component
+        C1, C2, C3 = xp.asarray(lor[0]), xp.asarray(lor[1]), xp.asarray(lor[2])
+        PLx, PLy, PLz = z3(), z3(), z3()
+        PLpx, PLpy, PLpz = z3(), z3(), z3()
     aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
     cmu = dt / MU0
@@ -707,6 +713,10 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         sHy_dz = z3(); sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
         dHz_dy = (Hz - xp.roll(Hz, 1, axis=1)) / dy
         curlx = dHz_dy - sHy_dz
+        if do_lor:                                          # Lorentz dPLx/dt enters the Ex-update
+            PLxn = C1 * PLx + C2 * PLpx + C3 * Ex
+            curlx = curlx - (PLxn - PLx) / dt
+            PLpx, PLx = PLx, PLxn
         Exn = (ce_dt * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
         Jx = aJ * Jx + bJ * (Exn + Ex)
         # Ey: (dHx/dz - dHz/dx) ; dHx/dz CPML-stretched
@@ -715,12 +725,20 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         sHx_dz = z3(); sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
         dHz_dx = (Hz - xp.roll(Hz, 1, axis=0)) / dx
         curly = sHx_dz - dHz_dx
+        if do_lor:
+            PLyn = C1 * PLy + C2 * PLpy + C3 * Ey
+            curly = curly - (PLyn - PLy) / dt
+            PLpy, PLy = PLy, PLyn
         Eyn = (ce_dt * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eyn + Ey)
         # Ez: (dHy/dx - dHx/dy) ; both transverse (no CPML)
         dHy_dx = (Hy - xp.roll(Hy, 1, axis=0)) / dx
         dHx_dy = (Hx - xp.roll(Hx, 1, axis=1)) / dy
         curlz = dHy_dx - dHx_dy
+        if do_lor:
+            PLzn = C1 * PLz + C2 * PLpz + C3 * Ez
+            curlz = curlz - (PLzn - PLz) / dt
+            PLpz, PLz = PLz, PLzn
         Ezn = (ce_dt * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
         Jz = aJ * Jz + bJ * (Ezn + Ez)
         # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML:
@@ -740,16 +758,19 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
-                nsteps, k_src, k_pL, k_pR, src):
+                nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
     """Fused, prange-threaded full-vector 3D timestep (the Numba CPU kernel) -- byte-near-identical physics
-    to _run_3d (six-component Yee + per-component semi-implicit Drude ADE + Kerr + CFS-CPML in z + PEC,
-    Bloch-periodic x,y), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass.
+    to _run_3d (six-component Yee + per-component semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in
+    z + PEC, Bloch-periodic x,y), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass.
+    C1,C2,C3 = per-cell Lorentz coefficients, has_lor gates the per-component polarization PL{x,y,z}.
     Parallel-safe over x: the H-phase writes Hx/Hy/Hz[i] (disjoint) reading only E (read-only); the E-phase
     writes Ex/Ey/Ez[i] (disjoint) reading only H. Returns the Ex,Ey,Hx,Hy probe planes (left/right)."""
     nx, ny, nz = eps_inf.shape
     Ex = np.zeros((nx, ny, nz)); Ey = np.zeros((nx, ny, nz)); Ez = np.zeros((nx, ny, nz))
     Hx = np.zeros((nx, ny, nz)); Hy = np.zeros((nx, ny, nz)); Hz = np.zeros((nx, ny, nz))
     Jx = np.zeros((nx, ny, nz)); Jy = np.zeros((nx, ny, nz)); Jz = np.zeros((nx, ny, nz))
+    PLx = np.zeros((nx, ny, nz)); PLy = np.zeros((nx, ny, nz)); PLz = np.zeros((nx, ny, nz))
+    PLpx = np.zeros((nx, ny, nz)); PLpy = np.zeros((nx, ny, nz)); PLpz = np.zeros((nx, ny, nz))
     psi_Hx = np.zeros((nx, ny, nz)); psi_Hy = np.zeros((nx, ny, nz))
     psi_Ex = np.zeros((nx, ny, nz)); psi_Ey = np.zeros((nx, ny, nz))
     sh = (nsteps, nx, ny)
@@ -802,7 +823,12 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                         sHy = dHy_dz / ke[k] + psi_Ex[i, j, k]
                     else:
                         sHy = 0.0
-                    exn = (e0dt * eps_eff * exo + (dHz_dy - sHy) - coef * Jx[i, j, k] - 0.5 * bJ * exo) / denom
+                    cx = dHz_dy - sHy
+                    if has_lor:                             # Lorentz dPLx/dt enters the Ex-update
+                        pln = C1[i, j, k] * PLx[i, j, k] + C2[i, j, k] * PLpx[i, j, k] + C3[i, j, k] * exo
+                        cx = cx - (pln - PLx[i, j, k]) / dt
+                        PLpx[i, j, k] = PLx[i, j, k]; PLx[i, j, k] = pln
+                    exn = (e0dt * eps_eff * exo + cx - coef * Jx[i, j, k] - 0.5 * bJ * exo) / denom
                     Jx[i, j, k] = aJ * Jx[i, j, k] + bJ * (exn + exo)
                     # Ey: curl_y H = dHx/dz (CPML) - dHz/dx
                     dHz_dx = (Hz[i, j, k] - Hz[im1, j, k]) / dx
@@ -812,11 +838,20 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                         sHx = dHx_dz / ke[k] + psi_Ey[i, j, k]
                     else:
                         sHx = 0.0
-                    eyn = (e0dt * eps_eff * eyo + (sHx - dHz_dx) - coef * Jy[i, j, k] - 0.5 * bJ * eyo) / denom
+                    cy = sHx - dHz_dx
+                    if has_lor:
+                        pln = C1[i, j, k] * PLy[i, j, k] + C2[i, j, k] * PLpy[i, j, k] + C3[i, j, k] * eyo
+                        cy = cy - (pln - PLy[i, j, k]) / dt
+                        PLpy[i, j, k] = PLy[i, j, k]; PLy[i, j, k] = pln
+                    eyn = (e0dt * eps_eff * eyo + cy - coef * Jy[i, j, k] - 0.5 * bJ * eyo) / denom
                     Jy[i, j, k] = aJ * Jy[i, j, k] + bJ * (eyn + eyo)
                     # Ez: curl_z H = dHy/dx - dHx/dy (transverse, no CPML)
-                    curlz = (Hy[i, j, k] - Hy[im1, j, k]) / dx - (Hx[i, j, k] - Hx[i, jm1, k]) / dy
-                    ezn = (e0dt * eps_eff * ezo + curlz - coef * Jz[i, j, k] - 0.5 * bJ * ezo) / denom
+                    cz = (Hy[i, j, k] - Hy[im1, j, k]) / dx - (Hx[i, j, k] - Hx[i, jm1, k]) / dy
+                    if has_lor:
+                        pln = C1[i, j, k] * PLz[i, j, k] + C2[i, j, k] * PLpz[i, j, k] + C3[i, j, k] * ezo
+                        cz = cz - (pln - PLz[i, j, k]) / dt
+                        PLpz[i, j, k] = PLz[i, j, k]; PLz[i, j, k] = pln
+                    ezn = (e0dt * eps_eff * ezo + cz - coef * Jz[i, j, k] - 0.5 * bJ * ezo) / denom
                     Jz[i, j, k] = aJ * Jz[i, j, k] + bJ * (ezn + ezo)
                     Ex[i, j, k] = exn; Ey[i, j, k] = eyn; Ez[i, j, k] = ezn
         # soft y-pol source + PEC (tangential Ex,Ey only); then co-located probes
@@ -902,21 +937,29 @@ def _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_p
     return outs                                             # 8-tuple of (nsteps,nx,ny) JAX arrays
 
 
-def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
+                 lor=None):
     """Run ONE 3D pass on the named backend, returning the eight probe planes as NumPy arrays (so the
     downstream FFT / R-T extraction is backend-agnostic). 'numba' = the fused threaded CPU kernel (the
-    fast 3D path); 'numpy'/'cupy' = the vectorized reference loop. (The jax 3D kernel is a follow-on.)"""
+    fast 3D path); 'numpy'/'cupy' = the vectorized reference loop. `lor`=(C1,C2,C3) per-cell Lorentz ADE
+    coefficients or None. (The jax 3D kernel does not carry the Lorentz ADE yet -> guarded upstream.)"""
     (ke, be, ce), (kh, bh, ch) = cpml
     if name == "numba":
+        has_lor = lor is not None
+        z = np.zeros_like(eps_inf)
+        C1, C2, C3 = (lor if has_lor else (z, z, z))
         return _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
-                           nsteps, k_src, k_pL, k_pR, src)
+                           nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
     if name == "jax":
+        if lor is not None:
+            raise NotImplementedError("the jax 3D backend does not carry the Lorentz ADE yet; use "
+                                      "backend='numba' or 'numpy' for a 3D Lorentz material.")
         out = _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp)
+    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -941,10 +984,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     byte-identically to vacuum at n_super=n_sub=1.
 
     backend: 'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path), 'numpy' (reference),
-    'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU."""
-    if any(L.lorentz_delta_eps != 0.0 for L in layers):
-        raise NotImplementedError("the Lorentz ADE pole is implemented in the 2D-TE kernels only; for a "
-                                  "uniform Lorentz stack use solve_fdtd_2d (dim=2). 3D is a follow-on.")
+    'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU. A Lorentz pole
+    (lorentz_delta_eps) is carried by the numpy/numba/cupy 3D kernels (per E-component); the jax 3D backend
+    does not yet, and raises if a Lorentz layer is run on it."""
     if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM/2D guard
         raise NotImplementedError("solve_fdtd_3d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={}.".format(n_super, n_sub))
@@ -972,6 +1014,7 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
 
     shape = (nx, ny, nz)
     eps_inf = np.ones(shape); wp = np.zeros(shape); gam = np.zeros(shape); chi3 = np.zeros(shape)
+    lw0 = np.zeros(shape); lgam = np.zeros(shape); ldeps = np.zeros(shape)   # Lorentz pole per cell
     zc = (np.arange(nz) + 0.5) * dz
     eps_inf[:, :, zc < pad] = n_super ** 2                   # fill the semi-infinite super/substrate pads
     eps_inf[:, :, zc >= pad + z_struct] = n_sub ** 2
@@ -981,6 +1024,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         eps_inf[:, :, m] = L.eps_inf
         wp[:, :, m] = L.drude_wp_rad_s
         gam[:, :, m] = L.drude_gamma_rad_s
+        lw0[:, :, m] = L.lorentz_w0_rad_s
+        lgam[:, :, m] = L.lorentz_gamma_rad_s
+        ldeps[:, :, m] = L.lorentz_delta_eps
         if kerr:
             chi3[:, :, m] = L.chi3_m2_V2
         z += L.thickness_m
@@ -998,17 +1044,27 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
+    # Lorentz ADE coefficients (central difference, per E-component); applied to the STRUCTURE run only.
+    # d_eps=0 everywhere -> lor=None -> the path is byte-identical to the no-Lorentz solve.
+    lor = None
+    if np.any(ldeps != 0.0):
+        den = 1.0 + lgam * dt / 2.0
+        C1 = (2.0 - lw0 ** 2 * dt ** 2) / den
+        C2 = (lgam * dt / 2.0 - 1.0) / den
+        C3 = (EPS0 * ldeps * lw0 ** 2 * dt ** 2) / den
+        lor = (C1, C2, C3)
+
     cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched super (low z) + sub (high z)
     cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference
     name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
-    def run(ei, w, g_, c3, cpml):
-        return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
+    def run(ei, w, g_, c3, cpml, lor=None):
+        return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp, lor)
 
     exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
         n_super ** 2 * one, zero, zero, zero, cpml_ref)                  # homogeneous-superstrate reference
-    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct)  # struct
+    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor)  # struct
 
     f = np.fft.rfftfreq(nsteps, dt)
     # 0-order specular co-pol (E_y) from the x,y-MEAN field (== the 1D two-run method)
