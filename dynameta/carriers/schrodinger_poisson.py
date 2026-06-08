@@ -223,7 +223,8 @@ class SchrodingerPoisson1D:
                                 max_outer: int = 60, tol_V: float = 1e-4,
                                 n_states: Optional[int] = None, bound_tol: float = 1e-3,
                                 relax: float = 0.7, alpha_np_per_eV: float = 0.0,
-                                neumann_left: bool = False, verbose: bool = False):
+                                neumann_left: bool = False, bulk_buffer_m: float = 0.0,
+                                verbose: bool = False):
         """Self-consistent solve on the FULL grid (Dirichlet phi at both ends).
         Poisson: d/dz(eps eps0 dphi/dz) = -q (N_D+ - n), electron PE U = -q*phi + U_band.
         The Trellakis predictor-corrector folds an a-priori quantum density that rigidly
@@ -260,10 +261,51 @@ class SchrodingerPoisson1D:
         density is filled from the Neumann eigenstates. Default False = Dirichlet psi at both ends,
         byte-identical to before.
 
+        `bulk_buffer_m`: an OPEN / TRANSPARENT body boundary (replaces the hard Neumann wall). A
+        zero-flux Neumann body forces a wavefunction ANTINODE at z=0 (density PILE-UP), and a Dirichlet
+        body forces a node (DEAD LAYER) -- neither recovers the bulk smoothly. With bulk_buffer_m > 0 a
+        field-free bulk buffer of that length (same grid spacing, doping = the body doping, flat band) is
+        prepended to the body side and the solve runs on the EXTENDED grid (Dirichlet at the FAR buffer
+        end = the bulk reference). The physical body node is then INTERIOR, far from any wall, so its
+        density relaxes to the bulk n_bg with NO boundary layer (the buffer mimics the semi-infinite
+        bulk -- the task's "bulk buffer" open BC). phi and n are returned on the ORIGINAL grid (buffer
+        stripped); the SubbandResult spans the extended grid. Mutually exclusive with neumann_left (the
+        buffer IS the open body boundary). Use ~5-15 nm for a degenerate accumulation layer.
+
         Returns (phi_V, n_m3, SubbandResult). The result carries `.converged` (bool):
         if the outer loop did not reach tol_V in max_outer iterations, `.converged` is
         False and a warning is emitted -- the returned (phi, n) is NOT trustworthy and
         is sensitive to max_outer (audit SP-1). Callers should check it."""
+        if bulk_buffer_m and bulk_buffer_m > 0.0:
+            # OPEN / TRANSPARENT body BC: prepend a field-free bulk buffer on the body side, solve on the
+            # extended grid (Dirichlet far end = bulk reference), and strip the buffer from the returned
+            # phi/n. The physical body node becomes interior -> recovers n_bg with no pile-up/dead-layer.
+            if neumann_left:
+                raise ValueError("solve_self_consistent: bulk_buffer_m and neumann_left are mutually "
+                                  "exclusive (the bulk buffer IS the open body boundary; the Neumann "
+                                  "wall is the pile-up BC it replaces).")
+            hb = self.h
+            n_buf = max(1, int(round(float(bulk_buffer_m) / hb)))
+            z_buf = self.z[0] - hb * np.arange(n_buf, 0, -1)       # n_buf nodes below z[0], spacing h
+            z_ext = np.concatenate([z_buf, self.z])
+            Nd0 = np.asarray(doping_m3, dtype=np.float64)
+            Nd_ext = np.concatenate([np.full(n_buf, Nd0[0]), Nd0])  # field-free bulk doping in the buffer
+            m_ext = None
+            if m_eff_z_kg is not None:
+                me = np.asarray(m_eff_z_kg, dtype=np.float64)
+                m_ext = np.concatenate([np.full(n_buf, me[0]), me])
+            U_ext = None
+            if U_init_J is not None:
+                Ui = np.asarray(U_init_J, dtype=np.float64)
+                U_ext = np.concatenate([np.full(n_buf, -Q * phi_left_V), Ui])
+            ext = SchrodingerPoisson1D(z_ext, self.m, T_K=self.T, g_s=self.g_s, g_v=self.g_v)
+            phi_e, n_e, res_e = ext.solve_self_consistent(
+                eps_r=eps_r, doping_m3=Nd_ext, E_F_J=E_F_J, U_init_J=U_ext,
+                phi_left_V=phi_left_V, phi_right_V=phi_right_V, m_eff_z_kg=m_ext,
+                max_outer=max_outer, tol_V=tol_V, n_states=n_states, bound_tol=bound_tol,
+                relax=relax, alpha_np_per_eV=alpha_np_per_eV, neumann_left=False,
+                bulk_buffer_m=0.0, verbose=verbose)
+            return phi_e[n_buf:], n_e[n_buf:], res_e   # strip the buffer -> the ORIGINAL grid
         N = self.z.size
         h = self.h
         ee = eps_r * EPS0
