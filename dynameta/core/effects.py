@@ -496,7 +496,14 @@ class LiquidCrystalModel:
     flow correctly through the tensor-eps FEM. The off-diagonal solve is supported end-to-end via the
     solver's explicit UPML path (the earlier failure was mesh.SetPML's coordinate stretch being wrong
     for an anisotropic medium, not an assembly defect); the tilted ordinary wave is tilt-invariant and
-    the extraordinary wave matches n_eff(theta) (validation/lc_tilted_fem.py)."""
+    the extraordinary wave matches n_eff(theta) (validation/lc_tilted_fem.py).
+
+    DIRECTOR SOURCE: 'director_angle_rad' is the tilt measured FROM THE PLATE PLANE (0 = planar/in-plane,
+    pi/2 = homeotropic/along z). To compute it from an applied voltage (statics) or its time evolution
+    (switching), use carriers.lc_director.director_profile / director_profile_bvp (two-constant K11/K33,
+    flexo, Poisson voltage-division, planar/cyl) or carriers.lc_dynamics.LCDynamics (Erickson-Leslie),
+    then bridge with carriers.lc_director.director_to_extra_fields (which applies the pi/2 field-axis ->
+    plate-plane convention) and drop the result into the optics field bundle."""
     n_o: float
     n_e: float
 

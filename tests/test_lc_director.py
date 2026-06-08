@@ -138,3 +138,32 @@ def test_director_to_extra_fields_bridge():
     assert "director_angle_rad" in out
     assert out["director_angle_rad"][0] == pytest.approx(0.5 * np.pi)   # homeotropic field-axis -> optic pi/2
     assert out["director_angle_rad"][1] == pytest.approx(0.0)           # planar field-axis -> optic 0
+
+
+def test_bridge_into_liquid_crystal_model_is_uniaxial_with_right_axis():
+    # the convention seam end-to-end: a field-axis director -> director_to_extra_fields ->
+    # LiquidCrystalModel eps must be uniaxial {n_o^2, n_o^2, n_e^2} with the extraordinary axis at
+    # theta_optic = pi/2 - theta_field.
+    from dynameta.core.effects import LiquidCrystalModel
+    n_o, n_e = 1.56, 1.92
+    lcm = LiquidCrystalModel(n_o=n_o, n_e=n_e)
+    th_field = np.array([0.0, np.radians(30.0), 0.5 * np.pi])      # homeotropic, 30 deg, planar
+    eps = np.asarray(lcm.eps(director_to_extra_fields(th_field), 1.5e-6)).real
+    for i, thf in enumerate(th_field):
+        w, V = np.linalg.eigh(eps[i])
+        assert np.allclose(np.sort(w), np.sort([n_o ** 2, n_o ** 2, n_e ** 2]), atol=1e-9)
+        ext = V[:, int(np.argmax(w))]
+        th_opt = 0.5 * np.pi - float(thf)
+        want = np.array([np.cos(th_opt), 0.0, np.sin(th_opt)])
+        assert abs(abs(float(np.dot(ext, want))) - 1.0) < 1e-6
+
+
+def test_cyl_geometry_bvp_tilts_above_threshold():
+    # coaxial cell, Poisson voltage division: a moderate drive tilts the midplane toward the field
+    # (theta drops well below the planar theta_b).
+    thb = np.radians(89.9)
+    r = director_profile_bvp(V_app=3.0, K11=17e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0,
+                             geometry="cyl", a=51.5e-9, b=181.5e-9, t_in=10e-9, t_out=10e-9,
+                             eps_in=7.5, eps_out=7.5, theta_b_rad=thb, field_model="poisson", nz=81)
+    assert r.V_lc < 3.0                                            # series fixed layers drop part of V
+    assert r.theta_field_rad[r.theta_field_rad.size // 2] < thb - np.radians(20.0)
