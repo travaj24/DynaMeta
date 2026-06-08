@@ -21,6 +21,23 @@ def test_infinite_square_well():
     assert np.allclose(E, E_an, rtol=2e-4)
 
 
+def test_neumann_left_box_eigenvalues_and_nonzero_body():
+    # Neumann (z=0) + Dirichlet (z=L) box: E_n = (n-1/2)^2 pi^2 hbar^2 / (2 m L^2), and the
+    # ground state is COSINE-like -> NON-zero at the Neumann body (vs the Dirichlet wall's psi=0).
+    L = 10e-9
+    z = np.linspace(0.0, L, 801)
+    sp = SchrodingerPoisson1D(z, MSTAR, T_K=300.0)
+    E, V, _ = sp.solve_schrodinger(np.zeros_like(z), n_states=4, neumann_left=True)
+    half = (np.arange(1, 5) - 0.5)
+    E_an = half ** 2 * np.pi ** 2 * HBAR ** 2 / (2.0 * MSTAR * L ** 2)
+    assert np.allclose(E, E_an, rtol=3e-3)
+    assert abs(V[0, 0]) > 0.3 * np.abs(V[:, 0]).max()        # ground state non-zero at the Neumann body
+    # The Neumann (n-1/2)^2 spectrum is DISTINCT from the Dirichlet n^2 box: the Neumann ground state
+    # sits at ~(1/2)^2 = 1/4 of the Dirichlet ground state (a clean signature it is genuinely Neumann).
+    Ed, _, _ = sp.solve_schrodinger(np.zeros_like(z), n_states=4)
+    assert E[0] < 0.5 * Ed[0]
+
+
 def test_triangular_well_airy():
     sp_special = pytest.importorskip("scipy.special")
     F, Zmax = 1.0e8, 40e-9

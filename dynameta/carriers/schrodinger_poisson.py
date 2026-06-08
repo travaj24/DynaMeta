@@ -103,11 +103,15 @@ class SchrodingerPoisson1D:
     # ---- Schrodinger ----
     def solve_schrodinger(self, U_J: np.ndarray, *,
                             m_eff_z_kg: Optional[np.ndarray] = None,
-                            n_states: Optional[int] = None
+                            n_states: Optional[int] = None,
+                            neumann_left: bool = False
                             ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Bound states of -hbar^2/2 d/dz(1/m dpsi/dz) + U psi = E psi with Dirichlet
-        psi=0 at both ends (BenDaniel-Duke; mass at half-nodes for position-dependent
-        m). Returns (E_J sorted ascending, psi interior-normalized, z_interior)."""
+        """Bound states of -hbar^2/2 d/dz(1/m dpsi/dz) + U psi = E psi (BenDaniel-Duke; mass at
+        half-nodes for position-dependent m). Default: Dirichlet psi=0 at BOTH ends. neumann_left=True:
+        a zero-flux (Neumann, dpsi/dz=0) BODY boundary at z=0 -- node 0 is then a free unknown (a
+        half-cell BenDaniel-Duke operator with only the right face), so psi need NOT vanish at the body
+        (the bulk side is a contact into the semiconductor, not an infinite wall). Removes the ~0.4 nm
+        body-side Dirichlet dead layer. Returns (E_J sorted ascending, psi normalized, z_nodes)."""
         from scipy.linalg import eigh_tridiagonal
         U = np.asarray(U_J, dtype=np.float64)
         m_node = (np.full_like(self.z, self.m) if m_eff_z_kg is None
@@ -115,15 +119,24 @@ class SchrodingerPoisson1D:
         if np.any(~np.isfinite(m_node)) or np.any(m_node <= 0.0):
             raise ValueError("m_eff_z_kg must be finite and > 0 at every node (a non-positive "
                              "mass inverts the BenDaniel-Duke kinetic operator -> nonsense spectrum)")
-        # interior nodes 1..N-2 (Dirichlet at 0 and N-1)
-        Ui = U[1:-1]
-        zi = self.z[1:-1]
-        # half-node inverse masses
-        inv_m_half = 2.0 / (m_node[:-1] + m_node[1:])         # at i+1/2, length N-1
+        # half-node inverse masses at faces j+1/2 (between node j and j+1), length N-1
+        inv_m_half = 2.0 / (m_node[:-1] + m_node[1:])
         c = HBAR ** 2 / (2.0 * self.h ** 2)
-        # diagonal_i = c*(inv_m_{i-1/2} + inv_m_{i+1/2}) + U_i ; offdiag = -c*inv_m_{i+1/2}
-        diag = c * (inv_m_half[:-1] + inv_m_half[1:]) + Ui    # length N-2
-        offd = -c * inv_m_half[1:-1]                           # length N-3
+        if neumann_left:
+            # unknown nodes 0..N-2 (Dirichlet psi=0 only at z=L); node 0 keeps ONLY its right face
+            # (zero-flux left boundary) -> diag[0] = c inv_m_{1/2} + U_0.
+            Ui = U[:-1]; zi = self.z[:-1]
+            diag = np.empty(self.z.size - 1)
+            diag[0] = c * inv_m_half[0] + Ui[0]
+            diag[1:] = c * (inv_m_half[:-1] + inv_m_half[1:]) + Ui[1:]   # nodes 1..N-2
+            offd = -c * inv_m_half[:-1]                          # off (0,1),(1,2),...,(N-3,N-2); length N-2
+        else:
+            # interior nodes 1..N-2 (Dirichlet at 0 and N-1)
+            Ui = U[1:-1]
+            zi = self.z[1:-1]
+            # diagonal_i = c*(inv_m_{i-1/2} + inv_m_{i+1/2}) + U_i ; offdiag = -c*inv_m_{i+1/2}
+            diag = c * (inv_m_half[:-1] + inv_m_half[1:]) + Ui    # length N-2
+            offd = -c * inv_m_half[1:-1]                           # length N-3
         # Compute ONLY the lowest n_states eigenpairs (select='i', bisection + inverse iteration)
         # instead of the full spectrum -- ~4x faster for n_states << N and identical to machine
         # precision (eigenvalues bit-equal; eigenvectors equal up to sign, and all downstream use
@@ -143,7 +156,8 @@ class SchrodingerPoisson1D:
                  m_eff_z_kg: Optional[np.ndarray] = None,
                  n_states: Optional[int] = None,
                  bound_tol: float = 1e-3,
-                 alpha_np_per_eV: float = 0.0) -> SubbandResult:
+                 alpha_np_per_eV: float = 0.0,
+                 neumann_left: bool = False) -> SubbandResult:
         """Electron density n(z) from degenerate 2D sub-bands filled to E_F:
             n(z) = sum_i (g_s g_v m* kT / (2 pi hbar^2)) ln(1+exp((E_F-E_i)/kT)) |psi_i(z)|^2
         Unbound states (psi not ~0 at the domain edge) are discarded. Returns a
@@ -154,7 +168,8 @@ class SchrodingerPoisson1D:
         eps), so the sheet density n_s,i = (g_s g_v m*0/2 pi hbar^2) Int (1+2 alpha eps)
         f(E_i+eps) deps (numerically). alpha=0 reduces to the parabolic kT*ln(1+e^eta).
         Captures ITO's band flattening (heavier DOS mass at high density)."""
-        E, psi, zi = self.solve_schrodinger(U_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states)
+        E, psi, zi = self.solve_schrodinger(U_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states,
+                                            neumann_left=neumann_left)
         # Completeness guard (anti-silent-failure): if n_states truncated the ladder, the HIGHEST
         # SOLVED sub-band is still at/below E_F, so occupied states above it were never solved and
         # n(z) is silently UNDER-counted (verified ~27% at 150 nm / 1e27 m^-3 with n_states=80).
@@ -168,8 +183,12 @@ class SchrodingerPoisson1D:
                 "the occupied sub-band ladder and UNDER-counts the density. Increase "
                 "n_states.".format(E.size - 1, E[-1] / Q, E_F_J / Q,
                                    (E_F_J - E[-1]) / (KB * self.T), n_states), stacklevel=2)
-        # keep states that are actually localized (small amplitude at both edges)
-        edge = np.maximum(np.abs(psi[0, :]), np.abs(psi[-1, :])) * np.sqrt(self.h)
+        # keep states that are actually localized (small amplitude at the Dirichlet edge[s]). With a
+        # Neumann body (node 0 free), psi need NOT vanish at z=0, so only the RIGHT (gate) edge is a wall.
+        if neumann_left:
+            edge = np.abs(psi[-1, :]) * np.sqrt(self.h)
+        else:
+            edge = np.maximum(np.abs(psi[0, :]), np.abs(psi[-1, :])) * np.sqrt(self.h)
         keep = edge < bound_tol
         if not np.any(keep):
             keep = np.zeros(E.size, dtype=bool); keep[0] = True   # keep ground state at least
@@ -204,7 +223,7 @@ class SchrodingerPoisson1D:
                                 max_outer: int = 60, tol_V: float = 1e-4,
                                 n_states: Optional[int] = None, bound_tol: float = 1e-3,
                                 relax: float = 0.7, alpha_np_per_eV: float = 0.0,
-                                verbose: bool = False):
+                                neumann_left: bool = False, verbose: bool = False):
         """Self-consistent solve on the FULL grid (Dirichlet phi at both ends).
         Poisson: d/dz(eps eps0 dphi/dz) = -q (N_D+ - n), electron PE U = -q*phi + U_band.
         The Trellakis predictor-corrector folds an a-priori quantum density that rigidly
@@ -234,6 +253,13 @@ class SchrodingerPoisson1D:
         nonparabolic-CONSISTENT (not a post-hoc re-fill of a parabolic potential). alpha=0 is the
         parabolic solve, byte-identical to before.
 
+        `neumann_left`: a zero-flux (Neumann) BODY boundary at z=0 for the SCHRODINGER only (psi need
+        not vanish at the body -> removes the ~0.4 nm Dirichlet dead layer; the body is a contact into
+        the bulk, not an infinite wall). The POISSON stays Dirichlet (phi[0]=phi_left_V pins the bulk
+        reference, so the body density is the bulk n_bg, not a floating value); the freed body node's
+        density is filled from the Neumann eigenstates. Default False = Dirichlet psi at both ends,
+        byte-identical to before.
+
         Returns (phi_V, n_m3, SubbandResult). The result carries `.converged` (bool):
         if the outer loop did not reach tol_V in max_outer iterations, `.converged` is
         False and a warning is emitted -- the returned (phi, n) is NOT trustworthy and
@@ -241,6 +267,7 @@ class SchrodingerPoisson1D:
         N = self.z.size
         h = self.h
         ee = eps_r * EPS0
+        lo = 0 if neumann_left else 1                         # first UNKNOWN node (0 = Neumann body)
         Nd = np.asarray(doping_m3, dtype=np.float64)
         U_band = np.zeros(N)                                  # band-edge offset (0 for single material)
         # initial potential: linear ramp between the Dirichlet values
@@ -264,7 +291,7 @@ class SchrodingerPoisson1D:
         for it in range(max_outer):
             U = -Q * phi + U_band
             res = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol,
-                               alpha_np_per_eV=alpha_np_per_eV)
+                               alpha_np_per_eV=alpha_np_per_eV, neumann_left=neumann_left)
             E_k, psi_k = res.energies_J.copy(), res.psi.copy()
             ns_pref = self.g_s * self.g_v * self.m * kT / (2.0 * np.pi * HBAR ** 2)
             phi_k = phi.copy()
@@ -274,11 +301,13 @@ class SchrodingerPoisson1D:
             from scipy.linalg import solve_banded
             phi_in = phi.copy()
             inner_ok = True
+            # POISSON stays Dirichlet at the body (phi[0]=phi_left pins the bulk reference, so n[0]=n_bg);
+            # a Neumann body only frees the SCHRODINGER psi (no dead layer), so the eigenstates carry an
+            # extra body row 0 -- use its INTERIOR rows (1..N-2) for the Poisson a-priori density.
             for _newton in range(40):
-                Uloc = -Q * phi_in + U_band
-                # a-priori quantum density with potential-shifted sub-band energies
+                pk = psi_k[1:] if neumann_left else psi_k      # interior rows (drop the body node)
                 shift = -Q * (phi_in - phi_k)                  # E_i(phi) ~ E_i^k + (U-U^k); U=-q phi
-                arg = (E_F_J - (E_k[None, :] + shift[1:-1, None])) / kT
+                arg = (E_F_J - (E_k[None, :] + shift[1:-1, None])) / kT   # interior nodes 1..N-2
                 F0 = _fermi_log(arg)                           # complete FD order 0 (n_int, n_states)
                 f = 1.0 / (1.0 + np.exp(-np.clip(arg, -700, 700)))   # Fermi function = dF_0/dx
                 if a_np > 0.0:
@@ -291,9 +320,9 @@ class SchrodingerPoisson1D:
                 else:
                     occ = ns_pref * F0                         # (n_int, n_states)
                     dns_dphi = (ns_pref * Q / kT) * f          # d(arg)/dphi = q/kT
-                n_int = np.sum((np.abs(psi_k) ** 2) * occ, axis=1)   # (n_int,)
-                dn_dphi = np.sum((np.abs(psi_k) ** 2) * dns_dphi, axis=1)
-                # residual of eps0 eps phi'' = -q(Nd - n)  on interior nodes
+                n_int = np.sum((np.abs(pk) ** 2) * occ, axis=1)   # (n_int,)
+                dn_dphi = np.sum((np.abs(pk) ** 2) * dns_dphi, axis=1)
+                # residual of eps0 eps phi'' = -q(Nd - n) on interior nodes
                 lap = (phi_in[:-2] - 2.0 * phi_in[1:-1] + phi_in[2:]) / h ** 2
                 R = ee * lap + Q * (Nd[1:-1] - n_int)
                 # Jacobian: ee * D2 - q * dn/dphi  (D2 tin/diag)
@@ -331,8 +360,8 @@ class SchrodingerPoisson1D:
                 "iterations.".format(max_outer, "; ".join(why)), stacklevel=2)
         U = -Q * phi + U_band
         result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol,
-                              alpha_np_per_eV=alpha_np_per_eV)
+                              alpha_np_per_eV=alpha_np_per_eV, neumann_left=neumann_left)
         result.converged = converged
         n_full = np.zeros(N)
-        n_full[1:-1] = result.density_m3
+        n_full[lo:-1] = result.density_m3                      # nodes lo..N-2 (lo=0 keeps the body node)
         return phi, n_full, result

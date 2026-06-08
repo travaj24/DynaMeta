@@ -60,6 +60,7 @@ class SchrodingerPoissonCarrier:
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
                  oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
                  alpha_np_per_eV: float = 0.0, g_s: int = 2, g_v: int = 1,
+                 neumann_body: bool = False,
                  surface_potential_of_gate: Optional[Callable[[float], float]] = None,
                  surface_potential_xy: Optional[Callable[[float, float, float], float]] = None) -> None:
         self.semi_thk_m = float(semi_thk_m)
@@ -79,6 +80,11 @@ class SchrodingerPoissonCarrier:
         # eps. The self-consistent potential and the bulk E_F stay parabolic (so the bulk
         # density may shift ~by the DOS enhancement); 0 = parabolic (default).
         self.alpha_np = float(alpha_np_per_eV)
+        # Neumann (zero-flux) BODY boundary at z=0 for the Schrodinger solve: psi need not vanish at
+        # the body (a contact into the bulk, not an infinite wall), removing the ~0.4nm Dirichlet
+        # dead layer; the Poisson keeps the Dirichlet body reference so n[body] is the bulk n_bg. (A
+        # hard Neumann wall has its own boundary pile-up; both are far from the gate-side ENZ.)
+        self.neumann_body = bool(neumann_body)
         # gate -> semiconductor surface-potential map. Priority:
         #   1. an explicit surface_potential_of_gate callable;
         #   2. else, if a gate oxide is given, the physical series-capacitor division
@@ -140,7 +146,7 @@ class SchrodingerPoissonCarrier:
             eps_r=self.eps_static, doping_m3=Nd, E_F_J=self.E_F_J,
             phi_left_V=0.0, phi_right_V=psi_s, n_states=self.n_states,
             bound_tol=1e9, max_outer=80, tol_V=1e-5,          # slab mode: keep all sub-bands
-            alpha_np_per_eV=self.alpha_np)
+            alpha_np_per_eV=self.alpha_np, neumann_left=self.neumann_body)
         return phi, n_z
 
     def _gate_to_psi_s(self, vg: float) -> float:
