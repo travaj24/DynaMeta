@@ -158,6 +158,9 @@ def fit_drude_lorentz(lambdas_m, eps_values, *, with_drude=True):
                 continue
             if best is None or sol.cost < best.cost:
                 best = sol
+    if best is None:                                        # every multi-start failed (degenerate input)
+        raise RuntimeError("fit_drude_lorentz: all optimization starts failed -- the eps_values are likely "
+                           "degenerate (NaN/inf/constant); check the input or use fit_drude_to_eps.")
     einf, wp, gd, w0, gl, de = best.x
     return dict(eps_inf=float(einf), drude_wp_rad_s=float(wp), drude_gamma_rad_s=float(gd),
                 lorentz_w0_rad_s=float(w0), lorentz_gamma_rad_s=float(gl), lorentz_delta_eps=float(de))
