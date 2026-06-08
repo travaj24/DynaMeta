@@ -81,10 +81,18 @@ class TabulatedOptical(OpticalModel):
         self.lambda_m = np.asarray(self.lambda_m, dtype=np.float64)[order]
         self.eps_complex = np.asarray(self.eps_complex, dtype=np.complex128)[order]
 
-    def eps(self, lambda_m: float, *, n_m3=None):
-        re = np.interp(lambda_m, self.lambda_m, self.eps_complex.real)
-        im = np.interp(lambda_m, self.lambda_m, self.eps_complex.imag)
-        v = complex(re, im)
+    def eps(self, lambda_m, *, n_m3=None):
+        lam = np.asarray(lambda_m, dtype=np.float64)
+        lo, hi = float(self.lambda_m[0]), float(self.lambda_m[-1])
+        if float(np.min(lam)) < lo * (1.0 - 1e-9) or float(np.max(lam)) > hi * (1.0 + 1e-9):
+            # no SILENT extrapolation (np.interp clamps to the endpoints) -- raise like the
+            # RefractiveIndexInfoOptical sibling; the table edge is not a valid eps off-band.
+            raise ValueError(
+                "TabulatedOptical.eps: wavelength outside the tabulated range [{:.4g}, {:.4g}] m -- "
+                "no silent extrapolation (extend the table or use a dispersion model).".format(lo, hi))
+        re = np.interp(lam, self.lambda_m, self.eps_complex.real)
+        im = np.interp(lam, self.lambda_m, self.eps_complex.imag)
+        v = complex(re, im) if lam.ndim == 0 else (re + 1j * im).astype(np.complex128)  # vectorized
         return v if n_m3 is None else np.full(np.shape(n_m3), v, dtype=np.complex128)
 
 

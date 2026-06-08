@@ -51,6 +51,14 @@ def _design_fingerprint(design) -> bytes:
         parts += [L.name, repr(float(L.thickness_m)), str(getattr(L, "background_material", "")),
                   str(len(getattr(L, "inclusions", []) or []))]
     parts += [str(design.stack.superstrate_material), str(design.stack.substrate_material)]
+    # the optical INCIDENCE spec changes R/T but NOT the eps grid -- it MUST be in the key, else an
+    # angle/polarization/side sweep silently serves the cached result for a different angle (audit HIGH).
+    opt = getattr(design, "optical", None)
+    parts += ["opt", str(getattr(opt, "polarization", "")), str(getattr(opt, "incidence_angle_deg", 0.0)),
+              str(getattr(opt, "azimuth_deg", 0.0)), str(getattr(opt, "incidence_side", ""))]
+    # the FEM polynomial order changes the FEM result for the same eps/geometry.
+    m3 = getattr(design, "mesh_3d", None)
+    parts += ["fem", str(getattr(m3, "fem_order", ""))]
     return hashlib.sha1("|".join(parts).encode("utf-8")).digest()
 
 
