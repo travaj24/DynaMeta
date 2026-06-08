@@ -117,6 +117,52 @@ def fit_drude_to_eps(lambdas_m, eps_values, *, eps_inf0=None, wp0=None, gamma0=N
     return float(einf), float(wp), float(g)
 
 
+def fit_drude_lorentz(lambdas_m, eps_values, *, with_drude=True):
+    """Least-squares fit of ONE Drude + ONE Lorentz pole to sampled complex eps(lambda):
+      eps(w) = eps_inf - wp^2/(w^2 + i w gd) + d_eps * w0^2/(w0^2 - w^2 - i w gl)
+    (the FDTDLayer convention, exp(-i w t), Im(eps) > 0 = loss). The Lorentz pole captures a bound-electron
+    / interband resonance the bare Drude cannot, so a metal-with-interband (Au-like) or a resonant
+    dielectric is reproduced ACROSS the band, not just at one lambda. Returns an FDTDLayer-ready dict
+    {eps_inf, drude_wp_rad_s, drude_gamma_rad_s, lorentz_w0_rad_s, lorentz_gamma_rad_s, lorentz_delta_eps}.
+    with_drude=False fits a pure Lorentz (a lossy resonant dielectric)."""
+    from scipy.optimize import least_squares
+    lam = np.asarray(lambdas_m, dtype=float).ravel()
+    eps = np.asarray(eps_values, dtype=complex).ravel()
+    w = 2.0 * math.pi * C_LIGHT / lam
+    wmid = float(np.median(w)); wmax = float(np.max(w)); wmin = float(np.min(w))
+
+    def model(p):
+        einf, wp, gd, w0, gl, de = p
+        return einf - wp ** 2 / (w ** 2 + 1j * w * gd) + de * w0 ** 2 / (w0 ** 2 - w ** 2 - 1j * w * gl)
+
+    def resid(p):
+        d = model(p) - eps
+        return np.concatenate([d.real, d.imag])
+
+    lo = [0.0, 0.0, 1.0e10, 0.1 * wmid, 1.0e10, 0.0]
+    hi = [60.0, (60.0 * wmax) if with_drude else 1.0e-3, 1.0e17, 5.0 * wmax, 1.0e17, 60.0]
+    # the params span ~15 decades (eps_inf~1 vs w0~1e15); x_scale tells least_squares each param's
+    # characteristic size so the trust region is well-conditioned (else it stalls at the start).
+    x_scale = [1.0, wmax, wmax, wmax, wmax, 1.0]
+    wp0 = (0.5 * wmid) if with_drude else 0.0
+    # MULTI-START: a Lorentz resonance makes Re(eps) overshoot, so a single start (esp. eps_inf=max(Re))
+    # lands in a local minimum. Scan w0 across the band and a few eps_inf guesses, keep the lowest cost.
+    einf_guesses = [max(1.0, float(np.median(eps.real))), 1.0, max(1.0, float(eps.real[np.argmax(w)]))]
+    best = None
+    for w0g in np.linspace(wmin, wmax, 6):
+        for eg in einf_guesses:
+            p0 = [eg, wp0, 0.1 * wmid, float(w0g), 0.1 * wmid, 0.5]
+            try:
+                sol = least_squares(resid, p0, bounds=(lo, hi), x_scale=x_scale, max_nfev=4000)
+            except Exception:                              # pragma: no cover - a degenerate start
+                continue
+            if best is None or sol.cost < best.cost:
+                best = sol
+    einf, wp, gd, w0, gl, de = best.x
+    return dict(eps_inf=float(einf), drude_wp_rad_s=float(wp), drude_gamma_rad_s=float(gd),
+                lorentz_w0_rad_s=float(w0), lorentz_gamma_rad_s=float(gl), lorentz_delta_eps=float(de))
+
+
 def _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m, *, eps_band_by_region=None,
                                       n_fit=7):
     """Like design_to_fdtd_layers but DISPERSIVE: each uniform layer's eps(lambda) is sampled across the
