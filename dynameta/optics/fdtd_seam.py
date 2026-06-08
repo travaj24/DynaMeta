@@ -246,15 +246,20 @@ def design_has_inclusions(design):
     return any(getattr(L, "inclusions", None) for L in design.stack.layers)
 
 
-def make_structured_lateral(design, lambda_m, *, eps_by_region=None):
+def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0):
     """For a laterally-STRUCTURED design, return (layers_for_grid, lateral_fn): `layers_for_grid` are the
     superstrate-first FDTDLayers (eps_inf = the layer's MAX real eps, for grid sizing / z-placement; no
     Drude -> the lateral path is lossless), and `lateral_fn(nx,ny,nz,zc,pad,zs)` paints the real
-    cross-section eps onto the (nx,ny,nz) eps_inf grid (vacuum pad; layers from z=pad superstrate-first,
-    matching solve_fdtd_3d). The lateral grid carries REAL eps only -> a lossy inclusion raises."""
+    cross-section eps onto the (nx,ny,nz) eps_inf grid. The pads are filled with the END-MEDIA eps
+    (n_super^2 / n_sub^2; default 1 = vacuum) so a STRUCTURED cell on a non-vacuum substrate (e.g.
+    metasurface-on-glass) is correct -- solve_fdtd_3d's lateral_eps_inf OVERWRITES the whole grid, so the
+    pads must be painted HERE (else they'd revert to vacuum and break the non-vacuum reference). Layers run
+    from z=pad superstrate-first, matching solve_fdtd_3d. The lateral grid carries REAL eps only -> a lossy
+    inclusion raises."""
     mats = design.materials
     layers_sf = list(reversed(design.stack.layers))         # incidence order: superstrate side first
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
+    ns2, nb2 = float(n_super) ** 2, float(n_sub) ** 2
 
     def _layer_max_eps(L):
         vals = [_layer_bg_eps(L, lambda_m, mats, eps_by_region)]
@@ -267,6 +272,8 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None):
         xs, ys = _cell_axes(nx, ny, px, py)
         X, Y = np.meshgrid(xs, ys, indexing="ij")           # (nx,ny)
         eps = np.ones((nx, ny, nz))
+        eps[:, :, zc < pad] = ns2                           # superstrate semi-infinite pad (n_super^2)
+        eps[:, :, zc >= pad + z_struct] = nb2               # substrate semi-infinite pad (n_sub^2)
         z = pad
         for L in layers_sf:
             zmask = (zc >= z) & (zc < z + L.thickness_m)
@@ -308,12 +315,6 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         if structured and dim != 3:
             raise NotImplementedError(
                 "a laterally-structured cell (layer inclusions) needs dim=3; got dim={}.".format(dim))
-        nonvac = abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL
-        if structured and nonvac:
-            raise NotImplementedError(
-                "non-vacuum end media + a laterally-structured cell is not yet supported (the lateral "
-                "rasterizer rebuilds the eps grid and would drop the end-media pads); use a uniform stack "
-                "or the FEM/RCWA solver.")
         lo, hi = lambda_m * (1.0 - band_frac), lambda_m * (1.0 + band_frac)
         kw = dict(lambda_min_m=lo, lambda_max_m=hi, resolution=resolution, courant=courant,
                   settle=settle, n_pad_wave=n_pad_wave, backend=backend,
@@ -321,7 +322,8 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
         t_start = time.time()
         if structured:
-            layers, lateral_fn = make_structured_lateral(design, lambda_m, eps_by_region=eps_by_region)
+            layers, lateral_fn = make_structured_lateral(design, lambda_m, eps_by_region=eps_by_region,
+                                                         n_super=ns.real, n_sub=nb.real)
             res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
         elif dim == 2:
             res = solve_fdtd_2d(design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region),
