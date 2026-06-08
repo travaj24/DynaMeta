@@ -24,6 +24,14 @@ The heavy solver pipeline is NOT imported at package top level (so `import
 dynameta` stays light); import it explicitly from dynameta.pipeline.
 Advanced users can supply their own CarrierSolver / OpticalGeometryBuilder /
 OpticalSolver (see dynameta.core.interfaces).
+
+Other modules (import explicitly): dynameta.optics.fdtd / fdtd_nd / fdtd_mo / fdtd_seam
+(broadband/dispersive/MO/oblique FDTD + the sweep-aware seam), dynameta.optics.tmm_reference
+(coherent-TMM oracle), dynameta.optics.inverse_design + topology_opt (differentiable JAX-FDTD
+design), dynameta.transient_optics (coupled carrier->optics transient), dynameta.results
+(SweepResults + HDF5/Zarr save/load), dynameta.cache (persistent optical-solver cache),
+dynameta.viz (matplotlib spectra/maps), dynameta.carriers.lc_director / lc_dynamics
+(nematic LC director statics + Erickson-Leslie dynamics).
 """
 
 __version__ = "0.4.0"
@@ -52,7 +60,10 @@ from dynameta.core import (
     AnisotropicThermoOpticModel, ElectroAbsorptionModel, PCMModel, LiquidCrystalModel,
     MagnetoOpticModel,
 )
-from dynameta.analysis import resonance_dip, resonance_shift
+from dynameta.analysis import (
+    resonance_dip, resonance_shift, gate_cv, sheet_resistance_ohm_sq,
+    lumped_rc_bandwidth, switching_energy_per_area, modulator_figure_of_merit,
+)
 
 __all__ = [
     "__version__",
@@ -74,6 +85,7 @@ __all__ = [
     "PockelsEffect", "KerrEffect", "FranzKeldyshEffect", "ThermoOpticModel",
     "AnisotropicThermoOpticModel", "ElectroAbsorptionModel", "PCMModel", "LiquidCrystalModel",
     "MagnetoOpticModel",
-    # analysis
-    "resonance_dip", "resonance_shift",
+    # analysis (resonance + modulator figure-of-merit)
+    "resonance_dip", "resonance_shift", "gate_cv", "sheet_resistance_ohm_sq",
+    "lumped_rc_bandwidth", "switching_energy_per_area", "modulator_figure_of_merit",
 ]
