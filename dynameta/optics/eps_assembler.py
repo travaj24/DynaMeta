@@ -61,8 +61,8 @@ def _region_matrix_cf(ef: EpsField):
         diag_max = float(np.max(np.abs(np.diag(T))))
         # Snap sub-tolerance off-diagonals (e.g. the ~1e-17 cos(pi/2) residual of a homeotropic LC
         # director) to EXACT int 0 so they stay on the proven sparse matrix-CF path, not a tiny
-        # dense complex entry (gotcha below). Past _check_diagonal every off-diagonal is <= tol, so
-        # this yields a clean diagonal matrix for the guarded (diagonal-within-tol) cases.
+        # dense complex entry (gotcha below). GENUINE off-diagonals (|off| > tol) are kept and solved
+        # via the UPML tensor path (no rejection); only the numerical-noise residuals are snapped.
         tol = _OFFDIAG_TOL * (diag_max or 1.0)
 
         def _ent(i, j):
