@@ -9,7 +9,8 @@ from dynameta.constants import EPS0
 from dynameta.carriers.lc_director import (
     freedericksz_threshold_V, director_profile, director_profile_bvp, solve_lc_field_profile,
     compute_lc_geometry, n_local_from_theta, n_eff_from_theta_profile, eps_along_field,
-    flexo_p_along_field, director_to_extra_fields)
+    flexo_p_along_field, director_to_extra_fields,
+    haller_order_parameter, K_of_temperature, gamma1_of_temperature)
 
 K, DEPS, EP, D = 6.5e-12, 11.0, 7.0, 5e-6     # ~5CB nematic cell
 
@@ -196,6 +197,31 @@ def test_bvp_below_threshold_untilted():
                              d_planar=1e-6, theta_b_rad=np.radians(89.9), field_model="uniform", nz=81)
     mid = r.theta_field_rad[r.theta_field_rad.size // 2]
     assert abs(mid - np.radians(89.9)) < np.radians(0.5)                # stays planar below V_th
+
+
+def test_weak_anchoring_recovers_strong_and_tilts_surface():
+    thb = np.radians(89.9)
+    kw = dict(K11=17e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=1e-6, theta_b_rad=thb,
+              field_model="uniform", nz=121)
+    strong = director_profile_bvp(V_app=2.0, W_anchor_J_m2=None, **kw)
+    huge = director_profile_bvp(V_app=2.0, W_anchor_J_m2=1e2, **kw)       # b = K/W ~ 1e-13 m
+    assert abs(strong.theta_field_rad[0] - thb) < 1e-6                     # strong: surface pinned
+    assert abs(huge.theta_field_rad[0] - thb) < np.radians(0.05)          # huge W -> recovers strong
+    weak = director_profile_bvp(V_app=2.0, W_anchor_J_m2=3e-4, **kw)
+    assert (thb - weak.theta_field_rad[0]) > np.radians(5.0)              # finite W: surface tilts to field
+
+
+def test_haller_temperature_scaling():
+    T_NI = 380.0
+    assert haller_order_parameter(300.0, T_NI) > haller_order_parameter(360.0, T_NI) > 0.0
+    assert haller_order_parameter(T_NI, T_NI) == 0.0                       # S=0 at the transition
+    assert haller_order_parameter(400.0, T_NI) == 0.0                      # and above
+    # K ~ S^2 -> reduces to K_ref at T_ref, falls with T
+    assert K_of_temperature(17e-12, 300.0, T_ref_K=300.0, T_NI_K=T_NI) == pytest.approx(17e-12)
+    assert K_of_temperature(17e-12, 360.0, T_ref_K=300.0, T_NI_K=T_NI) < 17e-12
+    # gamma1 Arrhenius -> reduces to gamma_ref at T_ref, falls with T
+    assert gamma1_of_temperature(0.085, 300.0, T_ref_K=300.0, E_a_eV=0.4) == pytest.approx(0.085)
+    assert gamma1_of_temperature(0.085, 360.0, T_ref_K=300.0, E_a_eV=0.4) < 0.085
 
 
 def test_cyl_geometry_bvp_tilts_above_threshold():

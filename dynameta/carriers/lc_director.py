@@ -43,6 +43,7 @@ from dynameta.core.numerics import trapz
 __all__ = [
     "DirectorProfile", "LCGeometry", "LCStaticResult",
     "freedericksz_threshold_V", "director_profile", "director_profile_bvp",
+    "haller_order_parameter", "K_of_temperature", "gamma1_of_temperature",
     "compute_lc_geometry", "solve_lc_field_profile", "eps_along_field",
     "flexo_p_along_field", "flexo_direct_torque",
     "n_local_from_theta", "n_eff_from_theta_profile",
@@ -65,6 +66,52 @@ def freedericksz_threshold_V(K_elastic: float, dEps_static: float) -> float:
         raise ValueError("dEps_static must be > 0 (positive anisotropy required for a planar-cell "
                          "Freedericksz transition)")
     return float(np.pi * np.sqrt(float(K_elastic) / (EPS0 * float(dEps_static))))
+
+
+# -----------------------------------------------------------------------------
+# Temperature dependence of the material constants (Haller order parameter)
+# -----------------------------------------------------------------------------
+def haller_order_parameter(T_K: float, T_NI_K: float, *, beta: float = 0.22) -> float:
+    """Nematic scalar order parameter S(T) via the Haller extrapolation S = (1 - T/T_NI)^beta
+    (beta ~ 0.18-0.25 for common nematics; S -> 0 at the nematic-isotropic transition T_NI). Returns
+    0 at/above T_NI."""
+    T_K = float(T_K); T_NI_K = float(T_NI_K)
+    if not (T_NI_K > 0.0):
+        raise ValueError("T_NI_K must be > 0")
+    if T_K >= T_NI_K:
+        return 0.0
+    return float((1.0 - T_K / T_NI_K) ** float(beta))
+
+
+def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = 300.0, T_NI_K: float = 380.0,
+                     beta: float = 0.22) -> float:
+    """Frank elastic constant at temperature T from its value K_ref at T_ref. The Frank constants scale
+    as the SQUARE of the order parameter, K(T) = K_ref [S(T)/S(T_ref)]^2 (the standard mean-field result;
+    the dielectric anisotropy dEps and birefringence scale ~ S, so V_th(T) ~ sqrt(K/dEps) ~ S^(1/2),
+    but the cleanest single scaling the caller applies per-constant is this K ~ S^2). At/above T_NI K -> 0."""
+    S = haller_order_parameter(T_K, T_NI_K, beta=beta)
+    S_ref = haller_order_parameter(T_ref_K, T_NI_K, beta=beta)
+    if not (S_ref > 0.0):
+        raise ValueError("T_ref_K must be below T_NI_K (S(T_ref) > 0)")
+    return float(K_ref) * (S / S_ref) ** 2
+
+
+def gamma1_of_temperature(gamma1_ref: float, T_K: float, *, T_ref_K: float = 300.0,
+                          E_a_eV: float = 0.4, T_NI_K: "Optional[float]" = None,
+                          beta: float = 0.22) -> float:
+    """Rotational viscosity gamma1(T) = gamma1_ref * exp((E_a/kB)(1/T - 1/T_ref)) * [S(T)/S(T_ref)]
+    -- an Arrhenius activation (activation energy E_a in eV, ~0.3-0.6 eV for nematics) times the
+    order-parameter factor S (gamma1 ~ S exp(E_a/kT), Diogo-Martins). T_NI_K=None drops the S factor
+    (pure Arrhenius). gamma1 FALLS with temperature (the exp dominates the modest S decline)."""
+    from dynameta.constants import KB, Q_E
+    T_K = float(T_K); T_ref_K = float(T_ref_K)
+    arr = math.exp((float(E_a_eV) * Q_E / KB) * (1.0 / T_K - 1.0 / T_ref_K))
+    s_fac = 1.0
+    if T_NI_K is not None:
+        S = haller_order_parameter(T_K, float(T_NI_K), beta=beta)
+        S_ref = haller_order_parameter(T_ref_K, float(T_NI_K), beta=beta)
+        s_fac = (S / S_ref) if S_ref > 0.0 else 1.0
+    return float(gamma1_ref) * arr * s_fac
 
 
 @dataclass
@@ -378,7 +425,9 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                          e1: float = 0.0, e3: float = 0.0, include_flexo: bool = False,
                          flexo_self_consistent: bool = False,
                          n_o: "Optional[float]" = None, n_e: "Optional[float]" = None,
-                         opt_model: str = "extra_k_radial", rtol: float = 1e-6) -> LCStaticResult:
+                         opt_model: str = "extra_k_radial", rtol: float = 1e-6,
+                         W_anchor_J_m2: "Optional[float]" = None,
+                         theta_easy_rad: "Optional[float]" = None) -> LCStaticResult:
     """Two-constant (K11 splay / K33 bend) static director BVP at one applied voltage, FIELD-AXIS theta,
     via scipy.integrate.solve_bvp on the scaled coordinate u = z/d_lc. The Euler-Lagrange torque balance
     K_eff theta'' = -[(K11 - K33) sin cos (theta')^2 - eps0 dEps E^2 sin cos + flexo + cyl-corr] with
@@ -395,6 +444,13 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                                   t_in=t_in, t_out=t_out)
     z = geo.z_m; r = geo.r_m; d_lc = float(geo.d_lc)
     theta_b = float(theta_b_rad)
+    # finite (Rapini-Papoular) surface anchoring: W_anchor_J_m2 = the anchoring strength (J/m^2); the
+    # surface director need NOT pin to the easy axis theta_easy (default theta_b). The Euler-Lagrange
+    # NATURAL BC is a torque balance K_eff(theta) dtheta/dz = +/- (1/2) W sin(2(theta - theta_easy)) at
+    # each plate (extrapolation length b = K/W). W_anchor_J_m2 = None -> STRONG anchoring (Dirichlet
+    # theta = theta_b, byte-identical to before); W -> inf recovers it.
+    theta_easy = float(theta_easy_rad) if theta_easy_rad is not None else theta_b
+    W_anchor = float(W_anchor_J_m2) if (W_anchor_J_m2 is not None and W_anchor_J_m2 > 0.0) else None
     e1e = float(e1) if include_flexo else 0.0
     e3e = float(e3) if include_flexo else 0.0
     fsc = bool(include_flexo and flexo_self_consistent)
@@ -431,7 +487,9 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
 
     def _energy(theta, Vk):
         try:
-            th = np.asarray(theta, float).copy(); th[0] = th[-1] = theta_b
+            th = np.asarray(theta, float).copy()
+            if W_anchor is None:
+                th[0] = th[-1] = theta_b                          # strong anchoring; weak keeps surface theta
             dth = np.gradient(th, z)
             E, _v = _field_at(th, Vk)
             s = np.sin(th); c = np.cos(th)
@@ -469,13 +527,23 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
             return np.vstack((dth_du, d2))
 
         def bc(ya, yb):
-            return np.array([ya[0] - theta_b, yb[0] - theta_b], dtype=float)
+            if W_anchor is None:                                  # strong anchoring (Dirichlet)
+                return np.array([ya[0] - theta_b, yb[0] - theta_b], dtype=float)
+            # Rapini-Papoular torque balance (dtheta/dz = (dtheta/du)/d_lc): at z=0 the bulk elastic
+            # torque balances +dF_s/dtheta, at z=d it balances -dF_s/dtheta (F_s = (1/2)W sin^2(theta-easy)).
+            Ka = K11 * np.sin(ya[0]) ** 2 + K33 * np.cos(ya[0]) ** 2
+            Kb = K11 * np.sin(yb[0]) ** 2 + K33 * np.cos(yb[0]) ** 2
+            return np.array([Ka * (ya[1] / d_lc) - 0.5 * W_anchor * np.sin(2.0 * (ya[0] - theta_easy)),
+                             Kb * (yb[1] / d_lc) + 0.5 * W_anchor * np.sin(2.0 * (yb[0] - theta_easy))],
+                            dtype=float)
 
         sol = solve_bvp(fun, bc, u, y0, tol=max(float(rtol), 3e-2), max_nodes=max(5000, int(nz) * 80),
                         verbose=0)
         if not sol.success:
             raise RuntimeError(str(sol.message))
-        th = np.asarray(sol.sol(u)[0], float); th[0] = th[-1] = theta_b
+        th = np.asarray(sol.sol(u)[0], float)
+        if W_anchor is None:
+            th[0] = th[-1] = theta_b
         return th
 
     def _seeds(Vk, carried):
@@ -520,7 +588,9 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     except RuntimeError as exc:
         raise RuntimeError("director_profile_bvp failed at V={:.6g}: {}".format(float(V_app), exc))
 
-    th = carried; th[0] = th[-1] = theta_b
+    th = carried
+    if W_anchor is None:
+        th[0] = th[-1] = theta_b
     _E, V_lc = _field_at(th, float(V_app))
     neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
             if (n_o is not None and n_e is not None) else float("nan"))
