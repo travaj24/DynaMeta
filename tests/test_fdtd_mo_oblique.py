@@ -5,7 +5,7 @@ import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d_oblique
+from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d_oblique, solve_fdtd_3d_mo
 
 LMIN, LMAX = 1400e-9, 1600e-9
 
@@ -82,6 +82,36 @@ def test_oblique_jax_matches_numpy():
     m = rn.band
     assert float(np.max(np.abs(rn.R0[m] - rj.R0[m]))) < 1e-10    # differentiable scan == reference
     assert float(np.max(np.abs(rn.T0[m] - rj.T0[m]))) < 1e-10
+
+
+def test_mo_3d_reduces_to_1d_faraday():
+    # the full-vector 3D MO engine on a laterally-uniform gyrotropic slab reproduces the 1D Faraday
+    # rotation. At THIS low resolution the 3D Yee grid carries stronger numerical dispersion near the
+    # plasma band, so they only agree to a factor here -- the rigorous quantitative oracle (3D == 1D to
+    # 6e-4 deg at resolution=40) lives in validation/fdtd_3d_mo_vs_1d. This fast test pins the physics:
+    # a real rotation of the SAME sign and order of magnitude (a broken kernel is off by >10x or sign).
+    L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=4.0, drude_wp_rad_s=2.0e15,
+                drude_gamma_rad_s=1.0e14, cyclotron_wc_rad_s=3.0e14)
+    kw = dict(lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, pol="y")
+    r1 = solve_fdtd_mo_1d([L], **kw)
+    r3 = solve_fdtd_3d_mo([L], period_x_m=300e-9, period_y_m=300e-9, nx=4, ny=4, **kw)
+    f1 = r1.freqs_Hz[r1.band]
+    far1 = float(np.median(r1.faraday_deg[r1.band]))
+    far3 = float(np.median(np.interp(f1, r3.freqs_Hz[r3.band], r3.faraday_deg[r3.band])))
+    assert abs(far1) > 1.0                                        # a real rotation to compare
+    assert far1 * far3 > 0.0                                      # same sign of rotation
+    assert 0.5 < far3 / far1 < 2.0                                # same order of magnitude (low-res floor)
+
+
+def test_mo_3d_birefringent_no_cross_pol():
+    # diagonal-anisotropic (no gyration) -> NO polarization mixing in the 3D engine + energy closes.
+    L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=0.0,
+                drude_gamma_rad_s=0.0, cyclotron_wc_rad_s=0.0)
+    r = solve_fdtd_3d_mo([L], period_x_m=300e-9, period_y_m=300e-9, nx=4, ny=4,
+                         lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, pol="y")
+    b = r.band
+    assert float(np.max(np.abs(r.t_cross[b]))) < 1e-6            # no gyro -> no cross-pol
+    assert float(np.max(np.abs(r.R[b] + r.T[b] - 1.0))) < 3e-2   # lossless energy closes
 
 
 @pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
