@@ -326,7 +326,8 @@ def director_to_extra_fields(theta_field_rad) -> dict:
 
 
 def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: float, V_app: float,
-                         geo: "Optional[LCGeometry]" = None, d_planar: "Optional[float]" = None,
+                         geo: "Optional[LCGeometry]" = None, geometry: str = "planar",
+                         d_planar: "Optional[float]" = None,
                          nz: int = 201, theta_b_rad: float = math.radians(89.9),
                          field_model: str = "uniform", t_in: float = 0.0, t_out: float = 0.0,
                          eps_in: float = 7.5, eps_out: float = 7.5,
@@ -348,7 +349,8 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     if not (K11 > 0 and K33 > 0):
         raise ValueError("K11, K33 must be > 0")
     if geo is None:
-        geo = compute_lc_geometry(geometry="planar", nz=nz, d_planar=d_planar, t_in=t_in, t_out=t_out)
+        geo = compute_lc_geometry(geometry=geometry, nz=nz, d_planar=d_planar, a=a, b=b,
+                                  t_in=t_in, t_out=t_out)
     z = geo.z_m; r = geo.r_m; d_lc = float(geo.d_lc)
     theta_b = float(theta_b_rad)
     e1e = float(e1) if include_flexo else 0.0
