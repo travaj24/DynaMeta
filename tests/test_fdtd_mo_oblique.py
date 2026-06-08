@@ -73,6 +73,17 @@ def test_oblique_tm_ppol_energy_and_angle():
     assert th.max() > th.min() + 1.0                             # fixed k_par -> theta varies with f
 
 
+def test_oblique_jax_matches_numpy():
+    pytest.importorskip("jax")
+    ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0)]
+    kw = dict(period_x_m=300e-9, angle_deg=30.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, nx=4)
+    rn = solve_fdtd_2d_oblique(ol, backend="numpy", **kw)
+    rj = solve_fdtd_2d_oblique(ol, backend="jax", **kw)
+    m = rn.band
+    assert float(np.max(np.abs(rn.R0[m] - rj.R0[m]))) < 1e-10    # differentiable scan == reference
+    assert float(np.max(np.abs(rn.T0[m] - rj.T0[m]))) < 1e-10
+
+
 @pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
 def test_mo_numba_matches_numpy():
     L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=1.6e15,
