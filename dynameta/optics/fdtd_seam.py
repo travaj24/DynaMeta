@@ -442,3 +442,76 @@ def run_fdtd_sweep(design, lambdas_m, *, dim=2, resolution=32, backend="auto", e
                           solve_time_s=(float(sw.solve_time_s) if i == 0 else 0.0), t=complex(tt[i]),
                           T=float(T[i]), A=float(1.0 - R[i] - T[i]), R_flux=float(Rf[i]), T_flux=float(Tf[i]))
             for i in range(lams.size)]
+
+
+class FDTDSweepOpticalSolver:
+    """A SWEEP-AWARE optical_solver: ONE broadband FDTD per bias serves the whole wavelength sweep, instead
+    of the per-wavelength make_fdtd_optical_solver re-settling a full pulse transient at every wavelength
+    (10-100x fewer settling tails for an N-wavelength dispersive sweep). It is BOTH:
+      * a normal per-(bias,wavelength) optical_solver (the __call__, a thin wrapper over make_fdtd_optical_
+        solver) -- so it is a drop-in wherever an OpticalSolver is expected; and
+      * sweep-aware: run_pipeline detects the `solve_sweep` method and, per bias, hands it an
+        `assemble_eps_at(lambda_m)` callback + the wavelength list, so ONE broadband solve covers them all.
+
+    The per-layer eps dispersion across the band is sampled from the bias's eps (the bias-modulated carrier
+    region included) at the SAME n_fit wavelengths the dispersive layer-fitter uses, so the broadband result
+    reproduces the per-wavelength one to the Drude-fit accuracy (exact for a Drude carrier region + non-
+    dispersive dielectrics; a strongly-dispersive dielectric is the single-pole-fit limit). Uniform stacks
+    only for the dispersive band; a structured cell still freezes at the band centre (one solve regardless)."""
+
+    def __init__(self, *, dim: int = 2, resolution: int = 32, backend: str = "auto", courant: float = 0.5,
+                 settle: float = 12.0, n_pad_wave: float = 4.0, n_fit: int = 7, band_pad: float = 0.08):
+        self.dim = dim
+        self.resolution = resolution
+        self.backend = backend
+        self.courant = courant
+        self.settle = settle
+        self.n_pad_wave = n_pad_wave
+        self.n_fit = int(n_fit)
+        self.band_pad = float(band_pad)
+        self._per_wl = make_fdtd_optical_solver(dim=dim, resolution=resolution, backend=backend,
+                                                courant=courant, settle=settle, n_pad_wave=n_pad_wave)
+
+    def __call__(self, design, geometry, eps_by_region, lambda_m, n_super, n_sub):
+        """Per-(bias,wavelength) fallback (a plain OpticalSolver), so this object also works in any context
+        that calls the seam once per wavelength."""
+        return self._per_wl(design, geometry, eps_by_region, lambda_m, n_super, n_sub)
+
+    def solve_sweep(self, design, geometry, assemble_eps_at, lambdas_m, n_super, n_sub):
+        """ONE broadband FDTD for the whole sweep at a fixed bias. `assemble_eps_at(lambda_m)` returns the
+        per-layer eps_by_region dict for THIS bias at a given wavelength (run_pipeline's bridge closure);
+        it is sampled at the n_fit band wavelengths to build the per-layer dispersion, then a single
+        broadband FDTD (run_fdtd_sweep) is interpolated to each requested wavelength. Returns one
+        OpticalResult per entry of lambdas_m (same order)."""
+        lams = np.asarray(lambdas_m, dtype=float).ravel()
+        lo, hi = float(lams.min()) * (1.0 - self.band_pad), float(lams.max()) * (1.0 + self.band_pad)
+        fit_lams = np.linspace(lo, hi, self.n_fit)           # MUST match _design_to_fdtd_layers_dispersive
+        samples = [assemble_eps_at(float(l)) for l in fit_lams]
+        # build the per-layer eps band from each sample's uniform-scalar eps (bias-modulated carrier incl.);
+        # a layer without a uniform scalar at every sample falls back to its material lambda-function.
+        eps_band = {}
+        for L in design.stack.layers:
+            vals = []
+            for s in samples:
+                ef = (s or {}).get(L.name)
+                if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+                    vals.append(complex(ef.scalar))
+                else:
+                    vals = None
+                    break
+            if vals is not None:
+                eps_band[L.name] = np.asarray(vals, dtype=complex)
+        return run_fdtd_sweep(design, lams, dim=self.dim, resolution=self.resolution, backend=self.backend,
+                              eps_band_by_region=(eps_band or None), band_pad=self.band_pad,
+                              n_super=n_super, n_sub=n_sub, courant=self.courant, settle=self.settle,
+                              n_pad_wave=self.n_pad_wave, n_fit=self.n_fit)
+
+
+def make_fdtd_sweep_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
+                                   courant: float = 0.5, settle: float = 12.0, n_pad_wave: float = 4.0,
+                                   n_fit: int = 7, band_pad: float = 0.08) -> "FDTDSweepOpticalSolver":
+    """Build a SWEEP-AWARE FDTD optical_solver for run_pipeline(optical_solver=...): one broadband FDTD per
+    bias serves the whole wavelength sweep (vs the per-wavelength make_fdtd_optical_solver re-settling each
+    wavelength). See FDTDSweepOpticalSolver. Drop-in: run_pipeline auto-uses the fast sweep path."""
+    return FDTDSweepOpticalSolver(dim=dim, resolution=resolution, backend=backend, courant=courant,
+                                  settle=settle, n_pad_wave=n_pad_wave, n_fit=n_fit, band_pad=band_pad)

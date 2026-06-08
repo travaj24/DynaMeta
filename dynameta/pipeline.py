@@ -112,6 +112,9 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             len(align.fixed_eps_regions)), flush=True)
 
     solve_optics = optical_solver or _fem_optical_solver
+    # a SWEEP-AWARE optical solver (e.g. make_fdtd_sweep_optical_solver) exposes solve_sweep: ONE broadband
+    # solve per bias serves the whole wavelength list, instead of re-solving each wavelength.
+    sweep_aware = hasattr(solve_optics, "solve_sweep")
     if n_to_eps is None:
         n_to_eps = MaterialEpsMap(design.materials)
     lift = choose_lift(design.device_symmetry(), design.optical.lift,
@@ -119,21 +122,38 @@ def run_pipeline(design: Design, sweep: Sweep, *,
 
     # 3) bridge + solve per (bias, wavelength)
     rows: List[SweepRow] = []
+
+    def _emit(label, lam_nm, res):
+        rows.append(SweepRow(label, float(lam_nm), res))
+        if verbose:
+            tstr = ("T={:.4f} A={:+.4f}".format(res.T, res.A) if res.T is not None else "T=n/a")
+            print("[optics]   {} lam={:.0f}nm  R={:.4f}  {}  phase={:+.1f}  ({:.1f}s)".format(
+                label, lam_nm, res.R, tstr, res.phase_deg, res.solve_time_s), flush=True)
+
     for bp in sweep.bias_points:
         cf = fields[bp.label]
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
         # dict is reused; None keeps the carrier-only path byte-identical)
         ef = extra_fields(bp) if callable(extra_fields) else extra_fields
+        if sweep_aware and len(sweep.wavelengths_nm) > 1:
+            # FAST PATH: ONE broadband solve for THIS bias serves the whole wavelength list. Hand the solver
+            # an eps-assembler closure (so it can sample the bias's per-layer dispersion across the band).
+            lams = [float(w) * 1e-9 for w in sweep.wavelengths_nm]
+            lam_c = 0.5 * (min(lams) + max(lams))
+            n_super, n_sub = end_media_indices(design, lam_c)
+
+            def _assemble_at(lm, _cf=cf, _ef=ef):
+                return assemble_eps(_cf, align, n_to_eps, lift, lm,
+                                    mesh_regions=mesh_regions, extra_fields=_ef)
+            results = solve_optics.solve_sweep(design, geo, _assemble_at, lams, n_super, n_sub)
+            for lam_nm, res in zip(sweep.wavelengths_nm, results):
+                _emit(bp.label, lam_nm, res)
+            continue
         for lam_nm in sweep.wavelengths_nm:
             lambda_m = float(lam_nm) * 1e-9
             n_super, n_sub = end_media_indices(design, lambda_m)
             eps_by_region = assemble_eps(cf, align, n_to_eps, lift, lambda_m,
                                           mesh_regions=mesh_regions, extra_fields=ef)
             res = solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub)
-            rows.append(SweepRow(bp.label, float(lam_nm), res))
-            if verbose:
-                tstr = ("T={:.4f} A={:+.4f}".format(res.T, res.A)
-                         if res.T is not None else "T=n/a")
-                print("[optics]   {} lam={:.0f}nm  R={:.4f}  {}  phase={:+.1f}  ({:.1f}s)".format(
-                    bp.label, lam_nm, res.R, tstr, res.phase_deg, res.solve_time_s), flush=True)
+            _emit(bp.label, lam_nm, res)
     return rows
