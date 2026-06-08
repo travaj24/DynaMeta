@@ -1531,7 +1531,8 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     for L in layers:
         m = (zc >= z) & (zc < z + L.thickness_m)
         exx[:, :, m] = L.eps_xx; eyy[:, :, m] = L.eps_yy
-        ezz[:, :, m] = getattr(L, "eps_zz", None) if getattr(L, "eps_zz", None) else 0.5 * (L.eps_xx + L.eps_yy)
+        _ezz = getattr(L, "eps_zz", None)        # `is not None`, NOT truthiness: eps_zz=0 (z-ENZ) is valid
+        ezz[:, :, m] = _ezz if _ezz is not None else 0.5 * (L.eps_xx + L.eps_yy)
         wp[:, :, m] = getattr(L, "drude_wp_rad_s", 0.0)
         gam[:, :, m] = getattr(L, "drude_gamma_rad_s", 0.0)
         wc[:, :, m] = getattr(L, "cyclotron_wc_rad_s", 0.0)

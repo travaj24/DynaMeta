@@ -39,7 +39,9 @@ def weighted_objective(terms):
             v = t["value"](p)
             w = float(t.get("weight", 1.0))
             if "target" in t:
-                total = total + w * (v - t["target"]) ** 2
+                # squared-MAGNITUDE so the loss is real even if value() returns a complex amplitude
+                # (e.g. a target on r/t); for a real R/T this is identical to (v - target)^2.
+                total = total + w * jnp.abs(v - t["target"]) ** 2
             elif t.get("sense", "max") == "min":
                 total = total + w * v
             else:
@@ -138,6 +140,14 @@ def optimize_fdtd(loss_fn, params0, *, n_steps: int = 60, lr: float = 0.05, b1: 
     history = []
     for t in range(1, int(n_steps) + 1):
         loss_val, grad = vg(p)
+        # NON-FINITE guard: if the loss/grad blew up (exploded eps, bad lr), stop and return the last
+        # finite params (p is still the previous iterate here) + record nan -- do NOT silently keep
+        # stepping with NaN params (audit gap).
+        if not (bool(jnp.isfinite(loss_val)) and bool(jnp.all(jnp.isfinite(grad)))):
+            history.append(float("nan"))
+            if callback is not None:
+                callback(t, float("nan"), np.asarray(p))
+            break
         m = b1 * m + (1.0 - b1) * grad
         v = b2 * v + (1.0 - b2) * grad ** 2
         m_hat = m / (1.0 - b1 ** t)
