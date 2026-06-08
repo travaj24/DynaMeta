@@ -124,14 +124,16 @@ def _resolve_backend(backend):
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                nsteps, k_src, k_pL, k_pR, src):
+                nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
     """Fused, prange-threaded 2D TE timestep (the Numba CPU kernel) -- byte-for-byte the same physics as
-    _run_2d_te (Yee + semi-implicit Drude ADE + Kerr + CFS-CPML in z + PEC backing, periodic in x), but
-    explicit-loop + JIT-compiled so the whole step is ONE compiled pass with no per-op overhead. Returns
-    the E_y / co-located H_x probe x-lines at the left/right z-planes."""
+    _run_2d_te (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
+    in x), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass with no per-op overhead.
+    C1,C2,C3 = per-cell Lorentz ADE coefficients; has_lor gates the extra pole. Returns the E_y / co-located
+    H_x probe x-lines at the left/right z-planes."""
     nx, nz = eps_inf.shape
     Ey = np.zeros((nx, nz)); Hx = np.zeros((nx, nz)); Hz = np.zeros((nx, nz))
     Jy = np.zeros((nx, nz)); psi_hxz = np.zeros((nx, nz)); psi_eyz = np.zeros((nx, nz))
+    PL = np.zeros((nx, nz)); PLp = np.zeros((nx, nz))           # Lorentz polarization (now / previous)
     eyL = np.empty((nsteps, nx)); hxL = np.empty((nsteps, nx))
     eyR = np.empty((nsteps, nx)); hxR = np.empty((nsteps, nx))
     cmu = dt / MU0
@@ -146,18 +148,22 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                 Hx[i, k] += cmu * (d / kh[k] + psi_hxz[i, k])
             for k in range(nz):
                 Hz[i, k] += -cmu * (Ey[ip1, k] - Ey[i, k]) / dx
-        # E update (parallel over x; interior z), Drude ADE + Kerr + CPML
+        # E update (parallel over x; interior z), Drude ADE + Kerr + Lorentz ADE + CPML
         for i in prange(nx):
             im1 = i - 1 if i - 1 >= 0 else nx - 1
             for k in range(1, nz - 1):
                 dHxz = (Hx[i, k] - Hx[i, k - 1]) / dz
                 psi_eyz[i, k] = be[k] * psi_eyz[i, k] + ce[k] * dHxz
                 curl = dHxz / ke[k] + psi_eyz[i, k] - (Hz[i, k] - Hz[im1, k]) / dx
+                eyo = Ey[i, k]
+                if has_lor:                                    # Lorentz ADE: dPL/dt enters the E-update
+                    pln = C1[i, k] * PL[i, k] + C2[i, k] * PLp[i, k] + C3[i, k] * eyo
+                    curl = curl - (pln - PL[i, k]) / dt
+                    PLp[i, k] = PL[i, k]; PL[i, k] = pln
                 aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                 bJ = (EPS0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                 eps_eff = eps_inf[i, k] + chi3[i, k] * Ey[i, k] ** 2
                 denom = e0dt * eps_eff + bJ / 2.0
-                eyo = Ey[i, k]
                 eyn = (e0dt * eps_eff * eyo + curl - 0.5 * (1.0 + aJ) * Jy[i, k] - 0.5 * bJ * eyo) / denom
                 Jy[i, k] = aJ * Jy[i, k] + bJ * (eyn + eyo)
                 Ey[i, k] = eyn
@@ -213,15 +219,20 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
     return (ke, be, ce), (kh, bh, ch)
 
 
-def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
     CFS-CPML absorbing layers + PEC backing in z. Records the E_y and H_x x-lines at the left/right
     z-probe planes (for both the x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE +
-    instantaneous Kerr. `cpml` = ((kappa_e,b_e,c_e),(kappa_h,b_h,c_h)) from _cpml_z (z-broadcast)."""
+    instantaneous Kerr. `cpml` = ((kappa_e,b_e,c_e),(kappa_h,b_h,c_h)) from _cpml_z (z-broadcast).
+    `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients (a second polarization PL) or None (no pole)."""
     nx, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     ke = xp.asarray(ke); be = xp.asarray(be); ce = xp.asarray(ce)
     kh = xp.asarray(kh); bh = xp.asarray(bh); ch = xp.asarray(ch)
+    do_lor = lor is not None
+    if do_lor:
+        C1, C2, C3 = (xp.asarray(lor[0]), xp.asarray(lor[1]), xp.asarray(lor[2]))
+        PL = xp.zeros((nx, nz)); PLp = xp.zeros((nx, nz))       # Lorentz polarization (now / previous step)
     Ey = xp.zeros((nx, nz))
     Hx = xp.zeros((nx, nz))                 # Hx[i,k] at (i, k+1/2)
     Hz = xp.zeros((nx, nz))                 # Hz[i,k] at (i+1/2, k)
@@ -245,6 +256,11 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         curl = xp.zeros((nx, nz))
         curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
         curl -= (Hz - xp.roll(Hz, 1, axis=0)) / dx
+        # Lorentz ADE: PL^{n+1} = C1 PL^n + C2 PL^{n-1} + C3 E^n; its current dPL/dt enters the E-update
+        if do_lor:
+            PLnew = C1 * PL + C2 * PLp + C3 * Ey
+            curl = curl - (PLnew - PL) / dt
+            PLp = PL; PL = PLnew
         # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr
         eps_eff = eps_inf + chi3 * Ey ** 2
         denom = EPS0 * eps_eff / dt + bJ / 2.0
@@ -261,7 +277,7 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     return eyL, hxL, eyR, hxR
 
 
-def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
+def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None):
     """JAX (XLA) backend -- the SAME 2D-TE physics as _run_2d_te, expressed as a single traced, compiled
     lax.scan time loop. Two payoffs: (1) it is DIFFERENTIABLE end-to-end, so a downstream jax.grad gives
     d(R,T)/d(geometry/material) for gradient-based inverse design; (2) XLA fuses the whole step (no
@@ -269,7 +285,8 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
     (immutable .at[]) updates replace the in-place ones; float64 is forced so it matches the reference.
     Returns the four probe x-lines as JAX arrays (the dispatcher converts to NumPy for the FFT/R-T
     extraction; staying in JAX lets a caller jax.grad a scalar objective straight through the time loop,
-    the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from _cpml_z."""
+    the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from _cpml_z. `lor`=(C1,C2,C3)
+    per-cell Lorentz ADE coefficients (a second polarization PL in the carry) or None (no pole)."""
     import jax
     jax.config.update("jax_enable_x64", True)               # FDTD needs float64 to match the reference
     import jax.numpy as jnp
@@ -283,9 +300,12 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
     nx, nz = eps_inf.shape
     cmu = dt / MU0
+    do_lor = lor is not None
+    if do_lor:
+        C1, C2, C3 = jnp.asarray(lor[0]), jnp.asarray(lor[1]), jnp.asarray(lor[2])
 
     def step(carry, src_n):
-        Ey, Hx, Hz, Jy, psi_h, psi_e = carry
+        Ey, Hx, Hz, Jy, psi_h, psi_e, PL, PLp = carry
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
         psi_h = psi_h.at[:, :-1].set(bh[:-1] * psi_h[:, :-1] + ch[:-1] * dEy_dz)
         Hx = Hx.at[:, :-1].add(cmu * (dEy_dz / kh[:-1] + psi_h[:, :-1]))
@@ -295,6 +315,10 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
         curl = jnp.zeros((nx, nz))
         curl = curl.at[:, 1:].add(dHx_dz / ke[1:] + psi_e[:, 1:])
         curl = curl - (Hz - jnp.roll(Hz, 1, axis=0)) / dx
+        if do_lor:                                          # Lorentz ADE: dPL/dt enters the E-update
+            PLnew = C1 * PL + C2 * PLp + C3 * Ey
+            curl = curl - (PLnew - PL) / dt
+            PLp, PL = PL, PLnew
         eps_eff = eps_inf + chi3 * Ey ** 2
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Eyn = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
@@ -303,10 +327,10 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
         Eyn = Eyn.at[:, 0].set(0.0).at[:, nz - 1].set(0.0)  # PEC backing the CPML
         out = (Eyn[:, k_pL], 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1]),
                Eyn[:, k_pR], 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1]))
-        return (Eyn, Hx, Hz, Jy, psi_h, psi_e), out
+        return (Eyn, Hx, Hz, Jy, psi_h, psi_e, PL, PLp), out
 
     z0 = jnp.zeros((nx, nz))
-    _, (eyL, hxL, eyR, hxR) = lax.scan(step, (z0, z0, z0, z0, z0, z0), jnp.asarray(src))
+    _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(8)), jnp.asarray(src))
     return eyL, hxL, eyR, hxR                               # JAX arrays (differentiable); dispatcher -> NumPy
 
 
@@ -319,22 +343,27 @@ def _flux(ey, hx):
     return -np.sum(np.real(Ey * np.conj(Hx)), axis=1)        # (nfreq,) signed z-power per frequency
 
 
-def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np):
+def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
+                    lor=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
     downstream FFT / R-T extraction stays backend-agnostic. 'numba' = the fused threaded CPU kernel;
     'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
-    array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API)."""
+    array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API).
+    `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients or None (no Lorentz pole)."""
     (ke, be, ce), (kh, bh, ch) = cpml
     if name == "numba":
+        has_lor = lor is not None
+        z = np.zeros_like(eps_inf)
+        C1, C2, C3 = (lor if has_lor else (z, z, z))
         return _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                           nsteps, k_src, k_pL, k_pR, src)
+                           nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
     if name == "jax":
-        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp                                    # backend='cupy' auto-selects the device module
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp)
+    out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -364,13 +393,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     R/T (validation/fdtd_2d_reduces.py GATE D); xp is an advanced override for a custom array module."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
-    w_min = 2.0 * np.pi * f_min
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
 
     def _n_band_max(L):
-        eps = complex(L.eps_inf)
-        if L.drude_wp_rad_s > 0.0:
-            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
-        return abs(np.sqrt(eps))
+        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
     n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     if nx is None:
@@ -386,6 +412,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     # z-profile, replicated over nx columns (laterally uniform unless lateral_eps_inf given)
     eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz)); chi3 = np.zeros((nx, nz))
+    lw0 = np.zeros((nx, nz)); lgam = np.zeros((nx, nz)); ldeps = np.zeros((nx, nz))  # Lorentz pole per cell
     zc = (np.arange(nz) + 0.5) * dz
     # fill the semi-infinite super/substrate pads with the end-media permittivity (so the incident wave is
     # truly in n_super and the structure sees the n_sub backing); vacuum (n=1) leaves this as ones
@@ -397,6 +424,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         eps_inf[:, m] = L.eps_inf
         wp[:, m] = L.drude_wp_rad_s
         gam[:, m] = L.drude_gamma_rad_s
+        lw0[:, m] = L.lorentz_w0_rad_s
+        lgam[:, m] = L.lorentz_gamma_rad_s
+        ldeps[:, m] = L.lorentz_delta_eps
         if kerr:
             chi3[:, m] = L.chi3_m2_V2
         z += L.thickness_m
@@ -416,18 +446,29 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
+    # Lorentz ADE coefficients (central difference): PL^{n+1} = C1 PL^n + C2 PL^{n-1} + C3 E^n, where the
+    # pole eps += d_eps w0^2/(w0^2 - w^2 - i gl w). lor is applied to the STRUCTURE run only (the reference
+    # is the bare superstrate). With d_eps=0 everywhere lor=None -> the path is byte-identical to before.
+    lor = None
+    if np.any(ldeps != 0.0):
+        den = 1.0 + lgam * dt / 2.0
+        C1 = (2.0 - lw0 ** 2 * dt ** 2) / den
+        C2 = (lgam * dt / 2.0 - 1.0) / den
+        C3 = (EPS0 * ldeps * lw0 ** 2 * dt ** 2) / den
+        lor = (C1, C2, C3)
+
     cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched to super (low z) + sub (high z)
     cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference -> super both ends
     name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
-    def run(ei, w, g_, c3, cpml):
-        return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp)
+    def run(ei, w, g_, c3, cpml, lor=None):
+        return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp, lor)
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
     # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run)
     eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
-    eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct)  # structure run
+    eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor)  # structure run
 
     f = np.fft.rfftfreq(nsteps, dt)
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----
@@ -775,15 +816,15 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
 
     backend: 'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path), 'numpy' (reference),
     'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU."""
+    if any(L.lorentz_delta_eps != 0.0 for L in layers):
+        raise NotImplementedError("the Lorentz ADE pole is implemented in the 2D-TE kernels only; for a "
+                                  "uniform Lorentz stack use solve_fdtd_2d (dim=2). 3D is a follow-on.")
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
-    w_min = 2.0 * np.pi * f_min
+    w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
 
     def _n_band_max(L):
-        eps = complex(L.eps_inf)
-        if L.drude_wp_rad_s > 0.0:
-            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
-        return abs(np.sqrt(eps))
+        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
     n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     if nx is None:

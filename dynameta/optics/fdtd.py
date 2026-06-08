@@ -29,12 +29,33 @@ MU0 = 1.0 / (EPS0 * C_LIGHT ** 2)
 @dataclass
 class FDTDLayer:
     """One layer of the 1D stack. Non-dispersive eps_inf, plus an optional Drude pole
-    (eps = eps_inf - wp^2/(w^2 + i gamma w)) and an instantaneous Kerr chi3 (eps += chi3 |E|^2)."""
+    (eps -= wp^2/(w^2 + i gamma w)), an optional Lorentz pole (eps += d_eps w0^2/(w0^2 - w^2 - i gl w),
+    the bound-electron / interband resonance the bare Drude cannot capture) and an instantaneous Kerr
+    chi3 (eps += chi3 |E|^2). All optional terms default off, so a plain dielectric is just eps_inf.
+
+    The 2D/3D engine (fdtd_nd) carries the Drude + Kerr; the Lorentz pole is honored by the 2D-TE kernels
+    (numpy/numba) via the central-difference ADE (a second polarization state PL). eps(w) at one lambda is
+    typically supplied by inverting to a single Drude pole (the seam); fit_drude_lorentz fits BOTH poles
+    across a band for an exact broadband metal/interband representation."""
     thickness_m: float
     eps_inf: float = 1.0
     drude_wp_rad_s: float = 0.0
     drude_gamma_rad_s: float = 0.0
     chi3_m2_V2: float = 0.0
+    lorentz_w0_rad_s: float = 0.0          # Lorentz resonance frequency (0 = no Lorentz pole)
+    lorentz_gamma_rad_s: float = 0.0       # Lorentz damping rate
+    lorentz_delta_eps: float = 0.0         # Lorentz static strength (eps(0) gains d_eps)
+
+    def eps_at(self, w_rad_s):
+        """The complex eps(omega) this layer represents (eps_inf - Drude + Lorentz), convention
+        exp(-i w t), Im(eps) > 0 = loss. Excludes the intensity-dependent Kerr term."""
+        e = complex(self.eps_inf)
+        if self.drude_wp_rad_s > 0.0:
+            e = e - self.drude_wp_rad_s ** 2 / (w_rad_s ** 2 + 1j * self.drude_gamma_rad_s * w_rad_s)
+        if self.lorentz_delta_eps != 0.0 and self.lorentz_w0_rad_s > 0.0:
+            w0 = self.lorentz_w0_rad_s
+            e = e + self.lorentz_delta_eps * w0 ** 2 / (w0 ** 2 - w_rad_s ** 2 - 1j * self.lorentz_gamma_rad_s * w_rad_s)
+        return e
 
 
 @dataclass
