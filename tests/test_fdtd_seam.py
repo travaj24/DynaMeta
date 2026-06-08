@@ -78,6 +78,14 @@ def test_bad_dim_raises():
         make_fdtd_optical_solver(dim=4)
 
 
+def test_fdtd_sweep_solver_is_sweep_aware_and_callable():
+    """The sweep-aware solver exposes solve_sweep (run_pipeline's fast-path hook) AND is a drop-in
+    per-wavelength OpticalSolver (the __call__ fallback)."""
+    from dynameta.optics.fdtd_seam import make_fdtd_sweep_optical_solver
+    sw = make_fdtd_sweep_optical_solver(dim=2, resolution=16)
+    assert hasattr(sw, "solve_sweep") and callable(sw)
+
+
 def test_sweep_guards():
     from dynameta.optics.fdtd_seam import fdtd_sweep_spectrum
     d = _design([(4.0, 100e-9, [])])
