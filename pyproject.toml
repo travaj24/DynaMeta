@@ -26,7 +26,8 @@ dependencies = [
 solvers = ["devsim>=2.10", "ngsolve>=6.2", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve
 io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps dump+load (zarr 3.x needs py>=3.11)
 plot = ["matplotlib>=3.7"]
-materials-db = ["jarvis-tools", "mp-api"]                  # DielectricDB live backends
+materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
+reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 

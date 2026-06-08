@@ -25,8 +25,10 @@ so a Taichi backend (one-source CPU+CUDA+Vulkan, when a Python-3.14 wheel exists
 Convention exp(-i omega t), SI; Im(eps) > 0 = loss. Reduces EXACTLY to the 1D solver + TMM for a
 laterally-uniform stack at normal incidence (validation/fdtd_2d_reduces.py).
 
-DEFERRED to later phases: CPML (replaces Mur), full 3D, off-diagonal/magneto-optic tensor eps,
-oblique Bloch incidence, and the GPU fast kernel.
+IMPLEMENTED since this docstring's first draft: CPML, full 3D (solve_fdtd_3d), per-cell diagonal +
+magneto-optic tensor eps (solve_fdtd_3d_mo, gyrotropic magnetized-Drude ADE), Drude+Lorentz multipole
+ADE, and oblique Bloch incidence (2D s/p + 3D, complex-envelope). STILL DEFERRED: a full 3D STRUCTURED
+(laterally-patterned) tensor solve, oblique numba/jax kernels, and a GPU (CUDA/Taichi) fast kernel.
 """
 
 from __future__ import annotations
