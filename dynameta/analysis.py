@@ -86,9 +86,13 @@ def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
 
 
 def sheet_resistance_ohm_sq(n_m3, mobility_m2Vs, thickness_m):
-    """Sheet resistance [Ohm/sq] of a conductive layer: rho_s = 1/(q n mu t)."""
+    """Sheet resistance [Ohm/sq] of a conductive layer: rho_s = 1/(q n mu t). A non-conducting layer
+    (zero carriers / mobility / thickness) returns inf rather than dividing by zero (so an undoped or
+    frozen-carrier region does not propagate a silent inf/-inf into the RC-bandwidth / FOM downstream)."""
     sigma = _Q_E * np.asarray(n_m3, dtype=np.float64) * float(mobility_m2Vs)   # S/m
-    return 1.0 / (sigma * float(thickness_m))
+    denom = sigma * float(thickness_m)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(denom > 0.0, 1.0 / np.where(denom > 0.0, denom, 1.0), np.inf)
 
 
 def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
