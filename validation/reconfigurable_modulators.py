@@ -5,11 +5,13 @@ oracle (pure numpy -- no FEM, so this runs fast and solver-free):
   (1) PCM (phase-change, PCMModel): the Bruggeman effective-medium mix reduces EXACTLY to the
       amorphous/crystalline end states at f=0/1, is monotonic in the crystalline fraction, stays
       PASSIVE (Im(eps) >= 0), and lies between the Wiener bounds (series <= Bruggeman <= parallel).
-  (2) LIQUID CRYSTAL (lc_director driver + LiquidCrystalModel): the Freedericksz threshold matches
-      V_th = pi sqrt(K/(eps0 dEps)); the uniaxial tensor's eigenvalues are the rotation-invariant
-      {n_o^2, n_o^2, n_e^2} for ANY director tilt; it reduces to isotropic when n_e = n_o; and the
-      extraordinary effective index for a normal-incidence x-wave matches 1/n_eff^2 = sin^2(theta)/
-      n_o^2 + cos^2(theta)/n_e^2.
+  (2) LIQUID CRYSTAL (the comprehensive director solver -> LiquidCrystalModel): the two-constant
+      (K11/K33) static BVP (director_profile_bvp) + the convention bridge (director_to_extra_fields)
+      modulate the optical eps from ~n_o (planar, below V_th) toward n_e (tilted, above V_th); the
+      Erickson-Leslie dynamics (LCDynamics) switch up and relax back with finite rise/decay; the
+      uniaxial tensor's eigenvalues stay the rotation-invariant {n_o^2, n_o^2, n_e^2} for ANY tilt;
+      and n_e = n_o reduces to isotropic. (The deeper director-physics oracles live in
+      validation/lc_two_constant_bvp.py, lc_director_dynamics.py and lc_cyl_flexo_optics.py.)
   (3) GRAPHENE (graphene_sigma + sheet_rt): the interband conductivity is the universal
       sigma0 = e^2/(4 hbar) well above threshold and is PAULI-BLOCKED (Re(sigma) -> ~0) once
       2|E_F| > hbar*omega -- the gate-tunable absorption modulator; the conductive-sheet reflection
@@ -17,13 +19,15 @@ oracle (pure numpy -- no FEM, so this runs fast and solver-free):
 
 Run: python -m validation.reconfigurable_modulators
 """
-import sys, os
+import sys, os, math
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.constants import HBAR, C_LIGHT, Q_E as Q
 from dynameta.core.effects import PCMModel, LiquidCrystalModel
 from dynameta.core.graphene import graphene_sigma, sheet_rt, SIGMA0, Z0
-from dynameta.carriers.lc_director import freedericksz_threshold_V, director_profile
+from dynameta.carriers.lc_director import (
+    freedericksz_threshold_V, director_profile_bvp, director_to_extra_fields)
+from dynameta.carriers.lc_dynamics import LCDynamics
 
 LAM = 1.55e-6
 
@@ -53,35 +57,42 @@ def part1_pcm():
 
 
 def part2_liquid_crystal():
-    """LC: Freedericksz transition (independent supercritical-law bifurcation at V_th) + uniaxial
-    eigenvalue invariance + isotropic reduction."""
-    K, dEps, ep, d = 6.5e-12, 11.0, 7.0, 5e-6
-    Vth = freedericksz_threshold_V(K, dEps)
-    # INDEPENDENT threshold check (NOT the tautological V_th-vs-same-formula, audit F3): the
-    # director PROFILE solver (an elliptic quadrature + bisection, independent of the threshold
-    # FORMULA) must (a) stay planar below V_th and (b) rise with the supercritical pitchfork law
-    # theta_max^2 ~ (V/V_th - 1) just above it -- the physical signature of the transition AT V_th.
-    below = director_profile(K, dEps, ep, d, 0.9 * Vth).theta_max_rad == 0.0
-    rs = np.array([1.02, 1.05, 1.10])
-    tm = np.array([director_profile(K, dEps, ep, d, r * Vth).theta_max_rad for r in rs])
-    ratio = tm ** 2 / (rs - 1.0)
-    sqrt_law = bool(np.all(tm > 0) and (ratio.max() / ratio.min() < 1.3))
-    threshold_ok = below and sqrt_law
+    """LC: the COMPREHENSIVE director solver drives the optics. The two-constant (K11/K33) static BVP
+    (director_profile_bvp) + the convention bridge (director_to_extra_fields) modulate the optical
+    LiquidCrystalModel from ~n_o (planar, below V_th) toward n_e (tilted, above V_th); the Erickson-Leslie
+    dynamics (LCDynamics) switch up and relax back with finite rise/decay; the uniaxial tensor's
+    eigenvalues stay the rotation-invariant {n_o^2, n_o^2, n_e^2}; and n_e=n_o reduces to isotropic. (The
+    legacy 1-constant exact-planar Freedericksz bifurcation sqrt-law -- director_profile -- is the
+    retained reference covered in tests/test_lc_director.py + validation/lc_two_constant_bvp.py.)"""
+    K11, K33, eps_para, eps_perp, d = 17e-12, 18e-12, 18.7, 4.0, 1e-6
     no, ne = 1.53, 1.71
+    Vth = freedericksz_threshold_V(K11, eps_para - eps_perp)
+    bkw = dict(K11=K11, K33=K33, eps_para=eps_para, eps_perp=eps_perp, d_planar=d,
+               theta_b_rad=math.radians(89.9), field_model="uniform", n_o=no, n_e=ne, nz=121)
+    below = director_profile_bvp(V_app=0.5 * Vth, **bkw)
+    above = director_profile_bvp(V_app=2.0 * Vth, **bkw)
+    # voltage -> tilt -> n_eff: ~planar (n_o) below V_th; rises toward n_e once tilted above V_th
+    modulation_ok = bool(abs(below.n_eff - no) < 3e-3 and above.n_eff > no + 0.02 and above.n_eff <= ne + 1e-6)
+    # the convention bridge feeds the optical LiquidCrystalModel; eigenvalues are invariant for any tilt
     lc = LiquidCrystalModel(n_o=no, n_e=ne)
-    # the uniaxial tensor's eigenvalues are the rotation-invariant {n_o^2, n_o^2, n_e^2} for ANY tilt
-    # (a genuine invariant -- the e-wave principal index n_e and the o-wave n_o; the angular
-    # extraordinary index n_eff(theta) is validated through the FEM in lc_uniaxial_fem.py)
-    eig_ok = True
-    for th in (0.0, 0.3, 0.9, np.pi / 2):
-        ev = np.sort(np.linalg.eigvals(lc.eps({"director_angle_rad": th}, LAM)).real)
-        if not np.allclose(ev, np.sort([no ** 2, no ** 2, ne ** 2]), atol=1e-9):
-            eig_ok = False
-    iso_ok = np.allclose(LiquidCrystalModel(1.6, 1.6).eps({"director_angle_rad": 0.7}, LAM),
-                         1.6 ** 2 * np.eye(3))
-    ok = threshold_ok and eig_ok and iso_ok
-    print("[r] (2) LC: V_th={:.4f} V  bifurcation+sqrt-law={} eig-invariant={} iso-reduction={}".format(
-        Vth, threshold_ok, eig_ok, iso_ok), flush=True)
+    eps = np.asarray(lc.eps(director_to_extra_fields(above.theta_field_rad), LAM))
+    eig_ok = all(np.allclose(np.sort(np.linalg.eigvalsh(eps[i].real)),
+                             np.sort([no ** 2, no ** 2, ne ** 2]), atol=1e-9) for i in range(eps.shape[0]))
+    iso_ok = bool(np.allclose(LiquidCrystalModel(1.6, 1.6).eps({"director_angle_rad": 0.7}, LAM),
+                              1.6 ** 2 * np.eye(3)))
+    # Erickson-Leslie dynamics: an above-threshold pulse switches n_eff up and relaxes back, finite rise/decay
+    dyn = LCDynamics(K11=K11, K33=K33, gamma1=0.085, eps_para=eps_para, eps_perp=eps_perp,
+                     theta_b_rad=math.radians(89.9), geometry="planar", d_planar=d,
+                     field_model="uniform", n_o=no, n_e=ne, nz=81)
+    rdyn = dyn.simulate_pulse(V0=2.0 * Vth, Ton=4e-3, T_end=12e-3, n_t=200, waveform="step")
+    switch_ok = bool(np.isfinite(rdyn.rise_10_90_s) and rdyn.rise_10_90_s > 0
+                     and np.isfinite(rdyn.decay_90_10_s) and rdyn.decay_90_10_s > 0
+                     and float(np.nanmax(rdyn.n_eff)) > no + 0.02 and abs(float(rdyn.n_eff[-1]) - no) < 3e-3)
+    ok = modulation_ok and eig_ok and iso_ok and switch_ok
+    print("[r] (2) LC: V_th={:.4f} V  n_eff {:.4f}->{:.4f} modulation={} eig-invariant={} iso={} "
+          "switching(rise={:.3g}s decay={:.3g}s)={}".format(
+              Vth, below.n_eff, above.n_eff, modulation_ok, eig_ok, iso_ok,
+              rdyn.rise_10_90_s, rdyn.decay_90_10_s, switch_ok), flush=True)
     return ok
 
 

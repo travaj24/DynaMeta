@@ -82,7 +82,18 @@ def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m:
     """Equilibrium director tilt theta(z) for a planar nematic cell under `applied_V`. Below V_th
     theta = 0 (planar); above, the midplane tilt theta_m is recovered by bisecting the monotone
     V(theta_m) relation, and theta(z) is reconstructed from the parametric turning-point map.
-    Returns a DirectorProfile."""
+    Returns a DirectorProfile (theta in the PLATE-PLANE convention: 0 = planar, pi/2 = homeotropic).
+
+    DEPRECATED for general use. This is the 1-constant (single K), PLANAR, STATIC, dielectric-only,
+    full-voltage-across-the-LC (no fixed-layer division) special case. For real modeling use the
+    comprehensive director solver: director_profile_bvp (two-constant K11/K33, planar OR cylindrical,
+    Poisson voltage-division through fixed dielectric layers, flexoelectricity) and lc_dynamics.LCDynamics
+    (time-domain Erickson-Leslie switching). director_profile is RETAINED only as the exact-planar
+    Freedericksz bifurcation reference: it solves the EXACT strong-planar cell (theta_b = 0) right through
+    the pitchfork via an elliptic-quadrature bisection with no initial guess and no pretilt -- something
+    the general solve_bvp path needs a small pretilt to do. director_profile_bvp at K11=K33 with
+    field_model='poisson' (constant-displacement field, no fixed layers) reproduces it to ~8e-3 rad
+    through the pi/2 angle bridge (director_to_extra_fields)."""
     K = float(K_elastic); dEps = float(dEps_static); ep = float(eps_perp)
     d = float(d_m); V = float(applied_V)
     if not (K > 0 and dEps > 0 and ep > 0 and d > 0 and int(nz) >= 11):
