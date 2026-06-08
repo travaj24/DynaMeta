@@ -26,7 +26,7 @@ import numpy as np
 
 MassFn = Callable[[np.ndarray], np.ndarray]
 MobilityFn = Callable[[np.ndarray], np.ndarray]
-CarrierPhysics = Literal["equilibrium", "drift_diffusion"]
+CarrierPhysics = Literal["equilibrium", "drift_diffusion", "bipolar_dd"]
 
 
 @dataclass
@@ -65,10 +65,29 @@ class TransportModel:
     hole_mobility_m2Vs_of_n_m3:  Optional[MobilityFn] = None
     tau_srh_s:                   Optional[float] = None
     traps:                       Optional[TrapSpec] = None
+    # Bipolar drift-diffusion only ("bipolar_dd"): full 3-variable (Potential, Electrons, Holes)
+    # solve with SRH recombination -- for a real p-n device (the electron-only DD assumes a
+    # degenerate unipolar semiconductor like ITO). n_i_m3 is the intrinsic carrier density;
+    # tau_srh_s is the (shared) SRH lifetime; dos_mass_p_kg is the VALENCE-band DOS mass (-> N_v,
+    # defaults to the conduction N_c). Doping sign: `acceptor` makes the region uniformly p-type
+    # (NetDoping = -n_bg_m3); for an IN-REGION junction supply `net_doping_expr`, a DEVSIM
+    # node-model expression (signed, m^-3) in the SI coordinates x/y, e.g.
+    # "ifelse(x < 1.5e-7, -1e24, 1e24)" (the abrupt lateral p-n step).
+    n_i_m3:                      Optional[float] = None
+    acceptor:                    bool = False
+    net_doping_expr:             Optional[str] = None
+    dos_mass_p_kg:               Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.physics not in ("equilibrium", "drift_diffusion"):
-            raise ValueError("physics must be 'equilibrium' or 'drift_diffusion'")
-        if self.physics == "drift_diffusion" and self.mobility_m2Vs_of_n_m3 is None:
+        if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
+            raise ValueError("physics must be 'equilibrium', 'drift_diffusion' or 'bipolar_dd'")
+        if self.physics in ("drift_diffusion", "bipolar_dd") and self.mobility_m2Vs_of_n_m3 is None:
             raise ValueError(
-                "drift_diffusion physics requires mobility_m2Vs_of_n_m3")
+                "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
+        if self.physics == "bipolar_dd":
+            missing = [nm for nm, v in (("hole_mobility_m2Vs_of_n_m3", self.hole_mobility_m2Vs_of_n_m3),
+                                        ("n_i_m3", self.n_i_m3), ("tau_srh_s", self.tau_srh_s))
+                       if v is None]
+            if missing:
+                raise ValueError("bipolar_dd physics requires {} (holes + recombination)".format(
+                    ", ".join(missing)))
