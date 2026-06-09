@@ -25,6 +25,31 @@ Convention reminder for implementers: cp1252-safe ASCII-only source + print(); S
 Im(eps) > 0 for absorbers; persistent validations under `validation/`; commit incrementally; push only
 when asked.
 
+## STATUS (2026-06-09): Tier 0 (R1-R9) COMPLETE -- the north-star set is shipped
+
+All nine Tier-0 items are implemented, validated against an independent oracle, unit-tested, committed
+and pushed. Each is byte-identical when its new physics is off.
+
+- **R1** field/density mobility mu(E,n) -- `carriers/mobility.py` (Caughey-Thomas + Masetti DEVSIM edge);
+  validation `dd_field_mobility.py`. Commit 5921f85.
+- **R2** resolved Drude Gamma + Kane m_opt(n) -- `materials/scattering.py` (KaneOpticalMass,
+  MatthiessenGamma); `drude_matthiessen_kane.py`. Commit 16ad0f0.
+- **R3** shared mobility<->optical-Gamma link -- `ScatteringModel` (one tau drives both); `scattering_link.py`. Commit d22d8ce.
+- **R4** per-cell time-domain eps(t) -> FDTD -- `optics/fdtd_seam.effect_eps_to_fdtd_grid` +
+  solve_fdtd_2d lateral_wp/gam; `fdtd_effect_seam.py`. Commit a2bce7b.
+- **R5** transient heat eqn rho Cp dT/dt -- `thermal_fem.solve_thermal_transient_fem` (theta-method);
+  `thermal_transient_fem.py` (Carslaw-Jaeger erfc + steady recovery). Commit f3f7477.
+- **R6** self-consistent electro-thermo-optic Picard loop -- `carriers/electrothermal.py`;
+  `electrothermal_picard.py`. Commit 1be7ff1.
+- **R7** quantum intersubband eps_zz -- `core/effects.IntersubbandEffect`; `intersubband_eps_zz.py`
+  (TRK f-sum rule + telecom line). Commit 48b84b4.
+- **R8** Burstein-Moss + bandgap-renormalization edge -- `core/effects.BursteinMossEdge`;
+  `burstein_moss_blueshift.py`. Commit 4946026.
+- **R9** carrier-heating two-temperature ENZ nonlinearity -- `carriers/carrier_heating.py`;
+  `carrier_heating_enz.py` (sub-ps rise / ps relaxation, 15.4x ENZ enhancement). Commit 044f0dc.
+
+Test suite: 295 passed. Tier 1+ below is not yet scheduled.
+
 ---
 
 ## Tier 0 -- NORTH STAR: ITO-ENZ modulator core fidelity
