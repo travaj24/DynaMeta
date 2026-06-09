@@ -13,7 +13,7 @@ Off-switches:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 
@@ -92,3 +92,52 @@ class MatthiessenGamma:
     def __call__(self, n_m3):
         n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)
         return self.optical_dc_ratio * (self.gamma_const_rad_s + self._phonon() + self._ii(n))
+
+
+@dataclass(frozen=True)
+class ScatteringModel:
+    """ONE momentum-relaxation law tau(n;T) shared by BOTH the optical Drude damping and the transport
+    mobility (roadmap R3), removing the hidden inconsistency of fitting them independently. The shared
+    quantity is 1/tau (rad/s), supplied as `one_over_tau` -- typically a MatthiessenGamma (R2) so the
+    SAME density/temperature scattering law feeds both sides:
+
+        optical Drude gamma(n) = 1/tau(n)                          (mass enters wp, NOT gamma)
+        drift mobility  mu(n)  = hall_factor * q / (m_cond(n) * 1/tau(n))   [m^2/Vs]
+
+    Build the link around tau, never around mu -- writing gamma = q/(m_opt mu) is circular (it just gives
+    1/tau back). CAVEATS, encoded as separate inputs so they are not conflated:
+      - m_cond is the CONDUCTIVITY (DC) effective mass, DISTINCT from the optical mass m_opt (which sets
+        wp) and from the DOS mass; in a nonparabolic conductor all three differ.
+      - hall_factor r_H: a measured Hall mobility is r_H * drift mobility; the tau<->mu link uses the
+        DRIFT mobility, so set hall_factor only if you want the produced mu to be a Hall mobility
+        (default 1.0 = drift). A measured Hall mu fed back to calibrate tau should be divided by r_H.
+    Pure numpy; attach to a Material via Material(scattering=...) (opt-in; default unset = byte-identical).
+    """
+    one_over_tau: Union[float, Callable]
+    m_cond_kg: Union[float, Callable] = M_E
+    hall_factor: float = 1.0
+
+    def inv_tau(self, n_m3):
+        ot = self.one_over_tau
+        return np.asarray(ot(n_m3), dtype=np.float64) if callable(ot) else float(ot)
+
+    def tau_s(self, n_m3):
+        return 1.0 / self.inv_tau(n_m3)
+
+    def gamma_optical_of_n(self):
+        """Optical Drude gamma callable gamma(n) = 1/tau(n) (reuses the MatthiessenGamma directly)."""
+        if callable(self.one_over_tau):
+            return self.one_over_tau
+        g = float(self.one_over_tau)
+        return lambda n: g
+
+    def mobility_of_n(self):
+        """Drift mobility callable mu(n) = hall_factor * q / (m_cond(n) * 1/tau(n)) [m^2/Vs]."""
+        ot, mc, rh = self.one_over_tau, self.m_cond_kg, self.hall_factor
+
+        def mu(n_m3):
+            n = np.asarray(n_m3, dtype=np.float64)
+            m = np.asarray(mc(n), dtype=np.float64) if callable(mc) else float(mc)
+            g = np.asarray(ot(n), dtype=np.float64) if callable(ot) else float(ot)
+            return rh * Q_E / (m * g)
+        return mu

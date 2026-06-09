@@ -4,7 +4,7 @@ from dynameta.materials.optical_model import (
     OpticalModel, ConstantOptical, TabulatedOptical, DrudeOptical,
     RefractiveIndexInfoOptical, fit_drude_params, M_E, Q_E, EPS0, C_LIGHT,
 )
-from dynameta.materials.scattering import KaneOpticalMass, MatthiessenGamma
+from dynameta.materials.scattering import KaneOpticalMass, MatthiessenGamma, ScatteringModel
 from dynameta.materials.transport_model import (
     TransportModel, TrapSpec, CarrierPhysics,
 )
@@ -16,7 +16,7 @@ from dynameta.materials.db import (
 __all__ = [
     "OpticalModel", "ConstantOptical", "TabulatedOptical", "DrudeOptical",
     "RefractiveIndexInfoOptical", "fit_drude_params", "M_E", "Q_E", "EPS0", "C_LIGHT",
-    "KaneOpticalMass", "MatthiessenGamma",
+    "KaneOpticalMass", "MatthiessenGamma", "ScatteringModel",
     "TransportModel", "TrapSpec", "CarrierPhysics",
     "Material", "MaterialRegistry",
     "DielectricDB", "DielectricRecord", "normalize_formula",
