@@ -321,10 +321,12 @@ class LCDynamics:
             if W_anchor is None:
                 dth_dt[0] = dth_dt[-1] = 0.0
             else:
-                # Rapini-Papoular surface torque balance with surface viscosity gamma_s (one-sided
-                # theta' at each plate): steady state = the static weak-anchoring BC.
-                thp0 = (th[1] - th[0]) / dz
-                thpd = (th[-1] - th[-2]) / dz
+                # Rapini-Papoular surface torque balance with surface viscosity gamma_s: steady state =
+                # the static weak-anchoring BC. Use a SECOND-ORDER one-sided theta' at each plate
+                # (O(dz^2)); a 1st-order difference leaves a few-degree surface error at extreme weak
+                # anchoring (steep surface gradient), caught by the W=1e-4 adversarial check.
+                thp0 = (-3.0 * th[0] + 4.0 * th[1] - th[2]) / (2.0 * dz)
+                thpd = (3.0 * th[-1] - 4.0 * th[-2] + th[-3]) / (2.0 * dz)
                 dth_dt[0] = (Keff[0] * thp0 - 0.5 * W_anchor * math.sin(2.0 * (th[0] - theta_easy))) / gamma_s
                 dth_dt[-1] = (-Keff[-1] * thpd - 0.5 * W_anchor * math.sin(2.0 * (th[-1] - theta_easy))) / gamma_s
             return dth_dt
