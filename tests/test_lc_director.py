@@ -10,7 +10,8 @@ from dynameta.carriers.lc_director import (
     freedericksz_threshold_V, director_profile, director_profile_bvp, solve_lc_field_profile,
     compute_lc_geometry, n_local_from_theta, n_eff_from_theta_profile, eps_along_field,
     flexo_p_along_field, director_to_extra_fields,
-    haller_order_parameter, K_of_temperature, gamma1_of_temperature)
+    haller_order_parameter, K_of_temperature, gamma1_of_temperature,
+    chiral_director_profile_bvp, cholesteric_q0, gooch_tarry_transmission, mauguin_number)
 
 K, DEPS, EP, D = 6.5e-12, 11.0, 7.0, 5e-6     # ~5CB nematic cell
 
@@ -233,3 +234,69 @@ def test_cyl_geometry_bvp_tilts_above_threshold():
                              eps_in=7.5, eps_out=7.5, theta_b_rad=thb, field_model="poisson", nz=81)
     assert r.V_lc < 3.0                                            # series fixed layers drop part of V
     assert r.theta_field_rad[r.theta_field_rad.size // 2] < thb - np.radians(20.0)
+
+
+# --- chiral / twisted-nematic director (theta + phi coupled) ---------------------------------------
+_CK = dict(K11=11e-12, K22=7e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=4e-6,
+           field_model="uniform", nz=121, theta_b_rad=np.radians(89.9))
+
+
+def test_chiral_decouples_to_director_profile_bvp():
+    # phi_top == phi_bottom and q0 = 0 -> twist decouples (phi == const) and theta == director_profile_bvp
+    # EXACTLY (same tilt Euler-Lagrange), including the Freedericksz-tilted branch under field.
+    ch = chiral_director_profile_bvp(V_app=2.0, phi_bottom_rad=0.0, phi_top_rad=0.0, q0_rad_m=0.0,
+                                     n_o=1.52, n_e=1.74, **_CK)
+    st = director_profile_bvp(V_app=2.0, K11=_CK["K11"], K33=_CK["K33"], eps_para=_CK["eps_para"],
+                              eps_perp=_CK["eps_perp"], d_planar=_CK["d_planar"], field_model="uniform",
+                              nz=_CK["nz"], theta_b_rad=_CK["theta_b_rad"], n_o=1.52, n_e=1.74)
+    assert ch.success
+    assert np.max(np.abs(ch.theta_field_rad - st.theta_field_rad)) < 1e-6
+    assert np.max(np.abs(ch.phi_rad)) < 1e-9
+    assert ch.n_eff == pytest.approx(st.n_eff, abs=1e-5)
+
+
+def test_chiral_pure_twist_is_linear_with_analytic_energy():
+    # 90 deg TN at V=0, planar: phi(z) linear, theta flat, twist energy = (1/2) K22 phi_t^2 / d.
+    ch = chiral_director_profile_bvp(V_app=0.0, phi_bottom_rad=0.0, phi_top_rad=0.5 * np.pi, q0_rad_m=0.0,
+                                     **{**_CK, "theta_b_rad": 0.5 * np.pi})
+    u = (ch.z_m - ch.z_m[0]) / (ch.z_m[-1] - ch.z_m[0])
+    assert np.max(np.abs(ch.phi_rad - 0.5 * np.pi * u)) < 1e-4
+    assert np.max(np.abs(ch.theta_field_rad - 0.5 * np.pi)) < 1e-4
+    w_an = 0.5 * _CK["K22"] * (0.5 * np.pi) ** 2 / _CK["d_planar"]
+    assert ch.twist_energy_J_m2 == pytest.approx(w_an, rel=1e-5)
+
+
+def test_chiral_cholesteric_undistorted_helix():
+    # q0 != 0 with matched plate azimuths -> phi' = q0 uniform, energy = -(1/2) K22 q0^2 d.
+    q0 = cholesteric_q0(8e-6)
+    ch = chiral_director_profile_bvp(V_app=0.0, phi_bottom_rad=0.0, phi_top_rad=q0 * _CK["d_planar"],
+                                     q0_rad_m=q0, **{**_CK, "theta_b_rad": 0.5 * np.pi})
+    phz = np.gradient(ch.phi_rad, ch.z_m)
+    assert np.max(np.abs(phz - q0)) / q0 < 1e-5
+    assert ch.twist_energy_J_m2 == pytest.approx(-0.5 * _CK["K22"] * q0 * q0 * _CK["d_planar"], rel=1e-5)
+
+
+def test_chiral_tn_freedericksz_monotone():
+    # midplane tilt of a 90 deg TN grows monotonically with field.
+    mids = []
+    for V in (0.3, 0.9, 1.5):
+        r = chiral_director_profile_bvp(V_app=V, phi_bottom_rad=0.0, phi_top_rad=0.5 * np.pi, **_CK)
+        assert r.success
+        mids.append(0.5 * np.pi - r.theta_field_rad[r.theta_field_rad.size // 2])
+    assert mids[0] < mids[1] < mids[2]
+    assert mids[2] > 0.5                                           # clearly tilted at V=1.5
+
+
+def test_gooch_tarry_first_minimum():
+    # 90 deg TN crossed-polarizer transmission -> first dark minimum at Mauguin u = sqrt(3).
+    dn, lam = 0.22, 0.55e-6
+    d_min = np.sqrt(3.0) * lam / (2.0 * dn)
+    assert mauguin_number(d_min, dn, lam) == pytest.approx(np.sqrt(3.0), abs=1e-9)
+    assert gooch_tarry_transmission(d_min, dn, lam) < 1e-12
+    assert 0.0 <= gooch_tarry_transmission(1e-6, dn, lam) <= 1.0
+
+
+def test_chiral_rejects_bad_constants():
+    with pytest.raises(ValueError):
+        chiral_director_profile_bvp(V_app=1.0, K11=1e-12, K22=-1e-12, K33=1e-12, eps_para=10.0,
+                                    eps_perp=4.0, d_planar=4e-6)
