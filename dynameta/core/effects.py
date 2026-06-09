@@ -30,7 +30,7 @@ from typing import List, Protocol, runtime_checkable
 
 import numpy as np
 
-from dynameta.constants import HBAR, C_LIGHT, Q_E, EPS0
+from dynameta.constants import HBAR, C_LIGHT, Q_E, EPS0, M_E
 from dynameta.core.backend import array_namespace, to_backend, is_jax_array, is_numpy_array
 from dynameta.core.numerics import trapz
 
@@ -436,6 +436,108 @@ class ElectroAbsorptionModel:
         sF = self.qw.solve(F)
         return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap)
                      - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap))
+
+
+# ---- Burstein-Moss band-filling + bandgap renormalization (R8) -----------------------------
+
+@dataclass
+class BursteinMossEdge:
+    """Carrier-density-dependent interband absorption edge of a degenerate semiconductor (e.g. ITO):
+    band filling pushes the optical gap UP (Burstein-Moss blueshift) while many-body bandgap
+    renormalization pulls it down (a redshift). Reads fields['n'] (carrier density m^-3) and returns
+    the interband permittivity contribution as a scalar grid (promoted to isotropic by as_tensor):
+
+        Eg_opt(n) = Eg0 - dE_BGR(n) + dE_BM(n),
+          dE_BM(n)  = (hbar^2/2)(1/m_vc) (3 pi^2 n)^(2/3)    (band-filling blueshift)
+          dE_BGR(n) = bgr_coeff_J_m * n^(1/3)                (renormalization redshift; 0 -> off)
+        Im edge (Tauc/parabolic, exp(-i omega t) -> Im >= 0): dimensionless eps2(E; Eg_opt) = alpha_edge
+          * ((E - Eg_opt)/Eg_opt)^tauc_exponent * (Eg_opt/E)^2 above Eg_opt, and its Kramers-Kronig
+          partner dn(E) (reusing kramers_kronig_dn on alpha = E eps2/(hbar c)). eps = (sqrt(eps_inf) +
+          dn + i kappa)^2, kappa = eps2/2 >= 0.
+
+    This is a PURE interband DELTA meant to be composed THROUGH DeltaEffect on top of the bare Drude
+    (whose eps_inf already embeds the interband response AT the reference doping). Compose as
+    ComposedEffect(background=OpticalModelEffect(DrudeOptical(...)),
+                   deltas=[DeltaEffect(BursteinMossEdge(eps_inf=<same eps_inf>, ...), {"n": n_ref})]);
+    only the doping-INDUCED change relative to n_ref survives (no eps_inf double-count). Pick n_ref =
+    n_bg (the fitted Drude eps_inf stays valid there). enabled=False -> returns eps_inf everywhere
+    (delta = 0 through DeltaEffect = byte-identical off-switch). m_vc is the REDUCED joint
+    conduction-valence mass (1/m_vc = 1/m_c + 1/m_v), NOT the Drude optical mass. numpy-only (KK uses
+    np.interp); exp(-i omega t), Im(eps) >= 0; grid-capable (dn precomputed vs Eg_opt and interpolated).
+    """
+    eps_inf: float
+    Eg0_J: float                  # undoped optical gap [J] (e.g. 3.6 * Q_E for ITO)
+    m_vc_kg: float                # reduced joint conduction-valence mass [kg]
+    alpha_edge: float             # dimensionless interband edge amplitude (O(1); Im(eps) ~ alpha_edge)
+    bgr_coeff_J_m: float = 0.0    # bandgap-renormalization coefficient C in dE_BGR = C n^(1/3) [J*m]; 0 -> off
+    tauc_exponent: float = 0.5    # 0.5 = direct-allowed sqrt(E-Eg) edge
+    e_grid_J: tuple = None        # (E_lo, E_hi, N) KK grid override; None -> auto around Eg_opt + probe
+    enabled: bool = True          # master off-switch: False -> eps_inf everywhere (delta 0)
+    _N_EG = 64                    # Eg_opt samples for the grid-capable dn interpolation
+    _KK_SPAN_J = 5.0 * 1.602176634e-19   # how far above the highest edge the KK grid extends (~5 eV)
+    _KK_N = 3001                  # KK photon-energy grid points
+
+    def gap_shift_J(self, n_m3):
+        """Burstein-Moss blueshift dE_BM(n) [J] = (hbar^2/2)(1/m_vc)(3 pi^2 n)^(2/3)."""
+        n = np.asarray(n_m3, dtype=np.float64)
+        return (HBAR ** 2 / 2.0) * (1.0 / float(self.m_vc_kg)) * (3.0 * np.pi ** 2 * n) ** (2.0 / 3.0)
+
+    def optical_gap_J(self, n_m3):
+        """Doping-shifted optical gap Eg_opt(n) = Eg0 - dE_BGR + dE_BM [J]."""
+        n = np.asarray(n_m3, dtype=np.float64)
+        dE_BGR = float(self.bgr_coeff_J_m) * n ** (1.0 / 3.0)
+        return float(self.Eg0_J) - dE_BGR + self.gap_shift_J(n)
+
+    def _eps2(self, E_eval, Eg_opt):
+        """Dimensionless interband Im(eps) edge: alpha_edge * ((E-Eg)/Eg)^p * (Eg/E)^2 above Eg, else 0.
+        Non-dimensionalized by Eg so alpha_edge is an O(1) amplitude (not a unit-laden prefactor)."""
+        E = np.asarray(E_eval, dtype=np.float64)
+        x = np.maximum(E - Eg_opt, 0.0) / Eg_opt
+        return float(self.alpha_edge) * x ** float(self.tauc_exponent) * (Eg_opt / E) ** 2
+
+    def eps(self, fields: dict, lambda_m: float):
+        n_in = (fields or {}).get("n")
+        if n_in is None:
+            raise ValueError("BursteinMossEdge requires fields['n'] (carrier density m^-3); none "
+                             "supplied (run the carrier model first)")
+        if is_jax_array(n_in):
+            raise TypeError("BursteinMossEdge is numpy-only (Kramers-Kronig np.interp); pass a numpy "
+                            "density (omit this delta from a JAX-traced pipeline -- it is additive).")
+        n = np.asarray(n_in, dtype=np.float64)
+        if not self.enabled:
+            return np.full(n.shape, complex(self.eps_inf))         # off-switch: pure eps_inf -> delta 0
+
+        E_ph = _photon_energy_J(lambda_m)
+        Eg = self.optical_gap_J(n)                                 # (...,) optical gap per cell
+        Eg_lo, Eg_hi = float(np.min(Eg)), float(np.max(Eg))
+        # KK photon-energy grid: span below the lowest edge / probe, up to well above the highest edge
+        if self.e_grid_J is not None:
+            lo, hi, ng = self.e_grid_J
+            grid = np.linspace(float(lo), float(hi), int(ng))
+        else:
+            e_lo = min(Eg_lo, E_ph) - 0.5 * float(self._KK_SPAN_J)
+            e_hi = max(Eg_hi, E_ph) + float(self._KK_SPAN_J)
+            grid = np.linspace(max(e_lo, 1e-21), e_hi, int(self._KK_N))
+        if not (grid[0] <= min(Eg_lo, E_ph) and max(Eg_hi, E_ph) <= grid[-1]):   # no silent KK truncation
+            raise ValueError("e_grid_J must span the optical gap range and the probe energy")
+
+        def _dn_at_gap(eg):
+            # absorption alpha = E eps2/(hbar c) [1/m]; KK -> dn (refractive index shift) at the probe
+            dalpha_grid = grid * self._eps2(grid, eg) / (HBAR * C_LIGHT)         # 1/m
+            return float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
+
+        # grid-capable dn: precompute dn(Eg_opt) on a 1D Eg grid, interpolate onto the per-cell gaps
+        if Eg_hi - Eg_lo < 1e-30:
+            dn = np.full(Eg.shape, _dn_at_gap(Eg_lo))
+        else:
+            egs = np.linspace(Eg_lo, Eg_hi, int(self._N_EG))
+            dn_tab = np.array([_dn_at_gap(e) for e in egs])
+            dn = np.interp(Eg.ravel(), egs, dn_tab).reshape(Eg.shape)
+
+        eps2_ph = self._eps2(E_ph, Eg)                                          # dimensionless Im edge (>= 0)
+        kappa = 0.5 * eps2_ph                                                   # extinction = eps2/(2 n_re)~eps2/2
+        n_re = np.sqrt(complex(self.eps_inf)).real + dn
+        return (n_re + 1j * kappa) ** 2                                          # scalar grid (...,)
 
 
 # ---- reconfigurable: phase-change + liquid-crystal (Phase 4) -------------------------------

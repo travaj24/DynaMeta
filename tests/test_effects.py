@@ -215,3 +215,45 @@ def test_intersubband_two_bands_anisotropic_and_passive():
     assert abs(eps_t[2, 2] - eps_t[0, 0]) > 1e-3                      # z carries the intersubband line
     assert eps_t[2, 2].imag > 0.0                                    # passive (exp(-iwt))
     assert eps_t[0, 0] == eps_t[1, 1]                                # in-plane isotropic Drude
+
+
+# ---- BursteinMossEdge (R8) ------------------------------------------------------------------
+
+def test_burstein_moss_reduces_and_off_switch():
+    from dynameta.constants import Q_E
+    eps_inf, m_opt, gamma = 4.25, 0.225 * M_E, 1.1e14
+    n_ref = 4.0e26
+    drude = DrudeOptical(eps_inf=eps_inf, m_opt_kg=m_opt, gamma_rad_s=gamma)
+    bg = OpticalModelEffect(drude)
+    from dynameta.core.effects import BursteinMossEdge
+    edge = BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    comp = ComposedEffect(background=bg, deltas=[DeltaEffect(edge, baseline_fields={"n": n_ref})])
+    # at n_ref the delta is identically zero -> bare Drude
+    assert np.allclose(comp.eps({"n": n_ref}, 1300e-9),
+                       as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n_ref)))), atol=1e-12)
+    # enabled=False -> bare Drude at ALL n (true off-switch)
+    off = ComposedEffect(background=bg, deltas=[DeltaEffect(
+        BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                         enabled=False), baseline_fields={"n": n_ref})])
+    for n in (2e26, 1e27):
+        assert np.allclose(off.eps({"n": n}, 1300e-9),
+                           as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n)))), atol=1e-14)
+
+
+def test_burstein_moss_blueshift_and_passive():
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    # Burstein-Moss: higher density -> larger optical gap (blueshift)
+    assert edge.optical_gap_J(8e26) > edge.optical_gap_J(4e26) > edge.optical_gap_J(1e26)
+    # above-gap Im(eps) >= 0 (passive, exp(-iwt)); probe at a photon energy above Eg_opt
+    lam_above = 2 * np.pi * 299792458.0 * 1.0546e-34 / (4.5 * Q_E)   # ~4.5 eV photon (> gap)
+    assert edge.eps({"n": 6e26}, lam_above).imag >= 0.0
+
+
+def test_burstein_moss_requires_density():
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    with pytest.raises(ValueError):
+        edge.eps({}, 1300e-9)
