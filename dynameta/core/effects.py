@@ -685,9 +685,13 @@ class IntersubbandEffect:
 
         S_ij = N_ij q^2 |z_ij|^2 (2 w_ij)/hbar ,   N_ij = (n_s,i - n_s,j)/Leff ,   z_ij = <psi_i|z|psi_j>
 
-    This S_ij is exactly (q^2/eps0) f_ij N_ij / eps0 -> ... with the dimensionless TRK strength
-    f_ij = (2 m0 w_ij/hbar)|z_ij|^2: the free mass m0 CANCELS, so the optical mass m_opt enters ONLY
-    the intraband Drude -- the intersubband line is mass-free (a common bug is to leave m* in it).
+    Where the mass went: write the standard Lorentz-oscillator susceptibility per transition,
+    chi_ij = (N_ij q^2 / (eps0 m0)) * f_ij / (w_ij^2 - w^2 - i w gamma), with the dimensionless TRK
+    strength f_ij = (2 m0 w_ij / hbar) |z_ij|^2; substituting f_ij, the free mass m0 CANCELS exactly,
+    leaving the dipole form S_ij above. The effective mass is NOT absent from the physics -- it enters
+    through the psi_i / E_i of the Schrodinger solve that produce z_ij and w_ij -- but it must not be
+    inserted AGAIN in the line strength (the classic double-counting bug). m_opt therefore appears
+    ONLY in the intraband Drude term.
     The denominator uses -i w gamma (exp(-i omega t), Im(eps_zz) > 0 on resonance = absorptive).
 
     REDUCES to a scalar Drude * I when fewer than two sub-bands are occupied (no i<j pair, the

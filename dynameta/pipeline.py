@@ -84,6 +84,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     / ``thermal_fem.solve_thermal_fem`` per bias and thread the resulting E / T here). None (the
     default) leaves the carrier-only path byte-identical.
     """
+    if not sweep.bias_points or not len(sweep.wavelengths_nm):     # no silent empty-sweep passthrough
+        raise ValueError("run_pipeline: sweep must have at least one bias point and one wavelength "
+                         "(got {} bias points, {} wavelengths)".format(
+                             len(sweep.bias_points), len(sweep.wavelengths_nm)))
     if carrier_solver is None:
         from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
         carrier_solver = LayeredDevsimBuilder(design)
@@ -145,7 +149,12 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             def _assemble_at(lm, _cf=cf, _ef=ef):
                 return assemble_eps(_cf, align, n_to_eps, lift, lm,
                                     mesh_regions=mesh_regions, extra_fields=_ef)
-            results = solve_optics.solve_sweep(design, geo, _assemble_at, lams, n_super, n_sub)
+            results = list(solve_optics.solve_sweep(design, geo, _assemble_at, lams, n_super, n_sub))
+            if len(results) != len(sweep.wavelengths_nm):       # zip would TRUNCATE silently otherwise
+                raise ValueError("optical_solver.solve_sweep returned {} results for {} wavelengths -- "
+                                 "a sweep-aware solver must return exactly one OpticalResult per "
+                                 "requested wavelength, in order.".format(
+                                     len(results), len(sweep.wavelengths_nm)))
             for lam_nm, res in zip(sweep.wavelengths_nm, results):
                 _emit(bp.label, lam_nm, res)
             continue

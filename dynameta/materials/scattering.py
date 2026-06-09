@@ -49,7 +49,9 @@ class MatthiessenGamma:
     """Matthiessen free-carrier damping Gamma(n) = optical_dc_ratio * (1/tau_gb + 1/tau_phonon(T) +
     1/tau_ii(n)), a callable of carrier density n -> rad/s. Temperature is model STATE (T_K), set by the
     caller (e.g. an electro-thermo loop does dataclasses.replace(gamma, T_K=...)); the per-call T/omega
-    signature widening is deferred (roadmap R3/R6). All channels are >= 0 so Gamma > 0 (passive).
+    signature widening is deferred (roadmap R3/R6). All channels are >= 0 so Gamma >= 0 (passive);
+    Gamma is exactly 0 only if EVERY channel is left at its zero default (a deliberate lossless
+    configuration -- DrudeOptical accepts gamma = 0 but rejects gamma < 0).
 
       1/tau_gb       = gamma_const_rad_s                         (grain-boundary + any T,n-independent floor)
       1/tau_phonon   = gamma_phonon_300K_rad_s * f_T             (LO/acoustic phonons; f_T below)
@@ -74,6 +76,11 @@ class MatthiessenGamma:
         # negative (gain) phonon rate in the Bose branch.
         if not (self.T_K > 0.0):
             raise ValueError("MatthiessenGamma: T_K must be > 0 (K), got {!r}".format(self.T_K))
+        # the optical/DC ratio is a positive scale factor; a non-positive value would flip the whole
+        # damping to zero/negative (gain under exp(-i omega t)) through an otherwise-valid channel sum.
+        if not (self.optical_dc_ratio > 0.0):
+            raise ValueError("MatthiessenGamma: optical_dc_ratio must be > 0, got {!r}".format(
+                self.optical_dc_ratio))
 
     def _phonon(self) -> float:
         if self.gamma_phonon_300K_rad_s <= 0.0:

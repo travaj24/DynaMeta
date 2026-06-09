@@ -53,7 +53,8 @@ and pushed. Each is byte-identical when its new physics is off.
 - **R9** carrier-heating two-temperature ENZ nonlinearity -- `carriers/carrier_heating.py`;
   `carrier_heating_enz.py` (sub-ps rise / ps relaxation, 15.4x ENZ enhancement). Commit 044f0dc.
 
-Test suite: 295 passed. Tier 1+ below is not yet scheduled.
+Test suite: 307 passed (295 at the R1-R9 ship; +12 from the 2026-06-09 audit-guard batch, commit
+7a04a37). Tier 1+ below is not yet scheduled.
 
 ---
 
