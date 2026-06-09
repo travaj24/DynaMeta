@@ -84,6 +84,57 @@ def test_oblique_jax_matches_numpy():
     assert float(np.max(np.abs(rn.T0[m] - rj.T0[m]))) < 1e-10
 
 
+def test_oblique_tm_ppol_jax_matches_numpy():
+    pytest.importorskip("jax")
+    ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.5e15, drude_gamma_rad_s=1.0e14)]
+    kw = dict(period_x_m=300e-9, angle_deg=35.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14,
+              nx=6, pol="p")
+    rn = solve_fdtd_2d_oblique(ol, backend="numpy", **kw)
+    rj = solve_fdtd_2d_oblique(ol, backend="jax", **kw)
+    m = rn.band
+    assert float(np.max(np.abs(rn.R0[m] - rj.R0[m]))) < 1e-9     # differentiable TM scan == reference
+    assert float(np.max(np.abs(rn.T0[m] - rj.T0[m]))) < 1e-9
+
+
+def test_oblique_tm_dispatch_routes_to_requested_backend(monkeypatch):
+    # REGRESSION GUARD: pol='p' must honor `backend`. A stale `name='numpy'` guard once forced the TM
+    # path to NumPy regardless of backend, so backend='numba'/'jax' silently ran NumPy and every byte-
+    # match passed TAUTOLOGICALLY (jax==numpy because both were numpy). Patch the fast/diff kernels to a
+    # sentinel and assert solve_fdtd_2d_oblique actually reaches them for pol='p'.
+    import dynameta.optics.fdtd_nd as F
+
+    class _Reached(Exception):
+        pass
+
+    def _boom(*a, **k):
+        raise _Reached()
+
+    ol = [FDTDLayer(thickness_m=200e-9, eps_inf=4.0)]
+    kw = dict(period_x_m=300e-9, angle_deg=20.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=6,
+              nx=4, pol="p")
+    if F._HAVE_NUMBA:
+        monkeypatch.setattr(F, "_tm2d_oblique_numba", _boom)
+        with pytest.raises(_Reached):
+            solve_fdtd_2d_oblique(ol, backend="numba", **kw)
+    if F._have_jax():
+        monkeypatch.setattr(F, "_run_2d_tm_oblique_jax", _boom)
+        with pytest.raises(_Reached):
+            solve_fdtd_2d_oblique(ol, backend="jax", **kw)
+
+
+def test_oblique_3d_jax_matches_numpy():
+    pytest.importorskip("jax")
+    from dynameta.optics.fdtd_nd import solve_fdtd_3d_oblique
+    ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.4e15, drude_gamma_rad_s=1.0e14)]
+    kw = dict(period_x_m=300e-9, period_y_m=300e-9, angle_deg=25.0, azimuth_deg=20.0,
+              lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=9, nx=5, ny=5, settle=8.0, n_pad_wave=2.5)
+    rn = solve_fdtd_3d_oblique(ol, backend="numpy", **kw)
+    rj = solve_fdtd_3d_oblique(ol, backend="jax", **kw)
+    m = rn.band
+    assert float(np.max(np.abs(rn.R0[m] - rj.R0[m]))) < 1e-9     # 3D differentiable scan == reference
+    assert float(np.max(np.abs(rn.T0[m] - rj.T0[m]))) < 1e-9
+
+
 def test_mo_3d_reduces_to_1d_faraday():
     # the full-vector 3D MO engine on a laterally-uniform gyrotropic slab reproduces the 1D Faraday
     # rotation. At THIS low resolution the 3D Yee grid carries stronger numerical dispersion near the
