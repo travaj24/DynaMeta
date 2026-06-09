@@ -1,0 +1,94 @@
+"""Resolved free-carrier scattering / mass closures for the Drude optical model (roadmap R2):
+a Kane nonparabolic optical mass m_opt(n) and a Matthiessen damping Gamma(n; T) = sum of phonon,
+ionized-impurity and grain-boundary channels. Both are plain callables-of-n that plug THROUGH the
+existing DrudeOptical m_opt_kg / gamma_rad_s callable seam (DrudeOptical itself is unchanged), so the
+default constant-Drude behavior is byte-identical when the new knobs are neutral. Pure numpy, SI units;
+spell out omega/Gamma/tau. (materials/scattering.py is also the home for the R3 shared ScatteringModel.)
+
+Off-switches:
+  KaneOpticalMass(m0_kg=m, alpha_eV=0.0)            -> m_opt(n) == m  exactly (constant).
+  MatthiessenGamma(gamma_const_rad_s=g, ...=0)      -> Gamma(n) == g  exactly (constant).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Union
+
+import numpy as np
+
+from dynameta.constants import Q_E, M_E, HBAR
+
+_N_FLOOR = 1.0e10        # mirror examples.park_2021.ito_dos_mass floor (avoid 0**(1/3) edge)
+
+
+@dataclass(frozen=True)
+class KaneOpticalMass:
+    """Density-dependent Kane (nonparabolic) optical/conductivity mass:
+        m_opt(n) = m0 * (1 + 2 alpha_eV E_F(n)/q)^p,   E_F(n) = hbar^2 (3 pi^2 n)^(2/3) / (2 m0).
+    Same functional form as examples.park_2021.ito_dos_mass (the DOS-mass closure), but this is the
+    OPTICAL mass (its own m0/alpha in general). alpha_eV=0 -> exactly m0 (constant). Callable of n -> kg."""
+    m0_kg: float
+    alpha_eV: float = 0.0
+    exponent: float = 0.5
+
+    def __call__(self, n_m3):
+        n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)
+        kF = np.power(3.0 * np.pi ** 2 * n, 1.0 / 3.0)
+        E_F = HBAR ** 2 * kF ** 2 / (2.0 * self.m0_kg)                 # J
+        return self.m0_kg * np.power(1.0 + 2.0 * self.alpha_eV * E_F / Q_E, self.exponent)
+
+
+def _bose(x):
+    """Bose occupation 1/(exp(x)-1) = 1/expm1(x); x = T_debye/T."""
+    return 1.0 / np.expm1(np.asarray(x, dtype=np.float64))
+
+
+@dataclass(frozen=True)
+class MatthiessenGamma:
+    """Matthiessen free-carrier damping Gamma(n) = optical_dc_ratio * (1/tau_gb + 1/tau_phonon(T) +
+    1/tau_ii(n)), a callable of carrier density n -> rad/s. Temperature is model STATE (T_K), set by the
+    caller (e.g. an electro-thermo loop does dataclasses.replace(gamma, T_K=...)); the per-call T/omega
+    signature widening is deferred (roadmap R3/R6). All channels are >= 0 so Gamma > 0 (passive).
+
+      1/tau_gb       = gamma_const_rad_s                         (grain-boundary + any T,n-independent floor)
+      1/tau_phonon   = gamma_phonon_300K_rad_s * f_T             (LO/acoustic phonons; f_T below)
+      1/tau_ii(n)    = bh_prefactor_rad_s * (n/bh_n_ref_m3)^p * (m_ref/m_opt(n))^2   (degenerate Brooks-
+                       Herring SCALING; the absolute prefactor is CALIBRATION-bearing, default 0 = off)
+      f_T            = (T/300)              if debye_T_K <= 0 (linear high-T)
+                       bose(Td/T)/bose(Td/300)  otherwise (LO-phonon Bose occupation)
+    """
+    gamma_const_rad_s: float = 0.0
+    gamma_phonon_300K_rad_s: float = 0.0
+    T_K: float = 300.0
+    debye_T_K: float = 0.0
+    bh_prefactor_rad_s: float = 0.0
+    bh_n_ref_m3: float = 1.0e27
+    bh_exponent: float = 1.0
+    m_opt: Optional[Union[float, "KaneOpticalMass"]] = None
+    optical_dc_ratio: float = 1.0
+
+    def _phonon(self) -> float:
+        if self.gamma_phonon_300K_rad_s <= 0.0:
+            return 0.0
+        if self.debye_T_K <= 0.0:
+            return self.gamma_phonon_300K_rad_s * (self.T_K / 300.0)
+        return self.gamma_phonon_300K_rad_s * float(_bose(self.debye_T_K / self.T_K) /
+                                                    _bose(self.debye_T_K / 300.0))
+
+    def _m_opt(self, n):
+        if self.m_opt is None:
+            return M_E
+        return self.m_opt(n) if callable(self.m_opt) else float(self.m_opt)
+
+    def _ii(self, n):
+        if self.bh_prefactor_rad_s <= 0.0:
+            return 0.0
+        m = self._m_opt(n)
+        m_ref = self._m_opt(self.bh_n_ref_m3)
+        return (self.bh_prefactor_rad_s * np.power(n / self.bh_n_ref_m3, self.bh_exponent)
+                * (m_ref / m) ** 2)
+
+    def __call__(self, n_m3):
+        n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)
+        return self.optical_dc_ratio * (self.gamma_const_rad_s + self._phonon() + self._ii(n))
