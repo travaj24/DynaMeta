@@ -10,11 +10,13 @@ Metals/dielectrics have only an OpticalModel.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from dynameta.materials.optical_model import OpticalModel
+from dynameta.materials.optical_model import OpticalModel, DrudeOptical
 from dynameta.materials.transport_model import TransportModel
+from dynameta.materials.scattering import ScatteringModel
 
 
 @dataclass
@@ -32,10 +34,32 @@ class Material:
                                             # the gate capacitance -> accumulation
                                             # depends on the DC value. Semiconductors
                                             # carry their DC eps on TransportModel.
+    scattering:   Optional[ScatteringModel] = None   # R3: ONE tau(n;T) law that DERIVES both the
+                                            # optical Drude gamma(n)=1/tau and the transport drift
+                                            # mobility mu(n)=q/(m_cond 1/tau). Opt-in; when set it
+                                            # OVERRIDES the optical gamma_rad_s and the transport
+                                            # mobility callable (replacing them on fresh copies, so the
+                                            # passed-in models are not mutated). Default None ->
+                                            # byte-identical (nothing changes).
 
     def __post_init__(self) -> None:
         if not self.pretty_name:
             self.pretty_name = self.name
+        if self.scattering is not None:
+            if self.transport is None:
+                raise ValueError(
+                    "Material '{}': scattering link requires a TransportModel (semiconductor)".format(
+                        self.name))
+            if not isinstance(self.optical, DrudeOptical):
+                raise ValueError(
+                    "Material '{}': scattering link requires a DrudeOptical optical model (the free-"
+                    "carrier gamma seam)".format(self.name))
+            # Derive gamma(n) and mu(n) from the ONE tau law, on FRESH copies (do not mutate the
+            # possibly-shared optical/transport objects).
+            self.optical = dataclasses.replace(
+                self.optical, gamma_rad_s=self.scattering.gamma_optical_of_n())
+            self.transport = dataclasses.replace(
+                self.transport, mobility_m2Vs_of_n_m3=self.scattering.mobility_of_n())
 
     @property
     def is_semiconductor(self) -> bool:
