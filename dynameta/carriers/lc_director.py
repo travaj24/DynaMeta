@@ -32,6 +32,7 @@ d in metres). Pure numpy/scipy; no devsim/ngsolve.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -48,6 +49,8 @@ __all__ = [
     "flexo_p_along_field", "flexo_direct_torque",
     "n_local_from_theta", "n_eff_from_theta_profile",
     "director_to_extra_fields", "reduce_director",
+    "LCChiralResult", "chiral_director_profile_bvp",
+    "cholesteric_q0", "gooch_tarry_transmission", "mauguin_number",
 ]
 
 
@@ -606,3 +609,248 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                            Vmag, V_th, tilt))
     return LCStaticResult(V_app=float(V_app), V_lc=float(V_lc), n_eff=float(neff), z_m=z,
                           theta_field_rad=th, theta_b_rad=theta_b, success=success, message=message)
+
+
+# -----------------------------------------------------------------------------
+# Chiral / twisted nematic (TN, cholesteric) -- the SECOND director angle phi(z)
+# -----------------------------------------------------------------------------
+def cholesteric_q0(pitch_m: float) -> float:
+    """Natural cholesteric twist wavenumber q0 = 2 pi / pitch (rad/m). A right-handed helix of pitch p0
+    has q0 > 0; the director azimuth advances by 2 pi over one pitch."""
+    p = float(pitch_m)
+    if abs(p) < 1e-30:
+        return 0.0
+    return 2.0 * math.pi / p
+
+
+def mauguin_number(d_lc: float, dn: float, wavelength: float, twist_total_rad: float = 0.5 * math.pi):
+    """Mauguin parameter u = 2 d dn / (lambda * (2 phi_t / pi)) for a twisted cell -- the polarization
+    'follows' the twist adiabatically (waveguiding) when u >> 1. For a 90 deg TN (phi_t = pi/2) this is the
+    classic u = 2 d dn / lambda. Returns the dimensionless Mauguin number."""
+    phit = abs(float(twist_total_rad))
+    norm = (2.0 * phit / math.pi) if phit > 1e-12 else 1.0
+    return 2.0 * float(d_lc) * float(dn) / (float(wavelength) * norm)
+
+
+def gooch_tarry_transmission(d_lc: float, dn: float, wavelength: float, *,
+                             twist_total_rad: float = 0.5 * math.pi) -> float:
+    """Normalized optical transmission of a 90 deg twisted-nematic cell between crossed polarizers (input
+    polarizer along the entrance rubbing), the Gooch-Tarry formula
+        T = sin^2( (pi/2) sqrt(1 + u^2) ) / (1 + u^2),   u = 2 d dn / lambda
+    valid for a 90 deg twist. T -> 0 at the Gooch-Tarry minima u = sqrt(3), sqrt(15), ... (the first
+    transmission minimum), and the cell is dark there (the waveguiding regime). For a general twist this is
+    an approximation (the exact result needs the 4x4/Jones twist matrix); a warning regime only."""
+    u = mauguin_number(d_lc, dn, wavelength, twist_total_rad=twist_total_rad)
+    arg = 0.5 * math.pi * math.sqrt(1.0 + u * u)
+    return float(math.sin(arg) ** 2 / (1.0 + u * u))
+
+
+@dataclass
+class LCChiralResult:
+    """Static tilt-twist director solution: theta(z) (tilt from the field/z axis) AND phi(z) (azimuthal
+    twist about z). Field-axis convention (theta = 0 homeotropic, pi/2 planar)."""
+    V_app: float
+    V_lc: float
+    z_m: np.ndarray
+    theta_field_rad: np.ndarray   # tilt from the field axis (0 = homeotropic, pi/2 = planar)
+    phi_rad: np.ndarray           # azimuthal twist about z
+    theta_b_rad: float
+    phi_bottom_rad: float
+    phi_top_rad: float
+    twist_energy_J_m2: float = 0.0
+    n_eff: float = float("nan")
+    success: bool = True
+    message: str = ""
+
+
+def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para: float, eps_perp: float,
+                                V_app: float, d_planar: float, nz: int = 201,
+                                theta_b_rad: float = math.radians(89.9),
+                                phi_bottom_rad: float = 0.0, phi_top_rad: float = 0.5 * math.pi,
+                                pitch_m: "Optional[float]" = None, q0_rad_m: float = 0.0,
+                                field_model: str = "uniform", t_in: float = 0.0, t_out: float = 0.0,
+                                eps_in: float = 7.5, eps_out: float = 7.5,
+                                n_o: "Optional[float]" = None, n_e: "Optional[float]" = None,
+                                opt_model: str = "extra_k_radial", rtol: float = 1e-6) -> LCChiralResult:
+    """Three-constant (K11 splay / K22 TWIST / K33 bend) static director BVP for a CHIRAL / TWISTED-nematic
+    planar cell, solving the COUPLED tilt theta(z) and azimuthal twist phi(z). Field-axis theta; director
+    n = (sin th cos ph, sin th sin ph, cos th). The Frank free-energy density for z-only variation is
+
+        f = (1/2) f1(th) th'^2 + (1/2) f2(th) ph'^2 - K22 q0 sin^2(th) ph'
+              + (1/2) eps0 dEps E(z)^2 sin^2(th)
+        f1 = K11 sin^2 th + K33 cos^2 th        (the SAME tilt K_eff as director_profile_bvp)
+        f2 = sin^2 th (K22 sin^2 th + K33 cos^2 th)
+
+    with q0 = 2 pi / pitch the natural cholesteric wavenumber (q0_rad_m, or pitch_m). The dielectric torque
+    acts only on theta (the field is along z; twist preserves the polar angle), so phi couples to theta
+    purely elastically. Euler-Lagrange (a 4-D first-order BVP on u = z/d):
+
+        d/dz(f1 th') = (1/2) f1'(th) th'^2 - (1/2) f2'(th) ph'^2 + K22 q0 sin(2th) ph' - eps0 dEps E^2 sin th cos th
+        d/dz(f2 ph' - K22 q0 sin^2 th) = 0      (=> f2 ph' - K22 q0 sin^2 th = const)
+
+    Strong anchoring: theta(0)=theta(d)=theta_b, phi(0)=phi_bottom, phi(d)=phi_top. Reduces EXACTLY to
+    director_profile_bvp when phi_top=phi_bottom and q0=0 (the twist decouples and phi == const). n_eff is
+    the on-axis OPL average via theta (NOTE: a real twisted cell rotates the polarization -- use
+    gooch_tarry_transmission / a Jones-matrix optic for the true twisted-cell response; n_eff is only the
+    tilt-birefringence proxy)."""
+    from scipy.integrate import solve_bvp
+    K11 = float(K11); K22 = float(K22); K33 = float(K33)
+    dEps = float(eps_para) - float(eps_perp)
+    if not (K11 > 0 and K22 > 0 and K33 > 0):
+        raise ValueError("K11, K22, K33 must be > 0")
+    if not (d_planar and d_planar > 0):
+        raise ValueError("d_planar must be > 0 (chiral solver is planar-only)")
+    geo = compute_lc_geometry(geometry="planar", nz=nz, d_planar=d_planar, t_in=t_in, t_out=t_out)
+    z = geo.z_m; d_lc = float(geo.d_lc)
+    theta_b = float(theta_b_rad)
+    phi_a = float(phi_bottom_rad); phi_b = float(phi_top_rad)
+    q0 = float(q0_rad_m) if abs(q0_rad_m) > 0.0 else (cholesteric_q0(pitch_m) if pitch_m else 0.0)
+    fkw = dict(eps_para=eps_para, eps_perp=eps_perp, field_model=field_model, t_in=t_in, t_out=t_out,
+               eps_in=eps_in, eps_out=eps_out)
+    u = (z - float(z[0])) / d_lc
+
+    def _f1(th):
+        s = np.sin(th); c = np.cos(th)
+        return K11 * s * s + K33 * c * c
+
+    def _f1p(th):                                     # df1/dtheta = (K11-K33) sin(2 theta)
+        return (K11 - K33) * np.sin(2.0 * th)
+
+    def _f2(th):
+        s2 = np.sin(th) ** 2; c2 = np.cos(th) ** 2
+        return s2 * (K22 * s2 + K33 * c2)
+
+    def _f2p(th):                                     # df2/dtheta = sin(2th)[2 K22 sin^2 + K33 cos(2th)]
+        return np.sin(2.0 * th) * (2.0 * K22 * np.sin(th) ** 2 + K33 * np.cos(2.0 * th))
+
+    F2_FLOOR = 1e-3 * K33                             # phi ill-defined where the cell is homeotropic (sin th->0)
+
+    def _field_at(theta, Vk):
+        return solve_lc_field_profile(theta, float(Vk), geo, **fkw)
+
+    def bc(ya, yb):
+        return np.array([ya[0] - theta_b, yb[0] - theta_b,
+                         ya[2] - phi_a, yb[2] - phi_b], dtype=float)
+
+    def _make_fun(Vk):
+        def fun(x, y):
+            uu = np.asarray(x, float); zz = float(z[0]) + uu * d_lc
+            th = np.asarray(y[0], float); th_u = np.asarray(y[1], float)
+            ph_u = np.asarray(y[3], float)
+            th_z = th_u / d_lc; ph_z = ph_u / d_lc
+            gloc = LCGeometry(geo.geometry, d_lc, zz, zz, geo.r_in, geo.r_out)
+            E, _v = solve_lc_field_profile(th, float(Vk), gloc, **fkw)
+            f1 = np.maximum(np.abs(_f1(th)), 1e-300)
+            f2 = np.where(np.abs(_f2(th)) < F2_FLOOR, F2_FLOOR, _f2(th))
+            s = np.sin(th); c = np.cos(th); s2 = np.sin(2.0 * th)
+            # theta EL (d/dz(dL/dth') - dL/dth = 0, L the Frank+dielectric free-energy density):
+            #   f1 th'' = -(1/2) f1' th'^2 + (1/2) f2' ph'^2 - K22 q0 sin(2th) ph' + eps0 dEps E^2 s c
+            # (reduces to director_profile_bvp's d2 = -(t2+t3)/Keff at ph'=0, q0=0).
+            rhs_th = (-0.5 * _f1p(th) * th_z * th_z + 0.5 * _f2p(th) * ph_z * ph_z
+                      - K22 * q0 * s2 * ph_z + EPS0 * dEps * (E * E) * s * c)
+            th_zz = rhs_th / f1
+            # phi EL: f2 ph'' = - f2'(th) th' ph' + K22 q0 sin(2th) th'
+            ph_zz = (-_f2p(th) * th_z * ph_z + K22 * q0 * s2 * th_z) / f2
+            return np.vstack((th_u, th_zz * d_lc * d_lc, ph_u, ph_zz * d_lc * d_lc))
+        return fun
+
+    ph_seed = phi_a + (phi_b - phi_a) * u + (q0 * d_lc) * (u - u * u)   # linear + chiral bow (fixed BCs)
+    Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
+    K_eff_mean = 0.5 * (K11 + K33)
+    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    sign = -1.0 if dEps >= 0.0 else 1.0                                # tilt direction toward the field
+    reach = theta_b if dEps >= 0.0 else (0.5 * math.pi - theta_b)
+    max_amp = min(abs(reach) * 0.98, math.radians(89.0))
+    direction = -1.0 if dEps >= 0.0 else 1.0
+    use_score = Vmag > 1e-14 and abs(dEps) > 1e-14
+
+    def _theta_seeds(Vk, carried):
+        gs = []
+        if carried is not None:
+            cc = np.array(carried, float); cc[0] = cc[-1] = theta_b
+            gs.append(np.clip(cc, -0.49 * math.pi, 0.999 * math.pi))    # CONTINUATION
+        df = (math.tanh(max(0.0, abs(Vk) / V_th - 0.85)) if (math.isfinite(V_th) and V_th > 0) else 0.5)
+        flat = np.full_like(z, theta_b)
+        for frac in (df, 0.3, 0.6, 0.85, 0.98):
+            g = np.clip(flat + sign * (max_amp * max(0.0, min(1.0, frac))) * np.sin(math.pi * u),
+                        -0.49 * math.pi, 0.999 * math.pi)
+            g[0] = g[-1] = theta_b
+            gs.append(g)
+        gs.append(flat)                                                # trivial fallback
+        uniq: List[np.ndarray] = []
+        for g in gs:
+            if not any(o.shape == g.shape and np.allclose(o, g, atol=1e-9) for o in uniq):
+                uniq.append(g)
+        return uniq
+
+    def _twist_energy(th_, ph_):
+        ph_z = np.gradient(ph_, z)
+        return float(trapz(0.5 * _f2(th_) * ph_z * ph_z - K22 * q0 * np.sin(th_) ** 2 * ph_z, z))
+
+    def _energy(th_, ph_, Vk):
+        try:
+            dth = np.gradient(th_, z)
+            E, _v = _field_at(th_, Vk)
+            dens = 0.5 * _f1(th_) * dth * dth + 0.5 * EPS0 * dEps * (E * E) * np.sin(th_) ** 2
+            return float(trapz(dens, z)) + _twist_energy(th_, ph_)
+        except Exception:
+            return float("inf")
+
+    def _solve_at(th_guess, Vk):
+        y0 = np.vstack((th_guess, np.gradient(th_guess, u), ph_seed, np.gradient(ph_seed, u)))
+        with warnings.catch_warnings(), np.errstate(all="ignore"):   # silence failed-seed Jacobian noise
+            warnings.simplefilter("ignore")
+            sol = solve_bvp(_make_fun(sgn_V * abs(Vk)), bc, u, y0, tol=max(float(rtol), 3e-2),
+                            max_nodes=max(6000, int(nz) * 100), verbose=0)
+        if not sol.success:
+            raise RuntimeError(str(sol.message))
+        th_ = np.asarray(sol.sol(u)[0], float); ph_ = np.asarray(sol.sol(u)[2], float)
+        th_[0] = th_[-1] = theta_b; ph_[0] = phi_a; ph_[-1] = phi_b
+        return th_, ph_
+
+    def _best_at(Vk, carried):
+        cands = []
+        last = ""
+        for g in _theta_seeds(Vk, carried):
+            try:
+                th_, ph_ = _solve_at(g, Vk)
+                score = direction * float(np.nanmean(th_ - theta_b)) if use_score else 0.0
+                cands.append((score, _energy(th_, ph_, sgn_V * abs(Vk)), th_, ph_))
+            except Exception as exc:
+                last = str(exc)
+        if not cands:
+            raise RuntimeError("no converged candidate (last: {})".format(last))
+        cands.sort(key=lambda it: (-it[0], it[1]))
+        return cands[0][2], cands[0][3]
+
+    if (not use_score) or (not math.isfinite(V_th)) or Vmag <= 1.02 * V_th:
+        ladder = [Vmag]
+    else:
+        n_steps = int(min(14, max(2, math.ceil((Vmag - V_th) / max(0.75, 0.5 * V_th)) + 1)))
+        ladder = list(np.linspace(min(1.05 * V_th, Vmag), Vmag, n_steps))
+    carried = None; success = True; message = "ok"
+    try:
+        for Vk in ladder:
+            carried, ph = _best_at(float(Vk), carried)
+        th = carried
+    except RuntimeError as exc:
+        # last-resort single solve at the requested voltage (keeps a result + flags the miss)
+        th, ph = _solve_at(np.full_like(z, theta_b) + sign * 0.5 * max_amp * np.sin(math.pi * u), Vmag)
+        success = False; message = str(exc)
+    # wrong-branch safety net (same as director_profile_bvp): above 1.3 V_th the cell MUST tilt
+    if use_score and math.isfinite(V_th) and Vmag > 1.3 * V_th:
+        tilt = direction * float(np.mean(th - theta_b))
+        if tilt < math.radians(1.0):
+            success = False
+            message = ("chiral_director_profile_bvp: V={:.3g} > 1.3 V_th(~{:.3g}) but stayed ~untilted "
+                       "(mean tilt {:.3g} rad)".format(Vmag, V_th, tilt))
+    _E, V_lc = _field_at(th, float(V_app))
+    # twist elastic energy per unit plate area: integral of [ (1/2) f2 ph'^2 - K22 q0 sin^2 th ph' ] dz
+    ph_z = np.gradient(ph, z)
+    w_twist = float(trapz(0.5 * _f2(th) * ph_z * ph_z - K22 * q0 * np.sin(th) ** 2 * ph_z, z))
+    neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
+            if (n_o is not None and n_e is not None) else float("nan"))
+    return LCChiralResult(V_app=float(V_app), V_lc=float(V_lc), z_m=z, theta_field_rad=th, phi_rad=ph,
+                          theta_b_rad=theta_b, phi_bottom_rad=phi_a, phi_top_rad=phi_b,
+                          twist_energy_J_m2=w_twist, n_eff=float(neff), success=success,
+                          message=message)
