@@ -60,6 +60,11 @@ class Feature:
     z_hi_m:      float
     priority:    int = 10       # features sit above layer inclusions by default
 
+    def __post_init__(self) -> None:
+        if not (self.z_lo_m < self.z_hi_m):       # Layer validates thickness > 0; Feature must validate its span
+            raise ValueError("Feature '{}' requires z_lo_m < z_hi_m (got {:.4g}, {:.4g})".format(
+                self.name, self.z_lo_m, self.z_hi_m))
+
 
 @dataclass
 class Stack:
