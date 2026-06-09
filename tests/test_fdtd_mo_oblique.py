@@ -136,3 +136,59 @@ def test_oblique_numba_matches_numpy():
     m = a.band
     assert float(np.max(np.abs(a.R0[m] - b.R0[m]))) < 1e-10      # complex-envelope JIT loop == reference
     assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
+
+
+# --- structured (laterally-patterned) 3D diagonal-tensor: the lateral_tensor override ----------------
+def test_lateral_tensor_bad_inputs_raise():
+    L = MOLayer(thickness_m=200e-9, eps_xx=4.0, eps_yy=4.0)
+    kw = dict(period_x_m=300e-9, period_y_m=300e-9, lambda_min_m=LMIN, lambda_max_m=LMAX,
+              resolution=6, nx=4, ny=4, pol="y")
+    with pytest.raises(ValueError):                                   # unknown key
+        solve_fdtd_3d_mo([L], lateral_tensor={"bogus": np.ones((4, 4, 4))}, **kw)
+    with pytest.raises(ValueError):                                   # wrong shape
+        solve_fdtd_3d_mo([L], lateral_tensor={"exx": np.ones((3, 3, 3))}, **kw)
+
+
+def test_lateral_tensor_uniform_equals_layer_fill():
+    # a laterally-UNIFORM lateral_tensor (the pillar fills the whole cell) reproduces the per-layer fill.
+    L = MOLayer(thickness_m=250e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=0.0, drude_gamma_rad_s=0.0,
+                cyclotron_wc_rad_s=0.0)
+    kw = dict(period_x_m=300e-9, period_y_m=300e-9, lambda_min_m=LMIN, lambda_max_m=LMAX,
+              resolution=10, nx=4, ny=4, pol="y")
+    ref = solve_fdtd_3d_mo([L], **kw)
+
+    def uniform(nx, ny, nz, zc, pad, z_struct):
+        band = ((zc >= pad) & (zc < pad + z_struct))[None, None, :]
+        exx = np.where(band, 4.0, 1.0) * np.ones((nx, ny, nz))
+        eyy = np.where(band, 2.25, 1.0) * np.ones((nx, ny, nz))
+        ezz = np.where(band, 0.5 * (4.0 + 2.25), 1.0) * np.ones((nx, ny, nz))
+        return {"exx": exx, "eyy": eyy, "ezz": ezz}
+    pat = solve_fdtd_3d_mo([L], lateral_tensor=uniform, **kw)
+    m = ref.band
+    assert float(np.max(np.abs(ref.R[m] - pat.R[m]))) < 1e-9
+    assert float(np.max(np.abs(ref.T[m] - pat.T[m]))) < 1e-9
+
+
+def test_lateral_tensor_structured_energy_and_diagonal_no_crosspol():
+    # a structured anisotropic pillar (no gyration) closes energy and stays co-polarized (diagonal tensor).
+    L = MOLayer(thickness_m=250e-9, eps_xx=6.25, eps_yy=6.25)
+    kw = dict(period_x_m=600e-9, period_y_m=600e-9, lambda_min_m=LMIN, lambda_max_m=LMAX,
+              resolution=8, nx=8, ny=8, pol="y", n_pad_wave=2.0, settle=8.0)
+
+    def pillar(nx, ny, nz, zc, pad, z_struct):
+        xs = (np.arange(nx) + 0.5) / nx
+        ys = (np.arange(ny) + 0.5) / ny
+        X, Y = np.meshgrid(xs, ys, indexing="ij")
+        mask = ((np.abs(X - 0.5) <= 0.25) & (np.abs(Y - 0.5) <= 0.25))[:, :, None]
+        band = ((zc >= pad) & (zc < pad + z_struct))[None, None, :]
+        exx = np.where(band, np.where(mask, 6.25, 1.0), 1.0)
+        eyy = np.where(band, np.where(mask, 4.0, 1.0), 1.0)            # in-plane anisotropy
+        ezz = exx
+        return {"exx": exx, "eyy": eyy, "ezz": ezz}
+    r = solve_fdtd_3d_mo([L], lateral_tensor=pillar, **kw)
+    b = r.band
+    assert np.all(np.isfinite(r.R[b])) and np.all(np.isfinite(r.T[b]))
+    # diagonal tensor (no gyration) on an x/y-mirror-symmetric pillar -> mean cross-pol vanishes by
+    # symmetry (numerically small at this coarse res; the grating makes it nonzero unlike a uniform slab).
+    assert float(np.max(np.abs(r.t_cross[b]))) < 2e-2                 # negligible cross-pol power (~4e-4)
+    assert float(np.max(np.abs(r.R[b] + r.T[b] - 1.0))) < 5e-2        # lossless energy closes
