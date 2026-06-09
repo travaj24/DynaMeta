@@ -46,6 +46,7 @@ from dynameta.geometry import (
 from dynameta.materials import (
     Material, MaterialRegistry, OpticalModel, ConstantOptical, TabulatedOptical,
     DrudeOptical, TransportModel, TrapSpec, fit_drude_params,
+    KaneOpticalMass, MatthiessenGamma,
 )
 from dynameta.sweep import Sweep, BiasPoint
 # Bridge core (data + alignment + bridge; still no devsim/ngsolve)
@@ -75,6 +76,7 @@ __all__ = [
     # materials
     "Material", "MaterialRegistry", "OpticalModel", "ConstantOptical",
     "TabulatedOptical", "DrudeOptical", "TransportModel", "TrapSpec", "fit_drude_params",
+    "KaneOpticalMass", "MatthiessenGamma",
     # sweep
     "Sweep", "BiasPoint",
     # bridge core
