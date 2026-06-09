@@ -27,8 +27,9 @@ laterally-uniform stack at normal incidence (validation/fdtd_2d_reduces.py).
 
 IMPLEMENTED since this docstring's first draft: CPML, full 3D (solve_fdtd_3d), per-cell diagonal +
 magneto-optic tensor eps (solve_fdtd_3d_mo, gyrotropic magnetized-Drude ADE), Drude+Lorentz multipole
-ADE, and oblique Bloch incidence (2D s/p + 3D, complex-envelope). STILL DEFERRED: a full 3D STRUCTURED
-(laterally-patterned) tensor solve, oblique numba/jax kernels, and a GPU (CUDA/Taichi) fast kernel.
+ADE, oblique Bloch incidence (2D s/p + 3D, complex-envelope), and a STRUCTURED (laterally-patterned)
+3D diagonal-tensor solve (solve_fdtd_3d_mo `lateral_tensor=`, validated vs grcwa per-component).
+STILL DEFERRED: oblique numba/jax kernels, and a GPU (CUDA/Taichi) fast kernel.
 """
 
 from __future__ import annotations
@@ -1497,13 +1498,23 @@ class FDTD3DMOResult:
 def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min_m: float,
                      lambda_max_m: float, resolution: int = 40, courant: float = 0.5,
                      n_pad_wave: float = 6.0, settle: float = 14.0, pol: str = "y",
-                     source_amp: float = 1.0, nx: int = 4, ny: int = 4, npml: int = 12) -> FDTD3DMOResult:
+                     source_amp: float = 1.0, nx: int = 4, ny: int = 4, npml: int = 12,
+                     lateral_tensor=None) -> FDTD3DMOResult:
     """Broadband co/cross R/T + Faraday rotation of a 3D anisotropic / magneto-optic stack (the full-vector
     gyrotropic engine, _run_3d_mo). `layers` are MO layers (duck-typed: .thickness_m, .eps_xx, .eps_yy,
     optional .eps_zz, .drude_wp_rad_s, .drude_gamma_rad_s, .cyclotron_wc_rad_s); the magnetized-Drude
     cyclotron term gives the gyrotropy. For a laterally-uniform stack the result reduces to the 1-D
     fdtd_mo (validated vs the circular-eigenmode Jones-TMM); nx,ny small. Vacuum ends, convention
-    exp(-i w t)."""
+    exp(-i w t).
+
+    STRUCTURED (laterally-patterned) TENSOR: pass `lateral_tensor` to make a 3-D patterned anisotropic
+    metasurface (the per-layer eps_xx/eps_yy/eps_zz are the laterally-UNIFORM default; lateral_tensor
+    OVERRIDES them cell-by-cell). It is either an (nx,ny,nz)->keyed dict {'exx','eyy','ezz'[, 'wp','gam',
+    'wc']} of arrays, or a callable lateral_tensor(nx, ny, nz, zc, pad, z_struct) returning that dict;
+    any key present overwrites the corresponding field in the structure region. With wc==0 everywhere the
+    engine is a plain per-cell DIAGONAL-anisotropic Yee solve (the cyclotron 2x2 collapses to diagonal),
+    so this is the structured diagonal-tensor 3-D FDTD; nx,ny must resolve the lateral pattern. Reduces to
+    the scalar solve_fdtd_3d when exx==eyy==ezz, and to the 1-D anisotropic TMM when laterally uniform."""
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -1537,6 +1548,18 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
         gam[:, :, m] = getattr(L, "drude_gamma_rad_s", 0.0)
         wc[:, :, m] = getattr(L, "cyclotron_wc_rad_s", 0.0)
         z += L.thickness_m
+    if lateral_tensor is not None:
+        # STRUCTURED override: a laterally-patterned per-cell tensor replaces the uniform per-layer fill.
+        pat = lateral_tensor(nx, ny, nz, zc, pad, z_struct) if callable(lateral_tensor) else lateral_tensor
+        fields = {"exx": exx, "eyy": eyy, "ezz": ezz, "wp": wp, "gam": gam, "wc": wc}
+        for key, arr in dict(pat).items():
+            if key not in fields:
+                raise ValueError("lateral_tensor key {!r} not in {}".format(key, sorted(fields)))
+            a = np.asarray(arr, dtype=float)
+            if a.shape != (nx, ny, nz):
+                raise ValueError("lateral_tensor[{!r}] shape {} != (nx,ny,nz)={}".format(
+                    key, a.shape, (nx, ny, nz)))
+            fields[key][...] = a
     k_src = max(2, int(round(0.35 * pad / dz)))
     k_pL = int(round(0.7 * pad / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
