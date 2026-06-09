@@ -7,7 +7,8 @@ import pytest
 
 pytest.importorskip("ngsolve")
 
-from dynameta.carriers.thermal_fem import ThermalLayer, solve_thermal_fem
+from dynameta.carriers.thermal_fem import (ThermalLayer, solve_thermal_fem,
+                                           solve_thermal_transient_fem)
 from dynameta.carriers.electrostatics_fem import ElectrostaticLayer, solve_electrostatics_fem
 
 
@@ -19,6 +20,30 @@ def test_thermal_fem_single_layer_series_resistance():
                             flux_W_m2=flux, T_sink_K=Tsink, maxh_m=30e-9, order=2)
     mean_rise = float(res.mean_T_per_layer()[0]) - Tsink
     assert abs(mean_rise - flux * L / (2.0 * k)) / (flux * L / (2.0 * k)) < 0.05   # ~3.33 K
+
+
+def test_thermal_transient_reaches_steady():
+    # coarse single slab, uniform Joule, uniform IC=T_sink: a few large backward-Euler steps must
+    # converge to the steady uniform-Joule profile T_mean = T_sink + Q L^2/(3k) within ~5%.
+    L, k, Q, Tsink = 100e-9, 10.0, 5.0e15, 300.0
+    slab = [ThermalLayer("slab", L, k, rho_kg_m3=7140.0, Cp_J_kgK=340.0)]   # ITO-like rho*Cp
+    tr = solve_thermal_transient_fem(slab, period_x_m=60e-9, period_y_m=60e-9, t_end_s=2e-7,
+                                     dt_s=1e-8, flux_W_m2=0.0, T_sink_K=Tsink, joule_W_m3=Q,
+                                     maxh_m=30e-9, order=2)
+    t_steady = Tsink + Q * L ** 2 / (3.0 * k)
+    mean_final = float(tr.mean_T_per_layer()[0])
+    assert abs(mean_final - t_steady) / abs(t_steady - Tsink) < 0.05
+    # monotone rise (theta=1, no overshoot) + sink pinned at the final field
+    assert float(np.min(np.diff(tr.mean_T_per_layer_t[:, 0]))) > -1e-6
+    assert abs(tr.T_at(30e-9, 30e-9, 0.0) - Tsink) < 1e-6
+
+
+def test_thermal_transient_requires_rho_cp():
+    # rho/Cp default 0 -> the transient cannot run (would be a singular mass matrix); must raise.
+    slab = [ThermalLayer("slab", 100e-9, 10.0)]                              # no rho/Cp
+    with pytest.raises(ValueError):
+        solve_thermal_transient_fem(slab, period_x_m=60e-9, period_y_m=60e-9, t_end_s=1e-7,
+                                    dt_s=1e-8, flux_W_m2=1e8)
 
 
 def test_electrostatics_fem_series_capacitor_field():
