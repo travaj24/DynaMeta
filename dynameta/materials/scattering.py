@@ -68,6 +68,13 @@ class MatthiessenGamma:
     m_opt: Optional[Union[float, "KaneOpticalMass"]] = None
     optical_dc_ratio: float = 1.0
 
+    def __post_init__(self):
+        # T_K is mutable model state (set via dataclasses.replace by an electro-thermo loop); guard it
+        # here so a non-positive temperature fails loudly rather than producing a divide-warning /
+        # negative (gain) phonon rate in the Bose branch.
+        if not (self.T_K > 0.0):
+            raise ValueError("MatthiessenGamma: T_K must be > 0 (K), got {!r}".format(self.T_K))
+
     def _phonon(self) -> float:
         if self.gamma_phonon_300K_rad_s <= 0.0:
             return 0.0
@@ -139,5 +146,8 @@ class ScatteringModel:
             n = np.asarray(n_m3, dtype=np.float64)
             m = np.asarray(mc(n), dtype=np.float64) if callable(mc) else float(mc)
             g = np.asarray(ot(n), dtype=np.float64) if callable(ot) else float(ot)
+            if np.any(np.asarray(m) <= 0.0) or np.any(np.asarray(g) <= 0.0):   # mu ~ 1/(m * 1/tau)
+                raise ValueError("ScatteringModel.mobility_of_n: m_cond and 1/tau must be > 0 (a "
+                                 "callable returned a non-positive value -> mu would be inf/NaN/negative).")
             return rh * Q_E / (m * g)
         return mu

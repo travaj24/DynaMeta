@@ -36,6 +36,9 @@ def weighted_objective(terms):
         import jax.numpy as jnp
         total = jnp.asarray(0.0)
         for t in terms:
+            if "target" in t and "sense" in t:           # the docstring says ONE of; enforce it
+                raise ValueError("weighted_objective term has BOTH 'target' and 'sense'; supply exactly "
+                                 "one ('sense' would be silently ignored when 'target' is present).")
             v = t["value"](p)
             w = float(t.get("weight", 1.0))
             if "target" in t:
@@ -100,6 +103,12 @@ class Fdtd2dDesignProblem:
         self.eyL_vac = eyL_v
         self.mL_inc = jnp.fft.rfft(eyL_v.mean(axis=1))[self.bins]
         self.mR_inc = jnp.fft.rfft(eyR_v.mean(axis=1))[self.bins]
+        # the vacuum reference amplitudes normalize R/T (spectrum: R=|mRefl/mL_inc|^2); a ~0 reference at
+        # a target bin would make R/T NaN and silently poison the optimizer -- fail loudly here instead.
+        if float(jnp.min(jnp.abs(self.mL_inc))) <= 0.0 or float(jnp.min(jnp.abs(self.mR_inc))) <= 0.0:
+            raise ValueError("Fdtd2dDesignProblem: the vacuum reference field is ~0 at a target "
+                             "wavelength bin (R/T would be NaN); check lambdas_m vs the FDTD frequency "
+                             "resolution / settle time.")
         self.lambdas_m = lams
 
     def spectrum(self, rho_p):
