@@ -42,19 +42,28 @@ def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide:
     return LayeredStack(1.0 + 0j, np.sqrt(complex(eps_mirror)), slabs)
 
 
-def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, drude_model,
+def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, drude_model=None,
+                               drude_of_t: Optional[Callable] = None,
                                build_stack: Optional[Callable] = None):
     """R(t)/T(t) of the modulator as the carriers evolve. `n_of_t(t)` returns the ITO carrier density n(z)
-    [m^-3] (depth array or scalar) at time t; the free-carrier `drude_model` (a DrudeOptical) maps it to
-    eps(z) at lambda_m; `build_stack(eps_ito, lambda_m)` (default enz_reflector_stack) assembles the
-    LayeredStack, solved by coherent TMM. Returns (t_s, R, T, eps_front) -- the optical turn-on/off waveform
-    plus the front-ITO permittivity trajectory (its ENZ crossing)."""
+    [m^-3] (depth array or scalar) at time t; the free-carrier Drude maps it to eps(z) at lambda_m;
+    `build_stack(eps_ito, lambda_m)` (default enz_reflector_stack) assembles the LayeredStack, solved by
+    coherent TMM. Returns (t_s, R, T, eps_front) -- the optical turn-on/off waveform plus the front-ITO
+    permittivity trajectory (its ENZ crossing).
+
+    Supply EXACTLY ONE of `drude_model` (a fixed DrudeOptical, the original behavior -- byte-identical) or
+    `drude_of_t(t) -> DrudeOptical` (a per-instant Drude, e.g. carrier-heating Te(t)-dependent m*/Gamma from
+    carriers.carrier_heating). The drude_of_t hook lets the SAME loop carry a time-varying material response
+    without widening DrudeOptical.eps; drude_of_t=None preserves the fixed-drude_model path exactly."""
+    if (drude_model is None) == (drude_of_t is None):
+        raise ValueError("supply exactly one of drude_model (fixed) or drude_of_t (per-instant)")
     build_stack = build_stack or enz_reflector_stack
     t = np.asarray(times_s, dtype=float)
     R = np.empty(t.size); T = np.empty(t.size); eps_front = np.empty(t.size, dtype=complex)
     for i, ti in enumerate(t):
+        dm = drude_of_t(float(ti)) if drude_of_t is not None else drude_model
         nz = np.atleast_1d(np.asarray(n_of_t(float(ti)), dtype=float))
-        eps_ito = np.atleast_1d(np.asarray(drude_model.eps(lambda_m, n_m3=nz), dtype=complex))  # vectorized
+        eps_ito = np.atleast_1d(np.asarray(dm.eps(lambda_m, n_m3=nz), dtype=complex))  # vectorized
         eps_front[i] = eps_ito[0]
         stack = build_stack(eps_ito, lambda_m)
         R[i], T[i], _A = layered_rta(stack, lambda_m)
