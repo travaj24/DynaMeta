@@ -64,6 +64,33 @@ def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> 
                      drude_wp_rad_s=float(math.sqrt(max(wp2, 0.0))), drude_gamma_rad_s=float(gamma))
 
 
+def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6):
+    """Per-cell time-domain eps hook (roadmap R4): vectorized twin of _eps_to_fdtd_layer that maps a
+    COMPLEX eps grid (an EffectModel's per-cell linear eps at a fixed slow drive -- gate E, T, PCM
+    fraction, ...) to (eps_inf, wp, gamma) grids for the FDTD lateral seam (solve_fdtd_2d's lateral_wp /
+    lateral_gam, or solve_fdtd_3d_mo's lateral_tensor). Byte-identical to _eps_to_fdtd_layer cell-by-cell,
+    so a uniform grid reduces to the validated single-layer inversion exactly. exp(-i w t), Im(eps) >= 0
+    = loss; the same one-Drude-pole inversion is single-omega-exact (re-sample/re-fit per cell across a
+    band for a broadband sweep)."""
+    eps = np.asarray(eps_grid, dtype=np.complex128)
+    er = eps.real
+    ei = np.maximum(eps.imag, 0.0)                          # passive clamp (same as _eps_to_fdtd_layer)
+    omega0 = 2.0 * math.pi * C_LIGHT / float(lambda_m)
+    lossless = (ei <= loss_tol * (np.abs(er) + 1.0)) & (er > 0.0)
+    absorber = (~lossless) & (er < 1.0)                     # eps_inf pinned to 1
+    denom = 1.0 - er
+    safe = np.where(denom > 0.0, denom, 1.0)
+    gamma_abs = np.where(denom > 0.0, ei * omega0 / safe, omega0)
+    wp2_abs = denom * (omega0 ** 2 + gamma_abs ** 2)
+    gamma_hi = np.full_like(er, omega0)                     # high-index lossy: eps_inf = er + ei
+    wp2_hi = 2.0 * ei * omega0 ** 2
+    eps_inf = np.where(lossless, er, np.where(absorber, 1.0, er + ei))
+    gamma = np.where(lossless, 0.0, np.where(absorber, gamma_abs, gamma_hi))
+    wp2 = np.where(lossless, 0.0, np.where(absorber, wp2_abs, wp2_hi))
+    wp = np.sqrt(np.maximum(wp2, 0.0))
+    return eps_inf, wp, gamma
+
+
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
     """[FDTDLayer] for the through-stack in SUPERSTRATE-FIRST (incidence) order -- the order solve_fdtd_*
     places layers (the Stack lists bottom->top, so reversed). A uniform layer uses the bridge's
