@@ -59,7 +59,7 @@ from dynameta.core import (
     EffectModel, as_tensor, ComposedEffect, DeltaEffect, OpticalModelEffect,
     PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel,
     AnisotropicThermoOpticModel, ElectroAbsorptionModel, PCMModel, LiquidCrystalModel,
-    MagnetoOpticModel, IntersubbandEffect,
+    MagnetoOpticModel, IntersubbandEffect, BursteinMossEdge,
 )
 from dynameta.analysis import (
     resonance_dip, resonance_shift, gate_cv, sheet_resistance_ohm_sq,
@@ -86,7 +86,7 @@ __all__ = [
     "EffectModel", "as_tensor", "ComposedEffect", "DeltaEffect", "OpticalModelEffect",
     "PockelsEffect", "KerrEffect", "FranzKeldyshEffect", "ThermoOpticModel",
     "AnisotropicThermoOpticModel", "ElectroAbsorptionModel", "PCMModel", "LiquidCrystalModel",
-    "MagnetoOpticModel", "IntersubbandEffect",
+    "MagnetoOpticModel", "IntersubbandEffect", "BursteinMossEdge",
     # analysis (resonance + modulator figure-of-merit)
     "resonance_dip", "resonance_shift", "gate_cv", "sheet_resistance_ohm_sq",
     "lumped_rc_bandwidth", "switching_energy_per_area", "modulator_figure_of_merit",
