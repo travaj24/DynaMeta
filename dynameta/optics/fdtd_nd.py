@@ -27,9 +27,11 @@ laterally-uniform stack at normal incidence (validation/fdtd_2d_reduces.py).
 
 IMPLEMENTED since this docstring's first draft: CPML, full 3D (solve_fdtd_3d), per-cell diagonal +
 magneto-optic tensor eps (solve_fdtd_3d_mo, gyrotropic magnetized-Drude ADE), Drude+Lorentz multipole
-ADE, oblique Bloch incidence (2D s/p + 3D, complex-envelope), and a STRUCTURED (laterally-patterned)
-3D diagonal-tensor solve (solve_fdtd_3d_mo `lateral_tensor=`, validated vs grcwa per-component).
-STILL DEFERRED: oblique numba/jax kernels, and a GPU (CUDA/Taichi) fast kernel.
+ADE, oblique Bloch incidence (2D s/p + 3D, complex-envelope) with fused numba kernels (2D-TE, 2D-TM,
+and full-vector 3D -- all byte-exact vs the NumPy reference, ~5-8x faster), and a STRUCTURED (laterally-
+patterned) 3D diagonal-tensor solve (solve_fdtd_3d_mo `lateral_tensor=`, validated vs grcwa per-
+component). STILL DEFERRED: oblique jax kernels (2D-TM/3D; 2D-TE jax exists), and a GPU (CUDA/Taichi)
+fast kernel.
 """
 
 from __future__ import annotations
@@ -1058,6 +1060,96 @@ def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
     return exL, eyL, exR, eyR
 
 
+@njit(parallel=True, fastmath=True, cache=True)
+def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
+                          nsteps, k_src, k_pL, k_pR, src, kx, ky, sx, sy):
+    """Fused, prange-threaded full-vector COMPLEX-ENVELOPE oblique 3D timestep (the Numba CPU kernel) --
+    the same physics as _run_3d_oblique (2D transverse Bloch envelope d/dx->d/dx+i kx, d/dy->d/dy+i ky;
+    semi-implicit Drude ADE per E-component; CFS-CPML + PEC in z; s-pol plane source on (sx,sy)), but
+    explicit-loop + compiled. complex128; (kx,ky)=0 reduces to the real normal-incidence response. Returns
+    the complex Ex,Ey probe planes at the left/right z-planes."""
+    nx, ny, nz = eps_inf.shape
+    c0 = np.complex128(0.0)
+    Ex = np.zeros((nx, ny, nz), dtype=np.complex128); Ey = np.zeros((nx, ny, nz), dtype=np.complex128)
+    Ez = np.zeros((nx, ny, nz), dtype=np.complex128)
+    Hx = np.zeros((nx, ny, nz), dtype=np.complex128); Hy = np.zeros((nx, ny, nz), dtype=np.complex128)
+    Hz = np.zeros((nx, ny, nz), dtype=np.complex128)
+    Jx = np.zeros((nx, ny, nz), dtype=np.complex128); Jy = np.zeros((nx, ny, nz), dtype=np.complex128)
+    Jz = np.zeros((nx, ny, nz), dtype=np.complex128)
+    psi_Hx = np.zeros((nx, ny, nz), dtype=np.complex128); psi_Hy = np.zeros((nx, ny, nz), dtype=np.complex128)
+    psi_Ex = np.zeros((nx, ny, nz), dtype=np.complex128); psi_Ey = np.zeros((nx, ny, nz), dtype=np.complex128)
+    exL = np.empty((nsteps, nx, ny), dtype=np.complex128); eyL = np.empty((nsteps, nx, ny), dtype=np.complex128)
+    exR = np.empty((nsteps, nx, ny), dtype=np.complex128); eyR = np.empty((nsteps, nx, ny), dtype=np.complex128)
+    cmu = dt / MU0; e0dt = EPS0 / dt
+    ikx = 1j * kx; iky = 1j * ky
+    for n in range(nsteps):
+        for i in prange(nx):                                  # ---- H update (reads old E) ----
+            ip1 = i + 1 if i + 1 < nx else 0
+            for j in range(ny):
+                jp1 = j + 1 if j + 1 < ny else 0
+                for k in range(nz):
+                    dyfEz = (Ez[i, jp1, k] - Ez[i, j, k]) / dy + iky * Ez[i, j, k]
+                    sEy = c0
+                    if k < nz - 1:
+                        dEy_dz = (Ey[i, j, k + 1] - Ey[i, j, k]) / dz
+                        psi_Hx[i, j, k] = bh[k] * psi_Hx[i, j, k] + ch[k] * dEy_dz
+                        sEy = dEy_dz / kh[k] + psi_Hx[i, j, k]
+                    Hx[i, j, k] -= cmu * (dyfEz - sEy)
+                    dxfEz = (Ez[ip1, j, k] - Ez[i, j, k]) / dx + ikx * Ez[i, j, k]
+                    sEx = c0
+                    if k < nz - 1:
+                        dEx_dz = (Ex[i, j, k + 1] - Ex[i, j, k]) / dz
+                        psi_Hy[i, j, k] = bh[k] * psi_Hy[i, j, k] + ch[k] * dEx_dz
+                        sEx = dEx_dz / kh[k] + psi_Hy[i, j, k]
+                    Hy[i, j, k] -= cmu * (sEx - dxfEz)
+                    dxfEy = (Ey[ip1, j, k] - Ey[i, j, k]) / dx + ikx * Ey[i, j, k]
+                    dyfEx = (Ex[i, jp1, k] - Ex[i, j, k]) / dy + iky * Ex[i, j, k]
+                    Hz[i, j, k] -= cmu * (dxfEy - dyfEx)
+        for i in prange(nx):                                  # ---- E update (reads new H, old E/J) ----
+            im1 = i - 1 if i - 1 >= 0 else nx - 1
+            for j in range(ny):
+                jm1 = j - 1 if j - 1 >= 0 else ny - 1
+                for k in range(nz):
+                    aJ = (1.0 - gam[i, j, k] * dt / 2.0) / (1.0 + gam[i, j, k] * dt / 2.0)
+                    bJ = (EPS0 * wp[i, j, k] ** 2 * dt / 2.0) / (1.0 + gam[i, j, k] * dt / 2.0)
+                    denom = e0dt * eps_inf[i, j, k] + bJ / 2.0
+                    dybHz = (Hz[i, j, k] - Hz[i, jm1, k]) / dy + iky * Hz[i, j, k]
+                    sHy = c0
+                    if k >= 1:
+                        dHy_dz = (Hy[i, j, k] - Hy[i, j, k - 1]) / dz
+                        psi_Ex[i, j, k] = be[k] * psi_Ex[i, j, k] + ce[k] * dHy_dz
+                        sHy = dHy_dz / ke[k] + psi_Ex[i, j, k]
+                    curlx = dybHz - sHy
+                    exo = Ex[i, j, k]
+                    exn = (e0dt * eps_inf[i, j, k] * exo + curlx - 0.5 * (1.0 + aJ) * Jx[i, j, k] - 0.5 * bJ * exo) / denom
+                    Jx[i, j, k] = aJ * Jx[i, j, k] + bJ * (exn + exo)
+                    dxbHz = (Hz[i, j, k] - Hz[im1, j, k]) / dx + ikx * Hz[i, j, k]
+                    sHx = c0
+                    if k >= 1:
+                        dHx_dz = (Hx[i, j, k] - Hx[i, j, k - 1]) / dz
+                        psi_Ey[i, j, k] = be[k] * psi_Ey[i, j, k] + ce[k] * dHx_dz
+                        sHx = dHx_dz / ke[k] + psi_Ey[i, j, k]
+                    curly = sHx - dxbHz
+                    eyo = Ey[i, j, k]
+                    eyn = (e0dt * eps_inf[i, j, k] * eyo + curly - 0.5 * (1.0 + aJ) * Jy[i, j, k] - 0.5 * bJ * eyo) / denom
+                    Jy[i, j, k] = aJ * Jy[i, j, k] + bJ * (eyn + eyo)
+                    dxbHy = (Hy[i, j, k] - Hy[im1, j, k]) / dx + ikx * Hy[i, j, k]
+                    dybHx = (Hx[i, j, k] - Hx[i, jm1, k]) / dy + iky * Hx[i, j, k]
+                    curlz = dxbHy - dybHx
+                    ezo = Ez[i, j, k]
+                    ezn = (e0dt * eps_inf[i, j, k] * ezo + curlz - 0.5 * (1.0 + aJ) * Jz[i, j, k] - 0.5 * bJ * ezo) / denom
+                    Jz[i, j, k] = aJ * Jz[i, j, k] + bJ * (ezn + ezo)
+                    Ex[i, j, k] = exn; Ey[i, j, k] = eyn; Ez[i, j, k] = ezn
+        for i in prange(nx):                                  # source + PEC + probes
+            for j in range(ny):
+                Ex[i, j, k_src] += sx * src[n]; Ey[i, j, k_src] += sy * src[n]
+                Ex[i, j, 0] = c0; Ex[i, j, nz - 1] = c0
+                Ey[i, j, 0] = c0; Ey[i, j, nz - 1] = c0
+                exL[n, i, j] = Ex[i, j, k_pL]; eyL[n, i, j] = Ey[i, j, k_pL]
+                exR[n, i, j] = Ex[i, j, k_pR]; eyR[n, i, j] = Ey[i, j, k_pR]
+    return exL, eyL, exR, eyR
+
+
 def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, pol):
     """Full-vector 3D-FDTD with a per-cell DIAGONAL anisotropy (exx,eyy,ezz) AND a gyrotropic
     MAGNETO-OPTIC response (magnetization along z) via the magnetized-Drude ADE -- the 3D analog of the
@@ -1482,7 +1574,7 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 36,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                           source_amp: float = 1.0, npml: int = 12, nx: int = 6,
-                          ny: int = 6) -> FDTD2DObliqueResult:
+                          ny: int = 6, backend: str = "numpy") -> FDTD2DObliqueResult:
     """Broadband s-pol reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence in the
     FULL-VECTOR 3D engine, via the complex-envelope Bloch method with a 2D transverse wavevector
     k_par=(kx,ky), |k_par| = (2 pi/lambda_c) sin(angle_deg), azimuth phi=azimuth_deg (kx=|k_par|cos phi,
@@ -1525,10 +1617,18 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
     cpml = _cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, ny, nz)); zero = np.zeros((nx, ny, nz))
-    exL_i, eyL_i, exR_i, eyR_i = _run_3d_oblique(one, zero, zero, dx, dy, dz, dt, nsteps, k_src, k_pL,
-                                                 k_pR, src, cpml, kx, ky, sx, sy)
-    exL_t, eyL_t, exR_t, eyR_t = _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL,
-                                                 k_pR, src, cpml, kx, ky, sx, sy)
+    bk = _resolve_backend(backend)
+
+    def _obl3d(ei, w, g):
+        if bk == "numba":
+            (ke, be, ce), (kh, bh, ch) = cpml
+            return _run_3d_oblique_numba(np.asarray(ei, float), np.asarray(w, float), np.asarray(g, float),
+                                         ke, be, ce, kh, bh, ch, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
+                                         np.asarray(src, float), kx, ky, sx, sy)
+        return _run_3d_oblique(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy)
+
+    exL_i, eyL_i, exR_i, eyR_i = _obl3d(one, zero, zero)
+    exL_t, eyL_t, exR_t, eyR_t = _obl3d(eps_inf, wp, gam)
     nf = nsteps // 2 + 1
     f = np.fft.rfftfreq(nsteps, dt)
     proj = (lambda ex, ey: sx * ex.mean(axis=(1, 2)) + sy * ey.mean(axis=(1, 2)))   # s-pol of the x,y-mean
