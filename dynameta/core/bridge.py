@@ -130,6 +130,16 @@ def assemble_eps(field: CarrierField,
         zspan = z3_m[-1] - z3_m[0]
         z_remap_m = (zlo + (z3_m - z3_m[0]) * ((zhi - zlo) / zspan)
                       if zspan > 0 else np.full_like(z3_m, zlo))
+        # eps_grid OUTPUT contract: a gridded response must be (Nx,Ny,Nz) scalar or (Nx,Ny,Nz,3,3)
+        # tensor matching the region axes -- the transpose below assumes it, and a wrong-shaped /
+        # transposed grid would silently misplace eps in the geometry (audit-v2 finding).
+        _want = (x3_m.size, y3_m.size, z3_m.size)
+        if not ((eps_3d.ndim == 3 and eps_3d.shape == _want)
+                or (eps_3d.ndim == 5 and eps_3d.shape == _want + (3, 3))):
+            raise ValueError(
+                "n_to_eps.eps_grid for region '{}' returned shape {}; expected scalar (Nx,Ny,Nz)={}, "
+                "tensor (Nx,Ny,Nz,3,3), a uniform scalar, or a uniform (3,3) tensor (axis order is "
+                "(Nx,Ny,Nz), NOT (Nz,Ny,Nx)).".format(ra.mesh_region, eps_3d.shape, _want))
         if eps_3d.ndim == 5:                                   # tensor (Nx,Ny,Nz,3,3) -> (Nz,Ny,Nx,3,3)
             vals = np.transpose(eps_3d, (2, 1, 0, 3, 4)).astype(np.complex128)
         else:                                                  # scalar (Nx,Ny,Nz) -> (Nz,Ny,Nx)

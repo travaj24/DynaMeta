@@ -79,3 +79,35 @@ def test_weighted_objective_both_keys_raises():
     loss = weighted_objective([{"value": (lambda p: p), "target": 1.0, "sense": "max"}])
     with pytest.raises(ValueError):
         loss(0.5)
+
+
+# ---- audit-v2 additions ----------------------------------------------------------------------
+
+def test_drude_negative_gamma_raises_zero_allowed():
+    # gamma < 0 = gain under exp(-iwt) -> reject; gamma = 0 (collisionless idealization) stays legal.
+    bad = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * M_E, gamma_rad_s=(lambda n: -1.0e14))
+    with pytest.raises(ValueError):
+        bad.eps(1300e-9, n_m3=1e27)
+    lossless = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * M_E, gamma_rad_s=0.0)
+    e = complex(lossless.eps(1300e-9, n_m3=1e27))
+    assert e.imag == 0.0 and np.isfinite(e.real)
+
+
+def test_matthiessen_nonpositive_dc_ratio_raises():
+    with pytest.raises(ValueError):
+        MatthiessenGamma(gamma_const_rad_s=1.0e14, optical_dc_ratio=0.0)
+    with pytest.raises(ValueError):
+        MatthiessenGamma(gamma_const_rad_s=1.0e14, optical_dc_ratio=-1.0)
+
+
+def test_sweepresults_wavelength_collision_raises():
+    from types import SimpleNamespace
+    from dynameta.results import SweepResults
+    rows = [SimpleNamespace(bias_label="b", lambda_nm=w, result=SimpleNamespace(R=0.5))
+            for w in (1300.0, 1300.0 + 5e-8)]            # distinct but within the 1e-6 nm key rounding
+    with pytest.raises(ValueError):
+        SweepResults.from_rows(rows)
+    ok = SweepResults.from_rows([SimpleNamespace(bias_label="b", lambda_nm=w,
+                                                 result=SimpleNamespace(R=0.5))
+                                 for w in (1300.0, 1310.0)])
+    assert ok.wavelengths_nm.size == 2                   # normal sweeps unaffected

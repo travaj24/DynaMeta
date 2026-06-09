@@ -187,6 +187,12 @@ class DrudeOptical(OpticalModel):
         if np.any(np.asarray(m) <= 0.0) or not np.all(np.isfinite(m)):   # a callable must return m_opt > 0
             raise ValueError("DrudeOptical.eps: m_opt_kg must be finite and > 0 (omega_p^2 ~ 1/m would "
                              "otherwise be inf/NaN); a callable m_opt_kg(n) returned a non-positive value.")
+        # gamma = 0 (collisionless/lossless idealization) is legitimate; NEGATIVE gamma flips
+        # Im(eps) < 0 = GAIN under exp(-i omega t) -- reject it loudly instead of silently amplifying.
+        if np.any(np.asarray(g) < 0.0) or not np.all(np.isfinite(g)):
+            raise ValueError("DrudeOptical.eps: gamma_rad_s must be finite and >= 0 (a negative damping "
+                             "gives Im(eps) < 0 = gain under exp(-i omega t)); a callable gamma_rad_s(n) "
+                             "returned a negative/non-finite value.")
         omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
         omega_p2 = n * Q_E * Q_E / (EPS0 * m)
         return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)

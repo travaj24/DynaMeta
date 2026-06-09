@@ -39,11 +39,19 @@ _jax = None
 
 
 def _ensure_jax_x64() -> None:
-    """Force JAX into float64 mode (it defaults to float32). MUST run before any jax.numpy use;
-    called on first JAX import below. Without this the JAX constitutive path would silently drop to
-    single precision -- unacceptable for the physics here."""
+    """Force JAX into float64 mode (it defaults to float32) and FAIL FAST if the switch did not take.
+    Called on first JAX use below. CAVEAT: this governs arrays created AFTER the switch -- if user code
+    imported jax and built float32 arrays BEFORE touching dynameta, those arrays stay 32-bit; pass
+    float64 inputs (or enable jax_enable_x64 yourself at program start). Without x64 the JAX
+    constitutive path would silently drop to single precision -- unacceptable for the physics here."""
     import jax
     jax.config.update("jax_enable_x64", True)
+    import jax.numpy as _probe
+    import numpy as _np
+    if _probe.zeros(1).dtype != _np.float64:    # the update must take effect for NEW arrays
+        raise RuntimeError("dynameta: could not enable JAX float64 mode (jax_enable_x64) -- new jax "
+                           "arrays are still 32-bit. Enable x64 before importing jax-dependent code "
+                           "(e.g. JAX_ENABLE_X64=1 or jax.config.update at program start).")
 
 
 def _get_cupy() -> Optional[Any]:
