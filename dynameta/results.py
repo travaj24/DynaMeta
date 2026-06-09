@@ -49,6 +49,10 @@ class SweepResults:
         wl = np.array(sorted({float(r.lambda_nm) for r in rows}), dtype=float)
         bi = {lab: i for i, lab in enumerate(labels)}
         wj = {round(float(w), 6): j for j, w in enumerate(wl)}
+        if len(wj) != wl.size:               # two wavelengths within 1e-6 nm would silently OVERWRITE
+            raise ValueError("from_rows: distinct wavelengths collide at 1e-6 nm rounding resolution "
+                             "({} unique keys for {} wavelengths) -- a degenerate sweep would silently "
+                             "overwrite rows.".format(len(wj), wl.size))
         nb, nw = len(labels), wl.size
         flds = {k: np.full((nb, nw), np.nan) for k in _REAL_FIELDS}
         flds.update({k: np.full((nb, nw), np.nan + 0j) for k in _CPLX_FIELDS})

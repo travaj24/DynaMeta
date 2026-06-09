@@ -311,3 +311,36 @@ def test_lumped_rc_bandwidth_formula_with_modulator_C():
     # switching energy 0.5 C V^2 over an 8 V swing
     E = switching_energy_per_area(C_area, 8.0)
     assert np.isclose(E, 0.5 * C_area * 64.0)
+
+
+# ---- eps_grid OUTPUT shape contract (audit-v2): a transposed/wrong-shape grid must raise ----
+def test_assemble_eps_rejects_transposed_eps_grid():
+    nx, ny, nz = 4, 5, 6                                  # distinct dims so a transpose is detectable
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    field = _field_3d(np.full((nx, ny, nz), N_BG), x, y, z)
+
+    class _TransposedMap:                                 # a buggy custom NToEpsMap: (Nz,Ny,Nx) output
+        def eps_grid(self, material, fields, lambda_m):
+            n = np.asarray(fields["n"])
+            return np.transpose(np.full(n.shape, 4.0 + 0.1j), (2, 1, 0))
+        def scalar_eps(self, material, lambda_m):
+            return 1.0 + 0j
+    with pytest.raises(ValueError):
+        assemble_eps(field, _align("semi", "semi", stack_axis="z"), _TransposedMap(),
+                     IdentityLift(), 1300e-9, mesh_regions=["semi"])
+
+
+def test_assemble_eps_rejects_4d_eps_grid():
+    nx, ny, nz = 4, 4, 6
+    x = np.linspace(0.0, PERIOD, nx); y = np.linspace(0.0, PERIOD, ny); z = np.linspace(0.0, 10e-9, nz)
+    field = _field_3d(np.full((nx, ny, nz), N_BG), x, y, z)
+
+    class _FourDMap:                                      # neither scalar grid nor (...,3,3) tensor grid
+        def eps_grid(self, material, fields, lambda_m):
+            n = np.asarray(fields["n"])
+            return np.full(n.shape + (3,), 4.0 + 0.1j)
+        def scalar_eps(self, material, lambda_m):
+            return 1.0 + 0j
+    with pytest.raises(ValueError):
+        assemble_eps(field, _align("semi", "semi", stack_axis="z"), _FourDMap(),
+                     IdentityLift(), 1300e-9, mesh_regions=["semi"])

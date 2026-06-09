@@ -127,8 +127,11 @@ aggregation) -- the umbrella that makes the others comparable and extrapolates s
 - Physics: oxygen-vacancy diffusion / re-oxidation slowly reduces the ITO carrier density:
     dn/dt = -lambda(T) (n - n_min),  lambda(T) = lambda0 * exp(-Ea / (kB * T)),  Ea ~ 1.5-2.1 eV.
   Because the Drude plasma frequency wp^2 = n e^2/(eps0 m) and the ENZ crossing sits where Re(eps)~0,
-  lambda_ENZ ~ proportional to 1/sqrt(n), so the sensitivity is
-    d(lambda_ENZ)/d n = -(1/2) * lambda_ENZ / n   (a factor of 1/2 -- NOT lambda_ENZ/n).
+  lambda_ENZ ~ proportional to sqrt(m/n), so the sensitivity is
+    d(lambda_ENZ)/d n = -(1/2) * (lambda_ENZ / n) * (1 - dln m/dln n)
+  (a factor of 1/2 -- NOT lambda_ENZ/n). The simple -(1/2) lambda/n form assumes CONSTANT m_opt and
+  eps_inf; with the library's Kane n-dependent mass (KaneOpticalMass, dln m/dln n > 0) the drift
+  sensitivity is REDUCED by the bracketed factor -- use the full expression when the Kane closure is on.
   A few percent carrier loss red-shifts the ENZ point by nm-scale, comparable to the modulation
   bandwidth.
 - Why: THE device-specific parametric failure -- the modulator silently de-tunes from its design
