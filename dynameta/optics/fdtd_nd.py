@@ -526,6 +526,7 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
 
 def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[int] = None,
                   lateral_eps_inf: Optional[np.ndarray] = None,
+                  lateral_wp: Optional[np.ndarray] = None, lateral_gam: Optional[np.ndarray] = None,
                   lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                   courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
@@ -595,6 +596,16 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # lateral pattern (callable(nx,nz)->array, or an (nx,nz) array applied in the structure region)
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
+    # PER-CELL LOSSY/graded eps (R4): a Drude (wp,gam) grid alongside eps_inf lets a slow drive (gate E,
+    # T, PCM fraction) paint a graded ABSORBING eps the eps_inf-only lateral seam cannot carry. Each is a
+    # callable(nx,nz,zc,pad,z_struct)->array or an (nx,nz) array (zero in the pads). Default None -> the
+    # wp/gam grids stay zeros -> byte-identical to the dielectric path.
+    if lateral_wp is not None:
+        wp = np.asarray(lateral_wp(nx, nz, zc, pad, z_struct) if callable(lateral_wp) else lateral_wp,
+                        dtype=float)
+    if lateral_gam is not None:
+        gam = np.asarray(lateral_gam(nx, nz, zc, pad, z_struct) if callable(lateral_gam) else lateral_gam,
+                         dtype=float)
 
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
