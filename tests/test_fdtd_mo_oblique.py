@@ -138,6 +138,19 @@ def test_oblique_numba_matches_numpy():
     assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
 
 
+@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+def test_oblique_tm_ppol_numba_matches_numpy():
+    # the p-pol (TM) complex-envelope oblique numba kernel == the NumPy TM reference (dispersive layer).
+    ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.5e15, drude_gamma_rad_s=1.0e14)]
+    kw = dict(period_x_m=300e-9, angle_deg=35.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14,
+              nx=6, pol="p")
+    a = solve_fdtd_2d_oblique(ol, backend="numpy", **kw)
+    b = solve_fdtd_2d_oblique(ol, backend="numba", **kw)
+    m = a.band
+    assert float(np.max(np.abs(a.R0[m] - b.R0[m]))) < 1e-10      # TM JIT loop == reference
+    assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
+
+
 # --- structured (laterally-patterned) 3D diagonal-tensor: the lateral_tensor override ----------------
 def test_lateral_tensor_bad_inputs_raise():
     L = MOLayer(thickness_m=200e-9, eps_xx=4.0, eps_yy=4.0)
