@@ -7,8 +7,10 @@ import pytest
 
 from dynameta.core.effects import (OpticalModelEffect, ComposedEffect, DeltaEffect, as_tensor,
                                    PockelsEffect, KerrEffect, FranzKeldyshEffect, ThermoOpticModel,
-                                   MagnetoOpticModel, AnisotropicThermoOpticModel)
-from dynameta.materials.optical_model import ConstantOptical
+                                   MagnetoOpticModel, AnisotropicThermoOpticModel, IntersubbandEffect)
+from dynameta.materials.optical_model import ConstantOptical, DrudeOptical
+from dynameta.constants import M_E, HBAR
+from dynameta.carriers.schrodinger_poisson import SubbandResult
 
 
 def test_optical_model_effect_matches_scalar_model():
@@ -164,3 +166,52 @@ def test_anisotropic_thermo_optic_diagonal_and_reduces_to_scalar():
                        complex(sca.eps({"T": 360.0}, 1550e-9)) * np.eye(3))
     with pytest.raises(ValueError):
         m.eps({}, 1550e-9)                                          # T required
+
+
+# ---- IntersubbandEffect (R7) ----------------------------------------------------------------
+
+EPS_INF, M_OPT, GAM_INTRA, GAM_INTER = 4.25, 0.225 * M_E, 1.1e14, 1.0e13
+
+
+def _one_band_subband():
+    L = 3e-9
+    z = np.linspace(0.0, L, 120)
+    psi = np.sin(np.pi * z / L)[:, None]
+    psi = psi / np.sqrt(np.sum(psi[:, 0] ** 2) * (z[1] - z[0]))
+    return SubbandResult(energies_J=np.array([1e-21]), psi=psi, z_m=z,
+                         sheet_density_m2=np.array([4.0e17]))
+
+
+def test_intersubband_requires_subband_field():
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    with pytest.raises(ValueError):
+        m.eps({}, 1300e-9)
+
+
+def test_intersubband_single_band_reduces_to_drude():
+    res = _one_band_subband()
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    eps_t = m.eps({"subband": res}, 1300e-9)
+    n3d = float(res.sheet_density_m2.sum()) / (res.z_m[-1] - res.z_m[0])
+    d = complex(DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAM_INTRA).eps(1300e-9, n_m3=n3d))
+    assert eps_t.shape == (3, 3)
+    assert np.allclose(eps_t, as_tensor(np.asarray(d)), atol=1e-13)   # isotropic == Drude*I
+    assert abs(eps_t[0, 1]) == 0.0 and abs(eps_t[2, 2] - eps_t[0, 0]) < 1e-13
+
+
+def test_intersubband_two_bands_anisotropic_and_passive():
+    # synthetic two-band well: eps_zz != eps_xx and Im(eps_zz) > 0 (absorptive line)
+    L = 2e-9
+    z = np.linspace(0.0, L, 160)
+    p1 = np.sin(np.pi * z / L); p2 = np.sin(2 * np.pi * z / L)
+    h = z[1] - z[0]
+    p1 = p1 / np.sqrt(np.sum(p1 ** 2) * h); p2 = p2 / np.sqrt(np.sum(p2 ** 2) * h)
+    psi = np.stack([p1, p2], axis=1)
+    E = np.array([0.0, 0.95 * 1.602e-19])                            # ~0.95 eV spacing
+    res = SubbandResult(energies_J=E, psi=psi, z_m=z, sheet_density_m2=np.array([5e17, 1e17]))
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    lam12 = 2 * np.pi * 299792458.0 / ((E[1] - E[0]) / HBAR)
+    eps_t = m.eps({"subband": res}, lam12)
+    assert abs(eps_t[2, 2] - eps_t[0, 0]) > 1e-3                      # z carries the intersubband line
+    assert eps_t[2, 2].imag > 0.0                                    # passive (exp(-iwt))
+    assert eps_t[0, 0] == eps_t[1, 1]                                # in-plane isotropic Drude

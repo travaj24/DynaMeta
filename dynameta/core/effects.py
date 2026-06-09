@@ -30,8 +30,9 @@ from typing import List, Protocol, runtime_checkable
 
 import numpy as np
 
-from dynameta.constants import HBAR, C_LIGHT
+from dynameta.constants import HBAR, C_LIGHT, Q_E, EPS0
 from dynameta.core.backend import array_namespace, to_backend, is_jax_array, is_numpy_array
+from dynameta.core.numerics import trapz
 
 
 @runtime_checkable
@@ -563,3 +564,79 @@ class MagnetoOpticModel:
                 xp.stack([-1j * g, e, zero], axis=-1),
                 xp.stack([zero, zero, e], axis=-1)]
         return xp.stack(rows, axis=-2)                       # (...,3,3) gyrotropic, Hermitian for real g
+
+
+# ---- Intersubband quantum eps_zz from sub-band wavefunctions (R7) -------------------------
+
+@dataclass
+class IntersubbandEffect:
+    """Diagonal-anisotropic permittivity from a quantum SubbandResult: the growth-axis (z) response
+    carries the INTERSUBBAND transitions whose dipole <psi_i|z|psi_j> lies along z, while the in-plane
+    (x, y) response is the ordinary intraband free-carrier Drude. Reads fields['subband'] (a
+    carriers.schrodinger_poisson.SubbandResult: energies_J, psi, z_m, sheet_density_m2).
+
+        eps_xx = eps_yy = eps_inf - wp^2 / (w^2 + i w gamma_intra)              (intraband Drude)
+        eps_zz = eps_xx + sum_{i<j}  S_ij / (eps0 (w_ij^2 - w^2 - i w gamma_inter))
+
+    with wp^2 = n3d q^2/(eps0 m_opt), n3d = (sum_i n_s,i)/Leff, w_ij = (E_j - E_i)/hbar, and the
+    f-sum-rule-CONSISTENT oscillator strength built in:
+
+        S_ij = N_ij q^2 |z_ij|^2 (2 w_ij)/hbar ,   N_ij = (n_s,i - n_s,j)/Leff ,   z_ij = <psi_i|z|psi_j>
+
+    This S_ij is exactly (q^2/eps0) f_ij N_ij / eps0 -> ... with the dimensionless TRK strength
+    f_ij = (2 m0 w_ij/hbar)|z_ij|^2: the free mass m0 CANCELS, so the optical mass m_opt enters ONLY
+    the intraband Drude -- the intersubband line is mass-free (a common bug is to leave m* in it).
+    The denominator uses -i w gamma (exp(-i omega t), Im(eps_zz) > 0 on resonance = absorptive).
+
+    REDUCES to a scalar Drude * I when fewer than two sub-bands are occupied (no i<j pair, the
+    Lorentzian sum is empty) -> diag(eps_D, eps_D, eps_D) == as_tensor(DrudeOptical.eps). v1 returns a
+    UNIFORM (3,3) slab response (sheet smeared over Leff = z[-1]-z[0]); a z-graded eps_zz(z) via the
+    local |psi(z)|^2 weighting is a documented follow-on (Leff sets the LINE STRENGTH, not the position
+    or the Leff-free f-sum rule). exp(-i omega t), Im(eps) > 0 for absorbers; pure numpy."""
+    eps_inf: float
+    m_opt_kg: float            # sub-band-averaged Kane optical mass (intraband Drude only)
+    gamma_intra_rad_s: float
+    gamma_inter_rad_s: float   # intersubband dephasing (scalar; per-pair callable = follow-on)
+    occ_floor_m2: float = 0.0  # min sheet density to count a sub-band as occupied
+
+    def eps(self, fields: dict, lambda_m: float):
+        res = (fields or {}).get("subband")
+        if res is None:
+            raise ValueError("IntersubbandEffect requires fields['subband'] (a SubbandResult); none "
+                             "supplied (run the Schrodinger-Poisson solver first)")
+        z = np.asarray(res.z_m, dtype=np.float64)
+        psi = np.asarray(res.psi, dtype=np.float64)
+        E = np.asarray(res.energies_J, dtype=np.float64)
+        ns = np.asarray(res.sheet_density_m2, dtype=np.float64)        # m^-2 per sub-band
+        if psi.ndim != 2 or psi.shape[1] != E.size or ns.size != E.size:
+            raise ValueError("SubbandResult psi/energies_J/sheet_density_m2 are inconsistent in shape")
+        Leff = float(z[-1] - z[0])
+        if not (Leff > 0.0):
+            raise ValueError("SubbandResult z_m must span a positive width (Leff = z[-1]-z[0])")
+
+        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        n3d = float(np.sum(ns)) / Leff                                 # m^-3 total volume density
+        wp2 = n3d * Q_E * Q_E / (EPS0 * float(self.m_opt_kg))
+        eps_intra = complex(self.eps_inf) - wp2 / (omega * omega + 1j * omega * float(self.gamma_intra_rad_s))
+
+        eps_zz = eps_intra
+        gam = float(self.gamma_inter_rad_s)
+        idx = np.where(ns > float(self.occ_floor_m2))[0]               # occupied sub-bands
+        for a in range(len(idx)):
+            for b in range(a + 1, len(idx)):
+                i, j = int(idx[a]), int(idx[b])                        # E[i] < E[j] (sorted ascending)
+                w_ij = (E[j] - E[i]) / HBAR                            # > 0
+                z_ij = trapz(psi[:, i] * z * psi[:, j], z)             # <psi_i|z|psi_j> [m]
+                N_ij = (ns[i] - ns[j]) / Leff                         # >= 0 (lower band more occupied)
+                if N_ij < 0.0:                                        # population inversion -> gain
+                    warnings.warn("IntersubbandEffect: inverted population (n_s[{}] < n_s[{}]) gives a "
+                                  "gain line; clamping to 0".format(i, j))
+                    N_ij = 0.0
+                S_ij = N_ij * Q_E * Q_E * (z_ij * z_ij) * (2.0 * w_ij) / HBAR
+                eps_zz += S_ij / (EPS0 * (w_ij * w_ij - omega * omega - 1j * omega * gam))
+
+        out = np.zeros((3, 3), dtype=complex)
+        out[0, 0] = eps_intra
+        out[1, 1] = eps_intra
+        out[2, 2] = eps_zz
+        return out
