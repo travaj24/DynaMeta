@@ -379,7 +379,9 @@ class LayeredDevsimBuilder:
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
-                        mobility_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)))
+                        mobility_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
+                        field_mobility=tr.field_dependent_mobility, v_sat_ms=tr.v_sat_ms,
+                        ct_beta=tr.ct_beta)
                     self._dd_regions.add(s.name)
                 else:
                     PE.setup_semiconductor_region(
