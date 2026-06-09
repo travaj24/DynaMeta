@@ -184,6 +184,9 @@ class DrudeOptical(OpticalModel):
               if callable(self.m_opt_kg) else float(self.m_opt_kg))
         g = (np.asarray(self.gamma_rad_s(n), dtype=np.float64)
               if callable(self.gamma_rad_s) else float(self.gamma_rad_s))
+        if np.any(np.asarray(m) <= 0.0) or not np.all(np.isfinite(m)):   # a callable must return m_opt > 0
+            raise ValueError("DrudeOptical.eps: m_opt_kg must be finite and > 0 (omega_p^2 ~ 1/m would "
+                             "otherwise be inf/NaN); a callable m_opt_kg(n) returned a non-positive value.")
         omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
         omega_p2 = n * Q_E * Q_E / (EPS0 * m)
         return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
