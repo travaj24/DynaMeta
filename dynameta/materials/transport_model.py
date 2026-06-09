@@ -65,6 +65,12 @@ class TransportModel:
     hole_mobility_m2Vs_of_n_m3:  Optional[MobilityFn] = None
     tau_srh_s:                   Optional[float] = None
     traps:                       Optional[TrapSpec] = None
+    # Field-dependent mobility (R1): Caughey-Thomas velocity saturation on the DD current,
+    # mu(E)=mu_low/(1+(mu_low|E|/v_sat)^ct_beta)^(1/ct_beta) with mu_low = the mobility callable above.
+    # Off by default -> byte-identical constant-mobility solve; v_sat_ms required when on.
+    field_dependent_mobility:    bool = False
+    v_sat_ms:                    Optional[float] = None
+    ct_beta:                     float = 2.0
     # Bipolar drift-diffusion only ("bipolar_dd"): full 3-variable (Potential, Electrons, Holes)
     # solve with SRH recombination -- for a real p-n device (the electron-only DD assumes a
     # degenerate unipolar semiconductor like ITO). n_i_m3 is the intrinsic carrier density;
@@ -84,6 +90,8 @@ class TransportModel:
         if self.physics in ("drift_diffusion", "bipolar_dd") and self.mobility_m2Vs_of_n_m3 is None:
             raise ValueError(
                 "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
+        if self.field_dependent_mobility and self.v_sat_ms is None:
+            raise ValueError("field_dependent_mobility=True requires v_sat_ms (saturation velocity, m/s)")
         if self.physics == "bipolar_dd":
             missing = [nm for nm, v in (("hole_mobility_m2Vs_of_n_m3", self.hole_mobility_m2Vs_of_n_m3),
                                         ("n_i_m3", self.n_i_m3), ("tau_srh_s", self.tau_srh_s))

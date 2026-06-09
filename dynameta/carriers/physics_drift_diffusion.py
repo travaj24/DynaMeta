@@ -52,7 +52,9 @@ contact); pending builder change. Equilibrium remains the validated tool for DC 
 
 from __future__ import annotations
 
+import math
 import warnings
+from typing import Optional
 
 import devsim as ds
 
@@ -62,6 +64,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_expr_devsim
+from dynameta.carriers.mobility import mu_edge_expr_devsim
 
 
 def _g_expr(s: str) -> str:
@@ -73,7 +76,10 @@ def _g_expr(s: str) -> str:
 
 def setup_semiconductor_region_dd(device: str, region: str, *,
                                     n_bg_m3: float, eps_static: float,
-                                    dos_mass_kg: float, mobility_m2Vs: float) -> None:
+                                    dos_mass_kg: float, mobility_m2Vs: float,
+                                    field_mobility: bool = False,
+                                    v_sat_ms: Optional[float] = None,
+                                    ct_beta: float = 2.0, e_smooth_Vm: float = 1.0) -> None:
     require_positive(n_bg_m3=n_bg_m3, eps_static=eps_static, dos_mass_kg=dos_mass_kg,
                      mobility_m2Vs=mobility_m2Vs)
     setup_phi_c0(device, region, n_bg_m3, dos_mass_kg)   # Phi_c0, N_c, N_D
@@ -126,8 +132,21 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
     _edge_with_derivs(device, region, "Bern_g", "B(vdiff_g)",
                         ("Potential", "Electrons"))
 
-    # Enhanced SG current
-    jn = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
+    # Enhanced SG current. FIELD-DEPENDENT MOBILITY (R1): when field_mobility is on, the scalar mu_n is
+    # replaced by a Caughey-Thomas velocity-saturated edge model mu_n_edge(|E_par|) (mu_n stays the
+    # low-field value); when off (default) the jn string keeps the scalar `mu_n` literal so the
+    # residual + Jacobian assembly are character-for-character today's constant-mobility solve.
+    mu_sym = "mu_n"
+    if field_mobility:
+        if v_sat_ms is None or not math.isfinite(float(v_sat_ms)) or float(v_sat_ms) <= 0.0:
+            raise ValueError("field_mobility=True requires a positive finite v_sat_ms (m/s)")
+        ds.set_parameter(device=device, region=region, name="v_sat", value=float(v_sat_ms))
+        ds.set_parameter(device=device, region=region, name="E_smooth", value=float(e_smooth_Vm))
+        mu_expr = mu_edge_expr_devsim(mu_low="mu_n", efield="ElectricField", v_sat="v_sat",
+                                      e_smooth="E_smooth", beta=ct_beta)
+        _edge_with_derivs(device, region, "mu_n_edge", mu_expr, ("Potential",))
+        mu_sym = "mu_n_edge"
+    jn = ("ElectronCharge*" + mu_sym + "*EdgeInverseLength*V_t*g_enh*"
            "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
     _edge_with_derivs(device, region, "ElectronCurrent", jn, ("Electrons", "Potential"))
 
