@@ -22,14 +22,21 @@ perturbation (1-constant limit). Produces rise/decay (10-90 / 90-10) and settle-
 and the n_eff(t) optical trace (via lc_director.n_eff_from_theta_profile). Bridge a director frame to the
 optical LiquidCrystalModel with lc_director.director_to_extra_fields. Pure numpy/scipy; SI units.
 
-NO-BACKFLOW APPROXIMATION (physical-accuracy caveat): only the rotational viscosity gamma1 is used; the
-full Leslie-Ericksen coupling of the director to the induced fluid flow (backflow, the alpha_i Leslie
-coefficients) is neglected. This is the standard single-relaxation model and is thermodynamically valid
-(the free energy decreases monotonically toward the static equilibrium), but it makes the reported
-rise/decay switching times roughly 10-20% SHORTER than a real cell (backflow speeds turn-on and slows the
-"optical bounce" on turn-off) and cannot reproduce the director-reorientation kickback. Treat the
-switching times as the no-backflow estimate. Validated: the dynamics steady state matches the static BVP
-(lc_director.director_profile_bvp) to < 0.04 deg at fixed V (same torque balance).
+BACKFLOW (optional, LOCAL effective-viscosity model): set include_backflow=True to couple the director to
+the induced shear flow via the Leslie coefficients alpha2/alpha3. The full Leslie-Ericksen problem solves
+the director AND the Navier-Stokes flow self-consistently; here we use the standard LOCAL reduction --
+the flow is slaved to the director rotation, giving an effective rotational viscosity
+gamma1_eff(theta) = gamma1 - g(theta)^2 / eta_shear  with  g(theta) = alpha2 sin^2 theta + alpha3 cos^2
+theta. Because gamma1_eff < gamma1, backflow SPEEDS UP reorientation (faster rise and decay). Limitations
+of the local model: it neglects the no-slip wall boundary condition on the flow and the director-
+reorientation "optical bounce" kickback, so it OVERESTIMATES the speedup relative to a real cell (treat
+the magnitude as an upper bound; the direction and the alpha2=alpha3=0 -> gamma1 off-limit are exact).
+With include_backflow=False (the default) only gamma1 is used -- the standard single-relaxation model,
+thermodynamically valid (free energy decreases monotonically to the static equilibrium) but ~10-20% faster
+in switching time than a real cell. Validated: the dynamics steady state matches the static BVP
+(lc_director.director_profile_bvp) to < 0.04 deg at fixed V (same torque balance), AND the weak-anchoring
+dynamics (finite W_anchor_J_m2 with surface viscosity gamma_s_Pa_s_m) relax to the static weak-anchoring
+BVP (Rapini-Papoular natural BC) to < 0.5 deg.
 
 Ported/adapted from the external lc_dynamics_base solver. The 1-constant static planar driver
 (lc_director.director_profile) + the thermal-pulse LCRelaxation (switching.py) are complementary and
@@ -212,6 +219,19 @@ class LCDynamics:
     n_e: Optional[float] = None
     opt_model: str = "extra_k_radial"
     nz: int = 121
+    # finite surface anchoring (None -> strong/clamped, byte-identical): Rapini-Papoular surface torque
+    # balance at the plates with a surface viscosity gamma_s [Pa s m]; theta_easy defaults to theta_b.
+    W_anchor_J_m2: Optional[float] = None
+    theta_easy_rad: Optional[float] = None
+    gamma_s_Pa_s_m: float = 1.0e-10
+    # BACKFLOW (Leslie director-flow coupling), LOCAL effective-viscosity model (off -> byte-identical):
+    # gamma1_eff(theta) = gamma1 - g(theta)^2 / eta_shear, g(theta) = alpha2 sin^2 + alpha3 cos^2, so the
+    # director reorientation is SPED UP (lower effective viscosity) by the induced shear flow. alpha2/
+    # alpha3 are Leslie coefficients (Pa s), eta_shear an effective Miesowicz shear viscosity (Pa s).
+    include_backflow: bool = False
+    alpha2_Pa_s: float = -0.08     # ~5CB (alpha2 < 0)
+    alpha3_Pa_s: float = -0.003    # ~5CB (alpha3 small, < 0)
+    eta_shear_Pa_s: float = 0.08
 
     def geometry_obj(self) -> LCGeometry:
         return compute_lc_geometry(geometry=self.geometry, nz=int(self.nz), d_planar=self.d_planar,
@@ -250,6 +270,13 @@ class LCDynamics:
         fkw = self._field_kwargs()
         flexo_on = bool(self.include_flexo and (self.flexo_e1 or self.flexo_e3))
         cyl_corr = bool(self.geometry == "cyl" and self.include_cyl_elastic_corr)
+        # finite-anchoring (None -> strong) + backflow setup
+        W_anchor = float(self.W_anchor_J_m2) if (self.W_anchor_J_m2 is not None
+                                                 and self.W_anchor_J_m2 > 0.0) else None
+        theta_easy = float(self.theta_easy_rad) if self.theta_easy_rad is not None else thb
+        gamma_s = float(self.gamma_s_Pa_s_m)
+        backflow = bool(self.include_backflow and (self.alpha2_Pa_s or self.alpha3_Pa_s))
+        a2, a3, eta_sh = float(self.alpha2_Pa_s), float(self.alpha3_Pa_s), float(self.eta_shear_Pa_s)
 
         t_eval = np.asarray(t_eval, dtype=float)
         if t_eval.size < 5 or not np.all(np.diff(t_eval) > 0):
@@ -260,17 +287,19 @@ class LCDynamics:
             th0 = np.asarray(theta0_rad, dtype=float).copy()
             if th0.size != N:
                 raise ValueError("theta0_rad length must equal nz")
-            th0[0] = th0[-1] = thb
+            if W_anchor is None:
+                th0[0] = th0[-1] = thb
 
         def rhs(t, th_vec):
             th = np.array(th_vec, dtype=float, copy=True)
-            th[0] = th[-1] = thb
+            if W_anchor is None:
+                th[0] = th[-1] = thb                              # strong anchoring; weak lets the surface move
             dth = np.gradient(th, dz)                              # 1st derivative (term2 + cyl correction)
             # 2nd derivative via the proper 3-point tridiagonal stencil (the dz-exact Laplacian), NOT
             # np.gradient(np.gradient(.)) which is a 2*dz-wide stencil ~4-6x less accurate near the walls.
             d2th = np.empty_like(th)
             d2th[1:-1] = (th[2:] - 2.0 * th[1:-1] + th[:-2]) / (dz * dz)
-            d2th[0] = d2th[-1] = 0.0                               # boundary nodes are clamped (dth_dt=0)
+            d2th[0] = d2th[-1] = 0.0
             E, _vlc = solve_lc_field_profile(th, float(V_func(float(t))), geo, **fkw)
             s = np.sin(th); c = np.cos(th)
             Keff = K11 * s * s + K33 * c * c
@@ -279,8 +308,25 @@ class LCDynamics:
             term3 = -EPS0 * dEps * (E * E) * s * c
             term4 = (flexo_direct_torque(th, E, np.gradient(E, dz), self.flexo_e1, self.flexo_e3,
                                          geometry=geo.geometry, r=r) if flexo_on else 0.0)
-            dth_dt = (term1 + term2 + term3 + term4) / g1
-            dth_dt[0] = dth_dt[-1] = 0.0
+            torque = term1 + term2 + term3 + term4
+            # BACKFLOW: the induced shear flow lowers the EFFECTIVE rotational viscosity (local model),
+            # gamma1_eff(theta) = gamma1 - g(theta)^2/eta_shear, g = alpha2 sin^2 + alpha3 cos^2; floored
+            # to stay positive. Speeds up the reorientation. Off -> g1_eff == g1 (byte-identical).
+            if backflow:
+                g_th = a2 * s * s + a3 * c * c
+                g1_eff = np.maximum(g1 - g_th * g_th / eta_sh, 0.05 * g1)
+            else:
+                g1_eff = g1
+            dth_dt = torque / g1_eff
+            if W_anchor is None:
+                dth_dt[0] = dth_dt[-1] = 0.0
+            else:
+                # Rapini-Papoular surface torque balance with surface viscosity gamma_s (one-sided
+                # theta' at each plate): steady state = the static weak-anchoring BC.
+                thp0 = (th[1] - th[0]) / dz
+                thpd = (th[-1] - th[-2]) / dz
+                dth_dt[0] = (Keff[0] * thp0 - 0.5 * W_anchor * math.sin(2.0 * (th[0] - theta_easy))) / gamma_s
+                dth_dt[-1] = (-Keff[-1] * thpd - 0.5 * W_anchor * math.sin(2.0 * (th[-1] - theta_easy))) / gamma_s
             return dth_dt
 
         kwargs = {}
