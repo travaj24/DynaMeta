@@ -25,6 +25,11 @@ Convention reminder for implementers: cp1252-safe ASCII-only source + print(); S
 Im(eps) > 0 for absorbers; persistent validations under `validation/`; commit incrementally; push only
 when asked.
 
+> Companion: this roadmap is OPERATING-physics depth (R1-R34). Reliability / degradation / wear-out
+> (electromigration, gate-oxide TDDB, NBTI/PBTI, thermal-cycling fatigue, ITO de-doping / ENZ drift,
+> optical damage, system MTTF) is a SEPARATE axis with its own ranked roadmap in
+> [docs/reliability_roadmap.md](reliability_roadmap.md) (items REL1-REL10).
+
 ## STATUS (2026-06-09): Tier 0 (R1-R9) COMPLETE -- the north-star set is shipped
 
 All nine Tier-0 items are implemented, validated against an independent oracle, unit-tested, committed
