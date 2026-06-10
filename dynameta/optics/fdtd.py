@@ -48,6 +48,17 @@ class FDTDLayer:
     raman_chi3_m2_V2: float = 0.0          # Raman chi3 strength [m^2/V^2]: P_R = eps0 chiR E Q
     raman_w_rad_s: float = 0.0             # Raman vibrational resonance Omega_R [rad/s]
     raman_gamma_rad_s: float = 0.0         # Raman damping [rad/s] (Q'' + g Q' + W^2 Q = W^2 E^2)
+    # R20 CLAMPED-INVERSION gain line (2D-TE numpy kernel; default off). The Lorentz-oscillator
+    # gain ADE P'' + dw P' + w^2 P = -kappa dN E: inversion dN = N2 - N1 > 0 -> Im(chi) < 0 = GAIN
+    # (exp(-i w t)); dN < 0 reduces EXACTLY to a passive Lorentz pole with delta_eps =
+    # kappa |dN|/(eps0 w^2). kappa is the classical coupling q^2/m_eff [C^2/kg]; the small-signal
+    # intensity gain at line center is g0 = kappa dN / (n c eps0 dw) [1/m]. The inversion is
+    # CLAMPED (no rate dynamics in the field loop -- see optics.gain_medium for the four-level
+    # populations; dynamic field-population coupling is a documented follow-on).
+    gain_w_rad_s: float = 0.0              # transition frequency w_a [rad/s] (0 = no gain line)
+    gain_dw_rad_s: float = 0.0             # FWHM linewidth dw_a [rad/s]
+    gain_kappa_C2_kg: float = 0.0          # coupling q^2/m_eff [C^2/kg]
+    gain_dN_m3: float = 0.0                # clamped inversion N2 - N1 [m^-3] (sign = gain/loss)
 
     def eps_at(self, w_rad_s):
         """The complex eps(omega) this layer represents (eps_inf - Drude + Lorentz), convention
