@@ -7,9 +7,11 @@ The chain this example wires (each piece is oracle-validated; the pipeline integ
         --custom scalar EffectModel (e-wave index of the tilted axis, OPL-averaged)--> eps(V)
         --run_pipeline + make_layered_tmm_solver--> R(V) of an LC-filled etalon
 
-The custom EffectModel is the documented BYO pattern: normal-incidence x-pol sees the
-extraordinary index n(theta') with theta' the angle between k (the z/field axis) and the optic
-axis -- the library's n_local_from_theta(theta_field, model='extra_k_axis').
+The custom EffectModel is the documented BYO pattern: with the optic axis tilting in the x-z
+plane, normal-incidence X-pol is the extraordinary wave with index n(theta') (theta' the angle
+between k, along z, and the optic axis) -- the library's n_local_from_theta(theta_field,
+model='extra_k_axis'); y-pol would be the untuned ordinary wave. The OPL average uses the
+trapezoid rule on the BVP's uniform z grid (matching n_eff_from_theta_profile's quadrature).
 
 GATE A: below the Freedericksz threshold the director stays planar (plate-plane angle ~ 0)
         and n_eff ~ n_e; far above threshold n_eff falls toward n_o, monotonically in V.
@@ -52,7 +54,8 @@ LC_KW = dict(K11=6.2e-12, K33=8.3e-12, eps_para=19.0, eps_perp=5.2, d_planar=D_L
 class LCEffectiveIndexModel:
     """BYO EffectModel: plate-plane director profile -> OPL-averaged e-wave index -> scalar eps.
     Reads fields['director_angle_rad'] (a (nz,) profile from lc_extra_fields(reduce='profile')
-    on a UNIFORM z grid, so the OPL average is the plain mean of the local index)."""
+    on a UNIFORM z grid; the OPL average is the trapezoid-rule mean of the local index, the
+    same quadrature n_eff_from_theta_profile uses)."""
     n_o: float
     n_e: float
 
@@ -60,7 +63,15 @@ class LCEffectiveIndexModel:
         theta_plate = np.asarray(fields.get("director_angle_rad", 0.0), dtype=np.float64)
         theta_field = theta_field_from_plate(theta_plate)    # the canonical convention bridge
         n_loc = n_local_from_theta(theta_field, self.n_o, self.n_e, model="extra_k_axis")
-        return complex(float(np.mean(n_loc)) ** 2)
+        return complex(_opl_mean(n_loc) ** 2)
+
+
+def _opl_mean(n_loc):
+    """Trapezoid-rule mean over the uniform BVP grid (endpoints half-weighted)."""
+    n_loc = np.atleast_1d(np.asarray(n_loc, dtype=np.float64))
+    if n_loc.size == 1:
+        return float(n_loc[0])
+    return float(np.trapezoid(n_loc, dx=1.0) / (n_loc.size - 1))
 
 
 def _design():
@@ -72,7 +83,7 @@ def _design():
                   stack=Stack(layers=[Layer("lc", D_LC, "lc")],
                               superstrate_material="air", substrate_material="glass"),
                   electrodes=[], materials=reg,
-                  optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0,
+                  optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0,
                                       lift="identity"))
 
 
@@ -147,7 +158,7 @@ def main():
         res = director_profile_bvp(V_app=v, **LC_KW)
         n_loc = n_local_from_theta(res.theta_field_rad, N_O, N_E, model="extra_k_axis")
         stk = LayeredStack(1.0 + 0j, 1.45 + 0j,
-                           [LayeredSlab(D_LC, eps=complex(float(np.mean(n_loc)) ** 2))],
+                           [LayeredSlab(D_LC, eps=complex(_opl_mean(n_loc) ** 2))],
                            period_x_m=PERIOD, period_y_m=PERIOD)
         r_direct = TmmLayeredSolver().solve(stk, lam, design.optical).R
         worst = max(worst, abs(r_pipe - r_direct))

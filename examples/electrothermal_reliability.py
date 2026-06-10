@@ -26,10 +26,16 @@ from dynameta.drivers import cw_damage_threshold_from_stack, tddb_tbd_from_elect
 from dynameta.reliability.lidt import ThermalNode, stack_absorbed_of_T
 from dynameta.reliability.tddb import TddbParams, oxide_stress_from_electrothermal
 
-# sigma is the LEAKAGE conductivity of the biased film (not the metallic in-plane value):
-# at V = 3 V the ITO field is ~2.9e7 V/m, so sigma ~ 15 S/m gives ~GW/m^3 Joule density and a
-# few-tens-of-K rise over the 10 nm oxide + 100 nm film -- strong enough to see, weak enough
-# that the mild sigma(T) feedback (0.2 %/K) stays Picard-stable.
+# DRIVE MODEL (kept honest): the Picard driver solves a charge-free eps_static Poisson for E
+# and forms Q = sigma E^2 -- i.e. the field divides CAPACITIVELY while sigma only dissipates.
+# That pairing is the high-frequency (displacement-dominated) limit: valid for an RMS drive
+# amplitude V at f >> sigma/(2 pi eps0 eps_r) ~ 30 GHz for ITO sigma = 15 S/m, eps_r = 9.3 (a
+# mm-wave stress drive). At TRUE DC the zero-sigma oxide blocks conduction and the Joule term
+# would vanish; this example's V values are RMS amplitudes of the fast drive. At V = 3 V the
+# ITO field is ~2.9e7 V/m, so sigma ~ 15 S/m gives Q ~ 1.2e16 W/m^3 (~1.2 GW/m^2 areal over
+# the 100 nm film) and a few-K rise over the oxide+film thermal resistance -- strong enough
+# to see, weak enough that the mild sigma(T) feedback (0.2 %/K) stays Picard-stable. The
+# TDDB read uses the same capacitive E_ox (the E-model under fast AC stress is approximate).
 LAYERS = [
     ElectroThermalLayer("metal", 100e-9, eps_static=1.0e4, k_thermal=180.0, sigma_S_m=0.0),
     ElectroThermalLayer("hfo2", 10e-9, eps_static=20.0, k_thermal=1.1, sigma_S_m=0.0),
