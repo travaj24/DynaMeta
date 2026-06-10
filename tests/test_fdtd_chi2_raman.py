@@ -36,3 +36,31 @@ def test_chi2_layer_runs_and_stays_linear_at_low_field():
     r1 = _solve(lay)
     m = r0.band
     assert np.max(np.abs(r1.R0[m] - r0.R0[m])) < 1e-9            # linear response unchanged
+
+
+# ---- R20: clamped-inversion gain line + four-level populations --------------------------------
+
+def test_gain_off_switch_and_guards():
+    r0 = _solve([FDTDLayer(150e-9, eps_inf=2.0)])
+    r1 = _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_dN_m3=0.0, gain_kappa_C2_kg=0.0)])
+    assert np.array_equal(r0.R0, r1.R0)
+    with pytest.raises(ValueError):                      # gain strength without w_a/dw
+        _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e24)])
+    with pytest.raises(NotImplementedError):             # numpy-only
+        _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e24,
+                          gain_w_rad_s=1e15, gain_dw_rad_s=1e14)], backend="numba")
+
+
+def test_four_level_steady_state_and_conservation():
+    from dynameta.optics.gain_medium import FourLevelSystem, small_signal_gain_per_m
+    s = FourLevelSystem(tau_32_s=4e-7, tau_21_s=2.3e-4, tau_10_s=1e-8, W_p_per_s=50.0,
+                        N_total_m3=1e25)
+    ss = s.steady_state()
+    assert ss.sum() == pytest.approx(1e25, rel=1e-14)
+    assert s.inversion_ss_m3() == pytest.approx(50.0 * ss[0] * (2.3e-4 - 1e-8), rel=1e-12)
+    N = s.evolve(np.linspace(0.0, 1e-3, 11))
+    assert np.max(np.abs(N.sum(axis=1) - 1e25)) < 1e-11 * 1e25
+    assert s.inversion_ss_m3() > 0.0                     # tau_21 >> tau_10 -> inverted
+    assert small_signal_gain_per_m(1e-8, -1e24, 1.5, 1e14) < 0.0   # dN < 0 -> absorption
+    with pytest.raises(ValueError):
+        FourLevelSystem(tau_32_s=0.0, tau_21_s=1e-4, tau_10_s=1e-8)
