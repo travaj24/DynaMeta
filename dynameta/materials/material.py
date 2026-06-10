@@ -20,8 +20,12 @@ from dynameta.materials.scattering import ScatteringModel
 from dynameta.materials.mechanical import MechanicalProps
 
 
-@dataclass
+@dataclass(frozen=True)
 class Material:
+    """Frozen: a Material is the shared single source of truth for a named solid, so external
+    code must not mutate it after construction (use dataclasses.replace for variants). The one
+    sanctioned exception is DielectricDB.apply, which back-fills eps_static_dc via
+    object.__setattr__ to keep its in-place provenance contract."""
     name:         str
     optical:      OpticalModel
     transport:    Optional[TransportModel] = None
@@ -48,8 +52,9 @@ class Material:
                                             # reads it; default None = byte-identical.
 
     def __post_init__(self) -> None:
+        # frozen dataclass: __post_init__ initialization goes through object.__setattr__
         if not self.pretty_name:
-            self.pretty_name = self.name
+            object.__setattr__(self, "pretty_name", self.name)
         if self.scattering is not None:
             if self.transport is None:
                 raise ValueError(
@@ -61,10 +66,10 @@ class Material:
                     "carrier gamma seam)".format(self.name))
             # Derive gamma(n) and mu(n) from the ONE tau law, on FRESH copies (do not mutate the
             # possibly-shared optical/transport objects).
-            self.optical = dataclasses.replace(
-                self.optical, gamma_rad_s=self.scattering.gamma_optical_of_n())
-            self.transport = dataclasses.replace(
-                self.transport, mobility_m2Vs_of_n_m3=self.scattering.mobility_of_n())
+            object.__setattr__(self, "optical", dataclasses.replace(
+                self.optical, gamma_rad_s=self.scattering.gamma_optical_of_n()))
+            object.__setattr__(self, "transport", dataclasses.replace(
+                self.transport, mobility_m2Vs_of_n_m3=self.scattering.mobility_of_n()))
 
     @property
     def is_semiconductor(self) -> bool:
