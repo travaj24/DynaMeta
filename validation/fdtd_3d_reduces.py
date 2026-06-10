@@ -111,10 +111,14 @@ def main():
     # GATE D (lossy -> defeats the lossless trap): a uniform absorbing Drude slab must match the analytic
     # complex-n Airy. A lossless cell auto-balances total power even with a wrong field split, so energy
     # closure alone cannot prove per-order correctness -- but an ABSORBING slab cannot fake the right R/T.
+    # resolution=60 == the validated 2D GATE B grid for this same slab: any coarser and the 120nm slab
+    # quantizes badly in dz (band-max n_max sizing -> dz=21.6nm at res 30 -> 5 cells = 108nm effective),
+    # so the gate would measure the staircase thickness error (~2e-2), not the lossy-Drude physics
+    # (the engine matches Airy at the discretized thickness to ~3e-3 even on that coarse grid).
     ei, wp, gm, dd = 4.0, 1.2e15, 2.0e13, 120e-9
     rD = solve_fdtd_3d([FDTDLayer(thickness_m=dd, eps_inf=ei, drude_wp_rad_s=wp, drude_gamma_rad_s=gm)],
                        period_x_m=300e-9, period_y_m=300e-9, nx=4, ny=4,
-                       lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=30)
+                       lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=60)
     mD = rD.band
     w = 2 * np.pi * rD.freqs_Hz[mD]
     nD = np.sqrt(ei - wp ** 2 / (w ** 2 + 1j * gm * w))
