@@ -149,7 +149,8 @@ class DielectricDB:
         """Set material.eps_static_dc from the DB and stash the record on the
         material as `._eps_static_dc_record` for provenance. Returns the record."""
         rec = self.eps_static(formula or material.name, refresh=refresh)
-        material.eps_static_dc = rec.eps_static
+        # Material is frozen; apply() is the one sanctioned in-place back-fill (see Material docstring)
+        object.__setattr__(material, "eps_static_dc", rec.eps_static)
         try:
             object.__setattr__(material, "_eps_static_dc_record", rec)
         except Exception:
