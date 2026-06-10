@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import solve_fdtd_2d
+from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d
+
+needs_numba = pytest.mark.skipif(not _HAVE_NUMBA,
+                                 reason="numba not installed (CI numpy-only leg)")
 
 
 def _solve(layers, **kw):
@@ -19,14 +22,21 @@ def test_zero_chi2_raman_byte_identical():
     assert np.array_equal(r0.R0, r1.R0) and np.array_equal(r0.T0, r1.T0)
 
 
-def test_chi2_numba_matches_numpy_and_cuda_raises():
-    # numba/jax now carry the nonlinearities (deferred-item completion); only the GPU kernels raise
+@needs_numba
+def test_chi2_numba_matches_numpy():
+    # numba/jax now carry the nonlinearities (deferred-item completion)
     lay = [FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)]
     r_np = _solve(lay)
     r_nb = _solve(lay, backend="numba")
     m = r_np.band
     assert np.max(np.abs(r_nb.R0[m] - r_np.R0[m])) < 1e-12
-    with pytest.raises(Exception):                       # no CUDA toolkit -> resolve/guard raises
+
+
+def test_chi2_on_gpu_backend_raises():
+    # raises at backend resolution (no numba/GPU installed) OR at the nonlinear+GPU dispatch
+    # guard (GPU present; the GPU NONLINEAR kernels are not implemented) -- never runs silently
+    lay = [FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)]
+    with pytest.raises((RuntimeError, NotImplementedError)):
         _solve(lay, backend="numba-cuda")
 
 
@@ -51,6 +61,10 @@ def test_gain_off_switch_and_guards():
     assert np.array_equal(r0.R0, r1.R0)
     with pytest.raises(ValueError):                      # gain strength without w_a/dw
         _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e24)])
+
+
+@needs_numba
+def test_gain_numba_matches_numpy():
     # gain on numba now matches numpy (deferred-item completion)
     lay_g = [FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e22,
                        gain_w_rad_s=1.5e15, gain_dw_rad_s=1.3e14)]
