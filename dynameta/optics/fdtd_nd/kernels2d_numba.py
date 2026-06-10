@@ -99,9 +99,13 @@ if _HAVE_NUMBA:
 
     @_cuda.jit(fastmath=True)
     def _te2d_coop_cuda(Ey, Hx, Hz, Jy, psi_hxz, psi_eyz, PL, PLp,
-                        eps_inf, wp, gam, chi3, C1, C2, C3, ke, be, ce, kh, bh, ch, d_src,
+                        P2, Q, Qp, PR, PG, PGp,
+                        eps_inf, wp, gam, chi3, C1, C2, C3,
+                        chi2g, R1, R2, R3, chi3R, G1, G2, G3,
+                        ke, be, ce, kh, bh, ch, d_src,
                         eyL, hxL, eyR, hxR, dx, dz, dt, cmu, e0dt, eps0,
-                        n0, ns, k_src, k_pL, k_pR, has_lor, nx, nz):
+                        n0, ns, k_src, k_pL, k_pR, has_lor, has_chi2, has_raman, has_gain,
+                        nx, nz):
         # runs timesteps [n0, n0+ns) -- the host loops over CHUNKS so no single cooperative launch exceeds
         # the WDDM TDR watchdog (~2 s on a display GPU); the field state persists on-device between chunks.
         grid = _cuda.cg.this_grid()
@@ -134,6 +138,19 @@ if _HAVE_NUMBA:
                         pln = C1[i, k] * PL[i, k] + C2[i, k] * PLp[i, k] + C3[i, k] * eyo
                         curl = curl - (pln - PL[i, k]) / dt
                         PLp[i, k] = PL[i, k]; PL[i, k] = pln
+                    if has_gain:                               # R20 clamped-inversion gain line
+                        pgn = G1[i, k] * PG[i, k] + G2[i, k] * PGp[i, k] + G3[i, k] * eyo
+                        curl = curl - (pgn - PG[i, k]) / dt
+                        PGp[i, k] = PG[i, k]; PG[i, k] = pgn
+                    if has_chi2:                               # R15 chi2 SHG polarization
+                        p2n = eps0 * chi2g[i, k] * eyo * eyo
+                        curl = curl - (p2n - P2[i, k]) / dt
+                        P2[i, k] = p2n
+                    if has_raman:                              # R15 Raman: ADE on E^2 + P_R = eps0 chiR E Q
+                        qn = R1[i, k] * Q[i, k] + R2[i, k] * Qp[i, k] + R3[i, k] * eyo * eyo
+                        prn = eps0 * chi3R[i, k] * eyo * qn
+                        curl = curl - (prn - PR[i, k]) / dt
+                        Qp[i, k] = Q[i, k]; Q[i, k] = qn; PR[i, k] = prn
                     aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                     bJ = (eps0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                     eps_eff = eps_inf[i, k] + chi3[i, k] * eyo * eyo
@@ -154,21 +171,28 @@ if _HAVE_NUMBA:
 
 
 def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-               nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
+               nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
+               chi2g, has_chi2, R1, R2, R3, chi3R, has_raman, G1, G2, G3, has_gain):
     """Host driver for the numba-CUDA 2D-TE FDTD: upload the per-cell profiles + CPML + source to the
     device, run the persistent cooperative-groups kernel in CHUNKS of timesteps (the field state persists
     on-device between chunks; only the probe planes accumulate), copy the probes back. Same result as
-    _te2d_numba to the float64 FMA floor. Chunking keeps each cooperative launch under the WDDM TDR
-    watchdog (~2 s on a display GPU) while still amortizing the launch over ~chunk steps. Cooperative
-    launch -> blocks must be co-resident: use <= #SMs blocks (1/SM, always safe) with grid-stride."""
+    _te2d_numba to the float64 FMA floor (incl. the R15/R20 chi2/Raman/gain nonlinearities, which are
+    cell-local recurrences -- no extra grid syncs needed). Chunking keeps each cooperative launch under
+    the WDDM TDR watchdog (~2 s on a display GPU) while still amortizing the launch over ~chunk steps.
+    Cooperative launch -> blocks must be co-resident: use <= #SMs blocks (1/SM, always safe) with
+    grid-stride."""
     from numba import cuda
     nx, nz = eps_inf.shape
     dev = (lambda a: cuda.to_device(np.ascontiguousarray(a, dtype=np.float64)))
     Ey = dev(np.zeros((nx, nz))); Hx = dev(np.zeros((nx, nz))); Hz = dev(np.zeros((nx, nz)))
     Jy = dev(np.zeros((nx, nz))); psi_hxz = dev(np.zeros((nx, nz))); psi_eyz = dev(np.zeros((nx, nz)))
     PL = dev(np.zeros((nx, nz))); PLp = dev(np.zeros((nx, nz)))
+    P2 = dev(np.zeros((nx, nz))); Q = dev(np.zeros((nx, nz))); Qp = dev(np.zeros((nx, nz)))
+    PR = dev(np.zeros((nx, nz))); PG = dev(np.zeros((nx, nz))); PGp = dev(np.zeros((nx, nz)))
     g_eps, g_wp, g_gam, g_chi3 = dev(eps_inf), dev(wp), dev(gam), dev(chi3)
     g_C1, g_C2, g_C3 = dev(C1), dev(C2), dev(C3)
+    g_x2, g_R1, g_R2, g_R3, g_xR = dev(chi2g), dev(R1), dev(R2), dev(R3), dev(chi3R)
+    g_G1, g_G2, g_G3 = dev(G1), dev(G2), dev(G3)
     g_ke, g_be, g_ce = dev(ke), dev(be), dev(ce)
     g_kh, g_bh, g_ch = dev(kh), dev(bh), dev(ch)
     g_src = dev(src)
@@ -196,10 +220,13 @@ def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
         while n0 < nsteps:
             ns = min(chunk, nsteps - n0)
             _te2d_coop_cuda[bk, tpb](Ey, Hx, Hz, Jy, psi_hxz, psi_eyz, PL, PLp,
+                                     P2, Q, Qp, PR, PG, PGp,
                                      g_eps, g_wp, g_gam, g_chi3, g_C1, g_C2, g_C3,
+                                     g_x2, g_R1, g_R2, g_R3, g_xR, g_G1, g_G2, g_G3,
                                      g_ke, g_be, g_ce, g_kh, g_bh, g_ch, g_src,
                                      eyL, hxL, eyR, hxR, dx, dz, dt, cmu, e0dt, EPS0,
-                                     n0, ns, k_src, k_pL, k_pR, has_lor, nx, nz)
+                                     n0, ns, k_src, k_pL, k_pR, has_lor, has_chi2,
+                                     has_raman, has_gain, nx, nz)
             cuda.synchronize()
             n0 += ns
 

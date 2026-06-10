@@ -122,7 +122,10 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             N2 = N2 + dt * (f32 - f21 - S_st)
             N3 = N3 + dt * (f30 - f32)
             if n == snap_step and gain_dyn_out is not None:
-                gain_dyn_out["dN_snap"] = np.asarray(N2 - N1).copy()
+                # host conversion must go through .get() on cupy (np.asarray raises there)
+                _dn = N2 - N1
+                gain_dyn_out["dN_snap"] = (np.asarray(_dn.get()) if hasattr(_dn, "get")
+                                           else np.asarray(_dn).copy())
         # R15 chi2 SHG polarization: P2 = eps0 chi2 E^2, lagged-explicit dP2/dt like the Lorentz
         if do_chi2:
             P2new = EPS0 * chi2 * Ey ** 2
@@ -148,6 +151,6 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
         eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
     if do_gdyn and gain_dyn_out is not None:
-        gain_dyn_out["Npop_final"] = np.stack([np.asarray(N0), np.asarray(N1),
-                                               np.asarray(N2), np.asarray(N3)])
+        _h = (lambda a: np.asarray(a.get()) if hasattr(a, "get") else np.asarray(a))
+        gain_dyn_out["Npop_final"] = np.stack([_h(N0), _h(N1), _h(N2), _h(N3)])
     return eyL, hxL, eyR, hxR
