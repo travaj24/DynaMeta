@@ -597,11 +597,22 @@ class Devsim3DEquilibrium:
             nodes_m=nodes, node_fields={ELECTRON_DENSITY: n, POTENTIAL: pot},
             grid_axes_m={"x": grid["axis_0"], "y": grid["axis_1"], "z": grid["axis_2"]},
             grid_fields={ELECTRON_DENSITY: grid[ELECTRON_DENSITY], POTENTIAL: grid[POTENTIAL]})
+        # terminal currents (driver D1): the 3D gmsh mesh is scaled to metres, so the contact
+        # current is already [A] (depth_m=None). Equilibrium yields {} -> no extras key.
+        extras = {}
+        try:
+            from dynameta.carriers.contact_current import extract_contact_currents
+            cc = extract_contact_currents(self.device, depth_m=None)
+            if cc:
+                extras["contact_currents_A"] = cc
+        except Exception as _e:                               # noqa: BLE001 (diagnostic)
+            import warnings as _w
+            _w.warn("contact-current extraction unavailable: {}".format(_e))
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
             temperature_K=PE.T_REF, regions={rname: reg},
             n_bg_by_region={rname: self.spec.semiconductor_nbg(fdr)},
-            unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m))
+            unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m), extras=extras)
 
     def teardown(self) -> None:
         import devsim as ds
