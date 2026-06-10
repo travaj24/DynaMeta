@@ -73,24 +73,31 @@ def test_absorbed_fraction_region_and_drift_guard():
         absorbed_fraction(_FakeOpt(A=0.3), "ito")
 
 
-def test_tmm_rekey_reverses_and_sums():
+def test_tmm_rekey_uses_unique_layer_names_top_first():
+    # keyed by LAYER name (unique by Stack contract; matches the FEM region labels and the
+    # layer addressing of oxide_stress_from_electrothermal), NOT by material -- two layers
+    # sharing a material must stay distinct, never silently summed.
     class _L:
-        def __init__(self, m):
-            self.background_material = m
+        def __init__(self, name, mat):
+            self.name = name
+            self.background_material = mat
 
     class _Stack:
-        layers = [_L("metal"), _L("ito"), _L("ito")]      # bottom -> top
+        layers = [_L("mirror", "metal"), _L("spacer_lo", "ito"), _L("spacer_hi", "ito")]
 
     class _Design:
         stack = _Stack()
 
-    # slabs are top-first: slab_0 = top ito, slab_1 = ito, slab_2 = bottom metal
+    # slabs are top-first: slab_0 = spacer_hi, slab_1 = spacer_lo, slab_2 = mirror
     r = _FakeOpt(per_region_absorption={"slab_0": 0.10, "slab_1": 0.07, "slab_2": 0.02})
     by_name = tmm_absorption_by_layer_name(r, _Design())
-    assert by_name["metal"] == pytest.approx(0.02)
-    assert by_name["ito"] == pytest.approx(0.17)
+    assert by_name == {"spacer_hi": pytest.approx(0.10), "spacer_lo": pytest.approx(0.07),
+                       "mirror": pytest.approx(0.02)}
     with pytest.raises(ValueError):                        # FEM (name-keyed) map rejected
         tmm_absorption_by_layer_name(_FakeOpt(per_region_absorption={"ito": 0.1}), _Design())
+    with pytest.raises(ValueError):                        # graded/sliced stack: no 1:1 map
+        tmm_absorption_by_layer_name(
+            _FakeOpt(per_region_absorption={"slab_0": 0.1, "slab_1": 0.1}), _Design())
 
 
 # ---- electrothermal -> TDDB ----

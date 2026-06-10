@@ -79,10 +79,12 @@ def absorbed_fraction(optical_result, region: Optional[str] = None) -> float:
 
     region=None -> total absorption: A_independent when available (the loss-integral path,
     exactly the sum of the per-region map), else A = 1 - R - T.
-    region=<name> -> that region's fraction from per_region_absorption (FEM keys are mesh
-    material names; TMM keys are 'slab_<i>' top-first -- see tmm_absorption_by_layer_name to
-    address TMM slabs by design layer name). Raises if the map or key is missing rather than
-    silently returning 0 -- a missing region name is layer-name drift, not zero absorption."""
+    region=<name> -> that region's fraction from per_region_absorption (FEM keys are the mesh
+    REGION labels the builder derives from design layer names -- L.name, plus the
+    __incl<j>/_inpatch/_outside decorations for inclusion layers; TMM keys are 'slab_<i>'
+    top-first -- see tmm_absorption_by_layer_name to address TMM slabs by design layer name).
+    Raises if the map or key is missing rather than silently returning 0 -- a missing region
+    name is layer-name drift, not zero absorption."""
     if region is None:
         if optical_result.A_independent is not None:
             return float(optical_result.A_independent)
@@ -101,24 +103,24 @@ def absorbed_fraction(optical_result, region: Optional[str] = None) -> float:
 
 def tmm_absorption_by_layer_name(optical_result, design) -> Dict[str, float]:
     """Re-key a TMM per_region_absorption ('slab_<i>', indexed TOP-FIRST from the superstrate
-    side) by the design's layer names (design.stack.layers is ordered bottom -> top). Layers
-    sharing a name are summed. FEM results already use material names -- passing one through
-    is an error (no 'slab_' keys)."""
+    side) by the design's LAYER names (L.name; design.stack.layers is ordered bottom -> top,
+    so the slab index walks the reversed list). Layer names are unique by Stack contract, so
+    the result is a clean bijection -- this matches the layer-name addressing of the FEM
+    region labels and of oxide_stress_from_electrothermal, NOT the material names (several
+    layers may share one material). Raises on a non-TMM (already name-keyed FEM) map and on
+    a slab/layer count mismatch (e.g. a graded n_slices stack, which has no 1:1 layer map)."""
     pra = optical_result.per_region_absorption
     if pra is None:
         raise ValueError("per_region_absorption was not computed")
     if not all(k.startswith("slab_") for k in pra):
-        raise ValueError("not a TMM map (keys {}); FEM maps are already name-keyed".format(
-            sorted(pra)))
-    names_bottom_up = [L.background_material for L in design.stack.layers]
-    names_top_first = list(reversed(names_bottom_up))
+        raise ValueError("not a TMM map (keys {}); FEM maps are already keyed by the "
+                         "layer-derived region labels".format(sorted(pra)))
+    names_top_first = [L.name for L in reversed(design.stack.layers)]
     if len(names_top_first) != len(pra):
-        raise ValueError("design has {} layers but the TMM map has {} slabs".format(
-            len(names_top_first), len(pra)))
-    out: Dict[str, float] = {}
-    for i, name in enumerate(names_top_first):
-        out[name] = out.get(name, 0.0) + float(pra["slab_{}".format(i)])
-    return out
+        raise ValueError("design has {} layers but the TMM map has {} slabs (graded/sliced "
+                         "stacks have no 1:1 layer mapping)".format(
+                             len(names_top_first), len(pra)))
+    return {name: float(pra["slab_{}".format(i)]) for i, name in enumerate(names_top_first)}
 
 
 def cw_damage_threshold_from_stack(build_stack_at_T: Callable[[float], object],
