@@ -131,8 +131,10 @@ def _detect_bloch_dirs(geo: OpticalGeometry):
                 "Bloch periodic-phase idnr direction detection inconsistent: resolved "
                 "{} x / {} y, expected {} / {}. Oblique incidence cannot be trusted.".format(
                     dirs.count("x"), dirs.count("y"), n_px, n_py))
-    try: geo._bloch_dirs = dirs
-    except Exception: pass
+    try:                                       # memoize on the geo object (a frozen/slotted geo just
+        geo._bloch_dirs = dirs                 # recomputes each solve -- correct, only slower)
+    except (AttributeError, TypeError):
+        pass
     return dirs
 
 

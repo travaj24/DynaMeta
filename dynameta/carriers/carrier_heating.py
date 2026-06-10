@@ -54,12 +54,21 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
     band where m* is larger, so <m*> RISES with T_e:
         <m*(T_e)> = m0 (1 + 2 alpha_eV <E>(T_e)/q)^exponent,
         <E>(T_e)  = (3/5) E_F [1 + (5 pi^2/12)(kB T_e / E_F)^2]   (degenerate-gas mean energy, Sommerfeld).
+    VALIDITY: the Sommerfeld expansion assumes a DEGENERATE gas, kB*T_e << E_F; the quadratic
+    correction term grows without bound, so beyond kB*T_e ~ E_F the formula over-states <E> (the
+    validated ITO regime peaks at kB*T_e/E_F ~ 0.3). A RuntimeWarning fires past kB*T_e > E_F; the
+    nondegenerate closure (full Fermi-Dirac integral) is a documented follow-on.
     alpha_per_eV == 0 -> returns m0 EXACTLY (the off-switch; no float drift through the sqrt branch)."""
     if alpha_per_eV == 0.0:
         return np.full(np.shape(np.asarray(n_m3, dtype=np.float64)), float(m0_kg)) \
             if np.ndim(n_m3) else float(m0_kg)
     E_F = fermi_energy_J(n_m3, m0_kg, alpha_per_eV, g_s=g_s, g_v=g_v)
     kT = KB * np.asarray(Te_K, dtype=np.float64)
+    if np.any(kT > E_F):                       # Sommerfeld validity edge (see docstring)
+        import warnings
+        warnings.warn("kane_mass_of_Te: kB*T_e exceeds E_F -- the Sommerfeld degenerate-gas expansion "
+                      "is outside its validity (kB*Te/E_F up to {:.2f}); <m*> is over-stated.".format(
+                          float(np.max(kT / E_F))), RuntimeWarning, stacklevel=2)
     mean_E = (3.0 / 5.0) * E_F * (1.0 + (5.0 * np.pi ** 2 / 12.0) * (kT / E_F) ** 2)
     return float(m0_kg) * np.power(1.0 + 2.0 * float(alpha_per_eV) * mean_E / Q_E, exponent)
 
