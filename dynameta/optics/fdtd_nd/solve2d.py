@@ -29,7 +29,7 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
     array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API).
     `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients or None (no Lorentz pole). chi2/raman/gain
     (R15/R20) run on the numpy, numba and jax backends; the GPU kernels (numba-cuda, cupy) raise when
-    they are active (no CUDA toolkit on the dev box to validate them; None keeps every backend
+    they are active (GPU nonlinear kernels are not yet written; None keeps every backend
     byte-identical)."""
     (ke, be, ce), (kh, bh, ch) = cpml
     nonlinear = chi2 is not None or raman is not None or gain is not None
