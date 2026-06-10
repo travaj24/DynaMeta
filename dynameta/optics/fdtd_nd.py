@@ -918,9 +918,6 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
         Ey = Eynew
         eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
         eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
-    if do_gdyn and gain_dyn_out is not None:
-        gain_dyn_out["Npop_final"] = np.stack([np.asarray(N0), np.asarray(N1),
-                                               np.asarray(N2), np.asarray(N3)])
     return eyL, hxL, eyR, hxR
 
 
