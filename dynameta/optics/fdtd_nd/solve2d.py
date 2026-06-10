@@ -28,25 +28,23 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
     'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
     array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API).
     `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients or None (no Lorentz pole). chi2/raman/gain
-    (R15/R20) run on the numpy, numba and jax backends; the GPU kernels (numba-cuda, cupy) raise when
-    they are active (GPU nonlinear kernels are not yet written; None keeps every backend
-    byte-identical)."""
+    (R15/R20) run on EVERY backend: the GPU kernels carry the same cell-local recurrences
+    (numba-cuda in the cooperative kernel; cupy through the xp-parameterized reference loop),
+    validated GPU==CPU in validation/fdtd_gpu_nonlinear.py. None keeps every backend
+    byte-identical."""
     (ke, be, ce), (kh, bh, ch) = cpml
-    nonlinear = chi2 is not None or raman is not None or gain is not None
-    if nonlinear and name in ("numba-cuda", "cupy"):
-        raise NotImplementedError("chi2/Raman/gain nonlinearities (R15/R20) run on the numpy, numba "
-                                  "and jax backends (GPU kernels unvalidated -> guarded); got "
-                                  "backend={!r}".format(name))
     if name in ("numba", "numba-cuda"):
         has_lor = lor is not None
         z = np.zeros_like(eps_inf)
         C1, C2, C3 = (lor if has_lor else (z, z, z))
-        if name == "numba-cuda":
-            return _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                              nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
         chi2g = chi2 if chi2 is not None else z
         R1, R2, R3, chi3R = (raman if raman is not None else (z, z, z, z))
         G1, G2, G3 = (gain if gain is not None else (z, z, z))
+        if name == "numba-cuda":
+            return _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
+                              nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
+                              chi2g, chi2 is not None, R1, R2, R3, chi3R, raman is not None,
+                              G1, G2, G3, gain is not None)
         return _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                            nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
                            chi2g, chi2 is not None, R1, R2, R3, chi3R, raman is not None,

@@ -5,10 +5,11 @@ import numpy as np
 import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _have_numba_cuda, solve_fdtd_2d
 
 needs_numba = pytest.mark.skipif(not _HAVE_NUMBA,
                                  reason="numba not installed (CI numpy-only leg)")
+needs_gpu = pytest.mark.skipif(not _have_numba_cuda(), reason="no CUDA GPU available")
 
 
 def _solve(layers, **kw):
@@ -32,12 +33,15 @@ def test_chi2_numba_matches_numpy():
     assert np.max(np.abs(r_nb.R0[m] - r_np.R0[m])) < 1e-12
 
 
-def test_chi2_on_gpu_backend_raises():
-    # raises at backend resolution (no numba/GPU installed) OR at the nonlinear+GPU dispatch
-    # guard (GPU present; the GPU NONLINEAR kernels are not implemented) -- never runs silently
+@needs_gpu
+def test_chi2_gpu_backend_matches_numpy():
+    # the cooperative CUDA kernel now carries the cell-local nonlinear recurrences (the
+    # rigorous multi-gate equality incl. cupy lives in validation/fdtd_gpu_nonlinear.py)
     lay = [FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)]
-    with pytest.raises((RuntimeError, NotImplementedError)):
-        _solve(lay, backend="numba-cuda")
+    r_np = _solve(lay)
+    r_gpu = _solve(lay, backend="numba-cuda")
+    m = r_np.band
+    assert np.max(np.abs(r_gpu.R0[m] - r_np.R0[m])) < 1e-12
 
 
 def test_raman_guards():
