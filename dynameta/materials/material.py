@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 from dynameta.materials.optical_model import OpticalModel, DrudeOptical
 from dynameta.materials.transport_model import TransportModel
 from dynameta.materials.scattering import ScatteringModel
+from dynameta.materials.mechanical import MechanicalProps
 
 
 @dataclass
@@ -41,6 +42,10 @@ class Material:
                                             # mobility callable (replacing them on fresh copies, so the
                                             # passed-in models are not mutated). Default None ->
                                             # byte-identical (nothing changes).
+    mechanical:   Optional[MechanicalProps] = None   # driver D3: {E, nu, CTE, sigma_crit} for the
+                                            # thermo-mechanical reliability post-processors (REL6
+                                            # fatigue, REL7 stress migration). Pure data -- no solver
+                                            # reads it; default None = byte-identical.
 
     def __post_init__(self) -> None:
         if not self.pretty_name:

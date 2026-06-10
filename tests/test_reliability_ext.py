@@ -106,3 +106,17 @@ def test_corrosion_limits_and_peck():
         peck_time_to_failure_s(0.0, 300.0, A_s=1.0)                     # RH in (0, 100]
     with pytest.raises(ValueError):
         peck_time_to_failure_s(120.0, 300.0, A_s=1.0)
+
+
+# ---- driver D3: MechanicalProps promoted onto the Material schema ----
+
+def test_mechanical_props_on_material_schema():
+    from dynameta.materials import Material, ConstantOptical, MechanicalProps as MatMech
+    from dynameta.reliability import MechanicalProps as RelMech
+    assert MatMech is RelMech                                # one class, re-exported (back-compat)
+    m_plain = Material("oxide", ConstantOptical(4.0 + 0j))
+    assert m_plain.mechanical is None                        # default None = byte-identical
+    mech = MatMech(E_Pa=70e9, nu=0.17, cte_per_K=0.5e-6, sigma_crit_Pa=0.8e9)
+    m = Material("oxide2", ConstantOptical(4.0 + 0j), mechanical=mech)
+    assert m.mechanical.E_Pa == 70e9 and np.isfinite(m.mechanical.sigma_crit_Pa)
+    assert biaxial_stress_Pa(m.mechanical, 2.6e-6, 100.0) != 0.0   # consumable by the REL6 functions
