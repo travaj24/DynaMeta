@@ -19,10 +19,15 @@ def test_zero_chi2_raman_byte_identical():
     assert np.array_equal(r0.R0, r1.R0) and np.array_equal(r0.T0, r1.T0)
 
 
-def test_chi2_requires_numpy_backend():
+def test_chi2_numba_matches_numpy_and_cuda_raises():
+    # numba/jax now carry the nonlinearities (deferred-item completion); only the GPU kernels raise
     lay = [FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)]
-    with pytest.raises(NotImplementedError):
-        _solve(lay, backend="numba")
+    r_np = _solve(lay)
+    r_nb = _solve(lay, backend="numba")
+    m = r_np.band
+    assert np.max(np.abs(r_nb.R0[m] - r_np.R0[m])) < 1e-12
+    with pytest.raises(Exception):                       # no CUDA toolkit -> resolve/guard raises
+        _solve(lay, backend="numba-cuda")
 
 
 def test_raman_guards():
@@ -46,9 +51,12 @@ def test_gain_off_switch_and_guards():
     assert np.array_equal(r0.R0, r1.R0)
     with pytest.raises(ValueError):                      # gain strength without w_a/dw
         _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e24)])
-    with pytest.raises(NotImplementedError):             # numpy-only
-        _solve([FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e24,
-                          gain_w_rad_s=1e15, gain_dw_rad_s=1e14)], backend="numba")
+    # gain on numba now matches numpy (deferred-item completion)
+    lay_g = [FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e22,
+                       gain_w_rad_s=1.5e15, gain_dw_rad_s=1.3e14)]
+    r_np = _solve(lay_g)
+    r_nb = _solve(lay_g, backend="numba")
+    assert np.max(np.abs(r_nb.R0[r_np.band] - r_np.R0[r_np.band])) < 1e-12
 
 
 def test_four_level_steady_state_and_conservation():

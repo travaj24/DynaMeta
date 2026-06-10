@@ -149,16 +149,23 @@ def _resolve_backend(backend):
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
+                nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
+                chi2g, has_chi2, R1, R2, R3, chi3R, has_raman, G1, G2, G3, has_gain):
     """Fused, prange-threaded 2D TE timestep (the Numba CPU kernel) -- byte-for-byte the same physics as
     _run_2d_te (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
     in x), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass with no per-op overhead.
-    C1,C2,C3 = per-cell Lorentz ADE coefficients; has_lor gates the extra pole. Returns the E_y / co-located
-    H_x probe x-lines at the left/right z-planes."""
+    C1,C2,C3 = per-cell Lorentz ADE coefficients; has_lor gates the extra pole. R15/R20 nonlinearities
+    mirror the numpy kernel: chi2 SHG polarization P2 = eps0 chi2 E^2 (lagged dP2/dt), the Raman pair
+    (vibrational ADE on E^2 + P_R = eps0 chi3R E Q) and the clamped-inversion gain line (G1,G2,G3
+    recursion) -- each gated by its has_* flag (zero-cost branches when off). Returns the E_y /
+    co-located H_x probe x-lines at the left/right z-planes."""
     nx, nz = eps_inf.shape
     Ey = np.zeros((nx, nz)); Hx = np.zeros((nx, nz)); Hz = np.zeros((nx, nz))
     Jy = np.zeros((nx, nz)); psi_hxz = np.zeros((nx, nz)); psi_eyz = np.zeros((nx, nz))
     PL = np.zeros((nx, nz)); PLp = np.zeros((nx, nz))           # Lorentz polarization (now / previous)
+    P2 = np.zeros((nx, nz))                                     # chi2 SHG polarization
+    Q = np.zeros((nx, nz)); Qp = np.zeros((nx, nz)); PR = np.zeros((nx, nz))  # Raman state
+    PG = np.zeros((nx, nz)); PGp = np.zeros((nx, nz))           # gain-line polarization
     eyL = np.empty((nsteps, nx)); hxL = np.empty((nsteps, nx))
     eyR = np.empty((nsteps, nx)); hxR = np.empty((nsteps, nx))
     cmu = dt / MU0
@@ -185,6 +192,19 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                     pln = C1[i, k] * PL[i, k] + C2[i, k] * PLp[i, k] + C3[i, k] * eyo
                     curl = curl - (pln - PL[i, k]) / dt
                     PLp[i, k] = PL[i, k]; PL[i, k] = pln
+                if has_gain:                                   # R20 clamped-inversion gain line
+                    pgn = G1[i, k] * PG[i, k] + G2[i, k] * PGp[i, k] + G3[i, k] * eyo
+                    curl = curl - (pgn - PG[i, k]) / dt
+                    PGp[i, k] = PG[i, k]; PG[i, k] = pgn
+                if has_chi2:                                   # R15 chi2 SHG polarization
+                    p2n = EPS0 * chi2g[i, k] * eyo * eyo
+                    curl = curl - (p2n - P2[i, k]) / dt
+                    P2[i, k] = p2n
+                if has_raman:                                  # R15 Raman: ADE on E^2 + P_R = eps0 chiR E Q
+                    qn = R1[i, k] * Q[i, k] + R2[i, k] * Qp[i, k] + R3[i, k] * eyo * eyo
+                    prn = EPS0 * chi3R[i, k] * eyo * qn
+                    curl = curl - (prn - PR[i, k]) / dt
+                    Qp[i, k] = Q[i, k]; Q[i, k] = qn; PR[i, k] = prn
                 aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                 bJ = (EPS0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                 eps_eff = eps_inf[i, k] + chi3[i, k] * Ey[i, k] ** 2
@@ -375,7 +395,7 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
 
 
 def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
-               chi2=None, raman=None, gain=None):
+               chi2=None, raman=None, gain=None, gain_dyn=None, gain_dyn_out=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
     CFS-CPML absorbing layers + PEC backing in z. Records the E_y and H_x x-lines at the left/right
     z-probe planes (for both the x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE +
@@ -395,7 +415,17 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
              0/2w instead).
       gain:  (G1,G2,G3) clamped-inversion gain-line ADE (R20) -- the SAME recursion as the Lorentz
              pole but sourced by -kappa dN E (G3 = -kappa dN dt^2/den), so dN > 0 amplifies and
-             dN < 0 is numerically IDENTICAL to a passive pole with delta_eps = kappa|dN|/(eps0 w^2)."""
+             dN < 0 is numerically IDENTICAL to a passive pole with delta_eps = kappa|dN|/(eps0 w^2).
+      gain_dyn: DYNAMIC four-level gain (R20 follow-on; mutually exclusive with `gain`):
+             (G1, G2, kapfac, Wp, Npop0, tau32, tau21, tau10, hw_a, snap_step) where kapfac =
+             kappa dt^2/den per cell (so G3(t) = -kapfac (N2 - N1)), Npop0 the (4,nx,nz) initial
+             populations, Wp the pump-rate grid [1/s] and hw_a = hbar w_a [J]. Each step couples
+             the field to the populations through the STIMULATED rate density S_st =
+             -E dPG/dt / (hbar w_a) (the field-polarization work; positive when amplifying ->
+             N2 -> N1 transfer, negative in absorption -> N1 -> N2), then advances the four-level
+             rate equations by conservative forward Euler (every term appears +/- once, so
+             sum(N) drifts only at the per-step rounding floor). gain_dyn_out (a dict) receives
+             'dN_snap' = N2 - N1 captured at snap_step and 'Npop_final'."""
     nx, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     ke = xp.asarray(ke); be = xp.asarray(be); ce = xp.asarray(ce)
@@ -418,6 +448,16 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     if do_gain:
         G1, G2, G3 = (xp.asarray(gain[0]), xp.asarray(gain[1]), xp.asarray(gain[2]))
         PG = xp.zeros((nx, nz)); PGp = xp.zeros((nx, nz))        # gain-line polarization (now/prev)
+    do_gdyn = gain_dyn is not None
+    if do_gdyn:
+        if do_gain:
+            raise ValueError("gain and gain_dyn are mutually exclusive")
+        (G1, G2, kapfac, Wp, Npop0, tau32, tau21, tau10, hw_a, snap_step) = gain_dyn
+        G1 = xp.asarray(G1); G2 = xp.asarray(G2); kapfac = xp.asarray(kapfac)
+        Wp = xp.asarray(Wp)
+        N0 = xp.asarray(Npop0[0]).copy(); N1 = xp.asarray(Npop0[1]).copy()
+        N2 = xp.asarray(Npop0[2]).copy(); N3 = xp.asarray(Npop0[3]).copy()
+        PG = xp.zeros((nx, nz)); PGp = xp.zeros((nx, nz))
     Ey = xp.zeros((nx, nz))
     Hx = xp.zeros((nx, nz))                 # Hx[i,k] at (i, k+1/2)
     Hz = xp.zeros((nx, nz))                 # Hz[i,k] at (i+1/2, k)
@@ -451,6 +491,21 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             PGnew = G1 * PG + G2 * PGp + G3 * Ey
             curl = curl - (PGnew - PG) / dt
             PGp = PG; PG = PGnew
+        # R20 follow-on DYNAMIC gain: G3(t) from the LOCAL inversion, then the stimulated
+        # transfer S_st = -E dPG/dt/(hbar w_a) drives the four-level populations
+        if do_gdyn:
+            PGnew = G1 * PG + G2 * PGp - kapfac * (N2 - N1) * Ey
+            dPG_dt = (PGnew - PG) / dt
+            curl = curl - dPG_dt
+            PGp = PG; PG = PGnew
+            S_st = -(Ey * dPG_dt) / hw_a                          # transitions / (m^3 s); >0 = emission
+            f30 = Wp * N0; f32 = N3 / tau32; f21 = N2 / tau21; f10 = N1 / tau10
+            N0 = N0 + dt * (f10 - f30)
+            N1 = N1 + dt * (f21 + S_st - f10)
+            N2 = N2 + dt * (f32 - f21 - S_st)
+            N3 = N3 + dt * (f30 - f32)
+            if n == snap_step and gain_dyn_out is not None:
+                gain_dyn_out["dN_snap"] = np.asarray(N2 - N1).copy()
         # R15 chi2 SHG polarization: P2 = eps0 chi2 E^2, lagged-explicit dP2/dt like the Lorentz
         if do_chi2:
             P2new = EPS0 * chi2 * Ey ** 2
@@ -475,10 +530,14 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         # per-diffraction-order phase (each order has a different k_z) that does NOT cancel in the ratio.
         eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
         eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
+    if do_gdyn and gain_dyn_out is not None:
+        gain_dyn_out["Npop_final"] = np.stack([np.asarray(N0), np.asarray(N1),
+                                               np.asarray(N2), np.asarray(N3)])
     return eyL, hxL, eyR, hxR
 
 
-def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None):
+def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None,
+                   chi2=None, raman=None, gain=None):
     """JAX (XLA) backend -- the SAME 2D-TE physics as _run_2d_te, expressed as a single traced, compiled
     lax.scan time loop. Two payoffs: (1) it is DIFFERENTIABLE end-to-end, so a downstream jax.grad gives
     d(R,T)/d(geometry/material) for gradient-based inverse design; (2) XLA fuses the whole step (no
@@ -487,7 +546,10 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
     Returns the four probe x-lines as JAX arrays (the dispatcher converts to NumPy for the FFT/R-T
     extraction; staying in JAX lets a caller jax.grad a scalar objective straight through the time loop,
     the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from _cpml_z. `lor`=(C1,C2,C3)
-    per-cell Lorentz ADE coefficients (a second polarization PL in the carry) or None (no pole)."""
+    per-cell Lorentz ADE coefficients (a second polarization PL in the carry) or None (no pole).
+    chi2/raman/gain (R15/R20) mirror the numpy kernel; their states extend the scan carry only when
+    active (None -> identical carry/trace to the pre-R15 path), and remain DIFFERENTIABLE -- jax.grad
+    flows through the SHG/Raman/gain polarizations like every other carry component."""
     import jax
     jax.config.update("jax_enable_x64", True)               # FDTD needs float64 to match the reference
     import jax.numpy as jnp
@@ -504,9 +566,26 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
     do_lor = lor is not None
     if do_lor:
         C1, C2, C3 = jnp.asarray(lor[0]), jnp.asarray(lor[1]), jnp.asarray(lor[2])
+    do_chi2 = chi2 is not None
+    if do_chi2:
+        chi2 = jnp.asarray(chi2)
+    do_raman = raman is not None
+    if do_raman:
+        R1, R2, R3, chi3R = (jnp.asarray(raman[0]), jnp.asarray(raman[1]),
+                             jnp.asarray(raman[2]), jnp.asarray(raman[3]))
+    do_gain = gain is not None
+    if do_gain:
+        G1, G2, G3 = jnp.asarray(gain[0]), jnp.asarray(gain[1]), jnp.asarray(gain[2])
 
     def step(carry, src_n):
-        Ey, Hx, Hz, Jy, psi_h, psi_e, PL, PLp = carry
+        Ey, Hx, Hz, Jy, psi_h, psi_e, PL, PLp = carry[:8]
+        extra = list(carry[8:])
+        if do_gain:
+            PG, PGp = extra.pop(0), extra.pop(0)
+        if do_chi2:
+            P2 = extra.pop(0)
+        if do_raman:
+            Q, Qp, PR = extra.pop(0), extra.pop(0), extra.pop(0)
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
         psi_h = psi_h.at[:, :-1].set(bh[:-1] * psi_h[:, :-1] + ch[:-1] * dEy_dz)
         Hx = Hx.at[:, :-1].add(cmu * (dEy_dz / kh[:-1] + psi_h[:, :-1]))
@@ -520,6 +599,19 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
             PLnew = C1 * PL + C2 * PLp + C3 * Ey
             curl = curl - (PLnew - PL) / dt
             PLp, PL = PL, PLnew
+        if do_gain:                                         # R20 clamped-inversion gain line
+            PGnew = G1 * PG + G2 * PGp + G3 * Ey
+            curl = curl - (PGnew - PG) / dt
+            PGp, PG = PG, PGnew
+        if do_chi2:                                         # R15 chi2 SHG polarization
+            P2new = EPS0 * chi2 * Ey ** 2
+            curl = curl - (P2new - P2) / dt
+            P2 = P2new
+        if do_raman:                                        # R15 Raman: ADE on E^2 + P_R = eps0 chiR E Q
+            Qnew = R1 * Q + R2 * Qp + R3 * Ey ** 2
+            PRnew = EPS0 * chi3R * Ey * Qnew
+            curl = curl - (PRnew - PR) / dt
+            Qp, Q, PR = Q, Qnew, PRnew
         eps_eff = eps_inf + chi3 * Ey ** 2
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Eyn = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
@@ -528,10 +620,19 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
         Eyn = Eyn.at[:, 0].set(0.0).at[:, nz - 1].set(0.0)  # PEC backing the CPML
         out = (Eyn[:, k_pL], 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1]),
                Eyn[:, k_pR], 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1]))
-        return (Eyn, Hx, Hz, Jy, psi_h, psi_e, PL, PLp), out
+        new_extra = []
+        if do_gain:
+            new_extra += [PG, PGp]
+        if do_chi2:
+            new_extra += [P2]
+        if do_raman:
+            new_extra += [Q, Qp, PR]
+        return (Eyn, Hx, Hz, Jy, psi_h, psi_e, PL, PLp) + tuple(new_extra), out
 
     z0 = jnp.zeros((nx, nz))
-    _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(8)), jnp.asarray(src))
+    n_extra = (2 if do_gain else 0) + (1 if do_chi2 else 0) + (3 if do_raman else 0)
+    _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(8 + n_extra)),
+                                       jnp.asarray(src))
     return eyL, hxL, eyR, hxR                               # JAX arrays (differentiable); dispatcher -> NumPy
 
 
@@ -550,22 +651,33 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
     downstream FFT / R-T extraction stays backend-agnostic. 'numba' = the fused threaded CPU kernel;
     'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
     array module (an explicit power-user `xp` is honored even for 'numpy', preserving the old xp=cupy API).
-    `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients or None (no Lorentz pole). chi2/raman (R15)
-    are carried by the NUMPY reference kernel only -- the fused numba/cuda/jax kernels raise (deferred;
-    None keeps every backend byte-identical)."""
+    `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients or None (no Lorentz pole). chi2/raman/gain
+    (R15/R20) run on the numpy, numba and jax backends; the GPU kernels (numba-cuda, cupy) raise when
+    they are active (no CUDA toolkit on the dev box to validate them; None keeps every backend
+    byte-identical)."""
     (ke, be, ce), (kh, bh, ch) = cpml
-    if (chi2 is not None or raman is not None or gain is not None) and name != "numpy":
-        raise NotImplementedError("chi2/Raman/gain nonlinearities (R15/R20) run on backend='numpy' "
-                                  "only (numba/cupy/jax kernels deferred); got backend={!r}".format(name))
+    nonlinear = chi2 is not None or raman is not None or gain is not None
+    if nonlinear and name in ("numba-cuda", "cupy"):
+        raise NotImplementedError("chi2/Raman/gain nonlinearities (R15/R20) run on the numpy, numba "
+                                  "and jax backends (GPU kernels unvalidated -> guarded); got "
+                                  "backend={!r}".format(name))
     if name in ("numba", "numba-cuda"):
         has_lor = lor is not None
         z = np.zeros_like(eps_inf)
         C1, C2, C3 = (lor if has_lor else (z, z, z))
-        runner = _te2d_cuda if name == "numba-cuda" else _te2d_numba
-        return runner(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                      nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
+        if name == "numba-cuda":
+            return _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
+                              nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
+        chi2g = chi2 if chi2 is not None else z
+        R1, R2, R3, chi3R = (raman if raman is not None else (z, z, z, z))
+        G1, G2, G3 = (gain if gain is not None else (z, z, z))
+        return _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
+                           nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
+                           chi2g, chi2 is not None, R1, R2, R3, chi3R, raman is not None,
+                           G1, G2, G3, gain is not None)
     if name == "jax":
-        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor)
+        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                             lor, chi2=chi2, raman=raman, gain=gain)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp                                    # backend='cupy' auto-selects the device module
@@ -806,6 +918,9 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
         Ey = Eynew
         eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
         eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
+    if do_gdyn and gain_dyn_out is not None:
+        gain_dyn_out["Npop_final"] = np.stack([np.asarray(N0), np.asarray(N1),
+                                               np.asarray(N2), np.asarray(N3)])
     return eyL, hxL, eyR, hxR
 
 
@@ -1197,13 +1312,19 @@ def _flux3d(ex, ey, hx, hy):
     return np.sum(S, axis=(1, 2))                            # (nfreq,) signed z-power per frequency
 
 
-def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None):
+def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
+            chi2=None, raman=None, gain=None):
     """One full-vector 3D-FDTD pass over a cell-wise (nx,ny,nz) (eps_inf, wp, gamma, chi3) profile.
     Periodic in x and y (roll = Bloch at normal incidence, zero phase), CFS-CPML + PEC backing in z.
     Standard Yee staggering: Ex@(i+1/2,j,k) Ey@(i,j+1/2,k) Ez@(i,j,k+1/2); Hx@(i,j+1/2,k+1/2)
     Hy@(i+1/2,j,k+1/2) Hz@(i+1/2,j+1/2,k). Semi-implicit Drude ADE per E-component + instantaneous Kerr
     (eps_eff = eps_inf + chi3|E|^2) + an optional Lorentz ADE per E-component (`lor`=(C1,C2,C3), a
-    polarization PL{x,y,z}). Only the d/dz derivatives are CPML-stretched (x,y are periodic), so
+    polarization PL{x,y,z}). R15/R20 nonlinearities (None -> byte-identical): chi2 SHG as a DIAGONAL
+    tensor model P2_i = eps0 chi2 E_i^2 per component; Raman with ONE isotropic vibrational coordinate
+    Q driven by |E|^2 and P_R,i = eps0 chi3R E_i Q (couples components through Q; reduces exactly to
+    the 2D scalar model for a single-component field); the clamped-inversion gain line per component
+    (the same (G1,G2,G3) recursion as the Lorentz pole). Only the d/dz derivatives are CPML-stretched
+    (x,y are periodic), so
     four psi memories: dEy/dz & dEx/dz (H update), dHx/dz & dHy/dz (E update). Records Ex,Ey,Hx,Hy on the
     left/right z-probe planes (the components that carry S_z). Returns 8 arrays of shape (nsteps,nx,ny)."""
     nx, ny, nz = eps_inf.shape
@@ -1222,6 +1343,21 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         C1, C2, C3 = xp.asarray(lor[0]), xp.asarray(lor[1]), xp.asarray(lor[2])
         PLx, PLy, PLz = z3(), z3(), z3()
         PLpx, PLpy, PLpz = z3(), z3(), z3()
+    do_chi2 = chi2 is not None
+    if do_chi2:
+        chi2 = xp.asarray(chi2)
+        P2x, P2y, P2z = z3(), z3(), z3()                     # chi2 SHG polarization per component
+    do_raman = raman is not None
+    if do_raman:
+        R1, R2, R3 = xp.asarray(raman[0]), xp.asarray(raman[1]), xp.asarray(raman[2])
+        chi3R = xp.asarray(raman[3])
+        Q, Qp = z3(), z3()                                   # ONE isotropic vibrational coordinate
+        PRx, PRy, PRz = z3(), z3(), z3()
+    do_gain = gain is not None
+    if do_gain:
+        G1, G2, G3 = xp.asarray(gain[0]), xp.asarray(gain[1]), xp.asarray(gain[2])
+        PGx, PGy, PGz = z3(), z3(), z3()
+        PGpx, PGpy, PGpz = z3(), z3(), z3()
     aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
     cmu = dt / MU0
@@ -1247,6 +1383,10 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         dEx_dy = (xp.roll(Ex, -1, axis=1) - Ex) / dy
         Hz -= cmu * (dEy_dx - dEx_dy)
         # ---------------- E update: eps0 eps_eff dE/dt = curl H - J ----------------
+        # the Raman coordinate is shared by all components: advance it ONCE per step on |E|^2
+        if do_raman:
+            Qnew = R1 * Q + R2 * Qp + R3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
+            Qp = Q; Q = Qnew
         eps_eff = eps_inf + chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
         ce_dt = EPS0 * eps_eff / dt
         denom = ce_dt + bJ / 2.0
@@ -1260,6 +1400,18 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
             PLxn = C1 * PLx + C2 * PLpx + C3 * Ex
             curlx = curlx - (PLxn - PLx) / dt
             PLpx, PLx = PLx, PLxn
+        if do_gain:
+            PGxn = G1 * PGx + G2 * PGpx + G3 * Ex
+            curlx = curlx - (PGxn - PGx) / dt
+            PGpx, PGx = PGx, PGxn
+        if do_chi2:
+            P2xn = EPS0 * chi2 * Ex ** 2
+            curlx = curlx - (P2xn - P2x) / dt
+            P2x = P2xn
+        if do_raman:
+            PRxn = EPS0 * chi3R * Ex * Q
+            curlx = curlx - (PRxn - PRx) / dt
+            PRx = PRxn
         Exn = (ce_dt * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
         Jx = aJ * Jx + bJ * (Exn + Ex)
         # Ey: (dHx/dz - dHz/dx) ; dHx/dz CPML-stretched
@@ -1272,6 +1424,18 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
             PLyn = C1 * PLy + C2 * PLpy + C3 * Ey
             curly = curly - (PLyn - PLy) / dt
             PLpy, PLy = PLy, PLyn
+        if do_gain:
+            PGyn = G1 * PGy + G2 * PGpy + G3 * Ey
+            curly = curly - (PGyn - PGy) / dt
+            PGpy, PGy = PGy, PGyn
+        if do_chi2:
+            P2yn = EPS0 * chi2 * Ey ** 2
+            curly = curly - (P2yn - P2y) / dt
+            P2y = P2yn
+        if do_raman:
+            PRyn = EPS0 * chi3R * Ey * Q
+            curly = curly - (PRyn - PRy) / dt
+            PRy = PRyn
         Eyn = (ce_dt * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eyn + Ey)
         # Ez: (dHy/dx - dHx/dy) ; both transverse (no CPML)
@@ -1282,6 +1446,18 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
             PLzn = C1 * PLz + C2 * PLpz + C3 * Ez
             curlz = curlz - (PLzn - PLz) / dt
             PLpz, PLz = PLz, PLzn
+        if do_gain:
+            PGzn = G1 * PGz + G2 * PGpz + G3 * Ez
+            curlz = curlz - (PGzn - PGz) / dt
+            PGpz, PGz = PGz, PGzn
+        if do_chi2:
+            P2zn = EPS0 * chi2 * Ez ** 2
+            curlz = curlz - (P2zn - P2z) / dt
+            P2z = P2zn
+        if do_raman:
+            PRzn = EPS0 * chi3R * Ez * Q
+            curlz = curlz - (PRzn - PRz) / dt
+            PRz = PRzn
         Ezn = (ce_dt * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
         Jz = aJ * Jz + bJ * (Ezn + Ez)
         # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML:
@@ -1796,12 +1972,17 @@ def _run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k
 
 
 def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
-                 lor=None):
+                 lor=None, chi2=None, raman=None, gain=None):
     """Run ONE 3D pass on the named backend, returning the eight probe planes as NumPy arrays (so the
     downstream FFT / R-T extraction is backend-agnostic). 'numba' = the fused threaded CPU kernel (the
     fast 3D path); 'numpy'/'cupy' = the vectorized reference loop. `lor`=(C1,C2,C3) per-cell Lorentz ADE
-    coefficients or None. (The jax 3D kernel does not carry the Lorentz ADE yet -> guarded upstream.)"""
+    coefficients or None. (The jax 3D kernel does not carry the Lorentz ADE yet -> guarded upstream.)
+    chi2/raman/gain (R15/R20) run on the numpy/cupy vectorized path only in 3D; numba/jax raise."""
     (ke, be, ce), (kh, bh, ch) = cpml
+    nonlinear3 = chi2 is not None or raman is not None or gain is not None
+    if nonlinear3 and name not in ("numpy", "cupy"):
+        raise NotImplementedError("3D chi2/Raman/gain run on backend='numpy' (or cupy) only; got "
+                                  "backend={!r}".format(name))
     if name == "numba":
         has_lor = lor is not None
         z = np.zeros_like(eps_inf)
@@ -1817,7 +1998,8 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
     if name == "cupy" and xp is np:
         import cupy as xp
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor)
+    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
+                  chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -1873,6 +2055,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     shape = (nx, ny, nz)
     eps_inf = np.ones(shape); wp = np.zeros(shape); gam = np.zeros(shape); chi3 = np.zeros(shape)
     lw0 = np.zeros(shape); lgam = np.zeros(shape); ldeps = np.zeros(shape)   # Lorentz pole per cell
+    chi2g = np.zeros(shape)                                                  # R15 SHG chi2 [m/V]
+    chi3R = np.zeros(shape); rw = np.zeros(shape); rgam = np.zeros(shape)    # R15 Raman pole
+    gw = np.zeros(shape); gdw = np.zeros(shape); gkdn = np.zeros(shape)      # R20 gain line
     zc = (np.arange(nz) + 0.5) * dz
     eps_inf[:, :, zc < pad] = n_super ** 2                   # fill the semi-infinite super/substrate pads
     eps_inf[:, :, zc >= pad + z_struct] = n_sub ** 2
@@ -1887,6 +2072,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         ldeps[:, :, m] = L.lorentz_delta_eps
         if kerr:
             chi3[:, :, m] = L.chi3_m2_V2
+        chi2g[:, :, m] = L.chi2_m_V
+        chi3R[:, :, m] = L.raman_chi3_m2_V2
+        rw[:, :, m] = L.raman_w_rad_s
+        rgam[:, :, m] = L.raman_gamma_rad_s
+        gw[:, :, m] = L.gain_w_rad_s
+        gdw[:, :, m] = L.gain_dw_rad_s
+        gkdn[:, :, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
         z += L.thickness_m
     if lateral_eps_inf is not None:
         lat = lateral_eps_inf(nx, ny, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
@@ -1912,17 +2104,36 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         C3 = (EPS0 * ldeps * lw0 ** 2 * dt ** 2) / den
         lor = (C1, C2, C3)
 
+    # R15/R20 nonlinear grids -> coefficient tuples (all-zero -> None -> pre-R15 path)
+    chi2_arrs = chi2g if np.any(chi2g != 0.0) else None
+    raman_arrs = None
+    if np.any(chi3R != 0.0):
+        if np.any((chi3R != 0.0) & (rw <= 0.0)):
+            raise ValueError("Raman chi3 needs raman_w_rad_s > 0 on every Raman-active layer")
+        den_r = 1.0 + rgam * dt / 2.0
+        raman_arrs = ((2.0 - rw ** 2 * dt ** 2) / den_r, (rgam * dt / 2.0 - 1.0) / den_r,
+                      (rw ** 2 * dt ** 2) / den_r, chi3R)
+    gain_arrs = None
+    if np.any(gkdn != 0.0):
+        if np.any((gkdn != 0.0) & ((gw <= 0.0) | (gdw <= 0.0))):
+            raise ValueError("gain line needs gain_w_rad_s > 0 and gain_dw_rad_s > 0 on every "
+                             "gain-active layer")
+        den_g = 1.0 + gdw * dt / 2.0
+        gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
+                     (-gkdn * dt ** 2) / den_g)
     cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched super (low z) + sub (high z)
     cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference
     name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
-    def run(ei, w, g_, c3, cpml, lor=None):
-        return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp, lor)
+    def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
+        return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp,
+                            lor, chi2, raman, gain)
 
     exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
         n_super ** 2 * one, zero, zero, zero, cpml_ref)                  # homogeneous-superstrate reference
-    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor)  # struct
+    exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
+                                                                 chi2_arrs, raman_arrs, gain_arrs)  # struct
 
     f = np.fft.rfftfreq(nsteps, dt)
     # 0-order specular co-pol (E_y) from the x,y-MEAN field (== the 1D two-run method)
