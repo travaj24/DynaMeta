@@ -9,7 +9,7 @@ LayeredDevsimBuilder` still works (the import happens on first attribute access)
 """
 
 __all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis", "transient",
-           "lc_director", "lc_director_2d", "lc_dynamics", "carrier_heating"]
+           "lc_director", "lc_director_2d", "lc_dynamics", "carrier_heating", "llg"]
 
 
 def __getattr__(name):
