@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.carriers.lc_director import (director_profile_bvp, freedericksz_threshold_V,
-                                           n_local_from_theta)
+                                           n_local_from_theta, theta_field_from_plate)
 from dynameta.core import NM, EffectEpsMap
 from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.core.carrier_field import CarrierField, CarrierRegion, ELECTRON_DENSITY
@@ -58,7 +58,7 @@ class LCEffectiveIndexModel:
 
     def eps(self, fields, lambda_m):
         theta_plate = np.asarray(fields.get("director_angle_rad", 0.0), dtype=np.float64)
-        theta_field = np.pi / 2.0 - theta_plate              # back to the field-axis convention
+        theta_field = theta_field_from_plate(theta_plate)    # the canonical convention bridge
         n_loc = n_local_from_theta(theta_field, self.n_o, self.n_e, model="extra_k_axis")
         return complex(float(np.mean(n_loc)) ** 2)
 
