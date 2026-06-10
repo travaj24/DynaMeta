@@ -375,7 +375,7 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
 
 
 def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
-               chi2=None, raman=None):
+               chi2=None, raman=None, gain=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
     CFS-CPML absorbing layers + PEC backing in z. Records the E_y and H_x x-lines at the left/right
     z-probe planes (for both the x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE +
@@ -392,7 +392,10 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
              (Q'' + gam_R Q' + W_R^2 Q = W_R^2 E^2 central-differenced) and the THIRD-order Raman
              polarization P_R = eps0 chi3R E Q (E times the DELAYED E^2 response -- this, not dQ/dt,
              is what produces Stokes gain at w_pump - W_R; coupling dQ/dt directly would radiate at
-             0/2w instead)."""
+             0/2w instead).
+      gain:  (G1,G2,G3) clamped-inversion gain-line ADE (R20) -- the SAME recursion as the Lorentz
+             pole but sourced by -kappa dN E (G3 = -kappa dN dt^2/den), so dN > 0 amplifies and
+             dN < 0 is numerically IDENTICAL to a passive pole with delta_eps = kappa|dN|/(eps0 w^2)."""
     nx, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     ke = xp.asarray(ke); be = xp.asarray(be); ce = xp.asarray(ce)
@@ -411,6 +414,10 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         chi3R = xp.asarray(raman[3])
         Q = xp.zeros((nx, nz)); Qp = xp.zeros((nx, nz))          # vibrational coordinate (now/prev)
         PR = xp.zeros((nx, nz))                                  # Raman polarization eps0 chi3R E Q
+    do_gain = gain is not None
+    if do_gain:
+        G1, G2, G3 = (xp.asarray(gain[0]), xp.asarray(gain[1]), xp.asarray(gain[2]))
+        PG = xp.zeros((nx, nz)); PGp = xp.zeros((nx, nz))        # gain-line polarization (now/prev)
     Ey = xp.zeros((nx, nz))
     Hx = xp.zeros((nx, nz))                 # Hx[i,k] at (i, k+1/2)
     Hz = xp.zeros((nx, nz))                 # Hz[i,k] at (i+1/2, k)
@@ -439,6 +446,11 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             PLnew = C1 * PL + C2 * PLp + C3 * Ey
             curl = curl - (PLnew - PL) / dt
             PLp = PL; PL = PLnew
+        # R20 clamped-inversion gain line: the Lorentz recursion with the -kappa dN E source
+        if do_gain:
+            PGnew = G1 * PG + G2 * PGp + G3 * Ey
+            curl = curl - (PGnew - PG) / dt
+            PGp = PG; PG = PGnew
         # R15 chi2 SHG polarization: P2 = eps0 chi2 E^2, lagged-explicit dP2/dt like the Lorentz
         if do_chi2:
             P2new = EPS0 * chi2 * Ey ** 2
@@ -533,7 +545,7 @@ def _flux(ey, hx):
 
 
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
-                    lor=None, chi2=None, raman=None):
+                    lor=None, chi2=None, raman=None, gain=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
     downstream FFT / R-T extraction stays backend-agnostic. 'numba' = the fused threaded CPU kernel;
     'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
@@ -542,9 +554,9 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
     are carried by the NUMPY reference kernel only -- the fused numba/cuda/jax kernels raise (deferred;
     None keeps every backend byte-identical)."""
     (ke, be, ce), (kh, bh, ch) = cpml
-    if (chi2 is not None or raman is not None) and name != "numpy":
-        raise NotImplementedError("chi2/Raman nonlinearities (R15) run on backend='numpy' only "
-                                  "(numba/cupy/jax kernels deferred); got backend={!r}".format(name))
+    if (chi2 is not None or raman is not None or gain is not None) and name != "numpy":
+        raise NotImplementedError("chi2/Raman/gain nonlinearities (R15/R20) run on backend='numpy' "
+                                  "only (numba/cupy/jax kernels deferred); got backend={!r}".format(name))
     if name in ("numba", "numba-cuda"):
         has_lor = lor is not None
         z = np.zeros_like(eps_inf)
@@ -559,7 +571,7 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
         import cupy as xp                                    # backend='cupy' auto-selects the device module
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
     out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                     chi2=chi2, raman=raman)
+                     chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -616,6 +628,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     lw0 = np.zeros((nx, nz)); lgam = np.zeros((nx, nz)); ldeps = np.zeros((nx, nz))  # Lorentz pole per cell
     chi2g = np.zeros((nx, nz))                                                       # R15 SHG chi2 [m/V]
     chi3R = np.zeros((nx, nz)); rw = np.zeros((nx, nz)); rgam = np.zeros((nx, nz))   # R15 Raman pole
+    gw = np.zeros((nx, nz)); gdw = np.zeros((nx, nz)); gkdn = np.zeros((nx, nz))     # R20 gain line
     zc = (np.arange(nz) + 0.5) * dz
     # fill the semi-infinite super/substrate pads with the end-media permittivity (so the incident wave is
     # truly in n_super and the structure sees the n_sub backing); vacuum (n=1) leaves this as ones
@@ -636,6 +649,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         chi3R[:, m] = L.raman_chi3_m2_V2
         rw[:, m] = L.raman_w_rad_s
         rgam[:, m] = L.raman_gamma_rad_s
+        gw[:, m] = L.gain_w_rad_s
+        gdw[:, m] = L.gain_dw_rad_s
+        gkdn[:, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
         z += L.thickness_m
     if lateral_eps_inf is not None:
         # a laterally-structured grating: overwrite eps_inf in the structure band with the (nx, *)
@@ -689,20 +705,28 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         den_r = 1.0 + rgam * dt / 2.0
         raman_arrs = ((2.0 - rw ** 2 * dt ** 2) / den_r, (rgam * dt / 2.0 - 1.0) / den_r,
                       (rw ** 2 * dt ** 2) / den_r, chi3R)
+    gain_arrs = None
+    if np.any(gkdn != 0.0):
+        if np.any((gkdn != 0.0) & ((gw <= 0.0) | (gdw <= 0.0))):
+            raise ValueError("gain line needs gain_w_rad_s > 0 and gain_dw_rad_s > 0 on every "
+                             "gain-active layer")
+        den_g = 1.0 + gdw * dt / 2.0
+        gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
+                     (-gkdn * dt ** 2) / den_g)
     cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched to super (low z) + sub (high z)
     cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference -> super both ends
     name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
-    def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None):
+    def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
         return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp,
-                               lor, chi2, raman)
+                               lor, chi2, raman, gain)
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
     # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run)
     eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
     eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
-                                     chi2_arrs, raman_arrs)  # structure run
+                                     chi2_arrs, raman_arrs, gain_arrs)  # structure run
 
     f = np.fft.rfftfreq(nsteps, dt)
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----
