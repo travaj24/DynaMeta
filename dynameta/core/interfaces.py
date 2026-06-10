@@ -55,6 +55,13 @@ class OpticalResult:
     # whose transmitted field is elliptical (the single-projection fit cannot see the cross-pol).
     R_flux:        Optional[float] = None
     T_flux:        Optional[float] = None
+    # Per-region absorbed-power map (driver D2): region/layer name -> absorbed fraction of the
+    # incident power -- the SAME normalized volumetric loss integral as A_independent restricted
+    # to one region, so sum(values) == A_independent by domain additivity (FEM path; non-PML
+    # regions only). The TMM layered path fills it per slab from tmm.absorp_in_each_layer. This
+    # is the spatial driver the reliability axis (REL5/LIDT) and electro-thermal Joule maps
+    # consume. None when not computed (the default -- byte-identical for existing callers).
+    per_region_absorption: Optional[Dict[str, float]] = None
 
 
 @runtime_checkable

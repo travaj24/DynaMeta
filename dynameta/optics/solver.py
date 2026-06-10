@@ -494,6 +494,15 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
+    # Per-region absorbed-power map (driver D2): the same loss integral split by material region
+    # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
+    try:
+        per_region_A = (None if A_independent is None else
+                        _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                               geo.period_x_nm, geo.period_y_nm))
+    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+        warnings.warn("per-region absorption map unavailable: {}".format(_e))
+        per_region_A = None
     # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
     # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
     # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
@@ -539,7 +548,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 A, A_independent, abs(A - A_independent)), stacklevel=2)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
-                          R_flux=R_flux, T_flux=T_flux)
+                          R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A)
 
 
 def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
@@ -705,6 +714,31 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     if area <= 0:
         return None
     return float(complex(integ).real * k0 / (max(math.cos(theta), 1e-12) * area))
+
+
+def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+    """Per-region absorbed-power map (driver D2): the _absorbed_fraction integrand evaluated
+    region by region -- IDENTICAL loss CF, IDENTICAL normalization, restricted to one material
+    domain at a time -- so sum(values) equals A_independent EXACTLY (domain additivity of the
+    integral), each value is the fraction of the incident power deposited in that region, and a
+    region with Im(eps) = 0 contributes exactly 0. Same caveats as _absorbed_fraction (clean
+    only for lossless cladding; PML regions excluded). Returns {region_name: fraction}."""
+    non_pml = [m for m in dict.fromkeys(mesh.GetMaterials()) if not m.startswith("pml_")]
+    area = float(Px) * float(Py)
+    if not non_pml or area <= 0:
+        return None
+    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
+        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E (see _absorbed_fraction)
+        loss = (q - ng.Conj(q)) / 2j
+    else:
+        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j
+        loss = im_eps * (E_tot * ng.Conj(E_tot))
+    scale = k0 / (max(math.cos(theta), 1e-12) * area)
+    out = {}
+    for m in non_pml:
+        integ = ng.Integrate(loss, mesh, definedon=mesh.Materials(re.escape(m)))
+        out[m] = float(complex(integ).real * scale)
+    return out
 
 
 def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):

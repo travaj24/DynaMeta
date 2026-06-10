@@ -159,6 +159,26 @@ def layered_rta(stack, lambda_m, *, theta_deg: float = 0.0, pol: str = "s"):
     return R, T, _check_energy_budget(R, T, where="layered_rta")
 
 
+def _per_layer_absorption(coh_tmm_res):
+    """Per-slab absorbed fractions from a coh_tmm result (driver D2): tmm.absorp_in_each_layer
+    returns [reflection-side semi-infinite, slab_0, ..., slab_{n-1}, transmission-side
+    semi-infinite]; the two ends are stripped (for a LOSSLESS lossy-free incidence medium the
+    first entry is R and the last is T -- they are NOT absorption). Keys 'slab_<i>' index
+    stack.slabs top-first. sum(values) == A == 1 - R - T to library precision."""
+    import tmm
+    arr = np.asarray(tmm.absorp_in_each_layer(coh_tmm_res), dtype=np.float64)
+    return {"slab_{}".format(i): float(arr[i + 1]) for i in range(arr.size - 2)}
+
+
+def layered_per_layer_absorption(stack, lambda_m, *, theta_deg: float = 0.0, pol: str = "s"):
+    """({'slab_<i>': absorbed fraction}, A_total) for a LayeredStack via coherent TMM -- the
+    per-layer absorbed-power driver (D2) on the exact 1-D path; the dict sums to A_total."""
+    res = _coh_tmm_stack(stack, lambda_m, theta_deg, pol)
+    R, T = float(res["R"]), float(res["T"])
+    return _per_layer_absorption(res), _check_energy_budget(R, T,
+                                                            where="layered_per_layer_absorption")
+
+
 class TmmLayeredSolver:
     """A LayeredStackSolver backed by `tmm` -- the FIRST concrete implementation of the
     layered seam (a future RCWA backend is the second). Exact for unstructured/graded stacks;
@@ -172,7 +192,8 @@ class TmmLayeredSolver:
         R, T = float(res["R"]), float(res["T"])
         A = _check_energy_budget(R, T, where="TmmLayeredSolver")
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                             solve_time_s=0.0, t=t, T=T, A=A)
+                             solve_time_s=0.0, t=t, T=T, A=A,
+                             per_region_absorption=_per_layer_absorption(res))
 
 
 def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None):
