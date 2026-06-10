@@ -357,8 +357,49 @@ class ElectroAbsorptionModel:
     lineshape: str = "gaussian"           # "gaussian" | "voigt"
     Gamma0_J: float = 0.0                 # Lorentzian HWHM [J] (voigt only)
     Gamma_F_func: object = None           # F [V/m] -> additional Lorentzian HWHM [J] (voigt only)
+    # R18 many-body density corrections, applied as POST-SOLVE closed forms when fields['n'] is
+    # present (peak density, mirroring the peak-|E| convention; all default-off = byte-identical):
+    #   bandgap renormalization  dE_BGR = -bgr_coeff_J_m * n^(1/3)  (edge REDSHIFT; published GaAs
+    #     coefficient 2.4e-8 eV*cm = 3.8e-29 J*m -> ~24 meV at 1e24 m^-3 -- mind the cm/m trap),
+    #   static exciton screening E_b(n) = E_b0 / (1 + n/n_s)  (n_s = screening_density_m3): the
+    #     WEAKER binding blueshifts the line by E_b0 - E_b(n) and bleaches its oscillator strength
+    #     f ~ E_b^p (screening_exponent p: 2D excitons f ~ |phi(0)|^2 ~ E_b -> p = 1, the default;
+    #     3D -> p = 1.5),
+    #   Mott transition: the LINE amplitude is EXACTLY 0 at n >= mott_density_m3 (the exciton
+    #     unbinds; enable the Elliott continuum so absorption does not vanish unphysically).
+    # exciton_binding_J here MUST equal the QuantumWell's (the EAM cannot read it from the driver).
+    bgr_coeff_J_m: float = 0.0            # 0 = BGR off
+    screening_density_m3: float = 0.0     # 0 = screening off
+    exciton_binding_J: float = 0.0        # E_b0 [J]; required > 0 when screening is on
+    screening_exponent: float = 1.0       # f ~ E_b^p (2D: 1, 3D: 1.5)
+    mott_density_m3: float = 0.0          # 0 = no Mott cutoff
 
     _KK_MARGIN_SIGMA = 6.0     # required grid coverage beyond E_T on each side, in broadening_J
+
+    def _density_corrections(self, fields: dict):
+        """(dE_T_J, line_amplitude) from the R18 closed forms at the PEAK fields['n'] density.
+        dE_T = -C n^(1/3) + (E_b0 - E_b(n)) (BGR redshift + screening blueshift); amplitude =
+        (E_b(n)/E_b0)^p, EXACTLY 0 past the Mott density. (0.0, 1.0) when off/no density."""
+        n_field = (fields or {}).get("n")
+        if n_field is None or (self.bgr_coeff_J_m == 0.0 and self.screening_density_m3 == 0.0
+                               and self.mott_density_m3 == 0.0):
+            return 0.0, 1.0
+        n = float(np.max(np.real(np.asarray(n_field))))
+        if n < 0.0 or not np.isfinite(n):
+            raise ValueError("ElectroAbsorptionModel: fields['n'] must be finite and >= 0")
+        if (self.screening_density_m3 > 0.0 or self.mott_density_m3 > 0.0) \
+                and not (self.exciton_binding_J > 0.0):
+            raise ValueError("ElectroAbsorptionModel: exciton screening needs exciton_binding_J "
+                             "> 0 (set it to the QuantumWell's binding energy)")
+        d_e = -float(self.bgr_coeff_J_m) * n ** (1.0 / 3.0)
+        amp = 1.0
+        if self.screening_density_m3 > 0.0:
+            eb_ratio = 1.0 / (1.0 + n / float(self.screening_density_m3))
+            d_e += float(self.exciton_binding_J) * (1.0 - eb_ratio)   # weaker binding -> blueshift
+            amp = eb_ratio ** float(self.screening_exponent)
+        if self.mott_density_m3 > 0.0 and n >= self.mott_density_m3:
+            amp = 0.0                                                  # the exciton unbinds
+        return d_e, amp
 
     def _gamma_lor_J(self, F: float) -> float:
         """Total Lorentzian HWHM [J] at field F (0.0 on the gaussian path)."""
@@ -429,6 +470,12 @@ class ElectroAbsorptionModel:
         sF = self.qw.solve(F)
         ov0 = s0.overlap
         gam0, gamF = self._gamma_lor_J(0.0), self._gamma_lor_J(F)
+        # R18 many-body corrections (closed forms on the SOLVED states; same density for the
+        # F-on and F-off profiles, so the differential stays purely field-driven and the F = 0
+        # flat-band reduction eps == eps_bg is preserved at every density)
+        dE_n, amp_n = self._density_corrections(fields)
+        eT0, eTF = s0.E_transition_J + dE_n, sF.E_transition_J + dE_n
+        ovF_eff, ov0_eff = sF.overlap * amp_n, s0.overlap * amp_n
         lo, hi, n = self.e_grid_J
         grid = np.linspace(float(lo), float(hi), int(n))
         # the KK integral needs the grid to COVER the line several sigma beyond E_T on both sides
@@ -437,14 +484,13 @@ class ElectroAbsorptionModel:
         # with Gamma/sigma (6 sigma pure-Gaussian -> +10 HWHM of Lorentzian reach; ~1% wing
         # truncation at the cap -- R17):
         margin = self._KK_MARGIN_SIGMA * float(self.broadening_J) + 10.0 * max(gam0, gamF)
-        e_lo = min(s0.E_transition_J, sF.E_transition_J) - margin
-        e_hi = max(s0.E_transition_J, sF.E_transition_J) + margin
+        e_lo = min(eT0, eTF) - margin
+        e_hi = max(eT0, eTF) + margin
         if self.continuum_alpha0_per_m:
             # the band-to-band Elliott continuum onset is at E_T + continuum_binding_J (with a slow
             # s2d -> 1 tail above it), which can sit FAR above E_T + margin; require the grid to reach
             # it + a margin so the KK integral does not silently truncate the continuum (audit QC-2b).
-            e_hi = max(e_hi, max(s0.E_transition_J, sF.E_transition_J)
-                       + float(self.continuum_binding_J) + margin)
+            e_hi = max(e_hi, max(eT0, eTF) + float(self.continuum_binding_J) + margin)
         if not (grid[0] <= e_lo and e_hi <= grid[-1]):
             raise ValueError("e_grid_J must span at least {:.0f}*broadening_J below E_T(0)/E_T(F) and "
                              "(when the continuum is on) up to E_T + continuum_binding_J + {:.0f}*"
@@ -454,11 +500,11 @@ class ElectroAbsorptionModel:
         # analytic dkappa path (audit QC-3).
         if not (grid[0] <= E_ph <= grid[-1]):
             raise ValueError("the probe photon energy h c/lambda must lie within e_grid_J")
-        dalpha_grid = (self._alpha(grid, sF.E_transition_J, sF.overlap, ov0, gamF)
-                       - self._alpha(grid, s0.E_transition_J, s0.overlap, ov0, gam0))
+        dalpha_grid = (self._alpha(grid, eTF, ovF_eff, ov0, gamF)
+                       - self._alpha(grid, eT0, ov0_eff, ov0, gam0))
         dn = float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
-        dalpha_ph = float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, ov0, gamF)
-                          - self._alpha(E_ph, s0.E_transition_J, s0.overlap, ov0, gam0))
+        dalpha_ph = float(self._alpha(E_ph, eTF, ovF_eff, ov0, gamF)
+                          - self._alpha(E_ph, eT0, ov0_eff, ov0, gam0))
         dkappa = dalpha_ph * HBAR * C_LIGHT / (2.0 * E_ph)
         nb = np.sqrt(complex(self.eps_bg))
         kappa = nb.imag + dkappa
@@ -477,9 +523,10 @@ class ElectroAbsorptionModel:
         E_ph = _photon_energy_J(lambda_m)
         s0 = self.qw.solve(0.0)
         sF = self.qw.solve(F)
-        return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap,
+        dE_n, amp_n = self._density_corrections(fields)               # R18 (0, 1 when off)
+        return float(self._alpha(E_ph, sF.E_transition_J + dE_n, sF.overlap * amp_n, s0.overlap,
                                  self._gamma_lor_J(F))
-                     - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap,
+                     - self._alpha(E_ph, s0.E_transition_J + dE_n, s0.overlap * amp_n, s0.overlap,
                                    self._gamma_lor_J(0.0)))
 
 
