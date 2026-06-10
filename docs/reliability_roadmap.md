@@ -8,6 +8,28 @@ projections for qualification and design trade-offs.
 Companion to docs/physics_depth_roadmap.md (which uses R1-R34 ids for operating-physics depth). To
 avoid id collision, reliability items are numbered REL1..RELn.
 
+## STATUS (2026-06-09): the no-new-driver MVP is SHIPPED -- REL1, REL2, REL4, REL10
+
+dynameta/reliability/ (pure numpy/scipy, opt-in import, byte-identical-off) now implements:
+- REL1 TDDB (reliability/tddb.py): separable E-model + 1/E AHI + Weibull area scaling + calibrated
+  anchor + the oxide_stress_from_electrothermal adapter. validation/reliability_tddb.py: closed-form
+  acceleration ratios machine-exact; a Miner two-segment T(t) damage integral matches the piecewise
+  analytic to 1.6e-11; slopes in the literature band (1.30 decades/(MV/cm), Ea 0.7 eV).
+- REL2 NBTI/PBTI (reliability/bti.py): power-law drift + duty factor + time-to-spec + calibration.
+  validation/reliability_bti.py: log-slope == n machine; brentq numeric inversion 2.4e-15; a 50 mV /
+  1000 h / 125 degC anchor extrapolates to 61.7 mV at 10 y / 85 degC / 3.3 MV/cm (sane band).
+- REL4 de-doping -> ENZ drift (reliability/dedoping.py): Arrhenius carrier decay (lambda0 = 0 ->
+  n(t) == n0 EXACT) + the ENZ crossing tracked on the ACTUAL DrudeOptical (brentq).
+  validation/reliability_dedoping.py: crossing == the exact closed form to 4.5e-10; the sensitivity
+  -(1/2)(lambda/n)(1 - dln m/dln n) validated by finite difference INCLUDING the Kane reduction
+  (dln m/dln n = 0.19 at 9e26); 1% carrier loss = +6.1 nm ENZ red-shift.
+- REL10 MTTF umbrella (reliability/mttf.py): Arrhenius/field AFs, stress->use extrapolation,
+  competing-risks system MTTF, FIT, Weibull array weakest-link. validation/reliability_mttf.py:
+  MONTE-CARLO competing-risks and order-statistic cross-checks (1.0e-3 / 1.5e-3); the AF chain equals
+  the TDDB model's own ratio at machine (REL10 x REL1 integration gate).
+Remaining (driver-gated): REL3 (contact current), REL5 (absorbed-power map), REL6/7 (CTE/stress
+schema), REL8 (substrate current), REL9 (ambient inputs).
+
 Provenance: the mechanism set was produced by a web-grounded multi-agent sweep (one researcher +
 one adversarial verifier per mechanism), THEN hand-checked. The hand check overturned two propagated
 errors: (a) the TDDB field-acceleration coefficient had been "corrected" into a form that drives the
