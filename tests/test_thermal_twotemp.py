@@ -63,3 +63,26 @@ def test_twotemp_guards():
     with pytest.raises(ValueError):                            # lattice C_l missing
         solve_thermal_transient_twotemp_fem([_layer(rho_kg_m3=0.0)], period_x_m=1e-7,
                                             period_y_m=1e-7, t_end_s=1e-12, dt_s=1e-13)
+
+
+# ---- R21: k(T) Kirchhoff transform ------------------------------------------------------------
+
+def test_kirchhoff_constant_k_matches_linear_solver():
+    from dynameta.carriers.thermal_fem import solve_thermal_fem, solve_thermal_kirchhoff_fem
+    lays = [ThermalLayer("s", 100e-9, 5.0)]
+    rl = solve_thermal_fem(lays, period_x_m=1e-7, period_y_m=1e-7, flux_W_m2=1e8,
+                           T_sink_K=300.0, maxh_m=25e-9)
+    rk = solve_thermal_kirchhoff_fem(lays, lambda T: 5.0, period_x_m=1e-7, period_y_m=1e-7,
+                                     flux_W_m2=1e8, T_sink_K=300.0, maxh_m=25e-9)
+    assert abs(rk.T_at(5e-8, 5e-8, 9.9e-8) - rl.T_at(5e-8, 5e-8, 9.9e-8)) < 1e-9
+
+
+def test_kirchhoff_roundtrip_and_guards():
+    from dynameta.carriers.thermal_fem import (kirchhoff_theta, invert_kirchhoff,
+                                               solve_thermal_kirchhoff_fem)
+    k = lambda T: 148.0 * (T / 300.0) ** (-1.3)
+    assert abs(invert_kirchhoff(k, kirchhoff_theta(k, 600.0, 300.0), 300.0) - 600.0) < 1e-8
+    assert invert_kirchhoff(k, 0.0, 300.0) == 300.0
+    with pytest.raises(ValueError):
+        solve_thermal_kirchhoff_fem([ThermalLayer("s", 1e-7, 1.0)], lambda T: 0.0,
+                                    period_x_m=1e-7, period_y_m=1e-7)
