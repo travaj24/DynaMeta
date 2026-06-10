@@ -99,7 +99,8 @@ pushed; each item is byte-identical off. One-line ledger (validations in `valida
 
 - **numba + jax 2D-TE nonlinear kernels** (chi2/Raman/gain): equivalence vs numpy 7.1e-14 /
   2.7e-14 all-active; jax stays DIFFERENTIABLE through the nonlinear carry (grad vs FD 1.1e-3)
-  (`fdtd_nonlinear_backends.py`). GPU kernels (numba-cuda/cupy) stay guarded (no CUDA toolkit).
+  (`fdtd_nonlinear_backends.py`). GPU nonlinear kernels (numba-cuda/cupy) stay guarded
+  (not yet implemented; CUDA 13.1 + RTX 4070 Ti + cupy 14.0.1 ARE available -- 2026-06-10 check).
   Commit df5593d.
 - **3D chi2/Raman/gain** (numpy/cupy path; per-component chi2, ONE isotropic Raman coordinate on
   |E|^2, per-component gain): laterally-uniform 3D == the 2D kernel EXACTLY (rel 0.0)
@@ -118,8 +119,10 @@ pushed; each item is byte-identical off. One-line ledger (validations in `valida
   (`dg_dd_in_newton.py`). Oxide-interface hard wall (interface equation) + bipolar twin =
   follow-ons; the post-hoc closure remains the dead-layer tool. Commit cde280a.
 
-Still deferred (documented): GPU (numba-cuda/cupy) nonlinear kernels -- no CUDA toolkit on the
-dev box to validate; lasing/cavity gain dynamics; DG oxide-interface hard wall + bipolar; C(T).
+Still deferred (documented): GPU (numba-cuda/cupy) NONLINEAR kernels -- not yet implemented
+(2026-06-10: CUDA 13.1 toolkit + RTX 4070 Ti + cupy 14.0.1 verified PRESENT and the linear GPU
+paths hardware-validated, so this is now ordinary development, not environment-blocked);
+lasing/cavity gain dynamics; DG oxide-interface hard wall + bipolar; C(T).
 
 ---
 

@@ -31,7 +31,7 @@ ADE, oblique Bloch incidence (2D s/p + 3D, complex-envelope) with BOTH fused num
 full-vector 3D -- byte-exact, ~5-8x faster) AND differentiable JAX kernels (2D-TE, 2D-TM, full-vector 3D
 -- byte-exact, jax.grad flows through the oblique scan for inverse-design-at-angle), plus a STRUCTURED
 (laterally-patterned) 3D diagonal-tensor solve (solve_fdtd_3d_mo `lateral_tensor=`, validated vs grcwa
-per-component). STILL DEFERRED: only a GPU (CUDA/Taichi) fast kernel (no CUDA toolkit here).
+per-component). STILL DEFERRED: GPU NONLINEAR kernels (the linear numba-cuda path is hardware-validated).
 """
 
 from __future__ import annotations
