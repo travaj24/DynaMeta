@@ -11,9 +11,13 @@ Pluggable Stage-1 DC solve methods.
              coupling that makes coupled Newton diverge on degenerate gated
              accumulation. Variables are frozen by DELETING their equations
              (via eq_registry) for one sub-solve and re-adding them after.
-             EXPERIMENTAL: it has no validation coverage and is NOT yet known to
-             converge the gated-accumulation case it was built for (see
-             physics_drift_diffusion KNOWN LIMITATION); "newton" is the default.
+             VALIDATED on unipolar ohmic transport: validation/gummel_vs_newton.py
+             shows the Gummel fixed point equals the coupled-Newton solution to
+             machine precision (fields and terminal current) and matches the
+             analytic ohmic limit. STILL EXPERIMENTAL for the degenerate
+             gated-ACCUMULATION case it was originally built for -- convergence
+             there remains unproven (see physics_drift_diffusion KNOWN
+             LIMITATION); "newton" stays the default.
 
 Add new methods by extending solve_dc's dispatch.
 """
@@ -50,9 +54,10 @@ def solve_dc(device: str, *, method: str = "newton",
         return
     if method == "gummel":
         warnings.warn(
-            "solve_dc(method='gummel') is EXPERIMENTAL: no validation coverage and not yet "
-            "known to converge the gated-accumulation case it targets. Use method='newton' "
-            "(default) or the equilibrium physics mode.", stacklevel=2)
+            "solve_dc(method='gummel'): validated against Newton on unipolar ohmic transport "
+            "(validation/gummel_vs_newton.py), but EXPERIMENTAL for the degenerate "
+            "gated-accumulation case it targets (convergence unproven there). "
+            "method='newton' (default) remains the supported general route.", stacklevel=2)
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):
