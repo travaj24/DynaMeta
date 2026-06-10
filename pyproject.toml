@@ -28,6 +28,7 @@ io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps 
 plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
+lumenairy = ["lumenairy>=5.14.1"]                          # RCWA/PMM backends (optics.lumenairy_bridge)
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
