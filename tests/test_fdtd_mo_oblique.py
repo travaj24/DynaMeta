@@ -102,6 +102,9 @@ def test_oblique_tm_dispatch_routes_to_requested_backend(monkeypatch):
     # match passed TAUTOLOGICALLY (jax==numpy because both were numpy). Patch the fast/diff kernels to a
     # sentinel and assert solve_fdtd_2d_oblique actually reaches them for pol='p'.
     import dynameta.optics.fdtd_nd as F
+    # the oblique dispatcher (_run_oblique) resolves kernels via ITS module globals, so the
+    # patch must land on the defining submodule, not the package namespace
+    import dynameta.optics.fdtd_nd.oblique2d as FK
 
     class _Reached(Exception):
         pass
@@ -113,11 +116,11 @@ def test_oblique_tm_dispatch_routes_to_requested_backend(monkeypatch):
     kw = dict(period_x_m=300e-9, angle_deg=20.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=6,
               nx=4, pol="p")
     if F._HAVE_NUMBA:
-        monkeypatch.setattr(F, "_tm2d_oblique_numba", _boom)
+        monkeypatch.setattr(FK, "_tm2d_oblique_numba", _boom)
         with pytest.raises(_Reached):
             solve_fdtd_2d_oblique(ol, backend="numba", **kw)
     if F._have_jax():
-        monkeypatch.setattr(F, "_run_2d_tm_oblique_jax", _boom)
+        monkeypatch.setattr(FK, "_run_2d_tm_oblique_jax", _boom)
         with pytest.raises(_Reached):
             solve_fdtd_2d_oblique(ol, backend="jax", **kw)
 
