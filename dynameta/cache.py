@@ -48,17 +48,24 @@ def _design_fingerprint(design) -> bytes:
     parts = [str(getattr(design, "name", "")), str(design.unit_cell.period_x_m),
              str(design.unit_cell.period_y_m)]
     for L in design.stack.layers:
-        parts += [L.name, repr(float(L.thickness_m)), str(getattr(L, "background_material", "")),
-                  str(len(getattr(L, "inclusions", []) or []))]
+        parts += [L.name, repr(float(L.thickness_m)), str(getattr(L, "background_material", ""))]
+        # per-inclusion SHAPE/material/priority -- hashing only the COUNT let a radius/size change
+        # silently serve the wrong cached result when eps_by_region was uniform (audit-v2 follow-up;
+        # the patterning lives in the GEOMETRY, not in the eps values, so eps cannot save us).
+        for inc in (getattr(L, "inclusions", []) or []):
+            parts += [repr(getattr(inc, "shape", "")), str(getattr(inc, "material", "")),
+                      str(getattr(inc, "priority", 0))]
+    for ft in (getattr(design.stack, "features", []) or []):
+        parts += ["feat", repr(getattr(ft, "shape", "")), str(getattr(ft, "material", "")),
+                  repr(float(getattr(ft, "z_lo_m", 0.0))), repr(float(getattr(ft, "z_hi_m", 0.0)))]
     parts += [str(design.stack.superstrate_material), str(design.stack.substrate_material)]
     # the optical INCIDENCE spec changes R/T but NOT the eps grid -- it MUST be in the key, else an
     # angle/polarization/side sweep silently serves the cached result for a different angle (audit HIGH).
-    opt = getattr(design, "optical", None)
-    parts += ["opt", str(getattr(opt, "polarization", "")), str(getattr(opt, "incidence_angle_deg", 0.0)),
-              str(getattr(opt, "azimuth_deg", 0.0)), str(getattr(opt, "incidence_side", ""))]
-    # the FEM polynomial order changes the FEM result for the same eps/geometry.
-    m3 = getattr(design, "mesh_3d", None)
-    parts += ["fem", str(getattr(m3, "fem_order", ""))]
+    # Hash the WHOLE spec reprs (deterministic dataclass reprs): any incidence knob or FEM mesh-sizing
+    # knob (maxh/buffers/PML/order) changes the solve for the same eps. (mesh_2d is carrier-side only:
+    # it cannot change the optical answer GIVEN eps_by_region, which is already a key input.)
+    parts += ["opt", repr(getattr(design, "optical", None)),
+              "mesh3", repr(getattr(design, "mesh_3d", None))]
     return hashlib.sha1("|".join(parts).encode("utf-8")).digest()
 
 
@@ -109,8 +116,8 @@ class OpticalSolverCache:
 
     def flush(self) -> str:
         """Write the in-memory cache to disk (HDF5/Zarr)."""
-        return save_arrays(self.path, self._mem, {"schema": 1, "tag": self.tag, "layout": list(_VEC)},
-                           fmt=self.fmt)
+        return save_arrays(self.path, self._mem, {"schema": 2, "tag": self.tag, "layout": list(_VEC)},
+                           fmt=self.fmt)                     # schema 2: stronger design fingerprint
 
     def stats(self) -> dict:
         tot = self.hits + self.misses
@@ -133,8 +140,12 @@ class OpticalSolverCache:
         opt = (lambda x: None if np.isnan(x) else float(x))
         t = None if np.isnan(d["t_re"]) else complex(d["t_re"], d["t_im"])
         r = None if np.isnan(d["r_re"]) else complex(d["r_re"], d["r_im"])   # mirror t (None round-trips, not nan+nanj)
+        # round-trip the ORIGINAL solve time (the field documents the SOLVE cost, not retrieval cost;
+        # hardcoding 0.0 here silently discarded it -- audit cache-1, flagged two rounds running).
+        st = d["solve_time_s"]
         return OpticalResult(r=r, R=float(d["R"]), phase_deg=float(d["phase_deg"]),
-                             solve_time_s=0.0, t=t, T=opt(d["T"]), A=opt(d["A"]),
+                             solve_time_s=(0.0 if np.isnan(st) else float(st)), t=t,
+                             T=opt(d["T"]), A=opt(d["A"]),
                              A_independent=opt(d["A_independent"]), R_flux=opt(d["R_flux"]),
                              T_flux=opt(d["T_flux"]))
 

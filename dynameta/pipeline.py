@@ -81,8 +81,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     'director_angle_rad': ..., 'crystalline_fraction': ..., 'magnetization': ...}. Either a static
     dict (same for every bias) or a CALLABLE ``fn(bias_point) -> dict`` (the usual case: the applied
     field/temperature changes with bias -- e.g. run ``carriers.electrostatics_fem.solve_electrostatics_fem``
-    / ``thermal_fem.solve_thermal_fem`` per bias and thread the resulting E / T here). None (the
-    default) leaves the carrier-only path byte-identical.
+    / ``thermal_fem.solve_thermal_fem`` per bias and thread the resulting E / T here). CONTRACT: a
+    callable must return a dict with the SAME key set at every bias (only the VALUES vary) -- a key
+    that appears or disappears mid-sweep would silently switch which effect terms are driven (a
+    RuntimeWarning fires on drift). None (the default) leaves the carrier-only path byte-identical.
     """
     if not sweep.bias_points or not len(sweep.wavelengths_nm):     # no silent empty-sweep passthrough
         raise ValueError("run_pipeline: sweep must have at least one bias point and one wavelength "
@@ -134,11 +136,22 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             print("[optics]   {} lam={:.0f}nm  R={:.4f}  {}  phase={:+.1f}  ({:.1f}s)".format(
                 label, lam_nm, res.R, tstr, res.phase_deg, res.solve_time_s), flush=True)
 
+    ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
         cf = fields[bp.label]
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
         # dict is reused; None keeps the carrier-only path byte-identical)
         ef = extra_fields(bp) if callable(extra_fields) else extra_fields
+        if callable(extra_fields) and ef is not None:
+            keys = frozenset(ef.keys())
+            if ef_keys0 is None:
+                ef_keys0 = keys
+            elif keys != ef_keys0:
+                import warnings
+                warnings.warn("run_pipeline: extra_fields callable changed its key set at bias '{}' "
+                              "({} vs {}) -- the driven effect terms silently differ across the sweep."
+                              .format(bp.label, sorted(keys), sorted(ef_keys0)), RuntimeWarning,
+                              stacklevel=2)
         if sweep_aware and len(sweep.wavelengths_nm) > 1:
             # FAST PATH: ONE broadband solve for THIS bias serves the whole wavelength list. Hand the solver
             # an eps-assembler closure (so it can sample the bias's per-layer dispersion across the band).
