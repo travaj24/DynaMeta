@@ -108,6 +108,36 @@ def main():
               lam_peak * 1e9, lam12 * 1e9, rel_pos, passive, xy_equal, no_xx_peak, in_band,
               "PASS" if g3 else "FAIL"), flush=True)
 
+    # ---- GATE 4: integrated LINE STRENGTH (audit-v2: gates 1-3 checked reduction/sum-rule/position
+    # but never the strength normalization). For the Lorentzian form chi = S/(eps0 (w0^2-w^2-i w g))
+    # the EXACT sum rule  integral_0^inf w * Im(chi) dw = (pi/2) S / eps0  holds for ANY g, so
+    # integrating the MODEL OUTPUT Im(eps_zz - eps_xx) over frequency must recover (pi/2) sum S_ij/eps0
+    # computed independently from the SubbandResult ingredients. Catches any wrong prefactor in S_ij.
+    w12 = (E3[1] - E3[0]) / HBAR
+    wgrid = np.linspace(1e12, 25.0 * w12, 60001)                      # tail correction ~ g/W ~ 3e-4
+    lam_w = 2.0 * np.pi * C_LIGHT / wgrid
+    im_chi = np.array([(model.eps({"subband": res3}, l)[2, 2]
+                        - model.eps({"subband": res3}, l)[0, 0]).imag for l in lam_w])
+    integral = float(np.trapezoid(wgrid * im_chi, wgrid)) if hasattr(np, "trapezoid") else \
+        float(np.trapz(wgrid * im_chi, wgrid))
+    Leff = float(zi3[-1] - zi3[0])
+    occ3 = ns3 > 0.0                                   # mirror the model: BOTH bands must be occupied
+    S_sum = 0.0
+    for a in range(len(ns3)):
+        for b in range(a + 1, len(ns3)):
+            if not (occ3[a] and occ3[b]):
+                continue
+            z_ab = trapz(psi3[:, a] * zi3 * psi3[:, b], zi3)
+            N_ab = max((ns3[a] - ns3[b]) / Leff, 0.0)
+            S_sum += N_ab * Q_E * Q_E * (z_ab * z_ab) * (2.0 * (E3[b] - E3[a]) / HBAR) / HBAR
+    expect = (np.pi / 2.0) * S_sum / EPS0
+    rel4 = abs(integral - expect) / max(abs(expect), 1e-300)
+    g4 = bool(rel4 < 1e-2)
+    ok = ok and g4
+    print("[is] GATE 4 (integrated line strength): int w*Im(chi_zz) dw = {:.6e} vs (pi/2) S/eps0 = "
+          "{:.6e} (rel {:.2e}) -> {}".format(integral, expect, rel4, "PASS" if g4 else "FAIL"),
+          flush=True)
+
     print("[is] *** INTERSUBBAND eps_zz: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

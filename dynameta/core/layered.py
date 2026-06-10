@@ -145,6 +145,6 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     # structured scalar: one eps_cell (Ny,Nx)->(Nx,Ny) per native z-slice (n_slices resampling NA)
     slabs = []
     for k in range(z_m.size - 1):
-        cell = np.transpose(0.5 * (v[k] + v[k + 1]))                 # (Nx, Ny)
+        cell = np.transpose(0.5 * (v[k] + v[k + 1]), (1, 0))         # (Nx, Ny) -- explicit, never bare T
         slabs.append(LayeredSlab(float(z_m[k + 1] - z_m[k]), eps_cell=cell))
     return slabs
