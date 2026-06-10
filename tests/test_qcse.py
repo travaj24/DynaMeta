@@ -238,3 +238,35 @@ def test_voigt_guards():
         ElectroAbsorptionModel(lineshape="voigt", Gamma_F_func=lambda f: -1e-21, **kw).eps(F, lam)
     with pytest.raises(ValueError):                      # unknown lineshape
         ElectroAbsorptionModel(lineshape="lorentz", **kw).eps(F, lam)
+
+
+# ---- R18: BGR + exciton screening / Mott ------------------------------------------------------
+
+def test_density_corrections_off_and_closed_forms():
+    qw = _gaas()
+    ET0 = qw.solve(0.0).E_transition_J
+    sig = 0.005 * Q
+    kw = dict(qw=qw, eps_bg=12.25 + 0j, alpha0_per_m=1e6, broadening_J=sig,
+              e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
+    off = ElectroAbsorptionModel(**kw)
+    assert off._density_corrections({"n": 1e26}) == (0.0, 1.0)        # all fields zero -> off
+    bgr = ElectroAbsorptionModel(bgr_coeff_J_m=3.84e-29, **kw)
+    dE, amp = bgr._density_corrections({"n": 1e24})
+    assert dE == pytest.approx(-3.84e-29 * 1e8, rel=1e-12) and amp == 1.0
+    scr = ElectroAbsorptionModel(screening_density_m3=6e27, exciton_binding_J=0.010 * Q,
+                                 mott_density_m3=8e27, **kw)
+    dE2, amp2 = scr._density_corrections({"n": 6e27})
+    assert amp2 == pytest.approx(0.5, rel=1e-14)                      # E_b halves at n = n_s
+    assert dE2 == pytest.approx(0.005 * Q, rel=1e-12)                 # blueshift E_b0/2
+    assert scr._density_corrections({"n": 9e27})[1] == 0.0            # Mott: exactly bleached
+
+
+def test_density_guards():
+    qw = _gaas()
+    ET0 = qw.solve(0.0).E_transition_J
+    kw = dict(qw=qw, eps_bg=12.25 + 0j, alpha0_per_m=1e6, broadening_J=0.005 * Q,
+              e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
+    with pytest.raises(ValueError):                                   # screening without E_b0
+        ElectroAbsorptionModel(screening_density_m3=1e27, **kw)._density_corrections({"n": 1e26})
+    with pytest.raises(ValueError):                                   # negative density
+        ElectroAbsorptionModel(bgr_coeff_J_m=1e-29, **kw)._density_corrections({"n": -1.0})
