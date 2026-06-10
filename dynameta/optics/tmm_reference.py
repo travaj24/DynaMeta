@@ -198,10 +198,14 @@ class TmmLayeredSolver:
 
 def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None):
     """Build a LayeredStack from a Design (+ optionally the bridge's eps_by_region for a graded
-    carrier region). Uniform layers -> scalar slabs (material eps at lambda); a semiconductor
-    layer whose eps_by_region entry is a gridded EpsField -> sliced via slice_eps_field. A layer
-    with material inclusions raises (laterally structured -> FEM/RCWA, not this extractor).
-    Slabs are ordered superstrate-side first (the Stack lists bottom->top, so reversed)."""
+    carrier region). Uniform layers -> scalar slabs; a layer whose eps_by_region entry is a
+    gridded EpsField -> sliced via slice_eps_field; a UNIFORM eps_by_region entry (an
+    effect-modulated or uniform-carrier eps) -> one slab at that value (it used to fall through
+    to the raw material eps, silently dropping uniform modulation -- the PCM/LC/thermo effects
+    path). A tensor entry raises (the scalar TMM cannot represent anisotropy -- use the FEM); a
+    layer with material inclusions raises (laterally structured -> FEM/RCWA, not this
+    extractor). Slabs are ordered superstrate-side first (the Stack lists bottom->top, so
+    reversed)."""
     from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
     slabs_top_down = []
     for L in reversed(design.stack.layers):          # superstrate side first
@@ -209,8 +213,14 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
             raise ValueError("layered_stack_from_design: layer '{}' has inclusions "
                              "(laterally structured); use the FEM solver or RCWA.".format(L.name))
         ef = (eps_by_region or {}).get(L.name)
+        if ef is not None and getattr(ef, "is_tensor", False):
+            raise ValueError("layered_stack_from_design: layer '{}' carries a TENSOR eps "
+                             "(anisotropic effect); the scalar TMM cannot represent it -- use "
+                             "the FEM solver.".format(L.name))
         if ef is not None and not getattr(ef, "is_uniform", True):
             slabs_top_down.extend(reversed(slice_eps_field(ef, 1.0 / S, n_slices=n_slices)))
+        elif ef is not None:
+            slabs_top_down.append(LayeredSlab(float(L.thickness_m), eps=complex(ef.scalar)))
         else:
             eps = complex(design.materials.get(L.background_material).eps(lambda_m))
             slabs_top_down.append(LayeredSlab(float(L.thickness_m), eps=eps))
