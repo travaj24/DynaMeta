@@ -120,3 +120,28 @@ def test_mechanical_props_on_material_schema():
     m = Material("oxide2", ConstantOptical(4.0 + 0j), mechanical=mech)
     assert m.mechanical.E_Pa == 70e9 and np.isfinite(m.mechanical.sigma_crit_Pa)
     assert biaxial_stress_Pa(m.mechanical, 2.6e-6, 100.0) != 0.0   # consumable by the REL6 functions
+
+
+# ---- R16: gate-oxide tunneling leakage --------------------------------------------------------
+
+def test_leakage_fn_linearity_and_anchor():
+    from dynameta.reliability.leakage import fn_coefficients, fowler_nordheim_current
+    a_fn, b_fn = fn_coefficients(0.42, 3.1)
+    assert 2.3e10 <= b_fn <= 2.6e10                      # SiO2 literature band [V/m]
+    E1, E2 = 6e8, 1.2e9
+    r = fowler_nordheim_current(E2) / fowler_nordheim_current(E1)
+    assert r == pytest.approx((E2 / E1) ** 2 * np.exp(-b_fn * (1 / E2 - 1 / E1)), rel=1e-12)
+    assert fowler_nordheim_current(0.0) == 0.0
+
+
+def test_leakage_dt_joins_fn_exactly_and_off_switch():
+    from dynameta.reliability.leakage import (OxideLeakageParams, direct_tunneling_current,
+                                              fowler_nordheim_current)
+    t = 3e-9
+    assert direct_tunneling_current(3.1, t) == fowler_nordheim_current(3.1 / t)
+    off = OxideLeakageParams(t_ox_m=t)
+    assert off.leakage_J_A_m2(2.0) == 0.0
+    on = OxideLeakageParams(t_ox_m=t, enabled=True)
+    assert on.joule_W_m3(2.0) == on.leakage_J_A_m2(2.0) * 2.0 / t > 0.0
+    with pytest.raises(ValueError):
+        OxideLeakageParams(t_ox_m=0.0)
