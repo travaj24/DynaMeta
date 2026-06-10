@@ -3,11 +3,15 @@ PURE-NUMPY/scipy POST-PROCESSOR on quantities the operating solve already produc
 per-layer T, the Drude n->eps map) -- nothing imports the heavy solvers, nothing changes any existing
 path (byte-identical-off: the package is opt-in by import, like carriers.thermal_fem).
 
-Shipped (the no-new-driver MVP): REL1 gate-oxide TDDB (tddb), REL2 NBTI/PBTI bias-temperature
-instability (bti), REL4 ITO thermal de-doping -> ENZ drift (dedoping), REL10 acceleration factors +
-system-MTTF aggregation (mttf). Deferred pending new drivers: REL3 electromigration (contact current),
-REL5 optical damage (per-region absorbed-power map), REL6/REL7 thermo-mechanical (CTE/stress schema),
-REL8 HCI (substrate current), REL9 corrosion (ambient inputs).
+The FULL REL1-REL10 set is shipped: REL1 TDDB (tddb), REL2 NBTI/PBTI (bti), REL3 electromigration
+(em -- drive current is an EXTERNAL design parameter per the roadmap MVP path; the DEVSIM contact
+extractor is the follow-on), REL4 ITO de-doping -> ENZ drift (dedoping), REL5 optical damage / LIDT +
+CW thermal runaway (lidt -- a lumped thermal node + absorbed(T) callable; the per-region absorbed-
+power map is the follow-on driver), REL6 thermal-cycling fatigue (fatigue -- ductile Coffin-Manson vs
+brittle Weibull, with the reliability-LOCAL MechanicalProps schema), REL7 stress/thermal-gradient
+migration (stress_migration -- Korhonen PDE + Soret flux), REL8 HCI (hci -- I_sub external),
+REL9 corrosion/oxidation/humidity (corrosion -- Deal-Grove + Peck; ambient is external), and
+REL10 acceleration factors + system MTTF (mttf).
 
 SI units; cp1252/ASCII; every model ships a reduces-to-closed-form gate AND an independent reference
 gate (validation/reliability_*.py).
@@ -20,6 +24,19 @@ from dynameta.reliability.dedoping import (DedopingParams, carrier_decay, enz_wa
                                            enz_drift_m)
 from dynameta.reliability.mttf import (arrhenius_af, field_af, mttf_use_from_stress, system_mttf,
                                        fit_per_1e9_hours, weibull_earliest_t63)
+from dynameta.reliability.em import (EmParams, black_mttf_s, blech_immortal, current_density_A_m2,
+                                     miner_time_to_failure_s)
+from dynameta.reliability.lidt import (ThermalNode, lidt_fluence_J_m2, cw_steady_temperature_K,
+                                       cw_critical_intensity_W_m2, cw_transient_K,
+                                       stack_absorbed_of_T)
+from dynameta.reliability.fatigue import (MechanicalProps, biaxial_stress_Pa, coffin_manson_nf,
+                                          plastic_strain_range, norris_landzberg_af,
+                                          brittle_survival, cycles_to_failure)
+from dynameta.reliability.stress_migration import (korhonen_kappa_m2_s, korhonen_relax,
+                                                   void_nucleates, soret_flux_per_m2_s)
+from dynameta.reliability.hci import trap_generation_rate_per_m2_s, hci_time_to_failure_s
+from dynameta.reliability.corrosion import (deal_grove_thickness_m, deal_grove_rate_arrhenius,
+                                            peck_time_to_failure_s, peck_af)
 
 __all__ = [
     "TddbParams", "tbd_e_model", "tbd_one_over_e", "weibull_area_scale",
@@ -28,4 +45,12 @@ __all__ = [
     "DedopingParams", "carrier_decay", "enz_wavelength_m", "enz_drift_m",
     "arrhenius_af", "field_af", "mttf_use_from_stress", "system_mttf", "fit_per_1e9_hours",
     "weibull_earliest_t63",
+    "EmParams", "black_mttf_s", "blech_immortal", "current_density_A_m2", "miner_time_to_failure_s",
+    "ThermalNode", "lidt_fluence_J_m2", "cw_steady_temperature_K", "cw_critical_intensity_W_m2",
+    "cw_transient_K", "stack_absorbed_of_T",
+    "MechanicalProps", "biaxial_stress_Pa", "coffin_manson_nf", "plastic_strain_range",
+    "norris_landzberg_af", "brittle_survival", "cycles_to_failure",
+    "korhonen_kappa_m2_s", "korhonen_relax", "void_nucleates", "soret_flux_per_m2_s",
+    "trap_generation_rate_per_m2_s", "hci_time_to_failure_s",
+    "deal_grove_thickness_m", "deal_grove_rate_arrhenius", "peck_time_to_failure_s", "peck_af",
 ]

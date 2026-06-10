@@ -8,7 +8,38 @@ projections for qualification and design trade-offs.
 Companion to docs/physics_depth_roadmap.md (which uses R1-R34 ids for operating-physics depth). To
 avoid id collision, reliability items are numbered REL1..RELn.
 
-## STATUS (2026-06-09): the no-new-driver MVP is SHIPPED -- REL1, REL2, REL4, REL10
+## STATUS (2026-06-09, second update): the FULL REL1-REL10 axis is SHIPPED
+
+The remaining six items landed via the lightweight-driver MVP paths this roadmap blessed (external
+parameters where the operating solve does not yet produce the quantity; a reliability-LOCAL
+mechanical schema; a lumped thermal node for runaway):
+- REL3 electromigration (reliability/em.py): Black + Blech immortality + geometry-scaled calibrated
+  prefactor + Miner duty-cycle accumulation; drive current I is an EXTERNAL design parameter (the
+  DEVSIM contact-current extractor stays the follow-on driver). validation/reliability_em.py: ratio
+  closed forms machine; Miner two-segment J(t) vs piecewise analytic 1e-3; Blech design demo.
+- REL5 optical damage / runaway (reliability/lidt.py): F_th ~ sqrt(tau) LIDT scaling + a lumped
+  CW thermal node with absorbed(T) callable (built from the ACTUAL layered TMM + the T-dependent
+  MatthiessenGamma phonon channel via stack_absorbed_of_T) + bifurcation detection.
+  validation/reliability_lidt.py: constant-A steady/transient closed forms machine; the LINEAR-
+  absorption runaway threshold matches the EXACT analytic bifurcation (incl. the T_max truncation
+  closed form) to 1e-3; the real ENZ stack absorbed(T) gated to [0,1]. The per-region absorbed-power
+  MAP on the optics result stays the follow-on driver.
+- REL6 thermal-cycling fatigue (reliability/fatigue.py): MechanicalProps (reliability-local {E, nu,
+  CTE, sigma_crit} -- folding into materials/ is the follow-on), biaxial mismatch stress, DUCTILE
+  Coffin-Manson Nf = C d_eps^(-1/c), Norris-Landzberg AF, BRITTLE Weibull/critical-stress split.
+  validation/reliability_fatigue.py: Cu-on-Si stress in the literature band; log-slope == -1/c; the
+  brittle ITO cracks at cycle 0 where ductile Cu lives 1.5e3 cycles.
+- REL7 stress migration (reliability/stress_migration.py): Korhonen kappa + method-of-lines PDE +
+  void threshold + Soret flux. validation/reliability_stressmig.py: the constant-kappa PDE matches
+  the exact erf(x/2 sqrt(kappa t)) to 1e-3; Arrhenius-with-1/T-prefactor ratio machine.
+- REL8 HCI (reliability/hci.py): lucky-electron t ~ (I_sub/W)^(-2/3) with the q-corrected trap rate
+  and the documented NEGATIVE-Ea allowance (worse cold); I_sub external (DEVSIM impact ionization is
+  the follow-on). validation/reliability_hci.py.
+- REL9 corrosion (reliability/corrosion.py): Deal-Grove closed form (+ Arrhenius rates) + Peck
+  humidity life; ambient RH external. validation/reliability_corrosion.py: closed form vs the rate
+  ODE 1e-8 + linear/parabolic limits + the 85/85 acceleration rationale.
+
+## STATUS (2026-06-09, first update): the no-new-driver MVP is SHIPPED -- REL1, REL2, REL4, REL10
 
 dynameta/reliability/ (pure numpy/scipy, opt-in import, byte-identical-off) now implements:
 - REL1 TDDB (reliability/tddb.py): separable E-model + 1/E AHI + Weibull area scaling + calibrated
