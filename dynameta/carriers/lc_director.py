@@ -48,6 +48,7 @@ __all__ = [
     "compute_lc_geometry", "solve_lc_field_profile", "eps_along_field",
     "flexo_p_along_field", "flexo_direct_torque",
     "n_local_from_theta", "n_eff_from_theta_profile",
+    "theta_plate_from_field", "theta_field_from_plate",
     "director_to_extra_fields", "reduce_director",
     "LCChiralResult", "chiral_director_profile_bvp",
     "cholesteric_q0", "gooch_tarry_transmission", "mauguin_number",
@@ -393,11 +394,30 @@ class LCStaticResult:
     message: str = ""
 
 
+def theta_plate_from_field(theta_field_rad):
+    """THE canonical convention bridge, FIELD-AXIS -> PLATE-PLANE: theta_plate = pi/2 - theta_field.
+
+    Two tilt conventions exist in the LC suite (see the banner above eps_along_field):
+    FIELD-AXIS (0 = homeotropic; the BVP/two-constant solvers, ported verbatim from the external
+    nematic solver) and PLATE-PLANE (0 = planar; the legacy 1-constant director_profile and the
+    optical LiquidCrystalModel's 'director_angle_rad'). ALL conversions must go through this pair
+    of named functions so the pi/2 flip happens exactly once and is greppable -- do not write
+    ad-hoc pi/2 arithmetic at call sites."""
+    return 0.5 * np.pi - np.asarray(theta_field_rad, dtype=float)
+
+
+def theta_field_from_plate(theta_plate_rad):
+    """The inverse canonical bridge, PLATE-PLANE -> FIELD-AXIS (see theta_plate_from_field).
+    The map is an involution: theta_field = pi/2 - theta_plate."""
+    return 0.5 * np.pi - np.asarray(theta_plate_rad, dtype=float)
+
+
 def director_to_extra_fields(theta_field_rad) -> dict:
     """Bridge a FIELD-AXIS director tilt theta(z) to the plate-plane 'director_angle_rad' that the
-    optical LiquidCrystalModel (core/effects) consumes: theta_optic = pi/2 - theta_field. Returns
-    {'director_angle_rad': ...} ready to drop into the optics field bundle."""
-    return {"director_angle_rad": 0.5 * np.pi - np.asarray(theta_field_rad, dtype=float)}
+    optical LiquidCrystalModel (core/effects) consumes (via theta_plate_from_field, the canonical
+    convention bridge). Returns {'director_angle_rad': ...} ready to drop into the optics field
+    bundle."""
+    return {"director_angle_rad": theta_plate_from_field(theta_field_rad)}
 
 
 def reduce_director(theta_zt_rad, *, t_index: int = -1, reduce: str = "profile") -> dict:
