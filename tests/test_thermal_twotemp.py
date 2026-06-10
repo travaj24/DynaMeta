@@ -86,3 +86,29 @@ def test_kirchhoff_roundtrip_and_guards():
     with pytest.raises(ValueError):
         solve_thermal_kirchhoff_fem([ThermalLayer("s", 1e-7, 1.0)], lambda T: 0.0,
                                     period_x_m=1e-7, period_y_m=1e-7)
+
+
+# ---- R21 follow-on: per-layer k(T) exact 1D + transient k(T(x)) -------------------------------
+
+def test_kirchhoff_layered_1d_constant_k_exact():
+    from dynameta.carriers.thermal import steady_layered_temperature
+    from dynameta.carriers.thermal_fem import solve_thermal_kirchhoff_layered_1d
+    lays = [ThermalLayer("a", 100e-9, 140.0), ThermalLayer("b", 60e-9, 1.4)]
+    r = solve_thermal_kirchhoff_layered_1d(lays, {"a": lambda T: 140.0, "b": lambda T: 1.4},
+                                           flux_W_m2=1e8)
+    ref = steady_layered_temperature([140.0, 1.4], [100e-9, 60e-9], 1e8, 300.0)
+    mids = 0.5 * (r.interface_z_m[:-1] + r.interface_z_m[1:])
+    assert max(abs(r.T_at_z(z) - t) for z, t in zip(mids, ref)) < 1e-9
+
+
+def test_kirchhoff_layered_1d_guards_and_continuity():
+    from dynameta.carriers.thermal_fem import solve_thermal_kirchhoff_layered_1d
+    lays = [ThermalLayer("a", 100e-9, 8.0), ThermalLayer("b", 60e-9, 2.0)]
+    k_by = {"a": lambda T: 8.0 * (300.0 / T) ** 1.3, "b": lambda T: 2.0}
+    r = solve_thermal_kirchhoff_layered_1d(lays, k_by, flux_W_m2=5e8)
+    assert r.interface_T_K[0] == 300.0
+    assert np.all(np.diff(r.interface_T_K) > 0)          # heating toward the top
+    # T continuity at the interface from both sides
+    assert abs(r.T_at_z(100e-9 - 1e-13) - r.T_at_z(100e-9 + 1e-13)) < 1e-6
+    with pytest.raises(ValueError):
+        solve_thermal_kirchhoff_layered_1d(lays, {"a": lambda T: 8.0})   # missing coverage
