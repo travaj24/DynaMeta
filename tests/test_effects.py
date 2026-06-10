@@ -280,3 +280,35 @@ def test_vector_mo_x_axis_structure_and_guards():
         vm.eps({}, 1550e-9)                                  # m_vector required
     with pytest.raises(ValueError):
         vm.eps({"m_vector": np.array([1.0, 0.0])}, 1550e-9)  # trailing axis must be 3
+
+
+# ---- LLG macrospin (R11) + the R13 seam ------------------------------------------------------
+
+def test_llg_precession_and_seam_into_vector_mo():
+    from dynameta.constants import MU0
+    from dynameta.carriers.llg import LLGMacrospin, GAMMA_ELECTRON_RAD_ST
+    from dynameta.core.effects import VectorMagnetoOpticModel
+    H0 = 1.0e4
+    llg = LLGMacrospin(Ms_A_m=1e5, alpha=0.0, H_applied_A_m=lambda t: np.array([0.0, 0.0, H0]))
+    w = GAMMA_ELECTRON_RAD_ST * MU0 * H0
+    t = np.linspace(0.0, 2 * np.pi / w, 101)               # one period
+    r = llg.simulate(t, m0=[1.0, 0.0, 0.0])
+    assert np.max(np.abs(np.linalg.norm(r.m_t, axis=1) - 1.0)) < 1e-12   # unit sphere conserved
+    assert r.m_t[-1, 0] == pytest.approx(1.0, abs=1e-5)    # back to start after one period
+    # the R13 seam: any m_t row drives the vector MO tensor directly
+    T = np.asarray(VectorMagnetoOpticModel(eps_r=2.25, g_s=0.05).eps(
+        {"m_vector": r.m_t[25]}, 1550e-9))
+    assert T.shape == (3, 3) and np.allclose(T, T.conj().T)
+
+
+def test_llg_guards_and_damped_alignment():
+    from dynameta.carriers.llg import LLGMacrospin
+    with pytest.raises(ValueError):
+        LLGMacrospin(Ms_A_m=0.0)                           # Ms > 0
+    with pytest.raises(ValueError):
+        LLGMacrospin(Ms_A_m=1e5, alpha=-0.1)               # alpha >= 0
+    llg = LLGMacrospin(Ms_A_m=1e5, alpha=0.5, H_applied_A_m=lambda t: np.array([0.0, 0.0, 1e4]))
+    t = np.linspace(0.0, 50e-9, 201)
+    r = llg.simulate(t, m0=[1.0, 0.0, 0.2])
+    assert r.m_t[-1, 2] > 0.999                            # damping aligns m with H
+    assert np.all(np.diff(r.energy_J_m3) <= 1e-12)         # Lyapunov
