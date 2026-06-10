@@ -146,3 +146,31 @@ def test_layered_rta_rejects_lossy_superstrate():
     stk = LayeredStack(1.0 + 0.3j, 1.0 + 0j, [LayeredSlab(100e-9, eps=4.0 + 0j)])
     with pytest.raises(ValueError):
         layered_rta(stk, 1300e-9)
+
+
+def test_uniform_eps_by_region_entry_reaches_tmm():
+    # REGRESSION (drivers/examples seam): a UNIFORM eps_by_region entry (an effect-modulated
+    # eps from PCM/LC/thermo via EffectEpsMap, or a uniform carrier region) must override the
+    # raw material eps in the TMM stack -- it used to fall through silently. A tensor entry
+    # must raise (scalar TMM), not silently drop to the material value.
+    from dynameta.core.eps_field import EpsField
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import OpticalSpec
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("pcm", ConstantOptical(complex(4.0, 0.0))))
+    d = Design(name="u", unit_cell=UnitCell.square(300e-9),
+               stack=Stack(layers=[Layer("film", 180e-9, "pcm")],
+                           superstrate_material="air", substrate_material="air"),
+               electrodes=[], materials=reg,
+               optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+    lam = 1300e-9
+    eps_mod = complex(9.0, 0.5)                            # crystallized + lossy: != material 4.0
+    stk = layered_stack_from_design(d, lam, eps_by_region={"film": EpsField(scalar=eps_mod)})
+    assert stk.slabs[0].eps == eps_mod                     # the modulated value, not 4.0
+    stk0 = layered_stack_from_design(d, lam)               # no entry -> material eps unchanged
+    assert stk0.slabs[0].eps == complex(4.0, 0.0)
+    with pytest.raises(ValueError):                        # anisotropic effect -> loud, not silent
+        layered_stack_from_design(d, lam, eps_by_region={
+            "film": EpsField(tensor=np.diag([4.0, 4.0, 9.0]).astype(complex))})
