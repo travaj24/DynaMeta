@@ -54,7 +54,50 @@ and pushed. Each is byte-identical when its new physics is off.
   `carrier_heating_enz.py` (sub-ps rise / ps relaxation, 15.4x ENZ enhancement). Commit 044f0dc.
 
 Test suite: 307 passed (295 at the R1-R9 ship; +12 from the 2026-06-09 audit-guard batch, commit
-7a04a37). Tier 1+ below is not yet scheduled.
+7a04a37).
+
+## STATUS (2026-06-10): Tier 1 (R11-R14) + Tier 2 (R15-R21) + drivers D1-D4 COMPLETE
+
+The full 15-item program (drivers + both tiers) is implemented, oracle-validated, unit-tested and
+pushed; each item is byte-identical off. One-line ledger (validations in `validation/`):
+
+- **D1** DEVSIM contact currents -> `carriers/contact_current.py` + CarrierField.extras
+  (`contact_current_drivers.py`: Ohm closed form 5.5e-13). Commit 5499a5b.
+- **D2** per-region/per-layer absorbed-power maps (FEM + TMM) -> OpticalResult.per_region_absorption
+  (`per_region_absorption.py`: additivity exact; FEM vs TMM 4e-4). Commit 3ea5818.
+- **D3** MechanicalProps on the Material schema (re-exported by reliability.fatigue). Commit f7c5d3d.
+- **D4** Chynoweth impact ionization / I_sub post-processor -> `carriers/impact_ionization.py`
+  (`impact_ionization_isub.py`: constant-field bar 7.2e-15; supplies reliability.hci's Isub).
+  Commit 2a24ee3.
+- **R11** LLG macrospin -> `carriers/llg.py` (`llg_macrospin.py`: exact tan(theta/2) ring-down,
+  SW astroid H_K/2; feeds R13 via fields['m_vector']). Commit a8487f9.
+- **R12** PCM classical nucleation+growth -> `carriers/switching.PCMClassicalNucleation`
+  (`pcm_nucleation_growth.py`: exact O(n) KJMA moments; == JMAK cross-model 3.1e-8). Commit fc48c67.
+- **R13** VectorMagnetoOpticModel full gyrotropic tensor (`vector_mo_tensor.py`: Levi-Civita +
+  rotation equivariance exact). Commit f7c5d3d.
+- **R14** spatial two-temperature FEM -> `thermal_fem.solve_thermal[_transient]_twotemp_fem`
+  (`thermal_fem_twotemp.py`: == lumped R9 TTM 3e-6; exact cosh steady profile 1.7e-6). Commit 8b29ceb.
+- **R15** chi2 SHG + Raman chi3 FDTD (`fdtd_chi2_shg_raman.py`: coupled-wave closed form 8e-3;
+  Stokes gain ln G/gL = 0.93). Commit 28d9e81.
+- **R16** FN + direct oxide tunneling -> `reliability/leakage.py` (`reliability_leakage.py`:
+  B_FN = 242 MV/cm in the literature band; DT == FN at phi_b EXACTLY). Commit 5431b75.
+- **R17** Voigt exciton lineshape (`qcse_voigt_lineshape.py`: Whiting FWHM 2e-4; area-conserving
+  unit-peak convention). Commit 5e49542.
+- **R18** BGR + exciton screening/Mott in the EAM (`qcse_density_screening.py`: n^(1/3) slope exact;
+  == BursteinMossEdge closed form). Commit 096893b.
+- **R19** density-gradient quantum correction (frozen-potential closure; in-Newton DG-DD = follow-on)
+  -> `carriers/density_gradient.py` (`density_gradient_dead_layer.py`: dead layer 1.7 nm vs
+  Schrodinger-Poisson 1.2 nm). Commit b80fba0.
+- **R20** four-level gain: clamped-inversion gain ADE + exact expm populations ->
+  `optics/gain_medium.py` (`fdtd_gain_medium.py`: g0 closed form 2.8e-4; dN < 0 == passive Lorentz
+  EXACTLY). Commit 438d95b.
+- **R21** k(T) via the EXACT Kirchhoff transform -> `thermal_fem.solve_thermal_kirchhoff_fem`
+  (`thermal_kirchhoff.py`: closed-form inversion 1.9e-11 where naive constant-k errs 2.4e-2).
+  Commit 3c0943b.
+
+Deferred (documented inside the items): chi2/Raman/gain on numba/cupy/jax backends + 3D kernels;
+dynamic gain saturation/lasing; in-Newton 5-variable DG-DD; per-layer k(T) Kirchhoff (interface
+theta jumps); transient k(T)/C(T).
 
 ---
 
