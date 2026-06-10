@@ -39,12 +39,39 @@ class ElectroThermalLayer:
     """One layer feeding BOTH the electrostatic and thermal solves (shared `name` prevents the
     {layer: Q} dict from silently mapping to the wrong layer). sigma_S_m is the DC conductivity used
     for the Joule source Q = sigma |E|^2 -- a constant (weak coupling) or a callable sigma(T_K)
-    (electro-thermal feedback); 0.0 -> no Joule from this layer."""
+    (electro-thermal feedback); 0.0 -> no Joule from this layer.
+
+    This class is a COMPOSITION facade over the per-physics layer schemas, not a third schema:
+    .electrostatic and .thermal are the canonical conversions consumed by the Picard driver, and
+    compose() builds one from existing per-physics layers."""
     name: str
     thickness_m: float
     eps_static: float            # for the electrostatic solve
     k_thermal: float             # W/(m K), for the thermal solve
     sigma_S_m: SigmaSpec = 0.0   # DC conductivity [S/m]: float or callable of T_K
+
+    @property
+    def electrostatic(self) -> ElectrostaticLayer:
+        """The ElectrostaticLayer view (single source of truth for the E-solve stack)."""
+        return ElectrostaticLayer(self.name, self.thickness_m, self.eps_static)
+
+    @property
+    def thermal(self) -> ThermalLayer:
+        """The ThermalLayer view (single source of truth for the T-solve stack)."""
+        return ThermalLayer(self.name, self.thickness_m, self.k_thermal)
+
+    @classmethod
+    def compose(cls, electrostatic: ElectrostaticLayer, thermal: ThermalLayer,
+                sigma_S_m: SigmaSpec = 0.0) -> "ElectroThermalLayer":
+        """Build from existing per-physics layers (name + thickness must agree)."""
+        if electrostatic.name != thermal.name:
+            raise ValueError("compose: layer names disagree ({!r} vs {!r})".format(
+                electrostatic.name, thermal.name))
+        if electrostatic.thickness_m != thermal.thickness_m:
+            raise ValueError("compose: layer thicknesses disagree for {!r} ({} vs {})".format(
+                electrostatic.name, electrostatic.thickness_m, thermal.thickness_m))
+        return cls(electrostatic.name, electrostatic.thickness_m, electrostatic.eps_static,
+                   thermal.k_thermal, sigma_S_m)
 
 
 @dataclass
@@ -113,8 +140,8 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
     if not np.isfinite(applied_V):
         raise ValueError("applied_V must be finite")
 
-    estack = [ElectrostaticLayer(L.name, L.thickness_m, L.eps_static) for L in layers]
-    tstack = [ThermalLayer(L.name, L.thickness_m, L.k_thermal) for L in layers]
+    estack = [L.electrostatic for L in layers]
+    tstack = [L.thermal for L in layers]
     Px, Py = float(period_x_m), float(period_y_m)
 
     # E-field: eps_static is T-independent in this spec, so solve ONCE outside the loop. |E|^2 per layer.
