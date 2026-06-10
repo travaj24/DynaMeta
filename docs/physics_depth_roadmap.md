@@ -95,9 +95,31 @@ pushed; each item is byte-identical off. One-line ledger (validations in `valida
   (`thermal_kirchhoff.py`: closed-form inversion 1.9e-11 where naive constant-k errs 2.4e-2).
   Commit 3c0943b.
 
-Deferred (documented inside the items): chi2/Raman/gain on numba/cupy/jax backends + 3D kernels;
-dynamic gain saturation/lasing; in-Newton 5-variable DG-DD; per-layer k(T) Kirchhoff (interface
-theta jumps); transient k(T)/C(T).
+## STATUS (2026-06-10, later): the deferred set above is COMPLETE
+
+- **numba + jax 2D-TE nonlinear kernels** (chi2/Raman/gain): equivalence vs numpy 7.1e-14 /
+  2.7e-14 all-active; jax stays DIFFERENTIABLE through the nonlinear carry (grad vs FD 1.1e-3)
+  (`fdtd_nonlinear_backends.py`). GPU kernels (numba-cuda/cupy) stay guarded (no CUDA toolkit).
+  Commit df5593d.
+- **3D chi2/Raman/gain** (numpy/cupy path; per-component chi2, ONE isotropic Raman coordinate on
+  |E|^2, per-component gain): laterally-uniform 3D == the 2D kernel EXACTLY (rel 0.0)
+  (`fdtd_3d_nonlinear.py`). Commit df5593d.
+- **Dynamic gain saturation** (field-coupled four-level populations, S_st = -E dPG/dt/(hbar w_a)):
+  small-signal == clamped R20 5.3e-11; plateau inversion == the homogeneous saturation law
+  dN0/(1 + A^2/A_sat^2) to 0.4% over A/A_sat = 0.15-4.4; sum(N) 3.6e-14
+  (`fdtd_gain_saturation.py`). Lasing/cavity feedback remains a follow-on. Commit df5593d.
+- **Per-layer k(T)** (interface theta jumps): EXACT 1D sequential Kirchhoff inversion
+  (`solve_thermal_kirchhoff_layered_1d`) + **transient k(T(x))** FEM with pointwise elementwise
+  coefficients (`solve_thermal_transient_kt_fem`); theta-jump two-layer cross-check 1.4e-4
+  (`thermal_kt_multilayer.py`). C(T) still out of scope. Commit e7b0d86.
+- **In-Newton DG-DD** (4-variable DEVSIM Newton; `carriers/physics_density_gradient.py`): the
+  Lambda-equation assembled Poisson-style (the recipe's blocker), gamma-ramped; classical
+  reduction 5.6e-16, Lambda == independent FD stencil 8.4e-14, fixed-point decomposition 7.5e-16
+  (`dg_dd_in_newton.py`). Oxide-interface hard wall (interface equation) + bipolar twin =
+  follow-ons; the post-hoc closure remains the dead-layer tool. Commit cde280a.
+
+Still deferred (documented): GPU (numba-cuda/cupy) nonlinear kernels -- no CUDA toolkit on the
+dev box to validate; lasing/cavity gain dynamics; DG oxide-interface hard wall + bipolar; C(T).
 
 ---
 
