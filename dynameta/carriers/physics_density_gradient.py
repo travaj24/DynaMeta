@@ -40,8 +40,8 @@ from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.eq_registry import node_with_derivs as _node_with_derivs
 from dynameta.constants import HBAR, Q_E
 
-__all__ = ["setup_dg_quantum_correction", "setup_contact_dg", "seed_dg_from_solution",
-           "set_dg_gamma", "dg_b_coefficient"]
+__all__ = ["setup_dg_quantum_correction", "setup_contact_dg", "setup_dg_hard_wall",
+           "seed_dg_from_solution", "set_dg_gamma", "dg_b_coefficient"]
 
 
 def dg_b_coefficient(m_eff_kg: float, gamma: float = 1.0) -> float:
@@ -86,7 +86,14 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
                       ("Potential", "QLambda"))
     _edge_with_derivs(device, region, "vdiff_g_dg", "vdiff_dg / g_enh",
                       ("Potential", "QLambda", "Electrons"))
-    _edge_with_derivs(device, region, "Bern_g_dg", "B(vdiff_g_dg)",
+    # Bernoulli argument CLAMPED at +-200 (e^200 ~ 7e86, far from overflow): near a hard
+    # wall the log-singular Lambda makes Newton TRANSIENTS overflow B()'s exp; the clamp
+    # never binds at convergence (|vdiff| <~ 15 there), and ifelse evaluates the unclamped
+    # branch with the EXACT same arithmetic, so converged results are bit-identical
+    # (re-verified against the dg_dd_in_newton gates).
+    _edge_with_derivs(device, region, "Bern_g_dg",
+                      "B(ifelse(vdiff_g_dg > 200, 200, "
+                      "ifelse(vdiff_g_dg < -200, -200, vdiff_g_dg)))",
                       ("Potential", "QLambda", "Electrons"))
     jn = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
           "kahan3(Electrons@n1*Bern_g_dg, Electrons@n1*vdiff_g_dg, -Electrons@n0*Bern_g_dg)")
@@ -117,6 +124,82 @@ def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
     _R.record_contact_equation(device, contact, name="QLambdaEquation", node_model=cl)
 
 
+def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 15.0) -> None:
+    """EXPERIMENTAL / NOT YET VALIDATED (see validation/_dg_hard_wall_wip.py): the Newton
+    landscape near the log-singular wall is so flat that ramped solves stall on spurious
+    wide-depletion states at practical tolerances -- the discrete mechanics below are pinned
+    and probed, but the dead-layer profile has NOT yet been validated against the post-hoc
+    BVP. The post-hoc closure (carriers.density_gradient.dg_correct_density_1d) remains THE
+    validated dead-layer tool.
+
+    Oxide/insulator HARD WALL at `contact` for the in-Newton DG system (the MOS dead-layer
+    boundary): u -> 0 (a tiny positive floor) Dirichlet, plus a DEEP REGULARIZATION pin on
+    Lambda.
+
+    Why a regularization and not a value: the equilibrium DG closure's first integral gives
+    (u')^2 = (V_t/b)(u^2 ln(u^2/n0) - u^2 + n0), so u'(wall) = sqrt(V_t n0 / b) is FINITE but
+    Lambda = V_t ln(u^2/n0) DIVERGES logarithmically at the wall -- there is no finite
+    physical wall value to pin (the tanh profile's finite b u''/u = -V_t belongs to a
+    DIFFERENT closure and does not solve this system). The wall node's Lambda row is
+    therefore pinned to the deep value -lambda_pin_factor * V_t: any pin a few V_t below the
+    first interior node's Lambda drives the wall-edge Scharfetter-Gummel density to ~ 0
+    (relative error e^(dLambda/V_t)), and the validation gates INSENSITIVITY to the factor
+    (validation/dg_hard_wall.py GATE C).
+
+    The ELECTRON row at the wall node is pinned to the Boltzmann quasi-equilibrium
+    n = N_D exp((Potential + QLambda)/V_t): for an INSULATING wall in 1D steady state no
+    current flows anywhere in the bar, so this relation is EXACT at the wall (it sits on the
+    equilibrium manifold, making the wall-edge Scharfetter-Gummel current vanish
+    identically -- the deep QLambda pin then drives n(wall) -> N_D e^(-pin) ~ 0). The bulk
+    (natural) continuity row at a bare contact node was measured NOT to behave as the
+    zero-flux row (n(wall) floated pin-dependently), hence the explicit pin. Potential keeps
+    its natural bulk row (probed on DEVSIM 2.10.0: equations without a contact_equation
+    retain the bulk assembly -- no empty-row singularity)."""
+    if not (lambda_pin_factor > 0.0):
+        raise ValueError("setup_dg_hard_wall: lambda_pin_factor must be > 0")
+    from dynameta.constants import KB, Q_E as _QE, T_REF
+    v_t = KB * T_REF / _QE
+    # the pin is a DEVICE parameter so the gamma ramp can co-ramp it (a full-depth pin at the
+    # first small-gamma step makes the wall-edge Bernoulli overflow during Newton transients)
+    ds.set_parameter(device=device, name="wall_lambda_pin", value=0.0)
+    ds.set_parameter(device=device, name="wall_lambda_pin_full",
+                     value=float(lambda_pin_factor) * v_t)
+    # u is pinned to a TINY POSITIVE floor, not literal 0: the QSqrtN variable uses DEVSIM's
+    # variable_update='positive' (the validated unipolar-DG choice), which FORBIDS an exact
+    # zero ('Solution Variable has negative or zero value'). u_floor = 1e-6 sqrt(N_D) makes
+    # n(wall) ~ 1e-12 N_D -- physically indistinguishable from a hard zero.
+    region = ds.get_region_list(device=device, contact=contact)[0]
+    n_d = float(ds.get_parameter(device=device, region=region, name="N_D"))
+    u_floor = 1.0e-6 * np.sqrt(n_d)
+    cu = "{}_qsqrtn_wall".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=cu,
+                          equation="QSqrtN - {:.16e}".format(u_floor))
+    ds.contact_node_model(device=device, contact=contact, name="{}:QSqrtN".format(cu),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="QSqrtNEquation", node_model=cu)
+    cl = "{}_qlambda_wall".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=cl,
+                          equation="QLambda + wall_lambda_pin")
+    ds.contact_node_model(device=device, contact=contact, name="{}:QLambda".format(cl),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="QLambdaEquation", node_model=cl)
+    ce = "{}_electrons_wall".format(contact)
+    # the wall node's ELECTRON row is the SAME constraint as the bulk, n = u^2 (so the pinned
+    # u-floor makes n(wall) = floor^2 ~ 0, the dead-layer endpoint). The natural bulk
+    # continuity row at a bare contact node was measured to FLOAT (n(wall) pin-dependent),
+    # and a Boltzmann pin n = N_D exp((psi+Lambda)/V_t) is WRONG here: it would evaluate the
+    # REGULARIZATION Lambda-pin as if it were the physical (log-divergent) wall Lambda and
+    # return a finite density. n = u^2 references no Lambda and needs no exponential.
+    ds.contact_node_model(device=device, contact=contact, name=ce,
+                          equation="Electrons - QSqrtN*QSqrtN")
+    ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
+                          equation="1")
+    ds.contact_node_model(device=device, contact=contact, name="{}:QSqrtN".format(ce),
+                          equation="-2*QSqrtN")
+    _R.record_contact_equation(device, contact, name="ElectronContinuityEquation",
+                               node_model=ce)
+
+
 def seed_dg_from_solution(device: str, region: str) -> None:
     """Seed QSqrtN = sqrt(Electrons) (current solution) and QLambda = 0 -- call after the
     CONVERGED classical solve, before the gamma ramp."""
@@ -128,8 +211,16 @@ def seed_dg_from_solution(device: str, region: str) -> None:
 
 
 def set_dg_gamma(device: str, region: str, frac: float) -> None:
-    """Scale b_dg to `frac` of its full value (the gamma-ramp convergence aid; frac in [0,1])."""
+    """Scale b_dg to `frac` of its full value (the gamma-ramp convergence aid; frac in [0,1]).
+    When a hard wall is present (setup_dg_hard_wall), its Lambda pin co-ramps with the same
+    fraction -- a full-depth pin against a small-gamma bulk overflows the wall-edge
+    Bernoulli during Newton transients."""
     if not (0.0 <= frac <= 1.0):
         raise ValueError("set_dg_gamma: frac must be in [0, 1]")
     b_full = float(ds.get_parameter(device=device, region=region, name="b_dg_full"))
     ds.set_parameter(device=device, region=region, name="b_dg", value=frac * b_full)
+    try:
+        pin_full = float(ds.get_parameter(device=device, name="wall_lambda_pin_full"))
+    except Exception:
+        return                                          # no hard wall on this device
+    ds.set_parameter(device=device, name="wall_lambda_pin", value=frac * pin_full)
