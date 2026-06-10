@@ -108,7 +108,10 @@ def test_kirchhoff_layered_1d_guards_and_continuity():
     r = solve_thermal_kirchhoff_layered_1d(lays, k_by, flux_W_m2=5e8)
     assert r.interface_T_K[0] == 300.0
     assert np.all(np.diff(r.interface_T_K) > 0)          # heating toward the top
-    # T continuity at the interface from both sides
-    assert abs(r.T_at_z(100e-9 - 1e-13) - r.T_at_z(100e-9 + 1e-13)) < 1e-6
+    # T continuity at the interface: the probes sit 2h apart across a real ~j/k gradient
+    # (~2.5e8 K/m here), so bound by gradient*2h + the brentq inversion tolerance
+    h = 1e-13
+    bound = (5e8 / 2.0) * 2 * h * 3.0 + 1e-7
+    assert abs(r.T_at_z(100e-9 - h) - r.T_at_z(100e-9 + h)) < bound
     with pytest.raises(ValueError):
         solve_thermal_kirchhoff_layered_1d(lays, {"a": lambda T: 8.0})   # missing coverage
