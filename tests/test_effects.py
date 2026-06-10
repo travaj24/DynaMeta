@@ -257,3 +257,26 @@ def test_burstein_moss_requires_density():
     edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     with pytest.raises(ValueError):
         edge.eps({}, 1300e-9)
+
+
+# ---- VectorMagnetoOpticModel (R13) -----------------------------------------------------------
+
+def test_vector_mo_reduces_to_z_axis_model():
+    from dynameta.core.effects import VectorMagnetoOpticModel
+    vm = VectorMagnetoOpticModel(eps_r=2.25, g_s=0.05)
+    Tz = np.asarray(vm.eps({"m_vector": np.array([0.0, 0.0, 1.0])}, 1550e-9))
+    T0 = np.asarray(MagnetoOpticModel(eps_r=2.25, g=0.05).eps({"magnetization": 1.0}, 1550e-9))
+    assert np.array_equal(Tz, T0)                            # exact anchor to the validated z model
+
+
+def test_vector_mo_x_axis_structure_and_guards():
+    from dynameta.core.effects import VectorMagnetoOpticModel
+    vm = VectorMagnetoOpticModel(eps_r=2.25, g_s=0.05)
+    T = np.asarray(vm.eps({"m_vector": np.array([1.0, 0.0, 0.0])}, 1550e-9))
+    assert T[1, 2] == pytest.approx(1j * 0.05) and T[2, 1] == pytest.approx(-1j * 0.05)
+    assert T[0, 1] == 0.0 and np.allclose(np.diag(T), 2.25)  # x-gyration couples y<->z only
+    assert np.allclose(T, T.conj().T)                        # Hermitian (lossless)
+    with pytest.raises(ValueError):
+        vm.eps({}, 1550e-9)                                  # m_vector required
+    with pytest.raises(ValueError):
+        vm.eps({"m_vector": np.array([1.0, 0.0])}, 1550e-9)  # trailing axis must be 3

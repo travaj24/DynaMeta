@@ -13,35 +13,20 @@ roadmap-corrected split):
     brittle (Weibull):     P_survive(sigma) = exp(-(sigma/sigma0)^m_w); sigma >= sigma_crit -> cracks
                            on the FIRST excursion (no cycle accumulation)
 
-DRIVER NOTE: mechanical properties {CTE, E, nu, sigma_crit} are not on the Material schema yet (the
-roadmap-flagged prerequisite); MechanicalProps is the reliability-LOCAL table -- folding it into
-materials/ is the documented follow-on. Pure numpy; oracles in validation/reliability_fatigue.py.
+DRIVER NOTE (D3 RESOLVED): MechanicalProps now lives on the MATERIAL schema
+(dynameta/materials/mechanical.py, optional Material.mechanical field) and is RE-EXPORTED here for
+backward compatibility -- the fatigue/stress-migration post-processors and the materials registry
+share one table. Pure numpy; oracles in validation/reliability_fatigue.py.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 
+from dynameta.materials.mechanical import MechanicalProps   # D3: promoted; re-exported (back-compat)
 
-@dataclass(frozen=True)
-class MechanicalProps:
-    """Reliability-local mechanical property set for one film. Typical values: Cu E=110 GPa nu=0.34
-    CTE=16.5e-6; SiO2 E=70 GPa nu=0.17 CTE=0.5e-6 sigma_crit~0.5-1 GPa; ITO E=115 GPa nu=0.35
-    CTE~6e-6 (brittle, sigma_crit~1 GPa); Si substrate CTE=2.6e-6."""
-    E_Pa: float
-    nu: float
-    cte_per_K: float
-    sigma_crit_Pa: float = float("inf")    # brittle fracture stress; inf = treat as ductile-only
-
-    def __post_init__(self):
-        if not (self.E_Pa > 0.0):
-            raise ValueError("MechanicalProps: E_Pa must be > 0")
-        if not (-1.0 < self.nu < 0.5):
-            raise ValueError("MechanicalProps: Poisson ratio must be in (-1, 0.5)")
-        if not (self.sigma_crit_Pa > 0.0):
-            raise ValueError("MechanicalProps: sigma_crit_Pa must be > 0")
+__all__ = ["MechanicalProps", "biaxial_stress_Pa", "coffin_manson_nf", "plastic_strain_range",
+           "norris_landzberg_af", "brittle_survival", "cycles_to_failure"]
 
 
 def biaxial_stress_Pa(film: MechanicalProps, cte_sub_per_K: float, dT_K) -> np.ndarray:
