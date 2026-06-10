@@ -90,3 +90,42 @@ def test_four_level_steady_state_and_conservation():
     assert small_signal_gain_per_m(1e-8, -1e24, 1.5, 1e14) < 0.0   # dN < 0 -> absorption
     with pytest.raises(ValueError):
         FourLevelSystem(tau_32_s=0.0, tau_21_s=1e-4, tau_10_s=1e-8)
+
+
+def test_cavity_design_formulas_worked_point():
+    # the hand-verified lasing worked point (validation/fdtd_lasing_cavity.py pins):
+    # n_c = sqrt(2) / n_out = 10 mirrors, L = 10.6 um, dw = 2pi 2e13, kappa = q^2/m_e
+    from dynameta.constants import M_E, Q_E
+    from dynameta.optics.gain_medium import (FourLevelSystem, cavity_photon_lifetime_s,
+                                             pump_threshold_per_s,
+                                             relaxation_oscillation_rad_s,
+                                             threshold_inversion_m3)
+    n_c, L = np.sqrt(2.0), 10.6e-6
+    R = ((n_c - 10.0) / (n_c + 10.0)) ** 2
+    kappa, dw = Q_E ** 2 / M_E, 2.0 * np.pi * 2.0e13
+    assert R == pytest.approx(0.56582, rel=1e-4)
+    tau_p = cavity_photon_lifetime_s(L, n_c, R, R)
+    assert tau_p == pytest.approx(87.8e-15, rel=2e-3)
+    dN_th = threshold_inversion_m3(kappa, n_c, dw, L, R, R)
+    assert dN_th == pytest.approx(8.994e23, rel=2e-3)
+    s = FourLevelSystem(tau_32_s=1e-14, tau_21_s=5e-12, tau_10_s=5e-15, N_total_m3=1e25)
+    assert pump_threshold_per_s(dN_th, s) == pytest.approx(1.979e10, rel=2e-3)
+    w, g = relaxation_oscillation_rad_s(2.0, tau_p, 5e-12)
+    assert g == pytest.approx(2.0e11, rel=1e-12)
+    assert w == pytest.approx(np.sqrt(1.0 / (tau_p * 5e-12) - g * g), rel=1e-12)
+
+
+def test_cavity_design_formula_guards():
+    from dynameta.optics.gain_medium import (FourLevelSystem, cavity_photon_lifetime_s,
+                                             pump_threshold_per_s,
+                                             relaxation_oscillation_rad_s,
+                                             threshold_inversion_m3)
+    with pytest.raises(ValueError):                      # lossless cavity: no finite tau_p
+        cavity_photon_lifetime_s(1e-6, 1.5, 1.0, 1.0)
+    with pytest.raises(ValueError):                      # Gamma out of range
+        threshold_inversion_m3(1e-8, 1.5, 1e14, 1e-6, 0.5, 0.5, Gamma=1.5)
+    s = FourLevelSystem(tau_32_s=1e-14, tau_21_s=5e-12, tau_10_s=5e-15, N_total_m3=1e20)
+    with pytest.raises(ValueError):                      # threshold unreachable (chain caps)
+        pump_threshold_per_s(1e25, s)
+    with pytest.raises(ValueError):                      # at/below threshold: no oscillation
+        relaxation_oscillation_rad_s(1.0, 1e-13, 5e-12)
