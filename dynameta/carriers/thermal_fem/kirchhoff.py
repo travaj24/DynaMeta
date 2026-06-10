@@ -189,15 +189,25 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
                                                               object]] = None,
                                    T_init_K: Optional[float] = None, theta: float = 1.0,
                                    maxh_m: Optional[float] = None, order: int = 2,
-                                   linear_solver: str = "umfpack", store_every: int = 1
+                                   linear_solver: str = "umfpack", store_every: int = 1,
+                                   rhoCp_of_T_by=None, bottom_bc: str = "sink"
                                    ) -> ThermalTransientResult:
-    """TRANSIENT heat equation with temperature-dependent conductivity k(T(x)) (R21 follow-on):
-    rho Cp dT/dt = div(k(T) grad T) + Q via the theta-method with a POINTWISE elementwise
-    coefficient -- each step projects T onto piecewise-constant L2 element means, evaluates the
-    layer's k(T) per element (no layer lumping), and reassembles the stiffness (lagged/Picard
-    coefficient k(T^n): first-order in dt on top of the theta error; the t -> infinity steady
-    limit is the TRUE nonlinear solution since T stops changing). k_of_T_by: one callable or a
-    per-layer dict covering every layer. C(T) is NOT modeled (rho Cp constant -- documented v1).
+    """TRANSIENT heat equation with temperature-dependent coefficients (R21 follow-on):
+    rho Cp(T) dT/dt = div(k(T) grad T) + Q via the theta-method with POINTWISE elementwise
+    coefficients -- each step projects T onto piecewise-constant L2 element means, evaluates the
+    layer's k(T) (and, when given, rho*Cp(T)) per element (no layer lumping), and reassembles
+    the stiffness (and mass) with the lagged/Picard coefficients at T^n: first-order in dt on
+    top of the theta error; the t -> infinity steady limit is the TRUE nonlinear solution since
+    T stops changing (and is C(T)-blind -- the mass term vanishes there). k_of_T_by /
+    rhoCp_of_T_by: one numpy-vectorizable callable or a per-layer dict covering every layer.
+    rhoCp_of_T_by=None keeps the constant rho*Cp from the layers on the EXACT existing code
+    path. The SAME M(T^n) is used on both sides of the theta step (staggering M between the
+    system matrix and the rhs would inject spurious stored heat). C(T^n)(T^{n+1}-T^n) is the
+    TANGENT approximation to the enthalpy increment: the physical (chord) enthalpy balance
+    closes O(dt) -- validated under dt-refinement in validation/thermal_ct_transient.py.
+    bottom_bc: 'sink' (Dirichlet T_sink, the default) or 'insulated' (pure-Neumann bottom; the
+    domain then stores ALL injected energy -- the enthalpy-balance configuration; the result's
+    steady_limit_T is meaningless there).
     Cost note: the system matrix is refactored EVERY step (k changes); use the constant-k
     solve_thermal_transient_fem when k is constant. Constant callables reproduce it to solver
     roundoff."""
@@ -213,6 +223,8 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
         raise ValueError("linear_solver must be 'umfpack' or 'sparsecholesky'")
     if store_every < 1:
         raise ValueError("store_every must be >= 1")
+    if bottom_bc not in ("sink", "insulated"):
+        raise ValueError("bottom_bc must be 'sink' or 'insulated'")
     if callable(k_of_T_by):
         k_by = {L.name: k_of_T_by for L in layers}
     else:
@@ -220,11 +232,22 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
         missing = [L.name for L in layers if L.name not in k_by]
         if missing:
             raise ValueError("k_of_T_by must cover every layer (missing {})".format(missing))
+    has_ct = rhoCp_of_T_by is not None
+    if has_ct:
+        if callable(rhoCp_of_T_by):
+            c_by = {L.name: rhoCp_of_T_by for L in layers}
+        else:
+            c_by = dict(rhoCp_of_T_by)
+            missing = [L.name for L in layers if L.name not in c_by]
+            if missing:
+                raise ValueError("rhoCp_of_T_by must cover every layer (missing {})".format(
+                    missing))
 
     n_steps = max(1, int(round(t_end_s / dt_s)))
     dt = t_end_s / n_steps
     mesh = _build_layered_mesh(layers, period_x_m, period_y_m, maxh_m)
-    fes = ng.H1(mesh, order=order, dirichlet="bot")
+    fes = (ng.H1(mesh, order=order, dirichlet="bot") if bottom_bc == "sink"
+           else ng.H1(mesh, order=order))
     u, v = fes.TnT()
     # element-wise coefficient space: L2 order-0 dof index == element index (probed), so the
     # per-element material map lets each element evaluate ITS layer's k at ITS mean temperature
@@ -238,11 +261,18 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
         raise RuntimeError("mesh material without a k_of_T entry")
     kg = ng.GridFunction(Vk)
     Tmean = ng.GridFunction(Vk)
+    if has_ct:
+        c_funcs = [c_by.get(m) for m in mats]
+        if any(f is None for f in c_funcs):
+            raise RuntimeError("mesh material without a rhoCp_of_T entry")
+        cg = ng.GridFunction(Vk)
 
     rhoCp_by = {L.name: float(L.rho_kg_m3) * float(L.Cp_J_kgK) for L in layers}
     rhoCp_cf = ng.CoefficientFunction([rhoCp_by[m] for m in mesh.GetMaterials()])
     m = ng.BilinearForm(fes)
-    m += (rhoCp_cf / _S ** 2) * u * v * ng.dx
+    # the /_S**2 is the nm-mesh volume-Jacobian conversion (package docstring) and applies to
+    # the mass COEFFICIENT regardless of whether it is per-material-constant or per-element
+    m += ((cg if has_ct else rhoCp_cf) / _S ** 2) * u * v * ng.dx
     a = ng.BilinearForm(fes)
     a += kg * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
@@ -250,13 +280,14 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
 
     T = ng.GridFunction(fes)
     T.Set(ng.CoefficientFunction(float(T_sink_K if T_init_K is None else T_init_K)))
-    g_bot = ng.GridFunction(fes)
-    g_bot.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh.Boundaries("bot"))
-    free = fes.FreeDofs()
-    mask = np.array([not free[i] for i in range(len(free))])
-    T.vec.FV().NumPy()[mask] = g_bot.vec.FV().NumPy()[mask]
+    if bottom_bc == "sink":
+        g_bot = ng.GridFunction(fes)
+        g_bot.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh.Boundaries("bot"))
+        free = fes.FreeDofs()
+        mask = np.array([not free[i] for i in range(len(free))])
+        T.vec.FV().NumPy()[mask] = g_bot.vec.FV().NumPy()[mask]
 
-    def _refresh_k():
+    def _refresh_coeffs():
         Tmean.Set(T)                                   # element-mean temperatures
         tv = Tmean.vec.FV().NumPy()
         kv = kg.vec.FV().NumPy()
@@ -265,18 +296,29 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
             kv[sel] = fk(tv[sel])
         if not np.all(kv > 0.0):
             raise ValueError("k_of_T returned a non-positive conductivity during the transient")
+        if has_ct:
+            cv = cg.vec.FV().NumPy()
+            for im, fc in enumerate(c_funcs):
+                sel = el_mat == im
+                cv[sel] = fc(tv[sel])
+            if not np.all(cv > 0.0):
+                raise ValueError("rhoCp_of_T returned a non-positive heat capacity during the "
+                                 "transient (M would lose positive-definiteness)")
 
     t_list = [0.0]
     mean_list = [_mean_T_per_layer(mesh, T, layers)]
     with ng.TaskManager():
-        m.Assemble()
+        if not has_ct:
+            m.Assemble()
         f.Assemble()
         rhs = T.vec.CreateVector()
         res = T.vec.CreateVector()
         t = 0.0
         for step in range(1, n_steps + 1):
-            _refresh_k()
+            _refresh_coeffs()
             a.Assemble()                               # k(T^n) -> stiffness changes every step
+            if has_ct:
+                m.Assemble()                           # rho Cp(T^n): the SAME M on BOTH sides
             S = m.mat.CreateMatrix()
             S.AsVector().data = m.mat.AsVector() + (theta * dt) * a.mat.AsVector()
             Sinv = S.Inverse(fes.FreeDofs(), inverse=linear_solver)
