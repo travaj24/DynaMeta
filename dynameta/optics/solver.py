@@ -188,10 +188,16 @@ def _incidence_geometry(optical, n_super):
     if oblique:
         # The fixed-alpha HalfSpace PML is not angle-aware; energy conservation degrades
         # with angle (audit OPT-3 / cross-cutting F5 -- the warning the README promised).
+        # Measured envelope vs the tmm oracle (validation/oblique_vs_tmm, lossless slab):
+        # ~1% through 30 deg, ~3% at 45 deg; ABOVE ~50 deg the PML reflection grows fast
+        # enough that the budget VIOLATES energy conservation (R+T = 1.17 observed at
+        # 60 deg) -- the energy-closure warnings downstream then fire.
         warnings.warn(
-            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware, so "
-            "R/T/energy-conservation degrade with angle (validated to ~1% through 30 deg). "
-            "Treat oblique R/T as approximate.", stacklevel=2)
+            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware. "
+            "Measured vs tmm: ~1% errors through 30 deg, ~3% at 45 deg; above ~50 deg "
+            "R/T become unreliable (energy non-conservation, +17% at 60 deg). Treat "
+            "oblique R/T as approximate and stay at or below ~45 deg for quantitative "
+            "work.", stacklevel=2)
     return theta, phi, oblique, conical
 
 
