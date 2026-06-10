@@ -26,6 +26,8 @@ from dynameta.io.store import load_arrays, save_arrays
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
         "r_re", "r_im", "t_re", "t_im")
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
+# OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
+# per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
 
 
 def _eps_fingerprint(eps_by_region) -> bytes:
