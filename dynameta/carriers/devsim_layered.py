@@ -628,10 +628,22 @@ class LayeredDevsimBuilder:
                 grid_fields={ELECTRON_DENSITY: grid[ELECTRON_DENSITY],
                               POTENTIAL: grid[POTENTIAL]})
             n_bg_by_region[s.name] = float(d.materials.get(s.material).transport.n_bg_m3)
+        # terminal currents (driver D1): per-unit-depth [A/m] scaled by period_y to [A]; an
+        # equilibrium device yields {} -> NO extras key (the byte-identical off-switch). A
+        # best-effort diagnostic -- a failure warns, never breaks the solve.
+        extras: Dict[str, object] = {}
+        try:
+            from dynameta.carriers.contact_current import extract_contact_currents
+            cc = extract_contact_currents(self.device, depth_m=d.unit_cell.period_y_m)
+            if cc:
+                extras["contact_currents_A"] = cc
+        except Exception as _e:                               # noqa: BLE001 (diagnostic)
+            import warnings as _w
+            _w.warn("contact-current extraction unavailable: {}".format(_e))
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=PE.T_REF, regions=regions, n_bg_by_region=n_bg_by_region,
-            unit_cell_m=(d.unit_cell.period_x_m, d.unit_cell.period_y_m))
+            unit_cell_m=(d.unit_cell.period_x_m, d.unit_cell.period_y_m), extras=extras)
 
     def teardown(self) -> None:
         _R.clear(self.device)
