@@ -606,3 +606,93 @@ def solve_thermal_transient_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, pe
         mean_Tl_per_layer_t=np.asarray(mean_tl, dtype=np.float64),
         Te_final=_copy_component(V, u, 0), Tl_final=_copy_component(V, u, 1),
         flux_W_m2=float(flux_W_m2), T_sink_K=float(T_sink_K), snapshots=snaps)
+
+
+# ---- R21: temperature-dependent k(T) via the EXACT Kirchhoff transform ------------------------
+
+def kirchhoff_theta(k_of_T, T_K, T_ref_K: float):
+    """Kirchhoff potential theta(T) = int_Tref^T k(T') dT' [W/m] (adaptive quadrature; SI)."""
+    from scipy.integrate import quad
+    val, _ = quad(lambda t: float(k_of_T(t)), float(T_ref_K), float(T_K), limit=200)
+    return float(val)
+
+
+def invert_kirchhoff(k_of_T, theta_W_m: float, T_ref_K: float, *, T_max_K: float = 5000.0):
+    """T such that int_Tref^T k dT' = theta (brentq; theta monotone since k > 0). theta >= 0
+    (heating above the reference) up to theta(T_max_K); below-reference theta inverts too."""
+    from scipy.optimize import brentq
+    th = float(theta_W_m)
+    if th == 0.0:
+        return float(T_ref_K)
+    lo, hi = (float(T_ref_K), float(T_max_K)) if th > 0.0 else (1.0, float(T_ref_K))
+    f = lambda t: kirchhoff_theta(k_of_T, t, T_ref_K) - th
+    if f(lo) * f(hi) > 0.0:
+        raise ValueError("invert_kirchhoff: theta={} outside the [{}, {}] K bracket".format(
+            th, lo, hi))
+    return float(brentq(f, lo, hi, xtol=1e-9))
+
+
+@dataclass
+class ThermalKirchhoffResult:
+    """Steady k(T) solve via the exact Kirchhoff transform (R21). theta is the LINEAR potential
+    field (GridFunction); temperatures come from the pointwise inversion T = theta^-1."""
+    mesh: object
+    theta: object                # ng.GridFunction, Kirchhoff potential [W/m]; theta(T_sink) = 0
+    k_of_T: object
+    T_sink_K: float
+    layers: List[ThermalLayer]
+
+    def theta_at(self, x_m: float, y_m: float, z_m: float) -> float:
+        return float(np.real(self.theta(self.mesh(x_m * _S, y_m * _S, z_m * _S))))
+
+    def T_at(self, x_m: float, y_m: float, z_m: float) -> float:
+        """Temperature [K] at a point: the EXACT pointwise Kirchhoff inversion."""
+        return invert_kirchhoff(self.k_of_T, self.theta_at(x_m, y_m, z_m), self.T_sink_K)
+
+    def T_profile(self, z_points_m, x_m: float, y_m: float) -> np.ndarray:
+        """T [K] along z at lateral position (x, y) -- the quasi-1D stack profile."""
+        return np.array([self.T_at(x_m, y_m, float(z)) for z in np.asarray(z_points_m)])
+
+
+def solve_thermal_kirchhoff_fem(layers: List[ThermalLayer], k_of_T, *, period_x_m: float,
+                                period_y_m: float, flux_W_m2: float = 0.0,
+                                T_sink_K: float = 300.0,
+                                joule_W_m3: Optional[Union[float, Dict[str, float],
+                                                           object]] = None,
+                                maxh_m: Optional[float] = None, order: int = 2,
+                                linear_solver: str = "umfpack") -> ThermalKirchhoffResult:
+    """STEADY heat equation with temperature-dependent conductivity, div(k(T) grad T) = -Q,
+    solved EXACTLY (no Picard) by the Kirchhoff transform: theta = int_{T_sink}^T k dT' turns it
+    into the LINEAR problem div(grad theta) = -Q with theta = 0 on the sink face and the SAME
+    Neumann flux/volumetric loads (-k dT/dn = -dtheta/dn). One linear solve, then the pointwise
+    inversion T = theta^-1 (ThermalKirchhoffResult.T_at). k_of_T must be > 0 over the operating
+    range (theta strictly monotone <=> invertible).
+
+    SCOPE (v1, exact within it): ONE k(T) for the whole meshed stack -- a single-material
+    Kirchhoff potential. Different k(T) per layer makes theta JUMP at interfaces (continuity of
+    T, not theta) and needs interface jump conditions -- raise-and-defer rather than silently
+    wrong. The TRANSIENT k(T) problem does not linearize this way (the C/k(theta) diffusivity
+    stays nonlinear) and keeps the constant-k path. k_of_T = const c reduces to the linear solver
+    with k = c exactly (theta = c (T - T_sink) -- the off-switch oracle)."""
+    if linear_solver not in ("umfpack", "sparsecholesky"):
+        raise ValueError("linear_solver must be 'umfpack' or 'sparsecholesky', got {!r}".format(
+            linear_solver))
+    if not callable(k_of_T):
+        raise ValueError("k_of_T must be a callable T_K -> k [W/(m K)]")
+    for t_probe in (float(T_sink_K), float(T_sink_K) + 100.0, float(T_sink_K) + 500.0):
+        if not (float(k_of_T(t_probe)) > 0.0):
+            raise ValueError("k_of_T must be > 0 over the operating range (k({:.0f} K) = {})"
+                             .format(t_probe, float(k_of_T(t_probe))))
+    # theta-problem: unit conductivity everywhere on the SAME mesh/loads as the linear path
+    theta_layers = [ThermalLayer(name=L.name, thickness_m=L.thickness_m, k_thermal=1.0)
+                    for L in layers]
+    mesh, fes, u, v, a, f, _ = _build_thermal_forms(
+        theta_layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
+    th = ng.GridFunction(fes)                    # theta(T_sink) = 0 on the sink face (Dirichlet 0)
+    with ng.TaskManager():
+        a.Assemble(); f.Assemble()
+        res = f.vec - a.mat * th.vec
+        inv = a.mat.Inverse(fes.FreeDofs(), inverse=linear_solver)
+        th.vec.data += inv * res
+    return ThermalKirchhoffResult(mesh=mesh, theta=th, k_of_T=k_of_T, T_sink_K=float(T_sink_K),
+                                  layers=list(layers))
