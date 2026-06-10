@@ -43,6 +43,11 @@ class FDTDLayer:
     lorentz_w0_rad_s: float = 0.0          # Lorentz resonance frequency (0 = no Lorentz pole)
     lorentz_gamma_rad_s: float = 0.0       # Lorentz damping rate
     lorentz_delta_eps: float = 0.0         # Lorentz static strength (eps(0) gains d_eps)
+    # R15 second-order + dispersive third-order nonlinearities (2D-TE numpy kernel; default off):
+    chi2_m_V: float = 0.0                  # SHG chi2 [m/V]: P2 = eps0 chi2 E^2 polarization source
+    raman_chi3_m2_V2: float = 0.0          # Raman chi3 strength [m^2/V^2]: P_R = eps0 chiR E Q
+    raman_w_rad_s: float = 0.0             # Raman vibrational resonance Omega_R [rad/s]
+    raman_gamma_rad_s: float = 0.0         # Raman damping [rad/s] (Q'' + g Q' + W^2 Q = W^2 E^2)
 
     def eps_at(self, w_rad_s):
         """The complex eps(omega) this layer represents (eps_inf - Drude + Lorentz), convention
