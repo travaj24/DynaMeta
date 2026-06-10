@@ -345,14 +345,53 @@ class ElectroAbsorptionModel:
     field_axis: int = 2        # component of fields['E'] taken as the well field (z by default)
     continuum_alpha0_per_m: float = 0.0   # Elliott band-to-band continuum step strength (0 -> off)
     continuum_binding_J: float = 0.0      # 2D exciton binding = continuum onset above E_T (0 -> off)
+    # R17 Voigt lineshape (lineshape="gaussian", the default, keeps the ORIGINAL code path --
+    # byte-identical off-switch). lineshape="voigt" convolves the Gaussian sigma (broadening_J,
+    # inhomogeneous) with a Lorentzian HWHM Gamma0_J [J] (lifetime dephasing) + an optional
+    # field-ionization term Gamma_F_func(F_V_m) -> ADDITIONAL Lorentzian HWHM [J] (the QCSE
+    # carrier-escape broadening). The Voigt is scaled to UNIT PEAK at Gamma = 0 -- so alpha0_per_m
+    # keeps its peak-absorption meaning, the Gamma = 0 limit equals the Gaussian branch, and the
+    # line AREA int alpha dE = alpha0 sigma sqrt(2 pi) is conserved for EVERY Gamma (oscillator
+    # strength is not magicked in/out by broadening; the peak drops instead). The continuum keeps
+    # its Elliott step shape (no Voigt broadening) by design.
+    lineshape: str = "gaussian"           # "gaussian" | "voigt"
+    Gamma0_J: float = 0.0                 # Lorentzian HWHM [J] (voigt only)
+    Gamma_F_func: object = None           # F [V/m] -> additional Lorentzian HWHM [J] (voigt only)
 
     _KK_MARGIN_SIGMA = 6.0     # required grid coverage beyond E_T on each side, in broadening_J
 
-    def _alpha(self, E_eval, E_T, overlap, overlap0):
+    def _gamma_lor_J(self, F: float) -> float:
+        """Total Lorentzian HWHM [J] at field F (0.0 on the gaussian path)."""
+        if self.lineshape != "voigt":
+            if self.Gamma0_J != 0.0 or self.Gamma_F_func is not None:
+                raise ValueError("ElectroAbsorptionModel: Gamma0_J/Gamma_F_func are read only by "
+                                 "lineshape='voigt' (set it explicitly; the gaussian default "
+                                 "would silently ignore them)")
+            return 0.0
+        g = float(self.Gamma0_J)
+        if self.Gamma_F_func is not None:
+            g += float(self.Gamma_F_func(float(F)))
+        if not (np.isfinite(g) and g >= 0.0):
+            raise ValueError("ElectroAbsorptionModel: total Lorentzian HWHM Gamma(F) must be a "
+                             "finite value >= 0, got {} at F={}".format(g, F))
+        return g
+
+    def _alpha(self, E_eval, E_T, overlap, overlap0, gamma_lor_J: float = 0.0):
         E = np.asarray(E_eval, dtype=np.float64)
         ratio = overlap / overlap0
-        g = np.exp(-0.5 * ((E - E_T) / float(self.broadening_J)) ** 2)
-        a = self.alpha0_per_m * ratio * g                              # 1s excitonic Gaussian line
+        if self.lineshape == "voigt":
+            from scipy.special import voigt_profile
+            sig = float(self.broadening_J)
+            # unit-peak-at-Gamma=0 scaling: voigt_profile is AREA-normalized (peak 1/(sig sqrt(2pi))
+            # at Gamma=0), so * sig sqrt(2pi) recovers the unit-peak Gaussian at Gamma=0 and
+            # conserves the line area for Gamma > 0 (the peak drops as the wings grow).
+            g = voigt_profile(E - E_T, sig, float(gamma_lor_J)) * (sig * np.sqrt(2.0 * np.pi))
+        elif self.lineshape == "gaussian":
+            g = np.exp(-0.5 * ((E - E_T) / float(self.broadening_J)) ** 2)
+        else:
+            raise ValueError("lineshape must be 'gaussian' or 'voigt', got {!r}".format(
+                self.lineshape))
+        a = self.alpha0_per_m * ratio * g                              # 1s excitonic line
         if self.continuum_alpha0_per_m > 0.0 and self.continuum_binding_J > 0.0:
             # Elliott band-to-band continuum above the UNBOUND edge E_cont = E_T + E_binding, with the
             # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi sqrt(E_b/dE))) -> 2 at the edge and
@@ -389,11 +428,15 @@ class ElectroAbsorptionModel:
         s0 = self.qw.solve(0.0)
         sF = self.qw.solve(F)
         ov0 = s0.overlap
+        gam0, gamF = self._gamma_lor_J(0.0), self._gamma_lor_J(F)
         lo, hi, n = self.e_grid_J
         grid = np.linspace(float(lo), float(hi), int(n))
         # the KK integral needs the grid to COVER the line several sigma beyond E_T on both sides
-        # (a center-only straddle silently truncates dn by tens of percent -- audit QC-2):
-        margin = self._KK_MARGIN_SIGMA * float(self.broadening_J)
+        # (a center-only straddle silently truncates dn by tens of percent -- audit QC-2). The
+        # Voigt's Lorentzian 1/x^2 wings decay far slower than exp(-x^2), so the margin WIDENS
+        # with Gamma/sigma (6 sigma pure-Gaussian -> +10 HWHM of Lorentzian reach; ~1% wing
+        # truncation at the cap -- R17):
+        margin = self._KK_MARGIN_SIGMA * float(self.broadening_J) + 10.0 * max(gam0, gamF)
         e_lo = min(s0.E_transition_J, sF.E_transition_J) - margin
         e_hi = max(s0.E_transition_J, sF.E_transition_J) + margin
         if self.continuum_alpha0_per_m:
@@ -411,11 +454,11 @@ class ElectroAbsorptionModel:
         # analytic dkappa path (audit QC-3).
         if not (grid[0] <= E_ph <= grid[-1]):
             raise ValueError("the probe photon energy h c/lambda must lie within e_grid_J")
-        dalpha_grid = (self._alpha(grid, sF.E_transition_J, sF.overlap, ov0)
-                       - self._alpha(grid, s0.E_transition_J, s0.overlap, ov0))
+        dalpha_grid = (self._alpha(grid, sF.E_transition_J, sF.overlap, ov0, gamF)
+                       - self._alpha(grid, s0.E_transition_J, s0.overlap, ov0, gam0))
         dn = float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
-        dalpha_ph = float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, ov0)
-                          - self._alpha(E_ph, s0.E_transition_J, s0.overlap, ov0))
+        dalpha_ph = float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, ov0, gamF)
+                          - self._alpha(E_ph, s0.E_transition_J, s0.overlap, ov0, gam0))
         dkappa = dalpha_ph * HBAR * C_LIGHT / (2.0 * E_ph)
         nb = np.sqrt(complex(self.eps_bg))
         kappa = nb.imag + dkappa
@@ -434,8 +477,10 @@ class ElectroAbsorptionModel:
         E_ph = _photon_energy_J(lambda_m)
         s0 = self.qw.solve(0.0)
         sF = self.qw.solve(F)
-        return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap)
-                     - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap))
+        return float(self._alpha(E_ph, sF.E_transition_J, sF.overlap, s0.overlap,
+                                 self._gamma_lor_J(F))
+                     - self._alpha(E_ph, s0.E_transition_J, s0.overlap, s0.overlap,
+                                   self._gamma_lor_J(0.0)))
 
 
 # ---- Burstein-Moss band-filling + bandgap renormalization (R8) -----------------------------
