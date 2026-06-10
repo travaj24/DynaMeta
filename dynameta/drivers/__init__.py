@@ -10,8 +10,8 @@ Two seams, both pure numpy/scipy (importable without DEVSIM/NGSolve):
   reads ('m_vector', 'crystalline_fraction', 'director_angle_rad').
 
 electrothermal_extra_fields (the Joule-heating T closure) lives with its solver in
-dynameta.carriers.electrothermal and is re-exported here for discoverability when NGSolve is
-installed -- importing THIS package does not require it.
+dynameta.carriers.electrothermal and is re-exported here LAZILY (PEP 562) for
+discoverability: accessing it imports NGSolve, but importing THIS package does not.
 """
 
 from dynameta.drivers.reliability_glue import (absorbed_fraction, contact_current_A,
@@ -29,4 +29,13 @@ __all__ = [
     "oxide_stress_from_electrothermal", "tddb_tbd_from_electrothermal",
     "tmm_absorption_by_layer_name",
     "lc_extra_fields", "llg_extra_fields", "pcm_extra_fields",
+    "electrothermal_extra_fields",
 ]
+
+
+def __getattr__(name):
+    # lazy NGSolve-backed re-export (PEP 562): keeps `import dynameta.drivers` solver-free
+    if name == "electrothermal_extra_fields":
+        from dynameta.carriers.electrothermal import electrothermal_extra_fields
+        return electrothermal_extra_fields
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

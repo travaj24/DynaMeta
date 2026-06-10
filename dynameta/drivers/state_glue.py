@@ -37,8 +37,10 @@ def llg_extra_fields(macrospin: LLGMacrospin,
     magnetization as {'m_vector': (3,)} for VectorMagnetoOpticModel.
 
     t_settle_s must cover the Gilbert relaxation (~1/(alpha*omega_p)); the factory raises if
-    the trajectory has not settled (|m(t_end) - m(t_end/2)| > 1e-3) rather than silently
-    emitting a still-precessing snapshot. Requires alpha > 0 (an undamped spin never settles)."""
+    the trajectory has not settled (max deviation over the trailing QUARTER of the trace
+    > 1e-3 -- a many-sample window, so a precession cone cannot alias past it the way a
+    two-sample check can) rather than silently emitting a still-precessing snapshot.
+    Requires alpha > 0 (an undamped spin never settles)."""
     if not (macrospin.alpha > 0.0):
         raise ValueError("llg_extra_fields: macrospin.alpha must be > 0 to reach a settled state")
     if not (t_settle_s > 0.0 and n_steps >= 5):
@@ -50,11 +52,13 @@ def llg_extra_fields(macrospin: LLGMacrospin,
         spin = dataclasses.replace(macrospin, H_applied_A_m=lambda t, H=H: H)
         t_eval = np.linspace(0.0, float(t_settle_s), int(n_steps))
         res = spin.simulate(t_eval, m0)
-        m_end, m_mid = res.m_t[-1], res.m_t[res.m_t.shape[0] // 2]
-        if float(np.max(np.abs(m_end - m_mid))) > 1e-3:
+        m_end = res.m_t[-1]
+        tail = res.m_t[3 * res.m_t.shape[0] // 4:]         # trailing quarter: ~n_steps/4 samples
+        dm = float(np.max(np.abs(tail - m_end[None, :])))
+        if dm > 1e-3:
             raise RuntimeError("llg_extra_fields: trajectory not settled by t_settle_s={:.3e} s "
-                               "(|dm|={:.2e}); increase t_settle_s or alpha".format(
-                                   t_settle_s, float(np.max(np.abs(m_end - m_mid)))))
+                               "(max tail deviation {:.2e}); increase t_settle_s or alpha".format(
+                                   t_settle_s, dm))
         return {"m_vector": m_end.copy()}
 
     return _fields
