@@ -193,3 +193,48 @@ def test_electroabsorption_clamps_gain_in_bleaching_regime():
         eps = eam.eps({"E": np.array([0., 0., 6e6])}, lam)
     assert eps.imag >= 0.0                                     # passive: no gain
     assert any(issubclass(x.category, RuntimeWarning) for x in w)
+
+
+# ---- R17: Voigt exciton lineshape -------------------------------------------------------------
+
+def test_voigt_gamma_zero_matches_gaussian():
+    qw = _gaas()
+    ET0 = qw.solve(0.0).E_transition_J
+    sig = 0.005 * Q
+    kw = dict(qw=qw, eps_bg=12.25 + 0.05j, alpha0_per_m=1e6, broadening_J=sig,
+              e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
+    lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 - 2.0 * sig)
+    F = {"E": np.array([0.0, 0.0, 5e6])}
+    e_g = ElectroAbsorptionModel(**kw).eps(F, lam)
+    e_v = ElectroAbsorptionModel(lineshape="voigt", Gamma0_J=0.0, **kw).eps(F, lam)
+    assert abs(e_v - e_g) < 1e-12
+
+
+def test_voigt_area_conserved_and_peak_drops():
+    qw = _gaas()
+    ET0 = qw.solve(0.0).E_transition_J
+    sig = 0.005 * Q
+    kw = dict(qw=qw, eps_bg=12.25 + 0j, alpha0_per_m=1e6, broadening_J=sig,
+              e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001), lineshape="voigt")
+    x = np.linspace(-50.0 * sig, 50.0 * sig, 60001)
+    p0 = ElectroAbsorptionModel(Gamma0_J=0.0, **kw)._alpha(ET0 + x, ET0, 1.0, 1.0, 0.0)
+    p1 = ElectroAbsorptionModel(Gamma0_J=sig, **kw)._alpha(ET0 + x, ET0, 1.0, 1.0, sig)
+    assert np.max(p1) < np.max(p0)                       # lifetime broadening lowers the peak...
+    a0, a1 = np.trapezoid(p0, x), np.trapezoid(p1, x)
+    assert abs(a1 - a0) / a0 < 2e-2                      # ...but conserves the line area (tails)
+
+
+def test_voigt_guards():
+    qw = _gaas()
+    ET0 = qw.solve(0.0).E_transition_J
+    sig = 0.005 * Q
+    kw = dict(qw=qw, eps_bg=12.25 + 0j, alpha0_per_m=1e6, broadening_J=sig,
+              e_grid_J=(ET0 - 0.3 * Q, ET0 + 0.3 * Q, 2001))
+    lam = 2.0 * np.pi * HBAR * C_LIGHT / (ET0 - 2.0 * sig)
+    F = {"E": np.array([0.0, 0.0, 5e6])}
+    with pytest.raises(ValueError):                      # Gamma0_J silently ignored -> explicit
+        ElectroAbsorptionModel(Gamma0_J=1e-22, **kw).eps(F, lam)
+    with pytest.raises(ValueError):                      # negative Gamma(F)
+        ElectroAbsorptionModel(lineshape="voigt", Gamma_F_func=lambda f: -1e-21, **kw).eps(F, lam)
+    with pytest.raises(ValueError):                      # unknown lineshape
+        ElectroAbsorptionModel(lineshape="lorentz", **kw).eps(F, lam)
