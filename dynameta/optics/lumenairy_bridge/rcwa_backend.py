@@ -92,7 +92,7 @@ def _min_samples(n_orders: int) -> int:
 
 def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_orders: int = 11,
                          n_orders_y: Optional[int] = None, n_slices: Optional[int] = None,
-                         cell_samples: Optional[int] = None):
+                         cell_samples: Optional[int] = None, formulation: str = "laurent"):
     """Translate a DynaMeta Design (+ optionally the bridge's eps_by_region) into a CONCRETE
     Lumenairy RCWAStack at one wavelength. Returns (stack, layer_names_top_first) where the
     name list is aligned with the Lumenairy layers (graded fields contribute several slabs
@@ -109,13 +109,33 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     py = float(design.unit_cell.period_y_m)
     eps_by_region = eps_by_region or {}
 
+    def _lamellar(L):
+        """All inclusions are full-y rectangles (y-invariant grating lines) -> the layer is
+        1-D-compatible and the stack can stay 1-D (a genuinely cheaper and
+        better-conditioned solve than a y-degenerate 2-D one)."""
+        for inc in L.inclusions:
+            if getattr(inc.shape, "kind", "") != "rectangle":
+                return False
+            _, _, ylo, yhi = inc.shape.bbox_m()
+            if ylo > 1e-12 * py or yhi < py * (1.0 - 1e-12):
+                return False
+        return True
+
     def _structured(L):
         ef = eps_by_region.get(L.name)
         grid = ef is not None and not getattr(ef, "is_uniform", True)
         utensor = ef is not None and getattr(ef, "is_tensor", False)
         return bool(L.inclusions) or grid or utensor
 
-    is_2d = any(_structured(L) for L in design.stack.layers)
+    def _needs_2d(L):
+        ef = eps_by_region.get(L.name)
+        grid_2d = (ef is not None and not getattr(ef, "is_uniform", True)
+                   and ef.values_zyx is not None and ef.values_zyx.shape[1] > 1)
+        utensor = ef is not None and getattr(ef, "is_tensor", False)
+        return (bool(L.inclusions) and not _lamellar(L)) or grid_2d or utensor
+
+    structured = any(_structured(L) for L in design.stack.layers)
+    is_2d = any(_needs_2d(L) for L in design.stack.layers)
     if is_2d:
         stack = lum.RCWAStack(px, period_y=py, n_superstrate=complex(n_super),
                               n_substrate=complex(n_sub), n_orders=int(n_orders),
@@ -129,7 +149,7 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
 
     s_min_x = _min_samples(nx_o)
     s_min_y = _min_samples(ny_o) if is_2d else 1
-    sx = max(int(cell_samples or 0), s_min_x, 128 if is_2d else s_min_x)
+    sx = max(int(cell_samples or 0), s_min_x, 128 if structured else s_min_x)
     sy = max(int(cell_samples or 0), s_min_y, 128) if is_2d else 1
 
     names: List[str] = []
@@ -143,7 +163,8 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
                     stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 elif slab.eps_cell is not None:
                     stack.add_layer(slab.thickness_m,
-                                    eps_cell=_meet_sampling(slab.eps_cell, s_min_x, s_min_y))
+                                    eps_cell=_meet_sampling(slab.eps_cell, s_min_x, s_min_y),
+                                    formulation=formulation)
                 else:
                     stack.add_layer(slab.thickness_m,
                                     eps_tensor_cell=_meet_sampling(slab.eps_tensor_cell,
@@ -160,7 +181,8 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
             x, y = _cell_axes(sx, sy, px, py)
             X, Y = np.meshgrid(x, y, indexing="ij")
             cell = _layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
-            stack.add_layer(L.thickness_m, eps_cell=np.asarray(cell, dtype=complex))
+            stack.add_layer(L.thickness_m, eps_cell=np.asarray(cell, dtype=complex),
+                            formulation=formulation)
             names.append(L.name)
             continue
         if ef is not None:                               # uniform scalar (effect-modulated)
@@ -247,7 +269,8 @@ def rcwa_result_to_optical_result(res, row: int, *, t0: float,
 def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] = None,
                                n_slices: Optional[int] = None,
                                cell_samples: Optional[int] = None,
-                               absorption: bool = False, stabilize: bool = False):
+                               absorption: bool = False, stabilize: bool = False,
+                               formulation: str = "laurent"):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy RCWA, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult
     PLUS the sweep-aware `solve_sweep` fast path (one result per wavelength, in order; end
@@ -259,7 +282,8 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
         t0 = time.perf_counter()
         stack, names = design_to_rcwa_stack(design, lambda_m, eps_by_region=eps_by_region,
                                             n_orders=n_orders, n_orders_y=n_orders_y,
-                                            n_slices=n_slices, cell_samples=cell_samples)
+                                            n_slices=n_slices, cell_samples=cell_samples,
+                                            formulation=formulation)
         theta, phi = _angles_rad(design.optical)
         stack.set_source(lambda_m, theta=theta, phi=phi)
         res = stack.solve(retain_internal=absorption, stabilize=stabilize)
