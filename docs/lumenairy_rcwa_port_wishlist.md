@@ -1,5 +1,13 @@
 # Lumenairy RCWA -- gaps & wishlist for porting into DynaMeta
 
+> **SUPERSEDED (2026-06-11):** This 2026-06-01 plan framed the integration as a code
+> PORT, with Lumenairy P1/P2 gaps to close first. The 2026-06-10 v0.5 decision
+> (`docs/roadmap_v0.5_integration_photonics.md`, A0-A4) replaced it with a live
+> REQUIRED dependency bridge (`lumenairy>=5.14.2`, `dynameta/optics/lumenairy_bridge/`),
+> shipped without P1/P2 (declared not blockers). The structured `eps_cell` path is
+> live via the RCWA backend (`validation/lumenairy_rcwa_bridge.py`). The body below
+> is kept untouched as the historical record.
+
 **Date:** 2026-06-01
 **Purpose:** DynaMeta's v0.3 modulation roadmap (`docs/roadmap_v0.3_modulation.md`) needs a
 fast, differentiable, periodic optical solver. Rather than build one, port Lumenairy's

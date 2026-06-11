@@ -8,16 +8,22 @@ Pluggable Stage-1 DC solve methods.
              equations with the carrier densities frozen, then the carrier
              continuity equations with the potential frozen, until both stop
              changing. Intended to be robust to the stiff Poisson<->continuity
-             coupling that makes coupled Newton diverge on degenerate gated
-             accumulation. Variables are frozen by DELETING their equations
+             coupling on degenerate gated accumulation; coupled Newton no longer
+             diverges there with the staged Poisson-presolve recipe
+             (validation/gated_dd*.py), so Gummel remains an alternative outer
+             iteration. Variables are frozen by DELETING their equations
              (via eq_registry) for one sub-solve and re-adding them after.
              VALIDATED on unipolar ohmic transport: validation/gummel_vs_newton.py
              shows the Gummel fixed point equals the coupled-Newton solution to
              machine precision (fields and terminal current) and matches the
-             analytic ohmic limit. STILL EXPERIMENTAL for the degenerate
-             gated-ACCUMULATION case it was originally built for -- convergence
-             there remains unproven (see physics_drift_diffusion KNOWN
-             LIMITATION); "newton" stays the default.
+             analytic ohmic limit. The GUMMEL ROUTE is STILL EXPERIMENTAL for
+             the degenerate gated-ACCUMULATION case it was originally built
+             for -- untested there; the PROVEN route for gated accumulation is
+             the staged Poisson-presolve + coupled Newton recipe:
+             validation/gated_dd.py (1D), gated_dd_2d.py (2D full-edge ohmic
+             ground), gated_dd_builder.py (Park metasurface). (The
+             physics_drift_diffusion KNOWN LIMITATION marker this caveat once
+             cited was removed 7e77f1c, 2026-06-02.) "newton" stays the default.
 
 Add new methods by extending solve_dc's dispatch.
 """
@@ -56,7 +62,9 @@ def solve_dc(device: str, *, method: str = "newton",
         warnings.warn(
             "solve_dc(method='gummel'): validated against Newton on unipolar ohmic transport "
             "(validation/gummel_vs_newton.py), but EXPERIMENTAL for the degenerate "
-            "gated-accumulation case it targets (convergence unproven there). "
+            "gated-accumulation case it targets (convergence unproven there; the proven "
+            "route is the staged Poisson-presolve + coupled Newton recipe, "
+            "validation/gated_dd*.py). "
             "method='newton' (default) remains the supported general route.", stacklevel=2)
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.

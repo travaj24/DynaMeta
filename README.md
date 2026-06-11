@@ -152,11 +152,16 @@ print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 
 ## Status
 
-v0.2 (clean-break) -- general bridge API: the `OpticalModel`/`TransportModel`
+v0.4.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
 materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
-`Inclusion`s) + `Electrode` geometry, and `run_pipeline`. The Park 2021
+`Inclusion`s) + `Electrode` geometry, and `run_pipeline`; plus the
+modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
+PCM/LC/graphene, magneto-optic), the FDTD engine (1D/2D/3D incl GPU +
+nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), and the
+required-core Lumenairy RCWA/PMM optical backends. The Park 2021
 reference design ([examples/park_2021.py](examples/park_2021.py)) is the
-validated end-to-end run.
+validated end-to-end run. Forward plan:
+[docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).
 
 Known limitations:
 
@@ -169,22 +174,31 @@ Known limitations:
   over-pin the ITO potential; physically the ground pads are mm-scale away.
 - Stage 1 defaults to the equilibrium Fermi-Dirac Poisson solve (no currents);
   `TransportModel(physics="drift_diffusion", ...)` adds the full
-  Scharfetter-Gummel continuity solve. Neither does Schrodinger-Poisson quantum
-  confinement.
+  Scharfetter-Gummel continuity solve. Both defaults are classical, but quantum
+  confinement IS available: `SchrodingerPoissonCarrier` (a pluggable Stage-1
+  `CarrierSolver`; per-column / oxide-division / open-body variants) and the
+  density-gradient correction (post-hoc `carriers/density_gradient.py` or
+  in-Newton DG-DD, `validation/dg_dd_in_newton.py`).
 - Oblique incidence (`OpticalSpec.incidence_angle_deg != 0`) is implemented for
   s-polarization AND p-polarization (Bloch-Floquet periodicity), plus conical
-  incidence (`azimuth_deg != 0`, s-pol), each validated against the `tmm` library
-  (s/p R&T to ~1% through 30 deg; conical phi-invariance + structured-cell symmetry).
+  incidence (`azimuth_deg != 0`, s-pol AND p-pol;
+  `validation/conical_ppol_vs_tmm.py`), each validated against the `tmm` library
+  (s/p R&T; conical phi-invariance + structured-cell symmetry). Measured envelope:
+  s-pol is gated over 0-45 deg (3% tolerance to 30 deg, 4% at 45 deg; measured
+  ~2.6%); p-pol, conical, and lossy cases are gated to 30 deg.
   It REQUIRES a vacuum/air incidence medium (`n_super = 1`; `solve_fem` raises on a
   non-vacuum superstrate at angle) and the polar angle is capped at `|theta| <= 60`
-  deg. The fixed-alpha HalfSpace PML is not angle-aware, so energy conservation
-  degrades with angle (~1% by 30 deg) -- `solve_fem` emits a warning and oblique
-  R/T should be treated as approximate. Absorption is reported as the budget closure
+  deg. The fixed-alpha HalfSpace z-PML is not angle-aware: at 60 deg it CREATES
+  energy (R+T ~ 1.17, report-only) -- `solve_fem` emits a warning; an angle-aware
+  PML is open. Absorption is reported as the budget closure
   `A = 1 - R - T`; `OpticalResult.A_independent` is the independent volumetric-loss
   measurement (their difference is the energy diagnostic).
 - The optical linear solve defaults to BDDC + GMRes
-  (`OpticalSpec.linear_solver = "bddc_gmres"`); the AMS preconditioner is not
-  used because of sign-changing alpha/beta in the ENZ regime.
+  (`OpticalSpec.linear_solver = "bddc_gmres"`); the AMS preconditioner is not the
+  default because of sign-changing alpha/beta in the ENZ regime, but is available
+  opt-in via `OpticalSpec.linear_solver = "ams"` / `"hypre"` on a HYPRE-built
+  NGSolve (falls back to `bddc_gmres`; see
+  [docs/installing_hypre_windows.md](docs/installing_hypre_windows.md)).
 
 **Native 3D carriers** are validated for both the equilibrium solve and full 3D
 drift-diffusion (`validation/carriers_3d.py`, `carriers_3d_dd.py`, transport via
@@ -198,9 +212,11 @@ solver-free bridge spine). The heavier solver-backed physics lives in
 `python -m validation.run_all` runs and gates the whole set by exit code (needs the
 `[solvers]` extra: ngsolve/devsim/gmsh; budget tens of minutes).
 
-**Roadmap.** The forward plan to broaden DynaMeta into a general modulation-physics
-simulator (field-effect EO/Pockels, thermo-optic, QCSE electro-absorption, and
-reconfigurable PCM/LC/graphene -- via a generalized field-aware + tensor-eps bridge) is
-[docs/roadmap_v0.3_modulation.md](docs/roadmap_v0.3_modulation.md). Prior phases:
+**Roadmap.** The active forward plan is silicon photonics integration (B1-B3):
+[docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).
+Completed phases (linked as records):
+[docs/roadmap_v0.3_modulation.md](docs/roadmap_v0.3_modulation.md),
+[docs/physics_depth_roadmap.md](docs/physics_depth_roadmap.md),
+[docs/reliability_roadmap.md](docs/reliability_roadmap.md), and
 [docs/roadmap_phase5_stretch.md](docs/roadmap_phase5_stretch.md); the independent audit:
 [docs/audit/](docs/audit/).

@@ -12,9 +12,11 @@ program (waveguide modes, phase shifters, EME components); (C) carry-over items.
 ### A0. The architectural decision: BRIDGE, not vendor
 
 **AMENDED 2026-06-11 (owner decision): Lumenairy is a REQUIRED core dependency**
-(`lumenairy>=5.14.1` in `[project] dependencies`; the `[lumenairy]` extra remains as an
-empty back-compat alias). RCWA/PMM are core DynaMeta capabilities, so availability is now
-guaranteed at install time. The bridge architecture is UNCHANGED -- live dependency, not a
+(`lumenairy>=5.14.2` in `[project] dependencies`; the `[lumenairy]` extra remains as an
+empty back-compat alias). The floor is 5.14.2, not 5.14.1: the published 5.14.1 wheel
+predates the all-uniform PMM grid degeneracy fix and fails the PMM bridge gates from a
+clean install; `_require_lumenairy` floors at (5, 14, 2). RCWA/PMM are core DynaMeta
+capabilities, so availability is now guaranteed at install time. The bridge architecture is UNCHANGED -- live dependency, not a
 vendored copy -- and imports stay lazy (base `import dynameta` remains fast and
 matplotlib-free; lumenairy loads at solver-call time). Wholesale copying the rcwa/pmm
 subpackages into DynaMeta was considered and rejected: it would fork ~15k lines of actively
@@ -41,7 +43,10 @@ tipped the decision to a live dependency:
   lumenairy/matplotlib (subprocess-asserted in tests) even though the dependency is
   guaranteed installed.
 
-### A1. RCWA backend bridge (task #169)
+### A1. RCWA backend bridge (task #169) -- SHIPPED
+
+Shipped b005e17: `validation/lumenairy_rcwa_bridge.py` 6 gates green (incl GATE F
+absorption attribution).
 
 `dynameta/optics/lumenairy_bridge/rcwa_backend.py`:
 
@@ -105,7 +110,9 @@ Landed alongside (the synergy glue A2 exposed):
   graded Drude eps(z) -> RCWA bridge (1-D fast path, absorption attribution) with the PMM
   bridge as cross-method referee (|dR| 4e-3 ungated); max gate modulation |dR| = 0.26.
 
-### A3. Bidirectional translation tools (task #171)
+### A3. Bidirectional translation tools (task #171) -- SHIPPED
+
+Shipped a0df9fd: `validation/lumenairy_translate.py` round-trip gates green.
 
 `dynameta/optics/lumenairy_bridge/translate.py` -- the "seamless synergy" layer, both ways:
 
@@ -123,10 +130,11 @@ Landed alongside (the synergy glue A2 exposed):
 
 ### A4. Sequencing + Lumenairy-side asks
 
-Order: A1 gates 1-2 (unstructured + graded; lowest risk) -> A1 gates 3-6 (patterned/tensor)
--> A3 translation + round-trips -> A2 PMM. Remaining Lumenairy-side wishlist items (P1 2-D
-stack autodiff if still open at v5.14.1, P2 normal-vector 2-D FFF) are tracked as Lumenairy
-work, NOT blockers: the bridge ships against what v5.14.1 provides and inherits upgrades.
+Order (planned): A1 gates 1-2 (unstructured + graded; lowest risk) -> A1 gates 3-6
+(patterned/tensor) -> A3 translation + round-trips -> A2 PMM; the whole A-sequence shipped
+2026-06-10/11. Remaining Lumenairy-side wishlist items (P1 2-D stack autodiff if still open
+at v5.14.1, P2 normal-vector 2-D FFF) are tracked as Lumenairy work, NOT blockers: the
+bridge shipped against what v5.14.2 provides and inherits upgrades.
 
 ---
 
@@ -167,12 +175,39 @@ propagation; default is interop, not reimplementation.
 
 ## C. Carry-over (status pointers)
 
-- DG oxide hard wall: EXPERIMENTAL (`setup_dg_hard_wall`); Newton stalls on the
-  log-singular boundary layer at practical tolerances -- continuation plan in
-  `validation/_dg_hard_wall_wip.py` + the function docstring. Bipolar DG twin queued after.
-- GPU: linear + nonlinear FDTD kernels hardware-validated (CUDA 13.1 / RTX 4070 Ti);
-  remaining GPU items are performance, not capability.
-- Oblique FEM envelope: validated 0-45 deg; angle-aware PML would extend toward the 60-deg
-  cap (open, low priority once RCWA covers oblique periodic cells).
-- Gummel: validated on unipolar ohmic transport; gated-accumulation convergence unproven.
-- Lasing/cavity, C(T), GPU nonlinear: SHIPPED 2026-06-10 (see physics_depth_roadmap.md).
+(verified 2026-06-11; each line cites the proving validation/commit)
+
+- DG oxide hard wall: EXPERIMENTAL (`setup_dg_hard_wall`, cef01d9;
+  `validation/_dg_hard_wall_wip.py`, underscore-excluded from run_all). Re-confirmed by
+  fresh run 2026-06-11: the frozen-psi gamma ramp converges to a spurious wide-depletion
+  state (GATE A max |dn|/N0 = 0.80 vs the <2% gate) and the self-consistent Poisson-on leg
+  hard-fails with DEVSIM convergence failure -- the log-singular boundary layer flattens
+  the Newton landscape. Continuation plan (tighter-tolerance damped solves or a u_floor
+  continuation) is pinned in the WIP script header; `dg_correct_density_1d` remains THE
+  validated dead-layer tool. Bipolar DG twin queued after.
+- GPU: linear + nonlinear FDTD kernels hardware-validated on CUDA 13.1 / RTX 4070 Ti /
+  cupy 14.0.1 (`validation/fdtd_numba_cuda` GPU==CPU ~4e-15;
+  `validation/fdtd_gpu_nonlinear` cupy + numba-cuda vs numpy worst ~2e-15 incl exact
+  dynamic gain; both re-run green 2026-06-11). Remaining GPU items (fused 3D fast path,
+  Taichi) are performance, not capability; the oblique and MO-1D solvers stay CPU
+  (numpy/numba/jax) by design.
+- Oblique FEM envelope (`validation/oblique_vs_tmm`, ba4dcb2): s-pol gated 0-45 deg (3% to
+  30 deg; 4% at 45, measured ~2.6%); p-pol/conical/lossy gated to 30 deg; at 60 deg the
+  fixed-alpha z-PML CREATES energy (R+T ~ 1.17, report-only) and `solve_fem` warns to stay
+  <= ~45 deg. Angle-aware PML remains OPEN (`solver.py` `pml_alpha=1j` constant) -- low
+  priority: the Lumenairy RCWA backend takes oblique theta/phi (gated 30-deg s/p
+  unstructured at 1e-9); a gated oblique STRUCTURED-cell RCWA validation is the remaining
+  coverage gap.
+- Gummel (`solve_dc(method='gummel')`): validated on unipolar ohmic transport
+  (`validation/gummel_vs_newton.py` -- fixed point == coupled Newton to machine precision;
+  terminal J == analytic ohmic limit; re-run green 2026-06-11); never exercised on gated
+  accumulation (still warns EXPERIMENTAL there, electron-only CARRIER_EQS).
+  Gated-accumulation convergence itself is CLOSED via the staged Poisson-presolve +
+  coupled-Newton recipe -- 1D `validation/gated_dd.py` (re-run green 2026-06-11), 2D
+  `validation/gated_dd_2d.py`, builder-wired Park metasurface
+  `validation/gated_dd_builder.py` -- so Gummel is not required for that case.
+- Lasing/cavity, C(T), GPU nonlinear: SHIPPED 2026-06-10 (d588e50
+  `validation/fdtd_lasing_cavity` gates A-E; cee64bd `validation/thermal_ct_transient`
+  gates A-D; d646875 `validation/fdtd_gpu_nonlinear` gates A-E on CUDA hardware); all
+  three re-run green 2026-06-11. `docs/physics_depth_roadmap.md` carries the matching
+  status update.

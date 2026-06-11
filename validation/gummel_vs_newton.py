@@ -12,9 +12,11 @@ GATE C (reduces to equilibrium): at zero bias both methods give |J| < 1e-9 * J(1
         flat potential (max |psi| < 1 uV).
 GATE D (contract): the EXPERIMENTAL-path warning fires on the gummel route.
 
-Scope note (kept honest): this validates the unipolar OHMIC-transport case. The degenerate
-gated-ACCUMULATION case Gummel was originally built for remains unproven (the
-physics_drift_diffusion KNOWN LIMITATION); the dc_solve docstring carries the split.
+Scope note (kept honest): this validation covers the unipolar OHMIC-transport case only. The
+Gummel route on the degenerate gated-ACCUMULATION case it was originally built for remains
+unexercised; for gated accumulation the staged Poisson-presolve + Newton recipe in the
+physics_drift_diffusion docstring is the route that CONVERGES (validation/gated_dd*.py).
+The dc_solve docstring carries the split.
 
 Run: python -m validation.gummel_vs_newton
 """

@@ -8,6 +8,18 @@ projections for qualification and design trade-offs.
 Companion to docs/physics_depth_roadmap.md (which uses R1-R34 ids for operating-physics depth). To
 avoid id collision, reliability items are numbered REL1..RELn.
 
+## STATUS UPDATE (2026-06-10): drivers D1-D4 shipped
+
+The four follow-on drivers flagged below all landed on 2026-06-10:
+- D1 contact currents (5499a5b): carriers/contact_current.py + validation/contact_current_drivers.py (REL3);
+- D2 per-region absorbed power (3ea5818): OpticalResult.per_region_absorption +
+  validation/per_region_absorption.py (REL5);
+- D3 MechanicalProps on Material (f7c5d3d) (REL6/7);
+- D4 Chynoweth impact ionization (2a24ee3): carriers/impact_ionization.py +
+  validation/impact_ionization_isub.py (REL8).
+The "follow-on" notes below are retained for history but are CLOSED; only REL9's ambient inputs
+(RH/contamination) remain external, by design.
+
 ## STATUS (2026-06-09, second update): the FULL REL1-REL10 axis is SHIPPED
 
 The remaining six items landed via the lightweight-driver MVP paths this roadmap blessed (external
@@ -15,7 +27,8 @@ parameters where the operating solve does not yet produce the quantity; a reliab
 mechanical schema; a lumped thermal node for runaway):
 - REL3 electromigration (reliability/em.py): Black + Blech immortality + geometry-scaled calibrated
   prefactor + Miner duty-cycle accumulation; drive current I is an EXTERNAL design parameter (the
-  DEVSIM contact-current extractor stays the follow-on driver). validation/reliability_em.py: ratio
+  DEVSIM contact-current extractor SHIPPED 2026-06-10 as driver D1, carriers/contact_current.py,
+  5499a5b). validation/reliability_em.py: ratio
   closed forms machine; Miner two-segment J(t) vs piecewise analytic 1e-3; Blech design demo.
 - REL5 optical damage / runaway (reliability/lidt.py): F_th ~ sqrt(tau) LIDT scaling + a lumped
   CW thermal node with absorbed(T) callable (built from the ACTUAL layered TMM + the T-dependent
@@ -23,9 +36,10 @@ mechanical schema; a lumped thermal node for runaway):
   validation/reliability_lidt.py: constant-A steady/transient closed forms machine; the LINEAR-
   absorption runaway threshold matches the EXACT analytic bifurcation (incl. the T_max truncation
   closed form) to 1e-3; the real ENZ stack absorbed(T) gated to [0,1]. The per-region absorbed-power
-  MAP on the optics result stays the follow-on driver.
+  MAP on the optics result SHIPPED 2026-06-10 as driver D2 (OpticalResult.per_region_absorption,
+  3ea5818).
 - REL6 thermal-cycling fatigue (reliability/fatigue.py): MechanicalProps (reliability-local {E, nu,
-  CTE, sigma_crit} -- folding into materials/ is the follow-on), biaxial mismatch stress, DUCTILE
+  CTE, sigma_crit} -- folded into materials/ 2026-06-10 as driver D3, f7c5d3d), biaxial mismatch stress, DUCTILE
   Coffin-Manson Nf = C d_eps^(-1/c), Norris-Landzberg AF, BRITTLE Weibull/critical-stress split.
   validation/reliability_fatigue.py: Cu-on-Si stress in the literature band; log-slope == -1/c; the
   brittle ITO cracks at cycle 0 where ductile Cu lives 1.5e3 cycles.
@@ -33,8 +47,9 @@ mechanical schema; a lumped thermal node for runaway):
   void threshold + Soret flux. validation/reliability_stressmig.py: the constant-kappa PDE matches
   the exact erf(x/2 sqrt(kappa t)) to 1e-3; Arrhenius-with-1/T-prefactor ratio machine.
 - REL8 HCI (reliability/hci.py): lucky-electron t ~ (I_sub/W)^(-2/3) with the q-corrected trap rate
-  and the documented NEGATIVE-Ea allowance (worse cold); I_sub external (DEVSIM impact ionization is
-  the follow-on). validation/reliability_hci.py.
+  and the documented NEGATIVE-Ea allowance (worse cold); I_sub external (DEVSIM impact ionization
+  SHIPPED 2026-06-10 as driver D4, carriers/impact_ionization.py, 2a24ee3).
+  validation/reliability_hci.py.
 - REL9 corrosion (reliability/corrosion.py): Deal-Grove closed form (+ Arrhenius rates) + Peck
   humidity life; ambient RH external. validation/reliability_corrosion.py: closed form vs the rate
   ODE 1e-8 + linear/parabolic limits + the 85/85 acceleration rationale.
@@ -58,8 +73,9 @@ dynameta/reliability/ (pure numpy/scipy, opt-in import, byte-identical-off) now 
   competing-risks system MTTF, FIT, Weibull array weakest-link. validation/reliability_mttf.py:
   MONTE-CARLO competing-risks and order-statistic cross-checks (1.0e-3 / 1.5e-3); the AF chain equals
   the TDDB model's own ratio at machine (REL10 x REL1 integration gate).
-Remaining (driver-gated): REL3 (contact current), REL5 (absorbed-power map), REL6/7 (CTE/stress
-schema), REL8 (substrate current), REL9 (ambient inputs).
+Remaining (driver-gated) -- CLOSED 2026-06-10 (drivers D1-D4 shipped, see STATUS UPDATE above):
+REL3 (contact current, D1), REL5 (absorbed-power map, D2), REL6/7 (CTE/stress schema, D3),
+REL8 (substrate current, D4); only REL9 (ambient inputs) stays external, by design.
 
 Provenance: the mechanism set was produced by a web-grounded multi-agent sweep (one researcher +
 one adversarial verifier per mechanism), THEN hand-checked. The hand check overturned two propagated
