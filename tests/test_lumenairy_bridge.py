@@ -14,8 +14,9 @@ needs_lum = pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
 
 
 def test_dynameta_import_stays_lumenairy_free():
-    # the bridge is opt-in: importing dynameta (and the optics package) must not import
-    # lumenairy (which hard-depends on matplotlib) -- CI installability contract
+    # lumenairy is a REQUIRED dependency but loaded lazily at solver-call time: importing
+    # dynameta (and the optics package) must not import lumenairy (which hard-depends on
+    # matplotlib) -- the import-time hygiene contract
     code = ("import dynameta, dynameta.optics, sys; "
             "assert 'lumenairy' not in sys.modules, 'lumenairy leaked into base import'; "
             "print('ok')")

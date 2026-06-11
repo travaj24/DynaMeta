@@ -11,11 +11,21 @@ program (waveguide modes, phase shifters, EME components); (C) carry-over items.
 
 ### A0. The architectural decision: BRIDGE, not vendor
 
-DynaMeta takes Lumenairy as an **optional dependency** (`pip install dynameta[lumenairy]`,
-floor `lumenairy>=5.14`) and adds a bridge package `dynameta/optics/lumenairy_bridge/`.
+**AMENDED 2026-06-11 (owner decision): Lumenairy is a REQUIRED core dependency**
+(`lumenairy>=5.14.1` in `[project] dependencies`; the `[lumenairy]` extra remains as an
+empty back-compat alias). RCWA/PMM are core DynaMeta capabilities, so availability is now
+guaranteed at install time. The bridge architecture is UNCHANGED -- live dependency, not a
+vendored copy -- and imports stay lazy (base `import dynameta` remains fast and
+matplotlib-free; lumenairy loads at solver-call time). Wholesale copying the rcwa/pmm
+subpackages into DynaMeta was considered and rejected: it would fork ~15k lines of actively
+audited physics away from Lumenairy's test suite, CI, and release pipeline, double the
+maintenance for the same owner, and drag in lumenairy-internal infrastructure
+(segment_geometry, materials, viewers, the JAX differentiability layer) -- all for zero
+capability gain, since the conventions are identical and the bridge is thin.
+
 The 2026-06-01 wishlist (`docs/lumenairy_rcwa_port_wishlist.md`) framed this as a code copy;
 the owner direction that the two libraries remain COMPLEMENTARY with seamless translation
-tips the decision to a live dependency:
+tipped the decision to a live dependency:
 
 - Lumenairy is actively maintained (v5.6 -> v5.14.1 since the wishlist, including audited
   P1 fixes, dispersive sweeps, PMM 2-D parity, device-geometry builders). A vendored copy
@@ -27,8 +37,9 @@ tips the decision to a live dependency:
   `LayeredSlab` spec set that deliberately mirrors `RCWAStack.add_layer`
   (scalar / `eps_cell` / `eps_tensor_cell` / `shapes`), the z-slicers, and the
   `optical_solver`/`solve_sweep` pipeline seam.
-- CI/installability: the bridge imports lazily; DynaMeta without Lumenairy is byte-identical
-  (the same opt-in pattern as devsim/ngsolve/jax).
+- Import hygiene: the bridge imports lazily; a dynameta import never drags
+  lumenairy/matplotlib (subprocess-asserted in tests) even though the dependency is
+  guaranteed installed.
 
 ### A1. RCWA backend bridge (task #169)
 

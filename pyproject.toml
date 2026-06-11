@@ -15,11 +15,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# Core data model + bridge (`import dynameta`) is pure numpy/scipy. The heavy
-# solver stack and IO backends are optional extras (see below).
+# Core data model + bridge (`import dynameta`) imports as pure numpy/scipy; lumenairy
+# (the RCWA/PMM optical backends) is REQUIRED but loaded lazily at solver-call time.
+# The heavy carrier/FEM solver stack and IO backends remain optional extras (see below).
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
+    "lumenairy>=5.14.2",                                   # RCWA/PMM backends (optics.lumenairy_bridge) -- core since v0.5; 5.14.2 carries the all-uniform PMM fix
 ]
 
 [project.optional-dependencies]
@@ -28,7 +30,7 @@ io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps 
 plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
-lumenairy = ["lumenairy>=5.14.1"]                          # RCWA/PMM backends (optics.lumenairy_bridge)
+lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
