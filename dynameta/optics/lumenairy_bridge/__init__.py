@@ -1,7 +1,9 @@
 """dynameta.optics.lumenairy_bridge: Lumenairy RCWA/PMM as DynaMeta optical backends.
 
-Lumenairy is an OPTIONAL dependency (`pip install dynameta[lumenairy]`); this package
-imports without it -- the backends raise with an install hint when called. Conventions are
+Lumenairy is a REQUIRED dependency of dynameta (core since v0.5) but is imported lazily:
+this package imports without touching it (keeping base `import dynameta` fast and
+matplotlib-free); the backends raise with an install hint if the environment lacks it.
+Conventions are
 identical on both sides (exp(-i omega t), Im(eps) > 0, metres, radians), so the bridge is a
 geometry/result adapter, not a translation layer. See docs/roadmap_v0.5_integration_photonics.md.
 """

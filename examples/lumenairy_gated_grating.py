@@ -13,8 +13,8 @@ with the nanopatch swapped for y-invariant grating lines, so the SAME Design exe
      accumulation is laterally structured under the lines -- RCWA territory; the PMM
      analytic-segment scope raises on rasterized lateral structure by contract).
 
-Requires lumenairy (`pip install dynameta[lumenairy]`) + devsim; exits 0 with a SKIP
-banner when either is missing.
+Requires lumenairy (a core dynameta dependency) + devsim (`dynameta[solvers]`); exits 0
+with a SKIP banner when either is missing from the environment.
 
 Run:
     python -m examples.lumenairy_gated_grating            # 2 biases x 4 wavelengths
