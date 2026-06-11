@@ -82,3 +82,27 @@ def test_bad_polarization_raises():
         pytest.skip("OpticalSpec immutable; covered by construction-time validation")
     with pytest.raises(ValueError):
         make_lumenairy_rcwa_solver(n_orders=2)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+
+
+@needs_lum
+def test_round_trip_design_geometry():
+    from dynameta.optics.lumenairy_bridge import design_to_rcwa_stack, rcwa_stack_to_design
+    d0 = _uniform_design()
+    stk, _ = design_to_rcwa_stack(d0, 1.31e-6, n_orders=2)
+    d1 = rcwa_stack_to_design(stk)
+    assert len(d1.stack.layers) == len(d0.stack.layers)
+    for a, b in zip(d0.stack.layers, d1.stack.layers):
+        assert b.thickness_m == pytest.approx(a.thickness_m, abs=1e-18)
+        assert complex(d1.materials.get(b.background_material).eps(1.31e-6)) == \
+            pytest.approx(complex(d0.materials.get(a.background_material).eps(1.31e-6)))
+
+
+@needs_lum
+def test_callable_optical_dispersion_chain():
+    from dynameta.optics.lumenairy_bridge import (CallableOptical,
+                                                  optical_model_to_lumenairy_eps)
+    fn = lambda wl: complex(2.0 + 0.1 * (wl / 1e-6))
+    model = CallableOptical(fn)
+    assert model.eps(1.5e-6) == pytest.approx(fn(1.5e-6))
+    back = optical_model_to_lumenairy_eps(model)
+    assert back(1.5e-6) == pytest.approx(fn(1.5e-6))
