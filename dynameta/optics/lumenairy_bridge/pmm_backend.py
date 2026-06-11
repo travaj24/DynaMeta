@@ -18,7 +18,7 @@ per-order complex amplitudes: OpticalResult.t is None (T comes from the order-su
 efficiencies; r from the zeroth-order reflection Jones with the same lab-basis -> Byrnes
 p-pol conversion as the RCWA bridge -- gated in validation/lumenairy_pmm_bridge.py).
 
-Cross-library pins (lumenairy 5.14.1): PMMStack(period, n_substrate=, n_superstrate=
+Cross-library pins (lumenairy 5.14.2): PMMStack(period, n_substrate=, n_superstrate=
 [INDICES], degree=, n_orders=); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
 [scalar or (3,3)], slant_angle=); set_source(wavelength, theta=); solve() ->
 (orders, R_eff(2, M), T_eff(2, M), jones_reflection(2, 2)) with rows/columns keyed

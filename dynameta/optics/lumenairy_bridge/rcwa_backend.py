@@ -1,12 +1,13 @@
 """Lumenairy RCWA as a DynaMeta optical backend (roadmap v0.5 A1).
 
-BRIDGE, not vendor: Lumenairy (>= 5.14.1) is an OPTIONAL dependency imported lazily inside
-the functions -- importing this module without it succeeds; calling raises with an install
-hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
+BRIDGE, not vendor: Lumenairy (>= 5.14.2) is a REQUIRED dependency of dynameta but is
+imported lazily inside the functions -- importing this module (and base dynameta) stays
+fast and matplotlib-free; calling against a broken/outdated environment raises with an
+install hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
 absorbers, metres, radians) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so no
 sign/unit translation happens here, only geometry/result adaptation.
 
-Pinned cross-library contracts (lumenairy 5.14.1, file:line refs in the roadmap):
+Pinned cross-library contracts (lumenairy 5.14.2, file:line refs in the roadmap):
 - RCWAStack(period, period_y=, n_superstrate=, n_substrate=, n_orders=, n_orders_y=):
   region media are complex refractive INDICES (or callables wl -> n); a stack is 1-D iff
   period_y/n_orders_y are omitted; the lattice is rectangular.
@@ -63,13 +64,15 @@ def _require_lumenairy():
         import lumenairy
     except ImportError as exc:
         raise ImportError(
-            "the Lumenairy RCWA backend needs the optional dependency: "
-            "pip install 'dynameta[lumenairy]' (or pip install lumenairy>=5.14.1)") from exc
-    ver = tuple(int(p) for p in str(lumenairy.__version__).split(".")[:2])
-    if ver < (5, 14):
-        raise ImportError("lumenairy >= 5.14 required (found {}); the bridge relies on the "
-                          "5.14 RCWAStack surface (dispersive specs, OOP tensor cascade, "
-                          "Ex/Ey result rows)".format(lumenairy.__version__))
+            "the Lumenairy backend needs lumenairy>=5.14.2 (a REQUIRED dependency of "
+            "dynameta -- this environment is missing it): pip install lumenairy") from exc
+    ver = tuple(int(p) for p in str(lumenairy.__version__).split(".")[:3])
+    if ver < (5, 14, 2):
+        raise ImportError("lumenairy >= 5.14.2 required (found {}); the bridge relies on "
+                          "the 5.14 RCWAStack surface (dispersive specs, OOP tensor "
+                          "cascade, Ex/Ey result rows) AND the 5.14.2 all-uniform PMM fix "
+                          "(unstructured PMMStack solves are silently wrong before it)"
+                          .format(lumenairy.__version__))
     return lumenairy
 
 
