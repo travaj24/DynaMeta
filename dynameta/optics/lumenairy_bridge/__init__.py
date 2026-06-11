@@ -10,6 +10,12 @@ from dynameta.optics.lumenairy_bridge.rcwa_backend import (LumenairyStackSolver,
                                                            design_to_rcwa_stack,
                                                            make_lumenairy_rcwa_solver,
                                                            rcwa_result_to_optical_result)
+from dynameta.optics.lumenairy_bridge.translate import (CallableOptical,
+                                                        lumenairy_eps_to_optical_model,
+                                                        optical_model_to_lumenairy_eps,
+                                                        rcwa_stack_to_design)
 
 __all__ = ["LumenairyStackSolver", "design_to_rcwa_stack", "make_lumenairy_rcwa_solver",
-           "rcwa_result_to_optical_result"]
+           "rcwa_result_to_optical_result", "CallableOptical",
+           "lumenairy_eps_to_optical_model", "optical_model_to_lumenairy_eps",
+           "rcwa_stack_to_design"]
