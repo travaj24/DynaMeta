@@ -34,7 +34,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
-from dynameta.core.layered import slice_eps_field
+from dynameta.core.layered import collapse_regions_to_layers, slice_eps_field
 from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _p_basis_conversion,
                                                            _pol_row, _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
@@ -99,15 +99,18 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)
     py = float(design.unit_cell.period_y_m)
-    eps_by_region = eps_by_region or {}
+    # mesh-region-keyed dicts (the run_pipeline/FEM bridge output) collapse to design-layer
+    # keys; identity when already layer-keyed
+    eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})
     stack = lum.PMMStack(px, n_substrate=complex(n_sub), n_superstrate=complex(n_super),
                          degree=int(degree), n_orders=int(n_orders))
     names: List[str] = []
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
-            if getattr(ef, "is_tensor", False) or (
-                    ef.values_zyx is not None and ef.values_zyx.shape[1:3] != (1, 1)):
+            v = ef.values_zyx
+            if getattr(ef, "is_tensor", False) or not np.allclose(
+                    v, v[:, :1, :1], rtol=1e-12, atol=0.0):
                 raise ValueError("PMM bridge: layer {!r} carries a laterally-structured "
                                  "gridded EpsField; PMM segments are analytic -- use the "
                                  "RCWA bridge for rasterized cells".format(L.name))
