@@ -97,32 +97,45 @@ pushed; each item is byte-identical off. One-line ledger (validations in `valida
 
 ## STATUS (2026-06-10, later): the deferred set above is COMPLETE
 
+STATUS UPDATE 2026-06-11: the 2026-06-10 evening ships closed three more items below -- GPU
+nonlinear kernels (d646875; `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware),
+lasing/cavity feedback (d588e50; `validation/fdtd_lasing_cavity.py` gates A-E green), and C(T)
+(cee64bd; `validation/thermal_ct_transient.py` gates A-D green). The DG oxide-interface hard wall
+is now EXPERIMENTAL (cef01d9), parked. The corrections are folded into the lines below.
+
 - **numba + jax 2D-TE nonlinear kernels** (chi2/Raman/gain): equivalence vs numpy 7.1e-14 /
   2.7e-14 all-active; jax stays DIFFERENTIABLE through the nonlinear carry (grad vs FD 1.1e-3)
-  (`fdtd_nonlinear_backends.py`). GPU nonlinear kernels (numba-cuda/cupy) stay guarded
-  (not yet implemented; CUDA 13.1 + RTX 4070 Ti + cupy 14.0.1 ARE available -- 2026-06-10 check).
-  Commit df5593d.
+  (`fdtd_nonlinear_backends.py`). GPU nonlinear kernels (numba-cuda/cupy) SHIPPED in commit
+  d646875: `validation/fdtd_gpu_nonlinear.py` gates A-E green on CUDA hardware (cupy + numba-cuda
+  vs numpy worst 2.6e-15, GATE E dynamic gain exact). Commit df5593d.
 - **3D chi2/Raman/gain** (numpy/cupy path; per-component chi2, ONE isotropic Raman coordinate on
   |E|^2, per-component gain): laterally-uniform 3D == the 2D kernel EXACTLY (rel 0.0)
   (`fdtd_3d_nonlinear.py`). Commit df5593d.
 - **Dynamic gain saturation** (field-coupled four-level populations, S_st = -E dPG/dt/(hbar w_a)):
   small-signal == clamped R20 5.3e-11; plateau inversion == the homogeneous saturation law
   dN0/(1 + A^2/A_sat^2) to 0.4% over A/A_sat = 0.15-4.4; sum(N) 3.6e-14
-  (`fdtd_gain_saturation.py`). Lasing/cavity feedback remains a follow-on. Commit df5593d.
+  (`fdtd_gain_saturation.py`). Lasing/cavity feedback SHIPPED in commit d588e50:
+  `validation/fdtd_lasing_cavity.py` gates A-E green (ring-down tau_p 4.2e-2, threshold straddle,
+  standing-wave clamp, omega_RO bracket, sum(N) 4.9e-13). Commit df5593d.
 - **Per-layer k(T)** (interface theta jumps): EXACT 1D sequential Kirchhoff inversion
   (`solve_thermal_kirchhoff_layered_1d`) + **transient k(T(x))** FEM with pointwise elementwise
   coefficients (`solve_thermal_transient_kt_fem`); theta-jump two-layer cross-check 1.4e-4
-  (`thermal_kt_multilayer.py`). C(T) still out of scope. Commit e7b0d86.
+  (`thermal_kt_multilayer.py`). C(T) SHIPPED in commit cee64bd: `validation/thermal_ct_transient.py`
+  gates A-D green (constant-C reduction 1.1e-15, chord-enthalpy O(dt) closure, FD oracle 3.2e-4).
+  Commit e7b0d86.
 - **In-Newton DG-DD** (4-variable DEVSIM Newton; `carriers/physics_density_gradient.py`): the
   Lambda-equation assembled Poisson-style (the recipe's blocker), gamma-ramped; classical
   reduction 5.6e-16, Lambda == independent FD stencil 8.4e-14, fixed-point decomposition 7.5e-16
-  (`dg_dd_in_newton.py`). Oxide-interface hard wall (interface equation) + bipolar twin =
-  follow-ons; the post-hoc closure remains the dead-layer tool. Commit cde280a.
+  (`dg_dd_in_newton.py`). Oxide-interface hard wall: EXPERIMENTAL contact-row pins
+  (`setup_dg_hard_wall`, commit cef01d9), parked (see Still-deferred below); bipolar twin queued
+  after; the post-hoc closure remains the dead-layer tool. Commit cde280a.
 
-Still deferred (documented): GPU (numba-cuda/cupy) NONLINEAR kernels -- not yet implemented
-(2026-06-10: CUDA 13.1 toolkit + RTX 4070 Ti + cupy 14.0.1 verified PRESENT and the linear GPU
-paths hardware-validated, so this is now ordinary development, not environment-blocked);
-lasing/cavity gain dynamics; DG oxide-interface hard wall + bipolar; C(T).
+Still deferred (documented): DG oxide-interface hard wall + bipolar -- no longer unstarted:
+`setup_dg_hard_wall` exists EXPERIMENTAL (commit cef01d9) as contact-row pins, parked (Newton
+stalls / DEVSIM convergence failure on the log-singular boundary layer); its failing WIP gate
+suite `validation/_dg_hard_wall_wip.py` is underscore-excluded from run_all; bipolar twin queued
+after. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
+shipped 2026-06-10 evening and left this list.
 
 ---
 
@@ -346,8 +359,9 @@ order-parameter field. (R5 transient heat above is also one of these.)
 ### R20. Active gain media: four-level rate-equation ADE in FDTD  [#34]  -- M, Med
 - Couple population rate equations to Maxwell; the lasing transition is a Lorentz oscillator whose
   strength is the instantaneous inversion `DeltaN(t)`. Enables loss-compensated/gain-assisted ENZ and
-  lasing-threshold studies -- the library can currently only model passive/lossy media (it even has
-  gain-as-a-bug tripwires). **LC-analog**: (a)+(e). **Oracle**: small-signal Lorentz-gain limit /
+  lasing-threshold studies -- the library could previously only model passive/lossy media (it even
+  had gain-as-a-bug tripwires); R20 and the lasing arc removed that limit. **LC-analog**: (a)+(e).
+  **Oracle**: small-signal Lorentz-gain limit /
   known steady-state gain coefficient.
 
 ### R21. Temperature- (and anisotropy-) dependent thermal conductivity k(T)  [#28]  -- M, Med

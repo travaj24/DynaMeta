@@ -41,13 +41,14 @@ floor at the numerical-precision ~1e-6, so a 1e-10 rel target never converges --
 is the real gate); (3) a staged solve -- a potential-only Poisson pre-solve (continuity frozen via
 eq_registry) then coupled Newton.
 
-2D/3D METASURFACE still needs work: there the ITO ohmic ground is a weak ~2-node edge contact
-(DEVSIM captures only the box corners of a lateral contact at a domain boundary; carriers/
-devsim_layered.py), which cannot anchor the continuity equation -- so gated DD is ill-conditioned
-there. The fix is to promote that to a FULL-EDGE ohmic contact via a thin adjacent edge-metal region
-(so the ground is a region-region interface with full-line node capture, like a horizontal-face
-contact); pending builder change. Equilibrium remains the validated tool for DC gate accumulation in
-2D/3D meanwhile.
+2D METASURFACE (validated): the ITO ohmic ground there was a weak ~2-node edge contact (DEVSIM
+captures only the box corners of a lateral contact at a domain boundary), which could not anchor
+the continuity equation. It was promoted to a FULL-EDGE ohmic ground via a thin adjacent edge-metal
+region (so the ground is a region-region interface with full-line node capture, like a
+horizontal-face contact) -- shipped and validated in 2D (8106849, validation/gated_dd_2d.py) and
+wired into the layered builder for the Park metasurface (77f92ab, validation/gated_dd_builder.py;
+devsim_layered.py _dd_full_edge_grounds). 1D + 2D + builder are validated; 3D DD on the gated
+stack remains the open extension.
 """
 
 from __future__ import annotations

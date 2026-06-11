@@ -11,8 +11,9 @@ a FULL boundary, so the continuity solve is well-posed -- and the recipe that ma
   (2) a relaxed RELATIVE tolerance (the trivial-bias Potential ~ 0 makes ||du||/||u|| floor at the
       numerical-precision ~1e-6, so a 1e-10 rel target never converges -- abs is the real gate),
   (3) a staged solve: a potential-only Poisson pre-solve (continuity frozen) then coupled Newton.
-The 2D metasurface needs the SAME ohmic contact promoted to a FULL EDGE (pending builder change);
-this 1D case is the physics + recipe proof.
+The 2D metasurface uses the SAME ohmic contact promoted to a FULL EDGE -- shipped 8106849
+(validation/gated_dd_2d.py) and builder-wired for the Park metasurface in 77f92ab
+(validation/gated_dd_builder.py); this 1D case is the physics + recipe proof.
 
 Physics check (the rigorous oracle): with no DC current the DD steady state MUST reduce to the
 local equilibrium Fermi-Dirac density n(z) = N_c F_1/2((Potential - Phi_c0)/V_t). So the DD and the

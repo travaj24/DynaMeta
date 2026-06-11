@@ -24,9 +24,10 @@ solution (Lambda-eq collapses to Lambda u = 0 -> Lambda = 0, the current to the 
 
 SCOPE (v1, validated): 1D/2D unipolar regions with ohmic contacts (u pinned to sqrt(n_contact),
 Lambda to 0 -- bulk contacts carry no quantum correction). The oxide-interface hard wall
-(u -> 0, the MOS dead layer) needs an interface equation on the semiconductor-oxide boundary --
-a follow-on; the validated post-hoc closure (carriers.density_gradient) remains the dead-layer
-tool. Bipolar adds the hole twin symmetrically (follow-on).
+(u -> 0, the MOS dead layer) now has an EXPERIMENTAL implementation, setup_dg_hard_wall
+(contact-row pins, unvalidated -- see its docstring); the validated post-hoc closure
+(carriers.density_gradient) remains the dead-layer tool. Bipolar adds the hole twin
+symmetrically (follow-on).
 """
 
 from __future__ import annotations
@@ -144,17 +145,21 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
     therefore pinned to the deep value -lambda_pin_factor * V_t: any pin a few V_t below the
     first interior node's Lambda drives the wall-edge Scharfetter-Gummel density to ~ 0
     (relative error e^(dLambda/V_t)), and the validation gates INSENSITIVITY to the factor
-    (validation/dg_hard_wall.py GATE C).
+    (validation/_dg_hard_wall_wip.py GATE C).
 
-    The ELECTRON row at the wall node is pinned to the Boltzmann quasi-equilibrium
-    n = N_D exp((Potential + QLambda)/V_t): for an INSULATING wall in 1D steady state no
-    current flows anywhere in the bar, so this relation is EXACT at the wall (it sits on the
-    equilibrium manifold, making the wall-edge Scharfetter-Gummel current vanish
-    identically -- the deep QLambda pin then drives n(wall) -> N_D e^(-pin) ~ 0). The bulk
-    (natural) continuity row at a bare contact node was measured NOT to behave as the
-    zero-flux row (n(wall) floated pin-dependently), hence the explicit pin. Potential keeps
-    its natural bulk row (probed on DEVSIM 2.10.0: equations without a contact_equation
-    retain the bulk assembly -- no empty-row singularity)."""
+    The ELECTRON row at the wall node is pinned to the SAME constraint as the bulk,
+    n = u^2 (the pinned u-floor then makes n(wall) = floor^2 ~ 0, the dead-layer endpoint).
+    The bulk (natural) continuity row at a bare contact node was measured NOT to behave as
+    the zero-flux row (n(wall) floated pin-dependently), hence the explicit pin. A Boltzmann
+    quasi-equilibrium pin n = N_D exp((Potential + QLambda)/V_t) is WRONG here: it would
+    evaluate the REGULARIZATION Lambda-pin as if it were the physical (log-divergent) wall
+    Lambda and return a finite density; n = u^2 references no Lambda and needs no
+    exponential. Potential keeps its natural bulk row (probed on DEVSIM 2.10.0: equations
+    without a contact_equation retain the bulk assembly -- no empty-row singularity).
+
+    Continuation plan (from cef01d9): tighter-tolerance damped Newton solves or a u_floor
+    continuation on the wall row; then the bipolar (hole) DG twin with
+    psi_eff,p = psi - Lambda_p."""
     if not (lambda_pin_factor > 0.0):
         raise ValueError("setup_dg_hard_wall: lambda_pin_factor must be > 0")
     from dynameta.constants import KB, Q_E as _QE, T_REF

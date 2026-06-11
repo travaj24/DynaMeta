@@ -20,7 +20,13 @@ GATE C (regularization insensitivity): the converged density is insensitive to t
 GATE D (sqrt(gamma) scaling): in frozen-psi mode the dead-layer deficit scales as L_q ~
         sqrt(gamma): deficit(gamma=0.25)/deficit(gamma=1) = 0.5 to < 5%.
 
-Run: python -m validation.dg_hard_wall
+STATUS (2026-06-11 re-run): GATE A FAILS at max |dn|/N0 = 0.80 (Newton stalls on a
+spurious wide-depletion state) and the self-consistent leg raises DEVSIM Convergence
+failure -- the honest current state. Continuation plan (from cef01d9): tighter-tolerance
+damped Newton solves or a u_floor continuation on the wall row; then the bipolar (hole)
+DG twin with psi_eff,p = psi - Lambda_p.
+
+Run: python -m validation._dg_hard_wall_wip
 """
 import contextlib
 import os
@@ -45,7 +51,7 @@ from dynameta.carriers.physics_drift_diffusion import (setup_contact_ohmic_dd,
 MSTAR = 0.35 * M_E
 LEN = 400e-9
 N0 = 4.0e26
-# REL 1e-5: the wall node's Boltzmann-pinned density ~ e^-pin N0 makes per-node
+# REL 1e-5: the wall node's n = u^2 pinned density ~ u_floor^2 ~ 1e-12 N0 makes per-node
 # RELATIVE updates floor out below this (the documented dc_solve precision-floor
 # ping-pong, here amplified by the tiny wall density); gates are at the 1e-2 level
 ABS_ERR, REL_ERR, MAX_ITER = 1.0e16, 1.0e-5, 200

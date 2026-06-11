@@ -117,37 +117,48 @@ def main():
         dB, "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: asymmetric patterned pillar vs FEM (the axis pin) ----
-    from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
-    from dynameta.optics.solver import solve_fem
-    pil = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 150e-9, 80e-9),
-                    material="pillar")
-    p_lays = [Layer("slab", 200e-9, "air", inclusions=[pil])]
-    R_fem, R_rc = {}, {}
-    for pol in ("x", "y"):
-        d = _design(p_lays, pol=pol, mesh=True)
-        geo = LayeredOpticalBuilder(d).build()
-        eps_vals = {r: complex(d.materials.get(geo.material_by_region[r]).eps(LAM))
-                    for r in geo.mesh.GetMaterials()}
-        import ngsolve as ng
-        eps_cf = geo.mesh.MaterialCF(eps_vals, default=1.0)
-        rf = solve_fem(geo, LAM, eps_cf, d.optical, order=2, n_super=1.0 + 0j,
-                       n_sub=1.5 + 0j)
-        R_fem[pol] = rf.R
-        rr = make_lumenairy_rcwa_solver(n_orders=8)(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-        R_rc[pol] = rr.R
-        print("[lrb]   pol {}: R fem {:.4f} / rcwa {:.4f}".format(pol, R_fem[pol],
-                                                                  R_rc[pol]), flush=True)
-    split_fem = R_fem["x"] - R_fem["y"]
-    split_rc = R_rc["x"] - R_rc["y"]
-    # discriminability: the FEM split must exceed BOTH backends' agreement scale (~1e-3
-    # measured), so the sign check is meaningful; 2.5e-3 = 2x the worst per-pol residual
-    g_c = bool(abs(R_rc["x"] - R_fem["x"]) < 2e-2 and abs(R_rc["y"] - R_fem["y"]) < 2e-2
-               and abs(split_fem) > 2.5e-3 and np.sign(split_rc) == np.sign(split_fem))
-    ok = ok and g_c
-    print("[lrb] GATE C: asymmetric pillar vs FEM (dRx {:.1e}, dRy {:.1e}; splits fem "
-          "{:+.4f} / rcwa {:+.4f} same-sign) -> {}".format(
-              abs(R_rc["x"] - R_fem["x"]), abs(R_rc["y"] - R_fem["y"]), split_fem,
-              split_rc, "PASS" if g_c else "FAIL"), flush=True)
+    # ngsolve is an OPTIONAL extra (dynameta[solvers]); lumenairy being a required core
+    # dependency means this validation now RUNS in minimal environments, so the FEM-oracle
+    # gate must skip honestly there instead of crashing on the netgen import.
+    if importlib.util.find_spec("ngsolve") is None:
+        print("[lrb] GATE C: SKIP (ngsolve not installed -- FEM oracle unavailable; "
+              "gates A/B/D/E/F still gate the bridge)", flush=True)
+    else:
+        from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
+        from dynameta.optics.solver import solve_fem
+        pil = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 150e-9, 80e-9),
+                        material="pillar")
+        p_lays = [Layer("slab", 200e-9, "air", inclusions=[pil])]
+        R_fem, R_rc = {}, {}
+        for pol in ("x", "y"):
+            d = _design(p_lays, pol=pol, mesh=True)
+            geo = LayeredOpticalBuilder(d).build()
+            eps_vals = {r: complex(d.materials.get(geo.material_by_region[r]).eps(LAM))
+                        for r in geo.mesh.GetMaterials()}
+            eps_cf = geo.mesh.MaterialCF(eps_vals, default=1.0)
+            rf = solve_fem(geo, LAM, eps_cf, d.optical, order=2, n_super=1.0 + 0j,
+                           n_sub=1.5 + 0j)
+            R_fem[pol] = rf.R
+            rr = make_lumenairy_rcwa_solver(n_orders=8)(d, None, {}, LAM,
+                                                        1.0 + 0j, 1.5 + 0j)
+            R_rc[pol] = rr.R
+            print("[lrb]   pol {}: R fem {:.4f} / rcwa {:.4f}".format(pol, R_fem[pol],
+                                                                      R_rc[pol]),
+                  flush=True)
+        split_fem = R_fem["x"] - R_fem["y"]
+        split_rc = R_rc["x"] - R_rc["y"]
+        # discriminability: the FEM split must exceed BOTH backends' agreement scale
+        # (~1e-3 measured), so the sign check is meaningful; 2.5e-3 = 2x the worst
+        # per-pol residual
+        g_c = bool(abs(R_rc["x"] - R_fem["x"]) < 2e-2
+                   and abs(R_rc["y"] - R_fem["y"]) < 2e-2
+                   and abs(split_fem) > 2.5e-3
+                   and np.sign(split_rc) == np.sign(split_fem))
+        ok = ok and g_c
+        print("[lrb] GATE C: asymmetric pillar vs FEM (dRx {:.1e}, dRy {:.1e}; splits "
+              "fem {:+.4f} / rcwa {:+.4f} same-sign) -> {}".format(
+                  abs(R_rc["x"] - R_fem["x"]), abs(R_rc["y"] - R_fem["y"]), split_fem,
+                  split_rc, "PASS" if g_c else "FAIL"), flush=True)
 
     # ---- GATE D: dispersive sweep path == per-wavelength + TMM each wavelength ----
     # dispersion enters the PRODUCTION way: through the per-wavelength assemble_at closure
