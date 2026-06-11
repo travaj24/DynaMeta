@@ -147,7 +147,10 @@ def main():
             None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     except ValueError:
         g_d += 1
-    grid = EpsField(values_zyx=np.full((3, 1, 8), 2.0 + 0j),
+    # genuinely x-VARYING values: laterally-uniform grids are in scope (they slice to
+    # uniform slabs); only true lateral structure must raise
+    grid = EpsField(values_zyx=np.broadcast_to(2.0 + 0.1 * np.arange(8.0),
+                                               (3, 1, 8)).astype(complex),
                     z_axis_u=np.array([0.0, 50.0, 100.0]),
                     x_axis_u=np.arange(8.0), y_axis_u=np.array([0.0]))
     try:

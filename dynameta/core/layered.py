@@ -148,3 +148,66 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
         cell = np.transpose(0.5 * (v[k] + v[k + 1]), (1, 0))         # (Nx, Ny) -- explicit, never bare T
         slabs.append(LayeredSlab(float(z_m[k + 1] - z_m[k]), eps_cell=cell))
     return slabs
+
+
+def _eps_fields_equal(a, b) -> bool:
+    """True when two EpsFields carry the same eps content (uniform scalars/tensors compare
+    by value; gridded fields by shape + axes + values). Used by collapse_regions_to_layers
+    to decide whether lateral mesh subregions of one design layer can merge."""
+    ua, ub = getattr(a, "is_uniform", True), getattr(b, "is_uniform", True)
+    if ua != ub:
+        return False
+    if ua:
+        ta, tb = a.tensor is not None, b.tensor is not None
+        if ta != tb:
+            return False
+        if ta:
+            return bool(np.allclose(np.asarray(a.tensor), np.asarray(b.tensor),
+                                    rtol=1e-9, atol=0.0))
+        return bool(np.isclose(complex(a.scalar), complex(b.scalar), rtol=1e-9, atol=0.0))
+    va, vb = np.asarray(a.values_zyx), np.asarray(b.values_zyx)
+    if va.shape != vb.shape:
+        return False
+    for axa, axb in ((a.z_axis_u, b.z_axis_u), (a.y_axis_u, b.y_axis_u),
+                     (a.x_axis_u, b.x_axis_u)):
+        if axa.shape != axb.shape or not np.allclose(axa, axb, rtol=1e-9, atol=0.0):
+            return False
+    return bool(np.allclose(va, vb, rtol=1e-9, atol=0.0))
+
+
+def collapse_regions_to_layers(design, eps_by_region) -> dict:
+    """Collapse a MESH-REGION-keyed eps_by_region (what run_pipeline's FEM bridge emits,
+    where a design layer may be split into lateral subregions 'ito_inpatch'/'ito_outside*'
+    and inclusion overlays 'grating__incl0'/'grating__bg1') into the DESIGN-LAYER-keyed
+    dict the layered extractors (TMM slicer, Lumenairy RCWA/PMM bridges) consume.
+
+    Per design layer: '__incl' overlay entries are DROPPED (the layered rasterizers freeze
+    inclusion eps at the material value -- the documented contract); the remaining members
+    must carry the SAME eps content (lateral FEM splits of one layer share the full-cell
+    lifted field, so identical-by-construction) and merge to one entry; members that
+    genuinely differ (a laterally split effect modulation no layered extractor can
+    represent) raise. IDENTITY for an already-layer-keyed dict; superstrate / substrate /
+    pml_* / other unmatched keys are ignored. Longest layer name claims a key first, so
+    overlapping layer-name prefixes cannot mis-assign."""
+    if not eps_by_region:
+        return {}
+    remaining = dict(eps_by_region)
+    out = {}
+    for L in sorted(design.stack.layers, key=lambda l: -len(l.name)):
+        members = {}
+        for k in list(remaining):
+            if k == L.name or k.startswith(L.name + "_"):
+                members[k] = remaining.pop(k)
+        members = {k: v for k, v in members.items() if "__incl" not in k[len(L.name):]}
+        if not members:
+            continue
+        keys = sorted(members)
+        ref = members[keys[0]]
+        for k in keys[1:]:
+            if not _eps_fields_equal(ref, members[k]):
+                raise ValueError(
+                    "collapse_regions_to_layers: layer {!r} subregions {} carry DIFFERENT "
+                    "eps fields (a laterally split modulation); the layered extractors "
+                    "cannot represent it -- use the FEM solver".format(L.name, keys))
+        out[L.name] = ref
+    return out

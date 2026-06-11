@@ -174,3 +174,54 @@ def test_uniform_eps_by_region_entry_reaches_tmm():
     with pytest.raises(ValueError):                        # anisotropic effect -> loud, not silent
         layered_stack_from_design(d, lam, eps_by_region={
             "film": EpsField(tensor=np.diag([4.0, 4.0, 9.0]).astype(complex))})
+
+
+def _two_layer_design():
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import OpticalSpec
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("hi", ConstantOptical(complex(4.0, 0.0))))
+    return Design(name="c", unit_cell=UnitCell.square(300e-9),
+                  stack=Stack(layers=[Layer("ito", 5e-9, "hi"),
+                                      Layer("grating", 50e-9, "air")],
+                              superstrate_material="air", substrate_material="air"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+
+
+def test_collapse_regions_to_layers_mesh_keyed():
+    # the run_pipeline/FEM bridge emits MESH-region keys (lateral splits 'ito_inpatch'/
+    # 'ito_outside*', inclusion overlays 'grating__incl0'); the layered extractors want
+    # DESIGN-layer keys. Identical lateral splits merge; '__incl' overlays drop (the
+    # rasterizer freezes inclusion eps at the material value); pml/superstrate ignored.
+    from dynameta.core.eps_field import EpsField
+    from dynameta.core.layered import collapse_regions_to_layers
+    d = _two_layer_design()
+    grad = EpsField(values_zyx=np.linspace(2.0, 3.0, 12).reshape(3, 2, 2).astype(complex),
+                    z_axis_u=np.array([0.0, 2.5, 5.0]),
+                    x_axis_u=np.array([0.0, 300.0]), y_axis_u=np.array([0.0, 300.0]))
+    grad2 = EpsField(values_zyx=grad.values_zyx.copy(), z_axis_u=grad.z_axis_u.copy(),
+                     x_axis_u=grad.x_axis_u.copy(), y_axis_u=grad.y_axis_u.copy())
+    src = {"ito_inpatch": grad, "ito_outside": grad2,
+           "grating": EpsField(scalar=1.0 + 0j),
+           "grating__bg1": EpsField(scalar=1.0 + 0j),
+           "grating__incl0": EpsField(scalar=-100.0 + 8j),
+           "superstrate": EpsField(scalar=1.0 + 0j),
+           "pml_top": EpsField(scalar=1.0 + 0j)}
+    out = collapse_regions_to_layers(d, src)
+    assert set(out) == {"ito", "grating"}
+    assert out["ito"] is grad and out["grating"].scalar == 1.0 + 0j
+
+
+def test_collapse_regions_to_layers_identity_and_conflict():
+    from dynameta.core.eps_field import EpsField
+    from dynameta.core.layered import collapse_regions_to_layers
+    d = _two_layer_design()
+    layer_keyed = {"ito": EpsField(scalar=2.0 + 0j)}
+    assert collapse_regions_to_layers(d, layer_keyed) == layer_keyed   # identity
+    assert collapse_regions_to_layers(d, {}) == {}
+    with pytest.raises(ValueError):                        # genuinely split modulation -> loud
+        collapse_regions_to_layers(d, {"ito_inpatch": EpsField(scalar=2.0 + 0j),
+                                       "ito_outside": EpsField(scalar=3.0 + 0j)})
