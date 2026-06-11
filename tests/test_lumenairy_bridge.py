@@ -98,6 +98,50 @@ def test_round_trip_design_geometry():
 
 
 @needs_lum
+def test_pmm_uniform_stack_matches_tmm():
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm_solver
+    from dynameta.optics.tmm_reference import make_layered_tmm_solver
+    d = _uniform_design()
+    lam = 1.31e-6
+    r_t = make_layered_tmm_solver()(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    r_p = make_lumenairy_pmm_solver(degree=10, n_orders=9)(d, None, {}, lam,
+                                                           1.0 + 0j, 1.5 + 0j)
+    assert r_p.R == pytest.approx(r_t.R, abs=1e-8)
+    assert r_p.T == pytest.approx(r_t.T, abs=1e-8)
+    assert r_p.r == pytest.approx(r_t.r, abs=1e-8)
+    assert r_p.t is None                                  # PMM exposes no transmission Jones
+
+
+@needs_lum
+def test_pmm_lamellar_segments_partition():
+    from dynameta.geometry import Inclusion, Layer
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.optics.lumenairy_bridge import layer_to_pmm_segments
+    per = 600e-9
+    d = _uniform_design()
+    lines = Inclusion(shape=Rectangle(per / 2.0, per / 2.0, 0.5 * per, per), material="hi")
+    lay = Layer("g", 120e-9, "air", inclusions=[lines])
+    segs = layer_to_pmm_segments(lay, d, 1.31e-6, per, per)
+    assert sum(w for w, _ in segs) == pytest.approx(1.0, abs=0.0)  # exact unit sum
+    assert any(e == pytest.approx(complex(4.0, 0.3)) for _, e in segs)
+    assert any(e == pytest.approx(1.0 + 0j) for _, e in segs)
+
+
+@needs_lum
+def test_pmm_partial_y_rectangle_raises():
+    from dynameta.geometry import Inclusion, Layer
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.optics.lumenairy_bridge import layer_to_pmm_segments
+    per = 600e-9
+    d = _uniform_design()
+    half = Inclusion(shape=Rectangle(per / 2.0, per / 4.0, 0.3 * per, 0.5 * per),
+                     material="hi")
+    lay = Layer("bad", 120e-9, "air", inclusions=[half])
+    with pytest.raises(ValueError):
+        layer_to_pmm_segments(lay, d, 1.31e-6, per, per)
+
+
+@needs_lum
 def test_callable_optical_dispersion_chain():
     from dynameta.optics.lumenairy_bridge import (CallableOptical,
                                                   optical_model_to_lumenairy_eps)
