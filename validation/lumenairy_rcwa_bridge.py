@@ -18,6 +18,9 @@ GATE D (sweep path): solve_sweep == the per-wavelength path identically on a dis
         wavelength -- no band-centre freeze).
 GATE E (uniform tensor): a planar-LC diagonal tensor diag(n_e^2, n_o^2, n_o^2) -- x-pol
         sees n_e, y-pol sees n_o; each matches the scalar TMM at that index < 1e-6.
+GATE F (per-layer absorption): absorption=True fills per_region_absorption keyed by DESIGN
+        layer name -- a lossless layer takes ~0, layers close on A_independent == A ==
+        1 - R - T (and A == TMM), and a graded layer's slabs aggregate into ONE key.
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -192,6 +195,40 @@ def main():
     ok = ok and g_e
     print("[lrb] GATE E: uniform LC tensor (x-pol -> n_e, y-pol -> n_o) vs scalar TMM: "
           "worst |d| = {:.2e} -> {}".format(worstE, "PASS" if g_e else "FAIL"), flush=True)
+
+    # ---- GATE F: per-layer absorption attribution (absorption=True mapping) ----
+    # lossy + lossless 2-layer stack: per_region_absorption must be keyed by the DESIGN
+    # layer names, the lossless layer must take ~0, the layers must close on
+    # A_independent == A == 1 - R - T (Lumenairy's attribution is energy-conserving by
+    # construction), and A must match TMM. Then a GRADED layer (gridded EpsField sliced
+    # into many slabs sharing one design name) must aggregate into ONE key, still closing.
+    solver_a = make_lumenairy_rcwa_solver(n_orders=2, absorption=True)
+    lays = [Layer("lossy", 120e-9, "hi"), Layer("clear", 200e-9, "lo")]
+    d = _design(lays, pol="y")
+    r_a = solver_a(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    r_t = tmm(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    pra = r_a.per_region_absorption or {}
+    errF = max(abs(r_a.A - r_t.A),
+               abs(r_a.A_independent - r_a.A) if r_a.A_independent is not None else 1.0,
+               abs(sum(pra.values()) - r_a.A) if pra else 1.0,
+               abs(pra.get("clear", 1.0)))
+    keysF = set(pra) == {"lossy", "clear"}
+    nz = 40
+    z = np.linspace(0.0, 300.0, nz)
+    eps_z = 2.0 + 1.5 * (z / z[-1]) + 0.2j * (z / z[-1])  # graded lossy profile
+    ef = EpsField(values_zyx=eps_z.reshape(nz, 1, 1), z_axis_u=z,
+                  x_axis_u=np.array([0.0]), y_axis_u=np.array([0.0]))
+    d_g = _design([Layer("graded", 300e-9, "lo")], pol="y")
+    r_g = solver_a(d_g, None, {"graded": ef}, LAM, 1.0 + 0j, 1.5 + 0j)
+    pg = r_g.per_region_absorption or {}
+    errG = max(abs(sum(pg.values()) - r_g.A) if pg else 1.0,
+               abs(r_g.A_independent - r_g.A) if r_g.A_independent is not None else 1.0)
+    keysG = set(pg) == {"graded"}
+    g_f = bool(keysF and keysG and errF < 1e-9 and errG < 1e-9)
+    ok = ok and g_f
+    print("[lrb] GATE F: per-layer absorption (keys {}, lossless ~0, closure {:.1e}; "
+          "graded slabs -> one key, closure {:.1e}) -> {}".format(
+              sorted(pra), errF, errG, "PASS" if g_f else "FAIL"), flush=True)
 
     print("[lrb] *** LUMENAIRY RCWA BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

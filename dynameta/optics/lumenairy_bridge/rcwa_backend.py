@@ -46,7 +46,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
-from dynameta.core.layered import LayeredStack, slice_eps_field
+from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
+                                   slice_eps_field)
 from dynameta.optics.fdtd_seam import _cell_axes, _layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
@@ -107,7 +108,14 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)
     py = float(design.unit_cell.period_y_m)
-    eps_by_region = eps_by_region or {}
+    # mesh-region-keyed dicts (the run_pipeline/FEM bridge output: 'ito_inpatch',
+    # 'grating__incl0', ...) collapse to design-layer keys; identity when already layer-keyed
+    eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})
+
+    def _y_invariant(ef):
+        v = ef.values_zyx
+        return v is None or v.shape[1] == 1 or bool(
+            np.allclose(v, v[:, :1], rtol=1e-12, atol=0.0))
 
     def _lamellar(L):
         """All inclusions are full-y rectangles (y-invariant grating lines) -> the layer is
@@ -130,7 +138,7 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     def _needs_2d(L):
         ef = eps_by_region.get(L.name)
         grid_2d = (ef is not None and not getattr(ef, "is_uniform", True)
-                   and ef.values_zyx is not None and ef.values_zyx.shape[1] > 1)
+                   and ef.values_zyx is not None and not _y_invariant(ef))
         utensor = ef is not None and getattr(ef, "is_tensor", False)
         return (bool(L.inclusions) and not _lamellar(L)) or grid_2d or utensor
 
@@ -162,13 +170,18 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
                 if slab.eps is not None:
                     stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 elif slab.eps_cell is not None:
+                    cell = np.asarray(slab.eps_cell, dtype=complex)
+                    if not is_2d and cell.shape[1] > 1:
+                        cell = cell[:, :1]                # y-invariant grid on a 1-D stack
                     stack.add_layer(slab.thickness_m,
-                                    eps_cell=_meet_sampling(slab.eps_cell, s_min_x, s_min_y),
+                                    eps_cell=_meet_sampling(cell, s_min_x, s_min_y),
                                     formulation=formulation)
                 else:
+                    cell = np.asarray(slab.eps_tensor_cell, dtype=complex)
+                    if not is_2d and cell.shape[1] > 1:
+                        cell = cell[:, :1]
                     stack.add_layer(slab.thickness_m,
-                                    eps_tensor_cell=_meet_sampling(slab.eps_tensor_cell,
-                                                                   s_min_x, s_min_y))
+                                    eps_tensor_cell=_meet_sampling(cell, s_min_x, s_min_y))
                 names.append(L.name)
             continue
         if ef is not None and getattr(ef, "is_tensor", False):

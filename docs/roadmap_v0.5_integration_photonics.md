@@ -64,17 +64,35 @@ tips the decision to a live dependency:
 5. Sweep path == per-wavelength path; dispersive-material sweep vs DynaMeta Material models.
 6. Tensor layer (uniform LC tilt) vs the UPML tensor FEM (`lc_tilted_fem` geometry).
 
-### A2. PMM backend bridge (task #170)
+### A2. PMM backend bridge (task #170) -- SHIPPED
 
 Same seam, `pmm_backend.py`: the high-accuracy path for 1-D gratings (incl. TM/metals where
-RCWA's factorization is the bottleneck) and the full-3x3 / out-of-plane tensor cases
-(pmm_jones_2d). Primary roles in DynaMeta:
-- **Reference oracle**: PMM has no Fourier-factorization accuracy floor -- use it as the
+RCWA's factorization is the bottleneck) and the full-3x3 / out-of-plane tensor cases.
+Primary roles in DynaMeta:
+- **Reference oracle**: 1-D PMM has no Fourier-factorization accuracy floor -- the
   convergence referee for RCWA settings on hard (metallic/tensor) cells.
 - **Tensor specialist**: out-of-plane (xz/yz-coupled) tensors that the in-plane RCWA tensor
   path does not carry -- magneto-optic and slanted-LC cells.
-Validation: PMM-vs-RCWA convergence ladder on a metal grating; PMM full-3x3 vs the gyrotropic
-UPML FEM + circular-eigenmode Jones-TMM (`magneto_optic_faraday` geometry).
+Shipped `validation/lumenairy_pmm_bridge.py` (all green): unstructured vs TMM 8.9e-14;
+referee ladder -- the RCWA bridge's lamellar 1-D fast path converges to the spectral PMM
+reference 8.9e-2 -> 7.3e-4 on a lossy metal TM grating; gyrotropic (3,3) tensor slab vs the
+hand-derived circular-eigenmode Jones 4.3e-14; scope guards (partial-y / laterally
+structured grids / conical raise loudly). Scope: 1-D lamellar + uniform tensors; no
+transmission Jones (OpticalResult.t = None).
+
+Landed alongside (the synergy glue A2 exposed):
+- `collapse_regions_to_layers` (core/layered.py): the run_pipeline/FEM bridge emits
+  MESH-region-keyed eps_by_region ('ito_inpatch', 'grating__incl0', ...); both Lumenairy
+  bridges now collapse those to design-layer keys automatically, so
+  `run_pipeline(optical_solver=make_lumenairy_rcwa_solver(...))` works against the DEFAULT
+  DEVSIM/NGSolve builders out of the box.
+- Lamellar 1-D fast path in the RCWA bridge (y-invariant full-period rectangles and
+  y-invariant gridded fields solve as true 1-D RCWA) + `formulation=` plumbed through.
+- Per-layer absorption attribution verified (GATE F in `lumenairy_rcwa_bridge.py`):
+  per_region_absorption keyed by design layer, graded slabs aggregate, closure to 1e-16.
+- Flagship example `examples/lumenairy_gated_grating.py`: DEVSIM gated-ITO accumulation ->
+  graded Drude eps(z) -> RCWA bridge (1-D fast path, absorption attribution) with the PMM
+  bridge as cross-method referee (|dR| 4e-3 ungated); max gate modulation |dR| = 0.26.
 
 ### A3. Bidirectional translation tools (task #171)
 
