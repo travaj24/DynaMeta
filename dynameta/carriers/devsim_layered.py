@@ -134,7 +134,7 @@ class LayeredDevsimBuilder:
         ground -- a thin adjacent edge-metal region so the ground is a region-region interface
         (full-line node capture) instead of a weak 2-node domain-boundary contact, which cannot
         anchor the continuity equation (gated DD otherwise does not converge). A layer may be
-        grounded on BOTH edges (e.g. the Park ITO). Equilibrium layers are NOT affected."""
+        grounded on BOTH edges (e.g. the reference ITO). Equilibrium layers are NOT affected."""
         d = self.design
         out: Dict[str, set] = {}
         for E in d.electrodes:

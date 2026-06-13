@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 from dynameta.carriers.devsim_layered import ELECTRON_DENSITY, LayeredDevsimBuilder
 from dynameta.materials import DrudeOptical, M_E
 from dynameta.optics.fdtd_nd import _cpml_z, _have_jax
@@ -71,7 +71,7 @@ def _orient_front_first(n_off, n_on):
 
 
 def _solve_profiles():
-    d = build_park_design("drift_diffusion")
+    d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="dts_m", device_name="dts_d")
     with _quiet():
         cf_off = b.solve(BiasPoint({GATE: V_OFF}, "off"))

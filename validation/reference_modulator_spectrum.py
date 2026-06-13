@@ -1,22 +1,22 @@
-"""Tier-2 confirmation: re-tabulate the Park reflection spectrum with the CORRECTED
+"""Tier-2 confirmation: re-tabulate the reference reflection spectrum with the CORRECTED
 gate-oxide DC permittivity (HfO2 18 / Al2O3 9), which raised the +2V accumulation
 1.09->1.35. Compare +2V vs -2V near the cavity resonance to confirm the stronger
 accumulation deepens the modulation (the eps_static_dc fix is already Stage-1
-validated; this is the optical confirmation). Run: python -m validation.park_spectrum
+validated; this is the optical confirmation). Run: python -m validation.reference_modulator_spectrum
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 from dynameta.sweep import Sweep, BiasPoint
 from dynameta.pipeline import run_pipeline
 
-design = build_park_design()           # equilibrium ITO, eps_static_dc=18/9 in effect
+design = build_reference_modulator()           # equilibrium ITO, eps_static_dc=18/9 in effect
 sweep = Sweep(
     bias_points=[BiasPoint({"top_contact": +2.0}, "patch+2V"),
                   BiasPoint({"top_contact": -2.0}, "patch-2V")],
     wavelengths_nm=[1200.0, 1250.0, 1300.0])
 rows = run_pipeline(design, sweep, verbose=True)
-print("[t] --- Park spectrum (corrected oxide DC eps 18/9) ---", flush=True)
+print("[t] --- reference spectrum (corrected oxide DC eps 18/9) ---", flush=True)
 by_wl = {}
 for r in rows:
     res = r.result
@@ -27,4 +27,4 @@ for wl in sorted(by_wl):
     if "patch+2V" in d and "patch-2V" in d:
         print("[t] lam={:.0f}nm  |dR(+2V vs -2V)| = {:.4f}".format(
             wl, abs(d["patch+2V"] - d["patch-2V"])), flush=True)
-print("[t] *** PARK SPECTRUM RE-TABULATION DONE ***", flush=True)
+print("[t] *** REFERENCE MODULATOR SPECTRUM RE-TABULATION DONE ***", flush=True)

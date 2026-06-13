@@ -1,5 +1,5 @@
 """Fast unit tests for the resolved Drude scattering/mass closures (materials/scattering.py, roadmap R2).
-Pure numpy; the eps-level + Park gates live in validation/drude_matthiessen_kane.py."""
+Pure numpy; the eps-level + reference gates live in validation/drude_matthiessen_kane.py."""
 import numpy as np
 import pytest
 
@@ -10,8 +10,8 @@ N = np.array([1e26, 4e26, 1e27, 2e27])
 LAM = 1500e-9
 
 
-def _park_ito_dos_mass(n, m_low=0.27 * M_E, alpha=0.5):
-    """Independent reference: the exact bulk Kane DOS-mass closure used in examples/park_2021."""
+def _reference_ito_dos_mass(n, m_low=0.27 * M_E, alpha=0.5):
+    """Independent reference: the exact bulk Kane DOS-mass closure (the ITO reference)."""
     n = np.maximum(np.asarray(n, float), 1e10)
     kF = (3.0 * np.pi ** 2 * n) ** (1.0 / 3.0)
     E_F = HBAR ** 2 * kF ** 2 / (2.0 * m_low)
@@ -23,9 +23,9 @@ def test_kane_alpha_zero_is_constant():
     assert np.allclose(m(N), 0.225 * M_E, rtol=0, atol=0)        # exactly m0
 
 
-def test_kane_matches_park_reference():
+def test_kane_matches_reference():
     m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5, exponent=0.5)
-    assert np.allclose(m(N), _park_ito_dos_mass(N), rtol=1e-12)
+    assert np.allclose(m(N), _reference_ito_dos_mass(N), rtol=1e-12)
 
 
 def test_kane_monotone_and_wp2_sublinear():

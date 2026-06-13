@@ -33,7 +33,7 @@ from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.optics.fdtd_seam import run_fdtd_sweep
 from dynameta.optics.tmm_reference import layered_rta, layered_stack_from_design
 from dynameta.sweep import BiasPoint
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 
 from validation.fdtd_modulator_study import _design as _optical_design
 
@@ -53,7 +53,7 @@ def _quiet():
 
 def _electrical_gate_C_per_area():
     """DEVSIM 2D DD + ssac on the Park metasurface -> the gate areal capacitance [F/m^2]."""
-    d = build_park_design("drift_diffusion")
+    d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="spec_m", device_name="spec_d")
     with _quiet():
         b.solve(BiasPoint({GATE: VG}, "g{:+.0f}".format(VG)))

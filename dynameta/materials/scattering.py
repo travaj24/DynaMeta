@@ -19,14 +19,14 @@ import numpy as np
 
 from dynameta.constants import Q_E, M_E, HBAR
 
-_N_FLOOR = 1.0e10        # mirror examples.park_2021.ito_dos_mass floor (avoid 0**(1/3) edge)
+_N_FLOOR = 1.0e10        # mirror the ITO DOS-mass closure floor (avoid 0**(1/3) edge)
 
 
 @dataclass(frozen=True)
 class KaneOpticalMass:
     """Density-dependent Kane (nonparabolic) optical/conductivity mass:
         m_opt(n) = m0 * (1 + 2 alpha_eV E_F(n)/q)^p,   E_F(n) = hbar^2 (3 pi^2 n)^(2/3) / (2 m0).
-    Same functional form as examples.park_2021.ito_dos_mass (the DOS-mass closure), but this is the
+    Same functional form as the ITO DOS-mass closure, but this is the
     OPTICAL mass (its own m0/alpha in general). alpha_eV=0 -> exactly m0 (constant). Callable of n -> kg."""
     m0_kg: float
     alpha_eV: float = 0.0
