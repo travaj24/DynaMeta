@@ -2,7 +2,7 @@
 Example: gated ITO ENZ modulator under a gold LAMELLAR grating, solved through the
 Lumenairy RCWA bridge -- the v0.5 integration flagship.
 
-The device is reference-2021-style gate cavity (Al-Nd mirror / oxide-ITO-oxide / Au lines)
+The device is a gate-cavity design (Al-Nd mirror / oxide-ITO-oxide / Au lines)
 with the nanopatch swapped for y-invariant grating lines, so the SAME Design exercises:
 
   1. real DEVSIM equilibrium carriers (ITO accumulation vs gate bias),

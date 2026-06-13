@@ -10,8 +10,8 @@
 ## 1. PROJECT GOALS
 
 Multi-physics simulation of a **tunable amplitude / phase metasurface
-modulator** based on reference et al. 2021 (gap-plasmon nanopatch
-antenna over an ITO-loaded MIM cavity).
+modulator** based on a gap-plasmon nanopatch
+antenna over an ITO-loaded MIM cavity.
 
 The simulation predicts:
 - DC carrier-density redistribution in the ITO under bias
