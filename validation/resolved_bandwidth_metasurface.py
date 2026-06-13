@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import devsim as ds
 
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import ac_analysis as AC
 from dynameta.sweep import BiasPoint
@@ -72,7 +72,7 @@ def _resolve_gate(dev, v):
 def main():
     print("[t] === Frequency-resolved gate C(omega) on the Park metasurface (2D DD, ssac) ===",
           flush=True)
-    d = build_park_design("drift_diffusion")
+    d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="rbm_m", device_name="rbm_d")
     n_bg = float(d.materials.get("ITO").transport.n_bg_m3)
     with _quiet():

@@ -21,7 +21,7 @@ Pluggable Stage-1 DC solve methods.
              for -- untested there; the PROVEN route for gated accumulation is
              the staged Poisson-presolve + coupled Newton recipe:
              validation/gated_dd.py (1D), gated_dd_2d.py (2D full-edge ohmic
-             ground), gated_dd_builder.py (Park metasurface). (The
+             ground), gated_dd_builder.py (the reference metasurface). (The
              physics_drift_diffusion KNOWN LIMITATION marker this caveat once
              cited was removed 7e77f1c, 2026-06-02.) "newton" stays the default.
 

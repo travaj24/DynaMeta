@@ -29,7 +29,7 @@ from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, ELECTRON_DENSITY, POTENTIAL)
 from dynameta.core.interfaces import CarrierSolver, RegionInfo
 from dynameta.sweep import Sweep, BiasPoint
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 
 
 class AnalyticAccumulationSolver:
@@ -116,7 +116,7 @@ def main(argv=None):
     p.add_argument("--fem", action="store_true",
                     help="run the FULL pipeline (carriers->bridge->FEM) at 1 wavelength")
     args = p.parse_args(argv)
-    design = build_park_design()
+    design = build_reference_modulator()
     _self_check(design)
     if args.fem:
         from dynameta.pipeline import run_pipeline

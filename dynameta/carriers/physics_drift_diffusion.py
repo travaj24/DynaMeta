@@ -29,7 +29,7 @@ F_1/2 in an edge model instead hangs DEVSIM). At equilibrium (Jn = 0) the enhanc
 gives n ~ exp(psi/(g V_t)), the Fermi-Dirac softening.
 
 VALIDATED REGIME: transport / current-flow and zero bias -- the clean
-[metal/ITO/metal] slab converges, and Park zero-bias gives n = n_bg. This is the
+[metal/ITO/metal] slab converges, and reference zero-bias gives n = n_bg. This is the
 regime DD is for (currents, J-V, dynamics).
 
 GATED CAPACITOR (no DC current path): CONVERGES in 1D and reduces to the equilibrium Fermi-Dirac
@@ -46,7 +46,7 @@ captures only the box corners of a lateral contact at a domain boundary), which 
 the continuity equation. It was promoted to a FULL-EDGE ohmic ground via a thin adjacent edge-metal
 region (so the ground is a region-region interface with full-line node capture, like a
 horizontal-face contact) -- shipped and validated in 2D (8106849, validation/gated_dd_2d.py) and
-wired into the layered builder for the Park metasurface (77f92ab, validation/gated_dd_builder.py;
+wired into the layered builder for the reference metasurface (77f92ab, validation/gated_dd_builder.py;
 devsim_layered.py _dd_full_edge_grounds). 1D + 2D + builder are validated; 3D DD on the gated
 stack remains the open extension.
 """

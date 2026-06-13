@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
 SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
-        "park_spectrum"}
+        "reference_modulator_spectrum"}
 PER_SCRIPT_TIMEOUT_S = 1800
 
 # The fast solver-free tier (opt-in; see module docstring). Verified 2026-06-10: each is pure

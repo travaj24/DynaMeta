@@ -1,16 +1,11 @@
-"""
-Example: Park 2021 ITO nanopatch metasurface modulator, expressed on the
-GENERAL dynameta bridge API (clean-break v0.2).
+"""Reference gated-ITO metasurface modulator -- a PRIVATE validation/test fixture
+(not a showcased example; underscore-prefixed so the runner skips it).
 
-A reflection modulator: Al-Nd mirror / oxide-ITO-oxide gate cavity / Au patch.
-This is one instance of the general model -- a square unit cell with a single
-centred metal-patch inclusion over a full-cell ITO cavity. Swapping the patch
-for a Circle inclusion, adding a substrate transmission medium, or making the
-ITO drift-diffusion are all single-field edits to this Design.
-
-Run:
-    python -m examples.park_2021            # 4-bias x several-wavelength sweep
-    python -m examples.park_2021 --quick    # 1 bias, 3 wavelengths
+A reflection modulator: metal mirror / oxide-ITO-oxide gate cavity / metal patch --
+a square unit cell with a single centred metal-patch inclusion over a full-cell ITO
+cavity. ITO is the generic worked ENZ material; its Drude/Kane parameters are
+representative near-IR values (see docs/dielectrics.md for the DC-permittivity
+sourcing). Exists only to exercise the pipeline across the validation suite.
 """
 
 from __future__ import annotations
@@ -32,7 +27,7 @@ from dynameta.pipeline import run_pipeline
 
 Q_E = 1.602176634e-19
 
-# ITO optical Drude -- Park 2021 Fig S2 fit (eps_inf 4.25, optical m* 0.225,
+# ITO optical Drude -- representative near-IR ITO Drude fit (eps_inf 4.25, optical m* 0.225,
 # Gamma 1.1e14). DOS mass for Stage-1 Nc is a separate, heavier Kane mass.
 ITO_N_BG = 4.0e20 * 1e6
 ITO_M_OPT = 0.225 * M_E
@@ -82,7 +77,7 @@ def build_materials(physics: str = "equilibrium") -> MaterialRegistry:
     return reg
 
 
-def build_park_design(physics: str = "equilibrium") -> Design:
+def build_reference_modulator(physics: str = "equilibrium") -> Design:
     cell = UnitCell.square(370e-9)
     layers = [
         Layer("mirror",      70e-9, "Al-Nd"),
@@ -101,39 +96,6 @@ def build_park_design(physics: str = "equilibrium") -> Design:
         Electrode("ito_gnd_left",  "ito", "x_lo", role="ground", fixed_voltage_V=0.0),
         Electrode("ito_gnd_right", "ito", "x_hi", role="ground", fixed_voltage_V=0.0),
     ]
-    return Design(name="park_2021", unit_cell=cell, stack=stack,
+    return Design(name="reference_modulator", unit_cell=cell, stack=stack,
                     electrodes=electrodes, materials=build_materials(physics),
-                    pretty_name="Park 2021 ITO nanopatch metasurface modulator")
-
-
-def main(argv=None) -> int:
-    import argparse
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--quick", action="store_true")
-    p.add_argument("--drift-diffusion", action="store_true",
-                    help="solve Stage-1 ITO with full drift-diffusion instead of "
-                         "the equilibrium Fermi-Dirac model (reduces to the same "
-                         "accumulation for this capacitor; validates the DD path)")
-    args = p.parse_args(argv)
-
-    physics = "drift_diffusion" if args.drift_diffusion else "equilibrium"
-    design = build_park_design(physics)
-    if args.quick:
-        sweep = Sweep(
-            bias_points=[BiasPoint({"top_contact": +2.0}, "patch+2V")],
-            wavelengths_nm=[1300.0, 1500.0, 1700.0])
-    else:
-        sweep = Sweep(
-            bias_points=[BiasPoint({"top_contact": +2.0}, "patch+2V"),
-                          BiasPoint({"top_contact": -2.0}, "patch-2V")],
-            wavelengths_nm=list(np.arange(1200.0, 2001.0, 100.0)))
-
-    print("Design: {}  device symmetry: {}".format(
-        design.pretty_name, design.device_symmetry()))
-    rows = run_pipeline(design, sweep, verbose=True)
-    print("\nDONE: {} (bias, wavelength) solves".format(len(rows)))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+                    pretty_name="reference gated-ITO metasurface modulator")

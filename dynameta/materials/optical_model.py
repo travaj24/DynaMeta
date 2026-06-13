@@ -9,7 +9,7 @@ distinct objects stops the two from being conflated (the old DrudeSpec carried
 both and strained under an `optical_mass_fn()` hack).
 
 Sign convention: exp(-i*omega*t) (NGSolve's convention). A passive lossy
-medium has Im(eps) > 0. Park 2021 Fig. S2 tabulates Re/Im(eps) this way.
+medium has Im(eps) > 0. Near-IR ellipsometry of ITO tabulates Re/Im(eps) this way.
 
 Every OpticalModel exposes:
     eps(lambda_m, *, n_m3=None) -> complex | np.ndarray
@@ -206,7 +206,7 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     """Least-squares fit of CONSTANT optical Drude params (eps_inf, m_opt, gamma)
     to measured / published complex permittivity samples.
 
-    Recovers, e.g. from Park 2021 Fig. S2, eps_inf ~ 4.25, m*/m_e ~ 0.225,
+    Recovers representative near-IR ITO values eps_inf ~ 4.25, m*/m_e ~ 0.225,
     gamma ~ 1.1e14. The fitted scalars plug straight into a DrudeOptical.
     Sign convention matches DrudeOptical (Im(eps) > 0 for passive loss).
 

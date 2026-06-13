@@ -293,7 +293,7 @@ def test_lumped_rc_bandwidth_formula_with_modulator_C():
     # Checks the RC-bandwidth FORMULA against the Metasurface_Modulator's MEASURED areal
     # capacitance C=0.0145 F/m^2 (a fixed INPUT, not a carrier-derived reproduction -- the
     # end-to-end carrier->C->f_3dB chain is exercised in validation/bandwidth_cv.py; audit AN-2).
-    # Park-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; 370 nm cell; medium access
+    # reference-cell numbers: ITO n_bg=4e26 m^-3, mu=30 cm^2/Vs, t=5 nm; 370 nm cell; medium access
     # 5 um path / 1 um pad -> ~15.4 GHz (the Modulator's result).
     rho_s = sheet_resistance_ohm_sq(4e26, 30e-4, 5e-9)
     assert abs(rho_s - 1040.0) < 5.0                       # ~1040 Ohm/sq

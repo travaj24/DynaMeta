@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import devsim as ds
 
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import eq_registry as _R
 from dynameta.sweep import BiasPoint
@@ -45,7 +45,7 @@ MU, T_ITO, PERIOD = 30e-4, 5e-9, 370e-9          # ITO mobility, thickness, cell
 def _sweep(physics):
     """Solve the Park metasurface (physics='equilibrium'|'drift_diffusion') at each gate bias;
     return {vg: CarrierField} and a per-bias convergence flag. Each builder is torn down after."""
-    d = build_park_design(physics)
+    d = build_reference_modulator(physics)
     b = LayeredDevsimBuilder(d, mesh_name=physics + "_m", device_name=physics + "_d")
     fields, conv = {}, {}
     for vg in GATE_BIASES:

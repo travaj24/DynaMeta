@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import devsim as ds
 
-from examples.park_2021 import build_park_design
+from validation._reference_device import build_reference_modulator
 from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
 from dynameta.carriers import transient as TR
 from dynameta.sweep import BiasPoint
@@ -77,7 +77,7 @@ def _ito_charge_per_y(dev, n_bg):
 
 def main():
     print("[t] === Large-signal transient gate step on the Park metasurface (2D DD) ===", flush=True)
-    d = build_park_design("drift_diffusion")
+    d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="tms_m", device_name="tms_d")
     n_bg = float(d.materials.get("ITO").transport.n_bg_m3)
 

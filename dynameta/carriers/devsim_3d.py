@@ -234,7 +234,7 @@ class Stacked3DSpec:
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
-        full Park mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
+        full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
         meshes them as distinct regions (the nearest -> the gate "oxide", the rest ->
         extra_dielectrics) so the gate voltage division is the exact SERIES capacitance.
@@ -287,7 +287,7 @@ class Stacked3DSpec:
                                   "(no material inclusions); a gate PATCH is modeled via gate_patch_frac"
                                   .format(layers[i].name))
         # Collect ALL gate-side dielectric layers from the GATE-ADJACENT semiconductor outward toward the
-        # gate (the full multi-dielectric stack, e.g. Park's upper HfO2 + Al2O3). Stop at the gate layer or
+        # gate (the full multi-dielectric stack, e.g. the reference upper HfO2 + Al2O3). Stop at the gate layer or
         # a non-dielectric (metal/ambient). The nearest becomes the gate "oxide"; the rest are meshed as
         # distinct regions via extra_dielectrics -> the gate voltage division is the exact series
         # capacitance (the old code collapsed to just the nearest oxide).

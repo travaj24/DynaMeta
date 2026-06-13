@@ -38,7 +38,7 @@ Usage:
     eps = db.eps_for("HfO2")             # -> float only
     db.apply(material, formula="HfO2")   # sets material.eps_static_dc + provenance
 
-See docs/dielectrics.md for the measured-vs-DFPT comparison of the Park-stack
+See docs/dielectrics.md for the measured-vs-DFPT comparison of a representative high-k gate stack
 oxides (HfO2/Al2O3/In2O3) and guidance on choosing and overriding these values.
 """
 
