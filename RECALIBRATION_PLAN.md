@@ -27,7 +27,7 @@ modulation is silently halved by this approximation alone.
 
 `shared/constants.py` sets `ITO_N_BG = 8e20 * 1e6`. The justification
 in the comments cites a material audit that empirically tuned it to
-match the reference-modulator 1300 nm resonance using the OLD 1D pipeline (uniform ITO
+match the reference modulator 1300 nm resonance using the OLD 1D pipeline (uniform ITO
 eps, coarse 3D mesh). The current 2D-DEVSIM + 3D-FEM pipeline does
 NOT reproduce that calibration -- dip is at 1150 nm, not 1300.
 
@@ -35,7 +35,7 @@ Worse: setting n_bg higher pushes eta_bg further into the regime
 where Halen-Pulfrey is most broken. So the calibration knob was
 counter-tuning the F_{1/2} bug, not fixing real physics.
 
-the reference-modulator STATED value is 4e20 cm^-3. We should revert.
+the reference modulator STATED value is 4e20 cm^-3. We should revert.
 
 ---
 
@@ -57,7 +57,7 @@ B(eta) = exp(-eta)
 Verified accuracy < 0.2 % on F_{1/2} and < 1.3 % on dF/d_eta across
 eta = -5..20.
 
-### the reference-modulator stated material parameters (use as reset baseline)
+### the reference modulator stated material parameters (use as reset baseline)
 
 | Parameter | Current | reference stated | Revert to |
 |---|---|---|---|
@@ -129,7 +129,7 @@ data and we don't want to overwrite or muddle.
 
 ### Run 3: Stage 2 + Stage 3 at V = 0
 - Apply Drude with corrected n_bg, then FEM at one wavelength scan
-- Expected: dip lands near 1300 nm (the reference-modulator value)
+- Expected: dip lands near 1300 nm (the reference modulator value)
 - Was: dip at 1150 nm
 - Out: `experiments/2026_05_28_recalibration/01_validation_0V/`
 - Time: ~25-40 minutes for 13-wavelength scan at coarse mesh

@@ -224,7 +224,7 @@ agent doesn't repeat them.
 ### Initial state
 - Symmetric 3D FEM sweep running (patch±2V completed, mirror±2V queued).
 - User noticed bias-induced reflectivity changes were *tiny* (~0.5% on
-  `|r|^2`) — vs the reference-modulator ~20% — and the resonance dip wasn't shifting
+  `|r|^2`) — vs the reference modulator ~20% — and the resonance dip wasn't shifting
   visibly with bias.
 
 ### Diagnosis 1: F_{1/2} approximation broken (WRONG)
@@ -259,11 +259,11 @@ of |r|^2 modulation).
 
 ### Diagnosis 3: n_bg = 8e20 calibration is stale (CORRECT)
 The legacy `ITO_N_BG = 8e20 * 1e6` was tuned in the OLD 1D pipeline
-to match the reference-modulator 1300 nm dip. In the current 2D-DEVSIM + 3D-FEM
+to match the reference modulator 1300 nm dip. In the current 2D-DEVSIM + 3D-FEM
 pipeline with the same value, the dip lands at ~1150 nm. The 8e20
 calibration didn't transfer because the pipeline changed underneath it,
 and it was probably also compensating for the over-pinning we just
-identified. Reverting to the reference-modulator stated **n_bg = 4 × 10^20 cm^-3** is
+identified. Reverting to the reference modulator stated **n_bg = 4 × 10^20 cm^-3** is
 the right choice.
 
 ### Recalibration changes applied
@@ -318,10 +318,10 @@ make the floating-ITO BC work numerically, the next agent needs:
    estimate (V_local_init ≈ V_top * C_top / (C_top + C_bot)) in the
    ITO bulk before the first solve.
 
-### Issue B — Resonance position 150 nm blue of the reference-modulator 1300 nm
+### Issue B — Resonance position 150 nm blue of the reference modulator 1300 nm
 **Severity:** Medium. Independent of bias.
 
-Our patch±2V dips both at ~1150 nm; the reference-modulator is at ~1300. After the n_bg
+Our patch±2V dips both at ~1150 nm; the reference modulator is at ~1300. After the n_bg
 revert (which actually moves the ENZ to the red), this should improve,
 but we haven't re-run yet to confirm. Other candidates:
 - Patch side L = 175 nm — reference might have a slightly different
@@ -357,7 +357,7 @@ Smoke comparison: symmetric and 2D-extruded results agree to 3-4
 decimal places of |r|^2 for patch-bias case. So the asymmetry is real
 but doesn't materially affect the resonance.
 
-### Issue E — the reference-modulator top-bias-only-amplitude vs our different result
+### Issue E — the reference modulator top-bias-only-amplitude vs our different result
 **Severity:** Medium (raises modeling questions).
 
 the reference modulator reports: patch-bias produces both resonance shift AND

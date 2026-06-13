@@ -27,9 +27,8 @@ Combines three stages:
 
 ## Quick start
 
-The authoritative, end-to-end example is
-[validation/_reference_device.py](validation/_reference_device.py). The snippet below is the same
-clean-break API, condensed:
+A representative end-to-end build is below — the same shape the
+[validation/_reference_device.py](validation/_reference_device.py) test fixture uses:
 
 ```python
 import numpy as np
@@ -111,13 +110,8 @@ for r in rows:
         r.bias_label, r.lambda_nm, r.result.R, r.result.phase_deg))
 ```
 
-Run the the reference modulator reference design:
-
-```bash
-python -m validation._reference_device --quick            # 1-bias x 3-wavelength smoke test
-python -m validation._reference_device                    # 2-bias x 9-wavelength sweep
-python -m validation._reference_device --drift-diffusion  # solve Stage 1 with full drift-diffusion
-```
+The same builder is exercised end-to-end by the validation suite
+(`python -m validation.run_all`, needs the `[solvers]` extra).
 
 ## Results
 
@@ -158,8 +152,8 @@ materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
 PCM/LC/graphene, magneto-optic), the FDTD engine (1D/2D/3D incl GPU +
 nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), and the
-required-core Lumenairy RCWA/PMM optical backends. The the reference modulator
-reference design ([validation/_reference_device.py](validation/_reference_device.py)) is the
+required-core Lumenairy RCWA/PMM optical backends. The reference gated-ITO modulator (the
+[validation/_reference_device.py](validation/_reference_device.py) fixture) is the
 validated end-to-end run. Forward plan:
 [docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).
 
