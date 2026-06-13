@@ -18,7 +18,7 @@ spec = Stacked3DSpec()            # ITO semi + HfO2 oxide, 12nm lateral
 solver = Devsim3DEquilibrium(spec)
 cf = solver.solve(BiasPoint({"gate": 1.0, "body": 0.0}, "gate+1V"))
 
-# n->eps map: ITO Drude (matches the validated Park ITO optical model)
+# n->eps map: ITO Drude (matches the validated reference ITO optical model)
 reg = MaterialRegistry()
 reg.add(Material("ITO", DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14)))
 n_to_eps = MaterialEpsMap(reg)

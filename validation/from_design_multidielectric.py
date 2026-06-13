@@ -1,4 +1,4 @@
-"""Validate Stacked3DSpec.from_design on a MULTI-DIELECTRIC stack (the full Park-like
+"""Validate Stacked3DSpec.from_design on a MULTI-DIELECTRIC stack (the full reference-like
 mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch). from_design must find the ITO semiconductor +
 the nearest GATE-SIDE dielectric (upper HfO2, toward the patch gate above ITO), derive
 gate_patch_frac from the patch footprint, name the region "ito", and tolerate the Au
@@ -17,7 +17,7 @@ PERIOD = 370e-9
 ITO_NBG = 4e26
 
 
-def build_park_like():
+def build_reference_like():
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
     reg.add(Material("Si", ConstantOptical(12.0 + 0j)))
@@ -44,14 +44,14 @@ def build_park_like():
         Electrode("top_contact", "patch", centered_square(cell, 175e-9), role="biased"),
         Electrode("ito_gnd_left", "ito", "x_lo", role="ground", fixed_voltage_V=0.0),
     ]
-    return Design(name="park_like", unit_cell=cell, stack=stack, electrodes=electrodes,
+    return Design(name="reference_like", unit_cell=cell, stack=stack, electrodes=electrodes,
                    materials=reg, mesh_3d=Mesh3DSpec(), optical=OpticalSpec(polarization="x"))
 
 
 def main():
-    d = build_park_like()
+    d = build_reference_like()
     spec = Stacked3DSpec.from_design(d)
-    print("[t] from_design (multi-dielectric Park stack):", flush=True)
+    print("[t] from_design (multi-dielectric reference gate stack):", flush=True)
     print("[t]   region={}  semi_material={}  semi_thk={:.0f}nm".format(
         spec.field_region_name, spec.semi_material, spec.semi_thk_m * 1e9), flush=True)
     print("[t]   gate dielectric={}  oxide_thk={:.0f}nm  eps_oxide={:.1f}".format(

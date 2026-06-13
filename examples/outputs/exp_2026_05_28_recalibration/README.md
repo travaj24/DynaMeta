@@ -10,9 +10,9 @@ See `Metasurface_Lib/RECALIBRATION_PLAN.md` for the rationale.
 
 | Subdir | Purpose | Status |
 |---|---|---|
-| `01_validation_0V/` | One-off Stage 1 solve at 0 V to verify the Park 2021 design loads, mesh builds, and carrier density at the ITO is uniform at n_bg = 4e20. | pending |
-| `02_park_2021_quick/` | Single-bias 3-wavelength smoke test of full pipeline (Stage 1+2+3). Verifies the library end-to-end. | pending |
-| `03_park_2021_full/` | 4 biases × 13 wavelengths sweep matching the legacy Metasurface_Modulator run. Direct comparison. | pending |
+| `01_validation_0V/` | One-off Stage 1 solve at 0 V to verify the the reference modulator design loads, mesh builds, and carrier density at the ITO is uniform at n_bg = 4e20. | pending |
+| `02_reference_modulator_quick/` | Single-bias 3-wavelength smoke test of full pipeline (Stage 1+2+3). Verifies the library end-to-end. | pending |
+| `03_reference_modulator_full/` | 4 biases × 13 wavelengths sweep matching the legacy Metasurface_Modulator run. Direct comparison. | pending |
 
 ## How to launch
 
@@ -20,12 +20,12 @@ See `Metasurface_Lib/RECALIBRATION_PLAN.md` for the rationale.
 cd Metasurface_Lib
 
 # Quick smoke (recommended first)
-python -m examples.park_2021 --quick \
-    --out examples/outputs/exp_2026_05_28_recalibration/02_park_2021_quick/
+python -m validation._reference_device --quick \
+    --out examples/outputs/exp_2026_05_28_recalibration/02_reference_modulator_quick/
 
 # Full sweep (after smoke validates)
-python -m examples.park_2021 \
-    --out examples/outputs/exp_2026_05_28_recalibration/03_park_2021_full/
+python -m validation._reference_device \
+    --out examples/outputs/exp_2026_05_28_recalibration/03_reference_modulator_full/
 ```
 
 Each run writes:

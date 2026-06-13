@@ -2,8 +2,8 @@
 
 ## Background
 
-The current Park 2021 simulation produces a resonance dip at λ ≈ 1150 nm
-but Park reports ≈ 1300 nm. Two independent issues identified:
+The current the reference modulator simulation produces a resonance dip at λ ≈ 1150 nm
+but reference reports ≈ 1300 nm. Two independent issues identified:
 
 ### Issue 1: Halen-Pulfrey F_{1/2} is ~50% under-valued at degenerate eta
 
@@ -27,7 +27,7 @@ modulation is silently halved by this approximation alone.
 
 `shared/constants.py` sets `ITO_N_BG = 8e20 * 1e6`. The justification
 in the comments cites a material audit that empirically tuned it to
-match Park's 1300 nm resonance using the OLD 1D pipeline (uniform ITO
+match the reference-modulator 1300 nm resonance using the OLD 1D pipeline (uniform ITO
 eps, coarse 3D mesh). The current 2D-DEVSIM + 3D-FEM pipeline does
 NOT reproduce that calibration -- dip is at 1150 nm, not 1300.
 
@@ -35,7 +35,7 @@ Worse: setting n_bg higher pushes eta_bg further into the regime
 where Halen-Pulfrey is most broken. So the calibration knob was
 counter-tuning the F_{1/2} bug, not fixing real physics.
 
-Park's STATED value is 4e20 cm^-3. We should revert.
+the reference-modulator STATED value is 4e20 cm^-3. We should revert.
 
 ---
 
@@ -57,9 +57,9 @@ B(eta) = exp(-eta)
 Verified accuracy < 0.2 % on F_{1/2} and < 1.3 % on dF/d_eta across
 eta = -5..20.
 
-### Park's stated material parameters (use as reset baseline)
+### the reference-modulator stated material parameters (use as reset baseline)
 
-| Parameter | Current | Park stated | Revert to |
+| Parameter | Current | reference stated | Revert to |
 |---|---|---|---|
 | `ITO_N_BG` | 8e20 cm^-3 | **4e20 cm^-3** | 4e20 |
 | `ITO_EPS_INF` | 3.9 | 3.9 | unchanged |
@@ -97,7 +97,7 @@ eta = -5..20.
 2. `dynameta/stage1_carriers/physics.py`
    - Import Aymerich-Humet expression
    - Update `setup_phi_c0` to use inverse_F12_joyce_dixon
-3. `examples/park_2021.py`
+3. `validation/_reference_device.py`
    - `ITO_N_BG = 4.0e20 * 1e6`
    - Other audit updates
 
@@ -129,7 +129,7 @@ data and we don't want to overwrite or muddle.
 
 ### Run 3: Stage 2 + Stage 3 at V = 0
 - Apply Drude with corrected n_bg, then FEM at one wavelength scan
-- Expected: dip lands near 1300 nm (Park's value)
+- Expected: dip lands near 1300 nm (the reference-modulator value)
 - Was: dip at 1150 nm
 - Out: `experiments/2026_05_28_recalibration/01_validation_0V/`
 - Time: ~25-40 minutes for 13-wavelength scan at coarse mesh

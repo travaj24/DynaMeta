@@ -1,13 +1,13 @@
 """Validate the shared ScatteringModel link (roadmap R3): ONE momentum-relaxation law tau(n;T) drives
 BOTH the optical Drude damping gamma(n)=1/tau AND the transport drift mobility mu(n)=q/(m_cond 1/tau),
 removing the hidden inconsistency of fitting them independently. The bidirectional check: the SAME tau
-must reproduce the Park ITO optical eps AND give a physically sane mobility.
+must reproduce the reference ITO optical eps AND give a physically sane mobility.
 
 GATE A-OPTICAL (off-switch exactness): with a CONSTANT tau0 = 1/1.1e14 s, the linked DrudeOptical eps
         equals the constant-gamma DrudeOptical eps to < 1e-12 over n,lambda (the link is exact when tau
         is constant -- it reduces to today's behavior).
 GATE A-TRANSPORT (sane mobility from the SAME tau): mu = q tau0 / m_cond with m_cond ~ 0.35 m_e lands in
-        20-60 cm^2/Vs (Park ITO ~30; the ~1.5x band is the documented DC-vs-optical mass/Hall caveat).
+        20-60 cm^2/Vs (reference ITO ~30; the ~1.5x band is the documented DC-vs-optical mass/Hall caveat).
 GATE A-FIT (independent code path): re-fit the linked eps with the existing fit_drude_params -> recovers
         gamma ~ 1.1e14 and m_opt ~ 0.225 m_e to the fitter's rms (cross-checks the link via a separate path).
 GATE B-MATTHIESSEN (trend): constant tau -> gamma(n) flat; with an ionized-impurity term -> gamma(n)
@@ -51,7 +51,7 @@ def main():
 
     mu = float(mat.transport.mobility_m2Vs_of_n_m3(6e26)) * 1e4              # cm^2/Vs
     g_tr = 20.0 < mu < 60.0
-    print("[sl] A-TRANSPORT mu from same tau = {:.1f} cm^2/Vs (Park ITO ~30; DC-vs-optical band) -> {}".format(
+    print("[sl] A-TRANSPORT mu from same tau = {:.1f} cm^2/Vs (reference ITO ~30; DC-vs-optical band) -> {}".format(
         mu, "OK" if g_tr else "FAIL"), flush=True)
 
     # independent code path: re-fit the linked eps at one density

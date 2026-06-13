@@ -62,7 +62,7 @@ traced path; route the per-layer eig through `_eig_for(xp)`'s stable VJP) and ad
 ### P2 -- True normal-vector FFF for 2-D metals (Goetz-Schuster)  [medium]
 **Today:** 2-D uses the **dual-Laurent** factorization (`'li'`/`'fff'`, the E_z inverse rule).
 There is no normal-vector field (Goetz-Schuster / Popov-Neviere) for 2-D metallic corners.
-**DynaMeta needs:** plasmonic metal patches (the Park Au nanopatch, gap-plasmon modes) converge
+**DynaMeta needs:** plasmonic metal patches (the reference Au nanopatch, gap-plasmon modes) converge
 only at the dual-Laurent rate in 2-D -- the same slow/erratic convergence the sibling
 Metasurface_Modulator project hit with grcwa (which also lacks it). A true normal-vector FFF
 gives Li-rate 2-D convergence for sharp metal features.
@@ -125,7 +125,7 @@ RCWAStack to an existing, validated seam":**
    in the data model and finalized with the RCWA port.
 3. **Result mapping**: `RCWAResult` -> DynaMeta `OpticalResult` (R, T, A; complex r/t and
    phase from the 0-order Jones; `A_independent` cross-check vs 1-R-T).
-4. **Validation gate**: RCWA vs the NGSolve FEM on the real Park lossy-Au-patch + ENZ-ITO cell
+4. **Validation gate**: RCWA vs the NGSolve FEM on the real reference lossy-Au-patch + ENZ-ITO cell
    (the audit's "missing independent oracle"); and vs `tmm_reference` on unstructured stacks.
 
 ---

@@ -161,7 +161,7 @@ matches the optics builder's alignment source_region -> `run_pipeline` with NO h
 alignment (`validation/carriers_3d_from_design.py`, PASS: derived spec + region match).
 
 **`from_design` constraints (now enforced, not silent):** it handles a MULTI-dielectric
-stack (e.g. the full Park mirror/Al2O3/HfO2/ITO/HfO2/patch -- it walks to the gate-side
+stack (e.g. the full reference mirror/Al2O3/HfO2/ITO/HfO2/patch -- it walks to the gate-side
 dielectric; `validation/from_design_multidielectric.py` PASS), selects the gate by
 `electrode.role=='biased'`, and threads the gate/body electrode NAMES into the bias lookup.
 It requires a SQUARE cell and an (approximately) centered square gate footprint -- each
@@ -222,7 +222,7 @@ DONE (72de9e3): wired into the 2D `LayeredDevsimBuilder` (the Gummel `CARRIER_EQ
 electron-only "gated-cap DD does not converge" note is orthogonal (weak 2-node lateral
 ITO contacts, not the formulation).
 NB: unipolar degenerate ITO is correctly electrons-only, so bipolar DD is a generality
-feature, not Park-critical.
+feature, not reference-critical.
 
 ### Quantum confinement (Schrodinger-Poisson)  [IMPLEMENTED + coupled as CarrierSolver]
 `carriers/schrodinger_poisson.py` -- a 1D effective-mass `SchrodingerPoisson1D`:
@@ -252,7 +252,7 @@ collapsing the bulk density to ~0 (the default kept 3 of ~8 sub-bands -> 0.64 n_
 mode -> 1.00 n_bg). Validated (`validation/sp_carrier.py`, PASS): bulk recovers n_bg
 (0.996); +0.3 V accumulates (peak 1.42 n_bg); the QUANTUM dead layer / charge-centroid
 setback (peak ~1 nm from the interface, n->0 AT it); the bridge shows accumulation deepens
-ENZ (min Re(eps) 1.15 -> 0.45). Directly informs the Park tuning: the quantum setback
+ENZ (min Re(eps) 1.15 -> 0.45). Directly informs the reference tuning: the quantum setback
 offsets the sub-ENZ region ~1 nm from the oxide vs the classical (peak-at-interface) model.
 
 **Per-lateral-column SP (DONE)** for laterally-VARYING devices: pass `surface_potential_xy

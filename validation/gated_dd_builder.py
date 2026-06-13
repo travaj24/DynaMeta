@@ -1,5 +1,5 @@
 """
-Validate the builder-wired full-edge gated drift-diffusion on the REAL Park metasurface: the
+Validate the builder-wired full-edge gated drift-diffusion on the REAL reference metasurface: the
 LayeredDevsimBuilder now auto-carves a thin edge-metal strip at each DD-semiconductor edge ground
 (making it a region-region interface -> full-line node capture), so the GATED DD metasurface
 converges -- the thing that previously did not (carriers/devsim_layered.py). And it reduces to the
@@ -11,7 +11,7 @@ frequency-RESOLVED gate C(omega) via ssac on the gate is the small remaining fol
 unipolar-DD charge time-node model + a circuit-driven gate); the quasi-static C here is what the
 equilibrium path already provides, now reproduced by the full DD solve.
 
-GATE A: the gated DD Park metasurface CONVERGES at every gate bias (0, +1, +2 V) -- previously it
+GATE A: the gated DD reference metasurface CONVERGES at every gate bias (0, +1, +2 V) -- previously it
         did not (weak 2-node ITO edge ground).
 GATE B: the DD ITO accumulation profile (x-averaged over the cell) matches the equilibrium
         Fermi-Dirac profile to < 3% (the oxide keeps eta within the FD g-factor's validity, as in
@@ -43,7 +43,7 @@ MU, T_ITO, PERIOD = 30e-4, 5e-9, 370e-9          # ITO mobility, thickness, cell
 
 
 def _sweep(physics):
-    """Solve the Park metasurface (physics='equilibrium'|'drift_diffusion') at each gate bias;
+    """Solve the reference metasurface (physics='equilibrium'|'drift_diffusion') at each gate bias;
     return {vg: CarrierField} and a per-bias convergence flag. Each builder is torn down after."""
     d = build_reference_modulator(physics)
     b = LayeredDevsimBuilder(d, mesh_name=physics + "_m", device_name=physics + "_d")
@@ -70,7 +70,7 @@ def _ito_zprofile(cf):
 
 
 def main():
-    print("[t] === Builder-wired full-edge gated DD on the Park metasurface ===", flush=True)
+    print("[t] === Builder-wired full-edge gated DD on the reference metasurface ===", flush=True)
     eq, eq_conv = _sweep("equilibrium")
     dd, dd_conv = _sweep("drift_diffusion")
 
@@ -107,7 +107,7 @@ def main():
         PROFILE_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
     print("[t] CHAIN (DD gate C-V -> C>0 -> finite f_3dB): {}".format(
         "PASS" if chain_ok else "FAIL"), flush=True)
-    print("[t] *** BUILDER-WIRED GATED DD (Park metasurface): {} ***".format(
+    print("[t] *** BUILDER-WIRED GATED DD (reference metasurface): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall
 

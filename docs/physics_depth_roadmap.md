@@ -169,7 +169,7 @@ first four are all `S`-effort and individually small -- ship them first.
   sweep the device exploits).
 - **LC-analog**: (b)+(f). **Feasibility**: `DrudeOptical` already accepts `gamma_rad_s` and `m_opt_kg`
   as callables of n -- this is supplying the physically-correct closures; pure numpy, no new solver.
-  **Oracle**: Park 2021 Fig. S2 / measured ITO n,k vs density; `fit_drude_params` harness exists.
+  **Oracle**: representative near-IR ITO data / measured ITO n,k vs density; `fit_drude_params` harness exists.
 
 ### R3. Self-consistent mobility <-> optical-Gamma scattering link (one tau drives both)  [#4]  -- M, High
 - **Physics**: the DC momentum-relaxation time `tau_m = m*_cond mu/q` (transport) and the optical Drude
@@ -182,7 +182,7 @@ first four are all `S`-effort and individually small -- ship them first.
   Linking them removes a hidden inconsistency and lets a single parameter set jointly predict modulation
   **depth and speed**. Builds on R1+R2.
 - **LC-analog**: (e)+(f). **Feasibility**: lives at the `TransportModel`/`OpticalModel`/`n_to_eps` seam;
-  no DEVSIM solver change. **Oracle**: the same tau reproduces Park Im(eps) AND a sane mobility.
+  no DEVSIM solver change. **Oracle**: the same tau reproduces reference Im(eps) AND a sane mobility.
 
 ### R4. Per-cell time-domain eps(t) hook into FDTD  [#36]  -- S, High
 - **Physics**: not new physics -- a wiring gap. `effects.py` computes rich field/T/state-dependent eps
@@ -240,7 +240,7 @@ first four are all `S`-effort and individually small -- ship them first.
   crossing wavelength and adds a doping-tunable interband loss channel the Drude-only model misses.
 - **LC-analog**: (b)+(f). **Feasibility**: `ComposedEffect(background=DrudeOptical,
   deltas=[BursteinMossEdge])` -- the compose/delta/passivity + `kramers_kronig_dn` machinery already
-  ships. **Oracle**: Park / measured n,k blueshift vs density.
+  ships. **Oracle**: reference / measured n,k blueshift vs density.
 
 ### R9. (Stretch) Carrier-heating (electron-temperature) ENZ nonlinearity  [#8]  -- L, High
 - **Physics**: the real origin of ITO's record ENZ nonlinearity is intraband carrier *heating*: a pulse

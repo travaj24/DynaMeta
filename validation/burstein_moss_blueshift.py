@@ -35,7 +35,7 @@ from dynameta.core.effects import (BursteinMossEdge, OpticalModelEffect, Compose
                                    as_tensor)
 from dynameta.materials.optical_model import DrudeOptical
 
-EPS_INF, M_OPT, GAMMA = 4.25, 0.225 * M_E, 1.1e14      # Park ITO Drude
+EPS_INF, M_OPT, GAMMA = 4.25, 0.225 * M_E, 1.1e14      # reference ITO Drude
 EG0 = 3.6 * Q_E                                        # undoped optical gap [J]
 M_VC = 0.5 * M_E                                       # reduced joint conduction-valence mass
 N_REF = 4.0e26                                         # n_bg (DeltaEffect baseline)

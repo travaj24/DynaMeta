@@ -205,17 +205,17 @@ two-constant elasticity (K11!=K33) is DONE (c3f8844, `validation/lc_two_constant
 ## Part D -- Reuse from the Metasurface_Modulator project
 
 The sibling imperative pipeline (`Python_Test_Scripts/Metasurface_Modulator/`) contains
-work that was never fully used for the Park experiment but is directly portable. Audited
+work that was never fully used for the reference experiment but is directly portable. Audited
 2026-06-01:
 
 1. **Lumped-RC -> intrinsic f_3dB bandwidth** (`stage4_system/access_R_f3dB.py`). Model:
    `R_access = rho_sheet * L_path / W_pad`, `rho_sheet = 1/(q n mu t)`,
    `f_3dB = 1/(2 pi R_access C_cell)`; C_cell from the C(V) curve. It produced ~15 GHz for
-   the Park cell. **PORTED (2026-06-01).** `analysis.sheet_resistance_ohm_sq`,
+   the reference cell. **PORTED (2026-06-01).** `analysis.sheet_resistance_ohm_sq`,
    `analysis.lumped_rc_bandwidth` (-> R_access, C_cell, f_3dB) and
    `analysis.switching_energy_per_area` (0.5 C V^2) now compose with `gate_cv` for an
    intrinsic f_3dB **with zero new solver**. Validated: the synthetic pytest reproduces the
-   Modulator's ~15.4 GHz Park number; `validation/bandwidth_cv.py` runs a real SP-carrier C-V
+   Modulator's ~15.4 GHz reference number; `validation/bandwidth_cv.py` runs a real SP-carrier C-V
    sweep -> f_3dB ~5 GHz (GHz band, monotonic). The on-ramp to the full AC/transient phase.
 2. **The "HYPRE"/iterative-solver work** (`stage3_optical/fem/{compare_solvers,
    fine_mesh_with_iterative,smoke_gmres}.py`). *Correction:* there is no literal HYPRE/AMS
@@ -231,7 +231,7 @@ work that was never fully used for the Park experiment but is directly portable.
    above BDDC) becomes worthwhile EXACTLY as we broaden the mechanism set. This is the right
    home for the "HYPRE" item, and it was not viable in the ENZ-only world.
 3. **RCWA -- SUPERSEDED by the Lumenairy port.** The Modulator's grcwa pipeline
-   (`stage3_optical/rcwa/`) was under-converged for the Park metal patch precisely because grcwa
+   (`stage3_optical/rcwa/`) was under-converged for the reference metal patch precisely because grcwa
    lacks Li factorization (erratic ~+/-25 nm resonance noise in 2-D metals). Lumenairy's native
    RCWA already fixes this (correct Li inverse-rule, principal-branch stability, dual-Laurent
    2-D, Wood-anomaly regularization), so the plan is to **port Lumenairy's `RCWAStack`** (Part C

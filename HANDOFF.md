@@ -10,7 +10,7 @@
 ## 1. PROJECT GOALS
 
 Multi-physics simulation of a **tunable amplitude / phase metasurface
-modulator** based on Park et al. 2021 (gap-plasmon nanopatch
+modulator** based on reference et al. 2021 (gap-plasmon nanopatch
 antenna over an ITO-loaded MIM cavity).
 
 The simulation predicts:
@@ -55,11 +55,11 @@ The unit cell, bottom-to-top:
   directly under the patch. Resonance wavelength ≈ 2 · L · n_eff ≈
   1300 nm for L = 175 nm and the cavity stack above.
 - **ITO acts as a tunable ENZ material**: at λ_ENZ, Re(ε_ITO) crosses
-  zero. Park 2021's design point places λ_ENZ near the patch-antenna
+  zero. the reference modulator's design point places λ_ENZ near the patch-antenna
   resonance, so that under bias the ITO carrier density modulates,
   shifting λ_ENZ, shifting the effective mode index, and thus
   shifting the resonance dip in `|r|^2(λ)`.
-- **Bias scheme (Park 2021)**: V_top on patch, V_bot grounded (mirror),
+- **Bias scheme (the reference modulator)**: V_top on patch, V_bot grounded (mirror),
   ITO grounded at far peripheral pads. Under +bias: accumulation at
   the TOP of ITO (closest to patch through upper cap); under -bias:
   depletion there.
@@ -146,8 +146,8 @@ Tasks #10-17 — **2D bias grid + RCWA validation**
 - 2D (V_top, V_bot) grid sweep over patch and mirror voltages
 - Installed grcwa for RCWA cross-check
 - Stage 3 RCWA driver, bias-mode comparison
-- Park 2021 §8 paper-strip validation
-- Rigorous material audit vs the Park paper
+- the reference modulator §8 paper-strip validation
+- Rigorous material audit vs the reference paper
 
 Tasks #18-31 — **NGSolve FEM setup**
 - Installed NGSolve, set up FEM groundwork
@@ -203,11 +203,11 @@ Task #50 — **Declarative library scaffolding**
 - Replaces ad-hoc scripts. Pipeline: `run_full_pipeline(design, sweep, out_dir)`
 - Clean-room rewrites of Stages 1, 2, 3 (Stage 1 not yet end-to-end
   validated — see Section 6)
-- Example design `examples/park_2021.py` reproduces the Park geometry
+- Example design `validation/_reference_device.py` reproduces the reference geometry
 
 Task #51 — **Recalibration (today, partially complete)**
 - Diagnosed weak bias modulation in the patch+2V FEM result
-- Reverted `ITO_N_BG` from 8e20 to 4e20 (the Park-stated value)
+- Reverted `ITO_N_BG` from 8e20 to 4e20 (the reference-stated value)
 - Reverted `ITO_BANDGAP_EV` 3.75 → 3.6, `N_HFO2_IR` 1.91 → 1.95,
   `N_AL2O3_IR` 1.66 → 1.65
 - Established experiment directory structure under
@@ -224,7 +224,7 @@ agent doesn't repeat them.
 ### Initial state
 - Symmetric 3D FEM sweep running (patch±2V completed, mirror±2V queued).
 - User noticed bias-induced reflectivity changes were *tiny* (~0.5% on
-  `|r|^2`) — vs Park's ~20% — and the resonance dip wasn't shifting
+  `|r|^2`) — vs the reference-modulator ~20% — and the resonance dip wasn't shifting
   visibly with bias.
 
 ### Diagnosis 1: F_{1/2} approximation broken (WRONG)
@@ -259,11 +259,11 @@ of |r|^2 modulation).
 
 ### Diagnosis 3: n_bg = 8e20 calibration is stale (CORRECT)
 The legacy `ITO_N_BG = 8e20 * 1e6` was tuned in the OLD 1D pipeline
-to match Park's 1300 nm dip. In the current 2D-DEVSIM + 3D-FEM
+to match the reference-modulator 1300 nm dip. In the current 2D-DEVSIM + 3D-FEM
 pipeline with the same value, the dip lands at ~1150 nm. The 8e20
 calibration didn't transfer because the pipeline changed underneath it,
 and it was probably also compensating for the over-pinning we just
-identified. Reverting to Park's stated **n_bg = 4 × 10^20 cm^-3** is
+identified. Reverting to the reference-modulator stated **n_bg = 4 × 10^20 cm^-3** is
 the right choice.
 
 ### Recalibration changes applied
@@ -272,10 +272,10 @@ the right choice.
   - `ITO_BANDGAP_EV = 3.6` (was 3.75)
   - `N_HFO2_IR = 1.95` (was 1.91; Hu et al 2018)
   - `N_AL2O3_IR = 1.65` (was 1.66)
-- `Metasurface_Lib/examples/park_2021.py`: `ITO_N_BG = 4.0e20 * 1e6`
+- `Metasurface_Lib/validation/_reference_device.py`: `ITO_N_BG = 4.0e20 * 1e6`
 
 ### Attempt to remove ITO grounds in new library (failed)
-Set up `Metasurface_Lib/examples/park_2021.py` with no ITO grounds,
+Set up `Metasurface_Lib/validation/_reference_device.py` with no ITO grounds,
 then with a single left-edge anchor, then back to two symmetric
 grounds. **All three failed in the new library**, for reasons that
 are bugs in the library's `stage1_carriers/`, not in the BC choice:
@@ -318,16 +318,16 @@ make the floating-ITO BC work numerically, the next agent needs:
    estimate (V_local_init ≈ V_top * C_top / (C_top + C_bot)) in the
    ITO bulk before the first solve.
 
-### Issue B — Resonance position 150 nm blue of Park's 1300 nm
+### Issue B — Resonance position 150 nm blue of the reference-modulator 1300 nm
 **Severity:** Medium. Independent of bias.
 
-Our patch±2V dips both at ~1150 nm; Park's is at ~1300. After the n_bg
+Our patch±2V dips both at ~1150 nm; the reference-modulator is at ~1300. After the n_bg
 revert (which actually moves the ENZ to the red), this should improve,
 but we haven't re-run yet to confirm. Other candidates:
-- Patch side L = 175 nm — Park might have a slightly different
+- Patch side L = 175 nm — reference might have a slightly different
   fabricated value
 - HfO2 optical index n_HfO2 — went 1.91 → 1.95, probably still off
-- ITO m* / Kane α — uses constant 0.27 m_e + α = 0.5; Park uses
+- ITO m* / Kane α — uses constant 0.27 m_e + α = 0.5; reference uses
   constant 0.35 m_e
 - FEM mesh — medium (5 nm cavity) isn't fully converged
 
@@ -357,10 +357,10 @@ Smoke comparison: symmetric and 2D-extruded results agree to 3-4
 decimal places of |r|^2 for patch-bias case. So the asymmetry is real
 but doesn't materially affect the resonance.
 
-### Issue E — Park's top-bias-only-amplitude vs our different result
+### Issue E — the reference-modulator top-bias-only-amplitude vs our different result
 **Severity:** Medium (raises modeling questions).
 
-Park 2021 reports: patch-bias produces both resonance shift AND
+the reference modulator reports: patch-bias produces both resonance shift AND
 amplitude modulation; mirror-bias produces only phase change. Our
 *pre-recalibration* result was the opposite-magnitude (mirror gave
 stronger Δn). After recalibration with floating-ITO BC, we expect
@@ -424,16 +424,16 @@ Verify: where does the resonance dip land? If still 1150 nm, investigate
 other candidates (L, n_HfO2, m*). If 1300 nm ± 50 nm, the n_bg revert
 was the main culprit.
 
-### Priority 3: Validate floating-ITO BC gives Park-magnitude modulation (~1 day)
+### Priority 3: Validate floating-ITO BC gives reference-magnitude modulation (~1 day)
 Once Priority 1 is done, rerun patch±2V Stage 1 with the new BC.
 Compare Δn at the top of ITO to: (a) the pre-recalibration ~4%, (b)
 the back-of-envelope ~30-60%. Should land in the 20-50% range.
 
 ### Priority 4: Full 4-bias × wavelength sweep with corrections (~6-8 h)
 Once Priorities 1-3 confirm physics is right, kick off the full
-`run_full_pipeline(park_2021_design, 4_bias_sweep, ...)`. Outputs
+`run_full_pipeline(reference_modulator_design, 4_bias_sweep, ...)`. Outputs
 to `experiments/2026_05_28_recalibration/02_patch_pm2V/` and
-`03_mirror_pm2V/`. Will give the dataset to compare against Park
+`03_mirror_pm2V/`. Will give the dataset to compare against reference
 Figure 2a.
 
 ### Priority 5: Rename `halen_F_half_expr` → `aymerich_humet_F_half_expr` (~30 min)
@@ -503,7 +503,7 @@ Would also help with the medium-vs-fine mesh memory tradeoff.
 - `Metasurface_Lib/dynameta/stage3_optical/` — NGSolve mesh,
   ε loader, solver. Not yet end-to-end tested
 - `Metasurface_Lib/dynameta/pipeline.py` — orchestrator
-- `Metasurface_Lib/examples/park_2021.py` — Park design.
+- `Metasurface_Lib/validation/_reference_device.py` — reference design.
   `ITO_N_BG = 4e20`, ITO grounds present (after rollback)
 
 ### Experiment directories (post-recalibration)
@@ -513,8 +513,8 @@ Would also help with the medium-vs-fine mesh memory tradeoff.
 - `Metasurface_Modulator/experiments/2026_05_28_recalibration/02_patch_pm2V/`
 - `Metasurface_Modulator/experiments/2026_05_28_recalibration/03_mirror_pm2V/`
 - `Metasurface_Lib/examples/outputs/exp_2026_05_28_recalibration/01_validation_0V/`
-- `Metasurface_Lib/examples/outputs/exp_2026_05_28_recalibration/02_park_2021_quick/`
-- `Metasurface_Lib/examples/outputs/exp_2026_05_28_recalibration/03_park_2021_full/`
+- `Metasurface_Lib/examples/outputs/exp_2026_05_28_recalibration/02_reference_modulator_quick/`
+- `Metasurface_Lib/examples/outputs/exp_2026_05_28_recalibration/03_reference_modulator_full/`
 
 ### Pre-recalibration data (legacy, 8e20 + grounds)
 - `Metasurface_Modulator/stage1_carriers/outputs/n_of_xy_2d/` — 10 Zarrs

@@ -1,7 +1,7 @@
 """END-TO-END modulator SPEC SHEET: fuse the two validated halves of the gated ITO modulator into one
 device characterization -- the project's culmination.
 
-  ELECTRICAL (DEVSIM 2D drift-diffusion + ssac): the Park metasurface gate response -> areal capacitance
+  ELECTRICAL (DEVSIM 2D drift-diffusion + ssac): the reference metasurface gate response -> areal capacitance
     C, the access-RC switching bandwidth f_3dB, and the per-event switching energy E = 0.5 C V^2.
   OPTICAL (FDTD dispersive broadband sweep): the gated ITO (carrier density background -> accumulation,
     free-carrier Drude eps shifting toward ENZ) -> the reflection modulation contrast dR(lambda).
@@ -52,7 +52,7 @@ def _quiet():
 
 
 def _electrical_gate_C_per_area():
-    """DEVSIM 2D DD + ssac on the Park metasurface -> the gate areal capacitance [F/m^2]."""
+    """DEVSIM 2D DD + ssac on the reference metasurface -> the gate areal capacitance [F/m^2]."""
     d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="spec_m", device_name="spec_d")
     with _quiet():
@@ -78,7 +78,7 @@ def _optical_contrast():
 def main():
     print("[ms] === END-TO-END modulator spec sheet (DEVSIM bandwidth + FDTD contrast) ===", flush=True)
 
-    print("[ms] [electrical] DEVSIM 2D DD + ssac on the Park metasurface ...", flush=True)
+    print("[ms] [electrical] DEVSIM 2D DD + ssac on the reference metasurface ...", flush=True)
     C_area = _electrical_gate_C_per_area()
     rho_s = sheet_resistance_ohm_sq(N_OFF * 1e6, MU, T_ITO)
 

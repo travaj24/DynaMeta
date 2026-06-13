@@ -1,11 +1,11 @@
 """Validate the resolved Drude scattering/mass closures (materials/scattering.py, roadmap R2): a Kane
 nonparabolic optical mass m_opt(n) and a Matthiessen damping Gamma(n;T), plugged through the existing
-DrudeOptical callable seam. Independent references: the existing park_2021 Kane DOS-mass closure, and
+DrudeOptical callable seam. Independent references: the reference ITO Kane DOS-mass closure, and
 the constant-Drude special case.
 
 GATE BYTEID (off-switch): DrudeOptical with KaneOpticalMass(alpha=0) + MatthiessenGamma(const only)
         reproduces the constant DrudeOptical eps to < 1e-15 over n in [1e26,2e27], lambda in [1200,2000] nm.
-GATE KANE (reduces-to-known-limit): KaneOpticalMass(0.27 m_e, alpha=0.5) == the park_2021 ito_dos_mass
+GATE KANE (reduces-to-known-limit): KaneOpticalMass(0.27 m_e, alpha=0.5) == the reference ito_dos_mass
         closure to < 1e-12.
 GATE PHYSICS: m_opt(n) increases with n; wp^2 = n q^2/(eps0 m_opt) is SUB-linear (d wp^2/dn decreasing);
         Gamma(T=400) > Gamma(300) > Gamma(200) with a phonon term.
@@ -31,7 +31,7 @@ LAMS = np.linspace(1200e-9, 2000e-9, 17)
 C = 299792458.0
 
 
-def _park_mass(n, m_low=0.27 * M_E, alpha=0.5):
+def _reference_mass(n, m_low=0.27 * M_E, alpha=0.5):
     n = np.maximum(np.asarray(n, float), 1e10)
     kF = (3.0 * np.pi ** 2 * n) ** (1.0 / 3.0)
     E_F = HBAR ** 2 * kF ** 2 / (2.0 * m_low)
@@ -62,9 +62,9 @@ def main():
         dmax, "OK" if g_id else "FAIL"), flush=True)
 
     m_kane = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
-    dk = float(np.max(np.abs(m_kane(NGRID) - _park_mass(NGRID)) / _park_mass(NGRID)))
+    dk = float(np.max(np.abs(m_kane(NGRID) - _reference_mass(NGRID)) / _reference_mass(NGRID)))
     g_k = dk < 1e-12
-    print("[dm] KANE == park_2021 DOS-mass closure: max rel={:.1e} -> {}".format(dk, "OK" if g_k else "FAIL"),
+    print("[dm] KANE == reference DOS-mass closure: max rel={:.1e} -> {}".format(dk, "OK" if g_k else "FAIL"),
           flush=True)
 
     mm = m_kane(NGRID)

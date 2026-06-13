@@ -21,7 +21,7 @@ from dynameta.sweep import BiasPoint
 from dynameta.analysis import (gate_cv, sheet_resistance_ohm_sq, lumped_rc_bandwidth,
                                switching_energy_per_area)
 
-N_BG, T_SEMI, PERIOD, MU = 4e26, 5e-9, 370e-9, 30e-4    # ITO film; mu ~ 30 cm^2/Vs (Park t=5nm)
+N_BG, T_SEMI, PERIOD, MU = 4e26, 5e-9, 370e-9, 30e-4    # ITO film; mu ~ 30 cm^2/Vs (reference t=5nm)
 OXIDE_T, EPS_OX = 5e-9, 9.0                             # gate oxide -> calibrated psi_s map
 BIASES = [0.0, 0.5, 1.0, 1.5, 2.0]
 PATH_M, PAD_M = 5e-6, 1e-6                               # medium access geometry

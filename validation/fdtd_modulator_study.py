@@ -33,7 +33,7 @@ from dynameta.optics.fdtd_seam import run_fdtd_sweep
 from dynameta.optics.tmm_reference import layered_rta, layered_stack_from_design
 
 C = 299792458.0
-ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)   # Park-like ITO
+ITO_DRUDE = DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * M_E, gamma_rad_s=1.0e14)   # reference-like ITO
 
 
 def _ito_at_bias(n_cm3, lo=1100e-9, hi=1900e-9, npts=220):
