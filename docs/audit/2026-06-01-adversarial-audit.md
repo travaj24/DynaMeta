@@ -194,7 +194,7 @@ There is **no** optimizer today (sweeps are forward-only; the only `scipy.optimi
 5. **(HIGH) SeparableXYLift is an unbounded separable approximation** for the canonical c4v square patch (the reference geometry), never bounded against a true 3D carrier solve.
 6. **(MED) Degenerate-ITO approximations bias the ENZ depth** (no BGN, parabolic self-consistent SP, classical-vs-quantum centroid ~1nm, linear resampling smears the ~1nm peak).
 
-**Single change that most increases trust:** add a second `OpticalSolver` backed by an independent RCWA tool (grcwa/inkstone) and validate it against the NGSolve solver on the **actual reference lossy-Au-patch + ENZ-ITO unit cell** -- full R/T/A spectrum *and* the bias-induced resonance shift -- ideally anchored to the reference-modulator measured value. This closes the missing oracle, provides the fast solver, and unlocks optimization.
+**Single change that most increases trust:** add a second `OpticalSolver` backed by an independent RCWA tool (grcwa/inkstone) and validate it against the NGSolve solver on the **actual reference lossy-Au-patch + ENZ-ITO unit cell** -- full R/T/A spectrum *and* the bias-induced resonance shift -- ideally anchored to the reference modulator measured value. This closes the missing oracle, provides the fast solver, and unlocks optimization.
 
 ---
 
