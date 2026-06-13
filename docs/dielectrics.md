@@ -3,7 +3,7 @@
 This note documents how the **static** (DC) relative permittivities used by the
 Stage-1 DEVSIM Poisson solve are chosen, and why they differ from the materials'
 **optical** permittivities. It also records a measured-vs-computed comparison for
-the the reference modulator stack so the choice of values travels with the code.
+the reference modulator stack so the choice of values travels with the code.
 
 ## Why Stage 1 needs a *static* permittivity (not the optical one)
 
