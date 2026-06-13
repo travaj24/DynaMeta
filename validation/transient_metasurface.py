@@ -1,9 +1,9 @@
 """
-Large-signal TRANSIENT (time-domain) gate response of the FULL Park metasurface (2D drift-diffusion)
+Large-signal TRANSIENT (time-domain) gate response of the FULL reference metasurface (2D drift-diffusion)
 -- the large-signal companion to validation/resolved_bandwidth_metasurface.py (the small-signal ssac
 C(omega)), completing the carrier-dynamics arc on the real geometry.
 
-Builds the Park DD metasurface (LayeredDevsimBuilder), records the independent DC ITO charge at the
+Builds the reference DD metasurface (LayeredDevsimBuilder), records the independent DC ITO charge at the
 target gate bias and at the operating point (via the builder's proven bias ramp), repoints the gate
 (top_contact) CIRCUIT-DRIVEN via the first-class builder API (LayeredDevsimBuilder.set_ssac_gate),
 then STEPS the gate bias and integrates the device forward in time (transient.transient_step,
@@ -76,7 +76,7 @@ def _ito_charge_per_y(dev, n_bg):
 
 
 def main():
-    print("[t] === Large-signal transient gate step on the Park metasurface (2D DD) ===", flush=True)
+    print("[t] === Large-signal transient gate step on the reference metasurface (2D DD) ===", flush=True)
     d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="tms_m", device_name="tms_d")
     n_bg = float(d.materials.get("ITO").transport.n_bg_m3)
@@ -119,7 +119,7 @@ def main():
         "PASS" if gate_a else "FAIL"), flush=True)
     print("[t] GATE B (transient settles to the independent DC at Vg1, within {:.2%} of swing): "
           "{}".format(SETTLE_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
-    print("[t] *** LARGE-SIGNAL TRANSIENT (Park metasurface): {} ***".format(
+    print("[t] *** LARGE-SIGNAL TRANSIENT (reference metasurface): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall
 

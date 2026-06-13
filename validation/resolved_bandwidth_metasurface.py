@@ -1,8 +1,8 @@
 """
-Frequency-resolved gate capacitance of the FULL Park metasurface (2D drift-diffusion) via ssac --
+Frequency-resolved gate capacitance of the FULL reference metasurface (2D drift-diffusion) via ssac --
 the resolved-bandwidth capability on the real geometry, completing the gated-DD arc.
 
-Builds the Park DD metasurface (LayeredDevsimBuilder, ITO = drift_diffusion with the full-edge
+Builds the reference DD metasurface (LayeredDevsimBuilder, ITO = drift_diffusion with the full-edge
 ground), DC-solves to a gate operating point, then repoints the gate (top_contact) CIRCUIT-DRIVEN
 via the first-class builder API (LayeredDevsimBuilder.set_ssac_gate) and runs ssac -> C(omega),
 G(omega) of the gate.
@@ -70,14 +70,14 @@ def _resolve_gate(dev, v):
 
 
 def main():
-    print("[t] === Frequency-resolved gate C(omega) on the Park metasurface (2D DD, ssac) ===",
+    print("[t] === Frequency-resolved gate C(omega) on the reference metasurface (2D DD, ssac) ===",
           flush=True)
     d = build_reference_modulator("drift_diffusion")
     b = LayeredDevsimBuilder(d, mesh_name="rbm_m", device_name="rbm_d")
     n_bg = float(d.materials.get("ITO").transport.n_bg_m3)
     with _quiet():
         b.solve(BiasPoint({GATE: VG}, "g{:+.0f}".format(VG)))     # DC operating point
-    print("[t] DD Park solved at gate +{:.1f} V; gate region = {}".format(
+    print("[t] DD reference solved at gate +{:.1f} V; gate region = {}".format(
         VG, b._contact_region.get(GATE)), flush=True)
 
     # repoint the gate circuit-driven via the first-class builder API, then re-settle
@@ -117,7 +117,7 @@ def main():
         "PASS" if gate_a else "FAIL"), flush=True)
     print("[t] GATE B (ssac C == quasi-static dQ/dVg within {:.0%}): {}".format(
         ORACLE_RTOL, "PASS" if gate_b else "FAIL"), flush=True)
-    print("[t] *** RESOLVED-BANDWIDTH ssac (Park metasurface): {} ***".format(
+    print("[t] *** RESOLVED-BANDWIDTH ssac (reference metasurface): {} ***".format(
         "PASS" if overall else "FAIL"), flush=True)
     return overall
 

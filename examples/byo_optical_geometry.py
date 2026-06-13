@@ -150,7 +150,7 @@ def main():
     # periodic check: the OCC Identify must have created x- and y-pairings PRE-mesh.
     # NB ng.Periodic(HCurl) does NOT shrink the reported .ndof in this NGSolve build
     # (periodicity is enforced by dof coupling, not by dropping dofs) -- verified
-    # identical on the proven layered Park mesh -- so identification COUNT, not
+    # identical on the proven layered reference mesh -- so identification COUNT, not
     # ndof, is the honest signal. The physical periodicity is exercised by the FEM
     # (the layered builder uses this very pattern and is validated end-to-end).
     print("[t] periodic identifications created: px={} py={}".format(b.n_px, b.n_py),

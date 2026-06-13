@@ -42,7 +42,7 @@ anti-correlate monotonically (a gain-bandwidth-like trade-off, near-invariant pr
 is a constrained design point (max contrast subject to a bandwidth floor), not a magic interior optimum.
 
 ### Real DEVSIM n(z) -> topology optimizer
-`validation/fdtd_devsim_topology_design.py` -- solves the Park 2-D drift-diffusion metasurface at two gate
+`validation/fdtd_devsim_topology_design.py` -- solves the reference 2-D drift-diffusion metasurface at two gate
 biases, extracts the genuine ITO accumulation `n(z)` at each, builds the graded free-carrier-ENZ FDTD
 layers from those REAL profiles, and runs the jax.grad topology optimizer to shape the resonator that
 maximises the actual device's reflection contrast -- closing the device->design loop with no synthetic

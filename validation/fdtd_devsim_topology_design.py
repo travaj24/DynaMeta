@@ -1,5 +1,5 @@
 """WIRE the REAL DEVSIM carrier physics into the differentiable-FDTD topology optimizer. Instead of a
-synthetic accumulation profile, this solves the Park drift-diffusion metasurface at TWO gate biases,
+synthetic accumulation profile, this solves the reference drift-diffusion metasurface at TWO gate biases,
 extracts the genuine ITO electron-density depth profile n(z) at each, builds the graded free-carrier-ENZ
 FDTD layers from those REAL profiles, and runs the jax.grad topology optimizer to shape the dielectric
 resonator that MAXIMISES the actual device's reflection-modulation contrast |R_on - R_off|.

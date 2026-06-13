@@ -44,7 +44,7 @@ After verification: **~8 HIGH, ~16 MEDIUM, ~18 LOW, ~5 INFO** across 8 subsystem
 3. **`from_design` mis-detects the gate** -- it ignores `electrode.role` (a ground pad can be taken as the gate) and does not carry the gate's name through, so `run_pipeline` silently solves the whole sweep at Vg=0 for any gate not literally named `"gate"`.
 4. **The physics is structurally unguarded:** 0 of 28 validations run in CI, 27 of 28 print PASS/FAIL but `exit 0` on failure, and the solver-free bridge spine has zero pytest coverage. A refactor can break the physics while CI stays green.
 
-**Strategically, the library is cogent-but-narrow.** The alignment keystone is a real decoupling, but the field -> eps seam cannot see the applied E-field (no Pockels/Kerr/electro-absorption), eps is scalar-isotropic only (no birefringent EO crystals), there is exactly one optical solver, and -- despite the name -- the carrier solve is **DC-only**: no AC, transient, bandwidth, RC, or C-V, which is half a modulator's spec. The single highest-leverage addition (and the one missing oracle) is an **independent RCWA solver validated against the FEM on the real lossy, laterally-structured Park cell**.
+**Strategically, the library is cogent-but-narrow.** The alignment keystone is a real decoupling, but the field -> eps seam cannot see the applied E-field (no Pockels/Kerr/electro-absorption), eps is scalar-isotropic only (no birefringent EO crystals), there is exactly one optical solver, and -- despite the name -- the carrier solve is **DC-only**: no AC, transient, bandwidth, RC, or C-V, which is half a modulator's spec. The single highest-leverage addition (and the one missing oracle) is an **independent RCWA solver validated against the FEM on the real lossy, laterally-structured reference cell**.
 
 ---
 
@@ -101,9 +101,9 @@ Equilibrium Poisson, accumulation sign, ohmic dual-contact-model, and the bipola
 |---|---|---|---|
 | F1 | MED *(from HIGH)* | The Fermi-Dirac diffusion-enhancement `g`-factor uses the **degenerate asymptote** `g=1+(2/3)(c1 n/Nc)^(2/3)`; vs the true generalized-Einstein ratio `F(1/2)/F(-1/2)` it is **6.6% high at ITO's operating point and 25-35% high in the moderate-degeneracy transition**. (Cancels in pure drift, so it is not a Boltzmann no-op -- hence MED not HIGH.) | Replace with a Pade/rational fit of `F(1/2)/F(-1/2)` (the AH forms are already present), keeping it a simple `pow` so DEVSIM still differentiates it; add a true-FD transition validation. |
 | F2/F3 | MED | The 3D MOS-cap "DD reduces to equilibrium" is **mobility-independent** (zero DC current), and its 25% tolerance is explicitly sized to absorb the F1 g-error. The only genuine transport test (3D resistor) passes at a **loose 14% over-prediction** asserted as "mesh-limited" but never tested under refinement in code. | Re-label the MOS-cap test as an equilibrium-limit/sign check; add an in-code Richardson/mesh-refinement check to the resistor and tighten its gate. |
-| F4 | MED | The 2D-layered drift-diffusion path is advertised (`park_2021.py --drift-diffusion`) but **unvalidated**, and the code's own docstring says the gated case **does not converge**; the solve loop has no try/except. | Guard/refuse gated DD with edge-only grounds (point to equilibrium), or make the example converge and validate it. |
+| F4 | MED | The 2D-layered drift-diffusion path is advertised (`_reference_device.py --drift-diffusion`) but **unvalidated**, and the code's own docstring says the gated case **does not converge**; the solve loop has no try/except. | Guard/refuse gated DD with edge-only grounds (point to equilibrium), or make the example converge and validate it. |
 | F5/F6/F7 | LOW/INFO | `gummel` solver has zero coverage and admits it does not solve its target case; the bipolar diode prints but never asserts ideality; stale `ElectronQFL` references (no QFL formulation exists). | Validate or mark `gummel` experimental; assert `1<=n<=2`; drop/fix the `ElectronQFL` references. |
-| *(verifier-added)* | MED | `_dielectric_eps_static` **falls back to the optical eps** (e.g. HfO2 ~4 vs DC ~18) with only a printed warning for any gate dielectric missing `eps_static_dc` -- a loud-but-continue wrong-physics path on the general API (Park sets it, so not triggered there). | Raise (match the 3D path) or set a hard quality flag on the CarrierField. |
+| *(verifier-added)* | MED | `_dielectric_eps_static` **falls back to the optical eps** (e.g. HfO2 ~4 vs DC ~18) with only a printed warning for any gate dielectric missing `eps_static_dc` -- a loud-but-continue wrong-physics path on the general API (reference sets it, so not triggered there). | Raise (match the 3D path) or set a hard quality flag on the CarrierField. |
 
 ### 6. Schrodinger-Poisson quantum (`schrodinger_poisson.py`, `sp_carrier.py`) -- **concerning**
 
@@ -121,7 +121,7 @@ The gmsh nm-build, gate-patch OCC imprint (genuine lateral contrast), and the no
 - **F1 (HIGH):** `from_design` selects the gate as "the first electrode with a CrossSection footprint" **ignoring `electrode.role`** (`:97`) -- a `role='ground'` pad is taken as the gate, silently choosing the wrong dielectric/eps_ox/thickness/patch-frac. *Fix:* filter to `role=='biased'`; raise if ambiguous.
 - **Verifier-added (HIGH):** `from_design` does **not carry the gate-electrode name** through; `Devsim3DEquilibrium.solve` hardcodes `bias.voltages.get("gate", 0.0)` while `BiasPoint` is keyed by electrode name, so a gate named anything but `"gate"` makes `run_pipeline` **silently solve the entire sweep at Vg=0**. The from_design docstring explicitly claims "-> run_pipeline, no hand alignment." *Fix:* thread the gate name into `Stacked3DSpec` and use it for the contact + bias lookup.
 - **F2/F3 (MED):** with >1 semiconductor layer, `from_design` silently picks the lowest-index one (wrong semiconductor + wrong oxide); a **non-square cell** mis-places the carrier accumulation laterally (carrier eps spans only `[0,min(px,py)]`, the rest is edge-clamped by the VoxelCoefficient). *Fix:* raise on multi-semiconductor / non-square (or remap lateral axes and build a rectangular carrier box).
-- **F4/F5/F6 (LOW/INFO):** rectangular/circular gate collapsed to a centered square via `max()`; roadmap stale (says multi-dielectric from_design unsupported though it works for Park ordering); `analysis.resonance_dip` claims "unequally-spaced-safe" but is off by a full grid step on non-uniform grids.
+- **F4/F5/F6 (LOW/INFO):** rectangular/circular gate collapsed to a centered square via `max()`; roadmap stale (says multi-dielectric from_design unsupported though it works for reference ordering); `analysis.resonance_dip` claims "unequally-spaced-safe" but is off by a full grid step on non-uniform grids.
 
 ### 8. Cross-cutting rigor (whole library + tests + docs) -- mostly-solid core, fragile guarantees
 
@@ -139,7 +139,7 @@ ASCII-only `print()` output is clean (0 non-ASCII in any print across 40 modules
 
 ### Is the library cogent and general enough? -- **Cogent-but-narrow, trending leaky**
 
-The alignment keystone (string-key + bbox, no shared object graph; lift the carrier *density* so background eps re-derives through the same formula) is genuinely good engineering. It leaks the moment you leave the Park ITO archetype:
+The alignment keystone (string-key + bbox, no shared object graph; lift the carrier *density* so background eps re-derives through the same formula) is genuinely good engineering. It leaks the moment you leave the reference ITO archetype:
 
 | Gap | Pri | Why it matters |
 |---|---|---|
@@ -191,10 +191,10 @@ There is **no** optimizer today (sweeps are forward-only; the only `scipy.optimi
 2. **(CRITICAL) No dynamic response** -- zero AC/transient/RC/bandwidth/switching/energy. Half the modulator spec is structurally absent.
 3. **(HIGH) The FEM linear solve has no convergence assertion** -- GMRes proceeds past `maxsteps` with whatever vector it holds, and AMS is disabled in the ENZ regime; a non-converged ENZ solve returns a plausible-but-wrong R/T silently.
 4. **(HIGH) The physics chain is regression-unguarded** (Part I.8: 0/28 CI-gated, 27/28 exit 0 on failure, spine untested).
-5. **(HIGH) SeparableXYLift is an unbounded separable approximation** for the canonical c4v square patch (the Park geometry), never bounded against a true 3D carrier solve.
+5. **(HIGH) SeparableXYLift is an unbounded separable approximation** for the canonical c4v square patch (the reference geometry), never bounded against a true 3D carrier solve.
 6. **(MED) Degenerate-ITO approximations bias the ENZ depth** (no BGN, parabolic self-consistent SP, classical-vs-quantum centroid ~1nm, linear resampling smears the ~1nm peak).
 
-**Single change that most increases trust:** add a second `OpticalSolver` backed by an independent RCWA tool (grcwa/inkstone) and validate it against the NGSolve solver on the **actual Park lossy-Au-patch + ENZ-ITO unit cell** -- full R/T/A spectrum *and* the bias-induced resonance shift -- ideally anchored to Park's measured value. This closes the missing oracle, provides the fast solver, and unlocks optimization.
+**Single change that most increases trust:** add a second `OpticalSolver` backed by an independent RCWA tool (grcwa/inkstone) and validate it against the NGSolve solver on the **actual reference lossy-Au-patch + ENZ-ITO unit cell** -- full R/T/A spectrum *and* the bias-induced resonance shift -- ideally anchored to the reference-modulator measured value. This closes the missing oracle, provides the fast solver, and unlocks optimization.
 
 ---
 
@@ -208,7 +208,7 @@ There is **no** optimizer today (sweeps are forward-only; the only `scipy.optimi
 - Add a FEM convergence assertion (raise/warn when GMRes hits `maxsteps`).
 
 **P1 -- the linchpin + the missing half-spec (medium-to-large):**
-- RCWA as a second `OpticalSolver` behind a `LayeredStackSolver` seam, validated vs FEM on the real Park lossy cell (closes the oracle + fast solver).
+- RCWA as a second `OpticalSolver` behind a `LayeredStackSolver` seam, validated vs FEM on the real reference lossy cell (closes the oracle + fast solver).
 - DC gate C-V (zero new solver), then scope the AC/transient carrier solve.
 
 **P2 -- generality (medium-to-large):**

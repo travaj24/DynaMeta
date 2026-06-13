@@ -74,7 +74,7 @@ absorption attribution).
    Airy-validated to ~1e-16).
 2. Graded carrier slab: bridge == graded-TMM == FEM (the existing `graded_tmm_vs_fem`
    triangle extended to a third backend) -- the DEVSIM n(z) -> RCWA chain.
-3. Patterned cell: the Park Au-patch/ENZ-ITO cell vs the NGSolve FEM (the wishlist's
+3. Patterned cell: the reference Au-patch/ENZ-ITO cell vs the NGSolve FEM (the wishlist's
    "missing independent oracle") and vs the existing grcwa cross-check machinery.
 4. Oblique/conical vs FEM/TMM within the measured envelopes.
 5. Sweep path == per-wavelength path; dispersive-material sweep vs DynaMeta Material models.
@@ -204,7 +204,7 @@ propagation; default is interop, not reimplementation.
   accumulation (still warns EXPERIMENTAL there, electron-only CARRIER_EQS).
   Gated-accumulation convergence itself is CLOSED via the staged Poisson-presolve +
   coupled-Newton recipe -- 1D `validation/gated_dd.py` (re-run green 2026-06-11), 2D
-  `validation/gated_dd_2d.py`, builder-wired Park metasurface
+  `validation/gated_dd_2d.py`, builder-wired reference metasurface
   `validation/gated_dd_builder.py` -- so Gummel is not required for that case.
 - Lasing/cavity, C(T), GPU nonlinear: SHIPPED 2026-06-10 (d588e50
   `validation/fdtd_lasing_cavity` gates A-E; cee64bd `validation/thermal_ct_transient`

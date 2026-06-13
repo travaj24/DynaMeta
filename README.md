@@ -28,7 +28,7 @@ Combines three stages:
 ## Quick start
 
 The authoritative, end-to-end example is
-[examples/park_2021.py](examples/park_2021.py). The snippet below is the same
+[validation/_reference_device.py](validation/_reference_device.py). The snippet below is the same
 clean-break API, condensed:
 
 ```python
@@ -59,7 +59,7 @@ reg.add(Material("ITO",
     optical=DrudeOptical(eps_inf=4.25, m_opt_kg=0.225 * M_E, gamma_rad_s=1.1e14),
     transport=TransportModel(
         n_bg_m3=4.0e20 * 1e6, eps_static=9.5,
-        # constant DOS mass here; examples/park_2021.py uses a Kane m*(n).
+        # constant DOS mass here; validation/_reference_device.py uses a Kane m*(n).
         dos_mass_kg_of_n_m3=lambda n: np.full_like(np.asarray(n, float), 0.27 * M_E),
         band_gap_eV=3.6, chi_eV=4.5)))   # physics defaults to "equilibrium"
 
@@ -111,12 +111,12 @@ for r in rows:
         r.bias_label, r.lambda_nm, r.result.R, r.result.phase_deg))
 ```
 
-Run the Park 2021 reference design:
+Run the the reference modulator reference design:
 
 ```bash
-python -m examples.park_2021 --quick            # 1-bias x 3-wavelength smoke test
-python -m examples.park_2021                    # 2-bias x 9-wavelength sweep
-python -m examples.park_2021 --drift-diffusion  # solve Stage 1 with full drift-diffusion
+python -m validation._reference_device --quick            # 1-bias x 3-wavelength smoke test
+python -m validation._reference_device                    # 2-bias x 9-wavelength sweep
+python -m validation._reference_device --drift-diffusion  # solve Stage 1 with full drift-diffusion
 ```
 
 ## Results
@@ -158,8 +158,8 @@ materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
 PCM/LC/graphene, magneto-optic), the FDTD engine (1D/2D/3D incl GPU +
 nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), and the
-required-core Lumenairy RCWA/PMM optical backends. The Park 2021
-reference design ([examples/park_2021.py](examples/park_2021.py)) is the
+required-core Lumenairy RCWA/PMM optical backends. The the reference modulator
+reference design ([validation/_reference_device.py](validation/_reference_device.py)) is the
 validated end-to-end run. Forward plan:
 [docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).
 

@@ -71,7 +71,7 @@ example asserts the identifications took effect by counting the x/y pairings
 created on the OCC shape (`n_px`, `n_py` > 0). NB: `ng.Periodic(HCurl).ndof` is
 NOT smaller than `HCurl.ndof` in current NGSolve -- HCurl periodicity is enforced
 by dof *coupling*, not by dropping dofs (verified identical on the validated
-layered Park mesh) -- so the identification count, not ndof, is the honest signal;
+layered reference mesh) -- so the identification count, not ndof, is the honest signal;
 the physical periodicity is exercised by the FEM solve.
 
 ## Validation hooks (use them -- the house style is no silent failure)

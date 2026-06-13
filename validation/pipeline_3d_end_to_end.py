@@ -97,7 +97,7 @@ def main():
     print("[t] gate-side Re(eps): 0V={:+.3f} +1V={:+.3f}  d_eps={:.3f}  (optical dR={:.6f})".format(
         eps_gate["0V"], eps_gate["+1V"], d_eps, dR), flush=True)
     print("[t] NOTE: R modulation ~0 here -- bare 12nm ITO in air is optically negligible at "
-          "1300nm; a resonant patch/cavity (Park) converts the ENZ shift to dR.", flush=True)
+          "1300nm; a resonant patch/cavity (reference) converts the ENZ shift to dR.", flush=True)
     print("[t] *** 3D PIPELINE END-TO-END: chain_runs={} bias_modulates_eps={} -> {} ***".format(
         "OK" if ran else "FAIL", "OK" if eps_modulated else "NULL",
         "PASS" if (ran and eps_modulated) else "CHECK"), flush=True)

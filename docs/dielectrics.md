@@ -3,7 +3,7 @@
 This note documents how the **static** (DC) relative permittivities used by the
 Stage-1 DEVSIM Poisson solve are chosen, and why they differ from the materials'
 **optical** permittivities. It also records a measured-vs-computed comparison for
-the Park 2021 stack so the choice of values travels with the code.
+the the reference modulator stack so the choice of values travels with the code.
 
 ## Why Stage 1 needs a *static* permittivity (not the optical one)
 
@@ -17,7 +17,7 @@ permittivity of a good insulator is flat at
 The library's optical models (`DrudeOptical`, `ConstantOptical`) carry only the
 **electronic** part (e.g. HfO2 ~4, n~2). The **ionic/lattice** part is what raises
 it to the DC value (HfO2 ~18). Using the optical eps in Stage 1 therefore
-under-predicts the gate capacitance -- for the Park HfO2/Al2O3 stack that is a
+under-predicts the gate capacitance -- for the reference HfO2/Al2O3 stack that is a
 **~4x** under-prediction of the accumulation (see the history note below).
 
 How to set it:
@@ -26,7 +26,7 @@ How to set it:
   wrong for a gate oxide).
 - **Semiconductors:** `TransportModel(eps_static=<DC value>, ...)`.
 
-## Park 2021 stack: computed vs measured vs the values used here
+## the reference modulator stack: computed vs measured vs the values used here
 
 The three oxides set the gate capacitance. The metals (Au patch, Al-Nd mirror)
 are electrodes -- DC permittivity is not applicable.
@@ -35,7 +35,7 @@ are electrodes -- DC permittivity is not applicable.
 |---|---|---|---|---|
 | **HfO2**  | 23.8  (orthorhombic Pca2_1, JVASP-52653; elec 5.11 + ionic 18.70) | monoclinic (stable bulk) ~18-20; **amorphous ALD ~12-24** (as-dep ~14); cubic ~30; tetragonal ~40+; canonical high-k value ~25 | **18.0** | ALD-film value; DFPT picked a higher-k crystalline phase |
 | **Al2O3** | 12.0  (corundum R-3c, JVASP-32; elec 3.20 + ionic 8.80) | standard ~9-10; **amorphous ALD ~7-9**; sapphire (alpha) ~9-10 | **9.0** | ALD-film value; DFPT overestimates by ~25% |
-| **In2O3** (ITO host) | none (all 3 polymorphs report 'na') | static eps0 ~8.9-10; optical eps_inf ~4.0-4.1 (single-crystal IR ellipsometry) | **9.5** static / **4.25** optical (Park Fig-S2 fit) | within the measured band on both ends |
+| **In2O3** (ITO host) | none (all 3 polymorphs report 'na') | static eps0 ~8.9-10; optical eps_inf ~4.0-4.1 (single-crystal IR ellipsometry) | **9.5** static / **4.25** optical (reference Fig-S2 fit) | within the measured band on both ends |
 
 ### What the comparison shows
 
@@ -48,7 +48,7 @@ are electrodes -- DC permittivity is not applicable.
 
 2. **Polymorph matters as much as the method.** JARVIS returned *orthorhombic*
    HfO2 (Pca2_1, the ferroelectric phase, k~24-30), not the monoclinic ground
-   state (~18) or the **amorphous ALD film** the Park device actually uses
+   state (~18) or the **amorphous ALD film** the reference device actually uses
    (~16-20). A database returns the most-stable structure that *has* a computed
    dielectric -- which is not necessarily your film.
 
@@ -58,7 +58,7 @@ are electrodes -- DC permittivity is not applicable.
    overturning it.
 
 4. **ITO/In2O3 is anchored independently at both ends:** the optical eps_inf=4.25
-   (Park Fig-S2 Drude fit) matches measured In2O3 eps_inf ~4.0-4.1, and the static
+   (reference Fig-S2 Drude fit) matches measured In2O3 eps_inf ~4.0-4.1, and the static
    9.5 sits in the measured eps0 ~8.9-10 band.
 
 ### Recommendation
@@ -107,7 +107,7 @@ Al2O3 2.756) instead of their static DC values. That was a ~4.2x too-low gate
 capacitance and under-predicted the +2 V accumulation by ~4x (n_top/n_bg 1.09
 instead of 1.35). Fixed 2026-05-31 by adding `Material.eps_static_dc` +
 `Material.dc_permittivity()`, making Stage 1 use it (warn loudly on fallback), and
-setting HfO2=18.0 / Al2O3=9.0 in the Park example. The original (pre-rewrite)
+setting HfO2=18.0 / Al2O3=9.0 in the reference example. The original (pre-rewrite)
 pipeline used the correct static values, so this never affected earlier results.
 
 ## References
