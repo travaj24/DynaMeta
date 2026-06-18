@@ -53,7 +53,7 @@ class FDTDLayer:
     # (exp(-i w t)); dN < 0 reduces EXACTLY to a passive Lorentz pole with delta_eps =
     # kappa |dN|/(eps0 w^2). kappa is the classical coupling q^2/m_eff [C^2/kg]; the small-signal
     # intensity gain at line center is g0 = kappa dN / (n c eps0 dw) [1/m]. The inversion is
-    # CLAMPED (no rate dynamics in the field loop -- see optics.gain_medium for the four-level
+    # CLAMPED (no rate dynamics in the field loop -- see optics.laser_gain for the four-level
     # populations; dynamic field-population coupling is a documented follow-on).
     gain_w_rad_s: float = 0.0              # transition frequency w_a [rad/s] (0 = no gain line)
     gain_dw_rad_s: float = 0.0             # FWHM linewidth dw_a [rad/s]

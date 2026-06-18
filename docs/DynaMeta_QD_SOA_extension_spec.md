@@ -79,7 +79,7 @@ to ~1 part in 2^N for N bits, and be stable symbol-to-symbol.**
 
 | Module | What it does | Relevance to the SOA model |
 |---|---|---|
-| `optics/gain_medium.py` | Four-level laser gain medium: exact matrix-exponential population solver; closed forms for small-signal gain `g₀`, Fabry-Pérot photon lifetime, threshold inversion, pump threshold, relaxation-oscillation frequency. Feeds the metasurface FDTD via a Lorentz-oscillator gain ADE. | Solid laser-physics core and good closed-form sanity checks. **But** the inversion is solved under a *constant pump and clamped* for the optical solve — dynamic field↔population coupling (saturation, lasing) is explicitly flagged as a follow-on. The scheme is four-level *atomic*, not semiconductor band gain. |
+| `optics/laser_gain.py` | Four-level laser gain medium: exact matrix-exponential population solver; closed forms for small-signal gain `g₀`, Fabry-Pérot photon lifetime, threshold inversion, pump threshold, relaxation-oscillation frequency. Feeds the metasurface FDTD via a Lorentz-oscillator gain ADE. | Solid laser-physics core and good closed-form sanity checks. **But** the inversion is solved under a *constant pump and clamped* for the optical solve — dynamic field↔population coupling (saturation, lasing) is explicitly flagged as a follow-on. The scheme is four-level *atomic*, not semiconductor band gain. |
 | `carriers/carrier_heating.py` | Two-temperature hot-electron model (`T_e` vs `T_l`), Kane non-parabolic mass, Drude damping vs `T_e`; sub-ps rise / ps relaxation. | **Directly reusable** as the SOA carrier-heating ultrafast term — the same physics, currently parameterized for a free-carrier ENZ film rather than an inverted gain medium. |
 | `carriers/transient.py`, `dynameta/transient_optics.py` (top-level, **not** under `carriers/`) | Time-domain carrier transport (DEVSIM BDF) and the carrier→Drude→optics transient loop. | Time-domain solver infrastructure and conventions. Aimed at the gated modulator (accumulation, RC, charge storage), not amplifier gain. |
 | `carriers/ac_analysis.py` | Small-signal admittance `Y(f)` → capacitance, RC bandwidth. | Bandwidth-analysis pattern; not optical gain dynamics. |
@@ -100,7 +100,7 @@ In rough priority order:
 
 2. **Dynamic field↔population coupling.** The signal photon density must deplete
    the inversion locally and in time — the stimulated-emission term that
-   `gain_medium.py` currently omits (its "follow-on"). This one addition is what
+   `laser_gain.py` currently omits (its "follow-on"). This one addition is what
    produces **gain saturation, the compressed transfer curve, and pattern
    effects** — i.e. the core of this simulation.
 
@@ -137,7 +137,7 @@ In rough priority order:
 
 **Placement.** A new `dynameta/optics/soa.py` (or an `amplifier/` subpackage),
 declarative in the existing DynaMeta style, reusing the matrix-exponential / ODE
-solver pattern from `gain_medium.py` and `TwoTempParams` from
+solver pattern from `laser_gain.py` and `TwoTempParams` from
 `carrier_heating.py`. Parameterize from datasheet-derived values. (**Correction:** no
 Innolume/SOA/BOA parameter set or amplifier model exists in DynaMeta today -- a repo-wide
 search finds the term only in this doc. The QD parameter set must be digitized from the
@@ -157,12 +157,33 @@ datasheet as new work, not reused; see Section 8.1.)
 
 1. **QD gain core** — multi-state rate equations + injection pump; produce the
    static gain-vs-input-power (saturation) curve.
-   *Validate:* small-signal limit matches `gain_medium.small_signal_gain_per_m`;
+   *Validate:* small-signal limit matches `laser_gain.small_signal_gain_per_m`;
    saturation power rises with pump current as expected.
+   **[SHIPPED 2026-06-11: `dynameta/optics/soa/qd_gain.py` (QDGainParams, QDGainModel) +
+   `validation/qd_soa_gain_core.py` (5 gates green). Group-resolved WL->ES->GS with the
+   Section-8 corrections; standalone package, no edits to laser_gain.py. Per the corrected
+   Phase-1 oracle (8.6) the small-signal check is transparency at rho_GS=1/2, NOT a
+   cross-quantity equality with the atomic laser_gain g0. Gates: transparency+monotonicity,
+   saturation+pump-dependence (S_sat rises 2.2e20->8.8e20 m^-3 over 6-25 mA), particle
+   conservation 7e-14, detailed balance exact, SHB hole tracks the drive frequency.]**
 2. **Traveling-wave dynamic coupling** — couple `P(z, t)` to the carrier
    dynamics; produce gain recovery and pattern effects.
    *Validate:* gain-recovery time vs literature; near pattern-free behavior at
    high symbol rate with QD parameters.
+   **[SHIPPED 2026-06-11: `dynameta/optics/soa/traveling_wave.py` (TravelingWaveSOA, a
+   method-of-characteristics z-t marcher with dt = dz/v_g; pluggable slab-gain protocol) +
+   `validation/qd_soa_traveling_wave.py` (5 gates green). GATE A verifies the engine against
+   the analytic Agrawal-Olsson saturable-gain pulse law to 3e-4 with 1/n_slices convergence
+   (TwoLevelSaturableGain + agrawal_olsson_output, the analytic oracle). GATE B: 6.6 ps QD
+   gain recovery, completing more with pump (reservoir). GATE C: the QD low-pattern-effect
+   advantage (penalty 0.05 vs 0.32 for a throttled reservoir at 80 GHz). GATE D: dynamic
+   distortion is frequency-dependent (HD2 0.044 at 2 GHz -> 0.0053 at 150 GHz), the memory
+   effect a static IP3 misses. GATE E: added power below the (I/q)h nu one-photon-per-electron
+   ceiling + passivity. Standalone engine, NOT wired into the run_pipeline metasurface seam.
+   REMAINING for full nonlinear coverage: true 2-colour cross-gain modulation + four-wave
+   mixing need a multi-tone field extension (Phase 3); ultrafast spectral-hole + carrier-
+   heating dynamics are captured at the group-resolved + reservoir level here and refine
+   with the TwoTempParams coupling (Phase 5).]**
 3. **ASE + noise** — spontaneous-emission source and beat-noise statistics.
    *Validate:* noise figure lands in the QD-SOA range (~5 dB) and approaches the
    quantum limit (~3 dB) at high gain.
@@ -234,7 +255,7 @@ the total noise floor (shot + ASE beat + source RIN + detector/TIA).
 
 ## 7. One-line conclusion
 
-DynaMeta has a genuine laser-gain core (`gain_medium.py`) and a reusable
+DynaMeta has a genuine laser-gain core (`laser_gain.py`) and a reusable
 ultrafast carrier-heating model (`carrier_heating.py`), but no
 traveling-wave **semiconductor** amplifier with dynamic saturation or ASE. The
 missing physics — QD band gain with an injection pump, signal-driven inversion
@@ -267,7 +288,7 @@ same focused module, specified correctly.
   repo (the only hit is the substring "boa" in "checkerboard"). The QD parameter set is new
   datasheet-digitization work, not reuse -- scope it explicitly.
 
-Everything else in Section 3 is accurate: `gain_medium.py` is confirmed a four-level ATOMIC
+Everything else in Section 3 is accurate: `laser_gain.py` is confirmed a four-level ATOMIC
 scheme with constant pump, CLAMPED inversion, and the dynamic field<->population coupling
 explicitly flagged as the follow-on (header:23-25); `carrier_heating.py` exposes
 `TwoTempParams` + `two_temperature_response` by those exact names.
@@ -283,9 +304,9 @@ The extension is **additive-with-care**. To keep it additive:
   steady-state, once-per-(bias, wavelength) callable returning `OpticalResult`), and must
   NOT route through the normal-incidence metasurface FDTD kernel (`_run_2d_te` /
   `kernels2d.py`). It returns its own waveform/trajectory objects.
-- **Do NOT edit `gain_medium.py`, `FourLevelSystem`, or the `kernels2d.py` gain/gain_dyn
-  recursion.** Section 4 item 2 ("the stimulated term gain_medium.py omits") must be read as
-  "build it fresh in the new module," not "add it to gain_medium." Editing those paths would
+- **Do NOT edit `laser_gain.py`, `FourLevelSystem`, or the `kernels2d.py` gain/gain_dyn
+  recursion.** Section 4 item 2 ("the stimulated term laser_gain.py omits") must be read as
+  "build it fresh in the new module," not "add it to laser_gain." Editing those paths would
   regress, in order of fragility: `validation/fdtd_lasing_cavity.py` (GATES A-E),
   `validation/fdtd_gain_saturation.py` (A-D), `validation/fdtd_gain_medium.py`,
   `tests/test_fdtd_chi2_raman.py` (FourLevelSystem asserts), and the cupy/numba parity gates
@@ -391,7 +412,7 @@ N_q = areal/volumetric dot density; group index j over the size distribution):
 
 ### 8.6 Corrected Phase-1 oracle
 
-The Phase-1 check "small-signal limit matches `gain_medium.small_signal_gain_per_m`" is
+The Phase-1 check "small-signal limit matches `laser_gain.small_signal_gain_per_m`" is
 **not a valid equality**: that function returns the line-center intensity gain of a single
 classical Lorentz-oscillator ADE (atomic four-level), a different physical quantity from
 semiconductor QD band gain summed over an inhomogeneous ensemble. Replace it with: (a)
@@ -406,7 +427,7 @@ checks only.
 ### 8.7 Bottom line
 
 Additive: **yes**, if built standalone in `dynameta/optics/soa/` with no edits to
-`gain_medium.py` or the FDTD gain kernels. Reflects full deep physics: **not yet** -- Section
+`laser_gain.py` or the FDTD gain kernels. Reflects full deep physics: **not yet** -- Section
 6 needs the 8.3/8.4 corrections (conservation, stimulated normalization, group-resolved SHB,
 e/h or a documented ceiling, internal-loss NF, facet ripple) and the 8.5 reclassifications,
 all of which fit the existing phased plan without expanding its scope.
