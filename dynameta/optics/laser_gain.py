@@ -43,7 +43,7 @@ def small_signal_gain_per_m(kappa_C2_kg: float, dN_m3: float, n_refr: float,
     """Line-center small-signal INTENSITY gain g0 = kappa dN/(n c eps0 dw) [1/m] (negative for
     dN < 0 = absorption)."""
     if not (kappa_C2_kg > 0.0 and n_refr > 0.0 and dw_rad_s > 0.0):
-        raise ValueError("gain_medium: kappa, n and dw must be > 0")
+        raise ValueError("laser_gain: kappa, n and dw must be > 0")
     return float(kappa_C2_kg) * float(dN_m3) / (n_refr * C_LIGHT * EPS0 * float(dw_rad_s))
 
 

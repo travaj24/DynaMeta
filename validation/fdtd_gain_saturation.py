@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, HBAR, M_E, Q_E
 from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te
-from dynameta.optics.gain_medium import FourLevelSystem, small_signal_gain_per_m
+from dynameta.optics.laser_gain import FourLevelSystem, small_signal_gain_per_m
 
 N_MED = np.sqrt(2.0)
 NX = 4
