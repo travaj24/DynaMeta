@@ -1,5 +1,5 @@
 """LASING: the dynamic four-level gain medium (R20 follow-on) inside a Fabry-Perot cavity,
-vs the hand-derived class-B laser rate-equation oracle (gain_medium cavity-design formulas).
+vs the hand-derived class-B laser rate-equation oracle (laser_gain cavity-design formulas).
 
 Testbed: a 10.6 um slab of n_c = sqrt(2) host (gain window = the whole slab, Gamma = 1)
 between eps = 100 (n_out = 10) pads index-matched into the CPML -- the two Fresnel steps are
@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, EPS0, HBAR, M_E, Q_E
 from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te
-from dynameta.optics.gain_medium import (FourLevelSystem, cavity_photon_lifetime_s,
+from dynameta.optics.laser_gain import (FourLevelSystem, cavity_photon_lifetime_s,
                                          pump_threshold_per_s, relaxation_oscillation_rad_s,
                                          small_signal_gain_per_m, threshold_inversion_m3)
 

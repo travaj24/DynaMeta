@@ -89,7 +89,7 @@ pushed; each item is byte-identical off. One-line ledger (validations in `valida
   -> `carriers/density_gradient.py` (`density_gradient_dead_layer.py`: dead layer 1.7 nm vs
   Schrodinger-Poisson 1.2 nm). Commit b80fba0.
 - **R20** four-level gain: clamped-inversion gain ADE + exact expm populations ->
-  `optics/gain_medium.py` (`fdtd_gain_medium.py`: g0 closed form 2.8e-4; dN < 0 == passive Lorentz
+  `optics/laser_gain.py` (`fdtd_gain_medium.py`: g0 closed form 2.8e-4; dN < 0 == passive Lorentz
   EXACTLY). Commit 438d95b.
 - **R21** k(T) via the EXACT Kirchhoff transform -> `thermal_fem.solve_thermal_kirchhoff_fem`
   (`thermal_kirchhoff.py`: closed-form inversion 1.9e-11 where naive constant-k errs 2.4e-2).

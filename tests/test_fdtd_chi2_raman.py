@@ -78,7 +78,7 @@ def test_gain_numba_matches_numpy():
 
 
 def test_four_level_steady_state_and_conservation():
-    from dynameta.optics.gain_medium import FourLevelSystem, small_signal_gain_per_m
+    from dynameta.optics.laser_gain import FourLevelSystem, small_signal_gain_per_m
     s = FourLevelSystem(tau_32_s=4e-7, tau_21_s=2.3e-4, tau_10_s=1e-8, W_p_per_s=50.0,
                         N_total_m3=1e25)
     ss = s.steady_state()
@@ -96,7 +96,7 @@ def test_cavity_design_formulas_worked_point():
     # the hand-verified lasing worked point (validation/fdtd_lasing_cavity.py pins):
     # n_c = sqrt(2) / n_out = 10 mirrors, L = 10.6 um, dw = 2pi 2e13, kappa = q^2/m_e
     from dynameta.constants import M_E, Q_E
-    from dynameta.optics.gain_medium import (FourLevelSystem, cavity_photon_lifetime_s,
+    from dynameta.optics.laser_gain import (FourLevelSystem, cavity_photon_lifetime_s,
                                              pump_threshold_per_s,
                                              relaxation_oscillation_rad_s,
                                              threshold_inversion_m3)
@@ -116,7 +116,7 @@ def test_cavity_design_formulas_worked_point():
 
 
 def test_cavity_design_formula_guards():
-    from dynameta.optics.gain_medium import (FourLevelSystem, cavity_photon_lifetime_s,
+    from dynameta.optics.laser_gain import (FourLevelSystem, cavity_photon_lifetime_s,
                                              pump_threshold_per_s,
                                              relaxation_oscillation_rad_s,
                                              threshold_inversion_m3)
