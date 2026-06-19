@@ -273,6 +273,40 @@ def test_selfheating_eh_es_numba_parity():
         assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
 
 
+def test_bidir_ase_reduces_and_symmetry():
+    from dynameta.optics.soa import (ase_output_psd, ase_spectrum_bidirectional,
+                                     noise_figure)
+    m = QDGainModel(QDGainParams(n_groups=1).with_detailed_balance_taus())
+    nu0, Gamma, N, dz = m.p.nu0_Hz, m.p.Gamma, 50, 1e-5
+    rho = np.full(1, 0.85)
+    g = float(m.material_gain_per_m(rho, nu0))
+    gsp = float(m.emission_gain_per_m(rho, nu0))
+    anchor = ase_output_psd(np.full(N, g), np.full(N, 0.85), dz, nu0, Gamma, 0.0, m_pol=2)
+    got = ase_spectrum_bidirectional(np.full((N, 1), g), np.full((N, 1), gsp), dz, np.array([nu0]),
+                                     np.array([1e10]), Gamma, m_pol=2, direction="forward")
+    assert abs(got["S_f_out"][0] - anchor) / abs(anchor) < 1e-13      # reduction
+    both = ase_spectrum_bidirectional(np.full((N, 1), g), np.full((N, 1), gsp), dz, np.array([nu0]),
+                                      np.array([1e10]), Gamma, m_pol=2)
+    assert abs(both["S_f"][0] - both["S_b"][0]) / both["S_f"][0] < 1e-13   # uniform symmetry
+    # spectral NF at this single band == noise_figure
+    nsp = float(gsp / g)
+    assert abs(both["NF"][0] - noise_figure(float(both["G"][0]), nsp)) / both["NF"][0] < 1e-10
+
+
+def test_bidir_ase_saturation_clamps():
+    from dynameta.optics.soa import ase_self_consistent
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
+    nu0 = m.p.nu0_Hz
+    nu = np.linspace(nu0 - 3e12, nu0 + 3e12, 21)
+    dnu = np.gradient(nu)
+    g_unsat = m.material_gain_per_m(m.rho_GS(m.steady_state(40e-3)), nu)
+    off = ase_self_consistent(m, 40e-3, 0.0, nu0, nu, dnu, 0.6e-3, n_slices=40, ase_saturation=False)
+    on = ase_self_consistent(m, 40e-3, 0.0, nu0, nu, dnu, 0.6e-3, n_slices=40, ase_saturation=True,
+                             ase_strength=20.0)
+    assert np.array_equal(off["g_sat"], g_unsat)                      # OFF == unsaturated
+    assert np.max(off["g_sat"] - on["g_sat"]) > 0.0 and on["converged"]   # ASE clamps the gain
+
+
 def test_facet_gain_ripple_and_ceiling():
     from dynameta.optics.soa import facet_gain_ripple_dB, ripple_enob_ceiling
     # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~5.6-bit ENOB ceiling

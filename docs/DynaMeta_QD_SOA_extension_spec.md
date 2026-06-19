@@ -278,7 +278,24 @@ datasheet as new work, not reused; see Section 8.1.)
      ripple is the Saitoh-Mukai Airy peak-to-valley (0.17 dB @ R=1e-4, G=20 dB -> ~5.6-bit ENOB
      ceiling). Rth=0 / coefficients 0 -> isothermal byte-identical. Demonstrated ENOB ceiling: a
      13.5 K self-heating drift (dG/dT=-0.037 dB/K) dwarfs the 0.23 K 8-bit predistortion budget.
-   Remaining gain-physics ceiling (documented, optional): bidirectional spectrally-resolved ASE.
+   - **Bidirectional spectrally-resolved ASE (the final gain ceiling) -- SHIPPED 2026-06-19**
+     (`ase_noise.ase_spectrum_bidirectional`/`ase_self_consistent`/`spectral_noise_figure`/
+     `inversion_factor_nsp_eh` + `validation/qd_soa_bidir_ase.py`, 5 gates). The forward-only
+     single-band `ase_output_psd` is generalized to a frequency grid with the z-resolved gain
+     profile and FORWARD + BACKWARD PSD transport. The emission source is pole-free,
+     q = Gamma g_sp h nu == Gamma g n_sp h nu (g_sp from emission_gain_per_m's rho^2 vs material
+     gain's (2 rho - 1), so g_sp/g = n_sp exactly), and S_f propagates with the NET coefficient
+     a = Gamma g - alpha_i. From it: the spectral noise figure NF(nu) (-> 2 n_sp at high gain,
+     == the scalar noise_figure at centre), and ASE-induced gain saturation (the integrated
+     bidirectional ASE photon density depletes the inversion through a self-consistent lumped
+     fixed point). Gates: single-nu forward == ase_output_psd (1.8e-16); uniform spectral sum
+     S_f == n_sp h nu (G-1) over the band (4e-14); spectral NF @centre == noise_figure (3.5e-13)
+     AND -> 2 n_sp at G>1e3, AND the LOSSY-device NF (alpha_i>0) == noise_figure(bare n_sp, Gg,
+     alpha_i) -- proving the loss degradation is counted ONCE (it lives in the net-propagated S_f,
+     not multiplied in again); bidirectional symmetry S_f(L) == S_b(0) (0.0); ASE clamps the gain
+     monotonically with load, ase_saturation=False reproduces the unsaturated propagator exactly.
+     Adversarial pass caught + fixed a P1 (spectral_noise_figure double-counted internal loss when
+     alpha_i>0) before ship. This closes every documented gain-leg ceiling from Section 8.
 
 ---
 

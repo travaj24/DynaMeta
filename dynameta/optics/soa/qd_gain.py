@@ -561,6 +561,21 @@ class QDGainModel:
             g = g + self._gain_scale * p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2 * (LE @ invE)
         return g if np.ndim(nu_Hz) else float(np.atleast_1d(g)[0])
 
+    def emission_gain_per_m(self, rho_GS, nu_Hz) -> np.ndarray:
+        """Spontaneous-EMISSION gain spectrum g_sp(nu) [1/m] (GS band, excitonic): sum_j N_q w_j
+        mu_GS sigma_pk L(nu-nu_j) rho_GS_j^2 -- proportional to the upper-state population, the ASE
+        SOURCE amplitude (the bidirectional-ASE source is q = Gamma g_sp h nu). It equals
+        g(nu)*n_sp(nu) but is POLE-FREE (no n_sp division at net transparency); for a single group
+        g_sp = g * rho^2/(2 rho-1), so Gamma g_sp h nu reproduces ase_output_psd's source exactly.
+        Scaled by the self-heating gain factor like the net gain."""
+        p = self.p
+        rho = np.asarray(rho_GS, dtype=np.float64)
+        nu = np.atleast_1d(np.asarray(nu_Hz, dtype=np.float64))
+        L = self._lorentzian(nu[:, None] - self.nu_j[None, :])
+        em = (rho * rho) * self.w_j                          # per-group emission (upper population)
+        g = self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * (L @ em)
+        return g if np.ndim(nu_Hz) else float(g[0])
+
     def power_to_photon_density(self, P_W: float, nu_Hz: float) -> float:
         """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided
         power P at frequency nu -- the density that actually depletes the dots."""
