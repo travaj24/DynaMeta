@@ -105,6 +105,45 @@ class TravelingWaveSOA:
             out["g_zt"] = g_zt
         return out
 
+    def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
+                         state0=None):
+        """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
+        cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
+        through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
+        the field amplification per slice is exp(0.5*(Gamma g (1 - i alpha) - alpha_i) dz)
+        and the carriers are driven by the local power |A|^2. Two input tones beating at a
+        detuning within the carrier cutoff pulsate the gain/index and scatter into FWM
+        sidebands; far-detuned tones simply cross-saturate (XGM). Returns a dict with the
+        complex A_out(t), |A_out|^2 power, t, dt. Reduces to amplify() (power) when alpha = 0
+        and the input is a single real tone.
+
+        Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at envelope
+        frequency f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
+        nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
+        alpha = float(alpha_lef) if alpha_lef is not None else float(
+            getattr(self.model, "alpha_lef", 0.0))
+        A_in = np.asarray(A_in, dtype=np.complex128)
+        if A_in.ndim != 1 or A_in.size < 2:
+            raise ValueError("amplify_coherent: A_in must be a 1-D complex waveform >= 2 samples")
+        nt = A_in.size
+        state = self.model.init_slices(self.nz, drive) if state0 is None else state0
+        gam = self.model.gamma_confinement
+        Anode = np.zeros(self.nz + 1, dtype=np.complex128)
+        A_out = np.empty(nt, dtype=np.complex128)
+        for n in range(nt):
+            g = self.model.gain_per_m_slices(state, nu)
+            amp = np.exp(0.5 * (gam * g * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
+            new = np.empty_like(Anode)
+            new[0] = A_in[n]
+            new[1:] = Anode[:-1] * amp
+            P_mid = 0.5 * (np.abs(Anode[:-1]) ** 2 + np.abs(Anode[1:]) ** 2)
+            state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            Anode = new
+            A_out[n] = Anode[-1]
+        t = np.arange(nt) * self.dt
+        return {"t": t, "A_in": A_in, "A_out": A_out, "P_in": np.abs(A_in) ** 2,
+                "P_out": np.abs(A_out) ** 2, "dt": self.dt, "state": state}
+
     def steady_gain_dB(self, P_cw_W: float, drive, *, nu_s_Hz: float = None,
                        settle_lifetimes: float = 30.0, tol_dB: float = 1e-3) -> float:
         """Single-pass CW gain [dB] at input power P_cw, at STEADY STATE. The settle time is
@@ -143,6 +182,7 @@ class TwoLevelSaturableGain:
     E_sat_J: float
     v_g_m_s: float = 8.5e7
     nu0_Hz: float = 1.934e14
+    alpha_lef: float = 0.0            # linewidth enhancement factor (0 -> pure amplitude gain)
 
     def __post_init__(self):
         if not (self.tau_c_s > 0.0 and self.E_sat_J > 0.0 and self.v_g_m_s > 0.0):
@@ -151,6 +191,10 @@ class TwoLevelSaturableGain:
     @property
     def v_g(self):
         return self.v_g_m_s
+
+    @property
+    def relaxation_time_s(self):
+        return self.tau_c_s
 
     @property
     def gamma_confinement(self):
