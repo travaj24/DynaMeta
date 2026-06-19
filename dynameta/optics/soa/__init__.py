@@ -16,9 +16,10 @@ steady-state, small-signal spectral gain, and the static saturation curve. Phase
 (traveling-wave dynamic coupling, ASE/noise, analog SFDR/ENOB metrics) slot in alongside.
 """
 
-from dynameta.optics.soa.ase_noise import (ase_output_psd, detector_noise_variances,
+from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
+                                           ase_spectrum_bidirectional, detector_noise_variances,
                                            inversion_factor_nsp, inversion_factor_nsp_eh,
-                                           noise_figure, single_pass_gain)
+                                           noise_figure, single_pass_gain, spectral_noise_figure)
 from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, optimal_drive_power,
                                          pattern_penalty_dB, predistort, ripple_enob_ceiling,
                                          sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K)
