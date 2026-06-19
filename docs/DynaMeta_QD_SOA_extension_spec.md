@@ -224,9 +224,25 @@ datasheet as new work, not reused; see Section 8.1.)
      ~1500x), optimal_drive_power, sfdr_dB, pattern_penalty_dB, thermal_drift_budget_K
      (dT_max for half-LSB predistortion stability, tighter with bits) +
      `validation/qd_soa_noise_metrics.py` GATES E-F.
-   Remaining genuinely-optional refinement: spectral gain DISPERSION (per-tone gain via a
-   split-step-Fourier engine) would enlarge the up/down FWM asymmetry beyond the
-   carrier-density-pulsation contribution already captured here.
+   - **Spectral gain DISPERSION -- SHIPPED 2026-06-19** (`amplify_coherent(line_filter=True)` +
+     `validation/qd_soa_spectral_dispersion.py`, 5 gates). A Maxwell-Bloch AUXILIARY-DIFFERENTIAL-
+     EQUATION line filter (chosen over split-step-Fourier after a design panel: it keeps the exact
+     time-march frame, needs no FFT/tone-comb, and resolves the band from one complex polarization
+     pole per inhomogeneous group). Each tone at nu_s+f now sees its OWN complex gain
+     Gamma_field(nu_s+f) = 0.5 sum_j A_j/(1 - i(nu-nu_j)/hw) -- 2 Re == the existing real gain g,
+     the imaginary part is the Kramers-Kronig resonant index. Gates: OFF reduces to the power
+     engine (5.6e-16); per-tone gain == analytic Lorentzian ensemble to 0.0077 dB over |f|<=300 GHz;
+     ON-OFF transmitted phase == analytic line dispersion to 0.2% with the correct causal sign;
+     up/down FWM asymmetry ENLARGED 0.44 dB @20 GHz (vs ~0 flat-gain), monotone in detuning. The
+     transit-AVERAGED polarization readout removes the O(dt) ZOH half-sample-delay error; the field
+     update is ADDITIVE (the polarization radiates into field nulls -> stable for modulated/nulling
+     waveforms, no divide-by-field). GVD (background group-velocity dispersion) remains optional.
+   - **Speedup -- SHIPPED 2026-06-19**: byte-identical Lorentzian/prefactor caching (1.1-1.3x) +
+     an OPT-IN numba carrier-step accelerator `QDGainModel(fast=True)` (bit-parity 1e-16,
+     ~7x on the carrier RK4, 3-4.4x on the full marcher; default OFF for byte-stable validations).
+     `validation/qd_soa_numba_parity.py`. The remaining lever is a full-marcher JIT (~1.5-2x more,
+     deferred for its duplicate-logic maintenance cost); GPU is not worthwhile (cache-resident
+     (nz x ng) arrays are launch-bound, same conclusion as the FDTD 'auto' backend).
 
 ---
 
