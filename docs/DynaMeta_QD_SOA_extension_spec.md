@@ -243,6 +243,25 @@ datasheet as new work, not reused; see Section 8.1.)
      `validation/qd_soa_numba_parity.py`. The remaining lever is a full-marcher JIT (~1.5-2x more,
      deferred for its duplicate-logic maintenance cost); GPU is not worthwhile (cache-resident
      (nz x ng) arrays are launch-bound, same conclusion as the FDTD 'auto' backend).
+   - **Electron/hole occupation split -- SHIPPED 2026-06-19** (`QDGainParams(eh_split=True)` +
+     `validation/qd_soa_eh_split.py`, 4 gates). The #1 gain-fidelity gap from the Section-8.3/8.5
+     reclassification is now an opt-in path: the dots carry SEPARATE electron f_c and hole f_v
+     occupations per state, with their OWN capture/escape/relaxation times (holes default to the
+     electron times; the physical asymmetry is holes-faster). gain -> N_q w mu_GS sigma_pk L
+     (f_c_GS + f_v_GS - 1) [the f_c f_v terms in (downward) - (upward) cancel -> LINEAR inversion],
+     spontaneous -> f_c f_v, n_sp -> f_c f_v/(f_c + f_v - 1) (ase_noise.inversion_factor_nsp_eh).
+     ONLY stimulated + spontaneous couple the two bands (the SAME scalar into both); WL recomb is
+     the pair form B N_w_e N_w_h. Separate electron and hole number are each conserved by internal
+     transitions; charge neutrality d(n_tot_e - n_tot_h)/dt = 0 is a global invariant. Gates:
+     symmetric e/h reduces to the excitonic model (occupations 1.6e-11, gain 0.0); gain/n_sp closed
+     forms exact; separate e/h conservation 1e-12 + closed-box 7e-16; the NEW physics -- with holes
+     ~5x faster the saturated-gain recovery differs from excitonic by 3.3% and the GS e/h
+     occupations split transiently (the high-speed pattern-effect physics the single-rho excitonic
+     model cannot represent), vanishing when the times are restored symmetric. Mirrored into a
+     second numba kernel (_qd_carrier_rk4_eh_numba, fast=True parity 1e-16). Default eh_split=False
+     keeps the excitonic path byte-identical. Remaining gain-physics ceilings (documented): ES
+     optical band / two-state (GS-only emission), facet ripple + self-heating (ENOB budget),
+     bidirectional spectral ASE.
 
 ---
 

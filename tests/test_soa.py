@@ -194,3 +194,47 @@ def test_fast_without_numba_raises_or_works():
     else:
         with pytest.raises(RuntimeError):
             QDGainModel(QDGainParams(n_groups=1), fast=True)
+
+
+def test_eh_split_reduces_to_excitonic():
+    # symmetric e/h (all hole times defaulted) reproduces the excitonic steady state + gain
+    exc = QDGainModel(QDGainParams(n_groups=11).with_detailed_balance_taus())
+    eh = QDGainModel(QDGainParams(n_groups=11, eh_split=True).with_detailed_balance_taus())
+    ye, yh = exc.steady_state(30e-3), eh.steady_state(30e-3)
+    assert np.max(np.abs(exc.rho_GS(ye) - eh.f_c_GS(yh))) < 1e-9
+    assert np.max(np.abs(eh.f_c_GS(yh) - eh.f_v_GS(yh))) < 1e-11    # stays on f_c=f_v manifold
+    se, sh = exc.init_slices(3, 30e-3), eh.init_slices(3, 30e-3)
+    g_e = exc.gain_per_m_slices(se, exc.p.nu0_Hz)
+    g_h = eh.gain_per_m_slices(sh, eh.p.nu0_Hz)
+    assert np.max(np.abs(g_e - g_h)) / np.max(np.abs(g_e)) < 1e-9
+
+
+def test_eh_gain_nsp_forms():
+    from dynameta.optics.soa import inversion_factor_nsp, inversion_factor_nsp_eh
+    # n_sp reduces to the excitonic form at f_c=f_v and is +inf at transparency f_c+f_v=1
+    assert abs(inversion_factor_nsp_eh(0.85, 0.85) - inversion_factor_nsp(0.85)) < 1e-12
+    assert not np.isfinite(inversion_factor_nsp_eh(0.6, 0.4))       # f_c+f_v = 1
+    eh = QDGainModel(QDGainParams(n_groups=7, eh_split=True))
+    ng = eh.ng
+    fcG = np.full((1, ng), 0.8)
+    fvG = np.full((1, ng), 0.7)
+    st = (np.zeros(1), np.zeros(1), np.zeros((1, ng)), np.zeros((1, ng)), fcG, fvG)
+    wl = eh.w_j * eh._lorentzian(eh.p.nu0_Hz - eh.nu_j)
+    g_ref = eh._gain_pref * np.sum((fcG[0] + fvG[0] - 1.0) * wl)
+    assert abs(eh.gain_per_m_slices(st, eh.p.nu0_Hz)[0] - g_ref) / abs(g_ref) < 1e-12
+
+
+def test_eh_numba_parity():
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    if not _HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    a = QDGainModel(QDGainParams(n_groups=21, eh_split=True, tau_cap_h_s=0.25e-12)
+                    .with_detailed_balance_taus())
+    b = QDGainModel(QDGainParams(n_groups=21, eh_split=True, tau_cap_h_s=0.25e-12)
+                    .with_detailed_balance_taus(), fast=True)
+    st = a.init_slices(30, 30e-3)
+    P = np.full(30, 5e-3)
+    ra = a.step_slices(st, P, 1.4e-13, a.p.nu0_Hz, 30e-3)
+    rb = b.step_slices(st, P, 1.4e-13, a.p.nu0_Hz, 30e-3)
+    for x, y in zip(ra, rb):
+        assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
