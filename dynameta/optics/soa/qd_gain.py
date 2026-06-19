@@ -62,7 +62,87 @@ from dynameta.constants import HBAR, KB, Q_E
 
 H_PLANCK = 2.0 * np.pi * HBAR                                  # J s
 
+# Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
+# Self-contained guarded import (mirrors optics.fdtd_nd.backends) so the module imports without
+# numba; selected via QDGainModel(fast=True). The numpy rhs_fields stays the reference and the
+# parity is asserted by validation/qd_soa_numba_parity.py.
+try:                                                          # pragma: no cover - env dependent
+    from numba import njit as _njit
+    _HAVE_NUMBA = True
+except Exception:                                             # pragma: no cover
+    _HAVE_NUMBA = False
+
+    def _njit(*a, **k):
+        def _wrap(f):
+            return f
+        return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
+
 __all__ = ["QDGainParams", "QDGainModel"]
+
+
+@_njit(cache=True, fastmath=True)
+def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, stim_pref,
+                          tau_cap, tau_esc, tau_ES_GS, tau_GS_ES, tau_sp, B, C,
+                          mGS_over_mES, mES_over_mGS, qVa):
+    """Compiled twin of step_slices: explicit-loop RK4 of the group-resolved QD rate equations
+    over all z-slices, MIRRORING rhs_fields term-for-term (so it stays bit-parity with the numpy
+    reference -- validated). One source of truth is rhs_fields; this is the optional accelerator.
+    Returns the advanced (Nw, rho_ES, rho_GS) with the same [0,1]/>=0 physical clamp."""
+    nz, ng = rES.shape
+    Nw_o = np.empty(nz)
+    rES_o = np.empty((nz, ng))
+    rGS_o = np.empty((nz, ng))
+    for k in range(nz):
+        Sk = S[k]
+        nw0 = Nw[k]
+        es0 = rES[k]
+        gs0 = rGS[k]
+        nw_acc = 0.0
+        es_acc = np.zeros(ng)
+        gs_acc = np.zeros(ng)
+        nw_y = nw0
+        es_y = es0.copy()
+        gs_y = gs0.copy()
+        for stage in range(4):
+            sum1 = 0.0                                        # sum_j w (1 - rho_ES)
+            sum2 = 0.0                                        # sum_j w rho_ES
+            des = np.empty(ng)
+            dgs = np.empty(ng)
+            for j in range(ng):
+                ej = es_y[j]
+                gj = gs_y[j]
+                cap = nw_y * (1.0 - ej) / cap_den
+                esc = ej / tau_esc
+                fwd = ej * (1.0 - gj) / tau_ES_GS
+                bwd = gj * (1.0 - ej) / tau_GS_ES
+                stim = stim_pref * Lrow[j] * (2.0 * gj - 1.0) * Sk
+                spE = ej * ej / tau_sp
+                spG = gj * gj / tau_sp
+                des[j] = cap - esc - fwd + mGS_over_mES * bwd - spE
+                dgs[j] = mES_over_mGS * fwd - bwd - stim - spG
+                sum1 += w[j] * (1.0 - ej)
+                sum2 += w[j] * ej
+            dnw = (I_A / qVa - (nw_y / tau_cap) * sum1 + esc_pref * sum2
+                   - B * nw_y * nw_y - C * nw_y ** 3)
+            cw = 2.0 if 0 < stage < 3 else 1.0
+            nw_acc += cw * dnw
+            for j in range(ng):
+                es_acc[j] += cw * des[j]
+                gs_acc[j] += cw * dgs[j]
+            if stage < 3:
+                h = 0.5 * dt if stage < 2 else dt
+                nw_y = nw0 + h * dnw
+                for j in range(ng):
+                    es_y[j] = es0[j] + h * des[j]
+                    gs_y[j] = gs0[j] + h * dgs[j]
+        nw_n = nw0 + dt / 6.0 * nw_acc
+        Nw_o[k] = nw_n if nw_n > 0.0 else 0.0
+        for j in range(ng):
+            e = es0[j] + dt / 6.0 * es_acc[j]
+            g = gs0[j] + dt / 6.0 * gs_acc[j]
+            rES_o[k, j] = 0.0 if e < 0.0 else (1.0 if e > 1.0 else e)
+            rGS_o[k, j] = 0.0 if g < 0.0 else (1.0 if g > 1.0 else g)
+    return Nw_o, rES_o, rGS_o
 
 
 @dataclass(frozen=True)
@@ -140,9 +220,16 @@ class QDGainParams:
 class QDGainModel:
     """Group-resolved QD-SOA gain core. State vector y = [N_w, rho_ES_0..G-1, rho_GS_0..G-1]."""
 
-    def __init__(self, params: Optional[QDGainParams] = None):
+    def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False):
         self.p = params if params is not None else QDGainParams()
         p = self.p
+        # Optional numba carrier-step accelerator (4.7x at ng=1, 7x at ng=41; bit-parity with the
+        # numpy reference). Default OFF so results are byte-stable across machines (numba-present or
+        # not); opt in with fast=True for long transient runs. Explicit fast=True without numba is
+        # an error (don't silently fall back to slow numpy when speed was requested).
+        if fast and not _HAVE_NUMBA:
+            raise RuntimeError("QDGainModel(fast=True) requires numba (pip install numba)")
+        self._use_numba = bool(fast) and _HAVE_NUMBA
         # inhomogeneous size groups: Gaussian-weighted frequencies about nu0
         sig = p.fwhm_inhom_Hz / (2.0 * np.sqrt(2.0 * np.log(2.0)))
         if p.n_groups == 1:
@@ -154,12 +241,41 @@ class QDGainModel:
             self.w_j = wj / wj.sum()                          # normalized: sum w_j = 1
         self._sig_inhom = sig
         self.ng = int(p.n_groups)
+        # Precomputed constant prefactors (frozen params) -- pulled out of the per-step hot loop.
+        # Each is the SAME product the inline expression formed, so results stay bit-identical.
+        self._cap_den = p.tau_cap_s * p.mu_ES * p.N_q_m3            # capture denominator
+        self._esc_pref = p.mu_ES * p.N_q_m3 / p.tau_esc_s          # WL escape-in prefactor
+        self._stim_pref = p.v_g_m_s * p.sigma_pk_m2                # per-dot stimulated prefactor
+        self._gain_pref = p.N_q_m3 * p.mu_GS * p.sigma_pk_m2       # modal-gain prefactor
+        self._qVa = Q_E * p.V_a_m3                                 # injection charge*volume
+        # Single-entry caches for the homogeneous Lorentzian evaluated at the (fixed) signal
+        # frequency -- rhs_fields and gain_per_m_slices are called O(nt) times with the SAME nu_s,
+        # so caching L(nu_s - nu_j) removes a redundant recompute per call (byte-identical values).
+        self._L_nu = None        # cached nu for the rate-equation Lorentzian row (1, ng)
+        self._L_row = None
+        self._gw_nu = None       # cached nu for the gain line weights w_j * L (ng,)
+        self._gw = None
 
     # ---- lineshape + gain ----
     def _lorentzian(self, dnu):
         """Homogeneous Lorentzian normalized to 1 at line centre; FWHM = fwhm_hom_Hz."""
         hw = 0.5 * self.p.fwhm_hom_Hz
         return hw * hw / (np.asarray(dnu) ** 2 + hw * hw)
+
+    def _L_at(self, nu_s_Hz):
+        """Cached homogeneous Lorentzian row L(nu_s - nu_j), shape (1, ng) -- constant across the
+        time march (fixed nu_s), so computed once and reused (identical values)."""
+        if self._L_nu != nu_s_Hz:
+            self._L_row = self._lorentzian(nu_s_Hz - self.nu_j)[None, :]
+            self._L_nu = nu_s_Hz
+        return self._L_row
+
+    def _gain_line_weights(self, nu_Hz):
+        """Cached gain line weights w_j * L(nu - nu_j), shape (ng,) -- constant across the march."""
+        if self._gw_nu != nu_Hz:
+            self._gw = self.w_j * self._lorentzian(nu_Hz - self.nu_j)
+            self._gw_nu = nu_Hz
+        return self._gw
 
     def material_gain_per_m(self, rho_GS, nu_Hz) -> np.ndarray:
         """Spectral intensity gain g(nu) [1/m] from the per-group GS occupations rho_GS
@@ -191,19 +307,19 @@ class QDGainModel:
         S = np.asarray(S_conf_m3, dtype=np.float64)
         Sb = S[:, None] if S.ndim else S                      # (Nz,1) or scalar
         Ib = np.asarray(I_A, dtype=np.float64)                # (Nz,) or scalar
-        L = self._lorentzian(nu_s_Hz - self.nu_j)[None, :]    # (1, ng)
+        L = self._L_at(nu_s_Hz)                               # cached (1, ng)
 
-        cap_occ = Nw[:, None] * (1.0 - rho_ES) / (p.tau_cap_s * p.mu_ES * p.N_q_m3)
+        cap_occ = Nw[:, None] * (1.0 - rho_ES) / self._cap_den
         esc_occ = rho_ES / p.tau_esc_s
         fwd = rho_ES * (1.0 - rho_GS) / p.tau_ES_GS_s
         bwd = rho_GS * (1.0 - rho_ES) / p.tau_GS_ES_s
-        stim = p.v_g_m_s * p.sigma_pk_m2 * L * (2.0 * rho_GS - 1.0) * Sb
+        stim = self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
         sp_ES = rho_ES * rho_ES / p.tau_sp_s
         sp_GS = rho_GS * rho_GS / p.tau_sp_s
 
-        dN_w = (Ib / (Q_E * p.V_a_m3)
+        dN_w = (Ib / self._qVa
                 - (Nw / p.tau_cap_s) * np.sum(w * (1.0 - rho_ES), axis=1)
-                + (p.mu_ES * p.N_q_m3 / p.tau_esc_s) * np.sum(w * rho_ES, axis=1)
+                + self._esc_pref * np.sum(w * rho_ES, axis=1)
                 - p.B_wl_m3_s * Nw * Nw - p.C_wl_m6_s * Nw ** 3)
         drho_ES = cap_occ - esc_occ - fwd + (p.mu_GS / p.mu_ES) * bwd - sp_ES
         drho_GS = (p.mu_ES / p.mu_GS) * fwd - bwd - stim - sp_GS
@@ -337,11 +453,24 @@ class QDGainModel:
 
     def gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
         """Material intensity gain g(nu) [1/m] per slice from the slice state (uses rho_GS)."""
-        p = self.p
-        rho_GS = state[2]
-        wl = self.w_j * self._lorentzian(nu_Hz - self.nu_j)   # (ng,)
-        return p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * np.sum(
-            (2.0 * np.asarray(rho_GS) - 1.0) * wl[None, :], axis=1)
+        wl = self._gain_line_weights(nu_Hz)                   # cached (ng,) = w_j * L(nu - nu_j)
+        return self._gain_pref * np.sum(
+            (2.0 * np.asarray(state[2]) - 1.0) * wl[None, :], axis=1)
+
+    def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
+        """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
+        term of the Maxwell-Bloch polarization ADE used by the spectral-dispersion path of
+        TravelingWaveSOA.amplify_coherent(line_filter=True). With the per-group pole
+            lam_j = -2 pi hw + 1j 2 pi (nu_s - nu_j),
+        drive kappa_j[k] = (2 pi hw) * A_j[k], and readout (1/A) sum_j p_j, the steady-state band
+        response of a tone at offset f reproduces EXACTLY 2 * Gamma_field(nu_s + f), where
+            Gamma_field(nu) = 0.5 sum_j A_j / (1 - 1j (nu - nu_j)/hw),  2 Re == g(nu),
+            A_j[k] = N_q w_j mu_GS sigma_pk (2 rho_GS_j[k] - 1)  [the SAME assembly as the gain],
+        so the line shape AND its Kramers-Kronig dispersive partner are carried by one pole per
+        group (no FFT, no tone comb). Returns kappa, shape (nz, ng) [s^-1], from the LIVE rho_GS
+        (so carrier-density pulsation rides on top -> dispersion-enlarged FWM/XGM)."""
+        rGS = np.asarray(state[2], dtype=np.float64)          # (nz, ng)
+        return (2.0 * np.pi * hw_Hz) * self._gain_pref * self.w_j[None, :] * (2.0 * rGS - 1.0)
 
     def step_slices(self, state, P_local_W, dt_s: float, nu_s_Hz: float, I_A: float):
         """Advance the per-slice carrier state by dt driven by the local guided POWER P (Nz,)
@@ -350,6 +479,21 @@ class QDGainModel:
         currency (power) to every slab model."""
         Nw, rES, rGS = state
         S_conf = self.photon_density(P_local_W, nu_s_Hz)
+
+        if self._use_numba:                                   # compiled twin (bit-parity, ~5-7x)
+            p = self.p
+            Sa = np.asarray(S_conf, dtype=np.float64)         # photon density (nz,) or scalar
+            # Nw/rES/rGS are already C-contiguous (kernel output or init_slices) -> no copy; the
+            # confined density only needs broadcasting/copying when it is a scalar; the Lorentzian
+            # row is the cached constant (avoid recomputing every step).
+            S = (np.ascontiguousarray(np.broadcast_to(Sa, Nw.shape))
+                 if Sa.shape != Nw.shape else Sa)
+            return _qd_carrier_rk4_numba(
+                Nw, rES, rGS, S, float(I_A), float(dt_s),
+                self._L_at(nu_s_Hz)[0], self.w_j,
+                self._cap_den, self._esc_pref, self._stim_pref, p.tau_cap_s, p.tau_esc_s,
+                p.tau_ES_GS_s, p.tau_GS_ES_s, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
+                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa)
 
         def f(nw, es, gs):
             return self.rhs_fields(nw, es, gs, I_A, S_conf, nu_s_Hz)

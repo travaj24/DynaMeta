@@ -136,3 +136,61 @@ def test_thermal_budget_and_sfdr():
     P_in = np.logspace(-5, -1, 300)
     P_out = P_in * 1000.0 / (1.0 + P_in / 5e-3)
     assert np.isfinite(sfdr_dB(P_in, P_out, 1e-3, 1e-9))
+
+
+def test_line_filter_off_is_flat_engine():
+    # line_filter=False (default) is the flat-gain branch verbatim -> reduces to the power engine
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    n = 800
+    co = soa.amplify_coherent(np.full(n, np.sqrt(1e-3)), drive=40e-3, alpha_lef=0.0,
+                              line_filter=False)
+    pw = soa.amplify(np.full(n, 1e-3), drive=40e-3)
+    assert abs(co["P_out"][-1] - pw["P_out"][-1]) / pw["P_out"][-1] < 1e-12
+
+
+def test_line_filter_spectral_gain_matches_analytic():
+    # a weak detuned CW probe sees per-tone gain == the analytic Lorentzian ensemble (the flat
+    # engine would give g(nu_s) for every tone)
+    m = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus())
+    nu0, L, Nz = m.p.nu0_Hz, 0.6e-3, 60
+    soa = TravelingWaveSOA(m, L, Nz, nu_s_Hz=nu0)
+    rho = m.rho_GS(m.steady_state(40e-3))
+    f = 150e9
+    t = np.arange(int(1.2e-9 / soa.dt)) * soa.dt
+    a = soa.amplify_coherent(1e-4 * np.exp(-1j * 2 * np.pi * f * t), drive=40e-3, alpha_lef=0.0,
+                             line_filter=True)["A_out"][int(0.9 * t.size):]
+    G_num = 20.0 * np.log10(np.abs(a).mean() / 1e-4)
+    G_an = 10.0 * np.log10(np.exp(m.p.Gamma * m.material_gain_per_m(rho, nu0 + f) * L))
+    assert abs(G_num - G_an) < 0.02
+
+
+def test_line_filter_requires_spectral_model():
+    tl = TwoLevelSaturableGain(g0_per_m=2000.0, tau_c_s=200e-12, E_sat_J=2e-12)
+    soa = TravelingWaveSOA(tl, 0.5e-3, 40, nu_s_Hz=1.934e14)
+    with pytest.raises(ValueError):
+        soa.amplify_coherent(np.full(50, 1e-3) + 0j, drive=None, line_filter=True)
+
+
+def test_numba_carrier_step_parity():
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    if not _HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    m0 = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus())
+    m1 = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus(), fast=True)
+    st = m0.init_slices(40, 40e-3)
+    P = np.full(40, 5e-3)
+    a = m0.step_slices(st, P, 1.4e-13, m0.p.nu0_Hz, 40e-3)
+    b = m1.step_slices(st, P, 1.4e-13, m0.p.nu0_Hz, 40e-3)
+    for x, y in zip(a, b):
+        assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
+
+
+def test_fast_without_numba_raises_or_works():
+    # fast=True must either work (numba present) or raise a clear error (never silently slow)
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    if _HAVE_NUMBA:
+        assert QDGainModel(QDGainParams(n_groups=1), fast=True)._use_numba is True
+    else:
+        with pytest.raises(RuntimeError):
+            QDGainModel(QDGainParams(n_groups=1), fast=True)
