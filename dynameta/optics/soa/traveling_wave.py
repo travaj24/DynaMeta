@@ -165,8 +165,47 @@ class TravelingWaveSOA:
                 out["h_uf"] = h_uf                            # SHB+CH compression depth vs t
         return out
 
+    # ---- optional spectral-dispersion (Maxwell-Bloch line-filter) layer ----
+    def _line_filter_init(self, nu):
+        """Set up the per-group complex-Lorentzian polarization filter that gives each spectral
+        component of the envelope its OWN complex gain Gamma_field(nu_s + f) (the line shape AND
+        its Kramers-Kronig dispersive partner), so gain dispersion across the signal band is
+        resolved -- the up/down FWM asymmetry and pulse reshaping the flat-gain engine misses.
+
+        One pole per inhomogeneous group: lam_j = -2 pi hw + 1j 2 pi (nu_s - nu_j) (hw = HWHM of
+        the homogeneous line). Re(lam_j) = -2 pi hw < 0 always, so the polarization is integrated
+        by the EXACT exponential step (unconditionally stable, no new CFL):
+            p_j^{n+1} = E_j p_j^n + kappa_j A_ref coef_j,  E_j = exp(lam_j dt), coef_j = (E_j-1)/lam_j.
+        The gain the field accumulates crossing a slice is the polarization integrated over the
+        transit, NOT its start-of-step value -- using the start value is a zero-order-hold that
+        leaks the (large) real gain into the (small) dispersive imaginary part as an O(dt)
+        half-sample-delay error. So amplify_coherent uses the transit-AVERAGED polarization
+            <p_j> = (1/dt) integral_0^dt p_j(t) dt = E_avg_j p_j + kappa_j A_ref coef_avg_j,
+            E_avg_j = (E_j - 1)/(lam_j dt),  coef_avg_j = (E_j - 1)/(lam_j^2 dt) - 1/lam_j,
+        whose sum sum_j <p_j> equals 2 Gamma_field(nu_s + f) A_ref to O(dt^2) for every offset f
+        (Re and Im, verified ~2e-4 at nz=50 out to 200 GHz; no FFT, no tone comb). The field then
+        gains the flat carrier part multiplicatively and the dispersive DEVIATION
+        (sum_j <p_j> - g(nu_s) A_ref) ADDITIVELY -- the polarization SOURCES field, so the line
+        radiates correctly into a field null (where dividing sum<p>/A would blow up). Requires a
+        spectral gain model (QDGainModel)."""
+        m = self.model
+        if not (hasattr(m, "line_kappa_slices") and hasattr(m, "nu_j")
+                and hasattr(m, "p") and hasattr(m.p, "fwhm_hom_Hz")):
+            raise ValueError("amplify_coherent(line_filter=True) needs a spectral gain model with "
+                             "nu_j, p.fwhm_hom_Hz and line_kappa_slices (e.g. QDGainModel); the {} "
+                             "model has no homogeneous line to disperse".format(type(m).__name__))
+        hw = 0.5 * float(m.p.fwhm_hom_Hz)
+        nu_j = np.asarray(m.nu_j, dtype=np.float64)
+        lam = -2.0 * np.pi * hw + 1j * 2.0 * np.pi * (float(nu) - nu_j)    # (ng,) complex pole
+        E = np.exp(lam * self.dt)
+        coef = (E - 1.0) / lam                                # exact-exp source weight (Re(lam)<0)
+        E_avg = (E - 1.0) / (lam * self.dt)                   # transit-averaged decay
+        coef_avg = (E - 1.0) / (lam * lam * self.dt) - 1.0 / lam   # transit-averaged source weight
+        return {"hw": hw, "E": E, "coef": coef, "E_avg": E_avg, "coef_avg": coef_avg,
+                "pol": np.zeros((self.nz, nu_j.size), dtype=np.complex128)}
+
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
-                         state0=None, ultrafast=None):
+                         state0=None, ultrafast=None, line_filter: bool = False):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -177,8 +216,18 @@ class TravelingWaveSOA:
         complex A_out(t), |A_out|^2 power, t, dt. Reduces to amplify() (power) when alpha = 0
         and the input is a single real tone.
 
-        Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at envelope
-        frequency f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
+        line_filter (default False): when True, replaces the single carrier-frequency gain
+        g(nu_s) with the per-group complex-Lorentzian SPECTRAL gain Gamma_field(nu_s + f) (the
+        Maxwell-Bloch polarization ADE of _line_filter_init / model.line_kappa_slices), so each
+        tone sees its own gain AND the resonant Kramers-Kronig dispersive phase -- gain
+        dispersion across the band, enlarged up/down FWM asymmetry, group delay. False is the
+        DEFAULT and that branch is byte-identical to the flat-gain engine (no model state touched
+        before the branch), so all existing callers are unaffected. Requires a spectral gain
+        model (QDGainModel); raises for the two-level oracle model. The broadband alpha index is
+        kept distinct from the resonant line dispersion -- alpha multiplies ONLY the real gain.
+
+        Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
+        frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         alpha = float(alpha_lef) if alpha_lef is not None else float(
             getattr(self.model, "alpha_lef", 0.0))
@@ -189,14 +238,32 @@ class TravelingWaveSOA:
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
+        lf = self._line_filter_init(nu) if line_filter else None
         Anode = np.zeros(self.nz + 1, dtype=np.complex128)
         A_out = np.empty(nt, dtype=np.complex128)
         for n in range(nt):
-            g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
-            amp = np.exp(0.5 * (gam * g * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
             new = np.empty_like(Anode)
             new[0] = A_in[n]
-            new[1:] = Anode[:-1] * amp
+            if lf is None:
+                g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
+                new[1:] = Anode[:-1] * amp
+            else:
+                A_ref = Anode[:-1]
+                kappa = self.model.line_kappa_slices(state, nu, lf["hw"])   # (nz, ng) live carriers
+                src = kappa * A_ref[:, None]                        # (nz, ng) polarization source
+                avg_p = lf["E_avg"] * lf["pol"] + src * lf["coef_avg"]      # transit-averaged pol
+                sum_p = np.sum(avg_p, axis=1)                       # (nz,); CW: 2 Gamma_field(nu_s+f) A_ref
+                g_un = self.model.gain_per_m_slices(state, nu)      # carrier real gain (no division)
+                g_flat = self._uf_suppress(uf, g_un)
+                amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
+                # flat carrier gain (multiplicative, == OFF amp) + ADDITIVE dispersive correction:
+                # the polarization sum_p minus its flat-gain equivalent g_un*A_ref is the resonant
+                # line deviation (zero at the carrier). Additive so the line radiates field into a
+                # null (sum_p != 0 there) -- no divide-by-field, stable for modulated/nulling
+                # waveforms; first order in the small per-slice deviation (~1e-3).
+                new[1:] = amp * (A_ref + 0.5 * gam * (sum_p - g_un * A_ref) * self.dz)
+                lf["pol"] = lf["E"] * lf["pol"] + src * lf["coef"]
             P_mid = 0.5 * (np.abs(Anode[:-1]) ** 2 + np.abs(Anode[1:]) ** 2)
             self._uf_relax(uf, P_mid, nu)
             state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
