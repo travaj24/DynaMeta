@@ -97,6 +97,9 @@ class QDGainParams:
     nu0_Hz: float = 1.934e14          # GS transition centre (~1550 nm) [Hz]
     fwhm_inhom_Hz: float = 5.0e12     # inhomogeneous (dot-size) Gaussian FWHM [Hz]
     fwhm_hom_Hz: float = 1.0e12       # homogeneous Lorentzian FWHM [Hz]
+    # coherent / phase
+    alpha_lef: float = 2.0           # linewidth enhancement factor (carrier-induced index;
+                                     # QD ~ 1-3 near the GS peak) -- drives FWM + its asymmetry
     # spectral discretization
     n_groups: int = 41               # inhomogeneous size groups (odd -> a group sits on nu0)
     span_sigma: float = 3.0          # half-width of the group grid in inhomogeneous sigmas
@@ -310,6 +313,12 @@ class QDGainModel:
         """Slowest carrier relaxation timescale (the spontaneous lifetime) -- sets how long a
         CW solve must settle to steady state (>> transit time)."""
         return self.p.tau_sp_s
+
+    @property
+    def alpha_lef(self) -> float:
+        """Linewidth enhancement factor (carrier-induced index / gain) -- the coherent
+        propagation phase term and the FWM asymmetry."""
+        return self.p.alpha_lef
 
     def photon_density(self, P_W, nu_Hz):
         """Confined photon density S_conf [m^-3] for guided power P (scalar or array)."""

@@ -187,11 +187,33 @@ datasheet as new work, not reused; see Section 8.1.)
 3. **ASE + noise** — spontaneous-emission source and beat-noise statistics.
    *Validate:* noise figure lands in the QD-SOA range (~5 dB) and approaches the
    quantum limit (~3 dB) at high gain.
+   **[SHIPPED 2026-06-11: `dynameta/optics/soa/ase_noise.py` (inversion_factor_nsp,
+   ase_output_psd [z-resolved ASE ODE, exact per-slice, machine-precision reduction to
+   n_sp h nu (G-1)], noise_figure [internal-loss + input-coupling corrected],
+   detector_noise_variances [shot + sig-spont + spont-spont, Olsson forms]) +
+   `validation/qd_soa_noise_metrics.py` GATES A-C. n_sp -> 1 and NF -> 3.01 dB quantum limit
+   at full inversion; NF degrades with internal loss; ASE-beat-dominated noise at high gain.
+   CORRECTION applied: n_sp = rho^2/(2 rho - 1) (the excitonic f_c(1-f_v)/(f_c-f_v) form,
+   consistent with the rho^2 spontaneous term), NOT the spec Section-6 rho/(2 rho - 1).]**
 4. **Analog metrics** — symbol-stream drive → SFDR / ENOB / ISI; predistortion
    hook.
    *Validate:* the SFDR-vs-drive-power optimum reproduces the
    distortion-above / noise-below trade-off.
-5. **(Optional)** SHB + carrier heating, FWM / multi-λ, thermal coupling.
+   **[SHIPPED 2026-06-11: `dynameta/optics/soa/metrics.py` (transfer_derivatives,
+   harmonic_amplitudes, sndr_db, enob, sndr_vs_drive) + `validation/qd_soa_noise_metrics.py`
+   GATE D: combining the gain-compression distortion (transfer-curve curvature) with the ASE
+   beat-noise floor, SNDR vs drive has an INTERIOR maximum (ENOB 6.7 at ~3.7 mW for the
+   default device) -- the "window, not a wall." Symbol-stream ISI is covered dynamically by
+   the Phase-2 pattern/recovery gates; the predistortion hook (invert the static compression
+   curve) is a thin follow-on.]**
+5. **(Partly shipped) extras.** FWM / multi-λ: **SHIPPED 2026-06-11** -- the coherent
+   complex-envelope path `TravelingWaveSOA.amplify_coherent` (alpha_lef in QDGainParams) +
+   `validation/qd_soa_fwm_xgm.py` (5 gates): cross-gain modulation (-5 dB at 30 mW pump),
+   four-wave-mixing conjugate sidebands rolling off with detuning, and the
+   eta_FWM = (1 + alpha^2) carrier-density-pulsation law to 1.2%; alpha=0 single-tone reduces
+   to the verified power engine (1e-15). Still optional: SHB + carrier-heating ultrafast
+   coupling (TwoTempParams), spectral gain dispersion (per-tone gain for the up/down-
+   conversion asymmetry), thermal self-heating.
 
 ---
 
