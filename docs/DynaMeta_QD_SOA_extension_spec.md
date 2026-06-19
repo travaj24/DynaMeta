@@ -259,9 +259,26 @@ datasheet as new work, not reused; see Section 8.1.)
      occupations split transiently (the high-speed pattern-effect physics the single-rho excitonic
      model cannot represent), vanishing when the times are restored symmetric. Mirrored into a
      second numba kernel (_qd_carrier_rk4_eh_numba, fast=True parity 1e-16). Default eh_split=False
-     keeps the excitonic path byte-identical. Remaining gain-physics ceilings (documented): ES
-     optical band / two-state (GS-only emission), facet ripple + self-heating (ENOB budget),
-     bidirectional spectral ASE.
+     keeps the excitonic path byte-identical.
+   - **Excited-state optical band / two-state gain -- SHIPPED 2026-06-19**
+     (`QDGainParams(sigma_pk_ES_m2>0)` + `validation/qd_soa_es_band.py`, 4 gates). The ES
+     transition (nu_ES_j = nu_j + dE_ES_GS*q/h, ~1442 nm, carrying mu_ES) becomes optically active:
+     gain g = g_GS + g_ES, an ES stimulated term depletes rho_ES (both f_*_ES in the split), and
+     the GS/ES two-state crossover emerges (I_th,ES > I_th,GS, ES gain exceeds the gain-clamped GS
+     at high injection). sigma_pk_ES=0 (default) -> GS-only byte-identical; mirrored in both numba
+     kernels (parity 0.0). Gates: reduction exact, g_ES == analytic ensemble 1e-16, two-state
+     crossover, ES photon-number conservation 1e-16.
+   - **Lumped self-heating + facet Airy ripple (ENOB budget) -- SHIPPED 2026-06-19**
+     (`SelfHeating` dataclass + `metrics.facet_gain_ripple_dB`/`ripple_enob_ceiling` +
+     `validation/qd_soa_enob_budget.py`, 5 gates). set_temperature rigidly red-shifts the combs
+     (nu0(T)=nu0-dnu0_dT(T-T0)) and scales the gain (1+dg_dT_frac(T-T0)) on BOTH emission and
+     stimulated depletion (photon-safe); steady_gain_self_consistent reaches the thermal fixed
+     point T=T0+Rth*P_diss (destabilizing optical-extraction feedback, stable for loop gain<1,
+     non-convergence guard raises); dGdT_dB_per_K feeds metrics.thermal_drift_budget_K. The facet
+     ripple is the Saitoh-Mukai Airy peak-to-valley (0.17 dB @ R=1e-4, G=20 dB -> ~5.6-bit ENOB
+     ceiling). Rth=0 / coefficients 0 -> isothermal byte-identical. Demonstrated ENOB ceiling: a
+     13.5 K self-heating drift (dG/dT=-0.037 dB/K) dwarfs the 0.23 K 8-bit predistortion budget.
+   Remaining gain-physics ceiling (documented, optional): bidirectional spectrally-resolved ASE.
 
 ---
 

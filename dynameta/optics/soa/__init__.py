@@ -19,15 +19,16 @@ steady-state, small-signal spectral gain, and the static saturation curve. Phase
 from dynameta.optics.soa.ase_noise import (ase_output_psd, detector_noise_variances,
                                            inversion_factor_nsp, inversion_factor_nsp_eh,
                                            noise_figure, single_pass_gain)
-from dynameta.optics.soa.metrics import (enob, optimal_drive_power, pattern_penalty_dB,
-                                         predistort, sfdr_dB, sndr_db, sndr_vs_drive,
-                                         thermal_drift_budget_K)
-from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
+from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, optimal_drive_power,
+                                         pattern_penalty_dB, predistort, ripple_enob_ceiling,
+                                         sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K)
+from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams, SelfHeating
 from dynameta.optics.soa.traveling_wave import (TravelingWaveSOA, TwoLevelSaturableGain,
                                                 UltrafastCompression, agrawal_olsson_output)
 
-__all__ = ["QDGainModel", "QDGainParams", "TravelingWaveSOA", "TwoLevelSaturableGain",
+__all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "TravelingWaveSOA", "TwoLevelSaturableGain",
            "UltrafastCompression", "agrawal_olsson_output", "inversion_factor_nsp",
            "inversion_factor_nsp_eh", "single_pass_gain", "ase_output_psd", "noise_figure",
            "detector_noise_variances", "sndr_db", "enob", "sndr_vs_drive", "optimal_drive_power",
-           "predistort", "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K"]
+           "predistort", "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K",
+           "facet_gain_ripple_dB", "ripple_enob_ceiling"]

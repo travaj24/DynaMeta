@@ -25,7 +25,7 @@ import numpy as np
 
 __all__ = ["transfer_derivatives", "harmonic_amplitudes", "sndr_db", "enob",
            "sndr_vs_drive", "optimal_drive_power", "predistort", "pattern_penalty_dB",
-           "sfdr_dB", "thermal_drift_budget_K"]
+           "sfdr_dB", "thermal_drift_budget_K", "facet_gain_ripple_dB", "ripple_enob_ceiling"]
 
 
 def transfer_derivatives(P_in_grid, P_out_grid, P0):
@@ -143,3 +143,36 @@ def thermal_drift_budget_K(n_bits, dGdT_dB_per_K):
     if s <= 0.0:
         return float("inf")
     return float(2.0 ** (-(n_bits + 1)) / s)
+
+
+def facet_gain_ripple_dB(G, R1, R2=None):
+    """Fabry-Perot residual-facet gain ripple [dB] for a single-pass POWER gain G and facet power
+    reflectivities R1, R2 (R2 defaults to R1). A real (not perfectly AR-coated) SOA has residual
+    facet reflectivity; the round-trip cavity makes the transmitted gain oscillate with the
+    round-trip phase between G_max ~ G/(1 - G sqrt(R1 R2))^2 and G_min ~ G/(1 + G sqrt(R1 R2))^2,
+    so the peak-to-valley ripple is
+        ripple_dB = 20 log10[(1 + G sqrt(R1 R2)) / (1 - G sqrt(R1 R2))]   (Saitoh & Mukai 1990).
+    R = 0 -> 0 ripple (the ideal traveling-wave limit the single-pass model assumes); G sqrt(R1 R2)
+    -> 1 is the lasing threshold (ripple -> inf) and raises. This gain-flatness budget caps the
+    analog ENOB of the amplifier (see ripple_enob_ceiling)."""
+    G = float(G)
+    R1 = float(R1)
+    R2 = float(R1 if R2 is None else R2)
+    if not (G > 0.0 and R1 >= 0.0 and R2 >= 0.0):
+        raise ValueError("facet_gain_ripple_dB: need G > 0 and R1, R2 >= 0")
+    gr = G * np.sqrt(R1 * R2)
+    if gr >= 1.0:
+        raise ValueError("facet_gain_ripple_dB: G sqrt(R1 R2) = {:.4f} >= 1 -- at/above the lasing "
+                         "threshold; the device is a Fabry-Perot laser, not an amplifier".format(gr))
+    return float(20.0 * np.log10((1.0 + gr) / (1.0 - gr)))
+
+
+def ripple_enob_ceiling(ripple_dB):
+    """ENOB ceiling imposed by a peak-to-valley gain ripple [dB]: the fractional amplitude spread
+    m = 10^(ripple_dB/20) - 1 is an irreducible full-scale gain error, so the resolution cannot
+    exceed n = -log2(m) bits (m must fall below one LSB = 2^-n). Returns +inf for zero ripple.
+    E.g. 0.17 dB -> ~5.7 bits, 1.7 dB -> ~2.2 bits (Saitoh & Mukai facet-ripple regime)."""
+    m = 10.0 ** (abs(float(ripple_dB)) / 20.0) - 1.0
+    if m <= 0.0:
+        return float("inf")
+    return float(-np.log2(m))
