@@ -77,13 +77,13 @@ except Exception:                                             # pragma: no cover
             return f
         return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
 
-__all__ = ["QDGainParams", "QDGainModel"]
+__all__ = ["QDGainParams", "QDGainModel", "SelfHeating"]
 
 
 @_njit(cache=True, fastmath=True)
 def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, stim_pref,
                           tau_cap, tau_esc, tau_ES_GS, tau_GS_ES, tau_sp, B, C,
-                          mGS_over_mES, mES_over_mGS, qVa):
+                          mGS_over_mES, mES_over_mGS, qVa, stim_pref_ES, LErow, es_active):
     """Compiled twin of step_slices: explicit-loop RK4 of the group-resolved QD rate equations
     over all z-slices, MIRRORING rhs_fields term-for-term (so it stays bit-parity with the numpy
     reference -- validated). One source of truth is rhs_fields; this is the optional accelerator.
@@ -119,6 +119,8 @@ def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, 
                 spE = ej * ej / tau_sp
                 spG = gj * gj / tau_sp
                 des[j] = cap - esc - fwd + mGS_over_mES * bwd - spE
+                if es_active:                               # ES optical channel (depletes rho_ES)
+                    des[j] -= stim_pref_ES * LErow[j] * (2.0 * ej - 1.0) * Sk
                 dgs[j] = mES_over_mGS * fwd - bwd - stim - spG
                 sum1 += w[j] * (1.0 - ej)
                 sum2 += w[j] * ej
@@ -149,7 +151,8 @@ def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, 
 def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow, w,
                              cap_den_e, cap_den_h, esc_pref_e, esc_pref_h, stim_pref,
                              tau_cap_e, tau_cap_h, tau_esc_e, tau_esc_h, tau_rel_e, tau_rel_h,
-                             tau_back_e, tau_back_h, tau_sp, B, C, mGS_over_mES, mES_over_mGS, qVa):
+                             tau_back_e, tau_back_h, tau_sp, B, C, mGS_over_mES, mES_over_mGS, qVa,
+                             stim_pref_ES, LErow, es_active):
     """Compiled twin of _step_slices_eh: explicit-loop RK4 of the electron/hole-split rate
     equations over all z-slices, MIRRORING rhs_fields_eh term-for-term (bit-parity, validated).
     Stimulated + spontaneous are the SAME scalar into both bands; WL recomb is the pair form."""
@@ -204,6 +207,10 @@ def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow,
                 dve[j] = (nwh_y * (1.0 - vej) / cap_den_h - vej / tau_esc_h
                           - vej * (1.0 - vgj) / tau_rel_h
                           + mGS_over_mES * vgj * (1.0 - vej) / tau_back_h - spE)
+                if es_active:                               # ES channel: SAME scalar into both bands
+                    stim_ES = stim_pref_ES * LErow[j] * (cej + vej - 1.0) * Sk
+                    dce[j] -= stim_ES
+                    dve[j] -= stim_ES
                 dcg[j] = (mES_over_mGS * cej * (1.0 - cgj) / tau_rel_e
                           - cgj * (1.0 - cej) / tau_back_e - stim - spG)
                 dvg[j] = (mES_over_mGS * vej * (1.0 - vgj) / tau_rel_h
@@ -280,6 +287,12 @@ class QDGainParams:
     nu0_Hz: float = 1.934e14          # GS transition centre (~1550 nm) [Hz]
     fwhm_inhom_Hz: float = 5.0e12     # inhomogeneous (dot-size) Gaussian FWHM [Hz]
     fwhm_hom_Hz: float = 1.0e12       # homogeneous Lorentzian FWHM [Hz]
+    # excited-state (ES) optical band (opt-in two-state gain). The ES transition sits dE_ES_GS
+    # ABOVE the GS (nu_ES_j = nu_j + dE_ES_GS/h, derived -- no separate nu param), carries mu_ES.
+    # sigma_pk_ES_m2 = 0 (default) -> GS-only, byte-identical. Lets a signal near the ES band see
+    # ES gain and exposes the GS/ES two-state crossover at high injection.
+    sigma_pk_ES_m2: float = 0.0       # peak ES stimulated cross-section [m^2]; 0 -> GS-only
+    fwhm_hom_ES_Hz: Optional[float] = None  # ES homogeneous FWHM [Hz]; None -> reuse fwhm_hom_Hz
     # coherent / phase
     alpha_lef: float = 2.0           # linewidth enhancement factor (carrier-induced index;
                                      # QD ~ 1-3 near the GS peak) -- drives FWM + its asymmetry
@@ -317,6 +330,10 @@ class QDGainParams:
             v = getattr(self, nm)
             if v is not None and not (v > 0.0):
                 raise ValueError("QDGainParams: {} must be > 0 when set".format(nm))
+        if self.sigma_pk_ES_m2 < 0.0:                         # 0 is the GS-only disable switch
+            raise ValueError("QDGainParams: sigma_pk_ES_m2 must be >= 0")
+        if self.fwhm_hom_ES_Hz is not None and not (self.fwhm_hom_ES_Hz > 0.0):
+            raise ValueError("QDGainParams: fwhm_hom_ES_Hz must be > 0 when set")
 
     def with_detailed_balance_taus(self) -> "QDGainParams":
         """Return a copy with tau_GS_ES fixed by detailed balance, so the dark
@@ -338,10 +355,54 @@ class QDGainParams:
         return replace(self, **updates)
 
 
+@dataclass(frozen=True)
+class SelfHeating:
+    """Lumped self-heating coupled into the gain (opt-in ENOB-budget physics). The junction
+    dissipates P_diss = I V_j - eta_extraction (P_out - P_in) and heats to T = T0 + Rth P_diss
+    (steady) / Cth dT/dt = P_diss - (T-T0)/Rth (transient, tau_th = Rth Cth). Temperature couples
+    into the gain two ways (the minimal well-posed choice -> a monotone dg/dT < 0, unique stable
+    fixed point):
+      - rigid red-shift of the whole comb: nu_j(T) = nu_j0 - dnu0_dT (T - T0)  (dnu0_dT > 0)
+      - fractional peak-gain coefficient:  gain_scale(T) = max(0, 1 + dg_dT_frac (T - T0)), applied
+        to BOTH the modal-gain emission and the per-dot stimulated depletion (photon-number safe).
+    Rth_K_W = 0 (default) -> isothermal, byte-identical to the current engine. The derived
+    single-pass dG/dT [dB/K] feeds metrics.thermal_drift_budget_K -> the predistortion ENOB ceiling.
+    SI; ASCII. (Sugawara/Coldren bandgap red-shift; lumped RC after e.g. Ning & Lippi SOA-thermal.)"""
+    Rth_K_W: float = 0.0              # thermal resistance [K/W]; 0 -> isothermal (OFF)
+    Cth_J_K: float = 1.0e-9           # heat capacity [J/K] (transient only; tau_th = Rth Cth)
+    dnu0_dT_Hz_K: float = 0.0         # gain-peak red-shift coef [Hz/K] (>=0: nu falls as T rises)
+    dg_dT_frac_per_K: float = 0.0     # fractional peak-gain coef (1/g) dg/dT [1/K] (<=0 physical)
+    T0_K: float = 300.0               # ambient / heat-sink reference [K]
+    V_j_V: float = 0.9                # junction bias for P_elec = I V_j [V]
+    eta_extraction: float = 1.0       # optical-extraction fraction removed from P_diss [0,1]
+    w_relax: float = 0.5              # steady Picard under-relaxation in (0,1]
+    tol_T_K: float = 1.0e-3
+    max_iter: int = 60
+
+    def __post_init__(self):
+        if self.Rth_K_W < 0.0 or self.Cth_J_K <= 0.0 or self.T0_K <= 0.0:
+            raise ValueError("SelfHeating: need Rth >= 0, Cth > 0, T0 > 0")
+        if self.dnu0_dT_Hz_K < 0.0:
+            raise ValueError("SelfHeating: dnu0_dT_Hz_K must be >= 0 (red-shift as T rises)")
+        if self.dg_dT_frac_per_K > 0.0:
+            raise ValueError("SelfHeating: dg_dT_frac_per_K must be <= 0 (gain drops with T)")
+        if not (0.0 <= self.eta_extraction <= 1.0) or not (0.0 < self.w_relax <= 1.0):
+            raise ValueError("SelfHeating: eta_extraction in [0,1], w_relax in (0,1]")
+
+    @property
+    def active(self) -> bool:
+        return self.Rth_K_W > 0.0
+
+    @property
+    def tau_th_s(self) -> float:
+        return self.Rth_K_W * self.Cth_J_K
+
+
 class QDGainModel:
     """Group-resolved QD-SOA gain core. State vector y = [N_w, rho_ES_0..G-1, rho_GS_0..G-1]."""
 
-    def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False):
+    def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False,
+                 self_heating: "Optional[SelfHeating]" = None):
         self.p = params if params is not None else QDGainParams()
         p = self.p
         # Optional numba carrier-step accelerator (4.7x at ng=1, 7x at ng=41; bit-parity with the
@@ -386,6 +447,29 @@ class QDGainModel:
         self._tback_h = float(p.tau_back_h_s) if p.tau_back_h_s is not None else p.tau_GS_ES_s
         self._cap_den_h = self._tcap_h * p.mu_ES * p.N_q_m3        # hole capture denominator
         self._esc_pref_h = p.mu_ES * p.N_q_m3 / self._tesc_h       # hole escape-in prefactor
+        # excited-state optical band (opt-in). The ES comb is the GS comb rigidly blue-shifted by
+        # the ES-GS separation (so optical + detailed-balance spacings stay consistent); carries
+        # mu_ES. sigma_pk_ES = 0 -> _es_active False -> every ES term short-circuits to 0 (GS-only,
+        # byte-identical). Its own cached Lorentzian row + gain line weights mirror the GS ones.
+        self.nu_ES_j = self.nu_j + p.dE_ES_GS_eV * Q_E / H_PLANCK  # (ng,) ES line comb
+        self._es_active = p.sigma_pk_ES_m2 > 0.0
+        self._stim_pref_ES = p.v_g_m_s * p.sigma_pk_ES_m2          # per-dot ES stimulated prefactor
+        self._gain_pref_ES = p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2  # ES modal-gain prefactor (mu_ES)
+        self._hw_ES = 0.5 * (p.fwhm_hom_ES_Hz if p.fwhm_hom_ES_Hz is not None else p.fwhm_hom_Hz)
+        self._zeros_ng = np.zeros(self.ng)                        # inactive-ES Lorentzian row
+        self._LE_nu = None
+        self._LE_row = None
+        self._gwE_nu = None
+        self._gwE = None
+        # lumped self-heating (opt-in). The gain emitters/stim multiply by _gain_scale (1.0 ->
+        # isothermal, byte-identical) and set_temperature rigidly red-shifts the combs off the
+        # cached cold-grid _nu_j0/_nu_ES_j0. dg_dT_frac is taken from SelfHeating directly.
+        self.sh = self_heating
+        self._nu_j0 = self.nu_j.copy()
+        self._nu_ES_j0 = self.nu_ES_j.copy()
+        self._gain_scale = 1.0
+        self._dg_dT_frac = self.sh.dg_dT_frac_per_K if self.sh is not None else 0.0
+        self._T = self.sh.T0_K if self.sh is not None else p.T_K
 
     # ---- lineshape + gain ----
     def _lorentzian(self, dnu):
@@ -408,6 +492,48 @@ class QDGainModel:
             self._gw_nu = nu_Hz
         return self._gw
 
+    # ---- excited-state (ES) band lineshape + inversion (mirror the GS helpers, retargeted to
+    # the blue-shifted ES comb nu_ES_j and the ES homogeneous HWHM _hw_ES) ----
+    def _lorentzian_ES(self, dnu):
+        hw = self._hw_ES
+        return hw * hw / (np.asarray(dnu) ** 2 + hw * hw)
+
+    def _LE_at(self, nu_s_Hz):
+        """Cached ES Lorentzian row L_ES(nu_s - nu_ES_j), shape (1, ng)."""
+        if self._LE_nu != nu_s_Hz:
+            self._LE_row = self._lorentzian_ES(nu_s_Hz - self.nu_ES_j)[None, :]
+            self._LE_nu = nu_s_Hz
+        return self._LE_row
+
+    def _gain_line_weights_ES(self, nu_Hz):
+        """Cached ES gain line weights w_j * L_ES(nu - nu_ES_j), shape (ng,)."""
+        if self._gwE_nu != nu_Hz:
+            self._gwE = self.w_j * self._lorentzian_ES(nu_Hz - self.nu_ES_j)
+            self._gwE_nu = nu_Hz
+        return self._gwE
+
+    def _es_inversion(self, state) -> np.ndarray:
+        """ES inversion: (2 rho_ES - 1) excitonic [state[1]], or (f_c_ES + f_v_ES - 1) split
+        [state[2]+state[3]]. The ES analogue of _gs_inversion."""
+        if self.eh:
+            return np.asarray(state[2]) + np.asarray(state[3]) - 1.0
+        return 2.0 * np.asarray(state[1]) - 1.0
+
+    def set_temperature(self, T_K: float) -> None:
+        """Set the junction temperature [K] (self-heating coupling site). Rigidly red-shifts the
+        GS+ES combs off the cold grids (nu_j = nu_j0 - dnu0_dT (T-T0)) and sets the fractional
+        peak-gain scale (1 + dg_dT_frac (T-T0), floored at 0); invalidates the cached Lorentzian
+        rows. No-op (and no cache touch) when self-heating is disabled -> isothermal byte-identity."""
+        self._T = float(T_K)
+        if self.sh is None:
+            return
+        dT = self._T - self.sh.T0_K
+        self.nu_j = self._nu_j0 - self.sh.dnu0_dT_Hz_K * dT
+        self.nu_ES_j = self._nu_ES_j0 - self.sh.dnu0_dT_Hz_K * dT
+        self._L_nu = self._gw_nu = self._LE_nu = self._gwE_nu = None     # invalidate stale rows
+        s = 1.0 + self._dg_dT_frac * dT
+        self._gain_scale = s if s > 0.0 else 0.0
+
     def material_gain_per_m(self, rho_GS, nu_Hz) -> np.ndarray:
         """Spectral intensity gain g(nu) [1/m] from the per-group GS occupations rho_GS
         (length n_groups): g(nu) = sum_j N_q w_j mu_GS sigma_pk L_hom(nu-nu_j)(2 rho_GS_j-1)."""
@@ -417,8 +543,23 @@ class QDGainModel:
         # (n_nu, n_groups)
         L = self._lorentzian(nu[:, None] - self.nu_j[None, :])
         inv = (2.0 * rho - 1.0) * self.w_j                    # per-group inversion x weight
-        g = p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * (L @ inv)
+        g = self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * (L @ inv)
         return g if np.ndim(nu_Hz) else float(g[0])
+
+    def total_material_gain(self, rho_ES, rho_GS, nu_Hz) -> np.ndarray:
+        """Full GS + ES material gain spectrum g(nu) [1/m] over nu (scalar or array) from the
+        EXCITONIC occupations. material_gain_per_m is the GS-only sibling (back-compat). The ES
+        term g_ES = sum_j N_q w_j mu_ES sigma_pk_ES L_ES(nu - nu_ES_j)(2 rho_ES-1) is added only
+        when sigma_pk_ES > 0 -> identical to material_gain_per_m for the GS-only default."""
+        p = self.p
+        rES = np.asarray(rho_ES, dtype=np.float64)
+        nu = np.atleast_1d(np.asarray(nu_Hz, dtype=np.float64))
+        g = self.material_gain_per_m(rho_GS, nu)              # GS band (array-safe)
+        if self._es_active:
+            LE = self._lorentzian_ES(nu[:, None] - self.nu_ES_j[None, :])
+            invE = (2.0 * rES - 1.0) * self.w_j
+            g = g + self._gain_scale * p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2 * (LE @ invE)
+        return g if np.ndim(nu_Hz) else float(np.atleast_1d(g)[0])
 
     def power_to_photon_density(self, P_W: float, nu_Hz: float) -> float:
         """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided
@@ -444,7 +585,10 @@ class QDGainModel:
         esc_occ = rho_ES / p.tau_esc_s
         fwd = rho_ES * (1.0 - rho_GS) / p.tau_ES_GS_s
         bwd = rho_GS * (1.0 - rho_ES) / p.tau_GS_ES_s
-        stim = self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
+        gsc = self._gain_scale                                # self-heating gain factor (1.0 off)
+        stim = gsc * self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
+        stim_ES = (gsc * self._stim_pref_ES * self._LE_at(nu_s_Hz) * (2.0 * rho_ES - 1.0) * Sb
+                   if self._es_active else 0.0)        # ES optical channel (0 -> GS-only)
         sp_ES = rho_ES * rho_ES / p.tau_sp_s
         sp_GS = rho_GS * rho_GS / p.tau_sp_s
 
@@ -452,7 +596,7 @@ class QDGainModel:
                 - (Nw / p.tau_cap_s) * np.sum(w * (1.0 - rho_ES), axis=1)
                 + self._esc_pref * np.sum(w * rho_ES, axis=1)
                 - p.B_wl_m3_s * Nw * Nw - p.C_wl_m6_s * Nw ** 3)
-        drho_ES = cap_occ - esc_occ - fwd + (p.mu_GS / p.mu_ES) * bwd - sp_ES
+        drho_ES = cap_occ - esc_occ - fwd + (p.mu_GS / p.mu_ES) * bwd - sp_ES - stim_ES
         drho_GS = (p.mu_ES / p.mu_GS) * fwd - bwd - stim - sp_GS
         return dN_w, drho_ES, drho_GS
 
@@ -483,8 +627,11 @@ class QDGainModel:
         L = self._L_at(nu_s_Hz)                               # cached (1, ng)
         inj = Ib / self._qVa
         # --- shared band-coupling scalars (subtracted into BOTH bands of a state) ---
+        gsc = self._gain_scale                                # self-heating gain factor (1.0 off)
         inv = f_c_GS + f_v_GS - 1.0                           # GS inversion (sum-minus-one)
-        stim = self._stim_pref * L * inv * Sb                 # one e + one h removed per event
+        stim = gsc * self._stim_pref * L * inv * Sb           # one e + one h removed per event
+        stim_ES = (gsc * self._stim_pref_ES * self._LE_at(nu_s_Hz) * (f_c_ES + f_v_ES - 1.0) * Sb
+                   if self._es_active else 0.0)               # ES channel (SAME scalar into both)
         sp_GS = f_c_GS * f_v_GS / p.tau_sp_s                  # spontaneous PRODUCT (not square)
         sp_ES = f_c_ES * f_v_ES / p.tau_sp_s
         R_wl = (p.B_wl_m3_s * Nwe * Nwh                       # pair recomb (charge-neutral)
@@ -497,10 +644,10 @@ class QDGainModel:
         # --- ES electrons / holes (independent ladders; back-transfer Pauli on (1-f_*_ES)) ---
         df_c_ES = (Nwe[:, None] * (1.0 - f_c_ES) / self._cap_den - f_c_ES / p.tau_esc_s
                    - f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
-                   + (p.mu_GS / p.mu_ES) * f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - sp_ES)
+                   + (p.mu_GS / p.mu_ES) * f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - sp_ES - stim_ES)
         df_v_ES = (Nwh[:, None] * (1.0 - f_v_ES) / self._cap_den_h - f_v_ES / self._tesc_h
                    - f_v_ES * (1.0 - f_v_GS) / self._trel_h
-                   + (p.mu_GS / p.mu_ES) * f_v_GS * (1.0 - f_v_ES) / self._tback_h - sp_ES)
+                   + (p.mu_GS / p.mu_ES) * f_v_GS * (1.0 - f_v_ES) / self._tback_h - sp_ES - stim_ES)
         # --- GS electrons / holes (carry the SAME stimulated + spontaneous scalar) ---
         df_c_GS = ((p.mu_ES / p.mu_GS) * f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
                    - f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - stim - sp_GS)
@@ -612,12 +759,80 @@ class QDGainModel:
         return float(y[1] + p.N_q_m3 * np.sum(
             self.w_j * (p.mu_ES * self.f_v_ES(y) + p.mu_GS * self.f_v_GS(y))))
 
+    # ---- self-heating: self-consistent steady operating point + ENOB tie-in ----
+    def _y_to_slice(self, y):
+        """Wrap a steady-state vector y as a 1-slice state tuple (so gain_per_m_slices, which
+        handles excitonic/e-h/ES/gain-scale uniformly, can read it)."""
+        if self.eh:
+            return (np.atleast_1d(y[0]), np.atleast_1d(y[1]),
+                    self.f_c_ES(y)[None, :], self.f_v_ES(y)[None, :],
+                    self.f_c_GS(y)[None, :], self.f_v_GS(y)[None, :])
+        return (np.atleast_1d(y[0]), self.rho_ES(y)[None, :], self.rho_GS(y)[None, :])
+
+    def steady_gain_self_consistent(self, I_A, P_in_W, L_m, *, nu_s_Hz=None):
+        """Self-consistent steady single-pass gain under lumped self-heating: iterate the thermal
+        fixed point T = T0 + Rth*P_diss, P_diss = I V_j - eta(P_out - P_in), with the gain (hence
+        P_out = P_in exp(Gamma g(nu_s) L), lumped input-end saturation; ignores z-saturation, an
+        ENOB-budget estimate) re-solved at each T via set_temperature. The feedback is mildly
+        DESTABILIZING -- heating cuts the gain, so less optical power is extracted and P_diss rises
+        -- with loop gain k = Rth eta |dP_out/dT|; the damped Picard (w_relax) converges to the
+        unique fixed point for k < 1 and the max_iter cap RAISES (thermal-runaway guard) otherwise.
+        Returns (g_per_m, T_star, G_dB). Isothermal (self_heating None/inactive) -> a single cold
+        solve at T0, no iteration."""
+        nu_s = float(nu_s_Hz) if nu_s_Hz is not None else self.p.nu0_Hz
+        gam = self.p.Gamma
+
+        def cold_gain(T):
+            self.set_temperature(T)
+            y = self.steady_state(I_A, S_conf_m3=self.photon_density(P_in_W, nu_s), nu_s_Hz=nu_s)
+            return float(self.gain_per_m_slices(self._y_to_slice(y), nu_s)[0])
+
+        if self.sh is None or not self.sh.active:
+            T0 = self.sh.T0_K if self.sh is not None else self.p.T_K
+            g = cold_gain(T0)
+            return g, T0, float((10.0 / np.log(10.0)) * gam * g * L_m)
+        sh = self.sh
+        T = sh.T0_K
+        for _ in range(sh.max_iter):
+            g = cold_gain(T)
+            P_out = P_in_W * np.exp(gam * g * L_m)
+            P_diss = I_A * sh.V_j_V - sh.eta_extraction * (P_out - P_in_W)
+            T_target = sh.T0_K + sh.Rth_K_W * P_diss
+            T_new = (1.0 - sh.w_relax) * T + sh.w_relax * T_target
+            if abs(T_new - T) < sh.tol_T_K:
+                T = T_new
+                self.set_temperature(T)
+                g = cold_gain(T)
+                return g, T, float((10.0 / np.log(10.0)) * gam * g * L_m)
+            T = T_new
+        raise RuntimeError("steady_gain_self_consistent: thermal fixed point did not converge in "
+                           "{} iterates (raise Rth/lower w_relax, or thermal runaway)".format(
+                               sh.max_iter))
+
+    def dGdT_dB_per_K(self, I_A, P_in_W, L_m, T_K, *, nu_s_Hz=None, dT=0.5):
+        """Single-pass gain temperature sensitivity dG/dT [dB/K] at T_K (central difference via
+        set_temperature). Feeds metrics.thermal_drift_budget_K -> the predistortion ENOB ceiling.
+        Requires self_heating (the coupling coefficients). Restores T_K on exit."""
+        nu_s = float(nu_s_Hz) if nu_s_Hz is not None else self.p.nu0_Hz
+        c = (10.0 / np.log(10.0)) * self.p.Gamma * L_m
+
+        def G_dB(T):
+            self.set_temperature(T)
+            y = self.steady_state(I_A, S_conf_m3=self.photon_density(P_in_W, nu_s), nu_s_Hz=nu_s)
+            return c * float(self.gain_per_m_slices(self._y_to_slice(y), nu_s)[0])
+
+        hi, lo = G_dB(T_K + dT), G_dB(T_K - dT)
+        self.set_temperature(T_K)
+        return (hi - lo) / (2.0 * dT)
+
     # ---- small-signal + saturation ----
     def small_signal_gain_per_m(self, I_A: float, nu_Hz=None) -> np.ndarray:
-        """Unsaturated (S_conf -> 0) modal gain spectrum at injection I."""
+        """Unsaturated (S_conf -> 0) modal gain spectrum at injection I, GS + (if active) ES band.
+        Excitonic state only (the two-state crossover oracle uses the excitonic model); for the
+        e/h split read spectra via gain_per_m_slices."""
         y = self.steady_state(I_A, S_conf_m3=0.0)
         nu = self.p.nu0_Hz if nu_Hz is None else nu_Hz
-        return self.material_gain_per_m(self.rho_GS(y), nu)
+        return self.total_material_gain(self.rho_ES(y), self.rho_GS(y), nu)
 
     def saturation_curve(self, I_A: float, P_in_W, *, nu_s_Hz: Optional[float] = None
                          ) -> Tuple[np.ndarray, np.ndarray]:
@@ -685,10 +900,17 @@ class QDGainModel:
                 np.tile(self.rho_GS(y), (nz, 1)))
 
     def gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
-        """Material intensity gain g(nu) [1/m] per slice from the slice GS inversion (excitonic
-        2 rho_GS-1, or e/h f_c_GS+f_v_GS-1 via _gs_inversion)."""
+        """Material intensity gain g(nu) [1/m] per slice = GS band + (if sigma_pk_ES>0) the ES
+        band g_ES = sum_j N_q w_j mu_ES sigma_pk_ES L_ES(nu-nu_ES_j)(INV_ES). GS inversion via
+        _gs_inversion (excitonic 2 rho_GS-1 / e/h f_c_GS+f_v_GS-1); ES via _es_inversion. With
+        sigma_pk_ES=0 the ES branch is skipped -> byte-identical GS-only gain."""
         wl = self._gain_line_weights(nu_Hz)                   # cached (ng,) = w_j * L(nu - nu_j)
-        return self._gain_pref * np.sum(self._gs_inversion(state) * wl[None, :], axis=1)
+        g = self._gain_scale * self._gain_pref * np.sum(self._gs_inversion(state) * wl[None, :], axis=1)
+        if self._es_active:
+            wlE = self._gain_line_weights_ES(nu_Hz)
+            g = g + self._gain_scale * self._gain_pref_ES * np.sum(
+                self._es_inversion(state) * wlE[None, :], axis=1)
+        return g
 
     def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
         """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
@@ -702,8 +924,10 @@ class QDGainModel:
         so the line shape AND its Kramers-Kronig dispersive partner are carried by one pole per
         group (no FFT, no tone comb). Returns kappa, shape (nz, ng) [s^-1], from the LIVE GS
         inversion (so carrier-density pulsation rides on top -> dispersion-enlarged FWM/XGM).
-        Uses _gs_inversion so the e/h split (f_c_GS+f_v_GS-1) drives the line filter too."""
-        return (2.0 * np.pi * hw_Hz) * self._gain_pref * self.w_j[None, :] * self._gs_inversion(state)
+        Uses _gs_inversion so the e/h split (f_c_GS+f_v_GS-1) drives the line filter too. Scaled by
+        the self-heating gain factor so the dispersive Kramers-Kronig partner stays consistent."""
+        return ((2.0 * np.pi * hw_Hz) * self._gain_scale * self._gain_pref
+                * self.w_j[None, :] * self._gs_inversion(state))
 
     def step_slices(self, state, P_local_W, dt_s: float, nu_s_Hz: float, I_A: float):
         """Advance the per-slice carrier state by dt driven by the local guided POWER P (Nz,)
@@ -723,12 +947,15 @@ class QDGainModel:
             # row is the cached constant (avoid recomputing every step).
             S = (np.ascontiguousarray(np.broadcast_to(Sa, Nw.shape))
                  if Sa.shape != Nw.shape else Sa)
+            LE = self._LE_at(nu_s_Hz)[0] if self._es_active else self._zeros_ng
+            gsc = self._gain_scale                            # self-heating gain factor (1.0 off)
             return _qd_carrier_rk4_numba(
                 Nw, rES, rGS, S, float(I_A), float(dt_s),
                 self._L_at(nu_s_Hz)[0], self.w_j,
-                self._cap_den, self._esc_pref, self._stim_pref, p.tau_cap_s, p.tau_esc_s,
+                self._cap_den, self._esc_pref, gsc * self._stim_pref, p.tau_cap_s, p.tau_esc_s,
                 p.tau_ES_GS_s, p.tau_GS_ES_s, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
-                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa)
+                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa,
+                gsc * self._stim_pref_ES, LE, self._es_active)
 
         def f(nw, es, gs):
             return self.rhs_fields(nw, es, gs, I_A, S_conf, nu_s_Hz)
@@ -755,13 +982,17 @@ class QDGainModel:
             base = state[0]
             S = (np.ascontiguousarray(np.broadcast_to(Sa, base.shape))
                  if Sa.shape != base.shape else Sa)
+            LE = self._LE_at(nu_s_Hz)[0] if self._es_active else self._zeros_ng
+            gsc = self._gain_scale                            # self-heating gain factor (1.0 off)
             return _qd_carrier_rk4_eh_numba(
                 state[0], state[1], state[2], state[3], state[4], state[5], S,
                 float(I_A), float(dt_s), self._L_at(nu_s_Hz)[0], self.w_j,
-                self._cap_den, self._cap_den_h, self._esc_pref, self._esc_pref_h, self._stim_pref,
+                self._cap_den, self._cap_den_h, self._esc_pref, self._esc_pref_h,
+                gsc * self._stim_pref,
                 p.tau_cap_s, self._tcap_h, p.tau_esc_s, self._tesc_h, p.tau_ES_GS_s, self._trel_h,
                 p.tau_GS_ES_s, self._tback_h, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
-                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa)
+                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa,
+                gsc * self._stim_pref_ES, LE, self._es_active)
 
         def f(s):
             return self.rhs_fields_eh(s[0], s[1], s[2], s[3], s[4], s[5], I_A, S_conf, nu_s_Hz)
