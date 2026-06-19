@@ -43,8 +43,8 @@ from dynameta.constants import HBAR, Q_E
 
 H_PLANCK = 2.0 * np.pi * HBAR
 
-__all__ = ["inversion_factor_nsp", "single_pass_gain", "ase_output_psd", "noise_figure",
-           "detector_noise_variances"]
+__all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
+           "ase_output_psd", "noise_figure", "detector_noise_variances"]
 
 
 def inversion_factor_nsp(rho_GS):
@@ -55,6 +55,19 @@ def inversion_factor_nsp(rho_GS):
     inv = 2.0 * rho - 1.0
     with np.errstate(divide="ignore", invalid="ignore"):
         nsp = np.where(inv > 1e-12, rho * rho / inv, np.inf)
+    return nsp if nsp.ndim else float(nsp)
+
+
+def inversion_factor_nsp_eh(f_c, f_v):
+    """Electron/hole-split inversion factor n_sp = f_c f_v/(f_c + f_v - 1) (Bernard-Duraffourg /
+    Henry; f_c electron occupation of the conduction state, f_v hole occupation of the valence
+    state). Reduces to the excitonic rho^2/(2 rho - 1) at f_c = f_v = rho. +inf at/below
+    transparency (f_c + f_v <= 1)."""
+    fc = np.asarray(f_c, dtype=np.float64)
+    fv = np.asarray(f_v, dtype=np.float64)
+    inv = fc + fv - 1.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        nsp = np.where(inv > 1e-12, fc * fv / inv, np.inf)
     return nsp if nsp.ndim else float(nsp)
 
 
