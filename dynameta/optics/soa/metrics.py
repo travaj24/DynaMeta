@@ -24,7 +24,8 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = ["transfer_derivatives", "harmonic_amplitudes", "sndr_db", "enob",
-           "sndr_vs_drive"]
+           "sndr_vs_drive", "optimal_drive_power", "predistort", "pattern_penalty_dB",
+           "sfdr_dB", "thermal_drift_budget_K"]
 
 
 def transfer_derivatives(P_in_grid, P_out_grid, P0):
@@ -79,3 +80,66 @@ def sndr_vs_drive(P_in_grid, P_out_grid, noise_var_of_Pout, P0_array, *, mod_ind
         noise = float(noise_var_of_Pout(P_out0))
         sndr[k] = sndr_db(sig, noise, dist)
     return sndr, np.array([enob(s) for s in sndr]), int(np.argmax(sndr))
+
+
+def optimal_drive_power(P_in_grid, P_out_grid, noise_var_of_Pout, P0_array, *,
+                        mod_index=0.3, R_A_W=1.0):
+    """The drive power that maximizes SNDR (the analog operating point) and its (SNDR, ENOB).
+    The interior optimum trades the ASE-noise floor (dominant at low drive) against gain-
+    compression distortion (dominant at high drive)."""
+    sndr, eno, iopt = sndr_vs_drive(P_in_grid, P_out_grid, noise_var_of_Pout, P0_array,
+                                    mod_index=mod_index, R_A_W=R_A_W)
+    P0s = np.atleast_1d(np.asarray(P0_array, dtype=np.float64))
+    return float(P0s[iopt]), float(sndr[iopt]), float(eno[iopt])
+
+
+def predistort(P_in_grid, P_out_grid, P_out_target):
+    """Inverse transfer: the input power(s) that, through the compression curve P_out(P_in),
+    yield the requested output P_out_target -- i.e. invert gain compression to linearize the
+    channel. Operates on the MONOTONE-rising branch (sorted by P_in): if the curve rolls over
+    in deep saturation it is truncated at the peak with a RuntimeWarning (the conjugate
+    descending branch is not invertible), so a flattened curve cannot silently blend the two
+    branches. Targets outside the invertible range clip to its ends."""
+    P_in = np.asarray(P_in_grid, dtype=np.float64)
+    P_out = np.asarray(P_out_grid, dtype=np.float64)
+    o = np.argsort(P_in)                                       # sort by the independent variable
+    P_in, P_out = P_in[o], P_out[o]
+    imax = int(np.argmax(P_out))
+    if imax < P_out.size - 1:                                  # rollover: keep the rising branch
+        import warnings
+        warnings.warn("predistort: P_out(P_in) rolls over (deep saturation); inverting only "
+                      "the monotone-rising branch up to the peak", RuntimeWarning, stacklevel=2)
+        P_in, P_out = P_in[:imax + 1], P_out[:imax + 1]
+    return np.interp(np.asarray(P_out_target, dtype=np.float64), P_out, P_in)
+
+
+def pattern_penalty_dB(mark_peaks):
+    """Pattern penalty [dB] of an amplified mark sequence: the peak-to-peak spread of the
+    per-'1' output peaks (gain-recovery memory imprints a pattern-dependent amplitude). 0 dB
+    is pattern-free."""
+    pk = np.asarray(mark_peaks, dtype=np.float64)
+    if pk.size == 0 or pk.min() <= 0.0:
+        raise ValueError("pattern_penalty_dB: need positive mark peaks")
+    return float(10.0 * np.log10(pk.max() / pk.min()))
+
+
+def sfdr_dB(P_in_grid, P_out_grid, P0, noise_var, *, mod_index=0.3, R_A_W=1.0):
+    """Spurious-free dynamic range [dB] at drive P0: the ratio (in dB) of the fundamental to
+    the larger of the 2nd/3rd compression harmonics, floored at the noise level -- the usable
+    distortion-free window above the noise."""
+    Tp, Tpp, Tppp = transfer_derivatives(P_in_grid, P_out_grid, float(P0))
+    c1, c2, c3 = harmonic_amplitudes(Tp, Tpp, Tppp, P0 * mod_index)
+    sig = 0.5 * (R_A_W * c1) ** 2
+    spur = max(0.5 * (R_A_W * c2) ** 2, 0.5 * (R_A_W * c3) ** 2, float(noise_var))
+    return float(10.0 * np.log10(max(sig, 1e-300) / max(spur, 1e-300)))
+
+
+def thermal_drift_budget_K(n_bits, dGdT_dB_per_K):
+    """Max junction-temperature drift [K] for which a STATIC predistortion calibration stays
+    good to half an LSB at n_bits: the fractional gain drift (1/G) dG/dT = (ln10/10) dG/dT[dB]
+    must stay below 2^-(n_bits+1), so dT_max = 2^-(n_bits+1) / ((ln10/10) |dG/dT[dB/K]|).
+    Tighter (smaller) as resolution grows -- why self-heating gates predistortion ENOB."""
+    s = (np.log(10.0) / 10.0) * abs(float(dGdT_dB_per_K))    # fractional gain sensitivity /K
+    if s <= 0.0:
+        return float("inf")
+    return float(2.0 ** (-(n_bits + 1)) / s)
