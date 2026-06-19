@@ -145,6 +145,109 @@ def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, 
     return Nw_o, rES_o, rGS_o
 
 
+@_njit(cache=True, fastmath=True)
+def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow, w,
+                             cap_den_e, cap_den_h, esc_pref_e, esc_pref_h, stim_pref,
+                             tau_cap_e, tau_cap_h, tau_esc_e, tau_esc_h, tau_rel_e, tau_rel_h,
+                             tau_back_e, tau_back_h, tau_sp, B, C, mGS_over_mES, mES_over_mGS, qVa):
+    """Compiled twin of _step_slices_eh: explicit-loop RK4 of the electron/hole-split rate
+    equations over all z-slices, MIRRORING rhs_fields_eh term-for-term (bit-parity, validated).
+    Stimulated + spontaneous are the SAME scalar into both bands; WL recomb is the pair form."""
+    nz, ng = fcES.shape
+    Nwe_o = np.empty(nz)
+    Nwh_o = np.empty(nz)
+    fcES_o = np.empty((nz, ng))
+    fvES_o = np.empty((nz, ng))
+    fcGS_o = np.empty((nz, ng))
+    fvGS_o = np.empty((nz, ng))
+    for k in range(nz):
+        Sk = S[k]
+        nwe0 = Nwe[k]
+        nwh0 = Nwh[k]
+        ce0 = fcES[k]
+        ve0 = fvES[k]
+        cg0 = fcGS[k]
+        vg0 = fvGS[k]
+        nwe_acc = 0.0
+        nwh_acc = 0.0
+        ce_acc = np.zeros(ng)
+        ve_acc = np.zeros(ng)
+        cg_acc = np.zeros(ng)
+        vg_acc = np.zeros(ng)
+        nwe_y = nwe0
+        nwh_y = nwh0
+        ce_y = ce0.copy()
+        ve_y = ve0.copy()
+        cg_y = cg0.copy()
+        vg_y = vg0.copy()
+        for stage in range(4):
+            s_ce = 0.0
+            s_ce1 = 0.0
+            s_ve = 0.0
+            s_ve1 = 0.0
+            dce = np.empty(ng)
+            dve = np.empty(ng)
+            dcg = np.empty(ng)
+            dvg = np.empty(ng)
+            for j in range(ng):
+                cej = ce_y[j]
+                vej = ve_y[j]
+                cgj = cg_y[j]
+                vgj = vg_y[j]
+                inv = cgj + vgj - 1.0
+                stim = stim_pref * Lrow[j] * inv * Sk
+                spG = cgj * vgj / tau_sp
+                spE = cej * vej / tau_sp
+                dce[j] = (nwe_y * (1.0 - cej) / cap_den_e - cej / tau_esc_e
+                          - cej * (1.0 - cgj) / tau_rel_e
+                          + mGS_over_mES * cgj * (1.0 - cej) / tau_back_e - spE)
+                dve[j] = (nwh_y * (1.0 - vej) / cap_den_h - vej / tau_esc_h
+                          - vej * (1.0 - vgj) / tau_rel_h
+                          + mGS_over_mES * vgj * (1.0 - vej) / tau_back_h - spE)
+                dcg[j] = (mES_over_mGS * cej * (1.0 - cgj) / tau_rel_e
+                          - cgj * (1.0 - cej) / tau_back_e - stim - spG)
+                dvg[j] = (mES_over_mGS * vej * (1.0 - vgj) / tau_rel_h
+                          - vgj * (1.0 - vej) / tau_back_h - stim - spG)
+                s_ce1 += w[j] * (1.0 - cej)
+                s_ce += w[j] * cej
+                s_ve1 += w[j] * (1.0 - vej)
+                s_ve += w[j] * vej
+            R_wl = B * nwe_y * nwh_y + C * nwe_y * nwh_y * (nwe_y + nwh_y) / 2.0
+            dnwe = I_A / qVa - (nwe_y / tau_cap_e) * s_ce1 + esc_pref_e * s_ce - R_wl
+            dnwh = I_A / qVa - (nwh_y / tau_cap_h) * s_ve1 + esc_pref_h * s_ve - R_wl
+            cw = 2.0 if 0 < stage < 3 else 1.0
+            nwe_acc += cw * dnwe
+            nwh_acc += cw * dnwh
+            for j in range(ng):
+                ce_acc[j] += cw * dce[j]
+                ve_acc[j] += cw * dve[j]
+                cg_acc[j] += cw * dcg[j]
+                vg_acc[j] += cw * dvg[j]
+            if stage < 3:
+                h = 0.5 * dt if stage < 2 else dt
+                nwe_y = nwe0 + h * dnwe
+                nwh_y = nwh0 + h * dnwh
+                for j in range(ng):
+                    ce_y[j] = ce0[j] + h * dce[j]
+                    ve_y[j] = ve0[j] + h * dve[j]
+                    cg_y[j] = cg0[j] + h * dcg[j]
+                    vg_y[j] = vg0[j] + h * dvg[j]
+        nwe_n = nwe0 + dt / 6.0 * nwe_acc
+        nwh_n = nwh0 + dt / 6.0 * nwh_acc
+        Nwe_o[k] = nwe_n if nwe_n > 0.0 else 0.0
+        Nwh_o[k] = nwh_n if nwh_n > 0.0 else 0.0
+        for j in range(ng):
+            ce = ce0[j] + dt / 6.0 * ce_acc[j]
+            ve = ve0[j] + dt / 6.0 * ve_acc[j]
+            cg = cg0[j] + dt / 6.0 * cg_acc[j]
+            vg = vg0[j] + dt / 6.0 * vg_acc[j]
+            fcES_o[k, j] = 0.0 if ce < 0.0 else (1.0 if ce > 1.0 else ce)
+            fvES_o[k, j] = 0.0 if ve < 0.0 else (1.0 if ve > 1.0 else ve)
+            fcGS_o[k, j] = 0.0 if cg < 0.0 else (1.0 if cg > 1.0 else cg)
+            fvGS_o[k, j] = 0.0 if vg < 0.0 else (1.0 if vg > 1.0 else vg)
+    return Nwe_o, Nwh_o, fcES_o, fvES_o, fcGS_o, fvGS_o
+
+
 @dataclass(frozen=True)
 class QDGainParams:
     """QD-SOA active-region + kinetic parameters (SI). Defaults are a generic 1550 nm
@@ -184,6 +287,16 @@ class QDGainParams:
     n_groups: int = 41               # inhomogeneous size groups (odd -> a group sits on nu0)
     span_sigma: float = 3.0          # half-width of the group grid in inhomogeneous sigmas
     T_K: float = 300.0
+    # electron/hole occupation split (opt-in, Phase-6 gain fidelity). With eh_split the dots carry
+    # SEPARATE electron f_c and hole f_v occupations per state; gain -> (f_c+f_v-1), spontaneous ->
+    # f_c f_v, n_sp -> f_c f_v/(f_c+f_v-1). The tau_*_s above are the ELECTRON times; the hole times
+    # default (None) to the electron value, so eh_split with all hole-times None reduces to the
+    # excitonic model. The physical asymmetry is holes-faster (heavier -> faster capture/relax).
+    eh_split: bool = False
+    tau_cap_h_s: Optional[float] = None   # WL -> ES hole capture (None -> tau_cap_s)
+    tau_esc_h_s: Optional[float] = None   # ES -> WL hole escape  (None -> tau_esc_s)
+    tau_rel_h_s: Optional[float] = None   # ES -> GS hole relaxation (None -> tau_ES_GS_s)
+    tau_back_h_s: Optional[float] = None  # GS -> ES hole back-transfer (None -> tau_GS_ES_s)
 
     def __post_init__(self):
         pos = ("N_q_m3", "V_a_m3", "A_mode_m2", "v_g_m_s", "tau_cap_s", "tau_esc_s",
@@ -200,6 +313,10 @@ class QDGainParams:
             raise ValueError("QDGainParams: B, C must be >= 0")
         if self.n_groups < 1 or self.span_sigma <= 0.0:
             raise ValueError("QDGainParams: n_groups >= 1 and span_sigma > 0")
+        for nm in ("tau_cap_h_s", "tau_esc_h_s", "tau_rel_h_s", "tau_back_h_s"):
+            v = getattr(self, nm)
+            if v is not None and not (v > 0.0):
+                raise ValueError("QDGainParams: {} must be > 0 when set".format(nm))
 
     def with_detailed_balance_taus(self) -> "QDGainParams":
         """Return a copy with tau_GS_ES fixed by detailed balance, so the dark
@@ -213,8 +330,12 @@ class QDGainParams:
         effective DOS, a Phase-2 refinement)."""
         from dataclasses import replace
         x = self.dE_ES_GS_eV * Q_E / (KB * self.T_K)
-        tau_gs_es = self.tau_ES_GS_s * (self.mu_GS / self.mu_ES) * np.exp(x)
-        return replace(self, tau_GS_ES_s=float(tau_gs_es))
+        ratio = (self.mu_GS / self.mu_ES) * np.exp(x)
+        updates = {"tau_GS_ES_s": float(self.tau_ES_GS_s * ratio)}
+        if self.eh_split:                                     # holes get the same detailed-balance rule
+            tau_rel_h = self.tau_rel_h_s if self.tau_rel_h_s is not None else self.tau_ES_GS_s
+            updates["tau_back_h_s"] = float(tau_rel_h * ratio)
+        return replace(self, **updates)
 
 
 class QDGainModel:
@@ -255,6 +376,16 @@ class QDGainModel:
         self._L_row = None
         self._gw_nu = None       # cached nu for the gain line weights w_j * L (ng,)
         self._gw = None
+        # electron/hole occupation split: resolve hole times (None -> electron value -> symmetric
+        # reduction) into plain floats so the hot loop sees scalars, and precompute the per-band
+        # capture/escape prefactors mirroring the electron ones.
+        self.eh = bool(p.eh_split)
+        self._tcap_h = float(p.tau_cap_h_s) if p.tau_cap_h_s is not None else p.tau_cap_s
+        self._tesc_h = float(p.tau_esc_h_s) if p.tau_esc_h_s is not None else p.tau_esc_s
+        self._trel_h = float(p.tau_rel_h_s) if p.tau_rel_h_s is not None else p.tau_ES_GS_s
+        self._tback_h = float(p.tau_back_h_s) if p.tau_back_h_s is not None else p.tau_GS_ES_s
+        self._cap_den_h = self._tcap_h * p.mu_ES * p.N_q_m3        # hole capture denominator
+        self._esc_pref_h = p.mu_ES * p.N_q_m3 / self._tesc_h       # hole escape-in prefactor
 
     # ---- lineshape + gain ----
     def _lorentzian(self, dnu):
@@ -325,10 +456,75 @@ class QDGainModel:
         drho_GS = (p.mu_ES / p.mu_GS) * fwd - bwd - stim - sp_GS
         return dN_w, drho_ES, drho_GS
 
+    def _gs_inversion(self, state) -> np.ndarray:
+        """GS inversion used by the gain and the line filter: (2 rho_GS - 1) excitonic, or the
+        e/h sum-minus-one (f_c_GS + f_v_GS - 1) in the split. The product f_c f_v cancels exactly
+        in (downward f_c f_v) - (upward (1-f_c)(1-f_v)) -> f_c + f_v - 1, so the inversion is
+        LINEAR in occupations (transparency at f_c+f_v=1, i.e. rho=1/2)."""
+        if self.eh:
+            return np.asarray(state[4]) + np.asarray(state[5]) - 1.0
+        return 2.0 * np.asarray(state[2]) - 1.0
+
+    def rhs_fields_eh(self, N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS, I_A, S_conf_m3, nu_s_Hz):
+        """Vectorized electron/hole-split rate equations (single source of truth for the split
+        carrier dynamics; the numba twin _qd_carrier_rk4_eh_numba mirrors it). f_c = electron
+        occupation of the conduction confined state, f_v = HOLE occupation of the valence state.
+        ONLY the stimulated and spontaneous terms couple the two bands (the SAME scalar subtracted
+        from both); everything else is two independent capture/escape/relax ladders. Reduces to
+        rhs_fields term-for-term when f_c=f_v=rho, N_w_e=N_w_h, and all hole times = electron times.
+        Returns (dN_w_e, dN_w_h, df_c_ES, df_v_ES, df_c_GS, df_v_GS)."""
+        p = self.p
+        w = self.w_j
+        Nwe = np.asarray(N_w_e, dtype=np.float64)
+        Nwh = np.asarray(N_w_h, dtype=np.float64)
+        S = np.asarray(S_conf_m3, dtype=np.float64)
+        Sb = S[:, None] if S.ndim else S
+        Ib = np.asarray(I_A, dtype=np.float64)
+        L = self._L_at(nu_s_Hz)                               # cached (1, ng)
+        inj = Ib / self._qVa
+        # --- shared band-coupling scalars (subtracted into BOTH bands of a state) ---
+        inv = f_c_GS + f_v_GS - 1.0                           # GS inversion (sum-minus-one)
+        stim = self._stim_pref * L * inv * Sb                 # one e + one h removed per event
+        sp_GS = f_c_GS * f_v_GS / p.tau_sp_s                  # spontaneous PRODUCT (not square)
+        sp_ES = f_c_ES * f_v_ES / p.tau_sp_s
+        R_wl = (p.B_wl_m3_s * Nwe * Nwh                       # pair recomb (charge-neutral)
+                + p.C_wl_m6_s * Nwe * Nwh * (Nwe + Nwh) / 2.0)
+        # --- WL electrons / holes (pair injection; same R_wl removes one e and one h) ---
+        dNwe = (inj - (Nwe / p.tau_cap_s) * np.sum(w * (1.0 - f_c_ES), axis=1)
+                + self._esc_pref * np.sum(w * f_c_ES, axis=1) - R_wl)
+        dNwh = (inj - (Nwh / self._tcap_h) * np.sum(w * (1.0 - f_v_ES), axis=1)
+                + self._esc_pref_h * np.sum(w * f_v_ES, axis=1) - R_wl)
+        # --- ES electrons / holes (independent ladders; back-transfer Pauli on (1-f_*_ES)) ---
+        df_c_ES = (Nwe[:, None] * (1.0 - f_c_ES) / self._cap_den - f_c_ES / p.tau_esc_s
+                   - f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
+                   + (p.mu_GS / p.mu_ES) * f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - sp_ES)
+        df_v_ES = (Nwh[:, None] * (1.0 - f_v_ES) / self._cap_den_h - f_v_ES / self._tesc_h
+                   - f_v_ES * (1.0 - f_v_GS) / self._trel_h
+                   + (p.mu_GS / p.mu_ES) * f_v_GS * (1.0 - f_v_ES) / self._tback_h - sp_ES)
+        # --- GS electrons / holes (carry the SAME stimulated + spontaneous scalar) ---
+        df_c_GS = ((p.mu_ES / p.mu_GS) * f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
+                   - f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - stim - sp_GS)
+        df_v_GS = ((p.mu_ES / p.mu_GS) * f_v_ES * (1.0 - f_v_GS) / self._trel_h
+                   - f_v_GS * (1.0 - f_v_ES) / self._tback_h - stim - sp_GS)
+        return dNwe, dNwh, df_c_ES, df_v_ES, df_c_GS, df_v_GS
+
     def rhs(self, y, I_A: float, S_conf_m3: float, nu_s_Hz: float) -> np.ndarray:
-        """dy/dt for the single-section state y = [N_w, rho_ES(ng), rho_GS(ng)] -- a thin
-        wrapper over rhs_fields with one slice."""
+        """dy/dt for the single-section state -- a thin wrapper over rhs_fields(_eh) with one
+        slice. Excitonic y = [N_w, rho_ES(ng), rho_GS(ng)]; split
+        y = [N_w_e, N_w_h, f_c_ES(ng), f_v_ES(ng), f_c_GS(ng), f_v_GS(ng)]."""
         ng = self.ng
+        if self.eh:
+            b = [y[0:1], y[1:2], y[2:2 + ng][None, :], y[2 + ng:2 + 2 * ng][None, :],
+                 y[2 + 2 * ng:2 + 3 * ng][None, :], y[2 + 3 * ng:][None, :]]
+            d = self.rhs_fields_eh(b[0], b[1], b[2], b[3], b[4], b[5], I_A, S_conf_m3, nu_s_Hz)
+            out = np.empty_like(y)
+            out[0] = d[0][0]
+            out[1] = d[1][0]
+            out[2:2 + ng] = d[2][0]
+            out[2 + ng:2 + 2 * ng] = d[3][0]
+            out[2 + 2 * ng:2 + 3 * ng] = d[4][0]
+            out[2 + 3 * ng:] = d[5][0]
+            return out
         dNw, dES, dGS = self.rhs_fields(y[0:1], y[1:1 + ng][None, :], y[1 + ng:][None, :],
                                         I_A, S_conf_m3, nu_s_Hz)
         out = np.empty_like(y)
@@ -338,6 +534,11 @@ class QDGainModel:
         return out
 
     def _initial_state(self) -> np.ndarray:
+        if self.eh:
+            y0 = np.zeros(2 + 4 * self.ng)
+            y0[0] = y0[1] = 1.0e21                            # WL electron + hole seeds [m^-3]
+            y0[2:] = 0.05                                     # nearly-empty dots (all 4 blocks)
+            return y0
         y0 = np.zeros(1 + 2 * self.ng)
         y0[0] = 1.0e21                                        # modest WL seed [m^-3]
         y0[1:] = 0.05                                         # nearly empty dots
@@ -359,10 +560,11 @@ class QDGainModel:
             raise RuntimeError("QDGainModel.steady_state: integration failed ({})".format(
                 sol.message))
         y = sol.y[:, -1]
+        nd = 2 if self.eh else 1                              # number of WL density entries
         # convergence + physicality checks
         res = self.rhs(y, I_A, S_conf_m3, nu_s)
         scale = max(abs(y[0]), 1.0) / self.p.tau_sp_s
-        if np.max(np.abs(res[1:])) > 1e-6 or abs(res[0]) > 1e-3 * scale:
+        if np.max(np.abs(res[nd:])) > 1e-6 or np.max(np.abs(res[:nd])) > 1e-3 * scale:
             # one more relaxation leg if not yet converged
             sol = solve_ivp(lambda t, yy: self.rhs(yy, I_A, S_conf_m3, nu_s),
                             (0.0, 10.0 * t_end_s), y, method="BDF", rtol=1e-10, atol=1e-13,
@@ -371,7 +573,7 @@ class QDGainModel:
                 raise RuntimeError("QDGainModel.steady_state: relaxation leg failed "
                                    "({})".format(sol.message))
             y = sol.y[:, -1]
-        occ = y[1:]                                          # re-read AFTER any extra leg
+        occ = y[nd:]                                          # re-read AFTER any extra leg
         if np.any(occ < -1e-6) or np.any(occ > 1.0 + 1e-6):
             raise RuntimeError("QDGainModel.steady_state: occupation left [0,1] "
                                "(min {:.3e}, max {:.3e})".format(float(occ.min()),
@@ -383,6 +585,32 @@ class QDGainModel:
 
     def rho_ES(self, y) -> np.ndarray:
         return np.asarray(y)[1:1 + self.ng]
+
+    # ---- e/h-split accessors (state y = [N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS]) ----
+    def f_c_ES(self, y) -> np.ndarray:
+        return np.asarray(y)[2:2 + self.ng]
+
+    def f_v_ES(self, y) -> np.ndarray:
+        return np.asarray(y)[2 + self.ng:2 + 2 * self.ng]
+
+    def f_c_GS(self, y) -> np.ndarray:
+        return np.asarray(y)[2 + 2 * self.ng:2 + 3 * self.ng]
+
+    def f_v_GS(self, y) -> np.ndarray:
+        return np.asarray(y)[2 + 3 * self.ng:2 + 4 * self.ng]
+
+    def total_electron_density(self, y) -> float:
+        """n_tot_e = N_w_e + N_q sum_j w_j (mu_ES f_c_ES_j + mu_GS f_c_GS_j) -- conserved by
+        internal transitions (only injection/recomb/stim change it). e/h-split state only."""
+        p = self.p
+        return float(y[0] + p.N_q_m3 * np.sum(
+            self.w_j * (p.mu_ES * self.f_c_ES(y) + p.mu_GS * self.f_c_GS(y))))
+
+    def total_hole_density(self, y) -> float:
+        """n_tot_h = N_w_h + N_q sum_j w_j (mu_ES f_v_ES_j + mu_GS f_v_GS_j). e/h-split state."""
+        p = self.p
+        return float(y[1] + p.N_q_m3 * np.sum(
+            self.w_j * (p.mu_ES * self.f_v_ES(y) + p.mu_GS * self.f_v_GS(y))))
 
     # ---- small-signal + saturation ----
     def small_signal_gain_per_m(self, I_A: float, nu_Hz=None) -> np.ndarray:
@@ -443,19 +671,24 @@ class QDGainModel:
             p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2)
 
     def init_slices(self, n_slices: int, I_A: float):
-        """Per-slice carrier state (N_w (Nz,), rho_ES (Nz, ng), rho_GS (Nz, ng)) initialized to
-        the unsaturated steady state at injection I (uniform along z)."""
+        """Per-slice carrier state initialized to the unsaturated steady state at injection I
+        (uniform along z). Excitonic: (N_w, rho_ES, rho_GS); e/h split: (N_w_e, N_w_h, f_c_ES,
+        f_v_ES, f_c_GS, f_v_GS)."""
         y = self.steady_state(float(I_A))
         nz = int(n_slices)
+        if self.eh:
+            return (np.full(nz, y[0]), np.full(nz, y[1]),
+                    np.tile(self.f_c_ES(y), (nz, 1)), np.tile(self.f_v_ES(y), (nz, 1)),
+                    np.tile(self.f_c_GS(y), (nz, 1)), np.tile(self.f_v_GS(y), (nz, 1)))
         return (np.full(nz, y[0]),
                 np.tile(self.rho_ES(y), (nz, 1)),
                 np.tile(self.rho_GS(y), (nz, 1)))
 
     def gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
-        """Material intensity gain g(nu) [1/m] per slice from the slice state (uses rho_GS)."""
+        """Material intensity gain g(nu) [1/m] per slice from the slice GS inversion (excitonic
+        2 rho_GS-1, or e/h f_c_GS+f_v_GS-1 via _gs_inversion)."""
         wl = self._gain_line_weights(nu_Hz)                   # cached (ng,) = w_j * L(nu - nu_j)
-        return self._gain_pref * np.sum(
-            (2.0 * np.asarray(state[2]) - 1.0) * wl[None, :], axis=1)
+        return self._gain_pref * np.sum(self._gs_inversion(state) * wl[None, :], axis=1)
 
     def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
         """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
@@ -467,16 +700,18 @@ class QDGainModel:
             Gamma_field(nu) = 0.5 sum_j A_j / (1 - 1j (nu - nu_j)/hw),  2 Re == g(nu),
             A_j[k] = N_q w_j mu_GS sigma_pk (2 rho_GS_j[k] - 1)  [the SAME assembly as the gain],
         so the line shape AND its Kramers-Kronig dispersive partner are carried by one pole per
-        group (no FFT, no tone comb). Returns kappa, shape (nz, ng) [s^-1], from the LIVE rho_GS
-        (so carrier-density pulsation rides on top -> dispersion-enlarged FWM/XGM)."""
-        rGS = np.asarray(state[2], dtype=np.float64)          # (nz, ng)
-        return (2.0 * np.pi * hw_Hz) * self._gain_pref * self.w_j[None, :] * (2.0 * rGS - 1.0)
+        group (no FFT, no tone comb). Returns kappa, shape (nz, ng) [s^-1], from the LIVE GS
+        inversion (so carrier-density pulsation rides on top -> dispersion-enlarged FWM/XGM).
+        Uses _gs_inversion so the e/h split (f_c_GS+f_v_GS-1) drives the line filter too."""
+        return (2.0 * np.pi * hw_Hz) * self._gain_pref * self.w_j[None, :] * self._gs_inversion(state)
 
     def step_slices(self, state, P_local_W, dt_s: float, nu_s_Hz: float, I_A: float):
         """Advance the per-slice carrier state by dt driven by the local guided POWER P (Nz,)
         held fixed across the step (operator splitting); explicit RK4. Power is converted to
         the confined photon density internally so the traveling-wave engine speaks one
         currency (power) to every slab model."""
+        if self.eh:
+            return self._step_slices_eh(state, P_local_W, dt_s, nu_s_Hz, I_A)
         Nw, rES, rGS = state
         S_conf = self.photon_density(P_local_W, nu_s_Hz)
 
@@ -509,3 +744,35 @@ class QDGainModel:
         # explicit-step overshoot under very strong/fast transients -- it only acts at the
         # bounds, where the unclamped value is already unphysical.
         return (np.maximum(Nw_n, 0.0), np.clip(rES_n, 0.0, 1.0), np.clip(rGS_n, 0.0, 1.0))
+
+    def _step_slices_eh(self, state, P_local_W, dt_s, nu_s_Hz, I_A):
+        """RK4 advance of the e/h-split slice state (N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS,
+        f_v_GS) by dt at fixed local power; numba twin when fast=True, else numpy rhs_fields_eh."""
+        S_conf = self.photon_density(P_local_W, nu_s_Hz)
+        if self._use_numba:                                   # compiled e/h twin (bit-parity)
+            p = self.p
+            Sa = np.asarray(S_conf, dtype=np.float64)
+            base = state[0]
+            S = (np.ascontiguousarray(np.broadcast_to(Sa, base.shape))
+                 if Sa.shape != base.shape else Sa)
+            return _qd_carrier_rk4_eh_numba(
+                state[0], state[1], state[2], state[3], state[4], state[5], S,
+                float(I_A), float(dt_s), self._L_at(nu_s_Hz)[0], self.w_j,
+                self._cap_den, self._cap_den_h, self._esc_pref, self._esc_pref_h, self._stim_pref,
+                p.tau_cap_s, self._tcap_h, p.tau_esc_s, self._tesc_h, p.tau_ES_GS_s, self._trel_h,
+                p.tau_GS_ES_s, self._tback_h, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
+                p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa)
+
+        def f(s):
+            return self.rhs_fields_eh(s[0], s[1], s[2], s[3], s[4], s[5], I_A, S_conf, nu_s_Hz)
+
+        s0 = state
+        k1 = f(s0)
+        k2 = f([s0[i] + 0.5 * dt_s * k1[i] for i in range(6)])
+        k3 = f([s0[i] + 0.5 * dt_s * k2[i] for i in range(6)])
+        k4 = f([s0[i] + dt_s * k3[i] for i in range(6)])
+        out = [s0[i] + dt_s / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) for i in range(6)]
+        # densities >= 0, occupations in [0, 1] (overshoot guard at the bounds)
+        return (np.maximum(out[0], 0.0), np.maximum(out[1], 0.0),
+                np.clip(out[2], 0.0, 1.0), np.clip(out[3], 0.0, 1.0),
+                np.clip(out[4], 0.0, 1.0), np.clip(out[5], 0.0, 1.0))
