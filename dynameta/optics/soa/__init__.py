@@ -19,12 +19,15 @@ steady-state, small-signal spectral gain, and the static saturation curve. Phase
 from dynameta.optics.soa.ase_noise import (ase_output_psd, detector_noise_variances,
                                            inversion_factor_nsp, noise_figure,
                                            single_pass_gain)
-from dynameta.optics.soa.metrics import enob, sndr_db, sndr_vs_drive
+from dynameta.optics.soa.metrics import (enob, optimal_drive_power, pattern_penalty_dB,
+                                         predistort, sfdr_dB, sndr_db, sndr_vs_drive,
+                                         thermal_drift_budget_K)
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 from dynameta.optics.soa.traveling_wave import (TravelingWaveSOA, TwoLevelSaturableGain,
-                                                agrawal_olsson_output)
+                                                UltrafastCompression, agrawal_olsson_output)
 
 __all__ = ["QDGainModel", "QDGainParams", "TravelingWaveSOA", "TwoLevelSaturableGain",
-           "agrawal_olsson_output", "inversion_factor_nsp", "single_pass_gain",
-           "ase_output_psd", "noise_figure", "detector_noise_variances",
-           "sndr_db", "enob", "sndr_vs_drive"]
+           "UltrafastCompression", "agrawal_olsson_output", "inversion_factor_nsp",
+           "single_pass_gain", "ase_output_psd", "noise_figure", "detector_noise_variances",
+           "sndr_db", "enob", "sndr_vs_drive", "optimal_drive_power", "predistort",
+           "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K"]

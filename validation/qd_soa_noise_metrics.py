@@ -121,6 +121,46 @@ def main():
               P0s[iopt] * 1e3, sndr[iopt], eno[iopt], sndr[0], sndr[-1],
               "PASS" if g_d else "FAIL"), flush=True)
 
+    # ---- GATE E: predistortion linearizes the compressed channel ----
+    from dynameta.optics.soa.metrics import (optimal_drive_power, pattern_penalty_dB,
+                                             predistort, sfdr_dB, thermal_drift_budget_K)
+    # a fine, well-conditioned transfer curve over the operating range (linear P_in spacing,
+    # away from the flat-saturation tail where inversion is ill-conditioned)
+    P_in_fine = np.linspace(2e-4, 1.0e-2, 80)
+    P_out_fine = np.array([P_out(p) for p in P_in_fine])
+    # request equally-spaced output levels; predistort finds the inputs that produce them
+    targets = np.linspace(P_out_fine[3], P_out_fine[-4], 9)
+    P_in_req = predistort(P_in_fine, P_out_fine, targets)
+    achieved = np.array([P_out(p) for p in P_in_req])
+    lin_resid = np.max(np.abs(achieved - targets)) / (targets[-1] - targets[0])
+    # vs the uncorrected (equally-spaced INPUT) ladder, whose output is compressed
+    P_in_lin = np.linspace(P_in_req[0], P_in_req[-1], 9)
+    out_uncorr = np.array([P_out(p) for p in P_in_lin])
+    fit = np.polyfit(np.arange(9), out_uncorr, 1)
+    uncorr_resid = np.max(np.abs(out_uncorr - np.polyval(fit, np.arange(9)))) / \
+        (out_uncorr[-1] - out_uncorr[0])
+    g_e = bool(lin_resid < 5e-3 and lin_resid < 0.1 * uncorr_resid)
+    ok = ok and g_e
+    print("[nm] GATE E: predistortion linearizes -- residual {:.2e} vs uncorrected {:.2e} "
+          "({:.0f}x better) -> {}".format(lin_resid, uncorr_resid,
+                                          uncorr_resid / max(lin_resid, 1e-12),
+                                          "PASS" if g_e else "FAIL"), flush=True)
+
+    # ---- GATE F: analysis helpers (optimal drive, SFDR, pattern penalty, thermal budget) ----
+    P0_opt, sndr_opt, enob_opt = optimal_drive_power(P_in, P_out_grid, noise_var, P0s,
+                                                     mod_index=0.3)
+    sfdr_at_opt = sfdr_dB(P_in, P_out_grid, P0_opt, noise_var(P_out(P0_opt)), mod_index=0.3)
+    pp = pattern_penalty_dB(np.array([1.00, 0.92, 0.97, 0.90]))   # example mark peaks
+    dT8 = thermal_drift_budget_K(8, 0.02)                        # 8-bit, 0.02 dB/K gain drift
+    dT4 = thermal_drift_budget_K(4, 0.02)
+    g_f = bool(abs(P0_opt - P0s[iopt]) < 1e-15 and sfdr_at_opt > 0.0 and pp > 0.0
+               and dT8 < dT4 and np.isfinite(dT8))
+    ok = ok and g_f
+    print("[nm] GATE F: helpers -- optimal drive {:.2f} mW (ENOB {:.1f}), SFDR {:.1f} dB, "
+          "pattern penalty {:.2f} dB, thermal budget dT8={:.3f}<dT4={:.3f} K -> {}".format(
+              P0_opt * 1e3, enob_opt, sfdr_at_opt, pp, dT8, dT4, "PASS" if g_f else "FAIL"),
+          flush=True)
+
     print("[nm] *** QD-SOA NOISE + METRICS: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
     return ok

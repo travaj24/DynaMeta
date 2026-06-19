@@ -204,16 +204,29 @@ datasheet as new work, not reused; see Section 8.1.)
    GATE D: combining the gain-compression distortion (transfer-curve curvature) with the ASE
    beat-noise floor, SNDR vs drive has an INTERIOR maximum (ENOB 6.7 at ~3.7 mW for the
    default device) -- the "window, not a wall." Symbol-stream ISI is covered dynamically by
-   the Phase-2 pattern/recovery gates; the predistortion hook (invert the static compression
-   curve) is a thin follow-on.]**
-5. **(Partly shipped) extras.** FWM / multi-λ: **SHIPPED 2026-06-11** -- the coherent
-   complex-envelope path `TravelingWaveSOA.amplify_coherent` (alpha_lef in QDGainParams) +
-   `validation/qd_soa_fwm_xgm.py` (5 gates): cross-gain modulation (-5 dB at 30 mW pump),
-   four-wave-mixing conjugate sidebands rolling off with detuning, and the
-   eta_FWM = (1 + alpha^2) carrier-density-pulsation law to 1.2%; alpha=0 single-tone reduces
-   to the verified power engine (1e-15). Still optional: SHB + carrier-heating ultrafast
-   coupling (TwoTempParams), spectral gain dispersion (per-tone gain for the up/down-
-   conversion asymmetry), thermal self-heating.
+   the Phase-2 pattern/recovery gates. The predistortion hook + analog helpers SHIPPED (see
+   below).]**
+5. **Extras -- SHIPPED 2026-06-11 (everything left over).**
+   - **FWM / multi-lambda + XGM:** the coherent complex-envelope path
+     `TravelingWaveSOA.amplify_coherent` (alpha_lef in QDGainParams) +
+     `validation/qd_soa_fwm_xgm.py` (6 gates): cross-gain modulation (-5 dB at 30 mW pump),
+     four-wave-mixing conjugate sidebands rolling off with detuning, the
+     eta_FWM = (1 + alpha^2) carrier-density-pulsation law to 1.2%, the up/down-conversion
+     asymmetry that is 0 at alpha=0 and grows with alpha (the index grating breaking
+     symmetry); alpha=0 single-tone reduces to the verified power engine (1e-15).
+   - **Ultrafast SHB + carrier heating:** `UltrafastCompression` folded into the engine +
+     `validation/qd_soa_ultrafast.py` (3 gates): off-switch byte-identical; extra nonlinear
+     gain compression beyond carrier-density saturation; the SHB+CH compression recovers
+     sub-ps (~tau_CH 0.68 ps) vs the ~6.6 ps carrier reservoir -- the two-timescale QD-SOA
+     gain dynamics. (Shares its time constant with carrier_heating.TwoTempParams; folded
+     phenomenologically, carriers still see the real photons.)
+   - **Analog helpers + thermal budget:** metrics.predistort (linearizes the compression
+     ~1500x), optimal_drive_power, sfdr_dB, pattern_penalty_dB, thermal_drift_budget_K
+     (dT_max for half-LSB predistortion stability, tighter with bits) +
+     `validation/qd_soa_noise_metrics.py` GATES E-F.
+   Remaining genuinely-optional refinement: spectral gain DISPERSION (per-tone gain via a
+   split-step-Fourier engine) would enlarge the up/down FWM asymmetry beyond the
+   carrier-density-pulsation contribution already captured here.
 
 ---
 

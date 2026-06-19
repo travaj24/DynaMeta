@@ -125,6 +125,29 @@ def main():
     print("[fx] GATE E: XGM probe-gain suppression {:.2f} dB (8 mW) -> {:.2f} dB (30 mW pump), "
           "grows with pump -> {}".format(xgm_lo, xgm_hi, "PASS" if g_e else "FAIL"), flush=True)
 
+    # ---- GATE F: FWM up/down-conversion asymmetry grows with alpha ----
+    # probe ABOVE vs BELOW the pump gives the SAME conjugate efficiency at alpha = 0 (the gain
+    # grating is symmetric) but DIFFERS once the index grating (alpha) breaks the symmetry --
+    # the carrier-density-pulsation up/down asymmetry.
+    def asym(alpha, fd=20e9):
+        e_up, _ = _conj_efficiency(soa, dt, fd, alpha)        # probe at +fd -> conj at -fd
+        # probe at -fd -> conj at +fd
+        nt = int(40 / fd / dt)
+        t = np.arange(nt) * dt
+        A = np.sqrt(4.0e-3) + np.sqrt(1.0e-4) * np.exp(-1j * 2.0 * np.pi * fd * t)
+        r = soa.amplify_coherent(A, drive=40.0e-3, alpha_lef=alpha)
+        y = r["A_out"][nt // 2:]
+        Y = np.abs(np.fft.fft(y * np.hanning(y.size))) ** 2
+        f = np.fft.fftfreq(y.size, dt)
+        e_dn = Y[int(np.argmin(np.abs(f - fd)))] / Y[int(np.argmin(np.abs(f + fd)))]
+        return abs(e_up - e_dn) / (e_up + e_dn)
+    asym0, asym_hi = asym(0.0), asym(4.0)
+    g_f = bool(asym0 < 1e-3 and asym_hi > 3e-3 and asym_hi > asym0)
+    ok = ok and g_f
+    print("[fx] GATE F: FWM up/down asymmetry alpha=0 {:.2e} (symmetric) -> alpha=4 {:.2e} "
+          "(index grating breaks symmetry) -> {}".format(asym0, asym_hi,
+                                                         "PASS" if g_f else "FAIL"), flush=True)
+
     print("[fx] *** QD-SOA FWM/XGM: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 
