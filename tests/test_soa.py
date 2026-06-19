@@ -224,6 +224,104 @@ def test_eh_gain_nsp_forms():
     assert abs(eh.gain_per_m_slices(st, eh.p.nu0_Hz)[0] - g_ref) / abs(g_ref) < 1e-12
 
 
+def test_selfheating_reduction_redshift_fixedpoint():
+    from dynameta.optics.soa import SelfHeating
+    P = QDGainParams(n_groups=11).with_detailed_balance_taus()
+    m_iso = QDGainModel(P)
+    y = m_iso.steady_state(40e-3)
+    nu = np.linspace(P.nu0_Hz - 4e12, P.nu0_Hz + 4e12, 1001)
+    g_iso = m_iso.material_gain_per_m(m_iso.rho_GS(y), nu)
+    # Rth=0 with nonzero coefficients -> isothermal byte-identical
+    m0 = QDGainModel(P, self_heating=SelfHeating(Rth_K_W=0.0, dnu0_dT_Hz_K=6e10,
+                                                 dg_dT_frac_per_K=-2e-3))
+    assert np.array_equal(g_iso, m0.material_gain_per_m(m_iso.rho_GS(y), nu))
+    # set_temperature red-shifts the peak by ~dnu0_dT*dT (within a group spacing)
+    sh = SelfHeating(Rth_K_W=300.0, dnu0_dT_Hz_K=6.2e10, dg_dT_frac_per_K=-1.5e-3)
+    m = QDGainModel(P, self_heating=sh)
+    rGS = m.rho_GS(m.steady_state(40e-3))
+    m.set_temperature(300.0)
+    p0 = nu[np.argmax(m.material_gain_per_m(rGS, nu))]
+    m.set_temperature(330.0)
+    pT = nu[np.argmax(m.material_gain_per_m(rGS, nu))]
+    assert abs((p0 - pT) - sh.dnu0_dT_Hz_K * 30.0) < (m._nu_j0[1] - m._nu_j0[0])
+    # self-consistent fixed point heats above ambient and the ENOB budget is finite/sane
+    g_ss, T_star, G_dB = m.steady_gain_self_consistent(50e-3, 1e-4, 0.6e-3)
+    assert T_star > sh.T0_K
+    from dynameta.optics.soa import thermal_drift_budget_K
+    assert thermal_drift_budget_K(8, m.dGdT_dB_per_K(50e-3, 1e-4, 0.6e-3, T_star)) > 0.0
+
+
+def test_selfheating_eh_es_numba_parity():
+    # the adversarially-found combination: fast=True + eh_split + ES + active self-heating must
+    # keep numpy/numba parity (gain emission AND stim depletion both scaled by gain_scale)
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    from dynameta.optics.soa import SelfHeating
+    if not _HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    P = QDGainParams(n_groups=21, eh_split=True, sigma_pk_ES_m2=3e-19).with_detailed_balance_taus()
+    sh = SelfHeating(Rth_K_W=300.0, dnu0_dT_Hz_K=6e10, dg_dT_frac_per_K=-2e-3)
+    a = QDGainModel(P, self_heating=sh)
+    b = QDGainModel(P, self_heating=sh, fast=True)
+    a.set_temperature(335.0)
+    b.set_temperature(335.0)                                  # gain_scale != 1
+    assert abs(a._gain_scale - 1.0) > 1e-3
+    st = a.init_slices(20, 40e-3)
+    Pl = np.full(20, 6e-3)
+    ra = a.step_slices(st, Pl, 1.4e-13, a.p.nu0_Hz, 40e-3)
+    rb = b.step_slices(st, Pl, 1.4e-13, a.p.nu0_Hz, 40e-3)
+    for x, y in zip(ra, rb):
+        assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
+
+
+def test_facet_gain_ripple_and_ceiling():
+    from dynameta.optics.soa import facet_gain_ripple_dB, ripple_enob_ceiling
+    # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~5.6-bit ENOB ceiling
+    r = facet_gain_ripple_dB(100.0, 1e-4)
+    assert abs(r - 0.174) < 5e-3
+    assert abs(ripple_enob_ceiling(r) - 5.63) < 0.1
+    assert facet_gain_ripple_dB(100.0, 0.0) == 0.0            # AR-coated traveling-wave limit
+    assert not np.isfinite(ripple_enob_ceiling(0.0))          # zero ripple -> no ENOB ceiling
+    with pytest.raises(ValueError):                           # above lasing threshold
+        facet_gain_ripple_dB(1e4, 1e-3)
+
+
+def test_es_band_reduction_and_gain():
+    # sigma_pk_ES=0 -> GS-only byte-identical; sigma_pk_ES>0 -> ES gain matches analytic ensemble
+    gs = QDGainModel(QDGainParams(n_groups=11).with_detailed_balance_taus())
+    y = gs.steady_state(30e-3)
+    nu = np.linspace(gs.p.nu0_Hz - 5e12, gs.p.nu0_Hz + 2e13, 30)
+    assert np.array_equal(gs.material_gain_per_m(gs.rho_GS(y), nu),
+                          gs.total_material_gain(gs.rho_ES(y), gs.rho_GS(y), nu))
+    es = QDGainModel(QDGainParams(n_groups=11, sigma_pk_ES_m2=3e-19).with_detailed_balance_taus())
+    from dynameta.constants import HBAR
+    nu_ES = es.p.nu0_Hz + es.p.dE_ES_GS_eV * 1.602176634e-19 / (2 * np.pi * HBAR)
+    ye = es.steady_state(40e-3)
+    rES = es.rho_ES(ye)
+    hwE = es._hw_ES
+    g_num = es.total_material_gain(rES, np.full(11, 0.5), nu_ES)
+    g_ref = float(np.sum(es.p.N_q_m3 * es.w_j * es.p.mu_ES * es.p.sigma_pk_ES_m2
+                         * hwE**2 / ((nu_ES - es.nu_ES_j)**2 + hwE**2) * (2 * rES - 1.0)))
+    assert abs(g_num - g_ref) / abs(g_ref) < 1e-12
+
+
+def test_es_numba_parity():
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    if not _HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    for kw in ({}, {"eh_split": True}):
+        a = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=3e-19, **kw)
+                        .with_detailed_balance_taus())
+        b = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=3e-19, **kw)
+                        .with_detailed_balance_taus(), fast=True)
+        nu_ES = a.nu_ES_j[a.ng // 2]
+        st = a.init_slices(20, 40e-3)
+        P = np.full(20, 5e-3)
+        ra = a.step_slices(st, P, 1.4e-13, nu_ES, 40e-3)
+        rb = b.step_slices(st, P, 1.4e-13, nu_ES, 40e-3)
+        for x, y in zip(ra, rb):
+            assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
+
+
 def test_eh_numba_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
