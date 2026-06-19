@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from dynameta.optics.soa import (QDGainModel, QDGainParams, TravelingWaveSOA,
-                                 TwoLevelSaturableGain, agrawal_olsson_output)
+                                 TwoLevelSaturableGain, UltrafastCompression,
+                                 agrawal_olsson_output)
 
 
 def test_params_validation():
@@ -104,3 +105,34 @@ def test_sndr_has_interior_optimum():
     sndr, eno, iopt = sndr_vs_drive(P_in, P_out, lambda Po: 1e-6,
                                     np.logspace(-4.5, -2.3, 24), mod_index=0.3)
     assert 0 < iopt < sndr.size - 1 and sndr[iopt] > sndr[0] and sndr[iopt] > sndr[-1]
+
+
+def test_ultrafast_off_switch_and_compression():
+    m = QDGainModel(QDGainParams(n_groups=1).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.6e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    P = np.full(1500, 5e-3)
+    base = soa.amplify(P, 40e-3)
+    off = soa.amplify(P, 40e-3, ultrafast=UltrafastCompression())          # eps=0
+    assert np.array_equal(base["P_out"], off["P_out"])                     # byte-identical
+    uf = UltrafastCompression(eps_shb_m3=8e-23, eps_ch_m3=1.2e-22)
+    on = soa.amplify(P, 40e-3, ultrafast=uf)
+    assert on["P_out"][-1] < base["P_out"][-1]                             # extra compression
+
+
+def test_predistortion_linearizes():
+    from dynameta.optics.soa import predistort
+    P_in = np.logspace(-5, -1, 300)
+    P_out = P_in * 1000.0 / (1.0 + P_in / 5e-3)                            # compressing curve
+    targets = np.linspace(P_out[20], P_out[-20], 9)
+    req = predistort(P_in, P_out, targets)
+    achieved = req * 1000.0 / (1.0 + req / 5e-3)
+    assert np.max(np.abs(achieved - targets)) / (targets[-1] - targets[0]) < 1e-2
+
+
+def test_thermal_budget_and_sfdr():
+    from dynameta.optics.soa import pattern_penalty_dB, sfdr_dB, thermal_drift_budget_K
+    assert thermal_drift_budget_K(8, 0.02) < thermal_drift_budget_K(4, 0.02)   # tighter w/ bits
+    assert pattern_penalty_dB([1.0, 0.9]) > 0.0
+    P_in = np.logspace(-5, -1, 300)
+    P_out = P_in * 1000.0 / (1.0 + P_in / 5e-3)
+    assert np.isfinite(sfdr_dB(P_in, P_out, 1e-3, 1e-9))

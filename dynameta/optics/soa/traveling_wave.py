@@ -36,7 +36,37 @@ from dynameta.constants import HBAR
 
 H_PLANCK = 2.0 * np.pi * HBAR
 
-__all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "agrawal_olsson_output"]
+__all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression",
+           "agrawal_olsson_output"]
+
+
+@dataclass
+class UltrafastCompression:
+    """Sub-picosecond nonlinear gain compression beyond the carrier-density dynamics: spectral
+    hole burning (SHB) and carrier heating (CH). Each suppresses the local gain by a depth
+    h_X that relaxes to eps_X * S_conf (the local confined photon density) with its own time
+    constant, so the gain seen by the field is g_eff = g (1 - h_SHB - h_CH):
+
+        dh_X/dt = (-h_X + eps_X S_conf) / tau_X .
+
+    SHB is the fastest (intradot carrier-carrier scattering, ~50-100 fs); CH is the electron-
+    phonon relaxation (~0.5-1 ps) and SHARES its time constant with the carrier-heating
+    (two-temperature) relaxation that carriers.carrier_heating.TwoTempParams models -- folded
+    here phenomenologically into the gain (it does NOT remove energy from the carrier
+    reservoir; the carriers still see the real photons via the rate equations). eps_X [m^3]
+    sets the compression depth; eps_X = 0 (default) disables the channel and the engine
+    reduces EXACTLY to the carrier-density-only result. `floor` caps the suppression so g_eff
+    stays physical under extreme drive. NB the SHB channel is only well-resolved when the
+    time step dt << tau_shb (use fine slices / a short section for sub-100 fs SHB studies)."""
+    eps_shb_m3: float = 0.0
+    tau_shb_s: float = 1.0e-13
+    eps_ch_m3: float = 0.0
+    tau_ch_s: float = 7.0e-13
+    floor: float = 0.05
+
+    @property
+    def active(self) -> bool:
+        return self.eps_shb_m3 > 0.0 or self.eps_ch_m3 > 0.0
 
 
 class TravelingWaveSOA:
@@ -61,10 +91,32 @@ class TravelingWaveSOA:
         if not self.nu_s > 0.0:
             raise ValueError("TravelingWaveSOA: a signal frequency nu_s_Hz is required")
 
+    # ---- optional ultrafast (SHB + CH) gain-compression layer ----
+    def _uf_init(self, ultrafast):
+        if ultrafast is None or not ultrafast.active:
+            return None
+        return {"uf": ultrafast, "h_shb": np.zeros(self.nz), "h_ch": np.zeros(self.nz),
+                "d_shb": float(np.exp(-self.dt / ultrafast.tau_shb_s)),
+                "d_ch": float(np.exp(-self.dt / ultrafast.tau_ch_s))}
+
+    def _uf_suppress(self, uf, g):
+        if uf is None:
+            return g
+        return g * np.clip(1.0 - uf["h_shb"] - uf["h_ch"], uf["uf"].floor, 1.0)
+
+    def _uf_relax(self, uf, P_mid_W, nu):
+        if uf is None:
+            return
+        S = self.model.photon_density(P_mid_W, nu)            # local confined photon density
+        uf["h_shb"] = uf["h_shb"] * uf["d_shb"] + uf["uf"].eps_shb_m3 * S * (1.0 - uf["d_shb"])
+        uf["h_ch"] = uf["h_ch"] * uf["d_ch"] + uf["uf"].eps_ch_m3 * S * (1.0 - uf["d_ch"])
+
     def amplify(self, P_in, drive, *, nu_s_Hz: float = None, state0=None,
-                return_traces: bool = False):
+                return_traces: bool = False, ultrafast=None):
         """Amplify the input power waveform P_in (1-D array sampled at this engine's dt) at
-        injection `drive`. Returns a dict: t [s], P_in, P_out [W], gain_dB, and (if
+        injection `drive`. `ultrafast` (an UltrafastCompression) adds the sub-ps SHB + carrier-
+        heating gain compression on top of the carrier-density dynamics (None -> off, the
+        carrier-density-only result). Returns a dict: t [s], P_in, P_out [W], gain_dB, and (if
         return_traces) the line-centre material gain per slice over time `g_zt` (nt, nz) and
         the carrier state. The amplifier starts in the unsaturated steady state at `drive`."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
@@ -74,24 +126,30 @@ class TravelingWaveSOA:
         nt = P_in.size
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
+        uf = self._uf_init(ultrafast)                         # ultrafast-compression state
         # the device field starts empty (Pnode = 0); the first nz steps fill it (a startup
         # transient one transit time long -- t = nz*dt -- before P_out is meaningful)
         Pnode = np.zeros(self.nz + 1)
         P_out = np.empty(nt)
         g_zt = np.empty((nt, self.nz)) if return_traces else None
+        h_uf = np.zeros(nt) if (return_traces and uf is not None) else None
         for n in range(nt):
             g = self.model.gain_per_m_slices(state, nu)       # (nz,) material gain
+            g = self._uf_suppress(uf, g)                      # SHB/CH gain compression (if on)
             amp = np.exp((gam * g - self.alpha_i) * self.dz)  # per-slice power amplification
             # method-of-characteristics shift: field at node k moves to node k+1, amplified
             new = np.empty_like(Pnode)
             new[0] = P_in[n]
             new[1:] = Pnode[:-1] * amp
             P_mid = 0.5 * (Pnode[:-1] + Pnode[1:])            # slice-average power this step
+            self._uf_relax(uf, P_mid, nu)                     # drive the compression by S_conf
             state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
             Pnode = new
             P_out[n] = Pnode[-1]
             if return_traces:
                 g_zt[n] = g
+                if uf is not None:
+                    h_uf[n] = float(np.mean(uf["h_shb"] + uf["h_ch"]))
         t = np.arange(nt) * self.dt
         # NOTE: gain_dB is the instantaneous P_out/P_in ratio; during transients P_out[n] is
         # the response to P_in[n - nz] (one transit earlier), so the ratio mixes wavefronts
@@ -103,10 +161,12 @@ class TravelingWaveSOA:
                "state": state}
         if return_traces:
             out["g_zt"] = g_zt
+            if h_uf is not None:
+                out["h_uf"] = h_uf                            # SHB+CH compression depth vs t
         return out
 
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
-                         state0=None):
+                         state0=None, ultrafast=None):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -128,15 +188,17 @@ class TravelingWaveSOA:
         nt = A_in.size
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
+        uf = self._uf_init(ultrafast)
         Anode = np.zeros(self.nz + 1, dtype=np.complex128)
         A_out = np.empty(nt, dtype=np.complex128)
         for n in range(nt):
-            g = self.model.gain_per_m_slices(state, nu)
+            g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
             amp = np.exp(0.5 * (gam * g * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
             new = np.empty_like(Anode)
             new[0] = A_in[n]
             new[1:] = Anode[:-1] * amp
             P_mid = 0.5 * (np.abs(Anode[:-1]) ** 2 + np.abs(Anode[1:]) ** 2)
+            self._uf_relax(uf, P_mid, nu)
             state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
             Anode = new
             A_out[n] = Anode[-1]
