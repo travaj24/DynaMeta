@@ -1101,6 +1101,38 @@ class QDGainModel:
             em = rho * rho                                    # rho_GS^2  (nz, ng)
         return self._gain_scale * self._gain_pref * np.sum(em * wl[None, :], axis=1)
 
+    def gain_per_m_thermal(self, state, nu_Hz, T_z) -> np.ndarray:
+        """Per-slice GS gain g(nu_s) [1/m] at a SPATIALLY-RESOLVED temperature profile T_z (n_slices):
+        each slice's comb is red-shifted by dnu0_dT (T_z - T0) and the gain scaled by 1 + dg_dT_frac
+        (T_z - T0) -- the per-slice generalization of the lumped set_temperature. Reduces to
+        gain_per_m_slices when T_z == the nominal T0 (GS-only, sigma_pk_ES=0), and to the lumped
+        set_temperature(T) gain when T_z is uniform. A reduced 1-D fin (optics.soa.thermal) OR the
+        thermal FEM (carriers.thermal_fem, sampled via sample_T_along_axis) supplies T_z through this
+        interface. Requires self_heating (the dnu0_dT / dg_dT_frac coefficients).
+
+        Scope / preconditions:
+          - GS band only. The ES thermal coupling is a refinement; this method RAISES if the ES band is
+            active (sigma_pk_ES > 0) rather than silently dropping it.
+          - MUTUALLY EXCLUSIVE with the lumped set_temperature(): this method reads the COLD comb
+            _nu_j0 and computes its own per-slice scale, deliberately ignoring any set_temperature()
+            state (so it never double-counts). Consequently the Gate-D identity
+            gain_per_m_thermal(., ., T0) == gain_per_m_slices holds only on a model whose
+            set_temperature() has NOT been engaged (self._gain_scale == 1). Do not mix the two thermal
+            representations on one model instance -- pick the lumped single-T path or this per-slice
+            path, not both."""
+        if self.sh is None:
+            raise ValueError("gain_per_m_thermal requires a SelfHeating (the dnu0_dT/dg_dT_frac coeffs)")
+        if self._es_active:
+            raise ValueError("gain_per_m_thermal is GS-only; the ES band (sigma_pk_ES>0) would be "
+                             "silently dropped -- disable ES or extend the thermal coupling to ES")
+        p, sh = self.p, self.sh
+        dT = np.atleast_1d(np.asarray(T_z, dtype=np.float64)) - sh.T0_K       # (nz,)
+        scale = np.clip(1.0 + sh.dg_dT_frac_per_K * dT, 0.0, None)            # (nz,) per-slice scale
+        nu_j_z = self._nu_j0[None, :] - sh.dnu0_dT_Hz_K * dT[:, None]         # (nz, ng) shifted comb
+        L = self._lorentzian(float(nu_Hz) - nu_j_z)                          # (nz, ng)
+        inv = self._gs_inversion(state)                                      # (nz, ng)
+        return scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * np.sum(inv * L * self.w_j[None, :], axis=1)
+
     def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
         """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
         term of the Maxwell-Bloch polarization ADE used by the spectral-dispersion path of
