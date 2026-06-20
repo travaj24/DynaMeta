@@ -205,9 +205,10 @@ class TravelingWaveSOA:
                 "pol": np.zeros((self.nz, nu_j.size), dtype=np.complex128)}
 
     # ---- optional background group-velocity-dispersion (GVD) layer ----
-    def _gvd_halfstep(self, beta2_s2_per_m: float, n_samples: int):
-        """Half-length GVD spectral phase exp(+0.5j beta2 omega^2 (L/2)) on the full retarded-time
-        waveform (n_samples sampled at dt). Background (waveguide + material) group-velocity
+    def _gvd_phase(self, beta2_s2_per_m: float, n_samples: int, length_m: float):
+        """GVD spectral phase exp(+0.5j beta2 omega^2 length) over a propagation distance length_m on
+        the full retarded-time waveform (n_samples sampled at dt). Background (waveguide + material)
+        group-velocity
         dispersion adds
             dA/dz = -(i beta2 / 2) d2A/dT2     (retarded time T = t - z/v_g, exp(-i omega t)),
         so a baseband tone exp(-i 2 pi f t) (at optical nu_s + f) picks up the residual dispersive
@@ -215,29 +216,30 @@ class TravelingWaveSOA:
         delay (beta1, already carried EXACTLY by the dt = dz/v_g advection) removed; beta2 is the
         curvature d2 beta/d omega^2.
 
-        GVD is applied as a symmetric (Strang) split at the DEVICE scale -- D(L/2) before the
-        nonlinear streaming marcher and D(L/2) after -- so the carriers see the half-dispersed field
-        and the output carries the full L of dispersion. D operates on the WHOLE waveform (the true
-        retarded-time signal): FFT over the n_samples, multiply each angular-frequency bin
-        omega = 2 pi fftfreq(n_samples, dt) by exp(+0.5j beta2 omega^2 (L/2)), iFFT. This is EXACT
-        in the linear / passive limit (per-tone phase, pulse broadening, chirp -- where D and the
-        marcher commute). When beta2 AND gain are BOTH active it is an UNCONTROLLED (single step at
-        fixed L, no z-refinement knob) approximation of the distributed dispersion-gain coupling: the
-        leading-order dispersive phase the carriers and the output see is captured, but the z-resolved
-        running phase-matching of FWM and in-device pulse reshaping are NOT (a sub-sectioned split
-        would be the controlled refinement). The spectral phase is UNITARY (|.| = 1) so D is loss-free
-        and unconditionally stable; beta2 is EVEN in omega so the FFT sign convention is immaterial
-        (a future odd beta3 term would not be). This is the BROADBAND background index, kept distinct
-        from the resonant gain-line dispersion of the line filter. NB the spatial node array could NOT
-        be dispersed per-step: it is a snapshot along z, not a fixed retarded-time window, so
-        dispersing the shifting window injects a boundary discontinuity and leaks energy -- the
-        device-scale split avoids this entirely."""
+        GVD is applied as a symmetric (Strang) split. With gvd_segments = 1 it is a single
+        DEVICE-scale split -- D(L/2) before the nonlinear streaming marcher and D(L/2) after -- so the
+        carriers see the half-dispersed field and the output carries the full L of dispersion; EXACT
+        in the linear / passive limit (per-tone phase, broadening, chirp -- where D and the marcher
+        commute) but an UNCONTROLLED approximation of the distributed dispersion-gain coupling when
+        beta2 AND a saturating gain are both active. With gvd_segments = S > 1 the device is split
+        into S sub-sections [D(L/2S) . N(L/S) . D(L/S) . ... . N(L/S) . D(L/2S)], interleaving
+        dispersion and gain S times -- a CONTROLLED 2nd-order (Strang) refinement whose splitting
+        error falls as O(1/S^2) to the true distributed coupling (qd_soa_gvd_distributed.py measures
+        the 2nd-order rate). D operates on the WHOLE waveform (the true retarded-time signal): FFT
+        over n_samples, multiply each angular-frequency bin omega = 2 pi fftfreq(n_samples, dt) by
+        exp(+0.5j beta2 omega^2 length), iFFT. The spectral phase is UNITARY (|.| = 1) so D is
+        loss-free and unconditionally stable; beta2 is EVEN in omega so the FFT sign convention is
+        immaterial (a future odd beta3 term would not be). This is the BROADBAND background index,
+        kept distinct from the resonant gain-line dispersion of the line filter. NB the spatial node
+        array could NOT be dispersed per-step: it is a snapshot along z, not a fixed retarded-time
+        window, so dispersing the shifting window injects a boundary discontinuity and leaks energy --
+        the device-/segment-scale split on the full waveform avoids this entirely."""
         omega = 2.0 * np.pi * np.fft.fftfreq(int(n_samples), d=self.dt)   # baseband ang. freq [rad/s]
-        return np.exp(0.5j * float(beta2_s2_per_m) * omega * omega * (0.5 * self.L))
+        return np.exp(0.5j * float(beta2_s2_per_m) * omega * omega * float(length_m))
 
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
                          state0=None, ultrafast=None, line_filter: bool = False,
-                         beta2_s2_per_m: float = None):
+                         beta2_s2_per_m: float = None, gvd_segments: int = 1):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -260,14 +262,17 @@ class TravelingWaveSOA:
 
         beta2_s2_per_m (default None -> model.beta2_s2_per_m or 0): background group-velocity
         dispersion d2 beta/d omega^2 [s^2/m]. When nonzero each tone at nu_s + f accumulates the
-        broadband dispersive phase exp(+i (beta2/2)(2 pi f)^2 L), applied as a symmetric device-scale
-        split D(L/2) . marcher . D(L/2) with the exact unitary spectral operator (see _gvd_halfstep)
-        -- pulse broadening/chirp and the leading-order dispersive phase the gain sees. EXACT in the
-        linear / passive limit; when beta2 and gain are both active it is an uncontrolled (single
-        step, no z-refinement) approximation of the distributed coupling -- the z-resolved running
-        FWM phase-matching is NOT captured. 0 (the default) leaves the field branch byte-identical.
-        This is the NON-resonant waveguide index, distinct from the resonant gain-line dispersion
-        (line_filter).
+        broadband dispersive phase exp(+i (beta2/2)(2 pi f)^2 L), applied as a symmetric Strang split
+        with the exact unitary spectral operator (see _gvd_phase) -- pulse broadening/chirp on top of
+        the gain. 0 (the default) leaves the field branch byte-identical. This is the NON-resonant
+        waveguide index, distinct from the resonant gain-line dispersion (line_filter).
+
+        gvd_segments (default 1): number of dispersion-gain interleaving sub-sections. 1 = a single
+        device-scale split D(L/2).marcher.D(L/2) -- EXACT in the linear / passive limit, but an
+        uncontrolled approximation of the distributed coupling when beta2 and a saturating gain are
+        both active. S > 1 splits the device into S streaming sub-marchers with dispersion between
+        them, a CONTROLLED 2nd-order (Strang) refinement converging as O(1/S^2) to the true
+        distributed coupling (must divide n_slices). Ignored when beta2 = 0.
 
         Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
         frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
@@ -279,6 +284,10 @@ class TravelingWaveSOA:
         A_in = np.asarray(A_in, dtype=np.complex128)
         if A_in.ndim != 1 or A_in.size < 2:
             raise ValueError("amplify_coherent: A_in must be a 1-D complex waveform >= 2 samples")
+        if beta2 != 0.0 and int(gvd_segments) > 1:
+            return self._amplify_coherent_segmented(
+                A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha,
+                ultrafast=ultrafast, line_filter=line_filter)
         nt = A_in.size
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
@@ -294,7 +303,7 @@ class TravelingWaveSOA:
         # retarded-time window, so dispersing the shifting window leaks energy.)
         A_in_orig = A_in
         if beta2 != 0.0:
-            half = self._gvd_halfstep(beta2, nt)
+            half = self._gvd_phase(beta2, nt, 0.5 * self.L)
             A_in = np.fft.ifft(np.fft.fft(A_in) * half)
         Anode = np.zeros(self.nz + 1, dtype=np.complex128)
         A_out = np.empty(nt, dtype=np.complex128)
@@ -331,6 +340,50 @@ class TravelingWaveSOA:
         t = np.arange(nt) * self.dt
         return {"t": t, "A_in": A_in_orig, "A_out": A_out, "P_in": np.abs(A_in_orig) ** 2,
                 "P_out": np.abs(A_out) ** 2, "dt": self.dt, "state": state}
+
+    def _amplify_coherent_segmented(self, A_in, drive, segments, beta2, *, nu_s_Hz, alpha_lef,
+                                    ultrafast, line_filter):
+        """Distributed GVD: the symmetric Strang split refined to S sub-sections that interleave
+        dispersion and gain S times instead of lumping all the dispersion at the two device ends:
+
+            D(L/2S) . N(L/S) . D(L/S) . N(L/S) . ... . N(L/S) . D(L/2S)   (S blocks of N).
+
+        Each N(L/S) is a full streaming sub-marcher over the length L/S (its own slices + fresh
+        carriers, so segment k's gain saturates on the field that has already crossed segments
+        0..k-1 -- this is the real distributed coupling); D is the exact unitary spectral phase on
+        the full waveform (no internal beta2 in the sub-marchers). The dt = dz/v_g is preserved
+        (dz = (L/S)/(nz/S) = L/nz), so the dispersion grid is unchanged. The splitting error falls as
+        O(1/S^2) (2nd-order Strang) to the true distributed limit, EXACT for any S in the linear /
+        passive limit (D commutes with the gain-free delay). Total dispersion = L/2S + (S-1)L/S +
+        L/2S = L. Returns the same dict as amplify_coherent (state is the LAST segment's carriers).
+
+        CAVEAT (S-dependent startup): each sub-marcher re-pays its own nz/S-sample device-fill
+        transient, so unlike the monolithic engine's single clean nz-sample fill the LEADING ~nz
+        samples of A_out are an S-DEPENDENT superposition of S separate startup ramps plus
+        segment-boundary zeros. Only the steady tail A_out[nz:] (after the full nz-sample transit) is
+        physical -- window past the first nz samples, exactly as for the monolithic amplify()/
+        amplify_coherent() (whose gain_dB is likewise meaningful only at CW steady state)."""
+        if int(segments) < 1 or self.nz % int(segments) != 0:
+            raise ValueError("amplify_coherent(gvd_segments=S): S must be >= 1 and divide n_slices "
+                             "({} % {} != 0)".format(self.nz, int(segments)))
+        S = int(segments)
+        nt = A_in.size
+        h = self.L / S
+        sub = TravelingWaveSOA(self.model, h, self.nz // S, alpha_i_per_m=self.alpha_i,
+                               nu_s_Hz=self.nu_s)
+        D_full = self._gvd_phase(beta2, nt, h)                # interior segment-to-segment D(L/S)
+        D_half = self._gvd_phase(beta2, nt, 0.5 * h)          # the two end half-steps D(L/2S)
+        field = np.fft.ifft(np.fft.fft(A_in) * D_half)
+        state = None
+        for k in range(S):
+            r = sub.amplify_coherent(field, drive, nu_s_Hz=nu_s_Hz, alpha_lef=alpha_lef,
+                                     ultrafast=ultrafast, line_filter=line_filter,
+                                     beta2_s2_per_m=0.0)
+            field, state = r["A_out"], r["state"]
+            field = np.fft.ifft(np.fft.fft(field) * (D_half if k == S - 1 else D_full))
+        t = np.arange(nt) * self.dt
+        return {"t": t, "A_in": A_in, "A_out": field, "P_in": np.abs(A_in) ** 2,
+                "P_out": np.abs(field) ** 2, "dt": self.dt, "state": state}
 
     def steady_gain_dB(self, P_cw_W: float, drive, *, nu_s_Hz: float = None,
                        settle_lifetimes: float = 30.0, tol_dB: float = 1e-3) -> float:

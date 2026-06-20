@@ -316,6 +316,23 @@ datasheet as new work, not reused; see Section 8.1.)
      disclose the uncontrolled-coupling limit. GVD was the last explicitly-deferred item -- the
      gain-leg model now spans every physics axis in this spec.
 
+   --- Deeper-realism upgrades (owner-requested, replacing the phenomenological/lumped reductions
+   with controlled ones; each opt-in, default-off, oracle-validated) ---
+   - **Distributed GVD (multi-segment split-step) -- SHIPPED 2026-06-19** (`amplify_coherent(
+     gvd_segments=S)` + `validation/qd_soa_gvd_distributed.py`, 5 gates). Redeems the GVD
+     uncontrolled-coupling caveat above: S sub-sections interleave dispersion and gain S times
+     [D(L/2S) . N(L/S) . D(L/S) . ... . N(L/S) . D(L/2S)], each N a full streaming sub-marcher with
+     its own z-pinned carriers, so the distributed coupling the single endpoint split (S=1) only
+     approximated is now CONTROLLED. Gates: gvd_segments=1 == the single split (byte-identical);
+     gain-free S-invariant (9.5e-16) + NLSE broadening (1.6e-16); 2nd-order Strang convergence,
+     successive-difference ratios plateau at 4.00 out to S=128 (the testable order claim that
+     replaces the earlier bare "2nd order" assertion); the distributed coupling is REAL -- in a
+     strong regime S=1 differs from the converged result by 4.6% while the high-S tail is Cauchy
+     (7e-5); passivity/energy conserved for every S. Adversarial pass (fix-then-ship): composition
+     verified correct (dispersion sums to L, no double-count, dz invariant, fresh per-segment
+     carriers physically right); the one fix was documenting that the segmented path's leading nz
+     samples are an S-dependent multi-fill transient (only the steady tail A_out[nz:] is physical).
+
 ---
 
 ## 6. Governing equations (reference)

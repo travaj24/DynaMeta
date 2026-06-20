@@ -205,6 +205,27 @@ def test_gvd_broadens_gaussian_per_nlse():
     assert abs((np.abs(out) ** 2).sum() - (np.abs(A) ** 2).sum()) / (np.abs(A) ** 2).sum() < 1e-9
 
 
+def test_gvd_segments_reduction_and_guard():
+    # gvd_segments=1 == the single device-scale split; gain-free is S-invariant; bad S raises
+    tl = TwoLevelSaturableGain(g0_per_m=0.0, tau_c_s=1e-9, E_sat_J=1e-12)
+    L, nz = 1.0e-3, 128
+    soa = TravelingWaveSOA(tl, L, nz)
+    nt = 3 * nz
+    t = np.arange(nt) * soa.dt
+    T0 = nz * soa.dt / 16.0
+    beta2 = T0 * T0 / L
+    A = np.exp(-((t - (nt // 2) * soa.dt) ** 2) / (2 * T0 * T0)) + 0j
+    base = soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2)["A_out"]
+    s1 = soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2, gvd_segments=1)["A_out"]
+    s4 = soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2, gvd_segments=4)["A_out"]
+    assert np.array_equal(base, s1)                           # S=1 == single split
+    # gain-free: dispersion commutes with the delay -> S-invariant up to the causal device-fill
+    # truncation at segment boundaries (machine in a well-contained window; see the validation)
+    assert np.max(np.abs(s4 - s1)) < 1e-6
+    with pytest.raises(ValueError):
+        soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2, gvd_segments=7)   # 7 does not divide 128
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
