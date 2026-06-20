@@ -339,6 +339,24 @@ def test_langevin_reduction_and_statistics():
     assert abs(np.mean(Ii ** 2) / np.mean(Ii) ** 2 - 2.0) < 0.15     # complex-Gaussian ASE intensity
 
 
+def test_transport_reduction_and_profile():
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    nt = 3000
+    P = np.full(nt, 1e-5)
+    base = soa.amplify(P, 40e-3)["P_out"]
+    assert np.array_equal(soa.amplify(P, 40e-3, transport_tau_s=0.0)["P_out"], base)   # tau=0 == lumped
+    assert np.array_equal(soa.amplify(P, np.full(40, 40e-3))["P_out"], base)           # uniform prof == scalar
+    # transport leaves DC gain invariant
+    g0 = soa.amplify(P, 40e-3, transport_tau_s=0.0, return_traces=True)["g_zt"][-1, 20]
+    gt = soa.amplify(P, 40e-3, transport_tau_s=300e-12, return_traces=True)["g_zt"][-1, 20]
+    assert abs(gt - g0) / abs(g0) < 1e-6
+    # DD injection profile -> non-uniform gain
+    st = soa.amplify(np.full(1500, 1e-5), np.linspace(20e-3, 60e-3, 40))["state"]
+    gz = m.gain_per_m_slices(st, m.p.nu0_Hz)
+    assert np.all(np.diff(gz) > 0)                                    # follows the ramp
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:

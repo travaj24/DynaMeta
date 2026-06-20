@@ -1047,19 +1047,33 @@ class QDGainModel:
         return p.Gamma * np.asarray(P_W, dtype=np.float64) / (
             p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2)
 
-    def init_slices(self, n_slices: int, I_A: float):
-        """Per-slice carrier state initialized to the unsaturated steady state at injection I
-        (uniform along z). Excitonic: (N_w, rho_ES, rho_GS); e/h split: (N_w_e, N_w_h, f_c_ES,
-        f_v_ES, f_c_GS, f_v_GS)."""
-        y = self.steady_state(float(I_A))
+    def init_slices(self, n_slices: int, I_A):
+        """Per-slice carrier state initialized to the unsaturated steady state at injection I.
+        Excitonic: (N_w, rho_ES, rho_GS); e/h split: (N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS).
+        I_A scalar -> uniform along z (byte-identical). I_A as a (n_slices,) array is a NON-UNIFORM
+        injection PROFILE I(z) (e.g. from a drift-diffusion / DEVSIM solve, or current crowding) --
+        each slice is seeded at its OWN local steady state (rhs_fields already accepts a per-slice
+        I_A, so the marcher carries the profile through the dynamics)."""
         nz = int(n_slices)
+        Iarr = np.asarray(I_A, dtype=np.float64)
+        if Iarr.ndim == 0:                                    # uniform (the original path)
+            y = self.steady_state(float(Iarr))
+            if self.eh:
+                return (np.full(nz, y[0]), np.full(nz, y[1]),
+                        np.tile(self.f_c_ES(y), (nz, 1)), np.tile(self.f_v_ES(y), (nz, 1)),
+                        np.tile(self.f_c_GS(y), (nz, 1)), np.tile(self.f_v_GS(y), (nz, 1)))
+            return (np.full(nz, y[0]), np.tile(self.rho_ES(y), (nz, 1)),
+                    np.tile(self.rho_GS(y), (nz, 1)))
+        if Iarr.size != nz:
+            raise ValueError("init_slices: injection profile I_A must be scalar or length n_slices")
+        ys = [self.steady_state(float(ii)) for ii in Iarr]    # per-slice local steady state
         if self.eh:
-            return (np.full(nz, y[0]), np.full(nz, y[1]),
-                    np.tile(self.f_c_ES(y), (nz, 1)), np.tile(self.f_v_ES(y), (nz, 1)),
-                    np.tile(self.f_c_GS(y), (nz, 1)), np.tile(self.f_v_GS(y), (nz, 1)))
-        return (np.full(nz, y[0]),
-                np.tile(self.rho_ES(y), (nz, 1)),
-                np.tile(self.rho_GS(y), (nz, 1)))
+            return (np.array([y[0] for y in ys]), np.array([y[1] for y in ys]),
+                    np.array([self.f_c_ES(y) for y in ys]), np.array([self.f_v_ES(y) for y in ys]),
+                    np.array([self.f_c_GS(y) for y in ys]), np.array([self.f_v_GS(y) for y in ys]))
+        return (np.array([y[0] for y in ys]),
+                np.array([self.rho_ES(y) for y in ys]),
+                np.array([self.rho_GS(y) for y in ys]))
 
     def gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
         """Material intensity gain g(nu) [1/m] per slice = GS band + (if sigma_pk_ES>0) the ES
