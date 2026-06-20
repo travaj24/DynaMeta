@@ -549,6 +549,24 @@ datasheet as new work, not reused; see Section 8.1.)
      a ridge/buried-hetero guided mode); a STANDALONE saturable-gain BPM (does NOT couple the QD rate
      equations into 2-D -- the filamentation/beam-quality axis, not the full QD physics in 2-D).
 
+   --- Tier-3 depth refinements (deepening existing axes, not new regimes) ---
+
+   - **ES-band thermal coupling -- SHIPPED 2026-06-20** (`QDGainModel.gain_per_m_thermal`;
+     `validation/qd_soa_thermal_profile.py` GATE F). The per-slice thermal gain now INCLUDES the ES band
+     (same red-shift + scale on the blue-shifted ES comb) when active (`sigma_pk_ES>0`) instead of
+     raising. Reduces to `gain_per_m_slices` at T0 (0.0, incl ES) and to `set_temperature` for uniform T
+     (0.0); ES band verified present.
+   - **Transient 1-D thermal T(z,t) -- SHIPPED 2026-06-20** (`thermal.thermal_profile_transient_1d`;
+     GATE G). Implicit-Euler march of `C' dT/dt = kappaA T'' - (T-T0)/Rth' + q(z)` (`C'` = per-length
+     heat capacity, `tau_th = C' Rth'`). Reduces to `thermal_profile_steady_1d` as t->inf (7.8e-11 K);
+     the lumped limit is the RC charge-up `T0 + q Rth'(1-exp(-t/tau_th))` (rel 9e-4).
+   - **2-D thermal lensing in the BPM -- SHIPPED 2026-06-20** (`TransverseBPM.propagate(T_profile_x=,
+     dndt_per_K=)`; `validation/qd_soa_transverse_bpm.py` GATE F). A transverse T(x) imposes the
+     thermo-optic index lens `delta_n(x) = dndt (T(x) - mean T)`, a per-step phase `exp(i k0 delta_n
+     dz)`. dndt=0 byte-identical; a linear T ramp STEERS the beam by the exact prism `<kx> = k0 dndt b L`
+     (Fourier-shift, rel 7e-14, energy-conserving); a hot-centred T(x) with dndt>0 FOCUSES (thermal
+     lens), dndt<0 defocuses.
+
 ---
 
 ## 6. Governing equations (reference)

@@ -62,6 +62,7 @@ class TransverseBPM:
         self.x = (np.arange(self.nx) - self.nx // 2) * self.dx
         self.kx = 2.0 * np.pi * np.fft.fftfreq(self.nx, d=self.dx)
         self.k = 2.0 * np.pi * float(n0) / float(lambda0_m)        # medium wavenumber
+        self.k0 = 2.0 * np.pi / float(lambda0_m)                   # vacuum wavenumber (index lens)
         self.n0 = float(n0)
         self.g0 = float(g0_per_m)
         self.gam = float(gamma_confinement)
@@ -97,20 +98,36 @@ class TransverseBPM:
         arg = np.clip(arg.real, None, 100.0) + 1j * arg.imag  # overflow guard (unsaturated ceiling)
         return A * np.exp(arg)
 
-    def propagate(self, A_in_x, Lz_m, nz, *, return_profile=False):
+    def propagate(self, A_in_x, Lz_m, nz, *, return_profile=False, T_profile_x=None,
+                  dndt_per_K=0.0):
         """March the input transverse field A_in_x (nx,) over length Lz_m in nz steps. Returns a dict:
         x [m], A_out (nx,), I_out=|A_out|^2; with return_profile, also I_xz (nz+1, nx) the intensity
-        at each z-plane and g_out the final-plane gain g(x)."""
+        at each z-plane and g_out the final-plane gain g(x).
+
+        THERMAL LENSING (2-D thermo-optic): pass a transverse temperature profile T_profile_x (nx,) and
+        dndt_per_K to impose the carrier/heat index lens delta_n(x) = dndt (T(x) - mean T), a per-step
+        real phase exp(i k0 delta_n dz) (k0 the VACUUM wavenumber; the x-mean is an irrelevant global
+        phase). A hot-centred T(x) with dndt > 0 -> higher on-axis index -> converging THERMAL LENS
+        (self-focusing); dndt < 0 -> defocusing; a linear T(x) ramp steers the beam (a prism). None /
+        dndt = 0 -> byte-identical (no lens). Phase-only, so it is energy-conserving."""
         A = np.asarray(A_in_x, dtype=np.complex128).copy()
         if A.shape != (self.nx,):
             raise ValueError("propagate: A_in_x must have shape (nx,)")
         dz = float(Lz_m) / int(nz)
+        lens = None                                          # per-step thermal-lens phase rate [rad/m]
+        if T_profile_x is not None and dndt_per_K != 0.0:
+            Tx = np.asarray(T_profile_x, dtype=np.float64)
+            if Tx.shape != (self.nx,):
+                raise ValueError("propagate: T_profile_x must have shape (nx,)")
+            lens = self.k0 * float(dndt_per_K) * (Tx - Tx.mean())
         prof = np.empty((int(nz) + 1, self.nx)) if return_profile else None
         if return_profile:
             prof[0] = np.abs(A) ** 2
         for n in range(int(nz)):
             A = self._diffract(A, 0.5 * dz)
             A = self._gain(A, dz)
+            if lens is not None:                             # thermo-optic index lens (real phase)
+                A = A * np.exp(1j * lens * dz)
             A = self._diffract(A, 0.5 * dz)
             if return_profile:
                 prof[n + 1] = np.abs(A) ** 2
