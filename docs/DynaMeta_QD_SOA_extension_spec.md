@@ -528,6 +528,27 @@ datasheet as new work, not reused; see Section 8.1.)
      amplitude-phase coupling DIRECTION (Gate E, a seed-averaged direction check), not the clamped-gain
      cavity-narrowing magnitude. +1 pytest (42 total).
 
+   - **Transverse 2-D gain-coupled BPM (filamentation) -- SHIPPED 2026-06-20** (`optics/soa/
+     transverse_bpm.py`: `TransverseBPM`; `validation/qd_soa_transverse_bpm.py`, 5 gates). The lateral
+     axis the 1-D engine lumps into Gamma/A_mode: a split-step Fresnel BPM `dA/dz = (i/2k) d2A/dx2 +
+     0.5(Gamma g(x)(1-i alpha) - alpha_i) A` with a saturable gain `g = g0/(1 + S_eff/Isat)` and lateral
+     carrier diffusion (the steady ambipolar Green's function `S_eff_k = |A|^2_k/(1+(L_diff k_x)^2)`,
+     `L_diff = sqrt(D tau)`), marched by the symmetric Strang split D(dz/2).N(dz).D(dz/2) with a
+     MIDPOINT-corrected gain leg so the whole split is genuinely 2nd-order (verified ratio 4.0; exact
+     unitary spectral diffraction). Resolves diffraction, gain guiding, transverse spatial hole burning,
+     and alpha-driven self-focusing / FILAMENTATION. Gates: uniform beam == the 1-D saturable-gain ODE
+     (rel 8.5e-9) + small-signal exact (8e-14) + flat stays flat; pure diffraction == the analytic
+     Gaussian `w(z)=w0 sqrt(1+(z/zR)^2)` (rel 2.4e-15) + unitary energy (1.0000000); SELF-FOCUSING
+     direction (a bright Gaussian is narrower at alpha=+3, broader at alpha=-3); broad-beam FILAMENTATION
+     -- the grid-invariant filament-band (5..40 um) AMPLIFICATION is 6.25x at alpha=4 vs 0.50 (decaying)
+     at alpha=0, and lateral diffusion SUPPRESSES it (6.25 -> 2.81 at L_diff=6 um); carrier-diffusion SHB
+     smoothing (gain-hole contrast monotone down in L_diff). +1 pytest (43 total).
+     SCOPE (honest): a CW STEADY 2-D (x-z) model -- NO z-t time dynamics; the carrier is ADIABATICALLY
+     eliminated into the saturable gain with lateral diffusion as the steady Green's function (NOT a
+     time-dependent 2-D carrier drift-diffusion); paraxial Fresnel; PERIODIC (FFT) lateral boundary (not
+     a ridge/buried-hetero guided mode); a STANDALONE saturable-gain BPM (does NOT couple the QD rate
+     equations into 2-D -- the filamentation/beam-quality axis, not the full QD physics in 2-D).
+
 ---
 
 ## 6. Governing equations (reference)
