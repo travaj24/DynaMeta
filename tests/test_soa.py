@@ -357,6 +357,45 @@ def test_transport_reduction_and_profile():
     assert np.all(np.diff(gz) > 0)                                    # follows the ramp
 
 
+def test_thermal_profile_reduction_and_coupling():
+    from dynameta.optics.soa import (SelfHeating, dome_analytic, sample_T_along_axis,
+                                     thermal_profile_steady_1d)
+    nz, L, T0, Rp, kA = 40, 1e-3, 300.0, 5e-4, 2e-5
+    dz = L / nz
+    q = np.full(nz, 2e4)
+    # kappaA=0, insulated -> lumped T = T0 + q Rth' per slice
+    Tl = thermal_profile_steady_1d(q, dz, 0.0, Rp, T0, ends="insulated")
+    assert np.max(np.abs(Tl - (T0 + q * Rp))) < 1e-9
+    # sunk-facet dome == analytic cosh (node grid)
+    dzn = L / (nz - 1)
+    zn = np.arange(nz) * dzn
+    Tn = thermal_profile_steady_1d(q, dzn, kA, Rp, T0, ends="sunk")
+    assert np.max(np.abs(Tn - dome_analytic(q[0], L, kA, Rp, T0, zn))) / (Tn.max() - T0) < 1e-2
+    # per-slice gain coupling: T0 -> exact reduction; hot T(z) -> lower local gain
+    sh = SelfHeating(Rth_K_W=50.0, dnu0_dT_Hz_K=20e9, dg_dT_frac_per_K=-0.01, T0_K=T0)
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus(), self_heating=sh)
+    st = m.init_slices(nz, 40e-3)
+    nu0 = m.p.nu0_Hz
+    assert np.array_equal(m.gain_per_m_thermal(st, nu0, np.full(nz, T0)),
+                          m.gain_per_m_slices(st, nu0))
+    Tdome = thermal_profile_steady_1d(np.full(nz, 3e4), dz, kA, Rp, T0, ends="sunk")
+    g = m.gain_per_m_thermal(st, nu0, Tdome)
+    assert g[nz // 2] < g[0]
+    # uniform-hot T(z) reduces to the lumped set_temperature gain
+    g_hot = m.gain_per_m_thermal(st, nu0, np.full(nz, 330.0))
+    m.set_temperature(330.0)
+    assert np.max(np.abs(g_hot - m.gain_per_m_slices(st, nu0))) < 1e-9
+    m.set_temperature(T0)
+    # external-FEM sampling seam
+    Tcb = sample_T_along_axis(lambda x, y, z: T0 + 10.0 * z / L, (np.arange(nz) + 0.5) * dz, axis="z")
+    assert np.all(np.isfinite(m.gain_per_m_thermal(st, nu0, Tcb)))
+    # GS-only guard: the ES band must not be silently dropped
+    mes = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=1e-19).with_detailed_balance_taus(),
+                      self_heating=sh)
+    with pytest.raises(ValueError):
+        mes.gain_per_m_thermal(mes.init_slices(nz, 40e-3), nu0, np.full(nz, T0))
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
