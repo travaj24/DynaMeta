@@ -112,21 +112,40 @@ class TravelingWaveSOA:
         uf["h_ch"] = uf["h_ch"] * uf["d_ch"] + uf["uf"].eps_ch_m3 * S * (1.0 - uf["d_ch"])
 
     def amplify(self, P_in, drive, *, nu_s_Hz: float = None, state0=None,
-                return_traces: bool = False, ultrafast=None):
+                return_traces: bool = False, ultrafast=None, transport_tau_s: float = 0.0):
         """Amplify the input power waveform P_in (1-D array sampled at this engine's dt) at
         injection `drive`. `ultrafast` (an UltrafastCompression) adds the sub-ps SHB + carrier-
         heating gain compression on top of the carrier-density dynamics (None -> off, the
         carrier-density-only result). Returns a dict: t [s], P_in, P_out [W], gain_dB, and (if
         return_traces) the line-centre material gain per slice over time `g_zt` (nt, nz) and
-        the carrier state. The amplifier starts in the unsaturated steady state at `drive`."""
+        the carrier state. The amplifier starts in the unsaturated steady state at `drive`.
+
+        transport_tau_s (default 0): the SCH (separate-confinement-heterostructure) carrier-TRANSPORT
+        time -- the reduced drift-diffusion stage the lumped current injection omits. The injected
+        current first fills an SCH reservoir N_sch that feeds the wetting layer with time tau_t
+        (dN_sch/dt = I/(qV) - N_sch/tau_t; the WL sees the transport rate N_sch/tau_t), adding a pole
+        that SLOWS the gain recovery / limits the modulation bandwidth. 0 -> instant transport, the
+        lumped-injection result byte-identical; steady state is unchanged for any tau_t (N_sch ->
+        I tau_t/(qV) -> the same WL feed). For the FULL spatially-resolved transport / current
+        crowding, pass `drive` as a per-slice injection PROFILE I(z) from a DEVSIM drift-diffusion
+        solve (init_slices + rhs_fields carry it)."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         P_in = np.asarray(P_in, dtype=np.float64)
         if P_in.ndim != 1 or P_in.size < 2:
             raise ValueError("amplify: P_in must be a 1-D waveform with >= 2 samples")
         nt = P_in.size
-        state = self.model.init_slices(self.nz, drive) if state0 is None else state0
+        # drive may be: a scalar I; a (nz,) spatial injection PROFILE I(z) (DEVSIM DD / current
+        # crowding); or a (nt,) TIME-varying current I(t) (direct current modulation, nt != nz). The
+        # carriers init at I(t=0) for the time form.
+        dr = np.asarray(drive, dtype=np.float64)
+        time_drive = bool(dr.ndim == 1 and dr.size == nt and nt != self.nz)
+        I0 = dr[0] if time_drive else drive
+        state = self.model.init_slices(self.nz, I0) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)                         # ultrafast-compression state
+        # SCH carrier-transport reservoir (opt-in): N_sch filled by I, feeding the WL with tau_t.
+        tau_t = float(transport_tau_s)
+        N_sch = np.asarray(I0, dtype=np.float64) * tau_t / self.model._qVa if tau_t > 0.0 else None
         # the device field starts empty (Pnode = 0); the first nz steps fill it (a startup
         # transient one transit time long -- t = nz*dt -- before P_out is meaningful)
         Pnode = np.zeros(self.nz + 1)
@@ -143,7 +162,13 @@ class TravelingWaveSOA:
             new[1:] = Pnode[:-1] * amp
             P_mid = 0.5 * (Pnode[:-1] + Pnode[1:])            # slice-average power this step
             self._uf_relax(uf, P_mid, nu)                     # drive the compression by S_conf
-            state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            I_now = dr[n] if time_drive else drive            # instantaneous injection this step
+            if N_sch is None:
+                I_eff = I_now                                 # instant transport (lumped injection)
+            else:                                             # SCH-transport-limited WL feed
+                I_eff = N_sch / tau_t * self.model._qVa
+                N_sch = N_sch + self.dt * (np.asarray(I_now) / self.model._qVa - N_sch / tau_t)
+            state = self.model.step_slices(state, P_mid, self.dt, nu, I_eff)
             Pnode = new
             P_out[n] = Pnode[-1]
             if return_traces:
