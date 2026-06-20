@@ -1074,6 +1074,19 @@ class QDGainModel:
                 self._es_inversion(state) * wlE[None, :], axis=1)
         return g
 
+    def emission_gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
+        """Spontaneous-EMISSION gain g_sp(nu) [1/m] per slice (GS band) = sum_j N_q w_j mu_GS sigma_pk
+        L(nu-nu_j) rho_GS_j^2 (excitonic) or f_c_GS f_v_GS (e/h split) -- the per-slice upper-state
+        population, hence the LANGEVIN / ASE spontaneous-source amplitude. Mirrors emission_gain_per_m
+        for the slice state layout; always >= 0 (pole-free)."""
+        wl = self._gain_line_weights(nu_Hz)                   # cached (ng,) = w_j * L(nu - nu_j)
+        if self.eh:
+            em = np.asarray(state[4]) * np.asarray(state[5])  # f_c_GS * f_v_GS  (nz, ng)
+        else:
+            rho = np.asarray(state[2])
+            em = rho * rho                                    # rho_GS^2  (nz, ng)
+        return self._gain_scale * self._gain_pref * np.sum(em * wl[None, :], axis=1)
+
     def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
         """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
         term of the Maxwell-Bloch polarization ADE used by the spectral-dispersion path of
