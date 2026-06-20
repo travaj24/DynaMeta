@@ -1204,6 +1204,26 @@ class QDGainModel:
                 self._es_inversion(state) * LE * self.w_j[None, :], axis=1)
         return g
 
+    def gain_per_m_nonmarkovian(self, state, nu_Hz, *, gamma2_factor, w1) -> np.ndarray:
+        """GS gain g(nu) [1/m] per slice with a NON-MARKOVIAN biexponential homogeneous line: the
+        single Lorentzian (HWHM hw = fwhm_hom/2, single dephasing T2) is replaced by the two-channel
+        line w1 L(hw) + (1-w1) L(hw*gamma2_factor) (peak-normalized, the gain convention) -- a
+        multi-timescale dephasing that gives a SUB-Lorentzian (sharper core + heavier/lighter wing)
+        gain line. Reduces EXACTLY to gain_per_m_slices (GS band) when w1 = 1 or gamma2_factor = 1
+        (the Markovian single-Lorentzian limit). GS band only (the inhomogeneous comb + inversion are
+        unchanged); the area-normalized lineshape <-> biexp-memory-kernel Fourier pair lives in
+        optics.soa.lineshape."""
+        if not (0.0 <= float(w1) <= 1.0):
+            raise ValueError("gain_per_m_nonmarkovian: w1 must be in [0, 1]")
+        p = self.p
+        dnu = float(nu_Hz) - self.nu_j                       # (ng,)
+        hw = 0.5 * p.fwhm_hom_Hz
+        hw2 = hw * float(gamma2_factor)
+        L = float(w1) * (hw * hw) / (dnu * dnu + hw * hw) + (1.0 - float(w1)) * (hw2 * hw2) / (
+            dnu * dnu + hw2 * hw2)
+        return self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * np.sum(
+            self._gs_inversion(state) * (self.w_j * L)[None, :], axis=1)
+
     def line_kappa_slices(self, state, nu_s_Hz, hw_Hz) -> np.ndarray:
         """Per-slice, per-group complex-Lorentzian line-filter DRIVE kappa_j[k] (real), the source
         term of the Maxwell-Bloch polarization ADE used by the spectral-dispersion path of

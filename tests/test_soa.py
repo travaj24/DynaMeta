@@ -389,11 +389,26 @@ def test_thermal_profile_reduction_and_coupling():
     # external-FEM sampling seam
     Tcb = sample_T_along_axis(lambda x, y, z: T0 + 10.0 * z / L, (np.arange(nz) + 0.5) * dz, axis="z")
     assert np.all(np.isfinite(m.gain_per_m_thermal(st, nu0, Tcb)))
-    # GS-only guard: the ES band must not be silently dropped
+    # ES-band thermal coupling: with the ES band active the thermal gain INCLUDES it and still
+    # reduces exactly to gain_per_m_slices at T0 (and to set_temperature for uniform-hot)
     mes = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=1e-19).with_detailed_balance_taus(),
                       self_heating=sh)
-    with pytest.raises(ValueError):
-        mes.gain_per_m_thermal(mes.init_slices(nz, 40e-3), nu0, np.full(nz, T0))
+    ste = mes.init_slices(nz, 40e-3)
+    assert np.array_equal(mes.gain_per_m_thermal(ste, nu0, np.full(nz, T0)),
+                          mes.gain_per_m_slices(ste, nu0))
+    ghe = mes.gain_per_m_thermal(ste, nu0, np.full(nz, 330.0))
+    mes.set_temperature(330.0)
+    assert np.max(np.abs(ghe - mes.gain_per_m_slices(ste, nu0))) < 1e-9
+    # transient 1-D thermal: t->inf == steady; lumped RC charge-up == analytic exp
+    from dynameta.optics.soa import thermal_profile_transient_1d
+    Cl, qa, Rpr, kAr = 1e-3, np.full(nz, 2e4), 5e-4, 2e-5
+    tau = Cl * Rpr
+    Ttr = thermal_profile_transient_1d(qa, dz, kAr, Rpr, T0, Cl, tau / 50, 4000, ends="sunk")
+    assert np.max(np.abs(Ttr - thermal_profile_steady_1d(qa, dz, kAr, Rpr, T0, ends="sunk"))) < 1e-6
+    Hh = thermal_profile_transient_1d(qa, dz, 0.0, Rpr, T0, Cl, tau / 200, 400, ends="insulated",
+                                      return_history=True)
+    th = np.arange(Hh.shape[0]) * (tau / 200)
+    assert np.max(np.abs(Hh[:, nz // 2] - (T0 + qa[0] * Rpr * (1 - np.exp(-th / tau))))) / (qa[0] * Rpr) < 1e-2
 
 
 def test_nonlinear_loss_tpa_fca():
@@ -462,6 +477,89 @@ def test_carrier_leakage():
     assert gf < gL < g0
 
 
+def test_electrical_rc():
+    m = QDGainModel(QDGainParams(n_groups=11).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    nt = 4000
+    P = np.full(nt, 1e-5)
+    base = soa.amplify(P, 40e-3, return_traces=True)["g_zt"]
+    # rc=0 and constant-drive rc>0 both byte-identical
+    assert np.array_equal(base, soa.amplify(P, 40e-3, rc_tau_s=0.0, return_traces=True)["g_zt"])
+    assert np.array_equal(base, soa.amplify(P, 40e-3, rc_tau_s=100e-12, return_traces=True)["g_zt"])
+    # RC filter pole exact: |H(fRC)| == 1/sqrt(2)
+    tau, dtf, N = 100e-12, 1e-13, 100000
+    tf = np.arange(N) * dtf
+    fRC = 1 / (2 * np.pi * tau)
+    sig = np.sin(2 * np.pi * fRC * tf)
+    rc, a, out = sig[0], dtf / tau, np.empty(N)
+    for n in range(N):
+        rc = rc + a * (sig[n] - rc); out[n] = rc
+    k = int(np.argmin(np.abs(np.fft.rfftfreq(N, dtf) - fRC)))
+    assert abs(np.abs(np.fft.rfft(out)[k]) / np.abs(np.fft.rfft(sig)[k]) - 1 / np.sqrt(2)) < 1e-2
+    # step delay: RC delays the gain rise
+    Istep = np.where(np.arange(nt) < nt // 4, 30e-3, 55e-3)
+    def t50(rc_tau):
+        g = soa.amplify(P, Istep, rc_tau_s=rc_tau, return_traces=True)["g_zt"][soa.nz:, soa.nz // 2]
+        return np.argmax(g >= 0.5 * (g[0] + g[-1]))
+    assert t50(100e-12) > t50(0.0)
+
+
+def test_nonmarkovian_lineshape():
+    from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
+                                               nonmarkovian_lineshape)
+    g1, g2, w1 = 20e9, 80e9, 0.6
+    N, dt = 16384, 2e-9 / 16384
+    t = (np.arange(N) - N // 2) * dt
+    M = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(biexp_memory_kernel(t, g1, g2, w1)))) * dt
+    f = np.fft.fftshift(np.fft.fftfreq(N, dt))
+    Lan = nonmarkovian_lineshape(f, g1, g2, w1)
+    sel = np.abs(f) < 4 * g2
+    assert np.max(np.abs(M.real[sel] - Lan[sel])) / Lan.max() < 1e-3      # Wiener-Khinchin
+    assert np.allclose(nonmarkovian_lineshape(f, g1, g2, 1.0), lorentzian_area(f, g1))  # Markovian
+    # model gain reduces to gain_per_m_slices (GS) at w1=1
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
+    st = m.init_slices(4, 40e-3)
+    nu0 = m.p.nu0_Hz
+    assert np.max(np.abs(m.gain_per_m_nonmarkovian(st, nu0, gamma2_factor=3.0, w1=1.0)
+                         - m.gain_per_m_slices(st, nu0))) < 1e-12
+
+
+def test_reduced_sbe():
+    from dynameta.optics.soa.sbe import reduced_sbe_susceptibility, sbe_gain_per_m
+    hw = np.linspace(0.90, 1.12, 200)
+    _, chi0 = reduced_sbe_susceptibility(hw, coulomb_V0=0.0, nk=160)
+    _, chiC = reduced_sbe_susceptibility(hw, coulomb_V0=3e-29, nk=160)
+    g0 = sbe_gain_per_m(hw, chi0)
+    gC = sbe_gain_per_m(hw, chiC)
+    assert gC.max() > g0.max()                                            # Coulomb enhancement
+    assert g0.min() < 0.0 < g0.max()                                      # gain + absorption regions
+    # unpumped only absorbs
+    _, chiL = reduced_sbe_susceptibility(hw, coulomb_V0=0.0, N_2d_m2=1e12, nk=160)
+    assert sbe_gain_per_m(hw, chiL).max() <= 1e-30
+
+
+def test_vectorial_pdg():
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    nu0, fwhm = m.p.nu0_Hz, m.p.fwhm_inhom_Hz
+    nt = 2000
+    te = np.full(nt, np.sqrt(1e-6) + 0j)
+    tm = np.full(nt, np.sqrt(1e-6) + 0j)
+    # shift=0 byte-identical to the scalar-pdg dualpol
+    a = soa.amplify_coherent_dualpol(te, tm, 40e-3, pdg_ratio=0.7)
+    b = soa.amplify_coherent_dualpol(te, tm, 40e-3, pdg_ratio=0.7, tm_peak_shift_Hz=0.0)
+    assert np.array_equal(a["A_tm_out"], b["A_tm_out"])
+    # ratio=1, shift=0 -> degenerate
+    d = soa.amplify_coherent_dualpol(te, tm, 40e-3, pdg_ratio=1.0, tm_peak_shift_Hz=0.0)
+    assert abs(d["P_te_out"][-1] - d["P_tm_out"][-1]) / d["P_te_out"][-1] < 1e-12
+    # frequency-dependent PDG reverses sign across the split
+    def pdg(nu):
+        o = soa.amplify_coherent_dualpol(te, tm, 40e-3, nu_s_Hz=nu, pdg_ratio=1.0,
+                                         tm_peak_shift_Hz=0.5 * fwhm)
+        return 10 * np.log10(o["P_te_out"][-1] / o["P_tm_out"][-1])
+    assert pdg(nu0 - 0.5 * fwhm) > 0.05 > -0.05 > pdg(nu0 + 0.5 * fwhm)
+
+
 def test_rin_and_linewidth():
     from dynameta.optics.soa import (henry_factor, linewidth_from_field, rin_spectrum,
                                      schawlow_townes_henry_linewidth)
@@ -512,6 +610,19 @@ def test_transverse_bpm():
         g = be.carrier_gain(np.sqrt(2e-3) * np.exp(-(be.x / 8e-6) ** 2) + 0j)
         return (g.max() - g.min()) / g.mean()
     assert contrast(8e-6) < contrast(0.0)
+    # thermal lensing: dndt=0 byte-id; linear ramp steers exactly; hot centre focuses
+    bl = TransverseBPM(400e-6, 2048, lam, n0, g0_per_m=0.0)
+    Al = np.exp(-(bl.x / 20e-6) ** 2) + 0j
+    assert np.array_equal(bl.propagate(Al, 0.3e-3, 150)["A_out"],
+                          bl.propagate(Al, 0.3e-3, 150, T_profile_x=np.ones(2048), dndt_per_K=0.0)["A_out"])
+    oL = bl.propagate(Al, 0.3e-3, 150, T_profile_x=1e5 * bl.x, dndt_per_K=3e-4)
+    Fk = np.abs(np.fft.fft(oL["A_out"])) ** 2
+    kxc = np.sum(bl.kx * Fk) / np.sum(Fk)
+    assert abs(kxc - bl.k0 * 3e-4 * 1e5 * 0.3e-3) / abs(bl.k0 * 3e-4 * 1e5 * 0.3e-3) < 1e-9
+    Tq = -0.5 * 5e12 * bl.x ** 2
+    wn = bl.rms_width(bl.propagate(Al, 0.6e-3, 300)["I_out"])
+    wf = bl.rms_width(bl.propagate(Al, 0.6e-3, 300, T_profile_x=Tq, dndt_per_K=2e-3)["I_out"])
+    assert wf < wn
 
 
 def test_carrier_leakage_numba_parity():
