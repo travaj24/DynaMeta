@@ -350,6 +350,20 @@ datasheet as new work, not reused; see Section 8.1.)
      Adversarial pass (fix-then-ship): all physics confirmed (alpha sign, single-r dualpol fold no
      double-count, alpha_i unscaled); the one fix STRENGTHENED GATE C with the saturating discriminator
      (the unsaturated point alone could not distinguish the gain-weighting from a plain mean).
+   - **True Fabry-Perot cavity (facet feedback) -- SHIPPED 2026-06-19** (`amplify_fabry_perot` +
+     `validation/qd_soa_fabry_perot.py`, 5 gates). Replaces the single-pass Saitoh-Mukai ripple METRIC
+     with a time-domain BIDIRECTIONAL marcher: counter-propagating FORWARD (F) + BACKWARD (B) envelopes
+     coupled by the facet power reflectivities R1, R2 (F advances +z, B advances -z, dt=dz/v_g), both
+     saturating the SHARED carriers (|F|^2 + |B|^2). Facet BCs F_in = t1 A_in + r1 e^{i phi/2} B(0),
+     B_in = r2 e^{i phi/2} F(nz); roundtrip_phase phi is the cavity detuning. Gates: R1=R2=0 == single-
+     pass amplify_coherent (byte-identical); phase-swept ripple == Saitoh-Mukai facet_gain_ripple_dB
+     (2.5e-13); on-resonance enhancement == Airy (1-R1)(1-R2)/(1-sqrt(R1R2)Gsp)^2 (6e-4); near
+     resonance external-seed feedback saturates the gain (round-trip 0.900<=1, G 9.84->9.61 dB, no
+     run-away); passivity. SCOPE (adversarial fix): F=B=0 init with only the coherent A_in seed -> no
+     spontaneous/ASE seed, so lasing FROM NOISE is out of scope; GATE D is external-seed saturation,
+     NOT a self-consistent threshold pin (docstring reworded from the over-claimed "clamps at lasing").
+     Marcher otherwise verified correct (advection dirs, facet BCs pre-update, reservoir intensity-sum
+     no standing-wave term, phase split, R=0 byte-exact).
 
 ---
 

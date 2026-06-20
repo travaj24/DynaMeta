@@ -257,6 +257,25 @@ def test_pdg_reduction_and_ratio():
     assert abs(pdg - (1 - r) * m.p.Gamma * g * L * 10 / np.log(10)) / pdg < 0.05
 
 
+def test_fabry_perot_reduction_and_ripple():
+    # R=0 reduces to single-pass; the ripple over a phase sweep matches the Saitoh-Mukai metric
+    from dynameta.optics.soa.metrics import facet_gain_ripple_dB
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 1.5e-3, 100, nu_s_Hz=m.p.nu0_Hz)
+    nt, eps = 3000, 1e-5
+    A = np.full(nt, eps) + 0j
+    sp = soa.amplify_coherent(A, 80e-3, alpha_lef=0.0)["A_out"]
+    fp0 = soa.amplify_fabry_perot(A, 80e-3, R1=0.0, R2=0.0, alpha_lef=0.0)["A_out"]
+    assert np.max(np.abs(fp0 - sp)) < 1e-15                    # R=0 == single-pass
+    Gsp = np.abs(sp[-1]) ** 2 / eps ** 2
+    R = 3e-3
+    gains = [10 * np.log10(np.abs(soa.amplify_fabry_perot(A, 80e-3, R1=R, R2=R, alpha_lef=0.0,
+             roundtrip_phase=p)["A_out"][-1]) ** 2 / eps ** 2) for p in np.linspace(0, 2 * np.pi, 13)]
+    assert abs((max(gains) - min(gains)) - facet_gain_ripple_dB(Gsp, R, R)) < 0.02
+    with pytest.raises(ValueError):
+        soa.amplify_fabry_perot(A, 80e-3, R1=1.0, R2=0.0)      # R>=1 invalid
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
