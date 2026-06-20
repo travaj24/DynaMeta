@@ -172,6 +172,39 @@ def test_line_filter_requires_spectral_model():
         soa.amplify_coherent(np.full(50, 1e-3) + 0j, drive=None, line_filter=True)
 
 
+def test_gvd_off_is_byte_identical():
+    # beta2=0 (default) leaves the coherent field branch unchanged
+    tl = TwoLevelSaturableGain(g0_per_m=1500.0, tau_c_s=200e-12, E_sat_J=2e-12)
+    soa = TravelingWaveSOA(tl, 0.5e-3, 64, nu_s_Hz=1.934e14)
+    t = np.arange(400) * soa.dt
+    A = (np.exp(-((t - t.mean()) ** 2) / (2 * (8 * soa.dt) ** 2)) + 0j)
+    base = soa.amplify_coherent(A, drive=None, alpha_lef=0.0)["A_out"]
+    z0 = soa.amplify_coherent(A, drive=None, alpha_lef=0.0, beta2_s2_per_m=0.0)["A_out"]
+    assert np.array_equal(base, z0)
+
+
+def test_gvd_broadens_gaussian_per_nlse():
+    # gain-free Gaussian broadens to T0 sqrt(1+(L/L_D)^2), L_D = T0^2/|beta2| (Agrawal ch.3)
+    tl = TwoLevelSaturableGain(g0_per_m=0.0, tau_c_s=1e-9, E_sat_J=1e-12)
+    L, nz = 1.0e-3, 256
+    soa = TravelingWaveSOA(tl, L, nz)
+    nt = 4 * nz
+    t = np.arange(nt) * soa.dt
+    W = nz * soa.dt
+    T0 = W / 16.0
+    beta2 = T0 * T0 / L                                    # L_D = L
+    A = np.exp(-((t - (nt // 2) * soa.dt) ** 2) / (2 * T0 * T0)) + 0j
+    out = soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2)["A_out"]
+
+    def rms(w):
+        m1 = (t * w).sum() / w.sum()
+        return np.sqrt((t * t * w).sum() / w.sum() - m1 * m1)
+    ratio = rms(np.abs(out) ** 2) / rms(np.abs(A) ** 2)
+    assert abs(ratio - np.sqrt(2.0)) / np.sqrt(2.0) < 1e-2     # L/L_D = 1 -> sqrt(2)
+    # unitary: gain-free dispersion conserves the pulse energy
+    assert abs((np.abs(out) ** 2).sum() - (np.abs(A) ** 2).sum()) / (np.abs(A) ** 2).sum() < 1e-9
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
