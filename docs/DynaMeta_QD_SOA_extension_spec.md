@@ -236,7 +236,7 @@ datasheet as new work, not reused; see Section 8.1.)
      up/down FWM asymmetry ENLARGED 0.44 dB @20 GHz (vs ~0 flat-gain), monotone in detuning. The
      transit-AVERAGED polarization readout removes the O(dt) ZOH half-sample-delay error; the field
      update is ADDITIVE (the polarization radiates into field nulls -> stable for modulated/nulling
-     waveforms, no divide-by-field). GVD (background group-velocity dispersion) remains optional.
+     waveforms, no divide-by-field). Background GVD is now also modeled (see the GVD bullet below).
    - **Speedup -- SHIPPED 2026-06-19**: byte-identical Lorentzian/prefactor caching (1.1-1.3x) +
      an OPT-IN numba carrier-step accelerator `QDGainModel(fast=True)` (bit-parity 1e-16,
      ~7x on the carrier RK4, 3-4.4x on the full marcher; default OFF for byte-stable validations).
@@ -296,6 +296,25 @@ datasheet as new work, not reused; see Section 8.1.)
      monotonically with load, ase_saturation=False reproduces the unsaturated propagator exactly.
      Adversarial pass caught + fixed a P1 (spectral_noise_figure double-counted internal loss when
      alpha_i>0) before ship. This closes every documented gain-leg ceiling from Section 8.
+   - **Background group-velocity dispersion (GVD) -- SHIPPED 2026-06-19** (`amplify_coherent(
+     beta2_s2_per_m=...)` + `QDGainParams.beta2_s2_per_m` + `validation/qd_soa_gvd.py`, 5 gates).
+     The waveguide GVD d2 beta/d omega^2 [s^2/m] adds dA/dz = -(i beta2/2) d2A/dT2 (retarded time,
+     exp(-i omega t)): each tone at nu_s + f picks up exp(+i (beta2/2)(2 pi f)^2 L). Applied as a
+     SYMMETRIC device-scale (Strang) split D(L/2) . marcher . D(L/2), where D is the EXACT unitary
+     spectral phase on the full retarded-time waveform (FFT . phase . iFFT) and the streaming
+     nonlinear marcher is untouched -- a per-step dispersion of the spatial node array is invalid
+     (it is a snapshot along z, not a fixed retarded-time window, so the shifting-window FFT leaks
+     energy; this was caught and rejected during the build). EXACT in the linear/passive limit;
+     uncontrolled (single step, no z-refinement) for the distributed dispersion-gain coupling when
+     beta2 and gain are both active (a sub-sectioned split is the future refinement). beta2 even in
+     omega -> FFT sign immaterial (beta3 would not be). Gates: beta2=0 byte-identical; the split
+     assembles to exactly D(L) (4.5e-15) and a windowed CW tone's phase == (beta2/2)(2 pi f)^2 L
+     (1.3e-4 rad, both signs); Gaussian RMS broadens to T0 sqrt(1+(L/L_D)^2), L_D=T0^2/|beta2|
+     (Agrawal, 7.7e-13); quadratic chirp coefficient C=-(beta2 L)/(2(T0^4+(beta2 L)^2)) sign+
+     magnitude (1.5e-16, both signs); gain-free unitarity sum|A|^2 conserved (3.8e-16). Adversarial
+     pass confirmed sign/magnitude independently (no code bug); reworded over-claiming docstrings to
+     disclose the uncontrolled-coupling limit. GVD was the last explicitly-deferred item -- the
+     gain-leg model now spans every physics axis in this spec.
 
 ---
 

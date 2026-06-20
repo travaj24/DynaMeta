@@ -296,6 +296,8 @@ class QDGainParams:
     # coherent / phase
     alpha_lef: float = 2.0           # linewidth enhancement factor (carrier-induced index;
                                      # QD ~ 1-3 near the GS peak) -- drives FWM + its asymmetry
+    beta2_s2_per_m: float = 0.0      # background (waveguide) group-velocity dispersion d2beta/domega2
+                                     # [s^2/m]; broadband non-resonant index (0 -> no GVD)
     # spectral discretization
     n_groups: int = 41               # inhomogeneous size groups (odd -> a group sits on nu0)
     span_sigma: float = 3.0          # half-width of the group grid in inhomogeneous sigmas
@@ -893,6 +895,12 @@ class QDGainModel:
         """Linewidth enhancement factor (carrier-induced index / gain) -- the coherent
         propagation phase term and the FWM asymmetry."""
         return self.p.alpha_lef
+
+    @property
+    def beta2_s2_per_m(self) -> float:
+        """Background (waveguide) group-velocity dispersion d2 beta / d omega^2 [s^2/m] -- the
+        broadband non-resonant index that amplify_coherent applies as a Fourier split-step."""
+        return self.p.beta2_s2_per_m
 
     def photon_density(self, P_W, nu_Hz):
         """Confined photon density S_conf [m^-3] for guided power P (scalar or array)."""
