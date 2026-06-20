@@ -582,14 +582,19 @@ datasheet as new work, not reused; see Section 8.1.)
      only on a time-varying drive); the filter |H(f)|=1/sqrt(1+(f/f_RC)^2) (4e-3); a current STEP is
      delayed by RC (monotone in tau_RC), RC+transport delays more than either alone; DC gain invariant;
      passivity (|H|<=1).
-   - **Non-Markovian (biexponential) dephasing lineshape -- SHIPPED 2026-06-20** (`optics/soa/
+   - **Two-timescale (heterogeneous-rate) dephasing lineshape -- SHIPPED 2026-06-20** (`optics/soa/
      lineshape.py`: `biexp_memory_kernel`, `nonmarkovian_lineshape`; `QDGainModel.gain_per_m_nonmarkovian`;
-     `validation/qd_soa_nonmarkovian.py`, 5 gates). The single-Lorentzian (Markovian, single T2) line
-     generalizes to a two-channel dipole-correlation memory `m(t) = w1 e^{-2pi g1|t|} + (1-w1) e^{-2pi
-     g2|t|}` whose Wiener-Khinchin transform is a two-component sub-Lorentzian line. Gates:
-     FFT(kernel)==lineshape (6e-5); w1=1 / g1=g2 reduce to a single Lorentzian; `gain_per_m_nonmarkovian`
-     reduces to `gain_per_m_slices` (0.0) at w1=1; sub-Lorentzian wing L(2 HWHM)/L(0) > 1/5; area-
-     normalized + non-negative.
+     `validation/qd_soa_nonmarkovian.py`, 5 gates). The single-rate single-Lorentzian line generalizes
+     to a two-channel dipole-correlation `m(t) = w1 e^{-2pi g1|t|} + (1-w1) e^{-2pi g2|t|}` whose
+     Wiener-Khinchin transform is a two-component SUPER-Lorentzian line (sharper core + heavier wing).
+     Gates: FFT(kernel)==lineshape (6e-5); w1=1 / g1=g2 reduce to a single Lorentzian;
+     `gain_per_m_nonmarkovian` reduces to `gain_per_m_slices` (0.0) at w1=1; super-Lorentzian wing
+     L(2 HWHM)/L(0) > 1/5; area-normalized + non-negative. NOTE (honest, per adversary): each exp channel
+     is itself single-rate/Markovian -- a weighted sum of two is HETEROGENEOUS (two-rate) dephasing, NOT
+     genuine bath-memory non-Markovianity (which gives a sub-Lorentzian motional-narrowed line, the
+     opposite direction). `gain_per_m_nonmarkovian` is PEAK-normalized (not oscillator-strength-
+     conserving for gamma2_factor != 1); the area-normalized `nonmarkovian_lineshape` is the
+     spectroscopy twin.
    - **Reduced k-resolved microscopic SBE -- SHIPPED 2026-06-20** (`optics/soa/sbe.py`:
      `reduced_sbe_susceptibility`, `sbe_gain_per_m`; `validation/qd_soa_sbe.py`, 5 gates). A steady-state
      linear-response Semiconductor-Bloch solve for the interband polarization p(k): `(hbar w - e_k +
@@ -600,6 +605,19 @@ datasheet as new work, not reused; see Section 8.1.)
      demonstration SBE -- 1 band pair, parabolic, MODEL 1-D screened kernel, quasi-equilibrium carriers,
      parameterized (uncalibrated) absolute magnitude; the SBE STRUCTURE (Pauli blocking, T2 dephasing,
      Coulomb enhancement, BGR) at the k-resolved level, not a full multi-band kinetic SBE.
+
+   - **Exhaustive HAMMER test -- SHIPPED 2026-06-20** (`validation/qd_soa_hammer.py`, 8 gate groups +
+     a `tests/test_soa.py::test_hammer` wrapper). The cross-cutting integration backstop above the
+     per-feature gates: H1 the exercised opt-ins default byte-identical -- amplify (ultrafast/transport/
+     rc/nl_loss), amplify_coherent (langevin/GVD/line_filter/nl_loss), leakage+self_heating at the model
+     level, BPM thermal lens (numba/eh/many-body/ES have their own gates, finiteness-checked in H2); H2
+     extreme/degenerate inputs all finite (zero/huge input, tiny/large I, n_groups=1, nz=2, e/h, numba);
+     H3 reductions (marcher==coherent; dualpol with TM=0 == SCALAR coherent + equal-TM cross-saturation
+     engages; FP(R=0)==single-pass; GVD(0)); H4 conservation/passivity (unpumped absorbs, passive BPM
+     energy 1.0, FCA<=baseline); H5 determinism (seed-reproducible + seed-sensitive); H6 cross-engine
+     (1-D CW==exp((Gamma g-alpha_i)L), uniform-beam BPM==1-D saturable-gain ODE [rel 5e-9], residual~0);
+     H7 kitchen sink (7 features on at once -> finite/physical); H8 sweeps (gain rises with I, output
+     saturates, NF->2 n_sp = 2.005). All PASS.
 
 ---
 

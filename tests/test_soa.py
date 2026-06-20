@@ -504,6 +504,13 @@ def test_electrical_rc():
     assert t50(100e-12) > t50(0.0)
 
 
+def test_hammer():
+    """Thin wrapper -- run the exhaustive cross-cutting hammer validation in the pytest suite."""
+    import importlib
+    ham = importlib.import_module("validation.qd_soa_hammer")
+    assert ham.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)

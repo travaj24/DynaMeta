@@ -1,7 +1,8 @@
-"""QD-SOA non-Markovian (biexponential) dephasing lineshape vs oracles. A two-channel dipole-
-correlation memory m(t) = w1 exp(-2 pi g1|t|) + (1-w1) exp(-2 pi g2|t|) Fourier-transforms to a
-two-component (sub-Lorentzian) homogeneous line -- the generalization of the single-Lorentzian
-Markovian line the gain model assumes.
+"""QD-SOA two-timescale (heterogeneous-rate) dephasing lineshape vs oracles. A two-channel dipole-
+correlation m(t) = w1 exp(-2 pi g1|t|) + (1-w1) exp(-2 pi g2|t|) Fourier-transforms to a two-component
+(SUPER-Lorentzian: sharper core, heavier wing) homogeneous line -- the multi-rate generalization of the
+single-rate single-Lorentzian line the gain model assumes (each exp channel is itself single-rate /
+Markovian; a sum of two is heterogeneous, not genuine bath-memory non-Markovianity).
 
 GATE A (Wiener-Khinchin): the FFT of biexp_memory_kernel equals nonmarkovian_lineshape (the line is
         the Fourier transform of the dipole-correlation memory).
@@ -9,8 +10,8 @@ GATE B (Markovian limit): w1 = 1 (and g1 = g2) recover the single Lorentzian exa
 GATE C (model gain reduction): QDGainModel.gain_per_m_nonmarkovian reduces EXACTLY to gain_per_m_slices
         (GS band) when w1 = 1 or gamma2_factor = 1 (the single-Lorentzian gain).
 GATE D (genuinely non-Lorentzian): a single Lorentzian has L(2 HWHM)/L(0) = 1/5 exactly; the biexp line
-        (narrow core + broad wing) is SUB-Lorentzian -- its wing at 2 x its own HWHM exceeds 1/5, so it
-        cannot be any single Lorentzian.
+        (narrow core + broad wing) is SUPER-Lorentzian -- its wing at 2 x its own HWHM EXCEEDS 1/5
+        (heavier wing), so it cannot be any single Lorentzian.
 GATE E (area + passivity): the line is area-normalized (analytic integral = 1; numeric -> 1 on a wide
         grid) and non-negative everywhere.
 
@@ -29,7 +30,8 @@ from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
 
 
 def main():
-    print("[nm] === QD-SOA non-Markovian dephasing lineshape vs oracles ===", flush=True)
+    print("[nm] === QD-SOA two-timescale (heterogeneous) dephasing lineshape vs oracles ===",
+          flush=True)
     ok = True
     g1, g2, w1 = 20e9, 80e9, 0.6
 
@@ -73,7 +75,7 @@ def main():
     wing = float(np.interp(2.0 * hwhm, fg, Lg)) / Lg[0]        # value at 2 HWHM / peak
     g_d = bool(wing > 0.20 + 0.01)                             # single Lorentzian would be exactly 0.20
     ok = ok and g_d
-    print("[nm] GATE D: sub-Lorentzian wing L(2 HWHM)/L(0) = {:.3f} > 0.20 (single Lorentzian) -> "
+    print("[nm] GATE D: super-Lorentzian wing L(2 HWHM)/L(0) = {:.3f} > 0.20 (single Lorentzian) -> "
           "{}".format(wing, "PASS" if g_d else "FAIL"), flush=True)
 
     # ---- GATE E: area + passivity (wide grid so the heavy Lorentzian wings are captured; the
