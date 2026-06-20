@@ -1205,14 +1205,18 @@ class QDGainModel:
         return g
 
     def gain_per_m_nonmarkovian(self, state, nu_Hz, *, gamma2_factor, w1) -> np.ndarray:
-        """GS gain g(nu) [1/m] per slice with a NON-MARKOVIAN biexponential homogeneous line: the
-        single Lorentzian (HWHM hw = fwhm_hom/2, single dephasing T2) is replaced by the two-channel
-        line w1 L(hw) + (1-w1) L(hw*gamma2_factor) (peak-normalized, the gain convention) -- a
-        multi-timescale dephasing that gives a SUB-Lorentzian (sharper core + heavier/lighter wing)
-        gain line. Reduces EXACTLY to gain_per_m_slices (GS band) when w1 = 1 or gamma2_factor = 1
-        (the Markovian single-Lorentzian limit). GS band only (the inhomogeneous comb + inversion are
-        unchanged); the area-normalized lineshape <-> biexp-memory-kernel Fourier pair lives in
-        optics.soa.lineshape."""
+        """GS gain g(nu) [1/m] per slice with a TWO-TIMESCALE (heterogeneous-rate) biexponential
+        homogeneous line: the single Lorentzian (HWHM hw = fwhm_hom/2, single dephasing T2) is replaced
+        by the two-channel line w1 L(hw) + (1-w1) L(hw*gamma2_factor) -- a multi-rate dephasing that
+        gives a SUPER-Lorentzian (sharper core + HEAVIER wing) gain line. Reduces EXACTLY to
+        gain_per_m_slices (GS band) when w1 = 1 or gamma2_factor = 1 (the single-rate Lorentzian limit).
+        GS band only (the inhomogeneous comb + inversion are unchanged).
+
+        CONVENTION: this uses the gain's PEAK-normalized Lorentzian (hw^2/(dnu^2+hw^2)=1 at line centre,
+        sigma_pk the peak cross-section), so broadening the wing channel (gamma2_factor>1) INFLATES the
+        integrated gain (sum w1 + (1-w1)gamma2_factor) -- it is NOT oscillator-strength conserving. The
+        AREA-normalized lineshape <-> biexp-memory-kernel Fourier pair (optics.soa.lineshape) is the
+        spectroscopy-convention twin; the two normalizations conserve peak vs area respectively."""
         if not (0.0 <= float(w1) <= 1.0):
             raise ValueError("gain_per_m_nonmarkovian: w1 must be in [0, 1]")
         p = self.p
