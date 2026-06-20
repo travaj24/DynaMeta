@@ -434,6 +434,36 @@ datasheet as new work, not reused; see Section 8.1.)
      DEVSIM supplies I(z) through it (no DD solve is run in the gate; the reduced model is a current
      low-pass, not a spatial DD). The full self-consistent DEVSIM coupling drives the SAME per-slice
      seam.
+   - **Spatially-resolved thermal: reduced 1-D fin T(z) + thermal-FEM sampling seam -- SHIPPED
+     2026-06-20** (`optics/soa/thermal.py`: `thermal_profile_steady_1d`, `sample_T_along_axis`,
+     `dome_analytic`; `QDGainModel.gain_per_m_thermal`; `validation/qd_soa_thermal_profile.py`, 5
+     gates). Two depths beyond the lumped (single-T) `SelfHeating`/`set_temperature`: (1) REDUCED -- a
+     steady 1-D heat-conduction fin `kappa A T'' - (T-T0)/Rth' = -q(z)` (longitudinal conduction +
+     distributed sink), tridiagonal solve, `ends='sunk'` (Dirichlet, mounted facets -> the DOME) or
+     `ends='insulated'` (Neumann); the per-slice dissipation `q(z)` [W/m] drives a non-uniform `T(z)`;
+     (2) the SEAM -- `gain_per_m_thermal(state, nu, T_z)` red-shifts each slice's comb by `dnu0_dT
+     (T_z-T0)` and scales gain by `1 + dg_dT_frac (T_z-T0)` (the per-slice `set_temperature`), and
+     `sample_T_along_axis` projects ANY external 3-D `T(x,y,z)` (a thermal-FEM `ThermalResult.T_at`)
+     onto the SOA axis -> a plain `T(z)` array. Gates: `kappa A -> 0` insulated reduces EXACTLY to the
+     lumped per-slice `T0 + q Rth'` (0.0); the sunk-facet dome matches the analytic cosh
+     `1 - cosh((z-L/2)/Lc)/cosh(L/2Lc)`, `Lc = sqrt(kappa A Rth')` (4.5e-4, node grid); a ramped `q(z)`
+     -> monotone `T(z)`; `gain_per_m_thermal(.,.,T0) == gain_per_m_slices` (0.0) and a hot `T(z)` lowers
+     the local gain; the external-FEM sampling seam reproduces the field and stays finite. Scope
+     (honestly labelled): STEADY (the transient is the lumped `Cth`'s job), GS band (ES is a
+     refinement -- `gain_per_m_thermal` RAISES if the ES band is active rather than silently dropping
+     it), 1-D LONGITUDINAL fin (transverse conduction lumped into `Rth'`); the FEM seam is how you
+     obtain the full 2-D/3-D heat field. `gain_per_m_thermal` reads the COLD comb and is MUTUALLY
+     EXCLUSIVE with the lumped `set_temperature` (no double-count). The reduced fin is the in-gate
+     reference; the full `carriers/thermal_fem` NGSolve solve drives the SAME interface (via
+     `sample_T_along_axis`, a one-way point-sampler). Adversarial pass (3 lenses + judge, verdict
+     fix-then-ship -> all fixes applied): the two disputed P1 "refutations" were both checked against
+     source and dismissed -- the insulated Neumann row is already the 2nd-order mirror ghost
+     (`-(2c+s)`/`+2c`, manufactured-solution convergence rate 2.00), and the "cell-grid Dirichlet
+     mis-placement" was a Gate-D illustrative-dome `dz` bookkeeping choice (the accuracy-backing Gate B
+     uses the correct node grid). No P1 code/sign/factor/physics bug survived; the fin signs, lumped
+     reduction, analytic-cosh dome, red-shift direction, and GS-only identity are all confirmed. The
+     applied fixes were P2/P3 wording + two extra gate pins (uniform-hot == `set_temperature`; ES-band
+     guard) + the honest STAND-IN label on the Gate-E sampler smoke-test.
 
 ---
 
