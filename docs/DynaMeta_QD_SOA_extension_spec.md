@@ -382,6 +382,29 @@ datasheet as new work, not reused; see Section 8.1.)
      spectral saturation stays lumped (an 8 THz comb treated as monochromatic at nu_s). PSD->density
      conversion, default-off byte-identical, and the fixed point all verified correct by the adversary.
 
+   --- Heavier-physics build-out (owner-requested deeper realism beyond the 1-D effective-parameter
+   layer; each opt-in, oracle-validated, adversarially verified) ---
+   - **Closed-form many-body-corrected gain (screened-HF-flavoured) -- SHIPPED 2026-06-20**
+     (`ManyBody` dataclass + `QDGainModel(many_body=...)` + `material_gain_index_mb` +
+     `validation/qd_soa_many_body.py`, 5 gates). The free-carrier gain is a sum of complex Lorentzians
+     whose Re part is the gain and Im part its KK index partner (one analytic chi(nu)); this
+     renormalizes that chi with the three dominant finite-density many-body corrections, all functions
+     of carrier density N (and T): bandgap renormalization (BGR red-shift, Haug-Koch universal
+     dE_BGR = -bgr_coeff E_R (a_B^3 N)^(1/3)), excitation-induced + LO-phonon dephasing (HWHM
+     broadening, OSCILLATOR-STRENGTH conserving so the peak drops as gamma0/gamma -- the correct
+     invariant vs the free-carrier fixed-peak), and screened Coulomb/excitonic enhancement. gain and
+     index are one chi -> KK-consistent and alpha = -gi/g (no separate alpha knob). Gates: disabled /
+     zero-correction == material_gain_per_m (3.6e-12); gi == Hilbert(g) (KK pair, 2.6e-2); BGR shift
+     == analytic + independent hand value + N^(1/3) scaling (2.1e-4); EID broadens HWHM with peak ~
+     1/gamma (1.3e-16) and conserved line area (5.8e-3); Coulomb enhancement 1.5->1 across the Mott
+     density. Adversarial pass (fix-then-ship 0.9): ALL physics confirmed correct (BGR sign/prefactor
+     hand-verified 1.5e-16, KK causal pole, area conservation, exact reduction) -- the fixes were
+     HONESTY: qualified "first-principles" (it is parameterised closed-form Haug-Koch, NOT a solved
+     self-consistent k-resolved SBE -- that is the deeper continuum refinement) + disclosed it is a
+     STANDALONE chi/alpha accessor NOT yet wired into the marcher (device dynamics unchanged until a
+     caller drives the per-slice gain through it with N_w(z)) + hardened a gate with an independent
+     BGR value.
+
 ---
 
 ## 6. Governing equations (reference)
