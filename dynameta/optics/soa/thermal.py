@@ -18,6 +18,7 @@ SI; ASCII. (1-D fin / Ning-Lippi distributed-thermal SOA model.)
 from __future__ import annotations
 
 import numpy as np
+from scipy.linalg import lu_factor, lu_solve
 
 
 def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K, *, ends="sunk"):
@@ -55,6 +56,54 @@ def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K
         raise ValueError("thermal_profile_steady_1d: ends must be 'sunk' or 'insulated'")
     theta = np.linalg.solve(A, b)
     return float(T0_K) + theta
+
+
+def thermal_profile_transient_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K, C_line_J_m_K,
+                                 dt_s, n_steps, *, ends="sunk", T_init=None, return_history=False):
+    """Transient 1-D fin C' dT/dt = kappa A T'' - (T-T0)/Rth' + q(z), marched by IMPLICIT EULER
+    (unconditionally stable). C_line_J_m_K = C' is the per-length heat capacity [J/(m K)] (= rho Cp
+    A_cross); tau_th = C' Rth' the lumped thermal time constant. Returns T(z) after n_steps (or, with
+    return_history, the (n_steps+1, n) array including the initial profile). Reduces to
+    thermal_profile_steady_1d as n_steps dt -> inf; the lumped limit (kappa A -> 0, insulated, uniform
+    q) is the RC charge-up T(t) = T0 + q Rth'(1 - exp(-t/tau_th)). T_init defaults to the uniform T0.
+
+    Implicit step: (C'/dt I - L) theta^{n+1} = C'/dt theta^n + q, theta = T - T0, L the steady fin
+    operator (so the fixed point is L theta = -q, identical to the steady solve)."""
+    q = np.atleast_1d(np.asarray(q_per_m, dtype=np.float64))
+    n = q.size
+    if n < 2:
+        raise ValueError("thermal_profile_transient_1d: need >= 2 slices")
+    if C_line_J_m_K <= 0.0 or dt_s <= 0.0:
+        raise ValueError("thermal_profile_transient_1d: C_line and dt must be > 0")
+    c = float(kappaA_W_m_K) / (float(dz_m) ** 2)
+    s = 1.0 / float(Rth_prime_K_m_W)
+    a = float(C_line_J_m_K) / float(dt_s)                     # backward-Euler accumulation [W/(m K)]
+    M = np.zeros((n, n))                                      # M = (C'/dt) I - L
+    for k in range(n):
+        M[k, k] = a + 2.0 * c + s
+        if k > 0:
+            M[k, k - 1] = -c
+        if k < n - 1:
+            M[k, k + 1] = -c
+    if ends == "sunk":
+        M[0, :] = 0.0; M[0, 0] = 1.0
+        M[-1, :] = 0.0; M[-1, -1] = 1.0
+    elif ends == "insulated":
+        M[0, 0] = a + 2.0 * c + s; M[0, 1] = -2.0 * c        # mirror ghost (matches the steady solve)
+        M[-1, -1] = a + 2.0 * c + s; M[-1, -2] = -2.0 * c
+    else:
+        raise ValueError("thermal_profile_transient_1d: ends must be 'sunk' or 'insulated'")
+    lu = lu_factor(M)                                        # factor once; reuse every step
+    theta = (np.asarray(T_init, dtype=np.float64) - T0_K) if T_init is not None else np.zeros(n)
+    hist = [T0_K + theta.copy()] if return_history else None
+    for _ in range(int(n_steps)):
+        rhs = a * theta + q
+        if ends == "sunk":
+            rhs[0] = 0.0; rhs[-1] = 0.0
+        theta = lu_solve(lu, rhs)
+        if return_history:
+            hist.append(T0_K + theta.copy())
+    return np.array(hist) if return_history else (float(T0_K) + theta)
 
 
 def sample_T_along_axis(T_at, s_centers_m, *, axis="x", a_fixed_m=0.0, b_fixed_m=0.0):

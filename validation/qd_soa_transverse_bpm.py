@@ -116,6 +116,32 @@ def main():
     print("[bpm] GATE E: lateral diffusion smooths SHB (gain contrast {:.3f} -> {:.3f} -> {:.3f} for "
           "L_diff 0/3/8 um) -> {}".format(c0, c3, c8, "PASS" if g_e else "FAIL"), flush=True)
 
+    # ---- GATE F: 2-D thermal lensing (Phase 24) ----
+    bl = TransverseBPM(400e-6, 4096, LAM, N0, g0_per_m=0.0)
+    w0l = 20e-6
+    Al = np.exp(-(bl.x / w0l) ** 2) + 0j
+    # dndt=0 byte-identical
+    f_byte = np.array_equal(bl.propagate(Al, 0.3e-3, 200)["A_out"],
+                            bl.propagate(Al, 0.3e-3, 200, T_profile_x=np.ones(4096),
+                                         dndt_per_K=0.0)["A_out"])
+    # linear T ramp -> EXACT beam steering <kx> == k0 dndt b L (Fourier shift)
+    dndt, bslope, Lzl = 3e-4, 1e5, 0.3e-3
+    oL = bl.propagate(Al, Lzl, 200, T_profile_x=bslope * bl.x, dndt_per_K=dndt)
+    F = np.abs(np.fft.fft(oL["A_out"])) ** 2
+    kxc = np.sum(bl.kx * F) / np.sum(F)
+    relF = abs(kxc - bl.k0 * dndt * bslope * Lzl) / abs(bl.k0 * dndt * bslope * Lzl)
+    en = oL["I_out"].sum() / (np.abs(Al) ** 2).sum()
+    # quadratic hot-centre -> focusing (dndt>0 narrower, dndt<0 broader)
+    Tq = -0.5 * 5e12 * bl.x ** 2
+    wn = bl.rms_width(bl.propagate(Al, 0.6e-3, 300)["I_out"])
+    wf = bl.rms_width(bl.propagate(Al, 0.6e-3, 300, T_profile_x=Tq, dndt_per_K=2e-3)["I_out"])
+    wd = bl.rms_width(bl.propagate(Al, 0.6e-3, 300, T_profile_x=Tq, dndt_per_K=-2e-3)["I_out"])
+    g_f = bool(f_byte and relF < 1e-9 and abs(en - 1.0) < 1e-9 and wf < wn < wd)
+    ok = ok and g_f
+    print("[bpm] GATE F: thermal lens -- dndt=0 byte-id {}; linear-ramp steer exact (rel {:.1e}, energy "
+          "{:.7f}); hot-centre focuses (wf {:.2e} < wn {:.2e} < wd {:.2e}) -> {}".format(
+              f_byte, relF, en, wf, wn, wd, "PASS" if g_f else "FAIL"), flush=True)
+
     print("[bpm] *** QD-SOA TRANSVERSE BPM: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

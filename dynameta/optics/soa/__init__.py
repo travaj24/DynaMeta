@@ -29,7 +29,7 @@ from dynameta.optics.soa.noise_metrics import (henry_factor, linewidth_from_fiel
 from dynameta.optics.soa.qd_gain import (Leakage, ManyBody, QDGainModel, QDGainParams,
                                          SelfHeating)
 from dynameta.optics.soa.thermal import (dome_analytic, sample_T_along_axis,
-                                         thermal_profile_steady_1d)
+                                         thermal_profile_steady_1d, thermal_profile_transient_1d)
 from dynameta.optics.soa.transverse_bpm import TransverseBPM
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
@@ -45,4 +45,4 @@ __all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "Leakage",
            "predistort", "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K",
            "facet_gain_ripple_dB", "ripple_enob_ceiling",
            "rin_spectrum", "linewidth_from_field", "henry_factor",
-           "schawlow_townes_henry_linewidth", "TransverseBPM"]
+           "schawlow_townes_henry_linewidth", "TransverseBPM", "thermal_profile_transient_1d"]
