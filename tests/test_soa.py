@@ -276,6 +276,31 @@ def test_fabry_perot_reduction_and_ripple():
         soa.amplify_fabry_perot(A, 80e-3, R1=1.0, R2=0.0)      # R>=1 invalid
 
 
+def test_ase_zresolved_reduction_and_profile():
+    # OFF == frozen transport; ON gives a non-uniform S_ase(z) anti-correlated with the local gain
+    from dynameta.optics.soa import (ase_self_consistent_zresolved, ase_spectrum_bidirectional)
+    # (small grid here; the full convergence/correlation rigor lives in validation/qd_soa_ase_zresolved)
+    m = QDGainModel(QDGainParams(n_groups=9).with_detailed_balance_taus())
+    nu0 = m.p.nu0_Hz
+    nu = np.linspace(nu0 - 3e12, nu0 + 3e12, 9)
+    dnu = np.gradient(nu)
+    L, I, nz = 1.5e-3, 80e-3, 8
+    off = ase_self_consistent_zresolved(m, I, 0.0, nu0, nu, dnu, L, n_slices=nz,
+                                        ase_saturation=False, m_pol=2)
+    y = m.steady_state(I, S_conf_m3=0.0, nu_s_Hz=nu0)
+    g = m.material_gain_per_m(m.rho_GS(y), nu)
+    gsp = m.emission_gain_per_m(m.rho_GS(y), nu)
+    ref = ase_spectrum_bidirectional(np.tile(g, (nz, 1)), np.tile(gsp, (nz, 1)), L / nz, nu, dnu,
+                                     m.p.Gamma, m_pol=2)
+    assert np.max(np.abs(off["S_f"] - ref["S_f"])) < 1e-280 + 1e-13 * np.max(ref["S_f"])
+    on = ase_self_consistent_zresolved(m, I, 0.0, nu0, nu, dnu, L, n_slices=nz, ase_saturation=True,
+                                       ase_strength=300.0, m_pol=2, beta=0.6, max_iter=60)
+    Sz = on["S_ase_z"]
+    gpk = on["g_sat_z"][:, np.argmin(np.abs(nu - nu0))]
+    assert on["converged"] and (Sz.max() - Sz.min()) / Sz.mean() > 0.1   # real z-profile
+    assert np.corrcoef(Sz, gpk)[0, 1] < -0.99                            # gain low where ASE high
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:

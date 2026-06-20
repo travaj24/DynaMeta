@@ -152,7 +152,7 @@ def spectral_noise_figure(S_f_per_pol, G_nu, nu_grid_Hz, *, eta_in=1.0):
 
 
 def ase_spectrum_bidirectional(g_slices_nu, gsp_slices_nu, dz_m, nu_grid_Hz, dnu_grid_Hz, Gamma, *,
-                               alpha_i_per_m=0.0, m_pol=2, direction="both"):
+                               alpha_i_per_m=0.0, m_pol=2, direction="both", return_profile=False):
     """Bidirectional, spectrally-resolved ASE on a GIVEN (frozen) z-resolved gain profile. Inputs
     g_slices_nu, gsp_slices_nu of shape (N_slices, K) are the net modal gain g(nu_k, z_m) and the
     spontaneous-EMISSION gain g_sp(nu_k, z_m) [1/m] (q = Gamma g_sp h nu is the per-pol source;
@@ -182,16 +182,22 @@ def ase_spectrum_bidirectional(g_slices_nu, gsp_slices_nu, dz_m, nu_grid_Hz, dnu
     amp = np.exp(a * dz_m)
     small = np.abs(a * dz_m) < 1e-12
     emit = np.where(small, q * dz_m, q * (amp - 1.0) / np.where(small, 1.0, a))
+    Sf_z = np.zeros((N, nu.size)) if return_profile else None
+    Sb_z = np.zeros((N, nu.size)) if return_profile else None
     Sf = np.zeros(nu.size)
     Sf_acc = np.zeros(nu.size)
     for m in range(N):                                       # forward sweep 0..N-1
         Sf = Sf * amp[m] + emit[m]
         Sf_acc += Sf
+        if return_profile:
+            Sf_z[m] = Sf                                     # forward PSD leaving slice m
     Sb = np.zeros(nu.size)
     Sb_acc = np.zeros(nu.size)
     for m in range(N - 1, -1, -1):                           # backward sweep N-1..0
         Sb = Sb * amp[m] + emit[m]
         Sb_acc += Sb
+        if return_profile:
+            Sb_z[m] = Sb                                     # backward PSD leaving slice m (toward 0)
     if direction == "forward":
         Sb = np.zeros(nu.size)
         Sb_acc = np.zeros(nu.size)
@@ -201,9 +207,13 @@ def ase_spectrum_bidirectional(g_slices_nu, gsp_slices_nu, dz_m, nu_grid_Hz, dnu
     G = np.exp(np.sum(a, axis=0) * dz_m)                     # net single-pass gain per nu
     Gg = np.exp(np.sum(Gamma * g, axis=0) * dz_m)            # gain-only (for reference)
     NF = spectral_noise_figure(Sf, G, nu)                    # loss already carried by net-prop S_f
-    return {"S_f": Sf, "S_b": Sb, "S_f_out": float(m_pol) * Sf, "S_b_out": float(m_pol) * Sb,
-            "S_f_mean": Sf_acc / N, "S_b_mean": Sb_acc / N, "G": G, "Gg": Gg, "NF": NF,
-            "nu": nu, "dnu": dnu}
+    out = {"S_f": Sf, "S_b": Sb, "S_f_out": float(m_pol) * Sf, "S_b_out": float(m_pol) * Sb,
+           "S_f_mean": Sf_acc / N, "S_b_mean": Sb_acc / N, "G": G, "Gg": Gg, "NF": NF,
+           "nu": nu, "dnu": dnu}
+    if return_profile:
+        out["S_f_z"] = Sf_z                                  # (N, K) per-slice forward / backward PSD
+        out["S_b_z"] = Sb_z
+    return out
 
 
 def ase_self_consistent(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid_Hz, dnu_grid_Hz, L_m, *,
@@ -258,4 +268,76 @@ def ase_self_consistent(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid_Hz, dnu_g
             res.update({"S_ase": S_ase, "g_unsat": g_unsat, "n_iter": it + 1, "converged": True})
             return res
     raise RuntimeError("ase_self_consistent: ASE fixed point not converged in {} iterates "
+                       "(raise max_iter or lower beta)".format(max_iter))
+
+
+def ase_self_consistent_zresolved(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid_Hz, dnu_grid_Hz,
+                                  L_m, *, n_slices=40, alpha_i_per_m=0.0, m_pol=2,
+                                  ase_saturation=True, beta=0.5, tol=1e-6, max_iter=80,
+                                  ase_strength=1.0):
+    """Z-RESOLVED self-consistent ASE: refines the lumped ase_self_consistent so EACH slice's gain is
+    saturated by its OWN local ASE photon density (not one device-averaged S_ase). The coupled
+    fixed point, iterated to convergence:
+      g(z, nu), g_sp(z, nu)  from  model.steady_state(I, S_conf = S_signal + ase_strength S_ase(z))
+      -> ase_spectrum_bidirectional(return_profile) -> S_f(z, nu), S_b(z, nu)
+      -> local confined ASE density  S_ase(z) = Gamma/(v_g A_mode) m_pol sum_nu (S_f+S_b) dnu/(h nu)
+      -> repeat (damped beta).
+    For a uniform unsaturated device the forward ASE grows toward z=L and the backward toward z=0, so
+    S_ase(z) and the gain depression carry a real z-PROFILE (U/dome shaped, deepest where the
+    bidirectional ASE flux peaks). SCOPE / MAGNITUDE: in the typical (stiff-QD-gain) regime the ASE
+    back-action is WEAK -- the local gain depression is ~1e-4 relative and its spatial spread ~1e-4 --
+    so the DEVICE-INTEGRATED output depends essentially only on mean(S_ase(z)) and is unchanged vs the
+    lumped ase_self_consistent (which this reduces to whenever S_ase(z) is ~uniform); the refinement is
+    the spatial PROFILE itself, not the aggregate output. The refinement is purely LONGITUDINAL: the
+    per-slice ASE load enters steady_state as a SCALAR S_conf saturating the carriers through the
+    signal-frequency line filter L(nu_s), so spectral saturation stays lumped (an 8 THz ASE comb is
+    treated as monochromatic at nu_s; a spectrally-resolved version would weight each band by its own
+    L(nu_k)). Reduces to the frozen ase_spectrum_bidirectional on the signal-only gain when
+    ase_saturation=False. Returns the ase_spectrum_bidirectional dict (with S_f_z/S_b_z) plus S_ase_z
+    (n_slices,), g_sat_z (n_slices, K), g_unsat (K), n_iter, converged. Raises on non-convergence."""
+    p = model.p
+    nu = np.atleast_1d(np.asarray(nu_grid_Hz, dtype=np.float64))
+    dnu = np.atleast_1d(np.asarray(dnu_grid_Hz, dtype=np.float64))
+    nz = int(n_slices)
+    dz = L_m / nz
+    hnu = H_PLANCK * nu
+    conv = p.Gamma / (p.v_g_m_s * p.A_mode_m2)
+
+    def gains(S_ase_load):                                   # per-slice gain at the local ASE load
+        rows_g, rows_gsp = [], []
+        for s in np.atleast_1d(S_ase_load):
+            y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * float(s),
+                                   nu_s_Hz=nu_s_Hz)
+            rho = model.rho_GS(y)
+            rows_g.append(model.material_gain_per_m(rho, nu))
+            rows_gsp.append(model.emission_gain_per_m(rho, nu))
+        return np.atleast_2d(np.array(rows_g)), np.atleast_2d(np.array(rows_gsp))
+
+    g_unsat = model.material_gain_per_m(model.rho_GS(
+        model.steady_state(I_A, S_conf_m3=S_conf_signal_m3, nu_s_Hz=nu_s_Hz)), nu)
+
+    def spectrum(S_ase_z):
+        g_z, gsp_z = gains(S_ase_z)
+        res = ase_spectrum_bidirectional(g_z, gsp_z, dz, nu, dnu, p.Gamma,
+                                         alpha_i_per_m=alpha_i_per_m, m_pol=m_pol,
+                                         return_profile=True)
+        res["g_sat_z"] = g_z
+        return res
+
+    if not ase_saturation:
+        res = spectrum(np.zeros(nz))
+        res.update({"S_ase_z": np.zeros(nz), "g_unsat": g_unsat, "n_iter": 0, "converged": True})
+        return res
+    S_ase_z = np.zeros(nz)
+    for it in range(max_iter):
+        res = spectrum(S_ase_z)
+        S_new = conv * m_pol * np.sum((res["S_f_z"] + res["S_b_z"]) * dnu / hnu, axis=1)   # (nz,)
+        S_d = (1.0 - beta) * S_ase_z + beta * S_new
+        done = bool(np.max(np.abs(S_d - S_ase_z)) <= tol * max(float(np.max(S_d)), 1e-300) + 1e-300)
+        S_ase_z = S_d
+        if done:
+            res = spectrum(S_ase_z)
+            res.update({"S_ase_z": S_ase_z, "g_unsat": g_unsat, "n_iter": it + 1, "converged": True})
+            return res
+    raise RuntimeError("ase_self_consistent_zresolved: profile not converged in {} iterates "
                        "(raise max_iter or lower beta)".format(max_iter))
