@@ -404,6 +404,20 @@ datasheet as new work, not reused; see Section 8.1.)
      STANDALONE chi/alpha accessor NOT yet wired into the marcher (device dynamics unchanged until a
      caller drives the per-slice gain through it with N_w(z)) + hardened a gate with an independent
      BGR value.
+   - **Stochastic Langevin spontaneous-emission noise -- SHIPPED 2026-06-20** (`amplify_coherent(
+     langevin=True, seed=...)` + `amplify_fabry_perot(langevin=...)` + `emission_gain_per_m_slices`
+     + `validation/qd_soa_langevin.py`, 5 gates). Each slice each step adds a complex-Gaussian field
+     increment of variance Gamma g_sp(z) h nu v_g -- the fluctuation-dissipation spontaneous source
+     (first-principles, no fitted coefficient: the geometric downstream-amplified slice sum reduces to
+     the analytic n_sp h nu (G-1)/dt EXACTLY). Gates: langevin=False byte-identical (coherent + FP) +
+     seed reproducible; mean ASE <|A|^2> dt == analytic ase_output_psd (2.8e-3); complex-Gaussian ASE
+     -> intensity exponential <I^2>/<I>^2 = 2.012; the Henry amplitude-phase coupling DIRECTION (low-f
+     phase noise rises with alpha, 1.11/1.25/1.37). SCOPE (honest, the adversary SHIP-ed with no
+     fixes): the quantitative (1+alpha^2) laser linewidth is a gain-CLAMPED above-threshold result
+     whose Hz-MHz width is below the fs-step time-domain marcher's FFT resolution; the marcher captures
+     the coupling direction + the gain clamp (FP, Phase 13), not the absolute laser linewidth -- that
+     needs a frequency-domain / clamped-gain treatment. The FP-Langevin path (noise seeds lasing) is
+     available for that follow-on.
 
 ---
 

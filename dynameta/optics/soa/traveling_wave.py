@@ -239,7 +239,8 @@ class TravelingWaveSOA:
 
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
                          state0=None, ultrafast=None, line_filter: bool = False,
-                         beta2_s2_per_m: float = None, gvd_segments: int = 1):
+                         beta2_s2_per_m: float = None, gvd_segments: int = 1,
+                         langevin: bool = False, seed=None):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -300,6 +301,16 @@ class TravelingWaveSOA:
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
         lf = self._line_filter_init(nu) if line_filter else None
+        # Langevin spontaneous-emission noise (opt-in). Each slice each step adds a complex Gaussian
+        # field increment of variance Gamma g_sp(z) h nu v_g (real + imag each half) -- the
+        # fluctuation-dissipation source whose downstream-amplified accumulation reproduces the
+        # analytic ASE PSD n_sp h nu (G-1) EXACTLY (the geometric slice sum cancels to that), and
+        # whose phase diffusion gives the Henry (1 + alpha^2) linewidth. Reproducible via seed; OFF
+        # (default) makes no RNG calls -> the deterministic engine is byte-identical.
+        lang = None
+        if langevin:
+            lang = {"rng": np.random.default_rng(seed),
+                    "npref": 0.5 * gam * H_PLANCK * nu * self.model.v_g}   # = var/2 per unit g_sp
         # GVD as a symmetric (Strang) split at the device scale: D(L/2) . N(L) . D(L/2). The
         # dispersion operator D is the EXACT unitary spectral phase on the full waveform (the
         # retarded-time signal); the streaming nonlinear marcher N is left untouched. Half the
@@ -338,6 +349,11 @@ class TravelingWaveSOA:
                 # waveforms; first order in the small per-slice deviation (~1e-3).
                 new[1:] = amp * (A_ref + 0.5 * gam * (sum_p - g_un * A_ref) * self.dz)
                 lf["pol"] = lf["E"] * lf["pol"] + src * lf["coef"]
+            if lang is not None:                               # Langevin spontaneous-emission source
+                gsp = self.model.emission_gain_per_m_slices(state, nu)   # (nz,) >= 0
+                sig = np.sqrt(lang["npref"] * gsp)             # std of real (= imag) part per slice
+                new[1:] = new[1:] + sig * (lang["rng"].standard_normal(self.nz)
+                                           + 1j * lang["rng"].standard_normal(self.nz))
             P_mid = 0.5 * (np.abs(Anode[:-1]) ** 2 + np.abs(Anode[1:]) ** 2)
             self._uf_relax(uf, P_mid, nu)
             state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
@@ -454,7 +470,7 @@ class TravelingWaveSOA:
 
     def amplify_fabry_perot(self, A_in, drive, *, R1: float, R2: float, nu_s_Hz=None,
                             alpha_lef=None, roundtrip_phase: float = 0.0, state0=None,
-                            ultrafast=None):
+                            ultrafast=None, langevin: bool = False, seed=None):
         """Fabry-Perot SOA: counter-propagating FORWARD (F) and BACKWARD (B) complex envelopes
         coupled by the facet POWER reflectivities R1, R2 (field reflectivities sqrt(R)), both
         saturating the SHARED carrier reservoir (the dots see |F|^2 + |B|^2). The cavity replaces the
@@ -494,6 +510,11 @@ class TravelingWaveSOA:
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
+        # Langevin spontaneous emission into BOTH counter-propagating modes (seeds lasing from noise;
+        # near threshold the gain-clamped amplitude-phase coupling gives the Henry (1+alpha^2)
+        # linewidth). OFF -> no RNG, byte-identical.
+        lang = {"rng": np.random.default_rng(seed),
+                "npref": 0.5 * gam * H_PLANCK * nu * self.model.v_g} if langevin else None
         F = np.zeros(self.nz + 1, dtype=np.complex128)
         B = np.zeros(self.nz + 1, dtype=np.complex128)
         A_out = np.empty(nt, dtype=np.complex128)
@@ -507,6 +528,12 @@ class TravelingWaveSOA:
             nF[0] = t1 * A_in[n] + r1 * ph * B[0]              # facet 1: input + reflected backward
             nB[:-1] = B[1:] * amp                              # backward advection + gain
             nB[self.nz] = r2 * ph * F[self.nz]                 # facet 2: reflected forward
+            if lang is not None:                               # spontaneous source into both modes
+                gsp = self.model.emission_gain_per_m_slices(state, nu)
+                sg = np.sqrt(lang["npref"] * gsp)
+                rng = lang["rng"]
+                nF[1:] = nF[1:] + sg * (rng.standard_normal(self.nz) + 1j * rng.standard_normal(self.nz))
+                nB[:-1] = nB[:-1] + sg * (rng.standard_normal(self.nz) + 1j * rng.standard_normal(self.nz))
             P_mid = (0.5 * (np.abs(F[:-1]) ** 2 + np.abs(F[1:]) ** 2)
                      + 0.5 * (np.abs(B[:-1]) ** 2 + np.abs(B[1:]) ** 2))   # both pump the reservoir
             self._uf_relax(uf, P_mid, nu)
