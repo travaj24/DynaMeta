@@ -301,6 +301,30 @@ def test_ase_zresolved_reduction_and_profile():
     assert np.corrcoef(Sz, gpk)[0, 1] < -0.99                            # gain low where ASE high
 
 
+def test_many_body_gain_reduction_and_bgr():
+    from dynameta.optics.soa import ManyBody
+    m0 = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus())
+    nu0 = m0.p.nu0_Hz
+    nu = np.linspace(nu0 - 8e12, nu0 + 8e12, 400)
+    rho = np.full(41, 0.9)
+    # enabled with zero corrections == free-carrier
+    mr = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus(),
+                     many_body=ManyBody(enabled=True, bgr_coeff=0.0, gamma_eid_Hz=0.0,
+                                        coulomb_enh=0.0))
+    g_mb, gi = mr.material_gain_index_mb(rho, nu, 1e24)
+    assert np.max(np.abs(g_mb - m0.material_gain_per_m(rho, nu))) < 1e-9 * np.max(np.abs(g_mb)) + 1e-9
+    # BGR red-shifts the peak by the analytic amount
+    nc = np.linspace(nu0 - 2e13, nu0 + 5e12, 4000)
+    mB = QDGainModel(QDGainParams(n_groups=41).with_detailed_balance_taus(),
+                     many_body=ManyBody(enabled=True, exciton_rydberg_meV=12.0, exciton_bohr_nm=12.0,
+                                        bgr_coeff=1.9))
+    gN, _ = mB.material_gain_index_mb(rho, nc, 1e24)
+    meas = nc[np.argmax(gN)] - nu0
+    assert abs(meas - mB._mb_bgr_shift_Hz(1e24)) / abs(mB._mb_bgr_shift_Hz(1e24)) < 0.05
+    with pytest.raises(ValueError):
+        ManyBody(enabled=True, exciton_rydberg_meV=-1.0)              # guard
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:

@@ -402,13 +402,71 @@ class SelfHeating:
         return self.Rth_K_W * self.Cth_J_K
 
 
+@dataclass(frozen=True)
+class ManyBody:
+    """Closed-form many-body-corrected QD gain (opt-in screened-Hartree-Fock-FLAVOURED physics; NOT a
+    solved self-consistent k-resolved semiconductor-Bloch-equation gain -- there is no k-summation,
+    screened-Coulomb matrix, or self-energy iteration, only the Haug-Koch closed-form universal forms
+    with input coefficients). STATUS: this is a STANDALONE chi(nu)/alpha analysis accessor
+    (material_gain_index_mb); it is NOT wired into the traveling-wave marcher (gain_per_m_slices /
+    rhs_fields / step_slices), so the simulated amplifier's gain and dynamics are UNCHANGED whether or
+    not ManyBody is enabled. The phenomenological free-carrier gain is a sum of complex Lorentzians
+    whose REAL part is the gain and IMAGINARY part its Kramers-Kronig index partner (one analytic
+    chi(nu)). This adds the three dominant finite-density many-body corrections, all functions of the
+    carrier density N (and T), so the gain, the carrier-induced index, and hence alpha become a single
+    CONSISTENT (one-chi) object rather than three separately tuned knobs:
+
+      - Bandgap renormalization (BGR): the screened-exchange + Coulomb-hole self-energy red-shifts
+        every transition, dE_BGR(N) = -bgr_coeff * E_R * (a_B^3 N)^(1/3)  (Haug-Koch universal 3D
+        form; bgr_coeff ~ 1.9). E_R (exciton Rydberg) and a_B (exciton Bohr radius) carry the
+        material (m*, eps). nu_j -> nu_j + dE_BGR(N)/h  (dE_BGR < 0 -> red-shift).
+      - Excitation-induced dephasing (EID) + phonon dephasing: the homogeneous HWHM grows with
+        carrier density (carrier-carrier scattering) and temperature (LO-phonon, Bose-occupied):
+        gamma(N,T) = gamma0 + gamma_eid (N/N_ref) + gamma_phonon [(2 n_LO(T)+1) - (2 n_LO(T0)+1)].
+        The EID broadening CONSERVES oscillator strength (the line area), so the peak drops as
+        gamma0/gamma -- the physically correct invariant (the free-carrier model holds the peak,
+        which over-counts the integrated gain when broadened).
+      - Coulomb / excitonic enhancement, screened away toward the Mott density:
+        C_enh(N) = 1 + coulomb_enh * exp(-N / N_mott)  (-> 1 at high N).
+
+    enabled = False (default) -> every correction is the identity and the gain reduces EXACTLY to
+    material_gain_per_m. SCOPE: per-group (each inhomogeneous group renormalized by the SAME N) --
+    the QD-appropriate limit since dots are spatially separated; a full k-resolved multiband SBE with
+    the wetting-layer continuum and inter-group Coulomb coupling is the deeper (continuum) refinement.
+    SI; ASCII. (Haug & Koch, Quantum Theory of the Optical and Electronic Properties of Semiconductors.)"""
+    enabled: bool = False
+    exciton_rydberg_meV: float = 10.0     # exciton Rydberg E_R [meV] (sets the BGR + enhancement scale)
+    exciton_bohr_nm: float = 12.0         # exciton Bohr radius a_B [nm]
+    bgr_coeff: float = 1.9                # universal Haug-Koch BGR coefficient (~1.9, 3D)
+    gamma_eid_Hz: float = 0.0             # EID HWHM at N = N_ref_eid [Hz]; 0 -> no density broadening
+    N_ref_eid_m3: float = 1.0e24          # reference density for the EID slope
+    gamma_phonon_Hz: float = 0.0          # LO-phonon dephasing HWHM scale [Hz]; 0 -> no T broadening
+    E_LO_meV: float = 36.0                # LO-phonon energy [meV] (Bose occupation)
+    coulomb_enh: float = 0.0              # excitonic peak enhancement at low density; 0 -> none
+    N_mott_m3: float = 5.0e24             # Mott density (enhancement screened to 1 above this)
+
+    def __post_init__(self):
+        if self.exciton_rydberg_meV <= 0.0 or self.exciton_bohr_nm <= 0.0:
+            raise ValueError("ManyBody: exciton_rydberg_meV and exciton_bohr_nm must be > 0")
+        if self.bgr_coeff < 0.0 or self.gamma_eid_Hz < 0.0 or self.gamma_phonon_Hz < 0.0:
+            raise ValueError("ManyBody: bgr_coeff, gamma_eid_Hz, gamma_phonon_Hz must be >= 0")
+        if self.N_ref_eid_m3 <= 0.0 or self.N_mott_m3 <= 0.0:
+            raise ValueError("ManyBody: N_ref_eid_m3 and N_mott_m3 must be > 0")
+
+    @property
+    def active(self) -> bool:
+        return bool(self.enabled)
+
+
 class QDGainModel:
     """Group-resolved QD-SOA gain core. State vector y = [N_w, rho_ES_0..G-1, rho_GS_0..G-1]."""
 
     def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False,
-                 self_heating: "Optional[SelfHeating]" = None):
+                 self_heating: "Optional[SelfHeating]" = None,
+                 many_body: "Optional[ManyBody]" = None):
         self.p = params if params is not None else QDGainParams()
         p = self.p
+        self.mb = many_body                                   # microscopic many-body gain (opt-in)
         # Optional numba carrier-step accelerator (4.7x at ng=1, 7x at ng=41; bit-parity with the
         # numpy reference). Default OFF so results are byte-stable across machines (numba-present or
         # not); opt in with fast=True for long transient runs. Explicit fast=True without numba is
@@ -579,6 +637,70 @@ class QDGainModel:
         em = (rho * rho) * self.w_j                          # per-group emission (upper population)
         g = self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * (L @ em)
         return g if np.ndim(nu_Hz) else float(g[0])
+
+    # ---- closed-form many-body-corrected gain (screened-HF-flavoured, opt-in; NOT a solved SBE) ----
+    def _mb_bgr_shift_Hz(self, N_m3) -> float:
+        """Bandgap-renormalization shift dnu(N) = dE_BGR(N)/h [Hz] (<= 0, a red-shift). Universal
+        screened-exchange + Coulomb-hole form dE_BGR = -bgr_coeff E_R (a_B^3 N)^(1/3)."""
+        mb = self.mb
+        E_R = mb.exciton_rydberg_meV * 1.0e-3 * Q_E          # exciton Rydberg [J]
+        a_B = mb.exciton_bohr_nm * 1.0e-9                    # exciton Bohr radius [m]
+        N = max(float(N_m3), 0.0)
+        return -mb.bgr_coeff * E_R * (a_B ** 3 * N) ** (1.0 / 3.0) / H_PLANCK
+
+    def _mb_hwhm_Hz(self, N_m3, T_K) -> float:
+        """Density + temperature dependent homogeneous HWHM gamma(N,T) [Hz] = gamma0 + EID(N) +
+        phonon-excess(T). Reduces to gamma0 = 0.5 fwhm_hom at N=0 and T=T_nominal."""
+        mb, p = self.mb, self.p
+        hw0 = 0.5 * p.fwhm_hom_Hz
+        eid = mb.gamma_eid_Hz * (max(float(N_m3), 0.0) / mb.N_ref_eid_m3)
+        ph = 0.0
+        if mb.gamma_phonon_Hz > 0.0:
+            elo = mb.E_LO_meV * 1.0e-3 * Q_E
+            nT = 1.0 / np.expm1(elo / (KB * float(T_K)))     # LO-phonon Bose occupation at T
+            n0 = 1.0 / np.expm1(elo / (KB * p.T_K))          # ... at the nominal T (excess only)
+            ph = mb.gamma_phonon_Hz * 2.0 * (nT - n0)
+        return hw0 + eid + ph
+
+    def material_gain_index_mb(self, rho_GS, nu_Hz, N_carrier_m3, T_K=None) -> Tuple:
+        """Microscopic many-body GS gain g(nu) [1/m] AND its carrier-induced index partner gi(nu)
+        [1/m -- the complex gain coefficient is g + i gi, gi the dispersive Kramers-Kronig partner]
+        from the renormalized complex susceptibility. BGR red-shifts the comb by dnu_BGR(N), EID +
+        phonon set the HWHM gamma(N,T) with OSCILLATOR-STRENGTH conservation (the peak scales as
+        gamma0/gamma so the line area is invariant under broadening), and the Coulomb enhancement
+        C_enh(N) scales the peak. g and gi are the Re and Im of the SAME analytic complex Lorentzian
+        sum, so gi == Hilbert(g) by construction (KK-consistent) and the local alpha = -gi/g is the
+        KK-consistent ratio of the renormalized chi (no separate alpha knob; the coefficients are
+        still input parameters, not solved). Reduces EXACTLY to (material_gain_per_m, its KK index)
+        when many_body is
+        disabled OR all corrections are zero (bgr_coeff=gamma_eid=gamma_phonon=coulomb_enh=0).
+
+        INTEGRATION SCOPE: this is the standalone many-body susceptibility ACCESSOR (pass the carrier
+        density N explicitly). It is NOT yet wired into the traveling-wave marcher's per-slice gain
+        (gain_per_m_slices still uses the free-carrier material_gain_per_m), so the device dynamics
+        are unchanged until a caller drives the per-slice gain through this method with the local
+        wetting-layer density N_w(z) -- the straightforward integration follow-on."""
+        p = self.p
+        rho = np.asarray(rho_GS, dtype=np.float64)
+        nu = np.atleast_1d(np.asarray(nu_Hz, dtype=np.float64))
+        inv = (2.0 * rho - 1.0) * self.w_j
+        pref0 = self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2
+        if self.mb is None or not self.mb.active:            # free-carrier (un-renormalized chi)
+            x = (nu[:, None] - self.nu_j[None, :]) / (0.5 * p.fwhm_hom_Hz)
+            g = pref0 * ((1.0 / (1.0 + x * x)) @ inv)
+            gi = pref0 * ((x / (1.0 + x * x)) @ inv)
+            return (g if np.ndim(nu_Hz) else float(g[0]), gi if np.ndim(nu_Hz) else float(gi[0]))
+        mb = self.mb
+        T = float(T_K) if T_K is not None else p.T_K
+        hw = self._mb_hwhm_Hz(N_carrier_m3, T)
+        nu_t = self.nu_j + self._mb_bgr_shift_Hz(N_carrier_m3)         # BGR-shifted comb
+        cenh = 1.0 + mb.coulomb_enh * np.exp(-max(float(N_carrier_m3), 0.0) / mb.N_mott_m3)
+        osc = (0.5 * p.fwhm_hom_Hz) / hw                              # area-conserving peak factor
+        x = (nu[:, None] - nu_t[None, :]) / hw
+        pref = pref0 * cenh
+        g = pref * ((osc / (1.0 + x * x)) @ inv)                     # gain (Re of the complex line)
+        gi = pref * ((osc * x / (1.0 + x * x)) @ inv)               # index partner (Im, KK)
+        return (g if np.ndim(nu_Hz) else float(g[0]), gi if np.ndim(nu_Hz) else float(gi[0]))
 
     def power_to_photon_density(self, P_W: float, nu_Hz: float) -> float:
         """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided
