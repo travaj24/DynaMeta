@@ -277,8 +277,15 @@ class TravelingWaveSOA:
         Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
         frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
-        alpha = float(alpha_lef) if alpha_lef is not None else float(
-            getattr(self.model, "alpha_lef", 0.0))
+        # alpha: an explicit alpha_lef arg pins a constant scalar; otherwise the model supplies it,
+        # per-slice and carrier-density-dependent via alpha_lef_slices(state) if available (the
+        # constant-alpha models / slope=0 return a scalar -> the engine stays byte-identical)
+        if alpha_lef is not None:
+            alpha = float(alpha_lef)
+            alpha_dyn = None
+        else:
+            alpha = float(getattr(self.model, "alpha_lef", 0.0))
+            alpha_dyn = getattr(self.model, "alpha_lef_slices", None)
         beta2 = float(beta2_s2_per_m) if beta2_s2_per_m is not None else float(
             getattr(self.model, "beta2_s2_per_m", 0.0))
         A_in = np.asarray(A_in, dtype=np.complex128)
@@ -286,7 +293,7 @@ class TravelingWaveSOA:
             raise ValueError("amplify_coherent: A_in must be a 1-D complex waveform >= 2 samples")
         if beta2 != 0.0 and int(gvd_segments) > 1:
             return self._amplify_coherent_segmented(
-                A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha,
+                A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha_lef,
                 ultrafast=ultrafast, line_filter=line_filter)
         nt = A_in.size
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
@@ -310,9 +317,10 @@ class TravelingWaveSOA:
         for n in range(nt):
             new = np.empty_like(Anode)
             new[0] = A_in[n]
+            a_eff = alpha if alpha_dyn is None else alpha_dyn(state)   # per-slice density-dependent
             if lf is None:
                 g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
-                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
+                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
                 new[1:] = Anode[:-1] * amp
             else:
                 A_ref = Anode[:-1]
@@ -322,7 +330,7 @@ class TravelingWaveSOA:
                 sum_p = np.sum(avg_p, axis=1)                       # (nz,); CW: 2 Gamma_field(nu_s+f) A_ref
                 g_un = self.model.gain_per_m_slices(state, nu)      # carrier real gain (no division)
                 g_flat = self._uf_suppress(uf, g_un)
-                amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * alpha) - self.alpha_i) * self.dz)
+                amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
                 # flat carrier gain (multiplicative, == OFF amp) + ADDITIVE dispersive correction:
                 # the polarization sum_p minus its flat-gain equivalent g_un*A_ref is the resonant
                 # line deviation (zero at the carrier). Additive so the line radiates field into a
@@ -384,6 +392,65 @@ class TravelingWaveSOA:
         t = np.arange(nt) * self.dt
         return {"t": t, "A_in": A_in, "A_out": field, "P_in": np.abs(A_in) ** 2,
                 "P_out": np.abs(field) ** 2, "dt": self.dt, "state": state}
+
+    def amplify_coherent_dualpol(self, A_te_in, A_tm_in, drive, *, nu_s_Hz=None, alpha_lef=None,
+                                 pdg_ratio: float = 1.0, state0=None, ultrafast=None):
+        """Polarization-dependent gain (PDG): co-propagate the TE and TM complex envelopes through
+        ONE shared carrier reservoir. The TM modal gain is pdg_ratio x the TE modal gain --
+        pdg_ratio folds the TE/TM modal-confinement ratio and the QD material gain anisotropy into a
+        single number (flat self-assembled QDs favour TE, so pdg_ratio < 1). Both polarizations
+        deplete the SAME dots: the confined density that saturates the carriers is the modal-weighted
+        total |A_TE|^2 + pdg_ratio |A_TM|^2, so a strong signal in one polarization CROSS-SATURATES
+        the gain seen by the other (the physics a single-pol run cannot show). pdg_ratio = 1 makes
+        the two pols gain-degenerate and each reduces EXACTLY to amplify_coherent (flat-gain branch).
+
+        Flat-gain path (no line filter / GVD -- those are single-pol features); the alpha(rho)
+        density dependence applies identically to both pols. Returns a dict: A_te_out / A_tm_out
+        (complex), P_te_out / P_tm_out, t, dt, state. PDG(dB) = 10 log10(G_TE / G_TM) on the steady
+        tails (small-signal -> (1 - pdg_ratio) Gamma g L * 10/ln10)."""
+        nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
+        if alpha_lef is not None:
+            alpha, alpha_dyn = float(alpha_lef), None
+        else:
+            alpha = float(getattr(self.model, "alpha_lef", 0.0))
+            alpha_dyn = getattr(self.model, "alpha_lef_slices", None)
+        r = float(pdg_ratio)
+        te_in = np.asarray(A_te_in, dtype=np.complex128)
+        tm_in = np.asarray(A_tm_in, dtype=np.complex128)
+        if te_in.shape != tm_in.shape or te_in.ndim != 1 or te_in.size < 2:
+            raise ValueError("amplify_coherent_dualpol: A_te_in, A_tm_in must be equal-length 1-D "
+                             ">= 2 samples")
+        nt = te_in.size
+        state = self.model.init_slices(self.nz, drive) if state0 is None else state0
+        gam = self.model.gamma_confinement
+        uf = self._uf_init(ultrafast)
+        te = np.zeros(self.nz + 1, dtype=np.complex128)
+        tm = np.zeros(self.nz + 1, dtype=np.complex128)
+        te_out = np.empty(nt, dtype=np.complex128)
+        tm_out = np.empty(nt, dtype=np.complex128)
+        for n in range(nt):
+            a_eff = alpha if alpha_dyn is None else alpha_dyn(state)
+            g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+            phase = 1.0 - 1j * a_eff
+            amp_te = np.exp(0.5 * (gam * g * phase - self.alpha_i) * self.dz)
+            amp_tm = np.exp(0.5 * (r * gam * g * phase - self.alpha_i) * self.dz)
+            nte = np.empty_like(te)
+            nte[0] = te_in[n]
+            nte[1:] = te[:-1] * amp_te
+            ntm = np.empty_like(tm)
+            ntm[0] = tm_in[n]
+            ntm[1:] = tm[:-1] * amp_tm
+            # modal-weighted total power saturates the shared reservoir (TM contributes r x its power)
+            P_mid = 0.5 * ((np.abs(te[:-1]) ** 2 + np.abs(te[1:]) ** 2)
+                           + r * (np.abs(tm[:-1]) ** 2 + np.abs(tm[1:]) ** 2))
+            self._uf_relax(uf, P_mid, nu)
+            state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            te, tm = nte, ntm
+            te_out[n] = te[-1]
+            tm_out[n] = tm[-1]
+        t = np.arange(nt) * self.dt
+        return {"t": t, "A_te_out": te_out, "A_tm_out": tm_out, "P_te_out": np.abs(te_out) ** 2,
+                "P_tm_out": np.abs(tm_out) ** 2, "dt": self.dt, "state": state}
 
     def steady_gain_dB(self, P_cw_W: float, drive, *, nu_s_Hz: float = None,
                        settle_lifetimes: float = 30.0, tol_dB: float = 1e-3) -> float:

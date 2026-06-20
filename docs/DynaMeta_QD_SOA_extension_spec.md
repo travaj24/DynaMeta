@@ -332,6 +332,24 @@ datasheet as new work, not reused; see Section 8.1.)
      verified correct (dispersion sums to L, no double-count, dz invariant, fresh per-segment
      carriers physically right); the one fix was documenting that the segmented path's leading nz
      samples are an S-dependent multi-fill transient (only the steady tail A_out[nz:] is physical).
+   - **Density-dependent alpha(rho) + polarization-dependent gain (PDG) -- SHIPPED 2026-06-19**
+     (`QDGainParams.alpha_lef_density_slope` + `QDGainModel.alpha_lef_slices` + `amplify_coherent_
+     dualpol` + `validation/qd_soa_alpha_pdg.py`, 6 gates). (1) alpha(rho): the linewidth enhancement
+     factor rises with inversion as the gain clamps (dg/dN falls, the carrier-induced index dn/dN
+     persists), alpha = alpha_lef + (slope/2)(2 rho_GS - 1) applied PER SLICE from the local carrier
+     state (first-order phenomenological expansion; the FREQUENCY dependence of the carrier-induced
+     index is the resonant Kramers-Kronig line filter, already shipped). (2) PDG: amplify_coherent_
+     dualpol co-propagates TE + TM through ONE shared carrier reservoir with a TM/TE modal-gain ratio
+     pdg_ratio (folds confinement ratio + QD material anisotropy), saturated by the modal-weighted
+     total |A_TE|^2 + pdg_ratio|A_TM|^2 -- so the pols cross-saturate. Gates: slope=0 byte-identical +
+     scalar helper; alpha_lef_slices formula exact (0.0); the DEFINING relation -arg(A_out)/ln|A_out/
+     A_in| == the gain-weighted z-average of alpha(rho(z)) (unsat 3e-13, and under saturation the
+     gain-weighting beats a plain z-average, |meas-gw|=1.9e-2 << |meas-zavg|=2.3e-1, gradient 0.21);
+     PDG pdg_ratio=1 TE-only == single-pol (byte-identical); small-signal PDG == (1-r)Gamma g L*10/ln10
+     (1.4e-3); cross-saturation -- a strong TE drops the weak-TM gain 2.0 dB (shared reservoir).
+     Adversarial pass (fix-then-ship): all physics confirmed (alpha sign, single-r dualpol fold no
+     double-count, alpha_i unscaled); the one fix STRENGTHENED GATE C with the saturating discriminator
+     (the unsaturated point alone could not distinguish the gain-weighting from a plain mean).
 
 ---
 

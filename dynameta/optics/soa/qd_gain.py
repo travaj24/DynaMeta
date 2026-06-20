@@ -296,6 +296,8 @@ class QDGainParams:
     # coherent / phase
     alpha_lef: float = 2.0           # linewidth enhancement factor (carrier-induced index;
                                      # QD ~ 1-3 near the GS peak) -- drives FWM + its asymmetry
+    alpha_lef_density_slope: float = 0.0  # d(alpha)/d(rho_GS): linewidth factor rises with inversion
+                                     # as the gain clamps (dg/dN drops, dn/dN persists); 0 -> constant
     beta2_s2_per_m: float = 0.0      # background (waveguide) group-velocity dispersion d2beta/domega2
                                      # [s^2/m]; broadband non-resonant index (0 -> no GVD)
     # spectral discretization
@@ -901,6 +903,21 @@ class QDGainModel:
         """Background (waveguide) group-velocity dispersion d2 beta / d omega^2 [s^2/m] -- the
         broadband non-resonant index that amplify_coherent applies as a Fourier split-step."""
         return self.p.beta2_s2_per_m
+
+    def alpha_lef_slices(self, state):
+        """Per-slice linewidth enhancement factor alpha(rho_GS) = alpha_lef +
+        alpha_lef_density_slope * (rho_GS - 1/2), with rho_GS the ensemble-mean GS occupation of each
+        slice (rho_GS - 1/2 = inversion/2). alpha rises with carrier density as the gain clamps
+        (dg/dN falls while the carrier-induced index dn/dN persists), the measured behaviour in QD
+        SOAs. Returns the SCALAR alpha_lef when the slope is 0 (so the coherent engine is
+        byte-identical), else a (nz,) array. The frequency dependence of the carrier-induced index is
+        carried separately by the resonant Kramers-Kronig line filter (amplify_coherent line_filter)."""
+        sl = self.p.alpha_lef_density_slope
+        if sl == 0.0:
+            return self.p.alpha_lef
+        inv = self._gs_inversion(state)                       # (nz, ng) = 2 rho_GS - 1
+        inv_mean = np.tensordot(inv, self.w_j, axes=([-1], [0])) / np.sum(self.w_j)   # (nz,)
+        return self.p.alpha_lef + 0.5 * sl * inv_mean         # alpha(rho_mean), slope d(alpha)/d(rho)
 
     def photon_density(self, P_W, nu_Hz):
         """Confined photon density S_conf [m^-3] for guided power P (scalar or array)."""

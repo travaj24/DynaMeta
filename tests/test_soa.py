@@ -226,6 +226,37 @@ def test_gvd_segments_reduction_and_guard():
         soa.amplify_coherent(A, drive=None, beta2_s2_per_m=beta2, gvd_segments=7)   # 7 does not divide 128
 
 
+def test_alpha_density_dependence():
+    # slope=0 -> scalar alpha, byte-identical coherent engine; slope!=0 -> per-slice array that
+    # shifts alpha away from alpha_lef with inversion
+    m0 = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    assert m0.alpha_lef_slices(m0.init_slices(20, 40e-3)) == m0.p.alpha_lef    # scalar
+    soa0 = TravelingWaveSOA(m0, 0.5e-3, 40, nu_s_Hz=m0.p.nu0_Hz)
+    A = np.full(600, 1e-4) + 0j
+    assert np.array_equal(soa0.amplify_coherent(A, 40e-3)["A_out"],
+                          soa0.amplify_coherent(A, 40e-3, alpha_lef=2.0)["A_out"])
+    md = QDGainModel(QDGainParams(n_groups=21, alpha_lef_density_slope=4.0).with_detailed_balance_taus())
+    al = md.alpha_lef_slices(md.init_slices(20, 40e-3))
+    assert np.ndim(al) == 1 and np.all(al > md.p.alpha_lef)    # alpha rises with inversion (slope>0)
+
+
+def test_pdg_reduction_and_ratio():
+    # pdg_ratio=1 with one pol dark reduces to single-pol; small-signal PDG = (1-r) Gamma g L
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    L = 1.0e-3
+    soa = TravelingWaveSOA(m, L, 80, nu_s_Hz=m.p.nu0_Hz)
+    nt, eps = 2000, 1e-4
+    Aw = np.full(nt, eps) + 0j
+    single = soa.amplify_coherent(Aw, 60e-3, alpha_lef=0.0)["A_out"]
+    dz = soa.amplify_coherent_dualpol(Aw, np.zeros(nt) + 0j, 60e-3, alpha_lef=0.0, pdg_ratio=1.0)
+    assert np.max(np.abs(dz["A_te_out"] - single)) < 1e-15    # TE-only, r=1 == single-pol
+    r = 0.5
+    d2 = soa.amplify_coherent_dualpol(Aw, Aw, 60e-3, alpha_lef=0.0, pdg_ratio=r)
+    pdg = 10 * np.log10((np.abs(d2["A_te_out"][-1]) / np.abs(d2["A_tm_out"][-1])) ** 2)
+    g = float(m.material_gain_per_m(m.rho_GS(m.steady_state(60e-3)), m.p.nu0_Hz))
+    assert abs(pdg - (1 - r) * m.p.Gamma * g * L * 10 / np.log(10)) / pdg < 0.05
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
