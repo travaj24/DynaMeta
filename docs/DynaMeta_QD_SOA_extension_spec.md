@@ -566,6 +566,40 @@ datasheet as new work, not reused; see Section 8.1.)
      dz)`. dndt=0 byte-identical; a linear T ramp STEERS the beam by the exact prism `<kx> = k0 dndt b L`
      (Fourier-shift, rel 7e-14, energy-conserving); a hot-centred T(x) with dndt>0 FOCUSES (thermal
      lens), dndt<0 defocuses.
+   - **Vectorial PDG (TE/TM spectral split) -- SHIPPED 2026-06-20** (`amplify_coherent_dualpol(
+     tm_peak_shift_Hz=)`; `validation/qd_soa_vectorial_pdg.py`, 5 gates). The scalar-ratio PDG (Phase
+     11) becomes FREQUENCY-DEPENDENT: the TM material-gain spectrum is the TE spectrum rigidly shifted
+     (strain / heavy-vs-light-hole splitting), so TM is evaluated at nu - tm_peak_shift while TE is at
+     nu. tm_peak_shift=0 byte-identical to the scalar PDG; pdg_ratio=1 & shift=0 degenerate (PDG=0);
+     PDG(nu)=10log10(G_TE/G_TM) VARIES across the band and REVERSES sign across the split, with the
+     zero-crossing at nu0+shift/2 (dev 0.005 fwhm); cross-saturation through the shared reservoir
+     preserved.
+   - **Electrical-parasitic RC bandwidth -- SHIPPED 2026-06-20** (`amplify(rc_tau_s=)`;
+     `validation/qd_soa_electrical_rc.py`, 5 gates). The drive current is first low-passed
+     dI_rc/dt=(I_drive-I_rc)/tau_RC (pad/bond + junction RC) BEFORE the SCH transport / injection stage
+     -- a first-order pole f_RC=1/(2 pi tau_RC) that limits the current-modulation bandwidth and
+     CASCADES with the SCH transport pole. rc=0 byte-identical; CONSTANT drive byte-identical (RC acts
+     only on a time-varying drive); the filter |H(f)|=1/sqrt(1+(f/f_RC)^2) (4e-3); a current STEP is
+     delayed by RC (monotone in tau_RC), RC+transport delays more than either alone; DC gain invariant;
+     passivity (|H|<=1).
+   - **Non-Markovian (biexponential) dephasing lineshape -- SHIPPED 2026-06-20** (`optics/soa/
+     lineshape.py`: `biexp_memory_kernel`, `nonmarkovian_lineshape`; `QDGainModel.gain_per_m_nonmarkovian`;
+     `validation/qd_soa_nonmarkovian.py`, 5 gates). The single-Lorentzian (Markovian, single T2) line
+     generalizes to a two-channel dipole-correlation memory `m(t) = w1 e^{-2pi g1|t|} + (1-w1) e^{-2pi
+     g2|t|}` whose Wiener-Khinchin transform is a two-component sub-Lorentzian line. Gates:
+     FFT(kernel)==lineshape (6e-5); w1=1 / g1=g2 reduce to a single Lorentzian; `gain_per_m_nonmarkovian`
+     reduces to `gain_per_m_slices` (0.0) at w1=1; sub-Lorentzian wing L(2 HWHM)/L(0) > 1/5; area-
+     normalized + non-negative.
+   - **Reduced k-resolved microscopic SBE -- SHIPPED 2026-06-20** (`optics/soa/sbe.py`:
+     `reduced_sbe_susceptibility`, `sbe_gain_per_m`; `validation/qd_soa_sbe.py`, 5 gates). A steady-state
+     linear-response Semiconductor-Bloch solve for the interband polarization p(k): `(hbar w - e_k +
+     i hbar/T2) p_k + (1-f_e-f_h) sum_k' W(k,k') p_k' = -(1-f_e-f_h) mu E`, e_k carrying the screened-
+     exchange BGR. Gates: coulomb_V0=0 == the free-carrier closed form (3e-16); Coulomb ENHANCES the
+     peak gain; transparency at Eg+EFe+EFh with gain>0 below / <0 above; Re/Im a Kramers-Kronig Hilbert
+     pair (corr 0.9993); BGR red-shifts the onset + an unpumped medium only absorbs. SCOPE: a REDUCED
+     demonstration SBE -- 1 band pair, parabolic, MODEL 1-D screened kernel, quasi-equilibrium carriers,
+     parameterized (uncalibrated) absolute magnitude; the SBE STRUCTURE (Pauli blocking, T2 dephasing,
+     Coulomb enhancement, BGR) at the k-resolved level, not a full multi-band kinetic SBE.
 
 ---
 

@@ -172,7 +172,7 @@ class TravelingWaveSOA:
 
     def amplify(self, P_in, drive, *, nu_s_Hz: float = None, state0=None,
                 return_traces: bool = False, ultrafast=None, transport_tau_s: float = 0.0,
-                nl_loss=None):
+                nl_loss=None, rc_tau_s: float = 0.0):
         """Amplify the input power waveform P_in (1-D array sampled at this engine's dt) at
         injection `drive`. `ultrafast` (an UltrafastCompression) adds the sub-ps SHB + carrier-
         heating gain compression on top of the carrier-density dynamics (None -> off, the
@@ -192,7 +192,15 @@ class TravelingWaveSOA:
 
         nl_loss (default None): a NonlinearLoss adding two-photon absorption (intensity-dependent,
         beta P/A_eff) and carrier-dependent free-carrier absorption (sigma_fca N_w) to the internal
-        loss, so alpha_i becomes dynamic. None -> byte-identical."""
+        loss, so alpha_i becomes dynamic. None -> byte-identical.
+
+        rc_tau_s (default 0): the electrical-parasitic RC time (pad/bond + junction, tau_RC = R C). The
+        drive current is first low-passed dI_rc/dt = (I_drive - I_rc)/tau_RC (BACKWARD Euler, I_rc =
+        (I_rc + (dt/tau)I)/(1+dt/tau), unconditionally stable for any dt) -- a first-order pole at
+        f_RC = 1/(2 pi tau_RC) that limits the direct-current-modulation bandwidth BEFORE the SCH
+        transport / injection stage (so RC and transport_tau cascade). 0 -> no RC; and for a CONSTANT
+        drive I_rc stays at the steady value, so the result is byte-identical (RC acts only on a
+        time-varying drive). I_rc inits at the steady drive (no startup transient)."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         P_in = np.asarray(P_in, dtype=np.float64)
         if P_in.ndim != 1 or P_in.size < 2:
@@ -211,6 +219,8 @@ class TravelingWaveSOA:
         # SCH carrier-transport reservoir (opt-in): N_sch filled by I, feeding the WL with tau_t.
         tau_t = float(transport_tau_s)
         N_sch = np.asarray(I0, dtype=np.float64) * tau_t / self.model._qVa if tau_t > 0.0 else None
+        rc_tau = float(rc_tau_s)                              # electrical-parasitic RC (opt-in)
+        I_rc = np.asarray(I0, dtype=np.float64) if rc_tau > 0.0 else None   # inits at the steady drive
         # the device field starts empty (Pnode = 0); the first nz steps fill it (a startup
         # transient one transit time long -- t = nz*dt -- before P_out is meaningful)
         Pnode = np.zeros(self.nz + 1)
@@ -229,6 +239,10 @@ class TravelingWaveSOA:
             P_mid = 0.5 * (Pnode[:-1] + Pnode[1:])            # slice-average power this step
             self._uf_relax(uf, P_mid, nu)                     # drive the compression by S_conf
             I_now = dr[n] if time_drive else drive            # instantaneous injection this step
+            if I_rc is not None:                              # electrical-parasitic RC low-pass
+                a_rc = self.dt / rc_tau                       # BACKWARD Euler (unconditionally stable)
+                I_rc = (I_rc + a_rc * np.asarray(I_now)) / (1.0 + a_rc)
+                I_now = I_rc
             if N_sch is None:
                 I_eff = I_now                                 # instant transport (lumped injection)
             else:                                             # SCH-transport-limited WL feed
@@ -511,20 +525,35 @@ class TravelingWaveSOA:
                 "P_out": np.abs(field) ** 2, "dt": self.dt, "state": state}
 
     def amplify_coherent_dualpol(self, A_te_in, A_tm_in, drive, *, nu_s_Hz=None, alpha_lef=None,
-                                 pdg_ratio: float = 1.0, state0=None, ultrafast=None):
+                                 pdg_ratio: float = 1.0, tm_peak_shift_Hz: float = 0.0,
+                                 state0=None, ultrafast=None):
         """Polarization-dependent gain (PDG): co-propagate the TE and TM complex envelopes through
         ONE shared carrier reservoir. The TM modal gain is pdg_ratio x the TE modal gain --
         pdg_ratio folds the TE/TM modal-confinement ratio and the QD material gain anisotropy into a
         single number (flat self-assembled QDs favour TE, so pdg_ratio < 1). Both polarizations
         deplete the SAME dots: the confined density that saturates the carriers is the modal-weighted
         total |A_TE|^2 + pdg_ratio |A_TM|^2, so a strong signal in one polarization CROSS-SATURATES
-        the gain seen by the other (the physics a single-pol run cannot show). pdg_ratio = 1 makes
-        the two pols gain-degenerate and each reduces EXACTLY to amplify_coherent (flat-gain branch).
+        the gain seen by the other (the physics a single-pol run cannot show). pdg_ratio = 1 (and
+        tm_peak_shift = 0) makes the two pols gain-degenerate and each reduces EXACTLY to
+        amplify_coherent (flat-gain branch).
+
+        tm_peak_shift_Hz (default 0): VECTORIAL PDG -- the TM material-gain spectrum is the TE spectrum
+        rigidly shifted by tm_peak_shift_Hz (strain / heavy-vs-light-hole splitting of the TM band), so
+        the TM gain is evaluated at nu - tm_peak_shift while TE is at nu. This makes the PDG
+        FREQUENCY-DEPENDENT -- PDG(nu) = 10 log10(G_TE/G_TM) varies across the band and reverses sign
+        across the split -- instead of the flat (frequency-independent) scalar-ratio PDG. 0 -> the TM
+        band coincides with TE -> the scalar-pdg_ratio behaviour (byte-identical).
+
+        SCOPE: this resolves the TE/TM GAIN-SPECTRUM split (frequency-dependent small-signal PDG). The
+        carrier SATURATION is LUMPED -- both pols deplete the SHARED reservoir at the TE/reservoir
+        frequency nu via P_mid (the carrier step is taken at nu, not nu_tm), so the cross-saturation is
+        a carrier-DENSITY effect; group-resolved TM-band SPECTRAL-HOLE burning at nu_tm is NOT resolved
+        (it would require adding the TM stimulated term at nu_tm into the rate equations).
 
         Flat-gain path (no line filter / GVD -- those are single-pol features); the alpha(rho)
         density dependence applies identically to both pols. Returns a dict: A_te_out / A_tm_out
         (complex), P_te_out / P_tm_out, t, dt, state. PDG(dB) = 10 log10(G_TE / G_TM) on the steady
-        tails (small-signal -> (1 - pdg_ratio) Gamma g L * 10/ln10)."""
+        tails (small-signal -> (1 - pdg_ratio) Gamma g L * 10/ln10 at tm_peak_shift = 0)."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         if alpha_lef is not None:
             alpha, alpha_dyn = float(alpha_lef), None
@@ -532,6 +561,7 @@ class TravelingWaveSOA:
             alpha = float(getattr(self.model, "alpha_lef", 0.0))
             alpha_dyn = getattr(self.model, "alpha_lef_slices", None)
         r = float(pdg_ratio)
+        nu_tm = nu - float(tm_peak_shift_Hz)                  # TM band evaluated at the shifted freq
         te_in = np.asarray(A_te_in, dtype=np.complex128)
         tm_in = np.asarray(A_tm_in, dtype=np.complex128)
         if te_in.shape != tm_in.shape or te_in.ndim != 1 or te_in.size < 2:
@@ -547,10 +577,12 @@ class TravelingWaveSOA:
         tm_out = np.empty(nt, dtype=np.complex128)
         for n in range(nt):
             a_eff = alpha if alpha_dyn is None else alpha_dyn(state)
-            g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+            g_te = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+            g_tm = (g_te if tm_peak_shift_Hz == 0.0
+                    else self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu_tm)))
             phase = 1.0 - 1j * a_eff
-            amp_te = np.exp(0.5 * (gam * g * phase - self.alpha_i) * self.dz)
-            amp_tm = np.exp(0.5 * (r * gam * g * phase - self.alpha_i) * self.dz)
+            amp_te = np.exp(0.5 * (gam * g_te * phase - self.alpha_i) * self.dz)
+            amp_tm = np.exp(0.5 * (r * gam * g_tm * phase - self.alpha_i) * self.dz)
             nte = np.empty_like(te)
             nte[0] = te_in[n]
             nte[1:] = te[:-1] * amp_te
