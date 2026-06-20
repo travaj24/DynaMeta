@@ -325,6 +325,20 @@ def test_many_body_gain_reduction_and_bgr():
         ManyBody(enabled=True, exciton_rydberg_meV=-1.0)              # guard
 
 
+def test_langevin_reduction_and_statistics():
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 1.0e-3, 60, nu_s_Hz=m.p.nu0_Hz)
+    A0 = np.zeros(8000) + 0j
+    det = soa.amplify_coherent(A0, 60e-3, alpha_lef=0.0)["A_out"]
+    off = soa.amplify_coherent(A0, 60e-3, alpha_lef=0.0, langevin=False)["A_out"]
+    assert np.array_equal(det, off)                                  # off == deterministic
+    r1 = soa.amplify_coherent(A0, 60e-3, alpha_lef=0.0, langevin=True, seed=3)["A_out"]
+    r2 = soa.amplify_coherent(A0, 60e-3, alpha_lef=0.0, langevin=True, seed=3)["A_out"]
+    assert np.array_equal(r1, r2)                                    # seed reproducible
+    Ii = np.abs(r1[60 + 200:]) ** 2
+    assert abs(np.mean(Ii ** 2) / np.mean(Ii) ** 2 - 2.0) < 0.15     # complex-Gaussian ASE intensity
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
