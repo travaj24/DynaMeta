@@ -1088,6 +1088,18 @@ class QDGainModel:
                 self._es_inversion(state) * wlE[None, :], axis=1)
         return g
 
+    def wl_density_slices(self, state) -> np.ndarray:
+        """Wetting-layer (reservoir) carrier density N_w [m^-3] per slice -- state[0] for both the
+        excitonic (N_w) and e/h-split (N_w_e) layouts. The free-carrier reservoir that drives the
+        dynamic free-carrier absorption (TravelingWaveSOA NonlinearLoss): alpha_FCA = sigma_FCA N_w
+        makes the internal loss depend on pumping/saturation rather than a fixed alpha_i.
+
+        SINGLE-RESERVOIR proxy: this is the WL density ONLY (in the e/h-split layout the ELECTRON WL
+        N_w_e alone; the hole WL N_w_h = state[1] and the confined ES/GS carriers are NOT summed in).
+        sigma_FCA is therefore an effective lumped cross-section calibrated to this one density, not a
+        first-principles per-species sigma."""
+        return np.asarray(state[0], dtype=np.float64)
+
     def emission_gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
         """Spontaneous-EMISSION gain g_sp(nu) [1/m] per slice (GS band) = sum_j N_q w_j mu_GS sigma_pk
         L(nu-nu_j) rho_GS_j^2 (excitonic) or f_c_GS f_v_GS (e/h split) -- the per-slice upper-state

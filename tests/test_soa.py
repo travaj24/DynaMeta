@@ -396,6 +396,43 @@ def test_thermal_profile_reduction_and_coupling():
         mes.gain_per_m_thermal(mes.init_slices(nz, 40e-3), nu0, np.full(nz, T0))
 
 
+def test_nonlinear_loss_tpa_fca():
+    from dynameta.optics.soa import NonlinearLoss
+    m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
+    nu = m.p.nu0_Hz
+    gam = m.gamma_confinement
+    A_eff = m.p.A_mode_m2
+    L, nz, I = 1.0e-3, 200, 40e-3
+    soa = TravelingWaveSOA(m, L, nz, nu_s_Hz=nu, alpha_i_per_m=300.0)
+    nt = 3 * nz
+    Pin = np.full(nt, 1e-7)
+    base = soa.amplify(Pin, I)["P_out"]
+    # byte-identical default
+    assert np.array_equal(base, soa.amplify(Pin, I, nl_loss=None)["P_out"])
+    assert np.array_equal(base, soa.amplify(Pin, I, nl_loss=NonlinearLoss(0.0, 0.0, 0.0))["P_out"])
+    # FCA exact: ratio == exp(-sigma Nw L)
+    Nw = m.wl_density_slices(m.init_slices(nz, I))[0]
+    sig = 5e-21
+    ratio = soa.amplify(Pin, I, nl_loss=NonlinearLoss(0.0, sig, 0.0))["P_out"][-1] / base[-1]
+    assert abs(ratio - np.exp(-sig * Nw * L)) / np.exp(-sig * Nw * L) < 1e-6
+    # TPA passive Bernoulli at transparency
+    def g_of_I(Ix):
+        return m.gain_per_m_slices(m.init_slices(2, Ix), nu)[0]
+    lo, hi = 1e-4, 40e-3
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if g_of_I(mid) < 0 else (lo, mid)
+    I_tr = 0.5 * (lo + hi)
+    alpha_i, beta, P0 = 100.0, 8e-11, 0.5
+    s = TravelingWaveSOA(m, L, nz, nu_s_Hz=nu, alpha_i_per_m=alpha_i)
+    tpa = s.amplify(np.full(nt, P0), I_tr, nl_loss=NonlinearLoss(beta, 0.0, A_eff))["P_out"][-1]
+    a, b = -alpha_i, beta / A_eff
+    P_an = a * P0 * np.exp(a * L) / (a + b * P0 * (np.exp(a * L) - 1.0))
+    assert abs(tpa - P_an) / P_an < 1e-3
+    # passivity: nonlinear loss never increases output
+    assert tpa <= s.amplify(np.full(nt, P0), I_tr)["P_out"][-1]
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
