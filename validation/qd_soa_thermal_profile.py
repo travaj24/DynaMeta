@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams, SelfHeating
 from dynameta.optics.soa.thermal import (dome_analytic, sample_T_along_axis,
-                                         thermal_profile_steady_1d)
+                                         thermal_profile_steady_1d, thermal_profile_transient_1d)
 
 
 def main():
@@ -105,6 +105,39 @@ def main():
           "interface (round-trip {:.1e} exact-by-construction, finite {}) -> {}".format(
               np.max(np.abs(T_fem - direct)), bool(np.all(np.isfinite(g_fem))),
               "PASS" if g_e else "FAIL"), flush=True)
+
+    # ---- GATE F: ES-band thermal coupling (Phase 22) ----
+    me = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=1e-19).with_detailed_balance_taus(),
+                     self_heating=sh)
+    ste = me.init_slices(nz, 40e-3)
+    relF0 = float(np.max(np.abs(me.gain_per_m_thermal(ste, nu0, np.full(nz, T0))
+                                - me.gain_per_m_slices(ste, nu0))))      # T0 identity incl ES
+    g_hot = me.gain_per_m_thermal(ste, nu0, np.full(nz, 330.0))
+    me.set_temperature(330.0)
+    relFh = float(np.max(np.abs(g_hot - me.gain_per_m_slices(ste, nu0))))  # uniform-hot == set_temp
+    me.set_temperature(T0)
+    nuES = me.nu_ES_j[len(me.nu_ES_j) // 2]                              # ES band contributes (>0)
+    es_present = bool(me.gain_per_m_thermal(ste, nuES, np.full(nz, T0))[0] != 0.0)
+    g_f = bool(relF0 < 1e-9 and relFh < 1e-9 and es_present)
+    ok = ok and g_f
+    print("[th] GATE F: ES-band thermal: T0 identity ({:.1e}) + uniform-hot==set_temperature ({:.1e}) "
+          "+ ES band present -> {}".format(relF0, relFh, "PASS" if g_f else "FAIL"), flush=True)
+
+    # ---- GATE G: transient 1-D thermal (Phase 23) ----
+    Cline, q_u = 1.0e-3, np.full(nz, 2.0e4)
+    tau = Cline * Rp
+    Ttr = thermal_profile_transient_1d(q_u, dz, kA, Rp, T0, Cline, tau / 50, 4000, ends="sunk")
+    relG_steady = float(np.max(np.abs(Ttr - thermal_profile_steady_1d(q_u, dz, kA, Rp, T0,
+                                                                      ends="sunk"))))
+    H = thermal_profile_transient_1d(q_u, dz, 0.0, Rp, T0, Cline, tau / 200, 400, ends="insulated",
+                                     return_history=True)
+    tg = np.arange(H.shape[0]) * (tau / 200)
+    Tan = T0 + q_u[0] * Rp * (1.0 - np.exp(-tg / tau))                   # lumped RC charge-up
+    relG_rc = float(np.max(np.abs(H[:, nz // 2] - Tan)) / (q_u[0] * Rp))
+    g_g = bool(relG_steady < 1e-6 and relG_rc < 1e-2)
+    ok = ok and g_g
+    print("[th] GATE G: transient t->inf == steady ({:.1e} K); lumped RC == T0+qRth(1-e^-t/tau) (rel "
+          "{:.1e}) -> {}".format(relG_steady, relG_rc, "PASS" if g_g else "FAIL"), flush=True)
 
     print("[th] *** QD-SOA THERMAL PROFILE: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
