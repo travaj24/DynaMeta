@@ -452,6 +452,72 @@ class TravelingWaveSOA:
         return {"t": t, "A_te_out": te_out, "A_tm_out": tm_out, "P_te_out": np.abs(te_out) ** 2,
                 "P_tm_out": np.abs(tm_out) ** 2, "dt": self.dt, "state": state}
 
+    def amplify_fabry_perot(self, A_in, drive, *, R1: float, R2: float, nu_s_Hz=None,
+                            alpha_lef=None, roundtrip_phase: float = 0.0, state0=None,
+                            ultrafast=None):
+        """Fabry-Perot SOA: counter-propagating FORWARD (F) and BACKWARD (B) complex envelopes
+        coupled by the facet POWER reflectivities R1, R2 (field reflectivities sqrt(R)), both
+        saturating the SHARED carrier reservoir (the dots see |F|^2 + |B|^2). The cavity replaces the
+        single-pass Saitoh-Mukai ripple METRIC with the real round-trip feedback:
+
+            F advances +z, gains exp(0.5(Gamma g(1-i alpha) - alpha_i) dz) per slice;
+            B advances -z with the same per-slice gain;
+            facet 1 (node 0):  F_in = t1 A_in + r1 e^{i phi/2} B(0)   (t1=sqrt(1-R1), r1=sqrt(R1));
+            facet 2 (node nz): B_in = r2 e^{i phi/2} F(nz);   transmitted output = t2 F(nz).
+
+        roundtrip_phase phi is the cavity DETUNING 2 beta(nu_s) L mod 2pi carried by the envelope
+        (removed from the baseband carrier) -- sweeping phi traces the FP gain ripple; the resonant
+        (phi=0) gain follows the Airy denominator (1 - sqrt(R1 R2) G)^-2 and SATURATES under the
+        external-seed feedback as sqrt(R1 R2) G -> 1 (the built-up intracavity field depletes the
+        carriers). R1=R2=0 reduces EXACTLY to the single-pass amplify_coherent forward field (B stays
+        0). SCOPE: no spontaneous-emission / ASE seed is modelled (F=B=0 at t=0; only the coherent
+        A_in drives the cavity), so true lasing FROM NOISE is out of scope -- above sqrt(R1 R2) G = 1
+        the device is non-physical without a seed and the field is bounded only by the injected power;
+        the gain saturation here tracks the injected seed, it is not a self-consistent threshold pin.
+        Flat-gain path (no line filter / GVD); alpha(rho) applies. Returns A_out (transmitted), the
+        intracavity |F|^2/|B|^2 at the last step, t, dt, state."""
+        nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
+        if alpha_lef is not None:
+            alpha, alpha_dyn = float(alpha_lef), None
+        else:
+            alpha = float(getattr(self.model, "alpha_lef", 0.0))
+            alpha_dyn = getattr(self.model, "alpha_lef_slices", None)
+        if not (0.0 <= R1 < 1.0 and 0.0 <= R2 < 1.0):
+            raise ValueError("amplify_fabry_perot: need 0 <= R1, R2 < 1")
+        r1, r2 = np.sqrt(R1), np.sqrt(R2)
+        t1, t2 = np.sqrt(1.0 - R1), np.sqrt(1.0 - R2)
+        ph = np.exp(0.5j * float(roundtrip_phase))
+        A_in = np.asarray(A_in, dtype=np.complex128)
+        if A_in.ndim != 1 or A_in.size < 2:
+            raise ValueError("amplify_fabry_perot: A_in must be a 1-D complex waveform >= 2 samples")
+        nt = A_in.size
+        state = self.model.init_slices(self.nz, drive) if state0 is None else state0
+        gam = self.model.gamma_confinement
+        uf = self._uf_init(ultrafast)
+        F = np.zeros(self.nz + 1, dtype=np.complex128)
+        B = np.zeros(self.nz + 1, dtype=np.complex128)
+        A_out = np.empty(nt, dtype=np.complex128)
+        for n in range(nt):
+            a_eff = alpha if alpha_dyn is None else alpha_dyn(state)
+            g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+            amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
+            nF = np.empty_like(F)
+            nB = np.empty_like(B)
+            nF[1:] = F[:-1] * amp                              # forward advection + gain
+            nF[0] = t1 * A_in[n] + r1 * ph * B[0]              # facet 1: input + reflected backward
+            nB[:-1] = B[1:] * amp                              # backward advection + gain
+            nB[self.nz] = r2 * ph * F[self.nz]                 # facet 2: reflected forward
+            P_mid = (0.5 * (np.abs(F[:-1]) ** 2 + np.abs(F[1:]) ** 2)
+                     + 0.5 * (np.abs(B[:-1]) ** 2 + np.abs(B[1:]) ** 2))   # both pump the reservoir
+            self._uf_relax(uf, P_mid, nu)
+            state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            F, B = nF, nB
+            A_out[n] = t2 * F[self.nz]                          # transmitted through facet 2
+        t = np.arange(nt) * self.dt
+        return {"t": t, "A_in": A_in, "A_out": A_out, "P_out": np.abs(A_out) ** 2,
+                "P_fwd_intracav": np.abs(F) ** 2, "P_bwd_intracav": np.abs(B) ** 2,
+                "dt": self.dt, "state": state}
+
     def steady_gain_dB(self, P_cw_W: float, drive, *, nu_s_Hz: float = None,
                        settle_lifetimes: float = 30.0, tol_dB: float = 1e-3) -> float:
         """Single-pass CW gain [dB] at input power P_cw, at STEADY STATE. The settle time is
