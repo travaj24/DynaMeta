@@ -83,7 +83,8 @@ __all__ = ["QDGainParams", "QDGainModel", "SelfHeating"]
 @_njit(cache=True, fastmath=True)
 def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, stim_pref,
                           tau_cap, tau_esc, tau_ES_GS, tau_GS_ES, tau_sp, B, C,
-                          mGS_over_mES, mES_over_mGS, qVa, stim_pref_ES, LErow, es_active):
+                          mGS_over_mES, mES_over_mGS, qVa, stim_pref_ES, LErow, es_active,
+                          leak_rate):
     """Compiled twin of step_slices: explicit-loop RK4 of the group-resolved QD rate equations
     over all z-slices, MIRRORING rhs_fields term-for-term (so it stays bit-parity with the numpy
     reference -- validated). One source of truth is rhs_fields; this is the optional accelerator.
@@ -125,7 +126,7 @@ def _qd_carrier_rk4_numba(Nw, rES, rGS, S, I_A, dt, Lrow, w, cap_den, esc_pref, 
                 sum1 += w[j] * (1.0 - ej)
                 sum2 += w[j] * ej
             dnw = (I_A / qVa - (nw_y / tau_cap) * sum1 + esc_pref * sum2
-                   - B * nw_y * nw_y - C * nw_y ** 3)
+                   - B * nw_y * nw_y - C * nw_y ** 3 - leak_rate * nw_y)
             cw = 2.0 if 0 < stage < 3 else 1.0
             nw_acc += cw * dnw
             for j in range(ng):
@@ -152,7 +153,7 @@ def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow,
                              cap_den_e, cap_den_h, esc_pref_e, esc_pref_h, stim_pref,
                              tau_cap_e, tau_cap_h, tau_esc_e, tau_esc_h, tau_rel_e, tau_rel_h,
                              tau_back_e, tau_back_h, tau_sp, B, C, mGS_over_mES, mES_over_mGS, qVa,
-                             stim_pref_ES, LErow, es_active):
+                             stim_pref_ES, LErow, es_active, leak_rate):
     """Compiled twin of _step_slices_eh: explicit-loop RK4 of the electron/hole-split rate
     equations over all z-slices, MIRRORING rhs_fields_eh term-for-term (bit-parity, validated).
     Stimulated + spontaneous are the SAME scalar into both bands; WL recomb is the pair form."""
@@ -220,8 +221,10 @@ def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow,
                 s_ve1 += w[j] * (1.0 - vej)
                 s_ve += w[j] * vej
             R_wl = B * nwe_y * nwh_y + C * nwe_y * nwh_y * (nwe_y + nwh_y) / 2.0
-            dnwe = I_A / qVa - (nwe_y / tau_cap_e) * s_ce1 + esc_pref_e * s_ce - R_wl
-            dnwh = I_A / qVa - (nwh_y / tau_cap_h) * s_ve1 + esc_pref_h * s_ve - R_wl
+            dnwe = (I_A / qVa - (nwe_y / tau_cap_e) * s_ce1 + esc_pref_e * s_ce - R_wl
+                    - leak_rate * nwe_y)
+            dnwh = (I_A / qVa - (nwh_y / tau_cap_h) * s_ve1 + esc_pref_h * s_ve - R_wl
+                    - leak_rate * nwh_y)
             cw = 2.0 if 0 < stage < 3 else 1.0
             nwe_acc += cw * dnwe
             nwh_acc += cw * dnwh
@@ -403,6 +406,48 @@ class SelfHeating:
 
 
 @dataclass(frozen=True)
+class Leakage:
+    """Thermally-activated carrier leakage (phenomenological) out of the wetting-layer reservoir over
+    the confining barrier -- a temperature-activated escape the closed capture/escape/recombination
+    ladder omits. Adds a linear loss -N_w / tau_leak(T) to the WL rate equation, with an Arrhenius rate
+
+        1 / tau_leak(T) = (1 / tau_leak0_s) exp(-E_barrier_eV q / (k_B T)),
+
+    so the escape rate rises steeply as the device heats (more carriers clear the barrier). TWO
+    distinct effects, NOT the same thing:
+      - the DIVERTED CURRENT (carriers lost to escape, N_w/tau_leak) rises with both pump and T;
+      - the GAIN SUPPRESSION it causes is LARGEST near threshold / below saturation and SHRINKS with
+        drive -- the clamped high-injection gain is barely affected (the % AND absolute gain drop fall
+        monotonically as current rises). So this is a below-saturation/threshold and high-T effect, NOT
+        a "high-injection gain rolloff."
+    T is the model junction temperature (set via set_temperature / SelfHeating.T0_K; default p.T_K).
+    tau_leak0_s <= 0 (default) disables leakage -> byte-identical. The escaped carriers LEAVE the model
+    permanently -- there is no leakage-recapture return path. In the e/h-split layout BOTH the electron
+    and hole WL reservoirs leak at the same rate (SIMPLIFICATION: a single shared rate enforces
+    charge-neutral bipolar leakage; the model does not support distinct e/h barrier heights, unlike the
+    e/h-asymmetric capture/relax times). SI; ASCII. (PHENOMENOLOGICAL: a linear -N_w/tau_leak loss with
+    an Arrhenius PREFACTOR exp(-E_b q/kT), NOT a computed thermionic-emission / barrier-integral flux;
+    E_barrier_eV is a fitted activation energy, tau_leak0_s a fitted prefactor; no T-dependent
+    attempt-rate prefactor.)"""
+    tau_leak0_s: float = 0.0          # escape-time prefactor [s]; <= 0 -> OFF
+    E_barrier_eV: float = 0.30        # barrier activation energy [eV]
+
+    def __post_init__(self):
+        if self.E_barrier_eV < 0.0:
+            raise ValueError("Leakage: E_barrier_eV must be >= 0")
+
+    @property
+    def active(self) -> bool:
+        return self.tau_leak0_s > 0.0
+
+    def rate_at(self, T_K: float) -> float:
+        """Thermionic leakage rate 1/tau_leak(T) [1/s] (0 when disabled)."""
+        if self.tau_leak0_s <= 0.0:
+            return 0.0
+        return np.exp(-self.E_barrier_eV * Q_E / (KB * float(T_K))) / self.tau_leak0_s
+
+
+@dataclass(frozen=True)
 class ManyBody:
     """Closed-form many-body-corrected QD gain (opt-in screened-Hartree-Fock-FLAVOURED physics; NOT a
     solved self-consistent k-resolved semiconductor-Bloch-equation gain -- there is no k-summation,
@@ -463,10 +508,12 @@ class QDGainModel:
 
     def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False,
                  self_heating: "Optional[SelfHeating]" = None,
-                 many_body: "Optional[ManyBody]" = None):
+                 many_body: "Optional[ManyBody]" = None,
+                 leakage: "Optional[Leakage]" = None):
         self.p = params if params is not None else QDGainParams()
         p = self.p
         self.mb = many_body                                   # microscopic many-body gain (opt-in)
+        self.leak = leakage                                   # thermionic WL leakage (opt-in)
         # Optional numba carrier-step accelerator (4.7x at ng=1, 7x at ng=41; bit-parity with the
         # numpy reference). Default OFF so results are byte-stable across machines (numba-present or
         # not); opt in with fast=True for long transient runs. Explicit fast=True without numba is
@@ -532,6 +579,11 @@ class QDGainModel:
         self._gain_scale = 1.0
         self._dg_dT_frac = self.sh.dg_dT_frac_per_K if self.sh is not None else 0.0
         self._T = self.sh.T0_K if self.sh is not None else p.T_K
+
+    def _leak_rate(self) -> float:
+        """Instantaneous thermionic WL leakage rate 1/tau_leak(T) [1/s] at the model temperature
+        self._T (0.0 when no Leakage -> the rate-equation term vanishes, byte-identical)."""
+        return self.leak.rate_at(self._T) if self.leak is not None else 0.0
 
     # ---- lineshape + gain ----
     def _lorentzian(self, dnu):
@@ -737,6 +789,8 @@ class QDGainModel:
                 - (Nw / p.tau_cap_s) * np.sum(w * (1.0 - rho_ES), axis=1)
                 + self._esc_pref * np.sum(w * rho_ES, axis=1)
                 - p.B_wl_m3_s * Nw * Nw - p.C_wl_m6_s * Nw ** 3)
+        if self.leak is not None:                             # thermionic WL leakage -N_w/tau_leak(T)
+            dN_w = dN_w - self._leak_rate() * Nw
         drho_ES = cap_occ - esc_occ - fwd + (p.mu_GS / p.mu_ES) * bwd - sp_ES - stim_ES
         drho_GS = (p.mu_ES / p.mu_GS) * fwd - bwd - stim - sp_GS
         return dN_w, drho_ES, drho_GS
@@ -782,6 +836,10 @@ class QDGainModel:
                 + self._esc_pref * np.sum(w * f_c_ES, axis=1) - R_wl)
         dNwh = (inj - (Nwh / self._tcap_h) * np.sum(w * (1.0 - f_v_ES), axis=1)
                 + self._esc_pref_h * np.sum(w * f_v_ES, axis=1) - R_wl)
+        if self.leak is not None:                             # neutral bipolar WL leakage (e + h)
+            lr = self._leak_rate()
+            dNwe = dNwe - lr * Nwe
+            dNwh = dNwh - lr * Nwh
         # --- ES electrons / holes (independent ladders; back-transfer Pauli on (1-f_*_ES)) ---
         df_c_ES = (Nwe[:, None] * (1.0 - f_c_ES) / self._cap_den - f_c_ES / p.tau_esc_s
                    - f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
@@ -1188,7 +1246,7 @@ class QDGainModel:
                 self._cap_den, self._esc_pref, gsc * self._stim_pref, p.tau_cap_s, p.tau_esc_s,
                 p.tau_ES_GS_s, p.tau_GS_ES_s, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
                 p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa,
-                gsc * self._stim_pref_ES, LE, self._es_active)
+                gsc * self._stim_pref_ES, LE, self._es_active, self._leak_rate())
 
         def f(nw, es, gs):
             return self.rhs_fields(nw, es, gs, I_A, S_conf, nu_s_Hz)
@@ -1225,7 +1283,7 @@ class QDGainModel:
                 p.tau_cap_s, self._tcap_h, p.tau_esc_s, self._tesc_h, p.tau_ES_GS_s, self._trel_h,
                 p.tau_GS_ES_s, self._tback_h, p.tau_sp_s, p.B_wl_m3_s, p.C_wl_m6_s,
                 p.mu_GS / p.mu_ES, p.mu_ES / p.mu_GS, self._qVa,
-                gsc * self._stim_pref_ES, LE, self._es_active)
+                gsc * self._stim_pref_ES, LE, self._es_active, self._leak_rate())
 
         def f(s):
             return self.rhs_fields_eh(s[0], s[1], s[2], s[3], s[4], s[5], I_A, S_conf, nu_s_Hz)

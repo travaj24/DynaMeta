@@ -24,14 +24,16 @@ from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
 from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, optimal_drive_power,
                                          pattern_penalty_dB, predistort, ripple_enob_ceiling,
                                          sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K)
-from dynameta.optics.soa.qd_gain import ManyBody, QDGainModel, QDGainParams, SelfHeating
+from dynameta.optics.soa.qd_gain import (Leakage, ManyBody, QDGainModel, QDGainParams,
+                                         SelfHeating)
 from dynameta.optics.soa.thermal import (dome_analytic, sample_T_along_axis,
                                          thermal_profile_steady_1d)
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
                                                 agrawal_olsson_output)
 
-__all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "thermal_profile_steady_1d",
+__all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "Leakage",
+           "thermal_profile_steady_1d",
            "sample_T_along_axis", "dome_analytic", "NonlinearLoss",
            "TravelingWaveSOA", "TwoLevelSaturableGain",
            "UltrafastCompression", "agrawal_olsson_output", "inversion_factor_nsp",

@@ -433,6 +433,50 @@ def test_nonlinear_loss_tpa_fca():
     assert tpa <= s.amplify(np.full(nt, P0), I_tr)["P_out"][-1]
 
 
+def test_carrier_leakage():
+    from dynameta.optics.soa import Leakage
+    from dynameta.optics.soa.qd_gain import KB, Q_E
+    pf = lambda: QDGainParams(n_groups=15).with_detailed_balance_taus()
+    nu = pf().nu0_Hz
+    I = 40e-3
+    lk = Leakage(tau_leak0_s=5e-12, E_barrier_eV=0.10)
+    m0 = QDGainModel(pf())
+    m = QDGainModel(pf(), leakage=lk)
+    # disabled Leakage(0) byte-identical to None
+    md = QDGainModel(pf(), leakage=Leakage(tau_leak0_s=0.0))
+    assert np.array_equal(m0.steady_state(I), md.steady_state(I))
+    # Arrhenius rate exact
+    assert abs(lk.rate_at(300.0) - np.exp(-0.10 * Q_E / (KB * 300.0)) / 5e-12) / lk.rate_at(300.0) < 1e-12
+    assert abs(lk.rate_at(340.0) / lk.rate_at(300.0)
+               - np.exp(-0.10 * Q_E / KB * (1 / 340. - 1 / 300.))) < 1e-12
+    # term-level exactness: dN_w(leak) - dN_w(no) == -leak_rate N_w
+    st = m0.init_slices(3, I)
+    d_no = m0.rhs_fields(st[0], st[1], st[2], I, 0.0, nu)[0]
+    d_lk = m.rhs_fields(st[0], st[1], st[2], I, 0.0, nu)[0]
+    assert np.max(np.abs((d_lk - d_no) - (-m._leak_rate() * st[0]))) < 1e-3
+    # gain suppressed, more so with faster leakage
+    g0 = m0.gain_per_m_slices(m0.init_slices(2, I), nu)[0]
+    gL = m.gain_per_m_slices(m.init_slices(2, I), nu)[0]
+    mf = QDGainModel(pf(), leakage=Leakage(tau_leak0_s=2e-12, E_barrier_eV=0.10))  # faster leak
+    gf = mf.gain_per_m_slices(mf.init_slices(2, I), nu)[0]                          # its OWN state
+    assert gf < gL < g0
+
+
+def test_carrier_leakage_numba_parity():
+    from dynameta.optics.soa import Leakage
+    from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
+    if not _HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    lk = Leakage(tau_leak0_s=5e-12, E_barrier_eV=0.10)
+    pf = lambda: QDGainParams(n_groups=21).with_detailed_balance_taus()
+    mn = QDGainModel(pf(), leakage=lk, fast=True)
+    mc = QDGainModel(pf(), leakage=lk)
+    nu = pf().nu0_Hz
+    a = mn.step_slices(mn.init_slices(6, 40e-3), 1e-4, 1e-13, nu, 40e-3)
+    b = mc.step_slices(mc.init_slices(6, 40e-3), 1e-4, 1e-13, nu, 40e-3)
+    assert np.max(np.abs(a[0] - b[0])) / np.max(np.abs(b[0])) < 1e-14
+
+
 def test_numba_carrier_step_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:

@@ -495,6 +495,22 @@ datasheet as new work, not reused; see Section 8.1.)
      lumped cross-section. TPA is oracle-verified only at transparency; Gate E is a wiring-consistency
      check (same formula in two representations), not an independent cross-marcher oracle.
 
+   - **Carrier leakage: thermally-activated escape over the barrier -- SHIPPED 2026-06-20** (`qd_gain.py`:
+     `Leakage` dataclass + `QDGainModel(leakage=)`; the `-N_w/tau_leak(T)` term in `rhs_fields`,
+     `rhs_fields_eh` (both reservoirs) and both numba kernels; `validation/qd_soa_leakage.py`, 5 gates).
+     A temperature-activated escape the closed capture/escape/recomb ladder omits: an Arrhenius
+     `1/tau_leak(T) = (1/tau_leak0) exp(-E_b q/(k_B T))` drains the wetting-layer reservoir. TWO distinct
+     effects: the DIVERTED CURRENT (`N_w/tau_leak`) rises with pump and T, but the GAIN SUPPRESSION is
+     LARGEST near threshold / below saturation and SHRINKS with drive (the clamped high-injection gain
+     is barely affected) -- so it is a below-saturation + high-T effect, NOT a "high-injection rolloff."
+     T is the lumped junction temperature `self._T` (set_temperature / SelfHeating). Gates: disabled
+     `Leakage(0)` byte-identical to `leak=None` (the `-0.0*N_w` path) + numba bit-parity (rel 1.2e-16);
+     Arrhenius rate exact (rel 1.4e-16); TERM-LEVEL exactness `rhs(leak)-rhs(no) == -leak_rate N_w`
+     (0.0, excitonic + e/h); gain suppressed monotone in the rate and falling with T; diverted current
+     grows with pump; passivity. SCOPE (honest): a PHENOMENOLOGICAL linear `-N_w/tau_leak` with an
+     Arrhenius prefactor (NOT a computed thermionic-emission/barrier integral), no leakage-recapture
+     (escaped carriers leave), one shared e/h rate, T from the lumped self._T. +2 pytest (41 total).
+
 ---
 
 ## 6. Governing equations (reference)
