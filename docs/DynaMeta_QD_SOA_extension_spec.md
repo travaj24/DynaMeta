@@ -418,6 +418,22 @@ datasheet as new work, not reused; see Section 8.1.)
      the coupling direction + the gain clamp (FP, Phase 13), not the absolute laser linewidth -- that
      needs a frequency-domain / clamped-gain treatment. The FP-Langevin path (noise seeds lasing) is
      available for that follow-on.
+   - **Carrier transport: reduced SCH stage + DD injection-profile seam -- SHIPPED 2026-06-20**
+     (`amplify(transport_tau_s=...)` + per-slice `drive` profile via the array-aware `init_slices` +
+     `validation/qd_soa_transport.py`, 5 gates). Two depths beyond the lumped uniform-current
+     injection: (1) REDUCED -- an SCH (separate-confinement-heterostructure) reservoir low-passes the
+     injection current (dN_sch/dt = I/(qV) - N_sch/tau_t, the WL sees N_sch/tau_t), a first-order pole
+     at 1/(2pi tau_t) -> the electrical modulation bandwidth limit; (2) the SEAM -- a non-uniform
+     injection PROFILE I(z) (current crowding, or from a DEVSIM drift-diffusion solve) passed as a
+     per-slice drive that init_slices seeds and rhs_fields carries. Gates: transport_tau=0 / const
+     time-drive / uniform profile all byte-identical to lumped; the SCH rolls off current modulation
+     (below the pole ratio 0.93, above 0.27); a non-uniform I(z) -> monotone non-uniform gain; the
+     transport leaves the DC gain invariant (1e-16, N_sch -> I tau_t/(qV)); passivity. Adversarial pass
+     (2nd clean SHIP, conf 0.93, NO must-fix): the SCH low-pass + pole + DC invariance + byte-identical
+     reduction + genuine per-slice threading all verified; honestly labelled -- the SEAM is shipped,
+     DEVSIM supplies I(z) through it (no DD solve is run in the gate; the reduced model is a current
+     low-pass, not a spatial DD). The full self-consistent DEVSIM coupling drives the SAME per-slice
+     seam.
 
 ---
 
