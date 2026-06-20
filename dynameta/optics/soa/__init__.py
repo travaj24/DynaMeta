@@ -17,6 +17,7 @@ steady-state, small-signal spectral gain, and the static saturation curve. Phase
 """
 
 from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
+                                           ase_self_consistent_zresolved,
                                            ase_spectrum_bidirectional, detector_noise_variances,
                                            inversion_factor_nsp, inversion_factor_nsp_eh,
                                            noise_figure, single_pass_gain, spectral_noise_figure)

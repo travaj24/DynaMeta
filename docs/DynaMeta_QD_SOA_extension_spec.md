@@ -364,6 +364,23 @@ datasheet as new work, not reused; see Section 8.1.)
      NOT a self-consistent threshold pin (docstring reworded from the over-claimed "clamps at lasing").
      Marcher otherwise verified correct (advection dirs, facet BCs pre-update, reservoir intensity-sum
      no standing-wave term, phase split, R=0 byte-exact).
+   - **Z-resolved dynamic bidirectional ASE -- SHIPPED 2026-06-20** (`ase_noise.
+     ase_self_consistent_zresolved` + `ase_spectrum_bidirectional(return_profile=True)` +
+     `validation/qd_soa_ase_zresolved.py`, 5 gates). Refines the lumped ase_self_consistent (Phase 8)
+     so EACH slice's gain is saturated by its OWN local bidirectional-ASE photon density, not one
+     device-averaged S_ase: the coupled fixed point g(z,nu) <-> S_f(z,nu),S_b(z,nu) <-> S_ase(z),
+     iterated damped to convergence. ase_spectrum_bidirectional gained return_profile to expose the
+     per-slice S_f_z/S_b_z (default off, byte-identical). Gates: ase_saturation=False == frozen
+     transport (0.0); fixed point g_sat_z == material_gain(steady_state(I, signal+ase S_ase_z)) per
+     slice (3.6e-12); the S_ase(z) profile is real (var 32%) and the local gain is PERFECTLY
+     anti-correlated with it (corr -1.000, gain depressed where the ASE flux peaks); the device-output
+     reduces to the lumped ase_self_consistent (7e-9, since it depends only on mean(S_ase_z) here);
+     negative feedback (more ASE -> lower mean gain) + passivity. SCOPE (adversarial fix-then-ship): the
+     ASE back-action is WEAK in the stiff QD gain (~1e-4 relative depression), so the refinement is the
+     spatial PROFILE, not the aggregate output (disclosed, not buried); and it is purely LONGITUDINAL --
+     the per-slice ASE enters steady_state as a scalar S_conf via the signal-frequency line filter, so
+     spectral saturation stays lumped (an 8 THz comb treated as monochromatic at nu_s). PSD->density
+     conversion, default-off byte-identical, and the fixed point all verified correct by the adversary.
 
 ---
 
