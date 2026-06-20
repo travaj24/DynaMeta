@@ -511,6 +511,23 @@ datasheet as new work, not reused; see Section 8.1.)
      Arrhenius prefactor (NOT a computed thermionic-emission/barrier integral), no leakage-recapture
      (escaped carriers leave), one shared e/h rate, T from the lumped self._T. +2 pytest (41 total).
 
+   - **Noise observables: RIN(f) spectrum + field-autocorrelation linewidth + ST-H -- SHIPPED
+     2026-06-20** (`optics/soa/noise_metrics.py`: `rin_spectrum`, `linewidth_from_field`,
+     `henry_factor`, `schawlow_townes_henry_linewidth`; `validation/qd_soa_rin_linewidth.py`, 5 gates).
+     Pure POST-PROCESSING readouts (NO marcher physics added) that turn a time-domain trace -- e.g. the
+     Langevin output of `amplify_coherent(langevin=True)` -- into the standard analog-link noise
+     figures. `rin_spectrum`: one-sided RIN(f) = S_dP(f)/<P>^2 (Parseval-exact, integral == var(P)/<P>^2
+     to 1.4e-6, odd + even N); `linewidth_from_field`: Lorentzian FWHM from `g1(tau) = exp(-pi dnu
+     |tau|)` (recovers a Wiener-phase-walk `dnu = v/(2 pi dt)` to 0.001; pure tone -> 0);
+     `schawlow_townes_henry_linewidth`: `(R_sp/(4 pi N_ph))(1+alpha^2)` (exact (1+alpha^2)). Gates: RIN
+     Parseval; RIN sinusoid line + integral == m^2/2; phase-walk linewidth recovery + tone -> 0; ST-H
+     (1+alpha^2) exact; and the MARCHER Henry DIRECTION -- the SOA's own Langevin output broadens with
+     alpha (alpha=0 7.5 MHz -> alpha=4 13.8 MHz, seed-averaged). SCOPE (honest): the ST-H formula is the
+     LASER-CAVITY (clamped-gain) linewidth REFERENCE -- a single-pass SOA does not lase, so it is the
+     closed-form (1+alpha^2) oracle, NOT a marcher property; the marcher's Langevin output captures the
+     amplitude-phase coupling DIRECTION (Gate E, a seed-averaged direction check), not the clamped-gain
+     cavity-narrowing magnitude. +1 pytest (42 total).
+
 ---
 
 ## 6. Governing equations (reference)

@@ -462,6 +462,29 @@ def test_carrier_leakage():
     assert gf < gL < g0
 
 
+def test_rin_and_linewidth():
+    from dynameta.optics.soa import (henry_factor, linewidth_from_field, rin_spectrum,
+                                     schawlow_townes_henry_linewidth)
+    rng = np.random.default_rng(1)
+    N, dt = 100000, 1e-12
+    # RIN Parseval
+    P = 1e-3 * (1 + 0.05 * rng.standard_normal(N))
+    f, rin = rin_spectrum(P, dt)
+    assert abs(np.trapezoid(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0) < 1e-3
+    # RIN sinusoid integral == m^2/2
+    t = np.arange(N) * dt
+    f2, rin2 = rin_spectrum(1e-3 * (1 + 0.1 * np.cos(2 * np.pi * 2e9 * t)), dt)
+    assert abs(np.trapezoid(rin2, f2) - 0.005) / 0.005 < 1e-3
+    # linewidth recovery + pure tone
+    v = 1e-3
+    dnu = linewidth_from_field(np.exp(1j * np.cumsum(np.sqrt(v) * rng.standard_normal(N))), dt)
+    assert abs(dnu - v / (2 * np.pi * dt)) / (v / (2 * np.pi * dt)) < 0.05
+    assert linewidth_from_field(np.exp(1j * 2 * np.pi * 1e9 * t), dt) < 1.0
+    # Schawlow-Townes-Henry (1+alpha^2)
+    a = schawlow_townes_henry_linewidth(1e12, 1e4, 3.0) / schawlow_townes_henry_linewidth(1e12, 1e4, 0.0)
+    assert abs(a - henry_factor(3.0)) < 1e-12
+
+
 def test_carrier_leakage_numba_parity():
     from dynameta.optics.soa import Leakage
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
