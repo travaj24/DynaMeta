@@ -485,6 +485,35 @@ def test_rin_and_linewidth():
     assert abs(a - henry_factor(3.0)) < 1e-12
 
 
+def test_transverse_bpm():
+    from dynameta.optics.soa import TransverseBPM
+    lam, n0 = 1.3e-6, 3.4
+    # pure diffraction == Gaussian w(z) law + unitary energy
+    bd = TransverseBPM(400e-6, 2048, lam, n0, g0_per_m=0.0)
+    w0 = 12e-6
+    A = np.exp(-(bd.x / w0) ** 2) + 0j
+    zR = np.pi * n0 * w0 ** 2 / lam
+    od = bd.propagate(A, zR, 120)
+    assert abs(bd.rms_width(od["I_out"]) - (w0 / 2) * np.sqrt(2)) / ((w0 / 2) * np.sqrt(2)) < 1e-3
+    assert abs(od["I_out"].sum() / (np.abs(A) ** 2).sum() - 1.0) < 1e-9
+    # uniform beam stays flat (lateral lumping limit)
+    bu = TransverseBPM(100e-6, 128, lam, n0, g0_per_m=1500.0, Isat_W=5e-3, alpha_i_per_m=200.0)
+    ou = bu.propagate(np.full(128, np.sqrt(1e-3) + 0j), 0.4e-3, 200)
+    assert (ou["I_out"].max() - ou["I_out"].min()) / ou["I_out"].mean() < 1e-12
+    # self-focusing: alpha>0 narrower than alpha=0
+    def w_alpha(a):
+        bc = TransverseBPM(300e-6, 1024, lam, n0, g0_per_m=1500.0, Isat_W=1e-3, alpha_lef=a)
+        return bc.rms_width(bc.propagate(np.sqrt(3e-3) * np.exp(-(bc.x / 15e-6) ** 2) + 0j,
+                                         0.4e-3, 300)["I_out"])
+    assert w_alpha(3.0) < w_alpha(0.0)
+    # lateral diffusion smooths the SHB gain hole
+    def contrast(Ld):
+        be = TransverseBPM(120e-6, 256, lam, n0, g0_per_m=1500.0, Isat_W=1e-3, L_diff_m=Ld)
+        g = be.carrier_gain(np.sqrt(2e-3) * np.exp(-(be.x / 8e-6) ** 2) + 0j)
+        return (g.max() - g.min()) / g.mean()
+    assert contrast(8e-6) < contrast(0.0)
+
+
 def test_carrier_leakage_numba_parity():
     from dynameta.optics.soa import Leakage
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
