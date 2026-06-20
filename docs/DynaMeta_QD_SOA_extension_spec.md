@@ -465,6 +465,36 @@ datasheet as new work, not reused; see Section 8.1.)
      applied fixes were P2/P3 wording + two extra gate pins (uniform-hot == `set_temperature`; ES-band
      guard) + the honest STAND-IN label on the Gate-E sampler smoke-test.
 
+   --- Dynamics-realism build-out (owner-requested, the remaining SOA-dynamics gaps after a code audit:
+   TPA/FCA, carrier leakage, noise observables, transverse 2-D) ---
+
+   - **Nonlinear loss: two-photon absorption + dynamic free-carrier absorption -- SHIPPED 2026-06-20**
+     (`traveling_wave.py`: `NonlinearLoss` dataclass + `amplify(nl_loss=)` / `amplify_coherent(nl_loss=)`;
+     `QDGainModel.wl_density_slices`; `validation/qd_soa_nonlinear_loss.py`, 5 gates). The fixed
+     `alpha_i` becomes intensity- AND carrier-dependent: per slice `alpha_nl = sigma_fca N_w +
+     (beta_tpa/A_eff) P`. (1) TPA -- `dP/dz|_TPA = -(beta/A_eff) P^2` (beta [m/W], A_eff the effective
+     nonlinear modal area); (2) FCA -- `sigma_fca N_w` (sigma_fca the EFFECTIVE MODAL cross-section,
+     absorbing Gamma; N_w = `wl_density_slices` = state[0], the WL reservoir), so the internal loss
+     grows with pumping and relaxes as the signal depletes N_w. Gates: nl_loss None/zeros byte-identical
+     (power + coherent); FCA weak-signal ratio == `exp(-sigma_fca N_w L)` (rel 8e-8, constant-coeff
+     exact); TPA at TRANSPARENCY (g=0 so the strong signal cannot deplete carriers) == the Bernoulli
+     closed form `a P0 e^{aL}/(a+b P0(e^{aL}-1))`, a=-alpha_i, b=beta/A_eff (1st-order convergence,
+     rate 2.00, rel 4.2e-5 at nz=200); TPA self-limiting (transmission falls 0.905->0.655 over
+     1mW..2W, below the linear T); dynamic FCA grows with pump (1.7->59 dB, 10->60 mA); coherent (fed
+     sqrt(P)) == power marcher (rel 6e-15); passivity. SCOPE (honest): both are pure ABSORPTION -- the
+     reactive partners (FC plasma index, Kerr/SPM) and the second-order TPA-generated-carrier FCA are a
+     noted refinement; not supported with distributed GVD (raises). +1 pytest (39 total). Adversarial
+     pass (3 lenses + judge, verdict fix-then-ship -> all applied): NO P1 code/sign/physics bug -- the
+     judge cross-checked the Bernoulli closed form against an independent scipy ODE integration (5e-14)
+     and confirmed the 0.5-on-amplitude folding recovers the full power law (6e-15); the fixes were
+     P2/P3 doc caveats. Two `sigma_fca` conventions are documented (a literature material cross-section
+     must be pre-scaled): (i) it is the MODAL cross-section, `sigma_fca_modal = Gamma * sigma_material`
+     (the marcher Gamma-weights gain explicitly but folds Gamma into sigma_fca for FCA); (ii) `N_w` is a
+     SINGLE-RESERVOIR proxy -- the wetting-layer density only (the ELECTRON WL `N_w_e` in the e/h-split
+     layout; the hole WL and confined ES/GS carriers are not summed), so `sigma_fca` is an effective
+     lumped cross-section. TPA is oracle-verified only at transparency; Gate E is a wiring-consistency
+     check (same formula in two representations), not an independent cross-marcher oracle.
+
 ---
 
 ## 6. Governing equations (reference)

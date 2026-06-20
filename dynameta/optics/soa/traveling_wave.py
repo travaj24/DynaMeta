@@ -36,8 +36,54 @@ from dynameta.constants import HBAR
 
 H_PLANCK = 2.0 * np.pi * HBAR
 
-__all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression",
+__all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression", "NonlinearLoss",
            "agrawal_olsson_output"]
+
+
+@dataclass
+class NonlinearLoss:
+    """Intensity- and carrier-DEPENDENT internal loss beyond the fixed alpha_i: two-photon
+    absorption (TPA) and free-carrier absorption (FCA). The per-slice loss added to the marcher's
+    modal coefficient is
+
+        alpha_nl(z) = sigma_fca_m2 * N_w(z)            [FCA, carrier-dependent]
+                    + (beta_tpa_m_per_W / A_eff) * P(z) [TPA, intensity-dependent]
+
+    so the total per-slice power coefficient becomes Gamma g - alpha_i - alpha_nl.
+
+      - FCA: sigma_fca_m2 is the EFFECTIVE MODAL free-carrier cross-section [m^2] -- it multiplies the
+        wetting-layer reservoir density N_w = state[0]. This makes the internal loss grow with pumping
+        and relax as the signal depletes N_w -- the fixed alpha_i becomes dynamic. Reduces to no extra
+        loss when sigma_fca_m2 = 0. TWO conventions are folded into sigma_fca, so a literature MATERIAL
+        cross-section must be pre-scaled before use:
+          * Confinement: it is the MODAL cross-section (absorbs the confinement factor), i.e.
+            sigma_fca_modal = Gamma * sigma_fca_material (Gamma = model.gamma_confinement, ~0.06 here).
+            The marcher Gamma-weights the gain explicitly (Gamma g) but NOT the FCA -- the Gamma is
+            hidden inside sigma_fca, so a raw material sigma would under-loss by ~Gamma.
+          * Single-reservoir proxy: N_w is the WETTING-LAYER density ONLY (in the e/h-split layout the
+            ELECTRON WL N_w_e alone; the hole WL N_w_h and the confined ES/GS carriers are NOT summed
+            in). sigma_fca is therefore an effective LUMPED cross-section calibrated to that one
+            density, not a first-principles per-species sigma.
+      - TPA: beta_tpa_m_per_W is the TPA coefficient beta [m/W]; A_eff_m2 the effective nonlinear
+        modal area [m^2] (<= 0 -> the model's A_mode_m2). The power loss is dP/dz|_TPA = -(beta/A_eff)
+        P^2, i.e. an intensity-dependent coefficient beta P / A_eff. Reduces to zero when beta = 0.
+
+    SCOPE: both are pure ABSORPTION (the real part). The companion REACTIVE terms -- the free-carrier
+    plasma index (Drude dn ~ -N) and the Kerr / TPA-carrier self-phase modulation -- are a separate
+    refinement (a phase term in the coherent marcher), as is the second-order TPA-GENERATED-carrier
+    FCA (beta-generated carriers feeding sigma_fca); not included here. Default all-zero -> the
+    marcher is byte-identical."""
+    beta_tpa_m_per_W: float = 0.0
+    sigma_fca_m2: float = 0.0
+    A_eff_m2: float = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self.beta_tpa_m_per_W > 0.0 or self.sigma_fca_m2 > 0.0
+
+    def __post_init__(self):
+        if self.beta_tpa_m_per_W < 0.0 or self.sigma_fca_m2 < 0.0:
+            raise ValueError("NonlinearLoss: beta_tpa_m_per_W and sigma_fca_m2 must be >= 0")
 
 
 @dataclass
@@ -111,8 +157,22 @@ class TravelingWaveSOA:
         uf["h_shb"] = uf["h_shb"] * uf["d_shb"] + uf["uf"].eps_shb_m3 * S * (1.0 - uf["d_shb"])
         uf["h_ch"] = uf["h_ch"] * uf["d_ch"] + uf["uf"].eps_ch_m3 * S * (1.0 - uf["d_ch"])
 
+    def _nl_setup(self, nl_loss):
+        """Resolve the NonlinearLoss config (None/inactive -> None, so the marcher stays byte-
+        identical). Returns (sigma_fca, beta_over_Aeff) or None."""
+        if nl_loss is None or not nl_loss.active:
+            return None
+        A_eff = nl_loss.A_eff_m2 if nl_loss.A_eff_m2 > 0.0 else float(self.model.p.A_mode_m2)
+        return {"sig": float(nl_loss.sigma_fca_m2), "b_over_A": float(nl_loss.beta_tpa_m_per_W) / A_eff}
+
+    def _nl_alpha(self, nl, state, P_slice):
+        """Per-slice nonlinear loss coefficient alpha_nl = sigma_fca N_w + (beta/A_eff) P_slice [1/m]
+        (FCA carrier-dependent + TPA intensity-dependent). P_slice is the local modal power [W]."""
+        return nl["sig"] * self.model.wl_density_slices(state) + nl["b_over_A"] * P_slice
+
     def amplify(self, P_in, drive, *, nu_s_Hz: float = None, state0=None,
-                return_traces: bool = False, ultrafast=None, transport_tau_s: float = 0.0):
+                return_traces: bool = False, ultrafast=None, transport_tau_s: float = 0.0,
+                nl_loss=None):
         """Amplify the input power waveform P_in (1-D array sampled at this engine's dt) at
         injection `drive`. `ultrafast` (an UltrafastCompression) adds the sub-ps SHB + carrier-
         heating gain compression on top of the carrier-density dynamics (None -> off, the
@@ -128,7 +188,11 @@ class TravelingWaveSOA:
         lumped-injection result byte-identical; steady state is unchanged for any tau_t (N_sch ->
         I tau_t/(qV) -> the same WL feed). For the FULL spatially-resolved transport / current
         crowding, pass `drive` as a per-slice injection PROFILE I(z) from a DEVSIM drift-diffusion
-        solve (init_slices + rhs_fields carry it)."""
+        solve (init_slices + rhs_fields carry it).
+
+        nl_loss (default None): a NonlinearLoss adding two-photon absorption (intensity-dependent,
+        beta P/A_eff) and carrier-dependent free-carrier absorption (sigma_fca N_w) to the internal
+        loss, so alpha_i becomes dynamic. None -> byte-identical."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         P_in = np.asarray(P_in, dtype=np.float64)
         if P_in.ndim != 1 or P_in.size < 2:
@@ -143,6 +207,7 @@ class TravelingWaveSOA:
         state = self.model.init_slices(self.nz, I0) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)                         # ultrafast-compression state
+        nl = self._nl_setup(nl_loss)                          # TPA + dynamic FCA (None -> byte-id)
         # SCH carrier-transport reservoir (opt-in): N_sch filled by I, feeding the WL with tau_t.
         tau_t = float(transport_tau_s)
         N_sch = np.asarray(I0, dtype=np.float64) * tau_t / self.model._qVa if tau_t > 0.0 else None
@@ -155,7 +220,8 @@ class TravelingWaveSOA:
         for n in range(nt):
             g = self.model.gain_per_m_slices(state, nu)       # (nz,) material gain
             g = self._uf_suppress(uf, g)                      # SHB/CH gain compression (if on)
-            amp = np.exp((gam * g - self.alpha_i) * self.dz)  # per-slice power amplification
+            a_nl = 0.0 if nl is None else self._nl_alpha(nl, state, Pnode[:-1])  # TPA+FCA loss
+            amp = np.exp((gam * g - self.alpha_i - a_nl) * self.dz)  # per-slice power amplification
             # method-of-characteristics shift: field at node k moves to node k+1, amplified
             new = np.empty_like(Pnode)
             new[0] = P_in[n]
@@ -265,7 +331,7 @@ class TravelingWaveSOA:
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
                          state0=None, ultrafast=None, line_filter: bool = False,
                          beta2_s2_per_m: float = None, gvd_segments: int = 1,
-                         langevin: bool = False, seed=None):
+                         langevin: bool = False, seed=None, nl_loss=None):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -300,6 +366,11 @@ class TravelingWaveSOA:
         them, a CONTROLLED 2nd-order (Strang) refinement converging as O(1/S^2) to the true
         distributed coupling (must divide n_slices). Ignored when beta2 = 0.
 
+        nl_loss (default None): a NonlinearLoss adding two-photon absorption (beta |A|^2/A_eff) and
+        carrier-dependent free-carrier absorption (sigma_fca N_w) to the internal loss. None -> byte-
+        identical. Not supported together with distributed GVD (gvd_segments>1 AND beta2!=0; raises);
+        with beta2=0 the gvd_segments setting is a no-op and nl_loss runs normally.
+
         Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
         frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
@@ -317,6 +388,9 @@ class TravelingWaveSOA:
         A_in = np.asarray(A_in, dtype=np.complex128)
         if A_in.ndim != 1 or A_in.size < 2:
             raise ValueError("amplify_coherent: A_in must be a 1-D complex waveform >= 2 samples")
+        if nl_loss is not None and nl_loss.active and beta2 != 0.0 and int(gvd_segments) > 1:
+            raise NotImplementedError("amplify_coherent: nl_loss (TPA/FCA) with distributed GVD "
+                                      "(gvd_segments>1) is not supported; use gvd_segments=1")
         if beta2 != 0.0 and int(gvd_segments) > 1:
             return self._amplify_coherent_segmented(
                 A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha_lef,
@@ -325,6 +399,7 @@ class TravelingWaveSOA:
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
+        nl = self._nl_setup(nl_loss)                          # TPA + dynamic FCA (None -> byte-id)
         lf = self._line_filter_init(nu) if line_filter else None
         # Langevin spontaneous-emission noise (opt-in). Each slice each step adds a complex Gaussian
         # field increment of variance Gamma g_sp(z) h nu v_g (real + imag each half) -- the
@@ -354,9 +429,10 @@ class TravelingWaveSOA:
             new = np.empty_like(Anode)
             new[0] = A_in[n]
             a_eff = alpha if alpha_dyn is None else alpha_dyn(state)   # per-slice density-dependent
+            a_nl = 0.0 if nl is None else self._nl_alpha(nl, state, np.abs(Anode[:-1]) ** 2)  # TPA+FCA
             if lf is None:
                 g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
-                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
+                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i - a_nl) * self.dz)
                 new[1:] = Anode[:-1] * amp
             else:
                 A_ref = Anode[:-1]
@@ -366,7 +442,7 @@ class TravelingWaveSOA:
                 sum_p = np.sum(avg_p, axis=1)                       # (nz,); CW: 2 Gamma_field(nu_s+f) A_ref
                 g_un = self.model.gain_per_m_slices(state, nu)      # carrier real gain (no division)
                 g_flat = self._uf_suppress(uf, g_un)
-                amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
+                amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * a_eff) - self.alpha_i - a_nl) * self.dz)
                 # flat carrier gain (multiplicative, == OFF amp) + ADDITIVE dispersive correction:
                 # the polarization sum_p minus its flat-gain equivalent g_un*A_ref is the resonant
                 # line deviation (zero at the carrier). Additive so the line radiates field into a
