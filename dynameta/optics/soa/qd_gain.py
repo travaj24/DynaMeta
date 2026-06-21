@@ -761,11 +761,18 @@ class QDGainModel:
         return float(p.Gamma * P_W / (p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2))
 
     # ---- rate equations ----
-    def rhs_fields(self, N_w, rho_ES, rho_GS, I_A, S_conf_m3, nu_s_Hz):
+    def rhs_fields(self, N_w, rho_ES, rho_GS, I_A, S_conf_m3, nu_s_Hz, ls_gs=None, ls_es=None):
         """Vectorized rate equations over a stack of z-slices -- the single source of truth
         for the carrier dynamics (the scalar rhs and the traveling-wave engine both call it).
         Shapes: N_w (Nz,); rho_ES, rho_GS (Nz, ng); I_A and S_conf_m3 scalar or (Nz,).
-        Returns (dN_w (Nz,), drho_ES (Nz, ng), drho_GS (Nz, ng))."""
+        Returns (dN_w (Nz,), drho_ES (Nz, ng), drho_GS (Nz, ng)).
+
+        ls_gs / ls_es (default None): the per-group lineshape-weighted confined photon density driving
+        the stimulated terms -- (Nz, ng) arrays. None (the single-channel default) computes them from
+        the single signal as L(nu_s) S_conf (BYTE-IDENTICAL to the original). The WDM multi-channel path
+        passes ls_gs = sum_k L(nu_k) S_k (and ls_es = sum_k L_ES(nu_k) S_k), so EACH channel depletes
+        the QD groups IT overlaps via its OWN homogeneous lineshape -- the wavelength-resolved cross-gain
+        saturation the single-scalar-at-nu_s model lumps together (spec 8 THz comb-as-monochromatic)."""
         p = self.p
         w = self.w_j                                          # (ng,)
         Nw = np.asarray(N_w, dtype=np.float64)                # (Nz,)
@@ -779,9 +786,16 @@ class QDGainModel:
         fwd = rho_ES * (1.0 - rho_GS) / p.tau_ES_GS_s
         bwd = rho_GS * (1.0 - rho_ES) / p.tau_GS_ES_s
         gsc = self._gain_scale                                # self-heating gain factor (1.0 off)
-        stim = gsc * self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
-        stim_ES = (gsc * self._stim_pref_ES * self._LE_at(nu_s_Hz) * (2.0 * rho_ES - 1.0) * Sb
-                   if self._es_active else 0.0)        # ES optical channel (0 -> GS-only)
+        if ls_gs is None:                                     # single-channel (BYTE-IDENTICAL order)
+            stim = gsc * self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
+        else:                                                 # WDM: ls_gs = sum_k L(nu_k) S_k (Nz, ng)
+            stim = gsc * self._stim_pref * ls_gs * (2.0 * rho_GS - 1.0)
+        if not self._es_active:
+            stim_ES = 0.0
+        elif ls_es is None:                                   # ES optical channel (BYTE-IDENTICAL order)
+            stim_ES = gsc * self._stim_pref_ES * self._LE_at(nu_s_Hz) * (2.0 * rho_ES - 1.0) * Sb
+        else:                                                 # WDM ES: ls_es = sum_k L_ES(nu_k) S_k
+            stim_ES = gsc * self._stim_pref_ES * ls_es * (2.0 * rho_ES - 1.0)
         sp_ES = rho_ES * rho_ES / p.tau_sp_s
         sp_GS = rho_GS * rho_GS / p.tau_sp_s
 
@@ -1286,6 +1300,45 @@ class QDGainModel:
         # physical bounds (occupations in [0,1], densities >= 0): a stability guard against
         # explicit-step overshoot under very strong/fast transients -- it only acts at the
         # bounds, where the unclamped value is already unphysical.
+        return (np.maximum(Nw_n, 0.0), np.clip(rES_n, 0.0, 1.0), np.clip(rGS_n, 0.0, 1.0))
+
+    def step_slices_wdm(self, state, P_list_W, nu_list_Hz, dt_s: float, I_A):
+        """WDM multi-channel carrier step: advance the per-slice state by dt driven by SEVERAL signals
+        at distinct optical frequencies nu_k, each with local guided power P_k (held fixed across the
+        step; explicit RK4). Each channel depletes the QD groups IT overlaps via its OWN homogeneous
+        lineshape -- the per-group stimulated drive is sum_k L(nu_k) S_conf(P_k, nu_k) -- so widely
+        spaced channels bleach DIFFERENT groups (the wavelength-resolved cross-gain saturation the
+        single-frequency step_slices lumps to one scalar at nu_s; spec 8 THz comb-as-monochromatic).
+        Reduces to step_slices for a single channel. Excitonic layout only (raises for eh_split);
+        numpy RK4 (no numba twin)."""
+        if self.eh:
+            raise NotImplementedError("step_slices_wdm: WDM multi-channel saturation is excitonic-only "
+                                      "(not eh_split)")
+        if len(P_list_W) != len(nu_list_Hz) or len(nu_list_Hz) < 1:
+            raise ValueError("step_slices_wdm: P_list_W and nu_list_Hz must be equal-length, non-empty")
+        Nw, rES, rGS = state
+        nz = np.asarray(Nw).shape[0]
+        # per-group lineshape-weighted total confined photon density: sum_k L(nu_k) S_conf(P_k, nu_k)
+        ls_gs = np.zeros((nz, self.ng), dtype=np.float64)
+        ls_es = np.zeros((nz, self.ng), dtype=np.float64) if self._es_active else None
+        for P_k, nu_k in zip(P_list_W, nu_list_Hz):
+            Sk = np.asarray(self.photon_density(P_k, float(nu_k)), dtype=np.float64)
+            Skb = Sk[:, None] if Sk.ndim else Sk              # (nz,1) or scalar
+            ls_gs = ls_gs + self._L_at(float(nu_k)) * Skb     # (1,ng)*(nz,1) -> (nz,ng)
+            if ls_es is not None:
+                ls_es = ls_es + self._LE_at(float(nu_k)) * Skb
+        nu0 = float(nu_list_Hz[0])                            # only used for the (unused) L cache call
+
+        def f(nw, es, gs):
+            return self.rhs_fields(nw, es, gs, I_A, 0.0, nu0, ls_gs=ls_gs, ls_es=ls_es)
+
+        k1 = f(Nw, rES, rGS)
+        k2 = f(Nw + 0.5 * dt_s * k1[0], rES + 0.5 * dt_s * k1[1], rGS + 0.5 * dt_s * k1[2])
+        k3 = f(Nw + 0.5 * dt_s * k2[0], rES + 0.5 * dt_s * k2[1], rGS + 0.5 * dt_s * k2[2])
+        k4 = f(Nw + dt_s * k3[0], rES + dt_s * k3[1], rGS + dt_s * k3[2])
+        Nw_n = Nw + dt_s / 6.0 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0])
+        rES_n = rES + dt_s / 6.0 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])
+        rGS_n = rGS + dt_s / 6.0 * (k1[2] + 2.0 * k2[2] + 2.0 * k3[2] + k4[2])
         return (np.maximum(Nw_n, 0.0), np.clip(rES_n, 0.0, 1.0), np.clip(rGS_n, 0.0, 1.0))
 
     def _step_slices_eh(self, state, P_local_W, dt_s, nu_s_Hz, I_A):

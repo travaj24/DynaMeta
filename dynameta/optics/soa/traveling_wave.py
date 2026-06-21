@@ -680,6 +680,63 @@ class TravelingWaveSOA:
         return {"t": t, "A_te_out": te_out, "A_tm_out": tm_out, "P_te_out": np.abs(te_out) ** 2,
                 "P_tm_out": np.abs(tm_out) ** 2, "dt": self.dt, "state": state}
 
+    def amplify_wdm(self, channels, drive, *, alpha_lef=None, state0=None):
+        """WDM multi-channel coherent amplification: co-propagate SEVERAL signals at DISTINCT optical
+        frequencies through ONE shared QD reservoir, each saturating the carriers via its OWN
+        homogeneous lineshape -- WAVELENGTH-RESOLVED cross-gain saturation. `channels` is a list of
+        (nu_k_Hz, A_k_in), A_k_in a complex envelope (nt,) (all equal length). Per z-slice each channel
+        is amplified by exp(0.5 (Gamma g(state, nu_k)(1 - i alpha) - alpha_i) dz) with its OWN material
+        gain g(nu_k), and the carriers advance by model.step_slices_wdm with EVERY channel's mid-slice
+        power. So a strong channel bleaches the QD groups RESONANT WITH IT, and a probe far away
+        (separation >> homogeneous linewidth but within the inhomogeneous band) sees REDUCED cross-gain
+        saturation -- the inhomogeneous-broadening / spectral-hole-burning low-crosstalk advantage of a
+        QD-SOA that the single-scalar-at-nu_s marcher (carrier back-reaction lumped to one frequency)
+        cannot show. Returns {'channels': [{'nu_Hz','A_out','P_out'} per input], 't', 'dt', 'state'}.
+
+        Reduces to amplify_coherent (flat-gain branch) for a single channel (to ~machine precision; the
+        carrier stim is formed as L(nu) S vs S then L, a different float association). Excitonic models
+        only (step_slices_wdm raises for eh_split). Flat gain + alpha index only -- no line filter / GVD
+        / Langevin (those are single-pol single-band features); the leading nz output samples are the
+        device-fill transient (window past them, as for amplify_coherent)."""
+        if len(channels) < 1:
+            raise ValueError("amplify_wdm: need >= 1 channel")
+        nus = [float(nu) for nu, _ in channels]
+        fin = [np.asarray(A, dtype=np.complex128) for _, A in channels]
+        nt = fin[0].size
+        if any(A.ndim != 1 or A.size != nt for A in fin) or nt < 2:
+            raise ValueError("amplify_wdm: all channel envelopes must be equal-length 1-D >= 2 samples")
+        if alpha_lef is not None:
+            alpha, alpha_dyn = float(alpha_lef), None
+        else:
+            alpha = float(getattr(self.model, "alpha_lef", 0.0))
+            alpha_dyn = getattr(self.model, "alpha_lef_slices", None)
+        state = self.model.init_slices(self.nz, drive) if state0 is None else state0
+        gam = self.model.gamma_confinement
+        nch = len(channels)
+        nodes = [np.zeros(self.nz + 1, dtype=np.complex128) for _ in range(nch)]
+        outs = [np.empty(nt, dtype=np.complex128) for _ in range(nch)]
+        for n in range(nt):
+            a_eff = alpha if alpha_dyn is None else alpha_dyn(state)
+            new_nodes = []
+            P_mid = []
+            for c in range(nch):
+                g = self.model.gain_per_m_slices(state, nus[c])
+                amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i) * self.dz)
+                nd = nodes[c]
+                new = np.empty_like(nd)
+                new[0] = fin[c][n]
+                new[1:] = nd[:-1] * amp
+                P_mid.append(0.5 * (np.abs(nd[:-1]) ** 2 + np.abs(nd[1:]) ** 2))
+                new_nodes.append(new)
+            state = self.model.step_slices_wdm(state, P_mid, nus, self.dt, drive)
+            nodes = new_nodes
+            for c in range(nch):
+                outs[c][n] = nodes[c][-1]
+        t = np.arange(nt) * self.dt
+        chans = [{"nu_Hz": nus[c], "A_out": outs[c], "P_out": np.abs(outs[c]) ** 2}
+                 for c in range(nch)]
+        return {"channels": chans, "t": t, "dt": self.dt, "state": state}
+
     def amplify_fabry_perot(self, A_in, drive, *, R1: float, R2: float, nu_s_Hz=None,
                             alpha_lef=None, roundtrip_phase: float = 0.0, state0=None,
                             ultrafast=None, langevin: bool = False, seed=None):
