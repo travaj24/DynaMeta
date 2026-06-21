@@ -714,6 +714,28 @@ datasheet as new work, not reused; see Section 8.1.)
      (which stays rate-equation); working in Omega [rad/s] keeps Rabi/echo free of the absolute dipole /
      power calibration, with the gain SHAPE (GATE A) the quantitative tie to the device.
 
+   - **STATIC/CW calibration to the Innolume BOA1310060 datasheet (Phase 34) -- SHIPPED 2026-06-21**
+     (`calibration.py`, `validation/qd_soa_calibration_innolume.py`,
+     `tests/test_soa.py::test_calibration_innolume`). The step that turns the generic-parameter gain core
+     into a DEVICE-matched set -- the FIRST experiment-anchored parameters (the gap audit's
+     "experiment_calibrated = false everywhere" is now PARTIALLY false: the static/CW axes are pinned to a
+     real 1310 nm QD BOA, the very 'Innolume set' QDGainParams' docstring said did not exist). The fit +
+     validation use ONLY steady-state physics (the gain core's saturation_curve -> local g_QD(P) ->
+     z-integral dP/dz = (Gamma g_QD - alpha_i) P), because the time-domain marcher OVERFLOWS at this 35 dB
+     single-pass / 8 mm device. calibrate_innolume_boa1310(N_q_m3=, alpha_i_per_m=) returns a
+     CalibratedDevice (fitted QDGainParams + length/alpha_i/drive/nu0). Staged fit: read-offs (nu0=1310 nm,
+     L=8 mm, drive=2 A, T=298 K, ES band ON with dE_ES_GS=0.078 eV from the 1210/1310 split) -> fwhm_inhom
+     for the 60 nm intrinsic (material-gain -3 dB) bandwidth -> sigma_pk for 35 dB small-signal gain
+     (iterated) -> A_mode for 23.2 dBm P_sat. 5 gates (all PASS): A peak 1310 nm; B G0 35.0 dB; C material
+     -3 dB BW 60.1 nm + net-gain span 89 nm (PHYSICAL -- the 60 nm is the INTRINSIC width, since the
+     35-dB-amplifier -3 dB would force an unphysical 40 THz inhom by high-gain narrowing); D P_sat,out
+     23.20 dBm; E NF 4.14 dB <= 5 dB (n_sp 1.00, eta_in=1) + the two-band ASE (ES gain at 1210 nm present,
+     absent when ES off). Fitted: sigma_pk=1.6e-18, fwhm_inhom=10.1 THz, A_mode=0.215 um2, N_q fixed 5e22
+     (the gain pins only the product Gamma*N_q*mu_GS*sigma_pk -- sigma_pk is the effective fitted factor).
+     STILL UNCALIBRATED (no datasheet data, flagged defaults): alpha_lef (no chirp/FWM), the kinetic taus
+     (no pump-probe), RIN/linewidth, NF(lambda)/NF(G), TPA/FCA, thermal slopes -- each needs a specific
+     dynamic measurement (pump-probe gain-recovery, FWM/chirp asymmetry, RF-RIN, spectral NF, gain-vs-T).
+
 ---
 
 ## 6. Governing equations (reference)

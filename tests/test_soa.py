@@ -539,6 +539,13 @@ def test_maxwell_bloch():
     assert mb.main() is True
 
 
+def test_calibration_innolume():
+    """Thin wrapper -- static/CW calibration to the Innolume BOA1310060 datasheet."""
+    import importlib
+    cal = importlib.import_module("validation.qd_soa_calibration_innolume")
+    assert cal.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)
