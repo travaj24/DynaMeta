@@ -35,6 +35,8 @@ from dynameta.optics.soa.thermal import (dome_analytic, sample_T_along_axis,
                                          thermal_profile_steady_1d, thermal_profile_transient_1d)
 from dynameta.optics.soa.transverse_bpm import TransverseBPM, qd_gain_table
 from dynameta.optics.soa.maxwell_bloch import MaxwellBlochEnsemble
+from dynameta.optics.soa.calibration import (CalibratedDevice, INNOLUME_BOA1310_TARGETS,
+                                             calibrate_innolume_boa1310)
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
                                                 agrawal_olsson_output)
@@ -50,6 +52,7 @@ __all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "Leakage",
            "facet_gain_ripple_dB", "ripple_enob_ceiling",
            "rin_spectrum", "linewidth_from_field", "henry_factor",
            "schawlow_townes_henry_linewidth", "TransverseBPM", "qd_gain_table", "MaxwellBlochEnsemble",
+           "CalibratedDevice", "INNOLUME_BOA1310_TARGETS", "calibrate_innolume_boa1310",
            "thermal_profile_transient_1d",
            "nonmarkovian_lineshape", "biexp_memory_kernel", "lorentzian_area",
            "reduced_sbe_susceptibility", "sbe_gain_per_m"]
