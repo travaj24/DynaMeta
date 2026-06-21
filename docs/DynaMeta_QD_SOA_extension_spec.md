@@ -735,6 +735,16 @@ datasheet as new work, not reused; see Section 8.1.)
      STILL UNCALIBRATED (no datasheet data, flagged defaults): alpha_lef (no chirp/FWM), the kinetic taus
      (no pump-probe), RIN/linewidth, NF(lambda)/NF(G), TPA/FCA, thermal slopes -- each needs a specific
      dynamic measurement (pump-probe gain-recovery, FWM/chirp asymmetry, RF-RIN, spectral NF, gain-vs-T).
+     CW->DYNAMICS INFERENCE (infer_dynamics_from_cw, validation/qd_soa_inferred_dynamics.py, 5 gates PASS):
+     physically-motivated ESTIMATES (NOT measurements, each flagged with a confidence) exploiting the
+     links between CW observables and dynamics: A_eff ~ 15 um2 from the 6/27 deg far-field divergence
+     (MEDIUM); the GS differential gain dg/dN ~ 0 at 2 A is a CLAMPING diagnostic (HIGH) -- the QD gain is
+     clamped/reservoir-limited, so tau_eff uses the stimulated CROSS-SECTION form tau_eff = A_eff h nu /
+     (Gamma sigma_pk P_sat) ~ 117 ps (the reservoir-refill gain-recovery time, MEDIUM order-of-magnitude);
+     f_3dB,slow ~ 1/(2 pi tau_eff) ~ 1.4 GHz (LOW, slow envelope only); the detailed-balance forward/
+     backward kinetic-rate RATIOS are pinned by the CW-calibrated dE_ES_GS (HIGH); and alpha_lef is
+     flagged NOT inferable (the symmetric fitted gain has a Kramers-Kronig index ~0 at the peak; the real
+     alpha needs an FWM/chirp measurement). InferredDynamic carries (value, unit, confidence, method).
 
 ---
 

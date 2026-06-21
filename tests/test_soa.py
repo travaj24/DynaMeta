@@ -546,6 +546,13 @@ def test_calibration_innolume():
     assert cal.main() is True
 
 
+def test_inferred_dynamics():
+    """Thin wrapper -- dynamic parameters inferred from the CW calibration (flagged estimates)."""
+    import importlib
+    inf = importlib.import_module("validation.qd_soa_inferred_dynamics")
+    assert inf.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)
