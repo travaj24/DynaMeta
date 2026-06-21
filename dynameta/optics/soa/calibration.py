@@ -178,3 +178,122 @@ def calibrate_innolume_boa1310(N_q_m3=5.0e22, alpha_i_per_m=300.0, n_groups=41, 
             print("  {:16s} {}".format(k, v))
     return CalibratedDevice(params=m.p, length_m=L, alpha_i_per_m=alpha_i_per_m, drive_A=drive,
                             nu0_Hz=nu0, name="Innolume BOA1310060 (static/CW fit)", report=report)
+
+
+@dataclass(frozen=True)
+class InferredDynamic:
+    """A DYNAMIC parameter INFERRED from the static/CW calibration -- NOT measured. value/unit, the
+    confidence (HIGH/MEDIUM/LOW with the reason), and the method/physics used. These are physically-
+    motivated ESTIMATES to seed the dynamic phases (18-33) instead of the generic defaults; every one
+    must be flagged inferred-not-measured and refined by the named dynamic measurement before any
+    dynamic/coherent prediction is trusted."""
+    value: float
+    unit: str
+    confidence: str
+    method: str
+
+
+def infer_dynamics_from_cw(device, *, slow_div_deg=6.0, fast_div_deg=27.0):
+    """Infer DYNAMIC parameters from the calibrated static/CW set (device = a CalibratedDevice). Returns a
+    dict of InferredDynamic. EACH IS AN ESTIMATE, NOT A MEASUREMENT -- the CW datasheet does not contain
+    dynamic data; these exploit physical LINKS between CW observables and dynamic quantities, and carry an
+    explicit per-parameter confidence. Inputs beyond the device: the datasheet far-field beam divergence
+    (slow 6 deg / fast 27 deg FWHM) used to pin the mode area.
+
+    The chain rests on the textbook SOA relation P_sat = h nu A_eff / (Gamma a tau_eff): the CW P_sat (and
+    the divergence-derived A_eff and the model differential gain a) jointly pin tau_eff. The Phase-34 fit
+    is left UNTOUCHED (it reproduces every CW number via an EFFECTIVE A_mode that absorbed the a*tau
+    degeneracy); these inferred values are the PHYSICAL interpretation of that same saturation."""
+    import numpy as _np
+    m = QDGainModel(device.params)
+    nu0, drive, L = device.nu0_Hz, device.drive_A, device.length_m
+    lam = C_LIGHT / nu0
+    out = {}
+
+    # --- (1) effective mode area A_eff from the far-field divergence -------------------------------------
+    # Gaussian far-field: a 1/e^2-intensity near-field radius w gives a 1/e^2 half-angle theta = lam/(pi w).
+    # The datasheet quotes the FWHM full-angle; for a Gaussian, FWHM_full = 1.18 * theta_(1/e2,half), so
+    # w = lam / (pi * theta_FWHM_full / 1.18). A_eff (1/e^2 intensity) = pi * w_slow * w_fast.
+    # CONFIDENCE: MEDIUM. The geometric mode size from divergence is well-defined (HIGH), but mapping it to
+    # the model's effective SATURATION area carries a ~2x convention factor (effective-area vs 1/e^2 area)
+    # and assumes a single Gaussian transverse mode (a real ridge mode is only approximately Gaussian).
+    th_s = _np.deg2rad(slow_div_deg) / 1.18
+    th_f = _np.deg2rad(fast_div_deg) / 1.18
+    w_s, w_f = lam / (_np.pi * th_s), lam / (_np.pi * th_f)
+    A_eff = float(_np.pi * w_s * w_f)
+    out["A_eff_m2"] = InferredDynamic(
+        A_eff, "m^2", "MEDIUM (geometric mode size HIGH; ~2x effective-area convention + Gaussian-mode "
+        "assumption)", "A_eff = pi*w_s*w_f, w = lambda/(pi*theta_FWHM/1.18) from the 6deg/27deg far-field")
+
+    # --- (2) GS differential gain dg/dN -- DIAGNOSTIC: it reveals GAIN CLAMPING -------------------------
+    # Finite-difference the GS material gain vs a small injection step at the operating point; N is the
+    # total confined+WL carrier density. At 2 A the GS is ~fully inverted (2 rho_GS - 1 ~ 0.998), so the
+    # extra carriers go into the WL/ES RESERVOIR, not the clamped GS -> dg/dN ~ 0. This is NOT a usable
+    # differential gain (it would blow the textbook P_sat = h nu A/(Gamma a tau) up); it is the SIGNATURE
+    # that the QD gain is CLAMPED and the saturation is RESERVOIR-limited, which is why tau_eff below uses
+    # the stimulated CROSS-SECTION form (sigma_pk) instead of dg/dN. CONFIDENCE: HIGH as a clamping
+    # diagnostic (dg/dN ~ 0 at the operating point); NOT to be used as a differential-gain value.
+    y1 = m.steady_state(drive, S_conf_m3=0.0)
+    y2 = m.steady_state(drive * 1.02, S_conf_m3=0.0)
+    g1 = float(m.material_gain_per_m(m.rho_GS(y1), nu0))
+    g2 = float(m.material_gain_per_m(m.rho_GS(y2), nu0))
+    N1, N2 = m.total_carrier_density(y1), m.total_carrier_density(y2)
+    a_diff = (g2 - g1) / (N2 - N1) if N2 != N1 else float("nan")
+    out["dg_dN_diagnostic_m2"] = InferredDynamic(
+        float(a_diff), "m^2 (dg/dN, ~0 = CLAMPED)", "HIGH as a clamping diagnostic (GS inverted ~0.998 at "
+        "2 A -> dg/dN ~ 0, reservoir-limited); NOT a usable differential gain",
+        "finite-difference dg/dN at the operating point (clamped)")
+
+    # --- (3) effective gain-recovery / saturation time tau_eff (cross-section form) --------------------
+    # For a CLAMPED QD gain the saturation is set by the stimulated CROSS-SECTION, not dg/dN: a dot's
+    # stimulated rate is sigma_pk * v_g * S_conf, the confined photon density is S_conf = Gamma P /
+    # (A_eff v_g h nu), and saturation occurs when that rate balances the recovery 1/tau_eff. Setting
+    # sigma_pk * Gamma * P_sat / (A_eff h nu) = 1/tau_eff gives
+    #     tau_eff = A_eff h nu / (Gamma sigma_pk P_sat),
+    # using the PHYSICAL A_eff (1), the FITTED sigma_pk, and the calibrated P_sat. For this device this is
+    # ~100 ps -- the QD reservoir-refill gain-recovery time that governs pattern effects / XGM, NOT the slow
+    # ns carrier lifetime and NOT the sub-ps SHB/carrier-heating (both are separate timescales absent from
+    # a CW P_sat). CONFIDENCE: MEDIUM for the order of magnitude -- it inherits the A_eff ~2x convention and
+    # the Gamma/sigma_pk degeneracy from the gain fit, so trust the ~10^2 ps SCALE, not the digits; pin it
+    # with a pump-probe gain-recovery trace.
+    Psat_W = 10.0 ** (device.report["Psat_out_dBm"] / 10.0) * 1.0e-3
+    gam, sig = m.gamma_confinement, float(device.params.sigma_pk_m2)
+    tau_eff = (H_PLANCK * nu0 * A_eff) / (gam * sig * Psat_W) if (sig and Psat_W) else float("nan")
+    out["tau_eff_s"] = InferredDynamic(
+        float(tau_eff), "s", "MEDIUM (order of magnitude ~100 ps; inherits A_eff ~2x + the Gamma/sigma_pk "
+        "degeneracy; the fast reservoir-refill recovery, NOT the slow lifetime or the sub-ps SHB/CH)",
+        "tau_eff = A_eff h nu / (Gamma sigma_pk P_sat), cross-section saturation form (QD gain is clamped)")
+
+    # --- (4) small-signal modulation / gain-recovery 3 dB frequency (order of magnitude) ---------------
+    # The CW-saturation time sets the low-frequency recovery: f_3dB ~ 1/(2 pi tau_eff). CONFIDENCE: LOW --
+    # this is only the SLOW envelope; the true high-speed response is dominated by the ps reservoir dynamics
+    # (unmeasured), so the real modulation bandwidth is HIGHER than this estimate.
+    f3 = 1.0 / (2.0 * _np.pi * tau_eff) if tau_eff and _np.isfinite(tau_eff) else float("nan")
+    out["f_3dB_slow_Hz"] = InferredDynamic(
+        float(f3), "Hz", "LOW (slow-envelope only; the ps reservoir dynamics raise the true bandwidth)",
+        "f ~ 1/(2 pi tau_eff)")
+
+    # --- (5) linewidth enhancement factor alpha (NOT reliably inferable) --------------------------------
+    # alpha = -dn'/dn'' is the carrier derivative of the KK-paired index/gain. Inferring it from the CW gain
+    # would need the gain ASYMMETRY (the carrier-induced index slope), but the fitted GS gain is a SYMMETRIC
+    # Gaussian comb -> its Kramers-Kronig index change is ANTISYMMETRIC and crosses ZERO at the 1310 nm peak
+    # -> the KK estimate of alpha at the operating wavelength is ~0, a trivial (useless) lower bound. The
+    # real alpha (1-3 for QD near the GS) comes from the asymmetric WL/ES background the symmetric fit omits.
+    # CONFIDENCE: LOW / effectively NOT inferable from this calibration. alpha stays at the flagged default
+    # (alpha_lef=2.0); pin it with an FWM up/down-asymmetry or AM/PM-chirp measurement.
+    out["alpha_lef"] = InferredDynamic(
+        float(device.params.alpha_lef), "-", "LOW / NOT inferable (KK of the symmetric fitted gain gives "
+        "~0 at the peak; the real alpha needs the gain asymmetry / a measurement)",
+        "KK of the CW gain is antisymmetric -> ~0 at peak; default 2.0 retained as a placeholder")
+
+    # --- NOTE on the kinetic rate RATIOS (HIGH, already applied) -----------------------------------------
+    # The forward/backward kinetic-rate RATIOS (tau_esc/tau_cap and tau_GS_ES/tau_ES_GS) are pinned by
+    # DETAILED BALANCE given the GS/ES energy separation dE_ES_GS = 0.078 eV, which WAS calibrated from the
+    # 1210/1310 nm two-band ASE split and is ALREADY APPLIED in the fitted params (.with_detailed_balance_
+    # taus()). CONFIDENCE: HIGH for the ratios (exact detailed balance); the ABSOLUTE kinetic times remain
+    # uncalibrated (only their ratios + the aggregate tau_eff above are constrained).
+    out["dE_ES_GS_eV"] = InferredDynamic(
+        float(device.params.dE_ES_GS_eV), "eV", "HIGH for the detailed-balance rate RATIOS it fixes (from "
+        "the CW two-band ASE); absolute kinetic times still uncalibrated",
+        "dE from the 1210/1310 nm ASE split -> detailed-balance forward/backward tau ratios")
+    return out
