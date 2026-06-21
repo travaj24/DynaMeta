@@ -665,6 +665,25 @@ datasheet as new work, not reused; see Section 8.1.)
        co-located (single-scalar-lump) value. SCOPE: flat gain + alpha index (no line filter / GVD /
        Langevin per channel); excitonic only; the WL reservoir still globally couples all channels.
 
+   - **QD-coupled transverse filamentation (Phase 32) -- SHIPPED 2026-06-21** (`transverse_bpm.py`,
+     `validation/qd_soa_filament_qd.py`, `tests/test_soa.py::test_filament_qd`). Closes the research-grade
+     gap that the transverse BPM was a STANDALONE toy whose saturable gain was a phenomenological
+     g0/(1+S/Isat) NOT coupled to the QD rate equations. Now the 2-D field saturates the REAL
+     group-resolved QD gain: qd_gain_table(model, drive, nu, P_grid) precomputes the QD saturable MATERIAL
+     gain g_QD(P) (the steady-state compression curve QDGainModel.saturation_curve returns) and
+     TransverseBPM(qd_gain_table=(P_grid, g_grid)) interpolates it at the local diffusion-smoothed power
+     (None -> the phenomenological form, byte-identical). 5 gates: A None-path == g0/(1+S/Isat) exact;
+     B a UNIFORM beam == the 1-D QD saturable-gain ODE dP/dz=(Gamma g_QD(P)-alpha_i)P integrated with the
+     SAME table (rel 8.9e-12 -- the coupling is correct); C the uniform QD-BPM output == the validated 1-D
+     marcher saturation_curve (rel 5.3e-3 -- the table is consistent with the device); D g_QD(P) IS the
+     real QD gain (monotone-saturating, low-power limit == small_signal_gain 6e-8, compresses); E
+     ALPHA-DRIVEN, POWER-THRESHOLDED filamentation -- normalized filament-band growth (band/total, so the
+     uniform gain divides out) alpha=4 vs alpha=0 is 1.49x at 200 mW (self-focusing) but 1.00x at 5 mW
+     (no filaments) -- QD gain saturates weakly (WL/ES reservoir), so filamentation needs HIGH power, the
+     correct QD-SOA beam-quality physics. SCOPE: CW-steady 2-D (no z-t time axis); the QD gain enters as a
+     PRECOMPUTED steady-state g_QD(P) table (adiabatic carrier per transverse point), not a live
+     per-(x,z) rate-equation solve; periodic-FFT (not guided-mode) lateral boundary; table built at nu_s.
+
 ---
 
 ## 6. Governing equations (reference)
