@@ -619,6 +619,31 @@ datasheet as new work, not reused; see Section 8.1.)
      H7 kitchen sink (7 features on at once -> finite/physical); H8 sweeps (gain rises with I, output
      saturates, NF->2 n_sp = 2.005). All PASS.
 
+   - **Experiment-observable fixes (Phase 30) -- SHIPPED 2026-06-20** (`traveling_wave.py`,
+     `validation/qd_soa_saturation_power.py`, `tests/test_soa.py::test_saturation_power`). Closes the
+     two HIGH/small gaps from the 5-agent physics-gap audit (the density-only gain-core gave a confined
+     photon DENSITY, never P_out in mW; the Langevin marcher gave internal-gain NF, not fiber-to-fiber):
+       * `TravelingWaveSOA.saturation_curve(drive, P_in_W, ...)` -- the ABSOLUTE gain-compression curve
+         an experimentalist reads off a measured part: P_in/P_out in W AND dBm, gain_dB, the unsaturated
+         G0_dB, and the -3 dB INPUT/OUTPUT saturation power (Pin_sat3dB_dBm / Psat_out_dBm). Generic-
+         param device: G0=8.3 dB, P_sat,out=+25.2 dBm (a HIGH, UNCALIBRATED value -- the magnitude rides
+         on the generic material params; fit to data to make it a device prediction).
+       * `TravelingWaveSOA.psat_vs_detuning(drive, P_in_W, nu_s_list)` -- the wavelength dependence of
+         gain + saturation power (the nu_s=nu0-pinned saturation gates never exercised detuning).
+       * `amplify_coherent(..., eta_in=)` -- input coupling efficiency: the input field is attenuated by
+         sqrt(eta_in) at the facet while ASE is generated internally at full gain, so the reported NF is
+         FIBER-TO-FIBER (= internal NF / eta_in, the standard input-loss-adds-to-NF result) instead of
+         internal-gain-only; eta_in=1.0 byte-identical. Wires into the marcher the same 1/eta_in factor
+         ase_noise.noise_figure carried only in post-processing.
+       5 gates: A absolute P_sat curve + finite -3 dB point; B G0 == model exp((Gamma g0-alpha_i)L)
+       (1.5e-2); C longitudinal SPATIAL HOLE BURNING g(0->L) 0.55 sat vs 0.015 small (the QD-SOA does
+       NOT obey the ideal homogeneous saturable-amplifier law -- WL/ES reservoir + inhomogeneous
+       broadening make it deviate, so SHB not the ideal law is the honest oracle); D detuning dependence
+       of gain+P_sat; E eta_in byte-id@1 + signal x eta exact + ASE invariant -> NF x 1/eta. Hammer
+       byte-identity regression PASS. STILL NOT experiment-calibrated -- this PRODUCES the observable;
+       calibration (fitting sigma_pk*N_q, tau_cap/esc, alpha to a measured G(nu,I)/P_sat/NF/tau set) is
+       the separate next step.
+
 ---
 
 ## 6. Governing equations (reference)

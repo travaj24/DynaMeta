@@ -270,6 +270,69 @@ class TravelingWaveSOA:
                 out["h_uf"] = h_uf                            # SHB+CH compression depth vs t
         return out
 
+    def saturation_curve(self, drive, P_in_W, *, nu_s_Hz: float = None, settle_transits: int = 60):
+        """ABSOLUTE-power saturation characterization -- the observables an experimentalist reads off
+        a measured gain-compression curve (which the density-only QDGainModel.saturation_curve does NOT
+        give: it returns a confined photon DENSITY, not P_out in mW). For each CW input power in
+        P_in_W [W] this runs the traveling-wave marcher to CW STEADY STATE and records the absolute
+        output power and gain. Returns a dict:
+          P_in_W, P_out_W [W];  P_in_dBm, P_out_dBm [dBm = 10 log10(P/1 mW)];
+          gain_dB  : 10 log10(P_out/P_in) at CW steady state, per input;
+          G0_dB    : the unsaturated (small-signal) gain = gain at the LOWEST input power;
+          Pin_sat3dB_dBm  : the INPUT saturation power -- input where gain = G0 - 3 dB (interpolated;
+                            nan if the sweep never reaches 3 dB compression);
+          Psat_out_dBm    : the OUTPUT saturation power at that point (the usual datasheet 'P_sat,out').
+        The curve follows the canonical saturable-amplifier law G = G0 exp(-(G - 1) P_in / P_sat); this
+        method PRODUCES the absolute observable, but its MAGNITUDE rides on the (uncalibrated) generic
+        material parameters -- fit P_sat to a measured device to turn it into a device prediction.
+        settle_transits: CW samples per point = settle_transits * nz (long enough to reach steady
+        state; the first nz samples are the device-fill transient and are excluded by reading P_out
+        at the final, steady, sample)."""
+        Pin = np.atleast_1d(np.asarray(P_in_W, dtype=np.float64)).copy()
+        if Pin.ndim != 1 or Pin.size < 2 or np.any(Pin <= 0.0):
+            raise ValueError("saturation_curve: P_in_W must be a 1-D array of >= 2 positive powers")
+        order = np.argsort(Pin)                                # ascending input for monotone interp
+        Pin = Pin[order]
+        nt = max(8, int(settle_transits) * self.nz)
+        Pout = np.empty(Pin.size)
+        for i, P in enumerate(Pin):
+            r = self.amplify(np.full(nt, float(P)), drive, nu_s_Hz=nu_s_Hz)
+            Pout[i] = float(r["P_out"][-1])                    # CW steady-state output power [W]
+        gain_dB = 10.0 * np.log10(Pout / Pin)
+        G0_dB = float(gain_dB[0])                              # smallest input -> unsaturated gain
+        to_dBm = lambda P: 10.0 * np.log10(np.asarray(P) / 1.0e-3)
+        # -3 dB INPUT saturation power: gain_dB is monotone-decreasing in Pin (compression); find
+        # where it first drops to G0 - 3 by linear interpolation in log10(Pin).
+        target = G0_dB - 3.0
+        Pin_sat3dB_dBm = np.nan
+        Psat_out_dBm = np.nan
+        if np.nanmin(gain_dB) <= target:
+            logPin = np.log10(Pin)
+            # gain_dB decreasing -> reverse so the x (gain) is increasing for np.interp
+            log_pin_sat = float(np.interp(target, gain_dB[::-1], logPin[::-1]))
+            Pin_sat_W = 10.0 ** log_pin_sat
+            Pin_sat3dB_dBm = float(to_dBm(Pin_sat_W))
+            Psat_out_dBm = float(Pin_sat3dB_dBm + target)      # P_out = P_in * G(=G0-3dB) in dB
+        return {"P_in_W": Pin, "P_out_W": Pout, "P_in_dBm": to_dBm(Pin), "P_out_dBm": to_dBm(Pout),
+                "gain_dB": gain_dB, "G0_dB": G0_dB, "Pin_sat3dB_dBm": Pin_sat3dB_dBm,
+                "Psat_out_dBm": Psat_out_dBm}
+
+    def psat_vs_detuning(self, drive, P_in_W, nu_s_list_Hz, *, settle_transits: int = 60):
+        """Output saturation power P_sat,out [dBm] vs signal frequency -- the wavelength dependence of
+        gain saturation an experimentalist maps by detuning the probe. Returns a dict: nu_s_Hz (the
+        grid), G0_dB(nu) (unsaturated gain per detuning), Psat_out_dBm(nu). Off the gain peak the
+        unsaturated gain falls and the saturation power shifts (the canonical blue-shift of P_sat with
+        the gain roll-off), which the single-tone-at-nu0 saturation gates never exercised. Runs
+        saturation_curve once per frequency."""
+        nus = np.atleast_1d(np.asarray(nu_s_list_Hz, dtype=np.float64))
+        G0 = np.empty(nus.size)
+        Psat = np.empty(nus.size)
+        for k, nu in enumerate(nus):
+            sc = self.saturation_curve(drive, P_in_W, nu_s_Hz=float(nu), settle_transits=settle_transits)
+            G0[k] = sc["G0_dB"]
+            Psat[k] = sc["Psat_out_dBm"]
+        return {"nu_s_Hz": nus, "G0_dB": G0, "Psat_out_dBm": Psat}
+
     # ---- optional spectral-dispersion (Maxwell-Bloch line-filter) layer ----
     def _line_filter_init(self, nu):
         """Set up the per-group complex-Lorentzian polarization filter that gives each spectral
@@ -345,7 +408,7 @@ class TravelingWaveSOA:
     def amplify_coherent(self, A_in, drive, *, nu_s_Hz: float = None, alpha_lef: float = None,
                          state0=None, ultrafast=None, line_filter: bool = False,
                          beta2_s2_per_m: float = None, gvd_segments: int = 1,
-                         langevin: bool = False, seed=None, nl_loss=None):
+                         langevin: bool = False, seed=None, nl_loss=None, eta_in: float = 1.0):
         """Coherent multi-tone amplification: propagate the COMPLEX field envelope A(z, t) so
         cross-gain modulation and four-wave mixing emerge. The carrier-induced index couples
         through the linewidth enhancement factor alpha (model.alpha_lef unless overridden):
@@ -385,6 +448,16 @@ class TravelingWaveSOA:
         identical. Not supported together with distributed GVD (gvd_segments>1 AND beta2!=0; raises);
         with beta2=0 the gvd_segments setting is a no-op and nl_loss runs normally.
 
+        eta_in (default 1.0): the INPUT coupling efficiency (fiber-to-chip), 0 < eta_in <= 1. The input
+        field is attenuated by sqrt(eta_in) at the input facet (a coupling LOSS of -10 log10(eta_in) dB)
+        while the ASE is still generated internally at full gain -- so the FIBER-TO-FIBER noise figure
+        the marcher reports is the internal-gain NF degraded by 1/eta_in (the standard input-loss-adds-
+        to-NF result), the value a datasheet quotes, rather than the internal-gain-only NF. The output
+        dict reports the FIBER-referred input (A_in / P_in are what you passed, before the facet loss),
+        so gain and NF are fiber-to-fiber. eta_in = 1.0 (default) is byte-identical (no scaling). Acts
+        only on the main (non-segmented) path. (The post-processing ase_noise.noise_figure already
+        carries the same 1/eta_in factor; this wires it into the time-domain Langevin engine too.)
+
         Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
         frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
@@ -410,6 +483,12 @@ class TravelingWaveSOA:
                 A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha_lef,
                 ultrafast=ultrafast, line_filter=line_filter)
         nt = A_in.size
+        eta = float(eta_in)                                   # input coupling efficiency (NF penalty)
+        if not (0.0 < eta <= 1.0):
+            raise ValueError("amplify_coherent: eta_in (input coupling efficiency) must be in (0, 1]")
+        A_fiber = A_in                                        # fiber-referred input (reported as P_in)
+        if eta != 1.0:
+            A_in = A_in * np.sqrt(eta)                        # input-facet coupling LOSS into the device
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
@@ -433,7 +512,7 @@ class TravelingWaveSOA:
         # the distributed dispersion-gain coupling when both are active. (A per-step dispersion of
         # the spatial node array is invalid: that array is a snapshot along z, not a fixed
         # retarded-time window, so dispersing the shifting window leaks energy.)
-        A_in_orig = A_in
+        A_in_orig = A_fiber                                   # report FIBER-referred input (P_in/A_in)
         if beta2 != 0.0:
             half = self._gvd_phase(beta2, nt, 0.5 * self.L)
             A_in = np.fft.ifft(np.fft.fft(A_in) * half)

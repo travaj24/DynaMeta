@@ -511,6 +511,13 @@ def test_hammer():
     assert ham.main() is True
 
 
+def test_saturation_power():
+    """Thin wrapper -- absolute P_sat (mW/dBm) + detuning + eta_in fiber-to-fiber NF validation."""
+    import importlib
+    sat = importlib.import_module("validation.qd_soa_saturation_power")
+    assert sat.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)
