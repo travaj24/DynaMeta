@@ -657,13 +657,18 @@ datasheet as new work, not reused; see Section 8.1.)
          step building ls_gs = sum_k L(nu_k) S_k. Excitonic-only (raises for eh_split); numpy (no numba).
        * `TravelingWaveSOA.amplify_wdm(channels, drive, ...)` -- co-propagate N channels at distinct
          nu_k, each amplified by its own g(nu_k), carriers stepped with all channels' mid-slice power.
-       5 gates: A single-channel == amplify_coherent (rel 0.0, exact); B two co-located channels' total
-       == single channel at summed power (rel 0.0); C cross-gain saturation of a probe by a 50 mW pump
-       DECREASES monotonically with pump-probe separation (XSAT 0.097->0.060->0.025->0.006 dB over
-       0.3->4 x homogeneous linewidth -- the inhomogeneous-broadening / spectral-hole-burning low-
-       crosstalk QD-SOA signature); D unpumped channels absorb; E far-detuned crosstalk is 5.6% of the
-       co-located (single-scalar-lump) value. SCOPE: flat gain + alpha index (no line filter / GVD /
-       Langevin per channel); excitonic only; the WL reservoir still globally couples all channels.
+       5 gates (HARDENED after an adversarial review found the first cut's cross-saturation gates also
+       passed for a non-resolved 'monochromatic-lump' model -- the dB XSAT falloff was dominated by the
+       probe's off-peak gain rolloff, not resolved depletion): A single-channel == amplify_coherent (rel
+       0.0, exact); B two co-located channels' total == single channel at summed power (rel 0.0 -- now
+       labeled FIELD/POWER CONSISTENCY only, since it passes for a mis-built drive too); C SPECTRAL HOLE
+       BURNING (the resolved-depletion DISCRIMINATOR) -- a 50 mW pump at nu0 burns a gain dip LOCALIZED
+       to ~the homogeneous linewidth, far/centre 0.11 << the gain-spectrum ratio 0.57, so the hole is
+       much narrower than the inhomogeneous gain spectrum; a group-uniform lump (dip proportional to g)
+       would give dip-ratio ~ gain-ratio and FAIL; D unpumped channels absorb; E ABSOLUTE co-located
+       cross-saturation 0.109 dB in (0, 0.5) -- the group-uniform lump gives ~2.7 dB (24x), so the bound
+       FAILS for the lumped model. SCOPE: flat gain + alpha index (no line filter / GVD / Langevin per
+       channel); excitonic only; the WL reservoir still globally couples all channels.
 
    - **QD-coupled transverse filamentation (Phase 32) -- SHIPPED 2026-06-21** (`transverse_bpm.py`,
      `validation/qd_soa_filament_qd.py`, `tests/test_soa.py::test_filament_qd`). Closes the research-grade
