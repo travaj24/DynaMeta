@@ -525,6 +525,13 @@ def test_wdm():
     assert wdm.main() is True
 
 
+def test_filament_qd():
+    """Thin wrapper -- QD-coupled transverse filamentation (real QD gain in the 2-D BPM) validation."""
+    import importlib
+    fil = importlib.import_module("validation.qd_soa_filament_qd")
+    assert fil.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)

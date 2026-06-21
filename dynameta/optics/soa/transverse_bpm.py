@@ -51,7 +51,8 @@ class TransverseBPM:
     solve), periodic (FFT) lateral boundary (not a guided-mode waveguide) -- see the module docstring."""
 
     def __init__(self, Lx_m, nx, lambda0_m, n0, *, g0_per_m=0.0, gamma_confinement=1.0,
-                 alpha_i_per_m=0.0, Isat_W=np.inf, alpha_lef=0.0, L_diff_m=0.0):
+                 alpha_i_per_m=0.0, Isat_W=np.inf, alpha_lef=0.0, L_diff_m=0.0,
+                 qd_gain_table=None):
         if nx < 4 or Lx_m <= 0.0:
             raise ValueError("TransverseBPM: need nx >= 4 and Lx_m > 0")
         if g0_per_m < 0.0 or alpha_i_per_m < 0.0 or Isat_W <= 0.0 or L_diff_m < 0.0:
@@ -71,18 +72,36 @@ class TransverseBPM:
         self.alpha = float(alpha_lef)
         self.L_diff = float(L_diff_m)
         self._diff_lp = 1.0 / (1.0 + (self.L_diff * self.kx) ** 2)  # carrier-diffusion low-pass
+        # QD-COUPLED saturable gain: a precomputed (P_grid, g_grid) table g_QD(P) [material gain 1/m vs
+        # local guided power, from QDGainModel.saturation_curve / qd_gain_table] that REPLACES the
+        # phenomenological g0/(1+S/Isat) -- so the 2-D field saturates the REAL group-resolved QD gain
+        # (with its WL/ES reservoir and inhomogeneous broadening), the filamentation feedback the
+        # standalone toy lacked. None -> the phenomenological form (byte-identical).
+        if qd_gain_table is None:
+            self._qd_P = None
+            self._qd_g = None
+        else:
+            self._qd_P = np.asarray(qd_gain_table[0], dtype=np.float64)
+            self._qd_g = np.asarray(qd_gain_table[1], dtype=np.float64)
+            if (self._qd_P.ndim != 1 or self._qd_P.size < 2 or self._qd_g.shape != self._qd_P.shape
+                    or np.any(np.diff(self._qd_P) <= 0.0)):
+                raise ValueError("TransverseBPM: qd_gain_table = (P_grid, g_grid), P_grid strictly "
+                                 "increasing 1-D >= 2 points, g_grid the same shape")
 
     def _diffract(self, A, dz):
         """Exact unitary paraxial diffraction over dz: A_k *= exp(-i k_x^2 dz / 2k)."""
         return np.fft.ifft(np.fft.fft(A) * np.exp(-1j * self.kx ** 2 * dz / (2.0 * self.k)))
 
     def carrier_gain(self, A):
-        """Local saturable gain g(x) [1/m] given the field A(x): g0/(1 + S_eff/Isat), S_eff the
-        lateral-diffusion-smoothed intensity (the steady carrier response). L_diff = 0 -> S_eff =
-        |A|^2 (no smoothing)."""
+        """Local saturable MATERIAL gain g(x) [1/m] given the field A(x). With a qd_gain_table, g(x) is
+        the REAL QD saturable gain g_QD interpolated at the local diffusion-smoothed power S_eff(x)
+        (clamped to the table range) -- the group-resolved QD saturation. Otherwise the phenomenological
+        g0/(1 + S_eff/Isat). S_eff = |A|^2 lateral-diffusion-smoothed (L_diff = 0 -> S_eff = |A|^2)."""
         S = np.abs(A) ** 2
         if self.L_diff > 0.0:
             S = np.fft.ifft(np.fft.fft(S) * self._diff_lp).real
+        if self._qd_P is not None:                            # QD-coupled saturable gain (interp table)
+            return np.interp(S, self._qd_P, self._qd_g)       # flat-clamped outside the table range
         return self.g0 / (1.0 + S / self.Isat)
 
     def _coef(self, A):
@@ -143,3 +162,19 @@ class TransverseBPM:
         tot = I.sum()
         xbar = np.sum(self.x * I) / tot
         return float(np.sqrt(np.sum((self.x - xbar) ** 2 * I) / tot))
+
+
+def qd_gain_table(model, drive, nu_Hz, P_grid_W):
+    """Precompute the QD saturable MATERIAL gain g(P) [1/m] vs local guided power P at fixed injection
+    `drive`, to drive a TransverseBPM(qd_gain_table=(P_grid, g_grid)) with the REAL group-resolved QD
+    gain saturation (WL/ES reservoir + inhomogeneous broadening) in place of the phenomenological
+    g0/(1 + S/Isat). g(P) is the static gain-vs-power compression curve QDGainModel.saturation_curve
+    returns (the steady-state line-resolved modal gain at nu_s at each power). Returns (P_grid_W,
+    g_grid); the BPM interpolates g at the local diffusion-smoothed power and flat-clamps outside the
+    grid, so include a low first power (the small-signal-gain plateau) and a high last power (deep
+    saturation) bracketing the operating intensities. Pure-numpy table build; SI; ASCII."""
+    P = np.asarray(P_grid_W, dtype=np.float64)
+    if P.ndim != 1 or P.size < 2 or np.any(np.diff(P) <= 0.0) or np.any(P <= 0.0):
+        raise ValueError("qd_gain_table: P_grid_W must be strictly increasing positive 1-D >= 2 points")
+    g, _S = model.saturation_curve(drive, P, nu_s_Hz=float(nu_Hz))
+    return P, np.asarray(g, dtype=np.float64)
