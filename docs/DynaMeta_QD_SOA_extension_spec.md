@@ -644,6 +644,27 @@ datasheet as new work, not reused; see Section 8.1.)
        calibration (fitting sigma_pk*N_q, tau_cap/esc, alpha to a measured G(nu,I)/P_sat/NF/tau set) is
        the separate next step.
 
+   - **WDM multi-channel cross-gain saturation (Phase 31) -- SHIPPED 2026-06-21** (`qd_gain.py`,
+     `traveling_wave.py`, `validation/qd_soa_wdm.py`, `tests/test_soa.py::test_wdm`). Closes the
+     research-grade WDM ceiling the gap audit flagged (spec line 382: the carrier back-reaction was
+     lumped to ONE scalar photon density at nu_s, so the 8 THz comb was treated as monochromatic and
+     all channels bleached the SAME groups). Now each channel saturates the QD groups IT overlaps via
+     its OWN homogeneous lineshape: the per-group stimulated drive is sum_k L(nu_k) S_conf(P_k, nu_k).
+       * `rhs_fields(..., ls_gs=, ls_es=)` -- optional pre-computed per-group lineshape-weighted photon
+         density; None (the single-channel default) computes L(nu_s) S with the ORIGINAL float order
+         (byte-identical; gain-core + hammer regressions PASS).
+       * `QDGainModel.step_slices_wdm(state, P_list, nu_list, dt, I_A)` -- multi-channel RK4 carrier
+         step building ls_gs = sum_k L(nu_k) S_k. Excitonic-only (raises for eh_split); numpy (no numba).
+       * `TravelingWaveSOA.amplify_wdm(channels, drive, ...)` -- co-propagate N channels at distinct
+         nu_k, each amplified by its own g(nu_k), carriers stepped with all channels' mid-slice power.
+       5 gates: A single-channel == amplify_coherent (rel 0.0, exact); B two co-located channels' total
+       == single channel at summed power (rel 0.0); C cross-gain saturation of a probe by a 50 mW pump
+       DECREASES monotonically with pump-probe separation (XSAT 0.097->0.060->0.025->0.006 dB over
+       0.3->4 x homogeneous linewidth -- the inhomogeneous-broadening / spectral-hole-burning low-
+       crosstalk QD-SOA signature); D unpumped channels absorb; E far-detuned crosstalk is 5.6% of the
+       co-located (single-scalar-lump) value. SCOPE: flat gain + alpha index (no line filter / GVD /
+       Langevin per channel); excitonic only; the WL reservoir still globally couples all channels.
+
 ---
 
 ## 6. Governing equations (reference)
