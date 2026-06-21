@@ -689,6 +689,31 @@ datasheet as new work, not reused; see Section 8.1.)
      PRECOMPUTED steady-state g_QD(P) table (adiabatic carrier per transverse point), not a live
      per-(x,z) rate-equation solve; periodic-FFT (not guided-mode) lateral boundary; table built at nu_s.
 
+   - **Coherent Maxwell-Bloch gain (Phase 33) -- SHIPPED 2026-06-21** (`maxwell_bloch.py`,
+     `validation/qd_soa_maxwell_bloch.py`, `tests/test_soa.py::test_maxwell_bloch`). Closes the
+     research-grade gap that the marcher ADIABATICALLY ELIMINATES the polarization (gain = rate-equation
+     occupations), missing the sub-T2 COHERENT dynamics. `MaxwellBlochEnsemble` integrates a real 2-level
+     Bloch vector (u, v, w) per inhomogeneous QD group: u' = delta v - u/T2; v' = -delta u + Omega w -
+     v/T2; w' = -Omega v - (w - w_eq)/T1, driven by the Rabi field Omega(t) = mu E/hbar [rad/s]
+     (Allen-Eberly); the macroscopic coherence P = sum_j w_j (u_j + i v_j) radiates the field.
+     from_model() calibrates it from a QDGainModel steady state (detunings, weights, w_eq = 2 rho_GS - 1,
+     T2 = 1/(pi fwhm_hom), T1 = tau_sp). 5 gates: A the DYNAMICAL integrator's weak-CW steady-state gain
+     (driven THROUGH evolve(), the in-quadrature Im(P) = sum_j w_j v_j) == material_gain_per_m (rel
+     3.2e-6 -- the rate-equation gain IS this coherent model's weak-field / fast-dephasing limit, the
+     reduction; exercises the Bloch ODE integration, a wrong sign/Rabi coupling FAILS -- hardened from a
+     static-formula match after the adversarial review flagged the first cut never called evolve()); B
+     coherent->incoherent crossover (strong resonant field: T2 >>
+     Rabi period -> deep flop min-w -1.0; T2 << -> no flop, min-w 0.0 = the rate-eq saturation limit);
+     C RABI FLOPPING w(theta) = w0 cos(theta) -- pi -> -w0, 2pi -> +w0 (err 1.2e-6), purely coherent;
+     D PHOTON ECHO -- an inhomogeneous ensemble dephases after a pi/2 pulse then a pi pulse at tau
+     rephases it into a macroscopic-polarization echo at 2 tau (151x above the dephased baseline); E
+     pulse-area / SELF-INDUCED TRANSPARENCY -- a 2 pi pulse returns the inversion (|dw| 1.2e-6,
+     transparent) while a pi pulse fully flips it (|dw| 2.0). SCOPE: the Bloch ensemble is driven by a
+     PRESCRIBED Rabi field (the coherent dynamics + the linear-gain tie-back to the device model), a
+     standalone coherent-physics module -- it is NOT wired as the gain of the z-propagating marcher
+     (which stays rate-equation); working in Omega [rad/s] keeps Rabi/echo free of the absolute dipole /
+     power calibration, with the gain SHAPE (GATE A) the quantitative tie to the device.
+
 ---
 
 ## 6. Governing equations (reference)

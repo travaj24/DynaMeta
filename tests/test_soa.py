@@ -532,6 +532,13 @@ def test_filament_qd():
     assert fil.main() is True
 
 
+def test_maxwell_bloch():
+    """Thin wrapper -- coherent Maxwell-Bloch (Rabi, photon echo, pulse-area) validation."""
+    import importlib
+    mb = importlib.import_module("validation.qd_soa_maxwell_bloch")
+    assert mb.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)
