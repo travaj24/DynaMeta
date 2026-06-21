@@ -518,6 +518,13 @@ def test_saturation_power():
     assert sat.main() is True
 
 
+def test_wdm():
+    """Thin wrapper -- WDM multi-channel wavelength-resolved cross-gain saturation validation."""
+    import importlib
+    wdm = importlib.import_module("validation.qd_soa_wdm")
+    assert wdm.main() is True
+
+
 def test_nonmarkovian_lineshape():
     from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                                nonmarkovian_lineshape)
