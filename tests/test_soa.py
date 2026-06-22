@@ -672,6 +672,18 @@ def test_transverse_bpm():
     wn = bl.rms_width(bl.propagate(Al, 0.6e-3, 300)["I_out"])
     wf = bl.rms_width(bl.propagate(Al, 0.6e-3, 300, T_profile_x=Tq, dndt_per_K=2e-3)["I_out"])
     assert wf < wn
+    # qd_gain_table REPLACES the phenomenological gain -> passing it WITH g0/Isat is a silent-ignore
+    # contradiction and must raise; each model ALONE constructs. (Pass-2 re-audit: the guard shipped
+    # without a unit test, so a refactor dropping it would have been undetected. The Isat-only case
+    # exercises the np.isfinite(Isat) half specifically.)
+    import pytest
+    Pg, gg = np.array([1e-6, 1e-3]), np.array([1500.0, 300.0])
+    TransverseBPM(100e-6, 64, lam, n0, qd_gain_table=(Pg, gg))            # table alone -> ok
+    TransverseBPM(100e-6, 64, lam, n0, g0_per_m=1500.0, Isat_W=1e-3)      # phenomenological alone -> ok
+    with pytest.raises(ValueError):
+        TransverseBPM(100e-6, 64, lam, n0, g0_per_m=1500.0, qd_gain_table=(Pg, gg))   # g0 + table
+    with pytest.raises(ValueError):
+        TransverseBPM(100e-6, 64, lam, n0, Isat_W=1e-3, qd_gain_table=(Pg, gg))       # Isat + table
 
 
 def test_carrier_leakage_numba_parity():

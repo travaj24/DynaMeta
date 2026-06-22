@@ -96,16 +96,32 @@ def main(argv):
         # reverse-direction drift: a gated script NOT in SMOKE that imports NO heavy solver is a
         # SOLVER-FREE validation the smoke tier silently excludes (e.g. the qd_soa_* family). Surface
         # it loudly so a new subsystem is curated into SMOKE deliberately, not dropped by omission.
-        _HEAVY = ("import ngsolve", "from ngsolve", "import devsim", "from devsim", "import gmsh")
+        # A script is "heavy" if its SOURCE references a heavy solver DIRECTLY (import ngsolve/devsim/
+        # gmsh) OR TRANSITIVELY through a DynaMeta wrapper that pulls one: optics.solver / ngsolve_layered
+        # -> ngsolve; optics.fdtd* -> multi-minute time loops; carriers.devsim* / thermal_fem /
+        # electrostatics_fem -> devsim/ngsolve; optics.inverse_design / topology_opt -> jax-FDTD;
+        # dynameta.pipeline -> devsim+ngsolve. The earlier literal import-only scan misclassified ~80
+        # FEM/FDTD/DEVSIM scripts as solver-free (they import their solver through these wrappers, not
+        # via a top-level `import ngsolve`) -- pass-2 re-audit P2. Substrings (not import-form) so a
+        # deferred/in-function import (e.g. behind a find_spec skip-guard) still counts as heavy.
+        _HEAVY = (
+            "ngsolve", "devsim", "import gmsh", "from gmsh",           # direct heavy deps
+            "optics.solver", "optics.fdtd", "optics.inverse_design",  # FEM / FDTD / jax-FDTD wrappers
+            "optics.topology_opt", "carriers.thermal_fem", "carriers.electrostatics_fem",
+            "carriers.devsim", "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
+        )
         extra = []
         for n in sorted(all_gated - SMOKE):
             src = open(os.path.join(HERE, n + ".py"), encoding="utf-8").read()
             if not any(h in src for h in _HEAVY):
                 extra.append(n)
         if extra:
-            print("[run_all] WARNING: {} solver-free gated validation(s) NOT in SMOKE (curate into "
-                  "the smoke tier or confirm intentional): {}".format(len(extra), ", ".join(extra)),
-                  flush=True)
+            # "no heavy path" = no NGSolve/DEVSIM/FDTD/jax-FDTD import; a few entries still pull
+            # lumenairy/jax (the bridge validations) -- fast but not pure-numpy, so verify the runtime
+            # before adding them to the pure-numpy smoke tier.
+            print("[run_all] WARNING: {} gated validation(s) with NO NGSolve/DEVSIM/FDTD heavy path NOT "
+                  "in SMOKE (curate into the smoke tier or confirm intentional; verify runtime -- a few "
+                  "pull lumenairy/jax): {}".format(len(extra), ", ".join(extra)), flush=True)
     elif tier == "full":
         ex_dir = os.path.join(REPO, "examples")
         if os.path.isdir(ex_dir):

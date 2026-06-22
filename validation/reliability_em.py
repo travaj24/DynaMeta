@@ -6,6 +6,11 @@ GATE B (independent numeric): Miner damage under a two-segment J(t) duty cycle (
         accumulation) matches the piecewise-ANALYTIC time-to-failure.
 GATE C (literature band + anchor): n = 2 (void growth), Ea in the Cu band; calibration reproduces its
         anchor; a short-contact design is demonstrably Blech-immortal.
+GATE D (array-J immortality is ELEMENTWISE): mttf_s on a VECTOR of current densities + a length
+        returns inf for the immortal cells (J*L < (J*L)_crit) and the finite Black law for the mortal
+        ones, matching the scalar calls elementwise. This DISCRIMINATES the pre-fix scalar-only-immortal
+        mttf_s (which silently returned the all-finite Black law for an array J) -- GATEs A/C only ever
+        feed SCALAR J, so a regression reverting the vectorized immortality would slip past them.
 
 Run: python -m validation.reliability_em
 """
@@ -67,6 +72,22 @@ def main():
     ok = ok and g_c
     print("[re] GATE C: n=2 (void growth), Ea {:.2f} eV in Cu band; anchor reproduced; short-contact "
           "design immortal -> {}".format(Ea, "PASS" if g_c else "FAIL"), flush=True)
+
+    # ---- GATE D: ARRAY-J Blech immortality is ELEMENTWISE (discriminates the pre-fix scalar path) ----
+    # Feed a VECTOR of current densities + a length: immortal cells (J*L < (J*L)_crit) must be inf,
+    # mortal cells the finite Black law, matching the per-element scalar calls. The pre-fix mttf_s
+    # applied the immortality test only on scalar J, so an array silently returned the all-finite Black
+    # law (no inf); GATEs A/C feed only SCALAR J, so this is the gate that fails for that regression.
+    pe = EmParams()
+    Jvec = np.array([1.0e7, 1.0e15])                       # L=1e-9 -> J*L = [1e-2, 1e6] vs crit 2e5
+    mt = pe.mttf_s(Jvec, 350.0, length_m=1e-9)             # -> [inf (immortal), finite (mortal)]
+    sc0 = pe.mttf_s(1.0e7, 350.0, length_m=1e-9)           # scalar immortal -> inf
+    sc1 = pe.mttf_s(1.0e15, 350.0, length_m=1e-9)          # scalar mortal -> finite Black law
+    g_d = bool(np.shape(mt) == (2,) and np.isinf(mt[0]) and np.isfinite(mt[1]) and mt[1] > 0.0
+               and np.isinf(sc0) and np.isfinite(sc1) and abs(mt[1] - sc1) <= 1e-12 * sc1)
+    ok = ok and g_d
+    print("[re] GATE D: array-J Blech elementwise (J*L=[1e-2,1e6] A/m -> [inf, {:.1f} s], == scalar) "
+          "-> {}".format(float(mt[1]), "PASS" if g_d else "FAIL"), flush=True)
 
     print("[re] *** REL3 ELECTROMIGRATION: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok

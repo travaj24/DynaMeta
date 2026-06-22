@@ -9,6 +9,9 @@ GATE A (normal incidence: sweep == per-call, byte-identical): solve_sweep over s
 GATE B (oblique fallback: sweep == per-call): at 30 deg the Bloch phases are k0-dependent, so the
         sweep MUST fall back to a per-wavelength FESpace build -- and still match the per-call solver
         byte-identically (the fallback path is not broken).
+GATE C (oblique refuses an injected reuse-space): a normal-incidence FESpace passed as _reuse_fes into
+        an OBLIQUE solve_fem must be IGNORED (the oblique branch precedes the reuse branch), giving the
+        byte-identical fresh-build oblique result -- the safety property the sweep fallback relies on.
 
 Honest SKIP (exit 0 + banner) when ngsolve is not installed.
 
@@ -100,6 +103,26 @@ def main():
     ok = ok and g_b
     print("[fsw] GATE B: oblique-30deg sweep (fallback) ==per-call worst |d|={:.1e} -> {}".format(
         worst_b, "PASS" if g_b else "FAIL"), flush=True)
+
+    # ---- GATE C: at oblique an INJECTED (wrong) normal-incidence FESpace is REFUSED ----
+    # The solve_fem oblique branch PRECEDES the _reuse_fes branch, so a normal-incidence space passed as
+    # _reuse_fes at oblique MUST be ignored -- the result is byte-identical to the freshly-built oblique
+    # fallback (swept2[0]). This is the safety property the sweep relies on: a reused space (only ever
+    # built at normal incidence) can never corrupt an oblique solve. (Without it, reuse could silently
+    # apply the wrong Bloch phases.)
+    import ngsolve as ng
+    from dynameta.optics.eps_assembler import assemble_eps_cf
+    from dynameta.optics.solver import solve_fem
+    od = int(d2.mesh_3d.fem_order)
+    eps_cf2 = assemble_eps_cf(geo2, ebr2)
+    fes_norm = ng.Periodic(ng.HCurl(geo2.mesh, order=od, complex=True, dirichlet=""))   # NORMAL-inc space
+    inj = solve_fem(geo2, lams[0], eps_cf2, d2.optical, order=od, n_super=1.0 + 0j, n_sub=1.0 + 0j,
+                    _reuse_fes=fes_norm)                         # oblique -> this space MUST be ignored
+    worst_c = _worst(inj, swept2[0])                             # == the fresh-build oblique fallback
+    g_c = bool(worst_c < 1e-12)
+    ok = ok and g_c
+    print("[fsw] GATE C: oblique REFUSES an injected normal-incidence FESpace (==fresh-build worst |d|="
+          "{:.1e}) -> {}".format(worst_c, "PASS" if g_c else "FAIL"), flush=True)
 
     print("[fsw] *** FEM SWEEP SOLVER (FESpace reuse byte-identical): {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
