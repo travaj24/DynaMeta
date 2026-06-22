@@ -21,6 +21,13 @@ GATE E (uniform tensor): a planar-LC diagonal tensor diag(n_e^2, n_o^2, n_o^2) -
 GATE F (per-layer absorption): absorption=True fills per_region_absorption keyed by DESIGN
         layer name -- a lossless layer takes ~0, layers close on A_independent == A ==
         1 - R - T (and A == TMM), and a graded layer's slabs aggregate into ONE key.
+GATE G (sliced-grid asymmetric transpose, FEM-FREE): the load-bearing slice_eps_field
+        transpose values_zyx (Nz,Ny,Nx) -> eps_cell (Nx,Ny) is pinned WITHOUT the FEM oracle
+        (which GATE C skips when ngsolve is absent). A 1-D grating along x on an ASYMMETRIC grid
+        (Ny=1, Nx>>1, R_xpol != R_ypol so the test is non-vacuous): (1) the slice path's R must
+        equal a HAND-BUILT (Nx,1) eps_cell end-to-end (<1e-9 -- an axis flip breaks it), and (2)
+        an independent Rytov-EMT oracle pins the ABSOLUTE mapping (y-pol || grooves -> arithmetic
+        mean eps, x-pol perp -> harmonic mean), which a transpose bug swaps.
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -240,6 +247,60 @@ def main():
     print("[lrb] GATE F: per-layer absorption (keys {}, lossless ~0, closure {:.1e}; "
           "graded slabs -> one key, closure {:.1e}) -> {}".format(
               sorted(pra), errF, errG, "PASS" if g_f else "FAIL"), flush=True)
+
+    # ---- GATE G: sliced-grid asymmetric transpose (FEM-FREE axis pin) ----
+    # The load-bearing transpose lives in slice_eps_field: values_zyx (Nz,Ny,Nx) -> eps_cell (Nx,Ny)
+    # (Lumenairy's axis-0 = x). GATE C exercises it through the FEM oracle but SKIPS without ngsolve, so
+    # the only transpose protection vanishes in a lumenairy-only environment. This gate pins it two
+    # FEM-free ways with an ASYMMETRIC grid (Ny=1, Nx>>1) and a pattern that genuinely distinguishes the
+    # axes (a 1-D grating along x -> R_xpol != R_ypol): a symmetric or square cell would make the test
+    # vacuous. (1) slice_eps_field's eps_cell must equal a HAND-BUILT (Nx,1) cell end-to-end (any axis
+    # mishandling flips the grating orientation vs polarization and breaks the match). (2) an independent
+    # Rytov-EMT oracle pins the ABSOLUTE mapping: E PARALLEL to the grooves (y-pol) sees the arithmetic
+    # mean eps, E PERPENDICULAR (x-pol) the harmonic mean -- a transpose bug swaps which pol sees which.
+    from dynameta.core.layered import LayeredSlab, LayeredStack, slice_eps_field
+    from dynameta.optics.lumenairy_bridge import LumenairyStackSolver
+    from dynameta.optics.tmm_reference import TmmLayeredSolver
+    PERg = LAM / 25.0                                    # deep sub-wavelength (only 0-order propagates)
+    Nx, t_nm = 64, 125.0                                 # Nx >> Ny=1 (asymmetric); two 125 nm slabs
+    xf = (np.arange(Nx) + 0.5) / Nx
+    eps_col = (5.0 + 3.5 * np.cos(2.0 * np.pi * xf)).astype(complex)   # eps(x), high-contrast grating
+    z_nm = np.array([0.0, t_nm, 2.0 * t_nm])
+    vals = np.broadcast_to(eps_col.reshape(1, 1, Nx), (3, 1, Nx)).astype(complex).copy()  # (Nz,Ny=1,Nx)
+    efg = EpsField(values_zyx=vals, z_axis_u=z_nm, x_axis_u=xf * PERg * 1e9,
+                   y_axis_u=np.array([0.0]))
+    slv = LumenairyStackSolver(n_orders=10)
+
+    def _RT(slabs, pol):
+        stk = LayeredStack(1.0 + 0j, 1.5 + 0j, slabs, period_x_m=PERg, period_y_m=PERg)
+        r = slv.solve(stk, LAM, OpticalSpec(polarization=pol, incidence_angle_deg=0.0))
+        return r.R
+
+    sliced = slice_eps_field(efg, 1e-9)                  # the bridge slice path (Nz,Ny,Nx) -> (Nx,Ny)
+    native = [LayeredSlab(t_nm * 1e-9, eps_cell=eps_col.reshape(Nx, 1)),  # hand-built (Nx,1) reference
+              LayeredSlab(t_nm * 1e-9, eps_cell=eps_col.reshape(Nx, 1))]
+    Rx_s, Ry_s = _RT(sliced, "x"), _RT(sliced, "y")
+    Rx_n, Ry_n = _RT(native, "x"), _RT(native, "y")
+    transpose_exact = max(abs(Rx_s - Rx_n), abs(Ry_s - Ry_n))
+    split = abs(Rx_s - Ry_s)                             # the grating distinguishes the axes (non-vacuous)
+    # independent Rytov-EMT oracle (uniform slabs of the two effective indices; hand-derived means)
+    arith = complex(eps_col.mean())
+    harm = complex(1.0 / np.mean(1.0 / eps_col))
+    tmm = TmmLayeredSolver()
+
+    def _Remt(eps_eff):
+        stk = LayeredStack(1.0 + 0j, 1.5 + 0j, [LayeredSlab(2.0 * t_nm * 1e-9, eps=eps_eff)])
+        return tmm.solve(stk, LAM, OpticalSpec(polarization="y", incidence_angle_deg=0.0)).R
+    R_arith, R_harm = _Remt(arith), _Remt(harm)
+    # y-pol (|| grooves) -> arith is the CLOSER EMT match; x-pol (perp) -> harm is closer
+    dir_ok = (abs(Ry_s - R_arith) < abs(Ry_s - R_harm) and abs(Rx_s - R_harm) < abs(Rx_s - R_arith))
+    emt_ok = (abs(Ry_s - R_arith) < 2e-2 and abs(Rx_s - R_harm) < 2e-2)
+    g_g = bool(transpose_exact < 1e-9 and split > 5e-3 and dir_ok and emt_ok)
+    ok = ok and g_g
+    print("[lrb] GATE G: sliced-grid transpose -- slice==hand-built (Nx,1) |d|={:.1e}; axis split |Rx-Ry|"
+          "={:.3f}; EMT y->arith x->harm (dRy {:.1e}, dRx {:.1e}, dir {}) -> {}".format(
+              transpose_exact, split, abs(Ry_s - R_arith), abs(Rx_s - R_harm), dir_ok,
+              "PASS" if g_g else "FAIL"), flush=True)
 
     print("[lrb] *** LUMENAIRY RCWA BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

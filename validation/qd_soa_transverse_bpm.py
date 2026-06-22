@@ -142,6 +142,30 @@ def main():
           "{:.7f}); hot-centre focuses (wf {:.2e} < wn {:.2e} < wd {:.2e}) -> {}".format(
               f_byte, relF, en, wf, wn, wd, "PASS" if g_f else "FAIL"), flush=True)
 
+    # ---- GATE G: Strang-split is 2nd-order in dz (Richardson self-convergence) ----
+    # The module docstring claims O(dz^2) ("verified ratio 4.0") but no gate proved it. Use a beam that
+    # exercises BOTH legs at once -- a Gaussian with strong saturable gain (Isat finite) AND diffraction
+    # AND alpha-coupling -- so the test is sensitive to the NONLINEAR-leg midpoint correction (a frozen-g
+    # 1st-order leg would cap the whole method at O(dz)). Richardson: with the SAME physical Lz solved at
+    # nz, 2nz, 4nz steps, the successive-difference norm ratio ||A(nz)-A(2nz)|| / ||A(2nz)-A(4nz)|| -> 2^p.
+    # 2nd order (real) -> 4; 1st order (frozen-gain, no midpoint) -> 2. Asserting ratio > 3 EXCLUDES the
+    # 1st-order method (the discriminator), and the upper bound catches a regime/roundoff pathology.
+    bg = TransverseBPM(300e-6, 512, LAM, N0, g0_per_m=1500.0, Isat_W=1.0e-3, alpha_lef=3.0,
+                       alpha_i_per_m=200.0)
+    Ag = np.sqrt(3.0e-3) * np.exp(-(bg.x / 15e-6) ** 2) + 0j
+    Lzg = 0.4e-3
+    A1 = bg.propagate(Ag, Lzg, 40)["A_out"]
+    A2 = bg.propagate(Ag, Lzg, 80)["A_out"]
+    A4 = bg.propagate(Ag, Lzg, 160)["A_out"]
+    d1 = float(np.linalg.norm(A1 - A2))
+    d2 = float(np.linalg.norm(A2 - A4))
+    ratio = d1 / d2 if d2 > 0.0 else np.inf
+    g_g = bool(d2 < d1 and 3.0 < ratio < 5.0)              # ~4 (2nd order), excludes ~2 (1st order)
+    ok = ok and g_g
+    print("[bpm] GATE G: Strang-split Richardson ratio ||dA(40-80)||/||dA(80-160)|| = {:.2f} (2nd-order "
+          "-> 4, 1st-order -> 2; d1 {:.2e} > d2 {:.2e}) -> {}".format(
+              ratio, d1, d2, "PASS" if g_g else "FAIL"), flush=True)
+
     print("[bpm] *** QD-SOA TRANSVERSE BPM: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 
