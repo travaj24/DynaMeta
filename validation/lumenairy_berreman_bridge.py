@@ -161,23 +161,29 @@ def main():
     t_m = _scalar_tmm(n_minus, dF, n_sup, n_sub, LAM)["t"]
     t_p = _scalar_tmm(n_plus, dF, n_sup, n_sub, LAM)["t"]
     Ex = 0.5 * (t_m + t_p)                                    # x-incident transmitted lab field
-    Ey_a = 0.5j * (t_m - t_p)
-    analytic1 = np.array([Ex, Ey_a])
-    analytic2 = np.array([Ex, -Ey_a])                        # circular-sign convention twin
+    # the +ig (DynaMeta MagnetoOpticModel) convention prediction -- (1,i) eigenmode carries n_minus,
+    # so E_y = +0.5j(t_minus - t_plus). NO sign-twin / min(): the gate must be SIGN-sensitive so a
+    # wrong-HANDEDNESS tensor (eps_xy = -ig) fails it (a min-over-+/-Ey twin would pass both).
+    analytic = np.array([Ex, 0.5j * (t_m - t_p)])
     col0 = np.asarray(Jtg)[:, 0]
-    faraday_err = min(np.max(np.abs(col0 - analytic1)), np.max(np.abs(col0 - analytic2)))
+    faraday_err = float(np.max(np.abs(col0 - analytic)))     # SIGN-sensitive match
+    hand_sign = float(np.sign((col0[1] / col0[0]).imag))     # rotation SENSE: -1 for the +ig convention
     cross_gyro = abs(Jtg[1, 0])                              # NONZERO Faraday rotation
     g0_lossless = abs(Rg[0] + Tg[0] - 1.0)
-    # WRONG-MODEL GUARD: g=0 (drop the off-diagonal) gives ZERO cross-pol
+    # WRONG-MODEL GUARDS: (a) g=0 (drop the off-diagonal) gives ZERO cross-pol; (b) the SIGN-REVERSED
+    # gyrotropic tensor (wrong handedness, eps_xy = -ig) must FAIL the analytic match AND flip the sense.
     _, _, _, Jt0 = lum.berreman_jones_1d([(e0 * np.eye(3, dtype=complex), dF)], n_sub, n_sup, LAM)
     wrong_cross = abs(Jt0[1, 0])
-    g_c = bool(faraday_err < 1e-9 and cross_gyro > 1e-2 and g0_lossless < 1e-9
-               and wrong_cross < 1e-14)
+    eps_wrong = np.array([[e0, -1j * g0, 0], [1j * g0, e0, 0], [0, 0, e0]], dtype=complex)
+    _, _, _, Jtw = lum.berreman_jones_1d([(eps_wrong, dF)], n_sub, n_sup, LAM)
+    wrong_hand_err = float(np.max(np.abs(np.asarray(Jtw)[:, 0] - analytic)))   # must be LARGE
+    g_c = bool(faraday_err < 1e-9 and hand_sign < 0.0 and cross_gyro > 1e-2 and g0_lossless < 1e-9
+               and wrong_cross < 1e-14 and wrong_hand_err > 1e-2)
     ok = ok and g_c
-    print("[lbb] GATE C: gyrotropic Faraday vs circular-TMM {:.1e}, cross-pol {:.3f} (g=0 gives "
-          "{:.1e}), lossless {:.1e} -> {}".format(faraday_err, cross_gyro, wrong_cross,
-                                                  g0_lossless, "PASS" if g_c else "FAIL"),
-          flush=True)
+    print("[lbb] GATE C: gyrotropic Faraday vs circular-TMM {:.1e} (sense {:+.0f}), cross-pol {:.3f} "
+          "(g=0 {:.1e}, wrong-handedness err {:.2f}), lossless {:.1e} -> {}".format(
+              faraday_err, hand_sign, cross_gyro, wrong_cross, wrong_hand_err, g0_lossless,
+              "PASS" if g_c else "FAIL"), flush=True)
 
     # ---- GATE D: lossy raw-eps split, no T>1; gain (flipped Im) violates ----
     eps_lossy = complex(2.2, 0.4)
@@ -216,8 +222,8 @@ def main():
     mo = MagnetoOpticModel(eps_r=4.0, g=0.40)
     eps_mo = np.asarray(mo.eps({"magnetization": 1.0}, LAM), dtype=complex)
     Rm, Tm, _, Jtm = lum.berreman_jones_1d([(eps_mo, dF)], n_sub, n_sup, LAM)
-    dev_faraday = min(np.max(np.abs(np.asarray(Jtm)[:, 0] - analytic1)),
-                      np.max(np.abs(np.asarray(Jtm)[:, 0] - analytic2)))
+    # the MO model emits eps_xy = +ig (magneto.py), so it must match the SAME sign-sensitive analytic
+    dev_faraday = float(np.max(np.abs(np.asarray(Jtm)[:, 0] - analytic)))
     # NON-trivial absorption closure on a LOSSY uniaxial slab: sum_layers A_i == 1 - R - T
     st = lum.BerremanStack(n_substrate=complex(n_sub), n_superstrate=complex(n_sup))
     st.add_layer(dL, eps=eps_uni_lossy)
@@ -244,11 +250,33 @@ def main():
                                                                    incidence_angle_deg=0.0))
     design_seam_err = max(abs(r_design.R - r_stack.R), abs(r_design.T - r_stack.T),
                           abs(r_design.r - r_stack.r))
-    # conical (azimuth != 0): the PMM bridge raises here; Berreman solves + conserves energy
+    # conical (azimuth != 0): the PMM bridge raises here; Berreman solves. DISCRIMINATOR: the full
+    # 2x2 Jones is rotationally COVARIANT -- Jr(eps; theta, phi) == Rot(phi) Jr(Rz(-phi) eps
+    # Rz(-phi)^T; theta, 0) Rot(-phi). A phi-IGNORING model (Jones independent of phi) FAILS this
+    # (energy closure alone is phi-invariant and proves nothing about conical physics).
+    th_c, phi_c = np.radians(20.0), np.radians(30.0)
+
+    def _Rz(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+    def _Rot2(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[c, -s], [s, c]], dtype=complex)
+
+    _, _, Jr_c, _ = lum.berreman_jones_1d([(eps_uni, d)], n_sub, n_sup, LAM, angle=th_c, phi=phi_c)
+    eps_rot = _Rz(-phi_c) @ eps_uni @ _Rz(-phi_c).T
+    _, _, Jr_r, _ = lum.berreman_jones_1d([(eps_rot, d)], n_sub, n_sup, LAM, angle=th_c, phi=0.0)
+    covar_err = float(np.max(np.abs(np.asarray(Jr_c)
+                                    - _Rot2(phi_c) @ np.asarray(Jr_r) @ _Rot2(-phi_c))))
+    _, _, Jr_p0, _ = lum.berreman_jones_1d([(eps_uni, d)], n_sub, n_sup, LAM, angle=th_c, phi=0.0)
+    phi_matters = float(np.max(np.abs(np.asarray(Jr_c) - np.asarray(Jr_p0))))   # phi genuinely used
+    # the Design-level conical solve also runs end-to-end + conserves energy (lossless tensor)
     d_con = _design([Layer("film", d, "lo")], pol="y", theta=20.0, phi=30.0)
     r_con = make_lumenairy_berreman_solver()(d_con, None, {"film": EpsField(tensor=eps_uni)},
                                              LAM, n_sup, n_sub)
-    conical_ok = bool(abs(r_con.R + r_con.T - 1.0) < 1e-9)   # lossless tensor -> energy closes
+    conical_ok = bool(covar_err < 1e-9 and phi_matters > 1e-2
+                      and abs(r_con.R + r_con.T - 1.0) < 1e-9)
     # DISPATCH BOUNDARY: a patterned layer must RAISE pointing at RCWA
     pil = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 150e-9, 80e-9), material="pillar")
     d_pat = _design([Layer("slab", 200e-9, "air", inclusions=[pil])], pol="y")
@@ -268,9 +296,10 @@ def main():
         raised_cell = True
     g_f = bool(design_seam_err < 1e-9 and conical_ok and raised and raised_cell)
     ok = ok and g_f
-    print("[lbb] GATE F: design-seam {:.1e}, conical energy-closes {}, patterned dispatch raises "
-          "{}/{} -> {}".format(design_seam_err, conical_ok, raised, raised_cell,
-                               "PASS" if g_f else "FAIL"), flush=True)
+    print("[lbb] GATE F: design-seam {:.1e}, conical Jones-covariance {:.1e} (phi matters {:.3f}), "
+          "patterned dispatch raises {}/{} -> {}".format(design_seam_err, covar_err, phi_matters,
+                                                         raised, raised_cell,
+                                                         "PASS" if g_f else "FAIL"), flush=True)
 
     print("[lbb] *** LUMENAIRY BERREMAN BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

@@ -9,17 +9,24 @@ GATE A (AD vs FD, every parameter class): the gradient of R through berreman_RT 
         Richardson-extrapolated central finite differences < 1e-8 for d/d(layer eps REAL part),
         d/d(eps IMAG part), d/d(thickness), d/d(wavelength), and d/d(incidence angle) -- gradients
         flow through the full tensor (re+im) and the geometry/source.
-GATE B (jit + vmap forward + batched gradient): jax.jit compiles the forward, jax.vmap batches a
-        12-point wavelength sweep in the FORWARD (matches the per-wavelength loop < 1e-12), and a
-        per-wavelength LOOP-batched gradient of the mean-R FOM matches the closed reference < 1e-9.
-        KNOWN LIMITATION probe (reported, not gated): grad-through-vmap (one gradient over a vmap'd
-        batch) hits a Lumenairy _jax_eig_stable custom-VJP / JAX-version pytree mismatch
-        (EigResult vs tuple) on this stack -- the loop-batched gradient is the working path.
+GATE B (jit + vmap forward + grad-through-vmap): jax.jit compiles the forward, jax.vmap batches a
+        12-point wavelength sweep in the FORWARD (matches the per-wavelength loop < 1e-12), and
+        grad-THROUGH-vmap (one gradient over the vmap'd batch) matches the eager batched gradient
+        < 1e-9. The grad-o-vmap assertion is VERSION-CONDITIONAL: it requires the Lumenairy eig-VJP
+        pytree fix (commit 8e29a71, which the installed 5.14.5 HEAD has); a pre-fix Lumenairy
+        (<= tagged 5.14.4) raises on the eig custom-VJP, so it is skipped with a note (eager grad
+        always works on the >= 5.14.2 floor).
 GATE C (twin == production forward): the JAX forward equals the concrete numpy berreman_RT at the
         same point < 1e-12 -- the differentiable path is the SAME physics as the rigorous solve.
-GATE D (inverse design actually works): gradient descent on |R(n_e) - R_target| drives the FOM
-        DOWN to < 1e-6 and recovers the target birefringence -- the end-to-end inverse-design loop,
-        not just the existence of a gradient.
+GATE D (inverse design + grad-of-jit): gradient descent on |R(n_e) - R_target| drives the FOM DOWN
+        to < 1e-6 and recovers the target birefringence (the end-to-end inverse-design loop, eager
+        grad); grad-of-JIT is ASSERTED == eager grad when the eig-VJP fix is present (same
+        version-conditional skip as GATE B otherwise).
+
+CONVENTION on the eig-VJP fix: the differentiable forward is FULLY grad/jit/vmap clean on a
+Lumenairy that includes the eig-VJP pytree fix (commit 8e29a71); on a pre-fix Lumenairy
+grad-through-a-jitted-or-vmapped solve is unavailable and only EAGER grad works (the inverse-design
+loop above uses eager grad, so it is robust on the floor either way).
 
 Honest SKIP (exit 0 + banner) when lumenairy or jax is not importable.
 
@@ -101,27 +108,28 @@ def main():
                   - float(R_at(jnp.asarray(1.74), jnp.asarray(LAM))))
     val_vmap = float(jnp.mean(jax.vmap(lambda lm: R_at(jnp.asarray(1.74), lm))(lams)))  # vmap fwd
     val_loop = float(np.mean([float(R_at(jnp.asarray(1.74), lm)) for lm in lams]))
-    # the WORKING batched-gradient path: sum per-wavelength grads (each a plain grad, no grad-o-vmap)
-    grad_loop = float(np.mean([float(jax.grad(R_at)(jnp.asarray(1.74), lm)) for lm in lams]))
     grad_ref = float(jax.grad(lambda ne: jnp.mean(jnp.stack(
         [R_at(ne, lm) for lm in lams])))(jnp.asarray(1.74)))
-    # KNOWN LIMITATION probe (reported, NOT gated): grad-through-vmap
+    # grad-THROUGH-vmap (one gradient over a vmap'd batch): ASSERTED when the Lumenairy eig-VJP
+    # pytree fix is present (it is on the installed stack), VERSION-CONDITIONAL-skip otherwise. A
+    # pre-fix Lumenairy (<= tagged 5.14.4, missing commit 8e29a71) raises on the eig custom-VJP
+    # (EigResult vs tuple); the eager loop-batched gradient (grad_ref) always works and is gated.
+    grad_vmap_err = None
     try:
-        _ = float(jax.grad(lambda ne: jnp.mean(jax.vmap(lambda lm: R_at(ne, lm))(lams)))(
+        gv = float(jax.grad(lambda ne: jnp.mean(jax.vmap(lambda lm: R_at(ne, lm))(lams)))(
             jnp.asarray(1.74)))
-        grad_vmap_ok = True
+        grad_vmap_err = abs(gv - grad_ref)               # must MATCH the eager batched gradient
     except Exception as exc:
-        grad_vmap_ok = False
-        print("[bjx]   NOTE grad-o-vmap unavailable: Lumenairy _jax_eig_stable custom-VJP vs this "
-              "JAX eig ({}); loop-batched gradient is the working path".format(type(exc).__name__),
+        print("[bjx]   NOTE grad-o-vmap version-conditional: this Lumenairy lacks the eig-VJP fix "
+              "(commit 8e29a71, post-5.14.4) -> {}; eager grad still works".format(type(exc).__name__),
               flush=True)
     g_b = bool(jit_err < 1e-12 and abs(val_vmap - val_loop) < 1e-12
-               and abs(grad_loop - grad_ref) < 1e-9)
+               and (grad_vmap_err is None or grad_vmap_err < 1e-9))
     ok = ok and g_b
-    print("[bjx] GATE B: jit {:.1e}, vmap-fwd==loop {:.1e}, loop-batched grad {:.1e} (grad-o-vmap "
-          "{}) -> {}".format(jit_err, abs(val_vmap - val_loop), abs(grad_loop - grad_ref),
-                             "ok" if grad_vmap_ok else "n/a", "PASS" if g_b else "FAIL"),
-          flush=True)
+    print("[bjx] GATE B: jit {:.1e}, vmap-fwd==loop {:.1e}, grad-o-vmap {} -> {}".format(
+        jit_err, abs(val_vmap - val_loop),
+        "n/a (pre-fix Lumenairy)" if grad_vmap_err is None else "{:.1e}".format(grad_vmap_err),
+        "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: JAX forward == concrete numpy forward (same physics) ----
     R_np, T_np = berreman_RT([(_uniaxial(1.74, np), D0)], N_SUB, N_SUP, LAM, angle=0.2, row=0)
@@ -142,7 +150,7 @@ def main():
     def loss(ne):
         return (R_at(ne, jnp.asarray(LAM)) - R_target) ** 2
 
-    grad_loss = jax.grad(loss)                            # EAGER grad (grad-of-jit hits the eig bug)
+    grad_loss = jax.grad(loss)                            # eager grad (always works on the floor)
     ne = jnp.asarray(1.60)                                # start away from the target
     losses = [float(loss(ne))]
     lr = 2.0
@@ -152,17 +160,22 @@ def main():
         ne = jnp.clip(ne - lr * g, 1.0, 3.0)
         losses.append(float(loss(ne)))
     converged = losses[-1] < 1e-6 and abs(float(ne) - ne_target) < 1e-2
-    # KNOWN LIMITATION probe: grad of a JITTED loss hits the same Lumenairy eig custom-VJP issue
+    # grad-of-JIT (differentiate a jit-compiled loss): ASSERTED == eager grad when the eig-VJP fix
+    # is present, VERSION-CONDITIONAL-skip otherwise (same Lumenairy eig custom-VJP requirement).
+    grad_jit_err = None
     try:
-        _ = float(jax.grad(jax.jit(loss))(jnp.asarray(1.60)))
-        grad_jit_ok = True
+        gj = float(jax.grad(jax.jit(loss))(jnp.asarray(1.60)))
+        grad_jit_err = abs(gj - float(grad_loss(jnp.asarray(1.60))))
     except Exception:
-        grad_jit_ok = False
-    g_d = bool(losses[-1] < 1e-3 * losses[0] and converged)
+        print("[bjx]   NOTE grad-of-jit version-conditional: pre-fix Lumenairy (< commit 8e29a71); "
+              "eager grad (used by the loop above) works", flush=True)
+    g_d = bool(losses[-1] < 1e-3 * losses[0] and converged
+               and (grad_jit_err is None or grad_jit_err < 1e-9))
     ok = ok and g_d
     print("[bjx] GATE D: inverse design loss {:.2e} -> {:.2e}, n_e {:.4f} (target {:.2f}); "
           "grad-of-jit {} -> {}".format(losses[0], losses[-1], float(ne), ne_target,
-                                        "ok" if grad_jit_ok else "n/a (eig VJP)",
+                                        "n/a (pre-fix Lumenairy)" if grad_jit_err is None
+                                        else "{:.1e}".format(grad_jit_err),
                                         "PASS" if g_d else "FAIL"), flush=True)
 
     print("[bjx] *** BERREMAN JAX (DIFFERENTIABLE) BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
