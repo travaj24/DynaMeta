@@ -207,3 +207,47 @@ def test_berreman_patterned_layer_raises():
     d.stack.layers.append(Layer("grating", 200e-9, "air", inclusions=[pil]))
     with pytest.raises(NotImplementedError):
         design_to_berreman_layers(d, 1.31e-6)
+
+
+def _grating_design(period, *, pol="x"):
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
+    reg.add(Material("ridge", ConstantOptical(6.0 + 0j)))
+    ridge = Inclusion(shape=Rectangle(period / 2.0, period / 2.0, 0.5 * period, period),
+                      material="ridge")
+    return Design(name="g", unit_cell=UnitCell.square(period),
+                  stack=Stack(layers=[Layer("grating", 180e-9, "air", inclusions=[ridge])],
+                              superstrate_material="air", substrate_material="glass"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=0.0))
+
+
+@needs_lum
+def test_emt_rytov_tensor_harmonic_arithmetic():
+    # the homogenized tensor is diag(harmonic, arithmetic, arithmetic) of the binary grating
+    from dynameta.optics.lumenairy_bridge import rytov_tensor_for_layer
+    d = _grating_design(1.55e-6 / 50.0)
+    L = d.stack.layers[0]
+    t = rytov_tensor_for_layer(L, d, 1.55e-6, d.unit_cell.period_x_m, d.unit_cell.period_y_m)
+    eps_par = 0.5 * 6.0 + 0.5 * 1.0
+    eps_perp = 1.0 / (0.5 / 6.0 + 0.5 / 1.0)
+    assert t[1, 1] == pytest.approx(eps_par, abs=1e-12)
+    assert t[0, 0] == pytest.approx(eps_perp, abs=1e-12)
+    assert t[0, 0].real < t[1, 1].real                    # form birefringence: perp < par
+
+
+@needs_lum
+def test_emt_screen_converges_to_rcwa_subwavelength():
+    # deeply sub-wavelength: the microsecond EMT screen agrees with the rigorous RCWA
+    from dynameta.optics.lumenairy_bridge import (make_lumenairy_emt_screen_solver,
+                                                  make_lumenairy_rcwa_solver)
+    lam = 1.55e-6
+    d = _grating_design(lam / 100.0, pol="x")
+    r_emt = make_lumenairy_emt_screen_solver()(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    r_rig = make_lumenairy_rcwa_solver(n_orders=20)(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    assert abs(r_emt.R - r_rig.R) < 3e-3
