@@ -211,7 +211,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False,
-                sheet_bcs: "dict | None" = None) -> OpticalResult:
+                sheet_bcs: "dict | None" = None, _reuse_fes=None) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
@@ -379,6 +379,12 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         # in creation order -- _bloch_phase_list resolves + verifies the true order.
         phases = _bloch_phase_list(geo, kx, ky)
         fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""), phase=phases)
+    elif _reuse_fes is not None:
+        # NORMAL incidence (no oblique Bloch phases) -> the FESpace is wavelength-INDEPENDENT, so a
+        # sweep solver may build it ONCE and reuse it here (the eps mass + RHS + factorization still
+        # rebuild per wavelength, so R/T are byte-identical). Reuse is REFUSED for oblique above (the
+        # Periodic Bloch phases depend on k0). See make_fem_optical_solver.
+        fes = _reuse_fes
     else:
         fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""))
     u, v = fes.TrialFunction(), fes.TestFunction()
@@ -813,3 +819,40 @@ def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):
         return float(R_flux), None
     T_flux = _avg_sz(Etot, zlo_b, zhi_b) / ref
     return float(R_flux), float(T_flux)
+
+
+def make_fem_optical_solver(*, order=None):
+    """An `optical_solver` for run_pipeline backed by the FEM, with a SWEEP-AWARE fast path. At NORMAL
+    incidence the HCurl FESpace is wavelength-INDEPENDENT (no oblique Bloch phases), so solve_sweep
+    builds it ONCE and reuses it across the whole wavelength sweep -- avoiding the redundant FESpace
+    construction the per-call default repeats every wavelength (pass-2 audit perf finding). The eps
+    mass, RHS, and factorization still rebuild per wavelength, so R/T are BYTE-IDENTICAL to a per-call
+    solve_fem (only the k0-independent space build is amortized; the solve itself is not reusable).
+    Oblique/conical incidence falls back to a per-wavelength build (the Periodic Bloch phases depend
+    on k0). OPT-IN -- pass optical_solver=make_fem_optical_solver() to run_pipeline; the default FEM
+    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order."""
+    from dynameta.optics.eps_assembler import assemble_eps_cf
+
+    def _ord(design):
+        return int(order) if order is not None else int(design.mesh_3d.fem_order)
+
+    def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
+        eps_cf = assemble_eps_cf(geo, eps_by_region)
+        return solve_fem(geo, lambda_m, eps_cf, design.optical, order=_ord(design),
+                         n_super=n_super, n_sub=n_sub)
+
+    def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
+        od = _ord(design)
+        normal = abs(float(getattr(design.optical, "incidence_angle_deg", 0.0) or 0.0)) <= 1e-9
+        # build the wavelength-independent FESpace ONCE for normal incidence (identical to what
+        # solve_fem builds internally there); None -> oblique falls back to per-wavelength build.
+        fes = ng.Periodic(ng.HCurl(geo.mesh, order=od, complex=True, dirichlet="")) if normal else None
+        out = []
+        for lam in lams:
+            eps_cf = assemble_eps_cf(geo, assemble_at(lam))
+            out.append(solve_fem(geo, lam, eps_cf, design.optical, order=od,
+                                 n_super=n_super, n_sub=n_sub, _reuse_fes=fes))
+        return out
+
+    _solve.solve_sweep = _solve_sweep
+    return _solve
