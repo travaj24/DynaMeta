@@ -35,8 +35,9 @@ import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import collapse_regions_to_layers, slice_eps_field
-from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _p_basis_conversion,
-                                                           _pol_row, _require_lumenairy)
+from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _guard_incidence_side,
+                                                           _p_basis_conversion, _pol_row,
+                                                           _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -149,6 +150,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
+        _guard_incidence_side(design.optical)
         theta, phi = _angles_rad(design.optical)
         if abs(phi) > 1e-12:
             raise NotImplementedError("PMM bridge: conical incidence (azimuth != 0) is not "

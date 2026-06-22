@@ -348,7 +348,12 @@ class LCDynamics:
         V_lc = np.empty_like(t_s); neff = np.full_like(t_s, np.nan)
         have_opt = (self.n_o is not None and self.n_e is not None)
         for i in range(t_s.size):
-            th = theta_zt[:, i].copy(); th[0] = th[-1] = thb
+            th = theta_zt[:, i].copy()
+            if W_anchor is None:
+                th[0] = th[-1] = thb            # STRONG anchoring: the surface is pinned to theta_b
+            # else WEAK anchoring: the RHS evolves a MOVING surface (Rapini-Papoular torque balance),
+            # so KEEP the integrated surface director -- re-pinning to theta_b would make the reported
+            # n_eff / V_lc inconsistent with the actual simulated state (audit fix).
             _E, V_lc[i] = solve_lc_field_profile(th, float(V_app[i]), geo, **fkw)
             if have_opt:
                 neff[i] = n_eff_from_theta_profile(th, z, self.n_o, self.n_e, model=self.opt_model,

@@ -25,6 +25,11 @@ from dynameta.io.store import load_arrays, save_arrays
 # packed-vector layout (NaN = the field was None): the OpticalResult scalar fields + split complex r/t
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
         "r_re", "r_im", "t_re", "t_im")
+# Store-format schema. BUMP whenever the KEY derivation changes so an on-disk cache written by an
+# older (buggy) keying is DISCARDED on load rather than serving collided/mis-keyed entries.
+#   2 -> 3: uniform-anisotropic `tensor` eps is now hashed into the key (previously all uniform-tensor
+#           states collided -- a Pockels/Kerr/magneto-optic bias sweep served the first point's result).
+_SCHEMA = 3
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
 # OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
 # per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
@@ -38,11 +43,19 @@ def _eps_fingerprint(eps_by_region) -> bytes:
         sc = getattr(ef, "scalar", None)
         if getattr(ef, "is_uniform", True) and sc is not None:
             z = complex(sc); h.update(struct.pack("<dd", z.real, z.imag))
-        else:
-            arr = getattr(ef, "values_zyx", None)
-            if arr is None:
-                arr = getattr(ef, "values", None)
-            h.update(np.ascontiguousarray(np.asarray(arr)).tobytes() if arr is not None else b"?")
+            continue
+        # A UNIFORM ANISOTROPIC EpsField has is_uniform True but scalar None -- its content lives in
+        # `tensor` (a (3,3)), NOT in values_zyx. Hashing it is REQUIRED: a PockelsEffect/KerrEffect
+        # under a uniform gate field, or MagnetoOpticModel, emits EpsField(tensor=(3,3)) (core/bridge),
+        # so without this every uniform-tensor state in a bias sweep collides to the same key and the
+        # cache serves the FIRST point's R/T/phase for all later points (audit P1).
+        ten = getattr(ef, "tensor", None)
+        if ten is not None:
+            h.update(b"T")                                   # tag so a (3,3) tensor cannot alias a grid
+            h.update(np.ascontiguousarray(np.asarray(ten, dtype=complex)).tobytes())
+            continue
+        arr = getattr(ef, "values_zyx", None)
+        h.update(np.ascontiguousarray(np.asarray(arr)).tobytes() if arr is not None else b"?")
     return h.digest()
 
 
@@ -99,8 +112,14 @@ class OpticalSolverCache:
         self._mem = {}
         if os.path.exists(path):
             try:
-                arrays, _ = load_arrays(path, fmt=fmt)
-                self._mem = {k: np.asarray(v, dtype=float) for k, v in arrays.items()}
+                arrays, meta = load_arrays(path, fmt=fmt)
+                # DISCARD a cache written under an older key schema -- its keys were derived
+                # differently (e.g. the schema-2 uniform-tensor collision), so its entries cannot be
+                # trusted against the current _key(). Re-solving is correct; serving stale is not.
+                if int((meta or {}).get("schema", -1)) != _SCHEMA:
+                    self._mem = {}
+                else:
+                    self._mem = {k: np.asarray(v, dtype=float) for k, v in arrays.items()}
             except Exception:                               # pragma: no cover - a corrupt/foreign file
                 self._mem = {}
 
@@ -118,8 +137,12 @@ class OpticalSolverCache:
 
     def flush(self) -> str:
         """Write the in-memory cache to disk (HDF5/Zarr)."""
-        return save_arrays(self.path, self._mem, {"schema": 2, "tag": self.tag, "layout": list(_VEC)},
-                           fmt=self.fmt)                     # schema 2: stronger design fingerprint
+        return save_arrays(self.path, self._mem,
+                           {"schema": _SCHEMA, "tag": self.tag, "layout": list(_VEC)},
+                           fmt=self.fmt)                     # _SCHEMA (single source): the load-side
+                                                            # discard check uses the SAME constant, so
+                                                            # a future bump cannot make the cache
+                                                            # write-only (flush stamping a stale int)
 
     def stats(self) -> dict:
         tot = self.hits + self.misses
