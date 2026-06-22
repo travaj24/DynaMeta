@@ -146,13 +146,16 @@ print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 
 ## Status
 
-v0.4.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
+v0.5.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
 materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 `Inclusion`s) + `Electrode` geometry, and `run_pipeline`; plus the
 modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
 PCM/LC/graphene, magneto-optic), the FDTD engine (1D/2D/3D incl GPU +
-nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), and the
-required-core Lumenairy RCWA/PMM optical backends. The reference gated-ITO modulator (the
+nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), the standalone
+QD-SOA traveling-wave gain module (`dynameta.optics.soa`), and the required-core
+Lumenairy optical backends -- RCWA/PMM plus the Berreman 4x4 anisotropic-planar
+and EMT (Rytov) screen tiers (`dynameta.optics.lumenairy_bridge`). The reference
+gated-ITO modulator (the
 [validation/_reference_device.py](validation/_reference_device.py) fixture) is the
 validated end-to-end run. Forward plan:
 [docs/roadmap_v0.5_integration_photonics.md](docs/roadmap_v0.5_integration_photonics.md).

@@ -128,9 +128,14 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     if not is_tensor and v.ndim != 3:
         raise ValueError("slice_eps_field: values_zyx must be (Nz,Ny,Nx) scalar or (Nz,Ny,Nx,3,3) tensor; "
                          "got shape {}.".format(v.shape))
-    # tight tolerance (matching the RCWA/PMM bridge _y_invariant / structured checks, rtol=1e-12):
-    # np.allclose DEFAULTS (rtol=1e-5) would average a weakly-modulated grating to a scalar slab,
-    # silently dropping the lateral structure the bridges would keep. Err toward preserving structure.
+    # tight tolerance (rtol=1e-12, atol=0): allclose(v, mean) collapses iff the relative lateral spread
+    # <= rtol, so this keeps a grating as structured unless its modulation is essentially at the
+    # round-off floor (~1e-16). np.allclose DEFAULTS (rtol=1e-5) would average any grating with relative
+    # modulation <= ~1e-5 to a scalar slab, silently dropping lateral structure the RCWA/PMM bridges
+    # keep; 1e-12 narrows that drop-window to (~1e-12, 1e-5]. The bridge _y_invariant checks (rcwa/
+    # berreman/pmm, rtol=1e-12) compare to the FIRST lateral sample whereas this compares to the lateral
+    # MEAN, so at the exact boundary it is ~2x more permissive -- same order, not identical. Err toward
+    # preserving structure.
     laterally_uniform = bool(np.allclose(v, v.mean(axis=(1, 2), keepdims=True), rtol=1e-12, atol=0.0))
     if is_tensor:
         # one eps_tensor_cell (Ny,Nx,3,3)->(Nx,Ny,3,3) per native z-slice; uniform -> a 1x1x3x3 cell.
