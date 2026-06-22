@@ -153,10 +153,17 @@ def main():
     r_direct = make_lumenairy_berreman_solver()(d, None, ebr, LAM, n_sup, n_sub)
     plumb_err = max(abs(r_screen.R - r_direct.R), abs(r_screen.T - r_direct.T),
                     abs(r_screen.r - r_direct.r))
-    g_c = bool(only_grating and plumb_err < 1e-12)
+    # order=2 on a MULTI-MEDIA lamellar grating must NOT be misrouted/dropped: it falls back to
+    # order=0 and still homogenizes (the binary-only order=2 error is no longer swallowed as
+    # "not lamellar"). d3 is a 3-distinct-media lamellar cell.
+    ebr2 = homogenize_lamellar_layers(d3, LAM, order=2)
+    multimedia_homogenized = ("g3" in ebr2 and getattr(ebr2["g3"], "is_tensor", False))
+    g_c = bool(only_grating and plumb_err < 1e-12 and multimedia_homogenized)
     ok = ok and g_c
-    print("[emt] GATE C: homogenize replaces only lamellar {}, screen==direct {:.1e} -> {}".format(
-        only_grating, plumb_err, "PASS" if g_c else "FAIL"), flush=True)
+    print("[emt] GATE C: homogenize replaces only lamellar {}, screen==direct {:.1e}, multi-media "
+          "order=2 falls back (homogenized {}) -> {}".format(
+              only_grating, plumb_err, multimedia_homogenized, "PASS" if g_c else "FAIL"),
+          flush=True)
 
     # ---- GATE D: 2-D scalar mixing rules (endpoints, bounds, passivity, symmetry) ----
     eh, ei = 2.1 + 0j, 6.0 + 0j

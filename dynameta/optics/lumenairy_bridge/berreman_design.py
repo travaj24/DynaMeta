@@ -19,6 +19,14 @@ jax.value_and_grad; jax.jit and jax.vmap (a wavelength / angle sweep inside one 
 Convention: identical on both sides (public exp(-i omega t), Im(eps) > 0, metres, radians, raw
 eps); `row` selects the incident lab polarization (0 = E_x, 1 = E_y). R/T are the TOTAL (co+cross)
 flux-normalized power for that incident pol -- the natural planar-anisotropic FOM ingredients.
+
+VERSION NOTE on jit/vmap: EAGER jax.grad works on any Lumenairy at the bridge floor (>= 5.14.2).
+FULL grad/jit/vmap cleanliness (differentiating a jit-compiled or vmap'd Berreman solve --
+grad-of-jit, grad-of-vmap) additionally requires the Lumenairy eig-VJP pytree fix (commit 8e29a71,
+post-tagged-5.14.4): the gauge-stable custom-VJP eig must return a plain (eigvals, eigvecs) tuple
+matching jnp.linalg.eig's EigResult, else the custom_vjp structure check rejects the transform. The
+forward (numpy or traced) and eager grad are unaffected. See validation/lumenairy_berreman_jax.py
+(GATE B/D assert grad-of-vmap / grad-of-jit when the fix is present, version-conditional-skip else).
 """
 
 from __future__ import annotations
