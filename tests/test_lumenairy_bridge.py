@@ -151,3 +151,59 @@ def test_callable_optical_dispersion_chain():
     assert model.eps(1.5e-6) == pytest.approx(fn(1.5e-6))
     back = optical_model_to_lumenairy_eps(model)
     assert back(1.5e-6) == pytest.approx(fn(1.5e-6))
+
+
+@needs_lum
+def test_berreman_uniform_stack_matches_tmm():
+    # the Berreman planar tier reduces EXACTLY to the transfer-matrix coating model on an
+    # isotropic stack -- s and p, oblique, complex r/t
+    from dynameta.core.layered import LayeredSlab, LayeredStack
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge import BerremanLayeredSolver
+    from dynameta.optics.tmm_reference import TmmLayeredSolver
+    stk = LayeredStack(1.0 + 0j, 1.5 + 0j,
+                       [LayeredSlab(120e-9, eps=complex(4.0, 0.3)),
+                        LayeredSlab(200e-9, eps=complex(2.1, 0.0))])
+    for pol, th in (("y", 0.0), ("p", 30.0)):
+        opt = OpticalSpec(polarization=pol, incidence_angle_deg=th)
+        r_b = BerremanLayeredSolver().solve(stk, 1.55e-6, opt)
+        r_t = TmmLayeredSolver().solve(stk, 1.55e-6, opt)
+        assert r_b.R == pytest.approx(r_t.R, abs=1e-10)
+        assert r_b.T == pytest.approx(r_t.T, abs=1e-10)
+        assert r_b.r == pytest.approx(r_t.r, abs=1e-9)
+        assert r_b.t == pytest.approx(r_t.t, abs=1e-9)
+
+
+@needs_lum
+def test_berreman_uniaxial_decouples_per_axis():
+    # an x-axis uniaxial slab decouples into independent n_e (x) / n_o (y) scalar problems --
+    # the anisotropic tensor path the scalar TMM cannot represent
+    import tmm
+    from dynameta.core.layered import LayeredSlab, LayeredStack
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge import BerremanLayeredSolver
+    n_o, n_e, d, lam = 1.50, 1.74, 220e-9, 1.55e-6
+    eps_t = np.diag([n_e ** 2, n_o ** 2, n_o ** 2]).astype(complex)
+    stk = LayeredStack(1.0 + 0j, 1.5 + 0j,
+                       [LayeredSlab(d, eps_tensor_cell=np.broadcast_to(eps_t, (1, 1, 3, 3)).copy())],
+                       period_x_m=400e-9, period_y_m=400e-9)
+    for pol, n_idx in (("x", n_e), ("y", n_o)):
+        r_b = BerremanLayeredSolver().solve(stk, lam, OpticalSpec(polarization=pol,
+                                                                 incidence_angle_deg=0.0))
+        ref = tmm.coh_tmm("s", [1.0, n_idx, 1.5], [np.inf, d * 1e9, np.inf], 0.0, lam * 1e9)
+        assert r_b.R == pytest.approx(ref["R"], abs=1e-9)
+        assert r_b.T == pytest.approx(ref["T"], abs=1e-9)
+
+
+@needs_lum
+def test_berreman_patterned_layer_raises():
+    # the planar-tier scope boundary: a patterned (inclusion) layer routes to RCWA, not Berreman
+    from dynameta.geometry import Inclusion, Layer
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.optics.lumenairy_bridge import design_to_berreman_layers
+    per = 400e-9
+    d = _uniform_design()
+    pil = Inclusion(shape=Rectangle(per / 2.0, per / 2.0, 150e-9, 80e-9), material="hi")
+    d.stack.layers.append(Layer("grating", 200e-9, "air", inclusions=[pil]))
+    with pytest.raises(NotImplementedError):
+        design_to_berreman_layers(d, 1.31e-6)
