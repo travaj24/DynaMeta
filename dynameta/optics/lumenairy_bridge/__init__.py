@@ -8,6 +8,10 @@ identical on both sides (exp(-i omega t), Im(eps) > 0, metres, radians), so the 
 geometry/result adapter, not a translation layer. See docs/roadmap_v0.5_integration_photonics.md.
 """
 
+from dynameta.optics.lumenairy_bridge.berreman_backend import (BerremanLayeredSolver,
+                                                              berreman_result_to_optical_result,
+                                                              design_to_berreman_layers,
+                                                              make_lumenairy_berreman_solver)
 from dynameta.optics.lumenairy_bridge.pmm_backend import (design_to_pmm_stack,
                                                           layer_to_pmm_segments,
                                                           make_lumenairy_pmm_solver)
