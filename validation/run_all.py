@@ -86,12 +86,26 @@ def main(argv):
 
     jobs = [("validation", n) for n in _gated(HERE, skip=SKIP)]
     n_gated = len(jobs)
+    all_gated = {n for _, n in jobs}                    # full gated set, BEFORE the SMOKE filter
     if tier == "smoke":
         jobs = [(p, n) for p, n in jobs if n in SMOKE]
         missing = SMOKE - {n for _, n in jobs}
-        if missing:                                     # tier-set drift is loud, not silent
+        if missing:                                     # tier-set drift (missing direction)
             print("[run_all] WARNING: SMOKE names with no matching gated script: {}".format(
                 ", ".join(sorted(missing))), flush=True)
+        # reverse-direction drift: a gated script NOT in SMOKE that imports NO heavy solver is a
+        # SOLVER-FREE validation the smoke tier silently excludes (e.g. the qd_soa_* family). Surface
+        # it loudly so a new subsystem is curated into SMOKE deliberately, not dropped by omission.
+        _HEAVY = ("import ngsolve", "from ngsolve", "import devsim", "from devsim", "import gmsh")
+        extra = []
+        for n in sorted(all_gated - SMOKE):
+            src = open(os.path.join(HERE, n + ".py"), encoding="utf-8").read()
+            if not any(h in src for h in _HEAVY):
+                extra.append(n)
+        if extra:
+            print("[run_all] WARNING: {} solver-free gated validation(s) NOT in SMOKE (curate into "
+                  "the smoke tier or confirm intentional): {}".format(len(extra), ", ".join(extra)),
+                  flush=True)
     elif tier == "full":
         ex_dir = os.path.join(REPO, "examples")
         if os.path.isdir(ex_dir):

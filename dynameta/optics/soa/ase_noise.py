@@ -139,9 +139,12 @@ def spectral_noise_figure(S_f_per_pol, G_nu, nu_grid_Hz, *, eta_in=1.0):
         n_sp_eff(nu_k) = S_f(nu_k,L) / (h nu_k (G-1)),   NF = (2 n_sp_eff (G-1)/G + 1/G)/eta_in.
     Internal loss needs NO separate factor here: S_f is propagated with the NET coefficient
     (Gamma g - alpha_i), so n_sp_eff already equals n_sp * Gamma_g/(Gamma_g - alpha_i) (the
-    loss-degraded inversion). Hence NF == noise_figure(G, n_sp_bare, Gamma_g, alpha_i, eta_in)
-    term-for-term, and -> 2 n_sp_eff at high gain. (Multiplying by loss again would double-count
-    it.)"""
+    loss-degraded inversion). So WHEN S_f is the consistently net-coefficient-propagated PSD this
+    equals noise_figure(G, n_sp_bare, Gamma_g, alpha_i, eta_in), and -> 2 n_sp_eff at high gain.
+    (Multiplying by loss again would double-count it.) eta_in is validated like the sibling
+    noise_figure -- an out-of-range coupling efficiency would otherwise silently divide the NF."""
+    if not (0.0 < eta_in <= 1.0):
+        raise ValueError("spectral_noise_figure: eta_in must be in (0, 1]")
     Sf = np.asarray(S_f_per_pol, dtype=np.float64)
     G = np.asarray(G_nu, dtype=np.float64)
     nu = np.atleast_1d(np.asarray(nu_grid_Hz, dtype=np.float64))

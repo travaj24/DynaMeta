@@ -9,11 +9,11 @@ The exit medium here is VACUUM (air) -- the clean test of the oblique machinery
 all of which must be correct for energy to conserve at angle. Accuracy is <0.3% at
 normal incidence and grows to ~1% in R (and a ~1% energy residual) by 30 deg as the
 fixed-alpha PML becomes less angle-accurate; the gate is TOL=0.03 (3%) there, and
-TOL_EXT=0.04 at 45 deg (measured ~2.6%). 60 deg (the solver's hard cap) is run
-REPORT-ONLY: the fixed-alpha PML creates energy there (R+T ~ 1.17 measured, ~8%
-R/T errors) and the solver itself warns R/T are unreliable above ~50 deg -- gating
-it would either fake precision or pin the suite to a known-bad number. The honest
-validated envelope is 0-45 deg.
+TOL_EXT=0.04 at 45 deg (measured ~2.6%). Above the ~50-deg FEM envelope the fixed-alpha
+PML creates energy (R+T ~ 1.17 at 60 deg), so the solver now RAISES rather than return a
+silently-wrong R/T (pass-2 audit); the 60-deg case here ASSERTS that raise -- a stronger,
+honest contract than the old report-only run of a known-bad number. The honest validated
+FEM envelope is 0-45 deg; the exact RCWA/PMM/Berreman bridges keep the full angular range.
 
 NON-vacuum (dense) substrates are now ALSO handled correctly by the layered (Fresnel
 two-region) background field in optics/solver.py (eps_bg piecewise + analytic bare
@@ -67,9 +67,8 @@ def main():
     print("[t] {:>6s} | {:>16s} | {:>16s} | {:>8s}".format(
         "theta", "R fem / tmm", "T fem / tmm", "R+T fem"), flush=True)
     ok = True
-    cases = ([(t, TOL, True) for t in ANGLES] + [(t, TOL_EXT, True) for t in ANGLES_EXT]
-             + [(t, None, False) for t in ANGLES_REPORT])
-    for theta_deg, tol, gated in cases:
+    cases = [(t, TOL) for t in ANGLES] + [(t, TOL_EXT) for t in ANGLES_EXT]   # gated 0-45 deg
+    for theta_deg, tol in cases:
         opt = OpticalSpec(polarization="y", incidence_angle_deg=theta_deg,
                            linear_solver="umfpack")
         res = solve_fem(geo, lam_m, eps_cf, opt, order=2,
@@ -81,16 +80,25 @@ def main():
         Rf = res.R
         Tf = res.T if res.T is not None else float('nan')
         dR, dT = abs(Rf - Rt), abs(Tf - Tt)
-        if gated:
-            good = dR < tol and dT < tol
-            ok = ok and good
-            verdict = "OK" if good else "MISMATCH(dR={:.3f},dT={:.3f})".format(dR, dT)
-        else:
-            verdict = "REPORT-ONLY (dR={:.3f},dT={:.3f}; PML energy violation expected)".format(
-                dR, dT)
+        good = dR < tol and dT < tol
+        ok = ok and good
+        verdict = "OK" if good else "MISMATCH(dR={:.3f},dT={:.3f})".format(dR, dT)
         print("[t] {:5.0f}d | {:6.4f} / {:6.4f} | {:6.4f} / {:6.4f} | {:7.4f}  {}".format(
             theta_deg, Rf, Rt, Tf, Tt, Rf + (Tf if Tf == Tf else 0.0), verdict), flush=True)
-    print("[t] *** OBLIQUE vs TMM (gated 0-45deg, 60deg reported, s-pol): {} ***".format(
+    # Above the ~50-deg FEM envelope the fixed-alpha PML violates energy (R+T ~ 1.17 at 60 deg);
+    # the solver now RAISES rather than return a silently-wrong R/T (pass-2 audit). Assert it does
+    # -- a stronger, honest contract than the old report-only run of a known-bad number.
+    raised = False
+    for theta_deg in ANGLES_REPORT:                          # 60 deg
+        opt = OpticalSpec(polarization="y", incidence_angle_deg=theta_deg, linear_solver="umfpack")
+        try:
+            solve_fem(geo, lam_m, eps_cf, opt, order=2, n_super=1.0+0j, n_sub=complex(N_SUB, 0.0))
+        except NotImplementedError:
+            raised = True
+        print("[t] {:5.0f}d | FEM raises above ~50 deg (PML energy violation) -> {}".format(
+            theta_deg, "OK" if raised else "DID NOT RAISE"), flush=True)
+    ok = ok and raised
+    print("[t] *** OBLIQUE vs TMM (gated 0-45deg, FEM raises >50deg, s-pol): {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
     return ok
 

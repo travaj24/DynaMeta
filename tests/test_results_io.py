@@ -104,3 +104,39 @@ def test_viz_saves_png(tmp_path):
     p = str(tmp_path / "summary.png")
     viz.plot_sweep_summary(sr, save=p)
     assert os.path.exists(p) and os.path.getsize(p) > 1000
+
+
+@pytest.mark.parametrize("fmt", _FORMATS)
+def test_sweepresults_nan_field_roundtrip(fmt, tmp_path):
+    # a row with MISSING (None) fields -> NaN grid cells; the round-trip must PRESERVE the NaN
+    # (equal_nan), not zero or drop it -- the documented missing-field contract. The prior test used a
+    # fixture that never produced a NaN, so an impl that zeroed/lost missing cells would have passed.
+    rows = [SweepRow("off", 1500.0, OpticalResult(r=1 + 0j, R=0.2, phase_deg=0.0, solve_time_s=1.0,
+                                                  t=0.9 + 0j, T=0.8, A=0.0, R_flux=0.2, T_flux=0.8)),
+            SweepRow("on", 1500.0, OpticalResult(r=1 + 0j, R=0.3, phase_deg=0.0, solve_time_s=1.0,
+                                                 t=None, T=None, A=None))]   # T/A/t missing -> NaN
+    sr = SweepResults.from_rows(rows)
+    assert np.isnan(sr.T[1, 0]) and not np.isnan(sr.T[0, 0])   # missing cell NaN, present cell not
+    p = str(tmp_path / ("nan" + _EXT[fmt]))
+    sr.save(p, fmt=fmt)
+    sr2 = SweepResults.load(p, fmt=fmt)
+    assert np.allclose(sr.T, sr2.T, equal_nan=True)            # NaN preserved through the store
+    assert np.isnan(sr2.T[1, 0]) and np.isnan(sr2.t[1, 0])     # explicit: the cell survived as NaN
+
+
+def test_viz_axes_labels_and_orientation():
+    # assertive (not just "PNG > 1000 bytes"): pin axis labels, line counts, x-data, and map shape so
+    # a transposed/swapped/wrong-bias plot is caught (pass-2 audit -- viz had no assertive test).
+    pytest.importorskip("matplotlib")
+    import matplotlib
+    matplotlib.use("Agg")
+    from dynameta import viz
+    sr = SweepResults.from_rows(_rows())                       # 2 biases x 3 wavelengths
+    ax1 = viz.plot_spectra(sr, "R")                            # the viz helpers return the Axes
+    assert ax1.get_xlabel() == "wavelength (nm)"
+    assert len(ax1.lines) == sr.n_bias                         # one spectrum line per bias
+    assert np.allclose(ax1.lines[0].get_xdata(), sr.wavelengths_nm)
+    ax2 = viz.plot_contrast(sr, "R")
+    assert len(ax2.lines) == sr.n_bias - 1                     # contrast drops the reference bias
+    im = viz.plot_map(sr.R).images[0]
+    assert tuple(im.get_array().shape) == sr.R.shape           # (n_bias, n_wl) orientation preserved
