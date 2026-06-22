@@ -210,10 +210,22 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
 
+    R, T (and r/t) are the SPECULAR 0-ORDER (zeroth diffraction order) only -- the
+    _cell_average demodulates and laterally averages, so by Fourier orthogonality any
+    PROPAGATING higher diffraction order integrates to exactly zero and is NOT counted.
+    They are therefore the TOTAL reflectance/transmittance only for a SUB-WAVELENGTH cell
+    (no propagating higher orders); for a diffracting (period > lambda/n) cell the
+    diffracted power is missing from R/T and is mis-attributed to A. result.R_flux/T_flux
+    (the reconstructed-field z-Poynting flux) capture ALL propagating orders and are the
+    authoritative total there -- prefer them, and use a sub-wavelength cell when relying on
+    R/T/A. (RCWA/PMM bridges instead return order-SUMMED R/T, so this 0-order caveat is
+    FEM-specific.)
+
     A = 1 - R - T is the energy-budget CLOSURE (it is identically 1-R-T, not an
     independent measurement). result.A_independent is the INDEPENDENTLY measured
     absorbed fraction (volumetric Im(eps)|E|^2 integral); |A - A_independent| is the
-    genuine, non-tautological energy/numerics diagnostic.
+    genuine, non-tautological energy/numerics diagnostic (a large gap with A_independent ~ 0
+    but A > 0 flags higher-order diffraction leaving the 0-order R/T, not absorption).
 
     sheet_bcs (C3): {boundary_name: sigma_S} applies a conductive-SHEET surface-current
     boundary condition (e.g. graphene) on the named internal interface(s). A sheet of
@@ -549,8 +561,11 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         warnings.warn(
             "solve_fem: energy-closure mismatch -- budget A=1-R-T={:.4f} vs independently measured "
             "volumetric absorption A_independent={:.4f} (|diff|={:.2e} > 5e-2); R/T are "
-            "inconsistent with the field (or the cladding is lossy, where A_independent is only "
-            "qualitative). Treat R/T/A as suspect.".format(
+            "inconsistent with the field. LIKELY CAUSE: HIGHER-ORDER DIFFRACTION -- R/T are 0-order "
+            "(specular) only, so a period > lambda/n cell loses the diffracted power from R/T and it "
+            "shows up as A (A_independent ~ 0 here flags exactly this; use R_flux/T_flux for the "
+            "all-orders total, or a sub-wavelength cell). Other causes: a lossy cladding (A_independent "
+            "qualitative) or an extraction error. Treat R/T/A as suspect.".format(
                 A, A_independent, abs(A - A_independent)), stacklevel=2)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,

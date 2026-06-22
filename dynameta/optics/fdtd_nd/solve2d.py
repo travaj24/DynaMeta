@@ -144,6 +144,17 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # lateral pattern (callable(nx,nz)->array, or an (nx,nz) array applied in the structure region)
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
+        # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) BEFORE this override. If the
+        # lateral pattern's peak index exceeds the sizing index, dz is too coarse and R/T are silently
+        # under-resolved. Raise rather than mis-solve -- size `layers` eps_inf to the pattern's max index
+        # (the make_structured_lateral seam already does this) so n_max/dz are derived correctly.
+        _n_lat = float(np.sqrt(max(1.0, float(np.max(np.real(eps_inf))))))
+        if _n_lat > n_max * (1.0 + 1e-9):
+            raise NotImplementedError(
+                "solve_fdtd_2d: lateral pattern peak index {:.3f} exceeds the grid-sizing index {:.3f} "
+                "from `layers` (+ end media) -- dz is under-resolved by {:.0%}. Size the `layers` "
+                "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
+                    _n_lat, n_max, _n_lat / n_max - 1.0))
     # PER-CELL LOSSY/graded eps (R4): a Drude (wp,gam) grid alongside eps_inf lets a slow drive (gate E,
     # T, PCM fraction) paint a graded ABSORBING eps the eps_inf-only lateral seam cannot carry. Each is a
     # callable(nx,nz,zc,pad,z_struct)->array or an (nx,nz) array (zero in the pads). Default None -> the

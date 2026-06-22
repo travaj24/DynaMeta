@@ -111,13 +111,60 @@ def part3_electroabsorption():
     return bool(flat_band and on_state and absorb_up and passive)
 
 
+def _s2d(dE, xb):
+    """2-D Sommerfeld enhancement (matches electroabsorption._alpha)."""
+    return 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / dE))) if dE > 0.0 else 0.0
+
+
+def part4_continuum_under_field():
+    """Elliott band-to-band continuum UNDER FIELD (the previously-dead path): its EA contribution is
+    driven by the EDGE REDSHIFT only -- the continuum STRENGTH is field-INDEPENDENT (set by the
+    interband matrix element, NOT the 1s-exciton overlap). DISCRIMINATOR: the ratio-scaled continuum a
+    prior version carried would give a materially different (overlap-suppressed) value."""
+    qw = _gaas_well()
+    s0 = qw.solve(0.0)
+    ET0 = s0.E_transition_J
+    xb = 0.012 * Q
+    sigma = 0.006 * Q
+    cont = 1.0e6
+    eps_bg = complex(3.6 ** 2, 0.05)
+    grid = (ET0 - 0.3 * Q, ET0 + xb + 0.4 * Q, 4001)
+    kw = dict(qw=qw, eps_bg=eps_bg, alpha0_per_m=1e6, broadening_J=sigma,
+              continuum_binding_J=xb, e_grid_J=grid)
+    eam = ElectroAbsorptionModel(continuum_alpha0_per_m=cont, **kw)
+    eam_noc = ElectroAbsorptionModel(continuum_alpha0_per_m=0.0, **kw)   # continuum OFF (isolator)
+    F = 9e6
+    sF = qw.solve(F)
+    ratioF = sF.overlap / s0.overlap                                    # < 1 under field
+    E_ph = ET0 + xb                                                     # at the 0-field continuum onset
+    lam = 2.0 * np.pi * HBAR * C_LIGHT / E_ph
+    fld = {"E": np.array([0.0, 0.0, F])}
+    # with-MINUS-without continuum: the exciton + KK cancel, leaving the PURE continuum EA contribution
+    cc = eam.delta_alpha_per_m(fld, lam) - eam_noc.delta_alpha_per_m(fld, lam)
+    s2dF = _s2d(E_ph - (sF.E_transition_J + xb), xb)                    # field-on (redshifted onset)
+    s2d0 = _s2d(E_ph - (ET0 + xb), xb)                                  # field-off (= 0 at the onset)
+    expected_fix = cont * (s2dF - s2d0)                                # FIELD-INDEPENDENT strength
+    expected_old = cont * (ratioF * s2dF - 1.0 * s2d0)                 # the ratio-scaled (wrong) model
+    match_fix = abs(cc - expected_fix) < 1e-3 * cont                   # continuum strength is field-indep
+    discriminates = abs(expected_fix - expected_old) > 0.05 * cont     # old model materially differs
+    contributes = cc > 0.05 * cont                                     # the continuum branch is LIVE
+    print("[q] (4) continuum under F: cc={:.3e} == field-indep {:.3e} (match {}), ratioF={:.3f}, "
+          "old-model would give {:.3e} (discriminates {}) -> {}".format(
+              cc, expected_fix, match_fix, ratioF, expected_old, discriminates,
+              "PASS" if (match_fix and discriminates and contributes and ratioF < 0.98) else "FAIL"),
+          flush=True)
+    return bool(match_fix and discriminates and contributes and ratioF < 0.98)
+
+
 def main():
     ok1 = part1_solver_vs_analytic()
     ok2 = part2_qcse_physics()
     ok3 = part3_electroabsorption()
-    ok = ok1 and ok2 and ok3
+    ok4 = part4_continuum_under_field()
+    ok = ok1 and ok2 and ok3 and ok4
     print("[q] *** QCSE ELECTRO-ABSORPTION (Stark solver == analytic; quadratic redshift; "
-          "field-ON absorption): {} ***".format("PASS" if ok else "FAIL"), flush=True)
+          "field-ON absorption; field-indep continuum): {} ***".format("PASS" if ok else "FAIL"),
+          flush=True)
     return ok
 
 

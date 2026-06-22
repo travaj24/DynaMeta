@@ -62,8 +62,10 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _p_basis_conversion,
-                                                           _pol_row, _require_lumenairy)
+from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _guard_conical_ppol,
+                                                           _guard_incidence_side,
+                                                           _p_basis_conversion, _pol_row,
+                                                           _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -206,9 +208,11 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
         lum = _require_berreman()
+        theta, phi = _angles_rad(design.optical)
+        _guard_incidence_side(design.optical)
+        _guard_conical_ppol(design.optical, phi)
         layers, n_sup, n_sb, names = design_to_berreman_layers(
             design, lambda_m, eps_by_region=eps_by_region, n_slices=n_slices)
-        theta, phi = _angles_rad(design.optical)
         R, T, Jr, Jt = lum.berreman_jones_1d(layers, complex(n_sb), complex(n_sup),
                                              float(lambda_m), angle=theta, phi=phi)
         rf, tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
@@ -249,6 +253,8 @@ class BerremanLayeredSolver:
     def solve(self, stack: LayeredStack, lambda_m: float, optical) -> OpticalResult:
         lum = _require_berreman()
         t0 = time.perf_counter()
+        _guard_incidence_side(optical)
+        _guard_conical_ppol(optical, _angles_rad(optical)[1])
         layers: List[Tuple[object, float]] = []
         for i, slab in enumerate(stack.slabs):            # already superstrate-side first
             if slab.eps is not None:

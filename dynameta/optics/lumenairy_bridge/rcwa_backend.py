@@ -90,6 +90,32 @@ def _angles_rad(optical) -> Tuple[float, float]:
     return theta, phi
 
 
+def _guard_incidence_side(optical) -> None:
+    """The bridges build the stack superstrate-side first from the Design's super/substrate, so they
+    model TOP incidence only (matching the FEM solver, solver.py). incidence_side='bottom' is a legal
+    OpticalSpec value but on an asymmetric stack it physically differs (different incidence medium,
+    reversed layer order); silently solving top would be a wrong number, so raise."""
+    side = getattr(optical, "incidence_side", "top") or "top"
+    if side != "top":
+        raise NotImplementedError(
+            "lumenairy bridge: incidence_side={!r} is not supported -- the bridges solve TOP "
+            "incidence only. For bottom incidence, swap the superstrate/substrate materials in the "
+            "Design (and reverse the layer order) and keep incidence_side='top'.".format(side))
+
+
+def _guard_conical_ppol(optical, phi_rad: float) -> None:
+    """p-polarization at CONICAL incidence (azimuth != 0) is unsupported: the lab-basis Jones -> tmm
+    p-hat conversion (_p_basis_conversion) assumes the x-z plane of incidence, so the lab E_x row is
+    NOT the TM eigen-polarization once phi != 0 (measured: a spurious ~4.5% azimuth dependence on an
+    isotropic stack). 's'/'y'/'x' are fine at conical; only 'p' needs phi == 0."""
+    pol = getattr(optical, "polarization", "y") or "y"
+    if pol == "p" and abs(float(phi_rad)) > 1e-12:
+        raise NotImplementedError(
+            "lumenairy bridge: p-polarization at conical incidence (azimuth != 0) is not supported "
+            "-- the p-basis conversion assumes the x-z plane of incidence (use polarization 's'/'y', "
+            "set azimuth_deg=0, or use the FEM solver for conical p-pol).")
+
+
 def _min_samples(n_orders: int) -> int:
     return 4 * int(n_orders) + 1
 
@@ -296,11 +322,13 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
+        theta, phi = _angles_rad(design.optical)
+        _guard_incidence_side(design.optical)
+        _guard_conical_ppol(design.optical, phi)
         stack, names = design_to_rcwa_stack(design, lambda_m, eps_by_region=eps_by_region,
                                             n_orders=n_orders, n_orders_y=n_orders_y,
                                             n_slices=n_slices, cell_samples=cell_samples,
                                             formulation=formulation)
-        theta, phi = _angles_rad(design.optical)
         stack.set_source(lambda_m, theta=theta, phi=phi)
         res = stack.solve(retain_internal=absorption, stabilize=stabilize)
         n_sup, n_sb = end_media_indices(design, lambda_m)
@@ -336,6 +364,8 @@ class LumenairyStackSolver:
     def solve(self, stack: LayeredStack, lambda_m: float, optical) -> OpticalResult:
         lum = _require_lumenairy()
         t0 = time.perf_counter()
+        _guard_incidence_side(optical)
+        _guard_conical_ppol(optical, _angles_rad(optical)[1])
         px = stack.period_x_m or float(lambda_m)          # period is irrelevant when uniform
         py = stack.period_y_m or float(lambda_m)
         structured = not stack.is_unstructured

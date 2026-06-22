@@ -146,12 +146,17 @@ class ElectroAbsorptionModel:
         if self.continuum_alpha0_per_m > 0.0 and self.continuum_binding_J > 0.0:
             # Elliott band-to-band continuum above the UNBOUND edge E_cont = E_T + E_binding, with the
             # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi sqrt(E_b/dE))) -> 2 at the edge and
-            # -> 1 far above (a step joint-DOS, edge-enhanced); also scales with the e-h overlap.
+            # -> 1 far above (a step joint-DOS, edge-enhanced). The continuum STRENGTH is set by the
+            # interband momentum matrix element and is field-INDEPENDENT (NOT scaled by the 1s-exciton
+            # envelope overlap ratio, which governs only the bound-exciton oscillator strength above):
+            # the QCSE field acts on the continuum solely through the EDGE REDSHIFT E_T(F) carried in
+            # E_T. (A prior ratio*continuum scaling made the continuum plateau spuriously drop with F;
+            # it was never exercised because every gate had overlap==overlap0 -- audit fix.)
             xb = float(self.continuum_binding_J)
             dE = E - (E_T + xb)
             safe = np.where(dE > 0.0, dE, 1.0)                         # avoid sqrt of <=0
             s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / safe))), 0.0)
-            a = a + self.continuum_alpha0_per_m * ratio * s2d
+            a = a + self.continuum_alpha0_per_m * s2d
         return a
 
     def _field_magnitude(self, fields: dict) -> float:
