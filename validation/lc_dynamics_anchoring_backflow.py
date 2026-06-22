@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.carriers.lc_dynamics import LCDynamics
-from dynameta.carriers.lc_director import director_profile_bvp
+from dynameta.carriers.lc_director import director_profile_bvp, n_eff_from_theta_profile
 
 THB = math.radians(89.9)
 
@@ -65,7 +65,33 @@ def main():
                                          rno.rise_10_90_s * 1e3, rno.decay_90_10_s * 1e3, faster,
                                          off_identical, "OK" if g_b else "FAIL"), flush=True)
 
-    ok = g_a and g_b
+    # GATE C: weak-anchoring DERIVED-TRACE consistency. The reported n_eff[-1] must equal n_eff
+    # recomputed from the STORED director theta_zt[:, -1] (which has a MOVING surface under weak
+    # anchoring). The prior code re-pinned the surface to theta_b before computing the trace, making
+    # n_eff inconsistent with its own theta_zt -- a discriminating gate the re-pin FAILS.
+    Wc = 1e-4
+    dyo = LCDynamics(K11=17e-12, K33=18e-12, gamma1=0.085, eps_para=18.7, eps_perp=4.0, theta_b_rad=THB,
+                     geometry="planar", d_planar=1e-6, field_model="uniform", n_o=1.56, n_e=1.92, nz=121,
+                     W_anchor_J_m2=Wc, gamma_s_Pa_s_m=1e-8)
+    tau2 = dyo.tau_1const_s()
+    ro = dyo.simulate(np.linspace(0.0, 30.0 * tau2, 200), lambda t: 3.0, theta0_rad=None)
+    z = ro.z_m
+    d_lc = float(z[-1] - z[0])
+    th_final = ro.theta_zt_rad[:, -1]
+    neff_state = n_eff_from_theta_profile(th_final, z, dyo.n_o, dyo.n_e, model=dyo.opt_model, d_lc=d_lc)
+    neff_reported = float(ro.n_eff[-1])
+    consistent = abs(neff_reported - neff_state) < 1e-4
+    th_repin = th_final.copy(); th_repin[0] = th_repin[-1] = THB        # the OLD (re-pinned) profile
+    neff_repin = n_eff_from_theta_profile(th_repin, z, dyo.n_o, dyo.n_e, model=dyo.opt_model, d_lc=d_lc)
+    surf_moved = abs(math.degrees(float(th_final[0])) - math.degrees(THB)) > 0.5
+    discriminates = abs(neff_reported - neff_repin) > 1e-3             # re-pin would be visibly wrong
+    g_c = bool(consistent and discriminates and surf_moved)
+    print("[db] C weak-anchor n_eff trace: reported {:.5f} == from-state {:.5f} (consistent {}), "
+          "surface moved {:.2f} deg, re-pinned would give {:.5f} (discriminates {}) -> {}".format(
+              neff_reported, neff_state, consistent, math.degrees(float(th_final[0])), neff_repin,
+              discriminates, "OK" if g_c else "FAIL"), flush=True)
+
+    ok = g_a and g_b and g_c
     print("[db] *** LC WEAK-ANCHORING DYNAMICS + BACKFLOW: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

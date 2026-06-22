@@ -128,6 +128,29 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     `courant` the CFL fraction (<= 1, use ~0.5 for Drude); `n_pad_wave` vacuum padding (in lambda_max)
     each side; `settle` the run length in pulse-widths. `kerr=False` zeroes chi3 (linear R/T). Returns
     FDTD1DResult(freqs_Hz, R, T, band) over the well-excited band."""
+    # The 1-D engine carries eps_inf + Drude + Kerr(chi3) ONLY. The Lorentz pole, chi2, Raman and the
+    # gain line are honored solely by the 2-D-TE kernels (fdtd_nd); _run never reads those arrays, so
+    # solving them here would SILENTLY drop the term and the FDTD eps would diverge from the layer's own
+    # eps_at(w). Raise loudly (matching the 2D/3D siblings) rather than mis-solve.
+    def _unsupported_1d(L):
+        bad = []
+        if L.lorentz_delta_eps != 0.0 and L.lorentz_w0_rad_s > 0.0:
+            bad.append("lorentz")
+        if getattr(L, "chi2_m_V", 0.0) != 0.0:
+            bad.append("chi2")
+        if getattr(L, "raman_chi3_m2_V2", 0.0) != 0.0:
+            bad.append("raman")
+        if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_w_rad_s", 0.0) > 0.0:
+            bad.append("gain")
+        return bad
+
+    _bad = sorted({t for L in layers for t in _unsupported_1d(L)})
+    if _bad:
+        raise NotImplementedError(
+            "solve_fdtd_1d supports eps_inf + Drude + Kerr(chi3) only; the layer term(s) {} are "
+            "carried ONLY by the 2-D-TE kernels (optics.fdtd_nd), so a 1-D solve would silently drop "
+            "them (the FDTD eps would diverge from FDTDLayer.eps_at(w)). Use the 2-D engine, or remove "
+            "those terms.".format(_bad))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     # Size the grid from the DISPERSIVE |n| over the band, not just sqrt(eps_inf): a below-plasma Drude

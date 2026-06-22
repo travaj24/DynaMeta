@@ -196,6 +196,38 @@ def test_berreman_uniaxial_decouples_per_axis():
 
 
 @needs_lum
+def test_bridge_conical_ppol_raises():
+    # p-pol at conical incidence (azimuth != 0) is unsupported (the p-basis conversion assumes the
+    # x-z plane of incidence); RCWA + Berreman must raise, but p-pol at phi=0 and s-pol conical solve
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
+                                                  make_lumenairy_rcwa_solver)
+    for mk in (lambda: make_lumenairy_rcwa_solver(n_orders=3), make_lumenairy_berreman_solver):
+        d = _uniform_design()
+        d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=20.0)
+        with pytest.raises(NotImplementedError):
+            mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
+        mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)        # phi=0 p-pol is fine
+
+
+@needs_lum
+def test_bridge_bottom_incidence_raises():
+    # incidence_side='bottom' is a legal OpticalSpec value the bridges cannot honor (top-only); raise
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
+                                                  make_lumenairy_pmm_solver,
+                                                  make_lumenairy_rcwa_solver)
+    for mk in (lambda: make_lumenairy_rcwa_solver(n_orders=3),
+               lambda: make_lumenairy_pmm_solver(degree=8, n_orders=7),
+               make_lumenairy_berreman_solver):
+        d = _uniform_design()
+        d.optical = OpticalSpec(polarization="y", incidence_angle_deg=0.0, incidence_side="bottom")
+        with pytest.raises(NotImplementedError):
+            mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+
+
+@needs_lum
 def test_berreman_patterned_layer_raises():
     # the planar-tier scope boundary: a patterned (inclusion) layer routes to RCWA, not Berreman
     from dynameta.geometry import Inclusion, Layer

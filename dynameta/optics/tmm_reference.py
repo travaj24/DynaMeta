@@ -186,6 +186,13 @@ class TmmLayeredSolver:
 
     def solve(self, stack, lambda_m, optical):
         from dynameta.core.interfaces import OpticalResult
+        side = getattr(optical, "incidence_side", "top") or "top"
+        if side != "top":
+            raise NotImplementedError(
+                "TmmLayeredSolver: incidence_side={!r} is not supported -- the stack is built "
+                "superstrate-side first, so it models TOP incidence only. For bottom incidence, "
+                "swap the super/substrate media (and reverse the slab order) with "
+                "incidence_side='top'.".format(side))
         theta = float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0)
         res = _coh_tmm_stack(stack, lambda_m, theta, _pol_for(optical))
         r, t = complex(res["r"]), complex(res["t"])

@@ -130,6 +130,16 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     if lateral_eps_inf is not None:
         lat = lateral_eps_inf(nx, ny, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
+        # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) before this override; a
+        # higher-index lateral pattern would be silently under-resolved. Raise rather than mis-solve --
+        # size `layers` eps_inf to the lateral pattern max (the make_structured_lateral seam does this).
+        _n_lat = float(np.sqrt(max(1.0, float(np.max(np.real(eps_inf))))))
+        if _n_lat > n_max * (1.0 + 1e-9):
+            raise NotImplementedError(
+                "solve_fdtd_3d: lateral pattern peak index {:.3f} exceeds the grid-sizing index {:.3f} "
+                "from `layers` (+ end media) -- dz is under-resolved by {:.0%}. Size the `layers` "
+                "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
+                    _n_lat, n_max, _n_lat / n_max - 1.0))
 
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
@@ -354,6 +364,19 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
                 raise ValueError("lateral_tensor[{!r}] shape {} != (nx,ny,nz)={}".format(
                     key, a.shape, (nx, ny, nz)))
             fields[key][...] = a
+        # GRID-SIZING GUARD: dz was derived from `layers` before this tensor override; a higher-index
+        # lateral pattern would be silently under-resolved. Use the TRANSVERSE index (exx/eyy) only --
+        # matching _ncell, which sets dz from eps_xx/eps_yy (the transverse E a z-propagating wave
+        # sees); eps_zz drives Ez, not the dz resolution, so including it would false-trip on a
+        # faithful high-eps_zz override. Raise rather than mis-solve -- size `layers` eps_xx/eps_yy to
+        # the lateral pattern max.
+        _n_lat = float(np.sqrt(max(1.0, float(np.max(exx)), float(np.max(eyy)))))
+        if _n_lat > n_max * (1.0 + 1e-9):
+            raise NotImplementedError(
+                "solve_fdtd_3d_mo: lateral_tensor transverse peak index {:.3f} exceeds the grid-sizing "
+                "index {:.3f} from `layers` -- dz is under-resolved by {:.0%}. Size the `layers` "
+                "eps_xx/eps_yy to the lateral pattern max so n_max/dz are derived from it.".format(
+                    _n_lat, n_max, _n_lat / n_max - 1.0))
     k_src = max(2, int(round(0.35 * pad / dz)))
     k_pL = int(round(0.7 * pad / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))

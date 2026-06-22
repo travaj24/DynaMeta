@@ -33,6 +33,12 @@ class RegionInfo:
 class OpticalResult:
     """Outcome of one optical solve. t/T/A are None until Phase 3 transmission.
 
+    R/T MEANING IS SOLVER-DEPENDENT: the FEM solver (optics.solver.solve_fem) returns the
+    SPECULAR 0-order (zeroth diffraction order) R/T -- the total reflectance/transmittance
+    only for a SUB-WAVELENGTH cell; for a diffracting cell the higher-order power is missing
+    from R/T (use R_flux/T_flux, the all-orders flux, below). The RCWA/PMM bridges instead
+    return order-SUMMED (all-order) R/T. A is always the 1-R-T closure of whatever R/T are.
+
     A is the energy-budget closure 1 - R - T. A_independent (when not None) is the
     INDEPENDENTLY measured absorbed fraction -- the normalized volumetric loss
     integral k0 * Int Im(eps)|E|^2 dV / (cos(theta) * cell_area) over the physical
