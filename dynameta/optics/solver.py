@@ -186,18 +186,24 @@ def _incidence_geometry(optical, n_super):
             "n_super={:.4g}. Use normal incidence for a non-vacuum superstrate, or extend "
             "solve_fem with the dense-incidence dispersion.".format(complex(n_super)))
     if oblique:
-        # The fixed-alpha HalfSpace PML is not angle-aware; energy conservation degrades
-        # with angle (audit OPT-3 / cross-cutting F5 -- the warning the README promised).
-        # Measured envelope vs the tmm oracle (validation/oblique_vs_tmm, lossless slab):
-        # ~1% through 30 deg, ~3% at 45 deg; ABOVE ~50 deg the PML reflection grows fast
-        # enough that the budget VIOLATES energy conservation (R+T = 1.17 observed at
-        # 60 deg) -- the energy-closure warnings downstream then fire.
+        # The fixed-alpha HalfSpace PML is not angle-aware; energy conservation degrades with angle
+        # (audit OPT-3 / cross-cutting F5). Measured vs the tmm oracle (validation/oblique_vs_tmm,
+        # lossless slab): ~1% through 30 deg, ~3% at 45 deg. ABOVE ~50 deg the PML reflection grows
+        # fast enough that the budget VIOLATES energy conservation (R+T = 1.17 at 60 deg) -- a
+        # silently-wrong R/T, so RAISE there rather than return it behind a warning (pass-2 audit).
+        # The exact RCWA/PMM/Berreman bridges have no PML and keep the full angular range (the
+        # OpticalSpec polar cap stays at 60 deg for them); only the FEM backend is bounded here.
+        if abs(theta) > math.radians(50.0):
+            raise NotImplementedError(
+                "oblique FEM: |theta| = {:.1f} deg exceeds the FEM's validated envelope (~50 deg) -- "
+                "the fixed-alpha HalfSpace z-PML is not angle-aware and VIOLATES energy conservation "
+                "above ~50 deg (R+T ~ 1.17 at 60 deg), so R/T would be silently wrong. Stay at "
+                "|theta| <= 45 deg for quantitative FEM, or use the exact RCWA/PMM/Berreman bridges "
+                "(no PML, full angular range).".format(math.degrees(abs(theta))))
         warnings.warn(
-            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware. "
-            "Measured vs tmm: ~1% errors through 30 deg, ~3% at 45 deg; above ~50 deg "
-            "R/T become unreliable (energy non-conservation, +17% at 60 deg). Treat "
-            "oblique R/T as approximate and stay at or below ~45 deg for quantitative "
-            "work.", stacklevel=2)
+            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware. Measured vs tmm: "
+            "~1% through 30 deg, ~3% at 45 deg. Treat oblique FEM R/T as approximate and stay at or "
+            "below ~45 deg for quantitative work (the solver raises above ~50 deg).", stacklevel=2)
     return theta, phi, oblique, conical
 
 

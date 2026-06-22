@@ -79,6 +79,14 @@ class SweepResults:
         (default: the first bias). The OFF/ON contrast spectrum of the modulator."""
         a = self.fields[metric]
         r = a[self.bias_labels.index(ref)] if ref is not None else a[0]
+        # A reference bias with no data (all-NaN, e.g. a None->NaN field) would make the WHOLE
+        # contrast array NaN -- and max_contrast then reads 'no modulation' when the truth is 'missing
+        # reference data'. Fail loud (like from_rows does for a wavelength collision) instead.
+        if np.all(np.isnan(r)):
+            raise ValueError(
+                "contrast: reference bias {!r} has no {!r} data (all-NaN) -- the contrast would be "
+                "silently all-NaN. Choose a reference bias with data, or check the solve populated "
+                "{!r}.".format(ref if ref is not None else self.bias_labels[0], metric, metric))
         return np.abs(a - r[None, :])
 
     def max_contrast(self, metric: str = "R", ref: Optional[str] = None) -> float:

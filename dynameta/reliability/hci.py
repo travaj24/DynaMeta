@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
-Q_E = 1.602176634e-19
+from dynameta.constants import Q_E             # single-source CODATA (was re-declared here)
+
+KB_EV_K = 8.617333262e-5                       # eV/K Boltzmann (constants.py carries only KB in J/K)
 
 
 def trap_generation_rate_per_m2_s(I_sub_A: float, width_m: float, length_m: float, *,

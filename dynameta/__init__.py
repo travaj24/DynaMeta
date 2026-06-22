@@ -32,9 +32,14 @@ design), dynameta.transient_optics (coupled carrier->optics transient), dynameta
 (SweepResults + HDF5/Zarr save/load), dynameta.cache (persistent optical-solver cache),
 dynameta.viz (matplotlib spectra/maps), dynameta.carriers.lc_director / lc_dynamics
 (nematic LC director statics + Erickson-Leslie dynamics).
+
+v0.5 adds: dynameta.optics.soa (standalone QD-SOA traveling-wave gain: group-resolved rate
+equations, ASE/noise, calibration) and the dynameta.optics.lumenairy_bridge backends -- RCWA/PMM
+plus the Berreman 4x4 anisotropic-planar and EMT (Rytov) screen tiers (lumenairy is a required core
+dep, imported lazily).
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Geometry + materials data model (lightweight)
 from dynameta.geometry import (

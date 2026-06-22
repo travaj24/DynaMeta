@@ -80,12 +80,21 @@ class EmParams:
     jl_crit_A_m: float = 2.0e5
 
     def mttf_s(self, J_A_m2, T_K, *, length_m: float = None):
-        """MTTF with the Blech check folded in (length_m given + immortal -> inf)."""
-        if length_m is not None and np.ndim(J_A_m2) == 0 \
-                and blech_immortal(float(J_A_m2), length_m, jl_crit_A_m=self.jl_crit_A_m):
-            return float("inf")
-        return black_mttf_s(J_A_m2, T_K, A_s=self.A_s, n_exp=self.n_exp, Ea_eV=self.Ea_eV,
+        """MTTF with the Blech check folded in (length_m given + immortal -> inf). The immortality
+        test is ELEMENTWISE over an array J (previously only the scalar-J path was immortal-aware, so
+        a vector of current densities silently lost the immortal -> inf elements)."""
+        base = black_mttf_s(J_A_m2, T_K, A_s=self.A_s, n_exp=self.n_exp, Ea_eV=self.Ea_eV,
                             J_ref_A_m2=self.J_ref_A_m2)
+        if length_m is None:
+            return base
+        if not (length_m > 0.0):
+            raise ValueError("EM: length_m must be > 0")
+        if not (self.jl_crit_A_m > 0.0):
+            raise ValueError("EM: jl_crit_A_m must be > 0")
+        # Blech immortality: J*L < (J*L)_crit -> back-stress gradient suppresses void nucleation -> inf
+        immortal = np.asarray(J_A_m2, dtype=np.float64) * float(length_m) < self.jl_crit_A_m
+        out = np.where(immortal, np.inf, base)
+        return float(out) if np.ndim(J_A_m2) == 0 else out
 
     @classmethod
     def calibrated(cls, *, J_A_m2: float, T_K: float, mttf_s: float, **kw) -> "EmParams":

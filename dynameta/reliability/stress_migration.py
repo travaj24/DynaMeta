@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
-KB_J_K = 1.380649e-23
+from dynameta.constants import KB as KB_J_K    # single-source CODATA (was re-declared here)
+
+KB_EV_K = 8.617333262e-5                       # eV/K Boltzmann (constants.py carries only KB in J/K)
 
 
 def korhonen_kappa_m2_s(T_K: float, *, D0_m2_s: float, Q_eV: float, B_Pa: float,

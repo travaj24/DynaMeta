@@ -29,8 +29,11 @@ __all__ = [
     "oxide_stress_from_electrothermal", "tddb_tbd_from_electrothermal",
     "tmm_absorption_by_layer_name",
     "lc_extra_fields", "llg_extra_fields", "pcm_extra_fields",
-    "electrothermal_extra_fields",
 ]
+# NOTE: electrothermal_extra_fields is reachable via the lazy __getattr__ below (explicit import or
+# attribute access) but is deliberately NOT in __all__: listing it would make `from dynameta.drivers
+# import *` resolve it via __getattr__ and EAGERLY import NGSolve, breaking the solver-free base-import
+# contract that __getattr__ exists to uphold (pass-2 audit). Explicit import does not need __all__.
 
 
 def __getattr__(name):
