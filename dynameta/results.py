@@ -90,8 +90,22 @@ class SweepResults:
         return np.abs(a - r[None, :])
 
     def max_contrast(self, metric: str = "R", ref: Optional[str] = None) -> float:
-        """The largest |delta metric| over all biases and wavelengths (the peak modulation)."""
-        return float(np.nanmax(self.contrast(metric, ref)))
+        """The largest |delta metric| over all biases and wavelengths (the peak modulation).
+
+        contrast() already guards the all-NaN REFERENCE; this also guards the symmetric case: if EVERY
+        non-reference (comparison) bias is all-NaN, np.nanmax silently returns 0.0 (the reference row's
+        self-contrast) -- reading 'no modulation' when the truth is 'no comparison data'. Raise instead.
+        A PARTIALLY-NaN comparison bias (a solve that failed at some wavelengths) is legitimate and still
+        reduces over its present cells; a single-bias sweep (no comparison row) correctly returns 0.0."""
+        c = self.contrast(metric, ref)                              # raises if the reference is all-NaN
+        ref_idx = self.bias_labels.index(ref) if ref is not None else 0
+        comp = np.delete(c, ref_idx, axis=0)                        # the non-reference modulation rows
+        if comp.size and bool(np.all(np.isnan(comp))):
+            raise ValueError(
+                "max_contrast: every non-reference bias is all-NaN for {!r} -- the peak modulation "
+                "would read 0.0 silently though there is NO comparison data. Check the solve populated "
+                "{!r} for the modulated bias(es).".format(metric, metric))
+        return float(np.nanmax(c))
 
     # ---- serialization (HDF5 / Zarr) ------------------------------------------------------------
     def save(self, path: str, *, fmt: str = "auto") -> str:

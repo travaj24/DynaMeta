@@ -140,3 +140,24 @@ def test_viz_axes_labels_and_orientation():
     assert len(ax2.lines) == sr.n_bias - 1                     # contrast drops the reference bias
     im = viz.plot_map(sr.R).images[0]
     assert tuple(im.get_array().shape) == sr.R.shape           # (n_bias, n_wl) orientation preserved
+
+
+def test_max_contrast_all_nan_comparison_raises():
+    # Symmetric to the all-NaN-reference guard: if EVERY non-reference (comparison) bias is all-NaN,
+    # np.nanmax silently returns 0.0 (the reference's self-contrast) -- reading 'no modulation' when the
+    # ON bias actually had NO data. max_contrast must RAISE. A partially-NaN comparison bias (solve
+    # failed at some wavelengths) is legitimate and still reduces; a single bias correctly gives 0.0.
+    def _r(R):  # R=None -> a missing (NaN) cell
+        return OpticalResult(r=1 + 0j, R=R, phase_deg=0.0, solve_time_s=1.0)
+    # (a) 2 biases, ON entirely missing -> comparison row all-NaN -> raise (was a silent 0.0)
+    sr = SweepResults.from_rows([SweepRow("off", 1500.0, _r(0.2)), SweepRow("on", 1500.0, _r(None))])
+    assert np.isnan(sr.R[1, 0]) and not np.isnan(sr.R[0, 0])
+    with pytest.raises(ValueError):
+        sr.max_contrast("R")
+    # (b) partially-NaN ON bias: present cells still reduce (|0.5-0.2| at 1400; 1500 ON NaN skipped)
+    sr2 = SweepResults.from_rows([SweepRow("off", 1400.0, _r(0.2)), SweepRow("off", 1500.0, _r(0.2)),
+                                  SweepRow("on", 1400.0, _r(0.5)), SweepRow("on", 1500.0, _r(None))])
+    assert abs(sr2.max_contrast("R") - 0.3) < 1e-12
+    # (c) single bias (no comparison row) -> 0.0, not an error
+    sr3 = SweepResults.from_rows([SweepRow("off", 1500.0, _r(0.2))])
+    assert sr3.max_contrast("R") == 0.0

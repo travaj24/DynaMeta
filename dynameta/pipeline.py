@@ -121,6 +121,28 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     # a SWEEP-AWARE optical solver (e.g. make_fdtd_sweep_optical_solver) exposes solve_sweep: ONE broadband
     # solve per bias serves the whole wavelength list, instead of re-solving each wavelength.
     sweep_aware = hasattr(solve_optics, "solve_sweep")
+    # The sweep-aware fast path passes ONE (n_super, n_sub) for the whole band (computed at band-centre
+    # below). That is EXACT only when the end media are NON-dispersive; if n_super/n_sub vary with
+    # wavelength a band-centre freeze gives wrong R/T off-centre AND disagrees with the per-wavelength
+    # path (which re-derives end media per lambda) -- a silent inconsistency for a dispersive cladding/
+    # substrate over a broadband sweep. Detect dispersion at the band edges and DISABLE the fast path
+    # when found, so optics are solved per-wavelength (end media track lambda; exact -- only the
+    # one-broadband-solve-per-bias speedup is lost). Non-dispersive end media (air super / fixed-index
+    # substrate -- the common case) keep the fast path, byte-identical.
+    if sweep_aware and len(sweep.wavelengths_nm) > 1:
+        _lams_m = [float(w) * 1e-9 for w in sweep.wavelengths_nm]
+        _ns_lo, _nb_lo = end_media_indices(design, min(_lams_m))
+        _ns_hi, _nb_hi = end_media_indices(design, max(_lams_m))
+        if (abs(_ns_lo - _ns_hi) > 1e-12 * max(abs(_ns_hi), 1.0)
+                or abs(_nb_lo - _nb_hi) > 1e-12 * max(abs(_nb_hi), 1.0)):
+            import warnings
+            warnings.warn(
+                "run_pipeline: end media (n_super/n_sub) are DISPERSIVE across the sweep band, so the "
+                "sweep-aware fast path (which freezes them at band-centre) is DISABLED -- optics are "
+                "solved per-wavelength instead so n_super/n_sub track lambda. The per-wavelength result "
+                "is exact; only the one-broadband-solve-per-bias speedup is lost.", RuntimeWarning,
+                stacklevel=2)
+            sweep_aware = False
     if n_to_eps is None:
         n_to_eps = MaterialEpsMap(design.materials)
     lift = choose_lift(design.device_symmetry(), design.optical.lift,
