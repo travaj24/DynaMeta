@@ -251,3 +251,48 @@ def test_emt_screen_converges_to_rcwa_subwavelength():
     r_emt = make_lumenairy_emt_screen_solver()(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
     r_rig = make_lumenairy_rcwa_solver(n_orders=20)(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
     assert abs(r_emt.R - r_rig.R) < 3e-3
+
+
+HAVE_JAX = importlib.util.find_spec("jax") is not None
+needs_jax = pytest.mark.skipif(not (HAVE_LUM and HAVE_JAX),
+                               reason="lumenairy or jax not installed")
+
+
+@needs_jax
+def test_berreman_jax_grad_matches_fd():
+    # the JAX twin differentiates through a layer eps tensor: AD == central FD
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    from dynameta.optics.lumenairy_bridge import berreman_RT
+    lam, d, n_o = 1.55e-6, 220e-9, 1.50
+
+    def R_of(ne):
+        eps = jnp.asarray([[ne ** 2, 0, 0], [0, n_o ** 2, 0], [0, 0, n_o ** 2]],
+                          dtype=jnp.complex128)
+        R, _T = berreman_RT([(eps, d)], 1.5 + 0j, 1.0 + 0j, lam, angle=0.0, row=0)
+        return jnp.real(R)
+
+    g = float(jax.grad(R_of)(jnp.asarray(1.74)))
+    fd = (float(R_of(jnp.asarray(1.74 + 1e-6))) - float(R_of(jnp.asarray(1.74 - 1e-6)))) / 2e-6
+    assert abs(g - fd) / (abs(fd) + 1e-12) < 1e-6
+
+
+@needs_jax
+def test_berreman_jax_forward_equals_numpy():
+    # the differentiable path is the SAME physics as the concrete numpy forward
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    from dynameta.optics.lumenairy_bridge import berreman_RT
+    lam, d, n_o, ne = 1.55e-6, 220e-9, 1.50, 1.74
+
+    def eps(xp):
+        return xp.asarray([[ne ** 2, 0, 0], [0, n_o ** 2, 0], [0, 0, n_o ** 2]],
+                          dtype=xp.complex128)
+
+    R_np, T_np = berreman_RT([(eps(np), d)], 1.5 + 0j, 1.0 + 0j, lam, angle=0.2, row=0)
+    R_jx, T_jx = berreman_RT([(eps(jnp), jnp.asarray(d))], 1.5 + 0j, 1.0 + 0j,
+                             jnp.asarray(lam), angle=jnp.asarray(0.2), row=0)
+    assert abs(float(R_np) - float(R_jx)) < 1e-12
+    assert abs(float(T_np) - float(T_jx)) < 1e-12
