@@ -128,7 +128,10 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     if not is_tensor and v.ndim != 3:
         raise ValueError("slice_eps_field: values_zyx must be (Nz,Ny,Nx) scalar or (Nz,Ny,Nx,3,3) tensor; "
                          "got shape {}.".format(v.shape))
-    laterally_uniform = bool(np.allclose(v, v.mean(axis=(1, 2), keepdims=True)))
+    # tight tolerance (matching the RCWA/PMM bridge _y_invariant / structured checks, rtol=1e-12):
+    # np.allclose DEFAULTS (rtol=1e-5) would average a weakly-modulated grating to a scalar slab,
+    # silently dropping the lateral structure the bridges would keep. Err toward preserving structure.
+    laterally_uniform = bool(np.allclose(v, v.mean(axis=(1, 2), keepdims=True), rtol=1e-12, atol=0.0))
     if is_tensor:
         # one eps_tensor_cell (Ny,Nx,3,3)->(Nx,Ny,3,3) per native z-slice; uniform -> a 1x1x3x3 cell.
         slabs = []

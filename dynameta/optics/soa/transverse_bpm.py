@@ -81,6 +81,13 @@ class TransverseBPM:
             self._qd_P = None
             self._qd_g = None
         else:
+            # the table REPLACES the phenomenological g0/(1+S/Isat) entirely -- passing both is a
+            # contradiction (the g0/Isat pair would be silently ignored), so reject it loudly.
+            if g0_per_m > 0.0 or np.isfinite(Isat_W):
+                raise ValueError("TransverseBPM: qd_gain_table REPLACES the phenomenological saturable "
+                                 "gain -- do not also pass g0_per_m > 0 or a finite Isat_W (they would "
+                                 "be ignored); set only one gain model. (alpha_lef/alpha_i/L_diff/"
+                                 "gamma_confinement still apply with a table.)")
             self._qd_P = np.asarray(qd_gain_table[0], dtype=np.float64)
             self._qd_g = np.asarray(qd_gain_table[1], dtype=np.float64)
             if (self._qd_P.ndim != 1 or self._qd_P.size < 2 or self._qd_g.shape != self._qd_P.shape
