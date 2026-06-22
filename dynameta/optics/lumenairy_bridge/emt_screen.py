@@ -85,12 +85,20 @@ def homogenize_lamellar_layers(design, lambda_m: float, *, order: int = 0,
     for L in design.stack.layers:
         if not L.inclusions or L.name in out:
             continue
+        # 1) LAMELLAR detection: a non-lamellar layer (non-rectangle / partial-y / overlap) raises
+        #    here -> leave it for the rigorous RCWA path (the EMT screen is 1-D-lamellar only). This
+        #    is a SEPARATE step so the order=2 binary-only error below is NOT swallowed as "not
+        #    lamellar" (which would misroute a valid multi-media grating with a misleading message).
+        try:
+            layer_to_pmm_segments(L, design, lambda_m, px, py)
+        except ValueError:
+            continue
+        # 2) HOMOGENIZE the confirmed-lamellar layer; order=2 is binary-only, so a multi-media
+        #    lamellar cell falls back to order=0 (the exact period->0 tensor) rather than misrouting.
         try:
             tens = rytov_tensor_for_layer(L, design, lambda_m, px, py, order=order)
         except ValueError:
-            # not a lamellar grating (non-rectangle / partial-y / overlap) -- leave it for the
-            # rigorous RCWA path to handle; the EMT screen is 1-D-lamellar only.
-            continue
+            tens = rytov_tensor_for_layer(L, design, lambda_m, px, py, order=0)
         out[L.name] = EpsField(tensor=tens)
     return out
 
