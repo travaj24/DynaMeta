@@ -47,6 +47,12 @@ class Mesh3DSpec:
     fem_order:               int = 2
     # Optional prismatic boundary layers grown into semiconductor interfaces:
     semi_prism_thk_m:        Optional[List[float]] = None
+    # Mirror-symmetry domain reduction (NORMAL incidence only): solve a half ('half_x'/'half_y')
+    # or 'quarter' lateral cell with symmetry walls (PEC/PMC) replacing the periodic boundary on
+    # the reduced axis, for a mesh-symmetric (centered-inclusion) cell. 'none' (default) builds the
+    # full periodic cell -- byte-identical. The reduction is correctness-neutral (same 0-order R/T as
+    # the full solve) but uses 1/2 or 1/4 the DOFs; the solver applies the wall types per polarization.
+    symmetry:                Literal["none", "half_x", "half_y", "quarter"] = "none"
 
 
 @dataclass
