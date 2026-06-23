@@ -373,7 +373,36 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     eps_bg_cf = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
 
     # ---- periodic HCurl space ----
-    if oblique and not envelope and (geo.n_px or geo.n_py):
+    if getattr(geo, "sym_x", False) or getattr(geo, "sym_y", False):
+        # MIRROR-SYMMETRY reduced cell (NORMAL incidence): the reduced lateral axis carries a symmetry
+        # WALL instead of a periodic boundary. The wall whose outward normal is PARALLEL to the incident
+        # E is a PEC (perfect electric conductor: tangential E = 0 = the HCurl Dirichlet/essential BC);
+        # the wall whose normal is PERPENDICULAR to E is a PMC (perfect magnetic conductor: the NATURAL
+        # BC of the curl-curl form -- left unconstrained). At normal incidence pol 'x' -> E||x so the
+        # x-walls ('sym_x') are PEC; pol 'y' -> E||y so the y-walls ('sym_y') are PEC. A surviving
+        # non-reduced axis stays plain-periodic (Bloch phase 1 at normal incidence).
+        if oblique or conical:
+            raise NotImplementedError(
+                "symmetry-reduced FEM mesh is NORMAL-incidence only (an oblique/conical wavevector "
+                "breaks the mirror symmetry); got theta={:.3g} deg.".format(math.degrees(theta)))
+        if eps_is_tensor:
+            raise NotImplementedError(
+                "symmetry-reduced FEM mesh does not support a tensor (anisotropic/gyrotropic) eps -- "
+                "off-diagonal coupling breaks the mirror parity. Use the full periodic solve.")
+        if optical.polarization not in ("x", "y"):
+            raise NotImplementedError(
+                "symmetry-reduced FEM mesh requires polarization 'x' or 'y' (got {!r}); the wall "
+                "type is keyed to the linear-polarization axis.".format(optical.polarization))
+        pec = []
+        if getattr(geo, "sym_x", False) and optical.polarization == "x":
+            pec.append("sym_x")                              # x-wall normal || E(x) -> PEC
+        if getattr(geo, "sym_y", False) and optical.polarization == "y":
+            pec.append("sym_y")                              # y-wall normal || E(y) -> PEC
+        base = ng.HCurl(mesh, order=order, complex=True, dirichlet="|".join(pec))
+        # any surviving periodic axis (half-cell) is plain-periodic at normal incidence (phase 1);
+        # a quarter cell has no periodic identification (n_px=n_py=0) -> the bare HCurl is the space.
+        fes = ng.Periodic(base) if (geo.n_px or geo.n_py) else base
+    elif oblique and not envelope and (geo.n_px or geo.n_py):
         # quasi-periodic: u(minion=x=Px) = exp(+i kx Px) u(master=x=0). The phase
         # list is keyed per identification in idnr order, which netgen does NOT keep
         # in creation order -- _bloch_phase_list resolves + verifies the true order.
