@@ -91,3 +91,35 @@ class Design:
                 if _SYM_ORDER[s] < _SYM_ORDER[sym]:
                     sym = s
         return sym
+
+    def detect_symmetry_reduction(self) -> str:
+        """The best mirror-symmetry FEM domain reduction this design is ELIGIBLE for, WITHOUT applying
+        it: 'quarter' (c4v), 'half_x'/'half_y' (c2v), or 'none'. Purely advisory -- it never changes a
+        solve; opt in by SETTING mesh_3d.symmetry to the returned value (the FEM build then meshes a
+        half/quarter cell with symmetry walls, ~1/2 or ~1/4 the DOFs, for the SAME 0-order R/T). The
+        optical builder emits a one-time hint when an eligible reduction is available but unused.
+        Eligible = a centered, mirror-symmetric cell (device_symmetry c2v/c4v) at NORMAL incidence,
+        a single linear x/y polarization (the wall type is keyed to the E axis; 'p' is excluded), no
+        carrier-coupled (semiconductor) or prismatic-boundary-layer feature, and only rectangle/circle
+        inclusions (the Box/Cylinder OCC primitives validated for a clean symmetry-plane cut) -- the
+        reduced-mesh path's current scope. The opt-in solve additionally requires a SCALAR eps (an
+        anisotropic/gyrotropic tensor eps breaks the mirror parity and the solve raises); that is not
+        knowable from the Design alone (it depends on the n_to_eps map) so it is enforced at solve
+        time, not here. Pure inspection -- no solver/meshing."""
+        devsym = self.device_symmetry()
+        if devsym not in ("c2v", "c4v"):
+            return "none"
+        if abs(self.optical.incidence_angle_deg) > 1e-9 or abs(self.optical.azimuth_deg) > 1e-9:
+            return "none"
+        if self.optical.polarization not in ("x", "y"):
+            return "none"          # the symmetry wall type is keyed to a linear x/y E axis ('p' rejected)
+        if self.mesh_3d.semi_prism_thk_m:
+            return "none"
+        for L in self.stack.layers:
+            if self.material_role(L.background_material) == "semiconductor" or any(
+                    self.material_role(inc.material) == "semiconductor" for inc in L.inclusions):
+                return "none"
+            for inc in L.inclusions:
+                if inc.shape.kind not in ("rectangle", "circle"):
+                    return "none"
+        return "quarter" if devsym == "c4v" else "half_x"

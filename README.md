@@ -167,6 +167,15 @@ Known limitations:
   `SeparableXYLift` for a centred 4-fold (c4v) square device and an extrusion
   otherwise; it captures square symmetry but not full 3D patch-corner
   accumulation. (This replaces the old `use_symmetrization` flag.)
+- The FEM optical solve can exploit a mirror-symmetric cell to solve a HALF or
+  QUARTER lateral domain (`Mesh3DSpec.symmetry = "half_x"/"half_y"/"quarter"`),
+  with PEC/PMC symmetry walls replacing the periodic boundary -- ~1/2 or ~1/4 the
+  DOFs for the SAME 0-order R/T. It is OPT-IN (`"none"` is the default; never
+  auto-applied); `Design.detect_symmetry_reduction()` reports the best eligible
+  mode and the build emits a one-time hint when one is available but unused.
+  Scope: a centered, mirror-symmetric (c2v/c4v) cell at normal incidence with a
+  scalar eps and rectangle/circle inclusions; the carrier-coupled (semiconductor),
+  prismatic, and other-shape paths use the full periodic cell.
 - Peripheral ITO ground contacts at the unit-cell edges (`"x_lo"` / `"x_hi"`)
   over-pin the ITO potential; physically the ground pads are mm-scale away.
 - Stage 1 defaults to the equilibrium Fermi-Dirac Poisson solve (no currents);
