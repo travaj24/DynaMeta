@@ -13,6 +13,9 @@ from dynameta.optics.lumenairy_bridge.berreman_backend import (BerremanLayeredSo
                                                               design_to_berreman_layers,
                                                               make_lumenairy_berreman_solver)
 from dynameta.optics.lumenairy_bridge.berreman_design import berreman_jones, berreman_RT
+from dynameta.optics.lumenairy_bridge.bor_backend import (BorLayer, BorResult, BorStackSpec,
+                                                          bor_result_to_optical_result,
+                                                          make_lumenairy_bor_solver, solve_bor)
 from dynameta.optics.lumenairy_bridge.emt_screen import (bruggeman_eps,
                                                         homogenize_lamellar_layers,
                                                         make_lumenairy_emt_screen_solver,
@@ -39,4 +42,6 @@ __all__ = ["LumenairyStackSolver", "design_to_rcwa_stack", "make_lumenairy_rcwa_
            "design_to_berreman_layers", "make_lumenairy_berreman_solver",
            "rytov_tensor_for_layer", "homogenize_lamellar_layers",
            "make_lumenairy_emt_screen_solver", "maxwell_garnett_eps", "bruggeman_eps",
-           "berreman_RT", "berreman_jones"]
+           "berreman_RT", "berreman_jones",
+           "BorLayer", "BorResult", "BorStackSpec", "solve_bor", "bor_result_to_optical_result",
+           "make_lumenairy_bor_solver"]
