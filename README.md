@@ -153,8 +153,9 @@ modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
 PCM/LC/graphene, magneto-optic), the FDTD engine (1D/2D/3D incl GPU +
 nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), the standalone
 QD-SOA traveling-wave gain module (`dynameta.optics.soa`), and the required-core
-Lumenairy optical backends -- RCWA/PMM plus the Berreman 4x4 anisotropic-planar
-and EMT (Rytov) screen tiers (`dynameta.optics.lumenairy_bridge`). The reference
+Lumenairy optical backends -- RCWA/PMM plus the Berreman 4x4 anisotropic-planar,
+EMT (Rytov) screen, and BOR-PMM axisymmetric tiers
+(`dynameta.optics.lumenairy_bridge`). The reference
 gated-ITO modulator (the
 [validation/_reference_device.py](validation/_reference_device.py) fixture) is the
 validated end-to-end run. Forward plan:
@@ -205,6 +206,16 @@ Known limitations:
   opt-in via `OpticalSpec.linear_solver = "ams"` / `"hypre"` on a HYPRE-built
   NGSolve (falls back to `bddc_gmres`; see
   [docs/installing_hypre_windows.md](docs/installing_hypre_windows.md)).
+- The Lumenairy bridge adds a BOR-PMM *axisymmetric* (body-of-revolution) optical
+  tier (`BorStackSpec` / `BorLayer` / `solve_bor`; needs `lumenairy >= 5.16.0`) for
+  structures invariant under rotation about an axis -- concentric-ring gratings,
+  fibers, axisymmetric diffractive lenses. Unlike the Cartesian RCWA/PMM/Berreman
+  backends (which plug into the `LayeredStackSolver` seam and return a single 0-order
+  `OpticalResult`), the BOR solve returns per-INCIDENT-MODE R/T over a discrete set of
+  cylindrical modes (`BorResult`; each mode = a wave at a quantized polar angle);
+  `.fundamental_result()` exposes the near-axis mode as an `OpticalResult`. Scope:
+  axisymmetric geometry only (no Cartesian patterning), top-incidence, conventions
+  identical to the rest of the stack (exp(-i omega t), `Im(eps) > 0`).
 
 **Native 3D carriers** are validated for both the equilibrium solve and full 3D
 drift-diffusion (`validation/carriers_3d.py`, `carriers_3d_dd.py`, transport via

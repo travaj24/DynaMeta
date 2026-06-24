@@ -285,6 +285,58 @@ def test_emt_screen_converges_to_rcwa_subwavelength():
     assert abs(r_emt.R - r_rig.R) < 3e-3
 
 
+# ---- BOR-PMM (axisymmetric) spec construction guards: solver-free, run regardless of lumenairy ----
+# The BorLayer/BorStackSpec dataclasses validate at construction (no lumenairy needed); only solve_bor
+# lazily imports it. These pin the guards + the lazy-import contract for the BOR backend.
+
+def test_bor_layer_needs_exactly_one_profile():
+    from dynameta.optics.lumenairy_bridge import BorLayer
+    BorLayer(thickness_m=0.5e-6, eps=2.25 + 0j)                       # uniform: ok
+    BorLayer(thickness_m=0.5e-6, rings=(3e-6, 0.5, 2.4 + 0j, 1.4 + 0j))   # ring grating: ok
+    BorLayer(thickness_m=0.5e-6, eps_profile=lambda r: np.ones_like(r))   # radial profile: ok
+    with pytest.raises(ValueError):                                   # none given
+        BorLayer(thickness_m=0.5e-6)
+    with pytest.raises(ValueError):                                   # two given
+        BorLayer(thickness_m=0.5e-6, eps=2.25 + 0j, rings=(3e-6, 0.5, 2.4 + 0j, 1.4 + 0j))
+
+
+def test_bor_layer_thickness_and_rings_arity():
+    from dynameta.optics.lumenairy_bridge import BorLayer
+    with pytest.raises(ValueError):
+        BorLayer(thickness_m=0.0, eps=2.25 + 0j)                      # nonpositive thickness
+    with pytest.raises(ValueError):
+        BorLayer(thickness_m=-1e-6, eps=2.25 + 0j)
+    with pytest.raises(ValueError):
+        BorLayer(thickness_m=0.5e-6, rings=(3e-6, 0.5, 2.4 + 0j))     # rings must be a 4-tuple
+
+
+def test_bor_stack_spec_guards():
+    from dynameta.optics.lumenairy_bridge import BorLayer, BorStackSpec
+    good = BorLayer(thickness_m=0.5e-6, eps=2.25 + 0j)
+    BorStackSpec(layers=[good], azimuthal_order_m=0, r_max_m=40e-6)   # m=0 allowed (axisymmetric mode)
+    with pytest.raises(ValueError):
+        BorStackSpec(layers=[], azimuthal_order_m=1, r_max_m=40e-6)   # empty stack
+    with pytest.raises(ValueError):
+        BorStackSpec(layers=[good], azimuthal_order_m=-1, r_max_m=40e-6)   # negative azimuthal order
+    with pytest.raises(ValueError):
+        BorStackSpec(layers=[good], azimuthal_order_m=1, r_max_m=0.0)      # nonpositive radius
+    with pytest.raises(ValueError):
+        BorStackSpec(layers=[good], azimuthal_order_m=1, r_max_m=40e-6, n_radial=8)   # too few points
+
+
+def test_bor_backend_import_is_lumenairy_free():
+    # constructing the BOR spec/layers must NOT import lumenairy (lazy-import contract): lumenairy is
+    # only touched inside solve_bor via _require_bor
+    code = ("import sys; "
+            "from dynameta.optics.lumenairy_bridge import BorLayer, BorStackSpec; "
+            "BorStackSpec(layers=[BorLayer(thickness_m=5e-7, eps=2.25+0j)], "
+            "azimuthal_order_m=1, r_max_m=4e-5); "
+            "assert 'lumenairy' not in sys.modules, 'lumenairy leaked from BOR spec construction'; "
+            "print('ok')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+
+
 HAVE_JAX = importlib.util.find_spec("jax") is not None
 needs_jax = pytest.mark.skipif(not (HAVE_LUM and HAVE_JAX),
                                reason="lumenairy or jax not installed")
