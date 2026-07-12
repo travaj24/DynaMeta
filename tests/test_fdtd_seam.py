@@ -341,3 +341,19 @@ def test_oblique_solvers_refuse_dropped_nonlinear_terms():
     with pytest.raises(NotImplementedError, match="gain_dN_m3"):
         solve_fdtd_2d_oblique([lay], period_x_m=300e-9, angle_deg=20.0,
                               lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=16)
+
+
+def test_ring_time_extends_window_for_narrow_poles():
+    # audit C3-6: the DFT window must carry the material memory of narrow Lorentz/gain
+    # poles (a loaded-Q~600 line rang past the fixed 200*tau window: |dT0|=0.102 vs TMM,
+    # silently); passive/broad layers keep the legacy window exactly
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd.solve2d import _ring_time_s
+    passive = FDTDLayer(thickness_m=200e-9, eps_inf=2.25)
+    assert _ring_time_s([passive]) == 0.0
+    narrow = FDTDLayer(thickness_m=200e-9, eps_inf=2.25, lorentz_w0_rad_s=1.3e15,
+                       lorentz_gamma_rad_s=1e12, lorentz_delta_eps=0.002)
+    assert _ring_time_s([narrow]) == pytest.approx(18.4e-12, rel=1e-12)
+    gainy = FDTDLayer(thickness_m=200e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
+                      gain_dw_rad_s=2e12, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
+    assert _ring_time_s([passive, gainy]) == pytest.approx(18.4 / 2e12, rel=1e-12)
