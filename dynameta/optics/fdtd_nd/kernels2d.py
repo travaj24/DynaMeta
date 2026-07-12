@@ -138,7 +138,7 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             curl = curl - (PRnew - PR) / dt
             Qp = Q; Q = Qnew; PR = PRnew
         # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr
-        eps_eff = eps_inf + chi3 * Ey ** 2
+        eps_eff = eps_inf + 3.0 * chi3 * Ey ** 2       # standard chi3: P = eps0 chi3 E^3 (C3-2)
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Eynew = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eynew + Ey)
