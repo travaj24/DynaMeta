@@ -938,3 +938,22 @@ def test_langevin_exact_emit_telescopes_to_analytic_ase():
     assert float(_exact_emit_factor(0.0)) == 1.0
     assert float(_exact_emit_factor(0.5)) == pytest.approx(np.expm1(0.5) / 0.5, rel=1e-14)
     assert float(_exact_emit_factor(-0.3)) == pytest.approx(np.expm1(-0.3) / -0.3, rel=1e-14)
+
+
+def test_eh_split_excitonic_accessors_raise():
+    # audit C4-5: rho_GS/rho_ES hardcode the excitonic layout; with eh_split=True they
+    # silently returned misaligned ES occupations and a raw WL density (saturation_curve
+    # gain 59% wrong, compression depth 2.5x wrong) -- they must raise like step_slices_wdm
+    import numpy as np
+    from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
+    m = QDGainModel(QDGainParams(eh_split=True).with_detailed_balance_taus())
+    y = np.zeros(2 + 4 * m.ng)                                 # any state: guard fires first
+    with pytest.raises(NotImplementedError, match="rho_GS"):
+        m.rho_GS(y)
+    with pytest.raises(NotImplementedError, match="rho_ES"):
+        m.rho_ES(y)
+    # excitonic models are untouched: the accessors stay pure layout slices
+    m2 = QDGainModel(QDGainParams())
+    y2 = np.arange(1 + 2 * m2.ng, dtype=float)
+    assert np.array_equal(m2.rho_ES(y2), y2[1:1 + m2.ng])
+    assert np.array_equal(m2.rho_GS(y2), y2[1 + m2.ng:1 + 2 * m2.ng])
