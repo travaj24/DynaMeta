@@ -43,14 +43,29 @@ class ElectrostaticResult:
     layers: List[ElectrostaticLayer]
 
     def mean_Ez_per_layer(self) -> np.ndarray:
-        """Volume-averaged E_z [V/m] in each layer (bottom->top order). For a laterally uniform stack
-        this is the per-layer series-capacitor field; for a patterned gate it is the layer mean."""
+        """Volume-averaged SIGNED E_z [V/m] in each layer (bottom->top order). For a laterally
+        uniform stack this is the per-layer series-capacitor field; for a patterned gate it is
+        the layer mean -- NOTE it is exactly ZERO for a zero-mean (e.g. +/-V split-gate)
+        profile, so it must NOT feed breakdown/percolation models (audit C4-9): use
+        mean_absEz_per_layer / max_absEz_per_layer for stress statistics."""
         out = []
         for L in self.layers:
             dom = self.mesh.Materials(L.name)
             vol = ng.Integrate(ng.CoefficientFunction(1.0), self.mesh, definedon=dom)
             ez = ng.Integrate(self.E_cf[2], self.mesh, definedon=dom)
             out.append(float((ez / vol).real) if abs(vol) > 0 else 0.0)
+        return np.asarray(out, dtype=np.float64)
+
+    def mean_absEz_per_layer(self) -> np.ndarray:
+        """Volume-averaged |E_z| [V/m] per layer (audit C4-9): sign-robust stress statistic --
+        nonzero for split-gate / sign-changing profiles where the signed mean cancels."""
+        out = []
+        for L in self.layers:
+            dom = self.mesh.Materials(L.name)
+            vol = ng.Integrate(ng.CoefficientFunction(1.0), self.mesh, definedon=dom)
+            aez = ng.Integrate(ng.sqrt(self.E_cf[2] * ng.Conj(self.E_cf[2])), self.mesh,
+                               definedon=dom)
+            out.append(float(complex(aez / vol).real) if abs(vol) > 0 else 0.0)
         return np.asarray(out, dtype=np.float64)
 
     def E_at(self, x_m: float, y_m: float, z_m: float) -> np.ndarray:
