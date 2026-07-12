@@ -21,6 +21,22 @@ from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
 
 
 
+def _ring_time_s(layers) -> float:
+    """Material-memory ring-down time (audit C3-6): the fixed 200*tau DFT window predates
+    the Lorentz/gain ADEs -- a high-loaded-Q in-band pole rings past it, truncating the
+    rfft with O(0.1) silent R0/T0 bias (probe: |dT0| = 0.102 vs the TMM oracle for a
+    Q~600 line, no warning possible since the band mask checks excitation only). Returns
+    the (2/Gamma) ln(1/1e-4) ~ 18.4/Gamma memory of the NARROWEST active Lorentz/gain
+    pole (0.0 when no pole is active -> the legacy window, byte-identical)."""
+    t_ring = 0.0
+    for L in layers:
+        if getattr(L, "lorentz_delta_eps", 0.0) != 0.0 and getattr(L, "lorentz_gamma_rad_s", 0.0) > 0.0:
+            t_ring = max(t_ring, 18.4 / float(L.lorentz_gamma_rad_s))
+        if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0:
+            t_ring = max(t_ring, 18.4 / float(L.gain_dw_rad_s))
+    return t_ring
+
+
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
                     lor=None, chi2=None, raman=None, gain=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
@@ -172,7 +188,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
+                      RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
@@ -316,7 +339,14 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
+                      RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 

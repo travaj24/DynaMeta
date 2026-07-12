@@ -217,8 +217,11 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     substrate refractive indices = sqrt(eps).
 
     R, T (and r/t) are the SPECULAR 0-ORDER (zeroth diffraction order) only -- the
-    _cell_average demodulates and laterally averages, so by Fourier orthogonality any
-    PROPAGATING higher diffraction order integrates to exactly zero and is NOT counted.
+    _cell_average demodulates and laterally averages on a probe grid SIZED so that every
+    aliased Fourier order is evanescent at the probe planes (audit C3-1: the old fixed
+    6x6 grid aliased orders m = 0 (mod 6) into the coefficient at full weight for
+    period > 6*lambda/n cells and 6x1 supercells; propagating non-aliased orders always
+    averaged to zero).
     They are therefore the TOTAL reflectance/transmittance only for a SUB-WAVELENGTH cell
     (no propagating higher orders); for a diffracting (period > lambda/n) cell the
     diffracted power is missing from R/T and is mis-attributed to A. result.R_flux/T_flux
@@ -615,16 +618,38 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A)
 
 
-def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
+def _probe_grid_sizes(Px, Py, kx, ky, kz_med):
+    """Per-direction probe-grid sizes so the FIRST aliased Fourier order is EVANESCENT in
+    the probe medium (audit C3-1): an N-point cell-centred grid aliases orders m = 0
+    (mod N) into the reported 0-order coefficient with weight (-1)^(m/N), so N must
+    satisfy N*2pi/P > n*k0 + |k_lat| (then the aliased order decays over the >= 50 nm
+    probe standoff exactly like every in-envelope evanescent order). n*k0 is recovered
+    from the medium dispersion n^2 k0^2 = kz_med^2 + k_par^2. Sub-wavelength cells
+    (the validated envelope) keep the legacy 6x6 -- byte-identical there."""
+    nk0 = float(np.hypot(abs(complex(kz_med)), float(np.hypot(kx, ky))))
+    nx_g = max(6, int(np.floor(Px * (nk0 + abs(float(kx))) / (2.0 * np.pi))) + 1)
+    ny_g = max(6, int(np.floor(Py * (nk0 + abs(float(ky))) / (2.0 * np.pi))) + 1)
+    return nx_g, ny_g
+
+
+def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None):
     """Transverse (x,y) cell-average of (proj . field), demodulated by exp(-i(kx x+ky y)),
     at each z. `proj` is a length-3 weight vector projecting the vector field onto the
     polarization of interest (the s-pol unit vector, or (1,0,0) for tangential Ex). The
-    demod removes the transverse Bloch phase so the cell-average IS the 0-order Fourier
-    coefficient; kx=ky=0 (envelope formulation) leaves it unchanged."""
+    demod removes the transverse Bloch phase; on the N x N cell-centred grid the average
+    equals the 0-order Fourier coefficient PLUS aliases of orders m = 0 (mod N) (audit
+    C3-1: NOT exact orthogonality, as previously claimed -- a propagating substrate
+    order-6 amplitude at 30% of r0 corrupted the fit silently at the old fixed 6x6).
+    Passing kz_med (the fitted wave's medium z-wavevector) sizes the grid so every
+    aliased order is evanescent at the probe planes; None keeps the legacy 6x6."""
     # cell-centred probe grid: offset off the x=0 / y=0 periodic-boundary lines (where
     # quasi-periodic point evaluation can fail) by half a step (audit OPT-7).
-    xs = (np.arange(6) + 0.5) * (Px / 6.0)
-    ys = (np.arange(6) + 0.5) * (Py / 6.0)
+    if kz_med is not None:
+        nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med)
+    else:
+        nx_g = ny_g = 6
+    xs = (np.arange(nx_g) + 0.5) * (Px / nx_g)
+    ys = (np.arange(ny_g) + 0.5) * (Py / ny_g)
     p0, p1, p2 = proj
     out = []
     for zv in z_probes:
@@ -680,7 +705,7 @@ def _reflection(mesh, gfu, kz_s, proj, kx, ky, geo: OpticalGeometry) -> complex:
         z_lo = z_struct_top + 0.2 * (z_air_top - z_struct_top)
         z_hi = z_struct_top + 0.8 * (z_air_top - z_struct_top)
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_s)   # C3-1
     # upward (reflected) exp(+i kz_s z) + residual downward exp(-i kz_s z)
     M = np.column_stack([np.exp(+1j * kz_s * z_probes), np.exp(-1j * kz_s * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="reflection")
@@ -701,7 +726,7 @@ def _transmission(mesh, gfu, kz_sub, proj, kx, ky, geo: OpticalGeometry):
     if z_hi <= z_lo:
         return None
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_sub)  # C3-1
     # downward (transmitted) exp(-i kz_sub z) + any upward residual exp(+i kz_sub z)
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="transmission")
@@ -720,7 +745,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zhi <= zlo:
         zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
     zr = np.linspace(zlo, zhi, 7)
-    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky)   # in-plane p-pol component (phi-frame Ex)
+    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky, kz_med=kz_s)   # in-plane p-pol (C3-1)
     Mr = np.column_stack([np.exp(-1j * kz_s * zr), np.exp(+1j * kz_s * zr)])
     cr = _lstsq_2wave(Mr, Exr, where="p-pol reflection")
     a_d, a_u = complex(cr[0]), complex(cr[1])                     # incident-dir, reflected-dir E_t
@@ -733,7 +758,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zs_hi - pad <= zs_lo + pad:
         return r, R, None, None
     zt = np.linspace(zs_lo + pad, zs_hi - pad, 7)
-    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky)
+    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky, kz_med=kz_sub)  # C3-1
     Mt = np.column_stack([np.exp(-1j * kz_sub * zt), np.exp(+1j * kz_sub * zt)])
     ct = _lstsq_2wave(Mt, Ext, where="p-pol transmission")
     t = complex(ct[0]) / a_d if abs(a_d) > 1e-30 else 0j          # transmitted Ex / incident Ex
