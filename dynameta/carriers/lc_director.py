@@ -448,7 +448,7 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                          e1: float = 0.0, e3: float = 0.0, include_flexo: bool = False,
                          flexo_self_consistent: bool = False,
                          n_o: "Optional[float]" = None, n_e: "Optional[float]" = None,
-                         opt_model: str = "extra_k_radial", rtol: float = 1e-6,
+                         opt_model: str = "extra_k_radial", rtol: float = 3e-2,
                          W_anchor_J_m2: "Optional[float]" = None,
                          theta_easy_rad: "Optional[float]" = None) -> LCStaticResult:
     """Two-constant (K11 splay / K33 bend) static director BVP at one applied voltage, FIELD-AXIS theta,
@@ -457,7 +457,12 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     K_eff = K11 sin^2 + K33 cos^2 and dEps = eps_para - eps_perp, strong anchoring theta(0)=theta(d)=
     theta_b. Several initial guesses are tried; the branch consistent with the field-driven direction is
     preferred, free energy breaks ties (robust through the Freedericksz pitchfork). Reduces to the
-    1-constant elliptic-quadrature director_profile() at K11=K33 (through the pi/2 angle bridge)."""
+    1-constant elliptic-quadrature director_profile() at K11=K33 (through the pi/2 angle bridge).
+
+    rtol is the solve_bvp residual tolerance and is HONORED AS GIVEN (audit C6-4: the old code
+    silently floored it at 3e-2, so the previously-advertised 1e-6 default was never real -- the
+    knob could only loosen). The default keeps the old effective value 3e-2; pass a smaller rtol
+    for a genuinely tighter solve (costs nodes/iterations). Same contract in chiral_director_bvp."""
     from scipy.integrate import solve_bvp
     K11 = float(K11); K33 = float(K33); dEps = float(eps_para) - float(eps_perp)
     if not (K11 > 0 and K33 > 0):
@@ -560,7 +565,7 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
                              Kb * (yb[1] / d_lc) + 0.5 * W_anchor * np.sin(2.0 * (yb[0] - theta_easy))],
                             dtype=float)
 
-        sol = solve_bvp(fun, bc, u, y0, tol=max(float(rtol), 3e-2), max_nodes=max(5000, int(nz) * 80),
+        sol = solve_bvp(fun, bc, u, y0, tol=float(rtol), max_nodes=max(5000, int(nz) * 80),
                         verbose=0)
         if not sol.success:
             raise RuntimeError(str(sol.message))
@@ -691,7 +696,7 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
                                 field_model: str = "uniform", t_in: float = 0.0, t_out: float = 0.0,
                                 eps_in: float = 7.5, eps_out: float = 7.5,
                                 n_o: "Optional[float]" = None, n_e: "Optional[float]" = None,
-                                opt_model: str = "extra_k_radial", rtol: float = 1e-6) -> LCChiralResult:
+                                opt_model: str = "extra_k_radial", rtol: float = 3e-2) -> LCChiralResult:
     """Three-constant (K11 splay / K22 TWIST / K33 bend) static director BVP for a CHIRAL / TWISTED-nematic
     planar cell, solving the COUPLED tilt theta(z) and azimuthal twist phi(z). Field-axis theta; director
     n = (sin th cos ph, sin th sin ph, cos th). The Frank free-energy density for z-only variation is
@@ -820,7 +825,7 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
         y0 = np.vstack((th_guess, np.gradient(th_guess, u), ph_seed, np.gradient(ph_seed, u)))
         with warnings.catch_warnings(), np.errstate(all="ignore"):   # silence failed-seed Jacobian noise
             warnings.simplefilter("ignore")
-            sol = solve_bvp(_make_fun(sgn_V * abs(Vk)), bc, u, y0, tol=max(float(rtol), 3e-2),
+            sol = solve_bvp(_make_fun(sgn_V * abs(Vk)), bc, u, y0, tol=float(rtol),
                             max_nodes=max(6000, int(nz) * 100), verbose=0)
         if not sol.success:
             raise RuntimeError(str(sol.message))
