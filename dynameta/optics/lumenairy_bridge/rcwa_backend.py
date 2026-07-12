@@ -194,8 +194,10 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
             # gridded EpsField (carrier/effect-graded; axes in nm solver units like the
-            # TMM extractor) -> native-z slabs; eps_cell slabs are (Sx, Sy) already
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # TMM extractor) -> slice_eps_field returns slabs in ASCENDING z
+            # (substrate-side first); this stack is superstrate-first, so reverse
+            # (audit C5-1: unreversed slabs vertically flip the graded profile)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 if slab.eps is not None:
                     stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 elif slab.eps_cell is not None:
