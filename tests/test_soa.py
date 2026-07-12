@@ -957,3 +957,22 @@ def test_eh_split_excitonic_accessors_raise():
     y2 = np.arange(1 + 2 * m2.ng, dtype=float)
     assert np.array_equal(m2.rho_ES(y2), y2[1:1 + m2.ng])
     assert np.array_equal(m2.rho_GS(y2), y2[1 + m2.ng:1 + 2 * m2.ng])
+
+
+def test_line_filter_keeps_es_band_gain():
+    # audit C4-6: with an active ES band, the line-filter branch subtracted the FULL
+    # GS+ES flat gain while its polarization poles re-added only the GS band -- the
+    # entire ES contribution was silently cancelled (probe: ON gain -0.004 dB vs OFF
+    # 3.79 dB). The ES band must ride the flat multiplicative gain: ON == OFF at the
+    # carrier (the dispersive correction is zero there by construction).
+    m = QDGainModel(QDGainParams(n_groups=21, sigma_pk_ES_m2=5e-19).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    n = 800
+    on = soa.amplify_coherent(np.full(n, np.sqrt(1e-3)), drive=40e-3, alpha_lef=0.0,
+                              line_filter=True)["P_out"][-1]
+    off = soa.amplify_coherent(np.full(n, np.sqrt(1e-3)), drive=40e-3, alpha_lef=0.0,
+                               line_filter=False)["P_out"][-1]
+    g_on = 10.0 * np.log10(on / 1e-3)
+    g_off = 10.0 * np.log10(off / 1e-3)
+    assert g_off > 1.0                                        # the ES-active device has real gain
+    assert abs(g_on - g_off) < 0.05 * abs(g_off), (g_on, g_off)
