@@ -91,6 +91,39 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
     return eps_inf, wp, gamma
 
 
+def _guard_optical_spec(design, *, structured: bool) -> None:
+    """audit C5-7: every FDTD seam entry point silently IGNORED design.optical -- a Design
+    with theta=30 deg (or azimuth, or bottom incidence) got the normal-incidence top-side
+    answer with no warning (probe: R off 10% s-pol / 35% p-pol at 30 deg) while every
+    sibling backend (FEM, TMM, lumenairy bridges) honors-or-raises the same fields. Raise
+    for what this seam cannot represent, mirroring the sibling guard pattern. At NORMAL
+    incidence polarization is provably irrelevant for a laterally-UNIFORM stack (any pol
+    accepted); a STRUCTURED cell is solved with a y-polarized source, so only 'y' is
+    accepted there."""
+    opt = getattr(design, "optical", None)
+    if opt is None:
+        return
+    theta = float(getattr(opt, "incidence_angle_deg", 0.0) or 0.0)
+    phi = float(getattr(opt, "azimuth_deg", 0.0) or 0.0)
+    side = getattr(opt, "incidence_side", "top") or "top"
+    pol = getattr(opt, "polarization", "y") or "y"
+    if abs(theta) > 1e-9 or abs(phi) > 1e-9:
+        raise NotImplementedError(
+            "FDTD seam: oblique/conical incidence (theta={:g} deg, azimuth={:g} deg) is not "
+            "wired into the pipeline seam -- the normal-incidence answer would be silently "
+            "wrong (audit C5-7); use solve_fdtd_2d_oblique directly, or the FEM/TMM solver."
+            .format(theta, phi))
+    if side != "top":
+        raise NotImplementedError(
+            "FDTD seam: incidence_side={!r} is not supported (TOP incidence only) -- swap the "
+            "superstrate/substrate in the Design instead (audit C5-7).".format(side))
+    if structured and pol != "y":
+        raise NotImplementedError(
+            "FDTD seam: a structured cell is solved with a y-polarized source; "
+            "polarization={!r} would silently get the 'y' answer (audit C5-7) -- use the "
+            "FEM/RCWA solver for other polarizations.".format(pol))
+
+
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
     """[FDTDLayer] for the through-stack in SUPERSTRATE-FIRST (incidence) order -- the order solve_fdtd_*
     places layers (the Stack lists bottom->top, so reversed). A uniform layer uses the bridge's
@@ -373,6 +406,7 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
                 "FDTD seam supports LOSSLESS semi-infinite end media; got n_super={:.4g}, n_sub={:.4g} "
                 "(absorbing incidence/exit medium -> use the FEM/TMM solver).".format(ns, nb))
         structured = design_has_inclusions(design)
+        _guard_optical_spec(design, structured=structured)   # audit C5-7
         if structured and dim != 3:
             raise NotImplementedError(
                 "a laterally-structured cell (layer inclusions) needs dim=3; got dim={}.".format(dim))
@@ -459,6 +493,7 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
               courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend,
               n_super=ns.real, n_sub=nb.real)
     structured = design_has_inclusions(design)
+    _guard_optical_spec(design, structured=structured)       # audit C5-7
     if structured and dim != 3:
         raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
     if structured and (abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL):
