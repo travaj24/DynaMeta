@@ -940,10 +940,25 @@ class QDGainModel:
                                                                  float(occ.max())))
         return y
 
+    def _guard_excitonic(self, who: str) -> None:
+        # audit C4-5: these accessors hardcode the EXCITONIC state layout
+        # y = [N_w, rho_ES, rho_GS]; with eh_split=True the layout is
+        # [N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS], so the same slices silently
+        # returned misaligned ES-block occupations and even a raw WL density (~1e24) --
+        # saturation_curve gain 59% wrong, ase_self_consistent corrupted, no error
+        # (step_slices_wdm already raises for eh; mirror it).
+        if getattr(self, "eh", False):
+            raise NotImplementedError(
+                "QDGainModel.{}: the excitonic-layout accessor is undefined for an "
+                "eh_split=True model (state is [N_w_e, N_w_h, f_c/f_v per band]); use the "
+                "f_c_*/f_v_* accessors and the eh-aware entry points (audit C4-5).".format(who))
+
     def rho_GS(self, y) -> np.ndarray:
+        self._guard_excitonic("rho_GS")
         return np.asarray(y)[1 + self.ng:1 + 2 * self.ng]
 
     def rho_ES(self, y) -> np.ndarray:
+        self._guard_excitonic("rho_ES")
         return np.asarray(y)[1:1 + self.ng]
 
     # ---- e/h-split accessors (state y = [N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS]) ----
