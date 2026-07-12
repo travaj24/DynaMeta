@@ -10,12 +10,23 @@ N = np.array([1e26, 4e26, 1e27, 2e27])
 LAM = 1500e-9
 
 
-def _reference_ito_dos_mass(n, m_low=0.27 * M_E, alpha=0.5):
-    """Independent reference: the exact bulk Kane DOS-mass closure (the ITO reference)."""
+def _dispersion_optical_mass(n, m0=0.27 * M_E, alpha_eV=0.5):
+    """NON-CIRCULAR reference (audit C7b-1: the old reference re-typed the class's own --
+    halved -- formula): m_opt = hbar k_F / v_F evaluated NUMERICALLY from the Kane
+    dispersion. E(k) solves E (1 + alpha E) = hbar^2 k^2/(2 m0) (positive quadratic
+    root); v = dE/dk by central difference at k_F. No closed-form mass expression is
+    reused, so a convention error in the class cannot cancel here."""
     n = np.maximum(np.asarray(n, float), 1e10)
     kF = (3.0 * np.pi ** 2 * n) ** (1.0 / 3.0)
-    E_F = HBAR ** 2 * kF ** 2 / (2.0 * m_low)
-    return m_low * np.sqrt(1.0 + 2.0 * alpha * E_F / Q_E)
+    a = alpha_eV / Q_E                                          # 1/J
+
+    def E_of_k(k):
+        g = HBAR ** 2 * k ** 2 / (2.0 * m0)
+        return (-1.0 + np.sqrt(1.0 + 4.0 * a * g)) / (2.0 * a)
+
+    dk = 1e-6 * kF
+    v = (E_of_k(kF + dk) - E_of_k(kF - dk)) / (2.0 * dk) / HBAR
+    return HBAR * kF / v
 
 
 def test_kane_alpha_zero_is_constant():
@@ -23,9 +34,22 @@ def test_kane_alpha_zero_is_constant():
     assert np.allclose(m(N), 0.225 * M_E, rtol=0, atol=0)        # exactly m0
 
 
-def test_kane_matches_reference():
-    m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5, exponent=0.5)
-    assert np.allclose(m(N), _reference_ito_dos_mass(N), rtol=1e-12)
+def test_kane_matches_dispersion_reference():
+    # exact Kane optical mass vs the numeric hbar k_F / (dE/dk) of the dispersion --
+    # the pre-audit halved closure misses this by ~2x in the enhancement (fails hard)
+    m = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
+    assert np.allclose(m(N), _dispersion_optical_mass(N), rtol=1e-9)
+
+
+def test_kane_legacy_equivalence_and_guard():
+    # back-compat contract: legacy closure with alpha_legacy = 2*alpha_Kane equals the
+    # exact default with alpha_Kane (the quadratic-inversion identity); exponent is a
+    # legacy-only knob
+    m_new = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
+    m_old = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=1.0, legacy=True)
+    assert np.allclose(m_new(N), m_old(N), rtol=1e-14)
+    with pytest.raises(ValueError):
+        KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5, exponent=1.0)
 
 
 def test_kane_monotone_and_wp2_sublinear():
