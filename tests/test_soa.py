@@ -914,3 +914,27 @@ def test_detector_spont_spont_matches_olsson():
     # single-pol: exactly half the two-pol variance
     v1 = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=1)
     assert v1["spont_spont"] == pytest.approx(0.5 * olsson, rel=1e-12)
+
+
+def test_langevin_exact_emit_telescopes_to_analytic_ase():
+    # audit C4-4: with the exact-emit variance factor expm1(a dz)/(a dz), the marcher's
+    # expected accumulated ASE (per-slice variance amplified by the downstream slices)
+    # telescopes EXACTLY to n_sp h nu (G-1) for constant gain -- the bare O(dz) source
+    # (factor 1) carries a lnG/(2 nz) deficit (0.731 of analytic at lnG=3, nz=5).
+    import numpy as np
+    from dynameta.optics.soa.traveling_wave import _exact_emit_factor
+
+    def accumulated_over_analytic(lnG, nz, exact):
+        a_dz = lnG / nz                                       # net power exponent per slice
+        emit = float(_exact_emit_factor(a_dz)) if exact else 1.0
+        # sum_k var*emit*e^{a dz (nz-1-k)} / [ (G-1)/a * a ] with var = a dz (n_sp-normalized)
+        acc = sum(a_dz * emit * np.exp(a_dz * (nz - 1 - k)) for k in range(nz))
+        return acc / (np.exp(lnG) - 1.0)
+    for lnG, nz in ((3.0, 5), (3.0, 80), (6.9, 40)):
+        assert abs(accumulated_over_analytic(lnG, nz, True) - 1.0) < 1e-12, (lnG, nz)
+    # and the pre-fix law is reproduced by the same algebra (regression anchor)
+    assert abs(accumulated_over_analytic(3.0, 5, False) - 0.731) < 5e-3
+    # factor limits: ->1 smoothly at a=0; matches expm1(x)/x
+    assert float(_exact_emit_factor(0.0)) == 1.0
+    assert float(_exact_emit_factor(0.5)) == pytest.approx(np.expm1(0.5) / 0.5, rel=1e-14)
+    assert float(_exact_emit_factor(-0.3)) == pytest.approx(np.expm1(-0.3) / -0.3, rel=1e-14)

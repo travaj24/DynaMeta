@@ -40,6 +40,18 @@ __all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression", 
            "agrawal_olsson_output"]
 
 
+def _exact_emit_factor(x):
+    """Exact-emit variance factor (expm1(x)/x, ->1 as x->0) for Langevin noise born inside a
+    slice of net power-gain exponent x = a_net*dz (audit C4-4): injecting the bare O(dz)
+    source AFTER the slice amplification accumulates to n_sp h nu (G-1) * [a dz/(e^{a dz}-1)]
+    -- a systematic ~lnG/(2 nz) ASE deficit (4.3% at 30 dB gain, nz=80). Scaling the
+    per-slice variance by this factor makes the geometric slice sum telescope EXACTLY to
+    n_sp h nu (G-1), mirroring ase_output_psd's exact per-slice emit."""
+    x = np.asarray(x, dtype=np.float64)
+    safe = np.where(np.abs(x) < 1e-9, 1.0, x)
+    return np.where(np.abs(x) < 1e-9, 1.0 + 0.5 * x, np.expm1(safe) / safe)
+
+
 @dataclass
 class NonlinearLoss:
     """Intensity- and carrier-DEPENDENT internal loss beyond the fixed alpha_i: two-photon
@@ -495,11 +507,12 @@ class TravelingWaveSOA:
         nl = self._nl_setup(nl_loss)                          # TPA + dynamic FCA (None -> byte-id)
         lf = self._line_filter_init(nu) if line_filter else None
         # Langevin spontaneous-emission noise (opt-in). Each slice each step adds a complex Gaussian
-        # field increment of variance Gamma g_sp(z) h nu v_g (real + imag each half) -- the
-        # fluctuation-dissipation source whose downstream-amplified accumulation reproduces the
-        # analytic ASE PSD n_sp h nu (G-1) EXACTLY (the geometric slice sum cancels to that), and
-        # whose phase diffusion gives the Henry (1 + alpha^2) linewidth. Reproducible via seed; OFF
-        # (default) makes no RNG calls -> the deterministic engine is byte-identical.
+        # field increment of variance Gamma g_sp(z) h nu v_g * _exact_emit_factor(a_net dz)
+        # (real + imag each half) -- the fluctuation-dissipation source whose downstream-amplified
+        # accumulation telescopes EXACTLY to the analytic ASE PSD n_sp h nu (G-1) (audit C4-4:
+        # the bare O(dz) source, injected after the slice gain, carried a ~lnG/(2 nz) deficit),
+        # and whose phase diffusion gives the Henry (1 + alpha^2) linewidth. Reproducible via
+        # seed; OFF (default) makes no RNG calls -> the deterministic engine is byte-identical.
         lang = None
         if langevin:
             lang = {"rng": np.random.default_rng(seed),
@@ -525,6 +538,7 @@ class TravelingWaveSOA:
             a_nl = 0.0 if nl is None else self._nl_alpha(nl, state, np.abs(Anode[:-1]) ** 2)  # TPA+FCA
             if lf is None:
                 g = self._uf_suppress(uf, self.model.gain_per_m_slices(state, nu))
+                g_used = g                                     # per-slice net gain for the C4-4 emit factor
                 amp = np.exp(0.5 * (gam * g * (1.0 - 1j * a_eff) - self.alpha_i - a_nl) * self.dz)
                 new[1:] = Anode[:-1] * amp
             else:
@@ -535,6 +549,7 @@ class TravelingWaveSOA:
                 sum_p = np.sum(avg_p, axis=1)                       # (nz,); CW: 2 Gamma_field(nu_s+f) A_ref
                 g_un = self.model.gain_per_m_slices(state, nu)      # carrier real gain (no division)
                 g_flat = self._uf_suppress(uf, g_un)
+                g_used = g_flat                                # per-slice net gain for the C4-4 emit factor
                 amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * a_eff) - self.alpha_i - a_nl) * self.dz)
                 # flat carrier gain (multiplicative, == OFF amp) + ADDITIVE dispersive correction:
                 # the polarization sum_p minus its flat-gain equivalent g_un*A_ref is the resonant
@@ -545,7 +560,8 @@ class TravelingWaveSOA:
                 lf["pol"] = lf["E"] * lf["pol"] + src * lf["coef"]
             if lang is not None:                               # Langevin spontaneous-emission source
                 gsp = self.model.emission_gain_per_m_slices(state, nu)   # (nz,) >= 0
-                sig = np.sqrt(lang["npref"] * gsp)             # std of real (= imag) part per slice
+                emit = _exact_emit_factor((gam * g_used - self.alpha_i - a_nl) * self.dz)
+                sig = np.sqrt(lang["npref"] * gsp * emit)      # std of real (= imag) part per slice (C4-4)
                 new[1:] = new[1:] + sig * (lang["rng"].standard_normal(self.nz)
                                            + 1j * lang["rng"].standard_normal(self.nz))
             P_mid = 0.5 * (np.abs(Anode[:-1]) ** 2 + np.abs(Anode[1:]) ** 2)
@@ -799,7 +815,8 @@ class TravelingWaveSOA:
             nB[self.nz] = r2 * ph * F[self.nz]                 # facet 2: reflected forward
             if lang is not None:                               # spontaneous source into both modes
                 gsp = self.model.emission_gain_per_m_slices(state, nu)
-                sg = np.sqrt(lang["npref"] * gsp)
+                emit = _exact_emit_factor((gam * g - self.alpha_i) * self.dz)
+                sg = np.sqrt(lang["npref"] * gsp * emit)       # exact-emit variance (audit C4-4)
                 rng = lang["rng"]
                 nF[1:] = nF[1:] + sg * (rng.standard_normal(self.nz) + 1j * rng.standard_normal(self.nz))
                 nB[:-1] = nB[:-1] + sg * (rng.standard_normal(self.nz) + 1j * rng.standard_normal(self.nz))
