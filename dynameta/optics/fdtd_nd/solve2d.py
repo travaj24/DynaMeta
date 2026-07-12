@@ -238,9 +238,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # COMPLEX 0-order coeffs. np.fft.rfft yields exp(+i w t) phasors, but the library convention is
         # exp(-i w t), so conjugate to get the physical complex amplitudes; then de-embed the probe<->face
         # propagation phase. The superstrate phase velocity is c/n_super, so r0c (referenced to the front
-        # face z=pad, probe at k_pL) carries n_super in k; t0c keeps the structure traversal phase.
+        # face z=pad, probe at k_pL) carries n_super in k. t0c (audit C3-4): the incident reference
+        # travels n_super the WHOLE way to the right probe while the transmitted leg is n_sub past the
+        # back face, so the interface-referenced t carries n_sub*z_struct PLUS the (n_super-n_sub)
+        # mismatch over the face->probe distance D = k_pR*dz - pad (the old bare exp(1j*k0*z_struct)
+        # was vacuum-only: ~100 deg phase error on glass, frequency-dependent; |t| untouched).
         r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
-        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
+                                                           + (n_super - n_sub) * (k_pR * dz - pad)))
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
     P_inc = _flux(eyL_i, hxL_i)
     P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i)
