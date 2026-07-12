@@ -123,3 +123,26 @@ def test_kane_mass_sommerfeld_coefficient_vs_exact_fd():
         # corrected coefficient tracks the exact shift to a few % (Sommerfeld O(x^4)
         # truncation); the pre-fix parabolic coefficient missed by 18-25% -> 5x margin
         assert abs(dm_code / dm_ex - 1.0) < 0.05, (Te, dm_code / dm_ex)
+
+
+def test_transient_rejects_silent_callable_substitution():
+    # audit C5-10: a calibrated DrudeOptical (callable m_opt/gamma) used to be silently
+    # replaced by M_E / 1e14 rad/s -- a different material, violating the off-switch
+    import numpy as np
+    import pytest
+    from dynameta.carriers.carrier_heating import TwoTempParams, carrier_heating_transient
+    from dynameta.constants import M_E
+    from dynameta.materials import DrudeOptical, KaneOpticalMass, MatthiessenGamma
+    ttm = TwoTempParams(C_e=3.0e4, C_l=2.5e6, G_e_l=3.0e16)
+    t = np.linspace(0.0, 1e-12, 8)
+    I = lambda tt: 0.0
+    d_mass = DrudeOptical(eps_inf=3.9, m_opt_kg=KaneOpticalMass(m0_kg=0.3 * M_E, alpha_eV=0.5),
+                          gamma_rad_s=1.6e14)
+    with pytest.raises(ValueError, match="m0_kg"):
+        carrier_heating_transient(t, I, 1.5e-6, drude0=d_mass, ttm_params=ttm,
+                                  n_m3=6e26, alpha_per_eV=0.5)
+    d_gam = DrudeOptical(eps_inf=3.9, m_opt_kg=0.3 * M_E,
+                         gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.6e14))
+    with pytest.raises(ValueError, match="gamma_rad_s"):
+        carrier_heating_transient(t, I, 1.5e-6, drude0=d_gam, ttm_params=ttm,
+                                  n_m3=6e26, alpha_per_eV=0.5, m0_kg=0.3 * M_E)
