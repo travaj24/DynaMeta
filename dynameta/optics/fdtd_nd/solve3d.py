@@ -202,9 +202,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         T0 = np.abs(mTrans / mR_inc) ** 2 * (n_sub / n_super)   # Snell power-flux ratio (incident in super)
         # COMPLEX co-pol 0-order coeffs: conjugate (rfft is exp(+iwt); convention is exp(-iwt)), then
         # de-embed the propagation phase (superstrate phase velocity c/n_super): r0c to the front face
-        # z=pad (probe k_pL); t0c across the cell (the common probe phase cancels in t).
+        # z=pad (probe k_pL). t0c (audit C3-4): interface-referenced t carries n_sub*z_struct plus the
+        # (n_super-n_sub) mismatch over the face->probe distance (the incident reference travels
+        # n_super all the way); the old bare exp(1j*k0*z_struct) was vacuum-only. Byte-identical at
+        # n_super=n_sub=1.
         r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
-        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
+                                                           + (n_super - n_sub) * (k_pR * dz - pad)))
     # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
     P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
     P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i)
