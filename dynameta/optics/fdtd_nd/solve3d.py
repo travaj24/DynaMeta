@@ -317,7 +317,16 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
         T0 = np.abs(trans / inc_R) ** 2
     sin_t = np.divide(k_par * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))
     theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
-    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit C3-5 (mirrors solve_fdtd_2d_oblique): trust only sin_t < 0.95 -- the grazing
+    # CPML echo corrupts R0/T0 beyond ~72 deg; warn on excluded excited points.
+    _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    band = _excited & (sin_t < 0.95)
+    if np.any(_excited & (sin_t >= 0.95)):
+        import warnings
+        warnings.warn(
+            "solve_fdtd_3d_oblique: excited in-band points at theta(f) >= 71.8 deg were "
+            "EXCLUDED from the trusted band (grazing CPML echo; audit C3-5).",
+            RuntimeWarning, stacklevel=2)
     return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
 
 

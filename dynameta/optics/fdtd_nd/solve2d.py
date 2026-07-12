@@ -379,7 +379,23 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
         T0 = np.abs(trans / inc_R) ** 2
     sin_t = np.divide(kx * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))   # sin theta(f) = k_par c / w
     theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
-    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit C3-5: the old sin_t < 0.999 mask trusted points up to theta ~ 87 deg, where
+    # the z-CPML's grazing round-trip echo reaches 0.1-0.5 FIELD (the absorber sees the
+    # z-wavevector shrink as cos theta): the validation geometry re-run at 76 deg carried
+    # band=True points with |R0 - TMM| = 0.39 and R0+T0-1 up to +0.38. Trust only
+    # sin_t < 0.95 (theta < ~72 deg -- the measured error onset for the shipped npml=12);
+    # warn when the mask removes otherwise-excited in-band points so the truncation is
+    # visible rather than silent.
+    _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    band = _excited & (sin_t < 0.95)
+    _cut = _excited & (sin_t >= 0.95)
+    if np.any(_cut):
+        import warnings
+        warnings.warn(
+            "solve_fdtd_2d_oblique: {} excited in-band points at theta(f) >= 71.8 deg were "
+            "EXCLUDED from the trusted band -- the grazing-incidence CPML echo corrupts R0/T0 "
+            "there (audit C3-5); narrow the band, lower angle_deg, or strengthen npml."
+            .format(int(np.sum(_cut))), RuntimeWarning, stacklevel=2)
     return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
 
 
