@@ -14,6 +14,7 @@ from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd.backends import _resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import _cpml_z
+from dynameta.optics.fdtd_nd.solve2d import _ring_time_s
 from dynameta.optics.fdtd_nd.kernels3d import _run_3d, _run_3d_mo, _run_3d_oblique
 from dynameta.optics.fdtd_nd.kernels3d_numba import _run_3d_oblique_numba, _te3d_numba
 from dynameta.optics.fdtd_nd.kernels3d_jax import _run_3d_jax, _run_3d_oblique_jax
@@ -147,7 +148,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
@@ -272,7 +279,13 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
     cpml = _cpml_z(nz, dz, dt, npml)
@@ -400,7 +413,13 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
     cpml = _cpml_z(nz, dz, dt, npml)
