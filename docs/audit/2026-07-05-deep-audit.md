@@ -1190,11 +1190,14 @@ validations pass locally after each commit.
 **ALL 3 P1 AND ALL 23 CONFIRMED P2 FINDINGS ARE FIXED** (plus both §7.1 regrades and
 the C6-class contract fixes), each with a discrimination-proven gate.
 
-**PENDING (hardening/hygiene tranche — no open confirmed P2s remain):**
-- Optics extraction hardening (P3-graded consequences at current defaults, fixes
-  recommended): C3-1 adaptive FEM probe grid, C3-5 CPML grazing band mask,
-  C3-6 material-memory ring-down window.
-- C5-4 per_region_absorption keying unification (TMM re-key to design layer names).
+- C3-1 adaptive FEM probe grid (_probe_grid_sizes per medium; sub-wavelength cells
+  byte-identical; alias-weight + sizing gates) and C3-6 material-memory run window
+  (_ring_time_s at all five FDTD front-ends, warning when it dominates) — 9b59daa.
+- C3-5 oblique band mask trusts sin_t < 0.95 with an exclusion warning (2D + 3D).
+- C5-4 pipeline-seam TMM per_region_absorption re-keyed to design layer names
+  (graded slabs sum into their layer; slab_<i> stays for direct LayeredStack use).
+
+**PENDING (hygiene batches only — every targeted finding above is fixed):**
 - The §7.3 tautology-sweep batch (reliability_tddb GATE B rebuild + the classified
   self-referential gates), stale-docs batch (§6.3), P3 hygiene batch, and the §6.2
   performance items (cache autosave batching first — mind the documented naive-append
