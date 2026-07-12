@@ -161,3 +161,49 @@ def test_max_contrast_all_nan_comparison_raises():
     # (c) single bias (no comparison row) -> 0.0, not an error
     sr3 = SweepResults.from_rows([SweepRow("off", 1500.0, _r(0.2))])
     assert sr3.max_contrast("R") == 0.0
+
+
+def test_cache_material_retune_and_solver_identity_miss(tmp_path):
+    # audit C5-3/C5-6: (a) retuning a material's optical constants under an UNCHANGED
+    # registry name must MISS (backends re-derive eps from design.materials at solve time;
+    # the name-only key served stale R -- probe: HIT returned R=0.179 vs truth 0.059);
+    # (b) a DIFFERENT inner solver over the same path with the default tag='' must MISS
+    # (FEM specular vs bridge order-summed numbers must not be served across backends).
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    from dynameta.cache import OpticalSolverCache
+    from dynameta.materials import ConstantOptical, Material
+
+    def mk_inner(val):
+        def inner(design, geo, eps, lam, ns, nb):
+            return OpticalResult(r=complex(val, 0), R=val, phase_deg=0.0, solve_time_s=0.1)
+        return inner
+
+    def _design_with_m(eps_m):
+        from dynameta.geometry import Design, Layer, Stack, UnitCell
+        from dynameta.materials import MaterialRegistry
+        reg = MaterialRegistry()
+        reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+        reg.add(Material("m", ConstantOptical(complex(eps_m))))
+        stack = Stack(layers=[Layer("s", 100e-9, "m", inclusions=[])],
+                      superstrate_material="air", substrate_material="air")
+        return Design(name="c", unit_cell=UnitCell.square(220e-9), stack=stack,
+                      electrodes=[], materials=reg)
+
+    p = str(tmp_path / ("cache2" + _EXT[_FORMATS[0]]))
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c1 = OpticalSolverCache(mk_inner(0.1), p)
+    c1(_design_with_m(4.0), None, eps, 1.4e-6, 1.0, 1.0)
+    assert c1.stats()["misses"] == 1
+    # (a) an identical design whose 'm' material is RETUNED under the same name -> MISS
+    # (the old name-only fingerprint made this a stale HIT)
+    c1(_design_with_m(9.0), None, eps, 1.4e-6, 1.0, 1.0)
+    assert c1.stats()["misses"] == 2, "material retune under an unchanged name must MISS"
+    # (b) same design + eps + wavelength through a DIFFERENTLY-NAMED solver -> MISS
+    def other_backend(design, geo, eps_, lam, ns, nb):
+        return OpticalResult(r=complex(0.9, 0), R=0.9, phase_deg=0.0, solve_time_s=0.1)
+    c2 = OpticalSolverCache(other_backend, p, autosave=False)
+    d2 = _design()
+    r_other = c2(d2, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c2.stats()["misses"] == 1 and r_other.R == pytest.approx(0.9), \
+        "a different backend over the same cache path must not be served another's result"
