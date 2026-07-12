@@ -976,3 +976,30 @@ def test_line_filter_keeps_es_band_gain():
     g_off = 10.0 * np.log10(off / 1e-3)
     assert g_off > 1.0                                        # the ES-active device has real gain
     assert abs(g_on - g_off) < 0.05 * abs(g_off), (g_on, g_off)
+
+
+def test_dualpol_tm_depletes_at_its_own_frequency():
+    # audit C4-7: with tm_peak_shift != 0 the TM channel amplified at nu_tm but depleted
+    # carriers at the TE frequency -- TM gain compression was largely lost (97% missed in
+    # the audit probe). Oracle: a TM-only drive through the dualpol marcher must show the
+    # SAME saturated gain as the single-pol marcher run AT nu_tm (they now share the
+    # per-channel-lineshape carrier step).
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 2e-3, 80, nu_s_Hz=m.p.nu0_Hz)
+    shift = m.p.fwhm_inhom_Hz
+    nu_tm = m.p.nu0_Hz + shift
+    n = 1200
+    A = np.sqrt(50e-3) + 0j                                   # deep saturation
+    dual = soa.amplify_coherent_dualpol(np.full(n, 1e-8 + 0j), np.full(n, A), drive=160e-3,
+                                        alpha_lef=0.0, pdg_ratio=1.0, tm_peak_shift_Hz=shift)
+    g_dual = 10.0 * np.log10(dual["P_tm_out"][-1] / abs(A) ** 2)
+    single = soa.amplify_coherent(np.full(n, A), drive=160e-3, alpha_lef=0.0,
+                                  nu_s_Hz=nu_tm, line_filter=False)
+    g_single = 10.0 * np.log10(single["P_out"][-1] / abs(A) ** 2)
+    assert abs(g_dual - g_single) < 0.15, (g_dual, g_single)  # pre-fix: ~0.35 dB apart
+    # unshifted dualpol stays byte-compatible with the lumped single-frequency step
+    dual0 = soa.amplify_coherent_dualpol(np.full(n, 1e-8 + 0j), np.full(n, A), drive=160e-3,
+                                         alpha_lef=0.0, pdg_ratio=1.0, tm_peak_shift_Hz=0.0)
+    g0 = 10.0 * np.log10(dual0["P_tm_out"][-1] / abs(A) ** 2)
+    s0 = soa.amplify_coherent(np.full(n, A), drive=160e-3, alpha_lef=0.0, line_filter=False)
+    assert abs(g0 - 10.0 * np.log10(s0["P_out"][-1] / abs(A) ** 2)) < 1e-9

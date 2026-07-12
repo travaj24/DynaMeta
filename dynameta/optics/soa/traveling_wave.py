@@ -691,10 +691,22 @@ class TravelingWaveSOA:
             ntm[0] = tm_in[n]
             ntm[1:] = tm[:-1] * amp_tm
             # modal-weighted total power saturates the shared reservoir (TM contributes r x its power)
-            P_mid = 0.5 * ((np.abs(te[:-1]) ** 2 + np.abs(te[1:]) ** 2)
-                           + r * (np.abs(tm[:-1]) ** 2 + np.abs(tm[1:]) ** 2))
+            P_te_mid = 0.5 * (np.abs(te[:-1]) ** 2 + np.abs(te[1:]) ** 2)
+            P_tm_mid = 0.5 * r * (np.abs(tm[:-1]) ** 2 + np.abs(tm[1:]) ** 2)
+            P_mid = P_te_mid + P_tm_mid
             self._uf_relax(uf, P_mid, nu)
-            state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            if tm_peak_shift_Hz == 0.0:
+                state = self.model.step_slices(state, P_mid, self.dt, nu, drive)
+            else:
+                # audit C4-7: with a shifted TM band the TM field amplifies at nu_tm but
+                # used to DEPLETE carriers at the TE frequency nu -- wrong groups by
+                # L(nu-nu_j)/L(nu_tm-nu_j) and total depletion mis-scaled by ~g(nu)/g(nu_tm),
+                # so TM gain compression was largely lost (probe: 97% of the compression
+                # missed, photon number not conserved). Deplete each polarization at ITS
+                # OWN frequency via the WDM per-channel-lineshape step (which raises for
+                # eh_split, inheriting the correct guard).
+                state = self.model.step_slices_wdm(state, [P_te_mid, P_tm_mid],
+                                                   [nu, nu_tm], self.dt, drive)
             te, tm = nte, ntm
             te_out[n] = te[-1]
             tm_out[n] = tm[-1]
