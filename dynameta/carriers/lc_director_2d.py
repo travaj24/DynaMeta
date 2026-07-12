@@ -173,6 +173,8 @@ def director_profile_2d(*, K: float, eps_para: float, eps_perp: float,
     ix2 = 1.0 / (dx * dx); iz2 = 1.0 / (dz * dz); S = 2.0 * (ix2 + iz2)
     cD = EPS0 * dEps
     res = float("inf"); it = 0
+    err_est = float("inf")
+    _res_hist = []
     for it in range(1, int(max_iter) + 1):
         dmax = 0.0
         for j in range(1, nz - 1):
@@ -191,7 +193,20 @@ def director_profile_2d(*, K: float, eps_para: float, eps_perp: float,
                 dmax = max(dmax, abs(t_upd - t))
                 th[i, j] = t_upd
         res = dmax
-        if res < tol:
+        # audit C6-1: the per-sweep UPDATE size under-states the true error of a
+        # Gauss-Seidel iterate by 1/(1-rho) (rho = the iteration's convergence factor:
+        # measured amplification x200 at nz=41 up to x4340 at nz=161), so breaking --
+        # and certifying success -- on `res` alone masked errors up to ~1.5 deg on fine
+        # grids. Estimate rho from consecutive update ratios (the standard geometric-
+        # tail bound) and gate on the implied ERROR estimate res*rho/(1-rho).
+        _res_hist.append(res)
+        if len(_res_hist) >= 4 and res > 0.0 and _res_hist[-2] > 0.0 and _res_hist[-3] > 0.0:
+            _rho = min(max(0.5 * (_res_hist[-1] / _res_hist[-2]
+                                  + _res_hist[-2] / _res_hist[-3]), 0.0), 0.999999)
+            err_est = res * _rho / (1.0 - _rho)
+        else:
+            err_est = res
+        if err_est < tol:
             break
     th[:, 0] = theta_b; th[:, -1] = theta_b              # enforce strong anchoring exactly
 
@@ -200,7 +215,12 @@ def director_profile_2d(*, K: float, eps_para: float, eps_perp: float,
         for i in range(nx):
             n_eff_of_x[i] = n_eff_from_theta_profile(th[i, :], z, n_o, n_e, model=opt_model,
                                                      d_lc=float(d_planar))
-    success = res < max(tol, 1e-5)
+    # audit C6-1: success is certified on the geometric-tail ERROR estimate, not the raw
+    # update size (which is rho-fold smaller); `residual` now reports the error estimate.
+    success = err_est < max(tol, 1e-5)
     return LC2DResult(x_m=x, z_m=z, theta_field_rad=th, Ex=Ex, Ez=Ez, V=V, n_eff_of_x=n_eff_of_x,
-                      theta_b_rad=theta_b, iters=it, residual=float(res), x_boundary=x_boundary,
-                      success=success, message=("ok" if success else "did not reach tol"))
+                      theta_b_rad=theta_b, iters=it, residual=float(err_est),
+                      x_boundary=x_boundary, success=success,
+                      message=("ok" if success else
+                               "did not reach tol (error estimate {:.2e}, last update "
+                               "{:.2e})".format(err_est, res)))
