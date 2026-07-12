@@ -235,6 +235,15 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     envelope (kx AND ky). Vacuum ends; Drude only. angle_deg=0 reduces to normal incidence."""
     if any(L.lorentz_delta_eps != 0.0 for L in layers):
         raise NotImplementedError("solve_fdtd_3d_oblique supports Drude dispersion only (no Lorentz pole).")
+    # audit C5-7: the oblique kernel carries NO chi3/chi2/Raman/gain ADEs -- refuse rather
+    # than silently solve the passive stack (the 1-D entry point raises for the same set)
+    _dropped = [t for t in ("chi3_m2_V2", "chi2_m_V", "raman_chi3_m2_V2", "gain_dN_m3")
+                if any(getattr(L, t, 0.0) != 0.0 for L in layers)]
+    if _dropped:
+        raise NotImplementedError(
+            "solve_fdtd_3d_oblique: the oblique kernel carries no {} terms -- they would be "
+            "silently ignored (audit C5-7); use the normal-incidence solver or split the "
+            "problem.".format("/".join(_dropped)))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)

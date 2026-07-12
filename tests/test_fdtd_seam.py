@@ -312,3 +312,32 @@ def test_fdtd_graded_modulation_moves_R():
     r_nom = solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
     r_mod = solver(d, None, {"s0": _graded_ef()}, LAM, 1.0 + 0j, 1.0 + 0j)
     assert abs(r_mod.R - r_nom.R) > 1e-3
+
+
+def test_seam_honors_or_raises_design_optical():
+    # audit C5-7: the seam used to IGNORE design.optical entirely -- theta/azimuth/
+    # incidence_side silently got the normal-incidence top-side answer
+    from dynameta.geometry.specs import OpticalSpec
+    solver = make_fdtd_optical_solver(dim=2, resolution=16)
+    d = _design([(4.0, 120e-9, [])])
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=30.0)
+    with pytest.raises(NotImplementedError, match="oblique"):
+        solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=0.0, incidence_side="bottom")
+    with pytest.raises(NotImplementedError, match="incidence_side"):
+        solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    # normal-incidence top-side (any pol on a uniform stack) still solves
+    d.optical = OpticalSpec(polarization="x", incidence_angle_deg=0.0)
+    assert solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j).R >= 0.0
+
+
+def test_oblique_solvers_refuse_dropped_nonlinear_terms():
+    # audit C5-7: the oblique kernels carry no chi3/chi2/raman/gain ADEs; an amplifying
+    # stack at 20 deg used to return R0/T0 BIT-IDENTICAL to the passive layer
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d_oblique
+    lay = FDTDLayer(thickness_m=300e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
+                    gain_dw_rad_s=3.6e14, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
+    with pytest.raises(NotImplementedError, match="gain_dN_m3"):
+        solve_fdtd_2d_oblique([lay], period_x_m=300e-9, angle_deg=20.0,
+                              lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=16)
