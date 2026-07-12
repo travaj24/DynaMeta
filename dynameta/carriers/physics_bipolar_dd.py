@@ -246,7 +246,8 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
 
 def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
                                         node_name: str = "vac",
-                                        source_name: str = "V1") -> tuple:
+                                        source_name: str = "V1",
+                                        v_ac: float = 1.0) -> tuple:
     """Circuit-driven bipolar ohmic contact -- the small-signal-AC (ssac) / transient analogue of
     setup_contact_ohmic_bipolar. The Potential is tied to a CIRCUIT NODE `node_name` (driven by an
     AC voltage source `source_name`) instead of a bias PARAMETER, and the Potential + Electron +
@@ -262,7 +263,11 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     node_name). (Validated: a reverse-biased diode's ssac junction C matches the analytic depletion
     C_j; see validation/ac_diode.py.)"""
     ds.add_circuit_node(name=node_name, variable_update="default")
-    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0, acreal=1.0, acimag=0.0)
+    if not (float(v_ac) > 0.0):
+        raise ValueError("setup_contact_ohmic_bipolar_circuit: v_ac must be > 0; got {!r}".format(v_ac))
+    # audit C6-2: carry the SAME v_ac ssac_admittance divides by (was hardcoded 1.0)
+    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
+                       acreal=float(v_ac), acimag=0.0)
     # Potential: Dirichlet tied to the circuit node + built-in offset (Boltzmann reference n_i).
     cp = "{}_potential_circuit".format(contact)
     pot_eq = ("Potential - {n} + ifelse(NetDoping > 0, -V_t*log({ce}/n_i), V_t*log({ch}/n_i))"

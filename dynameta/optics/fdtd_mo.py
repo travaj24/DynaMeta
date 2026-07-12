@@ -68,6 +68,20 @@ class FDTDMOResult:
     faraday_deg: np.ndarray     # polarization-ellipse major-axis rotation of the transmitted wave [deg]
 
 
+def _mo_band_index_bound(L, w_band) -> float:
+    """Grid-sizing index bound for one MOLayer over the band (audit C3-3): the max |n|
+    over BOTH circular branches eps_circular(w, +/-1) -- the (w, +1) branch is resonant
+    only for wc > 0, so the old one-branch max silently under-sized dz ~6x near resonance
+    for reversed magnetization / electron-signed wc < 0 (the MOLayer docstring's own
+    convention) -- floored by the background birefringent indices, which the
+    Drude-depressed circular index can undercut. wc-SIGN-INVARIANT by construction."""
+    bg = max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
+    if L.drude_wp_rad_s <= 0:
+        return float(bg)
+    n_circ = max(abs(np.sqrt(L.eps_circular(w, s))) for w in w_band for s in (+1, -1))
+    return float(max(n_circ, bg))
+
+
 def _2x2_inv(M):
     """Vectorized inverse of a stack of 2x2 matrices, shape (...,2,2)."""
     a, b, c, d = M[..., 0, 0], M[..., 0, 1], M[..., 1, 0], M[..., 1, 1]
@@ -215,10 +229,7 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
 
-    def _n_max(L):
-        return max(abs(np.sqrt(L.eps_circular(w, +1))) for w in w_band) \
-            if L.drude_wp_rad_s > 0 else max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
-    n_max = max(1.0, max(_n_max(L) for L in layers))
+    n_max = max(1.0, max(_mo_band_index_bound(L, w_band) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     dt = courant * dz / C_LIGHT
     pad = n_pad_wave * lambda_max_m

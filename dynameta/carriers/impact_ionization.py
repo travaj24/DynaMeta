@@ -90,6 +90,19 @@ def impact_generation_edges(device: str, region: str,
     to carry the bipolar edge models (ElectricField, ElectronCurrent, HoleCurrent)."""
     import devsim as ds
 
+    # audit 7.1 regrade (P2): the directional edge quadrature sum(alpha|J| EdgeCouple
+    # EdgeLength) is EXACT on the 2D layered tensor mesh (2V weight identity, zero-couple
+    # diagonals) but on 3D unstructured tets the circumcentric-dual identity is 3V with an
+    # edge-orientation-ISOTROPIC weight: for a transport-aligned field the estimate reads
+    # 1.8-3.1x LOW in the low-multiplication HCI regime (probe on a real Delaunay mesh),
+    # propagating to a 1.6-2.1x OPTIMISTIC REL8 lifetime -- refuse rather than under-count.
+    if int(ds.get_dimension(device=device)) == 3:
+        raise NotImplementedError(
+            "impact_generation_edges/substrate_current: the directional FV edge quadrature "
+            "is validated on 2D layered meshes only -- on 3D unstructured tets it "
+            "under-counts I_sub 1.8-3.1x (audit 7.1). A d-consistent element-based |E|,|J| "
+            "reconstruction is the tracked fix; until then compute I_sub on the 2D builder.")
+
     def em(name):
         return np.asarray(ds.get_edge_model_values(device=device, region=region, name=name),
                           dtype=np.float64)

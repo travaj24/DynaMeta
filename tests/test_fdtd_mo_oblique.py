@@ -274,3 +274,24 @@ def test_lateral_tensor_structured_energy_and_diagonal_no_crosspol():
     # symmetry (numerically small at this coarse res; the grating makes it nonzero unlike a uniform slab).
     assert float(np.max(np.abs(r.t_cross[b]))) < 2e-2                 # negligible cross-pol power (~4e-4)
     assert float(np.max(np.abs(r.R[b] + r.T[b] - 1.0))) < 5e-2        # lossless energy closes
+
+
+def test_mo_grid_sizing_is_wc_sign_invariant():
+    # audit C3-3: the sizing bound must see the resonant circular branch for BOTH signs of
+    # wc (the old (w,+1)-only max reported n_max=1.28 where the true both-branch peak is
+    # 7.51 for wc=-1.28e15 -- dz 5.9x too coarse, silently) and must not undercut the
+    # background birefringent indices
+    import numpy as np
+    from dynameta.constants import C_LIGHT
+    from dynameta.optics.fdtd_mo import MOLayer, _mo_band_index_bound
+    w_band = 2.0 * np.pi * np.linspace(C_LIGHT / 1.7e-6, C_LIGHT / 1.3e-6, 9)
+    mk = lambda wc: MOLayer(thickness_m=300e-9, eps_xx=2.0, eps_yy=2.0, drude_wp_rad_s=1.2e15,
+                            drude_gamma_rad_s=2e13, cyclotron_wc_rad_s=wc)
+    n_pos = _mo_band_index_bound(mk(+1.28e15), w_band)
+    n_neg = _mo_band_index_bound(mk(-1.28e15), w_band)
+    assert n_neg == pytest.approx(n_pos, rel=1e-12)              # sign-invariant
+    assert n_neg > 5.0                                           # resonance actually seen
+    # background floor: a birefringent layer whose Drude term depresses the circular index
+    hi_bg = MOLayer(thickness_m=300e-9, eps_xx=9.0, eps_yy=2.0, drude_wp_rad_s=1e14,
+                    drude_gamma_rad_s=2e13, cyclotron_wc_rad_s=0.0)
+    assert _mo_band_index_bound(hi_bg, w_band) >= 3.0
