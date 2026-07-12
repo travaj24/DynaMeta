@@ -66,6 +66,11 @@ def test_fatigue_split_and_guards():
     assert float(brittle_survival(0.0, sigma0_Pa=1e9, m_weibull=8.0)) == 1.0
     assert norris_landzberg_af(f_use_Hz=1e-4, f_test_Hz=1e-4, dT_use_K=50.0, dT_test_K=50.0,
                                Tmax_use_K=358.0, Tmax_test_K=358.0) == pytest.approx(1.0)
+    # audit C4-1 direction pin: from Nf ~ f^(1/3), a test differing ONLY by cycling 8x
+    # FASTER is less damaging per cycle, so AF = (1/8)^(1/3) = 0.5 exactly (the pre-audit
+    # inverted ratio returned 2.0 -- non-conservative field-life inflation)
+    assert norris_landzberg_af(f_use_Hz=1e-4, f_test_Hz=8e-4, dT_use_K=50.0, dT_test_K=50.0,
+                               Tmax_use_K=358.0, Tmax_test_K=358.0) == pytest.approx(0.5)
     with pytest.raises(ValueError):
         MechanicalProps(E_Pa=110e9, nu=0.6, cte_per_K=1e-6)             # Poisson out of range
     with pytest.raises(ValueError):
