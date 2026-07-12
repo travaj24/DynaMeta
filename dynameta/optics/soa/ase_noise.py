@@ -30,7 +30,10 @@ optical bandwidth dnu_o, m_pol ASE polarizations; Olsson JLT 7:1071 1989):
 
     shot         sigma^2 = 2 q R (P_sig + P_ASE) B + 2 q I_dark B
     signal-spont sigma^2 = 4 R^2 P_sig S_ASE B
-    spont-spont  sigma^2 = 2 m_pol R^2 S_ASE^2 (2 dnu_o - B) B
+    spont-spont  sigma^2 = m_pol R^2 S_ASE^2 (2 dnu_o - B) B
+    (S_ASE PER POLARIZATION; at m_pol = 2 this equals Olsson's both-pol form
+    4 R^2 S^2 (B_o - B/2) B. audit C4-3: the old 2*m_pol coefficient double-counted
+    polarization -- Olsson's leading 4 already contains the two-pol factor.)
 
 Pure numpy; SI units. exp(-i omega t); h nu energy per photon.
 """
@@ -127,8 +130,11 @@ def detector_noise_variances(P_sig_W, S_ASE_W_Hz, *, R_A_W=1.0, B_Hz=1e10, dnu_o
     P_ASE = float(m_pol) * S_ASE_W_Hz * dnu_opt_Hz
     sh = 2.0 * Q_E * R_A_W * (P_sig_W + P_ASE) * B_Hz + 2.0 * Q_E * I_dark_A * B_Hz
     ssp = 4.0 * R_A_W ** 2 * P_sig_W * S_ASE_W_Hz * B_Hz
-    spsp = 2.0 * float(m_pol) * R_A_W ** 2 * S_ASE_W_Hz ** 2 * max(2.0 * dnu_opt_Hz - B_Hz,
-                                                                  0.0) * B_Hz
+    # audit C4-3 (Monte-Carlo confirmed 2x): per-pol circular-Gaussian ASE gives
+    # sigma^2_sp-sp = m_pol R^2 S^2 (2 dnu_o - B) B; the old leading 2*m_pol treated
+    # Olsson's both-pol 4 R^2 S^2 (B_o - B/2) B as per-pol and re-multiplied by m_pol
+    spsp = float(m_pol) * R_A_W ** 2 * S_ASE_W_Hz ** 2 * max(2.0 * dnu_opt_Hz - B_Hz,
+                                                             0.0) * B_Hz
     return {"shot": sh, "sig_spont": ssp, "spont_spont": spsp,
             "total": sh + ssp + spsp, "P_ASE": P_ASE}
 
