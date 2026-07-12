@@ -124,7 +124,9 @@ def design_to_berreman_layers(design, lambda_m: float, *, eps_by_region=None,
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # slice_eps_field returns ascending-z (substrate-first) slabs; this list
+            # is superstrate-first, so reverse (audit C5-1)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 if slab.eps is not None:
                     layers.append((complex(slab.eps), float(slab.thickness_m)))
                 elif slab.eps_tensor_cell is not None:

@@ -380,3 +380,53 @@ def test_berreman_jax_forward_equals_numpy():
                              jnp.asarray(lam), angle=jnp.asarray(0.2), row=0)
     assert abs(float(R_np) - float(R_jx)) < 1e-12
     assert abs(float(T_np) - float(T_jx)) < 1e-12
+
+
+def _graded_design_and_eps():
+    """Asymmetric LOSSY graded layer fixture (audit C5-1 regression).
+
+    slice_eps_field returns ascending-z (substrate-first) slabs; every
+    superstrate-first consumer must reverse them. A symmetric or lossless profile
+    is blind to the flip (R/T reversal-invariant), so the profile here is both
+    asymmetric and lossy -- and the test asserts that discriminating power below.
+    """
+    from dynameta.core.eps_field import EpsField
+    d = _uniform_design()                      # air | 'a' 120nm | glass, normal incidence
+    z_nm = np.linspace(0.0, 120.0, 25)         # nm solver units, ascending = substrate-first
+    u = z_nm / 120.0
+    eps_z = 2.0 + 6.7 * u ** 2 + 1.0j * u ** 3     # eps(top) >> eps(bottom), lossy toward top
+    ef = EpsField(z_axis_u=z_nm, y_axis_u=np.zeros(1), x_axis_u=np.zeros(1),
+                  values_zyx=eps_z.reshape(-1, 1, 1).astype(complex))
+    return d, {"a": ef}
+
+
+@needs_lum
+def test_graded_slab_order_matches_tmm_asymmetric_lossy():
+    # audit C5-1: the three bridges inserted slice_eps_field's ascending (substrate-first)
+    # slabs UNREVERSED into superstrate-first stacks, vertically flipping every graded
+    # profile. TMM (tmm_reference.py, reversed(...)) is the proven-correct side of the
+    # seam; all three bridges must agree with it on an asymmetric lossy profile.
+    from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
+                                                  make_lumenairy_pmm_solver,
+                                                  make_lumenairy_rcwa_solver)
+    from dynameta.optics.tmm_reference import make_layered_tmm_solver
+    d, eps_by_region = _graded_design_and_eps()
+    lam = 1.31e-6
+    r_t = make_layered_tmm_solver()(d, None, eps_by_region, lam, 1.0 + 0j, 1.5 + 0j)
+
+    # the fixture must actually discriminate the flip: TMM on the reversed profile
+    # differs materially (otherwise a future 'simplification' could blind this test)
+    d2, ebr2 = _graded_design_and_eps()
+    ef = ebr2["a"]
+    ebr_flipped = {"a": type(ef)(z_axis_u=ef.z_axis_u,
+                                 y_axis_u=ef.y_axis_u, x_axis_u=ef.x_axis_u,
+                                 values_zyx=ef.values_zyx[::-1].copy())}
+    r_flip = make_layered_tmm_solver()(d2, None, ebr_flipped, lam, 1.0 + 0j, 1.5 + 0j)
+    assert abs(r_flip.R - r_t.R) > 1e-3, "fixture lost its asymmetry discrimination"
+
+    for make in (make_lumenairy_rcwa_solver, make_lumenairy_pmm_solver,
+                  make_lumenairy_berreman_solver):
+        r_b = make()(d, None, eps_by_region, lam, 1.0 + 0j, 1.5 + 0j)
+        assert r_b.R == pytest.approx(r_t.R, abs=1e-9), make.__name__
+        assert r_b.T == pytest.approx(r_t.T, abs=1e-9), make.__name__
+        assert r_b.phase_deg == pytest.approx(r_t.phase_deg, abs=1e-6), make.__name__

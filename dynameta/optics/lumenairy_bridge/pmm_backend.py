@@ -115,7 +115,9 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
                 raise ValueError("PMM bridge: layer {!r} carries a laterally-structured "
                                  "gridded EpsField; PMM segments are analytic -- use the "
                                  "RCWA bridge for rasterized cells".format(L.name))
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # slice_eps_field returns ascending-z (substrate-first) slabs; this stack
+            # is superstrate-first, so reverse (audit C5-1)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 names.append(L.name)
             continue
