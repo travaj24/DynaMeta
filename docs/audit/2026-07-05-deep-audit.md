@@ -1180,14 +1180,24 @@ validations pass locally after each commit.
   ElectrostaticResult.mean_absEz_per_layer (50f2ff0; split-gate probe: signed mean
   1.2e4 vs |Ez| mean 3.0e8 V/m; end-to-end skip-gated NGSolve test).
 
-**PENDING (next tranche):**
-- SOA composability: C4-6 line_filter ES cancellation, C4-7 dualpol TM pairing
-  (step_slices_wdm), C4-8 calibration bandwidth keys/caveats.
-- Optics extraction: C3-1 adaptive FEM probe grid, C3-5 CPML grazing band mask,
+- C4-6 line_filter ES-band cancellation (f5bd0cc; new gain_per_m_slices_gs so the
+  marcher subtracts exactly the band its poles re-add; ES-active ON==OFF carrier gate).
+- C4-7 dualpol TM pairing (134c02f; shifted-TM path uses step_slices_wdm per-channel
+  lineshapes; single-pol-at-nu_tm oracle gate + unshifted byte-compat pin).
+- C4-8 calibration bandwidth honesty (material_fwhm_nm + net_3dB_bw_nm distinct keys,
+  module-header caveat; dual-key gate).
+
+**ALL 3 P1 AND ALL 23 CONFIRMED P2 FINDINGS ARE FIXED** (plus both §7.1 regrades and
+the C6-class contract fixes), each with a discrimination-proven gate.
+
+**PENDING (hardening/hygiene tranche — no open confirmed P2s remain):**
+- Optics extraction hardening (P3-graded consequences at current defaults, fixes
+  recommended): C3-1 adaptive FEM probe grid, C3-5 CPML grazing band mask,
   C3-6 material-memory ring-down window.
 - C5-4 per_region_absorption keying unification (TMM re-key to design layer names).
 - The §7.3 tautology-sweep batch (reliability_tddb GATE B rebuild + the classified
   self-referential gates), stale-docs batch (§6.3), P3 hygiene batch, and the §6.2
   performance items (cache autosave batching first — mind the documented naive-append
   hazard). Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
-  per-order Jones synthesis for bridge conical s/p.
+  per-order Jones synthesis for bridge conical s/p; net-bandwidth co-fit for the
+  Innolume calibration.
