@@ -112,6 +112,12 @@ class Stacked3DSpec:
     dos_mass_p_kg:   Optional[float] = None    # VALENCE DOS mass -> N_v (bipolar FD g-factor); None -> N_c
     acceptor:        bool = False              # True -> uniform p-type (NetDoping = -n_bg); False -> n-type
     net_doping_expr: Optional[str] = None      # position-dependent junction (a DEVSIM node expression)
+    body_net_doping_m3: Optional[float] = None # SIGNED net doping AT THE BODY CONTACT when
+                                               # net_doping_expr is set (audit C2-1): phi_bi must be
+                                               # derived from the doping the body contact actually
+                                               # pins, not the dead (acceptor, n_bg_m3) scalars.
+                                               # >0 donor, <0 acceptor. REQUIRED with
+                                               # net_doping_expr on the bipolar path.
     gate_patch_frac: float = 1.0         # gate footprint as a fraction of the cell (centered
                                           # square). 1.0 = full-cell gate; <1 = a PATCH gate
                                           # (laterally-varying accumulation: gated under the
@@ -542,9 +548,26 @@ class Devsim3DEquilibrium:
             # (measured 7x low before this fix). So drive gate_bias = applied_Vg + phi_bi; at applied_Vg=0
             # the gate equals the body node -> flat band -> the equilibrium profile.
             abs_tol = max(1e13, self.spec.n_bg_m3 * 1e-12)
-            ni = float(self.spec.n_i_m3); nb = float(self.spec.n_bg_m3)
-            n0 = 0.5 * (nb + np.sqrt(nb * nb + 4.0 * ni * ni))      # = CELEC/CHOLE majority (bulk)
-            phi_bi = (-1.0 if self.spec.acceptor else 1.0) * V_T * np.log(n0 / ni)
+            ni = float(self.spec.n_i_m3)
+            # audit C2-1: with net_doping_expr the (acceptor, n_bg_m3) scalars are DEAD as
+            # doping definitions -- the body contact pins psi from the ACTUAL NetDoping node
+            # model, so deriving phi_bi from the scalars silently mis-references the gate
+            # (probe: a uniform p-cap via expr with acceptor=False applied +0.714 V of
+            # spurious gate bias at nominal Vg=0, converged, no diagnostic). Require the
+            # SIGNED body-side doping explicitly; it reduces byte-identically to the scalar
+            # path when it equals (-1 if acceptor else 1)*n_bg_m3.
+            if self.spec.net_doping_expr:
+                if self.spec.body_net_doping_m3 is None:
+                    raise ValueError(
+                        "Stacked3DSpec(physics='bipolar_dd', net_doping_expr=...): pass "
+                        "body_net_doping_m3 (the SIGNED net doping at the body contact) so "
+                        "the gate reference offset phi_bi matches the frame the body "
+                        "contact actually pins (audit C2-1).")
+                N_b = float(self.spec.body_net_doping_m3)
+            else:
+                N_b = (-1.0 if self.spec.acceptor else 1.0) * float(self.spec.n_bg_m3)
+            n0 = 0.5 * (abs(N_b) + np.sqrt(N_b * N_b + 4.0 * ni * ni))  # CELEC/CHOLE majority
+            phi_bi = (1.0 if N_b >= 0.0 else -1.0) * V_T * np.log(n0 / ni)
             ds.node_model(device=self.device, region="semi", name="_seed_psi",
                           equation="V_t*log(IntrinsicElectrons/n_i)")
             ds.set_node_values(device=self.device, region="semi", name="Potential",
