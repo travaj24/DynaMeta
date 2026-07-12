@@ -899,3 +899,18 @@ def test_eh_numba_parity():
     rb = b.step_slices(st, P, 1.4e-13, a.p.nu0_Hz, 30e-3)
     for x, y in zip(ra, rb):
         assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
+
+
+def test_detector_spont_spont_matches_olsson():
+    # audit C4-3: at m_pol=2 the per-pol form m_pol R^2 S^2 (2 dnu_o - B) B must equal
+    # Olsson's (JLT 7:1071, 1989) both-pol 4 R^2 S^2 (B_o - B/2) B -- the published
+    # leading 4 already contains the two-polarization factor. The pre-fix 2*m_pol
+    # coefficient returned exactly 2x this (Monte-Carlo confirmed in the audit).
+    from dynameta.optics.soa.ase_noise import detector_noise_variances
+    S, B, Bo, R = 1.4e-16, 2.0e10, 1.0e12, 0.9
+    v = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=2)
+    olsson = 4.0 * R ** 2 * S ** 2 * (Bo - B / 2.0) * B
+    assert v["spont_spont"] == pytest.approx(olsson, rel=1e-12)
+    # single-pol: exactly half the two-pol variance
+    v1 = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=1)
+    assert v1["spont_spont"] == pytest.approx(0.5 * olsson, rel=1e-12)
