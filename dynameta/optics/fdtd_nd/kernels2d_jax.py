@@ -85,7 +85,7 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
             PRnew = EPS0 * chi3R * Ey * Qnew
             curl = curl - (PRnew - PR) / dt
             Qp, Q, PR = Q, Qnew, PRnew
-        eps_eff = eps_inf + chi3 * Ey ** 2
+        eps_eff = eps_inf + 3.0 * chi3 * Ey ** 2       # standard chi3 (C3-2; == numpy kernel)
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Eyn = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eyn + Ey)

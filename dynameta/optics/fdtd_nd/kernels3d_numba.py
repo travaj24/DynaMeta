@@ -158,7 +158,7 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                     g = gam[i, j, k]
                     aJ = (1.0 - g * dt / 2.0) / (1.0 + g * dt / 2.0)
                     bJ = (EPS0 * wp[i, j, k] ** 2 * dt / 2.0) / (1.0 + g * dt / 2.0)
-                    eps_eff = eps_inf[i, j, k] + chi3[i, j, k] * (exo * exo + eyo * eyo + ezo * ezo)
+                    eps_eff = eps_inf[i, j, k] + 3.0 * chi3[i, j, k] * (exo * exo + eyo * eyo + ezo * ezo)  # C3-2
                     denom = e0dt * eps_eff + bJ / 2.0
                     coef = 0.5 * (1.0 + aJ)
                     # Ex: curl_x H = dHz/dy - dHy/dz (CPML)

@@ -72,7 +72,7 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                     Qp[i, k] = Q[i, k]; Q[i, k] = qn; PR[i, k] = prn
                 aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                 bJ = (EPS0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
-                eps_eff = eps_inf[i, k] + chi3[i, k] * Ey[i, k] ** 2
+                eps_eff = eps_inf[i, k] + 3.0 * chi3[i, k] * Ey[i, k] ** 2  # standard chi3 (C3-2)
                 denom = e0dt * eps_eff + bJ / 2.0
                 eyn = (e0dt * eps_eff * eyo + curl - 0.5 * (1.0 + aJ) * Jy[i, k] - 0.5 * bJ * eyo) / denom
                 Jy[i, k] = aJ * Jy[i, k] + bJ * (eyn + eyo)
@@ -153,7 +153,7 @@ if _HAVE_NUMBA:
                         Qp[i, k] = Q[i, k]; Q[i, k] = qn; PR[i, k] = prn
                     aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
                     bJ = (eps0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
-                    eps_eff = eps_inf[i, k] + chi3[i, k] * eyo * eyo
+                    eps_eff = eps_inf[i, k] + 3.0 * chi3[i, k] * eyo * eyo  # standard chi3 (C3-2)
                     denom = e0dt * eps_eff + bJ / 2.0
                     eyn = (e0dt * eps_eff * eyo + curl - 0.5 * (1.0 + aJ) * Jy[i, k] - 0.5 * bJ * eyo) / denom
                     Jy[i, k] = aJ * Jy[i, k] + bJ * (eyn + eyo)

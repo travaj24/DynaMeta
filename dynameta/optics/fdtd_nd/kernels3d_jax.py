@@ -41,7 +41,7 @@ def _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_p
         Hy = Hy - cmu * (sEx - (jnp.roll(Ez, -1, axis=0) - Ez) / dx)
         Hz = Hz - cmu * ((jnp.roll(Ey, -1, axis=0) - Ey) / dx - (jnp.roll(Ex, -1, axis=1) - Ex) / dy)
         # ---- E update (per-component Drude ADE + Kerr) ----
-        eps_eff = eps_inf + chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
+        eps_eff = eps_inf + 3.0 * chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)  # standard chi3 (C3-2)
         ce_dt = EPS0 * eps_eff / dt
         denom = ce_dt + bJ / 2.0
         coef = 0.5 * (1.0 + aJ)

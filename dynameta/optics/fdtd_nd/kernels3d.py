@@ -16,7 +16,7 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
     Periodic in x and y (roll = Bloch at normal incidence, zero phase), CFS-CPML + PEC backing in z.
     Standard Yee staggering: Ex@(i+1/2,j,k) Ey@(i,j+1/2,k) Ez@(i,j,k+1/2); Hx@(i,j+1/2,k+1/2)
     Hy@(i+1/2,j,k+1/2) Hz@(i+1/2,j+1/2,k). Semi-implicit Drude ADE per E-component + instantaneous Kerr
-    (eps_eff = eps_inf + chi3|E|^2) + an optional Lorentz ADE per E-component (`lor`=(C1,C2,C3), a
+    (eps_eff = eps_inf + 3 chi3|E|^2, the standard P = eps0 chi3 E^3 convention, audit C3-2) + an optional Lorentz ADE per E-component (`lor`=(C1,C2,C3), a
     polarization PL{x,y,z}). R15/R20 nonlinearities (None -> byte-identical): chi2 SHG as a DIAGONAL
     tensor model P2_i = eps0 chi2 E_i^2 per component; Raman with ONE isotropic vibrational coordinate
     Q driven by |E|^2 and P_R,i = eps0 chi3R E_i Q (couples components through Q; reduces exactly to
@@ -85,7 +85,7 @@ def _run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, s
         if do_raman:
             Qnew = R1 * Q + R2 * Qp + R3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
             Qp = Q; Q = Qnew
-        eps_eff = eps_inf + chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
+        eps_eff = eps_inf + 3.0 * chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)  # standard chi3 (C3-2)
         ce_dt = EPS0 * eps_eff / dt
         denom = ce_dt + bJ / 2.0
         # Ex: (dHz/dy - dHy/dz) ; dHy/dz CPML-stretched
