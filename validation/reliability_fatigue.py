@@ -48,14 +48,28 @@ def main():
           "dT=0 -> 0; d_eps=0 -> Nf=inf; log-slope = {:.4f} == -1/c -> {}".format(
               sig / 1e6, sig_hand / 1e6, slope, "PASS" if g_a else "FAIL"), flush=True)
 
-    # ---- GATE B: Norris-Landzberg ----
+    # ---- GATE B: Norris-Landzberg (de-tautologized per audit C4-1: the old reference
+    # re-typed the AF expression itself, so the inverted frequency ratio passed by
+    # construction. The reference is now the RATIO OF THE PRIMITIVE LAW
+    # Nf(f, dT, Tmax) = f^m dT^-n exp(Ea/Tmax) -- an independent derivation path --
+    # plus a direction-sensitive frequency-only leg.) ----
+    def _nf(f, dT, Tmax, m=1.0 / 3.0, n=2.0, Ea=1414.0):
+        return f ** m * dT ** (-n) * np.exp(Ea / Tmax)
+
     af = norris_landzberg_af(f_use_Hz=1.0e-4, f_test_Hz=5.6e-4, dT_use_K=40.0, dT_test_K=165.0,
                              Tmax_use_K=358.0, Tmax_test_K=398.0)
-    af_an = (5.6e-4 / 1.0e-4) ** (1 / 3) * (165.0 / 40.0) ** 2 * np.exp(1414.0 * (1 / 358.0 - 1 / 398.0))
-    g_b = bool(abs(af / af_an - 1) < 1e-12 and af > 1.0)
+    af_an = _nf(1.0e-4, 40.0, 358.0) / _nf(5.6e-4, 165.0, 398.0)
+    # direction: a test differing ONLY by cycling 8x faster is LESS damaging per cycle
+    # (shorter creep dwell -> more cycles to failure in test), so AF = (1/8)^(1/3) = 0.5
+    # exactly -- this leg FAILS on the pre-audit inverted ratio (which returned 2.0).
+    af_freq_only = norris_landzberg_af(f_use_Hz=1.0e-4, f_test_Hz=8.0e-4, dT_use_K=100.0,
+                                       dT_test_K=100.0, Tmax_use_K=360.0, Tmax_test_K=360.0)
+    g_b = bool(abs(af / af_an - 1) < 1e-12 and af > 1.0
+               and abs(af_freq_only - 0.5) < 1e-12)
     ok = ok and g_b
-    print("[rf] GATE B: Norris-Landzberg AF = {:.1f} == closed form, > 1 for the harsher test "
-          "-> {}".format(af, "PASS" if g_b else "FAIL"), flush=True)
+    print("[rf] GATE B: Norris-Landzberg AF = {:.2f} == primitive-law Nf ratio ({:.2f}), > 1 for "
+          "the harsher test; frequency-only 8x-faster test AF = {:.3f} == 0.5 exactly "
+          "-> {}".format(af, af_an, af_freq_only, "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: brittle-vs-ductile split ----
     dT = 600.0                                                          # ITO stress 0.18 GPa/100K *6

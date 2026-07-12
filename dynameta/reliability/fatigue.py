@@ -7,9 +7,13 @@ roadmap-corrected split):
     biaxial film stress:   sigma = (E_film / (1 - nu_film)) * (CTE_sub - CTE_film) * dT
     ductile Coffin-Manson: Nf = C * (d_eps_p)^(-1/c),  c = fatigue DUCTILITY exponent ~ 0.5-0.7
                            (so the exponent ON the plastic strain range is 1/c ~ 1.4-2.0)
-    Norris-Landzberg AF:   AF = (f_test/f_use)^m * (dT_test/dT_use)^n * exp(Ea_K (1/Tmax_use -
-                           1/Tmax_test)),  m ~ 1/3, n ~ 2, Ea_K ~ 1414 K (SnPb baseline; re-fit per
-                           materials system)
+    Norris-Landzberg AF:   from the primitive law Nf = C f^m dT^(-n) exp(Ea_K/Tmax)
+                           (slower cycling = longer creep dwell = FEWER cycles to failure):
+                           AF = Nf_use/Nf_test = (f_use/f_test)^m * (dT_test/dT_use)^n
+                           * exp(Ea_K (1/Tmax_use - 1/Tmax_test)),  m ~ 1/3, n ~ 2,
+                           Ea_K ~ 1414 K (SnPb baseline; re-fit per materials system).
+                           NOTE the frequency ratio direction: a FASTER test (f_test > f_use)
+                           contributes a factor < 1 (audit C4-1 fixed the inversion).
     brittle (Weibull):     P_survive(sigma) = exp(-(sigma/sigma0)^m_w); sigma >= sigma_crit -> cracks
                            on the FIRST excursion (no cycle accumulation)
 
@@ -30,8 +34,11 @@ __all__ = ["MechanicalProps", "biaxial_stress_Pa", "coffin_manson_nf", "plastic_
 
 
 def biaxial_stress_Pa(film: MechanicalProps, cte_sub_per_K: float, dT_K) -> np.ndarray:
-    """Equibiaxial thermal-mismatch film stress sigma = E/(1-nu) (CTE_sub - CTE_film) dT (tensile
-    positive when the film shrinks less than the substrate on cooling)."""
+    """Equibiaxial thermal-mismatch film stress sigma = E/(1-nu) (CTE_sub - CTE_film) dT, tension
+    positive. On cooling (dT < 0) the film ends up TENSILE when it shrinks MORE than the
+    substrate (CTE_film > CTE_sub) -- e.g. metal films on Si; a film that shrinks less than the
+    substrate is compressed. (Docstring sign-case corrected per audit; the formula is unchanged
+    and was always correct.)"""
     dT = np.asarray(dT_K, dtype=np.float64)
     return (film.E_Pa / (1.0 - film.nu)) * (cte_sub_per_K - film.cte_per_K) * dT
 
@@ -63,13 +70,17 @@ def plastic_strain_range(cte_film_per_K: float, cte_sub_per_K: float, dT_K: floa
 def norris_landzberg_af(*, f_use_Hz: float, f_test_Hz: float, dT_use_K: float, dT_test_K: float,
                         Tmax_use_K: float, Tmax_test_K: float, m: float = 1.0 / 3.0,
                         n: float = 2.0, Ea_K: float = 1414.0) -> float:
-    """Norris-Landzberg acceleration factor AF = Nf_use / Nf_test (> 1 when the test cycles harder/
-    hotter than use)."""
+    """Norris-Landzberg acceleration factor AF = Nf_use / Nf_test, from the primitive law
+    Nf = C f^m dT^(-n) exp(Ea_K/Tmax) with m = +1/3: FASTER cycling means SHORTER creep
+    dwell per cycle, hence MORE cycles to failure, so a faster test (f_test > f_use)
+    contributes a frequency factor (f_use/f_test)^m < 1 to AF. (Audit C4-1: the ratio was
+    previously inverted, overestimating field life by (f_test/f_use)^(2m) -- 4x for a
+    typical chamber-vs-field cadence -- systematically non-conservative.)"""
     for v, nm in ((f_use_Hz, "f_use"), (f_test_Hz, "f_test"), (dT_use_K, "dT_use"),
                   (dT_test_K, "dT_test"), (Tmax_use_K, "Tmax_use"), (Tmax_test_K, "Tmax_test")):
         if not (v > 0.0):
             raise ValueError("Norris-Landzberg: {} must be > 0".format(nm))
-    return float((f_test_Hz / f_use_Hz) ** m * (dT_test_K / dT_use_K) ** n
+    return float((f_use_Hz / f_test_Hz) ** m * (dT_test_K / dT_use_K) ** n
                  * np.exp(Ea_K * (1.0 / Tmax_use_K - 1.0 / Tmax_test_K)))
 
 
