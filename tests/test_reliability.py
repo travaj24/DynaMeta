@@ -118,3 +118,15 @@ def test_weibull_earliest_and_fit():
     assert weibull_earliest_t63(1e6, 1, 2.0) == 1e6               # single element reduces
     assert fit_per_1e9_hours(1e5 * 3600.0) == pytest.approx(1e4, rel=1e-9)
     assert mttf_use_from_stress(500.0, field_af(3.0, 5.0, 8.0)) == pytest.approx(500.0 * np.exp(9.0))
+
+
+def test_arrhenius_signed_ea_matches_hci(  ):
+    # audit C5-9: signed Ea is now legal -- REL10 can extrapolate REL8's cold-worse
+    # HCI (shipped default Ea=-0.1 eV). Pin against hci's own temperature ratio, and
+    # pin the direction: cold-worse means AF < 1 for a COLDER use.
+    import numpy as np
+    from dynameta.reliability.mttf import KB_EV_K, arrhenius_af
+    af = arrhenius_af(-0.1, 350.0, 250.0)
+    an = float(np.exp((-0.1 / KB_EV_K) * (1.0 / 350.0 - 1.0 / 250.0)))
+    assert af == pytest.approx(an, rel=1e-14) and af > 1.0        # hot use lives LONGER for Ea<0
+    assert arrhenius_af(-0.1, 250.0, 350.0) < 1.0                 # cold use ages faster

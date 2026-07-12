@@ -152,9 +152,25 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
     the nonparabolicity/phonon knobs are off (see module off-switches)."""
     from dynameta.transient_optics import optical_transient_response
 
-    m0 = float(m0_kg) if m0_kg is not None else (float(drude0.m_opt_kg)
-                                                 if not callable(drude0.m_opt_kg) else float(M_E))
-    gamma0 = float(drude0.gamma_rad_s) if not callable(drude0.gamma_rad_s) else 1.0e14
+    # audit C5-10: a CALIBRATED DrudeOptical carrying callable m_opt_kg / gamma_rad_s used
+    # to be silently replaced by the bare electron mass / a hardcoded 1e14 rad/s -- the
+    # transient was computed for a DIFFERENT material even with every heating knob off,
+    # violating the module's own documented byte-identical off-switch. A band-averaged
+    # m*(n) callable cannot be inverted safely here (evaluating it at n_m3 double-counts
+    # the Kane band filling), so require the explicit band-edge scalars instead.
+    if m0_kg is None and callable(drude0.m_opt_kg):
+        raise ValueError(
+            "carrier_heating_transient: drude0.m_opt_kg is a callable (a calibrated "
+            "density-dependent mass); pass the explicit band-edge m0_kg= instead -- "
+            "silently substituting M_E computed a different material (audit C5-10).")
+    if callable(drude0.gamma_rad_s):
+        raise ValueError(
+            "carrier_heating_transient: drude0.gamma_rad_s is a callable (a calibrated "
+            "scattering model); build the transient from its evaluated value at n_m3 "
+            "(float(drude0.gamma_rad_s(n_m3))) and pass a scalar-gamma DrudeOptical -- "
+            "silently substituting 1e14 rad/s computed a different material (audit C5-10).")
+    m0 = float(m0_kg) if m0_kg is not None else float(drude0.m_opt_kg)
+    gamma0 = float(drude0.gamma_rad_s)
     t, Te, Tl = two_temperature_response(times_s, intensity_of_t, ttm_params, T0_K=T0_K)
     Te_of_t = lambda tt: float(np.interp(tt, t, Te))
 
