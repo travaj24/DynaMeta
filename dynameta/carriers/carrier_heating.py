@@ -53,7 +53,12 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
     """Band-averaged Kane optical mass <m*(T_e)> [kg]. Hotter electrons sit higher in the nonparabolic
     band where m* is larger, so <m*> RISES with T_e:
         <m*(T_e)> = m0 (1 + 2 alpha_eV <E>(T_e)/q)^exponent,
-        <E>(T_e)  = (3/5) E_F [1 + (5 pi^2/12)(kB T_e / E_F)^2]   (degenerate-gas mean energy, Sommerfeld).
+        <E>(T_e)  = (3/5) E_F [1 + (5 pi^2/12)(kB T_e / E_F)^2 * K],
+        K         = (1 + 2 a E_F) / (1 + a E_F),   a = alpha_per_eV / q.
+    K is the KANE-DOS Sommerfeld factor (audit C2-2): for ANY DOS the fixed-n shift is
+    d<E> = (pi^2/6)(kT)^2 g(E_F)/n, and for the Kane DOS g(E_F)/n =
+    (3/2)(1+2aE_F)/[E_F(1+aE_F)] -- the parabolic coefficient (K=1, exact at alpha=0)
+    understated the heating-induced <E>/<m*> rise by 11-21% at the validated ITO regime.
     VALIDITY: the Sommerfeld expansion assumes a DEGENERATE gas, kB*T_e << E_F; the quadratic
     correction term grows without bound, so beyond kB*T_e ~ E_F the formula over-states <E> (the
     validated ITO regime peaks at kB*T_e/E_F ~ 0.3). A RuntimeWarning fires past kB*T_e > E_F; the
@@ -69,7 +74,10 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
         warnings.warn("kane_mass_of_Te: kB*T_e exceeds E_F -- the Sommerfeld degenerate-gas expansion "
                       "is outside its validity (kB*Te/E_F up to {:.2f}); <m*> is over-stated.".format(
                           float(np.max(kT / E_F))), RuntimeWarning, stacklevel=2)
-    mean_E = (3.0 / 5.0) * E_F * (1.0 + (5.0 * np.pi ** 2 / 12.0) * (kT / E_F) ** 2)
+    a_EF = float(alpha_per_eV) * E_F / Q_E                     # a*E_F, dimensionless
+    kane_dos_factor = (1.0 + 2.0 * a_EF) / (1.0 + a_EF)        # ->1 exactly at alpha=0 (C2-2)
+    mean_E = (3.0 / 5.0) * E_F * (1.0 + (5.0 * np.pi ** 2 / 12.0) * (kT / E_F) ** 2
+                                  * kane_dos_factor)
     return float(m0_kg) * np.power(1.0 + 2.0 * float(alpha_per_eV) * mean_E / Q_E, exponent)
 
 
