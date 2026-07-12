@@ -552,11 +552,17 @@ class TravelingWaveSOA:
                 g_used = g_flat                                # per-slice net gain for the C4-4 emit factor
                 amp = np.exp(0.5 * (gam * g_flat * (1.0 - 1j * a_eff) - self.alpha_i - a_nl) * self.dz)
                 # flat carrier gain (multiplicative, == OFF amp) + ADDITIVE dispersive correction:
-                # the polarization sum_p minus its flat-gain equivalent g_un*A_ref is the resonant
-                # line deviation (zero at the carrier). Additive so the line radiates field into a
-                # null (sum_p != 0 there) -- no divide-by-field, stable for modulated/nulling
-                # waveforms; first order in the small per-slice deviation (~1e-3).
-                new[1:] = amp * (A_ref + 0.5 * gam * (sum_p - g_un * A_ref) * self.dz)
+                # the polarization sum_p minus its flat-gain equivalent is the resonant line
+                # deviation (zero at the carrier). audit C4-6: the subtraction must be the
+                # GS-BAND-ONLY gain -- the polarization poles carry ONLY the GS band, so
+                # subtracting the full GS+ES g_un silently CANCELLED the entire ES band
+                # (probe: ON gain -0.004 dB vs OFF 3.79 dB near the ES centre); the ES band
+                # rides the flat multiplicative amp. Identical when sigma_pk_ES = 0.
+                # Additive so the line radiates field into a null (sum_p != 0 there) -- no
+                # divide-by-field, stable for modulated/nulling waveforms; first order in
+                # the small per-slice deviation (~1e-3).
+                g_gs_un = self.model.gain_per_m_slices_gs(state, nu)
+                new[1:] = amp * (A_ref + 0.5 * gam * (sum_p - g_gs_un * A_ref) * self.dz)
                 lf["pol"] = lf["E"] * lf["pol"] + src * lf["coef"]
             if lang is not None:                               # Langevin spontaneous-emission source
                 gsp = self.model.emission_gain_per_m_slices(state, nu)   # (nz,) >= 0

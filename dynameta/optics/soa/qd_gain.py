@@ -1175,6 +1175,17 @@ class QDGainModel:
                 self._es_inversion(state) * wlE[None, :], axis=1)
         return g
 
+    def gain_per_m_slices_gs(self, state, nu_Hz) -> np.ndarray:
+        """GS-BAND-ONLY per-slice gain [1/m]: the flat-gain twin of line_kappa_slices'
+        assembly (same _gain_scale * _gain_pref * w_j * L(nu-nu_j) * GS inversion). audit
+        C4-6: the line-filter marcher must subtract exactly the band its polarization
+        poles re-add (GS only) -- subtracting the full GS+ES gain silently CANCELLED the
+        entire ES band (probe: ON gain -0.004 dB vs OFF 3.79 dB near the ES centre).
+        Identical to gain_per_m_slices when sigma_pk_ES = 0 (byte-identical off-switch)."""
+        wl = self._gain_line_weights(nu_Hz)
+        return self._gain_scale * self._gain_pref * np.sum(
+            self._gs_inversion(state) * wl[None, :], axis=1)
+
     def wl_density_slices(self, state) -> np.ndarray:
         """Wetting-layer (reservoir) carrier density N_w [m^-3] per slice -- state[0] for both the
         excitonic (N_w) and e/h-split (N_w_e) layouts. The free-carrier reservoir that drives the
