@@ -227,3 +227,88 @@ def test_structured_lateral_grid_and_dispatch_guard():
     # dim=2 + inclusions must raise
     with pytest.raises(NotImplementedError):
         make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+
+
+# ---- audit C5-2: the seam used to silently DROP graded/tensor eps_by_region entries ----
+
+def _graded_ef(nz=13, eps_lo=2.0, eps_hi=9.0, thick_nm=120.0):
+    """Asymmetric laterally-uniform graded EpsField, nm axes, ascending z (substrate-first)."""
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    z = np.linspace(0.0, thick_nm, nz)
+    eps = eps_lo + (eps_hi - eps_lo) * (z / thick_nm) ** 2
+    return EpsField(z_axis_u=z, y_axis_u=np.zeros(1), x_axis_u=np.zeros(1),
+                    values_zyx=eps.reshape(-1, 1, 1).astype(complex))
+
+
+def test_graded_eps_by_region_is_sliced_incidence_first():
+    # a graded entry must produce per-slab FDTDLayers matching the shared slice_eps_field
+    # staircase in INCIDENCE (superstrate-first = descending-eps-first here) order --
+    # pre-audit this silently fell through to the nominal material eps (zero modulation)
+    import numpy as np
+    from dynameta.core.layered import slice_eps_field
+    from dynameta.optics.tmm_reference import S
+    d = _design([(4.0, 120e-9, [])])
+    ef = _graded_ef()
+    layers = design_to_fdtd_layers(d, LAM, eps_by_region={"s0": ef})
+    slabs = list(reversed(slice_eps_field(ef, 1.0 / S)))
+    assert len(layers) == len(slabs) and len(layers) == 12
+    got = np.array([L.eps_inf for L in layers])
+    want = np.array([s.eps.real for s in slabs])
+    assert np.allclose(got, want, rtol=1e-12)
+    assert got[0] > got[-1]                                   # top (high-eps) side first
+    assert abs(sum(L.thickness_m for L in layers) - 120e-9) < 1e-15
+
+
+def test_tensor_eps_by_region_raises():
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    d = _design([(4.0, 120e-9, [])])
+    ef = EpsField(tensor=np.diag([4.0 + 0j, 4.0 + 0j, 2.0 + 0j]))
+    with pytest.raises(NotImplementedError, match="TENSOR"):
+        design_to_fdtd_layers(d, LAM, eps_by_region={"s0": ef})
+
+
+def test_graded_drude_carrier_region_does_not_crash():
+    # pre-audit repro: a DrudeOptical carrier layer + graded bridge field crashed with a
+    # MISLEADING "DrudeOptical.eps requires n_m3" from the nominal fallback -- the seam
+    # was holding the bias eps it had just discarded
+    from dynameta.materials import DrudeOptical
+    d = _design([(4.0, 120e-9, [])])
+    d.materials.add(Material("ito", DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * 9.109e-31,
+                                                 gamma_rad_s=1.6e14)))
+    d.stack.layers[0].background_material = "ito"
+    layers = design_to_fdtd_layers(d, LAM, eps_by_region={"s0": _graded_ef()})
+    assert len(layers) == 12                                  # sliced from the bias field
+
+
+def test_sweep_solver_graded_bias_raises_not_silent():
+    # the broadband one-pole-per-layer path cannot carry a graded profile: it must say so
+    # (pre-audit it silently solved the UNMODULATED nominal stack)
+    from dynameta.optics.fdtd_seam import make_fdtd_sweep_optical_solver
+    import numpy as np
+    d = _design([(4.0, 120e-9, [])])
+    sw = make_fdtd_sweep_optical_solver(dim=2, resolution=16)
+    ef = _graded_ef()
+    with pytest.raises(NotImplementedError, match="graded"):
+        sw.solve_sweep(d, None, lambda lam: {"s0": ef},
+                       np.array([1.25e-6, 1.35e-6]), 1.0 + 0j, 1.0 + 0j)
+
+
+def test_structured_path_graded_bg_raises():
+    from dynameta.optics.fdtd_seam import _layer_bg_eps
+    d = _design([(4.0, 120e-9, [])])
+    with pytest.raises(NotImplementedError, match="graded"):
+        _layer_bg_eps(d.stack.layers[0], LAM, d.materials, {"s0": _graded_ef()})
+
+
+def test_fdtd_graded_modulation_moves_R():
+    # end-to-end sensitivity: the per-wavelength FDTD seam must actually SEE the graded
+    # bias (pre-audit: bit-identical R across biases). Coarse grid -- we assert
+    # modulation, not oracle-grade accuracy.
+    import numpy as np
+    d = _design([(4.0, 120e-9, [])])
+    solver = make_fdtd_optical_solver(dim=2, resolution=16)
+    r_nom = solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    r_mod = solver(d, None, {"s0": _graded_ef()}, LAM, 1.0 + 0j, 1.0 + 0j)
+    assert abs(r_mod.R - r_nom.R) > 1e-3
