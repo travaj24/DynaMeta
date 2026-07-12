@@ -549,7 +549,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # must not break the solve, so a failure warns (not silent) and yields None.
     try:
         A_independent = _absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                            geo.period_x_nm, geo.period_y_nm)
+                                            geo.period_x_nm, geo.period_y_nm,
+                                            n_super=n_super)
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
@@ -558,7 +559,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     try:
         per_region_A = (None if A_independent is None else
                         _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                               geo.period_x_nm, geo.period_y_nm))
+                                               geo.period_x_nm, geo.period_y_nm,
+                                               n_super=n_super))
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("per-region absorption map unavailable: {}".format(_e))
         per_region_A = None
@@ -740,10 +742,15 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     return r, R, t, T
 
 
-def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j):
     """Independently measured absorbed fraction (audit OPT-2): the normalized
-    volumetric loss integral A = k0 * Int_V Im(eps) |E|^2 dV / (cos(theta) * cell_area),
-    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave. This
+    volumetric loss integral
+        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area),
+    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave.
+    audit C3-7: the incident power in a dense superstrate is ~ n_super cos(theta) area,
+    so the normalization carries Re(n_super) (it used to omit it, inflating A -- and the
+    D2 per-region deposition -- by exactly Re(n_super) for a dense encapsulant; vacuum
+    incidence, the only supported oblique case, is byte-identical). This
     is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
     catches energy/numerics errors that the R/T extraction alone cannot. The PML
     materials are excluded -- their stretched-coordinate eps would corrupt the integral
@@ -775,10 +782,11 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     area = float(Px) * float(Py)
     if area <= 0:
         return None
-    return float(complex(integ).real * k0 / (max(math.cos(theta), 1e-12) * area))
+    n_cos = max(complex(n_super).real * math.cos(theta), 1e-12)   # C3-7 incident-power factor
+    return float(complex(integ).real * k0 / (n_cos * area))
 
 
-def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j):
     """Per-region absorbed-power map (driver D2): the _absorbed_fraction integrand evaluated
     region by region -- IDENTICAL loss CF, IDENTICAL normalization, restricted to one material
     domain at a time -- so sum(values) equals A_independent EXACTLY (domain additivity of the
@@ -795,7 +803,9 @@ def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     else:
         im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j
         loss = im_eps * (E_tot * ng.Conj(E_tot))
-    scale = k0 / (max(math.cos(theta), 1e-12) * area)
+    # audit C3-7: same Re(n_super) incident-power factor as _absorbed_fraction (the two must
+    # stay IDENTICAL for the sum-equals-A_independent additivity contract)
+    scale = k0 / (max(complex(n_super).real * math.cos(theta), 1e-12) * area)
     out = {}
     for m in non_pml:
         integ = ng.Integrate(loss, mesh, definedon=mesh.Materials(re.escape(m)))
