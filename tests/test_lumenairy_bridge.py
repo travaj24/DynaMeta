@@ -196,17 +196,23 @@ def test_berreman_uniaxial_decouples_per_axis():
 
 
 @needs_lum
-def test_bridge_conical_ppol_raises():
-    # p-pol at conical incidence (azimuth != 0) is unsupported (the p-basis conversion assumes the
-    # x-z plane of incidence); RCWA + Berreman must raise, but p-pol at phi=0 and s-pol conical solve
+def test_bridge_conical_raises_every_polarization():
+    # audit C4-2: conical incidence (azimuth != 0) must raise for EVERY polarization -- the
+    # bridges' lab-basis rows are phi-dependent s/p mixtures, not the FEM's rotated s/p
+    # (probe: 'y' at theta=30/phi=45 on bare glass returned R 32% low, silently; at phi=90
+    # exactly the orthogonal polarization). The old guard covered only 'p'. phi=0 solves.
     from dynameta.geometry.specs import OpticalSpec
     from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
                                                   make_lumenairy_rcwa_solver)
     for mk in (lambda: make_lumenairy_rcwa_solver(n_orders=3), make_lumenairy_berreman_solver):
+        # 'x' cannot reach the bridge at oblique (OpticalSpec rejects it at construction),
+        # so 'p' and 'y' are the full reachable set
+        for pol in ("p", "y"):
+            d = _uniform_design()
+            d.optical = OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=20.0)
+            with pytest.raises(NotImplementedError):
+                mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
         d = _uniform_design()
-        d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=20.0)
-        with pytest.raises(NotImplementedError):
-            mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
         d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
         mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)        # phi=0 p-pol is fine
 
@@ -430,3 +436,35 @@ def test_graded_slab_order_matches_tmm_asymmetric_lossy():
         assert r_b.R == pytest.approx(r_t.R, abs=1e-9), make.__name__
         assert r_b.T == pytest.approx(r_t.T, abs=1e-9), make.__name__
         assert r_b.phase_deg == pytest.approx(r_t.phase_deg, abs=1e-6), make.__name__
+
+
+@needs_lum
+def test_structured_stack_without_period_raises():
+    # audit C5-8: a STRUCTURED LayeredStack with defaulted period 0.0 used to solve at a
+    # fabricated wavelength-sized period (wrong diffraction geometry, silently)
+    import numpy as np
+    from dynameta.core.layered import LayeredSlab, LayeredStack
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge import LumenairyStackSolver
+    cell = np.where(np.linspace(0, 1, 33)[:, None] < 0.3, 4.0 + 0j, 1.0 + 0j)
+    stk = LayeredStack(1.0 + 0j, 1.5 + 0j, [LayeredSlab(180e-9, eps_cell=cell)])
+    opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0)
+    with pytest.raises(ValueError, match="period"):
+        LumenairyStackSolver(n_orders=3).solve(stk, 1.31e-6, opt)
+
+
+def test_collapse_unclaimed_keys_raise():
+    # audit C5-11: a drifted/typo'd region key used to be silently dropped -- the layer
+    # silently reverted to nominal material eps in every layered backend
+    from dynameta.core.eps_field import EpsField
+    from dynameta.core.layered import collapse_regions_to_layers
+    d = _uniform_design()
+    good = {"a": EpsField(scalar=4.1 + 0j)}
+    assert "a" in collapse_regions_to_layers(d, good)
+    with pytest.raises(ValueError, match="match no design layer"):
+        collapse_regions_to_layers(d, {"ito_top": EpsField(scalar=4.1 + 0j)})
+    # superstrate/substrate/pml_* keys remain legitimately ignorable
+    out = collapse_regions_to_layers(d, {"a": EpsField(scalar=4.1 + 0j),
+                                         "superstrate": EpsField(scalar=1.0 + 0j),
+                                         "pml_top": EpsField(scalar=1.0 + 0j)})
+    assert set(out) == {"a"}
