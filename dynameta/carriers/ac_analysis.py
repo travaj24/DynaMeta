@@ -31,7 +31,8 @@ from dynameta.carriers import eq_registry as _R
 
 def setup_circuit_contact(device: str, contact: str, *,
                           edge_charge_model: str = "PotentialEdgeFlux",
-                          source_name: str = "V1", node_name: str = "vac") -> tuple:
+                          source_name: str = "V1", node_name: str = "vac",
+                          v_ac: float = 1.0) -> tuple:
     """Make `contact` a circuit-driven Dirichlet (Potential = circuit node `node_name`) with an AC
     voltage source `source_name` from that node to ground, so a small-signal AC (ssac) solve can
     excite it. Use this on the gate you want to AC-probe INSTEAD of the bias-parameter
@@ -39,7 +40,13 @@ def setup_circuit_contact(device: str, contact: str, *,
     `edge_charge_model` is the contact's displacement-flux model (the charge whose AC derivative is
     the small-signal current). Returns (source_name, node_name)."""
     ds.add_circuit_node(name=node_name, variable_update="default")
-    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0, acreal=1.0, acimag=0.0)
+    if not (float(v_ac) > 0.0):
+        raise ValueError("setup_circuit_contact: v_ac must be > 0; got {!r}".format(v_ac))
+    # audit C6-2: the AC amplitude used to be hardcoded 1.0 while ssac_admittance divided
+    # by a caller-supplied v_ac nothing tied to it -- any v_ac != 1 silently mis-scaled
+    # C and G by 1/v_ac. The source now carries the SAME v_ac the admittance divides by.
+    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
+                       acreal=float(v_ac), acimag=0.0)
     cn = "{}_circuit_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cn,
                           equation="Potential - {}".format(node_name))
@@ -61,7 +68,12 @@ def ssac_admittance(frequencies, *, source_name: str = "V1", v_ac: float = 1.0):
     via DEVSIM's ssac. The caller must have (1) attached an AC source with setup_circuit_contact and
     (2) solved DC (ds.solve(type='dc', ...)) first. Sweeps `frequencies` (Hz) and returns
     (freqs, C, G): C = -Im(I_source)/(omega*v_ac) [F or F/m^2 in 1-D], G = -Re(I_source)/v_ac
-    [S or S/m^2]. A passive capacitor gives C > 0, G ~ 0 (validated)."""
+    [S or S/m^2]. A passive capacitor gives C > 0, G ~ 0 (validated).
+
+    v_ac MUST equal the amplitude the source was built with (setup_circuit_contact /
+    setup_contact_ohmic_bipolar_circuit v_ac=, default 1.0 on both sides) -- audit C6-2:
+    the old sources hardcoded acreal=1.0, so any v_ac != 1 here silently mis-scaled C and
+    G by 1/v_ac. (ssac is linear, so Y is amplitude-invariant when the two agree.)"""
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=np.float64))
     if np.any(freqs <= 0.0):
         raise ValueError("frequencies must be > 0 Hz")

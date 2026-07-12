@@ -339,9 +339,14 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     def _ncell(L):
         wpL = getattr(L, "drude_wp_rad_s", 0.0)
         if wpL > 0:                                              # circular-mode index bound for grid sizing
+            # audit C3-3: max over BOTH circular branches (w -/+ wc) -- the single (w - wc)
+            # branch is resonant only for wc > 0, silently under-sizing dz for reversed
+            # magnetization; floor by the background birefringent indices too.
             eps_inf = 0.5 * (L.eps_xx + L.eps_yy)
-            return max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - L.cyclotron_wc_rad_s) + 1j * w * L.drude_gamma_rad_s)))
-                       for w in w_band)
+            wcL = L.cyclotron_wc_rad_s
+            n_circ = max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - s * wcL) + 1j * w * L.drude_gamma_rad_s)))
+                         for w in w_band for s in (+1, -1))
+            return max(n_circ, np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
         return max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
     n_max = max(1.0, max(_ncell(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
