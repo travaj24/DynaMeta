@@ -271,12 +271,20 @@ def main():
                                     - _Rot2(phi_c) @ np.asarray(Jr_r) @ _Rot2(-phi_c))))
     _, _, Jr_p0, _ = lum.berreman_jones_1d([(eps_uni, d)], n_sub, n_sup, LAM, angle=th_c, phi=0.0)
     phi_matters = float(np.max(np.abs(np.asarray(Jr_c) - np.asarray(Jr_p0))))   # phi genuinely used
-    # the Design-level conical solve also runs end-to-end + conserves energy (lossless tensor)
+    # audit C4-2: the DESIGN-LEVEL conical solve must now RAISE -- the bridge's lab-basis
+    # 'y' row at phi != 0 is an s/p mixture, not the FEM's rotated s-hat, so the old
+    # end-to-end conical leg pinned a wrong-polarization number (probe: 32% off the s-pol
+    # truth). The covariance/phi-matters legs above exercise lumenairy's conical ENGINE
+    # directly (bridge-independent) and stay; bridge-level conical returns when per-order
+    # Jones synthesis lands (audit section 8 expansion item).
     d_con = _design([Layer("film", d, "lo")], pol="y", theta=20.0, phi=30.0)
-    r_con = make_lumenairy_berreman_solver()(d_con, None, {"film": EpsField(tensor=eps_uni)},
-                                             LAM, n_sup, n_sub)
-    conical_ok = bool(covar_err < 1e-9 and phi_matters > 1e-2
-                      and abs(r_con.R + r_con.T - 1.0) < 1e-9)
+    conical_raised = False
+    try:
+        make_lumenairy_berreman_solver()(d_con, None, {"film": EpsField(tensor=eps_uni)},
+                                         LAM, n_sup, n_sub)
+    except NotImplementedError as exc:
+        conical_raised = "conical" in str(exc)
+    conical_ok = bool(covar_err < 1e-9 and phi_matters > 1e-2 and conical_raised)
     # DISPATCH BOUNDARY: a patterned layer must RAISE pointing at RCWA
     pil = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 150e-9, 80e-9), material="pillar")
     d_pat = _design([Layer("slab", 200e-9, "air", inclusions=[pil])], pol="y")

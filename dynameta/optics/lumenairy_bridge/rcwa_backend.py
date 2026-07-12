@@ -104,16 +104,22 @@ def _guard_incidence_side(optical) -> None:
 
 
 def _guard_conical_ppol(optical, phi_rad: float) -> None:
-    """p-polarization at CONICAL incidence (azimuth != 0) is unsupported: the lab-basis Jones -> tmm
-    p-hat conversion (_p_basis_conversion) assumes the x-z plane of incidence, so the lab E_x row is
-    NOT the TM eigen-polarization once phi != 0 (measured: a spurious ~4.5% azimuth dependence on an
-    isotropic stack). 's'/'y'/'x' are fine at conical; only 'p' needs phi == 0."""
-    pol = getattr(optical, "polarization", "y") or "y"
-    if pol == "p" and abs(float(phi_rad)) > 1e-12:
+    """CONICAL incidence (azimuth != 0) is unsupported for EVERY polarization (audit C4-2):
+    the bridges map 'x'/'y' to the lumenairy LAB rows, which at phi != 0 are phi-dependent
+    s/p MIXTURES -- not the rotated s-hat = (-sin phi, cos phi) eigen-polarization the FEM
+    implements and OpticalSpec documents (probe: theta=30, phi=45 on bare glass returned
+    R=0.0392 vs the s-pol truth 0.0578, 32% low, silently; at phi=90 exactly the ORTHOGONAL
+    polarization); the 'p' lab-basis conversion likewise assumes the x-z plane of incidence.
+    (The previous guard covered only 'p', with a comment wrongly claiming 'x'/'y' are fine.)
+    True conical s/p through the bridges needs per-order Jones synthesis -- a follow-on;
+    until then refuse rather than return a wrong-polarization number."""
+    if abs(float(phi_rad)) > 1e-12:
+        pol = getattr(optical, "polarization", "y") or "y"
         raise NotImplementedError(
-            "lumenairy bridge: p-polarization at conical incidence (azimuth != 0) is not supported "
-            "-- the p-basis conversion assumes the x-z plane of incidence (use polarization 's'/'y', "
-            "set azimuth_deg=0, or use the FEM solver for conical p-pol).")
+            "lumenairy bridge: conical incidence (azimuth != 0) is not supported for "
+            "polarization {!r} -- the bridge's lab-basis rows are phi-dependent s/p mixtures, "
+            "not the FEM's rotated s/p eigen-polarizations (audit C4-2). Set azimuth_deg=0 or "
+            "use the FEM solver for conical incidence.".format(pol))
 
 
 def _min_samples(n_orders: int) -> int:
@@ -368,9 +374,19 @@ class LumenairyStackSolver:
         t0 = time.perf_counter()
         _guard_incidence_side(optical)
         _guard_conical_ppol(optical, _angles_rad(optical)[1])
+        structured = not stack.is_unstructured
+        # audit C5-8: the lambda-sized fallback period is only harmless when the stack is
+        # laterally UNIFORM (0-order-only physics); a STRUCTURED stack solved at a fabricated
+        # period gets wrong diffraction geometry silently (probe: R=0.061 vs 0.191 correct)
+        if structured and (float(stack.period_x_m or 0.0) <= 0.0
+                           or float(stack.period_y_m or 0.0) <= 0.0):
+            raise ValueError(
+                "LumenairyStackSolver: the stack holds structured (eps_cell/eps_tensor_cell) "
+                "slabs but period_x_m/period_y_m are unset (LayeredStack defaults 0.0; the "
+                "slicers do not populate them) -- set the real lattice periods on the "
+                "LayeredStack (audit C5-8; the old code silently substituted px=py=lambda).")
         px = stack.period_x_m or float(lambda_m)          # period is irrelevant when uniform
         py = stack.period_y_m or float(lambda_m)
-        structured = not stack.is_unstructured
         if structured:
             rs = lum.RCWAStack(px, period_y=py, n_superstrate=complex(stack.n_super),
                                n_substrate=complex(stack.n_sub), n_orders=self.n_orders,

@@ -201,8 +201,12 @@ def collapse_regions_to_layers(design, eps_by_region) -> dict:
     lifted field, so identical-by-construction) and merge to one entry; members that
     genuinely differ (a laterally split effect modulation no layered extractor can
     represent) raise. IDENTITY for an already-layer-keyed dict; superstrate / substrate /
-    pml_* / other unmatched keys are ignored. Longest layer name claims a key first, so
-    overlapping layer-name prefixes cannot mis-assign."""
+    pml_* keys are ignored. Any OTHER unclaimed key raises (audit C5-11): a drifted /
+    renamed / typo'd region key used to be silently dropped, making the layer's
+    bias-modulated eps silently revert to the nominal material in every layered backend
+    (probe: output bit-identical to passing no eps dict) while the FEM side of the same
+    seam fails loudly for exactly this drift class. Longest layer name claims a key
+    first, so overlapping layer-name prefixes cannot mis-assign."""
     if not eps_by_region:
         return {}
     remaining = dict(eps_by_region)
@@ -224,4 +228,13 @@ def collapse_regions_to_layers(design, eps_by_region) -> dict:
                     "eps fields (a laterally split modulation); the layered extractors "
                     "cannot represent it -- use the FEM solver".format(L.name, keys))
         out[L.name] = ref
+    unclaimed = [k for k in remaining
+                 if k not in ("superstrate", "substrate") and not k.startswith("pml_")]
+    if unclaimed:
+        raise ValueError(
+            "collapse_regions_to_layers: eps_by_region keys {} match no design layer "
+            "(layers: {}) -- a drifted/renamed region key would silently revert that "
+            "layer to its nominal material eps (audit C5-11). Key entries by the design "
+            "layer name (or its FEM subregion names).".format(
+                sorted(unclaimed), sorted(L.name for L in design.stack.layers)))
     return out
