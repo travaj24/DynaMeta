@@ -111,3 +111,42 @@ def test_sweepresults_wavelength_collision_raises():
                                                  result=SimpleNamespace(R=0.5))
                                  for w in (1300.0, 1310.0)])
     assert ok.wavelengths_nm.size == 2                   # normal sweeps unaffected
+
+
+def test_sweep_duplicate_bias_labels_raise():
+    # audit C6-3: duplicate labels silently collapsed to the last point
+    import pytest
+    from dynameta.sweep import BiasPoint, Sweep
+    with pytest.raises(ValueError, match="duplicate bias-point labels"):
+        Sweep(bias_points=[BiasPoint({"g": 0.0}, "on"), BiasPoint({"g": 1.0}, "on")],
+              wavelengths_nm=[1300.0])
+    Sweep(bias_points=[BiasPoint({"g": 0.0}, "off"), BiasPoint({"g": 1.0}, "on")],
+          wavelengths_nm=[1300.0])                             # distinct labels fine
+
+
+def test_dispersion_check_catches_inband_feature():
+    # audit C5-12: equal band-edge n with an in-band resonance must DISABLE the fast path
+    # (the old two-edge check false-passed and froze a wrong band-centre index)
+    import warnings
+    import numpy as np
+    import pytest
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical, TabulatedOptical
+    from dynameta.optics.tmm_reference import end_media_indices
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("m", ConstantOptical(4.0 + 0j)))
+    reg.add(Material("bump", TabulatedOptical(lambda_m=np.array([1.20e-6, 1.325e-6, 1.45e-6]),
+                                              eps_complex=np.array([4.0 + 0j, 6.0 + 0j, 4.0 + 0j]))))
+    d = Design(name="t", unit_cell=UnitCell.square(300e-9),
+               stack=Stack(layers=[Layer("s", 100e-9, "m")],
+                           superstrate_material="air", substrate_material="bump"),
+               electrodes=[], materials=reg)
+    lams = [1.20e-6, 1.325e-6, 1.45e-6]
+    # edges are equal (the old check's blind spot)...
+    ns_lo, nb_lo = end_media_indices(d, lams[0])
+    ns_hi, nb_hi = end_media_indices(d, lams[-1])
+    assert abs(nb_lo - nb_hi) < 1e-12
+    # ...but the band-centre (freeze point) differs -- the NEW check must flag it
+    _, nb_c = end_media_indices(d, 0.5 * (lams[0] + lams[-1]))
+    assert abs(nb_c - nb_lo) > 0.1
