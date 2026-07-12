@@ -29,7 +29,12 @@ class FDTDLayer:
     """One layer of the 1D stack. Non-dispersive eps_inf, plus an optional Drude pole
     (eps -= wp^2/(w^2 + i gamma w)), an optional Lorentz pole (eps += d_eps w0^2/(w0^2 - w^2 - i gl w),
     the bound-electron / interband resonance the bare Drude cannot capture) and an instantaneous Kerr
-    chi3 (eps += chi3 |E|^2). All optional terms default off, so a plain dielectric is just eps_inf.
+    chi3 in the STANDARD chi^(3) convention: P_NL = eps0 chi3 E^3, i.e. the update uses
+    eps_eff = eps_inf + 3 chi3 E(t)^2 and the fundamental-band shift is
+    d_eps = (3/4) chi3 |A|^2 (audit C3-2: the update previously used eps_inf + chi3 E^2 --
+    an effective chi^(3) three times weaker than the literature value entered, and 4x weaker
+    than this docstring then claimed; chi3_m2_V2 now takes literature chi^(3) values
+    directly). All optional terms default off, so a plain dielectric is just eps_inf.
 
     The 2D/3D engine (fdtd_nd) carries the Drude + Kerr; the Lorentz pole is honored by the 2D-TE kernels
     (numpy/numba) via the central-difference ADE (a second polarization state PL). eps(w) at one lambda is
@@ -103,7 +108,7 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
         # E update (interior): eps0 eps_eff dE/dt = -dHy/dz - (J^{n+1}+J^n)/2, with the Kerr eps_eff
         curl = np.zeros(nz)
         curl[1:-1] = (Hy[1:] - Hy[:-1]) / dz
-        eps_eff = eps_inf + chi3 * Ex ** 2             # instantaneous Kerr
+        eps_eff = eps_inf + 3.0 * chi3 * Ex ** 2       # Kerr: d(chi3 E^3)/dt = 3 chi3 E^2 dE/dt (C3-2)
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Enew = (EPS0 * eps_eff / dt * Ex + curl - 0.5 * (1.0 + aJ) * J - 0.5 * bJ * Ex) / denom
         Jnew = aJ * J + bJ * (Enew + Ex)
