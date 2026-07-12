@@ -1126,3 +1126,62 @@ physics into new paths. Order:
 The lens/GBD/caustics side of lumenairy (irrelevant to periodic unit cells) and EME
 (niche unless waveguide work is planned). EMT screen and BOR are already bridged at
 the right scope.
+
+---
+
+## 9. Remediation status (branch `fix/deep-audit-2026-07-05`, updated 2026-07-12)
+
+Every fix below landed with a regression gate verified (or constructed) to discriminate
+against the pre-fix code; affected pytest files and NGSolve/DEVSIM/bridge/statistical
+validations pass locally after each commit.
+
+**FIXED — P1 (all three):**
+- C5-1 bridge graded-slab flip (5c5505c) — `reversed()` x3 + asymmetric-lossy
+  bridge-vs-TMM gate (fails on pre-fix code by construction).
+- C4-1 Norris-Landzberg inversion (951eb72) — ratio flipped; GATE B de-tautologized to a
+  primitive-law Nf ratio + exact frequency-only direction leg; pytest direction pin.
+- C5-2 FDTD seam graded/tensor drop (99c11d7) — graded fields sliced like the TMM peer;
+  tensor/structured/broadband raise; DrudeOptical crash repro fixed; end-to-end
+  modulation-sensitivity FDTD gate.
+
+**FIXED — P2 physics formulas (Wave 2):**
+- C7b-1 KaneOpticalMass halved alpha (007d442) — exact √(1+4αγ_F); legacy=True
+  back-compat (α_legacy=2α); gate/test de-circularized to a numeric-dispersion reference.
+- C2-2 Kane ⟨m*(Te)⟩ Sommerfeld K-factor (2c1e7db) — exact-FD shift gate (1.9% vs
+  pre-fix 20%).
+- C4-3 spont-spont 2x (7afc83c) — Olsson-identity gate.
+- C4-4 Langevin exact-emit (c92053d) — telescoping-identity gate; validation GATE B
+  now 1.9e-3.
+- C3-7 absorption ÷Re(n_super) (19dad3f) — dense-superstrate lossy closure GATE C
+  (ratio 0.999 vs pre-fix 1.5).
+- C3-4 t0 de-embed n-aware (b4ad5a2) — hand-derived factor; t0-PHASE legs in all four
+  nonvacuum gates (0.2-1.1° vs ~100° pre-fix).
+- C3-2 Kerr standard chi3 (3152749) — factor 3 in all eight kernels incl. CUDA;
+  ABSOLUTE SPM GATE F vs measured analytic pump (0.992 vs pre-fix 0.33).
+
+**FIXED — P2 seams/guards (Wave 3):**
+- C4-2 conical any-pol raise + C5-8 structured-period raise + C5-11 collapse
+  unclaimed-key raise (f5cd4f0; Berreman validation conical leg converted to must-raise).
+- C5-3 material-content cache keys + C5-6 solver-identity keys, _SCHEMA 4 (8abd725).
+- C5-7 seam design.optical guards + oblique chi2/raman/gain raises (663b0eb).
+- C5-12 full-band dispersion check + C6-3 Sweep duplicate-label raise (7817409).
+- C5-9 signed Arrhenius Ea + C5-10 no silent callable substitution (3946db9).
+- C2-1 body_net_doping_m3 phi_bi contract + C2-3 2D lateral-isolation raises +
+  semi-semi carrier-blocking raise (69c5ccb; gated_dd_2d/bipolar_diode_2d/
+  carriers_3d_bipolar all pass).
+- C4-5 eh_split excitonic-accessor raises (77db547).
+
+**PENDING (next tranche):**
+- SOA composability: C4-6 line_filter ES cancellation, C4-7 dualpol TM pairing
+  (step_slices_wdm), C4-8 calibration bandwidth keys/caveats.
+- C4-9 TDDB field statistic (per-layer |Ez| max on ElectrostaticResult + adapter).
+- Optics extraction: C3-1 adaptive FEM probe grid, C3-3 MO both-branch grid sizing,
+  C3-5 CPML grazing band mask, C3-6 material-memory ring-down window.
+- Impact-ionization 3D dimension guard (§7.1 regrade).
+- C5-4 per_region_absorption keying unification (TMM re-key to design layer names).
+- C5-5 extras-through-the-lift normalization (bridge.py 2D path).
+- C6-1 lc_director_2d error-based convergence, C6-2 ssac v_ac contract, C6-4 LC tol
+  floor.
+- The §7.3 tautology-sweep batch (reliability_tddb GATE B rebuild + the classified
+  self-referential gates), stale-docs batch (§6.3), P3 hygiene batch, and the §6.2
+  performance items (cache autosave batching first).
