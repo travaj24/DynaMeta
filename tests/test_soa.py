@@ -1003,3 +1003,16 @@ def test_dualpol_tm_depletes_at_its_own_frequency():
     g0 = 10.0 * np.log10(dual0["P_tm_out"][-1] / abs(A) ** 2)
     s0 = soa.amplify_coherent(np.full(n, A), drive=160e-3, alpha_lef=0.0, line_filter=False)
     assert abs(g0 - 10.0 * np.log10(s0["P_out"][-1] / abs(A) ** 2)) < 1e-9
+
+
+def test_calibration_reports_both_bandwidth_notions():
+    # audit C4-8: report['bandwidth_nm'] presented the fitted MATERIAL half-max width as
+    # the datasheet's NET -3 dB observable, which this device does NOT match -- the two
+    # must now be distinct keys, with the net bandwidth honestly ~3-4x narrower
+    from dynameta.optics.soa.calibration import calibrate_innolume_boa1310
+    dev = calibrate_innolume_boa1310(verbose=False)
+    r = dev.report
+    assert r["material_fwhm_nm"] == pytest.approx(r["bandwidth_nm"])   # back-compat alias
+    assert 40.0 < r["material_fwhm_nm"] < 80.0                         # ~datasheet 60 nm
+    assert 8.0 < r["net_3dB_bw_nm"] < 30.0                             # honest net width
+    assert r["net_3dB_bw_nm"] < 0.5 * r["material_fwhm_nm"]           # narrowing is real

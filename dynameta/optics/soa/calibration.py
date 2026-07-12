@@ -4,7 +4,7 @@ QD Booster Optical Amplifier on carrier), the very 'Innolume set' QDGainParams' 
 yet exist.
 
 WHAT THIS FITS (the STATIC / CW load-bearing axes the datasheet constrains): peak wavelength (read-off),
-gain bandwidth (fwhm_inhom), small-signal gain magnitude (sigma_pk, the effective free factor of the
+gain bandwidth (fwhm_inhom -- SEE THE C4-8 CAVEAT BELOW), small-signal gain magnitude (sigma_pk, the effective free factor of the
 degenerate product Gamma*N_q*mu_GS*sigma_pk*L -- N_q is FIXED at a standard QD value, recorded as the
 convention), the absolute saturation output power P_sat (A_mode), and the GS/ES band split (dE_ES_GS,
 enabling the two-band ASE). The fit + the validation use only STEADY-STATE physics (the gain core's
@@ -17,6 +17,18 @@ enhancement factor alpha_lef (no chirp/FWM data), the carrier kinetic times tau_
 (no pump-probe / modulation-bandwidth), RIN / linewidth, NF(lambda)/NF(G), TPA/FCA, and the thermal
 slopes. Pin those with a pump-probe gain-recovery trace, an FWM / chirp-asymmetry measurement, an RF-RIN
 measurement, a spectral-NF measurement, and gain-vs-temperature data respectively.
+
+BANDWIDTH CAVEAT (audit C4-8): the datasheet's '-3 dB gain bandwidth 60 nm' is a NET
+amplifier-gain observable, but this fit maps it onto the MATERIAL-gain half-max width
+(the intrinsic/inhomogeneous interpretation argued in _bandwidth_nm). The resulting
+device's NET -3 dB bandwidth at the 35 dB peak is only ~16-17 nm (high-gain spectral
+narrowing) -- ~3.6x narrower than the datasheet number. Off-peak spectral predictions
+(WDM channels near the band edges, XGM/ASE/OSNR spectra) inherit that narrowing: two
+channels at 1280/1340 nm see ~12-13 dB where the real BOA delivers >= 32 dB. The report
+carries BOTH numbers under distinct keys (material_fwhm_nm, net_3dB_bw_nm);
+'bandwidth_nm' remains an alias of the fitted material width for back-compat. Co-fitting
+the ES strength / a flat-topped inhomogeneous profile to widen the net band is the
+tracked refinement.
 
 SI; ASCII; exp(-i omega t).
 """
@@ -169,7 +181,18 @@ def calibrate_innolume_boa1310(N_q_m3=5.0e22, alpha_i_per_m=300.0, n_groups=41, 
     G0 = _g0_dB(m, drive, nu0, alpha_i_per_m, L)
     bw = _bandwidth_nm(m, drive, nu0, alpha_i_per_m, L)
     ps, _ = _psat_out_dBm(m, drive, nu0, alpha_i_per_m, L)
-    report = {"G0_dB": G0, "bandwidth_nm": bw, "Psat_out_dBm": ps, "sigma_pk_m2": sig,
+    # audit C4-8: report BOTH bandwidth notions under distinct keys -- 'bandwidth_nm'
+    # (the fitted MATERIAL half-max width, kept as a back-compat alias) previously
+    # presented itself as the datasheet's NET -3 dB observable, which this device does
+    # NOT match (net ~16-17 nm vs datasheet 60 nm; module-header caveat).
+    nu_g = nu0 + np.linspace(-30e12, 30e12, 1201)
+    net_dB = _net_gain_spectrum(m, drive, nu_g, alpha_i_per_m, L)
+    in_band = nu_g[net_dB >= float(net_dB.max()) - 3.0]
+    lam0 = C_LIGHT / nu0
+    net_bw_nm = (float((in_band.max() - in_band.min()) * lam0 * lam0 / C_LIGHT * 1.0e9)
+                 if in_band.size >= 2 else 0.0)
+    report = {"G0_dB": G0, "bandwidth_nm": bw, "material_fwhm_nm": bw,
+              "net_3dB_bw_nm": net_bw_nm, "Psat_out_dBm": ps, "sigma_pk_m2": sig,
               "fwhm_inhom_Hz": fwhm, "A_mode_m2": A_mode, "dE_ES_GS_eV": dE, "N_q_m3": N_q_m3,
               "alpha_i_per_m": alpha_i_per_m}
     if verbose:
