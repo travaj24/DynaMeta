@@ -1170,18 +1170,24 @@ validations pass locally after each commit.
   semi-semi carrier-blocking raise (69c5ccb; gated_dd_2d/bipolar_diode_2d/
   carriers_3d_bipolar all pass).
 - C4-5 eh_split excitonic-accessor raises (77db547).
+- C3-3 MO both-branch grid sizing + II-3D dimension guard + C6-4 LC rtol honored +
+  C6-2 v_ac threaded through both AC sources (1a2e8fa; ac/mo/ii validations pass).
+- C5-5 extras ride the lift — the silent x<->y transpose at shipped defaults (0c48abe;
+  discrimination-proven gate).
+- C6-1 lc_director_2d certifies on the geometric-tail error estimate, not update size
+  (residual now reports the estimate; parity validation passes).
+- C4-9 TDDB stress = sign-robust layer-mean |Ez| via new
+  ElectrostaticResult.mean_absEz_per_layer (50f2ff0; split-gate probe: signed mean
+  1.2e4 vs |Ez| mean 3.0e8 V/m; end-to-end skip-gated NGSolve test).
 
 **PENDING (next tranche):**
 - SOA composability: C4-6 line_filter ES cancellation, C4-7 dualpol TM pairing
   (step_slices_wdm), C4-8 calibration bandwidth keys/caveats.
-- C4-9 TDDB field statistic (per-layer |Ez| max on ElectrostaticResult + adapter).
-- Optics extraction: C3-1 adaptive FEM probe grid, C3-3 MO both-branch grid sizing,
-  C3-5 CPML grazing band mask, C3-6 material-memory ring-down window.
-- Impact-ionization 3D dimension guard (§7.1 regrade).
+- Optics extraction: C3-1 adaptive FEM probe grid, C3-5 CPML grazing band mask,
+  C3-6 material-memory ring-down window.
 - C5-4 per_region_absorption keying unification (TMM re-key to design layer names).
-- C5-5 extras-through-the-lift normalization (bridge.py 2D path).
-- C6-1 lc_director_2d error-based convergence, C6-2 ssac v_ac contract, C6-4 LC tol
-  floor.
 - The §7.3 tautology-sweep batch (reliability_tddb GATE B rebuild + the classified
   self-referential gates), stale-docs batch (§6.3), P3 hygiene batch, and the §6.2
-  performance items (cache autosave batching first).
+  performance items (cache autosave batching first — mind the documented naive-append
+  hazard). Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
+  per-order Jones synthesis for bridge conical s/p.
