@@ -29,7 +29,13 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 # older (buggy) keying is DISCARDED on load rather than serving collided/mis-keyed entries.
 #   2 -> 3: uniform-anisotropic `tensor` eps is now hashed into the key (previously all uniform-tensor
 #           states collided -- a Pockels/Kerr/magneto-optic bias sweep served the first point's result).
-_SCHEMA = 3
+#   3 -> 4 (audit C5-3/C5-6): material eps CONTENT (sampled at the request wavelength) and the inner
+#           SOLVER identity are now keyed, and Feature.priority joined the design fingerprint.
+#           Previously (a) retuning a material's optical constants under an unchanged registry name
+#           served stale results (backends re-derive eps from design.materials at solve time; probe:
+#           HIT returned R=0.179 where the truth was 0.059), and (b) two different backends sharing a
+#           cache path with the default tag='' served each other's specular-vs-order-summed numbers.
+_SCHEMA = 4
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
 # OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
 # per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
@@ -72,7 +78,8 @@ def _design_fingerprint(design) -> bytes:
                       str(getattr(inc, "priority", 0))]
     for ft in (getattr(design.stack, "features", []) or []):
         parts += ["feat", repr(getattr(ft, "shape", "")), str(getattr(ft, "material", "")),
-                  repr(float(getattr(ft, "z_lo_m", 0.0))), repr(float(getattr(ft, "z_hi_m", 0.0)))]
+                  repr(float(getattr(ft, "z_lo_m", 0.0))), repr(float(getattr(ft, "z_hi_m", 0.0))),
+                  str(getattr(ft, "priority", 0))]           # priority resolves overlaps (audit C5-3)
     parts += [str(design.stack.superstrate_material), str(design.stack.substrate_material)]
     # the optical INCIDENCE spec changes R/T but NOT the eps grid -- it MUST be in the key, else an
     # angle/polarization/side sweep silently serves the cached result for a different angle (audit HIGH).
@@ -84,13 +91,47 @@ def _design_fingerprint(design) -> bytes:
     return hashlib.sha1("|".join(parts).encode("utf-8")).digest()
 
 
-def _key(design, eps_by_region, lambda_m, n_super, n_sub, tag) -> str:
+def _materials_fingerprint(design, lambda_m) -> bytes:
+    """audit C5-3: the non-FEM backends re-derive eps from design.materials at SOLVE time, so
+    the key must carry the material CONTENT, not just names -- retuning a material's optical
+    constants under an unchanged registry name used to serve stale cached results. Each
+    referenced material's eps is sampled AT THE REQUEST WAVELENGTH (exactly what the backend
+    will read; lambda is already a key input). Models whose eps needs runtime state (e.g.
+    DrudeOptical without n_m3 -- the carrier value arrives via eps_by_region, which is
+    already keyed) fall back to their repr: a deterministic dataclass repr is content-bearing,
+    and a non-deterministic repr only causes safe re-solves, never staleness."""
+    names = {str(design.stack.superstrate_material), str(design.stack.substrate_material)}
+    for L in design.stack.layers:
+        names.add(str(getattr(L, "background_material", "")))
+        for inc in (getattr(L, "inclusions", []) or []):
+            names.add(str(getattr(inc, "material", "")))
+    for ft in (getattr(design.stack, "features", []) or []):
+        names.add(str(getattr(ft, "material", "")))
+    h = hashlib.sha1()
+    for name in sorted(n for n in names if n):
+        h.update(name.encode("utf-8"))
+        try:
+            mat = design.materials.get(name)
+        except Exception:
+            h.update(b"!missing")
+            continue
+        try:
+            z = complex(mat.eps(float(lambda_m)))
+            h.update(struct.pack("<dd", z.real, z.imag))
+        except Exception:
+            h.update(repr(mat).encode("utf-8"))
+    return h.digest()
+
+
+def _key(design, eps_by_region, lambda_m, n_super, n_sub, tag, solver_id="") -> str:
     h = hashlib.sha1()
     h.update(_design_fingerprint(design)); h.update(_eps_fingerprint(eps_by_region))
+    h.update(_materials_fingerprint(design, lambda_m))       # audit C5-3
     h.update(struct.pack("<d", float(lambda_m)))
     for n in (n_super, n_sub):
         z = complex(n); h.update(struct.pack("<dd", z.real, z.imag))
     h.update(str(tag).encode("utf-8"))
+    h.update(str(solver_id).encode("utf-8"))                 # audit C5-6: backend identity
     return "k" + h.hexdigest()                              # valid HDF5/Zarr dataset name
 
 
@@ -104,6 +145,15 @@ class OpticalSolverCache:
         self.inner = inner_solver
         self.path = path
         self.tag = str(tag)
+        # audit C5-6: key the inner solver's IDENTITY so two different backends sharing a
+        # cache path with the default tag='' cannot serve each other's results (FEM specular
+        # vs bridge order-summed R/T; probe: swapped backend served R=0.107 where 0.177 is
+        # correct). Function qualnames carry the factory ('make_layered_tmm_solver.<locals>.
+        # _solve'); class instances use the class qualname. An explicit `tag` still namespaces
+        # solver SETTINGS (resolution, orders) within one backend.
+        self._solver_id = "{}:{}".format(
+            getattr(inner_solver, "__module__", type(inner_solver).__module__),
+            getattr(inner_solver, "__qualname__", type(inner_solver).__qualname__))
         self.fmt = fmt
         self.autosave = bool(autosave)
         self.verbose = bool(verbose)
@@ -124,7 +174,7 @@ class OpticalSolverCache:
                 self._mem = {}
 
     def __call__(self, design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
-        key = _key(design, eps_by_region, lambda_m, n_super, n_sub, self.tag)
+        key = _key(design, eps_by_region, lambda_m, n_super, n_sub, self.tag, self._solver_id)
         if key in self._mem:
             self.hits += 1
             return self._unpack(self._mem[key])
