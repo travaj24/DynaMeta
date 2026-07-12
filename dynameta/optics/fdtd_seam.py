@@ -94,15 +94,38 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
     """[FDTDLayer] for the through-stack in SUPERSTRATE-FIRST (incidence) order -- the order solve_fdtd_*
     places layers (the Stack lists bottom->top, so reversed). A uniform layer uses the bridge's
-    eps_by_region scalar when present (the bias-modulated value), else the material eps(lambda_m). A layer
-    with lateral inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
+    eps_by_region scalar when present (the bias-modulated value), else the material eps(lambda_m). A
+    GRADED (gridded, laterally-uniform) EpsField entry is sliced into thin uniform FDTDLayers, mirroring
+    the TMM extractor (audit C5-2: it used to fall through to the NOMINAL material eps, silently zeroing
+    the bias modulation -- or crashing on a DrudeOptical carrier region whose eps needs n_m3). A TENSOR
+    entry raises (the scalar FDTD grid cannot carry anisotropy -- use the FEM); a layer with lateral
+    inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
+    from dynameta.core.layered import slice_eps_field
+    from dynameta.optics.tmm_reference import S as _S_NM
     layers = []
     for L in reversed(design.stack.layers):                # incidence order: superstrate side first
         if getattr(L, "inclusions", None):
             raise NotImplementedError("design_to_fdtd_layers: layer '{}' has lateral inclusions; the FDTD "
                                       "seam Phase 0 handles laterally-uniform stacks only.".format(L.name))
         ef = (eps_by_region or {}).get(L.name)
-        if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+        if ef is not None and getattr(ef, "is_tensor", False):
+            raise NotImplementedError(
+                "design_to_fdtd_layers: layer '{}' carries a TENSOR eps (anisotropic effect); the "
+                "scalar FDTD grid cannot represent it -- use the FEM solver.".format(L.name))
+        if ef is not None and not getattr(ef, "is_uniform", True):
+            v = np.asarray(ef.values_zyx)
+            if not np.allclose(v, v[:, :1, :1], rtol=1e-12, atol=0.0):
+                raise NotImplementedError(
+                    "design_to_fdtd_layers: layer '{}' carries a laterally-STRUCTURED gridded "
+                    "EpsField; the uniform-stack FDTD seam cannot represent it -- use the FEM "
+                    "solver or the RCWA bridge.".format(L.name))
+            # slice_eps_field returns ascending-z (substrate-first) slabs; incidence order
+            # is superstrate-first, so reversed (same contract as the TMM extractor and the
+            # lumenairy bridges, audit C5-1); axes are nm solver units (the bridge convention)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM)):
+                layers.append(_eps_to_fdtd_layer(float(slab.thickness_m), complex(slab.eps), lambda_m))
+            continue
+        if ef is not None and getattr(ef, "scalar", None) is not None:
             eps = complex(ef.scalar)
         else:
             eps = complex(design.materials.get(L.background_material).eps(lambda_m))
@@ -253,8 +276,19 @@ def _cell_axes(nx, ny, period_x_m, period_y_m):
 
 def _layer_bg_eps(layer, lambda_m, materials, eps_by_region):
     ef = (eps_by_region or {}).get(layer.name)
-    if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
-        return complex(ef.scalar)
+    if ef is not None:
+        if getattr(ef, "is_tensor", False) or not getattr(ef, "is_uniform", True):
+            # audit C5-2: the structured (rasterized) path used to silently substitute the
+            # NOMINAL material eps for a graded/tensor entry -- the per-layer lateral painter
+            # can only carry one uniform scalar per layer, so refuse rather than mis-solve
+            raise NotImplementedError(
+                "FDTD structured path: layer '{}' carries a {} eps_by_region entry; the lateral "
+                "rasterizer represents one uniform scalar per layer -- use the FEM solver (or the "
+                "RCWA bridge) for graded/tensor structured cells.".format(
+                    layer.name,
+                    "TENSOR" if getattr(ef, "is_tensor", False) else "graded (gridded)"))
+        if getattr(ef, "scalar", None) is not None:
+            return complex(ef.scalar)
     return complex(materials.get(layer.background_material).eps(lambda_m))
 
 
@@ -436,6 +470,19 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
         res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
     else:
         if dispersive:                                      # fit one Drude pole per layer across the band
+            # audit C5-2: the dispersive band fit never reads eps_by_region (modulation must
+            # arrive via eps_band_by_region); a graded/tensor entry here used to be silently
+            # IGNORED -- refuse rather than solve the unmodulated stack
+            for _name, _ef in (eps_by_region or {}).items():
+                if _ef is not None and (getattr(_ef, "is_tensor", False)
+                                        or not getattr(_ef, "is_uniform", True)):
+                    raise NotImplementedError(
+                        "fdtd_sweep_spectrum(dispersive=True): eps_by_region['{}'] is a {} "
+                        "EpsField; the one-Drude-pole-per-layer band fit cannot carry it. Use "
+                        "the per-wavelength FDTD solver (which slices graded layers), or "
+                        "dispersive=False (frozen-at-centre slicing), or TMM/FEM.".format(
+                            _name, "TENSOR" if getattr(_ef, "is_tensor", False)
+                            else "graded (gridded)"))
             layers = _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m,
                                                         eps_band_by_region=eps_band_by_region, n_fit=n_fit)
         else:
@@ -532,7 +579,19 @@ class FDTDSweepOpticalSolver:
             vals = []
             for s in samples:
                 ef = (s or {}).get(L.name)
-                if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+                if ef is not None and (getattr(ef, "is_tensor", False)
+                                       or not getattr(ef, "is_uniform", True)):
+                    # audit C5-2: a graded/tensor bias eps used to silently fall back to the
+                    # NOMINAL material band (zeroing the modulation, or crashing on a
+                    # DrudeOptical carrier region with a misleading n_m3 error)
+                    raise NotImplementedError(
+                        "FDTDSweepOpticalSolver.solve_sweep: layer '{}' carries a {} EpsField "
+                        "for this bias; the broadband one-pole-per-layer path cannot carry it. "
+                        "Use the per-wavelength FDTD solver (make_fdtd_optical_solver, which "
+                        "slices graded layers) or the TMM sweep.".format(
+                            L.name, "TENSOR" if getattr(ef, "is_tensor", False)
+                            else "graded (gridded)"))
+                if ef is not None and getattr(ef, "scalar", None) is not None:
                     vals.append(complex(ef.scalar))
                 else:
                     vals = None
