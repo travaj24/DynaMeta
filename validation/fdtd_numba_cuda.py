@@ -53,7 +53,9 @@ def main():
     def lat(nx, nz, zc, pad, zs):
         e = np.ones((nx, nz)); mm = (zc >= pad) & (zc < pad + zs); e[:nx // 2, mm] = 6.25; return e
 
-    olc = [FDTDLayer(thickness_m=220e-9, eps_inf=3.0, drude_wp_rad_s=1.0e15, drude_gamma_rad_s=8e13,
+    # eps_inf sized to the lateral peak 6.25 (C3-3 guard: dz/n_max derive from `layers`);
+    # the painter overwrites eps everywhere, so this only refines the grid
+    olc = [FDTDLayer(thickness_m=220e-9, eps_inf=6.25, drude_wp_rad_s=1.0e15, drude_gamma_rad_s=8e13,
                      lorentz_delta_eps=1.5, lorentz_w0_rad_s=1.4e15, lorentz_gamma_rad_s=6e13)]
     kwc = dict(period_x_m=600e-9, lambda_min_m=1200e-9, lambda_max_m=1700e-9, resolution=14, nx=24,
                lateral_eps_inf=lat)

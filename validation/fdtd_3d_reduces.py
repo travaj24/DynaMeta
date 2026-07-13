@@ -75,8 +75,11 @@ def main():
         return e
 
     kw = dict(lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=16, n_pad_wave=4.0, settle=12.0)
-    r2 = solve_fdtd_2d([FDTDLayer(thickness_m=600e-9, eps_inf=1.0)], period_x_m=PX, lateral_eps_inf=lat2, **kw)
-    r3 = solve_fdtd_3d([FDTDLayer(thickness_m=600e-9, eps_inf=1.0)], period_x_m=PX, period_y_m=4000e-9,
+    # layer eps_inf sized to the LATERAL pattern max (4.0): the painter overwrites the eps
+    # everywhere, but dz/n_max derive from `layers` -- the C3-3 guard now (correctly)
+    # refuses the old eps_inf=1.0 fixture, whose dz was silently 2x under-resolved
+    r2 = solve_fdtd_2d([FDTDLayer(thickness_m=600e-9, eps_inf=4.0)], period_x_m=PX, lateral_eps_inf=lat2, **kw)
+    r3 = solve_fdtd_3d([FDTDLayer(thickness_m=600e-9, eps_inf=4.0)], period_x_m=PX, period_y_m=4000e-9,
                        ny=4, lateral_eps_inf=lat3, **kw)
     mB = r2.band                                            # 3D CFL dt differs via 1/dy^2 -> interp onto 2D grid
     f2, f3 = r2.freqs_Hz[mB], r3.freqs_Hz
@@ -97,7 +100,7 @@ def main():
             e[:, :, k] = np.where(blk, 6.25, 1.0)            # n=2.5 pillar in vacuum
         return e
 
-    rC = solve_fdtd_3d([FDTDLayer(thickness_m=500e-9, eps_inf=1.0)], period_x_m=900e-9, period_y_m=900e-9,
+    rC = solve_fdtd_3d([FDTDLayer(thickness_m=500e-9, eps_inf=6.25)], period_x_m=900e-9, period_y_m=900e-9,
                        lateral_eps_inf=pillar, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, n_pad_wave=4.0)
     mC = rC.band
     e_abs = np.abs(rC.R_flux[mC] + rC.T_flux[mC] - 1.0)
@@ -140,7 +143,7 @@ def main():
         for k in np.where(inb)[0]:
             e[:, :, k] = np.where(blk, 6.25, 1.0)
         return e
-    rE = solve_fdtd_3d([FDTDLayer(thickness_m=450e-9, eps_inf=1.0)], period_x_m=950e-9, period_y_m=950e-9,
+    rE = solve_fdtd_3d([FDTDLayer(thickness_m=450e-9, eps_inf=6.25)], period_x_m=950e-9, period_y_m=950e-9,
                        lateral_eps_inf=lshape, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=12, n_pad_wave=4.0)
     mE = rE.band
     eE = np.abs(rE.R_flux[mE] + rE.T_flux[mE] - 1.0)
