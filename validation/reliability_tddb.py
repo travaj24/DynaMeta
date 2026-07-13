@@ -57,8 +57,18 @@ def main():
     T1, T2, t_switch = 330.0, 390.0, 200.0                   # cool then hot
     # calibrate so the failure genuinely STRADDLES the switch (tb1 > t_switch > damage-to-go)
     p = TddbParams.calibrated(E_ox_V_m=E, T_K=T1, tbd_s=500.0, gamma_E_per_MV_cm=gam, Ea_eV=Ea)
-    tb1, tb2 = float(p.tbd_s(E, T1)), float(p.tbd_s(E, T2))
+    # audit C7b-2 de-tautologized: the old reference built tb1/tb2 FROM p.tbd_s -- the
+    # module's contribution cancelled identically and only the Miner bookkeeping was
+    # tested. The reference is now HAND-DERIVED from the E-model's stated physics using
+    # only the script's constants: the calibration anchors tb1 = 500 s at (E, T1) by
+    # definition, and tb2 = tb1 * exp((Ea/kB)(1/T2 - 1/T1)) is the independent Arrhenius
+    # evaluation -- a wrong sign/parenthesization/unit in tbd_s now FAILS this gate.
+    tb1 = 500.0
+    tb2 = tb1 * float(np.exp((Ea / KB_EV_K) * (1.0 / T2 - 1.0 / T1)))
     assert tb1 > t_switch, "gate setup: failure must straddle the T switch"
+    # cross-pin: the module must reproduce the hand values (calibration + Arrhenius)
+    assert abs(float(p.tbd_s(E, T1)) / tb1 - 1.0) < 1e-12
+    assert abs(float(p.tbd_s(E, T2)) / tb2 - 1.0) < 1e-12
     # analytic: damage D(t) = t/tb1 (t<ts); fail when ts/tb1 + (t-ts)/tb2 = 1
     t_fail_an = t_switch + (1.0 - t_switch / tb1) * tb2
     T_of_t = lambda t: T1 if t < t_switch else T2
