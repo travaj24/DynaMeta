@@ -48,7 +48,7 @@ def rytov_tensor_for_layer(layer, design, lambda_m: float, period_x_m: float, pe
     grating -- the EMT screen is 1-D, like the PMM bridge). order=2 adds the binary
     (period/lambda)^2 bulk-index correction (Lalanne & Lemercier-Lalanne 1996) and is defined
     ONLY for a 2-segment (binary) grating; a multi-region cell with order=2 raises."""
-    lum = _require_berreman()                            # lumenairy >= 5.14.4 carries the EMT bridge
+    lum = _require_berreman()                            # the bridge floor carries the EMT surface
     segs = layer_to_pmm_segments(layer, design, lambda_m, period_x_m, period_y_m, bg_eps=bg_eps)
     if order == 2:
         # BINARY = exactly two DISTINCT permittivities (a centered ridge yields 3 segments

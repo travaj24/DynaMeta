@@ -36,20 +36,11 @@ _SCALE = 1.0e6   # m -> um (lumenairy is unit-agnostic; microns match BOR's vali
 
 
 def _require_bor():
-    """lumenairy.elements.bor.BORStack -- the axisymmetric BOR-PMM tier graduated + released in 5.16.0.
-    lumenairy is a REQUIRED dynameta core dep but imported lazily here (so base import stays light)."""
-    import importlib
-    try:
-        lum = importlib.import_module("lumenairy")
-    except ImportError as e:
-        raise ImportError("the BOR-PMM bridge needs lumenairy (a required dynameta core dependency): "
-                          "pip install -U lumenairy") from e
-    ver = tuple(int(p) for p in str(lum.__version__).split(".")[:3])
-    if ver < (5, 16, 0):
-        raise ImportError(
-            "the BOR-PMM bridge needs lumenairy>=5.16.0 (lumenairy.elements.bor.BORStack -- the "
-            "axisymmetric/cylindrical tier graduated in 5.16.0); found {}. pip install -U lumenairy"
-            .format(lum.__version__))
+    """lumenairy.elements.bor.BORStack -- the axisymmetric BOR-PMM tier (graduated in 5.16.0,
+    covered by the single bridge floor in _common.VERSION_FLOOR, which replaced this backend's
+    copy-pasted version gate). Imported lazily so the base dynameta import stays light."""
+    from dynameta.optics.lumenairy_bridge._common import require_lumenairy
+    require_lumenairy()
     from lumenairy.elements.bor import BORStack
     return BORStack
 
