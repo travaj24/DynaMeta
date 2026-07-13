@@ -42,7 +42,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, EPS0, HBAR, M_E, Q_E
-from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te
+from dynameta.optics.fdtd_nd import cpml_z, run_2d_te
 from dynameta.optics.laser_gain import (FourLevelSystem, cavity_photon_lifetime_s,
                                          pump_threshold_per_s, relaxation_oscillation_rad_s,
                                          small_signal_gain_per_m, threshold_inversion_m3)
@@ -94,9 +94,9 @@ def _run(Wp_per_s, nsteps, seed_amp, out=None, snap_step=10):
     t = np.arange(nsteps) * DT
     t0, tau_s = 30e-15 * 6.0, 30e-15
     src = seed_amp * np.exp(-((t - t0) / tau_s) ** 2) * np.cos(W_A * (t - t0))
-    cpml = _cpml_z(NZ, DZ, DT, NPML, N_OUT, N_OUT)
+    cpml = cpml_z(NZ, DZ, DT, NPML, N_OUT, N_OUT)
     gd = (G1, G2, kapfac, Wp_per_s * win, Npop0, T32, T21, T10, HBAR * W_A, snap_step)
-    _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, zeros, DX, DZ, DT, nsteps, K_SRC,
+    _, _, eyR, _ = run_2d_te(eps, zeros, zeros, zeros, DX, DZ, DT, nsteps, K_SRC,
                               N_PAD // 2, K_PROBE, src, cpml, np, None,
                               gain_dyn=gd, gain_dyn_out=out)
     return eyR.mean(axis=1)                        # uniform in x -> average the 4 columns
