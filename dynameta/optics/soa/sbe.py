@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import EPS0, HBAR, KB, Q_E
+from dynameta.constants import C_LIGHT, EPS0, HBAR, KB, M_E, Q_E
 
 
 def _quasi_fermi_2d(N_2d_m2, m_eff, T_K):
@@ -44,7 +44,7 @@ def reduced_sbe_susceptibility(hbar_omega_eV, *, Eg_eV=0.95, m_e=0.067, m_h=0.45
     m_e, m_h in units of the free-electron mass. Returns (hw_eV, chi_complex). coulomb_V0=0 -> the
     free-carrier diagonal limit. The material gain is g(w) = -(w/(n c)) Im chi, n = sqrt(eps_r)."""
     hw = np.asarray(hbar_omega_eV, dtype=np.float64) * Q_E    # -> J
-    me, mh = float(m_e) * 9.1093837015e-31, float(m_h) * 9.1093837015e-31
+    me, mh = float(m_e) * M_E, float(m_h) * M_E
     mr = me * mh / (me + mh)
     kT = KB * float(T_K)
     # radial k-grid out to a few thermal wavevectors
@@ -88,4 +88,4 @@ def sbe_gain_per_m(hbar_omega_eV, chi, eps_r=12.5):
     (amplification, exp(-i w t) convention)."""
     n = np.sqrt(float(eps_r))
     w = np.asarray(hbar_omega_eV, dtype=np.float64) * Q_E / HBAR
-    return -(w / (n * 2.99792458e8)) * np.imag(chi)
+    return -(w / (n * C_LIGHT)) * np.imag(chi)

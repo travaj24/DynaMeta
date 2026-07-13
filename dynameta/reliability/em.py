@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 
 
 def current_density_A_m2(I_A: float, width_m: float, thickness_m: float) -> float:

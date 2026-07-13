@@ -58,9 +58,8 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import HBAR, KB, Q_E
+from dynameta.constants import H_PLANCK, KB, Q_E
 
-H_PLANCK = 2.0 * np.pi * HBAR                                  # J s
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
 # Self-contained guarded import (mirrors optics.fdtd_nd.backends) so the module imports without

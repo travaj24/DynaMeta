@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dynameta.constants import HBAR, Q_E
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
-H_PLANCK = 2.0 * np.pi * HBAR
+from dynameta.constants import H_PLANCK   # single source (audit 6.3)
 
 
 def main():

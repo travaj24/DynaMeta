@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 
 
 def arrhenius_af(Ea_eV: float, T_use_K: float, T_stress_K: float) -> float:

@@ -20,6 +20,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from dynameta.constants import SOLVER_TIME_CONVENTION
+
 
 @dataclass
 class EpsField:
@@ -29,7 +31,7 @@ class EpsField:
     z_axis_u:        Optional[np.ndarray] = None
     values_zyx:      Optional[np.ndarray] = None       # complex (Nz,Ny,Nx) scalar OR (Nz,Ny,Nx,3,3) tensor
     tensor:          Optional[np.ndarray] = None        # uniform anisotropic 3x3 (complex)
-    time_convention: str = "exp(-iwt)"
+    time_convention: str = SOLVER_TIME_CONVENTION
 
     @property
     def is_uniform(self) -> bool:

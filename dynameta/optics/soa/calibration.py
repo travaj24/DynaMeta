@@ -38,10 +38,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, Q_E   # single-source CODATA (was re-declared here)
+from dynameta.constants import C_LIGHT, H_PLANCK, Q_E   # single-source CODATA (was re-declared here)
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
-H_PLANCK = 6.62607015e-34                     # exact CODATA h (constants.py carries only HBAR)
 
 # Innolume BOA1310060CC600MXXXX datasheet (99-S01-273-01), 25 C, 2000 mA operating point.
 INNOLUME_BOA1310_TARGETS = {
