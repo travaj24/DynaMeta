@@ -528,3 +528,39 @@ def test_pmm_absorption_parity_surface():
     assert r1.A_independent == pytest.approx(r1.A, abs=1e-9)
     assert r1.per_region_absorption["a"] == pytest.approx(r1.A_independent, abs=1e-12)
     assert r1.R == r0.R and r1.T == r0.T
+
+
+@needs_lum
+def test_berreman_oop_oblique_first_class():
+    # audit 8.1-6: OOP-coupled tensors (exz != 0, tilted-LC director) at OBLIQUE and
+    # CONICAL incidence solve through the bridge (lumenairy 5.21 fixed the far field);
+    # absorption=True degrades GRACEFULLY there (warn + A_independent None -- the
+    # internal-field reconstruction is a documented upstream limitation), never crashes.
+    import warnings
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_berreman_solver
+    th_d = np.radians(40.0)
+    n_o2, n_e2 = complex(2.30, 0.06), complex(2.89, 0.09)
+    d_hat = np.array([np.sin(th_d), 0.0, np.cos(th_d)])
+    eps = n_o2 * np.eye(3) + (n_e2 - n_o2) * np.outer(d_hat, d_hat)
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
+    reg.add(Material("lo", ConstantOptical(complex(2.1))))
+    d = Design(name="lc", unit_cell=UnitCell.square(300e-9),
+               stack=Stack(layers=[Layer("lc", 800e-9, "lo")], superstrate_material="air",
+                           substrate_material="glass"),
+               electrodes=[], materials=reg,
+               optical=OpticalSpec(polarization="y", incidence_angle_deg=30.0,
+                                   azimuth_deg=25.0))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        r = make_lumenairy_berreman_solver(absorption=True)(
+            d, None, {"lc": EpsField(tensor=eps)}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    assert 0.0 <= r.A <= 1.0 and 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0
+    assert r.A_independent is None
+    assert any("absorption unavailable" in str(x.message) for x in w)
