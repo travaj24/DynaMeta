@@ -11,7 +11,7 @@ from dynameta.constants import EPS0, MU0
 
 
 
-def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
+def cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5.0, alpha_max=0.2, R0=1.0e-6):
     """CFS-CPML stretched-coordinate coefficients along z (the propagation axis; x is periodic so needs
     no PML). Returns (kappa, b, c) on the E-grid (z=k*dz) and the H-grid (z=(k+1/2)*dz). Roden-Gedney:
     sigma/kappa graded polynomially over the outer `npml` cells each end, alpha (CFS) graded the other
@@ -44,3 +44,6 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
     ke, be, ce = _coeffs(np.arange(nz, dtype=float))
     kh, bh, ch = _coeffs(np.arange(nz, dtype=float) + 0.5)
     return (ke, be, ce), (kh, bh, ch)
+
+
+_cpml_z = cpml_z                                             # back-compat alias (pre-promotion name)

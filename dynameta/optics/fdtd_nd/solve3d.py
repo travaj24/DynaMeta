@@ -10,14 +10,14 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
-from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd.backends import _resolve_backend
+from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
-from dynameta.optics.fdtd_nd.cpml import _cpml_z
+from dynameta.optics.fdtd_nd.cpml import cpml_z
 from dynameta.optics.fdtd_nd.solve2d import _ring_time_s
-from dynameta.optics.fdtd_nd.kernels3d import _run_3d, _run_3d_mo, _run_3d_oblique
+from dynameta.optics.fdtd_nd.kernels3d import _run_3d_mo, _run_3d_oblique, run_3d
 from dynameta.optics.fdtd_nd.kernels3d_numba import _run_3d_oblique_numba, _te3d_numba
-from dynameta.optics.fdtd_nd.kernels3d_jax import _run_3d_jax, _run_3d_oblique_jax
+from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
 
 def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
                  lor=None, chi2=None, raman=None, gain=None):
@@ -41,13 +41,13 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
         if lor is not None:
             raise NotImplementedError("the jax 3D backend does not carry the Lorentz ADE yet; use "
                                       "backend='numba' or 'numpy' for a 3D Lorentz material.")
-        out = _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        out = run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                  chi2=chi2, raman=raman, gain=gain)
+    out = run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
+                 chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -185,9 +185,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)
-    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched super (low z) + sub (high z)
-    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference
-    name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
+    cpml_struct = cpml_z(nz, dz, dt, npml, n_super, n_sub)   # PML matched super (low z) + sub (high z)
+    cpml_ref = cpml_z(nz, dz, dt, npml, n_super, n_super)    # homogeneous-superstrate reference
+    name = resolve_backend(backend)                         # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
     def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
@@ -288,9 +288,9 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, ny, nz)); zero = np.zeros((nx, ny, nz))
-    bk = _resolve_backend(backend)
+    bk = resolve_backend(backend)
 
     def _obl3d(ei, w, g):
         if bk == "numba":
@@ -299,8 +299,8 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
                                          ke, be, ce, kh, bh, ch, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
                                          np.asarray(src, float), kx, ky, sx, sy)
         if bk == "jax":
-            out = _run_3d_oblique_jax(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
-                                      kx, ky, sx, sy)
+            out = run_3d_oblique_jax(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                                     kx, ky, sx, sy)
             return tuple(np.asarray(v) for v in out)        # JAX -> NumPy for the FFT/R-T stage
         return _run_3d_oblique(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy)
 
@@ -431,7 +431,7 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     exL_i, eyL_i, exR_i, eyR_i = _run_3d_mo(o, o, o, zr, zr, zr, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
                                             src, cpml, pol)                                  # vacuum
     exL_t, eyL_t, exR_t, eyR_t = _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src,

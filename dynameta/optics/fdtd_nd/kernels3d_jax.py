@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from dynameta.constants import EPS0, MU0
 
-def _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
-    """JAX (XLA lax.scan) 3D backend -- the SAME six-component physics as _run_3d, but DIFFERENTIABLE end
+def run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
+    """JAX (XLA lax.scan) 3D backend -- the SAME six-component physics as run_3d, but DIFFERENTIABLE end
     to end: a downstream jax.grad gives d(R,T)/d(geometry/material) for 3D inverse design. Functional
     (immutable .at[]) updates, float64 forced to match the reference. Returns the eight probe planes as JAX
     arrays (the dispatcher converts to NumPy; staying in JAX lets a caller grad straight through the loop)."""
@@ -73,8 +73,11 @@ def _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_p
     return outs                                             # 8-tuple of (nsteps,nx,ny) JAX arrays
 
 
-def _run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
-                        kx, ky, sx, sy):
+_run_3d_jax = run_3d_jax                                    # back-compat alias (pre-promotion name)
+
+
+def run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                       kx, ky, sx, sy):
     """JAX (XLA lax.scan) twin of _run_3d_oblique -- the full-vector COMPLEX-ENVELOPE oblique 3D engine
     (2D transverse Bloch envelope d/dx->d/dx+i kx, d/dy->d/dy+i ky; semi-implicit Drude ADE per
     E-component; CFS-CPML + PEC in z; s-pol plane source on (sx,sy)) as a single traced/compiled
@@ -146,5 +149,8 @@ def _run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k
     carry0 = tuple(zz for _ in range(13))
     _, (exL, eyL, exR, eyR) = lax.scan(step, carry0, jnp.asarray(src, dtype=jnp.complex128))
     return exL, eyL, exR, eyR
+
+
+_run_3d_oblique_jax = run_3d_oblique_jax                    # back-compat alias (pre-promotion name)
 
 

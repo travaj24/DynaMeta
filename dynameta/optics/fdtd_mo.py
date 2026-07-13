@@ -26,7 +26,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _resolve_backend, njit
+from dynameta.optics.fdtd_nd import HAVE_NUMBA, njit, resolve_backend
 
 
 @dataclass
@@ -173,7 +173,7 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, 
     (jc00, jc01, jc10, jc11) = (Jc[:, 0, 0], Jc[:, 0, 1], Jc[:, 1, 0], Jc[:, 1, 1])
     (ma00, ma01, ma10, ma11) = (Ma[:, 0, 0], Ma[:, 0, 1], Ma[:, 1, 0], Ma[:, 1, 1])
     (mb00, mb01, mb10, mb11) = (Mb[:, 0, 0], Mb[:, 0, 1], Mb[:, 1, 0], Mb[:, 1, 1])
-    if backend == "numba" and _HAVE_NUMBA:                      # JIT the hot time loop (same precompute)
+    if backend == "numba" and HAVE_NUMBA:                       # JIT the hot time loop (same precompute)
         ac = (lambda a: np.ascontiguousarray(a, dtype=np.float64))
         return _mo_loop_numba(ac(iv00), ac(iv01), ac(iv10), ac(iv11), ac(ep00), ac(ep01), ac(ep10), ac(ep11),
                               ac(jc00), ac(jc01), ac(jc10), ac(jc11), ac(ma00), ac(ma01), ac(ma10), ac(ma11),
@@ -256,8 +256,8 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
     one = np.ones(nz); zero = np.zeros(nz)
-    rb = _resolve_backend(backend)                              # 'numba' = JIT loop; else NumPy reference
-    bk = "numba" if (rb == "numba" and _HAVE_NUMBA) else "numpy"
+    rb = resolve_backend(backend)                               # 'numba' = JIT loop; else NumPy reference
+    bk = "numba" if (rb == "numba" and HAVE_NUMBA) else "numpy"
     eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)   # vacuum
     eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)         # structure
 

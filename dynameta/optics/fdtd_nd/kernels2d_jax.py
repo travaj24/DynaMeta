@@ -9,16 +9,16 @@ from dynameta.constants import EPS0, MU0
 
 
 
-def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None,
-                   chi2=None, raman=None, gain=None):
-    """JAX (XLA) backend -- the SAME 2D-TE physics as _run_2d_te, expressed as a single traced, compiled
+def run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None,
+                  chi2=None, raman=None, gain=None):
+    """JAX (XLA) backend -- the SAME 2D-TE physics as run_2d_te, expressed as a single traced, compiled
     lax.scan time loop. Two payoffs: (1) it is DIFFERENTIABLE end-to-end, so a downstream jax.grad gives
     d(R,T)/d(geometry/material) for gradient-based inverse design; (2) XLA fuses the whole step (no
     per-op Python overhead) on CPU and, on a JAX-GPU build (WSL2 on Windows), on the device. Functional
     (immutable .at[]) updates replace the in-place ones; float64 is forced so it matches the reference.
     Returns the four probe x-lines as JAX arrays (the dispatcher converts to NumPy for the FFT/R-T
     extraction; staying in JAX lets a caller jax.grad a scalar objective straight through the time loop,
-    the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from _cpml_z. `lor`=(C1,C2,C3)
+    the inverse-design path -- see validation/fdtd_2d_autodiff.py). cpml from cpml_z. `lor`=(C1,C2,C3)
     per-cell Lorentz ADE coefficients (a second polarization PL in the carry) or None (no pole).
     chi2/raman/gain (R15/R20) mirror the numpy kernel; their states extend the scan carry only when
     active (None -> identical carry/trace to the pre-R15 path), and remain DIFFERENTIABLE -- jax.grad
@@ -107,3 +107,6 @@ def _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR
     _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(8 + n_extra)),
                                        jnp.asarray(src))
     return eyL, hxL, eyR, hxR                               # JAX arrays (differentiable); dispatcher -> NumPy
+
+
+_run_2d_te_jax = run_2d_te_jax                              # back-compat alias (pre-promotion name)

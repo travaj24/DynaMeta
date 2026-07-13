@@ -19,7 +19,7 @@ Backends (solve_fdtd_2d(backend=...)):
   * 'jax' (DIFFERENTIABLE) -- the same loop as a compiled XLA lax.scan, so jax.grad gives
     d(R,T)/d(geometry/material) for gradient-based inverse design; XLA-fused on CPU (GPU is WSL2-only on
     Windows). Plus the convenience aliases 'auto' (fastest CPU present), 'cpu', 'gpu'.
-available_backends() reports what is runnable here; _resolve_backend() maps the request (raising a clear
+available_backends() reports what is runnable here; resolve_backend() maps the request (raising a clear
 error with an install hint for an unavailable explicit pick). The hot loop is a swappable kernel boundary,
 so a Taichi backend (one-source CPU+CUDA+Vulkan, when a Python-3.14 wheel exists) drops in unchanged.
 Convention exp(-i omega t), SI; Im(eps) > 0 = loss. Reduces EXACTLY to the 1D solver + TMM for a
@@ -38,31 +38,23 @@ exact). STILL DEFERRED: GPU performance work only (a fused 3D fast path).
 
 from __future__ import annotations
 
-from dynameta.optics.fdtd import FDTDLayer
+# Public surface only (audit 6.3: the underscore kernel/probe names used to be re-exported
+# wholesale). Externally-consumed names are promoted in their owning modules; internal helpers
+# (_flux/_flux3d, the numba kernels, the dispatchers, ...) are imported sibling-to-sibling.
+from dynameta.optics.fdtd_nd.spec import FDTDLayer
 
-from dynameta.optics.fdtd_nd.backends import (_HAVE_NUMBA, _have_cupy, _have_jax,
-                                              _have_numba_cuda, _resolve_backend,
-                                              available_backends, njit, prange)
-from dynameta.optics.fdtd_nd.cpml import _cpml_z
+from dynameta.optics.fdtd_nd.backends import (HAVE_NUMBA, available_backends,
+                                              have_jax, have_numba_cuda, njit,
+                                              prange, resolve_backend)
+from dynameta.optics.fdtd_nd.cpml import cpml_z
 from dynameta.optics.fdtd_nd.results import (FDTD2DObliqueResult, FDTD2DResult,
-                                             FDTD3DMOResult, FDTD3DResult, _flux,
-                                             _flux3d)
-from dynameta.optics.fdtd_nd.kernels2d import _run_2d_te
-from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
-from dynameta.optics.fdtd_nd.kernels2d_jax import _run_2d_te_jax
-from dynameta.optics.fdtd_nd.oblique2d import (_run_2d_te_oblique,
-                                               _run_2d_te_oblique_jax,
-                                               _run_2d_tm_oblique,
-                                               _run_2d_tm_oblique_jax, _run_oblique,
-                                               _te2d_oblique_numba,
-                                               _tm2d_oblique_numba)
-from dynameta.optics.fdtd_nd.kernels3d import _run_3d, _run_3d_mo, _run_3d_oblique
-from dynameta.optics.fdtd_nd.kernels3d_numba import (_run_3d_oblique_numba,
-                                                     _te3d_numba)
-from dynameta.optics.fdtd_nd.kernels3d_jax import (_run_3d_jax,
-                                                   _run_3d_oblique_jax)
-from dynameta.optics.fdtd_nd.solve2d import (_dispatch_2d_te, solve_fdtd_2d,
-                                             solve_fdtd_2d_oblique)
-from dynameta.optics.fdtd_nd.solve3d import (_dispatch_3d, solve_fdtd_3d,
-                                             solve_fdtd_3d_mo,
+                                             FDTD3DMOResult, FDTD3DResult)
+from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
+from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
+from dynameta.optics.fdtd_nd.oblique2d import (run_2d_te_oblique_jax,
+                                               run_2d_tm_oblique_jax)
+from dynameta.optics.fdtd_nd.kernels3d import run_3d
+from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
+from dynameta.optics.fdtd_nd.solve2d import solve_fdtd_2d, solve_fdtd_2d_oblique
+from dynameta.optics.fdtd_nd.solve3d import (solve_fdtd_3d, solve_fdtd_3d_mo,
                                              solve_fdtd_3d_oblique)
