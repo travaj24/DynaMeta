@@ -145,8 +145,11 @@ class ElectroAbsorptionModel:
         a = self.alpha0_per_m * ratio * g                              # 1s excitonic line
         if self.continuum_alpha0_per_m > 0.0 and self.continuum_binding_J > 0.0:
             # Elliott band-to-band continuum above the UNBOUND edge E_cont = E_T + E_binding, with the
-            # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi sqrt(E_b/dE))) -> 2 at the edge and
-            # -> 1 far above (a step joint-DOS, edge-enhanced). The continuum STRENGTH is set by the
+            # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi gamma)), gamma = sqrt(R/dE) with
+            # R the effective 3D Rydberg = E_b(2D)/4 (Shinada-Sugano / Haug-Koch), i.e. in terms of
+            # the 2D binding the exponent is -pi sqrt(E_b/dE) -> 2 at the edge and -> 1 far above
+            # (a step joint-DOS, edge-enhanced). audit 7b P3: the exponent was previously doubled
+            # (-2 pi sqrt(E_b/dE)), over-enhancing the continuum by up to ~20% for dE ~ (2-30) E_b. The continuum STRENGTH is set by the
             # interband momentum matrix element and is field-INDEPENDENT (NOT scaled by the 1s-exciton
             # envelope overlap ratio, which governs only the bound-exciton oscillator strength above):
             # the QCSE field acts on the continuum solely through the EDGE REDSHIFT E_T(F) carried in
@@ -155,7 +158,7 @@ class ElectroAbsorptionModel:
             xb = float(self.continuum_binding_J)
             dE = E - (E_T + xb)
             safe = np.where(dE > 0.0, dE, 1.0)                         # avoid sqrt of <=0
-            s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / safe))), 0.0)
+            s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-np.pi * np.sqrt(xb / safe))), 0.0)
             a = a + self.continuum_alpha0_per_m * s2d
         return a
 

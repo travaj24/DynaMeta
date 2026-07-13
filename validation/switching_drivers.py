@@ -62,9 +62,18 @@ def main():
     lc = LCRelaxation(K_elastic_N=1.0e-11, gamma_visc_Pa_s=0.1, d_m=5.0e-6)
     tau = lc.tau_s()
     tau_an = 0.1 * (5.0e-6) ** 2 / (1.0e-11 * np.pi ** 2)
+    # audit 7.3 de-tautologized: tau_an above re-types the module's own one-liner, so it
+    # cannot catch a formula error. Cross-pin against the INDEPENDENT Erickson-Leslie PDE
+    # solver's tau_1const_s -- the quantity lc_director_dynamics GATE A validates against
+    # a fitted field-off PDE decay to 1% -- with the same (K, gamma, d).
+    from dynameta.carriers.lc_dynamics import LCDynamics
+    tau_pde = LCDynamics(K11=1.0e-11, K33=1.0e-11, gamma1=0.1, eps_para=10.0, eps_perp=5.0,
+                         geometry="planar", d_planar=5.0e-6, field_model="uniform",
+                         nz=31).tau_1const_s()
     tl = np.linspace(0.0, 3.0 * tau, 200)
     th = lc.relax(tl, np.radians(30.0))
-    tau_ok = bool(abs(tau - tau_an) < 1e-12 * tau_an and 1e-3 < tau < 1e-1)
+    tau_ok = bool(abs(tau - tau_an) < 1e-12 * tau_an and 1e-3 < tau < 1e-1
+                  and abs(tau - tau_pde) < 1e-9 * tau_pde)   # == the PDE-validated quantity
     e_fold = float(lc.relax(np.array([tau]), np.radians(30.0))[0])
     exp_ok = bool(abs(e_fold - np.radians(30.0) / np.e) < 1e-9)
     mono_lc = bool(np.all(np.diff(th) <= 1e-15) and abs(th[0] - np.radians(30.0)) < 1e-12)

@@ -54,9 +54,11 @@ def main():
     print("[sl] A-TRANSPORT mu from same tau = {:.1f} cm^2/Vs (reference ITO ~30; DC-vs-optical band) -> {}".format(
         mu, "OK" if g_tr else "FAIL"), flush=True)
 
-    # independent code path: re-fit the linked eps at one density
+    # independent code path: re-fit the LINKED model's eps (audit 7.3: this used to fit
+    # ref.eps -- the reference's own output -- making the leg a generate-then-recover
+    # round-trip that never touched the ScatteringModel link it claims to cross-check)
     n_fit = 6e26
-    eps = np.array([complex(ref.eps(l, n_m3=n_fit)) for l in LAMS])
+    eps = np.array([complex(mat.optical.eps(l, n_m3=n_fit)) for l in LAMS])
     fit = fit_drude_params(n_m3=np.full_like(LAMS, n_fit), lambda_m=LAMS, eps_re=eps.real,
                            eps_im=eps.imag, eps_inf0=4.0, m_eff_ratio0=0.30, gamma0=1.0e14)
     g_fit = (abs(fit["gamma_rad_s"] - GAMMA0) / GAMMA0 < 1e-3
