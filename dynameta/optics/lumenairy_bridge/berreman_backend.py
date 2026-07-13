@@ -198,6 +198,30 @@ def _berreman_layer_absorption(lum, layers, n_super, n_sub, lambda_m, theta, phi
     return np.asarray(st.layer_absorption())
 
 
+def _rotate_layers_conical(layers, phi_rad: float):
+    """Conical incidence via ROTATIONAL COVARIANCE (audit 8.2 step-4 Berreman leg): rotating
+    the whole physical problem about z by -phi maps the conical source (k_par along
+    (cos phi, sin phi), s-hat = (-sin phi, cos phi)) onto the validated IN-PLANE one (k_par
+    along x, s-hat = y) and each layer permittivity onto Rz(-phi) eps Rz(-phi)^T. Berreman is
+    the PLANAR tier -- no lateral structure breaks the symmetry -- so the mapped problem is
+    EXACT, and the existing lab-row extraction + p-basis conversion apply verbatim ('y' IS
+    the rotated s, 'x'/'p' the in-plane transverse). Scalars are rotation-invariant and pass
+    through untouched (bit-identical); isotropic stacks therefore reproduce their in-plane
+    result at any azimuth exactly (the azimuthal-invariance gate). The RCWA/PMM bridges keep
+    their conical guard: a patterned lattice is NOT z-rotation-invariant, so this shortcut
+    is wrong there (per-order Jones synthesis remains their documented follow-on)."""
+    c, s = np.cos(-phi_rad), np.sin(-phi_rad)
+    rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    out = []
+    for eps, thk in layers:
+        e = np.asarray(eps)
+        if e.ndim == 2:
+            out.append((rz @ e @ rz.T, thk))
+        else:
+            out.append((eps, thk))
+    return out
+
+
 def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Optional[int] = None):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy Berreman, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult PLUS
@@ -213,17 +237,21 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
         lum = _require_berreman()
         theta, phi = _angles_rad(design.optical)
         _guard_incidence_side(design.optical)
-        _guard_conical_ppol(design.optical, phi)
         layers, n_sup, n_sb, names = design_to_berreman_layers(
             design, lambda_m, eps_by_region=eps_by_region, n_slices=n_slices)
+        # conical (azimuth != 0): solve the z-rotated EQUIVALENT in-plane problem so the
+        # result is keyed to the rotated s/p eigen-polarizations, matching the FEM (the lab
+        # rows of a native phi != 0 solve are s/p mixtures -- the audit C4-2 trap)
+        if abs(phi) > 1e-12:
+            layers = _rotate_layers_conical(layers, phi)
         R, T, Jr, Jt = lum.berreman_jones_1d(layers, complex(n_sb), complex(n_sup),
-                                             float(lambda_m), angle=theta, phi=phi)
+                                             float(lambda_m), angle=theta, phi=0.0)
         rf, tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
                                      theta, n_sup, n_sb)
         la, a_names = None, None
         if absorption:
             try:
-                la = _berreman_layer_absorption(lum, layers, n_sup, n_sb, lambda_m, theta, phi)
+                la = _berreman_layer_absorption(lum, layers, n_sup, n_sb, lambda_m, theta, 0.0)
                 a_names = names
             except Exception as exc:                      # pragma: no cover - defensive
                 warnings.warn("Berreman bridge: per-layer absorption unavailable ({}); "
@@ -257,7 +285,6 @@ class BerremanLayeredSolver:
         lum = _require_berreman()
         t0 = time.perf_counter()
         _guard_incidence_side(optical)
-        _guard_conical_ppol(optical, _angles_rad(optical)[1])
         layers: List[Tuple[object, float]] = []
         for i, slab in enumerate(stack.slabs):            # already superstrate-side first
             if slab.eps is not None:
@@ -275,14 +302,16 @@ class BerremanLayeredSolver:
                     "BerremanLayeredSolver: slab {} is an analytic-shape slab (planar tier does "
                     "not pattern); rasterize and use the RCWA backend.".format(i))
         theta, phi = _angles_rad(optical)
+        if abs(phi) > 1e-12:                              # conical: rotated equivalent problem
+            layers = _rotate_layers_conical(layers, phi)
         R, T, Jr, Jt = lum.berreman_jones_1d(layers, complex(stack.n_sub), complex(stack.n_super),
-                                             float(lambda_m), angle=theta, phi=phi)
+                                             float(lambda_m), angle=theta, phi=0.0)
         rf, tf = _p_basis_conversion(getattr(optical, "polarization", "y"), theta,
                                      stack.n_super, stack.n_sub)
         la, names = None, None
         if self.absorption:
             la = _berreman_layer_absorption(lum, layers, stack.n_super, stack.n_sub, lambda_m,
-                                            theta, phi)
+                                            theta, 0.0)
             names = ["slab_{}".format(i) for i in range(len(layers))]
         return berreman_result_to_optical_result(R, T, Jr, Jt, _pol_row(optical), t0=t0,
                                                   r_factor=rf, t_factor=tf, layer_absorption=la,
