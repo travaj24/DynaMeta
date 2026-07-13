@@ -32,7 +32,8 @@ RCWA they are the same Poynting quantities); r/t are the CO-polarized zeroth-ord
 amplitudes (phase-bearing, the modulator observable).
 
 Inclusion handling: laterally structured layers are RASTERIZED onto a (Sx, Sy) cell with
-the validated fdtd_seam rasterizer (background + priority-ordered inclusion overpainting).
+the validated shared rasterizer (optics.rasterize, also the structured-FDTD painter:
+background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
 to the layer BACKGROUND only (rasterizer contract). The Lumenairy analytic-shapes fast path
 is a documented follow-on (requires the shape-frame pin + disjointness mapping).
@@ -49,7 +50,7 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.fdtd_seam import _cell_axes, _layer_eps_cell
+from dynameta.optics.rasterize import cell_axes, layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -228,9 +229,9 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
             names.append(L.name)
             continue
         if L.inclusions:
-            x, y = _cell_axes(sx, sy, px, py)
+            x, y = cell_axes(sx, sy, px, py)
             X, Y = np.meshgrid(x, y, indexing="ij")
-            cell = _layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
+            cell = layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
             stack.add_layer(L.thickness_m, eps_cell=np.asarray(cell, dtype=complex),
                             formulation=formulation)
             names.append(L.name)
