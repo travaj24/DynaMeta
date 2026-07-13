@@ -1197,10 +1197,27 @@ the C6-class contract fixes), each with a discrimination-proven gate.
 - C5-4 pipeline-seam TMM per_region_absorption re-keyed to design layer names
   (graded slabs sum into their layer; slab_<i> stays for direct LayeredStack use).
 
-**PENDING (hygiene batches only — every targeted finding above is fixed):**
-- The §7.3 tautology-sweep batch (reliability_tddb GATE B rebuild + the classified
-  self-referential gates), stale-docs batch (§6.3), P3 hygiene batch, and the §6.2
-  performance items (cache autosave batching first — mind the documented naive-append
-  hazard). Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
-  per-order Jones synthesis for bridge conical s/p; net-bandwidth co-fit for the
-  Innolume calibration.
+- Stale-docs batch (ec3afd7): C6-5 pair ACTUALLY fixed (the ledger had over-claimed it —
+  sp_carrier nonparabolic capabilities, graphene sheet-BC shipped) + the §6.3 set
+  (em/hci driver notes + Black/HCI attribution corrections, reliability/__init__,
+  dynameta/__init__ module map incl. BOR + symmetry, interfaces default location,
+  solve2d lateral shape doc) + the CPML matched scaling corrected to 1/n
+  (probe-verified strictly beneficial; every non-vacuum gate tightened).
+- Cache autosave batching (baf9739): autosave_every=K with atexit dirty-flush;
+  default byte-compatible; measured 240x available for sweeps; honest cost model
+  replaces the inverted "(cheap, crash-safe)" claim.
+- C7b-2 reliability_tddb GATE B de-tautologized (hand-derived Arrhenius reference +
+  module cross-pins).
+
+**PENDING (residual hygiene — optional):**
+- The remaining P3-classified tautology gates from §7.3 (fatigue GATE A/C re-types,
+  switching GATE B, qcse part-4, scattering_link A-FIT) and the two docstring-advertised
+  missing pins (S-P Gauss integral; sp nonparabolic alpha=0 byte-identity).
+- Constants single-sourcing sweep, private-API promotion batch, test-infra items
+  (CI smoke-tier wiring, SKIP category, DEVSIM pytest smokes) — §6.3.
+- Remaining §6.2 perf opportunities (packed cache layout with the GATE-D extension
+  prerequisite; pipeline CarrierField release; LC 2D vectorization; BM KK kernel;
+  jit/vacuum-ref/LIDT/SOA batches; solve_fem diagnostics opt-out).
+- Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB; per-order
+  Jones synthesis for bridge conical s/p; net-bandwidth co-fit for the Innolume
+  calibration; 2D lateral-interface wiring; 3D II element reconstruction.
