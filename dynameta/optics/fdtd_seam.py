@@ -36,6 +36,7 @@ from dynameta.constants import C_LIGHT
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
+from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 
 _VAC_TOL = 1.0e-3                                            # |n - 1| under this counts as vacuum end medium
 
@@ -300,39 +301,14 @@ def graded_fdtd_layers(thickness_m, eps_z, lambda_m, *, n_slices=None):
     return [_eps_to_fdtd_layer(d_sub, e, lambda_m) for e in eps_s]
 
 
-def _cell_axes(nx, ny, period_x_m, period_y_m):
-    """Cell-centered FDTD lateral sample points (cell frame [0,period], shapes in absolute coords)."""
-    xs = (np.arange(nx) + 0.5) * (period_x_m / nx)
-    ys = (np.arange(ny) + 0.5) * (period_y_m / ny)
-    return xs, ys
-
-
-def _layer_bg_eps(layer, lambda_m, materials, eps_by_region):
-    ef = (eps_by_region or {}).get(layer.name)
-    if ef is not None:
-        if getattr(ef, "is_tensor", False) or not getattr(ef, "is_uniform", True):
-            # audit C5-2: the structured (rasterized) path used to silently substitute the
-            # NOMINAL material eps for a graded/tensor entry -- the per-layer lateral painter
-            # can only carry one uniform scalar per layer, so refuse rather than mis-solve
-            raise NotImplementedError(
-                "FDTD structured path: layer '{}' carries a {} eps_by_region entry; the lateral "
-                "rasterizer represents one uniform scalar per layer -- use the FEM solver (or the "
-                "RCWA bridge) for graded/tensor structured cells.".format(
-                    layer.name,
-                    "TENSOR" if getattr(ef, "is_tensor", False) else "graded (gridded)"))
-        if getattr(ef, "scalar", None) is not None:
-            return complex(ef.scalar)
-    return complex(materials.get(layer.background_material).eps(lambda_m))
-
-
-def _layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region):
-    """The (nx,ny) COMPLEX eps cross-section of one layer: the background eps, overpainted by each
-    inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps."""
-    eps = np.full(X.shape, _layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
-    for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
-        mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
-        eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
-    return eps
+# The lateral rasterizer (cell_axes / layer_bg_eps / layer_eps_cell) was PROMOTED to the
+# public optics.rasterize module (audit 2026-07-05 section 6.3: the lumenairy RCWA bridge
+# shares it, and imported the underscore names across module boundaries). Re-exported here
+# under the old private names for back-compat (same pattern as the MechanicalProps
+# re-export in reliability.fatigue).
+_cell_axes = cell_axes
+_layer_bg_eps = layer_bg_eps
+_layer_eps_cell = layer_eps_cell
 
 
 def design_has_inclusions(design):

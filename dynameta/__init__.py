@@ -26,7 +26,9 @@ Advanced users can supply their own CarrierSolver / OpticalGeometryBuilder /
 OpticalSolver (see dynameta.core.interfaces).
 
 Other modules (import explicitly): dynameta.optics.fdtd / fdtd_nd / fdtd_mo / fdtd_seam
-(broadband/dispersive/MO/oblique FDTD + the sweep-aware seam), dynameta.optics.tmm_reference
+(broadband/dispersive/MO/oblique FDTD + the sweep-aware seam), dynameta.optics.rasterize
+(shared Design-layer lateral rasterizer: structured FDTD + the lumenairy RCWA bridge),
+dynameta.optics.tmm_reference
 (coherent-TMM oracle), dynameta.optics.inverse_design + topology_opt (differentiable JAX-FDTD
 design), dynameta.transient_optics (coupled carrier->optics transient), dynameta.results
 (SweepResults + HDF5/Zarr save/load), dynameta.cache (persistent optical-solver cache),
