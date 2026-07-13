@@ -90,11 +90,17 @@ def main():
         rel_diff, dphi), flush=True)
     ok = ok and (rel_diff > 0.02) and (dphi > 1e-3)
 
-    # ---- D: finite/positive + converged ----
+    # ---- D: finite/positive + converged + the DOCSTRING-ADVERTISED alpha=0 byte-identity
+    # (audit 7.3: promised, previously absent) -- alpha_np_per_eV=0.0 must be EXACTLY the
+    # parabolic code path, not merely close ----
     finite = bool(np.isfinite(n_np).all() and np.all(n_np >= -1e10) and res_np.converged)
-    print("[t] D nonparabolic biased solve converged={} finite_nonneg={}".format(res_np.converged, finite),
-          flush=True)
-    ok = ok and finite
+    phi_a0, n_a0, _ = spt.solve_self_consistent(eps_r=EPS_R, doping_m3=Nd, E_F_J=ef_par,
+        phi_left_V=0.0, phi_right_V=0.5, n_states=80, bound_tol=1e9, max_outer=80, tol_V=1e-5,
+        alpha_np_per_eV=0.0)
+    byteid = bool(np.array_equal(phi_a0, phi_par) and np.array_equal(n_a0, n_par))
+    print("[t] D nonparabolic biased solve converged={} finite_nonneg={}; alpha=0 byte-identical "
+          "to parabolic={}".format(res_np.converged, finite, byteid), flush=True)
+    ok = ok and finite and byteid
 
     print("[t] *** SELF-CONSISTENT NONPARABOLIC S-P: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok

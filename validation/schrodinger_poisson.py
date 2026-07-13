@@ -119,7 +119,20 @@ def test_self_consistent_accumulation():
         res.energies_J.size, res.energies_J[0] / Q), flush=True)
     print("[t]   gate-side peak={:.3e}  body-side peak={:.3e} m^-3  ratio={:.2f}  res.converged={}".format(
         gate_peak, body_peak, gate_peak / max(body_peak, 1.0), converged), flush=True)
-    return converged and accum
+    # audit 7.3: the docstring promised the Gauss-law pin but no gate implemented it.
+    # Integrated excess charge must equal the boundary-field difference:
+    # q Int(n - Nd) dz == eps0 eps_r (E(0) - E(t)), E = -dphi/dz from the SOLVED phi.
+    EPS0 = 8.8541878128e-12
+    dz = z[1] - z[0]
+    Q_sheet = Q * np.trapezoid(n_full - Nd, z)
+    E_gate = -(phi[1] - phi[0]) / dz
+    E_body = -(phi[-1] - phi[-2]) / dz
+    Q_gauss = EPS0 * eps_r * (E_gate - E_body)
+    gauss_rel = abs(Q_sheet - Q_gauss) / max(abs(Q_gauss), 1e-30)
+    gauss_ok = gauss_rel < 0.02
+    print("[t]   Gauss: q*int(n-Nd)dz={:.4e} C/m^2 vs eps*dE={:.4e} (rel {:.1e}) -> {}".format(
+        Q_sheet, Q_gauss, gauss_rel, "OK" if gauss_ok else "FAIL"), flush=True)
+    return converged and accum and gauss_ok
 
 
 def main():
