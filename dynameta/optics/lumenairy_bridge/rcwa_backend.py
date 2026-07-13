@@ -41,6 +41,7 @@ is a documented follow-on (requires the shape-frame pin + disjointness mapping).
 
 from __future__ import annotations
 
+import os
 import time
 import warnings
 from typing import Callable, Dict, List, Optional, Tuple
@@ -249,13 +250,22 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                n_slices: Optional[int] = None,
                                cell_samples: Optional[int] = None,
                                absorption: bool = False, stabilize: bool = False,
-                               formulation: str = "laurent"):
+                               formulation: str = "laurent",
+                               n_workers: Optional[int] = 1, blas_per_worker: int = 1):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy RCWA, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult
     PLUS the sweep-aware `solve_sweep` fast path (one result per wavelength, in order; end
     media re-derived PER WAVELENGTH, fixing the generic band-centre freeze). geo and the
     passed n_super/n_sub are accepted for seam compatibility but unused (the stack re-derives
-    end media from the Design, the make_layered_tmm_solver precedent)."""
+    end media from the Design, the make_layered_tmm_solver precedent).
+
+    n_workers threads the solve_sweep wavelengths (audit 8.1-2): each wavelength builds its
+    OWN concrete stack (the bridge's dispersive policy) and solves on a bounded thread pool
+    with the per-worker BLAS cap pinned to blas_per_worker via lumenairy's thread-local
+    rcwa_blas_threads (keep n_workers * blas_per_worker within the core count). Results are
+    stored by index, so the output ORDER is identical to serial; the numbers are too (each
+    solve is an independent LAPACK problem). Default n_workers=1 = the serial path,
+    byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths)."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
@@ -279,7 +289,21 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
-        return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
+        workers = (min(os.cpu_count() or 1, len(lams)) if n_workers is None
+                   else max(1, int(n_workers)))
+        if workers == 1 or len(lams) < 2:
+            return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
+        from concurrent.futures import ThreadPoolExecutor
+        from lumenairy.elements.rcwa import rcwa_blas_threads
+
+        def _one(lam):
+            # the BLAS cap is thread-local (lumenairy's own sweep pattern), so each
+            # worker pins its own; eps assembly + stack build are independent per call
+            with rcwa_blas_threads(int(blas_per_worker)):
+                return _solve_at(design, assemble_at(lam), lam)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(_one, lams))
 
     _solve.solve_sweep = _solve_sweep
     return _solve
