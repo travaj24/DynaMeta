@@ -271,20 +271,41 @@ def main():
                                     - _Rot2(phi_c) @ np.asarray(Jr_r) @ _Rot2(-phi_c))))
     _, _, Jr_p0, _ = lum.berreman_jones_1d([(eps_uni, d)], n_sub, n_sup, LAM, angle=th_c, phi=0.0)
     phi_matters = float(np.max(np.abs(np.asarray(Jr_c) - np.asarray(Jr_p0))))   # phi genuinely used
-    # audit C4-2: the DESIGN-LEVEL conical solve must now RAISE -- the bridge's lab-basis
-    # 'y' row at phi != 0 is an s/p mixture, not the FEM's rotated s-hat, so the old
-    # end-to-end conical leg pinned a wrong-polarization number (probe: 32% off the s-pol
-    # truth). The covariance/phi-matters legs above exercise lumenairy's conical ENGINE
-    # directly (bridge-independent) and stay; bridge-level conical returns when per-order
-    # Jones synthesis lands (audit section 8 expansion item).
+    # audit 8.1-6 / 8.2 step 4: the DESIGN-LEVEL conical solve now SOLVES via the rotated
+    # equivalent in-plane problem (rotational covariance -- planar tier only), so its r is
+    # keyed to the FEM's rotated s/p eigen-polarizations. END-TO-END ORACLE: the same r via
+    # lumenairy's NATIVE conical engine (kx, ky source -- a different code path) with its
+    # lab-basis Jones explicitly rotated into the s/p frame, Rot(-phi) Jr_c Rot(phi). The
+    # covariance leg above independently pins that identity at 1e-9; a wrong rotation sign,
+    # a phi-ignoring bridge, or the old C4-2 s/p-mixture extraction all break the match
+    # (pre-fix probe: 32% off the s-pol truth at theta=30, phi=45).
+    # LOW-SYMMETRY biaxial tensor for the end-to-end leg: eps_uni's optic axis lies along x
+    # (mirror-symmetric about the phi=0 plane of incidence), which makes the CO-polarized r
+    # EVEN in phi -- a rotation-sign bug survives it (probed: a deliberate -phi bridge
+    # rotation passed a co-pol match on eps_uni). Tilting the principal frame by Rz(25deg)
+    # Ry(35deg) breaks every mirror, so the sign flip moves r at the 1e-3 level.
+    a_z, b_y = np.radians(25.0), np.radians(35.0)
+    _Ry = np.array([[np.cos(b_y), 0.0, np.sin(b_y)], [0.0, 1.0, 0.0],
+                    [-np.sin(b_y), 0.0, np.cos(b_y)]])
+    frame = _Rz(a_z) @ _Ry
+    eps_low = frame @ np.diag([2.2, 2.8, 3.4]).astype(complex) @ frame.T
     d_con = _design([Layer("film", d, "lo")], pol="y", theta=20.0, phi=30.0)
-    conical_raised = False
-    try:
-        make_lumenairy_berreman_solver()(d_con, None, {"film": EpsField(tensor=eps_uni)},
-                                         LAM, n_sup, n_sub)
-    except NotImplementedError as exc:
-        conical_raised = "conical" in str(exc)
-    conical_ok = bool(covar_err < 1e-9 and phi_matters > 1e-2 and conical_raised)
+    r_con = make_lumenairy_berreman_solver()(d_con, None, {"film": EpsField(tensor=eps_low)},
+                                             LAM, n_sup, n_sub)
+    _, _, Jr_cl, _ = lum.berreman_jones_1d([(eps_low, d)], n_sub, n_sup, LAM,
+                                           angle=th_c, phi=phi_c)
+    Jr_sp = _Rot2(-phi_c) @ np.asarray(Jr_cl) @ _Rot2(phi_c)
+    e2e_err = abs(r_con.r - complex(Jr_sp[1, 1]))          # 'y' = rotated s = row 1, rf = 1
+    # azimuthal invariance: an ISOTROPIC (scalar-eps) film must reproduce its in-plane
+    # R/T/r at ANY azimuth exactly (scalars are rotation-invariant -> bit-identical path)
+    d_iso0 = _design([Layer("film", d, "lo")], pol="y", theta=20.0)
+    d_iso1 = _design([Layer("film", d, "lo")], pol="y", theta=20.0, phi=137.0)
+    r_iso0 = make_lumenairy_berreman_solver()(d_iso0, None, {}, LAM, n_sup, n_sub)
+    r_iso1 = make_lumenairy_berreman_solver()(d_iso1, None, {}, LAM, n_sup, n_sub)
+    azim_err = max(abs(r_iso1.R - r_iso0.R), abs(r_iso1.T - r_iso0.T),
+                   abs(r_iso1.r - r_iso0.r))
+    conical_ok = bool(covar_err < 1e-9 and phi_matters > 1e-2 and e2e_err < 1e-9
+                      and azim_err < 1e-12)
     # DISPATCH BOUNDARY: a patterned layer must RAISE pointing at RCWA
     pil = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 150e-9, 80e-9), material="pillar")
     d_pat = _design([Layer("slab", 200e-9, "air", inclusions=[pil])], pol="y")
@@ -305,9 +326,10 @@ def main():
     g_f = bool(design_seam_err < 1e-9 and conical_ok and raised and raised_cell)
     ok = ok and g_f
     print("[lbb] GATE F: design-seam {:.1e}, conical Jones-covariance {:.1e} (phi matters {:.3f}), "
-          "patterned dispatch raises {}/{} -> {}".format(design_seam_err, covar_err, phi_matters,
-                                                         raised, raised_cell,
-                                                         "PASS" if g_f else "FAIL"), flush=True)
+          "conical E2E bridge-vs-native-rotated {:.1e} (low-sym biaxial; sign-flip probed), "
+          "isotropic azimuth-invariance {:.1e}, patterned dispatch raises {}/{} -> {}".format(
+              design_seam_err, covar_err, phi_matters, e2e_err, azim_err,
+              raised, raised_cell, "PASS" if g_f else "FAIL"), flush=True)
 
     print("[lbb] *** LUMENAIRY BERREMAN BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
