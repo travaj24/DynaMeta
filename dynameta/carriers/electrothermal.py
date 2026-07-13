@@ -28,8 +28,8 @@ import numpy as np
 import ngsolve as ng
 
 from dynameta.carriers.electrostatics_fem import ElectrostaticLayer, solve_electrostatics_fem
-from dynameta.carriers.thermal_fem import (ThermalLayer, ThermalResult, _S, _build_thermal_forms,
-                                           _add_load_terms, _mean_T_per_layer)
+from dynameta.carriers.thermal_fem import (MESH_SCALE, ThermalLayer, ThermalResult,
+                                           add_load_terms, build_thermal_forms, mean_T_per_layer)
 
 SigmaSpec = Union[float, Callable[[float], float]]      # constant S/m, or sigma(T_K) -> S/m
 
@@ -106,14 +106,15 @@ def _mean_scalar_per_layer(mesh, cf, layers) -> np.ndarray:
 
 def _sink_outflux_W(t_result, layers) -> float:
     """Conductive power [W] leaving the bottom (sink) face: integral over 'bot' of (-k grad T).n with
-    outward normal -z, i.e. integral of k dT/dz_phys dS_phys. The mesh is in nm: grad_phys = _S*grad_mesh
-    and dS_phys = dS_mesh/_S^2, so the assembled boundary integral carries an overall 1/_S."""
+    outward normal -z, i.e. integral of k dT/dz_phys dS_phys. The mesh is in nm: grad_phys =
+    MESH_SCALE*grad_mesh and dS_phys = dS_mesh/MESH_SCALE^2, so the assembled boundary integral
+    carries an overall 1/MESH_SCALE."""
     mesh, T = t_result.mesh, t_result.T
     k_by = {L.name: L.k_thermal for L in layers}
     k_cf = ng.CoefficientFunction([k_by[m] for m in mesh.GetMaterials()])
     qz = ng.BoundaryFromVolumeCF(k_cf * ng.grad(T)[2])          # k dT/dz in mesh-nm units
     integ = ng.Integrate(qz, mesh, definedon=mesh.Boundaries("bot"))
-    return float(integ.real) / _S                              # dS_mesh -> dS_phys (1/_S^2) * _S(grad) = 1/_S
+    return float(integ.real) / MESH_SCALE                      # net 1/MESH_SCALE (see docstring)
 
 
 def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: float, *,
@@ -153,7 +154,7 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
     # Thermal mesh + stiffness factored ONCE; each Picard iteration rebuilds only the Joule load and
     # re-solves on the SAME mesh/factorization -> the const-sigma loop is a machine-exact no-op (no
     # re-meshing noise between iterations) and the solve is cheap.
-    mesh_t, fes_t, _u, v_t, a_t, _f0, _k = _build_thermal_forms(
+    mesh_t, fes_t, _u, v_t, a_t, _f0, _k = build_thermal_forms(
         tstack, Px, Py, flux_W_m2, T_sink_K, None, maxh_m, order)
     T_layer = np.full(len(layers), float(T_sink_K), dtype=np.float64)
     residual_history: List[float] = []
@@ -172,12 +173,12 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
             Q = sigma * Esq                                                # W/m^3 per layer (>= 0)
             Qdict = {L.name: float(Q[i]) for i, L in enumerate(layers)}
             f = ng.LinearForm(fes_t)
-            _add_load_terms(f, v_t, mesh_t, flux_W_m2, Qdict)
+            add_load_terms(f, v_t, mesh_t, flux_W_m2, Qdict)
             f.Assemble()
             Tg.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh_t.Boundaries("bot"))
             res = f.vec - a_t.mat * Tg.vec
             Tg.vec.data += inv * res
-            T_new = _mean_T_per_layer(mesh_t, Tg, tstack)
+            T_new = mean_T_per_layer(mesh_t, Tg, tstack)
             T_upd = (1.0 - relax) * T_layer + relax * T_new
             resid = float(np.max(np.abs(T_upd - T_layer)))
             residual_history.append(resid)
