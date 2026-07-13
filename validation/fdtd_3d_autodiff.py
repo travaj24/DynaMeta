@@ -7,7 +7,7 @@ material), no finite-difference re-solves).
 GATE (gradient correctness): a transmitted-energy objective J(s) = sum |E_y(right probe)|^2 for a slab
 whose permittivity is scaled by s. The reverse-mode jax.grad dJ/ds must match a central finite-difference
 to ~1e-3 relative AND be non-trivially nonzero. Grid kept deliberately TINY (reverse-mode stores all 13
-carried fields per step). Skipped (exit 0) if JAX is not installed.
+carried fields per step). Skipped (exit 42 = the run_all SKIP category, audit C6-6) if JAX is not installed.
 
 Run: python -m validation.fdtd_3d_autodiff
 """
@@ -54,8 +54,8 @@ def _build_small_slab():
 def main():
     print("[f3d] === 3D FDTD autodiff: jax.grad straight through the 3D FDTD time loop ===", flush=True)
     if not _have_jax():
-        print("[f3d] JAX not installed -> SKIP (exit 0)", flush=True)
-        return True
+        print("[f3d] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)
