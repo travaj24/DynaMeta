@@ -8,7 +8,7 @@ condition  n*d = lambda/2  =>  eps* = (lambda/(2 d))^2. For d = 375 nm, lambda =
 
 GATE: starting from eps0=2.8, the FDTD-grad Adam loop converges to eps ~ 4 (within ~0.4) and drives the
 reflectance below ~0.02 (and well below the start). The slab-eps is CLIPPED to [2.0, 9.0] to exclude the
-trivial "remove the slab" optimum (eps->1, R->0), so a non-trivial design is recovered. Skipped (exit 0)
+trivial "remove the slab" optimum (eps->1, R->0), so a non-trivial design is recovered. Skipped (exit 42 = the run_all SKIP category, audit C6-6)
 if JAX is absent.
 
 Run: python -m validation.fdtd_inverse_design
@@ -58,8 +58,8 @@ def _grid():
 def main():
     print("[fid] === FDTD inverse design: Adam + jax.grad through the FDTD -> half-wave AR slab ===", flush=True)
     if not _have_jax():
-        print("[fid] JAX not installed -> SKIP (exit 0)", flush=True)
-        return True
+        print("[fid] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)

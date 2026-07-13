@@ -1,5 +1,5 @@
 """Validate the numba-CUDA 2D-TE FDTD backend (a persistent cooperative-groups GPU kernel run in
-timestep CHUNKS to stay under the WDDM TDR watchdog). Skipped (exit 0) if no CUDA GPU is available.
+timestep CHUNKS to stay under the WDDM TDR watchdog). Skipped (exit 42 = the run_all SKIP category, audit C6-6) if no CUDA GPU is available.
 
 GATE A (byte-match): backend='numba-cuda' reproduces the CPU reference (backend='numpy') R0/T0/R_flux to
         the float64 FMA floor (< 1e-9) -- the GPU kernel is the SAME physics, just parallelized.
@@ -25,8 +25,8 @@ from dynameta.optics.fdtd_nd import solve_fdtd_2d, _have_numba_cuda
 def main():
     print("[cu] === numba-CUDA 2D-TE FDTD backend ===", flush=True)
     if not _have_numba_cuda():
-        print("[cu] no CUDA GPU available -> SKIP (exit 0)", flush=True)
-        return True
+        print("[cu] no CUDA GPU available -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     # GATE A: byte-match vs the NumPy reference (uniform Drude slab)
     ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.5e15, drude_gamma_rad_s=1e14)]

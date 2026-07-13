@@ -9,7 +9,7 @@ GATE 2 (optimization works): a topology-optimization run (design a patterned lay
         reflectance at lambda) starting from a gray field strongly INCREASES R and BINARISES the design
         (a manufacturable 0/1 pattern), via the filter+projection+beta-annealing recipe.
 
-Deliberately small grid (reverse-mode stores the FDTD carry per step). Skipped (exit 0) if JAX absent.
+Deliberately small grid (reverse-mode stores the FDTD carry per step). Skipped (exit 42 = the run_all SKIP category, audit C6-6) if JAX absent.
 
 Run: python -m validation.fdtd_topology_opt
 """
@@ -60,8 +60,8 @@ def _grid():
 def main():
     print("[fto] === FDTD topology optimization: adjoint gradient + optimize a patterned layer ===", flush=True)
     if not _have_jax():
-        print("[fto] JAX not installed -> SKIP (exit 0)", flush=True)
-        return True
+        print("[fto] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)
