@@ -1295,7 +1295,11 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   the defect is upstream; the gate had silently rotted because the smoke tier
   never ran it (fixed by H4's run-everything discovery — this failure is that
   fix WORKING). Left honestly red; handed off as a lumenairy-side task with the
-  full repro + bisect.
+  full repro + bisect. RESOLVED 2026-07-13: the upstream classifier fix landed
+  (lumenairy branch fix/bor-grazing-cutoff, audit
+  AUDIT_BOR_PROPAGATING_CUTOFF_ENERGY_2026_07_13.md) -- lumenairy_bor_bridge
+  re-run: ALL FOUR GATES PASS (GATE C 319 modes, |R+T-1| = 1.2e-11, the
+  pre-regression values to all digits).
 
 **Campaign completion (2026-07-13):**
 - H3b follow-up (52846d1): ~20 validation + 3 test files' consumer renames the
@@ -1325,9 +1329,10 @@ the C6-class contract fixes), each with a discrimination-proven gate.
 - Full smoke tier: 84/84 PASS (0 skipped) post-campaign.
 
 **PENDING (deferred, tracked):**
-- BOR absorption/phase parity (B4b) — blocked on the upstream lumenairy BOR
-  energy-closure regression (bisected to lumenairy fca4665; handed off with
-  repro). lumenairy_bor_bridge GATE C stays honestly red until then.
+- BOR absorption/phase parity (B4b) — UNBLOCKED 2026-07-13 (upstream classifier
+  fix landed; lumenairy_bor_bridge fully green). Full parity still wants the
+  upstream C1 items in lumenairy's AUDIT_DYNAMETA_CONSUMER_API_GAPS_2026_07_13.md
+  (pinned S-matrix column gauge / amplitude accessor + BOR layer_absorption).
 - Per-order Jones synthesis for RCWA/PMM conical s/p (8.1-1; Berreman conical
   is DONE via covariance).
 - Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
