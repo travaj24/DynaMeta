@@ -3,16 +3,21 @@ and current coexist. HONESTLY MARGINAL for this vertical MOS-cap (no lateral cha
 completeness and for patterned-gate fringing-field layouts.
 
     interface-trap rate:   dN_it/dt = (A_it / q) * (I_sub / (W * L)) * f(E)       [m^-2 s^-1]
-    time-to-failure:       t_HCI = C * (I_sub / W)^(-m) * exp(Ea / (kB * T)),  m ~ 2/3 (Takeda)
+    time-to-failure:       t_HCI = C * (I_sub / W)^(-m) * exp(Ea / (kB * T))
+    (m attribution corrected per audit P3: the (I_sub/W) POWER law is Hu's lucky-electron model,
+    where m = phi_it/phi_i ~ 2.9-3 in the literature; Takeda-Suzuki's law is tau ~ exp(beta/V_DS)
+    with no I_sub power. The shipped default m keeps its prior value as a CALIBRATION-bearing
+    knob -- re-fit m to device data rather than trusting either literature anchor.)
 
 NOTE the q factor in the trap rate (current -> particle flux; the audit-corrected dimension) and the
 SIGN QUIRK: HCI often WORSENS at LOW temperature (less phonon scattering -> hotter carriers), so Ea
 here may legitimately be NEGATIVE (~ -0.1 to -0.2 eV) -- the one mechanism in this package where a
 negative activation is physical and therefore allowed.
 
-DRIVER NOTE: the substrate/impact-ionization current I_sub is the roadmap-flagged missing driver (a
-DEVSIM impact-ionization model is the follow-on); it is an EXTERNAL parameter here. Pure numpy;
-oracles in validation/reliability_hci.py.
+DRIVER NOTE (stale text corrected per audit C6-5/6.3): the impact-ionization driver HAS shipped --
+carriers.impact_ionization (D4, van Overstraeten-de Man on the solved bipolar fields; 2D layered
+meshes only, the 3D tet quadrature is guarded) produces I_sub; it may also be supplied as an
+external parameter. Pure numpy; oracles in validation/reliability_hci.py.
 """
 
 from __future__ import annotations

@@ -19,9 +19,13 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
     sigma=alpha=0 -> b=1,c=0 -> plain FDTD.
 
     n_super / n_sub (default 1 = vacuum) impedance-match the conductivity to the END MEDIUM each PML
-    terminates: the matched conductivity for a medium of refractive index n is sigma ~ n / eta0 (wave
-    impedance eta0/n), so the low-z PML scales sig_max by n_super and the high-z PML by n_sub. With the
-    defaults the per-cell scale is 1.0 everywhere -> coefficients are byte-identical to the vacuum case."""
+    terminates. audit C3-5-adjacent fix: under this eps0-normalized convention
+    (b = exp(-(sig/kap + alp) dt/eps0)) the one-way attenuation is exp(-n eta0 Int(sigma dz)) --
+    the exponent ALREADY carries n through the medium's wavevector -- so the MATCHED scaling is
+    sigma ~ 1/n (Gedney sigma_opt ~ 1/(eta0 dz n)), NOT the previous x n (which over-drove sigma
+    by n^2 and raised the discrete-reflection echo floor 2-14x for n = 1.5-4; the 1/n law holds
+    the vacuum floor flat across all n, probe-verified). Low-z PML scales by 1/n_super, high-z by
+    1/n_sub; defaults (n=1) are byte-identical to vacuum."""
     eta0 = np.sqrt(MU0 / EPS0)
     sig_max = -(m + 1.0) * np.log(R0) / (2.0 * eta0 * npml * dz)
 
@@ -29,7 +33,7 @@ def _cpml_z(nz, dz, dt, npml, n_super=1.0, n_sub=1.0, m=3.0, ma=1.0, kappa_max=5
         d_lo = np.clip(npml - zpos, 0.0, None)           # depth into the low-z PML (cells)
         d_hi = np.clip(zpos - (nz - 1 - npml), 0.0, None)  # depth into the high-z PML
         rho = np.clip(np.maximum(d_lo, d_hi) / npml, 0.0, 1.0)
-        nfac = np.where(d_lo >= d_hi, n_super, n_sub)    # which end-medium this PML terminates (low->super)
+        nfac = np.where(d_lo >= d_hi, 1.0 / n_super, 1.0 / n_sub)   # matched ~ 1/n (see docstring)
         sig = sig_max * nfac * rho ** m
         kap = 1.0 + (kappa_max - 1.0) * rho ** m
         alp = alpha_max * (1.0 - rho) ** ma
