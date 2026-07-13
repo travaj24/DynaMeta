@@ -6,8 +6,9 @@ iteration" -- add a wavelength, tweak a bias, restart a notebook, and the unchan
 The cache key is a content hash of the SOLVE INPUTS -- the design geometry (period + per-layer
 name/thickness/material/#inclusions + end materials), the bias-modulated eps_by_region values (uniform
 scalar or the gridded array bytes), the wavelength, and n_super/n_sub -- so it is correct across processes
-and machines (no reliance on object identity). The store is one HDF5/Zarr file (dynameta.io.store), each
-entry a packed 12-float OpticalResult vector. Use OpticalSolverCache(inner, path) as a drop-in
+and machines (no reliance on object identity). The store is one HDF5/Zarr file (dynameta.io.store)
+holding ALL entries as two datasets: an (N,12) float64 value matrix (one packed OpticalResult vector
+per row) and an (N,41) uint8 ASCII key matrix. Use OpticalSolverCache(inner, path) as a drop-in
 optical_solver in run_pipeline; call .flush() (or rely on autosave) to persist, .stats() for hit/miss.
 """
 from __future__ import annotations
@@ -25,8 +26,8 @@ from dynameta.io.store import load_arrays, save_arrays
 # packed-vector layout (NaN = the field was None): the OpticalResult scalar fields + split complex r/t
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
         "r_re", "r_im", "t_re", "t_im")
-# Store-format schema. BUMP whenever the KEY derivation changes so an on-disk cache written by an
-# older (buggy) keying is DISCARDED on load rather than serving collided/mis-keyed entries.
+# Store-format schema. BUMP whenever the KEY derivation OR the on-disk layout changes so an on-disk
+# cache written by an older format is DISCARDED on load rather than serving collided/mis-keyed entries.
 #   2 -> 3: uniform-anisotropic `tensor` eps is now hashed into the key (previously all uniform-tensor
 #           states collided -- a Pockels/Kerr/magneto-optic bias sweep served the first point's result).
 #   3 -> 4 (audit C5-3/C5-6): material eps CONTENT (sampled at the request wavelength) and the inner
@@ -35,7 +36,14 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 #           served stale results (backends re-derive eps from design.materials at solve time; probe:
 #           HIT returned R=0.179 where the truth was 0.059), and (b) two different backends sharing a
 #           cache path with the default tag='' served each other's specular-vs-order-summed numbers.
-_SCHEMA = 4
+#   4 -> 5 (audit 6.2): LAYOUT change, keys unchanged -- one small dataset per entry became TWO packed
+#           datasets (_PK_VALS (N,12) float64 rows + _PK_KEYS (N,41) uint8 ASCII keys), bit-identical
+#           per entry but far faster to flush and reopen (per-dataset metadata churn dominated;
+#           measured 25-90x HDF5 / ~130x Zarr at N=400-2000, growing with N). A schema-4 per-key
+#           store is discarded on load like any stale schema.
+_SCHEMA = 5
+_PK_VALS = "packed_vals"                                    # (N, len(_VEC)) float64, one entry per row
+_PK_KEYS = "packed_keys"                                    # (N, 41) uint8: "k"+sha1-hex ASCII key rows
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
 # OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
 # per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
@@ -141,14 +149,19 @@ class OpticalSolverCache:
 
     PERSISTENCE COST MODEL (audit 6.2 -- the old '(cheap, crash-safe)' claim was inverted at
     scale): the store has no append path, so EVERY flush rewrites the WHOLE store (HDF5
-    mode-'w' truncate; Zarr rmtree-first), i.e. per-miss autosave is O(N^2) metadata churn
-    over a sweep -- measured 240x overhead (9.68 s vs 0.04 s) for a 400-miss HDF5 sweep and
-    70x at just 120 Zarr entries -- and every rewrite is a window where a crash loses the
-    accumulated store. autosave_every=K (default 1 = the old per-miss behavior,
-    byte-compatible) batches the flushes: K~16-64 recovers most of the 240x for big sweeps
-    while bounding crash loss to K-1 misses; a dirty cache is also flushed at interpreter
-    exit (atexit) so autosave_every > 1 cannot silently drop the tail. autosave=False +
-    one explicit flush() remains the fastest path."""
+    mode-'w' truncate; Zarr rmtree-first), and every rewrite is a window where a crash loses
+    the accumulated store. Two independent mitigations, still whole-store-rewrite semantics:
+      * schema-5 PACKED layout: all entries go into TWO datasets ((N,12) values + (N,41)
+        keys) instead of one tiny dataset per entry, whose per-dataset metadata churn
+        dominated (the old layout measured 9.68 s of autosave vs 0.04 s for one final
+        flush over a 400-miss HDF5 sweep, 240x, and 70x at just 120 Zarr entries); the
+        packed rewrite measures 25-90x (HDF5) / ~130x (Zarr) faster per flush AND per
+        reopen at N=400-2000, bit-identical entries.
+      * autosave_every=K (default 1 = per-miss autosave) batches the flushes, turning
+        O(N^2) rewrite bytes over a sweep into O(N^2/K) while bounding crash loss to K-1
+        misses; a dirty cache is also flushed at interpreter exit (atexit) so
+        autosave_every > 1 cannot silently drop the tail. autosave=False + one explicit
+        flush() remains the fastest path."""
 
     def __init__(self, inner_solver, path: str, *, tag: str = "", fmt: str = "auto",
                  autosave: bool = True, autosave_every: int = 1, verbose: bool = False):
@@ -178,13 +191,21 @@ class OpticalSolverCache:
         if os.path.exists(path):
             try:
                 arrays, meta = load_arrays(path, fmt=fmt)
-                # DISCARD a cache written under an older key schema -- its keys were derived
+                # DISCARD a cache written under an older key schema or layout -- its keys were derived
                 # differently (e.g. the schema-2 uniform-tensor collision), so its entries cannot be
                 # trusted against the current _key(). Re-solving is correct; serving stale is not.
+                # The discarded entries stay PHYSICALLY on disk until the first flush truncates the
+                # file (save_arrays is a whole-store rewrite) -- GATE D2 pins that an append/merge
+                # flush cannot resurrect them under the fresh schema stamp.
                 if int((meta or {}).get("schema", -1)) != _SCHEMA:
                     self._mem = {}
                 else:
-                    self._mem = {k: np.asarray(v, dtype=float) for k, v in arrays.items()}
+                    kmat = np.asarray(arrays[_PK_KEYS], dtype=np.uint8)
+                    vmat = np.asarray(arrays[_PK_VALS], dtype=float)
+                    # unpack row-wise: each entry gets its OWN (len(_VEC),) float64 copy, bit-identical
+                    # to what _pack() produced (ASCII keys and float64 rows round-trip exactly)
+                    self._mem = {bytes(kmat[i]).decode("ascii"): vmat[i].copy()
+                                 for i in range(kmat.shape[0])}
             except Exception:                               # pragma: no cover - a corrupt/foreign file
                 self._mem = {}
 
@@ -210,9 +231,22 @@ class OpticalSolverCache:
 
     def flush(self) -> str:
         """Write the in-memory cache to disk (HDF5/Zarr; a WHOLE-store rewrite -- see the
-        class docstring cost model)."""
+        class docstring cost model). The rewrite is deliberate: save_arrays truncates (HDF5
+        mode-'w' / Zarr rmtree-first), which is what makes a load-side schema discard
+        permanent -- an append/merge flush would resurrect the discarded stale entries
+        under the fresh schema stamp (audit 6.2 hazard; GATE D2)."""
         self._unsaved = 0
-        return save_arrays(self.path, self._mem,
+        keys = sorted(self._mem)                            # deterministic on-disk row order
+        if keys:
+            # keys are uniformly 41 ASCII chars ("k" + sha1 hex) by construction of _key();
+            # the reshape fails loudly if that invariant ever breaks (never a silent mis-split)
+            kmat = np.frombuffer("".join(keys).encode("ascii"),
+                                 dtype=np.uint8).reshape(len(keys), -1)
+            vmat = np.stack([self._mem[k] for k in keys])
+        else:
+            kmat = np.zeros((0, 41), dtype=np.uint8)
+            vmat = np.zeros((0, len(_VEC)), dtype=float)
+        return save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat},
                            {"schema": _SCHEMA, "tag": self.tag, "layout": list(_VEC)},
                            fmt=self.fmt)                     # _SCHEMA (single source): the load-side
                                                             # discard check uses the SAME constant, so

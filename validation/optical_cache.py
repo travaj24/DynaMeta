@@ -20,6 +20,12 @@ GATE C (every key knob moves the key): changing lambda, n_super, n_sub, the opti
 GATE D (stale-schema cache is discarded on load): a cache file written under an older key schema is
         DROPPED when reopened (re-solve), not served. Skipped honestly when neither h5py nor zarr is
         installed (the on-disk backends).
+GATE D2 (flush into a stale file TRUNCATES it -- audit 6.2 fixer hazard): after a load-side schema
+        discard, the discarded entries are still physically on disk until the next flush. A flush
+        that APPENDS (or read-merges) instead of truncating would rewrite the file with the CURRENT
+        schema stamp while the stale mis-keyed entries survive inside it -- the next reopen would
+        resurrect and SERVE them. This leg flushes a fresh entry into a stale-schema file, then
+        checks the raw on-disk datasets and a reopen: only the fresh entry may exist.
 
 Run: python -m validation.optical_cache
 """
@@ -37,7 +43,7 @@ from dynameta.core.eps_field import EpsField
 from dynameta.core.interfaces import OpticalResult
 from dynameta.geometry import Design, Layer, Stack, UnitCell
 from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
-from dynameta.io.store import available_formats, save_arrays
+from dynameta.io.store import available_formats, load_arrays, save_arrays
 from dynameta.materials import ConstantOptical, Material, MaterialRegistry
 
 PER = 400e-9
@@ -162,15 +168,52 @@ def main():
                         {"schema": 2, "tag": "", "layout": list(C._VEC)})
             stale = OpticalSolverCache(_stub_solver, path, autosave=False)
             discarded = len(stale._mem) == 0                       # schema-2 entries must be dropped
-            # a CURRENT-schema file must load normally
+            # a CURRENT-schema file (packed layout: (N,12) values + (N,41) keys) must load normally
             path2 = os.path.join(td, "fresh" + ext)
-            save_arrays(path2, {"kK": np.zeros(len(C._VEC))},
+            kk = "k" + "0" * 40
+            save_arrays(path2, {C._PK_KEYS: np.frombuffer(kk.encode("ascii"),
+                                                          dtype=np.uint8).reshape(1, -1),
+                                C._PK_VALS: np.zeros((1, len(C._VEC)))},
                         {"schema": C._SCHEMA, "tag": "", "layout": list(C._VEC)})
-            loaded = "kK" in OpticalSolverCache(_stub_solver, path2, autosave=False)._mem
+            loaded = kk in OpticalSolverCache(_stub_solver, path2, autosave=False)._mem
             g_d = bool(discarded and loaded)
         print("[cache] GATE D: stale schema-2 discarded {}, current schema-{} loads {} -> {}".format(
             discarded, C._SCHEMA, loaded, "PASS" if g_d else "FAIL"), flush=True)
     ok = ok and g_d
+
+    # ---- GATE D2: flush into a stale-schema file truncates it (no resurrection on reopen) ----
+    if not fmts:
+        print("[cache] GATE D2: SKIP (no h5py/zarr backend -- stale-truncate check not run)", flush=True)
+        g_d2 = True
+    else:
+        ext = ".h5" if "hdf5" in fmts else ".zarr"
+        stale_key = "k" + "f" * 40                             # a plausible mis-keyed old-schema entry
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "resurrect" + ext)
+            # a store written under the PREVIOUS schema, carrying one bogus packed entry
+            save_arrays(path, {stale_key: np.zeros(len(C._VEC))},
+                        {"schema": C._SCHEMA - 1, "tag": "", "layout": list(C._VEC)})
+            c1 = OpticalSolverCache(_stub_solver, path, autosave=True)
+            discarded2 = len(c1._mem) == 0                     # load-side discard (GATE D semantics)
+            d = _design()
+            e = {"film": _uniform_tensor(6.2)}
+            r_fresh = c1(d, None, e, LAM, 1.0 + 0j, 1.5 + 0j)  # miss -> autosave flush INTO the stale file
+            # raw on-disk check: the stale entry must be physically GONE, not just unread
+            raw, meta = load_arrays(path)
+            stale_gone = stale_key not in raw
+            restamped = int(meta.get("schema", -1)) == C._SCHEMA
+            # reopen under the fresh stamp: exactly the fresh entry, served as a HIT
+            c2 = OpticalSolverCache(_stub_solver, path, autosave=False)
+            only_fresh = (set(c2._mem) == set(c1._mem) and len(c2._mem) == 1
+                          and stale_key not in c2._mem)
+            r_hit = c2(d, None, e, LAM, 1.0 + 0j, 1.5 + 0j)
+            served_fresh = c2.hits == 1 and _same_result(r_hit, r_fresh)
+            g_d2 = bool(discarded2 and stale_gone and restamped and only_fresh and served_fresh)
+        print("[cache] GATE D2: discard {}, stale entry gone after flush {}, restamped {}, reopen "
+              "fresh-only {}, HIT==fresh {} -> {}".format(
+                  discarded2, stale_gone, restamped, only_fresh, served_fresh,
+                  "PASS" if g_d2 else "FAIL"), flush=True)
+    ok = ok and g_d2
 
     # ---- GATE E: flush -> reopen round-trip (pins flush()/load _SCHEMA agreement) ----
     # GATE B is in-memory (autosave off) and GATE D hand-writes via save_arrays, so neither exercises
@@ -187,12 +230,19 @@ def main():
             e = {"film": _uniform_tensor(6.3)}
             c1 = OpticalSolverCache(_stub_solver, path, autosave=True)     # autosave flushes on miss
             r_miss = c1(d, None, e, LAM, 1.0 + 0j, 1.5 + 0j)               # miss -> compute + flush
+            c1(d, None, {"film": _uniform_tensor(6.7)}, LAM, 1.0 + 0j, 1.5 + 0j)   # 2nd packed row
             c2 = OpticalSolverCache(_stub_solver, path, autosave=False)    # reopen FRESH from disk
             r_hit = c2(d, None, e, LAM, 1.0 + 0j, 1.5 + 0j)
             survived = (c2.hits == 1 and c2.misses == 0 and _same_result(r_hit, r_miss))
-        g_e = bool(survived)
-        print("[cache] GATE E: flush->reopen survives as HIT {} (hits {}, misses {}) -> {}".format(
-            survived, c2.hits, c2.misses, "PASS" if g_e else "FAIL"), flush=True)
+            # BIT-identity across the store: the reopened _mem must be BYTE-identical to what was
+            # flushed (the packed (N,12)+(N,41) layout must round-trip float64 bits + keys exactly)
+            bit_identical = (set(c2._mem) == set(c1._mem) and all(
+                c1._mem[k].dtype == c2._mem[k].dtype and c1._mem[k].tobytes() == c2._mem[k].tobytes()
+                for k in c1._mem))
+        g_e = bool(survived and bit_identical)
+        print("[cache] GATE E: flush->reopen survives as HIT {} (hits {}, misses {}), _mem "
+              "byte-identical {} -> {}".format(survived, c2.hits, c2.misses, bit_identical,
+                                               "PASS" if g_e else "FAIL"), flush=True)
     ok = ok and g_e
 
     print("[cache] *** OPTICAL CACHE: {} ***".format("PASS" if ok else "FAIL"), flush=True)
