@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 
 
 def deal_grove_thickness_m(t_s, *, A_m: float, B_m2_s: float, x0_m: float = 0.0):

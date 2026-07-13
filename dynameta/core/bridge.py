@@ -25,7 +25,7 @@ from dynameta.core.lift import FieldLift
 from dynameta.core.n_to_eps import NToEpsMap
 
 # The sign convention the whole library + NGSolve assume (passive loss => Im(eps)>0).
-SOLVER_TIME_CONVENTION = "exp(-iwt)"
+from dynameta.constants import SOLVER_TIME_CONVENTION  # noqa: E402  (single source; re-exported here)
 
 
 def assemble_eps(field: CarrierField,

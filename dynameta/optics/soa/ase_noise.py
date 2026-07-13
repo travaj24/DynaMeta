@@ -42,9 +42,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import HBAR, Q_E
+from dynameta.constants import H_PLANCK, Q_E
 
-H_PLANCK = 2.0 * np.pi * HBAR
 
 __all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
            "ase_output_psd", "noise_figure", "detector_noise_variances",
