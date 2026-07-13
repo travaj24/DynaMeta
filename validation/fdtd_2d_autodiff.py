@@ -8,7 +8,7 @@ GATE (gradient correctness): a transmitted-energy objective J(s) = sum |E_y(righ
 whose permittivity is scaled by s. The reverse-mode jax.grad dJ/ds must match a central finite-difference
 (two extra forward solves) to ~1e-4 relative, AND be non-trivially nonzero (a zero gradient would pass a
 loose FD check vacuously). Establishes the backend is genuinely usable for gradient-based design, not just
-a faster forward solver. Skipped (exit 0) if JAX is not installed.
+a faster forward solver. Skipped (exit 42 = the run_all SKIP category, audit C6-6) if JAX is not installed.
 
 Run: python -m validation.fdtd_2d_autodiff
 """
@@ -60,8 +60,8 @@ def _build_small_slab():
 def main():
     print("[fad] === 2D FDTD autodiff: jax.grad straight through the FDTD time loop ===", flush=True)
     if not _have_jax():
-        print("[fad] JAX not installed -> SKIP (exit 0)", flush=True)
-        return True
+        print("[fad] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)

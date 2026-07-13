@@ -13,7 +13,7 @@ GATE D: the full-vector 3D oblique JAX kernel == NumPy across conical (angle,azi
 GATE E: jax.grad through BOTH the 2D-TM and the 3D oblique kernels is finite + nonzero
         (differentiable inverse design at angle for p-pol and the full-vector 3D path).
 
-Skipped (exit 0) if JAX is not installed. Run: python -m validation.fdtd_oblique_jax
+Skipped (exit 42 = the run_all SKIP category, audit C6-6) if JAX is not installed. Run: python -m validation.fdtd_oblique_jax
 """
 import os
 import sys
@@ -31,8 +31,8 @@ from dynameta.constants import C_LIGHT
 def main():
     print("[t] === JAX oblique 2D FDTD: jax==numpy + differentiable ===", flush=True)
     if not _have_jax():
-        print("[t] JAX not installed -> SKIP (exit 0)", flush=True)
-        return True
+        print("[t] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
     L = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0)]
     kw = dict(period_x_m=320e-9, angle_deg=25.0, lambda_min_m=1.2e-6, lambda_max_m=1.8e-6,
               resolution=22, nx=6)
