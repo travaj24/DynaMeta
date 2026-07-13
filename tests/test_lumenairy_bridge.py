@@ -495,3 +495,36 @@ def test_translate_reads_layers_via_common():
     stk.add_layer(100e-9, eps=4.0 + 0j)
     recs = stack_layer_records(stk)
     assert len(recs) == 1 and recs[0].kind == "uniform"
+
+
+@needs_lum
+def test_threaded_sweep_matches_serial():
+    # audit 8.1-2: n_workers threads solve_sweep; results stored by index and each
+    # wavelength is an independent LAPACK problem, so the output must be byte-identical
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
+    d = _grating_design(600e-9, pol="x")
+    lams = [1.2e-6, 1.3e-6, 1.4e-6, 1.5e-6]
+    ser = make_lumenairy_rcwa_solver(n_orders=5).solve_sweep(
+        d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
+    par = make_lumenairy_rcwa_solver(n_orders=5, n_workers=4).solve_sweep(
+        d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
+    for a, b in zip(ser, par):
+        assert a.R == b.R and a.T == b.T and a.r == b.r and a.phase_deg == b.phase_deg
+
+
+@needs_lum
+def test_pmm_absorption_parity_surface():
+    # audit 8.1-3: absorption=True fills per_region_absorption + A_independent (keyed by
+    # design layer) and the budget closes; default stays None (byte-identical off-switch).
+    # The cross-engine physics oracle is validation/lumenairy_pmm_bridge GATE E.
+    from dynameta.geometry import Layer
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm_solver
+    d = _uniform_design()          # single lossy layer 'a' (hi = 4.0 + 0.3j)
+    lam = 1.31e-6
+    r0 = make_lumenairy_pmm_solver()(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    assert r0.per_region_absorption is None and r0.A_independent is None
+    r1 = make_lumenairy_pmm_solver(absorption=True)(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    assert set(r1.per_region_absorption) == {"a"}
+    assert r1.A_independent == pytest.approx(r1.A, abs=1e-9)
+    assert r1.per_region_absorption["a"] == pytest.approx(r1.A_independent, abs=1e-12)
+    assert r1.R == r0.R and r1.T == r0.T
