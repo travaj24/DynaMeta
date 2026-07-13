@@ -107,17 +107,18 @@ def device_saturation_curve(model, drive, nu, alpha_i, L, P_in_W, nz=2000):
     gam = model.gamma_confinement
     gQD = lambda P: np.interp(P, P_grid, g_loc)
     dz = L / int(nz)
-    P_out = np.empty(P_in.size)
-    for i, P0 in enumerate(P_in):
-        P = float(P0)
-        for _ in range(int(nz)):
-            k1 = (gam * gQD(P) - alpha_i) * P
-            k2 = (gam * gQD(P + 0.5 * dz * k1) - alpha_i) * (P + 0.5 * dz * k1)
-            k3 = (gam * gQD(P + 0.5 * dz * k2) - alpha_i) * (P + 0.5 * dz * k2)
-            k4 = (gam * gQD(P + dz * k3) - alpha_i) * (P + dz * k3)
-            P = P + dz / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-        P_out[i] = P
-    return P_in, P_out
+    # RK4 vectorized ACROSS the P_in array (audit 6.2 perf): every input power takes the same
+    # step count/size, so the former serial per-P_in python loop is just the same elementwise
+    # float ops in vector lanes (np.interp is elementwise too) -- BIT-identical per P_in
+    # (probe-verified), ~11x on this leg.
+    P = P_in.astype(np.float64, copy=True)
+    for _ in range(int(nz)):
+        k1 = (gam * gQD(P) - alpha_i) * P
+        k2 = (gam * gQD(P + 0.5 * dz * k1) - alpha_i) * (P + 0.5 * dz * k1)
+        k3 = (gam * gQD(P + 0.5 * dz * k2) - alpha_i) * (P + 0.5 * dz * k2)
+        k4 = (gam * gQD(P + dz * k3) - alpha_i) * (P + dz * k3)
+        P = P + dz / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return P_in, P
 
 
 def _psat_out_dBm(model, drive, nu, alpha_i, L):

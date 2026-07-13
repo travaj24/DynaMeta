@@ -312,13 +312,22 @@ def ase_self_consistent_zresolved(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid
     conv = p.Gamma / (p.v_g_m_s * p.A_mode_m2)
 
     def gains(S_ase_load):                                   # per-slice gain at the local ASE load
+        # Solve each DISTINCT load value once (audit 6.2 perf): the Picard iteration starts from
+        # the all-zero profile (and the ase_saturation=False path is all-zero), where every slice
+        # shares one load -- identical float inputs give the identical deterministic steady_state,
+        # so mapping the unique solves back over the slices is bit-identical to a per-slice loop.
+        rows = {}
         rows_g, rows_gsp = [], []
         for s in np.atleast_1d(S_ase_load):
-            y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * float(s),
-                                   nu_s_Hz=nu_s_Hz)
-            rho = model.rho_GS(y)
-            rows_g.append(model.material_gain_per_m(rho, nu))
-            rows_gsp.append(model.emission_gain_per_m(rho, nu))
+            key = float(s)
+            if key not in rows:
+                y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * key,
+                                       nu_s_Hz=nu_s_Hz)
+                rho = model.rho_GS(y)
+                rows[key] = (model.material_gain_per_m(rho, nu),
+                             model.emission_gain_per_m(rho, nu))
+            rows_g.append(rows[key][0])
+            rows_gsp.append(rows[key][1])
         return np.atleast_2d(np.array(rows_g)), np.atleast_2d(np.array(rows_gsp))
 
     g_unsat = model.material_gain_per_m(model.rho_GS(
