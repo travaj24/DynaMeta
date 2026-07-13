@@ -1,15 +1,15 @@
 """Gradient-based INVERSE DESIGN over the differentiable JAX-FDTD backend -- the capability the
-differentiable kernels (optics.fdtd_nd._run_2d_te_jax / _run_3d_jax) were built for. The user writes a
+differentiable kernels (optics.fdtd_nd.run_2d_te_jax / run_3d_jax) were built for. The user writes a
 JAX-differentiable loss(params) -> scalar that builds an eps grid from `params`, runs the JAX FDTD, and
 returns a figure of merit (e.g. reflectance at a wavelength, or a spectral mismatch); `optimize_fdtd`
 then Adam-steps the params downhill using jax.grad straight through the time loop -- no finite-difference
 re-solves. Convention exp(-i omega t), SI.
 
 Pattern:
-    from dynameta.optics.fdtd_nd import _run_2d_te_jax
+    from dynameta.optics.fdtd_nd import run_2d_te_jax
     def loss(eps_slab):                       # eps_slab is a JAX scalar/array being optimised
         eps = eps_base.at[:, slab].set(eps_slab)
-        eyL_t, *_ = _run_2d_te_jax(eps, wp0, gam0, chi3_0, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        eyL_t, *_ = run_2d_te_jax(eps, wp0, gam0, chi3_0, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
         mRefl = jnp.fft.rfft((eyL_t - eyL_vac).mean(axis=1))   # eyL_vac precomputed (eps-independent)
         return jnp.abs(mRefl[ix] / mL_inc[ix]) ** 2           # reflectance at the target bin
     eps_opt, history = optimize_fdtd(loss, 2.5, n_steps=50, lr=0.1, clip=(1.0, 9.0))
@@ -67,8 +67,8 @@ class Fdtd2dDesignProblem:
         import jax
         jax.config.update("jax_enable_x64", True)
         import jax.numpy as jnp
-        from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te_jax
-        self._run = _run_2d_te_jax
+        from dynameta.optics.fdtd_nd import cpml_z, run_2d_te_jax
+        self._run = run_2d_te_jax
         lams = np.asarray(lambdas_m, dtype=float).ravel()
         lo, hi = float(lams.min()) * 0.85, float(lams.max()) * 1.15
         n_max = np.sqrt(max(eps_hi, 1.0))
@@ -90,7 +90,7 @@ class Fdtd2dDesignProblem:
         nsteps = int(round((2.0 * t0 + 4.0 * nz * dz / C_LIGHT + 200 * tau) / dt))
         tg = np.arange(nsteps) * dt
         src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tg - t0))
-        cpml = _cpml_z(nz, dz, dt, 8)
+        cpml = cpml_z(nz, dz, dt, 8)
         self.eps_lo, self.eps_hi, self.n_des = eps_lo, eps_hi, n_des
         self.des_z = jnp.asarray(des_z)
         self.eps_base = jnp.ones((nx, nz))

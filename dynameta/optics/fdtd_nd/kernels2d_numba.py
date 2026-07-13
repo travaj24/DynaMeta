@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import EPS0, MU0
-from dynameta.optics.fdtd_nd.backends import _HAVE_NUMBA, njit, prange
+from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, njit, prange
 
 
 
@@ -17,7 +17,7 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                 nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
                 chi2g, has_chi2, R1, R2, R3, chi3R, has_raman, G1, G2, G3, has_gain):
     """Fused, prange-threaded 2D TE timestep (the Numba CPU kernel) -- byte-for-byte the same physics as
-    _run_2d_te (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
+    run_2d_te (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
     in x), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass with no per-op overhead.
     C1,C2,C3 = per-cell Lorentz ADE coefficients; has_lor gates the extra pole. R15/R20 nonlinearities
     mirror the numpy kernel: chi2 SHG polarization P2 = eps0 chi2 E^2 (lagged dP2/dt), the Raman pair
@@ -94,7 +94,7 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
 #     caps the grid at the co-resident block count (~#SMs), so this WINS on small / unit-cell grids (~3.4x
 #     vs the threaded CPU on a metasurface unit cell @ RTX 4070 Ti) but is occupancy-limited on very large
 #     volumes -- prefer the 'cupy' backend (unlimited blocks) there. ---
-if _HAVE_NUMBA:
+if HAVE_NUMBA:
     from numba import cuda as _cuda
 
     @_cuda.jit(fastmath=True)

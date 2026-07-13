@@ -10,13 +10,13 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
-from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd.backends import _HAVE_NUMBA, _have_jax, _resolve_backend
+from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
-from dynameta.optics.fdtd_nd.cpml import _cpml_z
-from dynameta.optics.fdtd_nd.kernels2d import _run_2d_te
-from dynameta.optics.fdtd_nd.kernels2d_jax import _run_2d_te_jax
+from dynameta.optics.fdtd_nd.cpml import cpml_z
+from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
+from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
 
 
@@ -66,14 +66,14 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
                            chi2g, chi2 is not None, R1, R2, R3, chi3R, raman is not None,
                            G1, G2, G3, gain is not None)
     if name == "jax":
-        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
-                             lor, chi2=chi2, raman=raman, gain=gain)
+        out = run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                            lor, chi2=chi2, raman=raman, gain=gain)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp                                    # backend='cupy' auto-selects the device module
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                     chi2=chi2, raman=raman, gain=gain)
+    out = run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
+                    chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -234,9 +234,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)
-    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched to super (low z) + sub (high z)
-    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference -> super both ends
-    name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
+    cpml_struct = cpml_z(nz, dz, dt, npml, n_super, n_sub)   # PML matched to super (low z) + sub (high z)
+    cpml_ref = cpml_z(nz, dz, dt, npml, n_super, n_super)    # homogeneous-superstrate reference -> super both ends
+    name = resolve_backend(backend)                          # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
     def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
@@ -351,16 +351,16 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
     # 'numba' = the fused threaded complex-envelope kernel; 'auto'/'cpu' pick it when present; everything else
     # falls back to the vectorized NumPy reference (the oblique path is normal-incidence-free of jax/cupy).
-    rb = _resolve_backend(backend)
+    rb = resolve_backend(backend)
     # _run_oblique carries fused numba + differentiable jax kernels for BOTH s-pol (TE) and p-pol (TM);
     # pick the requested fast/diff backend when available, else the NumPy reference.
-    if rb == "jax" and _have_jax():
+    if rb == "jax" and have_jax():
         name = "jax"                                         # differentiable oblique scan (s + p)
-    elif rb == "numba" and _HAVE_NUMBA:
+    elif rb == "numba" and HAVE_NUMBA:
         name = "numba"                                       # fused JIT oblique kernel (s + p)
     else:
         name = "numpy"
