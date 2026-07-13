@@ -21,6 +21,34 @@ from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
 
 
 
+# --- homogeneous-superstrate REFERENCE-run cache (audit 6.2 perf) ------------------------------
+# The pipeline seam invokes solve_fdtd_2d/_3d once per (bias, wavelength); the incident-reference
+# (normalization) run depends ONLY on the grid, the source and the superstrate -- not on the
+# structure -- so repeated seam solves at a fixed wavelength recompute an IDENTICAL reference
+# (~2x total cost). Cache the last few probe tuples keyed on the EXACT inputs that determine the
+# run (bytes/tuple key, exact reuse only -- a hit returns the same arrays, bit-identical by
+# construction). Entries are marked read-only so an accidental downstream mutation fails loudly
+# instead of silently corrupting later solves.
+_REF_CACHE = {}
+_REF_CACHE_MAX = 4                                           # FIFO entries (dict = insertion order)
+_REF_CACHE_MAX_BYTES = 512 * 1024 * 1024                     # skip caching huge (production-3D) refs
+
+
+def _ref_cache_call(key, fn):
+    """Return fn() memoized on `key` (exact match only). Oversized results pass through uncached."""
+    out = _REF_CACHE.get(key)
+    if out is not None:
+        return out
+    out = fn()
+    if sum(a.nbytes for a in out) <= _REF_CACHE_MAX_BYTES:
+        for a in out:
+            a.setflags(write=False)
+        while len(_REF_CACHE) >= _REF_CACHE_MAX:
+            _REF_CACHE.pop(next(iter(_REF_CACHE)))
+        _REF_CACHE[key] = out
+    return out
+
+
 def _ring_time_s(layers) -> float:
     """Material-memory ring-down time (audit C3-6): the fixed 200*tau DFT window predates
     the Lorentz/gain ADEs -- a high-loaded-Q in-band pole rings past it, truncating the
@@ -244,8 +272,16 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                                lor, chi2, raman, gain)
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
-    # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run)
-    eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
+    # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run).
+    # Structure-independent, so it is memoized on its exact determinants (audit 6.2 perf); a custom xp
+    # bypasses the cache (the key cannot pin an arbitrary array module).
+    if xp is np:
+        _key = ("2d", name, nx, nz, float(dx), float(dz), float(dt), int(nsteps), int(k_src),
+                int(k_pL), int(k_pR), int(npml), complex(n_super), src.tobytes())
+        eyL_i, hxL_i, eyR_i, hxR_i = _ref_cache_call(
+            _key, lambda: run(n_super ** 2 * one, zero, zero, zero, cpml_ref))
+    else:
+        eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
     eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
                                      chi2_arrs, raman_arrs, gain_arrs)  # structure run
 

@@ -14,7 +14,7 @@ from dynameta.optics.fdtd_nd.spec import FDTDLayer
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.solve2d import _ring_time_s
+from dynameta.optics.fdtd_nd.solve2d import _ref_cache_call, _ring_time_s
 from dynameta.optics.fdtd_nd.kernels3d import _run_3d_mo, _run_3d_oblique, run_3d
 from dynameta.optics.fdtd_nd.kernels3d_numba import _run_3d_oblique_numba, _te3d_numba
 from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
@@ -194,8 +194,16 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp,
                             lor, chi2, raman, gain)
 
-    exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
-        n_super ** 2 * one, zero, zero, zero, cpml_ref)                  # homogeneous-superstrate reference
+    # homogeneous-superstrate reference: structure-independent, so memoized on its exact
+    # determinants (audit 6.2 perf; see solve2d._ref_cache_call); custom xp bypasses the cache
+    if xp is np:
+        _key = ("3d", name, nx, ny, nz, float(dx), float(dy), float(dz), float(dt), int(nsteps),
+                int(k_src), int(k_pL), int(k_pR), int(npml), complex(n_super), src.tobytes())
+        exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = _ref_cache_call(
+            _key, lambda: run(n_super ** 2 * one, zero, zero, zero, cpml_ref))
+    else:
+        exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
+            n_super ** 2 * one, zero, zero, zero, cpml_ref)
     exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
                                                                  chi2_arrs, raman_arrs, gain_arrs)  # struct
 
