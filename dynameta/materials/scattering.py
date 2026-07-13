@@ -83,8 +83,13 @@ class MatthiessenGamma:
 
       1/tau_gb       = gamma_const_rad_s                         (grain-boundary + any T,n-independent floor)
       1/tau_phonon   = gamma_phonon_300K_rad_s * f_T             (LO/acoustic phonons; f_T below)
-      1/tau_ii(n)    = bh_prefactor_rad_s * (n/bh_n_ref_m3)^p * (m_ref/m_opt(n))^2   (degenerate Brooks-
-                       Herring SCALING; the absolute prefactor is CALIBRATION-bearing, default 0 = off)
+      1/tau_ii(n)    = bh_prefactor_rad_s * (n/bh_n_ref_m3)^p * (m_opt(n)/m_ref)      (degenerate Brooks-
+                       Herring RATE scaling; audit 7b: the previous (m_ref/m)^2 factor was the
+                       MOBILITY mass law mu_ii ~ 1/m*^2, but the damping RATE 1/tau = q/(m* mu)
+                       scales ~ m*^{+1} x a screening log -- a Born probe at ITO parameters showed
+                       the true rate RISING +28% over m* = 0.30->0.50 me while the old factor FELL
+                       to 0.36, a ~3.5x trend distortion. The absolute prefactor stays
+                       CALIBRATION-bearing, default 0 = off; re-fit it after this change.)
       f_T            = (T/300)              if debye_T_K <= 0 (linear high-T)
                        bose(Td/T)/bose(Td/300)  otherwise (LO-phonon Bose occupation)
     """
@@ -128,8 +133,10 @@ class MatthiessenGamma:
             return 0.0
         m = self._m_opt(n)
         m_ref = self._m_opt(self.bh_n_ref_m3)
+        # audit 7b: RATE ~ m*^{+1} (1/tau = q/(m* mu), mu_ii ~ 1/m*^2), not the old
+        # mobility-law (m_ref/m)^2 which moved the channel the WRONG WAY with mass
         return (self.bh_prefactor_rad_s * np.power(n / self.bh_n_ref_m3, self.bh_exponent)
-                * (m_ref / m) ** 2)
+                * (m / m_ref))
 
     def __call__(self, n_m3):
         n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)
