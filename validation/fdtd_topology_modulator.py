@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynameta.optics.fdtd_nd import _cpml_z, _have_jax
+from dynameta.optics.fdtd_nd import cpml_z, have_jax
 
 C = 299792458.0
 LAM = 1500e-9
@@ -48,7 +48,7 @@ def _grid_2d():
     src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * fc * (tg - t0))
     ix = int(np.argmin(np.abs(np.fft.rfftfreq(nsteps, dt) - fc)))
     return dict(nx=16, nz=nz, n_des=n_des, dx=dx, dz=dz, dt=dt, nsteps=nsteps, des=des, ito=ito,
-                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=_cpml_z(nz, dz, dt, 8), ix=ix)
+                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=cpml_z(nz, dz, dt, 8), ix=ix)
 
 
 def _grid_3d():
@@ -69,18 +69,18 @@ def _grid_3d():
     src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * fc * (tg - t0))
     ix = int(np.argmin(np.abs(np.fft.rfftfreq(nsteps, dt) - fc)))
     return dict(nx=4, ny=4, nz=nz, dx=dx, dy=dy, dz=dz, dt=dt, nsteps=nsteps, des=des,
-                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=_cpml_z(nz, dz, dt, 6), ix=ix)
+                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=cpml_z(nz, dz, dt, 6), ix=ix)
 
 
 def main():
     print("[ftm] === Device-FOM topology optimization: maximise modulation contrast + 3D grad ===", flush=True)
-    if not _have_jax():
+    if not have_jax():
         print("[ftm] JAX not installed -> SKIP (exit 0)", flush=True)
         return True
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from dynameta.optics.fdtd_nd import _run_2d_te_jax, _run_3d_jax
+    from dynameta.optics.fdtd_nd import run_2d_te_jax, run_3d_jax
     from dynameta.optics.topology_opt import (binarization, density_filter, eps_from_density,
                                               project, topology_optimize)
 
@@ -90,11 +90,11 @@ def main():
     z2 = jnp.zeros((nx, nz))
     a2 = (g["dx"], g["dz"], g["dt"], g["nsteps"], g["k_src"], g["k_pL"], g["k_pR"], jnp.asarray(g["src"]), g["cpml"])
     base2 = jnp.ones((nx, nz))
-    vac2 = _run_2d_te_jax(base2, z2, z2, z2, *a2)[0]
+    vac2 = run_2d_te_jax(base2, z2, z2, z2, *a2)[0]
     mL2 = jnp.fft.rfft(vac2.mean(axis=1))[g["ix"]]
 
     def _R2(eps):
-        eyL = _run_2d_te_jax(eps, z2, z2, z2, *a2)[0]
+        eyL = run_2d_te_jax(eps, z2, z2, z2, *a2)[0]
         return jnp.abs(jnp.fft.rfft((eyL - vac2).mean(axis=1))[g["ix"]] / mL2) ** 2
 
     def contrast_loss(rho_p):                               # rho_p: (nx, n_des)
@@ -121,14 +121,14 @@ def main():
     des3 = jnp.asarray(h["des"]); z3 = jnp.zeros((hx, hy, hz))
     a3 = (h["dx"], h["dy"], h["dz"], h["dt"], h["nsteps"], h["k_src"], h["k_pL"], h["k_pR"], jnp.asarray(h["src"]), h["cpml"])
     base3 = jnp.ones((hx, hy, hz))
-    vac3 = _run_3d_jax(base3, z3, z3, z3, *a3)[1]           # eyL plane (out idx 1)
+    vac3 = run_3d_jax(base3, z3, z3, z3, *a3)[1]           # eyL plane (out idx 1)
     mL3 = jnp.fft.rfft(vac3.mean(axis=(1, 2)))[h["ix"]]
 
     def loss3(rho):                                         # rho: (hx, hy) lateral pattern, x&y periodic
         rp = project(density_filter(rho, 1.5, periodic_axes=(0, 1)), 6.0)
         eps_lat = eps_from_density(rp, 1.0, EPS_HI)         # (hx, hy)
         eps = base3.at[:, :, des3].set(eps_lat[:, :, None])
-        eyL = _run_3d_jax(eps, z3, z3, z3, *a3)[1]
+        eyL = run_3d_jax(eps, z3, z3, z3, *a3)[1]
         return jnp.abs(jnp.fft.rfft((eyL - vac3).mean(axis=(1, 2)))[h["ix"]] / mL3) ** 2
 
     r0 = jnp.asarray(0.4 + 0.2 * np.random.RandomState(0).rand(hx, hy))

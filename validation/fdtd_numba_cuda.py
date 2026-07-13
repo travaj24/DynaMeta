@@ -19,12 +19,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import solve_fdtd_2d, _have_numba_cuda
+from dynameta.optics.fdtd_nd import solve_fdtd_2d, have_numba_cuda
 
 
 def main():
     print("[cu] === numba-CUDA 2D-TE FDTD backend ===", flush=True)
-    if not _have_numba_cuda():
+    if not have_numba_cuda():
         print("[cu] no CUDA GPU available -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
         raise SystemExit(42)
 

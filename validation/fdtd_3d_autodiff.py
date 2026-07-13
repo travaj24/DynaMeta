@@ -1,4 +1,4 @@
-"""3D FDTD autodiff oracle: the 'jax' 3D backend (optics.fdtd_nd._run_3d_jax) is DIFFERENTIABLE end to
+"""3D FDTD autodiff oracle: the 'jax' 3D backend (optics.fdtd_nd.run_3d_jax) is DIFFERENTIABLE end to
 end -- the full six-component vector FDTD runs inside a compiled XLA lax.scan, so a scalar objective built
 from its output fields can be differentiated with jax.grad straight THROUGH the 3D time loop. That is the
 gradient a 3D inverse-design / topology-optimization outer loop needs (d(figure of merit)/d(geometry or
@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynameta.optics.fdtd_nd import _cpml_z, _have_jax
+from dynameta.optics.fdtd_nd import cpml_z, have_jax
 
 C = 299792458.0
 
@@ -46,21 +46,21 @@ def _build_small_slab():
     nsteps = int(round((2.0 * t0 + 2.0 * (Lz / C) + 10.0 * tau) / dt))
     tg = np.arange(nsteps) * dt
     src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * fc * (tg - t0))
-    cpml = _cpml_z(nz, dz, dt, npml=8)
+    cpml = cpml_z(nz, dz, dt, npml=8)
     return dict(eps_base=eps_base, mask=mask, nx=nx, ny=ny, nz=nz, dx=dx, dy=dy, dz=dz, dt=dt,
                 nsteps=nsteps, k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=cpml)
 
 
 def main():
     print("[f3d] === 3D FDTD autodiff: jax.grad straight through the 3D FDTD time loop ===", flush=True)
-    if not _have_jax():
+    if not have_jax():
         print("[f3d] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
         raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from dynameta.optics.fdtd_nd import _run_3d_jax
+    from dynameta.optics.fdtd_nd import run_3d_jax
 
     g = _build_small_slab()
     eps_base = jnp.asarray(g["eps_base"]); mask = jnp.asarray(g["mask"])
@@ -69,7 +69,7 @@ def main():
     def objective(s):
         """Transmitted-energy figure of merit for a slab whose eps is scaled by s (s=1 -> base)."""
         eps = eps_base * (1.0 + mask * (s - 1.0))
-        out = _run_3d_jax(eps, z, z, z, g["dx"], g["dy"], g["dz"], g["dt"], g["nsteps"],
+        out = run_3d_jax(eps, z, z, z, g["dx"], g["dy"], g["dz"], g["dt"], g["nsteps"],
                           g["k_src"], g["k_pL"], g["k_pR"], g["src"], g["cpml"])
         eyR = out[5]                                        # (exL,eyL,hxL,hyL, exR,eyR,hxR,hyR)
         return jnp.sum(eyR ** 2)

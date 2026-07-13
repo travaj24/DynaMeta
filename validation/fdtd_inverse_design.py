@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynameta.optics.fdtd_nd import _cpml_z, _have_jax
+from dynameta.optics.fdtd_nd import cpml_z, have_jax
 
 C = 299792458.0
 LAM = 1500e-9
@@ -48,7 +48,7 @@ def _grid():
     nsteps = int(round((2.0 * t0 + 2.0 * (Lz / C) + 12.0 * tau) / dt))
     tg = np.arange(nsteps) * dt
     src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * fc * (tg - t0))
-    cpml = _cpml_z(nz, dz, dt, npml=8)
+    cpml = cpml_z(nz, dz, dt, npml=8)
     freqs = np.fft.rfftfreq(nsteps, dt)
     ix = int(np.argmin(np.abs(freqs - fc)))
     return dict(nx=nx, nz=nz, dx=dx, dz=dz, dt=dt, nsteps=nsteps, slab=slab, k_src=k_src, k_pL=k_pL,
@@ -57,14 +57,14 @@ def _grid():
 
 def main():
     print("[fid] === FDTD inverse design: Adam + jax.grad through the FDTD -> half-wave AR slab ===", flush=True)
-    if not _have_jax():
+    if not have_jax():
         print("[fid] JAX not installed -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
         raise SystemExit(42)
 
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from dynameta.optics.fdtd_nd import _run_2d_te_jax
+    from dynameta.optics.fdtd_nd import run_2d_te_jax
     from dynameta.optics.inverse_design import optimize_fdtd
 
     g = _grid()
@@ -75,12 +75,12 @@ def main():
             jnp.asarray(g["src"]), g["cpml"])
     eps_base = jnp.ones((nx, nz))
     # vacuum reference run (eps-independent) -> incident probe + its spectrum, as constants for the loss
-    eyL_vac = _run_2d_te_jax(eps_base, z2, z2, z2, *args)[0]
+    eyL_vac = run_2d_te_jax(eps_base, z2, z2, z2, *args)[0]
     mL_inc = jnp.fft.rfft(eyL_vac.mean(axis=1))[g["ix"]]
 
     def reflectance(eps_slab):
         eps = jnp.where(slab[None, :], eps_slab, eps_base)
-        eyL_t = _run_2d_te_jax(eps, z2, z2, z2, *args)[0]
+        eyL_t = run_2d_te_jax(eps, z2, z2, z2, *args)[0]
         mRefl = jnp.fft.rfft((eyL_t - eyL_vac).mean(axis=1))[g["ix"]]
         return jnp.abs(mRefl / mL_inc) ** 2
 

@@ -34,7 +34,7 @@ from scipy.signal import hilbert
 
 from dynameta.constants import C_LIGHT, EPS0
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _run_2d_te, _cpml_z, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import run_2d_te, cpml_z, solve_fdtd_2d
 
 N_MED = np.sqrt(2.0)
 NX = 4
@@ -67,9 +67,9 @@ def _run(dz, n_pad, n_str, src, *, chi2_val=0.0, raman=None, kerr_val=0.0, nstep
         ram = (np.full((NX, nz), (2.0 - W ** 2 * dt ** 2) / den),
                np.full((NX, nz), (g * dt / 2.0 - 1.0) / den),
                np.full((NX, nz), W ** 2 * dt ** 2 / den), c3)
-    cpml = _cpml_z(nz, dz, dt, 12, N_MED, N_MED)
+    cpml = cpml_z(nz, dz, dt, 12, N_MED, N_MED)
     k_src, k_pR = 16, nz - 16
-    _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, c3k, dx, dz, dt, nsteps, k_src, 20, k_pR,
+    _, _, eyR, _ = run_2d_te(eps, zeros, zeros, c3k, dx, dz, dt, nsteps, k_src, 20, k_pR,
                               src[:nsteps], cpml, np, None, chi2=chi2, raman=ram)
     return eyR.mean(axis=1), dt
 

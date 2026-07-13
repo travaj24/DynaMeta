@@ -19,14 +19,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynameta.optics.fdtd_nd import _have_jax
+from dynameta.optics.fdtd_nd import have_jax
 
 LAM1, LAM2 = 1500e-9, 1300e-9          # maximise R at LAM1, minimise R at LAM2
 
 
 def main():
     print("[mo2] === Multi-objective / multi-wavelength inverse design (dichroic reflector) ===", flush=True)
-    if not _have_jax():
+    if not have_jax():
         print("[mo2] JAX not installed -> SKIP (exit 0)", flush=True)
         return True
     import jax.numpy as jnp
