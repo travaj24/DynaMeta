@@ -84,10 +84,22 @@ def cw_critical_intensity_W_m2(absorbed_of_T, node: ThermalNode, *, I_lo: float 
                                I_hi: float = 1.0e14, T_max_K: float = 2000.0,
                                rel_tol: float = 1e-6) -> float:
     """The CW runaway threshold: the largest irradiance with a stable steady state (bisection on the
-    existence of the balance root). Raises if even I_lo runs away or I_hi is still stable."""
+    existence of the balance root). Raises if even I_lo runs away or I_hi is still stable.
+    absorbed_of_T is memoized on T across the bisection: the temperature grid inside
+    cw_steady_temperature_K is FIXED, so every trial I re-solves the identical T set (e.g. a full
+    per-T TMM rebuild) -- caching by the exact float value keeps the results bit-identical while
+    cutting the absorbed(T) solves ~25x (audit 6.2)."""
+    cache = {}
+
+    def absorbed_memo(T):
+        key = float(T)                                     # exact-value key -> bit-identical reuse
+        if key not in cache:
+            cache[key] = absorbed_of_T(T)
+        return cache[key]
+
     def stable(I):
         try:
-            cw_steady_temperature_K(absorbed_of_T, I, node, T_max_K=T_max_K)
+            cw_steady_temperature_K(absorbed_memo, I, node, T_max_K=T_max_K)
             return True
         except RuntimeError:
             return False
