@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5            # Boltzmann [eV/K]
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 _MV_CM = 1.0e8                      # 1 MV/cm in V/m
 
 

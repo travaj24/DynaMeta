@@ -284,7 +284,7 @@ class BursteinMossEdge:
     e_grid_J: tuple = None        # (E_lo, E_hi, N) KK grid override; None -> auto around Eg_opt + probe
     enabled: bool = True          # master off-switch: False -> eps_inf everywhere (delta 0)
     _N_EG = 64                    # Eg_opt samples for the grid-capable dn interpolation
-    _KK_SPAN_J = 5.0 * 1.602176634e-19   # how far above the highest edge the KK grid extends (~5 eV)
+    _KK_SPAN_J = 5.0 * Q_E   # how far above the highest edge the KK grid extends (~5 eV)
     _KK_N = 3001                  # KK photon-energy grid points
 
     def gap_shift_J(self, n_m3):

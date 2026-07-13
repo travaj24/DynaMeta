@@ -21,6 +21,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from dynameta.constants import SOLVER_TIME_CONVENTION
+
 SCHEMA_VERSION = 2
 ELECTRON_DENSITY = "electron_density_m3"
 POTENTIAL = "potential_V"
@@ -46,7 +48,7 @@ class CarrierField:
     regions:         Dict[str, CarrierRegion]
     n_bg_by_region:  Dict[str, float]
     unit_cell_m:     Tuple[float, float]            # (period_x, period_y)
-    time_convention: str = "exp(-iwt)"
+    time_convention: str = SOLVER_TIME_CONVENTION
     extras:          Dict[str, object] = field(default_factory=dict)
 
     def field_vocab(self) -> List[str]:
@@ -131,6 +133,6 @@ def load_carrier_field(path: Path) -> CarrierField:
         regions=regions,
         n_bg_by_region=json.loads(root.attrs["n_bg_by_region_json"]),
         unit_cell_m=(uc["period_x_m"], uc["period_y_m"]),
-        time_convention=str(root.attrs.get("time_convention", "exp(-iwt)")),
+        time_convention=str(root.attrs.get("time_convention", SOLVER_TIME_CONVENTION)),
         extras=json.loads(root.attrs.get("extras_json", "{}")),
     )

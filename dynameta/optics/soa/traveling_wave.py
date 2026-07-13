@@ -32,9 +32,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from dynameta.constants import HBAR
+from dynameta.constants import H_PLANCK
 
-H_PLANCK = 2.0 * np.pi * HBAR
 
 __all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression", "NonlinearLoss",
            "agrawal_olsson_output"]

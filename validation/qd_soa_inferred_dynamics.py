@@ -32,7 +32,7 @@ from dynameta.optics.soa import QDGainModel, QDGainParams
 from dynameta.optics.soa.calibration import CalibratedDevice, infer_dynamics_from_cw
 
 C_LIGHT = 2.99792458e8
-H_PLANCK = 6.62607015e-34
+from dynameta.constants import H_PLANCK   # single source (audit 6.3)
 
 
 def _innolume_device():

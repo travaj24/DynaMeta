@@ -24,6 +24,10 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.constants import Q_E, EPS0, KB, HBAR, M_E, T_REF, V_T  # noqa: E402,F401
 
 _AH_C = 3.0 * math.sqrt(math.pi) / 4.0
+# Aymerich-Humet F_1/2 fit coefficients: ONE source for the python evaluator AND the
+# DEVSIM expression twin below (each previously re-typed them; repr() keeps the DEVSIM
+# string byte-identical).
+_AH_P0, _AH_P1, _AH_B0, _AH_B1 = 50.0, 33.6, 0.68, 0.17
 
 
 def require_positive(**named_values) -> None:
@@ -39,7 +43,7 @@ def require_positive(**named_values) -> None:
 
 
 def F12_aymerich_humet(eta: float) -> float:
-    a = eta**4 + 50.0 + 33.6 * eta * (1.0 - 0.68 * math.exp(-0.17 * (eta + 1.0)**2))
+    a = eta**4 + _AH_P0 + _AH_P1 * eta * (1.0 - _AH_B0 * math.exp(-_AH_B1 * (eta + 1.0)**2))
     A = (3.0 * math.sqrt(math.pi) / 4.0) / a**(3.0 / 8.0)
     B = math.exp(-eta)
     return 1.0 / (A + B)
@@ -49,8 +53,9 @@ def F12_aymerich_humet_expr(eta_expr: str = "eta") -> str:
     """DEVSIM expression for F_1/2(eta). No sqrt() (parser lacks it); leading
     constant precomputed. Unclamped exp(-eta) -- log_damp handles overshoot."""
     e = "({})".format(eta_expr)
-    a_poly = ("({e}*{e}*{e}*{e} + 50.0 + 33.6 * {e} * "
-                "(1.0 - 0.68 * exp(-0.17 * ({e} + 1.0) * ({e} + 1.0))))").format(e=e)
+    a_poly = ("({{e}}*{{e}}*{{e}}*{{e}} + {p0!r} + {p1!r} * {{e}} * "
+                "(1.0 - {b0!r} * exp(-{b1!r} * ({{e}} + 1.0) * ({{e}} + 1.0))))").format(
+                    p0=_AH_P0, p1=_AH_P1, b0=_AH_B0, b1=_AH_B1).format(e=e)
     A = "({c} * pow({a}, -0.375))".format(c=_AH_C, a=a_poly)
     B = "exp(-{})".format(e)
     return "(1.0 / ({} + {}))".format(A, B)
