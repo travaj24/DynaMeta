@@ -146,11 +146,17 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
 
 def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                               n_slices: Optional[int] = None,
-                              stabilize=None):
+                              stabilize=None, absorption: bool = False):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy PMM (the exact seam
     signature + solve_sweep, mirroring the RCWA bridge incl. per-wavelength end media).
     1-D lamellar devices only; in-plane incidence only (azimuth raises). OpticalResult.t
-    is None (PMM exposes no transmission Jones); R/T are total order-summed efficiencies."""
+    is None (PMM exposes no transmission Jones); R/T are total order-summed efficiencies.
+
+    absorption=True (audit 8.1-3, PMM at RCWA-bridge parity): solves with
+    retain_internal=True and fills per_region_absorption keyed by DESIGN layer name (slabs
+    of a graded layer sum into their layer) + A_independent from PMMStack.layer_absorption
+    -- the internal z-Poynting flux difference per layer, an independent volumetric
+    measurement (lumenairy's own invariant closes it against 1 - sum R - sum T)."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
@@ -163,7 +169,8 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                                            degree=degree, n_orders=n_orders,
                                            n_slices=n_slices)
         stack.set_source(lambda_m, theta=theta)
-        orders, R2, T2, jones = stack.solve(stabilize=stabilize)
+        orders, R2, T2, jones = stack.solve(stabilize=stabilize,
+                                            retain_internal=absorption)
         row = _pol_row(design.optical)
         R = float(np.sum(R2[row]))
         T = float(np.sum(T2[row]))
@@ -171,9 +178,23 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         rf, _tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
                                       theta, n_sup, n_sb)
         r = complex(np.asarray(jones)[row, row]) * complex(rf)
+        a_ind, pra = None, None
+        if absorption:
+            try:
+                la = np.asarray(stack.layer_absorption())     # (n_layers, 2) per incident pol
+                la = la[:, row] if la.ndim == 2 and la.shape[1] == 2 else la[row]
+                pra = {}
+                for name, val in zip(names, la):
+                    pra[name] = pra.get(name, 0.0) + float(val)
+                a_ind = float(np.sum(la))
+            except Exception as exc:                          # pragma: no cover - defensive
+                import warnings
+                warnings.warn("lumenairy PMM bridge: per-layer absorption unavailable ({}); "
+                              "A_independent left unset".format(exc), stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=time.perf_counter() - t0, t=None, T=T,
-                             A=1.0 - R - T, R_flux=R, T_flux=T)
+                             A=1.0 - R - T, A_independent=a_ind, R_flux=R, T_flux=T,
+                             per_region_absorption=pra)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
         return _solve_at(design, eps_by_region, lambda_m)

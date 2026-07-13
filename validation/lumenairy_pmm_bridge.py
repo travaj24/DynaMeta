@@ -169,6 +169,47 @@ def main():
     print("[lpb] GATE D: partial-y / gridded-structured / conical guards -> {}".format(
         "PASS" if g_d else "FAIL"), flush=True)
 
+    # ---- GATE E: per-layer absorption parity (audit 8.1-3) -- CROSS-ENGINE oracle:
+    # the same lossy 2-layer device (metal TM grating over a lossy spacer) through
+    # PMM absorption=True and RCWA absorption=True. The engines share no code below
+    # the bridge (spectral-element walls vs Fourier factorization), so agreeing
+    # per-LAYER absorbed fractions are an independent check that the PMM internal
+    # z-flux map is keyed and normalized right -- and each engine must close its own
+    # budget sum(A_i) == 1 - R - T (PMM's flux map vs Rayleigh far field). ----
+    lossy_lays = [Layer("grating", 120e-9, "air", inclusions=[lines]),
+                  Layer("spacer", 200e-9, "lossy")]
+    d_abs = _design(lossy_lays, pol="x", extra=(("lossy", complex(6.0, 0.8)),))
+    r_p = make_lumenairy_pmm_solver(degree=24, n_orders=21, absorption=True)(
+        d_abs, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    r_p2 = make_lumenairy_pmm_solver(degree=32, n_orders=31, absorption=True)(
+        d_abs, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    keys_ok = (r_p.per_region_absorption is not None
+               and set(r_p.per_region_absorption) == {"grating", "spacer"})
+    close_p = abs(r_p.A_independent - r_p.A) if r_p.A_independent is not None else 1.0
+    self_conv = max(abs(r_p.per_region_absorption[k] - r_p2.per_region_absorption[k])
+                    for k in ("grating", "spacer")) if keys_ok else 1.0
+    # RCWA's per-layer split on a metal TM cell is Gibbs-limited at low orders (measured:
+    # grating 0.124 -> 0.068 -> 0.056 over n_orders 32/64/96 toward PMM's 0.0457, which is
+    # itself degree-stable at 2e-5) -- so the cross-engine leg demands CONVERGENCE TOWARD
+    # the PMM split (strictly shrinking |d|, direction-sensitive: a key-swap or
+    # mis-normalized PMM map would not be approached) plus agreement at n_orders=96.
+    dists = []
+    for n in (32, 64, 96):
+        r_r = make_lumenairy_rcwa_solver(n_orders=n, absorption=True)(
+            d_abs, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        dists.append(max(abs(r_p.per_region_absorption[k] - r_r.per_region_absorption[k])
+                         for k in ("grating", "spacer")) if keys_ok else 1.0)
+    g_e = bool(keys_ok and close_p < 1e-6 and self_conv < 1e-3
+               and dists[2] < dists[1] < dists[0] and dists[2] < 1.5e-2)
+    ok = ok and g_e
+    print("[lpb] GATE E: PMM per-layer absorption -- budget closure {:.1e}; PMM degree-"
+          "stability {:.1e}; RCWA split converges toward PMM ({:.3f} -> {:.3f} -> {:.3f}, "
+          "final < 1.5e-2) [PMM grating/spacer = {:.4f}/{:.4f}] -> {}".format(
+              close_p, self_conv, dists[0], dists[1], dists[2],
+              r_p.per_region_absorption.get("grating", float("nan")) if keys_ok else float("nan"),
+              r_p.per_region_absorption.get("spacer", float("nan")) if keys_ok else float("nan"),
+              "PASS" if g_e else "FAIL"), flush=True)
+
     print("[lpb] *** LUMENAIRY PMM BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
     return ok
