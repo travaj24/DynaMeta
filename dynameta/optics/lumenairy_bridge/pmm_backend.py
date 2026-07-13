@@ -163,8 +163,17 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         _guard_incidence_side(design.optical)
         theta, phi = _angles_rad(design.optical)
         if abs(phi) > 1e-12:
-            raise NotImplementedError("PMM bridge: conical incidence (azimuth != 0) is not "
-                                      "supported by PMMStack; use the RCWA or FEM solver")
+            # lumenairy's PMMStack DOES solve conical natively (5.20+, pure-nodal cascade
+            # since 5.21.3) -- but its rows are keyed incident lab Ex/Ey, which at phi != 0
+            # are s/p MIXTURES (audit C4-2), and it exposes no per-order Jones to synthesize
+            # the rotated s/p totals for a PATTERNED cell (a lattice is not z-rotation-
+            # invariant, so the Berreman bridge's covariance shortcut does not apply here).
+            raise NotImplementedError(
+                "PMM bridge: conical incidence (azimuth != 0) is not supported -- the "
+                "lumenairy conical PMM result rows are lab-basis s/p mixtures and per-order "
+                "Jones synthesis is a documented follow-on (audit C4-2 / 8.1-1). Use the FEM "
+                "solver for conical patterned cells, or the Berreman bridge for PLANAR "
+                "conical stacks (exact via rotational covariance).")
         stack, names = design_to_pmm_stack(design, lambda_m, eps_by_region=eps_by_region,
                                            degree=degree, n_orders=n_orders,
                                            n_slices=n_slices)
