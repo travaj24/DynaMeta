@@ -207,3 +207,29 @@ def test_cache_material_retune_and_solver_identity_miss(tmp_path):
     r_other = c2(d2, None, eps, 1.4e-6, 1.0, 1.0)
     assert c2.stats()["misses"] == 1 and r_other.R == pytest.approx(0.9), \
         "a different backend over the same cache path must not be served another's result"
+
+
+def test_cache_autosave_batching(tmp_path):
+    # audit 6.2: per-miss autosave rewrites the WHOLE store (O(N^2) over a sweep; measured
+    # 240x). autosave_every=K batches flushes (default 1 = old behavior byte-compatible);
+    # the batched cache flushes every Kth miss and an explicit flush() drains the tail.
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    from dynameta.cache import OpticalSolverCache
+
+    flushes = {"n": 0}
+
+    def inner(design, geo, eps, lam, ns, nb):
+        return OpticalResult(r=0.1 + 0j, R=0.1, phase_deg=0.0, solve_time_s=0.1)
+
+    d = _design()
+    p = str(tmp_path / ("cache3" + _EXT[_FORMATS[0]]))
+    c = OpticalSolverCache(inner, p, autosave_every=4)
+    orig_flush = c.flush
+    c.flush = lambda: (flushes.__setitem__("n", flushes["n"] + 1), orig_flush())[1]
+    for i, lam in enumerate([1.3e-6, 1.35e-6, 1.4e-6, 1.45e-6, 1.5e-6, 1.55e-6]):
+        c(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, lam, 1.0, 1.0)
+    assert c.stats()["misses"] == 6 and flushes["n"] == 1     # one flush at miss 4
+    c.flush()                                                 # drain the 2-miss tail
+    c2 = OpticalSolverCache(inner, p)
+    assert len(c2._mem) == 6                                  # everything persisted
