@@ -143,6 +143,55 @@ def test_pmm_partial_y_rectangle_raises():
 
 
 @needs_lum
+def test_pmm2d_uniform_stack_matches_tmm_both_engines():
+    # the 2-D crossed-PMM seam (audit 8.1-4) on a uniform lossy stack: both engines
+    # reduce to TMM (R/T and the complex r, pinning layer order + Jones conventions);
+    # neither exposes a transmission Jones (t is None, the 1-D PMM precedent); the
+    # hybrid absorption surface fills per_region_absorption and closes the budget.
+    # The rigorous patch-referee gates live in validation/lumenairy_pmm2d_bridge.py.
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm2d_solver
+    from dynameta.optics.tmm_reference import make_layered_tmm_solver
+    d = _uniform_design()
+    lam = 1.31e-6
+    r_t = make_layered_tmm_solver()(d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    r_h = make_lumenairy_pmm2d_solver(engine="hybrid", degree=7, n_orders=2)(
+        d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    r_p = make_lumenairy_pmm2d_solver(engine="pure", n_modes=5, n_orders=3)(
+        d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    for r_b in (r_h, r_p):
+        assert r_b.R == pytest.approx(r_t.R, abs=1e-8)
+        assert r_b.T == pytest.approx(r_t.T, abs=1e-8)
+        assert r_b.r == pytest.approx(r_t.r, abs=1e-8)
+        assert r_b.t is None                     # no transmission Jones in 2-D PMM
+    r_a = make_lumenairy_pmm2d_solver(engine="hybrid", degree=7, n_orders=2,
+                                      absorption=True)(d, None, {}, lam,
+                                                       1.0 + 0j, 1.5 + 0j)
+    assert set(r_a.per_region_absorption) == {"a"}
+    assert r_a.A_independent == pytest.approx(r_a.A, abs=1e-9)
+
+
+def test_pmm2d_pure_translation_and_guards():
+    # lumenairy-FREE surface of the 2-D PMM bridge: union-grid inference + the
+    # analytic Rectangle -> (N, N) segment painting, and the construction-time
+    # guards (absorption needs the hybrid engine; engine name is validated)
+    import pytest as _pytest
+    from dynameta.optics.lumenairy_bridge import (layer_to_pure_cell,
+                                                  make_lumenairy_pmm2d_solver,
+                                                  pure_union_grid_n)
+    per = 600e-9
+    d = _grating_design(per)                     # ridge walls at per/4 and 3 per/4
+    assert pure_union_grid_n(d) == 4
+    cell = layer_to_pure_cell(d.stack.layers[0], d, 1.31e-6, per, per, 4)
+    assert cell.shape == (4, 4)
+    assert np.allclose(cell[1:3, :], 6.0 + 0j)   # ridge spans full y (lamellar)
+    assert np.allclose(cell[0, :], 1.0 + 0j) and np.allclose(cell[3, :], 1.0 + 0j)
+    with _pytest.raises(NotImplementedError):    # pure retains no internals
+        make_lumenairy_pmm2d_solver(engine="pure", absorption=True)
+    with _pytest.raises(ValueError):
+        make_lumenairy_pmm2d_solver(engine="fmm")
+
+
+@needs_lum
 def test_callable_optical_dispersion_chain():
     from dynameta.optics.lumenairy_bridge import (CallableOptical,
                                                   optical_model_to_lumenairy_eps)
@@ -201,20 +250,25 @@ def test_bridge_conical_raises_every_polarization():
     # bridges' lab-basis rows are phi-dependent s/p mixtures, not the FEM's rotated s/p
     # (probe: 'y' at theta=30/phi=45 on bare glass returned R 32% low, silently; at phi=90
     # exactly the orthogonal polarization). The old guard covered only 'p'. phi=0 solves.
+    # BERREMAN is exempt since audit 8.1-6 (commit f0986df): a PLANAR stack is z-rotation
+    # covariant, so its bridge synthesizes the exact rotated s/p at any azimuth and SOLVES
+    # (pinned in test_berreman_oop_oblique_first_class); RCWA -- whose lattice breaks the
+    # covariance -- still raises.
     from dynameta.geometry.specs import OpticalSpec
     from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
                                                   make_lumenairy_rcwa_solver)
-    for mk in (lambda: make_lumenairy_rcwa_solver(n_orders=3), make_lumenairy_berreman_solver):
-        # 'x' cannot reach the bridge at oblique (OpticalSpec rejects it at construction),
-        # so 'p' and 'y' are the full reachable set
-        for pol in ("p", "y"):
-            d = _uniform_design()
-            d.optical = OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=20.0)
-            with pytest.raises(NotImplementedError):
-                mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+    # 'x' cannot reach the bridge at oblique (OpticalSpec rejects it at construction),
+    # so 'p' and 'y' are the full reachable set
+    for pol in ("p", "y"):
         d = _uniform_design()
-        d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
-        mk()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)        # phi=0 p-pol is fine
+        d.optical = OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=20.0)
+        with pytest.raises(NotImplementedError):
+            make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        r = make_lumenairy_berreman_solver()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        assert 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0    # berreman conical solves (8.1-6)
+    d = _uniform_design()
+    d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
+    make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)  # phi=0 ok
 
 
 @needs_lum
@@ -386,6 +440,69 @@ def test_berreman_jax_forward_equals_numpy():
                              jnp.asarray(lam), angle=jnp.asarray(0.2), row=0)
     assert abs(float(R_np) - float(R_jx)) < 1e-12
     assert abs(float(T_np) - float(T_jx)) < 1e-12
+
+
+@needs_jax
+def test_rcwa_design_twin_eager_grad_finite_nonzero():
+    # audit 8.1-5: the RCWAStack design twin builds and one eager gradient (ridge eps through
+    # a patterned cell's VALUES) is finite and nonzero; a jax wavelength must raise loudly
+    # (the stack twin's static/traced split -- the rigorous gates live in
+    # validation/lumenairy_rcwa_jax.py)
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    from dynameta.optics.lumenairy_bridge import rcwa_stack_RT
+    sx = 4 * 3 + 1
+    mask = jnp.asarray(np.arange(sx)[:, None] < sx // 2)
+
+    def R_of(e):
+        cell = jnp.where(mask, e + 0.0j, 1.0 + 0.0j)
+        R, _T = rcwa_stack_RT([(cell, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6,
+                              period_x=600e-9, n_orders=3, row=0)
+        return jnp.real(R)
+
+    g = float(jax.grad(R_of)(jnp.asarray(6.0)))
+    assert np.isfinite(g) and g != 0.0
+    with pytest.raises(TypeError, match="concrete"):
+        rcwa_stack_RT([(jnp.asarray(6.0 + 0j), 180e-9)], 1.5 + 0j, 1.0 + 0j,
+                      jnp.asarray(1.31e-6), period_x=600e-9, n_orders=3)
+
+
+@needs_jax
+def test_pmm_design_twin_eager_grad_finite_nonzero():
+    # audit 8.1-5: the PMM design twin (1-D lamellar spectral element) builds and one eager
+    # segment-eps gradient is finite and nonzero; segment WIDTHS are static and raise on jax
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    from dynameta.optics.lumenairy_bridge import pmm_stack_RT
+
+    def R_of(e):
+        segs = [(0.5, e + 0.0j), (0.5, 1.0 + 0j)]
+        R, _T = pmm_stack_RT([(segs, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6,
+                             period=600e-9, degree=6, n_orders=5, row=0)
+        return jnp.real(R)
+
+    g = float(jax.grad(R_of)(jnp.asarray(6.0)))
+    assert np.isfinite(g) and g != 0.0
+    with pytest.raises(TypeError, match="static"):
+        pmm_stack_RT([([(jnp.asarray(0.5), 6.0 + 0j), (0.5, 1.0 + 0j)], 180e-9)],
+                     1.5 + 0j, 1.0 + 0j, 1.31e-6, period=600e-9, degree=6, n_orders=5)
+
+
+def test_drude_eps_jax_matches_material_model():
+    # the carrier -> eps closure reproduces DrudeOptical.eps exactly at concrete inputs
+    # (same formula, same dynameta.constants) and refuses untraceable callable parameters
+    from dynameta.constants import M_E
+    from dynameta.materials.optical_model import DrudeOptical
+    from dynameta.optics.lumenairy_bridge import drude_eps_jax
+    model = DrudeOptical(eps_inf=3.9, m_opt_kg=0.30 * M_E, gamma_rad_s=1.2e14)
+    fn = drude_eps_jax(model)
+    n, lam = 4.0e26, 1.31e-6
+    assert fn(n, lam) == pytest.approx(complex(model.eps(lam, n_m3=n)), rel=1e-14)
+    with pytest.raises(NotImplementedError):
+        drude_eps_jax(DrudeOptical(eps_inf=3.9, m_opt_kg=lambda x: 0.30 * M_E,
+                                   gamma_rad_s=1.2e14))
 
 
 def _graded_design_and_eps():
