@@ -211,7 +211,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False,
-                sheet_bcs: "dict | None" = None, _reuse_fes=None) -> OpticalResult:
+                sheet_bcs: "dict | None" = None, diagnostics: bool = True,
+                _reuse_fes=None) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
@@ -242,7 +243,14 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     Robin term + i k0 Z0 sigma (E_tan . v_tan) over the interface (Z0 = free-space
     impedance); in the scattered-field formulation the sheet-free background E_bg also
     drives it, so the same term enters the RHS on E_bg. Validated vs the analytic
-    core.graphene.sheet_rt in validation/graphene_sheet_fem.py."""
+    core.graphene.sheet_rt in validation/graphene_sheet_fem.py.
+
+    diagnostics=False skips the best-effort post-solve diagnostics -- A_independent,
+    per_region_absorption, R_flux/T_flux (three volume/flux integrations + two field
+    interpolations per solve) -- returning None for all four. The r/R/t/T/A extraction is
+    byte-identical. NOTE this also disables the energy-closure mismatch warning (it needs
+    A_independent), so only opt out on throughput paths whose configuration a
+    diagnostics=True solve has already vetted (audit 6.2 perf)."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -550,10 +558,11 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # Independent absorption diagnostic (audit OPT-2): the normalized volumetric loss
     # integral, computed from the reconstructed TOTAL field. Best-effort -- a diagnostic
     # must not break the solve, so a failure warns (not silent) and yields None.
+    # diagnostics=False (opt-out, audit 6.2): skip this + per_region + flux R/T entirely.
     try:
-        A_independent = _absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
+        A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
                                             geo.period_x_nm, geo.period_y_nm,
-                                            n_super=n_super)
+                                            n_super=n_super) if diagnostics else None)
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
@@ -577,7 +586,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # cladding rather than report a silently-biased "independent" R/T.
     lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
     try:
-        if envelope or not lossless_clad:
+        if envelope or not lossless_clad or not diagnostics:
             R_flux = T_flux = None
         else:
             R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
@@ -885,7 +894,7 @@ def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):
     return float(R_flux), float(T_flux)
 
 
-def make_fem_optical_solver(*, order=None):
+def make_fem_optical_solver(*, order=None, diagnostics=True):
     """An `optical_solver` for run_pipeline backed by the FEM, with a SWEEP-AWARE fast path. At NORMAL
     incidence the HCurl FESpace is wavelength-INDEPENDENT (no oblique Bloch phases), so solve_sweep
     builds it ONCE and reuses it across the whole wavelength sweep -- avoiding the redundant FESpace
@@ -894,7 +903,9 @@ def make_fem_optical_solver(*, order=None):
     solve_fem (only the k0-independent space build is amortized; the solve itself is not reusable).
     Oblique/conical incidence falls back to a per-wavelength build (the Periodic Bloch phases depend
     on k0). OPT-IN -- pass optical_solver=make_fem_optical_solver() to run_pipeline; the default FEM
-    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order."""
+    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order;
+    `diagnostics=False` threads the solve_fem diagnostics opt-out (A_independent/per-region/flux R/T
+    skipped on every solve of the sweep -- see solve_fem's caveat about the energy-closure warning)."""
     from dynameta.optics.eps_assembler import assemble_eps_cf
 
     def _ord(design):
@@ -903,7 +914,7 @@ def make_fem_optical_solver(*, order=None):
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
         eps_cf = assemble_eps_cf(geo, eps_by_region)
         return solve_fem(geo, lambda_m, eps_cf, design.optical, order=_ord(design),
-                         n_super=n_super, n_sub=n_sub)
+                         n_super=n_super, n_sub=n_sub, diagnostics=diagnostics)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
         od = _ord(design)
@@ -915,7 +926,8 @@ def make_fem_optical_solver(*, order=None):
         for lam in lams:
             eps_cf = assemble_eps_cf(geo, assemble_at(lam))
             out.append(solve_fem(geo, lam, eps_cf, design.optical, order=od,
-                                 n_super=n_super, n_sub=n_sub, _reuse_fes=fes))
+                                 n_super=n_super, n_sub=n_sub, diagnostics=diagnostics,
+                                 _reuse_fes=fes))
         return out
 
     _solve.solve_sweep = _solve_sweep

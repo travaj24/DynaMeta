@@ -167,7 +167,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
 
     ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
-        cf = fields[bp.label]
+        # pop, not read: this loop is the sole consumer, so each bias's grids are freed once its
+        # optics finish -- peak memory no longer stacks every CarrierField under the optics solve
+        # (duplicate labels can't KeyError: Sweep rejects them at construction)
+        cf = fields.pop(bp.label)
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
         # dict is reused; None keeps the carrier-only path byte-identical)
         ef = extra_fields(bp) if callable(extra_fields) else extra_fields
