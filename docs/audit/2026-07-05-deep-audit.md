@@ -1297,9 +1297,39 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   fix WORKING). Left honestly red; handed off as a lumenairy-side task with the
   full repro + bisect.
 
-**PENDING (residual hygiene — optional):**
-- §6.2 perf still open: topology_opt jit-beta + FDTD vacuum-ref caching +
-  kernels3d prealloc, Berreman absorption double-solve consolidation.
-- Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB; per-order
-  Jones synthesis for bridge conical s/p; net-bandwidth co-fit for the Innolume
-  calibration; 2D lateral-interface wiring; 3D II element reconstruction.
+**Campaign completion (2026-07-13):**
+- H3b follow-up (52846d1): ~20 validation + 3 test files' consumer renames the
+  fdtd_nd export commit missed.
+- H5d (c472937), the LAST §6.2 items: topology_opt jit with beta TRACED (XLA
+  compiles 5 -> 1, rho bit-identical, x1.48); FDTD vacuum-reference cache
+  (bit-identical, x1.84/x2.16 on repeat 2D/3D seam solves); kernels3d run_3d
+  prealloc + out= ufuncs + roll-free derivatives (np.array_equal on 4 cases
+  incl. all-nonlinearities; +16% small grids, x5.4-7 at 24x24x300+). Berreman
+  absorption double-solve consolidation SKIPPED with evidence: BerremanStack
+  discards jones_t upstream (berreman.py:695) — needs a lumenairy API change;
+  class-vs-functional far fields probed bit-identical so it is safe later.
+- B5 (c619f34), §8.1-4: PMM2D bridge — pmm2d_backend.py bridges PMM2DStackPure
+  (analytic walls on the commensurate union grid) + PMM2DStackHybrid
+  (rasterized cells; absorption parity). C5-1 reversed() baked in + flipped-
+  profile discrimination 1.8e-2; referee gate: RCWA converges TOWARD pure
+  (5.7e-3 -> 5.8e-4 over n_orders 4..16) on an ITO-like patch.
+- B6 (2f66073), §8.1-5: JAX design twins — rcwa_design.py (grating functional +
+  RCWAStack twins with uniform-eps lifting + static-arg TypeError guards +
+  drude_eps_jax carrier closure) AND PMM twins (trace wavelength/angle/half-
+  spaces). Gradient oracle = Richardson FD of the NON-JAX bridge: 2.1e-11
+  (thickness) / 2.7e-8 (eps); PMM AD-vs-FD 2.7e-6.
+- Validation fixtures sized to the C3-3 guard (fdtd_3d_reduces 3 gates,
+  fdtd_2d_reduces, fdtd_numba_cuda): their layers under-sized dz by 100-150%
+  vs the painted lateral patterns — the guard found real staleness; all rerun
+  green (3d_reduces 7/7, GPU==CPU 1.1e-14).
+- Full smoke tier: 84/84 PASS (0 skipped) post-campaign.
+
+**PENDING (deferred, tracked):**
+- BOR absorption/phase parity (B4b) — blocked on the upstream lumenairy BOR
+  energy-closure regression (bisected to lumenairy fca4665; handed off with
+  repro). lumenairy_bor_bridge GATE C stays honestly red until then.
+- Per-order Jones synthesis for RCWA/PMM conical s/p (8.1-1; Berreman conical
+  is DONE via covariance).
+- Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
+  net-bandwidth co-fit for the Innolume calibration; 2D lateral-interface
+  wiring; 3D II element reconstruction; Berreman jones_t retention upstream.
