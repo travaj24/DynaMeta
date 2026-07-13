@@ -98,14 +98,24 @@ def topology_optimize(forward_loss, rho0, *, filter_radius, periodic_axes=(0,),
     objective to MINIMISE. This driver applies the filter + tanh projection inside the loss and Adam-steps
     rho while annealing beta (gray -> binary) over the `betas` schedule. Returns (rho_opt, rho_projected,
     history). rho is clipped to [0,1]. Reuses optics.inverse_design.optimize_fdtd (Adam + jax.grad)."""
+    import jax
     import jax.numpy as jnp
     from dynameta.optics.inverse_design import optimize_fdtd
+    jax.config.update("jax_enable_x64", True)
     rho = jnp.asarray(np.asarray(rho0, dtype=float))
     history = []
+
+    # ONE jitted value_and_grad with beta as a TRACED argument (audit 6.2 perf): baking each beta
+    # into the loss as a python constant forced a fresh XLA compile per continuation stage (5
+    # compiles for 5 betas); tracing beta lets a single compile serve the whole annealing schedule.
+    # A traced float is results-identical to the same float constant.
+    def _loss(r, beta):
+        return forward_loss(project(density_filter(r, filter_radius, periodic_axes), beta, eta))
+    vg = jax.jit(jax.value_and_grad(_loss))
     for beta in betas:
-        def loss(r, _beta=beta):
-            return forward_loss(project(density_filter(r, filter_radius, periodic_axes), _beta, eta))
-        rho_np, h = optimize_fdtd(loss, rho, n_steps=steps_per_beta, lr=lr, clip=(0.0, 1.0))
+        b = jnp.asarray(float(beta))
+        rho_np, h = optimize_fdtd(None, rho, n_steps=steps_per_beta, lr=lr, clip=(0.0, 1.0),
+                                  value_and_grad=lambda p, _b=b: vg(p, _b))
         rho = jnp.asarray(rho_np)
         history.extend(h)
         if callback is not None:

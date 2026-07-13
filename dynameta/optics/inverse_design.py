@@ -133,16 +133,23 @@ class Fdtd2dDesignProblem:
 
 
 def optimize_fdtd(loss_fn, params0, *, n_steps: int = 60, lr: float = 0.05, b1: float = 0.9,
-                  b2: float = 0.999, eps: float = 1e-8, clip=None, callback=None):
+                  b2: float = 0.999, eps: float = 1e-8, clip=None, callback=None,
+                  value_and_grad=None):
     """Adam optimiser over a DIFFERENTIABLE JAX-FDTD loss. `loss_fn(params) -> scalar` must be built from
     the JAX FDTD backend so jax.grad flows through the time loop. `params0` is a scalar or array. `clip`
     = (lo, hi) bounds applied after each step (e.g. keep eps physical). `callback(step, loss, params)`
     runs each step. Returns (params_opt, history) with history = loss per step. value_and_grad is JIT-
-    compiled once, so steps after the first are fast. Requires JAX (x64 enabled here for FDTD accuracy)."""
+    compiled once, so steps after the first are fast. Requires JAX (x64 enabled here for FDTD accuracy).
+
+    `value_and_grad` (optional): a PRE-BUILT fn(params) -> (loss, grad) used INSTEAD of jitting
+    loss_fn here (loss_fn may then be None). This lets a caller keep ONE jitted value_and_grad
+    alive across several optimize_fdtd calls whose losses differ only in a traced argument --
+    topology_optimize passes the projection beta this way so one XLA compile serves the whole
+    annealing schedule (audit 6.2 perf) instead of recompiling per continuation stage."""
     import jax
     import jax.numpy as jnp
     jax.config.update("jax_enable_x64", True)
-    vg = jax.jit(jax.value_and_grad(loss_fn))
+    vg = value_and_grad if value_and_grad is not None else jax.jit(jax.value_and_grad(loss_fn))
     p = jnp.asarray(params0, dtype=jnp.float64)
     m = jnp.zeros_like(p)
     v = jnp.zeros_like(p)

@@ -24,7 +24,11 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     (the same (G1,G2,G3) recursion as the Lorentz pole). Only the d/dz derivatives are CPML-stretched
     (x,y are periodic), so
     four psi memories: dEy/dz & dEx/dz (H update), dHx/dz & dHy/dz (E update). Records Ex,Ey,Hx,Hy on the
-    left/right z-probe planes (the components that carry S_z). Returns 8 arrays of shape (nsteps,nx,ny)."""
+    left/right z-probe planes (the components that carry S_z). Returns 8 arrays of shape (nsteps,nx,ny).
+
+    All per-step temporaries are PREALLOCATED outside the time loop and filled with out= ufuncs
+    (audit 6.2 perf): every out= expression reproduces the original arithmetic operand-by-operand
+    in the same order, so the result is bit-identical -- only the allocations moved."""
     nx, ny, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     r = (lambda a: xp.asarray(a).reshape(1, 1, nz))          # z-profile -> broadcast over (nx,ny,nz)
@@ -59,41 +63,101 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
     cmu = dt / MU0
+    # loop-invariant factors hoisted out of the time loop (audit 6.2 perf; identical ops, once)
+    chi3_3 = 3.0 * chi3
+    bJ_h = bJ / 2.0
+    aJ1_h = 0.5 * (1.0 + aJ)
+    bJ_half = 0.5 * bJ
+    # preallocated per-step scratch (audit 6.2 perf). s*: the CPML edge slice is written once
+    # (zeros) and never touched again -- exactly the fresh-z3()-per-step value; the interior is
+    # fully rewritten each step. f1/f2/f3 = general full-grid scratch; dzb/tz = (nz-1) z-derivative
+    # scratch; Exn/Eyn/Ezn ping-pong with Ex/Ey/Ez (fully overwritten every step).
+    sEy_dz, sEx_dz, sHy_dz, sHx_dz = z3(), z3(), z3(), z3()
+    f1, f2, f3 = xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz))
+    ce_dt, denom = xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz))
+    dzb, tz = xp.empty((nx, ny, nz - 1)), xp.empty((nx, ny, nz - 1))
+    Exn, Eyn, Ezn = xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz))
+    kes, bes, ces = ke[:, :, 1:], be[:, :, 1:], ce[:, :, 1:]     # CPML interior views (E-grid)
+    khs, bhs, chs = kh[:, :, :-1], bh[:, :, :-1], ch[:, :, :-1]  # CPML interior views (H-grid)
+
+    def _dfwd(F, axis, d, out):
+        """(xp.roll(F, -1, axis) - F) / d without the roll/temporary allocations (same values:
+        the periodic wrap row is the single [0]-[-1] difference)."""
+        if axis == 0:
+            xp.subtract(F[1:, :, :], F[:-1, :, :], out=out[:-1, :, :])
+            xp.subtract(F[0, :, :], F[-1, :, :], out=out[-1, :, :])
+        else:
+            xp.subtract(F[:, 1:, :], F[:, :-1, :], out=out[:, :-1, :])
+            xp.subtract(F[:, 0, :], F[:, -1, :], out=out[:, -1, :])
+        xp.divide(out, d, out=out)
+        return out
+
+    def _dbwd(F, axis, d, out):
+        """(F - xp.roll(F, 1, axis)) / d without the roll/temporary allocations."""
+        if axis == 0:
+            xp.subtract(F[1:, :, :], F[:-1, :, :], out=out[1:, :, :])
+            xp.subtract(F[0, :, :], F[-1, :, :], out=out[0, :, :])
+        else:
+            xp.subtract(F[:, 1:, :], F[:, :-1, :], out=out[:, 1:, :])
+            xp.subtract(F[:, 0, :], F[:, -1, :], out=out[:, 0, :])
+        xp.divide(out, d, out=out)
+        return out
+
     sh = (nsteps, nx, ny)
     exL, eyL, hxL, hyL = xp.empty(sh), xp.empty(sh), xp.empty(sh), xp.empty(sh)
     exR, eyR, hxR, hyR = xp.empty(sh), xp.empty(sh), xp.empty(sh), xp.empty(sh)
     for n in range(nsteps):
         # ---------------- H update: dH/dt = -(1/mu) curl E ----------------
         # Hx: -(dEz/dy - dEy/dz) ; dEy/dz is CPML-stretched
-        dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
-        psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
-        sEy_dz = z3(); sEy_dz[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
-        dEz_dy = (xp.roll(Ez, -1, axis=1) - Ez) / dy
-        Hx -= cmu * (dEz_dy - sEy_dz)
+        xp.subtract(Ey[:, :, 1:], Ey[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dEy/dz
+        xp.multiply(chs, dzb, out=tz)
+        xp.multiply(bhs, psi_Hx[:, :, :-1], out=psi_Hx[:, :, :-1])
+        xp.add(psi_Hx[:, :, :-1], tz, out=psi_Hx[:, :, :-1])
+        xp.divide(dzb, khs, out=tz)
+        xp.add(tz, psi_Hx[:, :, :-1], out=sEy_dz[:, :, :-1])
+        _dfwd(Ez, 1, dy, f1)                                 # dEz/dy
+        xp.subtract(f1, sEy_dz, out=f1); xp.multiply(f1, cmu, out=f1)
+        xp.subtract(Hx, f1, out=Hx)
         # Hy: -(dEx/dz - dEz/dx) ; dEx/dz is CPML-stretched
-        dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
-        psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
-        sEx_dz = z3(); sEx_dz[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
-        dEz_dx = (xp.roll(Ez, -1, axis=0) - Ez) / dx
-        Hy -= cmu * (sEx_dz - dEz_dx)
+        xp.subtract(Ex[:, :, 1:], Ex[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dEx/dz
+        xp.multiply(chs, dzb, out=tz)
+        xp.multiply(bhs, psi_Hy[:, :, :-1], out=psi_Hy[:, :, :-1])
+        xp.add(psi_Hy[:, :, :-1], tz, out=psi_Hy[:, :, :-1])
+        xp.divide(dzb, khs, out=tz)
+        xp.add(tz, psi_Hy[:, :, :-1], out=sEx_dz[:, :, :-1])
+        _dfwd(Ez, 0, dx, f1)                                 # dEz/dx
+        xp.subtract(sEx_dz, f1, out=f1); xp.multiply(f1, cmu, out=f1)
+        xp.subtract(Hy, f1, out=Hy)
         # Hz: -(dEy/dx - dEx/dy) ; both transverse (no CPML)
-        dEy_dx = (xp.roll(Ey, -1, axis=0) - Ey) / dx
-        dEx_dy = (xp.roll(Ex, -1, axis=1) - Ex) / dy
-        Hz -= cmu * (dEy_dx - dEx_dy)
+        _dfwd(Ey, 0, dx, f1)
+        _dfwd(Ex, 1, dy, f2)
+        xp.subtract(f1, f2, out=f1); xp.multiply(f1, cmu, out=f1)
+        xp.subtract(Hz, f1, out=Hz)
         # ---------------- E update: eps0 eps_eff dE/dt = curl H - J ----------------
         # the Raman coordinate is shared by all components: advance it ONCE per step on |E|^2
         if do_raman:
             Qnew = R1 * Q + R2 * Qp + R3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
             Qp = Q; Q = Qnew
-        eps_eff = eps_inf + 3.0 * chi3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)  # standard chi3 (C3-2)
-        ce_dt = EPS0 * eps_eff / dt
-        denom = ce_dt + bJ / 2.0
+        # eps_eff = eps_inf + 3 chi3 |E|^2 (standard chi3, C3-2) -> ce_dt, denom
+        xp.multiply(Ex, Ex, out=f1)
+        xp.multiply(Ey, Ey, out=f2)
+        xp.add(f1, f2, out=f1)
+        xp.multiply(Ez, Ez, out=f2)
+        xp.add(f1, f2, out=f1)                               # |E|^2
+        xp.multiply(chi3_3, f1, out=f1)
+        xp.add(eps_inf, f1, out=f1)                          # eps_eff
+        xp.multiply(f1, EPS0, out=ce_dt); xp.divide(ce_dt, dt, out=ce_dt)
+        xp.add(ce_dt, bJ_h, out=denom)
         # Ex: (dHz/dy - dHy/dz) ; dHy/dz CPML-stretched
-        dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
-        psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
-        sHy_dz = z3(); sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
-        dHz_dy = (Hz - xp.roll(Hz, 1, axis=1)) / dy
-        curlx = dHz_dy - sHy_dz
+        xp.subtract(Hy[:, :, 1:], Hy[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dHy/dz
+        xp.multiply(ces, dzb, out=tz)
+        xp.multiply(bes, psi_Ex[:, :, 1:], out=psi_Ex[:, :, 1:])
+        xp.add(psi_Ex[:, :, 1:], tz, out=psi_Ex[:, :, 1:])
+        xp.divide(dzb, kes, out=tz)
+        xp.add(tz, psi_Ex[:, :, 1:], out=sHy_dz[:, :, 1:])
+        _dbwd(Hz, 1, dy, f2)                                 # dHz/dy
+        xp.subtract(f2, sHy_dz, out=f2)
+        curlx = f2
         if do_lor:                                          # Lorentz dPLx/dt enters the Ex-update
             PLxn = C1 * PLx + C2 * PLpx + C3 * Ex
             curlx = curlx - (PLxn - PLx) / dt
@@ -110,14 +174,26 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             PRxn = EPS0 * chi3R * Ex * Q
             curlx = curlx - (PRxn - PRx) / dt
             PRx = PRxn
-        Exn = (ce_dt * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
-        Jx = aJ * Jx + bJ * (Exn + Ex)
+        # Exn = (ce_dt*Ex + curlx - 0.5*(1+aJ)*Jx - 0.5*bJ*Ex) / denom, then the Drude J recursion
+        xp.multiply(ce_dt, Ex, out=f1)
+        xp.add(f1, curlx, out=f1)
+        xp.multiply(aJ1_h, Jx, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.multiply(bJ_half, Ex, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.divide(f1, denom, out=Exn)
+        xp.add(Exn, Ex, out=f3); xp.multiply(f3, bJ, out=f3)     # bJ * (Exn + Ex)
+        xp.multiply(aJ, Jx, out=Jx); xp.add(Jx, f3, out=Jx)      # Jx = aJ*Jx + ...
         # Ey: (dHx/dz - dHz/dx) ; dHx/dz CPML-stretched
-        dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
-        psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
-        sHx_dz = z3(); sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
-        dHz_dx = (Hz - xp.roll(Hz, 1, axis=0)) / dx
-        curly = sHx_dz - dHz_dx
+        xp.subtract(Hx[:, :, 1:], Hx[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dHx/dz
+        xp.multiply(ces, dzb, out=tz)
+        xp.multiply(bes, psi_Ey[:, :, 1:], out=psi_Ey[:, :, 1:])
+        xp.add(psi_Ey[:, :, 1:], tz, out=psi_Ey[:, :, 1:])
+        xp.divide(dzb, kes, out=tz)
+        xp.add(tz, psi_Ey[:, :, 1:], out=sHx_dz[:, :, 1:])
+        _dbwd(Hz, 0, dx, f2)                                 # dHz/dx
+        xp.subtract(sHx_dz, f2, out=f2)
+        curly = f2
         if do_lor:
             PLyn = C1 * PLy + C2 * PLpy + C3 * Ey
             curly = curly - (PLyn - PLy) / dt
@@ -134,12 +210,20 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             PRyn = EPS0 * chi3R * Ey * Q
             curly = curly - (PRyn - PRy) / dt
             PRy = PRyn
-        Eyn = (ce_dt * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
-        Jy = aJ * Jy + bJ * (Eyn + Ey)
+        xp.multiply(ce_dt, Ey, out=f1)
+        xp.add(f1, curly, out=f1)
+        xp.multiply(aJ1_h, Jy, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.multiply(bJ_half, Ey, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.divide(f1, denom, out=Eyn)
+        xp.add(Eyn, Ey, out=f3); xp.multiply(f3, bJ, out=f3)
+        xp.multiply(aJ, Jy, out=Jy); xp.add(Jy, f3, out=Jy)
         # Ez: (dHy/dx - dHx/dy) ; both transverse (no CPML)
-        dHy_dx = (Hy - xp.roll(Hy, 1, axis=0)) / dx
-        dHx_dy = (Hx - xp.roll(Hx, 1, axis=1)) / dy
-        curlz = dHy_dx - dHx_dy
+        _dbwd(Hy, 0, dx, f2)                                 # dHy/dx
+        _dbwd(Hx, 1, dy, f1)                                 # dHx/dy
+        xp.subtract(f2, f1, out=f2)
+        curlz = f2
         if do_lor:
             PLzn = C1 * PLz + C2 * PLpz + C3 * Ez
             curlz = curlz - (PLzn - PLz) / dt
@@ -156,15 +240,25 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             PRzn = EPS0 * chi3R * Ez * Q
             curlz = curlz - (PRzn - PRz) / dt
             PRz = PRzn
-        Ezn = (ce_dt * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
-        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        xp.multiply(ce_dt, Ez, out=f1)
+        xp.add(f1, curlz, out=f1)
+        xp.multiply(aJ1_h, Jz, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.multiply(bJ_half, Ez, out=f3)
+        xp.subtract(f1, f3, out=f1)
+        xp.divide(f1, denom, out=Ezn)
+        xp.add(Ezn, Ez, out=f3); xp.multiply(f3, bJ, out=f3)
+        xp.multiply(aJ, Jz, out=Jz); xp.add(Jz, f3, out=Jz)
         # soft y-polarized plane source (uniform in x,y -> normal incidence), PEC backing the CPML:
         # a z=const PEC plane forces only the TANGENTIAL E (Ex,Ey) to zero; the normal Ez sits half a
         # cell inside and is left to its (purely transverse-curl, in-bounds) update.
         Eyn[:, :, k_src] += src[n]
         for F in (Exn, Eyn):
             F[:, :, 0] = 0.0; F[:, :, -1] = 0.0
-        Ex, Ey, Ez = Exn, Eyn, Ezn
+        # ping-pong swap: E^{n+1} becomes current; the retired E^n array is next step's out= target
+        Ex, Exn = Exn, Ex
+        Ey, Eyn = Eyn, Ey
+        Ez, Ezn = Ezn, Ez
         # probe planes: co-locate Hx,Hy (at k+/-1/2) onto the E-plane (k) so S_z co-locates in z
         exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
         hxL[n] = 0.5 * (Hx[:, :, k_pL] + Hx[:, :, k_pL - 1]); hyL[n] = 0.5 * (Hy[:, :, k_pL] + Hy[:, :, k_pL - 1])
@@ -194,6 +288,10 @@ def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
     Hx, Hy, Hz = z3(), z3(), z3()
     Jx, Jy, Jz = z3(), z3(), z3()
     psi_Hx, psi_Hy, psi_Ex, psi_Ey = z3(), z3(), z3(), z3()
+    # the four stretched-derivative buffers, hoisted out of the time loop (audit 6.2 perf): the
+    # CPML edge slice is written once (zeros) and never touched again, the interior is fully
+    # rewritten each step -- identical values, no per-step full-grid allocation.
+    sEy_dz, sEx_dz, sHy_dz, sHx_dz = z3(), z3(), z3(), z3()
     aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
     bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
     cmu = dt / MU0; e0dt = EPS0 / dt
@@ -208,24 +306,24 @@ def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
         # ---- H update: dH/dt = -(1/mu) curl E ; only d/dz CPML-stretched ----
         dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
         psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
-        sEy_dz = z3(); sEy_dz[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
+        sEy_dz[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
         Hx -= cmu * (dyf(Ez) - sEy_dz)
         dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
         psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
-        sEx_dz = z3(); sEx_dz[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
+        sEx_dz[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
         Hy -= cmu * (sEx_dz - dxf(Ez))
         Hz -= cmu * (dxf(Ey) - dyf(Ex))
         # ---- E update: eps0 eps dE/dt = curl H - J ; only d/dz CPML-stretched ----
         denom = e0dt * eps_inf + bJ / 2.0
         dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
         psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
-        sHy_dz = z3(); sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
+        sHy_dz[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
         curlx = dyb(Hz) - sHy_dz
         Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
         Jx = aJ * Jx + bJ * (Exn + Ex)
         dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
         psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
-        sHx_dz = z3(); sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
+        sHx_dz[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
         curly = sHx_dz - dxb(Hz)
         Eyn = (e0dt * eps_inf * Ey + curly - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eyn + Ey)
@@ -281,6 +379,9 @@ def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, 
     Hx, Hy, Hz = z3(), z3(), z3()
     Jx, Jy, Jz = z3(), z3(), z3()
     psi_Hx, psi_Hy, psi_Ex, psi_Ey = z3(), z3(), z3(), z3()
+    # stretched-derivative buffers hoisted out of the time loop (audit 6.2 perf): the CPML edge
+    # slice keeps its once-written zeros, the interior is fully rewritten each step
+    sEy, sEx, sHy, sHx = z3(), z3(), z3(), z3()
     cmu = dt / MU0
     sh = (nsteps, nx, ny)
     exL, eyL, exR, eyR = np.empty(sh), np.empty(sh), np.empty(sh), np.empty(sh)
@@ -288,21 +389,21 @@ def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, 
         # ---- H update (dH/dt = -(1/mu) curl E); only d/dz CPML-stretched ----
         dEy_dz = (Ey[:, :, 1:] - Ey[:, :, :-1]) / dz
         psi_Hx[:, :, :-1] = bh[:, :, :-1] * psi_Hx[:, :, :-1] + ch[:, :, :-1] * dEy_dz
-        sEy = z3(); sEy[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
+        sEy[:, :, :-1] = dEy_dz / kh[:, :, :-1] + psi_Hx[:, :, :-1]
         Hx -= cmu * ((np.roll(Ez, -1, axis=1) - Ez) / dy - sEy)
         dEx_dz = (Ex[:, :, 1:] - Ex[:, :, :-1]) / dz
         psi_Hy[:, :, :-1] = bh[:, :, :-1] * psi_Hy[:, :, :-1] + ch[:, :, :-1] * dEx_dz
-        sEx = z3(); sEx[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
+        sEx[:, :, :-1] = dEx_dz / kh[:, :, :-1] + psi_Hy[:, :, :-1]
         Hy -= cmu * (sEx - (np.roll(Ez, -1, axis=0) - Ez) / dx)
         Hz -= cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx - (np.roll(Ex, -1, axis=1) - Ex) / dy)
         # ---- E update: curls, then the 2x2 magnetized-Drude CN on (Ex,Ey) + scalar Ez ----
         dHy_dz = (Hy[:, :, 1:] - Hy[:, :, :-1]) / dz
         psi_Ex[:, :, 1:] = be[:, :, 1:] * psi_Ex[:, :, 1:] + ce[:, :, 1:] * dHy_dz
-        sHy = z3(); sHy[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
+        sHy[:, :, 1:] = dHy_dz / ke[:, :, 1:] + psi_Ex[:, :, 1:]
         curlx = (Hz - np.roll(Hz, 1, axis=1)) / dy - sHy
         dHx_dz = (Hx[:, :, 1:] - Hx[:, :, :-1]) / dz
         psi_Ey[:, :, 1:] = be[:, :, 1:] * psi_Ey[:, :, 1:] + ce[:, :, 1:] * dHx_dz
-        sHx = z3(); sHx[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
+        sHx[:, :, 1:] = dHx_dz / ke[:, :, 1:] + psi_Ey[:, :, 1:]
         curly = sHx - (Hz - np.roll(Hz, 1, axis=0)) / dx
         curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx - (Hx - np.roll(Hx, 1, axis=1)) / dy
         rhs0 = Ep00 * Ex + Ep01 * Ey + curlx - (Jc00 * Jx + Jc01 * Jy)
