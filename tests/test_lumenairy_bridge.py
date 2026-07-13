@@ -468,3 +468,30 @@ def test_collapse_unclaimed_keys_raise():
                                          "superstrate": EpsField(scalar=1.0 + 0j),
                                          "pml_top": EpsField(scalar=1.0 + 0j)})
     assert set(out) == {"a"}
+
+
+def test_common_version_floor_and_parse():
+    # audit 6.3 / section 8.2-2: ONE bridge floor in _common (bor_backend had a copy-pasted
+    # gate at a DIFFERENT floor), and a parse that survives pre/post-release suffixes (the
+    # old tuple(int(p) ...) x3 crashed on '5.21.0rc1')
+    from dynameta.optics.lumenairy_bridge._common import (VERSION_FLOOR, parse_version,
+                                                          require_lumenairy)
+    assert parse_version("5.21.0rc1") == (5, 21, 0)
+    assert parse_version("5.22.dev0") == (5, 22, 0)
+    assert parse_version("5.21") == (5, 21, 0)
+    assert parse_version("6.0.0.post1") == (6, 0, 0)
+    assert VERSION_FLOOR >= (5, 21, 0)
+    lum = pytest.importorskip("lumenairy")
+    if parse_version(lum.__version__) >= VERSION_FLOOR:
+        assert require_lumenairy() is lum
+
+
+@needs_lum
+def test_translate_reads_layers_via_common():
+    # the ONE version-ceilinged private-surface read (stack._layers has no public accessor)
+    from dynameta.optics.lumenairy_bridge._common import stack_layer_records
+    import lumenairy
+    stk = lumenairy.RCWAStack(300e-9, n_superstrate=1.0, n_substrate=1.5, n_orders=3)
+    stk.add_layer(100e-9, eps=4.0 + 0j)
+    recs = stack_layer_records(stk)
+    assert len(recs) == 1 and recs[0].kind == "uniform"

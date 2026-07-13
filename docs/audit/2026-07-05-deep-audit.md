@@ -1209,15 +1209,67 @@ the C6-class contract fixes), each with a discrimination-proven gate.
 - C7b-2 reliability_tddb GATE B de-tautologized (hand-derived Arrhenius reference +
   module cross-pins).
 
+**Hygiene waves (2026-07-12):**
+- H1 gate de-tautologization (dd30a20 + follow-ups + H1c): scattering_link A-FIT
+  re-fits the material's own eps; switching GATE B cross-pinned vs LCDynamics;
+  qcse part-4 exponent independent; S-P Gauss-integral pin ADDED (rel 4.1e-3);
+  sp nonparabolic alpha=0 byte-identity ADDED; fatigue GATE A stress reference
+  replaced by a numeric isotropic-compliance Hooke solve from (E, nu) primitives
+  (+ 2x-dT linearity and CTE-swap antisymmetry pins) and GATE C Weibull leg pinned
+  by the distribution-free S(sigma0)=1/e anchor + the ln S ~ s^m functional
+  equation. Every §7.3 tautology item now closed (GATE KANE was closed by C7b-1).
+- H2 constants single-sourcing (74567f2): KB_EV_K (byte-identical literal,
+  KB/Q_E quotient REJECTED — differs at 1.5e-11 rel vs the 1e-13 Arrhenius pins),
+  H_PLANCK (exact SI h; replaced the 2*pi*HBAR twins + calibration literal),
+  SOLVER_TIME_CONVENTION string, sbe m_e/c, inline Q_E literals, F12
+  Aymerich-Humet coefficients hoisted to one tuple (DEVSIM expression verified
+  byte-identical); 7 qd_soa validation twins moved to the same source.
+  134 affected tests + 23 validations green.
+- H4 test infrastructure (948da65): run_all rc==42 SKIP category (C6-6) +
+  run-everything-except-SKIP discovery with a drift NOTE (the old regex silently
+  never ran raise/assert-gated validations) + 35 qd_soa_* / optical_cache /
+  sp_open_body curated into SMOKE; six capability-skips converted from exit-0 to
+  SystemExit(42); CI smoke-tier leg wired; tests/test_devsim_smoke.py = first
+  pytest presence for the DEVSIM solve path (equilibrium + unipolar DD).
+- H3a private-API promotions (1a602d8): optics/rasterize.py owns the
+  fdtd_seam rasterizer publics (RCWA bridge off the underscore names);
+  thermal_fem build_thermal_forms/add_load_terms/mean_T_per_layer public;
+  fem_mesh MESH_SCALE. Underscore aliases retained. (fdtd_nd export cleanup +
+  FDTDLayer relocation + lumenairy_bridge/_common.py in flight — _common lands
+  with the §8 B1 floor work.)
+- H5a perf batch 1, results-identical (3da74bb): lc_director_2d vectorized
+  red-black GS (x42 shipped scale, fields agree 1.9e-11 rad); LIDT absorbed(T)
+  memo (26x fewer TMM solves, bit-identical); em Miner vectorized (17-45x,
+  bit-identical); pipeline frees each CarrierField at its sole read;
+  solve_fem diagnostics=False opt-out (~28%/solve, default unchanged;
+  True-vs-False delta bounded by repeat-run noise). Korhonen banded Jacobian
+  REFUTED as results-identical (LSODA step-sequence fork ~3e-10) — untouched,
+  13-119x available if the identity bar is relaxed to solver tolerance.
+
+**Bridge roadmap §8.2 (2026-07-12):**
+- B1 / step 2 — floors + _common consolidation: new lumenairy_bridge/_common.py
+  owns the SINGLE VERSION_FLOOR (5, 21, 0) + suffix-tolerant parse_version
+  ('5.21.0rc1' no longer crashes the x3 copy-pasted gates) + the shared helper
+  surface (pol_row/angles_rad/guards/p_basis_conversion, public names;
+  rcwa_backend keeps _-aliases) + stack_layer_records, the ONE version-ceilinged
+  reader of the private RCWAStack._layers (public attr preferred, warn beyond
+  the tested 5.21.x line). bor_backend's copy-pasted gate (floor drifted to
+  5.16.0) deleted; berreman's 5.14.4 tightening subsumed; pyproject floor
+  5.14.2 -> >=5.21. 27 bridge tests green (2 new: parse/floor + _layers reader).
+- UPSTREAM FINDING while re-running the bridge validations:
+  lumenairy_bor_bridge GATE C (lossless ring-grating energy closure) FAILS at
+  |R+T-1| = 2.3e-2. Bisected to lumenairy commit fca4665 ("unit-invariant flux
+  normalization + propagating-mode classifiers", its own audit P1-01/P2-06):
+  fca4665^ closes at 1.2e-11, fca4665 leaks 2.3e-2 and drops one incident mode
+  (319 -> 318). The DynaMeta bridge only relays lumenairy's res["energy"], so
+  the defect is upstream; the gate had silently rotted because the smoke tier
+  never ran it (fixed by H4's run-everything discovery — this failure is that
+  fix WORKING). Left honestly red; handed off as a lumenairy-side task with the
+  full repro + bisect.
+
 **PENDING (residual hygiene — optional):**
-- The remaining P3-classified tautology gates from §7.3 (fatigue GATE A/C re-types,
-  switching GATE B, qcse part-4, scattering_link A-FIT) and the two docstring-advertised
-  missing pins (S-P Gauss integral; sp nonparabolic alpha=0 byte-identity).
-- Constants single-sourcing sweep, private-API promotion batch, test-infra items
-  (CI smoke-tier wiring, SKIP category, DEVSIM pytest smokes) — §6.3.
-- Remaining §6.2 perf opportunities (packed cache layout with the GATE-D extension
-  prerequisite; pipeline CarrierField release; LC 2D vectorization; BM KK kernel;
-  jit/vacuum-ref/LIDT/SOA batches; solve_fem diagnostics opt-out).
+- §6.2 perf still open: topology_opt jit-beta + FDTD vacuum-ref caching +
+  kernels3d prealloc, Berreman absorption double-solve consolidation.
 - Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB; per-order
   Jones synthesis for bridge conical s/p; net-bandwidth co-fit for the Innolume
   calibration; 2D lateral-interface wiring; 3D II element reconstruction.
