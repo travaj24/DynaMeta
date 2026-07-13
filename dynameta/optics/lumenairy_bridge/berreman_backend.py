@@ -24,7 +24,7 @@ tensor (re+im), thickness, wavelength, angle, phi. Crucially it is the ONLY rigo
 for the FULL z-coupled gyrotropic tensor (VectorMagnetoOpticModel) the RCWA in-plane tensor
 path explicitly rejects (no exz/eyz/ezx/ezy).
 
-BRIDGE, not vendor: lumenairy (>= 5.14.4 -- the version that added BerremanStack /
+BRIDGE, not vendor: lumenairy (>= 5.21 bridge floor; 5.14.4 added BerremanStack /
 berreman_jones_1d) is a REQUIRED dependency but imported lazily; conventions are IDENTICAL
 on both sides (public exp(-i omega t), Im(eps) > 0 for absorbers, metres, radians, RAW eps --
 no conjugation), so this is geometry/result adaptation only, no sign/unit translation.
@@ -36,7 +36,7 @@ patterned needs a transverse Fourier/nodal basis). Uniform tensor layers (a cons
 across the cell), uniform scalars, and graded laterally-uniform fields (z-sliced into uniform
 slabs) are the supported inputs.
 
-Cross-library pins (lumenairy 5.14.4/5.14.5, file:line in elements/berreman.py):
+Cross-library pins (first pinned at lumenairy 5.14.4/5.14.5, re-verified on the 5.21 floor; file:line in elements/berreman.py):
 - berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength, *, angle=, phi=, theta=)
   -> (R, T, jones_r, jones_t). `layers` = [(eps, thickness_m), ...] SUPERSTRATE-side first
   (== LayeredStack.slabs order); eps scalar or (3,3) (public Im>0). R/T are (2,) TOTAL
@@ -62,10 +62,12 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _guard_conical_ppol,
-                                                           _guard_incidence_side,
-                                                           _p_basis_conversion, _pol_row,
-                                                           _require_lumenairy)
+from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
+                                                      guard_conical_ppol as _guard_conical_ppol,
+                                                      guard_incidence_side as _guard_incidence_side,
+                                                      p_basis_conversion as _p_basis_conversion,
+                                                      pol_row as _pol_row,
+                                                      require_lumenairy as _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -74,15 +76,14 @@ __all__ = ["design_to_berreman_layers", "make_lumenairy_berreman_solver",
 
 
 def _require_berreman():
-    """lumenairy with the Berreman 4x4 surface (added in 5.14.4). Builds on the RCWA bridge's
-    _require_lumenairy (which pins the >= 5.14.2 floor) and tightens to 5.14.4 + the symbol."""
+    """lumenairy with the Berreman 4x4 surface. The single bridge floor (_common.VERSION_FLOOR,
+    >= 5.21) already covers the 5.14.4 tier that added it; the symbol check stays as a cheap
+    defensive guard against a partial/renamed install."""
     lum = _require_lumenairy()
-    ver = tuple(int(p) for p in str(lum.__version__).split(".")[:3])
-    if ver < (5, 14, 4) or not hasattr(lum, "berreman_jones_1d"):
+    if not hasattr(lum, "berreman_jones_1d"):
         raise ImportError(
-            "the Berreman backend needs lumenairy>=5.14.4 (BerremanStack / berreman_jones_1d "
-            "-- the anisotropic-planar 4x4 tier added in 5.14.4); found {}. pip install -U "
-            "lumenairy".format(lum.__version__))
+            "the Berreman backend needs lumenairy's BerremanStack / berreman_jones_1d surface, "
+            "absent from this install ({}). pip install -U lumenairy".format(lum.__version__))
     return lum
 
 

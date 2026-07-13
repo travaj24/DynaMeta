@@ -1,13 +1,13 @@
 """Lumenairy RCWA as a DynaMeta optical backend (roadmap v0.5 A1).
 
-BRIDGE, not vendor: Lumenairy (>= 5.14.2) is a REQUIRED dependency of dynameta but is
+BRIDGE, not vendor: Lumenairy (>= 5.21, the single floor in _common.VERSION_FLOOR) is a REQUIRED dependency of dynameta but is
 imported lazily inside the functions -- importing this module (and base dynameta) stays
 fast and matplotlib-free; calling against a broken/outdated environment raises with an
 install hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
 absorbers, metres, radians) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so no
 sign/unit translation happens here, only geometry/result adaptation.
 
-Pinned cross-library contracts (lumenairy 5.14.2, file:line refs in the roadmap):
+Pinned cross-library contracts (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor; file:line refs in the roadmap):
 - RCWAStack(period, period_y=, n_superstrate=, n_substrate=, n_orders=, n_orders_y=):
   region media are complex refractive INDICES (or callables wl -> n); a stack is 1-D iff
   period_y/n_orders_y are omitted; the lattice is rectangular.
@@ -57,70 +57,14 @@ from dynameta.optics.tmm_reference import end_media_indices
 __all__ = ["design_to_rcwa_stack", "make_lumenairy_rcwa_solver", "LumenairyStackSolver",
            "rcwa_result_to_optical_result"]
 
-_POL_ROW = {"x": 0, "y": 1, "p": 0}
-
-
-def _require_lumenairy():
-    try:
-        import lumenairy
-    except ImportError as exc:
-        raise ImportError(
-            "the Lumenairy backend needs lumenairy>=5.14.2 (a REQUIRED dependency of "
-            "dynameta -- this environment is missing it): pip install lumenairy") from exc
-    ver = tuple(int(p) for p in str(lumenairy.__version__).split(".")[:3])
-    if ver < (5, 14, 2):
-        raise ImportError("lumenairy >= 5.14.2 required (found {}); the bridge relies on "
-                          "the 5.14 RCWAStack surface (dispersive specs, OOP tensor "
-                          "cascade, Ex/Ey result rows) AND the 5.14.2 all-uniform PMM fix "
-                          "(unstructured PMMStack solves are silently wrong before it)"
-                          .format(lumenairy.__version__))
-    return lumenairy
-
-
-def _pol_row(optical) -> int:
-    pol = getattr(optical, "polarization", "y") or "y"
-    if pol not in _POL_ROW:
-        raise ValueError("lumenairy bridge: polarization must be 'x', 'y' or 'p' "
-                         "(got {!r})".format(pol))
-    return _POL_ROW[pol]
-
-
-def _angles_rad(optical) -> Tuple[float, float]:
-    theta = float(np.radians(getattr(optical, "incidence_angle_deg", 0.0) or 0.0))
-    phi = float(np.radians(getattr(optical, "azimuth_deg", 0.0) or 0.0))
-    return theta, phi
-
-
-def _guard_incidence_side(optical) -> None:
-    """The bridges build the stack superstrate-side first from the Design's super/substrate, so they
-    model TOP incidence only (matching the FEM solver, solver.py). incidence_side='bottom' is a legal
-    OpticalSpec value but on an asymmetric stack it physically differs (different incidence medium,
-    reversed layer order); silently solving top would be a wrong number, so raise."""
-    side = getattr(optical, "incidence_side", "top") or "top"
-    if side != "top":
-        raise NotImplementedError(
-            "lumenairy bridge: incidence_side={!r} is not supported -- the bridges solve TOP "
-            "incidence only. For bottom incidence, swap the superstrate/substrate materials in the "
-            "Design (and reverse the layer order) and keep incidence_side='top'.".format(side))
-
-
-def _guard_conical_ppol(optical, phi_rad: float) -> None:
-    """CONICAL incidence (azimuth != 0) is unsupported for EVERY polarization (audit C4-2):
-    the bridges map 'x'/'y' to the lumenairy LAB rows, which at phi != 0 are phi-dependent
-    s/p MIXTURES -- not the rotated s-hat = (-sin phi, cos phi) eigen-polarization the FEM
-    implements and OpticalSpec documents (probe: theta=30, phi=45 on bare glass returned
-    R=0.0392 vs the s-pol truth 0.0578, 32% low, silently; at phi=90 exactly the ORTHOGONAL
-    polarization); the 'p' lab-basis conversion likewise assumes the x-z plane of incidence.
-    (The previous guard covered only 'p', with a comment wrongly claiming 'x'/'y' are fine.)
-    True conical s/p through the bridges needs per-order Jones synthesis -- a follow-on;
-    until then refuse rather than return a wrong-polarization number."""
-    if abs(float(phi_rad)) > 1e-12:
-        pol = getattr(optical, "polarization", "y") or "y"
-        raise NotImplementedError(
-            "lumenairy bridge: conical incidence (azimuth != 0) is not supported for "
-            "polarization {!r} -- the bridge's lab-basis rows are phi-dependent s/p mixtures, "
-            "not the FEM's rotated s/p eigen-polarizations (audit C4-2). Set azimuth_deg=0 or "
-            "use the FEM solver for conical incidence.".format(pol))
+# Shared plumbing now lives in _common.py (audit 6.3: rcwa_backend had become the bridge's
+# unofficial common module). Underscore aliases keep the historical import surface working.
+from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
+                                                      guard_conical_ppol as _guard_conical_ppol,
+                                                      guard_incidence_side as _guard_incidence_side,
+                                                      p_basis_conversion as _p_basis_conversion,
+                                                      pol_row as _pol_row,
+                                                      require_lumenairy as _require_lumenairy)
 
 
 def _min_samples(n_orders: int) -> int:
@@ -261,22 +205,6 @@ def _meet_sampling(cell, s_min_x: int, s_min_y: int):
         tile = reps + [1] * (cell.ndim - 2)
         cell = np.tile(cell, tile)
     return cell
-
-
-def _p_basis_conversion(pol: str, theta_rad: float, n_super: complex,
-                        n_sub: complex) -> Tuple[complex, complex]:
-    """(r_factor, t_factor) mapping Lumenairy's LAB-BASIS Jones x-components onto the
-    Byrnes-tmm p-hat-basis Fresnel amplitudes -- DynaMeta's incumbent convention (the FEM
-    p-pol phases were validated against tmm). Measured: at 30 deg p-pol the Jones r_xx is
-    EXACTLY -r_p(tmm) (R/T agree to machine precision, phase off by pi) and
-    t_xx = t_p * cos(theta_t)/cos(theta_i) (the lab-x projection of the p-hat fields).
-    s-pol ('y') and 'x' need no conversion (the bases coincide)."""
-    if pol != "p":
-        return 1.0, 1.0
-    cos_i = np.sqrt(1.0 + 0j - np.sin(theta_rad) ** 2)
-    sin_t = complex(n_super) * np.sin(theta_rad) / complex(n_sub)
-    cos_t = np.sqrt(1.0 + 0j - sin_t ** 2)
-    return -1.0, complex(cos_i / cos_t)
 
 
 def rcwa_result_to_optical_result(res, row: int, *, t0: float,

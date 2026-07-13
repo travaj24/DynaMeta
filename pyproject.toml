@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "lumenairy>=5.14.2",                                   # RCWA/PMM backends (optics.lumenairy_bridge) -- core since v0.5; 5.14.2 carries the all-uniform PMM fix
+    "lumenairy>=5.21",                                     # RCWA/PMM/Berreman/BOR backends (optics.lumenairy_bridge) -- core since v0.5; the audited bridge fixes were validated against 5.21 ONLY (single floor: lumenairy_bridge/_common.VERSION_FLOOR)
 ]
 
 [project.optional-dependencies]
