@@ -44,13 +44,16 @@ def main():
                                  continuum_alpha0_per_m=A0_CONT, continuum_binding_J=E_BIND)
 
     # GATE A: the continuum reproduces the closed-form 2D Sommerfeld factor S_2D(dE) =
-    # 2/(1+exp(-2 pi sqrt(E_b/dE))) above the unbound edge E_cont = E_T + E_b -> 2 at the edge,
-    # decaying SLOWLY toward 1 (S_2D(6 E_b) ~ 1.86, not ~1: the factor decays as ~1/sqrt(dE)). The
-    # exciton Gaussian is ~e^-12 negligible this far above E_T, so a(E) ~ A0_CONT * S_2D.
+    # 2/(1+exp(-2 pi gamma)), gamma = sqrt(R/dE) with R the effective 3D Rydberg = E_b(2D)/4
+    # (Shinada-Sugano), i.e. -pi sqrt(E_b/dE) in terms of the 2D binding, above the unbound edge
+    # E_cont = E_T + E_b -> 2 at the edge, decaying SLOWLY toward 1 (S_2D(6 E_b) ~ 1.57, not ~1:
+    # the factor decays as ~1/sqrt(dE)). The exciton Gaussian is ~e^-12 negligible this far above
+    # E_T, so a(E) ~ A0_CONT * S_2D. (audit 7b P3 halved the model's previously-doubled exponent
+    # -2 pi sqrt(E_b/dE); this oracle carries the corrected closed form.)
     E_cont = E_T + E_BIND
 
     def s2d(dE):
-        return 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(E_BIND / dE)))
+        return 2.0 / (1.0 + np.exp(-np.pi * np.sqrt(E_BIND / dE)))
     eam_off = ElectroAbsorptionModel(qw, eps_bg=complex(12.0, 0.02), alpha0_per_m=A0_EXC,
                                      broadening_J=SIGMA, e_grid_J=(e_lo, e_hi, 4001))
     form_ok = True
