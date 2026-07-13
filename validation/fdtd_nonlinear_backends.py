@@ -100,21 +100,21 @@ def main():
 
         # public API returns numpy -- differentiate the kernel path via finite difference vs
         # jax.grad on a jnp-traced wrapper of the dispatch (the kernel itself is the jax scan)
-        from dynameta.optics.fdtd_nd import _run_2d_te_jax, _cpml_z
+        from dynameta.optics.fdtd_nd import run_2d_te_jax, cpml_z
         import jax.numpy as jnp
         nxg, nzg, dzg = 4, 160, 10e-9
         dxg = 4 * dzg
         dtg = 0.5 / (3e8 * np.sqrt(1 / dxg ** 2 + 1 / dzg ** 2))
         t = np.arange(4000) * dtg
         srcg = 1e6 * np.exp(-((t - 4e-14) / 1.2e-14) ** 2) * np.cos(W0 * (t - 4e-14))
-        cp = _cpml_z(nzg, dzg, dtg, 12, np.sqrt(2.0), np.sqrt(2.0))
+        cp = cpml_z(nzg, dzg, dtg, 12, np.sqrt(2.0), np.sqrt(2.0))
         eps = np.full((nxg, nzg), 2.0)
         zer = np.zeros((nxg, nzg))
         msk = np.zeros((nxg, nzg)); msk[:, 60:100] = 1.0
 
         def loss(c2v):
             ch = c2v * jnp.asarray(msk)
-            _, _, eyR, _ = _run_2d_te_jax(eps, zer, zer, zer, dxg, dzg, dtg, srcg.size,
+            _, _, eyR, _ = run_2d_te_jax(eps, zer, zer, zer, dxg, dzg, dtg, srcg.size,
                                           16, 20, nzg - 16, srcg, cp, None, chi2=ch)
             return jnp.sum(eyR ** 2)
 

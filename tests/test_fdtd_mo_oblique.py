@@ -5,7 +5,7 @@ import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, solve_fdtd_2d_oblique, solve_fdtd_3d_mo
+from dynameta.optics.fdtd_nd import HAVE_NUMBA, solve_fdtd_2d_oblique, solve_fdtd_3d_mo
 
 LMIN, LMAX = 1400e-9, 1600e-9
 
@@ -115,12 +115,12 @@ def test_oblique_tm_dispatch_routes_to_requested_backend(monkeypatch):
     ol = [FDTDLayer(thickness_m=200e-9, eps_inf=4.0)]
     kw = dict(period_x_m=300e-9, angle_deg=20.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=6,
               nx=4, pol="p")
-    if F._HAVE_NUMBA:
+    if F.HAVE_NUMBA:
         monkeypatch.setattr(FK, "_tm2d_oblique_numba", _boom)
         with pytest.raises(_Reached):
             solve_fdtd_2d_oblique(ol, backend="numba", **kw)
-    if F._have_jax():
-        monkeypatch.setattr(FK, "_run_2d_tm_oblique_jax", _boom)
+    if F.have_jax():
+        monkeypatch.setattr(FK, "run_2d_tm_oblique_jax", _boom)
         with pytest.raises(_Reached):
             solve_fdtd_2d_oblique(ol, backend="jax", **kw)
 
@@ -168,7 +168,7 @@ def test_mo_3d_birefringent_no_cross_pol():
     assert float(np.max(np.abs(r.R[b] + r.T[b] - 1.0))) < 3e-2   # lossless energy closes
 
 
-@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+@pytest.mark.skipif(not HAVE_NUMBA, reason="numba not installed")
 def test_mo_numba_matches_numpy():
     L = MOLayer(thickness_m=300e-9, eps_xx=4.0, eps_yy=2.25, drude_wp_rad_s=1.6e15,
                 drude_gamma_rad_s=8.0e13, cyclotron_wc_rad_s=2.5e14)
@@ -181,7 +181,7 @@ def test_mo_numba_matches_numpy():
     assert float(np.max(np.abs(a.faraday_deg[m] - b.faraday_deg[m]))) < 1e-8
 
 
-@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+@pytest.mark.skipif(not HAVE_NUMBA, reason="numba not installed")
 def test_oblique_numba_matches_numpy():
     ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0)]
     kw = dict(period_x_m=300e-9, angle_deg=30.0, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, nx=4)
@@ -192,7 +192,7 @@ def test_oblique_numba_matches_numpy():
     assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
 
 
-@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+@pytest.mark.skipif(not HAVE_NUMBA, reason="numba not installed")
 def test_oblique_tm_ppol_numba_matches_numpy():
     # the p-pol (TM) complex-envelope oblique numba kernel == the NumPy TM reference (dispersive layer).
     ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.5e15, drude_gamma_rad_s=1.0e14)]
@@ -205,7 +205,7 @@ def test_oblique_tm_ppol_numba_matches_numpy():
     assert float(np.max(np.abs(a.T0[m] - b.T0[m]))) < 1e-10
 
 
-@pytest.mark.skipif(not _HAVE_NUMBA, reason="numba not installed")
+@pytest.mark.skipif(not HAVE_NUMBA, reason="numba not installed")
 def test_oblique_3d_numba_matches_numpy():
     # the full-vector 3D oblique complex-envelope numba kernel == the NumPy reference (2D transverse Bloch
     # envelope kx AND ky, dispersive Drude layer, conical azimuth).
