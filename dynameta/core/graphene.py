@@ -16,8 +16,10 @@ intraband term + the universal-conductivity interband term sigma0 = e^2/(4 hbar)
 
 Convention exp(-i omega t): a passive sheet has Re(sigma) > 0 (absorbing). SI units (E_F in J,
 lambda in m, sigma in siemens, tau in s). Pure numpy; no devsim/ngsolve. The FEM surface-current
-boundary condition (a sheet term in the curl-curl weak form) is a tracked follow-on; this module
-delivers the conductivity model + the analytic sheet oracle that validates it.
+boundary condition (a sheet Robin term in the curl-curl weak form) is IMPLEMENTED --
+optics.solver.solve_fem(sheet_bcs={'iface_z<nm>': sigma}), validated against this module's
+sheet_rt oracle in validation/graphene_sheet_fem.py (docstring corrected per audit C6-5; the
+old text claimed it was a follow-on).
 """
 
 from __future__ import annotations

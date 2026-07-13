@@ -24,15 +24,18 @@ semiconductor surface potential at the oxide interface (default: identity, i.e. 
 full gate drop -- a simplification; supply a callable folding the oxide capacitance
 voltage division for quantitative device matching).
 
-Known limitations (audit SP-3/SP-4):
-  - The self-consistent solve is PARABOLIC (m* constant). Kane nonparabolicity exists
-    only at the SchrodingerPoisson1D.density() level, not through this CarrierSolver,
-    and the bulk E_F here uses the parabolic (3 pi^2 n)^(2/3) relation. Do not treat the
-    accumulation magnitude as nonparabolic-accurate for ITO at >1e26 m^-3.
-  - The body side (z=0) is a Dirichlet hard wall, so the emitted density carries a small
-    (~0.4 nm) unphysical depletion at z=0 at every bias (a real device body is a contact
-    into the bulk, not an infinite barrier). The gate-side dead layer IS the physical
-    quantum effect; the body-side one is a boundary-condition artifact.
+Capabilities and limitations (docstring corrected per audit C6-5 -- the old text
+claimed parabolic-only for code that is fully nonparabolic):
+  - With alpha_np_per_eV > 0 the self-consistent solve IS fully NONPARABOLIC: the
+    Trellakis Newton's a-priori density + Jacobian use the Kane DOS through
+    _solve_column, and the bulk E_F is the exact Kane inversion
+    E_F = (-1 + sqrt(1 + 4 alpha gamma_F))/(2 alpha) (alpha=0 recovers the parabolic
+    (3 pi^2 n)^(2/3) relation exactly). ITO accumulation at >1e26 m^-3 is therefore
+    nonparabolic-consistent end to end when alpha is supplied.
+  - The body side (z=0) is a Dirichlet hard wall BY DEFAULT, so the emitted density
+    carries a small (~0.4 nm) unphysical depletion at z=0 at every bias (a real device
+    body is a contact into the bulk, not an infinite barrier); neumann_body=True removes
+    it. The gate-side dead layer IS the physical quantum effect.
 """
 
 from __future__ import annotations

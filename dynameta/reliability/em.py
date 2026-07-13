@@ -1,7 +1,9 @@
 """REL3: electromigration (Black equation + Blech immortality) for the current-carrying metal
 (mirror, gate traces, contacts).
 
-    MTTF = A * J^(-n) * exp(Ea / (kB * T)),   n = 2 (void-growth-limited, the usual dominant regime),
+    MTTF = A * J^(-n) * exp(Ea / (kB * T)),   n ~ 2 (void-NUCLEATION-limited -- Korhonen
+    sigma ~ J sqrt(t) gives t_nuc ~ J^-2; n ~ 1 is the void-GROWTH-limited regime; the labels
+    were previously swapped vs Lloyd 1991 / JEP122 -- audit P3),
     Ea ~ 0.55 eV (Cu grain-boundary) .. ~0.9 eV (Al / Cu surface-diffusion capped)
 
 Blech immortality: below the critical current-density-length product the back-stress gradient stops
@@ -10,9 +12,10 @@ effectively INFINITE MTTF. The pre-factor A is GEOMETRY-SCALED (a um-scale conta
 mm-scale interconnect by ~1e4-1e5x) -- always anchor it on a representative qualification point via
 EmParams.calibrated().
 
-DRIVER NOTE (the roadmap-flagged gap): the operating solve does not yet extract a contact current;
-per the roadmap MVP path, the drive current I [A] is an EXTERNAL design parameter here (a DEVSIM
-region-integrated extractor is the documented follow-on). J = I / (w * t) from the trace geometry.
+DRIVER NOTE (stale text corrected per audit C6-5/6.3): the contact-current driver HAS shipped --
+carriers.contact_current + drivers.reliability_glue feed the solved DEVSIM contact current straight
+into these models (validation/contact_current_drivers.py); the drive current I [A] may still be
+supplied as an external design parameter. J = I / (w * t) from the trace geometry.
 Miner damage accumulation handles time-varying (J, T) duty cycles. Pure numpy; oracles in
 validation/reliability_em.py.
 """
