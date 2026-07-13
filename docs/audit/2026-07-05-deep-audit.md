@@ -1256,6 +1256,36 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   the tested 5.21.x line). bor_backend's copy-pasted gate (floor drifted to
   5.16.0) deleted; berreman's 5.14.4 tightening subsumed; pyproject floor
   5.14.2 -> >=5.21. 27 bridge tests green (2 new: parse/floor + _layers reader).
+- B3 + B4a / step 3 quick wins (9d7931b): make_lumenairy_rcwa_solver(n_workers=,
+  blas_per_worker=) threads solve_sweep (per-wavelength stack build + solve on a
+  bounded pool, BLAS pinned thread-locally; byte-identical to serial, x6.1 on a
+  12-wavelength structured sweep); make_lumenairy_pmm_solver(absorption=True)
+  fills per_region_absorption/A_independent from PMMStack.layer_absorption --
+  PMM at RCWA-bridge parity for the D2 absorption chain. New GATE E cross-engine
+  oracle: PMM budget closure 1.4e-13, degree-stability 1.9e-4, and the RCWA
+  per-layer split CONVERGES toward PMM's (0.078 -> 0.022 -> 0.010 over n_orders
+  32/64/96) -- first run showed RCWA's metal-TM grating-layer absorption 2.7x
+  off at n_orders=32 (Gibbs), i.e. PMM referees per-layer absorption, not just R.
+- B2 / step 4 Berreman-conical leg (f0986df): conical s/p through the Berreman
+  bridge is now EXACT via rotational covariance (layer tensors rotated Rz(-phi),
+  solved in-plane -- planar tier only; RCWA/PMM lattices keep their guard). The
+  GATE F end-to-end leg pins the bridge against lumenairy's NATIVE conical
+  engine rotated to s/p on a LOW-SYMMETRY biaxial tensor -- the first tensor
+  tried (optic axis along x) left co-pol r EVEN in phi and the gate BLIND to a
+  rotation-sign bug (found by probing the deliberate bug); the Rz(25)Ry(35)
+  frame fixed that, and the sign-flip probe now fails the gate. Isotropic
+  azimuth-invariance at 1e-12 rides along.
+- 8.1-6 closed: OOP-coupled tensors (tilted-LC director) at oblique AND conical
+  solve first-class through the Berreman bridge (passivity verified);
+  absorption=True on that regime degrades gracefully (upstream raises for
+  OOP-oblique internal-field reconstruction -- documented limitation, pinned by
+  a no-crash + warn pytest).
+- 8.1-1 disposition: conical PMM stays refused at the bridge -- lumenairy's
+  native conical PMM (5.20+, pure-nodal 5.21.3) returns lab-basis s/p-mixture
+  rows and no per-order Jones, so rotated-s/p totals for a patterned cell are
+  not synthesizable (and the covariance shortcut is invalid for lattices). The
+  stale "not supported by PMMStack" message now states the real blocker and
+  routes planar conical to Berreman, patterned conical to the FEM.
 - UPSTREAM FINDING while re-running the bridge validations:
   lumenairy_bor_bridge GATE C (lossless ring-grating energy closure) FAILS at
   |R+T-1| = 2.3e-2. Bisected to lumenairy commit fca4665 ("unit-invariant flux
