@@ -90,8 +90,9 @@ class OpticalGeometryBuilder(Protocol):
 @runtime_checkable
 class OpticalSolver(Protocol):
     """The CALLABLE a frequency-domain optical backend implements -- the pipeline invokes it once per
-    (bias, wavelength). The DEFAULT is optics.solver._fem_optical_solver (a thin wrapper that assembles
-    the eps CoefficientFunction and calls solver.solve_fem); a BYO backend (e.g. a future RCWA adapter)
+    (bias, wavelength). The DEFAULT lives in dynameta.pipeline (_fem_optical_solver, a thin wrapper
+    that assembles the eps CoefficientFunction and calls optics.solver.solve_fem -- location note
+    corrected per audit 6.3); a BYO backend (TMM/RCWA/PMM/Berreman/EMT/BOR factories, the FDTD seam)
     is supplied via run_pipeline(optical_solver=...). NOTE: it is a plain callable with the signature
     below (NOT a class with a .solve method, and NOT solve_fem's own argument order -- solve_fem takes
     an already-assembled CF). Distinct from LayeredStackSolver, which consumes a LayeredStack."""

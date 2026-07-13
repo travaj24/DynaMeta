@@ -87,8 +87,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
-    is the through-stack (z) profile; supply `lateral_eps_inf` (shape (nx, n_layer_cells) or a callable
-    building the (nx,nz) eps_inf) to make a laterally-structured grating, else the stack is laterally
+    is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
+    building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
+    grating, else the stack is laterally
     UNIFORM (and the result reduces to the 1D solver / TMM). Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
