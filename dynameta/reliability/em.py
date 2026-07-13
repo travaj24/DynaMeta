@@ -117,8 +117,12 @@ def miner_time_to_failure_s(t_grid_s, J_of_t, T_of_t, params: EmParams) -> float
     t = np.asarray(t_grid_s, dtype=np.float64)
     if t.ndim != 1 or t.size < 2 or np.any(np.diff(t) <= 0):
         raise ValueError("EM: t_grid_s must be 1D strictly increasing with >= 2 samples")
-    rate = np.array([1.0 / float(params.mttf_s(float(J_of_t(tt)), float(T_of_t(tt))))
-                     for tt in t])                          # 1/MTTF; inf MTTF -> 0 rate
+    # sample the (scalar-callable) waveforms per grid point, then ONE broadcast Black solve --
+    # elementwise identical to the former per-sample mttf_s calls, ~grid-size fewer numpy round
+    # trips (audit 6.2)
+    J = np.array([float(J_of_t(tt)) for tt in t], dtype=np.float64)
+    T = np.array([float(T_of_t(tt)) for tt in t], dtype=np.float64)
+    rate = 1.0 / params.mttf_s(J, T)                        # 1/MTTF; inf MTTF -> 0 rate
     # trapezoid cumulative damage
     dmg = np.concatenate([[0.0], np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(t))])
     if dmg[-1] < 1.0:
