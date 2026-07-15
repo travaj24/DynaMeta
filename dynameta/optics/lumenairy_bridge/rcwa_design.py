@@ -16,15 +16,17 @@ entry point below scopes itself honestly and raises for the rest):
   set). Wrapped by rcwa_grating_RT, which keeps DynaMeta's EPS convention (the materials
   machinery hands out eps; the lumenairy scalar entry natively takes INDICES n, so the wrapper
   lifts eps -> n via the principal sqrt -- differentiable, Im(eps) > 0 maps to Im(n) > 0).
-- RCWAStack.solve (multilayer, 1-D or 2-D patterned): traced eps_cell / eps_tensor_cell
-  VALUES and layer THICKNESSES only. STATIC: wavelength/theta/phi (set_source float()s them),
-  half-space indices (complex()-ed), uniform eps= scalars (complex128-ed at add_layer), the
-  periods and order counts. Wrapped by rcwa_stack_RT / rcwa_stack_jones with PARAMETER
-  LIFTING: a jax-typed uniform-layer eps is auto-lifted to a CONSTANT eps_cell (the stack
-  dispatcher only traces patterned cells, so a plain eps= scalar would sever the gradient);
-  static-only arguments raise TypeError when handed a jax value instead of silently
-  concretizing. Upstream pins: tests/unit/test_v5_10_3_rcwa_2d_autodiff.py (eps-cell + depth
-  AD == FD, vmap forward, vmap-of-grad, Hessian).
+- RCWAStack.solve (multilayer, 1-D or 2-D patterned): TRACED are the eps_cell /
+  eps_tensor_cell VALUES, the UNIFORM eps= scalars (lumenairy 5.22 keeps a traced uniform
+  permittivity RAW -- layer kind 'uniform' -- so its gradient flows through the analytic
+  homogeneous modes, no lifted constant-cell eigensolve), the layer THICKNESSES, and (5.22)
+  the source WAVELENGTH / THETA / PHI (set_source keeps them raw). STATIC: the half-space
+  indices (complex()-ed in solve -- still sever the gradient), the periods (float()-ed in the
+  constructor), the order counts, and the patterned-cell WALLS. Wrapped by rcwa_stack_RT /
+  rcwa_stack_jones: a jax-typed static-only argument (half-space index or period) raises
+  TypeError instead of silently concretizing. Upstream pins:
+  tests/unit/test_v5_10_3_rcwa_2d_autodiff.py (eps-cell + depth AD == FD, vmap forward,
+  vmap-of-grad, Hessian).
 - PMMStack.solve (1-D lamellar spectral element -- no Fourier-factorization accuracy floor):
   traced segment eps (scalar or in-plane (3, 3), re AND im), layer thicknesses, wavelength,
   angle, half-space indices. STATIC: period, segment WIDTHS (frozen union grid), degree,
@@ -69,18 +71,22 @@ def _is_jaxish(x) -> bool:
 
 def _require_static(fn_name: str, **kwargs) -> None:
     """Raise loudly when a STATIC-only argument arrives as a jax value. The lumenairy stack
-    surface would float()/complex() it -- a concrete jax scalar would silently LOSE its
+    surface would complex()/float() it -- a concrete jax scalar would silently LOSE its
     gradient and a tracer would die with an opaque conversion error deep inside lumenairy;
-    honest scoping is the bridge's job (the berreman_design precedent)."""
+    honest scoping is the bridge's job (the berreman_design precedent). As of lumenairy 5.22
+    the ONLY remaining static-only stack-twin arguments are the half-space indices (complex()
+    at solve) and the periods (float() in the constructor) -- the source wavelength / theta /
+    phi now trace (set_source keeps them raw), so the call site no longer routes them here."""
     for name, val in kwargs.items():
         if _is_jaxish(val):
             raise TypeError(
                 "{}: {} must be a concrete python/numpy number -- lumenairy's RCWAStack twin "
-                "traces only the layer permittivity cells and thicknesses (set_source and the "
-                "half-space/period slots concretize everything else, severing the gradient). "
-                "For gradients w.r.t. wavelength / angle / half-space indices use "
-                "rcwa_grating_RT (binary grating) or pmm_stack_RT (1-D lamellar stack), whose "
-                "lumenairy twins trace them.".format(fn_name, name))
+                "concretizes the half-space indices (complex() in solve) and the periods "
+                "(float() in the constructor), severing their gradient. It DOES trace the "
+                "layer permittivity cells, the uniform eps, the thicknesses, and (5.22) the "
+                "source wavelength / theta / phi. For gradients w.r.t. the half-space indices "
+                "use rcwa_grating_RT (binary grating) or pmm_stack_RT (1-D lamellar stack), "
+                "whose lumenairy twins trace them.".format(fn_name, name))
 
 
 def rcwa_grating_RT(period, eps_ridge, eps_groove, n_substrate, n_superstrate, depth,
@@ -108,9 +114,10 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
     """Append [(eps_spec, thickness), ...] (superstrate-side first, the berreman_RT layer
     convention) to a lumenairy RCWAStack, dispatching on the spec's shape:
 
-    - scalar        -> uniform layer; a JAX scalar is LIFTED to a constant eps_cell at the
-                       minimum legal sampling so its gradient survives the stack dispatcher
-                       (a concrete number stays the cheap eps= uniform path);
+    - scalar        -> uniform layer; passed straight to add_layer(eps=) whether concrete or
+                       a traced JAX scalar (lumenairy 5.22 keeps a traced uniform eps RAW --
+                       layer kind 'uniform' -- so its gradient flows through the analytic
+                       homogeneous modes, no lifted constant-cell eigensolve);
     - (Sx,)/(Sx,Sy) -> patterned eps_cell (VALUES differentiable when jax; walls static);
     - (3, 3)        -> uniform anisotropic tensor, tiled to an eps_tensor_cell;
     - (Sx,Sy,3,3)   -> patterned eps_tensor_cell.
@@ -123,10 +130,12 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
     for eps, thickness in layers:
         nd = int(np.ndim(eps)) if not _is_jaxish(eps) else int(eps.ndim)
         if nd == 0:
+            # uniform layer: a traced jax eps passes STRAIGHT to add_layer(eps=) -- lumenairy
+            # 5.22 keeps it raw (kind 'uniform') so the gradient flows through the analytic
+            # homogeneous modes (no lifted constant-cell eigensolve); a concrete number takes
+            # the complex() uniform path.
             if _is_jaxish(eps):
-                import jax.numpy as jnp
-                cell = jnp.broadcast_to(jnp.asarray(eps, dtype=jnp.complex128), (smx, smy))
-                stack.add_layer(thickness, eps_cell=cell, formulation=formulation)
+                stack.add_layer(thickness, eps=eps)
             else:
                 stack.add_layer(thickness, eps=complex(eps))
         elif nd in (1, 2) and tuple(np.shape(eps)) != (3, 3):
@@ -151,8 +160,7 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
 def _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength, *, period_x, period_y,
                       theta, phi, n_orders, n_orders_y, formulation, fn_name):
     lum = _require_lumenairy()
-    _require_static(fn_name, wavelength=wavelength, theta=theta, phi=phi,
-                    n_substrate=n_substrate, n_superstrate=n_superstrate,
+    _require_static(fn_name, n_substrate=n_substrate, n_superstrate=n_superstrate,
                     period_x=period_x, period_y=period_y)
     if period_y is None:
         stack = lum.RCWAStack(period_x, n_superstrate=complex(n_superstrate),
@@ -177,12 +185,14 @@ def rcwa_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period_x, p
     polarization (row 0 = E_x, 1 = E_y) -- a scalar FOM ingredient for jax.grad.
 
     `layers` = [(eps_spec, thickness), ...] superstrate-side first (the berreman_RT layer
-    convention); see _add_stack_layers for the shape dispatch and the uniform-scalar lifting.
-    Gradients flow through every jax-typed eps VALUE (cells: values only, walls static) and
-    every jax-typed thickness; wavelength / theta / phi / half-space indices / periods are
-    STATIC here (TypeError on a jax value -- rcwa_grating_RT and pmm_stack_RT trace those).
-    A 1-D stack (period_y=None) is genuinely cheaper and better-conditioned than a
-    y-degenerate 2-D one -- keep lamellar problems 1-D."""
+    convention); see _add_stack_layers for the shape dispatch (a uniform scalar, concrete or
+    traced, goes straight to add_layer(eps=)). Gradients flow through every jax-typed eps
+    VALUE (cells: values only, walls static; a uniform eps traces raw), every jax-typed
+    thickness, AND (lumenairy 5.22) the source wavelength / theta / phi. STATIC here: the
+    half-space indices and the periods (TypeError on a jax value -- rcwa_grating_RT and
+    pmm_stack_RT trace the half-space indices). A 1-D stack (period_y=None) is genuinely
+    cheaper and better-conditioned than a y-degenerate 2-D one -- keep lamellar problems
+    1-D."""
     res = _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength,
                             period_x=period_x, period_y=period_y, theta=theta, phi=phi,
                             n_orders=n_orders, n_orders_y=n_orders_y,

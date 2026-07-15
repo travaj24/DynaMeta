@@ -5,19 +5,19 @@ Berreman backends imported its underscore helpers, and bor_backend copy-pasted t
 gate (drifting to its own floor). The shared surface now lives HERE under public names;
 rcwa_backend keeps underscore aliases for back-compat.
 
-ONE version floor (VERSION_FLOOR): the bridge is VERIFIED against lumenairy 5.21.x only --
+ONE version floor (VERSION_FLOOR): the bridge is VERIFIED against lumenairy 5.22.x only --
 every audited path (the C5-1 asymmetric-profile gates, C4-2 conical guards, per-layer
-absorption, BOR, Berreman OOP) was exercised against the installed 5.21 source, and nothing
-below it was ever tested. The old per-backend floors (5.14.2 / 5.14.4 / 5.16.0) predate all
-of that and advertised support that was never demonstrated. parse_version tolerates
-pre/post-release suffixes ('5.21.0rc1' -> (5, 21, 0)); the previous tuple(int(p) ...)
-parse -- copy-pasted x3 -- crashed on them.
+absorption, BOR, Berreman OOP, the D1 JAX-twin traced-source/uniform-eps surface, the A2
+public RCWAStack.layers accessor) was exercised against the installed 5.22 source, and
+nothing below it was ever tested. The old per-backend floors (5.14.2 / 5.14.4 / 5.16.0)
+predate all of that and advertised support that was never demonstrated. parse_version
+tolerates pre/post-release suffixes ('5.22.0rc1' -> (5, 22, 0)); the previous
+tuple(int(p) ...) parse -- copy-pasted x3 -- crashed on them.
 """
 
 from __future__ import annotations
 
 import re
-import warnings
 from typing import Tuple
 
 import numpy as np
@@ -28,11 +28,7 @@ __all__ = ["VERSION_FLOOR", "parse_version", "require_lumenairy", "pol_row", "an
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
-VERSION_FLOOR = (5, 21, 0)
-
-# The highest lumenairy MINOR the private-surface reads below (stack_layer_records) were
-# verified against; a newer install only elicits a warning there (never a hard stop).
-_TESTED_CEILING = (5, 21)
+VERSION_FLOOR = (5, 22, 0)
 
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
 
@@ -65,9 +61,10 @@ def require_lumenairy():
     if parse_version(lumenairy.__version__) < VERSION_FLOOR:
         raise ImportError(
             "lumenairy >= {} required (found {}); the bridge's audited fixes (graded-profile "
-            "slab order, conical guards, per-layer absorption, Berreman OOP-oblique, BOR) "
-            "were validated against the 5.21 surface only -- older releases were never "
-            "exercised. pip install -U lumenairy".format(
+            "slab order, conical guards, per-layer absorption, Berreman OOP-oblique, BOR, the "
+            "D1 JAX-twin traced-source/uniform-eps surface, the A2 public RCWAStack.layers "
+            "accessor) were validated against the 5.22 surface only -- older releases were "
+            "never exercised. pip install -U lumenairy".format(
                 ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
     return lumenairy
 
@@ -135,23 +132,9 @@ def p_basis_conversion(pol: str, theta_rad: float, n_super: complex,
 
 
 def stack_layer_records(stack):
-    """The per-layer records of a lumenairy RCWAStack (thickness/.kind/.data/.dispersive).
-    lumenairy exposes no public accessor (checked through 5.21.3), so this is the ONE place
-    the bridge reads the private `_layers` slot -- with a version ceiling: a `layers`
-    attribute is preferred if a future release adds one, and reading the private slot on a
-    lumenairy NEWER than the tested _TESTED_CEILING line warns (the record shape is pinned
-    by validation/lumenairy_translate.py, not by upstream contract)."""
-    pub = getattr(stack, "layers", None)
-    if pub is not None:
-        return list(pub)
-    import lumenairy
-    ver = parse_version(lumenairy.__version__)
-    if (ver[0], ver[1]) > _TESTED_CEILING:
-        warnings.warn(
-            "lumenairy bridge: reading RCWAStack._layers (no public accessor) on lumenairy "
-            "{} -- newer than the {}.{}.x line this private surface was verified against; "
-            "if translation output looks wrong, re-run validation/lumenairy_translate.py "
-            "and update the bridge.".format(
-                lumenairy.__version__, _TESTED_CEILING[0], _TESTED_CEILING[1]),
-            RuntimeWarning, stacklevel=2)
-    return list(getattr(stack, "_layers"))
+    """The per-layer records of a lumenairy RCWAStack (thickness/.kind/.data/.dispersive),
+    in stack order (superstrate side first). lumenairy 5.22 added the public read-only
+    `RCWAStack.layers` tuple property (AUDIT_DYNAMETA_CONSUMER_API_GAPS A2), so the bridge
+    reads it directly -- no private-slot access, no version ceiling (the record shape is
+    exercised by validation/lumenairy_translate.py)."""
+    return list(stack.layers)
