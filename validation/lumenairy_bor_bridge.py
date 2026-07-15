@@ -22,6 +22,15 @@ GATE C (a ring grating DIFFRACTS): a concentric binary ring grating must redistr
         rigorous per-order-vs-planar match is lumenairy's own GATE 4, validated upstream.)
 GATE D (lossy passivity + sign): a lossy layer (Im(eps) > 0) absorbs -- A = 1 - R - T > 0, energy
         R + T < 1, and 0 <= R, T <= 1 (passivity); a gain sign error would give A < 0 / R+T > 1.
+GATE E (complex phase + per-layer absorption budget, AUDIT C1 / B4b): (a) the fundamental reflection
+        PHASE is a real physical observable -- it must be GAUGE-STABLE (byte-identical across two
+        independent solves of the same spec, via the pinned per_mode_amplitudes gauge / gauge-invariant
+        S-diagonal) and NON-TRIVIAL for a finite uniform slab (its two-interface Fresnel-Airy
+        interference rotates r off the real axis, so phase differs from 0 and 180 by > 1 deg -- a
+        placeholder phase_deg = 0 would fail). (b) per-layer absorption closes the energy budget: a lossy
+        uniform slab has A_independent > 0 with |R + T + sum_layers A - 1| < 1e-9 for the fundamental,
+        while a LOSSLESS ring grating absorbs ~ 0 (A_independent < 1e-9) -- a sign/normalization error in
+        the flux-difference recipe would break the budget or leak a spurious loss.
 
 Honest SKIP (exit 0 + banner) when lumenairy < 5.16.0 / not importable.
 
@@ -46,6 +55,14 @@ def _fresnel_RsRp(n1, n2, theta_i):
     rs = (n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2)
     rp = (n2 * c1 - n1 * c2) / (n2 * c1 + n1 * c2)
     return abs(rs) ** 2, abs(rp) ** 2
+
+
+def _phase_off_axis(deg):
+    """Angular distance (deg) of a reflection phase from the nearest REAL axis (0 or 180). A lossless
+    single interface sits at 0/180 (r real); a finite slab's two-interface interference rotates it off,
+    so a genuinely-carried phase reads > 0 here (a placeholder phase_deg = 0 reads exactly 0)."""
+    d = abs(float(deg)) % 180.0
+    return min(d, 180.0 - d)
 
 
 def main():
@@ -122,6 +139,35 @@ def main():
     print("[bor] GATE D: lossy (Im eps>0) absorbs -- min A={:.3f} (>0), max(R+T)={:.4f} (<1), R,T in "
           "[0,1] -> {}".format(float(np.min(A)), float(np.max(rd.energy)), "PASS" if g_d else "FAIL"),
           flush=True)
+
+    # ---- GATE E: fundamental reflection PHASE (gauge-stable + non-trivial) + per-layer absorption ----
+    # (a) a finite uniform slab has a real Fresnel-Airy reflection phase -- reproducible run-to-run
+    #     (pinned gauge / gauge-invariant S-diagonal) and rotated OFF the real axis by its two-interface
+    #     interference (so |phase| is > 1 deg from both 0 and 180; a placeholder phase_deg = 0 would fail).
+    ph_spec = BorStackSpec(layers=[BorLayer(thickness_m=0.6e-6, eps=complex(1.8 ** 2), name="film")],
+                           azimuthal_order_m=1, r_max_m=40e-6, n_radial=220, n_super=1.0, n_sub=1.0)
+    fe1 = solve_bor(ph_spec, LAM).fundamental_result()
+    fe2 = solve_bor(ph_spec, LAM).fundamental_result()          # independent re-solve of the same spec
+    phase_stable = bool(fe1.phase_deg == fe2.phase_deg)
+    phase_off = _phase_off_axis(fe1.phase_deg)
+    phase_nontrivial = bool(phase_off > 1.0)
+    # (b) lossy uniform slab: A_independent > 0 and R + T + A_ind closes to machine precision for the
+    #     fundamental; a LOSSLESS ring grating must absorb ~ 0 (no spurious loss from the flux recipe).
+    lossyE = BorStackSpec(layers=[BorLayer(thickness_m=0.4e-6, eps=complex(2.5 ** 2, 0.4), name="absorber")],
+                          azimuthal_order_m=1, r_max_m=40e-6, n_radial=200, n_super=1.0, n_sub=1.5)
+    le = solve_bor(lossyE, LAM, absorption=True).fundamental_result()
+    budget_lossy = abs(float(le.R) + float(le.T) + float(le.A_independent) - 1.0)
+    ringE = BorStackSpec(layers=[BorLayer(thickness_m=0.5e-6, rings=(period, duty, n_r, n_g), name="grating")],
+                         azimuthal_order_m=1, r_max_m=48e-6, n_radial=256, n_super=1.41, n_sub=1.41)
+    lr = solve_bor(ringE, LAM, absorption=True).fundamental_result()
+    abs_ok = bool(le.A_independent is not None and le.A_independent > 1e-3 and budget_lossy < 1e-9
+                  and lr.A_independent is not None and abs(lr.A_independent) < 1e-9)
+    g_e = bool(phase_stable and phase_nontrivial and abs_ok)
+    ok = ok and g_e
+    print("[bor] GATE E: fund phase={:.3f} deg (stable={}, off-axis={:.1f} deg > 1); lossy A_ind={:.4f} "
+          "budget|R+T+A-1|={:.1e}; lossless-ring A_ind={:.1e} -> {}".format(
+              fe1.phase_deg, phase_stable, phase_off, float(le.A_independent), budget_lossy,
+              float(lr.A_independent), "PASS" if g_e else "FAIL"), flush=True)
 
     print("[bor] *** LUMENAIRY BOR-PMM BRIDGE: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
