@@ -100,6 +100,7 @@ def test_2d_builder_refuses_lateral_isolation_cases():
     # inclusions) get NO lateral interface in the 2D builder -- the inclusion would be
     # electrostatically isolated silently; must raise (the 3D builder wires these)
     import pytest
+    pytest.importorskip("devsim")              # devsim_layered imports devsim at module load
     from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
     from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
     from dynameta.geometry.cross_section import Rectangle
@@ -133,6 +134,7 @@ def test_bipolar3d_expr_requires_body_doping():
     # audit C2-1: net_doping_expr makes the (acceptor, n_bg_m3) scalars dead as doping --
     # phi_bi derived from them silently mis-references the gate (+0.714 V at Vg=0 in the
     # audit probe); the spec-level contract now requires the signed body-side doping
+    pytest.importorskip("devsim")              # devsim_3d imports devsim at module load
     from dynameta.carriers.devsim_3d import Stacked3DSpec
     spec = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e17, net_doping_expr="-1.0e23")
     assert spec.body_net_doping_m3 is None                     # guard fires at solve()
