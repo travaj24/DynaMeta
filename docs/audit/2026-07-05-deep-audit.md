@@ -1328,13 +1328,38 @@ the C6-class contract fixes), each with a discrimination-proven gate.
   green (3d_reduces 7/7, GPU==CPU 1.1e-14).
 - Full smoke tier: 84/84 PASS (0 skipped) post-campaign.
 
+**EXPANDED BRIDGE (2026-07-14, lumenairy 5.22) — the consumer-gap round is DONE.**
+lumenairy shipped every item requested in its
+AUDIT_DYNAMETA_CONSUMER_API_GAPS_2026_07_13.md (v5.21.4 + v5.22.0); the DynaMeta
+bridge now consumes the whole surface (7 commits on this branch):
+- A1 (7966ef8): Berreman ONE class solve (jones_transmission) + C2 OOP-tensor-
+  oblique absorption first-class (tilted-director budget 1.7e-16; was a graceful
+  warn+None). ~2x per absorption solve; r/t byte-identical (0.0). GATE G.
+- C1/B4b (a815374): BOR fundamental REAL reflection phase from the pinned-gauge
+  per_mode_amplitudes diagonal (122.9deg, gauge-stable; was phase_deg=0) +
+  per-layer absorption (budget R+T+sumA=1 to machine precision). GATE E. B4b,
+  the item deferred behind the now-fixed BOR energy regression, is DONE.
+- C3 (91a235c): PMM2D-Pure per-layer absorption (budget 3.7e-15; hybrid-vs-pure
+  4.6e-4). GATE E.
+- D1+A2+floor (60c9b5f): JAX stack twin traces uniform eps + wavelength/theta/phi
+  (d/d(wavelength) AD-vs-FD 2.1e-10 -- dispersion-engineering gradients now on the
+  stack twin, lifting workaround dropped); public RCWAStack.layers (private
+  _layers read + version-ceiling warning retired); VERSION_FLOOR -> 5.22.
+- B (e97c019): PMM OpticalResult.t (was None) + CONICAL s/p SOLVES via per-order-
+  amplitude synthesis of the rotated s/p eigen-polarization (the C4-2 cross-term
+  physics: naive per-order power sum is 1.25e-2 off). GATE F: uniform vs analytic
+  oblique Airy 3.3e-16 (incl |r|^2==R, sec^2-theta p-normalization), phi->0
+  reduction to the validated in-plane path (R + co-pol r phase) 2.9e-12, lossless
+  conical energy 4.0e-11. Only RCWA-conical for a 2-D PATTERNED lattice stays a
+  follow-on (its per-order Jones synthesis; RCWAResult.per_order_amplitudes makes
+  it consumer-side-feasible whenever wanted).
+- tests (2bbf756): pytest smokes across A1/B/C1/C2/C3/D1; the Berreman OOP test
+  flipped from graceful-degrade to closed budget.
+
 **PENDING (deferred, tracked):**
-- BOR absorption/phase parity (B4b) — UNBLOCKED 2026-07-13 (upstream classifier
-  fix landed; lumenairy_bor_bridge fully green). Full parity still wants the
-  upstream C1 items in lumenairy's AUDIT_DYNAMETA_CONSUMER_API_GAPS_2026_07_13.md
-  (pinned S-matrix column gauge / amplitude accessor + BOR layer_absorption).
-- Per-order Jones synthesis for RCWA/PMM conical s/p (8.1-1; Berreman conical
-  is DONE via covariance).
+- RCWA-conical for a 2-D patterned lattice (per-order Jones synthesis; PMM +
+  Berreman conical are DONE, so this is the last conical gap and consumer-side-
+  feasible via RCWAResult.per_order_amplitudes -- not upstream-blocked).
 - Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
   net-bandwidth co-fit for the Innolume calibration; 2D lateral-interface
-  wiring; 3D II element reconstruction; Berreman jones_t retention upstream.
+  wiring; 3D II element reconstruction.
