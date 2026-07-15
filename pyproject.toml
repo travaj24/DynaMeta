@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.5.0"
+version = "0.6.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
