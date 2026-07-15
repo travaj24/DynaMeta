@@ -24,7 +24,7 @@ import numpy as np
 
 __all__ = ["VERSION_FLOOR", "parse_version", "require_lumenairy", "pol_row", "angles_rad",
            "guard_incidence_side", "guard_conical_ppol", "p_basis_conversion",
-           "stack_layer_records"]
+           "stack_layer_records", "conical_synthesis", "pol_tangential_unit"]
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
@@ -138,3 +138,89 @@ def stack_layer_records(stack):
     reads it directly -- no private-slot access, no version ceiling (the record shape is
     exercised by validation/lumenairy_translate.py)."""
     return list(stack.layers)
+
+
+_CONICAL_PROP_TOL = 1e-8   # propagating-order selector (|Im kz| small, Re kz > tol), normalized by k0
+
+
+def pol_tangential_unit(pol: str, phi: float) -> "np.ndarray":
+    """Incident tangential (lab x, y) unit vector of the rotated s/p eigen-polarization the FEM
+    solver and OpticalSpec use: 'y' = s-hat = (-sin phi, cos phi) (perpendicular to the plane of
+    incidence); 'x'/'p' = the in-plane transverse direction (cos phi, sin phi). At phi = 0 these
+    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path."""
+    if pol == "y":
+        return np.array([-np.sin(phi), np.cos(phi)], dtype=float)
+    return np.array([np.cos(phi), np.sin(phi)], dtype=float)          # 'x' or 'p'
+
+
+def _zeroth_order_index(orders) -> int:
+    """Row of the specular (all-zero) diffraction order, for a 1-D (N,) integer-order array or a
+    2-D (N, 2) (m, n)-order array. Returns -1 if absent."""
+    o = np.asarray(orders)
+    mask = (o == 0) if o.ndim == 1 else np.all(o == 0, axis=1)
+    hit = np.where(mask)[0]
+    return int(hit[0]) if hit.size else -1
+
+
+def conical_synthesis(amp_source, pol: str, theta: float, phi: float, n_super: complex):
+    """Rotated s/p (R, T, r, t) for a CONICAL (azimuth != 0) solve, synthesized from the per-order
+    complex amplitudes (audit 8.1-1 / consumer-gap B). ENGINE-AGNOSTIC: amp_source is any object
+    exposing per_order_amplitudes(port) in the shared RCWA/PMM contract (dict of Ex/Ey (2, N)
+    keyed to incident LAB E_x/E_y, kx/ky/kz normalized by k0, `orders`, wavelength) -- so a
+    PMMStack, an RCWAResult (1-D or 2-D lattice), or a PMM2D result all feed it.
+
+    At phi != 0 the physical s/p eigen-polarization is a SUPERPOSITION of the lab rows, so the
+    total efficiency carries cross terms the per-order POWERS cannot provide. For the incident
+    tangential unit u the per-order response is u . (row0, row1); an order's efficiency is
+    (|Ex|^2 + |Ey|^2 + |Ez|^2) Re(kz/kz_inc) / |E_inc|^2 with the longitudinal Ez = -(kx Ex + ky
+    Ey)/kz and |E_inc|^2 = 1 + |Ez_inc|^2 (a unit-tangential p wave carries its own Ez, so
+    |E_inc,p|^2 = sec^2 theta -- the s-vs-p normalization the split hinges on). Summed over
+    PROPAGATING orders in the (lossless) end medium -> R (reflection) and T (transmission, kz_inc
+    still the superstrate value). r/t = the zeroth-order co-pol complex amplitudes: the specular
+    order's FULL 3-D field projected onto the outgoing eigen-direction e_hat and normalized by
+    sqrt(|E_inc|^2), so |r|^2 is the zeroth-order co-pol reflectance and the phase is the modulator
+    observable. s: e_hat = (-sin phi, cos phi, 0) (tangential; Ez drops). p: e_hat = the outgoing
+    p-hat = (k_out x s_hat)/|k_out|, which carries a z-component -- omitting Ez there undercounts
+    |r| (probed 0.40 vs the true sqrt(R) = 0.46). All k's are k0-normalized, so scale-free."""
+    u = pol_tangential_unit(pol, phi)
+    ns = float(np.real(n_super))
+    kz_inc = ns * np.cos(theta)                                       # normalized incident kz
+    kx0i = ns * np.sin(theta) * np.cos(phi)
+    ky0i = ns * np.sin(theta) * np.sin(phi)
+    ez_inc = -(kx0i * u[0] + ky0i * u[1]) / kz_inc
+    e_inc2 = float(u[0] ** 2 + u[1] ** 2 + abs(ez_inc) ** 2)          # 1 (s) or sec^2 theta (p)
+
+    def _port_total(port):
+        a = amp_source.per_order_amplitudes(port=port)
+        kx, ky, kz = np.asarray(a["kx"]), np.asarray(a["ky"]), np.asarray(a["kz"])
+        ex = u[0] * a["Ex"][0] + u[1] * a["Ex"][1]
+        ey = u[0] * a["Ey"][0] + u[1] * a["Ey"][1]
+        prop = (np.abs(kz.imag) < _CONICAL_PROP_TOL) & (kz.real > _CONICAL_PROP_TOL)
+        ez = np.zeros_like(ex)
+        nz = np.abs(kz) > 1e-300
+        ez[nz] = -(kx[nz] * ex[nz] + ky[nz] * ey[nz]) / kz[nz]
+        w = kz.real / kz_inc
+        eff = (np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2) * w
+        return float(np.sum(eff[prop])) / e_inc2, a, ex, ey
+
+    R, ar, exr, eyr = _port_total("reflection")
+    T, at, ext, eyt = _port_total("transmission")
+
+    def _co_amp(a, ex, ey):
+        i0 = _zeroth_order_index(a["orders"])
+        if i0 < 0:
+            return complex(0.0)
+        kx0, ky0, kz0 = float(np.asarray(a["kx"])[i0].real), float(np.asarray(a["ky"])[i0].real), \
+            np.asarray(a["kz"])[i0]
+        exz, eyz = ex[i0], ey[i0]
+        ez = -(kx0 * exz + ky0 * eyz) / kz0 if abs(kz0) > 1e-300 else 0.0
+        kpar = np.hypot(kx0, ky0)
+        if pol == "y" or kpar < 1e-12:                    # s-hat (tangential) or normal fallback
+            eh = np.array([-np.sin(phi), np.cos(phi), 0.0])
+        else:                                             # p-hat = (k_out x s_hat)/|k_out|
+            shat = np.array([-ky0, kx0, 0.0]) / kpar
+            eh = np.cross(np.array([kx0, ky0, float(kz0.real)]), shat)
+            eh = eh / np.linalg.norm(eh)
+        return complex((eh[0] * exz + eh[1] * eyz + eh[2] * ez) / np.sqrt(e_inc2))
+
+    return R, T, _co_amp(ar, exr, eyr), _co_amp(at, ext, eyt)

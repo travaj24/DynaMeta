@@ -1355,11 +1355,22 @@ bridge now consumes the whole surface (7 commits on this branch):
   it consumer-side-feasible whenever wanted).
 - tests (2bbf756): pytest smokes across A1/B/C1/C2/C3/D1; the Berreman OOP test
   flipped from graceful-degrade to closed budget.
+- RCWA CONICAL for a 2-D patterned lattice -- THE LAST CONICAL GAP, now CLOSED:
+  the PMM synthesis was generalized to a shared engine-agnostic
+  _common.conical_synthesis (2-D zeroth-order finder; works on any object with
+  per_order_amplitudes -- PMMStack, RCWAResult) and wired into both RCWA solve
+  entry points (make_lumenairy_rcwa_solver + LumenairyStackSolver), removing the
+  conical guard. GATE H: uniform slab vs analytic oblique Airy 3.3e-16 (|r|^2==R,
+  R+T=1); phi->0 reduction 4.9e-13; a genuine 2-D CROSSED PILLAR closes energy
+  3.8e-14 (lossless), is passive (lossy), and an ASYMMETRIC pillar's R moves
+  0.033 with phi; cross-engine RCWA-synth vs PMM-synth referee 5.0e-4. Per-layer
+  absorption left unset at conical (layer_absorption is per-lab-pol; the rotated
+  absorbed power is a quadratic form whose cross term it doesn't expose -- A=1-R-T
+  stays exact). Conical is now solved on ALL THREE engines (RCWA/PMM synthesis,
+  Berreman covariance). NO conical gap remains.
 
 **PENDING (deferred, tracked):**
-- RCWA-conical for a 2-D patterned lattice (per-order Jones synthesis; PMM +
-  Berreman conical are DONE, so this is the last conical gap and consumer-side-
-  feasible via RCWAResult.per_order_amplitudes -- not upstream-blocked).
 - Refinement follow-ons noted in-code: sampled per-layer peak |Ez| for TDDB;
   net-bandwidth co-fit for the Innolume calibration; 2D lateral-interface
-  wiring; 3D II element reconstruction.
+  wiring; 3D II element reconstruction; PMM2D transmission-Jones `t` (the 1-D
+  PMM/RCWA `t` shipped; the 2-D leg's separate close-out is a small follow-on).
