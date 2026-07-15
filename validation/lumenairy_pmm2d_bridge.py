@@ -21,8 +21,18 @@ GATE C (slab order, audit C5-1): an asymmetric LOSSY linear-in-z graded profile 
         profile differs by > 1e-3 (the fixture keeps its discriminating power).
 GATE D (scope guards raise): conical azimuth, incidence_side='bottom', a Circle
         inclusion on the pure engine, non-commensurate Rectangle walls (pure), a
-        laterally-structured gridded EpsField (pure), tensor EpsField (both),
-        absorption=True on pure, and a bogus engine name.
+        laterally-structured gridded EpsField (pure), tensor EpsField (both), and a
+        bogus engine name.
+GATE E (per-layer absorption, audit C3): a LOSSY ITO patch (eps -3 + 1j) on a LOSSY
+        'hi' spacer (eps 4 + 0.3j).  The PURE engine (internal retention new in
+        lumenairy 5.22) must close its own budget |A_independent - (1 - R - T)| <
+        1e-6, be genuinely absorbing (A_independent > 1e-3), key
+        per_region_absorption by DESIGN layer name, and vanish (< 1e-6) on the
+        lossless twin -- and absorption=False must leave per_region_absorption=None
+        (byte-identical off-switch).  Hybrid-vs-Pure cross-check: both engines close
+        their OWN budget and their TOTAL A_independent agree (staggered-modal vs
+        Fourier-projected internal quadrature -- different bases, so gated at the
+        convergence-appropriate tolerance measured at bring-up).
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -88,6 +98,26 @@ def _graded_design_and_eps():
     ef = EpsField(z_axis_u=z_nm, y_axis_u=np.zeros(1), x_axis_u=np.zeros(1),
                   values_zyx=eps_z.reshape(-1, 1, 1).astype(complex))
     return d, {"a": ef}
+
+
+def _lossy_patch_design(pol="x"):
+    """A LOSSY ITO patch (eps -3 + 1j, walls at PER/4 & 3 PER/4 -> pure (4, 4) union
+    grid) ON TOP of a LOSSY 'hi' spacer (eps 4 + 0.3j) -- BOTH Im(eps) > 0, the
+    per-layer absorption fixture (GATE E).  Design layers are BOTTOM -> TOP."""
+    patch = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, PER / 2.0, PER / 2.0),
+                      material="ito")
+    return _design([Layer("spacer", 150e-9, "hi"),
+                    Layer("patch", 60e-9, "air", inclusions=[patch])], pol=pol)
+
+
+def _lossless_patch_design(pol="x"):
+    """The lossless twin of _lossy_patch_design (real-eps materials throughout, same
+    geometry): a 'glass' patch (eps 2.25) on a 'lo' spacer (eps 2.1).  A_independent
+    must vanish -- the honest zero check for the absorption path."""
+    patch = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, PER / 2.0, PER / 2.0),
+                      material="glass")
+    return _design([Layer("spacer", 150e-9, "lo"),
+                    Layer("patch", 60e-9, "air", inclusions=[patch])], pol=pol)
 
 
 def main():
@@ -236,22 +266,56 @@ def main():
                       None, {"a": EpsField(tensor=eps_t)}, LAM, 1.0 + 0j, 1.5 + 0j)
         except ValueError:
             g_d += 1
-    # 7) absorption=True needs the hybrid engine (pure retains no internals)
-    try:
-        make_lumenairy_pmm2d_solver(engine="pure", absorption=True)
-    except NotImplementedError:
-        g_d += 1
-    # 8) bogus engine name
+    # 7) bogus engine name
     try:
         make_lumenairy_pmm2d_solver(engine="fmm")
     except ValueError:
         g_d += 1
-    g_d = bool(g_d == 9)
+    g_d = bool(g_d == 8)
     ok = ok and g_d
     print("[lp2b] GATE D: conical / bottom-incidence / circle-on-pure / "
           "non-commensurate / structured-grid-on-pure / tensor x2 / "
-          "absorption-on-pure / bad-engine guards ({}/9) -> {}".format(
-              9 if g_d else "<9", "PASS" if g_d else "FAIL"), flush=True)
+          "bad-engine guards ({}/8) -> {}".format(
+              8 if g_d else "<8", "PASS" if g_d else "FAIL"), flush=True)
+
+    # ---- GATE E: pure-engine per-layer absorption budget closure (audit C3) ----
+    # measured at bring-up (n_modes=6 pure / degree=9 hybrid on the lossy 4x4 patch):
+    # pure closes its Gram-flux-vs-far-field budget at 3.7e-15, hybrid at 1.0e-15;
+    # A_independent 0.1198 (pure) vs 0.1203 (hybrid) -> cross 4.6e-4 (staggered-modal
+    # vs Fourier-projected internal quadrature: two DIFFERENT bases, << the 1e-2 the
+    # two-basis total is gated at); lossless twin 5.3e-15; off-switch A_indep None.
+    d_abs = _lossy_patch_design(pol="x")
+    r_pa = make_lumenairy_pmm2d_solver(engine="pure", n_modes=6, n_orders=3,
+                                       absorption=True)(d_abs, None, {}, LAM,
+                                                        1.0 + 0j, 1.5 + 0j)
+    close_p = abs(r_pa.A_independent - r_pa.A)
+    keys_ok = (r_pa.per_region_absorption is not None
+               and set(r_pa.per_region_absorption) == {"spacer", "patch"})
+    r_ll = make_lumenairy_pmm2d_solver(engine="pure", n_modes=6, n_orders=3,
+                                       absorption=True)(_lossless_patch_design(),
+                                                        None, {}, LAM,
+                                                        1.0 + 0j, 1.5 + 0j)
+    r_off = make_lumenairy_pmm2d_solver(engine="pure", n_modes=6, n_orders=3)(
+        d_abs, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    off_ok = bool(r_off.per_region_absorption is None
+                  and r_off.A_independent is None)
+    r_ha = make_lumenairy_pmm2d_solver(engine="hybrid", degree=9, n_orders=9,
+                                       absorption=True)(d_abs, None, {}, LAM,
+                                                        1.0 + 0j, 1.5 + 0j)
+    close_h = abs(r_ha.A_independent - r_ha.A)
+    cross = abs(r_pa.A_independent - r_ha.A_independent)
+    g_e = bool(close_p < 1e-6 and keys_ok and r_pa.A_independent > 1e-3
+               and abs(r_ll.A_independent) < 1e-6 and off_ok
+               and close_h < 1e-6 and cross < 1e-2)
+    ok = ok and g_e
+    print("[lp2b] GATE E: pure per-layer absorption: closure |dA| = {:.1e} (< 1e-6), "
+          "A_indep = {:.4f} keyed [{}], lossless A_indep = {:.1e} (< 1e-6), "
+          "off-switch None {}; Hybrid-vs-Pure |dA_indep| = {:.1e} (< 1e-2, both "
+          "close own budget: pure {:.1e} / hybrid {:.1e}) -> {}".format(
+              close_p, r_pa.A_independent,
+              "+".join(sorted(r_pa.per_region_absorption)) if keys_ok else "BADKEYS",
+              r_ll.A_independent, "OK" if off_ok else "BAD", cross, close_p, close_h,
+              "PASS" if g_e else "FAIL"), flush=True)
 
     print("[lp2b] *** LUMENAIRY PMM2D BRIDGE: {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)

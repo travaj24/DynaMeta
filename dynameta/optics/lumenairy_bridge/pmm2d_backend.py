@@ -14,15 +14,17 @@ Two engines behind one seam (``engine=``):
 - ``'hybrid'`` (PMM2DStackHybrid): the Fourier-projected 2-D PMM (per-layer exact
   spectral-element walls, no union-grid constraint, but the FMM ``n_orders`` floor).
   It accepts RASTERIZED cells (the shared optics.rasterize painter, byte-identical
-  geometry to the RCWA bridge) and is the only engine with per-layer absorption
-  (``layer_absorption``, wired via ``absorption=True`` at 1-D-PMM/RCWA parity).
+  geometry to the RCWA bridge).
+BOTH engines expose per-layer absorption (``layer_absorption``, wired via
+``absorption=True`` at 1-D-PMM/RCWA parity -- the pure engine gained internal
+retention in lumenairy 5.22, audit C3; before that only the hybrid engine had it).
 
 Scope contract (v1, enforced loudly -- the honest-scope convention):
 - 'pure': patterned layers must be axis-aligned Rectangle inclusions whose walls are
   COMMENSURATE with a uniform (N, N) grid, N <= pure_max_cells (raise -> use
   engine='hybrid' or the RCWA bridge); laterally-structured gridded EpsFields raise
-  (rasters have no exact walls); no per-layer absorption (PMM2DStackPure retains no
-  internals) -- absorption=True raises at construction.
+  (rasters have no exact walls).  Per-layer absorption IS supported (lumenairy 5.22
+  added internal retention to PMM2DStackPure -- absorption=True at hybrid parity).
 - 'hybrid': patterned layers rasterize onto a (cell_samples, cell_samples) pixel grid
   (walls sit on pixel boundaries -- lumenairy's own cost guard rejects
   pathologically-many-wall rasters with its refine/route-elsewhere message);
@@ -292,20 +294,14 @@ def make_lumenairy_pmm2d_solver(*, engine: str = "pure", n_modes: int = 8,
     zeroth-order co-polarized reflection Jones with the shared lab-basis ->
     Byrnes p-pol conversion (all gated in validation/lumenairy_pmm2d_bridge).
 
-    absorption=True (hybrid ONLY -- PMM2DStackPure retains no internals, so
-    engine='pure' raises here at construction): solves with retain_internal=True
-    and fills per_region_absorption keyed by DESIGN layer name (slabs of a graded
-    layer sum into their layer) + A_independent from
-    PMM2DStackHybrid.layer_absorption -- the internal z-Poynting flux difference
-    per layer ((n_layers, 2) per incident pol), an independent volumetric
-    measurement (lumenairy's own invariant closes it against 1 - sum R - sum T)."""
+    absorption=True (BOTH engines): solves with retain_internal=True and fills
+    per_region_absorption keyed by DESIGN layer name (slabs of a graded layer sum
+    into their layer) + A_independent from PMM2DStack{Hybrid,Pure}.layer_absorption
+    -- the internal z-flux difference per layer ((n_layers, 2) per incident pol),
+    an independent volumetric measurement (lumenairy's own invariant closes it
+    against 1 - sum R - sum T).  The pure engine gained internal retention in
+    lumenairy 5.22 (audit C3); before that absorption raised for engine='pure'."""
     _check_engine(engine)
-    if absorption and engine != "hybrid":
-        raise NotImplementedError(
-            "PMM2D bridge: absorption=True needs the hybrid engine "
-            "(PMM2DStackPure retains no internal amplitudes, so it has no "
-            "layer_absorption) -- use engine='hybrid' or the RCWA / 1-D PMM "
-            "bridges")
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
@@ -318,10 +314,10 @@ def make_lumenairy_pmm2d_solver(*, engine: str = "pure", n_modes: int = 8,
             formulation=formulation, n_slices=n_slices, cell_samples=cell_samples,
             pure_max_cells=pure_max_cells)
         stack.set_source(lambda_m, theta=theta, phi=phi)
-        if engine == "hybrid":
-            orders, R2, T2, jones = stack.solve(retain_internal=absorption)
-        else:
-            orders, R2, T2, jones = stack.solve()
+        # both PMM2DStackHybrid.solve and PMM2DStackPure.solve take the same
+        # keyword surface (retain_internal retains the internals layer_absorption
+        # integrates -- pure since lumenairy 5.22, audit C3)
+        orders, R2, T2, jones = stack.solve(retain_internal=absorption)
         row = _pol_row(design.optical)
         R = float(np.sum(R2[row]))
         T = float(np.sum(T2[row]))
