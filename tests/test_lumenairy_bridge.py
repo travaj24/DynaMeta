@@ -245,17 +245,15 @@ def test_berreman_uniaxial_decouples_per_axis():
 
 
 @needs_lum
-def test_bridge_conical_raises_every_polarization():
-    # audit C4-2: conical incidence (azimuth != 0) must raise for EVERY polarization -- the
-    # bridges' lab-basis rows are phi-dependent s/p mixtures, not the FEM's rotated s/p
-    # (probe: 'y' at theta=30/phi=45 on bare glass returned R 32% low, silently; at phi=90
-    # exactly the orthogonal polarization). The old guard covered only 'p'. phi=0 solves.
-    # BERREMAN is exempt since audit 8.1-6 (commit f0986df): a PLANAR stack is z-rotation
-    # covariant, so its bridge synthesizes the exact rotated s/p at any azimuth and SOLVES
-    # (pinned in test_berreman_oop_oblique_first_class); RCWA -- whose lattice breaks the
-    # covariance -- still raises.
+def test_bridge_conical_rcwa_raises_pmm_berreman_solve():
+    # audit C4-2 / 8.1-1 / 8.1-6: conical incidence (azimuth != 0). Only the RCWA bridge still
+    # raises -- its lab rows are phi-dependent s/p mixtures and per-order Jones synthesis for a
+    # 2-D lattice is a follow-on. PMM (per-order-amplitude synthesis, consumer-gap B) and
+    # BERREMAN (planar z-rotation covariance, 8.1-6) both SOLVE the exact rotated s/p at any
+    # azimuth (pinned by validation GATE F / test_berreman_oop_oblique_first_class).
     from dynameta.geometry.specs import OpticalSpec
     from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
+                                                  make_lumenairy_pmm_solver,
                                                   make_lumenairy_rcwa_solver)
     # 'x' cannot reach the bridge at oblique (OpticalSpec rejects it at construction),
     # so 'p' and 'y' are the full reachable set
@@ -264,8 +262,11 @@ def test_bridge_conical_raises_every_polarization():
         d.optical = OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=20.0)
         with pytest.raises(NotImplementedError):
             make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
-        r = make_lumenairy_berreman_solver()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
-        assert 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0    # berreman conical solves (8.1-6)
+        rb = make_lumenairy_berreman_solver()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        assert 0.0 <= rb.R <= 1.0 and 0.0 <= rb.T <= 1.0    # berreman conical solves (8.1-6)
+        rp = make_lumenairy_pmm_solver(degree=10, n_orders=9)(d, None, {}, 1.31e-6,
+                                                              1.0 + 0j, 1.5 + 0j)
+        assert 0.0 <= rp.R <= 1.0 and 0.0 <= rp.T <= 1.0 and rp.t is not None   # pmm conical (B)
     d = _uniform_design()
     d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
     make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)  # phi=0 ok
@@ -634,7 +635,6 @@ def test_pmm_absorption_parity_surface():
     # audit 8.1-3: absorption=True fills per_region_absorption + A_independent (keyed by
     # design layer) and the budget closes; default stays None (byte-identical off-switch).
     # The cross-engine physics oracle is validation/lumenairy_pmm_bridge GATE E.
-    from dynameta.geometry import Layer
     from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm_solver
     d = _uniform_design()          # single lossy layer 'a' (hi = 4.0 + 0.3j)
     lam = 1.31e-6
@@ -645,15 +645,16 @@ def test_pmm_absorption_parity_surface():
     assert r1.A_independent == pytest.approx(r1.A, abs=1e-9)
     assert r1.per_region_absorption["a"] == pytest.approx(r1.A_independent, abs=1e-12)
     assert r1.R == r0.R and r1.T == r0.T
+    # consumer-gap B minimal cut: OpticalResult.t (transmission Jones) is now filled (was None)
+    assert r0.t is not None and abs(r0.t) > 0.0
 
 
 @needs_lum
 def test_berreman_oop_oblique_first_class():
-    # audit 8.1-6: OOP-coupled tensors (exz != 0, tilted-LC director) at OBLIQUE and
-    # CONICAL incidence solve through the bridge (lumenairy 5.21 fixed the far field);
-    # absorption=True degrades GRACEFULLY there (warn + A_independent None -- the
-    # internal-field reconstruction is a documented upstream limitation), never crashes.
-    import warnings
+    # audit C2 (lumenairy 5.22): OOP-coupled tensors (exz != 0, tilted-LC director) at OBLIQUE
+    # and CONICAL incidence now reconstruct internals through the generalized cascade, so
+    # per-layer absorption is FIRST-CLASS there (was a graceful warn + A_independent None
+    # before 5.22). The budget must close and A_independent be a real number.
     import numpy as np
     from dynameta.core.eps_field import EpsField
     from dynameta.geometry import Design, Layer, Stack, UnitCell
@@ -674,10 +675,109 @@ def test_berreman_oop_oblique_first_class():
                electrodes=[], materials=reg,
                optical=OpticalSpec(polarization="y", incidence_angle_deg=30.0,
                                    azimuth_deg=25.0))
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        r = make_lumenairy_berreman_solver(absorption=True)(
-            d, None, {"lc": EpsField(tensor=eps)}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    r = make_lumenairy_berreman_solver(absorption=True)(
+        d, None, {"lc": EpsField(tensor=eps)}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
     assert 0.0 <= r.A <= 1.0 and 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0
-    assert r.A_independent is None
-    assert any("absorption unavailable" in str(x.message) for x in w)
+    assert r.A_independent is not None and abs(r.A_independent - r.A) < 1e-6
+    assert r.per_region_absorption and "lc" in r.per_region_absorption
+
+
+@needs_lum
+def test_pmm_conical_synthesis_vs_analytic():
+    # consumer-gap B: conical s/p on a UNIFORM slab is synthesized from the per-order
+    # amplitudes and must equal the analytic oblique Airy reflectance for both s ('y') and
+    # p ('p'), with |r|^2 == R and R + T == 1 (the physics oracle is validation GATE F).
+    import numpy as np
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm_solver
+
+    def airy_R(n0, n1, n2, d, lam, th0, pol):
+        k0 = 2.0 * np.pi / lam
+        s0 = n0 * np.sin(th0)
+        kz = lambda n: np.sqrt((n * k0) ** 2 - (k0 * s0) ** 2 + 0j)
+        k0z, k1z, k2z = kz(n0), kz(n1), kz(n2)
+        if pol == "s":
+            rij = lambda a, b: (a - b) / (a + b)
+            r01, r12 = rij(k0z, k1z), rij(k1z, k2z)
+        else:
+            rij = lambda ni, nj, a, b: (nj ** 2 * a - ni ** 2 * b) / (nj ** 2 * a + ni ** 2 * b)
+            r01, r12 = rij(n0, n1, k0z, k1z), rij(n1, n2, k1z, k2z)
+        ph = np.exp(1j * k1z * d)
+        r = (r01 + r12 * ph ** 2) / (1.0 + r01 * r12 * ph ** 2)
+        return float(abs(r) ** 2)
+
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("sub", ConstantOptical(complex(1.5 ** 2))))
+    reg.add(Material("slab", ConstantOptical(complex(2.2 ** 2))))
+    sol = make_lumenairy_pmm_solver(degree=20, n_orders=15)
+    for pol, pt in (("y", "s"), ("p", "p")):
+        d = Design(name="u", unit_cell=UnitCell.square(300e-9),
+                   stack=Stack(layers=[Layer("a", 180e-9, "slab")], superstrate_material="air",
+                               substrate_material="sub"),
+                   electrodes=[], materials=reg,
+                   optical=OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=37.0))
+        r = sol(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        Ra = airy_R(1.0, 2.2, 1.5, 180e-9, 1.31e-6, np.radians(30.0), pt)
+        assert abs(r.R - Ra) < 1e-6
+        assert abs(abs(r.r) ** 2 - r.R) < 1e-6      # |r|^2 == zeroth-order co-pol reflectance
+        assert abs(r.R + r.T - 1.0) < 1e-6          # lossless energy closes
+
+
+@needs_lum
+def test_pmm2d_pure_absorption_budget():
+    # audit C3: absorption=True on the PURE (no-floor) engine fills per_region_absorption +
+    # A_independent (was hybrid-only); the budget closes and the off-switch stays None.
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm2d_solver
+    per = 400e-9
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
+    reg.add(Material("ito", ConstantOptical(complex(-3.0, 1.0))))
+    reg.add(Material("hi", ConstantOptical(complex(4.0, 0.3))))
+    patch = Inclusion(shape=Rectangle(per / 2.0, per / 2.0, per / 2.0, per / 2.0), material="ito")
+    d = Design(name="p2", unit_cell=UnitCell.square(per),
+               stack=Stack(layers=[Layer("spacer", 120e-9, "hi"),
+                                   Layer("patch", 40e-9, "air", inclusions=[patch])],
+                           superstrate_material="air", substrate_material="glass"),
+               electrodes=[], materials=reg,
+               optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+    off = make_lumenairy_pmm2d_solver(engine="pure")(d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    assert off.per_region_absorption is None and off.A_independent is None
+    on = make_lumenairy_pmm2d_solver(engine="pure", absorption=True)(
+        d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    assert set(on.per_region_absorption) == {"spacer", "patch"}
+    assert on.A_independent is not None and abs(on.A_independent - on.A) < 1e-6
+    assert on.A_independent > 1e-3      # genuinely absorbing
+
+
+@needs_lum
+def test_bor_phase_and_absorption():
+    # audit C1 / B4b: the BOR fundamental result now carries a REAL reflection phase (from the
+    # pinned-gauge per_mode_amplitudes diagonal, gauge-stable across solves) instead of the old
+    # phase_deg=0 placeholder, and absorption=True fills per_region_absorption + A_independent
+    # with a closed budget (R + T + A = 1). Physics oracle: validation/lumenairy_bor_bridge GATE E.
+    from dynameta.optics.lumenairy_bridge import BorLayer, BorStackSpec, solve_bor
+    # a finite uniform slab (index-matched half-spaces) -> a real Fresnel-Airy reflection phase
+    slab = BorStackSpec(layers=[BorLayer(thickness_m=0.6e-6, eps=complex(1.8 ** 2))],
+                        azimuthal_order_m=1, r_max_m=40e-6, n_radial=192,
+                        n_super=1.0, n_sub=1.0)
+    r1 = solve_bor(slab, 1.0e-6).fundamental_result()
+    r2 = solve_bor(slab, 1.0e-6).fundamental_result()
+    assert r1.phase_deg == pytest.approx(r2.phase_deg, abs=1e-9)   # gauge-stable
+    assert abs(r1.phase_deg) > 1.0                                 # genuinely non-zero
+    # a lossy slab: absorption budget closes; a lossless one takes A ~ 0
+    lossy = BorStackSpec(layers=[BorLayer(thickness_m=0.5e-6, eps=complex(2.5 ** 2, 0.4),
+                                          name="absorber")],
+                         azimuthal_order_m=1, r_max_m=40e-6, n_radial=192,
+                         n_super=1.0, n_sub=1.0)
+    ra = solve_bor(lossy, 1.0e-6, absorption=True).fundamental_result()
+    assert ra.A_independent is not None and ra.A_independent > 1e-3
+    assert "absorber" in ra.per_region_absorption
+    assert abs(ra.R + ra.T + ra.A_independent - 1.0) < 1e-9        # closed budget
