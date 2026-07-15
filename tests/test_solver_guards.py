@@ -109,6 +109,7 @@ def test_probe_grid_sizes_kill_aliased_orders():
     # audit C3-1: the N-point cell-centred grid aliases orders m = 0 (mod N) with weight
     # (-1)^(m/N); the size helper must make the first aliased order evanescent, and the
     # alias-weight identity itself is pinned here in pure numpy
+    pytest.importorskip("ngsolve")             # optics.solver imports ngsolve at module load
     import numpy as np
     from dynameta.optics.solver import _probe_grid_sizes
 
