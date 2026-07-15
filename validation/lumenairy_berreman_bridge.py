@@ -36,6 +36,16 @@ GATE F (Design-level seam + dispatch boundary + conical): make_lumenairy_berrema
         LayeredStack path; conical incidence (azimuth != 0, which the PMM bridge cannot do)
         solves and conserves energy; a PATTERNED layer (inclusion / eps_cell) RAISES pointing at
         the RCWA backend -- the planar-tier scope contract.
+GATE G (A1 far-field consolidation + C2 OOP-oblique absorption): the bridge now sources the far
+        field from ONE BerremanStack CLASS solve (+ jones_transmission()), retiring the old
+        functional-berreman_jones_1d-plus-second-retain_internal-solve pattern. The class-solved
+        r/t/R/T must equal the functional far field post-processed IDENTICALLY (p-basis + lab-row)
+        bit-for-bit (< 1e-13) on an in-plane tensor (p-pol, exercising the p-basis factors) AND a
+        conical-rotated case (the _rotate_layers_conical + phi=0 equivalent problem). AND, with
+        lumenairy 5.22 reconstructing the generalized-cascade internals (AUDIT C2), a tilted-
+        director tensor (out-of-plane, lossy) at OBLIQUE conical incidence now closes its per-layer
+        absorption budget (|sum A_i - (1 - R - T)| < 1e-6, A_independent != None) -- previously the
+        OOP-tensor-at-oblique case gracefully degraded to A_independent = None.
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -330,6 +340,70 @@ def main():
           "isotropic azimuth-invariance {:.1e}, patterned dispatch raises {}/{} -> {}".format(
               design_seam_err, covar_err, phi_matters, e2e_err, azim_err,
               raised, raised_cell, "PASS" if g_f else "FAIL"), flush=True)
+
+    # ---- GATE G: A1 far-field consolidation (class solve == functional) + C2 OOP absorption ----
+    # A1: the bridge sources the far field from ONE BerremanStack CLASS solve (+ jones_transmission)
+    # instead of the functional berreman_jones_1d PLUS a second retain_internal solve. Pin that
+    # consolidation results-IDENTICAL: the class-solved r/t/R/T must equal the functional far field
+    # post-processed identically (p-basis + lab-row extraction) bit-for-bit, on an IN-PLANE tensor
+    # (p-pol -> exercises the p-basis factors) AND a CONICAL-rotated case. C2: with the director
+    # tilted OUT of plane at OBLIQUE incidence, layer_absorption() now reconstructs the generalized-
+    # cascade internals (lumenairy 5.22), so the per-layer budget CLOSES (was A_independent=None).
+    from dynameta.optics.lumenairy_bridge._common import (p_basis_conversion as _pbc_g,
+                                                          pol_row as _prow_g)
+    from dynameta.optics.lumenairy_bridge.berreman_backend import \
+        _rotate_layers_conical as _rot_con_g
+
+    def _func_rt(layers_ff, theta_r, phi_r, pol):
+        """The far field the bridge USED to source from the functional entry, post-processed
+        with the SAME p-basis conversion + lab-row extraction the bridge applies."""
+        Rf, Tf, Jrf, Jtf = lum.berreman_jones_1d(layers_ff, complex(n_sub), complex(n_sup),
+                                                 LAM, angle=theta_r, phi=phi_r)
+        row = _prow_g(SimpleNamespace(polarization=pol))
+        rf, tf = _pbc_g(pol, theta_r, n_sup, n_sub)
+        return (float(Rf[row]), float(Tf[row]),
+                complex(Jrf[row, row]) * rf, complex(Jtf[row, row]) * tf)
+
+    # (a1) in-plane tensor, p-pol at oblique: class LayeredStack path vs functional far field
+    rb_ip = BerremanLayeredSolver().solve(
+        _tensor_stack(eps_uni, d, n_sup, n_sub), LAM,
+        OpticalSpec(polarization="p", incidence_angle_deg=25.0))
+    gR, gT, gr, gt = _func_rt([(eps_uni, d)], np.radians(25.0), 0.0, "p")
+    ip_err = max(abs(rb_ip.R - gR), abs(rb_ip.T - gT), abs(rb_ip.r - gr), abs(rb_ip.t - gt))
+    # (a2) conical (phi != 0): the bridge rotates the layers then solves phi=0; the functional
+    # far field of the SAME rotated layers must match the design-seam result bit-for-bit
+    r_con_g = make_lumenairy_berreman_solver()(
+        _design([Layer("film", d, "lo")], pol="y", theta=20.0, phi=30.0), None,
+        {"film": EpsField(tensor=eps_low)}, LAM, n_sup, n_sub)
+    lay_rot = _rot_con_g([(eps_low, d)], np.radians(30.0))
+    cR, cT, cr, ct = _func_rt(lay_rot, np.radians(20.0), 0.0, "y")
+    con_err = max(abs(r_con_g.R - cR), abs(r_con_g.T - cT),
+                  abs(r_con_g.r - cr), abs(r_con_g.t - ct))
+    consol_err = max(ip_err, con_err)
+
+    # (b) OOP-tensor director tilted ~40deg out of plane (both n_o/n_e lossy) at theta=30 phi=25 ->
+    # the C2 absorption budget closes; the lossy iso 'cap' makes the per-region sum non-trivial
+    _el, _az = np.radians(40.0), np.radians(30.0)
+    _dv = np.array([np.cos(_el) * np.cos(_az), np.cos(_el) * np.sin(_az), np.sin(_el)])
+    _dv = _dv / np.linalg.norm(_dv)
+    _no, _ne = complex(1.50, 0.05), complex(1.75, 0.08)
+    eps_tilt = (_no ** 2) * np.eye(3, dtype=complex) + (_ne ** 2 - _no ** 2) * np.outer(_dv, _dv)
+    d_oop = _design([Layer("director", 900e-9, "lo"), Layer("cap", 150e-9, "hi")],
+                    pol="y", theta=30.0, phi=25.0)
+    r_oop = make_lumenairy_berreman_solver(absorption=True)(
+        d_oop, None, {"director": EpsField(tensor=eps_tilt)}, LAM, n_sup, n_sub)
+    oop_budget = (abs(r_oop.A_independent - r_oop.A)
+                  if r_oop.A_independent is not None else float("inf"))
+    oop_keys = (bool(r_oop.per_region_absorption)
+                and set(r_oop.per_region_absorption) == {"director", "cap"})
+    oop_ok = bool(r_oop.A_independent is not None and oop_budget < 1e-6 and oop_keys)
+    g_g = bool(consol_err < 1e-13 and oop_ok)
+    ok = ok and g_g
+    print("[lbb] GATE G: A1 class==functional far field (in-plane p-pol {:.1e}, conical {:.1e}) "
+          "{:.1e}; C2 OOP-oblique absorption budget |sumA-(1-R-T)|={:.1e} (A_ind={}, keys {}) "
+          "-> {}".format(ip_err, con_err, consol_err, oop_budget,
+                         None if r_oop.A_independent is None else round(r_oop.A_independent, 4),
+                         oop_keys, "PASS" if g_g else "FAIL"), flush=True)
 
     print("[lbb] *** LUMENAIRY BERREMAN BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)
