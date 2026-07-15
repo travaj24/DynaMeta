@@ -110,7 +110,8 @@ def test_pmm_uniform_stack_matches_tmm():
     assert r_p.R == pytest.approx(r_t.R, abs=1e-8)
     assert r_p.T == pytest.approx(r_t.T, abs=1e-8)
     assert r_p.r == pytest.approx(r_t.r, abs=1e-8)
-    assert r_p.t is None                                  # PMM exposes no transmission Jones
+    # lumenairy 5.22: PMM now exposes the transmission Jones (consumer-gap B); t matches tmm
+    assert r_p.t == pytest.approx(r_t.t, abs=1e-8)
 
 
 @needs_lum
@@ -172,8 +173,9 @@ def test_pmm2d_uniform_stack_matches_tmm_both_engines():
 
 def test_pmm2d_pure_translation_and_guards():
     # lumenairy-FREE surface of the 2-D PMM bridge: union-grid inference + the
-    # analytic Rectangle -> (N, N) segment painting, and the construction-time
-    # guards (absorption needs the hybrid engine; engine name is validated)
+    # analytic Rectangle -> (N, N) segment painting, and the engine-name guard.
+    # (lumenairy 5.22 added pure-engine internal retention, so pure + absorption
+    # no longer raises at construction -- the physics gate is validation GATE E.)
     import pytest as _pytest
     from dynameta.optics.lumenairy_bridge import (layer_to_pure_cell,
                                                   make_lumenairy_pmm2d_solver,
@@ -185,8 +187,7 @@ def test_pmm2d_pure_translation_and_guards():
     assert cell.shape == (4, 4)
     assert np.allclose(cell[1:3, :], 6.0 + 0j)   # ridge spans full y (lamellar)
     assert np.allclose(cell[0, :], 1.0 + 0j) and np.allclose(cell[3, :], 1.0 + 0j)
-    with _pytest.raises(NotImplementedError):    # pure retains no internals
-        make_lumenairy_pmm2d_solver(engine="pure", absorption=True)
+    make_lumenairy_pmm2d_solver(engine="pure", absorption=True)   # now supported (C3)
     with _pytest.raises(ValueError):
         make_lumenairy_pmm2d_solver(engine="fmm")
 
@@ -445,10 +446,10 @@ def test_berreman_jax_forward_equals_numpy():
 
 @needs_jax
 def test_rcwa_design_twin_eager_grad_finite_nonzero():
-    # audit 8.1-5: the RCWAStack design twin builds and one eager gradient (ridge eps through
-    # a patterned cell's VALUES) is finite and nonzero; a jax wavelength must raise loudly
-    # (the stack twin's static/traced split -- the rigorous gates live in
-    # validation/lumenairy_rcwa_jax.py)
+    # audit 8.1-5 / D1: the RCWAStack design twin builds and one eager gradient (ridge eps
+    # through a patterned cell's VALUES) is finite and nonzero; a jax HALF-SPACE INDEX still
+    # raises loudly (lumenairy complex()s n_substrate -- the remaining static arg; wavelength
+    # NOW traces, D1). The rigorous gates live in validation/lumenairy_rcwa_jax.py.
     import jax
     import jax.numpy as jnp
     jax.config.update("jax_enable_x64", True)
@@ -464,9 +465,17 @@ def test_rcwa_design_twin_eager_grad_finite_nonzero():
 
     g = float(jax.grad(R_of)(jnp.asarray(6.0)))
     assert np.isfinite(g) and g != 0.0
+    # wavelength now traces (D1): a grad w.r.t. it is finite (no raise)
+    def R_of_wl(wl):
+        cell = jnp.where(mask, 6.0 + 0.0j, 1.0 + 0.0j)
+        R, _T = rcwa_stack_RT([(cell, 180e-9)], 1.5 + 0j, 1.0 + 0j, wl,
+                              period_x=600e-9, n_orders=3, row=0)
+        return jnp.real(R)
+    assert np.isfinite(float(jax.grad(R_of_wl)(jnp.asarray(1.31e-6))))
+    # a jax HALF-SPACE INDEX (n_substrate) still raises (lumenairy complex()s it)
     with pytest.raises(TypeError, match="concrete"):
-        rcwa_stack_RT([(jnp.asarray(6.0 + 0j), 180e-9)], 1.5 + 0j, 1.0 + 0j,
-                      jnp.asarray(1.31e-6), period_x=600e-9, n_orders=3)
+        rcwa_stack_RT([(jnp.asarray(6.0 + 0j), 180e-9)], jnp.asarray(1.5 + 0j), 1.0 + 0j,
+                      1.31e-6, period_x=600e-9, n_orders=3)
 
 
 @needs_jax
