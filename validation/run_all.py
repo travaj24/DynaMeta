@@ -48,7 +48,7 @@ SMOKE = {
     "reliability_fatigue", "reliability_hci", "reliability_leakage", "reliability_lidt",
     "reliability_mttf", "reliability_stressmig", "reliability_tddb", "results_io_demo",
     "optical_cache", "scattering_link", "schrodinger_poisson", "sp_carrier",
-    "sp_carrier_nonparabolic", "sp_neumann_body", "sp_nonparabolic", "sp_open_body",
+    "sp_carrier_nonparabolic", "sp_neumann_body", "sp_nonparabolic",
     "sp_oxide_cap", "sp_per_column", "sp_self_consistent_nonparabolic", "switching_drivers",
     "transient_optics_response", "vector_mo_tensor",
     # the solver-free QD-SOA family (audit 1.2/6.3: flagged by the reverse-drift warning
@@ -128,7 +128,8 @@ def main(argv):
             "ngsolve", "devsim", "import gmsh", "from gmsh",           # direct heavy deps
             "optics.solver", "optics.fdtd", "optics.inverse_design",  # FEM / FDTD / jax-FDTD wrappers
             "optics.topology_opt", "carriers.thermal_fem", "carriers.electrostatics_fem",
-            "carriers.devsim", "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
+            "carriers.devsim", "carriers.physics_equilibrium",   # physics_equilibrium imports devsim
+            "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
         )
         extra = []
         for n in sorted(all_gated - SMOKE):
