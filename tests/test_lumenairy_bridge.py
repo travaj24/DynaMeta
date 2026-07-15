@@ -246,12 +246,12 @@ def test_berreman_uniaxial_decouples_per_axis():
 
 
 @needs_lum
-def test_bridge_conical_rcwa_raises_pmm_berreman_solve():
-    # audit C4-2 / 8.1-1 / 8.1-6: conical incidence (azimuth != 0). Only the RCWA bridge still
-    # raises -- its lab rows are phi-dependent s/p mixtures and per-order Jones synthesis for a
-    # 2-D lattice is a follow-on. PMM (per-order-amplitude synthesis, consumer-gap B) and
-    # BERREMAN (planar z-rotation covariance, 8.1-6) both SOLVE the exact rotated s/p at any
-    # azimuth (pinned by validation GATE F / test_berreman_oop_oblique_first_class).
+def test_bridge_conical_all_engines_solve():
+    # audit C4-2 / 8.1-1 / 8.1-6: conical incidence (azimuth != 0) now SOLVES on ALL THREE
+    # engines -- RCWA (per-order-amplitude synthesis for the 2-D lattice, the last gap),
+    # PMM (same synthesis, 1-D), Berreman (planar z-rotation covariance). Each returns the
+    # rotated s/p eigen-polarization (pinned by validation GATE H / GATE F / test_berreman_
+    # oop_oblique_first_class); r/t are the phase-bearing co-pol amplitudes.
     from dynameta.geometry.specs import OpticalSpec
     from dynameta.optics.lumenairy_bridge import (make_lumenairy_berreman_solver,
                                                   make_lumenairy_pmm_solver,
@@ -261,16 +261,11 @@ def test_bridge_conical_rcwa_raises_pmm_berreman_solve():
     for pol in ("p", "y"):
         d = _uniform_design()
         d.optical = OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=20.0)
-        with pytest.raises(NotImplementedError):
-            make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
-        rb = make_lumenairy_berreman_solver()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
-        assert 0.0 <= rb.R <= 1.0 and 0.0 <= rb.T <= 1.0    # berreman conical solves (8.1-6)
-        rp = make_lumenairy_pmm_solver(degree=10, n_orders=9)(d, None, {}, 1.31e-6,
-                                                              1.0 + 0j, 1.5 + 0j)
-        assert 0.0 <= rp.R <= 1.0 and 0.0 <= rp.T <= 1.0 and rp.t is not None   # pmm conical (B)
-    d = _uniform_design()
-    d.optical = OpticalSpec(polarization="p", incidence_angle_deg=30.0, azimuth_deg=0.0)
-    make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)  # phi=0 ok
+        for r in (make_lumenairy_rcwa_solver(n_orders=3)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j),
+                  make_lumenairy_pmm_solver(degree=10, n_orders=9)(d, None, {}, 1.31e-6,
+                                                                   1.0 + 0j, 1.5 + 0j),
+                  make_lumenairy_berreman_solver()(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)):
+            assert 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0 and r.t is not None
 
 
 @needs_lum
@@ -790,3 +785,67 @@ def test_bor_phase_and_absorption():
     assert ra.A_independent is not None and ra.A_independent > 1e-3
     assert "absorber" in ra.per_region_absorption
     assert abs(ra.R + ra.T + ra.A_independent - 1.0) < 1e-9        # closed budget
+
+
+@needs_lum
+def test_rcwa_conical_synthesis_and_2d_lattice():
+    # audit 8.1-1 (the last conical gap): RCWA conical s/p is synthesized from
+    # per_order_amplitudes. A UNIFORM slab must match analytic oblique Airy (s+p, |r|^2==R,
+    # energy) to machine precision, and a genuine 2-D CROSSED PILLAR (finite in x AND y) must
+    # close energy (lossless) and stay passive (lossy). Physics oracle: validation GATE H.
+    import numpy as np
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
+
+    def airy_R(n0, n1, n2, d, lam, th0, pol):
+        k0 = 2.0 * np.pi / lam
+        s0 = n0 * np.sin(th0)
+        kz = lambda n: np.sqrt((n * k0) ** 2 - (k0 * s0) ** 2 + 0j)
+        a0, a1, a2 = kz(n0), kz(n1), kz(n2)
+        if pol == "s":
+            rij = lambda a, b: (a - b) / (a + b)
+            r01, r12 = rij(a0, a1), rij(a1, a2)
+        else:
+            rij = lambda ni, nj, a, b: (nj ** 2 * a - ni ** 2 * b) / (nj ** 2 * a + ni ** 2 * b)
+            r01, r12 = rij(n0, n1, a0, a1), rij(n1, n2, a1, a2)
+        ph = np.exp(1j * a1 * d)
+        return float(abs((r01 + r12 * ph ** 2) / (1.0 + r01 * r12 * ph ** 2)) ** 2)
+
+    # uniform slab vs analytic
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("sub", ConstantOptical(complex(1.5 ** 2))))
+    reg.add(Material("slab", ConstantOptical(complex(2.2 ** 2))))
+    sol = make_lumenairy_rcwa_solver(n_orders=5)
+    for pol, pt in (("y", "s"), ("p", "p")):
+        d = Design(name="u", unit_cell=UnitCell.square(300e-9),
+                   stack=Stack(layers=[Layer("a", 180e-9, "slab")], superstrate_material="air",
+                               substrate_material="sub"),
+                   electrodes=[], materials=reg,
+                   optical=OpticalSpec(polarization=pol, incidence_angle_deg=30.0, azimuth_deg=37.0))
+        r = sol(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        assert abs(r.R - airy_R(1.0, 2.2, 1.5, 180e-9, 1.31e-6, np.radians(30.0), pt)) < 1e-6
+        assert abs(abs(r.r) ** 2 - r.R) < 1e-6 and abs(r.R + r.T - 1.0) < 1e-6
+
+    # genuine 2-D crossed pillar: lossless energy closes, lossy is passive
+    per = 700e-9
+    reg2 = MaterialRegistry()
+    reg2.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg2.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
+    reg2.add(Material("rod", ConstantOptical(complex(3.0 ** 2))))
+    reg2.add(Material("rodL", ConstantOptical(complex(3.0 ** 2, 0.3))))
+    sol9 = make_lumenairy_rcwa_solver(n_orders=9)
+    for mat, lossy in (("rod", False), ("rodL", True)):
+        rod = Inclusion(shape=Rectangle(per / 2.0, per / 2.0, per / 2.0, per / 2.0), material=mat)
+        d = Design(name="pil", unit_cell=UnitCell.square(per),
+                   stack=Stack(layers=[Layer("lay", 200e-9, "air", inclusions=[rod])],
+                               superstrate_material="air", substrate_material="glass"),
+                   electrodes=[], materials=reg2,
+                   optical=OpticalSpec(polarization="y", incidence_angle_deg=20.0, azimuth_deg=30.0))
+        r = sol9(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
+        assert 0.0 <= r.A <= 1.0 and 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0
+        if not lossy:
+            assert abs(r.R + r.T - 1.0) < 5e-3     # lossless 2-D conical energy closes
