@@ -846,6 +846,11 @@ def test_rcwa_conical_synthesis_and_2d_lattice():
                    electrodes=[], materials=reg2,
                    optical=OpticalSpec(polarization="y", incidence_angle_deg=20.0, azimuth_deg=30.0))
         r = sol9(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
-        assert 0.0 <= r.A <= 1.0 and 0.0 <= r.R <= 1.0 and 0.0 <= r.T <= 1.0
+        # passivity, with a machine-epsilon slack: a lossless pillar's A = 1 - R - T rounds to
+        # +/- 1e-14 (sign platform-dependent -- it flaked negative on the py3.11/3.13 numpy)
+        tol = 1e-9
+        assert -tol <= r.A <= 1.0 + tol and -tol <= r.R <= 1.0 + tol and -tol <= r.T <= 1.0 + tol
         if not lossy:
             assert abs(r.R + r.T - 1.0) < 5e-3     # lossless 2-D conical energy closes
+        else:
+            assert r.A > 1e-3                       # the lossy pillar genuinely absorbs
