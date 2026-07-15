@@ -17,9 +17,8 @@ version-ceilinged reader of the private `_layers` slot (no public accessor exist
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional
 
-import numpy as np
 
 from dynameta.geometry import Design, Layer, Stack, UnitCell
 from dynameta.geometry.specs import OpticalSpec
