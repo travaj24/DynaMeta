@@ -10,9 +10,9 @@ of the non-JAX bridge is a genuinely different code path, the strongest availabl
 
 GATE A (twin == non-JAX bridge forward): rcwa_stack_RT on a lamellar grating stack (the SAME
         128-sample rasterized cell the bridge builds) matches make_lumenairy_rcwa_solver's
-        R and T < 1e-10; a uniform lossy stack through the LIFTED (constant-cell) path
-        matches < 1e-10 too; the functional grating twin (rcwa_grating_RT) jax forward
-        equals its own numpy forward < 1e-12.
+        R and T < 1e-10; a uniform lossy stack through the RAW uniform-eps path (5.22: no
+        constant-cell lift) matches < 1e-10 too; the functional grating twin
+        (rcwa_grating_RT) jax forward equals its own numpy forward < 1e-12.
 GATE B (gradient correctness vs the independent path): jax.grad of R through rcwa_stack_RT
         w.r.t. the grating layer THICKNESS and the ridge EPS (real part) matches
         Richardson-extrapolated central finite differences of the NON-JAX bridge solve
@@ -21,8 +21,12 @@ GATE C (gradient nonzero + descent sanity): two half-Newton gradient-descent ste
         |R(eps) - R_target|^2 (eager grad) strictly reduce the objective.
 GATE D (PMM design twin): pmm_stack_RT on the same lamellar geometry (analytic segments)
         matches make_lumenairy_pmm_solver < 1e-9, and jax.grad w.r.t. the ridge eps AND the
-        WAVELENGTH (a parameter the RCWAStack twin cannot trace) match Richardson FD of the
-        non-JAX PMM bridge < 1e-5 relative.
+        WAVELENGTH match Richardson FD of the non-JAX PMM bridge < 1e-5 relative.
+GATE E (D1 uniform-layer STACK twin): a physically-uniform slab passes straight to
+        add_layer(eps=) -- the twin keeps a 'uniform' layer (no lifted constant-cell
+        eigensolve) and jax.grad of R w.r.t. the uniform eps AND the WAVELENGTH (a stack-twin
+        capability new in lumenairy 5.22 -- previously wavelength gradients had to route to
+        the PMM twin) match Richardson FD of the non-JAX RCWA bridge < 1e-5 / < 1e-4 relative.
 
 Honest SKIP (exit 0 + banner) when lumenairy or jax is not importable.
 
@@ -112,7 +116,8 @@ def main():
     Rj, Tj = twin_RT(jnp.asarray(T0), jnp.asarray(EPS_RIDGE))
     par_g = max(abs(Rb - float(Rj)), abs(Tb - float(Tj)))
 
-    # uniform lossy stack through the LIFTED constant-cell path vs the bridge's eps= path
+    # uniform lossy stack through the RAW uniform-eps twin path (5.22: no constant-cell
+    # lift) vs the bridge's eps= path
     from dynameta.geometry import Design, Layer, Stack, UnitCell
     from dynameta.geometry.specs import OpticalSpec
     from dynameta.materials import ConstantOptical, Material, MaterialRegistry
@@ -139,7 +144,7 @@ def main():
     par_f = max(abs(float(Rn) - float(Rx)), abs(float(Tn) - float(Tx)))
     g_a = bool(par_g < 1e-10 and par_u < 1e-10 and par_f < 1e-12)
     ok = ok and g_a
-    print("[rjx] GATE A: twin==bridge grating {:.2e}, lifted-uniform {:.2e}, "
+    print("[rjx] GATE A: twin==bridge grating {:.2e}, uniform-raw {:.2e}, "
           "grating-fn jax==numpy {:.2e} -> {}".format(par_g, par_u, par_f,
                                                       "PASS" if g_a else "FAIL"), flush=True)
 
@@ -181,7 +186,6 @@ def main():
 
     # ---- GATE D: PMM design twin (parity + AD vs FD incl. the wavelength gradient) --------
     DEG, NOP = 10, 9
-    segs0 = [(0.25, 1.0 + 0j), (0.5, EPS_RIDGE + 0j), (0.25, 1.0 + 0j)]
 
     def bridge_pmm_R(eps_ridge, lam):
         r = make_lumenairy_pmm_solver(degree=DEG, n_orders=NOP)(
@@ -209,6 +213,54 @@ def main():
     print("[rjx] GATE D: PMM twin==bridge {:.2e}; AD vs bridge-FD rel: d/d(eps) {:.2e}, "
           "d/d(wavelength) {:.2e} -> {}".format(par_p, relp_e, relp_l,
                                                 "PASS" if g_d else "FAIL"), flush=True)
+
+    # ---- GATE E: uniform-layer STACK twin traces eps AND wavelength (D1, lumenairy 5.22) --
+    # A physically-uniform slab passes straight to add_layer(eps=): the twin keeps a raw
+    # 'uniform' layer (no lifted constant-cell eigensolve) and traces BOTH the uniform eps
+    # and -- new on the RCWAStack twin in 5.22 -- the source WAVELENGTH (previously a
+    # wavelength gradient had to route to the PMM twin, GATE D).
+    EPS_U, THK_U, PER_U, NRU = 4.0, 120e-9, 300e-9, 2
+
+    def _uniform_design(eps):
+        reg = MaterialRegistry()
+        reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+        reg.add(Material("hi", ConstantOptical(complex(eps))))
+        reg.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
+        return Design(name="ue", unit_cell=UnitCell.square(PER_U),
+                      stack=Stack(layers=[Layer("a", THK_U, "hi")],
+                                  superstrate_material="air", substrate_material="glass"),
+                      electrodes=[], materials=reg,
+                      optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0))
+
+    def bridge_uR(eps, lam):
+        return make_lumenairy_rcwa_solver(n_orders=NRU)(
+            _uniform_design(float(eps)), None, {}, float(lam), 1.0 + 0j, 1.5 + 0j).R
+
+    def twin_uR(eps, lam):
+        R, _T = rcwa_stack_RT([(eps + 0.0j, THK_U)], 1.5 + 0j, 1.0 + 0j, lam,
+                              period_x=PER_U, n_orders=NRU, row=0)
+        return jnp.real(R)
+
+    # the twin keeps a raw 'uniform' layer record (not a patterned 'iso' cell)
+    import lumenairy as _lum
+    from dynameta.optics.lumenairy_bridge.rcwa_design import _add_stack_layers
+    _stk = _lum.RCWAStack(PER_U, n_superstrate=1.0, n_substrate=1.5, n_orders=NRU)
+    _add_stack_layers(_stk, [(jnp.asarray(EPS_U + 0j), THK_U)], False, "laurent", "gateE")
+    kind_u = _stk.layers[0].kind
+
+    par_ue = abs(bridge_uR(EPS_U, LAM) - float(twin_uR(jnp.asarray(EPS_U), jnp.asarray(LAM))))
+    gu_e = float(jax.grad(lambda e: twin_uR(e, jnp.asarray(LAM)))(jnp.asarray(EPS_U)))
+    gu_l = float(jax.grad(lambda w: twin_uR(jnp.asarray(EPS_U), w))(jnp.asarray(LAM)))
+    fdu_e = _richardson(lambda e: bridge_uR(e, LAM), EPS_U, 1e-5)
+    fdu_l = _richardson(lambda w: bridge_uR(EPS_U, w), LAM, 2e-12)
+    relu_e = abs(gu_e - fdu_e) / (abs(fdu_e) + 1e-30)
+    relu_l = abs(gu_l - fdu_l) / (abs(fdu_l) + 1e-30)
+    g_e_gate = bool(kind_u == "uniform" and par_ue < 1e-10 and relu_e < 1e-5 and relu_l < 1e-4
+                    and abs(gu_e) > 0.0 and abs(gu_l) > 0.0)
+    ok = ok and g_e_gate
+    print("[rjx] GATE E: uniform twin kind={!r} (raw, no lift), twin==bridge {:.2e}; AD vs "
+          "bridge-FD rel: d/d(eps) {:.2e}, d/d(wavelength) {:.2e} -> {}".format(
+              kind_u, par_ue, relu_e, relu_l, "PASS" if g_e_gate else "FAIL"), flush=True)
 
     print("[rjx] *** RCWA/PMM JAX (DIFFERENTIABLE) DESIGN TWINS: {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
