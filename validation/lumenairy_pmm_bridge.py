@@ -15,8 +15,17 @@ GATE C (OOP tensor specialist vs ANALYTIC): a uniform GYROTROPIC slab (eps_xy = 
         J = [[s, -i d], [i d, s]], s = (r+ + r-)/2, d = (r+ - r-)/2, with r+- the scalar
         Airy reflections at n+- = sqrt(eps_r -+ g) (eps.(x +- i y) = (eps_r -+ g)(x +- i y)
         -- hand-derived eigenpair; < 1e-3, the documented PMM OOP floor).
-GATE D (scope guards): partial-y rectangle, structured-grid EpsField, and conical azimuth
-        all raise.
+GATE D (scope guards): partial-y rectangle, structured-grid EpsField, and incidence_side=
+        'bottom' all raise (conical is NO LONGER a guard -- GATE F solves it).
+GATE E (per-layer absorption): PMM at RCWA-bridge parity -- budget closure + the RCWA split
+        converging toward the PMM reference on a lossy metal-grating / lossy-spacer stack.
+GATE F (CONICAL s/p synthesis, audit 8.1-1 / consumer-gap B): the bridge synthesizes the
+        rotated s/p totals + co-pol r/t from lumenairy 5.22 per_order_amplitudes (the native
+        lab rows are s/p mixtures at phi != 0). Three oracles: (1) a UNIFORM slab at conical
+        vs analytic oblique Airy -- machine-exact, incl. |r|^2 == R and R + T = 1, pinning the
+        p-pol sec^2-theta normalization; (2) phi -> 0 reduction on a patterned grating
+        reproduces the validated in-plane R AND co-pol r (magnitude + phase); (3) a lossless
+        conical grating conserves energy and a metal grating's R genuinely MOVES with phi.
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -40,7 +49,7 @@ LAM = 1.31e-6
 PER = 600e-9
 
 
-def _design(layers, *, pol="y", theta=0.0, extra=()):
+def _design(layers, *, pol="y", theta=0.0, phi=0.0, extra=(), sub="glass"):
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
     reg.add(Material("glass", ConstantOptical(complex(1.5 ** 2))))
@@ -51,9 +60,28 @@ def _design(layers, *, pol="y", theta=0.0, extra=()):
         reg.add(Material(nm, ConstantOptical(eps)))
     return Design(name="pmm", unit_cell=UnitCell.square(PER),
                   stack=Stack(layers=layers, superstrate_material="air",
-                              substrate_material="glass"),
+                              substrate_material=sub),
                   electrodes=[], materials=reg,
-                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=theta))
+                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=theta,
+                                      azimuth_deg=phi))
+
+
+def _airy_oblique_R(n0, n1, n2, d, lam, theta0_rad, pol):
+    """Reflectance of a single slab n0|n1|n2 at oblique incidence (s|p), exact -- the
+    machine-precision oracle for the conical synthesis on a UNIFORM (unpatterned) cell."""
+    k0 = 2.0 * np.pi / lam
+    s0 = n0 * np.sin(theta0_rad)
+    kz = lambda n: np.sqrt((n * k0) ** 2 - (k0 * s0) ** 2 + 0j)
+    kz0, kz1, kz2 = kz(n0), kz(n1), kz(n2)
+    if pol == "s":
+        rij = lambda ki, kj: (ki - kj) / (ki + kj)
+        r01, r12 = rij(kz0, kz1), rij(kz1, kz2)
+    else:
+        rij = lambda ni, nj, ki, kj: (nj ** 2 * ki - ni ** 2 * kj) / (nj ** 2 * ki + ni ** 2 * kj)
+        r01, r12 = rij(n0, n1, kz0, kz1), rij(n1, n2, kz1, kz2)
+    ph = np.exp(1j * kz1 * d)
+    r = (r01 + r12 * ph ** 2) / (1.0 + r01 * r12 * ph ** 2)
+    return float(abs(r) ** 2)
 
 
 def _airy_r(n1, n2, n3, d, lam):
@@ -138,7 +166,7 @@ def main():
           "circular-eigenmode analytic: max |dJ| = {:.2e} -> {}".format(
               dC, "PASS" if g_c else "FAIL"), flush=True)
 
-    # ---- GATE D: scope guards ----
+    # ---- GATE D: scope guards (conical is NO LONGER a guard -- it solves, see GATE F) ----
     g_d = 0
     half_y = Inclusion(shape=Rectangle(PER / 2.0, PER / 4.0, 0.3 * PER, 0.5 * PER),
                        material="hi")
@@ -158,12 +186,13 @@ def main():
             1.0 + 0j, 1.5 + 0j)
     except ValueError:
         g_d += 1
+    # incidence_side='bottom' still raises (the bridge solves TOP incidence only)
     try:
-        d_con = _design(lays, pol="y")
-        object.__setattr__(d_con.optical, "azimuth_deg", 20.0)
-        pmm(d_con, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-    except (NotImplementedError, Exception) as exc:
-        g_d += 1 if isinstance(exc, NotImplementedError) else 0
+        d_bot = _design(lays, pol="y")
+        object.__setattr__(d_bot.optical, "incidence_side", "bottom")
+        pmm(d_bot, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    except NotImplementedError:
+        g_d += 1
     g_d = bool(g_d == 3)
     ok = ok and g_d
     print("[lpb] GATE D: partial-y / gridded-structured / conical guards -> {}".format(
@@ -209,6 +238,59 @@ def main():
               r_p.per_region_absorption.get("grating", float("nan")) if keys_ok else float("nan"),
               r_p.per_region_absorption.get("spacer", float("nan")) if keys_ok else float("nan"),
               "PASS" if g_e else "FAIL"), flush=True)
+
+    # ---- GATE F: CONICAL s/p synthesis (audit 8.1-1 / consumer-gap B) ----
+    # The bridge synthesizes the rotated s/p totals + co-pol r/t from the per-order complex
+    # amplitudes (native lab rows are s/p mixtures at phi != 0). THREE independent oracles:
+    #  (1) a UNIFORM slab at conical vs analytic oblique Airy -- machine-exact, pins the p-pol
+    #      normalization (|E_inc,p|^2 = sec^2 theta) and the flux weights the totals hinge on;
+    #  (2) phi -> 0 reduction on a PATTERNED metal grating: conical(1e-4 deg) must reproduce the
+    #      validated in-plane R AND the co-pol r (magnitude + PHASE) -- pins the convention;
+    #  (3) genuine conical (phi=30) on a lossless dielectric grating: energy R+T ~ 1 AND phi
+    #      MATTERS (conical R differs from the in-plane R -- a phi-ignoring synthesis would not).
+    pmm_c = make_lumenairy_pmm_solver(degree=20, n_orders=15)
+    uslab = [Layer("u", 180e-9, "uni")]
+    worst_uni = 0.0
+    for pol, pt in (("y", "s"), ("p", "p")):
+        d = _design(uslab, pol=pol, theta=30.0, phi=37.0,
+                    extra=(("uni", complex(2.2 ** 2)),), sub="glass")
+        r = pmm_c(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        Ra = _airy_oblique_R(1.0, 2.2, 1.5, 180e-9, LAM, np.radians(30.0), pt)
+        worst_uni = max(worst_uni, abs(r.R - Ra), abs(abs(r.r) ** 2 - r.R),
+                        abs(r.R + r.T - 1.0))
+    # reduction on a lossless dielectric grating (energy must close), phi-matters on a strongly
+    # form-birefringent METAL grating (a subwavelength dielectric grating's phi-dependence is a
+    # tiny form-birefringence effect; a metal grating's is large -- the anti-triviality guard).
+    diel = [Layer("grat", 120e-9, "air",
+                  inclusions=[Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 0.5 * PER, PER),
+                                        material="lossless")])]
+    metal = [Layer("grat", 120e-9, "air",
+                   inclusions=[Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 0.5 * PER, PER),
+                                         material="metal")])]
+    red = 0.0
+    energy_c = 0.0
+    phi_moves = 0.0
+    pmm_g = make_lumenairy_pmm_solver(degree=20, n_orders=21)
+    ex = (("lossless", complex(3.3 ** 2, 0.0)),)
+    for pol in ("y", "p"):
+        r0 = pmm_g(_design(diel, pol=pol, theta=20.0, phi=0.0, extra=ex), None, {},
+                   LAM, 1.0 + 0j, 1.5 + 0j)
+        rc = pmm_g(_design(diel, pol=pol, theta=20.0, phi=1e-4, extra=ex), None, {},
+                   LAM, 1.0 + 0j, 1.5 + 0j)
+        rg = pmm_g(_design(diel, pol=pol, theta=20.0, phi=30.0, extra=ex), None, {},
+                   LAM, 1.0 + 0j, 1.5 + 0j)
+        red = max(red, abs(r0.R - rc.R), abs(r0.r - rc.r))          # phi->0 reduction (incl. phase)
+        energy_c = max(energy_c, abs(rg.R + rg.T - 1.0))            # lossless conical closes
+        # metal grating: conical(45deg) vs in-plane R must differ substantially (phi is used)
+        m0 = pmm_g(_design(metal, pol=pol, theta=20.0, phi=0.0), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        m45 = pmm_g(_design(metal, pol=pol, theta=20.0, phi=45.0), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        phi_moves = max(phi_moves, abs(m45.R - m0.R))
+    g_f = bool(worst_uni < 1e-6 and red < 1e-8 and phi_moves > 1e-3 and energy_c < 5e-3)
+    ok = ok and g_f
+    print("[lpb] GATE F: conical s/p -- uniform vs analytic oblique Airy (incl |r|^2==R, R+T=1) "
+          "{:.1e}; phi->0 reduction (R + co-pol r phase) {:.1e}; phi-matters {:.3f}; lossless "
+          "conical energy |R+T-1| {:.1e} -> {}".format(
+              worst_uni, red, phi_moves, energy_c, "PASS" if g_f else "FAIL"), flush=True)
 
     print("[lpb] *** LUMENAIRY PMM BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

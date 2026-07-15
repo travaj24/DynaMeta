@@ -46,6 +46,87 @@ from dynameta.optics.tmm_reference import end_media_indices
 __all__ = ["design_to_pmm_stack", "make_lumenairy_pmm_solver", "layer_to_pmm_segments"]
 
 _REL_TOL = 1e-9
+_PROP_TOL = 1e-8            # propagating-order selector (|Im kz| small, Re kz > tol), normalized by k0
+
+
+def _pol_tangential_unit(pol: str, phi: float) -> np.ndarray:
+    """Incident tangential (lab x, y) unit vector of the rotated s/p eigen-polarization the FEM
+    solver and OpticalSpec use: 'y' = s-hat = (-sin phi, cos phi) (perpendicular to the plane of
+    incidence); 'x'/'p' = the in-plane transverse direction (cos phi, sin phi). At phi = 0 these
+    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path."""
+    if pol == "y":
+        return np.array([-np.sin(phi), np.cos(phi)], dtype=float)
+    return np.array([np.cos(phi), np.sin(phi)], dtype=float)          # 'x' or 'p'
+
+
+def _conical_synthesis(stack, pol: str, theta: float, phi: float, n_super: complex):
+    """Rotated s/p (R, T, r) for a conical (azimuth != 0) PMM solve, synthesized from the
+    per-order complex amplitudes (audit 8.1-1 / consumer-gap B). lumenairy's per-order rows are
+    keyed to incident LAB E_x / E_y; at phi != 0 the physical s/p eigen-polarization is a
+    superposition of them, so the total efficiency has cross terms the per-order POWERS cannot
+    provide. For incident tangential unit u the per-order response is u . (row0, row1); the
+    order efficiency is (|Ex|^2 + |Ey|^2 + |Ez|^2) Re(kz/kz_inc) / |E_inc|^2 with the longitudinal
+    Ez = -(kx Ex + ky Ey)/kz and |E_inc|^2 = 1 + |Ez_inc|^2 (a unit-tangential p wave carries its
+    own Ez, so |E_inc,p|^2 = sec^2 theta -- the normalization the s vs p split hinges on). Summed
+    over PROPAGATING orders in the (lossless) end medium: R (reflection port) and T (transmission
+    port, kz_inc still the superstrate value). r = the zeroth-order co-polarized complex amplitude
+    (magnitude sqrt of the zeroth-order co-pol reflectance, phase from the tangential projection
+    onto the reflected eigen-direction) -- the phase-bearing modulator observable. All k's are
+    normalized by k0 (per_order_amplitudes convention), so the arithmetic is scale-free."""
+    u = _pol_tangential_unit(pol, phi)
+    ns = float(np.real(n_super))
+    kz_inc = ns * np.cos(theta)                                       # normalized incident kz
+    # incident longitudinal for THIS polarization (transversality of the incident plane wave):
+    # kx0 = ns sin th cos phi, ky0 = ns sin th sin phi (normalized)
+    kx0 = ns * np.sin(theta) * np.cos(phi)
+    ky0 = ns * np.sin(theta) * np.sin(phi)
+    ez_inc = -(kx0 * u[0] + ky0 * u[1]) / kz_inc
+    e_inc2 = float(u[0] ** 2 + u[1] ** 2 + abs(ez_inc) ** 2)          # 1 (s) or sec^2 theta (p)
+
+    def _port_total(port):
+        a = stack.per_order_amplitudes(port=port)
+        kx, ky, kz = np.asarray(a["kx"]), np.asarray(a["ky"]), np.asarray(a["kz"])
+        ex = u[0] * a["Ex"][0] + u[1] * a["Ex"][1]                   # response to u, per order
+        ey = u[0] * a["Ey"][0] + u[1] * a["Ey"][1]
+        prop = (np.abs(kz.imag) < _PROP_TOL) & (kz.real > _PROP_TOL)
+        ez = np.zeros_like(ex)
+        nz = np.abs(kz) > 1e-300
+        ez[nz] = -(kx[nz] * ex[nz] + ky[nz] * ey[nz]) / kz[nz]
+        w = kz.real / kz_inc
+        eff = (np.abs(ex) ** 2 + np.abs(ey) ** 2 + np.abs(ez) ** 2) * w
+        tot = float(np.sum(eff[prop])) / e_inc2
+        return tot, a, ex, ey, prop
+
+    R, ar, exr, eyr, _pr = _port_total("reflection")
+    T, at, ext, eyt, _pt = _port_total("transmission")
+    # zeroth-order co-pol complex amplitude in the rotated frame: project the zeroth order's
+    # FULL 3-D field (tangential + longitudinal Ez) onto the outgoing eigen-direction e_hat and
+    # normalize by sqrt(|E_inc|^2), so |r|^2 is the zeroth-order co-pol reflectance and the phase
+    # is the modulator observable. s: e_hat = (-sin phi, cos phi, 0) is purely tangential (Ez drops
+    # -- reduces to the machine-exact tangential projection). p: e_hat is the outgoing p-hat, which
+    # carries a z-component (cos th cos phi, cos th sin phi, +/- sin th_out) -- omitting Ez there
+    # undercounts |r| (probed: 0.40 vs the true 0.46 = sqrt(R)). p_hat = (k_out x s_hat)/|k_out|.
+    def _co_amp(a, ex, ey):
+        z0 = np.where(np.asarray(a["orders"]) == 0)[0]
+        if not z0.size:
+            return complex(0.0)
+        i0 = int(z0[0])
+        kx0, ky0, kz0 = float(a["kx"][i0].real), float(a["ky"][i0].real), a["kz"][i0]
+        exz, eyz = ex[i0], ey[i0]
+        ez = -(kx0 * exz + ky0 * eyz) / kz0 if abs(kz0) > 1e-300 else 0.0
+        kpar = np.hypot(kx0, ky0)
+        if pol == "y" or kpar < 1e-12:                    # s-hat (tangential) or normal fallback
+            eh = np.array([-np.sin(phi), np.cos(phi), 0.0])
+        else:                                             # p-hat = (k_out x s_hat)/|k_out|
+            shat = np.array([-ky0, kx0, 0.0]) / kpar
+            kout = np.array([kx0, ky0, float(kz0.real)])
+            eh = np.cross(kout, shat)
+            eh = eh / np.linalg.norm(eh)
+        return complex((eh[0] * exz + eh[1] * eyz + eh[2] * ez) / np.sqrt(e_inc2))
+
+    r = _co_amp(ar, exr, eyr)
+    t = _co_amp(at, ext, eyt)
+    return R, T, r, t
 
 
 def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
@@ -156,37 +237,40 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
     retain_internal=True and fills per_region_absorption keyed by DESIGN layer name (slabs
     of a graded layer sum into their layer) + A_independent from PMMStack.layer_absorption
     -- the internal z-Poynting flux difference per layer, an independent volumetric
-    measurement (lumenairy's own invariant closes it against 1 - sum R - sum T)."""
+    measurement (lumenairy's own invariant closes it against 1 - sum R - sum T).
+
+    CONICAL incidence (azimuth != 0) is now supported (audit 8.1-1 / consumer-gap B): the
+    rotated s/p totals R/T and the co-pol amplitude r are SYNTHESIZED from the per-order
+    complex amplitudes (lumenairy 5.22 per_order_amplitudes), since the native result rows
+    are lab-basis s/p MIXTURES at phi != 0. OpticalResult.t (the zeroth-order transmission
+    Jones, phase-bearing) is filled from PMMStack.jones_transmission on BOTH the in-plane
+    and conical paths -- it was None before 5.22."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
         _guard_incidence_side(design.optical)
         theta, phi = _angles_rad(design.optical)
-        if abs(phi) > 1e-12:
-            # lumenairy's PMMStack DOES solve conical natively (5.20+, pure-nodal cascade
-            # since 5.21.3) -- but its rows are keyed incident lab Ex/Ey, which at phi != 0
-            # are s/p MIXTURES (audit C4-2), and it exposes no per-order Jones to synthesize
-            # the rotated s/p totals for a PATTERNED cell (a lattice is not z-rotation-
-            # invariant, so the Berreman bridge's covariance shortcut does not apply here).
-            raise NotImplementedError(
-                "PMM bridge: conical incidence (azimuth != 0) is not supported -- the "
-                "lumenairy conical PMM result rows are lab-basis s/p mixtures and per-order "
-                "Jones synthesis is a documented follow-on (audit C4-2 / 8.1-1). Use the FEM "
-                "solver for conical patterned cells, or the Berreman bridge for PLANAR "
-                "conical stacks (exact via rotational covariance).")
+        pol = getattr(design.optical, "polarization", "y")
         stack, names = design_to_pmm_stack(design, lambda_m, eps_by_region=eps_by_region,
                                            degree=degree, n_orders=n_orders,
                                            n_slices=n_slices)
-        stack.set_source(lambda_m, theta=theta)
+        stack.set_source(lambda_m, theta=theta, phi=phi)
         orders, R2, T2, jones = stack.solve(stabilize=stabilize,
                                             retain_internal=absorption)
         row = _pol_row(design.optical)
-        R = float(np.sum(R2[row]))
-        T = float(np.sum(T2[row]))
         n_sup, n_sb = end_media_indices(design, lambda_m)
-        rf, _tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
-                                      theta, n_sup, n_sb)
-        r = complex(np.asarray(jones)[row, row]) * complex(rf)
+        rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
+        if abs(phi) > 1e-12:
+            # rotated s/p eigen-polarization: synthesize R/T + the co-pol zeroth-order r/t from
+            # the per-order amplitudes (the native lab rows R2/T2/jones are s/p mixtures at
+            # phi != 0). The p-basis conversion is already baked into the eigen-projection, so
+            # rf/tf are NOT re-applied here.
+            R, T, r, t = _conical_synthesis(stack, pol, theta, phi, n_sup)
+        else:
+            R = float(np.sum(R2[row]))
+            T = float(np.sum(T2[row]))
+            r = complex(np.asarray(jones)[row, row]) * complex(rf)
+            t = complex(np.asarray(stack.jones_transmission())[row, row]) * complex(tf)
         a_ind, pra = None, None
         if absorption:
             try:
@@ -201,7 +285,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                 warnings.warn("lumenairy PMM bridge: per-layer absorption unavailable ({}); "
                               "A_independent left unset".format(exc), stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                             solve_time_s=time.perf_counter() - t0, t=None, T=T,
+                             solve_time_s=time.perf_counter() - t0, t=t, T=T,
                              A=1.0 - R - T, A_independent=a_ind, R_flux=R, T_flux=T,
                              per_region_absorption=pra)
 
