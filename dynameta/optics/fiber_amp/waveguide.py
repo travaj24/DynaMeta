@@ -42,6 +42,7 @@ class FiberSpec:
     dopant_radius_m: Optional[float] = None
     background_loss_per_m: Union[float, Callable] = 0.0
     clad_radius_m: Optional[float] = None
+    overlap_override: Union[float, Callable, None] = None
 
     def __post_init__(self):
         for nm, v in (("core_radius_m", self.core_radius_m), ("na", self.na),
@@ -72,7 +73,14 @@ def overlap_gamma(fiber: FiberSpec, lambda_m):
     Gaussian LP01 mode of field radius w: Gamma = 1 - exp(-2 b^2 / w^2) (Desurvire). Gamma -> 1
     for tight confinement (short lambda / large core), and falls at long lambda as the mode
     spreads past the dopant -- this wavelength dependence is what makes alpha(lambda) and
-    g*(lambda) genuine spectra, not just scaled cross-sections."""
+    g*(lambda) genuine spectra, not just scaled cross-sections. If fiber.overlap_override is set
+    (scalar or callable of lambda), it is used verbatim -- the hook for a measured overlap or for
+    Giles-parameter calibration that has already folded Gamma into the cross-sections."""
+    ov = fiber.overlap_override
+    if ov is not None:
+        val = ov(lambda_m) if callable(ov) else ov
+        return np.broadcast_to(np.asarray(val, np.float64),
+                               np.asarray(lambda_m, np.float64).shape).copy()
     w = mode_field_radius_m(fiber.core_radius_m, fiber.na, lambda_m)
     b = fiber.b_dope_m
     return 1.0 - np.exp(-2.0 * b ** 2 / w ** 2)

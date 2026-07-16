@@ -71,6 +71,9 @@ from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, ne
 from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_gain,
                                                frantz_nodvik_output_energy, frantz_nodvik_pulse,
                                                saturation_energy, simulate_transient)
+from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, calibration_report,
+                                                  dB_per_m_to_per_m, giles_calibrated_fiber,
+                                                  ion_from_cross_sections)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
@@ -85,4 +88,6 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "ThermalModel", "quantum_defect_fraction", "net_forward_flux", "heat_load_per_m",
            "total_heat_W", "radial_temperature_rise", "peak_temperature_rise",
            "TransientResult", "simulate_transient", "saturation_energy",
-           "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse"]
+           "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
+           "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
+           "calibration_report", "dB_per_m_to_per_m"]

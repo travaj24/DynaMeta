@@ -136,3 +136,29 @@ gain, 22.5 uJ seed -> ~0.57 mJ FNE prediction (measured 0.8 mJ, +1.5 dB, unquenc
 - **Yb reabsorption**: a short-wavelength (~1030 nm) signal in an under-pumped Yb fiber is
   ABSORBED (net loss), turning to gain only above the transparency pump level -- the
   quasi-three-level signature.
+
+## 9a. Achieved (implementation `dynameta/optics/fiber_amp/`, 34 pytest gates + validation.fiber_amp_physics)
+The steady state uses a RELAXATION solver (alternating forward/backward IVP sweeps), not
+solve_bvp (which overflows on ASE growing from the spontaneous floor through tens of dB).
+- Beer-Lambert: unpumped 8 m EDF -> -20.66 dB vs -20.67 dB analytic (0.007 dB).
+- Photon conservation: (signal+ASE photons gained)/(pump photons lost) = 0.915 <= 1.
+- Gain saturation: 1 uW->2 mW input compresses gain 24.1->14.7 dB, quenches fwd-ASE 20.3->0.14 mW.
+- NF: local n_sp >= 1 (exact) all configs; a long high-gain fiber is ASE-clamped at a realistic
+  3.66-3.84 dB, while a short heavily-doped preamp reaches NF -> 2.96 dB (n_sp -> 1.00), the
+  3.01 dB quantum floor. NF(PSD) == (2 n_sp(G-1)+1)/G to 1e-6.
+- Slope efficiency 0.602 <= Stokes 0.628 (96%); PCE 0.597 < ceiling. Gain-tilt peak migrates
+  1532.5 -> 1537.5 nm to the red as inversion drops 0.90 -> 0.45.
+- Concentration OPT-IN: concentration=None is byte-identical to an all-default ConcentrationModel.
+  Upconversion clamps nbar2/gain; 10% PIQ -> 1.65 dB unbleachable penalty; photodarkening ~nbar2^7
+  costs 4.99 dB at nbar2=0.996 (915 nm pump) vs 0.13 dB at 0.499 (976 nm zero-line) -- the latter
+  re-validating the Yb quasi-3-level 50% inversion cap when pumped on the zero line.
+- Cladding overlap ratio 7.67e-3 = Gamma_p/Gamma_core(980) to 0.03%. Heat balance exact
+  (pump_abs - sig_add - ASE_out == F(0)-F(L) == integral Q dz). Brown-Hoffman centre rise matches
+  an independent FD solve of the cylindrical heat equation. qd(Yb 976->1030)=5% << qd(Er)=37%.
+- Transient (nbar2(z,t), quasi-static powers, exp integrator) relaxes to the steady gain to
+  0.0019 dB; gain recovery tau_eff = 0.87 ms << bare 10 ms; add/drop XGM +23 dB.
+- Frantz-Nodvik: small E_in -> G0 E_in; large -> E_in + E_sat ln G0 (stored) exactly; temporal
+  P_out(t) integral matches; leading edge G0, trailing -> 1 in deep saturation.
+- Calibration: measured cross-section tables (CrossSectionTable) and vendor Giles alpha/g*
+  (giles_calibrated_fiber, overlap_override folds Gamma in) drive the same solver; Giles
+  round-trip reproduces alpha(1530) to 8e-5.
