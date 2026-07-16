@@ -178,7 +178,27 @@ solve_bvp (which overflows on ASE growing from the spontaneous floor through ten
   optical NF to <0.05 dB in the sig-spont-dominated limit (cross-check). sig-spont dominates at
   high signal, spont-spont at low; an optical filter (smaller B_o) cuts spont-spont.
 
+## 11. Pulsed / chirped-pulse amplification (Phases 12-14; pulse.py, cpa.py)
+The envelope A(z,t) [sqrt(W)] evolves by the GNLSE
+    dA/dz = i(beta2/2 d2/dt2 + beta3/6 d3/dt3)A + (g-alpha)/2 A + i gamma |A|^2 A,
+solved by the symmetric split-step Fourier method (dispersion+gain in frequency, Kerr in time),
+accumulating the B-integral gamma INT P_peak dz. Ref: Agrawal, "Nonlinear Fiber Optics";
+Strickland-Mourou (CPA).
+- **GNLSE core (Phase 12)**: validated against Gaussian dispersive broadening
+  T(z)=T0 sqrt(1+(z/L_D)^2), SPM spectral broadening (phi_max=4.5 pi -> 5 peaks, time envelope
+  preserved), the fundamental soliton (N=1, beta2<0 -> shape-invariant; pins the sign), energy
+  conservation to 9e-13, and flat gain -> exp(gL).
+- **Saturable spectral gain (Phase 13)**: SaturableGain g(omega,E) = g_small/(1+E/e_sat)
+  shape(omega). GAIN NARROWING (parabolic band) obeys 1/Omega_out^2 = 1/Omega_in^2 + G0/Omega_g^2
+  to 0.01% -- the effect that bounds the recompressed pulse. Couple e_sat to
+  dynamics.saturation_energy, g_small to the CW inversion.
+- **CPA chain (Phase 14)**: seed -> stretch(+GDD) -> amplify(GNLSE) -> compress(-GDD). Linear
+  recompression recovers a transform-limited pulse (Strehl 1.0000, exact FWHM); stretching lowers
+  the in-fiber peak power and hence the B-integral; and the B-integral is the compression
+  killer -- B=1.56 rad -> Strehl 0.75, B=5.2 rad -> 0.24 (the "keep B < ~1-2 rad" design rule).
+  Strehl = compressed peak / transform-limited peak.
+
 Still on the table (documented, not built): SRS/SBS and transverse-mode instability (high-power
-limiters), a gain+dispersion+Kerr pulse-propagation GNLSE (Frantz-Nodvik is the energy limit
-only), thermal lensing / transient heat diffusion, Er:Yb co-doping, and full transverse/
-polarization-resolved gain.
+limiters), thermal lensing / transient heat diffusion, Er:Yb co-doping, full transverse/
+polarization-resolved gain, and the delayed Raman response / self-steepening terms of the full
+GNLSE (self-frequency shift) -- the current pulse core carries dispersion + Kerr SPM.

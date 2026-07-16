@@ -85,6 +85,8 @@ from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
 from dynameta.optics.fiber_amp.pulse import (Pulse, gaussian_pulse, sech_pulse,
                                             dispersion_length, nonlinear_length, soliton_order,
                                             propagate_gnlse, SaturableGain)
+from dynameta.optics.fiber_amp.cpa import (apply_spectral_phase, transform_limited, strehl_ratio,
+                                          CPAResult, cpa_chain)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
@@ -105,4 +107,5 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "calibration_report", "dB_per_m_to_per_m",
            "BeatNoiseResult", "detection_noise",
            "Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "SaturableGain"]
+           "soliton_order", "propagate_gnlse", "SaturableGain",
+           "apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResult", "cpa_chain"]
