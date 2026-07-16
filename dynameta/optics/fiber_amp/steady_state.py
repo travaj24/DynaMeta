@@ -74,16 +74,29 @@ class SteadyStateResult:
 class FiberAmplifier:
     """A rare-earth fiber amplifier: an ion + fiber + a channel plan (pumps, signals, an ASE
     band). solve() returns the steady-state z-profiles, signal gain, and the output ASE
-    spectrum. upconversion_C_up (Phase 5) and cladding pumping (via FiberSpec.clad_radius_m +
-    Pump.cladding) are opt-in."""
+    spectrum. Concentration/degradation effects (upconversion, pair-induced quenching,
+    photodarkening -- Phase 5, via a ConcentrationModel or the raw upconversion_C_up) and
+    cladding pumping (via FiberSpec.clad_radius_m + Pump.cladding) are opt-in; with
+    concentration=None and upconversion_C_up=0 the solve is the ideal model."""
 
     def __init__(self, ion: RareEarthIon, fiber: FiberSpec, pumps: List[Pump],
                  signals: List[Signal], ase: Optional[AseBand] = None, *,
-                 upconversion_C_up: float = 0.0):
+                 upconversion_C_up: float = 0.0, concentration=None):
         self.ion, self.fiber = ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase = ase
-        self.upconversion_C_up = float(upconversion_C_up)
+        # an all-default (identity) model collapses to the None path: truly byte-identical
+        if concentration is not None and getattr(concentration, "is_identity", False):
+            concentration = None
+        self.concentration = concentration
+        if concentration is not None:
+            self.upconversion_C_up = float(concentration.c_up_m3_s)
+            self._n_active = concentration.active_density(fiber.n_t_m3)
+            self._n_dark = concentration.dark_density(fiber.n_t_m3)
+        else:
+            self.upconversion_C_up = float(upconversion_C_up)
+            self._n_active = fiber.n_t_m3
+            self._n_dark = 0.0
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self) -> Tuple[ChannelSet, np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -129,7 +142,7 @@ class FiberAmplifier:
         tau = ch.tau_s
         if self.upconversion_C_up <= 0.0:
             return tau * R_a / (1.0 + tau * (R_a + R_e))
-        A2 = self.upconversion_C_up * self.fiber.n_t_m3
+        A2 = self.upconversion_C_up * self._n_active     # upconversion among active excited ions
         B = 1.0 / tau + R_a + R_e
         return (-B + np.sqrt(B * B + 4.0 * A2 * R_a)) / (2.0 * A2)
 
@@ -137,11 +150,16 @@ class FiberAmplifier:
         """dP_k/dz [W/m] for every channel from the full local power vector P (K,)."""
         P = np.maximum(P, 0.0)
         n2 = self._nbar2(ch, P)
-        g = (ch.gamma * self.fiber.n_t_m3
-             * (ch.sigma_e * n2 - ch.sigma_a * (1.0 - n2)) - ch.loss_per_m)
+        na = self._n_active
+        g = (ch.gamma * na * (ch.sigma_e * n2 - ch.sigma_a * (1.0 - n2)) - ch.loss_per_m)
+        if self.concentration is not None:
+            # quenched dark-pair ions: unbleachable ground-state absorption at every wavelength
+            g = g - ch.gamma * self._n_dark * ch.sigma_a
+            # photodarkening: inversion-dependent gray excess loss
+            g = g - self.concentration.photodarkening_loss_per_m(n2)
         m = self.ase.m_modes if self.ase else 2
         s = np.where(ch.is_ase,
-                     ch.gamma * self.fiber.n_t_m3 * ch.sigma_e * n2 * m
+                     ch.gamma * na * ch.sigma_e * n2 * m
                      * H_PLANCK * ch.nu_hz * ch.dnu_hz, 0.0)
         return ch.u * (g * P + s)
 

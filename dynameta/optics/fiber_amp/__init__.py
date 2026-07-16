@@ -63,6 +63,8 @@ from dynameta.optics.fiber_amp.metrics import (CompressionCurve, GainSpectrum, S
                                               gain_spectrum, power_conversion_efficiency,
                                               saturation_output_power, slope_efficiency,
                                               stokes_limit)
+from dynameta.optics.fiber_amp.concentration import (ConcentrationModel, erbium_upconversion,
+                                                    ytterbium_photodarkening)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
@@ -72,4 +74,5 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "local_inversion_factor", "analyze_noise",
            "CompressionCurve", "GainSpectrum", "SlopeEfficiency", "gain_compression_curve",
            "gain_flatness", "gain_spectrum", "power_conversion_efficiency",
-           "saturation_output_power", "slope_efficiency", "stokes_limit"]
+           "saturation_output_power", "slope_efficiency", "stokes_limit",
+           "ConcentrationModel", "erbium_upconversion", "ytterbium_photodarkening"]
