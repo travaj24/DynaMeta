@@ -17,6 +17,7 @@ from dynameta.optics.fiber_amp import (
     peak_temperature_rise, radial_temperature_rise,
     simulate_transient, saturation_energy, frantz_nodvik_output_energy, frantz_nodvik_pulse,
     CrossSectionTable, giles_calibrated_fiber, dB_per_m_to_per_m,
+    detection_noise,
 )
 
 ER = erbium("aluminosilicate")
@@ -465,3 +466,38 @@ def test_multiphonon_energy_gap_law():
     assert abs(big - tau) / tau < 0.01                 # large gap ~ radiative (energy-gap law)
     assert small < 0.9 * tau                           # small gap quenched
     assert small_hot < small and big > small           # T lowers tau; larger gap less quenched
+
+
+# ============================ Phase 11: detector beat-noise spectra ============================
+
+def _bn_amp(sig_W):
+    return FiberAmplifier(ER, _edf(6.0), [Pump(120e-3, 0.980e-6, "fwd")],
+                          [Signal(sig_W, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 20))
+
+
+def test_beat_noise_nf_reduces_to_optical_nf():
+    r = _bn_amp(1e-3).solve()                           # strong signal -> signal-spont dominated
+    nf_lin, _, _ = noise_figure(r, 1.560e-6)
+    bn = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9,
+                         quantum_efficiency=1.0)
+    assert bn.dominant_term == "sig-sp"
+    assert abs(bn.nf_beat_dB - 10.0 * np.log10(nf_lin)) < 0.05
+
+
+def test_beat_noise_term_crossover():
+    lo = detection_noise(_bn_amp(1e-9).solve(), 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+    hi = detection_noise(_bn_amp(1e-3).solve(), 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+    assert lo.dominant_term == "sp-sp" and hi.dominant_term == "sig-sp"
+
+
+def test_optical_filter_cuts_spont_spont():
+    r = _bn_amp(1e-9).solve()
+    wide = detection_noise(r, 1.560e-6, optical_bw_Hz=200e9, electrical_bw_Hz=10e9)
+    narrow = detection_noise(r, 1.560e-6, optical_bw_Hz=25e9, electrical_bw_Hz=10e9)
+    assert narrow.var_sp_sp < wide.var_sp_sp and narrow.snr_elec_dB > wide.snr_elec_dB
+
+
+def test_electrical_snr_rises_with_signal():
+    snr = [detection_noise(_bn_amp(p).solve(), 1.560e-6, optical_bw_Hz=50e9,
+                           electrical_bw_Hz=10e9).snr_elec_dB for p in (1e-6, 1e-5, 1e-4)]
+    assert snr[0] < snr[1] < snr[2]

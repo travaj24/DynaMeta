@@ -162,3 +162,23 @@ solve_bvp (which overflows on ASE growing from the spontaneous floor through ten
 - Calibration: measured cross-section tables (CrossSectionTable) and vendor Giles alpha/g*
   (giles_calibrated_fiber, overlap_override folds Gamma in) drive the same solver; Giles
   round-trip reproduces alpha(1530) to 8e-5.
+
+## 10. Accuracy extensions (Phases 9-11; all opt-in, byte-identical when off)
+- **Excited-state absorption (Phase 9)**: sigma_esa on the ion adds a parasitic beam loss
+  -Gamma n_t sigma_esa nbar2 (cycling limit; inversion unchanged). erbium(esa=True) 980 nm pump
+  ESA costs ~1.5 dB gain and pushes heat/pump_abs 0.43 -> 0.83; monotonic; localized on the pump.
+  Yb is ESA-free (one excited 4f manifold).
+- **Temperature (Phase 10)**: at_temperature McCumber-scales sigma_e from a reference T
+  (sigma_a held); T=T_ref byte-identical; zero-line crossover T-invariant to 1e-12; captures the
+  EDFA gain-tilt-with-T (1560 nm gain 24.0 -> 20.8 dB over 280 -> 360 K). multiphonon_lifetime =
+  Miyakawa-Dexter energy-gap law W_nr = coupling exp(-alpha*gap)(nbar+1)^p (large gap ~ radiative,
+  small gap quenched, tau falls with T).
+- **Detector beat noise (Phase 11)**: detection_noise gives shot / signal-spont / spont-spont
+  photocurrent variances, electrical SNR, added RIN, and a beat-noise NF that reduces to the
+  optical NF to <0.05 dB in the sig-spont-dominated limit (cross-check). sig-spont dominates at
+  high signal, spont-spont at low; an optical filter (smaller B_o) cuts spont-spont.
+
+Still on the table (documented, not built): SRS/SBS and transverse-mode instability (high-power
+limiters), a gain+dispersion+Kerr pulse-propagation GNLSE (Frantz-Nodvik is the energy limit
+only), thermal lensing / transient heat diffusion, Er:Yb co-doping, and full transverse/
+polarization-resolved gain.
