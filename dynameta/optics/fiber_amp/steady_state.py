@@ -212,4 +212,8 @@ class FiberAmplifier:
         sig_idx = [i for i, k in enumerate(kind) if k == "signal"]
         gains_dB = np.array([10.0 * np.log10(P[i, -1] / bc[i]) for i in sig_idx])
         return SteadyStateResult(z, P, ch.lambda_m, u, is_ase, kind, n2, gains_dB,
-                                 meta={"converged": converged, "iterations": it + 1})
+                                 meta={"converged": converged, "iterations": it + 1,
+                                       "dnu_hz": ch.dnu_hz.copy(),
+                                       "sigma_a": ch.sigma_a.copy(),
+                                       "sigma_e": ch.sigma_e.copy(),
+                                       "gamma": ch.gamma.copy()})
