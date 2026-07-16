@@ -68,6 +68,9 @@ from dynameta.optics.fiber_amp.concentration import (ConcentrationModel, erbium_
 from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, net_forward_flux,
                                               peak_temperature_rise, quantum_defect_fraction,
                                               radial_temperature_rise, total_heat_W)
+from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_gain,
+                                               frantz_nodvik_output_energy, frantz_nodvik_pulse,
+                                               saturation_energy, simulate_transient)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
@@ -80,4 +83,6 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "saturation_output_power", "slope_efficiency", "stokes_limit",
            "ConcentrationModel", "erbium_upconversion", "ytterbium_photodarkening",
            "ThermalModel", "quantum_defect_fraction", "net_forward_flux", "heat_load_per_m",
-           "total_heat_W", "radial_temperature_rise", "peak_temperature_rise"]
+           "total_heat_W", "radial_temperature_rise", "peak_temperature_rise",
+           "TransientResult", "simulate_transient", "saturation_energy",
+           "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse"]
