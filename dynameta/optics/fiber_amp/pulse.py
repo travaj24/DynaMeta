@@ -21,7 +21,7 @@ from typing import Callable, Optional
 import numpy as np
 
 __all__ = ["Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse"]
+           "soliton_order", "propagate_gnlse", "SaturableGain"]
 
 
 @dataclass
@@ -135,6 +135,37 @@ def soliton_order(t0_s: float, peak_power_W: float, beta2_s2_m: float, gamma_W_m
 
 # ---- the GNLSE split-step propagator -------------------------------------------------------
 
+@dataclass(frozen=True)
+class SaturableGain:
+    """A saturable, spectrally-shaped fiber-amplifier gain for the GNLSE (Phase 13). The local
+    power-gain coefficient is
+        g(omega, E) = g_small_per_m * 1/(1 + E/e_sat_J) * shape(omega),
+    with E the pulse energy at the current z (homogeneous saturation) and shape a normalized band
+    of half-width gain_bandwidth_rad_s about center_omega_rad_s: 'parabolic' 1-x^2 (the analytic
+    gain-narrowing model), 'lorentzian' 1/(1+x^2), or 'gaussian' exp(-x^2). A short pulse's
+    spectrum is progressively NARROWED as its wings see less gain than the centre -- the effect
+    that bounds the recompressed CPA pulse duration. Couple to the CW model via g_small from the
+    inversion and e_sat_J = dynamics.saturation_energy."""
+    g_small_per_m: float
+    e_sat_J: float
+    gain_bandwidth_rad_s: float
+    shape: str = "parabolic"
+    center_omega_rad_s: float = 0.0
+
+    def g_omega(self, energy_J: float, omega) -> np.ndarray:
+        sat = 1.0 / (1.0 + energy_J / self.e_sat_J)
+        x = (np.asarray(omega, float) - self.center_omega_rad_s) / self.gain_bandwidth_rad_s
+        if self.shape == "parabolic":
+            shp = 1.0 - x ** 2
+        elif self.shape == "lorentzian":
+            shp = 1.0 / (1.0 + x ** 2)
+        elif self.shape == "gaussian":
+            shp = np.exp(-x ** 2)
+        else:
+            raise ValueError("SaturableGain.shape must be parabolic|lorentzian|gaussian")
+        return self.g_small_per_m * sat * shp
+
+
 @dataclass
 class PropagationResult:
     output: Pulse
@@ -147,27 +178,36 @@ class PropagationResult:
 def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
                     beta3_s3_m: float = 0.0, gamma_W_m: float = 0.0, loss_per_m: float = 0.0,
                     gain_per_m: float = 0.0, gain_omega: Optional[Callable] = None,
+                    saturable_gain: Optional["SaturableGain"] = None,
                     n_steps: int = 400, store_slices: int = 0) -> PropagationResult:
     """Propagate a Pulse through length_m of fiber by the symmetric split-step Fourier method:
     exp(h/2 D) exp(h N) exp(h/2 D) per step, with D the linear (dispersion + gain/loss) operator
-    in frequency and N = i gamma |A|^2 the Kerr operator in time. gain_omega(omega)->g [1/m] gives
-    a spectrally-shaped gain (else the flat gain_per_m). Returns the output pulse, the accumulated
-    B-integral, and optionally store_slices field snapshots along z."""
+    in frequency and N = i gamma |A|^2 the Kerr operator in time. Gain options: a flat gain_per_m,
+    a fixed spectral gain_omega(omega)->g [1/m], or a SaturableGain (Phase 13) whose spectral gain
+    is recomputed each step from the pulse energy at that z (energy grows -> gain saturates). With
+    saturable_gain=None the linear operator is precomputed once. Returns the output pulse, the
+    accumulated B-integral, and optionally store_slices field snapshots along z."""
     A = pulse.field.astype(np.complex128).copy()
     w = pulse.omega_rad_s()
-    D = 1j * (beta2_s2_m / 2.0 * w ** 2 + beta3_s3_m / 6.0 * w ** 3) - 0.5 * loss_per_m
+    dt = pulse.dt_s
+    D_fixed = 1j * (beta2_s2_m / 2.0 * w ** 2 + beta3_s3_m / 6.0 * w ** 3) - 0.5 * loss_per_m
     if gain_omega is not None:
-        D = D + 0.5 * np.asarray(gain_omega(w), np.complex128)
-    else:
-        D = D + 0.5 * gain_per_m
+        D_fixed = D_fixed + 0.5 * np.asarray(gain_omega(w), np.complex128)
+    elif gain_per_m:
+        D_fixed = D_fixed + 0.5 * gain_per_m
     h = length_m / n_steps
-    half = np.exp(D * (h / 2.0))
+    half_static = None if saturable_gain is not None else np.exp(D_fixed * (h / 2.0))
     b_int = 0.0
 
     slices, zs = [], []
     store_every = max(1, n_steps // store_slices) if store_slices else 0
 
     for k in range(n_steps):
+        if saturable_gain is not None:
+            E = float(np.sum(np.abs(A) ** 2) * dt)               # pulse energy at this z
+            half = np.exp((D_fixed + 0.5 * saturable_gain.g_omega(E, w)) * (h / 2.0))
+        else:
+            half = half_static
         A = np.fft.ifft(half * np.fft.fft(A))
         p = np.abs(A) ** 2
         b_int += gamma_W_m * float(p.max()) * h

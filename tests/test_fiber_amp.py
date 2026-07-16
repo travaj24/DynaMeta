@@ -19,6 +19,7 @@ from dynameta.optics.fiber_amp import (
     CrossSectionTable, giles_calibrated_fiber, dB_per_m_to_per_m,
     detection_noise,
     gaussian_pulse, sech_pulse, dispersion_length, soliton_order, propagate_gnlse,
+    SaturableGain,
 )
 
 ER = erbium("aluminosilicate")
@@ -551,3 +552,39 @@ def test_gnlse_energy_conservation_and_flat_gain():
     assert abs(r.output.energy_J - p.energy_J) / p.energy_J < 1e-9      # lossless -> conserved
     rg = propagate_gnlse(p, 1.0, gain_per_m=2.3, n_steps=200)
     assert abs(rg.output.energy_J / p.energy_J - np.exp(2.3)) / np.exp(2.3) < 1e-6
+
+
+# ============================ Phase 13: saturable, spectrally-shaped gain =====================
+
+def _osp(pulse):
+    return pulse.spectral_fwhm_rad_s() / (2.0 * np.sqrt(np.log(2.0)))    # Gaussian Omega
+
+
+def test_saturable_gain_flat_limit():
+    t = _pulse_grid()
+    sg = SaturableGain(g_small_per_m=1.0, e_sat_J=1.0, gain_bandwidth_rad_s=1e15)
+    p = gaussian_pulse(t, t0_s=1e-12, energy_J=1e-12)      # E << e_sat, broad band
+    r = propagate_gnlse(p, 2.0, saturable_gain=sg, n_steps=150)
+    assert abs(r.output.energy_J / p.energy_J - np.exp(2.0)) / np.exp(2.0) < 1e-3
+
+
+def test_gain_narrowing_matches_analytic():
+    t = _pulse_grid()
+    t0, Og, g0, L = 0.2e-12, 1.0e13, 1.0, 3.0
+    sg = SaturableGain(g0, 1e6, Og, "parabolic")
+    p = gaussian_pulse(t, t0_s=t0, energy_J=1e-12)
+    out = propagate_gnlse(p, L, saturable_gain=sg, n_steps=300).output
+    Om_in, Om_out = _osp(p), _osp(out)
+    Om_analytic = 1.0 / np.sqrt(1.0 / Om_in ** 2 + g0 * L / Og ** 2)
+    assert Om_out < Om_in                                  # narrowed
+    assert abs(Om_out - Om_analytic) / Om_analytic < 0.03  # 1/Om^2 = 1/Om_in^2 + G0/Og^2
+
+
+def test_saturable_gain_compresses_with_energy():
+    t = _pulse_grid()
+    sg = SaturableGain(1.0, 1e-9, 1e15, "parabolic")
+    dB = [10.0 * np.log10(propagate_gnlse(gaussian_pulse(t, t0_s=1e-12, energy_J=E), 2.0,
+                                          saturable_gain=sg, n_steps=150).output.energy_J
+                          / E) for E in (1e-13, 1e-9, 1e-8)]
+    assert dB[0] > dB[1] > dB[2]                           # gain compresses with input energy
+    assert abs(dB[0] - 10.0 * np.log10(np.exp(2.0))) < 0.05     # low-E -> exp(g_small L)
