@@ -53,7 +53,15 @@ from dynameta.optics.fiber_amp.waveguide import (FiberSpec, cladding_pump_overla
                                                  mode_field_radius_m, overlap_gamma)
 from dynameta.optics.fiber_amp.rare_earth import (ChannelSet, ase_source_per_m, dP_dz,
                                                   gain_coeff_per_m, metastable_fraction)
+from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, Signal,
+                                                   SteadyStateResult)
+from dynameta.optics.fiber_amp.noise import (AseSpectrum, NoiseResult, analyze_noise,
+                                            local_inversion_factor, noise_figure,
+                                            output_ase_spectrum)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
-           "ChannelSet", "metastable_fraction", "gain_coeff_per_m", "ase_source_per_m", "dP_dz"]
+           "ChannelSet", "metastable_fraction", "gain_coeff_per_m", "ase_source_per_m", "dP_dz",
+           "Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult",
+           "AseSpectrum", "NoiseResult", "output_ase_spectrum", "noise_figure",
+           "local_inversion_factor", "analyze_noise"]
