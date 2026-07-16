@@ -48,7 +48,8 @@ The imports below are populated as each phase lands.
 """
 
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
-                                                    ytterbium)
+                                                    ytterbium, at_temperature,
+                                                    multiphonon_lifetime)
 from dynameta.optics.fiber_amp.waveguide import (FiberSpec, cladding_pump_overlap,
                                                  mode_field_radius_m, overlap_gamma)
 from dynameta.optics.fiber_amp.rare_earth import (ChannelSet, ase_source_per_m, dP_dz,
@@ -76,6 +77,7 @@ from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, calibratio
                                                   ion_from_cross_sections)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
+           "at_temperature", "multiphonon_lifetime",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
            "ChannelSet", "metastable_fraction", "gain_coeff_per_m", "ase_source_per_m", "dP_dz",
            "Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult",

@@ -19,7 +19,8 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK, KB
 
-__all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium"]
+__all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
+           "at_temperature", "multiphonon_lifetime"]
 
 
 @dataclass(frozen=True)
@@ -140,3 +141,63 @@ def ytterbium(host: str = "aluminosilicate") -> RareEarthIon:
         (1.060e-6, 0.035e-6, 0.040 * pk_a),           # 1060 nm emission tail
     ))
     return RareEarthIon("Yb3+", sigma_a, sigma_e, tau_s=tau, zero_line_m=lam_a, host=host)
+
+
+# ---- temperature dependence (docs sec.10) --------------------------------------------------
+
+@dataclass(frozen=True)
+class _McCumberScaledEmission:
+    """Emission cross-section re-scaled from a reference temperature to T by the McCumber factor
+    ratio: sigma_e(nu, T) = sigma_e(nu, T_ref) exp[(eps - h nu)(1/kT - 1/kT_ref)]. At T = T_ref
+    the factor is exactly 1 (the reference spectrum is returned unchanged), and the detailed-
+    balance crossover stays pinned at the zero line (eps = h nu) for every T. Duck-types the
+    CrossSectionModel .sigma() interface."""
+    base: object
+    eps_J: float
+    T_K: float
+    T_ref_K: float
+
+    def sigma(self, lambda_m):
+        lam = np.asarray(lambda_m, dtype=np.float64)
+        nu = C_LIGHT / lam
+        expo = (self.eps_J - H_PLANCK * nu) * (1.0 / (KB * self.T_K) - 1.0 / (KB * self.T_ref_K))
+        out = np.asarray(self.base.sigma(lam), np.float64) * np.exp(expo)
+        return out if out.ndim else float(out)
+
+
+def at_temperature(ion: RareEarthIon, T_K: float, *, T_ref_K: float = 300.0,
+                   eps_J: float = None, tau_s: float = None) -> RareEarthIon:
+    """Return a copy of ion at operating temperature T_K (docs sec.10). The emission cross-section
+    is McCumber-scaled from T_ref_K to T (sigma_a and the zero line are held -- sigma_a's own
+    thermal-broadening is second order); at T = T_ref_K the ion is byte-identical. Pass tau_s to
+    override the lifetime (e.g. from multiphonon_lifetime); otherwise the reference tau is kept.
+    eps_J defaults to the zero-line photon energy h c / zero_line_m."""
+    if eps_J is None:
+        eps_J = H_PLANCK * C_LIGHT / ion.zero_line_m
+    if float(T_K) == float(T_ref_K) and tau_s is None:
+        return ion                                      # exact no-op at the reference temperature
+    se_T = _McCumberScaledEmission(ion.sigma_e, eps_J, float(T_K), float(T_ref_K))
+    return RareEarthIon(ion.name, ion.sigma_a, se_T, ion.tau_s if tau_s is None else float(tau_s),
+                        ion.zero_line_m, ion.host, sigma_esa=ion.sigma_esa)
+
+
+def multiphonon_lifetime(tau_radiative_s: float, T_K: float, *, gap_cm: float,
+                         phonon_cm: float = 1100.0, coupling_per_s: float = 0.0,
+                         alpha_per_cm: float = 4.5e-3) -> float:
+    """Metastable lifetime at T from multiphonon nonradiative decay (docs sec.10), the
+    Miyakawa-Dexter energy-gap law with the Bose stimulated-phonon temperature factor:
+        1/tau(T) = 1/tau_radiative + W_nr(T),
+        W_nr(T) = coupling * exp(-alpha_per_cm * gap_cm) * (nbar + 1)^p,
+        nbar = 1/(exp(h c phonon_cm / kT) - 1),  p = gap_cm / phonon_cm  (phonons to bridge gap).
+    The exp(-alpha*gap) ENERGY-GAP LAW is the dominant gap dependence -- a LARGER gap is
+    exponentially LESS quenched, which is why Er (4I13/2 ~6500 cm^-1) is nearly radiative /
+    T-independent while a small-gap transition quenches strongly. The (nbar+1)^p factor makes
+    W_nr rise with T. coupling=0 -> purely radiative (tau_radiative, T-independent)."""
+    if coupling_per_s <= 0.0:
+        return float(tau_radiative_s)
+    nu_ph = C_LIGHT * (phonon_cm * 100.0)               # phonon frequency [Hz] (cm^-1 -> m^-1 -> Hz)
+    nbar = 1.0 / (np.expm1(H_PLANCK * nu_ph / (KB * float(T_K))))
+    p = gap_cm / phonon_cm
+    w0 = coupling_per_s * np.exp(-alpha_per_cm * gap_cm)     # energy-gap law (T->0 rate)
+    w_nr = w0 * (nbar + 1.0) ** p
+    return float(1.0 / (1.0 / tau_radiative_s + w_nr))
