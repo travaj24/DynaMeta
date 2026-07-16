@@ -78,3 +78,71 @@ def test_optical_transient_requires_exactly_one_drude():
     with pytest.raises(ValueError):
         optical_transient_response(t, lambda tt: N, 1500e-9, drude_model=DRUDE0,
                                    drude_of_t=lambda tt: DRUDE0)                    # both
+
+
+def test_kane_mass_sommerfeld_coefficient_vs_exact_fd():
+    # audit C2-2: the (5 pi^2/12) Sommerfeld coefficient must carry the Kane-DOS factor
+    # (1+2aE_F)/(1+aE_F). Every prior gate pinned limits/scaling only and was blind to
+    # it (parabolic coefficient understated the heating SHIFT d<E> by 18-25% here).
+    # Reference: EXACT Fermi-Dirac mean energy over the Kane DOS at fixed n -- an
+    # independent numeric path with no Sommerfeld expansion. The pinned quantity is the
+    # Te-EXCURSION dm(Te) = m(Te) - m(Te->0) (the modulation observable); the T=0
+    # baseline itself keeps the module's parabolic (3/5)E_F convention (a static offset
+    # absorbed by DrudeOptical calibration, out of C2-2 scope).
+    import numpy as np
+    from scipy.integrate import quad
+    from scipy.optimize import brentq
+    from dynameta.carriers.carrier_heating import fermi_energy_J, kane_mass_of_Te
+    from dynameta.constants import HBAR, KB, M_E, Q_E
+
+    m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
+    a = alpha / Q_E
+    pref = (2.0 * m0) ** 1.5 / (2.0 * np.pi ** 2 * HBAR ** 3)   # spin-2 3D DOS prefactor
+
+    def g(E):
+        return pref * (1.0 + 2.0 * a * E) * np.sqrt(np.maximum(E * (1.0 + a * E), 0.0))
+
+    def fd(E, mu, kT):
+        return 1.0 / (1.0 + np.exp(np.clip((E - mu) / kT, -60.0, 60.0)))
+
+    E_F = float(fermi_energy_J(n, m0, alpha))
+    Emax = 12.0 * E_F
+
+    def mean_E_exact(Te):
+        kT = KB * Te
+        n_of = lambda mu: quad(lambda E: g(E) * fd(E, mu, kT), 0.0, Emax, limit=300)[0]
+        mu = brentq(lambda m: n_of(m) - n, -E_F, 3.0 * E_F, xtol=1e-26)
+        return quad(lambda E: E * g(E) * fd(E, mu, kT), 0.0, Emax, limit=300)[0] / n
+
+    T0 = 1.0                                                    # ~T=0 baseline
+    m_base_code = float(kane_mass_of_Te(m0, alpha, n, T0))
+    m_base_ex = m0 * (1.0 + 2.0 * a * mean_E_exact(T0))
+    for Te in (600.0, 1000.0, 1500.0):
+        dm_code = float(kane_mass_of_Te(m0, alpha, n, Te)) - m_base_code
+        dm_ex = m0 * (1.0 + 2.0 * a * mean_E_exact(Te)) - m_base_ex
+        # corrected coefficient tracks the exact shift to a few % (Sommerfeld O(x^4)
+        # truncation); the pre-fix parabolic coefficient missed by 18-25% -> 5x margin
+        assert abs(dm_code / dm_ex - 1.0) < 0.05, (Te, dm_code / dm_ex)
+
+
+def test_transient_rejects_silent_callable_substitution():
+    # audit C5-10: a calibrated DrudeOptical (callable m_opt/gamma) used to be silently
+    # replaced by M_E / 1e14 rad/s -- a different material, violating the off-switch
+    import numpy as np
+    import pytest
+    from dynameta.carriers.carrier_heating import TwoTempParams, carrier_heating_transient
+    from dynameta.constants import M_E
+    from dynameta.materials import DrudeOptical, KaneOpticalMass, MatthiessenGamma
+    ttm = TwoTempParams(C_e=3.0e4, C_l=2.5e6, G_e_l=3.0e16)
+    t = np.linspace(0.0, 1e-12, 8)
+    I = lambda tt: 0.0
+    d_mass = DrudeOptical(eps_inf=3.9, m_opt_kg=KaneOpticalMass(m0_kg=0.3 * M_E, alpha_eV=0.5),
+                          gamma_rad_s=1.6e14)
+    with pytest.raises(ValueError, match="m0_kg"):
+        carrier_heating_transient(t, I, 1.5e-6, drude0=d_mass, ttm_params=ttm,
+                                  n_m3=6e26, alpha_per_eV=0.5)
+    d_gam = DrudeOptical(eps_inf=3.9, m_opt_kg=0.3 * M_E,
+                         gamma_rad_s=MatthiessenGamma(gamma_const_rad_s=1.6e14))
+    with pytest.raises(ValueError, match="gamma_rad_s"):
+        carrier_heating_transient(t, I, 1.5e-6, drude0=d_gam, ttm_params=ttm,
+                                  n_m3=6e26, alpha_per_eV=0.5, m0_kg=0.3 * M_E)

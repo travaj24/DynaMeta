@@ -82,8 +82,14 @@ def slice_profile(eps_of_z, z_m, *, n_slices: Optional[int] = None) -> List[Laye
 
     This is the z-slicer the RCWA/TMM backends need for a graded layer (the carrier ENZ
     accumulation profile, a thermo-optic/field gradient): a continuous eps(z) becomes a
-    staircase of uniform slabs. The slabs are returned in the SAME order as `z_m`, so order
-    z from the superstrate side to the substrate side before calling.
+    staircase of uniform slabs. The slabs are ALWAYS returned in ASCENDING-z order,
+    regardless of the input direction (a descending `z_m` is normalized internally; each
+    slab keeps its physical z-interval). In this library's z-up frame ascending-z means
+    SUBSTRATE-side first, so a consumer building a superstrate-first stack
+    (LayeredStack.slabs, tmm/RCWA/PMM/Berreman layer lists) MUST reverse the returned
+    list -- see tmm_reference.py and the lumenairy bridges (audit C5-1: an unreversed
+    consumer vertically flips every asymmetric graded profile, invisibly to energy
+    closure).
 
     Args:
       eps_of_z : complex permittivity sampled at `z_m`.
@@ -99,8 +105,8 @@ def slice_profile(eps_of_z, z_m, *, n_slices: Optional[int] = None) -> List[Laye
         raise ValueError("slice_profile: eps_of_z and z_m must be 1D, equal length >= 2.")
     if not (np.all(np.diff(z) > 0) or np.all(np.diff(z) < 0)):
         raise ValueError("slice_profile: z_m must be monotonic.")
-    if z[0] > z[-1]:                                  # normalize to ascending, keep slab order
-        z, eps = z[::-1], eps[::-1]
+    if z[0] > z[-1]:                                  # normalize to ascending (output is
+        z, eps = z[::-1], eps[::-1]                   # ALWAYS ascending-z, see docstring)
     if n_slices is None:
         return [LayeredSlab(float(z[k + 1] - z[k]), eps=complex(0.5 * (eps[k] + eps[k + 1])))
                 for k in range(z.size - 1)]
@@ -195,8 +201,12 @@ def collapse_regions_to_layers(design, eps_by_region) -> dict:
     lifted field, so identical-by-construction) and merge to one entry; members that
     genuinely differ (a laterally split effect modulation no layered extractor can
     represent) raise. IDENTITY for an already-layer-keyed dict; superstrate / substrate /
-    pml_* / other unmatched keys are ignored. Longest layer name claims a key first, so
-    overlapping layer-name prefixes cannot mis-assign."""
+    pml_* keys are ignored. Any OTHER unclaimed key raises (audit C5-11): a drifted /
+    renamed / typo'd region key used to be silently dropped, making the layer's
+    bias-modulated eps silently revert to the nominal material in every layered backend
+    (probe: output bit-identical to passing no eps dict) while the FEM side of the same
+    seam fails loudly for exactly this drift class. Longest layer name claims a key
+    first, so overlapping layer-name prefixes cannot mis-assign."""
     if not eps_by_region:
         return {}
     remaining = dict(eps_by_region)
@@ -218,4 +228,13 @@ def collapse_regions_to_layers(design, eps_by_region) -> dict:
                     "eps fields (a laterally split modulation); the layered extractors "
                     "cannot represent it -- use the FEM solver".format(L.name, keys))
         out[L.name] = ref
+    unclaimed = [k for k in remaining
+                 if k not in ("superstrate", "substrate") and not k.startswith("pml_")]
+    if unclaimed:
+        raise ValueError(
+            "collapse_regions_to_layers: eps_by_region keys {} match no design layer "
+            "(layers: {}) -- a drifted/renamed region key would silently revert that "
+            "layer to its nominal material eps (audit C5-11). Key entries by the design "
+            "layer name (or its FEM subregion names).".format(
+                sorted(unclaimed), sorted(L.name for L in design.stack.layers)))
     return out

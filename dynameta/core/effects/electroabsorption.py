@@ -14,7 +14,8 @@ import numpy as np
 from dynameta.constants import C_LIGHT, EPS0, HBAR, Q_E
 from dynameta.core.backend import is_jax_array
 from dynameta.core.numerics import trapz
-from dynameta.core.effects.base import _E_vec, _photon_energy_J, kramers_kronig_dn
+from dynameta.core.effects.base import (_E_vec, _photon_energy_J, kramers_kronig_dn,
+                                        kramers_kronig_dn_rows)
 
 @dataclass
 class ElectroAbsorptionModel:
@@ -145,8 +146,11 @@ class ElectroAbsorptionModel:
         a = self.alpha0_per_m * ratio * g                              # 1s excitonic line
         if self.continuum_alpha0_per_m > 0.0 and self.continuum_binding_J > 0.0:
             # Elliott band-to-band continuum above the UNBOUND edge E_cont = E_T + E_binding, with the
-            # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi sqrt(E_b/dE))) -> 2 at the edge and
-            # -> 1 far above (a step joint-DOS, edge-enhanced). The continuum STRENGTH is set by the
+            # 2D Sommerfeld enhancement S_2D(dE) = 2/(1+exp(-2 pi gamma)), gamma = sqrt(R/dE) with
+            # R the effective 3D Rydberg = E_b(2D)/4 (Shinada-Sugano / Haug-Koch), i.e. in terms of
+            # the 2D binding the exponent is -pi sqrt(E_b/dE) -> 2 at the edge and -> 1 far above
+            # (a step joint-DOS, edge-enhanced). audit 7b P3: the exponent was previously doubled
+            # (-2 pi sqrt(E_b/dE)), over-enhancing the continuum by up to ~20% for dE ~ (2-30) E_b. The continuum STRENGTH is set by the
             # interband momentum matrix element and is field-INDEPENDENT (NOT scaled by the 1s-exciton
             # envelope overlap ratio, which governs only the bound-exciton oscillator strength above):
             # the QCSE field acts on the continuum solely through the EDGE REDSHIFT E_T(F) carried in
@@ -155,9 +159,24 @@ class ElectroAbsorptionModel:
             xb = float(self.continuum_binding_J)
             dE = E - (E_T + xb)
             safe = np.where(dE > 0.0, dE, 1.0)                         # avoid sqrt of <=0
-            s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / safe))), 0.0)
+            s2d = np.where(dE > 0.0, 2.0 / (1.0 + np.exp(-np.pi * np.sqrt(xb / safe))), 0.0)
             a = a + self.continuum_alpha0_per_m * s2d
         return a
+
+    def _solve0(self):
+        """The bias-INDEPENDENT zero-field Stark solve, cached per qw object (audit 6.2 perf): a
+        bias sweep re-enters eps()/delta_alpha_per_m once per bias but F = 0 never changes, so the
+        baseline is reused EXACTLY (the same StarkState object; callers only read it) for ANY
+        .solve(F) driver, not just the bundled QuantumWell (which memoizes by field itself). Keyed
+        on qw object identity: the drivers treat their well parameters as fixed after construction
+        (QuantumWell's own _solve_cache assumes the same) -- swap in a NEW qw object to change the
+        well and the baseline re-solves."""
+        cached = getattr(self, "_s0_cache", None)
+        if cached is not None and cached[0] is self.qw:
+            return cached[1]
+        s0 = self.qw.solve(0.0)
+        self._s0_cache = (self.qw, s0)
+        return s0
 
     def _field_magnitude(self, fields: dict) -> float:
         # numpy-ONLY: unlike the other effect models this one wraps scipy eigensolvers (the QCSE
@@ -181,7 +200,7 @@ class ElectroAbsorptionModel:
     def eps(self, fields: dict, lambda_m: float):
         F = self._field_magnitude(fields)
         E_ph = _photon_energy_J(lambda_m)
-        s0 = self.qw.solve(0.0)
+        s0 = self._solve0()
         sF = self.qw.solve(F)
         ov0 = s0.overlap
         gam0, gamF = self._gamma_lor_J(0.0), self._gamma_lor_J(F)
@@ -236,7 +255,7 @@ class ElectroAbsorptionModel:
         energy -- the electro-absorption-modulator extinction signal (>0 below the F=0 edge)."""
         F = self._field_magnitude(fields)
         E_ph = _photon_energy_J(lambda_m)
-        s0 = self.qw.solve(0.0)
+        s0 = self._solve0()
         sF = self.qw.solve(F)
         dE_n, amp_n = self._density_corrections(fields)               # R18 (0, 1 when off)
         return float(self._alpha(E_ph, sF.E_transition_J + dE_n, sF.overlap * amp_n, s0.overlap,
@@ -281,7 +300,7 @@ class BursteinMossEdge:
     e_grid_J: tuple = None        # (E_lo, E_hi, N) KK grid override; None -> auto around Eg_opt + probe
     enabled: bool = True          # master off-switch: False -> eps_inf everywhere (delta 0)
     _N_EG = 64                    # Eg_opt samples for the grid-capable dn interpolation
-    _KK_SPAN_J = 5.0 * 1.602176634e-19   # how far above the highest edge the KK grid extends (~5 eV)
+    _KK_SPAN_J = 5.0 * Q_E   # how far above the highest edge the KK grid extends (~5 eV)
     _KK_N = 3001                  # KK photon-energy grid points
 
     def gap_shift_J(self, n_m3):
@@ -328,17 +347,19 @@ class BursteinMossEdge:
         if not (grid[0] <= min(Eg_lo, E_ph) and max(Eg_hi, E_ph) <= grid[-1]):   # no silent KK truncation
             raise ValueError("e_grid_J must span the optical gap range and the probe energy")
 
-        def _dn_at_gap(eg):
-            # absorption alpha = E eps2/(hbar c) [1/m]; KK -> dn (refractive index shift) at the probe
-            dalpha_grid = grid * self._eps2(grid, eg) / (HBAR * C_LIGHT)         # 1/m
-            return float(np.interp(E_ph, grid, kramers_kronig_dn(grid, dalpha_grid)))
-
-        # grid-capable dn: precompute dn(Eg_opt) on a 1D Eg grid, interpolate onto the per-cell gaps
-        if Eg_hi - Eg_lo < 1e-30:
-            dn = np.full(Eg.shape, _dn_at_gap(Eg_lo))
+        # grid-capable dn: precompute dn(Eg_opt) on a 1D Eg grid, interpolate onto the per-cell gaps.
+        # absorption alpha = E eps2/(hbar c) [1/m] per Eg row; KK -> dn (index shift) at the probe.
+        # The KK transform on the FIXED photon grid is a constant linear map and only its value AT
+        # E_ph is consumed, so all _N_EG dalpha rows go through the two probe-bracketing kernel rows
+        # as batched matvecs (audit 6.2 perf: the dominant per-bias cost, O(N) per row) instead of
+        # _N_EG independent full O(N^2) divide-and-sum transforms.
+        egs = (np.array([Eg_lo]) if Eg_hi - Eg_lo < 1e-30
+               else np.linspace(Eg_lo, Eg_hi, int(self._N_EG)))
+        dalpha_rows = grid[None, :] * self._eps2(grid[None, :], egs[:, None]) / (HBAR * C_LIGHT)
+        dn_tab = kramers_kronig_dn_rows(grid, dalpha_rows, e_eval_J=E_ph)       # (_N_EG,) at E_ph
+        if egs.size == 1:
+            dn = np.full(Eg.shape, float(dn_tab[0]))
         else:
-            egs = np.linspace(Eg_lo, Eg_hi, int(self._N_EG))
-            dn_tab = np.array([_dn_at_gap(e) for e in egs])
             dn = np.interp(Eg.ravel(), egs, dn_tab).reshape(Eg.shape)
 
         eps2_ph = self._eps2(E_ph, Eg)                                          # dimensionless Im edge (>= 0)

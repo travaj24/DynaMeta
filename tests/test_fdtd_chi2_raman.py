@@ -5,11 +5,11 @@ import numpy as np
 import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _have_numba_cuda, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import HAVE_NUMBA, have_numba_cuda, solve_fdtd_2d
 
-needs_numba = pytest.mark.skipif(not _HAVE_NUMBA,
+needs_numba = pytest.mark.skipif(not HAVE_NUMBA,
                                  reason="numba not installed (CI numpy-only leg)")
-needs_gpu = pytest.mark.skipif(not _have_numba_cuda(), reason="no CUDA GPU available")
+needs_gpu = pytest.mark.skipif(not have_numba_cuda(), reason="no CUDA GPU available")
 
 
 def _solve(layers, **kw):

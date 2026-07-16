@@ -21,7 +21,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.materials import DrudeOptical, M_E
-from dynameta.optics.fdtd_nd import _cpml_z, _have_jax
+from dynameta.optics.fdtd_nd import cpml_z, have_jax
 from dynameta.optics.fdtd_seam import _eps_to_fdtd_layer
 
 C = 299792458.0
@@ -60,18 +60,18 @@ def _grid():
     src = np.exp(-((tg - t0) / tau) ** 2) * np.cos(2.0 * np.pi * fc * (tg - t0))
     ix = int(np.argmin(np.abs(np.fft.rfftfreq(nsteps, dt) - fc)))
     return dict(nx=14, nz=nz, n_des=n_des, dx=dx, dz=dz, dt=dt, nsteps=nsteps, des=des, itoz=itoz,
-                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=_cpml_z(nz, dz, dt, 8), ix=ix)
+                k_src=k_src, k_pL=k_pL, k_pR=k_pR, src=src, cpml=cpml_z(nz, dz, dt, 8), ix=ix)
 
 
 def main():
     print("[fmt] === ENZ modulator GEOMETRY design by topology optimization (graded ITO, 2 states) ===", flush=True)
-    if not _have_jax():
+    if not have_jax():
         print("[fmt] JAX not installed -> SKIP (exit 0)", flush=True)
         return True
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from dynameta.optics.fdtd_nd import _run_2d_te_jax
+    from dynameta.optics.fdtd_nd import run_2d_te_jax
     from dynameta.optics.topology_opt import binarization, eps_from_density, topology_optimize
 
     g = _grid(); nx, nz = g["nx"], g["nz"]
@@ -88,12 +88,12 @@ def main():
     Eoff, Woff, Goff = _state_grids(N_OFF)
     Eon, Won, Gon = _state_grids(N_ON)
 
-    vac = _run_2d_te_jax(jnp.ones((nx, nz)), z2, z2, z2, *a2)[0]
+    vac = run_2d_te_jax(jnp.ones((nx, nz)), z2, z2, z2, *a2)[0]
     mL = jnp.fft.rfft(vac.mean(axis=1))[g["ix"]]
 
     def _R(Ec, Wc, Gc, eps_d):
         eps_inf = Ec.at[:, des].set(eps_d)
-        eyL = _run_2d_te_jax(eps_inf, Wc, Gc, z2, *a2)[0]
+        eyL = run_2d_te_jax(eps_inf, Wc, Gc, z2, *a2)[0]
         return jnp.abs(jnp.fft.rfft((eyL - vac).mean(axis=1))[g["ix"]] / mL) ** 2
 
     def contrast_loss(rho_p):                               # rho_p: (nx, n_des) design density (projected)

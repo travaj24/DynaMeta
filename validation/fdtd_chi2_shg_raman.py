@@ -34,7 +34,7 @@ from scipy.signal import hilbert
 
 from dynameta.constants import C_LIGHT, EPS0
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _run_2d_te, _cpml_z, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import run_2d_te, cpml_z, solve_fdtd_2d
 
 N_MED = np.sqrt(2.0)
 NX = 4
@@ -47,12 +47,15 @@ def _grid(dz, n_pad_cells, n_struct_cells):
     return nz, dx, dt
 
 
-def _run(dz, n_pad, n_str, src, *, chi2_val=0.0, raman=None, nsteps=None):
+def _run(dz, n_pad, n_str, src, *, chi2_val=0.0, raman=None, kerr_val=0.0, nsteps=None):
     """Uniform-eps medium, nonlinearity active in the central window; returns (eyR, dt, k_pR)."""
     nz, dx, dt = _grid(dz, n_pad, n_str)
     nsteps = int(nsteps if nsteps is not None else src.size)
     eps = np.full((NX, nz), N_MED ** 2)
     zeros = np.zeros((NX, nz))
+    c3k = zeros
+    if kerr_val:
+        c3k = np.zeros((NX, nz)); c3k[:, n_pad:n_pad + n_str] = kerr_val
     chi2 = None
     if chi2_val:
         chi2 = np.zeros((NX, nz)); chi2[:, n_pad:n_pad + n_str] = chi2_val
@@ -64,9 +67,9 @@ def _run(dz, n_pad, n_str, src, *, chi2_val=0.0, raman=None, nsteps=None):
         ram = (np.full((NX, nz), (2.0 - W ** 2 * dt ** 2) / den),
                np.full((NX, nz), (g * dt / 2.0 - 1.0) / den),
                np.full((NX, nz), W ** 2 * dt ** 2 / den), c3)
-    cpml = _cpml_z(nz, dz, dt, 12, N_MED, N_MED)
+    cpml = cpml_z(nz, dz, dt, 12, N_MED, N_MED)
     k_src, k_pR = 16, nz - 16
-    _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, nsteps, k_src, 20, k_pR,
+    _, _, eyR, _ = run_2d_te(eps, zeros, zeros, c3k, dx, dz, dt, nsteps, k_src, 20, k_pR,
                               src[:nsteps], cpml, np, None, chi2=chi2, raman=ram)
     return eyR.mean(axis=1), dt
 
@@ -203,6 +206,25 @@ def main():
     ok = ok and g_e
     print("[nl] GATE E: zero chi2/Raman fields -> R0/T0 ARRAY-EQUAL to the pre-R15 path -> {}"
           .format("PASS" if g_e else "FAIL"), flush=True)
+
+    # ---- GATE F (audit C3-2): ABSOLUTE instantaneous-Kerr magnitude from the measured pump.
+    # Standard chi^(3) convention (P_NL = eps0 chi3 E^3): d_eps_fund = (3/4) chi3 |E|^2, so the
+    # SPM phase accrued over the window is dphi(t) = (w0 L / c) (3/8) chi3 |z1(t)|^2 / n and the
+    # first-order perturbation field is dphi x the pump quadrature. Pinned ABSOLUTELY against the
+    # measured analytic pump: the pre-fix update (eps_inf + chi3 E^2) delivered exactly 1/3 of
+    # this (ratio ~0.33 fails the [0.8, 1.25] band hard); scaling/reduction gates are blind to it.
+    chi3_v = 8.0e-20                                              # 3 chi3 A0^2 ~ 6e-2: weak, resolved
+    ey_kf, _ = _run(dz, n_pad, n_str, src1, kerr_val=chi3_v)
+    zk = hilbert(ey_ref)
+    dphi = (2.0 * np.pi * f0 / C_LIGHT) * L * (3.0 / 8.0) * chi3_v * np.abs(zk) ** 2 / N_MED
+    F_diff, f_f, _ = _band_amp(ey_kf - ey_ref, dt, 0.0, 1.0)
+    F_pred, _, _ = _band_amp(dphi * np.imag(zk), dt, 0.0, 1.0)
+    m_pump = (f_f >= 0.9 * f0) & (f_f <= 1.1 * f0)
+    ratioF = float(np.max(F_diff[m_pump]) / np.max(F_pred[m_pump]))
+    g_f = bool(0.8 < ratioF < 1.25)
+    ok = ok and g_f
+    print("[nl] GATE F: ABSOLUTE Kerr SPM |diff|/|(3/8) chi3 |z1|^2 (w0 L/c n) quad| = {:.3f} "
+          "(pre-fix convention ~0.33) -> {}".format(ratioF, "PASS" if g_f else "FAIL"), flush=True)
 
     print("[nl] *** R15 CHI2 SHG + RAMAN CHI3: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

@@ -50,3 +50,33 @@ def test_cache_drops_per_region_map():
     back = OpticalSolverCache._unpack(OpticalSolverCache._pack(src))
     assert back.per_region_absorption is None            # documented: diagnostic, never cached
     assert back.R == src.R and back.A == src.A
+
+
+def test_tmm_pipeline_seam_keys_by_design_layer_name():
+    # audit C5-4: run_pipeline's TMM solver used to emit seam-internal 'slab_<i>' keys
+    # (one per graded slice) while FEM/RCWA emit design layer names -- a backend swap
+    # broke reliability post-processing with a KeyError. The pipeline seam must key by
+    # layer name, summing graded slabs into their layer.
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.tmm_reference import make_layered_tmm_solver
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("clear", ConstantOptical(2.25 + 0j)))
+    reg.add(Material("lossy", ConstantOptical(4.0 + 0.3j)))
+    d = Design(name="t", unit_cell=UnitCell.square(300e-9),
+               stack=Stack(layers=[Layer("ito_top", 120e-9, "lossy"),
+                                   Layer("cap", 80e-9, "clear")],
+                           superstrate_material="air", substrate_material="air"),
+               electrodes=[], materials=reg)
+    z = np.linspace(0.0, 120.0, 13)
+    eps_z = 4.0 + 0.2j + (0.5 + 0.4j) * (z / 120.0) ** 2       # graded lossy profile
+    ebr = {"ito_top": EpsField(z_axis_u=z, y_axis_u=np.zeros(1), x_axis_u=np.zeros(1),
+                               values_zyx=eps_z.reshape(-1, 1, 1).astype(complex))}
+    res = make_layered_tmm_solver()(d, None, ebr, 1.31e-6, 1.0 + 0j, 1.0 + 0j)
+    pra = res.per_region_absorption
+    assert set(pra) == {"ito_top", "cap"}                      # design names, no slab_<i>
+    assert pra["cap"] == pytest.approx(0.0, abs=1e-12)         # lossless layer exactly 0
+    assert pra["ito_top"] == pytest.approx(res.A, rel=1e-9)    # graded slabs sum to A

@@ -24,7 +24,7 @@ tensor (re+im), thickness, wavelength, angle, phi. Crucially it is the ONLY rigo
 for the FULL z-coupled gyrotropic tensor (VectorMagnetoOpticModel) the RCWA in-plane tensor
 path explicitly rejects (no exz/eyz/ezx/ezy).
 
-BRIDGE, not vendor: lumenairy (>= 5.14.4 -- the version that added BerremanStack /
+BRIDGE, not vendor: lumenairy (>= 5.21 bridge floor; 5.14.4 added BerremanStack /
 berreman_jones_1d) is a REQUIRED dependency but imported lazily; conventions are IDENTICAL
 on both sides (public exp(-i omega t), Im(eps) > 0 for absorbers, metres, radians, RAW eps --
 no conjugation), so this is geometry/result adaptation only, no sign/unit translation.
@@ -36,7 +36,7 @@ patterned needs a transverse Fourier/nodal basis). Uniform tensor layers (a cons
 across the cell), uniform scalars, and graded laterally-uniform fields (z-sliced into uniform
 slabs) are the supported inputs.
 
-Cross-library pins (lumenairy 5.14.4/5.14.5, file:line in elements/berreman.py):
+Cross-library pins (first pinned at lumenairy 5.14.4/5.14.5, re-verified on the 5.21 floor; file:line in elements/berreman.py):
 - berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength, *, angle=, phi=, theta=)
   -> (R, T, jones_r, jones_t). `layers` = [(eps, thickness_m), ...] SUPERSTRATE-side first
   (== LayeredStack.slabs order); eps scalar or (3,3) (public Im>0). R/T are (2,) TOTAL
@@ -46,9 +46,13 @@ Cross-library pins (lumenairy 5.14.4/5.14.5, file:line in elements/berreman.py):
   to machine precision on a uniform-tensor slab), so the RCWA bridge's _pol_row / _p_basis_
   conversion / _angles_rad apply UNCHANGED.
 - BerremanStack(n_substrate=, n_superstrate=).add_layer(thickness, eps=).set_source(wavelength,
-  theta=, phi=).solve(retain_internal=) -> (R, T, jones_r) [NOTE: the class solve returns only
-  jones_r, so this backend uses the FUNCTIONAL berreman_jones_1d for the far field to also get
-  jones_t, and the class only when per-layer absorption / internal field is requested].
+  theta=, phi=).solve(retain_internal=) -> (R, T, jones_r), then .jones_transmission() -> jones_t
+  and .layer_absorption() -> (n_layers, 2). As of lumenairy 5.22 (AUDIT A1) the class solve stores
+  the transmission Jones on EVERY path (jones_transmission() is bit-identical to the functional
+  berreman_jones_1d's jones_t) and (AUDIT C2) reconstructs internals -- hence layer_absorption() --
+  for out-of-plane-tensor stacks at OBLIQUE incidence too. This backend therefore runs ONE class
+  solve for the whole far field + absorption (see _solve_berreman_stack), retiring the old pattern
+  that called the FUNCTIONAL berreman_jones_1d for jones_t plus a SECOND retain_internal class solve.
 """
 
 from __future__ import annotations
@@ -62,10 +66,11 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _guard_conical_ppol,
-                                                           _guard_incidence_side,
-                                                           _p_basis_conversion, _pol_row,
-                                                           _require_lumenairy)
+from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
+                                                      guard_incidence_side as _guard_incidence_side,
+                                                      p_basis_conversion as _p_basis_conversion,
+                                                      pol_row as _pol_row,
+                                                      require_lumenairy as _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -74,15 +79,14 @@ __all__ = ["design_to_berreman_layers", "make_lumenairy_berreman_solver",
 
 
 def _require_berreman():
-    """lumenairy with the Berreman 4x4 surface (added in 5.14.4). Builds on the RCWA bridge's
-    _require_lumenairy (which pins the >= 5.14.2 floor) and tightens to 5.14.4 + the symbol."""
+    """lumenairy with the Berreman 4x4 surface. The single bridge floor (_common.VERSION_FLOOR,
+    >= 5.21) already covers the 5.14.4 tier that added it; the symbol check stays as a cheap
+    defensive guard against a partial/renamed install."""
     lum = _require_lumenairy()
-    ver = tuple(int(p) for p in str(lum.__version__).split(".")[:3])
-    if ver < (5, 14, 4) or not hasattr(lum, "berreman_jones_1d"):
+    if not hasattr(lum, "berreman_jones_1d"):
         raise ImportError(
-            "the Berreman backend needs lumenairy>=5.14.4 (BerremanStack / berreman_jones_1d "
-            "-- the anisotropic-planar 4x4 tier added in 5.14.4); found {}. pip install -U "
-            "lumenairy".format(lum.__version__))
+            "the Berreman backend needs lumenairy's BerremanStack / berreman_jones_1d surface, "
+            "absent from this install ({}). pip install -U lumenairy".format(lum.__version__))
     return lum
 
 
@@ -124,7 +128,9 @@ def design_to_berreman_layers(design, lambda_m: float, *, eps_by_region=None,
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # slice_eps_field returns ascending-z (substrate-first) slabs; this list
+            # is superstrate-first, so reverse (audit C5-1)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 if slab.eps is not None:
                     layers.append((complex(slab.eps), float(slab.thickness_m)))
                 elif slab.eps_tensor_cell is not None:
@@ -183,16 +189,63 @@ def berreman_result_to_optical_result(R_arr, T_arr, jones_r, jones_t, row: int, 
                          per_region_absorption=pra)
 
 
-def _berreman_layer_absorption(lum, layers, n_super, n_sub, lambda_m, theta, phi):
-    """Per-layer absorbed fraction (n_layers, 2) via a BerremanStack(retain_internal=True). The
-    functional entry has no internal-field hook, so the class is used here ONLY for absorption
-    (the far field comes from berreman_jones_1d, which also returns the transmission Jones)."""
+def _solve_berreman_stack(lum, layers, n_super, n_sub, lambda_m, theta, phi, *, absorption):
+    """ONE BerremanStack CLASS solve for both bridge entries -- returns
+    (R, T, jones_r, jones_t, layer_absorption).
+
+    AUDIT A1 consolidation: the far field (R, T, jones_r) and the transmission Jones
+    (jones_t) now come from a SINGLE class solve, replacing the old two-solve pattern (a
+    functional berreman_jones_1d far-field solve PLUS a second retain_internal class solve
+    only for absorption). lumenairy 5.22 stores the transmission Jones on EVERY solve path,
+    so st.jones_transmission() returns the jones_t the functional entry used to be re-called
+    for -- BIT-IDENTICAL to berreman_jones_1d's jones_t (same _solve_core / _offplane_oblique
+    core + _farfield, same Kx/Ky = Re(n_super) sin(theta) (cos phi, sin phi)). Conical
+    incidence is handled by the CALLER via _rotate_layers_conical + phi=0.0 (rotational
+    covariance), so `layers` here is already the rotated equivalent in-plane problem.
+
+    AUDIT C2: with absorption=True the solve retains internals and layer_absorption() now
+    SUCCEEDS for out-of-plane-tensor stacks at OBLIQUE incidence too (5.22 reconstructs the
+    generalized-cascade internals -- the flagship tilted-director regime), so
+    per_region_absorption + A_independent close there without a special case. A genuine
+    failure still warns (defensive) and leaves la=None rather than crashing."""
     st = lum.BerremanStack(n_substrate=complex(n_sub), n_superstrate=complex(n_super))
     for eps, thk in layers:
         st.add_layer(float(thk), eps=eps)
     st.set_source(float(lambda_m), theta=float(theta), phi=float(phi))
-    st.solve(retain_internal=True)
-    return np.asarray(st.layer_absorption())
+    R, T, Jr = st.solve(retain_internal=absorption)
+    Jt = st.jones_transmission()
+    la = None
+    if absorption:
+        try:
+            la = np.asarray(st.layer_absorption())
+        except Exception as exc:                      # pragma: no cover - defensive
+            warnings.warn("Berreman bridge: per-layer absorption unavailable ({}); "
+                          "A_independent left unset".format(exc), stacklevel=2)
+    return R, T, Jr, Jt, la
+
+
+def _rotate_layers_conical(layers, phi_rad: float):
+    """Conical incidence via ROTATIONAL COVARIANCE (audit 8.2 step-4 Berreman leg): rotating
+    the whole physical problem about z by -phi maps the conical source (k_par along
+    (cos phi, sin phi), s-hat = (-sin phi, cos phi)) onto the validated IN-PLANE one (k_par
+    along x, s-hat = y) and each layer permittivity onto Rz(-phi) eps Rz(-phi)^T. Berreman is
+    the PLANAR tier -- no lateral structure breaks the symmetry -- so the mapped problem is
+    EXACT, and the existing lab-row extraction + p-basis conversion apply verbatim ('y' IS
+    the rotated s, 'x'/'p' the in-plane transverse). Scalars are rotation-invariant and pass
+    through untouched (bit-identical); isotropic stacks therefore reproduce their in-plane
+    result at any azimuth exactly (the azimuthal-invariance gate). The RCWA/PMM bridges keep
+    their conical guard: a patterned lattice is NOT z-rotation-invariant, so this shortcut
+    is wrong there (per-order Jones synthesis remains their documented follow-on)."""
+    c, s = np.cos(-phi_rad), np.sin(-phi_rad)
+    rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    out = []
+    for eps, thk in layers:
+        e = np.asarray(eps)
+        if e.ndim == 2:
+            out.append((rz @ e @ rz.T, thk))
+        else:
+            out.append((eps, thk))
+    return out
 
 
 def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Optional[int] = None):
@@ -210,21 +263,18 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
         lum = _require_berreman()
         theta, phi = _angles_rad(design.optical)
         _guard_incidence_side(design.optical)
-        _guard_conical_ppol(design.optical, phi)
         layers, n_sup, n_sb, names = design_to_berreman_layers(
             design, lambda_m, eps_by_region=eps_by_region, n_slices=n_slices)
-        R, T, Jr, Jt = lum.berreman_jones_1d(layers, complex(n_sb), complex(n_sup),
-                                             float(lambda_m), angle=theta, phi=phi)
+        # conical (azimuth != 0): solve the z-rotated EQUIVALENT in-plane problem so the
+        # result is keyed to the rotated s/p eigen-polarizations, matching the FEM (the lab
+        # rows of a native phi != 0 solve are s/p mixtures -- the audit C4-2 trap)
+        if abs(phi) > 1e-12:
+            layers = _rotate_layers_conical(layers, phi)
+        R, T, Jr, Jt, la = _solve_berreman_stack(lum, layers, n_sup, n_sb, lambda_m,
+                                                 theta, 0.0, absorption=absorption)
         rf, tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
                                      theta, n_sup, n_sb)
-        la, a_names = None, None
-        if absorption:
-            try:
-                la = _berreman_layer_absorption(lum, layers, n_sup, n_sb, lambda_m, theta, phi)
-                a_names = names
-            except Exception as exc:                      # pragma: no cover - defensive
-                warnings.warn("Berreman bridge: per-layer absorption unavailable ({}); "
-                              "A_independent left unset".format(exc), stacklevel=2)
+        a_names = names if la is not None else None
         return berreman_result_to_optical_result(R, T, Jr, Jt, _pol_row(design.optical), t0=t0,
                                                   r_factor=rf, t_factor=tf, layer_absorption=la,
                                                   layer_names=a_names)
@@ -254,7 +304,6 @@ class BerremanLayeredSolver:
         lum = _require_berreman()
         t0 = time.perf_counter()
         _guard_incidence_side(optical)
-        _guard_conical_ppol(optical, _angles_rad(optical)[1])
         layers: List[Tuple[object, float]] = []
         for i, slab in enumerate(stack.slabs):            # already superstrate-side first
             if slab.eps is not None:
@@ -272,15 +321,15 @@ class BerremanLayeredSolver:
                     "BerremanLayeredSolver: slab {} is an analytic-shape slab (planar tier does "
                     "not pattern); rasterize and use the RCWA backend.".format(i))
         theta, phi = _angles_rad(optical)
-        R, T, Jr, Jt = lum.berreman_jones_1d(layers, complex(stack.n_sub), complex(stack.n_super),
-                                             float(lambda_m), angle=theta, phi=phi)
+        if abs(phi) > 1e-12:                              # conical: rotated equivalent problem
+            layers = _rotate_layers_conical(layers, phi)
+        R, T, Jr, Jt, la = _solve_berreman_stack(lum, layers, stack.n_super, stack.n_sub,
+                                                 lambda_m, theta, 0.0,
+                                                 absorption=self.absorption)
         rf, tf = _p_basis_conversion(getattr(optical, "polarization", "y"), theta,
                                      stack.n_super, stack.n_sub)
-        la, names = None, None
-        if self.absorption:
-            la = _berreman_layer_absorption(lum, layers, stack.n_super, stack.n_sub, lambda_m,
-                                            theta, phi)
-            names = ["slab_{}".format(i) for i in range(len(layers))]
+        names = (["slab_{}".format(i) for i in range(len(layers))]
+                 if la is not None else None)
         return berreman_result_to_optical_result(R, T, Jr, Jt, _pol_row(optical), t0=t0,
                                                   r_factor=rf, t_factor=tf, layer_absorption=la,
                                                   layer_names=names)

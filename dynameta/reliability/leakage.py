@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from dynameta.constants import HBAR, M_E, Q_E
+from dynameta.constants import H_PLANCK, HBAR, M_E, Q_E
 
 __all__ = ["OxideLeakageParams", "fn_coefficients", "fowler_nordheim_current",
            "direct_tunneling_current"]
@@ -45,8 +45,7 @@ def fn_coefficients(m_ox_over_m0: float, phi_b_eV: float):
         raise ValueError("leakage: m_ox_over_m0 and phi_b_eV must be > 0")
     m_ox = m_ox_over_m0 * M_E
     phi_J = phi_b_eV * Q_E
-    h = 2.0 * np.pi * HBAR
-    a_fn = Q_E ** 3 * M_E / (8.0 * np.pi * h * m_ox * phi_J)
+    a_fn = Q_E ** 3 * M_E / (8.0 * np.pi * H_PLANCK * m_ox * phi_J)
     b_fn = (4.0 / 3.0) * np.sqrt(2.0 * m_ox) * phi_J ** 1.5 / (Q_E * HBAR)
     return float(a_fn), float(b_fn)
 

@@ -57,3 +57,28 @@ def test_electrostatics_fem_series_capacitor_field():
     D1, D2 = e1 * Ez[0], e2 * Ez[1]
     assert abs(D1 - D2) / abs(D1) < 0.03                              # D continuous across the interface
     assert abs(abs(Ez[0]) * t + abs(Ez[1]) * t - V) / V < 0.03        # series fields sum to applied V
+
+
+def test_split_gate_tddb_stress_statistic():
+    # audit C4-9: a +/-V split gate has signed layer-mean Ez ~ 0 (the pre-fix TDDB
+    # adapter reported ~zero stress -> exponentially overstated t_BD, silently); the
+    # sign-robust mean|Ez| statistic must see the ~3 MV/cm field
+    ng = pytest.importorskip("ngsolve")
+    import warnings
+    from types import SimpleNamespace
+    from dynameta.carriers.electrostatics_fem import (ElectrostaticLayer,
+                                                      solve_electrostatics_fem)
+    from dynameta.carriers.fem_mesh import _S
+    from dynameta.reliability.tddb import oxide_stress_from_electrothermal
+    lay = [ElectrostaticLayer("hfo2", 10e-9, 18.0)]
+    P = 300e-9
+    vcf = ng.IfPos(ng.x / (_S * P) - 0.5, 3.0, -3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_electrostatics_fem(lay, 3.0, period_x_m=P, period_y_m=P, top_voltage_cf=vcf)
+    am = r.mean_absEz_per_layer()[0]
+    assert am > 1e8                                           # ~3 MV/cm seen
+    assert abs(r.mean_Ez_per_layer()[0]) < 0.05 * am          # the signed mean cancels
+    et = SimpleNamespace(layers=lay, E_result=r, T_per_layer=[300.0])
+    ez, T = oxide_stress_from_electrothermal(et, "hfo2")
+    assert ez == pytest.approx(am)                            # adapter uses the C4-9 stat

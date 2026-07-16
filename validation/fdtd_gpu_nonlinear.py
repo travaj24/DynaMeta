@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _have_numba_cuda, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import have_numba_cuda, solve_fdtd_2d
 
 KW = dict(period_x_m=100e-9, lambda_min_m=1.0e-6, lambda_max_m=1.4e-6, resolution=16, nx=4)
 TOL = 1e-12
@@ -59,7 +59,7 @@ def main():
     backends = []
     if _have_cupy_device():
         backends.append("cupy")
-    if _have_numba_cuda():
+    if have_numba_cuda():
         backends.append("numba-cuda")
     if not backends:
         print("[gnl] *** SKIP: no CUDA GPU / cupy available -- GPU nonlinear gates not run ***",
@@ -83,12 +83,12 @@ def main():
     if "cupy" in backends:
         import cupy as cp
         from dynameta.constants import C_LIGHT, HBAR
-        from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te
+        from dynameta.optics.fdtd_nd import cpml_z, run_2d_te
         nx, n_pad, n_str = 4, 40, 24
         nz = 2 * n_pad + n_str
         dz = 10e-9; dx = 4.0 * dz
         dt = 0.5 / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
-        cpml = _cpml_z(nz, dz, dt, 12, 1.0, 1.0)
+        cpml = cpml_z(nz, dz, dt, 12, 1.0, 1.0)
         w_a, dw = 2.0 * np.pi * 2.5e14, 2.0 * np.pi * 2.0e13
         den = 1.0 + dw * dt / 2.0
         G1 = np.full((nx, nz), (2.0 - w_a ** 2 * dt ** 2) / den)
@@ -105,11 +105,11 @@ def main():
         snap = 400
         out_np, out_cp = {}, {}
         gd_np = (G1, G2, kapfac, Wp, Npop0, 1e-14, 1e-13, 5e-15, HBAR * w_a, snap)
-        _, _, eyR_np, _ = _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, nsteps, 16, 20,
+        _, _, eyR_np, _ = run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, nsteps, 16, 20,
                                      nz - 16, src, cpml, np, None, gain_dyn=gd_np,
                                      gain_dyn_out=out_np)
         gd_cp = tuple(cp.asarray(v) if isinstance(v, np.ndarray) else v for v in gd_np)
-        _, _, eyR_cp, _ = _run_2d_te(cp.asarray(eps), cp.asarray(zeros), cp.asarray(zeros),
+        _, _, eyR_cp, _ = run_2d_te(cp.asarray(eps), cp.asarray(zeros), cp.asarray(zeros),
                                      cp.asarray(zeros), dx, dz, dt, nsteps, 16, 20, nz - 16,
                                      cp.asarray(src), cpml, cp, None, gain_dyn=gd_cp,
                                      gain_dyn_out=out_cp)

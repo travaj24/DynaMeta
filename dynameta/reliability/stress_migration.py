@@ -23,7 +23,7 @@ import numpy as np
 
 from dynameta.constants import KB as KB_J_K    # single-source CODATA (was re-declared here)
 
-KB_EV_K = 8.617333262e-5                       # eV/K Boltzmann (constants.py carries only KB in J/K)
+from dynameta.constants import KB_EV_K, Q_E   # eV/K + charge, single source (audit 6.3)
 
 
 def korhonen_kappa_m2_s(T_K: float, *, D0_m2_s: float, Q_eV: float, B_Pa: float,
@@ -87,5 +87,5 @@ def soret_flux_per_m2_s(C_per_m3: float, T_K: float, gradT_K_m: float, *, D_a_m2
     (down the gradient for Q* > 0)."""
     if not (C_per_m3 > 0.0 and T_K > 0.0 and D_a_m2_s > 0.0):
         raise ValueError("soret_flux: C, T, D_a must be > 0")
-    Qstar_J = Qstar_eV * 1.602176634e-19
+    Qstar_J = Qstar_eV * Q_E
     return float(-(D_a_m2_s * C_per_m3 / (KB_J_K * T_K)) * (Qstar_J / T_K) * gradT_K_m)

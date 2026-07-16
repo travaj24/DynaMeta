@@ -10,15 +10,59 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
-from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd.backends import _HAVE_NUMBA, _have_jax, _resolve_backend
+from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
-from dynameta.optics.fdtd_nd.cpml import _cpml_z
-from dynameta.optics.fdtd_nd.kernels2d import _run_2d_te
-from dynameta.optics.fdtd_nd.kernels2d_jax import _run_2d_te_jax
+from dynameta.optics.fdtd_nd.cpml import cpml_z
+from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
+from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
 
+
+
+# --- homogeneous-superstrate REFERENCE-run cache (audit 6.2 perf) ------------------------------
+# The pipeline seam invokes solve_fdtd_2d/_3d once per (bias, wavelength); the incident-reference
+# (normalization) run depends ONLY on the grid, the source and the superstrate -- not on the
+# structure -- so repeated seam solves at a fixed wavelength recompute an IDENTICAL reference
+# (~2x total cost). Cache the last few probe tuples keyed on the EXACT inputs that determine the
+# run (bytes/tuple key, exact reuse only -- a hit returns the same arrays, bit-identical by
+# construction). Entries are marked read-only so an accidental downstream mutation fails loudly
+# instead of silently corrupting later solves.
+_REF_CACHE = {}
+_REF_CACHE_MAX = 4                                           # FIFO entries (dict = insertion order)
+_REF_CACHE_MAX_BYTES = 512 * 1024 * 1024                     # skip caching huge (production-3D) refs
+
+
+def _ref_cache_call(key, fn):
+    """Return fn() memoized on `key` (exact match only). Oversized results pass through uncached."""
+    out = _REF_CACHE.get(key)
+    if out is not None:
+        return out
+    out = fn()
+    if sum(a.nbytes for a in out) <= _REF_CACHE_MAX_BYTES:
+        for a in out:
+            a.setflags(write=False)
+        while len(_REF_CACHE) >= _REF_CACHE_MAX:
+            _REF_CACHE.pop(next(iter(_REF_CACHE)))
+        _REF_CACHE[key] = out
+    return out
+
+
+def _ring_time_s(layers) -> float:
+    """Material-memory ring-down time (audit C3-6): the fixed 200*tau DFT window predates
+    the Lorentz/gain ADEs -- a high-loaded-Q in-band pole rings past it, truncating the
+    rfft with O(0.1) silent R0/T0 bias (probe: |dT0| = 0.102 vs the TMM oracle for a
+    Q~600 line, no warning possible since the band mask checks excitation only). Returns
+    the (2/Gamma) ln(1/1e-4) ~ 18.4/Gamma memory of the NARROWEST active Lorentz/gain
+    pole (0.0 when no pole is active -> the legacy window, byte-identical)."""
+    t_ring = 0.0
+    for L in layers:
+        if getattr(L, "lorentz_delta_eps", 0.0) != 0.0 and getattr(L, "lorentz_gamma_rad_s", 0.0) > 0.0:
+            t_ring = max(t_ring, 18.4 / float(L.lorentz_gamma_rad_s))
+        if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0:
+            t_ring = max(t_ring, 18.4 / float(L.gain_dw_rad_s))
+    return t_ring
 
 
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
@@ -50,14 +94,14 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
                            chi2g, chi2 is not None, R1, R2, R3, chi3R, raman is not None,
                            G1, G2, G3, gain is not None)
     if name == "jax":
-        out = _run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
-                             lor, chi2=chi2, raman=raman, gain=gain)
+        out = run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                            lor, chi2=chi2, raman=raman, gain=gain)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp                                    # backend='cupy' auto-selects the device module
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                     chi2=chi2, raman=raman, gain=gain)
+    out = run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
+                    chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -71,8 +115,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
-    is the through-stack (z) profile; supply `lateral_eps_inf` (shape (nx, n_layer_cells) or a callable
-    building the (nx,nz) eps_inf) to make a laterally-structured grating, else the stack is laterally
+    is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
+    building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
+    grating, else the stack is laterally
     UNIFORM (and the result reduces to the 1D solver / TMM). Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
@@ -172,7 +217,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
+                      RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
@@ -210,9 +262,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)
-    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched to super (low z) + sub (high z)
-    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference -> super both ends
-    name = _resolve_backend(backend)                         # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
+    cpml_struct = cpml_z(nz, dz, dt, npml, n_super, n_sub)   # PML matched to super (low z) + sub (high z)
+    cpml_ref = cpml_z(nz, dz, dt, npml, n_super, n_super)    # homogeneous-superstrate reference -> super both ends
+    name = resolve_backend(backend)                          # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
     def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
@@ -220,8 +272,16 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                                lor, chi2, raman, gain)
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
-    # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run)
-    eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
+    # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run).
+    # Structure-independent, so it is memoized on its exact determinants (audit 6.2 perf); a custom xp
+    # bypasses the cache (the key cannot pin an arbitrary array module).
+    if xp is np:
+        _key = ("2d", name, nx, nz, float(dx), float(dz), float(dt), int(nsteps), int(k_src),
+                int(k_pL), int(k_pR), int(npml), complex(n_super), src.tobytes())
+        eyL_i, hxL_i, eyR_i, hxR_i = _ref_cache_call(
+            _key, lambda: run(n_super ** 2 * one, zero, zero, zero, cpml_ref))
+    else:
+        eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
     eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
                                      chi2_arrs, raman_arrs, gain_arrs)  # structure run
 
@@ -238,9 +298,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # COMPLEX 0-order coeffs. np.fft.rfft yields exp(+i w t) phasors, but the library convention is
         # exp(-i w t), so conjugate to get the physical complex amplitudes; then de-embed the probe<->face
         # propagation phase. The superstrate phase velocity is c/n_super, so r0c (referenced to the front
-        # face z=pad, probe at k_pL) carries n_super in k; t0c keeps the structure traversal phase.
+        # face z=pad, probe at k_pL) carries n_super in k. t0c (audit C3-4): the incident reference
+        # travels n_super the WHOLE way to the right probe while the transmitted leg is n_sub past the
+        # back face, so the interface-referenced t carries n_sub*z_struct PLUS the (n_super-n_sub)
+        # mismatch over the face->probe distance D = k_pR*dz - pad (the old bare exp(1j*k0*z_struct)
+        # was vacuum-only: ~100 deg phase error on glass, frequency-dependent; |t| untouched).
         r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
-        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
+                                                           + (n_super - n_sub) * (k_pR * dz - pad)))
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
     P_inc = _flux(eyL_i, hxL_i)
     P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i)
@@ -272,6 +337,16 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
         raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
                                   "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")
+    # audit C5-7: the oblique kernel also carries NO chi3/chi2/Raman/gain ADEs -- these terms
+    # used to be silently DROPPED (an amplifying/SHG/Raman stack at 20 deg returned R0/T0
+    # bit-identical to the passive layer), while the 1-D entry point raises for the same set
+    _dropped = [t for t in ("chi3_m2_V2", "chi2_m_V", "raman_chi3_m2_V2", "gain_dN_m3")
+                if any(getattr(L, t, 0.0) != 0.0 for L in layers)]
+    if _dropped:
+        raise NotImplementedError(
+            "solve_fdtd_2d_oblique: the oblique kernel carries no {} terms -- they would be "
+            "silently ignored (audit C5-7); use the normal-incidence solver or split the "
+            "problem.".format("/".join(_dropped)))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -301,20 +376,27 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
+                      RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
     # 'numba' = the fused threaded complex-envelope kernel; 'auto'/'cpu' pick it when present; everything else
     # falls back to the vectorized NumPy reference (the oblique path is normal-incidence-free of jax/cupy).
-    rb = _resolve_backend(backend)
+    rb = resolve_backend(backend)
     # _run_oblique carries fused numba + differentiable jax kernels for BOTH s-pol (TE) and p-pol (TM);
     # pick the requested fast/diff backend when available, else the NumPy reference.
-    if rb == "jax" and _have_jax():
+    if rb == "jax" and have_jax():
         name = "jax"                                         # differentiable oblique scan (s + p)
-    elif rb == "numba" and _HAVE_NUMBA:
+    elif rb == "numba" and HAVE_NUMBA:
         name = "numba"                                       # fused JIT oblique kernel (s + p)
     else:
         name = "numpy"
@@ -334,7 +416,23 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
         T0 = np.abs(trans / inc_R) ** 2
     sin_t = np.divide(kx * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))   # sin theta(f) = k_par c / w
     theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
-    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit C3-5: the old sin_t < 0.999 mask trusted points up to theta ~ 87 deg, where
+    # the z-CPML's grazing round-trip echo reaches 0.1-0.5 FIELD (the absorber sees the
+    # z-wavevector shrink as cos theta): the validation geometry re-run at 76 deg carried
+    # band=True points with |R0 - TMM| = 0.39 and R0+T0-1 up to +0.38. Trust only
+    # sin_t < 0.95 (theta < ~72 deg -- the measured error onset for the shipped npml=12);
+    # warn when the mask removes otherwise-excited in-band points so the truncation is
+    # visible rather than silent.
+    _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    band = _excited & (sin_t < 0.95)
+    _cut = _excited & (sin_t >= 0.95)
+    if np.any(_cut):
+        import warnings
+        warnings.warn(
+            "solve_fdtd_2d_oblique: {} excited in-band points at theta(f) >= 71.8 deg were "
+            "EXCLUDED from the trusted band -- the grazing-incidence CPML echo corrupts R0/T0 "
+            "there (audit C3-5); narrow the band, lower angle_deg, or strengthen npml."
+            .format(int(np.sum(_cut))), RuntimeWarning, stacklevel=2)
     return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
 
 

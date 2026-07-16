@@ -32,3 +32,10 @@ jobs:
           pip install -e ".[dev,plot]" "h5py>=3.8"
       - name: Run fast tests
         run: pytest tests/ -q
+      # audit 1.2/6.3: the smoke validation tier was advertised 'CI-able' but never
+      # wired in -- its physics oracles gated nothing automatically. One leg (the
+      # numpy-2.x python) runs the curated pure-numpy tier; capability-skips exit 42
+      # and are counted separately (never green-washed as PASS).
+      - name: Run smoke validation tier
+        if: matrix.python-version == '3.13'
+        run: python -m validation.run_all --tier smoke

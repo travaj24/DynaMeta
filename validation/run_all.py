@@ -47,10 +47,24 @@ SMOKE = {
     "reliability_bti", "reliability_corrosion", "reliability_dedoping", "reliability_em",
     "reliability_fatigue", "reliability_hci", "reliability_leakage", "reliability_lidt",
     "reliability_mttf", "reliability_stressmig", "reliability_tddb", "results_io_demo",
-    "scattering_link", "schrodinger_poisson", "sp_carrier", "sp_carrier_nonparabolic",
-    "sp_neumann_body", "sp_nonparabolic", "sp_oxide_cap", "sp_per_column",
-    "sp_self_consistent_nonparabolic", "switching_drivers", "transient_optics_response",
-    "vector_mo_tensor",
+    "optical_cache", "scattering_link", "schrodinger_poisson", "sp_carrier",
+    "sp_carrier_nonparabolic", "sp_neumann_body", "sp_nonparabolic",
+    "sp_oxide_cap", "sp_per_column", "sp_self_consistent_nonparabolic", "switching_drivers",
+    "transient_optics_response", "vector_mo_tensor",
+    # the solver-free QD-SOA family (audit 1.2/6.3: flagged by the reverse-drift warning
+    # since it shipped; pure numpy -- the newest never-CI'd subsystem now smoke-gated)
+    "qd_soa_alpha_pdg", "qd_soa_ase_zresolved", "qd_soa_bidir_ase",
+    "qd_soa_calibration_innolume", "qd_soa_eh_split", "qd_soa_electrical_rc",
+    "qd_soa_enob_budget", "qd_soa_es_band", "qd_soa_fabry_perot",
+    "qd_soa_filament_qd", "qd_soa_fwm_xgm", "qd_soa_gain_core",
+    "qd_soa_gvd", "qd_soa_gvd_distributed", "qd_soa_hammer",
+    "qd_soa_inferred_dynamics", "qd_soa_langevin", "qd_soa_leakage",
+    "qd_soa_many_body", "qd_soa_maxwell_bloch", "qd_soa_noise_metrics",
+    "qd_soa_nonlinear_loss", "qd_soa_nonmarkovian", "qd_soa_numba_parity",
+    "qd_soa_rin_linewidth", "qd_soa_saturation_power", "qd_soa_sbe",
+    "qd_soa_spectral_dispersion", "qd_soa_thermal_profile", "qd_soa_transport",
+    "qd_soa_transverse_bpm", "qd_soa_traveling_wave", "qd_soa_ultrafast",
+    "qd_soa_vectorial_pdg", "qd_soa_wdm",
 }
 
 
@@ -63,8 +77,14 @@ def _gated(directory, skip=()):
         if name in skip:
             continue
         src = open(os.path.join(directory, fn), encoding="utf-8").read()
-        if re.search(r"SystemExit|sys\.exit", src):     # only exit-code-gated scripts
-            out.append(name)
+        # audit 6.3: the old behavior INCLUDED only scripts matching this regex, silently
+        # classifying a raise/assert-gated validation as a diagnostic and NEVER RUNNING it.
+        # Any non-zero exit gates equally well, so membership is now everything-except-SKIP
+        # and the regex only powers a visible drift note.
+        if not re.search(r"SystemExit|sys\.exit", src):
+            print("[run_all] NOTE: {} has no explicit exit-gate text -- it runs anyway "
+                  "(non-zero exit = FAIL); verify it actually gates".format(name), flush=True)
+        out.append(name)
     return out
 
 
@@ -108,7 +128,8 @@ def main(argv):
             "ngsolve", "devsim", "import gmsh", "from gmsh",           # direct heavy deps
             "optics.solver", "optics.fdtd", "optics.inverse_design",  # FEM / FDTD / jax-FDTD wrappers
             "optics.topology_opt", "carriers.thermal_fem", "carriers.electrostatics_fem",
-            "carriers.devsim", "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
+            "carriers.devsim", "carriers.physics_equilibrium",   # physics_equilibrium imports devsim
+            "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
         )
         extra = []
         for n in sorted(all_gated - SMOKE):
@@ -145,12 +166,20 @@ def main(argv):
         except subprocess.TimeoutExpired:
             rc = 124
         dt = time.time() - t0
-        tag = "PASS" if rc == 0 else ("TIMEOUT" if rc == 124 else "FAIL(rc={})".format(rc))
+        # audit C6-6: rc == 42 is the SKIP convention (required capability absent --
+        # CUDA/cupy/jax/ngsolve/devsim/lumenairy not installed), counted separately so a
+        # never-executed physics gate cannot read as a green PASS in the summary
+        tag = ("PASS" if rc == 0 else "SKIP" if rc == 42
+               else ("TIMEOUT" if rc == 124 else "FAIL(rc={})".format(rc)))
         results.append((pkg + "." + name, rc, dt))
         print("[run_all] {:48s} {:8s} ({:5.0f}s)".format(pkg + "." + name, tag, dt), flush=True)
-    failed = [r for r in results if r[1] != 0]
-    print("\n[run_all] {}/{} passed; {} failed/errored".format(
-        len(results) - len(failed), len(results), len(failed)), flush=True)
+    skipped = [r for r in results if r[1] == 42]
+    failed = [r for r in results if r[1] not in (0, 42)]
+    print("\n[run_all] {}/{} passed; {} skipped (capability absent); {} failed/errored".format(
+        len(results) - len(failed) - len(skipped), len(results), len(skipped), len(failed)),
+        flush=True)
+    if skipped:
+        print("[run_all] SKIPPED: " + ", ".join(n for n, _, _ in skipped), flush=True)
     if failed:
         print("[run_all] FAILURES: " + ", ".join(n for n, _, _ in failed), flush=True)
     return 0 if not failed else 1

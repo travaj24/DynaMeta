@@ -20,7 +20,7 @@ Convention: identical on both sides (public exp(-i omega t), Im(eps) > 0, metres
 eps); `row` selects the incident lab polarization (0 = E_x, 1 = E_y). R/T are the TOTAL (co+cross)
 flux-normalized power for that incident pol -- the natural planar-anisotropic FOM ingredients.
 
-VERSION NOTE on jit/vmap: EAGER jax.grad works on any Lumenairy at the bridge floor (>= 5.14.2).
+VERSION NOTE on jit/vmap: EAGER jax.grad works on any Lumenairy at the bridge floor (now >= 5.21).
 FULL grad/jit/vmap cleanliness (differentiating a jit-compiled or vmap'd Berreman solve --
 grad-of-jit, grad-of-vmap) additionally requires the Lumenairy eig-VJP pytree fix (commit 8e29a71,
 post-tagged-5.14.4): the gauge-stable custom-VJP eig must return a plain (eigvals, eigvecs) tuple

@@ -130,11 +130,18 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     # one-broadband-solve-per-bias speedup is lost). Non-dispersive end media (air super / fixed-index
     # substrate -- the common case) keep the fast path, byte-identical.
     if sweep_aware and len(sweep.wavelengths_nm) > 1:
+        # audit C5-12: sample end media at EVERY sweep wavelength PLUS the band centre (the
+        # value the fast path actually freezes) -- the old two-edge check false-passed a
+        # dispersive medium with equal band-edge values and an in-band feature (probe: a
+        # tabulated substrate with eps 4->6->4 froze n_sub=2.449 while the true edge
+        # values are 2.0).
         _lams_m = [float(w) * 1e-9 for w in sweep.wavelengths_nm]
-        _ns_lo, _nb_lo = end_media_indices(design, min(_lams_m))
-        _ns_hi, _nb_hi = end_media_indices(design, max(_lams_m))
-        if (abs(_ns_lo - _ns_hi) > 1e-12 * max(abs(_ns_hi), 1.0)
-                or abs(_nb_lo - _nb_hi) > 1e-12 * max(abs(_nb_hi), 1.0)):
+        _lams_m.append(0.5 * (min(_lams_m) + max(_lams_m)))   # lam_c, the freeze point
+        _pairs = [end_media_indices(design, lm) for lm in _lams_m]
+        _ns_ref, _nb_ref = _pairs[-1]                         # the frozen band-centre values
+        if any(abs(ns - _ns_ref) > 1e-12 * max(abs(_ns_ref), 1.0)
+               or abs(nb - _nb_ref) > 1e-12 * max(abs(_nb_ref), 1.0)
+               for ns, nb in _pairs[:-1]):
             import warnings
             warnings.warn(
                 "run_pipeline: end media (n_super/n_sub) are DISPERSIVE across the sweep band, so the "
@@ -160,7 +167,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
 
     ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
-        cf = fields[bp.label]
+        # pop, not read: this loop is the sole consumer, so each bias's grids are freed once its
+        # optics finish -- peak memory no longer stacks every CarrierField under the optics solve
+        # (duplicate labels can't KeyError: Sweep rejects them at construction)
+        cf = fields.pop(bp.label)
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
         # dict is reused; None keeps the carrier-only path byte-identical)
         ef = extra_fields(bp) if callable(extra_fields) else extra_fields
