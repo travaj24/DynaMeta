@@ -58,10 +58,18 @@ from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pum
 from dynameta.optics.fiber_amp.noise import (AseSpectrum, NoiseResult, analyze_noise,
                                             local_inversion_factor, noise_figure,
                                             output_ase_spectrum)
+from dynameta.optics.fiber_amp.metrics import (CompressionCurve, GainSpectrum, SlopeEfficiency,
+                                              gain_compression_curve, gain_flatness,
+                                              gain_spectrum, power_conversion_efficiency,
+                                              saturation_output_power, slope_efficiency,
+                                              stokes_limit)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
            "ChannelSet", "metastable_fraction", "gain_coeff_per_m", "ase_source_per_m", "dP_dz",
            "Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult",
            "AseSpectrum", "NoiseResult", "output_ase_spectrum", "noise_figure",
-           "local_inversion_factor", "analyze_noise"]
+           "local_inversion_factor", "analyze_noise",
+           "CompressionCurve", "GainSpectrum", "SlopeEfficiency", "gain_compression_curve",
+           "gain_flatness", "gain_spectrum", "power_conversion_efficiency",
+           "saturation_output_power", "slope_efficiency", "stokes_limit"]
