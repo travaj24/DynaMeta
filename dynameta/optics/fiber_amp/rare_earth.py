@@ -37,6 +37,11 @@ class ChannelSet:
     gamma: np.ndarray                          # (K,) mode/dopant overlap
     loss_per_m: np.ndarray                     # (K,) background loss l_k [1/m]
     tau_s: float                               # upper-state lifetime [s] (from the ion)
+    sigma_esa: np.ndarray = None               # (K,) excited-state-absorption cross-section [m^2]
+
+    def __post_init__(self):
+        if self.sigma_esa is None:
+            object.__setattr__(self, "sigma_esa", np.zeros_like(self.sigma_a))
 
     @staticmethod
     def build(ion: RareEarthIon, fiber: FiberSpec, lambda_m, u, *, is_ase=None,
@@ -51,7 +56,8 @@ class ChannelSet:
                           np.asarray(ion.sigma_a.sigma(lam), float),
                           np.asarray(ion.sigma_e.sigma(lam), float),
                           np.asarray(overlap_gamma(fiber, lam), float),
-                          fiber.loss_per_m(lam), float(ion.tau_s))
+                          fiber.loss_per_m(lam), float(ion.tau_s),
+                          np.asarray(ion.sigma_esa_of(lam), float))
 
     @property
     def nu_hz(self) -> np.ndarray:
@@ -88,11 +94,13 @@ def metastable_fraction(ch: ChannelSet, powers_W, fiber: FiberSpec, *,
 
 def gain_coeff_per_m(ch: ChannelSet, nbar2: float, fiber: FiberSpec) -> np.ndarray:
     """Per-channel local NET gain coefficient g_k [1/m] (docs sec.1):
-        g_k = Gamma_k n_t [sigma_e,k nbar2 - sigma_a,k (1 - nbar2)] - l_k.
-    Positive = amplification, negative = net absorption. The bracket is the Giles
-    g*_k nbar2 - alpha_k (1 - nbar2) with alpha_k = sigma_a Gamma n_t, g*_k = sigma_e Gamma n_t."""
+        g_k = Gamma_k n_t [sigma_e,k nbar2 - sigma_a,k (1 - nbar2) - sigma_esa,k nbar2] - l_k.
+    Positive = amplification, negative = net absorption. The first bracket terms are the Giles
+    g*_k nbar2 - alpha_k (1 - nbar2); the sigma_esa nbar2 term is excited-state absorption (a
+    parasitic loss from the excited population, zero unless the ion carries an ESA spectrum)."""
     return (ch.gamma * fiber.n_t_m3
-            * (ch.sigma_e * nbar2 - ch.sigma_a * (1.0 - nbar2)) - ch.loss_per_m)
+            * (ch.sigma_e * nbar2 - ch.sigma_a * (1.0 - nbar2) - ch.sigma_esa * nbar2)
+            - ch.loss_per_m)
 
 
 def ase_source_per_m(ch: ChannelSet, nbar2: float, fiber: FiberSpec, *, m_modes: int = 2
