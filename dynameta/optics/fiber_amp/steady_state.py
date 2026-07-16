@@ -129,7 +129,7 @@ class FiberAmplifier:
                 from dynameta.optics.fiber_amp.waveguide import cladding_pump_overlap
                 gamma[k] = cladding_pump_overlap(self.fiber)
         ch = ChannelSet(ch.lambda_m, ch.u, ch.is_ase, ch.dnu_hz, ch.sigma_a, ch.sigma_e,
-                        gamma, ch.loss_per_m, ch.tau_s)
+                        gamma, ch.loss_per_m, ch.tau_s, ch.sigma_esa)
         return ch, np.asarray(bc), u, is_ase, kind
 
     # ---- pointwise physics used by the IVP passes ----------------------------------------
@@ -151,7 +151,8 @@ class FiberAmplifier:
         P = np.maximum(P, 0.0)
         n2 = self._nbar2(ch, P)
         na = self._n_active
-        g = (ch.gamma * na * (ch.sigma_e * n2 - ch.sigma_a * (1.0 - n2)) - ch.loss_per_m)
+        g = (ch.gamma * na * (ch.sigma_e * n2 - ch.sigma_a * (1.0 - n2) - ch.sigma_esa * n2)
+             - ch.loss_per_m)
         if self.concentration is not None:
             # quenched dark-pair ions: unbleachable ground-state absorption at every wavelength
             g = g - ch.gamma * self._n_dark * ch.sigma_a
