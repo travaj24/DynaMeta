@@ -65,6 +65,8 @@ SMOKE = {
     "qd_soa_spectral_dispersion", "qd_soa_thermal_profile", "qd_soa_transport",
     "qd_soa_transverse_bpm", "qd_soa_traveling_wave", "qd_soa_ultrafast",
     "qd_soa_vectorial_pdg", "qd_soa_wdm",
+    # the rare-earth fiber amplifier (EDFA/YDFA) end-to-end gates -- pure numpy/scipy
+    "fiber_amp_physics",
 }
 
 
