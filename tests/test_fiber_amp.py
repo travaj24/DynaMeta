@@ -19,7 +19,7 @@ from dynameta.optics.fiber_amp import (
     CrossSectionTable, giles_calibrated_fiber, dB_per_m_to_per_m,
     detection_noise,
     gaussian_pulse, sech_pulse, dispersion_length, soliton_order, propagate_gnlse,
-    SaturableGain,
+    SaturableGain, cpa_chain, strehl_ratio, transform_limited, apply_spectral_phase,
 )
 
 ER = erbium("aluminosilicate")
@@ -588,3 +588,53 @@ def test_saturable_gain_compresses_with_energy():
                           / E) for E in (1e-13, 1e-9, 1e-8)]
     assert dB[0] > dB[1] > dB[2]                           # gain compresses with input energy
     assert abs(dB[0] - 10.0 * np.log10(np.exp(2.0))) < 0.05     # low-E -> exp(g_small L)
+
+
+# ============================ Phase 14: CPA chain + B-integral + metrics =====================
+
+def _cpa_grid(N=8192, window_s=40e-12):
+    return (np.arange(N) - N // 2) * (window_s / N)
+
+
+def test_strehl_of_transform_limited_is_one():
+    t = _cpa_grid(4096)
+    p = gaussian_pulse(t, t0_s=1e-13, peak_power_W=1.0)          # already transform-limited
+    assert abs(strehl_ratio(p) - 1.0) < 1e-6
+    chirped = apply_spectral_phase(p, gdd_s2=2e-25)              # add dispersion -> Strehl < 1
+    assert strehl_ratio(chirped) < 0.5
+    # the transform limit of the chirped pulse is shorter (higher peak) and preserves energy
+    tl = transform_limited(chirped)
+    assert tl.peak_power_W > chirped.peak_power_W
+    assert abs(tl.energy_J - chirped.energy_J) / chirped.energy_J < 1e-9
+
+
+def test_cpa_linear_recompression_recovers_seed():
+    t = _cpa_grid()
+    seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=10.0, lambda0_m=1.03e-6)
+    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=0.0,
+                  n_steps=250)
+    assert r.stretch_factor > 10.0                              # genuinely stretched
+    assert r.strehl > 0.98                                      # matched compressor recovers TL
+    assert abs(r.compressed_fwhm_s - seed.fwhm_s()) / seed.fwhm_s() < 0.05
+
+
+def test_cpa_stretching_lowers_b_integral():
+    t = _cpa_grid()
+    seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=10.0)
+    B = [cpa_chain(seed, stretch_gdd_s2=st, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=3e-3,
+                   n_steps=250).b_integral_rad for st in (1e-25, 3e-25, 9e-25)]
+    assert B[0] > B[1] > B[2]                                   # more stretch -> lower B
+
+
+def test_cpa_b_integral_penalty_and_scaling():
+    t = _cpa_grid()
+    seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=2000.0)
+    out = [cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=g,
+                     n_steps=400) for g in (0.0, 1e-3, 3e-3, 1e-2)]
+    strehls = [o.strehl for o in out]
+    assert strehls[0] > 0.98 and strehls[-1] < 0.9             # B of a few rad spoils compression
+    assert all(strehls[i] > strehls[i + 1] for i in range(len(strehls) - 1))
+    # B scales linearly with gamma (unsaturated, gain off)
+    a = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=3e-3, n_steps=250)
+    b = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=6e-3, n_steps=250)
+    assert abs(b.b_integral_rad / a.b_integral_rad - 2.0) < 1e-3
