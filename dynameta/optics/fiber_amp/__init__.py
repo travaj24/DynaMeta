@@ -44,7 +44,13 @@ Module map (phased build; each phase ships with discrimination-proven validation
   Phase 8  calibration           : plug in datasheet cross-section spectra + measured gain/NF
            (mirrors soa.calibration).
 
-The imports below are populated as each phase lands.
+Accuracy extensions (all opt-in; byte-identical to the ideal model when off):
+  Phase 9  ESA (spectroscopy)     : excited-state absorption sigma_esa -- a parasitic beam loss
+           ~nbar2 (Er 980 nm pump ESA; Yb ESA-free).
+  Phase 10 temperature (spectroscopy): McCumber-scaled sigma_e(T) (at_temperature) + multiphonon
+           energy-gap-law lifetime (multiphonon_lifetime).
+  Phase 11 detection              : detector shot / signal-spont / spont-spont beat noise,
+           electrical SNR, and a beat-noise NF that reduces to the optical NF.
 """
 
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
