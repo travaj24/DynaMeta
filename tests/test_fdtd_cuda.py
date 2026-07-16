@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import solve_fdtd_2d, available_backends, _have_numba_cuda
+from dynameta.optics.fdtd_nd import solve_fdtd_2d, available_backends, have_numba_cuda
 
-pytestmark = pytest.mark.skipif(not _have_numba_cuda(), reason="no CUDA GPU available")
+pytestmark = pytest.mark.skipif(not have_numba_cuda(), reason="no CUDA GPU available")
 
 LMIN, LMAX = 1200e-9, 1600e-9
 

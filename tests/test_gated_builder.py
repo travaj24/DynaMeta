@@ -93,3 +93,48 @@ def test_set_ssac_gate_requires_built_device():
     assert not b._built
     with pytest.raises(RuntimeError):
         b.set_ssac_gate("gl")
+
+
+def test_2d_builder_refuses_lateral_isolation_cases():
+    # audit C2-3: non-ambient background WITH inclusions (and laterally touching
+    # inclusions) get NO lateral interface in the 2D builder -- the inclusion would be
+    # electrostatically isolated silently; must raise (the 3D builder wires these)
+    import pytest
+    pytest.importorskip("devsim")              # devsim_layered imports devsim at module load
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry, TransportModel
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("hfo2", ConstantOptical(4.0 + 0j)))
+    reg.add(Material("ito", ConstantOptical(3.9 + 0j),
+                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.5,
+                                              dos_mass_kg_of_n_m3=lambda n: 3.2e-31)))
+    P = 370e-9
+    bar = Inclusion(shape=Rectangle(P / 2, P / 4, 0.4 * P, P), material="ito")
+    d = Design(name="t", unit_cell=UnitCell.square(P),
+               stack=Stack(layers=[Layer("mix", 10e-9, "hfo2", inclusions=[bar])],
+                           superstrate_material="air", substrate_material="air"),
+               electrodes=[], materials=reg)
+    with pytest.raises(NotImplementedError, match="lateral"):
+        LayeredDevsimBuilder(d)
+    # two x-touching inclusions in an AMBIENT layer likewise raise
+    b1 = Inclusion(shape=Rectangle(P / 4, P / 4, 0.25 * P, P), material="ito")
+    b2 = Inclusion(shape=Rectangle(P / 2, P / 4, 0.25 * P, P), material="ito")
+    d2 = Design(name="t2", unit_cell=UnitCell.square(P),
+                stack=Stack(layers=[Layer("pair", 10e-9, "air", inclusions=[b1, b2])],
+                            superstrate_material="air", substrate_material="air"),
+                electrodes=[], materials=reg)
+    with pytest.raises(NotImplementedError, match="DECOUPLED"):
+        LayeredDevsimBuilder(d2)
+
+
+def test_bipolar3d_expr_requires_body_doping():
+    # audit C2-1: net_doping_expr makes the (acceptor, n_bg_m3) scalars dead as doping --
+    # phi_bi derived from them silently mis-references the gate (+0.714 V at Vg=0 in the
+    # audit probe); the spec-level contract now requires the signed body-side doping
+    pytest.importorskip("devsim")              # devsim_3d imports devsim at module load
+    from dynameta.carriers.devsim_3d import Stacked3DSpec
+    spec = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e17, net_doping_expr="-1.0e23")
+    assert spec.body_net_doping_m3 is None                     # guard fires at solve()

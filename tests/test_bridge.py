@@ -344,3 +344,31 @@ def test_assemble_eps_rejects_4d_eps_grid():
     with pytest.raises(ValueError):
         assemble_eps(field, _align("semi", "semi", stack_axis="z"), _FourDMap(),
                      IdentityLift(), 1300e-9, mesh_regions=["semi"])
+
+
+def test_extra_fields_2d_grid_lifts_not_transposes():
+    # audit C5-5: a 2D (Nx,Nv) extra (thermal/electrostatic companion) used to merge RAW
+    # against the lifted (Nx,Ny,Nz) n -- with Nx == Ny (the shipped defaults) numpy
+    # broadcast mapped the extra's x-axis onto the optical y-axis: an exact x<->y
+    # transpose, silently. It must now ride the lift (y-uniform extrusion).
+    nx = 2                                                    # ExtrudeLift synthesizes Ny=2,
+    nv = 8                                                    # so Nx=2 arms the broadcast trap
+    x = np.linspace(0.0, PERIOD, nx)
+    y = np.linspace(0.0, 10e-9, nv)
+    n2d = np.full((nx, nv), N_BG)
+    T2d = np.tile(np.linspace(300.0, 400.0, nx)[:, None], (1, nv))   # x-RAMP, v-uniform
+
+    class _EpsFromT:
+        def eps_grid(self, material, fields, lambda_m):
+            T = np.asarray(fields["T"])
+            return 2.0 + 0.001 * (T - 300.0) + 0.0 * np.asarray(fields["n"])
+
+    field = _field_2d(n2d, x, y)
+    out = assemble_eps(field, _align("ito", "ito"), _EpsFromT(),
+                       ExtrudeLift(period_y_m=PERIOD), 1300e-9,
+                       mesh_regions=["ito"], extra_fields={"T": T2d})
+    vzyx = np.asarray(out["ito"].values_zyx)                  # (Nz, Ny, Nx)
+    ramp_x = vzyx[0, 0, :].real
+    assert ramp_x[-1] - ramp_x[0] > 0.05, "the T ramp must live on the x axis"
+    assert np.allclose(vzyx[0, :, 0], vzyx[0, 0, 0]), "extras must be y-uniform"
+    assert np.allclose(vzyx[0], vzyx[-1]), "v-uniform T stays z-uniform"

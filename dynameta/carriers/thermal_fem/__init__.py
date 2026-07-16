@@ -28,13 +28,16 @@ int rho*Cp*u*v*dV' integral equals _S^3 * M_phys, so the mass coefficient carrie
 
 from __future__ import annotations
 
-from dynameta.carriers.thermal_fem.common import (_S, ThermalLayer,
+from dynameta.carriers.thermal_fem.common import (_S, MESH_SCALE, ThermalLayer,
                                                   ThermalLayerTwoTemp,
                                                   _add_load_terms,
                                                   _build_layered_mesh,
                                                   _build_thermal_forms,
                                                   _mean_T_per_layer,
-                                                  _per_material_cf)
+                                                  _per_material_cf,
+                                                  add_load_terms,
+                                                  build_thermal_forms,
+                                                  mean_T_per_layer)
 from dynameta.carriers.thermal_fem.steady import ThermalResult, solve_thermal_fem
 from dynameta.carriers.thermal_fem.transient import (ThermalTransientResult,
                                                      solve_thermal_transient_fem)

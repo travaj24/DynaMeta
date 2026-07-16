@@ -32,10 +32,21 @@ C = 299792458.0
 
 
 def _reference_mass(n, m_low=0.27 * M_E, alpha=0.5):
+    """NON-CIRCULAR reference (audit C7b-1: the old reference re-typed KaneOpticalMass's own
+    -- halved -- closed form, so the gate was tautological): m_opt = hbar k_F / v_F computed
+    NUMERICALLY from the Kane dispersion E (1 + alpha E) = hbar^2 k^2/(2 m0), v = dE/dk by
+    central difference at k_F. No closed-form mass expression is reused."""
     n = np.maximum(np.asarray(n, float), 1e10)
     kF = (3.0 * np.pi ** 2 * n) ** (1.0 / 3.0)
-    E_F = HBAR ** 2 * kF ** 2 / (2.0 * m_low)
-    return m_low * np.sqrt(1.0 + 2.0 * alpha * E_F / Q_E)
+    a = alpha / Q_E                                             # 1/J
+
+    def E_of_k(k):
+        g = HBAR ** 2 * k ** 2 / (2.0 * m_low)
+        return (-1.0 + np.sqrt(1.0 + 4.0 * a * g)) / (2.0 * a)
+
+    dk = 1e-6 * kF
+    v = (E_of_k(kF + dk) - E_of_k(kF - dk)) / (2.0 * dk) / HBAR
+    return HBAR * kF / v
 
 
 def _lambda_enz(drude, n):
@@ -63,9 +74,10 @@ def main():
 
     m_kane = KaneOpticalMass(m0_kg=0.27 * M_E, alpha_eV=0.5)
     dk = float(np.max(np.abs(m_kane(NGRID) - _reference_mass(NGRID)) / _reference_mass(NGRID)))
-    g_k = dk < 1e-12
-    print("[dm] KANE == reference DOS-mass closure: max rel={:.1e} -> {}".format(dk, "OK" if g_k else "FAIL"),
-          flush=True)
+    g_k = dk < 1e-8            # numeric central-diff reference truncation ~1.5e-10; the
+    # pre-audit halved closure misses by ~2.5e-1 -- 7 orders of discrimination retained
+    print("[dm] KANE == numeric-dispersion optical mass hbar kF/vF: max rel={:.1e} -> {}".format(
+        dk, "OK" if g_k else "FAIL"), flush=True)
 
     mm = m_kane(NGRID)
     wp2 = NGRID * Q_E ** 2 / (EPS0 * mm)

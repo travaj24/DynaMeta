@@ -106,7 +106,7 @@ def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, 
 def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                 nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor):
     """Fused, prange-threaded full-vector 3D timestep (the Numba CPU kernel) -- byte-near-identical physics
-    to _run_3d (six-component Yee + per-component semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in
+    to run_3d (six-component Yee + per-component semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in
     z + PEC, Bloch-periodic x,y), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass.
     C1,C2,C3 = per-cell Lorentz coefficients, has_lor gates the per-component polarization PL{x,y,z}.
     Parallel-safe over x: the H-phase writes Hx/Hy/Hz[i] (disjoint) reading only E (read-only); the E-phase
@@ -158,7 +158,7 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                     g = gam[i, j, k]
                     aJ = (1.0 - g * dt / 2.0) / (1.0 + g * dt / 2.0)
                     bJ = (EPS0 * wp[i, j, k] ** 2 * dt / 2.0) / (1.0 + g * dt / 2.0)
-                    eps_eff = eps_inf[i, j, k] + chi3[i, j, k] * (exo * exo + eyo * eyo + ezo * ezo)
+                    eps_eff = eps_inf[i, j, k] + 3.0 * chi3[i, j, k] * (exo * exo + eyo * eyo + ezo * ezo)  # C3-2
                     denom = e0dt * eps_eff + bJ / 2.0
                     coef = 0.5 * (1.0 + aJ)
                     # Ex: curl_x H = dHz/dy - dHy/dz (CPML)

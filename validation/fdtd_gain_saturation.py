@@ -26,7 +26,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, HBAR, M_E, Q_E
-from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te
+from dynameta.optics.fdtd_nd import cpml_z, run_2d_te
 from dynameta.optics.laser_gain import FourLevelSystem, small_signal_gain_per_m
 
 N_MED = np.sqrt(2.0)
@@ -41,7 +41,7 @@ def _setup(dz, n_pad, n_str):
     nz = 2 * n_pad + n_str
     dx = 4.0 * dz
     dt = 0.5 / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
-    cpml = _cpml_z(nz, dz, dt, 12, N_MED, N_MED)
+    cpml = cpml_z(nz, dz, dt, 12, N_MED, N_MED)
     return nz, dx, dt, cpml
 
 
@@ -80,13 +80,13 @@ def main():
     def run_dyn(src, snap_step):
         out = {}
         gd = (G1, G2, kapfac, Wp_grid, Npop0, T32, T21, T10, HBAR * W_A, snap_step)
-        _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, k_src, k_pL,
+        _, _, eyR, _ = run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, k_src, k_pL,
                                   k_pR, src, cpml, np, None, gain_dyn=gd, gain_dyn_out=out)
         return eyR.mean(axis=1), out
 
     def run_clamped(src, dN):
         g3 = -kapfac / dt ** 2 * dt ** 2 * dN          # == -kappa dN dt^2/den on the window
-        _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, k_src, k_pL,
+        _, _, eyR, _ = run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, k_src, k_pL,
                                   k_pR, src, cpml, np, None, gain=(G1, G2, g3))
         return eyR.mean(axis=1)
 
@@ -159,7 +159,7 @@ def main():
     g_d = False
     try:
         gd = (G1, G2, kapfac, Wp_grid, Npop0, T32, T21, T10, HBAR * W_A, 10)
-        _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, 100, k_src, k_pL, k_pR,
+        run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, 100, k_src, k_pL, k_pR,
                    np.zeros(100), cpml, np, None, gain=(G1, G2, zeros), gain_dyn=gd)
     except ValueError:
         g_d = True

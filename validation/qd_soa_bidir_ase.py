@@ -30,7 +30,7 @@ from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
                                            ase_spectrum_bidirectional, noise_figure)
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
-H_PLANCK = 2.0 * np.pi * HBAR
+from dynameta.constants import H_PLANCK   # single source (audit 6.3)
 
 
 def main():

@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, EPS0, M_E, Q_E
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _run_2d_te, _cpml_z, solve_fdtd_2d
+from dynameta.optics.fdtd_nd import run_2d_te, cpml_z, solve_fdtd_2d
 from dynameta.optics.laser_gain import FourLevelSystem, small_signal_gain_per_m
 
 N_MED = np.sqrt(2.0)
@@ -61,8 +61,8 @@ def _run(dz, n_pad, n_str, src, *, gain=None, lor=None):
     if lor is not None:
         w, dw, deps = lor
         ln = _coeffs(w, dw, EPS0 * deps * w ** 2)
-    cpml = _cpml_z(nz, dz, dt, 12, N_MED, N_MED)
-    _, _, eyR, _ = _run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, 16, 20, nz - 16,
+    cpml = cpml_z(nz, dz, dt, 12, N_MED, N_MED)
+    _, _, eyR, _ = run_2d_te(eps, zeros, zeros, zeros, dx, dz, dt, src.size, 16, 20, nz - 16,
                               src, cpml, np, ln, gain=gn)
     return eyR.mean(axis=1), dt
 

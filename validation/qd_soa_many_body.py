@@ -32,7 +32,7 @@ from scipy.signal import hilbert
 from dynameta.constants import HBAR, Q_E
 from dynameta.optics.soa.qd_gain import ManyBody, QDGainModel, QDGainParams
 
-H_PLANCK = 2.0 * np.pi * HBAR
+from dynameta.constants import H_PLANCK   # single source (audit 6.3)
 
 
 def _model(**mbkw):

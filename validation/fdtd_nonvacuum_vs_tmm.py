@@ -38,7 +38,20 @@ def _tmm_band(n_super, n_slab, d, n_sub, freqs):
     return R, T
 
 
-def _gate(tag, n_super, n_slab, d, n_sub, tol_rt, tol_en):
+def _tmm_t_band(n_super, n_slab, d, n_sub, freqs):
+    """Complex interface-referenced t (front face -> substrate start), exp(-iwt), via the
+    tmm package -- the oracle for the audit C3-4 t0-PHASE gate (the pre-fix de-embed was
+    vacuum-only: ~100 deg frequency-dependent phase error on glass while |t| was untouched)."""
+    import tmm
+    t = np.empty(len(freqs), dtype=complex)
+    for i, fHz in enumerate(freqs):
+        lam = C_LIGHT / fHz
+        t[i] = tmm.coh_tmm("s", [complex(n_super), complex(n_slab), complex(n_sub)],
+                           [np.inf, d, np.inf], 0.0, lam)["t"]
+    return t
+
+
+def _gate(tag, n_super, n_slab, d, n_sub, tol_rt, tol_en, tol_ph_deg=12.0):
     res = solve_fdtd_2d([FDTDLayer(thickness_m=d, eps_inf=n_slab ** 2)], period_x_m=300e-9,
                         lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=RES,
                         n_super=n_super, n_sub=n_sub, backend="numpy")
@@ -48,10 +61,13 @@ def _gate(tag, n_super, n_slab, d, n_sub, tol_rt, tol_en):
     dR = float(np.max(np.abs(res.R0[b] - Rt)))
     dT = float(np.max(np.abs(res.T0[b] - Tt)))
     den = float(np.max(np.abs(res.R_flux[b] + res.T_flux[b] - 1.0)))
-    ok = (dR < tol_rt) and (dT < tol_rt) and (den < tol_en)
+    # audit C3-4 t0-PHASE gate: complex t vs the tmm oracle (pre-fix: ~100 deg on glass)
+    dph = float(np.max(np.abs(np.degrees(np.angle(
+        res.t0[b] / _tmm_t_band(n_super, n_slab, d, n_sub, fb))))))
+    ok = (dR < tol_rt) and (dT < tol_rt) and (den < tol_en) and (dph < tol_ph_deg)
     print("[nv] {}: n_super={:.2f} n_slab={:.2f} n_sub={:.2f} -> max|dR0|={:.2e} max|dT0|={:.2e} "
-          "max|R+T-1|={:.2e}  {}".format(tag, n_super, n_slab, n_sub, dR, dT, den,
-                                          "PASS" if ok else "FAIL"), flush=True)
+          "max|R+T-1|={:.2e} max|dphase(t0)|={:.1f}deg  {}".format(
+              tag, n_super, n_slab, n_sub, dR, dT, den, dph, "PASS" if ok else "FAIL"), flush=True)
     return ok
 
 
@@ -66,10 +82,12 @@ def _gate3d(tag, n_super, n_slab, d, n_sub, tol_rt, tol_en):
     Rt, Tt = _tmm_band(n_super, n_slab, d, n_sub, res.freqs_Hz[b])
     dR = float(np.max(np.abs(res.R0[b] - Rt))); dT = float(np.max(np.abs(res.T0[b] - Tt)))
     den = float(np.max(np.abs(res.R_flux[b] + res.T_flux[b] - 1.0)))
-    ok = (dR < tol_rt) and (dT < tol_rt) and (den < tol_en)
+    dph = float(np.max(np.abs(np.degrees(np.angle(                       # audit C3-4 phase gate
+        res.t0[b] / _tmm_t_band(n_super, n_slab, d, n_sub, res.freqs_Hz[b]))))))
+    ok = (dR < tol_rt) and (dT < tol_rt) and (den < tol_en) and (dph < 18.0)
     print("[nv] {}: n_super={:.2f} n_slab={:.2f} n_sub={:.2f} -> max|dR0|={:.2e} max|dT0|={:.2e} "
-          "max|R+T-1|={:.2e}  {}  (backend={})".format(tag, n_super, n_slab, n_sub, dR, dT, den,
-                                                        "PASS" if ok else "FAIL", bk), flush=True)
+          "max|R+T-1|={:.2e} max|dphase(t0)|={:.1f}deg  {}  (backend={})".format(
+              tag, n_super, n_slab, n_sub, dR, dT, den, dph, "PASS" if ok else "FAIL", bk), flush=True)
     return ok
 
 

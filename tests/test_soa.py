@@ -899,3 +899,120 @@ def test_eh_numba_parity():
     rb = b.step_slices(st, P, 1.4e-13, a.p.nu0_Hz, 30e-3)
     for x, y in zip(ra, rb):
         assert np.max(np.abs(x - y)) / max(float(np.max(np.abs(x))), 1e-300) < 1e-12
+
+
+def test_detector_spont_spont_matches_olsson():
+    # audit C4-3: at m_pol=2 the per-pol form m_pol R^2 S^2 (2 dnu_o - B) B must equal
+    # Olsson's (JLT 7:1071, 1989) both-pol 4 R^2 S^2 (B_o - B/2) B -- the published
+    # leading 4 already contains the two-polarization factor. The pre-fix 2*m_pol
+    # coefficient returned exactly 2x this (Monte-Carlo confirmed in the audit).
+    from dynameta.optics.soa.ase_noise import detector_noise_variances
+    S, B, Bo, R = 1.4e-16, 2.0e10, 1.0e12, 0.9
+    v = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=2)
+    olsson = 4.0 * R ** 2 * S ** 2 * (Bo - B / 2.0) * B
+    assert v["spont_spont"] == pytest.approx(olsson, rel=1e-12)
+    # single-pol: exactly half the two-pol variance
+    v1 = detector_noise_variances(0.0, S, R_A_W=R, B_Hz=B, dnu_opt_Hz=Bo, m_pol=1)
+    assert v1["spont_spont"] == pytest.approx(0.5 * olsson, rel=1e-12)
+
+
+def test_langevin_exact_emit_telescopes_to_analytic_ase():
+    # audit C4-4: with the exact-emit variance factor expm1(a dz)/(a dz), the marcher's
+    # expected accumulated ASE (per-slice variance amplified by the downstream slices)
+    # telescopes EXACTLY to n_sp h nu (G-1) for constant gain -- the bare O(dz) source
+    # (factor 1) carries a lnG/(2 nz) deficit (0.731 of analytic at lnG=3, nz=5).
+    import numpy as np
+    from dynameta.optics.soa.traveling_wave import _exact_emit_factor
+
+    def accumulated_over_analytic(lnG, nz, exact):
+        a_dz = lnG / nz                                       # net power exponent per slice
+        emit = float(_exact_emit_factor(a_dz)) if exact else 1.0
+        # sum_k var*emit*e^{a dz (nz-1-k)} / [ (G-1)/a * a ] with var = a dz (n_sp-normalized)
+        acc = sum(a_dz * emit * np.exp(a_dz * (nz - 1 - k)) for k in range(nz))
+        return acc / (np.exp(lnG) - 1.0)
+    for lnG, nz in ((3.0, 5), (3.0, 80), (6.9, 40)):
+        assert abs(accumulated_over_analytic(lnG, nz, True) - 1.0) < 1e-12, (lnG, nz)
+    # and the pre-fix law is reproduced by the same algebra (regression anchor)
+    assert abs(accumulated_over_analytic(3.0, 5, False) - 0.731) < 5e-3
+    # factor limits: ->1 smoothly at a=0; matches expm1(x)/x
+    assert float(_exact_emit_factor(0.0)) == 1.0
+    assert float(_exact_emit_factor(0.5)) == pytest.approx(np.expm1(0.5) / 0.5, rel=1e-14)
+    assert float(_exact_emit_factor(-0.3)) == pytest.approx(np.expm1(-0.3) / -0.3, rel=1e-14)
+
+
+def test_eh_split_excitonic_accessors_raise():
+    # audit C4-5: rho_GS/rho_ES hardcode the excitonic layout; with eh_split=True they
+    # silently returned misaligned ES occupations and a raw WL density (saturation_curve
+    # gain 59% wrong, compression depth 2.5x wrong) -- they must raise like step_slices_wdm
+    import numpy as np
+    from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
+    m = QDGainModel(QDGainParams(eh_split=True).with_detailed_balance_taus())
+    y = np.zeros(2 + 4 * m.ng)                                 # any state: guard fires first
+    with pytest.raises(NotImplementedError, match="rho_GS"):
+        m.rho_GS(y)
+    with pytest.raises(NotImplementedError, match="rho_ES"):
+        m.rho_ES(y)
+    # excitonic models are untouched: the accessors stay pure layout slices
+    m2 = QDGainModel(QDGainParams())
+    y2 = np.arange(1 + 2 * m2.ng, dtype=float)
+    assert np.array_equal(m2.rho_ES(y2), y2[1:1 + m2.ng])
+    assert np.array_equal(m2.rho_GS(y2), y2[1 + m2.ng:1 + 2 * m2.ng])
+
+
+def test_line_filter_keeps_es_band_gain():
+    # audit C4-6: with an active ES band, the line-filter branch subtracted the FULL
+    # GS+ES flat gain while its polarization poles re-added only the GS band -- the
+    # entire ES contribution was silently cancelled (probe: ON gain -0.004 dB vs OFF
+    # 3.79 dB). The ES band must ride the flat multiplicative gain: ON == OFF at the
+    # carrier (the dispersive correction is zero there by construction).
+    m = QDGainModel(QDGainParams(n_groups=21, sigma_pk_ES_m2=5e-19).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 0.5e-3, 40, nu_s_Hz=m.p.nu0_Hz)
+    n = 800
+    on = soa.amplify_coherent(np.full(n, np.sqrt(1e-3)), drive=40e-3, alpha_lef=0.0,
+                              line_filter=True)["P_out"][-1]
+    off = soa.amplify_coherent(np.full(n, np.sqrt(1e-3)), drive=40e-3, alpha_lef=0.0,
+                               line_filter=False)["P_out"][-1]
+    g_on = 10.0 * np.log10(on / 1e-3)
+    g_off = 10.0 * np.log10(off / 1e-3)
+    assert g_off > 1.0                                        # the ES-active device has real gain
+    assert abs(g_on - g_off) < 0.05 * abs(g_off), (g_on, g_off)
+
+
+def test_dualpol_tm_depletes_at_its_own_frequency():
+    # audit C4-7: with tm_peak_shift != 0 the TM channel amplified at nu_tm but depleted
+    # carriers at the TE frequency -- TM gain compression was largely lost (97% missed in
+    # the audit probe). Oracle: a TM-only drive through the dualpol marcher must show the
+    # SAME saturated gain as the single-pol marcher run AT nu_tm (they now share the
+    # per-channel-lineshape carrier step).
+    m = QDGainModel(QDGainParams(n_groups=21).with_detailed_balance_taus())
+    soa = TravelingWaveSOA(m, 2e-3, 80, nu_s_Hz=m.p.nu0_Hz)
+    shift = m.p.fwhm_inhom_Hz
+    nu_tm = m.p.nu0_Hz + shift
+    n = 1200
+    A = np.sqrt(50e-3) + 0j                                   # deep saturation
+    dual = soa.amplify_coherent_dualpol(np.full(n, 1e-8 + 0j), np.full(n, A), drive=160e-3,
+                                        alpha_lef=0.0, pdg_ratio=1.0, tm_peak_shift_Hz=shift)
+    g_dual = 10.0 * np.log10(dual["P_tm_out"][-1] / abs(A) ** 2)
+    single = soa.amplify_coherent(np.full(n, A), drive=160e-3, alpha_lef=0.0,
+                                  nu_s_Hz=nu_tm, line_filter=False)
+    g_single = 10.0 * np.log10(single["P_out"][-1] / abs(A) ** 2)
+    assert abs(g_dual - g_single) < 0.15, (g_dual, g_single)  # pre-fix: ~0.35 dB apart
+    # unshifted dualpol stays byte-compatible with the lumped single-frequency step
+    dual0 = soa.amplify_coherent_dualpol(np.full(n, 1e-8 + 0j), np.full(n, A), drive=160e-3,
+                                         alpha_lef=0.0, pdg_ratio=1.0, tm_peak_shift_Hz=0.0)
+    g0 = 10.0 * np.log10(dual0["P_tm_out"][-1] / abs(A) ** 2)
+    s0 = soa.amplify_coherent(np.full(n, A), drive=160e-3, alpha_lef=0.0, line_filter=False)
+    assert abs(g0 - 10.0 * np.log10(s0["P_out"][-1] / abs(A) ** 2)) < 1e-9
+
+
+def test_calibration_reports_both_bandwidth_notions():
+    # audit C4-8: report['bandwidth_nm'] presented the fitted MATERIAL half-max width as
+    # the datasheet's NET -3 dB observable, which this device does NOT match -- the two
+    # must now be distinct keys, with the net bandwidth honestly ~3-4x narrower
+    from dynameta.optics.soa.calibration import calibrate_innolume_boa1310
+    dev = calibrate_innolume_boa1310(verbose=False)
+    r = dev.report
+    assert r["material_fwhm_nm"] == pytest.approx(r["bandwidth_nm"])   # back-compat alias
+    assert 40.0 < r["material_fwhm_nm"] < 80.0                         # ~datasheet 60 nm
+    assert 8.0 < r["net_3dB_bw_nm"] < 30.0                             # honest net width
+    assert r["net_3dB_bw_nm"] < 0.5 * r["material_fwhm_nm"]           # narrowing is real

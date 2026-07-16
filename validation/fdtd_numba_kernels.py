@@ -19,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, FDTDLayer, solve_fdtd_2d_oblique
+from dynameta.optics.fdtd_nd import HAVE_NUMBA, FDTDLayer, solve_fdtd_2d_oblique
 from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
 
 TOL = 1e-10
@@ -27,7 +27,7 @@ TOL = 1e-10
 
 def main():
     print("[nbk] === Numba FDTD kernels (MO 1-D + oblique 2-D) vs NumPy reference ===", flush=True)
-    if not _HAVE_NUMBA:
+    if not HAVE_NUMBA:
         print("[nbk] numba not installed -> SKIP (exit 0)", flush=True)
         return True
 

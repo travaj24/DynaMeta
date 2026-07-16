@@ -26,7 +26,9 @@ Advanced users can supply their own CarrierSolver / OpticalGeometryBuilder /
 OpticalSolver (see dynameta.core.interfaces).
 
 Other modules (import explicitly): dynameta.optics.fdtd / fdtd_nd / fdtd_mo / fdtd_seam
-(broadband/dispersive/MO/oblique FDTD + the sweep-aware seam), dynameta.optics.tmm_reference
+(broadband/dispersive/MO/oblique FDTD + the sweep-aware seam), dynameta.optics.rasterize
+(shared Design-layer lateral rasterizer: structured FDTD + the lumenairy RCWA bridge),
+dynameta.optics.tmm_reference
 (coherent-TMM oracle), dynameta.optics.inverse_design + topology_opt (differentiable JAX-FDTD
 design), dynameta.transient_optics (coupled carrier->optics transient), dynameta.results
 (SweepResults + HDF5/Zarr save/load), dynameta.cache (persistent optical-solver cache),
@@ -34,12 +36,14 @@ dynameta.viz (matplotlib spectra/maps), dynameta.carriers.lc_director / lc_dynam
 (nematic LC director statics + Erickson-Leslie dynamics).
 
 v0.5 adds: dynameta.optics.soa (standalone QD-SOA traveling-wave gain: group-resolved rate
-equations, ASE/noise, calibration) and the dynameta.optics.lumenairy_bridge backends -- RCWA/PMM
-plus the Berreman 4x4 anisotropic-planar and EMT (Rytov) screen tiers (lumenairy is a required core
-dep, imported lazily).
+equations, ASE/noise, calibration) and the dynameta.optics.lumenairy_bridge backends -- RCWA/PMM,
+the Berreman 4x4 anisotropic-planar and EMT (Rytov) screen tiers, and the axisymmetric BOR-PMM
+backend (bor_backend; lumenairy is a required core dep, imported lazily) -- plus the OPT-IN FEM
+mirror-symmetry domain reduction (geometry.specs.Mesh3DSpec.symmetry: PEC/PMC half/quarter cell,
+never automatic). (Module map refreshed per audit 6.3.)
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Geometry + materials data model (lightweight)
 from dynameta.geometry import (

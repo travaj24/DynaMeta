@@ -18,7 +18,7 @@ per-order complex amplitudes: OpticalResult.t is None (T comes from the order-su
 efficiencies; r from the zeroth-order reflection Jones with the same lab-basis -> Byrnes
 p-pol conversion as the RCWA bridge -- gated in validation/lumenairy_pmm_bridge.py).
 
-Cross-library pins (lumenairy 5.14.2): PMMStack(period, n_substrate=, n_superstrate=
+Cross-library pins (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor): PMMStack(period, n_substrate=, n_superstrate=
 [INDICES], degree=, n_orders=); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
 [scalar or (3,3)], slant_angle=); set_source(wavelength, theta=); solve() ->
 (orders, R_eff(2, M), T_eff(2, M), jones_reflection(2, 2)) with rows/columns keyed
@@ -35,9 +35,12 @@ import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import collapse_regions_to_layers, slice_eps_field
-from dynameta.optics.lumenairy_bridge.rcwa_backend import (_angles_rad, _guard_incidence_side,
-                                                           _p_basis_conversion, _pol_row,
-                                                           _require_lumenairy)
+from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
+                                                      conical_synthesis as _conical_synthesis,
+                                                      guard_incidence_side as _guard_incidence_side,
+                                                      p_basis_conversion as _p_basis_conversion,
+                                                      pol_row as _pol_row,
+                                                      require_lumenairy as _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
@@ -115,7 +118,9 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
                 raise ValueError("PMM bridge: layer {!r} carries a laterally-structured "
                                  "gridded EpsField; PMM segments are analytic -- use the "
                                  "RCWA bridge for rasterized cells".format(L.name))
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # slice_eps_field returns ascending-z (substrate-first) slabs; this stack
+            # is superstrate-first, so reverse (audit C5-1)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 names.append(L.name)
             continue
@@ -142,34 +147,67 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
 
 def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                               n_slices: Optional[int] = None,
-                              stabilize=None):
+                              stabilize=None, absorption: bool = False):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy PMM (the exact seam
     signature + solve_sweep, mirroring the RCWA bridge incl. per-wavelength end media).
     1-D lamellar devices only; in-plane incidence only (azimuth raises). OpticalResult.t
-    is None (PMM exposes no transmission Jones); R/T are total order-summed efficiencies."""
+    is None (PMM exposes no transmission Jones); R/T are total order-summed efficiencies.
+
+    absorption=True (audit 8.1-3, PMM at RCWA-bridge parity): solves with
+    retain_internal=True and fills per_region_absorption keyed by DESIGN layer name (slabs
+    of a graded layer sum into their layer) + A_independent from PMMStack.layer_absorption
+    -- the internal z-Poynting flux difference per layer, an independent volumetric
+    measurement (lumenairy's own invariant closes it against 1 - sum R - sum T).
+
+    CONICAL incidence (azimuth != 0) is now supported (audit 8.1-1 / consumer-gap B): the
+    rotated s/p totals R/T and the co-pol amplitude r are SYNTHESIZED from the per-order
+    complex amplitudes (lumenairy 5.22 per_order_amplitudes), since the native result rows
+    are lab-basis s/p MIXTURES at phi != 0. OpticalResult.t (the zeroth-order transmission
+    Jones, phase-bearing) is filled from PMMStack.jones_transmission on BOTH the in-plane
+    and conical paths -- it was None before 5.22."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
         _guard_incidence_side(design.optical)
         theta, phi = _angles_rad(design.optical)
-        if abs(phi) > 1e-12:
-            raise NotImplementedError("PMM bridge: conical incidence (azimuth != 0) is not "
-                                      "supported by PMMStack; use the RCWA or FEM solver")
+        pol = getattr(design.optical, "polarization", "y")
         stack, names = design_to_pmm_stack(design, lambda_m, eps_by_region=eps_by_region,
                                            degree=degree, n_orders=n_orders,
                                            n_slices=n_slices)
-        stack.set_source(lambda_m, theta=theta)
-        orders, R2, T2, jones = stack.solve(stabilize=stabilize)
+        stack.set_source(lambda_m, theta=theta, phi=phi)
+        orders, R2, T2, jones = stack.solve(stabilize=stabilize,
+                                            retain_internal=absorption)
         row = _pol_row(design.optical)
-        R = float(np.sum(R2[row]))
-        T = float(np.sum(T2[row]))
         n_sup, n_sb = end_media_indices(design, lambda_m)
-        rf, _tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
-                                      theta, n_sup, n_sb)
-        r = complex(np.asarray(jones)[row, row]) * complex(rf)
+        rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
+        if abs(phi) > 1e-12:
+            # rotated s/p eigen-polarization: synthesize R/T + the co-pol zeroth-order r/t from
+            # the per-order amplitudes (the native lab rows R2/T2/jones are s/p mixtures at
+            # phi != 0). The p-basis conversion is already baked into the eigen-projection, so
+            # rf/tf are NOT re-applied here.
+            R, T, r, t = _conical_synthesis(stack, pol, theta, phi, n_sup)
+        else:
+            R = float(np.sum(R2[row]))
+            T = float(np.sum(T2[row]))
+            r = complex(np.asarray(jones)[row, row]) * complex(rf)
+            t = complex(np.asarray(stack.jones_transmission())[row, row]) * complex(tf)
+        a_ind, pra = None, None
+        if absorption:
+            try:
+                la = np.asarray(stack.layer_absorption())     # (n_layers, 2) per incident pol
+                la = la[:, row] if la.ndim == 2 and la.shape[1] == 2 else la[row]
+                pra = {}
+                for name, val in zip(names, la):
+                    pra[name] = pra.get(name, 0.0) + float(val)
+                a_ind = float(np.sum(la))
+            except Exception as exc:                          # pragma: no cover - defensive
+                import warnings
+                warnings.warn("lumenairy PMM bridge: per-layer absorption unavailable ({}); "
+                              "A_independent left unset".format(exc), stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
-                             solve_time_s=time.perf_counter() - t0, t=None, T=T,
-                             A=1.0 - R - T, R_flux=R, T_flux=T)
+                             solve_time_s=time.perf_counter() - t0, t=t, T=T,
+                             A=1.0 - R - T, A_independent=a_ind, R_flux=R, T_flux=T,
+                             per_region_absorption=pra)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
         return _solve_at(design, eps_by_region, lambda_m)

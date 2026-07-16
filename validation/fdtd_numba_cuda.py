@@ -1,5 +1,5 @@
 """Validate the numba-CUDA 2D-TE FDTD backend (a persistent cooperative-groups GPU kernel run in
-timestep CHUNKS to stay under the WDDM TDR watchdog). Skipped (exit 0) if no CUDA GPU is available.
+timestep CHUNKS to stay under the WDDM TDR watchdog). Skipped (exit 42 = the run_all SKIP category, audit C6-6) if no CUDA GPU is available.
 
 GATE A (byte-match): backend='numba-cuda' reproduces the CPU reference (backend='numpy') R0/T0/R_flux to
         the float64 FMA floor (< 1e-9) -- the GPU kernel is the SAME physics, just parallelized.
@@ -19,14 +19,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import solve_fdtd_2d, _have_numba_cuda
+from dynameta.optics.fdtd_nd import solve_fdtd_2d, have_numba_cuda
 
 
 def main():
     print("[cu] === numba-CUDA 2D-TE FDTD backend ===", flush=True)
-    if not _have_numba_cuda():
-        print("[cu] no CUDA GPU available -> SKIP (exit 0)", flush=True)
-        return True
+    if not have_numba_cuda():
+        print("[cu] no CUDA GPU available -> SKIP (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+        raise SystemExit(42)
 
     # GATE A: byte-match vs the NumPy reference (uniform Drude slab)
     ol = [FDTDLayer(thickness_m=250e-9, eps_inf=4.0, drude_wp_rad_s=1.5e15, drude_gamma_rad_s=1e14)]
@@ -53,7 +53,9 @@ def main():
     def lat(nx, nz, zc, pad, zs):
         e = np.ones((nx, nz)); mm = (zc >= pad) & (zc < pad + zs); e[:nx // 2, mm] = 6.25; return e
 
-    olc = [FDTDLayer(thickness_m=220e-9, eps_inf=3.0, drude_wp_rad_s=1.0e15, drude_gamma_rad_s=8e13,
+    # eps_inf sized to the lateral peak 6.25 (C3-3 guard: dz/n_max derive from `layers`);
+    # the painter overwrites eps everywhere, so this only refines the grid
+    olc = [FDTDLayer(thickness_m=220e-9, eps_inf=6.25, drude_wp_rad_s=1.0e15, drude_gamma_rad_s=8e13,
                      lorentz_delta_eps=1.5, lorentz_w0_rad_s=1.4e15, lorentz_gamma_rad_s=6e13)]
     kwc = dict(period_x_m=600e-9, lambda_min_m=1200e-9, lambda_max_m=1700e-9, resolution=14, nx=24,
                lateral_eps_inf=lat)

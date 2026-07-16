@@ -36,6 +36,7 @@ from dynameta.constants import C_LIGHT
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
+from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 
 _VAC_TOL = 1.0e-3                                            # |n - 1| under this counts as vacuum end medium
 
@@ -91,18 +92,74 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
     return eps_inf, wp, gamma
 
 
+def _guard_optical_spec(design, *, structured: bool) -> None:
+    """audit C5-7: every FDTD seam entry point silently IGNORED design.optical -- a Design
+    with theta=30 deg (or azimuth, or bottom incidence) got the normal-incidence top-side
+    answer with no warning (probe: R off 10% s-pol / 35% p-pol at 30 deg) while every
+    sibling backend (FEM, TMM, lumenairy bridges) honors-or-raises the same fields. Raise
+    for what this seam cannot represent, mirroring the sibling guard pattern. At NORMAL
+    incidence polarization is provably irrelevant for a laterally-UNIFORM stack (any pol
+    accepted); a STRUCTURED cell is solved with a y-polarized source, so only 'y' is
+    accepted there."""
+    opt = getattr(design, "optical", None)
+    if opt is None:
+        return
+    theta = float(getattr(opt, "incidence_angle_deg", 0.0) or 0.0)
+    phi = float(getattr(opt, "azimuth_deg", 0.0) or 0.0)
+    side = getattr(opt, "incidence_side", "top") or "top"
+    pol = getattr(opt, "polarization", "y") or "y"
+    if abs(theta) > 1e-9 or abs(phi) > 1e-9:
+        raise NotImplementedError(
+            "FDTD seam: oblique/conical incidence (theta={:g} deg, azimuth={:g} deg) is not "
+            "wired into the pipeline seam -- the normal-incidence answer would be silently "
+            "wrong (audit C5-7); use solve_fdtd_2d_oblique directly, or the FEM/TMM solver."
+            .format(theta, phi))
+    if side != "top":
+        raise NotImplementedError(
+            "FDTD seam: incidence_side={!r} is not supported (TOP incidence only) -- swap the "
+            "superstrate/substrate in the Design instead (audit C5-7).".format(side))
+    if structured and pol != "y":
+        raise NotImplementedError(
+            "FDTD seam: a structured cell is solved with a y-polarized source; "
+            "polarization={!r} would silently get the 'y' answer (audit C5-7) -- use the "
+            "FEM/RCWA solver for other polarizations.".format(pol))
+
+
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
     """[FDTDLayer] for the through-stack in SUPERSTRATE-FIRST (incidence) order -- the order solve_fdtd_*
     places layers (the Stack lists bottom->top, so reversed). A uniform layer uses the bridge's
-    eps_by_region scalar when present (the bias-modulated value), else the material eps(lambda_m). A layer
-    with lateral inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
+    eps_by_region scalar when present (the bias-modulated value), else the material eps(lambda_m). A
+    GRADED (gridded, laterally-uniform) EpsField entry is sliced into thin uniform FDTDLayers, mirroring
+    the TMM extractor (audit C5-2: it used to fall through to the NOMINAL material eps, silently zeroing
+    the bias modulation -- or crashing on a DrudeOptical carrier region whose eps needs n_m3). A TENSOR
+    entry raises (the scalar FDTD grid cannot carry anisotropy -- use the FEM); a layer with lateral
+    inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
+    from dynameta.core.layered import slice_eps_field
+    from dynameta.optics.tmm_reference import S as _S_NM
     layers = []
     for L in reversed(design.stack.layers):                # incidence order: superstrate side first
         if getattr(L, "inclusions", None):
             raise NotImplementedError("design_to_fdtd_layers: layer '{}' has lateral inclusions; the FDTD "
                                       "seam Phase 0 handles laterally-uniform stacks only.".format(L.name))
         ef = (eps_by_region or {}).get(L.name)
-        if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+        if ef is not None and getattr(ef, "is_tensor", False):
+            raise NotImplementedError(
+                "design_to_fdtd_layers: layer '{}' carries a TENSOR eps (anisotropic effect); the "
+                "scalar FDTD grid cannot represent it -- use the FEM solver.".format(L.name))
+        if ef is not None and not getattr(ef, "is_uniform", True):
+            v = np.asarray(ef.values_zyx)
+            if not np.allclose(v, v[:, :1, :1], rtol=1e-12, atol=0.0):
+                raise NotImplementedError(
+                    "design_to_fdtd_layers: layer '{}' carries a laterally-STRUCTURED gridded "
+                    "EpsField; the uniform-stack FDTD seam cannot represent it -- use the FEM "
+                    "solver or the RCWA bridge.".format(L.name))
+            # slice_eps_field returns ascending-z (substrate-first) slabs; incidence order
+            # is superstrate-first, so reversed (same contract as the TMM extractor and the
+            # lumenairy bridges, audit C5-1); axes are nm solver units (the bridge convention)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM)):
+                layers.append(_eps_to_fdtd_layer(float(slab.thickness_m), complex(slab.eps), lambda_m))
+            continue
+        if ef is not None and getattr(ef, "scalar", None) is not None:
             eps = complex(ef.scalar)
         else:
             eps = complex(design.materials.get(L.background_material).eps(lambda_m))
@@ -244,28 +301,14 @@ def graded_fdtd_layers(thickness_m, eps_z, lambda_m, *, n_slices=None):
     return [_eps_to_fdtd_layer(d_sub, e, lambda_m) for e in eps_s]
 
 
-def _cell_axes(nx, ny, period_x_m, period_y_m):
-    """Cell-centered FDTD lateral sample points (cell frame [0,period], shapes in absolute coords)."""
-    xs = (np.arange(nx) + 0.5) * (period_x_m / nx)
-    ys = (np.arange(ny) + 0.5) * (period_y_m / ny)
-    return xs, ys
-
-
-def _layer_bg_eps(layer, lambda_m, materials, eps_by_region):
-    ef = (eps_by_region or {}).get(layer.name)
-    if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
-        return complex(ef.scalar)
-    return complex(materials.get(layer.background_material).eps(lambda_m))
-
-
-def _layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region):
-    """The (nx,ny) COMPLEX eps cross-section of one layer: the background eps, overpainted by each
-    inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps."""
-    eps = np.full(X.shape, _layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
-    for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
-        mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
-        eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
-    return eps
+# The lateral rasterizer (cell_axes / layer_bg_eps / layer_eps_cell) was PROMOTED to the
+# public optics.rasterize module (audit 2026-07-05 section 6.3: the lumenairy RCWA bridge
+# shares it, and imported the underscore names across module boundaries). Re-exported here
+# under the old private names for back-compat (same pattern as the MechanicalProps
+# re-export in reliability.fatigue).
+_cell_axes = cell_axes
+_layer_bg_eps = layer_bg_eps
+_layer_eps_cell = layer_eps_cell
 
 
 def design_has_inclusions(design):
@@ -339,6 +382,7 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
                 "FDTD seam supports LOSSLESS semi-infinite end media; got n_super={:.4g}, n_sub={:.4g} "
                 "(absorbing incidence/exit medium -> use the FEM/TMM solver).".format(ns, nb))
         structured = design_has_inclusions(design)
+        _guard_optical_spec(design, structured=structured)   # audit C5-7
         if structured and dim != 3:
             raise NotImplementedError(
                 "a laterally-structured cell (layer inclusions) needs dim=3; got dim={}.".format(dim))
@@ -425,6 +469,7 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
               courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend,
               n_super=ns.real, n_sub=nb.real)
     structured = design_has_inclusions(design)
+    _guard_optical_spec(design, structured=structured)       # audit C5-7
     if structured and dim != 3:
         raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
     if structured and (abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL):
@@ -436,6 +481,19 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
         res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
     else:
         if dispersive:                                      # fit one Drude pole per layer across the band
+            # audit C5-2: the dispersive band fit never reads eps_by_region (modulation must
+            # arrive via eps_band_by_region); a graded/tensor entry here used to be silently
+            # IGNORED -- refuse rather than solve the unmodulated stack
+            for _name, _ef in (eps_by_region or {}).items():
+                if _ef is not None and (getattr(_ef, "is_tensor", False)
+                                        or not getattr(_ef, "is_uniform", True)):
+                    raise NotImplementedError(
+                        "fdtd_sweep_spectrum(dispersive=True): eps_by_region['{}'] is a {} "
+                        "EpsField; the one-Drude-pole-per-layer band fit cannot carry it. Use "
+                        "the per-wavelength FDTD solver (which slices graded layers), or "
+                        "dispersive=False (frozen-at-centre slicing), or TMM/FEM.".format(
+                            _name, "TENSOR" if getattr(_ef, "is_tensor", False)
+                            else "graded (gridded)"))
             layers = _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m,
                                                         eps_band_by_region=eps_band_by_region, n_fit=n_fit)
         else:
@@ -532,7 +590,19 @@ class FDTDSweepOpticalSolver:
             vals = []
             for s in samples:
                 ef = (s or {}).get(L.name)
-                if ef is not None and getattr(ef, "is_uniform", True) and getattr(ef, "scalar", None) is not None:
+                if ef is not None and (getattr(ef, "is_tensor", False)
+                                       or not getattr(ef, "is_uniform", True)):
+                    # audit C5-2: a graded/tensor bias eps used to silently fall back to the
+                    # NOMINAL material band (zeroing the modulation, or crashing on a
+                    # DrudeOptical carrier region with a misleading n_m3 error)
+                    raise NotImplementedError(
+                        "FDTDSweepOpticalSolver.solve_sweep: layer '{}' carries a {} EpsField "
+                        "for this bias; the broadband one-pole-per-layer path cannot carry it. "
+                        "Use the per-wavelength FDTD solver (make_fdtd_optical_solver, which "
+                        "slices graded layers) or the TMM sweep.".format(
+                            L.name, "TENSOR" if getattr(ef, "is_tensor", False)
+                            else "graded (gridded)"))
+                if ef is not None and getattr(ef, "scalar", None) is not None:
                     vals.append(complex(ef.scalar))
                 else:
                     vals = None

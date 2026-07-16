@@ -24,19 +24,47 @@ _N_FLOOR = 1.0e10        # mirror the ITO DOS-mass closure floor (avoid 0**(1/3)
 
 @dataclass(frozen=True)
 class KaneOpticalMass:
-    """Density-dependent Kane (nonparabolic) optical/conductivity mass:
-        m_opt(n) = m0 * (1 + 2 alpha_eV E_F(n)/q)^p,   E_F(n) = hbar^2 (3 pi^2 n)^(2/3) / (2 m0).
-    Same functional form as the ITO DOS-mass closure, but this is the
-    OPTICAL mass (its own m0/alpha in general). alpha_eV=0 -> exactly m0 (constant). Callable of n -> kg."""
+    """Density-dependent Kane (nonparabolic) optical/conductivity mass.
+
+    For the Kane band E (1 + alpha E) = hbar^2 k^2 / (2 m0), the degenerate optical
+    (Drude/plasma) mass is the Fermi-surface value
+        m_opt = hbar k_F / v_F = m0 (1 + 2 alpha E_F),
+    with k_F = (3 pi^2 n)^(1/3) fixed by counting and E_F the TRUE Kane Fermi level
+    solving E_F (1 + alpha E_F) = gamma_F,  gamma_F = hbar^2 k_F^2 / (2 m0).
+    The quadratic-inversion identity  1 + 2 alpha E_F = sqrt(1 + 4 alpha gamma_F)
+    is what the default computes -- so alpha_eV here is the STANDARD Kane
+    nonparabolicity (literature ITO ~0.4 eV^-1), the same alpha the library's
+    schrodinger_poisson and carrier_heating closures use.
+
+    audit C7b-1: the previous default evaluated sqrt(1 + 2 alpha gamma_F) -- the Kane
+    alpha silently HALVED to leading order (m_opt 8.6-22% low over n = 1e26-2e27 m^-3
+    with literature ITO alpha; lambda_ENZ ~4-12% short) -- and its gate/test compared
+    against a copy of the same formula. legacy=True keeps the old closure for
+    back-compat with alphas CALIBRATED under it (alpha_legacy = 2 alpha_Kane
+    reproduces the old numbers exactly, since sqrt(1 + 2*(2a)*g) = sqrt(1 + 4 a g)).
+
+    alpha_eV=0 -> exactly m0 (constant) on both branches. Callable of n -> kg.
+    `exponent` is a LEGACY-branch fit knob only (the exact Kane mass has none)."""
     m0_kg: float
     alpha_eV: float = 0.0
     exponent: float = 0.5
+    legacy: bool = False
+
+    def __post_init__(self):
+        if not self.legacy and self.exponent != 0.5:
+            raise ValueError(
+                "KaneOpticalMass: `exponent` is a legacy-closure fit knob; the exact Kane "
+                "optical mass has no exponent freedom. Pass legacy=True to use the old "
+                "(1 + 2 alpha gamma_F)^exponent closure (audit C7b-1).")
 
     def __call__(self, n_m3):
         n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)
         kF = np.power(3.0 * np.pi ** 2 * n, 1.0 / 3.0)
-        E_F = HBAR ** 2 * kF ** 2 / (2.0 * self.m0_kg)                 # J
-        return self.m0_kg * np.power(1.0 + 2.0 * self.alpha_eV * E_F / Q_E, self.exponent)
+        g_F = HBAR ** 2 * kF ** 2 / (2.0 * self.m0_kg)                 # J (parabolic-form energy)
+        a_g = self.alpha_eV * g_F / Q_E                                # alpha * gamma_F, dimensionless
+        if self.legacy:
+            return self.m0_kg * np.power(1.0 + 2.0 * a_g, self.exponent)
+        return self.m0_kg * np.sqrt(1.0 + 4.0 * a_g)                   # = m0 (1 + 2 alpha E_F)
 
 
 def _bose(x):
@@ -55,8 +83,13 @@ class MatthiessenGamma:
 
       1/tau_gb       = gamma_const_rad_s                         (grain-boundary + any T,n-independent floor)
       1/tau_phonon   = gamma_phonon_300K_rad_s * f_T             (LO/acoustic phonons; f_T below)
-      1/tau_ii(n)    = bh_prefactor_rad_s * (n/bh_n_ref_m3)^p * (m_ref/m_opt(n))^2   (degenerate Brooks-
-                       Herring SCALING; the absolute prefactor is CALIBRATION-bearing, default 0 = off)
+      1/tau_ii(n)    = bh_prefactor_rad_s * (n/bh_n_ref_m3)^p * (m_opt(n)/m_ref)      (degenerate Brooks-
+                       Herring RATE scaling; audit 7b: the previous (m_ref/m)^2 factor was the
+                       MOBILITY mass law mu_ii ~ 1/m*^2, but the damping RATE 1/tau = q/(m* mu)
+                       scales ~ m*^{+1} x a screening log -- a Born probe at ITO parameters showed
+                       the true rate RISING +28% over m* = 0.30->0.50 me while the old factor FELL
+                       to 0.36, a ~3.5x trend distortion. The absolute prefactor stays
+                       CALIBRATION-bearing, default 0 = off; re-fit it after this change.)
       f_T            = (T/300)              if debye_T_K <= 0 (linear high-T)
                        bose(Td/T)/bose(Td/300)  otherwise (LO-phonon Bose occupation)
     """
@@ -100,8 +133,10 @@ class MatthiessenGamma:
             return 0.0
         m = self._m_opt(n)
         m_ref = self._m_opt(self.bh_n_ref_m3)
+        # audit 7b: RATE ~ m*^{+1} (1/tau = q/(m* mu), mu_ii ~ 1/m*^2), not the old
+        # mobility-law (m_ref/m)^2 which moved the channel the WRONG WAY with mass
         return (self.bh_prefactor_rad_s * np.power(n / self.bh_n_ref_m3, self.bh_exponent)
-                * (m_ref / m) ** 2)
+                * (m / m_ref))
 
     def __call__(self, n_m3):
         n = np.maximum(np.asarray(n_m3, dtype=np.float64), _N_FLOOR)

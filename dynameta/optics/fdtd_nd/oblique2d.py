@@ -213,7 +213,7 @@ def _tm2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
     return exL, hyL, exR, hyR
 
 
-def _run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+def run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
     """JAX (XLA, lax.scan) twin of _run_2d_te_oblique (s-pol complex-envelope Bloch): the SAME physics
     (d/dx -> d/dx + i kx, semi-implicit Drude ADE, CFS-CPML + PEC in z), as a single traced/compiled
     DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry/material) straight through
@@ -258,7 +258,10 @@ def _run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_
     return eyL, hxL, eyR, hxR
 
 
-def _run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+_run_2d_te_oblique_jax = run_2d_te_oblique_jax               # back-compat alias (pre-promotion name)
+
+
+def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
     """JAX (XLA, lax.scan) twin of _run_2d_tm_oblique (p-pol complex-envelope Bloch): the SAME physics
     (in-plane Ex,Ez + Hy, d/dx -> d/dx + i kx, semi-implicit Drude ADE on Jx,Jz, CFS-CPML + PEC in z) as a
     single traced/compiled DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry) for
@@ -307,11 +310,14 @@ def _run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_
     return exL, hyL, exR, hyR
 
 
+_run_2d_tm_oblique_jax = run_2d_tm_oblique_jax               # back-compat alias (pre-promotion name)
+
+
 def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s"):
     """Run ONE complex-envelope oblique 2D pass on the named backend. pol='s' = TE (Ey,Hx,Hz); pol='p' =
     TM (Hy,Ex,Ez). Returns the four complex probe x-lines (tangential E + co-located tangential H).
-    'numba' = the fused JIT kernel (TE and TM both have one); 'jax' = the differentiable TE scan (TM jax
-    falls back to the NumPy reference)."""
+    'numba' = the fused JIT kernel; 'jax' = the differentiable scan (TE and TM both have one of each);
+    anything else runs the vectorized NumPy reference."""
     if pol == "p":
         if name == "numba":
             (ke, be, ce), (kh, bh, ch) = cpml
@@ -319,12 +325,12 @@ def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
                                        np.asarray(gam, float), ke, be, ce, kh, bh, ch, dx, dz, dt,
                                        nsteps, k_src, k_pL, k_pR, np.asarray(src, float), kx)
         if name == "jax":
-            out = _run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src,
-                                         cpml, kx)
+            out = run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src,
+                                        cpml, kx)
             return tuple(np.asarray(v) for v in out)        # JAX -> NumPy for the FFT/R-T stage
         return _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
     if name == "jax":
-        out = _run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
+        out = run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
         return tuple(np.asarray(v) for v in out)            # JAX -> NumPy for the FFT/R-T stage
     if name == "numba":
         (ke, be, ce), (kh, bh, ch) = cpml

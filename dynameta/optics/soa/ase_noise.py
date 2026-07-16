@@ -30,7 +30,10 @@ optical bandwidth dnu_o, m_pol ASE polarizations; Olsson JLT 7:1071 1989):
 
     shot         sigma^2 = 2 q R (P_sig + P_ASE) B + 2 q I_dark B
     signal-spont sigma^2 = 4 R^2 P_sig S_ASE B
-    spont-spont  sigma^2 = 2 m_pol R^2 S_ASE^2 (2 dnu_o - B) B
+    spont-spont  sigma^2 = m_pol R^2 S_ASE^2 (2 dnu_o - B) B
+    (S_ASE PER POLARIZATION; at m_pol = 2 this equals Olsson's both-pol form
+    4 R^2 S^2 (B_o - B/2) B. audit C4-3: the old 2*m_pol coefficient double-counted
+    polarization -- Olsson's leading 4 already contains the two-pol factor.)
 
 Pure numpy; SI units. exp(-i omega t); h nu energy per photon.
 """
@@ -39,9 +42,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import HBAR, Q_E
+from dynameta.constants import H_PLANCK, Q_E
 
-H_PLANCK = 2.0 * np.pi * HBAR
 
 __all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
            "ase_output_psd", "noise_figure", "detector_noise_variances",
@@ -127,8 +129,11 @@ def detector_noise_variances(P_sig_W, S_ASE_W_Hz, *, R_A_W=1.0, B_Hz=1e10, dnu_o
     P_ASE = float(m_pol) * S_ASE_W_Hz * dnu_opt_Hz
     sh = 2.0 * Q_E * R_A_W * (P_sig_W + P_ASE) * B_Hz + 2.0 * Q_E * I_dark_A * B_Hz
     ssp = 4.0 * R_A_W ** 2 * P_sig_W * S_ASE_W_Hz * B_Hz
-    spsp = 2.0 * float(m_pol) * R_A_W ** 2 * S_ASE_W_Hz ** 2 * max(2.0 * dnu_opt_Hz - B_Hz,
-                                                                  0.0) * B_Hz
+    # audit C4-3 (Monte-Carlo confirmed 2x): per-pol circular-Gaussian ASE gives
+    # sigma^2_sp-sp = m_pol R^2 S^2 (2 dnu_o - B) B; the old leading 2*m_pol treated
+    # Olsson's both-pol 4 R^2 S^2 (B_o - B/2) B as per-pol and re-multiplied by m_pol
+    spsp = float(m_pol) * R_A_W ** 2 * S_ASE_W_Hz ** 2 * max(2.0 * dnu_opt_Hz - B_Hz,
+                                                             0.0) * B_Hz
     return {"shot": sh, "sig_spont": ssp, "spont_spont": spsp,
             "total": sh + ssp + spsp, "P_ASE": P_ASE}
 
@@ -307,13 +312,22 @@ def ase_self_consistent_zresolved(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid
     conv = p.Gamma / (p.v_g_m_s * p.A_mode_m2)
 
     def gains(S_ase_load):                                   # per-slice gain at the local ASE load
+        # Solve each DISTINCT load value once (audit 6.2 perf): the Picard iteration starts from
+        # the all-zero profile (and the ase_saturation=False path is all-zero), where every slice
+        # shares one load -- identical float inputs give the identical deterministic steady_state,
+        # so mapping the unique solves back over the slices is bit-identical to a per-slice loop.
+        rows = {}
         rows_g, rows_gsp = [], []
         for s in np.atleast_1d(S_ase_load):
-            y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * float(s),
-                                   nu_s_Hz=nu_s_Hz)
-            rho = model.rho_GS(y)
-            rows_g.append(model.material_gain_per_m(rho, nu))
-            rows_gsp.append(model.emission_gain_per_m(rho, nu))
+            key = float(s)
+            if key not in rows:
+                y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * key,
+                                       nu_s_Hz=nu_s_Hz)
+                rho = model.rho_GS(y)
+                rows[key] = (model.material_gain_per_m(rho, nu),
+                             model.emission_gain_per_m(rho, nu))
+            rows_g.append(rows[key][0])
+            rows_gsp.append(rows[key][1])
         return np.atleast_2d(np.array(rows_g)), np.atleast_2d(np.array(rows_gsp))
 
     g_unsat = model.material_gain_per_m(model.rho_GS(

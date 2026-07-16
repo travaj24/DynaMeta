@@ -1,7 +1,9 @@
 """REL3: electromigration (Black equation + Blech immortality) for the current-carrying metal
 (mirror, gate traces, contacts).
 
-    MTTF = A * J^(-n) * exp(Ea / (kB * T)),   n = 2 (void-growth-limited, the usual dominant regime),
+    MTTF = A * J^(-n) * exp(Ea / (kB * T)),   n ~ 2 (void-NUCLEATION-limited -- Korhonen
+    sigma ~ J sqrt(t) gives t_nuc ~ J^-2; n ~ 1 is the void-GROWTH-limited regime; the labels
+    were previously swapped vs Lloyd 1991 / JEP122 -- audit P3),
     Ea ~ 0.55 eV (Cu grain-boundary) .. ~0.9 eV (Al / Cu surface-diffusion capped)
 
 Blech immortality: below the critical current-density-length product the back-stress gradient stops
@@ -10,9 +12,10 @@ effectively INFINITE MTTF. The pre-factor A is GEOMETRY-SCALED (a um-scale conta
 mm-scale interconnect by ~1e4-1e5x) -- always anchor it on a representative qualification point via
 EmParams.calibrated().
 
-DRIVER NOTE (the roadmap-flagged gap): the operating solve does not yet extract a contact current;
-per the roadmap MVP path, the drive current I [A] is an EXTERNAL design parameter here (a DEVSIM
-region-integrated extractor is the documented follow-on). J = I / (w * t) from the trace geometry.
+DRIVER NOTE (stale text corrected per audit C6-5/6.3): the contact-current driver HAS shipped --
+carriers.contact_current + drivers.reliability_glue feed the solved DEVSIM contact current straight
+into these models (validation/contact_current_drivers.py); the drive current I [A] may still be
+supplied as an external design parameter. J = I / (w * t) from the trace geometry.
 Miner damage accumulation handles time-varying (J, T) duty cycles. Pure numpy; oracles in
 validation/reliability_em.py.
 """
@@ -23,7 +26,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 
 
 def current_density_A_m2(I_A: float, width_m: float, thickness_m: float) -> float:
@@ -114,8 +117,12 @@ def miner_time_to_failure_s(t_grid_s, J_of_t, T_of_t, params: EmParams) -> float
     t = np.asarray(t_grid_s, dtype=np.float64)
     if t.ndim != 1 or t.size < 2 or np.any(np.diff(t) <= 0):
         raise ValueError("EM: t_grid_s must be 1D strictly increasing with >= 2 samples")
-    rate = np.array([1.0 / float(params.mttf_s(float(J_of_t(tt)), float(T_of_t(tt))))
-                     for tt in t])                          # 1/MTTF; inf MTTF -> 0 rate
+    # sample the (scalar-callable) waveforms per grid point, then ONE broadcast Black solve --
+    # elementwise identical to the former per-sample mttf_s calls, ~grid-size fewer numpy round
+    # trips (audit 6.2)
+    J = np.array([float(J_of_t(tt)) for tt in t], dtype=np.float64)
+    T = np.array([float(T_of_t(tt)) for tt in t], dtype=np.float64)
+    rate = 1.0 / params.mttf_s(J, T)                        # 1/MTTF; inf MTTF -> 0 rate
     # trapezoid cumulative damage
     dmg = np.concatenate([[0.0], np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(t))])
     if dmg[-1] < 1.0:

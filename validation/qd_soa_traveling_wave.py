@@ -41,7 +41,7 @@ from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 from dynameta.optics.soa.traveling_wave import (TravelingWaveSOA, TwoLevelSaturableGain,
                                                 agrawal_olsson_output)
 
-H_PLANCK = 2.0 * np.pi * HBAR
+from dynameta.constants import H_PLANCK   # single source (audit 6.3)
 
 
 def _recovery_time(t, gain_dB, t_after):

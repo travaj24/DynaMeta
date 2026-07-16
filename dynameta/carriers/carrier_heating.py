@@ -53,7 +53,12 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
     """Band-averaged Kane optical mass <m*(T_e)> [kg]. Hotter electrons sit higher in the nonparabolic
     band where m* is larger, so <m*> RISES with T_e:
         <m*(T_e)> = m0 (1 + 2 alpha_eV <E>(T_e)/q)^exponent,
-        <E>(T_e)  = (3/5) E_F [1 + (5 pi^2/12)(kB T_e / E_F)^2]   (degenerate-gas mean energy, Sommerfeld).
+        <E>(T_e)  = (3/5) E_F [1 + (5 pi^2/12)(kB T_e / E_F)^2 * K],
+        K         = (1 + 2 a E_F) / (1 + a E_F),   a = alpha_per_eV / q.
+    K is the KANE-DOS Sommerfeld factor (audit C2-2): for ANY DOS the fixed-n shift is
+    d<E> = (pi^2/6)(kT)^2 g(E_F)/n, and for the Kane DOS g(E_F)/n =
+    (3/2)(1+2aE_F)/[E_F(1+aE_F)] -- the parabolic coefficient (K=1, exact at alpha=0)
+    understated the heating-induced <E>/<m*> rise by 11-21% at the validated ITO regime.
     VALIDITY: the Sommerfeld expansion assumes a DEGENERATE gas, kB*T_e << E_F; the quadratic
     correction term grows without bound, so beyond kB*T_e ~ E_F the formula over-states <E> (the
     validated ITO regime peaks at kB*T_e/E_F ~ 0.3). A RuntimeWarning fires past kB*T_e > E_F; the
@@ -69,7 +74,10 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
         warnings.warn("kane_mass_of_Te: kB*T_e exceeds E_F -- the Sommerfeld degenerate-gas expansion "
                       "is outside its validity (kB*Te/E_F up to {:.2f}); <m*> is over-stated.".format(
                           float(np.max(kT / E_F))), RuntimeWarning, stacklevel=2)
-    mean_E = (3.0 / 5.0) * E_F * (1.0 + (5.0 * np.pi ** 2 / 12.0) * (kT / E_F) ** 2)
+    a_EF = float(alpha_per_eV) * E_F / Q_E                     # a*E_F, dimensionless
+    kane_dos_factor = (1.0 + 2.0 * a_EF) / (1.0 + a_EF)        # ->1 exactly at alpha=0 (C2-2)
+    mean_E = (3.0 / 5.0) * E_F * (1.0 + (5.0 * np.pi ** 2 / 12.0) * (kT / E_F) ** 2
+                                  * kane_dos_factor)
     return float(m0_kg) * np.power(1.0 + 2.0 * float(alpha_per_eV) * mean_E / Q_E, exponent)
 
 
@@ -144,9 +152,25 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
     the nonparabolicity/phonon knobs are off (see module off-switches)."""
     from dynameta.transient_optics import optical_transient_response
 
-    m0 = float(m0_kg) if m0_kg is not None else (float(drude0.m_opt_kg)
-                                                 if not callable(drude0.m_opt_kg) else float(M_E))
-    gamma0 = float(drude0.gamma_rad_s) if not callable(drude0.gamma_rad_s) else 1.0e14
+    # audit C5-10: a CALIBRATED DrudeOptical carrying callable m_opt_kg / gamma_rad_s used
+    # to be silently replaced by the bare electron mass / a hardcoded 1e14 rad/s -- the
+    # transient was computed for a DIFFERENT material even with every heating knob off,
+    # violating the module's own documented byte-identical off-switch. A band-averaged
+    # m*(n) callable cannot be inverted safely here (evaluating it at n_m3 double-counts
+    # the Kane band filling), so require the explicit band-edge scalars instead.
+    if m0_kg is None and callable(drude0.m_opt_kg):
+        raise ValueError(
+            "carrier_heating_transient: drude0.m_opt_kg is a callable (a calibrated "
+            "density-dependent mass); pass the explicit band-edge m0_kg= instead -- "
+            "silently substituting M_E computed a different material (audit C5-10).")
+    if callable(drude0.gamma_rad_s):
+        raise ValueError(
+            "carrier_heating_transient: drude0.gamma_rad_s is a callable (a calibrated "
+            "scattering model); build the transient from its evaluated value at n_m3 "
+            "(float(drude0.gamma_rad_s(n_m3))) and pass a scalar-gamma DrudeOptical -- "
+            "silently substituting 1e14 rad/s computed a different material (audit C5-10).")
+    m0 = float(m0_kg) if m0_kg is not None else float(drude0.m_opt_kg)
+    gamma0 = float(drude0.gamma_rad_s)
     t, Te, Tl = two_temperature_response(times_s, intensity_of_t, ttm_params, T0_K=T0_K)
     Te_of_t = lambda tt: float(np.interp(tt, t, Te))
 

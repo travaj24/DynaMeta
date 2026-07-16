@@ -1,13 +1,13 @@
 """Lumenairy RCWA as a DynaMeta optical backend (roadmap v0.5 A1).
 
-BRIDGE, not vendor: Lumenairy (>= 5.14.2) is a REQUIRED dependency of dynameta but is
+BRIDGE, not vendor: Lumenairy (>= 5.21, the single floor in _common.VERSION_FLOOR) is a REQUIRED dependency of dynameta but is
 imported lazily inside the functions -- importing this module (and base dynameta) stays
 fast and matplotlib-free; calling against a broken/outdated environment raises with an
 install hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
 absorbers, metres, radians) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so no
 sign/unit translation happens here, only geometry/result adaptation.
 
-Pinned cross-library contracts (lumenairy 5.14.2, file:line refs in the roadmap):
+Pinned cross-library contracts (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor; file:line refs in the roadmap):
 - RCWAStack(period, period_y=, n_superstrate=, n_substrate=, n_orders=, n_orders_y=):
   region media are complex refractive INDICES (or callables wl -> n); a stack is 1-D iff
   period_y/n_orders_y are omitted; the lattice is rectangular.
@@ -31,8 +31,17 @@ is x-polarized at normal/oblique non-conical incidence). OpticalResult.R/T are t
 RCWA they are the same Poynting quantities); r/t are the CO-polarized zeroth-order complex
 amplitudes (phase-bearing, the modulator observable).
 
+CONICAL incidence (azimuth != 0) is supported for the 2-D lattice (audit 8.1-1, the last
+conical gap): the native lab rows are s/p MIXTURES at phi != 0, so R/T + the co-pol r/t are
+SYNTHESIZED from the per-order complex amplitudes for the rotated s/p eigen-polarization
+(the shared _common.conical_synthesis, from res.per_order_amplitudes). Per-layer absorption
+is left unset at conical (layer_absorption gives the per-lab-pol diagonal only; the rotated-
+pol absorbed power is a quadratic form whose cross term it does not expose -- A = 1 - R - T
+stays exact).
+
 Inclusion handling: laterally structured layers are RASTERIZED onto a (Sx, Sy) cell with
-the validated fdtd_seam rasterizer (background + priority-ordered inclusion overpainting).
+the validated shared rasterizer (optics.rasterize, also the structured-FDTD painter:
+background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
 to the layer BACKGROUND only (rasterizer contract). The Lumenairy analytic-shapes fast path
 is a documented follow-on (requires the shape-frame pin + disjointness mapping).
@@ -40,80 +49,31 @@ is a documented follow-on (requires the shape-frame pin + disjointness mapping).
 
 from __future__ import annotations
 
+import os
 import time
 import warnings
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.fdtd_seam import _cell_axes, _layer_eps_cell
+from dynameta.optics.rasterize import cell_axes, layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 
 __all__ = ["design_to_rcwa_stack", "make_lumenairy_rcwa_solver", "LumenairyStackSolver",
            "rcwa_result_to_optical_result"]
 
-_POL_ROW = {"x": 0, "y": 1, "p": 0}
-
-
-def _require_lumenairy():
-    try:
-        import lumenairy
-    except ImportError as exc:
-        raise ImportError(
-            "the Lumenairy backend needs lumenairy>=5.14.2 (a REQUIRED dependency of "
-            "dynameta -- this environment is missing it): pip install lumenairy") from exc
-    ver = tuple(int(p) for p in str(lumenairy.__version__).split(".")[:3])
-    if ver < (5, 14, 2):
-        raise ImportError("lumenairy >= 5.14.2 required (found {}); the bridge relies on "
-                          "the 5.14 RCWAStack surface (dispersive specs, OOP tensor "
-                          "cascade, Ex/Ey result rows) AND the 5.14.2 all-uniform PMM fix "
-                          "(unstructured PMMStack solves are silently wrong before it)"
-                          .format(lumenairy.__version__))
-    return lumenairy
-
-
-def _pol_row(optical) -> int:
-    pol = getattr(optical, "polarization", "y") or "y"
-    if pol not in _POL_ROW:
-        raise ValueError("lumenairy bridge: polarization must be 'x', 'y' or 'p' "
-                         "(got {!r})".format(pol))
-    return _POL_ROW[pol]
-
-
-def _angles_rad(optical) -> Tuple[float, float]:
-    theta = float(np.radians(getattr(optical, "incidence_angle_deg", 0.0) or 0.0))
-    phi = float(np.radians(getattr(optical, "azimuth_deg", 0.0) or 0.0))
-    return theta, phi
-
-
-def _guard_incidence_side(optical) -> None:
-    """The bridges build the stack superstrate-side first from the Design's super/substrate, so they
-    model TOP incidence only (matching the FEM solver, solver.py). incidence_side='bottom' is a legal
-    OpticalSpec value but on an asymmetric stack it physically differs (different incidence medium,
-    reversed layer order); silently solving top would be a wrong number, so raise."""
-    side = getattr(optical, "incidence_side", "top") or "top"
-    if side != "top":
-        raise NotImplementedError(
-            "lumenairy bridge: incidence_side={!r} is not supported -- the bridges solve TOP "
-            "incidence only. For bottom incidence, swap the superstrate/substrate materials in the "
-            "Design (and reverse the layer order) and keep incidence_side='top'.".format(side))
-
-
-def _guard_conical_ppol(optical, phi_rad: float) -> None:
-    """p-polarization at CONICAL incidence (azimuth != 0) is unsupported: the lab-basis Jones -> tmm
-    p-hat conversion (_p_basis_conversion) assumes the x-z plane of incidence, so the lab E_x row is
-    NOT the TM eigen-polarization once phi != 0 (measured: a spurious ~4.5% azimuth dependence on an
-    isotropic stack). 's'/'y'/'x' are fine at conical; only 'p' needs phi == 0."""
-    pol = getattr(optical, "polarization", "y") or "y"
-    if pol == "p" and abs(float(phi_rad)) > 1e-12:
-        raise NotImplementedError(
-            "lumenairy bridge: p-polarization at conical incidence (azimuth != 0) is not supported "
-            "-- the p-basis conversion assumes the x-z plane of incidence (use polarization 's'/'y', "
-            "set azimuth_deg=0, or use the FEM solver for conical p-pol).")
+# Shared plumbing now lives in _common.py (audit 6.3: rcwa_backend had become the bridge's
+# unofficial common module). Underscore aliases keep the historical import surface working.
+from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
+                                                      conical_synthesis as _conical_synthesis,
+                                                      guard_incidence_side as _guard_incidence_side,
+                                                      p_basis_conversion as _p_basis_conversion,
+                                                      pol_row as _pol_row,
+                                                      require_lumenairy as _require_lumenairy)
 
 
 def _min_samples(n_orders: int) -> int:
@@ -194,8 +154,10 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
         ef = eps_by_region.get(L.name)
         if ef is not None and not getattr(ef, "is_uniform", True):
             # gridded EpsField (carrier/effect-graded; axes in nm solver units like the
-            # TMM extractor) -> native-z slabs; eps_cell slabs are (Sx, Sy) already
-            for slab in slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices):
+            # TMM extractor) -> slice_eps_field returns slabs in ASCENDING z
+            # (substrate-side first); this stack is superstrate-first, so reverse
+            # (audit C5-1: unreversed slabs vertically flip the graded profile)
+            for slab in reversed(slice_eps_field(ef, 1.0 / _S_NM, n_slices=n_slices)):
                 if slab.eps is not None:
                     stack.add_layer(slab.thickness_m, eps=complex(slab.eps))
                 elif slab.eps_cell is not None:
@@ -220,9 +182,9 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
             names.append(L.name)
             continue
         if L.inclusions:
-            x, y = _cell_axes(sx, sy, px, py)
+            x, y = cell_axes(sx, sy, px, py)
             X, Y = np.meshgrid(x, y, indexing="ij")
-            cell = _layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
+            cell = layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
             stack.add_layer(L.thickness_m, eps_cell=np.asarray(cell, dtype=complex),
                             formulation=formulation)
             names.append(L.name)
@@ -254,33 +216,31 @@ def _meet_sampling(cell, s_min_x: int, s_min_y: int):
     return cell
 
 
-def _p_basis_conversion(pol: str, theta_rad: float, n_super: complex,
-                        n_sub: complex) -> Tuple[complex, complex]:
-    """(r_factor, t_factor) mapping Lumenairy's LAB-BASIS Jones x-components onto the
-    Byrnes-tmm p-hat-basis Fresnel amplitudes -- DynaMeta's incumbent convention (the FEM
-    p-pol phases were validated against tmm). Measured: at 30 deg p-pol the Jones r_xx is
-    EXACTLY -r_p(tmm) (R/T agree to machine precision, phase off by pi) and
-    t_xx = t_p * cos(theta_t)/cos(theta_i) (the lab-x projection of the p-hat fields).
-    s-pol ('y') and 'x' need no conversion (the bases coincide)."""
-    if pol != "p":
-        return 1.0, 1.0
-    cos_i = np.sqrt(1.0 + 0j - np.sin(theta_rad) ** 2)
-    sin_t = complex(n_super) * np.sin(theta_rad) / complex(n_sub)
-    cos_t = np.sqrt(1.0 + 0j - sin_t ** 2)
-    return -1.0, complex(cos_i / cos_t)
-
-
 def rcwa_result_to_optical_result(res, row: int, *, t0: float,
                                   layer_names: Optional[List[str]] = None,
                                   absorption: bool = False,
                                   r_factor: complex = 1.0,
-                                  t_factor: complex = 1.0) -> OpticalResult:
+                                  t_factor: complex = 1.0,
+                                  conical=None) -> OpticalResult:
     """Map an RCWAResult to a DynaMeta OpticalResult for ONE incident polarization row.
     R/T = TOTAL order-summed efficiencies (== the Poynting R_flux/T_flux); r/t = co-polarized
     zeroth-order complex Jones, multiplied by the p-basis conversion factors when applicable
     (_p_basis_conversion); A = 1 - R - T (budget); with absorption=True, per-layer absorption
     (independent volumetric loss) fills per_region_absorption keyed by DESIGN layer name
-    (slabs of a graded layer are summed) and its total fills A_independent."""
+    (slabs of a graded layer are summed) and its total fills A_independent.
+
+    conical=(pol, theta, phi, n_super) (azimuth != 0): the native lab rows are s/p MIXTURES, so
+    R/T + the co-pol r/t are SYNTHESIZED from res.per_order_amplitudes for the rotated s/p
+    eigen-polarization (consumer-gap B, the 2-D-lattice analogue of the PMM path -- one shared
+    _common.conical_synthesis). Per-layer absorption at conical is left unset: layer_absorption()
+    gives the per-LAB-pol diagonal only, and the rotated-pol absorbed power is a quadratic form
+    whose cross term it does not expose (A = 1 - R - T stays exact)."""
+    if conical is not None and abs(float(conical[2])) > 1e-12:
+        pol, theta, phi, n_super = conical
+        R, T, r, t = _conical_synthesis(res, pol, float(theta), float(phi), n_super)
+        return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r)))
+                             if r != 0 else 0.0, solve_time_s=time.perf_counter() - t0,
+                             t=t, T=T, A=1.0 - R - T, R_flux=R, T_flux=T)
     orders, R2, T2 = res.efficiencies()
     R = float(np.sum(R2[row]))
     T = float(np.sum(T2[row]))
@@ -312,19 +272,28 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                n_slices: Optional[int] = None,
                                cell_samples: Optional[int] = None,
                                absorption: bool = False, stabilize: bool = False,
-                               formulation: str = "laurent"):
+                               formulation: str = "laurent",
+                               n_workers: Optional[int] = 1, blas_per_worker: int = 1):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy RCWA, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult
     PLUS the sweep-aware `solve_sweep` fast path (one result per wavelength, in order; end
     media re-derived PER WAVELENGTH, fixing the generic band-centre freeze). geo and the
     passed n_super/n_sub are accepted for seam compatibility but unused (the stack re-derives
-    end media from the Design, the make_layered_tmm_solver precedent)."""
+    end media from the Design, the make_layered_tmm_solver precedent).
+
+    n_workers threads the solve_sweep wavelengths (audit 8.1-2): each wavelength builds its
+    OWN concrete stack (the bridge's dispersive policy) and solves on a bounded thread pool
+    with the per-worker BLAS cap pinned to blas_per_worker via lumenairy's thread-local
+    rcwa_blas_threads (keep n_workers * blas_per_worker within the core count). Results are
+    stored by index, so the output ORDER is identical to serial; the numbers are too (each
+    solve is an independent LAPACK problem). Default n_workers=1 = the serial path,
+    byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths)."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
         theta, phi = _angles_rad(design.optical)
+        pol = getattr(design.optical, "polarization", "y")
         _guard_incidence_side(design.optical)
-        _guard_conical_ppol(design.optical, phi)
         stack, names = design_to_rcwa_stack(design, lambda_m, eps_by_region=eps_by_region,
                                             n_orders=n_orders, n_orders_y=n_orders_y,
                                             n_slices=n_slices, cell_samples=cell_samples,
@@ -332,17 +301,31 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
         stack.set_source(lambda_m, theta=theta, phi=phi)
         res = stack.solve(retain_internal=absorption, stabilize=stabilize)
         n_sup, n_sb = end_media_indices(design, lambda_m)
-        rf, tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
-                                     theta, n_sup, n_sb)
+        rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
         return rcwa_result_to_optical_result(res, _pol_row(design.optical), t0=t0,
                                              layer_names=names, absorption=absorption,
-                                             r_factor=rf, t_factor=tf)
+                                             r_factor=rf, t_factor=tf,
+                                             conical=(pol, theta, phi, n_sup))
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
-        return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
+        workers = (min(os.cpu_count() or 1, len(lams)) if n_workers is None
+                   else max(1, int(n_workers)))
+        if workers == 1 or len(lams) < 2:
+            return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
+        from concurrent.futures import ThreadPoolExecutor
+        from lumenairy.elements.rcwa import rcwa_blas_threads
+
+        def _one(lam):
+            # the BLAS cap is thread-local (lumenairy's own sweep pattern), so each
+            # worker pins its own; eps assembly + stack build are independent per call
+            with rcwa_blas_threads(int(blas_per_worker)):
+                return _solve_at(design, assemble_at(lam), lam)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(_one, lams))
 
     _solve.solve_sweep = _solve_sweep
     return _solve
@@ -365,10 +348,19 @@ class LumenairyStackSolver:
         lum = _require_lumenairy()
         t0 = time.perf_counter()
         _guard_incidence_side(optical)
-        _guard_conical_ppol(optical, _angles_rad(optical)[1])
+        structured = not stack.is_unstructured
+        # audit C5-8: the lambda-sized fallback period is only harmless when the stack is
+        # laterally UNIFORM (0-order-only physics); a STRUCTURED stack solved at a fabricated
+        # period gets wrong diffraction geometry silently (probe: R=0.061 vs 0.191 correct)
+        if structured and (float(stack.period_x_m or 0.0) <= 0.0
+                           or float(stack.period_y_m or 0.0) <= 0.0):
+            raise ValueError(
+                "LumenairyStackSolver: the stack holds structured (eps_cell/eps_tensor_cell) "
+                "slabs but period_x_m/period_y_m are unset (LayeredStack defaults 0.0; the "
+                "slicers do not populate them) -- set the real lattice periods on the "
+                "LayeredStack (audit C5-8; the old code silently substituted px=py=lambda).")
         px = stack.period_x_m or float(lambda_m)          # period is irrelevant when uniform
         py = stack.period_y_m or float(lambda_m)
-        structured = not stack.is_unstructured
         if structured:
             rs = lum.RCWAStack(px, period_y=py, n_superstrate=complex(stack.n_super),
                                n_substrate=complex(stack.n_sub), n_orders=self.n_orders,
@@ -395,9 +387,10 @@ class LumenairyStackSolver:
                     "shapes payload contract is a documented follow-on); rasterize to "
                     "eps_cell instead")
         theta, phi = _angles_rad(optical)
+        pol = getattr(optical, "polarization", "y")
         rs.set_source(lambda_m, theta=theta, phi=phi)
         res = rs.solve(stabilize=self.stabilize)
-        rf, tf = _p_basis_conversion(getattr(optical, "polarization", "y"), theta,
-                                     stack.n_super, stack.n_sub)
+        rf, tf = _p_basis_conversion(pol, theta, stack.n_super, stack.n_sub)
         return rcwa_result_to_optical_result(res, _pol_row(optical), t0=t0,
-                                             r_factor=rf, t_factor=tf)
+                                             r_factor=rf, t_factor=tf,
+                                             conical=(pol, theta, phi, stack.n_super))

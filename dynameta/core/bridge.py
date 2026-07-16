@@ -25,7 +25,7 @@ from dynameta.core.lift import FieldLift
 from dynameta.core.n_to_eps import NToEpsMap
 
 # The sign convention the whole library + NGSolve assume (passive loss => Im(eps)>0).
-SOLVER_TIME_CONVENTION = "exp(-iwt)"
+from dynameta.constants import SOLVER_TIME_CONVENTION  # noqa: E402  (single source; re-exported here)
 
 
 def assemble_eps(field: CarrierField,
@@ -108,7 +108,29 @@ def assemble_eps(field: CarrierField,
             x_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             v_m = np.asarray(reg.grid_axes_m[ra.stack_axis], dtype=np.float64)
             n_3d, x3_m, y3_m, z3_m = lift.apply(n_grid, x_m, v_m, n_bg=n_bg)
-            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_3d, **(extra_fields or {})},
+            # audit C5-5: extra_fields used to merge RAW against the LIFTED n -- a 2D
+            # (Nx,Nv) companion grid (thermal/electrostatic driver output on the carrier
+            # grid) broadcast its x-axis onto the optical y-axis whenever Nx == Ny (true
+            # at the SHIPPED defaults, grid_n_x=256 == ny_sym=256): an exact x<->y
+            # TRANSPOSE of the field, silently -- and a cryptic broadcast error
+            # otherwise. Matching 2D extras are now extruded y-uniform onto the lifted
+            # grid (exact ExtrudeLift semantics; for SeparableXY a 2D companion carries
+            # no y-structure information anyway); other multi-D shapes raise.
+            extras_lifted = {}
+            for _k, _v in (extra_fields or {}).items():
+                _arr = np.asarray(_v)
+                if _arr.ndim == 2 and _arr.shape == np.shape(n_grid):
+                    extras_lifted[_k] = np.broadcast_to(
+                        _arr[:, None, :], np.shape(n_3d)).copy()
+                elif _arr.ndim >= 2:
+                    raise ValueError(
+                        "assemble_eps: extra field '{}' has shape {} which matches "
+                        "neither the 2D carrier grid {} nor a scalar/(Nz,) profile -- "
+                        "a raw merge would silently misplace it (audit C5-5)".format(
+                            _k, _arr.shape, np.shape(n_grid)))
+                else:
+                    extras_lifted[_k] = _v
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_3d, **extras_lifted},
                                        lambda_m)                               # (Nx,Ny,Nz)
 
         # A field-effect EffectModel driven by a UNIFORM extra field (e.g. a uniform gate E for

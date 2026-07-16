@@ -4,7 +4,7 @@ QD Booster Optical Amplifier on carrier), the very 'Innolume set' QDGainParams' 
 yet exist.
 
 WHAT THIS FITS (the STATIC / CW load-bearing axes the datasheet constrains): peak wavelength (read-off),
-gain bandwidth (fwhm_inhom), small-signal gain magnitude (sigma_pk, the effective free factor of the
+gain bandwidth (fwhm_inhom -- SEE THE C4-8 CAVEAT BELOW), small-signal gain magnitude (sigma_pk, the effective free factor of the
 degenerate product Gamma*N_q*mu_GS*sigma_pk*L -- N_q is FIXED at a standard QD value, recorded as the
 convention), the absolute saturation output power P_sat (A_mode), and the GS/ES band split (dE_ES_GS,
 enabling the two-band ASE). The fit + the validation use only STEADY-STATE physics (the gain core's
@@ -18,6 +18,18 @@ enhancement factor alpha_lef (no chirp/FWM data), the carrier kinetic times tau_
 slopes. Pin those with a pump-probe gain-recovery trace, an FWM / chirp-asymmetry measurement, an RF-RIN
 measurement, a spectral-NF measurement, and gain-vs-temperature data respectively.
 
+BANDWIDTH CAVEAT (audit C4-8): the datasheet's '-3 dB gain bandwidth 60 nm' is a NET
+amplifier-gain observable, but this fit maps it onto the MATERIAL-gain half-max width
+(the intrinsic/inhomogeneous interpretation argued in _bandwidth_nm). The resulting
+device's NET -3 dB bandwidth at the 35 dB peak is only ~16-17 nm (high-gain spectral
+narrowing) -- ~3.6x narrower than the datasheet number. Off-peak spectral predictions
+(WDM channels near the band edges, XGM/ASE/OSNR spectra) inherit that narrowing: two
+channels at 1280/1340 nm see ~12-13 dB where the real BOA delivers >= 32 dB. The report
+carries BOTH numbers under distinct keys (material_fwhm_nm, net_3dB_bw_nm);
+'bandwidth_nm' remains an alias of the fitted material width for back-compat. Co-fitting
+the ES strength / a flat-topped inhomogeneous profile to widen the net band is the
+tracked refinement.
+
 SI; ASCII; exp(-i omega t).
 """
 from __future__ import annotations
@@ -26,10 +38,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, Q_E   # single-source CODATA (was re-declared here)
+from dynameta.constants import C_LIGHT, H_PLANCK, Q_E   # single-source CODATA (was re-declared here)
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
-H_PLANCK = 6.62607015e-34                     # exact CODATA h (constants.py carries only HBAR)
 
 # Innolume BOA1310060CC600MXXXX datasheet (99-S01-273-01), 25 C, 2000 mA operating point.
 INNOLUME_BOA1310_TARGETS = {
@@ -96,17 +107,18 @@ def device_saturation_curve(model, drive, nu, alpha_i, L, P_in_W, nz=2000):
     gam = model.gamma_confinement
     gQD = lambda P: np.interp(P, P_grid, g_loc)
     dz = L / int(nz)
-    P_out = np.empty(P_in.size)
-    for i, P0 in enumerate(P_in):
-        P = float(P0)
-        for _ in range(int(nz)):
-            k1 = (gam * gQD(P) - alpha_i) * P
-            k2 = (gam * gQD(P + 0.5 * dz * k1) - alpha_i) * (P + 0.5 * dz * k1)
-            k3 = (gam * gQD(P + 0.5 * dz * k2) - alpha_i) * (P + 0.5 * dz * k2)
-            k4 = (gam * gQD(P + dz * k3) - alpha_i) * (P + dz * k3)
-            P = P + dz / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-        P_out[i] = P
-    return P_in, P_out
+    # RK4 vectorized ACROSS the P_in array (audit 6.2 perf): every input power takes the same
+    # step count/size, so the former serial per-P_in python loop is just the same elementwise
+    # float ops in vector lanes (np.interp is elementwise too) -- BIT-identical per P_in
+    # (probe-verified), ~11x on this leg.
+    P = P_in.astype(np.float64, copy=True)
+    for _ in range(int(nz)):
+        k1 = (gam * gQD(P) - alpha_i) * P
+        k2 = (gam * gQD(P + 0.5 * dz * k1) - alpha_i) * (P + 0.5 * dz * k1)
+        k3 = (gam * gQD(P + 0.5 * dz * k2) - alpha_i) * (P + 0.5 * dz * k2)
+        k4 = (gam * gQD(P + dz * k3) - alpha_i) * (P + dz * k3)
+        P = P + dz / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return P_in, P
 
 
 def _psat_out_dBm(model, drive, nu, alpha_i, L):
@@ -169,7 +181,18 @@ def calibrate_innolume_boa1310(N_q_m3=5.0e22, alpha_i_per_m=300.0, n_groups=41, 
     G0 = _g0_dB(m, drive, nu0, alpha_i_per_m, L)
     bw = _bandwidth_nm(m, drive, nu0, alpha_i_per_m, L)
     ps, _ = _psat_out_dBm(m, drive, nu0, alpha_i_per_m, L)
-    report = {"G0_dB": G0, "bandwidth_nm": bw, "Psat_out_dBm": ps, "sigma_pk_m2": sig,
+    # audit C4-8: report BOTH bandwidth notions under distinct keys -- 'bandwidth_nm'
+    # (the fitted MATERIAL half-max width, kept as a back-compat alias) previously
+    # presented itself as the datasheet's NET -3 dB observable, which this device does
+    # NOT match (net ~16-17 nm vs datasheet 60 nm; module-header caveat).
+    nu_g = nu0 + np.linspace(-30e12, 30e12, 1201)
+    net_dB = _net_gain_spectrum(m, drive, nu_g, alpha_i_per_m, L)
+    in_band = nu_g[net_dB >= float(net_dB.max()) - 3.0]
+    lam0 = C_LIGHT / nu0
+    net_bw_nm = (float((in_band.max() - in_band.min()) * lam0 * lam0 / C_LIGHT * 1.0e9)
+                 if in_band.size >= 2 else 0.0)
+    report = {"G0_dB": G0, "bandwidth_nm": bw, "material_fwhm_nm": bw,
+              "net_3dB_bw_nm": net_bw_nm, "Psat_out_dBm": ps, "sigma_pk_m2": sig,
               "fwhm_inhom_Hz": fwhm, "A_mode_m2": A_mode, "dE_ES_GS_eV": dE, "N_q_m3": N_q_m3,
               "alpha_i_per_m": alpha_i_per_m}
     if verbose:
