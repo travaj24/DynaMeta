@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5            # Boltzmann [eV/K]
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 _MV_CM = 1.0e8                      # 1 MV/cm in V/m
 
 
@@ -108,11 +108,22 @@ class TddbParams:
 def oxide_stress_from_electrothermal(et_result, layer_name: str):
     """Adapter: pull the (|E_ox| [V/m], T [K]) stress pair for `layer_name` out of an
     ElectroThermalResult (carriers.electrothermal) -- duck-typed so this module never imports the
-    NGSolve-backed solver. Returns (E_ox_V_m, T_K)."""
+    NGSolve-backed solver. Returns (E_ox_V_m, T_K).
+
+    audit C4-9: the stress statistic is the layer-mean |E_z| (mean_absEz_per_layer), NOT
+    |mean E_z| -- the signed mean is exactly ZERO for a +/-V split-gate profile and
+    generally understates the percolation-driving field for any sign-changing lateral
+    profile, silently overstating time-to-breakdown exponentially. The abs-mean still
+    understates the true hot-spot peak on nonuniform profiles; a sampled per-layer peak
+    statistic is the tracked refinement."""
     names = [L.name for L in et_result.layers]
     if layer_name not in names:
         raise ValueError("oxide_stress_from_electrothermal: layer {!r} not in {}".format(
             layer_name, names))
     i = names.index(layer_name)
-    ez = float(abs(et_result.E_result.mean_Ez_per_layer()[i]))
+    E_res = et_result.E_result
+    if hasattr(E_res, "mean_absEz_per_layer"):
+        ez = float(E_res.mean_absEz_per_layer()[i])
+    else:                                                   # duck-typed stub without the C4-9 stat
+        ez = float(abs(E_res.mean_Ez_per_layer()[i]))
     return ez, float(et_result.T_per_layer[i])

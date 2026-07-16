@@ -11,12 +11,12 @@ from dynameta.constants import EPS0, MU0
 
 
 
-def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
-               chi2=None, raman=None, gain=None, gain_dyn=None, gain_dyn_out=None):
+def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
+              chi2=None, raman=None, gain=None, gain_dyn=None, gain_dyn_out=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
     CFS-CPML absorbing layers + PEC backing in z. Records the E_y and H_x x-lines at the left/right
     z-probe planes (for both the x-mean 0-order and the Poynting-flux R/T). Semi-implicit Drude ADE +
-    instantaneous Kerr. `cpml` = ((kappa_e,b_e,c_e),(kappa_h,b_h,c_h)) from _cpml_z (z-broadcast).
+    instantaneous Kerr. `cpml` = ((kappa_e,b_e,c_e),(kappa_h,b_h,c_h)) from cpml_z (z-broadcast).
     `lor` = (C1,C2,C3) per-cell Lorentz ADE coefficients (a second polarization PL) or None (no pole).
 
     R15 nonlinear polarizations (None -> byte-identical to the pre-R15 path):
@@ -138,7 +138,7 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
             curl = curl - (PRnew - PR) / dt
             Qp = Q; Q = Qnew; PR = PRnew
         # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr
-        eps_eff = eps_inf + chi3 * Ey ** 2
+        eps_eff = eps_inf + 3.0 * chi3 * Ey ** 2       # standard chi3: P = eps0 chi3 E^3 (C3-2)
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Eynew = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
         Jy = aJ * Jy + bJ * (Eynew + Ey)
@@ -154,3 +154,6 @@ def _run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         _h = (lambda a: np.asarray(a.get()) if hasattr(a, "get") else np.asarray(a))
         gain_dyn_out["Npop_final"] = np.stack([_h(N0), _h(N1), _h(N2), _h(N3)])
     return eyL, hxL, eyR, hxR
+
+
+_run_2d_te = run_2d_te                                       # back-compat alias (pre-promotion name)

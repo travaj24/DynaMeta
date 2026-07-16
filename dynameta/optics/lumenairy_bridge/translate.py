@@ -11,14 +11,14 @@ are refractive INDICES while every layer spec is a PERMITTIVITY -- both handled 
 
 Version pin: the reverse translator reads RCWAStack's public attributes (period_x, period_y,
 is_1d, n_superstrate, n_substrate) plus the slotted per-layer record
-(_layers[i].thickness/.kind/.data/.dispersive -- the stable 5.14 surface). A Lumenairy
-release changing that record bumps the bridge floor."""
+(thickness/.kind/.data/.dispersive) via _common.stack_layer_records -- the one
+version-ceilinged reader of the private `_layers` slot (no public accessor exists through
+5.21.3). A Lumenairy release changing that record bumps the bridge floor."""
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional
 
-import numpy as np
 
 from dynameta.geometry import Design, Layer, Stack, UnitCell
 from dynameta.geometry.specs import OpticalSpec
@@ -89,7 +89,8 @@ def rcwa_stack_to_design(stack, *, name: str = "lumenairy_import",
     Lumenairy stacks are built SUPERSTRATE-side first; DynaMeta Stacks are bottom-to-top --
     the layer list is reversed here, and layer_names (when given) follows the LUMENAIRY
     (top-first) order to match how the stack was written."""
-    layers_rec = list(getattr(stack, "_layers"))
+    from dynameta.optics.lumenairy_bridge._common import stack_layer_records
+    layers_rec = stack_layer_records(stack)
     bad = [i for i, L in enumerate(layers_rec) if L.kind != "uniform"]
     if bad:
         raise NotImplementedError(

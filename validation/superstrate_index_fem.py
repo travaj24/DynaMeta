@@ -86,6 +86,44 @@ def main():
         print("[sup]   n1={:.2f} n2={:.2f}: R_fem={:.4f} R_an={:.4f} T_fem={:.4f} T_an={:.4f}  {}".format(
             n1, n2, res.R, R_an, res.T, T_an, "ok" if b_ok else "FAIL"), flush=True)
 
+    # GATE C (audit C3-7): dense superstrate over a LOSSY layer -- the independent
+    # absorption integral must close the energy budget, |A_ind - (1-R-T)| small. The
+    # pre-fix normalization omitted Re(n_super), inflating A_ind (and every D2 per-region
+    # value) by exactly 1.5x here, breaking closure by ~0.5*A while R/T stayed correct.
+    print("[sup] GATE C -- dense superstrate + lossy layer: A_independent closes 1-R-T:", flush=True)
+    n1, eps_lossy = 1.5, complex(4.0, 0.6)
+    reg = MaterialRegistry()
+    reg.add(Material("n1", ConstantOptical(complex(n1 ** 2, 0.0))))
+    reg.add(Material("abs", ConstantOptical(eps_lossy)))
+    cell = UnitCell.square(300e-9)
+    stack = Stack(layers=[Layer("s", 300e-9, "abs")], superstrate_material="n1",
+                  substrate_material="n1")
+    m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
+                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=45e-9)
+    geo = LayeredOpticalBuilder(Design(name="ls", unit_cell=cell, stack=stack, electrodes=[],
+                                       materials=reg, mesh_3d=m3)).build()
+    mats = list(geo.mesh.GetMaterials())
+    ebr = {rg: EpsField(scalar=complex(n1 ** 2, 0.0)) for rg in mats}
+    for rg in mats:
+        if geo.material_by_region.get(rg) == "abs":
+            ebr[rg] = EpsField(scalar=eps_lossy)
+    opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0, linear_solver="umfpack")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = solve_fem(geo, LAM * 1e-9, assemble_eps_cf(geo, ebr), opt, order=2,
+                        n_super=complex(n1), n_sub=complex(n1))
+    budget = 1.0 - res.R - res.T
+    d_close = abs(res.A_independent - budget)
+    ratio = res.A_independent / budget if budget > 1e-6 else float("nan")
+    pra_sum = sum((res.per_region_absorption or {}).values())
+    c_ok = (d_close < TOL and budget > 0.05
+            and abs(pra_sum - res.A_independent) < 1e-10)
+    ok = ok and c_ok
+    print("[sup]   A_ind={:.4f} 1-R-T={:.4f} |d|={:.1e} (ratio {:.3f}; pre-fix ~1.5); "
+          "sum(pra)==A_ind ({:.1e})  {}".format(
+              res.A_independent, budget, d_close, ratio, abs(pra_sum - res.A_independent),
+              "ok" if c_ok else "FAIL"), flush=True)
+
     print("[sup] *** NON-VACUUM SUPERSTRATE (normal incidence) kz_s=n_super*k0: {} ***".format(
         "PASS" if ok else "FAIL"), flush=True)
     return ok

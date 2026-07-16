@@ -28,6 +28,13 @@ GATE G (sliced-grid asymmetric transpose, FEM-FREE): the load-bearing slice_eps_
         equal a HAND-BUILT (Nx,1) eps_cell end-to-end (<1e-9 -- an axis flip breaks it), and (2)
         an independent Rytov-EMT oracle pins the ABSOLUTE mapping (y-pol || grooves -> arithmetic
         mean eps, x-pol perp -> harmonic mean), which a transpose bug swaps.
+GATE H (CONICAL s/p synthesis, incl. a genuine 2-D lattice; audit 8.1-1): RCWA was the last
+        conical gap. The native lab rows are s/p mixtures at phi != 0, so R/T + co-pol r/t are
+        synthesized from per_order_amplitudes (the shared _common.conical_synthesis, 2-D-order
+        analogue of the PMM path). Oracles: a uniform slab vs analytic oblique Airy (machine-
+        exact, |r|^2==R, R+T=1); phi->0 reduction to the validated in-plane R + co-pol r phase;
+        a genuine 2-D CROSSED PILLAR closing energy (lossless) / passive (lossy) / phi-dependent;
+        cross-engine agreement with the PMM-synth referee on a 1-D lamellar grating.
 
 Honest SKIP (exit 0 + banner) when lumenairy is not importable.
 
@@ -61,19 +68,40 @@ def _registry():
     return reg
 
 
-def _design(layers, *, pol="y", theta=0.0, sub="glass", mesh=False):
+def _design(layers, *, pol="y", theta=0.0, phi=0.0, sub="glass", mesh=False, per=PER, extra=()):
     reg = _registry()
+    for nm, eps in extra:
+        reg.add(Material(nm, ConstantOptical(eps)))
     kw = {}
     if mesh:
         kw["mesh_3d"] = Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=1400e-9,
                                    substrate_buffer_m=1400e-9, maxh_superstrate_m=45e-9,
                                    maxh_substrate_m=45e-9, maxh_background_m=22e-9,
                                    fem_order=2)
-    return Design(name="brg", unit_cell=UnitCell.square(PER),
+    return Design(name="brg", unit_cell=UnitCell.square(per),
                   stack=Stack(layers=layers, superstrate_material="air",
                               substrate_material=sub),
                   electrodes=[], materials=reg,
-                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=theta), **kw)
+                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=theta,
+                                      azimuth_deg=phi), **kw)
+
+
+def _airy_oblique_R(n0, n1, n2, d, lam, th0, pol):
+    """Reflectance of a single slab n0|n1|n2 at oblique incidence (s|p), exact -- the
+    machine-precision oracle for the conical synthesis on a UNIFORM cell."""
+    k0 = 2.0 * np.pi / lam
+    s0 = n0 * np.sin(th0)
+    kz = lambda n: np.sqrt((n * k0) ** 2 - (k0 * s0) ** 2 + 0j)
+    kz0, kz1, kz2 = kz(n0), kz(n1), kz(n2)
+    if pol == "s":
+        rij = lambda a, b: (a - b) / (a + b)
+        r01, r12 = rij(kz0, kz1), rij(kz1, kz2)
+    else:
+        rij = lambda ni, nj, a, b: (nj ** 2 * a - ni ** 2 * b) / (nj ** 2 * a + ni ** 2 * b)
+        r01, r12 = rij(n0, n1, kz0, kz1), rij(n1, n2, kz1, kz2)
+    ph = np.exp(1j * kz1 * d)
+    r = (r01 + r12 * ph ** 2) / (1.0 + r01 * r12 * ph ** 2)
+    return float(abs(r) ** 2)
 
 
 def main():
@@ -301,6 +329,72 @@ def main():
           "={:.3f}; EMT y->arith x->harm (dRy {:.1e}, dRx {:.1e}, dir {}) -> {}".format(
               transpose_exact, split, abs(Ry_s - R_arith), abs(Rx_s - R_harm), dir_ok,
               "PASS" if g_g else "FAIL"), flush=True)
+
+    # ---- GATE H: CONICAL s/p synthesis, incl. a genuine 2-D lattice (audit 8.1-1) ----
+    # RCWA is the LAST conical gap: the native lab rows are s/p mixtures at phi != 0, so R/T +
+    # the co-pol r/t are synthesized from per_order_amplitudes (the shared _common.conical_
+    # synthesis, the 2-D-order analogue of the PMM path). Oracles:
+    #  (1) a UNIFORM slab at conical vs analytic oblique Airy -- machine-exact, pins the recipe
+    #      (flux weights, |E_inc,p|^2 = sec^2 theta, the full-3D-field co-pol projection);
+    #  (2) phi -> 0 reduction: conical(1e-4 deg) reproduces the validated in-plane R + co-pol r;
+    #  (3) a genuine 2-D CROSSED PILLAR (finite in x AND y): lossless energy R + T ~ 1, a lossy
+    #      pillar is passive (0 <= A <= 1), and phi genuinely MOVES R;
+    #  (4) cross-engine on a 1-D lamellar grating: RCWA-synth agrees with the PMM-synth referee.
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm_solver
+    rc = make_lumenairy_rcwa_solver(n_orders=5)
+    worst_uni = 0.0
+    for pol, pt in (("y", "s"), ("p", "p")):
+        d = _design([Layer("u", 180e-9, "uni")], pol=pol, theta=30.0, phi=37.0, sub="glass",
+                    extra=(("uni", complex(2.2 ** 2)),))
+        r = rc(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        Ra = _airy_oblique_R(1.0, 2.2, 1.5, 180e-9, LAM, np.radians(30.0), pt)
+        worst_uni = max(worst_uni, abs(r.R - Ra), abs(abs(r.r) ** 2 - r.R), abs(r.R + r.T - 1.0))
+    # a genuine 2-D lattice at a diffracting period, with an x!=y ASYMMETRIC pillar (breaks the
+    # C4v symmetry that would make a square pillar's specular R phi-insensitive -- the anti-
+    # triviality guard needs a lattice whose R genuinely moves with the azimuth)
+    P2 = 800e-9
+    rc9 = make_lumenairy_rcwa_solver(n_orders=9)
+    rod = Inclusion(shape=Rectangle(P2 / 2.0, P2 / 2.0, 0.6 * P2, 0.3 * P2), material="rod")
+    en_2d = 0.0
+    phi_moves = 0.0
+    red = 0.0
+    for pol in ("y", "p"):
+        d0 = _design([Layer("lay", 200e-9, "air", inclusions=[rod])], pol=pol, theta=20.0,
+                     phi=0.0, per=P2, extra=(("rod", complex(3.0 ** 2)),))
+        d4 = _design([Layer("lay", 200e-9, "air", inclusions=[rod])], pol=pol, theta=20.0,
+                     phi=1e-4, per=P2, extra=(("rod", complex(3.0 ** 2)),))
+        dc = _design([Layer("lay", 200e-9, "air", inclusions=[rod])], pol=pol, theta=20.0,
+                     phi=30.0, per=P2, extra=(("rod", complex(3.0 ** 2)),))
+        r0 = rc9(d0, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        r4 = rc9(d4, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        rcn = rc9(dc, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+        red = max(red, abs(r0.R - r4.R), abs(r0.r - r4.r))       # phi->0 reduction (incl phase)
+        en_2d = max(en_2d, abs(rcn.R + rcn.T - 1.0))             # lossless 2-D conical energy
+        phi_moves = max(phi_moves, abs(rcn.R - r0.R))
+    # lossy 2-D pillar passivity
+    dl = _design([Layer("lay", 200e-9, "air", inclusions=[rod])], pol="y", theta=20.0, phi=30.0,
+                 per=P2, extra=(("rod", complex(3.0 ** 2, 0.3)),))
+    rl = rc9(dl, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    passive = bool(0.0 <= rl.A <= 1.0 and 0.0 <= rl.R <= 1.0 and 0.0 <= rl.T <= 1.0)
+    # cross-engine on a 1-D lamellar grating (RCWA-synth vs PMM-synth referee)
+    xeng = 0.0
+    gl = [Layer("grat", 150e-9, "air",
+                inclusions=[Inclusion(shape=Rectangle(700e-9 / 2, 700e-9 / 2, 350e-9, 700e-9),
+                                      material="rdg")])]
+    pmm_ref = make_lumenairy_pmm_solver(degree=24, n_orders=61)
+    rc80 = make_lumenairy_rcwa_solver(n_orders=80)
+    for pol in ("y", "p"):
+        dg = _design(gl, pol=pol, theta=20.0, phi=30.0, per=700e-9, extra=(("rdg", complex(2.0 ** 2)),))
+        xeng = max(xeng, abs(rc80(dg, None, {}, LAM, 1.0 + 0j, 1.5 + 0j).R
+                             - pmm_ref(dg, None, {}, LAM, 1.0 + 0j, 1.5 + 0j).R))
+    g_h = bool(worst_uni < 1e-6 and red < 1e-8 and en_2d < 5e-3 and phi_moves > 1e-3
+               and passive and xeng < 2e-2)
+    ok = ok and g_h
+    print("[lrb] GATE H: conical -- uniform vs analytic oblique Airy (|r|^2==R, R+T=1) {:.1e}; "
+          "phi->0 reduction (R + r phase) {:.1e}; 2-D pillar energy {:.1e}, phi-moves {:.3f}, "
+          "lossy passive {}; cross-engine vs PMM {:.1e} -> {}".format(
+              worst_uni, red, en_2d, phi_moves, passive, xeng, "PASS" if g_h else "FAIL"),
+          flush=True)
 
     print("[lrb] *** LUMENAIRY RCWA BRIDGE: {} ***".format("PASS" if ok else "FAIL"),
           flush=True)

@@ -103,3 +103,37 @@ def test_require_positive_guard():
     for bad in (-1.0, 0.0, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             require_positive(tau_n_s=bad)
+
+
+def test_probe_grid_sizes_kill_aliased_orders():
+    # audit C3-1: the N-point cell-centred grid aliases orders m = 0 (mod N) with weight
+    # (-1)^(m/N); the size helper must make the first aliased order evanescent, and the
+    # alias-weight identity itself is pinned here in pure numpy
+    pytest.importorskip("ngsolve")             # optics.solver imports ngsolve at module load
+    import numpy as np
+    from dynameta.optics.solver import _probe_grid_sizes
+
+    # alias-weight identity D(m): 0 for m != 0 (mod N), (-1)^(m/N) otherwise
+    def D(m, N):
+        j = np.arange(N)
+        return np.mean(np.exp(2j * np.pi * m * (j + 0.5) / N))
+    for N in (6, 9):
+        for m in range(1, N):
+            assert abs(D(m, N)) < 1e-12
+        assert D(N, N) == pytest.approx((-1.0) ** 1, abs=1e-12)
+        assert D(2 * N, N) == pytest.approx(1.0, abs=1e-12)
+
+    lam, n_sub = 1550.0, 3.48                                 # nm, silicon substrate
+    k0 = 2.0 * np.pi / lam
+    # sub-wavelength cell: legacy 6x6 (byte-identical envelope)
+    assert _probe_grid_sizes(300.0, 300.0, 0.0, 0.0, n_sub * k0) == (6, 6)
+    # the audit failure case: Px = 3 um on Si at 1550 -- order 6 PROPAGATES; the sized
+    # grid must exceed Px*n/lam ~ 6.7 so its first alias (m = N) is evanescent
+    nx, ny = _probe_grid_sizes(3000.0, 300.0, 0.0, 0.0, n_sub * k0)
+    assert nx >= 7 and ny == 6
+    assert nx * 2.0 * np.pi / 3000.0 > n_sub * k0             # first alias evanescent
+    # oblique: |kx| tightens the bound
+    kx = k0 * np.sin(np.radians(60.0))
+    nx_o, _ = _probe_grid_sizes(3000.0, 300.0, kx, 0.0,
+                                np.sqrt((n_sub * k0) ** 2 - kx ** 2))
+    assert nx_o > nx

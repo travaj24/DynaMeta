@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import C_LIGHT, M_E, Q_E
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import _cpml_z, _run_2d_te, _run_3d, solve_fdtd_3d
+from dynameta.optics.fdtd_nd import cpml_z, run_2d_te, run_3d, solve_fdtd_3d
 
 N_MED = np.sqrt(2.0)
 W0 = 2.0 * np.pi * 2.5e14
@@ -42,7 +42,7 @@ def main():
     nsteps = int(round((2.0 * t0 + 150e-15) / dt))
     t = np.arange(nsteps) * dt
     src = 3.0e8 * np.exp(-((t - t0) / tau) ** 2) * np.cos(W0 * (t - t0))
-    cpml = _cpml_z(nz, dz, dt, 12, N_MED, N_MED)
+    cpml = cpml_z(nz, dz, dt, 12, N_MED, N_MED)
     k_src, k_pL, k_pR = 14, 18, nz - 14
 
     def win2(val):
@@ -75,9 +75,9 @@ def main():
     eps3 = np.full((4, 4, nz), N_MED ** 2)
     z2 = np.zeros((4, nz)); z3 = np.zeros((4, 4, nz))
 
-    _, _, ey2, _ = _run_2d_te(eps2, z2, z2, z2, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src,
+    _, _, ey2, _ = run_2d_te(eps2, z2, z2, z2, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src,
                               cpml, np, None, chi2=chi2_2, raman=ram_2, gain=gn_2)
-    out3 = _run_3d(eps3, z3, z3, z3, dx, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+    out3 = run_3d(eps3, z3, z3, z3, dx, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
                    np, None, chi2=chi2_3, raman=ram_3, gain=gn_3)
     ey3 = out3[5].mean(axis=(1, 2))                           # eyR plane -> x,y mean
     dA = float(np.max(np.abs(ey3 - ey2.mean(axis=1)))) / float(np.max(np.abs(ey2)))

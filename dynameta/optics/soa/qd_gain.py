@@ -58,9 +58,8 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import HBAR, KB, Q_E
+from dynameta.constants import H_PLANCK, KB, Q_E
 
-H_PLANCK = 2.0 * np.pi * HBAR                                  # J s
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
 # Self-contained guarded import (mirrors optics.fdtd_nd.backends) so the module imports without
@@ -506,6 +505,8 @@ class ManyBody:
 class QDGainModel:
     """Group-resolved QD-SOA gain core. State vector y = [N_w, rho_ES_0..G-1, rho_GS_0..G-1]."""
 
+    _CACHE_MAX = 4096            # lineshape-row cache entries (each (ng,) floats); reset past this
+
     def __init__(self, params: Optional[QDGainParams] = None, *, fast: bool = False,
                  self_heating: "Optional[SelfHeating]" = None,
                  many_body: "Optional[ManyBody]" = None,
@@ -539,13 +540,15 @@ class QDGainModel:
         self._stim_pref = p.v_g_m_s * p.sigma_pk_m2                # per-dot stimulated prefactor
         self._gain_pref = p.N_q_m3 * p.mu_GS * p.sigma_pk_m2       # modal-gain prefactor
         self._qVa = Q_E * p.V_a_m3                                 # injection charge*volume
-        # Single-entry caches for the homogeneous Lorentzian evaluated at the (fixed) signal
-        # frequency -- rhs_fields and gain_per_m_slices are called O(nt) times with the SAME nu_s,
-        # so caching L(nu_s - nu_j) removes a redundant recompute per call (byte-identical values).
-        self._L_nu = None        # cached nu for the rate-equation Lorentzian row (1, ng)
-        self._L_row = None
-        self._gw_nu = None       # cached nu for the gain line weights w_j * L (ng,)
-        self._gw = None
+        # Dict caches (keyed on the exact float nu) for the homogeneous Lorentzian evaluated at
+        # the signal frequency -- rhs_fields and gain_per_m_slices are called O(nt) times with the
+        # SAME nu_s, so caching L(nu_s - nu_j) removes a redundant recompute per call
+        # (byte-identical values). Dict-keyed rather than single-entry (audit 6.2 perf): the WDM /
+        # dual-pol marchers alternate between per-channel frequencies EVERY step, which thrashed a
+        # single-entry cache into a recompute per channel per step. Exact-key reuse only;
+        # set_temperature clears them (the combs shift); _CACHE_MAX bounds a long spectral sweep.
+        self._L_cache = {}       # float(nu) -> rate-equation Lorentzian row (1, ng)
+        self._gw_cache = {}      # float(nu) -> gain line weights w_j * L (ng,)
         # electron/hole occupation split: resolve hole times (None -> electron value -> symmetric
         # reduction) into plain floats so the hot loop sees scalars, and precompute the per-band
         # capture/escape prefactors mirroring the electron ones.
@@ -566,10 +569,8 @@ class QDGainModel:
         self._gain_pref_ES = p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2  # ES modal-gain prefactor (mu_ES)
         self._hw_ES = 0.5 * (p.fwhm_hom_ES_Hz if p.fwhm_hom_ES_Hz is not None else p.fwhm_hom_Hz)
         self._zeros_ng = np.zeros(self.ng)                        # inactive-ES Lorentzian row
-        self._LE_nu = None
-        self._LE_row = None
-        self._gwE_nu = None
-        self._gwE = None
+        self._LE_cache = {}      # float(nu) -> ES Lorentzian row (1, ng)
+        self._gwE_cache = {}     # float(nu) -> ES gain line weights (ng,)
         # lumped self-heating (opt-in). The gain emitters/stim multiply by _gain_scale (1.0 ->
         # isothermal, byte-identical) and set_temperature rigidly red-shifts the combs off the
         # cached cold-grid _nu_j0/_nu_ES_j0. dg_dT_frac is taken from SelfHeating directly.
@@ -593,18 +594,25 @@ class QDGainModel:
 
     def _L_at(self, nu_s_Hz):
         """Cached homogeneous Lorentzian row L(nu_s - nu_j), shape (1, ng) -- constant across the
-        time march (fixed nu_s), so computed once and reused (identical values)."""
-        if self._L_nu != nu_s_Hz:
-            self._L_row = self._lorentzian(nu_s_Hz - self.nu_j)[None, :]
-            self._L_nu = nu_s_Hz
-        return self._L_row
+        time march (fixed nu_s), so computed once per DISTINCT nu and reused (identical values;
+        the dict key means WDM channels no longer evict each other)."""
+        row = self._L_cache.get(float(nu_s_Hz))
+        if row is None:
+            if len(self._L_cache) >= self._CACHE_MAX:
+                self._L_cache.clear()
+            row = self._lorentzian(nu_s_Hz - self.nu_j)[None, :]
+            self._L_cache[float(nu_s_Hz)] = row
+        return row
 
     def _gain_line_weights(self, nu_Hz):
         """Cached gain line weights w_j * L(nu - nu_j), shape (ng,) -- constant across the march."""
-        if self._gw_nu != nu_Hz:
-            self._gw = self.w_j * self._lorentzian(nu_Hz - self.nu_j)
-            self._gw_nu = nu_Hz
-        return self._gw
+        wl = self._gw_cache.get(float(nu_Hz))
+        if wl is None:
+            if len(self._gw_cache) >= self._CACHE_MAX:
+                self._gw_cache.clear()
+            wl = self.w_j * self._lorentzian(nu_Hz - self.nu_j)
+            self._gw_cache[float(nu_Hz)] = wl
+        return wl
 
     # ---- excited-state (ES) band lineshape + inversion (mirror the GS helpers, retargeted to
     # the blue-shifted ES comb nu_ES_j and the ES homogeneous HWHM _hw_ES) ----
@@ -614,17 +622,23 @@ class QDGainModel:
 
     def _LE_at(self, nu_s_Hz):
         """Cached ES Lorentzian row L_ES(nu_s - nu_ES_j), shape (1, ng)."""
-        if self._LE_nu != nu_s_Hz:
-            self._LE_row = self._lorentzian_ES(nu_s_Hz - self.nu_ES_j)[None, :]
-            self._LE_nu = nu_s_Hz
-        return self._LE_row
+        row = self._LE_cache.get(float(nu_s_Hz))
+        if row is None:
+            if len(self._LE_cache) >= self._CACHE_MAX:
+                self._LE_cache.clear()
+            row = self._lorentzian_ES(nu_s_Hz - self.nu_ES_j)[None, :]
+            self._LE_cache[float(nu_s_Hz)] = row
+        return row
 
     def _gain_line_weights_ES(self, nu_Hz):
         """Cached ES gain line weights w_j * L_ES(nu - nu_ES_j), shape (ng,)."""
-        if self._gwE_nu != nu_Hz:
-            self._gwE = self.w_j * self._lorentzian_ES(nu_Hz - self.nu_ES_j)
-            self._gwE_nu = nu_Hz
-        return self._gwE
+        wl = self._gwE_cache.get(float(nu_Hz))
+        if wl is None:
+            if len(self._gwE_cache) >= self._CACHE_MAX:
+                self._gwE_cache.clear()
+            wl = self.w_j * self._lorentzian_ES(nu_Hz - self.nu_ES_j)
+            self._gwE_cache[float(nu_Hz)] = wl
+        return wl
 
     def _es_inversion(self, state) -> np.ndarray:
         """ES inversion: (2 rho_ES - 1) excitonic [state[1]], or (f_c_ES + f_v_ES - 1) split
@@ -644,7 +658,8 @@ class QDGainModel:
         dT = self._T - self.sh.T0_K
         self.nu_j = self._nu_j0 - self.sh.dnu0_dT_Hz_K * dT
         self.nu_ES_j = self._nu_ES_j0 - self.sh.dnu0_dT_Hz_K * dT
-        self._L_nu = self._gw_nu = self._LE_nu = self._gwE_nu = None     # invalidate stale rows
+        for c in (self._L_cache, self._gw_cache, self._LE_cache, self._gwE_cache):
+            c.clear()                                         # invalidate stale rows (combs moved)
         s = 1.0 + self._dg_dT_frac * dT
         self._gain_scale = s if s > 0.0 else 0.0
 
@@ -940,10 +955,25 @@ class QDGainModel:
                                                                  float(occ.max())))
         return y
 
+    def _guard_excitonic(self, who: str) -> None:
+        # audit C4-5: these accessors hardcode the EXCITONIC state layout
+        # y = [N_w, rho_ES, rho_GS]; with eh_split=True the layout is
+        # [N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS], so the same slices silently
+        # returned misaligned ES-block occupations and even a raw WL density (~1e24) --
+        # saturation_curve gain 59% wrong, ase_self_consistent corrupted, no error
+        # (step_slices_wdm already raises for eh; mirror it).
+        if getattr(self, "eh", False):
+            raise NotImplementedError(
+                "QDGainModel.{}: the excitonic-layout accessor is undefined for an "
+                "eh_split=True model (state is [N_w_e, N_w_h, f_c/f_v per band]); use the "
+                "f_c_*/f_v_* accessors and the eh-aware entry points (audit C4-5).".format(who))
+
     def rho_GS(self, y) -> np.ndarray:
+        self._guard_excitonic("rho_GS")
         return np.asarray(y)[1 + self.ng:1 + 2 * self.ng]
 
     def rho_ES(self, y) -> np.ndarray:
+        self._guard_excitonic("rho_ES")
         return np.asarray(y)[1:1 + self.ng]
 
     # ---- e/h-split accessors (state y = [N_w_e, N_w_h, f_c_ES, f_v_ES, f_c_GS, f_v_GS]) ----
@@ -1159,6 +1189,17 @@ class QDGainModel:
             g = g + self._gain_scale * self._gain_pref_ES * np.sum(
                 self._es_inversion(state) * wlE[None, :], axis=1)
         return g
+
+    def gain_per_m_slices_gs(self, state, nu_Hz) -> np.ndarray:
+        """GS-BAND-ONLY per-slice gain [1/m]: the flat-gain twin of line_kappa_slices'
+        assembly (same _gain_scale * _gain_pref * w_j * L(nu-nu_j) * GS inversion). audit
+        C4-6: the line-filter marcher must subtract exactly the band its polarization
+        poles re-add (GS only) -- subtracting the full GS+ES gain silently CANCELLED the
+        entire ES band (probe: ON gain -0.004 dB vs OFF 3.79 dB near the ES centre).
+        Identical to gain_per_m_slices when sigma_pk_ES = 0 (byte-identical off-switch)."""
+        wl = self._gain_line_weights(nu_Hz)
+        return self._gain_scale * self._gain_pref * np.sum(
+            self._gs_inversion(state) * wl[None, :], axis=1)
 
     def wl_density_slices(self, state) -> np.ndarray:
         """Wetting-layer (reservoir) carrier density N_w [m^-3] per slice -- state[0] for both the

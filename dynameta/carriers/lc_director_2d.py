@@ -169,29 +169,57 @@ def director_profile_2d(*, K: float, eps_para: float, eps_perp: float,
             seen[key] = np.asarray(r.theta_field_rad, float)
         th[i, :] = seen[key]
 
-    # ---- under-relaxed nonlinear Gauss-Seidel on the interior (j = 1..nz-2), all x
+    # ---- under-relaxed nonlinear Gauss-Seidel on the interior (j = 1..nz-2), all x.
+    #      Vectorized RED-BLACK ordering: two interleaved (i+j)-parity half-sweeps, each a flat numpy
+    #      gather/update over that colour's points with the SAME per-point equation and relaxation as
+    #      the former lexicographic triple loop -- the iterates differ (ordering) but the fixed point
+    #      is identical, and the 5-point stencil makes every neighbour of one colour the other colour
+    #      (a periodic ring with odd nx leaves one same-colour seam pair, merely Jacobi-coupled there).
     ix2 = 1.0 / (dx * dx); iz2 = 1.0 / (dz * dz); S = 2.0 * (ix2 + iz2)
     cD = EPS0 * dEps
+    # precompute flat neighbour indices (th is C-ordered (nx, nz): flat k = i*nz + j) per colour
+    ii = np.arange(nx)[:, None]; jj = np.broadcast_to(np.arange(nz)[None, :], (nx, nz))
+    if periodic:
+        ip = (ii + 1) % nx; im = (ii - 1) % nx
+    else:                                                # Neumann walls: both neighbours fold inward
+        ip = np.where(ii < nx - 1, ii + 1, ii - 1); im = np.where(ii > 0, ii - 1, ii + 1)
+    kip = (ip * nz + jj).ravel(); kim = (im * nz + jj).ravel()
+    kjp = (ii * nz + jj + 1).ravel(); kjm = (ii * nz + jj - 1).ravel()
+    interior = (jj >= 1) & (jj <= nz - 2)
+    colors = []                                          # red, black: (self, x+, x-, z+, z-) indices
+    for p in (0, 1):
+        k = np.flatnonzero((((ii + jj) % 2 == p) & interior).ravel())
+        colors.append((k, kip[k], kim[k], kjp[k], kjm[k], Ex.ravel()[k], Ez.ravel()[k]))
+    thf = th.ravel()                                     # flat VIEW -- writes land in th
     res = float("inf"); it = 0
+    err_est = float("inf")
+    _res_hist = []
     for it in range(1, int(max_iter) + 1):
         dmax = 0.0
-        for j in range(1, nz - 1):
-            for i in range(nx):
-                if periodic:
-                    ip = (i + 1) % nx; im = (i - 1) % nx
-                else:
-                    ip = i + 1 if i < nx - 1 else i - 1
-                    im = i - 1 if i > 0 else i + 1
-                t = th[i, j]; s = math.sin(t); c = math.cos(t)
-                nE = Ex[i, j] * s + Ez[i, j] * c
-                torque = cD * nE * (Ex[i, j] * c - Ez[i, j] * s)
-                neigh = (th[ip, j] + th[im, j]) * ix2 + (th[i, j + 1] + th[i, j - 1]) * iz2
-                t_new = (K * neigh + torque) / (K * S)
-                t_upd = (1.0 - omega) * t + omega * t_new
-                dmax = max(dmax, abs(t_upd - t))
-                th[i, j] = t_upd
+        for k, kxp, kxm, kzp, kzm, Exc, Ezc in colors:   # red half-sweep, then black
+            t = thf[k]; s = np.sin(t); c = np.cos(t)
+            nE = Exc * s + Ezc * c
+            torque = cD * nE * (Exc * c - Ezc * s)
+            neigh = (thf[kxp] + thf[kxm]) * ix2 + (thf[kzp] + thf[kzm]) * iz2
+            t_new = (K * neigh + torque) / (K * S)
+            t_upd = (1.0 - omega) * t + omega * t_new
+            dmax = max(dmax, float(np.max(np.abs(t_upd - t))))
+            thf[k] = t_upd
         res = dmax
-        if res < tol:
+        # audit C6-1: the per-sweep UPDATE size under-states the true error of a
+        # Gauss-Seidel iterate by 1/(1-rho) (rho = the iteration's convergence factor:
+        # measured amplification x200 at nz=41 up to x4340 at nz=161), so breaking --
+        # and certifying success -- on `res` alone masked errors up to ~1.5 deg on fine
+        # grids. Estimate rho from consecutive update ratios (the standard geometric-
+        # tail bound) and gate on the implied ERROR estimate res*rho/(1-rho).
+        _res_hist.append(res)
+        if len(_res_hist) >= 4 and res > 0.0 and _res_hist[-2] > 0.0 and _res_hist[-3] > 0.0:
+            _rho = min(max(0.5 * (_res_hist[-1] / _res_hist[-2]
+                                  + _res_hist[-2] / _res_hist[-3]), 0.0), 0.999999)
+            err_est = res * _rho / (1.0 - _rho)
+        else:
+            err_est = res
+        if err_est < tol:
             break
     th[:, 0] = theta_b; th[:, -1] = theta_b              # enforce strong anchoring exactly
 
@@ -200,7 +228,12 @@ def director_profile_2d(*, K: float, eps_para: float, eps_perp: float,
         for i in range(nx):
             n_eff_of_x[i] = n_eff_from_theta_profile(th[i, :], z, n_o, n_e, model=opt_model,
                                                      d_lc=float(d_planar))
-    success = res < max(tol, 1e-5)
+    # audit C6-1: success is certified on the geometric-tail ERROR estimate, not the raw
+    # update size (which is rho-fold smaller); `residual` now reports the error estimate.
+    success = err_est < max(tol, 1e-5)
     return LC2DResult(x_m=x, z_m=z, theta_field_rad=th, Ex=Ex, Ez=Ez, V=V, n_eff_of_x=n_eff_of_x,
-                      theta_b_rad=theta_b, iters=it, residual=float(res), x_boundary=x_boundary,
-                      success=success, message=("ok" if success else "did not reach tol"))
+                      theta_b_rad=theta_b, iters=it, residual=float(err_est),
+                      x_boundary=x_boundary, success=success,
+                      message=("ok" if success else
+                               "did not reach tol (error estimate {:.2e}, last update "
+                               "{:.2e})".format(err_est, res)))

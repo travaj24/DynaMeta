@@ -21,14 +21,21 @@ from __future__ import annotations
 
 import numpy as np
 
-KB_EV_K = 8.617333262e-5
+from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
 
 
 def arrhenius_af(Ea_eV: float, T_use_K: float, T_stress_K: float) -> float:
     """Arrhenius acceleration factor AF = MTTF_use / MTTF_stress = exp((Ea/kB)(1/T_use - 1/T_stress)).
-    AF > 1 when the stress is HOTTER than use (the stress test ages faster)."""
-    if Ea_eV < 0.0:
-        raise ValueError("arrhenius_af: Ea_eV must be >= 0")
+
+    Ea may be SIGNED (audit C5-9): Ea > 0 = the usual thermally-activated aging (AF > 1
+    when the stress is HOTTER than use); Ea < 0 = cold-worse mechanisms -- REL8/HCI ships
+    a documented-physical default Ea = -0.1 eV, for which AF > 1 requires stressing
+    COLDER than use. The formula is exact for signed Ea (matches hci.py's own ratio to
+    machine precision); the old Ea >= 0 guard blocked the REL10-over-REL8 extrapolation
+    outright, and the natural |Ea| workaround silently returned the RECIPROCAL AF
+    (probe: 0.266 where 3.77 is correct -- a 14.2x silent error)."""
+    if not np.isfinite(Ea_eV):
+        raise ValueError("arrhenius_af: Ea_eV must be finite (signed is allowed; see docstring)")
     if not (T_use_K > 0.0 and T_stress_K > 0.0):
         raise ValueError("arrhenius_af: temperatures must be > 0 K")
     return float(np.exp((Ea_eV / KB_EV_K) * (1.0 / T_use_K - 1.0 / T_stress_K)))

@@ -203,7 +203,8 @@ class TmmLayeredSolver:
                              per_region_absorption=_per_layer_absorption(res))
 
 
-def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None):
+def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None,
+                              return_names=False):
     """Build a LayeredStack from a Design (+ optionally the bridge's eps_by_region for a graded
     carrier region). Uniform layers -> scalar slabs; a layer whose eps_by_region entry is a
     gridded EpsField -> sliced via slice_eps_field; a UNIFORM eps_by_region entry (an
@@ -215,6 +216,7 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
     reversed)."""
     from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
     slabs_top_down = []
+    names_top_down = []                              # design layer name per slab (audit C5-4)
     for L in reversed(design.stack.layers):          # superstrate side first
         if L.inclusions:
             raise ValueError("layered_stack_from_design: layer '{}' has inclusions "
@@ -225,16 +227,21 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
                              "(anisotropic effect); the scalar TMM cannot represent it -- use "
                              "the FEM solver.".format(L.name))
         if ef is not None and not getattr(ef, "is_uniform", True):
-            slabs_top_down.extend(reversed(slice_eps_field(ef, 1.0 / S, n_slices=n_slices)))
+            _sl = list(reversed(slice_eps_field(ef, 1.0 / S, n_slices=n_slices)))
+            slabs_top_down.extend(_sl)
+            names_top_down.extend([L.name] * len(_sl))
         elif ef is not None:
             slabs_top_down.append(LayeredSlab(float(L.thickness_m), eps=complex(ef.scalar)))
+            names_top_down.append(L.name)
         else:
             eps = complex(design.materials.get(L.background_material).eps(lambda_m))
             slabs_top_down.append(LayeredSlab(float(L.thickness_m), eps=eps))
+            names_top_down.append(L.name)
     n_super, n_sub = end_media_indices(design, lambda_m)
-    return LayeredStack(n_super, n_sub, slabs_top_down,
-                        period_x_m=design.unit_cell.period_x_m,
-                        period_y_m=design.unit_cell.period_y_m)
+    stack = LayeredStack(n_super, n_sub, slabs_top_down,
+                         period_x_m=design.unit_cell.period_x_m,
+                         period_y_m=design.unit_cell.period_y_m)
+    return (stack, names_top_down) if return_names else stack
 
 
 def make_layered_tmm_solver(*, n_slices=None):
@@ -253,8 +260,20 @@ def make_layered_tmm_solver(*, n_slices=None):
     solver = TmmLayeredSolver()
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
-        stack = layered_stack_from_design(design, lambda_m, eps_by_region=eps_by_region,
-                                          n_slices=n_slices)
-        return solver.solve(stack, lambda_m, design.optical)
+        stack, names = layered_stack_from_design(design, lambda_m, eps_by_region=eps_by_region,
+                                                 n_slices=n_slices, return_names=True)
+        res = solver.solve(stack, lambda_m, design.optical)
+        # audit C5-4: at the PIPELINE seam per_region_absorption is keyed by DESIGN LAYER
+        # NAME (the FEM/RCWA convention), not the seam-internal 'slab_<i>' -- a backend
+        # swap used to break reliability post-processing with a KeyError, and a graded
+        # layer's map exposed one entry per slice. Graded slabs sum into their layer.
+        if res.per_region_absorption is not None:
+            pra = {}
+            for i, nm in enumerate(names):
+                pra[nm] = pra.get(nm, 0.0) + res.per_region_absorption.get(
+                    "slab_{}".format(i), 0.0)
+            from dataclasses import replace as _dc_replace
+            res = _dc_replace(res, per_region_absorption=pra)
+        return res
 
     return _solve

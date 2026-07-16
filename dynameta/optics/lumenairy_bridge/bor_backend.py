@@ -36,20 +36,11 @@ _SCALE = 1.0e6   # m -> um (lumenairy is unit-agnostic; microns match BOR's vali
 
 
 def _require_bor():
-    """lumenairy.elements.bor.BORStack -- the axisymmetric BOR-PMM tier graduated + released in 5.16.0.
-    lumenairy is a REQUIRED dynameta core dep but imported lazily here (so base import stays light)."""
-    import importlib
-    try:
-        lum = importlib.import_module("lumenairy")
-    except ImportError as e:
-        raise ImportError("the BOR-PMM bridge needs lumenairy (a required dynameta core dependency): "
-                          "pip install -U lumenairy") from e
-    ver = tuple(int(p) for p in str(lum.__version__).split(".")[:3])
-    if ver < (5, 16, 0):
-        raise ImportError(
-            "the BOR-PMM bridge needs lumenairy>=5.16.0 (lumenairy.elements.bor.BORStack -- the "
-            "axisymmetric/cylindrical tier graduated in 5.16.0); found {}. pip install -U lumenairy"
-            .format(lum.__version__))
+    """lumenairy.elements.bor.BORStack -- the axisymmetric BOR-PMM tier (graduated in 5.16.0,
+    covered by the single bridge floor in _common.VERSION_FLOOR, which replaced this backend's
+    copy-pasted version gate). Imported lazily so the base dynameta import stays light."""
+    from dynameta.optics.lumenairy_bridge._common import require_lumenairy
+    require_lumenairy()
     from lumenairy.elements.bor import BORStack
     return BORStack
 
@@ -64,6 +55,7 @@ class BorLayer:
     rings: Optional[Tuple[float, float, complex, complex]] = None
     eps_profile: Optional[Callable[[np.ndarray], np.ndarray]] = None
     eps: Optional[complex] = None
+    name: Optional[str] = None
 
     def __post_init__(self) -> None:
         given = [self.rings is not None, self.eps_profile is not None, self.eps is not None]
@@ -111,18 +103,57 @@ class BorResult:
     energy: np.ndarray
     solve_time_s: float
     raw: dict = field(default_factory=dict)
+    # Physically-phased per-incident-mode SPECULAR (0-order, mode -> same mode) amplitudes, in the
+    # PINNED deterministic gauge of BORStack.per_mode_amplitudes ('dominant field sample real-positive'),
+    # aligned to angles_rad (index 0 = fundamental). r_complex[j] is the reflected specular amplitude of
+    # incident mode j (|r_complex[j]|**2 == R[j] only for a NON-diffractive stack -- for a diffractor the
+    # order-summed R[j] >= the specular |r|**2, so R stays the energy field and r carries the phase).
+    # t_complex[j] is the transmitted specular amplitude into the SAME transverse mode in the substrate,
+    # or NaN when that channel does not propagate (fall back to the sqrt(T) magnitude, phase 0). None on
+    # the empty-mode / JAX paths. (AUDIT C1)
+    r_complex: Optional[np.ndarray] = None
+    t_complex: Optional[np.ndarray] = None
+    # Per-layer absorbed fraction (n_layers, n_inc) from BORStack.layer_absorption(), columns aligned to
+    # angles_rad; layer_names labels the rows in BorStackSpec.layers order. Populated only when solve_bor
+    # was called with absorption=True (else None). R + T + sum_layers A = 1 per incident mode. (AUDIT B4b)
+    layer_absorption: Optional[np.ndarray] = None
+    layer_names: Optional[List[str]] = None
 
     def fundamental_result(self) -> OpticalResult:
-        """The fundamental (smallest-angle, near-normal) incident mode as an OpticalResult: R/T/A of
-        the most plane-wave-like channel. r = sqrt(R) (a magnitude; a per-order phase is not meaningful
-        for a multi-order diffractive BOR result, so phase_deg is reported as 0)."""
+        """The fundamental (smallest-angle, near-normal) incident mode as an OpticalResult.
+
+        `r` is the pinned-gauge COMPLEX specular reflection amplitude (physical phase; magnitude
+        sqrt of the 0-order specular reflectance) and phase_deg = degrees(angle(r)); `R` remains the
+        order-SUMMED reflected power fraction (so |r|**2 <= R, with equality for a non-diffractive
+        stack). `t` likewise carries the transmitted specular phase when that substrate channel
+        propagates, else falls back to the sqrt(T) magnitude with phase 0. When per-layer absorption
+        was retained (absorption=True), A_independent = sum_layers A for this mode and
+        per_region_absorption maps each layer name -> its absorbed fraction (R + T + A_independent = 1
+        to machine precision); otherwise both are None and A is the 1 - R - T closure."""
         if self.angles_rad.size == 0:
             raise ValueError("BorResult has no propagating incident mode (raise r_max_m / k0)")
         i0 = int(np.argmin(self.angles_rad))
-        R = float(self.R[i0]); T = float(self.T[i0])
-        return OpticalResult(r=complex(np.sqrt(max(R, 0.0)), 0.0), R=R, phase_deg=0.0,
-                             solve_time_s=self.solve_time_s, t=complex(np.sqrt(max(T, 0.0)), 0.0),
-                             T=T, A=float(1.0 - R - T))
+        R = float(self.R[i0])
+        T = float(self.T[i0])
+        if self.r_complex is not None and np.isfinite(self.r_complex[i0]):
+            r = complex(self.r_complex[i0])
+            phase_deg = float(np.degrees(np.angle(r)))
+        else:
+            r = complex(np.sqrt(max(R, 0.0)), 0.0)
+            phase_deg = 0.0
+        if self.t_complex is not None and np.isfinite(self.t_complex[i0]):
+            t = complex(self.t_complex[i0])
+        else:
+            t = complex(np.sqrt(max(T, 0.0)), 0.0)
+        A_ind: Optional[float] = None
+        per_region: Optional[dict] = None
+        if self.layer_absorption is not None and self.layer_names is not None and self.layer_absorption.size:
+            col = np.asarray(self.layer_absorption)[:, i0]
+            A_ind = float(np.sum(col))
+            per_region = {nm: float(col[k]) for k, nm in enumerate(self.layer_names)}
+        return OpticalResult(r=r, R=R, phase_deg=phase_deg, solve_time_s=self.solve_time_s,
+                             t=t, T=T, A=float(1.0 - R - T), A_independent=A_ind,
+                             per_region_absorption=per_region)
 
 
 def _scaled_stack(spec: BorStackSpec, lambda_m: float):
@@ -147,17 +178,68 @@ def _scaled_stack(spec: BorStackSpec, lambda_m: float):
     return s
 
 
-def solve_bor(spec: BorStackSpec, lambda_m: float) -> BorResult:
+def _layer_names(spec: BorStackSpec) -> List[str]:
+    """Deterministic, unique per-layer labels in BorStackSpec.layers order (the SAME order the stack
+    added them, so they line up row-for-row with BORStack.layer_absorption()). Uses BorLayer.name when
+    given, else "layer{i}"; a duplicate is disambiguated with a "#{i}" suffix."""
+    names: List[str] = []
+    seen: set = set()
+    for i, L in enumerate(spec.layers):
+        nm = (getattr(L, "name", None) or "layer{}".format(i))
+        if nm in seen:
+            nm = "{}#{}".format(nm, i)
+        seen.add(nm)
+        names.append(nm)
+    return names
+
+
+def solve_bor(spec: BorStackSpec, lambda_m: float, *, absorption: bool = False) -> BorResult:
     """Solve an axisymmetric BorStackSpec at wavelength lambda_m (metres) -> BorResult (per-incident-mode
-    R/T/angle). The incident modes are sorted by increasing polar angle (index 0 = near-axis fundamental)."""
+    R/T/angle). The incident modes are sorted by increasing polar angle (index 0 = near-axis fundamental).
+
+    The pinned-gauge COMPLEX specular reflection/transmission amplitudes (physical phase) are ALWAYS
+    threaded through (r_complex / t_complex) -- they cost only two cheap gauge-pinned reads of the solved
+    S-matrix, no extra eigensolve. When `absorption=True` the solve additionally retains the per-layer
+    partial cascades and exposes BORStack.layer_absorption() as (layer_absorption, layer_names), so the
+    fundamental OpticalResult carries A_independent + a per-layer absorption map that closes R+T+sum A = 1
+    to machine precision (AUDIT B4b)."""
     t0 = time.time()
-    res = _scaled_stack(spec, lambda_m).solve()
+    stack = _scaled_stack(spec, lambda_m)
+    res = stack.solve(retain_internal=bool(absorption))
     dt = time.time() - t0
     ang = np.asarray(res["angles"], dtype=float)
     order = np.argsort(ang)                                   # near-axis fundamental first
+    inc = np.asarray(res["inc"]).ravel()
+    out = np.asarray(res["out"]).ravel()
+    n_inc = int(inc.size)
+
+    # Physically-phased specular amplitudes in the pinned deterministic gauge (diagonal = incident mode
+    # -> same mode; gauge-invariant for reflection, deterministic for transmission). Cheap; always on.
+    r_complex: Optional[np.ndarray] = None
+    t_complex: Optional[np.ndarray] = None
+    if n_inc:
+        amp_r = np.asarray(stack.per_mode_amplitudes("reflection")["amplitude"])   # (n_inc, n_inc)
+        r_diag = np.diagonal(amp_r).copy()
+        amp_t = np.asarray(stack.per_mode_amplitudes("transmission")["amplitude"])  # (n_out, n_inc)
+        t_diag = np.full(n_inc, np.nan, dtype=complex)
+        for k in range(n_inc):
+            pos = np.where(out == inc[k])[0]     # SAME transverse mode transmitted into the substrate
+            if pos.size:
+                t_diag[k] = amp_t[int(pos[0]), k]
+        r_complex = r_diag[order]
+        t_complex = t_diag[order]
+
+    layer_abs: Optional[np.ndarray] = None
+    layer_names: Optional[List[str]] = None
+    if absorption:
+        A = np.asarray(stack.layer_absorption(), dtype=float)      # (n_layers, n_inc), inc order
+        layer_abs = A[:, order] if (A.ndim == 2 and A.size) else A
+        layer_names = _layer_names(spec)
+
     return BorResult(angles_rad=ang[order], R=np.asarray(res["R"], float)[order],
                      T=np.asarray(res["T"], float)[order], energy=np.asarray(res["energy"], float)[order],
-                     solve_time_s=dt, raw=res)
+                     solve_time_s=dt, raw=res, r_complex=r_complex, t_complex=t_complex,
+                     layer_absorption=layer_abs, layer_names=layer_names)
 
 
 def bor_result_to_optical_result(res: BorResult) -> OpticalResult:
@@ -165,14 +247,16 @@ def bor_result_to_optical_result(res: BorResult) -> OpticalResult:
     return res.fundamental_result()
 
 
-def make_lumenairy_bor_solver(*, n_radial: int = 256):
+def make_lumenairy_bor_solver(*, n_radial: int = 256, absorption: bool = False):
     """A BOR-PMM optical solver: `solve(spec_without_N, lambda_m) -> BorResult`, with n_radial supplied
     here (so a spec can omit it). Mirrors the make_lumenairy_*_solver factories; the BOR axisymmetric
     geometry is NOT the Cartesian LayeredStackSolver, so this returns a BorResult (per-mode), not a
-    single-channel OpticalResult -- call .fundamental_result() for the near-normal R/T."""
+    single-channel OpticalResult -- call .fundamental_result() for the near-normal R/T. `absorption=True`
+    retains the per-layer absorbed-fraction map (A_independent + per_region_absorption on the fundamental,
+    R+T+sum A = 1 to machine precision); the reflection/transmission phase is threaded either way."""
     def _solve(spec: BorStackSpec, lambda_m: float) -> BorResult:
         if int(spec.n_radial) != int(n_radial):
             from dataclasses import replace
             spec = replace(spec, n_radial=int(n_radial))
-        return solve_bor(spec, lambda_m)
+        return solve_bor(spec, lambda_m, absorption=absorption)
     return _solve

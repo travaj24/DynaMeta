@@ -11,15 +11,17 @@ from __future__ import annotations
 # imports without numba; selected via solve_fdtd_2d(backend='numba').
 try:
     from numba import njit, prange
-    _HAVE_NUMBA = True
+    HAVE_NUMBA = True
 except Exception:                                            # pragma: no cover
-    _HAVE_NUMBA = False
+    HAVE_NUMBA = False
 
     def njit(*a, **k):                                       # no-op shim so the def parses without numba
         def _wrap(f):
             return f
         return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
     prange = range
+
+_HAVE_NUMBA = HAVE_NUMBA                                     # back-compat alias (pre-promotion name)
 
 
 # --- Optional GPU / autodiff backends, lazily probed (importing cupy/jax is slow, so only on demand). ---
@@ -39,7 +41,7 @@ def _have_cupy():
     return _CUPY_OK
 
 
-def _have_jax():
+def have_jax():
     """True if JAX imports -- the differentiable XLA lax.scan backend (GPU is WSL2-only on Windows -> CPU)."""
     global _JAX_OK
     if _JAX_OK is None:
@@ -51,22 +53,28 @@ def _have_jax():
     return _JAX_OK
 
 
+_have_jax = have_jax                                         # back-compat alias (pre-promotion name)
+
+
 _NBCUDA_OK = None
 
 
-def _have_numba_cuda():
+def have_numba_cuda():
     """True iff a numba-CUDA GPU kernel can actually launch here (numba present AND cuda.is_available()).
     Cached; the import + driver probe is done once."""
     global _NBCUDA_OK
     if _NBCUDA_OK is None:
         _NBCUDA_OK = False
-        if _HAVE_NUMBA:
+        if HAVE_NUMBA:
             try:
                 from numba import cuda
                 _NBCUDA_OK = bool(cuda.is_available())
             except Exception:
                 _NBCUDA_OK = False
     return _NBCUDA_OK
+
+
+_have_numba_cuda = have_numba_cuda                           # back-compat alias (pre-promotion name)
 
 
 def available_backends():
@@ -77,26 +85,26 @@ def available_backends():
     persistent cooperative-groups GPU kernel (2D-TE so far; wins ~3x on SMALL/unit-cell grids, occupancy-
     capped on very large volumes -> use 'cupy' there)."""
     bk = []
-    if _HAVE_NUMBA:
+    if HAVE_NUMBA:
         bk.append("numba")
     bk.append("numpy")
     if _have_cupy():
         bk.append("cupy")
-    if _have_jax():
+    if have_jax():
         bk.append("jax")
-    if _have_numba_cuda():
+    if have_numba_cuda():
         bk.append("numba-cuda")
     return bk
 
 
-def _resolve_backend(backend):
+def resolve_backend(backend):
     """Map a requested backend -- including 'auto' and the 'cpu'/'gpu' aliases -- to a concrete available
     one, or raise a clear error (available list + install hint) for an unavailable EXPLICIT request. 'auto'
     picks the fastest CPU backend present (numba else numpy) and NEVER silently picks the GPU, because a
     cache-resident metasurface unit cell runs faster on the threaded CPU kernel than on a launch-bound GPU
     (the benchmark: numba 561-1882 MC/s vs cupy 20-120 MC/s on unit-cell grids)."""
     avail = available_backends()
-    fast_cpu = "numba" if _HAVE_NUMBA else "numpy"
+    fast_cpu = "numba" if HAVE_NUMBA else "numpy"
     name = {"auto": fast_cpu, "cpu": fast_cpu, "gpu": "cupy",
             "cuda": "numba-cuda"}.get(str(backend).lower(), str(backend).lower())
     if name not in avail:
@@ -106,3 +114,6 @@ def _resolve_backend(backend):
         raise RuntimeError("FDTD backend '{}' is not available here; available = {}.{}".format(
             backend, avail, (" Try: " + hint) if hint else ""))
     return name
+
+
+_resolve_backend = resolve_backend                           # back-compat alias (pre-promotion name)

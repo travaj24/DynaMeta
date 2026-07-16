@@ -77,7 +77,9 @@ def main():
         for i in range(nx):
             e[i, inb] = 4.0 if i < half else 1.0          # n=2 / n=1 stripes
         return e
-    rC = solve_fdtd_2d([FDTDLayer(thickness_m=600e-9, eps_inf=1.0)], period_x_m=1400e-9,
+    # layer eps_inf sized to the lateral-pattern max (4.0): dz/n_max derive from `layers`,
+    # and the C3-3 guard refuses the old eps_inf=1.0 fixture (dz 2x under-resolved)
+    rC = solve_fdtd_2d([FDTDLayer(thickness_m=600e-9, eps_inf=4.0)], period_x_m=1400e-9,
                        lateral_eps_inf=lat, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=30)
     mC = rC.band
     e_abs = np.abs(rC.R_flux[mC] + rC.T_flux[mC] - 1.0)

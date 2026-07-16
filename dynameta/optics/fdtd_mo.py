@@ -26,7 +26,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
-from dynameta.optics.fdtd_nd import _HAVE_NUMBA, _resolve_backend, njit
+from dynameta.optics.fdtd_nd import HAVE_NUMBA, njit, resolve_backend
 
 
 @dataclass
@@ -66,6 +66,20 @@ class FDTDMOResult:
     R: np.ndarray               # total reflectance |r_co|^2 + |r_cross|^2
     T: np.ndarray               # total transmittance |t_co|^2 + |t_cross|^2
     faraday_deg: np.ndarray     # polarization-ellipse major-axis rotation of the transmitted wave [deg]
+
+
+def _mo_band_index_bound(L, w_band) -> float:
+    """Grid-sizing index bound for one MOLayer over the band (audit C3-3): the max |n|
+    over BOTH circular branches eps_circular(w, +/-1) -- the (w, +1) branch is resonant
+    only for wc > 0, so the old one-branch max silently under-sized dz ~6x near resonance
+    for reversed magnetization / electron-signed wc < 0 (the MOLayer docstring's own
+    convention) -- floored by the background birefringent indices, which the
+    Drude-depressed circular index can undercut. wc-SIGN-INVARIANT by construction."""
+    bg = max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
+    if L.drude_wp_rad_s <= 0:
+        return float(bg)
+    n_circ = max(abs(np.sqrt(L.eps_circular(w, s))) for w in w_band for s in (+1, -1))
+    return float(max(n_circ, bg))
 
 
 def _2x2_inv(M):
@@ -159,7 +173,7 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, 
     (jc00, jc01, jc10, jc11) = (Jc[:, 0, 0], Jc[:, 0, 1], Jc[:, 1, 0], Jc[:, 1, 1])
     (ma00, ma01, ma10, ma11) = (Ma[:, 0, 0], Ma[:, 0, 1], Ma[:, 1, 0], Ma[:, 1, 1])
     (mb00, mb01, mb10, mb11) = (Mb[:, 0, 0], Mb[:, 0, 1], Mb[:, 1, 0], Mb[:, 1, 1])
-    if backend == "numba" and _HAVE_NUMBA:                      # JIT the hot time loop (same precompute)
+    if backend == "numba" and HAVE_NUMBA:                       # JIT the hot time loop (same precompute)
         ac = (lambda a: np.ascontiguousarray(a, dtype=np.float64))
         return _mo_loop_numba(ac(iv00), ac(iv01), ac(iv10), ac(iv11), ac(ep00), ac(ep01), ac(ep10), ac(ep11),
                               ac(jc00), ac(jc01), ac(jc10), ac(jc11), ac(ma00), ac(ma01), ac(ma10), ac(ma11),
@@ -215,10 +229,7 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
 
-    def _n_max(L):
-        return max(abs(np.sqrt(L.eps_circular(w, +1))) for w in w_band) \
-            if L.drude_wp_rad_s > 0 else max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
-    n_max = max(1.0, max(_n_max(L) for L in layers))
+    n_max = max(1.0, max(_mo_band_index_bound(L, w_band) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
     dt = courant * dz / C_LIGHT
     pad = n_pad_wave * lambda_max_m
@@ -245,8 +256,8 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
     one = np.ones(nz); zero = np.zeros(nz)
-    rb = _resolve_backend(backend)                              # 'numba' = JIT loop; else NumPy reference
-    bk = "numba" if (rb == "numba" and _HAVE_NUMBA) else "numpy"
+    rb = resolve_backend(backend)                               # 'numba' = JIT loop; else NumPy reference
+    bk = "numba" if (rb == "numba" and HAVE_NUMBA) else "numpy"
     eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)   # vacuum
     eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)         # structure
 

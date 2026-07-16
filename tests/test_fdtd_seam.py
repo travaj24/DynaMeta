@@ -227,3 +227,133 @@ def test_structured_lateral_grid_and_dispatch_guard():
     # dim=2 + inclusions must raise
     with pytest.raises(NotImplementedError):
         make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+
+
+# ---- audit C5-2: the seam used to silently DROP graded/tensor eps_by_region entries ----
+
+def _graded_ef(nz=13, eps_lo=2.0, eps_hi=9.0, thick_nm=120.0):
+    """Asymmetric laterally-uniform graded EpsField, nm axes, ascending z (substrate-first)."""
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    z = np.linspace(0.0, thick_nm, nz)
+    eps = eps_lo + (eps_hi - eps_lo) * (z / thick_nm) ** 2
+    return EpsField(z_axis_u=z, y_axis_u=np.zeros(1), x_axis_u=np.zeros(1),
+                    values_zyx=eps.reshape(-1, 1, 1).astype(complex))
+
+
+def test_graded_eps_by_region_is_sliced_incidence_first():
+    # a graded entry must produce per-slab FDTDLayers matching the shared slice_eps_field
+    # staircase in INCIDENCE (superstrate-first = descending-eps-first here) order --
+    # pre-audit this silently fell through to the nominal material eps (zero modulation)
+    import numpy as np
+    from dynameta.core.layered import slice_eps_field
+    from dynameta.optics.tmm_reference import S
+    d = _design([(4.0, 120e-9, [])])
+    ef = _graded_ef()
+    layers = design_to_fdtd_layers(d, LAM, eps_by_region={"s0": ef})
+    slabs = list(reversed(slice_eps_field(ef, 1.0 / S)))
+    assert len(layers) == len(slabs) and len(layers) == 12
+    got = np.array([L.eps_inf for L in layers])
+    want = np.array([s.eps.real for s in slabs])
+    assert np.allclose(got, want, rtol=1e-12)
+    assert got[0] > got[-1]                                   # top (high-eps) side first
+    assert abs(sum(L.thickness_m for L in layers) - 120e-9) < 1e-15
+
+
+def test_tensor_eps_by_region_raises():
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    d = _design([(4.0, 120e-9, [])])
+    ef = EpsField(tensor=np.diag([4.0 + 0j, 4.0 + 0j, 2.0 + 0j]))
+    with pytest.raises(NotImplementedError, match="TENSOR"):
+        design_to_fdtd_layers(d, LAM, eps_by_region={"s0": ef})
+
+
+def test_graded_drude_carrier_region_does_not_crash():
+    # pre-audit repro: a DrudeOptical carrier layer + graded bridge field crashed with a
+    # MISLEADING "DrudeOptical.eps requires n_m3" from the nominal fallback -- the seam
+    # was holding the bias eps it had just discarded
+    from dynameta.materials import DrudeOptical
+    d = _design([(4.0, 120e-9, [])])
+    d.materials.add(Material("ito", DrudeOptical(eps_inf=3.9, m_opt_kg=0.35 * 9.109e-31,
+                                                 gamma_rad_s=1.6e14)))
+    d.stack.layers[0].background_material = "ito"
+    layers = design_to_fdtd_layers(d, LAM, eps_by_region={"s0": _graded_ef()})
+    assert len(layers) == 12                                  # sliced from the bias field
+
+
+def test_sweep_solver_graded_bias_raises_not_silent():
+    # the broadband one-pole-per-layer path cannot carry a graded profile: it must say so
+    # (pre-audit it silently solved the UNMODULATED nominal stack)
+    from dynameta.optics.fdtd_seam import make_fdtd_sweep_optical_solver
+    import numpy as np
+    d = _design([(4.0, 120e-9, [])])
+    sw = make_fdtd_sweep_optical_solver(dim=2, resolution=16)
+    ef = _graded_ef()
+    with pytest.raises(NotImplementedError, match="graded"):
+        sw.solve_sweep(d, None, lambda lam: {"s0": ef},
+                       np.array([1.25e-6, 1.35e-6]), 1.0 + 0j, 1.0 + 0j)
+
+
+def test_structured_path_graded_bg_raises():
+    from dynameta.optics.fdtd_seam import _layer_bg_eps
+    d = _design([(4.0, 120e-9, [])])
+    with pytest.raises(NotImplementedError, match="graded"):
+        _layer_bg_eps(d.stack.layers[0], LAM, d.materials, {"s0": _graded_ef()})
+
+
+def test_fdtd_graded_modulation_moves_R():
+    # end-to-end sensitivity: the per-wavelength FDTD seam must actually SEE the graded
+    # bias (pre-audit: bit-identical R across biases). Coarse grid -- we assert
+    # modulation, not oracle-grade accuracy.
+    import numpy as np
+    d = _design([(4.0, 120e-9, [])])
+    solver = make_fdtd_optical_solver(dim=2, resolution=16)
+    r_nom = solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    r_mod = solver(d, None, {"s0": _graded_ef()}, LAM, 1.0 + 0j, 1.0 + 0j)
+    assert abs(r_mod.R - r_nom.R) > 1e-3
+
+
+def test_seam_honors_or_raises_design_optical():
+    # audit C5-7: the seam used to IGNORE design.optical entirely -- theta/azimuth/
+    # incidence_side silently got the normal-incidence top-side answer
+    from dynameta.geometry.specs import OpticalSpec
+    solver = make_fdtd_optical_solver(dim=2, resolution=16)
+    d = _design([(4.0, 120e-9, [])])
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=30.0)
+    with pytest.raises(NotImplementedError, match="oblique"):
+        solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=0.0, incidence_side="bottom")
+    with pytest.raises(NotImplementedError, match="incidence_side"):
+        solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+    # normal-incidence top-side (any pol on a uniform stack) still solves
+    d.optical = OpticalSpec(polarization="x", incidence_angle_deg=0.0)
+    assert solver(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j).R >= 0.0
+
+
+def test_oblique_solvers_refuse_dropped_nonlinear_terms():
+    # audit C5-7: the oblique kernels carry no chi3/chi2/raman/gain ADEs; an amplifying
+    # stack at 20 deg used to return R0/T0 BIT-IDENTICAL to the passive layer
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d_oblique
+    lay = FDTDLayer(thickness_m=300e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
+                    gain_dw_rad_s=3.6e14, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
+    with pytest.raises(NotImplementedError, match="gain_dN_m3"):
+        solve_fdtd_2d_oblique([lay], period_x_m=300e-9, angle_deg=20.0,
+                              lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=16)
+
+
+def test_ring_time_extends_window_for_narrow_poles():
+    # audit C3-6: the DFT window must carry the material memory of narrow Lorentz/gain
+    # poles (a loaded-Q~600 line rang past the fixed 200*tau window: |dT0|=0.102 vs TMM,
+    # silently); passive/broad layers keep the legacy window exactly
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd.solve2d import _ring_time_s
+    passive = FDTDLayer(thickness_m=200e-9, eps_inf=2.25)
+    assert _ring_time_s([passive]) == 0.0
+    narrow = FDTDLayer(thickness_m=200e-9, eps_inf=2.25, lorentz_w0_rad_s=1.3e15,
+                       lorentz_gamma_rad_s=1e12, lorentz_delta_eps=0.002)
+    assert _ring_time_s([narrow]) == pytest.approx(18.4e-12, rel=1e-12)
+    gainy = FDTDLayer(thickness_m=200e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
+                      gain_dw_rad_s=2e12, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
+    assert _ring_time_s([passive, gainy]) == pytest.approx(18.4 / 2e12, rel=1e-12)

@@ -211,14 +211,18 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False,
-                sheet_bcs: "dict | None" = None, _reuse_fes=None) -> OpticalResult:
+                sheet_bcs: "dict | None" = None, diagnostics: bool = True,
+                _reuse_fes=None) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
 
     R, T (and r/t) are the SPECULAR 0-ORDER (zeroth diffraction order) only -- the
-    _cell_average demodulates and laterally averages, so by Fourier orthogonality any
-    PROPAGATING higher diffraction order integrates to exactly zero and is NOT counted.
+    _cell_average demodulates and laterally averages on a probe grid SIZED so that every
+    aliased Fourier order is evanescent at the probe planes (audit C3-1: the old fixed
+    6x6 grid aliased orders m = 0 (mod 6) into the coefficient at full weight for
+    period > 6*lambda/n cells and 6x1 supercells; propagating non-aliased orders always
+    averaged to zero).
     They are therefore the TOTAL reflectance/transmittance only for a SUB-WAVELENGTH cell
     (no propagating higher orders); for a diffracting (period > lambda/n) cell the
     diffracted power is missing from R/T and is mis-attributed to A. result.R_flux/T_flux
@@ -239,7 +243,14 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     Robin term + i k0 Z0 sigma (E_tan . v_tan) over the interface (Z0 = free-space
     impedance); in the scattered-field formulation the sheet-free background E_bg also
     drives it, so the same term enters the RHS on E_bg. Validated vs the analytic
-    core.graphene.sheet_rt in validation/graphene_sheet_fem.py."""
+    core.graphene.sheet_rt in validation/graphene_sheet_fem.py.
+
+    diagnostics=False skips the best-effort post-solve diagnostics -- A_independent,
+    per_region_absorption, R_flux/T_flux (three volume/flux integrations + two field
+    interpolations per solve) -- returning None for all four. The r/R/t/T/A extraction is
+    byte-identical. NOTE this also disables the energy-closure mismatch warning (it needs
+    A_independent), so only opt out on throughput paths whose configuration a
+    diagnostics=True solve has already vetted (audit 6.2 perf)."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -547,9 +558,11 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # Independent absorption diagnostic (audit OPT-2): the normalized volumetric loss
     # integral, computed from the reconstructed TOTAL field. Best-effort -- a diagnostic
     # must not break the solve, so a failure warns (not silent) and yields None.
+    # diagnostics=False (opt-out, audit 6.2): skip this + per_region + flux R/T entirely.
     try:
-        A_independent = _absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                            geo.period_x_nm, geo.period_y_nm)
+        A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                            geo.period_x_nm, geo.period_y_nm,
+                                            n_super=n_super) if diagnostics else None)
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
         A_independent = None
@@ -558,7 +571,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     try:
         per_region_A = (None if A_independent is None else
                         _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                               geo.period_x_nm, geo.period_y_nm))
+                                               geo.period_x_nm, geo.period_y_nm,
+                                               n_super=n_super))
     except Exception as _e:                                   # noqa: BLE001 (diagnostic)
         warnings.warn("per-region absorption map unavailable: {}".format(_e))
         per_region_A = None
@@ -572,7 +586,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # cladding rather than report a silently-biased "independent" R/T.
     lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
     try:
-        if envelope or not lossless_clad:
+        if envelope or not lossless_clad or not diagnostics:
             R_flux = T_flux = None
         else:
             R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
@@ -613,16 +627,38 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A)
 
 
-def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky):
+def _probe_grid_sizes(Px, Py, kx, ky, kz_med):
+    """Per-direction probe-grid sizes so the FIRST aliased Fourier order is EVANESCENT in
+    the probe medium (audit C3-1): an N-point cell-centred grid aliases orders m = 0
+    (mod N) into the reported 0-order coefficient with weight (-1)^(m/N), so N must
+    satisfy N*2pi/P > n*k0 + |k_lat| (then the aliased order decays over the >= 50 nm
+    probe standoff exactly like every in-envelope evanescent order). n*k0 is recovered
+    from the medium dispersion n^2 k0^2 = kz_med^2 + k_par^2. Sub-wavelength cells
+    (the validated envelope) keep the legacy 6x6 -- byte-identical there."""
+    nk0 = float(np.hypot(abs(complex(kz_med)), float(np.hypot(kx, ky))))
+    nx_g = max(6, int(np.floor(Px * (nk0 + abs(float(kx))) / (2.0 * np.pi))) + 1)
+    ny_g = max(6, int(np.floor(Py * (nk0 + abs(float(ky))) / (2.0 * np.pi))) + 1)
+    return nx_g, ny_g
+
+
+def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None):
     """Transverse (x,y) cell-average of (proj . field), demodulated by exp(-i(kx x+ky y)),
     at each z. `proj` is a length-3 weight vector projecting the vector field onto the
     polarization of interest (the s-pol unit vector, or (1,0,0) for tangential Ex). The
-    demod removes the transverse Bloch phase so the cell-average IS the 0-order Fourier
-    coefficient; kx=ky=0 (envelope formulation) leaves it unchanged."""
+    demod removes the transverse Bloch phase; on the N x N cell-centred grid the average
+    equals the 0-order Fourier coefficient PLUS aliases of orders m = 0 (mod N) (audit
+    C3-1: NOT exact orthogonality, as previously claimed -- a propagating substrate
+    order-6 amplitude at 30% of r0 corrupted the fit silently at the old fixed 6x6).
+    Passing kz_med (the fitted wave's medium z-wavevector) sizes the grid so every
+    aliased order is evanescent at the probe planes; None keeps the legacy 6x6."""
     # cell-centred probe grid: offset off the x=0 / y=0 periodic-boundary lines (where
     # quasi-periodic point evaluation can fail) by half a step (audit OPT-7).
-    xs = (np.arange(6) + 0.5) * (Px / 6.0)
-    ys = (np.arange(6) + 0.5) * (Py / 6.0)
+    if kz_med is not None:
+        nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med)
+    else:
+        nx_g = ny_g = 6
+    xs = (np.arange(nx_g) + 0.5) * (Px / nx_g)
+    ys = (np.arange(ny_g) + 0.5) * (Py / ny_g)
     p0, p1, p2 = proj
     out = []
     for zv in z_probes:
@@ -678,7 +714,7 @@ def _reflection(mesh, gfu, kz_s, proj, kx, ky, geo: OpticalGeometry) -> complex:
         z_lo = z_struct_top + 0.2 * (z_air_top - z_struct_top)
         z_hi = z_struct_top + 0.8 * (z_air_top - z_struct_top)
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_s)   # C3-1
     # upward (reflected) exp(+i kz_s z) + residual downward exp(-i kz_s z)
     M = np.column_stack([np.exp(+1j * kz_s * z_probes), np.exp(-1j * kz_s * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="reflection")
@@ -699,7 +735,7 @@ def _transmission(mesh, gfu, kz_sub, proj, kx, ky, geo: OpticalGeometry):
     if z_hi <= z_lo:
         return None
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky)
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_sub)  # C3-1
     # downward (transmitted) exp(-i kz_sub z) + any upward residual exp(+i kz_sub z)
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="transmission")
@@ -718,7 +754,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zhi <= zlo:
         zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
     zr = np.linspace(zlo, zhi, 7)
-    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky)   # in-plane p-pol component (phi-frame Ex)
+    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky, kz_med=kz_s)   # in-plane p-pol (C3-1)
     Mr = np.column_stack([np.exp(-1j * kz_s * zr), np.exp(+1j * kz_s * zr)])
     cr = _lstsq_2wave(Mr, Exr, where="p-pol reflection")
     a_d, a_u = complex(cr[0]), complex(cr[1])                     # incident-dir, reflected-dir E_t
@@ -731,7 +767,7 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zs_hi - pad <= zs_lo + pad:
         return r, R, None, None
     zt = np.linspace(zs_lo + pad, zs_hi - pad, 7)
-    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky)
+    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky, kz_med=kz_sub)  # C3-1
     Mt = np.column_stack([np.exp(-1j * kz_sub * zt), np.exp(+1j * kz_sub * zt)])
     ct = _lstsq_2wave(Mt, Ext, where="p-pol transmission")
     t = complex(ct[0]) / a_d if abs(a_d) > 1e-30 else 0j          # transmitted Ex / incident Ex
@@ -740,10 +776,15 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     return r, R, t, T
 
 
-def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j):
     """Independently measured absorbed fraction (audit OPT-2): the normalized
-    volumetric loss integral A = k0 * Int_V Im(eps) |E|^2 dV / (cos(theta) * cell_area),
-    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave. This
+    volumetric loss integral
+        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area),
+    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave.
+    audit C3-7: the incident power in a dense superstrate is ~ n_super cos(theta) area,
+    so the normalization carries Re(n_super) (it used to omit it, inflating A -- and the
+    D2 per-region deposition -- by exactly Re(n_super) for a dense encapsulant; vacuum
+    incidence, the only supported oblique case, is byte-identical). This
     is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
     catches energy/numerics errors that the R/T extraction alone cannot. The PML
     materials are excluded -- their stretched-coordinate eps would corrupt the integral
@@ -775,10 +816,11 @@ def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     area = float(Px) * float(Py)
     if area <= 0:
         return None
-    return float(complex(integ).real * k0 / (max(math.cos(theta), 1e-12) * area))
+    n_cos = max(complex(n_super).real * math.cos(theta), 1e-12)   # C3-7 incident-power factor
+    return float(complex(integ).real * k0 / (n_cos * area))
 
 
-def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py):
+def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j):
     """Per-region absorbed-power map (driver D2): the _absorbed_fraction integrand evaluated
     region by region -- IDENTICAL loss CF, IDENTICAL normalization, restricted to one material
     domain at a time -- so sum(values) equals A_independent EXACTLY (domain additivity of the
@@ -795,7 +837,9 @@ def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py):
     else:
         im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j
         loss = im_eps * (E_tot * ng.Conj(E_tot))
-    scale = k0 / (max(math.cos(theta), 1e-12) * area)
+    # audit C3-7: same Re(n_super) incident-power factor as _absorbed_fraction (the two must
+    # stay IDENTICAL for the sum-equals-A_independent additivity contract)
+    scale = k0 / (max(complex(n_super).real * math.cos(theta), 1e-12) * area)
     out = {}
     for m in non_pml:
         integ = ng.Integrate(loss, mesh, definedon=mesh.Materials(re.escape(m)))
@@ -850,7 +894,7 @@ def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):
     return float(R_flux), float(T_flux)
 
 
-def make_fem_optical_solver(*, order=None):
+def make_fem_optical_solver(*, order=None, diagnostics=True):
     """An `optical_solver` for run_pipeline backed by the FEM, with a SWEEP-AWARE fast path. At NORMAL
     incidence the HCurl FESpace is wavelength-INDEPENDENT (no oblique Bloch phases), so solve_sweep
     builds it ONCE and reuses it across the whole wavelength sweep -- avoiding the redundant FESpace
@@ -859,7 +903,9 @@ def make_fem_optical_solver(*, order=None):
     solve_fem (only the k0-independent space build is amortized; the solve itself is not reusable).
     Oblique/conical incidence falls back to a per-wavelength build (the Periodic Bloch phases depend
     on k0). OPT-IN -- pass optical_solver=make_fem_optical_solver() to run_pipeline; the default FEM
-    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order."""
+    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order;
+    `diagnostics=False` threads the solve_fem diagnostics opt-out (A_independent/per-region/flux R/T
+    skipped on every solve of the sweep -- see solve_fem's caveat about the energy-closure warning)."""
     from dynameta.optics.eps_assembler import assemble_eps_cf
 
     def _ord(design):
@@ -868,7 +914,7 @@ def make_fem_optical_solver(*, order=None):
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
         eps_cf = assemble_eps_cf(geo, eps_by_region)
         return solve_fem(geo, lambda_m, eps_cf, design.optical, order=_ord(design),
-                         n_super=n_super, n_sub=n_sub)
+                         n_super=n_super, n_sub=n_sub, diagnostics=diagnostics)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
         od = _ord(design)
@@ -880,7 +926,8 @@ def make_fem_optical_solver(*, order=None):
         for lam in lams:
             eps_cf = assemble_eps_cf(geo, assemble_at(lam))
             out.append(solve_fem(geo, lam, eps_cf, design.optical, order=od,
-                                 n_super=n_super, n_sub=n_sub, _reuse_fes=fes))
+                                 n_super=n_super, n_sub=n_sub, diagnostics=diagnostics,
+                                 _reuse_fes=fes))
         return out
 
     _solve.solve_sweep = _solve_sweep

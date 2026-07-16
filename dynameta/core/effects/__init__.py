@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from dynameta.core.effects.base import (ComposedEffect, DeltaEffect, EffectModel,
                                         OpticalModelEffect, _E_vec, _photon_energy_J,
-                                        _voigt6_to_full, as_tensor, kramers_kronig_dn)
+                                        _voigt6_to_full, as_tensor, kramers_kronig_dn,
+                                        kramers_kronig_dn_rows)
 from dynameta.core.effects.electro import (FranzKeldyshEffect, KerrEffect,
                                            PockelsEffect)
 from dynameta.core.effects.thermo import (AnisotropicThermoOpticModel,

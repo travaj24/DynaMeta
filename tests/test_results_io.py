@@ -161,3 +161,116 @@ def test_max_contrast_all_nan_comparison_raises():
     # (c) single bias (no comparison row) -> 0.0, not an error
     sr3 = SweepResults.from_rows([SweepRow("off", 1500.0, _r(0.2))])
     assert sr3.max_contrast("R") == 0.0
+
+
+def test_cache_material_retune_and_solver_identity_miss(tmp_path):
+    # audit C5-3/C5-6: (a) retuning a material's optical constants under an UNCHANGED
+    # registry name must MISS (backends re-derive eps from design.materials at solve time;
+    # the name-only key served stale R -- probe: HIT returned R=0.179 vs truth 0.059);
+    # (b) a DIFFERENT inner solver over the same path with the default tag='' must MISS
+    # (FEM specular vs bridge order-summed numbers must not be served across backends).
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    from dynameta.cache import OpticalSolverCache
+    from dynameta.materials import ConstantOptical, Material
+
+    def mk_inner(val):
+        def inner(design, geo, eps, lam, ns, nb):
+            return OpticalResult(r=complex(val, 0), R=val, phase_deg=0.0, solve_time_s=0.1)
+        return inner
+
+    def _design_with_m(eps_m):
+        from dynameta.geometry import Design, Layer, Stack, UnitCell
+        from dynameta.materials import MaterialRegistry
+        reg = MaterialRegistry()
+        reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+        reg.add(Material("m", ConstantOptical(complex(eps_m))))
+        stack = Stack(layers=[Layer("s", 100e-9, "m", inclusions=[])],
+                      superstrate_material="air", substrate_material="air")
+        return Design(name="c", unit_cell=UnitCell.square(220e-9), stack=stack,
+                      electrodes=[], materials=reg)
+
+    p = str(tmp_path / ("cache2" + _EXT[_FORMATS[0]]))
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c1 = OpticalSolverCache(mk_inner(0.1), p)
+    c1(_design_with_m(4.0), None, eps, 1.4e-6, 1.0, 1.0)
+    assert c1.stats()["misses"] == 1
+    # (a) an identical design whose 'm' material is RETUNED under the same name -> MISS
+    # (the old name-only fingerprint made this a stale HIT)
+    c1(_design_with_m(9.0), None, eps, 1.4e-6, 1.0, 1.0)
+    assert c1.stats()["misses"] == 2, "material retune under an unchanged name must MISS"
+    # (b) same design + eps + wavelength through a DIFFERENTLY-NAMED solver -> MISS
+    def other_backend(design, geo, eps_, lam, ns, nb):
+        return OpticalResult(r=complex(0.9, 0), R=0.9, phase_deg=0.0, solve_time_s=0.1)
+    c2 = OpticalSolverCache(other_backend, p, autosave=False)
+    d2 = _design()
+    r_other = c2(d2, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c2.stats()["misses"] == 1 and r_other.R == pytest.approx(0.9), \
+        "a different backend over the same cache path must not be served another's result"
+
+
+@pytest.mark.parametrize("fmt", _FORMATS)
+def test_cache_packed_layout_stale_truncate_and_bit_identity(fmt, tmp_path):
+    # audit 6.2: entries persist as ONE (N,12) value matrix + one (N,41) key matrix (schema 5;
+    # ~100-250x faster flush/reopen than a dataset per entry, bit-identical). Fixer-hazard leg:
+    # after a load-side schema discard the old entries are still PHYSICALLY in the file -- the
+    # first flush must TRUNCATE (whole-store rewrite), else a reopen under the fresh schema
+    # stamp resurrects the discarded mis-keyed entries (GATE D2 in validation/optical_cache).
+    import dynameta.cache as C
+    from dynameta.cache import OpticalSolverCache
+
+    def inner(design, geo, eps, lam, ns, nb):
+        R = abs(complex(eps["s"].scalar)) * 1e-3 + lam * 1e5
+        return OpticalResult(r=complex(R, -0.2), R=R, phase_deg=7.0, solve_time_s=0.5,
+                             t=None, T=None, A=None)          # None fields -> NaN lanes round-trip
+
+    d = _design()
+    p = str(tmp_path / ("packed" + _EXT[fmt]))
+    stale_key = "k" + "f" * 40
+    # a store under the PREVIOUS schema (whose layout was one dataset per entry) with a bogus entry
+    save_arrays(p, {stale_key: np.zeros(len(C._VEC))},
+                {"schema": C._SCHEMA - 1, "tag": "", "layout": list(C._VEC)}, fmt=fmt)
+    c1 = OpticalSolverCache(inner, p, fmt=fmt)
+    assert c1._mem == {}                                       # load-side schema discard
+    grid = [(4.0, 1.4e-6), (9.0, 1.5e-6)]
+    for b, lam in grid:
+        c1(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=complex(b))}, lam, 1.0, 1.0)
+    arrays, meta = load_arrays(p, fmt=fmt)
+    assert set(arrays) == {C._PK_KEYS, C._PK_VALS}             # packed layout; stale dataset GONE
+    assert arrays[C._PK_VALS].shape == (2, len(C._VEC)) and arrays[C._PK_KEYS].shape == (2, 41)
+    assert int(meta["schema"]) == C._SCHEMA
+    c2 = OpticalSolverCache(inner, p, fmt=fmt, autosave=False)
+    assert set(c2._mem) == set(c1._mem) and stale_key not in c2._mem   # no resurrection
+    assert all(c2._mem[k].tobytes() == c1._mem[k].tobytes() for k in c1._mem)  # BIT-identical
+    # a reopened HIT returns exactly the fresh compute (incl. the None fields staying None)
+    eps0 = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    r_hit = c2(d, None, eps0, 1.4e-6, 1.0, 1.0)
+    r_ref = inner(d, None, eps0, 1.4e-6, 1.0, 1.0)
+    assert c2.hits == 1 and r_hit.R == r_ref.R and r_hit.r == r_ref.r
+    assert r_hit.T is None and r_hit.t is None and r_hit.A is None
+
+
+def test_cache_autosave_batching(tmp_path):
+    # audit 6.2: per-miss autosave rewrites the WHOLE store (O(N^2) over a sweep; measured
+    # 240x). autosave_every=K batches flushes (default 1 = old behavior byte-compatible);
+    # the batched cache flushes every Kth miss and an explicit flush() drains the tail.
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    from dynameta.cache import OpticalSolverCache
+
+    flushes = {"n": 0}
+
+    def inner(design, geo, eps, lam, ns, nb):
+        return OpticalResult(r=0.1 + 0j, R=0.1, phase_deg=0.0, solve_time_s=0.1)
+
+    d = _design()
+    p = str(tmp_path / ("cache3" + _EXT[_FORMATS[0]]))
+    c = OpticalSolverCache(inner, p, autosave_every=4)
+    orig_flush = c.flush
+    c.flush = lambda: (flushes.__setitem__("n", flushes["n"] + 1), orig_flush())[1]
+    for i, lam in enumerate([1.3e-6, 1.35e-6, 1.4e-6, 1.45e-6, 1.5e-6, 1.55e-6]):
+        c(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, lam, 1.0, 1.0)
+    assert c.stats()["misses"] == 6 and flushes["n"] == 1     # one flush at miss 4
+    c.flush()                                                 # drain the 2-miss tail
+    c2 = OpticalSolverCache(inner, p)
+    assert len(c2._mem) == 6                                  # everything persisted

@@ -10,13 +10,14 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
-from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd.backends import _resolve_backend
+from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
-from dynameta.optics.fdtd_nd.cpml import _cpml_z
-from dynameta.optics.fdtd_nd.kernels3d import _run_3d, _run_3d_mo, _run_3d_oblique
+from dynameta.optics.fdtd_nd.cpml import cpml_z
+from dynameta.optics.fdtd_nd.solve2d import _ref_cache_call, _ring_time_s
+from dynameta.optics.fdtd_nd.kernels3d import _run_3d_mo, _run_3d_oblique, run_3d
 from dynameta.optics.fdtd_nd.kernels3d_numba import _run_3d_oblique_numba, _te3d_numba
-from dynameta.optics.fdtd_nd.kernels3d_jax import _run_3d_jax, _run_3d_oblique_jax
+from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
 
 def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
                  lor=None, chi2=None, raman=None, gain=None):
@@ -40,13 +41,13 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
         if lor is not None:
             raise NotImplementedError("the jax 3D backend does not carry the Lorentz ADE yet; use "
                                       "backend='numba' or 'numpy' for a 3D Lorentz material.")
-        out = _run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        out = run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
-    out = _run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                  chi2=chi2, raman=raman, gain=gain)
+    out = run_3d(*a, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
+                 chi2=chi2, raman=raman, gain=gain)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -147,7 +148,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
@@ -178,17 +185,25 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)
-    cpml_struct = _cpml_z(nz, dz, dt, npml, n_super, n_sub)  # PML matched super (low z) + sub (high z)
-    cpml_ref = _cpml_z(nz, dz, dt, npml, n_super, n_super)   # homogeneous-superstrate reference
-    name = _resolve_backend(backend)                        # 'auto'/'cpu' -> numba (the fast 3D path)
+    cpml_struct = cpml_z(nz, dz, dt, npml, n_super, n_sub)   # PML matched super (low z) + sub (high z)
+    cpml_ref = cpml_z(nz, dz, dt, npml, n_super, n_super)    # homogeneous-superstrate reference
+    name = resolve_backend(backend)                         # 'auto'/'cpu' -> numba (the fast 3D path)
     one = np.ones(shape); zero = np.zeros(shape)
 
     def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
         return _dispatch_3d(name, ei, w, g_, c3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp,
                             lor, chi2, raman, gain)
 
-    exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
-        n_super ** 2 * one, zero, zero, zero, cpml_ref)                  # homogeneous-superstrate reference
+    # homogeneous-superstrate reference: structure-independent, so memoized on its exact
+    # determinants (audit 6.2 perf; see solve2d._ref_cache_call); custom xp bypasses the cache
+    if xp is np:
+        _key = ("3d", name, nx, ny, nz, float(dx), float(dy), float(dz), float(dt), int(nsteps),
+                int(k_src), int(k_pL), int(k_pR), int(npml), complex(n_super), src.tobytes())
+        exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = _ref_cache_call(
+            _key, lambda: run(n_super ** 2 * one, zero, zero, zero, cpml_ref))
+    else:
+        exL_i, eyL_i, hxL_i, hyL_i, exR_i, eyR_i, hxR_i, hyR_i = run(
+            n_super ** 2 * one, zero, zero, zero, cpml_ref)
     exL_t, eyL_t, hxL_t, hyL_t, exR_t, eyR_t, hxR_t, hyR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
                                                                  chi2_arrs, raman_arrs, gain_arrs)  # struct
 
@@ -202,9 +217,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         T0 = np.abs(mTrans / mR_inc) ** 2 * (n_sub / n_super)   # Snell power-flux ratio (incident in super)
         # COMPLEX co-pol 0-order coeffs: conjugate (rfft is exp(+iwt); convention is exp(-iwt)), then
         # de-embed the propagation phase (superstrate phase velocity c/n_super): r0c to the front face
-        # z=pad (probe k_pL); t0c across the cell (the common probe phase cancels in t).
+        # z=pad (probe k_pL). t0c (audit C3-4): interface-referenced t carries n_sub*z_struct plus the
+        # (n_super-n_sub) mismatch over the face->probe distance (the incident reference travels
+        # n_super all the way); the old bare exp(1j*k0*z_struct) was vacuum-only. Byte-identical at
+        # n_super=n_sub=1.
         r0c = np.conj(mRefl / mL_inc) * np.exp(-2j * n_super * k0 * (pad - k_pL * dz))
-        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * z_struct)
+        t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
+                                                           + (n_super - n_sub) * (k_pR * dz - pad)))
     # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
     P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
     P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i)
@@ -231,6 +250,15 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     envelope (kx AND ky). Vacuum ends; Drude only. angle_deg=0 reduces to normal incidence."""
     if any(L.lorentz_delta_eps != 0.0 for L in layers):
         raise NotImplementedError("solve_fdtd_3d_oblique supports Drude dispersion only (no Lorentz pole).")
+    # audit C5-7: the oblique kernel carries NO chi3/chi2/Raman/gain ADEs -- refuse rather
+    # than silently solve the passive stack (the 1-D entry point raises for the same set)
+    _dropped = [t for t in ("chi3_m2_V2", "chi2_m_V", "raman_chi3_m2_V2", "gain_dN_m3")
+                if any(getattr(L, t, 0.0) != 0.0 for L in layers)]
+    if _dropped:
+        raise NotImplementedError(
+            "solve_fdtd_3d_oblique: the oblique kernel carries no {} terms -- they would be "
+            "silently ignored (audit C5-7); use the normal-incidence solver or split the "
+            "problem.".format("/".join(_dropped)))
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -259,12 +287,18 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, ny, nz)); zero = np.zeros((nx, ny, nz))
-    bk = _resolve_backend(backend)
+    bk = resolve_backend(backend)
 
     def _obl3d(ei, w, g):
         if bk == "numba":
@@ -273,8 +307,8 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
                                          ke, be, ce, kh, bh, ch, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
                                          np.asarray(src, float), kx, ky, sx, sy)
         if bk == "jax":
-            out = _run_3d_oblique_jax(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
-                                      kx, ky, sx, sy)
+            out = run_3d_oblique_jax(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                                     kx, ky, sx, sy)
             return tuple(np.asarray(v) for v in out)        # JAX -> NumPy for the FFT/R-T stage
         return _run_3d_oblique(ei, w, g, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy)
 
@@ -291,7 +325,16 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
         T0 = np.abs(trans / inc_R) ** 2
     sin_t = np.divide(k_par * C_LIGHT, 2.0 * np.pi * np.maximum(f, 1e-30))
     theta = np.degrees(np.arcsin(np.clip(sin_t, -1.0, 1.0)))
-    band = (f >= f_min) & (f <= f_max) & (sin_t < 0.999) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit C3-5 (mirrors solve_fdtd_2d_oblique): trust only sin_t < 0.95 -- the grazing
+    # CPML echo corrupts R0/T0 beyond ~72 deg; warn on excluded excited points.
+    _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    band = _excited & (sin_t < 0.95)
+    if np.any(_excited & (sin_t >= 0.95)):
+        import warnings
+        warnings.warn(
+            "solve_fdtd_3d_oblique: excited in-band points at theta(f) >= 71.8 deg were "
+            "EXCLUDED from the trusted band (grazing CPML echo; audit C3-5).",
+            RuntimeWarning, stacklevel=2)
     return FDTD2DObliqueResult(freqs_Hz=f, theta_deg=theta, R0=R0, T0=T0, band=band)
 
 
@@ -326,9 +369,14 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     def _ncell(L):
         wpL = getattr(L, "drude_wp_rad_s", 0.0)
         if wpL > 0:                                              # circular-mode index bound for grid sizing
+            # audit C3-3: max over BOTH circular branches (w -/+ wc) -- the single (w - wc)
+            # branch is resonant only for wc > 0, silently under-sizing dz for reversed
+            # magnetization; floor by the background birefringent indices too.
             eps_inf = 0.5 * (L.eps_xx + L.eps_yy)
-            return max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - L.cyclotron_wc_rad_s) + 1j * w * L.drude_gamma_rad_s)))
-                       for w in w_band)
+            wcL = L.cyclotron_wc_rad_s
+            n_circ = max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - s * wcL) + 1j * w * L.drude_gamma_rad_s)))
+                         for w in w_band for s in (+1, -1))
+            return max(n_circ, np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
         return max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
     n_max = max(1.0, max(_ncell(L) for L in layers))
     dz = lambda_min_m / (resolution * n_max)
@@ -382,10 +430,16 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau) / dt))
+    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
+    if t_ring > 200 * tau:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s; audit C3-6)".format(
+                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
-    cpml = _cpml_z(nz, dz, dt, npml)
+    cpml = cpml_z(nz, dz, dt, npml)
     exL_i, eyL_i, exR_i, eyR_i = _run_3d_mo(o, o, o, zr, zr, zr, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
                                             src, cpml, pol)                                  # vacuum
     exL_t, eyL_t, exR_t, eyR_t = _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src,

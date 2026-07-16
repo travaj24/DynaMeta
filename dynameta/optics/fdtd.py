@@ -24,52 +24,9 @@ import numpy as np
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
 
 
-@dataclass
-class FDTDLayer:
-    """One layer of the 1D stack. Non-dispersive eps_inf, plus an optional Drude pole
-    (eps -= wp^2/(w^2 + i gamma w)), an optional Lorentz pole (eps += d_eps w0^2/(w0^2 - w^2 - i gl w),
-    the bound-electron / interband resonance the bare Drude cannot capture) and an instantaneous Kerr
-    chi3 (eps += chi3 |E|^2). All optional terms default off, so a plain dielectric is just eps_inf.
-
-    The 2D/3D engine (fdtd_nd) carries the Drude + Kerr; the Lorentz pole is honored by the 2D-TE kernels
-    (numpy/numba) via the central-difference ADE (a second polarization state PL). eps(w) at one lambda is
-    typically supplied by inverting to a single Drude pole (the seam); fit_drude_lorentz fits BOTH poles
-    across a band for an exact broadband metal/interband representation."""
-    thickness_m: float
-    eps_inf: float = 1.0
-    drude_wp_rad_s: float = 0.0
-    drude_gamma_rad_s: float = 0.0
-    chi3_m2_V2: float = 0.0
-    lorentz_w0_rad_s: float = 0.0          # Lorentz resonance frequency (0 = no Lorentz pole)
-    lorentz_gamma_rad_s: float = 0.0       # Lorentz damping rate
-    lorentz_delta_eps: float = 0.0         # Lorentz static strength (eps(0) gains d_eps)
-    # R15 second-order + dispersive third-order nonlinearities (2D-TE numpy kernel; default off):
-    chi2_m_V: float = 0.0                  # SHG chi2 [m/V]: P2 = eps0 chi2 E^2 polarization source
-    raman_chi3_m2_V2: float = 0.0          # Raman chi3 strength [m^2/V^2]: P_R = eps0 chiR E Q
-    raman_w_rad_s: float = 0.0             # Raman vibrational resonance Omega_R [rad/s]
-    raman_gamma_rad_s: float = 0.0         # Raman damping [rad/s] (Q'' + g Q' + W^2 Q = W^2 E^2)
-    # R20 CLAMPED-INVERSION gain line (2D-TE numpy kernel; default off). The Lorentz-oscillator
-    # gain ADE P'' + dw P' + w^2 P = -kappa dN E: inversion dN = N2 - N1 > 0 -> Im(chi) < 0 = GAIN
-    # (exp(-i w t)); dN < 0 reduces EXACTLY to a passive Lorentz pole with delta_eps =
-    # kappa |dN|/(eps0 w^2). kappa is the classical coupling q^2/m_eff [C^2/kg]; the small-signal
-    # intensity gain at line center is g0 = kappa dN / (n c eps0 dw) [1/m]. The inversion is
-    # CLAMPED (no rate dynamics in the field loop -- see optics.laser_gain for the four-level
-    # populations; dynamic field-population coupling is a documented follow-on).
-    gain_w_rad_s: float = 0.0              # transition frequency w_a [rad/s] (0 = no gain line)
-    gain_dw_rad_s: float = 0.0             # FWHM linewidth dw_a [rad/s]
-    gain_kappa_C2_kg: float = 0.0          # coupling q^2/m_eff [C^2/kg]
-    gain_dN_m3: float = 0.0                # clamped inversion N2 - N1 [m^-3] (sign = gain/loss)
-
-    def eps_at(self, w_rad_s):
-        """The complex eps(omega) this layer represents (eps_inf - Drude + Lorentz), convention
-        exp(-i w t), Im(eps) > 0 = loss. Excludes the intensity-dependent Kerr term."""
-        e = complex(self.eps_inf)
-        if self.drude_wp_rad_s > 0.0:
-            e = e - self.drude_wp_rad_s ** 2 / (w_rad_s ** 2 + 1j * self.drude_gamma_rad_s * w_rad_s)
-        if self.lorentz_delta_eps != 0.0 and self.lorentz_w0_rad_s > 0.0:
-            w0 = self.lorentz_w0_rad_s
-            e = e + self.lorentz_delta_eps * w0 ** 2 / (w0 ** 2 - w_rad_s ** 2 - 1j * self.lorentz_gamma_rad_s * w_rad_s)
-        return e
+# FDTDLayer moved to the n-D package (fdtd_nd/spec.py, audit 2026-07-05 section 5 ownership
+# inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
+from dynameta.optics.fdtd_nd.spec import FDTDLayer  # noqa: F401 (re-export)
 
 
 @dataclass
@@ -103,7 +60,7 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
         # E update (interior): eps0 eps_eff dE/dt = -dHy/dz - (J^{n+1}+J^n)/2, with the Kerr eps_eff
         curl = np.zeros(nz)
         curl[1:-1] = (Hy[1:] - Hy[:-1]) / dz
-        eps_eff = eps_inf + chi3 * Ex ** 2             # instantaneous Kerr
+        eps_eff = eps_inf + 3.0 * chi3 * Ex ** 2       # Kerr: d(chi3 E^3)/dt = 3 chi3 E^2 dE/dt (C3-2)
         denom = EPS0 * eps_eff / dt + bJ / 2.0
         Enew = (EPS0 * eps_eff / dt * Ex + curl - 0.5 * (1.0 + aJ) * J - 0.5 * bJ * Ex) / denom
         Jnew = aJ * J + bJ * (Enew + Ex)

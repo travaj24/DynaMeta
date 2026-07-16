@@ -112,8 +112,12 @@ def part3_electroabsorption():
 
 
 def _s2d(dE, xb):
-    """2-D Sommerfeld enhancement (matches electroabsorption._alpha)."""
-    return 2.0 / (1.0 + np.exp(-2.0 * np.pi * np.sqrt(xb / dE))) if dE > 0.0 else 0.0
+    """2-D Sommerfeld enhancement, Shinada-Sugano form: gamma = sqrt(R/dE), R = E_b(2D)/4,
+    so the exponent is -pi sqrt(E_b/dE) (audit 7b: the code and this helper both carried a
+    doubled exponent; NOTE this helper deliberately mirrors the implementation -- the
+    field-independence of the continuum STRENGTH is what part-4 discriminates, not the
+    lineshape itself)."""
+    return 2.0 / (1.0 + np.exp(-np.pi * np.sqrt(xb / dE))) if dE > 0.0 else 0.0
 
 
 def part4_continuum_under_field():

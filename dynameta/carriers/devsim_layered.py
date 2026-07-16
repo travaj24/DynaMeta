@@ -77,6 +77,7 @@ class LayeredDevsimBuilder:
         self.device = device_name
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
+        self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
         self._built = False
 
     # ---- region planning ----
@@ -178,6 +179,30 @@ class LayeredDevsimBuilder:
             bg_role = d.material_role(L.background_material)
             bg_ambient = L.background_material in ambient
             n_incl = len(L.inclusions)
+            # audit C2-3: the 2D interface loop wires only z-ADJACENT region pairs, so an
+            # inclusion overlaying a non-ambient background gets coincident DUPLICATED
+            # nodes with NO lateral interface -- DEVSIM then gives each side a natural
+            # zero-flux wall and the inclusion is electrostatically ISOLATED, silently.
+            # The 3D builder creates these lateral interfaces; refuse here until the 2D
+            # sidewall wiring is built and validated (matching the 3D raise discipline).
+            if not bg_ambient and n_incl:
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: layer '{}' has a NON-ambient background WITH "
+                    "inclusions -- the 2D builder wires no lateral (sidewall) interfaces, "
+                    "so the inclusion would be electrostatically isolated from its "
+                    "background with no warning (audit C2-3). Use the 3D builder "
+                    "(Stacked3DSpec.from_design) or make the background ambient.".format(L.name))
+            if bg_ambient and n_incl >= 2:
+                bbs = [inc.shape.bbox_m() for inc in L.inclusions]
+                for i in range(n_incl):
+                    for j in range(i + 1, n_incl):
+                        if min(bbs[i][1], bbs[j][1]) - max(bbs[i][0], bbs[j][0]) > -1e-15:
+                            raise NotImplementedError(
+                                "LayeredDevsimBuilder: layer '{}' inclusions {} and {} touch/"
+                                "overlap laterally -- the 2D builder wires no lateral "
+                                "interface between them, so they would be electrically "
+                                "DECOUPLED silently (audit C2-3). Separate them or use the "
+                                "3D builder.".format(L.name, i, j))
             if not bg_ambient:
                 # background region over the full cell (x split by inclusions is
                 # ignored for the background's DC role; inclusions overlay it). For a
@@ -306,6 +331,7 @@ class LayeredDevsimBuilder:
                         continue
                     z_if = a.z_hi if abs(a.z_hi - b.z_lo) < 1e-15 else b.z_hi
                     r0, r1 = (a.name, b.name) if a.z_hi <= b.z_lo + 1e-15 else (b.name, a.name)
+                    self._iface_pairs.append((r0, r1))       # for the semi-semi guard below
                     ds.add_2d_interface(mesh=self.mesh_name,
                                           name="{}__{}".format(r0, r1),
                                           region0=r0, region1=r1,
@@ -391,6 +417,22 @@ class LayeredDevsimBuilder:
                 eps_r = self._dielectric_eps_static(s.material)
                 PE.setup_dielectric_region(self.device, s.name, eps_r)
             # metals: inert, no setup
+        # audit regrade 7.1 (semi-semi interfaces): PE.setup_interface wires POTENTIAL-only
+        # continuity, which is exact for equilibrium pairs and semiconductor-dielectric
+        # interfaces, but between two regions that BOTH solve carrier continuity it leaves
+        # Electrons/Holes with natural zero-flux walls -- a silently carrier-BLOCKING
+        # junction (a p-on-n stack shows ~zero forward current with converged, plausible
+        # output). The 3D twin hard-raises for exactly this; mirror it here. Model the
+        # junction as an in-region net_doping_expr in ONE layer instead.
+        semi_cc = self._dd_regions | self._bipolar_regions
+        for r0, r1 in self._iface_pairs:
+            if r0 in semi_cc and r1 in semi_cc:
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: regions '{}' and '{}' both solve carrier "
+                    "continuity, but the interface enforces Potential continuity ONLY -- "
+                    "carrier flux across the junction would be silently BLOCKED. Model the "
+                    "junction as a net_doping_expr inside one region, or use the guarded "
+                    "3D builder.".format(r0, r1))
         for iface in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, iface)
         for c in ds.get_contact_list(device=self.device):

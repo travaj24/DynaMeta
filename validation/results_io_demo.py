@@ -76,13 +76,18 @@ def main():
     calls = {"n": 0}
     solver = _mock_solver(calls)
 
+    # the cache store's backend follows its file extension; pick one that is actually installed
+    # (CI ships only h5py, not zarr) so the cache-reuse gate runs everywhere, not just locally
+    cache_ext = ".zarr" if "zarr" in available_formats() else ".h5"
+    cache_path = os.path.join(tmp, "cache" + cache_ext)
+
     # pass 1: compute the whole grid through the cache
-    cache = OpticalSolverCache(solver, os.path.join(tmp, "cache.zarr"))
+    cache = OpticalSolverCache(solver, cache_path)
     sr = _run(cache)
     n1 = calls["n"]; cache.flush()
 
     # pass 2: a FRESH cache reading the same file -> everything served from disk
-    cache2 = OpticalSolverCache(solver, os.path.join(tmp, "cache.zarr"))
+    cache2 = OpticalSolverCache(solver, cache_path)
     sr2 = _run(cache2)
     n2_new = calls["n"] - n1
     print("[rio] cache: pass-1 computed {} points; pass-2 recomputed {} (hits={}, hit_rate={:.0%})".format(

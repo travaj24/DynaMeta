@@ -1,4 +1,4 @@
-"""Shared mesh-unit scale _S, layer dataclasses, mesh builder, and forms helpers.
+"""Shared mesh-unit scale MESH_SCALE (_S), layer dataclasses, mesh builder, and forms helpers.
 
 Split from the former monolithic thermal_fem.py; see the package __init__ docstring
 for unit conventions (the _S nm-scaling derivation). Bodies are verbatim.
@@ -11,7 +11,9 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.fem_mesh import _S, build_layered_box_mesh
+from dynameta.carriers.fem_mesh import MESH_SCALE, build_layered_box_mesh
+
+_S = MESH_SCALE                  # back-compat alias (pre-promotion private name; bodies below are verbatim)
 
 
 @dataclass
@@ -42,7 +44,8 @@ class ThermalLayerTwoTemp(ThermalLayer):
         return self.k_thermal if self.k_electron is None else float(self.k_electron)
 
 
-def _mean_T_per_layer(mesh, T, layers) -> np.ndarray:
+def mean_T_per_layer(mesh, T, layers) -> np.ndarray:
+    """Volume-averaged temperature [K] in each layer of `layers` (same order; 0.0 if zero volume)."""
     out = []
     for L in layers:
         dom = mesh.Materials(L.name)
@@ -52,7 +55,10 @@ def _mean_T_per_layer(mesh, T, layers) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
-def _add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3):
+_mean_T_per_layer = mean_T_per_layer         # back-compat alias (pre-promotion private name)
+
+
+def add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3):
     """Add the top-face flux Neumann + volumetric Joule source to a LinearForm (mesh-nm scaling).
     Shared by the steady and transient paths so the load is built identically."""
     if flux_W_m2:
@@ -66,6 +72,9 @@ def _add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3):
             q_cf = joule_W_m3                                 # an ng CF (mesh coords)
         f += (q_cf / _S ** 2) * v * ng.dx
     return f
+
+
+_add_load_terms = add_load_terms             # back-compat alias (pre-promotion private name)
 
 
 def _build_layered_mesh(layers, period_x_m, period_y_m, maxh_m):
@@ -89,8 +98,8 @@ def _per_material_cf(mesh, by_name: Dict[str, float], what: str):
     return ng.CoefficientFunction([by_name[m] for m in mesh.GetMaterials()])
 
 
-def _build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3,
-                         maxh_m, order) -> Tuple:
+def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3,
+                        maxh_m, order) -> Tuple:
     """Build the shared mesh + H1 space + stiffness BilinearForm a + load LinearForm f (UNASSEMBLED)
     used by BOTH the steady and transient solvers. Returns (mesh, fes, u, v, a, f, k_cf). Factoring
     this out keeps solve_thermal_fem byte-identical -- it assembles the same a, f it always did."""
@@ -109,3 +118,6 @@ def _build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, jo
     f = ng.LinearForm(fes)
     _add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
     return mesh, fes, u, v, a, f, k_cf
+
+
+_build_thermal_forms = build_thermal_forms   # back-compat alias (pre-promotion private name)

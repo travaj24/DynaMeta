@@ -4,12 +4,13 @@ per-layer T, the Drude n->eps map) -- nothing imports the heavy solvers, nothing
 path (byte-identical-off: the package is opt-in by import, like carriers.thermal_fem).
 
 The FULL REL1-REL10 set is shipped: REL1 TDDB (tddb), REL2 NBTI/PBTI (bti), REL3 electromigration
-(em -- drive current is an EXTERNAL design parameter per the roadmap MVP path; the DEVSIM contact
-extractor is the follow-on), REL4 ITO de-doping -> ENZ drift (dedoping), REL5 optical damage / LIDT +
-CW thermal runaway (lidt -- a lumped thermal node + absorbed(T) callable; the per-region absorbed-
-power map is the follow-on driver), REL6 thermal-cycling fatigue (fatigue -- ductile Coffin-Manson vs
-brittle Weibull, with the reliability-LOCAL MechanicalProps schema), REL7 stress/thermal-gradient
-migration (stress_migration -- Korhonen PDE + Soret flux), REL8 HCI (hci -- I_sub external),
+(em -- drive current from carriers.contact_current via drivers.reliability_glue, or external),
+REL4 ITO de-doping -> ENZ drift (dedoping), REL5 optical damage / LIDT + CW thermal runaway (lidt --
+a lumped thermal node + absorbed(T) callable; OpticalResult.per_region_absorption is the shipped
+driver via drivers.reliability_glue), REL6 thermal-cycling fatigue (fatigue -- ductile Coffin-Manson
+vs brittle Weibull; MechanicalProps lives on the MATERIAL schema, materials/mechanical.py, and is
+re-exported here), REL7 stress/thermal-gradient migration (stress_migration -- Korhonen PDE + Soret
+flux), REL8 HCI (hci -- I_sub from carriers.impact_ionization or external),
 REL9 corrosion/oxidation/humidity (corrosion -- Deal-Grove + Peck; ambient is external), and
 REL10 acceleration factors + system MTTF (mttf).
 
