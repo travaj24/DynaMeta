@@ -75,6 +75,7 @@ from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_g
 from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, calibration_report,
                                                   dB_per_m_to_per_m, giles_calibrated_fiber,
                                                   ion_from_cross_sections)
+from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
@@ -92,4 +93,5 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "TransientResult", "simulate_transient", "saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
            "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
-           "calibration_report", "dB_per_m_to_per_m"]
+           "calibration_report", "dB_per_m_to_per_m",
+           "BeatNoiseResult", "detection_noise"]
