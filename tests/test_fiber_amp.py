@@ -8,7 +8,7 @@ from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp import (
     erbium, ytterbium, FiberSpec, overlap_gamma, cladding_pump_overlap,
     ChannelSet, metastable_fraction, gain_coeff_per_m,
-    RareEarthIon, CrossSectionModel,
+    RareEarthIon, CrossSectionModel, at_temperature, multiphonon_lifetime,
     Pump, Signal, AseBand, FiberAmplifier,
     analyze_noise, noise_figure,
     gain_compression_curve, slope_efficiency, power_conversion_efficiency, stokes_limit,
@@ -428,3 +428,40 @@ def test_esa_monotonic_and_localized_at_pump():
 
 def test_ytterbium_is_esa_free():
     assert ytterbium().sigma_esa is None              # Yb: only one excited 4f manifold
+
+
+# ============================ Phase 10: temperature dependence ============================
+
+def test_temperature_ref_byte_identical():
+    r0 = _esa_amp(erbium()).solve()
+    r_ref = _esa_amp(at_temperature(erbium(), 300.0, T_ref_K=300.0)).solve()
+    assert np.array_equal(r0.power_W, r_ref.power_W)   # T = T_ref is a no-op
+
+
+def test_mccumber_crossover_T_invariant():
+    lam0 = ER.zero_line_m
+    ratios = [float(at_temperature(ER, T).sigma_e.sigma(lam0))
+              / float(at_temperature(ER, T).sigma_a.sigma(lam0)) for T in (250.0, 350.0, 450.0)]
+    assert max(ratios) - min(ratios) < 1e-12           # crossover is T-pinned at the zero line
+
+
+def test_gain_tilt_with_temperature():
+    # McCumber-T lowers the red-side (1560) emission relative to the blue (1530) as T rises
+    def se_ratio(T):
+        ion = at_temperature(ER, T)
+        return float(ion.sigma_e.sigma(1.560e-6)) / float(ion.sigma_e.sigma(1.530e-6))
+    assert se_ratio(360.0) < se_ratio(280.0)
+    g_cold = float(_esa_amp(at_temperature(ER, 280.0)).solve().signal_gain_dB[0])
+    g_hot = float(_esa_amp(at_temperature(ER, 360.0)).solve().signal_gain_dB[0])
+    assert g_hot < g_cold                              # red-side amplifier gain drops with T
+
+
+def test_multiphonon_energy_gap_law():
+    tau = 10.0e-3
+    assert multiphonon_lifetime(tau, 500.0, gap_cm=6500.0) == tau          # coupling 0 -> radiative
+    big = multiphonon_lifetime(tau, 300.0, gap_cm=6500.0, coupling_per_s=1e8)
+    small = multiphonon_lifetime(tau, 300.0, gap_cm=3000.0, coupling_per_s=1e8)
+    small_hot = multiphonon_lifetime(tau, 450.0, gap_cm=3000.0, coupling_per_s=1e8)
+    assert abs(big - tau) / tau < 0.01                 # large gap ~ radiative (energy-gap law)
+    assert small < 0.9 * tau                           # small gap quenched
+    assert small_hot < small and big > small           # T lowers tau; larger gap less quenched
