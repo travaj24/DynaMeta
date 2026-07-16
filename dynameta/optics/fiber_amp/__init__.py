@@ -51,6 +51,13 @@ Accuracy extensions (all opt-in; byte-identical to the ideal model when off):
            energy-gap-law lifetime (multiphonon_lifetime).
   Phase 11 detection              : detector shot / signal-spont / spont-spont beat noise,
            electrical SNR, and a beat-noise NF that reduces to the optical NF.
+
+Pulsed / chirped-pulse amplification (pulse.py, cpa.py):
+  Phase 12 pulse                  : the gain-GNLSE envelope model (dispersion + Kerr + gain)
+           solved by the symmetric split-step Fourier method (propagate_gnlse).
+  Phase 13 pulse (SaturableGain)  : saturable, spectrally-shaped gain -> gain narrowing.
+  Phase 14 cpa                    : stretcher/compressor chain, B-integral, Strehl / compression
+           metrics (cpa_chain, strehl_ratio, transform_limited).
 """
 
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
