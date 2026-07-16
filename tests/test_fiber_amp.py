@@ -18,6 +18,7 @@ from dynameta.optics.fiber_amp import (
     simulate_transient, saturation_energy, frantz_nodvik_output_energy, frantz_nodvik_pulse,
     CrossSectionTable, giles_calibrated_fiber, dB_per_m_to_per_m,
     detection_noise,
+    gaussian_pulse, sech_pulse, dispersion_length, soliton_order, propagate_gnlse,
 )
 
 ER = erbium("aluminosilicate")
@@ -501,3 +502,52 @@ def test_electrical_snr_rises_with_signal():
     snr = [detection_noise(_bn_amp(p).solve(), 1.560e-6, optical_bw_Hz=50e9,
                            electrical_bw_Hz=10e9).snr_elec_dB for p in (1e-6, 1e-5, 1e-4)]
     assert snr[0] < snr[1] < snr[2]
+
+
+# ============================ Phase 12: gain-GNLSE split-step core ============================
+
+def _pulse_grid(N=2048, window_s=40e-12):
+    return (np.arange(N) - N // 2) * (window_s / N)
+
+
+def test_gnlse_dispersive_broadening():
+    t = _pulse_grid()
+    t0, beta2 = 1e-12, 20e-27
+    LD = dispersion_length(t0, beta2)
+    p = gaussian_pulse(t, t0_s=t0, peak_power_W=1.0)
+    out = propagate_gnlse(p, 2.0 * LD, beta2_s2_m=beta2, n_steps=400).output
+    analytic = p.fwhm_s() * np.sqrt(1.0 + 2.0 ** 2)     # T0 sqrt(1+(z/L_D)^2)
+    assert abs(out.fwhm_s() - analytic) / analytic < 0.02
+
+
+def test_gnlse_spm_preserves_envelope_and_broadens_spectrum():
+    t = _pulse_grid()
+    gamma, P0 = 3e-3, 100.0
+    L = 4.5 * np.pi / (gamma * P0)              # phi_max = 4.5 pi -> 5 spectral peaks
+    p = gaussian_pulse(t, t0_s=2e-12, peak_power_W=P0)
+    out = propagate_gnlse(p, L, gamma_W_m=gamma, n_steps=600).output
+    assert np.max(np.abs(out.power_W - p.power_W)) / p.peak_power_W < 1e-6   # SPM preserves |A|
+    _, S = out.spectrum()
+    S = S / S.max()
+    peaks = int(np.sum((S[1:-1] > S[:-2]) & (S[1:-1] > S[2:]) & (S[1:-1] > 0.02)))
+    assert peaks == 5
+
+
+def test_gnlse_fundamental_soliton_shape_invariant():
+    t = _pulse_grid()
+    beta2, gamma, t0 = -20e-27, 3e-3, 1e-12
+    P0 = abs(beta2) / (gamma * t0 ** 2)          # N = 1
+    assert abs(soliton_order(t0, P0, beta2, gamma) - 1.0) < 1e-9
+    z0 = (np.pi / 2.0) * dispersion_length(t0, beta2)
+    p = sech_pulse(t, t0_s=t0, peak_power_W=P0)
+    out = propagate_gnlse(p, z0, beta2_s2_m=beta2, gamma_W_m=gamma, n_steps=600).output
+    assert np.max(np.abs(out.power_W - p.power_W)) / p.peak_power_W < 0.02
+
+
+def test_gnlse_energy_conservation_and_flat_gain():
+    t = _pulse_grid()
+    p = gaussian_pulse(t, t0_s=0.5e-12, peak_power_W=500.0)
+    r = propagate_gnlse(p, 5.0, beta2_s2_m=15e-27, beta3_s3_m=0.1e-39, gamma_W_m=3e-3, n_steps=800)
+    assert abs(r.output.energy_J - p.energy_J) / p.energy_J < 1e-9      # lossless -> conserved
+    rg = propagate_gnlse(p, 1.0, gain_per_m=2.3, n_steps=200)
+    assert abs(rg.output.energy_J / p.energy_J - np.exp(2.3)) / np.exp(2.3) < 1e-6
