@@ -8,6 +8,7 @@ from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp import (
     erbium, ytterbium, FiberSpec, overlap_gamma, cladding_pump_overlap,
     ChannelSet, metastable_fraction, gain_coeff_per_m,
+    RareEarthIon, CrossSectionModel,
     Pump, Signal, AseBand, FiberAmplifier,
     analyze_noise, noise_figure,
     gain_compression_curve, slope_efficiency, power_conversion_efficiency, stokes_limit,
@@ -384,3 +385,46 @@ def test_calibration_report_flags_match_and_miss():
     bad = calibration_report(amp, {"signal_nm": 1550.0, "small_signal_gain_dB": 60.0,
                                    "nf_dB_max": 6.0}, gain_tol_dB=1.0)
     assert not bad.gain_ok
+
+
+# ============================ Phase 9: excited-state absorption (ESA) ============================
+
+def _er_esa(peak):
+    base = erbium()
+    esa = CrossSectionModel(((0.980e-6, 0.016e-6, peak),))
+    return RareEarthIon(base.name, base.sigma_a, base.sigma_e, base.tau_s, base.zero_line_m,
+                        base.host, sigma_esa=esa)
+
+
+def _esa_amp(ion):
+    return FiberAmplifier(ion, _edf(6.0), [Pump(100e-3, 0.980e-6, "fwd")],
+                          [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 8))
+
+
+def test_esa_opt_in_byte_identical():
+    r_none = _esa_amp(erbium(esa=False)).solve()     # sigma_esa=None
+    r_zero = _esa_amp(_er_esa(0.0)).solve()           # zero-magnitude ESA model
+    assert np.array_equal(r_none.power_W, r_zero.power_W)
+
+
+def test_esa_reduces_gain_and_raises_heat():
+    r_off = _esa_amp(erbium(esa=False)).solve()
+    r_on = _esa_amp(erbium(esa=True)).solve()
+    ip = r_off.kind.index("pump")
+    hf_off = total_heat_W(r_off) / float(r_off.power_W[ip, 0] - r_off.power_W[ip, -1])
+    hf_on = total_heat_W(r_on) / float(r_on.power_W[ip, 0] - r_on.power_W[ip, -1])
+    assert float(r_on.signal_gain_dB[0]) < float(r_off.signal_gain_dB[0]) - 0.3
+    assert hf_on > hf_off                              # ESA is a parasitic pump->heat channel
+
+
+def test_esa_monotonic_and_localized_at_pump():
+    gains = [float(_esa_amp(_er_esa(pk)).solve().signal_gain_dB[0])
+             for pk in (0.0, 0.4e-25, 1.6e-25)]
+    assert gains[0] > gains[1] > gains[2]              # more ESA -> less gain
+    er = erbium(esa=True)                              # Er ESA sits on the 980 nm pump only
+    assert float(er.sigma_esa_of(0.980e-6)) > 1e-26
+    assert float(er.sigma_esa_of(1.560e-6)) < 0.01 * float(er.sigma_esa_of(0.980e-6))
+
+
+def test_ytterbium_is_esa_free():
+    assert ytterbium().sigma_esa is None              # Yb: only one excited 4f manifold

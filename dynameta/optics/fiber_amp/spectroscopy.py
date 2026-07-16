@@ -13,7 +13,7 @@ correct by construction. Pure numpy; SI units; wavelength in metres unless suffi
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -51,17 +51,31 @@ class RareEarthIon:
     manifold-to-manifold energy gap used to derive sigma_e from sigma_a).
 
     sigma_a, sigma_e are CrossSectionModels [m^2]; tau_s [s]; zero_line_m [m] is the
-    zero-phonon-line wavelength (Er 4I13/2<->4I15/2 ~ 1530 nm; Yb 2F5/2<->2F7/2 ~ 975 nm)."""
+    zero-phonon-line wavelength (Er 4I13/2<->4I15/2 ~ 1530 nm; Yb 2F5/2<->2F7/2 ~ 975 nm).
+
+    sigma_esa (optional) is the EXCITED-STATE-ABSORPTION cross-section [m^2]: absorption from the
+    metastable level to a higher-lying manifold, which (in the fast-relaxation / cycling limit)
+    returns the ion to the metastable state, so it is a pure parasitic BEAM LOSS proportional to
+    the excited fraction nbar2 -- it robs gain (signal ESA) and pump efficiency (pump ESA) without
+    changing the inversion balance. None -> no ESA (the ideal model)."""
     name: str
     sigma_a: CrossSectionModel
     sigma_e: CrossSectionModel
     tau_s: float
     zero_line_m: float
     host: str = ""
+    sigma_esa: Optional[CrossSectionModel] = None
 
     def __post_init__(self):
         if not (self.tau_s > 0.0 and self.zero_line_m > 0.0):
             raise ValueError("RareEarthIon: tau_s and zero_line_m must be > 0")
+
+    def sigma_esa_of(self, lambda_m):
+        """ESA cross-section at lambda_m [m^2]; zeros (same shape) when no ESA model is set."""
+        if self.sigma_esa is None:
+            lam = np.asarray(lambda_m, dtype=np.float64)
+            return np.zeros_like(lam) if lam.ndim else 0.0
+        return self.sigma_esa.sigma(lambda_m)
 
     def sigma_e_mccumber(self, lambda_m, T_K: float = 300.0, eps_J: float = None):
         """Emission cross-section from absorption via McCumber (Phys.Rev.136:A954; Miniscalco-
@@ -79,11 +93,13 @@ class RareEarthIon:
 
 # ---- literature-default ions (docs/fiber_amp_model_spec.md sec.5) --------------------------
 
-def erbium(host: str = "aluminosilicate") -> RareEarthIon:
+def erbium(host: str = "aluminosilicate", *, esa: bool = False) -> RareEarthIon:
     """Er3+ in an aluminosilicate EDF (Strohhofer-Polman / standard EDF anchors): 980 nm and
     1480 nm pump bands, 1530-1565 nm C-band signal. Peaks: sigma_a 5.7e-25 m^2 at 1530 nm,
     1.69e-25 at 1560 nm, 1.7e-25 at 980 nm; sigma_e 5.7e-25 at 1532 nm, 3.04e-25 at 1560 nm.
-    tau(4I13/2) = 10 ms."""
+    tau(4I13/2) = 10 ms. esa=True adds the 980 nm pump excited-state absorption (4I11/2->4F7/2,
+    ~0.4e-25 m^2) that limits 980-pumped efficiency; the C-band signal ESA is negligible in
+    silica so none is added there."""
     sigma_a = CrossSectionModel((
         (0.980e-6, 0.013e-6, 1.7e-25),                # 4I11/2 (980 nm pump)
         (1.480e-6, 0.040e-6, 0.8e-25),                # 1480 nm in-band pump (4I13/2 upper edge)
@@ -94,15 +110,21 @@ def erbium(host: str = "aluminosilicate") -> RareEarthIon:
         (1.532e-6, 0.012e-6, 5.7e-25),                # emission peak (near the abs peak)
         (1.560e-6, 0.040e-6, 3.04e-25),               # C-band emission shoulder anchor
     ))
+    sigma_esa = CrossSectionModel((
+        (0.980e-6, 0.016e-6, 0.4e-25),                # 4I11/2 -> 4F7/2 pump ESA at 980 nm
+    )) if esa else None
     return RareEarthIon("Er3+", sigma_a, sigma_e, tau_s=10.0e-3, zero_line_m=1.530e-6,
-                        host=host)
+                        host=host, sigma_esa=sigma_esa)
 
 
 def ytterbium(host: str = "aluminosilicate") -> RareEarthIon:
     """Yb3+ (2F5/2<->2F7/2): broad 850-1000 nm absorption (peak 976 nm), 1000-1100 nm emission,
     strong signal-band ground-state reabsorption (the quasi-three-level signature). Host peaks:
     sigma_a,peak = 2.7e-24 m^2 at 976 nm (aluminosilicate) / 1.4e-24 at 974.5 nm
-    (phosphosilicate); tau(2F5/2) = 0.83 ms (alumino) / 1.45 ms (phospho)."""
+    (phosphosilicate); tau(2F5/2) = 0.83 ms (alumino) / 1.45 ms (phospho). Yb is intrinsically
+    ESA-FREE (2F5/2 is the only excited 4f manifold, so no higher level is reachable) -- the
+    electronic-structure reason Yb reaches near-quantum-defect efficiency; sigma_esa is left
+    None."""
     if host.startswith("phospho"):
         pk_a, lam_a, tau = 1.4e-24, 0.9745e-6, 1.45e-3
     else:                                              # aluminosilicate (default)

@@ -109,6 +109,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     # per-z gain/source from an inversion profile
     sig_a = ch.sigma_a[:, None]
     sig_e = ch.sigma_e[:, None]
+    sig_esa = ch.sigma_esa[:, None]
     gam = ch.gamma[:, None]
     loss = ch.loss_per_m[:, None]
     ase_col = is_ase[:, None]
@@ -116,7 +117,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
 
     def g_s(n2z):
         n2 = n2z[None, :]
-        g = gam * na * (sig_e * n2 - sig_a * (1.0 - n2)) - loss
+        g = gam * na * (sig_e * n2 - sig_a * (1.0 - n2) - sig_esa * n2) - loss
         if amp.concentration is not None:
             g = g - gam * amp._n_dark * sig_a
             g = g - amp.concentration.photodarkening_loss_per_m(n2z)[None, :]
