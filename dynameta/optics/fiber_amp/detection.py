@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK, Q_E
-from dynameta.optics.fiber_amp.noise import analyze_noise, output_ase_spectrum
+from dynameta.optics.fiber_amp.noise import analyze_noise
 from dynameta.optics.fiber_amp.steady_state import SteadyStateResult
 
 __all__ = ["BeatNoiseResult", "detection_noise"]
@@ -53,26 +53,18 @@ class BeatNoiseResult:
         return max(pairs, key=pairs.get)
 
 
-def _rho_sp_at(result: SteadyStateResult, signal_lambda_m: float, m_modes: int) -> float:
-    """Per-polarization forward-ASE PSD [W/Hz] interpolated to the signal wavelength."""
-    fwd = output_ase_spectrum(result, "fwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
-    if fwd.lambda_m.size == 0:
-        return 0.0
-    if fwd.lambda_m.size == 1:
-        return float(fwd.psd_1pol[0])
-    return float(np.interp(signal_lambda_m, fwd.lambda_m, fwd.psd_1pol))
-
-
 def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
                     optical_bw_Hz: float, electrical_bw_Hz: float,
                     quantum_efficiency: float = 1.0, responsivity_A_W: float = None,
-                    m_modes: int = 2) -> BeatNoiseResult:
+                    m_modes: int = None) -> BeatNoiseResult:
     """Beat-noise analysis of the amplified signal at a photodetector. optical_bw_Hz is the
     filter bandwidth in front of the diode; electrical_bw_Hz the receiver bandwidth. Detector is
     R = responsivity_A_W, or eta e/(h nu) from quantum_efficiency if responsivity is not given.
     Returns the shot / signal-spontaneous / spontaneous-spontaneous variances, the electrical
     SNR, the beat-noise NF (-> optical NF in the signal-spont-dominated limit), and the excess
     RIN the amplifier adds."""
+    from dynameta.optics.fiber_amp.noise import _meta_m_modes
+    m_modes = _meta_m_modes(result, m_modes)     # default: the value the solve used (audit S3-31)
     nr = analyze_noise(result, signal_lambda_m, m_modes=m_modes)
     G = nr.gain_lin
     nu_s = C_LIGHT / signal_lambda_m
@@ -82,19 +74,33 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
     si = [i for i, k in enumerate(result.kind) if k == "signal"]
     i0 = min(si, key=lambda k: abs(result.lambda_m[k] - signal_lambda_m)) if si else 0
     P_sig_in = float(result.power_W[i0, 0])
-    rho_sp = _rho_sp_at(result, signal_lambda_m, m_modes)
+    # per-pol forward-ASE PSD at the signal, reusing the spectrum analyze_noise already extracted
+    fwd = nr.fwd_ase
+    if fwd.lambda_m.size == 0:
+        rho_sp = 0.0
+    elif fwd.lambda_m.size == 1:
+        rho_sp = float(fwd.psd_1pol[0])
+    else:
+        rho_sp = float(np.interp(signal_lambda_m, fwd.lambda_m, fwd.psd_1pol))
 
     B_o, B_e = float(optical_bw_Hz), float(electrical_bw_Hz)
     I_sig = R * P_sig_out
     I_ase = R * m_modes * rho_sp * B_o
     var_shot = 2.0 * Q_E * (I_sig + I_ase) * B_e
     var_sig_sp = 4.0 * R ** 2 * P_sig_out * rho_sp * B_e
-    var_sp_sp = 2.0 * R ** 2 * rho_sp ** 2 * m_modes * max(2.0 * B_o - B_e, 0.0) * B_e
+    # sp-sp beat: per polarization sigma^2 = R^2 rho^2 (2 B_o - B_e) B_e (triangle autoconvolution
+    # of the flat band integrated over +-B_e); m independent polarizations add. Audit S3-2/S5-1:
+    # the previous leading factor 2 double-counted polarization (the C4-3 fix from
+    # soa/ase_noise.detector_noise_variances, Monte-Carlo confirmed, now propagated here).
+    # Discriminating limit B_e=B_o, m=2: unpolarized thermal light var/mean^2 = 1/2.
+    var_sp_sp = R ** 2 * rho_sp ** 2 * m_modes * max(2.0 * B_o - B_e, 0.0) * B_e
     var_total = var_shot + var_sig_sp + var_sp_sp
 
     snr_out = I_sig ** 2 / var_total if var_total > 0.0 else np.inf
-    # shot-noise-limited input SNR of the same signal at an ideal detector, then NF = SNR_in/SNR_out
-    snr_in = quantum_efficiency * P_sig_in / (2.0 * H_PLANCK * nu_s * B_e)
+    # NF = SNR_in/SNR_out with SNR_in at an IDEAL (eta=1) shot-noise-limited input detector: the
+    # amplifier NF is a property of the amplifier and must be eta-independent (audit S3-10: the
+    # old eta factor reported sub-quantum-limit NF for real detectors).
+    snr_in = P_sig_in / (2.0 * H_PLANCK * nu_s * B_e)
     nf_beat = snr_in / snr_out if snr_out > 0.0 else np.inf
     added_rin = (var_sig_sp + var_sp_sp) / (I_sig ** 2 * B_e) if I_sig > 0.0 else np.inf
 

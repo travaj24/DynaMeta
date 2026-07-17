@@ -38,3 +38,21 @@ def test_optical_transient_settles_and_crosses_enz():
     assert abs(R_on - R_off) > 0.03                         # a real modulation contrast
     assert eps_front[0].real > 1.0 and eps_front[-1].real < 1.0   # ENZ crossing on accumulation
     assert np.all(np.diff(np.sign(R_on - R_off) * R) >= -1e-9)    # monotonic turn-on
+
+
+def test_enz_stack_depth_ordering_air_first():
+    # audit S2-3: eps_ito[0] must land adjacent to AIR, eps_ito[-1] adjacent to the OXIDE, and a
+    # flipped graded profile must change R (the flip is otherwise invisible: R+T+A still closes).
+    import numpy as np
+    from dynameta.transient_optics import enz_reflector_stack
+    from dynameta.optics.tmm_reference import layered_rta
+    lam = 1.31e-6
+    eps = np.array([10.0 + 0.0j, 5.0 + 0.0j, -1.0 + 0.5j])   # graded: air-side 10 ... gate-side ENZ
+    stack = enz_reflector_stack(eps, lam, t_ito_m=40e-9)
+    # slabs are superstrate-first: the first ITO sublayer carries eps_ito[0]
+    assert stack.slabs[0].eps == eps[0] and stack.slabs[len(eps) - 1].eps == eps[-1]
+    assert stack.slabs[len(eps)].eps == 9.0 + 0j              # oxide follows the last ITO sublayer
+    R_fwd, T_fwd, A_fwd = layered_rta(stack, lam)
+    R_rev, T_rev, A_rev = layered_rta(enz_reflector_stack(eps[::-1], lam, t_ito_m=40e-9), lam)
+    assert abs((R_fwd + T_fwd + A_fwd) - 1.0) < 1e-9 and abs((R_rev + T_rev + A_rev) - 1.0) < 1e-9
+    assert abs(R_fwd - R_rev) > 1e-3                          # the flip is optically visible in R

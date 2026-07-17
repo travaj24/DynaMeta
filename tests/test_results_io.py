@@ -83,12 +83,12 @@ def test_cache_hit_miss_and_persist(tmp_path):
     eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
     grid = [(b, lam) for b in (4.0, 9.0) for lam in (1.4e-6, 1.5e-6)]
 
-    c1 = OpticalSolverCache(inner, p)
+    c1 = OpticalSolverCache(inner, p, autosave_every=1)
     for b, lam in grid:
         c1(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=complex(b))}, lam, 1.0, 1.0)
     assert calls["n"] == 4 and c1.stats()["misses"] == 4
     # a fresh cache reading the SAME file -> all hits, zero new inner calls
-    c2 = OpticalSolverCache(inner, p)
+    c2 = OpticalSolverCache(inner, p, autosave_every=1)
     res = [c2(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=complex(b))}, lam, 1.0, 1.0)
            for b, lam in grid]
     assert calls["n"] == 4 and c2.stats()["hits"] == 4                # nothing recomputed
@@ -192,7 +192,7 @@ def test_cache_material_retune_and_solver_identity_miss(tmp_path):
 
     p = str(tmp_path / ("cache2" + _EXT[_FORMATS[0]]))
     eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
-    c1 = OpticalSolverCache(mk_inner(0.1), p)
+    c1 = OpticalSolverCache(mk_inner(0.1), p, autosave_every=1)
     c1(_design_with_m(4.0), None, eps, 1.4e-6, 1.0, 1.0)
     assert c1.stats()["misses"] == 1
     # (a) an identical design whose 'm' material is RETUNED under the same name -> MISS
@@ -230,7 +230,7 @@ def test_cache_packed_layout_stale_truncate_and_bit_identity(fmt, tmp_path):
     # a store under the PREVIOUS schema (whose layout was one dataset per entry) with a bogus entry
     save_arrays(p, {stale_key: np.zeros(len(C._VEC))},
                 {"schema": C._SCHEMA - 1, "tag": "", "layout": list(C._VEC)}, fmt=fmt)
-    c1 = OpticalSolverCache(inner, p, fmt=fmt)
+    c1 = OpticalSolverCache(inner, p, fmt=fmt, autosave_every=1)
     assert c1._mem == {}                                       # load-side schema discard
     grid = [(4.0, 1.4e-6), (9.0, 1.5e-6)]
     for b, lam in grid:
@@ -272,5 +272,5 @@ def test_cache_autosave_batching(tmp_path):
         c(d, None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, lam, 1.0, 1.0)
     assert c.stats()["misses"] == 6 and flushes["n"] == 1     # one flush at miss 4
     c.flush()                                                 # drain the 2-miss tail
-    c2 = OpticalSolverCache(inner, p)
+    c2 = OpticalSolverCache(inner, p, autosave_every=1)
     assert len(c2._mem) == 6                                  # everything persisted

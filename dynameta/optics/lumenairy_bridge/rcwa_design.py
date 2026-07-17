@@ -8,7 +8,7 @@ topology-opt path (optics.inverse_design.optimize_fdtd), which pays a full space
 per gradient. REQUIRES jax double precision (jax.config.update("jax_enable_x64", True)):
 lumenairy's traced solves refuse/warn on f32 (the RCWA eigenproblem is ill-conditioned there).
 
-WHAT LUMENAIRY ACTUALLY TRACES (pinned from the 5.21 source + lumenairy's own tests; each
+WHAT LUMENAIRY ACTUALLY TRACES (pinned from the 5.22 source + lumenairy's own tests; each
 entry point below scopes itself honestly and raises for the rest):
 
 - rcwa_efficiency_1d (binary grating, functional): region indices (re AND im), BOTH half-space
@@ -41,7 +41,7 @@ as TE/TM; the zeroth-order Jones (rcwa_stack_jones) carries the phase observable
 
 VERSION NOTE on jit/vmap: unlike the Berreman twin (see berreman_design.py -- its eig-VJP
 pytree fix landed only post-tagged-5.14.4), the RCWA/PMM twins' gauge-stable custom-VJP eig
-already returns a plain (eigvals, eigvecs) tuple on the whole bridge floor (>= 5.21;
+already returns a plain (eigvals, eigvecs) tuple on the whole bridge floor (>= 5.22;
 lumenairy rcwa/_core.py _jax_eig_stable), so grad-of-vmap / Hessian compose without a version
 condition (pinned upstream). Eager jax.grad is the gate-validated bridge path
 (validation/lumenairy_rcwa_jax.py: parity vs the non-JAX bridge, AD vs FD of the non-JAX

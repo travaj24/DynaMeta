@@ -17,7 +17,7 @@ eps(w) = eps_inf - wp^2/(w^2 + i gamma w).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 
@@ -50,6 +50,12 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
     eR = np.empty(nsteps)
     c = C_LIGHT
     mur = (c * dt - dz) / (c * dt + dz)
+    # audit S2-17: with Kerr off (the default linear R/T case) eps_eff and the E-denominator are
+    # loop-invariant; precompute once. curl is preallocated and refilled in place.
+    has_kerr = bool(np.any(chi3 != 0.0))
+    e0e_lin = EPS0 * eps_inf / dt
+    denom_lin = e0e_lin + bJ / 2.0
+    curl = np.zeros(nz)
     for n in range(nsteps):
         # old edge + adjacent cells for the Mur ABC. Position-matched names: L = left end (cells 0,1),
         # R = right end (cells -1,-2); *0 = the boundary cell, *1 = the adjacent interior cell.
@@ -58,11 +64,15 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
         # H update (Hy[i] between Ex[i], Ex[i+1])
         Hy += (dt / (MU0 * dz)) * (Ex[1:] - Ex[:-1])
         # E update (interior): eps0 eps_eff dE/dt = -dHy/dz - (J^{n+1}+J^n)/2, with the Kerr eps_eff
-        curl = np.zeros(nz)
         curl[1:-1] = (Hy[1:] - Hy[:-1]) / dz
-        eps_eff = eps_inf + 3.0 * chi3 * Ex ** 2       # Kerr: d(chi3 E^3)/dt = 3 chi3 E^2 dE/dt (C3-2)
-        denom = EPS0 * eps_eff / dt + bJ / 2.0
-        Enew = (EPS0 * eps_eff / dt * Ex + curl - 0.5 * (1.0 + aJ) * J - 0.5 * bJ * Ex) / denom
+        if has_kerr:
+            eps_eff = eps_inf + 3.0 * chi3 * Ex ** 2   # Kerr: d(chi3 E^3)/dt = 3 chi3 E^2 dE/dt (C3-2)
+            e0e = EPS0 * eps_eff / dt
+            denom = e0e + bJ / 2.0
+        else:                                          # audit S2-17: loop-invariant linear case
+            e0e = e0e_lin
+            denom = denom_lin
+        Enew = (e0e * Ex + curl - 0.5 * (1.0 + aJ) * J - 0.5 * bJ * Ex) / denom
         Jnew = aJ * J + bJ * (Enew + Ex)
         Ex_int = Enew
         Ex_int[i_src] += src[n]                        # soft source

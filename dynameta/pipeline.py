@@ -54,8 +54,13 @@ def run_pipeline(design: Design, sweep: Sweep, *,
                    optical_builder: Optional[OpticalGeometryBuilder] = None,
                    optical_solver: Optional[Callable[..., OpticalResult]] = None,
                    n_to_eps: Optional[NToEpsMap] = None,
-                   extra_fields: Optional[object] = None) -> List[SweepRow]:
+                   extra_fields: Optional[object] = None,
+                   on_error: str = "raise") -> List[SweepRow]:
     """Run the full Design + Sweep through carriers -> bridge -> optics.
+
+    on_error='skip' converts a failing optical point into an all-NaN row (with a warning)
+    instead of aborting the whole run and discarding every completed solve (audit S5-5);
+    the default 'raise' preserves the historical fail-fast behaviour.
 
     carrier_solver / optical_builder may be supplied to override the defaults
     (bring-your-own); each must satisfy the corresponding core Protocol.
@@ -158,12 +163,26 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     # 3) bridge + solve per (bias, wavelength)
     rows: List[SweepRow] = []
 
+    if on_error not in ("raise", "skip"):
+        raise ValueError("run_pipeline: on_error must be 'raise' or 'skip', got {!r}".format(on_error))
+
+    def _failed_row(exc):
+        # audit S5-5: in on_error='skip' a failed optical point becomes an all-NaN OpticalResult
+        # row (the NaN-aware SweepResults containers were built for exactly this) instead of
+        # discarding every completed solve in the run.
+        import warnings
+        warnings.warn("run_pipeline: optical solve failed ({}); emitting NaN row "
+                      "(on_error='skip')".format(exc), stacklevel=2)
+        return OpticalResult(r=None, R=float("nan"), phase_deg=float("nan"), solve_time_s=0.0)
+
     def _emit(label, lam_nm, res):
         rows.append(SweepRow(label, float(lam_nm), res))
         if verbose:
-            tstr = ("T={:.4f} A={:+.4f}".format(res.T, res.A) if res.T is not None else "T=n/a")
-            print("[optics]   {} lam={:.0f}nm  R={:.4f}  {}  phase={:+.1f}  ({:.1f}s)".format(
-                label, lam_nm, res.R, tstr, res.phase_deg, res.solve_time_s), flush=True)
+            # audit S5-11: A may be None even when T is set -- format each field independently
+            tstr = ("T={:.4f}".format(res.T) if res.T is not None else "T=n/a")
+            astr = ("A={:+.4f}".format(res.A) if res.A is not None else "A=n/a")
+            print("[optics]   {} lam={:.0f}nm  R={:.4f}  {} {}  phase={:+.1f}  ({:.1f}s)".format(
+                label, lam_nm, res.R, tstr, astr, res.phase_deg, res.solve_time_s), flush=True)
 
     ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
@@ -194,7 +213,13 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             def _assemble_at(lm, _cf=cf, _ef=ef):
                 return assemble_eps(_cf, align, n_to_eps, lift, lm,
                                     mesh_regions=mesh_regions, extra_fields=_ef)
-            results = list(solve_optics.solve_sweep(design, geo, _assemble_at, lams, n_super, n_sub))
+            try:
+                results = list(solve_optics.solve_sweep(design, geo, _assemble_at, lams,
+                                                        n_super, n_sub))
+            except Exception as exc:
+                if on_error == "raise":
+                    raise
+                results = [_failed_row(exc) for _ in sweep.wavelengths_nm]
             if len(results) != len(sweep.wavelengths_nm):       # zip would TRUNCATE silently otherwise
                 raise ValueError("optical_solver.solve_sweep returned {} results for {} wavelengths -- "
                                  "a sweep-aware solver must return exactly one OpticalResult per "
@@ -208,6 +233,11 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             n_super, n_sub = end_media_indices(design, lambda_m)
             eps_by_region = assemble_eps(cf, align, n_to_eps, lift, lambda_m,
                                           mesh_regions=mesh_regions, extra_fields=ef)
-            res = solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub)
+            try:
+                res = solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub)
+            except Exception as exc:
+                if on_error == "raise":
+                    raise
+                res = _failed_row(exc)
             _emit(bp.label, lam_nm, res)
     return rows

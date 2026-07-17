@@ -32,22 +32,35 @@ __all__ = ["AseSpectrum", "NoiseResult", "output_ase_spectrum", "noise_figure",
 _DB = lambda x: 10.0 * np.log10(np.maximum(x, 1e-300))    # noqa: E731
 
 
+def _meta_m_modes(result: SteadyStateResult, m_modes) -> int:
+    """Resolve the ASE polarization-mode count: an explicit argument wins, else the value the
+    SOLVE actually used (result.meta['m_modes'], audit S3-31 -- a non-default AseBand.m_modes
+    previously corrupted PSD/n_sp/NF/OSNR because the noise layer independently assumed 2)."""
+    if m_modes is not None:
+        return int(m_modes)
+    return int(result.meta.get("m_modes", 2))
+
+
 def local_inversion_factor(result: SteadyStateResult, lambda_m: float) -> np.ndarray:
-    """True two-level spontaneous-emission factor along z at wavelength lambda_m,
-        n_sp(z) = sigma_e nbar2(z) / (sigma_e nbar2(z) - sigma_a (1 - nbar2(z))),
-    using the cross-sections the solve cached (result.meta). This is >= 1 by construction (it
-    diverges toward net transparency and equals 1 at full inversion) -- the honest medium n_sp,
-    as opposed to the ASE-PSD-derived effective factor which carries discretization noise. NaN
-    where the cross-sections are unavailable."""
+    """Medium spontaneous-emission factor along z at wavelength lambda_m,
+        n_sp(z) = sigma_e nbar2 / (sigma_e nbar2 - sigma_a (1 - nbar2) - sigma_esa nbar2),
+    using the cross-sections the solve cached (result.meta). The denominator is the NET
+    stimulated coefficient the solver actually used, including opt-in excited-state absorption
+    (audit S3-33: omitting the ESA term made the reported n_sp inconsistent with the gain under
+    ESA; with sigma_esa = 0 this is the classic two-level form, >= 1 by construction). This is
+    the honest medium n_sp, as opposed to the ASE-PSD-derived effective factor which carries
+    discretization noise. NaN where the cross-sections are unavailable."""
     sa = result.meta.get("sigma_a")
     se = result.meta.get("sigma_e")
     if sa is None or se is None:
         return np.full(result.z_m.shape, np.nan)
     i = min(range(result.lambda_m.size), key=lambda k: abs(result.lambda_m[k] - lambda_m))
     sig_a, sig_e = float(sa[i]), float(se[i])
+    esa = result.meta.get("sigma_esa")
+    sig_esa = float(esa[i]) if esa is not None else 0.0
     n2 = result.nbar2_z
     num = sig_e * n2
-    den = sig_e * n2 - sig_a * (1.0 - n2)
+    den = sig_e * n2 - sig_a * (1.0 - n2) - sig_esa * n2
     with np.errstate(divide="ignore", invalid="ignore"):
         return num / den
 
@@ -112,12 +125,13 @@ def _bin_dnu_hz(result: SteadyStateResult, idx: np.ndarray) -> np.ndarray:
 
 
 def output_ase_spectrum(result: SteadyStateResult, direction: str = "fwd", *,
-                        m_modes: int = 2, signal_lambda_m: Optional[float] = None
-                        ) -> AseSpectrum:
+                        m_modes: Optional[int] = None,
+                        signal_lambda_m: Optional[float] = None) -> AseSpectrum:
     """Extract the output ASE spectrum for one direction. Forward ASE is read at z=L, backward
-    at z=0. n_sp per bin uses the local signal gain G(lambda) interpolated from the amplifier's
-    signal channel when available (else the gain at signal_lambda_m); n_sp is left NaN if no
-    gain reference exists."""
+    at z=0. m_modes defaults to the value the SOLVE used (result.meta). n_sp per bin uses the
+    local signal gain G(lambda) interpolated from the amplifier's signal channel when available
+    (else the gain at signal_lambda_m); n_sp is left NaN if no gain reference exists."""
+    m_modes = _meta_m_modes(result, m_modes)
     u = result.u
     mask = result.is_ase & (u > 0 if direction == "fwd" else u < 0)
     idx = np.where(mask)[0]
@@ -150,14 +164,18 @@ def output_ase_spectrum(result: SteadyStateResult, direction: str = "fwd", *,
     return AseSpectrum(lam, P, psd, n_sp, direction)
 
 
-def noise_figure(result: SteadyStateResult, signal_lambda_m: float, *, m_modes: int = 2):
+def noise_figure(result: SteadyStateResult, signal_lambda_m: float, *,
+                 m_modes: Optional[int] = None, _fwd: Optional[AseSpectrum] = None):
     """Optical noise figure at the signal wavelength (docs sec.4):
         NF = 2 rho_1pol(nu_s) / (h nu_s G) + 1/G,
     with G the signal gain and rho_1pol the per-polarization forward-ASE PSD interpolated to the
-    signal frequency. Returns (NF_linear, G_linear, n_sp_effective). Equivalent to
-    (2 n_sp (G-1) + 1)/G with n_sp = rho_1pol / (h nu_s (G-1))."""
+    signal frequency. m_modes defaults to the solve's own value (result.meta). Returns
+    (NF_linear, G_linear, n_sp_effective). Equivalent to (2 n_sp (G-1) + 1)/G with
+    n_sp = rho_1pol / (h nu_s (G-1)). _fwd lets a caller that already extracted the forward
+    spectrum pass it in (audit S6-14: analyze_noise used to extract it twice)."""
     G, _ = _signal_gain(result, signal_lambda_m)
-    fwd = output_ase_spectrum(result, "fwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
+    fwd = _fwd if _fwd is not None else output_ase_spectrum(
+        result, "fwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
     nu_s = C_LIGHT / signal_lambda_m
     if fwd.lambda_m.size == 0:
         rho_s = 0.0
@@ -171,13 +189,15 @@ def noise_figure(result: SteadyStateResult, signal_lambda_m: float, *, m_modes: 
 
 
 def analyze_noise(result: SteadyStateResult, signal_lambda_m: float, *, ref_bw_nm: float = 0.1,
-                  m_modes: int = 2) -> NoiseResult:
+                  m_modes: Optional[int] = None) -> NoiseResult:
     """Full noise analysis at signal_lambda_m: gain, NF, effective n_sp, forward/backward ASE
     spectra, and OSNR in a ref_bw_nm optical bandwidth (default 0.1 nm, the standard OSNR grid).
-    OSNR = signal output power / forward-ASE power within ref_bw around the signal."""
-    nf, G, n_sp = noise_figure(result, signal_lambda_m, m_modes=m_modes)
+    m_modes defaults to the value the solve used (result.meta). OSNR = signal output power /
+    forward-ASE power within ref_bw around the signal."""
+    m_modes = _meta_m_modes(result, m_modes)
     fwd = output_ase_spectrum(result, "fwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
     bwd = output_ase_spectrum(result, "bwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
+    nf, G, n_sp = noise_figure(result, signal_lambda_m, m_modes=m_modes, _fwd=fwd)
 
     # signal output power
     _, si = _signal_gain(result, signal_lambda_m)

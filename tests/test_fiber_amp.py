@@ -638,3 +638,150 @@ def test_cpa_b_integral_penalty_and_scaling():
     a = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=3e-3, n_steps=250)
     b = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=6e-3, n_steps=250)
     assert abs(b.b_integral_rad / a.b_integral_rad - 2.0) < 1e-3
+
+
+# ===================== Audit 2026-07-17 remediation gates (Wave 1: P1s) =====================
+
+def test_metrics_carry_concentration_model():
+    # S3-1: metric clones must thread the ConcentrationModel (PIQ/PD were silently dropped)
+    from dynameta.optics.fiber_amp.metrics import _with
+    from dynameta.optics.fiber_amp import gain_spectrum
+    conc = ConcentrationModel(pair_fraction=0.10, pd_loss_per_m=2.0)
+    amp = FiberAmplifier(ER, _edf(6.0), [Pump(150e-3, 0.980e-6, "fwd")],
+                         [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 8),
+                         concentration=conc)
+    clone = _with(amp)
+    assert clone.concentration is conc
+    assert clone._n_dark == amp._n_dark and clone._n_active == amp._n_active
+    ideal = FiberAmplifier(ER, _edf(6.0), [Pump(150e-3, 0.980e-6, "fwd")],
+                           [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 8))
+    lam = np.array([1.550e-6, 1.560e-6])
+    g_conc = gain_spectrum(amp, lam)
+    g_ideal = gain_spectrum(ideal, lam)
+    assert np.all(g_conc.gain_dB < g_ideal.gain_dB - 0.3)   # PIQ+PD visibly reduce metric gain
+
+
+def test_beat_noise_matches_soa_and_thermal_limit():
+    # S3-2/S5-1: the two beat-noise implementations must agree term-for-term (drift pin), and
+    # the discriminating absolute limit B_e=B_o, m=2 (unpolarized thermal light, contrast 1/2)
+    # must give var_sp_sp = 2 (R rho B_o)^2.
+    from dynameta.optics.soa.ase_noise import detector_noise_variances
+    r = _bn_amp(1e-3).solve()
+    bn = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+    rho = bn.meta["rho_sp_W_per_Hz"]
+    soa = detector_noise_variances(bn.meta["P_signal_out_W"], rho, R_A_W=bn.responsivity_A_W,
+                                   B_Hz=10e9, dnu_opt_Hz=50e9, m_pol=2)
+    assert np.isclose(bn.var_sp_sp, soa["spont_spont"], rtol=1e-12)
+    assert np.isclose(bn.var_sig_sp, soa["sig_spont"], rtol=1e-12)
+    assert np.isclose(bn.var_shot, soa["shot"], rtol=1e-12)
+    bn2 = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=50e9)
+    R = bn2.responsivity_A_W
+    assert np.isclose(bn2.var_sp_sp,
+                      2.0 * (R * bn2.meta["rho_sp_W_per_Hz"] * 50e9) ** 2, rtol=1e-12)
+
+
+def test_beat_nf_eta_independent_and_above_floor():
+    # S3-10: the beat-noise NF references an IDEAL input detector -> eta-independent in the
+    # sig-sp-dominated regime and never below the 2 - 1/G quantum floor.
+    r = _bn_amp(1e-3).solve()
+    a = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9,
+                        quantum_efficiency=1.0)
+    b = detection_noise(r, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9,
+                        quantum_efficiency=0.7)
+    assert abs(a.nf_beat_dB - b.nf_beat_dB) < 0.05
+    G = a.meta["gain_lin"]
+    floor_dB = 10.0 * np.log10(2.0 - 1.0 / G)
+    assert b.nf_beat_dB >= floor_dB - 0.1
+
+
+def test_cladding_pump_overlap_uses_dopant_radius():
+    # S3-9 (P1): Gamma_p must be the pump power fraction inside the DOPED radius b, not the core
+    fib = FiberSpec(5.0e-6, 0.06, 1.0e26, 2.0, dopant_radius_m=2.5e-6, clad_radius_m=62.5e-6)
+    assert np.isclose(cladding_pump_overlap(fib), (2.5 / 62.5) ** 2, rtol=1e-12)
+    amp = FiberAmplifier(YB, fib, [Pump(1e-6, 0.915e-6, "fwd", cladding=True)],
+                         [Signal(1e-9, 1.060e-6)], None)
+    r = amp.solve()
+    ip = r.kind.index("pump")
+    alpha = -np.log(r.power_W[ip, -1] / r.power_W[ip, 0]) / fib.length_m
+    expect = (2.5 / 62.5) ** 2 * fib.n_t_m3 * float(YB.sigma_a.sigma(0.915e-6))
+    assert abs(alpha - expect) / expect < 1e-3
+
+
+def test_counter_and_bidirectional_pumping():
+    # S3-7: the backward-IVP direction handling gets pinned (was entirely uncovered)
+    def amp_with(pumps):
+        return FiberAmplifier(ER, _edf(6.0), pumps, [Signal(1e-6, 1.560e-6)],
+                              AseBand(1.52e-6, 1.575e-6, 8))
+    r_co = amp_with([Pump(100e-3, 0.980e-6, "fwd")]).solve()
+    r_ctr = amp_with([Pump(100e-3, 0.980e-6, "bwd")]).solve()
+    r_bi = amp_with([Pump(50e-3, 0.980e-6, "fwd"), Pump(50e-3, 0.980e-6, "bwd")]).solve()
+    for r in (r_co, r_ctr, r_bi):
+        assert r.meta["converged"]
+        assert 0.0 <= float(r.nbar2_z.min()) and float(r.nbar2_z.max()) <= 1.0
+    g = [float(r.signal_gain_dB[0]) for r in (r_co, r_ctr, r_bi)]
+    assert abs(g[0] - g[1]) < 1.0 and abs(g[0] - g[2]) < 1.0
+    ip, is_ = r_ctr.kind.index("pump"), r_ctr.kind.index("signal")
+
+    def ph(P, lam):
+        return P / (H_PLANCK * C_LIGHT / lam)
+    lost = ph(r_ctr.power_W[ip, -1], r_ctr.lambda_m[ip]) - ph(r_ctr.power_W[ip, 0],
+                                                              r_ctr.lambda_m[ip])
+    got = ph(r_ctr.power_W[is_, -1], r_ctr.lambda_m[is_]) - ph(r_ctr.power_W[is_, 0],
+                                                               r_ctr.lambda_m[is_])
+    got += sum(ph(r_ctr.power_W[k, -1 if r_ctr.u[k] > 0 else 0], r_ctr.lambda_m[k])
+               for k in np.where(r_ctr.is_ase)[0])
+    assert 0.0 < got / lost <= 1.02
+
+
+def test_transient_upconversion_semi_implicit():
+    # S3-38: the semi-implicit upconversion update is dt-robust and lands on the steady solver's
+    # quadratic fixed point (the old explicit-Euler bolt-on was O(dt)-biased)
+    conc = ConcentrationModel(c_up_m3_s=3e-23)
+    amp = FiberAmplifier(ER, FiberSpec(2.0e-6, 0.20, 2.0e25, 6.0),
+                         [Pump(120e-3, 0.980e-6, "fwd")], [Signal(50e-6, 1.560e-6)], None,
+                         concentration=conc)
+    end = []
+    for nt in (400, 800):
+        tr = simulate_transient(amp, np.linspace(0.0, 40e-3, nt), n_nodes=31, nbar2_0=0.10)
+        end.append(float(tr.nbar2_zt[-1].mean()))
+    assert abs(end[0] - end[1]) < 5e-4
+    r_ss = amp.solve(n_nodes=31)
+    assert abs(end[1] - float(r_ss.nbar2_z.mean())) < 0.01
+
+
+def test_beta3_sign_matches_physical_convention():
+    # S3-11: in the exp(-i omega t) (Agrawal) convention, beta3-only propagation delays EVERY
+    # detuned component by tau(Delta) = beta3 L Delta^2 / 2 > 0 for beta3 > 0, so the intensity
+    # centroid shifts to the TRAILING edge by beta3 L <Delta^2> / 2 = beta3 L / (4 t0^2) for a
+    # chirp-free Gaussian. Pins both magnitude and (crucially) the odd-order SIGN.
+    t = _pulse_grid(8192, 40e-12)
+    t0 = 1e-13
+    p = gaussian_pulse(t, t0_s=t0, peak_power_W=1.0)
+    b3L = 8e-40                                            # -> expected shift 20 fs
+    out = propagate_gnlse(p, 10.0, beta3_s3_m=b3L / 10.0, n_steps=200).output
+
+    def centroid(pulse):
+        w = pulse.power_W
+        return float(np.sum(pulse.t_s * w) / np.sum(w))
+    shift = centroid(out) - centroid(p)
+    expect = b3L / (4.0 * t0 ** 2)
+    assert shift > 0.0                                     # trailing edge for beta3 > 0
+    assert abs(shift - expect) / expect < 0.05
+    # and the lumped TOD in apply_spectral_phase agrees with the propagated beta3
+    out2 = apply_spectral_phase(p, tod_s3=b3L)
+    assert abs(centroid(out2) - centroid(p) - expect) / expect < 0.05
+
+
+def test_nondefault_m_modes_propagates_to_noise_and_detection():
+    # S3-31: AseBand.m_modes=1 (polarized ASE) must flow through PSD/NF/OSNR and detection
+    amp1 = FiberAmplifier(ER, _edf(6.0), [Pump(120e-3, 0.980e-6, "fwd")],
+                          [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 10, m_modes=1))
+    r1 = amp1.solve()
+    assert r1.meta["m_modes"] == 1
+    nr1 = analyze_noise(r1, 1.560e-6)                      # no explicit m -> uses the solve's 1
+    bn1 = detection_noise(r1, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+    # m=1: sp-sp variance = R^2 rho^2 (2Bo-Be)Be exactly (single polarization)
+    R = bn1.responsivity_A_W
+    rho = bn1.meta["rho_sp_W_per_Hz"]
+    assert np.isclose(bn1.var_sp_sp, R ** 2 * rho ** 2 * (2 * 50e9 - 10e9) * 10e9, rtol=1e-12)
+    assert nr1.fwd_ase.psd_1pol.size > 0

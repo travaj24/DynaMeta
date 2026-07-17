@@ -69,13 +69,14 @@ class PCMSwitching:
         x = np.empty_like(t)
         x[0] = float(x0)
         theta = (-np.log(1.0 - min(max(float(x0), 0.0), 1.0 - 1e-15))) ** (1.0 / n) if x0 > 0 else 0.0
-        for i in range(1, t.size):
+        rates = np.asarray(self.rate_K(T), dtype=np.float64)   # audit S6-16: one vectorized
+        for i in range(1, t.size):                              # Arrhenius eval, not per step
             dt = t[i] - t[i - 1]
             if T[i] >= self.T_melt_K:                    # melt-quench -> amorphous
                 theta = 0.0
                 x[i] = 0.0
             elif T[i] > self.T_glass_K:                  # crystallize (accumulate kinetic time)
-                theta += float(self.rate_K(T[i])) * dt
+                theta += float(rates[i]) * dt
                 x[i] = 1.0 - np.exp(-theta ** n)
             else:                                        # frozen below the onset
                 x[i] = x[i - 1]

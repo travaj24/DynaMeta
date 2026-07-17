@@ -193,7 +193,7 @@ def main():
             # a store written under the PREVIOUS schema, carrying one bogus packed entry
             save_arrays(path, {stale_key: np.zeros(len(C._VEC))},
                         {"schema": C._SCHEMA - 1, "tag": "", "layout": list(C._VEC)})
-            c1 = OpticalSolverCache(_stub_solver, path, autosave=True)
+            c1 = OpticalSolverCache(_stub_solver, path, autosave=True, autosave_every=1)
             discarded2 = len(c1._mem) == 0                     # load-side discard (GATE D semantics)
             d = _design()
             e = {"film": _uniform_tensor(6.2)}
@@ -228,7 +228,7 @@ def main():
             path = os.path.join(td, "rt" + ext)
             d = _design()
             e = {"film": _uniform_tensor(6.3)}
-            c1 = OpticalSolverCache(_stub_solver, path, autosave=True)     # autosave flushes on miss
+            c1 = OpticalSolverCache(_stub_solver, path, autosave=True, autosave_every=1)  # per-miss flush
             r_miss = c1(d, None, e, LAM, 1.0 + 0j, 1.5 + 0j)               # miss -> compute + flush
             c1(d, None, {"film": _uniform_tensor(6.7)}, LAM, 1.0 + 0j, 1.5 + 0j)   # 2nd packed row
             c2 = OpticalSolverCache(_stub_solver, path, autosave=False)    # reopen FRESH from disk
