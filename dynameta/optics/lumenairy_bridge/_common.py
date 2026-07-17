@@ -182,6 +182,18 @@ def conical_synthesis(amp_source, pol: str, theta: float, phi: float, n_super: c
     observable. s: e_hat = (-sin phi, cos phi, 0) (tangential; Ez drops). p: e_hat = the outgoing
     p-hat = (k_out x s_hat)/|k_out|, which carries a z-component -- omitting Ez there undercounts
     |r| (probed 0.40 vs the true sqrt(R) = 0.46). All k's are k0-normalized, so scale-free."""
+    # LOSSLESS-END-MEDIA PRECONDITION (audit S4-1, verified empirically): the propagating-order
+    # mask below separates propagating (real kz) from evanescent (imaginary kz) orders, which is
+    # only well-defined in a lossless end medium. With a lossy super/substrate EVERY order has
+    # mixed complex kz -- even Im(n_sub) = 0.001 made the specular order fail the mask, silently
+    # collapsing T to 0 and dumping it into A = 1 - R - T. Refuse loudly instead.
+    if abs(complex(n_super).imag) > 1e-9:
+        raise ValueError(
+            "conical_synthesis: lossy superstrate (Im n_super = {:.3g}) is not supported at "
+            "conical incidence -- the propagating-order energy split is only defined for "
+            "lossless end media. Use phi = 0 (the non-conical path handles lossy media via the "
+            "engine's own efficiencies) or a lossless-superstrate approximation.".format(
+                complex(n_super).imag))
     u = pol_tangential_unit(pol, phi)
     ns = float(np.real(n_super))
     kz_inc = ns * np.cos(theta)                                       # normalized incident kz
@@ -195,6 +207,14 @@ def conical_synthesis(amp_source, pol: str, theta: float, phi: float, n_super: c
         kx, ky, kz = np.asarray(a["kx"]), np.asarray(a["ky"]), np.asarray(a["kz"])
         ex = u[0] * a["Ex"][0] + u[1] * a["Ex"][1]
         ey = u[0] * a["Ey"][0] + u[1] * a["Ey"][1]
+        # a genuinely mixed complex kz (significant real AND imaginary parts) means a lossy end
+        # medium on this port -- the specular order itself would be dropped by the mask (S4-1)
+        mixed = (np.abs(kz.imag) > 1e-6) & (np.abs(kz.real) > 1e-6)
+        if np.any(mixed):
+            raise ValueError(
+                "conical_synthesis: port '{}' has orders with mixed complex kz (lossy end "
+                "medium); the conical R/T synthesis requires lossless super/substrate. Use "
+                "phi = 0 or a lossless-end-medium approximation.".format(port))
         prop = (np.abs(kz.imag) < _CONICAL_PROP_TOL) & (kz.real > _CONICAL_PROP_TOL)
         ez = np.zeros_like(ex)
         nz = np.abs(kz) > 1e-300

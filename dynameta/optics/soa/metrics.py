@@ -168,11 +168,15 @@ def facet_gain_ripple_dB(G, R1, R2=None):
 
 
 def ripple_enob_ceiling(ripple_dB):
-    """ENOB ceiling imposed by a peak-to-valley gain ripple [dB]: the fractional amplitude spread
-    m = 10^(ripple_dB/20) - 1 is an irreducible full-scale gain error, so the resolution cannot
-    exceed n = -log2(m) bits (m must fall below one LSB = 2^-n). Returns +inf for zero ripple.
-    E.g. 0.17 dB -> ~5.7 bits, 1.7 dB -> ~2.2 bits (Saitoh & Mukai facet-ripple regime)."""
-    m = 10.0 ** (abs(float(ripple_dB)) / 20.0) - 1.0
+    """ENOB ceiling imposed by a peak-to-valley gain ripple [dB]: the fractional POWER spread
+    m = 10^(ripple_dB/10) - 1 is an irreducible full-scale gain error on the intensity-encoded
+    photocurrent channel this subpackage models (direct detection, i ~ R P_out), so the
+    resolution cannot exceed n = -log2(m) bits (m must fall below one LSB = 2^-n). Returns +inf
+    for zero ripple. E.g. 0.17 dB -> ~4.6 bits, 1.7 dB -> ~1.2 bits (Saitoh & Mukai facet-ripple
+    regime). Audit S3-5: the old /20 (field-amplitude) conversion overstated the ceiling by ~1
+    bit; facet_gain_ripple_dB returns a POWER-ratio dB (20 log10[(1+gr)/(1-gr)] = 10 log10 of
+    the peak/valley power-gain ratio), so the intensity channel takes the /10 form."""
+    m = 10.0 ** (abs(float(ripple_dB)) / 10.0) - 1.0
     if m <= 0.0:
         return float("inf")
     return float(-np.log2(m))

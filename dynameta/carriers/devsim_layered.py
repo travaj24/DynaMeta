@@ -501,25 +501,50 @@ class LayeredDevsimBuilder:
         method = d.mesh_2d.dc_method
         semi = sorted(self._dd_regions)
         abs_tol = self._dc_abs_tol() if abs_tol is None else abs_tol
+
+        def _targets():
+            return {E.name: bias.voltages.get(
+                E.name, E.fixed_voltage_V if E.role == "ground" else 0.0)
+                for E in d.electrodes}
+
+        def _ramp(from_v):
+            for E in d.electrodes:
+                target = _targets()[E.name]
+                v_now = from_v[E.name]
+                n_steps = max(1, int(abs(target - v_now) / v_step + 0.5))
+                dv = (target - v_now) / n_steps
+                for _ in range(n_steps):
+                    v_now += dv
+                    ds.set_parameter(device=self.device, name="{}_bias".format(E.name),
+                                      value=v_now)
+                    solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
+                              max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
+
+        # audit S6-4 CONTINUATION: the DEVSIM device persists across solve() calls, so a sweep
+        # can ramp from the PREVIOUS converged bias instead of re-seeding flat-band and
+        # re-ramping 0->V every time (2.6-6.6x fewer coupled-Newton solves on 5-13-point
+        # sweeps). Falls back to the historical full flat-band ramp on ANY failure, so a
+        # non-converging continuation can never poison the result.
+        prev = getattr(self, "_last_converged_bias", None)
+        if prev is not None:
+            try:
+                _ramp(dict(prev))
+                self._last_converged_bias = _targets()
+                return self._to_carrier_field(bias, grid_n_x, grid_n_z)
+            except Exception:
+                if verbose:
+                    print("[devsim] continuation from previous bias failed; "
+                          "falling back to the full flat-band ramp", flush=True)
         # zero-bias seed (grounds at fixed_voltage, biased at 0)
+        zero = {}
         for E in d.electrodes:
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
+            zero[E.name] = v
             ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
         solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
                   max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
-        # ramp biased electrodes to their target
-        for E in d.electrodes:
-            target = bias.voltages.get(E.name,
-                        E.fixed_voltage_V if E.role == "ground" else 0.0)
-            v_now = E.fixed_voltage_V if E.role == "ground" else 0.0
-            n_steps = max(1, int(abs(target - v_now) / v_step + 0.5))
-            dv = (target - v_now) / n_steps
-            for _ in range(n_steps):
-                v_now += dv
-                ds.set_parameter(device=self.device, name="{}_bias".format(E.name),
-                                  value=v_now)
-                solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
-                          max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
+        _ramp(zero)
+        self._last_converged_bias = _targets()
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)
 
     def _solve_bipolar(self, bias, *, grid_n_x: int, grid_n_z: int, rel_tol: float, max_iter: int,

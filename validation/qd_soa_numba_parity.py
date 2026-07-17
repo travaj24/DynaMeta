@@ -31,8 +31,9 @@ def main():
         print("[nb] SKIP: numba not installed -- the fast path is unavailable here; the numpy "
               "reference is the only backend. (pip install numba to enable the ~5x accelerator.)",
               flush=True)
-        print("[nb] *** QD-SOA NUMBA PARITY: SKIP (PASS) ***", flush=True)
-        return True
+        print("[nb] *** QD-SOA NUMBA PARITY: SKIP ***", flush=True)
+        raise SystemExit(42)   # audit S5-10: rc=42 = capability-skip; exit 0 green-washed the
+                               # smoke tier (its whole purpose is unverifiable without numba)
     ok = True
 
     # ---- GATE A: single-step parity over a saturating power range, ng in {1, 41} ----

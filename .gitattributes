@@ -1,0 +1,6 @@
+# audit S5-13: codify what the repo has always actually been -- LF-committed (git normalizes on
+# commit); working trees may be CRLF on Windows (core.autocrlf). This ends the mixed-EOL drift.
+* text=auto eol=lf
+*.png binary
+*.h5 binary
+*.msh binary

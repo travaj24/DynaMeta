@@ -43,7 +43,7 @@ mirror-symmetry domain reduction (geometry.specs.Mesh3DSpec.symmetry: PEC/PMC ha
 never automatic). (Module map refreshed per audit 6.3.)
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # Geometry + materials data model (lightweight)
 from dynameta.geometry import (

@@ -36,9 +36,9 @@ total carrier number is conserved by every internal transition -- only injection
 recombination channels, and the stimulated term change it (verified to ~1e-12 by the
 conservation gate). The per-dot stimulated rate is intrinsically per-dot (no 1/N_q), and the
 depleting photon density is the CONFINED density S_conf = Gamma P/(v_g h nu A_mode); the same
-sigma_pk * L_hom and mu_GS-weighted N_q build the modal gain, so photon number is conserved.
+sigma_pk * L_hom and mu_GS-weighted N_q build the MATERIAL gain (the consumer applies Gamma once; modal = Gamma x this), so photon number is conserved.
 
-Spectral modal gain (sum over groups; intensity gain per metre):
+Spectral MATERIAL gain (no Gamma; audit S3-13) (sum over groups; intensity gain per metre):
 
   g(nu) = sum_j N_q w_j mu_GS sigma_pk L_hom(nu - nu_j) (2 rho_GS_j - 1)        [1/m]
 
@@ -154,7 +154,7 @@ def _qd_carrier_rk4_eh_numba(Nwe, Nwh, fcES, fvES, fcGS, fvGS, S, I_A, dt, Lrow,
                              tau_back_e, tau_back_h, tau_sp, B, C, mGS_over_mES, mES_over_mGS, qVa,
                              stim_pref_ES, LErow, es_active, leak_rate):
     """Compiled twin of _step_slices_eh: explicit-loop RK4 of the electron/hole-split rate
-    equations over all z-slices, MIRRORING rhs_fields_eh term-for-term (bit-parity, validated).
+    equations over all z-slices, MIRRORING rhs_fields_eh term-for-term (~1e-12 parity, validated).
     Stimulated + spontaneous are the SAME scalar into both bands; WL recomb is the pair form."""
     nz, ng = fcES.shape
     Nwe_o = np.empty(nz)
@@ -538,7 +538,7 @@ class QDGainModel:
         self._cap_den = p.tau_cap_s * p.mu_ES * p.N_q_m3            # capture denominator
         self._esc_pref = p.mu_ES * p.N_q_m3 / p.tau_esc_s          # WL escape-in prefactor
         self._stim_pref = p.v_g_m_s * p.sigma_pk_m2                # per-dot stimulated prefactor
-        self._gain_pref = p.N_q_m3 * p.mu_GS * p.sigma_pk_m2       # modal-gain prefactor
+        self._gain_pref = p.N_q_m3 * p.mu_GS * p.sigma_pk_m2       # material-gain prefactor (no Gamma; audit S3-13)
         self._qVa = Q_E * p.V_a_m3                                 # injection charge*volume
         # Dict caches (keyed on the exact float nu) for the homogeneous Lorentzian evaluated at
         # the signal frequency -- rhs_fields and gain_per_m_slices are called O(nt) times with the
@@ -566,7 +566,7 @@ class QDGainModel:
         self.nu_ES_j = self.nu_j + p.dE_ES_GS_eV * Q_E / H_PLANCK  # (ng,) ES line comb
         self._es_active = p.sigma_pk_ES_m2 > 0.0
         self._stim_pref_ES = p.v_g_m_s * p.sigma_pk_ES_m2          # per-dot ES stimulated prefactor
-        self._gain_pref_ES = p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2  # ES modal-gain prefactor (mu_ES)
+        self._gain_pref_ES = p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2  # ES material-gain prefactor (no Gamma; audit S3-13) (mu_ES)
         self._hw_ES = 0.5 * (p.fwhm_hom_ES_Hz if p.fwhm_hom_ES_Hz is not None else p.fwhm_hom_Hz)
         self._zeros_ng = np.zeros(self.ng)                        # inactive-ES Lorentzian row
         self._LE_cache = {}      # float(nu) -> ES Lorentzian row (1, ng)

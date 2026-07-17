@@ -14,7 +14,20 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-import devsim as ds
+# devsim resolves lazily (audit S1-2): registry bookkeeping is importable devsim-free
+
+
+class _DevsimShim:
+    _mod = None
+
+    def __getattr__(self, name):
+        if _DevsimShim._mod is None:
+            import devsim as _devsim
+            _DevsimShim._mod = _devsim
+        return getattr(_DevsimShim._mod, name)
+
+
+ds = _DevsimShim()
 
 # device -> list of {scope, loc, name, kwargs}
 _REG: Dict[str, List[dict]] = {}

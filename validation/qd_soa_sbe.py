@@ -42,7 +42,9 @@ def _fc_oracle(hw_eV, Eg, m_e, m_h, N, T, T2, d, mu, nk, kf):
     inv = 1.0 - f_e - f_h
     ek = Eg * Q_E + HBAR ** 2 * k ** 2 / (2 * mr)
     gam = HBAR / T2
-    return np.array([(mu / (EPS0 * d)) * np.sum(mu * (-inv * mu) / (w * Q_E - ek + 1j * gam) * gk)
+    # audit S3-3: chi ~ mu^2 (one mu in the coherence, one in the polarization sum) with the
+    # dimensionless prefactor 1/(eps0 d); the old extra mu made chi ~ mu^3 (dimensionally C*m)
+    return np.array([(1.0 / (EPS0 * d)) * np.sum(mu * (-inv * mu) / (w * Q_E - ek + 1j * gam) * gk)
                      for w in hw_eV])
 
 
@@ -63,6 +65,18 @@ def main():
     ok = ok and g_a
     print("[sbe] GATE A: free-carrier == independent oracle (rel {:.1e}) -> {}".format(
         relA, "PASS" if g_a else "FAIL"), flush=True)
+
+    # ---- GATE A2 (audit S3-3/S3-12): ABSOLUTE scale, independent of the internal solver ----
+    # chi must be dimensionless O(1e-3..1) and the material gain O(1e3..1e6) /m for a pumped QW
+    # at N_2d=3e16 m^-2 -- the gate class whose absence let a chi~mu^3 (~28 orders small)
+    # dimensional error survive every shape/relative comparison.
+    chimax = float(np.max(np.abs(chi0)))
+    gmax = float(np.max(g0))
+    g_a2 = bool(1e-3 < chimax < 1.0 and 1e3 < gmax < 1e6)
+    ok = ok and g_a2
+    print("[sbe] GATE A2: absolute scale max|chi|={:.3g} (dimensionless O(0.01-1)), "
+          "max g={:.3g}/m (O(1e3-1e5)) -> {}".format(chimax, gmax,
+                                                     "PASS" if g_a2 else "FAIL"), flush=True)
 
     # ---- GATE B: Coulomb enhancement ----
     _, chiC = reduced_sbe_susceptibility(hw, coulomb_V0=3.0e-29, **P)

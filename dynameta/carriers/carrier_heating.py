@@ -30,10 +30,10 @@ from typing import Callable, Optional, Union
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import Q_E, HBAR, KB, M_E
+from dynameta.constants import Q_E, HBAR, KB, T_REF
 from dynameta.materials.optical_model import DrudeOptical
 
-T_REF = 300.0
+# T_REF imported from dynameta.constants (audit S1-15)
 
 
 def fermi_energy_J(n_m3, m0_kg: float, alpha_per_eV: float = 0.0, *, g_s: int = 2, g_v: int = 1):

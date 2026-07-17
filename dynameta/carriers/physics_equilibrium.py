@@ -15,7 +15,23 @@ from __future__ import annotations
 
 import math
 
-import devsim as ds
+# audit S1-2: devsim is imported LAZILY (module __getattr__) so the pure-math Fermi machinery
+# (F12_aymerich_humet / invert_F12 / require_positive -- the Phi_c0 calibration whose wrong root
+# would silently corrupt every downstream carrier solve) is importable and TESTABLE without the
+# heavy solver stack. The ds.* call sites resolve through this shim on first devsim use.
+
+
+class _DevsimShim:
+    _mod = None
+
+    def __getattr__(self, name):
+        if _DevsimShim._mod is None:
+            import devsim as _devsim
+            _DevsimShim._mod = _devsim
+        return getattr(_DevsimShim._mod, name)
+
+
+ds = _DevsimShim()
 
 from dynameta.carriers import eq_registry as _R
 

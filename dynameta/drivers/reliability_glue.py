@@ -13,6 +13,7 @@ or List[CarrierField].
 
 from __future__ import annotations
 
+import re
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
@@ -74,17 +75,35 @@ def em_mttf_from_carrier_field(carrier_field, contact_name: str, *, width_m: flo
 
 # ---- D2 per-region absorption -> REL5 LIDT / thermal loads ----------------------------------
 
+_FEM_DECOR = re.compile(r"(__incl\d*|__bg\d*|_skin|_bulk|_inpatch|_outside\w*)$")
+
+
+def collapse_fem_region_keys(pra: dict) -> dict:
+    """Collapse the FEM mesh-subdomain decorations (L_skin/L_bulk, L_inpatch/L_outside*,
+    L__incl<j>/L__bg<k>) back onto plain design-layer names by summing (audit S5-6: the FEM
+    backend keys per_region_absorption by mesh labels while every layered/Fourier backend uses
+    design-layer names, so a backend-agnostic query broke across the seam). Idempotent for maps
+    that are already design-layer-keyed."""
+    out = {}
+    for k, v in pra.items():
+        base = _FEM_DECOR.sub("", k)
+        while _FEM_DECOR.search(base):
+            base = _FEM_DECOR.sub("", base)
+        out[base] = out.get(base, 0.0) + float(v)
+    return out
+
+
 def absorbed_fraction(optical_result, region: Optional[str] = None) -> float:
     """Absorbed FRACTION of incident power (never watts) from an OpticalResult.
 
     region=None -> total absorption: A_independent when available (the loss-integral path,
     exactly the sum of the per-region map), else A = 1 - R - T.
-    region=<name> -> that region's fraction from per_region_absorption (FEM keys are the mesh
-    REGION labels the builder derives from design layer names -- L.name, plus the
-    __incl<j>/_inpatch/_outside decorations for inclusion layers; TMM keys are 'slab_<i>'
-    top-first -- see tmm_absorption_by_layer_name to address TMM slabs by design layer name).
-    Raises if the map or key is missing rather than silently returning 0 -- a missing region
-    name is layer-name drift, not zero absorption."""
+    region=<name> -> that region's fraction from per_region_absorption. Backend-agnostic: FEM
+    mesh-decorated keys (L_skin/L_bulk, L__incl<j>/L__bg<k>, L_inpatch/L_outside*) are collapsed
+    onto the design-layer name and summed when the raw key is absent (audit S5-6), so the same
+    design-layer query works across FEM and the layered/Fourier backends (TMM 'slab_<i>' keys:
+    see tmm_absorption_by_layer_name). Raises if the map or key is missing rather than silently
+    returning 0 -- a missing region name is layer-name drift, not zero absorption."""
     if region is None:
         if optical_result.A_independent is not None:
             return float(optical_result.A_independent)
@@ -95,10 +114,13 @@ def absorbed_fraction(optical_result, region: Optional[str] = None) -> float:
     if pra is None:
         raise ValueError("OpticalResult.per_region_absorption was not computed (FEM fills it "
                          "when A_independent is available; TMM always fills it)")
-    if region not in pra:
-        raise KeyError("region {!r} not in per_region_absorption (have {})".format(
-            region, sorted(pra)))
-    return float(pra[region])
+    if region in pra:
+        return float(pra[region])
+    collapsed = collapse_fem_region_keys(pra)
+    if region in collapsed:
+        return float(collapsed[region])
+    raise KeyError("region {!r} not in per_region_absorption, raw ({}) or collapsed ({})".format(
+        region, sorted(pra), sorted(collapsed)))
 
 
 def tmm_absorption_by_layer_name(optical_result, design) -> Dict[str, float]:

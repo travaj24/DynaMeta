@@ -63,10 +63,15 @@ class ConcentrationModel:
 
     def photodarkening_loss_per_m(self, nbar2):
         """Equilibrium photodarkening excess loss [1/m] at local inversion nbar2:
-        pd_loss_per_m * nbar2^pd_exponent (broadband/gray). 0 when pd_loss_per_m is 0."""
+        pd_loss_per_m * nbar2^pd_exponent (broadband/gray). SHAPE-PRESERVING: an array nbar2
+        always yields an array (the old scalar-0.0 early return crashed the transient path for
+        any ConcentrationModel without photodarkening -- caught by the audit-S3-38 gate)."""
+        n = np.clip(np.asarray(nbar2, dtype=np.float64), 0.0, 1.0)
         if self.pd_loss_per_m <= 0.0:
-            return 0.0
-        return self.pd_loss_per_m * np.power(np.clip(nbar2, 0.0, 1.0), self.pd_exponent)
+            out = np.zeros_like(n)
+        else:
+            out = self.pd_loss_per_m * np.power(n, self.pd_exponent)
+        return out if out.ndim else float(out)
 
 
 # ---- literature-anchored factories (docs sec.6) --------------------------------------------

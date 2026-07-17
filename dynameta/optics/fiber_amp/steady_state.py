@@ -26,9 +26,6 @@ from dynameta.optics.fiber_amp.waveguide import FiberSpec
 
 __all__ = ["Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult"]
 
-_P_FLOOR_W = 1.0e-12          # log-state floor: a channel never truly reaches 0 (spontaneous seed)
-
-
 @dataclass(frozen=True)
 class Pump:
     """A pump beam: power [W], wavelength [m], direction 'fwd' (co, seeded at z=0) or 'bwd'
@@ -133,50 +130,76 @@ class FiberAmplifier:
         return ch, np.asarray(bc), u, is_ase, kind
 
     # ---- pointwise physics used by the IVP passes ----------------------------------------
-    def _nbar2(self, ch: ChannelSet, P):
-        """Metastable fraction from the full local power vector P (K,) at one z (scalar)."""
+    # Per-channel constants (overlap/cross-section/frequency products) are hoisted into a
+    # coefficient bundle ONCE per solve (audit S6-13: they were recomputed on each of the
+    # ~25k RHS calls). Same algebra, tolerance-neutral regrouping.
+    def _coeffs(self, ch: ChannelSet):
         A = self.fiber.a_dope_m2
-        flux = ch.gamma * P / (H_PLANCK * ch.nu_hz * A)
-        R_a = float(np.sum(ch.sigma_a * flux))
-        R_e = float(np.sum(ch.sigma_e * flux))
-        tau = ch.tau_s
+        na = self._n_active
+        m = self.ase.m_modes if self.ase else 2
+        c = {
+            "flux_a": ch.gamma * ch.sigma_a / (H_PLANCK * ch.nu_hz * A),   # R_a = sum(flux_a P)
+            "flux_e": ch.gamma * ch.sigma_e / (H_PLANCK * ch.nu_hz * A),
+            "g_e": ch.gamma * na * ch.sigma_e,
+            "g_a": ch.gamma * na * ch.sigma_a,
+            "g_esa": ch.gamma * na * ch.sigma_esa,
+            "loss": ch.loss_per_m.copy(),
+            "s_pref": np.where(ch.is_ase, ch.gamma * na * ch.sigma_e * m
+                               * H_PLANCK * ch.nu_hz * ch.dnu_hz, 0.0),
+            "m_modes": m,
+        }
+        if self.concentration is not None:
+            c["loss"] = c["loss"] + ch.gamma * self._n_dark * ch.sigma_a   # unbleachable PIQ
+        return c
+
+    def _nbar2_c(self, c, P):
+        """Metastable fraction from the local power vector P (K,) via the coefficient bundle."""
+        R_a = float(np.dot(c["flux_a"], P))
+        R_e = float(np.dot(c["flux_e"], P))
+        tau = self._tau_s
         if self.upconversion_C_up <= 0.0:
             return tau * R_a / (1.0 + tau * (R_a + R_e))
         A2 = self.upconversion_C_up * self._n_active     # upconversion among active excited ions
         B = 1.0 / tau + R_a + R_e
         return (-B + np.sqrt(B * B + 4.0 * A2 * R_a)) / (2.0 * A2)
 
+    def _dP_full_c(self, c, u, P):
+        """dP_k/dz [W/m] for every channel from the local power vector P (K,)."""
+        P = np.maximum(P, 0.0)
+        n2 = self._nbar2_c(c, P)
+        g = c["g_e"] * n2 - c["g_a"] * (1.0 - n2) - c["g_esa"] * n2 - c["loss"]
+        if self.concentration is not None:
+            g = g - self.concentration.photodarkening_loss_per_m(n2)   # inversion-dependent gray
+        return u * (g * P + c["s_pref"] * n2)
+
+    # back-compat single-call forms (reference/diagnostic surface)
+    def _nbar2(self, ch: ChannelSet, P):
+        """Metastable fraction from the full local power vector P (K,) at one z (scalar)."""
+        self._tau_s = ch.tau_s
+        return self._nbar2_c(self._coeffs(ch), np.asarray(P, float))
+
     def _dP_full(self, ch: ChannelSet, P):
         """dP_k/dz [W/m] for every channel from the full local power vector P (K,)."""
-        P = np.maximum(P, 0.0)
-        n2 = self._nbar2(ch, P)
-        na = self._n_active
-        g = (ch.gamma * na * (ch.sigma_e * n2 - ch.sigma_a * (1.0 - n2) - ch.sigma_esa * n2)
-             - ch.loss_per_m)
-        if self.concentration is not None:
-            # quenched dark-pair ions: unbleachable ground-state absorption at every wavelength
-            g = g - ch.gamma * self._n_dark * ch.sigma_a
-            # photodarkening: inversion-dependent gray excess loss
-            g = g - self.concentration.photodarkening_loss_per_m(n2)
-        m = self.ase.m_modes if self.ase else 2
-        s = np.where(ch.is_ase,
-                     ch.gamma * na * ch.sigma_e * n2 * m
-                     * H_PLANCK * ch.nu_hz * ch.dnu_hz, 0.0)
-        return ch.u * (g * P + s)
+        self._tau_s = ch.tau_s
+        return self._dP_full_c(self._coeffs(ch), ch.u, np.asarray(P, float))
 
     def _nbar2_profile(self, ch: ChannelSet, P):
         """nbar2 at each z given the full power profile P (K, M)."""
-        return np.array([self._nbar2(ch, P[:, j]) for j in range(P.shape[1])])
+        self._tau_s = ch.tau_s
+        c = self._coeffs(ch)
+        return np.array([self._nbar2_c(c, P[:, j]) for j in range(P.shape[1])])
 
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
               method: str = "LSODA") -> SteadyStateResult:
         from scipy.integrate import solve_ivp
-        from scipy.interpolate import interp1d
         ch, bc, u, is_ase, kind = self._plan()
+        self._tau_s = ch.tau_s
+        c = self._coeffs(ch)
         L = self.fiber.length_m
         z = np.linspace(0.0, L, n_nodes)
         fwd = np.where(u > 0)[0]
         bwd = np.where(u < 0)[0]
+        u_fwd, u_bwd = u[fwd], u[bwd]
 
         # backward-channel profiles (K_bwd, M), initialised to their z=L seed everywhere
         P_bwd = np.repeat(bc[bwd][:, None], n_nodes, axis=1) if bwd.size else np.zeros((0, n_nodes))
@@ -189,39 +212,68 @@ class FiberAmplifier:
                 P[bwd] = Pb
             return P
 
+        # Lean frozen-profile interpolator (audit S6-2): the mesh is uniform, so scipy interp1d's
+        # per-call validation machinery (~43% of solve runtime) is pure overhead. Endpoint clamps
+        # reproduce interp1d's fill_value=(left, right) exactly; interior uses the identical
+        # linear form, and LSODA samples strictly inside (0, L), so results are unchanged.
+        inv_dz = (n_nodes - 1) / L
+
+        def _make_interp(Y):
+            slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
+            ncap = n_nodes - 2
+
+            def f(zz):
+                if zz <= 0.0:
+                    return Y[:, 0]
+                if zz >= L:
+                    return Y[:, -1]
+                j = int(zz * inv_dz)
+                if j > ncap:
+                    j = ncap
+                return Y[:, j] + slopes[:, j] * (zz - z[j])
+            return f
+
         last_out = None
+        last_prof = None
         converged = False
         for it in range(max_iter):
-            bwd_of = (interp1d(z, P_bwd, axis=1, bounds_error=False,
-                               fill_value=(P_bwd[:, 0], P_bwd[:, -1])) if bwd.size else None)
+            bwd_of = _make_interp(P_bwd) if bwd.size else None
 
             def rhs_f(zz, Pf):
                 Pb = bwd_of(zz) if bwd.size else np.zeros(0)
-                return self._dP_full(ch, _assemble(Pf, Pb))[fwd]
+                return self._dP_full_c(c, u, _assemble(Pf, Pb))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
                            rtol=1e-7, atol=1e-15)
             P_fwd = sf.y
 
             if bwd.size:
-                fwd_of = interp1d(z, P_fwd, axis=1, bounds_error=False,
-                                  fill_value=(P_fwd[:, 0], P_fwd[:, -1]))
+                fwd_of = _make_interp(P_fwd)
 
                 def rhs_b(zz, Pb):
-                    return self._dP_full(ch, _assemble(fwd_of(zz), Pb))[bwd]
+                    return self._dP_full_c(c, u, _assemble(fwd_of(zz), Pb))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
                                rtol=1e-7, atol=1e-15)
                 P_bwd = sb.y[:, ::-1]
 
+            # convergence: endpoint powers AND the full interior profile, each channel measured
+            # against its own peak power (audit S3-34: the old endpoint-only test with a 1e-15 W
+            # floor could declare victory while the interior was still moving, and amplified
+            # noise on strongly-absorbed channels).
             out = np.concatenate([P_fwd[:, -1], (P_bwd[:, 0] if bwd.size else [])])
+            prof = np.concatenate([P_fwd, P_bwd], axis=0) if bwd.size else P_fwd.copy()
             if last_out is not None:
                 denom = np.maximum(np.abs(out), 1e-15)
-                if float(np.max(np.abs(out - last_out) / denom)) < tol:
+                end_ok = float(np.max(np.abs(out - last_out) / denom)) < tol
+                ch_peak = np.maximum(np.max(np.abs(prof), axis=1, keepdims=True), 1e-300)
+                prof_ok = float(np.max(np.abs(prof - last_prof) / ch_peak)) < tol
+                if end_ok and prof_ok:
                     converged = True
                     last_out = out
                     break
             last_out = out
+            last_prof = prof
 
         P = np.empty((ch.lambda_m.size, n_nodes))
         P[fwd] = P_fwd
@@ -235,4 +287,6 @@ class FiberAmplifier:
                                        "dnu_hz": ch.dnu_hz.copy(),
                                        "sigma_a": ch.sigma_a.copy(),
                                        "sigma_e": ch.sigma_e.copy(),
-                                       "gamma": ch.gamma.copy()})
+                                       "sigma_esa": ch.sigma_esa.copy(),
+                                       "gamma": ch.gamma.copy(),
+                                       "m_modes": c["m_modes"]})
