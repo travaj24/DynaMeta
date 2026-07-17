@@ -225,4 +225,5 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
 
     _solve.solve_sweep = _solve_sweep
+    _solve.cache_fingerprint = "pmm(degree={},n_orders={},n_slices={},stabilize={},absorption={})".format(degree, n_orders, n_slices, stabilize, absorption)
     return _solve

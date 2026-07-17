@@ -36,3 +36,8 @@ dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 
 [tool.setuptools.packages.find]
 include = ["dynameta*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: full validation-suite wrappers excluded from the fast CI legs (covered by the py3.13 smoke tier; run with -m slow)",
+]
