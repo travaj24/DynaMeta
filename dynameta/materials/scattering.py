@@ -181,15 +181,24 @@ class ScatteringModel:
         return lambda n: g
 
     def mobility_of_n(self):
-        """Drift mobility callable mu(n) = hall_factor * q / (m_cond(n) * 1/tau(n)) [m^2/Vs]."""
+        """Drift mobility callable mu(n) = hall_factor * q / (m_cond(n) * 1/tau_DC(n)) [m^2/Vs].
+
+        Audit S4-5: `one_over_tau` supplies the OPTICAL Drude rate; when it is a MatthiessenGamma
+        with optical_dc_ratio != 1 that rate is optical_dc_ratio x the DC momentum-relaxation
+        rate, so the DC drift mobility must divide the ratio back OUT -- the old code fed the
+        optical rate straight into mu, corrupting the transport mobility (and the DEVSIM solve)
+        by exactly that factor. Arbitrary callables without the attribute are taken as DC-equal
+        (ratio 1), preserving the shared-law contract."""
         ot, mc, rh = self.one_over_tau, self.m_cond_kg, self.hall_factor
+        ratio = float(getattr(ot, "optical_dc_ratio", 1.0))
 
         def mu(n_m3):
             n = np.asarray(n_m3, dtype=np.float64)
             m = np.asarray(mc(n), dtype=np.float64) if callable(mc) else float(mc)
             g = np.asarray(ot(n), dtype=np.float64) if callable(ot) else float(ot)
-            if np.any(np.asarray(m) <= 0.0) or np.any(np.asarray(g) <= 0.0):   # mu ~ 1/(m * 1/tau)
+            g_dc = g / ratio                                   # undo the DC->optical scaling
+            if np.any(np.asarray(m) <= 0.0) or np.any(np.asarray(g_dc) <= 0.0):
                 raise ValueError("ScatteringModel.mobility_of_n: m_cond and 1/tau must be > 0 (a "
                                  "callable returned a non-positive value -> mu would be inf/NaN/negative).")
-            return rh * Q_E / (m * g)
+            return rh * Q_E / (m * g_dc)
         return mu

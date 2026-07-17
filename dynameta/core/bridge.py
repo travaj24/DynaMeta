@@ -145,13 +145,22 @@ def assemble_eps(field: CarrierField,
             out[ra.mesh_region] = EpsField(tensor=eps_3d.astype(np.complex128),
                                            time_convention=field.time_convention)
             continue
-        # Affine placement into the region bbox. Lateral axes scale directly
-        # (the carrier solve already spans the cell laterally); the vertical
-        # axis remaps onto [zlo, zhi].
-        _, _, _, _, zlo, zhi = ra.bbox_m
-        zspan = z3_m[-1] - z3_m[0]
-        z_remap_m = (zlo + (z3_m - z3_m[0]) * ((zhi - zlo) / zspan)
-                      if zspan > 0 else np.full_like(z3_m, zlo))
+        # Affine placement into the region bbox: ALL THREE axes remap onto the alignment bbox
+        # (audit S4-3: the old code remapped only z and emitted the lateral axes raw, silently
+        # assuming the carrier frame shared the optical-mesh origin/span -- true for the shipped
+        # auto-alignment by convention only; a BYO carrier or centered mesh frame shifted the
+        # eps laterally with no error). When the carrier axes already equal the bbox the remap
+        # is an exact identity.
+        xlo, xhi, ylo, yhi, zlo, zhi = ra.bbox_m
+
+        def _remap(axis_m, lo, hi):
+            span = axis_m[-1] - axis_m[0]
+            return (lo + (axis_m - axis_m[0]) * ((hi - lo) / span)
+                    if span > 0 else np.full_like(axis_m, lo))
+
+        x_remap_m = _remap(x3_m, xlo, xhi)
+        y_remap_m = _remap(y3_m, ylo, yhi)
+        z_remap_m = _remap(z3_m, zlo, zhi)
         # eps_grid OUTPUT contract: a gridded response must be (Nx,Ny,Nz) scalar or (Nx,Ny,Nz,3,3)
         # tensor matching the region axes -- the transpose below assumes it, and a wrong-shaped /
         # transposed grid would silently misplace eps in the geometry (audit-v2 finding).
@@ -167,10 +176,21 @@ def assemble_eps(field: CarrierField,
         else:                                                  # scalar (Nx,Ny,Nz) -> (Nz,Ny,Nx)
             vals = np.transpose(eps_3d, (2, 1, 0)).astype(np.complex128)
         out[ra.mesh_region] = EpsField(
-            x_axis_u=x3_m / mpp, y_axis_u=y3_m / mpp, z_axis_u=z_remap_m / mpp,
+            x_axis_u=x_remap_m / mpp, y_axis_u=y_remap_m / mpp, z_axis_u=z_remap_m / mpp,
             values_zyx=vals, time_convention=field.time_convention)
 
     for region, mat_name in alignment.fixed_eps_regions.items():
+        # audit S5-7: an effect registered for this material would be SILENTLY dropped here --
+        # scalar_eps ignores extra_fields and effect models by design (fixed regions carry no
+        # state). Warn loudly so a modulation layer landing on a fixed region is visible.
+        if getattr(n_to_eps, "effects", None) and mat_name in n_to_eps.effects:
+            import warnings
+            warnings.warn(
+                "assemble_eps: region '{}' (material '{}') is a FIXED-eps region, but an effect "
+                "model is registered for that material -- the effect (and any extra_fields) is "
+                "IGNORED on fixed regions. Declare the region spatial (a RegionAlignment) in the "
+                "optical builder if it is meant to modulate.".format(region, mat_name),
+                stacklevel=2)
         out[region] = EpsField(scalar=n_to_eps.scalar_eps(mat_name, lambda_m),
                                   time_convention=field.time_convention)
     return out

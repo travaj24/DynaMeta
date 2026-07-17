@@ -82,11 +82,18 @@ def single_pass_gain(g_slices, dz_m, Gamma, alpha_i_per_m=0.0):
 
 
 def ase_output_psd(g_slices, rho_GS_slices, dz_m, nu_Hz, Gamma, alpha_i_per_m=0.0,
-                   m_pol=2):
+                   m_pol=2, *, per_pol=False):
     """Forward ASE spectral density at the output [W/Hz], integrating dS/dz = (Gamma g -
     alpha_i) S + Gamma g n_sp h nu over the z-resolved gain + inversion profile (per-slice
-    g_slices, rho_GS_slices). m_pol counts ASE polarizations collected (2 for an unpolarized
-    receiver). Reduces to n_sp h nu (G - 1) for a uniform inversion."""
+    g_slices, rho_GS_slices). Reduces to n_sp h nu (G - 1) per polarization for a uniform
+    inversion.
+
+    POLARIZATION CONTRACT (audit S3-6): by default this returns the TOTAL collected PSD
+    (m_pol x per-polarization; m_pol=2 for an unpolarized receiver). The sibling consumers
+    detector_noise_variances and spectral_noise_figure take the PER-POLARIZATION S and apply
+    m_pol themselves -- feeding them this function's total double-counts polarization by
+    2x-8x. Pass per_pol=True (which ignores m_pol) to get the per-polarization PSD those
+    functions consume directly."""
     g = np.asarray(g_slices, dtype=np.float64)
     rho = np.asarray(rho_GS_slices, dtype=np.float64)
     nsp = inversion_factor_nsp(rho)
@@ -102,7 +109,7 @@ def ase_output_psd(g_slices, rho_GS_slices, dz_m, nu_Hz, Gamma, alpha_i_per_m=0.
             q = 0.0                                           # negligible NET forward ASE -> guard
         emit = q * dz_m if abs(a * dz_m) < 1e-12 else q * (amp - 1.0) / a
         S = S * amp + emit
-    return float(m_pol) * S
+    return float(S) if per_pol else float(m_pol) * S
 
 
 def noise_figure(G, n_sp, *, Gamma_g_per_m=None, alpha_i_per_m=0.0, eta_in=1.0):

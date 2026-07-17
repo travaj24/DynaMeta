@@ -175,8 +175,11 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                                            degree=degree, n_orders=n_orders,
                                            n_slices=n_slices)
         stack.set_source(lambda_m, theta=theta, phi=phi)
+        # retain_internal only where the absorption block below will actually consume it
+        # (phi == 0): at conical the per-lab-pol diagonal is not the eigen-pol absorption
+        # (audit S4-2) and lumenairy's own conical retain_internal raises anyway.
         orders, R2, T2, jones = stack.solve(stabilize=stabilize,
-                                            retain_internal=absorption)
+                                            retain_internal=absorption and abs(phi) <= 1e-12)
         row = _pol_row(design.optical)
         n_sup, n_sb = end_media_indices(design, lambda_m)
         rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
@@ -192,7 +195,13 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
             r = complex(np.asarray(jones)[row, row]) * complex(rf)
             t = complex(np.asarray(stack.jones_transmission())[row, row]) * complex(tf)
         a_ind, pra = None, None
-        if absorption:
+        # Audit S4-2 (defensive gate): at conical incidence the reported R/T/r/t are the ROTATED
+        # s/p eigen-polarization while layer_absorption()[:, row] is the per-LAB-pol diagonal --
+        # the true absorbed power is a quadratic form whose cross term lumenairy does not expose.
+        # Today lumenairy itself raises (retain_internal unsupported at conical) before this
+        # block, but do not rely on that: mirror the RCWA bridge's explicit conical early-out so
+        # a future lumenairy relaxation cannot silently produce the inconsistent number.
+        if absorption and abs(phi) <= 1e-12:
             try:
                 la = np.asarray(stack.layer_absorption())     # (n_layers, 2) per incident pol
                 la = la[:, row] if la.ndim == 2 and la.shape[1] == 2 else la[row]
