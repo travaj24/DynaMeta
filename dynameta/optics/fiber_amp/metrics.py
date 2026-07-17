@@ -24,15 +24,25 @@ __all__ = ["CompressionCurve", "SlopeEfficiency", "GainSpectrum",
 
 # ---- amplifier cloning helpers -------------------------------------------------------------
 def _with(amp: FiberAmplifier, *, pumps=None, signals=None) -> FiberAmplifier:
+    """Clone the amplifier with pumps/signals swapped. MUST carry the ConcentrationModel through
+    (audit S3-1: dropping it made every metric run the ideal model -- PIQ dark absorption and
+    photodarkening silently vanished and upconversion mis-scaled). When concentration is set the
+    FiberAmplifier __init__ derives upconversion_C_up from it; the explicit kwarg covers the
+    concentration=None raw-C_up case."""
     return FiberAmplifier(amp.ion, amp.fiber,
                           amp.pumps if pumps is None else pumps,
                           amp.signals if signals is None else signals,
-                          amp.ase, upconversion_C_up=amp.upconversion_C_up)
+                          amp.ase, upconversion_C_up=amp.upconversion_C_up,
+                          concentration=amp.concentration)
 
 
 def _set_total_pump(amp: FiberAmplifier, P_total_W: float) -> FiberAmplifier:
     cur = sum(p.power_W for p in amp.pumps)
-    sc = (P_total_W / cur) if cur > 0.0 else 0.0
+    if cur <= 0.0:
+        raise ValueError("_set_total_pump: the amplifier has zero total launched pump power; "
+                         "cannot rescale to {} W (audit S3-37: the old behaviour silently "
+                         "collapsed every pump to zero)".format(P_total_W))
+    sc = P_total_W / cur
     return _with(amp, pumps=[replace(p, power_W=p.power_W * sc) for p in amp.pumps])
 
 
@@ -177,7 +187,8 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
     base = _with(amp, signals=[])
     if not with_ase:
         base = FiberAmplifier(base.ion, base.fiber, base.pumps, [], None,
-                              upconversion_C_up=base.upconversion_C_up)
+                              upconversion_C_up=base.upconversion_C_up,
+                              concentration=base.concentration)
     gdB = np.empty_like(lams)
     for j, lam in enumerate(lams):
         r = _with(base, signals=[Signal(probe_power_W, float(lam))]).solve()

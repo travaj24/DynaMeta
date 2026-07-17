@@ -87,11 +87,15 @@ def overlap_gamma(fiber: FiberSpec, lambda_m):
 
 
 def cladding_pump_overlap(fiber: FiberSpec) -> float:
-    """Double-clad pump overlap with the CORE: Gamma_p = A_core / A_clad (a multimode pump
-    uniformly fills the inner cladding, so only the core-area fraction overlaps the ions).
-    Returns 1.0 for a core-pumped fiber (clad_radius_m is None). This is the single geometry
-    factor that makes cladding pumping far weaker per unit length than core pumping -- the
-    reason double-clad fibers are metres-to-tens-of-metres long."""
+    """Double-clad pump overlap with the DOPED region: Gamma_p = A_dope / A_clad (a multimode
+    pump uniformly fills the inner cladding, so the fraction of pump power the ions see is the
+    doped-area fraction). The solver forms the ion-seen intensity as Gamma_p*P/A_dope, which is
+    consistent ONLY if Gamma_p is the power fraction inside the dopant radius b -- so the ratio
+    uses b_dope, not the core radius (audit S3-9: using A_core inflates the clad-pump absorption
+    and gain by (a_core/b)^2 for confined doping). For uniform core doping (b = a_core, the
+    default) the two coincide. Returns 1.0 for a core-pumped fiber (clad_radius_m is None).
+    This is the single geometry factor that makes cladding pumping far weaker per unit length
+    than core pumping -- the reason double-clad fibers are metres-to-tens-of-metres long."""
     if fiber.clad_radius_m is None:
         return 1.0
-    return float((fiber.core_radius_m / fiber.clad_radius_m) ** 2)
+    return float((fiber.b_dope_m / fiber.clad_radius_m) ** 2)
