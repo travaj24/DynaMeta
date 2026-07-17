@@ -34,7 +34,14 @@ def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide:
                         t_oxide_m: float = 120e-9, eps_mirror: complex = -120.0 + 3.0j):
     """A default reflective gated-ITO modulator stack for the transient map: air | ITO(eps_ito) | oxide |
     mirror. eps_ito is the (graded or scalar) ITO permittivity at this instant. If eps_ito is an array it is
-    split into equal ITO sublayers (the depth-resolved ENZ profile); a scalar is one homogeneous film."""
+    split into equal ITO sublayers (the depth-resolved ENZ profile); a scalar is one homogeneous film.
+
+    DEPTH-ORDERING CONTRACT (audit S2-3): eps_ito[0] is placed adjacent to AIR and eps_ito[-1]
+    adjacent to the OXIDE (gate) -- i.e. the array runs AIR-SIDE-FIRST, top-down. A gated
+    accumulation layer therefore belongs at eps_ito[-1]. This is the OPPOSITE of the repo's
+    substrate-first depth-array convention (core.layered.slice_profile), so a DEVSIM-extracted
+    ascending-z profile must be REVERSED before feeding it here; a flipped profile changes R(t)
+    while R+T+A still closes to 1 (invisible-flip class)."""
     eps_ito = np.atleast_1d(np.asarray(eps_ito, dtype=complex))
     nsl = eps_ito.size
     slabs = [LayeredSlab(t_ito_m / nsl, eps=complex(e)) for e in eps_ito]
@@ -49,7 +56,11 @@ def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, dr
     [m^-3] (depth array or scalar) at time t; the free-carrier Drude maps it to eps(z) at lambda_m;
     `build_stack(eps_ito, lambda_m)` (default enz_reflector_stack) assembles the LayeredStack, solved by
     coherent TMM. Returns (t_s, R, T, eps_front) -- the optical turn-on/off waveform plus the front-ITO
-    permittivity trajectory (its ENZ crossing).
+    permittivity trajectory (its ENZ crossing). Depth arrays are AIR-SIDE-FIRST (see
+    enz_reflector_stack; reverse a substrate-first DEVSIM profile). NOTE on T (audit S2-16): with
+    the DEFAULT lossy-mirror stack, T is the power flux absorbed INTO the semi-infinite mirror
+    (~3%), not a device transmittance (true transmission through the opaque mirror is ~0); T is a
+    genuine transmittance only for a caller-supplied lossless-substrate build_stack.
 
     Supply EXACTLY ONE of `drude_model` (a fixed DrudeOptical, the original behavior -- byte-identical) or
     `drude_of_t(t) -> DrudeOptical` (a per-instant Drude, e.g. carrier-heating Te(t)-dependent m*/Gamma from

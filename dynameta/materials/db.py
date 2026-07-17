@@ -149,6 +149,14 @@ class DielectricDB:
         """Set material.eps_static_dc from the DB and stash the record on the
         material as `._eps_static_dc_record` for provenance. Returns the record."""
         rec = self.eps_static(formula or material.name, refresh=refresh)
+        if "MAX principal" in (rec.note or ""):
+            import warnings
+            warnings.warn(
+                "DielectricDB.apply: {} eps_static={:.4g} is the MAX principal DFPT tensor "
+                "component (JARVIS basis), an upper bound on the isotropic average for a "
+                "non-cubic crystal -- gate capacitance derived from it is overestimated. "
+                "Supply a measured override for quantitative work (audit S4-6).".format(
+                    rec.formula, rec.eps_static), stacklevel=2)
         # Material is frozen; apply() is the one sanctioned in-place back-fill (see Material docstring)
         object.__setattr__(material, "eps_static_dc", rec.eps_static)
         try:
@@ -210,7 +218,15 @@ class DielectricDB:
             formula=formula, eps_static=float(total), source="jarvis-dft",
             identifier=str(rec.get("jid", "")), kind="dft-dfpt",
             eps_electronic=elec, eps_ionic=ionic,
-            spacegroup=str(rec.get("spg_symbol") or rec.get("spg_number") or "") or None)
+            spacegroup=str(rec.get("spg_symbol") or rec.get("spg_number") or "") or None,
+            # audit S4-6: JARVIS publishes only the MAX principal component of the DFPT tensor
+            # (dfpt_piezo_max_dielectric); for a non-cubic crystal this is an UPPER BOUND on the
+            # isotropic (orientation-averaged) permittivity a scalar Poisson solve wants -- for
+            # tetragonal/monoclinic HfO2-class oxides the max can exceed the average by tens of
+            # percent. The electronic part, by contrast, is the epsx/y/z AVERAGE when the
+            # explicit key is absent. Label the basis so a consumer can tell.
+            note="eps_static = MAX principal tensor component (JARVIS dfpt_piezo_max_dielectric)"
+                 " -- upper bound on the orientation average for non-cubic crystals")
 
     # ---- Materials Project ----
     def _query_mp(self, formula: str) -> DielectricRecord:

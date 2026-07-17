@@ -69,7 +69,11 @@ def reduced_sbe_susceptibility(hbar_omega_eV, *, Eg_eV=0.95, m_e=0.067, m_h=0.45
     e_k = float(Eg_eV) * Q_E + HBAR ** 2 * k ** 2 / (2.0 * mr) - bgr          # renormalized transition
     gamma = HBAR / float(T2_s)                               # homogeneous dephasing [J]
     mu = float(mu_Cm)
-    pref = mu / (EPS0 * float(d_qw_m))                       # chi = pref sum_k mu p_k g_k (E=1)
+    # chi = (1/(eps0 d_qw)) sum_k mu p_k g_k at E=1: the dipole enters ONCE in the coherence p_k
+    # (source -inv*mu below) and ONCE in the polarization sum -- chi ~ mu^2, dimensionless.
+    # Audit S3-3: the old pref carried an extra mu (chi ~ mu^3, dimensionally C*m, ~28 orders
+    # small); the oracle in validation/qd_soa_sbe.py was corrected in lockstep.
+    pref = 1.0 / (EPS0 * float(d_qw_m))
     chi = np.empty(hw.size, dtype=np.complex128)
     src = -inv * mu                                          # source -(1-f_e-f_h) mu E, E=1
     for i, w in enumerate(hw):

@@ -4,8 +4,10 @@ Gamma_p = A_core/A_clad from waveguide.cladding_pump_overlap); this module adds 
 
   * the local heat density Q(z) [W/m] deposited in the core, from the rigorous optical-power
     balance Q = -d/dz (net forward optical flux) -- the power that leaves the optical fields
-    (quantum defect + background loss + reabsorbed ASE) becomes heat, while spontaneous light
-    that escapes does not;
+    (quantum defect + background loss + reabsorbed ASE) becomes heat. TRACKED (in-band) ASE that
+    exits the fiber is correctly NOT counted as heat; spontaneous emission OUTSIDE the tracked
+    band is invisible to the flux balance, so its pump-photon energy IS counted as heat -- an
+    overestimate bounded by the untracked spontaneous fraction (audit S3-32);
   * the quantum-defect fraction 1 - lambda_pump/lambda_signal, the floor on the heat fraction
     (5% for Yb 976->1030, 37% for Er 980->1560) -- the reason Yb double-clad fibers scale to
     kilowatts;
@@ -45,9 +47,10 @@ def net_forward_flux(result: SteadyStateResult) -> np.ndarray:
 def heat_load_per_m(result: SteadyStateResult) -> np.ndarray:
     """Local heat density Q(z) [W/m] = -d/dz(net forward optical flux). Positive where the fiber
     dissipates (pump absorption region); the integral is the total heat (total_heat_W). Captures
-    quantum-defect + background-loss + reabsorbed-ASE heating; escaping spontaneous light is not
-    counted as heat. Slightly conservative where tracked ASE bins miss out-of-band spontaneous
-    emission."""
+    quantum-defect + background-loss + reabsorbed-ASE heating. Tracked (in-band) ASE leaving the
+    fiber is correctly excluded from the heat; spontaneous emission outside the tracked band is
+    invisible to this balance and is therefore counted AS heat -- a conservative overestimate
+    bounded by the untracked spontaneous fraction (audit S3-32). Widen the AseBand to tighten it."""
     return -np.gradient(net_forward_flux(result), result.z_m)
 
 

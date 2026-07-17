@@ -747,3 +747,41 @@ def test_transient_upconversion_semi_implicit():
     assert abs(end[0] - end[1]) < 5e-4
     r_ss = amp.solve(n_nodes=31)
     assert abs(end[1] - float(r_ss.nbar2_z.mean())) < 0.01
+
+
+def test_beta3_sign_matches_physical_convention():
+    # S3-11: in the exp(-i omega t) (Agrawal) convention, beta3-only propagation delays EVERY
+    # detuned component by tau(Delta) = beta3 L Delta^2 / 2 > 0 for beta3 > 0, so the intensity
+    # centroid shifts to the TRAILING edge by beta3 L <Delta^2> / 2 = beta3 L / (4 t0^2) for a
+    # chirp-free Gaussian. Pins both magnitude and (crucially) the odd-order SIGN.
+    t = _pulse_grid(8192, 40e-12)
+    t0 = 1e-13
+    p = gaussian_pulse(t, t0_s=t0, peak_power_W=1.0)
+    b3L = 8e-40                                            # -> expected shift 20 fs
+    out = propagate_gnlse(p, 10.0, beta3_s3_m=b3L / 10.0, n_steps=200).output
+
+    def centroid(pulse):
+        w = pulse.power_W
+        return float(np.sum(pulse.t_s * w) / np.sum(w))
+    shift = centroid(out) - centroid(p)
+    expect = b3L / (4.0 * t0 ** 2)
+    assert shift > 0.0                                     # trailing edge for beta3 > 0
+    assert abs(shift - expect) / expect < 0.05
+    # and the lumped TOD in apply_spectral_phase agrees with the propagated beta3
+    out2 = apply_spectral_phase(p, tod_s3=b3L)
+    assert abs(centroid(out2) - centroid(p) - expect) / expect < 0.05
+
+
+def test_nondefault_m_modes_propagates_to_noise_and_detection():
+    # S3-31: AseBand.m_modes=1 (polarized ASE) must flow through PSD/NF/OSNR and detection
+    amp1 = FiberAmplifier(ER, _edf(6.0), [Pump(120e-3, 0.980e-6, "fwd")],
+                          [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 10, m_modes=1))
+    r1 = amp1.solve()
+    assert r1.meta["m_modes"] == 1
+    nr1 = analyze_noise(r1, 1.560e-6)                      # no explicit m -> uses the solve's 1
+    bn1 = detection_noise(r1, 1.560e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+    # m=1: sp-sp variance = R^2 rho^2 (2Bo-Be)Be exactly (single polarization)
+    R = bn1.responsivity_A_W
+    rho = bn1.meta["rho_sp_W_per_Hz"]
+    assert np.isclose(bn1.var_sp_sp, R ** 2 * rho ** 2 * (2 * 50e9 - 10e9) * 10e9, rtol=1e-12)
+    assert nr1.fwd_ase.psd_1pol.size > 0
