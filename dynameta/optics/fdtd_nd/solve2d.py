@@ -233,6 +233,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     # is the bare superstrate). With d_eps=0 everywhere lor=None -> the path is byte-identical to before.
     lor = None
     if np.any(ldeps != 0.0):
+        if float(np.max(lw0)) * dt > 1.0:                    # audit S2-7
+            raise ValueError("Lorentz pole under-resolved: lorentz_w0_rad_s*dt = {:.2f} > 1 -- "
+                             "the central-difference ADE would diverge; refine the grid or move "
+                             "the pole".format(float(np.max(lw0)) * dt))
         den = 1.0 + lgam * dt / 2.0
         C1 = (2.0 - lw0 ** 2 * dt ** 2) / den
         C2 = (lgam * dt / 2.0 - 1.0) / den
@@ -259,6 +263,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         if np.any((gkdn != 0.0) & ((gw <= 0.0) | (gdw <= 0.0))):
             raise ValueError("gain line needs gain_w_rad_s > 0 and gain_dw_rad_s > 0 on every "
                              "gain-active layer")
+        if float(np.max(gw)) * dt > 1.0:                     # audit S2-7
+            raise ValueError("gain line under-resolved: gain_w_rad_s*dt = {:.2f} > 1 -- the "
+                             "central-difference ADE would diverge; refine the grid or move the "
+                             "line".format(float(np.max(gw)) * dt))
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)

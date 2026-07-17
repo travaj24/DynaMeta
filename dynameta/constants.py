@@ -30,3 +30,4 @@ KB_EV_K = 8.617333262e-5      # Boltzmann constant, eV/K (CODATA-rounded literal
 # not physics -- lives here because this is the only no-import leaf every layer can reach
 # (was re-typed in core/bridge.py, core/carrier_field.py x2, core/eps_field.py).
 SOLVER_TIME_CONVENTION = "exp(-iwt)"
+GAMMA_E_RAD_ST = 1.760859630e11   # electron gyromagnetic ratio [rad/(s T)] (CODATA; audit S1-12)

@@ -78,10 +78,10 @@ class SchrodingerPoissonCarrier:
         self.n_lateral = int(n_lateral)
         self.n_states = int(n_states)
         # Kane in-plane nonparabolicity (eV^-1) applied to the emitted density as a
-        # POST-HOC nonparabolic 2D fill on the converged (parabolic) self-consistent
-        # potential -- captures ITO's DOS-mass flattening where it matters for the optical
-        # eps. The self-consistent potential and the bulk E_F stay parabolic (so the bulk
-        # density may shift ~by the DOS enhancement); 0 = parabolic (default).
+    # alpha_np > 0 makes the SELF-CONSISTENT solve fully Kane-nonparabolic: the Newton's
+    # density AND Jacobian use the Kane DOS and the bulk E_F is Kane-inverted (see the
+    # class docstring / audit C6-5; the old comment here wrongly described a post-hoc
+    # parabolic re-fill -- audit S1-16).
         self.alpha_np = float(alpha_np_per_eV)
         # Neumann (zero-flux) BODY boundary at z=0 for the Schrodinger solve: psi need not vanish at
         # the body (a contact into the bulk, not an infinite wall), removing the ~0.4nm Dirichlet

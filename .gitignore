@@ -25,3 +25,4 @@ Thumbs.db
 *.msh
 *.vol
 _moscap3d.msh
+.coverage

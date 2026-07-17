@@ -146,7 +146,7 @@ print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 
 ## Status
 
-v0.5.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
+v0.7.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
 materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 `Inclusion`s) + `Electrode` geometry, and `run_pipeline`; plus the
 modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,

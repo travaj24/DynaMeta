@@ -317,14 +317,8 @@ class SchrodingerPoisson1D:
                 else -np.asarray(U_init_J) / Q)
         kT = KB * self.T
 
-        def laplacian_matrix():
-            # second-difference operator on interior nodes (uniform grid), Dirichlet ends
-            n = N - 2
-            main = -2.0 * np.ones(n)
-            off = np.ones(n - 1)
-            return main, off
-
-        main, off = laplacian_matrix()
+        # (dead laplacian_matrix helper removed -- audit S1-17: the Newton loop builds its
+        # banded Jacobian directly and never read it)
         last_phi = phi.copy()
         result = None
         dV = float("inf")          # guard: max_outer<1 -> loop body never runs (report non-converged)
@@ -346,8 +340,9 @@ class SchrodingerPoisson1D:
             # POISSON stays Dirichlet at the body (phi[0]=phi_left pins the bulk reference, so n[0]=n_bg);
             # a Neumann body only frees the SCHRODINGER psi (no dead layer), so the eigenstates carry an
             # extra body row 0 -- use its INTERIOR rows (1..N-2) for the Poisson a-priori density.
-            for _newton in range(40):
-                pk = psi_k[1:] if neumann_left else psi_k      # interior rows (drop the body node)
+            pk = psi_k[1:] if neumann_left else psi_k          # interior rows (drop the body node)
+            pk2 = np.abs(pk) ** 2                              # audit S6-15: |psi|^2 is invariant
+            for _newton in range(40):                          # across the inner Newton iterations
                 shift = -Q * (phi_in - phi_k)                  # E_i(phi) ~ E_i^k + (U-U^k); U=-q phi
                 arg = (E_F_J - (E_k[None, :] + shift[1:-1, None])) / kT   # interior nodes 1..N-2
                 F0 = _fermi_log(arg)                           # complete FD order 0 (n_int, n_states)
@@ -362,8 +357,8 @@ class SchrodingerPoisson1D:
                 else:
                     occ = ns_pref * F0                         # (n_int, n_states)
                     dns_dphi = (ns_pref * Q / kT) * f          # d(arg)/dphi = q/kT
-                n_int = np.sum((np.abs(pk) ** 2) * occ, axis=1)   # (n_int,)
-                dn_dphi = np.sum((np.abs(pk) ** 2) * dns_dphi, axis=1)
+                n_int = np.sum(pk2 * occ, axis=1)              # (n_int,)
+                dn_dphi = np.sum(pk2 * dns_dphi, axis=1)
                 # residual of eps0 eps phi'' = -q(Nd - n) on interior nodes
                 lap = (phi_in[:-2] - 2.0 * phi_in[1:-1] + phi_in[2:]) / h ** 2
                 R = ee * lap + Q * (Nd[1:-1] - n_int)
