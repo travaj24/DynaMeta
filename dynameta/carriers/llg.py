@@ -37,7 +37,8 @@ from scipy.integrate import solve_ivp
 
 from dynameta.constants import MU0
 
-GAMMA_ELECTRON_RAD_ST = 1.760859630e11      # free-electron gyromagnetic ratio [rad/(s T)]
+from dynameta.constants import GAMMA_E_RAD_ST as GAMMA_ELECTRON_RAD_ST  # noqa: E402 (audit S1-12: single-source CODATA; module name kept as a re-export alias)
+_ = GAMMA_ELECTRON_RAD_ST  # value: 1.760859630e11      # free-electron gyromagnetic ratio [rad/(s T)]
 
 __all__ = ["LLGMacrospin", "LLGResult", "GAMMA_ELECTRON_RAD_ST"]
 

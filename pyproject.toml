@@ -41,3 +41,12 @@ include = ["dynameta*"]
 markers = [
     "slow: full validation-suite wrappers excluded from the fast CI legs (covered by the py3.13 smoke tier; run with -m slow)",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# audit S5-17: pin the lint surface actually enforced. F = real defects (undefined names, unused
+# imports/vars); the E7xx statement-style family is deliberately excluded (semicolon-compact
+# physics style is the house convention).
+select = ["F", "E9"]
