@@ -76,7 +76,16 @@ def save_arrays(path: str, arrays: Dict[str, np.ndarray], attrs: Dict[str, Any] 
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    meta = json.dumps(attrs)
+
+    def _jsonable(o):
+        # audit S4-28: numpy scalars crashed json.dumps; convert transparently. (JSON has no
+        # tuple type, so tuples round-trip as lists -- documented contract.)
+        if isinstance(o, np.generic):
+            return o.item()
+        raise TypeError("save_arrays attrs value of type {} is not JSON-serializable; use "
+                        "plain python / numpy scalar types (tuples become lists)".format(type(o)))
+
+    meta = json.dumps(attrs, default=_jsonable)
     if backend == "hdf5":
         h5py = _require("h5py", "hdf5")
         with h5py.File(path, "w") as f:
@@ -90,7 +99,14 @@ def save_arrays(path: str, arrays: Dict[str, np.ndarray], attrs: Dict[str, Any] 
             shutil.rmtree(path, ignore_errors=True)
         g = zarr.open_group(path, mode="w")
         for k, v in arrays.items():
-            g[k] = np.asarray(v)
+            a = np.asarray(v)
+            if a.ndim == 0:
+                # audit S4-7: `g[k] = a` and `g[k][:]` both raise IndexError for 0-d arrays on
+                # zarr>=3, breaking HDF5<->zarr parity; create the 0-d array explicitly
+                arr = g.create_array(k, shape=(), dtype=a.dtype)
+                arr[...] = a
+            else:
+                g[k] = a
         g.attrs[_META_KEY] = meta
     return path
 
@@ -107,6 +123,6 @@ def load_arrays(path: str, *, fmt: str = "auto") -> Tuple[Dict[str, np.ndarray],
     else:
         zarr = _require("zarr", "zarr")
         g = zarr.open_group(path, mode="r")
-        arrays = {k: np.asarray(g[k][:]) for k in g.array_keys()}
+        arrays = {k: np.asarray(g[k][...]) for k in g.array_keys()}  # [...] handles 0-d (S4-7)
         meta = g.attrs.get(_META_KEY, "{}")
     return arrays, json.loads(meta)

@@ -38,7 +38,7 @@ from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 
-_VAC_TOL = 1.0e-3                                            # |n - 1| under this counts as vacuum end medium
+_VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-13: matches the kernel's own guard; the old 1e-3 silently truncated a weakly-absorbing substrate, biasing T ~2% high)
 
 
 def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> FDTDLayer:
@@ -422,6 +422,7 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))), solve_time_s=solve_time_s,
                              t=t, T=T, A=float(1.0 - Rf - Tf), R_flux=Rf, T_flux=Tf)
 
+    _solve.cache_fingerprint = "fdtd(dim={},res={},backend={},courant={},settle={},pad={},band={})".format(dim, resolution, backend, courant, settle, n_pad_wave, band_frac)
     return _solve
 
 
@@ -565,6 +566,11 @@ class FDTDSweepOpticalSolver:
         self.n_pad_wave = n_pad_wave
         self.n_fit = int(n_fit)
         self.band_pad = float(band_pad)
+        # audit S5-2: answer-changing settings folded into the optical-cache identity
+        self.cache_fingerprint = ("fdtd_sweep(dim={},res={},backend={},courant={},settle={},"
+                                  "pad={},n_fit={},band_pad={})".format(
+                                      dim, resolution, backend, courant, settle, n_pad_wave,
+                                      n_fit, band_pad))
         self._per_wl = make_fdtd_optical_solver(dim=dim, resolution=resolution, backend=backend,
                                                 courant=courant, settle=settle, n_pad_wave=n_pad_wave)
 

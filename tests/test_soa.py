@@ -504,6 +504,7 @@ def test_electrical_rc():
     assert t50(100e-12) > t50(0.0)
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_hammer():
     """Thin wrapper -- run the exhaustive cross-cutting hammer validation in the pytest suite."""
     import importlib
@@ -511,6 +512,7 @@ def test_hammer():
     assert ham.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_saturation_power():
     """Thin wrapper -- absolute P_sat (mW/dBm) + detuning + eta_in fiber-to-fiber NF validation."""
     import importlib
@@ -518,6 +520,7 @@ def test_saturation_power():
     assert sat.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_wdm():
     """Thin wrapper -- WDM multi-channel wavelength-resolved cross-gain saturation validation."""
     import importlib
@@ -525,6 +528,7 @@ def test_wdm():
     assert wdm.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_filament_qd():
     """Thin wrapper -- QD-coupled transverse filamentation (real QD gain in the 2-D BPM) validation."""
     import importlib
@@ -532,6 +536,7 @@ def test_filament_qd():
     assert fil.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_maxwell_bloch():
     """Thin wrapper -- coherent Maxwell-Bloch (Rabi, photon echo, pulse-area) validation."""
     import importlib
@@ -539,6 +544,7 @@ def test_maxwell_bloch():
     assert mb.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_calibration_innolume():
     """Thin wrapper -- static/CW calibration to the Innolume BOA1310060 datasheet."""
     import importlib
@@ -546,6 +552,7 @@ def test_calibration_innolume():
     assert cal.main() is True
 
 
+@pytest.mark.slow          # audit S6-3: full validation suite, covered by the py3.13 smoke tier
 def test_inferred_dynamics():
     """Thin wrapper -- dynamic parameters inferred from the CW calibration (flagged estimates)."""
     import importlib
@@ -838,10 +845,10 @@ def test_bidir_ase_saturation_clamps():
 
 def test_facet_gain_ripple_and_ceiling():
     from dynameta.optics.soa import facet_gain_ripple_dB, ripple_enob_ceiling
-    # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~5.6-bit ENOB ceiling
+    # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~4.6-bit ENOB ceiling (power /10 form)
     r = facet_gain_ripple_dB(100.0, 1e-4)
     assert abs(r - 0.174) < 5e-3
-    assert abs(ripple_enob_ceiling(r) - 5.63) < 0.1
+    assert abs(ripple_enob_ceiling(r) - 4.61) < 0.1   # audit S3-5: /10 power form (was 5.63 under /20)
     assert facet_gain_ripple_dB(100.0, 0.0) == 0.0            # AR-coated traveling-wave limit
     assert not np.isfinite(ripple_enob_ceiling(0.0))          # zero ripple -> no ENOB ceiling
     with pytest.raises(ValueError):                           # above lasing threshold

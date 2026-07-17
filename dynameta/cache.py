@@ -157,14 +157,22 @@ class OpticalSolverCache:
         flush over a 400-miss HDF5 sweep, 240x, and 70x at just 120 Zarr entries); the
         packed rewrite measures 25-90x (HDF5) / ~130x (Zarr) faster per flush AND per
         reopen at N=400-2000, bit-identical entries.
-      * autosave_every=K (default 1 = per-miss autosave) batches the flushes, turning
-        O(N^2) rewrite bytes over a sweep into O(N^2/K) while bounding crash loss to K-1
-        misses; a dirty cache is also flushed at interpreter exit (atexit) so
-        autosave_every > 1 cannot silently drop the tail. autosave=False + one explicit
-        flush() remains the fastest path."""
+      * autosave_every=K (default 64; audit S6-5 measured the old per-miss default at
+        623-1372x persistence overhead on cheap backends, and K=64 recovers nearly all)
+        batches the flushes, turning O(N^2) rewrite bytes over a sweep into O(N^2/K)
+        while bounding crash loss to K-1 misses; a dirty cache is also flushed at
+        interpreter exit (atexit) so a batched tail is never silently dropped.
+        autosave=False + one explicit flush() remains the fastest path.
+      * flush() MERGES same-schema entries already on disk before an ATOMIC rewrite
+        (audit S5-4): concurrent writers with disjoint keys union instead of clobbering,
+        and the HDF5 write goes to a temp file + os.replace so a crash mid-write cannot
+        leave a half-written store (zarr directory stores replace best-effort). Stale-
+        SCHEMA entries are still discarded, never merged (GATE D2 preserved). The race
+        window shrinks but is not eliminated: do not share one cache path across
+        simultaneous writers producing the SAME keys."""
 
     def __init__(self, inner_solver, path: str, *, tag: str = "", fmt: str = "auto",
-                 autosave: bool = True, autosave_every: int = 1, verbose: bool = False):
+                 autosave: bool = True, autosave_every: int = 64, verbose: bool = False):
         self.inner = inner_solver
         self.path = path
         self.tag = str(tag)
@@ -177,6 +185,20 @@ class OpticalSolverCache:
         self._solver_id = "{}:{}".format(
             getattr(inner_solver, "__module__", type(inner_solver).__module__),
             getattr(inner_solver, "__qualname__", type(inner_solver).__qualname__))
+        # audit S5-2: qualname alone cannot distinguish two solvers from the SAME factory with
+        # different answer-changing kwargs (n_slices, resolution, orders...) -- they collided
+        # under tag='' and the cache served the wrong R/T. Factories now stamp a
+        # `cache_fingerprint` (str or callable) on their closures; fold it into the identity.
+        fp = getattr(inner_solver, "cache_fingerprint", None)
+        if fp is not None:
+            self._solver_id += "|" + str(fp() if callable(fp) else fp)
+        elif not self.tag and "<locals>" in self._solver_id:
+            import warnings
+            warnings.warn(
+                "OpticalSolverCache: the inner solver is a factory closure with no "
+                "cache_fingerprint and tag='' -- two solvers from the same factory with "
+                "different settings would share cache keys. Pass a distinguishing tag= or "
+                "stamp solver.cache_fingerprint (audit S5-2).", stacklevel=3)
         self.fmt = fmt
         self.autosave = bool(autosave)
         self.autosave_every = max(1, int(autosave_every))
@@ -185,7 +207,8 @@ class OpticalSolverCache:
         self.hits = 0
         self.misses = 0
         self._mem = {}
-        if self.autosave and self.autosave_every > 1:
+        self._pra = {}                                       # key -> per_region_absorption (S5-3)
+        if self.autosave:
             import atexit
             atexit.register(self._flush_if_dirty)            # batched mode: never drop the tail
         if os.path.exists(path):
@@ -206,21 +229,61 @@ class OpticalSolverCache:
                     # to what _pack() produced (ASCII keys and float64 rows round-trip exactly)
                     self._mem = {bytes(kmat[i]).decode("ascii"): vmat[i].copy()
                                  for i in range(kmat.shape[0])}
+                    self._pra = {k: dict(v) for k, v in
+                                 (meta or {}).get("pra", {}).items() if k in self._mem}
             except Exception:                               # pragma: no cover - a corrupt/foreign file
                 self._mem = {}
+                self._pra = {}
 
     def __call__(self, design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
         key = _key(design, eps_by_region, lambda_m, n_super, n_sub, self.tag, self._solver_id)
         if key in self._mem:
             self.hits += 1
-            return self._unpack(self._mem[key])
+            return self._unpack(self._mem[key], self._pra.get(key))
         self.misses += 1
         res = self.inner(design, geometry, eps_by_region, lambda_m, n_super, n_sub)
+        self._store(key, res)
+        return res
+
+    def _store(self, key, res) -> None:
         self._mem[key] = self._pack(res)
+        if res.per_region_absorption is not None:            # audit S5-3: a HIT used to drop this
+            self._pra[key] = {str(k): float(v) for k, v in res.per_region_absorption.items()}
         self._unsaved += 1
         if self.autosave and self._unsaved >= self.autosave_every:
             self.flush()
-        return res
+
+    def solve_sweep(self, design, geometry, assemble_at, lambdas, n_super, n_sub):
+        """Sweep-aware pass-through (audit S5-12: without this, wrapping a sweep-aware solver
+        silently downgraded run_pipeline to per-wavelength solving). Cached wavelengths are
+        served from the store; the MISSING subset goes to the inner solve_sweep in one call."""
+        if not hasattr(self.inner, "solve_sweep"):
+            raise AttributeError("inner solver has no solve_sweep")
+        lambdas = list(lambdas)
+        results = [None] * len(lambdas)
+        keys = []
+        miss_lams, miss_idx = [], []
+        for i, lm in enumerate(lambdas):
+            eps = assemble_at(lm)
+            key = _key(design, eps, lm, n_super, n_sub, self.tag, self._solver_id)
+            keys.append(key)
+            if key in self._mem:
+                self.hits += 1
+                results[i] = self._unpack(self._mem[key], self._pra.get(key))
+            else:
+                miss_lams.append(lm)
+                miss_idx.append(i)
+        if miss_lams:
+            self.misses += len(miss_lams)
+            solved = list(self.inner.solve_sweep(design, geometry, assemble_at, miss_lams,
+                                                 n_super, n_sub))
+            if len(solved) != len(miss_lams):
+                raise ValueError("inner solve_sweep returned {} results for {} wavelengths".format(
+                    len(solved), len(miss_lams)))
+            for i, res in zip(miss_idx, solved):
+                self._store(keys[i], res)
+                results[i] = res
+        return results
 
     def _flush_if_dirty(self) -> None:
         if self._unsaved > 0:
@@ -236,6 +299,24 @@ class OpticalSolverCache:
         permanent -- an append/merge flush would resurrect the discarded stale entries
         under the fresh schema stamp (audit 6.2 hazard; GATE D2)."""
         self._unsaved = 0
+        # audit S5-4 MERGE step: union same-schema entries already on disk that this process
+        # does not hold (disjoint concurrent writers no longer clobber each other). Entries
+        # under a DIFFERENT schema are ignored -- never resurrected (GATE D2 semantics).
+        if os.path.exists(self.path):
+            try:
+                arrays, meta = load_arrays(self.path, fmt=self.fmt)
+                if int((meta or {}).get("schema", -1)) == _SCHEMA:
+                    kmat = np.asarray(arrays[_PK_KEYS], dtype=np.uint8)
+                    vmat = np.asarray(arrays[_PK_VALS], dtype=float)
+                    disk_pra = (meta or {}).get("pra", {})
+                    for i in range(kmat.shape[0]):
+                        k = bytes(kmat[i]).decode("ascii")
+                        if k not in self._mem:               # memory always wins over disk
+                            self._mem[k] = vmat[i].copy()
+                            if k in disk_pra:
+                                self._pra[k] = dict(disk_pra[k])
+            except Exception:                               # unreadable store: overwrite it
+                pass
         keys = sorted(self._mem)                            # deterministic on-disk row order
         if keys:
             # keys are uniformly 41 ASCII chars ("k" + sha1 hex) by construction of _key();
@@ -246,8 +327,17 @@ class OpticalSolverCache:
         else:
             kmat = np.zeros((0, 41), dtype=np.uint8)
             vmat = np.zeros((0, len(_VEC)), dtype=float)
-        return save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat},
-                           {"schema": _SCHEMA, "tag": self.tag, "layout": list(_VEC)},
+        attrs = {"schema": _SCHEMA, "tag": self.tag, "layout": list(_VEC),
+                 "pra": {k: self._pra[k] for k in keys if k in self._pra}}
+        backend = self.fmt if self.fmt != "auto" else None
+        if (backend or ("zarr" if str(self.path).endswith(".zarr") else "hdf5")) == "hdf5" \
+                and not str(self.path).endswith(".zarr"):
+            # audit S5-4 ATOMIC step (single-file HDF5): temp write + os.replace
+            tmp = str(self.path) + ".tmp-flush"
+            save_arrays(tmp, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs, fmt="hdf5")
+            os.replace(tmp, self.path)
+            return self.path
+        return save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs,
                            fmt=self.fmt)                     # _SCHEMA (single source): the load-side
                                                             # discard check uses the SAME constant, so
                                                             # a future bump cannot make the cache
@@ -269,7 +359,7 @@ class OpticalSolverCache:
                          r.real, r.imag, t.real, t.imag], dtype=float)
 
     @staticmethod
-    def _unpack(v: np.ndarray) -> OpticalResult:
+    def _unpack(v: np.ndarray, pra=None) -> OpticalResult:
         d = {k: v[i] for i, k in enumerate(_VEC)}
         opt = (lambda x: None if np.isnan(x) else float(x))
         t = None if np.isnan(d["t_re"]) else complex(d["t_re"], d["t_im"])
@@ -281,7 +371,8 @@ class OpticalSolverCache:
                              solve_time_s=(0.0 if np.isnan(st) else float(st)), t=t,
                              T=opt(d["T"]), A=opt(d["A"]),
                              A_independent=opt(d["A_independent"]), R_flux=opt(d["R_flux"]),
-                             T_flux=opt(d["T_flux"]))
+                             T_flux=opt(d["T_flux"]),
+                             per_region_absorption=(dict(pra) if pra else None))
 
 
 def cached_optical_solver(inner_solver, path: str, **kw) -> OpticalSolverCache:

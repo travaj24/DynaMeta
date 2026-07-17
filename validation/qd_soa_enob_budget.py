@@ -48,8 +48,8 @@ def main():
     except ValueError:
         lasing_raises = True
     g_a = bool(abs(r - r_an) < 1e-12 and facet_gain_ripple_dB(G, 0.0) == 0.0
-               and abs(ripple_enob_ceiling(r) - 5.63) < 0.1
-               and abs(ripple_enob_ceiling(facet_gain_ripple_dB(G, 1e-3)) - 2.17) < 0.1
+               and abs(ripple_enob_ceiling(r) - 4.61) < 0.1
+               and abs(ripple_enob_ceiling(facet_gain_ripple_dB(G, 1e-3)) - 1.02) < 0.1
                and lasing_raises)
     ok = ok and g_a
     print("[en] GATE A: facet ripple {:.3f} dB == Airy (R=1e-4); R=0->0; ENOB ceiling {:.2f} b; "

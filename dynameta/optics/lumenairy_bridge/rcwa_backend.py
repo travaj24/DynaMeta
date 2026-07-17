@@ -1,13 +1,13 @@
 """Lumenairy RCWA as a DynaMeta optical backend (roadmap v0.5 A1).
 
-BRIDGE, not vendor: Lumenairy (>= 5.21, the single floor in _common.VERSION_FLOOR) is a REQUIRED dependency of dynameta but is
+BRIDGE, not vendor: Lumenairy (>= 5.22, the single floor in _common.VERSION_FLOOR) is a REQUIRED dependency of dynameta but is
 imported lazily inside the functions -- importing this module (and base dynameta) stays
 fast and matplotlib-free; calling against a broken/outdated environment raises with an
 install hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
 absorbers, metres, radians) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so no
 sign/unit translation happens here, only geometry/result adaptation.
 
-Pinned cross-library contracts (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor; file:line refs in the roadmap):
+Pinned cross-library contracts (first pinned at lumenairy 5.14.2, re-verified on the 5.22 floor; file:line refs in the roadmap):
 - RCWAStack(period, period_y=, n_superstrate=, n_substrate=, n_orders=, n_orders_y=):
   region media are complex refractive INDICES (or callables wl -> n); a stack is 1-D iff
   period_y/n_orders_y are omitted; the lattice is rectangular.

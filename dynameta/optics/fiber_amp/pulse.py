@@ -156,7 +156,11 @@ class SaturableGain:
         sat = 1.0 / (1.0 + energy_J / self.e_sat_J)
         x = (np.asarray(omega, float) - self.center_omega_rad_s) / self.gain_bandwidth_rad_s
         if self.shape == "parabolic":
-            shp = 1.0 - x ** 2
+            # clamped at zero outside the band: the raw 1 - x^2 diverges to -inf in the wings,
+            # applying unbounded parasitic LOSS where the physical gain simply goes to zero
+            # (audit S3-39). Near the band centre (where the gain-narrowing law lives) the
+            # clamp is inactive, so the analytic 1/Omega^2 narrowing gates are unaffected.
+            shp = np.maximum(1.0 - x ** 2, 0.0)
         elif self.shape == "lorentzian":
             shp = 1.0 / (1.0 + x ** 2)
         elif self.shape == "gaussian":
@@ -190,7 +194,12 @@ def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
     A = pulse.field.astype(np.complex128).copy()
     w = pulse.omega_rad_s()
     dt = pulse.dt_s
-    D_fixed = 1j * (beta2_s2_m / 2.0 * w ** 2 + beta3_s3_m / 6.0 * w ** 3) - 0.5 * loss_per_m
+    # numpy's ifft reconstructs A(t) = sum A_hat(w) exp(+i w t), so a physical envelope component
+    # exp(-i Delta t) (repo convention exp(-i omega t), Agrawal beta_k) sits at numpy frequency
+    # w = -Delta. Even orders are immune; ODD orders must flip sign in numpy-w variables so that
+    # a literature beta3 > 0 produces the physical trailing-edge oscillations (audit S3-11: the
+    # old +beta3/6 w^3 mirrored the TOD asymmetry for external inputs).
+    D_fixed = 1j * (beta2_s2_m / 2.0 * w ** 2 - beta3_s3_m / 6.0 * w ** 3) - 0.5 * loss_per_m
     if gain_omega is not None:
         D_fixed = D_fixed + 0.5 * np.asarray(gain_omega(w), np.complex128)
     elif gain_per_m:

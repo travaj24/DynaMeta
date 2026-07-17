@@ -26,11 +26,14 @@ __all__ = ["apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResu
 
 
 def apply_spectral_phase(pulse: Pulse, gdd_s2: float = 0.0, tod_s3: float = 0.0) -> Pulse:
-    """Apply a lumped spectral phase phi(omega) = gdd/2 omega^2 + tod/6 omega^3 (a stretcher or
-    compressor / grating pair): Afield -> IFFT[exp(i phi) FFT[Afield]]. gdd = group-delay
-    dispersion [s^2], tod = third-order dispersion [s^3]."""
+    """Apply a lumped spectral phase phi = gdd/2 Delta^2 + tod/6 Delta^3 (a stretcher or
+    compressor / grating pair) in the PHYSICAL exp(-i omega t) convention: Afield ->
+    IFFT[exp(i phi) FFT[Afield]]. gdd = group-delay dispersion [s^2], tod = third-order
+    dispersion [s^3]. The odd (tod) term flips sign in numpy-fft variables (w = -Delta), matching
+    propagate_gnlse's beta3 handling (audit S3-11), so a positive literature TOD delays the wings
+    to the trailing edge."""
     w = pulse.omega_rad_s()
-    phi = gdd_s2 / 2.0 * w ** 2 + tod_s3 / 6.0 * w ** 3
+    phi = gdd_s2 / 2.0 * w ** 2 - tod_s3 / 6.0 * w ** 3
     A = np.fft.ifft(np.exp(1j * phi) * np.fft.fft(pulse.field))
     return Pulse(pulse.t_s.copy(), A, pulse.lambda0_m)
 

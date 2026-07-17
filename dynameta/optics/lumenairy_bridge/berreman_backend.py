@@ -286,6 +286,7 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
         return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
 
     _solve.solve_sweep = _solve_sweep
+    _solve.cache_fingerprint = "berreman(absorption={},n_slices={})".format(absorption, n_slices)
     return _solve
 
 

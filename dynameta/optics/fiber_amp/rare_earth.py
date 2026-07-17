@@ -1,8 +1,11 @@
 """The shared rare-earth rate-equation CORE (Giles-Desurvire two-level, extends to the Yb
 quasi-three-level): given the local optical powers of every channel (pump / signal / ASE bins)
 at one z, compute the steady-state metastable fraction nbar2 = N2/n_t and the per-channel local
-gain coefficient + ASE spontaneous source. This is the pointwise physics the Phase-2 BVP
-integrator calls along z; it holds no geometry of its own beyond what FiberSpec supplies.
+gain coefficient + ASE spontaneous source. These are the REFERENCE (ideal-model, unit-tested) forms of the pointwise physics;
+the steady-state solver owns its own optimized copy (which additionally carries the opt-in
+concentration effects: active/dark ion split, photodarkening). Audit S3-8: the former dP_dz /
+ase_source_per_m exports duplicated the solver inline physics and had silently diverged from it
+(n_t vs active density); they were removed -- build on FiberAmplifier.solve(), not on these.
 
 docs/fiber_amp_model_spec.md sec.1. Pure numpy; SI units; exp(-i omega t).
 """
@@ -17,8 +20,7 @@ from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, overlap_gamma
 
-__all__ = ["ChannelSet", "metastable_fraction", "gain_coeff_per_m", "ase_source_per_m",
-           "dP_dz"]
+__all__ = ["ChannelSet", "metastable_fraction", "gain_coeff_per_m"]
 
 
 @dataclass(frozen=True)
@@ -101,25 +103,3 @@ def gain_coeff_per_m(ch: ChannelSet, nbar2: float, fiber: FiberSpec) -> np.ndarr
     return (ch.gamma * fiber.n_t_m3
             * (ch.sigma_e * nbar2 - ch.sigma_a * (1.0 - nbar2) - ch.sigma_esa * nbar2)
             - ch.loss_per_m)
-
-
-def ase_source_per_m(ch: ChannelSet, nbar2: float, fiber: FiberSpec, *, m_modes: int = 2
-                     ) -> np.ndarray:
-    """Per-channel local spontaneous-emission source [W/m] added to the ASE channels:
-        s_k = g*_k nbar2 * m h nu_k dnu_k = (Gamma_k n_t sigma_e,k) nbar2 * m h nu_k dnu_k,
-    with m = 2 modes (two polarizations). Zero for non-ASE channels (dnu_k = 0)."""
-    g_star = ch.gamma * fiber.n_t_m3 * ch.sigma_e * nbar2
-    return np.where(ch.is_ase, g_star * m_modes * H_PLANCK * ch.nu_hz * ch.dnu_hz, 0.0)
-
-
-def dP_dz(ch: ChannelSet, powers_W, fiber: FiberSpec, *, m_modes: int = 2,
-          upconversion_C_up: float = 0.0) -> np.ndarray:
-    """The full RHS dP_k/dz [W/m] for every channel at one z (docs sec.1):
-        dP_k/dz = u_k [ g_k P_k + s_k ],
-    g_k the net gain coefficient, s_k the ASE spontaneous source. nbar2 is recomputed from the
-    local powers each call (algebraic), so the marcher integrates a first-order system in P."""
-    P = np.asarray(powers_W, dtype=np.float64)
-    n2 = metastable_fraction(ch, P, fiber, upconversion_C_up=upconversion_C_up)
-    g = gain_coeff_per_m(ch, n2, fiber)
-    s = ase_source_per_m(ch, n2, fiber, m_modes=m_modes)
-    return ch.u * (g * P + s)

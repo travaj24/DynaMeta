@@ -162,6 +162,10 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     # d_eps=0 everywhere -> lor=None -> the path is byte-identical to the no-Lorentz solve.
     lor = None
     if np.any(ldeps != 0.0):
+        if float(np.max(lw0)) * dt > 1.0:                    # audit S2-7: silent-NaN guard
+            raise ValueError("Lorentz pole under-resolved: lorentz_w0_rad_s*dt = {:.2f} > 1 -- "
+                             "the central-difference ADE would diverge; refine the grid or move "
+                             "the pole".format(float(np.max(lw0)) * dt))
         den = 1.0 + lgam * dt / 2.0
         C1 = (2.0 - lw0 ** 2 * dt ** 2) / den
         C2 = (lgam * dt / 2.0 - 1.0) / den
@@ -174,6 +178,10 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     if np.any(chi3R != 0.0):
         if np.any((chi3R != 0.0) & (rw <= 0.0)):
             raise ValueError("Raman chi3 needs raman_w_rad_s > 0 on every Raman-active layer")
+        if float(np.max(rw)) * dt > 1.0:                     # audit S2-6: mirror the 2D guard
+            raise ValueError("Raman resonance under-resolved: raman_w_rad_s*dt = {:.2f} > 1 -- "
+                             "the leapfrog vibrational ADE would blow up; refine the grid or "
+                             "lower the Raman shift".format(float(np.max(rw)) * dt))
         den_r = 1.0 + rgam * dt / 2.0
         raman_arrs = ((2.0 - rw ** 2 * dt ** 2) / den_r, (rgam * dt / 2.0 - 1.0) / den_r,
                       (rw ** 2 * dt ** 2) / den_r, chi3R)
@@ -182,6 +190,10 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         if np.any((gkdn != 0.0) & ((gw <= 0.0) | (gdw <= 0.0))):
             raise ValueError("gain line needs gain_w_rad_s > 0 and gain_dw_rad_s > 0 on every "
                              "gain-active layer")
+        if float(np.max(gw)) * dt > 1.0:                     # audit S2-7
+            raise ValueError("gain line under-resolved: gain_w_rad_s*dt = {:.2f} > 1 -- the "
+                             "central-difference ADE would diverge; refine the grid or move the "
+                             "line".format(float(np.max(gw)) * dt))
         den_g = 1.0 + gdw * dt / 2.0
         gain_arrs = ((2.0 - gw ** 2 * dt ** 2) / den_g, (gdw * dt / 2.0 - 1.0) / den_g,
                      (-gkdn * dt ** 2) / den_g)
@@ -373,7 +385,7 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
             # branch is resonant only for wc > 0, silently under-sizing dz for reversed
             # magnetization; floor by the background birefringent indices too.
             eps_inf = 0.5 * (L.eps_xx + L.eps_yy)
-            wcL = L.cyclotron_wc_rad_s
+            wcL = getattr(L, 'cyclotron_wc_rad_s', 0.0)   # duck-typed (audit S2-8)
             n_circ = max(abs(np.sqrt(eps_inf - wpL ** 2 / (w * (w - s * wcL) + 1j * w * L.drude_gamma_rad_s)))
                          for w in w_band for s in (+1, -1))
             return max(n_circ, np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
