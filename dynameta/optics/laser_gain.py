@@ -162,9 +162,20 @@ class FourLevelSystem:
         A = self.rate_matrix()
         out = np.empty((t.size, 4))
         t_prev = 0.0
+        # audit S2-15: on a UNIFORM grid (the common case) the single-step propagator expm(A dt)
+        # is the same 4x4 matrix every step -- compute it once and mat-vec (identical result, the
+        # per-step expm was a ~100-500x slowdown at 1e4 steps). Non-uniform grids keep per-step.
+        dts = np.diff(np.concatenate(([t_prev], t)))
+        pos = dts[dts > 0.0]
+        uniform_dt = float(pos[0]) if pos.size and np.allclose(pos, pos[0], rtol=1e-12,
+                                                               atol=0.0) else None
+        P_step = expm(A * uniform_dt) if uniform_dt is not None else None
         for i, ti in enumerate(t):
             if ti > t_prev:
-                N = expm(A * (ti - t_prev)) @ N
+                if P_step is not None:
+                    N = P_step @ N
+                else:
+                    N = expm(A * (ti - t_prev)) @ N
                 t_prev = float(ti)
             out[i] = N
         return out

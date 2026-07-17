@@ -203,10 +203,10 @@ def solve_bor(spec: BorStackSpec, lambda_m: float, *, absorption: bool = False) 
     partial cascades and exposes BORStack.layer_absorption() as (layer_absorption, layer_names), so the
     fundamental OpticalResult carries A_independent + a per-layer absorption map that closes R+T+sum A = 1
     to machine precision (AUDIT B4b)."""
-    t0 = time.time()
+    t0 = time.perf_counter()
     stack = _scaled_stack(spec, lambda_m)
     res = stack.solve(retain_internal=bool(absorption))
-    dt = time.time() - t0
+    dt = time.perf_counter() - t0
     ang = np.asarray(res["angles"], dtype=float)
     order = np.argsort(ang)                                   # near-axis fundamental first
     inc = np.asarray(res["inc"]).ravel()

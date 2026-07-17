@@ -162,8 +162,8 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
     psi_eff,p = psi - Lambda_p."""
     if not (lambda_pin_factor > 0.0):
         raise ValueError("setup_dg_hard_wall: lambda_pin_factor must be > 0")
-    from dynameta.constants import KB, Q_E as _QE, T_REF
-    v_t = KB * T_REF / _QE
+    from dynameta.constants import V_T
+    v_t = V_T   # single-source thermal voltage (audit S1-7)
     # the pin is a DEVICE parameter so the gamma ramp can co-ramp it (a full-depth pin at the
     # first small-gamma step makes the wall-edge Bernoulli overflow during Newton transients)
     ds.set_parameter(device=device, name="wall_lambda_pin", value=0.0)

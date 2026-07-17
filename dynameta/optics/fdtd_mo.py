@@ -21,7 +21,7 @@ Validated (validation/fdtd_mo_vs_tmm.py) vs (a) per-polarization scalar TMM for 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 

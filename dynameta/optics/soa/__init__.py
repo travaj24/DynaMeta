@@ -42,7 +42,11 @@ from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
                                                 agrawal_olsson_output)
 
-__all__ = ["QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "Leakage",
+__all__ = [
+    "spectral_noise_figure",
+    "ase_self_consistent_zresolved",
+    "ase_self_consistent",
+    "ase_spectrum_bidirectional","QDGainModel", "QDGainParams", "SelfHeating", "ManyBody", "Leakage",
            "thermal_profile_steady_1d",
            "sample_T_along_axis", "dome_analytic", "NonlinearLoss",
            "TravelingWaveSOA", "TwoLevelSaturableGain",

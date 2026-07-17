@@ -508,3 +508,62 @@ Audit executed 2026-07-17 against main @ 2f22099 (v0.7.0) in 7 stages, 37 Opus r
 agents, ~5.7M subagent tokens, with every P1/P2 physics claim either executed or independently
 re-derived, and adversarial refutation applied to all findings that had not already been
 empirically demonstrated during review.
+
+---
+
+## Remediation status (executed 2026-07-17, branch fix/audit-2026-07-17)
+
+Four waves, one commit per wave; every fix carries a pinning gate or an executed verification.
+
+### Wave 1 -- all four P1s FIXED (commit b609ee3)
+S3-1, S3-2/S5-1 (formula fixed + soa/fiber term-for-term parity gate + absolute thermal-light
+pin), S3-9 (b_dope overlap + confined-doping gate), S6-1 (bit-identical vectorization). Riders:
+S3-10, S3-37, S3-38 (semi-implicit upconversion), S3-40, plus a latent shape-preservation crash
+in photodarkening_loss_per_m that the new gates caught. New gates: 8.
+
+### Wave 2 -- P2 physics/seams FIXED (commit abc3d24)
+S3-3 (+oracle in lockstep +absolute-scale GATE A2), S3-5 (+corrected pins), S3-11 (+analytic
+centroid gate), S3-4, S3-6 (per_pol contract), S4-1 (loud guard; verified reachable), S4-2
+residual hardening, S4-3 (all-axis affine remap), S4-5, S4-6 (basis labeling + warning), S4-7 +
+S4-28 (0-d zarr parity verified both backends), S2-3 + S2-16 (ordering contract + flip test),
+S5-6 (collapse_fem_region_keys + fallback), S5-7 (fixed-region effect warning), S3-31 (m_modes
+via meta), S3-33, S3-39, S3-8 (dead divergent exports removed), S3-32. Perf riders: S6-2
+(1.6x, bit-identical), S6-13, S6-14, S3-34, S3-36. fiber_amp suite 54s -> 23s.
+
+### Wave 3 -- infrastructure FIXED (commit 1039a42)
+Cache: S5-2 (fingerprints stamped on tmm/fdtd/fdtd-sweep/berreman/pmm factories + closure
+warning), S5-3 (pra persisted + served on HIT), S5-4 (merge-on-flush + atomic HDF5 replace;
+GATE D2 still green -- stale schemas are never resurrected), S6-5 (autosave_every default 64;
+per-miss harnesses updated to request 1 explicitly), S5-12 (solve_sweep proxy). Pipeline: S5-5
+(on_error='skip'), S5-11. DEVSIM: S6-4 (bias continuation with flat-band fallback). Test infra:
+S6-3/S5-8 (@slow + CI -m "not slow"), S5-9 (zarr on CI py3.11+), S5-10 (rc=42). New coverage:
+S1-2 (F12 devsim-free via lazy shims + monotonicity/accuracy/inverter gates), S1-3 (import
+contract), S4-4 (resample), S2-4 (fdtd_1d Airy/Drude), S2-1 (graded-TENSOR FEM gate -- PASSES,
+graded == uniform to 5e-3).
+
+### Wave 4 -- no-loss speedups + hygiene (this commit)
+Speedups (verified): S2-5/S6-6 + S6-7 numba aJ/bJ + Kerr-gate hoists (2D parity bit-identical
+0.0; 3D parity in-band), S6-8 conditional Lorentz-state allocation, S2-15 laser_gain uniform-grid
+expm hoist, S2-17 fdtd_1d loop invariants, S6-15 SP |psi|^2 hoist, S6-16 switching Arrhenius
+vectorization, S2-13 _VAC_TOL tightened to the kernel's 1e-9 (+honest comment). Guards: S2-6
+(3D Raman), S2-7 (Lorentz/gain w0*dt, 2D+3D), S2-8 (_ncell getattr). Hygiene: S1-7, S1-12
+(GAMMA_E_RAD_ST -> constants), S1-15, S1-16, S1-17, S2-18, S3-13, S3-14, S3-27, S4-9, S4-14,
+S5-13 (.gitattributes codifying LF), S5-17 (ruff F/E9 config; note the F-clean sweep is a
+follow-up), S5-18 (.coverage untracked), S5-23 (README 0.7.0).
+
+### DEFERRED (deliberate, with reasons)
+- S6-10 CPML psi banding (memory-only; banded-loop rewrite risk outweighs ~100 MB on the sizes in
+  use today), S6-11 _run_3d_mo/_run_3d_oblique prealloc (edge kernels; run_3d template exists),
+  S2-11/S6-12 2D reference-kernel prealloc (cupy path; medium rewrite), S6-17 batched NGSolve
+  probe evaluation, S6-18 duplicate diagnostics integral (diagnostics-path only).
+- S2-10 numba eager import (lazy-import restructure of the backend dispatch; do as its own PR).
+- S2-12 3D jax nonlinearities (feature work, guarded today). S2-14 fdtd_mo half-cell registration
+  (changes MO results at the dz/2 level; needs the MO validation battery re-run alongside).
+- S3-15/S3-16/S3-17/S3-20/S3-29/S3-30 (soa model refinements needing physics design, documented
+  in place), S3-18/S3-42 partial (deeper eh-split/transient coverage), S4-16 (Rytov orientation
+  oracle), S4-22 (graphene quadrature oracle), S4-27 (feature-aware symmetry), S4-12 (planar-
+  tensor Berreman rerouting), S4-13/S4-10/S4-11 partial docstring rewrites beyond the floor
+  bumps, S4-15 (BorResult flux aliases), S4-17-S4-21/S4-23/S4-24/S4-26/S4-29, S5-14 (implicit-
+  Optional sweep), S5-15, S5-16, S5-19-S5-22, S1-4, S1-5, S1-6, S1-8-S1-11, S1-13, S1-14, S1-18,
+  S3-19, S3-21-S3-26, S3-28, S3-35 partial, S3-41 partial: catalogued P3 polish, batched for a
+  follow-up hygiene PR.

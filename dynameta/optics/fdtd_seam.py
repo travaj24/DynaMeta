@@ -38,7 +38,7 @@ from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 
-_VAC_TOL = 1.0e-3                                            # |n - 1| under this counts as vacuum end medium
+_VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-13: matches the kernel's own guard; the old 1e-3 silently truncated a weakly-absorbing substrate, biasing T ~2% high)
 
 
 def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> FDTDLayer:
