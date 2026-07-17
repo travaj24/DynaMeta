@@ -838,10 +838,10 @@ def test_bidir_ase_saturation_clamps():
 
 def test_facet_gain_ripple_and_ceiling():
     from dynameta.optics.soa import facet_gain_ripple_dB, ripple_enob_ceiling
-    # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~5.6-bit ENOB ceiling
+    # Saitoh-Mukai facet ripple: G=20 dB, R=1e-4 -> ~0.17 dB ripple -> ~4.6-bit ENOB ceiling (power /10 form)
     r = facet_gain_ripple_dB(100.0, 1e-4)
     assert abs(r - 0.174) < 5e-3
-    assert abs(ripple_enob_ceiling(r) - 5.63) < 0.1
+    assert abs(ripple_enob_ceiling(r) - 4.61) < 0.1   # audit S3-5: /10 power form (was 5.63 under /20)
     assert facet_gain_ripple_dB(100.0, 0.0) == 0.0            # AR-coated traveling-wave limit
     assert not np.isfinite(ripple_enob_ceiling(0.0))          # zero ripple -> no ENOB ceiling
     with pytest.raises(ValueError):                           # above lasing threshold

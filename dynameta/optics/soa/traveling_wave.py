@@ -219,8 +219,16 @@ class TravelingWaveSOA:
         nt = P_in.size
         # drive may be: a scalar I; a (nz,) spatial injection PROFILE I(z) (DEVSIM DD / current
         # crowding); or a (nt,) TIME-varying current I(t) (direct current modulation, nt != nz). The
-        # carriers init at I(t=0) for the time form.
+        # carriers init at I(t=0) for the time form. Audit S3-4: when a 1-D drive has EXACTLY
+        # nt == nz samples the two readings collide; the old code silently took the SPATIAL
+        # reading and discarded the temporal modulation -- now it refuses the ambiguous case.
         dr = np.asarray(drive, dtype=np.float64)
+        if dr.ndim == 1 and dr.size == nt and nt == self.nz:
+            raise ValueError(
+                "amplify: ambiguous 1-D drive -- its length ({}) equals BOTH the waveform sample "
+                "count nt and the slice count nz, so it could be a time-varying current I(t) or a "
+                "spatial injection profile I(z). Resample the waveform (nt != nz) or pass a "
+                "scalar/explicitly-shaped drive.".format(dr.size))
         time_drive = bool(dr.ndim == 1 and dr.size == nt and nt != self.nz)
         I0 = dr[0] if time_drive else drive
         state = self.model.init_slices(self.nz, I0) if state0 is None else state0

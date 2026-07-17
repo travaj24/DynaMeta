@@ -56,13 +56,15 @@ class BeatNoiseResult:
 def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
                     optical_bw_Hz: float, electrical_bw_Hz: float,
                     quantum_efficiency: float = 1.0, responsivity_A_W: float = None,
-                    m_modes: int = 2) -> BeatNoiseResult:
+                    m_modes: int = None) -> BeatNoiseResult:
     """Beat-noise analysis of the amplified signal at a photodetector. optical_bw_Hz is the
     filter bandwidth in front of the diode; electrical_bw_Hz the receiver bandwidth. Detector is
     R = responsivity_A_W, or eta e/(h nu) from quantum_efficiency if responsivity is not given.
     Returns the shot / signal-spontaneous / spontaneous-spontaneous variances, the electrical
     SNR, the beat-noise NF (-> optical NF in the signal-spont-dominated limit), and the excess
     RIN the amplifier adds."""
+    from dynameta.optics.fiber_amp.noise import _meta_m_modes
+    m_modes = _meta_m_modes(result, m_modes)     # default: the value the solve used (audit S3-31)
     nr = analyze_noise(result, signal_lambda_m, m_modes=m_modes)
     G = nr.gain_lin
     nu_s = C_LIGHT / signal_lambda_m
