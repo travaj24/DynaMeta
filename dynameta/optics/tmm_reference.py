@@ -276,4 +276,5 @@ def make_layered_tmm_solver(*, n_slices=None):
             res = _dc_replace(res, per_region_absorption=pra)
         return res
 
+    _solve.cache_fingerprint = "tmm(n_slices={})".format(n_slices)
     return _solve
