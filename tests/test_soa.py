@@ -415,7 +415,6 @@ def test_nonlinear_loss_tpa_fca():
     from dynameta.optics.soa import NonlinearLoss
     m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus())
     nu = m.p.nu0_Hz
-    gam = m.gamma_confinement
     A_eff = m.p.A_mode_m2
     L, nz, I = 1.0e-3, 200, 40e-3
     soa = TravelingWaveSOA(m, L, nz, nu_s_Hz=nu, alpha_i_per_m=300.0)
@@ -1012,14 +1011,43 @@ def test_dualpol_tm_depletes_at_its_own_frequency():
     assert abs(g0 - 10.0 * np.log10(s0["P_out"][-1] / abs(A) ** 2)) < 1e-9
 
 
+@pytest.mark.slow
 def test_calibration_reports_both_bandwidth_notions():
-    # audit C4-8: report['bandwidth_nm'] presented the fitted MATERIAL half-max width as
-    # the datasheet's NET -3 dB observable, which this device does NOT match -- the two
-    # must now be distinct keys, with the net bandwidth honestly ~3-4x narrower
+    # audit C4-8 RESOLVED: the co-fit (default) now matches the datasheet's NET -3 dB
+    # bandwidth (60 nm, CONTIGUOUS around the peak -- the adversarial verifier killed a comb
+    # artifact where a max-min measure counted disjoint ripple fingers) with the material width
+    # honestly WIDER; the legacy path (fit_net_bandwidth=False) keeps the old material-width
+    # interpretation with its ~3-4x-narrower net band. SLOW: the resolved-ensemble co-fit runs
+    # ~5 min (spectrally-converged n_groups ~165); the fast-suite contract lives in
+    # test_calibrate_device_small_target below.
     from dynameta.optics.soa.calibration import calibrate_innolume_boa1310
     dev = calibrate_innolume_boa1310(verbose=False)
     r = dev.report
-    assert r["material_fwhm_nm"] == pytest.approx(r["bandwidth_nm"])   # back-compat alias
-    assert 40.0 < r["material_fwhm_nm"] < 80.0                         # ~datasheet 60 nm
-    assert 8.0 < r["net_3dB_bw_nm"] < 30.0                             # honest net width
-    assert r["net_3dB_bw_nm"] < 0.5 * r["material_fwhm_nm"]           # narrowing is real
+    assert r["bandwidth_nm"] == pytest.approx(r["net_3dB_bw_nm"])      # datasheet semantic
+    assert abs(r["net_3dB_bw_nm"] - 60.0) < 3.0                        # co-fit hits the sheet
+    assert r["material_fwhm_nm"] > 1.5 * r["net_3dB_bw_nm"]            # honest narrowing sense
+    assert abs(r["G0_dB"] - 35.0) < 1.0 and abs(r["Psat_out_dBm"] - 23.2) < 1.0
+    assert dev.params.n_groups >= 121                                   # spectrally resolved
+    leg = calibrate_innolume_boa1310(verbose=False, fit_net_bandwidth=False).report
+    assert leg["bandwidth_nm"] == pytest.approx(leg["material_fwhm_nm"])  # legacy alias
+    assert 40.0 < leg["material_fwhm_nm"] < 80.0                       # ~datasheet 60 nm
+    assert leg["net_3dB_bw_nm"] < 0.5 * leg["material_fwhm_nm"]        # the old narrowing
+
+
+def test_calibrate_device_small_target():
+    # FAST-suite contract for the generic co-fit: an easy narrowband GS-only target keeps
+    # n_groups at the floor (seconds, not minutes) while pinning the full report contract --
+    # exact G0/Psat pins, contiguous net bandwidth within tolerance, resolved-comb condition.
+    from dynameta.optics.soa.calibration import DeviceTargets, calibrate_device
+    tgt = DeviceTargets(name="small", peak_nm=1310.0, G0_dB=20.0, net_bw_3dB_nm=25.0,
+                        Psat_out_dBm=15.0, drive_A=0.5, L_m=4.0e-3)
+    dev = calibrate_device(tgt, verbose=False)
+    r = dev.report
+    assert abs(r["G0_dB"] - 20.0) < 0.5
+    assert abs(r["net_3dB_bw_nm"] - 25.0) < 3.0
+    assert abs(r["Psat_out_dBm"] - 15.0) < 0.5
+    assert r["es_ratio"] == 0.0                                        # no ES band requested
+    # resolution contract: group spacing <= half the homogeneous FWHM
+    p = dev.params
+    spacing = 2.0 * p.span_sigma * (p.fwhm_inhom_Hz / 2.35482) / (p.n_groups - 1)
+    assert spacing <= 0.5 * p.fwhm_hom_Hz * 1.001

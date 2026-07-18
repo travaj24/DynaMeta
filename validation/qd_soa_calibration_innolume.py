@@ -33,8 +33,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.optics.soa import QDGainModel, noise_figure
-from dynameta.optics.soa.calibration import (INNOLUME_BOA1310_TARGETS, calibrate_innolume_boa1310,
-                                            _net_gain_spectrum)
+from dynameta.optics.soa.calibration import (INNOLUME_BOA1310_TARGETS,
+                                             calibrate_innolume_boa1310)
 
 C_LIGHT = 2.99792458e8
 
@@ -60,18 +60,25 @@ def main():
     print("[cal] GATE B: small-signal gain {:.1f} dB == {:.0f} dB -> {}".format(
         r["G0_dB"], t["G0_dB"], "PASS" if g_b else "FAIL"), flush=True)
 
-    # ---- GATE C: bandwidth + physical span ----
-    nu = dev.nu0_Hz + np.linspace(-30e12, 30e12, 1601)
-    Gnet = _net_gain_spectrum(m, dev.drive_A, nu, dev.alpha_i_per_m, dev.length_m)
+    # ---- GATE C: NET -3 dB bandwidth (the datasheet observable; C4-8 resolved) ----
+    # The co-fit tunes the ES-band strength + inhomogeneous width until the FULL GS+ES net
+    # -3 dB bandwidth at the 35 dB operating gain matches the sheet's 60 nm. The material
+    # half-max width is now the WIDE number (chirped multi-stack QD envelope, ~150-200 nm) and
+    # the visible positive-net-gain span grows accordingly.
+    from dynameta.optics.soa.calibration import _net_gain_spectrum_full
+    nu = dev.nu0_Hz + np.linspace(-60e12, 60e12, 2401)
+    Gnet = _net_gain_spectrum_full(m, dev.drive_A, nu, dev.alpha_i_per_m, dev.length_m)
     lam = C_LIGHT / nu * 1.0e9
     span_nm = float(lam[Gnet > 0.0].max() - lam[Gnet > 0.0].min()) if np.any(Gnet > 0.0) else 0.0
-    bw_ok = abs(r["bandwidth_nm"] - t["bandwidth_nm"]) < 8.0
-    span_ok = 60.0 < span_nm < 180.0                       # physical (datasheet visible span ~120 nm)
-    g_c = bool(bw_ok and span_ok)
+    bw_ok = abs(r["net_3dB_bw_nm"] - t["bandwidth_nm"]) < 3.0
+    span_ok = 100.0 < span_nm < 450.0                      # physical: wide multi-stack envelope
+    narrow_ok = r["material_fwhm_nm"] > 1.5 * r["net_3dB_bw_nm"]   # narrowing runs the honest way
+    g_c = bool(bw_ok and span_ok and narrow_ok)
     ok = ok and g_c
-    print("[cal] GATE C: material -3dB BW {:.1f} nm == {:.0f} nm; net-gain span {:.0f} nm (physical) "
-          "-> {}".format(r["bandwidth_nm"], t["bandwidth_nm"], span_nm, "PASS" if g_c else "FAIL"),
-          flush=True)
+    print("[cal] GATE C: NET -3dB BW {:.1f} nm == {:.0f} nm (co-fit); material FWHM {:.0f} nm; "
+          "net-gain span {:.0f} nm -> {}".format(r["net_3dB_bw_nm"], t["bandwidth_nm"],
+                                                 r["material_fwhm_nm"], span_nm,
+                                                 "PASS" if g_c else "FAIL"), flush=True)
 
     # ---- GATE D: saturation output power ----
     g_d = bool(np.isfinite(r["Psat_out_dBm"]) and abs(r["Psat_out_dBm"] - t["Psat_out_dBm"]) < 1.0)
