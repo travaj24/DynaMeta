@@ -31,7 +31,7 @@ plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
-jax = ["jax>=0.11"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
+jax = ["jax>=0.11; python_version>='3.12'"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
