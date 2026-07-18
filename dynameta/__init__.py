@@ -43,9 +43,18 @@ mirror-symmetry domain reduction (geometry.specs.Mesh3DSpec.symmetry: PEC/PMC ha
 never automatic). (Module map refreshed per audit 6.3.)
 """
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 # Geometry + materials data model (lightweight)
+# Windows: expose the pip 'tbb' wheel's runtime DLLs (<prefix>/Library/bin) so numba's
+# preferred TBB threading layer can load -- a path fix only (numba_env docstring; the runtime
+# PROBE stays opt-in via ensure_working_threading_layer, e.g. tests/conftest.py). No-op on
+# POSIX / when tbb is absent; stdlib-only, keeps the base-import contract.
+from dynameta.numba_env import _expose_tbb_dlls as _dm_expose_tbb
+
+_dm_expose_tbb()
+del _dm_expose_tbb
+
 from dynameta.geometry import (
     Design, UnitCell, Stack, Layer, Inclusion, Feature, Electrode,
     CrossSection, Rectangle, Circle, Ellipse, RegularPolygon, Polygon,
