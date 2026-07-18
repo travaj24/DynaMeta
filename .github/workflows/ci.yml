@@ -29,7 +29,7 @@ jobs:
       - name: Install (core + dev + plot + h5py)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'"
+          pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'" "jax>=0.11; python_version >= '3.12'"
       - name: Run fast tests
         # audit S6-3: the 7 @slow validation-wrapper tests (~35 CPU-min across the matrix) are
         # excluded here; their underlying validation modules run once in the py3.13 smoke tier.

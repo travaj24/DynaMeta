@@ -58,6 +58,20 @@ Pulsed / chirped-pulse amplification (pulse.py, cpa.py):
   Phase 13 pulse (SaturableGain)  : saturable, spectrally-shaped gain -> gain narrowing.
   Phase 14 cpa                    : stretcher/compressor chain, B-integral, Strehl / compression
            metrics (cpa_chain, strehl_ratio, transform_limited).
+
+Realism extensions (2026-07 generality campaign; all opt-in / standalone):
+  Phase 15 nonlinear_limits       : SBS/SRS thresholds (passive Smith + active gain-integral
+           forms), TMI threshold estimator, double-Rayleigh MPI + RIN.
+  Phase 16 steady_state.RamanStokes: the SRS Stokes channel COUPLED into the solve (Manley-Rowe
+           exchange + spontaneous seeding); pulse (raman/self_steepening): delayed Raman h_R +
+           optical shock in the GNLSE.
+  Phase 17 thermal (+ solver hook): thermal lens, thermal-guiding onset, and the SELF-CONSISTENT
+           distributed-T(z) feedback loop (set_temperature_profile: per-z McCumber sigma_e).
+  Phase 18 eryb                   : Er:Yb co-doped amplifier (Yb-sensitized transfer).
+  Phase 19 lma                    : LP-mode solver, per-mode dopant overlaps, Marcuse bend loss,
+           cladding-pump geometry efficiency.
+  Phase 20 polarization / chain   : PDG/PHB two-pol model + measured anchors; multi-stage chains
+           with PSD-based Friis-reproducing noise cascade.
 """
 
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
@@ -67,8 +81,8 @@ from dynameta.optics.fiber_amp.waveguide import (FiberSpec, cladding_pump_overla
                                                  mode_field_radius_m, overlap_gamma)
 from dynameta.optics.fiber_amp.rare_earth import (ChannelSet, gain_coeff_per_m,
                                                   metastable_fraction)
-from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, Signal,
-                                                   SteadyStateResult)
+from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, RamanStokes,
+                                                   Signal, SteadyStateResult)
 from dynameta.optics.fiber_amp.noise import (AseSpectrum, NoiseResult, analyze_noise,
                                             local_inversion_factor, noise_figure,
                                             output_ase_spectrum)
@@ -81,7 +95,11 @@ from dynameta.optics.fiber_amp.concentration import (ConcentrationModel, erbium_
                                                     ytterbium_photodarkening)
 from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, net_forward_flux,
                                               peak_temperature_rise, quantum_defect_fraction,
-                                              radial_temperature_rise, total_heat_W)
+                                              radial_temperature_rise, total_heat_W,
+                                              thermal_lens_focal_power_per_m,
+                                              thermal_guiding_onset_Q_per_m,
+                                              thermo_optic_phase_rad,
+                                              solve_with_thermal_feedback)
 from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_gain,
                                                frantz_nodvik_output_energy, frantz_nodvik_pulse,
                                                saturation_energy, simulate_transient)
@@ -91,15 +109,31 @@ from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, calibratio
 from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
 from dynameta.optics.fiber_amp.pulse import (Pulse, gaussian_pulse, sech_pulse,
                                             dispersion_length, nonlinear_length, soliton_order,
-                                            propagate_gnlse, SaturableGain)
+                                            propagate_gnlse, raman_response_freq, SaturableGain)
 from dynameta.optics.fiber_amp.cpa import (apply_spectral_phase, transform_limited, strehl_ratio,
                                           CPAResult, cpa_chain)
+from dynameta.optics.fiber_amp.nonlinear_limits import (brillouin_shift_hz,
+                                                        brillouin_linewidth_hz,
+                                                        sbs_threshold_W, sbs_gain_exponent,
+                                                        srs_threshold_W, srs_gain_exponent,
+                                                        tmi_threshold_W, rayleigh_alpha_per_m,
+                                                        capture_fraction, double_rayleigh_mpi,
+                                                        mpi_beat_variance_ratio, mpi_rin_per_hz,
+                                                        mpi_power_penalty_dB)
+from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+from dynameta.optics.fiber_amp.lma import (solve_lp_modes, dopant_overlap,
+                                           marcuse_bend_loss_per_m, pump_absorption_efficiency,
+                                           effective_cladding_overlap,
+                                           mode_resolved_gain_overlaps)
+from dynameta.optics.fiber_amp.polarization import (TwoPolSaturation, f_from_pdg_slope,
+                                                    pdg_cascade_db, pdg_db)
+from dynameta.optics.fiber_amp.chain import AmplifierChain, ChainResult, PassiveElement
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
            "ChannelSet", "metastable_fraction", "gain_coeff_per_m",
-           "Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult",
+           "Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "SteadyStateResult",
            "AseSpectrum", "NoiseResult", "output_ase_spectrum", "noise_figure",
            "local_inversion_factor", "analyze_noise",
            "CompressionCurve", "GainSpectrum", "SlopeEfficiency", "gain_compression_curve",
@@ -108,11 +142,23 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "ConcentrationModel", "erbium_upconversion", "ytterbium_photodarkening",
            "ThermalModel", "quantum_defect_fraction", "net_forward_flux", "heat_load_per_m",
            "total_heat_W", "radial_temperature_rise", "peak_temperature_rise",
+           "thermal_lens_focal_power_per_m", "thermal_guiding_onset_Q_per_m",
+           "thermo_optic_phase_rad", "solve_with_thermal_feedback",
            "TransientResult", "simulate_transient", "saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
            "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
            "calibration_report", "dB_per_m_to_per_m",
            "BeatNoiseResult", "detection_noise",
            "Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "SaturableGain",
-           "apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResult", "cpa_chain"]
+           "soliton_order", "propagate_gnlse", "raman_response_freq", "SaturableGain",
+           "apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResult", "cpa_chain",
+           "brillouin_shift_hz", "brillouin_linewidth_hz", "sbs_threshold_W",
+           "sbs_gain_exponent", "srs_threshold_W", "srs_gain_exponent", "tmi_threshold_W",
+           "rayleigh_alpha_per_m", "capture_fraction", "double_rayleigh_mpi",
+           "mpi_beat_variance_ratio", "mpi_rin_per_hz", "mpi_power_penalty_dB",
+           "ErYbAmplifier",
+           "solve_lp_modes", "dopant_overlap", "marcuse_bend_loss_per_m",
+           "pump_absorption_efficiency", "effective_cladding_overlap",
+           "mode_resolved_gain_overlaps",
+           "TwoPolSaturation", "f_from_pdg_slope", "pdg_cascade_db", "pdg_db",
+           "AmplifierChain", "ChainResult", "PassiveElement"]

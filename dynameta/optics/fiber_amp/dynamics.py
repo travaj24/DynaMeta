@@ -85,6 +85,16 @@ def _propagate_fixed(z, g, s, bc, u):
     return P
 
 
+def _no_raman(amp):
+    """The transient fixed-inversion propagator assumes per-channel LINEAR gain; the SRS
+    Stokes exchange is bilinear in the powers, so a raman-coupled amplifier must refuse rather
+    than silently drop the coupling (the S3-1 clone-drop failure mode, applied to transients)."""
+    if getattr(amp, "raman", None) is not None:
+        raise NotImplementedError("simulate_transient does not support RamanStokes coupling; "
+                                  "solve the steady state with raman or run the transient "
+                                  "without it")
+
+
 def simulate_transient(amp: FiberAmplifier, t_grid, *,
                        signal_drive: Optional[Callable] = None,
                        pump_drive: Optional[Callable] = None,
@@ -94,6 +104,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     step functions of them produce add/drop transients; default (None) holds the configured
     input powers. Powers are quasi-static each step; nbar2 advances by an exponential integrator.
     Initialised from the steady state at the first drive unless nbar2_0 is supplied."""
+    _no_raman(amp)
     ch, bc0, u, is_ase, kind = amp._plan()
     L = amp.fiber.length_m
     z = np.linspace(0.0, L, n_nodes)

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import H_PLANCK, Q_E
+from dynameta.constants import H_PLANCK
 
 
 __all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
@@ -82,11 +82,23 @@ def single_pass_gain(g_slices, dz_m, Gamma, alpha_i_per_m=0.0):
 
 
 def ase_output_psd(g_slices, rho_GS_slices, dz_m, nu_Hz, Gamma, alpha_i_per_m=0.0,
-                   m_pol=2, *, per_pol=False):
+                   m_pol=2, *, per_pol=False, gsp_slices=None):
     """Forward ASE spectral density at the output [W/Hz], integrating dS/dz = (Gamma g -
-    alpha_i) S + Gamma g n_sp h nu over the z-resolved gain + inversion profile (per-slice
-    g_slices, rho_GS_slices). Reduces to n_sp h nu (G - 1) per polarization for a uniform
-    inversion.
+    alpha_i) S + q over the z-resolved gain + inversion profile (per-slice g_slices,
+    rho_GS_slices). Reduces to n_sp h nu (G - 1) per polarization for a uniform inversion.
+
+    SPONTANEOUS SOURCE (audit S3-30 / dossier Topic 6). Two equivalent above-transparency forms,
+    but only the second is well-posed BELOW transparency:
+      - legacy (gsp_slices=None): q = Gamma g n_sp h nu with n_sp = rho^2/(2 rho - 1). This has a
+        POLE at transparency (n_sp -> inf as g -> 0), so the old code zeroed q on any sub-transparency
+        slice -- which DROPS the real spontaneous emission there (an absorbing input section still
+        fluoresces). Kept for back-compat when no emission gain is supplied.
+      - EMISSION-ONLY (gsp_slices given): q = Gamma g_sp h nu with the pole-free emission gain
+        g_sp propto rho^2 (from emission_gain_per_m / emission_gain_per_m_slices). g_sp > 0 for ALL
+        rho > 0, so the source is finite, positive and CONTINUOUS through g = 0 (at rho = 1/2 it is
+        proportional to rho^2 = 1/4 = f_e f_h, NOT zero). Above transparency q = Gamma g n_sp h nu
+        exactly (g_sp = g n_sp), so the two forms agree there; only the sub-transparency slices differ.
+        This is the same source ase_spectrum_bidirectional uses.
 
     POLARIZATION CONTRACT (audit S3-6): by default this returns the TOTAL collected PSD
     (m_pol x per-polarization; m_pol=2 for an unpolarized receiver). The sibling consumers
@@ -95,18 +107,25 @@ def ase_output_psd(g_slices, rho_GS_slices, dz_m, nu_Hz, Gamma, alpha_i_per_m=0.
     2x-8x. Pass per_pol=True (which ignores m_pol) to get the per-polarization PSD those
     functions consume directly."""
     g = np.asarray(g_slices, dtype=np.float64)
-    rho = np.asarray(rho_GS_slices, dtype=np.float64)
-    nsp = inversion_factor_nsp(rho)
     hnu = H_PLANCK * nu_Hz
+    if gsp_slices is not None:
+        gsp = np.asarray(gsp_slices, dtype=np.float64)       # emission gain [1/m]; pole-free source
+        nsp = None
+    else:
+        rho = np.asarray(rho_GS_slices, dtype=np.float64)
+        nsp = inversion_factor_nsp(rho)
     S = 0.0
     for k in range(g.size):
         # exact slice solution of dS/dz = a S + q (constant a, q over the slice):
         # S <- S exp(a dz) + (q/a)(exp(a dz) - 1)  -> S exp + q dz as a -> 0 (no O(dz) bias).
         a = Gamma * g[k] - alpha_i_per_m
         amp = np.exp(a * dz_m)
-        q = Gamma * g[k] * nsp[k] * hnu                      # spontaneous source per length
-        if not np.isfinite(q):                               # sub-transparency slice (n_sp inf):
-            q = 0.0                                           # negligible NET forward ASE -> guard
+        if nsp is None:                                      # EMISSION-ONLY source (pole-free)
+            q = Gamma * gsp[k] * hnu
+        else:                                                # legacy n_sp source (pole at transparency)
+            q = Gamma * g[k] * nsp[k] * hnu
+            if not np.isfinite(q):                           # sub-transparency slice (n_sp inf):
+                q = 0.0                                       # negligible NET forward ASE -> guard
         emit = q * dz_m if abs(a * dz_m) < 1e-12 else q * (amp - 1.0) / a
         S = S * amp + emit
     return float(S) if per_pol else float(m_pol) * S
@@ -117,14 +136,13 @@ def noise_figure(G, n_sp, *, Gamma_g_per_m=None, alpha_i_per_m=0.0, eta_in=1.0):
     factor. The internal-loss factor (Gamma g)/(Gamma g - alpha_i) and the input-coupling
     efficiency eta_in degrade the ideal high-gain 2 n_sp; with alpha_i = 0 and eta_in = 1,
     NF = 2 n_sp (G-1)/G + 1/G -> 2 n_sp at high gain (3 dB at full inversion, n_sp = 1)."""
-    if not (G > 0.0 and 0.0 < eta_in <= 1.0):
-        raise ValueError("noise_figure: G > 0 and eta_in in (0, 1]")
+    from dynameta.optics.amp_noise import nf_from_nsp
     loss = 1.0
     if Gamma_g_per_m is not None and alpha_i_per_m > 0.0:
         if Gamma_g_per_m <= alpha_i_per_m:
             raise ValueError("noise_figure: net gain requires Gamma g > alpha_i")
         loss = Gamma_g_per_m / (Gamma_g_per_m - alpha_i_per_m)
-    return float((2.0 * n_sp * loss * (G - 1.0) / G + 1.0 / G) / eta_in)
+    return nf_from_nsp(G, n_sp, loss_factor=loss, eta_in=eta_in)
 
 
 def detector_noise_variances(P_sig_W, S_ASE_W_Hz, *, R_A_W=1.0, B_Hz=1e10, dnu_opt_Hz=1e12,
@@ -133,16 +151,15 @@ def detector_noise_variances(P_sig_W, S_ASE_W_Hz, *, R_A_W=1.0, B_Hz=1e10, dnu_o
     ASE: shot (signal + ASE + dark), signal-spontaneous beat, spontaneous-spontaneous beat.
     P_sig is the detected signal power, S_ASE the one-sided ASE PSD per polarization, dnu_opt
     the optical filter bandwidth, B the electrical bandwidth."""
-    P_ASE = float(m_pol) * S_ASE_W_Hz * dnu_opt_Hz
-    sh = 2.0 * Q_E * R_A_W * (P_sig_W + P_ASE) * B_Hz + 2.0 * Q_E * I_dark_A * B_Hz
-    ssp = 4.0 * R_A_W ** 2 * P_sig_W * S_ASE_W_Hz * B_Hz
-    # audit C4-3 (Monte-Carlo confirmed 2x): per-pol circular-Gaussian ASE gives
-    # sigma^2_sp-sp = m_pol R^2 S^2 (2 dnu_o - B) B; the old leading 2*m_pol treated
-    # Olsson's both-pol 4 R^2 S^2 (B_o - B/2) B as per-pol and re-multiplied by m_pol
-    spsp = float(m_pol) * R_A_W ** 2 * S_ASE_W_Hz ** 2 * max(2.0 * dnu_opt_Hz - B_Hz,
-                                                             0.0) * B_Hz
-    return {"shot": sh, "sig_spont": ssp, "spont_spont": spsp,
-            "total": sh + ssp + spsp, "P_ASE": P_ASE}
+    # single shared implementation (post-audit unification: the C4-3 sp-sp polarization fix had
+    # to be manually propagated to fiber_amp's duplicate -- S3-2 -- so the algebra now lives once
+    # in optics.amp_noise and both amplifier packages delegate)
+    from dynameta.optics.amp_noise import beat_noise_variances
+    v = beat_noise_variances(P_sig_W, S_ASE_W_Hz, responsivity_A_W=R_A_W,
+                             electrical_bw_Hz=B_Hz, optical_bw_Hz=dnu_opt_Hz,
+                             m_pol=m_pol, I_dark_A=I_dark_A)
+    return {"shot": v["shot"], "sig_spont": v["sig_spont"], "spont_spont": v["spont_spont"],
+            "total": v["total"], "P_ASE": v["P_ASE"]}
 
 
 def spectral_noise_figure(S_f_per_pol, G_nu, nu_grid_Hz, *, eta_in=1.0):
