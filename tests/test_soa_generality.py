@@ -61,16 +61,22 @@ def test_auger_loss_lowers_Nw_growing_with_drive():
 
 
 def test_auger_bit_identity_defaults():
-    # 1c: all-default (Auger off) results bit-identical to the pre-edit golden values.
+    # 1c: all-default (Auger off) results identical to the pre-edit golden values. GOLDENS
+    # were captured on the py3.14 dev box; CI's py3.11 numpy wheel rounds the last ULP
+    # differently (observed: ...88 vs ...87), so the contract is rtol=5e-12 -- still six
+    # orders tighter than any defect this gate guards against, but platform-portable.
+    RT = 5e-12
     m = QDGainModel(QDGainParams(n_groups=5).with_detailed_balance_taus())
     y = m.steady_state(20.0e-3)
-    assert all(float(a) == b for a, b in zip(y, GOLD_Y5))
-    assert float(m.material_gain_per_m(m.rho_GS(y), m.p.nu0_Hz)) == GOLD_G5
+    assert all(abs(float(a) - b) <= RT * max(abs(b), 1e-300) for a, b in zip(y, GOLD_Y5))
+    assert float(m.material_gain_per_m(m.rho_GS(y), m.p.nu0_Hz)) == pytest.approx(GOLD_G5,
+                                                                                  rel=RT)
     nus = m.p.nu0_Hz + np.linspace(-8e12, 8e12, 7)
-    assert all(float(a) == b for a, b in zip(m.material_gain_per_m(m.rho_GS(y), nus), GOLD_SPEC5))
+    assert np.allclose(m.material_gain_per_m(m.rho_GS(y), nus), GOLD_SPEC5, rtol=RT, atol=0.0)
     m2 = QDGainModel(QDGainParams())
     y2 = m2.steady_state(15.0e-3)
-    assert float(m2.material_gain_per_m(m2.rho_GS(y2), m2.p.nu0_Hz)) == GOLD_G_DEF
+    assert float(m2.material_gain_per_m(m2.rho_GS(y2), m2.p.nu0_Hz)) == pytest.approx(
+        GOLD_G_DEF, rel=RT)
 
 
 def test_auger_numba_fast_guard():
@@ -247,10 +253,12 @@ def test_sech_integrated_gain_conserved():
 
 
 def test_lorentzian_default_bit_identity():
-    # 4d: the default (lorentzian) is byte-identical to the pre-edit golden lineshape values.
+    # 4d: the default (lorentzian) matches the pre-edit golden lineshape values (rtol=5e-12:
+    # cross-platform last-ULP tolerance, see test_auger_bit_identity_defaults).
     m = QDGainModel(QDGainParams(n_groups=5, lineshape="lorentzian").with_detailed_balance_taus())
     y = m.steady_state(20.0e-3)
-    assert float(m.material_gain_per_m(m.rho_GS(y), m.p.nu0_Hz)) == GOLD_G5
+    assert float(m.material_gain_per_m(m.rho_GS(y), m.p.nu0_Hz)) == pytest.approx(GOLD_G5,
+                                                                                  rel=5e-12)
 
 
 # ================ ITEM 5: SUB-TRANSPARENCY ASE ============================
