@@ -58,7 +58,7 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import H_PLANCK, KB, Q_E
+from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E
 
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
@@ -316,6 +316,35 @@ class QDGainParams:
     tau_esc_h_s: Optional[float] = None   # ES -> WL hole escape  (None -> tau_esc_s)
     tau_rel_h_s: Optional[float] = None   # ES -> GS hole relaxation (None -> tau_ES_GS_s)
     tau_back_h_s: Optional[float] = None  # GS -> ES hole back-transfer (None -> tau_GS_ES_s)
+    # ---- confined-state Auger (opt-in; ALL default 0 -> byte-identical). Two PHYSICALLY DISTINCT
+    # channels kept separate (dossier Topic 1; Uskov APL 72,58 (1998); Magnusdottir & Mork PRB 67,
+    # 205326 (2003); Nilsson): (i) a LOSS Auger that REMOVES an e-h pair from the wetting-layer
+    # reservoir (neutral cubic R = C_A N_w^3, ADDED to the existing WL bimolecular+Auger channel),
+    # and (ii) a CAPTURE / relaxation Auger that MOVES a carrier WL->dot faster as the WL fills but
+    # removes NO pair -- the linear-pinned phenomenological volume form 1/tau_cap_eff = 1/tau_cap +
+    # C_W N_w and 1/tau_relax_eff = 1/tau_ES_GS + C_E N_w (density-assisted capture/relaxation). Only
+    # the pure-numpy rhs path carries them; the numba fast path raises if any is nonzero (documented).
+    auger_wl_C_m6_s: float = 0.0          # LOSS Auger on the WL reservoir C_A [m^6/s] (removes a pair)
+    auger_capture_Cw_m3_s: float = 0.0    # CAPTURE Auger C_W [m^3/s]: 1/tau_cap_eff = 1/tau_cap + C_W N_w
+    auger_capture_Ce_m3_s: float = 0.0    # RELAX Auger C_E [m^3/s]: 1/tau_relax_eff = 1/tau_ES_GS + C_E N_w
+    # ---- WL<->ES full detailed balance (opt-in via with_full_detailed_balance(); these are read ONLY
+    # by that method, so they never touch the default engine). 2-D reservoir escape slaving of tau_esc
+    # (ES->WL) to tau_cap (dossier Topic 2): 1/tau_esc = (1/tau_cap)((rho_WL_eff A_dot)/mu_ES)
+    # exp(-dE_WL_ES/kT) -- escape into the LARGER WL state count is ENHANCED by it (adversarial
+    # verifier fixed the initially-inverted ratio); rho_WL_eff = m_WL kB T/(pi hbar^2) [spin x2,
+    # states/m^2], A_dot = 1/(N_q t_qd) the effective wetting-layer area per dot.
+    dE_WL_ES_eV: float = 0.080            # WL(barrier continuum edge) - ES separation [eV]
+    m_wl_eff_kg: float = 0.05 * M_E       # wetting-layer in-plane effective mass [kg] (0.05 m0)
+    t_qd_m: float = 8.0e-9                # effective QD-layer thickness [m] -> sheet dot density N_q t_qd
+    # ---- ES OPTICAL split (audit S3-15): the ES optical transition energy (photon = electron + hole
+    # level split) is NOT the same as the electron-cascade split dE_ES_GS_eV that drives the WL->ES->GS
+    # electron kinetics. None -> reuse dE_ES_GS_eV (byte-identical); a value sets the ES gain comb
+    # offset nu_ES_j = nu_j + dE_ES_GS_optical/h WHILE the kinetics keep dE_ES_GS_eV.
+    dE_ES_GS_optical_eV: Optional[float] = None
+    # ---- homogeneous lineshape family. 'lorentzian' (default, peak-normalized, byte-identical to the
+    # legacy line) or 'sech' (area-conserving at equal FWHM: same oscillator strength / integrated gain,
+    # but EXPONENTIAL wings that kill the spurious Lorentzian sub-gap absorption tail; dossier Topic 5).
+    lineshape: str = "lorentzian"
 
     def __post_init__(self):
         pos = ("N_q_m3", "V_a_m3", "A_mode_m2", "v_g_m_s", "tau_cap_s", "tau_esc_s",
@@ -340,6 +369,15 @@ class QDGainParams:
             raise ValueError("QDGainParams: sigma_pk_ES_m2 must be >= 0")
         if self.fwhm_hom_ES_Hz is not None and not (self.fwhm_hom_ES_Hz > 0.0):
             raise ValueError("QDGainParams: fwhm_hom_ES_Hz must be > 0 when set")
+        for nm in ("auger_wl_C_m6_s", "auger_capture_Cw_m3_s", "auger_capture_Ce_m3_s"):
+            if getattr(self, nm) < 0.0:                        # 0 disables (byte-identical)
+                raise ValueError("QDGainParams: {} must be >= 0".format(nm))
+        if self.dE_WL_ES_eV < 0.0 or not (self.m_wl_eff_kg > 0.0) or not (self.t_qd_m > 0.0):
+            raise ValueError("QDGainParams: need dE_WL_ES_eV >= 0, m_wl_eff_kg > 0, t_qd_m > 0")
+        if self.dE_ES_GS_optical_eV is not None and self.dE_ES_GS_optical_eV < 0.0:
+            raise ValueError("QDGainParams: dE_ES_GS_optical_eV must be >= 0 when set")
+        if self.lineshape not in ("lorentzian", "sech"):
+            raise ValueError("QDGainParams: lineshape must be 'lorentzian' or 'sech'")
 
     def with_detailed_balance_taus(self) -> "QDGainParams":
         """Return a copy with tau_GS_ES fixed by detailed balance, so the dark
@@ -359,6 +397,46 @@ class QDGainParams:
             tau_rel_h = self.tau_rel_h_s if self.tau_rel_h_s is not None else self.tau_ES_GS_s
             updates["tau_back_h_s"] = float(tau_rel_h * ratio)
         return replace(self, **updates)
+
+    def with_full_detailed_balance(self) -> "QDGainParams":
+        """Return a copy with BOTH escape ladders slaved by detailed balance at the current T:
+        the ES<->GS back-transfer (exactly as with_detailed_balance_taus) AND the ES->WL escape
+        tau_esc, which with_detailed_balance_taus leaves free. Detailed-balance escape is never a
+        free knob (dossier Topic 2): a wrong tau_esc gives the wrong quasi-Fermi limit and an
+        unphysical high-T gain rollover.
+
+        The WL is a 2-D continuum reservoir, so its escape link needs the WL effective density of
+        states rather than a discrete degeneracy (the ES<->GS case). Setting the net WL<->ES flux
+        of the CODED rate equations to zero with per-state Boltzmann occupancy gives
+
+            1/tau_esc = (1/tau_cap) * ((rho_WL_eff * A_dot) / mu_ES) * exp(-dE_WL_ES / kT)
+
+        (the coded dilute equilibrium is rho_ES = (tau_esc/tau_cap) N_w/(mu_ES N_q); demanding
+        rho_ES = f_WL exp(dE/kT) with the per-state WL occupation f_WL = (N_w/N_q)/(rho_WL_eff
+        A_dot) forces the prefactor above. ADVERSARIAL-VERIFIER FIX: the first implementation
+        carried the RECIPROCAL state-count ratio, suppressing escape by (rho_WL_eff A_dot/mu_ES)^2
+        ~ 11x at 300 K -- physically, escape into the LARGER WL state count must be ENHANCED by
+        it, not suppressed; the dark-relaxation equilibrium gate in tests/test_soa_generality.py
+        pins the corrected form against a number-conserving numeric oracle.) The spin-degenerate
+        2-D wetting-layer sheet density of states is
+
+            rho_WL_eff = 2 * m_WL * kB * T / (2 pi hbar^2) = m_WL kB T / (pi hbar^2)   [states / m^2]
+
+        and the effective wetting-layer AREA per dot A_dot = 1 / n_dot_2d, n_dot_2d = N_q * t_qd the
+        sheet dot density. rho_WL_eff * A_dot is the number of WL states sharing one dot. tau_esc
+        still rises as T falls (the exp dominates the T-linear sheet-DOS prefactor) and diverges as
+        T -> 0 -- carriers freeze into the dots. This method is a SUPERSET of
+        with_detailed_balance_taus (which stays byte-stable); opt in when the WL<->ES equilibrium at
+        the model T matters (e.g. the temperature model, temperature.qd_params_at_temperature)."""
+        from dataclasses import replace
+        base = self.with_detailed_balance_taus()              # ES<->GS branch (byte-stable path)
+        kT = KB * self.T_K
+        rho_wl_eff = self.m_wl_eff_kg * kT / (np.pi * HBAR * HBAR)   # 2-D sheet DOS [states/m^2], spin x2
+        n_dot_2d = self.N_q_m3 * self.t_qd_m                        # sheet dot density [m^-2]
+        A_dot = 1.0 / n_dot_2d                                     # WL area per dot [m^2]
+        inv_tau_esc = (1.0 / self.tau_cap_s) * ((rho_wl_eff * A_dot) / self.mu_ES) * np.exp(
+            -self.dE_WL_ES_eV * Q_E / kT)
+        return replace(base, tau_esc_s=float(1.0 / inv_tau_esc))
 
 
 @dataclass(frozen=True)
@@ -563,7 +641,12 @@ class QDGainModel:
         # the ES-GS separation (so optical + detailed-balance spacings stay consistent); carries
         # mu_ES. sigma_pk_ES = 0 -> _es_active False -> every ES term short-circuits to 0 (GS-only,
         # byte-identical). Its own cached Lorentzian row + gain line weights mirror the GS ones.
-        self.nu_ES_j = self.nu_j + p.dE_ES_GS_eV * Q_E / H_PLANCK  # (ng,) ES line comb
+        # ES optical comb offset uses the OPTICAL split (electron + hole level splits both enter the
+        # photon energy) while the WL->ES->GS kinetics keep the electron-cascade split dE_ES_GS_eV
+        # (audit S3-15). None -> reuse dE_ES_GS_eV (byte-identical).
+        dE_ES_GS_opt = (p.dE_ES_GS_optical_eV if p.dE_ES_GS_optical_eV is not None
+                        else p.dE_ES_GS_eV)
+        self.nu_ES_j = self.nu_j + dE_ES_GS_opt * Q_E / H_PLANCK   # (ng,) ES line comb (optical split)
         self._es_active = p.sigma_pk_ES_m2 > 0.0
         self._stim_pref_ES = p.v_g_m_s * p.sigma_pk_ES_m2          # per-dot ES stimulated prefactor
         self._gain_pref_ES = p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2  # ES material-gain prefactor (no Gamma; audit S3-13) (mu_ES)
@@ -580,6 +663,21 @@ class QDGainModel:
         self._gain_scale = 1.0
         self._dg_dT_frac = self.sh.dg_dT_frac_per_K if self.sh is not None else 0.0
         self._T = self.sh.T0_K if self.sh is not None else p.T_K
+        # confined-state Auger (opt-in). Density-dependent capture/relaxation and the WL-loss cubic
+        # only live in the pure-numpy rhs path; the numba twin's fixed scalar-time signature cannot
+        # carry the density-dependent inverse times without restructuring, so a fast=True model with
+        # any Auger coefficient nonzero is rejected up front (rather than silently dropping the term).
+        self._auger_active = (p.auger_wl_C_m6_s > 0.0 or p.auger_capture_Cw_m3_s > 0.0
+                              or p.auger_capture_Ce_m3_s > 0.0)
+        if self._use_numba and self._auger_active:
+            raise ValueError("QDGainModel(fast=True) numba fast path does not support Auger yet "
+                             "(auger_wl_C_m6_s / auger_capture_Cw_m3_s / auger_capture_Ce_m3_s "
+                             "nonzero); use fast=False for the Auger-augmented rate equations")
+        # area-conserving sech lineshape (opt-in). Equal FWHM as the peak-normalized Lorentzian
+        # (FWHM = 2 arccosh(2) Gs => Gs = hw/arccosh(2)) and equal AREA (A_s = hw/Gs = arccosh(2)),
+        # so the oscillator strength is invariant under the swap but the wings decay exponentially.
+        self._lineshape_sech = (p.lineshape == "sech")
+        self._arccosh2 = float(np.arccosh(2.0))               # 1.3169578969... = FWHM/(2 Gs) = A_s
 
     def _leak_rate(self) -> float:
         """Instantaneous thermionic WL leakage rate 1/tau_leak(T) [1/s] at the model temperature
@@ -587,10 +685,25 @@ class QDGainModel:
         return self.leak.rate_at(self._T) if self.leak is not None else 0.0
 
     # ---- lineshape + gain ----
+    def _lineshape_row(self, dnu, hw):
+        """Homogeneous line profile at detuning dnu with half-width-at-half-max hw. The single
+        routing point for the lineshape FAMILY so 'lorentzian' and 'sech' apply identically to the
+        GS and ES pathways. lineshape='lorentzian' -> the peak-normalized Lorentzian
+        hw^2/(dnu^2+hw^2) (=1 at centre; BYTE-IDENTICAL to the legacy line). lineshape='sech' ->
+        the AREA-conserving sech A_s sech(dnu/Gs) at the SAME FWHM=2 hw: Gs=hw/arccosh(2) so the
+        FWHM matches, A_s=hw/Gs=arccosh(2) so the integral equals the Lorentzian's (pi hw) -- same
+        oscillator strength, but exponential (not 1/dnu^2) wings, so the spurious sub-gap absorption
+        tail vanishes (dossier Topic 5)."""
+        d = np.asarray(dnu)
+        if self._lineshape_sech:
+            Gs = hw / self._arccosh2                          # FWHM = 2 arccosh(2) Gs
+            return self._arccosh2 / np.cosh(d / Gs)           # A_s = hw/Gs = arccosh(2); area = pi hw
+        return hw * hw / (d ** 2 + hw * hw)
+
     def _lorentzian(self, dnu):
-        """Homogeneous Lorentzian normalized to 1 at line centre; FWHM = fwhm_hom_Hz."""
-        hw = 0.5 * self.p.fwhm_hom_Hz
-        return hw * hw / (np.asarray(dnu) ** 2 + hw * hw)
+        """Homogeneous GS line normalized to unit peak (Lorentzian) or equal area (sech) at
+        FWHM = fwhm_hom_Hz. Routed through _lineshape_row (lineshape family selector)."""
+        return self._lineshape_row(dnu, 0.5 * self.p.fwhm_hom_Hz)
 
     def _L_at(self, nu_s_Hz):
         """Cached homogeneous Lorentzian row L(nu_s - nu_j), shape (1, ng) -- constant across the
@@ -617,8 +730,8 @@ class QDGainModel:
     # ---- excited-state (ES) band lineshape + inversion (mirror the GS helpers, retargeted to
     # the blue-shifted ES comb nu_ES_j and the ES homogeneous HWHM _hw_ES) ----
     def _lorentzian_ES(self, dnu):
-        hw = self._hw_ES
-        return hw * hw / (np.asarray(dnu) ** 2 + hw * hw)
+        """ES homogeneous line (same lineshape family as the GS band) at HWHM _hw_ES."""
+        return self._lineshape_row(dnu, self._hw_ES)
 
     def _LE_at(self, nu_s_Hz):
         """Cached ES Lorentzian row L_ES(nu_s - nu_ES_j), shape (1, ng)."""
@@ -800,6 +913,18 @@ class QDGainModel:
         esc_occ = rho_ES / p.tau_esc_s
         fwd = rho_ES * (1.0 - rho_GS) / p.tau_ES_GS_s
         bwd = rho_GS * (1.0 - rho_ES) / p.tau_GS_ES_s
+        cap_wl_loss = (Nw / p.tau_cap_s) * np.sum(w * (1.0 - rho_ES), axis=1)   # WL capture-out (Nz,)
+        if self._auger_active:                                # WL-density-assisted CAPTURE Auger
+            # 1/tau_cap_eff = 1/tau_cap + C_W N_w  and  1/tau_relax_eff = 1/tau_ES_GS + C_E N_w.
+            # Scaling the conjugate capture-in (cap_occ) AND capture-out (cap_wl_loss) by the SAME
+            # per-slice factor (and likewise the ES->GS forward flux, which is applied to BOTH the ES
+            # loss and the mu_ES/mu_GS-weighted GS gain) preserves the exact number-conservation the
+            # dark path already holds. Escape/back-transfer keep their (detailed-balance) base rates.
+            fac_cap = 1.0 + (p.auger_capture_Cw_m3_s * p.tau_cap_s) * Nw    # tau_cap/tau_cap_eff (Nz,)
+            fac_rel = 1.0 + (p.auger_capture_Ce_m3_s * p.tau_ES_GS_s) * Nw  # tau_ES_GS/tau_ES_GS_eff
+            cap_occ = cap_occ * fac_cap[:, None]
+            fwd = fwd * fac_rel[:, None]
+            cap_wl_loss = cap_wl_loss * fac_cap
         gsc = self._gain_scale                                # self-heating gain factor (1.0 off)
         if ls_gs is None:                                     # single-channel (BYTE-IDENTICAL order)
             stim = gsc * self._stim_pref * L * (2.0 * rho_GS - 1.0) * Sb
@@ -815,9 +940,11 @@ class QDGainModel:
         sp_GS = rho_GS * rho_GS / p.tau_sp_s
 
         dN_w = (Ib / self._qVa
-                - (Nw / p.tau_cap_s) * np.sum(w * (1.0 - rho_ES), axis=1)
+                - cap_wl_loss
                 + self._esc_pref * np.sum(w * rho_ES, axis=1)
                 - p.B_wl_m3_s * Nw * Nw - p.C_wl_m6_s * Nw ** 3)
+        if self._auger_active:                                # LOSS Auger: R_A = C_A N_w^3 (removes a pair)
+            dN_w = dN_w - p.auger_wl_C_m6_s * Nw ** 3
         if self.leak is not None:                             # thermionic WL leakage -N_w/tau_leak(T)
             dN_w = dN_w - self._leak_rate() * Nw
         drho_ES = cap_occ - esc_occ - fwd + (p.mu_GS / p.mu_ES) * bwd - sp_ES - stim_ES
@@ -881,6 +1008,32 @@ class QDGainModel:
                    - f_c_GS * (1.0 - f_c_ES) / p.tau_GS_ES_s - stim - sp_GS)
         df_v_GS = ((p.mu_ES / p.mu_GS) * f_v_ES * (1.0 - f_v_GS) / self._trel_h
                    - f_v_GS * (1.0 - f_v_ES) / self._tback_h - stim - sp_GS)
+        if self._auger_active:                                # confined-state Auger (pure-numpy only)
+            # LOSS Auger removes an e-h pair from the WL: the neutral cubic mirroring the existing C_wl
+            # pair form (-> C_A N^3 at charge neutrality Nwe=Nwh), one e and one h per event.
+            R_aug = p.auger_wl_C_m6_s * Nwe * Nwh * (Nwe + Nwh) / 2.0
+            dNwe = dNwe - R_aug
+            dNwh = dNwh - R_aug
+            # CAPTURE / RELAX Auger: 1/tau_cap_eff = 1/tau_cap + C_W N_w, 1/tau_relax_eff = 1/tau_ES_GS
+            # + C_E N_w, per band (electron assisted by N_w_e, hole by N_w_h). Added as the delta
+            # (fac-1)*flux to the conjugate capture-in/-out and forward-relax fluxes (byte-identical when
+            # off); escape/back-transfer keep their base rates.
+            dcw_e = (p.auger_capture_Cw_m3_s * p.tau_cap_s) * Nwe    # fac_cap_e - 1  (Nz,)
+            dcw_h = (p.auger_capture_Cw_m3_s * self._tcap_h) * Nwh
+            dce_e = (p.auger_capture_Ce_m3_s * p.tau_ES_GS_s) * Nwe  # fac_rel_e - 1
+            dce_h = (p.auger_capture_Ce_m3_s * self._trel_h) * Nwh
+            cap_in_e = Nwe[:, None] * (1.0 - f_c_ES) / self._cap_den
+            cap_in_h = Nwh[:, None] * (1.0 - f_v_ES) / self._cap_den_h
+            cap_out_e = (Nwe / p.tau_cap_s) * np.sum(w * (1.0 - f_c_ES), axis=1)
+            cap_out_h = (Nwh / self._tcap_h) * np.sum(w * (1.0 - f_v_ES), axis=1)
+            fwd_e = f_c_ES * (1.0 - f_c_GS) / p.tau_ES_GS_s
+            fwd_h = f_v_ES * (1.0 - f_v_GS) / self._trel_h
+            dNwe = dNwe - dcw_e * cap_out_e
+            dNwh = dNwh - dcw_h * cap_out_h
+            df_c_ES = df_c_ES + dcw_e[:, None] * cap_in_e - dce_e[:, None] * fwd_e
+            df_v_ES = df_v_ES + dcw_h[:, None] * cap_in_h - dce_h[:, None] * fwd_h
+            df_c_GS = df_c_GS + (p.mu_ES / p.mu_GS) * dce_e[:, None] * fwd_e
+            df_v_GS = df_v_GS + (p.mu_ES / p.mu_GS) * dce_h[:, None] * fwd_h
         return dNwe, dNwh, df_c_ES, df_v_ES, df_c_GS, df_v_GS
 
     def rhs(self, y, I_A: float, S_conf_m3: float, nu_s_Hz: float) -> np.ndarray:
