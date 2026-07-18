@@ -84,17 +84,14 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
         rho_sp = float(np.interp(signal_lambda_m, fwd.lambda_m, fwd.psd_1pol))
 
     B_o, B_e = float(optical_bw_Hz), float(electrical_bw_Hz)
-    I_sig = R * P_sig_out
-    I_ase = R * m_modes * rho_sp * B_o
-    var_shot = 2.0 * Q_E * (I_sig + I_ase) * B_e
-    var_sig_sp = 4.0 * R ** 2 * P_sig_out * rho_sp * B_e
-    # sp-sp beat: per polarization sigma^2 = R^2 rho^2 (2 B_o - B_e) B_e (triangle autoconvolution
-    # of the flat band integrated over +-B_e); m independent polarizations add. Audit S3-2/S5-1:
-    # the previous leading factor 2 double-counted polarization (the C4-3 fix from
-    # soa/ase_noise.detector_noise_variances, Monte-Carlo confirmed, now propagated here).
-    # Discriminating limit B_e=B_o, m=2: unpolarized thermal light var/mean^2 = 1/2.
-    var_sp_sp = R ** 2 * rho_sp ** 2 * m_modes * max(2.0 * B_o - B_e, 0.0) * B_e
-    var_total = var_shot + var_sig_sp + var_sp_sp
+    # the beat-noise algebra lives ONCE in optics.amp_noise (post-audit unification of the
+    # S3-2/C4-3 duplicate pair); this module supplies the fiber-side inputs and packaging
+    from dynameta.optics.amp_noise import beat_noise_variances
+    v = beat_noise_variances(P_sig_out, rho_sp, responsivity_A_W=R, electrical_bw_Hz=B_e,
+                             optical_bw_Hz=B_o, m_pol=m_modes)
+    I_sig, I_ase = v["I_sig"], v["I_ase"]
+    var_shot, var_sig_sp, var_sp_sp = v["shot"], v["sig_spont"], v["spont_spont"]
+    var_total = v["total"]
 
     snr_out = I_sig ** 2 / var_total if var_total > 0.0 else np.inf
     # NF = SNR_in/SNR_out with SNR_in at an IDEAL (eta=1) shot-noise-limited input detector: the

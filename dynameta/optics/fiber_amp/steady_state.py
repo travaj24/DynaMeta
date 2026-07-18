@@ -19,12 +19,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, H_PLANCK
+from dynameta.constants import C_LIGHT, H_PLANCK, KB
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
-from dynameta.optics.fiber_amp.waveguide import FiberSpec
+from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
 
-__all__ = ["Pump", "Signal", "AseBand", "FiberAmplifier", "SteadyStateResult"]
+__all__ = ["Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "SteadyStateResult"]
 
 @dataclass(frozen=True)
 class Pump:
@@ -55,6 +55,35 @@ class AseBand:
     m_modes: int = 2
 
 
+@dataclass(frozen=True)
+class RamanStokes:
+    """Opt-in stimulated-Raman-scattering Stokes channel coupled INTO the steady-state solve
+    (the amplified signal is the Raman pump). Adds one channel (kind 'stokes') at the silica
+    Stokes shift below the chosen signal, propagating 'fwd' (co, threshold exponent ~16) or
+    'bwd' (counter, ~20), with the coupled-power exchange
+        dP_S/dz  = [rare-earth gain/loss at lambda_S] P_S + (g_R/A_eff) P_sig (P_S + q_seed)
+        dP_sig/dz -= (nu_sig/nu_S) (g_R/A_eff) P_sig (P_S + q_seed)
+    where the (nu_sig/nu_S) factor is Manley-Rowe photon conservation (each Raman event converts
+    ONE signal photon into ONE Stokes photon + a phonon) and q_seed = h nu_S dnu_eff (n_th + 1)
+    is the distributed spontaneous-Raman seed (one photon per mode over the lumped Stokes bucket
+    bandwidth dnu_eff, times the phonon thermal factor n_th ~ 0.14 at the 13.2 THz shift, 300 K).
+    The Stokes channel ALSO sees the rare-earth medium at its own wavelength (cross-sections,
+    background loss) -- the reason to couple it into the solver rather than post-process.
+    Refs: Smith, Appl. Opt. 11:2489 (1972); Kobyakov/Sauer/Chowdhury, Adv. Opt. Photon. 2:1
+    (2010); Agrawal, Nonlinear Fiber Optics ch. 8; Bromage, JLT 22:79 (2004).
+
+    g_r_m_w None -> the silica peak 1.0e-13 * (1 um / lambda_signal) [m/W] (Stolen-Ippen scaling);
+    a_eff_m2 None -> pi w^2 at the signal (Gaussian LP01); dnu_eff_hz = the lumped bucket width
+    (Raman gain FWHM ~5 THz -- a stated modeling convention); shift_hz = 13.2 THz silica peak."""
+    signal_index: int = 0
+    direction: str = "fwd"
+    g_r_m_w: Optional[float] = None
+    a_eff_m2: Optional[float] = None
+    dnu_eff_hz: float = 5.0e12
+    shift_hz: float = 13.2e12
+    T_K: float = 300.0
+
+
 @dataclass
 class SteadyStateResult:
     z_m: np.ndarray                            # (M,) mesh
@@ -78,10 +107,16 @@ class FiberAmplifier:
 
     def __init__(self, ion: RareEarthIon, fiber: FiberSpec, pumps: List[Pump],
                  signals: List[Signal], ase: Optional[AseBand] = None, *,
-                 upconversion_C_up: float = 0.0, concentration=None):
+                 upconversion_C_up: float = 0.0, concentration=None,
+                 raman: Optional[RamanStokes] = None):
         self.ion, self.fiber = ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase = ase
+        self.raman = raman
+        self._raman_map = None                      # filled by _plan when raman is active
+        self._Tz = None                             # optional axial T profile (set_temperature_profile)
+        if raman is not None and not (0 <= raman.signal_index < len(self.signals)):
+            raise ValueError("RamanStokes.signal_index out of range")
         # an all-default (identity) model collapses to the None path: truly byte-identical
         if concentration is not None and getattr(concentration, "is_identity", False):
             concentration = None
@@ -117,6 +152,13 @@ class FiberAmplifier:
                     lam.append(float(c)); u.append(direction); is_ase.append(True)
                     dnu.append(float(dv)); kind.append("ase"); bc.append(0.0)
                     cladding.append(False)
+        if self.raman is not None:                   # SRS Stokes channel (RamanStokes docstring)
+            rs = self.raman
+            lam_sig = self.signals[rs.signal_index].lambda_m
+            nu_st = C_LIGHT / lam_sig - rs.shift_hz
+            lam.append(C_LIGHT / nu_st); u.append(+1.0 if rs.direction == "fwd" else -1.0)
+            is_ase.append(False); dnu.append(0.0); kind.append("stokes"); bc.append(0.0)
+            cladding.append(False)
         lam = np.asarray(lam); u = np.asarray(u); is_ase = np.asarray(is_ase, bool)
         ch = ChannelSet.build(self.ion, self.fiber, lam, u, is_ase=is_ase, dnu_hz=np.asarray(dnu))
         # cladding pumps: replace the (core) overlap by A_core/A_clad
@@ -127,7 +169,58 @@ class FiberAmplifier:
                 gamma[k] = cladding_pump_overlap(self.fiber)
         ch = ChannelSet(ch.lambda_m, ch.u, ch.is_ase, ch.dnu_hz, ch.sigma_a, ch.sigma_e,
                         gamma, ch.loss_per_m, ch.tau_s, ch.sigma_esa)
+        if self.raman is not None:                   # the coupled-exchange bundle (RHS hot path)
+            rs = self.raman
+            lam_sig = self.signals[rs.signal_index].lambda_m
+            nu_sig = C_LIGHT / lam_sig
+            nu_st = nu_sig - rs.shift_hz
+            g_r = (rs.g_r_m_w if rs.g_r_m_w is not None
+                   else 1.0e-13 * (1.0e-6 / lam_sig))              # Stolen-Ippen 1/lambda scaling
+            a_eff = (rs.a_eff_m2 if rs.a_eff_m2 is not None
+                     else float(np.pi * mode_field_radius_m(self.fiber.core_radius_m,
+                                                            self.fiber.na, lam_sig) ** 2))
+            n_th = 1.0 / np.expm1(H_PLANCK * rs.shift_hz / (KB * rs.T_K))
+            self._raman_map = {
+                "i_sig": len(self.pumps) + rs.signal_index,
+                "i_st": lam.size - 1,
+                "k_r": g_r / a_eff,
+                "q_seed_W": H_PLANCK * nu_st * rs.dnu_eff_hz * (n_th + 1.0),
+                "ratio": nu_sig / nu_st,
+            }
+        else:
+            self._raman_map = None
         return ch, np.asarray(bc), u, is_ase, kind
+
+    # ---- distributed temperature profile (McCumber z-scaling) ----------------------------
+    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = 300.0):
+        """Impose an axial temperature profile T(z) on the gain medium. Every
+        sigma_e-proportional coefficient (local emission gain, stimulated-emission rate, ASE
+        spontaneous source) is scaled per-z by the McCumber factor
+            mcc_k(z) = exp[(eps - h nu_k) (1/(kB T(z)) - 1/(kB T_ref))],
+        eps = h c / zero_line -- the z-resolved form of spectroscopy.at_temperature (whose
+        GLOBAL scaling this reproduces exactly for a uniform profile; gated in tests).
+        sigma_a and tau are held (their T-dependence is second order at these Delta-T; module
+        docstring of spectroscopy). Cleared with clear_temperature_profile(). Used by
+        thermal.solve_with_thermal_feedback for the self-consistent Q(z) -> T(z) loop."""
+        z = np.asarray(z_m, float)
+        T = np.asarray(T_K, float)
+        if z.shape != T.shape or z.ndim != 1 or z.size < 2:
+            raise ValueError("set_temperature_profile: z_m and T_K must be equal-length 1-D")
+        self._Tz = (z.copy(), T.copy(), float(T_ref_K))
+
+    def clear_temperature_profile(self):
+        self._Tz = None
+
+    def _mcc_matrix(self, ch: ChannelSet, z):
+        """(K, M) McCumber sigma_e scale factors on the solver mesh z, or None."""
+        if getattr(self, "_Tz", None) is None:
+            return None
+        zt, Tt, T_ref = self._Tz
+        T = np.interp(z, zt, Tt)
+        eps = H_PLANCK * C_LIGHT / self.ion.zero_line_m
+        slope = eps - H_PLANCK * ch.nu_hz                       # (K,)
+        from dynameta.constants import KB as _KB
+        return np.exp(np.outer(slope, 1.0 / (_KB * T) - 1.0 / (_KB * T_ref)))
 
     # ---- pointwise physics used by the IVP passes ----------------------------------------
     # Per-channel constants (overlap/cross-section/frequency products) are hoisted into a
@@ -152,10 +245,11 @@ class FiberAmplifier:
             c["loss"] = c["loss"] + ch.gamma * self._n_dark * ch.sigma_a   # unbleachable PIQ
         return c
 
-    def _nbar2_c(self, c, P):
-        """Metastable fraction from the local power vector P (K,) via the coefficient bundle."""
+    def _nbar2_c(self, c, P, mcc=None):
+        """Metastable fraction from the local power vector P (K,) via the coefficient bundle.
+        mcc (K,) scales every sigma_e-proportional coefficient (set_temperature_profile)."""
         R_a = float(np.dot(c["flux_a"], P))
-        R_e = float(np.dot(c["flux_e"], P))
+        R_e = float(np.dot(c["flux_e"] if mcc is None else c["flux_e"] * mcc, P))
         tau = self._tau_s
         if self.upconversion_C_up <= 0.0:
             return tau * R_a / (1.0 + tau * (R_a + R_e))
@@ -163,14 +257,23 @@ class FiberAmplifier:
         B = 1.0 / tau + R_a + R_e
         return (-B + np.sqrt(B * B + 4.0 * A2 * R_a)) / (2.0 * A2)
 
-    def _dP_full_c(self, c, u, P):
-        """dP_k/dz [W/m] for every channel from the local power vector P (K,)."""
+    def _dP_full_c(self, c, u, P, mcc=None):
+        """dP_k/dz [W/m] for every channel from the local power vector P (K,). mcc (K,) is the
+        optional per-z McCumber sigma_e scale (set_temperature_profile)."""
         P = np.maximum(P, 0.0)
-        n2 = self._nbar2_c(c, P)
-        g = c["g_e"] * n2 - c["g_a"] * (1.0 - n2) - c["g_esa"] * n2 - c["loss"]
+        n2 = self._nbar2_c(c, P, mcc)
+        ge = c["g_e"] if mcc is None else c["g_e"] * mcc
+        sp = c["s_pref"] if mcc is None else c["s_pref"] * mcc
+        g = ge * n2 - c["g_a"] * (1.0 - n2) - c["g_esa"] * n2 - c["loss"]
         if self.concentration is not None:
             g = g - self.concentration.photodarkening_loss_per_m(n2)   # inversion-dependent gray
-        return u * (g * P + c["s_pref"] * n2)
+        dP = u * (g * P + sp * n2)
+        if self._raman_map is not None:              # SRS exchange (RamanStokes docstring):
+            rm = self._raman_map                     # Stokes gains along ITS direction, signal
+            ex = rm["k_r"] * P[rm["i_sig"]] * (P[rm["i_st"]] + rm["q_seed_W"])
+            dP[rm["i_st"]] += u[rm["i_st"]] * ex     # loses Manley-Rowe-weighted power
+            dP[rm["i_sig"]] -= u[rm["i_sig"]] * rm["ratio"] * ex
+        return dP
 
     # back-compat single-call forms (reference/diagnostic surface)
     def _nbar2(self, ch: ChannelSet, P):
@@ -183,11 +286,13 @@ class FiberAmplifier:
         self._tau_s = ch.tau_s
         return self._dP_full_c(self._coeffs(ch), ch.u, np.asarray(P, float))
 
-    def _nbar2_profile(self, ch: ChannelSet, P):
-        """nbar2 at each z given the full power profile P (K, M)."""
+    def _nbar2_profile(self, ch: ChannelSet, P, mcc_mat=None):
+        """nbar2 at each z given the full power profile P (K, M); mcc_mat (K, M) optional."""
         self._tau_s = ch.tau_s
         c = self._coeffs(ch)
-        return np.array([self._nbar2_c(c, P[:, j]) for j in range(P.shape[1])])
+        return np.array([self._nbar2_c(c, P[:, j],
+                                       None if mcc_mat is None else mcc_mat[:, j])
+                         for j in range(P.shape[1])])
 
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
               method: str = "LSODA") -> SteadyStateResult:
@@ -199,8 +304,6 @@ class FiberAmplifier:
         z = np.linspace(0.0, L, n_nodes)
         fwd = np.where(u > 0)[0]
         bwd = np.where(u < 0)[0]
-        u_fwd, u_bwd = u[fwd], u[bwd]
-
         # backward-channel profiles (K_bwd, M), initialised to their z=L seed everywhere
         P_bwd = np.repeat(bc[bwd][:, None], n_nodes, axis=1) if bwd.size else np.zeros((0, n_nodes))
         P_fwd = np.repeat(bc[fwd][:, None], n_nodes, axis=1)
@@ -233,6 +336,9 @@ class FiberAmplifier:
                 return Y[:, j] + slopes[:, j] * (zz - z[j])
             return f
 
+        mcc_mat = self._mcc_matrix(ch, z)            # (K, M) sigma_e T-scaling or None
+        mcc_of = _make_interp(mcc_mat) if mcc_mat is not None else None
+
         last_out = None
         last_prof = None
         converged = False
@@ -241,7 +347,8 @@ class FiberAmplifier:
 
             def rhs_f(zz, Pf):
                 Pb = bwd_of(zz) if bwd.size else np.zeros(0)
-                return self._dP_full_c(c, u, _assemble(Pf, Pb))[fwd]
+                m = mcc_of(zz) if mcc_of is not None else None
+                return self._dP_full_c(c, u, _assemble(Pf, Pb), m)[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
                            rtol=1e-7, atol=1e-15)
@@ -251,7 +358,8 @@ class FiberAmplifier:
                 fwd_of = _make_interp(P_fwd)
 
                 def rhs_b(zz, Pb):
-                    return self._dP_full_c(c, u, _assemble(fwd_of(zz), Pb))[bwd]
+                    m = mcc_of(zz) if mcc_of is not None else None
+                    return self._dP_full_c(c, u, _assemble(fwd_of(zz), Pb), m)[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
                                rtol=1e-7, atol=1e-15)
@@ -279,7 +387,7 @@ class FiberAmplifier:
         P[fwd] = P_fwd
         if bwd.size:
             P[bwd] = P_bwd
-        n2 = self._nbar2_profile(ch, P)
+        n2 = self._nbar2_profile(ch, P, mcc_mat)
         sig_idx = [i for i, k in enumerate(kind) if k == "signal"]
         gains_dB = np.array([10.0 * np.log10(P[i, -1] / bc[i]) for i in sig_idx])
         return SteadyStateResult(z, P, ch.lambda_m, u, is_ase, kind, n2, gains_dB,

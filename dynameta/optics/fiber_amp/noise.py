@@ -183,7 +183,8 @@ def noise_figure(result: SteadyStateResult, signal_lambda_m: float, *,
         rho_s = float(fwd.psd_1pol[0])
     else:
         rho_s = float(np.interp(signal_lambda_m, fwd.lambda_m, fwd.psd_1pol))
-    nf = 2.0 * rho_s / (H_PLANCK * nu_s * G) + 1.0 / G
+    from dynameta.optics.amp_noise import nf_from_psd
+    nf = nf_from_psd(G, rho_s, nu_s)     # shared algebra (optics.amp_noise, audit unification)
     n_sp_eff = rho_s / (H_PLANCK * nu_s * (G - 1.0)) if G > 1.0 else np.nan
     return nf, G, n_sp_eff
 
