@@ -35,9 +35,16 @@ from dynameta.optics.soa.thermal import (dome_analytic, sample_T_along_axis,
                                          thermal_profile_steady_1d, thermal_profile_transient_1d)
 from dynameta.optics.soa.transverse_bpm import TransverseBPM, qd_gain_table
 from dynameta.optics.soa.maxwell_bloch import MaxwellBlochEnsemble
-from dynameta.optics.soa.calibration import (CalibratedDevice, INNOLUME_BOA1310_TARGETS,
-                                             InferredDynamic, calibrate_innolume_boa1310,
-                                             infer_dynamics_from_cw)
+from dynameta.optics.soa.calibration import (CalibratedDevice, DeviceTargets,
+                                             INNOLUME_BOA1310, INNOLUME_BOA1310_TARGETS,
+                                             InferredDynamic, SOA_PRESETS, calibrate_device,
+                                             calibrate_innolume_boa1310, infer_dynamics_from_cw)
+from dynameta.optics.soa.qw_gain import BulkGainParams
+from dynameta.optics.soa.imd import (imd3_ratio, imd3_numeric_agrawal_olsson, oip3_dbm,
+                                     sfdr_db_hz23, tau_eff_s, two_tone_oip3_dbm)
+from dynameta.optics.soa.temperature import (VARSHNI_PARAMS, d_eg_dT_ev_per_K,
+                                             gain_peak_drift_nm_per_K,
+                                             qd_params_at_temperature, varshni_eg_ev)
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
                                                 TwoLevelSaturableGain, UltrafastCompression,
                                                 agrawal_olsson_output)
@@ -57,8 +64,13 @@ __all__ = [
            "facet_gain_ripple_dB", "ripple_enob_ceiling",
            "rin_spectrum", "linewidth_from_field", "henry_factor",
            "schawlow_townes_henry_linewidth", "TransverseBPM", "qd_gain_table", "MaxwellBlochEnsemble",
-           "CalibratedDevice", "INNOLUME_BOA1310_TARGETS", "calibrate_innolume_boa1310",
-           "InferredDynamic", "infer_dynamics_from_cw",
+           "CalibratedDevice", "DeviceTargets", "INNOLUME_BOA1310", "INNOLUME_BOA1310_TARGETS",
+           "SOA_PRESETS", "calibrate_device", "calibrate_innolume_boa1310",
+           "InferredDynamic", "infer_dynamics_from_cw", "BulkGainParams",
+           "imd3_ratio", "imd3_numeric_agrawal_olsson", "oip3_dbm", "sfdr_db_hz23",
+           "tau_eff_s", "two_tone_oip3_dbm",
+           "VARSHNI_PARAMS", "varshni_eg_ev", "d_eg_dT_ev_per_K", "gain_peak_drift_nm_per_K",
+           "qd_params_at_temperature",
            "thermal_profile_transient_1d",
            "nonmarkovian_lineshape", "biexp_memory_kernel", "lorentzian_area",
            "reduced_sbe_susceptibility", "sbe_gain_per_m"]

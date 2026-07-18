@@ -33,7 +33,8 @@ def _with(amp: FiberAmplifier, *, pumps=None, signals=None) -> FiberAmplifier:
                           amp.pumps if pumps is None else pumps,
                           amp.signals if signals is None else signals,
                           amp.ase, upconversion_C_up=amp.upconversion_C_up,
-                          concentration=amp.concentration)
+                          concentration=amp.concentration,
+                          raman=getattr(amp, "raman", None))
 
 
 def _set_total_pump(amp: FiberAmplifier, P_total_W: float) -> FiberAmplifier:

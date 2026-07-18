@@ -42,11 +42,23 @@ def _have_cupy():
 
 
 def have_jax():
-    """True if JAX imports -- the differentiable XLA lax.scan backend (GPU is WSL2-only on Windows -> CPU)."""
+    """True if a SUPPORTED JAX imports (>= 0.11 -- 0.11 broke several 0.10 APIs and dynameta's
+    jax kernels are validated against 0.11 only). An older jax reports unavailable with a
+    one-time warning (numpy fallback) rather than crashing deep inside a jitted trace. The
+    differentiable XLA lax.scan backend (GPU is WSL2-only on Windows -> CPU)."""
     global _JAX_OK
     if _JAX_OK is None:
         try:
             import jax                                       # noqa: F401
+            try:
+                from dynameta.core.backend import require_jax_011
+                require_jax_011(jax)
+            except RuntimeError as e:
+                import warnings
+                warnings.warn(str(e) + " -- the jax backend is DISABLED for this session",
+                              RuntimeWarning)
+                _JAX_OK = False
+                return _JAX_OK
             _JAX_OK = True
         except Exception:                                    # pragma: no cover
             _JAX_OK = False
