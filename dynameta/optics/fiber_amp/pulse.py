@@ -20,8 +20,10 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from dynameta.constants import C_LIGHT
+
 __all__ = ["Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "SaturableGain"]
+           "soliton_order", "propagate_gnlse", "SaturableGain", "raman_response_freq"]
 
 
 @dataclass
@@ -133,6 +135,39 @@ def soliton_order(t0_s: float, peak_power_W: float, beta2_s2_m: float, gamma_W_m
                          / nonlinear_length(peak_power_W, gamma_W_m)))
 
 
+# ---- delayed Raman response ----------------------------------------------------------------
+
+def raman_response_freq(n: int, dt_s: float, model: str = "blow_wood"):
+    """(f_R, H(w)) for the silica delayed Raman response on the numpy FFT grid of an n-point,
+    dt-spaced time window: the nonlinear response is R(t) = (1-f_R) delta(t) + f_R h_R(t) and
+    H(w) is the FFT-convention transform of the causal h_R sampled on [0, n*dt), normalized to
+    H(0) = 1 (h_R integrates to one). Models:
+      'blow_wood'  : h_R = (tau1^2+tau2^2)/(tau1 tau2^2) exp(-t/tau2) sin(t/tau1), f_R = 0.18,
+                     tau1 = 12.2 fs, tau2 = 32 fs (Blow & Wood, IEEE JQE 25:2665, 1989);
+      'lin_agrawal': adds the anisotropic boson peak h_b = (2 tau_b - t)/tau_b^2 exp(-t/tau_b),
+                     f_R = 0.245, (f_a, f_b, f_c) = (0.75, 0.21, 0.04), tau_b = 96 fs (Lin &
+                     Agrawal, Opt. Lett. 31:3086, 2006). f_R is PAIRED to the model -- 0.18
+                     belongs to Blow-Wood only, 0.245 to Lin-Agrawal only (dossier warning).
+    The frequency-domain convolution (h_R conv |A|^2) = ifft(H * fft(|A|^2)) with THIS pairing
+    delays the nonlinear phase behind the intensity (causal lag), which is what red-shifts a
+    soliton: to first order I_eff ~ I - T_R dI/dT with T_R = f_R int t h_R dt ~ 3 fs, whose mean
+    chirp <d phi/dT> = +gamma T_R int(I')^2/E > 0 in the numpy exp(+i w t) basis = a LOWER
+    physical frequency (repo convention exp(-i omega t): physical detuning = -w_numpy)."""
+    t = np.arange(int(n)) * float(dt_s)
+    tau1, tau2 = 12.2e-15, 32e-15
+    ha = (tau1 ** 2 + tau2 ** 2) / (tau1 * tau2 ** 2) * np.exp(-t / tau2) * np.sin(t / tau1)
+    if model == "blow_wood":
+        f_R, h = 0.18, ha
+    elif model == "lin_agrawal":
+        tau_b = 96e-15
+        hb = (2.0 * tau_b - t) / tau_b ** 2 * np.exp(-t / tau_b)
+        f_R, h = 0.245, (0.75 + 0.04) * ha + 0.21 * hb
+    else:
+        raise ValueError("raman model must be 'blow_wood' or 'lin_agrawal'")
+    H = np.fft.fft(h) * float(dt_s)
+    return f_R, H / H[0].real                       # exact H(0)=1 (unit-area response)
+
+
 # ---- the GNLSE split-step propagator -------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -183,14 +218,34 @@ def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
                     beta3_s3_m: float = 0.0, gamma_W_m: float = 0.0, loss_per_m: float = 0.0,
                     gain_per_m: float = 0.0, gain_omega: Optional[Callable] = None,
                     saturable_gain: Optional["SaturableGain"] = None,
+                    raman: Optional[str] = None, self_steepening: bool = False,
                     n_steps: int = 400, store_slices: int = 0) -> PropagationResult:
     """Propagate a Pulse through length_m of fiber by the symmetric split-step Fourier method:
     exp(h/2 D) exp(h N) exp(h/2 D) per step, with D the linear (dispersion + gain/loss) operator
-    in frequency and N = i gamma |A|^2 the Kerr operator in time. Gain options: a flat gain_per_m,
-    a fixed spectral gain_omega(omega)->g [1/m], or a SaturableGain (Phase 13) whose spectral gain
-    is recomputed each step from the pulse energy at that z (energy grows -> gain saturates). With
-    saturable_gain=None the linear operator is precomputed once. Returns the output pulse, the
-    accumulated B-integral, and optionally store_slices field snapshots along z."""
+    in frequency and N the nonlinear operator in time. Gain options: a flat gain_per_m, a fixed
+    spectral gain_omega(omega)->g [1/m], or a SaturableGain (Phase 13) whose spectral gain is
+    recomputed each step from the pulse energy at that z. With saturable_gain=None the linear
+    operator is precomputed once.
+
+    Nonlinear completion terms (both OFF by default -> the pure-Kerr N = i gamma |A|^2 A path,
+    byte-identical to the Phase-12 propagator):
+      * raman = 'blow_wood' | 'lin_agrawal': the DELAYED Raman response (raman_response_freq),
+        N = i gamma A [(1-f_R)|A|^2 + f_R h_R conv |A|^2]. The convolution is a TIME-domain
+        operation, so it needs no numpy-vs-physical sign gymnastics (unlike the spectral beta3
+        term); its causal lag is what produces the soliton self-frequency red shift at Gordon's
+        rate d nu/dz = -(4/(15 pi)) |beta2| T_R / T0^4 (Gordon, Opt. Lett. 11:662, 1986).
+      * self_steepening=True: the optical-shock prefactor, N -> i gamma (1 + (i/omega0) d/dT)
+        [A I_eff]. d/dT is implemented spectrally as multiplication by (+i w) -- the derivative
+        rule OF THE NUMPY exp(+i w t) BASIS, which keeps the time-domain operator physical with
+        no explicit sign flip. The shock steepens the TRAILING edge (peak drifts to later T) --
+        gated in tests. With the shock on, the nonlinear step integrates by RK4 (the operator is
+        no longer a pure phase); without it, the exact unitary phase step is kept.
+    Conservation contract (tests): pure Kerr conserves energy AND photon number; Raman-only
+    conserves energy exactly (real phase) while red-shifting the spectrum; Raman + shock is the
+    photon-number-conserving, energy-decreasing form (Blow-Wood).
+
+    Returns the output pulse, the accumulated B-integral, and optionally store_slices
+    field snapshots along z."""
     A = pulse.field.astype(np.complex128).copy()
     w = pulse.omega_rad_s()
     dt = pulse.dt_s
@@ -208,6 +263,24 @@ def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
     half_static = None if saturable_gain is not None else np.exp(D_fixed * (h / 2.0))
     b_int = 0.0
 
+    raman_active = raman is not None
+    if raman_active:
+        f_R, H_R = raman_response_freq(A.size, dt, raman)
+    omega0 = 2.0 * np.pi * C_LIGHT / pulse.lambda0_m
+
+    def _I_eff(p_now):
+        """(1-f_R)|A|^2 + f_R (h_R conv |A|^2); plain |A|^2 when Raman is off."""
+        if not raman_active:
+            return p_now
+        conv = np.real(np.fft.ifft(H_R * np.fft.fft(p_now)))
+        return (1.0 - f_R) * p_now + f_R * conv
+
+    def _N_op(A_now):
+        """Full nonlinear operator i gamma (1 + (i/omega0) d/dT)[A I_eff] for the RK4 path."""
+        Q = A_now * _I_eff(np.abs(A_now) ** 2)
+        dQ = np.fft.ifft((1j * w) * np.fft.fft(Q))
+        return 1j * gamma_W_m * (Q + (1j / omega0) * dQ)
+
     slices, zs = [], []
     store_every = max(1, n_steps // store_slices) if store_slices else 0
 
@@ -220,7 +293,16 @@ def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
         A = np.fft.ifft(half * np.fft.fft(A))
         p = np.abs(A) ** 2
         b_int += gamma_W_m * float(p.max()) * h
-        A = A * np.exp(1j * gamma_W_m * p * h)
+        if self_steepening:
+            k1 = _N_op(A)                                        # RK4: N is not a pure phase
+            k2 = _N_op(A + 0.5 * h * k1)
+            k3 = _N_op(A + 0.5 * h * k2)
+            k4 = _N_op(A + h * k3)
+            A = A + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        elif raman_active:
+            A = A * np.exp(1j * gamma_W_m * _I_eff(p) * h)       # exact unitary (real I_eff)
+        else:
+            A = A * np.exp(1j * gamma_W_m * p * h)               # legacy pure-Kerr path
         A = np.fft.ifft(half * np.fft.fft(A))
         if store_every and (k % store_every == 0):
             slices.append(A.copy())
