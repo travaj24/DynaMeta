@@ -38,6 +38,20 @@ _jnp = None
 _jax = None
 
 
+def require_jax_011(jax_module) -> None:
+    """FAIL FAST on jax < 0.11: jax 0.11 removed/changed 0.10 APIs and dynameta's jax paths are
+    validated against 0.11 only (pyproject pins jax>=0.11). One clear error beats a cryptic
+    AttributeError deep inside a jitted trace."""
+    try:
+        ver = tuple(int(x) for x in jax_module.__version__.split(".")[:2])
+    except Exception:
+        return                                       # unparseable dev version: let it through
+    if ver < (0, 11):
+        raise RuntimeError("dynameta requires jax >= 0.11 (found {}); jax 0.11 broke several "
+                           "0.10 APIs and only 0.11 is validated. pip install -U 'jax>=0.11'"
+                           .format(jax_module.__version__))
+
+
 def _ensure_jax_x64() -> None:
     """Force JAX into float64 mode (it defaults to float32) and FAIL FAST if the switch did not take.
     Called on first JAX use below. CAVEAT: this governs arrays created AFTER the switch -- if user code
@@ -45,6 +59,7 @@ def _ensure_jax_x64() -> None:
     float64 inputs (or enable jax_enable_x64 yourself at program start). Without x64 the JAX
     constitutive path would silently drop to single precision -- unacceptable for the physics here."""
     import jax
+    require_jax_011(jax)
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as _probe
     import numpy as _np
