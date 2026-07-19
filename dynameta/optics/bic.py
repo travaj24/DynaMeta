@@ -216,16 +216,35 @@ def _as_contour(contour, shape) -> np.ndarray:
     return idx
 
 
+# Sampling guard: a wrapped adjacent step of the doubled angle at/near pi is ambiguous (the true
+# step could be +pi or -pi -- the aliasing boundary), so the winding would be a CLEAN but
+# possibly WRONG integer.  Steps above this threshold raise instead of silently aliasing.
+_MAX_STEP_RAD = 0.9 * np.pi
+
+
 def _winding_of_angle(theta_closed: np.ndarray) -> float:
     """(1 / 2 pi) * total change of an S1-valued angle sequence around a CLOSED loop, via robust
     wrapped-difference unwrapping (each adjacent step wrapped into (-pi, pi], plus the closing
     step from the last sample back to the first). Returns a real number that is an integer up to
-    the discretization; the caller rounds. Valid provided no adjacent step exceeds pi in
-    magnitude (the sampling-density precondition -- see charge_map's Nyquist note)."""
+    the discretization; the caller rounds.
+
+    SAMPLING GUARD: valid only when no adjacent step approaches pi in magnitude (the Nyquist
+    precondition -- see charge_map's note). Because an aliased loop returns a CLEAN wrong
+    integer with no other signal, any wrapped step exceeding ~0.9*pi raises ValueError
+    ("undersampled contour") rather than returning a lie. NOTE this is a best-effort guard: a
+    grossly under-sampled loop whose true steps exceed pi can wrap back to SMALL apparent steps
+    and remains undetectable pointwise -- respect the Nyquist bound (radius >= (2|q|+1)/4)."""
     theta = np.asarray(theta_closed, dtype=float)
     d = np.diff(theta)
     d = (d + np.pi) % _TWO_PI - np.pi
     close = (theta[0] - theta[-1] + np.pi) % _TWO_PI - np.pi
+    worst = float(max(np.max(np.abs(d)) if d.size else 0.0, abs(close)))
+    if worst > _MAX_STEP_RAD:
+        raise ValueError(
+            "bic: undersampled contour -- an adjacent doubled-angle step of {:.3f} rad "
+            "(> {:.3f} = 0.9*pi) makes the winding ambiguous (aliasing). Enlarge the contour / "
+            "refine the k-grid (Nyquist: loop half-size R >= (2|q| + 1)/4), or the contour "
+            "passes through a polarization singularity.".format(worst, _MAX_STEP_RAD))
     return float((np.sum(d) + close) / _TWO_PI)
 
 
@@ -295,9 +314,11 @@ def find_vortex_candidates(field, *, rel_threshold: float = 0.5, exclude_border:
         cand = _strict_local_minima(indicator, neighborhood, exclude_border, rel_threshold)
         cand_scores = {ij: float(indicator[ij]) for ij in cand}
     elif arr.ndim == 2:
-        # phi-only fallback: no amplitudes, so key on the plaquette winding instead of L
+        # phi-only fallback: no amplitudes, so key on the plaquette winding instead of L.
+        # radius = 2 (16-point loops, |q| <= 3 alias-free), NOT 1: radius-1 loops alias any
+        # |q| >= 2 vortex (Nyquist |q| <= 1.5) and the guard turns those loops into NaN.
         phi = arr.astype(float)
-        qmap = charge_map(phi, radius=1)
+        qmap = charge_map(phi, radius=2)
         cand = [(i, j) for i in range(phi.shape[0]) for j in range(phi.shape[1])
                 if np.isfinite(qmap[i, j]) and abs(qmap[i, j]) > 1e-9]
         cand_scores = {ij: -abs(float(qmap[ij])) for ij in cand}     # strongest |q| first
@@ -311,7 +332,10 @@ def find_vortex_candidates(field, *, rel_threshold: float = 0.5, exclude_border:
     for (i, j) in cand:
         charge = None
         if i - r >= 0 and i + r < nx and j - r >= 0 and j + r < ny:
-            charge = topological_charge(phi, (i - r, i + r, j - r, j + r))
+            try:
+                charge = topological_charge(phi, (i - r, i + r, j - r, j + r))
+            except ValueError:
+                charge = None          # undersampled loop (guard fired); charge undetermined
         out.append({"index": (int(i), int(j)), "indicator": cand_scores[(i, j)], "charge": charge})
     out.sort(key=lambda d: d["indicator"])
     if max_candidates is not None:
@@ -342,7 +366,9 @@ def _strict_local_minima(field: np.ndarray, neighborhood: int, exclude_border: i
 
 def charge_map(field, radius: int = 2) -> np.ndarray:
     """Local topological charge on a small square loop centred at each interior grid vertex,
-    returned as an (Nx, Ny) array (np.nan where the loop does not fit inside the grid).
+    returned as an (Nx, Ny) array (np.nan where the loop does not fit inside the grid, AND where
+    the loop fails the sampling guard -- e.g. loops hugging or crossing a vortex core, whose
+    winding would be aliasing-ambiguous; see _winding_of_angle).
 
     `field` is a Jones field (Nx, Ny, 2) or an orientation field phi (Nx, Ny). Each interior
     vertex (i, j) gets the charge on the rectangle contour [i-radius, i+radius] x [j-radius,
@@ -360,5 +386,9 @@ def charge_map(field, radius: int = 2) -> np.ndarray:
     out = np.full((nx, ny), np.nan)
     for i in range(r, nx - r):
         for j in range(r, ny - r):
-            out[i, j] = topological_charge(phi, (i - r, i + r, j - r, j + r))
+            try:
+                out[i, j] = topological_charge(phi, (i - r, i + r, j - r, j + r))
+            except ValueError:
+                out[i, j] = np.nan     # undersampled loop (e.g. hugging / crossing a vortex
+                                       # core): honestly undetermined, NOT a junk half-integer
     return out

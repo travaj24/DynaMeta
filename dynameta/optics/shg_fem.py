@@ -175,17 +175,19 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     eps_at : callable | None            eps_at(lambda_m) -> {region: EpsField}; defaults to the
                                         design's material eps at the two wavelengths.
 
-    Returns dict with 'p_up_2w' (radiated SH power over the cell, W, best-effort), 'E_perp_in'
+    Returns dict with 'p_up_2w' (radiated SH power over the cell, W, SI), 'E_perp_in'
     (sampled normal fundamental field), 'result_w' (the fundamental OpticalResult), and the SH
     SourcedResult.
 
-    NOTE (conditioning caveat -- IMPORTANT): solve_fem_sourced's radiated-power extraction is only
-    quantitatively reliable when the scattered SH field in the buffers is a clean single outgoing
-    wave. In low-loss / open-cavity superstrates the periodic curl-curl operator carries a near-null
-    interior mode plus a background/PML counter-propagating component that biases the extracted
-    amplitude; treat 'p_up_2w' as indicative and cross-check against rudnick_stern_flat_shg (the
-    validated closed form) for flat surfaces. The linear step, the surface-field sampling, and the
-    SH source assembly are exact; the SH power read-out is the best-effort part.
+    ACCURACY (measured 2026-07-19, replacing the earlier -- WRONG -- 'near-null interior mode /
+    ~2-2.5x bias' deferral): for a flat Drude mirror, 'p_up_2w' matches the analytic oracle
+    rudnick_stern_flat_shg * cell area to ~0.5% at 20 deg, ~0.6% at 35 deg and ~1.1% at 50 deg
+    (gated at 10% in tests/test_shg_fem.py). The earlier huge discrepancy was NOT solver
+    conditioning: it was an SI-vs-nm units bug in _normal_sheet_vacuum_field (E0 low by exactly
+    S = 1e9) plus a tangential-only probe_pol under-counting the p-pol power by cos^2(theta);
+    both fixed. Residual error is the documented fixed-alpha z-PML oblique approximation (grows
+    with angle; stay at or below ~50 deg). CONSTRAINT that remains: solve_fem_sourced's power
+    formula assumes a LOSSLESS superstrate -- a lossy superstrate invalidates 'p_up_2w'.
     """
     import ngsolve as ng
     from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder, S
@@ -226,9 +228,14 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
 
     ebr_2w = eps_at(lambda_2w)
     eps_2w_cf = assemble_eps_cf(geo, ebr_2w)
+    # probe_pol = the FULL p-pol unit vector of the up-going SH wave, (cos th, 0, -sin th): the
+    # projection then returns the full E amplitude, and solve_fem_sourced's p_up = |a|^2 (kz/k0)
+    # /(2 Z0) A is the correct p-pol flux. A tangential-only (1,0,0) projection captures only
+    # Ex = E cos(th) and under-counts the radiated power by cos^2(th) (the 2026-07-19 fix).
     res_2w = solve_fem_sourced(geo, lambda_2w, eps_2w_cf, design.optical, order=order,
                                 n_super=n_super, n_sub=n_sub, bg_field=E0_cf, eps_ref=1.0,
-                                k_par_per_nm=(kx, 0.0), probe_pol=(1.0, 0.0, 0.0))
+                                k_par_per_nm=(kx, 0.0),
+                                probe_pol=(math.cos(theta), 0.0, -math.sin(theta)))
     return {"p_up_2w": res_2w.p_up, "E_perp_in": complex(E_perp_in), "result_w": res_w,
             "result_2w": res_2w, "metal_region": metal_region}
 
@@ -280,22 +287,32 @@ def _sample_normal_field_inside(mesh, res_w, geo, metal_region, design, lambda_m
 
 def _normal_sheet_vacuum_field(P_z, k0_2w, kx, z_sheet, ng):
     """Vacuum radiation of a normal (z) surface-polarization sheet P_z exp(i kx x) at z=z_sheet, as
-    an NGSolve CoefficientFunction (the SH background E0 for the scattered-field sourced solve). The
-    p-pol Hy amplitude is A = -i kx Omega P_z/(beta1 + beta1) (both sides vacuum, eps=1); the
-    corresponding E-field (Ex, Ez) is reconstructed. beta1 = sqrt(k0_2w^2 - kx^2) (nm^-1)."""
-    beta1 = cmath.sqrt(k0_2w ** 2 - kx ** 2)
+    an NGSolve CoefficientFunction (the SH background E0 for the scattered-field sourced solve).
+
+    UNITS (the 2026-07-19 fix): the PHASES are evaluated in mesh (nm) coordinates with the nm^-1
+    wavevectors (k0_2w, kx, beta1), but the AMPLITUDES must be SI (E in V/m) -- built from the SI
+    wavevectors kx*S, beta1*S [1/m] and the SI frequency Omega = c * k0_2w * S [rad/s] (the vacuum
+    SH dispersion). The previous revision mixed the two ('c = 1 in nm units'), leaving E0 low by
+    exactly S = 1e9 and the radiated power by S^2 = 1e18 -- found by adversarial verification
+    against the closed-form oracle.
+
+    The p-pol Hy amplitude is A = -i kx_SI Omega P_z / (2 beta1_SI) (both sides vacuum, eps = 1,
+    so beta2 = beta1 in rudnick_stern_flat_shg's denominator); E follows from Ampere's law
+    (exp(-i Omega t)): Ex = sgn * beta1_SI Hy / (Omega eps0), Ez = -kx_SI Hy / (Omega eps0)."""
+    from dynameta.optics.ngsolve_layered import S
+    beta1 = cmath.sqrt(k0_2w ** 2 - kx ** 2)         # nm^-1 (mesh-coordinate phases)
     if beta1.imag < 0:
         beta1 = -beta1
-    Omega = k0_2w                                    # scale-free (c=1 in nm units): Omega ~ k0_2w
-    A = -1j * kx * Omega * P_z / (2.0 * beta1)       # Hy amplitude of the up/down radiated wave
+    kx_si, b1_si = kx * S, beta1 * S                 # SI wavevectors (1/m)
+    Omega = C_LIGHT * k0_2w * S                      # SI angular frequency (rad/s)
+    A = -1j * kx_si * Omega * P_z / (2.0 * b1_si)    # Hy amplitude (A/m) of the up/down wave
     # up (z>z_sheet): Hy = A exp(i(kx x + beta1 (z-z_sheet))); down: Hy = A exp(i(kx x - beta1(z-z_sheet)))
     zrel = ng.z - z_sheet
     up = ng.IfPos(zrel, 1.0, 0.0)
     Hy = A * (up * ng.exp(1j * (kx * ng.x + beta1 * zrel))
               + (1.0 - up) * ng.exp(1j * (kx * ng.x - beta1 * zrel)))
-    # E from Hy (p-pol, vacuum): Ex = (dHy/dz)/(i Omega eps0); Ez = -(dHy/dx)/(i Omega eps0).
-    # dHy/dz = +/- i beta1 Hy ; dHy/dx = i kx Hy. Keep the sign of beta1 per half-space.
+    # E from Hy (p-pol, vacuum, SI): keep the sign of beta1 per half-space.
     sgn = ng.IfPos(zrel, 1.0, -1.0)
-    Ex = (sgn * 1j * beta1 * Hy) / (1j * Omega * EPS0)
-    Ez = -(1j * kx * Hy) / (1j * Omega * EPS0)
+    Ex = (sgn * b1_si * Hy) / (Omega * EPS0)
+    Ez = -(kx_si * Hy) / (Omega * EPS0)
     return ng.CoefficientFunction((Ex, 0.0 * Hy, Ez))

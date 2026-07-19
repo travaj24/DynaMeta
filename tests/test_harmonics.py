@@ -118,6 +118,35 @@ def test_input_contract_guards():
     with pytest.raises(ValueError):                          # bw must keep bands disjoint
         harmonic_spectrum((np.zeros(100), 1e-15), 1e13, bandwidth_frac=0.3)
 
+
+def test_pump_bandwidth_guard():
+    """The pump-bandwidth guard (module docstring PUMP-BANDWIDTH PRECONDITION): a broadband
+    PURE-FUNDAMENTAL pump leaks its own spectral tail into the 2w band and would be mis-read as
+    SHG -- a tau = 3 fs Gaussian pulse at f0 = 2.5e14 (sigma_f/f0 ~ 0.20) measures a phantom
+    P_2w/P_w ~ 9e-4 with ZERO nonlinearity, and MUST trigger the UserWarning + the
+    pump_broadband flag. The tau = 50 fs testbed pump (sigma_f/f0 ~ 0.013, the FDTD gates'
+    source) stays clean: no warning, honest floor."""
+    f0, dt = 2.5e14, 5e-17
+
+    def pulse(tau):
+        t0 = 6.0 * tau
+        n = int(round((12.0 * tau + 200e-15) / dt))
+        t = np.arange(n) * dt
+        return np.cos(2 * np.pi * f0 * (t - t0)) * np.exp(-((t - t0) / tau) ** 2)
+
+    with pytest.warns(UserWarning, match="BROADBAND pump"):
+        hs3 = harmonic_spectrum((pulse(3e-15), dt), f0)
+    assert hs3["pump_broadband"] is True
+    assert hs3["pump_sigma_hz"] > hs3["pump_sigma_max_hz"]
+    assert hs3["P_2w"] / hs3["P_w"] > 1e-6                   # the phantom leak the guard flags
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")                      # any warning would fail the test
+        hs50 = harmonic_spectrum((pulse(50e-15), dt), f0)
+    assert hs50["pump_broadband"] is False
+    assert hs50["pump_sigma_hz"] < 0.02 * f0                 # the narrowband testbed regime
+    assert hs50["P_2w"] / hs50["P_w"] < 1e-6                 # honest floor holds
+
     class _Res:                                              # a result missing its opt-in trace
         time_trace = None
     with pytest.raises(ValueError):

@@ -225,7 +225,39 @@ def test_charge_map_two_vortices_distinct_blocks():
     assert qmap[i_neg, jc] == -1.0
 
 
-def test_rectangle_contour_is_closed_ccw():
+def test_undersampled_contour_raises_not_lies():
+    # REGRESSION (2026-07-19 adversarial verification): a radius-1 loop (8 samples) around a
+    # q = +2 vortex has adjacent doubled-angle steps of exactly pi (the aliasing boundary) and
+    # used to return a CLEAN wrong integer (q = -1.0) with no warning -- a silent lie. The
+    # sampling guard must raise ValueError instead; the Nyquist-satisfying radius-2 loop
+    # (16 samples, |q| <= 3 alias-free) still returns exactly +2.
+    _, J = _vortex_jones(2, n=61, half=1.0)
+    phi = polarization_angle_field(J)
+    c = 30
+    with pytest.raises(ValueError, match="undersampled"):
+        topological_charge(phi, (c - 1, c + 1, c - 1, c + 1))
+    assert topological_charge(phi, (c - 2, c + 2, c - 2, c + 2)) == 2.0
+    # q = +3 stays exact on the Nyquist-satisfying radius-2 loop (max step 6*atan(1/2) ~ 2.78
+    # rad, just under the guard). NOTE the guard is best-effort by nature: a q = +3 radius-1
+    # loop has TRUE steps of 270 deg that wrap back to -90 deg and remains pointwise
+    # undetectable (documented in _winding_of_angle) -- respect the Nyquist bound.
+    _, J3 = _vortex_jones(3, n=61, half=1.0)
+    phi3 = polarization_angle_field(J3)
+    assert topological_charge(phi3, (c - 2, c + 2, c - 2, c + 2)) == 3.0
+
+
+def test_charge_map_marks_undersampled_loops_nan():
+    # charge_map degrades gracefully under the guard: loops hugging/crossing the vortex core
+    # whose winding is aliasing-ambiguous become NaN (honestly undetermined) instead of junk;
+    # the centred loop still reads the exact charge and far loops still read exactly 0.
+    n = 41
+    _, J = _vortex_jones(2, n=n, half=1.0)
+    qmap = charge_map(polarization_angle_field(J), radius=2)
+    c = n // 2
+    assert qmap[c, c] == 2.0                                  # centred loop: exact
+    assert qmap[5, 5] == 0.0                                  # far loop: exactly zero
+    interior = qmap[2:-2, 2:-2]
+    assert np.sum(~np.isfinite(interior)) > 0                 # the guard fired near the core
     idx = rectangle_contour(2, 6, 3, 8)
     assert idx.shape[1] == 2
     # perimeter length = 2*((6-2)+(8-3)) = 18 unique boundary points
