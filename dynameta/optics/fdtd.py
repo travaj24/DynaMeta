@@ -35,6 +35,11 @@ class FDTD1DResult:
     R: np.ndarray
     T: np.ndarray
     band: np.ndarray            # boolean mask of the trustworthy (well-excited) frequency band
+    # OPT-IN probe (roadmap 1.2, additive; None unless solve_fdtd_1d(return_time_trace=True)).
+    # dict of the recorded boundary time series already used for the R/T DFT -- exposed as copies
+    # for ringdown harmonic inversion. Keys: dt, t, reflected, transmitted, incident_left,
+    # incident_right. Leaving it None keeps R/T/band/freqs_Hz byte-identical to the legacy path.
+    time_trace: object = None
 
 
 def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
@@ -89,7 +94,8 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
 def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m: float,
                   resolution: int = 40, courant: float = 0.5, n_pad_wave: float = 6.0,
                   settle: float = 12.0, kerr: bool = False,
-                  source_amp: float = 1.0) -> FDTD1DResult:
+                  source_amp: float = 1.0,
+                  return_time_trace: bool = False) -> FDTD1DResult:
     """Broadband R(f)/T(f) of the layered `layers` (vacuum super/substrate) over
     [c/lambda_max, c/lambda_min]. `resolution` = cells per lambda_min in the highest-index medium;
     `courant` the CFL fraction (<= 1, use ~0.5 for Drude); `n_pad_wave` vacuum padding (in lambda_max)
@@ -180,4 +186,17 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         R = np.abs(Irefl / Iinc_L) ** 2
         T = np.abs(Itrans / Iinc_R) ** 2
     band = (f >= f_min) & (f <= f_max) & (np.abs(Iinc_L) > 0.05 * np.max(np.abs(Iinc_L)))
-    return FDTD1DResult(freqs_Hz=f, R=R, T=T, band=band)
+    # OPT-IN (roadmap 1.2): expose the boundary time series already recorded above, as copies.
+    # This is purely additive -- R/T/band/freqs_Hz are computed identically whether or not the
+    # trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
+    time_trace = None
+    if return_time_trace:
+        time_trace = {
+            "dt": dt,
+            "t": tgrid.copy(),
+            "reflected": (eL_tot - eL_inc).copy(),      # reflected = total - incident (left probe)
+            "transmitted": eR_tot.copy(),               # transmitted (right probe)
+            "incident_left": eL_inc.copy(),
+            "incident_right": eR_inc.copy(),
+        }
+    return FDTD1DResult(freqs_Hz=f, R=R, T=T, band=band, time_trace=time_trace)
