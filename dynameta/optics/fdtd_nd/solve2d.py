@@ -124,7 +124,8 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
                   n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np,
-                  hot_out: Optional[dict] = None) -> FDTD2DResult:
+                  hot_out: Optional[dict] = None,
+                  return_time_trace: bool = False) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
     is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
     building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
@@ -368,7 +369,24 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         R_flux = np.abs(P_refl) / np.abs(P_inc)
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
-    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)
+    # OPT-IN (roadmap 3.1): expose the exit/entry-plane E_y + H_x x-lines already recorded above, as
+    # copies. Purely additive -- R0/T0/R_flux/T_flux/band/r0/t0 are computed identically whether or not
+    # the trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
+    # optics.harmonics reads the raw transmitted series to integrate the 2w/3w bands (the SHG/THG content
+    # the ~0 incident reference makes invisible in the normalized R/T).
+    time_trace = None
+    if return_time_trace:
+        time_trace = {
+            "dt": dt,
+            "t": tgrid.copy(),
+            "transmitted": eyR_t.copy(), "transmitted_hx": hxR_t.copy(),
+            "reflected": (eyL_t - eyL_i).copy(), "reflected_hx": (hxL_t - hxL_i).copy(),
+            "incident_left": eyL_i.copy(), "incident_left_hx": hxL_i.copy(),
+            "incident_right": eyR_i.copy(), "incident_right_hx": hxR_i.copy(),
+            "period_x_m": float(period_x_m), "dx": float(dx), "nx": int(nx),
+        }
+    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c,
+                        time_trace=time_trace)
 
 
 

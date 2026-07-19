@@ -45,6 +45,8 @@ import re
 import time
 import warnings
 
+from dataclasses import dataclass
+
 import numpy as np
 import ngsolve as ng
 
@@ -625,6 +627,191 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A)
+
+
+@dataclass
+class SourcedResult:
+    """Result of a source-driven FEM solve (solve_fem_sourced): the radiated field plus the
+    per-port radiated power. Unlike OpticalResult (an incident-wave R/T), this describes the field
+    RADIATED by an imposed current / equivalent-polarization source with NO incident wave.
+
+    fes/gfu:   the periodic HCurl space and the solved SCATTERED GridFunction (equals the TOTAL
+               field when bg_field is None).
+    bg_field:  the analytic background E0 (a CoefficientFunction) the scattered field is measured
+               on top of (the source's radiation in the uniform reference medium), or None.
+    a_up/a_down: 0-order outgoing plane-wave amplitude (V/m, projected onto probe_pol) in the
+               superstrate (up) and substrate (down); a_down is None with no substrate buffer.
+    p_up/p_down: time-averaged radiated power through the top/bottom port INTEGRATED over the unit
+               cell (Watts). p_down is None with no substrate buffer.
+    relres:    the iterative-solver relative residual (0.0 for a direct umfpack solve)."""
+    fes:          object
+    gfu:          object
+    bg_field:     object
+    a_up:         complex
+    a_down:       "complex | None"
+    p_up:         float
+    p_down:       "float | None"
+    solve_time_s: float
+    relres:       float
+
+
+def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
+                        eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
+                        *, order: int = 2, n_super: complex = 1.0 + 0j,
+                        n_sub: complex = 1.0 + 0j,
+                        bg_field: "ng.CoefficientFunction | None" = None,
+                        eps_ref: "complex | ng.CoefficientFunction | None" = None,
+                        volume_current: "ng.CoefficientFunction | None" = None,
+                        surface_currents: "dict | None" = None,
+                        k_par_per_nm: "tuple[float, float]" = (0.0, 0.0),
+                        probe_pol: "tuple[float, float, float]" = (1.0, 0.0, 0.0),
+                        verbose: bool = False) -> SourcedResult:
+    """Source-driven sibling of solve_fem: solve the SAME periodic layered curl-curl weak form,
+    but driven by an imposed current / equivalent-polarization source instead of an incident plane
+    wave, and return the radiated field + per-port radiated power. ADDITIVE -- solve_fem is
+    untouched; this shares its PML / periodic-space / solver machinery. SI units, exp(-i omega t).
+
+    The physical time-harmonic Maxwell curl-curl equation with a free current density J (SI, A/m^2)
+    is (see e.g. Nireekshan Reddy et al., JOSA B 2017, Eq. 7)
+
+        curl curl E - k0^2 eps E = i omega mu0 J = i k0 Z0 J        (Z0 = free-space impedance)
+
+    In the solver's nm-length weak form (mesh coordinates in nm, k0 and ng.curl in nm^-1) the volume
+    RHS is  i * k0 * Z0 * (J / S) . v  and a surface current sheet K (A/m) on a named boundary is
+    i * k0 * Z0 * K . v_trace  (S = 1e9 nm/m; derived by rescaling curl_phys = S*ng.curl and
+    dV_phys = dV_nm / S^3, dA_phys = dA_nm / S^2 -- the surface term carries no 1/S, the volume term
+    one).
+
+    TWO source routes:
+      * SCATTERED-FIELD (preferred, WELL-CONDITIONED): pass bg_field = E0 (the source's radiation in
+        a UNIFORM reference medium eps_ref, a homogeneous solution of curl curl E0 - k0^2 eps_ref E0
+        = the source) and eps_ref. The FEM then solves the bounded scattered correction driven by
+        k0^2 (eps - eps_ref) E0 -- byte-for-byte the same source structure solve_fem uses, so it
+        inherits solve_fem's conditioning. The TOTAL field is E0 + gfu. This is the route the SHG
+        two-step (shg_fem) uses: E0 is the analytic radiation of the surface-SHG sheet.
+      * DIRECT current (volume_current J and/or surface_currents {bnd: K}): added straight to the
+        RHS as above. CAVEAT: a raw current source overlaps the curl-curl operator's gradient/
+        interior near-null space, so the DIRECT route is ILL-CONDITIONED for low-loss / open-cavity
+        geometries (the same regime solve_fem itself flags as ill-conditioned) -- reliable only when
+        a lossy scatterer (metal) fills much of the cell. Prefer the scattered-field route; the
+        direct route is provided for generality and near-metal use.
+
+    k_par_per_nm = (kx, ky) is the in-plane (Bloch) wavevector the source carries (0 at normal
+    incidence; for surface-SHG at 2*omega it is 2 * k_par of the fundamental). probe_pol projects
+    the field onto the polarization of interest for the 0-order amplitude fit (default tangential-x;
+    the SH p-pol reflection uses the in-plane p direction). Radiated power is reported for a
+    LOSSLESS (vacuum/dielectric) super/substrate; the superstrate is vacuum in the SHG use case."""
+    k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
+    mesh = geo.mesh
+    Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
+    kx, ky = float(k_par_per_nm[0]), float(k_par_per_nm[1])
+    oblique = math.hypot(kx, ky) > 1e-12 * k0
+
+    # ---- PML: clone solve_fem's scalar HalfSpace z-stretch (this ordering -- UnSetPML then SetPML
+    # BEFORE building the FESpace/forms -- matters; a SetPML after the forms silently zeros the RHS).
+    z_air_top = geo.z_super_interface_nm
+    z_sub_top = geo.z_sub_interface_nm
+    try:
+        mesh.UnSetPML("pml_top"); mesh.UnSetPML("pml_bot")
+    except Exception:
+        pass
+    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_air_top), normal=(0, 0, 1), alpha=1j), "pml_top")
+    mesh.SetPML(ng.pml.HalfSpace(point=(0, 0, z_sub_top), normal=(0, 0, -1), alpha=1j), "pml_bot")
+
+    # ---- periodic HCurl space (quasi-periodic Bloch phases if the source carries k_par) ----
+    if oblique and (geo.n_px or geo.n_py):
+        phases = _bloch_phase_list(geo, kx, ky)
+        fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""), phase=phases)
+    else:
+        fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""))
+    u, v = fes.TrialFunction(), fes.TestFunction()
+
+    a = ng.BilinearForm(fes, symmetric=True)
+    a += (ng.curl(u) * ng.curl(v) - k0 ** 2 * eps_cf * (u * v)) * ng.dx
+    f = ng.LinearForm(fes)
+    if bg_field is not None:
+        # scattered-field source k0^2 (eps - eps_ref) E0 -- nonzero only where eps != eps_ref (the
+        # structure). eps_ref may be a scalar (uniform reference) or a CF.
+        eps_ref_cf = eps_ref if isinstance(eps_ref, ng.CoefficientFunction) else \
+            ng.CoefficientFunction(complex(eps_ref if eps_ref is not None else 1.0))
+        f += (k0 ** 2 * (eps_cf - eps_ref_cf) * (bg_field * v)) * ng.dx
+    if volume_current is not None:
+        f += (1j * k0 * Z0 * (volume_current * v) / S) * ng.dx
+    if surface_currents:
+        for _bnd, _K in surface_currents.items():
+            f += (1j * k0 * Z0 * (_K * v.Trace())) * ng.ds(definedon=mesh.Boundaries(_bnd))
+
+    _ls = optical.linear_solver
+    pre = ng.Preconditioner(a, "bddc") if _ls.startswith("bddc") else None
+    gfu = ng.GridFunction(fes)
+    t0 = time.time()
+    with ng.TaskManager():
+        a.Assemble(); f.Assemble()
+        if _ls == "umfpack":
+            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
+        elif _ls == "bddc_cg":
+            inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
+                                        maxiter=optical.gmres_max_iter)
+            gfu.vec.data = inv * f.vec
+        else:
+            ng.solvers.GMRes(A=a.mat, b=f.vec, pre=pre.mat, x=gfu.vec,
+                                tol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
+                                printrates=verbose)
+    dt = time.time() - t0
+
+    rvec = gfu.vec.CreateVector()
+    rvec.data = f.vec - a.mat * gfu.vec
+    bn = float(np.linalg.norm(f.vec.FV().NumPy()))
+    relres = float(np.linalg.norm(rvec.FV().NumPy())) / bn if bn > 1e-300 else 0.0
+    if relres > 1e-3:
+        warnings.warn(
+            "solve_fem_sourced: solver '{}' did not converge (relative residual {:.2e} > 1e-3). The "
+            "curl-curl operator is near-singular for low-loss / open-cavity source problems (the "
+            "DIRECT current route especially); use the scattered-field route (bg_field/eps_ref) with "
+            "a metal-filled cell, linear_solver='umfpack', or refine.".format(
+                optical.linear_solver, relres), stacklevel=2)
+
+    # ---- radiated 0-order amplitudes + per-port power (total field = bg_field + gfu) ----
+    total = gfu if bg_field is None else (bg_field + gfu)
+    Px, Py = geo.period_x_nm, geo.period_y_nm
+    proj = (complex(probe_pol[0]), complex(probe_pol[1]), complex(probe_pol[2]))
+    kz_s = complex(cmath.sqrt((complex(n_super) * k0) ** 2 - kx ** 2 - ky ** 2))
+    if kz_s.imag < 0:
+        kz_s = -kz_s
+    a_up = _sourced_port_amp(mesh, total, geo, kz_s, proj, kx, ky, "superstrate", +1)
+    area_phys = (Px * Py) / S ** 2
+    p_up = (abs(a_up) ** 2 * (kz_s.real / k0) / (2.0 * Z0)) * area_phys
+    a_down = p_down = None
+    if "substrate" in geo.z_intervals_nm:
+        kz_b = complex(cmath.sqrt((complex(n_sub) * k0) ** 2 - kx ** 2 - ky ** 2))
+        if kz_b.imag < 0:
+            kz_b = -kz_b
+        a_down = _sourced_port_amp(mesh, total, geo, kz_b, proj, kx, ky, "substrate", -1)
+        if kz_b.real > 1e-9 * k0:
+            # lossless-substrate z-flux of a tangential-field plane wave (valid for a vacuum/
+            # dielectric substrate); the SHG use case radiates into a vacuum superstrate.
+            p_down = (abs(a_down) ** 2 * (kz_b.real / k0) / (2.0 * Z0)) * area_phys
+    return SourcedResult(fes=fes, gfu=gfu, bg_field=bg_field, a_up=complex(a_up),
+                          a_down=(None if a_down is None else complex(a_down)),
+                          p_up=float(p_up), p_down=(None if p_down is None else float(p_down)),
+                          solve_time_s=dt, relres=relres)
+
+
+def _sourced_port_amp(mesh, total_field, geo: OpticalGeometry, kz, proj, kx, ky, region, sgn):
+    """0-order outgoing amplitude in a super/substrate buffer: 2-wave fit of the (proj-projected,
+    demodulated) TOTAL field to sgn*outgoing exp(sgn i kz z) + residual. sgn=+1 up (superstrate),
+    -1 down (substrate). Reuses solve_fem's _cell_average (probe-grid sized for the medium)."""
+    z0, z1 = geo.z_intervals_nm[region]
+    pad = max(50.0, 0.1 * (z1 - z0))
+    zlo, zhi = z0 + pad, z1 - pad
+    if zhi <= zlo:
+        zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
+    zr = np.linspace(zlo, zhi, 7)
+    Es = _cell_average(mesh, total_field, zr, geo.period_x_nm, geo.period_y_nm, proj, kx, ky,
+                        kz_med=kz)
+    M = np.column_stack([np.exp(1j * sgn * kz * zr), np.exp(-1j * sgn * kz * zr)])
+    coeffs = _lstsq_2wave(M, Es, where="{} radiated".format(region))
+    return complex(coeffs[0])
 
 
 def _probe_grid_sizes(Px, Py, kx, ky, kz_med):
