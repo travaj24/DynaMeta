@@ -164,9 +164,10 @@ scale oracles (the audit lessons), adversarial verification before merge.
 
 | Item | State |
 |---|---|
-| 1.1 pole finder (layered) | IN PROGRESS |
-| 1.2 ringdown inversion | IN PROGRESS |
-| 1.3 Fano tooling | IN PROGRESS |
-| 1.4 vortex charge | pending (after 1.1-1.3) |
+| 1.1 pole finder (layered) | SHIPPED (optics/resonance.py; 9 gates incl. FP closed form to 2e-16, ENZ/Berreman film pole; KEY NUMERICS: the Abeles characteristic matrix is the branch-cut-free pole function -- 1/t and Redheffer cascades inherit the layer sqrt cut and break the argument principle; p-pol has a spurious eps=0 admittance pole to box around) |
+| 1.2 ringdown inversion | SHIPPED (optics/ringdown.py + opt-in FDTD trace probe; matrix-pencil to 1e-15 on synthetics, resolves half-linewidth pairs the FFT cannot, etalon Q 1.1% vs closed form; energy-Q convention == pole Q by construction) |
+| 1.3 Fano tooling | SHIPPED (analysis.fano_fit/lorentzian_fit/quasi_bic_scaling; VARPRO parameterization stable across all q; slope -2 law gate; NOTE pole-Q vs finesse-Q differ ~6% on low-finesse etalons -- fit windows documented) |
+| 1.x cross-gate | SHIPPED (tests/test_resonance_crossgate.py: ONE etalon mode measured by pole finder + FDTD ringdown + driven-spectrum fit agrees on (omega, Q); ringdown excitation-band placement is part of the operating manual -- a mid-gap band rings a skirt mode with a source-transient-contaminated tail) |
+| 1.4 vortex charge | pending (next) |
 | 2.1-2.4 ENZ | pending |
 | 3.1-3.3 NL generation | pending |
