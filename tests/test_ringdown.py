@@ -7,7 +7,6 @@ pole-finder convention Re(omega_t)/(2|Im omega_t|) for the same resonance.
 """
 
 import numpy as np
-import pytest
 from scipy.signal import find_peaks, hilbert
 
 from dynameta.constants import C_LIGHT

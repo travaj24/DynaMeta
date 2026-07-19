@@ -2,6 +2,7 @@
 
 from dynameta.materials.optical_model import (
     OpticalModel, ConstantOptical, TabulatedOptical, DrudeOptical,
+    ExtendedDrudeOptical, MerminDrudeOptical, gamma_ito_extended, check_kk,
     RefractiveIndexInfoOptical, fit_drude_params, M_E, Q_E, EPS0, C_LIGHT,
 )
 from dynameta.materials.scattering import KaneOpticalMass, MatthiessenGamma, ScatteringModel
@@ -16,6 +17,7 @@ from dynameta.materials.db import (
 
 __all__ = [
     "OpticalModel", "ConstantOptical", "TabulatedOptical", "DrudeOptical",
+    "ExtendedDrudeOptical", "MerminDrudeOptical", "gamma_ito_extended", "check_kk",
     "RefractiveIndexInfoOptical", "fit_drude_params", "M_E", "Q_E", "EPS0", "C_LIGHT",
     "KaneOpticalMass", "MatthiessenGamma", "ScatteringModel", "MechanicalProps",
     "TransportModel", "TrapSpec", "CarrierPhysics",
