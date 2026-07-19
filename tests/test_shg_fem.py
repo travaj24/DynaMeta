@@ -6,21 +6,22 @@ Scope of this suite (see optics/shg_fem.py + roadmap 3.2):
             side (derived in-test); + solve_fem_sourced runs and CONVERGES on a metal cell; +
             an analytic reciprocity spot-check.
   * GATE 2  flat-surface SHG     : the analytic Rudnick-Stern reflected-SHG oracle
-            (rudnick_stern_flat_shg) -- p-pol nonzero, s-pol identically zero (symmetry-forbidden).
+            (rudnick_stern_flat_shg) -- p-pol nonzero, s-pol identically zero (symmetry-forbidden);
+            PLUS the QUANTITATIVE FEM leg: shg_two_step's p_up_2w matches the oracle * cell area
+            to < 10% at oblique angles (measured ~0.5-1.2%; test_flat_shg_fem_quantitative).
   * GATE 3  slope 2              : SH power quadratic in the fundamental INTENSITY (slope 2.00).
   * GATE 4  normal-incidence     : the a-term SH radiation vanishes into the specular direction at
             exactly normal incidence (strong suppression vs oblique).
-  * GATE 5  (documented stretch) : a metal-grating vs flat SHG enhancement -- see notes at the end;
-            not asserted here (the FEM SH-power read-out caveat below).
+  * GATE 5  (documented stretch) : a metal-grating vs flat SHG enhancement -- see notes at the end.
 
-CONDITIONING NOTE (documented, honest): solve_fem_sourced's radiated-power EXTRACTION is only
-quantitatively reliable when the scattered field in the buffers is a single clean outgoing wave.
-The periodic curl-curl operator carries a near-null interior mode + a background/PML counter-
-propagating component in low-loss / open-cavity superstrates that biases the extracted amplitude,
-so the quantitative FEM-vs-oracle SH-power match (roadmap gate 2's FEM leg) is NOT asserted here;
-the closed-form oracle is the validated primary result. The linear step, surface-field sampling,
-and SH source assembly are exact. This mirrors solve_fem's own documented ill-conditioning in the
-resonant/lossy-metal regime.
+EXTRACTION NOTE (corrected 2026-07-19): an earlier revision deferred the quantitative FEM leg
+behind a 'near-null interior mode / ~2-2.5x low-loss extraction bias' story. Adversarial
+verification could NOT reproduce that bias (direct-route extraction measured accurate to ~0.3%
+normal / ~1-5.5% oblique even in an all-vacuum open cell); the actual defect was an SI-vs-nm
+units bug in shg_fem._normal_sheet_vacuum_field (E0 low by exactly S = 1e9, power by 1e18) plus
+a tangential-only probe_pol under-counting p-pol power by cos^2(theta). Both are fixed and the
+quantitative gate is now asserted below. The real remaining constraint: solve_fem_sourced's
+power formula requires a LOSSLESS superstrate.
 """
 
 import math
@@ -151,6 +152,43 @@ def test_flat_shg_angle_trend_increasing():
     assert all(S[i + 1] > S[i] for i in range(len(S) - 1)), S
 
 
+def test_flat_shg_fem_quantitative():
+    """GATE 2, FEM leg (previously deferred -- see the module docstring's EXTRACTION NOTE): the
+    full FEM two-step (shg_two_step: linear solve at w -> Rudnick-Stern sheet -> sourced solve at
+    2w -> radiated-power extraction) reproduces the analytic flat-surface oracle
+    rudnick_stern_flat_shg * cell area to < 10% at two oblique angles. Measured agreement is
+    ~0.5% at 20 deg and ~0.7% at 35 deg (~1.2% at 50 deg); the residual is the documented
+    fixed-alpha z-PML oblique approximation at BOTH wavelengths. Flat gold half-space,
+    ConstantOptical => the same eps at w and 2w, so the oracle is called with eps_2w = EPS_W."""
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
+    from dynameta.optics.shg_fem import shg_two_step
+
+    period = 220e-9
+    for th in (20.0, 35.0):
+        reg = MaterialRegistry()
+        reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+        reg.add(Material("gold", ConstantOptical(EPS_W)))
+        stack = Stack(layers=[Layer("metalL", 400e-9, "gold"), Layer("capL", 300e-9, "air")],
+                      superstrate_material="air", substrate_material="gold")
+        m3 = Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=800e-9, substrate_buffer_m=250e-9,
+                        maxh_superstrate_m=80e-9, maxh_substrate_m=90e-9, maxh_metal_m=25e-9,
+                        maxh_background_m=80e-9, maxh_pml_m=170e-9)
+        opt = OpticalSpec(polarization="p", incidence_angle_deg=th, linear_solver="umfpack")
+        d = Design(name="shg_quant", unit_cell=UnitCell.square(period), stack=stack,
+                   electrodes=[], materials=reg, mesh_3d=m3, optical=opt)
+        out = shg_two_step(d, lambda_fund_m=LAM, chi_zzz=CHI)
+        flat = rudnick_stern_flat_shg(LAM, th, EPS_W, EPS_W, CHI, polarization="p")
+        p_an = flat["S_up"] * period ** 2
+        assert p_an > 0.0
+        rel = abs(out["p_up_2w"] - p_an) / p_an
+        assert rel < 0.10, "theta={}: FEM p_up_2w={:.4e} vs analytic {:.4e} (rel {:.3f})".format(
+            th, out["p_up_2w"], p_an, rel)
+        # the sampled fundamental normal field must equal the oracle's closed form exactly
+        assert abs(out["E_perp_in"] - flat["E_perp_in"]) < 1e-12 * abs(flat["E_perp_in"])
+
+
 # --------------------------------------------------------------------------------------------
 # GATE 3 -- slope 2 (SH power quadratic in fundamental intensity)
 # --------------------------------------------------------------------------------------------
@@ -200,8 +238,8 @@ def test_rudnick_stern_chi_units_and_scaling():
 
 # --------------------------------------------------------------------------------------------
 # GATE 5 (documented stretch): a thin metal grating's SH vs the flat surface should show an
-# enhancement (field concentration in the gap). Implementing this needs the FEM SH-power read-out,
-# which carries the conditioning caveat above, so it is left as the documented stretch rather than
-# an asserted gate. The flat-surface analytic oracle + the FEM two-step driver (shg_fem.shg_two_step)
-# are in place for it once the sourced-solver extraction is hardened.
+# enhancement (field concentration in the gap). The SH-power read-out is now quantitatively
+# validated on the flat surface (test_flat_shg_fem_quantitative, ~1%), so the remaining work is
+# purely the grating-source assembly (a per-facet Rudnick-Stern sheet on a structured top
+# surface, replacing the flat-surface analytic E0); left as the documented stretch.
 # --------------------------------------------------------------------------------------------

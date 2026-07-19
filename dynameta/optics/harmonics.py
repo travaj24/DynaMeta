@@ -33,6 +33,17 @@ BANDWIDTH / WINDOWING CONVENTION (documented so the band integrals are reproduci
     closed form. The pump / 2w / 3w lobes are separated by ~f0 >> their widths, so inter-band
     spectral leakage sits far below the double-precision numerical floor (verified by the
     zero-nonlinearity floor gate: harmonic bands > 60 dB below the fundamental).
+  * PUMP-BANDWIDTH PRECONDITION (numeric, guarded at runtime -- measured 2026-07-19): the band
+    integrals are only a valid harmonic diagnostic for a NARROWBAND pump. A broadband pump's own
+    spectral tail reaches the 2w band [2 f0 (1-bw), ...] and is mis-attributed as second harmonic:
+    pure-fundamental Gaussian pulses (zero nonlinearity) measured phantom P_2w/P_w ~ 3e-11 at
+    pump spectral std sigma_f/f0 = 0.106, ~8e-6 at 0.159, and ~9e-4 at 0.208. For a Gaussian
+    pump the 2w-band leakage stays below the ~1e-6 (60 dB) floor when sigma_f < ~0.21 (1 - 2 bw)
+    f0 (= 0.147 f0 at the default bw = 0.15). harmonic_spectrum measures sigma_f over the
+    inter-band window [0.5 f0, 1.5 f0] and WARNS (UserWarning, non-fatal by design: the w-band
+    power itself remains usable and existing pipelines should not break; the returned
+    'pump_broadband' flag supports strict callers) when the bound is exceeded. The tau = 50 fs
+    validation testbed sits at sigma_f/f0 ~ 0.013, far inside the honest window.
   * "Power" is the band-summed spectral density. When the magnetic probe H_x is available the
     density is the per-frequency time-averaged Poynting flux S_z = -Re(E_y H_x*) (a true power,
     correct even for a dispersive exit medium); when only E is supplied it is |E(f)|^2 (energy
@@ -46,6 +57,8 @@ uniform chi2/chi3 slab radiates only the specular m = 0 order; a grating spreads
 across orders.
 """
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 
@@ -155,6 +168,9 @@ def harmonic_spectrum(result_or_trace, fundamental_hz, *, dt=None, field="transm
       fundamental_hz, freqs_Hz, power_spectrum (order-summed density vs f), orders,
       power {n: P_total}, power_by_order {n: (norder,) array}, bands_hz {n: (lo, hi)},
       band_truncated {n: bool}, power_type, bandwidth_frac, nyquist_hz,
+      pump_sigma_hz / pump_sigma_max_hz / pump_broadband (the pump-bandwidth guard: measured
+      pump spectral std, the honest-diagnostic bound, and whether it was exceeded -- a
+      UserWarning also fires; see the module docstring),
       and the convenience aliases P_w / P_2w / P_3w.
     """
     f0 = float(fundamental_hz)
@@ -169,6 +185,29 @@ def harmonic_spectrum(result_or_trace, fundamental_hz, *, dt=None, field="transm
                          "harmonic bands do not overlap; got {}".format(_bw_max, bandwidth_frac))
     e, h, dt = _extract(result_or_trace, dt, field)
     f, S, orders, ptype = _order_spectra(e, h, dt)
+    # ---- pump-bandwidth guard (see the module docstring's PUMP-BANDWIDTH PRECONDITION) ----
+    # pump spectral std over the inter-band window [0.5 f0, 1.5 f0] (pump-dominated; stops short
+    # of the 2w band). |S| weights: robust to tiny negative Poynting-density noise bins.
+    Ssum = np.abs(S.sum(axis=1))
+    mwin = (f >= 0.5 * f0) & (f <= 1.5 * f0)
+    wtot = float(Ssum[mwin].sum())
+    pump_sigma = 0.0
+    if wtot > 0.0:
+        fw, sw = f[mwin], Ssum[mwin]
+        fbar = float((fw * sw).sum()) / wtot
+        pump_sigma = float(np.sqrt(max(0.0, float(((fw - fbar) ** 2 * sw).sum()) / wtot)))
+    pump_sigma_max = 0.21 * (1.0 - 2.0 * bandwidth_frac) * f0
+    pump_broadband = bool(pump_sigma > pump_sigma_max)
+    if pump_broadband:
+        warnings.warn(
+            "harmonic diagnostics: BROADBAND pump -- measured pump spectral std {:.3g} Hz "
+            "({:.3f} f0) exceeds the honest-diagnostic bound {:.3g} Hz ({:.3f} f0) for "
+            "bandwidth_frac = {}. The pump's own spectral tail reaches the 2w band and is "
+            "mis-attributed as second harmonic (a pure-fundamental pulse at 0.21 f0 measures a "
+            "phantom P_2w/P_w ~ 1e-3); the 2w/3w band powers are NOT a valid harmonic "
+            "diagnostic here. Use a longer (narrower-band) pump pulse.".format(
+                pump_sigma, pump_sigma / f0, pump_sigma_max, pump_sigma_max / f0,
+                bandwidth_frac), stacklevel=2)
     power, power_by_order, bands, trunc = {}, {}, {}, {}
     for n in range(1, max_order + 1):
         Ptot, Pord, band_hz, tr = _band(f, S, f0, n, bandwidth_frac)
@@ -185,6 +224,9 @@ def harmonic_spectrum(result_or_trace, fundamental_hz, *, dt=None, field="transm
         "power_type": ptype,
         "bandwidth_frac": float(bandwidth_frac),
         "nyquist_hz": float(f[-1]),
+        "pump_sigma_hz": float(pump_sigma),
+        "pump_sigma_max_hz": float(pump_sigma_max),
+        "pump_broadband": pump_broadband,
     }
     out["P_w"] = power.get(1)
     out["P_2w"] = power.get(2)

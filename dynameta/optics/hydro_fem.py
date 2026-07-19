@@ -48,13 +48,16 @@ is close to a discrete longitudinal eigenvalue at generic ``omega``.  Consequenc
 
   * ``hydro_layered_1d`` -- a 1-D-in-z coupled ``(E, J)`` FEM for a LAYERED stack.  The screening
     layer is trivially resolved (fine z-mesh), so this solver is ROBUST.  At NORMAL incidence it
-    reproduces ``nonlocal_tmm`` R/T/A to MACHINE PRECISION (there is no longitudinal coupling at
-    normal incidence -- it validates the local reduction, the ABC bookkeeping, the units and the
-    transparent boundary condition).  At OBLIQUE incidence it reproduces the BULK-PLASMON
-    standing-wave absorption peaks at ``k_L d = m*pi`` to < 1% (the core nonlocal physics -- the
-    pressure term and ABC); its ABSOLUTE absorption carries a ~10% error because a single scalar
-    impedance BC cannot fully absorb the oblique VECTOR p-pol wave in a nodal discretization
-    (documented, not gated -- the peak POSITIONS are what validate the physics).
+    reproduces ``nonlocal_tmm`` R/T/A to ~1e-8 relative (mesh/order-limited, NOT machine
+    precision: measured worst 5.5e-8 over 0.4-1.3 wp at an off-gate parameter set, ~1e-10 well
+    below wp; there is no longitudinal coupling at normal incidence -- it validates the local
+    reduction, the ABC bookkeeping, the units and the transparent boundary condition).  At
+    OBLIQUE incidence it reproduces the BULK-PLASMON standing-wave absorption peaks at
+    ``k_L d = m*pi`` to < 1% (the core nonlocal physics -- the pressure term and ABC); its
+    ABSOLUTE absorption error grows with angle because a single scalar impedance BC cannot fully
+    absorb the oblique VECTOR p-pol wave in a nodal discretization: measured ~0.5-3% at 30 deg
+    and up to ~20% at 60 deg near 0.7 wp (documented, not gated -- the peak POSITIONS are what
+    validate the physics).
 
   * ``scattering_2d`` -- the genuine 2-D ``H(curl) x H(div)`` coupled weak form on an arbitrary
     scatterer (cylinder / nanowire dimer).  Its LOCAL-Drude path (``local=True``) is rock-solid
@@ -275,8 +278,12 @@ class LayeredResult(NamedTuple):
         extracted by matching the outgoing p-pol plane wave in each vacuum buffer.
     A_volume : float
         The INDEPENDENT volumetric absorptance ``P_abs / P_inc``, ``P_abs = (1/2) int Re(E.J*) dV``.
-        At normal incidence ``A_volume == A == nonlocal_tmm`` to machine precision; at oblique it is
-        the reliable absorptance (the R/T plane-wave fit carries the vector-BC error).
+        At normal incidence ``A_volume == A == nonlocal_tmm`` to ~1e-8 relative (mesh/order-
+        limited); at oblique it is the PREFERRED absorptance (the R/T plane-wave fit carries the
+        vector-BC error and can go unphysical), but it still carries the scalar-impedance-BC
+        error itself: measured ~0.5-3% vs nonlocal_tmm at 30 deg, up to ~20% at 60 deg near
+        0.7 wp.  Peak POSITIONS remain < 1%-accurate; treat oblique ABSOLUTE values as
+        approximate.
     """
 
     R: float
@@ -324,9 +331,10 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
     p-polarised plane-wave incidence at ``theta_rad``.  Solves the weak form documented in the
     module header on a 1-D-in-z mesh (fields ``~ f(z) exp(i*kx*x)``, ``kx = k0 sin(theta)``).
 
-    Robust and oracle-backed: at NORMAL incidence R/T/A match ``nonlocal_tmm`` to machine
-    precision; at OBLIQUE incidence the bulk-plasmon absorption peaks land at ``k_L d = m*pi``
-    (:func:`bulk_plasmon_omega`) to < 1% -- see the module header for the exact scope.
+    Robust and oracle-backed: at NORMAL incidence R/T/A match ``nonlocal_tmm`` to ~1e-8
+    relative (mesh/order-limited); at OBLIQUE incidence the bulk-plasmon absorption peaks land
+    at ``k_L d = m*pi`` (:func:`bulk_plasmon_omega`) to < 1%, while the ABSOLUTE absorptance
+    degrades with angle (up to ~20% at 60 deg) -- see the module header for the exact scope.
 
     Parameters
     ----------
