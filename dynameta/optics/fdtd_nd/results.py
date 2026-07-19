@@ -22,6 +22,13 @@ class FDTD2DResult:
     band: np.ndarray            # boolean mask of the well-excited frequency band
     r0: Optional[np.ndarray] = None   # COMPLEX 0-order reflection coeff, phase de-embedded to the front face
     t0: Optional[np.ndarray] = None   # COMPLEX 0-order transmission coeff, de-embedded across the structure
+    # OPT-IN probe (roadmap 3.1 harmonic diagnostics; None unless solve_fdtd_2d(return_time_trace=True),
+    # mirroring the 1-D FDTD1DResult.time_trace precedent). dict of the recorded exit/entry-plane E_y + H_x
+    # x-lines (nsteps, nx) already used for the R/T extraction -- exposed as copies so optics.harmonics can
+    # read the 2w/3w content (which R0/T0/flux, normalized by the ~0 incident reference at n*f0, cannot
+    # carry). Keys: dt, t, transmitted(+_hx), reflected(+_hx), incident_left(+_hx), incident_right(+_hx),
+    # period_x_m, dx, nx. Leaving it None keeps every other field byte-identical to the legacy path.
+    time_trace: Optional[dict] = None
 
 
 
