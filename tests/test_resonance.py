@@ -165,6 +165,74 @@ def test_track_fp_pole_over_thickness():
 # ------------------------------------------------------------------------------------------------
 # Gate 6: Berreman / ENZ thin-film mode
 # ------------------------------------------------------------------------------------------------
+def _driven_absorptance_qfit(eps_inf, wp, gamma, d, theta_rad, n_pts=1200):
+    """INDEPENDENT oracle for the Berreman/ENZ mode: scan REAL omega, compute the p-pol driven
+    absorptance A(omega) = 1 - R - T of the film with the real-axis evaluator (itself pinned
+    against tmm_reference in gate 1), and fit the resonance with analysis.lorentzian_fit (the
+    driven-spectrum instrument). Returns (x0, Q). No pole/winding machinery is involved."""
+    from dynameta.analysis import lorentzian_fit
+
+    omega_p = wp / math.sqrt(eps_inf)
+    film = [(lambda w: drude_eps(w, eps_inf, wp, gamma), d)]
+    ws = np.linspace(0.85 * omega_p, 1.30 * omega_p, n_pts)
+    A = np.empty(n_pts)
+    for i, w in enumerate(ws):
+        sm = layered_smatrix_complex(w, film, theta_rad=theta_rad, pol="p")
+        A[i] = 1.0 - sm.R - sm.T
+    fit = lorentzian_fit(ws, A)
+    return fit.x0, fit.Q
+
+
+@pytest.mark.parametrize("eps_inf,wp,gamma,d_nm,theta_deg", [
+    (2.0, 2.0e15, 1.0e14, 40.0, 45.0),
+    (3.8, 2.5e15, 1.0e13, 40.0, 40.0),
+    (3.8, 2.5e15, 1.0e14, 40.0, 40.0),
+    (4.0, 3.0e15, 5.0e13, 30.0, 60.0),
+])
+def test_berreman_enz_pole_eps_inf_gt_one_vs_driven_oracle(eps_inf, wp, gamma, d_nm, theta_deg):
+    # REGRESSION (2026-07-19 adversarial verification): for eps_inf > 1 -- i.e. every REAL
+    # TCO/ITO ENZ film (eps_inf ~ 3.7-4) -- the pre-fix finder silently returned spurious
+    # far-plane zeros (Re/omega_p ~ 1e-9 or ~10, Q ~ 1e-9..1.4) because the genuine Berreman
+    # zero sits next to the film's eps = 0 admittance pole of the p-pol pole function (argument
+    # principle nets zeros - poles ~ 0) and the old hardcoded Newton seeds fell off to strays.
+    # The fixed finder (ENZ-pole-cleared function + grid-minimum-seeded Newton backstop) must
+    # agree with the independent driven-absorptance oracle. Measured agreement at the fix:
+    # dRe <= 1.1e-3, dQ <= 9.3% (the largest on the broadest line -- the known pole-Q vs
+    # driven-Q gap of low-finesse resonances).
+    d = d_nm * 1e-9
+    theta = math.radians(theta_deg)
+    omega_p = wp / math.sqrt(eps_inf)
+    res = berreman_enz_pole(eps_inf=eps_inf, wp=wp, gamma=gamma, thickness_m=d, theta_rad=theta)
+    pole = res["omega"]
+    assert pole.imag < 0.0                                    # decaying (exp(-i w t))
+    assert 0.95 < pole.real / omega_p < 1.10                  # near omega_p (pre-fix: 1e-9 / ~10)
+    x0, q_driven = _driven_absorptance_qfit(eps_inf, wp, gamma, d, theta)
+    assert pole.real == pytest.approx(x0, rel=5e-3)           # centre vs the driven oracle
+    assert res["Q"] == pytest.approx(q_driven, rel=0.15)      # Q vs the driven oracle
+
+
+def test_find_poles_pole_on_subdivision_centre():
+    # REGRESSION (2026-07-19 adversarial verification): a search box centred EXACTLY on a pole
+    # (the natural user call) put that pole on the quad-tree dividing lines; both adjacent
+    # children's windings were corrupted by the ~pi boundary phase step and the pole was
+    # SILENTLY DROPPED (a box around FP m=5 returned only m=4 and m=6). Misses persisted for
+    # centre offsets up to ~1e-4 of Re. The validated-split fix (children counts must be clean
+    # integers summing to the parent count, else the split lines move to an irrational
+    # fraction) must return all three poles at every offset.
+    n, L = 3.5, 500e-9
+    func = smatrix_pole_func([(complex(n) ** 2, L)], pol="s", n_super=1.0, n_sub=1.0, k_par_m=0.0)
+    p5 = _fp_pole(n, L, 5)
+    span = complex(0.30 * p5.real, 0.6 * abs(p5.imag))
+    for off in (0.0, 1e-9, 1e-6, 1e-4):
+        centre = complex(p5.real * (1.0 + off), p5.imag)
+        poles = find_poles(func, centre, span, n_grid=40)
+        for m in (4, 5, 6):
+            want = _fp_pole(n, L, m)
+            got = min(poles, key=lambda p, w=want: abs(p - w))
+            assert abs(got - want) < 1e-6 * abs(want), (
+                "pole m={} missed with centre offset {}".format(m, off))
+
+
 def test_berreman_enz_pole_thin_drude_film():
     # ITO-like Drude film: eps_inf = 1, omega_p ~ 2e15 rad/s (ENZ in the near-IR), moderate loss.
     eps_inf, wp, gamma = 1.0, 2.0e15, 1.0e14

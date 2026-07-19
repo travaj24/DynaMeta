@@ -302,9 +302,12 @@ def _stack_denominator(omega: complex, layers: Sequence[Layer], pol: str, n_supe
     when a search-box edge crosses it ``arg(D)`` jumps by ~pi and the argument-principle winding
     miscounts.  ``D`` here is analytic in ``omega`` except for the branch points of the SEMI-INFINITE
     end media (``Y_super``, ``Y_sub`` at their light lines ``kz_end = 0``) -- which are physical and
-    kept outside a well-placed box -- and, for p-polarization, a pole at a layer ENZ crossing
-    ``eps_j = 0`` (from ``1/Y_p = kz/eps``); position p-pol boxes to exclude that point (see
-    :func:`berreman_enz_pole`, which additionally seeds Newton directly)."""
+    kept outside a well-placed box -- and, for p-polarization, a SIMPLE POLE at a layer ENZ
+    crossing ``eps_j = 0`` (from ``1/Y_p = kz/eps``); either position p-pol boxes to exclude that
+    point, or clear it by multiplying ``D`` by ``eps_j(omega)`` (the same trick
+    ``nonlocal_tmm.pole_function`` uses for its csc poles -- see :func:`berreman_enz_pole`,
+    where the genuine Berreman zero sits right next to the ENZ point and the cleared form is
+    essential)."""
     k0 = omega / C_LIGHT
     kpar = complex(k_par)
     eps_super = complex(n_super) ** 2
@@ -409,6 +412,30 @@ def _winding(func: Callable[[complex], complex], rect: Tuple[float, float, float
     return acc / (2.0 * math.pi), maxstep
 
 
+def _winding_densified(func: Callable[[complex], complex],
+                       rect: Tuple[float, float, float, float],
+                       n_grid: int) -> Tuple[float, float]:
+    """:func:`_winding` with adaptive boundary densification (doubling up to 16x while any
+    single phase step exceeds ~1.2 rad).  Returns ``(w, maxstep)`` at the final density.  A
+    residual ``maxstep > 1.2`` after densification flags an UNTRUSTWORTHY count -- typically a
+    zero lying on (or hugging) the contour, whose ~pi phase jump no sampling density removes."""
+    w, maxstep = _winding(func, rect, n_grid)
+    ng = n_grid
+    while maxstep > 1.2 and ng < n_grid * 16:
+        ng *= 2
+        w, maxstep = _winding(func, rect, ng)
+    return w, maxstep
+
+
+# Quad-tree split fractions tried in order.  0.5 first (the natural bisection); the other two are
+# irrational offsets used when the parent-vs-children count-consistency check fails -- a pole
+# sitting ON a dividing line corrupts both children's windings, and shifting the line by an
+# irrational fraction of the box is guaranteed to move it off any such pole.
+_SPLIT_FRACS = (0.5,
+                0.5 + 0.5 * (math.sqrt(5.0) - 2.0),      # ~0.618 (golden section)
+                0.5 - 0.25 * (math.sqrt(2.0) - 1.0))     # ~0.396
+
+
 def _interior_seed(func: Callable[[complex], complex],
                    rect: Tuple[float, float, float, float], n: int) -> complex:
     """Seed Newton at the interior grid point of least |func| (a coarse basin locator)."""
@@ -475,29 +502,58 @@ def find_poles(func_of_omega: Callable[[complex], complex], omega_center, omega_
 
     found: List[complex] = []
 
-    def recurse(rect, depth):
-        w, maxstep = _winding(func_of_omega, rect, n_grid)
-        ng = n_grid
-        # Densify if the boundary is under-sampled (a phase step > ~pi risks miscounting).
-        while maxstep > 1.2 and ng < n_grid * 16:
-            ng *= 2
-            w, maxstep = _winding(func_of_omega, rect, ng)
-        count = int(round(w))
+    def newton_in(rect):
+        seed = _interior_seed(func_of_omega, rect, max(6, n_grid // 4))
+        z = newton_refine(func_of_omega, seed, tol=refine_tol)
+        if _inside(z, rect) and np.isfinite(z):
+            found.append(z)
+
+    def recurse(rect, depth, count=None):
+        if count is None:
+            w, _ = _winding_densified(func_of_omega, rect, n_grid)
+            count = int(round(w))
         if count <= 0:
             return
         re0, re1, im0, im1 = rect
         tiny = (re1 - re0) < dedup_rel * max(abs(re0), abs(re1), 1.0)
         if count == 1 or depth >= max_depth or tiny:
-            seed = _interior_seed(func_of_omega, rect, max(6, n_grid // 4))
-            z = newton_refine(func_of_omega, seed, tol=refine_tol)
-            if _inside(z, rect) and np.isfinite(z):
-                found.append(z)
+            newton_in(rect)
             return
-        # Subdivide into 4 quadrants and recurse.
+        # Subdivide into 4 quadrants -- with a VALIDATED split.  A pole lying ON a dividing line
+        # (e.g. a box centred exactly on a pole, the natural user call) corrupts both adjacent
+        # children's winding integrals: the ~pi phase step across the boundary zero survives any
+        # sampling density, and the pole is silently dropped.  So each candidate split must have
+        # (i) every child boundary well-sampled after densification (maxstep <= 1.2), (ii) every
+        # child winding a clean integer, and (iii) the children counts SUMMING to the parent
+        # count.  On failure the dividing lines move to an irrational fraction of the box
+        # (guaranteed off the offending pole) and the check repeats.
+        for frac in _SPLIT_FRACS:
+            rm = re0 + frac * (re1 - re0)
+            imm = im0 + frac * (im1 - im0)
+            subs = ((re0, rm, im0, imm), (rm, re1, im0, imm),
+                    (re0, rm, imm, im1), (rm, re1, imm, im1))
+            child_counts = []
+            ok = True
+            for sub in subs:
+                ws, ms = _winding_densified(func_of_omega, sub, n_grid)
+                cs = int(round(ws))
+                if ms > 1.2 or abs(ws - cs) > 0.25:
+                    ok = False                     # a zero sits on / hugs this child boundary
+                    break
+                child_counts.append(cs)
+            if ok and sum(child_counts) == count:
+                for sub, cs in zip(subs, child_counts):
+                    recurse(sub, depth + 1, count=cs)
+                return
+        # No split offset yielded a fully-validated partition -- a pole hugs every candidate
+        # dividing line (pole-DENSE box, e.g. a bulk-plasmon comb). Fall back to plain bisection
+        # with per-child re-counting: each child's own boundaries move again as it subdivides,
+        # so deeper recursion recovers isolated poles best-effort (the pre-fix behaviour) --
+        # far better than collapsing the whole box onto a single Newton seed.
         rm = 0.5 * (re0 + re1)
-        im = 0.5 * (im0 + im1)
-        for sub in ((re0, rm, im0, im), (rm, re1, im0, im),
-                    (re0, rm, im, im1), (rm, re1, im, im1)):
+        imm = 0.5 * (im0 + im1)
+        for sub in ((re0, rm, im0, imm), (rm, re1, im0, imm),
+                    (re0, rm, imm, im1), (rm, re1, imm, im1)):
             recurse(sub, depth + 1)
 
     recurse(root_rect, 0)
@@ -630,30 +686,53 @@ def berreman_enz_pole(*, eps_inf: float, wp: float, gamma: float, thickness_m: f
     """
     omega_p = wp / math.sqrt(eps_inf)
     k_par = k_par_from_angle(n_super, omega_p, theta_rad)
-    film = (lambda w: drude_eps(w, eps_inf, wp, gamma), float(thickness_m))
+
+    def eps_film(w):
+        return drude_eps(w, eps_inf, wp, gamma)
+
+    film = (eps_film, float(thickness_m))
     func = smatrix_pole_func([film], pol="p", n_super=n_super, n_sub=n_sub, k_par_m=k_par)
 
-    # Default box: bracket omega_p in Re, and keep the Im range BELOW the film's ENZ point
-    # (eps_film = 0 at omega = -i gamma/2 + sqrt(wp^2 - (gamma/2)^2), a p-pol admittance pole of the
-    # pole function) so the argument-principle winding counts only the physical Berreman zero.
-    if omega_center is None:
-        omega_center = complex(1.05 * omega_p, -0.13 * omega_p)
-    if omega_span is None:
-        omega_span = complex(0.15 * omega_p, 0.08 * omega_p)
+    # The p-pol pole function D(omega) carries a SPURIOUS SIMPLE POLE at the film's ENZ crossing
+    # eps_film(omega) = 0 (through the 1/Y_p = kz/eps admittance entry).  The genuine Berreman
+    # zero sits right next to that point -- for eps_inf > 1 (every real TCO/ITO film) practically
+    # ON TOP of it -- so the argument principle over any box containing both nets
+    # (zeros - poles) ~ 0 and the mode is MISSED, while naive Newton seeds fall off to far-plane
+    # strays (the pre-2026-07-19 failure: spurious poles at Re ~ 0 or ~10*omega_p returned
+    # silently).  Clear the admittance pole the same way nonlocal_tmm.pole_function clears its
+    # csc poles: D_c = D * eps_film is analytic at the ENZ point (simple pole times simple zero
+    # -> finite NON-zero), keeps every scattering zero, and introduces no new one.
+    def func_cleared(w):
+        return func(w) * complex(eps_film(w))
 
-    poles = find_poles(func, omega_center, omega_span, n_grid=n_grid, refine_tol=refine_tol)
-    # Seed Newton directly at physically-motivated points too (robust when the box placement is
-    # awkward relative to the ENZ admittance pole).
+    # Default box: bracket omega_p in Re and hug the real axis from below -- the high-Q Berreman
+    # poles (small gamma and/or eps_inf > 1) sit at Im ~ -gamma, far shallower than the old
+    # deeper default box reached.
+    if omega_center is None:
+        omega_center = complex(1.02 * omega_p, -0.10 * omega_p)
+    if omega_span is None:
+        omega_span = complex(0.14 * omega_p, 0.099 * omega_p)
+
+    poles = find_poles(func_cleared, omega_center, omega_span, n_grid=n_grid,
+                       refine_tol=refine_tol)
+    # Backstop, independent of the winding machinery: Newton seeded at the coarse-grid minimum
+    # of |D_c| over the box (the pole-cleared surface has its global minimum in the zero's
+    # basin; verified against the driven-absorptance oracle in the tests).
+    oc = complex(omega_center)
+    osp = complex(omega_span)
+    rect = (oc.real - abs(osp.real), oc.real + abs(osp.real),
+            oc.imag - abs(osp.imag), oc.imag + abs(osp.imag))
+    seed = _interior_seed(func_cleared, rect, max(16, n_grid // 2))
+    poles.append(newton_refine(func_cleared, seed, tol=refine_tol))
+
+    # Keep only genuine decaying zeros, VERIFIED ON THE ORIGINAL D (|D| negligible vs the
+    # off-pole scale -- this also rejects any stray at the ENZ point itself, where |D| blows
+    # up), inside/near the search box, deduplicated.
     scale = abs(func(complex(omega_p, -0.5 * omega_p)))       # reference magnitude of D off-pole
-    seeds = [complex(1.02 * omega_p, -0.06 * omega_p),
-             complex(omega_p, -0.10 * omega_p),
-             complex(1.05 * omega_p, -0.15 * omega_p)]
-    for s in seeds:
-        poles.append(newton_refine(func, s, tol=refine_tol))
-    # Keep only genuine decaying zeros (|D| negligible vs the off-pole scale), deduplicated.
     genuine = []
     for p in poles:
-        if p.imag < 0.0 and p.real > 0.0 and abs(func(p)) < 1e-6 * max(scale, 1e-300):
+        if (p.imag < 0.0 and p.real > 0.0 and _inside(p, rect)
+                and abs(func(p)) < 1e-6 * max(scale, 1e-300)):
             if all(abs(p - g) > 1e-6 * max(abs(p), 1.0) for g in genuine):
                 genuine.append(p)
     if not genuine:

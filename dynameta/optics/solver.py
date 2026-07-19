@@ -690,17 +690,25 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
         inherits solve_fem's conditioning. The TOTAL field is E0 + gfu. This is the route the SHG
         two-step (shg_fem) uses: E0 is the analytic radiation of the surface-SHG sheet.
       * DIRECT current (volume_current J and/or surface_currents {bnd: K}): added straight to the
-        RHS as above. CAVEAT: a raw current source overlaps the curl-curl operator's gradient/
-        interior near-null space, so the DIRECT route is ILL-CONDITIONED for low-loss / open-cavity
-        geometries (the same regime solve_fem itself flags as ill-conditioned) -- reliable only when
-        a lossy scatterer (metal) fills much of the cell. Prefer the scattered-field route; the
-        direct route is provided for generality and near-metal use.
+        RHS as above. ACCURACY (measured 2026-07-19, superseding an earlier 'near-null interior
+        mode / ~2-2.5x low-loss bias' claim that adversarial verification could NOT reproduce):
+        with the direct umfpack solve the extracted p_up matches independent current-sheet closed
+        forms to ~0.3% at normal incidence and ~1-5.5% oblique (0-40 deg; the growth is the
+        documented fixed-alpha z-PML oblique error) EVEN in an all-vacuum open cell, and to ~2-5%
+        with a metal-backed sheet. Iterative solvers (gmres/bddc) may still struggle on low-loss
+        curl-curl source problems -- watch relres -- but with a direct factorization both routes
+        are quantitatively reliable.
 
     k_par_per_nm = (kx, ky) is the in-plane (Bloch) wavevector the source carries (0 at normal
     incidence; for surface-SHG at 2*omega it is 2 * k_par of the fundamental). probe_pol projects
-    the field onto the polarization of interest for the 0-order amplitude fit (default tangential-x;
-    the SH p-pol reflection uses the in-plane p direction). Radiated power is reported for a
-    LOSSLESS (vacuum/dielectric) super/substrate; the superstrate is vacuum in the SHG use case."""
+    the field onto the polarization of interest for the 0-order amplitude fit -- it must be the
+    FULL polarization unit vector of the outgoing wave for p_up to be the true flux: for a p-pol
+    wave pass (cos th, 0, -sin th); a tangential-only (1,0,0) projection captures Ex = E cos(th)
+    and under-counts the power by cos^2(th). Radiated power REQUIRES a LOSSLESS (vacuum/
+    dielectric) super/substrate: p_up = |a|^2 (Re kz / k0)/(2 Z0) A is the plane-wave flux of a
+    lossless medium, and a lossy superstrate makes it meaningless (measured: Im(eps_super) = 1
+    inflates p_up ~5x vs the analytic sheet power; Im = 5 by ~260x). This lossless-superstrate
+    constraint -- not solver conditioning -- is the real limit of the power read-out."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
     Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
