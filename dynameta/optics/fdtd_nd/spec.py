@@ -9,6 +9,10 @@ working. Deliberately dependency-light (dataclasses only): every engine imports 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:                                            # keep spec.py dependency-light at runtime
+    from dynameta.optics.hot_carrier import HotCarrierParams
 
 
 @dataclass
@@ -51,6 +55,12 @@ class FDTDLayer:
     gain_dw_rad_s: float = 0.0             # FWHM linewidth dw_a [rad/s]
     gain_kappa_C2_kg: float = 0.0          # coupling q^2/m_eff [C^2/kg]
     gain_dN_m3: float = 0.0                # clamped inversion N2 - N1 [m^-3] (sign = gain/loss)
+    # roadmap 2.1 -- opt-in per-cell hot-carrier two-temperature ADE (2D-TE NumPy reference kernel only;
+    # None -> byte-identical to the passive Drude path). A HotCarrierParams (optics.hot_carrier) whose
+    # precomputed m*(T_e)/gamma(T_e) tables drop this layer's cold (wp, gamma) as the absorbed optical
+    # power p_abs = J_drude.E heats the local electron gas. ADDED LAST so parallel additive edits to this
+    # dataclass cannot collide textually. Typed via TYPE_CHECKING (spec.py stays import-light).
+    hot_carrier: Optional[HotCarrierParams] = None
 
     def eps_at(self, w_rad_s):
         """The complex eps(omega) this layer represents (eps_inf - Drude + Lorentz), convention
