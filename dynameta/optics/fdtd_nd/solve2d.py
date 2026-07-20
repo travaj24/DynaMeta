@@ -188,6 +188,11 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         hc_tables = []                                       # per-material (Te_grid,U_grid,wp_ratio,gam_ratio)
         hc_seen = {}                                         # id(HotCarrierParams) -> material index (dedupe)
         hc_n_update = None
+        # roadmap 5.7 finite-lattice scaffolding: c_l = inf (Tl pinned) / g_sub = 0 everywhere until a
+        # HotCarrierParams sets c_l_j_m3_k. _have_lat stays False if every layer is fixed-bath (c_l None),
+        # so the bundle carries c_l=None and the kernel takes the byte-identical fixed-bath path.
+        hc_c_l = np.full((nx, nz), np.inf); hc_g_sub = np.zeros((nx, nz))
+        _have_lat = False
     z = pad
     for L in layers:
         m = (zc >= z) & (zc < z + L.thickness_m)
@@ -220,6 +225,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
             hc_alpha[:, m] = float(hc.ttm.alpha_abs)
             hc_Te0[:, m] = float(hc.T_e0_K)
             hc_n_update = int(hc.n_update) if hc_n_update is None else min(hc_n_update, int(hc.n_update))
+            if hc.c_l_j_m3_k is not None:                     # roadmap 5.7 finite lattice on this layer
+                _have_lat = True
+                hc_c_l[:, m] = float(hc.c_l_j_m3_k)
+                hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
         z += L.thickness_m
     if lateral_eps_inf is not None:
         # a laterally-structured grating: overwrite eps_inf in the structure band with the (nx, *)
@@ -323,7 +332,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     if _have_hot:
         hot_bundle = {"mask": (hc_mat_idx >= 0).astype(float), "mat_idx": hc_mat_idx,
                       "tables": hc_tables, "G": hc_G, "Tl": hc_Tl, "alpha": hc_alpha,
-                      "Te0": hc_Te0, "n_update": (hc_n_update if hc_n_update else 1)}
+                      "Te0": hc_Te0, "n_update": (hc_n_update if hc_n_update else 1),
+                      "c_l": (hc_c_l if _have_lat else None),      # roadmap 5.7; None -> fixed-bath tier
+                      "g_sub": (hc_g_sub if _have_lat else None)}
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
     # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run).
