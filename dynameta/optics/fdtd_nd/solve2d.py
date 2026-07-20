@@ -9,7 +9,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import C_LIGHT, EPS0, T_REF
 from dynameta.optics.fdtd_nd.spec import FDTDLayer
 from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
@@ -66,7 +66,7 @@ def _ring_time_s(layers) -> float:
 
 
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
-                    lor=None, chi2=None, raman=None, gain=None):
+                    lor=None, chi2=None, raman=None, gain=None, hot=None, hot_out=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
     downstream FFT / R-T extraction stays backend-agnostic. 'numba' = the fused threaded CPU kernel;
     'jax' = the differentiable XLA scan; 'numpy'/'cupy' = the vectorized reference loop on the chosen
@@ -75,7 +75,17 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
     (R15/R20) run on EVERY backend: the GPU kernels carry the same cell-local recurrences
     (numba-cuda in the cooperative kernel; cupy through the xp-parameterized reference loop),
     validated GPU==CPU in validation/fdtd_gpu_nonlinear.py. None keeps every backend
-    byte-identical."""
+    byte-identical.
+
+    `hot` (roadmap 2.1 per-cell hot-carrier two-temperature ADE) is carried by the NUMPY reference kernel
+    ONLY -- the fused/GPU/differentiable kernels have no hot-carrier fast path yet (the Auger precedent), so
+    a non-NumPy backend with hot != None raises a loud ValueError rather than silently ignoring the
+    physics."""
+    if hot is not None and name != "numpy":
+        raise ValueError(
+            "hot-carrier two-temperature dynamics run on the 'numpy' reference kernel only; backend "
+            "'{}' has no hot-carrier fast path (extend the reference first, the Auger/nonlinear "
+            "precedent). Use backend='numpy'.".format(name))
     (ke, be, ce), (kh, bh, ch) = cpml
     if name in ("numba", "numba-cuda"):
         has_lor = lor is not None
@@ -101,7 +111,7 @@ def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_p
         import cupy as xp                                    # backend='cupy' auto-selects the device module
     a = tuple(xp.asarray(v) for v in (eps_inf, wp, gam, chi3))
     out = run_2d_te(*a, dx, dz, dt, nsteps, k_src, k_pL, k_pR, xp.asarray(src), cpml, xp, lor,
-                    chi2=chi2, raman=raman, gain=gain)
+                    chi2=chi2, raman=raman, gain=gain, hot=hot, hot_out=hot_out)
     to_np = (lambda v: np.asarray(v.get()) if hasattr(v, "get") else np.asarray(v))
     return tuple(to_np(v) for v in out)
 
@@ -113,7 +123,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
                   n_super: float = 1.0, n_sub: float = 1.0,
-                  backend: str = "numpy", xp=np) -> FDTD2DResult:
+                  backend: str = "numpy", xp=np,
+                  hot_out: Optional[dict] = None,
+                  return_time_trace: bool = False) -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
     is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
     building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
@@ -165,6 +177,22 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     # truly in n_super and the structure sees the n_sub backing); vacuum (n=1) leaves this as ones
     eps_inf[:, zc < pad] = n_super ** 2
     eps_inf[:, zc >= pad + z_struct] = n_sub ** 2
+    # roadmap 2.1 hot-carrier per-cell scaffolding (opt-in). All None/-1 unless a layer carries a
+    # HotCarrierParams; when every hot_carrier is None the bundle stays None so the run is byte-identical.
+    _hot_layers = [getattr(L, "hot_carrier", None) for L in layers]
+    _have_hot = any(h is not None for h in _hot_layers)
+    if _have_hot:
+        hc_mat_idx = np.full((nx, nz), -1, dtype=np.int64)   # per-cell material id, -1 = not hot
+        hc_G = np.zeros((nx, nz)); hc_Tl = np.zeros((nx, nz))
+        hc_alpha = np.zeros((nx, nz)); hc_Te0 = np.full((nx, nz), T_REF, dtype=float)
+        hc_tables = []                                       # per-material (Te_grid,U_grid,wp_ratio,gam_ratio)
+        hc_seen = {}                                         # id(HotCarrierParams) -> material index (dedupe)
+        hc_n_update = None
+        # roadmap 5.7 finite-lattice scaffolding: c_l = inf (Tl pinned) / g_sub = 0 everywhere until a
+        # HotCarrierParams sets c_l_j_m3_k. _have_lat stays False if every layer is fixed-bath (c_l None),
+        # so the bundle carries c_l=None and the kernel takes the byte-identical fixed-bath path.
+        hc_c_l = np.full((nx, nz), np.inf); hc_g_sub = np.zeros((nx, nz))
+        _have_lat = False
     z = pad
     for L in layers:
         m = (zc >= z) & (zc < z + L.thickness_m)
@@ -183,6 +211,24 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         gw[:, m] = L.gain_w_rad_s
         gdw[:, m] = L.gain_dw_rad_s
         gkdn[:, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
+        hc = getattr(L, "hot_carrier", None)
+        if _have_hot and hc is not None:
+            from dynameta.optics.hot_carrier import build_hot_carrier_tables  # lazy: keep fdtd_nd import-light
+            mi = hc_seen.get(id(hc))
+            if mi is None:
+                mi = len(hc_tables)
+                hc_seen[id(hc)] = mi
+                hc_tables.append(build_hot_carrier_tables(hc))
+            hc_mat_idx[:, m] = mi
+            hc_G[:, m] = float(hc.ttm.G_e_l)
+            hc_Tl[:, m] = float(hc.T_l_K)
+            hc_alpha[:, m] = float(hc.ttm.alpha_abs)
+            hc_Te0[:, m] = float(hc.T_e0_K)
+            hc_n_update = int(hc.n_update) if hc_n_update is None else min(hc_n_update, int(hc.n_update))
+            if hc.c_l_j_m3_k is not None:                     # roadmap 5.7 finite lattice on this layer
+                _have_lat = True
+                hc_c_l[:, m] = float(hc.c_l_j_m3_k)
+                hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
         z += L.thickness_m
     if lateral_eps_inf is not None:
         # a laterally-structured grating: overwrite eps_inf in the structure band with the (nx, *)
@@ -275,9 +321,20 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     name = resolve_backend(backend)                          # 'auto'/'cpu'/'gpu'/explicit -> concrete backend
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
 
-    def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None):
+    def run(ei, w, g_, c3, cpml, lor=None, chi2=None, raman=None, gain=None, hot=None, hot_out=None):
         return _dispatch_2d_te(name, ei, w, g_, c3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp,
-                               lor, chi2, raman, gain)
+                               lor, chi2, raman, gain, hot=hot, hot_out=hot_out)
+
+    # assemble the hot-carrier bundle (roadmap 2.1) for the STRUCTURE run only -- the incident reference is
+    # the bare superstrate (no absorber, so no heating) and stays byte-identical / cache-shared. wp/gam here
+    # already carry any lateral (wp,gam) override, so the kernel's cold anchors match the painted structure.
+    hot_bundle = None
+    if _have_hot:
+        hot_bundle = {"mask": (hc_mat_idx >= 0).astype(float), "mat_idx": hc_mat_idx,
+                      "tables": hc_tables, "G": hc_G, "Tl": hc_Tl, "alpha": hc_alpha,
+                      "Te0": hc_Te0, "n_update": (hc_n_update if hc_n_update else 1),
+                      "c_l": (hc_c_l if _have_lat else None),      # roadmap 5.7; None -> fixed-bath tier
+                      "g_sub": (hc_g_sub if _have_lat else None)}
 
     # reference = homogeneous superstrate (no structure, no substrate) so the probe sees the pure incident
     # wave in n_super and the reflection subtraction is exact (same incident medium as the structure run).
@@ -291,7 +348,8 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     else:
         eyL_i, hxL_i, eyR_i, hxR_i = run(n_super ** 2 * one, zero, zero, zero, cpml_ref)
     eyL_t, hxL_t, eyR_t, hxR_t = run(eps_inf, wp, gam, chi3, cpml_struct, lor,
-                                     chi2_arrs, raman_arrs, gain_arrs)  # structure run
+                                     chi2_arrs, raman_arrs, gain_arrs,
+                                     hot=hot_bundle, hot_out=hot_out)  # structure run
 
     f = np.fft.rfftfreq(nsteps, dt)
     # ---- 0-order (specular) R/T from the x-MEAN field (== the 1D two-run method) ----
@@ -322,7 +380,24 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         R_flux = np.abs(P_refl) / np.abs(P_inc)
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
-    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)
+    # OPT-IN (roadmap 3.1): expose the exit/entry-plane E_y + H_x x-lines already recorded above, as
+    # copies. Purely additive -- R0/T0/R_flux/T_flux/band/r0/t0 are computed identically whether or not
+    # the trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
+    # optics.harmonics reads the raw transmitted series to integrate the 2w/3w bands (the SHG/THG content
+    # the ~0 incident reference makes invisible in the normalized R/T).
+    time_trace = None
+    if return_time_trace:
+        time_trace = {
+            "dt": dt,
+            "t": tgrid.copy(),
+            "transmitted": eyR_t.copy(), "transmitted_hx": hxR_t.copy(),
+            "reflected": (eyL_t - eyL_i).copy(), "reflected_hx": (hxL_t - hxL_i).copy(),
+            "incident_left": eyL_i.copy(), "incident_left_hx": hxL_i.copy(),
+            "incident_right": eyR_i.copy(), "incident_right_hx": hxR_i.copy(),
+            "period_x_m": float(period_x_m), "dx": float(dx), "nx": int(nx),
+        }
+    return FDTD2DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c,
+                        time_trace=time_trace)
 
 
 
