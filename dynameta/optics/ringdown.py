@@ -228,6 +228,66 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     return out
 
 
+def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
+                     max_refine: int = 6) -> List[Mode]:
+    """VARPRO refinement of pencil modes on a REAL trace: hold the mode COUNT fixed, optimize
+    the nonlinear parameters (omega_k, gamma_k) by least squares with the linear (cos/sin)
+    amplitudes solved exactly at each step. The pencil poles come out of an SVD subspace whose
+    last digits are LAPACK-build-dependent -- near a marginal model order, two correct BLAS
+    stacks can return dominant-mode Q values differing by tens of percent (observed: Windows
+    dev box vs CI linux wheels straddling a 12% gate on the SAME deterministic FDTD trace).
+    The NLS optimum is a property of the DATA, so refined modes are platform-stable. Modes are
+    re-sorted by refined |amplitude|; non-oscillatory (omega ~ 0) modes pass through unrefined.
+    Falls back to the input modes unchanged if scipy is unavailable or the fit fails."""
+    osc = [m for m in modes[:max_refine] if m.omega_rad_s * dt > 1e-9]
+    rest = [m for m in modes if m not in osc]
+    if not osc:
+        return modes
+    try:
+        from scipy.optimize import least_squares
+    except Exception:                                   # pragma: no cover - scipy is a core dep
+        return modes
+    t = np.arange(y.size) * dt
+    K = len(osc)
+    w0 = np.array([m.omega_rad_s for m in osc])
+    h0 = np.array([0.5 * m.gamma_rad_s for m in osc])   # FIELD decay rate = gamma/2
+
+    def _design(w, h):
+        cols = np.empty((y.size, 2 * K))
+        for k in range(K):
+            e = np.exp(-np.abs(h[k]) * t)
+            cols[:, 2 * k] = e * np.cos(w[k] * t)
+            cols[:, 2 * k + 1] = e * np.sin(w[k] * t)
+        return cols
+
+    def _resid(p):
+        A = _design(p[:K], p[K:])
+        c, *_ = np.linalg.lstsq(A, y, rcond=None)
+        return A @ c - y
+
+    try:
+        sol = least_squares(_resid, np.concatenate([w0, h0]), x_scale="jac",
+                            ftol=1e-14, xtol=1e-14, gtol=1e-14, max_nfev=400)
+        w, h = sol.x[:K], np.abs(sol.x[K:])
+        A = _design(w, h)
+        c, *_ = np.linalg.lstsq(A, y, rcond=None)
+        rms = float(np.sqrt(np.mean((A @ c - y) ** 2))) + 1e-300
+    except Exception:                                   # pragma: no cover - defensive
+        return modes
+    out = list(rest)
+    for k in range(K):
+        amp = complex(c[2 * k], c[2 * k + 1])           # y = Re(A e^{-i w t}) e^{-h t}
+        gam = 2.0 * h[k]
+        if not (np.isfinite(w[k]) and np.isfinite(gam)) or gam <= 0.0 or w[k] <= 0.0:
+            out.append(osc[k])                          # degenerate refit: keep the pencil mode
+            continue
+        out.append(Mode(omega_rad_s=float(w[k]), gamma_rad_s=float(gam),
+                        q=float(w[k] / gam), amplitude=amp,
+                        snr_est=float(abs(amp) / rms)))
+    out.sort(key=lambda m: abs(m.amplitude), reverse=True)
+    return out
+
+
 def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
     """Convenience: dominant-mode (f0_Hz, Q) of a ringdown trace. Extra kwargs pass through to
     matrix_pencil. Raises ValueError if no mode is found."""
@@ -261,7 +321,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                          start_frac: float = 0.55, target_samples_per_period: int = 20,
                          max_fit_samples: int = 1200, pencil_frac: float = 0.4,
                          svd_tol: float = 1e-6, max_modes: Optional[int] = None,
-                         amp_floor: float = 5e-2) -> EtalonRingdown:
+                         amp_floor: float = 5e-2, refine: bool = True) -> EtalonRingdown:
     """Drive solve_fdtd_1d on a high-index dielectric slab (a leaky Fabry-Perot etalon), window
     out the driven pulse, decimate the ringdown tail, and matrix-pencil-invert it.
 
@@ -276,6 +336,9 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       start_frac   : begin the fit window at start_frac of the record (skips the driven pulse).
       target_samples_per_period : decimation target (>= ~8 to stay above Nyquist).
       max_fit_samples : cap on the number of decimated samples fed to the pencil (speed).
+      refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
+                     (default True) -- makes the reported (f0, Q) a platform-stable property
+                     of the trace rather than of the LAPACK build (see _nls_refine_real).
       the remaining kwargs pass through to matrix_pencil.
     """
     from dynameta.optics.fdtd import solve_fdtd_1d, FDTDLayer
@@ -307,6 +370,11 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
 
     modes = matrix_pencil(tail_d, dt_d, pencil_frac=pencil_frac, svd_tol=svd_tol,
                           max_modes=max_modes, amp_floor=amp_floor, real_signal=True)
+    # NLS (VARPRO) refinement: the pencil seed's dominant-mode Q is sensitive to the LAPACK
+    # build at marginal model orders (two correct BLAS stacks straddled a 12% gate on the same
+    # trace); the refined optimum is a property of the data and platform-stable.
+    if refine and modes:
+        modes = _nls_refine_real(tail_d, dt_d, modes)
     t_used = np.arange(tail_d.size) * dt_d
     if modes:
         f0, q = modes[0].f_hz, modes[0].q
