@@ -23,10 +23,22 @@ Off-switches:
     gamma_p == 0      -> gamma ratio == 1 (no damping shift, exact).
 Either collapses the Drude cell to its cold (wp0, gamma0) at every T_e.
 
-TIER SCOPE: the lattice temperature T_l is a FIXED bath (the C_l -> infinity limit of the two-
-temperature model); a co-evolving lattice (finite C_l) is a documented follow-on. The uniform-film
-UNIFORMITY oracle therefore drives carrier_heating.two_temperature_response with a large C_l (so its
-T_l stays pinned) and the SAME absorbed-power-density history extracted from the FDTD run.
+TIER SCOPE: with c_l_j_m3_k == None (default) the lattice temperature T_l is a FIXED bath (the
+C_l -> infinity limit of the two-temperature model); the uniform-film UNIFORMITY oracle then drives
+carrier_heating.two_temperature_response with a large C_l (so its T_l stays pinned) and the SAME
+absorbed-power-density history extracted from the FDTD run.
+
+FINITE LATTICE (roadmap 5.7): setting c_l_j_m3_k makes T_l a per-cell state that CO-EVOLVES,
+    dU_l/dt = + G (T_e - T_l)  - g_sub (T_l - T_l0),     T_l = T_l0 + U_l / c_l,
+i.e. the term leaving the electrons enters the lattice EXACTLY (energy is conserved cell-by-cell,
+the closure oracle); c_l is a constant lattice heat capacity [J/m^3/K] and the optional substrate
+out-coupling g_sub_w_m3_k [W/m^3/K] (default 0 = an ADIABATIC lattice) drains the lattice toward
+its cold value T_l0 = T_l_K (the substrate-bath reference). As c_l -> infinity, U_l/c_l -> 0 so
+T_l stays pinned at T_l0 and the electron trajectory reduces to the fixed-bath tier. With g_sub == 0
+the co-evolving (T_e, T_l) pair is exactly carrier_heating.two_temperature_response with the matched
+(C_e, C_l = c_l, G_e_l = G) coefficients (the 0-D consistency oracle). NUMBA-PATH STATUS: unchanged
+from the 2.1 tier -- the hot-carrier ADE (fixed-bath OR finite-lattice) runs on the NumPy reference
+kernel only; a non-NumPy backend with a hot carrier still raises loudly (no fast path yet).
 
 Pure numpy/scipy; SI; exp(-i omega t), Im(eps) > 0.
 """
@@ -35,7 +47,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -58,11 +70,13 @@ class HotCarrierParams:
     drude_wp_rad_s / drude_gamma_rad_s and are the anchor at T_e = T_e0.
 
     Fields (SI):
-      ttm           two-temperature-model coefficients (REUSED; C_l unused this fixed-bath tier)
+      ttm           two-temperature-model coefficients (REUSED; C_l used only for the 0-D oracle --
+                    the FDTD lattice heat capacity is c_l_j_m3_k below, not ttm.C_l)
       n_m3          carrier density (fixed; sets E_F for the Kane band average)
       m0_kg         band-edge effective mass
       alpha_per_eV  Kane nonparabolicity (0 -> m* == m0, no plasma shift)
-      T_l_K         lattice bath temperature (FIXED this tier)
+      T_l_K         lattice temperature: the FIXED bath (c_l None) or the INITIAL lattice temp
+                    T_l0 and the substrate-bath reference (c_l set)
       T_e0_K        cold electron temperature -- the wp0/gamma0 anchor (U_e == 0 here)
       gamma_p       gamma(T_e) = gamma0 (T_e/T_e0)^gamma_p exponent (0 -> no damping shift)
       mass_exponent kane_mass_of_Te exponent
@@ -70,6 +84,12 @@ class HotCarrierParams:
       n_update      FDTD steps between (wp, gamma) refreshes from the T_e tables (>= 1; 1 = every step)
       Te_max_K      upper bound of the T_e lookup table (interp clamps above it -> wp/gamma saturate)
       n_table       lookup-table resolution
+      c_l_j_m3_k    FINITE lattice heat capacity [J/m^3/K] (roadmap 5.7). None (default) -> the fixed-
+                    bath tier, BYTE-IDENTICAL to the pre-5.7 path. When set, each heated cell carries a
+                    co-evolving T_l = T_l0 + U_l/c_l with dU_l/dt = +G(T_e-T_l) - g_sub(T_l-T_l0); as
+                    c_l -> inf the lattice re-pins and the electron trajectory reduces to fixed-bath.
+      g_sub_w_m3_k  optional lattice -> substrate-bath out-coupling [W/m^3/K] (only with c_l set);
+                    default 0.0 = an ADIABATIC lattice (drains toward T_l0 at rate g_sub otherwise)
     """
     ttm: TwoTempParams
     n_m3: float
@@ -84,6 +104,8 @@ class HotCarrierParams:
     n_update: int = 1
     Te_max_K: float = 6000.0
     n_table: int = 1024
+    c_l_j_m3_k: Optional[float] = None
+    g_sub_w_m3_k: float = 0.0
 
     def __post_init__(self):
         if self.n_m3 <= 0.0 or self.m0_kg <= 0.0:
@@ -98,6 +120,10 @@ class HotCarrierParams:
             raise ValueError("HotCarrierParams: n_update must be >= 1")
         if self.ttm.G_e_l < 0.0:
             raise ValueError("HotCarrierParams: ttm.G_e_l must be >= 0")
+        if self.c_l_j_m3_k is not None and self.c_l_j_m3_k <= 0.0:
+            raise ValueError("HotCarrierParams: c_l_j_m3_k must be > 0 when set (None = fixed-bath tier)")
+        if self.g_sub_w_m3_k < 0.0:
+            raise ValueError("HotCarrierParams: g_sub_w_m3_k must be >= 0")
 
 
 def build_hot_carrier_tables(hc: HotCarrierParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
