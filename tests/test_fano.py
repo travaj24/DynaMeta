@@ -185,9 +185,13 @@ def test_quasi_bic_scaling_minus_two():
 
 
 # ---------------------------------------------------------------------------
-# GATE 5 -- byte-stability of the pre-existing resonance_dip / resonance_shift. Goldens were
+# GATE 5 -- stability of the pre-existing resonance_dip / resonance_shift. Goldens were
 # captured by running the CURRENT code on this fixed synthetic spectrum BEFORE the item-1.3
-# additions; the additive edit must not perturb them (rtol 5e-12).
+# additions; the additive edit must not perturb them. The parabola-refined quantities go
+# through a BLAS-backed fit whose last digits are platform-dependent (measured: CI numpy
+# builds drift ~1.4e-10 relative, each leg differently), so those goldens pin at rel=1e-8
+# (100x the observed drift, still far below any behavioral change); the fit-free edge
+# fallbacks stay at 5e-12.
 # ---------------------------------------------------------------------------
 def test_resonance_dip_shift_byte_stable():
     lam = np.linspace(1200.0, 1400.0, 41)
@@ -197,9 +201,9 @@ def test_resonance_dip_shift_byte_stable():
     dip_nm, dip_val = resonance_dip(lam, ref)
     shift = resonance_shift(lam, ref, test)
 
-    assert dip_nm == pytest.approx(1305.5157431738487, rel=5e-12)
-    assert dip_val == pytest.approx(0.10422568467402016, rel=5e-12)
-    assert shift == pytest.approx(6.695385825972835, rel=5e-12)
+    assert dip_nm == pytest.approx(1305.5157431738487, rel=1e-8)
+    assert dip_val == pytest.approx(0.10422568467402016, rel=1e-8)
+    assert shift == pytest.approx(6.695385825972835, rel=1e-8)
 
     # edge-fallback branch (discrete minimum at an array edge -> no parabola)
     edge_nm, edge_val = resonance_dip(lam[:9], np.linspace(0.1, 0.9, 9))

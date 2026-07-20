@@ -377,9 +377,12 @@ def test_gate2_sfg_bilinearity(sfg_runs):
 def test_gate3_dfg_idler_appears(sfg_runs):
     """GATE 3: the DFG idler at |f1-f2| appears with chi2 on and floors (> 60 dB down) with chi2 off."""
     on, off = sfg_runs["on"], sfg_runs["off"]
+    # NOTE the chi2-off floor is a SIGNED Poynting band power at machine noise (~1e-10 of the
+    # pump) whose SIGN is platform-dependent (observed negative on CI BLAS builds) -- always
+    # ratio against its MAGNITUDE.
     assert on["P_diff"] / on["P_f1"] > 1e-8                  # a real difference-frequency band
-    assert on["P_diff"] / off["P_diff"] > 1e6               # >> 60 dB above the chi2-off floor
-    assert off["P_diff"] / off["P_f1"] < 1e-6               # chi2 off: idler at the numerical floor
+    assert on["P_diff"] / abs(off["P_diff"]) > 1e6          # >> 60 dB above the chi2-off floor
+    assert abs(off["P_diff"]) / off["P_f1"] < 1e-6          # chi2 off: idler at the numerical floor
 
 
 def test_gate5_zero_chi2_floors(sfg_runs):
@@ -387,7 +390,7 @@ def test_gate5_zero_chi2_floors(sfg_runs):
     off = sfg_runs["off"]
     pump = max(off["P_f1"], off["P_f2"])
     for lab in ("f1+f2", "f1-f2", "2f1", "2f2", "2f1-f2", "2f2-f1"):
-        assert off["power"][lab] / pump < 1e-6, lab
+        assert abs(off["power"][lab]) / pump < 1e-6, lab     # |.|: signed Poynting noise floor
     # and with chi2 ON the sum / SHG bands are genuinely radiated
     on = sfg_runs["on"]
     for lab in ("f1+f2", "2f1", "2f2"):
