@@ -16,8 +16,9 @@ eps(w) = eps_inf - wp^2/(w^2 + i gamma w).
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -89,6 +90,225 @@ def _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src):
         eL[n] = Ex[i_pL]
         eR[n] = Ex[i_pR]
     return eL, eR
+
+
+def _run_nu(eps_inf, wp, gam, chi3, dz_primal, dt, nsteps, i_src, i_pL, i_pR, src):
+    """NONUNIFORM-z twin of `_run` (roadmap 5.1): the standard nonuniform Yee scheme (Taflove &
+    Hagness ch. 3; Monk-Suli analysis). E (Ex) sits on the PRIMAL nonuniform grid (node j at
+    z_edges[j], spacing dz_primal[j] = z_edges[j+1]-z_edges[j]); H (Hy) sits on the DUAL grid (cell
+    centers, one per primal cell). Each spatial derivative uses its LOCAL spacing:
+
+      * H update (Faraday, this module's sign mu0 dHy/dt = +dEx/dz): the derivative of Ex across
+        primal cell j uses the PRIMAL spacing dz_primal[j] --  Hy[j] += (dt/mu0) (Ex[j+1]-Ex[j])/dz_primal[j].
+      * E update (Ampere): the derivative of Hy at primal node j uses the DUAL spacing
+        dz_dual[j] = 0.5 (dz_primal[j-1] + dz_primal[j]) (center-to-center of the two adjacent primal
+        cells) -- curl[j] = (Hy[j]-Hy[j-1]) / dz_dual[j].
+
+    A single global dt is used, bounded by the SMALLEST cell (Courant S = c dt / min(dz_primal) <= 1,
+    enforced by the caller). The Drude ADE (aJ, bJ) and the Kerr eps_eff are per-cell already
+    conceptually (dz-independent coefficients), so they carry over UNCHANGED from `_run` -- only the
+    two spatial-derivative denominators become per-cell arrays. 2nd-order accurate on SMOOTHLY graded
+    meshes (dz varying with a small per-cell ratio); the local truncation error drops to 1st order at
+    abrupt spacing jumps, hence the geometric grading in make_graded_z. 1st-order Mur ABC at each end
+    uses that end's own boundary spacing.
+
+    NOTE: this is a distinct code path from `_run`; the uniform-limit byte-identity gate is met by
+    solve_fdtd_1d routing an (essentially) uniform z_edges back through the unchanged `_run` scalar
+    path (np.diff of any positional grid carries ULP noise), NOT by this kernel reproducing `_run`."""
+    nz = eps_inf.size
+    Ex = np.zeros(nz)
+    Hy = np.zeros(nz - 1)
+    J = np.zeros(nz)                                   # Drude polarization current
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    eL = np.empty(nsteps)
+    eR = np.empty(nsteps)
+    c = C_LIGHT
+    # per-end Mur ABC (pads are uniform, so dz_primal[0] == dz_primal[-1] == the pad spacing)
+    dzL = float(dz_primal[0]); dzR = float(dz_primal[-1])
+    murL = (c * dt - dzL) / (c * dt + dzL)
+    murR = (c * dt - dzR) / (c * dt + dzR)
+    has_kerr = bool(np.any(chi3 != 0.0))
+    e0e_lin = EPS0 * eps_inf / dt
+    denom_lin = e0e_lin + bJ / 2.0
+    # per-cell derivative coefficients: primal spacing drives H, dual spacing drives the E curl
+    chH = dt / (MU0 * dz_primal)                       # size nz-1 (one per primal cell / Hy node)
+    dz_dual_int = 0.5 * (dz_primal[:-1] + dz_primal[1:])   # size nz-2 (interior primal nodes 1..nz-2)
+    inv_dz_dual = np.zeros(nz)
+    inv_dz_dual[1:-1] = 1.0 / dz_dual_int
+    curl = np.zeros(nz)
+    for n in range(nsteps):
+        Ex_oldL0, Ex_oldL1 = Ex[0], Ex[1]
+        Ex_oldR0, Ex_oldR1 = Ex[-1], Ex[-2]
+        Hy += chH * (Ex[1:] - Ex[:-1])                 # local primal spacing per cell
+        curl[1:-1] = (Hy[1:] - Hy[:-1]) * inv_dz_dual[1:-1]   # local dual spacing per node
+        if has_kerr:
+            eps_eff = eps_inf + 3.0 * chi3 * Ex ** 2
+            e0e = EPS0 * eps_eff / dt
+            denom = e0e + bJ / 2.0
+        else:
+            e0e = e0e_lin
+            denom = denom_lin
+        Enew = (e0e * Ex + curl - 0.5 * (1.0 + aJ) * J - 0.5 * bJ * Ex) / denom
+        Jnew = aJ * J + bJ * (Enew + Ex)
+        Ex_int = Enew
+        Ex_int[i_src] += src[n]                        # soft source
+        Ex_int[0] = Ex_oldL1 + murL * (Ex_int[1] - Ex_oldL0)
+        Ex_int[-1] = Ex_oldR1 + murR * (Ex_int[-2] - Ex_oldR0)
+        Ex = Ex_int
+        J = Jnew
+        eL[n] = Ex[i_pL]
+        eR[n] = Ex[i_pR]
+    return eL, eR
+
+
+# --------------------------------------------------------------------------------------------------
+# Nonuniform-z grid construction (roadmap 5.1): geometric grading into designated thin layers, plus
+# the metrics helper that pins the uniform grid so solve_fdtd_1d and the tests agree bit-for-bit.
+# --------------------------------------------------------------------------------------------------
+
+def _grid_metrics(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave):
+    """The SPATIAL grid metrics shared by the default (uniform) solve and uniform_z_edges. Factored
+    out so the two never drift; the float expressions are byte-identical to the pre-5.1 inline code
+    (dz, pad, z_struct, Lz, nz all reproduce exactly)."""
+    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    # Size the grid from the DISPERSIVE |n| over the band (a below-plasma Drude metal has |eps| >>
+    # eps_inf, largest at the low-frequency end): the short skin depth is otherwise under-resolved.
+    w_min = 2.0 * np.pi * f_min
+
+    def _n_band_max(L):
+        eps = complex(L.eps_inf)
+        if L.drude_wp_rad_s > 0.0:
+            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
+        return abs(np.sqrt(eps))
+    n_max = max(1.0, max(_n_band_max(L) for L in layers))
+    dz = lambda_min_m / (resolution * n_max)
+    pad = n_pad_wave * lambda_max_m
+    z_struct = float(sum(L.thickness_m for L in layers))
+    Lz = 2.0 * pad + z_struct
+    nz = int(round(Lz / dz)) + 1
+    return dz, pad, z_struct, Lz, nz, n_max, f_min, f_max
+
+
+def _march_graded(bounds, htarget, ratio_max=1.15, transition_cells=8):
+    """Build a monotone primal grid over [bounds[0], bounds[-1]] whose local cell size tracks the
+    per-region target htarget[i] (region i spans [bounds[i], bounds[i+1]]), with GEOMETRIC transitions
+    (per-cell ratio <= ratio_max) into/out of the finer regions and region boundaries snapped ONTO
+    grid nodes (so material interfaces are resolved). A cell of size h needs ramp room ~ h*r/(r-1) to
+    shrink to a fine target at ratio r, so approaching a finer region at distance `dist` the size is
+    capped at dist*(r-1)/r. transition_cells sets the MINIMUM cells across the largest jump (the
+    effective ratio is min(ratio_max, (hmax/hmin)**(1/transition_cells)))."""
+    bounds = np.asarray(bounds, dtype=float)
+    htarget = np.asarray(htarget, dtype=float)
+    L = float(bounds[-1])
+    hmax, hmin = float(htarget.max()), float(htarget.min())
+    if hmax > hmin:
+        r = min(ratio_max, (hmax / hmin) ** (1.0 / max(1, int(transition_cells))))
+    else:
+        r = ratio_max
+    r = max(r, 1.0 + 1e-6)
+
+    def target_at(z):
+        idx = int(np.searchsorted(bounds, z, side="right")) - 1
+        return htarget[min(max(idx, 0), len(htarget) - 1)]
+
+    tiny = 1e-12 * L
+    edges = [0.0]
+    guard = 0
+    while edges[-1] < L - tiny:
+        guard += 1
+        if guard > 20_000_000:
+            raise RuntimeError("_march_graded did not terminate (check bounds/htarget)")
+        z = edges[-1]
+        h = target_at(z + tiny)
+        for j in range(len(htarget)):               # look ahead: room to ramp DOWN to finer regions
+            hj = htarget[j]
+            zj = bounds[j]
+            if zj > z and hj < h:
+                allowed = max(hj, (zj - z) * (r - 1.0) / r)
+                if allowed < h:
+                    h = allowed
+        if len(edges) >= 2:                          # smoothness vs the previous cell (both ways)
+            hp = edges[-1] - edges[-2]
+            if h > hp * r:
+                h = hp * r
+            if h < hp / r:
+                h = hp / r
+        z_next = z + h
+        k = int(np.searchsorted(bounds, z + tiny))   # snap onto the next region boundary if within h/2
+        if k < len(bounds):
+            nb = bounds[k]
+            if nb < L - tiny and z < nb and z_next >= nb - 0.5 * h:
+                z_next = nb
+        if z_next > L:
+            z_next = L
+        edges.append(z_next)
+    return np.array(edges)
+
+
+def _layer_htargets(layers, dz0, refine):
+    """Per-layer target cell size: dz0 (baseline) unless the layer index is in `refine`, whose value
+    is a refinement FACTOR when >= 1 (target dz = dz0/factor) or an absolute target dz [m] when < 1
+    (target dz values are ~1e-9..1e-6 m, unambiguously < 1)."""
+    refine = refine or {}
+    hs = []
+    for i, L in enumerate(layers):
+        if i in refine:
+            v = float(refine[i])
+            if v <= 0.0:
+                raise ValueError("refine[{}] must be > 0 (a factor >= 1 or a target dz [m] < 1)".format(i))
+            hs.append(dz0 / v if v >= 1.0 else v)
+        else:
+            hs.append(float(dz0))
+    return hs
+
+
+def make_graded_z(layers, *, resolution, refine=None, transition_cells=8, dz_base_m=None,
+                  ratio_max=1.15):
+    """Geometrically graded primal z-grid (E-node positions) over the STRUCTURE [0, sum(thickness)]
+    (roadmap 5.1a). Baseline cell size dz0 = dz_base_m if given, else max(thickness)/resolution.
+    `refine` maps a layer index to a refinement factor (>= 1) or an absolute target dz [m] (< 1);
+    those layers get finer cells with geometric transitions (per-cell ratio <= ratio_max ~ 1.15) into
+    and out of them. Returns z_edges spanning [0, structure thickness].
+
+    For a FULL solve, prefer solve_fdtd_1d(refine=...) (it wraps this with vacuum pads and the correct
+    domain); this bare helper is for constructing/inspecting the structure grid directly. dz_base_m
+    lets the caller pin the baseline to the solver's own dz (dependency-light default kept simple)."""
+    if dz_base_m is not None:
+        dz0 = float(dz_base_m)
+    else:
+        dz0 = max(L.thickness_m for L in layers) / float(resolution)
+    hs = _layer_htargets(layers, dz0, refine)
+    bounds = [0.0]
+    z = 0.0
+    for L in layers:
+        z += L.thickness_m
+        bounds.append(z)
+    return _march_graded(np.array(bounds), np.array(hs), ratio_max, transition_cells)
+
+
+def _refined_full_edges(layers, dz0, pad, z_struct, refine, transition_cells):
+    """Full-domain graded primal grid [0, 2*pad + z_struct] used by solve_fdtd_1d(refine=...): uniform
+    vacuum pads at dz0, the layer stack graded per `refine`, one _march_graded pass (no stitching)."""
+    hs = _layer_htargets(layers, dz0, refine)
+    bounds = [0.0, float(pad)]
+    z = float(pad)
+    for L in layers:
+        z += L.thickness_m
+        bounds.append(z)
+    bounds.append(float(pad) + z_struct + float(pad))
+    htar = [float(dz0)] + list(hs) + [float(dz0)]
+    return _march_graded(np.array(bounds), np.array(htar), 1.15, transition_cells)
+
+
+def uniform_z_edges(layers, *, lambda_min_m, lambda_max_m, resolution=40, n_pad_wave=6.0):
+    """The exact primal-node positions of solve_fdtd_1d's DEFAULT uniform grid (roadmap 5.1 gate 1).
+    Feeding this back as z_edges= reproduces the default solve bit-for-bit: the first spacing
+    (arange(nz)[1]*dz - arange(nz)[0]*dz) is exactly dz, so solve's uniform-limit detection recovers
+    the scalar dz and routes through the unchanged `_run` path."""
+    dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
+        layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave)
+    return np.arange(nz) * dz
 
 
 def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
@@ -188,13 +408,41 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     return eL, eR
 
 
+def _second_carrier_hz(spec, f_min, f_max):
+    """Resolve the second-carrier frequency [Hz] of a bichromatic source (roadmap 4.2).
+
+    `spec` is the solve_fdtd_1d `second_source` dict; exactly one of 'f_hz' or 'lambda0_m' fixes the
+    color. Warns (UserWarning) when the color falls outside the excited/resolved band [f_min, f_max]:
+    the grid step, the pulse bandwidth and the trustworthy `band` mask are all sized from
+    lambda_min_m/lambda_max_m, so BOTH colors must be bracketed by them for the run to resolve and
+    (via the two-run reference) normalize each color. Returns the frequency in Hz."""
+    has_f = spec.get("f_hz") is not None
+    has_l = spec.get("lambda0_m") is not None
+    if has_f == has_l:
+        raise ValueError("second_source needs exactly one of 'f_hz' or 'lambda0_m'")
+    f2 = float(spec["f_hz"]) if has_f else C_LIGHT / float(spec["lambda0_m"])
+    if f2 <= 0.0:
+        raise ValueError("second_source frequency must be > 0")
+    if not (f_min <= f2 <= f_max):
+        warnings.warn(
+            "solve_fdtd_1d bichromatic source: the second color {:.4g} Hz lies OUTSIDE the excited "
+            "band [{:.4g}, {:.4g}] Hz set by lambda_min_m/lambda_max_m -- the grid step, source "
+            "bandwidth and trustworthy `band` mask are all sized from that band, so this color is "
+            "under-resolved / un-normalized. Widen [lambda_min_m, lambda_max_m] to bracket both "
+            "colors.".format(f2, f_min, f_max), stacklevel=2)
+    return f2
+
+
 def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m: float,
                   resolution: int = 40, courant: float = 0.5, n_pad_wave: float = 6.0,
                   settle: float = 12.0, kerr: bool = False,
                   source_amp: float = 1.0,
+                  second_source: Optional[dict] = None,
                   return_time_trace: bool = False,
                   eps_inf_of_t=None, drude_of_t=None,
-                  time_varying_layer: int = 0, n_update: int = 1) -> FDTD1DResult:
+                  time_varying_layer: int = 0, n_update: int = 1,
+                  z_edges: Optional[np.ndarray] = None, refine: Optional[dict] = None,
+                  transition_cells: int = 8) -> FDTD1DResult:
     """Broadband R(f)/T(f) of the layered `layers` (vacuum super/substrate) over
     [c/lambda_max, c/lambda_min]. `resolution` = cells per lambda_min in the highest-index medium;
     `courant` the CFL fraction (<= 1, use ~0.5 for Drude); `n_pad_wave` vacuum padding (in lambda_max)
@@ -216,7 +464,42 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     no-op change-detection. Pair with return_time_trace=True + frequency_conversion_diagnostic to read
     the converted output spectrum. NOTE: the grid is sized from the INITIAL layer params, so a large
     eps_inf INCREASE mid-run under-resolves the (shortened) in-medium wavelength -- keep changes modest
-    or raise `resolution`."""
+    or raise `resolution`.
+
+    OPT-IN BICHROMATIC SOURCE (roadmap 4.2 -- two-color / three-wave-mixing driving). `second_source`
+    (default None) superposes a SECOND carrier in the SAME injected soft-source waveform:
+      {'f_hz' OR 'lambda0_m': the second color (exactly one); 'amplitude_rel': its amplitude as a
+       fraction of source_amp (default 1.0); optional 'tau_s' / 't0_s' pulse width / center (default
+       the PRIMARY pulse's tau, t0)}.
+    The PRIMARY carrier stays at the band-center f_c = 0.5*(f_min+f_max), so to place the primary color
+    exactly, choose [lambda_min_m, lambda_max_m] symmetric about it; both colors must lie inside the
+    band (a UserWarning fires otherwise -- see _second_carrier_hz). TWO-COLOR NORMALIZATION: the vacuum
+    REFERENCE run uses this SAME composite source, so the incident field it fixes already carries both
+    colors; the PER-COLOR incident powers are then read from the incident_left/incident_right series
+    with harmonics.mixing_spectrum (the f1 band = the primary carrier f_c, the f2 band = the second
+    carrier), which is also the extractor for any mixing products a nonlinear (Kerr) layer radiates.
+    second_source=None is BYTE-IDENTICAL to the legacy path (the second-carrier term is only ever
+    added when the dict is supplied). NOTE: the 1-D engine carries eps_inf + Drude + Kerr(chi3) only,
+    so two colors here mix through chi3 four-wave mixing (2f1-f2, 2f2-f1, ...); chi2 sum/difference
+    generation (f1+/-f2) lives in the 2-D-TE kernels (optics.fdtd_nd).
+
+    OPT-IN NONUNIFORM-z GRID (roadmap 5.1 -- nm gaps / accumulation layers in wavelength-scale cells).
+    Supply EITHER an explicit primal grid via `z_edges` (1-D array of E-node positions spanning
+    [0, 2*pad + z_struct]; the layer stack sits at [pad, pad+z_struct]) OR the `refine` convenience
+    (dict {layer_index: refinement_factor >= 1 OR target_dz_m < 1}) which builds a geometrically graded
+    grid via make_graded_z (baseline = the uniform dz, thin layers refined, per-cell ratio <= ~1.15,
+    `transition_cells` cells across the largest jump). The march then runs on the standard nonuniform
+    Yee scheme (_run_nu: E on the primal grid, H on the dual/cell-centers, each derivative using its
+    LOCAL spacing -- dual spacing for E updates, primal for H); a single global dt is set by the
+    SMALLEST cell (Courant S = c*dt/min(dz) <= 1, GUARDED: courant > 1 raises). The reference (vacuum)
+    normalization run uses the SAME grid. 2nd-order on smoothly graded meshes, 1st-order at abrupt
+    spacing jumps (hence the geometric grading). UNIFORM-LIMIT BYTE-IDENTITY: passing the uniform grid's
+    own edges (uniform_z_edges) reproduces the default path bit-for-bit (an essentially-uniform z_edges
+    is detected and routed back through the scalar `_run`). SUPPORTED with the nonuniform grid in this
+    pass: static materials (dielectric / Drude / Kerr) + return_time_trace. NOT supported (raises
+    loudly): the time-varying hooks (eps_inf_of_t / drude_of_t) and the bichromatic second_source, and
+    the 2-D z-grading (fdtd_nd) is the documented follow-up tier. z_edges and refine are mutually
+    exclusive; both None keeps the legacy uniform path byte-identical."""
     # The 1-D engine carries eps_inf + Drude + Kerr(chi3) ONLY. The Lorentz pole, chi2, Raman and the
     # gain line are honored solely by the 2-D-TE kernels (fdtd_nd); _run never reads those arrays, so
     # solving them here would SILENTLY drop the term and the FDTD eps would diverge from the layer's own
@@ -240,45 +523,96 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             "carried ONLY by the 2-D-TE kernels (optics.fdtd_nd), so a 1-D solve would silently drop "
             "them (the FDTD eps would diverge from FDTDLayer.eps_at(w)). Use the 2-D engine, or remove "
             "those terms.".format(_bad))
-    f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
+    # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
+    # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
+    dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
+        layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave)
     f_c = 0.5 * (f_min + f_max)
-    # Size the grid from the DISPERSIVE |n| over the band, not just sqrt(eps_inf): a below-plasma Drude
-    # metal has |eps(w)| >> eps_inf (largest at the band's low-frequency end), so the short skin depth
-    # is otherwise silently under-resolved (audit). eps(w) = eps_inf - wp^2/(w^2 + i gamma w).
-    w_min = 2.0 * np.pi * f_min
 
-    def _n_band_max(L):
-        eps = complex(L.eps_inf)
-        if L.drude_wp_rad_s > 0.0:
-            eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
-        return abs(np.sqrt(eps))                       # |n| (sets both the wavelength and the skin depth)
-    n_max = max(1.0, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
-    dt = courant * dz / C_LIGHT
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
+    # ---- OPT-IN nonuniform-z grid (roadmap 5.1) ---------------------------------------------------
+    if refine is not None:
+        if z_edges is not None:
+            raise ValueError("solve_fdtd_1d: pass either z_edges= or refine=, not both")
+        z_edges = _refined_full_edges(layers, dz, pad, z_struct, refine, transition_cells)
+    nonuniform = z_edges is not None
+    dz_primal = None
+    if nonuniform:
+        z_edges = np.ascontiguousarray(np.asarray(z_edges, dtype=float))
+        if z_edges.ndim != 1 or z_edges.size < 3:
+            raise ValueError("solve_fdtd_1d: z_edges must be a 1-D array of >= 3 primal-node positions")
+        dz_primal = np.diff(z_edges)
+        if np.any(dz_primal <= 0.0):
+            raise ValueError("solve_fdtd_1d: z_edges must be strictly increasing")
+        # combinations NOT supported with the nonuniform grid in this pass (raise loudly, see docstring)
+        if (eps_inf_of_t is not None) or (drude_of_t is not None):
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "time-varying hooks (eps_inf_of_t/drude_of_t) in this pass; use the uniform grid.")
+        if second_source is not None:
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "bichromatic second_source in this pass; use the uniform grid.")
+        # UNIFORM-LIMIT byte-identity (gate 1): an essentially-uniform z_edges must reproduce the legacy
+        # scalar path EXACTLY. np.diff of any positional grid carries ~1e-13 ULP noise, so we must NOT
+        # feed those diffs to the run; detect uniformity, take the single spacing as the scalar dz, and
+        # fall through to the unchanged uniform build + `_run` below.
+        _d = dz_primal
+        if (float(_d.max()) - float(_d.min())) <= 1e-9 * float(_d.max()):
+            dz = float(_d[0])
+            nz = int(z_edges.size)
+            nonuniform = False
+            dz_primal = None
 
-    # cell-wise material profile (structure centered, vacuum pads each side)
-    eps_inf = np.ones(nz)
-    wp = np.zeros(nz)
-    gam = np.zeros(nz)
-    chi3 = np.zeros(nz)
-    z0 = pad
-    zc = (np.arange(nz) + 0.5) * dz                    # cell centers
-    z = z0
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
-        eps_inf[m] = L.eps_inf
-        wp[m] = L.drude_wp_rad_s
-        gam[m] = L.drude_gamma_rad_s
-        if kerr:
-            chi3[m] = L.chi3_m2_V2
-        z += L.thickness_m
-    i_src = max(2, int(round((0.35 * pad) / dz)))
-    i_pL = int(round((0.7 * pad) / dz))                # left probe: between source and structure
-    i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))  # right probe: in the sub vacuum
+    if not nonuniform:
+        dt = courant * dz / C_LIGHT
+        # cell-wise material profile (structure centered, vacuum pads each side)  [legacy uniform build]
+        eps_inf = np.ones(nz)
+        wp = np.zeros(nz)
+        gam = np.zeros(nz)
+        chi3 = np.zeros(nz)
+        z0 = pad
+        zc = (np.arange(nz) + 0.5) * dz                    # cell centers
+        z = z0
+        for L in layers:
+            m = (zc >= z) & (zc < z + L.thickness_m)
+            eps_inf[m] = L.eps_inf
+            wp[m] = L.drude_wp_rad_s
+            gam[m] = L.drude_gamma_rad_s
+            if kerr:
+                chi3[m] = L.chi3_m2_V2
+            z += L.thickness_m
+        i_src = max(2, int(round((0.35 * pad) / dz)))
+        i_pL = int(round((0.7 * pad) / dz))                # left probe: between source and structure
+        i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))  # right probe: in the sub vacuum
+    else:
+        # nonuniform primal grid: E nodes = z_edges (material colocated at nodes); H on the dual grid.
+        # single global dt from the SMALLEST cell (Courant S = c dt / dz_min <= 1, guarded).
+        nz = int(z_edges.size)
+        Lz = float(z_edges[-1] - z_edges[0])
+        dz_min = float(dz_primal.min())
+        dt = courant * dz_min / C_LIGHT
+        if dt > (dz_min / C_LIGHT) * (1.0 + 1e-9):        # S = c dt / dz_min <= 1 (min-cell CFL bound)
+            raise ValueError(
+                "solve_fdtd_1d: courant={:.4g} exceeds the nonuniform Courant bound S<=1 (dt from the "
+                "smallest cell dz_min={:.3e} m); use courant <= 1 (<= ~0.99 for long/Drude runs).".format(
+                    courant, dz_min))
+        eps_inf = np.ones(nz)
+        wp = np.zeros(nz)
+        gam = np.zeros(nz)
+        chi3 = np.zeros(nz)
+        z0 = float(z_edges[0])
+        zpos = z0 + pad
+        for L in layers:
+            m = (z_edges >= zpos) & (z_edges < zpos + L.thickness_m)
+            eps_inf[m] = L.eps_inf
+            wp[m] = L.drude_wp_rad_s
+            gam[m] = L.drude_gamma_rad_s
+            if kerr:
+                chi3[m] = L.chi3_m2_V2
+            zpos += L.thickness_m
+        i_src = max(2, int(np.searchsorted(z_edges, z0 + 0.35 * pad)))
+        i_pL = int(np.searchsorted(z_edges, z0 + 0.7 * pad))
+        i_pR = min(int(np.searchsorted(z_edges, z0 + pad + z_struct + 0.3 * pad)), nz - 1)
 
     # OPT-IN (roadmap 2.2): cell mask of the designated time-varying layer. Built only when a hook is
     # supplied, so the default (no-hook) path below is byte-for-byte the legacy code.
@@ -303,16 +637,36 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
 
+    # OPT-IN bichromatic source (roadmap 4.2): ADD a second carrier to the SAME injected waveform. This
+    # block only runs when second_source is supplied, so `src` (and every downstream array) is byte-
+    # identical to the legacy single-color path when it is None. The reference (vacuum) run below reuses
+    # this same composite `src`, so the incident field it records carries both colors (per-color incident
+    # powers -> harmonics.mixing_spectrum on incident_left/incident_right).
+    f_c2 = None
+    if second_source is not None:
+        f_c2 = _second_carrier_hz(second_source, f_min, f_max)
+        amp_rel = float(second_source.get("amplitude_rel", 1.0))
+        tau2 = float(second_source.get("tau_s", tau))
+        t02 = float(second_source.get("t0_s", t0))
+        src = src + (source_amp * amp_rel
+                     * np.exp(-((tgrid - t02) / tau2) ** 2)
+                     * np.cos(2.0 * np.pi * f_c2 * (tgrid - t02)))
+
     # reference (vacuum) run for the incident field, then the structure run. The reference is ALWAYS
     # static (it defines the unshifted incident field); only the structure run carries the hooks.
     z1 = np.ones(nz)
     z0v = np.zeros(nz)
-    eL_inc, eR_inc = _run(z1, z0v, z0v, z0v, dz, dt, nsteps, i_src, i_pL, i_pR, src)
-    if _hooks_on:
-        eL_tot, eR_tot = _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
-                                 tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)))
+    if nonuniform:
+        # reference (vacuum) + structure runs on the SAME nonuniform grid (roadmap 5.1)
+        eL_inc, eR_inc = _run_nu(z1, z0v, z0v, z0v, dz_primal, dt, nsteps, i_src, i_pL, i_pR, src)
+        eL_tot, eR_tot = _run_nu(eps_inf, wp, gam, chi3, dz_primal, dt, nsteps, i_src, i_pL, i_pR, src)
     else:
-        eL_tot, eR_tot = _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src)
+        eL_inc, eR_inc = _run(z1, z0v, z0v, z0v, dz, dt, nsteps, i_src, i_pL, i_pR, src)
+        if _hooks_on:
+            eL_tot, eR_tot = _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
+                                     tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)))
+        else:
+            eL_tot, eR_tot = _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src)
 
     f = np.fft.rfftfreq(nsteps, dt)
     Iinc_L = np.fft.rfft(eL_inc)
@@ -335,6 +689,8 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             "transmitted": eR_tot.copy(),               # transmitted (right probe)
             "incident_left": eL_inc.copy(),
             "incident_right": eR_inc.copy(),
+            "f_carrier_hz": float(f_c),                 # primary carrier (band center)
+            "f_carrier2_hz": (None if f_c2 is None else float(f_c2)),  # second carrier (bichromatic)
         }
     return FDTD1DResult(freqs_Hz=f, R=R, T=T, band=band, time_trace=time_trace)
 
