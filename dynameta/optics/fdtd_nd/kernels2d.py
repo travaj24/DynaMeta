@@ -262,9 +262,11 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         hot_out["E2_int"] = E2_int                           # (nx,nz) time-integrated |E_y|^2 (fluence proxy)
         hot_out["Te_final"] = Te_hot.copy()                  # (nx,nz) final electron-temperature map
         hot_out["mask"] = hmask.astype(bool)                 # (nx,nz) opted-in-cell mask
-        # roadmap 5.7 energy-closure + lattice probes. With alpha_abs=1, p_abs_int == the J.E work into
-        # the film == U_e_final + U_l_final + sub_outflow_int EXACTLY (each dt*coupling entered both
-        # reservoirs with opposite sign; sub_out drained the lattice). Fixed-bath -> lattice terms zero.
+        # roadmap 5.7 energy-closure + lattice probes. p_abs_int is the RAW J.E work into the film; the
+        # tracked reservoirs receive the alpha_abs fraction of it, so the EXACT identity is
+        #     U_e_final + U_l_final + sub_outflow_int == alpha_abs * p_abs_int
+        # (each dt*coupling entered both reservoirs with opposite sign; sub_out drained the lattice).
+        # alpha_abs=1 (the default) makes it p_abs_int == U_e+U_l+sub; fixed-bath -> lattice terms zero.
         hot_out["U_e_final"] = U_e.copy()                    # (nx,nz) electron energy density [J/m^3]
         hot_out["Tl_final"] = Tlhot.copy()                   # (nx,nz) final lattice-temperature map
         if do_lat:

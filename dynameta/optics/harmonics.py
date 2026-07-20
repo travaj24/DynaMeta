@@ -383,7 +383,13 @@ def mixing_spectrum(result_or_trace, f1_hz, f2_hz, *, dt=None, field="transmitte
     # ---- per-band leakage guard (generalized single-pump 0.21-of-the-gap bound) ----
     Ssum = np.abs(S.sum(axis=1))
     # each pump's measurement window reaches HALF-WAY to its nearest other band (mirrors the single-
-    # pump [0.5 f0, 1.5 f0] = half-way to the 2w line), so it never straddles the other pump.
+    # pump [0.5 f0, 1.5 f0] = half-way to the 2w line), so it never straddles the other pump. This is
+    # the MAXIMAL symmetric window that stays clean; if a pump is so broadband that its skirt already
+    # crosses that half-way point the two colors have MERGED (the per-pump sigma is then ill-defined
+    # and slightly UNDER-measured on the far bands) -- but a merged blob always trips the GLOBAL
+    # pump_broadband flag below, which is the reliable contract; the per-band band_contaminated flags
+    # are only trustworthy in the un-merged regime (verified 2026-07-19; see the mixing_spectrum guard
+    # note). This is why strict callers should gate on pump_broadband, not a single band's flag.
     pump_sigma = {}
     for pl, fp in (("f1", f1), ("f2", f2)):
         others = [fc_abs[lab] for lab in labels

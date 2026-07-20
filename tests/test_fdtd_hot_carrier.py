@@ -346,3 +346,92 @@ def test_lat_param_guards():
     with pytest.raises(ValueError):                           # g_sub must be >= 0
         HotCarrierParams(ttm=ttm, n_m3=N_M3, m0_kg=M0, c_l_j_m3_k=1.0e5, g_sub_w_m3_k=-1.0)
     HotCarrierParams(ttm=ttm, n_m3=N_M3, m0_kg=M0, c_l_j_m3_k=None)  # None (fixed bath) is valid
+
+
+# ================= ADVERSARIAL PROBES (finite lattice): closure / bit-identity / physics =========
+
+def test_lat_gate6_closure_partial_absorption_and_post_pulse():
+    """ATTACK 6: the machine-exact closure survives alpha_abs != 1 and a pump that ends before the
+    run.  With alpha_abs != 1 only a FRACTION alpha of the J.E work enters the tracked reservoirs, so
+    the exact identity is U_e + U_l + sub == alpha * p_abs_int (p_abs_int is the RAW J.E work); the
+    reservoir sum divided by p_abs_int recovers alpha to rounding.  The pump ends well before the run
+    ends (default settle=12 -> long ring-down tail), and closure holds with NO post-pulse drift."""
+    G, c_l, g_sub, alpha = 8.0e16, 5.0e4, 2.0e16, 0.5
+    lay = FDTDLayer(120e-9, eps_inf=EPS_INF, drude_wp_rad_s=WP, drude_gamma_rad_s=GAM,
+                    hot_carrier=HotCarrierParams(ttm=_ttm(G, alpha_abs=alpha), n_m3=N_M3, m0_kg=M0,
+                                                 alpha_per_eV=ALPHA, T_l_K=T_REF, T_e0_K=T_REF,
+                                                 gamma_p=1.0, c_l_j_m3_k=c_l, g_sub_w_m3_k=g_sub))
+    ho = {}
+    _solve([lay], source_amp=3e8, hot_out=ho)
+    mk = ho["mask"]
+    pabs = ho["p_abs_int"][mk].sum()                          # RAW J.E work (no alpha)
+    reservoirs = (ho["U_e_final"][mk].sum() + ho["U_l_final"][mk].sum()
+                  + ho["sub_outflow_int"][mk].sum())
+    assert pabs > 0 and reservoirs > 0
+    assert abs(reservoirs - alpha * pabs) / (alpha * pabs) < 1e-9   # closure vs alpha*p_abs_int
+    assert abs(reservoirs / pabs - alpha) < 1e-9                    # the missing (1-alpha) is not tracked
+    # the pump ended well before the run: the last quarter carries ~no absorbed power, yet closure held
+    pm = ho["p_abs_mean"]
+    q = len(pm) // 4
+    assert np.max(np.abs(pm[-q:])) < 1e-6 * np.max(np.abs(pm))      # post-pulse tail, pump off
+
+
+def test_lat_gate7_mixed_material_fixed_bath_bit_identical():
+    """ATTACK 7: a finite-lattice cell must not perturb a fixed-bath cell's arithmetic.  Stack an
+    OPTICALLY INERT finite-lattice layer (alpha_per_eV=0 -> wp frozen, gamma_p=0 -> gamma frozen; its
+    optics never shift regardless of T_e/T_l) with an optically ACTIVE fixed-bath layer.  Toggling the
+    inert layer's finite lattice on (do_lat) vs off (fixed bath) leaves the field -- hence R/T -- BYTE
+    identical, proving the finite-lattice update does not leak into the untouched fixed-bath cells."""
+    def _mk(alpha_pe, gamma_p, c_l, g_sub=0.0):
+        return FDTDLayer(120e-9, eps_inf=EPS_INF, drude_wp_rad_s=WP, drude_gamma_rad_s=GAM,
+                         hot_carrier=HotCarrierParams(ttm=_ttm(8.0e16), n_m3=N_M3, m0_kg=M0,
+                                                      alpha_per_eV=alpha_pe, T_l_K=T_REF, T_e0_K=T_REF,
+                                                      gamma_p=gamma_p, c_l_j_m3_k=c_l, g_sub_w_m3_k=g_sub))
+    inert_lat = _mk(0.0, 0.0, 5.0e4, 2.0e16)                  # inert + finite lattice -> do_lat True
+    inert_fix = _mk(0.0, 0.0, None)                           # inert + fixed bath   -> do_lat False
+    active = _mk(ALPHA, 1.0, None)                            # active, always fixed bath
+    rX = _solve([inert_lat, active], source_amp=3e8)          # do_lat True (via the inert layer)
+    rY = _solve([inert_fix, active], source_amp=3e8)          # do_lat False everywhere
+    for a, b in ((rX.R0, rY.R0), (rX.T0, rY.T0), (rX.R_flux, rY.R_flux), (rX.T_flux, rY.T_flux)):
+        assert a.tobytes() == b.tobytes()                    # untouched fixed-bath arithmetic bit-exact
+
+
+def test_lat_gate8_slowed_relax_same_G_and_matches_2ode():
+    """ATTACK 8: the finite-lattice T_e tail sits above fixed bath for the RIGHT reason -- a REDUCED
+    (T_e - T_l) driving force, not a changed effective G.  (i) Before the lattice heats (at the T_e
+    peak) the finite-lattice and fixed-bath T_e coincide (same G, same driving force); the elevation
+    appears only in the tail as T_l rises.  (ii) The FULL T_e(t)/T_l(t) curves reproduce an INDEPENDENT
+    RK4 integration of the coupled 2-ODE (analytic T_e = sqrt(T_e0^2 + 2 U_e/gamma_e) inversion),
+    confirming the whole trajectory shape, not merely the tail sign."""
+    G, c_l = 8.0e16, 5.0e4
+    ho_fix, ho_lat = {}, {}
+    _solve([_hot_layer(G=G, gamma_p=1.0)], source_amp=3e8, hot_out=ho_fix)
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho_lat)
+    t = ho_lat["t"]; dt = float(t[1] - t[0])
+    Te_fix, Te_lat, Tl_lat, pabs = ho_fix["Te_mean"], ho_lat["Te_mean"], ho_lat["Tl_mean"], ho_lat["p_abs_mean"]
+    ip = int(np.argmax(Te_fix))
+    # (i) same G / driving force before the lattice heats -> curves coincide at the peak
+    assert (Tl_lat[ip] - T_REF) < 1.0                        # lattice barely moved at the electron peak
+    assert abs(Te_lat[ip] - Te_fix[ip]) / (Te_fix[ip] - T_REF) < 1e-3
+    tail = slice(ip + (len(Te_fix) - ip) // 2, None)
+    assert Te_lat[tail].mean() > Te_fix[tail].mean() + 0.5   # elevated tail (reduced driving force)
+    # (ii) independent RK4 of the coupled 2-ODE with the extracted half-step p_abs
+    Te0 = Tl0 = T_REF
+    p_of = lambda tt: float(np.interp(tt, t + 0.5 * dt, pabs))
+    Te_of = lambda Ue: np.sqrt(Te0 ** 2 + 2.0 * max(Ue, 0.0) / GAMMA_E)
+    def deriv(tt, Ue, Ul):
+        coup = G * (Te_of(Ue) - (Tl0 + Ul / c_l))
+        return (p_of(tt) - coup, coup)
+    Ue = Ul = 0.0
+    Te_rk = np.empty_like(Te_lat); Tl_rk = np.empty_like(Tl_lat)
+    for n in range(len(t)):
+        Te_rk[n] = Te_of(Ue); Tl_rk[n] = Tl0 + Ul / c_l
+        k1 = deriv(t[n], Ue, Ul)
+        k2 = deriv(t[n] + 0.5 * dt, Ue + 0.5 * dt * k1[0], Ul + 0.5 * dt * k1[1])
+        k3 = deriv(t[n] + 0.5 * dt, Ue + 0.5 * dt * k2[0], Ul + 0.5 * dt * k2[1])
+        k4 = deriv(t[n] + dt, Ue + dt * k3[0], Ul + dt * k3[1])
+        Ue += dt / 6.0 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+        Ul += dt / 6.0 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+    peakTe = max(Te_lat.max() - T_REF, 1e-9); peakTl = max(Tl_lat.max() - T_REF, 1e-9)
+    assert np.max(np.abs(Te_rk - Te_lat)) / peakTe < 5e-3    # full electron trajectory (measured ~7e-4)
+    assert np.max(np.abs(Tl_rk - Tl_lat)) / peakTl < 5e-3    # full lattice trajectory  (measured ~1e-4)
