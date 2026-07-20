@@ -234,6 +234,197 @@ def harmonic_spectrum(result_or_trace, fundamental_hz, *, dt=None, field="transm
     return out
 
 
+# --------------------------------------------------------------------------------------------------
+# two-color three-wave-mixing diagnostics (roadmap 4.2)
+# --------------------------------------------------------------------------------------------------
+# The bands a two-color pump {f1, f2} can radiate up to |p|+|q| = 2 second-order/Kerr products, plus
+# the two Kerr four-wave-mixing lines 2f1-f2 / 2f2-f1. Each entry is (label, (p, q)) with signed
+# center p*f1 + q*f2; the physical band sits at |center|. A chi2 medium fills f1+f2 (SFG) / |f1-f2|
+# (DFG) / 2f1 / 2f2 (SHG); a chi3 medium fills 2f1-f2 / 2f2-f1 (FWM) and 3f-type lines (out of scope
+# here). Convention + windowing match harmonic_spectrum (see the module docstring): the band is the
+# constant-fractional [|fc|(1-bw), |fc|(1+bw)], valid for a NARROWBAND pump; a broadband pump is
+# caught by the generalized per-band leakage guard below.
+_MIX_BANDS = (
+    ("f1", (1, 0)),
+    ("f2", (0, 1)),
+    ("f1+f2", (1, 1)),
+    ("f1-f2", (1, -1)),
+    ("2f1", (2, 0)),
+    ("2f2", (0, 2)),
+    ("2f1-f2", (2, -1)),
+    ("2f2-f1", (-1, 2)),
+)
+# convenience-alias keys (ASCII, no '+/-') paralleling harmonic_spectrum's P_w/P_2w/P_3w
+_MIX_ALIASES = {"f1": "P_f1", "f2": "P_f2", "f1+f2": "P_sum", "f1-f2": "P_diff",
+                "2f1": "P_2f1", "2f2": "P_2f2", "2f1-f2": "P_2f1mf2", "2f2-f1": "P_2f2mf1"}
+
+
+def _band_power_at(f, S, lo, hi):
+    """(P_total, P_by_order, truncated) integrating the density S over [lo, hi] (order-resolved)."""
+    df = f[1] - f[0] if f.size > 1 else 0.0
+    truncated = bool(hi > f[-1] + 0.5 * df)
+    m = (f >= lo) & (f <= hi)
+    P_by_order = S[m].sum(axis=0)
+    return float(P_by_order.sum()), P_by_order, truncated
+
+
+def _pump_sigma(f, Ssum, fp, half_lo, half_hi):
+    """Measured pump spectral std over the window [fp-half_lo, fp+half_hi] (the pump-dominated span
+    that stops short of the neighbouring bands). |S| weights (robust to tiny negative Poynting bins),
+    exactly as harmonic_spectrum's single-pump guard measures sigma_f over [0.5 f0, 1.5 f0]."""
+    mwin = (f >= fp - half_lo) & (f <= fp + half_hi)
+    wtot = float(Ssum[mwin].sum())
+    if wtot <= 0.0:
+        return 0.0
+    fw, sw = f[mwin], Ssum[mwin]
+    fbar = float((fw * sw).sum()) / wtot
+    return float(np.sqrt(max(0.0, float(((fw - fbar) ** 2 * sw).sum()) / wtot)))
+
+
+def mixing_spectrum(result_or_trace, f1_hz, f2_hz, *, dt=None, field="transmitted",
+                    bandwidth_frac=0.05):
+    """Two-color three-wave-/four-wave-mixing band powers from a recorded FDTD exit-plane series
+    (roadmap 4.2). Extracts the bands {f1, f2, f1+f2, |f1-f2|, 2f1, 2f2, 2f1-f2, 2f2-f1} and applies
+    a per-band leakage guard generalized from harmonic_spectrum's pump-bandwidth guard.
+
+    result_or_trace : an FDTD result (return_time_trace=True), a time_trace dict, a (trace, dt) or
+        (E, H, dt) tuple, or a bare ndarray (then pass dt=...). Same contract as harmonic_spectrum.
+    f1_hz, f2_hz    : the two pump carrier frequencies [Hz] (order-free; bands use |p f1 + q f2|).
+    bandwidth_frac  : the constant-fractional half-bandwidth bw; band `b` centered at |fc| is
+        integrated over [|fc|(1-bw), |fc|(1+bw)] (the harmonic_spectrum convention). Default 0.05
+        (mixing bands crowd together far more than pure harmonics do, so the safe bw is smaller).
+
+    BAND-OVERLAP VALIDATION: raises ValueError if two bands with DISTINCT centers overlap for the
+    given (f1, f2, bw) -- the diagnostic would then double-count. DEGENERATE spacings (e.g. f2 = 2 f1,
+    where |f1-f2| coincides with f1, f2 with 2f1, f1+f2 with 2f2-f1, and 2f1-f2 collapses onto DC) are
+    NOT an error: coincident bands (equal center) are grouped, annotated (`band_degenerate`,
+    `degenerate_groups`) and share the one integral, rather than raising.
+
+    PER-BAND LEAKAGE GUARD (generalizes the module's PUMP-BANDWIDTH PRECONDITION to two pumps): each
+    pump's spectral std sigma_p is measured over its own pump-dominated window; a band is FLAGGED
+    contaminated by pump p when sigma_p exceeds 0.21 * (gap from fp to the band's near edge) -- the
+    same 0.21-of-the-gap bound the single-pump guard uses (there the gap f0 -> 2f0(1-bw) is
+    f0(1-2bw)). This covers BOTH the cross-leakage between the two pump bands (a broad f1 tail reaching
+    the f2 band and vice versa) AND leakage into every mixing band. A UserWarning fires and
+    `pump_broadband` is set when any band is flagged (non-fatal, same philosophy as harmonic_spectrum:
+    the narrowband bands stay usable; strict callers read the flags).
+
+    Returns a dict: f1_hz, f2_hz, bandwidth_frac, freqs_Hz, power_spectrum, orders, power_type;
+      power {label: P}, power_by_order {label: (norder,)}, bands_hz {label: (lo, hi)},
+      band_truncated {label: bool}, coeffs {label: (p, q)}, centers_hz {label: signed center};
+      band_degenerate {label: bool}, degenerate_groups [[label, ...], ...];
+      pump_sigma_hz {'f1': .., 'f2': ..}, band_leak_sources {label: [pump labels]},
+      band_contaminated {label: bool}, pump_broadband (bool); and the aliases P_f1, P_f2, P_sum,
+      P_diff, P_2f1, P_2f2, P_2f1mf2, P_2f2mf1."""
+    f1 = float(f1_hz)
+    f2 = float(f2_hz)
+    if f1 <= 0.0 or f2 <= 0.0:
+        raise ValueError("f1_hz and f2_hz must be > 0")
+    if f1 == f2:
+        raise ValueError("mixing_spectrum needs two DISTINCT colors (f1 != f2)")
+    if not (0.0 < bandwidth_frac < 0.5):
+        raise ValueError("bandwidth_frac must satisfy 0 < bw < 0.5")
+    e, h, dt = _extract(result_or_trace, dt, field)
+    f, S, orders, ptype = _order_spectra(e, h, dt)
+
+    # ---- band geometry: signed center, physical center |fc|, and the fractional band ----
+    coeffs, centers, fc_abs, bands_hz, hw = {}, {}, {}, {}, {}
+    fscale = min(f1, f2)                                   # near-DC fallback width scale
+    for label, (p, q) in _MIX_BANDS:
+        c = p * f1 + q * f2
+        a = abs(c)
+        w = bandwidth_frac * (a if a > 0.0 else fscale)   # a==0 (DC-degenerate): scale off min(f1,f2)
+        coeffs[label] = (p, q)
+        centers[label] = float(c)
+        fc_abs[label] = float(a)
+        hw[label] = float(w)
+        bands_hz[label] = (float(max(0.0, a - w)), float(a + w))
+
+    # ---- degeneracy grouping (coincident centers) + overlap validation (distinct centers) ----
+    labels = [lab for lab, _ in _MIX_BANDS]
+    tol = 1e-9 * max(f1, f2)
+    band_degenerate = {lab: False for lab in labels}
+    groups = []                                           # each: list of labels sharing a center
+    for lab in labels:
+        placed = False
+        for g in groups:
+            if abs(fc_abs[lab] - fc_abs[g[0]]) <= tol:
+                g.append(lab)
+                placed = True
+                break
+        if not placed:
+            groups.append([lab])
+    degenerate_groups = [g for g in groups if len(g) > 1]
+    for g in degenerate_groups:
+        for lab in g:
+            band_degenerate[lab] = True
+    for lab in labels:                                    # a band collapsed onto DC (fc = 0, e.g.
+        if fc_abs[lab] <= tol:                            # 2f1-f2 when f2 = 2 f1) is also degenerate
+            band_degenerate[lab] = True
+    # distinct-center overlap => raise (would double-count). Compare one representative per group.
+    reps = [g[0] for g in groups]
+    reps.sort(key=lambda lab: fc_abs[lab])
+    for i in range(len(reps) - 1):
+        a_lab, b_lab = reps[i], reps[i + 1]
+        if bands_hz[a_lab][1] > bands_hz[b_lab][0] + tol:
+            raise ValueError(
+                "mixing_spectrum: bands {!r} ({:.4g} Hz) and {!r} ({:.4g} Hz) OVERLAP for "
+                "bandwidth_frac={} -- they would double-count. Use well-separated colors or a "
+                "smaller bandwidth_frac (the mixing bands crowd near f1~f2 and near harmonic "
+                "spacings).".format(a_lab, fc_abs[a_lab], b_lab, fc_abs[b_lab], bandwidth_frac))
+
+    # ---- band powers ----
+    power, power_by_order, band_truncated = {}, {}, {}
+    for lab in labels:
+        lo, hi = bands_hz[lab]
+        P, Pord, tr = _band_power_at(f, S, lo, hi)
+        power[lab], power_by_order[lab], band_truncated[lab] = P, Pord, tr
+
+    # ---- per-band leakage guard (generalized single-pump 0.21-of-the-gap bound) ----
+    Ssum = np.abs(S.sum(axis=1))
+    # each pump's measurement window reaches HALF-WAY to its nearest other band (mirrors the single-
+    # pump [0.5 f0, 1.5 f0] = half-way to the 2w line), so it never straddles the other pump.
+    pump_sigma = {}
+    for pl, fp in (("f1", f1), ("f2", f2)):
+        others = [fc_abs[lab] for lab in labels
+                  if abs(fc_abs[lab] - fp) > tol and fc_abs[lab] > 0.0]
+        nearest = min((abs(o - fp) for o in others), default=0.5 * fp)
+        halfw = 0.5 * nearest
+        pump_sigma[pl] = _pump_sigma(f, Ssum, fp, halfw, halfw)
+    # a band is contaminated by pump p if sigma_p > 0.21 * (gap from fp to the band's near edge)
+    band_leak_sources = {lab: [] for lab in labels}
+    for lab in labels:
+        for pl, fp in (("f1", f1), ("f2", f2)):
+            if abs(fc_abs[lab] - fp) <= tol:
+                continue                                  # the pump's OWN band -- skip self
+            gap = abs(fc_abs[lab] - fp) - hw[lab]         # pump center -> band near edge
+            if gap <= 0.0 or pump_sigma[pl] > 0.21 * gap:
+                band_leak_sources[lab].append(pl)
+    band_contaminated = {lab: (len(band_leak_sources[lab]) > 0) for lab in labels}
+    pump_broadband = any(band_contaminated.values())
+    if pump_broadband:
+        flagged = [lab for lab in labels if band_contaminated[lab]]
+        warnings.warn(
+            "mixing_spectrum: BROADBAND pump(s) -- measured pump spectral std "
+            "(f1: {:.3g}, f2: {:.3g} Hz) leaks past the 0.21-of-the-gap bound into band(s) {}. "
+            "Those bands mix genuine products with pump spectral tails and are NOT a clean mixing "
+            "diagnostic; use longer (narrower-band) pulses or better-separated colors.".format(
+                pump_sigma["f1"], pump_sigma["f2"], flagged), stacklevel=2)
+
+    out = {
+        "f1_hz": f1, "f2_hz": f2, "bandwidth_frac": float(bandwidth_frac),
+        "freqs_Hz": f, "power_spectrum": S.sum(axis=1), "orders": orders, "power_type": ptype,
+        "power": power, "power_by_order": power_by_order, "bands_hz": bands_hz,
+        "band_truncated": band_truncated, "coeffs": coeffs, "centers_hz": centers,
+        "band_degenerate": band_degenerate, "degenerate_groups": degenerate_groups,
+        "pump_sigma_hz": pump_sigma, "band_leak_sources": band_leak_sources,
+        "band_contaminated": band_contaminated, "pump_broadband": pump_broadband,
+    }
+    for lab, alias in _MIX_ALIASES.items():
+        out[alias] = power[lab]
+    return out
+
+
 def conversion_efficiency(result_or_trace, fundamental_hz, *, incident=None,
                           normalization="incident", dt=None, field="transmitted",
                           bandwidth_frac=0.15):
