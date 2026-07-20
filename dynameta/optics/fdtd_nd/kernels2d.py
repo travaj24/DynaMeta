@@ -55,7 +55,14 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
              None -> byte-identical to the passive path. gain_dyn is incompatible with hot (both re-touch
              the Drude coefficients); the solve front-end never combines them. hot_out (a dict), when
              given, receives the per-step spatially-averaged p_abs/T_e histories + the final T_e / field-
-             intensity maps for the uniformity + locality oracles."""
+             intensity maps for the uniformity + locality oracles.
+             FINITE LATTICE (roadmap 5.7, opt-in via the dict's 'c_l'/'g_sub' (nx,nz) arrays; both absent
+             or 'c_l' None -> the fixed-bath tier, byte-identical): each cell also carries U_l with
+             dU_l/dt = +G(T_e-T_l) - g_sub(T_l-T_l0), T_l = T_l0 + U_l/c_l (c_l = inf off the finite cells,
+             so their T_l stays pinned). The SAME per-step coupling leaves the electrons and enters the
+             lattice, so hot_out's U_e_final + U_l_final + sub_outflow_int == p_abs_int exactly (alpha 1);
+             hot_out then also carries Tl_mean/Tl_final/U_l_final/sub_outflow_int for the closure + 0-D
+             two-temperature (carrier_heating) consistency oracles."""
     nx, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     ke = xp.asarray(ke); be = xp.asarray(be); ce = xp.asarray(ce)
@@ -114,7 +121,7 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         mat_idx = np.asarray(hot["mat_idx"])                 # (nx,nz) material id, -1 off
         htab = hot["tables"]                                 # list of (Te_grid,U_grid,wp_ratio,gam_ratio)
         Ghot = np.asarray(hot["G"], dtype=np.float64)        # (nx,nz) electron-phonon coupling [W/m^3/K]
-        Tlhot = np.asarray(hot["Tl"], dtype=np.float64)      # (nx,nz) fixed lattice bath [K]
+        Tlhot = np.asarray(hot["Tl"], dtype=np.float64)      # (nx,nz) lattice temp [K] (fixed bath, or Tl0)
         alpha_hot = np.asarray(hot["alpha"], dtype=np.float64)  # (nx,nz) p_abs coupling (usually 1)
         n_upd = max(1, int(hot["n_update"]))
         wp0 = np.array(wp, dtype=np.float64)                 # COLD (wp,gamma) anchors; wp/gam mutate below
@@ -125,11 +132,25 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         U_e = np.zeros((nx, nz))                             # electron energy density above T_e0 [J/m^3]
         Te_hot = np.array(hot["Te0"], dtype=np.float64)      # T_e map (U_e == 0 -> T_e0 per material)
         n_mat = len(htab)
+        # --- FINITE LATTICE heat capacity (roadmap 5.7). do_lat False -> Tlhot stays the fixed bath and
+        #     NOT one extra op runs -> byte-identical to the 2.1 fixed-bath path. When on, each cell also
+        #     carries U_l with dU_l/dt = +G(T_e-T_l) - g_sub(T_l-T_l0) and T_l = T_l0 + U_l/c_l; the SAME
+        #     coupling array leaves the electrons (below) and enters the lattice, so energy closes exactly.
+        do_lat = hot.get("c_l") is not None
+        if do_lat:
+            c_l_hot = np.asarray(hot["c_l"], dtype=np.float64)     # (nx,nz) lattice heat capacity [J/m^3/K];
+            g_sub_hot = np.asarray(hot["g_sub"], dtype=np.float64)  # inf off the finite-lattice cells (Tl pinned)
+            Tl0_hot = np.array(Tlhot, dtype=np.float64)       # T_l0 == initial lattice temp == substrate ref
+            Tlhot = np.array(Tlhot, dtype=np.float64)         # mutable copy; evolves as Tl0 + U_l/c_l
+            U_l = np.zeros((nx, nz))                          # lattice energy density above T_l0 [J/m^3]
         _rec = hot_out is not None
         if _rec:
             msum = float(hmask.sum()) or 1.0
             pabs_mean = np.empty(nsteps); Te_mean = np.empty(nsteps)
             pabs_int = np.zeros((nx, nz)); E2_int = np.zeros((nx, nz))
+            if do_lat:
+                Tl_mean = np.empty(nsteps)                    # (nsteps,) mask-averaged lattice temperature
+                sub_out_int = np.zeros((nx, nz))              # integrated lattice->substrate outflow rate
     for n in range(nsteps):
         # H update: dHx/dt = (1/mu0) (CPML-stretched dEy/dz) ; dHz/dt = -(1/mu0) dEy/dx (periodic x)
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz                      # at H positions k=0..nz-2
@@ -192,12 +213,21 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         # for a Drude-off cell, J == 0, so p_abs == 0 and T_e stays at T_e0.
         if do_hot:
             p_abs = hmask * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
-            U_e += dt * (alpha_hot * p_abs - Ghot * (Te_hot - Tlhot))
+            if do_lat:
+                coupling = Ghot * (Te_hot - Tlhot)         # W/m^3 leaving the electrons -> INTO the lattice
+                U_e += dt * (alpha_hot * p_abs - coupling)
+                sub_out = g_sub_hot * (Tlhot - Tl0_hot)    # W/m^3 lattice -> substrate bath (0 if g_sub 0)
+                U_l += dt * (coupling - sub_out)           # exact energy conservation (same coupling array)
+            else:
+                U_e += dt * (alpha_hot * p_abs - Ghot * (Te_hot - Tlhot))
             if _rec:
                 pabs_mean[n] = float(p_abs.sum()) / msum
                 Te_mean[n] = float((Te_hot * hmask).sum()) / msum
                 pabs_int += p_abs
                 E2_int += Eynew ** 2
+                if do_lat:
+                    Tl_mean[n] = float((Tlhot * hmask).sum()) / msum
+                    sub_out_int += sub_out                 # rate; * dt applied at the end
             if (n % n_upd) == 0:                       # refresh T_e, (wp,gamma) and the Drude ADE coeffs
                 for mi in range(n_mat):
                     sel = (mat_idx == mi)
@@ -208,6 +238,8 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
                     Te_hot[sel] = te
                     wp[sel] = wp0[sel] * np.interp(te, Te_g, wpr)
                     gam[sel] = gam0[sel] * np.interp(te, Te_g, gmr)
+                if do_lat:                                # constant-c_l lattice temp (c_l=inf off-cell -> Tl0)
+                    Tlhot = Tl0_hot + U_l / c_l_hot
                 aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
                 bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
         Jy = Jynew
@@ -230,6 +262,18 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         hot_out["E2_int"] = E2_int                           # (nx,nz) time-integrated |E_y|^2 (fluence proxy)
         hot_out["Te_final"] = Te_hot.copy()                  # (nx,nz) final electron-temperature map
         hot_out["mask"] = hmask.astype(bool)                 # (nx,nz) opted-in-cell mask
+        # roadmap 5.7 energy-closure + lattice probes. With alpha_abs=1, p_abs_int == the J.E work into
+        # the film == U_e_final + U_l_final + sub_outflow_int EXACTLY (each dt*coupling entered both
+        # reservoirs with opposite sign; sub_out drained the lattice). Fixed-bath -> lattice terms zero.
+        hot_out["U_e_final"] = U_e.copy()                    # (nx,nz) electron energy density [J/m^3]
+        hot_out["Tl_final"] = Tlhot.copy()                   # (nx,nz) final lattice-temperature map
+        if do_lat:
+            hot_out["Tl_mean"] = Tl_mean                     # (nsteps,) mask-averaged lattice temperature
+            hot_out["U_l_final"] = U_l.copy()                # (nx,nz) lattice energy density above T_l0 [J/m^3]
+            hot_out["sub_outflow_int"] = sub_out_int * dt    # (nx,nz) lattice->substrate energy density [J/m^3]
+        else:
+            hot_out["U_l_final"] = np.zeros((nx, nz))        # fixed bath: no lattice reservoir
+            hot_out["sub_outflow_int"] = np.zeros((nx, nz))
     return eyL, hxL, eyR, hxR
 
 

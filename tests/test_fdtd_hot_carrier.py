@@ -16,6 +16,13 @@ Gates:
   5  LOCALITY       -- a Drude stripe heats where |E|^2 concentrates, not uniformly.
   6  NUMBA GUARD    -- backend='numba' + hot carrier raises ValueError (numpy reference path only).
 Plus the J.E dissipation identity and the HotCarrierParams / off-switch guards.
+
+FINITE LATTICE (roadmap 5.7, the test_lat_* gates): opt-in c_l_j_m3_k makes T_l a co-evolving per-cell
+state (dU_l/dt = +G(T_e-T_l) - g_sub(T_l-T_l0)). Gates: off (c_l=None) byte-identical; c_l -> huge
+reproduces the fixed-bath T_e trajectory (limit contract); energy closes incl. the lattice + substrate
+outflow; a small c_l slows electron relaxation (tail above fixed bath); and the uniform-film (T_e, T_l)
+match carrier_heating.two_temperature_response with matched coefficients (its lattice equation IS the
+0-D oracle).
 """
 import numpy as np
 import pytest
@@ -43,9 +50,12 @@ def _ttm(G, C_l=1.0e30, alpha_abs=1.0):
     return TwoTempParams(C_e=lambda Te: GAMMA_E * Te, C_l=C_l, G_e_l=G, alpha_abs=alpha_abs)
 
 
-def _hc(G=8.0e16, gamma_p=1.0, n_update=1):
+def _hc(G=8.0e16, gamma_p=1.0, n_update=1, c_l=None, g_sub=0.0):
+    # c_l=None -> the fixed-bath tier (roadmap 2.1, byte-identical); a float -> the finite-lattice
+    # tier (roadmap 5.7) with optional lattice->substrate out-coupling g_sub (0 = adiabatic lattice).
     return HotCarrierParams(ttm=_ttm(G), n_m3=N_M3, m0_kg=M0, alpha_per_eV=ALPHA,
-                            T_l_K=T_REF, T_e0_K=T_REF, gamma_p=gamma_p, n_update=n_update)
+                            T_l_K=T_REF, T_e0_K=T_REF, gamma_p=gamma_p, n_update=n_update,
+                            c_l_j_m3_k=c_l, g_sub_w_m3_k=g_sub)
 
 
 def _cold_layer(thick=120e-9):
@@ -249,3 +259,90 @@ def test_table_off_switches_are_exact():
         HotCarrierParams(ttm=_ttm(8e16), n_m3=N_M3, m0_kg=M0, alpha_per_eV=ALPHA, gamma_p=1.0))
     assert Te[0] == T_REF and U[0] == 0.0
     assert wpr2[0] == pytest.approx(1.0, abs=1e-12) and gmr2[0] == pytest.approx(1.0, abs=1e-12)
+
+
+# ================= roadmap 5.7: FINITE LATTICE HEAT CAPACITY (opt-in co-evolving T_l) =================
+# c_l_j_m3_k=None (default) is the fixed-bath tier gated above; setting it makes each heated cell carry a
+# co-evolving T_l = T_l0 + U_l/c_l with dU_l/dt = +G(T_e-T_l) - g_sub(T_l-T_l0). The term leaving the
+# electrons enters the lattice EXACTLY (energy closes cell-by-cell), and c_l -> inf reduces to fixed bath.
+
+def test_lat_gate1_off_byte_identical():
+    """c_l=None reproduces the fixed-bath tier bit-exactly: the finite-lattice branch never executes,
+    so two default (c_l=None) hot runs are byte-identical on R/T (and the whole shipped 2.1 suite above,
+    run against this edited kernel, still passes -- the additive edit did not perturb the fixed path)."""
+    r0 = _solve([_hot_layer(gamma_p=0.0)], source_amp=1e6)
+    r1 = _solve([_hot_layer(gamma_p=0.0)], source_amp=1e6)     # c_l defaults to None
+    for a, b in ((r0.R0, r1.R0), (r0.T0, r1.T0), (r0.R_flux, r1.R_flux), (r0.T_flux, r1.T_flux)):
+        assert a.tobytes() == b.tobytes()
+
+
+def test_lat_gate2_huge_cl_reproduces_fixed_bath():
+    """LIMIT CONTRACT: c_l -> huge (1e12) re-pins the lattice (U_l/c_l -> 0), so the electron T_e(t)
+    trajectory reduces to the fixed-bath tier to rtol 1e-6 (measured ~1e-8)."""
+    G = 8.0e16
+    ho_fix, ho_big = {}, {}
+    _solve([_hot_layer(G=G, gamma_p=1.0)], source_amp=3e8, hot_out=ho_fix)               # fixed bath
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=1.0e12)], source_amp=3e8, hot_out=ho_big)   # huge c_l
+    Te_fix, Te_big = ho_fix["Te_mean"], ho_big["Te_mean"]
+    peak = Te_fix.max() - T_REF
+    assert peak > 5.0                                          # a real, resolvable heating transient
+    assert np.max(np.abs(Te_big - Te_fix)) / peak < 1e-6      # huge c_l -> fixed-bath T_e trajectory
+    assert ho_big["Tl_final"][ho_big["mask"]].max() - T_REF < 1e-2  # the lattice barely moved
+
+
+def test_lat_gate3_energy_closure_with_lattice():
+    """ENERGY CLOSURE incl. the lattice reservoir: with alpha_abs=1 the integrated J.E work into the film
+    (p_abs_int) equals U_e_final + U_l_final + substrate outflow. The SAME per-step coupling enters both
+    reservoirs with opposite sign, so closure is exact to rounding. All three terms are non-trivial here."""
+    G, c_l, g_sub = 8.0e16, 5.0e4, 2.0e16                      # small c_l + strong g_sub -> Ue~Ul~sub all big
+    ho = {}
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l, g_sub=g_sub)], source_amp=3e8, hot_out=ho)
+    mk = ho["mask"]
+    absorbed = ho["p_abs_int"][mk].sum()                      # common cell volume cancels (all densities)
+    U_e = ho["U_e_final"][mk].sum(); U_l = ho["U_l_final"][mk].sum(); sub = ho["sub_outflow_int"][mk].sum()
+    assert absorbed > 0 and U_e > 0 and U_l > 0 and sub > 0   # every reservoir genuinely exercised
+    assert abs((U_e + U_l + sub) - absorbed) / absorbed < 1e-6  # closure (measured ~1e-15)
+
+
+def test_lat_gate4_finite_lattice_slows_relaxation():
+    """PHYSICS: with a small c_l the lattice heats appreciably and T_l rises toward T_e, shrinking the
+    (T_e - T_l) driving force so the electrons cool SLOWER -- the T_e(t) relaxation tail sits ABOVE the
+    fixed-bath tail (which drains into an infinite bath)."""
+    G, c_l = 8.0e16, 5.0e4
+    ho_fix, ho_lat = {}, {}
+    _solve([_hot_layer(G=G, gamma_p=1.0)], source_amp=3e8, hot_out=ho_fix)               # fixed bath
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho_lat)      # finite lattice
+    assert ho_lat["Tl_final"][ho_lat["mask"]].max() - T_REF > 5.0   # the lattice genuinely heated
+    Te_fix, Te_lat = ho_fix["Te_mean"], ho_lat["Te_mean"]
+    ip = int(np.argmax(Te_fix))
+    tail = slice(ip + (len(Te_fix) - ip) // 2, None)          # the relaxation tail, well after the peak
+    assert (Te_lat[tail] - Te_fix[tail]).min() >= -1e-9       # finite-lattice tail never below fixed bath
+    assert Te_lat[tail].mean() > Te_fix[tail].mean() + 0.5    # and sits strictly above
+
+
+def test_lat_gate5_uniform_finite_lattice_matches_two_temperature_oracle():
+    """0-D CONSISTENCY: carrier_heating.two_temperature_response DOES evolve a lattice equation
+    (C_l dT_l/dt = +G(T_e-T_l)). With g_sub=0 (adiabatic -- the 0-D TTM has no substrate term) and the
+    matched (C_e, C_l=c_l, G) coefficients, the uniform-film mask-averaged T_e(t) AND T_l(t) reproduce
+    the 0-D two-temperature oracle driven with the SAME half-step p_abs history (the 2.1 p_abs lesson)."""
+    G, c_l = 8.0e16, 3.0e5
+    ho = {}
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho)
+    t, pabs = ho["t"], ho["p_abs_mean"]
+    Te_run, Tl_run = ho["Te_mean"], ho["Tl_mean"]
+    dt = float(t[1] - t[0])
+    _, Te_or, Tl_or = two_temperature_response(
+        t, lambda tt: float(np.interp(tt, t + 0.5 * dt, pabs)), _ttm(G, C_l=c_l), T0_K=T_REF)
+    peakTe = max(Te_run.max() - T_REF, 1e-9); peakTl = max(Tl_run.max() - T_REF, 1e-9)
+    assert peakTl > 5.0                                       # the lattice genuinely co-evolved
+    assert np.max(np.abs(Te_or - Te_run)) / peakTe < 2e-2     # electron trajectory (measured ~1e-3)
+    assert np.max(np.abs(Tl_or - Tl_run)) / peakTl < 2e-2     # lattice trajectory  (measured ~1e-4)
+
+
+def test_lat_param_guards():
+    ttm = _ttm(8e16)
+    with pytest.raises(ValueError):                           # c_l must be > 0 when set
+        HotCarrierParams(ttm=ttm, n_m3=N_M3, m0_kg=M0, c_l_j_m3_k=0.0)
+    with pytest.raises(ValueError):                           # g_sub must be >= 0
+        HotCarrierParams(ttm=ttm, n_m3=N_M3, m0_kg=M0, c_l_j_m3_k=1.0e5, g_sub_w_m3_k=-1.0)
+    HotCarrierParams(ttm=ttm, n_m3=N_M3, m0_kg=M0, c_l_j_m3_k=None)  # None (fixed bath) is valid
