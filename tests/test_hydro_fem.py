@@ -413,3 +413,25 @@ def test_2d_hydro_guard_still_live():
     om = 2.0 * math.pi * hf.C_LIGHT / 600e-9
     with pytest.raises(hf.HydroFEMUnstable):
         hf.scattering_2d(mesh, om, p, local=False, flux_radius=0.7 * Rp, unstable_ratio=1e-6)
+
+
+def test_2d_hydro_converges_under_refinement():
+    """ITEM 5.4 STABILIZATION REGRESSION (2026-07 adversarial round).  The defining failure of the
+    retired indefinite vector-J form was that mesh refinement made it WORSE (the essential spectrum
+    densifies, so refining walked the drive onto discrete eigenvalues -> field norms 1e19-1e53).
+    The scalar-longitudinal-potential form must do the opposite: refining the surface shell toward
+    the screening length must CONVERGE the near-field.  Gate: three shell refinements at the coupled
+    SP stay bounded, the successive relative change SHRINKS, and the last two levels agree."""
+    p = _sodium(gamma=3.0e13)
+    w_sp = hf.cylinder_sp_omega(p, 1.0)
+    om = (1.0 + hf.cylinder_blueshift_raza(p, 4.0, 1.0)) * w_sp   # on the coupled resonance
+    enh = []
+    for h_surf in (0.8, 0.4, 0.2):
+        mesh, Rp = hf.cylinder_mesh(4.0, h_metal=1.0, h_surf=h_surf, surf_nm=1.0)
+        r = hf.scattering_2d(mesh, om, p, local=False, flux_radius=0.7 * Rp)
+        assert np.isfinite(r.enhancement) and r.enhancement < 1e3   # bounded at every level
+        enh.append(r.enhancement)
+    d1 = abs(enh[1] - enh[0]) / enh[0]
+    d2 = abs(enh[2] - enh[1]) / enh[1]
+    assert d2 < max(d1, 0.02), "refinement must converge, not wander: enh={}".format(enh)
+    assert d2 < 0.12, "last two refinement levels disagree by {:.1%}: enh={}".format(d2, enh)

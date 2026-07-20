@@ -100,6 +100,77 @@ def test_vortex_charge_unity():
 
 
 # ------------------------------------------------------------------------------------------------
+# ADVERSARIAL ATTACK 4: vortex-charge robustness (radius stability + genuine off-BIC null)
+# ------------------------------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def vortex_phi():
+    """One conical Jones field around Gamma at the BIC wavelength (n_grid=13), reused by the
+    charge-robustness gates so they cost a single RCWA k-sweep."""
+    from validation.bic_capstone import vortex_jones_field
+    from dynameta.optics.bic import polarization_angle_field
+    J = vortex_jones_field(DESIGN, n_grid=13, k_frac=0.03, n_orders=N_ORDERS)
+    return polarization_angle_field(J)
+
+
+def test_vortex_charge_radius_stable(vortex_phi):
+    # ATTACK 4a: |q| = 1 is a genuine topological invariant -- CONSTANT across every contour radius
+    # that safely encloses the (numerically smeared) vortex winding, so the unity charge is not a
+    # single-radius coincidence.  A too-small contour that hugs the smeared core must fire the
+    # undersampling guard rather than silently under-report a clean-but-wrong q = 0.
+    from dynameta.optics.bic import topological_charge
+    c = 13 // 2
+    charges = [topological_charge(vortex_phi, (c - r, c + r, c - r, c + r)) for r in (3, 4, 5)]
+    assert all(abs(q - charges[0]) < 1e-9 for q in charges), \
+        "charge not radius-stable across r=3,4,5: {}".format(charges)
+    assert abs(abs(charges[0]) - 1.0) < 1e-9
+    with pytest.raises(ValueError):                                    # r=2 hugs the core -> guard fires
+        topological_charge(vortex_phi, (c - 2, c + 2, c - 2, c + 2))
+
+
+def test_vortex_offbic_control_is_a_genuine_null():
+    # ATTACK 4d: the q = 0 control at an OFF-BIC wavelength must be a genuine null -- a clean winding
+    # of 0 with the guard NOT firing -- not an undersampling artifact.  Otherwise |q| = 1 at the BIC
+    # would carry no discriminating power.
+    q_bic, _n, g_bic = vortex_charge(DESIGN, n_grid=13, k_frac=0.03, contour_radius=4,
+                                     n_orders=N_ORDERS)
+    assert (not g_bic) and abs(abs(q_bic) - 1.0) < 1e-9
+    d_off = type(DESIGN)(**{**DESIGN.__dict__, "lam_bic_m": DESIGN.lam_bic_m * 1.02})
+    q_off, n_off, g_off = vortex_charge(d_off, n_grid=13, k_frac=0.03, contour_radius=4,
+                                        n_orders=N_ORDERS)
+    assert not g_off, "off-BIC guard fired -- the q=0 control would be an undersampling artifact"
+    assert abs(q_off) < 1e-9 and abs(n_off) < 0.15
+
+
+# ------------------------------------------------------------------------------------------------
+# ADVERSARIAL ATTACK 5: theta^-2 exponent robustness + lossless Q non-saturation
+# ------------------------------------------------------------------------------------------------
+def test_exponent_robust_to_endpoint_drop(sweeps):
+    # ATTACK 5a/b/c: the quasi-BIC theta^-2 law survives dropping the smallest OR the largest angle,
+    # AND holds for BOTH the fano_Q and the pole_Q route -- exponent within -2 +/- 0.15 every time.
+    th = np.array(THETAS)
+    fano_Q = np.array([r.fano_Q for r in sweeps])
+    pole_Q = np.array([r.pole_Q for r in sweeps])
+    for ts, fq, pq in ((th, fano_Q, pole_Q), (th[1:], fano_Q[1:], pole_Q[1:]),
+                       (th[:-1], fano_Q[:-1], pole_Q[:-1])):
+        ef, _pf, r2f = quasi_bic_scaling(list(ts), list(fq))
+        ep, _pp, r2p = quasi_bic_scaling(list(ts), list(pq))
+        assert abs(ef + 2.0) <= 0.15 and r2f > 0.98, "fano route exp={:.3f}".format(ef)
+        assert abs(ep + 2.0) <= 0.15 and r2p > 0.98, "pole route exp={:.3f}".format(ep)
+
+
+def test_lossless_Q_does_not_saturate(sweeps):
+    # ATTACK 5d: the LOSSLESS (real-index Si) symmetry-protected BIC has a purely RADIATIVE Q with no
+    # absorption-limited floor, so Q must keep diverging toward Gamma -- halving theta (1 -> 0.5 deg)
+    # must ~quadruple the pole Q (1/theta^2), never plateau.
+    res = run_angle_sweeps(DESIGN, [0.5], n_orders=N_ORDERS, n_initial=81, max_samples=193)
+    assert res[0] is not None, "pole extraction failed at 0.5 deg"
+    q_half = res[0].pole_Q
+    q_one = sweeps[0].pole_Q                                          # THETAS[0] == 1.0 deg
+    assert q_half > 3.0 * q_one, \
+        "Q saturated: Q(0.5deg)={:.0f} !~ 4*Q(1deg)={:.0f} (absorption floor?)".format(q_half, q_one)
+
+
+# ------------------------------------------------------------------------------------------------
 # Signature 4: the three instruments agree on the resonance frequency
 # ------------------------------------------------------------------------------------------------
 def test_instrument_consistency(sweeps):
