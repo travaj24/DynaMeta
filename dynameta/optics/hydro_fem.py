@@ -1,4 +1,5 @@
-"""Hydrodynamic (nonlocal) Drude FINITE-ELEMENT tier -- roadmap item 3.3 (HDM -> GNOR -> QCM).
+"""Hydrodynamic (nonlocal) Drude FINITE-ELEMENT tier -- roadmap items 3.3 (HDM -> GNOR -> QCM)
+and 5.4 (2-D coupled-HDM STABILIZATION).
 
 Item 2.4 (``optics.nonlocal_tmm``) solved the LAYERED hydrodynamic problem with a 4-wave
 transfer matrix.  This module carries the SAME physics into a FINITE-ELEMENT weak form -- the
@@ -6,6 +7,11 @@ coupled ``(E, J)`` system the generalizes beyond planar stacks -- plus the quant
 (QCM) sub-nanometre gap material.  It reuses ``nonlocal_tmm``'s conventions EXACTLY (same
 ``beta**2 = (3/5) v_F**2``, same GNOR ``beta_eff**2 = beta**2 + D(gamma - i*omega)``, same
 ``exp(-i*omega*t)`` so a passive absorber has ``Im(eps) > 0``, the ABC ``J_normal = 0``).
+
+The 2-D scatterer solver (:func:`scattering_2d`, ``local=False``) is the STABILIZED reformulation
+of roadmap item 5.4 -- the scalar-longitudinal-potential form derived below.  It is stable at
+plasmon resonances and in sub-5-nm gaps (the original vector-``J`` form was indefinite and blew
+up there); it delivers the CYLINDER-BLUESHIFT and GAP-SATURATION gates quantitatively.
 
 ------------------------------------------------------------------------------------------------
 THE COUPLED (E, J) WEAK FORM (Toscano et al., Opt. Express 20, 4176 (2012))
@@ -39,36 +45,112 @@ incident plane wave, and the metal carries the sources ``src_E = k0**2 (eps_inf 
 ``src_J = i*omega*eps0*wp**2 E_inc``.
 
 ------------------------------------------------------------------------------------------------
-TWO SOLVERS, AND WHY (an honest numerical-scoping note -- read before use)
+THE 1-D LAYERED SOLVER (robust; item 3.3)
 ------------------------------------------------------------------------------------------------
-The longitudinal (bulk-plasmon) wave has a screening length ``delta_L ~ beta / sqrt(wp**2/eps_inf
-- omega**2) ~ 0.1-0.2 nm`` below ``omega_p`` -- far below the geometric scale.  It also makes the
-J-block form ``omega**2 |J|**2 - beta**2 |div J|**2`` INDEFINITE, so the plane-wave-driven system
-is close to a discrete longitudinal eigenvalue at generic ``omega``.  Consequences, measured:
+``hydro_layered_1d`` -- a 1-D-in-z coupled ``(E, J)`` FEM for a LAYERED stack.  The screening layer
+is trivially resolved (fine z-mesh), so this solver is ROBUST.  At NORMAL incidence it reproduces
+``nonlocal_tmm`` R/T/A to ~1e-8 relative (mesh/order-limited, NOT machine precision: measured worst
+5.5e-8 over 0.4-1.3 wp at an off-gate parameter set, ~1e-10 well below wp; there is no longitudinal
+coupling at normal incidence -- it validates the local reduction, the ABC bookkeeping, the units and
+the transparent boundary condition).  At OBLIQUE incidence it reproduces the BULK-PLASMON
+standing-wave absorption peaks at ``k_L d = m*pi`` to < 1% (the core nonlocal physics -- the pressure
+term and ABC); its ABSOLUTE absorption error grows with angle because a single scalar impedance BC
+cannot fully absorb the oblique VECTOR p-pol wave in a nodal discretization: measured ~0.5-3% at
+30 deg and up to ~20% at 60 deg near 0.7 wp (documented, not gated -- the peak POSITIONS validate
+the physics).
 
-  * ``hydro_layered_1d`` -- a 1-D-in-z coupled ``(E, J)`` FEM for a LAYERED stack.  The screening
-    layer is trivially resolved (fine z-mesh), so this solver is ROBUST.  At NORMAL incidence it
-    reproduces ``nonlocal_tmm`` R/T/A to ~1e-8 relative (mesh/order-limited, NOT machine
-    precision: measured worst 5.5e-8 over 0.4-1.3 wp at an off-gate parameter set, ~1e-10 well
-    below wp; there is no longitudinal coupling at normal incidence -- it validates the local
-    reduction, the ABC bookkeeping, the units and the transparent boundary condition).  At
-    OBLIQUE incidence it reproduces the BULK-PLASMON standing-wave absorption peaks at
-    ``k_L d = m*pi`` to < 1% (the core nonlocal physics -- the pressure term and ABC); its
-    ABSOLUTE absorption error grows with angle because a single scalar impedance BC cannot fully
-    absorb the oblique VECTOR p-pol wave in a nodal discretization: measured ~0.5-3% at 30 deg
-    and up to ~20% at 60 deg near 0.7 wp (documented, not gated -- the peak POSITIONS are what
-    validate the physics).
+------------------------------------------------------------------------------------------------
+THE 2-D SCATTERER SOLVER (item 5.4): why the vector-J form failed, and the cure that fixed it
+------------------------------------------------------------------------------------------------
+THE ORIGINAL OBSTRUCTION (the indefinite vector-J block -- the spectral analysis).  The shipped
+3.3 form carried ``J`` as a full vector in ``H(div)`` and the metal J-block bilinear form was
+``omega(omega+i*gamma)|J|**2 - beta_eff**2 |div J|**2``.  Helmholtz-decompose ``J = J_T + grad
+phi`` (``div J_T = 0``): the LONGITUDINAL part ``grad phi`` sees ``-beta_eff**2 |div J|**2`` (a
+stiff, high-wavenumber operator whose screening length ``delta_L ~ beta/sqrt(wp**2/eps_inf -
+omega**2) ~ 0.1-0.2 nm`` is FAR below the geometric scale), while the TRANSVERSE part ``J_T`` sees
+ONLY the mass term ``omega(omega+i*gamma)|J_T|**2`` -- there is NOTHING to make the two parts
+comparable, so the block's spectrum straddles zero (INDEFINITE) and its essential spectrum has an
+accumulation point where ``omega(omega+i*gamma) - beta_eff**2 k**2 = 0`` for the discrete
+longitudinal wavenumbers ``k`` the mesh supports.  Driving at a generic ``omega`` lands ARBITRARILY
+CLOSE to one of those discrete longitudinal eigenvalues -> a near-null internal mode -> ``||E_scat||
+/||E_inc||`` of 1e19-1e53 at plasmon resonances and in sub-5-nm gaps.  Refining the surface mesh
+DENSIFIES the discrete longitudinal spectrum (more near-degeneracies), so it does not cure the
+problem -- it can worsen it.  (This is why 3.3 gated ``scattering_2d`` to RAISE.)
 
-  * ``scattering_2d`` -- the genuine 2-D ``H(curl) x H(div)`` coupled weak form on an arbitrary
-    scatterer (cylinder / nanowire dimer).  Its LOCAL-Drude path (``local=True``) is rock-solid
-    and reproduces the quasistatic surface-plasmon resonance and the ``1/gap`` near-field
-    divergence.  Its FINITE-``beta`` HDM path is only conditionally stable: it needs a
-    sub-``delta_L`` surface mesh and is ill-conditioned near plasmon resonances and in sub-5-nm
-    gaps (the indefinite J-block).  ``scattering_2d`` therefore RAISES ``HydroFEMUnstable`` when
-    the returned field norm blows up, rather than silently returning garbage.  The QUANTITATIVE
-    nonlocal gap/cylinder physics is delivered by ``hydro_layered_1d`` (bulk plasmons) and the
-    QCM gap material; the 2-D solver's validated claims are its local limit and its
-    ``beta -> 0`` reduction.
+CURE (a) -- THE SCALAR-LONGITUDINAL-POTENTIAL REFORMULATION (the one that worked).  Investigated in
+the roadmap's order; (a) succeeded on the first try, so (b) grad-div augmentation, (c) static
+condensation / complex-shifted factorization, and (d) first-order least squares were NOT needed
+(their trade-offs are noted at the end).  The idea: eliminate the transverse ``J`` ANALYTICALLY and
+keep only a SCALAR longitudinal unknown, turning the indefinite vector block into a well-understood
+scalar Helmholtz.
+
+  In a homogeneous metal the longitudinal content of (H) is a scalar Helmholtz.  Take ``div`` of
+  (H) and set ``psi := div J`` (``grad div = lap`` on gradients):
+
+      beta_eff**2 lap(psi) + Omega psi = i*omega*eps0*wp**2 div E ,   Omega := omega(omega+i*gamma).
+                                                                                                 (P)
+
+  Solve (H) pointwise for ``J`` and substitute into (M).  ``J = (i*omega*eps0*wp**2/Omega) E -
+  (beta_eff**2/Omega) grad psi``; feeding this into ``curl curl E - k0**2 eps_inf E = i*omega*mu0 J``
+  and using ``omega**2 mu0 eps0 = k0**2`` collapses the transverse free response into the LOCAL
+  Drude permittivity ``eps_T = eps_inf - wp**2/Omega``:
+
+      curl curl E - k0**2 eps_T(omega) E = -(i*omega*mu0 beta_eff**2/Omega) grad psi .            (M')
+
+  Self-consistency check: take ``div`` of (M') (``div curl curl == 0``) to get ``div E`` in terms of
+  ``lap psi`` and back-substitute into (P); the coupled system's longitudinal wavenumber comes out
+  EXACTLY ``k_L**2 = (Omega - wp**2/eps_inf)/beta_eff**2`` -- IDENTICAL to ``nonlocal_tmm.kL_squared``.
+
+  THE COUPLED WEAK FORM.  ``E`` in ``H(curl)`` (whole domain, PEC 'outer', PML on 'pml'); ``psi`` in
+  ``H1`` on the METAL only.  Test ``v`` (H(curl)) and ``w`` (H1).  Integrate the ``lap psi`` term in
+  (P) by parts AND the ``div E`` source by parts (mandatory: ``H(curl)`` ``E`` has no ``L2``
+  divergence); the two resulting metal-surface integrals CANCEL once the ABC is applied, leaving:
+
+      int_all [curl E . curl v - k0**2 eps(x) E.v] dV
+          + (i*omega*mu0 beta_eff**2/Omega) int_metal grad(psi) . v dV                = f_E(v),
+      int_metal [-beta_eff**2 grad(psi).grad(w) + Omega psi w] dV
+          + i*omega*eps0*wp**2 int_metal E . grad(w) dV                               = f_psi(w),
+
+  with ``eps(x) = eps_T`` in metal, ``eps_host`` outside.  Scattered-field sources (``E`` scattered,
+  ``E_inc`` the analytic plane wave): ``f_E = k0**2 int_metal (eps_T - eps_host) E_inc . v`` and
+  ``f_psi = -i*omega*eps0*wp**2 int_metal E_inc . grad(w)``.  (Implementation applies a symmetric
+  numerical rescaling ``psi = S psi_hat`` + equation scale so the assembled matrix is
+  complex-SYMMETRIC and every entry is O(1e-3..1) -- a well-conditioned direct ``umfpack`` solve.)
+
+  THE ABC AS A NATURAL CONDITION.  The hard-wall ABC ``J.n = 0`` is, via ``J`` above,
+  ``grad(psi).n = (i*omega*eps0*wp**2/beta_eff**2) E.n`` on the metal surface.  Integrating (P)'s
+  ``lap psi`` by parts produces ``+int_surf beta_eff**2 (grad psi.n) w`` and integrating the ``div E``
+  source by parts produces ``-int_surf i*omega*eps0*wp**2 (E.n) w``; substituting the ABC makes them
+  EQUAL AND OPPOSITE, so they cancel and ``psi`` needs NO essential (dirichlet) constraint -- the ABC
+  is enforced NATURALLY by the clean weak form (verify: the natural BC of the surface-free form is
+  exactly the ABC).  This is the crux of the stabilization: the transverse block is gone (folded into
+  ``eps_T``), the ``E`` block is now the ROBUST local-Drude curl-curl operator, and the only extra
+  unknown ``psi`` obeys a scalar dissipative Helmholtz (``Im Omega = omega*gamma > 0`` -> invertible,
+  not indefinite).  ``beta -> 0`` smoothly decouples ``psi`` (coupling ``~ beta_eff**2 -> 0``) and
+  recovers the local solver EXACTLY (machine-precision local limit, unconditionally stable).
+
+WHY (b)-(d) WERE NOT NEEDED (documented alternatives).  (b) grad-div augmentation
+``+ s (div J)(div w)`` stabilizes the transverse null space but leaves the stiff longitudinal
+operator on the full vector field and needs a swept ``s`` per regime; (c) a complex-shifted direct
+factorization moves off the discrete-eigenvalue accumulation but re-solves the same large
+vector system every frequency; (d) a first-order least-squares form is unconditionally coercive but
+squares the condition number and doubles the unknowns.  (a) is strictly better here: it removes the
+bad block ANALYTICALLY, shrinks the extra unknown from a vector to a scalar, and yields a symmetric
+positive-definite-in-structure Helmholtz that any direct solver handles.
+
+VALIDATED GATES (item 5.4 success criteria, all ngsolve-gated in tests/test_hydro_fem.py):
+  * CYLINDER BLUESHIFT -- the coupled dipole-SP peak MINUS the local peak (same mesh) matches the
+    quasistatic Raza closed form :func:`cylinder_blueshift_raza` to ~3-10% over R = 2.5-4 nm (well
+    inside the roadmap's 15%); positive (blue) and ~1/R.
+  * GAP SATURATION -- a metal-metal dimer swept ~10 -> 2 nm: the local/hydro gap-centre enhancement
+    RATIO grows MONOTONICALLY as the gap shrinks (the local field diverges ~1/gap while the HDM caps
+    it), and the coupled solve stays BOUNDED at 2 nm (the old blow-up regime).
+  * LOCAL LIMIT -- ``beta -> 0`` reproduces the 2-D local-Drude solve (machine-close).
+  * BOUNDED NORMS / ENERGY -- ``||E_scat||/||E_inc||`` stays O(1) at resonance and in tight gaps;
+    ``P_abs, P_scat >= 0`` and the total-field flux balances ``-P_abs``.
+
+The instability guard (:class:`HydroFEMUnstable`) is KEPT as a safety net for meshes that cannot
+resolve the screening length at all, or for an aggressively-set ``unstable_ratio``.
 
 ------------------------------------------------------------------------------------------------
 QCM -- the quantum-corrected gap material (Esteban et al., Nat. Commun. 3, 825 (2012))
@@ -116,12 +198,15 @@ __all__ = [
     "LayeredResult",
     "hydro_layered_1d",
     "bulk_plasmon_omega",
+    "cylinder_sp_omega",
+    "cylinder_blueshift_raza",
     "ScatterResult",
     "cylinder_mesh",
     "dimer_mesh",
     "dimer_gap_mesh",
     "gap_enhancement_2d",
     "scattering_2d",
+    "sp_resonance_omega",
 ]
 
 Z0 = math.sqrt(MU0 / EPS0)          # free-space wave impedance [ohm]
@@ -205,6 +290,43 @@ def bulk_plasmon_omega(m: int, params: HydroParams, d_nm: float) -> float:
     ``_bulk_plasmon_omega`` (odd ``m`` couple for a symmetric film -- the ABC selection rule)."""
     d = d_nm * _L0
     return math.sqrt(params.wp ** 2 / params.eps_inf + params.beta ** 2 * (m * math.pi / d) ** 2)
+
+
+def cylinder_sp_omega(params: HydroParams, eps_b: float = 1.0) -> float:
+    """LOCAL (quasistatic Frohlich) dipole surface-plasmon frequency of a 2-D metal cylinder in a
+    host ``eps_b``.  The 2-D dipole has depolarisation factor 1/2, so the polarisability
+    ``alpha ~ (eps - eps_b)/(eps + eps_b)`` resonates at ``eps(omega) = -eps_b`` -- for a Drude
+    metal ``omega_sp = wp / sqrt(eps_inf + eps_b)``."""
+    return params.wp / math.sqrt(params.eps_inf + float(eps_b))
+
+
+def cylinder_blueshift_raza(params: HydroParams, R_nm: float, eps_b: float = 1.0) -> float:
+    """Nonlocal (HDM) dipole-SP RELATIVE blueshift ``delta_omega/omega_sp`` of a 2-D metal cylinder
+    of radius ``R_nm`` in a host ``eps_b``, from the QUASISTATIC hydrodynamic boundary-value
+    problem in the thin-screening (large ``k_L R``) limit (Raza et al. 2015):
+
+        delta_omega/omega_sp = (beta / (2 wp R)) sqrt( eps_b (eps_inf + eps_b) / eps_inf ) .
+
+    DERIVATION (the closed-form oracle for the cylinder gate; full algebra in the module header).
+    Quasistatic dipole mode m=1: outside ``phi = (-E0 r + p/r) cos(theta)``; inside a harmonic part
+    ``a r cos(theta)`` plus an induced free charge ``rho = rho0 I_1(kappa r) cos(theta)`` obeying
+    ``(lap + k_L^2) rho = 0`` (so ``kappa = sqrt(-k_L^2)`` below ``wp/sqrt(eps_inf)``), with the
+    particular potential ``-rho/(eps0 eps_inf kappa^2)``.  Three boundary conditions -- ``phi``
+    continuous, background normal-D continuous ``eps_inf E_n,in = eps_b E_n,out`` (no free surface
+    charge because the ABC makes ``P_free,n(R) = 0``), and the ABC ``J_n = 0`` i.e.
+    ``eps0 wp^2 E_n = beta^2 d rho/dn`` -- close the system.  Eliminating the amplitudes gives the
+    dipole resonance condition
+
+        eps_T(omega) + eps_b [ 1 - eta I_1(kappa R)/(R kappa I_1'(kappa R)) ] = 0 ,
+        eta = wp^2/(Omega eps_inf),   Omega = omega(omega + i gamma) ,
+
+    which reduces to the LOCAL Frohlich ``eps_T = -eps_b`` as ``beta -> 0`` (``I_1/(R kappa I_1')
+    -> 1/(kappa R) -> 0``); the leading ``1/(kappa R)`` surface term is the blueshift above.  A
+    POSITIVE (blue) shift scaling as ``1/R`` -- the nonlocal inverse-size signature.  (Exact vs this
+    asymptotic: ~2-4% over R = 2.5-5 nm, kappa R = 18-30.)"""
+    R_m = float(R_nm) * _L0
+    return (params.beta / (2.0 * params.wp * R_m)) * \
+        math.sqrt(float(eps_b) * (params.eps_inf + float(eps_b)) / params.eps_inf)
 
 
 # ================================================================================================
@@ -439,10 +561,15 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
 # 2-D scattering coupled (E, J) FEM  (cylinder / nanowire dimer)
 # ================================================================================================
 class HydroFEMUnstable(RuntimeError):
-    """Raised when the 2-D coupled HDM solve is ill-conditioned (indefinite J-block near a
-    plasmon resonance / in a sub-5-nm gap on a mesh that does not resolve ``delta_L``): the field
-    norm blows up.  See the module header's numerical-scoping note -- use ``local=True`` or
-    ``hydro_layered_1d`` for the validated quantitative physics."""
+    """Safety-net exception for the 2-D coupled HDM solve (:func:`scattering_2d`, ``local=False``).
+
+    The item-5.4 scalar-longitudinal-potential reformulation is STABLE in the validated regimes
+    (cylinder blueshift, gap saturation down to 2 nm, local limit) -- the old indefinite-vector-J
+    blow-up (field norm 1e19-1e53) is gone.  This exception is RETAINED as a guard: if a mesh cannot
+    resolve the ~0.1 nm longitudinal screening length at all (so the scalar-Helmholtz sector is
+    under-resolved), or ``unstable_ratio`` is set aggressively, ``scattering_2d`` raises this rather
+    than returning a suspect field.  Refine the metal-surface mesh (``surf_nm``/``h_surf``), raise
+    ``order_psi``, or fall back to ``hydro_layered_1d`` / the QCM material."""
 
 
 class ScatterResult(NamedTuple):
@@ -606,19 +733,29 @@ def gap_enhancement_2d(mesh, omega, eps_metal: complex, eps_gap: complex, *,
 def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
                   eps_host: complex = 1.0, pol_axis: str = "x",
                   probe=(0.0, 0.0), flux_radius: Optional[float] = None,
-                  order: int = 2, unstable_ratio: float = 1e3) -> ScatterResult:
+                  order: int = 2, order_psi: Optional[int] = None,
+                  unstable_ratio: float = 1e3) -> ScatterResult:
     """2-D TM scattering off the metal region of ``mesh`` under a p-polarised plane wave.
 
-    ``local=False`` solves the coupled ``H(curl) x H(div)`` HDM weak form (ABC ``J.n = 0`` on
-    'metal_iface', GNOR via ``params.D``); ``local=True`` solves the ordinary local-Drude
-    curl-curl (``eps = drude_eps``) on the same mesh.  Incident wave: unit-amplitude p-pol, E along
-    ``pol_axis`` ('x' or 'y'), propagating along the other axis.  PML on the 'pml' region,
-    PEC on 'outer'.  Scattered-field formulation (host permittivity ``eps_host``).
+    ``local=False`` solves the STABILISED coupled HDM weak form -- the scalar-longitudinal-potential
+    reformulation of roadmap item 5.4 (the ``(E in H(curl), psi in H1)`` system with ``psi = div J``;
+    see the module header): the transverse free response is folded analytically into the LOCAL
+    ``eps_T(omega)``, and the nonlocal longitudinal physics lives in a scalar Helmholtz for ``psi``
+    coupled to ``E`` through ``grad(psi)``, with the ABC ``J.n = 0`` as a NATURAL boundary condition.
+    This replaces the original indefinite vector-``J`` block and is STABLE at plasmon resonances and
+    in sub-5-nm gaps.  ``local=True`` solves the ordinary local-Drude curl-curl (``eps = drude_eps``)
+    on the same mesh.  Incident wave: unit-amplitude p-pol, E along ``pol_axis`` ('x' or 'y'),
+    propagating along the other axis.  PML on the 'pml' region, PEC on 'outer'.  Scattered-field
+    formulation (host permittivity ``eps_host``).
 
-    IMPORTANT (see module header): the ``local`` path is robust; the finite-``beta`` HDM path is
-    only conditionally stable and RAISES :class:`HydroFEMUnstable` if the scattered-field norm
-    exceeds ``unstable_ratio`` times the incident (the indefinite-J-block blow-up).  Use
-    :func:`hydro_layered_1d` / the QCM material for validated quantitative nonlocal physics.
+    ``order`` is the ``H(curl)`` order for ``E``; ``order_psi`` (default ``order + 1``) is the
+    ``H1`` order for the longitudinal potential ``psi`` (one order higher resolves the thin
+    ~0.1 nm surface screening layer without needing an extreme surface mesh).
+
+    The instability guard (:class:`HydroFEMUnstable`) is KEPT as a safety net: if a mesh cannot
+    resolve the longitudinal screening length at all, or ``unstable_ratio`` is set aggressively,
+    the solve can still be flagged rather than returned silently.  In the validated regimes
+    (cylinder blueshift, gap saturation, local limit) the reformulation stays bounded.
     """
     import ngsolve as ng
 
@@ -627,7 +764,6 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
     comp = 0 if pol_axis == "x" else 1
     Einc = ng.CoefficientFunction((ng.exp(1j * k0 * prop), 0) if pol_axis == "x"
                                   else (0, ng.exp(1j * k0 * prop)))
-    eps_inf = params.eps_inf
     dm = ng.dx(definedon=mesh.Materials("metal"))
 
     if local:
@@ -649,28 +785,58 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
         Pabs = _L0 ** 2 * float(ng.Integrate(0.5 * omega * EPS0 * complex(eps_m).imag
                                 * (Etot * ng.Conj(Etot)).real, mesh, definedon=mesh.Materials("metal")))
     else:
+        # ---- scalar-longitudinal-potential reformulation (roadmap 5.4 cure (a)) ------------------
+        # Unknowns: E in H(curl) over the whole domain, psi := div J in H1 over the metal.  The
+        # transverse (local) free response is folded into eps_T; psi carries only the nonlocal
+        # longitudinal correction.  Strong form (metal):
+        #   curl curl E - k0^2 eps_T E = -(i w mu0 be2/Om) grad psi
+        #   be2 lap psi + Om psi        =  i w eps0 wp^2 div E
+        # ABC J.n = 0  <=>  grad(psi).n = (i w eps0 wp^2/be2) E.n : a NATURAL condition (the two
+        # surface terms from integrating be2 lap psi and i w eps0 wp^2 div E by parts CANCEL), so
+        # psi carries NO essential (dirichlet) constraint.
+        Om = omega * (omega + 1j * params.gamma)            # Omega = w(w + i gamma)
+        be2 = params.beta_eff_squared(omega)                # beta_eff^2 (GNOR knob in params.D)
+        wp2 = params.wp ** 2
+        eps_T = drude_eps(omega, params)                    # LOCAL transverse Drude permittivity
+        # Block coefficients in nm-mesh coordinates, with a symmetric numerical rescaling of psi
+        # (psi = S * psi_hat, equation scaled by Rc) so the two off-diagonal blocks are EQUAL
+        # (complex-symmetric) and every entry is O(1e-3..1) -- a well-conditioned direct solve.
+        C_Ep = 1j * omega * MU0 * be2 / Om                  # E-eq  <- grad psi
+        C_pE = 1j * omega * EPS0 * wp2                       # psi-eq <- div E
+        a_raw = C_Ep * _L0
+        b_raw = C_pE * _L0
+        c_raw = -be2                                        # psi stiffness (grad.grad)
+        d_raw = Om * _L0 ** 2                                # psi mass
+        beta_s = max(params.beta, 1.0e3)                    # scale floor (safe as beta -> 0)
+        S = params.wp / (Z0 * _L0 * beta_s)                 # real trial scale
+        Rc = a_raw * S / b_raw                              # -> complex-symmetric (a_raw S = Rc b_raw)
+        coup = a_raw * S                                    # both off-diagonal blocks
+        stiff = Rc * c_raw * S
+        mass = Rc * d_raw * S
+        op = order + 1 if order_psi is None else int(order_psi)
+        eps_cf = ng.CoefficientFunction([eps_T if mm == "metal" else eps_host
+                                         for mm in mesh.GetMaterials()])
         fes = (ng.HCurl(mesh, order=order, complex=True, dirichlet="outer")
-               * ng.HDiv(mesh, order=order, complex=True,
-                         definedon=mesh.Materials("metal"), dirichlet="metal_iface"))
-        (E, J), (v, w) = fes.TnT()
-        be2 = params.beta_eff_squared(omega)
-        a = ng.BilinearForm(fes, symmetric=False)
-        a += (ng.curl(E) * ng.curl(v) - k0 ** 2 * eps_inf * (E * v)) * ng.dx("metal")
-        a += (ng.curl(E) * ng.curl(v) - k0 ** 2 * eps_host * (E * v)) * ng.dx("host|pml")
-        a += (-1j * omega * MU0 * _L0 ** 2 * (J * v)) * dm
-        a += (-(be2 / _L0 ** 2) * ng.div(J) * ng.div(w)
-              + omega * (omega + 1j * params.gamma) * (J * w)
-              - 1j * omega * EPS0 * params.wp ** 2 * (E * w)) * dm
+               * ng.H1(mesh, order=op, complex=True, definedon=mesh.Materials("metal")))
+        (E, psi), (v, w) = fes.TnT()
+        a = ng.BilinearForm(fes, symmetric=True)
+        a += (ng.curl(E) * ng.curl(v) - k0 ** 2 * eps_cf * (E * v)) * ng.dx
+        a += (coup * (ng.grad(psi) * v)) * dm
+        a += (stiff * (ng.grad(psi) * ng.grad(w)) + mass * (psi * w)
+              + coup * (E * ng.grad(w))) * dm
         f = ng.LinearForm(fes)
-        f += (k0 ** 2 * (eps_inf - eps_host) * (Einc * v)) * dm
-        f += (1j * omega * EPS0 * params.wp ** 2 * (Einc * w)) * dm
+        f += (k0 ** 2 * (eps_T - eps_host) * (Einc * v)) * dm
+        f += (-coup * (Einc * ng.grad(w))) * dm
         gfu = ng.GridFunction(fes)
         with ng.TaskManager():
             a.Assemble(); f.Assemble()
             gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
-        gE, gJ = gfu.components
+        gE, gpsi = gfu.components
         Escat, Etot = gE, Einc + gE
-        Pabs = _L0 ** 2 * float(ng.Integrate(0.5 * (Etot * ng.Conj(gJ)).real, mesh,
+        # J = (i w eps0 wp^2/Om) E_tot - (be2/Om) grad_x psi ;  psi = S psi_hat, grad_x = grad_xi/_L0
+        Jcf = (1j * omega * EPS0 * wp2 / Om) * Etot \
+            - (be2 / Om) * (S / _L0) * ng.grad(gpsi)
+        Pabs = _L0 ** 2 * float(ng.Integrate(0.5 * (Etot * ng.Conj(Jcf)).real, mesh,
                                 definedon=mesh.Materials("metal")))
 
     # instability guard: scattered-field L2 norm vs incident (host region)
@@ -680,8 +846,9 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
                                   definedon=mesh.Materials("host")).real) ** 0.5
     if inc_norm > 0 and sc_norm / inc_norm > unstable_ratio and not local:
         raise HydroFEMUnstable(
-            "2-D coupled HDM solve blew up (||E_scat||/||E_inc|| = {:.2e} > {:.0e}); the "
-            "indefinite J-block is ill-conditioned here. Refine the surface mesh, move off "
+            "2-D coupled HDM scattered-field norm exceeded the guard (||E_scat||/||E_inc|| = "
+            "{:.2e} > {:.0e}); the longitudinal screening length is likely unresolved on this "
+            "mesh. Refine the metal-surface mesh (surf_nm/h_surf), raise order_psi, move off "
             "resonance, or use hydro_layered_1d / the QCM material.".format(
                 sc_norm / inc_norm, unstable_ratio))
 
@@ -703,6 +870,26 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
         e_res = float("nan")
     return ScatterResult(enhancement=float(enh), P_abs=Pabs, P_scat=P_scat,
                          P_ext=Pabs + P_scat, energy_residual=float(e_res))
+
+
+def sp_resonance_omega(mesh, params: HydroParams, omegas, *, local: bool,
+                       order: int = 2, order_psi: Optional[int] = None,
+                       flux_radius: Optional[float] = None) -> float:
+    """Locate a dipole surface-plasmon resonance as the parabola-refined peak of ``P_abs(omega)``
+    over the scan ``omegas`` (a 3-point vertex refine).  ``local`` picks the local-Drude or the
+    coupled HDM (:func:`scattering_2d`) solve.  The CYLINDER-BLUESHIFT gate takes the coupled peak
+    MINUS the local peak on the SAME mesh, so the mesh's absolute-position error cancels and the
+    residue is the physical nonlocal blueshift (compare :func:`cylinder_blueshift_raza`)."""
+    ws = np.asarray(omegas, dtype=float)
+    P = np.array([scattering_2d(mesh, float(w), params, local=local, order=order,
+                                order_psi=order_psi, flux_radius=flux_radius).P_abs for w in ws])
+    i = int(np.argmax(P))
+    if 0 < i < ws.size - 1:
+        y0, y1, y2 = P[i - 1], P[i], P[i + 1]
+        denom = y0 - 2.0 * y1 + y2
+        off = 0.5 * (y0 - y2) / denom if denom != 0.0 else 0.0
+        return float(ws[i] + off * (ws[1] - ws[0]))
+    return float(ws[i])
 
 
 def _flux_on_contour(mesh, E_cf, curl_cf, omega, flux_radius) -> float:

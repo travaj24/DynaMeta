@@ -1,9 +1,9 @@
-"""Gates for the hydrodynamic (nonlocal) Drude FINITE-ELEMENT tier (roadmap item 3.3).
+"""Gates for the hydrodynamic (nonlocal) Drude FINITE-ELEMENT tier (roadmap items 3.3 and 5.4).
 
-See ``dynameta/optics/hydro_fem.py`` for the coupled ``(E, J)`` weak form, the two-solver split
-(the robust 1-D-in-z layered FEM vs the conditionally-stable 2-D scattering FEM) and the QCM gap
-material.  Independent oracles: ``dynameta.optics.nonlocal_tmm`` (the shipped exact layered HDM),
-in-test quasistatic closed forms, and the FEM's own local-Drude path on the same mesh.
+See ``dynameta/optics/hydro_fem.py`` for the coupled ``(E, J)`` weak form, the 1-D-in-z layered FEM,
+the STABILIZED 2-D scattering FEM (item 5.4 scalar-longitudinal-potential reformulation) and the QCM
+gap material.  Independent oracles: ``dynameta.optics.nonlocal_tmm`` (the shipped exact layered HDM),
+in-test / in-module quasistatic closed forms, and the FEM's own local-Drude path on the same mesh.
 
 Gate map (the task's numbering; every gate below is ngsolve-gated with a documented mesh):
   1  LOCAL LIMIT : beta -> 0 reproduces a local-Drude solve of the SAME geometry.
@@ -12,12 +12,14 @@ Gate map (the task's numbering; every gate below is ngsolve-gated with a documen
        - 2-D cylinder, non-resonant, coarse mesh: coupled beta -> 0 matches the 2-D local-Drude
          solve to a few % (test_gate1_local_limit_2d).
   2  CYLINDER    : the LOCAL dipole surface-plasmon lands on the quasistatic Frohlich condition
-       eps = -eps_b (Raza closed form derived in-test); the nonlocal BLUESHIFT-with-inverse-size
-       is validated robustly by the 1-D bulk-plasmon 1/d shift (gate ENZ) since the 2-D cylinder
-       blueshift needs a sub-delta_L surface mesh (documented) -- test_gate2_cylinder_local_sp.
-  3  GAP         : the LOCAL dimer near-field grows ~1/gap (the DIVERGENCE the HDM/QCM must tame);
-       the taming is delivered by the bulk plasmons (below) and the QCM gate (5)
-       -- test_gate3_gap_divergence_2d.
+       eps = -eps_b (test_gate2_cylinder_local_sp).  ITEM 5.4 SUCCESS: the STABILIZED 2-D coupled
+       HDM reproduces the nonlocal dipole-SP BLUESHIFT (coupled peak minus local peak on the same
+       mesh) to < 15% of the derived Raza closed form, positive and ~1/R
+       (test_gate2_cylinder_blueshift_2d).
+  3  GAP         : the LOCAL dimer near-field grows ~1/gap (test_gate3_gap_divergence_2d).  ITEM 5.4
+       SUCCESS: the coupled HDM CAPS it -- local/hydro gap-centre enhancement ratio grows MONOTONE as
+       the gap shrinks and the HDM stays bounded at 2 nm (test_gate3_gap_saturation_2d).  The QCM
+       tunnelling short is gate 5.
   4  GNOR        : the complex beta_eff**2 knob is byte-identical to nonlocal_tmm and shifts the
        bulk-plasmon pole; rigorous monotone broadening is validated in nonlocal_tmm's gate 5
        (test_gate4_gnor_knob).
@@ -301,6 +303,38 @@ def test_gate2_cylinder_local_sp():
 
 
 # ================================================================================================
+# Gate 2 (item 5.4 success): CYLINDER BLUESHIFT -- the STABILIZED 2-D coupled HDM reproduces the
+# quasistatic Raza closed-form nonlocal blueshift of the dipole SP
+# ================================================================================================
+def test_gate2_cylinder_blueshift_2d():
+    """ITEM 5.4 SUCCESS GATE.  The stabilized 2-D coupled HDM (scalar-longitudinal-potential
+    reformulation) reproduces the cylinder dipole-SP nonlocal BLUESHIFT: the coupled-HDM P_abs peak
+    minus the LOCAL peak on the SAME mesh (so the mesh's absolute-position error cancels) matches the
+    derived quasistatic Raza closed form :func:`hf.cylinder_blueshift_raza` to < 15% over 2 radii,
+    and the shift is positive (blue) and larger for the smaller cylinder (~1/R).  This is the 2-D
+    near-field physics the old indefinite vector-J form could not deliver (it blew up at resonance)."""
+    p = _sodium(gamma=3.0e13)
+    eps_b = 1.0
+    w_sp = hf.cylinder_sp_omega(p, eps_b)
+    assert w_sp == pytest.approx(p.wp / math.sqrt(p.eps_inf + eps_b), rel=1e-12)
+    meas = {}
+    for R_nm in (2.5, 4.0):
+        pred = hf.cylinder_blueshift_raza(p, R_nm, eps_b)        # derived closed-form oracle
+        assert pred > 0.0
+        ws = np.linspace(0.985 * w_sp, (1.0 + 3.0 * pred) * w_sp, 17)
+        mesh, Rp = hf.cylinder_mesh(R_nm, h_metal=1.0)           # coarse mesh: the shift-difference is robust
+        w_local = hf.sp_resonance_omega(mesh, p, ws, local=True)
+        w_hydro = hf.sp_resonance_omega(mesh, p, ws, local=False)
+        d = (w_hydro - w_local) / w_sp
+        meas[R_nm] = d
+        assert d > 0.0, "expected a BLUEshift (coupled peak above local), got {:.4f}%".format(100 * d)
+        assert abs(d - pred) / pred < 0.15, (
+            "R={} nm: measured blueshift {:.4f}% not within 15% of Raza {:.4f}%".format(
+                R_nm, 100 * d, 100 * pred))
+    assert meas[2.5] > meas[4.0]                                 # smaller cylinder -> larger blueshift (~1/R)
+
+
+# ================================================================================================
 # Gate 3: GAP -- the local 1/gap divergence the HDM/QCM must tame
 # ================================================================================================
 def test_gate3_gap_divergence_2d():
@@ -323,15 +357,59 @@ def test_gate3_gap_divergence_2d():
 
 
 # ================================================================================================
-# the honest-scoping guard: the 2-D coupled HDM raises rather than returning garbage
+# Gate 3 (item 5.4 success): GAP SATURATION -- the stabilized coupled HDM CAPS the local 1/gap
+# divergence, and the local/hydro ratio GROWS monotonically as the gap shrinks
 # ================================================================================================
-def test_2d_hydro_unstable_guard():
-    """The 2-D coupled HDM path is only conditionally stable (indefinite J-block).  In an unstable
-    regime -- a fine metal mesh where the discrete longitudinal spectrum is near-singular -- the
-    solver RAISES HydroFEMUnstable rather than silently returning a blown-up field (the honest
-    scoping: quantitative nonlocal physics is delivered by hydro_layered_1d + the QCM material)."""
+def test_gate3_gap_saturation_2d():
+    """ITEM 5.4 SUCCESS GATE.  A metal-metal dimer swept ~12 -> 2 nm, driven BELOW the bonding
+    gap-plasmon (so the gap concentrates the field -- the same regime as the local 1/gap divergence
+    of test_gate3_gap_divergence_2d).  The nonlocal (HDM) response SMEARS the gap surface charge and
+    CAPS the enhancement, so the LOCAL/HYDRO gap-centre enhancement RATIO grows MONOTONICALLY as the
+    gap shrinks, while the coupled HDM stays BOUNDED at 2 nm (the old indefinite-J blow-up regime)."""
     p = _gold()
-    mesh, Rp = hf.dimer_mesh(15.0, 3.0, h_metal=2.0)          # small gap -> dense L-spectrum, near-singular
+    om = 2.0 * math.pi * hf.C_LIGHT / 700e-9                  # below the bonding plasmon -> field in the gap
+    gaps = (12.0, 8.0, 5.0, 3.0, 2.0)
+    el, eh = [], []
+    for g in gaps:
+        mesh, Rp = hf.dimer_mesh(20.0, g, h_metal=4.0)
+        el.append(hf.scattering_2d(mesh, om, p, local=True).enhancement)
+        eh.append(hf.scattering_2d(mesh, om, p, local=False).enhancement)
+    el, eh = np.array(el), np.array(eh)
+    ratio = el / eh
+    # the LOCAL near-field diverges as the gap closes (the un-tamed 1/gap growth)
+    assert np.all(np.diff(el) > 0), "local enhancement must grow toward contact: {}".format(el)
+    # the HDM caps it -> local/hydro ratio grows MONOTONICALLY toward contact, by a clear margin
+    assert np.all(np.diff(ratio) > 0), "local/hydro ratio must grow as the gap shrinks: {}".format(ratio)
+    assert ratio[-1] - ratio[0] > 3e-3                        # a clear net saturation (2 nm vs 12 nm)
+    assert eh[-1] < 1.5 * el[-1]                              # HDM BOUNDED at 2 nm (no indefinite-J blow-up)
+    assert eh[-1] < el[-1]                                    # and capped below the local value
+
+
+# ================================================================================================
+# item 5.4: the STABILIZED 2-D coupled HDM returns a bounded physical result where the OLD vector-J
+# form blew up; the HydroFEMUnstable guard is retained as a safety net
+# ================================================================================================
+def test_2d_hydro_stable_where_old_form_blew_up():
+    """The previously-UNSTABLE regime (fine metal mesh, sub-5-nm dimer gap) that the OLD indefinite
+    vector-J form flagged with HydroFEMUnstable now returns a BOUNDED, energy-consistent result with
+    the scalar-longitudinal-potential reformulation (item 5.4).  The field norm stays O(1) (not
+    1e19-1e53), P_abs/P_scat >= 0 and the total-field flux balances -P_abs."""
+    p = _gold()
+    mesh, Rp = hf.dimer_mesh(15.0, 3.0, h_metal=2.0)          # the old 'near-singular' case
+    om = 2.0 * math.pi * hf.C_LIGHT / 600e-9
+    r = hf.scattering_2d(mesh, om, p, local=False, flux_radius=0.7 * Rp)  # no raise
+    assert np.isfinite(r.enhancement) and r.enhancement < 1e3
+    assert r.P_abs >= -1e-30 and r.P_scat >= -1e-30
+    assert abs(r.energy_residual) < 5e-2                      # total flux == -P_abs (optical theorem)
+
+
+def test_2d_hydro_guard_still_live():
+    """The HydroFEMUnstable safety net is RETAINED: a mesh/parameter regime that cannot resolve the
+    longitudinal screening length can still be flagged rather than returned silently.  Exercised here
+    via an aggressively low ``unstable_ratio`` so a normal (bounded) solve trips the guard -- proving
+    the norm check and the exception path remain wired after the reformulation."""
+    p = _gold()
+    mesh, Rp = hf.dimer_mesh(15.0, 3.0, h_metal=2.0)
     om = 2.0 * math.pi * hf.C_LIGHT / 600e-9
     with pytest.raises(hf.HydroFEMUnstable):
-        hf.scattering_2d(mesh, om, p, local=False, flux_radius=0.7 * Rp)
+        hf.scattering_2d(mesh, om, p, local=False, flux_radius=0.7 * Rp, unstable_ratio=1e-6)
