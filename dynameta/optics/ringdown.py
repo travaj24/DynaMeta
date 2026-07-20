@@ -302,6 +302,37 @@ def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
 # FDTD etalon ringdown helper
 # --------------------------------------------------------------------------------------------
 
+def _ringdown_window(sig: np.ndarray, dt: float, f_c: float, *,
+                     drop_db_start: float = 50.0, floor_margin: float = 1e3) -> tuple:
+    """Data-driven fit window (i0, i1) for a ringdown trace: START after the driven pulse's
+    envelope has fallen ``drop_db_start`` dB below its peak (past the fast source tail, onto
+    the exponential cavity leak), END where the envelope reaches ``floor_margin`` x the
+    late-time numeric floor. A FIXED-fraction window is a precision cliff: on a long record
+    the coherent mode can be at ~1e-13 of peak by the window start, so the fit reads the
+    platform-dependent float64 noise floor (observed: two correct numpy builds returning Q
+    values 28% apart from bit-identical physics). The envelope is a block max over ~2 carrier
+    periods."""
+    w = max(1, int(round(2.0 / (max(f_c, 1e-300) * dt))))
+    a = np.abs(np.asarray(sig, dtype=np.float64))
+    nb = max(1, int(np.ceil(a.size / w)))
+    pad = np.pad(a, (0, nb * w - a.size), constant_values=0.0)
+    env = pad.reshape(nb, w).max(axis=1)               # block envelope, one point per w samples
+    pk = int(np.argmax(env))
+    peak = float(env[pk])
+    if peak <= 0.0:
+        return 0, a.size
+    floor = float(np.median(env[int(0.9 * env.size):])) if env.size >= 10 else 0.0
+    th_start = peak * 10.0 ** (-drop_db_start / 20.0)
+    th_end = max(floor * floor_margin, peak * 1e-13)
+    below = np.nonzero(env[pk:] < th_start)[0]
+    b0 = pk + (int(below[0]) if below.size else 1)
+    ends = np.nonzero(env[b0:] < th_end)[0]
+    b1 = b0 + (int(ends[0]) if ends.size else env.size - b0)
+    i0 = max(0, min(b0 * w, a.size - 8))
+    i1 = max(i0 + 8, min(b1 * w, a.size))
+    return i0, i1
+
+
 @dataclass
 class EtalonRingdown:
     """Result of fdtd_etalon_ringdown: the extracted modes plus the windowed/decimated trace
@@ -318,7 +349,8 @@ class EtalonRingdown:
 def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: float,
                          lambda_max_m: float, resolution: int = 30, courant: float = 0.5,
                          settle: float = 12.0, use: str = "reflected",
-                         start_frac: float = 0.55, target_samples_per_period: int = 20,
+                         start_frac: Optional[float] = None,
+                         target_samples_per_period: int = 20,
                          max_fit_samples: int = 1200, pencil_frac: float = 0.4,
                          svd_tol: float = 1e-6, max_modes: Optional[int] = None,
                          amp_floor: float = 5e-2, refine: bool = True) -> EtalonRingdown:
@@ -333,7 +365,11 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       n_slab, thickness_m : slab index and thickness (vacuum super/substrate).
       lambda_min_m, lambda_max_m : source band; center it on the mode order you want excited.
       use          : "reflected" (default) or "transmitted" tail to invert.
-      start_frac   : begin the fit window at start_frac of the record (skips the driven pulse).
+      start_frac   : None (default) = DATA-DRIVEN window via _ringdown_window (start when the
+                     envelope is 50 dB below peak, end a margin above the numeric floor --
+                     platform-stable, fits the clean exponential decades). A float gives the
+                     legacy fixed-fraction window start (fragile on long records: the mode may
+                     be at the float64 floor by then).
       target_samples_per_period : decimation target (>= ~8 to stay above Nyquist).
       max_fit_samples : cap on the number of decimated samples fed to the pencil (speed).
       refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
@@ -354,13 +390,16 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     sig_full = np.asarray(tr[use], dtype=np.float64)
     N = sig_full.size
 
-    # window: skip the driven transient, keep the ringdown tail
-    i0 = int(round(start_frac * N))
-    i0 = max(0, min(i0, N - 8))
-    tail = sig_full[i0:]
+    # window: skip the driven transient, keep the CLEAN part of the ringdown tail
+    f_c = 0.5 * (C_LIGHT / lambda_max_m + C_LIGHT / lambda_min_m)
+    if start_frac is None:
+        i0, i1 = _ringdown_window(sig_full, dt, f_c)
+    else:                                               # legacy fixed-fraction window
+        i0 = max(0, min(int(round(start_frac * N)), N - 8))
+        i1 = N
+    tail = sig_full[i0:i1]
 
     # decimate to ~target_samples_per_period at the band center (keeps the pencil small + fast)
-    f_c = 0.5 * (C_LIGHT / lambda_max_m + C_LIGHT / lambda_min_m)
     stride = max(1, int(round((1.0 / f_c) / (target_samples_per_period * dt))))
     tail_d = tail[::stride]
     if tail_d.size > max_fit_samples:
