@@ -69,6 +69,21 @@ References
   ``exp(-i*omega*t)`` lower-half-plane sign.)
 * J. Gilles, ... (Froissart, "Approximation de Pade", 1969 -- the doublet phenomenon named here).
 
+-------------------------------------------------------------------------------------------------
+OPERATING ENVELOPE (sweep span vs. linewidth)
+-------------------------------------------------------------------------------------------------
+The AAA barycentric fit IS an analytic continuation, so on CLEAN data the recovered pole (hence
+``Q``) is EXACT to rounding no matter how narrow the real-axis window is -- verified to 0% ``Q``
+error with the pole up to 20 linewidths deeper than the window half-width.  There is therefore NO
+window-width BIAS.  What the finite window costs is estimator VARIANCE at finite SNR: with a
+resolvable resonance and ~0.1% noise the recovered ``Q`` stays unbiased in the median but its
+scatter grows steeply once the sweep span is not a few times the resonance FWHM -- the
+inter-quartile ``Q`` spread runs ~2% at span >= 3*FWHM but blows past 100% by span ~ 1-2*FWHM.
+OPERATING RULE: straddle each resonance with a span of at least ~3-5 FWHM (several linewidths of
+off-resonance context on each side).  :func:`find_resonances` emits a ``RuntimeWarning`` when a
+surviving pole's FWHM (``2|Im|``) exceeds ``broad_warn_frac`` of the sweep span (the resonance
+nearly fills the window, so its ``Q`` is an ill-conditioned, high-variance extrapolation).
+
 Conventions: SI units, ``exp(-i*omega*t)`` (physical decaying poles have ``Im < 0``), pure
 numpy/scipy, ASCII-only.
 """
@@ -76,6 +91,7 @@ numpy/scipy, ASCII-only.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -411,8 +427,9 @@ def _physical_candidates(result: AAAResult, lo: float, hi: float, band_margin: f
 def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Optional[float] = None,
                     stability_check: bool = True, tol: float = 1e-11, max_degree: int = 100,
                     band: Optional[Tuple[float, float]] = None, band_margin: float = 0.02,
-                    stability_rtol: float = 5e-3, residue_rel_floor: float = 1e-3,
-                    im_atol_rel: float = 1e-9) -> List[Resonance]:
+                    stability_rtol: float = 5e-3, residue_rel_floor: float = 1e-6,
+                    im_atol_rel: float = 1e-9, froissart_frac: float = 0.05,
+                    broad_warn_frac: float = 0.5) -> List[Resonance]:
     """Extract physical resonances from a real-frequency sweep with spurious-pole filtering.
 
     Fits :func:`aaa` to ``(omega_real, response)``, then keeps only poles that pass ALL of:
@@ -421,10 +438,23 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
             inside the swept band.  For real-valued ``response`` this discards the unphysical
             upper-half conjugate mirror of each pole (see the module docstring); for complex
             analytic ``response`` it merely confirms the clean placement.
-      (ii)  RESIDUE FLOOR -- ``|residue| >= residue_floor`` (absolute) or, if ``residue_floor`` is
-            ``None``, ``|residue| >= residue_rel_floor * max|residue|`` over the candidates.  A
-            Froissart doublet's pole nearly cancels its partner zero, so its residue is tiny.
-      (iii) STABILITY (if ``stability_check``) -- the pole must persist, to within
+      (ii)  FROISSART pole-zero coincidence -- a Froissart doublet is, BY DEFINITION, a pole with a
+            near-coincident zero (the spurious pole nearly cancels against its partner zero).  Its
+            robust signature is GEOMETRIC: the nearest AAA zero lies within
+            ``froissart_frac * |Im(pole)|`` (a tiny fraction of the pole's own linewidth-half).  A
+            genuine resonance -- even a very weakly coupled one with a small residue -- has NO such
+            near-coincident zero (its nearest zero is order the linewidth away or is a real
+            transmission / Fano zero).  This is what separates a spurious doublet from a physically
+            weak pole, which a residue-magnitude floor CANNOT (both have small residues).  Set
+            ``froissart_frac = 0`` to disable.
+      (iii) RESIDUE FLOOR -- optional junk guard.  If ``residue_floor`` is given it is an ABSOLUTE
+            ``|residue| >= residue_floor`` cut; otherwise the pole's Lorentzian PEAK contribution
+            ``|residue| / |Im(pole)|`` must be ``>= residue_rel_floor`` times the LOCAL response
+            magnitude near ``Re(pole)``.  The floor is LOCAL (per-pole), NOT relative to the global
+            ``max|residue|`` -- the old global rule killed a genuine weak pole merely because a
+            DIFFERENT, dominant resonance carried a huge residue (the pole-zero test above, not the
+            residue, is now the real Froissart discriminator).
+      (iv)  STABILITY (if ``stability_check``) -- the pole must persist, to within
             ``stability_rtol * |pole|``, when the sample set is DECIMATED (every other sample).  A
             genuine resonance barely moves; a Froissart / noise-driven pole jumps.
 
@@ -436,7 +466,8 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
         The measured / computed response at each ``omega`` (complex amplitude such as ``t``, or a
         real intensity such as transmittance).
     residue_floor : float, optional
-        Absolute residue-magnitude threshold.  ``None`` -> relative (``residue_rel_floor``).
+        Absolute residue-magnitude threshold.  ``None`` -> the LOCAL relative floor
+        (``residue_rel_floor``, see (iii)).
     stability_check : bool
         Enable the decimation-stability filter (default on).
     tol, max_degree : float, int
@@ -444,6 +475,14 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
         Froissart doublets -- which the filter then removes (the Froissart demo gate).
     band : (float, float), optional
         Physical band ``(omega_lo, omega_hi)``; defaults to the sampled range.
+    froissart_frac : float
+        Pole-zero coincidence threshold as a fraction of the pole's ``|Im|`` (default 0.05); a pole
+        with a zero closer than this is a Froissart doublet.  ``0`` disables the test.
+    broad_warn_frac : float
+        Emit a ``RuntimeWarning`` when a surviving pole's FWHM (``2|Im|``) exceeds this fraction of
+        the sweep span (default 0.5) -- the resonance nearly fills the window, so its ``Q`` is a
+        high-variance, ill-conditioned extrapolation (see the module OPERATING ENVELOPE).  ``0``
+        disables the check.
 
     Returns
     -------
@@ -466,17 +505,42 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
     if not cand:
         return []
 
-    # (ii) residue-magnitude floor.
-    res_mags = np.array([abs(r) for _, r in cand])
-    if residue_floor is None:
-        floor = residue_rel_floor * float(np.max(res_mags))
-    else:
+    # (ii) FROISSART pole-zero coincidence filter (the ACTUAL doublet signature; see the docstring).
+    # A genuine weakly-coupled resonance has a small residue but NO near-coincident zero, so it
+    # survives -- unlike under a residue-magnitude floor (ATTACK 1: a weak-residue physical pole was
+    # false-killed because a dominant resonance set the global residue scale).
+    if froissart_frac and froissart_frac > 0.0:
+        zeros = np.asarray(res.zeros, dtype=np.complex128)
+        zeros = zeros[np.isfinite(zeros)]
+        if zeros.size:
+            kept = []
+            for p, r in cand:
+                dz = float(np.min(np.abs(zeros - p)))
+                if dz > froissart_frac * abs(p.imag):
+                    kept.append((p, r))
+            cand = kept
+            if not cand:
+                return []
+
+    # (iii) residue floor.  ABSOLUTE (residue_floor) or, by default, a LOCAL relative floor: the
+    # pole's Lorentzian peak height |residue|/|Im| must clear residue_rel_floor * (local |response|
+    # near Re(pole)).  A numerically-invisible ghost is dropped; a genuine weak feature is not.
+    if residue_floor is not None:
         floor = float(residue_floor)
-    cand = [(p, r) for (p, r), rm in zip(cand, res_mags) if rm >= floor]
+        cand = [(p, r) for (p, r) in cand if abs(r) >= floor]
+    elif residue_rel_floor and residue_rel_floor > 0.0:
+        fabs = np.abs(f)
+        kept = []
+        for p, r in cand:
+            peak = abs(r) / max(abs(p.imag), 1e-300)          # Lorentzian peak contribution height
+            local = float(np.interp(p.real, w, fabs))         # local response magnitude near Re(pole)
+            if peak >= residue_rel_floor * local:
+                kept.append((p, r))
+        cand = kept
     if not cand:
         return []
 
-    # (iii) stability under decimation.
+    # (iv) stability under decimation.
     if stability_check and w.size >= 8:
         res_dec = aaa(w[::2].astype(np.complex128), f[::2], tol=tol,
                       max_degree=max_degree)
@@ -493,6 +557,22 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
 
     out = [Resonance(omega_tilde=p, Q=q_from_pole(p), residue=r) for p, r in cand]
     out.sort(key=lambda rr: rr.omega_tilde.real)
+
+    # NARROW-WINDOW GUARD (operating envelope): a resonance whose FWHM (2|Im|) is a large fraction
+    # of the sweep span nearly fills the window, so its Q is an ill-conditioned high-variance
+    # extrapolation (unbiased on clean data, but scatters badly at finite SNR).  Warn, do not drop.
+    span = hi - lo
+    if broad_warn_frac and broad_warn_frac > 0.0 and span > 0.0:
+        for rr in out:
+            fwhm = 2.0 * abs(rr.omega_tilde.imag)
+            if fwhm > broad_warn_frac * span:
+                warnings.warn(
+                    "aaa_poles.find_resonances: resonance at Re(omega)={:.4e} has FWHM {:.3e} = "
+                    "{:.0%} of the sweep span {:.3e} (> {:.0%}); Q={:.3g} is a high-variance "
+                    "extrapolation -- widen the sweep to >= ~3-5 FWHM (module OPERATING "
+                    "ENVELOPE).".format(rr.omega_tilde.real, fwhm, fwhm / span, span,
+                                        broad_warn_frac, rr.Q),
+                    RuntimeWarning, stacklevel=2)
     return out
 
 

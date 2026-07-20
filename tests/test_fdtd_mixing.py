@@ -164,6 +164,35 @@ def test_mixing_broadband_guard_warns():
     assert ms50["pump_broadband"] is False
 
 
+def test_mixing_global_guard_is_conservative():
+    """Verifier gate (2026-07-20): the GLOBAL pump_broadband flag is CONSERVATIVE. Across a tau
+    sweep of PURE two-tone (zero-nonlinearity) Gaussian pumps -- so EVERY mixing band is phantom
+    (pump-skirt leakage, the phantom-SHG hazard) -- whenever ANY mixing band carries phantom power
+    > 1e-6 of the pump, pump_broadband must be True. This pins the reliable contract: the per-band
+    band_contaminated flags can under-report FAR bands once the two colors MERGE into one broadband
+    blob (their skirts cross the half-way point; the per-pump sigma is then ill-defined), but the
+    GLOBAL flag still fires there, so strict callers gate on it (see the mixing_spectrum guard note).
+    Adversarial hunt found NO config with phantom > 1e-6 yet pump_broadband False."""
+    f1, f2, dt = 1.82e14, 2.50e14, 2e-17
+    labs = ("f1+f2", "f1-f2", "2f1", "2f2", "2f1-f2", "2f2-f1")
+
+    def two_tone(tau):
+        t0 = 7.0 * tau
+        n = int(round((14.0 * tau + 300e-15) / dt))
+        t = np.arange(n) * dt
+        env = np.exp(-((t - t0) / tau) ** 2)
+        return env * (np.cos(2 * np.pi * f1 * (t - t0)) + np.cos(2 * np.pi * f2 * (t - t0)))
+
+    for tau in (3e-15, 5e-15, 8e-15, 12e-15, 20e-15, 50e-15):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ms = mixing_spectrum((two_tone(tau), dt), f1, f2, bandwidth_frac=0.05)
+        pump = max(ms["P_f1"], ms["P_f2"])
+        max_phantom = max(ms["power"][l] / pump for l in labs)
+        if max_phantom > 1e-6:
+            assert ms["pump_broadband"] is True, (tau, max_phantom)
+
+
 # =================================================================================================
 # Part B -- 1-D bichromatic source: byte-identity + exact two-color superposition + guards
 # =================================================================================================
@@ -446,6 +475,53 @@ def test_gate4c_manley_rowe_photon_bookkeeping(opa_runs):
     predicted = dN_i - dN_sum - 2 * dN_2s
     assert dN_s < 0.0                                        # non-dispersive: SFG drains the seed net
     assert abs(dN_s / predicted - 1.0) < 0.2                # Manley-Rowe photon accounting closes
+
+
+def test_gate4c_independent_ode_confirms_seed_drain_mechanism():
+    """INDEPENDENT (non-FDTD) coupled-wave oracle for the module's OPA PHASE-MATCHING CAVEAT
+    (verifier 2026-07-20). A dense scipy ODE integrates the chi2 frequency comb A_m at w_m = m*w0
+    (SVEA, Boyd ch.2) for the exact non-dispersive _OPA slab (n const => every sum/difference is
+    phase-matched, Delta_k = 0). This is an INDEPENDENT code path from the FDTD -- it refutes-or-
+    confirms the headline claim 'a non-dispersive phase-matched chi2 slab cannot net-gain a seed'
+    without re-using the FDTD kernel. It asserts (i) the SIGN of the net seed change is NEGATIVE
+    (seed net-LOSES), and (ii) disabling ONLY the s+p->sum SFG term flips the seed to GAIN --
+    proving SFG (coupling ~sqrt(w_s w_sum)) is the drain that beats the parametric process
+    (~sqrt(w_s w_i)), exactly the mechanism gate 4c/4d rely on."""
+    from scipy.integrate import solve_ivp
+    w0 = 2.0 * np.pi * 0.5e14
+    n_med, chi2, L = np.sqrt(2.0), CHI2, L_OPA
+    modes = list(range(1, 13))
+    idx = {m: k for k, m in enumerate(modes)}
+    S_M, P_M, SUM_M = 3, 5, 8                                # s=1.5e14, p=2.5e14, sum=4.0e14
+    sfg = {m: [(a, b, 1.0 if a == b else 2.0)
+               for a in modes for b in modes if a <= b and a + b == m] for m in modes}
+    dfg = {m: [(a, b) for a in modes for b in modes if a > b and a - b == m] for m in modes}
+
+    def rhs(z, y, kill_sfg_sum):
+        A = y[:len(modes)] + 1j * y[len(modes):]
+        dA = np.zeros(len(modes), complex)
+        for m in modes:
+            NL = 0j
+            for (a, b, g) in sfg[m]:
+                if kill_sfg_sum and m == SUM_M and {a, b} == {S_M, P_M}:
+                    continue                                 # remove the s+p->sum up-conversion only
+                NL += g * A[idx[a]] * A[idx[b]]
+            for (a, b) in dfg[m]:
+                NL += 2.0 * A[idx[a]] * np.conj(A[idx[b]])
+            dA[idx[m]] = 1j * (m * w0 * chi2 / (2.0 * n_med * C_LIGHT)) * NL
+        return np.concatenate([dA.real, dA.imag])
+
+    def seed_gain(kill):
+        A0 = np.zeros(len(modes), complex)
+        A0[idx[S_M]] = 4e6
+        A0[idx[P_M]] = 3e8
+        sol = solve_ivp(rhs, [0.0, L], np.concatenate([A0.real, A0.imag]),
+                        rtol=1e-9, atol=1e-3, max_step=L / 1500, args=(kill,))
+        Af = sol.y[:len(modes), -1] + 1j * sol.y[len(modes):, -1]
+        return abs(Af[idx[S_M]]) ** 2 / abs(A0[idx[S_M]]) ** 2
+
+    assert seed_gain(False) < 1.0                            # non-dispersive phase-matched: seed NET-LOSES
+    assert seed_gain(True) > 1.0                             # kill s+p->sum SFG => seed GAINS (SFG is the drain)
 
 
 def test_gate4d_seed_gains_with_sfg_phase_mismatch():

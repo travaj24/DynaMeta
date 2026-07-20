@@ -66,10 +66,14 @@ EPS_W = complex(-40.0, 2.5)      # Drude metal (gold-like near 1 um); ConstantOp
 CHI = 1.0e-20                    # representative normal surface susceptibility (m^2/V)
 
 
-def _flat_gold_design(period_m, theta_deg, pol="p"):
+def _flat_gold_design(period_m, theta_deg, pol="p", period_y_m=None):
     """A flat Drude half-space cell (vacuum cap + gold slab, gold substrate) -- the SAME coarse mesh
     as the shipped flat SHG gate (tests/test_shg_fem.test_flat_shg_fem_quantitative). Called through
-    shg_structured_two_step on a FLAT geometry it must reproduce shg_two_step (gate 1)."""
+    shg_structured_two_step on a FLAT geometry it must reproduce shg_two_step (gate 1).
+
+    period_y_m (default None -> square) makes a NON-SYMMETRIC rectangular cell (period_x != period_y),
+    used by the s-pol selection-rule gate to prove the a-term suppression is PHYSICAL and not an
+    artifact of square-mesh symmetry cancellation (adversarial verification 2026-07-19)."""
     from dynameta.materials import Material, MaterialRegistry, ConstantOptical
     from dynameta.geometry import UnitCell, Stack, Layer, Design
     from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
@@ -83,7 +87,9 @@ def _flat_gold_design(period_m, theta_deg, pol="p"):
                     maxh_superstrate_m=80e-9, maxh_substrate_m=90e-9, maxh_metal_m=25e-9,
                     maxh_background_m=80e-9, maxh_pml_m=170e-9)
     opt = OpticalSpec(polarization=pol, incidence_angle_deg=theta_deg, linear_solver="umfpack")
-    return Design(name="shg_flat", unit_cell=UnitCell.square(period_m), stack=stack,
+    uc = (UnitCell.square(period_m) if period_y_m is None
+          else UnitCell(period_x_m=period_m, period_y_m=period_y_m))
+    return Design(name="shg_flat", unit_cell=uc, stack=stack,
                   electrodes=[], materials=reg, mesh_3d=m3, optical=opt)
 
 
@@ -211,18 +217,31 @@ def test_shallow_grating_full_pipeline_runs_and_diffracts():
 # --------------------------------------------------------------------------------------------
 # GATE 4 -- s-pol selection rule (suppression vs p-pol, not exact zero on a structured surface)
 # --------------------------------------------------------------------------------------------
-def test_spol_suppressed_vs_ppol():
+@pytest.mark.parametrize("px,py", [(220e-9, None), (270e-9, 190e-9)])
+def test_spol_suppressed_vs_ppol(px, py):
     """The a-term (chi_zzz) sheet is driven by the NORMAL fundamental field. On a flat surface an
     s-pol fundamental has no normal E, so its structured-driver SH is pure extraction noise and is
-    suppressed vs p-pol by many orders of magnitude (measured s/p ~ 1e-10 in power). We gate the
-    SUPPRESSION ratio rather than exact zero (a structured surface would generate an h-suppressed
-    residual at tilted facets)."""
-    dp = _flat_gold_design(220e-9, 30.0, pol="p")
-    dy = _flat_gold_design(220e-9, 30.0, pol="y")        # s-pol (E along y)
+    suppressed vs p-pol by many orders of magnitude. We gate the SUPPRESSION ratio rather than exact
+    zero (a structured surface would generate an h-suppressed residual at tilted facets).
+
+    MESH-ROBUSTNESS (adversarial verification 2026-07-19): the RADIATED-POWER selection rule is the
+    physical observable and is mesh-robust -- s/p power < 1e-4 with many orders of margin on BOTH a
+    square cell (measured ~1.3e-10) AND a NON-SYMMETRIC rectangular cell (~1.6e-8). The E_perp
+    residual, by contrast, is the FEM numerical noise of an ANALYTICALLY-ZERO field and its magnitude
+    is mesh-geometry-dependent (~3.4e-3 square, ~1.1e-2 rectangular): the earlier 1e-2 E_perp bound
+    passed only by square-mesh symmetry cancellation and is BREACHED on a rectangular cell, so it is
+    gated here at a mesh-robust 3e-2. Running this on a non-symmetric cell proves the suppression is
+    physical, not a symmetry artifact."""
+    dp = _flat_gold_design(px, 30.0, pol="p", period_y_m=py)
+    dy = _flat_gold_design(px, 30.0, pol="y", period_y_m=py)   # s-pol (E along y)
     pp = shg_structured_two_step(dp, lambda_fund_m=LAM, chi_zzz=CHI, n_orders=1, metal_region="metalL")
     ss = shg_structured_two_step(dy, lambda_fund_m=LAM, chi_zzz=CHI, n_orders=1, metal_region="metalL")
     assert pp["p_up_2w"] > 0.0
+    # PHYSICAL selection rule (mesh-robust, tight): the radiated s-pol SH power is negligible vs p-pol
     ratio = ss["p_up_2w"] / pp["p_up_2w"]
-    assert ratio < 1e-4, "s-pol/p-pol SH ratio {:.3e} (not suppressed)".format(ratio)
-    # the driving normal field itself is strongly suppressed for s-pol
-    assert abs(ss["E_perp_in"]) < 1e-2 * abs(pp["E_perp_in"])
+    assert ratio < 1e-4, "s-pol/p-pol SH ratio {:.3e} (not suppressed; cell={}x{})".format(
+        ratio, px, py)
+    # the driving normal field residual is strongly suppressed for s-pol (mesh-dependent noise floor)
+    assert abs(ss["E_perp_in"]) < 3e-2 * abs(pp["E_perp_in"]), (
+        "s-pol normal-field residual {:.3e} vs p-pol {:.3e} (cell={}x{})".format(
+            abs(ss["E_perp_in"]), abs(pp["E_perp_in"]), px, py))

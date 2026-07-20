@@ -53,6 +53,25 @@ def test_undepleted_sfg_sinc2_vs_dk():
         assert abs(cf["sinc2"] - expect) < 1e-12
 
 
+def test_undepleted_sfg_complex_phase_vs_brute_force_integral():
+    # PHASE gate (a sign flip of phase_matching_sinc's exp(-i dk L/2) is invisible to every
+    # |A3|/sinc^2 gate above, yet corrupts the non-separable JSA phase -> Schmidt number).
+    # Pin the FULL COMPLEX A3 of sfg_undepleted against the brute-force closed form
+    # A3 = i kappa3 A1 A2 integral_0^L exp(-i dk z) dz, evaluated by raw quadrature.
+    L = 3.0e-3
+    a1, a2 = 1.0 * np.exp(0.4j), 1.0 * np.exp(-1.2j)     # complex inputs expose the phase
+    z = np.linspace(0.0, L, 400001)
+    for dk in (400.0, 900.0, -1500.0):
+        spec = TWMSpec(omega1=W1, omega2=W2, d_eff=DEFF, length=L,
+                       n1=1.5, n2=1.5, n3=1.5, dk_override=dk)
+        cf = sfg_undepleted(spec, a1, a2)
+        g = np.exp(-1j * dk * z)                          # exp(-i dk z), NOT +i (the sign under test)
+        dz = z[1] - z[0]
+        integ = dz * (g.sum() - 0.5 * g[0] - 0.5 * g[-1])  # trapezoid (numpy-version independent)
+        a3_bf = 1j * spec.kappa(3) * a1 * a2 * integ
+        assert abs(cf["A3_L"] - a3_bf) / abs(a3_bf) < 1e-5, (dk, cf["A3_L"], a3_bf)
+
+
 def test_undepleted_opa_cosh_sinh():
     # strong undepleted pump A3, weak signal A1, no idler; phase matched -> cosh^2 / sinh^2.
     L = 3.0e-3

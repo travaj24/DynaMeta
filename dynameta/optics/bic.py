@@ -274,7 +274,19 @@ def topological_charge(phi_field, contour) -> float:
     (P, 2) index array. phi_field is the (kx, ky) orientation field from polarization_angle_field
     (axis 0 = kx, axis 1 = ky). The doubled winding is an integer, so we round N to the nearest
     integer before halving -- this makes q exact and topologically robust (small Jones noise cannot
-    move it) as long as the contour samples 2 phi densely enough (no adjacent step > pi)."""
+    move it) as long as the contour samples 2 phi densely enough (no adjacent step > pi).
+
+    UNDER-ENCLOSING CONTOUR (a distinct failure the angle guard does NOT catch): the sampling guard
+    (see :func:`_winding_of_angle`) rejects ANGLE aliasing -- adjacent doubled-angle steps near pi.
+    It does NOT know whether the contour actually ENCLOSES the vortex winding.  A REAL (numerically
+    computed) BIC director field -- e.g. the max-|eigenvalue| far-field polarization of an RCWA
+    Jones map near Gamma -- is not the ideal ``q * atan2(ky, kx)``: the eigenvector selection is
+    near-degenerate at Gamma, so the winding is SMEARED into an annulus rather than concentrated at
+    a single grid vertex.  A contour SMALLER than that annulus then encloses ~0 net winding and
+    returns a CLEAN but wrong ``q = 0`` with the guard silent (its steps are all small).  The charge
+    is a genuine topological invariant only over contours large enough to enclose the full winding
+    region, so VERIFY RADIUS-STABILITY: sweep the contour radius and require a constant ``q`` across
+    a range (see tests/test_bic_capstone.py) rather than trusting a single small loop."""
     n_raw = contour_winding(phi_field, contour)
     return float(round(n_raw)) / 2.0
 

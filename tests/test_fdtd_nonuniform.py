@@ -135,6 +135,30 @@ def test_gate2_lossy_film_graded_matches_uniform_fine():
     assert n_fine / n_graded >= 5.0, (n_graded, n_fine)   # ~8x fewer cells (report: see final message)
 
 
+def test_gate2b_strongly_graded_energy_closure_vs_airy():
+    """Verifier gate (2026-07-20): an INDEPENDENT-ORACLE check that the nonuniform Yee scheme is
+    correct on a STRONGLY graded LOSSLESS mesh -- no shipped gate pinned ABSOLUTE energy closure on
+    a strongly graded mesh (gate 2/4 compare graded-vs-uniform-FDTD, same scheme family). A lossless
+    n=2 slab, refined 4x and 10x (dz ranges ~6x and ~80x across the mesh), must (a) conserve energy
+    R+T=1 and (b) match the analytic Airy R (a truly independent oracle) to the discretization floor.
+    A dual-grid indexing/spacing bug would break energy closure or bias R off the analytic curve."""
+    n_slab, d = 2.0, 0.30e-6
+    lmin, lmax, npw = 1.2e-6, 1.5e-6, 1.0
+    for fac, rt_tol, airy_tol in ((4, 2e-3, 2e-3), (10, 2e-3, 6e-3)):
+        r = solve_fdtd_1d([FDTDLayer(thickness_m=d, eps_inf=n_slab ** 2)],
+                          lambda_min_m=lmin, lambda_max_m=lmax, resolution=24, n_pad_wave=npw,
+                          refine={0: fac})
+        b = r.band
+        lam = C_LIGHT / r.freqs_Hz[b]
+        r12 = (1.0 - n_slab) / (1.0 + n_slab)
+        delta = 2.0 * np.pi * n_slab * d / lam
+        R_airy = np.abs(r12 * (1.0 - np.exp(2j * delta)) / (1.0 - r12 ** 2 * np.exp(2j * delta))) ** 2
+        rt_err = float(np.max(np.abs(r.R[b] + r.T[b] - 1.0)))
+        airy_err = float(np.max(np.abs(r.R[b] - R_airy)))
+        assert rt_err < rt_tol, (fac, rt_err)                # absolute energy closure on a graded mesh
+        assert airy_err < airy_tol, (fac, airy_err)          # matches the independent analytic oracle
+
+
 # ============================================================================================
 # GATE 3 -- CONVERGENCE ORDER ~2 on smoothly graded meshes
 # ============================================================================================

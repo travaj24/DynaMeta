@@ -287,6 +287,115 @@ def test_sweep_and_extract_adaptive_fp_etalon():
 
 
 # ------------------------------------------------------------------------------------------------
+# Gate 7 (adversarial ATTACK 1): the spurious-pole filter must NOT false-kill a GENUINE weak pole.
+# A weakly-coupled resonance (residue 1e-6 of the dominant) and a close doublet (spacing ~ half a
+# linewidth) are physical; a residue-magnitude floor relative to the global max residue killed the
+# weak one (a dominant resonance set the residue scale).  The Froissart discriminator is the
+# pole-zero COINCIDENCE, not the residue magnitude -- a genuine weak pole has no near-coincident
+# zero, so it survives.  Regression for the aaa_poles.find_resonances filter fix.
+# ------------------------------------------------------------------------------------------------
+def test_weak_pole_and_doublet_not_false_killed():
+    p_dom = 1.00e15 - (1.00e15 / (2 * 100)) * 1j                # Q = 100, dominant
+    p_weak = 1.30e15 - (1.30e15 / (2 * 500)) * 1j               # Q = 500, well separated
+    w_d, Q_d = 0.75e15, 300.0
+    gam_d = w_d / Q_d
+    half_lw = 0.5 * gam_d                                       # doublet spacing ~ half a linewidth
+    p_d1 = (w_d - 0.5 * half_lw) - 0.5 * gam_d * 1j
+    p_d2 = (w_d + 0.5 * half_lw) - 0.5 * gam_d * 1j
+    poles = [p_dom, p_weak, p_d1, p_d2]
+    residues = [1.0, 1.0e-6, 0.3, 0.3]                          # weak pole: residue 1e-6 of dominant
+
+    def f(omega):
+        z = np.asarray(omega, dtype=complex)
+        return sum(r / (z - p) for p, r in zip(poles, residues))
+
+    omega = np.linspace(0.6e15, 1.5e15, 1200)
+    reso = find_resonances(omega, f(omega), tol=1e-13)
+    assert len(reso) == 4                                       # ALL four kept (weak + doublet)
+    # weak pole present with its true (high) Q
+    weak = min(reso, key=lambda rr: abs(rr.omega_tilde.real - p_weak.real))
+    assert abs(weak.omega_tilde.real - p_weak.real) <= 1e-6 * p_weak.real
+    assert abs(weak.Q - pole_q(p_weak)) <= 1e-2 * pole_q(p_weak)
+    assert abs(weak.residue) <= 1e-3                            # genuinely weak residue, still kept
+    # doublet resolved into two distinct poles half a linewidth apart
+    dbl = [rr for rr in reso if abs(rr.omega_tilde.real - w_d) < gam_d]
+    assert len(dbl) == 2 and abs(dbl[0].omega_tilde.real - dbl[1].omega_tilde.real) > 0.3 * half_lw
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 8 (adversarial ATTACK 2): NO sweep-window bias -- clean-data Q is exact at any span (the AAA
+# barycentric fit is an analytic continuation), and a resonance that nearly fills the window (Q is
+# then a high-variance extrapolation) triggers the narrow-window RuntimeWarning.
+# ------------------------------------------------------------------------------------------------
+def test_no_window_bias_and_narrow_window_warns():
+    import warnings
+    w0, Q_true = 1.0e15, 200.0
+    gamma = w0 / Q_true
+    p = w0 - 0.5 * gamma * 1j
+    A = 0.18 * (0.5 * gamma)                                    # ~30% contrast on the background
+
+    def fn(w):
+        w = np.asarray(w, dtype=complex)
+        u = (w - w0) / (10 * gamma)
+        return (0.6 + 0.08 * np.cos(0.7 * u) + 0.03 * np.exp(0.2 * u)) + A / (w - p)
+
+    # clean-data Q is exact from a very narrow (0.25 FWHM) to a wide (40 FWHM) window
+    for m in (0.25, 1.0, 4.0, 40.0):
+        half = 0.5 * m * gamma
+        w = np.linspace(w0 - half, w0 + half, 400)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reso = find_resonances(w, fn(w), tol=1e-13)
+        best = min(reso, key=lambda rr: abs(rr.omega_tilde.real - w0))
+        assert abs(best.Q - Q_true) <= 1e-3 * Q_true           # unbiased at every span
+
+    # a span of ~1 FWHM makes the resonance fill the window -> narrow-window warning fires
+    half = 0.5 * 1.0 * gamma
+    w = np.linspace(w0 - half, w0 + half, 400)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        find_resonances(w, fn(w), tol=1e-13)
+    assert any("high-variance" in str(x.message) for x in rec)
+    # a wide span (20 FWHM) does NOT warn
+    half = 0.5 * 20.0 * gamma
+    w = np.linspace(w0 - half, w0 + half, 400)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        find_resonances(w, fn(w), tol=1e-13)
+    assert not any("high-variance" in str(x.message) for x in rec)
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 9 (adversarial ATTACK 3): GAIN pole (Im > 0 under exp(-i w t)) convention.  Complex analytic
+# gain data must NOT yield a false DECAYING resonance (the physical Im<0 cut returns nothing); real
+# intensity data is conjugate-ambiguous, so the Im<0 mirror is reported -- but it obeys the stated
+# contract (Im < 0, Q > 0 with |Q| matching the gain pole), never a silent wrong-sign Q.
+# ------------------------------------------------------------------------------------------------
+def test_gain_pole_convention_no_wrong_sign_Q():
+    w0, Qg = 1.0e15, 150.0
+    gam_g = w0 / Qg
+    p_gain = w0 + 0.5 * gam_g * 1j                             # Im > 0 = amplifying mode
+    w = np.linspace(w0 - 10 * gam_g, w0 + 10 * gam_g, 400)
+
+    # (a) COMPLEX analytic gain data: AAA places the pole in the UPPER half; no physical decaying
+    # resonance -> find_resonances returns nothing (no false Im<0 pole, no wrong-sign Q).
+    resp_c = 1.0 / (w.astype(complex) - p_gain)
+    ac = aaa(w.astype(complex), resp_c, tol=1e-13)
+    near = min(ac.poles, key=lambda z: abs(z.real - w0))
+    assert near.imag > 0.0                                     # the true gain pole is Im > 0
+    assert find_resonances(w, resp_c, tol=1e-13) == []
+
+    # (b) REAL intensity data: conjugate-symmetric; the Im<0 mirror is returned with |Q| = gain Q,
+    # and every returned pole honours the Im < 0 / Q > 0 contract (no silent sign error).
+    resp_r = 1.0 / ((w - w0) ** 2 + (0.5 * gam_g) ** 2)
+    reso = find_resonances(w, resp_r, tol=1e-12)
+    assert len(reso) == 1
+    r = reso[0]
+    assert r.omega_tilde.imag < 0.0 and r.Q > 0.0
+    assert abs(r.Q - Qg) <= 5e-3 * Qg
+
+
+# ------------------------------------------------------------------------------------------------
 # Gate 5: RCWA bridge -- real lumenairy 2-D RCWA guided-mode-resonance sweep, AAA Q vs fano_fit Q
 # ------------------------------------------------------------------------------------------------
 @pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
