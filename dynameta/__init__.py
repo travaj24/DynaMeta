@@ -43,7 +43,7 @@ mirror-symmetry domain reduction (geometry.specs.Mesh3DSpec.symmetry: PEC/PMC ha
 never automatic). (Module map refreshed per audit 6.3.)
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 # Geometry + materials data model (lightweight)
 # Windows: expose the pip 'tbb' wheel's runtime DLLs (<prefix>/Library/bin) so numba's
