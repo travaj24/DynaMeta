@@ -217,33 +217,51 @@ def phase_matching_sinc(dk: np.ndarray | float, length: float,
     With QPM (period Lambda) the poling square wave has the Fourier series
         sign(cos(2 pi z/Lambda)) = sum_{m odd} c_m exp(i 2 pi m z / Lambda),
         c_m = (2/(pi |m|)) (-1)^((|m|-1)/2)     ==>  c_{+1} = c_{-1} = 2/pi,
-    i.e. it carries BOTH first orders m = +1 and m = -1, supplying momentum -/+ 2 pi/Lambda.
+    i.e. it carries EVERY ODD order m = +-1, +-3, +-5, ..., supplying momentum -/+ 2 pi m/Lambda.
     Term m contributes (1/L) integral_0^L exp(-i (dk - 2 pi m/Lambda) z) dz, so
-        Phi_QPM = (2/pi) sinc(dk_eff L / 2) exp(-i dk_eff L / 2),
-        dk_eff  = dk - 2 pi m / Lambda   with m = +-1 chosen ELEMENTWISE as the nearer order.
-    Both first orders carry the SAME (2/pi) weight, so a grating of period |Lambda| matches
-    dk = +2 pi/Lambda and dk = -2 pi/Lambda equally well -- which is why ``qpm_period_for``
-    can return a positive period for either sign of dk (see its SIGN CONVENTION note). For
-    dk > 0 and Lambda > 0 the m = +1 order is always the nearer one, so this reduces exactly
-    to the single-order form; the m = -1 branch is what makes dk < 0 (reachable whenever
-    n3 < n1, n2) phase-match, and it also makes a SIGNED (negative) Lambda behave identically
-    to its positive twin. Ties (dk == 0) resolve to m = +1.
+        Phi_QPM = (2/(pi |m|)) sinc(dk_eff L / 2) exp(-i dk_eff L / 2),
+        dk_eff  = dk - 2 pi m / Lambda,
+    with m the NEAREST ODD order to dk Lambda / (2 pi), chosen ELEMENTWISE and carrying its own
+    (2/(pi |m|)) weight. Ties (|dk Lambda / 2 pi| an even integer, including dk == 0) resolve to
+    the SMALLER |m|, which is the one with the larger weight; dk == 0 therefore gives m = +1.
+    Both signs of an order carry the same weight, so a grating of period |Lambda| matches
+    dk = +2 pi m/Lambda and dk = -2 pi m/Lambda equally well -- which is why ``qpm_period_for``
+    can return a positive period for either sign of dk (see its SIGN CONVENTION note). The
+    negative-m branch is what makes dk < 0 (reachable whenever n3 < n1, n2) phase-match, and it
+    also makes a SIGNED (negative) Lambda behave identically to its positive twin (m flips with
+    Lambda, so m * 2 pi / Lambda -- and hence Phi -- does not; bitwise, at every dk except the
+    dk == 0 tie, where the m = +1 convention is taken in the SIGN OF Lambda's frame and the two
+    spellings come out complex-conjugate -- of a Phi that is real, so they agree to rounding).
 
-    Only the nearest first order is kept (the standard first-order QPM truncation); the m =
-    +-3, +-5, ... orders and the far order are down by their (2/(pi|m|)) weight and by their
-    sinc, which is the ~0.15% closed-form-vs-integrator tolerance documented for the QPM
-    gates. Used by ``spdc_design.jsa`` (the sinc(delta k L/2) phase-matching envelope) and by
-    the undepleted closed forms below. ``dk`` may be an array."""
+    WHY ALL ODD ORDERS, not just m = +-1 (fix-verify W1 kill 3). Keeping only the first order made
+    ``qpm_period_for(dk, order=3)`` / ``effective_deff_qpm(d, 3)`` -- which exist, and which return
+    the m-th-order period and its 2/(3 pi) coefficient -- inconsistent with this function by
+    fifteen orders of magnitude: at dk = +-3 * 2 pi/Lambda the exact square-wave response is
+    2/(3 pi) = 0.2122, and the truncated form returned 2.4e-16 (100% error, silently). Every
+    HIGHER-order QPM design (a coarser, easier-to-pole mask driven on m = 3 or 5) landed in that
+    hole. Only the NEAREST odd order is summed -- the neighbouring orders are down by both their
+    1/|m| weight and their sinc, and the residual is the ~1% closed-form-vs-integrator tolerance
+    the QPM gates carry (measured against a brute-force piecewise-exact quadrature: <= 1.1e-2
+    relative wherever |Phi| >= 0.5, i.e. inside the main lobe of whichever order is matched).
+    Used by ``spdc_design.jsa`` (the sinc(delta k L/2) phase-matching envelope) and by the
+    undepleted closed forms below. ``dk`` may be an array."""
     dk = np.asarray(dk, dtype=float)
     if qpm_period is None:
         arg = dk * length / 2.0
         return _sinc(arg) * np.exp(-1j * arg)
     g = 2.0 * math.pi / float(qpm_period)
-    dk_plus = dk - g                                    # m = +1 grating order
-    dk_minus = dk + g                                   # m = -1 grating order
-    dk_eff = np.where(np.abs(dk_minus) < np.abs(dk_plus), dk_minus, dk_plus)[()]
+    u = dk / g                                          # dk in units of the grating vector
+    # nearest ODD integer to u, ties (|u| even) to the SMALLER |m| = the larger Fourier weight.
+    # Written via |u| and re-signed so the selection is exactly antisymmetric in u -- np.round's
+    # banker's rounding is not, and would break Phi(-dk) == conj(Phi(dk)) at the tie points.
+    m_abs = (2.0 * np.maximum(np.ceil(0.5 * np.abs(u)), 1.0) - 1.0)[()]
+    m = np.where(u < 0.0, -m_abs, m_abs)[()]
+    dk_eff = dk - m * g
+    # c_m = (2/(pi |m|)) (-1)^((|m|-1)/2): +1 for |m| = 1, 5, 9, ... and -1 for |m| = 3, 7, 11, ...
+    # (|m| mod 4). Dropping it would leave |Phi| right and its PHASE wrong on those orders.
+    c_m = (2.0 / (math.pi * m_abs)) * np.where(np.mod(m_abs, 4.0) == 1.0, 1.0, -1.0)[()]
     arg = dk_eff * length / 2.0
-    return (2.0 / math.pi) * _sinc(arg) * np.exp(-1j * arg)
+    return c_m * _sinc(arg) * np.exp(-1j * arg)
 
 
 # --------------------------------------------------------------------------------------------

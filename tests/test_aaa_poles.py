@@ -288,8 +288,10 @@ def test_under_coupled_cmt_resonance_survives_froissart_filter():
     assert abs(reso[0].Q - q_true) <= 1e-3 * q_true
     assert abs(reso[0].omega_tilde.real - w0) <= 1e-6 * w0
 
-    # the old default is the regression: it returns [] with no warning
-    assert find_resonances(w, f, tol=1e-13, froissart_frac=0.05) == []
+    # the old default is the regression: it returns [] -- and, since fix-verify W1 kill 4, it says
+    # so out loud instead of silently (the emptied-candidate-list warning names froissart_frac).
+    with pytest.warns(RuntimeWarning, match="froissart_frac"):
+        assert find_resonances(w, f, tol=1e-13, froissart_frac=0.05) == []
 
     # ... and the calibrated default still holds two decades deeper into under-coupling
     for r in (1e-3, 1e-4):
@@ -298,6 +300,63 @@ def test_under_coupled_cmt_resonance_survives_froissart_filter():
         got = find_resonances(wr, t_cmt(wr, r * gi), tol=1e-13)
         assert len(got) == 1, r
         assert abs(got[0].Q - w0 / gtot_r) <= 1e-3 * (w0 / gtot_r), r
+
+
+def test_froissart_threshold_scales_with_the_aaa_misfit_on_noisy_data():
+    """FIX-VERIFY W1 kill 4.  ``froissart_frac = 1e-4`` is calibrated to the ROUNDING-level
+    pole-zero gaps of a CLEAN over-fit (~1e-13).  Noise manufactures doublets that separate by
+    roughly the NOISE instead: on a 4-pole rational with 1e-6 relative complex noise the spurious
+    gaps reach 3e-2, and the fixed 1e-4 admitted 25 spurious resonances over a 25-seed sweep where
+    the old 0.05 admitted none.  The threshold is now
+    ``clip(16 sqrt(AAA misfit), froissart_frac, 0.05)``, so clean data is untouched and noisy data
+    recovers the old rejection."""
+    from dynameta.optics.aaa_poles import (_aaa_misfit, _froissart_threshold,
+                                           _FROISSART_MAX_FRAC)
+
+    w0 = 1.0e15
+    true = [complex(0.80 * w0, -0.0100 * w0), complex(1.00 * w0, -0.0040 * w0),
+            complex(1.25 * w0, -0.0025 * w0), complex(1.45 * w0, -0.0060 * w0)]
+    resid = [0.9 + 0.2j, 1.4 - 0.5j, 0.6 + 0.9j, 1.1 + 0.0j]
+
+    def f_true(wv):
+        out = np.full(np.shape(wv), 0.25 + 0.0j)
+        for p, r in zip(true, resid):
+            out = out + r * w0 / (np.asarray(wv, dtype=complex) - p)
+        return out
+
+    def is_true(p):
+        return any(abs(p - t) <= 2e-2 * abs(t) for t in true)
+
+    w = np.linspace(0.6 * w0, 1.7 * w0, 400)
+    clean = f_true(w)
+
+    # (a) CLEAN data: the misfit is at machine level, so the threshold IS the shipped constant.
+    res_clean = aaa(w.astype(np.complex128), clean, tol=1e-13, max_degree=40)
+    assert _aaa_misfit(res_clean, clean) < 1e-10
+    assert _froissart_threshold(res_clean, clean, 1e-4) == 1e-4
+    got = find_resonances(w, clean, tol=1e-13, max_degree=40)
+    assert len(got) == 4 and all(is_true(r.omega_tilde) for r in got)
+
+    # (b) 1e-6 RELATIVE noise, 8 of the verifier's 25 seeds: 4 genuine and ZERO spurious each.
+    for seed in range(1000, 1008):
+        rng = np.random.default_rng(seed)
+        fn = clean + 1e-6 * float(np.max(np.abs(clean))) * (rng.standard_normal(400)
+                                                            + 1j * rng.standard_normal(400))
+        rn = aaa(w.astype(np.complex128), fn, tol=1e-13, max_degree=40)
+        eff = _froissart_threshold(rn, fn, 1e-4)
+        assert 1e-3 < eff <= _FROISSART_MAX_FRAC, (seed, eff)     # scaled well above the floor
+        out = find_resonances(w, fn, tol=1e-13, max_degree=40)
+        n_true = sum(1 for r in out if is_true(r.omega_tilde))
+        assert n_true == 4, (seed, n_true, len(out))
+        assert len(out) - n_true == 0, (seed, len(out) - n_true)  # pre-fix: 1 spurious per seed
+
+    # (c) the scaling is CAPPED at the legacy constant: ``max_error`` is a MAX over samples and a
+    #     single near-real-axis approximant pole can put it O(1), which uncapped would delete real
+    #     physics (the 0.1%-noise transmittance gate above measures misfits up to 2.65).
+    class _Fake:
+        max_error = 1.0e3
+    assert _froissart_threshold(_Fake(), np.array([1.0 + 0j]), 1e-4) == _FROISSART_MAX_FRAC
+    assert _froissart_threshold(_Fake(), np.array([1.0 + 0j]), 0.2) == 0.2   # explicit floor wins
 
 
 # ------------------------------------------------------------------------------------------------

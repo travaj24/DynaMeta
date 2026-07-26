@@ -17,7 +17,7 @@ Pure numpy/scipy: importable without DEVSIM/NGSolve.
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 

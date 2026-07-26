@@ -38,9 +38,8 @@ from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.constants import HBAR, KB, M_E  # for the effective DOS N_c(N_v) from the DOS mass
+from dynameta.constants import HBAR, KB  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
-from dynameta.geometry.electrode import Electrode
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node

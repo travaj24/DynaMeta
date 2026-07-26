@@ -163,8 +163,13 @@ def test_span_weights_reduce_to_trapezoid_on_a_node_grid():
 def test_chiral_bvp_poisson_normalisation_matches_the_tilt_solver():
     # AUDIT N2 (C-4's defect verbatim in chiral_director_profile_bvp): with the twist decoupled
     # (phi_top == phi_bottom, q0 = 0) the chiral solver must reproduce director_profile_bvp under a
-    # POISSON field too -- the path where the midpoint-grid normalisation used to bias both solvers
-    # by different amounts (their converged midplane tilts differed by ~0.2 deg before the fix).
+    # POISSON field too.
+    #
+    # SCOPE (fix-verify W1 item 8). This is a CONSISTENCY check between the two solvers, NOT a
+    # regression gate for N2: both solvers carried the identical normalisation defect, so it passed
+    # pre-fix as well (measured -- the earlier comment's claim that "their converged midplane tilts
+    # differed by ~0.2 deg before the fix" is false). The discriminating gate is
+    # test_chiral_bvp_poisson_is_grid_convergent below.
     ck = dict(K11=11e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=4e-6, nz=121,
               theta_b_rad=np.radians(89.9), field_model="poisson")
     ch = chiral_director_profile_bvp(V_app=2.0, K22=7e-12, phi_bottom_rad=0.0, phi_top_rad=0.0,
@@ -172,6 +177,43 @@ def test_chiral_bvp_poisson_normalisation_matches_the_tilt_solver():
     st = director_profile_bvp(V_app=2.0, **ck)
     assert ch.success
     assert np.max(np.abs(ch.theta_field_rad - st.theta_field_rad)) < 1e-6
+
+
+def test_chiral_bvp_poisson_is_grid_convergent():
+    """AUDIT N2, the DISCRIMINATING gate (fix-verify W1 item 8).
+
+    The defect was the series-capacitance normalisation of the Poisson field: on solve_bvp's
+    adapted MIDPOINT abscissae the denominator ``int dz / eps(theta)`` was evaluated with a plain
+    trapezoid over the NODES it happened to hold, which spans only ``d_lc - h`` instead of the full
+    cell, so E was biased by ``1/(1 - h/d_lc)``. That bias is O(h) and it is what makes the solved
+    tilt move with ``nz``. It is invisible to a same-``nz`` comparison of two solvers that share the
+    bug, and visible immediately under grid refinement -- so refine.
+
+    Measured midplane tilt (twisted case, phi_top = pi/2, so the chiral solver is genuinely
+    exercised), |theta_mid(nz) - theta_mid(nz = 961)| in degrees:
+
+        nz = 121:   PRE-fix 0.757    POST-fix 0.032      (24x)
+        nz = 61:    PRE-fix 0.657    POST-fix 0.089
+
+    Pre-fix the sequence is not even monotone in nz (17.499, 17.399, 17.830, 18.156 deg for
+    nz = 61, 121, 241, 961) -- the hallmark of an h-dependent forcing rather than a converging
+    discretisation.
+    """
+    ck = dict(K11=11e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=4e-6,
+              theta_b_rad=np.radians(89.9), field_model="poisson")
+    mids = {}
+    for nz in (61, 121, 241):
+        r = chiral_director_profile_bvp(V_app=2.0, K22=7e-12, phi_bottom_rad=0.0,
+                                        phi_top_rad=0.5 * np.pi, q0_rad_m=0.0, nz=nz, **ck)
+        assert r.success, nz
+        mids[nz] = np.degrees(float(r.theta_field_rad[r.theta_field_rad.size // 2]))
+    # monotone convergence, and the coarse-to-fine drift is an order of magnitude under the
+    # pre-fix 0.66-0.76 deg
+    assert mids[61] > mids[121] > mids[241], mids
+    assert abs(mids[61] - mids[241]) < 0.15, mids
+    assert abs(mids[121] - mids[241]) < 0.05, mids
+    # ... and the drift SHRINKS with refinement (an O(h) forcing error would not)
+    assert abs(mids[121] - mids[241]) < 0.6 * abs(mids[61] - mids[121]), mids
 
 
 def test_bvp_freedericksz_threshold_and_branch():

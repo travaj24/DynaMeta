@@ -155,3 +155,81 @@ def test_two_pol_model_limits():
             deep = m.pdg_dB(P)
             break
     assert deep is not None and 0.15 < deep < 0.45
+
+
+def test_chain_stage_without_with_signals_raises_a_protocol_error():
+    """audit A-3 follow-on: the docstring advertised a "legacy FiberAmplifier-shaped rebuild" for
+    a duck-typed stage that exposes .signals but not with_signals. That fallback never worked --
+    it routed into metrics._set_signal, which reached for the FiberAmplifier-private `_clone` and
+    produced `AttributeError: 'DuckAmp' object has no attribute '_clone'`. The contract is now
+    TRUE: with_signals is REQUIRED and its absence raises a TypeError naming it, while a stage
+    with NO .signals at all really does pass through unchanged as a pre-configured element."""
+    class DuckAmp:                       # .signals + .solve(), no with_signals
+        name = "duck"
+
+        def __init__(self, inner):
+            self.inner = inner
+            self.signals = list(inner.signals)
+
+        def solve(self, **kw):
+            return self.inner.with_signals(self.signals).solve(**kw)
+
+    with pytest.raises(TypeError, match="with_signals"):
+        AmplifierChain([DuckAmp(_edfa())]).solve(1e-5, LAM_S, n_nodes=81)
+
+    class PreConfigured:                 # no .signals -> pass-through, solved as configured
+        name = "pre"
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        def solve(self, **kw):
+            return self.inner.solve(**kw)
+
+    r = AmplifierChain([PreConfigured(_edfa())]).solve(1e-5, LAM_S, n_nodes=81)
+    direct = _edfa().solve(n_nodes=81)
+    assert r.gain_total_dB == pytest.approx(float(direct.signal_gain_dB[0]), abs=1e-9)
+
+
+def test_metrics_name_the_missing_protocol_method_instead_of_leaking_a_private_attribute():
+    """The same contract on the metrics side: a third-party amplifier gets a TypeError naming the
+    protocol method it is missing, not a bare AttributeError about a private `_clone`."""
+    from dynameta.optics.fiber_amp import metrics as M
+
+    class DuckAmp:
+        """Implements as much of the protocol as `implements` says, and nothing else. The
+        implemented methods return a DuckAmp (a real amplifier would short-circuit the test by
+        supplying the rest of the protocol from the next clone on)."""
+
+        name = "duck"
+
+        def __init__(self, inner, implements=()):
+            self.inner = inner
+            self.signals = list(inner.signals)
+            self.pumps = list(inner.pumps)
+            self._impl = tuple(implements)
+            if "with_signals" in self._impl:
+                self.with_signals = lambda s: DuckAmp(inner.with_signals(s), self._impl)
+            if "with_pumps" in self._impl:
+                self.with_pumps = lambda p: DuckAmp(inner.with_pumps(p), self._impl)
+
+        def solve(self, **kw):
+            return self.inner.solve(**kw)
+
+    bare = DuckAmp(_edfa())
+    with_sig = DuckAmp(_edfa(), implements=("with_signals",))
+    # each metric names the FIRST protocol method it actually needs and cannot find
+    cases = [(bare, lambda a: M.gain_compression_curve(a, [1e-5]), r"^DuckAmp does not implement "
+              r"with_signals\(\)"),
+             (with_sig, lambda a: M.slope_efficiency(a, [0.1, 0.2]),
+              r"^DuckAmp does not implement with_pumps\(\)"),
+             (with_sig, lambda a: M.gain_spectrum(a, [LAM_S]),
+              r"^DuckAmp does not implement without_ase\(\)")]
+    for amp, call, pattern in cases:
+        with pytest.raises(TypeError, match=pattern):
+            call(amp)
+        try:
+            call(amp)
+        except TypeError as e:
+            assert "_clone" not in str(e)                 # no private attribute leaks out
+            assert "with_signals(signals)" in str(e)      # ... the whole contract is spelled out

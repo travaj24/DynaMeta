@@ -90,7 +90,8 @@ from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.tr
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
-from dynameta.optics.fiber_amp.steady_state import AseBand, Pump, Signal, SteadyStateResult
+from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
+                                                    _KEEP)
 
 __all__ = ["ErYbAmplifier"]
 
@@ -153,16 +154,41 @@ class ErYbAmplifier:
         self.upconversion_C_up = float(upconversion_C_up)
 
     # ---- type-preserving clone protocol ---------------------------------------------------
-    def with_signals(self, signals: List[Signal]) -> "ErYbAmplifier":
-        """Re-seed with a new signal list, rebuilt through THIS class's own constructor (both Er
-        and Yb spectroscopy, both ASE bands, the transfer coefficients and the Er upconversion
-        coefficient). The FiberAmplifier sibling exposes the same method, so AmplifierChain can
-        walk a chain of either class without knowing which it holds -- audit A-3: the chain used
-        to rebuild every stage as a FiberAmplifier and crashed here on the missing .ion."""
-        return ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber, list(self.pumps),
-                             list(signals), self.ase, n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
-                             k_back_m3_s=self._k_back, a32_per_s=self._a32, yb_ase=self.yb_ase,
+    def _clone(self, *, pumps: Optional[List[Pump]] = None,
+               signals: Optional[List[Signal]] = None, ase=_KEEP, yb_ase=_KEEP) -> "ErYbAmplifier":
+        """Clone through THIS class's own constructor, carrying EVERY opt-in: both ions'
+        spectroscopy, the fiber, both ASE bands, the Yb density, the forward/back transfer
+        coefficients, A_32 and the Er upconversion coefficient. The single place that lists what
+        an ErYb clone must carry (the FiberAmplifier._clone analogue); the three public protocol
+        methods below all route through it, so adding an opt-in to __init__ needs ONE edit here.
+        PRIVATE -- callers outside the class use with_signals / with_pumps / without_ase."""
+        return ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber,
+                             list(self.pumps) if pumps is None else list(pumps),
+                             list(self.signals) if signals is None else list(signals),
+                             self.ase if ase is _KEEP else ase,
+                             n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
+                             k_back_m3_s=self._k_back, a32_per_s=self._a32,
+                             yb_ase=self.yb_ase if yb_ase is _KEEP else yb_ase,
                              upconversion_C_up=self.upconversion_C_up)
+
+    # ---- PUBLIC amplifier re-seed protocol -------------------------------------------------
+    # The SAME three methods FiberAmplifier exposes, so AmplifierChain and metrics.* can rebuild
+    # a stage without knowing which class they hold (audit A-3: the chain rebuilt every stage as
+    # a FiberAmplifier and crashed here on the missing .ion; the A-3 follow-on found metrics.*
+    # still reaching past the protocol into FiberAmplifier._clone, which does not exist here).
+    def with_signals(self, signals: List[Signal]) -> "ErYbAmplifier":
+        """Re-seed with a new signal list, preserving this class and every opt-in (see _clone)."""
+        return self._clone(signals=signals)
+
+    def with_pumps(self, pumps: List[Pump]) -> "ErYbAmplifier":
+        """Re-seed with a new pump list, preserving this class and every opt-in (see _clone).
+        Used by metrics.slope_efficiency to sweep the launched pump."""
+        return self._clone(pumps=pumps)
+
+    def without_ase(self) -> "ErYbAmplifier":
+        """A copy with BOTH ASE bands dropped (the Er C-band and the Yb-band parasitic band) --
+        the ASE-free configuration metrics.gain_spectrum probes the small-signal gain in."""
+        return self._clone(ase=None, yb_ase=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self):

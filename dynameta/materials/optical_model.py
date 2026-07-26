@@ -583,12 +583,35 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
     the normalization scale, and the headline diagnostics max_norm / rms_norm (residual over
     the band, normalized by the dispersive Re swing) plus raw max_abs / rms_abs.
 
-    HOW TO READ THE RESULT (finding Q-5).  ``rms_norm`` is the headline and it is now
-    GRID-INDEPENDENT as a discriminator: a causal model's residual FALLS with grid refinement
-    (~O(h^2)) while a genuine acausality holds a fixed residual, so refining the grid can only
-    WIDEN the separation -- it can never invert the ranking. There is no need for an external
-    "causal reference model" (the shipped gate used to compare against plain Drude, the single
-    worst causal reference there is).
+    HOW TO READ THE RESULT (finding Q-5).  ``rms_norm`` is the headline: a causal model's residual
+    FALLS with grid refinement (~O(h^2)) while a genuine acausality holds a fixed residual, so
+    REFINING the grid can only widen the separation. There is no need for an external "causal
+    reference model" (the shipped gate used to compare against plain Drude, the single worst causal
+    reference there is).
+
+    RESOLUTION ENVELOPE (fix-verify W1 item 5 -- the claim above holds only INSIDE it).  Grid
+    refinement can never invert the ranking, but that is a statement about refining FROM a resolved
+    grid; it is NOT a licence to compare residuals on a COARSE one, and the ranking really does
+    invert below about N = 6000 on the reference grid.  The Maclaurin quadrature has to RESOLVE the
+    sharpest feature of Im(eps): a Lorentz line of FWHM ``gamma`` needs ``gamma / h`` grid points
+    across it, and under-resolving it inflates a perfectly CAUSAL model's residual.  Measured on
+    the reference grid (``wmax = 80 wp``, band [0.4 wp, 5 wp]) with the 2-oscillator Lorentz whose
+    narrowest line is ``gamma = 1e14``:
+
+      N        h          gamma/h   lorentz2 rms_norm   worst acausal separation
+      2000     8.53e13    1.17      4.56e-2             NONE -- the causal Lorentz outscores the
+                                                        10x gamma jump (4.66e-2)
+      4000     4.27e13    2.35      7.79e-3             NONE -- level with the 2x jump (7.93e-3)
+      6000     2.84e13    3.52      1.11e-3             7.2x on the 2x jump
+      8000     2.13e13    4.69      1.76e-4             39x   (and the drude floor takes over)
+      16000    1.07e13    9.38      1.92e-5             150x
+
+    So: keep ``gamma_min / h >= ~5`` for every line in the model.  ``feature_pts`` in the returned
+    dict is a MODEL-FREE estimate of that ratio (the sharpest curvature of the sampled Im(eps)
+    inside the band, read as a Lorentzian width in grid points), and a ``RuntimeWarning`` fires
+    below ``_KK_MIN_FEATURE_PTS``.  A discontinuous ``gamma(omega)`` is of course never resolved
+    (``feature_pts`` pinned near 3-5 at every N) -- that is itself the tell, and its ``rms_norm``
+    stays flat under refinement while a resolved causal model's falls.
 
     Secondary keys:
       h, h_rel         : the grid step [rad/s] and h / (omega[-1] - omega[0]).
@@ -675,6 +698,20 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
         causality_ratio = float("inf")
     else:
         causality_ratio = float("nan")
+    feature_pts = _kk_feature_pts(im_chi, band)
+    if feature_pts < _KK_MIN_FEATURE_PTS:
+        warnings.warn(
+            "check_kk: the sharpest feature of Im(eps) inside the metric band spans only about "
+            "{:.2f} grid points (h = {:.4g} rad/s, N = {}); the Maclaurin quadrature needs >= {:g} "
+            "to resolve a line, and UNDER-RESOLVING a line inflates the residual of a perfectly "
+            "CAUSAL model. rms_norm = {:.4e} is therefore NOT comparable against another model's "
+            "on this grid -- on the reference grid the ranking inverts below N ~ 6000 (a causal "
+            "2-oscillator Lorentz with gamma/h = 2.3 scored 7.8e-3, level with an acausal 2x jump "
+            "in gamma). Refine the grid, or narrow the band away from the sharp feature. A "
+            "DISCONTINUOUS gamma(omega) never resolves at any N -- that is itself the tell; "
+            "confirm by checking whether rms_norm falls under refinement.".format(
+                feature_pts, h, omega.size, _KK_MIN_FEATURE_PTS, rms_norm),
+            RuntimeWarning, stacklevel=2)
     return {
         "omega": omega, "re_model": re_model, "re_kk": re_kk, "residual": residual,
         "band_mask": band, "eps_inf_est": eps_inf_est, "scale": scale,
@@ -685,8 +722,37 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
         "quad_floor_norm": quad_floor_norm,
         "causality_ratio": causality_ratio,
         "rms_norm_per_h": float(rms_norm / h_rel) if h_rel > 0.0 else float("nan"),
+        "feature_pts": feature_pts,
         "edge_correct": bool(edge_correct),
     }
+
+
+# Minimum resolved width, in grid points, of the sharpest Im(eps) feature inside the metric band
+# (fix-verify W1 item 5).  Below this the quadrature error of a CAUSAL model swamps the causality
+# signal and the causal/acausal ranking can invert; see check_kk's RESOLUTION ENVELOPE table.
+_KK_MIN_FEATURE_PTS = 5.0
+
+
+def _kk_feature_pts(im_chi: np.ndarray, band: np.ndarray) -> float:
+    """MODEL-FREE width, in grid points, of the sharpest feature of ``Im(eps)`` inside ``band``.
+
+    A Lorentzian of FWHM ``G`` sampled at step ``h`` has, at its peak, the second difference
+    ``y[k-1] - 2 y[k] + y[k+1] ~= -2 A (2h/G)^2``, so the largest band-normalized second difference
+    ``rho = max|d2| / max|y|`` inverts to ``G/h ~= sqrt(8/rho)``.  Restricted to the metric band on
+    purpose: the low-omega Drude edge (``Im ~ 1/omega^3``) is the sharpest thing on any uniform
+    grid, it is never resolved, and check_kk already excludes it from the band."""
+    y = np.abs(np.asarray(im_chi, dtype=np.float64))
+    if y.size < 3:
+        return float("inf")
+    d2 = np.abs(y[2:] - 2.0 * y[1:-1] + y[:-2])
+    inner = np.asarray(band, dtype=bool)[1:-1]
+    if not np.any(inner):
+        return float("inf")
+    ymax = float(np.max(y[np.asarray(band, dtype=bool)]))
+    if not (ymax > 0.0):
+        return float("inf")
+    rho = float(np.max(d2[inner])) / ymax
+    return float(np.sqrt(8.0 / rho)) if rho > 0.0 else float("inf")
 
 
 def _kk_auto_band(omega, re_model, dc_skip):

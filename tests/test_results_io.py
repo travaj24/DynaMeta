@@ -1,6 +1,8 @@
 """Fast unit tests for the results/io layer: the HDF5+Zarr store, the SweepResults container, the
 persistent optical-solver cache, and the matplotlib viz helpers (all without a real solver)."""
 import os
+import pathlib
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -376,3 +378,110 @@ def test_close_flushes_and_unregisters(tmp_path):
     assert atexit._ncallbacks() == n0, "close() must release the atexit slot"
     c.close()                                                  # idempotent
     assert atexit._ncallbacks() == n0
+
+
+def test_dropped_caches_do_not_accumulate_atexit_trampolines(tmp_path):
+    """audit R-7 follow-on: the weakref trampoline stops a dropped cache from being IMMORTAL, but
+    atexit keeps every registration for the life of the process -- so a sweep that built and
+    dropped caches left one dead no-op callback behind per cache (probe: 9 callbacks after 5
+    dropped caches). __del__ now unregisters, so the count must return to its baseline while the
+    batched tails still get persisted."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import atexit
+    import gc
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    gc.collect()
+    n0 = atexit._ncallbacks()
+    for i in range(5):
+        c = _mk_cache(tmp_path, "r7e%d" % i, autosave=True, autosave_every=64)
+        c(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
+        assert c._unsaved == 1                                 # batched, nothing written yet
+        del c
+    gc.collect()
+    assert atexit._ncallbacks() == n0, "dropped caches left dead atexit trampolines behind"
+    for i in range(5):                                         # ... and every tail survived
+        c2 = _mk_cache(tmp_path, "r7e%d" % i, autosave=False)
+        c2(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
+        assert c2.stats()["hits"] == 1
+        c2.close()
+    gc.collect()
+    assert atexit._ncallbacks() == n0
+
+
+def test_cache_construction_preloads_the_store_backend(tmp_path):
+    """audit R-7: every write path is DEFERRED (autosave batches; the last batch is written by the
+    atexit hook or by __del__), so a cache whose whole run fits in one batch used to reach
+    save_arrays -- and therefore `import h5py` -- for the FIRST time during interpreter SHUTDOWN.
+    That segfaults on Windows / CPython 3.14 / h5py 3.16 (0xC0000005, no traceback, AFTER the rows
+    are written). Constructing the cache must import the backend while the interpreter is healthy.
+    The companion subprocess gate is test_cache_flush_at_interpreter_shutdown_does_not_crash."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import sys
+    mod = {"hdf5": "h5py", "zarr": "zarr"}[_FORMATS[0]]
+    code = ("import sys; "
+            "from dynameta.cache import OpticalSolverCache; "
+            "assert {m!r} not in sys.modules, 'importing dynameta.cache already loaded it'; "
+            "c = OpticalSolverCache(lambda *a: None, r'{p}'); "
+            "print({m!r} in sys.modules)").format(
+                m=mod, p=str(tmp_path / ("pre" + _EXT[_FORMATS[0]])).replace("\\", "\\\\"))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(pathlib.Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().endswith("True"), out.stdout + out.stderr
+    # best effort: an unknown extension must NOT turn construction into a raise
+    OpticalSolverCache = __import__("dynameta.cache", fromlist=["x"]).OpticalSolverCache
+    OpticalSolverCache(lambda *a: None, str(tmp_path / "no_such_extension.bogus"))
+
+
+@pytest.mark.parametrize("mode", ["drop", "keep", "cycle", "shutdown"])
+def test_cache_flush_at_interpreter_shutdown_does_not_crash(tmp_path, mode):
+    """The R-7 segfault itself, in a subprocess, over the four teardown orderings: dropped before
+    exit (__del__ runs mid-run), alive at exit (the atexit trampoline runs), held in a reference
+    CYCLE (only the GC can reclaim it), and held by a module global cleared during shutdown (a
+    LATE __del__). Pre-fix: rc=0 for 'drop' and 0xC0000005 for the other three. All four must exit
+    cleanly AND leave the batched tail on disk."""
+    if not _FORMATS or _FORMATS[0] != "hdf5":
+        pytest.skip("the shutdown segfault is the HDF5/h5py path")
+    import sys
+    p = str(tmp_path / ("shut" + _EXT["hdf5"]))
+    child = '''
+import sys
+from types import SimpleNamespace
+sys.path.insert(0, {root!r})
+from dynameta.cache import OpticalSolverCache
+from dynameta.core.interfaces import OpticalResult
+from dynameta.geometry import Design, Layer, Stack, UnitCell
+from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+reg = MaterialRegistry()
+for nm, e in [("air", 1.0), ("m", 4.0)]:
+    reg.add(Material(nm, ConstantOptical(complex(e))))
+d = Design(name="c", unit_cell=UnitCell.square(220e-9),
+           stack=Stack(layers=[Layer("s", 100e-9, "m", inclusions=[])],
+                       superstrate_material="air", substrate_material="air"),
+           electrodes=[], materials=reg)
+def inner(design, geo, eps, lam, ns, nb):
+    return OpticalResult(r=complex(lam*1e5, 0), R=float(lam*1e5), phase_deg=0.0, solve_time_s=0.25)
+inner.cache_fingerprint = "r7-probe"
+eps = {{"s": SimpleNamespace(is_uniform=True, scalar=4.0+0j)}}
+c = OpticalSolverCache(inner, {path!r}, autosave=True, autosave_every=64)
+for i in range(5):
+    c(d, None, eps, 1.0e-6 + i*1e-9, 1.0, 1.0)
+assert c._unsaved == 5
+mode = {mode!r}
+if mode == "drop":
+    del c
+elif mode == "cycle":
+    c._self_cycle = c; del c
+elif mode == "shutdown":
+    import __main__; __main__._keep = c
+'''.format(root=str(pathlib.Path(__file__).resolve().parents[1]), path=p, mode=mode)
+    out = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True,
+                         cwd=str(pathlib.Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, "rc={} (0xC0000005 = -1073741819) stderr={!r}".format(
+        out.returncode, out.stderr[-400:])
+    probe = _mk_cache(tmp_path, "unused", autosave=False)      # a throwaway to reach the class
+    c2 = type(probe)(probe.inner, p, autosave=False)
+    assert len(c2._mem) == 5, "the batched tail was not persisted in mode " + mode

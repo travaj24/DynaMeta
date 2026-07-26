@@ -112,7 +112,10 @@ def _h1_periodicity_violation(mesh, Px, Py, order=2, ns=7):
                 continue
             worst = max(worst, abs(a - b))
             scale = max(scale, abs(a), abs(b))
-    return worst / max(scale, 1e-30)
+    # T-1-class guard: if EVERY probe point landed outside the mesh, scale stays 0.0 and the
+    # old `worst/1e-30` returned 0 == "perfect periodicity" from zero samples (vacuous pass).
+    assert scale > 0.0, "H1 periodicity probe sampled zero valid points -- probe grid is wrong"
+    return worst / scale
 
 
 def _old_per_face_identify(shape, Px, Py, sym_x=False, sym_y=False):
@@ -197,6 +200,35 @@ def test_unpairable_periodic_face_raises():
         NL._identify_periodic(glued, PX, PY)
 
 
+def test_unpaired_face_message_names_the_right_one_of_the_two_causes():
+    """The orphan message used to blame 'a geometry feature overhangs or crosses the unit cell'
+    unconditionally. Two DIFFERENT defects reach it and they need different fixes, so it now
+    decides between them from the glued shape's own bounding box:
+
+      * a block that stays inside the cell but only ABUTS x=0 -> 'TOUCHES ... without spanning'
+        (the likelier user trigger: an inclusion or footprint edge landing on the boundary);
+      * the F-2 raw-bbox mode -- a cavity band split into an in-patch built from an UNCLIPPED
+        bbox (x = -80..80) plus its outside remainder (x = 80..Px) -- leaves the x=Px remainder
+        face with no x=0 partner -> 'OVERHANGS or CROSSES', quoting the offending span.
+    """
+    cell = occ.Box(occ.Pnt(0, 0, 0), occ.Pnt(PX, PY, 100))
+    touching = occ.Glue([cell, occ.Box(occ.Pnt(0, 0, 100), occ.Pnt(0.5 * PX, PY, 200))])
+    with pytest.raises(RuntimeError) as exc:
+        NL._identify_periodic(touching, PX, PY)
+    msg = str(exc.value)
+    assert "TOUCHES" in msg and "without spanning" in msg
+    assert "OVERHANGS" not in msg
+
+    overhang = occ.Glue([cell,
+                         occ.Box(occ.Pnt(-80.0, 0, 100), occ.Pnt(80.0, PY, 200)),   # raw in-patch
+                         occ.Box(occ.Pnt(80.0, 0, 100), occ.Pnt(PX, PY, 200))])     # its remainder
+    with pytest.raises(RuntimeError) as exc:
+        NL._identify_periodic(overhang, PX, PY)
+    msg = str(exc.value)
+    assert "OVERHANGS" in msg and "-80" in msg
+    assert "TOUCHES" not in msg
+
+
 # --------------------------------------------------------------------- F-23
 def _knob_design(metal_split, **mesh_kw):
     """A 3-layer cell exercising every region class: metal band (split or not), a cavity-split
@@ -244,19 +276,106 @@ def test_maxh_routing_sends_each_region_class_to_its_own_knob():
     """Routing contract (a plain function, no meshing). The catch-all must be the BACKGROUND
     knob: while the loop was inert nothing distinguished it from maxh_inclusion_m, whose 5 nm
     default would otherwise land on every plain dielectric film. A metal region follows
-    maxh_metal_m whether it is a background band or an inclusion."""
+    maxh_metal_m whether it is a background band or an inclusion.
+
+    Two call shapes: with the builder-supplied `mesh_role` (what build() does since F-7), and
+    without it (a direct/subclass call), which falls back to ANCHORED name matching."""
     d = _knob_design(True, maxh_metal_m=11e-9, maxh_metal_skin_m=12e-9, maxh_metal_bulk_m=13e-9,
                      maxh_inclusion_m=14e-9, maxh_background_m=15e-9, maxh_substrate_m=16e-9,
                      maxh_superstrate_m=17e-9, maxh_pml_m=18e-9)
     mh = LayeredOpticalBuilder(d)._maxh
-    assert mh("pml_top", "air") == pytest.approx(18.0)
-    assert mh("substrate", "air") == pytest.approx(16.0)
-    assert mh("superstrate", "air") == pytest.approx(17.0)
-    assert mh("metal_skin", "au") == pytest.approx(12.0)
-    assert mh("metal_bulk", "au") == pytest.approx(13.0)
-    assert mh("grating__incl0", "hi") == pytest.approx(14.0)        # dielectric inclusion -> inclusion knob
-    assert mh("grating__incl0", "au") == pytest.approx(11.0)        # metal inclusion -> metal knob
-    assert mh("grating", "air") == pytest.approx(15.0)   # inclusion-layer background -> background
-    assert mh("film", "hi") == pytest.approx(15.0)       # plain full-cell band -> background
-    assert mh("cavity_inpatch", "hi") == pytest.approx(15.0)   # cavity halves are background
-    assert mh("cavity_outside", "hi") == pytest.approx(15.0)
+    for role, args in ((None, ()), ("explicit", ("pml", "substrate", "superstrate", "metal_skin",
+                                                 "metal_bulk", "inclusion", "layer"))):
+        r = (lambda i: args[i]) if args else (lambda i: None)
+        assert mh("pml_top", "air", r(0)) == pytest.approx(18.0)
+        assert mh("substrate", "air", r(1)) == pytest.approx(16.0)
+        assert mh("superstrate", "air", r(2)) == pytest.approx(17.0)
+        assert mh("metal_skin", "au", r(3)) == pytest.approx(12.0)
+        assert mh("metal_bulk", "au", r(4)) == pytest.approx(13.0)
+        assert mh("grating__incl0", "hi", r(5)) == pytest.approx(14.0)   # dielectric inclusion
+        assert mh("grating__incl0", "au", r(5)) == pytest.approx(11.0)   # metal inclusion -> metal
+        assert mh("grating", "air", r(6)) == pytest.approx(15.0)  # inclusion-layer bg -> background
+        assert mh("film", "hi", r(6)) == pytest.approx(15.0)      # plain full-cell band
+        assert mh("cavity_inpatch", "hi", r(6)) == pytest.approx(15.0)   # cavity halves are bg
+        assert mh("cavity_outside", "hi", r(6)) == pytest.approx(15.0)
+
+
+# ---------------------------------------------------------------------- F-7
+# Layer names that merely CONTAIN a reserved word. F-23 made the per-region maxh loop live, and
+# the routing was substring-based (`"substrate" in region_name`, `"pml" in region_name`,
+# `endswith("_bulk")`, ...) -- so each of these took a knob belonging to another region class,
+# silently and in the COARSENING direction (maxh_substrate_m / maxh_pml_m are the coarsest knobs
+# in the spec, so a device layer routed there is UNDER-resolved, not merely slow).
+_F7_COLLISIONS = [
+    ("ito_substrate_cap",   "maxh_substrate_m"),      # contains 'substrate'
+    ("substrate_contact",   "maxh_substrate_m"),      # contains 'substrate'
+    ("superstrate_matching", "maxh_superstrate_m"),   # contains 'superstrate'
+    ("pml_calibration_film", "maxh_pml_m"),           # contains 'pml'
+    ("au_bulk",             "maxh_metal_bulk_m"),     # ends with the builder's '_bulk' token
+    ("probe_skin",          "maxh_metal_skin_m"),     # ends with the builder's '_skin' token
+]
+
+
+def _collision_design(**mesh_kw):
+    """Six PLAIN dielectric device layers whose names collide with a reserved word. Every one of
+    them is a full-cell background band, so all six must follow maxh_background_m."""
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("mid", ConstantOptical(complex(4.0, 0.0))))
+    layers = [Layer(name, 40e-9, "mid") for name, _ in _F7_COLLISIONS]
+    base = dict(pml_thk_m=300e-9, superstrate_buffer_m=200e-9, substrate_buffer_m=200e-9,
+                maxh_superstrate_m=170e-9, maxh_substrate_m=160e-9, maxh_pml_m=180e-9,
+                maxh_metal_m=110e-9, maxh_metal_bulk_m=130e-9, maxh_metal_skin_m=120e-9,
+                maxh_inclusion_m=140e-9, maxh_background_m=150e-9)
+    base.update(mesh_kw)
+    return Design(name="f7", unit_cell=UnitCell.square(PX * 1e-9),
+                  stack=Stack(layers=layers, superstrate_material="air",
+                              substrate_material="air"),
+                  electrodes=[], materials=reg, mesh_3d=Mesh3DSpec(**base),
+                  optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0))
+
+
+def test_f7_user_layer_names_containing_reserved_words_route_by_role():
+    """Every one of the six collisions must follow its OWN role (a plain background band ->
+    maxh_background_m = 150 nm), not the reserved knob its name happens to contain. Asserted on
+    `_maxh_by_region`, i.e. the value that actually reached the mesher, after a real build."""
+    b = LayeredOpticalBuilder(_collision_design())
+    b.build()
+    got = b._maxh_by_region
+    for name, hijacked in _F7_COLLISIONS:
+        assert name in got, "region {} missing from the build ({})".format(name, sorted(got))
+        assert got[name] == pytest.approx(150.0), \
+            "{} routed to {} ({} nm) instead of maxh_background_m".format(name, hijacked, got[name])
+    # the builder's OWN reserved regions still route correctly through the same map
+    assert got["pml_bot"] == pytest.approx(180.0) and got["pml_top"] == pytest.approx(180.0)
+    assert got["substrate"] == pytest.approx(160.0)
+    assert got["superstrate"] == pytest.approx(170.0)
+
+
+def test_f7_substring_routing_would_have_hijacked_all_six():
+    """Negative control: the PRE-fix substring rule, applied to the same six names, sends each to
+    the wrong knob -- so the gate above is testing a real defect, not a tautology."""
+    d = _collision_design()
+    spec = d.mesh_3d
+
+    def _pre_fix(region_name):                       # verbatim pre-F-7 routing, background default
+        if "pml" in region_name:         return spec.maxh_pml_m
+        if "substrate" in region_name:   return spec.maxh_substrate_m
+        if "superstrate" in region_name: return spec.maxh_superstrate_m
+        if region_name.endswith("_skin"): return spec.maxh_metal_skin_m
+        if region_name.endswith("_bulk"): return spec.maxh_metal_bulk_m
+        return spec.maxh_background_m
+    for name, hijacked in _F7_COLLISIONS:
+        assert _pre_fix(name) == pytest.approx(getattr(spec, hijacked)), name
+        assert _pre_fix(name) != pytest.approx(spec.maxh_background_m), name
+
+
+def test_f7_reserved_names_are_matched_whole_not_as_substrings():
+    """The name-matching FALLBACK (mesh_role=None) is anchored: exact reserved band names, the
+    builder-only `__incl` marker, and the terminal `_skin` / `_bulk` tokens the builder appends."""
+    mh = LayeredOpticalBuilder(_collision_design())._maxh
+    assert mh("pml_bot", "mid") == pytest.approx(180.0)      # exact reserved name
+    assert mh("pml_top", "mid") == pytest.approx(180.0)
+    assert mh("substrate", "mid") == pytest.approx(160.0)
+    for name, _ in _F7_COLLISIONS[:4]:                       # the four substring collisions
+        assert mh(name, "mid") == pytest.approx(150.0), name

@@ -9,6 +9,7 @@ cannot run -- the heavy NGSolve/DEVSIM stack is not installed in CI.
   python -m validation.run_all --tier full           # everything + the examples/ workflows
   python -m validation.run_all oblique sp            # only scripts whose name matches a token
   python -m validation.run_all --tier smoke lc       # tier and tokens compose (AND)
+  python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity   # declared exception
 
 Tiers:
   smoke -- the SMOKE set below: pure numpy/scipy scripts measured/verified < ~30 s each, no
@@ -17,8 +18,24 @@ Tiers:
            import-grepping misclassifies lazy-import and long-numpy cases).
   full  -- every gated validation PLUS the exit-gated examples/ workflows.
 
-Exits non-zero if ANY selected script fails or errors. Pure-diagnostic scripts (no PASS/FAIL
-verdict) are skipped. Budget: smoke ~ a few minutes; full ~ hours with the [solvers] extra.
+EXIT-CODE CONTRACT (audit T-3 -- the tier used to read green while executing nothing):
+  0   PASS.
+  42  SKIP: the script declared a required capability absent (numba/CUDA/jax/ngsolve/devsim).
+      Counted SEPARATELY from PASS in the summary, never green-washed into it.
+      * In the SMOKE tier a 42 is a FAILURE by default: smoke is the CI-able tier, so a
+        capability it needs is a capability CI was supposed to install. Naming the script in
+        --allow-skip turns that back into an informational skip -- and forces the exception
+        to be visible in the workflow file (e.g. numba, which the dedicated `numba` CI leg
+        runs for real instead).
+      * In the other tiers a 42 stays informational: those tiers legitimately run without
+        the [solvers] extra.
+  124 TIMEOUT (PER_SCRIPT_TIMEOUT_S).
+  ANY OTHER non-zero (including a code this runner does not know) is a FAILURE. There is no
+  "unrecognized, therefore harmless" branch.
+
+Exits non-zero if ANY selected script fails, errors, times out, or (smoke, undeclared) skips.
+Pure-diagnostic scripts (no PASS/FAIL verdict) are excluded. Budget: smoke ~ a few minutes;
+full ~ hours with the [solvers] extra.
 """
 import os
 import re
@@ -32,6 +49,8 @@ REPO = os.path.dirname(HERE)
 SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
         "reference_modulator_spectrum"}
 PER_SCRIPT_TIMEOUT_S = 1800
+SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
+TIMEOUT_RC = 124
 
 # The fast solver-free tier (opt-in; see module docstring). Verified 2026-06-10: each is pure
 # numpy/scipy at runtime (lazy-import traps like results_io_demo included deliberately;
@@ -104,7 +123,23 @@ def main(argv):
             print("[run_all] unknown tier {!r} (smoke | full)".format(tier), flush=True)
             return 2
         args = args[:i] + args[i + 2:]
+    # audit T-3: declared exceptions to the smoke tier's strict-skip rule. Repeatable and/or
+    # comma-separated; a name here must be a script the CALLER runs elsewhere for real (the
+    # workflow file is where that promise is visible).
+    allow_skip = set()
+    while "--allow-skip" in args:
+        i = args.index("--allow-skip")
+        try:
+            value = args[i + 1]
+        except IndexError:
+            print("[run_all] --allow-skip needs a value: NAME[,NAME...]", flush=True)
+            return 2
+        allow_skip.update(n for n in value.replace(",", " ").split() if n)
+        args = args[:i] + args[i + 2:]
     tokens = args
+    # smoke is the CI-able tier, so "capability absent" there means CI did not install
+    # something it was supposed to -- a red, not a shrug (audit T-3).
+    strict_skip = tier == "smoke"
 
     jobs = [("validation", n) for n in _gated(HERE, skip=SKIP)]
     n_gated = len(jobs)
@@ -166,25 +201,49 @@ def main(argv):
                                cwd=REPO, timeout=PER_SCRIPT_TIMEOUT_S)
             rc = p.returncode
         except subprocess.TimeoutExpired:
-            rc = 124
+            rc = TIMEOUT_RC
         dt = time.time() - t0
-        # audit C6-6: rc == 42 is the SKIP convention (required capability absent --
+        # audit C6-6: rc == SKIP_RC is the SKIP convention (required capability absent --
         # CUDA/cupy/jax/ngsolve/devsim/lumenairy not installed), counted separately so a
-        # never-executed physics gate cannot read as a green PASS in the summary
-        tag = ("PASS" if rc == 0 else "SKIP" if rc == 42
-               else ("TIMEOUT" if rc == 124 else "FAIL(rc={})".format(rc)))
-        results.append((pkg + "." + name, rc, dt))
+        # never-executed physics gate cannot read as a green PASS in the summary. audit T-3:
+        # in the smoke tier that skip is itself a FAILURE unless --allow-skip declares it,
+        # because smoke is the tier CI is supposed to be able to run in full.
+        undeclared_skip = rc == SKIP_RC and strict_skip and name not in allow_skip
+        if rc == 0:
+            tag = "PASS"
+        elif rc == SKIP_RC:
+            tag = "SKIP!" if undeclared_skip else "SKIP"
+        elif rc == TIMEOUT_RC:
+            tag = "TIMEOUT"
+        else:
+            tag = "FAIL(rc={})".format(rc)          # incl. any rc this runner does not know
+        results.append((pkg + "." + name, rc, dt, undeclared_skip))
         print("[run_all] {:48s} {:8s} ({:5.0f}s)".format(pkg + "." + name, tag, dt), flush=True)
-    skipped = [r for r in results if r[1] == 42]
-    failed = [r for r in results if r[1] not in (0, 42)]
-    print("\n[run_all] {}/{} passed; {} skipped (capability absent); {} failed/errored".format(
-        len(results) - len(failed) - len(skipped), len(results), len(skipped), len(failed)),
-        flush=True)
+    bad_skips = [r for r in results if r[3]]
+    skipped = [r for r in results if r[1] == SKIP_RC and not r[3]]
+    failed = [r for r in results if r[1] not in (0, SKIP_RC)]
+    print("\n[run_all] {}/{} passed; {} skipped (capability absent, declared); {} failed/errored;"
+          " {} skipped-but-required".format(
+              len(results) - len(failed) - len(skipped) - len(bad_skips), len(results),
+              len(skipped), len(failed), len(bad_skips)), flush=True)
     if skipped:
-        print("[run_all] SKIPPED: " + ", ".join(n for n, _, _ in skipped), flush=True)
+        print("[run_all] SKIPPED (declared): " + ", ".join(n for n, _, _, _ in skipped), flush=True)
     if failed:
-        print("[run_all] FAILURES: " + ", ".join(n for n, _, _ in failed), flush=True)
-    return 0 if not failed else 1
+        print("[run_all] FAILURES: " + ", ".join(n for n, _, _, _ in failed), flush=True)
+    if bad_skips:
+        print("[run_all] REQUIRED-BUT-SKIPPED (smoke tier: install the missing capability, or "
+              "pass --allow-skip NAME once something else runs it for real): "
+              + ", ".join(n for n, _, _, _ in bad_skips), flush=True)
+    # keep the exception list from rotting: an --allow-skip name that did NOT skip is either a
+    # typo or a capability that is now installed, and either way the caller should drop it.
+    selected = {n.split(".", 1)[-1] for n, _, _, _ in results}
+    stale = (allow_skip & selected) - {n.split(".", 1)[-1] for n, rc, _, _ in results
+                                       if rc == SKIP_RC}
+    if stale:
+        print("[run_all] NOTE: --allow-skip name(s) that ran instead of skipping: {} (the "
+              "capability is present -- drop them from the caller)".format(
+                  ", ".join(sorted(stale))), flush=True)
+    return 0 if not (failed or bad_skips) else 1
 
 
 if __name__ == "__main__":

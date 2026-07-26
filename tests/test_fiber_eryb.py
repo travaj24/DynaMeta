@@ -184,3 +184,86 @@ def test_yb_parasitic_gain_tracks_inversion():
     beta_hi, par_hi = run(2e-23)                          # weak transfer -> Yb builds up
     assert beta_hi > beta_lo
     assert par_hi > par_lo
+
+
+# ============ Protocol: every metric runs on an ErYbAmplifier (audit A-3 follow-on) ============
+
+def test_every_metric_runs_on_an_eryb_amplifier_and_matches_a_direct_resolve():
+    """metrics.* used to reach past the public re-seed protocol into the FiberAmplifier-private
+    `_clone`, so gain_compression_curve / saturation_output_power / slope_efficiency /
+    gain_spectrum all died with `AttributeError: 'ErYbAmplifier' object has no attribute
+    '_clone'` (only power_conversion_efficiency, which never clones, worked). They now route
+    through with_signals / with_pumps / without_ase, which THIS class implements -- so each
+    metric must not only run, it must reproduce a direct re-solve of the same operating point
+    EXACTLY (a clone that quietly dropped an opt-in would run but disagree)."""
+    from dynameta.optics.fiber_amp import metrics as M
+
+    fib = FiberSpec(3.0e-6, 0.20, 2.0e25, 3.0, clad_radius_m=50e-6)
+
+    def eydfa(P_sig=1e-3, pump=4.0):
+        return ErYbAmplifier(ER, YB, fib, [Pump(pump, 0.976e-6, "fwd", cladding=True)],
+                             [Signal(P_sig, 1.55e-6)], AseBand(1.50e-6, 1.60e-6, n_bins=16),
+                             n_yb_m3=4.0e26)
+
+    def _sig_out(res):
+        return float(res.power_W[[i for i, k in enumerate(res.kind) if k == "signal"][0], -1])
+
+    # 1) gain_compression_curve == the same amplifier re-solved at each input power
+    p_in = [1e-5, 1e-4, 1e-3, 1e-2]
+    cc = M.gain_compression_curve(eydfa(), p_in, signal_index=0)
+    direct = [float(eydfa(p).solve().signal_gain_dB[0]) for p in p_in]
+    assert np.array_equal(np.asarray(cc.gain_dB), np.asarray(direct))
+    assert cc.gain_dB[0] - cc.gain_dB[-1] > 1.0                  # genuinely compressing
+
+    # 2) saturation_output_power is the 3 dB point of that same curve
+    p_sat = M.saturation_output_power(eydfa(), p_in_min_W=1e-6, p_in_max_W=1e-1, n=9)
+    assert np.isfinite(p_sat) and p_sat > 0.0
+
+    # 3) slope_efficiency == the same amplifier re-solved at each launched pump
+    pumps = [1.0, 2.0, 4.0, 6.0]
+    se = M.slope_efficiency(eydfa(), pumps, saturating_signal_W=1e-2)
+    direct_out = [_sig_out(eydfa(1e-2, pw).solve()) for pw in pumps]
+    assert np.array_equal(np.asarray(se.signal_out_W), np.asarray(direct_out))
+    assert 0.0 < se.slope < se.stokes_limit                      # below the quantum-defect ceiling
+
+    # 4) gain_spectrum == an explicitly ASE-free, probe-only re-solve (without_ase drops BOTH
+    #    ErYb bands, and the probe replaces the amplifier's own signals)
+    lams = [1.53e-6, 1.55e-6, 1.57e-6]
+    gs = M.gain_spectrum(eydfa(), lams, probe_power_W=1e-9)
+    direct_g = []
+    for lam in lams:
+        rr = eydfa().without_ase().with_signals([Signal(1e-9, lam)]).solve()
+        si = [i for i, k in enumerate(rr.kind) if k == "signal"][0]
+        direct_g.append(10.0 * np.log10(rr.power_W[si, -1] / rr.power_W[si, 0]))
+    assert np.array_equal(np.asarray(gs.gain_dB), np.asarray(direct_g))
+    assert M.gain_spectrum(eydfa(), [1.55e-6], probe_power_W=1e-9,
+                           with_ase=True).gain_dB[0] < gs.gain_dB[1]   # ASE loading costs gain
+
+    # 5) power_conversion_efficiency (the one that always worked) stays sane
+    pce = M.power_conversion_efficiency(eydfa(), eydfa().solve())
+    assert 0.0 < pce < 1.0
+
+
+def test_eryb_reseed_protocol_is_type_preserving_and_carries_every_optin():
+    """with_signals / with_pumps / without_ase all rebuild through ErYbAmplifier's own
+    constructor, so the class AND every opt-in (both ions, the Yb density, k_tr / k_back / A_32,
+    the Er upconversion coefficient, the second ASE band) survive."""
+    fib = FiberSpec(3.0e-6, 0.20, 2.0e25, 3.0, clad_radius_m=50e-6)
+    a = ErYbAmplifier(ER, YB, fib, [Pump(4.0, 0.976e-6, "fwd", cladding=True)],
+                      [Signal(1e-3, 1.55e-6)], AseBand(1.50e-6, 1.60e-6, n_bins=8),
+                      n_yb_m3=4.0e26, k_tr_m3_s=3.3e-22, k_back_m3_s=1.1e-23,
+                      a32_per_s=6.5e5, yb_ase=AseBand(1.00e-6, 1.08e-6, n_bins=4),
+                      upconversion_C_up=3e-24)
+    carried = ("er_ion", "yb_ion", "fiber", "_n_yb", "_k_tr", "_k_back", "_a32",
+               "upconversion_C_up", "yb_ase", "ase")
+    for clone, changed in ((a.with_signals([Signal(7e-3, 1.55e-6)]), {"signals"}),
+                           (a.with_pumps([Pump(9.0, 0.976e-6, "fwd", cladding=True)]), {"pumps"}),
+                           (a.without_ase(), {"ase", "yb_ase"})):
+        assert type(clone) is ErYbAmplifier
+        assert set(clone.__dict__) == set(a.__dict__)            # no attribute lost or invented
+        for k in carried:
+            if k in changed:
+                continue
+            assert clone.__dict__[k] == a.__dict__[k] or clone.__dict__[k] is a.__dict__[k], k
+    assert a.without_ase().ase is None and a.without_ase().yb_ase is None
+    assert a.ase is not None and a.yb_ase is not None            # the original is untouched

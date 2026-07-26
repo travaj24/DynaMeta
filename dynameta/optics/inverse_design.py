@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import C_LIGHT
 
 
 def weighted_objective(terms):

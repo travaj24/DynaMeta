@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -285,7 +285,6 @@ class Stacked3DSpec:
         else:                                   # single semiconductor (gate above OR below)
             primary_idx, gate_adj_idx, extra_idxs = semi_idxs[0], semi_idxs[0], []
             step = 1 if gate_idx > semi_idxs[0] else -1
-        semi_idx = primary_idx
         semi_L = layers[primary_idx]
         for i in semi_idxs:                     # every semiconductor in the run must be laterally uniform
             if layers[i].inclusions:
@@ -654,7 +653,6 @@ class Devsim3DEquilibrium:
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        tsemi, tox = s.semi_thk_m * 1e9, s.oxide_thk_m * 1e9
         os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
@@ -662,7 +660,6 @@ class Devsim3DEquilibrium:
         occ = gmsh.model.occ
         stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
         ztop = stack[-1][4]                                     # top of the topmost dielectric
-        z_semi_top = stack[0][4]                                # semi/oxide interface (= tsemi)
         boundaries = [stack[k][3] for k in range(1, len(stack))]   # interior z-boundaries (semi/ox, ox/diel1,...)
         frac = float(s.gate_patch_frac)
         patterned = frac < 1.0 - 1e-9

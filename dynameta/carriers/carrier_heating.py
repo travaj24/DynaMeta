@@ -202,6 +202,11 @@ def kane_mass_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, *, g_s: int =
         return np.full(shape, float(m0_kg)) if shape else float(m0_kg)
     n_b, Te_b = np.broadcast_arrays(np.asarray(n_m3, dtype=np.float64),
                                     np.asarray(Te_K, dtype=np.float64))
+    # NaN/inf FIRST: every comparison against NaN is False, so a NaN slid past the sign checks and
+    # died much later inside _kane_chemical_potential as "could not bracket mu(T_e) from above" --
+    # a RuntimeError that points at the root finder instead of at the caller's input.
+    if not (np.all(np.isfinite(n_b)) and np.all(np.isfinite(Te_b))):
+        raise ValueError("kane_mass_of_Te: n_m3 and Te_K must be finite (got NaN or inf)")
     if np.any(n_b <= 0.0) or np.any(Te_b < 0.0):
         raise ValueError("kane_mass_of_Te: require n_m3 > 0 and Te_K >= 0")
     out = np.array([_kane_conductivity_mass(m0_kg, alpha_per_eV, float(nn), float(tt), g_s, g_v)
@@ -221,7 +226,12 @@ def _kane_mass_mean_energy_of_Te(m0_kg: float, alpha_per_eV: float, n_m3, Te_K, 
     the C-1/N5 error-sign gate (the legacy form UNDER-states the T_e-induced rise below
     a*E_F ~ 0.2 and OVER-states it above) keep a reference implementation to test against.
     Its Sommerfeld expansion is a degenerate-gas result: it diverges from the truth once
-    kB T_e ~ E_F."""
+    kB T_e ~ E_F.
+
+    OUTSIDE THAT ENVELOPE IT RETURNS SILENT NONSENSE (fix-verify W1 item 6): the (kT/E_F)^2 term is
+    unbounded, so at n = 1e25 m^-3, T_e = 20000 K (kT/E_F = 36.5) it returns m/m0 = 159.7 against
+    the f-sum truth 5.640 -- 28x high, with NO warning. It is private and has no callers outside
+    the regression gates for exactly this reason; do not resurrect it as a fast path."""
     if alpha_per_eV == 0.0:
         return np.full(np.shape(np.asarray(n_m3, dtype=np.float64)), float(m0_kg)) \
             if np.ndim(n_m3) else float(m0_kg)

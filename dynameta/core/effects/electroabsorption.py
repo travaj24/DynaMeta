@@ -322,7 +322,15 @@ class BursteinMossEdge:
     e_grid_J overrides the auto grid; it is validated against the same tail criterion and warns
     (audit R-2: the old guard only checked that the grid BRACKETED the gap, and accepted a grid
     ending 1 meV above Eg). An overriding grid is still used for both DeltaEffect halves, so it is
-    pinned too.
+    pinned too. The AUTO grid is size-capped (_KK_MAX_GRID_BYTES): E_hi ~ tol^(-1/(2-p)) explodes as
+    p -> 2 (1.6e9 points = 12.4 GB at p = 1.5), so past the cap _kk_grid RAISES and names e_grid_J
+    rather than attempting the allocation.
+
+    tauc_exponent = 0 (the 2-D / constant-joint-DOS edge) is ALLOWED and is a clean STEP: eps2 = 0
+    below Eg_opt, alpha_edge (Eg_opt/E)^2 above. That requires masking the shape factor rather than
+    evaluating ((E-Eg)/Eg)^p, because IEEE ``0.0 ** 0.0 == 1.0`` otherwise puts alpha_edge (Eg/E)^2
+    of absorption EVERYWHERE below the gap (diverging toward E -> 0, and driving Im(eps) NEGATIVE --
+    gain -- at a sub-gap probe once the equally corrupted KK dn pushed n_re past zero). See _eps2.
     """
     eps_inf: float
     Eg0_J: float                  # undoped optical gap [J] (e.g. 3.6 * Q_E for ITO)
@@ -340,6 +348,7 @@ class BursteinMossEdge:
     _KK_E_LO_J = 1.0e-21          # grid start [J] (~0+, the KK lower limit; NOT exactly 0: _eps2
                                   # divides by E, and dalpha is identically 0 below the gap anyway)
     _KK_ROW_CHUNK_BYTES = 8 << 20  # byte budget for one dalpha_rows chunk (the grid is now ~1e5 wide)
+    _KK_MAX_GRID_BYTES = 256 << 20  # hard cap on the AUTO grid's own float64 footprint (see _kk_grid)
 
     def gap_shift_J(self, n_m3):
         """Burstein-Moss blueshift dE_BM(n) [J] = (hbar^2/2)(1/m_vc)(3 pi^2 n)^(2/3)."""
@@ -354,17 +363,34 @@ class BursteinMossEdge:
 
     def _eps2(self, E_eval, Eg_opt):
         """Dimensionless interband Im(eps) edge: alpha_edge * ((E-Eg)/Eg)^p * (Eg/E)^2 above Eg, else 0.
-        Non-dimensionalized by Eg so alpha_edge is an O(1) amplitude (not a unit-laden prefactor)."""
+        Non-dimensionalized by Eg so alpha_edge is an O(1) amplitude (not a unit-laden prefactor).
+
+        The shape factor is MASKED on x = (E - Eg)/Eg > 0 rather than evaluated as ``x ** p``:
+        numpy (like IEEE-754 ``pow``) defines ``0.0 ** 0.0 == 1.0``, so at p = 0 -- the physical
+        2-D / constant-joint-DOS edge, and an ALLOWED exponent -- the unmasked form returned
+        alpha_edge * (Eg/E)^2 EVERYWHERE BELOW THE GAP, diverging as (Eg/E)^2 toward E -> 0. That
+        put absorption in the transparency window (Im(eps) = 2 n_re kappa at a 0.5 Eg probe came out
+        NEGATIVE -- gain -- once the correspondingly corrupted KK dn drove n_re below zero) and it
+        poisoned the KK integral itself, since the quadrature grid starts at ~0 and integrated that
+        spurious sub-gap tail. Masked, p = 0 is a clean STEP edge (eps2 = 0 for E <= Eg,
+        alpha_edge (Eg/E)^2 above) and every p > 0 is BYTE-IDENTICAL to the unmasked form
+        (0.0 ** p == 0.0 exactly there)."""
         E = np.asarray(E_eval, dtype=np.float64)
         x = np.maximum(E - Eg_opt, 0.0) / Eg_opt
-        return float(self.alpha_edge) * x ** self._tauc_p() * (Eg_opt / E) ** 2
+        shape = np.where(x > 0.0, x ** self._tauc_p(), 0.0)
+        return float(self.alpha_edge) * shape * (Eg_opt / E) ** 2
 
     # ---- KK grid sizing and tail correction (audit R-2) -------------------------------------
 
     def _tauc_p(self) -> float:
         """tauc_exponent, validated. p >= 2 makes the KK integrand E'^(p-3) non-integrable, i.e.
         dn is INFINITE for this cutoff-free Tauc edge -- the old code returned a finite,
-        purely grid-determined number instead."""
+        purely grid-determined number instead.
+
+        p == 0 IS allowed and physical (a 2-D / constant joint-DOS edge: eps2 jumps to
+        alpha_edge (Eg/E)^2 at the gap and has no onset shape). _eps2 masks the shape factor so
+        that case is a clean step; see its docstring for what the unmasked ``0.0 ** 0.0 == 1.0``
+        did below the gap."""
         p = float(self.tauc_exponent)
         if not (0.0 <= p < 2.0):
             raise ValueError("BursteinMossEdge: tauc_exponent must lie in [0, 2) -- the cutoff-free "
@@ -419,7 +445,17 @@ class BursteinMossEdge:
 
         Deliberately independent of fields['n'] and of lambda: that is what pins DeltaEffect's two
         eps() calls to the SAME grid (audit R-2). The cache key is the set of dataclass fields the
-        grid depends on, so mutating them after construction still rebuilds."""
+        grid depends on, so mutating them after construction still rebuilds.
+
+        SIZE GUARD. The auto E_hi grows as ``tol^(-1/(2-p))``, i.e. EXPLOSIVELY as p -> 2 (the
+        exponent at which the cutoff-free Tauc KK integral diverges): at the fixed _KK_H_J = 10 meV
+        spacing the auto grid is 7.7e4 points at the default p = 0.5, 1.1e6 at p = 1, 1.3e7 at
+        p = 1.25 and 1.6e9 -- a 12.4 GB float64 array, before any of the per-row temporaries -- at
+        p = 1.5 (direct-FORBIDDEN Tauc). _KK_ROW_CHUNK_BYTES bounds a dalpha_rows CHUNK, but a chunk
+        can never be smaller than ONE row of ``grid.size`` doubles, so the row budget is only
+        honourable while the grid itself is bounded. This raises instead of attempting the
+        allocation, and names the ``e_grid_J`` override (a user-chosen grid is validated against the
+        same tail criterion and only WARNS, so the physics stays reachable at any p in [0, 2))."""
         key = (self.e_grid_J, float(self.Eg0_J), float(self.tauc_exponent),
                float(self._KK_TAIL_REL), float(self._KK_GAP_HEADROOM), float(self._KK_H_J),
                float(self._KK_E_LO_J))
@@ -434,6 +470,20 @@ class BursteinMossEdge:
             npts = int(np.ceil(e_hi / float(self._KK_H_J))) + 1
             npts += 1 - npts % 2                       # force ODD (keeps the Maclaurin midpoint
                                                        # branch endpoint-free; R-3 covers both)
+            max_pts = max(3, int(self._KK_MAX_GRID_BYTES) // 8)
+            if npts > max_pts:
+                raise ValueError(
+                    "BursteinMossEdge: the auto Kramers-Kronig grid for tauc_exponent = {:g} needs "
+                    "{:.4g} points ({:.3g} GB of float64) out to E_hi = {:.4g} eV -- the cutoff-free "
+                    "Tauc tail requires E_hi ~ tol^(-1/(2-p)), which diverges as p -> 2, and the "
+                    "{:.4g} meV auto spacing then makes the grid unbounded. The cap is {:.4g} points "
+                    "({:.3g} GB, BursteinMossEdge._KK_MAX_GRID_BYTES). Supply an explicit "
+                    "e_grid_J=(E_lo, E_hi, N) override (it is validated against the same tail "
+                    "criterion and only WARNS, and the tail beyond E_hi is added back in closed "
+                    "form by _kk_tail_dn), or raise _KK_H_J / _KK_TAIL_REL.".format(
+                        self._tauc_p(), float(npts), 8.0 * npts / 1e9, e_hi / Q_E,
+                        float(self._KK_H_J) / Q_E * 1e3, float(max_pts),
+                        8.0 * max_pts / 1e9))
             grid = np.linspace(float(self._KK_E_LO_J), e_hi, npts)
         self._kk_grid_cache = (key, grid)
         self._kk_tail_warned = False       # re-arm the tail test for the new grid (see eps())
