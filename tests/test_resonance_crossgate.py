@@ -10,6 +10,7 @@ shared analytic anchor. One Q convention (energy Q = Re(omega)/(2|Im omega|) = o
 one mode, three routes."""
 
 import numpy as np
+import pytest
 
 from dynameta.constants import C_LIGHT
 from dynameta.analysis import fano_fit, lorentzian_fit
@@ -28,6 +29,11 @@ def _closed_form(m):
     return om, -m * np.pi / (2.0 * np.log(r12))
 
 
+# audit T-13 (`filterwarnings = error`): the matrix-pencil fit of this real FDTD trace drops a
+# marginal pole at |z| = 1.00026 and says so. Expected on an FDTD ringdown (the same advisory is
+# gated for its own sake in test_ringdown.py::test_gate10b_growing_poles_are_dropped_...), and
+# nothing in this cross-instrument gate depends on it. Message-scoped to this one test.
+@pytest.mark.filterwarnings("ignore:matrix_pencil")
 def test_three_instruments_agree_on_one_etalon():
     # ---- instrument 2 first: FDTD ringdown (fully independent solver) picks the mode.
     # NOTE the excitation band matters: this is the ringdown module's own validated gate-6

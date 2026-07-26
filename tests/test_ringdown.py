@@ -22,6 +22,16 @@ from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
                                       fdtd_etalon_ringdown, _ringdown_window,
                                       _nls_refine_real, _real_reconstruction)
 
+# audit T-13 (`filterwarnings = error`): fitting a REAL FDTD etalon trace routinely turns up a
+# marginal pole at |z| = 1 + O(1e-4) (dropped, with the "GROWING pole" advisory) and, at high Q,
+# a short-window note -- data-dependent, e.g. n_slab 3.5 and 10.0 warn here while 5.0 and 7.0 do
+# not, so pinning them per test would be brittle. Both diagnostics have their OWN dedicated gates
+# in this file (test_gate10b_growing_poles_are_dropped_and_do_not_overflow,
+# test_gate9_high_q_window_span_scope_limit_warns), which use `pytest.warns` and are therefore
+# unaffected by these marks -- as is test_gate10c's local `simplefilter("error")`.
+pytestmark = [pytest.mark.filterwarnings("ignore:matrix_pencil"),
+              pytest.mark.filterwarnings("ignore:fdtd_etalon_ringdown")]
+
 
 # ---- Gate 1: SYNTHETIC EXACT (3 well-separated damped cosines) -----------------------------
 

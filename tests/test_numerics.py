@@ -170,7 +170,6 @@ def test_no_direct_numpy_trapezoid_in_library():
     exemption for four bare scipy `trapezoid` calls; they were routed through core.numerics
     instead (byte-identical), so the allow-list stays at one entry."""
     import ast
-    import io
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "dynameta"
     allowed = {"spdc_design.py"}
@@ -179,7 +178,11 @@ def test_no_direct_numpy_trapezoid_in_library():
         if f.name in allowed:
             continue
         scanned += 1
-        tree = ast.parse(io.open(f, encoding="cp1252", errors="replace").read(), filename=str(f))
+        # audit T-13: was `io.open(...).read()`, which leaked one handle per file (~180 here,
+        # ~120 in the sibling scan below) and produced a ResourceWarning + a
+        # PytestUnraisableExceptionWarning at GC -- invisible until `filterwarnings = error`
+        # landed, then two failures with a traceback that named neither test.
+        tree = ast.parse(f.read_text(encoding="cp1252", errors="replace"), filename=str(f))
         offenders += _trapezoid_offenders(tree, str(f))
     assert scanned > 100                                      # the walk really did see the tree
     assert not offenders, ("direct numpy/scipy trapezoid call(s) outside the one home "
@@ -198,7 +201,6 @@ def test_no_direct_numpy_trapezoid_in_tests_and_validation():
     claims are checked against and is itself resolved floor-safely (`trapezoid` or `trapz`,
     whichever this numpy has)."""
     import ast
-    import io
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1]
     allowed = {"test_numerics.py"}
@@ -208,7 +210,7 @@ def test_no_direct_numpy_trapezoid_in_tests_and_validation():
             if f.name in allowed:
                 continue
             scanned += 1
-            tree = ast.parse(io.open(f, encoding="cp1252", errors="replace").read(),
+            tree = ast.parse(f.read_text(encoding="cp1252", errors="replace"),   # audit T-13
                              filename=str(f))
             offenders += _trapezoid_offenders(tree, str(f))
     assert scanned > 100                                      # both trees really were walked

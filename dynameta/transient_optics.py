@@ -41,11 +41,36 @@ def rc_accumulation(times_s, n_off: float, n_on: float, tau_s: float):
     return float(n_off) + (float(n_on) - float(n_off)) * (1.0 - np.exp(-t / float(tau_s)))
 
 
-def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide: float = 9.0,
-                        t_oxide_m: float = 120e-9, eps_mirror: complex = -120.0 + 3.0j):
+def _eps_at(spec, lambda_m: float, what: str) -> complex:
+    """audit X-8: resolve a background permittivity that is EITHER a constant (the incumbent
+    scalar default, wavelength-independent by construction) OR a dispersion callable
+    ``f(lambda_m) -> complex``. This is the hook that makes `enz_reflector_stack`'s `lambda_m`
+    an argument the function actually READS."""
+    if callable(spec):
+        val = complex(spec(float(lambda_m)))
+        if not (np.isfinite(val.real) and np.isfinite(val.imag)):
+            raise ValueError(
+                "enz_reflector_stack: {} dispersion callable returned a non-finite permittivity "
+                "{!r} at lambda_m = {:.6g} m".format(what, val, float(lambda_m)))
+        return val
+    return complex(spec)
+
+
+def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide=9.0,
+                        t_oxide_m: float = 120e-9, eps_mirror=-120.0 + 3.0j):
     """A default reflective gated-ITO modulator stack for the transient map: air | ITO(eps_ito) | oxide |
     mirror. eps_ito is the (graded or scalar) ITO permittivity at this instant. If eps_ito is an array it is
     split into equal ITO sublayers (the depth-resolved ENZ profile); a scalar is one homogeneous film.
+
+    `lambda_m` IS READ (audit X-8). It used to be accepted and then completely ignored --
+    AST-verified -- so this builder returned a byte-identical stack at 1.31 um and 1.55 um while
+    its signature promised otherwise, and a caller sweeping wavelength got the same background
+    every time with no signal. `eps_oxide` and `eps_mirror` now accept EITHER a constant (the
+    shipped scalar defaults; the stack is then wavelength-independent BY CONSTRUCTION, which is a
+    deliberate, documented, gated property rather than an ignored argument) OR a dispersion
+    callable ``f(lambda_m) -> complex``, which is evaluated here at `lambda_m`. Pass callables to
+    sweep a real oxide/metal dispersion; leave them scalar for byte-identical incumbent behaviour.
+    `lambda_m` is validated (finite, > 0) on every call either way.
 
     DEPTH-ORDERING CONTRACT (audit S2-3): eps_ito[0] is placed adjacent to AIR and eps_ito[-1]
     adjacent to the OXIDE (gate) -- i.e. the array runs AIR-SIDE-FIRST, top-down. A gated
@@ -53,11 +78,17 @@ def enz_reflector_stack(eps_ito, lambda_m, *, t_ito_m: float = 10e-9, eps_oxide:
     substrate-first depth-array convention (core.layered.slice_profile), so a DEVSIM-extracted
     ascending-z profile must be REVERSED before feeding it here; a flipped profile changes R(t)
     while R+T+A still closes to 1 (invisible-flip class)."""
+    lam = float(lambda_m)                                    # audit X-8: read AND validated
+    if not np.isfinite(lam) or lam <= 0.0:
+        raise ValueError(
+            "enz_reflector_stack: lambda_m must be a finite wavelength > 0 m (it selects the "
+            "oxide/mirror dispersion and is the wavelength the stack is built FOR); got "
+            "{!r}".format(lambda_m))
     eps_ito = np.atleast_1d(np.asarray(eps_ito, dtype=complex))
     nsl = eps_ito.size
     slabs = [LayeredSlab(t_ito_m / nsl, eps=complex(e)) for e in eps_ito]
-    slabs.append(LayeredSlab(t_oxide_m, eps=complex(eps_oxide)))
-    return LayeredStack(1.0 + 0j, np.sqrt(complex(eps_mirror)), slabs)
+    slabs.append(LayeredSlab(t_oxide_m, eps=_eps_at(eps_oxide, lam, "eps_oxide")))
+    return LayeredStack(1.0 + 0j, np.sqrt(_eps_at(eps_mirror, lam, "eps_mirror")), slabs)
 
 
 def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, drude_model=None,

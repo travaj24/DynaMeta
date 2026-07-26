@@ -145,3 +145,206 @@ def test_dg_contact_guard():
     from dynameta.carriers.physics_density_gradient import setup_contact_dg
     with pytest.raises(ValueError):
         setup_contact_dg("dev", "c", 0.0)
+
+
+# ---- audit X-6: setup_dg_hard_wall is a shipped __all__ export whose only caller was an
+# underscore-prefixed validation that run_all deliberately skips, so NOTHING ever machine-checked
+# it. The gates below are its EXECUTABLE contract; the parked WIP is gone (see the note in
+# test_dg_hard_wall_pins_the_wall_rows for what it measured and why it is not a physics gate).
+
+def _hard_wall_bar(tag, *, pin=8.0, gamma=1.0, frozen_psi=True,
+                   fracs=(0.05, 0.1, 0.25, 0.5, 1.0)):
+    """Build the smallest 1-D DG hard-wall device that converges (44 nodes, ~1 s): a uniform n-type
+    ITO-like bar with the LEFT contact carrying setup_dg_hard_wall (DG rows only, an insulating
+    boundary) and the RIGHT a bulk-ohmic DG contact, ramped to full gamma. Returns
+    (z, n, u, Lambda, N_D) sorted by z; the device is torn down before returning."""
+    import contextlib
+    import os
+    import sys
+
+    import devsim as ds
+
+    from dynameta.constants import M_E
+    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers.physics_density_gradient import (seed_dg_from_solution, set_dg_gamma,
+                                                            setup_contact_dg, setup_dg_hard_wall,
+                                                            setup_dg_quantum_correction)
+    from dynameta.carriers.physics_drift_diffusion import (setup_contact_ohmic_dd,
+                                                           setup_semiconductor_region_dd)
+
+    @contextlib.contextmanager
+    def _quiet():                                    # DEVSIM chatters on stdout at C level
+        sys.stdout.flush()
+        saved, devnull = os.dup(1), os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 1)
+            yield
+        finally:
+            sys.stdout.flush()
+            os.dup2(saved, 1)
+            os.close(devnull)
+            os.close(saved)
+
+    def _solve():
+        with _quiet():                               # REL 1e-5: the wall node's n ~ 1e-12 N_D makes
+            ds.solve(type="dc", absolute_error=1.0e16,   # per-node RELATIVE updates floor out below
+                     relative_error=1.0e-5, maximum_iterations=200)
+
+    mstar, length, n0 = 0.35 * M_E, 100e-9, 4.0e26
+    mesh, dev, reg = "x6m_" + tag, "x6d_" + tag, "bar"
+    try:
+        with _quiet():
+            ds.create_1d_mesh(mesh=mesh)
+            ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=0.2e-9, tag="wall")   # resolve L_q = 1.18 nm
+            ds.add_1d_mesh_line(mesh=mesh, pos=10e-9, ps=1.0e-9)
+            ds.add_1d_mesh_line(mesh=mesh, pos=length, ps=10e-9, tag="back")
+            ds.add_1d_contact(mesh=mesh, name="wall", tag="wall", material="metal")
+            ds.add_1d_contact(mesh=mesh, name="back", tag="back", material="metal")
+            ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="wall", tag2="back")
+            ds.finalize_mesh(mesh=mesh)
+            ds.create_device(mesh=mesh, device=dev)
+            setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.5,
+                                          dos_mass_kg=mstar, mobility_m2Vs=0.004)
+            setup_contact_ohmic_dd(dev, "back")          # the wall contact: DG equations only
+            nn = len(ds.get_node_model_values(device=dev, region=reg, name="Electrons"))
+            ds.set_node_values(device=dev, region=reg, name="Electrons", values=[n0] * nn)
+        _solve()                                         # classical equilibrium (flat)
+        with _quiet():
+            setup_dg_quantum_correction(dev, reg, m_eff_kg=mstar, gamma=gamma)
+            setup_contact_dg(dev, "back", n0)
+            setup_dg_hard_wall(dev, "wall", lambda_pin_factor=pin)
+            seed_dg_from_solution(dev, reg)
+            # wall-aware seed: taper u (and n = u^2) to ~0 over L_q at the wall -- seeding the FLAT
+            # bulk profile against the wall pin overflows the first ramp step's Newton transients
+            z0 = np.asarray(ds.get_node_model_values(device=dev, region=reg, name="x"))
+            u0 = np.asarray(ds.get_node_model_values(device=dev, region=reg, name="QSqrtN"))
+            taper = np.maximum(np.tanh(z0 / 1.2e-9), 1e-6)
+            ds.set_node_values(device=dev, region=reg, name="QSqrtN", values=list(u0 * taper))
+            ds.set_node_values(device=dev, region=reg, name="Electrons",
+                               values=list(np.maximum((u0 * taper) ** 2, 1e14)))
+            if frozen_psi:
+                _R.delete_by_name(dev, "PotentialEquation")     # freeze psi at the flat solution
+        for fr in fracs:
+            set_dg_gamma(dev, reg, fr)
+            _solve()
+        get = (lambda name: np.asarray(ds.get_node_model_values(device=dev, region=reg, name=name)))
+        z = get("x")
+        order = np.argsort(z)
+        out = (z[order], get("Electrons")[order], get("QSqrtN")[order], get("QLambda")[order],
+               float(ds.get_parameter(device=dev, region=reg, name="N_D")))
+    finally:
+        with _quiet():
+            try:
+                _R.clear(dev)
+                ds.delete_device(device=dev)
+                ds.delete_mesh(mesh=mesh)
+            except Exception:                            # nothing to tear down (build failed)
+                pass
+    return out
+
+
+def test_dg_hard_wall_input_guard():
+    """audit X-6: the only guard the export declares, never executed by anything."""
+    pytest.importorskip("devsim")
+    from dynameta.carriers.physics_density_gradient import setup_dg_hard_wall
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="lambda_pin_factor"):
+            setup_dg_hard_wall("dev", "wall", lambda_pin_factor=bad)
+
+
+def test_dg_hard_wall_pin_is_a_ramped_device_parameter():
+    """audit X-6: setup_dg_hard_wall's Lambda pin is a DEVICE parameter so the gamma ramp can
+    co-ramp it (a full-depth pin at the first small-gamma step overflows the wall-edge Bernoulli
+    during Newton transients). set_dg_gamma must scale BOTH b_dg and the pin, and must stay a no-op
+    on the pin for a device with no hard wall."""
+    ds = pytest.importorskip("devsim")
+    from dynameta.constants import M_E, V_T
+    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers.physics_density_gradient import (dg_b_coefficient, set_dg_gamma,
+                                                            setup_dg_hard_wall,
+                                                            setup_dg_quantum_correction)
+    from dynameta.carriers.physics_drift_diffusion import setup_semiconductor_region_dd
+    mstar, n0, pin = 0.35 * M_E, 4.0e26, 8.0
+    mesh, dev, reg = "x6pm", "x6pd", "bar"
+    try:
+        ds.create_1d_mesh(mesh=mesh)
+        ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=2e-9, tag="wall")
+        ds.add_1d_mesh_line(mesh=mesh, pos=20e-9, ps=2e-9, tag="back")
+        ds.add_1d_contact(mesh=mesh, name="wall", tag="wall", material="metal")
+        ds.add_1d_contact(mesh=mesh, name="back", tag="back", material="metal")
+        ds.add_1d_region(mesh=mesh, material="ITO", region=reg, tag1="wall", tag2="back")
+        ds.finalize_mesh(mesh=mesh)
+        ds.create_device(mesh=mesh, device=dev)
+        setup_semiconductor_region_dd(dev, reg, n_bg_m3=n0, eps_static=9.5,
+                                      dos_mass_kg=mstar, mobility_m2Vs=0.004)
+        setup_dg_quantum_correction(dev, reg, m_eff_kg=mstar, gamma=1.0)
+        b_full = dg_b_coefficient(mstar, 1.0)
+        # no hard wall yet: set_dg_gamma must not invent a pin
+        set_dg_gamma(dev, reg, 0.25)
+        assert ds.get_parameter(device=dev, region=reg, name="b_dg") == pytest.approx(0.25 * b_full)
+        with pytest.raises(Exception):
+            ds.get_parameter(device=dev, name="wall_lambda_pin")
+        setup_dg_hard_wall(dev, "wall", lambda_pin_factor=pin)
+        # installed at ZERO depth (the ramp turns it on), full depth recorded separately
+        assert ds.get_parameter(device=dev, name="wall_lambda_pin") == 0.0
+        assert ds.get_parameter(device=dev, name="wall_lambda_pin_full") == pytest.approx(pin * V_T)
+        for frac in (0.05, 0.5, 1.0):
+            set_dg_gamma(dev, reg, frac)
+            assert ds.get_parameter(device=dev, name="wall_lambda_pin") == pytest.approx(
+                frac * pin * V_T, rel=1e-12)
+            assert ds.get_parameter(device=dev, region=reg, name="b_dg") == pytest.approx(
+                frac * b_full, rel=1e-12)
+    finally:
+        try:
+            _R.clear(dev)
+            ds.delete_device(device=dev)
+            ds.delete_mesh(mesh=mesh)
+        except Exception:
+            pass
+
+
+def test_dg_hard_wall_pins_the_wall_rows():
+    """audit X-6, the load-bearing gate: `setup_dg_hard_wall` shipped in `__all__` with ZERO
+    executable coverage -- its only caller was `validation/_dg_hard_wall_wip.py`, and
+    `run_all.py` skips every `_`-prefixed file in EVERY tier, so its four declared gates had never
+    been machine-checked. This runs the real 4-variable Newton on a coarse bar and pins the DISCRETE
+    MECHANICS the docstring claims (the part that IS validated):
+
+      * u(wall) is pinned to the documented floor u_floor = 1e-6 sqrt(N_D) -- not an exact zero,
+        which DEVSIM's variable_update='positive' forbids;
+      * the wall's ELECTRON row is the bulk constraint n = u^2 (NOT a Boltzmann quasi-equilibrium
+        pin, which would evaluate the REGULARIZATION Lambda-pin as a physical wall Lambda), so
+        n(wall) = u_floor^2 = 1e-12 N_D -- the dead-layer endpoint;
+      * Lambda(wall) sits at the ramped regularization depth -lambda_pin_factor V_t;
+      * the bulk is unperturbed (n -> N_D) and the profile rises monotonically off the wall.
+
+    NOT a physics gate, deliberately. The WIP's GATE A (frozen-psi in-Newton == the validated
+    post-hoc BVP dg_correct_density_1d) FAILS -- re-measured 2026-07-26 at max |dn|/N0 = 0.80 on
+    its own fine mesh, and its self-consistent leg (GATE B) raises a DEVSIM convergence failure.
+    The converged Newton settles on a spurious WIDE-depletion branch: the dead-layer deficit here
+    is tens of N0 L_q where the BVP closure gives ~1. That is exactly why setup_dg_hard_wall is
+    documented EXPERIMENTAL and why the post-hoc closure remains THE dead-layer tool. The width is
+    pinned below as a CHARACTERIZATION so a continuation fix cannot land silently."""
+    pytest.importorskip("devsim")
+    from dynameta.constants import M_E, V_T
+    pin = 8.0
+    z, n, u, lam, n_d = _hard_wall_bar("rows", pin=pin)
+    u_floor = 1.0e-6 * np.sqrt(n_d)
+
+    assert u[0] == pytest.approx(u_floor, rel=1e-9)             # u -> the documented floor
+    assert n[0] == pytest.approx(u_floor ** 2, rel=1e-9)        # electron row: n = u^2
+    assert n[0] == pytest.approx(1e-12 * n_d, rel=1e-9)         # ... = 1e-12 N_D, the endpoint
+    assert lam[0] == pytest.approx(-pin * V_T, rel=1e-9)        # Lambda: the ramped pin depth
+    assert n[-1] == pytest.approx(n_d, rel=1e-6)                # bulk unperturbed
+    assert np.all(np.diff(n) >= -1e-6 * n_d)                    # rises monotonically off the wall
+    assert np.all(np.isfinite(u)) and np.all(u > 0.0)           # variable_update='positive' held
+
+    from dynameta.core.numerics import trapz          # audit X-1: np.trapezoid needs numpy>=2.0
+    deficit = float(trapz(n_d - n, z))
+    lq = dg_length_m(0.35 * M_E)
+    assert deficit > 0.0                                        # a dead layer exists at all
+    assert 3.0 < deficit / (n_d * lq) < 1000.0, (
+        "dead-layer deficit {:.1f} N0 L_q. This CHARACTERIZES the known-open in-Newton wall "
+        "convergence (the post-hoc BVP closure gives ~1 N0 L_q). If a Newton-continuation fix "
+        "landed, REPLACE this with the real physics gate against dg_correct_density_1d and "
+        "promote setup_dg_hard_wall out of EXPERIMENTAL.".format(deficit / (n_d * lq)))

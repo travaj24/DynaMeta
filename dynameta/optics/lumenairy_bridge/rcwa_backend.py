@@ -45,6 +45,14 @@ background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
 to the layer BACKGROUND only (rasterizer contract). The Lumenairy analytic-shapes fast path
 is a documented follow-on (requires the shape-frame pin + disjointness mapping).
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident
+E_x, 1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo --
+{'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'}
+-> row is _common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the
+grating bridge's, and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -237,6 +245,12 @@ def rcwa_result_to_optical_result(res, row: int, *, t0: float,
     _common.conical_synthesis). Per-layer absorption at conical is left unset: layer_absorption()
     gives the per-LAB-pol diagonal only, and the rotated-pol absorbed power is a quadratic form
     whose cross term it does not expose (A = 1 - R - T stays exact)."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        # audit V-8: `row` is the integer lab-`row` vocabulary (0 = incident E_x, 1 = E_y).  A
+        # sibling label ('x'/'y'/'p', 's'/'p', 'te'/'tm') used to reach the fancy-index and die
+        # opaquely.  Accepted set unchanged; LAZY import, failure path only.
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where="rcwa_result_to_optical_result", param="row")
     if conical is not None and abs(float(conical[2])) > 1e-12:
         pol, theta, phi, n_super = conical
         R, T, r, t = _conical_synthesis(res, pol, float(theta), float(phi), n_super)

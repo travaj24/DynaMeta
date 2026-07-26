@@ -16,6 +16,14 @@ from dynameta.results import SweepResults
 _FORMATS = available_formats()
 _EXT = {"hdf5": ".h5", "zarr": ".zarr"}
 
+# audit T-13 (`filterwarnings = error`): most of the cache tests below build their inner solver as
+# a LOCAL closure and deliberately leave tag='' -- which is exactly the shape the S5-2 advisory
+# (cache.py:252, "no cache_fingerprint and tag=''") warns about. Here the collision it warns about
+# is the mechanism under test (see test_solver_identity_..., which needs two same-qualname
+# closures to be told apart), so the advisory is expected, not a defect. Message-scoped so every
+# other warning in this module is still an error.
+pytestmark = pytest.mark.filterwarnings("ignore:OpticalSolverCache")
+
 
 def _rows():
     rows = []

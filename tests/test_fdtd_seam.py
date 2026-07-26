@@ -746,3 +746,265 @@ def test_finite_eps_path_is_unchanged_by_the_finiteness_guard():
         assert L.eps_inf == einf[j, k]
         assert L.drude_wp_rad_s == wp[j, k]
         assert L.drude_gamma_rad_s == gam[j, k]
+
+
+# =====================================================================================================
+# audit D-9 / D-10 / D-11 / D-12 (wave-5): flux SIGNS, the DFT-window memory rule, the CFL guard and
+# the Kerr/time-varying composition. Only the two D-9 cases march (one small 2-D and one small 1-D);
+# everything else is a setup-time raise or a pure helper call.
+# =====================================================================================================
+
+_D9_FIX = dict(period_x_m=100e-9, lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=16)
+
+
+def _mo_layers():
+    """Minimal duck-typed magneto-optic layer list for solve_fdtd_3d_mo's setup-only guards."""
+    from types import SimpleNamespace
+    return [SimpleNamespace(thickness_m=150e-9, eps_xx=4.0, eps_yy=4.0, eps_zz=4.0,
+                            drude_wp_rad_s=0.0, drude_gamma_rad_s=0.0, cyclotron_wc_rad_s=0.0)]
+
+
+def test_d9_flux_ratios_are_signed_and_bit_identical_for_physical_signs():
+    """audit D-9: R_flux/T_flux took abs() of BOTH the signed Poynting integral and the reference,
+    so a physically impossible result -- net backward power at the exit plane, or net FORWARD power
+    in the scattered field at the entrance plane -- came back positive and plausible. The signed
+    convention (R = -P_refl/P_inc, T = P_trans/P_inc) is the SAME NUMBER bit-for-bit when the signs
+    are physical (IEEE negation is exact), and negative when they are not."""
+    from dynameta.optics.fdtd_nd.solve2d import _flux_ratios
+    band = np.ones(5, dtype=bool)
+    P_inc = np.full(5, 3.0)
+    P_refl = np.full(5, -0.75)                      # physical: the scattered field goes BACKWARD
+    P_trans = np.full(5, 2.25)                      # physical: the exit plane goes FORWARD
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")              # no warning on a healthy run
+        R, T = _flux_ratios("probe", P_inc, P_refl, P_trans, band)
+    assert np.array_equal(R, np.abs(P_refl) / np.abs(P_inc))     # bit-identical to the legacy form
+    assert np.array_equal(T, np.abs(P_trans) / np.abs(P_inc))
+    # flip the transmitted flux: the legacy form hid it as +0.75, the signed one shows -0.75 and warns
+    with pytest.warns(RuntimeWarning, match="impossible SIGN"):
+        _R2, T2 = _flux_ratios("probe", P_inc, P_refl, -P_trans, band)
+    assert np.all(T2 < 0) and np.allclose(np.abs(T2), np.abs(T))
+    with pytest.warns(RuntimeWarning, match="impossible SIGN"):
+        R3, _T3 = _flux_ratios("probe", P_inc, -P_refl, P_trans, band)
+    assert np.all(R3 < 0)
+    # sign noise on a ~0 bin must NOT warn (the tolerance exists for exactly that)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _flux_ratios("probe", P_inc, np.full(5, 1e-9), P_trans, band)
+
+
+def test_d9_shipped_2d_flux_is_unchanged_and_carries_the_physical_signs():
+    """End-to-end D-9: on a healthy lossless slab every in-band R_flux/T_flux is bit-for-bit what
+    the abs()/abs() form returned, recomputed here from the public time trace."""
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d
+    from dynameta.optics.fdtd_nd.results import _flux
+    r = solve_fdtd_2d([FDTDLayer(150e-9, eps_inf=4.0)], return_time_trace=True, **_D9_FIX)
+    tt = r.time_trace
+    P_inc = _flux(tt["incident_left"], tt["incident_left_hx"], tt["dt"])
+    P_refl = _flux(tt["reflected"], tt["reflected_hx"], tt["dt"])
+    P_trans = _flux(tt["transmitted"], tt["transmitted_hx"], tt["dt"])
+    b = r.band
+    assert np.all(P_inc[b] > 0.0) and np.all(P_refl[b] < 0.0) and np.all(P_trans[b] > 0.0)
+    assert np.array_equal(r.R_flux[b], np.abs(P_refl[b]) / np.abs(P_inc[b]))
+    assert np.array_equal(r.T_flux[b], np.abs(P_trans[b]) / np.abs(P_inc[b]))
+    assert float(np.max(np.abs(r.R_flux[b] + r.T_flux[b] - 1.0))) < _D3_BUDGET_TOL
+    # OUT-OF-BAND (audit D-9 residual, now documented on the public arrays in fdtd_nd/results.py):
+    # outside `band` the incident reference carries no power, so these are ratios of two noise
+    # numbers and about half of them come back NEGATIVE where abs() used to disguise them as small
+    # positives. That is expected -- the noise is unchanged, only its presentation -- and every
+    # in-repo consumer masks with `band`. Pin BOTH halves so neither can drift silently.
+    oob = (~b) & np.isfinite(r.R_flux) & np.isfinite(r.T_flux)
+    assert int(oob.sum()) > 100
+    frac = float(np.mean(r.R_flux[oob] < 0.0))
+    assert 0.2 < frac < 0.8, frac                    # measured 0.47 on this class of fixture
+    assert r.R_flux[b].tobytes() == np.abs(r.R_flux)[b].tobytes()      # in-band: bitwise unchanged
+    assert r.T_flux[b].tobytes() == np.abs(r.T_flux)[b].tobytes()
+
+
+def test_d10_ring_time_omits_raman_and_keeps_both_gain_signs():
+    """audit D-10, re-measured 2026-07-26 (see _ring_time_s' docstring for the numbers).
+
+    (1) The RAMAN pole stays out of the window rule ON PURPOSE: its polarization P_R = eps0 chi3R E Q
+        is proportional to E, so Q ringing after the pulse has left reaches no probe -- measured
+        tail/peak 2.3e-13 at the end of the legacy window on a chi3R E^2 = 0.09 fixture, versus
+        1.8e-3 for the narrow Lorentz line the rule exists for.
+    (2) The GAIN pole stays in for BOTH signs of gain_dN_m3: the ADE's homogeneous coefficients do
+        not contain dN (only the drive does), and extending the window measurably HELPS an
+        amplifying line (transmitted tail/peak 1.3e-4 -> 9.0e-8). What the amplifying case gets is
+        a WARNING, because 18.4/dw is then not an upper bound (161x the passive residue)."""
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd.solve2d import _ring_time_s, _window_memory_s
+    raman = FDTDLayer(150e-9, eps_inf=2.0, raman_chi3_m2_V2=1e-22,
+                      raman_w_rad_s=2e13, raman_gamma_rad_s=1e13)
+    assert _ring_time_s([raman]) == 0.0                      # byte-identical legacy window
+    amp = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e25,
+                    gain_w_rad_s=1.6e15, gain_dw_rad_s=1e13)
+    pas = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=-1e25,
+                    gain_w_rad_s=1.6e15, gain_dw_rad_s=1e13)
+    assert _ring_time_s([amp]) == pytest.approx(18.4 / 1e13, rel=1e-12)
+    assert _ring_time_s([pas]) == _ring_time_s([amp])        # the sign of dN changes no memory
+    # the window-extension warning fires for both; the amplifying caveat only for dN > 0
+    tau_small = (18.4 / 1e13) / 400.0                        # 200*tau << the pole memory
+    with pytest.warns(RuntimeWarning) as rec:
+        assert _window_memory_s("probe", [amp], tau_small) == _ring_time_s([amp])
+    msgs = " | ".join(str(w.message) for w in rec)
+    assert "C3-6" in msgs and "AMPLIFYING" in msgs and "D-10" in msgs
+    with pytest.warns(RuntimeWarning) as rec2:
+        _window_memory_s("probe", [pas], tau_small)
+    msgs2 = " | ".join(str(w.message) for w in rec2)
+    assert "C3-6" in msgs2 and "AMPLIFYING" not in msgs2
+    # a pole whose memory is below the source window neither extends the warning nor caveats
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _window_memory_s("probe", [amp], 18.4 / 1e13) == pytest.approx(18.4 / 1e13, rel=1e-12)
+
+
+def test_d10_amplifying_caveat_does_not_depend_on_which_pole_won_the_window():
+    """audit D-10 residual: the amplifying caveat was gated on the gain line's OWN 18.4/dw equalling
+    t_ring, so ANOTHER pole with a longer memory -- which is what actually sizes the window --
+    silenced it entirely. The caveat is about whether the EXTENDED window can be trusted, and a gain
+    line makes it untrustworthy regardless of which pole set the extension."""
+    from dynameta.optics.fdtd import FDTDLayer
+    from dynameta.optics.fdtd_nd.solve2d import _ring_time_s, _window_memory_s
+    amp = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e25,
+                    gain_w_rad_s=1.6e15, gain_dw_rad_s=1e13)          # memory 1.84e-12 s
+    lorentz = FDTDLayer(150e-9, eps_inf=2.0, lorentz_w0_rad_s=1.4e15,
+                        lorentz_gamma_rad_s=1e12, lorentz_delta_eps=0.5)   # memory 1.84e-11 s: WINS
+    tau_small = 1e-17
+    assert _ring_time_s([lorentz, amp]) == _ring_time_s([lorentz])    # the Lorentz pole sizes it
+    with pytest.warns(RuntimeWarning) as rec:
+        _window_memory_s("probe", [lorentz, amp], tau_small)
+    msgs = " | ".join(str(w.message) for w in rec)
+    assert "C3-6" in msgs and "AMPLIFYING" in msgs and "D-10" in msgs
+    # an ABSORBING line winning the max likewise must not silence a present amplifier
+    absorb = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=-1e25,
+                       gain_w_rad_s=1.6e15, gain_dw_rad_s=1e12)
+    with pytest.warns(RuntimeWarning) as rec2:
+        _window_memory_s("probe", [absorb, amp], tau_small)
+    assert "AMPLIFYING" in " | ".join(str(w.message) for w in rec2)
+    # ... and with two amplifiers the message names the NARROWEST (longest-memory) one
+    amp2 = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e25,
+                     gain_w_rad_s=1.6e15, gain_dw_rad_s=1e12)
+    with pytest.warns(RuntimeWarning) as rec3:
+        _window_memory_s("probe", [amp, amp2], tau_small)
+    assert "1.000e+12" in " | ".join(str(w.message) for w in rec3)
+    # no gain line anywhere -> still no caveat (no false positive from dropping the filter)
+    with pytest.warns(RuntimeWarning) as rec4:
+        _window_memory_s("probe", [lorentz], tau_small)
+    assert "AMPLIFYING" not in " | ".join(str(w.message) for w in rec4)
+
+
+def test_d11_courant_guard_is_enforced_at_every_front_end():
+    """audit D-11: every solve_* docstring promises `courant` <= 1, but only the nonuniform 1-D
+    branch enforced it -- `courant=2.0` marched to overflow-driven garbage. One shared guard
+    (spec.courant_guard) now raises at all EIGHT entry points, at SETUP (no march runs here)."""
+    from dynameta.optics.fdtd import FDTDLayer, run_uniform_time_boundary, solve_fdtd_1d
+    from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
+    from dynameta.optics.fdtd_nd import (solve_fdtd_2d, solve_fdtd_2d_oblique, solve_fdtd_3d,
+                                         solve_fdtd_3d_mo, solve_fdtd_3d_oblique)
+    from dynameta.optics.fdtd_nd.spec import courant_guard
+    lay = [FDTDLayer(150e-9, eps_inf=4.0)]
+    band = dict(lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=8)
+    calls = [
+        lambda: solve_fdtd_1d(lay, courant=2.0, **band),
+        lambda: solve_fdtd_1d(lay, courant=2.0, refine={0: 3}, n_pad_wave=1.0, **band),
+        lambda: solve_fdtd_mo_1d([MOLayer(thickness_m=120e-9, eps_xx=4.0, eps_yy=4.0)],
+                                 courant=2.0, n_pad_wave=1.0, **band),
+        lambda: solve_fdtd_2d(lay, period_x_m=100e-9, courant=2.0, **band),
+        lambda: solve_fdtd_2d_oblique(lay, period_x_m=100e-9, angle_deg=10.0, courant=2.0, **band),
+        lambda: solve_fdtd_3d(lay, period_x_m=100e-9, period_y_m=100e-9, courant=2.0, **band),
+        lambda: solve_fdtd_3d_oblique(lay, period_x_m=100e-9, period_y_m=100e-9, angle_deg=10.0,
+                                      courant=2.0, **band),
+        lambda: solve_fdtd_3d_mo(_mo_layers(), period_x_m=100e-9, period_y_m=100e-9, courant=2.0,
+                                 **band),
+        lambda: run_uniform_time_boundary(index_of_t=lambda t: 1.5, n_init=1.5,
+                                          lambda_med_m=1e-6, courant=2.0),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="Courant"):
+            call()
+    # the bound itself: 1.0 is accepted (with rounding slack), 0 / negative / NaN are not
+    assert courant_guard("probe", 1.0) == 1.0
+    assert courant_guard("probe", 1.0 + 1e-12) == pytest.approx(1.0)
+    for bad in (0.0, -0.5, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="courant"):
+            courant_guard("probe", bad)
+
+
+def test_d11_the_eighth_front_end_fdtd_mo_1d_is_guarded_too():
+    """audit D-11 residual: `fdtd_mo.solve_fdtd_mo_1d` also takes `courant` and builds
+    dt = courant*dz/c, so S = c dt/dz = courant there as well -- but the wave-5 rollout counted six
+    sites and missed it. Unguarded, courant=1.05 marched an unstable leapfrog and returned, with NO
+    raise, R/T that are 100% NaN over all 2134 frequency bins and an EMPTY band mask; courant=2.0
+    exploded far enough that the emptied band surfaced as numpy's confusing 'zero-size array to
+    reduction operation fmax' instead of anything naming the CFL bound."""
+    from dynameta.optics.fdtd_mo import MOLayer, solve_fdtd_mo_1d
+    lay = [MOLayer(thickness_m=120e-9, eps_xx=4.0, eps_yy=4.0)]
+    band = dict(lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=6, n_pad_wave=1.0)
+    for bad in (1.05, 2.0, 0.0, -0.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="(?i)courant"):
+            solve_fdtd_mo_1d(lay, courant=bad, **band)
+    # the guard names THIS entry point, and runs before any march (a marching 1.05 took seconds)
+    import time
+    t0 = time.time()
+    with pytest.raises(ValueError, match="solve_fdtd_mo_1d"):
+        solve_fdtd_mo_1d(lay, courant=1.05, **band)
+    assert time.time() - t0 < 1.0
+    # a legal courant still solves, and gives a finite in-band R/T (no regression)
+    r = solve_fdtd_mo_1d(lay, courant=0.5, **band)
+    assert np.all(np.isfinite(r.R[r.band])) and np.all(np.isfinite(r.T[r.band]))
+
+
+def test_d12_kerr_refuses_to_compose_with_the_eps_inf_temporal_boundary():
+    """audit D-12: `_run_tv`'s D-preserving rescale E_new = E_old*eps_old/eps_new is exact for
+    D = eps0 eps_inf E + P_Drude but ignores the Kerr term -- with chi3 != 0 the true D continuity
+    is a CUBIC in E_new, so the linear rescale injects/destroys energy ~ chi3 E^2 per jump. It used
+    to compose SILENTLY. drude_of_t is unaffected (J is continuous, no field jump), and so is a
+    Kerr layer that is not the time-varying one."""
+    from dynameta.optics.fdtd import FDTDLayer, solve_fdtd_1d
+    band = dict(lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=8, n_pad_wave=1.0)
+    kerr_layer = FDTDLayer(150e-9, eps_inf=4.0, chi3_m2_V2=1e-20)
+    plain = FDTDLayer(150e-9, eps_inf=4.0)
+    with pytest.raises(NotImplementedError, match="D-12"):
+        solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5, **band)
+    # kerr=True but chi3 == 0 on the time-varying layer is fine (nothing to get wrong)
+    solve_fdtd_1d([plain], kerr=True, eps_inf_of_t=lambda t: 4.5, **band)
+    # the Kerr layer elsewhere in the stack is fine: no temporal boundary is applied to it
+    solve_fdtd_1d([plain, kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5,
+                  time_varying_layer=0, **band)
+    with pytest.raises(NotImplementedError, match="D-12"):
+        solve_fdtd_1d([plain, kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5,
+                      time_varying_layer=1, **band)
+    # drude_of_t + kerr still composes (documented as the supported combination)
+    solve_fdtd_1d([kerr_layer], kerr=True, drude_of_t=lambda t: (0.0, 0.0), **band)
+
+
+def test_d12_refusal_fires_on_the_JUMP_not_on_the_mere_presence_of_the_hook():
+    """audit D-12 residual: the guard ran once at entry, so it also refused a STATIC eps_inf_of_t --
+    the hook that returns the layer's own eps_inf, which this module documents as a strict no-op and
+    gate 1 pins as BIT-IDENTICAL to the no-hook march. No temporal boundary is applied on that path,
+    so there is nothing to mis-rescale and nothing to refuse. The refusal now lives in the branch
+    where the jump actually fires."""
+    from dynameta.optics.fdtd import FDTDLayer, solve_fdtd_1d
+    band = dict(lambda_min_m=1.2e-6, lambda_max_m=1.5e-6, resolution=8, n_pad_wave=1.0)
+    kerr_layer = FDTDLayer(150e-9, eps_inf=4.0, chi3_m2_V2=1e-20)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        base = solve_fdtd_1d([kerr_layer], kerr=True, **band)               # no hook at all
+        stat = solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.0, **band)
+    assert stat.R.tobytes() == base.R.tobytes()                             # BYTE-identical
+    assert stat.T.tobytes() == base.T.tobytes()
+    assert np.array_equal(stat.band, base.band)
+    # a hook that sits still and then JUMPS still raises -- at the jump, naming both eps values
+    t_jump = [None]
+
+    def late(tt):
+        if t_jump[0] is None:
+            t_jump[0] = tt
+        return 4.0 if tt < t_jump[0] + 1e-15 else 4.5
+
+    with pytest.raises(NotImplementedError, match="D-12"):
+        solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=late, **band)
+    with pytest.raises(NotImplementedError, match=r"4 -> 4\.5"):
+        solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5, **band)

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import numpy as np
 
+__all__ = ["rin_spectrum", "linewidth_from_field", "henry_factor",
+           "schawlow_townes_henry_linewidth"]
+
 
 def rin_spectrum(P_t, dt_s):
     """One-sided relative-intensity-noise PSD RIN(f) [1/Hz] of a power trace P(t) sampled at dt:

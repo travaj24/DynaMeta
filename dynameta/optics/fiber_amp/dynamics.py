@@ -15,7 +15,9 @@ FAST PULSES. When the pulse is short against the lifetime (no pumping/relaxation
 saturation is analytic (Frantz & Nodvik, JAP 34:2346 1963): E_sat = h nu A/(Gamma(sigma_a+
 sigma_e)), and the output pulse P_out(t) = P_in(t) G0 / (G0 - (G0-1) exp(-U_in(t)/E_sat)) with
 G0 the small-signal gain and U_in the running input energy; the leading edge sees full G0, the
-trailing edge sees a saturated gain of 1.
+trailing edge sees a saturated gain of 1. The per-sample factor of that law
+(frantz_nodvik_instantaneous_gain) is the SINGLE HOME of the algebra: pulse.propagate_gnlse's
+opt-in SaturableGain(frantz_nodvik=True) mode reads it rather than re-deriving it (audit A-10).
 
 SAME OBJECT, SAME PHYSICS. The march reads the amplifier's own opt-ins rather than a subset of
 them: the normalised upconversion coefficient (either constructor spelling -- audit A-1) enters
@@ -57,7 +59,8 @@ from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp.steady_state import FiberAmplifier
 
 __all__ = ["TransientResult", "simulate_transient", "saturation_energy",
-           "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse"]
+           "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
+           "frantz_nodvik_instantaneous_gain"]
 
 
 # ============================ transient nbar2(z, t) dynamics ============================
@@ -374,14 +377,52 @@ def frantz_nodvik_gain(e_in_J, small_signal_gain: float, e_sat_J: float):
                                                                                         float)
 
 
+def _fn_denominator(t_s, p_in_W, G0: float, e_sat_J: float):
+    """G0 - (G0-1) exp(-U_in(t)/E_sat), the shared Frantz-Nodvik denominator, with the running
+    input energy U_in(t) = INT_-inf^t P_in dt' on the pulse's own time grid. SINGLE HOME for the
+    FN instantaneous-saturation algebra: frantz_nodvik_pulse and frantz_nodvik_instantaneous_gain
+    are the two spellings of the same law and both read it from here (so does the GNLSE
+    propagator's opt-in FN mode, pulse.propagate_gnlse -- audit A-10)."""
+    t = np.asarray(t_s, float)
+    pin = np.asarray(p_in_W, float)
+    U = _cumtrapz(pin, t)
+    return G0 - (G0 - 1.0) * np.exp(-U / e_sat_J)
+
+
+def frantz_nodvik_instantaneous_gain(t_s, p_in_W, small_signal_gain: float, e_sat_J: float):
+    """Instantaneous POWER gain G(t) = P_out(t)/P_in(t) of a saturable gain traversed by a pulse
+    short against the upper-state lifetime (Frantz & Nodvik, JAP 34:2346 1963):
+
+        G(t) = G0 / (G0 - (G0-1) exp(-U_in(t)/E_sat)),   U_in(t) = INT_-inf^t P_in dt'.
+
+    G0 = exp(g0 L) is the small-signal (unsaturated) gain of the slab. The leading edge (U -> 0)
+    sees the full G0; the trailing edge of a pulse with E_in >> E_sat sees G -> 1, which is what
+    STEEPENS the pulse -- the temporal reshaping a CW saturation law cannot produce. For a GAIN
+    (G0 > 1) G(t) is monotonically decreasing in t and always in [1, G0]. G0 < 1 is the saturable
+    ABSORBER (a negative g0; legal here and on both pulse.SaturableGain branches -- audit W5-3):
+    the same formula runs, monotonically INCREASING in t and confined to [G0, 1] as the absorber
+    bleaches toward transparency.
+
+    COMPOSITION (why this is exact for a split-step propagator): the map is linear in the
+    variable u = expm1(U/E_sat), u_out = G0 u_in, so applying it over L1 then L2 with
+    G0 = exp(g0 L1), exp(g0 L2) is EXACTLY the single application over L1+L2. A slab can
+    therefore be sliced arbitrarily without changing the answer.
+
+    Frame: t is the RETARDED time of the pulse (the frame propagate_gnlse works in); the law
+    assumes no pumping and no relaxation during the pulse (see frantz_nodvik_pulse for the
+    energy form, and pulse.SaturableGain(recovery_time_s=...) for the finite-lifetime
+    generalization that restores the CW limit)."""
+    G0 = float(small_signal_gain)
+    return G0 / _fn_denominator(t_s, p_in_W, G0, e_sat_J)
+
+
 def frantz_nodvik_pulse(t_s, p_in_W, small_signal_gain: float, e_sat_J: float):
     """Output temporal power P_out(t) for an input pulse P_in(t) through a saturable gain
     (Frantz-Nodvik):
         P_out(t) = P_in(t) G0 / (G0 - (G0-1) exp(-U_in(t)/E_sat)),  U_in(t) = INT_-inf^t P_in dt'.
     Returns P_out (same shape as p_in_W). The leading edge is amplified by G0, the trailing edge
-    by ~1 as the stored energy is depleted; integral(P_out) matches frantz_nodvik_output_energy."""
-    t = np.asarray(t_s, float)
+    by ~1 as the stored energy is depleted; integral(P_out) matches frantz_nodvik_output_energy.
+    The per-sample gain factor alone is frantz_nodvik_instantaneous_gain."""
     pin = np.asarray(p_in_W, float)
-    U = _cumtrapz(pin, t)
     G0 = float(small_signal_gain)
-    return pin * G0 / (G0 - (G0 - 1.0) * np.exp(-U / e_sat_J))
+    return pin * G0 / _fn_denominator(t_s, pin, G0, e_sat_J)

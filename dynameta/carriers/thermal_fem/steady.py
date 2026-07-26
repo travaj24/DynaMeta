@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, _build_thermal_forms, _mean_T_per_layer
+from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, build_thermal_forms, mean_T_per_layer
 
 @dataclass
 class ThermalResult:
@@ -21,7 +21,7 @@ class ThermalResult:
 
     def mean_T_per_layer(self) -> np.ndarray:
         """Volume-averaged temperature [K] in each layer (sink-first order)."""
-        return _mean_T_per_layer(self.mesh, self.T, self.layers)
+        return mean_T_per_layer(self.mesh, self.T, self.layers)
 
     def T_at(self, x_m: float, y_m: float, z_m: float) -> float:
         return float(np.real(self.T(self.mesh(x_m * _S, y_m * _S, z_m * _S))))
@@ -40,7 +40,7 @@ def solve_thermal_fem(layers: List[ThermalLayer], *, period_x_m: float, period_y
     if linear_solver not in ("umfpack", "sparsecholesky"):       # no silent substitution
         raise ValueError("linear_solver must be 'umfpack' or 'sparsecholesky', got {!r}".format(
             linear_solver))
-    mesh, fes, u, v, a, f, k_cf = _build_thermal_forms(
+    mesh, fes, u, v, a, f, k_cf = build_thermal_forms(
         layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
     T = ng.GridFunction(fes)
     T.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh.Boundaries("bot"))

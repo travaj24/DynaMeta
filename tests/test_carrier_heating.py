@@ -305,3 +305,95 @@ def test_transient_rejects_silent_callable_substitution():
     with pytest.raises(ValueError, match="gamma_rad_s"):
         carrier_heating_transient(t, I, 1.5e-6, drude0=d_gam, ttm_params=ttm,
                                   n_m3=6e26, alpha_per_eV=0.5, m0_kg=0.3 * M_E)
+
+
+def test_c7_pump_off_reproduces_gamma0_at_every_base_temperature():
+    """audit C-7: the module's documented byte-identical off-switch (pump off -> the per-instant
+    Drude collapses to drude0) used to hold ONLY at T0_K = 300 K. gamma_of_Te's T_ref was pinned at
+    T_REF while the caller owned T0_K, so with the pump OFF (T_e == T_l == T0_K exactly, verified
+    below) the damping came out gamma0*(T0/300)^p -- 0.2567*gamma0 at 77 K, 1.6667*gamma0 at 500 K
+    for p=1: a DIFFERENT material with every heating knob off."""
+    t = np.linspace(0.0, 1e-12, 12)
+    zero = lambda tt: 0.0
+    for T0 in (77.0, 300.0, 500.0):
+        _t, Te, Tl = two_temperature_response(t, zero, PARAMS, T0_K=T0)
+        assert np.max(np.abs(Te - T0)) == 0.0 and np.max(np.abs(Tl - T0)) == 0.0   # TTM is exact
+        # the pre-fix damping ratio (the bug, reproduced from the pinned-300 K reading)
+        legacy = float(gamma_of_Te(GAMMA0, T0, p=1.0)) / GAMMA0
+        assert legacy == pytest.approx((T0 / 300.0) ** 1.0, rel=1e-12)
+        # the shipped path now references gamma0 to T0_K, so the off-switch is exact off 300 K too
+        assert float(gamma_of_Te(GAMMA0, T0, p=1.0, T_ref_K=T0)) == GAMMA0
+    assert float(gamma_of_Te(GAMMA0, 77.0, p=1.0)) / GAMMA0 == pytest.approx(0.256667, rel=1e-5)
+
+
+def test_c7_cryogenic_transient_is_the_cold_material_and_the_legacy_reading_survives():
+    """End-to-end C-7: a 77 K pump-off run must return EXACTLY the fixed-drude0 transient (it did
+    not before -- 3.9x wrong damping), while gamma_T_ref_K=300.0 reproduces the legacy 300 K-
+    calibrated reading bit-for-bit. Default T0_K = 300 K is byte-identical either way."""
+    t = np.linspace(0.0, 1e-12, 40)
+    off = lambda tt: 0.0
+    _t, R_fix, _T, _e = optical_transient_response(t, lambda tt: N, 1500e-9, drude_model=DRUDE0)
+    kw = dict(drude0=DRUDE0, ttm_params=PARAMS, n_m3=N, alpha_per_eV=0.0)   # mass off-switch on
+    _th, R77, _Th, _eh, Te77, _Tl = carrier_heating_transient(t, off, 1500e-9, T0_K=77.0, **kw)
+    assert np.max(np.abs(Te77 - 77.0)) == 0.0
+    assert np.max(np.abs(R77 - R_fix)) < 1e-12                    # cold run == the calibrated Drude
+    # the legacy (300 K-referenced) reading is still reachable, and is NOT the same material
+    _th2, R77_legacy, _T2, _e2, _Te2, _Tl2 = carrier_heating_transient(
+        t, off, 1500e-9, T0_K=77.0, gamma_T_ref_K=300.0, **kw)
+    assert np.max(np.abs(R77_legacy - R_fix)) > 1e-6
+    # T0_K = 300 (the default) is untouched by the fix
+    _th3, R300, _T3, _e3, _Te3, _Tl3 = carrier_heating_transient(t, off, 1500e-9, **kw)
+    assert np.array_equal(R300, R_fix)
+    with pytest.raises(ValueError, match="C-7"):
+        carrier_heating_transient(t, off, 1500e-9, T0_K=0.0, **kw)
+
+
+def test_c7_reference_and_base_temperatures_must_be_FINITE_and_positive():
+    """audit C-7 residual. `not (gamma_T_ref > 0.0)` accepts +inf, and Gamma = gamma0 (T_e/inf)^p is
+    then EXACTLY 0: a silently LOSSLESS Drude (measured: eps[0] came back purely real, -1.866+0j,
+    with no raise). And with an explicit gamma_T_ref_K, T0_K was not validated at all -- it reached
+    the TTM, where it raised only incidentally, through C-11's heat-capacity check, naming the wrong
+    quantity (and only for a C_e whose sign happens to flip)."""
+    t = np.linspace(0.0, 1e-12, 20)
+    off = lambda tt: 0.0
+    kw = dict(drude0=DRUDE0, ttm_params=PARAMS, n_m3=N, alpha_per_eV=0.0)
+    for bad in (float("inf"), float("-inf"), float("nan"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="C-7"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=300.0, gamma_T_ref_K=bad, **kw)
+    # T0_K is now validated on ITS OWN, i.e. also when gamma_T_ref_K is explicit
+    for bad in (0.0, -5.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="T0_K"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=bad, gamma_T_ref_K=300.0, **kw)
+        with pytest.raises(ValueError, match="C-7"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=bad, **kw)
+    # the healthy path is untouched (and finite/positive references still work at any base T)
+    for T0 in (77.0, 300.0, 500.0):
+        _t, R, _T, eps, _Te, _Tl = carrier_heating_transient(t, off, 1500e-9, T0_K=T0, **kw)
+        assert np.all(np.isfinite(R)) and float(np.max(np.abs(np.imag(eps)))) > 0.0   # NOT lossless
+
+
+def test_c11_nonpositive_electron_heat_capacity_raises():
+    """audit C-11: C_e was never validated. C_e < 0 flips the sign of the electron-gas energy
+    equation and used to integrate SILENTLY to a plausible (t, Te, Tl); C_e == 0 died inside
+    solve_ivp as 'array must not contain infs or NaNs'. Both now raise at setup, and a CALLABLE
+    that only goes non-positive along the trajectory is caught after the solve."""
+    t = np.linspace(0.0, 1e-12, 25)
+    pump = lambda tt: 3e20 * np.exp(-((tt - 0.4e-12) / 6e-14) ** 2)
+    for bad in (-3.0e4, 0.0, float("nan")):
+        with pytest.raises(ValueError, match="C-11"):
+            two_temperature_response(t, pump, TwoTempParams(C_e=bad, C_l=2.4e6, G_e_l=6e15),
+                                     T0_K=300.0)
+    # a callable that is fine at T0 but goes non-positive as the gas heats (a fitted closure). The
+    # setup check cannot see it -- the per-rhs check does, and it names the offending (Te, C_e).
+    ttm = TwoTempParams(C_e=(lambda Te: 3.0e4 if Te < 400.0 else -3.0e4), C_l=2.4e6, G_e_l=6e15)
+    assert ttm.C_e_of(300.0) > 0.0
+    with pytest.raises(ValueError, match="C-11"):
+        two_temperature_response(t, pump, ttm, T0_K=300.0)
+    # a closure that is positive everywhere on the physical Te >= 0 axis is NEVER tripped by the
+    # rhs check, even though it is negative at (unphysical) negative temperatures
+    ok = TwoTempParams(C_e=(lambda Te: GAMMA_E * Te + 1.0), C_l=2.4e6, G_e_l=6e15)
+    _t, Te_ok, _Tl_ok = two_temperature_response(t, pump, ok, T0_K=300.0)
+    assert float(np.max(Te_ok)) > 300.0
+    # the healthy path is untouched
+    _t, Te, _Tl = two_temperature_response(t, pump, PARAMS, T0_K=300.0)
+    assert float(np.max(Te)) > 300.0

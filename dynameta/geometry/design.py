@@ -2,6 +2,16 @@
 Design: the complete declarative device = UnitCell + Stack + electrodes +
 materials + solver specs. Validated at construction. This is what the default
 builders and the pipeline consume; it carries NO solver state.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -99,7 +109,8 @@ class Design:
         half/quarter cell with symmetry walls, ~1/2 or ~1/4 the DOFs, for the SAME 0-order R/T). The
         optical builder emits a one-time hint when an eligible reduction is available but unused.
         Eligible = a centered, mirror-symmetric cell (device_symmetry c2v/c4v) at NORMAL incidence,
-        a single linear x/y polarization (the wall type is keyed to the E axis; 'p' is excluded), no
+        a single linear x/y polarization (the OpticalSpec LAB-AXIS vocabulary of audit V-8 -- the
+        wall type is keyed to the E axis, so 'p' is excluded), no
         carrier-coupled (semiconductor) or prismatic-boundary-layer feature, and only rectangle/circle
         inclusions (the Box/Cylinder OCC primitives validated for a clean symmetry-plane cut) -- the
         reduced-mesh path's current scope. The opt-in solve additionally requires a SCALAR eps (an

@@ -14,6 +14,15 @@ the corrections this implementation applies. Pure numpy/scipy; SI units; exp(-i 
 Phase 1 (this module): qd_gain.QDGainModel -- group-resolved WL->ES->GS rate equations,
 steady-state, small-signal spectral gain, and the static saturation curve. Phases 2-4
 (traveling-wave dynamic coupling, ASE/noise, analog SFDR/ENOB metrics) slot in alongside.
+
+FACADE CONTRACT (audit X-10 / A-20). This is an EAGER, EXHAUSTIVE facade -- unlike
+dynameta.optics and dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are
+by design. Every name in a submodule's __all__ MUST be re-exported here; drift is a bug, not a
+design choice (it left 16 of qw_gain's 17 public names -- the entire quantum-well/bulk gain API --
+invisible from the package). tests/test_soa.py::test_package_facade_is_exhaustive enforces it.
+Every submodule must also DECLARE an __all__ (audit W5-7: seven of them did not, so the gate
+skipped them entirely and calibration.device_saturation_curve stayed unexported); the gate now
+requires one from every submodule and asserts it checked all of them, not "at least N".
 """
 
 from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
@@ -21,9 +30,11 @@ from dynameta.optics.soa.ase_noise import (ase_output_psd, ase_self_consistent,
                                            ase_spectrum_bidirectional, detector_noise_variances,
                                            inversion_factor_nsp, inversion_factor_nsp_eh,
                                            noise_figure, single_pass_gain, spectral_noise_figure)
-from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, optimal_drive_power,
+from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, harmonic_amplitudes,
+                                         optimal_drive_power,
                                          pattern_penalty_dB, predistort, ripple_enob_ceiling,
-                                         sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K)
+                                         sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K,
+                                         transfer_derivatives)
 from dynameta.optics.soa.noise_metrics import (henry_factor, linewidth_from_field, rin_spectrum,
                                                schawlow_townes_henry_linewidth)
 from dynameta.optics.soa.qd_gain import (Leakage, ManyBody, QDGainModel, QDGainParams,
@@ -38,11 +49,20 @@ from dynameta.optics.soa.maxwell_bloch import MaxwellBlochEnsemble
 from dynameta.optics.soa.calibration import (CalibratedDevice, DeviceTargets,
                                              INNOLUME_BOA1310, INNOLUME_BOA1310_TARGETS,
                                              InferredDynamic, SOA_PRESETS, calibrate_device,
-                                             calibrate_innolume_boa1310, infer_dynamics_from_cw)
-from dynameta.optics.soa.qw_gain import BulkGainParams
+                                             calibrate_innolume_boa1310, device_saturation_curve,
+                                             infer_dynamics_from_cw)
+from dynameta.optics.soa.qw_gain import (BulkGainParams, band_edge_Eg_J,
+                                         carrier_recombination_per_m3_s, carrier_rhs,
+                                         device_gain_dB, device_output_power_W,
+                                         emission_gain_per_m, gain_peak, material_gain_per_m,
+                                         n_sp_inversion, noise_figure_db, quasi_fermi_levels,
+                                         quasi_fermi_separation_eV, saturation_output_power_dbm,
+                                         small_signal_gain_spectrum, steady_state_N,
+                                         transparency_density)
 from dynameta.optics.soa.imd import (imd3_ratio, imd3_numeric_agrawal_olsson, oip3_dbm,
                                      sfdr_db_hz23, tau_eff_s, two_tone_oip3_dbm)
-from dynameta.optics.soa.temperature import (VARSHNI_PARAMS, d_eg_dT_ev_per_K,
+from dynameta.optics.soa.temperature import (B_LO_10MEV_HZ, VARSHNI_PARAMS, d_eg_dT_ev_per_K,
+                                             fwhm_hom_at_temperature,
                                              gain_peak_drift_nm_per_K,
                                              qd_params_at_temperature, varshni_eg_ev)
 from dynameta.optics.soa.traveling_wave import (NonlinearLoss, TravelingWaveSOA,
@@ -62,15 +82,22 @@ __all__ = [
            "detector_noise_variances", "sndr_db", "enob", "sndr_vs_drive", "optimal_drive_power",
            "predistort", "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K",
            "facet_gain_ripple_dB", "ripple_enob_ceiling",
+           "transfer_derivatives", "harmonic_amplitudes",
            "rin_spectrum", "linewidth_from_field", "henry_factor",
            "schawlow_townes_henry_linewidth", "TransverseBPM", "qd_gain_table", "MaxwellBlochEnsemble",
            "CalibratedDevice", "DeviceTargets", "INNOLUME_BOA1310", "INNOLUME_BOA1310_TARGETS",
            "SOA_PRESETS", "calibrate_device", "calibrate_innolume_boa1310",
+           "device_saturation_curve",
            "InferredDynamic", "infer_dynamics_from_cw", "BulkGainParams",
+           "band_edge_Eg_J", "quasi_fermi_levels", "quasi_fermi_separation_eV",
+           "material_gain_per_m", "emission_gain_per_m", "n_sp_inversion", "gain_peak",
+           "transparency_density", "carrier_recombination_per_m3_s", "carrier_rhs",
+           "steady_state_N", "small_signal_gain_spectrum", "device_output_power_W",
+           "device_gain_dB", "saturation_output_power_dbm", "noise_figure_db",
            "imd3_ratio", "imd3_numeric_agrawal_olsson", "oip3_dbm", "sfdr_db_hz23",
            "tau_eff_s", "two_tone_oip3_dbm",
            "VARSHNI_PARAMS", "varshni_eg_ev", "d_eg_dT_ev_per_K", "gain_peak_drift_nm_per_K",
-           "qd_params_at_temperature",
+           "qd_params_at_temperature", "B_LO_10MEV_HZ", "fwhm_hom_at_temperature",
            "thermal_profile_transient_1d",
            "nonmarkovian_lineshape", "biexp_memory_kernel", "lorentzian_area",
            "reduced_sbe_susceptibility", "sbe_gain_per_m"]

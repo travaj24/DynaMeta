@@ -129,11 +129,13 @@ def _solve(abs_err=ABS_ERR, rel_err=REL_ERR, max_iter=MAX_ITER):
 
 def staged_equilibrium_solve(verbose=False):
     """(1) potential-only pre-solve; (2) seed carriers; (3) coupled Newton @ 0 V."""
-    # Seed Potential from the built-in (charge-neutral) value: psi = V_t*log(n0/n_i)
-    # on the n-side, -V_t*log(p0/n_i) on the p-side (Boltzmann reference n_i).
-    n0_eq = "ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(ce=BP.CELEC, ch=BP.CHOLE)
+    # Seed Potential from the built-in (charge-neutral) value: psi = V_t*log(n0/n_i) on the n-side,
+    # -V_t*log(p0/n_i) on the p-side, PLUS the Fermi-Dirac degeneracy correction with the sign the
+    # local doping type takes, whenever the region runs the FD g-factor (audit C-10). The expression
+    # is single-sourced with the ohmic contact so the seed and the boundary condition cannot drift;
+    # with fd_enhancement=False it is the legacy Boltzmann string bit-for-bit.
     ds.node_model(device=DEVICE, region=REGION, name="_seed_psi",
-                  equation="V_t*log({n0}/n_i)".format(n0=n0_eq))
+                  equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(DEVICE, REGION)))
     psi_seed = ds.get_node_model_values(device=DEVICE, region=REGION, name="_seed_psi")
     n_seed = ds.get_node_model_values(device=DEVICE, region=REGION,
                                       name="IntrinsicElectrons")
@@ -276,12 +278,38 @@ def main():
     # Sign convention: bias on the p-contact. Forward (V>0) -> large positive-growing
     # current; reverse (V<0) -> small saturating current of the opposite sign.
     fwd_j = [jt for (v, jt, jn, jp) in fwd]
-    rev_j = [jt for (v, jt, jn, jp) in rev]
+    rev_j = [jt for (v, jt, jn, jp) in rev]           # printed only; see the J_n note below
 
     # Monotonic in magnitude with bias magnitude (forward current strictly grows).
     fwd_abs = [abs(j) for j in fwd_j]
     mono_fwd = all(fwd_abs[i + 1] >= fwd_abs[i] - 1e-30 for i in range(len(fwd_abs) - 1))
-    rev_abs = [abs(j) for j in rev_j]
+    # REVERSE BRANCH: use the ELECTRON current, not the total (measured 2026-07-26, audit C-10).
+    #
+    # WHY. The p-contact HOLE terminal current is a catastrophic Scharfetter-Gummel cancellation in
+    # deep reverse. With the SI prefactor q mu_p V_t (1/dx) p0 = 9.9407e+10 A/m^2 at the pinned
+    # p0 = 1e24 and a 2 nm contact cell, one float64 eps of that prefactor is 2.207e-05 A/m^2 --
+    # already 1110x the 1.9881e-08 A/m^2 the diode ACTUALLY passes in holes (the short-base Shockley
+    # value q D_p p_n0 / W, and the interior HoleCurrent on the n side measures a clean, smooth
+    # 2.059e-08 there, so the hole PHYSICS is right; it is only the contact-edge difference that
+    # cancels). What is reported is worse than one eps: the measured J_p flips between EXACTLY 0.0
+    # and -8.5381e-04 A/m^2, i.e. 39 eps of the prefactor and 4.3e4x the true J_p, under
+    # perturbations as small as the 0.31 mV FD built-in correction. It is a FLOAT64 floor, not an
+    # under-converged Newton: tightening the solve by 1e6 (absolute_error 1e18 -> 1e12, relative
+    # 1e-6 -> 1e-12) reproduces -8.538112e-04 to all 7 printed digits at every affected bias.
+    # J_n is clean and strictly monotone over the same sweep (-5.7472e-08 -> -5.8440e-08 at
+    # -0.25 -> -2.0 V), so the reverse-branch monotonicity is asserted on it: a STRONGER test than
+    # one whose input is 4 orders of magnitude of rounding noise. (The forward branch runs at
+    # 1e2-1e3 A/m^2, far above that floor, and keeps using the total.)
+    #
+    # DISCLOSURE: the C-10 contact change is what FORCED this gate change, and the gate change is
+    # not cosmetic. Holding everything else fixed and toggling only the contact statistics
+    # (fd_enhancement=False reproduces the pre-C-10 Boltzmann contact character-for-character):
+    # with the OLD Boltzmann contact the reverse J_p never left 0.0, |J_total| was monotone and
+    # GATE A passed ON THE TOTAL; with the shipped FD contact the +0.31 mV offset moves the
+    # cancellation across the rounding boundary at -0.75 .. -1.5 V, J_p reads -8.538e-04 there and
+    # |J_total| is NO LONGER monotone. |J_n| is monotone either way and differs by only ~3e-12
+    # between them, which is why it is the honest oracle rather than the convenient one.
+    rev_abs = [abs(jn) for (v, jt, jn, jp) in rev]
     mono_rev = all(rev_abs[i + 1] >= rev_abs[i] - 1e-30 for i in range(len(rev_abs) - 1))
     monotonic = mono_fwd and mono_rev
 
@@ -289,7 +317,9 @@ def main():
     # reverse current at the same |V| (=0.6 V interpolated -> use -0.5 V point), and
     # the two have OPPOSITE sign.
     j_fwd_06 = fwd_j[fwd_V.index(0.6)]
-    j_rev_05 = rev_j[rev_V.index(-0.5)]
+    # the reverse points are read from J_n for the cancellation-floor reason documented above
+    rev_jn = [jn for (v, jt, jn, jp) in rev]
+    j_rev_05 = rev_jn[rev_V.index(-0.5)]
     opposite_sign = (j_fwd_06 * j_rev_05) < 0.0
     big_ratio = abs(j_fwd_06) > 100.0 * max(abs(j_rev_05), 1e-300)
     rectifying = opposite_sign and big_ratio
@@ -298,7 +328,7 @@ def main():
     # |J_rev(-2V)|/|J_rev(-0.5V)| ~ 1; a non-rectifying OHMIC leak would grow ~linearly
     # (ratio ~4). Asserting this distinguishes a diode from a resistor that merely passes
     # the monotonic + single-point rectification checks (audit carriers-verifier C).
-    j_rev_2 = rev_j[rev_V.index(-2.0)]
+    j_rev_2 = rev_jn[rev_V.index(-2.0)]
     rev_sat_ratio = abs(j_rev_2) / max(abs(j_rev_05), 1e-300)
     rev_saturates = rev_sat_ratio < 2.0
 

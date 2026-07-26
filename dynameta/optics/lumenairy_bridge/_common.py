@@ -13,6 +13,17 @@ nothing below it was ever tested. The old per-backend floors (5.14.2 / 5.14.4 / 
 predate all of that and advertised support that was never demonstrated. parse_version
 tolerates pre/post-release suffixes ('5.22.0rc1' -> (5, 22, 0)); the previous
 tuple(int(p) ...) parse -- copy-pasted x3 -- crashed on them.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. _POL_ROW is the lab -> row leg of the map and
+is NOT injective ('x' and 'p' both land on row 0), which is why the inverse is refused.
 """
 
 from __future__ import annotations
@@ -81,7 +92,20 @@ VERSION_FLOOR = (5, 22, 0)
 VERSION_VERIFIED_MAX = (5, 22)
 _CEILING_WARNED = False
 
+# The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
+# family {'x','y','p'}, the lumenairy differentiable side speaks the integer lab `row` (0 = E_x,
+# 1 = E_y), and rcwa_design.rcwa_grating_RT speaks {'te','tm'}.  _POL_ROW is the x/y/p -> row leg
+# and it is NOT injective ('x' and 'p' both land on row 0, because p-pol's transverse E points
+# along lab x at phi = 0) -- which is why core.polarization refuses the row -> label inverse.
+# Map, converter and caveats: dynameta.core.polarization.
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
+
+
+def _reject_pol(pol, where: str, param: str = "polarization"):
+    """Raise the shared V-8 vocabulary error for a label outside {'x','y','p'}.  LAZY import,
+    failure path only -- the bridge's import-light contract is untouched."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, "lab_xyp", where=where, param=param)
 
 
 def parse_version(vstr) -> Tuple[int, int, int]:
@@ -143,10 +167,11 @@ def _warn_above_ceiling(vstr) -> None:
 
 
 def pol_row(optical) -> int:
+    """OpticalSpec lab-axis label -> lumenairy lab Jones/power ROW (audit V-8: the x/y/p -> row
+    leg of the vocabulary map; 'x' and 'p' share row 0)."""
     pol = getattr(optical, "polarization", "y") or "y"
     if pol not in _POL_ROW:
-        raise ValueError("lumenairy bridge: polarization must be 'x', 'y' or 'p' "
-                         "(got {!r})".format(pol))
+        _reject_pol(pol, "lumenairy bridge pol_row")
     return _POL_ROW[pol]
 
 
@@ -195,7 +220,13 @@ def p_basis_conversion(pol: str, theta_rad: float, n_super: complex,
     p-pol phases were validated against tmm). Measured: at 30 deg p-pol the Jones r_xx is
     EXACTLY -r_p(tmm) (R/T agree to machine precision, phase off by pi) and
     t_xx = t_p * cos(theta_t)/cos(theta_i) (the lab-x projection of the p-hat fields).
-    s-pol ('y') and 'x' need no conversion (the bases coincide)."""
+    s-pol ('y') and 'x' need no conversion (the bases coincide).
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} (map:
+    dynameta.core.polarization). The "anything but 'p'" fallthrough used to silently treat an
+    off-vocabulary label as needing no conversion; same accepted set, named rejection."""
+    if pol not in _POL_ROW:
+        _reject_pol(pol, "p_basis_conversion", param="pol")
     if pol != "p":
         return 1.0, 1.0
     cos_i = np.sqrt(1.0 + 0j - np.sin(theta_rad) ** 2)
@@ -220,7 +251,14 @@ def pol_tangential_unit(pol: str, phi: float) -> "np.ndarray":
     """Incident tangential (lab x, y) unit vector of the rotated s/p eigen-polarization the FEM
     solver and OpticalSpec use: 'y' = s-hat = (-sin phi, cos phi) (perpendicular to the plane of
     incidence); 'x'/'p' = the in-plane transverse direction (cos phi, sin phi). At phi = 0 these
-    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path."""
+    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path.
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'}. NOTE the phi != 0
+    reading of 'y' HERE (the rotated s-hat, matching the FEM solver) is NOT the reading
+    _POL_ROW gives it (lab row 1) -- the split documented in dynameta.core.polarization and the
+    reason guard_conical_ppol refuses conical incidence for the bridge's row-based paths."""
+    if pol not in _POL_ROW:
+        _reject_pol(pol, "pol_tangential_unit", param="pol")
     if pol == "y":
         return np.array([-np.sin(phi), np.cos(phi)], dtype=float)
     return np.array([np.cos(phi), np.sin(phi)], dtype=float)          # 'x' or 'p'

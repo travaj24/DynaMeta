@@ -85,6 +85,7 @@ Pure numpy/scipy; no FDTD, no DEVSIM, no metasurface seam.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -463,18 +464,47 @@ def saturation_output_power_dbm(I_A: float, nu_Hz: float, L_m: float, alpha_i_pe
     return float(10.0 * np.log10((10.0 ** log_pout_sat) / 1.0e-3)), G0
 
 
-def noise_figure_db(I_A: float, nu_Hz: float, L_m: float, alpha_i_per_m: float,
-                    params: BulkGainParams, nz: int = 200) -> float:
+def noise_figure_db(I_A: float, nu_Hz: float = None, L_m: float = None,
+                    alpha_i_per_m: float = None,
+                    params: BulkGainParams = None, nz: int = 200) -> float:
     """Amplifier noise figure [dB] at the small-signal operating point. n_sp = f_c(1-f_v)/(f_c-f_v)
     is evaluated at the reservoir density N0(I) and the gain-peak frequency; the internal-loss
     inversion degradation loss_factor = Gamma g_pk/(Gamma g_pk - alpha_i) and the net linear gain G
     feed the shared optics.amp_noise.nf_from_nsp (NF = 2 n_sp loss_factor (G-1)/G + 1/G).
 
+    `nu_Hz` is the frequency the NF is REQUESTED at, and this routine only ever answers at the
+    GAIN PEAK (audit X-8: the argument was accepted and then completely ignored -- AST-verified --
+    so a caller asking for the NF at their operating wavelength silently got the peak-wavelength
+    answer). Pass None (the documented spelling) to have the peak looked up; passing a frequency
+    that is NOT the peak now warns rather than substituting in silence. The peak used is returned
+    by gain_peak(steady_state_N(I_A, params), params).
+
     `L_m` must match `params.V_active_m3 / params.A_xsec_m2` (audit A-13)."""
+    # audit W5-6: giving nu_Hz a None default (the X-8 fix) forced None defaults onto every
+    # argument to its RIGHT, silently turning three REQUIRED model arguments into optional ones.
+    # Omitting them then surfaced as an AttributeError thrown deep inside steady_state_N
+    # ("'NoneType' object has no attribute 'A_srh_per_s'") -- a missing-argument mistake reported
+    # as a broken model. Only nu_Hz is genuinely optional (None = "the gain peak"); the other
+    # three defaults exist solely so nu_Hz can keep its documented position.
+    missing = [n for n, v in (("L_m", L_m), ("alpha_i_per_m", alpha_i_per_m),
+                              ("params", params)) if v is None]
+    if missing:
+        raise TypeError(
+            "noise_figure_db: missing required argument(s): {}. Only nu_Hz is optional (pass "
+            "None for the gain peak); L_m, alpha_i_per_m and params must all be "
+            "supplied.".format(", ".join(missing)))
     _require_device_length("noise_figure_db", L_m, params)
     p = params
     N0 = steady_state_N(I_A, params, P_W=0.0)
     nu_pk, g_pk = gain_peak(N0, params)
+    if nu_Hz is not None and abs(float(nu_Hz) - nu_pk) > 1e-9 * nu_pk:
+        warnings.warn(
+            "noise_figure_db: nu_Hz = {:.6g} Hz ({:.3f} nm) is not the gain peak {:.6g} Hz "
+            "({:.3f} nm); this model evaluates n_sp AND the net gain at the PEAK, so the value "
+            "returned is the peak-wavelength noise figure, not the one you asked for. Pass "
+            "nu_Hz=None to make that explicit (audit X-8).".format(
+                float(nu_Hz), C_LIGHT / float(nu_Hz) * 1e9, nu_pk, C_LIGHT / nu_pk * 1e9),
+            RuntimeWarning, stacklevel=2)
     modal = p.Gamma * g_pk
     if modal <= alpha_i_per_m:
         raise ValueError("noise_figure_db: modal gain Gamma*g_pk <= alpha_i (no net gain at peak)")

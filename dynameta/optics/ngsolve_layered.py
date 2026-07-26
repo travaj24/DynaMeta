@@ -21,6 +21,16 @@ checkable rather than hopeful (audit F-1/F-2): _identify_periodic REFUSES a face
 it cannot pair, and _assert_periodic_complete re-checks the BUILT mesh's
 periodic entity table before the geometry is handed out -- a mesh that netgen
 identified only partially raises instead of solving non-periodically in silence.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -135,12 +145,24 @@ class LayeredOpticalBuilder:
                 "mesh_3d.symmetry reduction is NORMAL-incidence only (an oblique/conical in-plane "
                 "wavevector breaks the mirror symmetry); got incidence_angle_deg={:.3g}, azimuth_deg="
                 "{:.3g}.".format(opt.incidence_angle_deg, opt.azimuth_deg))
+        if opt is not None and opt.polarization not in ("x", "y", "p"):
+            # audit V-8: an OFF-VOCABULARY label (e.g. the plane-of-incidence 's') is a different
+            # failure from the in-vocabulary-but-unsupported 'p' below, and used to be reported as
+            # the latter.  LAZY import, failure path only.
+            from dynameta.core.polarization import pol_vocabulary_error
+            raise pol_vocabulary_error(
+                opt.polarization, "lab_xyp",
+                where="LayeredOpticalBuilder._check_symmetry_supported", param="polarization")
         if opt is not None and opt.polarization not in ("x", "y"):
             # mirror the solver's wall-type guard at BUILD time, so requesting a reduction with an
             # unsupported polarization fails early/clearly rather than after the reduced mesh is built.
+            # (This is a CAPABILITY refusal of the in-vocabulary 'p', not a vocabulary error: the
+            # mirror wall type is PEC/PMC keyed to a linear x/y E axis and p-pol has no single one.)
             raise NotImplementedError(
                 "mesh_3d.symmetry reduction requires polarization 'x' or 'y' (the wall type is keyed to "
-                "the linear-polarization axis); got {!r}. Use symmetry='none'.".format(opt.polarization))
+                "the linear-polarization axis); got {!r}. Use symmetry='none'. ('x'/'y'/'p' is the "
+                "OpticalSpec lab-axis vocabulary -- see dynameta.core.polarization, audit V-8.)"
+                .format(opt.polarization))
         if d.mesh_3d.semi_prism_thk_m:
             raise NotImplementedError(
                 "mesh_3d.symmetry reduction is not yet supported with semi_prism_thk_m (the prismatic "

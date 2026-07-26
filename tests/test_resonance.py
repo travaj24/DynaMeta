@@ -347,6 +347,513 @@ def test_find_poles_pole_on_subdivision_centre():
                 "pole m={} missed with centre offset {}".format(m, off))
 
 
+# ------------------------------------------------------------------------------------------------
+# AUDIT Q-11: the ROOT-box winding diagnostic must reach the caller
+# ------------------------------------------------------------------------------------------------
+def test_root_box_untrustworthy_winding_is_reported_not_swallowed():
+    """Audit Q-11. ``_winding_densified`` returns its own "is this count believable" signal (the
+    residual max single-step |delta arg| after densification), and the quad-tree has always
+    checked it on every CHILD box before accepting a split -- but ``find_poles`` DROPPED it on the
+    root box, the one the caller asked about. A pole sitting ON the search-box boundary makes the
+    raw winding come out 0.000000 with a residual step of ~1.6 rad, and ``count <= 0`` then
+    returned an empty list: bit-for-bit the same answer as an honestly empty box, with nothing for
+    the caller to test.
+
+    The three outcomes must now be distinguishable, and the POLES must not move."""
+    import warnings
+
+    n, L, m = 3.5, 1.0e-6, 5
+    func = smatrix_pole_func([(complex(n) ** 2, L)], pol="s", n_super=1.0, n_sub=1.0, k_par_m=0.0)
+    p5 = _fp_pole(n, L, m)
+    span_re, span_im = 0.06 * p5.real, 1.5 * abs(p5.imag)
+
+    # (a) CENTRED box -- the pole is found, and nothing is reported
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        centred = find_poles(func, complex(p5.real, p5.imag), complex(span_re, span_im),
+                             n_grid=48)
+    assert len(centred) == 1 and abs(centred[0] - p5) < 1e-6 * abs(p5)
+    assert not [w for w in rec if issubclass(w.category, RuntimeWarning)]
+
+    # (b) the pole EXACTLY on the box's left edge -- empty list, and now a RuntimeWarning that
+    #     says the count itself is not believable
+    edge_centre = complex(p5.real + span_re, p5.imag)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        on_edge = find_poles(func, edge_centre, complex(span_re, span_im), n_grid=48)
+    assert on_edge == []
+    hits = [w for w in rec if issubclass(w.category, RuntimeWarning)]
+    assert len(hits) == 1, "the boundary pole was still swallowed silently"
+    msg = str(hits[0].message)
+    assert "untrustworthy" in msg and "does NOT mean 'no poles'" in msg
+
+    # (c) an HONESTLY empty box -- empty list, and SILENCE (the diagnostic must discriminate)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        empty = find_poles(func, complex(p5.real * 1.5, p5.imag), complex(0.01 * p5.real, span_im),
+                           n_grid=48)
+    assert empty == []
+    assert not [w for w in rec if issubclass(w.category, RuntimeWarning)]
+
+    # (d) on_untrusted policies: 'raise' is fatal, 'ignore' restores the old silence, and the
+    #     RETURNED POLES ARE IDENTICAL in all three modes (this is a diagnostic, not a search
+    #     change).
+    with pytest.raises(RuntimeError, match="untrustworthy"):
+        find_poles(func, edge_centre, complex(span_re, span_im), n_grid=48, on_untrusted="raise")
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        ignored = find_poles(func, edge_centre, complex(span_re, span_im), n_grid=48,
+                             on_untrusted="ignore")
+    assert ignored == [] and not [w for w in rec if issubclass(w.category, RuntimeWarning)]
+    for mode in ("warn", "ignore"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            same = find_poles(func, complex(p5.real, p5.imag), complex(span_re, span_im),
+                              n_grid=48, on_untrusted=mode)
+        assert same == centred                                   # bit-for-bit
+    with pytest.raises(ValueError, match="on_untrusted"):
+        find_poles(func, complex(p5.real, p5.imag), span_re, on_untrusted="shout")
+
+
+def test_root_diagnostic_is_not_a_false_alarm_when_the_count_is_corroborated():
+    """A contour can legitimately run at maxstep ~ pi (a near-cancellation on the boundary) while
+    its winding is an exact integer AND the quad-tree then refines exactly that many roots. The
+    two independent signals agree, so nothing is reported -- otherwise the diagnostic fires on
+    ordinary multi-pole boxes and stops meaning anything. (Measured on the shipped
+    nonlocal_tmm bulk-plasmon gate: maxstep 3.13 rad, winding exactly 2, 2 poles returned.)"""
+    import warnings
+
+    n, L = 3.5, 500e-9
+    func = smatrix_pole_func([(complex(n) ** 2, L)], pol="s", n_super=1.0, n_sub=1.0, k_par_m=0.0)
+    p5 = _fp_pole(n, L, 5)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        poles = find_poles(func, complex(p5.real, p5.imag),
+                           complex(0.30 * p5.real, 0.6 * abs(p5.imag)), n_grid=40)
+    assert len(poles) == 3                                       # m = 4, 5, 6
+    assert not [w for w in rec if issubclass(w.category, RuntimeWarning)]
+
+    # ... and this is the case the boundary RE-CHECK must not break: maxstep is large, but every
+    # zero is well inside, so shrinking / growing the box by a hair leaves the count alone.
+    from dynameta.optics.resonance import _boundary_is_clear, _winding_densified
+    rect = (p5.real - 0.30 * p5.real, p5.real + 0.30 * p5.real,
+            p5.imag - 0.6 * abs(p5.imag), p5.imag + 0.6 * abs(p5.imag))
+    w_root, ms_root = _winding_densified(func, rect, 40)
+    assert _boundary_is_clear(func, rect, 40, int(round(w_root))), (w_root, ms_root)
+
+
+def _polyfunc(roots):
+    """An analytic function with EXACTLY the given zeros -- find_poles takes any analytic callable,
+    and a polynomial is the only way to place zeros to the bit."""
+    rs = [complex(r) for r in roots]
+
+    def f(z):
+        out = 1.0 + 0j
+        for r in rs:
+            out *= (complex(z) - r)
+        return out
+    return f
+
+
+@pytest.mark.parametrize("name,roots", [
+    ("1 on the RIGHT edge", [1.0 + 0.0j]),
+    ("1 on the TOP edge", [0.3 + 1.0j]),
+    ("1 inside + 1 on the LEFT edge", [0.2 + 0.1j, -1.0 + 0.0j]),
+    ("2 inside + 1 on the LEFT edge", [0.2 + 0.1j, -0.3 - 0.4j, -1.0 + 0.0j]),
+    ("2 inside + 1 on the TOP edge", [0.2 + 0.1j, -0.3 - 0.4j, 0.15 + 1.0j]),
+    ("3 inside + 1 on the RIGHT edge", [0.2 + 0.1j, -0.3 - 0.4j, 0.5 - 0.6j, 1.0 + 0.2j]),
+    ("4 inside + 1 on the BOTTOM edge", [0.2 + 0.1j, -0.3 - 0.4j, 0.5 - 0.6j, -0.55 + 0.5j,
+                                         0.1 - 1.0j]),
+])
+def test_boundary_straddling_zeros_are_reported_even_when_the_count_matches(name, roots):
+    """AUDIT Q-11 residual: corroboration by COINCIDENCE. A zero on the search-box boundary makes
+    the winding untrustworthy (a ~pi phase step no densification removes, or a half-integer count)
+    -- but the quad-tree usually FINDS that zero too, so ``len(poles) == round(winding)`` held and
+    the diagnostic went silent. Measured on 12 boundary geometries: 7 were silenced this way,
+    these seven, including a single zero on the right edge (winding 1.000000, maxstep 3.14 rad,
+    one pole returned, no warning).
+
+    Matching counts is not corroboration when a zero sits ON the contour, because BOTH numbers
+    come from the same ambiguity. The independent signal is whether the count survives a hair's
+    shrink and a hair's growth of the box: only a zero within ``_BOX_RECHECK_REL`` of the boundary
+    changes side between the two."""
+    import warnings
+    from dynameta.optics.resonance import _MAXSTEP_TRUST, _WINDING_INT_TOL, _winding_densified
+
+    func = _polyfunc(roots)
+    rect = (-1.0, 1.0, -1.0, 1.0)
+    w, ms = _winding_densified(func, rect, 40)
+    count = int(round(w))
+    # precondition: this geometry IS the silenced kind -- untrustworthy winding, matching count
+    assert ms > _MAXSTEP_TRUST or abs(w - count) > _WINDING_INT_TOL, (name, w, ms)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        poles = find_poles(func, 0.0 + 0.0j, 1.0 + 1.0j, n_grid=40)
+    assert count > 0 and len(poles) == count, (name, count, len(poles))   # the coincidence
+    flagged = [str(w_.message) for w_ in rec if issubclass(w_.category, RuntimeWarning)]
+    assert flagged, name
+    assert any("STRADDLES" in m for m in flagged), (name, flagged)
+
+    # the policy knob works on this path too, and the poles are identical in all three modes
+    with pytest.raises(RuntimeError, match="STRADDLES"):
+        find_poles(func, 0.0 + 0.0j, 1.0 + 1.0j, n_grid=40, on_untrusted="raise")
+    with warnings.catch_warnings(record=True) as rec2:
+        warnings.simplefilter("always")
+        quiet = find_poles(func, 0.0 + 0.0j, 1.0 + 1.0j, n_grid=40, on_untrusted="ignore")
+    assert not [w_ for w_ in rec2 if issubclass(w_.category, RuntimeWarning)]
+    assert quiet == poles
+
+
+def test_a_trustworthy_winding_that_outcounts_the_search_is_reported():
+    """AUDIT Q-11 residual, the OTHER side. The old check only ever looked at UNTRUSTWORTHY
+    windings, so the opposite failure was silent: the argument principle counts N zeros with a
+    perfectly believable contour, the quad-tree refines M < N of them, and the short list comes
+    back with no diagnostic. Measured: a box with 8 simple zeros, winding exactly 8.000000 at
+    maxstep 0.49 rad, returned 6 poles and said nothing."""
+    import warnings
+    from dynameta.optics.resonance import _MAXSTEP_TRUST, _winding_densified
+
+    # the verifier's own 8-zero geometry, pinned so the gate does not drift with numpy's stream
+    roots = [0.23192038375205482 + 0.030921803096026768j,
+             -0.5132459423676295 + 0.19763929355103937j,
+             -0.002985361700475808 + 0.6147498747936122j,
+             -0.008932232461439149 + 0.11482212090586419j,
+             0.000316665088244239 - 0.3250332535917761j,
+             0.642015200552946 + 0.6016845734312937j,
+             -0.21008764024884324 - 0.011584601542532824j,
+             -0.3867203945104976 + 0.24612121090693617j]
+    func = _polyfunc(roots)
+    w, ms = _winding_densified(func, (-1.0, 1.0, -1.0, 1.0), 40)
+    assert ms <= _MAXSTEP_TRUST and w == pytest.approx(8.0, abs=1e-6)   # a TRUSTED count of 8
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        poles = find_poles(func, 0.0 + 0.0j, 1.0 + 1.0j, n_grid=40)
+    assert len(poles) == 6                                       # ... and the search fell short
+    flagged = [str(x.message) for x in rec if issubclass(x.category, RuntimeWarning)]
+    assert any("INCOMPLETE" in m and "argument principle counts 8" in m for m in flagged), flagged
+
+    # a box whose count IS fully recovered stays silent (no blanket warning on multi-pole boxes)
+    ok_roots = [0.2 + 0.1j, -0.3 - 0.4j, 0.5 - 0.6j]
+    with warnings.catch_warnings(record=True) as rec2:
+        warnings.simplefilter("always")
+        got = find_poles(_polyfunc(ok_roots), 0.0 + 0.0j, 1.0 + 1.0j, n_grid=40)
+    assert len(got) == 3
+    assert not [x for x in rec2 if issubclass(x.category, RuntimeWarning)]
+
+
+def test_on_untrusted_is_plumbed_through_every_pole_facing_entry_point():
+    """AUDIT Q-11 residual (c). ``find_poles`` grew the diagnostic and the policy knob; the three
+    public entry points a caller reaches poles through did not have it, so a user of
+    ``berreman_enz_pole`` could neither escalate nor silence the report on a box they never see,
+    and ``track_pole`` / ``q_budget`` had untrusted-result paths of their own with no policy at
+    all. Same keyword, same vocabulary, same default everywhere."""
+    import inspect
+    import warnings
+    from dynameta.optics import resonance as R
+
+    for fn in (R.find_poles, R.track_pole, R.q_budget, R.berreman_enz_pole):
+        p = inspect.signature(fn).parameters.get("on_untrusted")
+        assert p is not None, fn.__name__
+        assert p.default == "warn", fn.__name__
+        with pytest.raises(ValueError, match="on_untrusted"):
+            _call_with_untrusted(fn, "shout")
+
+    # (a) berreman_enz_pole FORWARDS it -- and the RESULT is bit-identical in all three modes, on
+    #     the shipped configuration. The Q-11 diagnostic is a diagnostic and nothing else.
+    kw = dict(eps_inf=3.8, wp=2.0e15, gamma=5.0e13, thickness_m=15e-9,
+              theta_rad=math.radians(60.0))
+    a = berreman_enz_pole(**kw)
+    b = berreman_enz_pole(on_untrusted="ignore", **kw)
+    c = berreman_enz_pole(on_untrusted="raise", **kw)
+    assert a["omega"] == b["omega"] == c["omega"] and a["Q"] == b["Q"] == c["Q"]
+    assert a["poles"] == b["poles"] == c["poles"]
+    # ... same for find_poles on the shipped Fabry-Perot boxes
+    n, L = 3.5, 1.0e-6
+    D = smatrix_pole_func([(complex(n) ** 2, L)], pol="s", n_super=1.0, n_sub=1.0, k_par_m=0.0)
+    for m in (3, 4, 5, 6):
+        p = _fp_pole(n, L, m)
+        ctr, spn = complex(p.real, p.imag), complex(0.06 * p.real, 1.5 * abs(p.imag))
+        got = [find_poles(D, ctr, spn, n_grid=48, on_untrusted=mode)
+               for mode in ("warn", "raise", "ignore")]
+        assert got[0] == got[1] == got[2] and len(got[0]) == 1, m
+
+    # (b) track_pole reports a jump it could not bisect away, and 'ignore' restores the silence.
+    #     A pole function whose pole MOVES discontinuously with the parameter is the failure the
+    #     jump_rel guard exists for; at max_subdiv = 0 the bisection cannot rescue it.
+    def solver(p):
+        return lambda z: complex(z) - complex(1.0 + p, -0.1)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        track = track_pole(solver, 1.0 - 0.1j, [0.0, 5.0], jump_rel=1e-3, max_subdiv=0)
+    assert any("max_subdiv" in str(x.message)
+               for x in rec if issubclass(x.category, RuntimeWarning))
+    with warnings.catch_warnings(record=True) as rec2:
+        warnings.simplefilter("always")
+        quiet = track_pole(solver, 1.0 - 0.1j, [0.0, 5.0], jump_rel=1e-3, max_subdiv=0,
+                           on_untrusted="ignore")
+    assert not [x for x in rec2 if issubclass(x.category, RuntimeWarning)]
+    assert quiet == track                       # the RESULT is identical in both modes
+    with pytest.raises(RuntimeError, match="max_subdiv"):
+        track_pole(solver, 1.0 - 0.1j, [0.0, 5.0], jump_rel=1e-3, max_subdiv=0,
+                   on_untrusted="raise")
+    # ... and a well-sampled track says nothing
+    with warnings.catch_warnings(record=True) as rec3:
+        warnings.simplefilter("always")
+        track_pole(solver, 1.0 - 0.1j, list(np.linspace(0.0, 0.5, 21)))
+    assert not [x for x in rec3 if issubclass(x.category, RuntimeWarning)]
+
+
+def _call_with_untrusted(fn, mode):
+    """Invoke each entry point far enough to hit its on_untrusted validation, no further."""
+    if fn.__name__ == "find_poles":
+        return fn(lambda z: complex(z), 0.0 + 0.0j, 1.0 + 1.0j, n_grid=8, on_untrusted=mode)
+    if fn.__name__ == "track_pole":
+        return fn(lambda p: (lambda z: complex(z)), 0.0 + 0.0j, [0.0], on_untrusted=mode)
+    if fn.__name__ == "q_budget":
+        return fn(lambda s: (lambda z: complex(z) - 1.0), 1.0 + 0.0j, on_untrusted=mode)
+    return fn(eps_inf=3.8, wp=2.0e15, gamma=5.0e13, thickness_m=15e-9,
+              theta_rad=math.radians(60.0), on_untrusted=mode)
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT P-6: the scalar 2x2 rewrite is the module's ONE non-bit-identical change -- gate its drift
+# ------------------------------------------------------------------------------------------------
+def _stack_denominator_numpy_reference(omega, layers, pol, n_super, n_sub, k_par):
+    """The PRE-P-6 array-numpy implementation of ``_stack_denominator``, verbatim: 2x2
+    ``np.array`` builds and ``@`` products (which route through BLAS zgemm), ``np.sqrt(... + 0j)``
+    and numpy complex division. Kept here as the reference the scalar rewrite is measured
+    against."""
+    from dynameta.optics.resonance import _admittance, _eval_eps
+
+    k0 = omega / C_LIGHT
+    kpar = complex(k_par)
+    eps_super = complex(n_super) ** 2
+    eps_sub = complex(n_sub) ** 2
+
+    def kz_np(eps):
+        return np.sqrt(eps * k0 * k0 - kpar * kpar + 0j)
+
+    Y_super = _admittance(eps_super, kz_np(eps_super), pol)
+    Y_sub = _admittance(eps_sub, kz_np(eps_sub), pol)
+    Mc = np.eye(2, dtype=np.complex128)
+    for e_spec, d in layers:
+        eps = _eval_eps(e_spec, omega)
+        kz = kz_np(eps)
+        Y = _admittance(eps, kz, pol)
+        phi = kz * float(d)
+        c, s = np.cos(phi), np.sin(phi)
+        Mc = Mc @ np.array([[c, -1j * s / Y], [-1j * Y * s, c]], dtype=np.complex128)
+    return complex(Y_super * (Mc[0, 0] + Mc[0, 1] * Y_sub) + (Mc[1, 0] + Mc[1, 1] * Y_sub))
+
+
+# SECONDARY sanity ceiling on the pole positions (see the mutation-teeth note in the test): the
+# ACTIVE discriminator is the median relative drift of D(omega) itself, six decades tighter.
+# Measured worst pole drift over every configuration below: 2.1e-16.
+_P6_POLE_TOL = 1e-12
+
+
+def test_p6_scalar_rewrite_drift_is_within_the_accepted_bound():
+    """AUDIT P-6. ``_kz`` / ``_interface`` / ``_propagate`` / the ``layered_smatrix_complex``
+    cascade / ``_stack_denominator`` were scalar physics written in array numpy; rewritten with
+    plain complex scalars they are 2.7x-3.6x (``_stack_denominator``), 4.9x
+    (``layered_smatrix_complex``) and 1.71x on ``find_poles`` end to end.
+
+    This is the only change in the module that is NOT bit-identical -- numpy's 2x2 ``@`` routes
+    through BLAS and accumulates differently from ``a*e + b*g``, and numpy's complex division
+    differs from CPython's -- so the drift is GATED here rather than assumed, against the
+    pre-P-6 implementation kept verbatim above. ``cmath.sqrt`` / ``cmath.exp`` are bit-identical
+    to their numpy twins on the argument classes this module can reach, and ``np.cos`` /
+    ``np.sin`` are NOT to ``cmath``'s, which is why the cosines stayed numpy -- see the module
+    comment for the per-class measurement, including the two exceptions (denormal ``sqrt``
+    arguments, ``exp`` arguments of magnitude >~ 400).
+
+    WHAT HAS TEETH HERE, MEASURED (mutation test: copy the package, apply ONE algebraically-exact
+    or physics-breaking rewrite of the 2x2 algebra, re-run these assertions):
+
+      * ``median(rel drift of D)`` < 1e-15 in (a) is the ACTIVE discriminator and the reason this
+        gate is worth running. It caught the control physics break (``-1j*s/Y`` -> ``-1j*s*Y`` in
+        the characteristic matrix: median drift 1.8e13, i.e. a different function) AND a
+        deliberate 1e-13 RELATIVE perturbation of D (median 4.9e-14) -- a change far too small to
+        move a pole. A 1e-15 relative perturbation passes, which is the intended sensitivity: it
+        is the accepted ulp band.
+      * the POLE clauses in (b) (``< _P6_POLE_TOL`` = 1e-12, and ``worst < 1e-14``) never fire on
+        their own. Under the 1e-13 perturbation the worst pole drift was 3.9e-15 -- inside BOTH
+        bounds -- because Newton refinement to ``refine_tol = 1e-11`` cannot resolve a
+        perturbation of D that small. They are kept as a SECONDARY sanity ceiling on the quantity
+        the acceptance was actually stated on (and they do catch the control break, at 6.2e-2),
+        not as the sharp instrument.
+      * algebraically-EXACT reorderings pass BY DESIGN and that is not a hole: expanding
+        ``_stack_denominator``, writing the p-pol admittance as ``1/(kz/eps)``, and
+        ``omega * (1/C_LIGHT)`` all stayed inside the ulp band (median 1.6e-16 to 1.8e-16). This
+        gate bounds the DRIFT of a rewrite; it is not a checksum of the source text."""
+    from dynameta.optics.resonance import _stack_denominator
+
+    configs = [
+        ("FP slab", [(complex(3.5) ** 2, 1.0e-6)], "s", 1.0, 1.0, 0.0),
+        ("3-layer lossy", [(complex(n) ** 2, d) for n, d in
+                           zip((2.0 + 0.05j, 1.4 + 0.0j, 3.0 + 0.2j), (120e-9, 80e-9, 60e-9))],
+         "p", 1.0, 1.0, k_par_from_angle(1.0, 2.0 * math.pi * C_LIGHT / 1300e-9,
+                                         math.radians(40.0))),
+        ("Drude film", [(lambda w: drude_eps(w, 3.8, 2.0e15, 1.0e14), 20e-9)],
+         "p", 1.0, 1.0, k_par_from_angle(1.0, 2.0e15, math.radians(50.0))),
+    ]
+
+    # (a) D(omega) itself: 1-2 ulp over a wide swath of the complex plane
+    rng = np.random.default_rng(0)
+    for name, layers, pol, ns, nb, kp in configs:
+        z = 1.2e15 * (1.0 + 0.3 * rng.standard_normal(1500)
+                      + 0.3j * rng.standard_normal(1500))
+        got = np.array([_stack_denominator(complex(w), layers, pol, ns, nb, kp) for w in z])
+        ref = np.array([_stack_denominator_numpy_reference(complex(w), layers, pol, ns, nb, kp)
+                        for w in z])
+        rel = np.abs(got - ref) / np.maximum(np.abs(ref), 1e-300)
+        # max is loose (it is dominated by the samples nearest a zero of D, where the relative
+        # metric has no scale); the MEDIAN is the clause with teeth -- measured 1.6e-16, and a
+        # rewrite that perturbs D by 1e-13 relative already reads 4.9e-14 here.
+        assert np.max(rel) < 1e-12, (name, float(np.max(rel)))
+        assert np.median(rel) < 1e-15, (name, float(np.median(rel)))
+
+    # (b) POLE POSITIONS -- the quantity the acceptance bound is stated on. Every shipped gate
+    #     configuration: Fabry-Perot m = 3..6 one at a time, the 3-pole box, and the Berreman/ENZ
+    #     film through berreman_enz_pole's own eps-cleared function and default box.
+    #     SECONDARY: see the mutation-teeth note in the docstring -- these clauses sit six decades
+    #     above the median-D clause and never fire without it.
+    worst = 0.0
+    boxes = []
+    for m in (3, 4, 5, 6):
+        p = _fp_pole(3.5, 1.0e-6, m)
+        boxes.append(([(complex(3.5) ** 2, 1.0e-6)], "s", 1.0, 1.0, 0.0, None,
+                      complex(p.real, p.imag), complex(0.06 * p.real, 1.5 * abs(p.imag)), 48))
+    p5 = _fp_pole(3.5, 500e-9, 5)
+    boxes.append(([(complex(3.5) ** 2, 500e-9)], "s", 1.0, 1.0, 0.0, None,
+                  complex(p5.real, p5.imag), complex(0.30 * p5.real, 0.6 * abs(p5.imag)), 40))
+    for eps_inf, wp, gam, d_nm, th in ((1.0, 2.0e15, 1.0e14, 20.0, 50.0),
+                                       (3.8, 2.0e15, 5.0e13, 15.0, 60.0),
+                                       (4.0, 1.2e15, 2.0e13, 30.0, 45.0)):
+        om_p = wp / math.sqrt(eps_inf)
+        ef = (lambda w, a=eps_inf, b=wp, c=gam: drude_eps(w, a, b, c))
+        boxes.append(([(ef, d_nm * 1e-9)], "p", 1.0, 1.0,
+                      k_par_from_angle(1.0, om_p, math.radians(th)), ef,
+                      complex(1.02 * om_p, -0.10 * om_p),
+                      complex(0.14 * om_p, 0.099 * om_p), 48))
+
+    for layers, pol, ns, nb, kp, clear, ctr, spn, ng in boxes:
+        def make(impl, layers=layers, pol=pol, ns=ns, nb=nb, kp=kp, clear=clear):
+            base = (lambda w: impl(complex(w), layers, pol, ns, nb, kp))
+            if clear is None:
+                return base
+            return lambda w: base(w) * complex(clear(w))
+
+        got = sorted(find_poles(make(_stack_denominator), ctr, spn, n_grid=ng,
+                                on_untrusted="ignore"), key=lambda z: (z.real, z.imag))
+        ref = sorted(find_poles(make(_stack_denominator_numpy_reference), ctr, spn, n_grid=ng,
+                                on_untrusted="ignore"), key=lambda z: (z.real, z.imag))
+        assert len(got) == len(ref) and got, (len(got), len(ref))
+        for a, b in zip(got, ref):
+            worst = max(worst, abs(a - b) / abs(b))
+            assert abs(a - b) / abs(b) < _P6_POLE_TOL, (a, b)
+            assert abs(pole_q(a) - pole_q(b)) / abs(pole_q(b)) < _P6_POLE_TOL
+    assert worst < 1e-14, "measured 2.1e-16; a jump to {:g} means the algebra changed".format(worst)
+
+    # (c) the OTHER half of the P-6 rewrite: layered_smatrix_complex's amplitude cascade. Its
+    #     R / T are already pinned against the independent `tmm` oracle at 1e-10 by gate 1; this
+    #     bounds the ulp-level drift of the complex amplitudes themselves.
+    def m11_numpy_reference(omega, layers, pol, ns, nb, kp):
+        from dynameta.optics.resonance import _admittance, _eval_eps
+        k0 = complex(omega) / C_LIGHT
+        kpar = complex(kp)
+
+        def kzn(eps):
+            return np.sqrt(eps * k0 * k0 - kpar * kpar + 0j)
+
+        eps_l = [_eval_eps(e, complex(omega)) for e, _ in layers]
+        kz_l = [kzn(e) for e in eps_l]
+        Y = ([_admittance(complex(ns) ** 2, kzn(complex(ns) ** 2), pol)]
+             + [_admittance(e, k, pol) for e, k in zip(eps_l, kz_l)]
+             + [_admittance(complex(nb) ** 2, kzn(complex(nb) ** 2), pol)])
+
+        def iface(a, b):
+            rho = b / a
+            return 0.5 * np.array([[1.0 + rho, 1.0 - rho], [1.0 - rho, 1.0 + rho]],
+                                  dtype=np.complex128)
+
+        M = iface(Y[0], Y[1])
+        for j in range(len(layers)):
+            e = np.exp(1j * kz_l[j] * float(layers[j][1]))
+            M = M @ np.array([[1.0 / e, 0.0], [0.0, e]], dtype=np.complex128) \
+                  @ iface(Y[j + 1], Y[j + 2])
+        return complex(M[0, 0])
+
+    for name, layers, pol, ns, nb, kp in configs:
+        for w in (1.2e15, complex(1.35e15, -2.0e13), complex(9.0e14, -5.0e13)):
+            got = layered_smatrix_complex(w, layers, pol=pol, n_super=ns, n_sub=nb,
+                                          k_par_m=kp).M11
+            want = m11_numpy_reference(w, layers, pol, ns, nb, kp)
+            assert abs(got - want) / abs(want) < 1e-12, (name, w, got, want)
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT Q-12: M11 is NOT a valid pole function -- the docstrings used to recommend it
+# ------------------------------------------------------------------------------------------------
+def test_m11_winding_miscounts_across_a_layer_branch_cut_but_the_denominator_does_not():
+    """Audit Q-12. ``SMatrix.M11`` and ``find_poles`` used to recommend feeding ``M11`` to the
+    pole finder, which ``_stack_denominator`` explicitly documents as WRONG: every Abeles entry
+    (cos(kz d), sin(kz d)/Y, Y sin(kz d)) is EVEN in the layer kz, hence a function of
+    kz^2 = eps k0^2 - k_par^2 -- polynomial in omega, no branch cut -- whereas M11 carries an
+    explicit exp(+-i kz d) and inherits the layer's sqrt branch point.
+
+    This pins the consequence rather than the prose. Put the LAYER light line (kz_layer = 0, at
+    omega = k_par c / n) inside a small box. Both functions have the SAME zero in there -- they
+    differ by nonvanishing factors, and both dip to ~5e-4 of their box-scale at the same point --
+    but only the branch-cut-free one counts it."""
+    import warnings
+
+    from dynameta.optics.resonance import _winding_densified, layered_smatrix_complex
+
+    n, L, m = 3.5, 1.0e-6, 5
+    layers = [(complex(n) ** 2, L)]
+    om = m * math.pi * C_LIGHT / (n * L)
+    k_par = om * n / C_LIGHT                       # layer branch point sits exactly at omega = om
+
+    D = smatrix_pole_func(layers, pol="s", k_par_m=k_par)
+
+    def M11(w):
+        return layered_smatrix_complex(w, layers, pol="s", k_par_m=k_par).M11
+
+    h = 0.05
+    rect = (om * (1 - h), om * (1 + h), -h * om, h * om)
+
+    # ground truth: a zero IS inside, and it is the same zero for both functions
+    re = np.linspace(rect[0], rect[1], 41)
+    im = np.linspace(rect[2], rect[3], 41)
+    for f in (D, M11):
+        Z = np.array([[abs(f(complex(a, b))) for b in im] for a in re])
+        assert Z.min() < 1e-3 * Z.max(), "no zero in the probe box"
+
+    w_D, ms_D = _winding_densified(D, rect, 80)
+    w_M, ms_M = _winding_densified(M11, rect, 80)
+    assert w_D == pytest.approx(1.0, abs=1e-6)     # analytic: the argument principle works
+    assert ms_D < 1.2                              # ... and its contour is well sampled
+    assert w_M == pytest.approx(0.0, abs=1e-6)     # M11 MISCOUNTS the very same zero
+    assert ms_M > 3.0                              # ... with the ~pi jump of the branch cut
+
+    # end to end: the recommended function finds the pole silently; M11 finds nothing and the
+    # Q-11 diagnostic is what tells you so.
+    centre, span = complex(om, 0.0), complex(h * om, h * om)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        got = find_poles(D, centre, span, n_grid=80)
+    assert len(got) == 1
+    assert not [w for w in rec if issubclass(w.category, RuntimeWarning)]
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        assert find_poles(M11, centre, span, n_grid=80) == []
+    assert [w for w in rec if issubclass(w.category, RuntimeWarning)]
+
+
 def test_berreman_enz_pole_thin_drude_film():
     # ITO-like Drude film: eps_inf = 1, omega_p ~ 2e15 rad/s (ENZ in the near-IR), moderate loss.
     eps_inf, wp, gamma = 1.0, 2.0e15, 1.0e14

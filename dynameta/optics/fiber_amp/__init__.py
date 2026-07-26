@@ -55,7 +55,8 @@ Accuracy extensions (all opt-in; byte-identical to the ideal model when off):
 Pulsed / chirped-pulse amplification (pulse.py, cpa.py):
   Phase 12 pulse                  : the gain-GNLSE envelope model (dispersion + Kerr + gain)
            solved by the symmetric split-step Fourier method (propagate_gnlse).
-  Phase 13 pulse (SaturableGain)  : saturable, spectrally-shaped gain -> gain narrowing.
+  Phase 13 pulse (SaturableGain)  : saturable, spectrally-shaped gain -> gain narrowing; opt-in
+           Frantz-Nodvik temporal reshaping (frantz_nodvik=True) for the short-pulse regime.
   Phase 14 cpa                    : stretcher/compressor chain, B-integral, Strehl / compression
            metrics (cpa_chain, strehl_ratio, transform_limited).
 
@@ -72,6 +73,12 @@ Realism extensions (2026-07 generality campaign; all opt-in / standalone):
            cladding-pump geometry efficiency.
   Phase 20 polarization / chain   : PDG/PHB two-pol model + measured anchors; multi-stage chains
            with PSD-based Friis-reproducing noise cascade.
+
+FACADE CONTRACT (audit X-10). This is an EAGER, EXHAUSTIVE facade -- unlike dynameta.optics and
+dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are by design. Every name
+in a submodule's __all__ MUST be re-exported here; drift is a bug, not a design choice (it left
+lma's own result type LPMode and its bend-loss / effective-area API invisible from the package).
+tests/test_fiber_amp.py::test_package_facade_is_exhaustive enforces it mechanically.
 """
 
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
@@ -101,9 +108,11 @@ from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, ne
                                               thermo_optic_phase_rad,
                                               solve_with_thermal_feedback)
 from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_gain,
+                                               frantz_nodvik_instantaneous_gain,
                                                frantz_nodvik_output_energy, frantz_nodvik_pulse,
                                                saturation_energy, simulate_transient)
-from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, calibration_report,
+from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, EDFA_CBAND_TARGETS,
+                                                  calibration_report,
                                                   dB_per_m_to_per_m, giles_calibrated_fiber,
                                                   ion_from_cross_sections)
 from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
@@ -112,8 +121,12 @@ from dynameta.optics.fiber_amp.pulse import (Pulse, gaussian_pulse, sech_pulse,
                                             propagate_gnlse, raman_response_freq, SaturableGain)
 from dynameta.optics.fiber_amp.cpa import (apply_spectral_phase, transform_limited, strehl_ratio,
                                           CPAResult, cpa_chain)
-from dynameta.optics.fiber_amp.nonlinear_limits import (brillouin_shift_hz,
+from dynameta.optics.fiber_amp.nonlinear_limits import (TMI_C0_DEFAULT, brillouin_shift_hz,
                                                         brillouin_linewidth_hz,
+                                                        brillouin_phonon_number,
+                                                        effective_length_m,
+                                                        raman_gain_coefficient,
+                                                        srs_stokes_wavelength_m,
                                                         sbs_threshold_W, sbs_gain_exponent,
                                                         srs_threshold_W, srs_gain_exponent,
                                                         tmi_threshold_W, rayleigh_alpha_per_m,
@@ -121,13 +134,18 @@ from dynameta.optics.fiber_amp.nonlinear_limits import (brillouin_shift_hz,
                                                         mpi_beat_variance_ratio, mpi_rin_per_hz,
                                                         mpi_power_penalty_dB)
 from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
-from dynameta.optics.fiber_amp.lma import (solve_lp_modes, dopant_overlap,
-                                           marcuse_bend_loss_per_m, pump_absorption_efficiency,
+from dynameta.optics.fiber_amp.lma import (LPMode, ModeOverlap, solve_lp_modes, dopant_overlap,
+                                           cladding_absorption_two_population,
+                                           effective_area_m2, marcuse_bend_loss_dB_per_m,
+                                           marcuse_bend_loss_per_m, mode_degeneracy, mode_field,
+                                           one_over_e_radius_m, pump_absorption_efficiency,
+                                           second_moment_radius_m, total_mode_count,
                                            effective_cladding_overlap,
                                            mode_resolved_gain_overlaps)
 from dynameta.optics.fiber_amp.polarization import (TwoPolSaturation, f_from_pdg_slope,
                                                     pdg_cascade_db, pdg_db)
-from dynameta.optics.fiber_amp.chain import AmplifierChain, ChainResult, PassiveElement
+from dynameta.optics.fiber_amp.chain import (AmplifierChain, ChainResult, PassiveElement,
+                                             StageRecord)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
@@ -146,8 +164,9 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "thermo_optic_phase_rad", "solve_with_thermal_feedback",
            "TransientResult", "simulate_transient", "saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
+           "frantz_nodvik_instantaneous_gain",
            "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
-           "calibration_report", "dB_per_m_to_per_m",
+           "calibration_report", "dB_per_m_to_per_m", "EDFA_CBAND_TARGETS",
            "BeatNoiseResult", "detection_noise",
            "Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
            "soliton_order", "propagate_gnlse", "raman_response_freq", "SaturableGain",
@@ -156,9 +175,14 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "sbs_gain_exponent", "srs_threshold_W", "srs_gain_exponent", "tmi_threshold_W",
            "rayleigh_alpha_per_m", "capture_fraction", "double_rayleigh_mpi",
            "mpi_beat_variance_ratio", "mpi_rin_per_hz", "mpi_power_penalty_dB",
+           "TMI_C0_DEFAULT", "brillouin_phonon_number", "effective_length_m",
+           "raman_gain_coefficient", "srs_stokes_wavelength_m",
            "ErYbAmplifier",
            "solve_lp_modes", "dopant_overlap", "marcuse_bend_loss_per_m",
            "pump_absorption_efficiency", "effective_cladding_overlap",
            "mode_resolved_gain_overlaps",
+           "LPMode", "ModeOverlap", "cladding_absorption_two_population", "effective_area_m2",
+           "marcuse_bend_loss_dB_per_m", "mode_degeneracy", "mode_field", "one_over_e_radius_m",
+           "second_moment_radius_m", "total_mode_count",
            "TwoPolSaturation", "f_from_pdg_slope", "pdg_cascade_db", "pdg_db",
-           "AmplifierChain", "ChainResult", "PassiveElement"]
+           "AmplifierChain", "ChainResult", "PassiveElement", "StageRecord"]

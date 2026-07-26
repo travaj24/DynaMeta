@@ -18,8 +18,12 @@ Off-switches (byte-identical to the linear, constant-mass result):
   - intensity I(t) == 0 (or alpha_abs == 0)         -> T_e == T_l == T0 for all t.
   - alpha_per_eV == 0 in kane_mass_of_Te            -> m_c == m0 EXACTLY (no band nonparabolicity).
   - p == 0 in gamma_of_Te                           -> Gamma == gamma0 EXACTLY.
-Any of these collapses the per-instant Drude to the constant drude0 at every step. Pure numpy/scipy;
-exp(-i omega t), Im(eps) > 0; SI units (C in J/m^3/K, alpha_abs I in W/m^3).
+Any of these collapses the per-instant Drude to the constant drude0 at every step. The pump-off
+switch holds AT EVERY BASE TEMPERATURE (audit C-7): gamma_of_Te's reference temperature is threaded
+from carrier_heating_transient and defaults to T0_K, so Gamma == gamma0 whenever T_e == T_l == T0_K
+(it used to be pinned at 300 K, which made the promise FALSE off 300 K -- 0.257*gamma0 at 77 K with
+the pump off). Pure numpy/scipy; exp(-i omega t), Im(eps) > 0; SI units (C in J/m^3/K, alpha_abs I
+in W/m^3).
 """
 
 from __future__ import annotations
@@ -280,17 +284,41 @@ def two_temperature_response(times_s, intensity_of_t: Callable, params: TwoTempP
 
     max_step caps the internal step so the adaptive integrator cannot STEP OVER a narrow pump pulse
     (a classic stiff-solver-misses-the-forcing failure); default = the output sample spacing, so the
-    pump is always resolved at least to the requested time resolution."""
+    pump is always resolved at least to the requested time resolution.
+
+    Every coefficient is validated: C_l > 0, G_e_l >= 0 and (audit C-11) C_e finite and > 0 -- at
+    T0_K before the solve, and at every rhs evaluation with Te >= 0 (which is what a callable
+    C_e = gamma_e*Te needs; a setup check alone cannot see a closure that crosses zero later)."""
     t = np.asarray(times_s, dtype=np.float64)
     if t.ndim != 1 or t.size < 2 or np.any(np.diff(t) <= 0):
         raise ValueError("times_s must be a 1D strictly increasing array with >= 2 samples")
     if params.C_l <= 0 or params.G_e_l < 0:
         raise ValueError("C_l must be > 0 and G_e_l >= 0")
+    # audit C-11: C_e was the ONE unvalidated coefficient. rhs DIVIDES by it, so C_e < 0 flips the
+    # sign of the electron-gas energy equation (the hot gas COOLS when heated) and used to integrate
+    # SILENTLY to a plausible-looking (t, Te, Tl); C_e == 0 died far from the cause inside solve_ivp
+    # as "array must not contain infs or NaNs". Two checks: once at setup (the float case, and the
+    # callable at the initial state -- a clean message before any integration), and once per rhs
+    # evaluation for the documented CALLABLE usage (C_e = gamma_e*Te), whose zero crossing a setup
+    # check cannot see. The rhs check is gated on Te >= 0 so a stiff-solver trial state at negative
+    # temperature -- unphysical, and not what the user asked about -- cannot raise spuriously; any
+    # C_e that is positive over the physical Te >= 0 axis therefore never trips it.
+    C0 = params.C_e_of(float(T0_K))
+    if not (np.isfinite(C0) and C0 > 0.0):
+        raise ValueError("two_temperature_response: C_e must be finite and > 0 (got C_e({:g} K) = "
+                         "{!r}); a non-positive electron heat capacity inverts the sign of the "
+                         "electron-gas energy equation (audit C-11)".format(float(T0_K), C0))
     ms = float(max_step) if max_step is not None else float(np.min(np.diff(t)))
 
     def rhs(tt, y):
         Te, Tl = y
         Ce = params.C_e_of(Te)
+        if Te >= 0.0 and not (np.isfinite(Ce) and Ce > 0.0):       # audit C-11
+            raise ValueError(
+                "two_temperature_response: C_e({:g} K) = {!r} at t = {:g} s -- the electron heat "
+                "capacity must stay finite and > 0 over the whole trajectory (a non-positive C_e "
+                "inverts the sign of the electron-gas energy equation, so the hot gas would COOL "
+                "when heated); check the C_e closure (audit C-11)".format(Te, Ce, tt))
         Q = float(params.alpha_abs) * float(intensity_of_t(tt))    # W/m^3 absorbed power density
         flow = params.G_e_l * (Te - Tl)
         return [(-flow + Q) / Ce, flow / params.C_l]
@@ -306,13 +334,23 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
                               drude0: DrudeOptical, ttm_params: TwoTempParams, n_m3: float,
                               alpha_per_eV: float, m0_kg: Optional[float] = None, g_s: int = 2,
                               g_v: int = 1, gamma_p: float = 1.0, mass_exponent: float = 1.0,
-                              build_stack: Optional[Callable] = None, T0_K: float = 300.0):
+                              build_stack: Optional[Callable] = None, T0_K: float = 300.0,
+                              gamma_T_ref_K: Optional[float] = None):
     """Full carrier-heating ENZ transient: solve the TTM for T_e(t), then feed the existing
     transient_optics loop a per-instant DrudeOptical whose m_opt_kg / gamma_rad_s are CLOSURES capturing
     T_e(t_i) (so m_c(T_e) and Gamma(T_e) evolve with the hot-electron temperature). The density n_m3 is
     held fixed (carrier heating is a same-density, hot-carrier effect, distinct from gate accumulation).
     Returns (t_s, R, T, eps_front, Te, Tl). Reduces to the linear constant-Drude result when the pump or
-    the nonparabolicity/phonon knobs are off (see module off-switches)."""
+    the nonparabolicity/phonon knobs are off (see module off-switches).
+
+    `gamma_T_ref_K` (audit C-7) is the temperature at which `drude0.gamma_rad_s` was CALIBRATED, i.e.
+    the T_ref of Gamma(T_e) = gamma0 (T_e/T_ref)^gamma_p. It used to be hardwired to T_REF = 300 K
+    while the caller owned T0_K, so off 300 K the module's own byte-identical off-switch was FALSE:
+    with the pump off T_e == T_l == T0_K exactly, yet Gamma = gamma0 (T0_K/300)^p -- 0.257*gamma0 at
+    77 K, 1.667*gamma0 at 500 K (p=1), a DIFFERENT material with every heating knob off. The default
+    None now means "gamma0 is the damping at T0_K", which restores the off-switch at every base
+    temperature and is byte-identical at the default T0_K = 300 K. Pass gamma_T_ref_K=300.0
+    explicitly to keep the legacy reading of a 300 K-calibrated gamma0 at a non-300 K T0_K."""
     from dynameta.transient_optics import optical_transient_response
 
     # audit C5-10: a CALIBRATED DrudeOptical carrying callable m_opt_kg / gamma_rad_s used
@@ -334,6 +372,26 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
             "silently substituting 1e14 rad/s computed a different material (audit C5-10).")
     m0 = float(m0_kg) if m0_kg is not None else float(drude0.m_opt_kg)
     gamma0 = float(drude0.gamma_rad_s)
+    # audit C-7: the phonon-damping reference temperature travels WITH gamma0's calibration, so it is
+    # threaded (default = T0_K) instead of being pinned at 300 K inside gamma_of_Te.
+    gamma_T_ref = float(T0_K) if gamma_T_ref_K is None else float(gamma_T_ref_K)
+    # FINITE and > 0, not merely > 0: +inf passes `> 0` and makes Gamma = gamma0 (T_e/inf)^p = 0
+    # EXACTLY, i.e. a silently LOSSLESS Drude -- a different material with no diagnostic, which is
+    # the same class of defect C-7 exists to close (measured: gamma_T_ref_K=inf returned
+    # eps[0] = -1.866+0j, a purely real permittivity, with no raise).
+    if not (np.isfinite(gamma_T_ref) and gamma_T_ref > 0.0):
+        raise ValueError("carrier_heating_transient: the gamma reference temperature must be FINITE "
+                         "and > 0 K (got gamma_T_ref_K={!r}, T0_K={!r}); a non-finite reference makes "
+                         "Gamma(T_e) = gamma0 (T_e/T_ref)^p collapse to 0 and returns a silently "
+                         "LOSSLESS Drude (audit C-7).".format(gamma_T_ref_K, T0_K))
+    # T0_K is only checked THROUGH gamma_T_ref when gamma_T_ref_K is None; with an explicit
+    # reference an unphysical T0_K used to reach the TTM unchecked (it then raised, but from
+    # two_temperature_response's C_e guard, naming C-11 and a heat capacity rather than the base
+    # temperature the caller actually got wrong -- and only for a C_e whose sign happens to flip).
+    if not (np.isfinite(float(T0_K)) and float(T0_K) > 0.0):
+        raise ValueError("carrier_heating_transient: the base temperature T0_K must be FINITE and "
+                         "> 0 K (got T0_K={!r}); it seeds BOTH the two-temperature solve and (with "
+                         "gamma_T_ref_K=None) the phonon-damping reference (audit C-7).".format(T0_K))
     t, Te, Tl = two_temperature_response(times_s, intensity_of_t, ttm_params, T0_K=T0_K)
     Te_of_t = lambda tt: float(np.interp(tt, t, Te))
 
@@ -343,7 +401,8 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
             eps_inf=drude0.eps_inf,
             m_opt_kg=(lambda nn, _Te=Te_i: kane_mass_of_Te(m0, alpha_per_eV, nn, _Te, g_s=g_s,
                                                            g_v=g_v, exponent=mass_exponent)),
-            gamma_rad_s=(lambda nn, _Te=Te_i: gamma_of_Te(gamma0, _Te, p=gamma_p)))
+            gamma_rad_s=(lambda nn, _Te=Te_i: gamma_of_Te(gamma0, _Te, p=gamma_p,
+                                                          T_ref_K=gamma_T_ref)))
 
     n_of_t = lambda tt: float(n_m3)
     tt, R, Tr, eps_front = optical_transient_response(times_s, n_of_t, lambda_m,
