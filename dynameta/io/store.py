@@ -67,6 +67,33 @@ def _require(mod: str, fmt: str):
                           "pip install {}).".format(fmt, mod, mod)) from e
 
 
+def preload_backend(path: str, *, fmt: str = "auto"):
+    """Import the storage backend for `path`/`fmt` NOW, and return its name ('hdf5'/'zarr') or
+    None if it could not be resolved.
+
+    Why this exists (audit R-7): a FIRST-TIME `import h5py` executed during interpreter SHUTDOWN
+    segfaults on Windows / CPython 3.14 / h5py 3.16 -- exit code 0xC0000005, no traceback, after
+    the data has already been written. dynameta.cache defers its final write to an atexit hook or
+    to __del__, so a cache whose entries all fit inside one autosave batch reached save_arrays for
+    the very first time at shutdown and took the whole process down with it (reproduced: rc=0 when
+    the cache is dropped mid-run, 0xC0000005 for the alive-at-exit / reference-cycle / late-__del__
+    orderings; rc=0 in all four once h5py is imported eagerly). Importing the extension module
+    while the interpreter is healthy makes the shutdown-time call a no-op lookup.
+
+    BEST EFFORT by design: an unresolvable extension or a missing optional package is swallowed
+    here, so this cannot turn a construction that used to succeed into a raise -- the real error
+    still surfaces from save_arrays/load_arrays with its own message."""
+    try:
+        backend = _detect_fmt(path, fmt)
+    except Exception:                                       # unknown extension -> let save/load say so
+        return None
+    try:
+        _require("h5py" if backend == "hdf5" else "zarr", backend)
+    except Exception:                                       # pragma: no cover - optional dep absent
+        return None
+    return backend
+
+
 def save_arrays(path: str, arrays: Dict[str, np.ndarray], attrs: Dict[str, Any] = None, *,
                 fmt: str = "auto") -> str:
     """Write `arrays` (name -> real NumPy array) and the JSON-able `attrs` dict to `path` on the backend

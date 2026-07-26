@@ -150,8 +150,9 @@ def _sweep_aware_recorder(rec):
     return _solve
 
 
-def _run_sweep(design, rec):
-    sweep = Sweep(bias_points=[BiasPoint(label="b0", voltages={"gate": 0.0})], wavelengths_nm=_LAMS_NM)
+def _run_sweep(design, rec, lams=None):
+    sweep = Sweep(bias_points=[BiasPoint(label="b0", voltages={"gate": 0.0})],
+                  wavelengths_nm=(_LAMS_NM if lams is None else lams))
     run_pipeline(design, sweep, verbose=False, carrier_solver=_StubCarrier(),
                  optical_builder=_StubBuilder(), optical_solver=_sweep_aware_recorder(rec))
 
@@ -174,6 +175,48 @@ def test_dispersive_end_media_disables_sweep_fast_path():
         assert abs(n_sub - n_sub_true) < 1e-12
     seen = [n for _, n in rec["per_call"]]
     assert abs(seen[0] - seen[-1]) > 1e-2                           # n_sub genuinely VARIES (not frozen)
+
+
+# The band-edge-equal, in-band-bump fixture: eps 4 -> 6 -> 4 with the 6 sitting EXACTLY on the
+# band centre 0.5*(1200 + 1450) = 1325 nm, the wavelength the fast path freezes n_sub at.
+_BUMP_LAMS_NM = [1200.0, 1450.0]
+
+
+def test_inband_dispersion_bump_disables_sweep_fast_path():
+    """AUDIT T-10 / C5-12 -- the DISCRIMINATING case, driven through the real run_pipeline.
+
+    The sibling test above uses a MONOTONIC substrate (eps 4 -> 6 across the band), which the
+    pre-fix two-edge check also flagged, so it passes on both implementations and gates nothing
+    about the fix. This fixture is the one the fix was written for: the end-media index is
+    IDENTICAL at the two band edges (n_sub = 2.0) and different only in between, so the two-edge
+    check sees no dispersion, keeps the fast path, and freezes n_sub = sqrt(6) = 2.449 for the
+    whole sweep. The shipped check samples every sweep wavelength against the band-centre freeze
+    point and must warn + disable.
+
+    Verified against a `git archive` copy with pipeline.py reverted to the two-edge form: there no
+    RuntimeWarning fires, .solve_sweep IS called once, and this test fails on `pytest.warns` --
+    while every other test in this module and in test_audit_guards.py stays green.
+    """
+    lam_c_m = 0.5 * (min(_BUMP_LAMS_NM) + max(_BUMP_LAMS_NM)) * 1e-9
+    bump = TabulatedOptical(lambda_m=np.array([1.20e-6, 1.325e-6, 1.45e-6]),
+                            eps_complex=np.array([4.0 + 0j, 6.0 + 0j, 4.0 + 0j]))
+    d = _design_sub(bump)
+    # the fixture's defining property: EQUAL at the edges, wrong at the freeze point
+    _, nb_lo = end_media_indices(d, min(_BUMP_LAMS_NM) * 1e-9)
+    _, nb_hi = end_media_indices(d, max(_BUMP_LAMS_NM) * 1e-9)
+    _, nb_c = end_media_indices(d, lam_c_m)
+    assert abs(nb_lo - nb_hi) < 1e-12                   # the two-edge check is blind here...
+    assert abs(nb_c - nb_lo) > 0.4                      # ...but the value it would freeze is wrong
+
+    rec = {"per_call": [], "sweep_nsub": []}
+    with pytest.warns(RuntimeWarning, match="DISPERSIVE"):
+        _run_sweep(d, rec, lams=_BUMP_LAMS_NM)
+    assert rec["sweep_nsub"] == []                      # fast path DISABLED (no frozen solve)
+    assert len(rec["per_call"]) == len(_BUMP_LAMS_NM)   # solved per wavelength instead
+    for lam_m, n_sub in rec["per_call"]:
+        _, n_true = end_media_indices(d, lam_m)
+        assert abs(n_sub - n_true) < 1e-12              # the correct PER-lambda substrate index
+        assert abs(n_sub - nb_c) > 0.4                  # and NOT the frozen band-centre value
 
 
 def test_nondispersive_end_media_keeps_sweep_fast_path():

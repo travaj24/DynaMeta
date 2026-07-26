@@ -41,6 +41,7 @@ existing output; fdtd_etalon_ringdown() drives it and inverts the post-pulse tai
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
@@ -245,6 +246,39 @@ def _real_reconstruction(n: int, dt: float, modes: Sequence[Mode]) -> np.ndarray
         else:
             out += e * m.amplitude.real
     return out
+
+
+# ---- ABSOLUTE fit-quality tells (fix-verify W1 kill 2) --------------------------------------
+# _nls_refine_real's gate is RELATIVE: it only asks whether the refit beats its own pencil seed.
+# When the window is source-contaminated BOTH fits are garbage and the comparison passes, so the
+# public path returned a wrong Q with refine_note = '' and no warning at all. These two absolute
+# tells separate the shipped configurations from the contaminated ones by ~an order of magnitude
+# each (measured on the n_slab = 3.5..15 FDTD etalons vs a start_frac sweep that cuts into the
+# driven pulse):
+#   residual   rms(reconstruction - data) / ptp(data):  1.8e-3 .. 2.4e-3 good,  8.4e-3 .. 1.4e-1 bad
+#   amplitude  sum_k |A_k| / max|data|:                 1.2 .. 2.1     good,  10 .. 5.7e3     bad
+# The second catches near-cancelling amplitude blow-up (a rank-deficient design matrix reproduces
+# the data from huge opposed columns); the first catches a fit that simply does not describe it.
+_FIT_RESID_TOL = 5.0e-3
+_FIT_AMP_SANITY = 20.0
+# A window must span a few amplitude e-foldings for gamma (hence Q) to be observable rather than
+# extrapolated; see fdtd_etalon_ringdown's SCOPE note.
+_MIN_WINDOW_NEPERS = 3.0
+
+
+def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode]) -> dict:
+    """ABSOLUTE goodness-of-fit of ``modes`` on the windowed trace ``y``: the reconstruction RMS
+    relative to the data's peak-to-peak, and the summed |amplitude| relative to the data's peak.
+    Both are scale-free and neither is a comparison against another (possibly equally bad) fit."""
+    y = np.asarray(y, dtype=np.float64)
+    ptp = float(np.ptp(y))
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    rms = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, modes) - y) ** 2))) if modes \
+        else float(np.sqrt(np.mean(y ** 2)))
+    amp = float(sum(abs(m.amplitude) for m in modes))
+    return {"rms": rms, "ptp": ptp, "peak": peak, "amp_sum": amp,
+            "rms_rel": rms / ptp if ptp > 0.0 else float("inf"),
+            "amp_rel": amp / peak if peak > 0.0 else float("inf")}
 
 
 def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
@@ -530,8 +564,11 @@ class EtalonRingdown:
 
     ``refine_note`` is a debug string: empty when the NLS (VARPRO) refinement was accepted, and
     otherwise the reason the PENCIL SEED was returned instead (finding Q-2's safety gate --
-    e.g. "refined RMS ... > seed RMS ...").  ``window`` is the (i0, i1) sample window that was
-    cut out of the raw FDTD trace."""
+    e.g. "refined RMS ... > seed RMS ...").  It ALSO carries an ``UNRELIABLE FIT: ...`` prefix
+    (alongside a ``RuntimeWarning``) whenever the returned modes fail the ABSOLUTE goodness-of-fit
+    tells in ``_fit_quality`` -- the refinement gate is only RELATIVE to its own seed, so a
+    source-contaminated window used to come back with an empty note and a 73-93%-wrong Q.
+    ``window`` is the (i0, i1) sample window that was cut out of the raw FDTD trace."""
 
     modes: List[Mode]
     f0_Hz: float
@@ -565,9 +602,14 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       use          : "reflected" (default) or "transmitted" tail to invert.
       start_frac   : None (default) = DATA-DRIVEN window via _ringdown_window (start when the
                      envelope is 50 dB below peak, end a margin above the numeric floor --
-                     platform-stable, fits the clean exponential decades). A float gives the
-                     legacy fixed-fraction window start (fragile on long records: the mode may
-                     be at the float64 floor by then).
+                     platform-stable, fits the clean exponential decades). A float in (0, 1) gives
+                     the legacy fixed-fraction window start. That path is FRAGILE at BOTH ends: too
+                     small and the window still holds the driven pulse (start_frac = 0.02 measured
+                     Q 73% low at n_slab = 3.5 and 93% low at n_slab = 7, because the envelope
+                     peaks at ~6.7% of the record); too large and the mode is already at the
+                     float64 floor. It is validated (0 < start_frac < 1), it WARNS when the window
+                     begins at or before the envelope peak, and whatever it produces is scored by
+                     the absolute fit-quality tells below.
       target_samples_per_period : decimation target (>= ~8 to stay above Nyquist).
       max_fit_samples : cap on the number of decimated samples fed to the pencil (speed).
       refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
@@ -580,6 +622,25 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                      refinement. Every other mode still contributes FIXED columns to the design
                      matrix, so no mode's energy can alias into a refined one (finding Q-2).
       the remaining kwargs pass through to matrix_pencil.
+
+    OPERATING ENVELOPE (fix-verify W1 items 2 and 9). Two absolute checks run on the result and
+    each raises a ``RuntimeWarning`` AND annotates ``EtalonRingdown.refine_note``:
+
+      * GOODNESS OF FIT -- ``_fit_quality``: reconstruction RMS vs the window's peak-to-peak, and
+        summed |amplitude| vs the data peak. The refinement's own gate is RELATIVE (refit vs its
+        pencil seed), so when the window is source-contaminated both fits are garbage and the
+        comparison passes silently; these two are absolute. Measured: 1.8e-3..2.4e-3 and 1.2..2.1
+        on the shipped n_slab = 3.5..15 etalons, versus 8.4e-3..1.4e-1 and 10..5.7e3 on windows
+        that cut into the driven pulse.
+      * WINDOW SPAN -- the fitted window should cover at least ~3 amplitude e-foldings of the
+        dominant mode. ``max_fit_samples = 1200`` at ``target_samples_per_period = 20`` is 60
+        carrier periods, i.e. only ``60 pi / Q`` nepers: 13.7 at n_slab = 3.5, 3.5 at 7, 1.7 at 10,
+        0.75 at 15. THAT is the shipped scope limit. It is a CONSERVATIVE flag -- on these clean
+        traces the extraction still holds to +0.7% at n_slab = 10 and 15 -- but n_slab = 20 is
+        where it breaks: Q = 169.9 against the Fabry-Perot 455.2 (-62.7%), and the RMS tell flags
+        that one too (3.7e-2). Raise ``max_fit_samples`` (and ``settle`` for the extra record) to
+        go higher; the pencil is O(N^3) in the fitted length, so this is a deliberate speed/range
+        trade, not a bound of the method.
     """
     from dynameta.optics.fdtd import solve_fdtd_1d, FDTDLayer
 
@@ -599,8 +660,27 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     if start_frac is None:
         i0, i1 = _ringdown_window(sig_full, dt, f_c)
     else:                                               # legacy fixed-fraction window
+        start_frac = float(start_frac)
+        if not (np.isfinite(start_frac) and 0.0 < start_frac < 1.0):
+            raise ValueError(
+                "fdtd_etalon_ringdown: start_frac must satisfy 0 < start_frac < 1 (it is the "
+                "FRACTION of the record at which the legacy fixed window starts); got {!r}. Pass "
+                "start_frac=None for the data-driven window.".format(start_frac))
         i0 = max(0, min(int(round(start_frac * N)), N - 8))
         i1 = N
+        # The driven pulse peaks well inside the record (~6.7% of it for the shipped configs), so a
+        # small start_frac puts the fit ON the source, not on the cavity leak.  That is exactly how
+        # start_frac=0.02 produced a Q that was 73-93% low.
+        i_pk = int(np.argmax(np.abs(sig_full)))
+        if i0 <= i_pk:
+            warnings.warn(
+                "fdtd_etalon_ringdown: start_frac={:g} starts the fit at sample {} but the trace "
+                "envelope still PEAKS at sample {} (fraction {:.4f}) -- the window contains the "
+                "driven transient, not the ringdown, and the extracted Q will be wrong. Use "
+                "start_frac=None (the data-driven window, which starts {:.0f} dB below the peak) "
+                "or a start_frac above {:.3f}.".format(
+                    start_frac, i0, i_pk, i_pk / float(N), 50.0, i_pk / float(N)),
+                RuntimeWarning, stacklevel=2)
     tail = sig_full[i0:i1]
 
     # decimate to ~target_samples_per_period at the band center (keeps the pencil small + fast)
@@ -624,6 +704,46 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
         f0, q = modes[0].f_hz, modes[0].q
     else:
         f0, q = float("nan"), float("nan")
+
+    # ---- ABSOLUTE fit-quality tells (fix-verify W1 kill 2) ---------------------------------
+    # _nls_refine_real only compares the refit against its own seed, so a window that is still
+    # inside the driven pulse produced garbage from BOTH and reported refine_note = '' silently.
+    qual = _fit_quality(tail_d, dt_d, modes)
+    bad = []
+    if not np.isfinite(qual["rms_rel"]) or qual["rms_rel"] > _FIT_RESID_TOL:
+        bad.append("reconstruction RMS is {:.3e} of the window's peak-to-peak (limit {:.1e})"
+                   .format(qual["rms_rel"], _FIT_RESID_TOL))
+    if not np.isfinite(qual["amp_rel"]) or qual["amp_rel"] > _FIT_AMP_SANITY:
+        bad.append("summed |amplitude| is {:.3g}x the data peak (limit {:g}: near-cancelling "
+                   "modes)".format(qual["amp_rel"], _FIT_AMP_SANITY))
+    if bad:
+        msg = ("fdtd_etalon_ringdown: the fit does NOT describe the window -- "
+               + "; ".join(bad)
+               + ". The window is probably source-contaminated (it still holds the driven pulse) "
+                 "or too short; (f0, Q) = ({:.4e} Hz, {:.4f}) is not trustworthy. Use "
+                 "start_frac=None for the data-driven window.".format(f0, q))
+        note = (note + " | " if note else "") + "UNRELIABLE FIT: " + "; ".join(bad)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+    # ---- window-span scope guard (fix-verify W1 item 9) ------------------------------------
+    if modes and np.isfinite(q) and t_used.size > 1:
+        nepers = 0.5 * modes[0].gamma_rad_s * float(t_used[-1])     # FIELD e-foldings spanned
+        if nepers < _MIN_WINDOW_NEPERS:
+            warnings.warn(
+                "fdtd_etalon_ringdown: the fitted window spans only {:.2f} amplitude e-foldings "
+                "(nepers) of the dominant mode, under the ~{:g} below which the decay rate -- "
+                "hence Q = {:.4g} -- is weakly constrained (the fit interpolates a decay it barely "
+                "sees). The span is {} decimated samples at {} samples/period, i.e. pi * "
+                "n_periods / Q nepers, so it shrinks as 1/Q: this is the max_fit_samples cap "
+                "meeting a high-Q cavity, NOT a limit of the method. Raise max_fit_samples (and "
+                "`settle` for the extra record) or lower target_samples_per_period. This is a "
+                "CONSERVATIVE flag -- on clean traces the extraction held to +0.7% at n_slab = 10 "
+                "(1.7 nepers) and 15 (0.75) -- but it is where it breaks: n_slab = 20 returns "
+                "Q = 169.9 against a Fabry-Perot 455.2 (-62.7%).".format(
+                    nepers, _MIN_WINDOW_NEPERS, q, int(min(max_fit_samples, tail_d.size)),
+                    int(target_samples_per_period)),
+                RuntimeWarning, stacklevel=2)
+
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
                           t_used=t_used, signal_used=tail_d, refine_note=note,
                           window=(int(i0), int(i1)))

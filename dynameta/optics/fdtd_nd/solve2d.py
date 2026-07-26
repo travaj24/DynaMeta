@@ -65,63 +65,171 @@ def _ring_time_s(layers) -> float:
     return t_ring
 
 
-# --- source / probe placement vs the CPML (audit D-3) ------------------------------------------
-_PROBE_CLEARANCE = 2                                         # cells of margin required outside the CPML
+# --- absorber thickness + probe placement vs the CPML (audit D-3, wave-3 redesign) --------------
+# WHAT ACTUALLY CORRUPTS R/T. Measured 2026-07-26 on four fixtures (lossless eps=4 slab, backend
+# 'numpy') with this guard bypassed, holding the GEOMETRY fixed and sweeping ONLY npml -- which
+# isolates absorber effects from near-field contamination. The tables live in
+# tests/test_fdtd_seam.py (test_d3_guard_verdict_matches_the_measured_fixtures and
+# test_d3_npml_floor_is_a_hard_raise_below_the_measured_cliff); the headline rows are:
+#
+#  (1) TOO THIN AN ABSORBER -- the mode the pre-wave-3 guard did not test AT ALL. `npml` was never
+#      validated, so npml <= 2 passed silently at (600 nm fixture) R0+T0 up to 1.8387 and (300 nm
+#      fixture) R_flux+T_flux up to 2.9721 -- an 84-197 % energy-budget violation on a LOSSLESS
+#      slab, WORSE than anything the guard did reject. npml=3 still costs 3.2-6.3 %, npml=4 lands
+#      within 0.7-2.0 %, npml>=5 within 0.5 %. Hence a hard floor `_NPML_MIN` = 4 plus a warning
+#      below `_NPML_WARN` = 6.
+#
+#  (2) A PROBE PLANE BURIED IN THE GRADED ABSORBER -- the binding placement constraint. cpml_z
+#      grades sigma as (depth/npml)^3, so burial depth matters far more than "inside/outside":
+#      600 nm fixture (k_pL=11, k_pR=38, nz=50), R_flux+T_flux vs probe depth d:
+#          d = 0 (npml=11): 1.0000     d = 1 (npml=12): 0.9983     d = 2 (npml=13): 0.9836
+#          d = 3 (npml=14): 0.9416     d = 4 (npml=15): 0.8670     d = 9 (npml=20): 0.3052
+#      The predicted one-way attenuation `_pml_atten` tracks that within a factor ~1.5 (d=2:
+#      predicted 1.7 % power deficit vs 1.6 % measured; d=3: 5.1 % vs 5.8 %; d=4: 10.3 % vs 13.3 %),
+#      so the rule is an ATTENUATION budget, not a cell count -- one cell of burial is harmless at
+#      npml=12 (0.13 %) and fatal at npml=4 (10.8 %).
+#
+#  (3) THE SOURCE IS NOT A CORRECTNESS PROBLEM -- and rejecting it was the wave-2 guard's mistake.
+#      R0/T0/R_flux/T_flux are two-run DFT RATIOS against a vacuum reference injected through the
+#      SAME absorber, and the reflected/transmitted wave inherits the same launch attenuation as
+#      the incident wave that produced it, so the attenuation cancels: with the source buried 5-6
+#      cells (npml=11-12) and the probes clear, both narrow-band fixtures return R0+T0 = 1.0000 and
+#      R_flux+T_flux within 2e-4. Burial only costs SNR (a broadband 1.2-1.8 um fixture with the
+#      source 5-8 cells deep scattered its band-edge bins by up to +-1.2 %), so it WARNS. The
+#      terminal case -- the pulse never reaching the probe at all -- is caught by _check_band.
+#
+# Consequence for the callers: the old `k_src >= npml + 2` rule rejected npml=5..12 thin-pad
+# configurations that measure PERFECT, including the library default npml=12 and
+# validation/fdtd_oblique_jax.py GATE D (which passed by exactly one cell).
+_NPML_MIN = 4                                                # hard floor on the CPML thickness (cells)
+_NPML_WARN = 6                                               # below this the budget error is 0.5-2 %
+_PROBE_ATTEN_MAX = 3.0e-3                                    # tolerated one-way amplitude loss at a probe
+
+
+def _pml_atten(depth_cells, npml, m=3.0, R0=1.0e-6):
+    """One-way AMPLITUDE attenuation between the CPML interface and a plane `depth_cells` cells
+    inside the graded absorber (0.0 at or outside the interface).
+
+    cpml_z grades sigma_j = sigma_max (j/npml)^m at depth j cells with
+    sigma_max*dz = -(m+1) ln(R0) / (2 eta0 npml), and its docstring pins the one-way attenuation at
+    exp(-n eta0 Int sigma dz) with sigma ~ 1/n matched to the end medium -- so n cancels and the
+    exponent is a pure function of (depth, npml). Summing the Yee cells the wave crosses:
+
+        a(d, npml) = 1 - exp(-[-(m+1) ln R0 / (2 npml)] * sum_{j=1..d} (j/npml)^m)
+                   = 1 - exp(-27.63 * (d(d+1)/2)^2 / npml^4)          for m=3, R0=1e-6
+
+    `m` / `R0` are cpml_z's own defaults: every solve_* front end calls cpml_z(nz, dz, dt, npml,
+    n_super, n_sub) and never overrides them (pinned by test_d3_atten_model_uses_cpml_z_defaults).
+    The flux extraction's H_x average also reads k-1, i.e. half a cell deeper than the E plane;
+    that half cell is inside the factor-1.5 accuracy of this estimate and is absorbed by the
+    `_PROBE_ATTEN_MAX` margin.
+    """
+    d = int(depth_cells)
+    if d <= 0:
+        return 0.0
+    a = (-(m + 1.0) * np.log(R0) / (2.0 * npml)) * sum((j / float(npml)) ** m
+                                                       for j in range(1, d + 1))
+    return float(1.0 - np.exp(-a))
+
+
+def _max_probe_depth(npml):
+    """Deepest probe burial (cells) whose `_pml_atten` still fits the `_PROBE_ATTEN_MAX` budget:
+    0 for npml <= 9 (one cell already costs 0.42-10.2 % there), 1 at npml=10..16, 2 at 17..23,
+    3 at 24..30, ... -- the budget grows as npml^4 because sigma is graded (depth/npml)^3."""
+    d = 0
+    while _pml_atten(d + 1, npml) <= _PROBE_ATTEN_MAX:
+        d += 1
+    return d
 
 
 def _check_probe_placement(entry_point, k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution):
-    """audit D-3: refuse a soft source or an R/T probe plane that lands in (or too near) the CPML.
+    """audit D-3: refuse an absorber too thin to absorb, or an R/T probe plane buried in it.
+
+    Two hard rules and one warning (see the module-level block above for the measured evidence):
+
+      * `npml >= _NPML_MIN` -- nothing else checked the absorber itself.
+      * both probe planes must clear the graded absorber to within `_PROBE_ATTEN_MAX` of one-way
+        amplitude attenuation. cpml_z puts the low-z grading on cells 0..npml-1 (depth
+        npml - k, zero AT k = npml) and the high-z grading on cells nz-npml..nz-1 (depth
+        k - (nz-1-npml)), so the burial depths are `npml - k_pL` and `k_pR - (nz-1-npml)`.
+      * a source inside the absorber only WARNS: the two-run ratio cancels its launch attenuation.
 
     Every front end places k_src / k_pL / k_pR as FRACTIONS OF THE Z PAD (0.35 pad, 0.7 pad, and
-    0.3 pad past the structure), so all three scale with `n_pad_wave * lambda_max / dz` -- while
-    `npml` is a fixed CELL count (default 12) that is never compared against them. A thin pad (small
-    n_pad_wave, or a coarse `resolution`) therefore slides the source and/or the left probe INSIDE
-    the absorber, where the injected pulse is damped as it is launched and the probe reads an
-    attenuated, phase-corrupted field.
-
-    It fails SILENTLY. Holding the GEOMETRY fixed (lossless eps=4 slab, resolution=20,
-    n_pad_wave=0.35 -> k_src=7, k_pL=15, nz=50) and sweeping ONLY npml isolates PML overlap from
-    evanescent near-field contamination -- the violation switches on exactly as npml overtakes k_src
-    and then grows monotonically (measured 2026-07-25 with this guard bypassed):
-        npml =  6 (source clear): R0+T0 [0.9998, 1.0000]   R_flux+T_flux [0.9997, 0.9999]
-        npml = 12 (the DEFAULT):  R0+T0 [0.9945, 1.0062]   R_flux+T_flux [0.9891, 1.0123]
-        npml = 20:                R0+T0 [0.9573, 0.9750]   R_flux+T_flux [0.8849, 0.9092]
-    -- an 11.5% energy-budget violation on a LOSSLESS slab, with no warning of any kind. (The audit
-    ledger reports the same monotone signature on its own fixture: 5.4% at the default npml=12.)
-
-    Clearance is `_PROBE_CLEARANCE` = 2 cells because the flux extraction also reads k-1 (the
-    half-cell H_x average onto the E_y plane), and the right probe must additionally stay 2 cells
-    clear of the high-z CPML. The binding constraint is the source (0.35 pad vs 0.7 pad for the
-    probes), so the message names the minimum `n_pad_wave` at the given `resolution` AND the minimum
-    `resolution` at the given `n_pad_wave` -- either knob, or a smaller `npml`, fixes it.
+    0.3 pad past the structure) while `npml` is a fixed CELL count, so a thin pad (small
+    `n_pad_wave`, or a coarse `resolution`) slides them into the absorber. Both probes bind at the
+    SAME pad depth -- k_pL - npml and (nz-1-npml) - k_pR are both 0.7*pad/dz - npml -- so one
+    number, `0.7 * pad/dz >= npml - _max_probe_depth(npml)`, is the whole placement contract, and
+    the message inverts it onto each knob.
     """
-    need = npml + _PROBE_CLEARANCE
+    npml = int(npml)
+    if npml < _NPML_MIN:
+        raise ValueError(
+            "{}: npml={} is too thin a CPML -- the absorber itself, not the probe placement, then "
+            "dominates the error. Measured on a LOSSLESS eps=4 slab with the probes fully clear: "
+            "npml=1 gives R_flux+T_flux up to 2.97, npml=2 up to 1.46 (R0+T0 up to 1.84), npml=3 "
+            "still 3.2-6.3 % off; npml>=4 lands within 2 % and npml>=5 within 0.5 % (audit D-3). "
+            "Use npml >= {} (>= 8 recommended); the Roden-Gedney polynomial grading needs several "
+            "cells before the discretized profile absorbs anything.".format(
+                entry_point, npml, _NPML_MIN))
+    if npml < _NPML_WARN:
+        import warnings
+        warnings.warn(
+            "{}: npml={} is a thin CPML -- measured energy-budget error on a lossless slab is "
+            "0.5-2.0 % at npml=4-5 versus <0.1 % at npml>=8 (audit D-3). Raise npml if you need "
+            "better than ~1 %.".format(entry_point, npml), RuntimeWarning, stacklevel=3)
+
+    d_lo = npml - k_pL                                       # cells the R probe sits inside the low-z PML
+    d_hi = k_pR - (nz - 1 - npml)                            # cells the T probe sits inside the high-z PML
+    a_lo, a_hi = _pml_atten(d_lo, npml), _pml_atten(d_hi, npml)
     bad = []
-    if k_src < need:
-        bad.append("source k_src={} < npml+{}={}".format(k_src, _PROBE_CLEARANCE, need))
-    if k_pL < need:
-        bad.append("left (R) probe k_pL={} < npml+{}={}".format(k_pL, _PROBE_CLEARANCE, need))
-    if k_pR > nz - 1 - need:
-        bad.append("right (T) probe k_pR={} > nz-1-npml-{}={}".format(
-            k_pR, _PROBE_CLEARANCE, nz - 1 - need))
-    if not bad:
-        return
-    # pad/dz is the single scale every index is a fixed fraction of; k_src = 0.35 * (pad/dz) is the
-    # tightest, so pad/dz must reach need/0.35 for all three clearances to hold.
-    p_cells = pad / dz
-    p_need = need / 0.35
-    scale = p_need / p_cells if p_cells > 0 else float("inf")
-    raise ValueError(
-        "{}: {} -- the source/probe planes are placed as fractions of the z pad and have fallen "
-        "INSIDE the CPML, which silently corrupts R/T (measured up to an 11.5% energy-budget "
-        "violation on a LOSSLESS slab; audit D-3). The pad is {:.1f} cells deep and needs >= {:.1f}. Fix by raising "
-        "n_pad_wave to >= {:.2f} (currently {:g}) at resolution={:g}, OR raising resolution to >= {:d} "
-        "(currently {:g}) at n_pad_wave={:g}, OR lowering npml to <= {:d} (currently {:d}).".format(
-            entry_point, "; ".join(bad), p_cells, p_need,
-            n_pad_wave * scale, n_pad_wave, resolution,
-            int(np.ceil(resolution * scale)), resolution, n_pad_wave,
-            max(1, int(np.floor(0.35 * p_cells)) - _PROBE_CLEARANCE), int(npml)))
+    if a_lo > _PROBE_ATTEN_MAX:
+        bad.append("left (R) probe k_pL={} is {} cell(s) inside the low-z CPML (npml={}) -> "
+                   "{:.2%} one-way amplitude attenuation".format(k_pL, d_lo, npml, a_lo))
+    if a_hi > _PROBE_ATTEN_MAX:
+        bad.append("right (T) probe k_pR={} is {} cell(s) inside the high-z CPML (nz={}, npml={}) "
+                   "-> {:.2%} one-way amplitude attenuation".format(k_pR, d_hi, nz, npml, a_hi))
+    if bad:
+        # 0.7 * (pad/dz) is the single scale BOTH probe clearances reduce to (see the docstring).
+        d_max = _max_probe_depth(npml)
+        p_cells = pad / dz
+        p_need = (npml - d_max) / 0.7
+        scale = p_need / p_cells if p_cells > 0 else float("inf")
+        npml_ok = 0
+        for n in range(_NPML_MIN, npml):                     # largest npml this pad can still carry
+            if n - _max_probe_depth(n) <= 0.7 * p_cells:
+                npml_ok = n
+        fix_npml = ("OR lowering npml to <= {} (currently {})".format(npml_ok, npml) if npml_ok
+                    else "(npml cannot help: even the floor npml={} would not clear this pad)"
+                         .format(_NPML_MIN))
+        raise ValueError(
+            "{}: {} -- the R/T probe planes are placed as fractions of the z pad and have fallen "
+            "INSIDE the CPML, where the graded absorber damps the recorded field and R/T degrade "
+            "SILENTLY (measured on a LOSSLESS slab with both probes at the same depth d: "
+            "R_flux+T_flux = 0.9836 at d=2 / 0.87 % predicted attenuation, 0.8670 at d=4 / 5.3 %, "
+            "0.3052 at d=9 / 29.5 %; audit D-3). The tolerance is {:.2%}, "
+            "i.e. at npml={} a probe may be at most {} cell(s) deep. The pad is {:.1f} cells and "
+            "needs >= {:.1f}: fix by raising n_pad_wave to >= {:.2f} (currently {:g}) at "
+            "resolution={:g}, OR raising resolution to >= {:d} (currently {:g}) at "
+            "n_pad_wave={:g}, {}.".format(
+                entry_point, "; ".join(bad), _PROBE_ATTEN_MAX, npml, d_max, p_cells, p_need,
+                n_pad_wave * scale, n_pad_wave, resolution,
+                int(np.ceil(resolution * scale)), resolution, n_pad_wave, fix_npml))
+
+    d_src = npml - k_src                                     # informational only: the ratio cancels it
+    if d_src > 0:
+        import warnings
+        warnings.warn(
+            "{}: the soft source k_src={} sits {} cell(s) inside the low-z CPML (npml={}), so the "
+            "launch leaves the absorber {:.0%} down in amplitude. This is NOT rejected: R0/T0/"
+            "R_flux/T_flux are two-run DFT ratios against a vacuum reference injected through the "
+            "SAME absorber, so the launch attenuation cancels (measured: both narrow-band "
+            "fixtures return R0+T0=1.0000 with the source 5-6 cells deep and the probes clear). "
+            "What it does cost is SNR -- a broadband 1.2-1.8 um fixture with the source 5-8 cells "
+            "deep scattered its band-edge bins by up to +-1.2 %. Raise n_pad_wave / resolution (or "
+            "lower npml) if you need better than ~1 % there; audit D-3.".format(
+                entry_point, k_src, d_src, npml, _pml_atten(d_src, npml)),
+            RuntimeWarning, stacklevel=3)
 
 
 def _check_band(entry_point, band, f_min, f_max):
@@ -131,6 +239,12 @@ def _check_band(entry_point, band, f_min, f_max):
     probe, so `np.abs(mL_inc) > 0.05 * max(...)` selects NOTHING (measured: band.sum() == 0 of 2617
     bins, no raise). Every downstream consumer then dies far from the cause with an opaque
     `ValueError: zero-size array to reduction operation minimum` on `result.R0[result.band].min()`.
+
+    This is now the HARD backstop for a buried source: `_check_probe_placement` only warns about
+    one (its launch attenuation cancels in the two-run ratio), so the terminal case -- no signal at
+    all -- has to be caught here. Called from all six front ends including solve_fdtd_1d, whose Mur
+    ABCs have no absorber; there an empty band means the source band and lambda_min/lambda_max
+    disagree.
     """
     if not np.any(band):
         raise ValueError(

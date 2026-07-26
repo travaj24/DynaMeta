@@ -131,6 +131,32 @@ def test_legacy_mean_energy_mass_sommerfeld_coefficient_vs_exact_fd():
         assert abs(dm_code / dm_ex - 1.0) < 0.05, (Te, dm_code / dm_ex)
 
 
+def test_kane_mass_rejects_non_finite_inputs():
+    """FIX-VERIFY W1 item 6. Every comparison against NaN is False, so ``np.any(n <= 0)`` and
+    ``np.any(Te < 0)`` both passed a NaN straight through; it then died deep inside the chemical-
+    potential root finder as ``RuntimeError: kane_mass_of_Te: could not bracket mu(T_e) from
+    above`` -- a message that points at brentq rather than at the caller's argument."""
+    import numpy as np
+    import pytest as _pytest
+    from dynameta.carriers.carrier_heating import kane_mass_of_Te
+    from dynameta.constants import M_E
+
+    m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
+    for bad_n, bad_te in ((np.nan, 300.0), (n, np.nan), (np.inf, 300.0), (n, np.inf)):
+        with _pytest.raises(ValueError, match="finite"):
+            kane_mass_of_Te(m0, alpha, bad_n, bad_te)
+    # arrays too (the guard runs after broadcasting)
+    with _pytest.raises(ValueError, match="finite"):
+        kane_mass_of_Te(m0, alpha, np.array([n, np.nan]), 300.0)
+    # the existing sign guards still fire, with their own message
+    with _pytest.raises(ValueError, match="n_m3 > 0"):
+        kane_mass_of_Te(m0, alpha, -1.0, 300.0)
+    with _pytest.raises(ValueError, match="Te_K >= 0"):
+        kane_mass_of_Te(m0, alpha, n, -1.0)
+    # and a valid call is untouched
+    assert float(kane_mass_of_Te(m0, alpha, n, 300.0)) > m0
+
+
 # ===================== audit C-1: the f-sum (Drude/conductivity) mass =====================
 # wp^2 = n e^2/(eps0 m) is an f-SUM-RULE quantity, so kane_mass_of_Te must return the conductivity
 # mass 1/m_c = (1/(3n)) Int g(E) f(E) [Lap_k E/hbar^2] dE -- NOT the mass evaluated at the mean

@@ -42,19 +42,41 @@ _VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-1
 
 
 def _require_passive_eps(eps_imag, eps_real, *, where: str = "_eps_to_fdtd_layer") -> None:
-    """AUDIT V-2: reject Im(eps) < 0 (= GAIN under exp(-i omega t)) instead of clamping it to zero.
+    """AUDIT V-2: reject a NON-FINITE eps, and reject Im(eps) < 0 (= GAIN under exp(-i omega t)),
+    instead of clamping either to a lossless medium.
 
     `eps_imag` may be a scalar or an array (the vectorized twin passes the whole grid). The old
     `max(0, Im)` / `np.maximum(Im, 0)` clamp was UNBOUNDED: a sign-convention slip such as
     eps = -180 - 30j was silently realized as the strictly real -180+0j -- a collisionless metal
     with gamma = 0.0 and absorption identically zero -- with no warning anywhere. The sibling
     materials.DrudeOptical raises on the analogous input (a negative damping), so this seam now
-    does too. -0.0 is NOT a violation (it is +0.0 numerically) and is normalized downstream."""
+    does too. -0.0 is NOT a violation (it is +0.0 numerically) and is normalized downstream.
+
+    NON-FINITE eps fell straight through that guard, because every comparison against NaN is
+    False (audit V-2 follow-on). Worse, the two twins then DISAGREED, breaking the byte-identity
+    contract the vectorized twin advertises: `eps = 4 + nan*1j` reached the scalar path's
+    `max(0.0, nan)`, which returns 0.0 and yields a perfectly ordinary LOSSLESS eps_inf = 4
+    dielectric, while `np.maximum(nan, 0.0)` propagates NaN and the vector twin emitted an
+    all-NaN layer. An infinite Im(eps) likewise produced eps_inf = inf / wp = inf. Both are now
+    refused at the seam: a NaN/inf permittivity is a broken upstream model (a dispersion fit that
+    diverged, an ENZ pole hit exactly, an uninitialised grid cell), never a medium."""
     im = np.asarray(eps_imag, dtype=np.float64)
+    re = np.broadcast_to(np.asarray(eps_real, dtype=np.float64), im.shape)
+    nonfinite = ~(np.isfinite(im) & np.isfinite(re))
+    if bool(np.any(nonfinite)):
+        k = int(np.argmax(nonfinite))                       # first offending cell
+        raise ValueError(
+            "{}: eps must be FINITE (NaN/inf in either part); got eps = {:.6g}{:+.6g}j{}. This is "
+            "NOT clamped: a non-finite imaginary part slipped through the Im(eps) >= 0 guard "
+            "(every comparison against NaN is False) and was then realized as a LOSSLESS eps_inf "
+            "= {:.6g} dielectric by the scalar path while the vectorized twin propagated NaN -- "
+            "the two twins disagreed (audit V-2). Fix the upstream permittivity model (a diverged "
+            "dispersion fit, an exact ENZ pole, an uninitialised grid cell).".format(
+                where, float(re.ravel()[k]), float(im.ravel()[k]),
+                ("" if im.size == 1 else " at flat index {}".format(k)), float(re.ravel()[k])))
     bad = im < 0.0                                          # -0.0 < 0.0 is False -> accepted
     if not bool(np.any(bad)):
         return
-    re = np.broadcast_to(np.asarray(eps_real, dtype=np.float64), im.shape)
     k = int(np.argmax(bad))                                 # first offending cell
     im_bad, re_bad = float(im.ravel()[k]), float(re.ravel()[k])
     raise ValueError(
@@ -76,7 +98,9 @@ def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> 
     RAISES on Im(eps) < 0 (gain under exp(-i omega t)), like the sibling DrudeOptical does for a
     negative damping. It used to CLAMP instead, unbounded despite a "clamp tiny negatives" comment
     (audit V-2): eps = -180 - 30j was realized as a strictly REAL -180+0j, i.e. a collisionless
-    metal with gamma = 0 and absorption identically zero, with no warning."""
+    metal with gamma = 0 and absorption identically zero, with no warning. Also RAISES on a
+    non-finite eps, which slipped through that guard (NaN compares False) and came out as an
+    ordinary lossless dielectric here while the vectorized twin returned NaN."""
     eps = complex(eps)
     er = eps.real
     _require_passive_eps(eps.imag, er)                       # audit V-2 (was: silent unbounded clamp)
@@ -104,7 +128,9 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
     so a uniform grid reduces to the validated single-layer inversion exactly. exp(-i w t), Im(eps) >= 0
     = loss; the same one-Drude-pole inversion is single-omega-exact (re-sample/re-fit per cell across a
     band for a broadband sweep). Im(eps) < 0 in ANY cell raises, exactly as in the scalar twin
-    (audit V-2) -- the byte-identity contract covers the guard as well as the arithmetic."""
+    (audit V-2) -- the byte-identity contract covers the guard as well as the arithmetic, which is
+    why a NON-FINITE cell raises here too: it used to divide the twins (scalar -> a lossless
+    dielectric, vector -> an all-NaN layer)."""
     eps = np.asarray(eps_grid, dtype=np.complex128)
     er = eps.real
     _require_passive_eps(eps.imag, er, where="effect_eps_to_fdtd_grid")   # audit V-2

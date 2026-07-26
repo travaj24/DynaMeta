@@ -76,11 +76,22 @@ def test_tmm_lossy_superstrate_and_theta_raise():
 
 def test_tmm_passive_stack_unaffected():
     pytest.importorskip("tmm")
+    from _rta_oracles import abeles_rta
     from dynameta.optics.tmm_reference import stack_rta
-    # a normal passive (lossy-but-physical) stack must still return a clean R+T+A=1, A>=0.
-    R, T, A = stack_rta(1.0, [(complex(1.5, 0.02), 200e-9)], 1.5, 1550e-9)
+    # a normal passive (lossy-but-physical) stack must still return a clean, PHYSICAL R/T/A --
+    # i.e. the gain guard does not fire and the numbers are right.
+    layers = [(complex(1.5, 0.02), 200e-9)]
+    R, T, A = stack_rta(1.0, layers, 1.5, 1550e-9)
     assert R >= 0 and T >= 0 and A >= -1e-9
-    assert abs(R + T + A - 1.0) < 1e-9
+    # AUDIT T-1: `R + T + A == 1` was an IDENTITY here (stack_rta returns A := 1 - R - T), so it
+    # passed for any R/T whatsoever -- exactly the silently-wrong number this module exists to
+    # catch. The stack is LOSSY, so there is no `abs(A) < tol` physics anchor; gate all three
+    # against the INDEPENDENT Abeles TMM (tests/_rta_oracles.py, not the `tmm` package) instead.
+    R_ref, T_ref, A_ref = abeles_rta(1.0, layers, 1.5, 1550e-9)
+    assert R == pytest.approx(R_ref, abs=1e-12)
+    assert T == pytest.approx(T_ref, abs=1e-12)
+    assert A == pytest.approx(A_ref, abs=1e-12)
+    assert A_ref > 1e-3                                    # the oracle agrees it genuinely absorbs
 
 
 # ----------------------------- DEVSIM carrier physics (needs `devsim`) -----------------------------

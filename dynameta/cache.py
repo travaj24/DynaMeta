@@ -13,15 +13,15 @@ optical_solver in run_pipeline; call .flush() (or rely on autosave) to persist, 
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import os
 import struct
-from typing import Optional
 
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
-from dynameta.io.store import load_arrays, save_arrays
+from dynameta.io.store import load_arrays, preload_backend, save_arrays
 
 # packed-vector layout (NaN = the field was None): the OpticalResult scalar fields + split complex r/t
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
@@ -218,14 +218,25 @@ class OpticalSolverCache:
         self._mem = {}
         self._pra = {}                                       # key -> per_region_absorption (S5-3)
         self._atexit_hook = None
+        # audit R-7: EAGERLY resolve the storage backend. Every write path here is deferred --
+        # autosave batches, and the final batch is written by the atexit hook or by __del__ --
+        # so a cache whose whole run fits inside one batch reached save_arrays for the FIRST time
+        # during interpreter shutdown. A first-time `import h5py` at that point segfaults on
+        # Windows / CPython 3.14 / h5py 3.16 (0xC0000005, no traceback, AFTER the rows are
+        # written): measured rc=0 when the cache is dropped mid-run but 0xC0000005 for the
+        # alive-at-exit, reference-cycle and late-__del__ orderings, and rc=0 for all four once
+        # the module is imported while the interpreter is healthy. Best-effort: an absent optional
+        # package or an unknown extension still raises later, from save/load, with its own message.
+        preload_backend(path, fmt=fmt)
         if self.autosave:
             # audit R-7: register a WEAKREF TRAMPOLINE, not the bound method. atexit holds its
             # callbacks for the whole process life, so `atexit.register(self._flush_if_dirty)`
             # made every autosave cache (and its entire _mem store) IMMORTAL -- a long-running
             # sweep that built and dropped caches leaked all of them. The trampoline holds only a
             # weak reference, so a dropped cache is collectable; __del__ still persists a dirty
-            # tail at collection time, and close() unregisters explicitly.
-            import atexit
+            # tail at collection time, and BOTH __del__ and close() unregister the trampoline so
+            # the dead closures do not pile up in atexit (they used to: 5 built-and-dropped
+            # caches left 5 no-op callbacks registered for the life of the process).
             import weakref
             _ref = weakref.ref(self)
 
@@ -317,6 +328,18 @@ class OpticalSolverCache:
             except Exception:                                # atexit must never raise
                 pass                                         # (_unsaved survives -- audit R-7)
 
+    def _release_atexit(self) -> None:
+        """Drop this cache's atexit trampoline (idempotent, never raises). Called by BOTH close()
+        and __del__ (audit R-7): the weakref trampoline is harmless once the cache is collected,
+        but atexit keeps every registration for the life of the process, so a sweep that builds
+        and drops caches accumulated one dead no-op callback per cache."""
+        hook, self._atexit_hook = self._atexit_hook, None
+        if hook is not None:
+            try:
+                atexit.unregister(hook)                      # removes ALL copies of this callable
+            except Exception:                                # pragma: no cover - teardown races
+                pass
+
     def close(self) -> None:
         """Flush any unsaved entries and UNREGISTER the atexit hook (audit R-7). Optional -- a
         live cache is still flushed at interpreter exit, and a dropped one at collection -- but
@@ -324,18 +347,21 @@ class OpticalSolverCache:
         Do not keep solving through a closed cache: the exit-time safety net is gone (call
         flush() yourself, or build a new cache)."""
         self._flush_if_dirty()
-        hook, self._atexit_hook = self._atexit_hook, None
-        if hook is not None:
-            import atexit
-            atexit.unregister(hook)
+        self._release_atexit()
 
     def __del__(self):
         # audit R-7: with the atexit registration weakened to a weakref, a cache dropped WITHOUT
         # close() would otherwise lose its batched tail (the trampoline only fires for caches
         # still alive at exit). Best-effort, never raises -- the docstring's "a batched tail is
-        # never silently dropped" contract holds for both the dropped and the live case.
+        # never silently dropped" contract holds for both the dropped and the live case. The
+        # trampoline is released here too, so dropping a cache really does return the process to
+        # where it started instead of leaving a dead closure registered forever.
         try:
             self._flush_if_dirty()
+        except Exception:                                    # pragma: no cover - teardown races
+            pass
+        try:
+            self._release_atexit()
         except Exception:                                    # pragma: no cover - teardown races
             pass
 

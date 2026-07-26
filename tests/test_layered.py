@@ -74,7 +74,16 @@ def test_tmm_layered_solver_optical_result():
     stk = LayeredStack(1.0 + 0j, 1.0 + 0j, [LayeredSlab(250e-9, eps=complex(2.0 ** 2))])
     res = TmmLayeredSolver().solve(stk, 1300e-9, _Opt())
     assert 0.0 <= res.R <= 1.0 and res.T is not None
-    assert abs(res.R + res.T + res.A - 1.0) < 1e-9     # lossless
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY (TmmLayeredSolver sets A := 1 - R - T via
+    # _check_energy_budget), so it passed for a halved, doubled or sign-flipped T. What IS
+    # falsifiable is the PHYSICS: this stack is lossless (real eps, real end media), R and T are
+    # computed separately by tmm, so A must BE zero -- i.e. R + T = 1 as a statement about two
+    # independent numbers. Verified: a halved T fails here at |A| = 0.40.
+    assert abs(res.A) < 1e-12                          # lossless -> nothing absorbed
+    assert abs(res.R + res.T - 1.0) < 1e-12            # the SAME statement, spelled out
+    # per_region_absorption is a bookkeeping (not energy) check: tmm.absorp_in_each_layer closes
+    # with 1 - R - T by construction, so this pins the per-slab DECOMPOSITION, not the budget.
+    assert sum(res.per_region_absorption.values()) == pytest.approx(res.A, abs=1e-12)
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9         # |r|^2 == R
     assert -180.0 <= res.phase_deg <= 180.0
 
@@ -100,7 +109,15 @@ def test_make_layered_tmm_solver_seam():
     res = solve(d, None, {}, lam, 1.0 + 0j, 1.0 + 0j)   # geo/n_super/n_sub unused by TMM
     R, T, A = layered_rta(layered_stack_from_design(d, lam), lam, theta_deg=0.0, pol="s")
     assert abs(res.R - R) < 1e-12 and abs(res.T - T) < 1e-12
-    assert abs(res.R + res.T + res.A - 1.0) < 1e-9
+    # AUDIT T-1: `R + T + A == 1` is an identity here too (A := 1 - R - T). The seam's stack is
+    # LOSSLESS (air | n=2.2 | air), so the falsifiable statement is A == 0, i.e. R + T == 1 for two
+    # separately computed numbers. Verified: a halved T fails here at |A| = 0.30.
+    assert abs(res.A) < 1e-12                          # lossless -> nothing absorbed
+    assert abs(res.R + res.T - 1.0) < 1e-12
+    # bookkeeping (not energy): the seam must re-key slab_<i> -> DESIGN layer name (C5-4), and the
+    # per-layer decomposition must sum to the total.
+    assert set(res.per_region_absorption) == {"film"}
+    assert sum(res.per_region_absorption.values()) == pytest.approx(res.A, abs=1e-12)
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9
 
 

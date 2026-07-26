@@ -38,3 +38,17 @@ from dynameta.core.effects.electroabsorption import (BursteinMossEdge,
 from dynameta.core.effects.reconfigurable import LiquidCrystalModel, PCMModel
 from dynameta.core.effects.magneto import (MagnetoOpticModel,
                                            VectorMagnetoOpticModel)
+
+# audit T-4: pure re-export facade over base/electro/thermo/electroabsorption/reconfigurable/
+# magneto -- every name above is deliberate surface (the underscored helpers are imported from
+# here by the effect modules and their oracles). Declaring it makes the intent machine-readable
+# so `ruff check .` runs repo-wide without 22 phantom "unused import" hits. Keep in sync when a
+# re-export is added or dropped.
+__all__ = [
+    "AnisotropicThermoOpticModel", "BursteinMossEdge", "ComposedEffect", "DeltaEffect",
+    "EffectModel", "ElectroAbsorptionModel", "FranzKeldyshEffect", "IntersubbandEffect",
+    "KerrEffect", "LiquidCrystalModel", "MagnetoOpticModel", "OpticalModelEffect", "PCMModel",
+    "PockelsEffect", "ThermoOpticModel", "VectorMagnetoOpticModel", "_E_vec",
+    "_photon_energy_J", "_voigt6_to_full", "as_tensor", "kramers_kronig_dn",
+    "kramers_kronig_dn_rows",
+]

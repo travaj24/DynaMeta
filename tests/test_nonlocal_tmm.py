@@ -203,13 +203,41 @@ def test_gate4_energy_budget():
         assert R + T + A == pytest.approx(1.0, abs=1e-12)
         assert abs(A) < 1e-10
     # (c) Lossy + GNOR: R, T, A must all be physical (>= 0) -- no spurious interior gain.
+    #
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY for this producer (stack_rt returns
+    # A := 1 - R - T), and unlike (a)/(b) a LOSSY layer has no `abs(A) < tol` physics anchor to
+    # rescue it -- the old assertion here passed for a halved or sign-flipped T. nonlocal_tmm
+    # exposes no internal-field/Joule-integral absorption, so there is no independent A to compare
+    # against directly; the independent gate is the LOCAL limit, where the very same code path is
+    # pinned to the `tmm` package (a wholly separate implementation):
+    #   * s-pol carries NO longitudinal physics at all -- eps_T is the whole story, GNOR included --
+    #     so the lossy s-pol result must equal the local tmm slab to machine precision;
+    #   * p-pol is genuinely nonlocal (it deviates from local by up to ~0.5 in R/T at the m=1 bulk
+    #     plasmon, so a local tolerance would be meaningless), so its independent anchor is the
+    #     beta -> 0, D = 0 twin of the same lossy film, which must reproduce the local tmm slab.
     lossy = nt.HydroLayer(1.0, wp, 5e13, beta, 3e-9, D=2e-4)
+    lossy_local = nt.HydroLayer(1.0, wp, 5e13, 1e-3, 3e-9)        # beta -> 0, D = 0 twin
+    from dynameta.constants import C_LIGHT as _C
     for f in np.linspace(0.53, 1.21, 60):
         w = f * wp
+        lam = 2.0 * math.pi * _C / w
+        n_T = _passive_n(complex(nt.eps_transverse(w, lossy)))    # the transverse (local) index
         for pol in ("s", "p"):
             R, T, A = nt.rta(w, [lossy], pol=pol, n_super=1.0, n_sub=1.3, theta_rad=theta)
             assert R >= -1e-12 and T >= -1e-12 and A >= -1e-12
-            assert R + T + A == pytest.approx(1.0, abs=1e-12)
+            assert A > 1e-4                                       # a lossy film genuinely absorbs
+            R_t, T_t, A_t = stack_rta(1.0, [(n_T, lossy.thickness_m)], 1.3, lam,
+                                      theta_deg=40.0, pol=pol)
+            if pol == "s":
+                assert R == pytest.approx(R_t, abs=1e-12)         # s-pol IS the local result
+                assert T == pytest.approx(T_t, abs=1e-12)
+                assert A == pytest.approx(A_t, abs=1e-12)
+            else:
+                R0, T0, A0 = nt.rta(w, [lossy_local], pol="p", n_super=1.0, n_sub=1.3,
+                                    theta_rad=theta)
+                assert R0 == pytest.approx(R_t, abs=1e-8)         # p-pol beta->0 == local tmm
+                assert T0 == pytest.approx(T_t, abs=1e-8)
+                assert A0 == pytest.approx(A_t, abs=1e-8)
 
 
 # ------------------------------------------------------------------------------------------------

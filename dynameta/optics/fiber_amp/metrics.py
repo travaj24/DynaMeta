@@ -5,7 +5,20 @@ small-signal gain spectrum with its flatness / tilt across a signal band.
 
 Each metric re-runs the amplifier with the pump or signal rescaled (Pump/Signal are frozen, so
 this uses dataclasses.replace to clone), which is why they take a FiberAmplifier rather than a
-single solved result. Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.4.
+single solved result.
+
+AMPLIFIER CONTRACT (audit A-3 follow-on). Every rebuild goes through the PUBLIC, type-preserving
+re-seed protocol, never through a class-private clone:
+    with_signals(signals) -> a copy with that signal list
+    with_pumps(pumps)     -> a copy with that pump list
+    without_ase()         -> a copy with the ASE band(s) dropped
+FiberAmplifier and ErYbAmplifier both implement all three, so every metric here works on either
+class. A third-party amplifier MUST implement them too: this module reached for the
+FiberAmplifier-only `_clone` before, which made gain_compression_curve / saturation_output_power /
+slope_efficiency / gain_spectrum raise a bare `AttributeError: 'ErYbAmplifier' object has no
+attribute '_clone'` (only power_conversion_efficiency, which never clones, worked). A missing
+protocol method now raises a TypeError NAMING the method instead. Pure numpy/scipy; SI units.
+docs/fiber_amp_model_spec.md sec.4.
 """
 
 from __future__ import annotations
@@ -23,14 +36,41 @@ __all__ = ["CompressionCurve", "SlopeEfficiency", "GainSpectrum",
 
 
 # ---- amplifier cloning helpers -------------------------------------------------------------
+_PROTOCOL = ("with_signals(signals), with_pumps(pumps) and without_ase() -- the public, "
+             "type-preserving amplifier re-seed protocol (FiberAmplifier and ErYbAmplifier both "
+             "implement all three)")
+
+
+def _rebuild(amp, method: str, *args):
+    """Run ONE step of the public amplifier re-seed protocol, or raise a TypeError NAMING the
+    method that is missing. Every clone in this module goes through here: reaching straight for
+    the FiberAmplifier-private `_clone` is what made four of the five metrics die with a bare
+    `AttributeError: 'ErYbAmplifier' object has no attribute '_clone'` (audit A-3 follow-on).
+
+    The clone must carry every opt-in -- the ConcentrationModel (audit S3-1: dropping it made
+    every metric run the ideal model, silently losing PIQ dark absorption and photodarkening and
+    mis-scaling upconversion) and the axial temperature profile (audit A-5) -- which is why the
+    protocol is implemented by the amplifier CLASS rather than re-rolled here."""
+    fn = getattr(amp, method, None)
+    if not callable(fn):
+        raise TypeError(
+            "{} does not implement {}(), required by dynameta.optics.fiber_amp.metrics. An "
+            "amplifier passed to these metrics must implement {}; each must return a copy of the "
+            "SAME class carrying every opt-in (ASE band, concentration model, upconversion "
+            "coefficient, axial temperature profile).".format(type(amp).__name__, method,
+                                                              _PROTOCOL))
+    return fn(*args)
+
+
 def _with(amp: FiberAmplifier, *, pumps=None, signals=None) -> FiberAmplifier:
-    """Clone the amplifier with pumps/signals swapped. MUST carry the ConcentrationModel through
-    (audit S3-1: dropping it made every metric run the ideal model -- PIQ dark absorption and
-    photodarkening silently vanished and upconversion mis-scaled). When concentration is set the
-    FiberAmplifier __init__ derives upconversion_C_up from it; the explicit kwarg covers the
-    concentration=None raw-C_up case. Delegates to FiberAmplifier._clone, which is the single
-    place that lists what a clone must carry (it adds the axial temperature profile, audit A-5)."""
-    return amp._clone(pumps=pumps, signals=signals)
+    """Clone the amplifier with pumps and/or signals swapped, through the public protocol only
+    (see _rebuild). Neither argument -> the amplifier is returned unchanged."""
+    out = amp
+    if pumps is not None:
+        out = _rebuild(out, "with_pumps", list(pumps))
+    if signals is not None:
+        out = _rebuild(out, "with_signals", list(signals))
+    return out
 
 
 def _set_total_pump(amp: FiberAmplifier, P_total_W: float) -> FiberAmplifier:
@@ -183,11 +223,12 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
     lams = np.atleast_1d(np.asarray(probe_lambda_m, float))
     base = _with(amp, signals=[])
     if not with_ase:
-        no_ase = FiberAmplifier(base.ion, base.fiber, base.pumps, [], None,
-                                upconversion_C_up=base.upconversion_C_up,
-                                concentration=base.concentration)
-        no_ase._Tz = base._Tz                  # the ASE band is dropped, the T profile is NOT (A-5)
-        base = no_ase
+        # THROUGH THE PROTOCOL (audit A-3 follow-on): this used to hand-roll a FiberAmplifier(
+        # base.ion, ...) rebuild -- a fourth, divergent copy of the "what a clone must carry"
+        # list that read the FiberAmplifier-only `.ion`, dropped the RamanStokes coupling, and
+        # had to re-attach `_Tz` by hand. without_ase() drops the ASE band(s) and carries
+        # everything else, including the axial temperature profile (audit A-5).
+        base = _rebuild(base, "without_ase")
     gdB = np.empty_like(lams)
     for j, lam in enumerate(lams):
         r = _with(base, signals=[Signal(probe_power_W, float(lam))]).solve()

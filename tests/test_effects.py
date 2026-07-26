@@ -474,6 +474,86 @@ def test_burstein_moss_tail_test_replaces_the_bracket_only_guard():
                          tauc_exponent=2.0).eps({"n": np.asarray(4e26)}, 1300e-9)
 
 
+def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
+    """FIX-VERIFY W1 kill 1. ``_eps2`` evaluated the Tauc shape factor as ``x ** p`` with
+    ``x = max(E - Eg, 0)/Eg``.  IEEE-754 (and numpy) define ``0.0 ** 0.0 == 1.0``, so at
+    ``tauc_exponent = 0`` -- the physical 2-D / constant-joint-DOS edge, and an ALLOWED exponent --
+    the factor was 1 EVERYWHERE BELOW THE GAP and eps2 came out ``alpha_edge (Eg/E)^2``, diverging
+    toward E -> 0 (measured: 1.5 at the gap, 6.0 at 0.5 Eg, 24.0 at 0.25 Eg).  That sub-gap
+    absorption also entered the KK quadrature, whose grid starts at ~0, and the resulting dn drove
+    ``n_re`` negative: ``eps(0.5 Eg)`` came back ``82.6 - 57.4j`` -- Im(eps) < 0, i.e. GAIN out of a
+    passive interband edge.  The shape factor is now masked on ``x > 0``, so p = 0 is a clean step
+    and every p > 0 is byte-identical to the unmasked form."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    from dynameta.core.effects.base import _photon_energy_J
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                            tauc_exponent=0.0)
+    n = np.asarray(1e26)
+    Eg = float(edge.optical_gap_J(n))
+
+    # (a) the step: EXACTLY zero below (and at) the gap, alpha_edge (Eg/E)^2 above it.
+    below = np.array([1e-30, 0.1, 0.25, 0.5, 0.9, 0.999, 1.0]) * Eg
+    above = np.array([1.0001, 1.2, 2.0, 10.0]) * Eg
+    assert np.all(np.asarray(edge._eps2(below, Eg)) == 0.0)
+    assert np.allclose(np.asarray(edge._eps2(above, Eg)), 1.5 * (Eg / above) ** 2,
+                       rtol=0.0, atol=0.0)
+
+    # (b) passivity at the 0.5 Eg probe the pre-fix code turned into gain.
+    e_half = complex(edge.eps({"n": n}, _photon_energy_J(1.0) / (0.5 * Eg)))
+    assert e_half.imag == 0.0 and e_half.real > 0.0
+    for frac in (0.1, 0.25, 0.5, 0.75, 0.95, 1.2, 2.0):
+        assert complex(edge.eps({"n": n}, _photon_energy_J(1.0) / (frac * Eg))).imag >= 0.0
+
+    # (c) continuity as p -> 0 (the pre-fix p = 0 branch was discontinuous in p by construction).
+    n_re0 = np.sqrt(complex(4.25)).real
+    lam = _photon_energy_J(1.0) / (0.5 * Eg)
+    dn = {}
+    for p in (0.0, 1e-9):
+        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                              tauc_exponent=p)
+        dn[p] = float(np.sqrt(complex(ed.eps({"n": n}, lam))).real - n_re0)
+    assert dn[1e-9] == pytest.approx(dn[0.0], rel=1e-8)
+    # and it is the RIGHT number: the step edge's KK partner, to the O(h) the 10 meV grid allows
+    assert dn[0.0] == pytest.approx(_bm_dn_quad(1.5, Eg, 0.5 * Eg, p=0.0), rel=2e-3)
+
+    # (d) p > 0 is untouched, bit for bit.
+    rng = np.random.default_rng(0)
+    E = np.concatenate([np.linspace(1e-25, 5 * Eg, 20001), np.array([Eg]),
+                        rng.uniform(1e-25, 5 * Eg, 5000)])
+    for p in (0.25, 0.5, 1.0, 1.9):
+        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                              tauc_exponent=p)
+        x = np.maximum(E - Eg, 0.0) / Eg
+        assert np.array_equal(np.asarray(ed._eps2(E, Eg)), 1.5 * x ** p * (Eg / E) ** 2)
+
+
+def test_burstein_moss_auto_kk_grid_is_size_capped():
+    """FIX-VERIFY W1 kill 1 (second half).  The auto E_hi scales as ``tol^(-1/(2-p))``, so at the
+    fixed 10 meV spacing the grid is 7.7e4 points at p = 0.5 but 1.56e9 -- a 12.4 GB float64 array,
+    before the per-row temporaries -- at p = 1.5 (direct-forbidden Tauc).  ``_KK_ROW_CHUNK_BYTES``
+    cannot help: a chunk is never smaller than ONE row of ``grid.size`` doubles.  The auto grid is
+    now capped and raises with the ``e_grid_J`` escape hatch named; the override itself still
+    works (only warning about the tail)."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+
+    def mk(p, **kw):
+        return BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                                tauc_exponent=p, **kw)
+
+    for p, npts in ((0.5, 76849), (1.0, 1080001)):                 # under the cap, unchanged
+        assert mk(p)._kk_grid().size == npts
+    for p in (1.5, 1.9):
+        with pytest.raises(ValueError, match="e_grid_J"):
+            mk(p)._kk_grid()
+    # the escape hatch: an explicit grid at p = 1.5 runs, warns about the tail, and stays passive
+    over = mk(1.5, e_grid_J=(1e-21, 2000.0 * Q_E, 20001))
+    with pytest.warns(RuntimeWarning, match="Kramers-Kronig grid ends"):
+        val = complex(over.eps({"n": np.asarray(1e26)}, 1550e-9))
+    assert np.isfinite(val.real) and val.imag >= 0.0
+
+
 def test_photon_energy_uses_the_exact_planck_constant():
     """audit X-7 / R-17: h was re-derived as 2*pi*HBAR (6.1e-10 relative drift) upstream of the
     whole electro-absorption / KK stack."""

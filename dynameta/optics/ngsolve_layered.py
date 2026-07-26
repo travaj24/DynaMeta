@@ -67,6 +67,7 @@ class LayeredOpticalBuilder:
     def __init__(self, design: Design) -> None:
         self.design = design
         self._geo: Optional[OpticalGeometry] = None
+        self._maxh_by_region: Dict[str, float] = {}   # per-region maxh (nm) that reached the mesher
 
     # ---- helpers ----
     def _refinement_footprint_nm(self) -> Optional[Tuple[float, float, float, float]]:
@@ -263,7 +264,7 @@ class LayeredOpticalBuilder:
                     stacklevel=2)
         Px_mesh = 0.5 * Px if sym_x else Px
         Py_mesh = 0.5 * Py if sym_y else Py
-        z_iv_m = d.z_intervals()
+        _z_iv_m = d.z_intervals()          # call kept (it validates the stack); result unused here
         sub_mat = d.stack.substrate_material
         sup_mat = d.stack.superstrate_material
 
@@ -272,6 +273,10 @@ class LayeredOpticalBuilder:
         material_by_region: Dict[str, str] = {}
         source_by_region: Dict[str, str] = {}
         region_align: List[RegionAlignment] = []
+        # audit F-7: the STRUCTURAL role of every region, recorded where the region is created so
+        # _maxh never has to infer it from a user-chosen layer name. Values:
+        # 'pml' | 'substrate' | 'superstrate' | 'metal_skin' | 'metal_bulk' | 'inclusion' | 'layer'.
+        role_by_region: Dict[str, str] = {}
 
         footprint = self._refinement_footprint_nm()
         layers = d.stack.layers
@@ -281,7 +286,7 @@ class LayeredOpticalBuilder:
         first_metal = metal_idx[0] if metal_idx else None
         last_metal = metal_idx[-1] if metal_idx else None
 
-        def add_box(name, mat, z_lo, z_hi, xl=0.0, xh=None, yl=0.0, yh=None):
+        def add_box(name, mat, z_lo, z_hi, xl=0.0, xh=None, yl=0.0, yh=None, role="layer"):
             xh = Px_mesh if xh is None else xh
             yh = Py_mesh if yh is None else yh
             b = occ.Box(occ.Pnt(xl, yl, z_lo), occ.Pnt(xh, yh, z_hi))
@@ -290,12 +295,13 @@ class LayeredOpticalBuilder:
             solids.append(b)
             z_intervals_nm[name] = (z_lo, z_hi)
             material_by_region[name] = mat
+            role_by_region[name] = role
 
         # bottom: PML + substrate buffer
         z = -(spec.pml_thk_m + spec.substrate_buffer_m) * S
-        add_box("pml_bot", sub_mat, z, z + spec.pml_thk_m * S); z += spec.pml_thk_m * S
+        add_box("pml_bot", sub_mat, z, z + spec.pml_thk_m * S, role="pml"); z += spec.pml_thk_m * S
         z_sub_interface_nm = z
-        add_box("substrate", sub_mat, z, z + spec.substrate_buffer_m * S)
+        add_box("substrate", sub_mat, z, z + spec.substrate_buffer_m * S, role="substrate")
         z += spec.substrate_buffer_m * S
 
         # device layers
@@ -333,6 +339,7 @@ class LayeredOpticalBuilder:
                         solids.append(s)
                     z_intervals_nm[iname] = (z_lo, z_hi)
                     material_by_region[iname] = inc.material
+                    role_by_region[iname] = "inclusion"
                 # background = (meshed) cell minus the (cell-clipped) inclusions
                 bg = occ.Box(occ.Pnt(0, 0, z_lo), occ.Pnt(Px_mesh, Py_mesh, z_hi))
                 for inc in L.inclusions:
@@ -348,6 +355,7 @@ class LayeredOpticalBuilder:
                     solids.append(s)
                     z_intervals_nm[bn] = (z_lo, z_hi)
                     material_by_region[bn] = L.background_material
+                    role_by_region[bn] = "layer"
             elif is_cavity:
                 # in-patch = the inclusion footprint CLIPPED to the meshed cell (+ its periodic
                 # wraps): an unclipped box overhangs the cell and breaks the periodic pairing (F-2).
@@ -372,6 +380,7 @@ class LayeredOpticalBuilder:
                     solids.append(inp)
                 z_intervals_nm[iname] = (z_lo, z_hi)
                 material_by_region[iname] = L.background_material
+                role_by_region[iname] = "layer"    # cavity in-patch is BACKGROUND material (see _maxh)
                 if is_semi_bg:
                     source_by_region[iname] = L.name
                     region_align.append(RegionAlignment(
@@ -390,6 +399,7 @@ class LayeredOpticalBuilder:
                     solids.append(s)
                     z_intervals_nm[on] = (z_lo, z_hi)
                     material_by_region[on] = L.background_material
+                    role_by_region[on] = "layer"
                     if is_semi_bg:
                         source_by_region[on] = L.name
                         region_align.append(RegionAlignment(
@@ -401,12 +411,16 @@ class LayeredOpticalBuilder:
                     skin = min(spec.metal_skin_thk_m * S, thk)
                     if i == first_metal:   # mirror: bulk below, skin on top
                         if thk - skin > 0:
-                            add_box(L.name + "_bulk", L.background_material, z_lo, z_hi - skin)
-                        add_box(L.name + "_skin", L.background_material, z_hi - skin, z_hi)
+                            add_box(L.name + "_bulk", L.background_material, z_lo, z_hi - skin,
+                                    role="metal_bulk")
+                        add_box(L.name + "_skin", L.background_material, z_hi - skin, z_hi,
+                                role="metal_skin")
                     else:                  # top metal: skin on bottom, bulk above
-                        add_box(L.name + "_skin", L.background_material, z_lo, z_lo + skin)
+                        add_box(L.name + "_skin", L.background_material, z_lo, z_lo + skin,
+                                role="metal_skin")
                         if thk - skin > 0:
-                            add_box(L.name + "_bulk", L.background_material, z_lo + skin, z_hi)
+                            add_box(L.name + "_bulk", L.background_material, z_lo + skin, z_hi,
+                                    role="metal_bulk")
                 else:
                     add_box(L.name, L.background_material, z_lo, z_hi)
                     if is_semi_bg:
@@ -417,9 +431,9 @@ class LayeredOpticalBuilder:
 
         # top: superstrate buffer + PML
         z_super_interface_nm = z + spec.superstrate_buffer_m * S
-        add_box("superstrate", sup_mat, z, z + spec.superstrate_buffer_m * S)
+        add_box("superstrate", sup_mat, z, z + spec.superstrate_buffer_m * S, role="superstrate")
         z += spec.superstrate_buffer_m * S
-        add_box("pml_top", sup_mat, z, z + spec.pml_thk_m * S)
+        add_box("pml_top", sup_mat, z, z + spec.pml_thk_m * S, role="pml")
 
         # glue + periodic identify (before OCCGeometry). A symmetry-reduced axis is NOT identified
         # (its boundary becomes a symmetry wall, not a periodic pair) -> n_px/n_py = 0 on that axis.
@@ -458,8 +472,13 @@ class LayeredOpticalBuilder:
         # per-region refinement knob is silently inert (audit F-23: maxh_metal/_skin/_bulk/_inclusion/
         # _background/_substrate all moved mesh.nv by exactly 0; raw-netgen A/B nv = 33 post vs 1215
         # pre). Set it here, where it reaches the mesher.
+        maxh_by_region: Dict[str, float] = {}
         for solid in glued.solids:
-            solid.maxh = self._maxh(solid.name, material_by_region.get(solid.name, ""))
+            h = self._maxh(solid.name, material_by_region.get(solid.name, ""),
+                           role_by_region.get(solid.name))
+            solid.maxh = h
+            maxh_by_region[solid.name] = h
+        self._maxh_by_region = maxh_by_region     # what actually reached the mesher (F-7 gate)
         geo = occ.OCCGeometry(glued)
         # Diagnostic labels for the exterior PERIODIC side faces (the Bloch periodicity itself is driven
         # by the _identify_periodic Identify() calls, keyed by idnr -- not these names); skip a reduced
@@ -496,13 +515,32 @@ class LayeredOpticalBuilder:
         self._region_align = region_align
         return self._geo
 
-    def _maxh(self, region_name: str, material: str) -> float:
+    # Region names the BUILDER itself emits verbatim; anything else in a name is user text.
+    _RESERVED_REGIONS = {"pml_bot": "pml", "pml_top": "pml",
+                         "substrate": "substrate", "superstrate": "superstrate"}
+
+    def _maxh(self, region_name: str, material: str, mesh_role: Optional[str] = None) -> float:
         """Per-region target element size (nm). Routing, most specific first:
-        pml/substrate/superstrate bands by name; the metal skin/bulk split; any METAL region
+        pml/substrate/superstrate bands; the metal skin/bulk split; any METAL region
         (background OR inclusion) by maxh_metal_m; the INCLUSION solids by maxh_inclusion_m;
         everything else -- a plain full-cell device band, an inclusion layer's background /
         `__bg<k>` remainder, and BOTH halves of a cavity split (`_inpatch` column + `_outside`
         annulus, which are background material by construction) -- by maxh_background_m.
+
+        ROUTE ON THE ROLE, NOT ON THE NAME (audit F-7). `mesh_role` is recorded by build() where
+        each solid is created ('pml' | 'substrate' | 'superstrate' | 'metal_skin' | 'metal_bulk' |
+        'inclusion' | 'layer'); the material's own role decides 'metal'. The previous SUBSTRING
+        routing (`"substrate" in region_name`, `"pml" in region_name`, ...) was harmless while
+        F-23 kept the whole loop inert, but it is now live and mis-sizes any user layer whose name
+        merely CONTAINS a reserved word: 'ito_substrate_cap' took maxh_substrate_m,
+        'pml_calibration_film' took maxh_pml_m, and a device layer literally named 'au_bulk' took
+        maxh_metal_bulk_m -- silently, in the wrong direction (the substrate/pml knobs are the
+        COARSEST in the spec, so a device layer routed there is under-resolved, not just slow).
+
+        `mesh_role=None` (a direct call, or a subclass adding its own solids) falls back to name
+        matching -- but ANCHORED: the reserved band names must match EXACTLY, and only the
+        terminal `_skin` / `_bulk` tokens and the builder-only `__incl` marker (double underscore,
+        unreachable from a Layer name via this builder) are treated as structural.
 
         Two routing rules exist only because F-23 made the values live; while the loop was inert
         the distinction was invisible and both defaults were landmines. (i) The catch-all is
@@ -518,14 +556,21 @@ class LayeredOpticalBuilder:
         following maxh_metal_m."""
         spec = self.design.mesh_3d
         role = self.design.material_role(material) if material in self.design.materials else ""
-        if "pml" in region_name:        return spec.maxh_pml_m * S
-        if "substrate" in region_name:  return spec.maxh_substrate_m * S
-        if "superstrate" in region_name: return spec.maxh_superstrate_m * S
-        if region_name.endswith("_skin"):
+        r = mesh_role
+        if r is None:                                     # anchored name fallback (no substrings)
+            r = self._RESERVED_REGIONS.get(region_name)
+            if r is None and region_name.endswith("_skin"):   r = "metal_skin"
+            elif r is None and region_name.endswith("_bulk"): r = "metal_bulk"
+            elif r is None and "__incl" in region_name:       r = "inclusion"
+            else:                                             r = r or "layer"
+        if r == "pml":                  return spec.maxh_pml_m * S
+        if r == "substrate":            return spec.maxh_substrate_m * S
+        if r == "superstrate":          return spec.maxh_superstrate_m * S
+        if r == "metal_skin":
             return (spec.maxh_metal_skin_m or spec.maxh_metal_m) * S
-        if region_name.endswith("_bulk"): return spec.maxh_metal_bulk_m * S
+        if r == "metal_bulk":           return spec.maxh_metal_bulk_m * S
         if role == "metal":             return spec.maxh_metal_m * S
-        if "__incl" in region_name:     return spec.maxh_inclusion_m * S
+        if r == "inclusion":            return spec.maxh_inclusion_m * S
         return spec.maxh_background_m * S
 
     # ---- OpticalGeometryBuilder Protocol ----
@@ -584,10 +629,46 @@ def _identify_periodic(shape, Px: float, Py: float, sym_x: bool = False,
 
     stol = max(Px, Py) * 1e-6
 
+    def _diagnose(s0, other, sig, this_plane, other_plane):
+        """Which of the two real causes produced this orphan -- they need DIFFERENT fixes, and the
+        message used to assert the first one unconditionally.
+
+          * OVERHANG / CROSSING (the F-2 mode): some solid extends outside [0,Px]x[0,Py], so its
+            boundary never lands on the periodic planes where a partner could be found. Decided by
+            the glued shape's own bounding box, which is unambiguous. Fix: clip + periodically wrap
+            the feature (or move it inside).
+          * TOUCHING WITHOUT SPANNING (the likelier user trigger): everything is inside the cell,
+            but a feature ABUTS one periodic plane and does not reach the other, so the two planes
+            are cut into different pieces. Fix: move the feature strictly inside the cell, or
+            centre it on the boundary so it crosses and wraps. The far-plane faces sharing this
+            z-band are reported as supporting evidence.
+        """
+        otol = 1e-3 * max(Px, Py)
+        (blo, bhi) = shape.bounding_box
+        span = []
+        if blo[0] < -otol or bhi[0] > Px + otol:
+            span.append("x in [{:.4g}, {:.4g}]".format(blo[0], bhi[0]))
+        if blo[1] < -otol or bhi[1] > Py + otol:
+            span.append("y in [{:.4g}, {:.4g}]".format(blo[1], bhi[1]))
+        if span:
+            return ("a geometry feature OVERHANGS or CROSSES the unit cell -- the meshed shape "
+                    "spans {} nm, outside [0,{:.4g}]x[0,{:.4g}] nm -- so the wrapped piece that "
+                    "would carry the partner face is missing or misplaced (typically an inclusion "
+                    "or refinement footprint built from a RAW, unclipped bbox). Clip it to the "
+                    "cell and union its periodic translates, or move it inside".format(
+                        " and ".join(span), Px, Py))
+        same_z = [c for c in (sig(f) for f in other) if abs(c[1] - s0[1]) < 1e3 * stol]
+        return ("a geometry feature TOUCHES {} without spanning the unit cell: nothing lies "
+                "outside [0,{:.4g}]x[0,{:.4g}] nm, but this z-band meets {} with {} face(s) "
+                "(transverse offsets {} nm), so the two planes are cut into different pieces. "
+                "Move the feature strictly inside the cell, or centre it on the boundary so it "
+                "crosses and wraps".format(this_plane, Px, Py, other_plane, len(same_z),
+                                            [round(c[0], 4) for c in same_z[:4]]))
+
     def _pairs(lo, hi, sig, axis, lo_plane, hi_plane):
         """Pair every lo-face with the hi-face at the same transverse centroid. RAISE on an
         orphan (F-2) or an ambiguous match (BI-5) -- both would otherwise drop a boundary to a
-        natural BC with no error."""
+        natural BC with no error. The orphan message names WHICH cause applies (see _diagnose)."""
         out, used = [], set()
         for f0 in lo:
             s0 = sig(f0)
@@ -604,20 +685,22 @@ def _identify_periodic(shape, Px: float, Py: float, sym_x: bool = False,
                     "periodic {}-boundary: the face on {} with transverse centroid {} nm has NO "
                     "partner on {} ({} faces on {} vs {} on {}). An unpaired periodic face is "
                     "left at a natural boundary condition and the solve is silently "
-                    "non-periodic. A geometry feature overhangs or crosses the unit cell "
-                    "without a matching wrapped piece (e.g. an inclusion or refinement "
-                    "footprint outside [0,{:.4g}]x[0,{:.4g}] nm).".format(
+                    "non-periodic. Diagnosis: {}.".format(
                         axis, lo_plane, tuple(round(v, 4) for v in s0), hi_plane,
-                        len(lo), lo_plane, len(hi), hi_plane, Px, Py))
+                        len(lo), lo_plane, len(hi), hi_plane,
+                        _diagnose(s0, hi, sig, lo_plane, hi_plane)))
             used.add(cand[0])
             out.append((f0, hi[cand[0]]))
         if len(used) != len(hi):
+            j0 = next(j for j in range(len(hi)) if j not in used)
             orphan = [tuple(round(v, 4) for v in sig(hi[j]))
                       for j in range(len(hi)) if j not in used]
             raise RuntimeError(
                 "periodic {}-boundary: {} face(s) on {} have no partner on {} (centroids {} nm). "
                 "An unpaired periodic face is left at a natural boundary condition and the solve "
-                "is silently non-periodic.".format(axis, len(orphan), hi_plane, lo_plane, orphan))
+                "is silently non-periodic. Diagnosis: {}.".format(
+                    axis, len(orphan), hi_plane, lo_plane, orphan,
+                    _diagnose(sig(hi[j0]), lo, sig, hi_plane, lo_plane)))
         return out
 
     tx = occ.gp_Trsf.Translation(occ.Vec(Px, 0, 0))
@@ -641,7 +724,13 @@ def _assert_periodic_complete(mesh, Px: float, Py: float, sym_x: bool = False,
     boundary plane must appear in mesh.GetPeriodicNodePairs for that axis. ng.Periodic
     silently leaves an unlisted boundary dof UNCONSTRAINED, so an incomplete table is a
     non-periodic solve with no error, no warning, and an R/T error that does not converge away
-    (measured 9.4 points of T on the trigger geometry). Cost is O(boundary elements).
+    (measured 9.4 points of T on the trigger geometry).
+
+    Cost is O(boundary elements) but NOT free: measured 0.16-0.27 s on a ~33k-element mesh
+    (nv ~ 7k, 70k boundary faces), i.e. ~8 % of that mesh's 2.1-3.0 s build -- not the
+    "microseconds" the audit ledger's fix sketch assumed. It stays unconditional because it is
+    O(1) in the SOLVE that follows and the failure it catches is silent, but it is a visible
+    fraction of a build-only workload (a mesh-convergence sweep).
 
     The entity-pair COUNT is the artefact-free signal: a Periodic(H1).Set() point probe has
     both false positives (~1e-1 'violations' on provably complete tables) and false negatives,
