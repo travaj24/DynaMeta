@@ -818,6 +818,31 @@ class QDGainModel:
         g = self._gain_scale * p.N_q_m3 * p.mu_GS * p.sigma_pk_m2 * (L @ em)
         return g if np.ndim(nu_Hz) else float(g[0])
 
+    def total_emission_gain(self, rho_ES, rho_GS, nu_Hz) -> np.ndarray:
+        """Full GS + ES spontaneous-EMISSION gain spectrum g_sp(nu) [1/m] from the EXCITONIC
+        occupations -- the ASE / Langevin source amplitude (q = Gamma g_sp h nu), the emission
+        partner of total_material_gain exactly as emission_gain_per_m is the partner of
+        material_gain_per_m. The ES term
+            g_sp_ES = sum_j N_q w_j mu_ES sigma_pk_ES L_ES(nu - nu_ES_j) rho_ES_j^2
+        carries the ES band's OWN upper-state population rho_ES^2 (the quadratic Pauli factor
+        f_e f_h of that band), NOT the GS one, and is added only when sigma_pk_ES > 0 -> identical
+        to emission_gain_per_m for the GS-only default (byte-identical off-switch).
+
+        Above transparency in EACH band g_sp = g n_sp band-by-band, so pairing this with
+        total_material_gain keeps the ASE source and the propagated gain on the same physics.
+        audit A-4: ase_self_consistent* hard-wired the GS-only pair while the slice gain
+        (gain_per_m_slices) already included ES, so the ASE/OSNR/NF stack was blind to a band the
+        gain -- and, on the Innolume fit, the datasheet's own 1210 nm ASE lobe -- actually has."""
+        p = self.p
+        g = self.emission_gain_per_m(rho_GS, nu_Hz)           # GS band (array-safe)
+        if self._es_active:
+            rES = np.asarray(rho_ES, dtype=np.float64)
+            nu = np.atleast_1d(np.asarray(nu_Hz, dtype=np.float64))
+            LE = self._lorentzian_ES(nu[:, None] - self.nu_ES_j[None, :])
+            emE = (rES * rES) * self.w_j                      # ES upper-state population x weight
+            g = g + self._gain_scale * p.N_q_m3 * p.mu_ES * p.sigma_pk_ES_m2 * (LE @ emE)
+        return g if np.ndim(nu_Hz) else float(np.atleast_1d(g)[0])
+
     # ---- closed-form many-body-corrected gain (screened-HF-flavoured, opt-in; NOT a solved SBE) ----
     def _mb_bgr_shift_Hz(self, N_m3) -> float:
         """Bandgap-renormalization shift dnu(N) = dE_BGR(N)/h [Hz] (<= 0, a red-shift). Universal
@@ -1367,17 +1392,30 @@ class QDGainModel:
         return np.asarray(state[0], dtype=np.float64)
 
     def emission_gain_per_m_slices(self, state, nu_Hz) -> np.ndarray:
-        """Spontaneous-EMISSION gain g_sp(nu) [1/m] per slice (GS band) = sum_j N_q w_j mu_GS sigma_pk
-        L(nu-nu_j) rho_GS_j^2 (excitonic) or f_c_GS f_v_GS (e/h split) -- the per-slice upper-state
-        population, hence the LANGEVIN / ASE spontaneous-source amplitude. Mirrors emission_gain_per_m
-        for the slice state layout; always >= 0 (pole-free)."""
+        """Spontaneous-EMISSION gain g_sp(nu) [1/m] per slice = GS band + (if sigma_pk_ES > 0) the
+        ES band, from the per-slice upper-state populations rho_GS_j^2 / rho_ES_j^2 (excitonic) or
+        f_c_GS f_v_GS / f_c_ES f_v_ES (e/h split) -- the LANGEVIN / ASE spontaneous-source
+        amplitude. The slice-layout twin of total_emission_gain, and the emission partner of
+        gain_per_m_slices (which has been GS+ES all along): audit A-4 -- the source used to be
+        GS-only beside a GS+ES gain, so an ES-active device radiated no spontaneous power into its
+        own ES band. Always >= 0 (pole-free); byte-identical to the old GS-only form when
+        sigma_pk_ES = 0."""
         wl = self._gain_line_weights(nu_Hz)                   # cached (ng,) = w_j * L(nu - nu_j)
         if self.eh:
             em = np.asarray(state[4]) * np.asarray(state[5])  # f_c_GS * f_v_GS  (nz, ng)
         else:
             rho = np.asarray(state[2])
             em = rho * rho                                    # rho_GS^2  (nz, ng)
-        return self._gain_scale * self._gain_pref * np.sum(em * wl[None, :], axis=1)
+        g = self._gain_scale * self._gain_pref * np.sum(em * wl[None, :], axis=1)
+        if self._es_active:
+            wlE = self._gain_line_weights_ES(nu_Hz)
+            if self.eh:
+                emE = np.asarray(state[2]) * np.asarray(state[3])   # f_c_ES * f_v_ES
+            else:
+                rE = np.asarray(state[1])
+                emE = rE * rE                                       # rho_ES^2
+            g = g + self._gain_scale * self._gain_pref_ES * np.sum(emE * wlE[None, :], axis=1)
+        return g
 
     def gain_per_m_thermal(self, state, nu_Hz, T_z) -> np.ndarray:
         """Per-slice GS gain g(nu_s) [1/m] at a SPATIALLY-RESOLVED temperature profile T_z (n_slices):

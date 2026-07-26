@@ -72,3 +72,32 @@ class FDTDLayer:
             w0 = self.lorentz_w0_rad_s
             e = e + self.lorentz_delta_eps * w0 ** 2 / (w0 ** 2 - w_rad_s ** 2 - 1j * self.lorentz_gamma_rad_s * w_rad_s)
         return e
+
+
+def hot_carrier_guard(entry_point: str, layers) -> None:
+    """audit C5-7 / D-1: refuse a `hot_carrier` layer on an entry point that cannot march it.
+
+    FDTDLayer.hot_carrier (roadmap 2.1, the per-cell two-temperature ADE) is implemented in exactly
+    ONE kernel -- fdtd_nd.kernels2d.run_2d_te -- reached only through
+    solve_fdtd_2d(..., backend='numpy'). Every other front end fills its material grids from the
+    layer's Drude/Lorentz/chi fields and never reads `hot_carrier`, so it marches the layer as a
+    plain PASSIVE film and returns a result BIT-IDENTICAL to hot_carrier=None (measured 2026-07-25:
+    array_equal True on all four dropping entry points, no raise, no warning). The dropped physics is
+    large, not marginal: on the one supported path a drive sweep moves max|dR0| by up to 0.166
+    absolute (absorbed fraction 0.025 -> 0.19).
+
+    The repo policy (audit C5-7) is "raise loudly rather than mis-solve", and the per-BACKEND half of
+    it already exists one level down (solve2d._dispatch_2d_te refuses numba/jax/cupy with hot != None);
+    this is the missing per-ENTRY-POINT half, factored to ONE implementation so the five call sites
+    (solve_fdtd_1d, solve_fdtd_2d_oblique, solve_fdtd_3d, solve_fdtd_3d_oblique, solve_fdtd_3d_mo)
+    cannot drift. Layers WITHOUT a hot_carrier take a single `any(...)` over None and are otherwise
+    byte-identical to the pre-guard path.
+    """
+    if any(getattr(L, "hot_carrier", None) is not None for L in layers):
+        raise NotImplementedError(
+            "{}: hot-carrier two-temperature dynamics (FDTDLayer.hot_carrier) are carried ONLY by the "
+            "2-D-TE NumPy reference kernel (optics.fdtd_nd.kernels2d.run_2d_te, i.e. "
+            "solve_fdtd_2d(..., backend='numpy')) -- this entry point has no hot-carrier path and "
+            "would SILENTLY ignore the term, returning the passive-layer result bit-for-bit "
+            "(audit C5-7 / D-1). Use solve_fdtd_2d(..., backend='numpy'), or clear "
+            "hot_carrier.".format(entry_point))

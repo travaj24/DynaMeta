@@ -110,9 +110,18 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
     laterally UNIFORM (no inclusions) -- so TMM applies. Raises if any layer has an
     inclusion (then it is a metasurface, not a 1D stack; use the FEM solver). The
     per-layer index is sqrt(eps(material, lambda)) at zero bias (density-independent
-    materials); for a carrier-modulated layer pass the biased eps yourself."""
+    materials); for a carrier-modulated layer pass the biased eps yourself.
+
+    ORDER: the returned layer list is SUPERSTRATE-SIDE FIRST -- the order stack_rta (and
+    every other layer-list consumer in the repo: layered_stack_from_design,
+    design_to_fdtd_layers, the lumenairy bridges) requires. `Stack.layers` lists
+    bottom-to-top, so the list is reversed here (audit C5-1 / V-1: an UNREVERSED extractor
+    vertically flips every asymmetric stack, invisibly to energy closure -- R+T+A closes in
+    both orderings, only R and T are wrong. This helper was the last unreversed member of
+    the C5-1 flip family; the 2026-07-17 sweep missed it because it checked the CONSUMERS
+    of tmm_reference and never the extractor inside it)."""
     layers = []
-    for L in design.stack.layers:
+    for L in reversed(design.stack.layers):          # superstrate side first (audit C5-1/V-1)
         if L.inclusions:
             raise ValueError(
                 "design_layer_stack: layer '{}' has inclusions -- the cell is laterally "

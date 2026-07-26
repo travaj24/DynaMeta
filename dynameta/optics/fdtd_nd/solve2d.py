@@ -10,7 +10,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, T_REF
-from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.spec import FDTDLayer, hot_carrier_guard
 from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
@@ -63,6 +63,83 @@ def _ring_time_s(layers) -> float:
         if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0:
             t_ring = max(t_ring, 18.4 / float(L.gain_dw_rad_s))
     return t_ring
+
+
+# --- source / probe placement vs the CPML (audit D-3) ------------------------------------------
+_PROBE_CLEARANCE = 2                                         # cells of margin required outside the CPML
+
+
+def _check_probe_placement(entry_point, k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution):
+    """audit D-3: refuse a soft source or an R/T probe plane that lands in (or too near) the CPML.
+
+    Every front end places k_src / k_pL / k_pR as FRACTIONS OF THE Z PAD (0.35 pad, 0.7 pad, and
+    0.3 pad past the structure), so all three scale with `n_pad_wave * lambda_max / dz` -- while
+    `npml` is a fixed CELL count (default 12) that is never compared against them. A thin pad (small
+    n_pad_wave, or a coarse `resolution`) therefore slides the source and/or the left probe INSIDE
+    the absorber, where the injected pulse is damped as it is launched and the probe reads an
+    attenuated, phase-corrupted field.
+
+    It fails SILENTLY. Holding the GEOMETRY fixed (lossless eps=4 slab, resolution=20,
+    n_pad_wave=0.35 -> k_src=7, k_pL=15, nz=50) and sweeping ONLY npml isolates PML overlap from
+    evanescent near-field contamination -- the violation switches on exactly as npml overtakes k_src
+    and then grows monotonically (measured 2026-07-25 with this guard bypassed):
+        npml =  6 (source clear): R0+T0 [0.9998, 1.0000]   R_flux+T_flux [0.9997, 0.9999]
+        npml = 12 (the DEFAULT):  R0+T0 [0.9945, 1.0062]   R_flux+T_flux [0.9891, 1.0123]
+        npml = 20:                R0+T0 [0.9573, 0.9750]   R_flux+T_flux [0.8849, 0.9092]
+    -- an 11.5% energy-budget violation on a LOSSLESS slab, with no warning of any kind. (The audit
+    ledger reports the same monotone signature on its own fixture: 5.4% at the default npml=12.)
+
+    Clearance is `_PROBE_CLEARANCE` = 2 cells because the flux extraction also reads k-1 (the
+    half-cell H_x average onto the E_y plane), and the right probe must additionally stay 2 cells
+    clear of the high-z CPML. The binding constraint is the source (0.35 pad vs 0.7 pad for the
+    probes), so the message names the minimum `n_pad_wave` at the given `resolution` AND the minimum
+    `resolution` at the given `n_pad_wave` -- either knob, or a smaller `npml`, fixes it.
+    """
+    need = npml + _PROBE_CLEARANCE
+    bad = []
+    if k_src < need:
+        bad.append("source k_src={} < npml+{}={}".format(k_src, _PROBE_CLEARANCE, need))
+    if k_pL < need:
+        bad.append("left (R) probe k_pL={} < npml+{}={}".format(k_pL, _PROBE_CLEARANCE, need))
+    if k_pR > nz - 1 - need:
+        bad.append("right (T) probe k_pR={} > nz-1-npml-{}={}".format(
+            k_pR, _PROBE_CLEARANCE, nz - 1 - need))
+    if not bad:
+        return
+    # pad/dz is the single scale every index is a fixed fraction of; k_src = 0.35 * (pad/dz) is the
+    # tightest, so pad/dz must reach need/0.35 for all three clearances to hold.
+    p_cells = pad / dz
+    p_need = need / 0.35
+    scale = p_need / p_cells if p_cells > 0 else float("inf")
+    raise ValueError(
+        "{}: {} -- the source/probe planes are placed as fractions of the z pad and have fallen "
+        "INSIDE the CPML, which silently corrupts R/T (measured up to an 11.5% energy-budget "
+        "violation on a LOSSLESS slab; audit D-3). The pad is {:.1f} cells deep and needs >= {:.1f}. Fix by raising "
+        "n_pad_wave to >= {:.2f} (currently {:g}) at resolution={:g}, OR raising resolution to >= {:d} "
+        "(currently {:g}) at n_pad_wave={:g}, OR lowering npml to <= {:d} (currently {:d}).".format(
+            entry_point, "; ".join(bad), p_cells, p_need,
+            n_pad_wave * scale, n_pad_wave, resolution,
+            int(np.ceil(resolution * scale)), resolution, n_pad_wave,
+            max(1, int(np.floor(0.35 * p_cells)) - _PROBE_CLEARANCE), int(npml)))
+
+
+def _check_band(entry_point, band, f_min, f_max):
+    """audit D-3 (sub-mode): refuse an EMPTY well-excited band mask instead of returning silent zeros.
+
+    With the source buried deep enough in the CPML the injected pulse never reaches the reference
+    probe, so `np.abs(mL_inc) > 0.05 * max(...)` selects NOTHING (measured: band.sum() == 0 of 2617
+    bins, no raise). Every downstream consumer then dies far from the cause with an opaque
+    `ValueError: zero-size array to reduction operation minimum` on `result.R0[result.band].min()`.
+    """
+    if not np.any(band):
+        raise ValueError(
+            "{}: the well-excited frequency band is EMPTY ({} rfft bins, none above the 5%-of-peak "
+            "incident-amplitude threshold in [{:.4g}, {:.4g}] Hz) -- the source pulse never reached "
+            "the reference probe. This is the deep-overlap mode of audit D-3: check that the source "
+            "and probe planes clear the CPML (raise n_pad_wave / resolution, or lower npml), and "
+            "that lambda_min_m/lambda_max_m bracket the source band.".format(
+                entry_point, int(np.size(band)), f_min, f_max))
 
 
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
@@ -260,6 +337,8 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_2d", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
@@ -373,13 +452,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
                                                            + (n_super - n_sub) * (k_pR * dz - pad)))
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
-    P_inc = _flux(eyL_i, hxL_i)
-    P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i)
-    P_trans = _flux(eyR_t, hxR_t)
+    P_inc = _flux(eyL_i, hxL_i, dt)                          # dt: half-timestep H de-stagger (D-2)
+    P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i, dt)
+    P_trans = _flux(eyR_t, hxR_t, dt)
     with np.errstate(divide="ignore", invalid="ignore"):
         R_flux = np.abs(P_refl) / np.abs(P_inc)
         T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
+    _check_band("solve_fdtd_2d", band, f_min, f_max)         # audit D-3 sub-mode
     # OPT-IN (roadmap 3.1): expose the exit/entry-plane E_y + H_x x-lines already recorded above, as
     # copies. Purely additive -- R0/T0/R_flux/T_flux/band/r0/t0 are computed identically whether or not
     # the trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
@@ -430,6 +510,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
             "solve_fdtd_2d_oblique: the oblique kernel carries no {} terms -- they would be "
             "silently ignored (audit C5-7); use the normal-incidence solver or split the "
             "problem.".format("/".join(_dropped)))
+    # audit D-1: hot_carrier cannot join `_dropped` (its sentinel is None, not 0.0, so the
+    # `!= 0.0` test would fire on every passive layer); guarded by the shared spec helper.
+    hot_carrier_guard("solve_fdtd_2d_oblique", layers)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -457,6 +540,8 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_2d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
     t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
@@ -507,6 +592,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # warn when the mask removes otherwise-excited in-band points so the truncation is
     # visible rather than silent.
     _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit D-3 sub-mode: gate the EXCITATION mask only -- the grazing (sin_t) cut below may
+    # legitimately empty the trusted band at a large angle, and it already warns when it does.
+    _check_band("solve_fdtd_2d_oblique", _excited, f_min, f_max)
     band = _excited & (sin_t < 0.95)
     _cut = _excited & (sin_t >= 0.95)
     if np.any(_cut):

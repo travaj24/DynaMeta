@@ -28,13 +28,9 @@ def _with(amp: FiberAmplifier, *, pumps=None, signals=None) -> FiberAmplifier:
     (audit S3-1: dropping it made every metric run the ideal model -- PIQ dark absorption and
     photodarkening silently vanished and upconversion mis-scaled). When concentration is set the
     FiberAmplifier __init__ derives upconversion_C_up from it; the explicit kwarg covers the
-    concentration=None raw-C_up case."""
-    return FiberAmplifier(amp.ion, amp.fiber,
-                          amp.pumps if pumps is None else pumps,
-                          amp.signals if signals is None else signals,
-                          amp.ase, upconversion_C_up=amp.upconversion_C_up,
-                          concentration=amp.concentration,
-                          raman=getattr(amp, "raman", None))
+    concentration=None raw-C_up case. Delegates to FiberAmplifier._clone, which is the single
+    place that lists what a clone must carry (it adds the axial temperature profile, audit A-5)."""
+    return amp._clone(pumps=pumps, signals=signals)
 
 
 def _set_total_pump(amp: FiberAmplifier, P_total_W: float) -> FiberAmplifier:
@@ -187,9 +183,11 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
     lams = np.atleast_1d(np.asarray(probe_lambda_m, float))
     base = _with(amp, signals=[])
     if not with_ase:
-        base = FiberAmplifier(base.ion, base.fiber, base.pumps, [], None,
-                              upconversion_C_up=base.upconversion_C_up,
-                              concentration=base.concentration)
+        no_ase = FiberAmplifier(base.ion, base.fiber, base.pumps, [], None,
+                                upconversion_C_up=base.upconversion_C_up,
+                                concentration=base.concentration)
+        no_ase._Tz = base._Tz                  # the ASE band is dropped, the T profile is NOT (A-5)
+        base = no_ase
     gdB = np.empty_like(lams)
     for j, lam in enumerate(lams):
         r = _with(base, signals=[Signal(probe_power_W, float(lam))]).solve()

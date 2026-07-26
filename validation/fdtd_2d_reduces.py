@@ -88,6 +88,14 @@ def main():
     # CPML conserves energy to ~1e-3 across the band (median); the max spikes only at the GRAZING
     # emergence of diffraction orders (orders propagating nearly parallel to the z-interface reflect
     # off any PML -- a fundamental FDTD limit, npml-independent), so gate on the median.
+    # COUNTERINTUITIVE, and itself evidence FOR the PML attribution (audit 2026-07-25 D-2 re-grade):
+    # at fixed resolution the spike GROWS with a LARGER pad -- measured on this exact fixture,
+    # max|R+T-1| = 1.7e-3 at n_pad_wave=2.0, 5.7e-3 at 4.0, 2.1e-2 at 6.0 (ledger: 3.2e-3 -> 2.6e-2).
+    # That is the opposite of the evanescent-damping trend a near-field/probe-placement cause would
+    # give: a longer pad lets a nearly-in-plane order travel further along the absorber before it is
+    # sampled, so it accumulates more grazing PML echo. NOT the half-timestep stagger (D-2): applying
+    # the correct exp(+i w dt/2) H de-stagger moves this fixture's median by 1.00x and its max by
+    # 1.02x, so the D-2 attribution to this gate is DISPROVEN and the PML rationale above stands.
     gate_c = bool(en_med < 5e-3 and spec_min < 0.9)
     print("[f2] C grating: flux |R+T-1| median={:.2e} (CPML) max={:.2e} (grazing-order emergence) ; "
           "0-order min(R0+T0)={:.3f} (<1 = diffracted) -> {}".format(

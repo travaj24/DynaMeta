@@ -75,6 +75,20 @@ _TEST_KCROSS_SIGN = -1.0
 _FIT_RELRES_WARN = 5e-2
 
 
+def _bloch_z_samples(geo: OpticalGeometry):
+    """z sample points (nm) for the Bloch-idnr direction probe: 18 fractions of the GLOBAL stack
+    span PLUS three fractions of EVERY region z-interval (audit F-6). The global fractions alone
+    can give a thin layer ZERO samples (a 5 nm layer in a ~2.5 um stack sits between two global
+    samples), leaving its identification classified from numerical noise. Exposed as a helper so
+    the per-region coverage is unit-testable without a solve."""
+    zvals = [z for iv in geo.z_intervals_nm.values() for z in iv]
+    zlo, zhi = min(zvals), max(zvals)
+    zpts = [zlo + fz * (zhi - zlo) for fz in np.linspace(0.03, 0.97, 18)]     # global spread
+    for (_zl, _zh) in geo.z_intervals_nm.values():                            # + every region
+        zpts += [_zl + fr * (_zh - _zl) for fr in (0.2, 0.5, 0.8)]
+    return zpts
+
+
 def _detect_bloch_dirs(geo: OpticalGeometry):
     """Return a per-identification direction list (['x'|'y'] of length n_px+n_py)
     mapping each periodic idnr to its translation axis. CRITICAL: ng.Periodic keys
@@ -85,7 +99,17 @@ def _detect_bloch_dirs(geo: OpticalGeometry):
     NORMAL-incidence field at every angle (a particularly nasty silent failure, since
     normal incidence still validates). We resolve each idnr's axis by toggling a
     marker phase on that idnr alone and measuring whether it perturbs the x- or the
-    y-boundary, then assert the recovered x/y counts (anti-silent-failure)."""
+    y-boundary, then assert the recovered x/y counts (anti-silent-failure).
+
+    Z-SAMPLING (audit F-6): the 18 GLOBAL stack fractions alone MISS a thin layer's periodic faces
+    (a sub-100 nm layer in a multi-micron stack falls between two global samples), so its idnr is
+    classified from numerical noise and the x/y-count assertion fires -- 'resolved N x / M y,
+    expected ...' on an otherwise supported stack. The sample list therefore ALSO carries three
+    PER-REGION fractions of every z-interval, so every layer -- however thin -- is hit. This is the
+    per-region sampling shg_fem._ensure_bloch_dirs used to apply at ONE call site; folding it in
+    here gives it to every caller (solve_fem, solve_fem_sourced, _bloch_phase_list). Purely
+    ADDITIVE: extra samples can only strengthen the true axis's violation (the marker phase
+    perturbs only its own identification's faces), so stacks that already resolved are unchanged."""
     cached = getattr(geo, "_bloch_dirs", None)
     if cached is not None:
         return cached
@@ -98,10 +122,8 @@ def _detect_bloch_dirs(geo: OpticalGeometry):
     elif n_px == 0:
         dirs = ["y"] * n_py
     else:
-        zvals = [z for iv in geo.z_intervals_nm.values() for z in iv]
-        zlo, zhi = min(zvals), max(zvals)
         th = cmath.exp(1j * 0.7853981634)           # marker phase != 1
-        zfr = np.linspace(0.03, 0.97, 18)           # dense in z to hit every layer's face
+        zpts = _bloch_z_samples(geo)                # global spread + every region (audit F-6)
 
         def viol(i):                                # x- vs y-boundary perturbation of idnr i
             phases = [(th if j == i else 1.0 + 0j) for j in range(N)]
@@ -109,8 +131,7 @@ def _detect_bloch_dirs(geo: OpticalGeometry):
             gf = ng.GridFunction(fes)
             gf.Set(ng.exp(0.01j * ng.z) * (1.0 + 0.3 * ng.y / Py + 0.25 * ng.x / Px + 0.2j))
             xv = yv = 0.0
-            for fz in zfr:
-                z = zlo + fz * (zhi - zlo)
+            for z in zpts:
                 for fy in (0.3, 0.6):
                     try:
                         a = complex(gf(mesh(0.0, fy * Py, z))); b = complex(gf(mesh(Px, fy * Py, z)))
@@ -642,7 +663,9 @@ class SourcedResult:
     a_up/a_down: 0-order outgoing plane-wave amplitude (V/m, projected onto probe_pol) in the
                superstrate (up) and substrate (down); a_down is None with no substrate buffer.
     p_up/p_down: time-averaged radiated power through the top/bottom port INTEGRATED over the unit
-               cell (Watts). p_down is None with no substrate buffer.
+               cell (Watts). Both are LOSSLESS-medium plane-wave fluxes: solve_fem_sourced RAISES on
+               a lossy n_super, and p_down is None with no substrate buffer, with an evanescent
+               0-order, or with a LOSSY n_sub (audit F-3).
     relres:    the iterative-solver relative residual (0.0 for a direct umfpack solve)."""
     fes:          object
     gfu:          object
@@ -708,7 +731,25 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
     dielectric) super/substrate: p_up = |a|^2 (Re kz / k0)/(2 Z0) A is the plane-wave flux of a
     lossless medium, and a lossy superstrate makes it meaningless (measured: Im(eps_super) = 1
     inflates p_up ~5x vs the analytic sheet power; Im = 5 by ~260x). This lossless-superstrate
-    constraint -- not solver conditioning -- is the real limit of the power read-out."""
+    constraint -- not solver conditioning -- is the real limit of the power read-out, and it is now
+    ENFORCED (audit F-3): a lossy n_super RAISES NotImplementedError, mirroring solve_fem's
+    _incidence_geometry guard (previously only solve_fem raised, so the drivers that reach this
+    function WITHOUT a prior solve_fem call -- shg_structured_two_step via
+    _reconstruct_fundamental_field -- passed a lossy superstrate end to end). A lossy n_sub is
+    treated the way solve_fem treats its lossy-cladding flux diagnostic: p_down is returned as None
+    (with a warning) rather than as a silently-wrong number; a_down (an amplitude, not a power) is
+    still returned."""
+    if abs(complex(n_super).imag) > 1e-9:
+        # p_up = |a|^2 (Re kz/k0)/(2 Z0) A is the plane-wave flux of a LOSSLESS medium; in a lossy
+        # superstrate the 2-wave fit's "outgoing" amplitude is z-dependent and the flux formula
+        # over-counts (measured 5.03x at Im(eps_super)=1, 66.5x at n_super=1+2j). solve_fem raises
+        # on exactly this input (see _incidence_geometry) -- match it. (Audit F-3.)
+        raise NotImplementedError(
+            "solve_fem_sourced: the radiated-power read-out p_up = |a|^2 (Re kz/k0)/(2 Z0) A is the "
+            "plane-wave flux of a LOSSLESS superstrate (Im(n_super)=0); got n_super={:.4g}, which "
+            "inflates p_up by ~5x at Im(eps_super)=1 and ~260x at Im(eps_super)=5. Use a lossless "
+            "(vacuum/dielectric) incidence medium -- solve_fem raises on the same input."
+            .format(complex(n_super)))
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
     Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
@@ -795,7 +836,17 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
         if kz_b.imag < 0:
             kz_b = -kz_b
         a_down = _sourced_port_amp(mesh, total, geo, kz_b, proj, kx, ky, "substrate", -1)
-        if kz_b.real > 1e-9 * k0:
+        if abs(complex(n_sub).imag) > 1e-9:
+            # Same lossless-medium restriction as p_up, on the DOWN port. A metal-backed cell
+            # (n_sub = sqrt(eps_metal)) is a legitimate, common configuration whose UP-port power is
+            # still valid, so this flags/omits p_down instead of raising (mirroring solve_fem, which
+            # leaves its R_flux/T_flux diagnostic None for a lossy cladding). (Audit F-3.)
+            warnings.warn(
+                "solve_fem_sourced: p_down is undefined for a LOSSY substrate (Im(n_sub)={:.3g} != 0) "
+                "-- the plane-wave flux formula assumes a lossless medium -- so it is returned as "
+                "None rather than a silently-wrong power. a_up/p_up (lossless superstrate) and "
+                "a_down are unaffected.".format(complex(n_sub).imag), stacklevel=2)
+        elif kz_b.real > 1e-9 * k0:
             # lossless-substrate z-flux of a tangential-field plane wave (valid for a vacuum/
             # dielectric substrate); the SHG use case radiates into a vacuum superstrate.
             p_down = (abs(a_down) ** 2 * (kz_b.real / k0) / (2.0 * Z0)) * area_phys

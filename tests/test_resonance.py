@@ -412,3 +412,55 @@ def test_drude_eps_passive_sign_and_enz():
     # ENZ crossing of Re(eps) at omega ~ wp / sqrt(eps_inf).
     enz = wp / math.sqrt(eps_inf)
     assert complex(drude_eps(enz, eps_inf, wp, gamma)).real == pytest.approx(0.0, abs=5e-2 * eps_inf)
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT V-3: the polarization vocabulary is EXACTLY {'s', 'p'} at every entry point
+# ------------------------------------------------------------------------------------------------
+_OFF_VOCAB = ["TE", "TM", "te", "tm", "S", "P", "x", "y", "", "sp"]
+
+
+def test_smatrix_pole_func_validates_pol():
+    """smatrix_pole_func -- the module's primary public pole finder, in __all__ -- used to accept
+    ANY string and silently return the P-POL function ('TE', 'TM', 'x' all gave p-pol), while its
+    sibling layered_smatrix_complex raised on the same input. Both now reject the same set, and the
+    factory raises EAGERLY (at build time, not inside find_poles)."""
+    layers = [(4.0 + 0.1j, 200e-9)]
+    for bad in _OFF_VOCAB:
+        with pytest.raises(ValueError, match="pol must be"):
+            smatrix_pole_func(layers, pol=bad)                # eager: no closure is handed back
+        with pytest.raises(ValueError, match="pol must be"):
+            layered_smatrix_complex(1.0e15, layers, pol=bad)
+    for good in ("s", "p"):                                   # the accepted set is unchanged
+        assert callable(smatrix_pole_func(layers, pol=good))
+        assert layered_smatrix_complex(1.0e15, layers, pol=good) is not None
+
+
+def test_pol_fallthrough_was_answer_changing():
+    """Discrimination: s and p pole functions are genuinely different at oblique incidence, so the
+    old silent p-pol default was not a harmless alias -- a pol='TE' pole hunt returned plausible
+    p-pol poles. (Also pins that the two accepted spellings still disagree, i.e. the guard did not
+    accidentally collapse them.)"""
+    lam = 1300e-9
+    omega = 2.0 * math.pi * C_LIGHT / lam
+    layers = [(4.0 + 0.1j, 200e-9)]
+    k_par = 0.6 * omega / C_LIGHT                             # ~37 deg in vacuum
+    ds = smatrix_pole_func(layers, pol="s", k_par_m=k_par)(omega)
+    dp = smatrix_pole_func(layers, pol="p", k_par_m=k_par)(omega)
+    assert abs(ds - dp) > 0.1 * max(abs(ds), abs(dp))
+
+
+def test_admittance_twins_agree_on_off_vocabulary():
+    """AUDIT V-3/V-8: the duplicated _admittance helpers had MIRROR-IMAGE silent fallbacks
+    (resonance -> p-pol, nonlocal_tmm -> s-pol), so the two modules returned different physics for
+    the same unrecognized string. Both must now raise -- the stricter behaviour."""
+    from dynameta.optics.nonlocal_tmm import _admittance as adm_nl
+    from dynameta.optics.resonance import _admittance as adm_res
+    eps, kz = 4.0 + 0.1j, 1.2e7 + 0j
+    for bad in _OFF_VOCAB:
+        with pytest.raises(ValueError, match="pol must be"):
+            adm_res(eps, kz, bad)
+        with pytest.raises(ValueError, match="pol must be"):
+            adm_nl(eps, kz, bad)
+    for good in ("s", "p"):                                   # and they still agree where defined
+        assert adm_res(eps, kz, good) == adm_nl(eps, kz, good)

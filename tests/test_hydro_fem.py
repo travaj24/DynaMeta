@@ -135,6 +135,82 @@ def test_gate1_local_limit_2d():
 
 
 # ================================================================================================
+# AUDIT F-4: a NON-VACUUM host (eps_host != 1) must use a CONSISTENT scattered-field split
+# ================================================================================================
+def test_f4_host_energy_conservation():
+    """AUDIT F-4 REGRESSION.  ``scattering_2d`` builds the metal-restricted source ``k0**2
+    (eps - eps_host) E_inc``, which is the exact scattered-field split ONLY if ``E_inc`` solves the
+    source-free equation in the HOST -- i.e. only if it carries the HOST wavenumber
+    ``k0 sqrt(eps_host)``.  It used to be built with the VACUUM ``k0``, so for ``eps_host != 1`` the
+    residual ``k0**2 (eps_host - 1) E_inc`` over the whole host was silently dropped: the library's
+    own ``energy_residual`` (documented '~0 for a converged, energy-conserving solve') walked to
+    0.88 at ``eps_host = 2`` and 1.53 at 4 with nothing raised.  With the host wavenumber it is back
+    in the 1e-4 class at every host, for BOTH the local and the coupled-HDM route.
+
+    ``eps_host = 1`` is byte-identical to the pre-fix path (``sqrt(1) = 1``); the pinned value below
+    is the pre-fix number."""
+    p = _sodium(gamma=3.0e13)
+    mesh, Rp = hf.cylinder_mesh(4.0)                          # deeply subwavelength (quasistatic)
+    res = {}
+    for eps_host in (1.0, 2.0, 4.0):
+        w_sp = hf.cylinder_sp_omega(p, eps_host)              # on resonance for THIS host
+        for local in (True, False):
+            r = hf.scattering_2d(mesh, w_sp, p, local=local, eps_host=eps_host,
+                                 flux_radius=0.7 * Rp)
+            res[(eps_host, local)] = r
+            assert abs(r.energy_residual) < 5e-3, (
+                "eps_host={} local={}: energy_residual={:.3e} (pre-fix: 0.88 at 2, 1.53 at 4)"
+                .format(eps_host, local, r.energy_residual))
+            assert r.P_abs >= 0.0 and r.P_scat >= 0.0
+    # vacuum host unchanged (the pre-fix measured value on this mesh)
+    assert res[(1.0, True)].energy_residual == pytest.approx(1.2264e-04, rel=5e-3)
+
+
+def test_f4_host_local_limit_and_guards():
+    """AUDIT F-4, part 2.  (a) The ``beta -> 0`` local limit stays EXACT in a dense host: the
+    coupled solve reproduces the local-Drude solve of the same mesh to ~1e-8 in P_abs at
+    ``eps_host = 2`` (the same quality as vacuum) -- the host fix does not disturb the
+    longitudinal decoupling.  (b) A LOSSY / non-positive host RAISES rather than returning an
+    unconserved power budget (the contour fluxes are only radius-independent in a lossless host)."""
+    p = _sodium()
+    mesh, Rp = hf.cylinder_mesh(20.0, h_metal=6.0, h_host=16.0)
+    om = 2.0 * math.pi * hf.C_LIGHT / 250e-9                  # below the SP resonance
+    p0 = hf.HydroParams(p.eps_inf, p.wp, p.gamma, p.beta * 1e-4)   # beta -> 0
+    for eps_host in (1.0, 2.0):
+        r_local = hf.scattering_2d(mesh, om, p, local=True, eps_host=eps_host,
+                                   flux_radius=0.7 * Rp)
+        r_coup = hf.scattering_2d(mesh, om, p0, local=False, eps_host=eps_host,
+                                  flux_radius=0.7 * Rp)
+        assert r_coup.P_abs == pytest.approx(r_local.P_abs, rel=1e-6)
+        assert r_coup.enhancement == pytest.approx(r_local.enhancement, rel=1e-4)
+    for bad in (complex(2.0, 0.3), -1.0, 0.0):
+        with pytest.raises(ValueError, match="LOSSLESS dielectric"):
+            hf.scattering_2d(mesh, om, p, local=True, eps_host=bad, flux_radius=0.7 * Rp)
+
+
+def test_f4_sp_resonance_forwards_eps_host():
+    """AUDIT F-4, part 3.  ``sp_resonance_omega`` now accepts and FORWARDS ``eps_host``, so the FEM
+    can be compared against the host-aware analytic oracles it ships (``cylinder_sp_omega`` /
+    ``cylinder_blueshift_raza`` both take ``eps_b``); previously the only route to a non-vacuum host
+    was to call ``scattering_2d`` directly.  Load-bearing: with the host forwarded the LOCAL dipole
+    peak lands within 2% of the Frohlich condition ``omega_p/sqrt(eps_inf + eps_b)`` (measured
+    -0.96%, the same quality as the vacuum case), while the UNFORWARDED (vacuum-host) solve peaks
+    8% away -- so the assertion cannot pass by accident."""
+    p = _sodium(gamma=3.0e13)
+    mesh, Rp = hf.cylinder_mesh(4.0)
+    eps_host = 2.0
+    w_sp = hf.cylinder_sp_omega(p, eps_host)
+    ws = np.linspace(0.90 * w_sp, 1.08 * w_sp, 13)
+    w_pk = hf.sp_resonance_omega(mesh, p, ws, local=True, eps_host=eps_host,
+                                 flux_radius=0.7 * Rp)
+    assert abs(w_pk - w_sp) / w_sp < 0.02, (w_pk, w_sp)
+    w_vac = hf.sp_resonance_omega(mesh, p, ws, local=True, flux_radius=0.7 * Rp)
+    assert abs(w_vac - w_sp) / w_sp > 0.05, (
+        "the vacuum-host solve must NOT land on the eps_b=2 Frohlich point, else the gate is "
+        "vacuous: got {:.4e} vs {:.4e}".format(w_vac, w_sp))
+
+
+# ================================================================================================
 # BULK PLASMON: the core nonlocal physics (pressure term + ABC), 1-D oblique HDM
 # ================================================================================================
 def test_bulk_plasmon_peaks_1d():
@@ -188,6 +264,88 @@ def test_enz_blueshift_one_over_d():
         assert abs(got[d_nm] - w1) / w1 < 0.03
         assert w1 > p.wp
     assert got[2.0] > got[4.0]                                # thinner -> higher (1/d blueshift)
+
+
+# ================================================================================================
+# AUDIT F-5: the 1-D R/T probe planes must be chosen from the GEOMETRY, not by magic index
+# ================================================================================================
+def _f5_gold():
+    return hf.HydroParams(1.0, 1.37e16, 1.1e14, hf.beta_from_vf(1.40e6), D=1.0e-4)   # GNOR gold
+
+
+def test_f5_probe_planes_are_geometric():
+    """AUDIT F-5 REGRESSION.  ``hydro_layered_1d`` read R/T at the hardcoded mesh nodes
+    ``allz[3]`` / ``allz[-4]`` -- the 4th node from each end of the stack.  Those sit in the vacuum
+    buffer only for a thick-enough buffer AND a fine-enough metal: at ``buffer_nm = 20`` the buffer
+    holds two 10 nm cells, so ``allz[3]`` is the metal's first interior node, and with
+    ``metal_cells = 4`` on a 100 nm film that node is 25 nm DEEP in the film.  The function then
+    returned **R = 1.2499, A = -0.2564 on a passive absorbing metal** while the independent
+    ``A_volume`` stayed correct at 0.0199 -- a 0.28-sized discrepancy the library never looked at.
+
+    The probe planes are now placed geometrically inside the buffers, so BOTH ledger triggers
+    (thin buffer; coarse metal mesh) reproduce the thick-buffer reference, and R/T are physical."""
+    p = _f5_gold()
+    om = 0.6 * p.wp
+    ref = hf.hydro_layered_1d(om, p, 100.0, hydro=True)                  # shipped default
+    assert 0.0 <= ref.R <= 1.0 and ref.A >= 0.0
+    for buffer_nm, metal_cells in ((20.0, 4), (20.0, 80), (8.0, 4), (50.0, 4), (150.0, 4)):
+        r = hf.hydro_layered_1d(om, p, 100.0, hydro=True, buffer_nm=buffer_nm,
+                                metal_cells=metal_cells)
+        tag = "buffer={} metal_cells={}".format(buffer_nm, metal_cells)
+        assert r.R == pytest.approx(ref.R, abs=1e-4), tag        # pre-fix worst: R = 1.2499
+        assert r.T == pytest.approx(ref.T, abs=1e-4), tag
+        assert r.A == pytest.approx(ref.A, abs=1e-4), tag        # pre-fix worst: A = -0.2564
+        assert 0.0 <= r.R <= 1.0 and r.A >= 0.0, tag
+        # A (budget) and A_volume (independent volumetric loss integral) must now agree
+        assert r.A == pytest.approx(r.A_volume, abs=1e-4), tag
+
+
+def test_f5_thin_buffer_refuses_loudly():
+    """AUDIT F-5, part 2.  A buffer too thin to host a probe plane strictly inside the vacuum (with
+    the minimum standoff from both the metal interface and the transparent-BC boundary) RAISES and
+    names the minimum ``buffer_nm``, instead of silently reading the field inside the metal.  The
+    minimum is a module constant so the message and the guard cannot drift apart."""
+    p = _f5_gold()
+    om = 0.6 * p.wp
+    assert hf._MIN_BUFFER_NM == pytest.approx(4.0 * hf._PROBE_STANDOFF_NM)
+    for bad in (3.0, 0.99 * hf._MIN_BUFFER_NM):
+        with pytest.raises(ValueError, match="probe plane"):
+            hf.hydro_layered_1d(om, p, 100.0, hydro=True, buffer_nm=bad)
+    # exactly at the minimum it still works (and agrees with the thick-buffer reference)
+    r = hf.hydro_layered_1d(om, p, 100.0, hydro=True, buffer_nm=hf._MIN_BUFFER_NM)
+    assert r.R == pytest.approx(hf.hydro_layered_1d(om, p, 100.0, hydro=True).R, abs=1e-4)
+
+
+def test_f5_probe_node_helper_stays_inside_the_buffer():
+    """AUDIT F-5, part 3 (pure numpy -- no FEM).  :func:`hydro_fem._probe_node` must return a node
+    STRICTLY inside its vacuum buffer for every buffer/metal-mesh combination, and must reproduce
+    the historical ``allz[3]`` / ``allz[-4]`` nodes on the shipped default (buffer 150 nm -> 15 nm
+    cells), which is what makes the default read-out byte-identical to the pre-fix code."""
+    def _allz(buffer_nm, d_nm, metal_cells):
+        h_buf, h_met = 15.0, max(0.04, d_nm / metal_cells)
+        zs = [np.linspace(0.0, buffer_nm, max(2, math.ceil(buffer_nm / h_buf)) + 1),
+              np.linspace(buffer_nm, buffer_nm + d_nm, max(2, math.ceil(d_nm / h_met)) + 1),
+              np.linspace(buffer_nm + d_nm, 2 * buffer_nm + d_nm,
+                          max(2, math.ceil(buffer_nm / h_buf)) + 1)]
+        return np.unique(np.concatenate(zs))
+
+    # shipped default: the geometric rule must land on the historical magic indices
+    allz = _allz(150.0, 100.0, 80)
+    ir = hf._probe_node(allz, 0.0, 150.0, 150.0, +1, "sub")
+    it = hf._probe_node(allz, 250.0, 400.0, 150.0, -1, "sup")
+    assert allz[ir] == allz[3] and allz[it] == allz[-4]
+
+    # every other combination: strictly inside the vacuum, and (the F-5 failure) NOT in the metal
+    for buffer_nm in (8.0, 20.0, 40.0, 150.0, 400.0):
+        for metal_cells in (4, 8, 80, 400):
+            for d_nm in (10.0, 100.0):
+                allz = _allz(buffer_nm, d_nm, metal_cells)
+                zm0, zm1 = buffer_nm, buffer_nm + d_nm
+                zr = allz[hf._probe_node(allz, 0.0, zm0, buffer_nm, +1, "sub")]
+                zt = allz[hf._probe_node(allz, zm1, zm1 + buffer_nm, buffer_nm, -1, "sup")]
+                tag = (buffer_nm, metal_cells, d_nm, zr, zt)
+                assert 0.0 < zr < zm0, tag
+                assert zm1 < zt < zm1 + buffer_nm, tag
 
 
 # ================================================================================================

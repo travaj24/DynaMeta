@@ -1,7 +1,12 @@
 """Fast (no-FDTD-run) unit tests for the FDTD OpticalSolver seam helpers: the complex-eps -> FDTDLayer
-Drude inversion, the Design -> layer mapping (order + guards), and the vacuum-end-media guard."""
+Drude inversion, the Design -> layer mapping (order + guards), and the vacuum-end-media guard.
+
+Also home to the audit D-3 source/probe-vs-CPML clearance gates. Those raise at SETUP (before any
+march), so the negative cases stay no-FDTD-run; the single positive "a minimally-padded VALID config
+still runs and closes the energy budget" gate is the one small 2-D march in this module."""
 import math
 
+import numpy as np
 import pytest
 
 from dynameta.constants import C_LIGHT
@@ -56,6 +61,22 @@ def test_layers_superstrate_first_order():
     layers = design_to_fdtd_layers(d, LAM)
     assert len(layers) == 2
     assert abs(layers[0].eps_inf - 9.0) < 1e-9 and abs(layers[1].eps_inf - 4.0) < 1e-9  # top (s1) first
+
+
+def test_gain_eps_raises_instead_of_clamping_to_lossless():
+    """AUDIT V-2: a sign-convention slip (Im(eps) < 0 = gain under exp(-i omega t)) used to be
+    CLAMPED, unbounded: eps = -180 - 30j was realized as a strictly real -180+0j -- a collisionless
+    metal, gamma = 0.0, absorption identically zero, with no warning. It must now raise, at the
+    helper AND through the Design seam. Byte-identity for VALID inputs is unaffected: the guard
+    runs before untouched arithmetic (`ei = max(0.0, eps.imag)` is kept verbatim)."""
+    with pytest.raises(ValueError, match="exp\\(-i omega t\\)"):
+        _eps_to_fdtd_layer(100e-9, -180.0 - 30.0j, LAM)
+    d = _design([(-180.0 - 30.0j, 40e-9, [])])
+    with pytest.raises(ValueError, match="Im\\(eps\\)"):
+        design_to_fdtd_layers(d, LAM)
+    # the passive counterpart of the same material is unaffected and IS absorbing
+    L = _eps_to_fdtd_layer(100e-9, -180.0 + 30.0j, LAM)
+    assert L.drude_gamma_rad_s > 0.0 and abs(_fdtd_layer_eps(L, LAM) - (-180.0 + 30.0j)) < 1e-6 * 181.0
 
 
 def test_inclusions_layer_raises():
@@ -357,3 +378,153 @@ def test_ring_time_extends_window_for_narrow_poles():
     gainy = FDTDLayer(thickness_m=200e-9, eps_inf=4.0, gain_w_rad_s=1.45e15,
                       gain_dw_rad_s=2e12, gain_kappa_C2_kg=2.8e-8, gain_dN_m3=5e23)
     assert _ring_time_s([passive, gainy]) == pytest.approx(18.4 / 2e12, rel=1e-12)
+
+
+# =====================================================================================================
+# audit D-3: the soft source and BOTH R/T probe planes must clear the CPML
+# =====================================================================================================
+# k_src / k_pL / k_pR are placed as FRACTIONS OF THE Z PAD (0.35 pad, 0.7 pad, 0.3 pad past the
+# structure) in five front ends; `npml` is a fixed CELL count that was never compared against them.
+# A thin pad slides them into the absorber and R/T degrade SILENTLY -- no raise, no warning.
+_D3_BAND = dict(lambda_min_m=1.2e-6, lambda_max_m=1.8e-6, resolution=20)
+_D3_SLAB = dict(thickness_m=200e-9, eps_inf=4.0)
+
+
+def _d3_layer():
+    from dynameta.optics.fdtd import FDTDLayer
+    return FDTDLayer(**_D3_SLAB)
+
+
+def test_d3_thin_pad_source_in_cpml_raises_naming_the_knobs():
+    """The ledger's silent-violation config now RAISES, naming n_pad_wave / resolution / npml.
+
+    Measured with the guard bypassed (geometry held fixed at k_src=7, k_pL=15, nz=50; npml swept
+    alone -- which isolates PML overlap from evanescent near-field contamination): at
+    n_pad_wave=0.35, resolution=20 the lossless slab's R_flux+T_flux walks [0.9997, 0.9999]
+    (npml=6, source clear) -> [0.9891, 1.0123] (npml=12, the shipped default) -> [0.8849, 0.9092]
+    (npml=20, an 11.5% energy-budget violation on a LOSSLESS slab). The violation switches on
+    exactly as npml overtakes k_src and grows monotonically -- PML overlap, not near-field
+    contamination.
+    """
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d
+    with pytest.raises(ValueError) as exc:
+        solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, n_pad_wave=0.35, npml=20, **_D3_BAND)
+    msg = str(exc.value)
+    assert "solve_fdtd_2d" in msg and "k_src" in msg and "CPML" in msg
+    for knob in ("n_pad_wave", "resolution", "npml"):        # every knob that can fix it is named
+        assert knob in msg
+
+
+def test_d3_guard_covers_every_front_end():
+    """All five front ends that place probes as pad fractions are guarded (audit D-3 listed four
+    sites plus the 2-D oblique twin). Each raises at SETUP, so no march runs here."""
+    from dynameta.optics.fdtd_nd import (solve_fdtd_2d, solve_fdtd_2d_oblique, solve_fdtd_3d,
+                                         solve_fdtd_3d_oblique)
+    thin = dict(n_pad_wave=0.35, npml=20)
+    calls = {
+        "solve_fdtd_2d": lambda: solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, **thin, **_D3_BAND),
+        "solve_fdtd_2d_oblique": lambda: solve_fdtd_2d_oblique(
+            [_d3_layer()], period_x_m=300e-9, angle_deg=10.0, nx=4, **thin, **_D3_BAND),
+        "solve_fdtd_3d": lambda: solve_fdtd_3d(
+            [_d3_layer()], period_x_m=300e-9, period_y_m=300e-9, nx=4, ny=4, **thin, **_D3_BAND),
+        "solve_fdtd_3d_oblique": lambda: solve_fdtd_3d_oblique(
+            [_d3_layer()], period_x_m=300e-9, period_y_m=300e-9, angle_deg=10.0, nx=4, ny=4,
+            **thin, **_D3_BAND),
+    }
+    for name, fn in calls.items():
+        with pytest.raises(ValueError, match="CPML"):
+            fn()
+
+
+def test_d3_right_probe_clearance_is_checked_too():
+    """The high-z end is guarded symmetrically: the helper refuses k_pR within 2 cells of the
+    upper CPML, not just the source / left probe."""
+    from dynameta.optics.fdtd_nd.solve2d import _PROBE_CLEARANCE, _check_probe_placement
+    ok = dict(nz=200, npml=12, pad=1.0e-6, dz=1.0e-8, n_pad_wave=1.0, resolution=20)
+    _check_probe_placement("t", 35, 70, 130, **ok)           # all three clear -> no raise
+    with pytest.raises(ValueError, match="right"):           # k_pR too close to the far CPML
+        _check_probe_placement("t", 35, 70, 200 - 1 - 12 - _PROBE_CLEARANCE + 1, **ok)
+    with pytest.raises(ValueError, match="left"):
+        _check_probe_placement("t", 35, 12 + _PROBE_CLEARANCE - 1, 130, **ok)
+
+
+def test_d3_minimally_padded_valid_config_still_runs_and_closes():
+    """A MINIMALLY padded but valid config is not over-refused, and the minimum the error message
+    recommends actually works: at resolution=20, npml=12 the guard asks for n_pad_wave >= 0.67, and
+    that run closes max|R_flux+T_flux-1| = 2.1e-5 (documented lossless-slab tolerance: 2e-3)."""
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d
+    r = solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, n_pad_wave=0.67, npml=12, **_D3_BAND)
+    m = r.band
+    assert np.any(m)
+    assert float(np.max(np.abs(r.R_flux[m] + r.T_flux[m] - 1.0))) < 2e-3
+    assert float(np.max(np.abs(r.R0[m] + r.T0[m] - 1.0))) < 2e-3
+
+
+def test_d3_empty_band_mask_raises_instead_of_silent_zeros():
+    """audit D-3 sub-mode: an empty well-excited band used to be returned silently, and every
+    downstream `result.R0[result.band].min()` then died with an opaque `zero-size array to
+    reduction operation minimum` far from the cause."""
+    from dynameta.optics.fdtd_nd.solve2d import _check_band
+    good = np.array([False, True, True, False])
+    assert _check_band("solve_fdtd_2d", good, 1.0e14, 2.5e14) is None
+    with pytest.raises(ValueError) as exc:
+        _check_band("solve_fdtd_2d", np.zeros(2617, dtype=bool), 1.0e14, 2.5e14)
+    msg = str(exc.value)
+    assert "EMPTY" in msg and "2617" in msg and "D-3" in msg
+    assert "npml" in msg                                     # points at the actual cause
+
+
+# =====================================================================================================
+# audit D-2: the HALF-TIMESTEP E/H stagger in the Poynting-flux extraction
+# =====================================================================================================
+# _flux's docstring used to claim the half-cell AND half-step offsets both cancel in the R/T ratio.
+# Only the half-cell one does (it is removed inside the kernel). The kernels record E at t=(n+1)dt but
+# H at t=(n+1/2)dt, so E conj(H) carries a spurious exp(+i w dt/2): harmless for a propagating order
+# (a common cos(w dt/2)) but for an EVANESCENT / near-cutoff order, where E H* is nearly pure
+# imaginary, it manufactures a flux Im(E H*) sin(w dt/2) that survives the ratio.
+_D2_N, _D2_DT, _D2_K0 = 4096, 1.0e-17, 137
+
+
+def _d2_staggered(a_e, a_h):
+    """(ey, hx) at the kernel's staggering -- E at (n+1)dt, H at (n+1/2)dt -- for one bin-exact mode."""
+    n = np.arange(_D2_N)[:, None]
+    w = 2.0 * np.pi * _D2_K0 / (_D2_N * _D2_DT)
+    ey = np.real(a_e * np.exp(-1j * w * (n + 1.0) * _D2_DT))
+    hx = np.real(a_h * np.exp(-1j * w * (n + 0.5) * _D2_DT))
+    return ey, hx
+
+
+def test_d2_evanescent_order_carries_no_spurious_flux():
+    """E H* pure imaginary == an evanescent / cutoff order: the true time-averaged S_z is EXACTLY 0.
+
+    Measured on this fixture: uncorrected +7.342e-2; with the shipped exp(+i w dt/2) H de-stagger
+    -2.6e-16 (machine zero); with the audit's originally-prescribed exp(-i w dt/2) +1.460e-1, i.e.
+    1.989x WORSE (the predicted exactly-2 doubling). That ratio is why the sign matters."""
+    from dynameta.optics.fdtd_nd.results import _flux
+    ey, hx = _d2_staggered(1.0 + 0j, 0.0 + 0.7j)             # conj(A)*B pure imaginary -> S_z == 0
+    P = _flux(ey, hx, _D2_DT) / (_D2_N / 2.0) ** 2
+    assert abs(P[_D2_K0]) < 1e-12                            # was 7.34e-2 before the fix
+
+
+def test_d2_propagating_order_flux_is_the_analytic_value():
+    """A forward propagating order (E H* real) must give exactly -Re(conj(A) B) -- the correction
+    removes an error there too, it just happens to be second order in sin(w dt/2)."""
+    from dynameta.optics.fdtd_nd.results import _flux
+    a_e, a_h = 1.0 + 0j, -1.0 / 376.730313668 + 0j
+    ey, hx = _d2_staggered(a_e, a_h)
+    P = _flux(ey, hx, _D2_DT) / (_D2_N / 2.0) ** 2
+    assert P[_D2_K0] == pytest.approx(-np.real(np.conj(a_e) * a_h), rel=1e-9)
+    assert P[_D2_K0] > 0.0                                   # +z Poynting sign convention
+
+
+def test_d2_flux3d_reduces_to_flux_and_de_staggers_identically():
+    """_flux3d must carry the SAME correction: with Ex = Hy = 0 it reduces to the 2-D _flux, and the
+    evanescent order gives zero flux there too."""
+    from dynameta.optics.fdtd_nd.results import _flux, _flux3d
+    ey2, hx2 = _d2_staggered(1.0 + 0j, -2.0e-3 + 0j)
+    ey = ey2[:, :, None]; hx = hx2[:, :, None]               # (nsteps, nx, ny) with ny = 1
+    z = np.zeros_like(ey)
+    assert np.allclose(_flux3d(z, ey, hx, z, _D2_DT), _flux(ey2, hx2, _D2_DT), rtol=1e-12, atol=0.0)
+    eyE, hxE = _d2_staggered(1.0 + 0j, 0.0 + 0.7j)           # evanescent
+    P3 = _flux3d(z, eyE[:, :, None], hxE[:, :, None], z, _D2_DT) / (_D2_N / 2.0) ** 2
+    assert abs(P3[_D2_K0]) < 1e-12

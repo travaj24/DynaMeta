@@ -86,6 +86,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
@@ -150,6 +151,18 @@ class ErYbAmplifier:
         self._tau_er = float(er_ion.tau_s)
         self._tau_yb = float(yb_ion.tau_s)
         self.upconversion_C_up = float(upconversion_C_up)
+
+    # ---- type-preserving clone protocol ---------------------------------------------------
+    def with_signals(self, signals: List[Signal]) -> "ErYbAmplifier":
+        """Re-seed with a new signal list, rebuilt through THIS class's own constructor (both Er
+        and Yb spectroscopy, both ASE bands, the transfer coefficients and the Er upconversion
+        coefficient). The FiberAmplifier sibling exposes the same method, so AmplifierChain can
+        walk a chain of either class without knowing which it holds -- audit A-3: the chain used
+        to rebuild every stage as a FiberAmplifier and crashed here on the missing .ion."""
+        return ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber, list(self.pumps),
+                             list(signals), self.ase, n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
+                             k_back_m3_s=self._k_back, a32_per_s=self._a32, yb_ase=self.yb_ase,
+                             upconversion_C_up=self.upconversion_C_up)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self):
@@ -411,8 +424,8 @@ class ErYbAmplifier:
                           for j in range(P.shape[1])])
         transfer = self._k_tr * n1 * nYb2
         total = (self._k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
-        num = float(np.trapezoid(transfer, z))
-        den = float(np.trapezoid(total, z))
+        num = float(trapz(transfer, z))
+        den = float(trapz(total, z))
         return num / den if den > 0.0 else 0.0
 
     def transfer_efficiency(self, result: SteadyStateResult) -> float:
@@ -431,7 +444,7 @@ class ErYbAmplifier:
         se_er = float(self.er_ion.sigma_e.sigma(lam)); sa_er = float(self.er_ion.sigma_a.sigma(lam))
         g = gam * (self._n_yb * (se_yb * b2 - sa_yb * (1.0 - b2))
                    + self._n_er * (se_er * f2 - sa_er * (1.0 - f2)))
-        ln_gain = float(np.trapezoid(g, z))
+        ln_gain = float(trapz(g, z))
         return 10.0 / np.log(10.0) * ln_gain
 
     def yb_parasitic_gain_dB(self, result: SteadyStateResult) -> float:
