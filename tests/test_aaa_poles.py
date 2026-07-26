@@ -20,6 +20,7 @@ Gates (see docs/enz_bic_nonlinear_roadmap.md 5.5):
 Run: python -m pytest tests/test_aaa_poles.py -q
 """
 import importlib.util
+import inspect
 import math
 
 import numpy as np
@@ -235,6 +236,68 @@ def test_froissart_doublets_manufactured_then_filtered():
     assert len(filt) == 4
     for r, m in zip(filt, ms):
         assert abs(q_from_pole(r.omega_tilde) - pole_q(exact[m])) <= 1e-3 * pole_q(exact[m])
+
+    # AUDIT Q-6 -- the pole-zero filter is a SCALE-SEPARATION test, and the scales must actually
+    # separate by many decades on this very gate.  Measure them: manufactured doublets cancel to
+    # ROUNDING (min|p - z| / |Im p| ~ 1e-13), genuine poles sit at ~1e0.  The default
+    # froissart_frac (1e-4) must lie strictly inside that void, with margin on both sides.
+    zeros = np.array([z for z in raw.zeros if np.isfinite(z)], dtype=complex)
+    gaps_genuine, gaps_doublet = [], []
+    for p in raw_in_band_lower:
+        gap = float(np.min(np.abs(zeros - p))) / abs(p.imag)
+        genuine = any(abs(p - exact[m]) <= 1e-3 * abs(exact[m]) for m in ms)
+        (gaps_genuine if genuine else gaps_doublet).append(gap)
+    assert len(gaps_genuine) == 4 and len(gaps_doublet) >= 4
+    assert max(gaps_doublet) < 1e-9                       # doublets: rounding-level cancellation
+    assert min(gaps_genuine) > 1e-2                       # genuine: a physical, resolvable gap
+    assert min(gaps_genuine) / max(gaps_doublet) > 1e8    # >= 8 decades of void (measured ~13)
+    default_frac = inspect.signature(find_resonances).parameters["froissart_frac"].default
+    assert max(gaps_doublet) < default_frac < min(gaps_genuine)
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 3b (audit Q-6): UNDER-COUPLED resonance must survive the Froissart filter.
+#
+# For a side-coupled single-mode resonator (Haus CMT) the pole-zero gap IS the external-coupling
+# fraction, |pole - zero| / |Im pole| = 2 ge / (gi + ge), so a weakly-coupled (absorption-dominated)
+# resonance has an arbitrarily small gap while being entirely physical.  The shipped
+# froissart_frac = 0.05 therefore deleted every resonance with gi/ge > 39 and returned [] with NO
+# warning; the calibrated 1e-4 default keeps them.
+# ------------------------------------------------------------------------------------------------
+def test_under_coupled_cmt_resonance_survives_froissart_filter():
+    w0 = 1.0e15
+    gi = w0 / 1200.0                                       # intrinsic (absorption) linewidth
+    ge = 0.01 * gi                                         # UNDER-coupled: ge/gi = 1e-2
+
+    def t_cmt(w, ge_):
+        d = 1j * (w0 - np.asarray(w, dtype=complex))
+        return (d + 0.5 * (gi - ge_)) / (d + 0.5 * (gi + ge_))
+
+    gtot = gi + ge
+    q_true = w0 / gtot                                     # pole = w0 - i gtot/2 -> Q = w0/gtot
+    assert abs(q_true - 1188.1) < 0.1                      # the audit's Q ~ 1188 configuration
+    w = np.linspace(w0 - 20 * gtot, w0 + 20 * gtot, 600)
+    f = t_cmt(w, ge)
+
+    # the analytic pole-zero gap is the coupling fraction, well below the OLD 0.05 threshold
+    gap = 2.0 * ge / gtot
+    assert abs(gap - 1.9802e-2) < 1e-5
+
+    reso = find_resonances(w, f, tol=1e-13)                # DEFAULT froissart_frac
+    assert len(reso) == 1, "under-coupled resonance deleted by the Froissart filter (Q-6)"
+    assert abs(reso[0].Q - q_true) <= 1e-3 * q_true
+    assert abs(reso[0].omega_tilde.real - w0) <= 1e-6 * w0
+
+    # the old default is the regression: it returns [] with no warning
+    assert find_resonances(w, f, tol=1e-13, froissart_frac=0.05) == []
+
+    # ... and the calibrated default still holds two decades deeper into under-coupling
+    for r in (1e-3, 1e-4):
+        gtot_r = gi * (1.0 + r)
+        wr = np.linspace(w0 - 20 * gtot_r, w0 + 20 * gtot_r, 600)
+        got = find_resonances(wr, t_cmt(wr, r * gi), tol=1e-13)
+        assert len(got) == 1, r
+        assert abs(got[0].Q - w0 / gtot_r) <= 1e-3 * (w0 / gtot_r), r
 
 
 # ------------------------------------------------------------------------------------------------

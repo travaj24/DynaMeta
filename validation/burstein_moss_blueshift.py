@@ -20,17 +20,36 @@ GATE B -- INDEPENDENT ANALYTIC + PUBLISHED-TREND REFERENCE:
             crossing exactly; with the delta ON it shifts (the "corrects the exact ENZ wavelength"
             claim) -- reported, with passivity (Im(eps) >= 0) asserted.
 
+GATE C -- KRAMERS-KRONIG TRUNCATION vs scipy.quad TO INFINITY (audit R-2). The probe sits BELOW the
+        optical gap, so the KK integral has no pole in range and the substitution E' = Eg/t lets
+        scipy.quad evaluate it EXACTLY, tail to infinity included -- the oracle the audit prescribes
+        (not "a wider grid", which cannot see a common truncation). Assert
+        (1) the model's absolute dn matches that oracle to < 2% (the shipped default, whose auto grid
+            stopped 5 eV above the edge, was 44-50% LOW: the cutoff-free Tauc tail leaves an
+            E_hi^-1.5 remainder, so the observed halving-per-doubling IS the convergence law);
+        (2) the DeltaEffect DIFFERENCE matches the difference of two separately-converged quad values
+            to < 1e-4 of the dn scale. The shipped grid was rebuilt PER eps() CALL from the per-call
+            Eg_opt(n), so a DeltaEffect integrated its two halves on DIFFERENT grids, the large
+            common truncation did not cancel, and the delta came out 14-16x too large. The grid is
+            now a pure function of the configuration, so both halves share it;
+        (3) the grid object is literally reused across n and lambda (pinning, by identity);
+        (4) a grid of the SHIPPED width now trips the tail test -- the old guard only checked that
+            the grid BRACKETED the gap and the probe, and accepted a grid ending 1 meV above Eg.
+
 Run: python -m validation.burstein_moss_blueshift
 """
 
 import os
 import sys
+import warnings
 
 import numpy as np
+from scipy.integrate import quad
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import HBAR, M_E, Q_E
+from dynameta.core.effects.base import _photon_energy_J
 from dynameta.core.effects import (BursteinMossEdge, OpticalModelEffect, ComposedEffect, DeltaEffect,
                                    as_tensor)
 from dynameta.materials.optical_model import DrudeOptical
@@ -48,7 +67,14 @@ def _crossing_nm(eps_re_of_lambda, lams):
     if not len(s):
         return None
     i = s[0]
-    return float(np.interp(0.0, [re[i], re[i + 1]], [lams[i] * 1e9, lams[i + 1] * 1e9]))
+    # audit R-2 fallout: this used np.interp(0.0, [re[i], re[i+1]], ...), whose xp is DECREASING
+    # here (Re eps falls through zero with lambda). np.interp requires increasing xp and silently
+    # returned the left endpoint instead, quantizing the crossing to the lambda grid -- the old
+    # "shift -1.224 nm" was exactly one grid spacing (1100 nm / 899), i.e. a quantization artefact,
+    # not a measurement. Interpolate explicitly, which is direction-agnostic.
+    lo, hi = float(re[i]), float(re[i + 1])
+    t = (0.0 - lo) / (hi - lo)
+    return float((lams[i] + t * (lams[i + 1] - lams[i])) * 1e9)
 
 
 def main():
@@ -110,6 +136,49 @@ def main():
           "{:+.3f} nm); passive={} -> {}".format(
               fmt(enz_drude), fmt(enz_off), fmt(enz_on), shift if shift is not None else float("nan"),
               im_ok, "PASS" if g_b3 else "FAIL"), flush=True)
+
+    # ---- GATE C: Kramers-Kronig truncation vs scipy.quad to infinity (audit R-2) ----
+    n_re0 = np.sqrt(complex(EPS_INF)).real
+
+    def dn_quad(Eg_J, E_ph_J, p=0.5):
+        """EXACT dn = (1/pi) int_Eg^inf E' eps2(E')/(E'^2 - E^2) dE' via E' = Eg/t, t in (0, 1]."""
+        def f(t):
+            Ep = Eg_J / t
+            return ((((Ep - Eg_J) / Eg_J) ** p * (Eg_J / Ep) ** 2 * Ep / (Ep ** 2 - E_ph_J ** 2))
+                    * (Eg_J / t ** 2))
+        return ALPHA_EDGE / np.pi * quad(f, 1e-14, 1.0, limit=600)[0]
+
+    def dn_model(n_m3, lam_m):
+        e = bm.eps({"n": np.asarray(float(n_m3))}, lam_m)
+        return float(np.sqrt(complex(e)).real - n_re0)
+
+    worst_abs, worst_delta, dn_scale = 0.0, 0.0, bm._kk_dn_scale()
+    for lam_probe in (1300e-9, 1550e-9):
+        E_ph = _photon_energy_J(lam_probe)
+        d_ref_m, d_ref_q = dn_model(N_REF, lam_probe), dn_quad(
+            float(bm.optical_gap_J(np.asarray(N_REF))), E_ph)
+        for n in (1e26, 7e26, 1e27):
+            Eg_n = float(bm.optical_gap_J(np.asarray(float(n))))
+            q, m = dn_quad(Eg_n, E_ph), dn_model(n, lam_probe)
+            worst_abs = max(worst_abs, abs(m / q - 1.0))
+            worst_delta = max(worst_delta, abs((m - d_ref_m) - (q - d_ref_q)) / dn_scale)
+            print("[bm]   lam={:.0f} nm n={:.1e}: dn model={:+.7f} quad={:+.7f} (rel {:.1e}); "
+                  "delta vs n_ref model={:+.7f} quad={:+.7f}".format(
+                      lam_probe * 1e9, n, m, q, abs(m / q - 1.0), m - d_ref_m, q - d_ref_q), flush=True)
+    grid_id = bm._kk_grid()
+    bm.eps({"n": np.asarray(2e26)}, 1550e-9)
+    pinned = bm._kk_grid() is grid_id
+    with warnings.catch_warnings(record=True) as wrec:
+        warnings.simplefilter("always")
+        BursteinMossEdge(eps_inf=EPS_INF, Eg0_J=EG0, m_vc_kg=M_VC, alpha_edge=ALPHA_EDGE,
+                         e_grid_J=(1e-21, 9.0 * Q_E, 3001)).eps({"n": np.asarray(N_REF)}, 1300e-9)
+        tail_test = any("Kramers-Kronig grid ends" in str(x.message) for x in wrec)
+    g_c = bool(worst_abs < 2e-2 and worst_delta < 1e-4 and pinned and tail_test)
+    ok = ok and g_c
+    print("[bm] GATE C: |dn - quad|/quad worst = {:.2e} (< 2e-2); |delta - quad delta|/dn_scale worst "
+          "= {:.2e} (< 1e-4); grid pinned across n/lambda = {}; shipped-width grid trips the tail "
+          "test = {} -> {}".format(worst_abs, worst_delta, pinned, tail_test,
+                                   "PASS" if g_c else "FAIL"), flush=True)
 
     print("[bm] *** BURSTEIN-MOSS EDGE: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok

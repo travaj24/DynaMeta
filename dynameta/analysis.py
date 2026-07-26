@@ -340,7 +340,15 @@ def _fano_varpro(x, y, ncols):
     """Core VARPRO fit shared by fano_fit / lorentzian_fit. Fits T(x) with ncols amplitude
     columns; only (x0, gamma) are nonlinear. Returns (x0, gamma, coeffs, resid_rms) in the
     ORIGINAL x-units. Robust to arbitrary x-scale (Hz ~ 1e14 or nm ~ 1e3) via internal
-    normalization, and to seed choice via a small multi-start."""
+    normalization, to seed choice via a small multi-start, and to arbitrary SPECTRUM SCALE --
+    the gradient-norm termination is DISABLED (see the least_squares call below), so a
+    spectrum of magnitude 1e-12 is fitted exactly, as is a 1e-8 feature on a unit baseline.
+
+    Remaining amplitude floor (numerical, NOT a tolerance): a feature riding a MUCH larger
+    baseline is limited by the 2-point finite-difference Jacobian, whose step perturbs the
+    residual below its own rounding once the feature drops under ~3e-9 of the baseline
+    (measured); there the fit falls back to the seed. ``resid_rms`` is the loud tell -- it is
+    <= ~1e-6 of the feature amplitude on a recovered fit and ~1e-1 of it on a seed fallback."""
     from scipy.optimize import least_squares
 
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -373,8 +381,17 @@ def _fano_varpro(x, y, ncols):
     for x0s, gs in _fano_seed_candidates(u, y):
         p0 = np.array([min(max(x0s, lo[0]), hi[0]), min(max(gs, lo[1]), hi[1])])
         try:
+            # gtol MUST stay disabled.  scipy's `gtol` is an ABSOLUTE bound on the scaled
+            # gradient norm, not a relative one, so any finite value is a bound on the
+            # SPECTRUM AMPLITUDE: with gtol = 1e-15 a feature below ~3e-8 (on any baseline)
+            # made trf terminate on the very first iteration and _fano_varpro returned the
+            # SEED (gamma = 0.15 * span) as a 200%-wrong FWHM and 3x-wrong Q, silently
+            # (audit Q-3).  `gtol=None` is scipy's spelling of "disable this test" -- it is
+            # numerically identical to gtol=0.0 (check_tolerance maps None -> 0) but does not
+            # emit the "below machine epsilon" UserWarning once per seed.  ftol / xtol (both
+            # RELATIVE, and both above EPS) remain the termination criteria.
             sol = least_squares(resid, p0, bounds=(lo, hi), method="trf",
-                                ftol=1e-15, xtol=1e-15, gtol=1e-15, max_nfev=4000)
+                                ftol=1e-15, xtol=1e-15, gtol=None, max_nfev=4000)
         except Exception:                               # pragma: no cover - degenerate seed
             continue
         cost = float(sol.cost)

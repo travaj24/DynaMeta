@@ -25,12 +25,26 @@ optical LiquidCrystalModel with lc_director.director_to_extra_fields. Pure numpy
 BACKFLOW (optional, LOCAL effective-viscosity model): set include_backflow=True to couple the director to
 the induced shear flow via the Leslie coefficients alpha2/alpha3. The full Leslie-Ericksen problem solves
 the director AND the Navier-Stokes flow self-consistently; here we use the standard LOCAL reduction --
-the flow is slaved to the director rotation, giving an effective rotational viscosity
-gamma1_eff(theta) = gamma1 - g(theta)^2 / eta_shear  with  g(theta) = alpha2 sin^2 theta + alpha3 cos^2
-theta. Because gamma1_eff < gamma1, backflow SPEEDS UP reorientation (faster rise and decay). Limitations
-of the local model: it neglects the no-slip wall boundary condition on the flow and the director-
-reorientation "optical bounce" kickback, so it OVERESTIMATES the speedup relative to a real cell (treat
-the magnitude as an upper bound; the direction and the alpha2=alpha3=0 -> gamma1 off-limit are exact).
+the flow is slaved to the director rotation. Writing the Rayleigh dissipation function for a director in
+the shear plane at FIELD-AXIS tilt theta (flow along x, velocity gradient along z = the field axis),
+
+    2R = gamma1 (dtheta/dt)^2 + 2 m(theta) (dtheta/dt) (dv_x/dz) + eta(theta) (dv_x/dz)^2
+
+and minimising over the slaved shear rate (dR/d(dv_x/dz) = 0) gives the effective rotational viscosity
+
+    gamma1_eff(theta) = gamma1 - m(theta)^2 / eta(theta)
+    m(theta)   = alpha3 sin^2 theta - alpha2 cos^2 theta        (Leslie director-flow coupling)
+    eta(theta) = eta_c cos^2 theta + eta_b sin^2 theta + alpha1 sin^2 theta cos^2 theta   (Miesowicz)
+
+with eta_c the Miesowicz viscosity for n || velocity gradient (theta = 0, homeotropic) and eta_b for
+n || flow (theta = pi/2, planar). AUDIT C-2: m had alpha2 and alpha3 swapped, which mapped the backflow
+enhancement onto the COMPLEMENTARY angle -- maximal exactly where it should be minimal (5CB is ~5x at
+homeotropic and <1% at planar; the old code inverted that). AUDIT N4: eta was a single scalar where the
+governing Miesowicz viscosity swings 0.0204 -> 0.1052 Pa s over the same theta range. Because gamma1_eff
+< gamma1, backflow SPEEDS UP reorientation (faster rise and decay). Limitations of the local model: it
+neglects the no-slip wall boundary condition on the flow and the director-reorientation "optical bounce"
+kickback, so it OVERESTIMATES the speedup relative to a real cell (treat the magnitude as an upper bound;
+the direction and the alpha2=alpha3=0 -> gamma1 off-limit are exact).
 With include_backflow=False (the default) only gamma1 is used -- the standard single-relaxation model,
 thermodynamically valid (free energy decreases monotonically to the static equilibrium) but ~10-20% faster
 in switching time than a real cell. Validated: the dynamics steady state matches the static BVP
@@ -46,6 +60,7 @@ untouched.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple
 
@@ -61,6 +76,11 @@ __all__ = [
     "v_step", "v_rc_mirrored", "make_three_stage_voltage_func",
     "crossing_time", "step_rise_10_90", "step_decay_90_10",
 ]
+
+# gamma1_eff floor as a fraction of gamma1. Reached only when the supplied Leslie set violates the
+# positive-definiteness condition gamma1 * eta(theta) >= m(theta)^2 (audit C-2) -- warned about, not
+# silently applied, whenever backflow_warn is on.
+_G1_EFF_FLOOR_FRAC = 0.05
 
 
 # -----------------------------------------------------------------------------
@@ -194,7 +214,15 @@ class LCDynamics:
     K11/K33 elastic constants (J/m), gamma1 rotational viscosity (Pa s), eps_para/eps_perp static
     permittivities, theta_b strong-anchoring tilt (rad; ~pi/2 = planar cell). Geometry/field-model
     params (d_planar or a/b, fixed layers, eps_in/out) mirror lc_director.solve_lc_field_profile.
-    Flexoelectric (e1, e3) and the cyl elastic correction are gated OFF by default."""
+    Flexoelectric (e1, e3) and the cyl elastic correction are gated OFF by default.
+
+    BEHAVIOUR CHANGE (audit C-2 + N4, 2026-07-25): with include_backflow=True the Leslie coupling is
+    now m = alpha3 sin^2 - alpha2 cos^2 (alpha2/alpha3 used to be swapped, putting the enhancement on
+    the complementary angle) and the shear viscosity is the theta-dependent Miesowicz eta(theta)
+    (eta_shear_Pa_s used to be a scalar defaulting to 0.08 Pa s; it now defaults to None = the
+    theta-dependent form, and a float still pins it to a constant). Supplying a Leslie set that
+    violates gamma1 = alpha3 - alpha2, or the positive-definiteness gamma1*eta >= m^2, now warns
+    (backflow_warn=False silences it). include_backflow=False is untouched and byte-identical."""
     K11: float
     K33: float
     gamma1: float
@@ -225,17 +253,84 @@ class LCDynamics:
     theta_easy_rad: Optional[float] = None
     gamma_s_Pa_s_m: float = 1.0e-10
     # BACKFLOW (Leslie director-flow coupling), LOCAL effective-viscosity model (off -> byte-identical):
-    # gamma1_eff(theta) = gamma1 - g(theta)^2 / eta_shear, g(theta) = alpha2 sin^2 + alpha3 cos^2, so the
-    # director reorientation is SPED UP (lower effective viscosity) by the induced shear flow. alpha2/
-    # alpha3 are Leslie coefficients (Pa s), eta_shear an effective Miesowicz shear viscosity (Pa s).
+    # gamma1_eff(theta) = gamma1 - m(theta)^2 / eta(theta), m = alpha3 sin^2 - alpha2 cos^2 (audit C-2),
+    # eta the theta-dependent MIESOWICZ viscosity (audit N4), so the director reorientation is SPED UP
+    # (lower effective viscosity) by the induced shear flow. See the module banner for the derivation.
     include_backflow: bool = False
     alpha2_Pa_s: float = -0.08     # ~5CB (alpha2 < 0)
-    alpha3_Pa_s: float = -0.003    # ~5CB (alpha3 small, < 0)
-    eta_shear_Pa_s: float = 0.08
+    alpha3_Pa_s: float = -0.003    # ~5CB (alpha3 small, < 0); flow-alignment angle atan sqrt(a3/a2)
+    # Miesowicz shear viscosities (Pa s). eta_b = n || FLOW (theta = pi/2, planar) = (a3+a4+a6)/2;
+    # eta_c = n || VELOCITY GRADIENT (theta = 0, homeotropic) = (a4+a5-a2)/2. Parodi's relation makes
+    # the pair consistent with alpha2/alpha3: eta_c - eta_b = -(alpha2 + alpha3), which is what
+    # eta_c_Pa_s=None uses (for the literature 5CB set a2=-0.0812, a3=-0.0036 it returns the MEASURED
+    # eta_c = 0.1052 from the measured eta_b = 0.0204 exactly).
+    eta_b_Pa_s: float = 0.0204     # ~5CB measured
+    eta_c_Pa_s: Optional[float] = None      # None -> Parodi-consistent eta_b - (alpha2 + alpha3)
+    alpha1_Pa_s: float = 0.0       # optional eta(theta) cross term (5CB ~ -0.006); 0 leaves the anchors
+    # BACKWARD-COMPATIBILITY scalar override. None (the DEFAULT, changed in the C-2/N4 remediation --
+    # it was the constant 0.08) selects the theta-dependent Miesowicz eta above; a float pins eta to
+    # that constant at every theta, reproducing the pre-remediation viscosity model (but NOT the
+    # pre-remediation m(theta), which was simply wrong).
+    eta_shear_Pa_s: Optional[float] = None
+    # warn when the Leslie set violates gamma1 = alpha3 - alpha2, or the PSD condition gamma1*eta >= m^2
+    backflow_warn: bool = True
 
     def geometry_obj(self) -> LCGeometry:
         return compute_lc_geometry(geometry=self.geometry, nz=int(self.nz), d_planar=self.d_planar,
                                    a=self.a, b=self.b, t_in=self.t_in, t_out=self.t_out)
+
+    # ---- backflow (Leslie/Miesowicz) helpers -------------------------------------------------
+    def eta_c_effective_Pa_s(self) -> float:
+        """The Miesowicz viscosity for n || velocity gradient (theta = 0). eta_c_Pa_s if given, else
+        the Parodi-consistent eta_b - (alpha2 + alpha3) (audit N4)."""
+        if self.eta_c_Pa_s is not None:
+            return float(self.eta_c_Pa_s)
+        return float(self.eta_b_Pa_s) - (float(self.alpha2_Pa_s) + float(self.alpha3_Pa_s))
+
+    def leslie_coupling(self, theta_rad):
+        """Leslie director-flow coupling m(theta) = alpha3 sin^2 theta - alpha2 cos^2 theta in this
+        module's FIELD-AXIS convention (theta = 0 homeotropic, pi/2 planar); the classic flow-frame
+        form alpha3 cos^2 - alpha2 sin^2 measured from the FLOW direction, rotated by pi/2.
+        AUDIT C-2: the shipped code had alpha2/alpha3 swapped here."""
+        th = np.asarray(theta_rad, dtype=float)
+        s = np.sin(th); c = np.cos(th)
+        return float(self.alpha3_Pa_s) * s * s - float(self.alpha2_Pa_s) * c * c
+
+    def eta_shear_of_theta(self, theta_rad):
+        """Miesowicz shear viscosity eta(theta) = eta_c cos^2 + eta_b sin^2 + alpha1 sin^2 cos^2
+        (FIELD-AXIS theta), the s^2 coefficient of the same Rayleigh dissipation function that gives
+        m(theta) -- so gamma1_eff below is a single consistent reduction, not two unrelated models.
+        A scalar eta_shear_Pa_s override returns that constant at every theta (audit N4)."""
+        th = np.asarray(theta_rad, dtype=float)
+        if self.eta_shear_Pa_s is not None:
+            return np.full_like(th, float(self.eta_shear_Pa_s))
+        s2 = np.sin(th) ** 2; c2 = np.cos(th) ** 2
+        return self.eta_c_effective_Pa_s() * c2 + float(self.eta_b_Pa_s) * s2 \
+            + float(self.alpha1_Pa_s) * s2 * c2
+
+    def gamma1_eff_of_theta(self, theta_rad, *, apply_floor: bool = True):
+        """Effective rotational viscosity gamma1_eff(theta) = gamma1 - m(theta)^2 / eta(theta) under
+        the LOCAL (slaved-flow) backflow reduction. With apply_floor (the solver's setting) the result
+        is clamped to _G1_EFF_FLOOR_FRAC * gamma1: positive-definiteness of [[gamma1, m], [m, eta]]
+        requires gamma1*eta >= m^2, so the floor fires EXACTLY where the supplied Leslie coefficient
+        set has left thermodynamic validity (audit C-2) -- it is a guard against an invalid input set,
+        NOT a routine crutch for a valid one. Pass apply_floor=False to see the raw (possibly
+        negative) reduction."""
+        m = self.leslie_coupling(theta_rad)
+        eta = np.maximum(np.abs(self.eta_shear_of_theta(theta_rad)), 1e-300)
+        raw = float(self.gamma1) - m * m / eta
+        if not apply_floor:
+            return raw
+        return np.maximum(raw, _G1_EFF_FLOOR_FRAC * float(self.gamma1))
+
+    def flow_alignment_angle_rad(self) -> float:
+        """Leslie flow-alignment angle measured FROM THE FLOW DIRECTION, tan^2 = alpha3/alpha2 (the
+        tilt at which m vanishes and the director neither aligns nor tumbles). NaN for a tumbling
+        nematic (alpha3/alpha2 <= 0). The equivalent FIELD-AXIS tilt is pi/2 minus this."""
+        a2 = float(self.alpha2_Pa_s); a3 = float(self.alpha3_Pa_s)
+        if abs(a2) < 1e-300 or (a3 / a2) <= 0.0:
+            return float("nan")
+        return float(math.atan(math.sqrt(a3 / a2)))
 
     def tau_1const_s(self, K: Optional[float] = None) -> float:
         """Analytic 1-constant relaxation time tau = gamma1 d_lc^2 / (K pi^2) (small-perturbation,
@@ -276,7 +371,29 @@ class LCDynamics:
         theta_easy = float(self.theta_easy_rad) if self.theta_easy_rad is not None else thb
         gamma_s = float(self.gamma_s_Pa_s_m)
         backflow = bool(self.include_backflow and (self.alpha2_Pa_s or self.alpha3_Pa_s))
-        a2, a3, eta_sh = float(self.alpha2_Pa_s), float(self.alpha3_Pa_s), float(self.eta_shear_Pa_s)
+        a2, a3 = float(self.alpha2_Pa_s), float(self.alpha3_Pa_s)
+        eta_scalar = None if self.eta_shear_Pa_s is None else float(self.eta_shear_Pa_s)
+        eta_b = float(self.eta_b_Pa_s); eta_c = self.eta_c_effective_Pa_s()
+        a1 = float(self.alpha1_Pa_s)
+        g1_floor = _G1_EFF_FLOOR_FRAC * g1
+        floored_once = [False]
+        if backflow:
+            if eta_scalar is not None and eta_scalar <= 0.0:
+                raise ValueError("eta_shear_Pa_s must be > 0 when given")
+            if eta_scalar is None and not (eta_b > 0.0 and eta_c > 0.0):
+                raise ValueError("Miesowicz viscosities must be > 0 (eta_b={:.6g}, eta_c={:.6g}); "
+                                 "the Parodi default eta_c = eta_b - (alpha2 + alpha3) needs a "
+                                 "physical Leslie set".format(eta_b, eta_c))
+            # AUDIT C-2: the Leslie identity gamma1 = alpha3 - alpha2 ties the rotational viscosity to
+            # the coupling coefficients; a mismatched set is not a valid nematic.
+            g1_leslie = a3 - a2
+            if bool(self.backflow_warn) and abs(g1_leslie) > 0.0 \
+                    and abs(g1 - g1_leslie) > 0.05 * abs(g1_leslie):
+                warnings.warn(
+                    "LCDynamics backflow: gamma1={:.6g} Pa s is inconsistent with the Leslie identity "
+                    "gamma1 = alpha3 - alpha2 = {:.6g} Pa s ({:+.1f}%); the effective-viscosity "
+                    "reduction assumes one self-consistent coefficient set (audit C-2)".format(
+                        g1, g1_leslie, 100.0 * (g1 / g1_leslie - 1.0)), RuntimeWarning, stacklevel=2)
 
         t_eval = np.asarray(t_eval, dtype=float)
         if t_eval.size < 5 or not np.all(np.diff(t_eval) > 0):
@@ -310,11 +427,30 @@ class LCDynamics:
                                          geometry=geo.geometry, r=r) if flexo_on else 0.0)
             torque = term1 + term2 + term3 + term4
             # BACKFLOW: the induced shear flow lowers the EFFECTIVE rotational viscosity (local model),
-            # gamma1_eff(theta) = gamma1 - g(theta)^2/eta_shear, g = alpha2 sin^2 + alpha3 cos^2; floored
-            # to stay positive. Speeds up the reorientation. Off -> g1_eff == g1 (byte-identical).
+            # gamma1_eff(theta) = gamma1 - m(theta)^2/eta(theta) with the Leslie coupling
+            # m = alpha3 sin^2 - alpha2 cos^2 (audit C-2 -- alpha2/alpha3 were swapped, putting the
+            # enhancement on the complementary angle) and the theta-dependent Miesowicz eta(theta)
+            # (audit N4 -- it was a single scalar). Speeds up the reorientation. The floor keeps
+            # gamma1_eff positive but fires ONLY where gamma1*eta < m^2, i.e. where the supplied
+            # Leslie set is not positive-definite. Off -> g1_eff == g1 (byte-identical).
             if backflow:
-                g_th = a2 * s * s + a3 * c * c
-                g1_eff = np.maximum(g1 - g_th * g_th / eta_sh, 0.05 * g1)
+                m_th = a3 * s * s - a2 * c * c
+                if eta_scalar is None:
+                    s2 = s * s; c2 = c * c
+                    eta_th = eta_c * c2 + eta_b * s2 + a1 * s2 * c2
+                else:
+                    eta_th = eta_scalar
+                g1_raw = g1 - m_th * m_th / eta_th
+                g1_eff = np.maximum(g1_raw, g1_floor)
+                if (not floored_once[0]) and bool(self.backflow_warn) and np.any(g1_raw < g1_floor):
+                    floored_once[0] = True
+                    warnings.warn(
+                        "LCDynamics backflow: gamma1_eff clamped to {:.3g}*gamma1 -- the Leslie set "
+                        "violates the positive-definiteness condition gamma1*eta >= m^2 at theta in "
+                        "this cell (min gamma1_eff/gamma1 = {:.3g}); the local backflow reduction is "
+                        "thermodynamically invalid there (audit C-2/N4)".format(
+                            _G1_EFF_FLOOR_FRAC, float(np.min(g1_raw)) / g1),
+                        RuntimeWarning, stacklevel=2)
             else:
                 g1_eff = g1
             dth_dt = torque / g1_eff

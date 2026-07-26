@@ -72,6 +72,7 @@ numpy/scipy, ASCII-only.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Callable, List, NamedTuple, Sequence, Tuple, Union
 
 import numpy as np
@@ -356,15 +357,25 @@ def pole_q(omega_tilde) -> float:
 
 
 def newton_refine(func: Callable[[complex], complex], z0, *, tol: float = 1e-11,
-                  maxiter: int = 100, h_rel: float = 1e-7) -> complex:
+                  maxiter: int = 100, h_rel: float = 1e-7,
+                  require_convergence: bool = False) -> complex:
     """Newton's method on an analytic ``func`` with a central-difference derivative (the material
     models are analytic but not necessarily cheap to differentiate in closed form).  ``tol`` is the
-    RELATIVE step-size stopping criterion on ``omega``.  Returns the best iterate."""
+    RELATIVE step-size stopping criterion on ``omega``.
+
+    Returns the LAST iterate.  NOTE (finding Q-4): that is *not* a converged root -- there is no
+    residual or basin test here, and for a ``func`` that never vanishes the last iterate is
+    meaningless (a ``func`` identically 1.0 returns ~1e15 - 1e13j).  Callers that need a *validated*
+    root must test the result themselves (see :func:`q_budget`'s proximity + residual gate) or pass
+    ``require_convergence=True``, which raises ``ValueError`` when the relative step-size criterion
+    was never met within ``maxiter``."""
     z = complex(z0)
+    converged = False
     for _ in range(maxiter):
         f = func(z)
         if f == 0.0:
-            return z
+            converged = True
+            break
         h = h_rel * max(abs(z), 1.0)
         fp = (func(z + h) - func(z - h)) / (2.0 * h)
         if fp == 0.0 or not np.isfinite(fp):
@@ -372,7 +383,13 @@ def newton_refine(func: Callable[[complex], complex], z0, *, tol: float = 1e-11,
         dz = f / fp
         z = z - dz
         if abs(dz) <= tol * max(abs(z), 1.0):
-            return z
+            converged = True
+            break
+    if require_convergence and not converged:
+        raise ValueError(
+            "newton_refine: no convergence to a relative step of {:g} in {} iterations from z0 = "
+            "{!r} (last iterate {!r}); the seed is likely outside the root's basin.".format(
+                tol, maxiter, complex(z0), z))
     return z
 
 
@@ -617,7 +634,9 @@ def track_pole(solver: Callable[[float], Callable[[complex], complex]], pole0, p
 # Radiative / absorptive Q split
 # ------------------------------------------------------------------------------------------------
 def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], pole0, *,
-             refine_tol: float = 1e-11, loss_scale: float = 1.0) -> dict:
+             refine_tol: float = 1e-11, loss_scale: float = 1.0,
+             rad_proximity_linewidths: float = 5.0, rad_proximity_rel_floor: float = 1e-3,
+             residual_rel: float = 1e-6, degenerate_rel: float = 1e-9) -> dict:
     """Split the total Q of a pole into radiative and absorptive parts by the lossless/lossy
     two-pass (Lalanne et al. 2018).
 
@@ -630,18 +649,99 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
     The lossless pass re-finds the pole with ``loss_scale = 0`` (warm-started from the lossy pole):
     ``Q_rad``.  Then ``1/Q_abs = 1/Q_total - 1/Q_rad``.
 
+    ENZ / p-POLARIZATION PRECONDITION.  A p-pol pole function over a material with an
+    epsilon-near-zero crossing carries a SPURIOUS SIMPLE POLE of ``D`` at ``eps_layer(omega) = 0``
+    (from the ``1/Y_p = kz/eps`` admittance entry).  Feed ``q_budget`` the ENZ-CLEARED function
+    ``D_c = D * eps_layer(omega)`` -- exactly what :func:`berreman_enz_pole` builds, and what
+    :func:`_stack_denominator` documents.  Without the clearing, the lossless Newton pass falls off
+    the spurious pole into a far-plane stray: measured ``Re(pole) shift = +2256.83%`` to a root
+    that is a genuine zero of ``D`` (``|D| = 1.55e-23`` vs an off-pole reference ``5.28e-07``) and
+    is CORRECTLY SIGNED (``Re > 0``, ``Im < 0``), so no sign test can catch it (finding Q-4).
+
+    VALIDITY GATE (finding Q-4).  ``pole_rad`` is accepted only if it lies within
+    ``rad_proximity_linewidths`` total linewidths (``2 |Im pole_total|``, floored at
+    ``rad_proximity_rel_floor * |pole_total|``) of ``pole_total`` AND ``|D_lossless(pole_rad)|`` is
+    below ``residual_rel`` times an off-pole reference magnitude.  On failure ``Q_rad``, ``Q_abs``
+    and ``inv_Q_abs`` are ``nan`` (NEVER ``+inf``), ``pole_rad_ok`` is ``False``, ``warning``
+    carries the reason, and a ``RuntimeWarning`` is emitted.
+
     Returns
     -------
     dict
-        ``pole_total``, ``pole_rad``, ``Q_total``, ``Q_rad``, ``Q_abs``, ``inv_Q_abs``.
-        ``Q_abs = +inf`` (``inv_Q_abs <= 0``) flags a lossless / numerically-degenerate case.
+        ``pole_total``, ``pole_rad``, ``Q_total``, ``Q_rad``, ``Q_abs``, ``inv_Q_abs``,
+        ``pole_rad_ok`` (bool), ``pole_rad_shift_rel``, ``pole_rad_residual_rel``, ``warning``.
+        ``Q_abs = +inf`` flags a genuinely lossless / degenerate split (``|1/Q_abs|`` below
+        ``degenerate_rel * 1/Q_total``); ``Q_abs = nan`` flags an INVALID split -- either a rejected
+        lossless root or an unphysical negative ``1/Q_abs``.
     """
-    pole_total = newton_refine(make_pole_func(float(loss_scale)), complex(pole0), tol=refine_tol)
-    pole_rad = newton_refine(make_pole_func(0.0), pole_total, tol=refine_tol)
+    d_lossy = make_pole_func(float(loss_scale))
+    d_rad = make_pole_func(0.0)
+    pole_total = newton_refine(d_lossy, complex(pole0), tol=refine_tol)
+    pole_rad = newton_refine(d_rad, pole_total, tol=refine_tol)
     q_total = pole_q(pole_total)
-    q_rad = pole_q(pole_rad)
-    inv_q_abs = (1.0 / q_total) - (1.0 / q_rad if math.isfinite(q_rad) else 0.0)
-    q_abs = (1.0 / inv_q_abs) if inv_q_abs > 1e-15 else float("inf")
+
+    # --- validate the lossless root: PROXIMITY first (the sign test is provably insufficient --
+    # the observed escape has Re > 0 and Im < 0 and is a genuine zero of D). -------------------
+    scale = abs(pole_total) if abs(pole_total) > 0.0 else 1.0
+    linewidth = 2.0 * abs(pole_total.imag)
+    bound = max(float(rad_proximity_linewidths) * linewidth,
+                float(rad_proximity_rel_floor) * scale)
+    shift = abs(pole_rad - pole_total)
+    shift_rel = shift / scale
+    # off-pole reference magnitude of the LOSSLESS function, half a Re-unit into the lower plane
+    ref_pt = complex(pole_total.real, -0.5 * abs(pole_total.real) - abs(pole_total.imag))
+    try:
+        ref = abs(complex(d_rad(ref_pt)))
+    except Exception:                                             # pragma: no cover - defensive
+        ref = 0.0
+    try:
+        res_abs = abs(complex(d_rad(pole_rad)))
+    except Exception:                                             # pragma: no cover - defensive
+        res_abs = float("inf")
+    residual_rel_meas = res_abs / ref if ref > 0.0 else float("inf")
+
+    warning = ""
+    ok = True
+    if not np.isfinite(shift) or shift > bound:
+        ok = False
+        warning = (
+            "q_budget: the lossless (loss_scale = 0) Newton pass ESCAPED the pole -- "
+            "|pole_rad - pole_total| = {:.4e} rad/s ({:.2f}% of |pole_total|) exceeds the allowed "
+            "{:.4e} ({:g} linewidths). Q_rad/Q_abs returned as NaN. If this is a p-polarized pole "
+            "function over an ENZ material, feed the ENZ-CLEARED denominator D_c(omega) = "
+            "D(omega) * eps_layer(omega) (as berreman_enz_pole does); otherwise reseed closer to "
+            "the pole or widen rad_proximity_linewidths.".format(
+                shift, 100.0 * shift_rel, bound, float(rad_proximity_linewidths)))
+    elif not (residual_rel_meas <= float(residual_rel)):
+        ok = False
+        warning = (
+            "q_budget: the lossless Newton pass did NOT converge to a zero -- "
+            "|D_rad(pole_rad)| is {:.4e} of the off-pole reference (allowed {:g}). Q_rad/Q_abs "
+            "returned as NaN.".format(residual_rel_meas, float(residual_rel)))
+
+    if not ok:
+        warnings.warn(warning, RuntimeWarning, stacklevel=2)
+        q_rad = float("nan")
+        inv_q_abs = float("nan")
+        q_abs = float("nan")
+    else:
+        q_rad = pole_q(pole_rad)
+        inv_q_abs = (1.0 / q_total) - (1.0 / q_rad if math.isfinite(q_rad) else 0.0)
+        # RELATIVE degeneracy threshold (the old absolute 1e-15 silently mapped a NEGATIVE
+        # 1/Q_abs -- the Q-4 failure signature -- to +inf).
+        eps_deg = float(degenerate_rel) * abs(1.0 / q_total) if q_total > 0.0 else 0.0
+        if inv_q_abs > eps_deg:
+            q_abs = 1.0 / inv_q_abs
+        elif abs(inv_q_abs) <= eps_deg:
+            q_abs = float("inf")                                  # lossless / degenerate split
+        else:
+            q_abs = float("nan")                                  # unphysical: Q_total > Q_rad
+            warning = (
+                "q_budget: 1/Q_abs = {:.4e} is NEGATIVE (Q_total = {:.6g} EXCEEDS Q_rad = {:.6g}), "
+                "which is unphysical for an absorbing stack; the two passes are measuring "
+                "different modes or different omega_0 (a dispersive lossless pass also shifts "
+                "Re(eps)). Q_abs returned as NaN.".format(inv_q_abs, q_total, q_rad))
+            warnings.warn(warning, RuntimeWarning, stacklevel=2)
     return {
         "pole_total": pole_total,
         "pole_rad": pole_rad,
@@ -649,6 +749,10 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
         "Q_rad": q_rad,
         "Q_abs": q_abs,
         "inv_Q_abs": inv_q_abs,
+        "pole_rad_ok": bool(ok),
+        "pole_rad_shift_rel": float(shift_rel),
+        "pole_rad_residual_rel": float(residual_rel_meas),
+        "warning": warning,
     }
 
 

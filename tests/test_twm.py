@@ -154,6 +154,67 @@ def test_qpm_two_over_pi_squared_and_wrong_period_kills():
     assert abs(abs(cf["A3_L"]) ** 2 - eff_qpm) / eff_qpm < 1e-3
 
 
+# --------------------------------------------------- gate 4b: QPM SIGN convention (audit Q-7)
+def test_qpm_closed_form_matches_integrator_for_BOTH_signs_of_dk():
+    """Audit Q-7. ``qpm_period_for`` returns a POSITIVE period for either sign of dk, because the
+    poling square wave carries BOTH first grating orders m = +-1 (equal weight 2/pi). The closed
+    form (``phase_matching_sinc`` -> ``sfg_undepleted``) must therefore agree with what
+    ``twm_propagate`` actually integrates (the square wave) at dk < 0 to the SAME tolerance as the
+    shipped dk > 0 gate above -- before the fix the two oracles disagreed by 229x (an intensity
+    factor 1.9e-5) with every Manley-Rowe / power diagnostic clean. dk < 0 is reachable from plain
+    indices whenever n3 < n1, n2.
+
+    Also pins that the SIGNED period Lambda = 2 pi m / dk is the SAME physical grating: the square
+    wave is even in Lambda, so both oracles (and the integrator's max_step) must accept it and
+    return the identical answer."""
+    ndom = 20
+    amp = 1.0
+    for dk0 in (800.0, -800.0):
+        Lam = qpm_period_for(dk0)
+        assert Lam > 0.0                               # the physical (mask) period, either sign
+        L = ndom * Lam
+        common = dict(omega1=W1, omega2=W2, d_eff=DEFF, length=L, n1=1.5, n2=1.5, n3=1.5)
+        spec_qpm = TWMSpec(dk_override=dk0, qpm_period=Lam, **common)
+        spec_pm = TWMSpec(dk_override=0.0, **common)
+
+        res = twm_propagate(spec_qpm, amp, amp, 0.0 + 0j, n_out=8 * ndom + 1)
+        eff_qpm = abs(res.A3[-1]) ** 2
+        eff_pm = abs(twm_propagate(spec_pm, amp, amp, 0.0 + 0j, n_out=201).A3[-1]) ** 2
+        cf = sfg_undepleted(spec_qpm, amp, amp)
+
+        # (a) same (2/pi)^2 first-order QPM law at both signs
+        assert abs(eff_qpm / eff_pm - (2.0 / np.pi) ** 2) / (2.0 / np.pi) ** 2 < 1e-2, dk0
+        # (b) the two shipped oracles agree -- the Q-7 gate, same 1e-3 tolerance as dk > 0
+        assert abs(abs(cf["A3_L"]) ** 2 - eff_qpm) / eff_qpm < 1e-3, (dk0, cf["A3_L"], eff_qpm)
+        # (c) SIGNED period == same physical grating (integrator included: max_step uses |Lambda|)
+        spec_signed = TWMSpec(dk_override=dk0, qpm_period=2.0 * np.pi / dk0, **common)
+        cf_s = sfg_undepleted(spec_signed, amp, amp)
+        eff_s = abs(twm_propagate(spec_signed, amp, amp, 0.0 + 0j, n_out=8 * ndom + 1).A3[-1]) ** 2
+        assert cf_s["A3_L"] == cf["A3_L"]                                  # byte-identical
+        assert abs(eff_s - eff_qpm) / eff_qpm < 1e-12
+
+
+def test_qpm_both_grating_orders_vs_brute_force_square_wave():
+    """Audit Q-7 (oracle-independent). |Phi| from ``phase_matching_sinc`` vs a raw quadrature of
+    the ACTUAL poling profile ``_qpm_sign`` -- the m = -1 band at dk = -2 pi/Lambda is physically
+    present with the SAME strength as the m = +1 band, which is why one positive period matches
+    either sign of dk."""
+    from dynameta.optics.twm_reference import phase_matching_sinc, _qpm_sign
+
+    dk0 = 800.0
+    Lam = qpm_period_for(dk0)
+    L = 20 * Lam                                       # integer number of poling periods
+    z = np.linspace(0.0, L, 400001)
+    dz = z[1] - z[0]
+    s = _qpm_sign(z, Lam)
+    for dk in (dk0, -dk0):
+        g = s * np.exp(-1j * dk * z)
+        brute = dz * (g.sum() - 0.5 * g[0] - 0.5 * g[-1]) / L
+        phi = phase_matching_sinc(dk, L, Lam)
+        assert abs(abs(phi) - abs(brute)) <= 1e-5 * abs(brute), (dk, phi, brute)
+        assert abs(abs(brute) - 2.0 / np.pi) <= 1e-5 * (2.0 / np.pi)       # both bands (2/pi)
+
+
 # ------------------------------------------------------------------ gate 5: energy conservation
 def test_total_power_conserved_lossless():
     spec = TWMSpec(omega1=W1, omega2=W2, d_eff=DEFF, length=0.04,
