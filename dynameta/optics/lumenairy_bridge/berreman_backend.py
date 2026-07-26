@@ -57,6 +57,8 @@ Cross-library pins (first pinned at lumenairy 5.14.4/5.14.5, re-verified on the 
 
 from __future__ import annotations
 
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
+
 import time
 import warnings
 from typing import List, Optional, Tuple
@@ -280,6 +282,7 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
                                                   layer_names=a_names)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+        _require_eps_convention(eps_by_region, "make_lumenairy_berreman_solver")   # audit V-5
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):

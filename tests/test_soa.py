@@ -3,6 +3,7 @@ validation/qd_soa_gain_core.py and validation/qd_soa_traveling_wave.py)."""
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.soa import (QDGainModel, QDGainParams, TravelingWaveSOA,
                                  TwoLevelSaturableGain, UltrafastCompression,
                                  agrawal_olsson_output)
@@ -623,11 +624,11 @@ def test_rin_and_linewidth():
     # RIN Parseval
     P = 1e-3 * (1 + 0.05 * rng.standard_normal(N))
     f, rin = rin_spectrum(P, dt)
-    assert abs(np.trapezoid(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0) < 1e-3
+    assert abs(trapz(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0) < 1e-3
     # RIN sinusoid integral == m^2/2
     t = np.arange(N) * dt
     f2, rin2 = rin_spectrum(1e-3 * (1 + 0.1 * np.cos(2 * np.pi * 2e9 * t)), dt)
-    assert abs(np.trapezoid(rin2, f2) - 0.005) / 0.005 < 1e-3
+    assert abs(trapz(rin2, f2) - 0.005) / 0.005 < 1e-3
     # linewidth recovery + pure tone
     v = 1e-3
     dnu = linewidth_from_field(np.exp(1j * np.cumsum(np.sqrt(v) * rng.standard_normal(N))), dt)

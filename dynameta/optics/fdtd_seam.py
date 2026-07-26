@@ -33,6 +33,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
@@ -435,6 +436,7 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         raise ValueError("make_fdtd_optical_solver: dim must be 2 or 3")
 
     def _solve(design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
+        _require_eps_convention(eps_by_region, "make_fdtd_optical_solver")   # audit V-5
         ns, nb = complex(n_super), complex(n_sub)
         if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
             raise NotImplementedError(

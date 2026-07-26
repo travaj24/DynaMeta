@@ -233,3 +233,35 @@ def test_metrics_name_the_missing_protocol_method_instead_of_leaking_a_private_a
         except TypeError as e:
             assert "_clone" not in str(e)                 # no private attribute leaks out
             assert "with_signals(signals)" in str(e)      # ... the whole contract is spelled out
+
+
+def _edfa_m(m_modes, pump_W=0.25, L=8.0):
+    """Same EDFA with an explicit ASE mode count (m_modes=1 -> polarized ASE)."""
+    fib = FiberSpec(core_radius_m=1.6e-6, na=0.22, n_t_m3=8.0e24, length_m=L)
+    return FiberAmplifier(erbium(), fib, [Pump(pump_W, 0.98e-6)], [Signal(1e-5, LAM_S)],
+                          AseBand(1.50e-6, 1.60e-6, n_bins=24, m_modes=m_modes))
+
+
+def test_chain_osnr_honours_stage_m_modes():
+    """audit A-12: the chain-level OSNR used a LITERAL m_out = 2 while rho_gen already divided
+    by the stage's own m_modes, so a polarized-ASE chain read exactly 3 dB pessimistic. The
+    reference mode count must now be DERIVED from the last amplifier stage (and reported)."""
+    r2 = AmplifierChain([_edfa_m(2)]).solve(1e-5, LAM_S, n_nodes=121)
+    r1 = AmplifierChain([_edfa_m(1)]).solve(1e-5, LAM_S, n_nodes=121)
+    assert r2.m_out == 2 and r1.m_out == 1
+    # the SAME chain re-referenced by hand must reproduce the reported OSNR exactly
+    assert r1.osnr_dB == pytest.approx(
+        AmplifierChain([_edfa_m(1)]).solve(1e-5, LAM_S, n_nodes=121, m_out=1).osnr_dB, abs=1e-12)
+    # forcing the old literal back reproduces the 3 dB pessimism, and ONLY that
+    r1_forced = AmplifierChain([_edfa_m(1)]).solve(1e-5, LAM_S, n_nodes=121, m_out=2)
+    assert r1_forced.osnr_dB == pytest.approx(r1.osnr_dB - 10.0 * np.log10(2.0), abs=1e-9)
+    # NF is a per-polarization PSD form and must be untouched by the mode-count choice
+    assert r1_forced.nf_total_dB == pytest.approx(r1.nf_total_dB, abs=1e-12)
+
+
+def test_chain_warns_when_stages_disagree_on_m_modes():
+    ch = AmplifierChain([_edfa_m(2), PassiveElement("iso", 0.5), _edfa_m(1, 0.10, L=6.0)])
+    with pytest.warns(UserWarning, match="disagree on the ASE mode count"):
+        r = ch.solve(1e-5, LAM_S, n_nodes=121)
+    assert r.m_out == 1                                   # the LAST amp stage sets the output ASE
+    assert [s.meta.get("m_modes") for s in r.stages if s.kind == "amp"] == [2, 1]

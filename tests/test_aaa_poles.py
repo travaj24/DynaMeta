@@ -537,7 +537,8 @@ def test_rcwa_bridge_gmr_aaa_vs_fano():
 
     def R_of_lambda(lam):
         layers = [(cell, d_grating), (eps_wg, d_wg)]
-        R, _T = rcwa_stack_RT(layers, n_sub, 1.0, lam, period_x=period, theta=0.0,
+        R, _T = rcwa_stack_RT(layers, lam, n_substrate=n_sub, n_superstrate=1.0,
+                              period_x=period, theta=0.0,
                               n_orders=n_orders, row=0)
         return float(R)
 

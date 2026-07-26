@@ -485,3 +485,48 @@ elif mode == "shutdown":
     probe = _mk_cache(tmp_path, "unused", autosave=False)      # a throwaway to reach the class
     c2 = type(probe)(probe.inner, p, autosave=False)
     assert len(c2._mem) == 5, "the batched tail was not persisted in mode " + mode
+
+
+def test_cache_eps_fingerprint_separates_axes_shape_and_tensor():
+    """audit R-8: the EpsField fingerprint hashed only the VALUES. Two physically different
+    gridded states -- same numbers on axes differing 100x, and a (2,3,4) grid vs its (4,3,2)
+    reshape (identical C-order bytes) -- shared one key, i.e. a cache HIT for a different solve;
+    and a scalar+tensor field collided with the same scalar alone (the scalar branch returned
+    before reaching `tensor`). Every distinction must now change the fingerprint."""
+    from dynameta.cache import _eps_fingerprint
+    from dynameta.core.eps_field import EpsField
+    ax = lambda n, span: np.linspace(0.0, span, n)
+    v = np.arange(24, dtype=complex).reshape(2, 3, 4)
+    fp = lambda ef: _eps_fingerprint({"r": ef})
+
+    small = EpsField(values_zyx=v, x_axis_u=ax(4, 1.0), y_axis_u=ax(3, 1.0), z_axis_u=ax(2, 1.0))
+    big = EpsField(values_zyx=v, x_axis_u=ax(4, 100.0), y_axis_u=ax(3, 1.0), z_axis_u=ax(2, 1.0))
+    transposed = EpsField(values_zyx=v.reshape(4, 3, 2), x_axis_u=ax(2, 1.0),
+                          y_axis_u=ax(3, 1.0), z_axis_u=ax(4, 1.0))
+    assert fp(small) != fp(big)                       # AXES (VoxelCoefficient bounds)
+    assert fp(small) != fp(transposed)                # SHAPE (same bytes, different grid)
+    # scalar vs scalar+tensor, and the convention label
+    s = EpsField(scalar=2.0 + 0j)
+    st = EpsField(scalar=2.0 + 0j, tensor=np.eye(3, dtype=complex) * 3.0)
+    assert fp(s) != fp(st)
+    assert fp(s) != fp(EpsField(scalar=2.0 + 0j, time_convention="exp(+iwt)"))
+    # and it stays a CONTENT hash: an identical rebuild must still hit
+    same = EpsField(values_zyx=v.copy(), x_axis_u=ax(4, 1.0), y_axis_u=ax(3, 1.0),
+                    z_axis_u=ax(2, 1.0))
+    assert fp(small) == fp(same)
+
+
+def test_sweep_rejects_duplicate_and_nonpositive_wavelengths():
+    """audit R-4: Sweep guarded duplicate bias LABELS -- with a comment naming the wavelength
+    collision as a sibling hazard -- while accepting duplicate and non-positive wavelengths.
+    SweepResults.from_rows keys the grid off a SET, so a duplicate silently overwrote its own
+    row with the last solve after paying for the extra solve."""
+    from dynameta.sweep import BiasPoint, Sweep
+    bp = [BiasPoint({"gate": 0.0}, "v0")]
+    assert Sweep(bp, [1310.0, 1550.0]).wavelengths_nm == [1310.0, 1550.0]
+    assert Sweep(bp).wavelengths_nm == []                       # empty stays legal
+    with pytest.raises(ValueError, match="duplicate wavelengths_nm"):
+        Sweep(bp, [1310.0, 1550.0, 1310.0])
+    for bad in ([1310.0, -5.0], [0.0], [float("nan")], [float("inf")]):
+        with pytest.raises(ValueError, match="finite and > 0"):
+            Sweep(bp, bad)

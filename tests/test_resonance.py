@@ -464,3 +464,31 @@ def test_admittance_twins_agree_on_off_vocabulary():
             adm_nl(eps, kz, bad)
     for good in ("s", "p"):                                   # and they still agree where defined
         assert adm_res(eps, kz, good) == adm_nl(eps, kz, good)
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 4c (finding Q-15): the DISPERSIVE two-pass bias must be reported, not hidden
+# ------------------------------------------------------------------------------------------------
+def test_q_budget_reports_the_dispersive_omega0_shift():
+    """audit Q-15: the Q_rad/Q_abs two-pass is evaluated at two DIFFERENT resonance frequencies
+    whenever the loss knob is dispersive -- zeroing a Drude gamma also moves Re(eps) by
+    wp^2 g^2 / (w^2 (w^2 + g^2)), so the lossless linewidth is measured at Re(pole_rad), not at
+    Re(pole_total). The bias is small but real (a few % on gamma_abs at gamma/omega_0 ~ 0.1) and
+    grows with gamma/omega_0, so q_budget must RETURN it as the split's own error bar."""
+    eps_inf, wp, d, theta = 4.0, 2.0e15, 20e-9, np.radians(30.0)
+    omega_p = wp / np.sqrt(eps_inf)
+    k_par = k_par_from_angle(1.0, omega_p, theta)
+    shifts = []
+    for gamma in (1.0e13, 1.0e14):
+        _raw, cleared = _enz_budget_factories(eps_inf, wp, gamma, d, k_par)
+        seed = berreman_enz_pole(eps_inf=eps_inf, wp=wp, gamma=gamma, thickness_m=d,
+                                 theta_rad=theta)["omega"]
+        out = q_budget(cleared, seed, refine_tol=1e-12)
+        assert out["pole_rad_ok"] and np.isfinite(out["omega0_shift_rel"])
+        # it is a genuine measurement of the two passes, not a placeholder
+        assert out["omega0_shift_rel"] == pytest.approx(
+            (out["pole_rad"].real - out["pole_total"].real) / out["pole_total"].real, rel=1e-12)
+        shifts.append(abs(out["omega0_shift_rel"]))
+    # DISCRIMINATION: the bias grows with gamma/omega_0, which is the whole point of reporting it
+    assert shifts[1] > shifts[0]
+    assert shifts[1] < 0.05                     # still a small, usable split at gamma/w0 ~ 0.1

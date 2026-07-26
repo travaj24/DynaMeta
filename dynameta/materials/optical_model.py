@@ -505,12 +505,31 @@ def _maclaurin_re_from_im(omega, im_chi, h, *, edge_correct: bool = True, chunk:
     pref = 4.0 * h / np.pi
     re = np.empty(N, dtype=np.float64)
     step = int(chunk) if int(chunk) > 0 else max(32, min(512, 4_000_000 // max(1, N)))
-    for a in range(0, N, step):
-        b = min(a + step, N)
-        j = idx[a:b]
-        mask = (((idx[None, :] - j[:, None]) & 1) == 1)            # opposite parity
-        den = w2[None, :] - w2[j][:, None]
-        re[a:b] = pref * np.where(mask, p[None, :] / np.where(mask, den, 1.0), 0.0).sum(axis=1)
+    # PERF (audit P-4): the opposite-parity mask takes only TWO distinct values over the whole
+    # sum -- the ODD columns for an even ``j``, the EVEN columns for an odd ``j`` -- so the rows
+    # are processed ONE PARITY AT A TIME against a single broadcast (1,N) column mask.  That
+    # removes, per block, the int64 ``idx - j`` precursor, the ``& 1``/``== 1`` passes, the
+    # boolean mask itself and both ``np.where`` temporaries, leaving one broadcast subtract, one
+    # divide, one masked zero-fill and the SAME per-row reduction, all in one reused buffer.
+    # BYTE-IDENTICAL by construction: each row holds exactly the values the mask/where pair
+    # produced (the same-parity columns are zeroed after the divide instead of being divided by
+    # 1.0 and then discarded), and every row is still summed on its own contiguous (N,) block,
+    # i.e. through the identical pairwise reduction.  ``errstate`` only silences the 1/0 on the
+    # zeroed diagonal, which the pre-P-4 form divided by 1.0 instead.
+    zero_cols = ((idx & 1) == 0, (idx & 1) == 1)        # columns to ZERO for j even / j odd
+    buf = np.empty((min(step, max(N, 1)), N), dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for par in (0, 1):
+            w2_par = w2[par::2]                         # the j of this parity (strided view)
+            re_par = re[par::2]                         # write-through view into `re`
+            zc = zero_cols[par][None, :]
+            for a in range(0, w2_par.size, step):
+                b = min(a + step, w2_par.size)
+                blk = buf[:b - a]
+                np.subtract(w2[None, :], w2_par[a:b, None], out=blk)        # den
+                np.divide(p[None, :], blk, out=blk)                         # p / den
+                np.copyto(blk, 0.0, where=zc)                               # same-parity -> 0
+                re_par[a:b] = pref * blk.sum(axis=1)
     if not edge_correct or N < 4:
         return re
 

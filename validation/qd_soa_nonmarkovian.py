@@ -24,6 +24,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.soa import QDGainModel, QDGainParams
 from dynameta.optics.soa.lineshape import (biexp_memory_kernel, lorentzian_area,
                                            nonmarkovian_lineshape)
@@ -81,7 +82,7 @@ def main():
     # ---- GATE E: area + passivity (wide grid so the heavy Lorentzian wings are captured; the
     # analytic area is exactly w1 + (1-w1) = 1) ----
     fw = np.linspace(0.0, 1500.0 * g2, 3000000)
-    area = float(np.trapezoid(nonmarkovian_lineshape(fw, g1, g2, w1), fw)) * 2.0   # even line -> x2
+    area = float(trapz(nonmarkovian_lineshape(fw, g1, g2, w1), fw)) * 2.0   # even line -> x2
     nonneg = bool(np.all(Lan >= 0.0))
     g_e = bool(abs(area - 1.0) < 1e-2 and nonneg)
     ok = ok and g_e

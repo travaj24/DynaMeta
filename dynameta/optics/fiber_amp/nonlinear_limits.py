@@ -186,7 +186,8 @@ def sbs_threshold_W(a_eff_m2: float, *, g_b: float = G_B_EFFECTIVE, length_m: fl
 
 
 def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda_m: float, *,
-                      g_b: float = G_B_EFFECTIVE, C: float = 21.0, T_K: float = 300.0) -> dict:
+                      g_b: float = G_B_EFFECTIVE, C: float = 21.0, K: float = 1.0,
+                      T_K: float = 300.0) -> dict:
     """Accumulated SBS gain exponent of an ACTIVE amplifier from a converged SteadyStateResult:
 
         G_B = (g_B / A_eff) integral_0^L P_signal(z) dz     (trapezoidal, over the signal profile)
@@ -195,11 +196,23 @@ def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda
     NOT used (that would double-count the gain). A_eff = pi w^2 from the Gaussian mode-field
     radius (Marcuse) at the signal wavelength. Backward Stokes seeding is thermal:
     P_seed = h nu_s dnu_B n_th with n_th = 1/(exp(h nu_B / kT) - 1); the projected Stokes output
-    is P_seed exp(G_B). The single-frequency amplifier is SBS-limited when G_B ~ C (~21), i.e.
-    threshold_margin = G_B / C ~ 1. [Kobyakov 2010; Gray et al., Opt. Express 15, 17044 (2007).]
+    is P_seed exp(G_B). The single-frequency amplifier is SBS-limited when G_B ~ C K, i.e.
+    threshold_margin = G_B / (C K) ~ 1. [Kobyakov 2010; Gray et al., Opt. Express 15, 17044
+    (2007).]
 
-    Returns a dict: G_B, threshold_margin (G_B/C), a_eff_m2, integral_P_dz_Wm, nu_B_hz, dnu_B_hz,
-    n_th, P_seed_W, P_stokes_out_W."""
+    POLARIZATION FACTOR K -- MATCH IT ACROSS THE TWO CRITERIA (audit A-7). The passive sibling
+    `sbs_threshold_W` defaults to K = 1.5 (standard randomly-birefringent SMF) while this active
+    form carried NO K at all, so evaluating both at the same fiber and the same power gave
+    threshold_margin = 1.5 exactly at the passive threshold, with no signpost that the two were
+    using different criteria. The default here is K = 1.0 (co-polarized PM -- the convention this
+    function has always used, so existing numbers are unchanged); pass K = 1.5 to compare against
+    a default `sbs_threshold_W` call, or pass K = 1.0 to BOTH. K is echoed in the returned dict.
+
+    Returns a dict: G_B, threshold_margin (G_B/(C K)), K, a_eff_m2, integral_P_dz_Wm, nu_B_hz,
+    dnu_B_hz, n_th, P_seed_W, P_stokes_out_W."""
+    if not (K > 0.0):
+        raise ValueError("SBS: polarization factor K must be > 0 (1 co-pol PM, 1.5 SMF, 2 "
+                         "scrambled)")
     z, P = _signal_power_profile(result, signal_lambda_m)
     integral_P_dz = float(trapz(P, z))
     w = float(mode_field_radius_m(fiber.core_radius_m, fiber.na, signal_lambda_m))
@@ -213,7 +226,8 @@ def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda
     P_seed = H_PLANCK * nu_s * dnu_b * n_th
     return {
         "G_B": G_B,
-        "threshold_margin": G_B / float(C),
+        "threshold_margin": G_B / (float(C) * float(K)),        # audit A-7
+        "K": float(K),
         "a_eff_m2": a_eff,
         "integral_P_dz_Wm": integral_P_dz,
         "nu_B_hz": nu_b,
@@ -311,7 +325,14 @@ def _calibrate_tmi_c0() -> float:
     return P_th * eta * dndt * gov / ((lam / d_core) ** 2 * kappa)
 
 
-TMI_C0_DEFAULT = _calibrate_tmi_c0()   # ~0.1393 (dimensionless), calibrated at 1 kW / 20-400 Yb
+# UNITS (audit A-8): C0 is a LENGTH in metres, not the dimensionless constant this comment used
+# to claim. Check it on the calibration expression: [W][1][1/K][1] / ([1][W/(m K)]) = m. That is
+# not cosmetic bookkeeping -- the hidden metre is the FIBER-LENGTH dependence the one-constant
+# estimator absorbs into C0 (P_th genuinely depends on the heated length, which appears nowhere
+# in the formula). So re-pinning C0 at a fiber of a DIFFERENT length silently rescales every
+# subsequent prediction, and comparing two C0 values pinned at different lengths is meaningless.
+# Re-pin and use within one length class, and treat the absolute number as 2-3x at best.
+TMI_C0_DEFAULT = _calibrate_tmi_c0()   # ~0.1393 METRES, calibrated at 1 kW on a 20/400 Yb
 
 
 def tmi_threshold_W(core_diameter_m: float, lambda_s_m: float, eta_heat: float, *,
@@ -327,7 +348,9 @@ def tmi_threshold_W(core_diameter_m: float, lambda_s_m: float, eta_heat: float, 
     loss and out-of-band ASE are added); Gamma_ov ~ 0.3-0.7 is the LP01-LP11 thermo-optic overlap;
     kappa (silica ~1.38 W/m/K) and dn/dT (~1.2e-5 /K) are the host thermal / thermo-optic
     constants. C0 defaults to TMI_C0_DEFAULT (pinned to 1 kW at a 20/400 Yb; expose C0 to
-    re-pin to another datum).
+    re-pin to another datum). C0 has units of METRES, not "dimensionless" (audit A-8): the
+    hidden length is the fiber-length dependence this one-constant form absorbs, so a re-pin at
+    a different fiber length rescales every prediction -- see the TMI_C0_DEFAULT note.
 
     ABSOLUTE ACCURACY IS 2-3x ONLY -- trust the SCALING (P_th falls as core diameter grows, falls
     with heat fraction, rises with 1/(dn/dT) and 1/Gamma_ov), not the number. See the module

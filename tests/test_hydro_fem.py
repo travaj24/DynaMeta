@@ -67,18 +67,60 @@ def _as_layer(p: hf.HydroParams, d_nm, beta=None):
 # unit: HydroParams / QCM material  (no FEM)
 # ================================================================================================
 def test_hydroparams_match_nonlocal_tmm():
-    """HydroParams reproduces nonlocal_tmm's material functions BYTE-IDENTICALLY (same beta, same
-    GNOR sign, same k_L) -- the shared-convention contract."""
-    p = hf.HydroParams(1.0, 8.65e15, 1.0e14, hf.beta_from_vf(1.07e6), D=2.0e-4)
-    lay = _as_layer(p, 3.0)
-    for w in (5.0e15, 9.0e15):
-        assert p.eps_transverse(w) == pytest.approx(nt.eps_transverse(w, lay), rel=1e-14)
-        assert p.beta_eff_squared(w) == pytest.approx(nt.beta_eff_squared(w, lay), rel=1e-14)
-        assert p.kL_squared(w) == pytest.approx(nt.kL_squared(w, lay), rel=1e-14)
-    # GNOR sign: real omega -> Im(beta_eff**2) < 0 (broadening), as in nonlocal_tmm
-    assert p.beta_eff_squared(9.0e15).imag < 0.0
-    # passive absorber: Im(eps) > 0 under exp(-i w t)
-    assert hf.drude_eps(5.0e15, _sodium()).imag > 0.0
+    """CROSS-TIER MATERIAL CONTRACT (audit X-4/X-5). ``nonlocal_tmm`` is the single home of the
+    hydrodynamic material model; this FEM tier is a consumer of it. EVERY shared function is
+    covered here -- ``beta_from_vf`` + the three response functions -- over a grid of frequencies
+    and parameter sets, EXACTLY (``==``, not ``approx``): delegation, not agreement, is the claim.
+    Referenced from ``hydro_fem.HydroParams`` and ``nonlocal_tmm``'s module header.
+
+    This gate used to check three functions at two frequencies with rel=1e-14 while the two modules
+    held INDEPENDENT copies importing nothing from each other -- it could only ever have caught a
+    drift after it shipped."""
+    # (a) beta_from_vf: one home, re-exported by both hydro tiers -- the same function OBJECT
+    from dynameta.optics import hydro_fdtd as hfd
+    assert hf.beta_from_vf is nt.beta_from_vf
+    assert hfd.beta_from_vf is nt.beta_from_vf
+    for conv in ("high_freq", "thomas_fermi"):
+        assert hf.beta_from_vf(1.07e6, conv) == nt.beta_from_vf(1.07e6, conv)
+    with pytest.raises(ValueError):
+        hf.beta_from_vf(1.07e6, "nonsense")
+
+    # (b) the three response functions, over metals x GNOR settings x frequencies, EXACT
+    cases = [hf.HydroParams(1.0, 8.65e15, 1.0e14, hf.beta_from_vf(1.07e6), D=2.0e-4),  # Na + GNOR
+             hf.HydroParams(1.0, 8.65e15, 1.0e14, hf.beta_from_vf(1.07e6)),            # Na, D=0
+             hf.HydroParams(9.5, 1.37e16, 1.1e14, hf.beta_from_vf(1.40e6), D=1.0e-4),  # Au-like
+             hf.HydroParams(1.0, 8.65e15, 0.0, hf.beta_from_vf(1.07e6))]               # lossless
+    omegas = (1.0e15, 5.0e15, 9.0e15, 1.5e16, 9.0e15 + 1.0e14j)   # incl. a COMPLEX omega (poles)
+    for p in cases:
+        lay = _as_layer(p, 3.0)
+        for w in omegas:
+            assert p.eps_transverse(w) == nt.eps_transverse(w, lay)
+            assert p.beta_eff_squared(w) == nt.beta_eff_squared(w, lay)
+            assert p.kL_squared(w) == nt.kL_squared(w, lay)
+    # as_layer is the documented bridge and must round-trip every field
+    p = cases[0]
+    lay = p.as_layer(3.0e-9)
+    assert (lay.eps_inf, lay.wp, lay.gamma, lay.beta, lay.D, lay.thickness_m) == \
+        (p.eps_inf, p.wp, p.gamma, p.beta, p.D, 3.0e-9)
+
+    # (c) conventions the delegation must not quietly invert
+    assert cases[0].beta_eff_squared(9.0e15).imag < 0.0   # GNOR: Im(beta_eff^2) < 0 -> broadening
+    assert hf.drude_eps(5.0e15, _sodium()).imag > 0.0     # passive under exp(-i w t)
+
+
+def test_q_convention_has_one_implementation():
+    """audit X-5: ``aaa_poles.q_from_pole`` and ``resonance.pole_q`` were byte-identical copies
+    under two public names whose docstrings had already drifted. One function object now, so the
+    convention (|Re| in the numerator) cannot diverge."""
+    from dynameta.optics.aaa_poles import q_from_pole
+    from dynameta.optics.resonance import pole_q
+    assert q_from_pole is pole_q
+    assert q_from_pole.__doc__ is pole_q.__doc__ and "|Re(omega_tilde)|" in pole_q.__doc__
+    # the |.| the drifted docstring omitted: the -conj partner pole has the SAME positive Q
+    w = 3.0e15 - 1.0e13j
+    assert pole_q(w) == pytest.approx(3.0e15 / (2.0 * 1.0e13))
+    assert pole_q(-w.conjugate()) == pole_q(w)
+    assert pole_q(3.0e15 + 0j) == float("inf")
 
 
 def test_qcm_material_parameterization():

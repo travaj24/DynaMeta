@@ -51,6 +51,12 @@ class OpticalGeometry:
     z_sub_interface_nm:   float    # bottom PML/substrate interface
     material_by_region:   Dict[str, str] = field(default_factory=dict)
     source_by_region:     Dict[str, str] = field(default_factory=dict)   # semi region -> carrier region
+    # Structural role of every region, recorded where the region is CREATED (audit F-7):
+    # 'pml' | 'substrate' | 'superstrate' | 'metal_skin' | 'metal_bulk' | 'inclusion' | 'layer'.
+    # Consumers must route on this, never on the region NAME: a user layer may legally be called
+    # 'pml_calibration_film' or 'ito_substrate_cap'. Empty for a geometry built by other means, in
+    # which case consumers fall back to the builder's own naming (documented at each site).
+    role_by_region:       Dict[str, str] = field(default_factory=dict)
     n_px:                 int = 0        # # x-periodic identifications (Bloch phase order)
     n_py:                 int = 0        # # y-periodic identifications
     # Mirror-symmetry reduction: True when the x (resp. y) axis is a HALF-cell with symmetry walls
@@ -237,6 +243,8 @@ class LayeredOpticalBuilder:
     # ---- build ----
     def build(self) -> OpticalGeometry:
         d = self.design
+        self._check_layer_names(d)          # audit F-7 (reserved region names)
+        self._check_features(d)             # audit F-14 (silently ignored Stack.features)
         spec = d.mesh_3d
         Px = d.unit_cell.period_x_m * S
         Py = d.unit_cell.period_y_m * S
@@ -511,6 +519,7 @@ class LayeredOpticalBuilder:
             mesh=mesh, z_intervals_nm=z_intervals_nm, period_x_nm=Px_mesh, period_y_nm=Py_mesh,
             z_super_interface_nm=z_super_interface_nm, z_sub_interface_nm=z_sub_interface_nm,
             material_by_region=material_by_region, source_by_region=source_by_region,
+            role_by_region=role_by_region,
             n_px=n_px, n_py=n_py, sym_x=sym_x, sym_y=sym_y)
         self._region_align = region_align
         return self._geo
@@ -518,6 +527,56 @@ class LayeredOpticalBuilder:
     # Region names the BUILDER itself emits verbatim; anything else in a name is user text.
     _RESERVED_REGIONS = {"pml_bot": "pml", "pml_top": "pml",
                          "substrate": "substrate", "superstrate": "superstrate"}
+
+    @classmethod
+    def _check_layer_names(cls, d) -> None:
+        """RAISE if a Layer name is EXACTLY a region name this builder emits (audit F-7).
+
+        `Stack.__post_init__` enforces only that layer names are unique AMONG THEMSELVES -- nothing
+        stops `Layer("substrate", ...)`. `add_box` then writes into the same `z_intervals_nm` /
+        `material_by_region` / `role_by_region` dicts the buffers use, so the layer OVERWRITES the
+        buffer's entry: both solids end up sharing one mesh material, the layer's eps lands on the
+        buffer, and downstream `solve_fem` silently moves its Fresnel interface z_int
+        (`z_intervals_nm['substrate']`), its transmission probe band and its flux band. Every
+        symptom is a plausible-looking number, which is why this is a raise and not a warning.
+
+        The rule is EXACT-match only. A name that merely contains or is prefixed by a reserved word
+        ('ito_substrate_cap', 'pml_calibration_film') is legal: every consumer that used to infer
+        structure from the name now routes on `role_by_region` instead (`_maxh` here, the PML
+        exclusion in `solver._absorbed_fraction` / `_per_region_absorption`).
+
+        Design-time would be earlier, but the reserved set is the OPTICAL builder's, not the data
+        model's: a Stack meshed by some other builder is entitled to those names."""
+        bad = [L.name for L in d.stack.layers if str(L.name) in cls._RESERVED_REGIONS]
+        if bad:
+            raise ValueError(
+                "Layer name(s) {} are region names LayeredOpticalBuilder emits itself, so the "
+                "layer would OVERWRITE the corresponding buffer/PML region: the two solids would "
+                "share one mesh material, the layer's eps would land on the buffer, and solve_fem "
+                "would silently take its Fresnel interface / probe / flux bands from the wrong "
+                "z-interval. Reserved (exact names only): {}. Rename the layer(s) -- a name that "
+                "merely CONTAINS a reserved word (e.g. 'ito_substrate_cap') is fine."
+                .format(", ".join(repr(b) for b in bad), ", ".join(sorted(cls._RESERVED_REGIONS))))
+
+    @staticmethod
+    def _check_features(d) -> None:
+        """RAISE if the Stack carries `Feature`s (audit F-14).
+
+        `Design.__post_init__` validates every Feature's material and `Feature.__post_init__`
+        validates its z-span, so a via / T-patch stem passes construction cleanly -- and then this
+        builder never reads `d.stack.features` (it lays down layers only), so the feature simply is
+        not in the mesh. A validated Design that silently loses a solid is worse than one that
+        refuses to build. `Feature`'s own docstring promises support "in a later phase"; until then
+        say so at runtime instead of meshing a different device than the one described."""
+        feats = list(getattr(d.stack, "features", ()) or ())
+        if feats:
+            raise NotImplementedError(
+                "LayeredOpticalBuilder does not implement Stack.features yet, and would mesh the "
+                "layer stack WITHOUT the {} feature(s) ({}) -- a device different from the one the "
+                "Design describes. Model the feature as a Layer inclusion (Stack.layers[].inclusions), "
+                "or subclass the builder to add the feature solids. (Design validates Feature "
+                "materials and z-spans, so this cannot be caught at construction.)"
+                .format(len(feats), ", ".join(repr(f.name) for f in feats)))
 
     def _maxh(self, region_name: str, material: str, mesh_role: Optional[str] = None) -> float:
         """Per-region target element size (nm). Routing, most specific first:

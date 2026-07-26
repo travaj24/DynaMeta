@@ -257,3 +257,173 @@ def test_probe_grid_sizes_kill_aliased_orders():
     nx_o, _ = _probe_grid_sizes(3000.0, 300.0, kx, 0.0,
                                 np.sqrt((n_sub * k0) ** 2 - kx ** 2))
     assert nx_o > nx
+
+
+# ------------------- FEM solve-path guards (audit F-8 / F-9 / F-15; needs ngsolve) -------------------
+# One small gold/air cell drives all the gates below.
+
+def _fem_cell(theta=0.0, pol="y"):
+    """A 2-layer gold/air cell on a coarse-but-CONVERGED mesh (the audit's own p20 census cell at
+    0.6x maxh: R = 0.9595 there vs 0.9590 at 0.4x, and it emits zero quality warnings). Returns
+    (geo, eps_cf, OpticalSpec)."""
+    pytest.importorskip("ngsolve")
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
+    from dynameta.core.eps_field import EpsField
+    from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder
+    from dynameta.optics.eps_assembler import assemble_eps_cf
+    eps_m = complex(-40.0, 2.5)
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("gold", ConstantOptical(eps_m)))
+    stack = Stack(layers=[Layer("metalL", 200e-9, "gold"), Layer("capL", 300e-9, "air")],
+                  superstrate_material="air", substrate_material="air")
+    m3 = Mesh3DSpec(pml_thk_m=400e-9, superstrate_buffer_m=400e-9, substrate_buffer_m=300e-9,
+                    maxh_superstrate_m=132e-9, maxh_substrate_m=132e-9, maxh_pml_m=240e-9,
+                    maxh_inclusion_m=108e-9, maxh_background_m=108e-9, maxh_metal_m=108e-9)
+    opt = OpticalSpec(polarization=pol, incidence_angle_deg=theta, linear_solver="umfpack")
+    d = Design(name="guards", unit_cell=UnitCell.square(400e-9), stack=stack, electrodes=[],
+               materials=reg, mesh_3d=m3, optical=opt)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geo = LayeredOpticalBuilder(d).build()
+    ebr = {rg: EpsField(scalar={"air": 1.0 + 0j, "gold": eps_m}[geo.material_by_region[rg]])
+           for rg in geo.mesh.GetMaterials()}
+    return geo, assemble_eps_cf(geo, ebr), opt
+
+
+def test_f8_unmatched_sheet_bc_name_raises_and_lists_the_interfaces():
+    """A sheet_bcs key matching no boundary used to assemble ||f|| = 0 -- the solve silently
+    returned the SHEET-FREE answer. It must raise, naming the interfaces that DO exist."""
+    import re as _re
+    geo, eps_cf, opt = _fem_cell()
+    from dynameta.optics.solver import solve_fem, _validate_sheet_bcs
+    ifaces = [b for b in geo.mesh.GetBoundaries() if b.startswith("iface_z")]
+    assert ifaces, "the cell must expose at least one named interior interface"
+
+    with pytest.raises(ValueError, match="match no boundary"):
+        solve_fem(geo, 1200e-9, eps_cf, opt, order=1, sheet_bcs={"iface_z999": 1e-4})
+    # the message must be actionable: it lists the real names
+    with pytest.raises(ValueError, match=_re.escape(ifaces[0])):
+        _validate_sheet_bcs(geo.mesh, {"iface_z999": 1e-4})
+    # an alternation must not pass on the strength of its good half
+    with pytest.raises(ValueError, match="iface_z999"):
+        _validate_sheet_bcs(geo.mesh, {ifaces[0] + "|iface_z999": 1e-4})
+    # no false fire: a real name, an alternation of real names, and a regex all validate
+    _validate_sheet_bcs(geo.mesh, {ifaces[0]: 1e-4})
+    _validate_sheet_bcs(geo.mesh, {"|".join(ifaces): 1e-4})
+    _validate_sheet_bcs(geo.mesh, {"iface_z.*": 1e-4})
+
+
+def test_f8_unmatched_boundary_really_assembles_to_zero():
+    """Negative control: NGSolve itself does not object -- a linear form over an unknown boundary
+    assembles cleanly with ||f|| = 0, which is why the guard has to exist."""
+    import ngsolve as ng
+    geo, _eps, _opt = _fem_cell()
+    fes = ng.Periodic(ng.HCurl(geo.mesh, order=1, complex=True, dirichlet=""))
+    v = fes.TestFunction()
+    f = ng.LinearForm(fes)
+    f += (ng.CoefficientFunction((1.0, 0.0, 0.0)) * v.Trace()) * \
+        ng.ds(definedon=geo.mesh.Boundaries("iface_z999"))
+    f.Assemble()
+    assert float(np.linalg.norm(f.vec.FV().NumPy())) == 0.0
+
+
+def test_f15_oblique_pml_advisory_is_emitted_once_per_process():
+    """The advisory describes the PML, not the solve: a sweep must not repeat it per wavelength.
+    The per-solve REGIME GUARD (the 50 deg raise) stays unconditional."""
+    from dynameta.optics import solver as S
+    S._ADVISED_ONCE.discard("oblique_pml")
+    opt = type("O", (), {"incidence_angle_deg": 30.0, "azimuth_deg": 0.0,
+                         "polarization": "y", "incidence_side": "top"})()
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        for _ in range(5):
+            S._incidence_geometry(opt, 1.0 + 0j)
+    hits = [w for w in rec if "not angle-aware" in str(w.message)]
+    assert len(hits) == 1, "advisory fired {} times for 5 solves".format(len(hits))
+    assert issubclass(hits[0].category, S.FEMDiagnosticWarning)
+    # the GUARD is not de-duplicated: every over-cap solve still raises
+    opt.incidence_angle_deg = 60.0
+    for _ in range(2):
+        with pytest.raises(NotImplementedError, match="validated envelope"):
+            S._incidence_geometry(opt, 1.0 + 0j)
+
+
+def test_f15_fit_warnings_are_aggregated_into_one_per_solve():
+    """Four bad bands in one solve used to emit four near-identical warnings. They must arrive as
+    ONE warning naming every band; outside a solve the immediate warning is preserved."""
+    from dynameta.optics import solver as S
+    M = np.column_stack([np.ones(7), np.linspace(0.0, 1.0, 7)])
+    Es = np.linspace(0.0, 1.0, 7) ** 3 + 0.7                    # cubic: not a two-wave field
+
+    S._fit_ctx.acc = acc = []                                   # inside a solve: accumulate only
+    try:
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            for band in ("reflection", "transmission", "p-pol reflection", "p-pol transmission"):
+                S._lstsq_2wave(M, Es, where=band)
+        assert not rec, "no warning may escape while a solve is accumulating"
+    finally:
+        S._fit_ctx.acc = None
+    bad = [(w, v) for w, v in acc if v > S._FIT_RELRES_WARN]
+    assert len(bad) == 4
+    text = S._fit_warn_text(bad)
+    assert "4 bands" in text and all(b in text for b, _ in bad)
+
+    with warnings.catch_warnings(record=True) as rec:            # outside a solve: warns at once
+        warnings.simplefilter("always")
+        S._lstsq_2wave(M, Es, where="reflection")
+    assert len(rec) == 1 and issubclass(rec[0].category, S.FEMDiagnosticWarning)
+
+
+def test_f15_ordinary_solve_is_quiet_and_reports_its_fit_quality():
+    """The threshold's "validated cases do not false-fire" claim, MEASURED: a converged coarse
+    solve emits ZERO diagnostics and carries a fit residual far below the threshold."""
+    from dynameta.optics import solver as S
+    geo, eps_cf, opt = _fem_cell()
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = S.solve_fem(geo, 1200e-9, eps_cf, opt, order=2)
+    diag = [w for w in rec if issubclass(w.category, S.FEMDiagnosticWarning)]
+    assert not diag, [str(w.message) for w in diag]
+    assert res.R == pytest.approx(0.959, abs=0.015)              # opaque 200 nm gold film
+    assert 0.0 < res.fit_relres < 0.1 * S._FIT_RELRES_WARN
+
+
+def test_f9_quasiperiodic_matrix_is_hermitian_not_symmetric():
+    """The fact behind F-9: ng.Periodic(..., phase=...) conjugates the phase on the TEST side, so
+    even a REAL symmetric integrand assembles Hermitian-not-symmetric -- `symmetric=True` on that
+    space is a false statement (inert in ngsolve 6.2.2604, but it must not be asserted)."""
+    import ngsolve as ng
+    from dynameta.optics import solver as S
+    geo, _eps, _opt = _fem_cell(theta=30.0, pol="y")
+    kx = 2.0 * np.pi / 1200.0 * np.sin(np.radians(30.0))
+    fes = ng.Periodic(ng.HCurl(geo.mesh, order=1, complex=True, dirichlet=""),
+                      phase=S._bloch_phase_list(geo, kx, 0.0))
+    u, v = fes.TrialFunction(), fes.TestFunction()
+    a = ng.BilinearForm(fes, symmetric=False)
+    a += (ng.curl(u) * ng.curl(v) + u * v) * ng.dx               # REAL symmetric integrand
+    a.Assemble()
+    A = np.array(a.mat.ToDense())
+    scale = float(np.abs(A).max())
+    assert np.abs(A - A.T).max() / scale > 1e-3, "expected NON-symmetric"
+    assert np.abs(A - A.conj().T).max() / scale < 1e-10, "expected Hermitian"
+
+
+def test_f9_bddc_cg_falls_back_on_a_bloch_phased_space():
+    """`ng.solvers.CGSolver` runs COCG (complex-SYMMETRIC pseudo inner product), which has no
+    convergence theory on the non-symmetric oblique matrix. The documented option must fall back
+    to the GMRes route (once per process) rather than iterate an invalid Krylov method."""
+    from dynameta.optics import solver as S
+    geo, eps_cf, opt = _fem_cell(theta=30.0, pol="y")
+    S._ADVISED_ONCE.discard("bddc_cg_nonsymmetric")
+    S._ADVISED_ONCE.discard("oblique_pml")
+    opt.linear_solver = "bddc_cg"
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = S.solve_fem(geo, 1200e-9, eps_cf, opt, order=1)
+    hits = [w for w in rec if "bddc_cg" in str(w.message)]
+    assert len(hits) == 1 and issubclass(hits[0].category, S.FEMDiagnosticWarning)
+    assert res.R is not None and np.isfinite(res.R)

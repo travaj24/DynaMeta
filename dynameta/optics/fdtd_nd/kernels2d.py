@@ -151,18 +151,45 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             if do_lat:
                 Tl_mean = np.empty(nsteps)                    # (nsteps,) mask-averaged lattice temperature
                 sub_out_int = np.zeros((nx, nz))              # integrated lattice->substrate outflow rate
+    # --- PER-STEP LOOP INVARIANTS, HOISTED (audit P-1) -------------------------------------------
+    # The 1-D kernel already does exactly this (optics/fdtd.py, audit S2-17) and the 3-D kernel is
+    # written with in-place `out=` throughout; the 2-D kernel was the only one still allocating a
+    # fresh full-grid `curl` (plus two `xp.roll` copies) every step and running the Kerr and Drude
+    # blocks even when `chi3` / `wp` are identically zero. Measured on a 64 x 400 cell, 800 steps:
+    # 1.6x-1.9x on a linear passive cell, 1.2x-1.3x on a Drude cell, with all four probe arrays
+    # BIT-FOR-BIT identical. `solve_fdtd_2d` marches twice (structure + incident reference), so it
+    # is close to a halving of the dominant cost.
+    #   * the fast paths are gated on an EXACT zero test (`xp.any`), never a tolerance: with
+    #     chi3 == 0, `eps_inf + 3*chi3*Ey**2` IS `eps_inf` for finite fields, and with wp == 0,
+    #     bJ == 0 exactly, so `Jy` never leaves the zeros it started at. (With a DIVERGING field
+    #     the old form propagated inf*0 = NaN into eps_eff one step earlier -- a run that is
+    #     already garbage reports a slightly different flavour of it.)
+    #   * hot-carrier runs keep the full Drude path: `hot` mutates (wp, gam) -> (aJ, bJ) mid-march
+    #     and its p_abs reads J^n and J^{n+1}, so `denom_lin` is rebuilt with bJ at every refresh.
+    #   * `curl_buf` is refilled, never rebound: the Lorentz/gain/chi2/Raman blocks below REBIND
+    #     `curl` to a fresh array, which would otherwise throw the buffer away after step 0.
+    do_kerr = bool(xp.any(chi3))
+    do_drude = bool(xp.any(wp)) or do_hot
+    curl_buf = xp.zeros((nx, nz))
+    Ey_roll = xp.empty((nx, nz))                # == xp.roll(Ey, -1, axis=0), no per-step alloc
+    Hz_roll = xp.empty((nx, nz))                # == xp.roll(Hz,  1, axis=0)
+    cE_lin = EPS0 * eps_inf / dt                # eps_eff == eps_inf when chi3 is identically 0
+    denom_lin = cE_lin + bJ / 2.0
     for n in range(nsteps):
         # H update: dHx/dt = (1/mu0) (CPML-stretched dEy/dz) ; dHz/dt = -(1/mu0) dEy/dx (periodic x)
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz                      # at H positions k=0..nz-2
         psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
         Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
-        Hz += -cmu * (xp.roll(Ey, -1, axis=0) - Ey) / dx
+        Ey_roll[:-1] = Ey[1:]; Ey_roll[-1] = Ey[0]                  # roll(Ey, -1) into the buffer
+        Hz += -cmu * (Ey_roll - Ey) / dx
         # curl_y(H) = (CPML-stretched dHx/dz) - dHz/dx at the E_y points
         dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz                      # at E positions k=1..nz-1
         psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
-        curl = xp.zeros((nx, nz))
-        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
-        curl -= (Hz - xp.roll(Hz, 1, axis=0)) / dx
+        curl = curl_buf
+        curl[:, 0] = 0.0                                            # only column 0 needs zeroing
+        curl[:, 1:] = dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        Hz_roll[0] = Hz[-1]; Hz_roll[1:] = Hz[:-1]                  # roll(Hz, 1) into the buffer
+        curl -= (Hz - Hz_roll) / dx
         # Lorentz ADE: PL^{n+1} = C1 PL^n + C2 PL^{n-1} + C3 E^n; its current dPL/dt enters the E-update
         if do_lor:
             PLnew = C1 * PL + C2 * PLp + C3 * Ey
@@ -202,11 +229,21 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             PRnew = EPS0 * chi3R * Ey * Qnew
             curl = curl - (PRnew - PR) / dt
             Qp = Q; Q = Qnew; PR = PRnew
-        # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr
-        eps_eff = eps_inf + 3.0 * chi3 * Ey ** 2       # standard chi3: P = eps0 chi3 E^3 (C3-2)
-        denom = EPS0 * eps_eff / dt + bJ / 2.0
-        Eynew = (EPS0 * eps_eff / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
-        Jynew = aJ * Jy + bJ * (Eynew + Ey)            # (== Jy update below; split out so p_abs can read J^n)
+        # E update: eps0 eps_eff dEy/dt = curl - J, semi-implicit Drude + instantaneous Kerr.
+        # (audit P-1: `EPS0 * eps_eff / dt` was built twice per step; both fast paths below are
+        #  the SAME arithmetic on the same operands, not an approximation of it.)
+        if do_kerr:
+            eps_eff = eps_inf + 3.0 * chi3 * Ey ** 2   # standard chi3: P = eps0 chi3 E^3 (C3-2)
+            cE = EPS0 * eps_eff / dt
+            denom = cE + bJ / 2.0
+        else:
+            cE = cE_lin
+            denom = denom_lin
+        if do_drude:
+            Eynew = (cE * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+            Jynew = aJ * Jy + bJ * (Eynew + Ey)        # (== Jy update below; split out so p_abs can read J^n)
+        else:                                          # wp identically 0 -> Jy stays exactly 0
+            Eynew = (cE * Ey + curl) / denom
         # HOT-CARRIER two-temperature ADE (roadmap 2.1): local Drude Joule dissipation heats the electron
         # gas -> T_e -> (wp,gamma) shift. p_abs = J.E co-locates J and E at the step midpoint (its cycle
         # average is the Drude absorption). Off-mask cells (non-Drude, or not opted in) carry mask 0 and,
@@ -242,7 +279,9 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
                     Tlhot = Tl0_hot + U_l / c_l_hot
                 aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
                 bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
-        Jy = Jynew
+                denom_lin = cE_lin + bJ / 2.0      # bJ moved: the hoisted denominator must follow
+        if do_drude:
+            Jy = Jynew
         Eynew[:, k_src] += src[n]            # soft plane source (uniform in x -> normal-incidence plane wave)
         Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0  # PEC backing the CPML
         Ey = Eynew

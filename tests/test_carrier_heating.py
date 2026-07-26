@@ -3,6 +3,7 @@ Pure numpy/scipy (no devsim/ngsolve/fdtd). The rigorous oracle is validation/car
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import M_E, KB
 from dynameta.materials import DrudeOptical
 from dynameta.carriers.carrier_heating import (TwoTempParams, two_temperature_response,
@@ -56,8 +57,7 @@ def test_two_temperature_energy_conservation():
     t = np.linspace(0.0, 4e-12, 800)
     pump = lambda tt: 2e20 * np.exp(-((tt - 0.4e-12) / 5e-14) ** 2)
     _t, Te, Tl = two_temperature_response(t, pump, PARAMS, T0_K=300.0)
-    U_in = np.trapezoid(np.array([pump(tt) for tt in t]), t) if hasattr(np, "trapezoid") else \
-        np.trapz(np.array([pump(tt) for tt in t]), t)
+    U_in = trapz(np.array([pump(tt) for tt in t]), t)
     U_e = 0.5 * GAMMA_E * (Te[-1] ** 2 - 300.0 ** 2)             # electron energy (C_e = gamma_e Te)
     U_l = PARAMS.C_l * (Tl[-1] - 300.0)
     assert abs((U_e + U_l) - U_in) / U_in < 0.05                # conserved (G only redistributes)
