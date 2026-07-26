@@ -5,15 +5,19 @@ the REVERSE direction and the materials mapping -- the synergy layer that lets a
 Lumenairy-born device gain DynaMeta's multiphysics axes (carriers, thermal, reliability,
 effects) and lets DynaMeta materials drive Lumenairy's dispersive solves.
 
-Conventions are identical on both sides (exp(-i omega t), Im(eps) > 0, metres); the ONE
-mapping trap is index-vs-permittivity: Lumenairy REGION media (n_superstrate/n_substrate)
-are refractive INDICES while every layer spec is a PERMITTIVITY -- both handled here.
+The SIGN conventions are identical on both sides (exp(-i omega t), Im(eps) > 0, metres); the
+mapping traps this module handles are index-vs-permittivity -- Lumenairy REGION media
+(n_superstrate/n_substrate) are refractive INDICES while every layer spec is a PERMITTIVITY --
+and layer ORDER. See the package header for the full list of translated quantities (audit V-7).
 
-Version pin: the reverse translator reads RCWAStack's public attributes (period_x, period_y,
-is_1d, n_superstrate, n_substrate) plus the slotted per-layer record
-(thickness/.kind/.data/.dispersive) via _common.stack_layer_records -- the one
-version-ceilinged reader of the private `_layers` slot (no public accessor exists through
-5.21.3). A Lumenairy release changing that record bumps the bridge floor."""
+Version pin (audit V-7 -- this paragraph described machinery `_common.py` had already retired):
+the reverse translator reads RCWAStack's public attributes (period_x, period_y, is_1d,
+n_superstrate, n_substrate) plus the per-layer record (thickness/.kind/.data/.dispersive)
+through `_common.stack_layer_records`. Since lumenairy 5.22 that helper reads the PUBLIC
+read-only `RCWAStack.layers` tuple -- there is no private-slot access and no version CEILING
+left here; the single bridge-wide FLOOR is `_common.VERSION_FLOOR`, and the soft "newer than
+verified" notice is `_common.VERSION_VERIFIED_MAX` (finding Q-16). A Lumenairy release that
+changes the record shape still bumps the floor."""
 
 from __future__ import annotations
 

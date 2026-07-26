@@ -5,6 +5,13 @@ import pytest
 
 from dynameta.core.numerics import trapz
 
+# The ORACLE for the bit-identity claims below -- resolved ONCE, at import, to whichever spelling
+# this numpy carries (`trapezoid` on 2.x, `trapz` on the declared 1.24 floor; they are the same
+# function under two names). Spelling either one inline would make this module -- the module that
+# exists to police exactly that -- the last floor break in tests/, which is what the CI floor leg's
+# now-deleted per-test deselect list was hiding (audit X-1).
+_NUMPY_TRAPEZOID = getattr(np, "trapezoid", None) or getattr(np, "trapz", None)
+
 
 def test_trapz_line():
     x = np.linspace(0.0, 1.0, 101)
@@ -179,6 +186,37 @@ def test_no_direct_numpy_trapezoid_in_library():
                            "(core.numerics.trapz): {}".format(offenders))
 
 
+def test_no_direct_numpy_trapezoid_in_tests_and_validation():
+    """audit X-1, the last leg. The LIBRARY was routed through core.numerics.trapz; tests/ and
+    validation/ were not, so 8 tests + 9 validation call sites still raised AttributeError on a
+    numpy-1.24 install. CI could not see it either way -- every ubuntu leg resolves numpy 2.x --
+    and the floor leg carried a hand-maintained `--deselect` line PER TEST to stay green. All 17
+    now route here, the deselect list is deleted from .github/workflows/ci.yml, and this gate is
+    what keeps it deleted.
+
+    Allow-list, exhaustive: this module, whose `_NUMPY_TRAPEZOID` is the ORACLE the bit-identity
+    claims are checked against and is itself resolved floor-safely (`trapezoid` or `trapz`,
+    whichever this numpy has)."""
+    import ast
+    import io
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    allowed = {"test_numerics.py"}
+    offenders, scanned = [], 0
+    for sub in ("tests", "validation"):
+        for f in sorted((root / sub).rglob("*.py")):
+            if f.name in allowed:
+                continue
+            scanned += 1
+            tree = ast.parse(io.open(f, encoding="cp1252", errors="replace").read(),
+                             filename=str(f))
+            offenders += _trapezoid_offenders(tree, str(f))
+    assert scanned > 100                                      # both trees really were walked
+    assert not offenders, ("direct numpy/scipy trapezoid call(s) in tests/ or validation/ -- these "
+                           "break on the declared numpy>=1.24 floor; use core.numerics.trapz: "
+                           "{}".format(offenders))
+
+
 def test_trapezoid_guard_catches_every_spelling_it_claims_to():
     """The guard's own gate: each spelling below is a REAL floor hazard (or a second home) and
     must be caught; the two negatives must not fire. Four of these six were silently blind
@@ -219,11 +257,11 @@ def test_trapz_refuses_a_complex_integrand_instead_of_truncating_it():
         trapz([1 + 1j, 2 + 0j], [0.0, 1.0])                   # a python complex list too
     with pytest.raises(TypeError, match="REAL integrand"):
         trapz(x.real, x.astype(complex))                      # complex ABSCISSA as well
-    # the documented workaround reproduces what np.trapezoid would have returned
+    # the documented workaround reproduces what numpy's trapezoid would have returned
     got = trapz(y.real, x) + 1j * trapz(y.imag, x)
-    assert got == complex(np.trapezoid(y, x))
+    assert got == complex(_NUMPY_TRAPEZOID(y, x))
     # and the real path is unchanged
-    assert trapz(y.real, x) == float(np.trapezoid(y.real, x))
+    assert trapz(y.real, x) == float(_NUMPY_TRAPEZOID(y.real, x))
 
 
 def test_trapz_is_bit_identical_to_numpy_trapezoid_on_real_data():
@@ -234,4 +272,4 @@ def test_trapz_is_bit_identical_to_numpy_trapezoid_on_real_data():
         n = int(rng.integers(2, 40))
         xx = np.sort(rng.normal(0.0, 10.0, n))
         yy = rng.normal(0.0, 1e6, n)
-        assert trapz(yy, xx) == float(np.trapezoid(yy, xx))
+        assert trapz(yy, xx) == float(_NUMPY_TRAPEZOID(yy, xx))

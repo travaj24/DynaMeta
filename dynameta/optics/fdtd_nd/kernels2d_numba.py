@@ -11,14 +11,48 @@ from dynameta.constants import EPS0, MU0
 from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, njit, prange
 
 
+def _launch_with_retry(launch, reset, blocks, sm, need):
+    """Negotiate the cooperative block count, RESETTING the persistent device state before every
+    attempt (audit D-8).
+
+    `launch(bk)` marches chunks n0 = 0, chunk, 2*chunk, ... into device arrays that are allocated
+    ONCE and persist across chunks, and the retry re-enters it at n0 = 0. The retry loop used to
+    re-march from step 0 on top of whatever state the failed attempt had already advanced. That is
+    harmless only when the failure lands on the FIRST chunk (the intended case: a cooperative grid
+    too large to be co-resident, which fails at launch). The other way this fails is a WDDM TDR
+    timeout on a LATER chunk -- the very hazard the chunking exists to avoid -- and there the retry
+    silently returned probes from a field that had taken some steps twice. `reset()` re-zeros the
+    field/ADE/CPML arrays, so every attempt starts from t = 0 exactly as the first one did.
+
+    Split out of `_te2d_cuda` as a plain function of two callables so the retry LOGIC is testable
+    without a CUDA device (tests/test_fdtd_backend_contracts.py injects a `launch` that fails on a
+    chosen chunk of a chosen attempt)."""
+    while True:
+        reset()
+        try:
+            launch(blocks)
+            return blocks
+        except Exception:
+            if blocks <= sm:
+                blocks = max(1, min(sm, need))
+                reset()                                       # last resort is an attempt too
+                launch(blocks)                                # <= #SMs (always co-resident); may raise
+                return blocks
+            blocks = max(sm, blocks // 2)
+
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                 nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
                 chi2g, has_chi2, R1, R2, R3, chi3R, has_raman, G1, G2, G3, has_gain):
-    """Fused, prange-threaded 2D TE timestep (the Numba CPU kernel) -- byte-for-byte the same physics as
-    run_2d_te (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
-    in x), but explicit-loop + JIT-compiled so the whole step is ONE compiled pass with no per-op overhead.
+    """Fused, prange-threaded 2D TE timestep (the Numba CPU kernel) -- the same physics as run_2d_te
+    (Yee + semi-implicit Drude ADE + Kerr + Lorentz ADE + CFS-CPML in z + PEC backing, periodic
+    in x) to the FLOAT64 ROUNDING FLOOR, not bit-for-bit (audit D-7): this kernel folds the E-update
+    constant as `e0dt*eps_inf` where the numpy reference computes `EPS0*eps_eff/dt`, and `fastmath=True`
+    licenses reassociation. Gated at < 1e-9 on R/T for a non-dispersive lossless slab
+    (validation/fdtd_2d_reduces.py GATE D) and < 1e-12 with the R15/R20 nonlinearities active
+    (validation/fdtd_nonlinear_backends.py). It is also explicit-loop + JIT-compiled, so the whole step
+    is ONE compiled pass with no per-op overhead.
     C1,C2,C3 = per-cell Lorentz ADE coefficients; has_lor gates the extra pole. R15/R20 nonlinearities
     mirror the numpy kernel: chi2 SHG polarization P2 = eps0 chi2 E^2 (lagged dP2/dt), the Raman pair
     (vibrational ADE on E^2 + P_R = eps0 chi3R E Q) and the clamped-inversion gain line (G1,G2,G3
@@ -100,6 +134,15 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                 eyn = (e0e * eyo + curl - 0.5 * (1.0 + aJ) * Jy[i, k] - 0.5 * bJ * eyo) / denom
                 Jy[i, k] = aJ * Jy[i, k] + bJ * (eyn + eyo)
                 Ey[i, k] = eyn
+        # audit D-14: the E loop above runs k in [1, nz-2], so the ADE state (Jy, PL, P2, Q, PR, PG)
+        # is NOT advanced on the PEC cells k = 0 / k = nz-1, where the numpy reference kernel DOES
+        # advance it (kernels2d.py updates the whole slab, then zeroes E at the two PEC planes --
+        # and its Jy update reads the pre-zero Eynew, so Jy there is not even zero). Consequence
+        # nil either way: that state feeds ONLY E at those same two cells, which is overwritten
+        # with 0 every step, so nothing propagates. It is still a genuine term-present-in-one-copy
+        # divergence and part of why the backends agree to ~1e-9/1e-12 rather than bit-for-bit
+        # (audit D-7). The CUDA kernel below matches THIS kernel (k in [1, nz-2]); do not "fix" one
+        # copy without the other.
         for i in prange(nx):                                 # soft source + PEC backing
             Ey[i, k_src] += src[n]
             Ey[i, 0] = 0.0; Ey[i, nz - 1] = 0.0
@@ -238,6 +281,16 @@ def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
     blocks = max(1, min(sm * bps, need))
     chunk = int(min(nsteps, max(8, 20_000_000 // max(1, nx * nz))))
 
+    # audit D-8: the fields/ADE/CPML state below is allocated ONCE and persists across chunks, while
+    # the retry re-enters _launch at n0 = 0 -- so every attempt must re-zero it first.
+    _persistent = (Ey, Hx, Hz, Jy, psi_hxz, psi_eyz, PL, PLp, P2, Q, Qp, PR, PG, PGp)
+    _zeros = np.zeros((nx, nz))
+
+    def _reset():
+        for a in _persistent:
+            a.copy_to_device(_zeros)
+        # eyL/hxL/eyR/hxR need no reset: a re-march from n0 = 0 rewrites every row [0, nsteps).
+
     def _launch(bk):
         n0 = 0
         while n0 < nsteps:
@@ -253,14 +306,6 @@ def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
             cuda.synchronize()
             n0 += ns
 
-    while True:                                               # shrink blocks if the cooperative grid is too big
-        try:
-            _launch(blocks)
-            break
-        except Exception:
-            if blocks <= sm:
-                blocks = max(1, min(sm, need))
-                _launch(blocks)                               # last resort: <= #SMs (always co-resident)
-                break
-            blocks = max(sm, blocks // 2)
+    # shrink blocks if the cooperative grid is too big; every attempt marches from a ZEROED state
+    _launch_with_retry(_launch, _reset, blocks, sm, need)
     return eyL.copy_to_host(), hxL.copy_to_host(), eyR.copy_to_host(), hxR.copy_to_host()

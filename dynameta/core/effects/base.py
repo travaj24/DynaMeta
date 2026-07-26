@@ -211,7 +211,12 @@ def kramers_kronig_dn(e_grid_J: np.ndarray, dalpha_per_m: np.ndarray) -> np.ndar
 # therefore build the two non-zero parity blocks ONCE and push all rows through two BLAS matmuls
 # instead of re-running the O(N^2) divide-and-sum per row (audit 6.2 perf). Keyed on the grid
 # VALUES (bytes), not object identity -- callers rebuild equal-valued grids per call via linspace.
-# Blocks are ~N^2/2 doubles (~36 MB at N=3001), so the cache is kept tiny (LRU-of-2).
+# Blocks are ~N^2/2 doubles (~36 MB at N=3001), so the cache is kept tiny: at most two grids,
+# evicted least-recently-USED (audit R-20: this was described as "LRU-of-2" while a HIT did not
+# move the entry, i.e. it was insertion-order FIFO. With capacity 2 that is not academic --
+# alternating between a hot grid and two cold ones evicts the hot one every time, exactly the
+# access pattern LRU exists to survive. _kk_parity_kernel now re-inserts on hit, which makes the
+# dict's insertion order a true recency order.)
 _KK_KERNEL_CACHE: dict = {}
 _KK_KERNEL_CACHE_MAX = 2
 
@@ -222,6 +227,9 @@ def _kk_parity_kernel(E: np.ndarray):
     key = E.tobytes()
     hit = _KK_KERNEL_CACHE.get(key)
     if hit is not None:
+        # audit R-20: make the documented LRU real -- move the hit to the MOST-RECENT end so the
+        # insertion-order eviction below is recency-based, not FIFO.
+        _KK_KERNEL_CACHE[key] = _KK_KERNEL_CACHE.pop(key)
         return hit
     h = E[1] - E[0]
     pref = (HBAR * C_LIGHT / np.pi) * 2.0 * h

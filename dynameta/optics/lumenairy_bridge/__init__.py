@@ -3,9 +3,27 @@
 Lumenairy is a REQUIRED dependency of dynameta (core since v0.5) but is imported lazily:
 this package imports without touching it (keeping base `import dynameta` fast and
 matplotlib-free); the backends raise with an install hint if the environment lacks it.
-Conventions are
-identical on both sides (exp(-i omega t), Im(eps) > 0, metres, radians), so the bridge is a
-geometry/result adapter, not a translation layer. See docs/roadmap_v0.5_integration_photonics.md.
+The SIGN conventions are identical on both sides (exp(-i omega t), Im(eps) > 0, metres,
+radians), so no permittivity is ever conjugated across the seam.
+
+IT IS STILL A TRANSLATION LAYER (audit V-7 -- this header used to claim otherwise while the
+code translated at least nine quantities). What the bridge converts, and where:
+
+  * layer ORDER (DynaMeta Stack is bottom-first; lumenairy stacks are superstrate-first)
+  * half-spaces as INDICES vs layer specs as PERMITTIVITIES (translate.py; the *_design API)
+  * incidence ANGLES degrees -> radians, and azimuth (_common.angles_rad)
+  * incidence SIDE (guard_incidence_side: top only -- bottom incidence is refused, not mapped)
+  * polarization LABEL -> lumenairy lab row index (_common.pol_row: x/y/p -> 0/1/0)
+  * p-pol AMPLITUDE sign and the cos_i/cos_t scale, mapping lumenairy's lab-basis Jones onto
+    DynaMeta's incumbent Byrnes-tmm p-hat basis (_common.p_basis_conversion)
+  * CONICAL incidence (azimuth != 0), which needs per-order Jones synthesis rather than a row
+    pick (_common.conical_synthesis; refused for the row-pick backends by guard_conical_ppol)
+  * per-layer RECORDS on the reverse path (translate.py)
+  * eps CELL rasterization from Design inclusions (optics.rasterize)
+
+A convention bug in any of those is a wrong number with a plausible R + T, which is why each
+has its own gate under validation/lumenairy_*.py.
+See docs/roadmap_v0.5_integration_photonics.md.
 """
 
 from dynameta.optics.lumenairy_bridge.berreman_backend import (BerremanLayeredSolver,

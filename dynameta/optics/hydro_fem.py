@@ -235,22 +235,35 @@ _PROBE_TARGET_FRAC = 0.3
 
 
 # ================================================================================================
-# Material physics (mirrors nonlocal_tmm conventions EXACTLY)
+# Material physics -- DELEGATED to nonlocal_tmm (audit X-4/X-5)
 # ================================================================================================
-def beta_from_vf(v_f: float, convention: str = "high_freq") -> float:
-    """Hydrodynamic velocity ``beta`` [m/s] from the Fermi velocity (see nonlocal_tmm):
-    ``"high_freq"`` -> ``sqrt(3/5) v_f`` (the optical choice); ``"thomas_fermi"`` -> ``sqrt(1/3) v_f``."""
-    v = float(v_f)
-    if convention == "high_freq":
-        return math.sqrt(3.0 / 5.0) * v
-    if convention == "thomas_fermi":
-        return math.sqrt(1.0 / 3.0) * v
-    raise ValueError("convention must be 'high_freq' or 'thomas_fermi'; got {!r}".format(convention))
+# The hydrodynamic material model (beta_from_vf, eps_transverse, beta_eff_squared, kL_squared) has
+# exactly ONE home: :mod:`dynameta.optics.nonlocal_tmm`, the shipped exact layered HDM.  This module
+# used to carry a second, independent copy of all four, self-documented as "identical to
+# nonlocal_tmm..." four times over while importing nothing from it -- so the two could (and did)
+# drift, and any single-file fix (e.g. the beta = 0 local-Drude limit) would land in one copy only.
+# The FEM tier is a CONSUMER of the material model, not a second author of it: the copies are gone
+# and the calls below go through nonlocal_tmm.
+#
+# CROSS-TIER GATE: tests/test_hydro_fem.py::test_hydroparams_match_nonlocal_tmm covers EVERY shared
+# function (beta_from_vf + the three response functions) over metals x GNOR settings x real and
+# complex frequencies, EXACTLY -- it now asserts delegation rather than hoping for agreement.
+from dynameta.optics.nonlocal_tmm import (                                  # noqa: E402
+    HydroLayer as _HydroLayer,
+    beta_eff_squared as _nt_beta_eff_squared,
+    beta_from_vf,
+    eps_transverse as _nt_eps_transverse,
+    kL_squared as _nt_kL_squared,
+)
 
 
 @dataclass(frozen=True)
 class HydroParams:
     """Hydrodynamic-Drude metal parameters (SI, rad/s).
+
+    This is ``nonlocal_tmm.HydroLayer`` minus ``thickness_m`` (the FEM tier gets its geometry from
+    the mesh, not from the material record).  Its three response functions DELEGATE to
+    ``nonlocal_tmm`` -- see :func:`as_layer` -- so the two tiers cannot drift (audit X-4).
 
     Attributes
     ----------
@@ -264,7 +277,7 @@ class HydroParams:
         Hydrodynamic velocity [m/s] (build with :func:`beta_from_vf`).  ``beta -> 0`` is local Drude.
     D : float
         GNOR diffusion constant [m**2/s] (default 0).  Enters as ``beta_eff**2 = beta**2 +
-        D(gamma - i*omega)`` -- IDENTICAL to ``nonlocal_tmm.beta_eff_squared``.
+        D(gamma - i*omega)``.
     """
 
     eps_inf: float
@@ -273,24 +286,29 @@ class HydroParams:
     beta: float
     D: float = 0.0
 
+    def as_layer(self, thickness_m: float = 0.0) -> "_HydroLayer":
+        """This material as a ``nonlocal_tmm.HydroLayer`` -- the shared home of the response
+        functions, and the bridge for a cross-solver comparison against the exact layered HDM.
+        ``thickness_m`` is irrelevant to eps_transverse/beta_eff_squared/kL_squared (they are bulk
+        material functions), so it defaults to 0 and is only worth passing for a TMM cross-check."""
+        return _HydroLayer(self.eps_inf, self.wp, self.gamma, self.beta,
+                           float(thickness_m), D=self.D)
+
     def eps_transverse(self, omega) -> complex:
         """Transverse (ordinary, LOCAL) Drude permittivity ``eps_inf - wp**2/(omega**2 +
-        i*omega*gamma)`` -- identical to ``nonlocal_tmm.eps_transverse``."""
-        w = complex(omega)
-        return self.eps_inf - self.wp * self.wp / (w * w + 1j * w * self.gamma)
+        i*omega*gamma)``.  Delegates to ``nonlocal_tmm.eps_transverse``."""
+        return _nt_eps_transverse(omega, self.as_layer())
 
     def beta_eff_squared(self, omega) -> complex:
         """GNOR effective nonlocal parameter ``beta**2 + D(gamma - i*omega)`` [m**2/s**2]
-        (identical to ``nonlocal_tmm.beta_eff_squared``; ``Im < 0`` for real omega -> broadening)."""
-        w = complex(omega)
-        return self.beta * self.beta + self.D * (self.gamma - 1j * w)
+        (``Im < 0`` for real omega -> broadening).  Delegates to
+        ``nonlocal_tmm.beta_eff_squared``."""
+        return _nt_beta_eff_squared(omega, self.as_layer())
 
     def kL_squared(self, omega) -> complex:
         """Longitudinal (bulk-plasmon) wavenumber squared ``(omega**2 + i*gamma*omega -
-        wp**2/eps_inf)/beta_eff**2`` -- identical to ``nonlocal_tmm.kL_squared``."""
-        w = complex(omega)
-        num = w * w + 1j * self.gamma * w - self.wp * self.wp / self.eps_inf
-        return num / self.beta_eff_squared(w)
+        wp**2/eps_inf)/beta_eff**2``.  Delegates to ``nonlocal_tmm.kL_squared``."""
+        return _nt_kL_squared(omega, self.as_layer())
 
 
 def drude_eps(omega, params: HydroParams) -> complex:

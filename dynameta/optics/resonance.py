@@ -373,8 +373,17 @@ def smatrix_pole_func(layers: Sequence[Layer], *, pol: str = "s", n_super=1.0, n
 # Newton refinement and Q
 # ------------------------------------------------------------------------------------------------
 def pole_q(omega_tilde) -> float:
-    """Quality factor of a complex pole: ``Q = Re(omega_tilde) / (2 |Im(omega_tilde)|)``.  Returns
-    ``+inf`` for a real (lossless, undamped) pole."""
+    """Quality factor of a complex pole ``omega_tilde = omega_0 - i*gamma/2``:
+
+        Q = |Re(omega_tilde)| / (2 |Im(omega_tilde)|) .
+
+    Returns ``+inf`` for a real (lossless, undamped) pole.
+
+    THE single Q convention across the resonance tooling: ``optics.aaa_poles.q_from_pole`` is a
+    thin alias of THIS function, not a second implementation (audit X-5 -- the two used to be
+    byte-identical copies whose docstrings had already drifted, this one omitting the ``|.|`` the
+    code has always applied to ``Re``).  The absolute value matters: a pole finder working on the
+    lower half-plane can hand back the ``-conj`` partner, and Q is positive for both."""
     w = complex(omega_tilde)
     im = abs(w.imag)
     if im == 0.0:
@@ -478,6 +487,14 @@ _SPLIT_FRACS = (0.5,
                 0.5 + 0.5 * (math.sqrt(5.0) - 2.0),      # ~0.618 (golden section)
                 0.5 - 0.25 * (math.sqrt(2.0) - 1.0))     # ~0.396
 
+# find_poles' per-call evaluation memo (audit P-14).  Entry cap: a (float, float) key plus a
+# complex value costs ~200 B, so 200k entries bound the memo at ~40 MB even if a caller drives an
+# extreme n_grid / max_depth.  Past the cap the finder simply stops caching -- the values it
+# returns do not change, only the hit rate.  `_MEMO_MISS` is a private sentinel so that a
+# `func_of_omega` legitimately returning None is not mistaken for a cache miss.
+_POLE_MEMO_MAX = 200_000
+_MEMO_MISS = object()
+
 
 def _interior_seed(func: Callable[[complex], complex],
                    rect: Tuple[float, float, float, float], n: int) -> complex:
@@ -515,7 +532,8 @@ def find_poles(func_of_omega: Callable[[complex], complex], omega_center, omega_
     ----------
     func_of_omega : callable
         Analytic function whose ZEROS are the sought poles (``1/S``, ``M11``, or ``det`` of the
-        inverse scattering matrix).
+        inverse scattering matrix).  It must be DETERMINISTIC in ``omega``: repeated evaluations
+        at the same point are served from a per-call memo (see below).
     omega_center : complex
         Centre of the search rectangle.  Give it a NEGATIVE imaginary part (or a tall enough span)
         to bracket decaying poles (``Im < 0``).
@@ -536,6 +554,24 @@ def find_poles(func_of_omega: Callable[[complex], complex], omega_center, omega_
     -------
     list of complex
         Refined pole positions (unordered), each a zero of ``func_of_omega`` inside the box.
+
+    Notes
+    -----
+    PER-CALL EVALUATION MEMO (audit P-14).  About 63 % of the evaluations this finder requests are
+    at points it has ALREADY evaluated: ``np.linspace(a, b, 2n, endpoint=False)`` CONTAINS
+    ``np.linspace(a, b, n, endpoint=False)`` exactly (the step halves, so every coarse point is an
+    even-indexed fine point), so each densification level inside :func:`_winding_densified`
+    re-walks the previous one bit-for-bit, and the quad-tree re-walks corner/edge points shared
+    between a parent box, its candidate splits and its children.  Since ``func_of_omega`` is a
+    deterministic function of ``omega``, a dict memo on the exact float pair returns literally the
+    same bits: measured **1.90x** with an exactly identical pole set (121771 requests, 76644 hits,
+    45127 unique evaluations) on a pole-dense hydrodynamic box.  Two properties are load-bearing:
+    the memo lives for ONE call (a module-level cache would serve values across different
+    ``layers`` / ``k_par`` / ``loss_scale`` closures), and it keys on the EXACT ``(real, imag)``
+    pair -- never a rounded or tolerance key.  It stops growing past ``_POLE_MEMO_MAX`` entries
+    (correctness is unaffected; only the hit rate drops), and a point with a zero or NaN component
+    bypasses it entirely (``0.0`` and ``-0.0`` are the same dict key but need not be the same side
+    of a branch cut; NaN never matches itself).
     """
     span = complex(omega_span)
     sr = abs(span.real) if span.real != 0.0 else abs(span.imag)
@@ -544,16 +580,31 @@ def find_poles(func_of_omega: Callable[[complex], complex], omega_center, omega_
     root_rect = (c.real - sr, c.real + sr, c.imag - si, c.imag + si)
 
     found: List[complex] = []
+    memo: dict = {}
+    miss = _MEMO_MISS
+
+    def func(z):
+        """`func_of_omega` memoized on the exact (real, imag) pair -- see the Notes above."""
+        zr, zi = z.real, z.imag
+        if zr == 0.0 or zi == 0.0 or zr != zr or zi != zi:
+            return func_of_omega(z)                # +-0.0 alias / NaN: never keyed
+        key = (zr, zi)
+        v = memo.get(key, miss)
+        if v is miss:
+            v = func_of_omega(z)
+            if len(memo) < _POLE_MEMO_MAX:
+                memo[key] = v
+        return v
 
     def newton_in(rect):
-        seed = _interior_seed(func_of_omega, rect, max(6, n_grid // 4))
-        z = newton_refine(func_of_omega, seed, tol=refine_tol)
+        seed = _interior_seed(func, rect, max(6, n_grid // 4))
+        z = newton_refine(func, seed, tol=refine_tol)
         if _inside(z, rect) and np.isfinite(z):
             found.append(z)
 
     def recurse(rect, depth, count=None):
         if count is None:
-            w, _ = _winding_densified(func_of_omega, rect, n_grid)
+            w, _ = _winding_densified(func, rect, n_grid)
             count = int(round(w))
         if count <= 0:
             return
@@ -578,7 +629,7 @@ def find_poles(func_of_omega: Callable[[complex], complex], omega_center, omega_
             child_counts = []
             ok = True
             for sub in subs:
-                ws, ms = _winding_densified(func_of_omega, sub, n_grid)
+                ws, ms = _winding_densified(func, sub, n_grid)
                 cs = int(round(ws))
                 if ms > 1.2 or abs(ws - cs) > 0.25:
                     ok = False                     # a zero sits on / hugs this child boundary
@@ -675,6 +726,19 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
     The lossless pass re-finds the pole with ``loss_scale = 0`` (warm-started from the lossy pole):
     ``Q_rad``.  Then ``1/Q_abs = 1/Q_total - 1/Q_rad``.
 
+    DISPERSIVE-MEDIUM BIAS (finding Q-15).  The two passes are evaluated at two DIFFERENT
+    resonance frequencies whenever the loss knob is dispersive.  For a Drude layer
+    ``eps = eps_inf - wp^2/(w^2 + i w g)`` the real part is ``eps_inf - wp^2/(w^2 + g^2)``, so
+    setting ``g = 0`` moves ``Re(eps)`` by ``wp^2 g^2 / (w^2 (w^2 + g^2))`` and therefore moves
+    the pole: the lossless linewidth ``2|Im pole_rad|`` is the radiative linewidth AT
+    ``Re(pole_rad)``, not at ``Re(pole_total)``.  Measured on a thin Drude film at
+    ``gamma/omega_0 ~ 0.1``: ``Re(pole)`` shifts -0.0605% and the implied ``gamma_abs`` comes out
+    2.2% below the true collision rate.  The bias GROWS with ``gamma/omega_0``, so read the
+    returned ``omega0_shift_rel`` (the fractional ``Re`` shift between the two passes) as the
+    split's own error bar -- it is small exactly when the split is trustworthy.  For a
+    NON-dispersive loss knob (scaling a constant ``Im(eps)``) the shift is second order and the
+    split is unbiased.
+
     ENZ / p-POLARIZATION PRECONDITION.  A p-pol pole function over a material with an
     epsilon-near-zero crossing carries a SPURIOUS SIMPLE POLE of ``D`` at ``eps_layer(omega) = 0``
     (from the ``1/Y_p = kz/eps`` admittance entry).  Feed ``q_budget`` the ENZ-CLEARED function
@@ -695,7 +759,8 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
     -------
     dict
         ``pole_total``, ``pole_rad``, ``Q_total``, ``Q_rad``, ``Q_abs``, ``inv_Q_abs``,
-        ``pole_rad_ok`` (bool), ``pole_rad_shift_rel``, ``pole_rad_residual_rel``, ``warning``.
+        ``pole_rad_ok`` (bool), ``pole_rad_shift_rel``, ``pole_rad_residual_rel``,
+        ``omega0_shift_rel`` (the dispersive-bias diagnostic above), ``warning``.
         ``Q_abs = +inf`` flags a genuinely lossless / degenerate split (``|1/Q_abs|`` below
         ``degenerate_rel * 1/Q_total``); ``Q_abs = nan`` flags an INVALID split -- either a rejected
         lossless root or an unphysical negative ``1/Q_abs``.
@@ -714,6 +779,11 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
                 float(rad_proximity_rel_floor) * scale)
     shift = abs(pole_rad - pole_total)
     shift_rel = shift / scale
+    # Q-15 diagnostic: the FRACTIONAL Re shift between the lossy and lossless passes. It is the
+    # split's own error bar for a dispersive loss knob (zeroing a Drude gamma also moves
+    # Re(eps), so the two linewidths are measured at two different omega_0).
+    omega0_shift_rel = ((pole_rad.real - pole_total.real) / pole_total.real
+                        if pole_total.real != 0.0 else float("nan"))
     # off-pole reference magnitude of the LOSSLESS function, half a Re-unit into the lower plane
     ref_pt = complex(pole_total.real, -0.5 * abs(pole_total.real) - abs(pole_total.imag))
     try:
@@ -778,6 +848,7 @@ def q_budget(make_pole_func: Callable[[float], Callable[[complex], complex]], po
         "pole_rad_ok": bool(ok),
         "pole_rad_shift_rel": float(shift_rel),
         "pole_rad_residual_rel": float(residual_rel_meas),
+        "omega0_shift_rel": float(omega0_shift_rel),
         "warning": warning,
     }
 

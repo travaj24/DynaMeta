@@ -379,3 +379,91 @@ def test_f7_reserved_names_are_matched_whole_not_as_substrings():
     assert mh("substrate", "mid") == pytest.approx(160.0)
     for name, _ in _F7_COLLISIONS[:4]:                       # the four substring collisions
         assert mh(name, "mid") == pytest.approx(150.0), name
+
+
+# ------------------------------------------------- F-7 (rider): reserved-name COLLISION
+# The role routing above fixes names that CONTAIN a reserved word. The remaining half of F-7 is a
+# name that IS one: `Stack.__post_init__` only checks that layer names are unique among themselves,
+# so `Layer("substrate", ...)` used to build cleanly and silently overwrite the buffer's entry in
+# z_intervals_nm / material_by_region.
+def _reserved_name_design(layer_name):
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("mid", ConstantOptical(complex(4.0, 0.0))))
+    return Design(name="f7c", unit_cell=UnitCell.square(PX * 1e-9),
+                  stack=Stack(layers=[Layer(layer_name, 40e-9, "mid")],
+                              superstrate_material="air", substrate_material="air"),
+                  electrodes=[], materials=reg, mesh_3d=_mesh_spec(),
+                  optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0))
+
+
+@pytest.mark.parametrize("name", ["substrate", "superstrate", "pml_bot", "pml_top"])
+def test_f7_layer_named_after_a_reserved_region_raises(name):
+    """All four builder-owned region names must be refused at build time, naming the collision."""
+    with pytest.raises(ValueError, match="region names LayeredOpticalBuilder emits"):
+        LayeredOpticalBuilder(_reserved_name_design(name)).build()
+
+
+def test_f7_reserved_collision_would_have_overwritten_the_buffer():
+    """Negative control for the raise: WITHOUT the guard the collision is silent and destructive.
+    Replaying the builder's own dict writes shows the layer landing on top of the buffer's
+    z-interval and material -- which is what moves solve_fem's Fresnel interface and probe bands."""
+    z_intervals, material_by_region = {}, {}
+
+    def add_box(nm, mat, z_lo, z_hi):                 # the shape of LayeredOpticalBuilder.add_box
+        z_intervals[nm] = (z_lo, z_hi)
+        material_by_region[nm] = mat
+
+    add_box("substrate", "air", -200.0, 0.0)          # the builder's substrate BUFFER
+    add_box("substrate", "mid", 0.0, 40.0)            # a user layer with the same name
+    assert len(z_intervals) == 1                                  # one region, not two
+    assert z_intervals["substrate"] == (0.0, 40.0)                # buffer's z-interval destroyed
+    assert material_by_region["substrate"] == "mid"               # buffer now carries layer eps
+
+
+def test_f7_names_containing_a_reserved_word_still_build():
+    """No false fire: the six substring collisions the role routing already handles must remain
+    legal names -- including the 'pml_' PREFIX, which the absorption filter now routes by role."""
+    LayeredOpticalBuilder(_collision_design()).build()            # must not raise
+    for name, _ in _F7_COLLISIONS:
+        LayeredOpticalBuilder(_reserved_name_design(name)).build()
+
+
+def test_f7_role_map_reaches_the_geometry_and_marks_only_the_pml():
+    """`role_by_region` must survive onto OpticalGeometry (it is what solver._non_pml_regions
+    routes on) and must tag exactly the two PML slabs -- not the user layer named 'pml_...'."""
+    geo = LayeredOpticalBuilder(_collision_design()).build()
+    roles = geo.role_by_region
+    assert {r for r, v in roles.items() if v == "pml"} == {"pml_bot", "pml_top"}
+    assert roles["pml_calibration_film"] == "layer"      # user layer, NOT pml
+    assert roles["substrate"] == "substrate" and roles["superstrate"] == "superstrate"
+    from dynameta.optics.solver import _non_pml_regions
+    kept = _non_pml_regions(geo.mesh, roles)
+    assert "pml_calibration_film" in kept                # role-routed: stays in the budget
+    assert "pml_bot" not in kept and "pml_top" not in kept
+    # pre-fix name-prefix rule (roles=None) drops the user layer -- the defect this gate closes
+    assert "pml_calibration_film" not in _non_pml_regions(geo.mesh, None)
+
+
+# ------------------------------------------------- F-14: Stack.features silently ignored
+def test_f14_stack_features_raise_instead_of_vanishing():
+    """`Design` validates every Feature's material and z-span, then the optical builder never reads
+    `stack.features` -- a via / T-patch stem vanished from the mesh with no error. It must refuse."""
+    from dynameta.geometry.stack import Feature
+    from dynameta.geometry.cross_section import Rectangle as Rect
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("mid", ConstantOptical(complex(4.0, 0.0))))
+    via = Feature(name="via", shape=Rect(cx_m=200e-9, cy_m=200e-9, width_m=80e-9, height_m=80e-9),
+                  material="mid", z_lo_m=0.0, z_hi_m=30e-9)
+    d = Design(name="f14", unit_cell=UnitCell.square(PX * 1e-9),
+               stack=Stack(layers=[Layer("film", 40e-9, "mid")], superstrate_material="air",
+                           substrate_material="air", features=[via]),
+               electrodes=[], materials=reg, mesh_3d=_mesh_spec(),
+               optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0))
+    assert d.stack.features                              # Design accepted it
+    with pytest.raises(NotImplementedError, match="Stack.features"):
+        LayeredOpticalBuilder(d).build()
+    # the SAME stack without the feature must still build (the guard is not a blanket refusal)
+    d.stack.features = []
+    LayeredOpticalBuilder(d).build()

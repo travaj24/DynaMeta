@@ -15,6 +15,7 @@ Fiber Optics". Pure numpy; SI units. docs/fiber_amp_model_spec.md sec.11.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -55,16 +56,31 @@ class Pulse:
         return _fwhm(self.t_s, self.power_W)
 
     def omega_rad_s(self) -> np.ndarray:
-        """Angular-frequency grid (baseband, rad/s) matching numpy FFT ordering."""
+        """Angular-frequency grid (baseband, rad/s) matching numpy FFT ordering.
+
+        SIGN (audit V-6/A-9 -- this was undocumented while the OPERATORS in this same module
+        documented it): the envelope is propagated in the numpy exp(+i w t) basis, so this
+        axis is the NEGATIVE of the physical detuning under the repo-wide exp(-i omega t)
+        convention. physical_detuning = -omega_rad_s(). Any ASYMMETRIC spectrum plotted
+        against this axis without the flip is MIRRORED about the carrier -- including the
+        Raman red shift, which appears at POSITIVE w here. The same flip applies to the
+        `beta3` and CPA operators (which state it) and to SaturableGain.center_omega_rad_s /
+        gain_omega (which now state it too).
+        """
         return 2.0 * np.pi * np.fft.fftfreq(self.t_s.size, self.dt_s)
 
     def spectrum(self):
-        """(omega_shifted [rad/s], spectral power density [arb]) sorted by frequency."""
+        """(omega_shifted [rad/s], spectral power density [arb]) sorted by frequency.
+
+        The axis is the NUMPY frequency variable, i.e. MINUS the physical detuning -- see
+        omega_rad_s (audit V-6). Negate it before plotting against physical wavelength."""
         w = np.fft.fftshift(self.omega_rad_s())
         S = np.abs(np.fft.fftshift(np.fft.fft(self.field))) ** 2
         return w, S
 
     def spectral_fwhm_rad_s(self) -> float:
+        """Spectral FWHM [rad/s] on the numpy frequency axis. A WIDTH is sign-symmetric, so
+        the V-6 flip does not affect this number -- it affects where the band SITS."""
         w, S = self.spectrum()
         return _fwhm(w, S)
 
@@ -164,8 +180,40 @@ def raman_response_freq(n: int, dt_s: float, model: str = "blow_wood"):
         f_R, h = 0.245, (0.75 + 0.04) * ha + 0.21 * hb
     else:
         raise ValueError("raman model must be 'blow_wood' or 'lin_agrawal'")
+    _guard_raman_sampling(float(dt_s), model)
     H = np.fft.fft(h) * float(dt_s)
     return f_R, H / H[0].real                       # exact H(0)=1 (unit-area response)
+
+
+# Longest kernel time constant per model: tau2 = 32 fs (Blow-Wood), tau_b = 96 fs (Lin-Agrawal).
+# The response must be sampled several times within it or the discrete kernel is not the response
+# at all -- see _guard_raman_sampling (audit A-11).
+_RAMAN_TAU_MAX_S = {"blow_wood": 32e-15, "lin_agrawal": 96e-15}
+_RAMAN_MIN_SAMPLES_PER_TAU = 4.0
+
+
+def _guard_raman_sampling(dt_s: float, model: str) -> None:
+    """audit A-11: `raman_response_freq` had NO time-sampling guard. For dt >~ tau the sampled
+    h_R is one or two points, and the H/H[0] normalization then forces H(w) ~ 1 across the whole
+    grid -- i.e. the DELAYED Raman response silently degrades to an instantaneous (delta)
+    nonlinearity with NO soliton self-frequency shift at all, and nothing anywhere reports it.
+    A stretched-pulse CPA run (a nanosecond window sampled at picoseconds) lands squarely in that
+    regime. Warn rather than raise: a coarse-dt run is still a legitimate Kerr-only simulation --
+    it just is not a Raman one, and the user must know which they got."""
+    tau = _RAMAN_TAU_MAX_S.get(model)
+    if tau is None or not (dt_s > 0.0):
+        return
+    n_per_tau = tau / dt_s
+    if n_per_tau < _RAMAN_MIN_SAMPLES_PER_TAU:
+        warnings.warn(
+            "raman_response_freq({!r}): dt = {:.3g} s samples the {:.3g} s Raman kernel only "
+            "{:.2g} times (need >~ {:g}). The discrete kernel aliases and the H(0) = 1 "
+            "normalization then flattens H(w) to ~1, so the DELAYED Raman response silently "
+            "becomes an instantaneous one -- no soliton self-frequency shift, no Raman-induced "
+            "red shift, with a plausible-looking result. Refine dt (more time points over the "
+            "same window) or drop the Raman term and call the run Kerr-only.".format(
+                model, dt_s, tau, n_per_tau, _RAMAN_MIN_SAMPLES_PER_TAU),
+            RuntimeWarning, stacklevel=3)
 
 
 # ---- the GNLSE split-step propagator -------------------------------------------------------
@@ -180,7 +228,14 @@ class SaturableGain:
     gain-narrowing model), 'lorentzian' 1/(1+x^2), or 'gaussian' exp(-x^2). A short pulse's
     spectrum is progressively NARROWED as its wings see less gain than the centre -- the effect
     that bounds the recompressed CPA pulse duration. Couple to the CW model via g_small from the
-    inversion and e_sat_J = dynamics.saturation_energy."""
+    inversion and e_sat_J = dynamics.saturation_energy.
+
+    FREQUENCY CONVENTION (audit A-9): `center_omega_rad_s` and the `omega` argument of
+    `g_omega` are on the NUMPY frequency grid (Pulse.omega_rad_s), which is MINUS the physical
+    detuning under the repo-wide exp(-i omega t) convention -- the same flip the beta3 and CPA
+    operators in this module document. A gain band centred at a physical detuning +Delta0 is
+    therefore requested as center_omega_rad_s = -Delta0. The band is symmetric about its
+    centre, so `gain_bandwidth_rad_s` is unaffected."""
     g_small_per_m: float
     e_sat_J: float
     gain_bandwidth_rad_s: float

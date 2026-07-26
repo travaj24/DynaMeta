@@ -3,6 +3,7 @@ validation/lumenairy_rcwa_bridge.py). Skipped wholesale when lumenairy is not in
 the import-light test runs regardless (the bridge must not drag lumenairy/matplotlib into
 a bare dynameta import)."""
 import importlib.util
+import warnings
 import subprocess
 import sys
 
@@ -75,12 +76,12 @@ def test_structured_slab_solver_consumes_eps_cell():
 def test_bad_polarization_raises():
     from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
     d = _uniform_design(pol="y")
-    object.__setattr__(d.optical, "polarization", "zz") if hasattr(
-        d.optical, "__dataclass_fields__") else None
-    try:
-        d.optical.polarization = "zz"
-    except Exception:
-        pytest.skip("OpticalSpec immutable; covered by construction-time validation")
+    # audit X-27/T-19: this used to be a no-op ternary EXPRESSION (its value discarded) followed
+    # by a try/except pytest.skip that could never fire -- OpticalSpec is NOT frozen, so the
+    # plain assignment always succeeded and the skip branch was dead. Set the invalid value
+    # directly and let the assertion below actually run on every leg.
+    d.optical.polarization = "zz"
+    assert d.optical.polarization == "zz"
     with pytest.raises(ValueError):
         make_lumenairy_rcwa_solver(n_orders=2)(d, None, {}, 1.31e-6, 1.0 + 0j, 1.5 + 0j)
 
@@ -411,7 +412,8 @@ def test_berreman_jax_grad_matches_fd():
     def R_of(ne):
         eps = jnp.asarray([[ne ** 2, 0, 0], [0, n_o ** 2, 0], [0, 0, n_o ** 2]],
                           dtype=jnp.complex128)
-        R, _T = berreman_RT([(eps, d)], 1.5 + 0j, 1.0 + 0j, lam, angle=0.0, row=0)
+        R, _T = berreman_RT([(eps, d)], lam, n_substrate=1.5 + 0j,
+                            n_superstrate=1.0 + 0j, angle=0.0, row=0)
         return jnp.real(R)
 
     g = float(jax.grad(R_of)(jnp.asarray(1.74)))
@@ -432,9 +434,11 @@ def test_berreman_jax_forward_equals_numpy():
         return xp.asarray([[ne ** 2, 0, 0], [0, n_o ** 2, 0], [0, 0, n_o ** 2]],
                           dtype=xp.complex128)
 
-    R_np, T_np = berreman_RT([(eps(np), d)], 1.5 + 0j, 1.0 + 0j, lam, angle=0.2, row=0)
-    R_jx, T_jx = berreman_RT([(eps(jnp), jnp.asarray(d))], 1.5 + 0j, 1.0 + 0j,
-                             jnp.asarray(lam), angle=jnp.asarray(0.2), row=0)
+    R_np, T_np = berreman_RT([(eps(np), d)], lam, n_substrate=1.5 + 0j,
+                             n_superstrate=1.0 + 0j, angle=0.2, row=0)
+    R_jx, T_jx = berreman_RT([(eps(jnp), jnp.asarray(d))], jnp.asarray(lam),
+                             n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j,
+                             angle=jnp.asarray(0.2), row=0)
     assert abs(float(R_np) - float(R_jx)) < 1e-12
     assert abs(float(T_np) - float(T_jx)) < 1e-12
 
@@ -454,8 +458,8 @@ def test_rcwa_design_twin_eager_grad_finite_nonzero():
 
     def R_of(e):
         cell = jnp.where(mask, e + 0.0j, 1.0 + 0.0j)
-        R, _T = rcwa_stack_RT([(cell, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6,
-                              period_x=600e-9, n_orders=3, row=0)
+        R, _T = rcwa_stack_RT([(cell, 180e-9)], 1.31e-6, n_substrate=1.5 + 0j,
+                              n_superstrate=1.0 + 0j, period_x=600e-9, n_orders=3, row=0)
         return jnp.real(R)
 
     g = float(jax.grad(R_of)(jnp.asarray(6.0)))
@@ -463,14 +467,15 @@ def test_rcwa_design_twin_eager_grad_finite_nonzero():
     # wavelength now traces (D1): a grad w.r.t. it is finite (no raise)
     def R_of_wl(wl):
         cell = jnp.where(mask, 6.0 + 0.0j, 1.0 + 0.0j)
-        R, _T = rcwa_stack_RT([(cell, 180e-9)], 1.5 + 0j, 1.0 + 0j, wl,
-                              period_x=600e-9, n_orders=3, row=0)
+        R, _T = rcwa_stack_RT([(cell, 180e-9)], wl, n_substrate=1.5 + 0j,
+                              n_superstrate=1.0 + 0j, period_x=600e-9, n_orders=3, row=0)
         return jnp.real(R)
     assert np.isfinite(float(jax.grad(R_of_wl)(jnp.asarray(1.31e-6))))
     # a jax HALF-SPACE INDEX (n_substrate) still raises (lumenairy complex()s it)
     with pytest.raises(TypeError, match="concrete"):
-        rcwa_stack_RT([(jnp.asarray(6.0 + 0j), 180e-9)], jnp.asarray(1.5 + 0j), 1.0 + 0j,
-                      1.31e-6, period_x=600e-9, n_orders=3)
+        rcwa_stack_RT([(jnp.asarray(6.0 + 0j), 180e-9)], 1.31e-6,
+                      n_substrate=jnp.asarray(1.5 + 0j), n_superstrate=1.0 + 0j,
+                      period_x=600e-9, n_orders=3)
 
 
 @needs_jax
@@ -484,15 +489,17 @@ def test_pmm_design_twin_eager_grad_finite_nonzero():
 
     def R_of(e):
         segs = [(0.5, e + 0.0j), (0.5, 1.0 + 0j)]
-        R, _T = pmm_stack_RT([(segs, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6,
-                             period=600e-9, degree=6, n_orders=5, row=0)
+        R, _T = pmm_stack_RT([(segs, 180e-9)], 1.31e-6, n_substrate=1.5 + 0j,
+                             n_superstrate=1.0 + 0j, period=600e-9, degree=6,
+                             n_orders=5, row=0)
         return jnp.real(R)
 
     g = float(jax.grad(R_of)(jnp.asarray(6.0)))
     assert np.isfinite(g) and g != 0.0
     with pytest.raises(TypeError, match="static"):
         pmm_stack_RT([([(jnp.asarray(0.5), 6.0 + 0j), (0.5, 1.0 + 0j)], 180e-9)],
-                     1.5 + 0j, 1.0 + 0j, 1.31e-6, period=600e-9, degree=6, n_orders=5)
+                     1.31e-6, n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j,
+                     period=600e-9, degree=6, n_orders=5)
 
 
 def test_drude_eps_jax_matches_material_model():
@@ -854,3 +861,67 @@ def test_rcwa_conical_synthesis_and_2d_lattice():
             assert abs(r.R + r.T - 1.0) < 5e-3     # lossless 2-D conical energy closes
         else:
             assert r.A > 1e-3                       # the lossy pillar genuinely absorbs
+
+
+@needs_lum
+def test_design_api_halfspaces_are_keyword_only():
+    """audit V-4: the nine differentiable *_design entry points mirror lumenairy's SUB-FIRST
+    (n_substrate, n_superstrate) order -- the inverse of the 46 super-first functions elsewhere
+    in DynaMeta -- and both are bare scalars, so a super-first POSITIONAL call used to run and
+    solve the stack upside down in silence. They are now KEYWORD-ONLY: the legacy positional
+    shape must raise a TypeError that names the migration, and the keyword form must still solve
+    the half-spaces with their ORIGINAL meanings (nothing silently transposed)."""
+    from dynameta.optics.lumenairy_bridge import (berreman_jones, berreman_RT, pmm_stack_jones,
+                                                  pmm_stack_RT, rcwa_grating_RT,
+                                                  rcwa_stack_jones, rcwa_stack_RT)
+    eps = np.eye(3, dtype=complex) * 2.25
+    legacy = [
+        (berreman_RT, ([(eps, 220e-9)], 1.5 + 0j, 1.0 + 0j, 1.55e-6), {}),
+        (berreman_jones, ([(eps, 220e-9)], 1.5 + 0j, 1.0 + 0j, 1.55e-6), {}),
+        (rcwa_grating_RT, (600e-9, 6 + 0j, 1 + 0j, 1.5 + 0j, 1.0 + 0j, 180e-9, 0.5, 1.31e-6), {}),
+        (rcwa_stack_RT, ([(6 + 0j, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6), {"period_x": 600e-9}),
+        (rcwa_stack_jones, ([(6 + 0j, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6),
+         {"period_x": 600e-9}),
+        (pmm_stack_RT, ([(6 + 0j, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6), {"period": 600e-9}),
+        (pmm_stack_jones, ([(6 + 0j, 180e-9)], 1.5 + 0j, 1.0 + 0j, 1.31e-6), {"period": 600e-9}),
+    ]
+    for fn, args, kw in legacy:
+        with pytest.raises(TypeError, match="KEYWORD-ONLY"):
+            fn(*args, **kw)
+    # omitting one entirely is the same loud failure, never a default
+    with pytest.raises(TypeError, match="missing required keyword-only"):
+        berreman_RT([(eps, 220e-9)], 1.55e-6, n_substrate=1.5 + 0j)
+    # MEANINGS UNCHANGED: a bare half-wave n = 1.5 layer on vacuum/n = 1.5 half-spaces gives the
+    # single-interface Fresnel R = ((1.5 - 1)/(1.5 + 1))^2 = 0.04 -- and would NOT if the two
+    # half-spaces had been silently swapped into the other order (the stack is asymmetric).
+    R, T = berreman_RT([(eps, 220e-9)], 1.55e-6, n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j)
+    assert float(R) == pytest.approx(0.04, abs=1e-9)
+    assert float(R) + float(T) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_bridge_version_ceiling_is_a_one_time_soft_warning():
+    """audit Q-16: the bridge documents itself as VERIFIED against one lumenairy minor and
+    enforced a floor with NO ceiling, so an environment seven minor releases past the
+    verification (5.29 vs 5.22, spanning new propagators and a carrier-backend rework) was
+    accepted in complete silence. It now says so once per process -- a soft warning, not a
+    refusal: there is no evidence the newer release is broken, only no evidence that it is not."""
+    from dynameta.optics.lumenairy_bridge import _common as C
+    assert C.VERSION_VERIFIED_MAX >= C.VERSION_FLOOR[:2]      # a ceiling below the floor is a bug
+    saved = C._CEILING_WARNED
+    try:
+        C._CEILING_WARNED = False
+        with pytest.warns(RuntimeWarning, match="NEWER than the last version"):
+            C._warn_above_ceiling("{}.{}.0".format(C.VERSION_VERIFIED_MAX[0],
+                                                   C.VERSION_VERIFIED_MAX[1] + 1))
+        # ONE time only: the second call on the same process is silent
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            C._warn_above_ceiling("{}.{}.0".format(C.VERSION_VERIFIED_MAX[0],
+                                                   C.VERSION_VERIFIED_MAX[1] + 9))
+        # at or below the ceiling: silent even when the flag is clear
+        C._CEILING_WARNED = False
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            C._warn_above_ceiling("{}.{}.7".format(*C.VERSION_VERIFIED_MAX))
+    finally:
+        C._CEILING_WARNED = saved

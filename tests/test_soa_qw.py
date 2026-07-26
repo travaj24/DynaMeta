@@ -216,3 +216,33 @@ def test_gain_scalar_vs_array_consistency():
     g_arr = qw.material_gain_per_m(np.array([nu0, nu0]), 2.0e24, p)
     assert np.isscalar(g_scalar) or np.ndim(g_scalar) == 0
     assert np.allclose(g_arr, g_scalar)
+
+
+def test_device_routines_reject_a_length_the_params_were_not_built_for():
+    """audit A-13: BulkGainParams pins the ENERGY-CONSISTENCY requirement
+    A_xsec = V_active / L_device (dP/dz = Gamma g P must equal the carrier stimulated loss times
+    A_xsec h nu), and notes the default pair is consistent at the reference L = 600 um. But every
+    device-level routine took L_m as a FREE argument and never checked it, so calling them with
+    the thorlabs_boa1004p preset's own 1.5 mm chip length injected a 600 um device's current
+    density I/(q V_active) into a 1.5 mm device -- the pump term and the stimulated term then
+    describe different geometries, silently."""
+    p = _ref_params()
+    nu_pk = qw.gain_peak(qw.steady_state_N(DRIVE_A, p, P_W=0.0), p)[0]
+    L_implied = p.V_active_m3 / p.A_xsec_m2
+    assert L_implied == pytest.approx(L_M, rel=1e-4)        # the shipped pair IS the 600 um one
+    # the reference operating point still runs (the guard must not reject the library's own preset,
+    # whose A_xsec is a 5-digit rounding of V_active / 600 um -- consistent only to ~2.4e-5)
+    assert np.isfinite(float(qw.device_gain_dB(DRIVE_A, nu_pk, L_M, ALPHA_I, params=p)))
+    # ... and the 2.5x geometry mismatch the finding names now raises, on EVERY device entry point
+    L_bad = 1.5e-3                                          # thorlabs_boa1004p chip length
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.device_gain_dB(DRIVE_A, nu_pk, L_bad, ALPHA_I, params=p)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.device_output_power_W(DRIVE_A, nu_pk, L_bad, ALPHA_I, 1e-9, p, nz=20)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.saturation_output_power_dbm(DRIVE_A, nu_pk, L_bad, ALPHA_I, p, nz=20)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.noise_figure_db(DRIVE_A, nu_pk, L_bad, ALPHA_I, p, nz=20)
+    # the SUPPORTED way to model that device: rescale the active volume with the length
+    p15 = replace(p, V_active_m3=p.V_active_m3 * (L_bad / L_implied))
+    assert np.isfinite(float(qw.device_gain_dB(DRIVE_A, nu_pk, L_bad, ALPHA_I, params=p15)))

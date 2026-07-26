@@ -454,4 +454,12 @@ class FiberAmplifier:
                                        "sigma_e": ch.sigma_e.copy(),
                                        "sigma_esa": ch.sigma_esa.copy(),
                                        "gamma": ch.gamma.copy(),
+                                       # audit A-6: the sigma_* above are the T_ref ChannelSet
+                                       # values. Under a temperature profile the solve actually
+                                       # used sigma_e * mcc(z), so noise.local_inversion_factor
+                                       # -- which advertises "the cross-sections the solve
+                                       # cached" -- mixed a T_ref sigma_e with the HOT nbar2_z.
+                                       # Cache the (K, M) McCumber scaling so it can undo that;
+                                       # None on an isothermal solve (byte-identical path).
+                                       "mcc": None if mcc_mat is None else mcc_mat.copy(),
                                        "m_modes": c["m_modes"]})

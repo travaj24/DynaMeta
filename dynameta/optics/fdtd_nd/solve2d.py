@@ -256,6 +256,47 @@ def _check_band(entry_point, band, f_min, f_max):
                 entry_point, int(np.size(band)), f_min, f_max))
 
 
+def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub):
+    """audit D-6: `lateral_eps_inf` REPLACES the whole eps_inf grid, so the painter owns the pads.
+
+    The 2-D comment used to say the pattern is "applied in the structure region"; it is not (and the
+    3-D twin behaves the same way -- only fdtd_seam.make_structured_lateral, which paints the pads
+    itself, documented the real contract). A caller who follows the old comment and returns
+    `np.ones((nx, nz))` outside the structure LOSES the superstrate/substrate entirely, while
+
+      * the incident reference run is still homogeneous n_super,
+      * the CPML is still impedance-matched to n_super / n_sub per end,
+      * T0 is still multiplied by the n_sub/n_super flux ratio,
+
+    so R/T come back silently mis-normalized. Rather than let that pass, require the pads to carry
+    the declared end media (exactly what make_structured_lateral does). The check is vacuous for the
+    default vacuum end media only if the painter really did leave ones there -- which is the point:
+    it also catches a painter that floods the WHOLE grid with the structure index."""
+    eps = np.asarray(eps_grid, dtype=float)
+    lo = zc < pad                                            # superstrate pad
+    hi = zc >= pad + z_struct                                # substrate pad
+    bad = []
+    for mask, want, side, knob in ((lo, float(n_super) ** 2, "superstrate (low-z)", "n_super"),
+                                   (hi, float(n_sub) ** 2, "substrate (high-z)", "n_sub")):
+        if not np.any(mask):
+            continue
+        block = eps[:, mask]
+        if not np.allclose(block, want, rtol=1e-9, atol=1e-12):
+            bad.append("{} pad carries eps_inf in [{:.6g}, {:.6g}] but {}={:g} demands {:.6g}"
+                       .format(side, float(block.min()), float(block.max()), knob,
+                               float(n_super if knob == "n_super" else n_sub), want))
+    if bad:
+        raise ValueError(
+            "{}: `lateral_eps_inf` REPLACES THE WHOLE (nx, nz) grid -- pads included -- so the "
+            "painter must fill the z pads with the END-MEDIA permittivity, and this one did not: "
+            "{}. The incident reference run, the per-end CPML match and T0's n_sub/n_super flux "
+            "factor all still assume the declared end media, so R/T would come back silently "
+            "mis-normalized (audit D-6). Fill zc < pad with n_super**2 and zc >= pad + z_struct "
+            "with n_sub**2 inside your painter (optics.fdtd_seam.make_structured_lateral does this "
+            "for you), or leave them at 1.0 for the default vacuum end media."
+            .format(entry_point, "; ".join(bad)))
+
+
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
                     lor=None, chi2=None, raman=None, gain=None, hot=None, hot_out=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
@@ -321,7 +362,11 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
     building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
     grating, else the stack is laterally
-    UNIFORM (and the result reduces to the 1D solver / TMM). Returns both the 0-order (specular, x-mean)
+    UNIFORM (and the result reduces to the 1D solver / TMM). `lateral_eps_inf` REPLACES THE WHOLE GRID,
+    z PADS INCLUDED (same as solve_fdtd_3d), so the painter OWNS the super/substrate pads and must fill
+    zc < pad with n_super**2 and zc >= pad + z_struct with n_sub**2 -- optics.fdtd_seam
+    .make_structured_lateral does it for you, and a painter that does not is now REFUSED rather than
+    silently mis-normalized (audit D-6). Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
     n_super / n_sub (default 1 = vacuum) are the lossless semi-infinite superstrate / substrate indices
@@ -332,8 +377,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     backend selects the compute kernel (see available_backends()): 'auto' (default-fastest CPU present),
     'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
-    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. All backends are byte-for-byte equivalent on
-    R/T (validation/fdtd_2d_reduces.py GATE D); xp is an advanced override for a custom array module."""
+    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. Every backend AGREES WITH THE NUMPY
+    REFERENCE TO THE FLOAT64 ROUNDING FLOOR on R/T, NOT bit-for-bit (audit D-7): the numba/CUDA kernels
+    factor the E-update constant differently (`e0dt*eps_inf` vs `EPS0*eps_eff/dt`) and carry
+    fastmath=True, which licenses reassociation. What is actually GATED: max|dR|,max|dT| < 1e-9 on a
+    non-dispersive lossless slab (validation/fdtd_2d_reduces.py GATE D) and < 1e-12 with the R15/R20
+    chi2/Raman/gain nonlinearities active (validation/fdtd_nonlinear_backends.py GATES A/B/E,
+    validation/fdtd_gpu_nonlinear.py on real hardware); 3-D backend parity is
+    validation/fdtd_3d_reduces.py. xp is an advanced override for a custom array module."""
     if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM guard
         raise NotImplementedError("solve_fdtd_2d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
@@ -422,10 +473,18 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                 hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
         z += L.thickness_m
     if lateral_eps_inf is not None:
-        # a laterally-structured grating: overwrite eps_inf in the structure band with the (nx, *)
-        # lateral pattern (callable(nx,nz)->array, or an (nx,nz) array applied in the structure region)
+        # a laterally-structured grating: the pattern REPLACES THE WHOLE (nx, nz) eps_inf grid, PADS
+        # INCLUDED -- not just the structure band (audit D-6: the comment here used to say "applied in
+        # the structure region", which is what a caller reads before writing the painter, and only
+        # fdtd_seam.make_structured_lateral knew the real contract). Same semantics as solve_fdtd_3d.
+        # The painter therefore OWNS the n_super/n_sub pads and must fill them with n_super**2 /
+        # n_sub**2 -- the two lines above that did so are discarded here -- while the incident
+        # reference run, the per-end CPML match and T0's n_sub/n_super flux factor all still assume
+        # the declared end media. `_check_lateral_pads` turns that from a silent mis-normalization
+        # into a raise; make_structured_lateral already paints the pads for you.
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
+        _check_lateral_pads("solve_fdtd_2d", eps_inf, zc, pad, z_struct, n_super, n_sub)
         # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) BEFORE this override. If the
         # lateral pattern's peak index exceeds the sizing index, dz is too coarse and R/T are silently
         # under-resolved. Raise rather than mis-solve -- size `layers` eps_inf to the pattern's max index

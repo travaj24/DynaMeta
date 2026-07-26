@@ -4,6 +4,7 @@ a falsifiable gate, kept small so the suite runs in CI. Grouped by build phase."
 
 import numpy as np
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp import (
     erbium, ytterbium, FiberSpec, overlap_gamma, cladding_pump_overlap,
@@ -257,7 +258,7 @@ def test_heat_energy_balance():
                     + np.sum(r.power_W[(r.u < 0) & r.is_ase, 0]))
     heat_bal = pump_abs - sig_add - ase_out
     assert abs(total_heat_W(r) - heat_bal) < 1e-9 * max(1.0, abs(heat_bal)) + 1e-12
-    assert abs(np.trapezoid(heat_load_per_m(r), r.z_m) - total_heat_W(r)) / abs(
+    assert abs(trapz(heat_load_per_m(r), r.z_m) - total_heat_W(r)) / abs(
         total_heat_W(r)) < 5e-3
 
 
@@ -341,10 +342,10 @@ def test_frantz_nodvik_temporal_reshaping():
     G0 = np.exp(3.0)
     t = np.linspace(-5e-9, 5e-9, 1500)
     p_in = np.exp(-(t / 1.5e-9) ** 2)
-    p_in *= (4.0 * Esat) / np.trapezoid(p_in, t)
+    p_in *= (4.0 * Esat) / trapz(p_in, t)
     p_out = frantz_nodvik_pulse(t, p_in, G0, Esat)
-    E_out = np.trapezoid(p_out, t)
-    E_ana = float(frantz_nodvik_output_energy(np.trapezoid(p_in, t), G0, Esat))
+    E_out = trapz(p_out, t)
+    E_ana = float(frantz_nodvik_output_energy(trapz(p_in, t), G0, Esat))
     assert abs(E_out - E_ana) / E_ana < 1e-2
     assert abs(p_out[0] / p_in[0] - G0) / G0 < 0.02 and p_out[-1] / p_in[-1] < 1.1
 

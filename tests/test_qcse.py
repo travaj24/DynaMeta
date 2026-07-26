@@ -5,6 +5,7 @@ numpy/scipy (a 1D BenDaniel-Duke eigenproblem; no FEM/devsim). Run: python -m py
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import HBAR, M_E, C_LIGHT, Q_E as Q
 from dynameta.carriers.qcse import QuantumWell, StarkState, INFINITE_WELL_STARK_BETA
 from dynameta.core.effects import ElectroAbsorptionModel, kramers_kronig_dn
@@ -220,7 +221,7 @@ def test_voigt_area_conserved_and_peak_drops():
     p0 = ElectroAbsorptionModel(Gamma0_J=0.0, **kw)._alpha(ET0 + x, ET0, 1.0, 1.0, 0.0)
     p1 = ElectroAbsorptionModel(Gamma0_J=sig, **kw)._alpha(ET0 + x, ET0, 1.0, 1.0, sig)
     assert np.max(p1) < np.max(p0)                       # lifetime broadening lowers the peak...
-    a0, a1 = np.trapezoid(p0, x), np.trapezoid(p1, x)
+    a0, a1 = trapz(p0, x), trapz(p1, x)
     assert abs(a1 - a0) / a0 < 2e-2                      # ...but conserves the line area (tails)
 
 

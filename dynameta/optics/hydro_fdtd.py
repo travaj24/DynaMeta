@@ -59,8 +59,8 @@ longitudinal dispersion):
   ``rho = i div J / omega`` from continuity into momentum; the pressure term becomes
   ``-beta^2 grad(div J)/(-i omega)`` and the algebra collapses to the module-header HDM of
   nonlocal_tmm).  ``beta^2 = (3/5) v_F^2`` (high-frequency plasma limit; Thomas-Fermi (1/3) v_F^2
-  documented) -- IDENTICAL convention to ``nonlocal_tmm.beta_from_vf`` so the cross-solver gate is
-  apples-to-apples.  GNOR diffusion enters as ``beta^2 -> beta^2 + D(gamma - i omega)`` (frequency
+  documented) -- ``beta_from_vf`` is RE-EXPORTED from ``nonlocal_tmm`` (its single home, audit X-5),
+  so the cross-solver gate is apples-to-apples by construction rather than by convention.  GNOR diffusion enters as ``beta^2 -> beta^2 + D(gamma - i omega)`` (frequency
   domain); the time-domain diffusion term ``+ D grad(div J)`` (a Laplacian of J) is the additive
   GNOR knob (Mortensen et al. 2014) -- carried as the ``D`` field but defaulting to 0.
 
@@ -168,22 +168,14 @@ __all__ = [
 
 
 # ------------------------------------------------------------------------------------------------
-# beta from the Fermi velocity (self-contained; IDENTICAL convention to nonlocal_tmm.beta_from_vf)
+# beta from the Fermi velocity -- RE-EXPORTED from its single home (audit X-5)
 # ------------------------------------------------------------------------------------------------
-def beta_from_vf(v_f: float, convention: str = "high_freq") -> float:
-    """Hydrodynamic velocity ``beta`` [m/s] from the Fermi velocity ``v_f`` [m/s].
-
-    ``"high_freq"`` (default): ``beta = sqrt(3/5) v_f`` (optical / omega >> gamma limit;
-    Barton 1979).  ``"thomas_fermi"``: ``beta = sqrt(1/3) v_f`` (static limit).  ``beta**2`` is
-    what enters the longitudinal wavenumber and the pressure term.  Matches
-    ``nonlocal_tmm.beta_from_vf`` exactly so the cross-solver bulk-plasmon gate is apples-to-apples.
-    """
-    v = float(v_f)
-    if convention == "high_freq":
-        return math.sqrt(3.0 / 5.0) * v
-    if convention == "thomas_fermi":
-        return math.sqrt(1.0 / 3.0) * v
-    raise ValueError("convention must be 'high_freq' or 'thomas_fermi'; got {!r}".format(convention))
+# `beta = sqrt(3/5) v_f` used to be spelled out THREE times (here, hydro_fem, nonlocal_tmm), all
+# three in their module's `__all__`, with two of the docstrings asserting the identity in prose --
+# i.e. the cross-solver bulk-plasmon gate's apples-to-apples property rested on three copies staying
+# in sync.  One home now: nonlocal_tmm.  This is a re-export (the same function object), so the FDTD
+# tier keeps its convenient `hydro_fdtd.beta_from_vf` spelling and the convention cannot drift.
+from dynameta.optics.nonlocal_tmm import beta_from_vf                       # noqa: E402
 
 
 # ------------------------------------------------------------------------------------------------

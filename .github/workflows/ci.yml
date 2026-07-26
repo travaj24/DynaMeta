@@ -12,7 +12,8 @@ name: CI
 #   test     ubuntu  3.12    numpy 2.x -- `numpy>=1.24` is an  fast suite + coverage          + cov overhead
 #   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite + smoke tier        unchanged
 #   floor    ubuntu  3.10 the OLDEST DECLARED pins             import sweep + fast suite      1 suite / ncores
-#                                                              (`-n auto`, 878 tests)         (xdist)
+#                                                              (`-n auto`, the WHOLE suite     (xdist)
+#                                                              bar test_bic_capstone)
 #   numba    windows 3.12 core+dev+[numba]                     16 numba tests + parity oracle ~8 min
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
 #   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
@@ -35,9 +36,11 @@ jobs:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # audit T-14: every job carries an explicit cap. GitHub's silent default is 6 h, and
-    # run_all's own per-script cap is 1800 s x 84 smoke scripts, so "hung job" used to mean
+    # run_all's own per-script cap is 1800 s x 93 smoke scripts, so "hung job" used to mean
     # "burn the day". These are CAPS, not budgets -- see the table at the top. 75 rather than 60
     # because the 3.12 leg now also carries coverage instrumentation.
+    # (audit X-19/X-26 added 9 measured solver-free scripts to the tier, ~112 s of real work --
+    # the 7 curated bridge/capstone gates plus 2 new material/pole-finder wrappers.)
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -149,31 +152,21 @@ jobs:
               sys.exit(1)
           PY
       - name: Run the fast suite at the floor
-        # The whole fast suite minus ONE module and EIGHT named tests, and each exclusion is a
-        # finding, not a convenience (measured on a numpy-1.x/lumenairy-5.22 proxy 2026-07-26:
-        # 878 passed, 0 failed once these are out):
-        #   * the 8 deselected tests call `np.trapezoid` DIRECTLY, which does not exist before
-        #     numpy 2.0. The LIBRARY was routed through core.numerics.trapz by the X-1 fix; the
-        #     TESTS were not, so the X-1 trap still lives in tests/. Routing these 8 through
-        #     core.numerics.trapz (or a hasattr shim like test_carrier_heating.py:59 already
-        #     uses) deletes this list -- that is the follow-on, and it is why the list is spelled
-        #     out per test instead of ignoring four whole modules (which would cost 85 further
-        #     tests of floor coverage).
+        # The whole fast suite minus ONE module, and that exclusion is a finding, not a
+        # convenience:
         #   * test_bic_capstone HANGS at lumenairy 5.22.0 (>15 min at 750% CPU, vs ~20 s at
         #     5.28) -- a real limitation of the declared lumenairy floor, recorded here rather
         #     than papered over by letting lumenairy float on this leg.
-        # Everything else runs, so a new floor break anywhere else turns this leg red.
+        # The EIGHT per-test `--deselect` lines that used to sit here were the last of audit X-1:
+        # those tests called `np.trapezoid` DIRECTLY, which does not exist before numpy 2.0, so
+        # the trap the X-1 fix removed from the library still lived in tests/. All 17 call sites
+        # in tests/ and validation/ now route through core.numerics.trapz (the same one home the
+        # library uses), the list is gone, and
+        # tests/test_numerics.py::test_no_direct_numpy_trapezoid_in_tests_and_validation keeps it
+        # gone. Everything runs, so a new floor break anywhere turns this leg red.
         run: |
           pytest tests/ -q -m "not slow" -n auto \
-            --ignore=tests/test_bic_capstone.py \
-            --deselect tests/test_qcse.py::test_voigt_area_conserved_and_peak_drops \
-            --deselect tests/test_soa.py::test_rin_and_linewidth \
-            --deselect tests/test_soa_generality.py::test_sech_integrated_gain_conserved \
-            --deselect tests/test_fiber_amp.py::test_heat_energy_balance \
-            --deselect tests/test_fiber_amp.py::test_frantz_nodvik_temporal_reshaping \
-            --deselect tests/test_fiber_gnlse.py::test_raman_only_red_shift_at_gordon_rate_and_energy_conserved \
-            --deselect tests/test_fiber_nonlinear.py::test_sbs_active_gain_exponent_gate \
-            --deselect tests/test_fiber_nonlinear.py::test_srs_stokes_redshift_and_gain_exponent
+            --ignore=tests/test_bic_capstone.py
 
   numba:
     # audit T-3: `numba` was declared by no extra and installed by no leg, so 13 library modules /

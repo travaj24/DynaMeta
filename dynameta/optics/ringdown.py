@@ -84,13 +84,52 @@ class Mode:
         return self.omega_rad_s / (2.0 * np.pi)
 
 
+# |z| in (1, 1 + _GAIN_TOL] is the numerical image of a LOSSLESS pole (gamma = 0), not gain:
+# snapped onto the unit circle. Above it the pole is genuinely growing -- see matrix_pencil's
+# DISCRETE-POLE DOMAIN note (finding Q-9).
+_GAIN_TOL = 1e-9
+
+
 def _hankel(y: np.ndarray, L: int) -> np.ndarray:
-    """(N-L) x (L+1) Hankel data matrix H[i, j] = y[i + j] (the matrix-pencil data matrix)."""
-    N = y.size
-    rows = N - L
-    # strided view materialized to a contiguous array (residue solve etc. want a real copy)
-    idx = np.arange(rows)[:, None] + np.arange(L + 1)[None, :]
-    return y[idx]
+    """(N-L) x (L+1) Hankel data matrix H[i, j] = y[i + j] (the matrix-pencil data matrix).
+
+    Returned as a READ-ONLY STRIDED VIEW of ``y`` (audit P-2).  The previous form built an
+    ``(N-L) x (L+1)`` int64 index array purely to fancy-index ``y``, i.e. an integer array
+    exactly as large as the result, discarded immediately: measured peak traced memory 1536 MB
+    at N = 20000 (result 768 MB) plus 0.35 s of pure copy time, versus 0.001 MB / 20 us for the
+    view.  The only consumer is :func:`numpy.linalg.svd`, which makes its own contiguous LAPACK
+    copy either way, so the values reaching LAPACK -- and therefore every number downstream --
+    are bit-for-bit what they were.  The view is NON-WRITEABLE and non-contiguous: any future
+    caller that wants to mutate ``H`` (or needs C order) must ``.copy()`` it first.
+    """
+    rows = y.size - L
+    return np.lib.stride_tricks.sliding_window_view(y, L + 1)[:rows]
+
+
+# --- big-N guard on the public pencil entry points (audit P-3) --------------------------------
+# `matrix_pencil` is O(N^3) in time and O(N^2) in memory in the RAW trace length: with the
+# default pencil_frac = 0.4 the Hankel matrix is 0.6N x 0.4N and `np.linalg.svd` allocates its
+# own copy of it plus U (0.6N x 0.4N, computed by LAPACK and never read here) and Vh
+# (0.4N x 0.4N).  Measured: N = 8000 -> 13.8 s and ~370 MB; N = 20000 -> ~4 min and ~2.3 GB.
+# The repo's own front end `fdtd_etalon_ringdown` decimates and caps at max_fit_samples = 1200,
+# but `matrix_pencil` / `ringdown_q` are exported for arbitrary traces and
+# `solve_fdtd_1d(..., return_time_trace=True)` hands out traces of exactly the length that blows
+# this up.  So the workspace estimate below is checked BEFORE anything large is allocated and a
+# too-long trace RAISES (it never silently decimates -- decimation is an accuracy change and must
+# be the caller's explicit choice, as in `fdtd_etalon_ringdown`).
+_PENCIL_MAX_BYTES = 2_000_000_000                       # 2 GB SVD workspace budget
+
+
+def _pencil_peak_bytes(rows: int, cols: int, itemsize: int) -> float:
+    """Estimated peak bytes of the pencil SVD step: the contiguous LAPACK copy of the Hankel
+    data, U (rows x k) and Vh (k x cols) with k = min(rows, cols).  The strided Hankel view
+    itself costs nothing (P-2), so this counts ONE copy of the matrix, not two.  With
+    pencil_frac = 0.4 it is ~0.64 * itemsize * N^2, so the 2 GB budget is reached at
+    N ~ 19760 samples (real trace) / N ~ 13970 (complex): the audit's measured N = 20000 case
+    (~4 min of SVD, 2.3 GB peak before P-2) raises, while its N = 8000 case (13.8 s, ~370 MB)
+    still runs."""
+    k = min(int(rows), int(cols))
+    return float(itemsize) * (float(rows) * cols + float(rows) * k + float(k) * cols)
 
 
 def _select_order(sv: np.ndarray, svd_tol: float, max_modes: Optional[int]) -> int:
@@ -117,7 +156,9 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                   svd_tol: float = 1e-9, max_modes: Optional[int] = None,
                   t_start: float = 0.0, amp_floor: float = 1e-3,
                   real_signal: Optional[bool] = None,
-                  omega_zero_tol: float = 1e-6) -> List[Mode]:
+                  omega_zero_tol: float = 1e-6,
+                  allow_gain: bool = False,
+                  max_bytes: Optional[float] = None) -> List[Mode]:
     """Extract damped-exponential modes from a uniformly sampled trace by the matrix-pencil
     method (Hua & Sarkar 1990).
 
@@ -136,9 +177,42 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                     input dtype / imaginary content.
       omega_zero_tol : |omega dt| below this (radians) is treated as a zero-frequency (pure
                     decay) mode rather than half of an oscillatory pair.
+      allow_gain  : keep GROWING poles (|z| > 1, i.e. gamma < 0 and q < 0). Default False --
+                    the `Mode` contract documents gamma > 0, and a growing pole additionally
+                    OVERFLOWS the residue Vandermonde at large N (finding Q-9). See the
+                    DISCRETE-POLE DOMAIN note below.
+      max_bytes   : SVD workspace budget [bytes]; None uses `_PENCIL_MAX_BYTES` (2 GB). A trace
+                    long enough to exceed it RAISES instead of allocating (audit P-3) -- see the
+                    COST note below. `np.inf` disables the guard.
 
     Returns:
       list[Mode] sorted by descending |amplitude| (dominant first).
+
+    DISCRETE-POLE DOMAIN (findings Q-8 / Q-9). The z-plane poles are mapped to continuous poles
+    by ``s = log(z)/dt``, which needs the COMPLEX branch: ``np.linalg.eigvals`` returns a REAL
+    array when every eigenvalue happens to be real, and ``np.log`` of a NEGATIVE real then gives
+    ``nan`` -- a Nyquist-frequency pole (``z < 0``, ``omega = pi/dt``) used to escape the public
+    API as ``omega_rad_s = 0`` with ``gamma_rad_s = nan``.  ``z`` is therefore cast to
+    ``complex128`` before the log, and the self-conjugate Nyquist pole is reported ONCE (no
+    residue doubling) rather than being dropped by the conjugate collapse.
+    Growing poles (``|z| > 1``) are dropped with a ``RuntimeWarning`` unless ``allow_gain=True``:
+    they contradict the documented ``gamma > 0``, and the residue Vandermonde ``z**n`` overflows
+    to ``inf`` once ``|z|**(N-1)`` passes the float64 range (for ``|z| = 1.5`` that is ``N ~
+    1750`` -- the audit note's ``1.5**1200`` is actually 2.04e211, finite; the threshold is
+    higher than quoted but the mechanism is real), which poisons the residue least-squares and
+    the amplitude sort for EVERY mode, not just the growing one.  On the ``allow_gain=True`` path
+    the Vandermonde is therefore built in log space and column-normalized, so no ``N`` overflows.
+
+    COST -- THIS SCALES WITH THE RAW TRACE LENGTH (audit P-3). The Hankel matrix is
+    ``(1-pencil_frac)N x pencil_frac*N``, so the SVD is ``O(N^3)`` in time and ``O(N^2)`` in
+    memory in the number of SAMPLES, independent of how many modes are wanted: measured 0.23 s at
+    N = 2000, 13.8 s at N = 8000, and ~4 min / ~2.3 GB extrapolated at N = 20000.  A trace whose
+    estimated workspace exceeds ``max_bytes`` (2 GB by default, i.e. about 19700 real samples)
+    RAISES with the decimation recipe rather than allocating.  MORE SAMPLES ARE NOT MORE
+    INFORMATION here: the pencil fits poles, so a trace decimated to ~8-10 samples per period of
+    the highest mode of interest carries the same poles at a fraction of the cost -- which is
+    exactly what :func:`fdtd_etalon_ringdown` does (it decimates to
+    ``target_samples_per_period`` and caps at ``max_fit_samples = 1200``).
     """
     y_full = np.asarray(signal)
     dt = float(dt)
@@ -161,6 +235,25 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     L = int(round(pencil_frac * N))
     L = max(2, min(L, N - 2))              # keep both Hankel dimensions >= 2
 
+    # BIG-N GUARD (audit P-3): refuse a trace whose SVD workspace blows past `max_bytes` BEFORE
+    # allocating anything large. The cost is O(N^3) time / O(N^2) memory in the RAW trace length,
+    # and nothing upstream caps it: raise with the decimation recipe rather than spend four
+    # minutes and a few GB. Never auto-decimates -- that would be a silent accuracy change.
+    budget = float(_PENCIL_MAX_BYTES if max_bytes is None else max_bytes)
+    need = _pencil_peak_bytes(N - L, L + 1, y.dtype.itemsize)
+    if need > budget:
+        n_fit = int((budget / max(need, 1.0)) ** 0.5 * N)
+        raise ValueError(
+            "matrix_pencil: a {}-sample trace needs an estimated {:.2f} GB of SVD workspace "
+            "(Hankel {} x {}, {} bytes/sample), over the {:.2f} GB budget -- and the fit is "
+            "O(N^3) in time (N = 8000 measures 13.8 s, N = 20000 extrapolates to ~4 min). "
+            "DECIMATE the trace first (keep >= ~8 samples per period of the highest mode, e.g. "
+            "`signal[::k]` with `dt*k`, which is what fdtd_etalon_ringdown does at "
+            "max_fit_samples = 1200), shorten it with `t_start`, or -- if you really do have the "
+            "memory -- pass `max_bytes` above {:.2f}e9. About {} samples fit the current budget."
+            .format(N, need / 1e9, N - L, L + 1, y.dtype.itemsize, budget / 1e9,
+                    budget / 1e9, n_fit))
+
     H = _hankel(y, L)
     # SVD of the Hankel data matrix; the right singular vectors carry the shift structure.
     U, sv, Vh = np.linalg.svd(H, full_matrices=False)
@@ -174,21 +267,63 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     V2 = Vs[1:, :]                         # remove first row -> L x M
     # z_k are the eigenvalues of the M x M matrix pinv(V1) @ V2 (TLS matrix pencil).
     Zmat = np.linalg.pinv(V1) @ V2
-    z = np.linalg.eigvals(Zmat)
+    # CAST TO COMPLEX (finding Q-8): np.linalg.eigvals returns a REAL array when every eigenvalue
+    # of the real Zmat happens to be real, and np.log of a NEGATIVE real float64 is nan -- a pole
+    # at exactly Nyquist (z < 0) then leaked out as omega = 0 with gamma = nan. The complex log
+    # takes the correct branch ln|z| + i pi.
+    z = np.asarray(np.linalg.eigvals(Zmat), dtype=np.complex128)
 
     # discard non-physical / numerically dead poles: |z| ~ 0 (infinite damping) is meaningless.
     z = z[np.abs(z) > 1e-12]
     if z.size == 0:
         return []
+    # GROWING-POLE POLICY (finding Q-9). |z| > 1 is gamma < 0 and q < 0, which the Mode contract
+    # forbids. Poles a hair outside the unit circle are the numerical image of a LOSSLESS mode:
+    # snap those to |z| = 1 exactly (gamma = 0, q = inf) instead of reporting a large negative
+    # gamma manufactured by a 1e-12 modulus excess. Genuinely growing poles are dropped with a
+    # warning unless the caller opted in.
+    absz = np.abs(z)
+    marginal = (absz > 1.0) & (absz <= 1.0 + _GAIN_TOL)
+    if np.any(marginal):
+        z = np.where(marginal, z / np.where(absz > 0.0, absz, 1.0), z)
+        absz = np.abs(z)
+    growing = absz > 1.0 + _GAIN_TOL
+    if np.any(growing) and not allow_gain:
+        warnings.warn(
+            "matrix_pencil: dropped {} GROWING pole(s) (|z| up to {:.6g} > 1, i.e. gamma < 0 and "
+            "q < 0), which contradict the documented Mode contract (gamma > 0) and can overflow "
+            "the residue Vandermonde on a long trace. Pass allow_gain=True to keep them (an "
+            "amplifying medium / an unstable simulation), or shorten the fit window.".format(
+                int(np.count_nonzero(growing)), float(absz.max())),
+            RuntimeWarning, stacklevel=2)
+        z = z[~growing]
+        absz = absz[~growing]
+        if z.size == 0:
+            return []
     s = np.log(z) / dt                     # continuous poles s_k = -gamma/2 -/+ i omega_0
 
     # residues by Vandermonde least squares: y[n] = sum_k R_k z_k^n
     n_idx = np.arange(N)
-    Zvand = z[None, :] ** n_idx[:, None]   # N x M
-    R, *_ = np.linalg.lstsq(Zvand, y, rcond=None)
+    if absz.max() <= 1.0 + _GAIN_TOL:
+        # decaying (or unit-circle) poles: z**n cannot overflow -- (1+1e-9)**N is ~1 even at
+        # N = 1e5 -- so keep the original power form and stay BYTE-IDENTICAL on every physical
+        # ringdown, including one whose marginal pole was just snapped onto the unit circle.
+        Zvand = z[None, :] ** n_idx[:, None]                 # N x M
+        col_scale = np.ones(z.size, dtype=np.complex128)
+    else:
+        # allow_gain path only: build the Vandermonde in LOG space with each column divided by
+        # its own largest magnitude, so |z| > 1 cannot reach inf (1.5**1200 = inf poisons the
+        # lstsq and the |amplitude| sort for EVERY mode). Solving the scaled system and undoing
+        # the scale afterwards recovers the same residues.
+        logz = np.log(z)
+        c = np.maximum(0.0, (N - 1) * np.real(logz))
+        Zvand = np.exp(n_idx[:, None] * logz[None, :] - c[None, :])
+        col_scale = np.exp(-c).astype(np.complex128)
+    R_scaled, *_ = np.linalg.lstsq(Zvand, y, rcond=None)
 
     # full reconstruction -> residual RMS for the SNR estimate
-    recon = Zvand @ R
+    recon = Zvand @ R_scaled
+    R = R_scaled * col_scale
     resid = y - (recon.real if real_signal else recon)
     res_rms = float(np.sqrt(np.mean(np.abs(resid) ** 2)))
 
@@ -198,10 +333,17 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
         # mode once by taking the Im(s) < 0 representative (the exp(-i omega_0 t), i.e. positive
         # physical-frequency member) and doubling its residue; report a real pole (omega ~ 0) once.
         w_tol = omega_zero_tol / dt
+        w_nyq = np.pi / dt
         for si, Ri in zip(s, R):
             omega = -si.imag
             gamma = -2.0 * si.real
-            if si.imag < -w_tol:                        # positive-frequency representative
+            if abs(abs(si.imag) - w_nyq) <= w_tol:      # SELF-CONJUGATE Nyquist pole (finding Q-8)
+                # z is real NEGATIVE: y[n] ~ Re(A) (-1)^n. It is its own conjugate partner, so it
+                # is reported ONCE with an UNDOUBLED real residue -- the plain conjugate collapse
+                # below would send it to the "already counted" branch and drop it silently.
+                omega = w_nyq
+                amp = complex(Ri.real, 0.0)
+            elif si.imag < -w_tol:                      # positive-frequency representative
                 amp = 2.0 * Ri
             elif abs(si.imag) <= w_tol:                 # zero-frequency (pure decay) mode
                 omega = 0.0
@@ -410,7 +552,11 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
 
 def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
     """Convenience: dominant-mode (f0_Hz, Q) of a ringdown trace. Extra kwargs pass through to
-    matrix_pencil. Raises ValueError if no mode is found."""
+    matrix_pencil. Raises ValueError if no mode is found.
+
+    Inherits :func:`matrix_pencil`'s O(N^3)/O(N^2) cost in the RAW trace length and its
+    ``max_bytes`` big-N guard (audit P-3): a multi-thousand-sample FDTD trace should be decimated
+    (or handed to :func:`fdtd_etalon_ringdown`, which decimates for you) before it gets here."""
     modes = matrix_pencil(signal, dt, **kwargs)
     if not modes:
         raise ValueError("matrix_pencil found no modes in the trace")

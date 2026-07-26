@@ -492,3 +492,77 @@ def test_mode_fields_and_all():
         assert name in rd.__all__
     m = Mode(omega_rad_s=10.0, gamma_rad_s=2.0, q=5.0, amplitude=1 + 0j, snr_est=np.inf)
     assert abs(m.f_hz - 10.0 / (2 * np.pi)) < 1e-12
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 10 (findings Q-8 / Q-9): the DISCRETE-POLE DOMAIN -- Nyquist branch and growing poles
+# ------------------------------------------------------------------------------------------------
+def test_gate10a_nyquist_pole_is_reported_not_nan(recwarn):
+    """finding Q-8: `np.linalg.eigvals` returns a REAL array when every eigenvalue is real, and
+    `np.log` of a NEGATIVE float64 is nan -- a pole at exactly Nyquist (z < 0) escaped the public
+    API as omega_rad_s = 0 with gamma_rad_s = nan and q = nan, plus a RuntimeWarning from numpy.
+    z is now cast to complex128 (correct branch ln|z| + i pi) and the self-conjugate Nyquist pole
+    is reported ONCE with an undoubled real residue."""
+    dt, n = 1e-15, np.arange(400)
+    y = ((-1.0) ** n) * np.exp(-0.01 * n)                  # z = -exp(-0.01): |z| < 1, arg = pi
+    modes = matrix_pencil(y, dt)
+    assert modes, "the Nyquist mode must not be dropped by the conjugate collapse"
+    for m in modes:
+        assert np.isfinite(m.omega_rad_s) and np.isfinite(m.gamma_rad_s) and np.isfinite(m.q)
+    dom = modes[0]
+    assert dom.omega_rad_s * dt == pytest.approx(np.pi, abs=1e-9)        # omega = pi/dt exactly
+    assert dom.gamma_rad_s * dt == pytest.approx(0.02, abs=1e-9)         # gamma = -2 ln|z| / dt
+    assert dom.q == pytest.approx(np.pi / 0.02, rel=1e-9)
+    assert abs(dom.amplitude) == pytest.approx(1.0, rel=1e-9)            # NOT doubled
+    assert not [w for w in recwarn if "invalid value encountered in log" in str(w.message)]
+    # CONTROL: an ordinary near-Nyquist mode is unaffected (0.95 pi, not pi)
+    ctl = matrix_pencil(np.cos(0.95 * np.pi * n) * np.exp(-0.01 * n), dt)[0]
+    assert ctl.omega_rad_s * dt == pytest.approx(0.95 * np.pi, rel=1e-9)
+    assert ctl.gamma_rad_s * dt == pytest.approx(0.02, rel=1e-6)
+
+
+def test_gate10b_growing_poles_are_dropped_and_do_not_overflow():
+    """finding Q-9: nothing rejected |z| > 1, so a growing trace returned gamma < 0 and q < 0
+    against the documented Mode contract -- and `z**n` overflowed to inf at large N, poisoning the
+    residue lstsq and the |amplitude| sort for EVERY mode. Growing poles are now dropped with a
+    RuntimeWarning (opt back in with allow_gain=True, which uses an overflow-free log-space
+    Vandermonde)."""
+    dt, n = 1e-15, np.arange(400)
+    y_grow = np.exp(+0.02 * n) * np.cos(0.3 * n)
+    with pytest.warns(RuntimeWarning, match="GROWING pole"):
+        modes = matrix_pencil(y_grow, dt)
+    assert all(m.gamma_rad_s >= 0.0 and m.q >= 0.0 for m in modes)       # contract restored
+    kept = matrix_pencil(y_grow, dt, allow_gain=True)
+    assert kept and kept[0].gamma_rad_s < 0.0                            # opt-in returns them
+    assert kept[0].omega_rad_s * dt == pytest.approx(0.3, rel=1e-6)
+    assert np.isfinite(abs(kept[0].amplitude)) and np.isfinite(kept[0].q)
+    # The Vandermonde z**n_idx is built from z ALONE, so a growing pole overflows float64 once
+    # |z|**(N-1) passes ~1.8e308 -- for |z| = 1.5 that is N ~ 1750, NOT the N = 1200 the audit
+    # note quotes (1.5**1200 = 2.04e211, comfortably finite; the arithmetic in finding Q-9 is
+    # wrong on that point even though the mechanism is real). The log-space column-normalized
+    # Vandermonde makes the allow_gain path immune to it at any N.
+    with np.errstate(over="ignore"):
+        assert np.isfinite(1.5 ** 1200) and not np.isfinite(np.float64(1.5) ** 1800)
+    nl = np.arange(1400)
+    y_long = np.exp(0.1 * nl) * np.cos(0.3 * nl)
+    y_long = y_long / np.max(np.abs(y_long))               # keep the DATA in range
+    long_grow = matrix_pencil(y_long, dt, allow_gain=True)
+    assert long_grow
+    assert all(np.isfinite(abs(m.amplitude)) and np.isfinite(m.q) for m in long_grow)
+    assert long_grow[0].omega_rad_s * dt == pytest.approx(0.3, rel=1e-6)
+    assert long_grow[0].gamma_rad_s * dt == pytest.approx(-0.2, rel=1e-6)
+
+
+def test_gate10c_decaying_traces_take_the_unchanged_fast_path():
+    """The Q-9 machinery must be INERT on every physical ringdown: an ordinary decaying trace
+    still goes through the original z**n Vandermonde, so the shipped numbers are untouched."""
+    dt, n = 1e-15, np.arange(600)
+    y = (np.exp(-0.004 * n) * np.cos(0.7 * n) + 0.4 * np.exp(-0.02 * n) * np.cos(1.9 * n))
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                      # no growing-pole warning may fire
+        modes = matrix_pencil(y, dt)
+    got = sorted((m.omega_rad_s * dt, m.gamma_rad_s * dt) for m in modes)
+    assert len(got) == 2
+    assert got[0][0] == pytest.approx(0.7, rel=1e-8) and got[0][1] == pytest.approx(0.008, rel=1e-6)
+    assert got[1][0] == pytest.approx(1.9, rel=1e-8) and got[1][1] == pytest.approx(0.04, rel=1e-6)

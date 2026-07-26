@@ -242,3 +242,38 @@ def test_collapse_regions_to_layers_identity_and_conflict():
     with pytest.raises(ValueError):                        # genuinely split modulation -> loud
         collapse_regions_to_layers(d, {"ito_inpatch": EpsField(scalar=2.0 + 0j),
                                        "ito_outside": EpsField(scalar=3.0 + 0j)})
+
+
+def _tiny_design():
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    reg = MaterialRegistry()
+    for nm, e in [("air", 1.0 + 0j), ("hi", complex(4.0, 0.3)), ("glass", complex(2.25))]:
+        reg.add(Material(nm, ConstantOptical(e)))
+    return Design(name="t", unit_cell=UnitCell.square(300e-9),
+                  stack=Stack(layers=[Layer("a", 120e-9, "hi")],
+                              superstrate_material="air", substrate_material="glass"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+
+
+def test_byo_eps_seam_enforces_time_convention():
+    """audit V-5: EpsField.time_convention was WRITTEN by the bridge and read by nobody, so a
+    caller assembling EpsFields themselves (the whole point of the pluggable eps_by_region seam)
+    could hand any backend an exp(+i omega t) permittivity and get a silently AMPLIFYING solve.
+    The label is now checked at the seam -- here on the layered path; the FEM assembler, the FDTD
+    seam and the four lumenairy backends call the same helper."""
+    from dynameta.core.eps_field import EpsField, require_solver_time_convention
+    from dynameta.core.layered import collapse_regions_to_layers
+    d = _tiny_design()
+    good = {"a": EpsField(scalar=complex(4.0, 0.3))}
+    assert collapse_regions_to_layers(d, good)                 # default label passes
+    bad = {"a": EpsField(scalar=complex(4.0, -0.3), time_convention="exp(+iwt)")}
+    with pytest.raises(ValueError, match="time_convention"):
+        collapse_regions_to_layers(d, bad)
+    # the helper itself: names the offending region, and tolerates a duck-typed entry
+    with pytest.raises(ValueError, match=r"'a'"):
+        require_solver_time_convention(bad, "unit-test")
+    require_solver_time_convention({"a": object()}, "unit-test")   # no label -> no opinion
+    require_solver_time_convention(None, "unit-test")              # empty seam

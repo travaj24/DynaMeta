@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import devsim as ds
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import M_E
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.density_gradient import dg_correct_density_1d, dg_length_m
@@ -130,7 +131,7 @@ def _run_hard_wall(tag, *, gamma=1.0, pin=8.0, frozen_psi=True,
 
 
 def _deficit(z, n):
-    return float(np.trapezoid(N0 - n, z))
+    return float(trapz(N0 - n, z))
 
 
 def main():

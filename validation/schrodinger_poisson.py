@@ -12,6 +12,7 @@ import sys, os, math
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scipy.special import ai_zeros
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.carriers.schrodinger_poisson import (
     SchrodingerPoisson1D, HBAR, M_E, Q, KB, EPS0)
 
@@ -122,9 +123,13 @@ def test_self_consistent_accumulation():
     # audit 7.3: the docstring promised the Gauss-law pin but no gate implemented it.
     # Integrated excess charge must equal the boundary-field difference:
     # q Int(n - Nd) dz == eps0 eps_r (E(0) - E(t)), E = -dphi/dz from the SOLVED phi.
-    EPS0 = 8.8541878128e-12
+    # audit R-5: this line REBOUND the module-level EPS0 imported at the top from
+    # carriers.schrodinger_poisson (a ruff F841-class shadow inside an oracle). The literal
+    # happens to equal the imported CODATA-2018 value, so the gate below was right by
+    # coincidence -- and a future constants refresh would have silently desynchronized the
+    # oracle from the solver it is checking. Use the SAME constant the solver uses.
     dz = z[1] - z[0]
-    Q_sheet = Q * np.trapezoid(n_full - Nd, z)
+    Q_sheet = Q * trapz(n_full - Nd, z)
     E_gate = -(phi[1] - phi[0]) / dz
     E_body = -(phi[-1] - phi[-2]) / dz
     Q_gauss = EPS0 * eps_r * (E_gate - E_body)
