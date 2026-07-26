@@ -98,7 +98,8 @@ def main():
     for i, thf in enumerate(th_field):
         evals = np.sort(np.linalg.eigvalsh(eps[i].real))
         # uniaxial: two ordinary n_o^2, one extraordinary n_e^2
-        okC = okC and np.allclose(evals, np.sort([N_O ** 2, N_O ** 2, N_E ** 2]), atol=1e-9)
+        # AUDIT T-6: rtol=0.0 -- without it numpy's 1e-5 default dominates the intended 1e-9 gate.
+        okC = okC and np.allclose(evals, np.sort([N_O ** 2, N_O ** 2, N_E ** 2]), rtol=0.0, atol=1e-9)
         # extraordinary eigenvector along (cos th_optic, 0, sin th_optic), th_optic = pi/2 - th_field
         th_opt = 0.5 * math.pi - float(thf)
         w, V = np.linalg.eigh(eps[i].real)

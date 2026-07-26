@@ -48,12 +48,23 @@ Physics (all SI, exp(-i omega t), Im eps > 0 = loss):
   (the flat-surface oracle and the FEM two-step use the SAME chi_s, and the slope/symmetry/
   angle gates are prefactor-independent), so the absolute scale is a documented convention,
   not a fitted quantity.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. This file speaks BOTH: the closed-form
+oracles take {'s','p'} while the FEM path reads design.optical.polarization, the lab
+{'x','y','p'}.
 """
 
 from __future__ import annotations
 
 import cmath
 import math
+import warnings
 
 from dynameta.constants import EPS0, C_LIGHT, Q_E, M_E
 
@@ -88,6 +99,18 @@ def rudnick_stern_surface_chi(a: float, b: float, omega: float,
     f_perp = ((complex(eps_w) - 1.0) / 4.0) ** 2
     f_par = (complex(eps_w) - 1.0) / 4.0
     return {"zzz": -a * scale * f_perp, "par": -b * scale * f_par}
+
+
+# ---- TWO polarization vocabularies live in this file (audit V-8) -------------------------------
+# The CLOSED-FORM oracles (rudnick_stern_flat_shg / _sfg) take the plane-of-incidence {'s','p'};
+# the FEM path (_reconstruct_fundamental_field, shg_structured_two_step) reads
+# design.optical.polarization, which is the OpticalSpec LAB-AXIS {'x','y','p'}.  Both sets are
+# UNCHANGED; both rejections now come from dynameta.core.polarization so a label from the other
+# family is named rather than silently mapped (an 'x' used to take the p-pol branch here).
+def _reject_pol(pol, where: str, vocabulary: str = "sp", param: str = "pol"):
+    """Raise the shared V-8 vocabulary error.  LAZY import, failure path only."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, vocabulary, where=where, param=param)
 
 
 def _ppol_normal_field_inside(E0: float, theta: float, eps_w: complex) -> complex:
@@ -131,6 +154,11 @@ def rudnick_stern_flat_shg(lambda_m: float, theta_deg: float, eps_w: complex, ep
     rule). Returns dict with 'S_up' (W/m^2), 'efficiency' (S_up / incident intensity), 'E_perp_in',
     'A', and the SH wavevectors.
     """
+    if polarization not in ("s", "p"):
+        # audit V-8: this used to fall through to the p-pol branch for ANY string that was not
+        # exactly 's', so 'x' / 'y' (the OpticalSpec vocabulary this module ALSO consumes on its
+        # FEM path) silently produced the p-pol answer.  Same accepted set, named rejection.
+        _reject_pol(polarization, "rudnick_stern_flat_shg", param="polarization")
     theta = math.radians(float(theta_deg))
     omega = 2.0 * math.pi * C_LIGHT / lambda_m
     Omega = 2.0 * omega
@@ -155,6 +183,31 @@ def rudnick_stern_flat_shg(lambda_m: float, theta_deg: float, eps_w: complex, ep
     return {"S_up": float(S_up), "efficiency": float(eff), "E_perp_in": complex(E_perp_in),
             "A": complex(A), "beta1": complex(beta1), "beta2": complex(beta2),
             "K_par": float(K_par)}
+
+
+def _require_vacuum_superstrate(n_super, where: str) -> None:
+    """RAISE unless the SUPERSTRATE is vacuum (audit F-11): every radiator in this module is a
+    vacuum one, while `n_super` is an exposed parameter of all three drivers.
+
+    Vacuum is hardwired in FOUR places, none of which reads n_super:
+      * _ppol_normal_field_inside -- the p-pol Fresnel transmission is written with n1 = 1;
+      * _normal_sheet_vacuum_field -- the sheet's radiation is the VACUUM normal-dipole-sheet
+        plane wave (beta1 = sqrt(k0^2 - kx^2), Hy amplitude with beta2 = beta1), and it is passed
+        to solve_fem_sourced with eps_ref = 1.0 (a dense superstrate would put a nonzero scattered
+        source k0^2 (eps_sup - 1) E0 inside the PML, where the decomposition breaks down);
+      * the analytic per-order sheet power's denominator beta1 + beta2/eps_2w (Sipe, vacuum above);
+      * _sourced_order_power's beta1 = sqrt(k0_2w^2 - K_m^2) and its plane-wave flux.
+    So a caller who sets n_super = 1.5 gets a silently wrong number rather than an encapsulated
+    device. Refuse instead. (A dielectric CAP INSIDE the cell is a different case and is
+    supported: the sheet extraction measures its eps, and the scattered-field route lets the FEM
+    scatter the vacuum sheet radiation off it -- see shg_structured_two_step.)"""
+    if abs(complex(n_super) - 1.0) > 1e-9:
+        raise NotImplementedError(
+            "{}: a non-vacuum superstrate (n_super={:.4g}) is not supported -- the Rudnick-Stern "
+            "sheet radiator, its eps_ref=1.0 scattered-field background and the radiated-order "
+            "extraction are all VACUUM constructions, so the returned SH power would be silently "
+            "wrong (the surface sheet alone scales as eps_above^2). Use n_super=1; a dielectric "
+            "CAP layer inside the cell is supported instead.".format(where, complex(n_super)))
 
 
 def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
@@ -196,6 +249,7 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     from dynameta.optics.eps_assembler import assemble_eps_cf
     from dynameta.optics.solver import solve_fem, solve_fem_sourced
 
+    _require_vacuum_superstrate(n_super, "shg_two_step")            # audit F-11
     geo = LayeredOpticalBuilder(design).build()
     mesh = geo.mesh
     if eps_at is None:
@@ -394,6 +448,8 @@ def rudnick_stern_flat_sfg(omega1_rad_s: float, omega2_rad_s: float,
     the DFG-conjugated field actually used), 'K_par3' (1/m), 'k3' (1/m vacuum), 'omega3' (rad/s),
     'theta3_deg' (emission polar angle), 'beta1', 'beta2', 'propagating' (bool).
     """
+    if polarization not in ("s", "p"):
+        _reject_pol(polarization, "rudnick_stern_flat_sfg", param="polarization")   # audit V-8
     proc = str(process).lower()
     if proc not in ("sfg", "dfg"):
         raise ValueError("process must be 'sfg' or 'dfg'")
@@ -478,6 +534,7 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     proc = str(process).lower()
     if proc not in ("sfg", "dfg"):
         raise ValueError("process must be 'sfg' or 'dfg'")
+    _require_vacuum_superstrate(n_super, "sfg_two_step")            # audit F-11
     sgn = 1.0 if proc == "sfg" else -1.0
     w1, w2 = float(omega1_rad_s), float(omega2_rad_s)
     w3 = w1 + sgn * w2
@@ -623,9 +680,12 @@ def _region_eps_scalar(design, geo, region, lambda_m):
 #   (b) extract E_perp just OUTSIDE the metal along the surface by point-sampling E_z in the
 #       DIELECTRIC at small standoffs and extrapolating to the boundary -- the CONTINUOUS normal-D
 #       route (D_perp = eps E.n is single-valued across the interface; the discontinuous E.n is not),
-#       E_perp,inside = D_perp / eps_metal. Point evaluation in the dielectric VOLUME (not a boundary
-#       trace) is the reliable way to reach the normal component in HCurl. MEASURED NOISE vs the Sipe
-#       closed form on a flat mirror: ~0.1-0.25% at 20-35 deg, ~1.8% at 45 deg;
+#       E_perp,inside = D_perp / eps_metal = eps_above E_z,above / eps_metal, with eps_above MEASURED
+#       from the eps field at the standoff points (audit F-11: it was hardwired to vacuum, so the
+#       sheet was wrong by eps_above^2 over any dielectric). Point evaluation in the dielectric
+#       VOLUME (not a boundary trace) is the reliable way to reach the normal component in HCurl.
+#       MEASURED NOISE vs the Sipe closed form on a flat mirror: ~0.1-0.25% at 20-35 deg, ~1.8% at
+#       45 deg;
 #   (c) assemble the Rudnick-Stern normal sheet P_perp(2w) = eps0 chi_perp E_perp^2 ON THE SURFACE
 #       PROFILE, then RADIATE it via the SAME scattered-field route shg_two_step uses
 #       (_normal_sheet_vacuum_field, the sheet's analytic vacuum radiation), generalized to a
@@ -642,7 +702,12 @@ def _region_eps_scalar(design, geo, region, lambda_m):
 # structured driver reproduces shg_two_step to the extraction noise (< 2%, the load-bearing gate 1).
 # Refs: Rudnick & Stern, PRB 4, 4274 (1971); Heinz / Sipe interface BCs (Sipe, JOSA B 4, 481 (1987);
 # Sipe/So/Fukui/Stegeman, PRB 21, 4389 (1980)); Dadap, Shan, Eisenthal, Heinz, PRL 83, 4045 (1999)
-# (small-particle multipole SH). Same LOSSLESS-superstrate power-read-out constraint as shg_two_step.
+# (small-particle multipole SH). Same LOSSLESS-superstrate power-read-out constraint as shg_two_step,
+# and the same VACUUM-superstrate requirement (n_super=1 -- every radiator in this module is a vacuum
+# construction; _require_vacuum_superstrate refuses otherwise, audit F-11). A dielectric CAP inside
+# the cell IS supported: (b) measures its eps and (c)'s eps_ref=1 decomposition lets the FEM scatter
+# the vacuum sheet radiation off it -- only the analytic 'sheet_order_power' stays a flat-vacuum
+# physical-optics estimate there, and says so.
 
 
 def _ensure_bloch_dirs(geo):
@@ -663,57 +728,36 @@ def _ensure_bloch_dirs(geo):
         pass
 
 
-def _fresnel_background(pol, ng, kx, kz_s_c, kz_sub, z_int, eps_sup_c, eps_sub_c, n_super, n_sub, k0):
-    """The analytic layered (air/metal half-space) Fresnel background field E_bg and its eps_bg, in
-    the x-z plane (azimuth 0), byte-for-byte the construction solver.solve_fem uses internally
-    (p-pol: numeric interface BCs; s-pol/x-pol: Fresnel r/t). Returned so the fundamental field can
-    be REBUILT through solve_fem_sourced (which exposes the field; solve_fem returns only R/T). The
-    scattered source k0^2 (eps - eps_bg) E_bg is then identical to solve_fem's, so E_bg + gfu equals
-    solve_fem's total field."""
-    import cmath as _cm
-    import numpy as _np
-    iph = ng.exp(1j * kx * ng.x)
-    eps_bg = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
-    if pol == "p":
-        kpar = kx
-        cth = kz_s_c / (complex(n_super) * k0); sth = kpar / (complex(n_super) * k0)
-        cth_t = kz_sub / (complex(n_sub) * k0); sth_t = kpar / (complex(n_sub) * k0)
-        A = _cm.exp(-1j * kz_s_c * z_int); B = _cm.exp(1j * kz_s_c * z_int)
-        C = _cm.exp(-1j * kz_sub * z_int)
-        M = _np.array([[cth * B, -cth_t * C],
-                       [cth * B * eps_sup_c / kz_s_c, cth_t * C * eps_sub_c / kz_sub]], dtype=complex)
-        rhs = _np.array([-cth * A, cth * A * eps_sup_c / kz_s_c], dtype=complex)
-        pp_rho, pp_tau = (complex(v) for v in _np.linalg.solve(M, rhs))
-        et_sup = cth * ng.exp((-1j * kz_s_c) * ng.z) + pp_rho * cth * ng.exp((1j * kz_s_c) * ng.z)
-        ez_sup = sth * ng.exp((-1j * kz_s_c) * ng.z) - pp_rho * sth * ng.exp((1j * kz_s_c) * ng.z)
-        et_sub = pp_tau * cth_t * ng.exp((-1j * kz_sub) * ng.z)
-        ez_sub = pp_tau * sth_t * ng.exp((-1j * kz_sub) * ng.z)
-        et = ng.IfPos(ng.z - z_int, et_sup, et_sub)
-        E_bg = ng.CoefficientFunction((iph * et, 0.0 * et,
-                                       iph * ng.IfPos(ng.z - z_int, ez_sup, ez_sub)))
-    else:                                              # s-pol (E along y): scalar Fresnel r/t
-        r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)
-        t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
-        R0 = r_f * _cm.exp(-2j * kz_s_c * z_int)
-        T0 = t_f * _cm.exp(-1j * (kz_s_c - kz_sub) * z_int)
-        sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
-        sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
-        scal = iph * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
-        E_bg = ng.CoefficientFunction((0.0 * scal, scal, 0.0 * scal))
-    return E_bg, eps_bg
-
-
 def _reconstruct_fundamental_field(geo, design, lambda_m, optical, eps_cf, order,
                                     n_super, n_sub, theta_deg, pol):
     """Rebuild solve_fem's TOTAL fundamental field on the (structured) cell so E_perp can be
-    sampled along the surface. Constructs the analytic layered background (_fresnel_background) and
-    drives solve_fem_sourced with it (bg_field=E_bg, eps_ref=eps_bg) -- the scattered source is
-    byte-identical to solve_fem's, so total = E_bg + gfu equals solve_fem's field, and now the
-    GridFunction is available. Returns (total_field_cf, kx_per_nm, relres)."""
+    sampled along the surface. Builds the analytic layered background with solve_fem's OWN
+    constructor (solver._layered_background) and drives solve_fem_sourced with it
+    (bg_field=E_bg, eps_ref=eps_bg) -- the scattered source is then identical to solve_fem's, so
+    total = E_bg + gfu equals solve_fem's field, and now the GridFunction is available.
+    Returns (total_field_cf, kx_per_nm, relres).
+
+    audit F-12: this used to call a PRIVATE COPY of that constructor (_fresnel_background), which
+    had drifted to two branches -- so polarization='x' (the OpticalSpec DEFAULT) was reconstructed
+    as E-along-y, the ORTHOGONAL mode, and probed with (0,1,0) to match. Both the field and the
+    probe now come from the single shared implementation. Azimuth is not supported here (the whole
+    surface-SHG module is x-z-plane only) and is REFUSED rather than silently dropped."""
+    if pol not in ("x", "y", "p"):
+        # audit V-8: `pol` here is the OpticalSpec LAB-AXIS vocabulary (it is read straight off
+        # design.optical.polarization), NOT the {'s','p'} the closed-form oracles in this same
+        # module take.  Rejecting it by name is what keeps the two families from crossing.
+        _reject_pol(pol, "_reconstruct_fundamental_field", vocabulary="lab_xyp",
+                    param="OpticalSpec.polarization")
     import numpy as _np
     from dynameta.optics.ngsolve_layered import S as _S
-    from dynameta.optics.solver import solve_fem_sourced
-    import ngsolve as _ng
+    from dynameta.optics.solver import (background_probe_pol, solve_fem_sourced,
+                                        _layered_background)
+    phi_deg = float(getattr(optical, "azimuth_deg", 0.0) or 0.0)
+    if abs(phi_deg) > 1e-9:
+        raise NotImplementedError(
+            "surface-SHG: conical incidence (azimuth_deg={:.4g}) is not supported -- the sheet "
+            "extraction, its Fourier decomposition and the sourced radiation are all built in the "
+            "x-z plane (ky = 0). Use azimuth_deg=0.".format(phi_deg))
     k0 = 2.0 * math.pi / (lambda_m * _S)
     th = math.radians(float(theta_deg))
     kx = k0 * math.sin(th)
@@ -723,9 +767,9 @@ def _reconstruct_fundamental_field(geo, design, lambda_m, optical, eps_cf, order
     z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
              else geo.z_sub_interface_nm)
     eps_sup_c, eps_sub_c = complex(n_super) ** 2, complex(n_sub) ** 2
-    E_bg, eps_bg = _fresnel_background(pol, _ng, kx, kz_s_c, kz_sub, z_int, eps_sup_c, eps_sub_c,
-                                       n_super, n_sub, k0)
-    probe = (math.cos(th), 0.0, -math.sin(th)) if pol == "p" else (0.0, 1.0, 0.0)
+    E_bg, _E_inc, eps_bg, _R0, _T0 = _layered_background(
+        pol, k0, kx, 0.0, 0.0, kz_s_c, kz_sub, z_int, eps_sup_c, eps_sub_c, n_super, n_sub)
+    probe = background_probe_pol(pol, th, 0.0)
     src = solve_fem_sourced(geo, lambda_m, eps_cf, optical, order=order, n_super=n_super,
                             n_sub=n_sub, bg_field=E_bg, eps_ref=eps_bg,
                             k_par_per_nm=(kx, 0.0), probe_pol=probe)
@@ -769,22 +813,91 @@ def _np_linspace(a, b, n):
     return _np.linspace(a, b, n)
 
 
+# --- straddle detection for the E_z standoff band (audit F-11) -----------------------------------
+_EPS_JUMP_REL = 1.0e-2         # a step this large relative to eps_above is a candidate interface
+_JUMP_SHAPE_RATIO = 4.0        # ... and it must be this much larger than the next-largest step
+_NEAR_FRAC = 0.05              # sub-standoff probe depth, as a fraction of the FIRST standoff
+
+
+def _straddles_interface(eps_col, eps_above):
+    """True when the sampled permittivities `eps_col` (in standoff order) look like a MATERIAL STEP
+    rather than a smoothly graded film. audit F-11 residual.
+
+    The original test -- "any sample differs from eps_above by more than 1 %" -- cannot tell the two
+    apart, and a graded film is the common case (a VoxelCoefficient interpolates linearly across the
+    band). Measured on a real mesh, 4..24 nm band over a 2.25 cap: a film grading by 1.5 %, 5.0 %,
+    7.8 % and 20 % across the band all warned "crosses a MATERIAL INTERFACE" although none does,
+    while only the 0.5 % case stayed quiet -- i.e. the threshold was a grading-rate test wearing an
+    interface's warning text. With the shape test all five are silent and every genuine cap
+    (2, 6, 12, 20 nm under the same band) warns, including the 2 nm one that is thinner than the
+    first standoff and used to be invisible.
+
+    A step and a grade have different SHAPES, and the shape is what is diagnostic. Over uniformly
+    spaced samples a linear grade gives equal successive differences (max/next-largest -> 1); a
+    genuine interface puts the whole variation into ONE difference while the rest are ~0
+    (max/next-largest -> very large). So: flag only when the largest successive step both exceeds
+    `_EPS_JUMP_REL` of |eps_above| AND is `_JUMP_SHAPE_RATIO` times the next-largest one. With a
+    single difference (two valid samples) the shape is unknowable and the 1 % magnitude test is used
+    on its own, which is the conservative reading.
+
+    `eps_col` may carry the extra sub-standoff sample in front of the band; its spacing is shorter
+    than the band's, which changes a linear grade's first difference by a factor ~0.95 -- far inside
+    the `_JUMP_SHAPE_RATIO` margin -- while a cap thinner than the first standoff puts a full
+    material step there, which is exactly what it is for.
+
+    A smooth grade is NOT a defect for this extractor: `eps_above` is taken from the sample NEAREST
+    the surface and the two-wave fit is evaluated at dz -> 0, so the grade contributes at the level
+    of its variation over ONE standoff step (0.05 %/nm-class), not over the whole band."""
+    import numpy as _np
+    ev = [complex(e) for e in eps_col if _np.isfinite(e)]
+    if len(ev) < 2:
+        return False
+    scale = abs(eps_above) if abs(eps_above) > 0.0 else 1.0
+    diffs = sorted(abs(ev[i + 1] - ev[i]) for i in range(len(ev) - 1))
+    jump = diffs[-1]
+    if jump <= _EPS_JUMP_REL * scale:
+        return False                                           # nothing bigger than float noise
+    if len(diffs) == 1:
+        return True                                            # shape unknowable -> conservative
+    return jump > _JUMP_SHAPE_RATIO * diffs[-2]
+
+
 def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_zzz, eps_metal,
-                                    metal_region, k0_2w, kz_fund_air, *, nx=40, ny=3,
+                                    metal_region, k0_2w, k0_fund, *, nx=40, ny=3,
                                     standoff_nm=4.0, n_standoff=6):
     """Extract the Rudnick-Stern surface-sheet profile along the STRUCTURED metal top.
 
     For each in-plane sample (xv, yv): find the local surface height z_s (Re eps < 0 boundary),
     point-sample E_z in the DIELECTRIC at n_standoff small standoffs above z_s, extrapolate to
-    z_s (D_perp = E_z,air at the boundary, the continuous normal-D), convert to the inside normal
-    field E_perp,in = D_perp / eps_metal (the Sipe driving field), and form the normal sheet
-    P_z(x) = eps0 chi_zzz E_perp,in^2 (C/m).
+    z_s, convert to the inside normal field through NORMAL-D CONTINUITY
+
+        D_perp = eps_above E_z,above = eps_metal E_perp,in   ->   E_perp,in = eps_above E_z,above / eps_metal
+
+    (the Sipe driving field), and form the normal sheet P_z(x) = eps0 chi_zzz E_perp,in^2 (C/m).
+
+    eps_above is MEASURED from eps_fund_cf at the standoff sample points, per column (audit F-11:
+    the conversion used to read `d_perp / eps_metal`, i.e. it silently identified the extrapolated
+    E_z with D_perp and so was short by exactly eps_above -- and since P_z ~ E_perp^2, the sheet was
+    wrong by eps_above^2, a factor 5 for a mere n = 1.5 encapsulant. The standoff two-wave fit's kz
+    likewise used the VACUUM dispersion and is now built from the same measured eps_above.) A
+    standoff band that STRADDLES a material interface (a dielectric cap thinner than
+    n_standoff*standoff_nm) cannot be described by one medium at all, and warns.
+
+    THE STRADDLE TEST COVERS BOTH SIDES OF THE BAND, and only genuine steps (audit F-11 residual):
+      * a cap thinner than the FIRST standoff used to be INVISIBLE -- every sample sat above the cap,
+        the band read perfectly uniform, and eps_above came back as the upper medium with no warning
+        (measured: a 2 nm cap under a 4..24 nm band -> eps_above = 1.0, and the sheet is wrong by
+        eps_cap^2 = 5x for n = 1.5). One extra probe at _NEAR_FRAC of the first standoff catches it.
+      * a smoothly GRADED film no longer warns: see `_straddles_interface` for the shape test and
+        the measured 1.5 / 5.0 / 7.8 % graded cases that used to warn spuriously.
 
     Returns a dict with the y-averaged, x-demodulated Fourier decomposition of the sheet:
       'c0'      : the 0-order (specular) sheet amplitude (C/m),  == the flat-limit P_z,
       'orders'  : {m: c_m} the periodic Fourier coefficients including the leading surface-height
                   phase (see shg_structured_two_step), for |m| <= (nx//2 - 1),
       'z_mean'  : area-averaged surface height (nm), the sheet radiation plane,
+      'eps_above': the measured dielectric permittivity just above the metal surface (mean over the
+                  sampled columns) -- 1 for the validated vacuum-superstrate case,
       'z_profile', 'P_profile', 'x' : diagnostics (numpy arrays).
     """
     import numpy as _np
@@ -796,6 +909,8 @@ def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_z
     # per-column: surface height + extrapolated D_perp (y-averaged)
     z_s = _np.zeros(nx)
     P_x = _np.zeros(nx, dtype=complex)
+    eps_seen = []
+    straddled = False
     for i, xv in enumerate(xs):
         zcol = []
         Pcol = []
@@ -803,29 +918,72 @@ def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_z
             z_local = _local_surface_height(mesh, eps_fund_cf, xv, yv, z_hi + 1.0, z_lo - 1.0)
             zcol.append(z_local)
             ez = []
+            eps_col = []
             for dz in ds:
+                # sampled INDEPENDENTLY (and each appended exactly once) so a failure in either
+                # evaluation cannot desynchronise ez from eps_col -- ez is indexed by ds[good]
                 try:
-                    E = total_fund(mesh(float(xv), float(yv), float(z_local + dz)))
-                    ez.append(complex(E[2]))
+                    pt = mesh(float(xv), float(yv), float(z_local + dz))
                 except Exception:
                     ez.append(_np.nan)
+                    eps_col.append(_np.nan)
+                    continue
+                try:
+                    ez.append(complex(total_fund(pt)[2]))
+                except Exception:
+                    ez.append(_np.nan)
+                try:
+                    eps_col.append(complex(eps_fund_cf(pt)))
+                except Exception:
+                    eps_col.append(_np.nan)
             ez = _np.asarray(ez)
             good = _np.isfinite(ez)
+            # the DIELECTRIC just above the metal at this column: the nearest valid standoff sample
+            # (audit F-11). Defaults to vacuum only if nothing sampled (a column entirely outside
+            # the mesh), where d_perp is 0 anyway.
+            eps_above = next((e for e in eps_col if _np.isfinite(e)), 1.0 + 0j)
+            # A cap THINNER than the FIRST standoff is invisible to a scan of the band alone --
+            # every sample sits in the medium ABOVE the cap, so the band looks perfectly uniform and
+            # eps_above is that upper medium (measured: a 2 nm cap under a 4..24 nm band read
+            # eps_above = 1.0, silently, and the sheet is then wrong by (eps_cap/1)^2 = 5x for a
+            # mere n = 1.5 cap). One extra sample BELOW the first standoff closes it. Metal samples
+            # are dropped: at a small enough offset the point evaluation snaps back into the metal
+            # element, which is a mesh artifact, not a dielectric interface. (audit F-11 residual)
+            try:
+                e_near = complex(eps_fund_cf(mesh(float(xv), float(yv),
+                                                  float(z_local + _NEAR_FRAC * float(ds[0])))))
+            except Exception:
+                e_near = _np.nan
+            scan = eps_col if not (_np.isfinite(e_near) and e_near.real > 0.0) else [e_near] + list(eps_col)
+            if _straddles_interface(scan, eps_above):
+                straddled = True
+            eps_seen.append(eps_above)
+            kz_above = cmath.sqrt(complex(eps_above) * k0_fund ** 2 - kx ** 2)
+            if kz_above.imag < 0:                              # decaying/outgoing branch
+                kz_above = -kz_above
             if good.sum() >= 2:
-                # D_perp = E_z,air at the boundary. The dielectric-side E_z is a two-wave standing
-                # field a exp(i kz dz) + b exp(-i kz dz); fit both and evaluate at dz -> 0 (exact for
-                # the propagating normal field, unlike a linear extrapolation which carries O((kz*dz)^2)
+                # The dielectric-side E_z is a two-wave standing field a exp(i kz dz) + b exp(-i kz dz)
+                # in the medium ABOVE the metal; fit both and evaluate at dz -> 0 (exact for the
+                # propagating normal field, unlike a linear extrapolation which carries O((kz*dz)^2)
                 # curvature error and pushed the flat gate over 2% at 35 deg).
-                M = _np.column_stack([_np.exp(1j * kz_fund_air * ds[good]),
-                                      _np.exp(-1j * kz_fund_air * ds[good])])
+                M = _np.column_stack([_np.exp(1j * kz_above * ds[good]),
+                                      _np.exp(-1j * kz_above * ds[good])])
                 coef, *_ = _np.linalg.lstsq(M, ez[good], rcond=None)
-                d_perp = complex(coef[0] + coef[1])            # value at dz = 0
+                ez_above = complex(coef[0] + coef[1])          # E_z in the dielectric at dz = 0
             else:
-                d_perp = 0.0 + 0j
-            e_in = d_perp / complex(eps_metal)                 # inside normal field (D continuity)
+                ez_above = 0.0 + 0j
+            # normal-D continuity: eps_above E_z,above = eps_metal E_perp,in
+            e_in = complex(eps_above) * ez_above / complex(eps_metal)
             Pcol.append(EPS0 * complex(chi_zzz) * e_in ** 2)   # normal sheet P_z (C/m)
         z_s[i] = float(_np.mean(zcol))
         P_x[i] = _np.mean(Pcol)
+    if straddled:
+        warnings.warn(
+            "surface-SHG extraction: the E_z standoff band (up to {:.3g} nm above the metal) crosses "
+            "a MATERIAL INTERFACE, so no single eps_above describes it and the two-wave fit mixes two "
+            "dispersions. Reduce standoff_nm/n_standoff below the cap thickness. (audit F-11)"
+            .format(float(ds[-1])), stacklevel=2)
+    eps_above_mean = complex(_np.mean(eps_seen)) if eps_seen else 1.0 + 0j
     z_mean = float(_np.mean(z_s))
     # demodulate the SH transverse Bloch phase exp(i kx_2w x), kx_2w = 2 kx_fund, then FFT over x.
     kx_2w = 2.0 * kx
@@ -845,7 +1003,7 @@ def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_z
         # c_m = FFT[P]_m + (leading surface-height phase) -i beta1_m FFT[P (z_s - z_mean)]_m
         orders[m] = complex(q0[idx] - 1j * b1 * q1[idx])
     return {"c0": complex(q0[0]), "orders": orders, "z_mean": z_mean,
-            "z_profile": z_s, "P_profile": P_x, "x": xs}
+            "eps_above": eps_above_mean, "z_profile": z_s, "P_profile": P_x, "x": xs}
 
 
 def _sourced_order_power(mesh, total_sh, geo, k0_2w, K_m, Z0, *, nx=None, ny=6, n_z=7):
@@ -912,8 +1070,9 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
 
     Returns dict with:
       'sheet'              the _extract_surface_sheet_profile diagnostics (Fourier orders c_m,
-                           z_mean, profiles); c_m is the SURFACE-SHEET amplitude of diffraction
-                           order m -- |c_{+-1}| ~ h for shallow corrugation (the leading trend),
+                           z_mean, the MEASURED eps_above, profiles); c_m is the SURFACE-SHEET
+                           amplitude of diffraction order m -- |c_{+-1}| ~ h for shallow
+                           corrugation (the leading trend),
       'sheet_order_power'  {m: power_W} per-order SHEET radiated power (order c_m radiating off a
                            FLAT metal at z_mean, the rudnick_stern_flat_shg amplitude) -- the CLEAN
                            physical-optics nonspecular trend used for the shallow-h slope gate,
@@ -933,13 +1092,18 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
 
     FLAT LIMIT (load-bearing gate): a geometrically flat cell reproduces shg_two_step's 'p_up_2w'
     to < 2% (only m = 0 survives; E0 collapses to the single analytic sheet plane wave). Same
-    LOSSLESS-superstrate power-read-out constraint as shg_two_step.
+    LOSSLESS-superstrate power-read-out constraint as shg_two_step, and (audit F-11) the
+    superstrate must be VACUUM: n_super != 1 RAISES, since every radiator here is a vacuum one.
+    A dielectric CAP inside the cell is supported -- the sheet extraction measures the eps just
+    above the metal and the FEM scatters the vacuum sheet radiation off the cap -- but the
+    ANALYTIC 'sheet_order_power' estimate stays a flat-metal-in-vacuum formula and says so.
     """
     import ngsolve as ng
     from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder, S
     from dynameta.optics.eps_assembler import assemble_eps_cf
     from dynameta.optics.solver import solve_fem_sourced
 
+    _require_vacuum_superstrate(n_super, "shg_structured_two_step")     # audit F-11
     geo = LayeredOpticalBuilder(design).build()
     mesh = geo.mesh
     _ensure_bloch_dirs(geo)                          # robust Bloch-idnr detection for thin grating layers
@@ -963,9 +1127,10 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     eps_metal = _region_eps_scalar(design, geo, metal_region, lambda_fund_m)
     k0_2w = 2.0 * math.pi / (lambda_2w * S)
     k0_fund = 2.0 * math.pi / (lambda_fund_m * S)
-    kz_fund_air = math.sqrt(max(k0_fund ** 2 - kx ** 2, 0.0))         # fundamental air z-wavevector
+    # the standoff fit's z-wavevector is built INSIDE the extractor from the eps it MEASURES just
+    # above the metal (audit F-11), not from a hardwired vacuum dispersion.
     sheet = _extract_surface_sheet_profile(mesh, geo, total_fund, eps_w_cf, kx, chi_zzz, eps_metal,
-                                           metal_region, k0_2w, kz_fund_air, nx=nx, ny=ny,
+                                           metal_region, k0_2w, k0_fund, nx=nx, ny=ny,
                                            standoff_nm=standoff_nm)
     E_perp_in = cmath.sqrt(sheet["c0"] / (EPS0 * complex(chi_zzz))) if abs(chi_zzz) > 0 else 0j
     kx_2w = 2.0 * kx
@@ -996,6 +1161,17 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
         S_up = 0.5 * abs(A_m) ** 2 * b1.real / (Omega * EPS0)
         sheet_order_power[m] = float(S_up * area_phys)
     sheet_nonspec = sum(p for mm, p in sheet_order_power.items() if mm != 0)
+    if abs(complex(sheet.get("eps_above", 1.0 + 0j)) - 1.0) > 1e-9:
+        # the SHEET itself is now correct over a dielectric cap (its eps_above is measured), and so
+        # is the FEM sourced radiation (the vacuum E0 + eps_ref=1 scattered-field decomposition lets
+        # the FEM scatter off the cap). Only this ANALYTIC per-order estimate is a flat-metal-with-
+        # VACUUM-above physical-optics formula, so say so rather than quietly returning it. (F-11)
+        warnings.warn(
+            "shg_structured_two_step: the medium just above the metal is a DIELECTRIC "
+            "(eps_above={:.4g}), so 'sheet_order_power'/'sheet_nonspecular' -- the analytic "
+            "flat-metal-in-VACUUM physical-optics estimate (Sipe denominator beta1 + beta2/eps_2w) "
+            "-- are approximate. The extracted 'sheet' and the FEM 'p_up_by_order' account for the "
+            "cap. (audit F-11)".format(complex(sheet["eps_above"])), stacklevel=2)
 
     base = {"sheet": sheet, "sheet_order_power": sheet_order_power,
             "sheet_nonspecular": float(sheet_nonspec), "E_perp_in": complex(E_perp_in),

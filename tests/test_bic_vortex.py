@@ -68,7 +68,9 @@ def test_stokes_linear_polarization_degree():
     _, J = _vortex_jones(1, n=21)
     s0, s1, s2, s3 = stokes_parameters(J)
     assert np.max(np.abs(s3)) < 1e-12
-    assert np.allclose(s0 ** 2, s1 ** 2 + s2 ** 2, atol=1e-12)
+    # AUDIT T-6: rtol=0.0 -- without it numpy's default rtol=1e-5 dominates and the "fully
+    # polarized" identity is gated at 1e-5 relative, not at machine precision.
+    assert np.allclose(s0 ** 2, s1 ** 2 + s2 ** 2, rtol=0.0, atol=1e-12)
 
 
 # ------------------------------------------------------------------------------------------------

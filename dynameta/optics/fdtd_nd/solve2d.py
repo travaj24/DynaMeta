@@ -2,6 +2,16 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. Read the FIXED-k_par 2-D TE/TM subtlety there
+before carrying a TE label in from elsewhere: 'TE' here is E_y OUT of the simulation plane, and
+the physical angle sweeps with frequency while the s/p label does not.
 """
 from __future__ import annotations
 
@@ -10,7 +20,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, T_REF
-from dynameta.optics.fdtd_nd.spec import FDTDLayer, hot_carrier_guard
+from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_guard
 from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
@@ -55,13 +65,72 @@ def _ring_time_s(layers) -> float:
     rfft with O(0.1) silent R0/T0 bias (probe: |dT0| = 0.102 vs the TMM oracle for a
     Q~600 line, no warning possible since the band mask checks excitation only). Returns
     the (2/Gamma) ln(1/1e-4) ~ 18.4/Gamma memory of the NARROWEST active Lorentz/gain
-    pole (0.0 when no pole is active -> the legacy window, byte-identical)."""
+    pole (0.0 when no pole is active -> the legacy window, byte-identical).
+
+    THE RAMAN POLE IS DELIBERATELY ABSENT (audit D-10, re-measured 2026-07-26). Its vibrational
+    ADE Q'' + gam_R Q' + W_R^2 Q = W_R^2 E^2 does carry an 18.4/gam_R memory, but the polarization
+    it feeds back is P_R = eps0 chi3R E Q -- PROPORTIONAL TO E -- so once the pulse has left, Q
+    rings on into a field that is already gone and NOTHING reaches the probes. Measured on a
+    strongly driven fixture (chi3R = 1e-22, source_amp = 3e10 V/m, i.e. chi3R E^2 = 0.09 -- far
+    beyond any shipped Raman fixture), tail/peak of the transmitted probe series in the last 2 % of
+    the LEGACY window:
+        Raman layer        2.3e-13   (extending by 18.4/gam_R -> 2.0e-13, and 3.8x the steps)
+        narrow Lorentz     1.8e-3    (the C3-6 case; the extension takes it to 1.4e-8)
+    i.e. the Raman run is already at the numerical floor and the extension buys nothing while
+    multiplying every Raman solve's cost by 2-6x. Do not "complete" this function with a Raman term.
+
+    THE GAIN POLE IS INCLUDED FOR BOTH SIGNS of gain_dN_m3, likewise measured. The ADE's homogeneous
+    coefficients (2 - w^2 dt^2)/den and (dw dt/2 - 1)/den do not contain dN at all -- only the DRIVE
+    -kappa dN dt^2/den does -- so 18.4/dw is the oscillator memory whether the line amplifies or
+    absorbs, and extending the window HELPS an amplifying line (same fixture, transmitted tail/peak
+    at the end of the window: 1.3e-4 legacy -> 9.0e-8 extended). What is true is that with gain the
+    COUPLED field+medium pole is less damped than dw/2, so 18.4/dw is no longer an upper bound: at
+    the extended window the amplifying residue is still 161x the same line's passive residue
+    (9.0e-8 vs 5.6e-10), and above the lasing threshold no finite window converges at all. That is
+    why the front ends warn (see `_window_memory_s`) instead of silently trusting the extension."""
     t_ring = 0.0
     for L in layers:
         if getattr(L, "lorentz_delta_eps", 0.0) != 0.0 and getattr(L, "lorentz_gamma_rad_s", 0.0) > 0.0:
             t_ring = max(t_ring, 18.4 / float(L.lorentz_gamma_rad_s))
         if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0:
             t_ring = max(t_ring, 18.4 / float(L.gain_dw_rad_s))
+    return t_ring
+
+
+def _window_memory_s(entry_point, layers, tau) -> float:
+    """`_ring_time_s` + the two window warnings, single-sourced for all five front ends (audit
+    D-10 / D-15: the C3-6 warn block was re-typed verbatim in five places and the amplifying-line
+    caveat had nowhere to live). Returns the same t_ring `_ring_time_s` does, so the callers'
+    `nsteps` arithmetic is unchanged.
+
+    THE GAIN CAVEAT DOES NOT DEPEND ON WHICH POLE WON THE MAX (wave-5 residual). It used to be
+    emitted only for a gain line whose OWN 18.4/dw equalled t_ring, so a stack with a narrower
+    passive Lorentz line -- which sets a LONGER t_ring and therefore the extension -- silenced the
+    caveat completely (measured: [Lorentz gam=1e12, amplifying gain dw=1e13] extended the window and
+    warned C3-6, with no AMPLIFYING warning at all). The caveat is about whether the extended window
+    can be trusted, and an amplifying line makes it untrustworthy no matter which pole sized it: the
+    coupled field+medium pole is less damped than dw/2 for EVERY gain line present, so any of them
+    can still be ringing up at the end of the window. It now fires whenever a gain line exists on an
+    extended window, naming the NARROWEST one (the longest-memory amplifier)."""
+    t_ring = _ring_time_s(layers)
+    base = 200.0 * float(tau)
+    if t_ring > base:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / base, t_ring), RuntimeWarning, stacklevel=3)
+        amp = [float(L.gain_dw_rad_s) for L in layers
+               if getattr(L, "gain_dN_m3", 0.0) > 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0]
+        if amp:
+            warnings.warn(
+                "{}: the extended window above contains an AMPLIFYING line (gain_dN_m3 > 0, "
+                "narrowest dw = {:.3e} rad/s -- whether or not that line is the pole that SIZED the "
+                "window), and 18.4/dw is only the bare-oscillator memory there: gain shifts the "
+                "coupled field+medium pole toward zero damping, so the true ring-down is LONGER "
+                "(measured 161x the passive residue at the same extended window) and above the "
+                "lasing threshold no finite window converges. Treat R/T as unconverged unless you "
+                "have checked the tail; audit D-10.".format(entry_point, min(amp)),
+                RuntimeWarning, stacklevel=3)
     return t_ring
 
 
@@ -256,6 +325,53 @@ def _check_band(entry_point, band, f_min, f_max):
                 entry_point, int(np.size(band)), f_min, f_max))
 
 
+_NEG_FLUX_TOL = 1.0e-6                                       # ignore sign noise on a ~0 R/T bin
+
+
+def _flux_ratios(entry_point, P_inc, P_refl, P_trans, band):
+    """audit D-9: the SIGNED (R_flux, T_flux) from the signed z-Poynting integrals, + an in-band
+    sign-flip warning.
+
+    `_flux`/`_flux3d` return the signed +z power per frequency, and the physical signs are fixed:
+    the incident reference and the transmitted field carry net FORWARD power (P_inc > 0,
+    P_trans > 0) while the scattered field at the ENTRANCE plane carries net BACKWARD power
+    (P_refl < 0). Taking `np.abs` of each turned a physically impossible result -- net backward
+    power at the exit plane, net forward power in the reflected field -- into a positive,
+    plausible-looking ratio, destroying exactly the diagnostic a user needs when audit D-2/D-3 is
+    biting or a gain layer is above threshold.
+
+    The convention here is the SAME NUMBER in the physical case: R_flux = -P_refl/P_inc and
+    T_flux = P_trans/P_inc are BIT-IDENTICAL to abs(P)/abs(P_inc) whenever the signs are the
+    physical ones (IEEE negation is exact), so every shipped R/T is unchanged; only an unphysical
+    bin now comes back NEGATIVE instead of disguised as positive. `_NEG_FLUX_TOL` keeps the warning
+    off the sign noise of a bin whose true R (or T) is ~0.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R_flux = -P_refl / P_inc
+        T_flux = P_trans / P_inc
+    bad = []
+    b = np.asarray(band, dtype=bool)
+    if np.any(b):
+        for name, arr in (("R_flux", R_flux), ("T_flux", T_flux)):
+            v = np.asarray(arr)[b]
+            v = v[np.isfinite(v)]
+            if v.size and float(np.min(v)) < -_NEG_FLUX_TOL:
+                bad.append("{} reaches {:.4g} on {} in-band bin(s)".format(
+                    name, float(np.min(v)), int(np.sum(v < -_NEG_FLUX_TOL))))
+        if np.any(np.asarray(P_inc)[b] <= 0.0):
+            bad.append("the incident reference itself carries net BACKWARD power in-band")
+    if bad:
+        import warnings
+        warnings.warn(
+            "{}: the Poynting flux has a physically impossible SIGN in-band ({}) -- net backward "
+            "power at the exit plane, or net forward power in the scattered field at the entrance "
+            "plane. This used to be hidden by an abs() on both the numerator and the denominator "
+            "(audit D-9). Usual causes: probe planes inside the CPML or too thin an absorber (audit "
+            "D-3), an evanescent/near-cutoff order (audit D-2), or a gain layer above threshold."
+            .format(entry_point, "; ".join(bad)), RuntimeWarning, stacklevel=3)
+    return R_flux, T_flux
+
+
 def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub):
     """audit D-6: `lateral_eps_inf` REPLACES the whole eps_inf grid, so the painter owns the pads.
 
@@ -389,6 +505,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         raise NotImplementedError("solve_fdtd_2d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
                                   "for an absorbing incidence/exit medium).".format(n_super, n_sub))
+    courant = courant_guard("solve_fdtd_2d", courant)        # audit D-11 (CFL bound, shared)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
@@ -515,13 +632,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s > the 200*tau source window; audit "
-                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
-                      RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_2d", layers, tau)  # audit C3-6 pole memory + D-10 caveat
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -628,11 +739,11 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     P_inc = _flux(eyL_i, hxL_i, dt)                          # dt: half-timestep H de-stagger (D-2)
     P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i, dt)
     P_trans = _flux(eyR_t, hxR_t, dt)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        R_flux = np.abs(P_refl) / np.abs(P_inc)
-        T_flux = np.abs(P_trans) / np.abs(P_inc)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
     _check_band("solve_fdtd_2d", band, f_min, f_max)         # audit D-3 sub-mode
+    # audit D-9: signed ratios (bit-identical to the old abs()/abs() for physical signs) + the
+    # in-band sign-flip warning. Ordered after `band` because the check is an IN-BAND statement.
+    R_flux, T_flux = _flux_ratios("solve_fdtd_2d", P_inc, P_refl, P_trans, band)
     # OPT-IN (roadmap 3.1): expose the exit/entry-plane E_y + H_x x-lines already recorded above, as
     # copies. Purely additive -- R0/T0/R_flux/T_flux/band/r0/t0 are computed identically whether or not
     # the trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
@@ -655,6 +766,21 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
 
 
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# This solver speaks the plane-of-incidence {'s', 'p'} and glosses them TE / TM.  Read the
+# fixed-k_par TE/TM subtlety in dynameta.core.polarization before carrying a TE label in from
+# elsewhere: 'TE' here means E_y OUT of the 2-D (x, z) simulation plane (the opposite waveguide
+# convention exists), and because k_par is held FIXED across the band the PHYSICAL angle sweeps
+# with frequency -- the s/p label does not, but the angle it refers to does (read result.theta_deg,
+# not the angle_deg you passed).  Accepted set unchanged.
+def _reject_pol(pol, where: str):
+    """Raise the shared V-8 vocabulary error.  LAZY import, failure path only."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(
+        pol, "sp", where=where, param="pol",
+        extra="Here 's' is glossed TE (E_y out of the 2-D plane) and 'p' TM (H_y out of plane).")
+
+
 def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_deg: float,
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
@@ -669,7 +795,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     angle_deg=0 reduces to the normal-incidence solver. backend selects the TE kernel (numpy/numba); TM is
     the NumPy reference."""
     if pol not in ("s", "p"):
-        raise ValueError("pol must be 's' (TE) or 'p' (TM); got {!r}".format(pol))
+        _reject_pol(pol, "solve_fdtd_2d_oblique")                       # audit V-8
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
         raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
                                   "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")
@@ -686,6 +812,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # audit D-1: hot_carrier cannot join `_dropped` (its sentinel is None, not 0.0, so the
     # `!= 0.0` test would fire on every passive layer); guarded by the shared spec helper.
     hot_carrier_guard("solve_fdtd_2d_oblique", layers)
+    courant = courant_guard("solve_fdtd_2d_oblique", courant)   # audit D-11
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -717,13 +844,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
                            n_pad_wave, resolution)          # audit D-3
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s > the 200*tau source window; audit "
-                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
-                      RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_2d_oblique", layers, tau)   # audit C3-6 + D-10
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))

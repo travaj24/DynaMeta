@@ -25,6 +25,7 @@ as deferred with verified blockers (see the module's TIER 2 SCOPE note).
 Run: python -m pytest tests/test_hydro_fdtd.py -q
 """
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -210,8 +211,14 @@ def test_tier2_linear_limit_rings_at_omega1():
                                                cells_per_longitudinal=12, record_periods=40,
                                                nonlinear=True)
     step = max(1, int(round(0.05 / (wp * dt))))
-    modes = matrix_pencil(rec[::step] - rec.mean(), dt * step, svd_tol=1e-9,
-                          amp_floor=1e-2, max_modes=6)
+    # audit T-13 (`filterwarnings = error`): this ring-down is by construction almost UNDAMPED, so
+    # the pencil routinely returns a pair of marginal poles at |z| = 1 + O(eps) and warns that it
+    # dropped them as "growing". That is the documented, correct behaviour here (the surviving
+    # mode is what the assertions use), so silence exactly that diagnostic -- nothing else.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="matrix_pencil: dropped .* GROWING pole")
+        modes = matrix_pencil(rec[::step] - rec.mean(), dt * step, svd_tol=1e-9,
+                              amp_floor=1e-2, max_modes=6)
     cand = [x for x in modes if x.omega_rad_s > 0.5 * wp]
     assert cand, "nonlinear solver linear limit produced no ring-down mode"
     w_fdtd = max(cand, key=lambda x: abs(x.amplitude)).omega_rad_s

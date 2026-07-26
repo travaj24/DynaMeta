@@ -112,6 +112,14 @@ is a change to every hydrodynamic solver in the library, which is the point: the
 bulk-plasmon gates compare solvers, not two transcriptions of one formula. The contract is gated by
 tests/test_hydro_fem.py::test_hydroparams_match_nonlocal_tmm, which covers every shared function
 over metals x GNOR settings x real and complex frequencies, EXACTLY.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -274,11 +282,23 @@ def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
     return np.sqrt(eps * k0 * k0 - k_par * k_par + 0j)
 
 
-# The ONE polarization vocabulary of this module (audit V-3/V-8): exactly {'p', 's'}, matching the
-# stack_rt / pole_function checks.  Case-sensitive on purpose -- see resonance._POL_MSG (the twin).
-_POL_MSG = ("pol must be 'p' or 's' (case-sensitive); got {!r}. There is no default: 'TE'/'TM'/'x' "
-            "used to return the s-polarized admittance silently, the MIRROR of the p-pol "
-            "fallthrough in optics.resonance (audit V-3).")
+# The ONE polarization vocabulary of this module (audit V-3/V-8): exactly {'p', 's'} -- the 'sp'
+# family of dynameta.core.polarization, matching the stack_rt / pole_function checks.
+# Case-sensitive on purpose -- see resonance._reject_pol (the twin).  The ACCEPTED SET IS
+# UNCHANGED; only the rejection message moved to the shared home, which is what lets the twins
+# emit ONE text instead of two that had already drifted apart.
+_POL_NO_DEFAULT = ("There is no default here: 'TE'/'TM'/'x' used to return the s-polarized "
+                   "admittance silently, the MIRROR of the p-pol fallthrough in optics.resonance "
+                   "(audit V-3).")
+
+
+def _reject_pol(pol, where: str):
+    """Raise the shared V-8 vocabulary error for a ``pol`` outside {'s', 'p'}.
+
+    LAZY import, failure path only: the valid path pays nothing and this module gains no import
+    edge (dynameta.core.polarization is stdlib-only documentation + validation)."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, "sp", where=where, param="pol", extra=_POL_NO_DEFAULT)
 
 
 def _admittance(eps: complex, kz: complex, pol: str) -> complex:
@@ -294,7 +314,7 @@ def _admittance(eps: complex, kz: complex, pol: str) -> complex:
     Both now raise -- the stricter behaviour, and the one this module's public entry points
     (``stack_rt``, ``pole_function``) already had."""
     if pol not in ("p", "s"):
-        raise ValueError(_POL_MSG.format(pol))
+        _reject_pol(pol, "_admittance")
     if pol == "p":
         return eps / kz          # reduced by the common omega*eps0 (cancels in every ratio used)
     return kz                    # reduced by the common 1/(omega*mu0)
@@ -487,7 +507,7 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     RTA
     """
     if pol not in ("p", "s"):
-        raise ValueError(_POL_MSG.format(pol))           # audit V-3: one vocabulary, one message
+        _reject_pol(pol, "stack_rt")                     # audit V-3/V-8: one vocabulary, one message
     w = complex(omega)
     k0 = w / C_LIGHT
     eps_super = complex(n_super) ** 2
@@ -542,7 +562,7 @@ def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub
     for GENUINE nonlocal stacks (finite ``beta``); in the ``beta -> 0`` local limit there is no
     bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there)."""
     if pol not in ("p", "s"):
-        raise ValueError(_POL_MSG.format(pol))           # audit V-3: one vocabulary, one message
+        _reject_pol(pol, "pole_function")                # audit V-3/V-8: one vocabulary, one message
     kpar = complex(k_par_m)
     eps_super = complex(n_super) ** 2
     eps_sub = complex(n_sub) ** 2

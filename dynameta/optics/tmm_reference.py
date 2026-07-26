@@ -7,6 +7,16 @@ stack, via the `tmm` library. Two uses:
 
 This is solver-agnostic (only numpy + tmm). For LATERALLY-STRUCTURED cells (patches,
 gratings) TMM does not apply -- use the FEM solver (or a future RCWA backend).
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. This file also consumes OpticalSpec's lab
+{'x','y','p'} (TmmLayeredSolver / _pol_for); _pol_for's 'x' -> 's' leg is the NORMAL-INCIDENCE
+branch only (sibling finding Q-24).
 """
 
 from __future__ import annotations
@@ -81,7 +91,7 @@ def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: 
     """
     import tmm
     if pol not in ("s", "p"):
-        raise ValueError("pol must be 's' or 'p'")
+        _reject_pol(pol, "stack_rta")
     theta_deg = _require_theta(theta_deg)
     if abs(complex(n_super).imag) > 1e-9:                      # mirror _coh_tmm_stack's LTM-5 guard
         raise ValueError("stack_rta: R/T/A and the energy budget A=1-R-T are defined only for a "
@@ -134,10 +144,34 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
 
 # ---- LayeredStack consumer: the graded-TMM oracle + a LayeredStackSolver impl ----
 
+# ---- the {'s','p'} <-> {'x','y','p'} vocabulary seam (audit V-8) -------------------------------
+# This file is the ONE module that speaks BOTH families: its own entry points take the
+# plane-of-incidence {'s','p'}, while TmmLayeredSolver consumes an OpticalSpec, whose
+# `polarization` is the lab-axis {'x','y','p'}.  `_pol_for` below is that bridge.  Both messages
+# come from dynameta.core.polarization so a label from the wrong family is NAMED, not silently
+# reinterpreted; the accepted sets are unchanged on both sides.
+
+def _reject_pol(pol, where: str, vocabulary: str = "sp", param: str = "pol"):
+    """Raise the shared V-8 vocabulary error.  LAZY import, failure path only -- the valid path
+    pays nothing and this module gains no import edge."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, vocabulary, where=where, param=param)
+
+
 def _pol_for(optical) -> str:
-    """Map an OpticalSpec polarization to a tmm 's'/'p'. 'y' (E perp plane) -> s; 'p' -> p;
-    'x' -> s (at normal incidence a layered stack is polarization-degenerate)."""
+    """Map an OpticalSpec polarization (the lab-axis {'x','y','p'} vocabulary) to a tmm
+    {'s','p'}. 'y' (E perp plane) -> s; 'p' -> p; 'x' -> s (at normal incidence a layered stack
+    is polarization-degenerate).
+
+    AUDIT V-8/Q-24: the 'x' -> 's' leg is the NORMAL-INCIDENCE branch only -- E along lab x is
+    not transverse to an oblique x-z wavevector, which is why ``OpticalSpec`` rejects 'x' at
+    theta != 0 and why ``core.polarization.normalize_pol('x', 'lab_xyp', to='sp', ...)`` demands
+    ``theta_deg`` and refuses off normal.  This helper is fed OpticalSpec-validated values, so it
+    keeps the cheap mapping and only VALIDATES the vocabulary (a label from the {'s','p'} or
+    {'te','tm'} family used to be mapped to 's' silently)."""
     p = getattr(optical, "polarization", "y")
+    if p not in ("x", "y", "p"):
+        _reject_pol(p, "_pol_for", vocabulary="lab_xyp", param="OpticalSpec.polarization")
     return "p" if p == "p" else "s"
 
 
@@ -146,6 +180,11 @@ def _coh_tmm_stack(stack, lambda_m, theta_deg, pol):
     (R, T, r, t, ...). Raises if any slab is laterally structured (then it is not a 1-D
     stack -- use the FEM solver or a future RCWA backend)."""
     import tmm
+    if pol not in ("s", "p"):
+        # audit V-8: layered_rta / layered_per_layer_absorption used to hand `pol` straight to
+        # tmm, so an off-vocabulary label surfaced (if at all) as a third-party error naming
+        # neither this module's vocabulary nor its siblings.  Same accepted set, named rejection.
+        _reject_pol(pol, "layered TMM")
     if not stack.is_unstructured:
         raise ValueError("layered TMM requires an unstructured (all-scalar-slab) stack; "
                          "a laterally-structured slab needs the FEM solver / RCWA.")

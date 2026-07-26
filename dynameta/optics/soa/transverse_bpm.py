@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import numpy as np
 
+__all__ = ["TransverseBPM", "qd_gain_table"]
+
 
 class TransverseBPM:
     """2-D (x-z) paraxial gain-coupled BPM. Lx_m x nx is the transverse grid (periodic FFT); lambda0_m

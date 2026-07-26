@@ -45,6 +45,10 @@ import numpy as np
 from dynameta.constants import C_LIGHT, H_PLANCK, Q_E   # single-source CODATA (was re-declared here)
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
+__all__ = ["DeviceTargets", "CalibratedDevice", "InferredDynamic", "INNOLUME_BOA1310",
+           "INNOLUME_BOA1310_TARGETS", "SOA_PRESETS", "calibrate_device",
+           "calibrate_innolume_boa1310", "device_saturation_curve", "infer_dynamics_from_cw"]
+
 
 # Innolume BOA1310060CC600MXXXX datasheet (99-S01-273-01), 25 C, 2000 mA operating point.
 INNOLUME_BOA1310_TARGETS = {

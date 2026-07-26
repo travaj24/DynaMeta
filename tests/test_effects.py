@@ -195,7 +195,9 @@ def test_intersubband_single_band_reduces_to_drude():
     n3d = float(res.sheet_density_m2.sum()) / (res.z_m[-1] - res.z_m[0])
     d = complex(DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAM_INTRA).eps(1300e-9, n_m3=n3d))
     assert eps_t.shape == (3, 3)
-    assert np.allclose(eps_t, as_tensor(np.asarray(d)), atol=1e-13)   # isotropic == Drude*I
+    # AUDIT T-6: rtol=0.0 -- |eps| ~ 12 here, so numpy's default rtol=1e-5 turned the intended
+    # 1e-13 machine gate into a ~1e-4 absolute one.
+    assert np.allclose(eps_t, as_tensor(np.asarray(d)), rtol=0.0, atol=1e-13)  # isotropic == Drude*I
     assert abs(eps_t[0, 1]) == 0.0 and abs(eps_t[2, 2] - eps_t[0, 0]) < 1e-13
 
 
@@ -229,15 +231,20 @@ def test_burstein_moss_reduces_and_off_switch():
     edge = BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     comp = ComposedEffect(background=bg, deltas=[DeltaEffect(edge, baseline_fields={"n": n_ref})])
     # at n_ref the delta is identically zero -> bare Drude
+    # AUDIT T-6: rtol=0.0 -- the delta is identically zero at n_ref, so this is an exactness check
+    # and must not inherit numpy's 1e-5 relative default (|eps| ~ 4 -> 4e-5 absolute).
     assert np.allclose(comp.eps({"n": n_ref}, 1300e-9),
-                       as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n_ref)))), atol=1e-12)
+                       as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n_ref)))),
+                       rtol=0.0, atol=1e-12)
     # enabled=False -> bare Drude at ALL n (true off-switch)
     off = ComposedEffect(background=bg, deltas=[DeltaEffect(
         BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                          enabled=False), baseline_fields={"n": n_ref})])
     for n in (2e26, 1e27):
+        # AUDIT T-6: rtol=0.0 -- a true off-switch must reproduce the bare Drude tensor exactly.
         assert np.allclose(off.eps({"n": n}, 1300e-9),
-                           as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n)))), atol=1e-14)
+                           as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n)))),
+                           rtol=0.0, atol=1e-14)
 
 
 def test_burstein_moss_blueshift_and_passive():

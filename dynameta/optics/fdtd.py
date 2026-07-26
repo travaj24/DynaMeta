@@ -27,7 +27,8 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 
 # FDTDLayer moved to the n-D package (fdtd_nd/spec.py, audit 2026-07-05 section 5 ownership
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
-from dynameta.optics.fdtd_nd.spec import FDTDLayer, hot_carrier_guard  # noqa: F401 (re-export)
+from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
+                                          hot_carrier_guard)
 
 
 @dataclass
@@ -332,6 +333,23 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
       * Drude wp/gamma change -- the polarization CURRENT J is a physical current, CONTINUOUS across
         the boundary; only the J-update coefficients (aJ, bJ) take the new wp/gamma. No field jump.
 
+    NOT COMPOSABLE WITH KERR (audit D-12). The D-preserving rescale above is exact for
+    D = eps0 eps_inf E + P_Drude, but with chi3 != 0 the constitutive relation is
+    D = eps0 (eps_inf + chi3 E^2) E, so continuity of D across the temporal boundary is a CUBIC in
+    E_new; the linear rescale then injects/destroys energy of order chi3 E^2 / eps_inf per jump.
+    Nothing used to raise or warn -- `kerr=True` composed SILENTLY with the hooks. Per repo policy
+    (raise loudly rather than mis-solve) the combination is now refused when the time-varying layer
+    itself carries chi3. A Kerr layer ELSEWHERE in the stack is fine (no temporal boundary is applied
+    there), and drude_of_t + kerr is fine too: the Drude update leaves E untouched.
+
+    THE REFUSAL FIRES ON THE JUMP, NOT ON THE HOOK (wave-5 residual). Checking it once at entry also
+    refused a STATIC eps_inf_of_t -- the hook that returns the layer's own eps_inf forever, which
+    this module documents as a strict no-op and gate 1 pins as BIT-IDENTICAL to `_run`. No temporal
+    boundary is applied on that path (the `new_eps != cur_eps` branch never runs), so there is
+    nothing to mis-rescale and nothing to refuse; the raise now lives inside that branch, where an
+    actual jump on chi3-carrying cells is what triggers it. A hook that stays put for 10000 steps
+    and then jumps still raises -- at the jump.
+
     COST + APPROXIMATION: re-deriving the affected coefficients is O(nz) per update (negligible vs
     the O(nz) field update); n_update>1 amortizes it. This is the INSTANTANEOUS-PARAMETER
     approximation -- the material is treated as piecewise-constant between updates, using parameters
@@ -340,6 +358,26 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     scheme is O(n_update*dt) accurate and exact in the adiabatic (slow) and step (fast) limits, which
     are the two physically meaningful regimes. When the hooks return values equal to the initial ones
     the update block is a strict no-op, so this function is BIT-IDENTICAL to `_run` (gate 1)."""
+    # audit D-12: the eps_inf temporal boundary and an instantaneous Kerr cannot both be right here
+    # (see the docstring -- D continuity is cubic in E once chi3 != 0). Refuse rather than compose
+    # silently; only the eps_inf hook is affected, only on the cells it rescales, and only when a
+    # jump ACTUALLY fires (the raise is armed here, thrown in the update block below).
+    _kerr_on_tv = bool(eps_inf_of_t is not None and mask is not None
+                       and np.any(np.asarray(chi3)[mask] != 0.0))
+
+    def _refuse_kerr_jump(eps_old, eps_new):
+        raise NotImplementedError(
+            "solve_fdtd_1d/_run_tv: kerr=True on the time-varying layer cannot be combined with "
+            "eps_inf_of_t -- the temporal boundary condition is continuity of "
+            "D = eps0 (eps_inf + chi3 E^2) E, which is CUBIC in the post-jump field, while the "
+            "implemented D-preserving rescale E_new = E_old*eps_old/eps_new is the chi3 = 0 form; "
+            "composing them injects/destroys energy of order chi3 E^2 (audit D-12). The hook jumped "
+            "eps_inf {:.6g} -> {:.6g} on chi3-carrying cells. Use drude_of_t (the polarization "
+            "current is continuous, so Kerr composes there), move the chi3 layer off the "
+            "time-varying one, or drop kerr=True. (A hook that never changes eps_inf applies no "
+            "temporal boundary at all and is allowed -- it is the documented bit-identical no-op.)"
+            .format(float(eps_old), float(eps_new)))
+
     eps_inf = np.array(eps_inf, dtype=float, copy=True)     # local copies: hooks mutate in place
     wp = np.array(wp, dtype=float, copy=True)
     gam = np.array(gam, dtype=float, copy=True)
@@ -369,6 +407,8 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
             if eps_inf_of_t is not None:
                 new_eps = float(eps_inf_of_t(tt))
                 if new_eps != cur_eps:
+                    if _kerr_on_tv:                            # audit D-12: refuse the JUMP itself
+                        _refuse_kerr_jump(cur_eps, new_eps)
                     Ex[mask] *= cur_eps / new_eps               # D-preserving: E jumps, D continuous
                     eps_inf[mask] = new_eps
                     cur_eps = new_eps
@@ -458,7 +498,14 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
       * drude_of_t(t) -> (wp, gamma) for that layer; the polarization current J is CONTINUOUS, only the
         J-update coefficients take the new wp/gamma.
     `n_update` re-derives the affected coefficients every n_update steps (INSTANTANEOUS-PARAMETER
-    approximation; see _run_tv for the cost + the rigorous-formulation note). Both hooks None (default)
+    approximation; see _run_tv for the cost + the rigorous-formulation note). An `eps_inf_of_t` that
+    actually JUMPS eps_inf is REFUSED when the designated layer also carries a Kerr chi3
+    (kerr=True): the temporal boundary condition is continuity of D = eps0(eps_inf + chi3 E^2)E,
+    cubic in the post-jump field, and the implemented linear rescale would inject/destroy energy
+    ~ chi3 E^2 silently (audit D-12). A STATIC hook (one that returns the layer's own eps_inf) is
+    allowed with kerr=True and stays bit-identical to the no-hook run: it applies no temporal
+    boundary, so there is nothing to mis-rescale.
+    `drude_of_t` composes with Kerr freely (J is continuous; no field jump). Both hooks None (default)
     keeps the STRUCTURE run on `_run`, so R/T/band/freqs_Hz are BYTE-IDENTICAL to the legacy path; a
     static hook (returning the initial constants) routes through `_run_tv` but is bit-identical by the
     no-op change-detection. Pair with return_time_trace=True + frequency_conversion_diagnostic to read
@@ -527,6 +574,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # `getattr(L, t, 0.0) != 0.0` list (None != 0.0 would fire on every passive layer); the shared
     # spec.hot_carrier_guard raises with the same C5-7 wording and names the one supported kernel.
     hot_carrier_guard("solve_fdtd_1d", layers)
+    # audit D-11: the CFL bound was enforced on the NONUNIFORM branch only (the raise further down),
+    # so the default UNIFORM path marched courant > 1 to overflow-driven garbage. One shared guard,
+    # ahead of both branches (S == courant on either -- see spec.courant_guard).
+    courant = courant_guard("solve_fdtd_1d", courant)
     # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
     # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
     dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
@@ -846,6 +897,7 @@ def run_uniform_time_boundary(*, index_of_t, n_init: float, lambda_med_m: float,
     n0 = float(n_init)
     w_init = C_LIGHT * k / n0
     dz = lambda_med_m / cells_per_wavelength
+    courant = courant_guard("run_uniform_time_boundary", courant)   # audit D-11 (the 6th copy)
     dt = courant * dz / C_LIGHT                            # stable for any n>=1 (fastest speed <= c)
     N = int(round(domain_wavelengths * cells_per_wavelength)) + 1
     z = np.arange(N) * dz

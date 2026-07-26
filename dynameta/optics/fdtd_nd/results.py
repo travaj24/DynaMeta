@@ -2,6 +2,16 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
 """
 from __future__ import annotations
 
@@ -12,13 +22,34 @@ import numpy as np
 
 
 
+# --- R_flux / T_flux SIGN CONVENTION on the public result arrays (audit D-9) ---------------------
+# `R_flux` / `T_flux` are the SIGNED Poynting ratios R_flux = -P_refl/P_inc, T_flux = P_trans/P_inc
+# (solve2d._flux_ratios), not the pre-wave-5 abs(P)/abs(P_inc). Wherever the signs are the physical
+# ones the two are BIT-IDENTICAL (IEEE negation is exact), so every IN-BAND value is unchanged --
+# verified bitwise on a lossless slab, a Drude metal and an asymmetric-ends stack.
+#
+# OUT-OF-BAND BINS NOW COME BACK NEGATIVE ABOUT HALF THE TIME, and that is expected, not a defect:
+# outside `band` the incident reference carries essentially no power, so these entries are ratios of
+# two numerical-noise numbers whose signs are random. Measured on the three fixtures above: 47.3 %,
+# 48.3 % and 53.7 % of the out-of-band R_flux bins are negative (46.8-53.1 % for T_flux), against
+# 0 % before, when abs() disguised them as small positive numbers. THE NOISE IS THE SAME; only its
+# presentation changed, and a negative value is the honest one.
+#
+# CONSUMERS MUST MASK WITH `band` (they already do): validation/* index `[res.band]`,
+# fdtd_seam.run_fdtd_sweep masks with `res.band & (f > 0)`, and fdtd_seam's per-wavelength `_solve`
+# interpolates at a target frequency inside the requested [lambda_min, lambda_max]. No in-repo
+# consumer reads an unmasked out-of-band bin, so nothing downstream changed; an EXTERNAL consumer
+# that plots the raw array without the mask will see sign flips in the noise skirts.
+# The in-band sign flip that is NOT noise (a real backward-power result) warns -- see _flux_ratios.
+
+
 @dataclass
 class FDTD2DResult:
     freqs_Hz: np.ndarray
     R0: np.ndarray              # 0-order (specular) reflectance from the x-mean field (== 1D/TMM)
     T0: np.ndarray             # 0-order (specular) transmittance from the x-mean field
-    R_flux: np.ndarray         # TOTAL reflectance from the Poynting flux (all diffraction orders)
-    T_flux: np.ndarray         # TOTAL transmittance from the Poynting flux (all diffraction orders)
+    R_flux: np.ndarray         # TOTAL reflectance from the Poynting flux, SIGNED (see the note above)
+    T_flux: np.ndarray         # TOTAL transmittance from the Poynting flux, SIGNED (see the note above)
     band: np.ndarray            # boolean mask of the well-excited frequency band
     r0: Optional[np.ndarray] = None   # COMPLEX 0-order reflection coeff, phase de-embedded to the front face
     t0: Optional[np.ndarray] = None   # COMPLEX 0-order transmission coeff, de-embedded across the structure
@@ -89,12 +120,15 @@ class FDTD2DObliqueResult:
 class FDTD3DResult:
     """Broadband R(f)/T(f) of a 2D-periodic unit cell (normal incidence, y-polarized source). R0/T0 = the
     specular (0-order) co-pol from the x,y-mean field (== 1D/TMM for a laterally-uniform stack); R_flux/
-    T_flux = the total over ALL (kx,ky) diffraction orders from the full Poynting flux S_z = ExHy* - EyHx*."""
+    T_flux = the total over ALL (kx,ky) diffraction orders from the full Poynting flux S_z = ExHy* - EyHx*.
+
+    R_flux/T_flux are SIGNED and their out-of-band bins are noise ratios that flip sign about half the
+    time -- see the module-level sign-convention note above (audit D-9). Mask with `band`."""
     freqs_Hz: np.ndarray
     R0: np.ndarray
     T0: np.ndarray
-    R_flux: np.ndarray
-    T_flux: np.ndarray
+    R_flux: np.ndarray          # SIGNED (see the module note); mask with `band`
+    T_flux: np.ndarray          # SIGNED (see the module note); mask with `band`
     band: np.ndarray
     r0: Optional[np.ndarray] = None   # COMPLEX co-pol 0-order reflection coeff, de-embedded to the front face
     t0: Optional[np.ndarray] = None   # COMPLEX co-pol 0-order transmission coeff, de-embedded across the cell

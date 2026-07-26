@@ -22,6 +22,16 @@ minimum; ~1-2% for a single THIN resonant slab whose Fabry-Perot fringe shifts w
 dispersion -- a general single-slab FDTD effect, identical lossless/lossy, that tightens with resolution).
 The lossy/absorbing path (one inverted Drude pole, exact eps at lambda) matches TMM to ~few 1e-3 when not
 FP-dominated. Convention exp(-i omega t), SI; Im(eps) > 0 = loss.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
 """
 from __future__ import annotations
 
@@ -168,6 +178,13 @@ def _guard_optical_spec(design, *, structured: bool) -> None:
     phi = float(getattr(opt, "azimuth_deg", 0.0) or 0.0)
     side = getattr(opt, "incidence_side", "top") or "top"
     pol = getattr(opt, "polarization", "y") or "y"
+    if pol not in ("x", "y", "p"):
+        # audit V-8: this seam getattr's a duck-typed `optical`, so an off-vocabulary label (the
+        # plane-of-incidence 's', say) reached the structured/uniform branch below and was either
+        # accepted silently (uniform stack) or reported as an unsupported 'y'-source case.  It is
+        # a VOCABULARY error; the accepted set is unchanged.  LAZY import, failure path only.
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(pol, "lab_xyp", where="FDTD seam", param="polarization")
     if abs(theta) > 1e-9 or abs(phi) > 1e-9:
         raise NotImplementedError(
             "FDTD seam: oblique/conical incidence (theta={:g} deg, azimuth={:g} deg) is not "
@@ -182,7 +199,8 @@ def _guard_optical_spec(design, *, structured: bool) -> None:
         raise NotImplementedError(
             "FDTD seam: a structured cell is solved with a y-polarized source; "
             "polarization={!r} would silently get the 'y' answer (audit C5-7) -- use the "
-            "FEM/RCWA solver for other polarizations.".format(pol))
+            "FEM/RCWA solver for other polarizations. ('x'/'y'/'p' is the OpticalSpec lab-axis "
+            "vocabulary -- see dynameta.core.polarization, audit V-8.)".format(pol))
 
 
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):

@@ -129,6 +129,174 @@ def test_small_amplitude_spectra_recover_q_not_the_seed():
 
 
 # ---------------------------------------------------------------------------
+# GATE 2c (audit Q-10) -- the q -> +-inf cut-off must fire on DEGENERACY, not on size.
+#
+# fano_fit recovers (a_bg, b_bg, q) from the fitted symmetric+dispersive coefficients
+# (C0, C_L, C_D) with C_L = b_bg(q^2-1), C_D = 2 b_bg q. The cut-off used to test
+# b_bg <= 1e-12 (|C0| + Rq); since Rq -> b_bg q^2 that reads 1 <= 1e-12 q^2 and fired from
+# |q| ~ 1e6 -- on data the fit had reproduced to 1e-16 -- and then returned q = inf ALONGSIDE a
+# finite b_bg, a triple that reconstructs to inf. The controlling quantity is the DISPERSIVE
+# weight: C_D / (|C0| + Rq) is exactly 2/q, so it is a conditioning test on q itself.
+#
+# Pinned here: (a) large-but-recoverable q comes back as a number and its triple RECONSTRUCTS
+# the data; (b) the genuine peak limit returns a SELF-CONSISTENT triple (b_bg exactly 0.0,
+# a_bg the true background, peak_height the true peak); (c) the q -> 0 dip branch is untouched
+# by the cut-off; (d) every ordinary fit is BIT-IDENTICAL to the old recovery.
+# ---------------------------------------------------------------------------
+def _fano_curve(x, x0, gamma, a_bg, b_bg, q):
+    eps = 2.0 * (x - x0) / gamma
+    return a_bg + b_bg * (q + eps) ** 2 / (1.0 + eps ** 2)
+
+
+def _reconstruct(fit, x):
+    """T(x) from the RETURNED FanoFit record -- through the finite-q form when q is finite, and
+    through the documented q -> +-inf limit T = a_bg + peak_height/(1+eps^2) when it is not."""
+    eps = 2.0 * (x - fit.omega0) / fit.gamma_fwhm
+    if np.isfinite(fit.q):
+        return fit.a_bg + fit.b_bg * (fit.q + eps) ** 2 / (1.0 + eps ** 2)
+    return fit.a_bg + fit.peak_height / (1.0 + eps ** 2)
+
+
+def test_large_q_is_recovered_and_the_returned_triple_reconstructs():
+    x0, gamma, a_bg, b_bg = 1.935e14, 2.0e12, 0.1, 0.7
+    eps = np.linspace(-30.0, 30.0, 2001)
+    x = x0 + 0.5 * gamma * eps
+
+    # (a) LARGE but exactly recoverable q -- the regime the old cut-off swallowed
+    for q in (1.0e5, 1.0e6, 1.0e8, 1.0e10, 1.0e12):
+        T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+        fit = fano_fit(x, T, x_kind="freq")
+        assert np.isfinite(fit.q), "q={} was discarded as inf".format(q)
+        assert fit.q == pytest.approx(q, rel=1e-4), (q, fit.q)
+        assert fit.b_bg == pytest.approx(b_bg, rel=1e-3)
+        assert fit.peak_height == pytest.approx(b_bg * q ** 2, rel=1e-3)
+        # the RETURNED record reproduces the data it was fitted to
+        assert np.max(np.abs(_reconstruct(fit, x) - T)) / np.max(np.abs(T)) < 1e-10, q
+        assert fit.residual_rms < 1e-12 * np.max(np.abs(T))
+
+    # (b) the GENUINE peak limit (a pure Lorentzian: no dispersive component at all) -> the
+    #     self-consistent inf triple.  Pre-fix this returned q = inf WITH b_bg = 0.7.
+    peak = 0.7
+    T = a_bg + peak / (1.0 + eps ** 2)
+    fit = fano_fit(x, T, x_kind="freq")
+    # The SIGN of the reported inf follows the residual dispersive coefficient, which on an
+    # exactly symmetric peak is roundoff (|C_D| ~ 5e-18 of the model scale) -- +inf and -inf are
+    # the SAME lineshape in this limit, so only the magnitude is pinned.
+    assert abs(fit.q) == float("inf")
+    assert fit.b_bg == 0.0                                  # EXACTLY zero, not 1e-25
+    assert fit.a_bg == pytest.approx(a_bg, abs=1e-12)       # the FULL background
+    assert fit.peak_height == pytest.approx(peak, rel=1e-9)
+    assert np.max(np.abs(_reconstruct(fit, x) - T)) / np.max(np.abs(T)) < 1e-12
+
+    # (c) the DIP branch (C_L <= 0) is untouched: C_D -> 0 there means q -> 0, NOT q -> inf.
+    for q in (0.0, 1.0e-13):
+        T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+        fit = fano_fit(x, T, x_kind="freq")
+        assert np.isfinite(fit.q) and abs(fit.q) < 1e-6, (q, fit.q)
+        assert fit.b_bg == pytest.approx(b_bg, rel=1e-6)
+
+
+def test_q_reliable_flags_a_magnitude_the_noise_cannot_support():
+    """AUDIT Q-10 residual. The conditioning cut-off asks whether the dispersive weight C_D clears
+    the LINEAR SOLVE's roundoff. On measured data the binding floor is the NOISE, ~13 decades
+    higher -- and because C_D relative to the model scale is exactly 2/q, a large q is measured by
+    an ever-fainter asymmetry. So the fit reproduces noisy data to its noise level and returns a q
+    that is orders of magnitude wrong, with nothing in the record to say so: measured 22x wrong at
+    1e-3 fractional noise with q_true = 1e6.
+
+    ``FanoFit.q_reliable`` is that missing statement. It compares |C_D| with residual_rms; the
+    calibration (6 noise levels x 12 decades of q) maps that ratio to the worst-case error in q as
+    ~0.2/ratio, and the threshold 20 means "q good to ~1 %". This gate pins BOTH anchors of the
+    calibration and the fact that no returned VALUE changed."""
+    x0, gamma, a_bg, b_bg = 1.935e14, 2.0e12, 0.1, 0.7
+    eps = np.linspace(-30.0, 30.0, 2001)
+    x = x0 + 0.5 * gamma * eps
+
+    # (a) CLEAN fits stay reliable at every magnitude -- 12 decades of q, measured SNR >= 1.5e4
+    for q in (1.0, 1.0e2, 1.0e4, 1.0e6, 1.0e9, 1.0e12):
+        fit = fano_fit(x, _fano_curve(x, x0, gamma, a_bg, b_bg, q), x_kind="freq")
+        assert fit.q_reliable is True, (q, fit.q, fit.residual_rms)
+        assert fit.q == pytest.approx(q, rel=1e-4)
+
+    # (b) 1e-3 noise with q >= 1e6: FLAGGED, every trial (measured SNR <= 0.58, a 35x margin),
+    #     and the flag is right -- the returned q really is order-of-magnitude wrong
+    rng = np.random.default_rng(11)
+    worst_err = 0.0
+    for q in (1.0e6, 1.0e9, 1.0e12):
+        for _ in range(6):
+            T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+            T = T + 1e-3 * np.ptp(T) * rng.standard_normal(T.size)
+            fit = fano_fit(x, T, x_kind="freq")
+            assert fit.q_reliable is False, (q, fit.q, fit.residual_rms)
+            if np.isfinite(fit.q):
+                worst_err = max(worst_err, abs(fit.q / q - 1))
+    assert worst_err > 0.5, worst_err        # the flagged fits ARE badly wrong (measured ~1)
+
+    # (c) noise that the asymmetry easily clears is NOT flagged (small q, same noise)
+    for q in (0.5, 2.0, 10.0):
+        T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+        T = T + 1e-3 * np.ptp(T) * rng.standard_normal(T.size)
+        fit = fano_fit(x, T, x_kind="freq")
+        assert fit.q_reliable is True, (q, fit.q, fit.residual_rms)
+        assert fit.q == pytest.approx(q, rel=0.05)
+
+    # (d) the +-inf branch is a DEGENERACY FLAG, not a measurement -- never "reliable"
+    fit = fano_fit(x, a_bg + 0.7 / (1.0 + eps ** 2), x_kind="freq")
+    assert abs(fit.q) == float("inf") and fit.q_reliable is False
+    assert fit.peak_height == pytest.approx(0.7, rel=1e-9)      # ... the usable number is finite
+
+    # (e) NOTHING ELSE MOVED. Every other field is bit-for-bit what the same fit gave before the
+    #     flag existed -- reproduced here by rebuilding the record from _fano_varpro directly.
+    from dynameta.analysis import _fano_varpro
+    for q in (0.3, 7.0, 1.0e5):
+        T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+        fit = fano_fit(x, T, x_kind="freq")
+        x0f, gf, coef, rms = _fano_varpro(x, T, ncols=3)
+        assert fit.omega0 == x0f and fit.gamma_fwhm == gf and fit.residual_rms == rms
+        C_D = float(coef[2])
+        assert fit.q_reliable == bool(np.isfinite(fit.q)
+                                      and (rms <= 0.0 or abs(C_D) >= 20.0 * rms))
+
+
+def test_fano_recovery_is_bit_identical_outside_the_q10_band():
+    """Byte-identity gate for Q-10. Everything the fix does NOT intend to change must come back
+    bit-for-bit: the OLD recovery is re-implemented here from the pre-fix source and compared to
+    the shipped one on the SAME varpro coefficients, so only the recovery algebra is under test.
+    The intended differences are exactly two: the peak branch (C_L > 0) inside the old cut-off but
+    outside the new one, and b_bg/a_bg in the genuine q -> inf limit."""
+    from dynameta.analysis import _fano_varpro
+
+    def old_recovery(coef):
+        C0, C_L, C_D = float(coef[0]), float(coef[1]), float(coef[2])
+        Rq = float(np.hypot(C_L, C_D))
+        if C_L > 0.0:
+            b = (C_D * C_D) / (2.0 * (Rq + C_L)) if (Rq + C_L) > 0.0 else 0.0
+        else:
+            b = 0.5 * (-C_L + Rq)
+        b_scale = abs(C0) + Rq + 1e-300
+        if b <= 1e-12 * b_scale:
+            return (float(np.inf) if C_D >= 0.0 else float(-np.inf)), C0 - b, b
+        return C_D / (2.0 * b), C0 - b, b
+
+    rng = np.random.default_rng(7)
+    x0, gamma = 1.935e14, 2.0e12
+    eps = np.linspace(-14.0, 14.0, 561)
+    x = x0 + 0.5 * gamma * eps
+    checked = 0
+    for q in (-10.0, -5.0, -1.0, -0.2, 0.0, 0.3, 2.0, 10.0, 100.0, 1.0e4):
+        for a_bg, b_bg in ((0.15, 0.60), (0.0, 1.0), (-0.4, 0.05)):
+            T = _fano_curve(x, x0, gamma, a_bg, b_bg, q)
+            T = T + 0.003 * np.ptp(T) * rng.standard_normal(T.size)      # noisy, like real data
+            fit = fano_fit(x, T, x_kind="freq")
+            q_old, a_old, b_old = old_recovery(_fano_varpro(x, T, 3)[2])
+            assert fit.q == q_old, (q, a_bg, b_bg, fit.q, q_old)         # BIT-identical
+            assert fit.a_bg == a_old
+            assert fit.b_bg == b_old
+            checked += 1
+    assert checked == 30
+
+
+# ---------------------------------------------------------------------------
 # GATE 3 -- TMM cross-gate. Build a driven transmission spectrum of a symmetric n=3.5 slab
 # in vacuum with tmm_reference around one Fabry-Perot resonance (m=4) and check the fitted
 # Q against the CLOSED-FORM etalon pole Q.

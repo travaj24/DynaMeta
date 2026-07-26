@@ -2,6 +2,16 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. Read the FIXED-k_par 2-D TE/TM subtlety
+there: 'TE' here is E_y OUT of the simulation plane (the opposite waveguide convention exists),
+and the physical angle sweeps with frequency while the s/p label does not.
 """
 from __future__ import annotations
 
@@ -317,7 +327,15 @@ def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     """Run ONE complex-envelope oblique 2D pass on the named backend. pol='s' = TE (Ey,Hx,Hz); pol='p' =
     TM (Hy,Ex,Ez). Returns the four complex probe x-lines (tangential E + co-located tangential H).
     'numba' = the fused JIT kernel; 'jax' = the differentiable scan (TE and TM both have one of each);
-    anything else runs the vectorized NumPy reference."""
+    anything else runs the vectorized NumPy reference.
+
+    AUDIT V-8: `pol` is the plane-of-incidence {'s', 'p'} vocabulary (see
+    dynameta.core.polarization, including the fixed-k_par TE/TM subtlety).  Anything else used to
+    fall through to the TE branch silently; the accepted set is unchanged, the rejection is now
+    named.  solve_fdtd_2d_oblique validates first, so this guard only fires on a direct call."""
+    if pol not in ("s", "p"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(pol, "sp", where="_run_oblique", param="pol")
     if pol == "p":
         if name == "numba":
             (ke, be, ce), (kh, bh, ch) = cpml
