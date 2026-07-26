@@ -215,6 +215,45 @@ def test_backflow_scalar_eta_override_is_backward_compatible():
                    **_CELL).simulate_pulse(V0=2.0, Ton=3e-3, T_end=9e-3, n_t=60)
 
 
+def test_backflow_solver_eta_matches_its_public_twin_when_alpha1_crosses_zero():
+    """FIX-VERIFY W1 item 7. ``eta(theta) = eta_c cos^2 + eta_b sin^2 + alpha1 sin^2 cos^2``: the
+    validation covers eta_b, eta_c > 0, but ``alpha1_Pa_s`` -- the only sign-free term -- was
+    UNVALIDATED, and a large negative alpha1 sends eta(theta) through ZERO at intermediate tilt
+    (eta_c = 0.1052, eta_b = 0.0204, alpha1 = -1 gives eta(45 deg) = -0.2186).  The public
+    ``gamma1_eff_of_theta`` guards with ``np.maximum(np.abs(eta), 1e-300)``; the solver's inline
+    copy did not, so the SAME configuration divided by ~0 inside ``rhs`` and, past the crossing,
+    turned the backflow REDUCTION into an increase of gamma1_eff above gamma1.  The two are now
+    the same expression."""
+    kw = dict(gamma1=0.077, include_backflow=True, alpha2_Pa_s=-0.08, alpha3_Pa_s=-0.003)
+    lc = LCDynamics(alpha1_Pa_s=-1.0, **kw, **_CELL)
+
+    # eta(theta) genuinely crosses zero, so the guard is REACHABLE from public kwargs
+    th = np.linspace(0.0, 0.5 * np.pi, 401)
+    eta = np.asarray(lc.eta_shear_of_theta(th))
+    assert eta.min() < 0.0 < eta.max()
+
+    # the public twin never lets gamma1_eff exceed gamma1 and never returns a non-finite value
+    g1e = np.asarray(lc.gamma1_eff_of_theta(th))
+    assert np.all(np.isfinite(g1e)) and np.all(g1e <= 0.077 + 1e-15)
+
+    # the solver takes the same branch: finite trajectory + the PSD warning, not inf/NaN
+    with pytest.warns(RuntimeWarning):
+        res = lc.simulate_pulse(V0=3.0, Ton=1e-3, T_end=3e-3, n_t=60)
+    assert np.all(np.isfinite(res.theta_zt_rad))
+
+    # a non-finite alpha1 is now rejected up front instead of poisoning the march
+    with pytest.raises(ValueError, match="alpha1_Pa_s"):
+        LCDynamics(alpha1_Pa_s=float("nan"), **kw, **_CELL).simulate_pulse(
+            V0=2.0, Ton=1e-3, T_end=3e-3, n_t=60)
+
+    # and the guard is a NO-OP for a physical set: alpha1 = 0 is byte-identical to before
+    ref = LCDynamics(gamma1=0.077, include_backflow=True, **_MOD, **_CELL)
+    a = ref.simulate_pulse(V0=2.0, Ton=3e-3, T_end=9e-3, n_t=60)
+    b = LCDynamics(gamma1=0.077, include_backflow=True, alpha1_Pa_s=0.0, **_MOD,
+                   **_CELL).simulate_pulse(V0=2.0, Ton=3e-3, T_end=9e-3, n_t=60)
+    assert np.array_equal(a.theta_zt_rad, b.theta_zt_rad)
+
+
 def test_backflow_psd_violation_warns_and_floors():
     # AUDIT C-2: positive-definiteness of [[gamma1, m], [m, eta]] requires gamma1*eta >= m^2. The
     # 0.05*gamma1 floor must fire ONLY there -- and say so instead of silently clamping.

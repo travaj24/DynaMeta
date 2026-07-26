@@ -105,24 +105,133 @@ def test_eryb_diagnostics_on_numpy_124(monkeypatch):
     assert _solve() == ref                                   # byte-identical
 
 
+_TRAPZ_NAMES = ("trapezoid", "trapz")
+
+
+def _trapezoid_offenders(tree, label):
+    """Every way a module can reach a scalar trapezoid other than core.numerics.trapz.
+
+    The first version of this guard matched ONE shape -- `ast.Attribute` whose value is a
+    `ast.Name` in a hard-coded {'np', 'numpy'} set -- and was therefore blind to four others
+    (audit X-1 follow-on, each verified blind on a synthetic violation):
+      * `from numpy import trapezoid` + a bare `trapezoid(...)` call;
+      * ANY other alias for the numpy module (`import numpy as onp; onp.trapezoid(...)`) --
+        the aliases are now read out of the file's OWN import statements, not guessed
+        (dynameta/core/backend.py really does `import numpy as _np`);
+      * `getattr(np, "trapezoid")(...)`;
+      * the scipy spelling `scipy.integrate.trapezoid`, in either import form -- floor-safe,
+        but it is still a second home for the same reduction (it was live in fiber_amp/lma.py).
+    `cumulative_trapezoid` is deliberately NOT matched: it is a different reduction with no
+    core.numerics home (see the core.numerics.trapz docstring's exception list)."""
+    import ast
+    np_aliases, bad_from = set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "numpy" or a.name.startswith("numpy."):
+                    np_aliases.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "numpy" or mod.startswith("numpy.") or mod.startswith("scipy.integrate"):
+                for a in node.names:
+                    if a.name in _TRAPZ_NAMES:
+                        bad_from.append("{}:{} (from {} import {})".format(label, node.lineno,
+                                                                          mod, a.name))
+    out = list(bad_from)
+    for node in ast.walk(tree):                               # AST, so comments/docstrings are out
+        if isinstance(node, ast.Attribute) and node.attr in _TRAPZ_NAMES:
+            v = node.value
+            if isinstance(v, ast.Name) and v.id in (np_aliases | {"np", "numpy"}):
+                out.append("{}:{} ({}.{})".format(label, node.lineno, v.id, node.attr))
+            elif isinstance(v, ast.Attribute) and v.attr == "integrate":  # scipy.integrate.trapezoid
+                out.append("{}:{} (scipy.integrate.{})".format(label, node.lineno, node.attr))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "getattr" and len(node.args) >= 2
+              and isinstance(node.args[0], ast.Name)
+              and node.args[0].id in (np_aliases | {"np", "numpy"})
+              and isinstance(node.args[1], ast.Constant) and node.args[1].value in _TRAPZ_NAMES):
+            out.append("{}:{} (getattr({}, {!r}))".format(label, node.lineno, node.args[0].id,
+                                                          node.args[1].value))
+    return out
+
+
 def test_no_direct_numpy_trapezoid_in_library():
-    """The 'ONE home' claim, machine-checked: no library module may reach for a numpy trapezoid
-    spelling directly. Sole documented exception: optics/spdc_design.py, whose getattr shim is
-    itself floor-correct on BOTH sides (1.x has trapz, 2.x has trapezoid) and which needs the
-    2-D `axis=` form core.numerics.trapz does not offer."""
+    """The 'ONE home' claim, machine-checked over FIVE spellings (see _trapezoid_offenders).
+    Documented exception, exhaustive: optics/spdc_design.py, whose getattr shim is itself
+    floor-correct on BOTH sides (1.x has trapz, 2.x has trapezoid) and which needs the 2-D
+    `axis=` form core.numerics.trapz does not offer. fiber_amp/lma.py used to need a second
+    exemption for four bare scipy `trapezoid` calls; they were routed through core.numerics
+    instead (byte-identical), so the allow-list stays at one entry."""
     import ast
     import io
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "dynameta"
     allowed = {"spdc_design.py"}
-    offenders = []
+    offenders, scanned = [], 0
     for f in sorted(root.rglob("*.py")):
         if f.name in allowed:
             continue
+        scanned += 1
         tree = ast.parse(io.open(f, encoding="cp1252", errors="replace").read(), filename=str(f))
-        for node in ast.walk(tree):                           # AST, so comments/docstrings are out
-            if (isinstance(node, ast.Attribute) and node.attr in ("trapezoid", "trapz")
-                    and isinstance(node.value, ast.Name) and node.value.id in ("np", "numpy")):
-                offenders.append("{}:{}".format(f, node.lineno))
-    assert not offenders, ("direct numpy trapezoid call(s) outside the one home "
+        offenders += _trapezoid_offenders(tree, str(f))
+    assert scanned > 100                                      # the walk really did see the tree
+    assert not offenders, ("direct numpy/scipy trapezoid call(s) outside the one home "
                            "(core.numerics.trapz): {}".format(offenders))
+
+
+def test_trapezoid_guard_catches_every_spelling_it_claims_to():
+    """The guard's own gate: each spelling below is a REAL floor hazard (or a second home) and
+    must be caught; the two negatives must not fire. Four of these six were silently blind
+    before (audit X-1 follow-on) -- a guard that cannot fail is not a guard."""
+    import ast
+    caught = {
+        "np.trapezoid(y, x)": "import numpy as np\nv = np.trapezoid([1,2],[0,1])\n",
+        "numpy.trapz(y, x)": "import numpy\nv = numpy.trapz([1,2],[0,1])\n",
+        "from numpy import trapezoid": "from numpy import trapezoid\nv = trapezoid([1,2],[0,1])\n",
+        "aliased numpy module": "import numpy as onp\nv = onp.trapezoid([1,2],[0,1])\n",
+        "getattr(np, 'trapezoid')": "import numpy as np\nv = getattr(np,'trapezoid')([1,2],[0,1])\n",
+        "from scipy.integrate import trapezoid":
+            "from scipy.integrate import trapezoid\nv = trapezoid([1,2],[0,1])\n",
+        "scipy.integrate.trapezoid": "import scipy.integrate\nv = scipy.integrate.trapezoid([1,2],[0,1])\n",
+    }
+    silent = {
+        "docstring mention only": '"""np.trapezoid mention only"""\nv = 1\n',
+        "cumulative_trapezoid (documented exception)":
+            "from scipy.integrate import cumulative_trapezoid\nv = cumulative_trapezoid([1,2],[0,1])\n",
+        "the one home": "from dynameta.core.numerics import trapz\nv = trapz([1,2],[0,1])\n",
+    }
+    for name, src in caught.items():
+        assert _trapezoid_offenders(ast.parse(src), name), "guard is BLIND to: " + name
+    for name, src in silent.items():
+        assert not _trapezoid_offenders(ast.parse(src), name), "guard FALSE-FIRES on: " + name
+
+
+def test_trapz_refuses_a_complex_integrand_instead_of_truncating_it():
+    """audit X-1: the real-only cast is now explicit. A complex integrand used to be silently
+    reduced to its real part (numpy ComplexWarning, easy to filter or miss) where np.trapezoid
+    returns a complex value -- so a caller that reached here with a complex array lost half the
+    answer with no error. Real input is untouched (byte-identical)."""
+    y = np.array([1 + 1j, 2 + 2j, 3 + 3j])
+    x = np.array([0.0, 1.0, 2.0])
+    with pytest.raises(TypeError, match="REAL integrand"):
+        trapz(y, x)
+    with pytest.raises(TypeError, match="REAL integrand"):
+        trapz([1 + 1j, 2 + 0j], [0.0, 1.0])                   # a python complex list too
+    with pytest.raises(TypeError, match="REAL integrand"):
+        trapz(x.real, x.astype(complex))                      # complex ABSCISSA as well
+    # the documented workaround reproduces what np.trapezoid would have returned
+    got = trapz(y.real, x) + 1j * trapz(y.imag, x)
+    assert got == complex(np.trapezoid(y, x))
+    # and the real path is unchanged
+    assert trapz(y.real, x) == float(np.trapezoid(y.real, x))
+
+
+def test_trapz_is_bit_identical_to_numpy_trapezoid_on_real_data():
+    """The docstring's byte-note ('an EXACT power-of-two regrouping'), machine-checked, so the
+    X-1 re-routing of eight call sites is provably answer-preserving."""
+    rng = np.random.default_rng(7)
+    for _ in range(500):
+        n = int(rng.integers(2, 40))
+        xx = np.sort(rng.normal(0.0, 10.0, n))
+        yy = rng.normal(0.0, 1e6, n)
+        assert trapz(yy, xx) == float(np.trapezoid(yy, xx))

@@ -257,6 +257,90 @@ def test_gate7_high_q_etalon_window_does_not_collapse(n_slab, rel_tol):
     assert isinstance(er.refine_note, str)
 
 
+def test_gate9_contaminated_window_is_flagged_not_silent():
+    """FIX-VERIFY W1 kill 2.  ``_nls_refine_real``'s safety gate is RELATIVE -- it only asks whether
+    the refit beats its own pencil seed -- so on a window that still contains the driven pulse BOTH
+    fits are garbage, the comparison passes, and the public path returned ``refine_note = ''`` with
+    ZERO warnings.  Measured on the documented escape hatch ``start_frac = 0.02``: Q = 3.592 vs the
+    Fabry-Perot 10.69 at n_slab = 3.5 (-66%) and Q = 4.098 vs 49.14 at n_slab = 7 (-92%), with the
+    reconstruction RMS at 4.2e-2 / 3.0e-2 of the window's peak-to-peak and the summed |amplitude|
+    at 1575x / 4430x the data peak.  Two ABSOLUTE tells now fire, plus a window-vs-envelope-peak
+    check on the fixed-fraction path itself."""
+    from dynameta.optics.ringdown import _fit_quality, _FIT_RESID_TOL, _FIT_AMP_SANITY
+
+    for n_slab, min_err in ((3.5, 0.50), (7.0, 0.50)):
+        with pytest.warns(RuntimeWarning) as rec:
+            er = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                      resolution=30, start_frac=0.02)
+        msgs = [str(w.message) for w in rec]
+        # it really is wrong (so the flag is not decoration)
+        m = int(round(2.0 * np.pi * er.f0_Hz * n_slab * 1.0e-6 / (np.pi * C_LIGHT)))
+        assert abs(er.q / _fp_closed_form_q(n_slab, m) - 1.0) > min_err, (n_slab, er.q)
+        # ... and it is flagged, twice: the window rule and the fit itself
+        assert any("PEAKS at sample" in s for s in msgs), msgs
+        assert any("does NOT describe the window" in s for s in msgs), msgs
+        assert "UNRELIABLE FIT" in er.refine_note, er.refine_note
+        q = _fit_quality(er.signal_used, er.dt_used, er.modes)
+        assert q["rms_rel"] > _FIT_RESID_TOL or q["amp_rel"] > _FIT_AMP_SANITY, q
+
+    # a start_frac PAST the driven transient is accepted silently and is accurate
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        ok = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30, start_frac=0.2)
+    assert not [w for w in rec if issubclass(w.category, RuntimeWarning)], \
+        [str(w.message) for w in rec]
+    assert "UNRELIABLE" not in ok.refine_note
+    m = int(round(2.0 * np.pi * ok.f0_Hz * 3.5 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(ok.q / _fp_closed_form_q(3.5, m) - 1.0) < 0.03
+
+    # start_frac is validated (it was an unchecked multiply into an index before)
+    for bad in (0.0, 1.0, -0.1, 1.5, float("nan")):
+        with pytest.raises(ValueError, match="0 < start_frac < 1"):
+            fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                 resolution=30, start_frac=bad)
+
+
+def test_gate9_fit_quality_tells_are_silent_on_every_shipped_config():
+    """The companion to the gate above: the tells must not cry wolf.  On the DEFAULT (data-driven)
+    window across the whole gate-7 index set the reconstruction RMS is 9.1e-4..2.4e-3 of the
+    peak-to-peak and the summed |amplitude| is 1.2..2.1x the data peak -- both an order of
+    magnitude inside their limits."""
+    from dynameta.optics.ringdown import _fit_quality, _FIT_RESID_TOL, _FIT_AMP_SANITY
+
+    for n_slab in (3.5, 5.0, 7.0, 10.0):
+        er = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30)
+        q = _fit_quality(er.signal_used, er.dt_used, er.modes)
+        assert q["rms_rel"] < 0.5 * _FIT_RESID_TOL, (n_slab, q)
+        assert q["amp_rel"] < 0.25 * _FIT_AMP_SANITY, (n_slab, q)
+        assert "UNRELIABLE" not in er.refine_note, (n_slab, er.refine_note)
+
+
+def test_gate9_high_q_window_span_scope_limit_warns():
+    """FIX-VERIFY W1 item 9.  ``max_fit_samples = 1200`` at 20 samples/period is 60 carrier
+    periods, i.e. only ``60 pi / Q`` amplitude e-foldings: 13.7 at n_slab = 3.5 but 1.1 at
+    n_slab = 20.  That is where the extraction breaks -- Q = 169.9 against the Fabry-Perot 455.2
+    (-62.7%) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
+    says so."""
+    with pytest.warns(RuntimeWarning) as rec:
+        er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30)
+    msgs = [str(w.message) for w in rec]
+    m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert er.q < 0.6 * _fp_closed_form_q(20.0, m)              # it IS biased low
+    assert any("e-foldings" in s for s in msgs), msgs
+    nepers = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
+    assert nepers < 3.0
+
+    # the shipped low-index configs are comfortably inside the envelope
+    for n_slab, lo in ((3.5, 10.0), (7.0, 3.0)):
+        e2 = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30)
+        assert 0.5 * e2.modes[0].gamma_rad_s * float(e2.t_used[-1]) > lo, n_slab
+
+
 def test_gate7_cross_platform_q_anchor_unchanged():
     """The 2026-07-20 CI fix (data-driven window + NLS refinement) pinned the n_slab = 3.5
     dominant-mode Q at 13.351015 on both the Windows dev box and the CI linux wheels. The Q-1 /

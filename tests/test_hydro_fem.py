@@ -412,12 +412,21 @@ def test_gate5_qcm_nonmonotonic():
 # Gate 6: ENERGY sanity
 # ================================================================================================
 def test_gate6_energy():
-    """1-D: R + T + A = 1 to machine precision (normal incidence).  2-D: P_abs >= 0 and P_scat >= 0
-    (no spurious gain), and the TOTAL-field outward flux balances -P_abs (energy conservation)."""
+    """1-D: the flux deficit 1 - R - T equals the INDEPENDENT volume-integral absorption.  2-D:
+    P_abs >= 0 and P_scat >= 0 (no spurious gain), and the TOTAL-field outward flux balances
+    -P_abs (energy conservation).
+
+    AUDIT T-1: `R + T + A == 1` is an identity -- hydro_layered_1d returns ``A = 1 - R - T`` from
+    the plane-wave probe-plane fit -- so it passed for a halved or sign-flipped T. The module also
+    returns ``A_volume``, the Joule loss integrated over the metal volume, which never touches R or
+    T; that is the real gate (and the same one test_gate1_local_limit_1d uses against the
+    nonlocal-TMM oracle). Measured agreement on this fixture: 1.2e-7 / 1.6e-6 relative.
+    """
     p = hf.HydroParams(1.0, 8.65e15, 1.0e14, 1e-3)
     for wf in (0.6, 0.8):
         r = hf.hydro_layered_1d(wf * p.wp, p, 20.0, hydro=False)
-        assert r.R + r.T + r.A == pytest.approx(1.0, abs=1e-9)
+        assert r.A_volume > 1e-3                             # the film genuinely absorbs
+        assert r.A == pytest.approx(r.A_volume, rel=1e-4)    # flux deficit == Joule integral
         assert r.R >= 0 and r.T >= 0 and r.A >= -1e-9
     p2 = _sodium(gamma=3.0e13)
     mesh, Rp = hf.cylinder_mesh(4.0)

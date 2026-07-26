@@ -53,3 +53,21 @@ from dynameta.carriers.thermal_fem.kirchhoff import (ThermalKirchhoffLayeredResu
                                                      solve_thermal_kirchhoff_fem,
                                                      solve_thermal_kirchhoff_layered_1d,
                                                      solve_thermal_transient_kt_fem)
+
+# audit T-4: this package is a pure re-export facade over common/steady/transient/twotemp/
+# kirchhoff, so every name above is DELIBERATE public (or, for the underscored assembly
+# helpers, deliberate cross-module) surface -- consumers import them from here. Declaring it
+# is what makes that intent machine-readable (and is why `ruff check .` can now run repo-wide
+# instead of reporting 28 phantom "unused import" hits here). Keep in sync when a re-export
+# is added or dropped.
+__all__ = [
+    "MESH_SCALE", "ThermalKirchhoffLayeredResult", "ThermalKirchhoffResult", "ThermalLayer",
+    "ThermalLayerTwoTemp", "ThermalResult", "ThermalTransientResult",
+    "ThermalTransientTwoTempResult", "ThermalTwoTempResult", "_S", "_add_load_terms",
+    "_build_layered_mesh", "_build_thermal_forms", "_mean_T_per_layer", "_per_material_cf",
+    "_twotemp_space_and_forms", "add_load_terms", "build_thermal_forms", "invert_kirchhoff",
+    "kirchhoff_theta", "mean_T_per_layer", "solve_thermal_fem", "solve_thermal_kirchhoff_fem",
+    "solve_thermal_kirchhoff_layered_1d", "solve_thermal_transient_fem",
+    "solve_thermal_transient_kt_fem", "solve_thermal_transient_twotemp_fem",
+    "solve_thermal_twotemp_fem",
+]

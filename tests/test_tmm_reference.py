@@ -9,38 +9,11 @@ from dynameta.optics.tmm_reference import stack_rta, design_layer_stack
 
 # ------------------------------------------------------------------------------------------------
 # Independent Abeles (characteristic-matrix) TMM oracle -- hand-written, NOT the `tmm` package that
-# stack_rta calls, so the layer-ORDER gate below is not self-referential (audit V-1).
-# Convention exp(-i omega t): forward wave ~ exp(+i kz z), Im(eps) >= 0 = loss, so the per-layer
-# characteristic matrix mapping (E_tan, H_tan) from the layer's TOP face to its BOTTOM face is
-#   m = [[cos q, -i sin q / Y], [-i Y sin q, cos q]],  q = kz d,  Y = kz (s-pol) or eps/kz (p-pol).
+# stack_rta calls, so the layer-ORDER gate below is not self-referential (audit V-1) and neither is
+# the energy gate on the LOSSY stack (audit T-1). It lives in tests/_rta_oracles.py so
+# test_solver_guards and test_mermin gate against the SAME independent implementation.
 # ------------------------------------------------------------------------------------------------
-def _abeles_rta(n_super, layers_super_first, n_sub, lambda_m, *, theta_deg=0.0, pol="s"):
-    """(R, T, A) for super | layers | sub, layers ordered SUPERSTRATE-side first."""
-    k0 = 2.0 * np.pi / float(lambda_m)
-    eps_s, eps_b = complex(n_super) ** 2, complex(n_sub) ** 2
-    k_par = complex(n_super) * k0 * np.sin(np.radians(float(theta_deg)))
-
-    def kz(eps):
-        return np.sqrt(complex(eps) * k0 * k0 - k_par * k_par + 0j)
-
-    def adm(eps):
-        return kz(eps) if pol == "s" else complex(eps) / kz(eps)
-
-    M = np.eye(2, dtype=np.complex128)
-    for n_j, d_j in layers_super_first:
-        eps_j = complex(n_j) ** 2
-        q = kz(eps_j) * float(d_j)
-        Y = adm(eps_j)
-        M = M @ np.array([[np.cos(q), -1j * np.sin(q) / Y],
-                          [-1j * Y * np.sin(q), np.cos(q)]], dtype=np.complex128)
-    Ys, Yb = adm(eps_s), adm(eps_b)
-    B = M[0, 0] + M[0, 1] * Yb                       # [B; C] = M @ [1; Y_sub]
-    C = M[1, 0] + M[1, 1] * Yb
-    r = (Ys * B - C) / (Ys * B + C)
-    t = 2.0 * Ys / (Ys * B + C)
-    R = float(abs(r) ** 2)
-    T = float((Yb.real / Ys.real) * abs(t) ** 2)
-    return R, T, 1.0 - R - T
+from _rta_oracles import abeles_rta as _abeles_rta          # noqa: E402
 
 
 def test_single_interface_fresnel_normal():
@@ -61,9 +34,17 @@ def test_lossless_slab_energy_conserves():
 
 
 def test_lossy_slab_absorbs():
-    R, T, A = stack_rta(1.0, [(2.0 + 0.1j, 250e-9)], 1.0, 1300e-9, pol="s")
+    layers = [(2.0 + 0.1j, 250e-9)]
+    R, T, A = stack_rta(1.0, layers, 1.0, 1300e-9, pol="s")
     assert A > 0.0                              # a lossy slab absorbs
-    assert abs(R + T + A - 1.0) < 1e-9
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY here -- stack_rta returns A := 1 - R - T, so that
+    # assertion passes for a halved / sign-flipped / garbage T. The lossless sites above are saved
+    # by their companion `abs(A) < 1e-9`; a LOSSY stack has no such physics anchor, so the budget
+    # is gated against the INDEPENDENT Abeles TMM instead (all three quantities, not their sum).
+    R_ref, T_ref, A_ref = _abeles_rta(1.0, layers, 1.0, 1300e-9, pol="s")
+    assert R == pytest.approx(R_ref, abs=1e-12)
+    assert T == pytest.approx(T_ref, abs=1e-12)
+    assert A == pytest.approx(A_ref, abs=1e-12)
 
 
 def test_s_p_differ_at_angle():

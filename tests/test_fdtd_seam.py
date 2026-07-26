@@ -1,10 +1,11 @@
 """Fast (no-FDTD-run) unit tests for the FDTD OpticalSolver seam helpers: the complex-eps -> FDTDLayer
 Drude inversion, the Design -> layer mapping (order + guards), and the vacuum-end-media guard.
 
-Also home to the audit D-3 source/probe-vs-CPML clearance gates. Those raise at SETUP (before any
-march), so the negative cases stay no-FDTD-run; the single positive "a minimally-padded VALID config
-still runs and closes the energy budget" gate is the one small 2-D march in this module."""
+Also home to the audit D-3 absorber-thickness / probe-placement gates. Those raise at SETUP (before
+any march), so the negative cases stay no-FDTD-run; the single positive "a fully clear config runs
+SILENTLY and closes the energy budget" gate is the one small 2-D march in this module."""
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -381,13 +382,45 @@ def test_ring_time_extends_window_for_narrow_poles():
 
 
 # =====================================================================================================
-# audit D-3: the soft source and BOTH R/T probe planes must clear the CPML
+# audit D-3 (wave-3 redesign): the ABSORBER must be thick enough, and both R/T PROBE planes must
+# clear it. The source only warns.
 # =====================================================================================================
 # k_src / k_pL / k_pR are placed as FRACTIONS OF THE Z PAD (0.35 pad, 0.7 pad, 0.3 pad past the
-# structure) in five front ends; `npml` is a fixed CELL count that was never compared against them.
-# A thin pad slides them into the absorber and R/T degrade SILENTLY -- no raise, no warning.
+# structure) in five front ends; `npml` is a fixed CELL count. The wave-2 guard demanded
+# k_src/k_pL >= npml+2 and k_pR <= nz-1-npml-2. Re-measured 2026-07-26 (guard bypassed, four
+# fixtures) that rule was wrong in BOTH directions:
+#   * it never checked npml itself, so npml <= 2 passed silently at up to an 84 % (R0+T0 = 1.84) /
+#     197 % (R_flux+T_flux = 2.97) energy-budget violation on a LOSSLESS slab;
+#   * it rejected on the SOURCE, whose launch attenuation cancels in the two-run DFT ratio, so
+#     npml = 5..12 thin-pad configs that measure PERFECT were refused -- including the library
+#     default npml=12 and validation/fdtd_oblique_jax.py GATE D (which passed by ONE cell).
+# The rule is now (1) npml >= 4, (2) each probe's predicted one-way CPML amplitude attenuation
+# <= 0.3 %, (3) a buried source WARNS. Fixture tables below.
 _D3_BAND = dict(lambda_min_m=1.2e-6, lambda_max_m=1.8e-6, resolution=20)
 _D3_SLAB = dict(thickness_m=200e-9, eps_inf=4.0)
+
+# (label, k_src, k_pL, k_pR, nz) -- the indices the front ends compute for each fixture, and, per
+# npml, the measured in-band R_flux+T_flux range on a LOSSLESS eps=4 slab with the guard bypassed
+# (backend 'numpy', 2026-07-26) next to the new verdict. 'S' = accepted with the source warning.
+# fixture A: thk=300 nm, lam 1.4-1.6 um, resolution=20, n_pad_wave=0.35
+_D3_FIX_A = ("A/300nm", 6, 11, 29, 42, {
+    1: ("RAISE", 1.0088, 2.9721), 2: ("RAISE", 1.0108, 1.0719), 3: ("RAISE", 1.0049, 1.0319),
+    4: ("warn", 0.9950, 0.9986), 5: ("warn", 0.9999, 1.0001), 6: ("pass", 0.9999, 1.0000),
+    7: ("S", 1.0000, 1.0000), 8: ("S", 1.0000, 1.0000), 9: ("S", 1.0000, 1.0000),
+    10: ("S", 1.0000, 1.0000), 11: ("S", 1.0000, 1.0000), 12: ("S", 0.9990, 0.9991),
+    13: ("RAISE", 0.9899, 0.9908), 14: ("RAISE", 0.9604, 0.9633), 15: ("RAISE", 0.9025, 0.9079),
+    16: ("RAISE", 0.8165, 0.8244), 20: ("RAISE", 0.3623, 0.3649)})
+# fixture B: thk=600 nm, lam 1.4-1.6 um, resolution=20, n_pad_wave=0.35
+_D3_FIX_B = ("B/600nm", 6, 11, 38, 50, {
+    1: ("RAISE", 0.6600, 1.3955), 2: ("RAISE", 1.0602, 1.4549), 3: ("RAISE", 0.9604, 0.9982),
+    4: ("warn", 0.9957, 1.0027), 5: ("warn", 1.0005, 1.0007), 6: ("pass", 0.9997, 0.9997),
+    7: ("S", 0.9998, 0.9999), 8: ("S", 0.9999, 0.9999), 9: ("S", 0.9999, 1.0000),
+    10: ("S", 1.0000, 1.0000), 11: ("S", 1.0000, 1.0000), 12: ("S", 0.9983, 0.9983),
+    13: ("RAISE", 0.9836, 0.9836), 14: ("RAISE", 0.9416, 0.9416), 15: ("RAISE", 0.8669, 0.8670),
+    16: ("RAISE", 0.7646, 0.7648), 20: ("RAISE", 0.3052, 0.3096)})
+_D3_BUDGET_TOL = 2e-3            # documented lossless-slab tolerance (an ACCEPTED config must meet it)
+_D3_BAD_TOL = 5e-3               # a REJECTED config must miss it by at least this much
+_D3_WARN_TOL = 2e-2              # accepted-with-a-thin-npml-warning: the warning quotes 0.5-2 %
 
 
 def _d3_layer():
@@ -395,29 +428,160 @@ def _d3_layer():
     return FDTDLayer(**_D3_SLAB)
 
 
-def test_d3_thin_pad_source_in_cpml_raises_naming_the_knobs():
-    """The ledger's silent-violation config now RAISES, naming n_pad_wave / resolution / npml.
+def _d3_verdict(k_src, k_pL, k_pR, nz, npml, p_cells=15.7, npw=0.35, res=20):
+    """'RAISE' / 'warn' (thin npml) / 'S' (source buried) / 'pass' from the live guard."""
+    import warnings as _w
+    from dynameta.optics.fdtd_nd.solve2d import _check_probe_placement
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        try:
+            _check_probe_placement("t", k_src, k_pL, k_pR, nz, npml, p_cells * 1e-8, 1e-8, npw, res)
+        except ValueError:
+            return "RAISE"
+    if any("thin CPML" in str(x.message) for x in rec):
+        return "warn"
+    return "S" if rec else "pass"
 
-    Measured with the guard bypassed (geometry held fixed at k_src=7, k_pL=15, nz=50; npml swept
-    alone -- which isolates PML overlap from evanescent near-field contamination): at
-    n_pad_wave=0.35, resolution=20 the lossless slab's R_flux+T_flux walks [0.9997, 0.9999]
-    (npml=6, source clear) -> [0.9891, 1.0123] (npml=12, the shipped default) -> [0.8849, 0.9092]
-    (npml=20, an 11.5% energy-budget violation on a LOSSLESS slab). The violation switches on
-    exactly as npml overtakes k_src and grows monotonically -- PML overlap, not near-field
-    contamination.
+
+@pytest.mark.parametrize("fix", [_D3_FIX_A, _D3_FIX_B], ids=lambda f: f[0])
+def test_d3_guard_verdict_matches_the_measured_fixtures(fix):
+    """THE calibration gate: on both fixtures, every npml the guard REJECTS measures badly and
+    every npml it ACCEPTS measures within tolerance. Tables are the 2026-07-26 re-run above.
+
+    Rejections split into the two real failure modes: npml <= 3 is too thin an absorber (up to
+    197 % over budget) and npml >= 13 buries a probe in the graded absorber (1.6 % -> 70 %). The
+    accepted band npml = 4..12 spans the library default (12), where the old rule raised.
     """
-    from dynameta.optics.fdtd_nd import solve_fdtd_2d
+    label, k_src, k_pL, k_pR, nz, table = fix
+    for npml, (want, lo, hi) in sorted(table.items()):
+        got = _d3_verdict(k_src, k_pL, k_pR, nz, npml)
+        assert got == want, "{} npml={}: guard says {}, table says {}".format(label, npml, got, want)
+        off = max(abs(lo - 1.0), abs(hi - 1.0))
+        if want == "RAISE":                                  # every rejected config IS bad
+            assert off > _D3_BAD_TOL, "{} npml={} rejected but measures {:.4f}..{:.4f}".format(
+                label, npml, lo, hi)
+        elif want == "warn":                                 # thin absorber: flagged, never silent
+            assert off <= _D3_WARN_TOL, "{} npml={} warned but measures {:.4f}..{:.4f}".format(
+                label, npml, lo, hi)
+        else:                                                # every silently-accepted config IS good
+            assert off <= _D3_BUDGET_TOL, "{} npml={} accepted but measures {:.4f}..{:.4f}".format(
+                label, npml, lo, hi)
+    # and the thin-npml warning earns its keep: npml=4 is the one accepted row that MISSES the
+    # silent tolerance (0.4-0.5 %), which is exactly what it warns about.
+    assert max(abs(v - 1.0) for v in table[4][1:]) > _D3_BUDGET_TOL
+
+
+def test_d3_npml_floor_is_a_hard_raise_below_the_measured_cliff():
+    """npml itself was never validated -- the mode the wave-2 guard missed entirely, and the worst
+    one measured. R_flux+T_flux on a LOSSLESS slab with the probes fully clear:
+        npml = 1: 2.9721 (fixture A) / 1.3955 (B)     npml = 2: 1.0719 / 1.4549  (R0+T0 to 1.8387)
+        npml = 3: 1.0319 / 0.9604                     npml = 4: 0.9986 / 1.0027
+        npml = 5: 1.0001 / 1.0007                     npml >= 8: within 1e-4
+    So: hard raise below 4, warn below 6."""
+    from dynameta.optics.fdtd_nd.solve2d import _NPML_MIN, _NPML_WARN, _check_probe_placement
+    assert (_NPML_MIN, _NPML_WARN) == (4, 6)
+    clear = dict(nz=200, k_pL=70, k_pR=130, pad=1.0e-6, dz=1.0e-8, n_pad_wave=1.0, resolution=20)
+    for npml in (0, 1, 2, 3):
+        with pytest.raises(ValueError) as exc:
+            _check_probe_placement("solve_fdtd_2d", 35, npml=npml, **clear)
+        assert "npml" in str(exc.value) and "CPML" in str(exc.value)
+    with pytest.warns(RuntimeWarning, match="thin CPML"):
+        _check_probe_placement("solve_fdtd_2d", 35, npml=4, **clear)
+    with warnings.catch_warnings():                          # npml >= 6 with everything clear: silent
+        warnings.simplefilter("error")
+        _check_probe_placement("solve_fdtd_2d", 35, npml=6, **clear)
+
+
+def test_d3_source_in_the_cpml_only_warns_because_the_ratio_cancels():
+    """The wave-2 guard REJECTED a buried source. It should not: R0/T0/R_flux/T_flux are two-run
+    DFT ratios against a vacuum reference injected through the SAME absorber, and the reflected /
+    transmitted wave inherits the launch attenuation of the incident wave that produced it, so it
+    cancels. Measured with the probes clear and the source 5-6 cells deep (npml=11-12): fixture A
+    R_flux+T_flux = [0.9999, 1.0000] and fixture B [1.0000, 1.0000] -- i.e. 2e-4, at a launch
+    amplitude 44 % down. It still warns: the SNR loss is real (a broadband 1.2-1.8 um fixture with
+    the source 5-8 cells deep scattered its band-edge bins by +-1.2 %), and the terminal case is
+    caught by _check_band."""
+    from dynameta.optics.fdtd_nd.solve2d import _check_probe_placement, _pml_atten
+    clear = dict(nz=200, k_pL=70, k_pR=130, npml=12, pad=1.0e-6, dz=1.0e-8, n_pad_wave=1.0,
+                 resolution=20)
+    with pytest.warns(RuntimeWarning) as rec:
+        _check_probe_placement("solve_fdtd_2d", 6, **clear)  # source 6 cells inside the CPML
+    msg = str(rec[0].message)
+    assert "k_src=6" in msg and "6 cell(s) inside" in msg and "cancels" in msg
+    assert _pml_atten(6, 12) == pytest.approx(0.4443, abs=2e-3)   # the 44 % quoted above
+    with warnings.catch_warnings():                          # k_src == npml is already outside
+        warnings.simplefilter("error")
+        _check_probe_placement("solve_fdtd_2d", 12, **clear)
+
+
+def test_d3_probe_clearance_is_an_attenuation_budget_not_a_cell_count():
+    """cpml_z grades sigma as (depth/npml)^3, so ONE cell of burial is harmless at npml=12
+    (0.13 % amplitude) and fatal at npml=4 (10.2 %) -- a fixed cell margin cannot express that.
+    Both ends are guarded symmetrically (low-z depth npml-k_pL, high-z depth k_pR-(nz-1-npml))."""
+    from dynameta.optics.fdtd_nd.solve2d import (_PROBE_ATTEN_MAX, _check_probe_placement,
+                                                 _max_probe_depth, _pml_atten)
+    assert _max_probe_depth(12) == 1 and _max_probe_depth(4) == 0 and _max_probe_depth(20) == 2
+    assert _pml_atten(0, 12) == 0.0 and _pml_atten(-3, 12) == 0.0
+    assert _pml_atten(1, 12) < _PROBE_ATTEN_MAX < _pml_atten(2, 12)
+    ok = dict(nz=200, npml=12, pad=1.0e-6, dz=1.0e-8, n_pad_wave=1.0, resolution=20)
+    _check_probe_placement("t", 35, 70, 130, **ok)           # both probes far outside -> silent
+    _check_probe_placement("t", 35, 11, 200 - 1 - 12 + 1, **ok)   # both exactly 1 cell deep -> ok
+    with pytest.raises(ValueError, match="right"):           # 2 cells into the far CPML
+        _check_probe_placement("t", 35, 70, 200 - 1 - 12 + 2, **ok)
+    with pytest.raises(ValueError, match="left"):            # 2 cells into the near CPML
+        _check_probe_placement("t", 35, 10, 130, **ok)
+
+
+def test_d3_atten_model_uses_cpml_z_defaults():
+    """_pml_atten hard-codes the grading exponent m and the target reflection R0. Pin them to
+    cpml_z's OWN defaults, which every front end takes (they pass only nz/dz/dt/npml/n_super/
+    n_sub) -- if cpml_z's grading is ever retuned the guard must be retuned with it."""
+    import inspect
+    from dynameta.optics.fdtd_nd.cpml import cpml_z
+    from dynameta.optics.fdtd_nd.solve2d import _pml_atten
+    p = inspect.signature(cpml_z).parameters
+    assert p["m"].default == 3.0 and p["R0"].default == 1.0e-6
+    src = inspect.getsource(_pml_atten)
+    assert "m=3.0" in src and "R0=1.0e-6" in src
+    # closed form: a(d) = 1 - exp(-27.63 (d(d+1)/2)^2 / npml^4) for m=3, R0=1e-6
+    for d, n in ((1, 12), (3, 14), (5, 20)):
+        want = 1.0 - math.exp(-(-4.0 * math.log(1e-6) / 2.0) * (d * (d + 1) / 2.0) ** 2 / n ** 4)
+        assert _pml_atten(d, n) == pytest.approx(want, rel=1e-12)
+
+
+def test_d3_ledger_silent_violation_config_is_still_rejected():
+    """The audit ledger's own trigger (resolution=8, n_pad_wave=0.5, npml=12 -> k_src=4, k_pL=8,
+    k_pR=18, nz=28) returned R_flux+T_flux = 0.8625 silently. It is rejected by the NEW rule too,
+    and for the right reason: its probes are 4 and 3 cells inside the absorber (12.5 % / 4.7 %
+    predicted attenuation; re-measured R_flux+T_flux = [0.7502, 0.7725]). The message names every
+    knob that can fix it."""
+    from dynameta.optics.fdtd_nd.solve2d import _check_probe_placement
     with pytest.raises(ValueError) as exc:
-        solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, n_pad_wave=0.35, npml=20, **_D3_BAND)
+        _check_probe_placement("solve_fdtd_2d", 4, 8, 18, 28, 12, 10.5e-8, 1e-8, 0.5, 8)
     msg = str(exc.value)
-    assert "solve_fdtd_2d" in msg and "k_src" in msg and "CPML" in msg
-    for knob in ("n_pad_wave", "resolution", "npml"):        # every knob that can fix it is named
+    assert "CPML" in msg and "k_pL=8" in msg and "k_pR=18" in msg
+    for knob in ("n_pad_wave", "resolution", "npml"):
         assert knob in msg
+
+
+def test_d3_oblique_jax_gate_d_config_passes_with_margin():
+    """validation/fdtd_oblique_jax.py GATE D (3-D oblique, resolution=9, n_pad_wave=2.5 ->
+    k_src=15, k_pL=30, k_pR=58, nz=89, npml=12) passed the wave-2 rule by exactly ONE cell on the
+    source. Under the new rule it is clean with 18 cells of probe margin and 3 cells of source
+    margin, and stays clean over npml=6..15."""
+    from dynameta.optics.fdtd_nd.solve2d import _check_probe_placement
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                       # not even a warning
+        for npml in range(6, 16):
+            _check_probe_placement("solve_fdtd_3d_oblique", 15, 30, 58, 89, npml,
+                                   43.6e-8, 1e-8, 2.5, 9)
 
 
 def test_d3_guard_covers_every_front_end():
     """All five front ends that place probes as pad fractions are guarded (audit D-3 listed four
-    sites plus the 2-D oblique twin). Each raises at SETUP, so no march runs here."""
+    sites plus the 2-D oblique twin). The trigger is now a PROBE burial -- n_pad_wave=0.35 at
+    npml=20 puts both probes 5 cells into the absorber (3.8 % attenuation each; measured
+    R_flux+T_flux = [0.8848, 0.9092]). Each raises at SETUP, so no march runs here."""
     from dynameta.optics.fdtd_nd import (solve_fdtd_2d, solve_fdtd_2d_oblique, solve_fdtd_3d,
                                          solve_fdtd_3d_oblique)
     thin = dict(n_pad_wave=0.35, npml=20)
@@ -436,34 +600,28 @@ def test_d3_guard_covers_every_front_end():
             fn()
 
 
-def test_d3_right_probe_clearance_is_checked_too():
-    """The high-z end is guarded symmetrically: the helper refuses k_pR within 2 cells of the
-    upper CPML, not just the source / left probe."""
-    from dynameta.optics.fdtd_nd.solve2d import _PROBE_CLEARANCE, _check_probe_placement
-    ok = dict(nz=200, npml=12, pad=1.0e-6, dz=1.0e-8, n_pad_wave=1.0, resolution=20)
-    _check_probe_placement("t", 35, 70, 130, **ok)           # all three clear -> no raise
-    with pytest.raises(ValueError, match="right"):           # k_pR too close to the far CPML
-        _check_probe_placement("t", 35, 70, 200 - 1 - 12 - _PROBE_CLEARANCE + 1, **ok)
-    with pytest.raises(ValueError, match="left"):
-        _check_probe_placement("t", 35, 12 + _PROBE_CLEARANCE - 1, 130, **ok)
-
-
-def test_d3_minimally_padded_valid_config_still_runs_and_closes():
-    """A MINIMALLY padded but valid config is not over-refused, and the minimum the error message
-    recommends actually works: at resolution=20, npml=12 the guard asks for n_pad_wave >= 0.67, and
-    that run closes max|R_flux+T_flux-1| = 2.1e-5 (documented lossless-slab tolerance: 2e-3)."""
+def test_d3_a_fully_clear_config_runs_silently_and_closes():
+    """The positive control (the one 2-D march in this module): with BOTH probes and the source
+    clear -- resolution=20, n_pad_wave=0.67, npml=12 -> k_src=14 > npml -- the guard is completely
+    silent and the lossless slab closes to 2.1e-5. Acting on the source WARNING is what buys that:
+    the same geometry at n_pad_wave=0.35 (probes clear, source 5 cells deep, warning only) still
+    runs but closes to only 1.2e-2, and at npml=20 (probes 5 cells deep, REJECTED) it would have
+    been 1.15e-1."""
     from dynameta.optics.fdtd_nd import solve_fdtd_2d
-    r = solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, n_pad_wave=0.67, npml=12, **_D3_BAND)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r = solve_fdtd_2d([_d3_layer()], period_x_m=300e-9, n_pad_wave=0.67, npml=12, **_D3_BAND)
     m = r.band
     assert np.any(m)
-    assert float(np.max(np.abs(r.R_flux[m] + r.T_flux[m] - 1.0))) < 2e-3
-    assert float(np.max(np.abs(r.R0[m] + r.T0[m] - 1.0))) < 2e-3
+    assert float(np.max(np.abs(r.R_flux[m] + r.T_flux[m] - 1.0))) < _D3_BUDGET_TOL
+    assert float(np.max(np.abs(r.R0[m] + r.T0[m] - 1.0))) < _D3_BUDGET_TOL
 
 
 def test_d3_empty_band_mask_raises_instead_of_silent_zeros():
     """audit D-3 sub-mode: an empty well-excited band used to be returned silently, and every
     downstream `result.R0[result.band].min()` then died with an opaque `zero-size array to
-    reduction operation minimum` far from the cause."""
+    reduction operation minimum` far from the cause. This is now also the HARD backstop for a
+    buried source, whose placement only warns."""
     from dynameta.optics.fdtd_nd.solve2d import _check_band
     good = np.array([False, True, True, False])
     assert _check_band("solve_fdtd_2d", good, 1.0e14, 2.5e14) is None
@@ -472,6 +630,28 @@ def test_d3_empty_band_mask_raises_instead_of_silent_zeros():
     msg = str(exc.value)
     assert "EMPTY" in msg and "2617" in msg and "D-3" in msg
     assert "npml" in msg                                     # points at the actual cause
+
+
+def test_d3_empty_band_guard_is_wired_into_solve_fdtd_1d(monkeypatch):
+    """P3 scope gap: the empty-band raise reached the five 2-D/3-D front ends but NOT
+    solve_fdtd_1d, which returned the silent all-False mask. The 1-D grid terminates in Mur ABCs
+    (no CPML), so there is no placement guard to run alongside it -- only this one. Spy on the
+    shared helper to prove the 1-D path calls it with its own entry-point name, then force an
+    empty mask and check the raise propagates."""
+    from dynameta.optics import fdtd as F
+    from dynameta.optics.fdtd_nd import solve2d as S2
+    seen = []
+    real = S2._check_band
+    monkeypatch.setattr(S2, "_check_band",
+                        lambda ep, band, f_lo, f_hi: (seen.append((ep, int(np.sum(band)))),
+                                                      real(ep, band, f_lo, f_hi))[1])
+    kw = dict(lambda_min_m=1.4e-6, lambda_max_m=1.6e-6, resolution=8, n_pad_wave=1.0)
+    r = F.solve_fdtd_1d([_d3_layer()], **kw)
+    assert seen and seen[0][0] == "solve_fdtd_1d" and seen[0][1] > 0 and np.any(r.band)
+    monkeypatch.setattr(S2, "_check_band",
+                        lambda ep, band, f_lo, f_hi: real(ep, np.zeros_like(band), f_lo, f_hi))
+    with pytest.raises(ValueError, match="EMPTY"):
+        F.solve_fdtd_1d([_d3_layer()], **kw)
 
 
 # =====================================================================================================
@@ -528,3 +708,41 @@ def test_d2_flux3d_reduces_to_flux_and_de_staggers_identically():
     eyE, hxE = _d2_staggered(1.0 + 0j, 0.0 + 0.7j)           # evanescent
     P3 = _flux3d(z, eyE[:, :, None], hxE[:, :, None], z, _D2_DT) / (_D2_N / 2.0) ** 2
     assert abs(P3[_D2_K0]) < 1e-12
+
+
+@pytest.mark.parametrize("bad", [complex(4.0, float("nan")), complex(4.0, float("inf")),
+                                 complex(4.0, float("-inf")), complex(float("nan"), 0.0),
+                                 complex(float("inf"), 1.0)])
+def test_nonfinite_eps_raises_in_both_twins(bad):
+    """AUDIT V-2 follow-on: a NaN/inf permittivity fell straight THROUGH the Im(eps) >= 0 guard
+    (every comparison against NaN is False) and the two twins then disagreed -- the scalar path's
+    `max(0.0, nan)` returns 0.0, so eps = 4 + nan*1j became an ordinary LOSSLESS eps_inf = 4
+    dielectric, while `np.maximum(nan, 0.0)` propagates and the vectorized twin emitted an all-NaN
+    layer. Both must refuse, with the SAME error class, keeping the twins' byte-identity contract
+    over the guard as well as the arithmetic."""
+    from dynameta.optics.fdtd_seam import effect_eps_to_fdtd_grid
+    with pytest.raises(ValueError, match="must be FINITE"):
+        _eps_to_fdtd_layer(100e-9, bad, LAM)
+    with pytest.raises(ValueError, match="must be FINITE"):
+        effect_eps_to_fdtd_grid(np.array([[bad]], dtype=np.complex128), LAM)
+    # a single bad cell in an otherwise healthy grid is caught too, and located
+    grid = np.full((3, 4), 4.0 + 1e-3j, dtype=np.complex128)
+    grid[2, 1] = bad
+    with pytest.raises(ValueError, match="flat index 9"):
+        effect_eps_to_fdtd_grid(grid, LAM)
+
+
+def test_finite_eps_path_is_unchanged_by_the_finiteness_guard():
+    """The guard runs before untouched arithmetic: every VALID input still gives bit-for-bit the
+    same layer, and the scalar/vector twins still agree cell-by-cell."""
+    from dynameta.optics.fdtd_seam import effect_eps_to_fdtd_grid
+    good = [4.0 + 0.0j, complex(4.0, -0.0), 4.0 + 1e-8j, 2.25 + 0.0j, -180.0 + 30.0j,
+            1.0 + 5.0j, 12.0 + 3.0j, 0.5 + 0.2j]
+    grid = np.array(good, dtype=np.complex128).reshape(2, 4)
+    einf, wp, gam = effect_eps_to_fdtd_grid(grid, LAM)
+    for i, e in enumerate(good):
+        L = _eps_to_fdtd_layer(100e-9, e, LAM)
+        j, k = divmod(i, 4)
+        assert L.eps_inf == einf[j, k]
+        assert L.drude_wp_rad_s == wp[j, k]
+        assert L.drude_gamma_rad_s == gam[j, k]

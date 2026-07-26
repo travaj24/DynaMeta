@@ -681,6 +681,16 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         R = np.abs(Irefl / Iinc_L) ** 2
         T = np.abs(Itrans / Iinc_R) ** 2
     band = (f >= f_min) & (f <= f_max) & (np.abs(Iinc_L) > 0.05 * np.max(np.abs(Iinc_L)))
+    # audit D-3 (sub-mode), wave-3 scope fix: the empty-band raise was wired into the five 2-D/3-D
+    # front ends but NOT here, so a 1-D solve whose pulse never reached the reference probe still
+    # returned a silent all-False mask and every downstream `result.R[result.band].min()` died with
+    # an opaque `zero-size array to reduction operation minimum`. The 1-D grid terminates in Mur
+    # ABCs, not a CPML, so there is no source/probe placement guard to run alongside it -- an empty
+    # band here means the pulse itself missed the band, not that it was absorbed at launch.
+    # Lazy import (the `build_hot_carrier_tables` idiom): single-source the guard from solve2d
+    # without making this 1-D module pull the whole n-D kernel stack at import time.
+    from dynameta.optics.fdtd_nd.solve2d import _check_band
+    _check_band("solve_fdtd_1d", band, f_min, f_max)
     # OPT-IN (roadmap 1.2): expose the boundary time series already recorded above, as copies.
     # This is purely additive -- R/T/band/freqs_Hz are computed identically whether or not the
     # trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.

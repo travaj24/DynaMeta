@@ -77,11 +77,12 @@ class ChainResult:
 
 
 class AmplifierChain:
-    """An ordered chain of amplifier stages (FiberAmplifier / ErYbAmplifier -- anything with
-    .signals and .solve() returning a SteadyStateResult) and PassiveElements. solve() walks the
-    chain: each amplifier is re-solved with ITS actual input signal power (metrics-style clone
-    via the element's own signal list with the power swapped), so inter-stage losses and
-    saturation interact correctly."""
+    """An ordered chain of amplifier stages (FiberAmplifier / ErYbAmplifier -- anything
+    implementing with_signals(signals) and solve() -> SteadyStateResult) and PassiveElements.
+    solve() walks the chain: each amplifier is re-solved with ITS actual input signal power (the
+    element's own with_signals re-seed with the power swapped), so inter-stage losses and
+    saturation interact correctly. with_signals is REQUIRED, not optional: a stage that exposes
+    .signals without it raises a TypeError naming the method (see _reseed_signal)."""
 
     def __init__(self, elements: List, *, signal_index: int = 0):
         if not elements:
@@ -145,20 +146,30 @@ class AmplifierChain:
 
 def _reseed_signal(el, P_W: float, index: int):
     """Re-seed an amplifier stage with the signal power it ACTUALLY sees at its input, preserving
-    the stage's TYPE (audit A-3). Every amplifier class implements with_signals (FiberAmplifier
-    and ErYbAmplifier do), which rebuilds itself through its OWN constructor; the chain used to
-    call metrics._set_signal, which unconditionally rebuilt a FiberAmplifier from amp.ion /
-    amp.concentration / amp.raman and so raised AttributeError on the ErYbAmplifier the class
-    docstring advertises. A duck-typed third-party amplifier with .signals but no with_signals
-    still gets the legacy FiberAmplifier-shaped rebuild; anything without .signals passes through
-    unchanged (a pre-configured stage)."""
+    the stage's TYPE (audit A-3). CONTRACT: an amplifier stage MUST implement
+    with_signals(signals) -> a copy of ITSELF carrying that signal list and every opt-in
+    (FiberAmplifier and ErYbAmplifier both do, each rebuilding through its own constructor). The
+    chain used to call metrics._set_signal, which unconditionally rebuilt a FiberAmplifier from
+    amp.ion / amp.concentration / amp.raman and so raised AttributeError on the ErYbAmplifier the
+    class docstring advertises.
+
+    A stage with .signals but NO with_signals now raises a TypeError naming the missing method.
+    The "legacy FiberAmplifier-shaped rebuild" this docstring used to advertise as the duck-typed
+    fallback never worked: metrics._set_signal reached for the FiberAmplifier-private `_clone`,
+    so a third-party stage got `AttributeError: 'DuckAmp' object has no attribute '_clone'`
+    instead. An object without .signals passes through unchanged (a pre-configured stage)."""
     if hasattr(el, "with_signals"):
         sigs = list(el.signals)
         sigs[index] = replace(sigs[index], power_W=float(P_W))
         return el.with_signals(sigs)
     if hasattr(el, "signals"):
-        from dynameta.optics.fiber_amp.metrics import _set_signal
-        return _set_signal(el, P_W, index)
+        raise TypeError(
+            "AmplifierChain stage {!r} ({}) exposes .signals but not with_signals(signals), so "
+            "the chain cannot re-seed it at its actual input power. Implement "
+            "with_signals(signals) -> a copy of the stage carrying that signal list and every "
+            "opt-in (FiberAmplifier and ErYbAmplifier both do); a stage with NO .signals at all "
+            "is passed through unchanged as a pre-configured element.".format(
+                getattr(el, "name", None) or type(el).__name__, type(el).__name__))
     return el
 
 

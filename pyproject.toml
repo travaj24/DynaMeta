@@ -32,6 +32,7 @@ materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + r
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
 jax = ["jax>=0.11; python_version>='3.12'"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
+numba = ["numba>=0.58"]                                    # JIT/prange CPU kernels: 13 modules (fdtd_nd kernels2d/3d + oblique, soa, numba_env), 16 numba-gated tests, 1 parity oracle. OPTIONAL (every kernel has a numpy reference path) -- but audit T-3: it was declared by NO extra, so nothing could install it and all 16 gates ran nowhere. Installed by the `numba` CI leg.
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
@@ -51,3 +52,24 @@ line-length = 120
 # imports/vars); the E7xx statement-style family is deliberately excluded (semicolon-compact
 # physics style is the house convention).
 select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# audit T-4: `ruff check .` now RUNS in CI (the `lint` job), so the repo has to be clean under it.
+# The SHIPPED package `dynameta/` was cleared to zero and is gated in full -- 75 of its 157 F401
+# were phantom hits on three pure re-export __init__ facades (now declared via __all__ instead of
+# deleted, since they ARE the public API), 17 were genuinely unused imports (removed), 5 were dead
+# locals (removed / one renamed because the call it binds is a validity check).
+#
+# tests/ and validation/ keep 81 pre-existing hits (7+58 F401, 1+13 F841, 1+1 F811) that are NOT
+# mechanically safe to autofix, so they are scoped OUT rather than green-washed by weakening
+# `select`: the capability-probe idiom (a bare `import devsim` inside a skip guard --
+# tests/test_contact_current.py:23, validation/carriers_3d_multisemi.py:54) reads as an unused
+# import but deleting it deletes the guard, and several unused locals bind a call that is kept for
+# its side effect. Everything ELSE in these trees is gated (E9 syntax errors, F821 undefined names,
+# F-string and comparison defects, ...). Two real defects are parked behind this and want a
+# follow-on: the physical constant shadowed inside an oracle (validation/schrodinger_poisson.py:125
+# rebinds the imported EPS0) and validation/'s own 9 files still calling `np.trapezoid` directly
+# (audit X-1's floor trap, fixed in dynameta/ but not in the oracles). Shrink this list; do not
+# grow it.
+"tests/*.py" = ["F401", "F811", "F841"]
+"validation/*.py" = ["F401", "F811", "F841"]

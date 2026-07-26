@@ -14,6 +14,10 @@ from dynameta.optics.fdtd_nd.spec import FDTDLayer, hot_carrier_guard
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
+# audit D-3 / D-15: the absorber-thickness + probe-placement rule and the empty-band backstop are
+# SINGLE-SOURCED in solve2d (all three 3-D front ends below call the same helper), so the wave-3
+# redesign -- npml floor, attenuation-budget probe clearance, source demoted to a warning -- lands
+# here with no separate copy to drift. See solve2d's own module block for the measured evidence.
 from dynameta.optics.fdtd_nd.solve2d import (_check_band, _check_probe_placement,
                                              _ref_cache_call, _ring_time_s)
 from dynameta.optics.fdtd_nd.kernels3d import _run_3d_mo, _run_3d_oblique, run_3d

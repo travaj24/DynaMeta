@@ -58,3 +58,14 @@ from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
 from dynameta.optics.fdtd_nd.solve2d import solve_fdtd_2d, solve_fdtd_2d_oblique
 from dynameta.optics.fdtd_nd.solve3d import (solve_fdtd_3d, solve_fdtd_3d_mo,
                                              solve_fdtd_3d_oblique)
+
+# audit T-4: the re-export list above IS the package's public surface (the note above says so);
+# declaring it makes that machine-readable so `ruff check .` runs repo-wide without 25 phantom
+# "unused import" hits here. Keep in sync when a re-export is added or dropped.
+__all__ = [
+    "FDTD2DObliqueResult", "FDTD2DResult", "FDTD3DMOResult", "FDTD3DResult", "FDTDLayer",
+    "HAVE_NUMBA", "available_backends", "cpml_z", "have_jax", "have_numba_cuda", "njit",
+    "prange", "resolve_backend", "run_2d_te", "run_2d_te_jax", "run_2d_te_oblique_jax",
+    "run_2d_tm_oblique_jax", "run_3d", "run_3d_jax", "run_3d_oblique_jax", "solve_fdtd_2d",
+    "solve_fdtd_2d_oblique", "solve_fdtd_3d", "solve_fdtd_3d_mo", "solve_fdtd_3d_oblique",
+]

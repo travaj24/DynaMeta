@@ -12,6 +12,7 @@ Pure numpy/scipy; runs in CI. Gates:
   (5) total EM power conserved to 1e-10 in the lossless depleted integrator.
 """
 import numpy as np
+import pytest
 
 from dynameta.constants import C_LIGHT
 from dynameta.optics.twm_reference import (
@@ -213,6 +214,106 @@ def test_qpm_both_grating_orders_vs_brute_force_square_wave():
         phi = phase_matching_sinc(dk, L, Lam)
         assert abs(abs(phi) - abs(brute)) <= 1e-5 * abs(brute), (dk, phi, brute)
         assert abs(abs(brute) - 2.0 / np.pi) <= 1e-5 * (2.0 / np.pi)       # both bands (2/pi)
+
+
+def _phi_square_wave_exact(dk, L, Lam):
+    """EXACT (1/L) int_0^L sign(cos(2 pi z/Lam)) exp(-i dk z) dz, piecewise-analytic (the square
+    wave is piecewise constant, so each segment integrates in closed form -- no quadrature error
+    and no reference to the module under test)."""
+    import math
+    Lam = abs(float(Lam))
+    js = np.arange(0, int(math.ceil(2.0 * L / Lam)) + 4)
+    brk = Lam * (0.25 + 0.5 * js)
+    edges = np.concatenate(([0.0], brk[(brk > 0.0) & (brk < L)], [L]))
+    tot = 0.0 + 0.0j
+    for a, b in zip(edges[:-1], edges[1:]):
+        s = 1.0 if math.cos(2.0 * math.pi * (0.5 * (a + b)) / Lam) >= 0.0 else -1.0
+        seg = ((b - a) + 0.0j if dk == 0.0
+               else (np.exp(-1j * dk * b) - np.exp(-1j * dk * a)) / (-1j * dk))
+        tot += s * seg
+    return tot / L
+
+
+def test_qpm_selects_the_nearest_ODD_order_not_just_m_plus_minus_1():
+    """FIX-VERIFY W1 kill 3.  ``phase_matching_sinc`` selected only m = +-1, so a grating driven on
+    a HIGHER odd order -- exactly what ``qpm_period_for(dk, order=3)`` and
+    ``effective_deff_qpm(d, 3)`` exist to build -- fell in a hole: at dk = +-3 * 2 pi/Lambda the
+    exact square-wave response is 2/(3 pi) = 0.212207 and the truncated form returned 2.4e-16, a
+    silent 100% error, and the two order-3 helpers disagreed with it by fifteen orders of
+    magnitude.  The nearest ODD order is now chosen elementwise with its own (2/(pi|m|))
+    (-1)^((|m|-1)/2) Fourier weight."""
+    from dynameta.optics.twm_reference import phase_matching_sinc, effective_deff_qpm
+
+    dk0 = 800.0
+    Lam = qpm_period_for(dk0)
+    g = 2.0 * np.pi / Lam
+    L = 20 * Lam
+    # (a) every odd order, magnitude AND phase, against the piecewise-exact integral
+    for m in (1, 3, 5, 7, 9, -1, -3, -5, -7):
+        got = complex(phase_matching_sinc(m * g, L, Lam))
+        ex = _phi_square_wave_exact(m * g, L, Lam)
+        assert abs(got - ex) <= 1e-9 * abs(ex), (m, got, ex)
+        assert abs(got) == pytest.approx(2.0 / (np.pi * abs(m)), rel=1e-9)
+
+    # (b) the m-th-order helpers now agree with the function they are meant to describe
+    for order in (1, 3, 5, 7):
+        Lm = qpm_period_for(dk0, order=order)
+        got = abs(complex(phase_matching_sinc(dk0, 20 * Lm, Lm)))
+        assert got == pytest.approx(effective_deff_qpm(1.0, order), rel=1e-9)
+
+    # (c) 0 <= dk < 2g is BYTE-IDENTICAL to the m = +-1 form (the pinned 120k-value golden)
+    def m1_only(dkv, length, period):
+        from dynameta.optics.twm_reference import _sinc
+        dkv = np.asarray(dkv, dtype=float)
+        gg = 2.0 * np.pi / float(period)
+        dp, dm = dkv - gg, dkv + gg
+        de = np.where(np.abs(dm) < np.abs(dp), dm, dp)[()]
+        arg = de * length / 2.0
+        return (2.0 / np.pi) * _sinc(arg) * np.exp(-1j * arg)
+
+    rng = np.random.default_rng(0)
+    for u in (np.linspace(-2 * g, 2 * g, 120001), rng.uniform(0.0, 2.0 * g, 20000)):
+        for Ll in (L, 0.7 * L, 13.37 * Lam):
+            assert np.array_equal(np.asarray(phase_matching_sinc(u, Ll, Lam)),
+                                  np.asarray(m1_only(u, Ll, Lam)))
+    # ... and |dk| > 2g is exactly where it must NOT be
+    hi = np.linspace(2.001 * g, 6 * g, 5000)
+    assert not np.any(np.asarray(phase_matching_sinc(hi, L, Lam))
+                      == np.asarray(m1_only(hi, L, Lam)))
+
+    # (d) reality/symmetry: Phi(-dk) == conj(Phi(dk)) and a SIGNED period is the same grating,
+    #     bitwise, everywhere except the documented dk == 0 tie (m = +1 by convention).
+    u = np.linspace(-8 * g, 8 * g, 8001)
+    u = u[u != 0.0]
+    a = np.asarray(phase_matching_sinc(u, L, Lam))
+    assert np.array_equal(a, np.conj(np.asarray(phase_matching_sinc(-u, L, Lam))))
+    assert np.array_equal(a, np.asarray(phase_matching_sinc(u, L, -Lam)))
+
+    # (e) the residual the docstring quotes: <= 1.1e-2 relative inside whichever main lobe is
+    #     matched (pre-fix this band held a 100%-error hole at dk/g ~ +-3)
+    uu = np.linspace(-8 * g, 8 * g, 4001)
+    ex = np.array([_phi_square_wave_exact(d, L, Lam) for d in uu])
+    got = np.array([complex(phase_matching_sinc(d, L, Lam)) for d in uu])
+    for thr, tol in ((0.5, 1.1e-2), (0.2, 3.3e-2)):
+        msk = np.abs(ex) >= thr
+        assert np.max(np.abs(got[msk] - ex[msk]) / np.abs(ex[msk])) <= tol, thr
+
+
+def test_qpm_order_three_design_closed_form_matches_the_integrator():
+    """FIX-VERIFY W1 kill 3, end to end: a THIRD-order poling mask (period 3x coarser, the reason
+    higher-order QPM is used at all) must give the same A3(L) from ``sfg_undepleted``'s closed form
+    as from ``twm_propagate``'s ODE march over the actual square wave.  Pre-fix the closed form
+    returned ~0 for every order > 1."""
+    dk0 = 800.0
+    for order in (1, 3, 5):
+        Lam = qpm_period_for(dk0, order=order)
+        L = 20 * Lam
+        spec = TWMSpec(dk_override=dk0, qpm_period=Lam, omega1=W1, omega2=W1, d_eff=DEFF,
+                       length=L, n1=1.5, n2=1.5, n3=1.5)
+        march = abs(twm_propagate(spec, 1.0, 1.0, 0.0 + 0j, n_out=241,
+                                  rtol=1e-12, atol=1e-14).A3[-1]) ** 2
+        closed = abs(sfg_undepleted(spec, 1.0, 1.0)["A3_L"]) ** 2
+        assert closed == pytest.approx(march, rel=2e-2), order
 
 
 # ------------------------------------------------------------------ gate 5: energy conservation

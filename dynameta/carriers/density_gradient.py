@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import HBAR, KB, M_E, Q_E
+from dynameta.constants import HBAR, KB, Q_E
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m"]

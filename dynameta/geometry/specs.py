@@ -41,7 +41,13 @@ class Mesh3DSpec:
     metal_skin_thk_m:        float = 0.0         # 0 disables the split
     maxh_metal_skin_m:       Optional[float] = None
     maxh_metal_bulk_m:       float = 35e-9
-    # In-inclusion vs background lateral refinement of cavity layers:
+    # maxh_inclusion_m sizes the INCLUSION solids only (`<layer>__incl<j>`, i.e. a Layer that
+    # actually carries an Inclusion). maxh_background_m is the catch-all for everything else: plain
+    # full-cell bands, an inclusion layer's background remainder, AND BOTH HALVES OF A CAVITY SPLIT
+    # (`_inpatch` + `_outside`) -- a cavity layer follows the BACKGROUND knob, not this one, since
+    # the in-patch column is full-layer-thickness background material (see
+    # ngsolve_layered.LayeredOpticalBuilder._maxh; putting it on maxh_inclusion_m's 5 nm default
+    # cost 5.1M elements / 493 s of meshing on a 250 nm air cap).
     maxh_inclusion_m:        float = 5e-9
     maxh_background_m:       float = 30e-9
     fem_order:               int = 2

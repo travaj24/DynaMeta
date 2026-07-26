@@ -26,6 +26,11 @@ from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
 
 __all__ = ["Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "SteadyStateResult"]
 
+# "carry the current value through the clone" sentinel: distinguishes "not supplied" from an
+# explicit None (ase=None DROPS the ASE band -- see FiberAmplifier.without_ase).
+_KEEP = object()
+
+
 @dataclass(frozen=True)
 class Pump:
     """A pump beam: power [W], wavelength [m], direction 'fwd' (co, seeded at z=0) or 'bwd'
@@ -132,30 +137,55 @@ class FiberAmplifier:
 
     # ---- type-preserving clone protocol ---------------------------------------------------
     def _clone(self, *, pumps: Optional[List[Pump]] = None,
-               signals: Optional[List[Signal]] = None) -> "FiberAmplifier":
-        """Clone this amplifier with the pump and/or signal list swapped, carrying EVERY opt-in
-        through: the ASE band, the ConcentrationModel, the normalised upconversion_C_up (audit
-        S3-1/A-1: the raw-C_up spelling was dropped by clones that only forwarded the
-        concentration model), the RamanStokes coupling, and the axial temperature profile set by
-        set_temperature_profile / solve_with_thermal_feedback (audit A-5: every clone used to run
-        the COLD model, so metrics.*(amp) disagreed with amp.solve() by ~2.4 dB on a hot fiber).
-        The _Tz tuple is immutable in practice (set_temperature_profile copies its inputs and
-        nothing mutates it in place), so it is shared rather than re-copied."""
+               signals: Optional[List[Signal]] = None, ase=_KEEP) -> "FiberAmplifier":
+        """Clone this amplifier with the pump list, signal list and/or ASE band swapped, carrying
+        EVERY opt-in through: the ASE band, the ConcentrationModel, the normalised
+        upconversion_C_up (audit S3-1/A-1: the raw-C_up spelling was dropped by clones that only
+        forwarded the concentration model), the RamanStokes coupling, and the axial temperature
+        profile set by set_temperature_profile / solve_with_thermal_feedback (audit A-5: every
+        clone used to run the COLD model, so metrics.*(amp) disagreed with amp.solve() by ~2.4 dB
+        on a hot fiber). The _Tz tuple is immutable in practice (set_temperature_profile copies
+        its inputs and nothing mutates it in place), so it is shared rather than re-copied.
+
+        FiberAmplifier-PRIVATE. Anything that must also work on an ErYbAmplifier -- metrics.py
+        and chain.py, i.e. everything the user hands an amplifier to -- uses the three PUBLIC
+        protocol methods below (with_signals / with_pumps / without_ase) instead; reaching for
+        _clone from metrics.py is what made every metric raise AttributeError on an ErYbAmplifier
+        (audit A-3 follow-on). dynamics._amp_with_boundary keeps using _clone deliberately: the
+        transient march is FiberAmplifier-only anyway (it reads _n_active / _mcc_matrix /
+        concentration, none of which ErYbAmplifier has) and it needs pumps AND signals swapped in
+        ONE construction."""
         new = FiberAmplifier(self.ion, self.fiber,
                              self.pumps if pumps is None else list(pumps),
                              self.signals if signals is None else list(signals),
-                             self.ase, upconversion_C_up=self.upconversion_C_up,
+                             self.ase if ase is _KEEP else ase,
+                             upconversion_C_up=self.upconversion_C_up,
                              concentration=self.concentration, raman=self.raman)
         new._Tz = self._Tz
         return new
 
+    # ---- PUBLIC amplifier re-seed protocol -------------------------------------------------
+    # with_signals / with_pumps / without_ase are THE contract every amplifier class in this
+    # package implements (FiberAmplifier and ErYbAmplifier both do) and the ONLY route
+    # AmplifierChain and metrics.* use to rebuild a stage. Each returns a copy of the SAME class
+    # carrying every opt-in.
     def with_signals(self, signals: List[Signal]) -> "FiberAmplifier":
         """Re-seed the amplifier with a new signal list, preserving its TYPE and every opt-in
-        (see _clone). This is the amplifier-agnostic re-seed protocol AmplifierChain uses to walk
-        a chain -- ErYbAmplifier implements the same method, so a chain can hold either class
+        (see _clone). ErYbAmplifier implements the same method, so a chain can hold either class
         (audit A-3: the chain used to rebuild every stage as a FiberAmplifier from amp.ion, which
         hard-crashed on an ErYbAmplifier)."""
         return self._clone(signals=signals)
+
+    def with_pumps(self, pumps: List[Pump]) -> "FiberAmplifier":
+        """Re-seed the amplifier with a new pump list, preserving its TYPE and every opt-in
+        (see _clone). Used by metrics.slope_efficiency to sweep the launched pump."""
+        return self._clone(pumps=pumps)
+
+    def without_ase(self) -> "FiberAmplifier":
+        """A copy with the ASE band DROPPED (ase=None) and everything else -- including the axial
+        temperature profile (audit A-5) -- carried through. Used by metrics.gain_spectrum, whose
+        small-signal probe is ASE-independent and much faster without the band."""
+        return self._clone(ase=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self) -> Tuple[ChannelSet, np.ndarray, np.ndarray, np.ndarray, List[str]]:

@@ -1,5 +1,30 @@
 name: CI
 
+# WHAT EACH LEG ACTUALLY INSTALLS AND RUNS. Audit T-2/T-3/T-4/T-5: the previous version of this
+# file carried a comment asserting the py3.10-3.12 legs resolved numpy 1.x -- no leg ever did, and
+# the floor it claimed to defend (`numpy>=1.24`) was therefore installed nowhere. Keep this table
+# true or delete it; a false comment is worse than no comment.
+#
+#   job      runs-on py   installs                            runs                          added cost
+#   -------- ------- ---- ----------------------------------- ----------------------------- ----------
+#   test     ubuntu  3.10 core+dev+plot+h5py, FLOATING resolve fast suite                     unchanged
+#   test     ubuntu  3.11   (every leg lands on the NEWEST     fast suite                     unchanged
+#   test     ubuntu  3.12    numpy 2.x -- `numpy>=1.24` is an  fast suite + coverage          + cov overhead
+#   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite + smoke tier        unchanged
+#   floor    ubuntu  3.10 the OLDEST DECLARED pins             import sweep + fast suite      1 suite / ncores
+#                                                              (`-n auto`, 878 tests)         (xdist)
+#   numba    windows 3.12 core+dev+[numba]                     16 numba tests + parity oracle ~8 min
+#   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
+#   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
+#                                                              validation oracles
+#
+# The "added cost" figures for the new legs are measured (2026-07-26, this repo, 2 threads per
+# process); the four `test` legs are untouched apart from coverage on 3.12.
+#
+# Not covered by ANY leg (stated so the next audit does not have to rediscover it): CUDA kernels,
+# the [materials-db] extra, macOS, the heavy FEM modules named in the `solvers` job, and the
+# ~35 CPU-min of @slow validation wrappers.
+
 on:
   push:
     branches: [main]
@@ -9,11 +34,18 @@ jobs:
   test:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # audit T-14: every job carries an explicit cap. GitHub's silent default is 6 h, and
+    # run_all's own per-script cap is 1800 s x 84 smoke scripts, so "hung job" used to mean
+    # "burn the day". These are CAPS, not budgets -- see the table at the top. 75 rather than 60
+    # because the 3.12 leg now also carries coverage instrumentation.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        # 3.13 pulls numpy 2.x (no numpy<2 wheels for 3.13) -> the numpy-2.x compatibility leg, so a
-        # re-introduced removed API (np.trapz, np.float_, ...) fails CI instead of passing on a 1.24 resolve.
+        # All four legs resolve the NEWEST numpy (2.x) -- an open `>=` floor always does. This
+        # matrix is therefore the numpy-2.x compatibility surface (a re-introduced np.trapz /
+        # np.float_ fails here); the OTHER direction -- a numpy-2-only API used under the
+        # declared 1.24 floor, i.e. audit X-1 -- is caught by the `floor` job below, not here.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +57,8 @@ jobs:
       # which requires Python >=3.11 -- installing it would break the py3.10 leg, so we
       # install h5py here (wheels on all CI Pythons) and let the IDENTICAL zarr code path
       # be covered locally on 3.11+; the io tests pick whichever backend is installed and
-      # skip the rest. The heavy solver stack (devsim/ngsolve/gmsh) is NOT exercised here.
+      # skip the rest. The heavy solver stack (devsim/ngsolve/gmsh) is NOT exercised here
+      # -- the `solvers` job is where it is.
       - name: Install (core + dev + plot + h5py)
         run: |
           python -m pip install --upgrade pip
@@ -33,11 +66,227 @@ jobs:
       - name: Run fast tests
         # audit S6-3: the 7 @slow validation-wrapper tests (~35 CPU-min across the matrix) are
         # excluded here; their underlying validation modules run once in the py3.13 smoke tier.
+        if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
+      # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
+      # number quoted in the audit had no gate behind it. ONE leg measures it (running the suite
+      # twice on 3.12 would just buy wall-clock). The floor is set BELOW the measured value on
+      # purpose: it is a ratchet against a large regression, not a target to tune tests to.
+      - name: Run fast tests + coverage
+        if: matrix.python-version == '3.12'
+        run: pytest tests/ -q -m "not slow" --cov=dynameta --cov-report=term --cov-fail-under=65
       # audit 1.2/6.3: the smoke validation tier was advertised 'CI-able' but never
       # wired in -- its physics oracles gated nothing automatically. One leg (the
-      # numpy-2.x python) runs the curated pure-numpy tier; capability-skips exit 42
-      # and are counted separately (never green-washed as PASS).
+      # numpy-2.x python) runs the curated pure-numpy tier. audit T-3: a smoke-tier
+      # capability-skip (exit 42) is now a FAILURE unless declared with --allow-skip;
+      # qd_soa_numba_parity is declared here because the `numba` job runs it for real.
       - name: Run smoke validation tier
         if: matrix.python-version == '3.13'
-        run: python -m validation.run_all --tier smoke
+        run: python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity
+
+  floor:
+    # audit T-2: the ONLY leg that installs the DECLARED dependency floors. Everything else in
+    # this file floats to the newest release, so `numpy>=1.24` / `scipy>=1.10` / `lumenairy>=5.22`
+    # were assertions no job could falsify. Pin set resolved 2026-07-26 by pip cross-resolve for
+    # cp310 (numpy 1.24.4 + scipy 1.10.1 + lumenairy 5.22.0, pulling matplotlib 3.10.9); numpy 1.x
+    # has no cp312/cp313 wheels, so py3.10 is the only interpreter this set installs on at all.
+    name: floor pins (py3.10, oldest declared)
+    runs-on: ubuntu-latest
+    # 8:18 wall at -n 8 locally (~66 CPU-min); a 2-vCPU runner should land well inside this cap.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install (core pinned to the declared floor)
+        # pytest-xdist is a CI-only accelerator, not a declared dependency: this leg re-runs the
+        # whole fast suite, and `-n auto` is what keeps a FIFTH full-suite run from doubling the
+        # PR wall-clock. The suite was verified xdist-safe locally (an 8-worker run reproduces
+        # exactly the serial pass/fail set, both at the floor and at the newest resolve).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . "numpy==1.24.*" "scipy==1.10.*" "lumenairy==5.22.*" "pytest>=7.0" tmm pytest-xdist
+      - name: Assert the floor is what actually got installed
+        # The trip-wire that keeps this leg honest: `np.trapezoid` DOES NOT EXIST before numpy
+        # 2.0, so its absence proves this interpreter really is on the pre-2.0 API surface. If a
+        # future resolve silently upgrades numpy, this fails instead of quietly re-floating.
+        run: |
+          python - <<'PY'
+          import numpy, scipy, lumenairy
+          assert numpy.__version__.startswith("1.24."), numpy.__version__
+          assert scipy.__version__.startswith("1.10."), scipy.__version__
+          assert lumenairy.__version__.startswith("5.22."), lumenairy.__version__
+          assert not hasattr(numpy, "trapezoid"), "numpy is NOT at the declared floor"
+          print("floor OK:", numpy.__version__, scipy.__version__, lumenairy.__version__)
+          PY
+      - name: Import every shipped module at the floor
+        # Broader than any test selection and the cheapest possible catch for X-1's class: a
+        # numpy-2-only name at module scope in ANY of the ~200 library modules. Optional-backend
+        # ImportErrors (ngsolve/devsim/gmsh/numba/jax/zarr/h5py/cupy/tmm/...) are expected here and
+        # skipped by name; an AttributeError or any other exception is a real floor break.
+        run: |
+          python - <<'PY'
+          import importlib, pkgutil, sys, traceback
+          import dynameta
+          OPTIONAL = ("ngsolve", "netgen", "devsim", "gmsh", "numba", "jax", "zarr", "h5py",
+                      "cupy", "tmm", "jarvis", "mp_api", "refractiveindex", "matplotlib")
+          bad = []
+          for m in pkgutil.walk_packages(dynameta.__path__, "dynameta."):
+              try:
+                  importlib.import_module(m.name)
+              except ImportError as e:
+                  if any(o in str(e) for o in OPTIONAL):
+                      continue
+                  bad.append((m.name, repr(e)))
+              except Exception as e:
+                  bad.append((m.name, repr(e)))
+                  traceback.print_exc()
+          print("swept", len(list(pkgutil.walk_packages(dynameta.__path__, "dynameta."))), "modules")
+          if bad:
+              for name, err in bad:
+                  print("FLOOR-BREAK", name, err)
+              sys.exit(1)
+          PY
+      - name: Run the fast suite at the floor
+        # The whole fast suite minus ONE module and EIGHT named tests, and each exclusion is a
+        # finding, not a convenience (measured on a numpy-1.x/lumenairy-5.22 proxy 2026-07-26:
+        # 878 passed, 0 failed once these are out):
+        #   * the 8 deselected tests call `np.trapezoid` DIRECTLY, which does not exist before
+        #     numpy 2.0. The LIBRARY was routed through core.numerics.trapz by the X-1 fix; the
+        #     TESTS were not, so the X-1 trap still lives in tests/. Routing these 8 through
+        #     core.numerics.trapz (or a hasattr shim like test_carrier_heating.py:59 already
+        #     uses) deletes this list -- that is the follow-on, and it is why the list is spelled
+        #     out per test instead of ignoring four whole modules (which would cost 85 further
+        #     tests of floor coverage).
+        #   * test_bic_capstone HANGS at lumenairy 5.22.0 (>15 min at 750% CPU, vs ~20 s at
+        #     5.28) -- a real limitation of the declared lumenairy floor, recorded here rather
+        #     than papered over by letting lumenairy float on this leg.
+        # Everything else runs, so a new floor break anywhere else turns this leg red.
+        run: |
+          pytest tests/ -q -m "not slow" -n auto \
+            --ignore=tests/test_bic_capstone.py \
+            --deselect tests/test_qcse.py::test_voigt_area_conserved_and_peak_drops \
+            --deselect tests/test_soa.py::test_rin_and_linewidth \
+            --deselect tests/test_soa_generality.py::test_sech_integrated_gain_conserved \
+            --deselect tests/test_fiber_amp.py::test_heat_energy_balance \
+            --deselect tests/test_fiber_amp.py::test_frantz_nodvik_temporal_reshaping \
+            --deselect tests/test_fiber_gnlse.py::test_raman_only_red_shift_at_gordon_rate_and_energy_conserved \
+            --deselect tests/test_fiber_nonlinear.py::test_sbs_active_gain_exponent_gate \
+            --deselect tests/test_fiber_nonlinear.py::test_srs_stokes_redshift_and_gain_exponent
+
+  numba:
+    # audit T-3: `numba` was declared by no extra and installed by no leg, so 13 library modules /
+    # 44 njit-prange kernels, 16 numba-gated tests and the one numba parity oracle ran NOWHERE --
+    # and the oracle's exit-42 skip was counted as a non-failure, so the tier read green. Windows
+    # on purpose: the TBB threading-layer hard-crash that dynameta/numba_env.py exists to defend
+    # against is Windows-specific, and conftest.py runs that probe on every pytest start.
+    name: numba kernels (windows, py3.12)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        # windows-latest defaults to PowerShell, where a trailing `\` is NOT a line continuation
+        # -- the multi-line pytest invocation below would silently run only its first line.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (core + dev + numba)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,numba]"
+      - name: Assert numba is importable and the threading probe runs
+        run: |
+          python -c "import numba; print('numba', numba.__version__)"
+          python -c "from dynameta.numba_env import ensure_working_threading_layer as f; f(); import os; print('NUMBA_THREADING_LAYER=', os.environ.get('NUMBA_THREADING_LAYER'))"
+      - name: Run every numba-gated test
+        # `-k numba` is exact, not a heuristic: all 16 numba-gated tests in these five modules
+        # carry "numba" in the test name, and the deselected remainder is what the ubuntu legs
+        # already run without numba. Measured locally 2026-07-26 with numba present:
+        # mo_oblique 4 passed / chi2_raman 2 / hot_carrier 3 / soa 6 / soa_generality 1 = 16/16
+        # PASS. Running the WHOLE files instead would add ~10 min of numpy-side FDTD time loops
+        # that buy nothing here.
+        run: |
+          pytest -q -m "not slow" -k numba \
+            tests/test_fdtd_mo_oblique.py tests/test_fdtd_chi2_raman.py \
+            tests/test_fdtd_hot_carrier.py tests/test_soa.py tests/test_soa_generality.py
+      - name: Run the numba parity oracle for real
+        # ~60 s with numba present (measured). This is the oracle that exited 42 and read green.
+        run: python -m validation.run_all --tier smoke qd_soa_numba_parity
+
+  lint:
+    # audit T-4: ruff was pinned in [dev] and invoked by no leg while 178 violations accumulated.
+    # The enforced surface is pinned in pyproject ([tool.ruff.lint] select = F, E9), not by a ruff
+    # version here. dynameta/ is clean and fully gated; tests/ and validation/ have documented
+    # per-file-ignores for their pre-existing F401/F841/F811 (see pyproject for why, and shrink it).
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff only
+        run: python -m pip install --upgrade pip ruff
+      - name: ruff check .
+        run: ruff check .
+
+  solvers:
+    # audit T-5: no leg installed the [solvers] extra, so ~99 test functions (13 whole modules
+    # skipping at import) and 122 of 206 gated validations were structurally unreachable -- the
+    # regression class F-1/F-2/F-5/F-23/C-5/C-6 all live in. ngsolve, devsim and gmsh all have
+    # manylinux wheels (verified 2026-07-26: ngsolve 6.2.2606 cp310-cp314, devsim 2.10.0 cp39-abi3,
+    # gmsh 4.15.2), so this needs no source build -- only libGLU, which gmsh's ctypes load needs.
+    # Bounded on purpose: selected modules, not the whole suite.
+    name: solvers (ngsolve + devsim, py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 on purpose: that is the interpreter this leg's install and test selection were
+          # verified against locally (ngsolve 6.2.2606 cp312 wheel + devsim 2.10.0 cp39-abi3).
+          python-version: "3.12"
+      - name: System libs for gmsh
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
+      - name: Install (core + dev + plot + solvers)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]"
+      - name: Assert the solver stack really imported
+        run: python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
+      - name: Run the ngsolve/devsim-gated test modules
+        # The 25 modules that mention ngsolve or devsim, MINUS the three that dominate the clock
+        # (test_fem_drivers > 300 s, test_graded_tensor_fem > 240 s, test_shg_grating -- the heavy
+        # grating/driver sweeps; they are the nightly/on-demand tier, not the PR tier). Every file
+        # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
+        # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
+        # which is exactly the T-5 failure mode.
+        run: |
+          pytest -q -m "not slow" \
+            tests/test_audit_2026_07_17_infra.py tests/test_audit_guards.py \
+            tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
+            tests/test_contact_current.py tests/test_density_gradient.py \
+            tests/test_devsim_smoke.py tests/test_electrothermal.py \
+            tests/test_gated_builder.py tests/test_geometry_shapes.py \
+            tests/test_hydro_fem.py tests/test_impact_ionization.py \
+            tests/test_mesh_periodicity.py tests/test_mobility.py \
+            tests/test_pipeline_effects.py tests/test_qcse.py tests/test_sfg_fem.py \
+            tests/test_shg_fem.py tests/test_solver_guards.py \
+            tests/test_stacked3d_spec.py tests/test_thermal_twotemp.py
+      - name: Run the FEM/DEVSIM validation smoke subset
+        # The solver-backed oracles the smoke tier cannot reach at all (run_all's SMOKE set is
+        # pure-numpy by construction). These two tokens select THREE scripts -- electrostatics_fem
+        # (15 s), thermal_fem (26 s) and, by substring, thermal_fem_twotemp (5 s) -- all measured
+        # PASS locally on 2026-07-26 against ngsolve 6.2.2606. It is a deliberately small beachhead:
+        # every other FEM oracle probed (superstrate_index_fem, graded_tmm_vs_fem,
+        # per_region_absorption, symmetry_reduced_fem) exceeds 180 s each and belongs in a nightly
+        # tier, and the full gated set is 122 scripts / hours. Grow this list with measurements.
+        # A capability skip here is informational (this is not the smoke tier), but with the extra
+        # installed there should be none: an exit 42 means the install step silently did not take.
+        run: python -m validation.run_all electrostatics_fem thermal_fem

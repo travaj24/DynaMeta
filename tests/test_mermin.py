@@ -19,6 +19,8 @@ Independent oracle for the k->0 claim: a self-contained finite-k Mermin dielectr
 the collisionless hydrodynamic Lindhard function, evaluated in this test only (the library never
 computes finite-k Mermin -- that is roadmap 2.4). Mermin, Phys. Rev. B 1, 2362 (1970).
 """
+import warnings
+
 import numpy as np
 import pytest
 
@@ -229,10 +231,18 @@ def test_check_kk_causal_small_acausal_large():
     assert res["gamma_step_10x"]["max_norm"] > 5.0 * res["drude"]["max_norm"]
 
 
-def test_check_kk_discrimination_is_grid_independent():
-    """finding Q-5's core requirement: the ranking must not depend on the grid. A causal model's
-    residual is quadrature-limited and FALLS with refinement; a genuine acausality is a property
-    of the model and stays put. Checked at the shipped grid and at 4x.
+def test_check_kk_discrimination_survives_grid_REFINEMENT():
+    """finding Q-5's core requirement, SCOPED (fix-verify W1 item 5): the ranking must not degrade
+    when the grid is REFINED from a resolved one. A causal model's residual is quadrature-limited
+    and FALLS with refinement; a genuine acausality is a property of the model and stays put.
+    Checked at the shipped grid and at 4x.
+
+    THIS IS NOT UNCONDITIONAL GRID-INDEPENDENCE and the docstring no longer claims it is. Below
+    N ~ 6000 on this grid the ranking INVERTS, because the causal 2-oscillator Lorentz's narrowest
+    line (gamma = 1e14) is no longer resolved: at N = 4000 (gamma/h = 2.3) it scores 7.79e-3,
+    level with the acausal 2x gamma jump, and at N = 2000 (gamma/h = 1.2) it scores 4.56e-2, ABOVE
+    the 10x jump. ``check_kk`` now reports ``feature_pts`` and warns below 5 grid points per line;
+    the coarse end is pinned by test_check_kk_warns_when_the_sharpest_line_is_under_resolved.
 
     Measured rms_norm (N = 8000 -> 32000): drude 2.05e-4 -> 2.78e-5, lorentz2 3.10e-4 -> 1.92e-5,
     2x step 8.10e-3 -> 8.14e-3, 10x step 1.82e-2 -> 1.45e-2, flipped Im 6.11e-1 -> 6.01e-1. The
@@ -258,6 +268,50 @@ def test_check_kk_discrimination_is_grid_independent():
     assert out[("lorentz2", 32000)] < 0.5 * out[("lorentz2", 8000)]
     assert 0.5 < out[("gamma_step_2x", 32000)] / out[("gamma_step_2x", 8000)] < 2.0
     assert 0.5 < out[("lorentz_flip_im", 32000)] / out[("lorentz_flip_im", 8000)] < 2.0
+
+
+def test_check_kk_warns_when_the_sharpest_line_is_under_resolved():
+    """FIX-VERIFY W1 item 5. ``check_kk`` claimed its discrimination was "GRID-INDEPENDENT" and
+    that refining "can never invert the ranking". The second half is true; the first is not. Below
+    N ~ 6000 on the reference grid the CAUSAL 2-oscillator Lorentz is no longer resolved (its
+    narrowest line is gamma = 1e14 and h = 80 wp / N), its residual is inflated by quadrature, and
+    the ranking inverts:
+
+        N = 2000 (gamma/h = 1.17): lorentz2 4.56e-2 > the acausal 10x gamma jump 4.66e-2 * 0.98
+        N = 4000 (gamma/h = 2.35): lorentz2 7.79e-3, level with the acausal 2x jump 7.93e-3
+        N = 8000 (gamma/h = 4.69): lorentz2 1.76e-4, 39x below the 2x jump  <- inside the envelope
+
+    ``feature_pts`` measures that resolution model-free and a RuntimeWarning now fires below 5."""
+    wmax = 80.0 * WP
+    lor = _Lorentz2()
+    step2 = ExtendedDrudeOptical(
+        EPS_INF, M_OPT, lambda w: np.where(np.asarray(w) < 1.2e15, 1.5e14, 3.0e14))
+    band = _band()
+    got = {}
+    for N in (4000, 8000):
+        g = np.linspace(wmax / N, wmax, N)
+        with warnings.catch_warnings(record=True) as wl:
+            warnings.simplefilter("always")
+            got[("lorentz2", N)] = check_kk(lor, g, metric_band=band, self_calib=False)
+        got[("lorentz2_warn", N)] = [w for w in wl if issubclass(w.category, RuntimeWarning)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            got[("step2", N)] = check_kk(step2, g, n_m3=N_ITO, metric_band=band, self_calib=False)
+
+    # the COARSE grid: under-resolved, warned about, and the ranking is indeed destroyed
+    assert got[("lorentz2", 4000)]["feature_pts"] < 5.0
+    assert got[("lorentz2_warn", 4000)], "no under-resolution warning at N = 4000"
+    assert "grid points" in str(got[("lorentz2_warn", 4000)][0].message)
+    assert got[("step2", 4000)]["rms_norm"] < 2.0 * got[("lorentz2", 4000)]["rms_norm"]
+
+    # the RESOLVED grid: no warning, and the acausal model separates by more than an order
+    assert got[("lorentz2", 8000)]["feature_pts"] >= 5.0
+    assert not got[("lorentz2_warn", 8000)], [str(w.message) for w in got[("lorentz2_warn", 8000)]]
+    assert got[("step2", 8000)]["rms_norm"] > 10.0 * got[("lorentz2", 8000)]["rms_norm"]
+
+    # feature_pts tracks gamma/h: refining 2x must widen the resolved line by ~2x
+    assert (got[("lorentz2", 8000)]["feature_pts"]
+            > 1.3 * got[("lorentz2", 4000)]["feature_pts"])
 
 
 def test_check_kk_causal_floor_was_pure_quadrature_error():
@@ -350,10 +404,19 @@ def test_extended_drude_in_tmm_three_layer_stack():
     assert n_ito.imag >= 0.0                 # decaying wave (passive branch)
 
     # air | ITO(50 nm) | glass -- the eps() model plugs straight into the TMM oracle.
-    R, T, A = stack_rta(1.0, [(n_ito, 50e-9)], 1.5, lam, theta_deg=0.0, pol="s")
+    layers = [(n_ito, 50e-9)]
+    R, T, A = stack_rta(1.0, layers, 1.5, lam, theta_deg=0.0, pol="s")
     assert 0.0 <= R <= 1.0 and 0.0 <= T <= 1.0 and 0.0 <= A <= 1.0
     assert A > 0.0                           # a lossy ITO film absorbs
-    assert abs(R + T + A - 1.0) < 1e-9       # energy budget holds (stack_rta also guards it)
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY (stack_rta returns A := 1 - R - T) and gated
+    # nothing -- it passes for a halved or sign-flipped T. This film is LOSSY, so gate the whole
+    # triple against the INDEPENDENT Abeles TMM: that is what actually pins the extended-Drude
+    # eps -> n -> R/T/A chain this test is about.
+    from _rta_oracles import abeles_rta
+    R_ref, T_ref, A_ref = abeles_rta(1.0, layers, 1.5, lam, theta_deg=0.0, pol="s")
+    assert R == pytest.approx(R_ref, abs=1e-12)
+    assert T == pytest.approx(T_ref, abs=1e-12)
+    assert A == pytest.approx(A_ref, abs=1e-12)
 
     # sanity vs plain Drude @ gamma_dc: the extended film absorbs LESS (reduced Im eps).
     n_plain = _passive_sqrt(complex(

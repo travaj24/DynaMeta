@@ -169,14 +169,23 @@ def test_tmm_etalon_pole_q_cross_gate():
     assert ff.Q == pytest.approx(Q_pole, rel=0.02), "fano Q {} vs pole {}".format(ff.Q, Q_pole)
 
 
-def test_tmm_etalon_vs_resonance_pole_finder_optional():
-    """OPTIONAL cross-check against optics/resonance.py (item 1.1, written concurrently by
-    another agent). Skips gracefully if the module is absent or its API differs -- this gate
-    must NOT depend on it."""
-    try:
-        from dynameta.optics import resonance as _res
-    except ImportError:
-        pytest.skip("optics/resonance.py not present yet (item 1.1); optional cross-check")
+def test_tmm_etalon_fit_q_matches_resonance_pole_finder():
+    """Cross-INSTRUMENT gate: the Q fitted from a driven `tmm`-package transmission spectrum must
+    equal the Q of the complex-omega pole that optics.resonance locates numerically for the SAME
+    etalon. Two independent routes to one number -- a real-axis lineshape fit of a third-party TMM
+    spectrum, and an argument-principle pole hunt on dynameta's own characteristic-matrix
+    denominator -- with the closed form above as the shared anchor.
+
+    AUDIT X-2/T-7/T-24: this test had NEVER EXECUTED. It probed five guessed entry points with a
+    `fn(n=..., thickness_m=..., m=...)` signature that matches none of them, swallowed the
+    resulting TypeError in `except Exception: continue`, and skipped with an "API not finalized"
+    excuse -- in the very commit that created the API. It is now written against the real
+    signatures (smatrix_pole_func -> find_poles -> pole_q) with no try/except and no skip.
+    tests/test_resonance_crossgate.py runs the sibling three-instrument gate, but its spectrum
+    comes from `layered_smatrix_complex`; this one is the only place the `tmm` package's driven
+    spectrum is tied to the pole finder.
+    """
+    from dynameta.optics.resonance import find_poles, pole_q, smatrix_pole_func
 
     c = 299_792_458.0
     n = 3.5
@@ -187,22 +196,19 @@ def test_tmm_etalon_vs_resonance_pole_finder_optional():
     T = _etalon_transmission(f, n, L)
     fit_Q = lorentzian_fit(f, T).Q
 
-    # Probe a few plausible entry points; skip if none matches (do not fail the suite).
-    pole_Q = None
-    for name in ("etalon_pole", "etalon_poles", "find_poles", "pole_q", "resonance_q"):
-        fn = getattr(_res, name, None)
-        if fn is None:
-            continue
-        try:
-            out = fn(n=n, thickness_m=L, m=m)
-            pole_Q = float(getattr(out, "Q", out))
-            break
-        except Exception:
-            continue
-    if pole_Q is None:
-        pytest.skip("optics/resonance.py present but no recognized pole-Q entry point; "
-                    "cross-check skipped (item 1.1 API not finalized)")
-    assert fit_Q == pytest.approx(pole_Q, rel=0.03)
+    om_m = 2.0 * np.pi * f_m
+    r12 = (n - 1.0) / (n + 1.0)
+    Q_pole_cf = -m * np.pi / (2.0 * np.log(abs(r12)))          # closed form, for the search box
+    half_width = om_m / (2.0 * Q_pole_cf)                      # |Im omega| of the pole
+    D = smatrix_pole_func([(complex(n) ** 2, L)])              # (eps, thickness) layer spec
+    poles = find_poles(D, om_m - 0.6j * half_width, 0.06 * om_m + 1.5j * half_width, n_grid=48)
+    assert poles, "pole finder found no pole near the m={} etalon resonance".format(m)
+    pole = min(poles, key=lambda p: abs(p.real - om_m))
+    pole_Q = pole_q(pole)
+
+    assert pole.real == pytest.approx(om_m, rel=1e-8)          # the pole finder found THIS mode
+    assert pole_Q == pytest.approx(Q_pole_cf, rel=1e-6)        # ... at the closed-form width
+    assert fit_Q == pytest.approx(pole_Q, rel=0.03)            # THE cross-instrument statement
 
 
 # ---------------------------------------------------------------------------

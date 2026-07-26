@@ -10,7 +10,10 @@ cross-check rather than a tautology. The failure mode both audit findings descri
 (a dropped kwarg on a rebuild), so each gate also pins the SIZE of the effect being carried --
 otherwise a re-broken clone would still "agree" with a model that ignores the same term twice."""
 
+import warnings
+
 import numpy as np
+import pytest
 
 from dynameta.optics.fiber_amp.concentration import ConcentrationModel
 from dynameta.optics.fiber_amp.dynamics import simulate_transient
@@ -98,6 +101,83 @@ def test_thermal_profile_survives_metrics_clone_and_transient():
     # ... and so must the transient's long-time limit (its own McCumber-scaled march)
     tr = simulate_transient(amp, np.linspace(0.0, 12e-3, 200), n_nodes=81)
     assert abs(float(tr.signal_gain_dB[-1, 0]) - G_hot) < 0.05
+    assert tr.meta["quasi_static_valid"]                        # a HOT profile stays in regime
     amp.clear_temperature_profile()
     tr_cold = simulate_transient(amp, np.linspace(0.0, 12e-3, 200), n_nodes=81)
     assert abs(float(tr_cold.signal_gain_dB[-1, 0]) - G_cold) < 0.05    # and the cold model still is
+    assert tr_cold.meta["quasi_static_valid"]
+
+
+# ---- A-7: the frozen-inversion step announces when it leaves its valid regime ---------------
+
+def test_transient_flags_ase_runaway_on_a_sub_reference_temperature_profile():
+    """audit A-7: the A-5 temperature path also reaches T < T_ref, where McCumber > 1 BOOSTS
+    sigma_e. Past ~227 K this amplifier's frozen-inversion step runs the ASE away (the step
+    propagates exp(INT g dz) at a FIXED inversion, so in-step ASE never depletes the gain that
+    made it) and the march settles ~31 dB below its own solve(). That used to be SILENT. It must
+    now raise a RuntimeWarning AND carry meta['quasi_static_valid'] = False -- while the hot side
+    of the same sweep, and the same amplifier at 300 K, stay clean and keep agreeing with
+    solve()."""
+    z = np.linspace(0.0, 5.0, 41)
+    t = np.linspace(0.0, 25e-3, 400)
+
+    # --- the broken cold case: the flag fires, the warning names the limitation ---
+    cold = _hot_yb()
+    cold.set_temperature_profile(z, np.full(z.size, 220.0), T_ref_K=300.0)
+    G_ss = float(cold.solve(n_nodes=81).signal_gain_dB[0])
+    with np.errstate(all="ignore"), pytest.warns(RuntimeWarning, match="quasi-static"):
+        tr = simulate_transient(cold, t, n_nodes=81)
+    assert tr.meta["quasi_static_valid"] is False
+    assert tr.meta["validity_warning"] and "ASE" in tr.meta["validity_warning"]
+    # the flag is not decorative: this run really is ~31 dB away from its own steady state
+    assert float(G_ss) - float(tr.signal_gain_dB[-1, 0]) > 20.0
+    # and both measured margins are far past their documented limits
+    lim = tr.meta["validity_limits"]
+    assert tr.meta["max_ase_to_launched"] > 1e3 * lim["ase_to_launched"]
+    assert tr.meta["max_ase_gain_integral"] > 2.0 * lim["ase_gain_integral"]
+
+    # --- the hot / in-regime cases stay clean (no warning, flag True, agrees with solve()) ---
+    for T in (None, 300.0, 500.0, 800.0):
+        amp = _hot_yb()
+        if T is not None:
+            amp.set_temperature_profile(z, np.full(z.size, T), T_ref_K=300.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ok = simulate_transient(amp, t, n_nodes=81)
+        assert ok.meta["quasi_static_valid"] is True, T
+        assert ok.meta["validity_warning"] is None
+        assert not [w for w in caught if issubclass(w.category, RuntimeWarning)
+                    and "quasi-static" in str(w.message)], T
+        assert abs(float(ok.signal_gain_dB[-1, 0])
+                   - float(amp.solve(n_nodes=81).signal_gain_dB[0])) < 0.05, T
+
+
+def test_transient_flags_ase_dominance_at_a_tiny_signal_but_not_on_a_healthy_edfa():
+    """The pre-existing half of A-7 (no temperature profile involved): the same 400 W Yb booster
+    driven at a 1 uW signal lands 54 dB below its own solve(). The threshold is referenced to the
+    LAUNCHED power, not to the signal, precisely so a healthy C-band EDFA -- which legitimately
+    carries 30-3000x more in-band ASE than signal and agrees with solve() to 1e-3 dB -- does NOT
+    trip it."""
+    t = np.linspace(0.0, 25e-3, 400)
+    tiny = _hot_yb().with_signals([Signal(1e-6, 1.03e-6)])
+    G_ss = float(tiny.solve(n_nodes=81).signal_gain_dB[0])
+    with np.errstate(all="ignore"), pytest.warns(RuntimeWarning, match="OUT OF ITS VALID REGIME"):
+        tr = simulate_transient(tiny, t, n_nodes=81)
+    assert tr.meta["quasi_static_valid"] is False
+    assert G_ss - float(tr.signal_gain_dB[-1, 0]) > 40.0
+
+    edfa = FiberAmplifier(ER, FiberSpec(1.6e-6, 0.22, 8.0e24, 8.0), [Pump(0.25, 0.98e-6)],
+                          [Signal(1e-5, 1.55e-6)], AseBand(1.50e-6, 1.60e-6, n_bins=16))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ok = simulate_transient(edfa, t, n_nodes=81)
+    assert ok.meta["quasi_static_valid"] is True
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    # ASE really does dominate the signal here -- an ASE/SIGNAL threshold would have false-fired
+    r = edfa.solve(n_nodes=81)
+    ase_out = float(np.sum(r.power_W[[i for i, k in enumerate(r.kind)
+                                      if k == "ase" and r.u[i] > 0], -1]))
+    sig_out = float(r.power_W[[i for i, k in enumerate(r.kind) if k == "signal"][0], -1])
+    assert ase_out > 10.0 * sig_out
+    assert ok.meta["max_ase_to_launched"] < ok.meta["validity_limits"]["ase_to_launched"]
+    assert abs(float(ok.signal_gain_dB[-1, 0]) - float(r.signal_gain_dB[0])) < 0.05

@@ -61,15 +61,15 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 
 from dynameta.constants import EPS0
 from dynameta.carriers.lc_director import (
     LCGeometry, compute_lc_geometry, solve_lc_field_profile, flexo_direct_torque,
-    n_eff_from_theta_profile, freedericksz_threshold_V)
+    n_eff_from_theta_profile)
 
 __all__ = [
     "LCDynamics", "LCDynamicsResult",
@@ -384,6 +384,11 @@ class LCDynamics:
                 raise ValueError("Miesowicz viscosities must be > 0 (eta_b={:.6g}, eta_c={:.6g}); "
                                  "the Parodi default eta_c = eta_b - (alpha2 + alpha3) needs a "
                                  "physical Leslie set".format(eta_b, eta_c))
+            # alpha1 was UNVALIDATED (fix-verify W1 item 7): it is the only term in eta(theta) whose
+            # sign is free, so it is the one that can send eta(theta) to zero at intermediate tilt.
+            if eta_scalar is None and not math.isfinite(a1):
+                raise ValueError("alpha1_Pa_s must be finite (got {!r}); it is the sin^2 cos^2 cross "
+                                 "term of the Miesowicz eta(theta)".format(self.alpha1_Pa_s))
             # AUDIT C-2: the Leslie identity gamma1 = alpha3 - alpha2 ties the rotational viscosity to
             # the coupling coefficients; a mismatched set is not a valid nematic.
             g1_leslie = a3 - a2
@@ -437,7 +442,15 @@ class LCDynamics:
                 m_th = a3 * s * s - a2 * c * c
                 if eta_scalar is None:
                     s2 = s * s; c2 = c * c
-                    eta_th = eta_c * c2 + eta_b * s2 + a1 * s2 * c2
+                    # SAME guard as the public twin gamma1_eff_of_theta (fix-verify W1 item 7): the
+                    # alpha1 cross term is NOT sign-constrained by eta_b, eta_c > 0, so a large
+                    # negative alpha1_Pa_s drives eta(theta) through ZERO at intermediate tilt
+                    # (eta_c = 0.1, eta_b = 0.02, alpha1 = -1 gives eta(45 deg) = -0.19) -- the
+                    # unguarded divide gave inf/NaN at the crossing and, past it, an INCREASE of
+                    # gamma1_eff above gamma1. With |eta| floored the reduction stays a reduction
+                    # and drives g1_raw far negative, which the _G1_EFF_FLOOR_FRAC clamp and its
+                    # positive-definiteness warning below then report.
+                    eta_th = np.maximum(np.abs(eta_c * c2 + eta_b * s2 + a1 * s2 * c2), 1e-300)
                 else:
                     eta_th = eta_scalar
                 g1_raw = g1 - m_th * m_th / eta_th
