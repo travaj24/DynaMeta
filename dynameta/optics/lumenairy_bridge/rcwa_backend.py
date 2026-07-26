@@ -49,6 +49,8 @@ is a documented follow-on (requires the shape-frame pin + disjointness mapping).
 
 from __future__ import annotations
 
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
+
 import os
 import time
 import warnings
@@ -308,6 +310,7 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                              conical=(pol, theta, phi, n_sup))
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+        _require_eps_convention(eps_by_region, "make_lumenairy_rcwa_solver")   # audit V-5
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):

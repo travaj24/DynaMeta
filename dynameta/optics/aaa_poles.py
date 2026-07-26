@@ -114,21 +114,14 @@ __all__ = [
 
 
 # ------------------------------------------------------------------------------------------------
-# Quality factor (identical to optics.resonance.pole_q)
+# Quality factor -- ALIAS of optics.resonance.pole_q (audit X-5)
 # ------------------------------------------------------------------------------------------------
-def q_from_pole(omega_tilde) -> float:
-    """Quality factor of a complex pole ``omega_tilde = omega_0 - i*gamma/2``:
-
-        Q = |Re(omega_tilde)| / (2 |Im(omega_tilde)|).
-
-    Returns ``+inf`` for a real (lossless / undamped) pole.  This is byte-identical to
-    :func:`dynameta.optics.resonance.pole_q` -- the single Q convention across the resonance
-    tooling."""
-    w = complex(omega_tilde)
-    im = abs(w.imag)
-    if im == 0.0:
-        return float("inf")
-    return abs(w.real) / (2.0 * im)
+# There is one Q convention and now one implementation of it.  `q_from_pole` and `resonance.pole_q`
+# used to be byte-identical copies under two public names, and their DOCSTRINGS had already drifted
+# (this one documented the `|Re|` the code applies; the other did not).  `q_from_pole` is kept as
+# the spelling this module's own API reads in, but it is the same function object as `pole_q`, so
+# there is exactly one docstring, one convention and nothing left to drift.
+from dynameta.optics.resonance import pole_q as q_from_pole                 # noqa: E402
 
 
 # ------------------------------------------------------------------------------------------------

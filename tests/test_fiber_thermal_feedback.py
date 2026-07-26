@@ -113,3 +113,47 @@ def test_feedback_hot_amplifier_direction_and_self_consistency():
     assert float(np.max(np.abs(T_check - T_z))) < 0.5
     # and the heat number itself is physical: bounded by launched pump
     assert 0.0 < total_heat_W(res) < 60.0
+
+
+def test_local_inversion_factor_uses_the_hot_cross_sections():
+    """audit A-6: local_inversion_factor advertises "the cross-sections the solve cached", but
+    meta['sigma_e'] is the T_ref ChannelSet value -- under a temperature profile it mixed a cold
+    sigma_e with the HOT nbar2_z (verified bit-identical sigma_e at 450 K and 300 K), making the
+    reported n_sp inconsistent with the gain the solver produced.
+
+    Same UNIFORMITY oracle as test_uniform_profile_equals_global_at_temperature: a constant T(z)
+    through the per-z McCumber path must reproduce the GLOBAL at_temperature scaling, now for
+    n_sp(z) as well as the gain. It CANNOT if the cold sigma_e is used -- the two paths differ by
+    the McCumber factor exp[(eps - h nu)(1/kT - 1/kT_ref)]."""
+    from dynameta.optics.fiber_amp.noise import local_inversion_factor
+    T1, LAM_S = 400.0, 1.03e-6
+    ion = ytterbium()
+    r_glob = _yb_amp(ion=at_temperature(ion, T1)).solve(n_nodes=121)
+    a_prof = _yb_amp(ion=ion)
+    z = np.linspace(0.0, a_prof.fiber.length_m, 9)
+    a_prof.set_temperature_profile(z, np.full(z.size, T1), T_ref_K=300.0)
+    r_prof = a_prof.solve(n_nodes=121)
+
+    n_glob = local_inversion_factor(r_glob, LAM_S)
+    n_prof = local_inversion_factor(r_prof, LAM_S)
+    assert np.all(np.isfinite(n_glob)) and np.all(np.isfinite(n_prof))
+    assert float(np.max(np.abs(n_prof - n_glob))) < 1e-6          # same physics, both paths
+
+    # DISCRIMINATION: the pre-fix code path (cold sigma_e, hot nbar2) is measurably different --
+    # otherwise this gate would pass for the wrong reason.
+    mcc = r_prof.meta["mcc"]
+    assert mcc is not None                                        # the solve caches it now
+    i = int(np.argmin(np.abs(r_prof.lambda_m - LAM_S)))
+    sa, se = float(r_prof.meta["sigma_a"][i]), float(r_prof.meta["sigma_e"][i])
+    n2 = r_prof.nbar2_z
+    cold = (se * n2) / (se * n2 - sa * (1.0 - n2))                # what it used to compute
+    assert float(np.max(np.abs(cold - n_glob))) > 1e-3            # and it was WRONG
+
+    # an ISOTHERMAL solve must be byte-identical to the pre-fix path (mcc is None)
+    r_iso = _yb_amp(ion=ion).solve(n_nodes=121)
+    assert r_iso.meta["mcc"] is None
+    j = int(np.argmin(np.abs(r_iso.lambda_m - LAM_S)))
+    sa_i, se_i = float(r_iso.meta["sigma_a"][j]), float(r_iso.meta["sigma_e"][j])
+    n2_i = r_iso.nbar2_z
+    assert np.array_equal(local_inversion_factor(r_iso, LAM_S),
+                          (se_i * n2_i) / (se_i * n2_i - sa_i * (1.0 - n2_i)))

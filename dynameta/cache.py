@@ -46,7 +46,14 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 #           E/H phase alignment exp(+i w dt/2), so FDTD-backed entries written before the fix
 #           differ (up to ~2e-3 on diffracting gratings). Discarding on schema keeps a pre-fix
 #           store from serving pre-fix flux.
-_SCHEMA = 6
+#   6 -> 7 (audit R-8, 2026-07-26): KEY change, layout unchanged -- the EpsField fingerprint now
+#           carries the grid SHAPE, the dtype, the three AXES and the time_convention label, and
+#           hashes `tensor` even when `scalar` is also set. Previously a (2,3,4) grid and its
+#           (4,3,2) transpose (identical C-order bytes), the same values on axes differing 100x,
+#           and a scalar+tensor field vs the scalar alone all shared one key -- i.e. a cache HIT
+#           for a physically different solve. A schema-6 store is discarded rather than
+#           re-served under keys that were derived differently.
+_SCHEMA = 7
 _PK_VALS = "packed_vals"                                    # (N, len(_VEC)) float64, one entry per row
 _PK_KEYS = "packed_keys"                                    # (N, 41) uint8: "k"+sha1-hex ASCII key rows
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
@@ -55,26 +62,65 @@ _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be 
 
 
 def _eps_fingerprint(eps_by_region) -> bytes:
+    """Content hash of the per-region EpsFields.
+
+    audit R-8: this used to hash only the VALUES -- not the axes, not the array shape, not the
+    dtype tag -- and it stopped at `scalar` when both `scalar` and `tensor` were set. So
+    (a) the same gridded values on axes differing 100x, (b) a (2, 3, 4) grid and its (4, 3, 2)
+    transpose (identical C-order bytes), and (c) a scalar+tensor EpsField and the same scalar
+    alone all produced the SAME fingerprint, i.e. a cache HIT for a physically different solve.
+    The grid geometry is a solve input (it sets the VoxelCoefficient bounds), so it belongs in
+    the key. Every branch is now length- and kind-TAGGED so no two branches can alias.
+    """
     h = hashlib.sha1()
     for name in sorted(eps_by_region or {}):
         ef = eps_by_region[name]
         h.update(name.encode("utf-8"))
+        # audit V-5/R-8: the convention label changes the PHYSICS the same values describe.
+        h.update(str(getattr(ef, "time_convention", "")).encode("utf-8"))
         sc = getattr(ef, "scalar", None)
+        ten = getattr(ef, "tensor", None)
         if getattr(ef, "is_uniform", True) and sc is not None:
+            h.update(b"S")
             z = complex(sc); h.update(struct.pack("<dd", z.real, z.imag))
+            if ten is None:
+                continue
+            # a scalar AND a tensor: hash BOTH (the old code returned after the scalar, so an
+            # EpsField carrying both collided with the same scalar alone)
+            h.update(b"+T")
+            h.update(np.ascontiguousarray(np.asarray(ten, dtype=complex)).tobytes())
             continue
         # A UNIFORM ANISOTROPIC EpsField has is_uniform True but scalar None -- its content lives in
         # `tensor` (a (3,3)), NOT in values_zyx. Hashing it is REQUIRED: a PockelsEffect/KerrEffect
         # under a uniform gate field, or MagnetoOpticModel, emits EpsField(tensor=(3,3)) (core/bridge),
         # so without this every uniform-tensor state in a bias sweep collides to the same key and the
         # cache serves the FIRST point's R/T/phase for all later points (audit P1).
-        ten = getattr(ef, "tensor", None)
         if ten is not None:
             h.update(b"T")                                   # tag so a (3,3) tensor cannot alias a grid
             h.update(np.ascontiguousarray(np.asarray(ten, dtype=complex)).tobytes())
             continue
         arr = getattr(ef, "values_zyx", None)
-        h.update(np.ascontiguousarray(np.asarray(arr)).tobytes() if arr is not None else b"?")
+        if arr is None:
+            h.update(b"?")
+            continue
+        a = np.ascontiguousarray(np.asarray(arr))
+        # SHAPE + DTYPE (audit R-8): the raw C-order bytes of a (2, 3, 4) grid and of its
+        # (4, 3, 2) transpose-reshape are identical, so bytes alone cannot separate them.
+        h.update(b"G")
+        h.update(str(a.shape).encode("utf-8"))
+        h.update(str(a.dtype.str).encode("utf-8"))
+        h.update(a.tobytes())
+        # AXES (audit R-8): the axes carry the VoxelCoefficient bounds, i.e. the physical size of
+        # the grid. Two solves whose axes differ 100x are different solves at the same values.
+        for ax_name in ("x_axis_u", "y_axis_u", "z_axis_u"):
+            ax = getattr(ef, ax_name, None)
+            h.update(ax_name.encode("utf-8"))
+            if ax is None:
+                h.update(b"-")
+                continue
+            axa = np.ascontiguousarray(np.asarray(ax, dtype=np.float64))
+            h.update(str(axa.shape).encode("utf-8"))
+            h.update(axa.tobytes())
     return h.digest()
 
 

@@ -49,7 +49,16 @@ def local_inversion_factor(result: SteadyStateResult, lambda_m: float) -> np.nda
     (audit S3-33: omitting the ESA term made the reported n_sp inconsistent with the gain under
     ESA; with sigma_esa = 0 this is the classic two-level form, >= 1 by construction). This is
     the honest medium n_sp, as opposed to the ASE-PSD-derived effective factor which carries
-    discretization noise. NaN where the cross-sections are unavailable."""
+    discretization noise. NaN where the cross-sections are unavailable.
+
+    TEMPERATURE (audit A-6). `meta['sigma_e']` is the ChannelSet value at the reference
+    temperature; under `set_temperature_profile` the solve multiplies it by the per-z McCumber
+    factor `mcc_k(z)` and it is that HOT sigma_e which produced `nbar2_z`. Pairing the T_ref
+    sigma_e with the hot inversion made this function's "the cross-sections the solve cached"
+    claim false and its n_sp internally inconsistent (verified bit-identical sigma_e at 450 K and
+    300 K). The solve now caches `meta['mcc']` (K, M) and it is applied here, so n_sp(z) uses the
+    same emission cross-section the gain did. An isothermal solve has `mcc = None` and is
+    byte-identical to before."""
     sa = result.meta.get("sigma_a")
     se = result.meta.get("sigma_e")
     if sa is None or se is None:
@@ -59,6 +68,12 @@ def local_inversion_factor(result: SteadyStateResult, lambda_m: float) -> np.nda
     esa = result.meta.get("sigma_esa")
     sig_esa = float(esa[i]) if esa is not None else 0.0
     n2 = result.nbar2_z
+    mcc = result.meta.get("mcc")
+    if mcc is not None:
+        # sigma_e becomes z-dependent (audit A-6). sigma_esa is NOT scaled: the solve applies
+        # mcc only to the sigma_e-proportional coefficients (g_e, s_pref), leaving g_esa at its
+        # own cross-section -- match that exactly rather than inventing a second T dependence.
+        sig_e = sig_e * np.asarray(mcc, dtype=np.float64)[i]
     num = sig_e * n2
     den = sig_e * n2 - sig_a * (1.0 - n2) - sig_esa * n2
     with np.errstate(divide="ignore", invalid="ignore"):

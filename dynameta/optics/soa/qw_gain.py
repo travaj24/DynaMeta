@@ -366,12 +366,52 @@ def _local_saturated_gain(I_A: float, nu_Hz: float, params: BulkGainParams, P_gr
     return g
 
 
+# 1% relative. NOT tighter: the SHIPPED default pair is itself only consistent to 2.4e-5
+# (A_xsec_m2 = 1.4167e-12 is a 5-digit rounding of V_active_m3 / 600 um = 1.41666...e-12), so a
+# 1e-6 gate would reject the library's own reference operating point. The failure this guards
+# against is a GEOMETRY mismatch -- 1.5 mm against a 600 um params set, a factor of 2.5 -- not a
+# rounding in the last digit of a preset.
+_L_CONSISTENCY_RTOL = 1e-2
+
+
+def _require_device_length(fn_name: str, L_m: float, params) -> None:
+    """audit A-13: the BulkGainParams docstring pins the ENERGY-CONSISTENCY requirement
+    A_xsec = V_active / L_device (dP/dz = Gamma g P must equal the carrier stimulated loss times
+    A_xsec h nu), and notes the shipped default pair is consistent at the reference L = 600 um.
+    But every device-level routine took `L_m` as a FREE argument and never checked it, so calling
+    them with, say, the thorlabs_boa1004p preset's own 1.5 mm chip length injected a 600 um
+    device's current density (I/(q V_active)) into a 1.5 mm device: the pump term and the
+    stimulated term then describe different geometries, silently. Raise instead."""
+    if params is None:
+        return
+    v = float(getattr(params, "V_active_m3", 0.0))
+    a = float(getattr(params, "A_xsec_m2", 0.0))
+    if not (v > 0.0 and a > 0.0):
+        return
+    L_implied = v / a
+    L = float(L_m)
+    if not (L > 0.0):
+        raise ValueError("{}: L_m must be > 0 (got {!r})".format(fn_name, L_m))
+    if abs(L - L_implied) > _L_CONSISTENCY_RTOL * L_implied:
+        raise ValueError(
+            "{}: L_m = {:.6g} m is inconsistent with the params geometry -- "
+            "V_active_m3 / A_xsec_m2 = {:.6g} m / {:.6g} m^2 = {:.6g} m (BulkGainParams pins "
+            "A_xsec = V_active / L_device for energy consistency). As given, the injection term "
+            "I/(q V_active) describes a {:.6g} m device while the stimulated term "
+            "Gamma g P/(h nu A_xsec) describes a {:.6g} m one. Rebuild params for this length "
+            "(scale V_active_m3 by {:.6g}) or pass the length the params were built "
+            "for.".format(fn_name, L, v, a, L_implied, L_implied, L, L / L_implied))
+
+
 def device_output_power_W(I_A: float, nu_Hz: float, L_m: float, alpha_i_per_m: float,
                           P_in_W, params: BulkGainParams, nz: int = 200):
     """Absolute CW output power P_out(P_in) [W] by z-resolved local-N integration:
     dP/dz = (Gamma g_m(N_loc(P)) - alpha_i) P, RK4 over L. N_loc(P) is the local saturated density
     (one brentq per power sample; precomputed on a grid and interpolated for the RK4, so each step
-    is elementwise). Returns (P_in_W, P_out_W), vectorized across the P_in array."""
+    is elementwise). Returns (P_in_W, P_out_W), vectorized across the P_in array.
+
+    `L_m` must match `params.V_active_m3 / params.A_xsec_m2` (audit A-13)."""
+    _require_device_length("device_output_power_W", L_m, params)
     p = params
     P_in = np.atleast_1d(np.asarray(P_in_W, dtype=np.float64))
     P_grid = np.logspace(np.log10(P_in.min()) - 1.0,
@@ -397,6 +437,7 @@ def device_gain_dB(I_A: float, nu_Hz: float, L_m: float, alpha_i_per_m: float,
     curve in dB)."""
     if params is None:
         raise ValueError("device_gain_dB: params (BulkGainParams) is required")
+    _require_device_length("device_gain_dB", L_m, params)                     # audit A-13
     P_in, P_out = device_output_power_W(I_A, nu_Hz, L_m, alpha_i_per_m, P_in_W, params, nz=nz)
     G_dB = 10.0 * np.log10(P_out / P_in)
     return float(G_dB[0]) if np.ndim(P_in_W) == 0 else G_dB
@@ -406,7 +447,10 @@ def saturation_output_power_dbm(I_A: float, nu_Hz: float, L_m: float, alpha_i_pe
                                 params: BulkGainParams, nz: int = 200):
     """Output-referred -3 dB saturation power P_sat,out [dBm]: the output power where the device
     gain has dropped 3 dB below its small-signal value, read off the steady-state saturation curve
-    (mirrors optics.soa.calibration._psat_out_dBm). Returns (Psat_out_dBm, G0_dB)."""
+    (mirrors optics.soa.calibration._psat_out_dBm). Returns (Psat_out_dBm, G0_dB).
+
+    `L_m` must match `params.V_active_m3 / params.A_xsec_m2` (audit A-13)."""
+    _require_device_length("saturation_output_power_dbm", L_m, params)
     P_in = np.logspace(-9.0, 0.5, 48)
     P_in, P_out = device_output_power_W(I_A, nu_Hz, L_m, alpha_i_per_m, P_in, params, nz=nz)
     G_dB = 10.0 * np.log10(P_out / P_in)
@@ -424,7 +468,10 @@ def noise_figure_db(I_A: float, nu_Hz: float, L_m: float, alpha_i_per_m: float,
     """Amplifier noise figure [dB] at the small-signal operating point. n_sp = f_c(1-f_v)/(f_c-f_v)
     is evaluated at the reservoir density N0(I) and the gain-peak frequency; the internal-loss
     inversion degradation loss_factor = Gamma g_pk/(Gamma g_pk - alpha_i) and the net linear gain G
-    feed the shared optics.amp_noise.nf_from_nsp (NF = 2 n_sp loss_factor (G-1)/G + 1/G)."""
+    feed the shared optics.amp_noise.nf_from_nsp (NF = 2 n_sp loss_factor (G-1)/G + 1/G).
+
+    `L_m` must match `params.V_active_m3 / params.A_xsec_m2` (audit A-13)."""
+    _require_device_length("noise_figure_db", L_m, params)
     p = params
     N0 = steady_state_N(I_A, params, P_W=0.0)
     nu_pk, g_pk = gain_peak(N0, params)

@@ -52,12 +52,13 @@ try:
 except Exception:                                            # pragma: no cover
     HAVE_SCIPY = False
 
-# Optional cross-check against the concurrent 4.1 coupled-wave reference (graceful skip if not landed).
-try:
-    from dynameta.optics import twm_reference as _twm      # noqa: F401
-    HAVE_TWM = True
-except ImportError:
-    HAVE_TWM = False
+# Cross-check against the coupled-wave reference. twm_reference SHIPPED in v0.9.0, so this
+# import is not optional any more (audit X-27 class: the skipif below still read "roadmap 4.1
+# not landed yet", i.e. a skip reason that could no longer fire and would have hidden a genuine
+# breakage of the oracle as a silent skip). Import it directly and let an ImportError fail.
+from dynameta.optics import twm_reference as _twm      # noqa: F401
+
+HAVE_TWM = True
 
 H_PLANCK = sc.h
 
@@ -547,7 +548,7 @@ def test_gate4d_seed_gains_with_sfg_phase_mismatch():
     assert m_on["P_sum"] / m_on["P_f1"] < 1e-3
 
 
-@pytest.mark.skipif(not HAVE_TWM, reason="twm_reference (roadmap 4.1) not landed yet")
+@pytest.mark.skipif(not HAVE_TWM, reason="dynameta.optics.twm_reference unavailable")
 def test_twm_reference_crosscheck(opa_runs):
     """Cross-check the measured parametric gL against the 4.1 coupled-wave reference
     (twm_reference.opa_gain): same slab (d_eff = chi2/2 convention), same measured pump field,

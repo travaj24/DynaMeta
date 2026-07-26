@@ -103,6 +103,15 @@ References
 
 Conventions: SI units, exp(-i*omega*t) (a passive/absorbing medium has Im(eps) > 0), pure
 numpy/scipy, ASCII-only.
+
+THE HOME OF THE HYDRODYNAMIC MATERIAL MODEL (audit X-4/X-5). ``beta_from_vf``, ``eps_transverse``,
+``beta_eff_squared`` and ``kL_squared`` are defined HERE and nowhere else; the FEM tier
+(``optics.hydro_fem.HydroParams``) delegates to them through ``HydroParams.as_layer()`` and the
+FDTD tier (``optics.hydro_fdtd``) re-exports ``beta_from_vf`` verbatim. A change to any of the four
+is a change to every hydrodynamic solver in the library, which is the point: the cross-solver
+bulk-plasmon gates compare solvers, not two transcriptions of one formula. The contract is gated by
+tests/test_hydro_fem.py::test_hydroparams_match_nonlocal_tmm, which covers every shared function
+over metals x GNOR settings x real and complex frequencies, EXACTLY.
 """
 
 from __future__ import annotations

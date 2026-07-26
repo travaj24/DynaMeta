@@ -26,6 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.soa import (QDGainModel, QDGainParams, TravelingWaveSOA, henry_factor,
                                  linewidth_from_field, rin_spectrum,
                                  schawlow_townes_henry_linewidth)
@@ -42,7 +43,7 @@ def main():
     f, rin = rin_spectrum(P, dt)
     # NB the residual here is np.trapezoid endpoint quadrature (~1e-2 at small N), NOT a normalization
     # error -- a rectangle sum np.sum(rin)*(f[1]-f[0]) is Parseval-exact to machine precision.
-    relA = abs(np.trapezoid(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0)
+    relA = abs(trapz(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0)
     g_a = bool(relA < 1e-3)
     ok = ok and g_a
     print("[rl] GATE A: integral RIN df == var(P)/<P>^2 (rel {:.1e}) -> {}".format(
@@ -54,7 +55,7 @@ def main():
     Ps = 1.0e-3 * (1.0 + m * np.cos(2.0 * np.pi * fm * t))
     f2, rin2 = rin_spectrum(Ps, dt)
     peak_f = f2[np.argmax(rin2)]
-    tot = np.trapezoid(rin2, f2)
+    tot = trapz(rin2, f2)
     g_b = bool(abs(peak_f - fm) < 2.0 * (f2[1] - f2[0])
                and abs(tot - m * m / 2.0) / (m * m / 2.0) < 1e-3)
     ok = ok and g_b

@@ -8,7 +8,9 @@ Pure numpy/scipy; SI units; ASCII-only.
 """
 
 import numpy as np
+import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.steady_state import SteadyStateResult
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
 from dynameta.optics.fiber_amp.nonlinear_limits import (
@@ -89,7 +91,7 @@ def test_sbs_active_gain_exponent_gate():
     # fabricate an exponential P(z) rescaled so integral P dz = 735 W.m exactly (trapezoid)
     z = np.linspace(0.0, 1.5, 201)
     P = np.exp(2.0 * z / 1.5)
-    P *= 735.0 / np.trapezoid(P, z)
+    P *= 735.0 / trapz(P, z)
     res = _synth_result(z, P, lam=1.064e-6)
 
     out = sbs_gain_exponent(res, fiber, 1.064e-6, g_b=2e-11)
@@ -128,7 +130,7 @@ def test_srs_stokes_redshift_and_gain_exponent():
     fiber = FiberSpec(core_radius_m=12.5e-6, na=0.029, n_t_m3=1.0e25, length_m=1.5)
     z = np.linspace(0.0, 1.5, 201)
     P = np.exp(2.0 * z / 1.5)
-    P *= 735.0 / np.trapezoid(P, z)
+    P *= 735.0 / trapz(P, z)
     out = srs_gain_exponent(_synth_result(z, P, 1.064e-6), fiber, 1.064e-6)
     # default g_R scales as 1e-13*(1e-6/lambda)
     assert np.isclose(out["g_R"], raman_gain_coefficient(1.064e-6), rtol=1e-12)
@@ -246,3 +248,61 @@ def test_base_import_contract_intact():
                  "double_rayleigh_mpi"):
         assert hasattr(nonlinear_limits, name)
     assert isinstance(dynameta, type(np))          # it is a module
+
+
+# ============================ audit wave 4 (P2) gates =====================================
+
+def test_sbs_active_and_passive_criteria_agree_when_K_matches():
+    """audit A-7: the passive Smith threshold carried the polarization factor K (default 1.5,
+    randomly-birefringent SMF) while the ACTIVE gain-exponent criterion carried none, so at the
+    passive threshold the active form reported threshold_margin = 1.5, not 1, with no signpost.
+    `sbs_gain_exponent` now takes the same K (defaulting to the co-polarized 1.0 it has always
+    implied) and reports it, so the two can be evaluated on the SAME criterion."""
+    fiber = FiberSpec(core_radius_m=15e-6, na=0.06, n_t_m3=1.0e25, length_m=1.5)
+    lam, C = 1.064e-6, 21.0
+    w = mode_field_radius_m(fiber.core_radius_m, fiber.na, lam)
+    a_eff = np.pi * w * w
+    g_b = 2e-11
+    for K in (1.0, 1.5, 2.0):
+        # build the flat P(z) that sits EXACTLY at the passive threshold for this K
+        P_th = sbs_threshold_W(a_eff, g_b=g_b, length_m=fiber.length_m, K=K, C=C)
+        z = np.linspace(0.0, fiber.length_m, 401)
+        res = _synth_result(z, np.full_like(z, P_th), lam=lam)
+        out = sbs_gain_exponent(res, fiber, lam, g_b=g_b, C=C, K=K)
+        assert out["K"] == K
+        assert out["threshold_margin"] == pytest.approx(1.0, rel=1e-6)   # SAME criterion
+        # and the MISMATCHED call is exactly the old, silent K-factor error
+        mism = sbs_gain_exponent(res, fiber, lam, g_b=g_b, C=C, K=1.0)
+        assert mism["threshold_margin"] == pytest.approx(K, rel=1e-6)
+
+
+def test_tmi_c0_default_is_a_length_in_metres():
+    """audit A-8: TMI_C0_DEFAULT is documented as a LENGTH (metres), not "dimensionless" --
+    check the dimension the calibration expression actually produces, so a future re-pin cannot
+    quietly reintroduce the wrong unit label."""
+    # P_th [W] * eta [1] * dndt [1/K] * gov [1] / ((lam/d)^2 [1] * kappa [W/(m K)])  ->  m
+    assert 0.05 < TMI_C0_DEFAULT < 0.5                    # ~0.1393 m
+    # doubling kappa (W/m/K) halves C0: the metre is carried by kappa's 1/m, nothing else
+    P_th, d, lam, eta, gov, dndt = 1000.0, 20e-6, 1.06e-6, 0.09, 0.5, 1.2e-5
+    c0 = lambda kap: P_th * eta * dndt * gov / ((lam / d) ** 2 * kap)
+    assert c0(2.76) == pytest.approx(TMI_C0_DEFAULT / 2.0, rel=1e-12)
+
+
+def test_raman_response_warns_when_dt_cannot_resolve_the_kernel():
+    """audit A-11: with dt >~ tau the sampled kernel aliases and the H/H[0] normalization forces
+    H(w) ~ 1 -- the DELAYED Raman response silently degrades to an instantaneous one, i.e. no
+    soliton self-frequency shift at all, on a stretched-pulse (ns window, ps sampling) CPA run."""
+    import warnings
+
+    from dynameta.optics.fiber_amp.pulse import raman_response_freq
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                     # fine sampling: silent
+        raman_response_freq(4096, 2e-15)
+    with pytest.warns(RuntimeWarning, match="aliases"):
+        _f_R, H = raman_response_freq(4096, 1e-12)
+    # and the warning is telling the truth: H is flat, i.e. a delta response
+    assert float(np.ptp(np.abs(H))) < 1e-9
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _f_R, H_ok = raman_response_freq(4096, 2e-15)
+    assert float(np.ptp(np.abs(H_ok))) > 0.1              # a genuinely dispersive response

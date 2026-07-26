@@ -12,10 +12,13 @@ cannot run -- the heavy NGSolve/DEVSIM stack is not installed in CI.
   python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity   # declared exception
 
 Tiers:
-  smoke -- the SMOKE set below: pure numpy/scipy scripts measured/verified < ~30 s each, no
-           DEVSIM/NGSolve and no multi-minute FDTD time loops. A NEW fast solver-free
-           validation must be ADDED to the set explicitly (opt-in keeps the tier honest:
-           import-grepping misclassifies lazy-import and long-numpy cases).
+  smoke -- the SMOKE set below: solver-free scripts MEASURED at < 60 s each, no DEVSIM/NGSolve and
+           no multi-minute FDTD time loops (most are pure numpy/scipy and finish in seconds; the
+           lumenairy-bridge gates pull lumenairy/jax, both of which CI already installs). A NEW
+           fast solver-free validation must be ADDED to the set explicitly (opt-in keeps the tier
+           honest: import-grepping misclassifies lazy-import and long-numpy cases). A solver-free
+           script that MEASURES too slow goes in SMOKE_EXCLUDED with its time, so the reverse-drift
+           warning below names only genuinely uncurated scripts (audit X-26).
   full  -- every gated validation PLUS the exit-gated examples/ workflows.
 
 EXIT-CODE CONTRACT (audit T-3 -- the tier used to read green while executing nothing):
@@ -86,6 +89,30 @@ SMOKE = {
     "qd_soa_vectorial_pdg", "qd_soa_wdm",
     # the rare-earth fiber amplifier (EDFA/YDFA) end-to-end gates -- pure numpy/scipy
     "fiber_amp_physics",
+    # audit X-19/X-26: the solver-free validations the reverse-drift warning below had been naming
+    # since they shipped. `lumenairy` is a CORE dependency CI already installs, so the bridge gates
+    # -- the only executable coverage of the 11-module optics/lumenairy_bridge subsystem -- cost
+    # nothing extra to run. Wall-clock MEASURED 2026-07-26 (this box, cold start, per script):
+    #   bic_capstone 13.9 s | inverse_design_oracle 3.6 s | lumenairy_berreman_bridge 3.0 s
+    #   lumenairy_emt_screen 2.1 s | lumenairy_translate 3.1 s | lumenairy_rcwa_jax 35.8 s
+    #   lumenairy_pmm_bridge 47.8 s | nonlocal_hydro_material 0.4 s | resonance_pole_finder 2.5 s
+    # = ~112 s added to the tier. The three that measured OVER the 60 s bar are in SMOKE_EXCLUDED
+    # below with their times, so the reverse-drift warning stays signal rather than noise.
+    "bic_capstone", "inverse_design_oracle", "lumenairy_berreman_bridge", "lumenairy_emt_screen",
+    "lumenairy_pmm_bridge", "lumenairy_rcwa_jax", "lumenairy_translate",
+    # audit X-19: cheap smoke wrappers for two optics modules that had NO validation script at all,
+    # so their only oracle was the test written beside the implementation in the same commit
+    "nonlocal_hydro_material", "resonance_pole_finder",
+}
+
+# Solver-free validations DELIBERATELY outside SMOKE, with the reason (audit X-26: "add them to
+# SMOKE after measuring runtime, or record an explicit exclusion reason next to each so the
+# reverse-drift warning stops being noise"). The reverse-drift check below subtracts this set, so
+# anything it still names is genuinely uncurated. Re-measure before moving one INTO the tier.
+SMOKE_EXCLUDED = {
+    "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
+    "lumenairy_berreman_jax":    "145 s measured 2026-07-26 (jax jit warm-up + sweep)",
+    "lumenairy_pmm2d_bridge":    "268 s measured 2026-07-26 (2-D PMM cascade; the slowest gate)",
 }
 
 
@@ -169,17 +196,25 @@ def main(argv):
             "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
         )
         extra = []
-        for n in sorted(all_gated - SMOKE):
+        for n in sorted(all_gated - SMOKE - set(SMOKE_EXCLUDED)):
             src = open(os.path.join(HERE, n + ".py"), encoding="utf-8").read()
             if not any(h in src for h in _HEAVY):
                 extra.append(n)
         if extra:
             # "no heavy path" = no NGSolve/DEVSIM/FDTD/jax-FDTD import; a few entries still pull
             # lumenairy/jax (the bridge validations) -- fast but not pure-numpy, so verify the runtime
-            # before adding them to the pure-numpy smoke tier.
+            # before adding them to the pure-numpy smoke tier. A script that has been MEASURED and
+            # judged too slow belongs in SMOKE_EXCLUDED with its time, not here (audit X-26).
             print("[run_all] WARNING: {} gated validation(s) with NO NGSolve/DEVSIM/FDTD heavy path NOT "
-                  "in SMOKE (curate into the smoke tier or confirm intentional; verify runtime -- a few "
-                  "pull lumenairy/jax): {}".format(len(extra), ", ".join(extra)), flush=True)
+                  "in SMOKE and NOT in SMOKE_EXCLUDED (curate into the smoke tier, or record a measured "
+                  "exclusion reason in SMOKE_EXCLUDED): {}".format(len(extra), ", ".join(extra)),
+                  flush=True)
+        # keep SMOKE_EXCLUDED honest in both directions: a name that no longer exists, or that has
+        # since been curated INTO SMOKE, is stale bookkeeping the next reader would trust.
+        stale_ex = [n for n in sorted(SMOKE_EXCLUDED) if n not in all_gated or n in SMOKE]
+        if stale_ex:
+            print("[run_all] WARNING: SMOKE_EXCLUDED name(s) that are no longer excludable gated "
+                  "scripts (deleted, or now in SMOKE): {}".format(", ".join(stale_ex)), flush=True)
     elif tier == "full":
         ex_dir = os.path.join(REPO, "examples")
         if os.path.isdir(ex_dir):

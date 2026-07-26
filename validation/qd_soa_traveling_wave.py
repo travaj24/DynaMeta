@@ -36,6 +36,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import HBAR, Q_E
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 from dynameta.optics.soa.traveling_wave import (TravelingWaveSOA, TwoLevelSaturableGain,
@@ -77,7 +78,7 @@ def main():
         r = soa.amplify(P_in, drive=None)
         ref = agrawal_olsson_output(t, P_in, g0, L, tau_c, E_sat)
         pk = abs(r["P_out"].max() - ref.max()) / ref.max()
-        en = abs(np.trapezoid(r["P_out"], t) - np.trapezoid(ref, t)) / np.trapezoid(ref, t)
+        en = abs(trapz(r["P_out"], t) - trapz(ref, t)) / trapz(ref, t)
         errs.append((pk, en))
     g_a = bool(errs[-1][0] < 1e-2 and errs[-1][1] < 1e-2 and errs[-1][0] < errs[0][0])
     ok = ok and g_a

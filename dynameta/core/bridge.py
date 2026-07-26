@@ -100,7 +100,25 @@ def assemble_eps(field: CarrierField,
             x3_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             y3_m = np.asarray(reg.grid_axes_m["y"], dtype=np.float64)
             z3_m = np.asarray(reg.grid_axes_m["z"], dtype=np.float64)
-            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_grid, **(extra_fields or {})},
+            # audit R-16: the 3-D branch merged extras RAW while the 2-D branch (C5-5) guards
+            # them. A 3-D companion field with a different AXIS ORDER, or one that merely
+            # BROADCASTS (an (Nx,1,Nz) slab, an (Nz,) profile the ndim>=2 test never sees),
+            # went straight into eps_grid -- and the final output-shape assertion below cannot
+            # catch a transposed-but-same-shape field, which is exactly the invisible-flip class
+            # C5-5 was raised for. Same policy here: an extra that is not scalar/(1-D) must match
+            # the carrier grid EXACTLY, elementwise-shape and all.
+            extras_3d = {}
+            for _k, _v in (extra_fields or {}).items():
+                _arr = np.asarray(_v)
+                if _arr.ndim >= 2 and _arr.shape != np.shape(n_grid):
+                    raise ValueError(
+                        "assemble_eps: extra field '{}' has shape {} which does not match the "
+                        "3D carrier grid {} -- a raw merge would broadcast or transpose it "
+                        "silently (audit R-16; the 2D branch has guarded this since C5-5). "
+                        "Resample the companion field onto the carrier grid first.".format(
+                            _k, _arr.shape, np.shape(n_grid)))
+                extras_3d[_k] = _v
+            eps_3d = n_to_eps.eps_grid(reg.material, {"n": n_grid, **extras_3d},
                                        lambda_m)                                # (Nx,Ny,Nz)
         else:
             # 2D (x, v=through-stack) carrier solve -> the FieldLift synthesizes

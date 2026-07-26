@@ -128,8 +128,7 @@ def main():
     lam_w = 2.0 * np.pi * C_LIGHT / wgrid
     im_chi = np.array([(model.eps({"subband": res3}, l)[2, 2]
                         - model.eps({"subband": res3}, l)[0, 0]).imag for l in lam_w])
-    integral = float(np.trapezoid(wgrid * im_chi, wgrid)) if hasattr(np, "trapezoid") else \
-        float(np.trapz(wgrid * im_chi, wgrid))
+    integral = trapz(wgrid * im_chi, wgrid)
     Leff = float(zi3[-1] - zi3[0])
     S_sum = 0.0
     for a in range(len(ns3)):

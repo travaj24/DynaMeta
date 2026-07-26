@@ -22,7 +22,7 @@ from typing import Dict
 import numpy as np
 import ngsolve as ng
 
-from dynameta.core.eps_field import EpsField
+from dynameta.core.eps_field import EpsField, require_solver_time_convention
 from dynameta.optics.ngsolve_layered import OpticalGeometry
 
 _ID3 = ng.CoefficientFunction((1, 0, 0, 0, 1, 0, 0, 0, 1), dims=(3, 3))
@@ -87,6 +87,9 @@ def _region_matrix_cf(ef: EpsField):
 
 def assemble_eps_cf(geo: OpticalGeometry,
                       eps_by_region: Dict[str, EpsField]) -> ng.CoefficientFunction:
+    # audit V-5: the BYO seam's convention label is CHECKED here, not merely recorded --
+    # an exp(+i omega t) eps field would solve as gain, silently.
+    require_solver_time_convention(eps_by_region, "assemble_eps_cf")
     mats = list(geo.mesh.GetMaterials())
     for region in mats:
         if region not in eps_by_region:

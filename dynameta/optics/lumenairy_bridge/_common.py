@@ -18,17 +18,68 @@ tuple(int(p) ...) parse -- copy-pasted x3 -- crashed on them.
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Tuple
 
 import numpy as np
 
-__all__ = ["VERSION_FLOOR", "parse_version", "require_lumenairy", "pol_row", "angles_rad",
-           "guard_incidence_side", "guard_conical_ppol", "p_basis_conversion",
-           "stack_layer_records", "conical_synthesis", "pol_tangential_unit"]
+__all__ = ["VERSION_FLOOR", "VERSION_VERIFIED_MAX", "parse_version", "require_lumenairy",
+           "pol_row", "angles_rad", "guard_incidence_side", "guard_conical_ppol",
+           "p_basis_conversion", "stack_layer_records", "conical_synthesis",
+           "pol_tangential_unit", "require_halfspace_keywords"]
+
+_REQUIRED = object()      # sentinel: "this keyword-only argument was not supplied"
+
+
+def require_halfspace_keywords(fn_name: str, legacy_positional, **named):
+    """Enforce KEYWORD-ONLY half-space indices on the differentiable ``*_design`` API, and turn
+    the legacy positional call into a LOUD, self-explaining TypeError (finding V-4).
+
+    Those nine entry points mirror lumenairy's upstream ``(n_substrate, n_superstrate)`` order,
+    which is the INVERSE of the 46 other super/sub-taking functions in DynaMeta (including
+    :func:`p_basis_conversion` in this very module, ``solve_fem``, ``stack_rta``,
+    ``nonlocal_tmm.stack_rt``, the ``optical_solver`` seam contract).  Both are bare scalars, so
+    a super-first positional call used to type-check, run, and silently solve the stack UPSIDE
+    DOWN -- 614%-class errors on an asymmetric device with a perfectly plausible R + T.
+
+    The meanings are NOT renormalized (that would silently change the answer for every existing
+    super-first-by-accident caller and break the validation scripts that pass ``N_SUB, N_SUP``
+    correctly).  Instead the ambiguity is REMOVED: the two indices must now be named at the call
+    site, so neither order can be got wrong without the interpreter saying so.
+
+    ``legacy_positional`` is the function's ``*args`` catch-all: any leftover positional argument
+    is a pre-change call and raises.  ``named`` are the keyword-only parameters that have no
+    default; a missing one raises the same way.
+    """
+    if legacy_positional:
+        raise TypeError(
+            "{0}: the half-space indices are now KEYWORD-ONLY (audit V-4). This looks like the "
+            "old positional call {0}(..., n_substrate, n_superstrate, ...): DynaMeta's *_design "
+            "API mirrors lumenairy's SUB-FIRST order, the inverse of the rest of the library "
+            "(solve_fem, stack_rta, the optical_solver seam and p_basis_conversion are all "
+            "SUPER-first), so a positional pair that was written super-first solved the stack "
+            "upside down in silence. Pass them by name -- {0}(..., n_substrate=..., "
+            "n_superstrate=...) -- and the order stops mattering. ({1} unexpected positional "
+            "argument(s) received.)".format(fn_name, len(legacy_positional)))
+    missing = [k for k, v in named.items() if v is _REQUIRED]
+    if missing:
+        raise TypeError(
+            "{}: missing required keyword-only argument(s) {} (audit V-4: the half-space "
+            "indices and the source wavelength must be named, not positional).".format(
+                fn_name, ", ".join(sorted(missing))))
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
 VERSION_FLOOR = (5, 22, 0)
+# SOFT CEILING (finding Q-16). The floor states what was VERIFIED; it said nothing about newer
+# releases, and the development environment had already run seven minor versions past it (5.29
+# against a 5.22 verification, spanning new propagators and a carrier-backend rework) in
+# complete silence. This is the (major, minor) of the last release the bridge gates were
+# actually re-run against; above it the bridge still runs -- lumenairy is backward compatible in
+# practice and refusing would be worse -- but says so ONCE per process. Bumping this is the
+# CHEAP half of the same correctness work: re-run validation/lumenairy_*.py and raise it.
+VERSION_VERIFIED_MAX = (5, 22)
+_CEILING_WARNED = False
 
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
 
@@ -66,7 +117,29 @@ def require_lumenairy():
             "accessor) were validated against the 5.22 surface only -- older releases were "
             "never exercised. pip install -U lumenairy".format(
                 ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
+    _warn_above_ceiling(lumenairy.__version__)
     return lumenairy
+
+
+def _warn_above_ceiling(vstr) -> None:
+    """One-time RuntimeWarning when the installed lumenairy is NEWER than the last version the
+    bridge gates were re-run against (finding Q-16). Not an error: the bridge has no evidence
+    the newer release is broken, only no evidence that it is not."""
+    global _CEILING_WARNED
+    if _CEILING_WARNED:
+        return
+    if parse_version(vstr)[:2] <= VERSION_VERIFIED_MAX:
+        return
+    _CEILING_WARNED = True
+    warnings.warn(
+        "lumenairy {} is NEWER than the last version the DynaMeta bridge gates were re-run "
+        "against ({}.{}.x). The bridge is running anyway -- nothing is known to be broken -- but "
+        "its conventions (layer order, p-pol sign, incidence side, per-order amplitude contract) "
+        "are pinned against the {}.{} surface only. Re-run validation/lumenairy_*.py and raise "
+        "dynameta.optics.lumenairy_bridge._common.VERSION_VERIFIED_MAX to clear this.".format(
+            vstr, VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1],
+            VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1]),
+        RuntimeWarning, stacklevel=3)
 
 
 def pol_row(optical) -> int:

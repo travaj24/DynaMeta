@@ -68,6 +68,12 @@ class OpticalResult:
     # is the spatial driver the reliability axis (REL5/LIDT) and electro-thermal Joule maps
     # consume. None when not computed (the default -- byte-identical for existing callers).
     per_region_absorption: Optional[Dict[str, float]] = None
+    # Worst relative residual of the two-wave (up/down) 0-order amplitude fits this solve performed
+    # (audit F-15): 0.0 when nothing was fitted. This is the quality number behind the fit warning,
+    # exposed so a sweep can INSPECT extraction quality per wavelength instead of relying on
+    # warning text -- a converged solve reads ~1e-4..1e-3, an under-resolved one ~1e-2 and up. The
+    # FEM path fills it; other backends leave it at 0.0.
+    fit_relres:    float = 0.0
 
 
 @runtime_checkable

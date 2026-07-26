@@ -79,6 +79,28 @@ class Stack:
         names = [L.name for L in self.layers]
         if len(set(names)) != len(names):
             raise ValueError("Duplicate layer names: {}".format(names))
+        # audit R-10: Features were validated only for z_lo < z_hi. Two identically-named
+        # features lying ENTIRELY outside [0, total_thickness] were accepted, and combined with
+        # the builder's own silence (F-14) the user got no signal at either layer -- the feature
+        # simply never appeared in the mesh. Layer names already fail loudly on both counts;
+        # apply the same policy to their z-spanning sibling.
+        if self.features:
+            fnames = [f.name for f in self.features]
+            fdupes = sorted({n for n in fnames if fnames.count(n) > 1})
+            if fdupes:
+                raise ValueError(
+                    "Stack: duplicate Feature names {} -- feature names key the geometry and "
+                    "per-region diagnostics exactly as layer names do.".format(fdupes))
+            total = self.total_thickness_m()
+            # relative slack: a feature snapped to the stack top by float arithmetic must not trip
+            tol = 1e-9 * max(total, 1.0)
+            outside = [(f.name, f.z_lo_m, f.z_hi_m) for f in self.features
+                       if f.z_hi_m <= tol or f.z_lo_m >= total - tol]
+            if outside:
+                raise ValueError(
+                    "Stack: Feature(s) {} lie entirely outside the stack z-range [0, {:.6g}] m "
+                    "and would silently never be built. Move them inside, or grow the "
+                    "stack.".format(outside, total))
 
     def z_intervals(self) -> Dict[str, Tuple[float, float]]:
         """{layer_name: (z_lo_m, z_hi_m)}, accumulating thickness bottom-to-top
