@@ -646,59 +646,20 @@ def _region_eps_scalar(design, geo, region, lambda_m):
 
 
 def _ensure_bloch_dirs(geo):
-    """Pre-compute + cache geo._bloch_dirs using z-sampling that hits EVERY region z-interval
-    (including thin patterned grating layers). solver._detect_bloch_dirs samples z at 18 GLOBAL
-    fractions, which can miss a thin patterned layer's periodic face and misclassify its Bloch idnr
-    -- the 'resolved N x / M y ... expected' RuntimeError at oblique incidence. Same toggle-marker
-    method, denser (per-region) z-sampling; a no-op when already cached or single-axis periodic."""
-    import cmath as _cm
-    import ngsolve as _ng
+    """Pre-compute + cache geo._bloch_dirs (thin-patterned-layer-robust). HISTORICAL: this used to
+    carry its OWN per-region-z-sampled copy of the detector because solver._detect_bloch_dirs
+    sampled z at 18 GLOBAL fractions only and could miss a thin layer's periodic face -- but it was
+    wired into exactly ONE call site, so every other entry point kept the fragile detection (audit
+    F-6). The per-region sampling now lives IN solver._detect_bloch_dirs, so all call sites benefit
+    and this is a thin pre-cache wrapper: it warms geo._bloch_dirs early (so a detection failure
+    surfaces before the expensive solve) and, if detection is inconclusive, stays silent and leaves
+    the solver to raise its own diagnostic on the solve path -- the pre-existing behaviour."""
+    from dynameta.optics.solver import _detect_bloch_dirs as _ddirs
     if getattr(geo, "_bloch_dirs", None) is not None:
         return
-    mesh = geo.mesh
-    n_px, n_py = geo.n_px, geo.n_py
-    N = n_px + n_py
-    Px, Py = geo.period_x_nm, geo.period_y_nm
-    if N == 0 or n_py == 0:
-        dirs = ["x"] * n_px
-    elif n_px == 0:
-        dirs = ["y"] * n_py
-    else:
-        zpts = []
-        for (zl, zh) in geo.z_intervals_nm.values():
-            for fr in (0.2, 0.5, 0.8):
-                zpts.append(zl + fr * (zh - zl))
-        thm = _cm.exp(1j * 0.7853981634)
-
-        def _viol(i):
-            phases = [(thm if j == i else 1.0 + 0j) for j in range(N)]
-            fes = _ng.Periodic(_ng.H1(mesh, order=1, complex=True), phase=phases)
-            gf = _ng.GridFunction(fes)
-            gf.Set(_ng.exp(0.01j * _ng.z) * (1.0 + 0.3 * _ng.y / Py + 0.25 * _ng.x / Px + 0.2j))
-            xv = yv = 0.0
-            for zv in zpts:
-                for fy in (0.3, 0.6):
-                    try:
-                        a = complex(gf(mesh(0.0, fy * Py, zv))); b = complex(gf(mesh(Px, fy * Py, zv)))
-                        xv = max(xv, abs(b - a))
-                    except Exception:
-                        pass
-                for fx in (0.3, 0.6):
-                    try:
-                        c = complex(gf(mesh(fx * Px, 0.0, zv))); e = complex(gf(mesh(fx * Px, Py, zv)))
-                        yv = max(yv, abs(e - c))
-                    except Exception:
-                        pass
-            return xv, yv
-        dirs = []
-        for i in range(N):
-            xv, yv = _viol(i)
-            dirs.append("x" if xv > yv else "y")
-        if dirs.count("x") != n_px or dirs.count("y") != n_py:
-            return                                    # inconclusive: leave the solver to try its own
     try:
-        geo._bloch_dirs = dirs
-    except (AttributeError, TypeError):
+        _ddirs(geo)                                   # memoizes geo._bloch_dirs on success
+    except Exception:                                 # noqa: BLE001 -- inconclusive: not fatal HERE
         pass
 
 

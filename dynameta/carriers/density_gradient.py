@@ -30,6 +30,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import HBAR, KB, M_E, Q_E
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m"]
 
@@ -115,5 +116,5 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
     if flip:
         n_dg = n_dg[::-1]
     if conserve_charge:
-        n_dg = n_dg * (np.trapezoid(n_cl, z) / max(np.trapezoid(n_dg, z), 1e-300))
+        n_dg = n_dg * (trapz(n_cl, z) / max(trapz(n_dg, z), 1e-300))
     return n_dg

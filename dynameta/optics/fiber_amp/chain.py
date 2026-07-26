@@ -23,7 +23,7 @@ Pure numpy; SI units."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 import numpy as np
@@ -91,7 +91,6 @@ class AmplifierChain:
 
     def solve(self, P_in_W: float, signal_lambda_m: float, *, ref_bw_nm: float = 0.1,
               **solve_kw) -> ChainResult:
-        from dynameta.optics.fiber_amp.metrics import _set_signal
         from dynameta.optics.fiber_amp.noise import analyze_noise
 
         nu_s = C_LIGHT / signal_lambda_m
@@ -111,13 +110,19 @@ class AmplifierChain:
                                            rho, p_ase))
                 P = P_new
             else:
-                amp = _set_signal(el, P, self.signal_index) if hasattr(el, "signals") else el
+                amp = _reseed_signal(el, P, self.signal_index)
                 res = amp.solve(**solve_kw)
-                nr = analyze_noise(res, signal_lambda_m)
+                # forward the caller's reference bandwidth (audit A-2): analyze_noise builds
+                # P_ase_ref_W in ITS bandwidth, and the rho_gen inversion below divides by the
+                # caller's -- at its 0.1 nm default against a ref_bw_nm != 0.1 caller the two
+                # disagreed by exactly 0.1/ref_bw_nm, so every stage's generated PSD was
+                # mis-scaled and the chain NF walked below the quantum limit (n_sp < 1).
+                nr = analyze_noise(res, signal_lambda_m, ref_bw_nm=ref_bw_nm)
                 G = float(nr.gain_lin)
                 P_new = P * G
                 # per-pol PSD the stage generated at the signal wavelength (analyze_noise
-                # reports the m*rho*dnu_ref reference-band power; invert its own definition)
+                # reports the m*rho*dnu_ref reference-band power; invert its own definition --
+                # same bandwidth on both sides, so this returns rho_1pol(nu_s) exactly)
                 rho_gen = (float(nr.meta["P_ase_ref_W"])
                            / (_ref_dnu(signal_lambda_m, ref_bw_nm) * _meta_m(res)))
                 p_ase_gen = _total_fwd_ase_W(res)
@@ -136,6 +141,25 @@ class AmplifierChain:
         osnr = P / p_ase_ref if p_ase_ref > 0.0 else np.inf
         return ChainResult(float(signal_lambda_m), records, float(P), float(_DB(G_tot)),
                            float(_DB(nf_tot)), float(rho), float(_DB(osnr)), float(ref_bw_nm))
+
+
+def _reseed_signal(el, P_W: float, index: int):
+    """Re-seed an amplifier stage with the signal power it ACTUALLY sees at its input, preserving
+    the stage's TYPE (audit A-3). Every amplifier class implements with_signals (FiberAmplifier
+    and ErYbAmplifier do), which rebuilds itself through its OWN constructor; the chain used to
+    call metrics._set_signal, which unconditionally rebuilt a FiberAmplifier from amp.ion /
+    amp.concentration / amp.raman and so raised AttributeError on the ErYbAmplifier the class
+    docstring advertises. A duck-typed third-party amplifier with .signals but no with_signals
+    still gets the legacy FiberAmplifier-shaped rebuild; anything without .signals passes through
+    unchanged (a pre-configured stage)."""
+    if hasattr(el, "with_signals"):
+        sigs = list(el.signals)
+        sigs[index] = replace(sigs[index], power_W=float(P_W))
+        return el.with_signals(sigs)
+    if hasattr(el, "signals"):
+        from dynameta.optics.fiber_amp.metrics import _set_signal
+        return _set_signal(el, P_W, index)
+    return el
 
 
 def _ref_dnu(lambda_m, ref_bw_nm):

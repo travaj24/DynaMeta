@@ -16,6 +16,11 @@ GATE E (noise figure + two-band ASE): the fitted inversion gives NF <= 5 dB (eta
         coupling, as the datasheet specifies); and the ES band is ENABLED so the gain spectrum carries a
         second (ES/WL) feature blue of the GS at ~1210 nm (the datasheet's two-band ASE), absent when the
         ES band is off.
+GATE F (ASE stack sees both bands, audit A-4): the self-consistent ASE machinery is driven by the FULL
+        GS+ES gain/emission pair, so the output ASE PSD picks up ~0.9-2.5 dB across the device's own -3 dB
+        window and ~3.6 dB at the 1210 nm ES lobe (where the net gain itself moves ~4.1 dB), with a finite
+        n_sp >= 1 in the ES band. The GS-only pair the ASE path used before is computed alongside as the
+        contrast.
 
 HONEST SCOPE: this calibrates the STATIC/CW axes only. alpha_lef, the carrier kinetic times, RIN/linewidth,
 NF(lambda), TPA/FCA and the thermal slopes are NOT constrained by this datasheet and stay at flagged
@@ -107,6 +112,46 @@ def main():
     print("[cal] GATE E: NF {:.2f} dB <= {:.0f} dB (n_sp {:.2f}); ES-band gain@1210nm {:.0f} vs off {:.0f} "
           "/m -> {}".format(NF_dB, t["NF_dB_max"], n_sp, g_es_on, g_es_off, "PASS" if g_e else "FAIL"),
           flush=True)
+
+    # ---- GATE F: the ASE stack sees the SAME two bands the gain does (audit A-4) ----
+    # The ASE/OSNR/NF path used the GS-only (material_gain_per_m, emission_gain_per_m) pair while
+    # the gain was already GS+ES, so it was blind to the ES lobe this very calibration fits
+    # (es_ratio ~ 0.046, ES centre 1210.0 nm == the sheet's ase_es_nm). Routing
+    # ase_self_consistent* through (total_material_gain, total_emission_gain) moves the ASE PSD by
+    # ~0.9-2.5 dB across the device's own -3 dB window and ~3.6 dB at the ES lobe -- where the net
+    # gain itself was wrong by ~4.1 dB -- and leaves a finite n_sp >= 1 in the ES band.
+    from dynameta.optics.soa.ase_noise import ase_spectrum_bidirectional
+    H_PLANCK = 6.62607015e-34
+    lam_nm = np.linspace(1150.0, 1420.0, 271)
+    nu_ase = C_LIGHT / (lam_nm * 1.0e-9)
+    dnu_ase = np.abs(np.gradient(nu_ase))
+    nz = 40
+    dz = dev.length_m / nz
+    rho_GS, rho_ES = m.rho_GS(y), m.rho_ES(y)
+    g_two = m.total_material_gain(rho_ES, rho_GS, nu_ase)
+    spec = {}
+    for tag, (gg, gsp) in (("gs", (m.material_gain_per_m(rho_GS, nu_ase),
+                                   m.emission_gain_per_m(rho_GS, nu_ase))),
+                           ("two", (g_two, m.total_emission_gain(rho_ES, rho_GS, nu_ase)))):
+        spec[tag] = ase_spectrum_bidirectional(np.tile(gg, (nz, 1)), np.tile(gsp, (nz, 1)), dz,
+                                               nu_ase, dnu_ase, m.p.Gamma,
+                                               alpha_i_per_m=dev.alpha_i_per_m, m_pol=2)
+    d_dB = 10.0 * np.log10(spec["two"]["S_f"] / spec["gs"]["S_f"])
+    Gnet_dB = (10.0 / np.log(10.0)) * (m.p.Gamma * g_two - dev.alpha_i_per_m) * dev.length_m
+    in_band = Gnet_dB >= Gnet_dB.max() - 3.0
+    k_es = int(np.argmin(np.abs(lam_nm - t["ase_es_nm"])))
+    G_es = float(spec["two"]["G"][k_es])
+    nsp_es = float(spec["two"]["S_f"][k_es] / (H_PLANCK * nu_ase[k_es] * (G_es - 1.0)))
+    dG_es_dB = 10.0 * np.log10(G_es / float(spec["gs"]["G"][k_es]))
+    band_ok = bool(0.8 < d_dB[in_band].min() and d_dB[in_band].max() < 2.7)
+    es_ok = bool(3.0 < d_dB[k_es] < 4.2 and 3.5 < dG_es_dB < 4.6 and np.isfinite(nsp_es)
+                 and nsp_es >= 1.0)
+    g_f = bool(band_ok and es_ok)
+    ok = ok and g_f
+    print("[cal] GATE F: two-band ASE (A-4): in-band PSD delta {:.2f}..{:.2f} dB; at {:.0f} nm PSD "
+          "{:+.2f} dB, net gain {:+.2f} dB, n_sp {:.2f} -> {}".format(
+              d_dB[in_band].min(), d_dB[in_band].max(), t["ase_es_nm"], d_dB[k_es], dG_es_dB,
+              nsp_es, "PASS" if g_f else "FAIL"), flush=True)
 
     print("[cal] fitted: sigma_pk {:.2e} m2, fwhm_inhom {:.1f} THz, A_mode {:.3f} um2, dE_ES_GS {:.3f} eV, "
           "N_q {:.1e}".format(r["sigma_pk_m2"], r["fwhm_inhom_Hz"] / 1e12, r["A_mode_m2"] * 1e12,

@@ -17,6 +17,13 @@ sigma_e)), and the output pulse P_out(t) = P_in(t) G0 / (G0 - (G0-1) exp(-U_in(t
 G0 the small-signal gain and U_in the running input energy; the leading edge sees full G0, the
 trailing edge sees a saturated gain of 1.
 
+SAME OBJECT, SAME PHYSICS. The march reads the amplifier's own opt-ins rather than a subset of
+them: the normalised upconversion coefficient (either constructor spelling -- audit A-1) enters
+the semi-implicit nbar2 update, and an axial temperature profile left set by
+thermal.solve_with_thermal_feedback scales every sigma_e-proportional coefficient by the same
+per-z McCumber factor the steady solve uses (audit A-5). The long-time limit of the transient is
+therefore amp.solve()'s fixed point for the SAME amp, which is what the gates assert.
+
 Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.8.
 """
 
@@ -135,10 +142,21 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     loss = ch.loss_per_m[:, None]
     ase_col = is_ase[:, None]
     src_pref = ase_col * (gam * na * sig_e * m * (hnu * ch.dnu_hz)[:, None])
+    # Optional axial temperature profile (set_temperature_profile / thermal.solve_with_thermal_
+    # feedback): the SAME (K, Nz) McCumber sigma_e scaling the steady solve applies, on every
+    # sigma_e-proportional coefficient -- the local emission gain, the ASE spontaneous source and
+    # the stimulated-emission rate (audit A-5: the transient ran the COLD model on an amplifier
+    # whose profile was explicitly SET, so its long-time limit disagreed with amp.solve()).
+    # mcc is None (no profile) -> every expression below is the original one, byte-identically.
+    mcc = amp._mcc_matrix(ch, z)
+    sig_e_z = sig_e if mcc is None else sig_e * mcc
+    if mcc is not None:
+        src_pref = src_pref * mcc
+    flux_e_pref = ch.sigma_e[:, None] if mcc is None else ch.sigma_e[:, None] * mcc
 
     def g_s(n2z):
         n2 = n2z[None, :]
-        g = gam * na * (sig_e * n2 - sig_a * (1.0 - n2) - sig_esa * n2) - loss
+        g = gam * na * (sig_e_z * n2 - sig_a * (1.0 - n2) - sig_esa * n2) - loss
         if amp.concentration is not None:
             g = g - gam * amp._n_dark * sig_a
             g = g - amp.concentration.photodarkening_loss_per_m(n2z)[None, :]
@@ -148,7 +166,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     def rates(P):
         flux = ch.gamma[:, None] * P / (hnu[:, None] * A)       # (K, Nz)
         R_a = np.sum(ch.sigma_a[:, None] * flux, axis=0)         # (Nz,)
-        R_e = np.sum(ch.sigma_e[:, None] * flux, axis=0)
+        R_e = np.sum(flux_e_pref * flux, axis=0)                 # sigma_e (x McCumber, if profiled)
         return R_a, R_e
 
     # initial inversion: steady state at the first drive (interp to z), unless supplied
@@ -189,8 +207,14 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         dt = float(t_grid[it + 1] - t)
         R_a, R_e = rates(P)
         B = R_a + R_e + inv_tau
-        if amp.concentration is not None and amp.concentration.c_up_m3_s > 0.0:
-            B = B + amp.concentration.c_up_m3_s * na * n2
+        # Gate on the NORMALISED coefficient, not on the ConcentrationModel: FiberAmplifier
+        # folds BOTH documented spellings (concentration.c_up_m3_s and the raw
+        # upconversion_C_up=) into self.upconversion_C_up, and the steady-state _nbar2_c reads
+        # only that attribute. Gating on the object dropped the raw-C_up opt-in entirely --
+        # the transient came out bit-equal to the C_up = 0 ideal and disagreed with its own
+        # steady-state solve by 4.5 dB at the repo's own test value 3e-23 (audit A-1).
+        if amp.upconversion_C_up > 0.0:
+            B = B + amp.upconversion_C_up * na * n2
         n2_ss = R_a / B
         n2 = n2_ss + (n2 - n2_ss) * np.exp(-B * dt)
         n2 = np.clip(n2, 0.0, 1.0)
@@ -200,7 +224,11 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
 
 
 def _amp_with_boundary(amp, bc, sig_idx, pmp_idx, kind):
-    """Clone amp with pump/signal input powers set from a boundary vector bc (ASE seeds are 0)."""
+    """Clone amp with pump/signal input powers set from a boundary vector bc (ASE seeds are 0).
+    Routed through FiberAmplifier._clone so the raw upconversion_C_up (audit A-1) and the axial
+    temperature profile (audit A-5) travel with the clone -- this rebuild used to forward the
+    ConcentrationModel alone, so the steady state that SEEDS the transient was a different
+    amplifier from the one being marched."""
     from dataclasses import replace
     pumps = list(amp.pumps)
     signals = list(amp.signals)
@@ -208,8 +236,7 @@ def _amp_with_boundary(amp, bc, sig_idx, pmp_idx, kind):
         pumps[j] = replace(pumps[j], power_W=float(bc[i]))
     for j, i in enumerate(sig_idx):
         signals[j] = replace(signals[j], power_W=float(bc[i]))
-    return FiberAmplifier(amp.ion, amp.fiber, pumps, signals, amp.ase,
-                          concentration=amp.concentration)
+    return amp._clone(pumps=pumps, signals=signals)
 
 
 # ============================ Frantz-Nodvik fast-pulse extraction ============================

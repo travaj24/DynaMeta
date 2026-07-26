@@ -130,6 +130,33 @@ class FiberAmplifier:
             self._n_active = fiber.n_t_m3
             self._n_dark = 0.0
 
+    # ---- type-preserving clone protocol ---------------------------------------------------
+    def _clone(self, *, pumps: Optional[List[Pump]] = None,
+               signals: Optional[List[Signal]] = None) -> "FiberAmplifier":
+        """Clone this amplifier with the pump and/or signal list swapped, carrying EVERY opt-in
+        through: the ASE band, the ConcentrationModel, the normalised upconversion_C_up (audit
+        S3-1/A-1: the raw-C_up spelling was dropped by clones that only forwarded the
+        concentration model), the RamanStokes coupling, and the axial temperature profile set by
+        set_temperature_profile / solve_with_thermal_feedback (audit A-5: every clone used to run
+        the COLD model, so metrics.*(amp) disagreed with amp.solve() by ~2.4 dB on a hot fiber).
+        The _Tz tuple is immutable in practice (set_temperature_profile copies its inputs and
+        nothing mutates it in place), so it is shared rather than re-copied."""
+        new = FiberAmplifier(self.ion, self.fiber,
+                             self.pumps if pumps is None else list(pumps),
+                             self.signals if signals is None else list(signals),
+                             self.ase, upconversion_C_up=self.upconversion_C_up,
+                             concentration=self.concentration, raman=self.raman)
+        new._Tz = self._Tz
+        return new
+
+    def with_signals(self, signals: List[Signal]) -> "FiberAmplifier":
+        """Re-seed the amplifier with a new signal list, preserving its TYPE and every opt-in
+        (see _clone). This is the amplifier-agnostic re-seed protocol AmplifierChain uses to walk
+        a chain -- ErYbAmplifier implements the same method, so a chain can hold either class
+        (audit A-3: the chain used to rebuild every stage as a FiberAmplifier from amp.ion, which
+        hard-crashed on an ErYbAmplifier)."""
+        return self._clone(signals=signals)
+
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self) -> Tuple[ChannelSet, np.ndarray, np.ndarray, np.ndarray, List[str]]:
         lam, u, is_ase, dnu, kind, bc, cladding = [], [], [], [], [], [], []

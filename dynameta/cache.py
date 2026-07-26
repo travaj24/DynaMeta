@@ -41,7 +41,12 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 #           per entry but far faster to flush and reopen (per-dataset metadata churn dominated;
 #           measured 25-90x HDF5 / ~130x Zarr at N=400-2000, growing with N). A schema-4 per-key
 #           store is discarded on load like any stale schema.
-_SCHEMA = 5
+#   5 -> 6 (audit D-2, 2026-07-25): VALUE change, keys/layout unchanged -- the FDTD flux
+#           diagnostics (R_flux/T_flux and order-resolved powers) gained the exact half-timestep
+#           E/H phase alignment exp(+i w dt/2), so FDTD-backed entries written before the fix
+#           differ (up to ~2e-3 on diffracting gratings). Discarding on schema keeps a pre-fix
+#           store from serving pre-fix flux.
+_SCHEMA = 6
 _PK_VALS = "packed_vals"                                    # (N, len(_VEC)) float64, one entry per row
 _PK_KEYS = "packed_keys"                                    # (N, 41) uint8: "k"+sha1-hex ASCII key rows
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
@@ -161,7 +166,11 @@ class OpticalSolverCache:
         623-1372x persistence overhead on cheap backends, and K=64 recovers nearly all)
         batches the flushes, turning O(N^2) rewrite bytes over a sweep into O(N^2/K)
         while bounding crash loss to K-1 misses; a dirty cache is also flushed at
-        interpreter exit (atexit) so a batched tail is never silently dropped.
+        interpreter exit (atexit, via a WEAKREF trampoline so the registration does not
+        make every autosave cache immortal) or at collection (__del__) if it was dropped
+        first, so a batched tail is never silently dropped -- and a flush that FAILS
+        leaves the dirty flag set, so the next flush retries instead of the failure
+        disarming the net (audit R-7). close() flushes and releases the atexit slot.
         autosave=False + one explicit flush() remains the fastest path.
       * flush() MERGES same-schema entries already on disk before an ATOMIC rewrite
         (audit S5-4): concurrent writers with disjoint keys union instead of clobbering,
@@ -208,9 +217,25 @@ class OpticalSolverCache:
         self.misses = 0
         self._mem = {}
         self._pra = {}                                       # key -> per_region_absorption (S5-3)
+        self._atexit_hook = None
         if self.autosave:
+            # audit R-7: register a WEAKREF TRAMPOLINE, not the bound method. atexit holds its
+            # callbacks for the whole process life, so `atexit.register(self._flush_if_dirty)`
+            # made every autosave cache (and its entire _mem store) IMMORTAL -- a long-running
+            # sweep that built and dropped caches leaked all of them. The trampoline holds only a
+            # weak reference, so a dropped cache is collectable; __del__ still persists a dirty
+            # tail at collection time, and close() unregisters explicitly.
             import atexit
-            atexit.register(self._flush_if_dirty)            # batched mode: never drop the tail
+            import weakref
+            _ref = weakref.ref(self)
+
+            def _atexit_flush(_ref=_ref):
+                obj = _ref()
+                if obj is not None:                          # already collected -> nothing to do
+                    obj._flush_if_dirty()
+
+            self._atexit_hook = _atexit_flush
+            atexit.register(_atexit_flush)                    # batched mode: never drop the tail
         if os.path.exists(path):
             try:
                 arrays, meta = load_arrays(path, fmt=fmt)
@@ -290,15 +315,41 @@ class OpticalSolverCache:
             try:
                 self.flush()
             except Exception:                                # atexit must never raise
-                pass
+                pass                                         # (_unsaved survives -- audit R-7)
+
+    def close(self) -> None:
+        """Flush any unsaved entries and UNREGISTER the atexit hook (audit R-7). Optional -- a
+        live cache is still flushed at interpreter exit, and a dropped one at collection -- but
+        calling it makes the persistence point explicit and releases the atexit slot. Idempotent.
+        Do not keep solving through a closed cache: the exit-time safety net is gone (call
+        flush() yourself, or build a new cache)."""
+        self._flush_if_dirty()
+        hook, self._atexit_hook = self._atexit_hook, None
+        if hook is not None:
+            import atexit
+            atexit.unregister(hook)
+
+    def __del__(self):
+        # audit R-7: with the atexit registration weakened to a weakref, a cache dropped WITHOUT
+        # close() would otherwise lose its batched tail (the trampoline only fires for caches
+        # still alive at exit). Best-effort, never raises -- the docstring's "a batched tail is
+        # never silently dropped" contract holds for both the dropped and the live case.
+        try:
+            self._flush_if_dirty()
+        except Exception:                                    # pragma: no cover - teardown races
+            pass
 
     def flush(self) -> str:
         """Write the in-memory cache to disk (HDF5/Zarr; a WHOLE-store rewrite -- see the
         class docstring cost model). The rewrite is deliberate: save_arrays truncates (HDF5
         mode-'w' / Zarr rmtree-first), which is what makes a load-side schema discard
         permanent -- an append/merge flush would resurrect the discarded stale entries
-        under the fresh schema stamp (audit 6.2 hazard; GATE D2)."""
-        self._unsaved = 0
+        under the fresh schema stamp (audit 6.2 hazard; GATE D2).
+
+        The dirty flag is cleared at the END, only after the write has SUCCEEDED (audit R-7): it
+        used to be zeroed as the FIRST statement, so a failing write DISARMED the atexit safety
+        net -- _unsaved dropped to 0, _flush_if_dirty then found nothing to do, and the batch was
+        never retried even though the entries were still sitting in _mem."""
         # audit S5-4 MERGE step: union same-schema entries already on disk that this process
         # does not hold (disjoint concurrent writers no longer clobber each other). Entries
         # under a DIFFERENT schema are ignored -- never resurrected (GATE D2 semantics).
@@ -336,12 +387,19 @@ class OpticalSolverCache:
             tmp = str(self.path) + ".tmp-flush"
             save_arrays(tmp, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs, fmt="hdf5")
             os.replace(tmp, self.path)
-            return self.path
-        return save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs,
-                           fmt=self.fmt)                     # _SCHEMA (single source): the load-side
+            out = self.path
+        else:
+            out = save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs,
+                              fmt=self.fmt)                  # _SCHEMA (single source): the load-side
                                                             # discard check uses the SAME constant, so
                                                             # a future bump cannot make the cache
                                                             # write-only (flush stamping a stale int)
+        self._unsaved = 0                                    # audit R-7: ONLY after a successful
+                                                            # write -- any exception above
+                                                            # propagates with the dirty flag intact,
+                                                            # so the next autosave / the atexit net
+                                                            # (and __del__) still retry the batch.
+        return out
 
     def stats(self) -> dict:
         tot = self.hits + self.misses

@@ -54,7 +54,11 @@ ORDER RESOLUTION: for a periodic 2D unit cell the exit probe is an x-line (nstep
 DFT over x resolves the diffraction orders m = 0, +-1, ...; the module returns per-order band
 powers (with 1/nx Parseval normalization so the order sum equals the x-summed flux). A laterally
 uniform chi2/chi3 slab radiates only the specular m = 0 order; a grating spreads the harmonics
-across orders.
+across orders. ORDER SIGN (audit D-4, fixed 2026-07-25): the time transform is CONJUGATED before
+the x-DFT so the bin index equals the PHYSICAL order under exp(-i omega t) -- m > 0 is the order
+whose transverse dependence is exp(+i m G x), deflected toward +x. Without that conjugation the
+labels came out mirrored (a physical +1 filed as -1), which inverts the reported blaze asymmetry
+of an asymmetric grating; magnitudes and the order SUM were, and remain, unaffected.
 """
 from __future__ import annotations
 
@@ -117,18 +121,38 @@ def _order_spectra(e, h, dt):
     rfft in time and a full fft over x give the (freq, order) amplitudes. With h: the +z Poynting
     density S = -Re(E_k conj(H_k))/nx (sums over orders to the x-summed flux, Parseval). Without h:
     |E_k|^2/nx (energy spectral density). `orders` are the signed diffraction indices 0, +-1, ...
+
+    TWO CONVENTION CORRECTIONS applied here (audit 2026-07-25):
+
+    D-4, ORDER LABELS. np.fft.rfft yields exp(+i w t) phasors while the library convention is
+    exp(-i w t), so the time transform must be CONJUGATED -- the same np.conj every sibling
+    extractor applies (solve2d.py's r0c/t0c, solve3d.py's m_). The conjugation also flips the sign
+    of the x phase, so without it a wave whose physical transverse dependence is exp(+i k_x x)
+    lands in the x-DFT bin -m: a physical +1 order was reported as -1 (measured by synthesis: 100%
+    of a +1 order's power filed under -1, and a blazed mix with physical P(+1)/P(-1) = 16.0
+    reported as 0.0625). Conjugating BOTH transforms is a pure RELABELLING: on its own it leaves
+    every magnitude and the order SUM bit-identical (the per-order rows simply swap m <-> -m), and
+    the nx = 1 case (a single-order series or a 1-D FDTD trace) is unchanged entirely.
+
+    D-2, HALF-TIMESTEP STAGGER. The Yee kernels record H half a step BEFORE E, so the H spectrum
+    carries a spurious exp(-i w dt/2); it is removed with exp(+i w dt/2) before the x-DFT, exactly
+    as in fdtd_nd.results._flux (see _half_step_H there for the empirical sign verification --
+    the opposite sign doubles the error). It matters only where E H* is nearly pure-imaginary
+    (evanescent / near-cutoff orders); a propagating order sees an O(sin(w dt/2)^2) shift.
     """
     e = np.asarray(e, dtype=float)
     if e.ndim == 1:
         e = e[:, None]
     nsteps, nx = e.shape
     f = np.fft.rfftfreq(nsteps, dt)
-    Ek = np.fft.fft(np.fft.rfft(e, axis=0), axis=1)        # (nfreq, nx): time->freq, x->order
+    # (nfreq, nx): time->freq (conjugated to exp(-i w t), audit D-4), then x->order
+    Ek = np.fft.fft(np.conj(np.fft.rfft(e, axis=0)), axis=1)
     if h is not None:
         h = np.asarray(h, dtype=float)
         if h.ndim == 1:
             h = h[:, None]
-        Hk = np.fft.fft(np.fft.rfft(h, axis=0), axis=1)
+        Hw = np.fft.rfft(h, axis=0) * np.exp(1j * np.pi * f * dt)[:, None]   # exp(+i w dt/2), D-2
+        Hk = np.fft.fft(np.conj(Hw), axis=1)
         S = -np.real(Ek * np.conj(Hk)) / nx
         ptype = "poynting_flux"
     else:

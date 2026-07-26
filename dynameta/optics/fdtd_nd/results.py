@@ -33,12 +33,46 @@ class FDTD2DResult:
 
 
 
-def _flux(ey, hx):
+def _half_step_H(nsteps, dt, ndim):
+    """exp(+i w dt/2) on the rfft axis, broadcast against an `ndim`-dimensional probe spectrum.
+
+    HALF-TIMESTEP DE-STAGGERING (audit D-2). The Yee kernels record E and H from the SAME loop
+    iteration, but the H update runs first: at step n they store E(t = (n+1) dt) and
+    H(t = (n+1/2) dt) (kernels2d.py:252-253, kernels3d.py:263-264), so H LAGS E by half a step.
+    Its rfft therefore carries a spurious exp(-i w dt/2) relative to E's, and E conj(H) carries
+    exp(+i w dt/2). Multiplying the H spectrum by exp(+i w dt/2) removes it exactly.
+
+    Unlike the half-CELL z offset (already removed inside the kernel, which averages H_x onto the
+    E_y plane) this does NOT cancel in the R/T ratio. For a PROPAGATING order E H* is nearly real
+    and the residue is a common cos(w dt/2) that does cancel; for an EVANESCENT / near-cutoff order
+    E H* is nearly pure-imaginary and the uncorrected flux picks up a spurious
+    Im(E H*) sin(w dt/2) that survives it.
+
+    SIGN, verified empirically 2026-07-25 (the 2026-07-25 audit's D-2 prescribes the OPPOSITE sign,
+    which doubles the error):
+      * synthetic evanescent order, true S_z == 0 exactly: uncorrected +7.342e-2 ->
+        exp(+i w dt/2) gives -2.6e-16 (machine zero); exp(-i w dt/2) gives +1.460e-1 (1.989x, the
+        predicted exactly-2 doubling).
+      * real FDTD incident reference (a pure +z plane wave, so E/H must be a REAL -eta ratio):
+        max|Im|/max|Re| 1.3873e-2 -> 1.9132e-5 with exp(+i w dt/2) (725x better) and -> 2.7735e-2
+        with exp(-i w dt/2) (2x worse).
+    IMPACT: on a laterally-uniform slab (propagating 0 order only) R_flux/T_flux move by <= 9.0e-7
+    (an O(sin(w dt/2)^2) residue); on a real diffracting grating T_flux moves by up to 2.0e-3
+    absolute and the thin-pad (n_pad_wave=2) energy-budget error drops 1.74e-4 -> 1.12e-5 median.
+    R0/T0 are amplitude ratios and are NOT affected at all.
+    """
+    w = 2.0 * np.pi * np.fft.rfftfreq(nsteps, dt)
+    return np.exp(0.5j * w * dt).reshape((-1,) + (1,) * (ndim - 1))
+
+
+def _flux(ey, hx, dt):
     """Per-frequency time-averaged +z Poynting power S_z = -Re(E_y H_x*) summed over x, from the rfft
-    of the recorded probe x-lines (shape (nsteps, nx)). Half-cell / half-step staggering offsets are
-    common to numerator and the incident reference, so they cancel in the R/T ratio."""
+    of the recorded probe x-lines (shape (nsteps, nx)). The half-CELL z stagger is removed in the
+    kernel (H_x averaged onto the E_y plane) and the half-TIMESTEP stagger here, via _half_step_H --
+    neither cancels in the R/T ratio for an evanescent/near-cutoff order (audit D-2; the pre-fix
+    docstring claimed both did)."""
     Ey = np.fft.rfft(ey, axis=0)
-    Hx = np.fft.rfft(hx, axis=0)
+    Hx = np.fft.rfft(hx, axis=0) * _half_step_H(ey.shape[0], dt, 2)
     return -np.sum(np.real(Ey * np.conj(Hx)), axis=1)        # (nfreq,) signed z-power per frequency
 
 
@@ -66,13 +100,15 @@ class FDTD3DResult:
     t0: Optional[np.ndarray] = None   # COMPLEX co-pol 0-order transmission coeff, de-embedded across the cell
 
 
-def _flux3d(ex, ey, hx, hy):
+def _flux3d(ex, ey, hx, hy, dt):
     """Total time-averaged +z Poynting power per frequency, S_z = Re(Ex Hy* - Ey Hx*) summed over the
     whole (x,y) probe plane (Parseval: the real-space sum over the plane already includes every (kx,ky)
     diffraction order). Each probe array is (nsteps, nx, ny). Reduces to -Re(Ey Hx*) (the 2D _flux) when
-    Ex = Hy = 0. The half-cell stagger is common to numerator and incident reference, so it cancels."""
+    Ex = Hy = 0. The half-cell stagger is removed in the kernel; the half-TIMESTEP stagger is removed
+    here by _half_step_H (audit D-2 -- see its docstring for the empirical sign verification)."""
+    ph = _half_step_H(ex.shape[0], dt, 3)
     EX = np.fft.rfft(ex, axis=0); EY = np.fft.rfft(ey, axis=0)
-    HX = np.fft.rfft(hx, axis=0); HY = np.fft.rfft(hy, axis=0)
+    HX = np.fft.rfft(hx, axis=0) * ph; HY = np.fft.rfft(hy, axis=0) * ph
     S = np.real(EX * np.conj(HY) - EY * np.conj(HX))
     return np.sum(S, axis=(1, 2))                            # (nfreq,) signed z-power per frequency
 

@@ -274,3 +274,105 @@ def test_cache_autosave_batching(tmp_path):
     c.flush()                                                 # drain the 2-miss tail
     c2 = OpticalSolverCache(inner, p, autosave_every=1)
     assert len(c2._mem) == 6                                  # everything persisted
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT R-7: the dirty flag and the atexit safety net
+# ------------------------------------------------------------------------------------------------
+def _mk_cache(tmp_path, name, **kw):
+    from dynameta.cache import OpticalSolverCache
+
+    def inner(design, geo, eps, lam, ns, nb):
+        return OpticalResult(r=complex(lam * 1e5, 0), R=float(lam * 1e5), phase_deg=0.0,
+                             solve_time_s=0.25)
+    inner.cache_fingerprint = "r7-probe"
+    return OpticalSolverCache(inner, str(tmp_path / (name + _EXT[_FORMATS[0]])), **kw)
+
+
+def test_failed_flush_keeps_dirty_flag_and_next_flush_retries(tmp_path, monkeypatch):
+    """flush() used to zero the dirty flag as its FIRST statement, BEFORE any I/O -- so a failing
+    write disarmed the atexit net: _unsaved dropped to 0, _flush_if_dirty found nothing to do, and
+    the batch was never retried even though the rows were still in _mem. The flag must survive a
+    failed write, and the next flush must persist everything."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import dynameta.cache as C
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c = _mk_cache(tmp_path, "r7a", autosave=False)
+    for lam in (1.40e-6, 1.45e-6, 1.50e-6):
+        c(d, None, eps, lam, 1.0, 1.0)
+    assert c._unsaved == 3
+
+    boom = {"n": 0}
+
+    def failing_save(*a, **kw):
+        boom["n"] += 1
+        raise OSError("disk full (injected)")
+
+    monkeypatch.setattr(C, "save_arrays", failing_save)
+    with pytest.raises(OSError):
+        c.flush()
+    assert boom["n"] == 1
+    assert c._unsaved == 3, "a FAILED flush must leave the cache dirty"
+    c._flush_if_dirty()                                       # the atexit path: still armed, retries
+    assert boom["n"] == 2 and c._unsaved == 3                 # swallowed, still dirty
+    monkeypatch.undo()                                        # disk comes back
+    c.flush()
+    assert c._unsaved == 0
+    # everything the failed flushes held is on disk (nothing was dropped)
+    c2 = _mk_cache(tmp_path, "r7a", autosave=False)
+    for lam in (1.40e-6, 1.45e-6, 1.50e-6):
+        c2(d, None, eps, lam, 1.0, 1.0)
+    assert c2.stats()["hits"] == 3 and c2.stats()["misses"] == 0
+
+
+def test_autosave_cache_is_garbage_collectable(tmp_path):
+    """The atexit registration used to hold a BOUND METHOD, which keeps the cache (and its whole
+    _mem store) alive for the life of the process. It is now a weakref trampoline, so a dropped
+    cache is collected -- probed with a weakref."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import gc
+    import weakref
+    c = _mk_cache(tmp_path, "r7b", autosave=True, autosave_every=1)
+    c(_design(), None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, 1.4e-6, 1.0, 1.0)
+    assert c._unsaved == 0                                    # autosave_every=1 -> already clean
+    ref = weakref.ref(c)
+    del c
+    gc.collect()
+    assert ref() is None, "an autosave cache must not be kept alive by its atexit registration"
+
+
+def test_dropped_dirty_cache_still_persists_its_tail(tmp_path):
+    """Weakening the atexit hold must NOT reintroduce tail loss: a dirty cache dropped without
+    close() is flushed at collection."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import gc
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c = _mk_cache(tmp_path, "r7c", autosave=True, autosave_every=64)
+    c(d, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c._unsaved == 1 and not os.path.exists(c.path)     # batched: nothing written yet
+    del c
+    gc.collect()
+    c2 = _mk_cache(tmp_path, "r7c", autosave=False)
+    c2(d, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c2.stats()["hits"] == 1, "the batched tail of a dropped cache was lost"
+
+
+def test_close_flushes_and_unregisters(tmp_path):
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import atexit
+    n0 = atexit._ncallbacks()
+    c = _mk_cache(tmp_path, "r7d", autosave=True, autosave_every=64)
+    c(_design(), None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, 1.4e-6, 1.0, 1.0)
+    assert c._atexit_hook is not None and c._unsaved == 1
+    assert atexit._ncallbacks() == n0 + 1                      # the hook is registered
+    c.close()
+    assert c._unsaved == 0 and os.path.exists(c.path) and c._atexit_hook is None
+    assert atexit._ncallbacks() == n0, "close() must release the atexit slot"
+    c.close()                                                  # idempotent
+    assert atexit._ncallbacks() == n0
