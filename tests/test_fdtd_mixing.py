@@ -186,7 +186,11 @@ def test_mixing_global_guard_is_conservative():
 
     for tau in (3e-15, 5e-15, 8e-15, 12e-15, 20e-15, 50e-15):
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            # AUDIT T-13 follow-up: narrowed from a blanket simplefilter("ignore"). This sweep
+            # DELIBERATELY walks the pump bandwidth across the guard threshold and asserts on the
+            # flag three lines below, so only that one advisory is suppressed; any OTHER warning
+            # out of mixing_spectrum now reaches the session's `error` policy.
+            warnings.filterwarnings("ignore", message="mixing_spectrum: BROADBAND pump")
             ms = mixing_spectrum((two_tone(tau), dt), f1, f2, bandwidth_frac=0.05)
         pump = max(ms["P_f1"], ms["P_f2"])
         max_phantom = max(ms["power"][l] / pump for l in labs)
@@ -234,9 +238,11 @@ def _bichromatic_1d(amp_rel):
     lay = [FDTDLayer(thickness_m=0.30e-6, eps_inf=4.0)]
     kw = dict(lambda_min_m=lam_min, lambda_max_m=lam_max, resolution=30, source_amp=1.0,
               return_time_trace=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")                      # broadband-pump guard fires on the 1-D pulse
-        r = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=amp_rel))
+    # AUDIT T-13 follow-up: this call carried a blanket simplefilter("ignore") whose comment blamed
+    # the broadband-pump guard -- but that guard lives in mixing_spectrum, not in the solver.
+    # MEASURED under simplefilter("always"): solve_fdtd_1d(second_source=...) emits NO warning at
+    # all, so the suppression was vestigial and hid every real warning this solve could raise.
+    r = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=amp_rel))
     return r, f_c, f2, kw, lay
 
 
@@ -251,10 +257,10 @@ def test_1d_bichromatic_exact_linear_superposition():
     f_c = 0.5 * (C_LIGHT / lam_max + C_LIGHT / lam_min)
     f2 = f_c / 1.37
     r_single = solve_fdtd_1d(lay, **kw)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r_full = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=1.0))
-        r_half = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=0.5))
+    # AUDIT T-13 follow-up: blanket simplefilter("ignore") removed -- MEASURED, the bichromatic
+    # solve emits no warning (see _bichromatic_1d); warnings here now hit the `error` policy.
+    r_full = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=1.0))
+    r_half = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, amplitude_rel=0.5))
     inc_s = np.asarray(r_single.time_trace["incident_right"], float)
     d_full = np.asarray(r_full.time_trace["incident_right"], float) - inc_s
     d_half = np.asarray(r_half.time_trace["incident_right"], float) - inc_s
@@ -276,7 +282,9 @@ def test_1d_bichromatic_per_color_bookkeeping_and_guard():
     color separation, the raw two-color incident is (honestly) flagged broadband by the guard."""
     r, f_c, f2, _kw, _lay = _bichromatic_1d(0.7)
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        # AUDIT T-13 follow-up: narrowed from a blanket simplefilter("ignore"). The broadband flag
+        # is this test's own assertion (two lines below), so suppress exactly it and nothing else.
+        warnings.filterwarnings("ignore", message="mixing_spectrum: BROADBAND pump")
         ms = mixing_spectrum(r.time_trace, f_c, f2, field="incident_right", bandwidth_frac=0.03)
     assert ms["P_f1"] > 0.0 and ms["P_f2"] > 0.0             # both colors present
     assert ms["pump_broadband"] is True                     # 1-D fixed-bandwidth pulse -> overlapping colors

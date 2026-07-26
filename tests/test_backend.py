@@ -70,10 +70,15 @@ def test_jax_constitutive_matches_numpy_in_float64():
         e_np = np.asarray(model.eps(f_np, 1300e-9))
         e_jx = model.eps(f_jx, 1300e-9)
         assert "complex128" in str(e_jx.dtype) or "float64" in str(e_jx.dtype)   # x64 enforced
-        assert np.allclose(np.asarray(e_jx), e_np, atol=1e-12)
+        # AUDIT T-6: `atol=1e-12` alone left numpy's default rtol=1e-5 in force, so this -- the ONLY
+        # jax-vs-numpy float64 parity gate -- accepted a 10 ppm error in r13/r33 and 2.3e-4 absolute
+        # in the PCM permittivity. rtol=1e-12/atol=0.0 is the real gate. MEASURED on all six pairs
+        # (probe: jax 0.11, x64 on): max|e_jx - e_np| = 0.0 exactly, i.e. the two paths are currently
+        # bit-identical, so 1e-12 relative leaves ~3-4 decades of headroom over float64 eps.
+        assert np.allclose(np.asarray(e_jx), e_np, rtol=1e-12, atol=0.0)
     s_np = complex(graphene_sigma(0.3 * Q, 1.55e-6))
     s_jx = complex(graphene_sigma(jnp.asarray(0.3 * Q), 1.55e-6))
-    assert np.allclose(s_jx, s_np, atol=1e-12)
+    assert np.allclose(s_jx, s_np, rtol=1e-12, atol=0.0)     # measured |ds| = 0.0 (|s| ~ 6.0e-5)
 
 
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="jax not installed")

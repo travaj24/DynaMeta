@@ -466,7 +466,10 @@ def test_no_window_bias_and_narrow_window_warns():
         half = 0.5 * m * gamma
         w = np.linspace(w0 - half, w0 + half, 400)
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            # AUDIT T-13: narrowed from a blanket simplefilter("ignore"). Only the narrow-window
+            # diagnostic this sweep deliberately provokes (and asserts on, 10 lines below) is
+            # suppressed; any OTHER warning from find_resonances still reaches the session policy.
+            warnings.filterwarnings("ignore", message=".*high-variance.*")
             reso = find_resonances(w, fn(w), tol=1e-13)
         best = min(reso, key=lambda rr: abs(rr.omega_tilde.real - w0))
         assert abs(best.Q - Q_true) <= 1e-3 * Q_true           # unbiased at every span

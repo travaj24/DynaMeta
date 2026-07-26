@@ -2,6 +2,18 @@
 
 Split from the former monolithic thermal_fem.py; see the package __init__ docstring
 for unit conventions (the _S nm-scaling derivation). Bodies are verbatim.
+
+SINGLE-HOMED NAMES (audit X-11). The split "promoted" three helpers to public names but kept the
+pre-promotion private spellings as aliases, and the two spellings then split by caller: 18
+in-package call sites on `_mean_T_per_layer` / `_add_load_terms` / `_build_thermal_forms` against 3
+on the public names, with the package facade re-exporting both -- two names for one object, each
+half-used, which is exactly how a later edit lands on one spelling and misses the other. The
+CANONICAL spelling is now the PUBLIC one (`mean_T_per_layer`, `add_load_terms`,
+`build_thermal_forms`): every call site inside the package uses it, and the underscored spellings
+survive only as thin, deprecated, one-line aliases bound to the SAME function object (gated by
+tests/test_audit_2026_07_25_cleanup.py, X-11) so anything importing them from the facade keeps
+working. Do not add a call site on an underscored alias.
+`_build_layered_mesh` / `_per_material_cf` are NOT doubled -- they are private-only, one name each.
 """
 from __future__ import annotations
 
@@ -11,9 +23,11 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.fem_mesh import MESH_SCALE, build_layered_box_mesh
-
-_S = MESH_SCALE                  # back-compat alias (pre-promotion private name; bodies below are verbatim)
+# audit X-11: `_S` is the in-formula symbol for the nm mesh scale and MESH_SCALE is its spelled-out
+# name; BOTH are single-sourced in carriers.fem_mesh (this module used to re-declare `_S = MESH_SCALE`,
+# a second home for the same float). Import them; do not re-bind them here.
+from dynameta.carriers.fem_mesh import MESH_SCALE      # noqa: F401 -- pass-through re-export: the
+from dynameta.carriers.fem_mesh import _S, build_layered_box_mesh   # package facade exports it
 
 
 @dataclass
@@ -55,7 +69,7 @@ def mean_T_per_layer(mesh, T, layers) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
-_mean_T_per_layer = mean_T_per_layer         # back-compat alias (pre-promotion private name)
+_mean_T_per_layer = mean_T_per_layer         # DEPRECATED alias of the canonical public name (X-11)
 
 
 def add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3):
@@ -74,7 +88,7 @@ def add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3):
     return f
 
 
-_add_load_terms = add_load_terms             # back-compat alias (pre-promotion private name)
+_add_load_terms = add_load_terms             # DEPRECATED alias of the canonical public name (X-11)
 
 
 def _build_layered_mesh(layers, period_x_m, period_y_m, maxh_m):
@@ -116,8 +130,8 @@ def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, jou
     a = ng.BilinearForm(fes)
     a += k_cf * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
-    _add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
+    add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
     return mesh, fes, u, v, a, f, k_cf
 
 
-_build_thermal_forms = build_thermal_forms   # back-compat alias (pre-promotion private name)
+_build_thermal_forms = build_thermal_forms   # DEPRECATED alias of the canonical public name (X-11)

@@ -39,6 +39,18 @@ Oblique REQUIRES a vacuum/air incidence medium (n_super=1): the in-plane wavevec
 kx=k0 sin(theta) uses the vacuum dispersion, so solve_fem RAISES on a non-vacuum
 superstrate at angle rather than returning a silently-wrong result. Validated against
 the `tmm` library (validation/oblique_vs_tmm.py).
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map. At azimuth phi != 0 THIS module reads 'y' as
+the ROTATED s-hat, while the lumenairy bridge reads the same letter as lab row 1 -- the documented
+split, and why the bridge refuses conical.
 """
 
 from __future__ import annotations
@@ -91,6 +103,32 @@ _TEST_KCROSS_SIGN = -1.0
 # above is not "ordinary" but grossly under-resolved -- it returns R=0.30/T=0.257 for a 200 nm gold
 # film whose converged answer is R=0.959/T=1e-4, so a warning there is a TRUE positive, not fatigue.
 _FIT_RELRES_WARN = 5e-2
+
+# Validated oblique envelope of the fixed-alpha HalfSpace z-PML, shared by solve_fem
+# (_incidence_geometry) and solve_fem_sourced (audit F-13: the sourced path used to carry NONE of
+# the incidence guards). Above this the PML reflection grows fast enough to VIOLATE energy
+# conservation (R+T ~ 1.17 at 60 deg), so both paths RAISE rather than return a silently-wrong
+# number. The sourced path only has k_par (not an OpticalSpec angle), so it compares SINES --
+# sin(theta) = |k_par| / (n_super k0) -- which avoids an asin round-trip re-raising at exactly the cap.
+# Suppression (in nepers) the probe grid must give the FIRST aliased Fourier order at the nearest
+# probe plane (audit F-10). e^-3 = 5%: the old rule only required the alias to be evanescent, which
+# near cutoff left it at 0.988 of its structure-face amplitude over the 50 nm standoff.
+_ALIAS_DECAY_NEPERS = 3.0
+# Hard cap on the per-direction probe-grid size the decay criterion may ask for (audit F-10
+# residual). Point evaluations cost N^2 and the criterion grows as ~1/standoff, so a thin buffer
+# runs away: 10 nm pad + 1000 nm cell -> (48, 48), i.e. 64x the evaluations and ~+40% wall on a
+# shipped solve. 12x12 is 4x the legacy 6x6 cost and covers every shipped fixture measured; past it
+# _probe_grid_sizes warns and tells the caller to thicken the buffer instead.
+_PROBE_GRID_MAX = 12
+_FEM_THETA_MAX_DEG = 50.0
+_FEM_SIN_THETA_MAX = math.sin(math.radians(_FEM_THETA_MAX_DEG))
+# The angle advisory itself (emitted ONCE PER PROCESS under the tag "oblique_pml" from either
+# entry point -- it describes the PML, not the solve).
+_OBLIQUE_PML_ADVICE = (
+    "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware. Measured vs tmm: "
+    "~1% through 30 deg, ~3% at 45 deg. Treat oblique FEM R/T as approximate and stay at or "
+    "below ~45 deg for quantitative work (the solver raises above ~50 deg). [reported once "
+    "per process; re-enable with warnings.simplefilter('always', FEMDiagnosticWarning)]")
 
 
 class FEMDiagnosticWarning(UserWarning):
@@ -276,7 +314,7 @@ def _incidence_geometry(optical, n_super):
         # silently-wrong R/T, so RAISE there rather than return it behind a warning (pass-2 audit).
         # The exact RCWA/PMM/Berreman bridges have no PML and keep the full angular range (the
         # OpticalSpec polar cap stays at 60 deg for them); only the FEM backend is bounded here.
-        if abs(theta) > math.radians(50.0):
+        if abs(theta) > math.radians(_FEM_THETA_MAX_DEG):
             raise NotImplementedError(
                 "oblique FEM: |theta| = {:.1f} deg exceeds the FEM's validated envelope (~50 deg) -- "
                 "the fixed-alpha HalfSpace z-PML is not angle-aware and VIOLATES energy conservation "
@@ -287,13 +325,7 @@ def _incidence_geometry(optical, n_super):
         # individual solve, so a 40-wavelength sweep repeating it 40x is pure noise. The regime
         # GUARD above (the 50 deg raise) is per-solve and unconditional -- only the advisory is
         # de-duplicated, so no angle can slip through unchecked.
-        _advise_once(
-            "oblique_pml",
-            "oblique incidence: the fixed-alpha HalfSpace z-PML is not angle-aware. Measured vs tmm: "
-            "~1% through 30 deg, ~3% at 45 deg. Treat oblique FEM R/T as approximate and stay at or "
-            "below ~45 deg for quantitative work (the solver raises above ~50 deg). [reported once "
-            "per process; re-enable with warnings.simplefilter('always', FEMDiagnosticWarning)]",
-            stacklevel=3)
+        _advise_once("oblique_pml", _OBLIQUE_PML_ADVICE, stacklevel=3)
     return theta, phi, oblique, conical
 
 
@@ -338,6 +370,134 @@ def _validate_sheet_bcs(mesh, sheet_bcs) -> None:
                     ", ".join(ifaces) if ifaces else "<none>", ", ".join(known)))
 
 
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# This solver speaks the OpticalSpec LAB-AXIS family {'x', 'y', 'p'} everywhere.  The four sibling
+# spellings, the conversions, and the normal-incidence / azimuth caveats are documented in
+# dynameta.core.polarization; the set accepted here is unchanged (unifying acceptance across the
+# repo is a follow-on, not part of the map).
+def _reject_pol_unless_lab(polarization, where: str):
+    """Guard the lab-axis vocabulary.  LAZY import, failure path only, so the valid path is
+    untouched and no import edge is added."""
+    if polarization not in ("x", "y", "p"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(polarization, "lab_xyp", where=where, param="polarization")
+
+
+def _layered_background(polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
+                        eps_sup_c, eps_sub_c, n_super, n_sub, *, inc_phase=None):
+    """THE analytic layered (two-region Fresnel) background of the scattered-field formulation:
+    the bare superstrate/substrate field E_bg the structure scatters off, its eps_bg(z), the
+    incident-only field E_inc (the Poynting-flux reference) and, for the scalar polarizations, the
+    background amplitudes R0/T0 the extractor adds back.
+
+    eps_bg(z) = superstrate medium above the substrate-top interface z_int, substrate medium below.
+    The scattered source k0^2 (eps - eps_bg) E_bg is then nonzero ONLY in the structure layers --
+    the substrate carries NO volumetric source (eps == eps_bg there), which is what makes a dense
+    (non-vacuum) substrate accurate. Reduces exactly to the plain incident wave when
+    n_sub == n_super == 1 (R0 = 0, T0 = 1).
+
+    THREE polarization branches, keyed to OpticalSpec.polarization: 'p' (E in the plane of
+    incidence), 'x' (E along x -- the OpticalSpec DEFAULT, normal incidence only) and anything else
+    = s-pol along the conical in-plane direction Es = (-sin phi, cos phi, 0).
+
+    SINGLE SOURCE (audit F-12): shg_fem carried its OWN copy of this construction, declared
+    "byte-for-byte the construction solve_fem uses" -- and it had already drifted to only TWO
+    branches, so polarization='x' was silently solved as E-along-y, the ORTHOGONAL mode, and every
+    field/relres/sheet diagnostic built on it described the wrong mode. Both callers now build the
+    background here.
+
+    inc_phase overrides the transverse Bloch phase exp(i(kx x + ky y)) (solve_fem's diagnostic
+    "envelope" route passes 1.0, carrying the transverse phase in the operator instead).
+
+    AUDIT V-8: `polarization` is the OpticalSpec LAB-AXIS vocabulary {'x', 'y', 'p'} -- see
+    dynameta.core.polarization for the map and for why 'y' is s-pol only at azimuth phi = 0 (at
+    phi != 0 this builder reads 'y' as the ROTATED s-hat, while the lumenairy bridge reads the
+    same letter as lab row 1; the bridge refuses conical for exactly that reason). The "anything
+    else = s-pol" fallthrough below is now unreachable for an off-vocabulary label: the accepted
+    set is unchanged, the rejection is named."""
+    _reject_pol_unless_lab(polarization, "_layered_background")
+    iph = ng.exp(1j * (kx * ng.x + ky * ng.y)) if inc_phase is None else inc_phase
+    eps_bg = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
+    # s-pol unit E (perpendicular to the plane of incidence); reduces to +y at phi=0
+    es_x, es_y = -math.sin(phi), math.cos(phi)
+    # in-plane wavevector magnitude + its azimuthal unit (cos phi, sin phi) = (kx, ky)/|k_par|, used by
+    # the p-pol field (the transverse p-pol component points along k_par). At phi=0 -> (1, 0); at normal
+    # incidence (|k_par|=0) -> (1, 0) so p-pol reduces to E along x. Conical p-pol splits over this.
+    kpar = math.hypot(kx, ky)
+    cphi, sphi = (kx / kpar, ky / kpar) if kpar > 1e-12 * k0 else (1.0, 0.0)
+    if polarization == "p":
+        # p-pol: E in the PLANE OF INCIDENCE (the plane through z and k_par). The transverse part
+        # points along (cos phi, sin phi); the z part carries the full in-plane |k_par|. At phi=0 this
+        # reduces to (Ex, 0, Ez). The background reflection/transmission E-vector amplitudes (rho, tau)
+        # come from the physical interface BCs at z_int -- tangential-E and Hy continuity -- solved
+        # NUMERICALLY (no Fresnel sign ambiguity). A 1-D layered medium is rotationally symmetric about
+        # z, so M/rhs depend only on the kz's + eps (NOT on phi): identical to the phi=0 problem. Hy ~
+        # E_t*eps/qz (qz the z-wavevector: -kz down, +kz up).
+        cth, sth = kz_s_c / (complex(n_super) * k0), kpar / (complex(n_super) * k0)
+        cth_t, sth_t = kz_sub / (complex(n_sub) * k0), kpar / (complex(n_sub) * k0)
+        A = cmath.exp(-1j * kz_s_c * z_int); B = cmath.exp(1j * kz_s_c * z_int)
+        C = cmath.exp(-1j * kz_sub * z_int)
+        M = np.array([[cth * B,                   -cth_t * C],
+                      [cth * B * eps_sup_c / kz_s_c, cth_t * C * eps_sub_c / kz_sub]], dtype=complex)
+        rhs = np.array([-cth * A, cth * A * eps_sup_c / kz_s_c], dtype=complex)
+        pp_rho, pp_tau = (complex(val) for val in np.linalg.solve(M, rhs))
+        # transverse (in-plane) p-pol profile (the old "Ex"); split over (cos phi, sin phi) for x/y.
+        et_sup = cth * ng.exp((-1j * kz_s_c) * ng.z) + pp_rho * cth * ng.exp((1j * kz_s_c) * ng.z)
+        ez_sup = sth * ng.exp((-1j * kz_s_c) * ng.z) - pp_rho * sth * ng.exp((1j * kz_s_c) * ng.z)
+        et_sub = pp_tau * cth_t * ng.exp((-1j * kz_sub) * ng.z)
+        ez_sub = pp_tau * sth_t * ng.exp((-1j * kz_sub) * ng.z)
+        et = ng.IfPos(ng.z - z_int, et_sup, et_sub)             # transverse magnitude (phi-frame Ex)
+        E_bg = ng.CoefficientFunction((iph * cphi * et,
+                                        iph * sphi * et,
+                                        iph * ng.IfPos(ng.z - z_int, ez_sup, ez_sub)))
+        # incident-only field (no background reflection/transmission) for the Poynting-flux reference
+        inc_t = cth * ng.exp((-1j * kz_s_c) * ng.z)             # incident transverse profile
+        E_inc = ng.CoefficientFunction((iph * cphi * inc_t,
+                                         iph * sphi * inc_t,
+                                         iph * sth * ng.exp((-1j * kz_s_c) * ng.z)))
+        R0 = T0 = None                          # p-pol extracts the total field directly
+    else:
+        # s-pol (E along y) / x-pol: scalar tangential field. Fresnel R0/T0 (field
+        # amplitude), z=0 reference. The extractor returns the scattered amplitude and
+        # the caller adds R0/T0 back.
+        r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)
+        t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
+        R0 = r_f * cmath.exp(-2j * kz_s_c * z_int)
+        T0 = t_f * cmath.exp(-1j * (kz_s_c - kz_sub) * z_int)
+        sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
+        sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
+        bg_field = iph * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
+        inc_only = iph * ng.exp((-1j * kz_s_c) * ng.z)   # incident-only (flux reference)
+        if polarization == "x":
+            E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
+            E_inc = ng.CoefficientFunction((inc_only, 0.0, 0.0))
+        else:
+            # s-pol along the (conical) in-plane direction E_s = (-sin phi, cos phi, 0);
+            # reduces to (0, bg_field, 0) at phi=0.
+            E_bg = ng.CoefficientFunction((es_x * bg_field, es_y * bg_field, 0.0))
+            E_inc = ng.CoefficientFunction((es_x * inc_only, es_y * inc_only, 0.0))
+    return E_bg, E_inc, eps_bg, R0, T0
+
+
+def background_probe_pol(polarization, theta, phi=0.0):
+    """The polarization unit vector to PROJECT a _layered_background field onto: the p-pol unit
+    vector (cos th cos phi, cos th sin phi, -sin th) for 'p', xhat for 'x', and the conical s-pol
+    unit (-sin phi, cos phi, 0) otherwise. Kept beside the background builder so the projection can
+    never drift out of step with the branch that built the field (audit F-12: shg_fem's private
+    copy probed (0,1,0) for 'x' as well, matching its own wrong background).
+
+    AUDIT V-8: `polarization` is the OpticalSpec LAB-AXIS vocabulary {'x', 'y', 'p'} (map:
+    dynameta.core.polarization). The trailing "otherwise" branch is the 'y' branch, so an
+    off-vocabulary label used to be probed as s-pol silently; same accepted set, named
+    rejection."""
+    _reject_pol_unless_lab(polarization, "background_probe_pol")
+    if polarization == "p":
+        return (math.cos(theta) * math.cos(phi), math.cos(theta) * math.sin(phi), -math.sin(theta))
+    if polarization == "x":
+        return (1.0, 0.0, 0.0)
+    return (-math.sin(phi), math.cos(phi), 0.0)
+
+
 def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 eps_cf: ng.CoefficientFunction, optical: "OpticalSpec",
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
@@ -350,10 +510,14 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
 
     R, T (and r/t) are the SPECULAR 0-ORDER (zeroth diffraction order) only -- the
     _cell_average demodulates and laterally averages on a probe grid SIZED so that every
-    aliased Fourier order is evanescent at the probe planes (audit C3-1: the old fixed
-    6x6 grid aliased orders m = 0 (mod 6) into the coefficient at full weight for
+    aliased Fourier order is evanescent AND DECAYED to e^-3 at the probe planes (audit C3-1: the
+    old fixed 6x6 grid aliased orders m = 0 (mod 6) into the coefficient at full weight for
     period > 6*lambda/n cells and 6x1 supercells; propagating non-aliased orders always
-    averaged to zero).
+    averaged to zero. Audit F-10: "evanescent" alone is vacuous just past cutoff, where the
+    alias survives the standoff at 0.988). The grid size is CAPPED at _PROBE_GRID_MAX per
+    direction and warns above it -- a thin buffer makes the criterion ask for tens of points
+    per direction, which costs N^2 point evaluations and is better fixed by thickening the
+    buffer (audit F-10 residual).
     They are therefore the TOTAL reflectance/transmittance only for a SUB-WAVELENGTH cell
     (no propagating higher orders); for a diffracting (period > lambda/n) cell the
     diffracted power is missing from R/T and is mis-attributed to A. result.R_flux/T_flux
@@ -461,58 +625,9 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # transverse Bloch phase exp(i(kx x + ky y)); reduces to exp(i kx x) at phi=0
     inc_x_phase = (1.0 if envelope else ng.exp(1j * (kx * ng.x + ky * ng.y)))
 
-    if pol_p:
-        # p-pol: E in the PLANE OF INCIDENCE (the plane through z and k_par). The transverse part
-        # points along (cos phi, sin phi); the z part carries the full in-plane |k_par|. At phi=0 this
-        # reduces to (Ex, 0, Ez). The background reflection/transmission E-vector amplitudes (rho, tau)
-        # come from the physical interface BCs at z_int -- tangential-E and Hy continuity -- solved
-        # NUMERICALLY (no Fresnel sign ambiguity). A 1-D layered medium is rotationally symmetric about
-        # z, so M/rhs depend only on the kz's + eps (NOT on phi): identical to the phi=0 problem. Hy ~
-        # E_t*eps/qz (qz the z-wavevector: -kz down, +kz up).
-        cth, sth = kz_s_c / (complex(n_super) * k0), kpar / (complex(n_super) * k0)
-        cth_t, sth_t = kz_sub / (complex(n_sub) * k0), kpar / (complex(n_sub) * k0)
-        A = cmath.exp(-1j * kz_s_c * z_int); B = cmath.exp(1j * kz_s_c * z_int)
-        C = cmath.exp(-1j * kz_sub * z_int)
-        M = np.array([[cth * B,                   -cth_t * C],
-                      [cth * B * eps_sup_c / kz_s_c, cth_t * C * eps_sub_c / kz_sub]], dtype=complex)
-        rhs = np.array([-cth * A, cth * A * eps_sup_c / kz_s_c], dtype=complex)
-        pp_rho, pp_tau = (complex(val) for val in np.linalg.solve(M, rhs))
-        # transverse (in-plane) p-pol profile (the old "Ex"); split over (cos phi, sin phi) for x/y.
-        et_sup = cth * ng.exp((-1j * kz_s_c) * ng.z) + pp_rho * cth * ng.exp((1j * kz_s_c) * ng.z)
-        ez_sup = sth * ng.exp((-1j * kz_s_c) * ng.z) - pp_rho * sth * ng.exp((1j * kz_s_c) * ng.z)
-        et_sub = pp_tau * cth_t * ng.exp((-1j * kz_sub) * ng.z)
-        ez_sub = pp_tau * sth_t * ng.exp((-1j * kz_sub) * ng.z)
-        et = ng.IfPos(ng.z - z_int, et_sup, et_sub)             # transverse magnitude (phi-frame Ex)
-        E_bg = ng.CoefficientFunction((inc_x_phase * cphi * et,
-                                        inc_x_phase * sphi * et,
-                                        inc_x_phase * ng.IfPos(ng.z - z_int, ez_sup, ez_sub)))
-        # incident-only field (no background reflection/transmission) for the Poynting-flux reference
-        inc_t = cth * ng.exp((-1j * kz_s_c) * ng.z)             # incident transverse profile
-        E_inc = ng.CoefficientFunction((inc_x_phase * cphi * inc_t,
-                                         inc_x_phase * sphi * inc_t,
-                                         inc_x_phase * sth * ng.exp((-1j * kz_s_c) * ng.z)))
-        R0 = T0 = None                          # p-pol extracts the total field directly
-    else:
-        # s-pol (E along y) / x-pol: scalar tangential field. Fresnel R0/T0 (field
-        # amplitude), z=0 reference. The extractor returns the scattered amplitude and
-        # the caller adds R0/T0 back.
-        r_f = (kz_s_c - kz_sub) / (kz_s_c + kz_sub)
-        t_f = 2.0 * kz_s_c / (kz_s_c + kz_sub)
-        R0 = r_f * cmath.exp(-2j * kz_s_c * z_int)
-        T0 = t_f * cmath.exp(-1j * (kz_s_c - kz_sub) * z_int)
-        sup_bg = ng.exp((-1j * kz_s_c) * ng.z) + R0 * ng.exp((1j * kz_s_c) * ng.z)
-        sub_bg = T0 * ng.exp((-1j * kz_sub) * ng.z)
-        bg_field = inc_x_phase * ng.IfPos(ng.z - z_int, sup_bg, sub_bg)
-        inc_only = inc_x_phase * ng.exp((-1j * kz_s_c) * ng.z)   # incident-only (flux reference)
-        if optical.polarization == "x":
-            E_bg = ng.CoefficientFunction((bg_field, 0.0, 0.0))
-            E_inc = ng.CoefficientFunction((inc_only, 0.0, 0.0))
-        else:
-            # s-pol along the (conical) in-plane direction E_s = (-sin phi, cos phi, 0);
-            # reduces to (0, bg_field, 0) at phi=0.
-            E_bg = ng.CoefficientFunction((es_x * bg_field, es_y * bg_field, 0.0))
-            E_inc = ng.CoefficientFunction((es_x * inc_only, es_y * inc_only, 0.0))
-    eps_bg_cf = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
+    E_bg, E_inc, eps_bg_cf, R0, T0 = _layered_background(
+        optical.polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
+        eps_sup_c, eps_sub_c, n_super, n_sub, inc_phase=inc_x_phase)
 
     # ---- periodic HCurl space ----
     if getattr(geo, "sym_x", False) or getattr(geo, "sym_y", False):
@@ -892,7 +1007,19 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
     _reconstruct_fundamental_field -- passed a lossy superstrate end to end). A lossy n_sub is
     treated the way solve_fem treats its lossy-cladding flux diagnostic: p_down is returned as None
     (with a warning) rather than as a silently-wrong number; a_down (an amplitude, not a power) is
-    still returned."""
+    still returned.
+
+    REGIME GUARDS (audit F-13 -- this path used to carry NONE of solve_fem's, so a driver that
+    reaches it WITHOUT a prior solve_fem call, i.e. shg_structured_two_step, ran unchecked):
+      * TENSOR eps -> NotImplementedError. There is no UPML branch here and mesh.SetPML is called
+        unconditionally, which eps_assembler documents as WRONG for an anisotropic medium; NGSolve
+        would otherwise raise "Dimensions don't match" from deep inside the form assembly.
+      * the radiated 0-order's polar angle, recovered from sin(theta) = |k_par|/(n_super k0), is
+        held to the SAME ~50 deg PML envelope solve_fem enforces (and emits the same once-per-
+        process non-angle-aware-PML advisory). sin(theta) > 1 (an evanescent 0-order, i.e. a
+        near-field source) is not an angle and is left alone.
+      * a port whose |kz| ~ 0 (grazing cutoff) -> NotImplementedError: the two-wave fit basis
+        degenerates to rank 1 there, so the amplitude split is arbitrary."""
     if abs(complex(n_super).imag) > 1e-9:
         # p_up = |a|^2 (Re kz/k0)/(2 Z0) A is the plane-wave flux of a LOSSLESS medium; in a lossy
         # superstrate the 2-wave fit's "outgoing" amplitude is z-dependent and the flux formula
@@ -904,11 +1031,45 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             "inflates p_up by ~5x at Im(eps_super)=1 and ~260x at Im(eps_super)=5. Use a lossless "
             "(vacuum/dielectric) incidence medium -- solve_fem raises on the same input."
             .format(complex(n_super)))
+    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
+        # solve_fem routes a TENSOR eps through an explicit UPML (the anisotropic PML material
+        # tensor folded into the weak form) precisely because mesh.SetPML's coordinate stretch is
+        # WRONG for an anisotropic medium (eps_assembler: a resolution-INDEPENDENT ~3% error on the
+        # decoupled component). This path has no UPML branch and calls mesh.SetPML unconditionally
+        # below, and its scalar `eps_cf * (u*v)` mass term does not even ASSEMBLE against a 3x3 CF
+        # (NGSolve raises "Dimensions don't match, op = -" from deep inside the form). Refuse HERE,
+        # where the reason is visible. (Audit F-13.)
+        raise NotImplementedError(
+            "solve_fem_sourced: a TENSOR (3x3, anisotropic/gyrotropic) eps is not supported -- the "
+            "sourced path has no UPML branch and mesh.SetPML's scalar coordinate stretch is wrong "
+            "for an anisotropic medium. Use solve_fem (which builds the explicit UPML for tensor "
+            "eps) for an incident-wave solve, or pass a scalar/diagonal eps here.")
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
     Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
     kx, ky = float(k_par_per_nm[0]), float(k_par_per_nm[1])
     oblique = math.hypot(kx, ky) > 1e-12 * k0
+    if oblique:
+        # audit F-13: the sourced path carried NONE of solve_fem's incidence guards, so
+        # shg_structured_two_step at 70 deg ran straight past the envelope where the same PML makes
+        # solve_fem refuse. The source carries k_par instead of an OpticalSpec angle, so the
+        # radiated 0-order's polar angle is recovered from the superstrate dispersion
+        # sin(theta) = |k_par| / (n_super k0) and compared as a SINE (no asin round-trip at the cap).
+        # sin > 1 means the 0-order is EVANESCENT in the superstrate -- a legitimate near-field
+        # source problem, not an angle -- so the PML envelope simply does not apply there.
+        n_sup_r = abs(complex(n_super).real)
+        sin_th = math.hypot(kx, ky) / (n_sup_r * k0) if n_sup_r * k0 > 0.0 else float("inf")
+        if sin_th <= 1.0:
+            if sin_th > _FEM_SIN_THETA_MAX * (1.0 + 1e-12):
+                raise NotImplementedError(
+                    "solve_fem_sourced: the radiated 0-order leaves at |theta| = {:.1f} deg "
+                    "(|k_par| = {:.4g} nm^-1, n_super = {:.4g}), beyond the FEM's validated "
+                    "envelope (~{:.0f} deg) -- the fixed-alpha HalfSpace z-PML is not angle-aware "
+                    "and VIOLATES energy conservation above it (R+T ~ 1.17 at 60 deg), so p_up/"
+                    "p_down would be silently wrong. solve_fem raises on the same geometry."
+                    .format(math.degrees(math.asin(min(1.0, sin_th))), math.hypot(kx, ky),
+                            complex(n_super), _FEM_THETA_MAX_DEG))
+            _advise_once("oblique_pml", _OBLIQUE_PML_ADVICE, stacklevel=2)
 
     # ---- PML: clone solve_fem's scalar HalfSpace z-stretch (this ordering -- UnSetPML then SetPML
     # BEFORE building the FESpace/forms -- matters; a SetPML after the forms silently zeros the RHS).
@@ -998,6 +1159,7 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
     kz_s = complex(cmath.sqrt((complex(n_super) * k0) ** 2 - kx ** 2 - ky ** 2))
     if kz_s.imag < 0:
         kz_s = -kz_s
+    _refuse_grazing_port(kz_s, k0, "superstrate", n_super, kx, ky)          # audit F-13
     a_up = _sourced_port_amp(mesh, total, geo, kz_s, proj, kx, ky, "superstrate", +1)
     area_phys = (Px * Py) / S ** 2
     p_up = (abs(a_up) ** 2 * (kz_s.real / k0) / (2.0 * Z0)) * area_phys
@@ -1006,17 +1168,26 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
         kz_b = complex(cmath.sqrt((complex(n_sub) * k0) ** 2 - kx ** 2 - ky ** 2))
         if kz_b.imag < 0:
             kz_b = -kz_b
+        _refuse_grazing_port(kz_b, k0, "substrate", n_sub, kx, ky)          # audit F-13
         a_down = _sourced_port_amp(mesh, total, geo, kz_b, proj, kx, ky, "substrate", -1)
         if abs(complex(n_sub).imag) > 1e-9:
             # Same lossless-medium restriction as p_up, on the DOWN port. A metal-backed cell
             # (n_sub = sqrt(eps_metal)) is a legitimate, common configuration whose UP-port power is
             # still valid, so this flags/omits p_down instead of raising (mirroring solve_fem, which
             # leaves its R_flux/T_flux diagnostic None for a lossy cladding). (Audit F-3.)
+            # audit T-13: FEMDiagnosticWarning, not a bare UserWarning. This is an ADVISORY about
+            # the SOLVE REGIME (a metal-backed cell is a legitimate configuration and the result is
+            # correct -- p_down is simply omitted), which is exactly what the category exists for;
+            # a plain UserWarning would mean "the caller made a mistake". Categorising it here is
+            # what let pyproject's temporary message-scoped exemption be deleted: conftest's
+            # conditional `ignore::FEMDiagnosticWarning` now covers it alongside the solver's other
+            # advisories, and a caller silencing the class silences this one too.
             warnings.warn(
                 "solve_fem_sourced: p_down is undefined for a LOSSY substrate (Im(n_sub)={:.3g} != 0) "
                 "-- the plane-wave flux formula assumes a lossless medium -- so it is returned as "
                 "None rather than a silently-wrong power. a_up/p_up (lossless superstrate) and "
-                "a_down are unaffected.".format(complex(n_sub).imag), stacklevel=2)
+                "a_down are unaffected.".format(complex(n_sub).imag),
+                FEMDiagnosticWarning, stacklevel=2)
         elif kz_b.real > 1e-9 * k0:
             # lossless-substrate z-flux of a tangential-field plane wave (valid for a vacuum/
             # dielectric substrate); the SHG use case radiates into a vacuum superstrate.
@@ -1025,6 +1196,25 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
                           a_down=(None if a_down is None else complex(a_down)),
                           p_up=float(p_up), p_down=(None if p_down is None else float(p_down)),
                           solve_time_s=dt, relres=relres)
+
+
+def _refuse_grazing_port(kz, k0, region, n_med, kx, ky):
+    """RAISE if a port's 0-order sits at the grazing cutoff, |kz| ~ 0 (audit F-13).
+
+    The port amplitude comes from a two-wave fit onto the basis exp(+i kz z), exp(-i kz z). At
+    |kz| ~ 0 BOTH columns collapse to 1, the design matrix is rank-1, and the up/down split lstsq
+    returns is arbitrary -- so a_up/a_down (and p_up = |a|^2 Re kz/k0 ...) are numerical noise, not
+    a small number. This is the sourced mirror of solve_fem's substrate grazing refusal. A DEEPLY
+    evanescent 0-order keeps |kz| LARGE (purely imaginary) and is NOT caught here: there the two
+    columns are a decaying and a growing exponential, well separated, and p_up ~ 0 is correct."""
+    if abs(kz) <= 1e-6 * k0:
+        raise NotImplementedError(
+            "solve_fem_sourced: the {} 0-order is at the grazing cutoff (|kz| = {:.3e} nm^-1 ~ 0): "
+            "the two-wave port fit basis exp(+-i kz z) degenerates to a rank-1 DC fit, so the "
+            "radiated amplitude/power there is arbitrary. n_med = {:.4g}, |k_par| = {:.4g} nm^-1. "
+            "Nudge the source k_par / wavelength off the exact cutoff. (solve_fem refuses the same "
+            "geometry on its substrate order.)".format(
+                region, abs(kz), complex(n_med), math.hypot(kx, ky)))
 
 
 def _sourced_port_amp(mesh, total_field, geo: OpticalGeometry, kz, proj, kx, ky, region, sgn):
@@ -1037,28 +1227,93 @@ def _sourced_port_amp(mesh, total_field, geo: OpticalGeometry, kz, proj, kx, ky,
     if zhi <= zlo:
         zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
     zr = np.linspace(zlo, zhi, 7)
+    # the band is padded symmetrically, so the structure-to-nearest-probe standoff is that pad
+    # whichever port this is (structure BELOW the superstrate band, ABOVE the substrate one).
     Es = _cell_average(mesh, total_field, zr, geo.period_x_nm, geo.period_y_nm, proj, kx, ky,
-                        kz_med=kz)
+                        kz_med=kz, standoff_nm=(zlo - z0 if sgn > 0 else z1 - zhi))   # F-10
     M = np.column_stack([np.exp(1j * sgn * kz * zr), np.exp(-1j * sgn * kz * zr)])
     coeffs = _lstsq_2wave(M, Es, where="{} radiated".format(region))
     return complex(coeffs[0])
 
 
-def _probe_grid_sizes(Px, Py, kx, ky, kz_med):
-    """Per-direction probe-grid sizes so the FIRST aliased Fourier order is EVANESCENT in
-    the probe medium (audit C3-1): an N-point cell-centred grid aliases orders m = 0
-    (mod N) into the reported 0-order coefficient with weight (-1)^(m/N), so N must
-    satisfy N*2pi/P > n*k0 + |k_lat| (then the aliased order decays over the >= 50 nm
-    probe standoff exactly like every in-envelope evanescent order). n*k0 is recovered
-    from the medium dispersion n^2 k0^2 = kz_med^2 + k_par^2. Sub-wavelength cells
-    (the validated envelope) keep the legacy 6x6 -- byte-identical there."""
-    nk0 = float(np.hypot(abs(complex(kz_med)), float(np.hypot(kx, ky))))
+def _probe_grid_sizes(Px, Py, kx, ky, kz_med, standoff_nm=None,
+                      decay_nepers=_ALIAS_DECAY_NEPERS):
+    """Per-direction probe-grid sizes so the first aliased Fourier order is DECAYED (not merely
+    evanescent) at the probe planes (audit C3-1, tightened by F-10).
+
+    An N-point cell-centred grid aliases orders m = 0 (mod N) into the reported 0-order
+    coefficient with weight (-1)^(m/N), so the first surviving alias has in-plane wavevector at
+    least `N*2pi/P - |k_lat|` and decay constant kappa = sqrt(that^2 - (n k0)^2). The old rule
+    only required kappa > 0: for `P (n k0 + kx)/(2 pi)` just under an integer the margin is ~0.2%,
+    kappa ~ 0.06 n k0, and at lambda = 1550 nm the alias survives the 50 nm standoff at
+    exp(-0.012) = 0.988 -- essentially UNDAMPED, i.e. the guarantee was vacuous near cutoff
+    (audit F-10). The criterion is now a DECAY one: pick the smallest N with
+
+        kappa * standoff >= decay_nepers   <=>   N*2pi/P - |k_lat| >= sqrt((n k0)^2 + (d/s)^2),
+
+    i.e. e^-3 = 5% suppression of the first alias at the NEAREST probe plane by default. n*k0 is
+    recovered from the medium dispersion n^2 k0^2 = kz_med^2 + k_par^2; `standoff_nm` is the gap
+    between the structure (where the evanescent orders are excited) and the nearest probe plane.
+    standoff_nm=None keeps the legacy evanescent-only rule.
+
+    COST. The decay term alone asks for a probe pitch of about (2 pi / decay_nepers) * standoff,
+    i.e. ~105 nm at a 50 nm standoff and ~63 nm at 30 nm, INDEPENDENTLY of wavelength -- so N grows
+    linearly with the period and the point-evaluation count as N^2. A THIN PAD is what bites, since
+    the transmission-side standoff is the 10 % substrate_buffer pad: at the DEFAULT
+    substrate_buffer = 100 nm (pad = 10 nm) a 1000 nm cell asks for (48, 48) instead of (6, 6) --
+    64x the point evaluations and ~+40 % wall on a shipped solve.
+
+    N IS THEREFORE CAPPED AT `max(_PROBE_GRID_MAX, N_evanescent)`, with a warning (audit F-10
+    residual). The cap bounds the DECAY refinement only -- it is floored at the evanescent-only size
+    the C3-1 rule asks for, so a supercell that legitimately needs many points because it has many
+    PROPAGATING orders is never capped below that (capping there would silently re-open C3-1), and
+    the `standoff_nm=None` legacy path is untouched by the cap entirely. The claim
+    that "sub-wavelength cells stay at the legacy 6x6" is FALSE as stated -- it holds for a 400 nm
+    cell at a 50 nm standoff (byte-identical), but 163 of 576 sub-wavelength (period < lambda/n)
+    configurations at that standoff already exceed 6, up to N = 11 at lambda = 1064 nm -- so the
+    floor cannot be relied on for cost. Above the cap the criterion is not met and the FIRST alias
+    is suppressed by less than e^-3 at the nearest probe plane; the fix is to THICKEN the buffer
+    (the standoff enters as ~1/standoff, so 10 nm -> 90 nm takes N from 48 back to 6) rather than to
+    pay N^2 point evaluations for a geometry whose probes are too close to the structure anyway.
+    Pass `decay_nepers=0` (or `standoff_nm=None`) to opt out of the decay criterion entirely.
+
+    ALIAS SUPPRESSION AT THE CAP: with N capped, the residual alias amplitude is
+    exp(-kappa*standoff) with kappa from the CAPPED N -- the caller should treat R/T as
+    alias-contaminated at the level the warning quotes."""
+    nk0_ev = float(np.hypot(abs(complex(kz_med)), float(np.hypot(kx, ky))))
+    decay_on = (standoff_nm is not None and float(standoff_nm) > 0.0 and decay_nepers > 0.0)
+    # required lateral wavevector: sqrt((n k0)^2 + kappa_min^2), kappa_min = nepers / standoff
+    nk0 = (float(np.hypot(nk0_ev, float(decay_nepers) / float(standoff_nm))) if decay_on else nk0_ev)
     nx_g = max(6, int(np.floor(Px * (nk0 + abs(float(kx))) / (2.0 * np.pi))) + 1)
     ny_g = max(6, int(np.floor(Py * (nk0 + abs(float(ky))) / (2.0 * np.pi))) + 1)
+    # The cap bounds the F-10 DECAY refinement only. The C3-1 requirement -- make the first alias
+    # EVANESCENT -- is never weakened: a supercell with many propagating orders legitimately needs a
+    # large N, and capping that would silently re-open C3-1 (a propagating order aliased into the
+    # 0-order coefficient at full weight). So the cap is floored at the evanescent-only size, and the
+    # legacy standoff_nm=None path is untouched.
+    nx_ev = max(6, int(np.floor(Px * (nk0_ev + abs(float(kx))) / (2.0 * np.pi))) + 1)
+    ny_ev = max(6, int(np.floor(Py * (nk0_ev + abs(float(ky))) / (2.0 * np.pi))) + 1)
+    cap_x = max(_PROBE_GRID_MAX, nx_ev)
+    cap_y = max(_PROBE_GRID_MAX, ny_ev)
+    if decay_on and (nx_g > cap_x or ny_g > cap_y):
+        warnings.warn(
+            "_probe_grid_sizes: the e^-{:.0f} alias-decay criterion asks for a ({}, {}) probe grid "
+            "at a {:.3g} nm standoff, above the {}x{} cap -- capping it, so the first aliased order "
+            "is NOT suppressed to {:.1%} at the nearest probe plane and R/T carry that alias. This "
+            "is the THIN-PAD regime: the requirement grows as ~1/standoff (and the point-evaluation "
+            "count as N^2, e.g. 64x and ~+40 % wall for a 1000 nm cell at the default 10 nm "
+            "transmission pad). THICKEN the buffer instead -- Mesh3DSpec(substrate_buffer_m=...) / "
+            "superstrate_buffer_m -- which fixes the physics rather than paying for it (a 90 nm pad "
+            "takes that same cell back to 6x6). audit F-10.".format(
+                float(decay_nepers), nx_g, ny_g, float(standoff_nm or 0.0),
+                cap_x, cap_y, float(np.exp(-float(decay_nepers)))),
+            FEMDiagnosticWarning, stacklevel=3)
+        nx_g = min(nx_g, cap_x)
+        ny_g = min(ny_g, cap_y)
     return nx_g, ny_g
 
 
-def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None):
+def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None, standoff_nm=None):
     """Transverse (x,y) cell-average of (proj . field), demodulated by exp(-i(kx x+ky y)),
     at each z. `proj` is a length-3 weight vector projecting the vector field onto the
     polarization of interest (the s-pol unit vector, or (1,0,0) for tangential Ex). The
@@ -1067,11 +1322,14 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None):
     C3-1: NOT exact orthogonality, as previously claimed -- a propagating substrate
     order-6 amplitude at 30% of r0 corrupted the fit silently at the old fixed 6x6).
     Passing kz_med (the fitted wave's medium z-wavevector) sizes the grid so every
-    aliased order is evanescent at the probe planes; None keeps the legacy 6x6."""
+    aliased order is evanescent at the probe planes; None keeps the legacy 6x6.
+    standoff_nm (audit F-10) is the gap from the structure to the NEAREST probe plane; passing it
+    upgrades that sizing from "evanescent" to "decayed by e^-3 at the probe" (see
+    _probe_grid_sizes -- near cutoff the two are not remotely the same guarantee)."""
     # cell-centred probe grid: offset off the x=0 / y=0 periodic-boundary lines (where
     # quasi-periodic point evaluation can fail) by half a step (audit OPT-7).
     if kz_med is not None:
-        nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med)
+        nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med, standoff_nm=standoff_nm)
     else:
         nx_g = ny_g = 6
     xs = (np.arange(nx_g) + 0.5) * (Px / nx_g)
@@ -1144,7 +1402,8 @@ def _reflection(mesh, gfu, kz_s, proj, kx, ky, geo: OpticalGeometry) -> complex:
         z_lo = z_struct_top + 0.2 * (z_air_top - z_struct_top)
         z_hi = z_struct_top + 0.8 * (z_air_top - z_struct_top)
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_s)   # C3-1
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_s,
+                        standoff_nm=(z_lo - z_struct_top))                       # C3-1 / F-10
     # upward (reflected) exp(+i kz_s z) + residual downward exp(-i kz_s z)
     M = np.column_stack([np.exp(+1j * kz_s * z_probes), np.exp(-1j * kz_s * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="reflection")
@@ -1165,7 +1424,9 @@ def _transmission(mesh, gfu, kz_sub, proj, kx, ky, geo: OpticalGeometry):
     if z_hi <= z_lo:
         return None
     z_probes = np.linspace(z_lo, z_hi, 7)
-    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_sub)  # C3-1
+    # the structure sits ABOVE the substrate buffer, so the nearest-probe standoff is the top pad
+    Es = _cell_average(mesh, gfu, z_probes, Px, Py, proj, kx, ky, kz_med=kz_sub,
+                        standoff_nm=(z_sub_hi - z_hi))                            # C3-1 / F-10
     # downward (transmitted) exp(-i kz_sub z) + any upward residual exp(+i kz_sub z)
     M = np.column_stack([np.exp(-1j * kz_sub * z_probes), np.exp(+1j * kz_sub * z_probes)])
     coeffs = _lstsq_2wave(M, Es, where="transmission")
@@ -1184,7 +1445,8 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zhi <= zlo:
         zlo, zhi = z0 + 0.2 * (z1 - z0), z0 + 0.8 * (z1 - z0)
     zr = np.linspace(zlo, zhi, 7)
-    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky, kz_med=kz_s)   # in-plane p-pol (C3-1)
+    Exr = _cell_average(mesh, E_tot, zr, Px, Py, proj_t, kx, ky, kz_med=kz_s,
+                         standoff_nm=(zlo - z0))            # in-plane p-pol (C3-1 / F-10)
     Mr = np.column_stack([np.exp(-1j * kz_s * zr), np.exp(+1j * kz_s * zr)])
     cr = _lstsq_2wave(Mr, Exr, where="p-pol reflection")
     a_d, a_u = complex(cr[0]), complex(cr[1])                     # incident-dir, reflected-dir E_t
@@ -1197,7 +1459,8 @@ def _ppol_extract(mesh, E_tot, kz_s, kz_sub, kx, ky, proj_t, geo: OpticalGeometr
     if zs_hi - pad <= zs_lo + pad:
         return r, R, None, None
     zt = np.linspace(zs_lo + pad, zs_hi - pad, 7)
-    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky, kz_med=kz_sub)  # C3-1
+    Ext = _cell_average(mesh, E_tot, zt, Px, Py, proj_t, kx, ky, kz_med=kz_sub,
+                         standoff_nm=pad)                                        # C3-1 / F-10
     Mt = np.column_stack([np.exp(-1j * kz_sub * zt), np.exp(+1j * kz_sub * zt)])
     ct = _lstsq_2wave(Mt, Ext, where="p-pol transmission")
     t = complex(ct[0]) / a_d if abs(a_d) > 1e-30 else 0j          # transmitted Ex / incident Ex

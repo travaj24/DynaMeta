@@ -91,7 +91,7 @@ from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
 from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
-                                                    _KEEP)
+                                                    _KEEP, _frozen_profile_interp)
 
 __all__ = ["ErYbAmplifier"]
 
@@ -352,23 +352,12 @@ class ErYbAmplifier:
                 P[bwd] = Pb
             return P
 
-        # Lean frozen-profile interpolator on the uniform mesh (steady_state audit S6-2).
-        inv_dz = (n_nodes - 1) / L
-
+        # Lean frozen-profile interpolator on the uniform mesh (steady_state audit S6-2). Audit
+        # X-3: IMPORTED, not re-copied -- the verbatim copy that used to live here carried the
+        # endpoint-clamp / uniform-mesh contract twice in a module that already imports from
+        # steady_state.
         def _make_interp(Y):
-            slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
-            ncap = n_nodes - 2
-
-            def f(zz):
-                if zz <= 0.0:
-                    return Y[:, 0]
-                if zz >= L:
-                    return Y[:, -1]
-                j = int(zz * inv_dz)
-                if j > ncap:
-                    j = ncap
-                return Y[:, j] + slopes[:, j] * (zz - z[j])
-            return f
+            return _frozen_profile_interp(Y, z, L, n_nodes)
 
         last_out = None
         last_prof = None

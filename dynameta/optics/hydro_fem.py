@@ -186,6 +186,15 @@ References
   (2014) -- GNOR (the ``beta**2 -> beta**2 + D(gamma - i*omega)`` diffusion knob).
 * R. Esteban, A. G. Borisov, P. Nordlander, J. Aizpurua, "Bridging quantum and classical
   plasmonics with a quantum-corrected model", Nat. Commun. 3, 825 (2012) -- the QCM gap material.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks `pol_axis` in {'x', 'y'} -- a 2-D IN-PLANE
+cross-section, where the wave propagates inside the plane and there is NO layer normal. It is one
+of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'}
+OpticalSpec's LAB AXIS, {'te','tm'} the grating bridge's, and the integer `row` 0/1 the
+differentiable forwards'. None of them convert to or from this one. The map, the `normalize_pol`
+converter and the normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set
+ACCEPTED here is UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not
+part of the map.
 """
 
 from __future__ import annotations
@@ -803,13 +812,32 @@ def dimer_gap_mesh(R_nm: float, gap_nm: float, *, host_nm: float = 60.0, pml_nm:
     return mesh, Rp
 
 
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# `pol_axis` is the FIFTH spelling of "which polarization" in the repo, and the only one whose
+# GEOMETRY is different: these are 2-D IN-PLANE cross-sections (a cylinder / a dimer), so the wave
+# propagates inside the x-y plane, there is no layer normal, and neither the plane-of-incidence
+# {'s','p'} nor OpticalSpec's lab {'x','y','p'} applies -- core.polarization REFUSES every
+# conversion into or out of this family rather than let the shared letters 'x'/'y' imply one.
+# Accepted set unchanged; only the silent "anything but 'x' means 'y'" fallthrough became a named
+# error.  Map: dynameta.core.polarization.
+def _reject_pol_axis(pol_axis, where: str):
+    """Guard the {'x','y'} in-plane axis vocabulary.  LAZY import, failure path only."""
+    if pol_axis not in ("x", "y"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(pol_axis, "axis_xy", where=where, param="pol_axis")
+
+
 def gap_enhancement_2d(mesh, omega, eps_metal: complex, eps_gap: complex, *,
                        pol_axis: str = "x", order: int = 2) -> float:
     """Gap-centre near-field enhancement ``|E_total|/|E_inc|`` for a LOCAL 2-D dimer solve where the
     'metal' region has permittivity ``eps_metal`` and the 'gap' region ``eps_gap`` (the rest is
     vacuum).  A rock-solid local curl-curl solve on a :func:`dimer_gap_mesh` -- the vehicle for the
     QCM gate: sweep the gap, set ``eps_gap = QCMGapMaterial.eps(omega, gap)``, and the enhancement
-    is NON-MONOTONIC (peaks near ~1 nm, then the tunnelling short DROPS it -- Esteban 2012)."""
+    is NON-MONOTONIC (peaks near ~1 nm, then the tunnelling short DROPS it -- Esteban 2012).
+
+    ``pol_axis`` is the 2-D IN-PLANE axis vocabulary {'x','y'} (audit V-8, see the note above this
+    function): E lies along the named axis and the wave propagates along the other."""
+    _reject_pol_axis(pol_axis, "gap_enhancement_2d")
     import ngsolve as ng
 
     k0 = (omega / C_LIGHT) * _L0
@@ -849,7 +877,9 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
     in sub-5-nm gaps.  ``local=True`` solves the ordinary local-Drude curl-curl (``eps = drude_eps``)
     on the same mesh.  Incident wave: unit-amplitude p-pol, E along ``pol_axis`` ('x' or 'y'),
     propagating along the other axis.  PML on the 'pml' region, PEC on 'outer'.  Scattered-field
-    formulation (host permittivity ``eps_host``).
+    formulation (host permittivity ``eps_host``).  (``pol_axis`` is the 2-D IN-PLANE axis
+    vocabulary of audit V-8 -- see the note above :func:`gap_enhancement_2d`; "p-pol" here means E
+    in the 2-D plane, which is NOT the layered-stack p-pol of ``optics.tmm_reference``.)
 
     ``order`` is the ``H(curl)`` order for ``E``; ``order_psi`` (default ``order + 1``) is the
     ``H1`` order for the longitudinal potential ``psi`` (one order higher resolves the thin
@@ -872,6 +902,7 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
     normalisation are only conserved there, so a lossy or negative host RAISES rather than
     returning an unconserved number.
     """
+    _reject_pol_axis(pol_axis, "scattering_2d")                 # audit V-8
     import ngsolve as ng
 
     eh = complex(eps_host)

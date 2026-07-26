@@ -17,7 +17,18 @@ through `_common.stack_layer_records`. Since lumenairy 5.22 that helper reads th
 read-only `RCWAStack.layers` tuple -- there is no private-slot access and no version CEILING
 left here; the single bridge-wide FLOOR is `_common.VERSION_FLOOR`, and the soft "newer than
 verified" notice is `_common.VERSION_VERIFIED_MAX` (finding Q-16). A Lumenairy release that
-changes the record shape still bumps the floor."""
+changes the record shape still bumps the floor.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
+It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
+(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
+repo is a deliberate follow-on, not part of the map.
+"""
 
 from __future__ import annotations
 
@@ -92,7 +103,12 @@ def rcwa_stack_to_design(stack, *, name: str = "lumenairy_import",
 
     Lumenairy stacks are built SUPERSTRATE-side first; DynaMeta Stacks are bottom-to-top --
     the layer list is reversed here, and layer_names (when given) follows the LUMENAIRY
-    (top-first) order to match how the stack was written."""
+    (top-first) order to match how the stack was written.
+
+    `polarization` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} (audit V-8): it is handed
+    straight to the OpticalSpec this builds, which validates it and names the sibling family on a
+    wrong label. Note the asymmetry with the SAME package's rcwa_grating_RT, which speaks
+    {'te','tm'} -- see dynameta.core.polarization."""
     from dynameta.optics.lumenairy_bridge._common import stack_layer_records
     layers_rec = stack_layer_records(stack)
     bad = [i for i, L in enumerate(layers_rec) if L.kind != "uniform"]

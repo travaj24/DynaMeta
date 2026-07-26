@@ -141,7 +141,9 @@ def main():
     T3 = np.asarray(MagnetoOpticModel(eps_r=EPS_R, g=0.05).eps({}, LAM))
     eig = np.sort(np.linalg.eigvals(T3).real)
     exp = np.sort([EPS_R - 0.05, EPS_R, EPS_R + 0.05])
-    gate_a = bool(np.allclose(eig, exp, atol=1e-12))
+    # AUDIT T-6: rtol=0.0 -- eps_r is O(6), so numpy's default rtol=1e-5 relaxed this eigenvalue
+    # gate to ~6e-5 absolute; the gyrotropic splitting itself is only 0.05.
+    gate_a = bool(np.allclose(eig, exp, rtol=0.0, atol=1e-12))
     print("[mo] tensor eigenvalues {} vs expected {} : {}".format(
         np.round(eig, 5), np.round(exp, 5), "PASS" if gate_a else "FAIL"), flush=True)
 

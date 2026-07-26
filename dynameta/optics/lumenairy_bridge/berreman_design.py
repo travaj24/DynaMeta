@@ -27,6 +27,14 @@ post-tagged-5.14.4): the gauge-stable custom-VJP eig must return a plain (eigval
 matching jnp.linalg.eig's EigResult, else the custom_vjp structure check rejects the transform. The
 forward (numpy or traced) and eager grad are unaffected. See validation/lumenairy_berreman_jax.py
 (GATE B/D assert grad-of-vmap / grad-of-jit when the fix is present, version-conditional-skip else).
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident
+E_x, 1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo --
+{'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'}
+-> row is _common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the
+grating bridge's, and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -47,6 +55,18 @@ __all__ = ["berreman_RT", "berreman_jones"]
 # names the migration instead of returning a wrong number.
 
 
+def _reject_row(row, where: str):
+    """Guard the integer lab-`row` vocabulary (audit V-8): 0 = incident E_x, 1 = incident E_y.
+    A label from a SIBLING vocabulary ('x'/'y'/'p' from OpticalSpec, 's'/'p', 'te'/'tm') used to
+    reach the numpy fancy-index and either raise an opaque IndexError/TypeError deep inside, or --
+    for a bool -- index row 0/1 by accident.  Accepted set unchanged.  LAZY import, failure path
+    only.  The lab_xyp -> row leg of the map is _common.pol_row; the INVERSE is refused (row 0 is
+    ambiguous: 'x' and 'p' both map to it)."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where=where, param="row")
+
+
 def berreman_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
                 n_superstrate=_REQUIRED, angle=0.0, phi=0.0, row=0):
     """Differentiable (R, T) power for ONE incident lab polarization (row 0 = E_x, 1 = E_y) of a
@@ -63,6 +83,7 @@ def berreman_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     march, and the only differentiable path for the anisotropic stacks the FEM cannot grad."""
     _require_halfspace_keywords("berreman_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "berreman_RT")                                     # audit V-8
     lum = _require_berreman()
     R, T, _Jr, _Jt = lum.berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength,
                                            angle=angle, phi=phi)

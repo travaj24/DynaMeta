@@ -251,7 +251,9 @@ def test_bridge_into_liquid_crystal_model_is_uniaxial_with_right_axis():
     eps = np.asarray(lcm.eps(director_to_extra_fields(th_field), 1.5e-6)).real
     for i, thf in enumerate(th_field):
         w, V = np.linalg.eigh(eps[i])
-        assert np.allclose(np.sort(w), np.sort([n_o ** 2, n_o ** 2, n_e ** 2]), atol=1e-9)
+        # AUDIT T-6: rtol=0.0 -- eigenvalues are O(3), so numpy's default rtol=1e-5 would have made
+        # the "uniaxial" gate 3e-5 absolute instead of the intended 1e-9.
+        assert np.allclose(np.sort(w), np.sort([n_o ** 2, n_o ** 2, n_e ** 2]), rtol=0.0, atol=1e-9)
         ext = V[:, int(np.argmax(w))]
         th_opt = 0.5 * np.pi - float(thf)
         want = np.array([np.cos(th_opt), 0.0, np.sin(th_opt)])

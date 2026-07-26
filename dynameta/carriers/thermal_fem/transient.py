@@ -11,12 +11,22 @@ from typing import Callable, Dict, List, Optional, Union
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, _add_load_terms, _build_thermal_forms, _mean_T_per_layer
+from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, add_load_terms, build_thermal_forms, mean_T_per_layer
 
 @dataclass
 class ThermalTransientResult:
     """Trace of the transient heat solve. mean_T_per_layer_t has shape (n_times, n_layers); t_s the
-    sample times [s]; T_final the last temperature field; T_snapshots the optional full-field copies."""
+    sample times [s]; T_final the last temperature field; T_snapshots the optional full-field copies.
+
+    PICKLING (audit C-9 residual). `k_of_T`, `flux_of_t` and `joule_of_t` hold the CALLABLES the run
+    was driven with, because that is the only way `steady_limit_T` can tell when it must stay silent
+    (a boolean would answer "was it time-dependent?" but not "with what?", and callers do read them
+    back). A result built from a LAMBDA therefore does not pickle -- measured:
+    `PicklingError: Can't pickle <function <lambda>>` -- while a result with all three None (the
+    constant-k, constant-load solve) pickles fine, mesh and GridFunction included. Pass a
+    MODULE-LEVEL function instead of a lambda if the result has to be pickled, or drop the callables
+    with `dataclasses.replace(result, k_of_T=repr(result.k_of_T), ...)` before dumping -- the guards
+    only test `is not None`, so a repr string keeps `steady_limit_T` honest."""
     mesh: object
     layers: List[ThermalLayer]
     t_s: np.ndarray
@@ -26,10 +36,28 @@ class ThermalTransientResult:
     T_sink_K: float
     joule_W_m3: object
     T_snapshots: Optional[List[object]] = None
+    # audit C-9: what the RUN actually used, so `steady_limit_T` can tell when it must stay silent.
+    # The k(T) twin (thermal_fem.kirchhoff.solve_thermal_transient_kt_fem) assembles the stiffness
+    # from per-ELEMENT k_of_T -- L.k_thermal is then only a positivity placeholder -- and it can be
+    # run with a pure-Neumann bottom (bottom_bc='insulated'), which has no series-resistance limit at
+    # all. The result object could see neither, so the property returned the closed form for a
+    # DIFFERENT material / a BC the run never imposed, as a plausible-looking array with no signal
+    # that it was wrong. Defaults keep the constant-k solver's result byte-identical.
+    k_of_T: object = None                  # the k_of_T_by the run used (None = constant L.k_thermal)
+    bottom_bc: str = "sink"                # 'sink' (Dirichlet T_sink) or 'insulated' (pure Neumann)
+    # audit C-9 (wave-5 residual): the TIME-DEPENDENT load hooks. `flux_W_m2` / `joule_W_m3` record
+    # only the STATIC arguments, so a run driven by flux_of_t / joule_of_t recorded the defaults
+    # (0.0 / None) and steady_limit_T evaluated the closed form for a load the run never used --
+    # measured: flux_of_t = 1e8 with the default flux_W_m2 = 0.0 claimed a steady limit of 300.0 K
+    # while the run settles at 300.5 K, and joule_of_t = 1e16 was invisible to the Joule guard, which
+    # returned 300.5 K against an actual 303.8 K. Same honesty rule: if the result cannot describe
+    # the load, it says None rather than a plausible-looking number.
+    flux_of_t: object = None               # the flux_of_t the run used (None = constant flux_W_m2)
+    joule_of_t: object = None              # the joule_of_t the run used (None = constant joule_W_m3)
 
     def mean_T_per_layer(self) -> np.ndarray:
         """Volume-averaged temperature [K] per layer at the FINAL time (sink-first order)."""
-        return _mean_T_per_layer(self.mesh, self.T_final, self.layers)
+        return mean_T_per_layer(self.mesh, self.T_final, self.layers)
 
     def T_at(self, x_m: float, y_m: float, z_m: float) -> float:
         return float(np.real(self.T_final(self.mesh(x_m * _S, y_m * _S, z_m * _S))))
@@ -37,9 +65,25 @@ class ThermalTransientResult:
     @property
     def steady_limit_T(self) -> Optional[np.ndarray]:
         """The analytic series-resistance steady limit (carriers.thermal) for the pure-flux,
-        no-Joule case -- the t -> infinity target. Returns None when a Joule source is present
-        (no closed form here; compare against solve_thermal_fem instead)."""
+        no-Joule, constant-k, constant-load, sink-bottom case -- the t -> infinity target. Returns
+        None whenever that closed form does not describe the run (audit C-9):
+          * a Joule source is present (no closed form here; compare against solve_thermal_fem),
+          * the run used a temperature-dependent k_of_T (the stiffness came from per-element k(T),
+            NOT from L.k_thermal, which the k(T) solver reads only for its > 0 validation),
+          * bottom_bc='insulated' (a pure-Neumann box has no steady limit -- it stores the energy),
+          * a TIME-DEPENDENT load hook (flux_of_t / joule_of_t) drove the run: `flux_W_m2` and
+            `joule_W_m3` then hold the unused static arguments, and evaluating the closed form on
+            them describes a load the march never applied (measured: 300.0 K claimed against 300.5 K
+            reached for flux_of_t, 300.5 K against 303.8 K for joule_of_t).
+        A steady limit for a time-varying drive would in any case need the t -> infinity value of
+        the hook, which this object cannot know; call solve_thermal_fem with that value instead.
+        The constant-k, constant-load solver leaves every new field at its default, so it is
+        unaffected."""
         if self.joule_W_m3 is not None:
+            return None
+        if self.k_of_T is not None or self.bottom_bc != "sink":
+            return None
+        if self.flux_of_t is not None or self.joule_of_t is not None:
             return None
         from dynameta.carriers.thermal import steady_layered_temperature
         return steady_layered_temperature([L.k_thermal for L in self.layers],
@@ -67,7 +111,10 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
     this is an explicit precondition, NOT an off-switch -- the off-switch is that the steady solver
     never reads them). Boundary conditions match the steady solve (bottom Dirichlet T_sink, top
     Neumann flux, lateral insulated). `flux_of_t` / `joule_of_t`, if given, make the flux / Joule
-    source time-dependent (the load is reassembled each step); otherwise the load is constant.
+    source time-dependent (the load is reassembled each step); otherwise the load is constant. A
+    time-dependent hook is RECORDED on the result and makes `steady_limit_T` return None, because
+    the static `flux_W_m2` / `joule_W_m3` arguments are then unused and the closed form evaluated on
+    them describes a load the march never applied (audit C-9).
 
     Returns a ThermalTransientResult with the per-layer mean-T trace (sampled every `store_every`
     steps, plus t=0 and the final step) and the final field; set store_fields=True to also keep
@@ -91,7 +138,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
     dt = t_end_s / n_steps
     time_dependent = (flux_of_t is not None) or (joule_of_t is not None)
 
-    mesh, fes, u, v, a, f, k_cf = _build_thermal_forms(
+    mesh, fes, u, v, a, f, k_cf = build_thermal_forms(
         layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
 
     # MASS term: int (rho*Cp/_S^2) u v dV' = _S * M_phys (matches the _S * (K, f) scaling; see header)
@@ -104,7 +151,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
         ff = ng.LinearForm(fes)
         fl = flux_of_t(t) if flux_of_t is not None else flux_W_m2
         jo = joule_of_t(t) if joule_of_t is not None else joule_W_m3
-        _add_load_terms(ff, v, mesh, fl, jo)
+        add_load_terms(ff, v, mesh, fl, jo)
         ff.Assemble()
         return ff
 
@@ -128,7 +175,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
     tvec[mask] = gvec[mask]                 # constrained (sink) dofs -> T_sink; free dofs keep T_init
 
     t_list = [0.0]
-    mean_list = [_mean_T_per_layer(mesh, T, layers)]
+    mean_list = [mean_T_per_layer(mesh, T, layers)]
     snaps = None
     if store_fields:
         s0 = ng.GridFunction(fes); s0.vec.data = T.vec; snaps = [s0]
@@ -158,7 +205,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
             f_old = f_new
             if (step % store_every == 0) or (step == n_steps):
                 t_list.append(t)
-                mean_list.append(_mean_T_per_layer(mesh, T, layers))
+                mean_list.append(mean_T_per_layer(mesh, T, layers))
                 if store_fields:
                     sc = ng.GridFunction(fes); sc.vec.data = T.vec; snaps.append(sc)
 
@@ -166,4 +213,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
         mesh=mesh, layers=list(layers), t_s=np.asarray(t_list, dtype=np.float64),
         mean_T_per_layer_t=np.asarray(mean_list, dtype=np.float64), T_final=T,
         flux_W_m2=float(flux_W_m2), T_sink_K=float(T_sink_K), joule_W_m3=joule_W_m3,
-        T_snapshots=snaps)
+        T_snapshots=snaps,
+        # audit C-9: record the load hooks so steady_limit_T can refuse (both None on the
+        # constant-load path, which keeps that result byte-identical).
+        flux_of_t=flux_of_t, joule_of_t=joule_of_t)

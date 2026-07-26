@@ -577,10 +577,14 @@ class LayeredDevsimBuilder:
         except Exception:
             pass
 
-        # (1) seed the built-in (charge-neutral) potential + carriers
+        # (1) seed the built-in (charge-neutral) potential + carriers, in the frame the ohmic
+        # contacts PIN -- which carries the Fermi-Dirac degeneracy correction (with the sign the
+        # local doping type takes) whenever the region runs the FD g-factor. audit C-10: a bare
+        # Boltzmann seed contradicts an FD contact by 0.178 V per degenerate contact at eta = 10, and
+        # this 2-D staged solve goes STRAIGHT into the coupled 3-variable Newton from it.
         for s in sorted(self._bipolar_regions):
             ds.node_model(device=self.device, region=s, name="_seed_psi",
-                          equation="V_t*log(IntrinsicElectrons/n_i)")
+                          equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(self.device, s)))
             ds.set_node_values(device=self.device, region=s, name="Potential",
                                values=ds.get_node_model_values(device=self.device, region=s, name="_seed_psi"))
             ds.set_node_values(device=self.device, region=s, name="Electrons",

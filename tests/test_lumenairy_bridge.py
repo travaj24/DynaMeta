@@ -925,3 +925,124 @@ def test_bridge_version_ceiling_is_a_one_time_soft_warning():
             C._warn_above_ceiling("{}.{}.7".format(*C.VERSION_VERIFIED_MAX))
     finally:
         C._CEILING_WARNED = saved
+
+
+# ---- AUDIT T-9: bridge entry points that had NO caller anywhere (no test, no validation, no ----
+# example, no doc): make_lumenairy_bor_solver (a whole optical backend front end),
+# rcwa_stack_jones and pmm_stack_jones (the phase-bearing halves of the design twins).
+
+@needs_lum
+def test_make_lumenairy_bor_solver_overrides_n_radial_and_threads_absorption():
+    """audit T-9: the BOR factory had no caller. Its whole contract is (a) supply n_radial here
+    so a spec can omit/disagree with it and (b) thread `absorption` into solve_bor -- both gated
+    against solve_bor itself on the same spec."""
+    from dataclasses import replace
+    from dynameta.optics.lumenairy_bridge import (BorLayer, BorStackSpec,
+                                                  make_lumenairy_bor_solver, solve_bor)
+    spec = BorStackSpec(layers=[BorLayer(thickness_m=0.6e-6, eps=complex(1.8 ** 2), name="slab")],
+                        azimuthal_order_m=1, r_max_m=40e-6, n_radial=32, n_super=1.0, n_sub=1.0)
+    got = make_lumenairy_bor_solver(n_radial=48)(spec, 1.0e-6)
+    want = solve_bor(replace(spec, n_radial=48), 1.0e-6)
+    coarse = solve_bor(spec, 1.0e-6)                             # the spec's OWN 32-point grid
+    assert np.allclose(got.angles_rad, want.angles_rad, rtol=0.0, atol=1e-12)
+    assert np.allclose(got.R, want.R, rtol=1e-12, atol=0.0)      # the factory's grid, not the spec's
+    assert got.angles_rad.size != coarse.angles_rad.size, "n_radial override did nothing"
+    assert np.allclose(got.energy, 1.0, rtol=0.0, atol=1e-9)     # lossless: R + T = 1
+    # absorption=True threads through to the per-layer map + closed budget
+    lossy = replace(spec, layers=[BorLayer(thickness_m=0.5e-6, eps=complex(2.5 ** 2, 0.4),
+                                           name="absorber")])
+    off = make_lumenairy_bor_solver(n_radial=48)(lossy, 1.0e-6).fundamental_result()
+    on = make_lumenairy_bor_solver(n_radial=48, absorption=True)(lossy, 1.0e-6).fundamental_result()
+    assert off.A_independent is None and off.per_region_absorption is None
+    assert on.A_independent is not None and on.A_independent > 1e-3
+    assert "absorber" in on.per_region_absorption
+    assert on.R + on.T + on.A_independent == pytest.approx(1.0, abs=1e-9)
+
+
+def _airy_r_t(n0, n1, n2, d, lam):
+    """Analytic normal-incidence Fresnel-Airy AMPLITUDES of a single slab (the oracle for the
+    zeroth-order Jones matrices; T = (n2/n0)|t|^2)."""
+    r01, r12 = (n0 - n1) / (n0 + n1), (n1 - n2) / (n1 + n2)
+    t01, t12 = 2 * n0 / (n0 + n1), 2 * n1 / (n1 + n2)
+    ph = np.exp(2j * np.pi * n1 * d / lam)
+    den = 1.0 + r01 * r12 * ph ** 2
+    return (r01 + r12 * ph ** 2) / den, t01 * t12 * ph / den
+
+
+@needs_lum
+def test_rcwa_stack_jones_zeroth_order_matches_analytic_airy_amplitudes():
+    """audit T-9: `rcwa_stack_jones` -- the PHASE-bearing twin of rcwa_stack_RT (the modulator
+    observable is r = jones_r[row, row]) -- had no caller, so nothing gated the amplitudes it
+    exists to produce. A uniform slab has a closed-form complex r/t: gated on the COMPLEX value
+    (measured |d| ~ 1e-16), not just |r|^2, plus the diagonality an isotropic slab must have and
+    consistency with the per-order efficiencies."""
+    from dynameta.optics.lumenairy_bridge import rcwa_stack_jones
+    n0, n1, n2, d, lam = 1.0, 2.2, 1.5, 180e-9, 1.31e-6
+    orders, R, T, jr, jt = rcwa_stack_jones([(complex(n1 ** 2), d)], lam, n_substrate=n2 + 0j,
+                                            n_superstrate=n0 + 0j, period_x=600e-9, n_orders=3)
+    jr, jt, R, T = (np.asarray(x) for x in (jr, jt, R, T))
+    r_an, t_an = _airy_r_t(n0, n1, n2, d, lam)
+    assert jr.shape == (2, 2) and jt.shape == (2, 2)
+    assert R.shape == T.shape == (2, np.asarray(orders).size)
+    assert abs(jr[0, 0] - r_an) < 1e-12 and abs(jr[1, 1] - r_an) < 1e-12   # phase, not just |r|
+    assert abs(jt[0, 0] - t_an) < 1e-12 and abs(jt[1, 1] - t_an) < 1e-12
+    assert abs(jr[0, 1]) < 1e-14 and abs(jr[1, 0]) < 1e-14                 # isotropic -> diagonal
+    assert abs(jt[0, 1]) < 1e-14 and abs(jt[1, 0]) < 1e-14
+    # the Jones matrix and the efficiencies describe the SAME solve
+    assert float(R[0].sum()) == pytest.approx(abs(jr[0, 0]) ** 2, abs=1e-12)   # specular only
+    assert float(T[0].sum()) == pytest.approx((n2 / n0) * abs(jt[0, 0]) ** 2, abs=1e-12)
+    assert float(R[0].sum() + T[0].sum()) == pytest.approx(1.0, abs=1e-12)     # lossless
+
+
+@needs_lum
+def test_pmm_stack_jones_zeroth_order_matches_analytic_airy_amplitude():
+    """audit T-9: `pmm_stack_jones` had no caller either. PMM exposes no transmission Jones, so
+    the contract is the 4-tuple (orders, R, T, jones_r) -- gated against the same analytic slab
+    (measured |d| ~ 7e-15 on the spectral-element path) and against the row-summed efficiencies."""
+    from dynameta.optics.lumenairy_bridge import pmm_stack_jones
+    n0, n1, n2, d, lam = 1.0, 2.2, 1.5, 180e-9, 1.31e-6
+    out = pmm_stack_jones([([(1.0, complex(n1 ** 2))], d)], lam, n_substrate=n2 + 0j,
+                          n_superstrate=n0 + 0j, period=600e-9, degree=6, n_orders=5)
+    assert len(out) == 4, "pmm_stack_jones documents (orders, R_eff, T_eff, jones_r)"
+    orders, R, T, jr = out
+    jr, R, T = np.asarray(jr), np.asarray(R), np.asarray(T)
+    r_an, _t_an = _airy_r_t(n0, n1, n2, d, lam)
+    assert jr.shape == (2, 2) and R.shape == T.shape == (2, np.asarray(orders).size)
+    assert abs(jr[0, 0] - r_an) < 1e-11 and abs(jr[1, 1] - r_an) < 1e-11
+    assert abs(jr[0, 1]) < 1e-14 and abs(jr[1, 0]) < 1e-14
+    assert float(R[0].sum()) == pytest.approx(abs(jr[0, 0]) ** 2, abs=1e-11)
+    assert float(R[0].sum() + T[0].sum()) == pytest.approx(1.0, abs=1e-11)
+
+
+def test_bridge_guards_and_polarization_basis_have_direct_gates():
+    """audit T-9: `guard_incidence_side`, `guard_conical_ppol` and `pol_tangential_unit` are the
+    bridge's two REFUSAL points and its s/p basis vector, and none of the three had a caller in
+    tests -- a guard that silently stops guarding is the failure mode this class of code has.
+    Solver-free (no lumenairy import): the guards are pure argument checks."""
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.optics.lumenairy_bridge._common import (guard_conical_ppol, guard_incidence_side,
+                                                          pol_tangential_unit)
+    top = OpticalSpec(polarization="y", incidence_angle_deg=0.0)
+    guard_incidence_side(top)                                      # TOP incidence: supported
+    bottom = OpticalSpec(polarization="y", incidence_angle_deg=0.0, incidence_side="bottom")
+    with pytest.raises(NotImplementedError, match="incidence_side"):
+        guard_incidence_side(bottom)                               # BOTTOM: refused, not mis-solved
+    guard_incidence_side(object())                                 # no attribute -> defaults to top
+
+    # conical (azimuth != 0) is refused for EVERY polarization, in-plane is allowed
+    for pol in ("x", "y", "p"):
+        guard_conical_ppol(OpticalSpec(polarization=pol), 0.0)
+        guard_conical_ppol(OpticalSpec(polarization=pol), 1e-13)   # inside the phi tolerance
+        with pytest.raises(NotImplementedError, match="conical"):
+            guard_conical_ppol(OpticalSpec(polarization=pol), np.deg2rad(45.0))
+
+    # the rotated s/p basis: s-hat perpendicular to the plane of incidence, p in-plane, both unit,
+    # both continuous with the lab axes at phi = 0
+    assert np.allclose(pol_tangential_unit("y", 0.0), [0.0, 1.0], rtol=0.0, atol=1e-15)
+    assert np.allclose(pol_tangential_unit("x", 0.0), [1.0, 0.0], rtol=0.0, atol=1e-15)
+    for phi in (0.0, 0.3, np.pi / 2, 2.1):
+        s, p = pol_tangential_unit("y", phi), pol_tangential_unit("p", phi)
+        assert float(np.dot(s, p)) == pytest.approx(0.0, abs=1e-15)     # orthogonal
+        assert float(np.dot(s, s)) == pytest.approx(1.0, abs=1e-15)     # unit
+        assert float(np.dot(p, p)) == pytest.approx(1.0, abs=1e-15)
+        assert np.allclose(pol_tangential_unit("x", phi), p, rtol=0.0, atol=1e-15)   # 'x' == 'p'

@@ -211,8 +211,15 @@ def test_check_kk_causal_small_acausal_large():
     10x step 1.82e-2, Im-flipped Lorentz 6.11e-1. Legacy (edge_correct=False) drude: 1.65e-2.
     """
     grid = _kk_grid()
-    res = {name: check_kk(m, grid, n_m3=nn, metric_band=bd)
-           for name, m, nn, bd, _c in _kk_models()}
+    # audit T-13 (`filterwarnings = error`): the reference grid puts ~4.89 points across the
+    # 2-oscillator Lorentz's narrowest line, just under check_kk's 5-point advisory -- deliberately
+    # so (the docstring's whole point is that this grid is the RANKING baseline, and the
+    # under-resolution advisory itself is pinned by
+    # test_check_kk_warns_when_the_sharpest_line_is_under_resolved). Silence that one diagnostic.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="check_kk: the sharpest feature")
+        res = {name: check_kk(m, grid, n_m3=nn, metric_band=bd)
+               for name, m, nn, bd, _c in _kk_models()}
 
     # causal models -- both extremes, DC-pole and no-DC-pole
     assert res["drude"]["rms_norm"] < 1.0e-3 and res["drude"]["max_norm"] < 1.0e-2
@@ -251,12 +258,16 @@ def test_check_kk_discrimination_survives_grid_REFINEMENT():
     wmax = 80.0 * WP
     models = _kk_models()
     out = {}
-    for N in (8000, 32000):
-        g = np.linspace(wmax / N, wmax, N)
-        for name, m, nn, bd, causal in models:
-            if N > 8000 and name == "gamma_step_10x":
-                continue                                   # 4 models at 4x is enough (runtime)
-            out[(name, N)] = check_kk(m, g, n_m3=nn, metric_band=bd)["rms_norm"]
+    # audit T-13: same under-resolution advisory as in test_check_kk_causal_small_acausal_large --
+    # the N = 8000 end of this refinement sweep is the (marginally) under-resolved one BY DESIGN.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="check_kk: the sharpest feature")
+        for N in (8000, 32000):
+            g = np.linspace(wmax / N, wmax, N)
+            for name, m, nn, bd, causal in models:
+                if N > 8000 and name == "gamma_step_10x":
+                    continue                               # 4 models at 4x is enough (runtime)
+                out[(name, N)] = check_kk(m, g, n_m3=nn, metric_band=bd)["rms_norm"]
 
     for N in (8000, 32000):
         worst_causal = max(out[("drude", N)], out[("lorentz2", N)])

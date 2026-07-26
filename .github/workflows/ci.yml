@@ -269,7 +269,8 @@ jobs:
             tests/test_gated_builder.py tests/test_geometry_shapes.py \
             tests/test_hydro_fem.py tests/test_impact_ionization.py \
             tests/test_mesh_periodicity.py tests/test_mobility.py \
-            tests/test_pipeline_effects.py tests/test_qcse.py tests/test_sfg_fem.py \
+            tests/test_pipeline_effects.py tests/test_polarization_vocabulary.py \
+            tests/test_qcse.py tests/test_sfg_fem.py \
             tests/test_shg_fem.py tests/test_solver_guards.py \
             tests/test_stacked3d_spec.py tests/test_thermal_twotemp.py
       - name: Run the FEM/DEVSIM validation smoke subset

@@ -63,7 +63,8 @@ from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.carriers.physics_equilibrium import M_E, V_T
+from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
+# comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.constants import HBAR, KB
 
 
@@ -565,10 +566,23 @@ class Devsim3DEquilibrium:
                 N_b = float(self.spec.body_net_doping_m3)
             else:
                 N_b = (-1.0 if self.spec.acceptor else 1.0) * float(self.spec.n_bg_m3)
-            n0 = 0.5 * (abs(N_b) + np.sqrt(N_b * N_b + 4.0 * ni * ni))  # CELEC/CHOLE majority
-            phi_bi = (1.0 if N_b >= 0.0 else -1.0) * V_T * np.log(n0 / ni)
+            # audit C-10: the body contact pins the FD-CONSISTENT built-in offset whenever its
+            # region runs the FD g-factor (which _setup_bipolar_semi hardcodes), so the gate
+            # reference has to carry the same degeneracy correction -- re-deriving the Boltzmann
+            # log() here would re-open the C2-1 frame mismatch for a DEGENERATE body (0.178 V at
+            # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
+            # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
+            # same correction (FDContactShift is the node model the contact installed).
+            _Nc = _effective_dos_m3(self.spec.dos_mass_kg)
+            _Nv = (_effective_dos_m3(float(self.spec.dos_mass_p_kg))
+                   if self.spec.dos_mass_p_kg else _Nc)
+            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
+            # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
+            # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
+            # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.
             ds.node_model(device=self.device, region="semi", name="_seed_psi",
-                          equation="V_t*log(IntrinsicElectrons/n_i)")
+                          equation=BP.equilibrium_seed_psi_expr(
+                              BP.fd_shift_model(self.device, "semi")))
             ds.set_node_values(device=self.device, region="semi", name="Potential",
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="_seed_psi"))

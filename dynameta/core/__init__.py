@@ -3,6 +3,10 @@
 Pure numpy/scipy + dataclasses; no devsim/ngsolve imports live here. The bridge
 consumes a GeometryAlignment (the keystone identity/coordinate contract), a
 CarrierField, an NToEpsMap, and a FieldLift -- not a Design or a mesh.
+
+`core.polarization` is the repo's polarization-VOCABULARY map (audit V-8): which of the five
+spellings of "which polarization" means what in which geometry, `normalize_pol` to convert
+between them, and the shared error text every consumer module raises through. Stdlib-only.
 """
 
 from dynameta.core.units import UnitScale, SI, NM
@@ -33,6 +37,9 @@ from dynameta.core.interfaces import (
 )
 from dynameta.core.layered import LayeredSlab, LayeredStack, slice_profile, slice_eps_field
 from dynameta.core.bridge import assemble_eps
+from dynameta.core.polarization import (
+    VOCABULARIES, PolarizationConversionError, PolarizationVocabularyError, normalize_pol,
+)
 
 __all__ = [
     "UnitScale", "SI", "NM",
@@ -54,4 +61,6 @@ __all__ = [
     "LayeredStackSolver",
     "LayeredSlab", "LayeredStack", "slice_profile", "slice_eps_field",
     "assemble_eps",
+    "normalize_pol", "VOCABULARIES", "PolarizationVocabularyError",
+    "PolarizationConversionError",
 ]

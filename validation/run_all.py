@@ -51,6 +51,13 @@ REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
 SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
         "reference_modulator_spectrum"}
+# The `_` prefix excludes a file from EVERY tier (see _gated), and it carries TWO opposite
+# meanings: a legitimately SHARED FIXTURE (imported by other validations, never run on its own)
+# and a PARKED WIP (a real gate suite that nothing executes). Declare the fixtures here so the
+# second kind is NAMED on every run instead of vanishing silently -- audit X-6, where a parked
+# `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
+# executable gate anywhere and nobody could see it.
+FIXTURES = {"_reference_device"}
 PER_SCRIPT_TIMEOUT_S = 1800
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
@@ -119,7 +126,17 @@ SMOKE_EXCLUDED = {
 def _gated(directory, skip=()):
     out = []
     for fn in sorted(os.listdir(directory)):
-        if not fn.endswith(".py") or fn.startswith("_"):
+        if not fn.endswith(".py"):
+            continue
+        if fn.startswith("_"):
+            # audit X-6: a `_`-prefixed file runs in NO tier. That is correct for a shared fixture
+            # and wrong for a parked gate suite, and the prefix cannot tell them apart -- so name
+            # every non-fixture one loudly rather than dropping it in silence.
+            if fn[:-3] not in FIXTURES:
+                print("[run_all] NOTE: {}/{} is `_`-prefixed, so it is EXCLUDED FROM EVERY TIER. "
+                      "If it is a gate suite, rename it (drop the underscore) or gate it from "
+                      "tests/; if it is a shared fixture, add it to FIXTURES.".format(
+                          os.path.basename(directory), fn), flush=True)
             continue
         name = fn[:-3]
         if name in skip:

@@ -60,6 +60,12 @@ from dynameta.carriers.thermal_fem.kirchhoff import (ThermalKirchhoffLayeredResu
 # is what makes that intent machine-readable (and is why `ruff check .` can now run repo-wide
 # instead of reporting 28 phantom "unused import" hits here). Keep in sync when a re-export
 # is added or dropped.
+#
+# audit X-11: three of these names are DOUBLED -- `_mean_T_per_layer`/`mean_T_per_layer`,
+# `_add_load_terms`/`add_load_terms`, `_build_thermal_forms`/`build_thermal_forms` -- and the facade
+# deliberately keeps both spellings importable so nothing outside breaks. They are the SAME function
+# object (see common.py); the PUBLIC spelling is canonical and is the only one any call site inside
+# the package uses now. New code should import the public spelling.
 __all__ = [
     "MESH_SCALE", "ThermalKirchhoffLayeredResult", "ThermalKirchhoffResult", "ThermalLayer",
     "ThermalLayerTwoTemp", "ThermalResult", "ThermalTransientResult",

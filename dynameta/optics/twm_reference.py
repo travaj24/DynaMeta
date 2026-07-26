@@ -61,6 +61,44 @@ which is byte-for-byte the degenerate coupled-wave oracle of
 ``validation/fdtd_chi2_shg_raman.py`` (its GATE B closed form). twm_reference USES the
 d_eff = chi2/2 convention; pass ``d_eff = chi2/2`` to reproduce an FDTD chi2.
 
+--------------------------------------------------------------------------------------------
+DEGENERATE SPECS ARE REFUSED, NOT GUESSED  (audit Q-14)  ** behaviour change, v0.9.1 **
+--------------------------------------------------------------------------------------------
+A ``TWMSpec`` with ``omega1 == omega2`` used to run the NONDEGENERATE equations silently: for
+A1 = A2 = A that is exactly 2x the SHG field (4x the intensity), and Manley-Rowe stays clean
+(residual 3.6e-16) so no diagnostic fires. The 1/2 above is derived here and applied in
+``shg_undepleted`` / ``twm_propagate(degenerate=True)``, but nothing routed a degenerate spec
+there.
+
+The frequencies alone CANNOT decide which physics is right, which is why this is refused rather
+than auto-routed:
+
+  * omega1 = omega2 and the two waves are the SAME MODE (collinear, same polarization, same
+    index) -> SHG, the 1/2 factor applies. Use ``shg_undepleted`` / ``degenerate=True``.
+  * omega1 = omega2 and the two waves are DISTINCT MODES -- type-II degenerate SFG/SPDC, where
+    signal and idler are orthogonal polarizations with n1 != n2, the most common degenerate
+    geometry in practice -> the NONDEGENERATE equations are correct as written, and there is no
+    1/2. Say so with ``distinct_modes=True`` / ``degenerate=False``.
+
+Auto-routing would silently pick the first for every caller, and in ``twm_propagate`` it would
+also silently DISCARD ``amp2`` and ``n2``. So the nondegenerate entry points
+(``sfg_undepleted``, ``twm_propagate``) raise ``ValueError`` on a degenerate spec unless the
+caller states which case it is. ``opa_gain`` is NOT gated (degenerate OPA -- a single
+signal = idler mode -- carries the same factor; see its docstring), and neither is ``TWMSpec``
+itself, so building a degenerate spec for ``shg_undepleted`` stays a one-liner.
+
+The refusal is TWO-SIDED. ``twm_propagate(spec, ..., degenerate=True)`` on a spec whose
+``is_degenerate()`` is False also raises: that branch propagates ONE fundamental mode and
+silently discards ``amp2``, ``n2`` and ``omega2``, which is the identical silent-discard failure
+the ``degenerate=None`` refusal exists to prevent, reached through the other door. Measured
+before the fix: ``omega2 = 1.31 omega1``, ``amp2 = 2e7`` V/m ignored, ``|A3(L)| = 2.79e7``
+reported with ``degenerate=True`` and no diagnostic.
+
+``TWMSpec`` additionally rejects a NON-FINITE ``omega1`` / ``omega2`` at construction, because
+the degeneracy predicate is a comparison and nan compares False against everything: a nan spec
+answered "not degenerate" and ran the nondegenerate equations, and ``omega1 = omega2 = inf``
+answered "not degenerate" for a spec that is degenerate by inspection.
+
 Intensity / photon flux (real-peak convention):
     I_j = (1/2) n_j eps0 c |A_j|^2 ,   photon flux Phi_j = I_j / (hbar omega_j) .
 Manley-Rowe: with the equations above dN1/dz = dN2/dz = -dN3/dz where N_j := n_j |A_j|^2 /
@@ -84,6 +122,7 @@ from scipy.integrate import solve_ivp
 from dynameta.constants import C_LIGHT, EPS0, HBAR
 
 __all__ = [
+    "DEGENERACY_REL_TOL",
     "TWMSpec",
     "TWMResult",
     "sfg_undepleted",
@@ -96,6 +135,24 @@ __all__ = [
 ]
 
 _IndexLike = Union[float, Callable[[float], float]]
+
+# Relative separation below which omega1 and omega2 are the SAME frequency for the purpose of the
+# degeneracy factor (audit Q-14). Loose enough to catch a spec built from two rounded floats or
+# from omega_p/2 arithmetic, far tighter than any physical detuning: at omega ~ 1e15 rad/s this is
+# ~1e6 rad/s = 0.16 MHz, orders of magnitude below the linewidth of anything this module models.
+DEGENERACY_REL_TOL = 1e-9
+
+_DEGENERATE_MSG = (
+    "{where}: this TWMSpec is DEGENERATE (omega1 = {w1:.12g}, omega2 = {w2:.12g}, relative "
+    "separation {sep:.3g} <= {tol:g}) and the NONDEGENERATE coupled-wave equations do not apply "
+    "to it unaltered -- for A1 = A2 they give exactly 2x the second-harmonic field (4x the "
+    "intensity), and Manley-Rowe stays conserved so nothing else flags it (audit Q-14). The "
+    "frequencies alone cannot say which physics you mean, so state it:\n"
+    "  * ONE mode driving its own second harmonic (collinear, same polarization/index) -> SHG: "
+    "use {shg}, which carries the 1/2 degeneracy factor.\n"
+    "  * TWO distinct modes that happen to share a frequency (type-II degenerate SFG/SPDC: "
+    "orthogonal polarizations, n1 != n2) -> the nondegenerate equations ARE correct: pass "
+    "{distinct} to run them.")
 
 
 def _sinc(x: np.ndarray | float) -> np.ndarray | float:
@@ -119,6 +176,10 @@ class TWMSpec:
     mismatch dk = k3 - k1 - k2 (rad/m); otherwise it is computed from the indices.
     ``qpm_period`` (m), if set, engages first-order quasi-phase-matching (sign-flipping
     d_eff of that period).
+
+    A spec with ``omega1 == omega2`` is DEGENERATE (see ``is_degenerate``). Building one is
+    fine -- it is what ``shg_undepleted`` takes -- but the NONDEGENERATE entry points refuse it
+    unless you say which physics you mean; see the module docstring (audit Q-14).
     """
 
     omega1: float
@@ -131,9 +192,50 @@ class TWMSpec:
     dk_override: Optional[float] = None
     qpm_period: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        """Validate that the two frequencies are FINITE (audit Q-14 residual).
+
+        ``is_degenerate`` is a comparison, and every comparison against a NaN is False -- so a
+        spec built with ``omega1 = nan`` (or ``inf``) reported ``is_degenerate() -> False`` and
+        sailed straight through the degeneracy refusal into the nondegenerate equations, which
+        then returned nan/inf amplitudes with no diagnostic naming the cause. ``inf`` is worse
+        than nan: ``TWMSpec(omega1=inf, omega2=inf)`` is degenerate by inspection yet
+        ``abs(inf - inf) = nan <= rel_tol * inf`` is False, so the guard's own predicate reports
+        the OPPOSITE of the truth. Neither is a frequency, so both are rejected at construction
+        and the degeneracy predicate downstream only ever sees finite numbers."""
+        for name in ("omega1", "omega2"):
+            val = getattr(self, name)
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "TWMSpec.{}: expected a real frequency in rad/s, got {!r}".format(name, val)
+                ) from None
+            if not math.isfinite(fval):
+                raise ValueError(
+                    "TWMSpec.{}: must be a FINITE frequency in rad/s, got {!r}. A non-finite "
+                    "omega defeats the degeneracy test itself -- `is_degenerate` is a comparison "
+                    "and every comparison against nan is False, so a nan/inf spec reported "
+                    "NONdegenerate and ran through the nondegenerate coupled-wave equations "
+                    "(audit Q-14).".format(name, val))
+
     @property
     def omega3(self) -> float:
         return float(self.omega1) + float(self.omega2)
+
+    def is_degenerate(self, rel_tol: float = DEGENERACY_REL_TOL) -> bool:
+        """True when omega1 and omega2 coincide to ``rel_tol`` -- i.e. omega3 = 2 omega1 and the
+        interaction is (or may be) second-harmonic generation rather than sum-frequency. See the
+        module docstring's DEGENERATE SPECS section for why this is a REFUSAL, not a routing
+        decision (audit Q-14).
+
+        Both frequencies are guaranteed FINITE by ``__post_init__``, so this predicate never has
+        to answer for a nan (which would compare False and report a nan spec as nondegenerate)."""
+        w1, w2 = float(self.omega1), float(self.omega2)
+        scale = max(abs(w1), abs(w2))
+        if scale == 0.0:
+            return True
+        return abs(w1 - w2) <= rel_tol * scale
 
     def n(self, which: int) -> float:
         omega = (self.omega1, self.omega2, self.omega3)[which - 1]
@@ -268,13 +370,63 @@ def phase_matching_sinc(dk: np.ndarray | float, length: float,
 # Undepleted closed forms
 # --------------------------------------------------------------------------------------------
 
-def sfg_undepleted(spec: TWMSpec, amp1: complex, amp2: complex) -> dict:
+def _reject_degenerate(spec: TWMSpec, where: str, shg: str, distinct: str) -> None:
+    """Raise ``ValueError`` if ``spec`` is degenerate -- the audit Q-14 guard on the entry points
+    that implement the NONDEGENERATE coupled-wave equations. No-op otherwise (so every
+    nondegenerate call, which is every previously-correct call, is bit-for-bit untouched)."""
+    if not spec.is_degenerate():
+        return
+    w1, w2 = float(spec.omega1), float(spec.omega2)
+    scale = max(abs(w1), abs(w2)) or 1.0
+    raise ValueError(_DEGENERATE_MSG.format(where=where, w1=w1, w2=w2,
+                                            sep=abs(w1 - w2) / scale,
+                                            tol=DEGENERACY_REL_TOL, shg=shg, distinct=distinct))
+
+
+_NONDEGENERATE_MSG = (
+    "{where}: degenerate=True was asked for, but this TWMSpec is NONDEGENERATE (omega1 = "
+    "{w1:.12g}, omega2 = {w2:.12g}, relative separation {sep:.3g} > {tol:g}). The degenerate SHG "
+    "branch propagates a SINGLE fundamental mode: it reads amp1/n1/omega1 and SILENTLY DISCARDS "
+    "amp2, n2 and omega2, so the answer is the second harmonic of omega1 alone -- not the "
+    "sum-frequency of your two waves, and every Manley-Rowe diagnostic stays clean while it is "
+    "wrong. This is the same silent-discard failure the degeneracy guard exists to prevent, "
+    "reached through the other door (audit Q-14). Either pass a spec whose omega1 and omega2 "
+    "coincide (is_degenerate() True), or use shg_undepleted(spec, amp_fund) for the undepleted "
+    "closed form; for two genuinely distinct waves drop degenerate=True and let the "
+    "nondegenerate equations run.")
+
+
+def _reject_nondegenerate(spec: TWMSpec, where: str) -> None:
+    """Raise ``ValueError`` if ``spec`` is NOT degenerate -- the mirror of
+    :func:`_reject_degenerate`, guarding the explicit ``degenerate=True`` opt-in (audit Q-14
+    residual). No-op on a degenerate spec, so every correct degenerate call is bit-for-bit
+    untouched."""
+    if spec.is_degenerate():
+        return
+    w1, w2 = float(spec.omega1), float(spec.omega2)
+    scale = max(abs(w1), abs(w2)) or 1.0
+    raise ValueError(_NONDEGENERATE_MSG.format(where=where, w1=w1, w2=w2,
+                                               sep=abs(w1 - w2) / scale,
+                                               tol=DEGENERACY_REL_TOL))
+
+
+def sfg_undepleted(spec: TWMSpec, amp1: complex, amp2: complex, *,
+                   distinct_modes: bool = False) -> dict:
     """Undepleted sum-frequency A3(L) for constant inputs A1, A2 (A3(0) = 0):
 
         A3(L) = i kappa3 A1 A2 L Phi(dk),   Phi = sinc(dk L/2) exp(-i dk L/2)  (+ QPM),
 
     so the SFG intensity is sinc^2 in the phase mismatch. Returns the complex A3(L), its
-    intensity, the pump-referenced conversion efficiency I3(L)/I1(0), and |sinc|^2."""
+    intensity, the pump-referenced conversion efficiency I3(L)/I1(0), and |sinc|^2.
+
+    Raises ``ValueError`` on a DEGENERATE spec (omega1 == omega2) -- these are the nondegenerate
+    equations and they overshoot the second harmonic by exactly 2x in field. Use
+    ``shg_undepleted`` for one mode driving its own harmonic, or ``distinct_modes=True`` for two
+    genuinely distinct co-frequency modes (type-II). See the module docstring (audit Q-14).
+    ``distinct_modes=True`` reproduces the pre-fix numbers bit-for-bit."""
+    if not distinct_modes:
+        _reject_degenerate(spec, "sfg_undepleted", "shg_undepleted(spec, amp_fund)",
+                           "distinct_modes=True")
     L = spec.length
     # A3(L) = i kappa3 A1 A2 integral_0^L (d_eff(z)/d_eff) exp(-i dk z) dz = i kappa3 A1 A2 L Phi;
     # phase_matching_sinc carries the (2/pi) first-order factor and the QPM peak shift, so
@@ -333,7 +485,15 @@ def opa_gain(spec: TWMSpec, amp_pump: complex, amp_signal: complex,
 
     Returns the complex output signal/idler amplitudes, their power gains, |g| or the
     oscillation rate, and the Manley-Rowe check (idler photons gained == signal photons
-    gained)."""
+    gained).
+
+    DEGENERATE OPA (omega1 == omega2, i.e. omega3 = 2 omega1) is NOT gated here the way
+    ``sfg_undepleted`` / ``twm_propagate`` are (audit Q-14), because these two equations are also
+    the correct nondegenerate physics for a type-II degenerate parametric amplifier (signal and
+    idler orthogonal, n1 != n2), which is the common case. If signal and idler are the SAME mode
+    -- true single-mode degenerate parametric amplification / squeezing -- the same 1/2 factor
+    the module docstring derives applies to the down-conversion source and these gains overshoot;
+    that regime is out of scope for this three-envelope reference."""
     L = spec.length
     dk = spec.dk
     k1, k2 = spec.kappa(1), spec.kappa(2)
@@ -392,20 +552,37 @@ class TWMResult:
 
 
 def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
-                  *, n_out: int = 129, degenerate: bool = False,
+                  *, n_out: int = 129, degenerate: Optional[bool] = None,
                   rtol: float = 3e-14, atol: float = 1e-15,
                   max_step: Optional[float] = None) -> TWMResult:
     """Integrate the DEPLETED coupled-wave equations from z = 0 to spec.length (DOP853).
 
-    Nondegenerate (default): state (A1, A2, A3) = (``amp1``, ``amp2``, ``amp3``). Degenerate
-    SHG (``degenerate=True``): fundamental A_f = ``amp1`` at omega1, second harmonic A_s =
+    Nondegenerate: state (A1, A2, A3) = (``amp1``, ``amp2``, ``amp3``). Degenerate SHG
+    (``degenerate=True``): fundamental A_f = ``amp1`` at omega1, second harmonic A_s =
     ``amp3`` at omega3 = 2 omega1 (``amp2`` ignored); uses the 1/2 degeneracy source. QPM
     (spec.qpm_period set) flips d_eff(z) as a square wave of that period.
+
+    ``degenerate`` is TRI-STATE (audit Q-14; it used to default to ``False``):
+      * ``None`` (default) -- infer from the spec, and REFUSE a degenerate one. A spec with
+        omega1 == omega2 raises ``ValueError``, because running it nondegenerate silently gives
+        2x the second-harmonic field while every diagnostic stays clean, and auto-routing it to
+        the SHG branch would silently discard ``amp2`` and ``n2``.
+      * ``True``  -- degenerate SHG branch. RAISES ``ValueError`` on a spec whose
+        ``is_degenerate()`` is False: that branch reads amp1/n1/omega1 and silently discards
+        amp2/n2/omega2, which is the very failure the ``None`` refusal exists to prevent,
+        reached through the other door. On a genuinely degenerate spec it is unchanged.
+      * ``False`` -- nondegenerate branch, no check: the explicit "these are two distinct modes
+        that happen to share a frequency" (type-II) opt-in, bit-for-bit the pre-fix behaviour.
 
     Amplitudes are internally rescaled to O(1) before integration (the coupling then carries
     the scale) so the DOP853 tolerances resolve the invariants to ~1e-12; the result is
     un-scaled back to V/m. Returns a ``TWMResult`` with exact Manley-Rowe / power diagnostics.
     """
+    if degenerate is None:
+        _reject_degenerate(spec, "twm_propagate", "degenerate=True", "degenerate=False")
+        degenerate = False
+    elif degenerate:
+        _reject_nondegenerate(spec, "twm_propagate")
     L = float(spec.length)
     dk = spec.dk
     period = spec.qpm_period

@@ -1128,3 +1128,72 @@ def test_calibrate_device_small_target():
     p = dev.params
     spacing = 2.0 * p.span_sigma * (p.fwhm_inhom_Hz / 2.35482) / (p.n_groups - 1)
     assert spacing <= 0.5 * p.fwhm_hom_Hz * 1.001
+
+
+# ============ Audit 2026-07-25 X-9 / T-8: a FAST gate on fit_net_bandwidth=False ============
+
+def test_calibrate_device_small_target_legacy_bandwidth():
+    # X-9 / T-8: the ONLY caller of fit_net_bandwidth=False anywhere was
+    # test_calibration_reports_both_bandwidth_notions, which is @slow (MEASURED 612.8 s, so the
+    # marker is correct) and therefore excluded by -m "not slow" from all four CI legs -- the
+    # documented legacy interpretation shipped with no fast coverage at all. This is that gate:
+    # the same easy narrowband target test_calibrate_device_small_target uses for the co-fit,
+    # run down the legacy branch, pinning what the FLAG changes rather than what the fit finds.
+    from dynameta.optics.soa.calibration import DeviceTargets, calibrate_device
+    tgt = DeviceTargets(name="small", peak_nm=1310.0, G0_dB=20.0, net_bw_3dB_nm=25.0,
+                        Psat_out_dBm=15.0, drive_A=0.5, L_m=4.0e-3)
+    r = calibrate_device(tgt, verbose=False, fit_net_bandwidth=False).report
+    assert r["fit_net_bandwidth"] is False                     # the branch actually taken
+    # LEGACY SEMANTIC: 'bandwidth_nm' aliases the MATERIAL half-max width (the pre-co-fit
+    # interpretation), not the net -3 dB band the co-fit reports for the same key.
+    assert r["bandwidth_nm"] == pytest.approx(r["material_fwhm_nm"])
+    assert r["bandwidth_nm"] != pytest.approx(r["net_3dB_bw_nm"])
+    # ... and it is the MATERIAL width that gets fitted to the datasheet number, which is
+    # exactly why the net band then lands ~3-4x narrower than the sheet (audit C4-8).
+    assert abs(r["material_fwhm_nm"] - 25.0) < 3.0
+    assert r["net_3dB_bw_nm"] < 0.5 * r["material_fwhm_nm"]
+    assert abs(r["G0_dB"] - 20.0) < 0.5                        # the G0 pin is branch-independent
+    assert abs(r["Psat_out_dBm"] - 15.0) < 0.5                 # so is the Psat pin
+    assert r["es_ratio"] == 0.0                                # no ES band requested -> no ES
+    # the co-fit twin (test_calibrate_device_small_target) pins the OTHER alias, so the pair
+    # discriminates the two interpretations rather than just exercising both code paths.
+
+
+# ============ Audit 2026-07-25 X-10: the package facade must stay EXHAUSTIVE ============
+
+def test_package_facade_is_exhaustive():
+    # X-10 / A-20: dynameta.optics.soa is an EAGER facade (it imports every submodule at import
+    # time and its __all__ mirrors those imports), so a name in a submodule's __all__ that never
+    # reaches the package __all__ is an ACCIDENT, not a design choice -- unlike dynameta.optics /
+    # dynameta.carriers, which are deliberate PEP-562 lazy facades. The audit found 20 such names
+    # here: 16 of qw_gain's 17 (the ENTIRE quantum-well/bulk device API -- gain_peak,
+    # steady_state_N, device_gain_dB, noise_figure_db, ...), plus metrics' transfer_derivatives /
+    # harmonic_amplitudes and temperature's B_LO_10MEV_HZ / fwhm_hom_at_temperature.
+    import importlib
+    import pkgutil
+
+    # audit W5-7/W5-8: seven submodules (calibration, lineshape, maxwell_bloch, noise_metrics,
+    # sbe, thermal, transverse_bpm) declared NO __all__ at all, so the loop below skipped them
+    # entirely -- the gate was checking 7 of 14 modules and the "checked >= 7" floor made that
+    # look complete. calibration.device_saturation_curve was the live casualty: a public,
+    # separately-tested entry point invisible from the package. The gate now REQUIRES an __all__
+    # from every submodule and asserts it checked all of them.
+    import dynameta.optics.soa as pkg
+    exported = set(pkg.__all__)
+    assert len(exported) == len(pkg.__all__)                   # no duplicate entries
+    submodules = [info.name for info in pkgutil.iter_modules(pkg.__path__)]
+    checked = []
+    for name in submodules:
+        sub = importlib.import_module("dynameta.optics.soa." + name)
+        names = getattr(sub, "__all__", None)
+        assert names is not None, ("submodule declares no __all__", name)
+        missing = sorted(set(names) - exported)
+        assert not missing, (name, missing)
+        checked.append(name)
+    assert checked == submodules
+    assert len(submodules) == 14, submodules                   # pin the count itself
+    for name in pkg.__all__:                                   # ... and every export resolves
+        assert getattr(pkg, name, None) is not None, name
+    # the name the drift actually cost, spelled out
+    from dynameta.optics.soa.calibration import device_saturation_curve
+    assert pkg.device_saturation_curve is device_saturation_curve

@@ -17,6 +17,7 @@ from dynameta.optics.fiber_amp import (
     ThermalModel, quantum_defect_fraction, total_heat_W, heat_load_per_m,
     peak_temperature_rise, radial_temperature_rise,
     simulate_transient, saturation_energy, frantz_nodvik_output_energy, frantz_nodvik_pulse,
+    frantz_nodvik_instantaneous_gain, Pulse,
     CrossSectionTable, giles_calibrated_fiber, dB_per_m_to_per_m,
     detection_noise,
     gaussian_pulse, sech_pulse, dispersion_length, soliton_order, propagate_gnlse,
@@ -786,3 +787,576 @@ def test_nondefault_m_modes_propagates_to_noise_and_detection():
     rho = bn1.meta["rho_sp_W_per_Hz"]
     assert np.isclose(bn1.var_sp_sp, R ** 2 * rho ** 2 * (2 * 50e9 - 10e9) * 10e9, rtol=1e-12)
     assert nr1.fwd_ase.psd_1pol.size > 0
+
+
+# ============ Audit 2026-07-25 A-10: Frantz-Nodvik temporal reshaping (OPT-IN) ============
+#
+# The CW law g = g_small/(1+E/e_sat) multiplies the WHOLE time window by one scalar, so it can
+# neither steepen a pulse nor extract the right energy in the intermediate regime (measured
+# -27% at E_in ~ 0.1 E_sat). SaturableGain(frantz_nodvik=True) replaces it with the
+# Frantz-Nodvik instantaneous law applied in the time domain each half-step.
+
+_FN_G0_PER_M, _FN_L, _FN_ESAT = 5.0, 1.0, 1.0e-6          # G0 = e^5 = 148.4, stored = 5 uJ
+_FN_G0 = float(np.exp(_FN_G0_PER_M * _FN_L))
+
+
+def _fn_grid(N=4096, window_s=409.6e-12):
+    return (np.arange(N) - N // 2) * (window_s / N)
+
+
+def _fn_pair(**kw):
+    """(CW, FN) SaturableGain twins on an exactly FLAT band (shape(omega) == 1 everywhere)."""
+    base = dict(g_small_per_m=_FN_G0_PER_M, e_sat_J=_FN_ESAT, gain_bandwidth_rad_s=np.inf)
+    base.update(kw)
+    return SaturableGain(**base), SaturableGain(frantz_nodvik=True, **base)
+
+
+def _cumtrapz_t(y, x):
+    o = np.zeros_like(y)
+    o[1:] = np.cumsum(0.5 * (y[1:] + y[:-1]) * np.diff(x))
+    return o
+
+
+def test_fn_mode_reproduces_the_frantz_nodvik_energy_closed_form():
+    # GATE (a): the time-resolved integration must reproduce dynamics.frantz_nodvik_output_energy
+    # -- the SAME law, differentiated. Three separate statements:
+    #  (1) agreement across four decades of input energy;
+    #  (2) n_steps independence: the FN map is linear in u = expm1(U/E_sat) with factor G0, so
+    #      slicing the fiber is EXACT -- a 1-step and a 400-step run must agree;
+    #  (3) the two analytic limits.
+    t = _fn_grid()
+    _, fn = _fn_pair()
+    for Ein in (1e-9, 1e-7, 1e-6, 1e-5):
+        p = gaussian_pulse(t, t0_s=5e-12, energy_J=Ein, lambda0_m=1.03e-6)
+        got = propagate_gnlse(p, _FN_L, saturable_gain=fn, n_steps=200).output.energy_J
+        want = float(frantz_nodvik_output_energy(p.energy_J, _FN_G0, _FN_ESAT))
+        assert abs(got / want - 1.0) < 1e-4, (Ein, got, want)
+    # (2) composition: 1 step vs 400 steps (no dispersion / Kerr -> gain only)
+    p = gaussian_pulse(t, t0_s=5e-12, energy_J=1e-6, lambda0_m=1.03e-6)
+    e = [propagate_gnlse(p, _FN_L, saturable_gain=fn, n_steps=ns).output.energy_J
+         for ns in (1, 400)]
+    assert abs(e[0] / e[1] - 1.0) < 1e-4, e            # measured 5.1e-5 across a 148x gain
+    # (3) small signal -> G0 E_in exactly; deep saturation -> E_in + E_sat ln G0 (stored cap)
+    tiny = gaussian_pulse(t, t0_s=5e-12, energy_J=1e-15, lambda0_m=1.03e-6)
+    e_lin = propagate_gnlse(tiny, _FN_L, saturable_gain=fn, n_steps=100).output.energy_J
+    assert abs(e_lin / (_FN_G0 * tiny.energy_J) - 1.0) < 1e-6
+    big = gaussian_pulse(t, t0_s=5e-12, energy_J=1e-3, lambda0_m=1.03e-6)
+    stored = _FN_ESAT * np.log(_FN_G0)
+    e_big = propagate_gnlse(big, _FN_L, saturable_gain=fn, n_steps=100).output.energy_J
+    assert abs((e_big - big.energy_J) / stored - 1.0) < 1e-3      # all stored energy extracted
+    assert e_big - big.energy_J < stored                          # and never MORE than stored
+
+
+def test_fn_mode_matches_a_direct_ode_oracle_and_closes_the_cw_gap():
+    # GATE (d): independent oracle -- integrate the coupled PDE pair directly
+    #     dP/dz = g P,   dg/dt = -g P/E_sat,   g(z, t -> -inf) = g0
+    # by method of lines (midpoint in z). It never touches the log1p/expm1 FN algebra, so it
+    # discriminates the closed form from the implementation. The CW law is measured against the
+    # same oracle: it must still under-extract by the ~27% the audit reported.
+    t = _fn_grid()
+    cw, fn = _fn_pair()
+
+    def oracle(P0, nz=1200):
+        P = np.array(P0, float)
+        dz = _FN_L / nz
+        for _ in range(nz):
+            g = _FN_G0_PER_M * np.exp(-_cumtrapz_t(P, t) / _FN_ESAT)
+            gm = _FN_G0_PER_M * np.exp(-_cumtrapz_t(P * np.exp(0.5 * g * dz), t) / _FN_ESAT)
+            P = P * np.exp(gm * dz)
+        return float(trapz(P, t))
+
+    for Ein, cw_deficit in ((1e-7, 0.271), (1e-6, 0.229)):
+        p = gaussian_pulse(t, t0_s=5e-12, energy_J=Ein, lambda0_m=1.03e-6)
+        ref = oracle(p.power_W)
+        e_fn = propagate_gnlse(p, _FN_L, saturable_gain=fn, n_steps=200).output.energy_J
+        e_cw = propagate_gnlse(p, _FN_L, saturable_gain=cw, n_steps=200).output.energy_J
+        assert abs(e_fn / ref - 1.0) < 1e-4, (Ein, e_fn, ref)          # FN mode == the ODEs
+        got = (e_cw - p.energy_J) / (ref - p.energy_J) - 1.0           # CW extraction deficit
+        assert abs(got + cw_deficit) < 0.01, (Ein, got)                # the audit's -27% / -23%
+
+
+def test_fn_mode_steepens_the_leading_edge():
+    # GATE (c): the physical SIGNATURE. On a flat-top pulse the leading edge sees the full
+    # small-signal gain and the trailing edge sees ~1, so the intensity centroid moves EARLIER.
+    # The CW law is exactly flat in time (its "gain ratio" is 1.000) -- that is the bug.
+    t = _fn_grid(8192, 409.6e-12)
+    T = 100e-12
+    env = np.exp(-(2.0 * t / T) ** 12)                     # smooth super-Gaussian flat top
+    power = env * (3.0 * _FN_ESAT / float(trapz(env, t)))  # E_in = 3 E_sat
+    flat = Pulse(t, np.sqrt(power).astype(np.complex128), 1.03e-6)
+    lit = power > 1e-6 * power.max()                       # the pulse's full temporal support
+    cw, fn = _fn_pair()
+    out_cw = propagate_gnlse(flat, _FN_L, saturable_gain=cw, n_steps=200).output
+    out_fn = propagate_gnlse(flat, _FN_L, saturable_gain=fn, n_steps=200).output
+
+    def centroid(pw):
+        return float(np.sum(t * pw) / np.sum(pw))
+    g_cw = out_cw.power_W[lit] / power[lit]
+    g_fn = out_fn.power_W[lit] / power[lit]
+    assert abs(g_cw[0] / g_cw[-1] - 1.0) < 1e-9            # CW: no temporal structure at all
+    assert abs(centroid(out_cw.power_W) - centroid(power)) < 1e-15
+    assert g_fn[0] / g_fn[-1] > 100.0                      # FN: leading edge favoured ~141x
+    assert abs(g_fn[0] / _FN_G0 - 1.0) < 1e-5              # leading edge sees the FULL G0
+    assert g_fn[-1] < 1.1                                  # trailing edge sees ~1
+    assert np.all(np.diff(g_fn) <= 1e-12)                  # monotonically decreasing in t
+    assert centroid(out_fn.power_W) - centroid(power) < -0.2 * T   # centroid moves EARLIER
+    assert t[int(np.argmax(out_fn.power_W))] < -0.4 * T           # and so does the peak
+    # the whole temporal profile matches the closed-form FN pulse, not just its integral
+    ref = frantz_nodvik_pulse(t, power, _FN_G0, _FN_ESAT)
+    assert np.max(np.abs(out_fn.power_W - ref)) / ref.max() < 1e-4
+    # ... which is P_in * frantz_nodvik_instantaneous_gain (the shared formula home; the two
+    # spellings differ only by the association of the same three factors, i.e. by ulps)
+    alt = power * frantz_nodvik_instantaneous_gain(t, power, _FN_G0, _FN_ESAT)
+    assert np.max(np.abs(ref - alt)) <= 4e-16 * ref.max()
+
+
+def test_fn_recovery_time_recovers_the_cw_saturation_law():
+    # GATE (b): FN is the NO-RECOVERY limit. With a finite upper-state lifetime the gain
+    # re-pumps between parts of the pulse, and for a pulse LONG against that lifetime the gain
+    # becomes MEMORYLESS -- the CW law. The contract is asserted against the module's OWN
+    # SaturableGain.g_omega: g(t) -> g_omega(P(t) * tau), i.e. the CW law's E is the energy
+    # delivered within one recovery time.
+    from dynameta.optics.fiber_amp.pulse import _gain_with_recovery
+    t = _fn_grid(8192, 409.6e-12)
+    T = 100e-12
+    env = np.exp(-(2.0 * t / T) ** 12)
+    power = env * (3.0 * _FN_ESAT / float(trapz(env, t)))
+    flat = Pulse(t, np.sqrt(power).astype(np.complex128), 1.03e-6)
+    top = power > 0.5 * power.max()
+    p_top = float(np.median(power[top]))
+    cw, fn = _fn_pair()
+    asym = []
+    for ratio, tol in ((10.0, 1e-3), (50.0, 1e-4), (200.0, 1e-5)):
+        tau = T / ratio
+        g_t = _gain_with_recovery(t, power, _FN_G0_PER_M, _FN_ESAT, tau)
+        mid = float(g_t[top][int(top.sum()) // 2])
+        assert abs(mid / float(cw.g_omega(p_top * tau, 0.0)) - 1.0) < tol, (ratio, mid)
+        sgr = SaturableGain(_FN_G0_PER_M, _FN_ESAT, np.inf, frantz_nodvik=True,
+                            recovery_time_s=tau)
+        out = propagate_gnlse(flat, _FN_L, saturable_gain=sgr, n_steps=200).output
+        g_prof = out.power_W[top] / power[top]
+        asym.append(float(g_prof[0] / g_prof[-1]))
+    assert asym[0] > asym[1] > asym[2]                     # reshaping dies as tau shrinks
+    assert asym[-1] < 1.1                                  # T/tau = 200 -> memoryless (CW-like)
+    out_inf = propagate_gnlse(flat, _FN_L, saturable_gain=fn, n_steps=200).output
+    g_inf = out_inf.power_W[top] / power[top]
+    assert g_inf[0] / g_inf[-1] > 10.0                     # ... while tau = inf still reshapes
+    # tau = inf is the LIMIT of finite tau, not a different model: a huge-but-finite lifetime
+    # converges to the FN branch as the z-step shrinks (first order in h, as documented)
+    err = [abs(propagate_gnlse(flat, _FN_L, n_steps=ns,
+                               saturable_gain=SaturableGain(_FN_G0_PER_M, _FN_ESAT, np.inf,
+                                                            frantz_nodvik=True,
+                                                            recovery_time_s=1e6)
+                               ).output.energy_J
+               / propagate_gnlse(flat, _FN_L, saturable_gain=fn, n_steps=ns).output.energy_J
+               - 1.0) for ns in (100, 400)]
+    assert err[1] < 0.35 * err[0] and err[1] < 2e-3, err
+
+
+def test_fn_opt_in_is_off_by_default_and_inert_when_off():
+    # GATE (b), byte-identity half: the opt-in must not perturb the CW path in ANY way.
+    # (Against the pre-A-10 function itself this was verified bit-for-bit on 72 shape/band/
+    # e_sat/centre combinations plus all 7 non-saturable paths; in-repo we pin the invariants
+    # that could regress: the defaults, the ignored knob, and the g_omega factorization.)
+    t = _fn_grid(2048, 40.96e-12)
+    p = gaussian_pulse(t, t0_s=1e-12, energy_J=1e-6, lambda0_m=1.03e-6)
+    assert SaturableGain(1.0, 1e-6, 1e13).frantz_nodvik is False
+    assert SaturableGain(1.0, 1e-6, 1e13).recovery_time_s == np.inf
+    kw = dict(beta2_s2_m=15e-27, beta3_s3_m=0.1e-39, gamma_W_m=3e-3, loss_per_m=0.05,
+              n_steps=60, store_slices=4)
+    for shp in ("parabolic", "lorentzian", "gaussian"):
+        a = propagate_gnlse(p, 1.5, saturable_gain=SaturableGain(1.7, 1e-9, 1e13, shp), **kw)
+        # recovery_time_s is IGNORED when the opt-in is off -- bit for bit, not approximately
+        b = propagate_gnlse(p, 1.5, saturable_gain=SaturableGain(
+            1.7, 1e-9, 1e13, shp, 0.0, False, 1e-15), **kw)
+        assert np.array_equal(a.output.field, b.output.field)
+        assert np.array_equal(a.field_zt, b.field_zt)
+        assert a.b_integral_rad == b.b_integral_rad and a.meta == b.meta
+        assert "frantz_nodvik" not in a.meta                # meta untouched on the CW path
+        # g_omega == g_small * sat * shape_omega, exactly (the shape_omega split-out)
+        sg = SaturableGain(1.7, 1e-9, 1e13, shp)
+        w = p.omega_rad_s()
+        assert np.array_equal(sg.g_omega(3e-9, w),
+                              1.7 * (1.0 / (1.0 + 3e-9 / 1e-9)) * sg.shape_omega(w))
+    # and the FN path DOES change the answer (the opt-in is not a no-op) -- at e_sat = E_in,
+    # the intermediate regime where the two laws disagree most
+    fn = propagate_gnlse(p, 1.5, saturable_gain=SaturableGain(
+        1.7, 1e-6, 1e13, "parabolic", 0.0, True), **kw)
+    cw = propagate_gnlse(p, 1.5, saturable_gain=SaturableGain(1.7, 1e-6, 1e13), **kw)
+    assert fn.output.energy_J / cw.output.energy_J - 1.0 > 0.01      # measured +2.1%
+    assert fn.meta["frantz_nodvik"] is True
+
+
+def test_fn_composes_with_the_cpa_chain():
+    # GATE (e): stretch -> FN-amplify -> compress stays green, and with the Kerr term off and a
+    # flat band the CHAIN energy gain is still exactly the Frantz-Nodvik closed form (the
+    # stretcher/compressor are pure spectral phase, so they move no energy).
+    t = _cpa_grid(8192)
+    seed = gaussian_pulse(t, t0_s=1e-13, energy_J=1e-9, lambda0_m=1.03e-6)
+    sg_flat = SaturableGain(2.0, 2e-9, np.inf, frantz_nodvik=True)
+    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_m=20e-27,
+                  saturable_gain=sg_flat, n_steps=300)
+    want = float(frantz_nodvik_output_energy(seed.energy_J, np.exp(2.0 * 2.0), 2e-9))
+    assert abs(r.amplified.energy_J / want - 1.0) < 1e-6
+    assert abs(r.energy_gain_dB - 10.0 * np.log10(want / seed.energy_J)) < 1e-5
+    assert abs(r.compressed.energy_J / r.amplified.energy_J - 1.0) < 1e-9   # phase-only optics
+    # with a real band + Kerr the chain still produces a sane CPA result, and FN extracts MORE
+    # than the CW law does (the -27% under-extraction is what this feature closes)
+    common = dict(stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_m=20e-27, gamma_W_m=1e-3,
+                  n_steps=300)
+    band = dict(g_small_per_m=2.0, e_sat_J=2e-9, gain_bandwidth_rad_s=6e13, shape="parabolic")
+    r_cw = cpa_chain(seed, saturable_gain=SaturableGain(**band), **common)
+    r_fn = cpa_chain(seed, saturable_gain=SaturableGain(frantz_nodvik=True, **band), **common)
+    for rr in (r_cw, r_fn):
+        assert rr.stretch_factor > 10.0 and 0.0 < rr.strehl <= 1.0
+        assert rr.b_integral_rad > 0.0 and np.isfinite(rr.compressed_fwhm_s)
+    assert r_fn.energy_gain_dB > r_cw.energy_gain_dB + 0.5
+    # gain narrowing still operates in FN mode (the relative band filter): the amplified
+    # spectrum is narrower than a flat-band FN run at the same small-signal gain
+    r_flat = cpa_chain(seed, saturable_gain=SaturableGain(2.0, 2e-9, np.inf,
+                                                         frantz_nodvik=True), **common)
+    assert r_fn.amplified.spectral_fwhm_rad_s() < r_flat.amplified.spectral_fwhm_rad_s()
+
+
+# ============ Audit 2026-07-25 X-10: the package facade must stay EXHAUSTIVE ============
+
+def test_package_facade_is_exhaustive():
+    # X-10 / A-20: dynameta.optics.fiber_amp is an EAGER facade (it imports every submodule at
+    # import time and its __all__ mirrors those imports), so a name in a submodule's __all__ that
+    # never reaches the package __all__ is an ACCIDENT, not a design choice -- unlike
+    # dynameta.optics / dynameta.carriers, which are deliberate PEP-562 lazy facades. The audit
+    # found 17 such names here: all 10 of lma's mode-solver API (LPMode, effective_area_m2,
+    # marcuse_bend_loss_dB_per_m, ...), 5 of nonlinear_limits, EDFA_CBAND_TARGETS and
+    # StageRecord. This gate makes the drift mechanical to catch.
+    import importlib
+    import pkgutil
+
+    import dynameta.optics.fiber_amp as pkg
+    exported = set(pkg.__all__)
+    assert len(exported) == len(pkg.__all__)                  # no duplicate entries
+    submodules = [info.name for info in pkgutil.iter_modules(pkg.__path__)]
+    checked = []
+    for name in submodules:
+        sub = importlib.import_module("dynameta.optics.fiber_amp." + name)
+        names = getattr(sub, "__all__", None)
+        assert names is not None, ("submodule declares no __all__", name)
+        missing = sorted(set(names) - exported)
+        assert not missing, (name, missing)
+        checked.append(name)
+    # audit W5-8: the old "checked >= 15" let a submodule silently DROP its __all__ (the loop
+    # skipped it and 17 of the 18 still cleared the floor) -- exactly the drift this gate exists
+    # to catch. Equality against the live submodule count leaves no slack.
+    assert checked == submodules
+    assert len(submodules) == 18, submodules                  # pin the count itself
+    for name in pkg.__all__:                                  # ... and every export resolves
+        assert getattr(pkg, name, None) is not None, name
+
+
+def test_fn_recovery_integrator_matches_a_naive_rk4_march():
+    # The finite-lifetime branch solves dg/dt = (g0-g)/tau - g P/E_sat by an integrating factor
+    # whose exp(A) weights are accumulated in LOG space (np.logaddexp.accumulate) -- necessary
+    # because A ~ E_pulse/E_sat + T/tau overflows for any realistic window, but clever enough to
+    # deserve an oracle. Gate it against a brute-force sub-stepped RK4 march that shares no
+    # algebra with it.
+    from dynameta.optics.fiber_amp.pulse import _gain_with_recovery
+    N = 1024
+    t = (np.arange(N) - N // 2) * (409.6e-12 / N)
+    T = 100e-12
+    env = np.exp(-(2.0 * t / T) ** 12)
+    power = env * (3.0 * _FN_ESAT / float(trapz(env, t)))
+
+    def rk4_march(tau, sub=4):
+        g = _FN_G0_PER_M
+        out = np.empty(N)
+        out[0] = g
+        for i in range(N - 1):
+            h = (t[i + 1] - t[i]) / sub
+            for k in range(sub):
+                pm = power[i] + (power[i + 1] - power[i]) * ((k + 0.5) / sub)
+
+                def rhs(gg):
+                    return (_FN_G0_PER_M - gg) / tau - gg * pm / _FN_ESAT
+                k1 = rhs(g)
+                k2 = rhs(g + 0.5 * h * k1)
+                k3 = rhs(g + 0.5 * h * k2)
+                k4 = rhs(g + h * k3)
+                g = g + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            out[i + 1] = g
+        return out
+
+    for tau in (1e-12, 1e-11, 1e-10):
+        got = _gain_with_recovery(t, power, _FN_G0_PER_M, _FN_ESAT, tau)
+        ref = rk4_march(tau)
+        assert np.max(np.abs(got - ref) / ref) < 1e-4, tau
+        assert got[0] == _FN_G0_PER_M                     # fully recovered ahead of the pulse
+        assert np.all(got <= _FN_G0_PER_M + 1e-12)        # re-pumping never overshoots g0
+        assert np.all(got > 0.0)
+    # a non-positive lifetime is not a model, it is a typo
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="recovery_time_s must be > 0"):
+        propagate_gnlse(gaussian_pulse(t, t0_s=5e-12, energy_J=1e-9), 1.0, n_steps=2,
+                        saturable_gain=SaturableGain(1.0, 1e-6, np.inf, frantz_nodvik=True,
+                                                     recovery_time_s=0.0))
+
+
+# ==== Audit 2026-07-26 W5-1/W5-2: the finite-recovery branch is FIRST order, and it says so ====
+
+def _fn_flat_top(N=1024, window_s=409.6e-12, T_s=100e-12, e_ratio=3.0):
+    """(t, P(t), Pulse) for a smooth super-Gaussian flat top of energy e_ratio * _FN_ESAT."""
+    t = _fn_grid(N, window_s)
+    env = np.exp(-(2.0 * t / T_s) ** 12)
+    power = env * (e_ratio * _FN_ESAT / float(trapz(env, t)))
+    return t, power, Pulse(t, np.sqrt(power).astype(np.complex128), 1.03e-6)
+
+
+def test_fn_finite_recovery_branch_is_first_order_and_inf_is_the_exact_spelling():
+    # W5-1/W5-2. _fn_slab_gain's docstring used to claim the finite-tau thin-slab form agreed with
+    # the exact tau = inf FN branch "to the split-step's own O(h^2) accuracy" while, two lines
+    # earlier, calling itself "first order in dz". Only one of those can be true. This gate pins
+    # the measured answer -- FIRST order -- in three independent ways, so the docs can no longer
+    # drift back:
+    #   (i)   the branch-to-branch energy gap falls as 1/n_steps, NOT 1/n_steps^2;
+    #   (ii)  the WHOLE propagator (dispersion + Kerr in the same step) loses its second order:
+    #         observed 2.04 with tau = inf, 1.08 with a finite tau;
+    #   (iii) tau = 1e30 s is therefore NOT a synonym for tau = inf -- it takes the first-order
+    #         branch and disagrees by 0.39% at n_steps = 100 (falling as 1/n_steps).
+    _, _, flat = _fn_flat_top()
+    _, fn = _fn_pair()
+
+    def gap(tau, ns):
+        a = propagate_gnlse(flat, _FN_L, n_steps=ns, saturable_gain=SaturableGain(
+            _FN_G0_PER_M, _FN_ESAT, np.inf, "parabolic", 0.0, True, tau)).output.energy_J
+        b = propagate_gnlse(flat, _FN_L, saturable_gain=fn, n_steps=ns).output.energy_J
+        return a, b, abs(a / b - 1.0)
+
+    e = [gap(1e6, ns)[2] for ns in (50, 100, 200, 400)]
+    orders = [np.log2(e[i] / e[i + 1]) for i in range(len(e) - 1)]
+    assert all(0.85 < o < 1.25 for o in orders), orders     # measured 1.008, 1.004, 1.002
+    assert not any(o > 1.6 for o in orders), orders         # ... and emphatically not O(h^2)
+
+    # (ii) the order of the propagator ITSELF, self-convergence at fixed dt with beta2 = 1 ps^2/m
+    # (L/L_D = 25) and gamma = 3e-4 /W/m in every step, so D and the gain factor truly do not
+    # commute. tau = inf keeps the symmetric split's second order; a finite tau does not.
+    N, esat = 2048, 1.0e-9
+    td = (np.arange(N) - N // 2) * (40.96e-12 / N)
+
+    def field(ns, tau):
+        p = gaussian_pulse(td, t0_s=200e-15, energy_J=3.0 * esat, lambda0_m=1.03e-6)
+        sg = SaturableGain(_FN_G0_PER_M, esat, np.inf, "parabolic", 0.0, True, tau)
+        return propagate_gnlse(p, _FN_L, beta2_s2_m=1.0e-24, gamma_W_m=3.0e-4,
+                               saturable_gain=sg, n_steps=ns).output.field
+
+    got = {}
+    for tau in (np.inf, 1.0e-9):
+        ref = field(4096, tau)
+        errs = [float(np.linalg.norm(field(ns, tau) - ref) / np.linalg.norm(ref))
+                for ns in (64, 128, 256)]
+        got[tau] = np.log2(errs[-2] / errs[-1])
+    assert got[np.inf] > 1.80, got                          # measured 2.04
+    assert 0.80 < got[1.0e-9] < 1.40, got                   # measured 1.08
+    assert got[np.inf] - got[1.0e-9] > 0.6, got             # the two branches are distinguishable
+
+    # (iii) 1e30 s is not inf: same physics, first-order branch, 1/n_steps error
+    rel = [abs(gap(1e30, ns)[0] / gap(1e30, ns)[1] - 1.0) for ns in (100, 200)]
+    assert 0.002 < rel[0] < 0.006, rel                      # measured 0.39% at n_steps = 100
+    assert abs(rel[0] / rel[1] - 2.0) < 0.3, rel            # halves with h, i.e. O(h)
+
+
+# ==== Audit 2026-07-26 W5-3: a saturable ABSORBER (g_small < 0) on all three branches ====
+
+def test_saturable_absorber_is_finite_and_consistent_on_all_three_branches():
+    # g_small_per_m < 0 is a saturable ABSORBER -- physical, and accepted by the CW law and by the
+    # tau = inf Frantz-Nodvik branch (G0 = exp(g0 dz) < 1 is a perfectly good FN slab). The
+    # finite-tau branch used to take np.log(g0) of a negative number and return an ALL-NaN gain,
+    # with nothing but a RuntimeWarning, which then poisoned the whole field. The rate equation is
+    # linear in g with a source proportional to g0, so g = g0 * h(t) with h independent of g0 --
+    # the fix carries |g0| through the log-space algebra and restores the sign.
+    import warnings
+
+    from dynameta.optics.fiber_amp.pulse import _gain_with_recovery
+    G_ABS = -2.0
+    t, power, flat = _fn_flat_top(N=512)
+
+    # (1) exact linearity in g0: the absorber IS the negated amplifier, bit for bit
+    for tau in (30e-12, 300e-12):
+        pos = _gain_with_recovery(t, power, -G_ABS, _FN_ESAT, tau)
+        neg = _gain_with_recovery(t, power, G_ABS, _FN_ESAT, tau)
+        assert np.array_equal(neg, -pos), tau
+    assert np.array_equal(_gain_with_recovery(t, power, 0.0, _FN_ESAT, 1e-10),
+                          np.zeros_like(power))            # g0 = 0 -> g == 0, not NaN
+
+    # (2) vs a brute-force RK4 march (no integrating factor, no logaddexp), at g0 < 0
+    def rk4_march(g0, tau, sub=4):
+        g = g0
+        out = np.empty(t.size)
+        out[0] = g
+        for i in range(t.size - 1):
+            h = (t[i + 1] - t[i]) / sub
+            for k in range(sub):
+                pm = power[i] + (power[i + 1] - power[i]) * ((k + 0.5) / sub)
+
+                def rhs(gg):
+                    return (g0 - gg) / tau - gg * pm / _FN_ESAT
+                k1 = rhs(g)
+                k2 = rhs(g + 0.5 * h * k1)
+                k3 = rhs(g + 0.5 * h * k2)
+                k4 = rhs(g + h * k3)
+                g = g + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            out[i + 1] = g
+        return out
+
+    for tau in (30e-12, 300e-12):
+        got = _gain_with_recovery(t, power, G_ABS, _FN_ESAT, tau)
+        ref = rk4_march(G_ABS, tau)
+        assert np.all(np.isfinite(got))
+        assert np.max(np.abs(got - ref) / np.abs(ref)) < 1e-4, tau
+        assert got[0] == G_ABS                             # unbleached ahead of the pulse
+        assert np.all(got < 0.0) and np.all(got >= G_ABS - 1e-12)   # bleaches TOWARD zero
+
+    # (3) the tau -> inf limit of the finite-tau integrator is the closed form it documents
+    U = _cumtrapz_t(power, t)
+    assert np.allclose(_gain_with_recovery(t, power, G_ABS, _FN_ESAT, np.inf),
+                       G_ABS * np.exp(-U / _FN_ESAT), rtol=0, atol=1e-14)
+
+    # (4) all three PROPAGATOR branches attenuate, stay finite, and warn about nothing
+    outs = {}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        outs["cw"] = propagate_gnlse(flat, _FN_L, n_steps=200,
+                                     saturable_gain=SaturableGain(G_ABS, _FN_ESAT, np.inf)).output
+        for tag, tau in (("fn_inf", np.inf), ("fn_tau", 1e-9), ("fn_fast", 1e-10)):
+            outs[tag] = propagate_gnlse(flat, _FN_L, n_steps=200, saturable_gain=SaturableGain(
+                G_ABS, _FN_ESAT, np.inf, "parabolic", 0.0, True, tau)).output
+    assert not caught, [str(w.message)[:80] for w in caught]
+    for tag, o in outs.items():
+        assert np.all(np.isfinite(o.field)), tag
+        assert 0.0 < o.energy_J < flat.energy_J, (tag, o.energy_J)
+    # a RECOVERING absorber cannot be bleached as thoroughly -> it absorbs MORE than the
+    # no-recovery limit, monotonically in 1/tau; and tau -> inf lands on the FN branch
+    assert outs["fn_fast"].energy_J < outs["fn_tau"].energy_J < outs["fn_inf"].energy_J
+    assert abs(outs["fn_tau"].energy_J / outs["fn_inf"].energy_J - 1.0) < 0.05
+
+    # (5) LIMIT CONSISTENCY, same two limits the amplifier gates use.
+    #   tau -> inf: the finite-tau branch converges to the exact FN branch, first order in h
+    err = [abs(propagate_gnlse(flat, _FN_L, n_steps=ns, saturable_gain=SaturableGain(
+        G_ABS, _FN_ESAT, np.inf, "parabolic", 0.0, True, 1e6)).output.energy_J
+        / propagate_gnlse(flat, _FN_L, n_steps=ns, saturable_gain=SaturableGain(
+            G_ABS, _FN_ESAT, np.inf, "parabolic", 0.0, True, np.inf)).output.energy_J - 1.0)
+        for ns in (100, 200)]
+    assert err[1] < 0.6 * err[0] and err[1] < 5e-3, err
+    #   pulse LONG against tau: the gain goes memoryless -> the CW law at E = P tau
+    cw_abs = SaturableGain(G_ABS, _FN_ESAT, np.inf)
+    top = power > 0.5 * power.max()
+    p_top = float(np.median(power[top]))
+    for ratio, tol in ((10.0, 1e-3), (200.0, 1e-5)):
+        tau = 100e-12 / ratio
+        g_t = _gain_with_recovery(t, power, G_ABS, _FN_ESAT, tau)
+        mid = float(g_t[top][int(top.sum()) // 2])
+        assert abs(mid / float(cw_abs.g_omega(p_top * tau, 0.0)) - 1.0) < tol, (ratio, mid)
+
+
+# ==== Audit 2026-07-26 W5-4: the FN factor needs the pulse INSIDE the window ====
+
+def test_fn_wrap_guard_fires_when_the_pulse_straddles_the_window_edge():
+    # Every other operator in propagate_gnlse is spectral, hence exactly equivariant under a
+    # cyclic shift of the field. The FN factor is not: it builds U(t) = INT P dt' from the LEFT
+    # EDGE of the periodic FFT window, so a pulse straddling that boundary has its leading part
+    # treated as trailing (saturated instead of unsaturated) -- 43.8% of the extracted energy,
+    # silently. A contained pulse must stay roll-equivariant to round-off; a wrapped one must now
+    # say so.
+    import warnings
+
+    N = 4096
+    t = _fn_grid(N, 409.6e-12)
+
+    def rolled(k, *, fn=True, beta2=0.0, ns=100):
+        p0 = gaussian_pulse(t, t0_s=5e-12, energy_J=3.0 * _FN_ESAT, lambda0_m=1.03e-6)
+        sg = SaturableGain(_FN_G0_PER_M, _FN_ESAT, np.inf, "parabolic", 0.0, fn)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = propagate_gnlse(Pulse(t, np.roll(p0.field, k), 1.03e-6), _FN_L,
+                                  beta2_s2_m=beta2, saturable_gain=sg, n_steps=ns).output
+        wraps = [w for w in caught if "not contained in the time window" in str(w.message)]
+        return np.roll(out.field, -k), out.energy_J, wraps
+
+    base, e0, w0 = rolled(0)
+    assert not w0                                          # a centred pulse is silent
+    for k in (200, 1000, -1000):                           # ... and roll-equivariant
+        f, e, w = rolled(k)
+        assert not w, k
+        assert np.linalg.norm(f - base) / np.linalg.norm(base) < 1e-12, k
+        assert abs(e / e0 - 1.0) < 1e-12, k
+    # HALF-WINDOW roll: the pulse now sits ON the periodic boundary
+    f, e, w = rolled(N // 2)
+    assert len(w) == 1, [str(x.message)[:80] for x in w]    # exactly one warning per call
+    assert issubclass(w[0].category, RuntimeWarning)
+    for phrase in ("Frantz-Nodvik", "LEFT EDGE", "43.8%", "Re-centre"):
+        assert phrase in str(w[0].message), phrase
+    assert e / e0 - 1.0 > 0.4                              # measured +43.75%: the bug it names
+    assert np.linalg.norm(f - base) / np.linalg.norm(base) > 0.5
+    # the CW path is EXACTLY roll-equivariant (its gain is one scalar) -- and must stay silent
+    cbase, ce, cw0 = rolled(0, fn=False, beta2=5e-24)
+    for k in (1024, N // 2):
+        f, e, w = rolled(k, fn=False, beta2=5e-24)
+        assert not w and not cw0, k
+        assert np.array_equal(f, cbase), k
+
+
+# ==== Audit 2026-07-26 W5-5: the relative band filter is an APPROXIMATION, pinned ====
+
+def test_fn_relative_band_filter_over_saturation_is_pinned():
+    # The relative filter gets the SPECTRAL SHAPE exactly right (ln G_i / ln G_j = s_i/s_j) but
+    # saturates on the UNWEIGHTED total power at the band-CENTRE gain, whereas the exact
+    # homogeneous system depletes one shared inversion with the SHAPE-WEIGHTED total power
+    # SUM_j s_j P_j. Wing energy therefore over-saturates the model, which then UNDER-extracts.
+    # Oracle: RK4 in z of dP_i/dz = s_i n P_i, n = g0 exp(-INT (s1 P1 + s2 P2) dt / E_sat), on a
+    # two-line field -- one line at the band centre (s = 1) and one in the wing (s = 0.3053).
+    N, nz, ns = 8192, 400, 200
+    g0, esat, L = 3.0, 1.0e-6, 1.0
+    t = _fn_grid(N, 409.6e-12)
+    dt = float(t[1] - t[0])
+    env = np.exp(-(2.0 * t / 100e-12) ** 12)
+    omega_g = 3.0e13
+    kbeat = int(round(2.5e13 / (2.0 * np.pi / (N * dt))))   # exactly on the FFT grid
+    dw = 2.0 * np.pi * kbeat / (N * dt)
+    s2 = float(max(1.0 - (dw / omega_g) ** 2, 0.0))
+    assert abs(s2 - 0.3053) < 1e-3, s2
+
+    def two_line(e_tot, wing_frac):
+        p_tot = e_tot / float(trapz(env ** 2, t))
+        A = env * (np.sqrt(p_tot * (1.0 - wing_frac))
+                   + np.sqrt(p_tot * wing_frac) * np.exp(1j * dw * t))
+        return (Pulse(t, A.astype(np.complex128), 1.03e-6),
+                (env ** 2) * p_tot * (1.0 - wing_frac), (env ** 2) * p_tot * wing_frac)
+
+    def oracle(P1, P2):
+        def rhs(p1, p2):
+            n = g0 * np.exp(-_cumtrapz_t(p1 + s2 * p2, t) / esat)
+            return n * p1, s2 * n * p2
+        p1, p2, dz = P1.copy(), P2.copy(), L / nz
+        for _ in range(nz):
+            k1 = rhs(p1, p2)
+            k2 = rhs(p1 + 0.5 * dz * k1[0], p2 + 0.5 * dz * k1[1])
+            k3 = rhs(p1 + 0.5 * dz * k2[0], p2 + 0.5 * dz * k2[1])
+            k4 = rhs(p1 + dz * k3[0], p2 + dz * k3[1])
+            p1 = p1 + dz / 6.0 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+            p2 = p2 + dz / 6.0 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+        return float(trapz(p1, t)) + float(trapz(p2, t))
+
+    sg = SaturableGain(g0, esat, omega_g, "parabolic", 0.0, True)
+    err = {}
+    for tag, e_ratio, wing in (("centre_only", 0.5, 0.0),      # control: no wing energy
+                               ("shipped", 0.5, 0.036),        # the shipped CPA example's exposure
+                               ("worst", 3.0, 0.5)):           # designed worst case
+        p, P1, P2 = two_line(e_ratio * esat, wing)
+        got = propagate_gnlse(p, L, saturable_gain=sg, n_steps=ns).output.energy_J
+        err[tag] = got / oracle(P1, P2) - 1.0
+    # all the energy at the band centre -> the filter is exact (this isolates the wing weighting)
+    assert abs(err["centre_only"]) < 5e-5, err
+    # REGRESSION PIN. The shipped cpa_chain example runs at energy-weighted mean shape 0.975 with
+    # E_in = 0.5 E_sat; at that exposure the model under-extracts by 0.686%. Pinning it makes any
+    # drift in the approximation visible instead of silently absorbed.
+    assert -0.0075 < err["shipped"] < -0.0062, err
+    # the error is a WING effect and it grows with wing energy and saturation, one-signed
+    assert -0.140 < err["worst"] < -0.128, err                 # measured -13.39%
+    assert err["worst"] < err["shipped"] < err["centre_only"]

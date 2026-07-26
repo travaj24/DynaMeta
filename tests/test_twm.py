@@ -303,17 +303,166 @@ def test_qpm_order_three_design_closed_form_matches_the_integrator():
     """FIX-VERIFY W1 kill 3, end to end: a THIRD-order poling mask (period 3x coarser, the reason
     higher-order QPM is used at all) must give the same A3(L) from ``sfg_undepleted``'s closed form
     as from ``twm_propagate``'s ODE march over the actual square wave.  Pre-fix the closed form
-    returned ~0 for every order > 1."""
+    returned ~0 for every order > 1.
+
+    AUDIT Q-14 re-pin: this spec used to carry ``omega2=W1``, i.e. a DEGENERATE spec (omega1 ==
+    omega2) run through the nondegenerate closed form AND the nondegenerate integrator. That is
+    exactly the silent-2x failure Q-14 is about; it did not affect this gate's STATEMENT (both
+    sides carry the same error, and the assertion is closed-vs-march, not an absolute value), but
+    it is now the nondegenerate ``omega2=W2`` its sibling gates use, so the gate exercises the
+    path its docstring describes. The degenerate contract itself is pinned in
+    ``test_degenerate_spec_is_refused_not_silently_nondegenerate`` below."""
     dk0 = 800.0
     for order in (1, 3, 5):
         Lam = qpm_period_for(dk0, order=order)
         L = 20 * Lam
-        spec = TWMSpec(dk_override=dk0, qpm_period=Lam, omega1=W1, omega2=W1, d_eff=DEFF,
+        spec = TWMSpec(dk_override=dk0, qpm_period=Lam, omega1=W1, omega2=W2, d_eff=DEFF,
                        length=L, n1=1.5, n2=1.5, n3=1.5)
         march = abs(twm_propagate(spec, 1.0, 1.0, 0.0 + 0j, n_out=241,
                                   rtol=1e-12, atol=1e-14).A3[-1]) ** 2
         closed = abs(sfg_undepleted(spec, 1.0, 1.0)["A3_L"]) ** 2
         assert closed == pytest.approx(march, rel=2e-2), order
+
+
+# --------------------------------------------------- gate 4c: degenerate spec contract (Q-14)
+def test_degenerate_spec_is_refused_not_silently_nondegenerate():
+    """AUDIT Q-14 -- ** BEHAVIOUR CHANGE **. A ``TWMSpec`` with omega1 == omega2 used to run the
+    NONDEGENERATE coupled-wave equations silently: for A1 = A2 = A that is exactly 2x the SHG
+    field (4x the intensity), while Manley-Rowe stays conserved to ~4e-16 so no diagnostic fires.
+    The 1/2 degeneracy factor is derived in the module docstring and applied in ``shg_undepleted``
+    / ``degenerate=True``; nothing routed a degenerate spec there.
+
+    THE CHOSEN CONTRACT IS REFUSE, NOT AUTO-ROUTE, and this gate pins why: the frequencies alone
+    cannot decide the physics. omega1 == omega2 with the two waves being the SAME mode is SHG
+    (the 1/2 applies); omega1 == omega2 with the two waves being DISTINCT modes -- type-II
+    degenerate SFG/SPDC, orthogonal polarizations, n1 != n2 -- is ordinary nondegenerate physics
+    (no 1/2), and TWMSpec can represent it. Auto-routing would pick SHG for both, and inside
+    ``twm_propagate`` it would additionally discard ``amp2`` and ``n2`` without a word. So the
+    nondegenerate entry points raise and make the caller say which case it is; the opt-outs
+    reproduce the pre-fix numbers BIT-FOR-BIT."""
+    w = W1
+    L, A = 3.0e-3, 1.0
+    spec = TWMSpec(omega1=w, omega2=w, d_eff=DEFF, length=L, n1=1.5, n2=1.5, n3=1.5,
+                   dk_override=0.0)
+    assert spec.is_degenerate()
+
+    # (a) both nondegenerate entry points REFUSE, and say where to go
+    for fn in (lambda: sfg_undepleted(spec, A, A),
+               lambda: twm_propagate(spec, A, A, 0.0 + 0j, n_out=33)):
+        with pytest.raises(ValueError) as ei:
+            fn()
+        msg = str(ei.value)
+        assert "DEGENERATE" in msg
+        assert "shg_undepleted" in msg or "degenerate=True" in msg      # the SHG route
+        assert "distinct_modes=True" in msg or "degenerate=False" in msg  # the type-II route
+
+    # (b) the SHG route carries the 1/2: |A3|_nondeg = 2 |A_s|_shg exactly (the Q-14 measurement)
+    nd = sfg_undepleted(spec, A, A, distinct_modes=True)
+    shg = shg_undepleted(spec, A)
+    assert abs(nd["A3_L"]) / abs(shg["A_s_L"]) == pytest.approx(2.0, rel=1e-14)
+    assert nd["I3_L"] / shg["I_s_L"] == pytest.approx(4.0, rel=1e-13)
+
+    # (c) the opt-outs are BIT-IDENTICAL to the pre-fix nondegenerate path.  Reference values are
+    #     rebuilt in-test from the closed form the module documents (A3 = i kappa3 A1 A2 L Phi at
+    #     dk = 0 => Phi = 1), i.e. from the physics, not from the code under test.
+    assert nd["A3_L"] == 1j * spec.kappa(3) * A * A * L
+    march = twm_propagate(spec, A, A, 0.0 + 0j, n_out=33, degenerate=False)
+    assert march.degenerate is False
+    assert abs(abs(march.A3[-1]) - abs(nd["A3_L"])) < 1e-9 * abs(nd["A3_L"])
+    assert march.mr13_residual < 1e-12        # ... and Manley-Rowe was NEVER the tell
+
+    # (d) the SHG route through the integrator matches its own closed form (the 1/2 on both)
+    deg = twm_propagate(spec, A, 0.0 + 0j, 0.0 + 0j, n_out=33, degenerate=True)
+    assert deg.degenerate is True
+    assert abs(abs(deg.A3[-1]) - abs(shg["A_s_L"])) < 1e-6 * abs(shg["A_s_L"])
+
+    # (e) a NONDEGENERATE spec is untouched -- no raise, and the tri-state default agrees with an
+    #     explicit degenerate=False bit-for-bit.
+    nds = TWMSpec(omega1=W1, omega2=W2, d_eff=DEFF, length=L, n1=1.5, n2=1.5, n3=1.5,
+                  dk_override=0.0)
+    assert not nds.is_degenerate()
+    auto = twm_propagate(nds, A, A, 0.0 + 0j, n_out=33)
+    expl = twm_propagate(nds, A, A, 0.0 + 0j, n_out=33, degenerate=False)
+    assert np.array_equal(auto.A3, expl.A3)
+    assert sfg_undepleted(nds, A, A)["A3_L"] == sfg_undepleted(nds, A, A,
+                                                               distinct_modes=True)["A3_L"]
+
+    # (f) the tolerance is RELATIVE and tight: a physically detuned pair is not "degenerate"
+    near = TWMSpec(omega1=w, omega2=w * (1.0 + 1e-7), d_eff=DEFF, length=L, n1=1.5, n2=1.5,
+                   n3=1.5, dk_override=0.0)
+    assert not near.is_degenerate()
+    sfg_undepleted(near, A, A)                                   # must not raise
+    exact = TWMSpec(omega1=w, omega2=w * (1.0 + 1e-12), d_eff=DEFF, length=L, n1=1.5, n2=1.5,
+                    n3=1.5, dk_override=0.0)
+    assert exact.is_degenerate()
+
+
+def test_degenerate_True_on_a_nondegenerate_spec_is_refused():
+    """AUDIT Q-14 residual -- the SAME silent discard, through the OTHER door. The refusal above
+    exists because auto-routing a degenerate spec into the SHG branch would discard amp2/n2/omega2
+    without a word. ``degenerate=True`` on a NONdegenerate spec does exactly that, and was
+    accepted: measured omega2 = 1.31 omega1 with amp2 = 2.0e7 V/m, |A3(L)| = 2.79e7 reported, the
+    second wave never read, no diagnostic. The gate is two-sided now."""
+    L = 3.0e-3
+    nds = TWMSpec(omega1=W1, omega2=1.31 * W1, d_eff=DEFF, length=L, n1=1.5, n2=1.55, n3=1.6,
+                  dk_override=311.0)
+    assert not nds.is_degenerate()
+
+    with pytest.raises(ValueError) as ei:
+        twm_propagate(nds, 3.0e7, 2.0e7, 1.0e6 + 0j, n_out=65, degenerate=True)
+    msg = str(ei.value)
+    assert "NONDEGENERATE" in msg
+    assert "amp2" in msg and "n2" in msg                     # names what would be discarded
+    assert "shg_undepleted" in msg                           # ... and where to go instead
+
+    # the value it USED to return, computed the only way that branch can: from omega1 alone.
+    # Pinned so the refusal is measured against a real number, not an assumption.
+    deg_spec = TWMSpec(omega1=W1, omega2=W1, d_eff=DEFF, length=L, n1=1.5, n2=1.55, n3=1.6,
+                       dk_override=311.0)
+    would_have = twm_propagate(deg_spec, 3.0e7, 2.0e7, 1.0e6 + 0j, n_out=65, degenerate=True)
+    assert abs(would_have.A3[-1]) > 0.0                      # a perfectly plausible-looking number
+
+    # (b) the CORRECT degenerate calls are untouched, bit-for-bit
+    A = 1.0
+    dspec = TWMSpec(omega1=W1, omega2=W1, d_eff=DEFF, length=L, n1=1.5, n2=1.5, n3=1.5,
+                    dk_override=0.0)
+    ok = twm_propagate(dspec, A, 0.0 + 0j, 0.0 + 0j, n_out=33, degenerate=True)
+    assert ok.degenerate is True
+    assert abs(abs(ok.A3[-1]) - abs(shg_undepleted(dspec, A)["A_s_L"])) \
+        < 1e-6 * abs(shg_undepleted(dspec, A)["A_s_L"])
+    # (c) ... and so is degenerate=False on a nondegenerate spec (the type-II opt-in)
+    twm_propagate(nds, 3.0e7, 2.0e7, 1.0e6 + 0j, n_out=65, degenerate=False)
+    # (d) a NEARLY degenerate spec just outside the tolerance is refused too -- the predicate
+    #     is the single source of truth on both sides
+    near = TWMSpec(omega1=W1, omega2=W1 * (1.0 + 2e-9), d_eff=DEFF, length=L)
+    assert not near.is_degenerate()
+    with pytest.raises(ValueError):
+        twm_propagate(near, 1.0, 1.0, 0.0 + 0j, n_out=17, degenerate=True)
+    inside = TWMSpec(omega1=W1, omega2=W1 * (1.0 + 5e-10), d_eff=DEFF, length=L)
+    assert inside.is_degenerate()
+    twm_propagate(inside, 1.0, 1.0, 0.0 + 0j, n_out=17, degenerate=True)     # must not raise
+
+
+def test_nonfinite_omegas_are_rejected_at_construction():
+    """AUDIT Q-14 residual: ``is_degenerate`` is a COMPARISON, and every comparison against nan is
+    False -- so a spec with a nan omega reported NONdegenerate and sailed through the degeneracy
+    refusal into the nondegenerate equations. ``inf`` was worse: ``omega1 = omega2 = inf`` is
+    degenerate by inspection, but ``abs(inf - inf) = nan <= rel_tol * inf`` is False, so the
+    guard's own predicate reported the OPPOSITE of the truth. Neither is a frequency."""
+    L = 3.0e-3
+    for w1, w2 in ((float("nan"), W1), (W1, float("nan")), (float("nan"), float("nan")),
+                   (float("inf"), float("inf")), (float("inf"), W1),
+                   (W1, float("-inf"))):
+        with pytest.raises(ValueError) as ei:
+            TWMSpec(omega1=w1, omega2=w2, d_eff=DEFF, length=L)
+        assert "FINITE" in str(ei.value)
+        assert "omega1" in str(ei.value) or "omega2" in str(ei.value)
+
+    # zero is finite and stays legal (is_degenerate(0, 0) is True by the scale == 0 branch)
+    assert TWMSpec(omega1=0.0, omega2=0.0, d_eff=DEFF, length=L).is_degenerate()
+    assert not TWMSpec(omega1=0.0, omega2=W1, d_eff=DEFF, length=L).is_degenerate()
+    # ... as do ordinary specs, unchanged
+    assert not TWMSpec(omega1=W1, omega2=W2, d_eff=DEFF, length=L).is_degenerate()
 
 
 # ------------------------------------------------------------------ gate 5: energy conservation

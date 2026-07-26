@@ -177,14 +177,17 @@ propagation; default is interop, not reimplementation.
 
 (verified 2026-06-11; each line cites the proving validation/commit)
 
-- DG oxide hard wall: EXPERIMENTAL (`setup_dg_hard_wall`, cef01d9;
-  `validation/_dg_hard_wall_wip.py`, underscore-excluded from run_all). Re-confirmed by
-  fresh run 2026-06-11: the frozen-psi gamma ramp converges to a spurious wide-depletion
-  state (GATE A max |dn|/N0 = 0.80 vs the <2% gate) and the self-consistent Poisson-on leg
+- DG oxide hard wall: EXPERIMENTAL (`setup_dg_hard_wall`, cef01d9). Its discrete mechanics
+  are gated by `tests/test_density_gradient.py::test_dg_hard_wall_pins_the_wall_rows`
+  (audit X-6: the export previously had NO executable gate anywhere -- its only caller was
+  a `_`-prefixed validation `run_all` skips in every tier, so that file is gone and its
+  gate definitions live in the test's docstring). Re-confirmed by fresh runs 2026-06-11
+  and 2026-07-26: the frozen-psi gamma ramp converges to a spurious wide-depletion state
+  (GATE A max |dn|/N0 = 0.80 vs the <2% gate) and the self-consistent Poisson-on leg
   hard-fails with DEVSIM convergence failure -- the log-singular boundary layer flattens
   the Newton landscape. Continuation plan (tighter-tolerance damped solves or a u_floor
-  continuation) is pinned in the WIP script header; `dg_correct_density_1d` remains THE
-  validated dead-layer tool. Bipolar DG twin queued after.
+  continuation) is pinned in `setup_dg_hard_wall`'s docstring; `dg_correct_density_1d`
+  remains THE validated dead-layer tool. Bipolar DG twin queued after.
 - GPU: linear + nonlinear FDTD kernels hardware-validated on CUDA 13.1 / RTX 4070 Ti /
   cupy 14.0.1 (`validation/fdtd_numba_cuda` GPU==CPU ~4e-15;
   `validation/fdtd_gpu_nonlinear` cupy + numba-cuda vs numpy worst ~2e-15 incl exact

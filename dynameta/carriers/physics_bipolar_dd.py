@@ -35,6 +35,31 @@ Charge-neutral ohmic contact (recipe): pin
   p0 = n_i^2 / n0,  with the symmetric swap on the p-side, and the Potential
 contact carries the built-in offset + ifelse(N>0, -V_t log(n0/n_i), V_t log(p0/n_i)).
 
+FERMI-DIRAC CONTACT OFFSET (audit C-10). That log() offset is the BOLTZMANN built-in potential,
+and it used to be pinned even with fd_enhancement=True -- i.e. the boundary condition contradicted
+the interior model, by 0.17 V per degenerate contact at eta = 10. Setting the SG current to zero,
+  Jn = 0  =>  n1/n0 = exp(-vdiff/g)  =>  dpsi = g V_t dln n,
+so the offset the FD interior actually implies is V_t [ ln(n0/n_i) + Delta(n0/N_dos) ] with
+  Delta(u) = int_0^u (g(x) - 1) dx/x ,
+evaluated with the SAME rational g the edge models use (carriers.einstein) -- so the contact and
+the interior agree by construction and the Boltzmann limit (g -> 1, Delta -> 0) is EXACT.
+fd_enhancement=False keeps the pure Boltzmann expressions byte-identically.
+
+ACCURACY OF Delta, IN TWO FRAMES (re-measured 2026-07-26; the earlier "0.85 % at eta = 10, <0.5 %
+for eta >= 15" was measured only in the AH frame and does NOT hold against exact quadrature).
+Comparing Delta(u) against the exact Fermi-Dirac offset eta - ln(F_1/2(eta)):
+  * AH frame (u = F12_aymerich_humet(eta), the fit tests/test_devsim_smoke.py uses):
+      0.85 % at eta = 10, and < 0.5 % for eta >= 15 -- the claim as originally written.
+  * EXACT frame (u = F_1/2(eta) by quadrature, the physical oracle):
+      eta = 10: +0.78 %   15: +0.60 %   20: +0.55 %   25: +0.50 %   32 (the ceiling): +0.40 %
+    i.e. the error is under 1 % everywhere degeneracy matters, but "< 0.5 % for eta >= 15" is an
+    artifact of the AH frame; against exact quadrature it does not reach 0.5 % until eta ~ 25.
+The sign matters for the ceiling warning: Delta OVERSHOOTS the exact offset (positive error) all
+the way to eta ~ 50, where the error crosses zero (+0.009 % at eta = 50, -0.040 % at 52); only past
+that does it undershoot (-0.24 % at eta = 60, -1.20 % at 100). The g-FACTOR is the one that crosses
+over early -- +0.009 % at eta = 30, -0.041 % at 31, -1.07 % at 50 -- so g undershoots past eta ~ 30,
+which is where _FD_U_MAX comes from.
+
 Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
   (1) potential-only pre-solve (freeze carriers); (2) seed Electrons/Holes from the
   Boltzmann equilibrium node models; (3) coupled 3-variable Newton; (4) bias ramp.
@@ -43,6 +68,7 @@ Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
 
 from __future__ import annotations
 
+import numpy as np
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
@@ -50,7 +76,170 @@ from dynameta.carriers.physics_equilibrium import (
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
-from dynameta.carriers.einstein import g_expr_devsim
+from dynameta.carriers.einstein import g_einstein, g_expr_devsim
+
+# --- audit C-10: the Fermi-Dirac degeneracy correction to the ohmic built-in potential ----------
+_FD_GL_N = 96                                                  # Gauss-Legendre nodes for Delta(u)
+_FD_GL_X, _FD_GL_W = np.polynomial.legendre.leggauss(_FD_GL_N)
+_FD_U_MAX = 136.0          # F_1/2(eta = 32): the rational g fit's validated ceiling (einstein.py)
+# audit C-10 (wave-5 residual): peak-memory budget for the (n_u, _FD_GL_N) quadrature block below.
+# The rule is evaluated on the UNIQUE u values, which is normally one or two, but a GRADED doping
+# profile makes every node unique: a 1e6-unique-value case allocated 5.5 GB (several (1e6, 96)
+# float64 temporaries at once inside g_einstein) and could take the process down. Chunking the
+# unique axis is EXACTLY arithmetic-preserving -- each row's 96-point sum is independent of every
+# other row -- so results are bit-identical to the unchunked form at any chunk size.
+# MEASURED (tracemalloc, 2026-07-26): u = linspace(1e-6, 130, 1e6) peaks at 113 MB chunked; the
+# unchunked form peaks at 1047 MB for only 2e5 values (10.4x the chunked peak at the same n), i.e.
+# ~5.1 GB extrapolated to 1e6 -- and the two results are byte-identical.
+_FD_CHUNK_BYTES = 12 * 1024 * 1024                             # ~113 MB peak with the temporaries
+_FD_CHUNK = max(1, _FD_CHUNK_BYTES // (8 * _FD_GL_N))          # rows per block (16384 at 96 nodes)
+
+
+def fd_potential_shift(u):
+    """Degeneracy correction Delta(u) = int_0^u (g(x) - 1) dx/x to the built-in potential, in units
+    of V_t; u = n0/N_dos (the majority carrier over ITS band DOS). audit C-10.
+
+    Zero-current equilibrium of the FD-enhanced Scharfetter-Gummel current gives dpsi = g V_t dln n
+    (see the module docstring), so the ohmic contact's built-in offset is
+    V_t [ln(n0/n_i) + Delta(n0/N_dos)] instead of the Boltzmann V_t ln(n0/n_i). Integrating in
+    s = x^(1/3) (the fit's natural variable) makes the integrand 3 (g(s^3) - 1)/s, which is
+    ANALYTIC and vanishes like 3*GA*s^2 at the origin, so a fixed Gauss-Legendre rule converges
+    spectrally and Delta(0) = 0 EXACTLY -- the Boltzmann off-switch. Broadcasts over arrays.
+
+    The (n_u, 96) quadrature block is evaluated in `_FD_CHUNK`-row slices so peak memory stays ~113 MB
+    however many values are passed (audit C-10 residual; a 1e6-value graded profile allocated ~5 GB).
+    Rows are independent, so the chunked result is BIT-IDENTICAL to the unchunked one."""
+    uu = np.asarray(u, dtype=np.float64)
+    if np.any(uu < 0.0):
+        raise ValueError("fd_potential_shift: u = n/N_dos must be >= 0")
+    flat = np.power(uu, 1.0 / 3.0).reshape(-1)                  # upper limit in s, one row per value
+    out = np.empty(flat.shape, dtype=np.float64)
+    for lo in range(0, flat.size, _FD_CHUNK):
+        hi = flat[lo:lo + _FD_CHUNK]
+        s = 0.5 * hi[:, None] * (_FD_GL_X + 1.0)                # nodes on [0, u^(1/3)]
+        w = 0.5 * hi[:, None] * _FD_GL_W
+        with np.errstate(divide="ignore", invalid="ignore"):
+            integrand = np.where(s > 0.0,
+                                 3.0 * (g_einstein(s ** 3) - 1.0) / np.where(s > 0.0, s, 1.0), 0.0)
+        out[lo:lo + _FD_CHUNK] = np.sum(w * integrand, axis=-1)
+    out = out.reshape(uu.shape)
+    return float(out) if out.ndim == 0 else out
+
+
+def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: float,
+                            n_dos_p_m3: "float | None" = None,
+                            fd_enhancement: bool = True) -> float:
+    """The built-in potential [V] the bipolar ohmic contact PINS for a node of SIGNED net doping
+    `net_doping_m3`, in the contact's own frame (n-type: +V_t ln(n0/n_i) plus the FD correction).
+
+    THE single source for anything that has to reference another terminal to the ohmic contact's
+    frame -- notably devsim_3d's gate offset phi_bi, which re-derived the Boltzmann log() and would
+    otherwise re-open the very frame mismatch it exists to close (audit C2-1) as soon as the body is
+    degenerate (audit C-10: 0.178 V at eta = 10). fd_enhancement=False returns the plain Boltzmann
+    value, matching the contact expression exactly."""
+    N = float(net_doping_m3)
+    ni = float(n_i_m3)
+    root = (N * N + 4.0 * ni * ni) ** 0.5
+    n0 = 0.5 * (abs(N) + root)                                 # majority density (CELEC / CHOLE)
+    sign = 1.0 if N >= 0.0 else -1.0
+    dos = float(n_dos_m3) if N >= 0.0 else float(n_dos_p_m3 if n_dos_p_m3 else n_dos_m3)
+    shift = float(fd_potential_shift(n0 / dos)) if fd_enhancement else 0.0
+    return sign * V_T * (np.log(n0 / ni) + shift)
+
+
+def _contact_region(device: str, contact: str):
+    """The region a contact belongs to (None if DEVSIM cannot say)."""
+    try:
+        regions = ds.get_region_list(device=device, contact=contact)
+    except Exception:                                          # pragma: no cover - devsim internals
+        return None
+    return regions[0] if regions else None
+
+
+def _fd_contact_shift(device: str, contact: str):
+    """audit C-10: build (once per region) the node model carrying Delta(u) for the ohmic contact's
+    built-in offset, and return its name -- or None when the FD correction does not apply (the
+    region was set up with fd_enhancement=False, or is not a bipolar region at all), in which case
+    the callers keep the pure-Boltzmann expressions BYTE-IDENTICALLY.
+
+    Delta depends only on NetDoping (through the charge-neutral majority density) and on the band
+    DOS parameters, i.e. on no solution variable, so it is a fixed field: computed here in numpy
+    and installed with node_solution/set_node_values. That also keeps the contact model's
+    derivative literal "1" exactly as before.
+
+    TWO DIFFERENT "return None"s, and only one of them is silent (audit C-10 residual). A region with
+    no `fd_enhancement` parameter at all is not a bipolar region -- the caller is setting up some
+    other physics and the Boltzmann string is simply what it always was, so that path stays quiet.
+    But a region that DOES declare fd_enhancement > 0 and then fails a MATERIAL lookup (n_i / N_dos /
+    N_dos_p) would silently revert its contact to Boltzmann and re-open the very 0.17 V mismatch this
+    function exists to close, so that path WARNS and names the parameter that could not be read."""
+    region = _contact_region(device, contact)
+    if region is None:
+        return None
+    try:
+        fd_on = float(ds.get_parameter(device=device, region=region,
+                                       name="fd_enhancement")) > 0.0
+    except Exception:
+        return None                                            # not a bipolar region: leave as-is
+    if not fd_on:
+        return None                                            # Boltzmann interior -> Boltzmann BC
+    _param = "n_i"
+    try:
+        n_i = float(ds.get_parameter(device=device, region=region, name=_param))
+        _param = "N_dos"
+        N_c = float(ds.get_parameter(device=device, region=region, name=_param))
+        _param = "N_dos_p"
+        N_v = float(ds.get_parameter(device=device, region=region, name=_param))
+    except Exception as exc:                                   # audit C-10: do NOT revert silently
+        import warnings
+        warnings.warn(
+            "setup_contact_ohmic_bipolar: region {!r} declares fd_enhancement > 0 (Fermi-Dirac "
+            "transport) but its material parameter {!r} could not be read ({}: {}), so contact {!r} "
+            "falls back to the BOLTZMANN built-in potential while the interior keeps the FD "
+            "g-factor -- the exact boundary/interior contradiction audit C-10 closed (0.17 V per "
+            "degenerate contact at eta = 10). Set the parameter on the region (setup_bipolar_region "
+            "does), or set fd_enhancement=0 to choose Boltzmann deliberately.".format(
+                region, _param, type(exc).__name__, str(exc)[:80], contact),
+            RuntimeWarning, stacklevel=3)
+        return None
+    name = "FDContactShift"
+    if name in ds.get_node_model_list(device=device, region=region):
+        return name
+    nd = np.asarray(ds.get_node_model_values(device=device, region=region, name="NetDoping"),
+                    dtype=np.float64)
+    root = np.sqrt(nd ** 2 + 4.0 * n_i ** 2)
+    n0 = 1.0 + 0.5 * np.abs(nd + root)                         # == CELEC, evaluated in numpy
+    p0 = 1.0 + 0.5 * np.abs(-nd + root)                        # == CHOLE
+    u = np.where(nd > 0.0, n0 / N_c, p0 / N_v)                 # the branch the contact expression takes
+    # CEILING WARNING. It reads NetDoping ONLY -- i.e. the CHARGE-NEUTRAL majority density at the
+    # contact -- so it cannot see degeneracy that the SOLUTION produces: a gated/accumulation device
+    # (the MOS-cap builders, an ENZ accumulation layer) can drive n/N_dos far past this ceiling in
+    # the channel while the contact's own doping sits comfortably below it, and NOTHING warns there.
+    # The transport g-factor is what degrades in that case, not this offset. A solution-level check
+    # (post-solve max(Electrons)/N_dos) is a deliberate follow-on, not implemented here.
+    if float(np.max(u)) > _FD_U_MAX:
+        import warnings
+        warnings.warn(
+            "setup_contact_ohmic_bipolar: the contact's majority density reaches n/N_dos = {:.3g} "
+            "(eta > 32), beyond the validated ceiling of the rational g fit (carriers.einstein). "
+            "Past it the transport g-FACTOR undershoots (its error crosses zero near eta ~ 30: "
+            "-0.04 % at eta = 31, -1.1 % at 50), while this contact's built-in OFFSET still "
+            "overshoots the exact Fermi-Dirac value out to eta ~ 50 (+0.40 % at the ceiling, "
+            "+0.009 % at 50) and only undershoots beyond that (-0.24 % at 60) -- so the two do NOT "
+            "err in the same direction (audit C-10 / DD-2, re-measured 2026-07-26). NOTE this test "
+            "sees NetDoping only: a gated/accumulation device can exceed the ceiling at the "
+            "SOLUTION level with no warning at all. Supply a larger N_dos, or drop fd_enhancement "
+            "and accept the Boltzmann model knowingly.".format(float(np.max(u))),
+            RuntimeWarning, stacklevel=3)
+    # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
+    # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
+    # otherwise allocate an (nnodes, 96) quadrature array.
+    uq, inv = np.unique(u, return_inverse=True)
+    shift = np.asarray(fd_potential_shift(uq), dtype=np.float64).reshape(-1)[inv]
+    ds.node_solution(device=device, region=region, name=name)
+    ds.set_node_values(device=device, region=region, name=name,
+                       values=[float(v) for v in shift])
+    return name
 
 
 def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:
@@ -103,6 +292,11 @@ def setup_bipolar_region(device: str, region: str, *,
     ds.set_parameter(device=device, region=region, name="taup", value=tau_p_s)
     ds.set_parameter(device=device, region=region, name="n1", value=n_i_m3)  # SRH trap
     ds.set_parameter(device=device, region=region, name="p1", value=n_i_m3)
+    # audit C-10: the contact builders are called later and separately, and the ohmic built-in
+    # potential must follow the SAME statistics as the transport in this region. Record the choice
+    # here (1.0 = Fermi-Dirac g-factor, 0.0 = Boltzmann) so setup_contact_ohmic_bipolar* can read it.
+    ds.set_parameter(device=device, region=region, name="fd_enhancement",
+                     value=1.0 if fd_enhancement else 0.0)
 
     # --- solution variables ---
     ds.node_solution(device=device, region=region, name="Potential")
@@ -206,17 +400,57 @@ def setup_equilibrium_seed_models(device: str, region: str) -> None:
     ds.node_model(device=device, region=region, name="IntrinsicHoles", equation=p0)
 
 
+def fd_shift_model(device: str, region: str) -> "str | None":
+    """The name of the FD contact-shift node model if `region` carries one (installed on the region
+    by setup_contact_ohmic_bipolar via _fd_contact_shift), else None. audit C-10.
+
+    Staged solvers seed Potential from the charge-neutral equilibrium and MUST use the same offset
+    the contact pins; this is how they ask which frame the contact chose."""
+    return ("FDContactShift"
+            if "FDContactShift" in ds.get_node_model_list(device=device, region=region) else None)
+
+
+def equilibrium_seed_psi_expr(shift: "str | None") -> str:
+    """The DEVSIM expression for the charge-neutral equilibrium seed potential, in the SAME frame the
+    ohmic contact pins (audit C-10). `shift` is `fd_shift_model(...)`; None reproduces the legacy
+    Boltzmann string CHARACTER-FOR-CHARACTER.
+
+    SIGN BY DOPING TYPE -- the residual C-10 defect. IntrinsicElectrons is n0 on the n side and
+    n_i^2/p0 on the p side, so V_t ln(IntrinsicElectrons/n_i) is +V_t ln(n0/n_i) on the n side and
+    -V_t ln(p0/n_i) on the p side: the log term already flips sign with the doping, and the FD
+    correction must flip WITH it. Adding a bare +Delta therefore landed the p-side seed 2 V_t Delta
+    ABOVE the contact's pinned potential -- measured +0.355 V at eta = 10 (the n side was exact) --
+    i.e. a p-type body seeded the coupled Newton in a frame the boundary condition contradicts."""
+    if shift is None:
+        return "V_t*log(IntrinsicElectrons/n_i)"
+    return ("V_t*(log(IntrinsicElectrons/n_i) + ifelse(NetDoping > 0, {s}, -{s}))".format(s=shift))
+
+
+def _pot_offset(shift: "str | None", ce: str, ch: str) -> str:
+    """The ohmic built-in-potential offset expression (audit C-10). `shift` is the FD degeneracy
+    node model from `_fd_contact_shift` or None; None reproduces the legacy Boltzmann string
+    CHARACTER-FOR-CHARACTER, so a Boltzmann region's contact equation is unchanged."""
+    if shift is None:
+        return "ifelse(NetDoping > 0, -V_t*log({ce}/n_i), V_t*log({ch}/n_i))".format(ce=ce, ch=ch)
+    return ("ifelse(NetDoping > 0, -V_t*(log({ce}/n_i) + {s}), V_t*(log({ch}/n_i) + {s}))"
+            .format(ce=ce, ch=ch, s=shift))
+
+
 def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
     """Bipolar ohmic contact: pin Potential (with the built-in offset) and pin
-    Electrons/Holes to their charge-neutral equilibrium values."""
+    Electrons/Holes to their charge-neutral equilibrium values. The built-in offset follows the
+    region's own statistics (audit C-10): Boltzmann when the region was set up with
+    fd_enhancement=False, Fermi-Dirac (+ V_t Delta(n0/N_dos)) when it was set up with the g-factor
+    on -- the boundary condition used to be Boltzmann either way, contradicting the interior model
+    by 0.17 V per degenerate contact at eta = 10."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     bias = "{}_bias".format(contact)
+    shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
 
-    # Potential: Dirichlet + built-in potential offset (Boltzmann reference n_i).
+    # Potential: Dirichlet + built-in potential offset (reference n_i; FD-corrected when the
+    # region's transport uses the FD g-factor).
     cp = "{}_potential_dirichlet".format(contact)
-    pot_eq = ("Potential - {b} + ifelse(NetDoping > 0, "
-              "-V_t*log({ce}/n_i), V_t*log({ch}/n_i))").format(
-                  b=bias, ce=CELEC, ch=CHOLE)
+    pot_eq = "Potential - {b} + {off}".format(b=bias, off=_pot_offset(shift, CELEC, CHOLE))
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact,
                           name="{}:Potential".format(cp), equation="1")
@@ -268,10 +502,11 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     # audit C6-2: carry the SAME v_ac ssac_admittance divides by (was hardcoded 1.0)
     ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
                        acreal=float(v_ac), acimag=0.0)
-    # Potential: Dirichlet tied to the circuit node + built-in offset (Boltzmann reference n_i).
+    # Potential: Dirichlet tied to the circuit node + built-in offset (reference n_i; FD-corrected
+    # when the region's transport uses the FD g-factor -- audit C-10, same rule as the DC twin).
+    shift = _fd_contact_shift(device, contact)
     cp = "{}_potential_circuit".format(contact)
-    pot_eq = ("Potential - {n} + ifelse(NetDoping > 0, -V_t*log({ce}/n_i), V_t*log({ch}/n_i))"
-              .format(n=node_name, ce=CELEC, ch=CHOLE))
+    pot_eq = "Potential - {n} + {off}".format(n=node_name, off=_pot_offset(shift, CELEC, CHOLE))
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
                           equation="1")

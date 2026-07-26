@@ -50,6 +50,14 @@ bridge, descent sanity).
 Carrier modulation: drude_eps_jax lifts an existing materials-machinery DrudeOptical into a
 jax-traceable carrier-density -> eps closure (same constants, same formula, eagerly validated
 static parameters), so a carrier-actuated layer chains n_m3 -> eps -> R/T with one jax.grad.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks TWO of the five -- {'te', 'tm'} for the
+1-D grating entry point (plus lumenairy's own case-insensitive 's'/'p' aliases) and the integer
+lab `row` 0/1 (0 = E_x, 1 = E_y) for the stack entry points. It is one of five spellings in the
+repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS, and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not part of the map.
 """
 
 from __future__ import annotations
@@ -127,6 +135,34 @@ def _require_static(fn_name: str, **kwargs) -> None:
                 "whose lumenairy twins trace them.".format(fn_name, name))
 
 
+# ---- polarization vocabularies spoken in THIS file (audit V-8) ----------------------------------
+# TWO of the repo's five: rcwa_grating_RT takes {'te','tm'} (lumenairy's grating spelling, which
+# ALSO accepts 's'/'p' case-insensitively -- lumenairy.rcwa_efficiency_1d normalizes them upstream
+# and always has), while rcwa_stack_RT / pmm_stack_RT take the integer lab `row` (0 = E_x,
+# 1 = E_y).  Both accepted sets are UNCHANGED; only the rejections moved to the shared home so a
+# label from a sibling family is named instead of dying inside lumenairy or inside a fancy-index.
+# Map, converter and caveats: dynameta.core.polarization.
+def _reject_grating_pol(polarization, where: str):
+    """Guard the {'te','tm'} vocabulary INCLUDING lumenairy's own case-insensitive 's'/'p'
+    aliases -- the accepted set is byte-for-byte what `lumenairy.rcwa_efficiency_1d._normalize_pol`
+    accepts, so nothing that used to work stops working and the ORIGINAL string is still what gets
+    passed downstream.  Only the REJECTION changes: a lab-axis 'x'/'y' now names its own family
+    instead of producing a lumenairy error that mentions neither.  LAZY import, failure path
+    only."""
+    if str(polarization).lower() not in ("te", "tm", "s", "p"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(polarization, "tetm", where=where, param="polarization")
+
+
+def _reject_row(row, where: str):
+    """Guard the integer lab-`row` vocabulary (audit V-8): 0 = incident E_x, 1 = incident E_y.
+    A sibling label ('x'/'y'/'p', 's'/'p', 'te'/'tm') used to reach the numpy fancy-index and die
+    opaquely (or, for a bool, silently index row 0/1).  Accepted set unchanged."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where=where, param="row")
+
+
 def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength=_REQUIRED,
                     *_legacy, n_substrate=_REQUIRED, n_superstrate=_REQUIRED,
                     angle=0.0, polarization="te", n_orders=11, formulation="auto"):
@@ -146,6 +182,7 @@ def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength
     indices, as everywhere in the bridge."""
     _require_halfspace_keywords("rcwa_grating_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_grating_pol(polarization, "rcwa_grating_RT")                # audit V-8
     _require_jax_x64("rcwa_grating_RT", eps_ridge, eps_groove, n_substrate, n_superstrate,
                      depth, wavelength, angle)                      # audit R-14
     lum = _require_lumenairy()
@@ -246,6 +283,7 @@ def rcwa_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     1-D."""
     _require_halfspace_keywords("rcwa_stack_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "rcwa_stack_RT")                                   # audit V-8
     res = _solve_rcwa_stack(layers, wavelength,
                             n_substrate=n_substrate, n_superstrate=n_superstrate,
                             period_x=period_x, period_y=period_y, theta=theta, phi=phi,
@@ -322,6 +360,7 @@ def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     wavelength gradients are valid BETWEEN order cutoffs (Wood anomalies)."""
     _require_halfspace_keywords("pmm_stack_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "pmm_stack_RT")                                    # audit V-8
     _orders, R, T, _jones = _solve_pmm_stack(layers, wavelength, n_substrate=n_substrate,
                                              n_superstrate=n_superstrate,
                                              period=period, angle=angle, degree=degree,

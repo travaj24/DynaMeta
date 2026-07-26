@@ -31,6 +31,36 @@ __all__ = ["Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "Steady
 _KEEP = object()
 
 
+def _frozen_profile_interp(Y, z, L: float, n_nodes: int):
+    """Lean frozen-profile interpolator on the UNIFORM mesh z = linspace(0, L, n_nodes): returns
+    f(zz) -> Y[:, zz] by piecewise-linear lookup, for the relaxation sweeps that propagate one
+    beam direction through a frozen profile of the other.
+
+    Why not scipy.interpolate.interp1d (audit S6-2): the mesh is uniform, so interp1d's per-call
+    validation machinery is ~43% of the solve runtime -- pure overhead here. The endpoint clamps
+    reproduce interp1d's fill_value=(left, right) EXACTLY; the interior uses the identical linear
+    form, and LSODA samples strictly inside (0, L), so results are unchanged.
+
+    SINGLE HOME (audit X-3): this was the repo's largest verbatim cross-file duplicate -- copied
+    into eryb.py (which already imports from this module), provenance comment and all, so the
+    endpoint-clamp / uniform-mesh correctness contract was carried twice. Both solvers now call
+    this one function; the arithmetic is unchanged, so both remain bit-identical to the copies."""
+    inv_dz = (n_nodes - 1) / L
+    slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
+    ncap = n_nodes - 2
+
+    def f(zz):
+        if zz <= 0.0:
+            return Y[:, 0]
+        if zz >= L:
+            return Y[:, -1]
+        j = int(zz * inv_dz)
+        if j > ncap:
+            j = ncap
+        return Y[:, j] + slopes[:, j] * (zz - z[j])
+    return f
+
+
 @dataclass(frozen=True)
 class Pump:
     """A pump beam: power [W], wavelength [m], direction 'fwd' (co, seeded at z=0) or 'bwd'
@@ -372,26 +402,8 @@ class FiberAmplifier:
                 P[bwd] = Pb
             return P
 
-        # Lean frozen-profile interpolator (audit S6-2): the mesh is uniform, so scipy interp1d's
-        # per-call validation machinery (~43% of solve runtime) is pure overhead. Endpoint clamps
-        # reproduce interp1d's fill_value=(left, right) exactly; interior uses the identical
-        # linear form, and LSODA samples strictly inside (0, L), so results are unchanged.
-        inv_dz = (n_nodes - 1) / L
-
-        def _make_interp(Y):
-            slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
-            ncap = n_nodes - 2
-
-            def f(zz):
-                if zz <= 0.0:
-                    return Y[:, 0]
-                if zz >= L:
-                    return Y[:, -1]
-                j = int(zz * inv_dz)
-                if j > ncap:
-                    j = ncap
-                return Y[:, j] + slopes[:, j] * (zz - z[j])
-            return f
+        def _make_interp(Y):                         # audit X-3: ONE implementation, module level
+            return _frozen_profile_interp(Y, z, L, n_nodes)
 
         mcc_mat = self._mcc_matrix(ch, z)            # (K, M) sigma_e T-scaling or None
         mcc_of = _make_interp(mcc_mat) if mcc_mat is not None else None
