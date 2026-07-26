@@ -11,6 +11,18 @@ Golden = the external lc_statics_base solver:
   * FLEXO (planar, poisson, theta_b=80deg, V=1.0): no-flexo (n_eff=1.5991, theta=62.836deg) vs
     e1=e3=10pC/m self-consistent (n_eff=1.5967, theta=63.839deg).
 
+AUDIT C-4 NOTE (re-baselined 2026-07-25). Both goldens above are POISSON-path numbers produced by the
+external solver this module was ported from, which carries the same midpoint-grid normalisation defect
+(the series-capacitance integral was evaluated on solve_bvp's collocation midpoints, a grid short by one
+full cell). With the normalisation corrected to span the full LC thickness the agreement with these
+external goldens LOOSENS slightly while agreement with the ANALYTIC constant-displacement oracle improves
+~9x (validation/lc_two_constant_bvp GATE B, 1.0919e-2 -> 5.7013e-3 rad):
+    cyl  max|d theta_ctr| 0.209 -> 0.564 deg, max|d n_eff| 6.8e-4 -> 2.6e-3, max rel|dV_lc| 5.7e-4 -> 2.2e-3
+    flexo theta 62.968 -> 63.165 deg (golden 62.836), with-flexo 63.957 -> 64.136 (golden 63.839),
+          flexo shift +0.989 -> +0.971 deg (external +1.0)
+All still inside the gate budgets. Treat the external goldens as ~0.6 deg references on this path, not
+as exactness pins -- the analytic oracle is the one that discriminates.
+
 GATE A (cylindrical): director_profile_bvp(geometry='cyl', poisson) matches the cyl golden (V_lc to <1%,
         theta_center to <1.5 deg, n_eff to <5e-3).
 GATE B (flexoelectric): no-flexo and with-flexo match the external golden (theta to <1.5 deg); the flexo

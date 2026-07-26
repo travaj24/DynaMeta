@@ -120,6 +120,13 @@ def test_qpm_shifts_jsa_centre():
     # dk(ws) = beta (ws - ws0): degenerate phase matching at ws0 with NO poling. First-order
     # QPM of period Lambda moves the phase-matched point to dk = 2 pi / Lambda, i.e.
     # ws = ws0 + (2 pi / Lambda) / beta -- the twm_reference prediction.
+    #
+    # AUDIT Q-7: the poling square wave carries BOTH first orders m = +-1 with the same 2/pi
+    # weight, so a linear dk(ws) is phase-matched at ws0 +- delta -- two bands of EQUAL height,
+    # not one (verified against a raw quadrature of the poling profile in
+    # tests/test_twm.py::test_qpm_both_grating_orders_vs_brute_force_square_wave).  The m = +1
+    # band is the design target and is checked at its predicted position; the m = -1 mirror is
+    # pinned as physics, not tolerated as an artefact.
     sigma_p, L, beta = 6.0e11, 5.0e-4, 1.0e-8
     dkf = lambda a, b: beta * (a - WS0)
     span, N = 6.0e12, 801
@@ -136,8 +143,18 @@ def test_qpm_shifts_jsa_centre():
     dk_target = beta * delta
     Lam = qpm_period_for(dk_target)                              # 2 pi / dk_target
     Fq = jsi(jsa(wsg, wig, _pump(sigma_p), dkf, L, qpm_period=Lam))
-    ip, jp = np.unravel_index(int(np.argmax(Fq)), Fq.shape)
-    ws_pred = WS0 + dk_target / beta                            # == WS0 + delta
+    ws_pred = WS0 + dk_target / beta                            # == WS0 + delta  (m = +1 band)
     wi_pred = WP - ws_pred
+    # m = +1 band: restrict to the dk > 0 half plane (ws > WS0), where it is the only band.
+    up = wsg > WS0
+    Fup = np.where(up[:, None], Fq, -np.inf)
+    ip, jp = np.unravel_index(int(np.argmax(Fup)), Fq.shape)
     assert abs(wsg[ip] - ws_pred) / (ws_pred - WS0) < 1e-2
     assert abs(wig[jp] - wi_pred) / abs(wi_pred - WI0) < 1e-2
+
+    # m = -1 mirror band at ws = WS0 - delta, SAME height (equal 2/pi Fourier weight).
+    Fdn = np.where((wsg < WS0)[:, None], Fq, -np.inf)
+    im, jm = np.unravel_index(int(np.argmax(Fdn)), Fq.shape)
+    assert abs(wsg[im] - (WS0 - dk_target / beta)) / (ws_pred - WS0) < 1e-2
+    assert abs(wig[jm] - (WP - wsg[im])) <= 2.0 * (wig[1] - wig[0])
+    assert abs(Fq[im, jm] - Fq[ip, jp]) <= 1e-9 * Fq[ip, jp]

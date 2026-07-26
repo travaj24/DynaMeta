@@ -6,6 +6,7 @@ the Voigt lineshape).
 """
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass
 
@@ -290,18 +291,55 @@ class BursteinMossEdge:
     (delta = 0 through DeltaEffect = byte-identical off-switch). m_vc is the REDUCED joint
     conduction-valence mass (1/m_vc = 1/m_c + 1/m_v), NOT the Drude optical mass. numpy-only (KK uses
     np.interp); exp(-i omega t), Im(eps) >= 0; grid-capable (dn precomputed vs Eg_opt and interpolated).
+
+    KK GRID AND ITS TRUNCATION (audit R-2 -- this is what the shipped default got wrong). The Tauc
+    edge has NO high-energy cutoff, so its KK integrand decays only algebraically:
+
+        dn(E) = (1/pi) int_0^inf E' eps2(E') / (E'^2 - E^2) dE' ,  E' eps2/(E'^2-E^2) ~ Eg^(2-p) E'^(p-3)
+
+    (p = tauc_exponent). The integral CONVERGES for p < 2, but the neglected E' > E_hi remainder is
+    only O(E_hi^(p-2)) -- E_hi^-1.5 for the default p = 0.5. The old default stopped 5 eV above the
+    edge, which truncated ~45% of the absolute dn; worse, the old grid was rebuilt PER eps() CALL
+    from the per-call Eg_opt(n) and probe, so a DeltaEffect integrated its two halves on DIFFERENT
+    grids and the large common truncation did not cancel -- the delta came out 14-16x too large.
+    Three things fix it here:
+
+      1. the auto grid is a pure function of the CONFIGURATION (Eg0_J, tauc_exponent, and the class
+         constants below) -- not of fields['n'] or lambda -- so it is built ONCE per instance and
+         every eps() call, in particular both halves of a DeltaEffect, integrates on the SAME grid;
+      2. E_hi is chosen adaptively so the truncated tail is below _KK_TAIL_REL of the dn scale
+         (see _kk_min_e_hi: the tail and the scale are both proportional to alpha_edge, so the
+         criterion is a pure ratio E_hi/Eg -- 142.3x Eg for p = 0.5 at 1e-3);
+      3. what is left of the tail is added back in closed form (_kk_tail_dn), which removes both
+         its absolute offset AND its Eg-dependence, so a DeltaEffect delta no longer inherits it.
+
+    Measured against scipy.quad carried to infinity (the oracle the audit prescribes), the absolute
+    dn is now correct to ~1e-5 relative and the DeltaEffect delta to <1e-4 of the dn scale, where
+    the shipped default was 44-50% low in absolute dn and 14-16x too large in the delta. Because
+    the grid no longer moves, alpha_edge is a physical amplitude again rather than a number that
+    silently absorbs the grid choice.
+
+    e_grid_J overrides the auto grid; it is validated against the same tail criterion and warns
+    (audit R-2: the old guard only checked that the grid BRACKETED the gap, and accepted a grid
+    ending 1 meV above Eg). An overriding grid is still used for both DeltaEffect halves, so it is
+    pinned too.
     """
     eps_inf: float
     Eg0_J: float                  # undoped optical gap [J] (e.g. 3.6 * Q_E for ITO)
     m_vc_kg: float                # reduced joint conduction-valence mass [kg]
     alpha_edge: float             # dimensionless interband edge amplitude (O(1); Im(eps) ~ alpha_edge)
     bgr_coeff_J_m: float = 0.0    # bandgap-renormalization coefficient C in dE_BGR = C n^(1/3) [J*m]; 0 -> off
-    tauc_exponent: float = 0.5    # 0.5 = direct-allowed sqrt(E-Eg) edge
-    e_grid_J: tuple = None        # (E_lo, E_hi, N) KK grid override; None -> auto around Eg_opt + probe
+    tauc_exponent: float = 0.5    # 0.5 = direct-allowed sqrt(E-Eg) edge (must be in [0, 2))
+    e_grid_J: tuple = None        # (E_lo, E_hi, N) KK grid override; None -> auto (config-pinned)
     enabled: bool = True          # master off-switch: False -> eps_inf everywhere (delta 0)
     _N_EG = 64                    # Eg_opt samples for the grid-capable dn interpolation
-    _KK_SPAN_J = 5.0 * Q_E   # how far above the highest edge the KK grid extends (~5 eV)
-    _KK_N = 3001                  # KK photon-energy grid points
+    # ---- auto KK grid (audit R-2; replaces the old _KK_SPAN_J = 5 eV / _KK_N = 3001 pair) ----
+    _KK_TAIL_REL = 1.0e-3         # target |truncated tail| / dn_scale for the auto E_hi
+    _KK_GAP_HEADROOM = 1.5        # auto grid sized for Eg_opt up to this multiple of Eg0_J
+    _KK_H_J = 0.01 * Q_E          # target auto-grid spacing [J] (10 meV; sets N with E_hi)
+    _KK_E_LO_J = 1.0e-21          # grid start [J] (~0+, the KK lower limit; NOT exactly 0: _eps2
+                                  # divides by E, and dalpha is identically 0 below the gap anyway)
+    _KK_ROW_CHUNK_BYTES = 8 << 20  # byte budget for one dalpha_rows chunk (the grid is now ~1e5 wide)
 
     def gap_shift_J(self, n_m3):
         """Burstein-Moss blueshift dE_BM(n) [J] = (hbar^2/2)(1/m_vc)(3 pi^2 n)^(2/3)."""
@@ -319,7 +357,87 @@ class BursteinMossEdge:
         Non-dimensionalized by Eg so alpha_edge is an O(1) amplitude (not a unit-laden prefactor)."""
         E = np.asarray(E_eval, dtype=np.float64)
         x = np.maximum(E - Eg_opt, 0.0) / Eg_opt
-        return float(self.alpha_edge) * x ** float(self.tauc_exponent) * (Eg_opt / E) ** 2
+        return float(self.alpha_edge) * x ** self._tauc_p() * (Eg_opt / E) ** 2
+
+    # ---- KK grid sizing and tail correction (audit R-2) -------------------------------------
+
+    def _tauc_p(self) -> float:
+        """tauc_exponent, validated. p >= 2 makes the KK integrand E'^(p-3) non-integrable, i.e.
+        dn is INFINITE for this cutoff-free Tauc edge -- the old code returned a finite,
+        purely grid-determined number instead."""
+        p = float(self.tauc_exponent)
+        if not (0.0 <= p < 2.0):
+            raise ValueError("BursteinMossEdge: tauc_exponent must lie in [0, 2) -- the cutoff-free "
+                             "Tauc tail eps2 ~ (E/Eg)^(p-2) makes the Kramers-Kronig integral "
+                             "divergent at p >= 2 (give the edge a finite bandwidth instead); "
+                             "got {}".format(p))
+        return p
+
+    def _kk_dn_scale(self) -> float:
+        """|dn| in the E -> 0 limit, in CLOSED FORM and independent of Eg:
+
+            dn(0) = (1/pi) int_Eg^inf eps2(E')/E' dE'  --[E' = Eg/t]-->  (alpha/pi) B(p+1, 2-p)
+
+        with B the Euler beta function. Used as the reference magnitude for the relative tail
+        criterion in _kk_min_e_hi (0.1875 for the default alpha_edge = 1.5, p = 0.5)."""
+        p = self._tauc_p()
+        beta = math.gamma(p + 1.0) * math.gamma(2.0 - p) / math.gamma(3.0)
+        return abs(float(self.alpha_edge)) / math.pi * beta
+
+    def _kk_min_e_hi(self, Eg_ref: float) -> float:
+        """Smallest KK grid upper limit whose neglected tail is below _KK_TAIL_REL of dn_scale.
+
+        The leading tail term is T(E_hi) = (alpha/pi) Eg^(2-p) E_hi^(p-2) / (2-p) (E'^-1.5 for
+        p = 0.5, i.e. halving per doubling of E_hi -- that observed halving IS the convergence
+        law, not evidence of divergence). Setting T <= tol * (alpha/pi) B(p+1, 2-p) makes alpha
+        cancel, leaving a pure ratio
+
+            E_hi >= Eg * [tol (2-p) B(p+1, 2-p)]^(-1/(2-p))       (142.31 x Eg at p=0.5, tol=1e-3).
+        """
+        p = self._tauc_p()
+        beta = math.gamma(p + 1.0) * math.gamma(2.0 - p) / math.gamma(3.0)
+        return float(Eg_ref) * (float(self._KK_TAIL_REL) * (2.0 - p) * beta) ** (-1.0 / (2.0 - p))
+
+    def _kk_tail_dn(self, Eg, e_hi: float):
+        """Closed-form E' > e_hi remainder of the KK integral, added back to the quadrature so the
+        result no longer carries the truncation offset OR its Eg-dependence (which is what made a
+        DeltaEffect delta 14-16x too large). Two-term asymptotic in Eg/e_hi:
+
+            (1/pi) int_{e_hi}^inf E' eps2 /(E'^2-E^2) dE'
+              ~ (alpha/pi) Eg^(2-p) e_hi^(p-2) [ 1/(2-p) - p (Eg/e_hi)/(3-p) ] ,
+
+        from (E'-Eg)^p = E'^p (1 - p Eg/E' + ...) and 1/(E'^2-E^2) = E'^-2 (1 + E^2/E'^2 + ...);
+        the dropped terms are O((Eg/e_hi)^2) and O((E/e_hi)^2), both < 1e-4 of the tail on the auto
+        grid. Vectorized over Eg."""
+        p = self._tauc_p()
+        Eg = np.asarray(Eg, dtype=np.float64)
+        return (float(self.alpha_edge) / np.pi) * Eg ** (2.0 - p) * float(e_hi) ** (p - 2.0) * (
+            1.0 / (2.0 - p) - p * (Eg / float(e_hi)) / (3.0 - p))
+
+    def _kk_grid(self) -> np.ndarray:
+        """The KK photon-energy grid, built ONCE per configuration and cached on the instance.
+
+        Deliberately independent of fields['n'] and of lambda: that is what pins DeltaEffect's two
+        eps() calls to the SAME grid (audit R-2). The cache key is the set of dataclass fields the
+        grid depends on, so mutating them after construction still rebuilds."""
+        key = (self.e_grid_J, float(self.Eg0_J), float(self.tauc_exponent),
+               float(self._KK_TAIL_REL), float(self._KK_GAP_HEADROOM), float(self._KK_H_J),
+               float(self._KK_E_LO_J))
+        cached = getattr(self, "_kk_grid_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        if self.e_grid_J is not None:
+            lo, hi, ng = self.e_grid_J
+            grid = np.linspace(float(lo), float(hi), int(ng))
+        else:
+            e_hi = self._kk_min_e_hi(float(self._KK_GAP_HEADROOM) * float(self.Eg0_J))
+            npts = int(np.ceil(e_hi / float(self._KK_H_J))) + 1
+            npts += 1 - npts % 2                       # force ODD (keeps the Maclaurin midpoint
+                                                       # branch endpoint-free; R-3 covers both)
+            grid = np.linspace(float(self._KK_E_LO_J), e_hi, npts)
+        self._kk_grid_cache = (key, grid)
+        self._kk_tail_warned = False       # re-arm the tail test for the new grid (see eps())
+        return grid
 
     def eps(self, fields: dict, lambda_m: float):
         n_in = (fields or {}).get("n")
@@ -336,27 +454,47 @@ class BursteinMossEdge:
         E_ph = _photon_energy_J(lambda_m)
         Eg = self.optical_gap_J(n)                                 # (...,) optical gap per cell
         Eg_lo, Eg_hi = float(np.min(Eg)), float(np.max(Eg))
-        # KK photon-energy grid: span below the lowest edge / probe, up to well above the highest edge
-        if self.e_grid_J is not None:
-            lo, hi, ng = self.e_grid_J
-            grid = np.linspace(float(lo), float(hi), int(ng))
-        else:
-            e_lo = min(Eg_lo, E_ph) - 0.5 * float(self._KK_SPAN_J)
-            e_hi = max(Eg_hi, E_ph) + float(self._KK_SPAN_J)
-            grid = np.linspace(max(e_lo, 1e-21), e_hi, int(self._KK_N))
-        if not (grid[0] <= min(Eg_lo, E_ph) and max(Eg_hi, E_ph) <= grid[-1]):   # no silent KK truncation
+        # KK photon-energy grid: PINNED to the configuration (audit R-2), so a DeltaEffect's two
+        # eps() calls -- different n, hence different Eg_opt -- integrate on the identical grid.
+        grid = self._kk_grid()
+        e_hi_grid = float(grid[-1])
+        if not (grid[0] <= min(Eg_lo, E_ph) and max(Eg_hi, E_ph) <= e_hi_grid):
             raise ValueError("e_grid_J must span the optical gap range and the probe energy")
+        # REAL tail test (audit R-2): the old guard only checked that the grid BRACKETED the gap
+        # and the probe, which accepts a grid ending 1 meV above Eg -- i.e. it could not see the
+        # defect it was written to prevent. Compare against the criterion that actually sets E_hi.
+        # Fires ONCE per grid build (the grid is a configuration property, and a lambda/bias sweep
+        # would otherwise emit the same warning thousands of times); _kk_grid re-arms it.
+        need_e_hi = self._kk_min_e_hi(Eg_hi)
+        if e_hi_grid < need_e_hi and not getattr(self, "_kk_tail_warned", False):
+            self._kk_tail_warned = True
+            warnings.warn(
+                "BursteinMossEdge: the Kramers-Kronig grid ends at {:.3g} eV but the cutoff-free "
+                "Tauc tail needs >= {:.3g} eV for a truncation below {:.1e} of dn at Eg_opt = "
+                "{:.3g} eV (the residual scales as E_hi^({:+.2f})). dn is tail-corrected in closed "
+                "form, so the error is far smaller than the raw truncation, but widen e_grid_J (or "
+                "drop the override) if dn matters at that level.".format(
+                    e_hi_grid / Q_E, need_e_hi / Q_E, float(self._KK_TAIL_REL), Eg_hi / Q_E,
+                    self._tauc_p() - 2.0), RuntimeWarning, stacklevel=2)
 
         # grid-capable dn: precompute dn(Eg_opt) on a 1D Eg grid, interpolate onto the per-cell gaps.
         # absorption alpha = E eps2/(hbar c) [1/m] per Eg row; KK -> dn (index shift) at the probe.
         # The KK transform on the FIXED photon grid is a constant linear map and only its value AT
         # E_ph is consumed, so all _N_EG dalpha rows go through the two probe-bracketing kernel rows
         # as batched matvecs (audit 6.2 perf: the dominant per-bias cost, O(N) per row) instead of
-        # _N_EG independent full O(N^2) divide-and-sum transforms.
+        # _N_EG independent full O(N^2) divide-and-sum transforms. The rows are built in CHUNKS
+        # under a byte budget because the R-2 grid is ~1e5 wide (a full (_N_EG, N) block plus the
+        # _eps2 temporaries would be a few hundred MB).
         egs = (np.array([Eg_lo]) if Eg_hi - Eg_lo < 1e-30
                else np.linspace(Eg_lo, Eg_hi, int(self._N_EG)))
-        dalpha_rows = grid[None, :] * self._eps2(grid[None, :], egs[:, None]) / (HBAR * C_LIGHT)
-        dn_tab = kramers_kronig_dn_rows(grid, dalpha_rows, e_eval_J=E_ph)       # (_N_EG,) at E_ph
+        per_chunk = max(1, int(self._KK_ROW_CHUNK_BYTES) // (8 * grid.size))
+        dn_tab = np.concatenate([
+            kramers_kronig_dn_rows(
+                grid,
+                grid[None, :] * self._eps2(grid[None, :], egs[k:k + per_chunk, None]) / (HBAR * C_LIGHT),
+                e_eval_J=E_ph)
+            for k in range(0, egs.size, per_chunk)])                 # (_N_EG,) at E_ph
+        dn_tab = dn_tab + self._kk_tail_dn(egs, e_hi_grid)           # closed-form tail (audit R-2)
         if egs.size == 1:
             dn = np.full(Eg.shape, float(dn_tab[0]))
         else:
@@ -395,8 +533,18 @@ class IntersubbandEffect:
     ONLY in the intraband Drude term.
     The denominator uses -i w gamma (exp(-i omega t), Im(eps_zz) > 0 on resonance = absorptive).
 
-    REDUCES to a scalar Drude * I when fewer than two sub-bands are occupied (no i<j pair, the
-    Lorentzian sum is empty) -> diag(eps_D, eps_D, eps_D) == as_tensor(DrudeOptical.eps). v1 returns a
+    WHICH PAIRS RADIATE (audit R-1). The line strength is carried entirely by the population
+    DIFFERENCE N_ij = (n_s,i - n_s,j)/Leff, so a pair (i, j) contributes iff |n_s,i - n_s,j| exceeds
+    occ_floor_m2. It is NOT gated on both states being populated: the canonical intersubband
+    absorber is a FULL ground sub-band radiating into an EMPTY excited one, which has the LARGEST
+    N_ij and therefore the STRONGEST line. The shipped filter drew both i and j from the
+    occupancy-filtered set, which deleted exactly that configuration (measured: populating the
+    upper sub-band with a physically null 1e-30 m^-2 swung Im(eps_zz) from 0.028 to 89.2) and also
+    made the N_ij < 0 gain warning below unreachable for the inverted case n_s = [0, n], since the
+    pair was removed before the warning could fire.
+
+    REDUCES to a scalar Drude * I when no pair has a population difference (the Lorentzian sum is
+    empty) -> diag(eps_D, eps_D, eps_D) == as_tensor(DrudeOptical.eps). v1 returns a
     UNIFORM (3,3) slab response (sheet smeared over Leff = z[-1]-z[0]); a z-graded eps_zz(z) via the
     local |psi(z)|^2 weighting is a documented follow-on (Leff sets the LINE STRENGTH, not the position
     or the Leff-free f-sum rule). exp(-i omega t), Im(eps) > 0 for absorbers; pure numpy."""
@@ -404,7 +552,9 @@ class IntersubbandEffect:
     m_opt_kg: float            # sub-band-averaged Kane optical mass (intraband Drude only)
     gamma_intra_rad_s: float
     gamma_inter_rad_s: float   # intersubband dephasing (scalar; per-pair callable = follow-on)
-    occ_floor_m2: float = 0.0  # min sheet density to count a sub-band as occupied
+    # R-1: this is the minimum |n_s,i - n_s,j| sheet-density DIFFERENCE for a pair to radiate, NOT
+    # a per-sub-band occupancy floor (which silently deleted the full-ground/empty-excited absorber).
+    occ_floor_m2: float = 0.0  # min |n_s,i - n_s,j| [m^-2] for an i->j line to be kept
 
     def eps(self, fields: dict, lambda_m: float):
         res = (fields or {}).get("subband")
@@ -428,13 +578,19 @@ class IntersubbandEffect:
 
         eps_zz = eps_intra
         gam = float(self.gamma_inter_rad_s)
-        idx = np.where(ns > float(self.occ_floor_m2))[0]               # occupied sub-bands
-        for a in range(len(idx)):
-            for b in range(a + 1, len(idx)):
-                i, j = int(idx[a]), int(idx[b])                        # E[i] < E[j] (sorted ascending)
+        floor = float(self.occ_floor_m2)
+        # R-1: gate on the POPULATION DIFFERENCE, not on both states being occupied. The INITIAL
+        # state supplies the carriers and the FINAL state ranges over every bound sub-band, so a
+        # full ground / empty excited pair keeps its (maximal) line and an inverted pair reaches
+        # the gain warning below instead of being deleted silently.
+        for i in range(E.size):
+            for j in range(i + 1, E.size):                             # E[i] < E[j] (ascending)
+                dns = float(ns[i] - ns[j])
+                if abs(dns) <= floor:                                  # no population difference
+                    continue
                 w_ij = (E[j] - E[i]) / HBAR                            # > 0
                 z_ij = trapz(psi[:, i] * z * psi[:, j], z)             # <psi_i|z|psi_j> [m]
-                N_ij = (ns[i] - ns[j]) / Leff                         # >= 0 (lower band more occupied)
+                N_ij = dns / Leff                                      # >= 0 (lower band fuller)
                 if N_ij < 0.0:                                        # population inversion -> gain
                     warnings.warn("IntersubbandEffect: inverted population (n_s[{}] < n_s[{}]) gives a "
                                   "gain line; clamping to 0".format(i, j))

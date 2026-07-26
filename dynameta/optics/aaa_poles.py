@@ -55,9 +55,14 @@ The SELECTION / FILTERING rule is therefore the SAME in both cases: keep poles w
 conjugate mirror, and for complex analytic data it is a no-op that simply confirms the clean data
 placed every physical pole correctly.  On top of physicality, :func:`find_resonances` rejects
 spurious FROISSART DOUBLETS (a pole with a near-coincident zero, the signature of over-fitting or
-noise) by (i) a residue-magnitude floor -- a Froissart pole nearly cancels against its partner
-zero, so its residue is tiny -- and (ii) a stability test: a genuine resonance pole barely moves
-when the sample set is decimated, whereas a Froissart / noise-driven pole jumps.
+noise) by (i) a pole-zero SCALE-SEPARATION test -- a doublet's zero cancels its pole to ROUNDING
+(~1e-13 of the linewidth-half), decades below any physical pole-zero gap; (ii) a LOCAL
+residue-magnitude floor -- a Froissart pole nearly cancels against its partner zero, so its residue
+is tiny; and (iii) a stability test: a genuine resonance pole barely moves when the sample set is
+decimated, whereas a Froissart / noise-driven pole jumps.  Filter (i) is a scale separation, NOT a
+"physical poles have no nearby zero" rule: a genuine pole-zero gap equals the external-coupling
+fraction ``2 ge/(gi + ge)`` and vanishes for an under-coupled resonance -- see the
+``froissart_frac`` discussion in :func:`find_resonances` (audit Q-6).
 
 References
 ----------
@@ -428,7 +433,7 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
                     stability_check: bool = True, tol: float = 1e-11, max_degree: int = 100,
                     band: Optional[Tuple[float, float]] = None, band_margin: float = 0.02,
                     stability_rtol: float = 5e-3, residue_rel_floor: float = 1e-6,
-                    im_atol_rel: float = 1e-9, froissart_frac: float = 0.05,
+                    im_atol_rel: float = 1e-9, froissart_frac: float = 1e-4,
                     broad_warn_frac: float = 0.5) -> List[Resonance]:
     """Extract physical resonances from a real-frequency sweep with spurious-pole filtering.
 
@@ -439,21 +444,41 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
             upper-half conjugate mirror of each pole (see the module docstring); for complex
             analytic ``response`` it merely confirms the clean placement.
       (ii)  FROISSART pole-zero coincidence -- a Froissart doublet is, BY DEFINITION, a pole with a
-            near-coincident zero (the spurious pole nearly cancels against its partner zero).  Its
-            robust signature is GEOMETRIC: the nearest AAA zero lies within
-            ``froissart_frac * |Im(pole)|`` (a tiny fraction of the pole's own linewidth-half).  A
-            genuine resonance -- even a very weakly coupled one with a small residue -- has NO such
-            near-coincident zero (its nearest zero is order the linewidth away or is a real
-            transmission / Fano zero).  This is what separates a spurious doublet from a physically
-            weak pole, which a residue-magnitude floor CANNOT (both have small residues).  Set
-            ``froissart_frac = 0`` to disable.
+            near-coincident zero, and that cancellation is essentially EXACT (it is a rounding-level
+            artefact of over-fitting, not a physical feature).  The filter is a SCALE-SEPARATION
+            test, not a presence/absence test: the nearest AAA zero must lie farther than
+            ``froissart_frac * |Im(pole)|``.  Measured on this module's own Froissart gate
+            (deliberate over-fit, ``tol=0``, ``max_degree=40``), the separations
+            ``min|pole - zero| / |Im(pole)|`` are 5.9e-14 .. 1.6e-13 for the manufactured doublets
+            and 0.60 .. 0.97 for the genuine Fabry-Perot poles -- about THIRTEEN decades apart.
+            The default ``1e-4`` sits ~9 decades above the doublets and ~4 decades below the
+            genuine poles, i.e. in the middle of that void.  Set ``froissart_frac = 0`` to disable.
+
+            This is NOT the rule "a genuine pole never has a nearby zero" -- that claim is FALSE,
+            and believing it is what made the previous ``0.05`` default silently delete PHYSICAL
+            resonances (audit Q-6).  A genuine pole-zero gap is a COUPLING RATIO and can be made
+            arbitrarily small: for a side-coupled single-mode resonator (Haus CMT,
+            ``t = [i(w0 - w) + (gi - ge)/2] / [i(w0 - w) + (gi + ge)/2]`` with intrinsic loss ``gi``
+            and external coupling ``ge``) the pole is ``w0 - i(gi + ge)/2`` and the zero is
+            ``w0 - i(gi - ge)/2``, so
+
+                |pole - zero| / |Im(pole)| = 2 ge / (gi + ge)   ->   0   as ge/gi -> 0,
+
+            the EXTERNAL-COUPLING FRACTION.  Pole-zero coincidence therefore MEANS weak external
+            coupling (an under-coupled / high-``Q_abs`` resonance), which is physics, not
+            spuriousness.  At ``0.05`` the kill condition was ``gi/ge > 39`` and ``find_resonances``
+            returned ``[]`` with no warning; at ``1e-4`` the same sweep recovers the resonance down
+            to ``ge/gi = 1e-4`` (measured ``Q`` 1188.1 at ``ge/gi = 0.01``, 1199.9 at ``1e-4``)
+            while the Froissart gate still removes every manufactured doublet.
       (iii) RESIDUE FLOOR -- optional junk guard.  If ``residue_floor`` is given it is an ABSOLUTE
             ``|residue| >= residue_floor`` cut; otherwise the pole's Lorentzian PEAK contribution
             ``|residue| / |Im(pole)|`` must be ``>= residue_rel_floor`` times the LOCAL response
             magnitude near ``Re(pole)``.  The floor is LOCAL (per-pole), NOT relative to the global
             ``max|residue|`` -- the old global rule killed a genuine weak pole merely because a
-            DIFFERENT, dominant resonance carried a huge residue (the pole-zero test above, not the
-            residue, is now the real Froissart discriminator).
+            DIFFERENT, dominant resonance carried a huge residue.  On the Froissart gate (ii) and
+            (iii) are REDUNDANT (the doublets there carry residues ~1e-13 of the genuine poles', so
+            the floor alone removes all of them); they separate on the ATTACK-1 spectrum, where a
+            genuine pole has a tiny residue but no coincident zero.
       (iv)  STABILITY (if ``stability_check``) -- the pole must persist, to within
             ``stability_rtol * |pole|``, when the sample set is DECIMATED (every other sample).  A
             genuine resonance barely moves; a Froissart / noise-driven pole jumps.
@@ -476,8 +501,11 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
     band : (float, float), optional
         Physical band ``(omega_lo, omega_hi)``; defaults to the sampled range.
     froissart_frac : float
-        Pole-zero coincidence threshold as a fraction of the pole's ``|Im|`` (default 0.05); a pole
-        with a zero closer than this is a Froissart doublet.  ``0`` disables the test.
+        Pole-zero coincidence threshold as a fraction of the pole's ``|Im|`` (default ``1e-4``); a
+        pole with a zero closer than this is a Froissart doublet.  Calibrated to the ~13-decade
+        void between manufactured doublets (~1e-13) and genuine poles (~1e0), see (ii); it must
+        stay well BELOW the smallest external-coupling fraction ``2 ge/(gi + ge)`` of interest,
+        because that is what the test measures on a genuine resonance.  ``0`` disables the test.
     broad_warn_frac : float
         Emit a ``RuntimeWarning`` when a surviving pole's FWHM (``2|Im|``) exceeds this fraction of
         the sweep span (default 0.5) -- the resonance nearly fills the window, so its ``Q`` is a

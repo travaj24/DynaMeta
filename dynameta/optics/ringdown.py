@@ -228,36 +228,100 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     return out
 
 
+_OMEGA_DC_TOL = 1e-9          # |omega * dt| below this is a pure-decay (DC / drift) column
+
+
+def _real_reconstruction(n: int, dt: float, modes: Sequence[Mode]) -> np.ndarray:
+    """Reconstruct a REAL trace from a mode list using the module's documented convention
+    y(t) ~ sum_k Re(A_k exp(-i omega_k t)) exp(-gamma_k t / 2)  (an omega ~ 0 mode is the pure
+    decay Re(A) exp(-gamma t / 2)).  Used to score a refinement against its own seed."""
+    t = np.arange(int(n)) * float(dt)
+    out = np.zeros(int(n), dtype=np.float64)
+    for m in modes:
+        e = np.exp(-0.5 * abs(m.gamma_rad_s) * t)
+        if m.omega_rad_s * dt > _OMEGA_DC_TOL:
+            out += e * (m.amplitude.real * np.cos(m.omega_rad_s * t)
+                        + m.amplitude.imag * np.sin(m.omega_rad_s * t))
+        else:
+            out += e * m.amplitude.real
+    return out
+
+
 def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
-                     max_refine: int = 6) -> List[Mode]:
+                     max_refine: int = 6) -> tuple:
     """VARPRO refinement of pencil modes on a REAL trace: hold the mode COUNT fixed, optimize
     the nonlinear parameters (omega_k, gamma_k) by least squares with the linear (cos/sin)
     amplitudes solved exactly at each step. The pencil poles come out of an SVD subspace whose
     last digits are LAPACK-build-dependent -- near a marginal model order, two correct BLAS
     stacks can return dominant-mode Q values differing by tens of percent (observed: Windows
     dev box vs CI linux wheels straddling a 12% gate on the SAME deterministic FDTD trace).
-    The NLS optimum is a property of the DATA, so refined modes are platform-stable. Modes are
-    re-sorted by refined |amplitude|; non-oscillatory (omega ~ 0) modes pass through unrefined.
-    Falls back to the input modes unchanged if scipy is unavailable or the fit fails."""
-    osc = [m for m in modes[:max_refine] if m.omega_rad_s * dt > 1e-9]
-    rest = [m for m in modes if m not in osc]
-    if not osc:
-        return modes
+    The NLS optimum is a property of the DATA, so refined modes are platform-stable.
+
+    EVERY pencil mode contributes columns to the design matrix (finding Q-2).  Only the
+    ``max_refine`` DOMINANT OSCILLATORY modes have their nonlinear parameters (omega, gamma)
+    varied; every other mode keeps its seed (omega, gamma) and contributes FIXED columns -- two
+    (cos/sin) for an oscillatory mode, ONE real exponential ``exp(-gamma t / 2)`` for a
+    non-oscillatory (omega ~ 0, pure-decay / DC-drift) mode.  Only the LINEAR amplitudes of the
+    'rest' modes are solved.  The pre-fix code sliced ``modes[:max_refine]`` and dropped every
+    remaining mode from the design matrix entirely, so their energy aliased into the refined
+    oscillators -- an excluded DC component dragged a refined mode to omega -> 0 with a 31x
+    spurious amplitude, and even with no DC anywhere the refined reconstruction RMS came out
+    1.3-2.7x WORSE than the pencil seed at n_slab = 4..6.
+
+    SAFETY GATE (also finding Q-2): the refined reconstruction RMS is compared against the
+    pencil seed's own reconstruction RMS, and a refinement that does not improve on the seed --
+    or that sends a refined mode outside [0.5, 2] x its seed omega, to omega ~ 0, or to a
+    non-positive/non-finite (omega, gamma) -- is REJECTED and the seed returned unchanged.
+
+    Modes are re-sorted by refined |amplitude|.  Returns ``(modes, note)`` where ``note`` is a
+    short debug string ('' when the refinement was accepted).  Falls back to the input modes
+    unchanged if scipy is unavailable or the fit fails."""
+    y = np.asarray(y, dtype=np.float64)
+    seed = list(modes)
+    if not seed:
+        return seed, "no modes to refine"
+    dt = float(dt)
+    t = np.arange(y.size) * dt
+    is_osc = [bool(m.omega_rad_s * dt > _OMEGA_DC_TOL) for m in seed]
+    # index-based split (finding Q-21: the old `m not in osc` used dataclass VALUE equality, so
+    # two degenerate modes both landed in `osc` and `rest` silently lost one).
+    ref_idx = [i for i, o in enumerate(is_osc) if o][:int(max_refine)]
+    fix_idx = [i for i in range(len(seed)) if i not in set(ref_idx)]
+    if not ref_idx:
+        return seed, "no oscillatory mode to refine"
     try:
         from scipy.optimize import least_squares
     except Exception:                                   # pragma: no cover - scipy is a core dep
-        return modes
-    t = np.arange(y.size) * dt
-    K = len(osc)
-    w0 = np.array([m.omega_rad_s for m in osc])
-    h0 = np.array([0.5 * m.gamma_rad_s for m in osc])   # FIELD decay rate = gamma/2
+        return seed, "scipy unavailable: refinement skipped"
+
+    K = len(ref_idx)
+    w0 = np.array([seed[i].omega_rad_s for i in ref_idx], dtype=np.float64)
+    h0 = np.array([0.5 * seed[i].gamma_rad_s for i in ref_idx], dtype=np.float64)
+
+    # FIXED columns: seed (omega, gamma) held, linear amplitude still solved.
+    fixed_cols: List[np.ndarray] = []
+    fixed_map: List[tuple] = []                         # (mode index, n_cols)
+    for i in fix_idx:
+        m = seed[i]
+        e = np.exp(-0.5 * abs(m.gamma_rad_s) * t)
+        if is_osc[i]:
+            fixed_cols.append(e * np.cos(m.omega_rad_s * t))
+            fixed_cols.append(e * np.sin(m.omega_rad_s * t))
+            fixed_map.append((i, 2))
+        else:
+            fixed_cols.append(e)                        # pure decay / DC-drift column
+            fixed_map.append((i, 1))
+    F = (np.column_stack(fixed_cols) if fixed_cols
+         else np.empty((y.size, 0), dtype=np.float64))
 
     def _design(w, h):
-        cols = np.empty((y.size, 2 * K))
+        cols = np.empty((y.size, 2 * K + F.shape[1]), dtype=np.float64)
         for k in range(K):
             e = np.exp(-np.abs(h[k]) * t)
             cols[:, 2 * k] = e * np.cos(w[k] * t)
             cols[:, 2 * k + 1] = e * np.sin(w[k] * t)
+        if F.shape[1]:
+            cols[:, 2 * K:] = F
         return cols
 
     def _resid(p):
@@ -271,21 +335,43 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
         w, h = sol.x[:K], np.abs(sol.x[K:])
         A = _design(w, h)
         c, *_ = np.linalg.lstsq(A, y, rcond=None)
-        rms = float(np.sqrt(np.mean((A @ c - y) ** 2))) + 1e-300
+        rms = float(np.sqrt(np.mean((A @ c - y) ** 2)))
     except Exception:                                   # pragma: no cover - defensive
-        return modes
-    out = list(rest)
+        return seed, "least_squares failed: seed kept"
+
+    # --- per-mode sanity: reject an escaped / invented refit outright ---------------------
+    for k in range(K):
+        gam = 2.0 * h[k]
+        ws = w0[k]
+        if not (np.isfinite(w[k]) and np.isfinite(gam)) or gam <= 0.0 or w[k] <= 0.0:
+            return seed, "refit degenerate (mode {}): seed kept".format(ref_idx[k])
+        if w[k] * dt <= _OMEGA_DC_TOL:
+            return seed, "refit collapsed a mode to omega ~ 0: seed kept"
+        if not (0.5 * ws <= w[k] <= 2.0 * ws):
+            return seed, "refit left the seed omega basin (mode {}): seed kept".format(ref_idx[k])
+
+    # --- the cross-cutting safety gate: never accept a refit worse than its own seed -------
+    rms_seed = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed) - y) ** 2)))
+    if not np.isfinite(rms) or rms > rms_seed:
+        return seed, ("refined RMS {:.6e} > seed RMS {:.6e}: seed kept".format(rms, rms_seed))
+
+    denom = rms + 1e-300
+    out: List[Mode] = []
     for k in range(K):
         amp = complex(c[2 * k], c[2 * k + 1])           # y = Re(A e^{-i w t}) e^{-h t}
         gam = 2.0 * h[k]
-        if not (np.isfinite(w[k]) and np.isfinite(gam)) or gam <= 0.0 or w[k] <= 0.0:
-            out.append(osc[k])                          # degenerate refit: keep the pencil mode
-            continue
         out.append(Mode(omega_rad_s=float(w[k]), gamma_rad_s=float(gam),
                         q=float(w[k] / gam), amplitude=amp,
-                        snr_est=float(abs(amp) / rms)))
+                        snr_est=float(abs(amp) / denom)))
+    j = 2 * K
+    for i, ncol in fixed_map:                           # seed (omega, gamma), re-solved amplitude
+        m = seed[i]
+        amp = complex(c[j], c[j + 1]) if ncol == 2 else complex(c[j], 0.0)
+        j += ncol
+        out.append(Mode(omega_rad_s=m.omega_rad_s, gamma_rad_s=m.gamma_rad_s, q=m.q,
+                        amplitude=amp, snr_est=float(abs(amp) / denom)))
     out.sort(key=lambda m: abs(m.amplitude), reverse=True)
-    return out
+    return out, ""
 
 
 def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
@@ -303,40 +389,149 @@ def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
 # --------------------------------------------------------------------------------------------
 
 def _ringdown_window(sig: np.ndarray, dt: float, f_c: float, *,
-                     drop_db_start: float = 50.0, floor_margin: float = 1e3) -> tuple:
-    """Data-driven fit window (i0, i1) for a ringdown trace: START after the driven pulse's
-    envelope has fallen ``drop_db_start`` dB below its peak (past the fast source tail, onto
-    the exponential cavity leak), END where the envelope reaches ``floor_margin`` x the
-    late-time numeric floor. A FIXED-fraction window is a precision cliff: on a long record
-    the coherent mode can be at ~1e-13 of peak by the window start, so the fit reads the
-    platform-dependent float64 noise floor (observed: two correct numpy builds returning Q
-    values 28% apart from bit-identical physics). The envelope is a block max over ~2 carrier
-    periods."""
-    w = max(1, int(round(2.0 / (max(f_c, 1e-300) * dt))))
+                     drop_db_start: float = 50.0, floor_margin: float = 1e3,
+                     decades_span: float = 10.0, min_blocks: int = 8,
+                     plateau_rel: float = 1e-6, min_drop_db: float = 20.0) -> tuple:
+    """Data-driven fit window (i0, i1) for a ringdown trace.
+
+    START after the driven pulse's envelope has fallen ``drop_db_start`` dB below its peak (past
+    the fast source tail, onto the exponential cavity leak).  A FIXED-fraction window is a
+    precision cliff: on a long record the coherent mode can be at ~1e-13 of peak by the window
+    start, so the fit reads the platform-dependent float64 noise floor (observed: two correct
+    numpy builds returning Q values 28% apart from bit-identical physics).
+
+    END at whichever comes FIRST of (a) ``decades_span`` decades of ENVELOPE DECAY below the
+    window start and (b) ``floor_margin`` x the measured late-time numeric floor -- and only if
+    that floor is a genuine PLATEAU (``floor < plateau_rel * env[start]``).  If neither is
+    reached the FULL REMAINING RECORD is used.
+
+    FINDING Q-1 (the pre-fix defect).  The end threshold was ``max(floor*floor_margin,
+    peak*1e-13)`` with ``floor = median(env[last 10%])`` and no plateau test, so on a trace that
+    is still ringing at the end of the record the "floor" is the LIVE SIGNAL: the end threshold
+    landed ABOVE the envelope at the window start, the first-crossing search returned index 0,
+    and the window collapsed to the hardcoded 8-sample minimum -- which then died downstream in
+    ``matrix_pencil`` with "need at least 4 samples". It broke ``fdtd_etalon_ringdown`` from
+    ``n_slab ~ 7`` (Q ~ 50) upward, and a LONGER record did not rescue it (lengthening the record
+    stretches the decay proportionally, so the median tracks it). The 8-sample window was also the
+    terminal state of every malformed input -- pure noise, a badly mis-specified ``f_c`` -- i.e.
+    silent failure. The window now (i) drives the END off the envelope decay itself, (ii) never
+    collapses (a sub-``min_blocks`` window falls back to the full remaining record), (iii) adapts
+    the START threshold when ``drop_db_start`` is not reachable, and (iv) RAISES a named
+    diagnostic when the trace genuinely carries no ringdown or is too short.
+
+    The envelope is a block max over ~2 carrier periods at ``f_c``.  ``f_c`` is a caller-supplied
+    band centre, so the block width is GUARDED against a mis-specified ``f_c`` by the dominant
+    frequency measured from the trace itself (a 100x-too-high ``f_c`` gave sub-period blocks whose
+    "envelope" dives into every zero crossing; a 100x-too-low one gave a handful of blocks and a
+    silently wrong window).
+
+    Parameters
+    ----------
+    drop_db_start : dB below the envelope peak at which the fit window starts. If the record never
+        gets that far down, HALF the deepest reachable drop is used instead (so a 40 dB-total
+        trace starts at 20 dB, still past the source tail); the shipped FDTD configs all reach
+        150-300 dB, so the effective start is the full 50 dB and is unchanged by this fallback.
+    min_drop_db : if the envelope does not fall even this far below its peak anywhere in the
+        usable record, the trace carries no ringdown and a ValueError is raised. Pure white noise
+        block-maxima span only ~7.7 dB, well under the 20 dB default.
+    decades_span : decades of ENVELOPE amplitude decay below the window start at which the window
+        ends. The default 10 (200 dB) is essentially the float64 dynamic range of the march: it is
+        a safety net, and it is NOT binding on any shipped config (where the plateau floor is
+        reached first).
+    floor_margin, plateau_rel : the late-time floor ``median(env[last 10%])`` is used as an end
+        threshold (times ``floor_margin``) ONLY when it is a genuine plateau, i.e. below
+        ``plateau_rel`` times the envelope at the window start.
+    min_blocks : the minimum number of envelope blocks a window must span. A shorter window is
+        widened to the full remaining record rather than truncated.
+
+    Raises
+    ------
+    ValueError
+        If the record holds too few envelope blocks after the pulse peak, or if the envelope
+        never falls ``min_drop_db`` below its peak (a noise-like trace with no ringdown).
+    """
     a = np.abs(np.asarray(sig, dtype=np.float64))
-    nb = max(1, int(np.ceil(a.size / w)))
-    pad = np.pad(a, (0, nb * w - a.size), constant_values=0.0)
+    n_samp = int(a.size)
+    dt = float(dt)
+    min_blocks = max(2, int(min_blocks))
+    if n_samp < 16:
+        raise ValueError("_ringdown_window: trace has {} samples; need at least 16.".format(n_samp))
+
+    # ---- block width ~2 carrier periods, guarded against a mis-specified f_c ---------------
+    w = max(1, int(round(2.0 / (max(float(f_c), 1e-300) * dt))))
+    ac = np.asarray(sig, dtype=np.float64)
+    spec = np.abs(np.fft.rfft(ac - float(np.mean(ac))))
+    if spec.size > 2:
+        k = int(np.argmax(spec[1:])) + 1
+        f_meas = float(np.fft.rfftfreq(n_samp, dt)[k])
+        if f_meas > 0.0:
+            w_meas = max(1, int(round(2.0 / (f_meas * dt))))
+            # keep w within [1, 4] carrier periods of the MEASURED carrier: a no-op whenever the
+            # supplied f_c is right (all shipped configs sit at 0.96-1.08 x f_meas).
+            w = int(min(max(w, max(1, w_meas // 2)), 2 * w_meas))
+    w = max(1, min(w, max(1, n_samp // (4 * min_blocks))))   # always >= 4*min_blocks blocks
+
+    nb = max(1, int(np.ceil(n_samp / w)))
+    pad = np.pad(a, (0, nb * w - n_samp), constant_values=0.0)
     env = pad.reshape(nb, w).max(axis=1)               # block envelope, one point per w samples
     pk = int(np.argmax(env))
     peak = float(env[pk])
     if peak <= 0.0:
-        return 0, a.size
-    floor = float(np.median(env[int(0.9 * env.size):])) if env.size >= 10 else 0.0
-    th_start = peak * 10.0 ** (-drop_db_start / 20.0)
-    th_end = max(floor * floor_margin, peak * 1e-13)
-    below = np.nonzero(env[pk:] < th_start)[0]
+        return 0, n_samp
+
+    # ---- START: deepest reachable drop below the peak, capped at drop_db_start -------------
+    last_start = nb - min_blocks                       # a window must still hold min_blocks blocks
+    if last_start <= pk:
+        raise ValueError(
+            "_ringdown_window: record too short -- only {} envelope blocks ({} samples each) "
+            "follow the pulse peak, need at least {}. Lengthen the record (larger `settle`) or "
+            "lower `min_blocks`.".format(nb - pk, w, min_blocks))
+    seg = env[pk:last_start + 1]
+    e_min = float(np.min(seg))
+    deepest_db = (20.0 * np.log10(peak / e_min)) if e_min > 0.0 else float("inf")
+    if deepest_db < float(min_drop_db):
+        raise ValueError(
+            "_ringdown_window: no ringdown decay detected -- the block envelope falls only "
+            "{:.1f} dB below its peak over the usable record (need {:.1f} dB). The trace is "
+            "noise-like, or the record ends before the cavity leaks; check the excitation band "
+            "and `settle`.".format(deepest_db, float(min_drop_db)))
+    drop_eff = min(float(drop_db_start), 0.5 * deepest_db)
+    th_start = peak * 10.0 ** (-drop_eff / 20.0)
+    below = np.nonzero(seg < th_start)[0]
     b0 = pk + (int(below[0]) if below.size else 1)
+    b0 = int(min(max(b0, 0), last_start))
+
+    # ---- END: envelope decay OR a genuine numeric plateau, whichever comes FIRST -----------
+    env_start = float(env[b0])
+    floor = float(np.median(env[int(0.9 * nb):])) if nb >= 10 else 0.0
+    plateau = (floor > 0.0) and (floor < float(plateau_rel) * env_start)
+    th_floor = floor * float(floor_margin) if plateau else 0.0
+    th_dec = env_start * 10.0 ** (-float(decades_span))
+    th_end = max(th_floor, th_dec, peak * 1e-13)
     ends = np.nonzero(env[b0:] < th_end)[0]
-    b1 = b0 + (int(ends[0]) if ends.size else env.size - b0)
-    i0 = max(0, min(b0 * w, a.size - 8))
-    i1 = max(i0 + 8, min(b1 * w, a.size))
+    b1 = b0 + (int(ends[0]) if ends.size else nb - b0)
+    if b1 - b0 < min_blocks:
+        b1 = nb                                        # never collapse: full remaining record
+
+    i0 = int(max(0, min(b0 * w, n_samp - 1)))
+    i1 = int(max(i0, min(b1 * w, n_samp)))
+    if i1 - i0 < 16:                                   # pragma: no cover - unreachable guard
+        raise ValueError(
+            "_ringdown_window: the fit window collapsed to {} samples (block width {}, blocks "
+            "{}..{} of {}); the trace carries no usable ringdown tail.".format(
+                i1 - i0, w, b0, b1, nb))
     return i0, i1
 
 
 @dataclass
 class EtalonRingdown:
     """Result of fdtd_etalon_ringdown: the extracted modes plus the windowed/decimated trace
-    that was inverted, and the dominant-mode (f0_Hz, Q)."""
+    that was inverted, and the dominant-mode (f0_Hz, Q).
+
+    ``refine_note`` is a debug string: empty when the NLS (VARPRO) refinement was accepted, and
+    otherwise the reason the PENCIL SEED was returned instead (finding Q-2's safety gate --
+    e.g. "refined RMS ... > seed RMS ...").  ``window`` is the (i0, i1) sample window that was
+    cut out of the raw FDTD trace."""
 
     modes: List[Mode]
     f0_Hz: float
@@ -344,6 +539,8 @@ class EtalonRingdown:
     dt_used: float
     t_used: np.ndarray
     signal_used: np.ndarray
+    refine_note: str = ""
+    window: tuple = (0, 0)
 
 
 def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: float,
@@ -353,7 +550,8 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                          target_samples_per_period: int = 20,
                          max_fit_samples: int = 1200, pencil_frac: float = 0.4,
                          svd_tol: float = 1e-6, max_modes: Optional[int] = None,
-                         amp_floor: float = 5e-2, refine: bool = True) -> EtalonRingdown:
+                         amp_floor: float = 5e-2, refine: bool = True,
+                         max_refine: int = 6) -> EtalonRingdown:
     """Drive solve_fdtd_1d on a high-index dielectric slab (a leaky Fabry-Perot etalon), window
     out the driven pulse, decimate the ringdown tail, and matrix-pencil-invert it.
 
@@ -375,6 +573,12 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
                      (default True) -- makes the reported (f0, Q) a platform-stable property
                      of the trace rather than of the LAPACK build (see _nls_refine_real).
+                     The refinement is REJECTED (seed returned, reason in
+                     ``EtalonRingdown.refine_note``) if it does not beat the seed's own
+                     reconstruction RMS.
+      max_refine   : how many DOMINANT OSCILLATORY modes have their (omega, gamma) varied by the
+                     refinement. Every other mode still contributes FIXED columns to the design
+                     matrix, so no mode's energy can alias into a refined one (finding Q-2).
       the remaining kwargs pass through to matrix_pencil.
     """
     from dynameta.optics.fdtd import solve_fdtd_1d, FDTDLayer
@@ -412,12 +616,14 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     # NLS (VARPRO) refinement: the pencil seed's dominant-mode Q is sensitive to the LAPACK
     # build at marginal model orders (two correct BLAS stacks straddled a 12% gate on the same
     # trace); the refined optimum is a property of the data and platform-stable.
+    note = ""
     if refine and modes:
-        modes = _nls_refine_real(tail_d, dt_d, modes)
+        modes, note = _nls_refine_real(tail_d, dt_d, modes, max_refine=max_refine)
     t_used = np.arange(tail_d.size) * dt_d
     if modes:
         f0, q = modes[0].f_hz, modes[0].q
     else:
         f0, q = float("nan"), float("nan")
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
-                          t_used=t_used, signal_used=tail_d)
+                          t_used=t_used, signal_used=tail_d, refine_note=note,
+                          window=(int(i0), int(i1)))
