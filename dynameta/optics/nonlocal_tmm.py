@@ -265,12 +265,27 @@ def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
     return np.sqrt(eps * k0 * k0 - k_par * k_par + 0j)
 
 
+# The ONE polarization vocabulary of this module (audit V-3/V-8): exactly {'p', 's'}, matching the
+# stack_rt / pole_function checks.  Case-sensitive on purpose -- see resonance._POL_MSG (the twin).
+_POL_MSG = ("pol must be 'p' or 's' (case-sensitive); got {!r}. There is no default: 'TE'/'TM'/'x' "
+            "used to return the s-polarized admittance silently, the MIRROR of the p-pol "
+            "fallthrough in optics.resonance (audit V-3).")
+
+
 def _admittance(eps: complex, kz: complex, pol: str) -> complex:
     """Physical optical admittance ``Y = H_tan / E_tan`` for a forward wave (H_tan is H_y for
     p-pol, and -H_x for s-pol, so both polarizations share the same sign pattern):
     p-pol (TM) ``Y = omega*eps0*eps / kz``; s-pol (TE) ``Y = kz / (omega*mu0)``.  The
     reflectance / transmittance built from these reproduce the exact Fresnel power coefficients
-    (validated against ``tmm`` in the tests)."""
+    (validated against ``tmm`` in the tests).
+
+    AUDIT V-3/V-8: RAISES on any other ``pol``.  This twin used to fall through to S-pol while the
+    verbatim copy in ``optics.resonance`` fell through to P-pol, so the two modules returned
+    DIFFERENT physics for the same off-vocabulary string (``"TE"``, ``"TM"``, ``"x"``, ``"P"``).
+    Both now raise -- the stricter behaviour, and the one this module's public entry points
+    (``stack_rt``, ``pole_function``) already had."""
+    if pol not in ("p", "s"):
+        raise ValueError(_POL_MSG.format(pol))
     if pol == "p":
         return eps / kz          # reduced by the common omega*eps0 (cancels in every ratio used)
     return kz                    # reduced by the common 1/(omega*mu0)
@@ -463,7 +478,7 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     RTA
     """
     if pol not in ("p", "s"):
-        raise ValueError("pol must be 'p' or 's'")
+        raise ValueError(_POL_MSG.format(pol))           # audit V-3: one vocabulary, one message
     w = complex(omega)
     k0 = w / C_LIGHT
     eps_super = complex(n_super) ** 2
@@ -518,7 +533,7 @@ def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub
     for GENUINE nonlocal stacks (finite ``beta``); in the ``beta -> 0`` local limit there is no
     bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there)."""
     if pol not in ("p", "s"):
-        raise ValueError("pol must be 'p' or 's'")
+        raise ValueError(_POL_MSG.format(pol))           # audit V-3: one vocabulary, one message
     kpar = complex(k_par_m)
     eps_super = complex(n_super) ** 2
     eps_sub = complex(n_sub) ** 2

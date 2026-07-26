@@ -142,11 +142,27 @@ def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
     return np.sqrt(eps * k0 * k0 - k_par * k_par + 0j)
 
 
+# The ONE polarization vocabulary of this module (audit V-3/V-8): exactly {'s', 'p'}, matching
+# layered_smatrix_complex's long-standing check.  Case-sensitive on purpose -- silently accepting
+# 'S'/'TE' is how the p-pol-by-default fallthrough went unnoticed.
+_POL_MSG = ("pol must be 's' or 'p' (case-sensitive); got {!r}. There is no default: 'TE'/'TM'/'x' "
+            "used to return the p-polarized function silently (audit V-3).")
+
+
 def _admittance(eps: complex, kz: complex, pol: str) -> complex:
     """Reduced optical admittance ``Y = H_tan / E_tan`` (common factors dropped):
     s-pol (TE) ``Y ~ kz``; p-pol (TM) ``Y ~ eps / kz``.  Reflectance ``|r|^2`` and transmittance
     ``|t|^2 * Re(Y_sub)/Re(Y_super)`` built from these reproduce the exact Fresnel power
-    coefficients for both polarizations (validated against ``tmm`` to ~1e-14)."""
+    coefficients for both polarizations (validated against ``tmm`` to ~1e-14).
+
+    AUDIT V-3/V-8: RAISES on any other ``pol``.  This used to fall through to p-pol (``return kz
+    if pol == "s" else eps/kz``) while its verbatim twin ``nonlocal_tmm._admittance`` fell through
+    to s-pol -- mirror-image silent defaults, so the two modules DISAGREED on every off-vocabulary
+    string (``"TE"``, ``"TM"``, ``"x"``, ``"S"``).  Both twins now raise, the stricter of the two
+    behaviours and the one the public entry points (``layered_smatrix_complex``, ``stack_rt``,
+    ``pole_function``) already had."""
+    if pol not in ("s", "p"):
+        raise ValueError(_POL_MSG.format(pol))
     return kz if pol == "s" else eps / kz
 
 
@@ -226,7 +242,7 @@ def layered_smatrix_complex(omega_rad_s, layers: Sequence[Layer], *, theta_rad: 
     SMatrix
     """
     if pol not in ("s", "p"):
-        raise ValueError("pol must be 's' or 'p'")
+        raise ValueError(_POL_MSG.format(pol))               # audit V-3: one vocabulary, one message
     omega = complex(omega_rad_s)
     k0 = omega / C_LIGHT
     eps_super = complex(n_super) ** 2
@@ -337,7 +353,17 @@ def smatrix_pole_func(layers: Sequence[Layer], *, pol: str = "s", n_super=1.0, n
     """Return the analytic scattering-pole function ``D(omega)`` (a closure holding ``k_par``
     FIXED), whose zeros are the scattering poles of the stack.  Feed this to :func:`find_poles` /
     :func:`newton_refine`.  See :func:`_stack_denominator` for why the characteristic-matrix form
-    is used (branch-cut-free in the layer wavevectors, correct decaying-pole sign)."""
+    is used (branch-cut-free in the layer wavevectors, correct decaying-pole sign).
+
+    ``pol`` is validated EAGERLY against the same ``{'s', 'p'}`` set
+    :func:`layered_smatrix_complex` accepts (audit V-3: this entry point -- the module's primary
+    public pole finder -- used to accept anything and silently return the P-POL function, so a
+    ``pol='TE'`` pole hunt returned p-pol poles that look entirely plausible; validating in the
+    factory, not in the closure, surfaces the typo at the call site rather than inside
+    ``find_poles``)."""
+    if pol not in ("s", "p"):
+        raise ValueError(_POL_MSG.format(pol))
+
     def D(omega):
         return _stack_denominator(omega, layers, pol, n_super, n_sub, k_par_m)
     return D

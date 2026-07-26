@@ -79,6 +79,7 @@ from typing import Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK, KB
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.steady_state import SteadyStateResult
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
 
@@ -188,7 +189,7 @@ def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda
                       g_b: float = G_B_EFFECTIVE, C: float = 21.0, T_K: float = 300.0) -> dict:
     """Accumulated SBS gain exponent of an ACTIVE amplifier from a converged SteadyStateResult:
 
-        G_B = (g_B / A_eff) integral_0^L P_signal(z) dz     (np.trapezoid over the signal profile)
+        G_B = (g_B / A_eff) integral_0^L P_signal(z) dz     (trapezoidal, over the signal profile)
 
     P_signal(z) already carries the amplifier gain and loss, so the L_eff of the passive form is
     NOT used (that would double-count the gain). A_eff = pi w^2 from the Gaussian mode-field
@@ -200,7 +201,7 @@ def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda
     Returns a dict: G_B, threshold_margin (G_B/C), a_eff_m2, integral_P_dz_Wm, nu_B_hz, dnu_B_hz,
     n_th, P_seed_W, P_stokes_out_W."""
     z, P = _signal_power_profile(result, signal_lambda_m)
-    integral_P_dz = float(np.trapezoid(P, z))
+    integral_P_dz = float(trapz(P, z))
     w = float(mode_field_radius_m(fiber.core_radius_m, fiber.na, signal_lambda_m))
     a_eff = float(np.pi * w * w)
     G_B = float(g_b) * integral_P_dz / a_eff
@@ -283,7 +284,7 @@ def srs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda
     Returns a dict: G_R, threshold_margin (G_R/C), g_R, a_eff_m2, integral_P_dz_Wm,
     stokes_lambda_m."""
     z, P = _signal_power_profile(result, signal_lambda_m)
-    integral_P_dz = float(np.trapezoid(P, z))
+    integral_P_dz = float(trapz(P, z))
     w = float(mode_field_radius_m(fiber.core_radius_m, fiber.na, signal_lambda_m))
     a_eff = float(np.pi * w * w)
     if g_r is None:
@@ -399,7 +400,7 @@ def double_rayleigh_mpi(result: SteadyStateResult, fiber: FiberSpec, signal_lamb
     cum[0, :] = 0.0
     cum[1:, :] = np.cumsum(col_incr, axis=0)                    # cum[i, j] = int_0^{z_i} ... dz1
     inner = np.diagonal(cum).copy()                            # triangular mask: z1 <= z2 = z_j
-    R_MPI = (float(alpha_R) * float(S)) ** 2 * float(np.trapezoid(inner, z))
+    R_MPI = (float(alpha_R) * float(S)) ** 2 * float(trapz(inner, z))
     return R_MPI
 
 

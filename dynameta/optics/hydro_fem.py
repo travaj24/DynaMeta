@@ -57,7 +57,11 @@ standing-wave absorption peaks at ``k_L d = m*pi`` to < 1% (the core nonlocal ph
 term and ABC); its ABSOLUTE absorption error grows with angle because a single scalar impedance BC
 cannot fully absorb the oblique VECTOR p-pol wave in a nodal discretization: measured ~0.5-3% at
 30 deg and up to ~20% at 60 deg near 0.7 wp (documented, not gated -- the peak POSITIONS validate
-the physics).
+the physics).  R/T are read from plane-wave probe planes placed GEOMETRICALLY inside the vacuum
+buffers (:func:`_probe_node`, audit F-5) -- they used to be the fixed mesh indices ``allz[3]`` /
+``allz[-4]``, which fall INSIDE the metal for a thin ``buffer_nm`` and/or a coarse ``metal_cells``
+and returned R > 1, A < 0 on a passive film; a buffer too thin to host a probe now RAISES.
+``A_volume`` never depended on the probe planes and was correct throughout.
 
 ------------------------------------------------------------------------------------------------
 THE 2-D SCATTERER SOLVER (item 5.4): why the vector-J form failed, and the cure that fixed it
@@ -113,7 +117,12 @@ scalar Helmholtz.
 
   with ``eps(x) = eps_T`` in metal, ``eps_host`` outside.  Scattered-field sources (``E`` scattered,
   ``E_inc`` the analytic plane wave): ``f_E = k0**2 int_metal (eps_T - eps_host) E_inc . v`` and
-  ``f_psi = -i*omega*eps0*wp**2 int_metal E_inc . grad(w)``.  (Implementation applies a symmetric
+  ``f_psi = -i*omega*eps0*wp**2 int_metal E_inc . grad(w)``.  The METAL-RESTRICTED source is exact
+  only if ``E_inc`` solves the source-free equation in the HOST, i.e. only if it is built with the
+  HOST wavenumber ``k_host = k0 sqrt(eps_host)`` (audit F-4) -- with a vacuum ``k0`` the residual
+  ``k0**2 (eps_host - 1) E_inc`` over the whole host is dropped and the "scattered" field is not the
+  scattered field at all.  ``scattering_2d`` therefore builds ``E_inc`` (and its analytic curl) at
+  ``k_host`` and REQUIRES a lossless dielectric host.  (Implementation applies a symmetric
   numerical rescaling ``psi = S psi_hat`` + equation scale so the assembled matrix is
   complex-SYMMETRIC and every entry is O(1e-3..1) -- a well-conditioned direct ``umfpack`` solve.)
 
@@ -182,6 +191,7 @@ References
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -211,6 +221,17 @@ __all__ = [
 
 Z0 = math.sqrt(MU0 / EPS0)          # free-space wave impedance [ohm]
 _L0 = 1.0e-9                        # length unit: mesh coordinates are in nm
+
+# hydro_layered_1d R/T probe planes (audit F-5): the probe node must sit STRICTLY inside its vacuum
+# buffer, standing off at least this much (nm, or 10% of the buffer, whichever is larger) from BOTH
+# the metal interface and the outer (transparent-BC) boundary.  _MIN_BUFFER_NM = 4 x the floor is
+# the smallest buffer that can host such a node on the 1-D mesh's 2-cell minimum.
+_PROBE_STANDOFF_NM = 2.0
+_MIN_BUFFER_NM = 4.0 * _PROBE_STANDOFF_NM
+# Target probe position, as a fraction of the buffer measured from the OUTER boundary inward (the
+# shipped default buffer_nm = 150 has 15 nm cells, so 0.3 lands exactly on the historical allz[3] /
+# allz[-4] node -> the default read-out is byte-identical to the pre-fix magic indices).
+_PROBE_TARGET_FRAC = 0.3
 
 
 # ================================================================================================
@@ -446,6 +467,41 @@ def _build_1d_mesh(layers, hmap, iface_z):
     return ng.Mesh(m), allz
 
 
+def _probe_node(allz, z_lo, z_hi, buffer_nm, from_outer, where):
+    """Index into ``allz`` of the R/T probe plane inside a VACUUM buffer spanning ``[z_lo, z_hi]``
+    (audit F-5).
+
+    The pre-fix code used the magic indices ``allz[3]`` / ``allz[-4]`` -- the 4th mesh node from each
+    end of the stack.  Those are only inside the buffer for a coarse-enough buffer AND a fine-enough
+    metal: with ``buffer_nm = 20`` the buffer holds just two 10 nm cells, so ``allz[3]`` is the
+    metal's FIRST interior node, and with ``metal_cells = 4`` on a 100 nm film that node is 25 nm
+    DEEP in the film -- the read-out then returned R = 1.25, A = -0.26 on a passive absorber while
+    the independent ``A_volume`` stayed correct, with nothing raised.
+
+    Geometric rule instead: take the mesh node nearest ``_PROBE_TARGET_FRAC * buffer`` from the
+    OUTER boundary, restricted to nodes standing off at least ``max(_PROBE_STANDOFF_NM,
+    0.1 * buffer)`` from BOTH the metal interface and the outer (transparent-BC) boundary.  This is
+    buffer-relative, so it degrades gracefully; the shipped default (buffer 150 nm -> 15 nm cells)
+    picks exactly the historical node (45 nm in from the outer boundary), i.e. the default R/T are
+    byte-identical.  ``from_outer`` is +1 for the substrate buffer (outer boundary at ``z_lo``) and
+    -1 for the superstrate buffer (outer boundary at ``z_hi``).
+    """
+    stand = max(_PROBE_STANDOFF_NM, 0.1 * float(buffer_nm))
+    lo, hi = float(z_lo) + stand, float(z_hi) - stand
+    target = (float(z_lo) + _PROBE_TARGET_FRAC * float(buffer_nm) if from_outer > 0 else
+              float(z_hi) - _PROBE_TARGET_FRAC * float(buffer_nm))
+    ok = np.nonzero((allz >= lo - 1e-9) & (allz <= hi + 1e-9))[0]
+    if ok.size == 0:
+        raise ValueError(
+            "hydro_layered_1d: buffer_nm={:.6g} cannot host an R/T probe plane in the {} buffer -- "
+            "no mesh node stands off {:.6g} nm from both the metal interface and the outer boundary, "
+            "so the probe would land in (or on) the metal and R/T would be silently wrong (the "
+            "pre-fix magic index returned R > 1 and A < 0 on a passive film there). Use "
+            "buffer_nm >= {:.6g} nm (>= 50 nm recommended); A_volume is unaffected by the "
+            "buffer.".format(float(buffer_nm), where, stand, _MIN_BUFFER_NM))
+    return int(ok[np.argmin(np.abs(allz[ok] - target))])
+
+
 def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: float = 0.0,
                      hydro: bool = True, buffer_nm: float = 150.0, order: int = 3,
                      metal_cells: int = 80) -> LayeredResult:
@@ -471,7 +527,11 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
     hydro : bool
         ``True`` -> the full coupled HDM (pressure term + ABC).  ``False`` -> the LOCAL Drude
         reduction (no pressure term, no ABC) on the same mesh, for the local-limit gate.
-    buffer_nm, order, metal_cells : mesh / discretisation controls.
+    buffer_nm, order, metal_cells : mesh / discretisation controls.  ``buffer_nm`` is the vacuum
+        sub/superstrate thickness; the R/T probe planes are placed inside it geometrically
+        (:func:`_probe_node`, audit F-5) and a buffer too thin to host one RAISES (minimum
+        ``_MIN_BUFFER_NM`` = 8 nm, >= 50 nm recommended).  ``A_volume`` does not depend on the
+        probe planes.
 
     Returns
     -------
@@ -486,6 +546,15 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
     k0p, kxp, kzp = k0 * _L0, kx * _L0, kz * _L0
     if kzp == 0.0:
         raise ValueError("grazing incidence (kz = 0) is singular")
+    if float(buffer_nm) < _MIN_BUFFER_NM:
+        # The R/T read-out needs a probe plane strictly inside each vacuum buffer (see _probe_node);
+        # below this the buffer's 2-cell minimum cannot supply one. A_volume would still be valid,
+        # but returning R/T from a probe inside the metal is exactly the F-5 silent failure.
+        raise ValueError(
+            "hydro_layered_1d: buffer_nm={:.6g} is too thin for the R/T probe planes (needs "
+            ">= {:.6g} nm so a mesh node can stand off {:.6g} nm from both the metal interface and "
+            "the outer boundary; >= 50 nm recommended).".format(
+                float(buffer_nm), _MIN_BUFFER_NM, _PROBE_STANDOFF_NM))
 
     z = 0.0
     layers = [("sub", z, z + buffer_nm)]; z += buffer_nm
@@ -545,15 +614,31 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
     Pinc = kz / (2.0 * k0 * Z0)
     A_vol = float(Pabs / Pinc)
 
-    # R / T by matching the outgoing plane wave in each vacuum buffer (0-order)
+    # R / T by matching the outgoing plane wave in each vacuum buffer (0-order). The probe planes
+    # are chosen GEOMETRICALLY (audit F-5): strictly inside the 'sub'/'sup' vacuum buffers with a
+    # minimum standoff from both the metal interface and the transparent-BC boundary. The shipped
+    # default (buffer 150 nm) reproduces the historical allz[3] / allz[-4] nodes exactly.
     def ev(cf, zz):
         return complex(cf(mesh(float(zz))))
-    zr, zt = allz[3], allz[-4]
+    ir = _probe_node(allz, 0.0, zm0, buffer_nm, +1, "substrate ('sub')")
+    it = _probe_node(allz, zm1, zm1 + buffer_nm, buffer_nm, -1, "superstrate ('sup')")
+    zr, zt = allz[ir], allz[it]
     r_ex = ev(gEx, zr) / np.exp(-1j * kzp * zr) / (kz / k0)     # reflected Ex amplitude / incident
     t_ex = ev(Etx, zt) / np.exp(1j * kzp * zt) / (kz / k0)      # transmitted Ex amplitude / incident
     R = float(abs(r_ex) ** 2)
     T = float(abs(t_ex) ** 2)
     A = float(1.0 - R - T)
+    if abs(theta_rad) < 1e-12 and (R > 1.0 + 5e-2 or T > 1.0 + 5e-2 or A < -5e-2):
+        # NORMAL-incidence backstop only: there the plane-wave read-out is exact (~1e-8 vs
+        # nonlocal_tmm), so a gross violation means the extraction is broken, not the physics. At
+        # OBLIQUE incidence the single-scalar-impedance BC makes R/T legitimately unphysical (see
+        # the module header) -- prefer A_volume there -- so no warning fires and the documented
+        # behaviour is unchanged. Thresholds mirror solve_fem's loose 5e-2 backstop.
+        warnings.warn(
+            "hydro_layered_1d: unphysical normal-incidence read-out R={:.4f}, T={:.4f}, "
+            "A=1-R-T={:.4f} (independent A_volume={:.4f}); the plane-wave fit is unreliable on this "
+            "mesh. Prefer A_volume and check buffer_nm/metal_cells.".format(R, T, A, A_vol),
+            stacklevel=2)
     return LayeredResult(R=R, T=T, A=A, A_volume=A_vol)
 
 
@@ -756,14 +841,34 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
     resolve the longitudinal screening length at all, or ``unstable_ratio`` is set aggressively,
     the solve can still be flagged rather than returned silently.  In the validated regimes
     (cylinder blueshift, gap saturation, local limit) the reformulation stays bounded.
+
+    ``eps_host`` (audit F-4).  The incident plane wave is built with the HOST wavenumber
+    ``k_host = k0 sqrt(eps_host)``, so it solves ``curl curl E_inc = k_host**2 E_inc = k0**2
+    eps_host E_inc`` in the host and the metal-restricted scattered source ``k0**2 (eps - eps_host)
+    E_inc`` is then the EXACT scattered-field split for any host.  (It previously used the VACUUM
+    ``k0`` with the same metal-restricted source -- consistent only at ``eps_host = 1``; the two
+    disagree over the whole host, and the library's own ``energy_residual`` diagnostic walked
+    5.8e-4 -> 0.33 -> 0.94 over ``eps_host = 1 -> 1.5 -> 4`` with nothing raised.  ``eps_host = 1``
+    is byte-identical before and after: ``sqrt(1) = 1``.)  The host must be a LOSSLESS dielectric
+    (real ``eps_host > 0``): the P_scat / energy_residual contour fluxes and the plane-wave
+    normalisation are only conserved there, so a lossy or negative host RAISES rather than
+    returning an unconserved number.
     """
     import ngsolve as ng
 
+    eh = complex(eps_host)
+    if abs(eh.imag) > 1e-12 * max(abs(eh), 1.0) or eh.real <= 0.0:
+        raise ValueError(
+            "scattering_2d: eps_host must be a LOSSLESS dielectric (real, > 0); got {!r}. The "
+            "incident plane wave, the radius-independent P_scat contour flux and energy_residual "
+            "all assume a non-absorbing host -- a lossy/negative host would return an unconserved "
+            "power budget silently. (Metal loss belongs in the 'metal' region.)".format(eps_host))
     k0 = (omega / C_LIGHT) * _L0                    # nm^-1
+    k_h = k0 * math.sqrt(eh.real)                   # HOST wavenumber (== k0 for eps_host = 1)
     prop = ng.y if pol_axis == "x" else ng.x
     comp = 0 if pol_axis == "x" else 1
-    Einc = ng.CoefficientFunction((ng.exp(1j * k0 * prop), 0) if pol_axis == "x"
-                                  else (0, ng.exp(1j * k0 * prop)))
+    Einc = ng.CoefficientFunction((ng.exp(1j * k_h * prop), 0) if pol_axis == "x"
+                                  else (0, ng.exp(1j * k_h * prop)))
     dm = ng.dx(definedon=mesh.Materials("metal"))
 
     if local:
@@ -854,12 +959,14 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
 
     enh = abs(complex(Etot[comp](mesh(float(probe[0]), float(probe[1])))))
 
-    # curls: scattered from the HCurl field; incident analytically (curl of a plane wave).
+    # curls: scattered from the HCurl field; incident analytically (curl of a plane wave). The
+    # incident curl carries the SAME host wavenumber as Einc (audit F-4) or the total-field flux
+    # -- and hence energy_residual -- would mix two different incident waves.
     curl_scat = ng.curl(Escat)
-    if pol_axis == "x":                                     # E_inc = (exp(i k0 y), 0)
-        curl_inc = -1j * k0 * ng.exp(1j * k0 * prop)        # curl' = -i k0 exp(i k0 y)
-    else:                                                   # E_inc = (0, exp(i k0 x))
-        curl_inc = 1j * k0 * ng.exp(1j * k0 * prop)
+    if pol_axis == "x":                                     # E_inc = (exp(i k_h y), 0)
+        curl_inc = -1j * k_h * ng.exp(1j * k_h * prop)      # curl' = -i k_h exp(i k_h y)
+    else:                                                   # E_inc = (0, exp(i k_h x))
+        curl_inc = 1j * k_h * ng.exp(1j * k_h * prop)
     P_scat = _flux_on_contour(mesh, Escat, curl_scat, omega, flux_radius)
     # energy conservation: TOTAL-field outward flux must equal -P_abs (absorbed power flows in)
     if flux_radius is not None:
@@ -873,15 +980,20 @@ def scattering_2d(mesh, omega, params: HydroParams, *, local: bool = False,
 
 
 def sp_resonance_omega(mesh, params: HydroParams, omegas, *, local: bool,
+                       eps_host: complex = 1.0,
                        order: int = 2, order_psi: Optional[int] = None,
                        flux_radius: Optional[float] = None) -> float:
     """Locate a dipole surface-plasmon resonance as the parabola-refined peak of ``P_abs(omega)``
     over the scan ``omegas`` (a 3-point vertex refine).  ``local`` picks the local-Drude or the
     coupled HDM (:func:`scattering_2d`) solve.  The CYLINDER-BLUESHIFT gate takes the coupled peak
     MINUS the local peak on the SAME mesh, so the mesh's absolute-position error cancels and the
-    residue is the physical nonlocal blueshift (compare :func:`cylinder_blueshift_raza`)."""
+    residue is the physical nonlocal blueshift (compare :func:`cylinder_blueshift_raza`).
+
+    ``eps_host`` is forwarded to :func:`scattering_2d` (audit F-4): the analytic oracles
+    :func:`cylinder_sp_omega` / :func:`cylinder_blueshift_raza` both take a host ``eps_b``, so
+    without it the only route to a host-aware FEM-vs-oracle comparison was to bypass this wrapper."""
     ws = np.asarray(omegas, dtype=float)
-    P = np.array([scattering_2d(mesh, float(w), params, local=local, order=order,
+    P = np.array([scattering_2d(mesh, float(w), params, local=local, eps_host=eps_host, order=order,
                                 order_psi=order_psi, flux_radius=flux_radius).P_abs for w in ws])
     i = int(np.argmax(P))
     if 0 < i < ws.size - 1:

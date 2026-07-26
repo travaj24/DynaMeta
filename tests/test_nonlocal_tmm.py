@@ -300,3 +300,25 @@ def test_gate7_enz_blueshift_one_over_d():
     assert shifts[10e-9] > 0.0 and shifts[50e-9] > 0.0
     # monotonicity / 1/d: a thinner film blueshifts MORE.
     assert shifts[10e-9] > shifts[50e-9]
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT V-3: the polarization vocabulary is EXACTLY {'p', 's'} here too (the twin gate lives in
+# tests/test_resonance.py::test_admittance_twins_agree_on_off_vocabulary)
+# ------------------------------------------------------------------------------------------------
+def test_public_entry_points_validate_pol():
+    """stack_rt / pole_function already raised; the private _admittance they share with
+    optics.resonance did NOT -- it silently returned the S-POL admittance for any unrecognized
+    string, the MIRROR of resonance's p-pol fallthrough. All three now reject the same set."""
+    layers = [nt.DielectricLayer(4.0 + 0j, 100e-9)]
+    w = 2.0 * math.pi * 3.0e8 / 1300e-9
+    for bad in ("TE", "TM", "te", "tm", "S", "P", "x", ""):
+        with pytest.raises(ValueError, match="pol must be"):
+            nt.stack_rt(w, layers, pol=bad)
+        with pytest.raises(ValueError, match="pol must be"):
+            nt.pole_function(layers, pol=bad)
+        with pytest.raises(ValueError, match="pol must be"):
+            nt._admittance(4.0 + 0j, 1.2e7 + 0j, bad)
+    for good in ("p", "s"):                                   # the accepted set is unchanged
+        assert nt.stack_rt(w, layers, pol=good) is not None
+        assert callable(nt.pole_function(layers, pol=good))

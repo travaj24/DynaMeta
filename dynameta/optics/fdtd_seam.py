@@ -41,15 +41,46 @@ from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 _VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-13: matches the kernel's own guard; the old 1e-3 silently truncated a weakly-absorbing substrate, biasing T ~2% high)
 
 
+def _require_passive_eps(eps_imag, eps_real, *, where: str = "_eps_to_fdtd_layer") -> None:
+    """AUDIT V-2: reject Im(eps) < 0 (= GAIN under exp(-i omega t)) instead of clamping it to zero.
+
+    `eps_imag` may be a scalar or an array (the vectorized twin passes the whole grid). The old
+    `max(0, Im)` / `np.maximum(Im, 0)` clamp was UNBOUNDED: a sign-convention slip such as
+    eps = -180 - 30j was silently realized as the strictly real -180+0j -- a collisionless metal
+    with gamma = 0.0 and absorption identically zero -- with no warning anywhere. The sibling
+    materials.DrudeOptical raises on the analogous input (a negative damping), so this seam now
+    does too. -0.0 is NOT a violation (it is +0.0 numerically) and is normalized downstream."""
+    im = np.asarray(eps_imag, dtype=np.float64)
+    bad = im < 0.0                                          # -0.0 < 0.0 is False -> accepted
+    if not bool(np.any(bad)):
+        return
+    re = np.broadcast_to(np.asarray(eps_real, dtype=np.float64), im.shape)
+    k = int(np.argmax(bad))                                 # first offending cell
+    im_bad, re_bad = float(im.ravel()[k]), float(re.ravel()[k])
+    raise ValueError(
+        "{}: Im(eps) must be >= 0 (passive) under the exp(-i omega t) convention; got eps = "
+        "{:.6g}{:+.6g}j{} (Im < 0 = GAIN). This is NOT clamped: the old silent clamp realized it "
+        "as the strictly real {:.6g}+0j -- a lossless (gamma = 0) layer whose absorption is "
+        "identically zero (audit V-2). Conjugate the permittivity if it came from an exp(+i omega "
+        "t) source, or fix the sign of the damping.".format(
+            where, re_bad, im_bad, ("" if im.size == 1 else " at flat index {}".format(k)), re_bad))
+
+
 def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> FDTDLayer:
     """Map a single complex eps(lambda_m) to an FDTDLayer. A pure positive-real eps -> a non-dispersive
     dielectric. A lossy and/or negative-real eps (absorber / metal) -> ONE Drude pole inverted to
     reproduce eps EXACTLY at this omega, with eps_inf held >= 1 so the FDTD background stays stable:
         eps(w) = eps_inf - wp^2/(w^2 + i gamma w),  matched at w0 = 2*pi*c/lambda_m.
-    Only this omega is read out, so the Drude's off-omega dispersion is irrelevant to the result."""
+    Only this omega is read out, so the Drude's off-omega dispersion is irrelevant to the result.
+
+    RAISES on Im(eps) < 0 (gain under exp(-i omega t)), like the sibling DrudeOptical does for a
+    negative damping. It used to CLAMP instead, unbounded despite a "clamp tiny negatives" comment
+    (audit V-2): eps = -180 - 30j was realized as a strictly REAL -180+0j, i.e. a collisionless
+    metal with gamma = 0 and absorption identically zero, with no warning."""
     eps = complex(eps)
     er = eps.real
-    ei = max(0.0, eps.imag)                                 # passive (Im(eps) >= 0); clamp tiny negatives
+    _require_passive_eps(eps.imag, er)                       # audit V-2 (was: silent unbounded clamp)
+    ei = max(0.0, eps.imag)                                 # passive (Im(eps) >= 0); normalizes -0.0
     if ei <= loss_tol * (abs(er) + 1.0) and er > 0.0:
         return FDTDLayer(thickness_m=float(thickness_m), eps_inf=float(er))   # pure dielectric
     omega0 = 2.0 * math.pi * C_LIGHT / lambda_m
@@ -72,10 +103,12 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
     lateral_gam, or solve_fdtd_3d_mo's lateral_tensor). Byte-identical to _eps_to_fdtd_layer cell-by-cell,
     so a uniform grid reduces to the validated single-layer inversion exactly. exp(-i w t), Im(eps) >= 0
     = loss; the same one-Drude-pole inversion is single-omega-exact (re-sample/re-fit per cell across a
-    band for a broadband sweep)."""
+    band for a broadband sweep). Im(eps) < 0 in ANY cell raises, exactly as in the scalar twin
+    (audit V-2) -- the byte-identity contract covers the guard as well as the arithmetic."""
     eps = np.asarray(eps_grid, dtype=np.complex128)
     er = eps.real
-    ei = np.maximum(eps.imag, 0.0)                          # passive clamp (same as _eps_to_fdtd_layer)
+    _require_passive_eps(eps.imag, er, where="effect_eps_to_fdtd_grid")   # audit V-2
+    ei = np.maximum(eps.imag, 0.0)                          # passive: normalizes -0.0 (same as the scalar twin)
     omega0 = 2.0 * math.pi * C_LIGHT / float(lambda_m)
     lossless = (ei <= loss_tol * (np.abs(er) + 1.0)) & (er > 0.0)
     absorber = (~lossless) & (er < 1.0)                     # eps_inf pinned to 1

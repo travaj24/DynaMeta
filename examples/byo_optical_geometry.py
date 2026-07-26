@@ -40,10 +40,17 @@ S = 1e9   # m -> nm (OCC works in nm)
 
 def identify_periodic(shape, Px, Py):
     """Pair the x=0/x=Px and y=0/y=Py faces as PERIODIC on the OCC shape (the step
-    that cannot be done after meshing). Returns (n_px, n_py) -- the number of
-    identifications created in each direction, in creation order (px first). That
-    ordering is what a Floquet/Bloch phase list (ng.Periodic(phase=[...])) keys
-    off, so it is the honest signal that the pre-mesh periodic step succeeded."""
+    that cannot be done after meshing). Returns (n_px, n_py) -- 1 if the direction
+    was identified, else 0; that count is what a Floquet/Bloch phase list
+    (ng.Periodic(phase=[...])) keys off (px first).
+
+    AUDIT F-1/F-2 (2026-07-25): use ONE shared identification name per axis and
+    RAISE on any unpairable face. The earlier template used one name per face pair
+    and silently skipped unpaired faces -- netgen then left edge/face dofs
+    unconstrained on some multi-layer geometries and the solve was quietly
+    non-periodic. The library builder (dynameta/optics/ngsolve_layered.py) uses
+    the same one-name-per-axis pattern and a post-build GetPeriodicNodePairs
+    completeness check; mirror it in your own builders."""
     tol = max(Px, Py) * 1e-4
     x0 = [f for f in shape.faces if abs(f.center.x) < tol]
     xP = [f for f in shape.faces if abs(f.center.x - Px) < tol]
@@ -58,12 +65,22 @@ def identify_periodic(shape, Px, Py):
     n_px = n_py = 0
     for f in x0:
         p = xP_by.get(sig_yz(f))
-        if p is not None:
-            f.Identify(p, "px_{}".format(n_px), IdentificationType.PERIODIC, tx); n_px += 1
+        if p is None:
+            raise RuntimeError("periodic x-face at {} has no partner on x=Px -- the "
+                               "geometry is not translation-symmetric (or the tolerance "
+                               "missed it); a silent skip here yields a quietly "
+                               "non-periodic solve (audit F-1)".format(f.center))
+        f.Identify(p, "px", IdentificationType.PERIODIC, tx)
+        n_px = 1
     for f in y0:
         p = yP_by.get(sig_xz(f))
-        if p is not None:
-            f.Identify(p, "py_{}".format(n_py), IdentificationType.PERIODIC, ty); n_py += 1
+        if p is None:
+            raise RuntimeError("periodic y-face at {} has no partner on y=Py -- the "
+                               "geometry is not translation-symmetric (or the tolerance "
+                               "missed it); a silent skip here yields a quietly "
+                               "non-periodic solve (audit F-1)".format(f.center))
+        f.Identify(p, "py", IdentificationType.PERIODIC, ty)
+        n_py = 1
     return n_px, n_py
 
 

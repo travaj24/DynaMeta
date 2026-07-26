@@ -27,7 +27,7 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 
 # FDTDLayer moved to the n-D package (fdtd_nd/spec.py, audit 2026-07-05 section 5 ownership
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
-from dynameta.optics.fdtd_nd.spec import FDTDLayer  # noqa: F401 (re-export)
+from dynameta.optics.fdtd_nd.spec import FDTDLayer, hot_carrier_guard  # noqa: F401 (re-export)
 
 
 @dataclass
@@ -523,6 +523,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             "carried ONLY by the 2-D-TE kernels (optics.fdtd_nd), so a 1-D solve would silently drop "
             "them (the FDTD eps would diverge from FDTDLayer.eps_at(w)). Use the 2-D engine, or remove "
             "those terms.".format(_bad))
+    # audit D-1: hot_carrier is NOT a scalar term, so it cannot join `_unsupported_1d`'s
+    # `getattr(L, t, 0.0) != 0.0` list (None != 0.0 would fire on every passive layer); the shared
+    # spec.hot_carrier_guard raises with the same C5-7 wording and names the one supported kernel.
+    hot_carrier_guard("solve_fdtd_1d", layers)
     # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
     # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
     dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(

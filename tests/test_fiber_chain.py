@@ -73,6 +73,62 @@ def test_chain_records_are_consistent():
     assert all(s.meta.get("converged", True) for s in r.stages if s.kind == "amp")
 
 
+def test_chain_nf_invariant_under_reference_bandwidth():
+    # audit A-2: the chain asked analyze_noise for the ASE reference power at ITS 0.1 nm default
+    # and then inverted that power with the CALLER's bandwidth, so every stage's generated PSD
+    # picked up a spurious 0.1/ref_bw_nm. The end-to-end NF is a property of the amplifier, not of
+    # the bookkeeping bandwidth an OSNR happens to be quoted in, so it must be invariant -- and
+    # the un-forwarded version walked 6.78 -> -9.23 dB over 0.05..2.0 nm, i.e. straight through
+    # the quantum limit to an implied n_sp of 0.06. OSNR, which IS a per-bandwidth quantity, must
+    # still move dB-for-dB with the bandwidth ratio.
+    ch = AmplifierChain([_edfa(0.25), PassiveElement("iso", 0.5), _edfa(0.10, L=6.0)])
+    rows = {bw: ch.solve(1e-5, LAM_S, ref_bw_nm=bw, n_nodes=121) for bw in (0.05, 0.1, 1.0)}
+    ref = rows[0.1]
+    for bw, r in rows.items():
+        assert r.nf_total_dB == pytest.approx(ref.nf_total_dB, abs=1e-6), bw
+        assert r.gain_total_dB == pytest.approx(ref.gain_total_dB, abs=1e-9)
+        assert r.rho_out_1pol_W_Hz == pytest.approx(ref.rho_out_1pol_W_Hz, rel=1e-12)
+        # implied end-to-end n_sp stays above the quantum limit
+        G = 10.0 ** (r.gain_total_dB / 10.0)
+        F = 10.0 ** (r.nf_total_dB / 10.0)
+        assert (F * G - 1.0) / (2.0 * (G - 1.0)) >= 1.0, bw
+    assert rows[0.1].osnr_dB - rows[1.0].osnr_dB == pytest.approx(10.0, abs=1e-6)
+    assert rows[0.05].osnr_dB - rows[0.1].osnr_dB == pytest.approx(3.0103, abs=1e-3)
+
+
+def test_chain_holds_an_eryb_stage():
+    # audit A-3: the class docstring advertises ErYbAmplifier stages, but the chain re-seeded
+    # every stage through metrics._set_signal, which unconditionally rebuilt a FiberAmplifier from
+    # amp.ion -> AttributeError. The type-preserving with_signals protocol keeps the stage's own
+    # class (and its Yb sensitizer), so the EYDFA booster must run end-to-end with a finite NF
+    # above the 3 dB quantum floor and a gain that tracks its standalone solve.
+    from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+    from dynameta.optics.fiber_amp.spectroscopy import ytterbium
+    fib = FiberSpec(core_radius_m=3.0e-6, na=0.20, n_t_m3=2.0e25, length_m=3.0,
+                    clad_radius_m=50e-6)
+
+    def eydfa(P_sig=1e-3):
+        return ErYbAmplifier(erbium(), ytterbium(), fib,
+                             [Pump(4.0, 0.976e-6, "fwd", cladding=True)], [Signal(P_sig, LAM_S)],
+                             AseBand(1.50e-6, 1.60e-6, n_bins=16), n_yb_m3=4.0e26)
+
+    r = AmplifierChain([_edfa(0.25), PassiveElement("iso", 0.5), eydfa()]).solve(1e-5, LAM_S,
+                                                                                n_nodes=121)
+    ey = [s for s in r.stages if s.kind == "amp"][-1]
+    assert ey.name == "ErYbAmplifier"                       # the stage kept its OWN class
+    assert np.isfinite(ey.nf_stage_dB) and 3.0 < ey.nf_stage_dB < 10.0
+    assert np.isfinite(r.nf_total_dB) and 3.0 < r.nf_total_dB < 10.0
+    assert r.gain_total_dB == pytest.approx(sum(s.gain_dB for s in r.stages), abs=1e-9)
+    # the chain re-seeds the booster at ITS actual input power: same power, same standalone solve
+    standalone = eydfa(ey.P_in_W).solve(n_nodes=121)
+    assert float(standalone.signal_gain_dB[0]) == pytest.approx(ey.gain_dB, abs=1e-9)
+    # ... and a single-stage ErYb chain reproduces its own noise analysis
+    from dynameta.optics.fiber_amp.noise import analyze_noise
+    solo = AmplifierChain([eydfa()]).solve(1e-3, LAM_S, n_nodes=121)
+    nr = analyze_noise(eydfa().solve(n_nodes=121), LAM_S)
+    assert solo.nf_total_dB == pytest.approx(nr.nf_dB, abs=1e-9)
+
+
 # ---- PDG (polarization.py) -----------------------------------------------------------------
 
 def test_pdg_anchor_and_cascade():
