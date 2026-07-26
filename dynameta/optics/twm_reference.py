@@ -10,6 +10,9 @@ three-wave process (roadmap item 4.1). It provides:
     A3 vs z) with EXACT Manley-Rowe photon-flux diagnostics and total-power conservation;
   * quasi-phase-matching (QPM): a sign-flipping d_eff(z) of period Lambda and the first-order
     effective (2/pi) d_eff law + ``phase_matching_sinc`` (consumed by ``spdc_design.jsa``).
+    The poling square wave carries BOTH first grating orders m = +-1, so one positive period
+    Lambda = 2 pi / |dk| phase-matches EITHER sign of dk (``qpm_period_for``'s SIGN
+    CONVENTION note); ``phase_matching_sinc`` picks the matching order.
 
 --------------------------------------------------------------------------------------------
 SIGN / AMPLITUDE CONVENTION  (DERIVED here for the library-wide exp(-i omega t) convention;
@@ -168,8 +171,22 @@ class TWMSpec:
 # --------------------------------------------------------------------------------------------
 
 def qpm_period_for(dk: float, order: int = 1) -> float:
-    """First-order (or m-th order) QPM period Lambda that phase-matches a residual mismatch
-    dk = k3 - k1 - k2: Lambda = 2 pi m / dk (the grating supplies momentum 2 pi m / Lambda).
+    """m-th order QPM period that phase-matches a residual mismatch dk = k3 - k1 - k2:
+
+        Lambda = 2 pi m / |dk|      (a POSITIVE, physical poling period, m = ``order``).
+
+    SIGN CONVENTION (the whole module is consistent with this; see ``phase_matching_sinc``).
+    The poling square wave is an EVEN function of Lambda and carries BOTH SIGNS of every odd
+    grating order, supplying momentum -/+ 2 pi m / Lambda. A given physical grating therefore
+    phase-matches dk = +2 pi m/Lambda AND dk = -2 pi m/Lambda; only the ORDER SIGN differs.
+    The returned period is the positive one -- what a poling mask is actually written to --
+    for either sign of dk, and ``phase_matching_sinc`` selects the matching order sign. The
+    signed form Lambda = 2 pi m / dk describes the SAME physical grating and is accepted
+    everywhere a period is taken (``phase_matching_sinc`` picks the matching order either way,
+    and ``twm_propagate`` bounds its step with |Lambda|), so the two spellings give identical
+    physics end to end. Prefer the positive one: it is a length, and callers do arithmetic on
+    it (crystal length = N * Lambda).
+
     Raises for dk == 0 (already phase matched -- no poling needed)."""
     if dk == 0.0:
         raise ValueError("qpm_period_for: dk == 0 is already phase matched; no QPM needed.")
@@ -183,7 +200,10 @@ def effective_deff_qpm(d_eff: float, order: int = 1) -> float:
 
 
 def _qpm_sign(z: np.ndarray | float, period: float) -> np.ndarray | float:
-    """Square-wave poling sign(cos(2 pi z / Lambda)) in {-1, +1}; the sign of d_eff(z)."""
+    """Square-wave poling sign(cos(2 pi z / Lambda)) in {-1, +1}; the sign of d_eff(z).
+
+    EVEN in ``period``: cos is even, so a negative Lambda is the SAME physical grating (the
+    signed-period convention of ``qpm_period_for``)."""
     ph = np.cos(2.0 * math.pi * np.asarray(z, dtype=float) / period)
     return np.where(ph >= 0.0, 1.0, -1.0)
 
@@ -193,16 +213,35 @@ def phase_matching_sinc(dk: np.ndarray | float, length: float,
     """Complex phase-matching function Phi = (1/L) integral_0^L d_eff(z)/d_eff exp(-i dk z) dz.
 
     Uniform crystal: Phi = sinc(dk L / 2) exp(-i dk L / 2)  (magnitude |sinc(dk L/2)|).
-    With QPM (period Lambda): the first grating order supplies 2 pi / Lambda, so the peak
-    moves to dk = 2 pi / Lambda and the amplitude picks up the (2/pi) first-order factor:
-        Phi_QPM = (2/pi) sinc((dk - 2 pi/Lambda) L / 2) exp(-i (dk - 2 pi/Lambda) L / 2).
-    Used by ``spdc_design.jsa`` (the sinc(delta k L/2) phase-matching envelope) and by the
-    undepleted closed forms below. ``dk`` may be an array."""
+
+    With QPM (period Lambda) the poling square wave has the Fourier series
+        sign(cos(2 pi z/Lambda)) = sum_{m odd} c_m exp(i 2 pi m z / Lambda),
+        c_m = (2/(pi |m|)) (-1)^((|m|-1)/2)     ==>  c_{+1} = c_{-1} = 2/pi,
+    i.e. it carries BOTH first orders m = +1 and m = -1, supplying momentum -/+ 2 pi/Lambda.
+    Term m contributes (1/L) integral_0^L exp(-i (dk - 2 pi m/Lambda) z) dz, so
+        Phi_QPM = (2/pi) sinc(dk_eff L / 2) exp(-i dk_eff L / 2),
+        dk_eff  = dk - 2 pi m / Lambda   with m = +-1 chosen ELEMENTWISE as the nearer order.
+    Both first orders carry the SAME (2/pi) weight, so a grating of period |Lambda| matches
+    dk = +2 pi/Lambda and dk = -2 pi/Lambda equally well -- which is why ``qpm_period_for``
+    can return a positive period for either sign of dk (see its SIGN CONVENTION note). For
+    dk > 0 and Lambda > 0 the m = +1 order is always the nearer one, so this reduces exactly
+    to the single-order form; the m = -1 branch is what makes dk < 0 (reachable whenever
+    n3 < n1, n2) phase-match, and it also makes a SIGNED (negative) Lambda behave identically
+    to its positive twin. Ties (dk == 0) resolve to m = +1.
+
+    Only the nearest first order is kept (the standard first-order QPM truncation); the m =
+    +-3, +-5, ... orders and the far order are down by their (2/(pi|m|)) weight and by their
+    sinc, which is the ~0.15% closed-form-vs-integrator tolerance documented for the QPM
+    gates. Used by ``spdc_design.jsa`` (the sinc(delta k L/2) phase-matching envelope) and by
+    the undepleted closed forms below. ``dk`` may be an array."""
     dk = np.asarray(dk, dtype=float)
     if qpm_period is None:
         arg = dk * length / 2.0
         return _sinc(arg) * np.exp(-1j * arg)
-    dk_eff = dk - 2.0 * math.pi / float(qpm_period)
+    g = 2.0 * math.pi / float(qpm_period)
+    dk_plus = dk - g                                    # m = +1 grating order
+    dk_minus = dk + g                                   # m = -1 grating order
+    dk_eff = np.where(np.abs(dk_minus) < np.abs(dk_plus), dk_minus, dk_plus)[()]
     arg = dk_eff * length / 2.0
     return (2.0 / math.pi) * _sinc(arg) * np.exp(-1j * arg)
 
@@ -390,8 +429,11 @@ def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
 
     z_eval = np.linspace(0.0, L, int(n_out))
     if max_step is None:
-        # resolve the QPM domains (and any fast beat) if poling is on
-        max_step = (period / 20.0) if period is not None else np.inf
+        # resolve the QPM domains (and any fast beat) if poling is on.  |period|: the poling
+        # square wave is even in Lambda, so a signed (negative) period from the
+        # Lambda = 2 pi m / dk convention is the same grating and must not produce a negative
+        # step bound (see qpm_period_for's SIGN CONVENTION note).
+        max_step = (abs(period) / 20.0) if period is not None else np.inf
     sol = solve_ivp(rhs, (0.0, L), y0, method="DOP853", t_eval=z_eval,
                     rtol=rtol, atol=atol, max_step=max_step, dense_output=False)
     if not sol.success:

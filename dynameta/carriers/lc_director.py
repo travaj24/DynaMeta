@@ -157,8 +157,10 @@ def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m:
     Freedericksz bifurcation reference: it solves the EXACT strong-planar cell (theta_b = 0) right through
     the pitchfork via an elliptic-quadrature bisection with no initial guess and no pretilt -- something
     the general solve_bvp path needs a small pretilt to do. director_profile_bvp at K11=K33 with
-    field_model='poisson' (constant-displacement field, no fixed layers) reproduces it to ~8e-3 rad
-    through the pi/2 angle bridge (director_to_extra_fields)."""
+    field_model='poisson' (constant-displacement field, no fixed layers) reproduces it to ~1.2e-3 rad
+    at V = 1.8 V (worst 5.7e-3 over V = 1.3..3.5) through the pi/2 angle bridge
+    (director_to_extra_fields). AUDIT C-4: this advertised "~8e-3" was really 1.19e-2 until the
+    series-capacitance normalisation stopped being integrated on solve_bvp's midpoint grid."""
     K = float(K_elastic); dEps = float(dEps_static); ep = float(eps_perp)
     d = float(d_m); V = float(applied_V)
     if not (K > 0 and dEps > 0 and ep > 0 and d > 0 and int(nz) >= 11):
@@ -290,17 +292,50 @@ def flexo_direct_torque(theta, E, dE_dz, e1: float, e3: float, *,
     return tq
 
 
+def _span_weights(x, x_lo: float, x_hi: float) -> np.ndarray:
+    """Quadrature weights w such that sum(w * f(x)) approximates int_{x_lo}^{x_hi} f dx for ARBITRARY
+    abscissae x -- node grids that include both endpoints AND interior-only grids such as the cell
+    MIDPOINTS scipy's solve_bvp hands its RHS. Dual-cell (Voronoi) rule: the cell edges are the
+    midpoints between neighbouring abscissae with the two outer edges clamped to the domain, so the
+    weights always sum to exactly (x_hi - x_lo).
+
+    AUDIT C-4/N2: the LC series-capacitance normalisation used plain `trapz` on whatever abscissae it
+    was handed. On solve_bvp's `x_middle` that integral is short by one full cell (span d_lc - h), so
+    the voltage division saw a thinner cell and E came out too large by ~1/(1 - h/d_lc) -- an O(h)
+    bias inside a 4th-order collocation scheme. This rule is EXACT for a constant integrand at any nz
+    (hence the normalisation is exact for a uniform field, gated in tests/test_lc_director.py) and
+    reduces algebraically to the trapezoid rule when x[0] == x_lo and x[-1] == x_hi."""
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    if n == 1:
+        return np.array([float(x_hi) - float(x_lo)], dtype=float)
+    edges = np.empty(n + 1, dtype=float)
+    edges[0] = float(x_lo)
+    edges[-1] = float(x_hi)
+    edges[1:-1] = 0.5 * (x[:-1] + x[1:])
+    return np.diff(edges)
+
+
 def solve_lc_field_profile(theta, V_app: float, geo: LCGeometry, *,
                            eps_para: float, eps_perp: float, field_model: str = "poisson",
                            t_in: float = 0.0, t_out: float = 0.0,
                            eps_in: float = 7.5, eps_out: float = 7.5,
                            a: "Optional[float]" = None, b: "Optional[float]" = None,
                            e1: float = 0.0, e3: float = 0.0,
-                           flexo_self_consistent: bool = False):
+                           flexo_self_consistent: bool = False,
+                           quad_span: "Optional[Tuple[float, float]]" = None):
     """Return (E(z), V_lc) for a FIELD-AXIS theta(z) and applied voltage. 'uniform': E = V_app/d_lc,
     V_lc = V_app. 'poisson': quasi-static voltage division across the SERIES fixed dielectric layers +
     the theta-dependent LC eps (planar series-C / cyl log-capacitance), with an optional flexoelectric
-    self-consistent depolarization field (nonzero E even at V_app = 0)."""
+    self-consistent depolarization field (nonzero E even at V_app = 0).
+
+    quad_span = (z_lo, z_hi) makes the GLOBAL series-capacitance normalisation (and the flexo /
+    V_lc integrals) span exactly that interval via _span_weights, for callers whose abscissae do not
+    cover the LC domain -- specifically solve_bvp's collocation MIDPOINT grid, which is short by one
+    cell (audit C-4, and N2 for the chiral twin). None (the default) keeps the plain trapezoid path
+    byte-identical for callers that already pass a full [0, d_lc] node grid."""
     theta = np.asarray(theta, dtype=float)
     z = geo.z_m; r = geo.r_m; d_lc = geo.d_lc
     V_app = float(V_app)
@@ -311,6 +346,14 @@ def solve_lc_field_profile(theta, V_app: float, geo: LCGeometry, *,
     flexo_on = bool(flexo_self_consistent and (e1 or e3))
     if abs(V_app) < 1e-30 and not flexo_on:
         return np.zeros_like(theta), 0.0
+    if quad_span is None:
+        def _int(y):
+            return trapz(y, z)
+    else:
+        _w = _span_weights(z, float(quad_span[0]), float(quad_span[1]))
+
+        def _int(y):
+            return float(np.sum(np.asarray(y, dtype=float) * _w))
     eps = eps_along_field(theta, eps_para, eps_perp)
     P_f = np.zeros_like(theta)
     if flexo_on:
@@ -319,27 +362,27 @@ def solve_lc_field_profile(theta, V_app: float, geo: LCGeometry, *,
         denom = 0.0
         if t_in > 0:
             denom += (1.0 / eps_in) * math.log((a + t_in) / a)
-        denom += trapz(1.0 / (r * eps), z)
+        denom += _int(1.0 / (r * eps))
         if t_out > 0:
             denom += (1.0 / eps_out) * math.log(b / (b - t_out))
         if not math.isfinite(denom) or denom <= 0:
             return np.zeros_like(theta), 0.0
-        flexo_v = trapz(P_f / (EPS0 * eps), z) if flexo_on else 0.0
+        flexo_v = _int(P_f / (EPS0 * eps)) if flexo_on else 0.0
         g = (V_app + flexo_v) / denom
         E = (g / r - P_f / EPS0) / eps
-        return E, float(trapz(E, z))
+        return E, float(_int(E))
     denom = 0.0
     if t_in > 0:
         denom += t_in / eps_in
-    denom += trapz(1.0 / eps, z)
+    denom += _int(1.0 / eps)
     if t_out > 0:
         denom += t_out / eps_out
     if not math.isfinite(denom) or denom <= 0:
         return np.zeros_like(theta), 0.0
-    flexo_v = trapz(P_f / (EPS0 * eps), z) if flexo_on else 0.0
+    flexo_v = _int(P_f / (EPS0 * eps)) if flexo_on else 0.0
     g = (V_app + flexo_v) / denom
     E = (g - P_f / EPS0) / eps
-    return E, float(trapz(E, z))
+    return E, float(_int(E))
 
 
 def n_local_from_theta(theta, n_o: float, n_e: float, model: str = "extra_k_radial"):
@@ -485,6 +528,7 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     fkw = dict(eps_para=eps_para, eps_perp=eps_perp, field_model=field_model, t_in=t_in, t_out=t_out,
                eps_in=eps_in, eps_out=eps_out, a=a, b=b, e1=e1e, e3=e3e, flexo_self_consistent=fsc)
     u = (z - float(z[0])) / d_lc
+    quad_span = (float(z[0]), float(z[0]) + d_lc)     # audit C-4: the TRUE LC domain, see fun() below
 
     def _prepare(g):
         gg = np.asarray(g, dtype=float).copy()
@@ -540,7 +584,10 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
             rr = (geo.r_in + zz) if geo.geometry == "cyl" else zz
             th = np.asarray(y[0], float); dth_du = np.asarray(y[1], float); dth_dz = dth_du / d_lc
             gloc = LCGeometry(geo.geometry, d_lc, zz, rr, geo.r_in, geo.r_out)
-            E, _v = solve_lc_field_profile(th, float(Vk), gloc, **fkw)
+            # AUDIT C-4: solve_bvp evaluates this RHS on x_middle, a grid SHORT BY ONE CELL. Pin the
+            # series-capacitance normalisation to the full [0, d_lc] domain so the voltage division
+            # sees the true LC thickness (without quad_span, E was too large by ~1/(1 - h/d_lc)).
+            E, _v = solve_lc_field_profile(th, float(Vk), gloc, quad_span=quad_span, **fkw)
             s = np.sin(th); c = np.cos(th)
             Keff = np.where(np.abs(K11 * s * s + K33 * c * c) < 1e-300, 1e-300, K11 * s * s + K33 * c * c)
             t2 = (K11 - K33) * s * c * (dth_dz * dth_dz)
@@ -733,6 +780,7 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
     fkw = dict(eps_para=eps_para, eps_perp=eps_perp, field_model=field_model, t_in=t_in, t_out=t_out,
                eps_in=eps_in, eps_out=eps_out)
     u = (z - float(z[0])) / d_lc
+    quad_span = (float(z[0]), float(z[0]) + d_lc)     # audit N2 (= C-4 verbatim), see _make_fun below
 
     def _f1(th):
         s = np.sin(th); c = np.cos(th)
@@ -764,7 +812,9 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
             ph_u = np.asarray(y[3], float)
             th_z = th_u / d_lc; ph_z = ph_u / d_lc
             gloc = LCGeometry(geo.geometry, d_lc, zz, zz, geo.r_in, geo.r_out)
-            E, _v = solve_lc_field_profile(th, float(Vk), gloc, **fkw)
+            # AUDIT N2 (C-4's defect verbatim in the chiral twin): pin the series-capacitance
+            # normalisation to the full [0, d_lc] domain -- solve_bvp's x_middle is short one cell.
+            E, _v = solve_lc_field_profile(th, float(Vk), gloc, quad_span=quad_span, **fkw)
             f1 = np.maximum(np.abs(_f1(th)), 1e-300)
             f2 = np.where(np.abs(_f2(th)) < F2_FLOOR, F2_FLOOR, _f2(th))
             s = np.sin(th); c = np.cos(th); s2 = np.sin(2.0 * th)

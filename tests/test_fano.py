@@ -83,6 +83,52 @@ def test_lorentzian_limit_matches_fano():
 
 
 # ---------------------------------------------------------------------------
+# GATE 2b (audit Q-3) -- SMALL-AMPLITUDE spectra must fit, not silently return the SEED.
+#
+# scipy's least_squares `gtol` is an ABSOLUTE bound on the scaled gradient norm, so any finite
+# value is really a bound on the spectrum AMPLITUDE: with the shipped gtol = 1e-15 the optimizer
+# terminated on its first iteration for small features and _fano_varpro returned the seed
+# (gamma = 0.15 * span) -- a 200%-wrong FWHM and a 3x-wrong Q, with NO exception and no flag.
+# The controlling quantity is the FEATURE amplitude, not |y|: a tiny feature on an O(1) baseline
+# failed identically to a uniformly tiny spectrum.  Both regimes are pinned here, along with
+# residual_rms as the tell (it separates a recovered fit from a seed fallback by ~5 decades).
+# ---------------------------------------------------------------------------
+def test_small_amplitude_spectra_recover_q_not_the_seed():
+    x0, g = 1.0e14, 2.0e12
+    Q_true = x0 / g                                            # = 50
+    x = np.linspace(x0 - 12 * g, x0 + 12 * g, 801)
+    lor = 1.0 / (1.0 + (2.0 * (x - x0) / g) ** 2)
+    gamma_seed = 0.15 * (x.max() - x.min())                    # the seed the old code returned
+    assert abs(gamma_seed / g - 3.6) < 1e-9                    # seed FWHM is 3.6x the truth
+
+    # (a) a 1e-8 FEATURE on a 1.0 baseline (|y| ~ 1: the amplitude, not the scale, is what bites)
+    for amp in (1.0, 1e-4, 1e-8):
+        lf = lorentzian_fit(x, 1.0 + amp * lor)
+        ff = fano_fit(x, 1.0 + amp * lor, x_kind="freq")
+        assert lf.Q == pytest.approx(Q_true, rel=0.03), "lorentzian Q at feature {}".format(amp)
+        assert ff.Q == pytest.approx(Q_true, rel=0.03), "fano Q at feature {}".format(amp)
+        assert lf.fwhm == pytest.approx(g, rel=0.03)
+        assert abs(lf.fwhm - gamma_seed) > 0.5 * gamma_seed    # NOT the seed
+        assert lf.residual_rms < 1e-4 * amp                    # the tell: fit, not fallback
+
+    # (b) a uniformly SMALL spectrum (magnitude 1e-7 and far below)
+    for scale in (1e-7, 1e-9, 1e-12):
+        y = scale * (0.2 + lor)
+        lf = lorentzian_fit(x, y)
+        ff = fano_fit(x, y, x_kind="freq")
+        assert lf.Q == pytest.approx(Q_true, rel=0.03), "lorentzian Q at scale {}".format(scale)
+        assert ff.Q == pytest.approx(Q_true, rel=0.03), "fano Q at scale {}".format(scale)
+        assert lf.amplitude == pytest.approx(scale, rel=0.03)
+        assert lf.baseline == pytest.approx(0.2 * scale, rel=0.03)
+        assert lf.residual_rms < 1e-6 * (y.max() - y.min())
+
+    # (c) the fit is EXACT (not merely within a few %) once the feature is resolvable
+    lf = lorentzian_fit(x, 1e-12 * (0.2 + lor))
+    assert lf.fwhm == pytest.approx(g, rel=1e-6)
+    assert lf.x0 == pytest.approx(x0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # GATE 3 -- TMM cross-gate. Build a driven transmission spectrum of a symmetric n=3.5 slab
 # in vacuum with tmm_reference around one Fabry-Perot resonance (m=4) and check the fitted
 # Q against the CLOSED-FORM etalon pole Q.

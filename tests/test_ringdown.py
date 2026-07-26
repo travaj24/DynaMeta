@@ -4,14 +4,23 @@ method, Hua & Sarkar IEEE TAP 38:814 (1990)) and the additive opt-in FDTD time-t
 Convention under test (see ringdown.py docstring): a real field trace decays as exp(-gamma t/2)
 in amplitude (energy ~ exp(-gamma t)); q = omega_0 / gamma is the ENERGY Q and equals the
 pole-finder convention Re(omega_t)/(2|Im omega_t|) for the same resonance.
+
+Gate 7 (finding Q-1) covers the data-driven fit window: it must not collapse on a HIGH-Q trace
+that is still ringing at the end of the record (n_slab = 3.5/5/7/10 against the Fabry-Perot
+closed form, with the 2026-07-20 cross-platform Q anchor pinned), must fail LOUDLY on an
+all-noise trace, and must survive a 100x-mis-specified band centre. Gate 8 (finding Q-2) covers
+the VARPRO refinement: every pencil mode enters the design matrix, and a refit that does not beat
+its own seed is rejected.
 """
 
 import numpy as np
+import pytest
 from scipy.signal import find_peaks, hilbert
 
 from dynameta.constants import C_LIGHT
 from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
-                                      fdtd_etalon_ringdown)
+                                      fdtd_etalon_ringdown, _ringdown_window,
+                                      _nls_refine_real, _real_reconstruction)
 
 
 # ---- Gate 1: SYNTHETIC EXACT (3 well-separated damped cosines) -----------------------------
@@ -196,6 +205,199 @@ def test_gate6_fdtd_etalon_ringdown_matches_fabry_perot():
     r12 = (n_slab - 1.0) / (n_slab + 1.0)
     q_closed = -m * np.pi / (2.0 * np.log(abs(r12)))
     assert abs(er.q - q_closed) / q_closed < 0.10                  # within 10%
+
+
+# ---- Gate 7 (finding Q-1): the data-driven window must not collapse on a HIGH-Q trace -----
+
+def _fp_closed_form_q(n_slab, m):
+    r12 = (n_slab - 1.0) / (n_slab + 1.0)
+    return -m * np.pi / (2.0 * np.log(abs(r12)))
+
+
+@pytest.mark.parametrize("n_slab,rel_tol", [(3.5, 0.03), (5.0, 0.03), (7.0, 0.03), (10.0, 0.03)])
+def test_gate7_high_q_etalon_window_does_not_collapse(n_slab, rel_tol):
+    """REGRESSION (finding Q-1). The 2026-07-20 data-driven window ended the fit where the
+    envelope reached `floor_margin` x `median(env[last 10%])`. On a trace that is still ringing
+    at the end of the record that "floor" IS the live signal, so the end threshold landed ABOVE
+    the envelope at the window start, the window collapsed to the hardcoded 8-sample minimum and
+    `matrix_pencil` raised "need at least 4 samples after t_start". Measured break-in point:
+    n_slab = 7 (Q ~ 50); n_slab = 10 too. A longer record did NOT rescue it (settle = 12/30/60/120
+    all raised) because the median tracks a decay that lengthens with the record.
+
+    The fixed window drives the END off the ENVELOPE DECAY (a fixed number of decades below the
+    window start) and only trusts the late-time floor when it is a genuine PLATEAU, falling back
+    to the full remaining record otherwise. All four indices must now invert against the
+    symmetric-slab Fabry-Perot closed form Q = -m pi / (2 ln|r12|).
+
+    Measured at the fix (n_slab: Q, closed form, error):
+      3.5:  13.351015 vs 13.361960  (-0.082%)      <- the CI configuration, unchanged
+      5.0:  27.291776 vs 27.118423  (+0.639%)
+      7.0:  54.970929 vs 54.601815  (+0.676%)      <- pre-fix: ValueError
+     10.0: 110.302227 vs 109.588241 (+0.652%)      <- pre-fix: ValueError
+    """
+    L = 1.0e-6
+    er = fdtd_etalon_ringdown(n_slab, L, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
+    assert er.modes and np.isfinite(er.q) and np.isfinite(er.f0_Hz)
+    w0 = 2.0 * np.pi * er.f0_Hz
+    m = int(round(w0 * n_slab * L / (np.pi * C_LIGHT)))
+    q_cf = _fp_closed_form_q(n_slab, m)
+    assert abs(er.q / q_cf - 1.0) < rel_tol
+    # the window must be a real window, not the 8-sample terminal state
+    i0, i1 = er.window
+    assert i1 - i0 > 1000
+    assert er.signal_used.size >= 200
+
+    # finding Q-2's safety gate: the returned modes never reconstruct WORSE than the pencil seed.
+    seed = matrix_pencil(er.signal_used, er.dt_used, pencil_frac=0.4, svd_tol=1e-6,
+                         amp_floor=5e-2, real_signal=True)
+    y = er.signal_used
+    rms_seed = np.sqrt(np.mean((_real_reconstruction(y.size, er.dt_used, seed) - y) ** 2))
+    rms_out = np.sqrt(np.mean((_real_reconstruction(y.size, er.dt_used, er.modes) - y) ** 2))
+    assert rms_out <= rms_seed * (1.0 + 1e-12), (rms_out, rms_seed, er.refine_note)
+    assert isinstance(er.refine_note, str)
+
+
+def test_gate7_cross_platform_q_anchor_unchanged():
+    """The 2026-07-20 CI fix (data-driven window + NLS refinement) pinned the n_slab = 3.5
+    dominant-mode Q at 13.351015 on both the Windows dev box and the CI linux wheels. The Q-1 /
+    Q-2 remediation must NOT move it: the window is byte-identical there (the late-time floor IS
+    a genuine plateau, floor/env_start = 9.95e-13, so the plateau test passes and the decade rule
+    is not binding) and the refinement's design matrix is unchanged (all 6 pencil modes are
+    oscillatory, so `rest` was empty even pre-fix)."""
+    er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                              resolution=30)
+    assert er.q == pytest.approx(13.351015, rel=1e-4)
+    assert er.window == (9840, 31980)
+
+
+def _synthetic_ringdown(n_samp=200000, dt=1.9e-17, f0=2.13e14, q=300.0, pulse_at=3000,
+                        pulse_w=800.0, amp_ring=0.1):
+    """A driven pulse followed by a high-Q ringdown that is STILL RINGING at the end of the
+    record -- the exact configuration that collapsed the pre-fix window."""
+    n = np.arange(n_samp)
+    t = n * dt
+    w = 2.0 * np.pi * f0
+    gam = w / q
+    y = np.exp(-((n - pulse_at) / pulse_w) ** 2) * np.cos(w * t)
+    y = y + amp_ring * np.exp(-0.5 * gam * t) * np.cos(w * t + 0.3)
+    return y, dt, f0, w, gam
+
+
+def test_gate7_synthetic_still_ringing_trace_uses_full_remaining_record():
+    """Synthetic trace whose ringdown never reaches a numeric floor inside the record (the
+    late-time "floor" is the LIVE SIGNAL, ~8% of the ringdown start): the fixed window must fall
+    back to the FULL REMAINING RECORD and the pencil must recover Q, instead of collapsing to the
+    pre-fix 8-sample stub (finding Q-1)."""
+    y, dt, f0, w, gam = _synthetic_ringdown()
+    i0, i1 = _ringdown_window(y, dt, f0)
+    assert i1 - i0 > 0.9 * (y.size - i0)          # the whole tail, not a truncated stub
+    assert i0 > 3000                              # the driven pulse was skipped
+    stride = max(1, int(round((1.0 / f0) / (20 * dt))))
+    tail = y[i0:i1][::stride][:1200]
+    modes = matrix_pencil(tail - tail.mean(), dt * stride, svd_tol=1e-6, amp_floor=5e-2,
+                          real_signal=True)
+    assert modes
+    m = modes[0]
+    assert abs(m.omega_rad_s / w - 1.0) < 1e-3
+    assert abs(m.q / (w / gam) - 1.0) < 0.05
+
+
+def test_gate7_all_noise_trace_fails_honestly():
+    """An all-noise trace has no ringdown at all. The pre-fix window silently returned the same
+    8-sample stub it returned for every other malformed input; the fix must RAISE and name the
+    reason (finding Q-1's anti-silent-failure requirement)."""
+    rng = np.random.default_rng(11)
+    y = rng.standard_normal(140000)
+    with pytest.raises(ValueError, match="no ringdown decay detected"):
+        _ringdown_window(y, 1.9e-17, 2.13e14)
+
+
+@pytest.mark.parametrize("f_scale", [100.0, 0.01])
+def test_gate7_mis_specified_fc_block_width_guard(f_scale):
+    """A badly mis-specified band centre used to be fatal: f_c 100x too HIGH gave sub-carrier-
+    period blocks whose "envelope" dives into every zero crossing (terminal 8-sample window), and
+    100x too LOW gave a handful of huge blocks and a silently wrong window. The block width is now
+    clamped to [1, 4] carrier periods of the frequency MEASURED from the trace itself, so the
+    window stays within a factor ~2 of the correctly-specified one (finding Q-1)."""
+    y, dt, f0, w, gam = _synthetic_ringdown()
+    i0_ref, i1_ref = _ringdown_window(y, dt, f0)
+    i0, i1 = _ringdown_window(y, dt, f0 * f_scale)
+    assert i1 - i0 > 0.5 * (i1_ref - i0_ref)
+    assert i1 - i0 < 2.0 * (i1_ref - i0_ref) + 4000
+    assert i0 > 2000                              # still past the driven pulse
+
+
+# ---- Gate 8 (finding Q-2): every pencil mode must enter the VARPRO design matrix -----------
+
+def _dc_contaminated_trace():
+    """7 damped cosines (more than max_refine = 6) plus a STRONG slow pure-decay drift. Pre-fix,
+    `modes[:max_refine]` was sliced BEFORE the frequency test, so the DC mode (the largest
+    |amplitude|, hence modes[0]) and the two weakest oscillators were dropped from the design
+    matrix entirely; their energy then aliased into the refined oscillators, dragging one to
+    omega -> 0 with a spurious amplitude that the post-hoc |amplitude| sort promoted to
+    modes[0] -- i.e. straight into the reported (f0, Q).
+
+    Measured on THIS trace with the pre-fix `_nls_refine_real` (re-implemented verbatim):
+    reconstruction RMS 3.694e-2 against the pencil seed's 3.224e-12 -- 1.1e10 times WORSE, and
+    0.69% of the data peak-to-peak -- with the dominant line's gamma off by 2.5% (2.9244 vs 3.0)
+    and the weaker lines corrupted. Nothing in the pre-fix path compared residuals before
+    accepting that."""
+    dt, N = 1.0e-3, 2000
+    t = np.arange(N) * dt
+    truth = [(2 * np.pi * 40.0, 3.0, 1.00, 0.3),
+             (2 * np.pi * 60.0, 4.0, 0.85, -0.7),
+             (2 * np.pi * 95.0, 5.0, 0.70, 1.1),
+             (2 * np.pi * 130.0, 6.0, 0.55, 0.2),
+             (2 * np.pi * 160.0, 8.0, 0.45, -1.4),
+             (2 * np.pi * 200.0, 9.0, 0.35, 0.9),
+             (2 * np.pi * 240.0, 11.0, 0.30, 2.0)]
+    y = 2.5 * np.exp(-0.6 * t)                                   # DC / slow-drift contamination
+    for w, g, A, ph in truth:
+        y = y + A * np.exp(-g * t / 2.0) * np.cos(w * t + ph)
+    return y, dt, truth
+
+
+def test_gate8_dc_contaminated_refinement_matches_truth():
+    y, dt, truth = _dc_contaminated_trace()
+    seed = matrix_pencil(y, dt, svd_tol=1e-8, amp_floor=1e-3, real_signal=True)
+    # the scenario must actually exercise the bug: more modes than max_refine, DC dominant
+    assert len(seed) > 6
+    assert seed[0].omega_rad_s * dt <= 1e-9, "the DC drift must be the largest-|A| pencil mode"
+
+    refined, note = _nls_refine_real(y, dt, seed, max_refine=6)
+    rms_seed = np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed) - y) ** 2))
+    rms_ref = np.sqrt(np.mean((_real_reconstruction(y.size, dt, refined) - y) ** 2))
+    # the cross-cutting safety gate: never worse than the seed
+    assert rms_ref <= rms_seed, (rms_ref, rms_seed, note)
+    assert rms_ref < 1e-6 * np.ptp(y)                            # and in fact essentially exact
+
+    osc = [m for m in refined if m.omega_rad_s * dt > 1e-9]
+    # NO omega -> 0 invention: every oscillatory mode sits on a real line, none near DC
+    for m in osc:
+        assert m.omega_rad_s > 2 * np.pi * 10.0, "spurious near-DC oscillator invented"
+    # every truth line is recovered, including the 0.55-amplitude one the pre-fix code lost
+    for w_t, g_t, A_t, _ph in truth:
+        got = min(osc, key=lambda m, ww=w_t: abs(m.omega_rad_s - ww))
+        assert abs(got.omega_rad_s / w_t - 1.0) < 1e-3, (w_t, got.omega_rad_s)
+        assert abs(got.gamma_rad_s / g_t - 1.0) < 1e-2, (w_t, got.gamma_rad_s, g_t)
+        assert abs(abs(got.amplitude) / A_t - 1.0) < 1e-2
+    # the dominant OSCILLATORY mode is the A = 1.0 line, not an invented DC one
+    dom = max(osc, key=lambda m: abs(m.amplitude))
+    assert abs(dom.omega_rad_s / truth[0][0] - 1.0) < 1e-3
+    # the pure-decay drift is still represented (its own real-exponential column)
+    dc = [m for m in refined if m.omega_rad_s * dt <= 1e-9]
+    assert dc and abs(abs(dc[0].amplitude) / 2.5 - 1.0) < 1e-2
+
+
+def test_gate8_refine_returns_seed_with_a_note_when_it_cannot_help():
+    """The refinement returns (modes, note); the note is the debug tell that the PENCIL SEED was
+    returned instead of a refit (finding Q-2's safety gate)."""
+    y, dt, _truth = _dc_contaminated_trace()
+    seed = matrix_pencil(y, dt, svd_tol=1e-8, amp_floor=1e-3, real_signal=True)
+    out, note = _nls_refine_real(y, dt, seed, max_refine=0)
+    assert note and out == seed                                  # nothing to refine -> seed kept
+    out2, note2 = _nls_refine_real(y, dt, seed, max_refine=6)
+    assert note2 == ""                                           # accepted on this trace
 
 
 # ---- module hygiene ------------------------------------------------------------------------

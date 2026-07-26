@@ -7,8 +7,11 @@ Gates:
     MerminDrudeOptical == ExtendedDrudeOptical identity and the finite-k deferral;
   * the ITO extended-Drude preset vs a plain Drude fixed at gamma_dc: absorption (Im eps)
     REDUCED in the near-IR/below-plasma window (direction pinned);
-  * check_kk residual SMALL for causal models (Drude, ITO preset) and LARGE for a
-    deliberately acausal step gamma -- the diagnostic discriminates;
+  * check_kk residual SMALL for causal models (Drude AND a 2-oscillator Lorentz -- two
+    opposite extremes) and LARGE for acausal ones (a 2x and a 10x step in gamma, a
+    sign-flipped Im), with the ranking held at the shipped grid AND at 4x it; plus the
+    regression that the OLD "causal floor" was pure O(h) quadrature error, and the honest
+    re-scoping of the ITO preset out of the causal class (finding Q-5);
   * plugs into tmm_reference for a 3-layer stack (R, T, A finite; energy budget holds);
   * exp(-i omega t) sign convention (Im eps > 0 where absorbing).
 
@@ -153,28 +156,149 @@ def _band():
     return (0.4 * WP, 5.0 * WP)
 
 
+def _lorentz_band():
+    return (0.3e15, 4.0e15)
+
+
+class _Lorentz2:
+    """A manifestly causal 2-oscillator Lorentz dielectric -- no 1/omega DC pole, so it is the
+    OPPOSITE extreme from Drude as a causal reference. `flip_im` negates Im(eps), which breaks
+    causality while leaving Re(eps) (and hence the normalization scale) untouched.
+
+    OpticalModel duck-type: only eps(lambda_m, n_m3=...) is needed by check_kk.
+    """
+
+    OSCS = ((1.0e15, 6.0e14, 1.0e14), (2.2e15, 9.0e14, 2.0e14))   # (omega0, f, gamma) rad/s
+
+    def __init__(self, eps_inf=2.0, flip_im=False):
+        self.eps_inf, self.flip_im = eps_inf, flip_im
+
+    def eps(self, lambda_m, *, n_m3=None):
+        w = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        e = complex(self.eps_inf)
+        for w0, f, g in self.OSCS:
+            e += f ** 2 / (w0 ** 2 - w ** 2 - 1j * g * w)        # exp(-i w t): Im(eps) > 0
+        return complex(e.real, -e.imag) if self.flip_im else e
+
+
+def _kk_models():
+    """(name, model, n_m3, band, causal?) -- two causal references at opposite extremes (Drude
+    with its DC pole, Lorentz without one) and three acausal probes of decreasing severity."""
+    return [
+        ("drude", DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=1.0e14),
+         N_ITO, _band(), True),
+        ("lorentz2", _Lorentz2(), None, _lorentz_band(), True),
+        ("lorentz_flip_im", _Lorentz2(flip_im=True), None, _lorentz_band(), False),
+        ("gamma_step_2x", ExtendedDrudeOptical(
+            EPS_INF, M_OPT, lambda w: np.where(np.asarray(w) < 1.2e15, 1.5e14, 3.0e14)),
+         N_ITO, _band(), False),
+        ("gamma_step_10x", ExtendedDrudeOptical(
+            EPS_INF, M_OPT, lambda w: np.where(np.asarray(w) < 1.2e15, 3.0e13, 3.0e14)),
+         N_ITO, _band(), False),
+    ]
+
+
 def test_check_kk_causal_small_acausal_large():
-    grid, band = _kk_grid(), _band()
+    """RE-BASELINED for finding Q-5. The old absolute thresholds (0.035 / 0.30) were calibrated to
+    a "causal floor" that was pure O(h) quadrature error -- the residual scaled EXACTLY with the
+    grid step, and plain Drude (the DC pole) was the worst possible causal reference, which is why
+    a 2x gamma discontinuity was invisible. With the endpoint-consistent Maclaurin variant the
+    causal floor drops ~80x at this grid and then falls as O(h^2), so the thresholds move with it.
 
+    Measured at the fix (N = 8000, rms_norm): drude 2.05e-4, lorentz2 3.10e-4 | 2x step 8.10e-3,
+    10x step 1.82e-2, Im-flipped Lorentz 6.11e-1. Legacy (edge_correct=False) drude: 1.65e-2.
+    """
+    grid = _kk_grid()
+    res = {name: check_kk(m, grid, n_m3=nn, metric_band=bd)
+           for name, m, nn, bd, _c in _kk_models()}
+
+    # causal models -- both extremes, DC-pole and no-DC-pole
+    assert res["drude"]["rms_norm"] < 1.0e-3 and res["drude"]["max_norm"] < 1.0e-2
+    assert res["lorentz2"]["rms_norm"] < 1.0e-3
+
+    causal_worst = max(res["drude"]["rms_norm"], res["lorentz2"]["rms_norm"])
+    # THE GATE: even a 2x discontinuity in gamma(omega) scores above EVERY causal model.
+    assert res["gamma_step_2x"]["rms_norm"] > 3.0e-3
+    assert res["gamma_step_2x"]["rms_norm"] > 5.0 * causal_worst
+    assert res["gamma_step_10x"]["rms_norm"] > 8.0e-3
+    assert res["gamma_step_10x"]["rms_norm"] > 10.0 * causal_worst
+    # a sign-flipped Im is grossly acausal and must be nowhere near the causal band
+    assert res["lorentz_flip_im"]["rms_norm"] > 0.1
+    assert res["lorentz_flip_im"]["rms_norm"] > 100.0 * causal_worst
+    # the localized spike at the jump is still a tell
+    assert res["gamma_step_10x"]["max_norm"] > 5.0 * res["drude"]["max_norm"]
+
+
+def test_check_kk_discrimination_is_grid_independent():
+    """finding Q-5's core requirement: the ranking must not depend on the grid. A causal model's
+    residual is quadrature-limited and FALLS with refinement; a genuine acausality is a property
+    of the model and stays put. Checked at the shipped grid and at 4x.
+
+    Measured rms_norm (N = 8000 -> 32000): drude 2.05e-4 -> 2.78e-5, lorentz2 3.10e-4 -> 1.92e-5,
+    2x step 8.10e-3 -> 8.14e-3, 10x step 1.82e-2 -> 1.45e-2, flipped Im 6.11e-1 -> 6.01e-1. The
+    2x-step-to-worst-causal margin therefore GROWS from 26x to 293x.
+    """
+    wmax = 80.0 * WP
+    models = _kk_models()
+    out = {}
+    for N in (8000, 32000):
+        g = np.linspace(wmax / N, wmax, N)
+        for name, m, nn, bd, causal in models:
+            if N > 8000 and name == "gamma_step_10x":
+                continue                                   # 4 models at 4x is enough (runtime)
+            out[(name, N)] = check_kk(m, g, n_m3=nn, metric_band=bd)["rms_norm"]
+
+    for N in (8000, 32000):
+        worst_causal = max(out[("drude", N)], out[("lorentz2", N)])
+        assert out[("gamma_step_2x", N)] > 5.0 * worst_causal, (N, out)
+        assert out[("lorentz_flip_im", N)] > 100.0 * worst_causal, (N, out)
+
+    # causal residuals FALL with refinement (the O(h^2) floor); acausal ones do NOT.
+    assert out[("drude", 32000)] < 0.5 * out[("drude", 8000)]
+    assert out[("lorentz2", 32000)] < 0.5 * out[("lorentz2", 8000)]
+    assert 0.5 < out[("gamma_step_2x", 32000)] / out[("gamma_step_2x", 8000)] < 2.0
+    assert 0.5 < out[("lorentz_flip_im", 32000)] / out[("lorentz_flip_im", 8000)] < 2.0
+
+
+def test_check_kk_causal_floor_was_pure_quadrature_error():
+    """REGRESSION (finding Q-5). The legacy first-order sum's normalized residual is EXACTLY
+    proportional to the grid step -- `rms_norm_per_h` is 132.19 at both N = 8000 and N = 32000, a
+    4-significant-figure match -- i.e. the old "causal floor" measured the Maclaurin step size and
+    carried no causality information at all. The endpoint-consistent variant breaks that scaling
+    (1.64 -> 0.89 over the same 4x refinement) and lowers the residual 80x at the shipped grid."""
     drude = DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=1.0e14)
+    wmax, band = 80.0 * WP, _band()
+    legacy, fixed = {}, {}
+    for N in (8000, 32000):
+        g = np.linspace(wmax / N, wmax, N)
+        legacy[N] = check_kk(drude, g, n_m3=N_ITO, metric_band=band, edge_correct=False,
+                             self_calib=False)
+        fixed[N] = check_kk(drude, g, n_m3=N_ITO, metric_band=band, self_calib=False)
+    # legacy: O(h) exactly -- rms_norm / h is grid-INVARIANT
+    assert legacy[32000]["rms_norm_per_h"] == pytest.approx(legacy[8000]["rms_norm_per_h"],
+                                                            rel=1e-3)
+    # fixed: the same indicator FALLS, i.e. the residual is no longer O(h)-limited
+    assert fixed[8000]["rms_norm_per_h"] < 0.1 * legacy[8000]["rms_norm_per_h"]
+    assert fixed[32000]["rms_norm_per_h"] < 0.6 * fixed[8000]["rms_norm_per_h"]
+    # and the shipped-grid residual itself drops by more than an order of magnitude
+    assert fixed[8000]["rms_norm"] < 0.05 * legacy[8000]["rms_norm"]
+
+
+def test_check_kk_ito_preset_is_not_in_the_causal_class():
+    """HONEST SCOPING (finding Q-5). The old gate lumped the ITO extended-Drude preset in with the
+    causal models because the O(h) floor hid everything below ~3.5e-2. It does not belong there:
+    its residual is 1.007e-2 at N = 8000 and 1.005e-2 at N = 32000 -- GRID-INDEPENDENT, i.e. a
+    genuine ~1% causality violation (the omega^1.5 impurity crossover is non-analytic at
+    omega = 0), comparable to a 2x jump in gamma. Small enough to be usable, too large to call
+    causal; the docstrings now say so."""
+    wmax, band = 80.0 * WP, _band()
     ext = ExtendedDrudeOptical(EPS_INF, M_OPT, gamma_ito_extended)
-    # deliberately ACAUSAL: a step in gamma(omega) -> discontinuous eps, cannot satisfy KK.
-    step = ExtendedDrudeOptical(EPS_INF, M_OPT,
-                                lambda w: np.where(np.asarray(w) < 1.2e15, 3.0e13, 3.0e14))
-
-    kd = check_kk(drude, grid, n_m3=N_ITO, metric_band=band)
-    ke = check_kk(ext, grid, n_m3=N_ITO, metric_band=band)
-    ks = check_kk(step, grid, n_m3=N_ITO, metric_band=band)
-
-    # causal models: small normalized residual.
-    assert kd["rms_norm"] < 0.035 and kd["max_norm"] < 0.25
-    assert ke["rms_norm"] < 0.035
-    # acausal step: clearly larger, both in RMS and in the localized max spike at the jump.
-    assert ks["rms_norm"] > 0.035
-    assert ks["max_norm"] > 0.30
-    # DISCRIMINATION: the step residual is several-fold above the causal floor.
-    assert ks["rms_norm"] > 2.5 * kd["rms_norm"]
-    assert ks["max_norm"] > 2.0 * kd["max_norm"]
+    r = {}
+    for N in (8000, 32000):
+        g = np.linspace(wmax / N, wmax, N)
+        r[N] = check_kk(ext, g, n_m3=N_ITO, metric_band=band, self_calib=False)["rms_norm"]
+    assert 5.0e-3 < r[8000] < 3.0e-2
+    assert r[32000] == pytest.approx(r[8000], rel=0.05)        # does NOT fall with refinement
 
 
 def test_check_kk_auto_band_runs():
@@ -182,7 +306,7 @@ def test_check_kk_auto_band_runs():
     drude = DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=1.0e14)
     k = check_kk(drude, _kk_grid(), n_m3=N_ITO)
     assert np.isfinite(k["rms_norm"]) and np.isfinite(k["max_norm"])
-    assert k["rms_norm"] < 0.05
+    assert k["rms_norm"] < 1.0e-3                              # re-baselined (finding Q-5)
 
 
 def test_check_kk_rejects_nonuniform_and_nonpositive_grid():

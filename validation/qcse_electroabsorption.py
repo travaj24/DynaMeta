@@ -20,7 +20,7 @@ Run: python -m validation.qcse_electroabsorption
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from dynameta.constants import HBAR, M_E, C_LIGHT, Q_E as Q
+from dynameta.constants import HBAR, H_PLANCK, M_E, C_LIGHT, Q_E as Q
 from dynameta.carriers.qcse import QuantumWell, INFINITE_WELL_STARK_BETA as BETA
 from dynameta.core.effects import ElectroAbsorptionModel
 
@@ -140,8 +140,15 @@ def part4_continuum_under_field():
     F = 9e6
     sF = qw.solve(F)
     ratioF = sF.overlap / s0.overlap                                    # < 1 under field
-    E_ph = ET0 + xb                                                     # at the 0-field continuum onset
-    lam = 2.0 * np.pi * HBAR * C_LIGHT / E_ph
+    # audit X-7 fallout: probe 1 ppm BELOW the zero-field continuum onset instead of exactly ON it,
+    # and build lambda with the SAME h the model uses. The Elliott step is discontinuous at
+    # dE = 0 (s2d jumps 0 -> 2), and this probe used to sit on the knife edge: the round trip
+    # E_ph -> lambda -> h c/lambda landed on the "off" side only because the script's 2*pi*HBAR and
+    # the model's h disagreed by 6.1e-10. With h consistent, an exactly-on-the-onset probe is a coin
+    # flip worth 2 * continuum_alpha0_per_m. The nudge is 1e5x larger than float round-trip noise
+    # and leaves s2dF (which sits at the FULL field redshift above the onset) unchanged.
+    E_ph = (ET0 + xb) - 1e-6 * xb                                       # just below the 0-field onset
+    lam = H_PLANCK * C_LIGHT / E_ph
     fld = {"E": np.array([0.0, 0.0, F])}
     # with-MINUS-without continuum: the exciton + KK cancel, leaving the PURE continuum EA contribution
     cc = eam.delta_alpha_per_m(fld, lam) - eam_noc.delta_alpha_per_m(fld, lam)

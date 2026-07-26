@@ -6,6 +6,10 @@ Gates:
   3. Q(reflectivity) trend: raising the slab index raises Q monotonically, quantitatively.
   4. lossless Q_rad == closed-form Q; loss makes Q_total < Q_rad and 1/Q_abs = 1/Q - 1/Q_rad;
      doubling the loss ~doubles 1/Q_abs.
+  4b. q_budget VALIDATES the lossless-pass root by PROXIMITY (finding Q-4): an ENZ p-pol pole
+     function fed without the eps-clearing escapes to a far-plane root -- sometimes correctly
+     signed -- and must return NaN + a RuntimeWarning, never +inf; the ENZ-cleared form gives a
+     finite Q_abs whose gamma_abs equals the Drude gamma to a few %.
   5. tracking the FP pole over L in [0.9, 1.1] um follows the closed form continuously.
   6. Berreman/ENZ pole of a thin Drude film near omega_p (p-pol, 50 deg), finite Q, thin-film trend.
   7. branch robustness: an evanescent-substrate pole converges and is stable under n_grid doubling.
@@ -140,6 +144,116 @@ def test_q_budget_rad_abs_split():
     # Zero loss => Q_total == Q_rad (self-consistency of the two passes).
     budget0 = q_budget(make_func, w0, refine_tol=1e-12, loss_scale=0.0)
     assert budget0["Q_total"] == pytest.approx(budget0["Q_rad"], rel=1e-6)
+
+    # finding Q-4: the CLEAN (non-ENZ) recipe must be accepted by the new validity gate, and the
+    # measured proximity/residual must stay far inside it. Measured: shift_rel 2.089e-3 against a
+    # 5-linewidth bound of ~0.80, |D(pole_rad)| 9.70e-18 of the off-pole reference.
+    assert budget["pole_rad_ok"] and budget["warning"] == ""
+    assert budget["pole_rad_shift_rel"] < 0.01
+    assert budget["pole_rad_residual_rel"] < 1e-9
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 4b (finding Q-4): the lossless pass must be VALIDATED, and by PROXIMITY
+# ------------------------------------------------------------------------------------------------
+def _enz_budget_factories(eps_inf, wp, gamma, d, k_par):
+    """(uncleared, ENZ-cleared) q_budget factories for a p-pol Drude film. The p-pol pole function
+    carries a SPURIOUS simple pole at eps_film(omega) = 0; the cleared form D*eps_film is what
+    berreman_enz_pole uses and what q_budget's docstring now requires."""
+    def raw(ls):
+        return smatrix_pole_func([(lambda w: drude_eps(w, eps_inf, wp, ls * gamma), d)],
+                                 pol="p", n_super=1.0, n_sub=1.0, k_par_m=k_par)
+
+    def cleared(ls):
+        f = raw(ls)
+        return lambda w: f(w) * complex(drude_eps(w, eps_inf, wp, ls * gamma))
+    return raw, cleared
+
+
+@pytest.mark.parametrize("eps_inf,wp,gamma,d_nm,theta_deg", [
+    (2.0, 2.0e15, 1.0e14, 40.0, 45.0),
+    (3.8, 2.5e15, 1.0e14, 40.0, 40.0),
+    (4.0, 3.0e15, 5.0e13, 30.0, 60.0),
+])
+def test_q_budget_rejects_escaped_lossless_root(eps_inf, wp, gamma, d_nm, theta_deg):
+    """REGRESSION (finding Q-4). `q_budget` performed NO validity check on the lossless-pass root.
+    On the module's own flagship recipe -- a p-polarized pole function over an ENZ Drude film,
+    fed WITHOUT the eps-clearing -- the loss_scale = 0 Newton pass escapes to a far-plane root and
+    Q_abs was silently reported as +inf (with a negative implied gamma_abs).
+
+    The escaped root is a GENUINE zero of D and is CORRECTLY SIGNED (Re > 0, Im < 0), so the
+    obvious sign test is provably insufficient; only a PROXIMITY test catches it. Measured escape
+    here: |pole_rad - pole_total| = 9.1 to 12.6 x |pole_total| (the ledger's independent
+    reproduction measured a +2256.83% Re shift).
+
+    Contract: NaN Q_rad/Q_abs plus a RuntimeWarning naming the ENZ-clearing recipe -- never +inf.
+    """
+    d = d_nm * 1e-9
+    theta = math.radians(theta_deg)
+    omega_p = wp / math.sqrt(eps_inf)
+    k_par = k_par_from_angle(1.0, omega_p, theta)
+    seed = berreman_enz_pole(eps_inf=eps_inf, wp=wp, gamma=gamma, thickness_m=d,
+                             theta_rad=theta)["omega"]
+    raw, cleared = _enz_budget_factories(eps_inf, wp, gamma, d, k_par)
+
+    # --- uncleared: the escape must be CAUGHT ---
+    with pytest.warns(RuntimeWarning, match="ENZ-CLEARED"):
+        bad = q_budget(raw, seed, refine_tol=1e-12, loss_scale=1.0)
+    assert bad["pole_rad_ok"] is False
+    assert math.isnan(bad["Q_rad"]) and math.isnan(bad["Q_abs"]) and math.isnan(bad["inv_Q_abs"])
+    assert not math.isinf(bad["Q_abs"])                        # NEVER +inf (the old signature)
+    assert bad["pole_rad_shift_rel"] > 1.0                     # genuinely far away
+    assert "ENZ-CLEARED" in bad["warning"]
+
+    # --- ENZ-cleared: accepted, finite, and physically consistent ---
+    good = q_budget(cleared, seed, refine_tol=1e-12, loss_scale=1.0)
+    assert good["pole_rad_ok"] and good["warning"] == ""
+    assert math.isfinite(good["Q_abs"]) and good["Q_abs"] > 0.0
+    assert good["Q_rad"] > good["Q_total"]
+    # ABSOLUTE-SCALE oracle: for a Drude film the absorptive decay rate IS the Drude gamma.
+    # Measured: 9.918e13 / 9.985e13 / 4.889e13 against gamma = 1e14 / 1e14 / 5e13 (1-2%).
+    gamma_abs = good["pole_total"].real / good["Q_abs"]
+    assert gamma_abs == pytest.approx(gamma, rel=0.05)
+
+
+def test_q_budget_sign_test_would_be_insufficient():
+    """finding Q-4, the load-bearing correction: the escaped lossless root can be CORRECTLY
+    SIGNED, so validating `Im < 0, Re > 0` would let it through. Pinned on the recipe where it
+    happens (eps_inf = 2.0): pole_rad = 1.675e16 - 9.337e15j -- Re > 0, Im < 0, a genuine zero of
+    D, and 12.6 |pole_total| away. (The sign of the escape is basin chaos, not a property of the
+    recipe: at eps_inf = 4.0 the same construction escapes to Re < 0, Im > 0.)"""
+    eps_inf, wp, gamma, d, theta = 2.0, 2.0e15, 1.0e14, 40e-9, math.radians(45.0)
+    omega_p = wp / math.sqrt(eps_inf)
+    k_par = k_par_from_angle(1.0, omega_p, theta)
+    seed = berreman_enz_pole(eps_inf=eps_inf, wp=wp, gamma=gamma, thickness_m=d,
+                             theta_rad=theta)["omega"]
+    raw, _cleared = _enz_budget_factories(eps_inf, wp, gamma, d, k_par)
+    with pytest.warns(RuntimeWarning):
+        bad = q_budget(raw, seed, refine_tol=1e-12, loss_scale=1.0)
+    p = bad["pole_rad"]
+    assert p.real > 0.0 and p.imag < 0.0        # the sign test PASSES this escaped root
+    assert bad["pole_rad_shift_rel"] > 10.0     # only the proximity test catches it
+    assert bad["pole_rad_ok"] is False
+    # and it really is a zero of D (not a Newton stall): |D| far below an off-pole reference
+    D0 = raw(0.0)
+    ref = abs(D0(complex(p.real, -0.5 * abs(p.real))))
+    assert abs(D0(p)) < 1e-6 * ref
+
+
+def test_newton_refine_require_convergence_flag():
+    """finding Q-4: newton_refine returns the LAST iterate with no residual test -- for a func that
+    never vanishes it returns a meaningless far-plane number. The opt-in convergence assertion
+    must catch that; the default (off) must keep the legacy return-the-last-iterate behaviour."""
+    never_zero = lambda z: 1.0 + 0.0j
+    z = newton_refine(never_zero, 1.0e15 + 0.0j, tol=1e-11, maxiter=20)
+    assert abs(z) > 1e14                                       # legacy: a meaningless iterate
+    with pytest.raises(ValueError, match="no convergence"):
+        newton_refine(never_zero, 1.0e15 + 0.0j, tol=1e-11, maxiter=20,
+                      require_convergence=True)
+    # a real root still converges with the flag on
+    func = smatrix_pole_func([(complex(2.2) ** 2, 1.0e-6)], pol="s")
+    root = newton_refine(func, _fp_pole(2.2, 1.0e-6, 4), tol=1e-12, require_convergence=True)
+    assert abs(func(root)) < 1e-9 * abs(func(complex(root.real, -0.5 * root.real)))
 
 
 # ------------------------------------------------------------------------------------------------
