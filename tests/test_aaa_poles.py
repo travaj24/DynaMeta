@@ -248,9 +248,12 @@ def test_froissart_doublets_manufactured_then_filtered():
         genuine = any(abs(p - exact[m]) <= 1e-3 * abs(exact[m]) for m in ms)
         (gaps_genuine if genuine else gaps_doublet).append(gap)
     assert len(gaps_genuine) == 4 and len(gaps_doublet) >= 4
-    assert max(gaps_doublet) < 1e-9                       # doublets: rounding-level cancellation
+    # The doublet-gap MAGNITUDE is BLAS/platform-dependent (dev box ~1e-13, CI manylinux
+    # wheels measured 3.6e-8 on the same spectrum -- second PR-6 CI run), so pin the
+    # SEPARATION, which is the physics the filter keys on, not an absolute rounding level.
+    assert max(gaps_doublet) < 1e-6                       # doublets: far below any physical gap
     assert min(gaps_genuine) > 1e-2                       # genuine: a physical, resolvable gap
-    assert min(gaps_genuine) / max(gaps_doublet) > 1e8    # >= 8 decades of void (measured ~13)
+    assert min(gaps_genuine) / max(gaps_doublet) > 1e4    # >= 4 decades of void on EVERY platform
     default_frac = inspect.signature(find_resonances).parameters["froissart_frac"].default
     assert max(gaps_doublet) < default_frac < min(gaps_genuine)
 
