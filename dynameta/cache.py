@@ -13,15 +13,15 @@ optical_solver in run_pipeline; call .flush() (or rely on autosave) to persist, 
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import os
 import struct
-from typing import Optional
 
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
-from dynameta.io.store import load_arrays, save_arrays
+from dynameta.io.store import load_arrays, preload_backend, save_arrays
 
 # packed-vector layout (NaN = the field was None): the OpticalResult scalar fields + split complex r/t
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
@@ -41,35 +41,98 @@ _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "
 #           per entry but far faster to flush and reopen (per-dataset metadata churn dominated;
 #           measured 25-90x HDF5 / ~130x Zarr at N=400-2000, growing with N). A schema-4 per-key
 #           store is discarded on load like any stale schema.
-_SCHEMA = 5
+#   5 -> 6 (audit D-2, 2026-07-25): VALUE change, keys/layout unchanged -- the FDTD flux
+#           diagnostics (R_flux/T_flux and order-resolved powers) gained the exact half-timestep
+#           E/H phase alignment exp(+i w dt/2), so FDTD-backed entries written before the fix
+#           differ (up to ~2e-3 on diffracting gratings). Discarding on schema keeps a pre-fix
+#           store from serving pre-fix flux.
+#   6 -> 7 (audit R-8, 2026-07-26): KEY change, layout unchanged -- the EpsField fingerprint now
+#           carries the grid SHAPE, the dtype, the three AXES and the time_convention label, and
+#           hashes `tensor` even when `scalar` is also set. Previously a (2,3,4) grid and its
+#           (4,3,2) transpose (identical C-order bytes), the same values on axes differing 100x,
+#           and a scalar+tensor field vs the scalar alone all shared one key -- i.e. a cache HIT
+#           for a physically different solve. A schema-6 store is discarded rather than
+#           re-served under keys that were derived differently.
+_SCHEMA = 7
 _PK_VALS = "packed_vals"                                    # (N, len(_VEC)) float64, one entry per row
 _PK_KEYS = "packed_keys"                                    # (N, 41) uint8: "k"+sha1-hex ASCII key rows
 _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be None
 # OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
 # per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
 
+# ids of THIS module's currently-registered atexit trampolines (audit R-7 accounting). Tests
+# must count these, never atexit._ncallbacks() deltas: on a fresh CI interpreter the FIRST
+# h5py/zarr import happens inside a cache construction and registers ITS OWN atexit hooks,
+# so global-count deltas are not attributable to us (caught on the first PR-6 CI run, where
+# the dev box's warm imports had masked it).
+_LIVE_ATEXIT_HOOKS: set = set()
+
+
+def _live_atexit_hook_count() -> int:
+    """Number of OpticalSolverCache atexit trampolines currently registered (test hook)."""
+    return len(_LIVE_ATEXIT_HOOKS)
+
 
 def _eps_fingerprint(eps_by_region) -> bytes:
+    """Content hash of the per-region EpsFields.
+
+    audit R-8: this used to hash only the VALUES -- not the axes, not the array shape, not the
+    dtype tag -- and it stopped at `scalar` when both `scalar` and `tensor` were set. So
+    (a) the same gridded values on axes differing 100x, (b) a (2, 3, 4) grid and its (4, 3, 2)
+    transpose (identical C-order bytes), and (c) a scalar+tensor EpsField and the same scalar
+    alone all produced the SAME fingerprint, i.e. a cache HIT for a physically different solve.
+    The grid geometry is a solve input (it sets the VoxelCoefficient bounds), so it belongs in
+    the key. Every branch is now length- and kind-TAGGED so no two branches can alias.
+    """
     h = hashlib.sha1()
     for name in sorted(eps_by_region or {}):
         ef = eps_by_region[name]
         h.update(name.encode("utf-8"))
+        # audit V-5/R-8: the convention label changes the PHYSICS the same values describe.
+        h.update(str(getattr(ef, "time_convention", "")).encode("utf-8"))
         sc = getattr(ef, "scalar", None)
+        ten = getattr(ef, "tensor", None)
         if getattr(ef, "is_uniform", True) and sc is not None:
+            h.update(b"S")
             z = complex(sc); h.update(struct.pack("<dd", z.real, z.imag))
+            if ten is None:
+                continue
+            # a scalar AND a tensor: hash BOTH (the old code returned after the scalar, so an
+            # EpsField carrying both collided with the same scalar alone)
+            h.update(b"+T")
+            h.update(np.ascontiguousarray(np.asarray(ten, dtype=complex)).tobytes())
             continue
         # A UNIFORM ANISOTROPIC EpsField has is_uniform True but scalar None -- its content lives in
         # `tensor` (a (3,3)), NOT in values_zyx. Hashing it is REQUIRED: a PockelsEffect/KerrEffect
         # under a uniform gate field, or MagnetoOpticModel, emits EpsField(tensor=(3,3)) (core/bridge),
         # so without this every uniform-tensor state in a bias sweep collides to the same key and the
         # cache serves the FIRST point's R/T/phase for all later points (audit P1).
-        ten = getattr(ef, "tensor", None)
         if ten is not None:
             h.update(b"T")                                   # tag so a (3,3) tensor cannot alias a grid
             h.update(np.ascontiguousarray(np.asarray(ten, dtype=complex)).tobytes())
             continue
         arr = getattr(ef, "values_zyx", None)
-        h.update(np.ascontiguousarray(np.asarray(arr)).tobytes() if arr is not None else b"?")
+        if arr is None:
+            h.update(b"?")
+            continue
+        a = np.ascontiguousarray(np.asarray(arr))
+        # SHAPE + DTYPE (audit R-8): the raw C-order bytes of a (2, 3, 4) grid and of its
+        # (4, 3, 2) transpose-reshape are identical, so bytes alone cannot separate them.
+        h.update(b"G")
+        h.update(str(a.shape).encode("utf-8"))
+        h.update(str(a.dtype.str).encode("utf-8"))
+        h.update(a.tobytes())
+        # AXES (audit R-8): the axes carry the VoxelCoefficient bounds, i.e. the physical size of
+        # the grid. Two solves whose axes differ 100x are different solves at the same values.
+        for ax_name in ("x_axis_u", "y_axis_u", "z_axis_u"):
+            ax = getattr(ef, ax_name, None)
+            h.update(ax_name.encode("utf-8"))
+            if ax is None:
+                h.update(b"-")
+                continue
+            axa = np.ascontiguousarray(np.asarray(ax, dtype=np.float64))
+            h.update(str(axa.shape).encode("utf-8"))
+            h.update(axa.tobytes())
     return h.digest()
 
 
@@ -161,7 +224,11 @@ class OpticalSolverCache:
         623-1372x persistence overhead on cheap backends, and K=64 recovers nearly all)
         batches the flushes, turning O(N^2) rewrite bytes over a sweep into O(N^2/K)
         while bounding crash loss to K-1 misses; a dirty cache is also flushed at
-        interpreter exit (atexit) so a batched tail is never silently dropped.
+        interpreter exit (atexit, via a WEAKREF trampoline so the registration does not
+        make every autosave cache immortal) or at collection (__del__) if it was dropped
+        first, so a batched tail is never silently dropped -- and a flush that FAILS
+        leaves the dirty flag set, so the next flush retries instead of the failure
+        disarming the net (audit R-7). close() flushes and releases the atexit slot.
         autosave=False + one explicit flush() remains the fastest path.
       * flush() MERGES same-schema entries already on disk before an ATOMIC rewrite
         (audit S5-4): concurrent writers with disjoint keys union instead of clobbering,
@@ -208,9 +275,37 @@ class OpticalSolverCache:
         self.misses = 0
         self._mem = {}
         self._pra = {}                                       # key -> per_region_absorption (S5-3)
+        self._atexit_hook = None
+        # audit R-7: EAGERLY resolve the storage backend. Every write path here is deferred --
+        # autosave batches, and the final batch is written by the atexit hook or by __del__ --
+        # so a cache whose whole run fits inside one batch reached save_arrays for the FIRST time
+        # during interpreter shutdown. A first-time `import h5py` at that point segfaults on
+        # Windows / CPython 3.14 / h5py 3.16 (0xC0000005, no traceback, AFTER the rows are
+        # written): measured rc=0 when the cache is dropped mid-run but 0xC0000005 for the
+        # alive-at-exit, reference-cycle and late-__del__ orderings, and rc=0 for all four once
+        # the module is imported while the interpreter is healthy. Best-effort: an absent optional
+        # package or an unknown extension still raises later, from save/load, with its own message.
+        preload_backend(path, fmt=fmt)
         if self.autosave:
-            import atexit
-            atexit.register(self._flush_if_dirty)            # batched mode: never drop the tail
+            # audit R-7: register a WEAKREF TRAMPOLINE, not the bound method. atexit holds its
+            # callbacks for the whole process life, so `atexit.register(self._flush_if_dirty)`
+            # made every autosave cache (and its entire _mem store) IMMORTAL -- a long-running
+            # sweep that built and dropped caches leaked all of them. The trampoline holds only a
+            # weak reference, so a dropped cache is collectable; __del__ still persists a dirty
+            # tail at collection time, and BOTH __del__ and close() unregister the trampoline so
+            # the dead closures do not pile up in atexit (they used to: 5 built-and-dropped
+            # caches left 5 no-op callbacks registered for the life of the process).
+            import weakref
+            _ref = weakref.ref(self)
+
+            def _atexit_flush(_ref=_ref):
+                obj = _ref()
+                if obj is not None:                          # already collected -> nothing to do
+                    obj._flush_if_dirty()
+
+            self._atexit_hook = _atexit_flush
+            atexit.register(_atexit_flush)                    # batched mode: never drop the tail
+            _LIVE_ATEXIT_HOOKS.add(id(_atexit_flush))         # OUR registrations only (see below)
         if os.path.exists(path):
             try:
                 arrays, meta = load_arrays(path, fmt=fmt)
@@ -290,15 +385,57 @@ class OpticalSolverCache:
             try:
                 self.flush()
             except Exception:                                # atexit must never raise
+                pass                                         # (_unsaved survives -- audit R-7)
+
+    def _release_atexit(self) -> None:
+        """Drop this cache's atexit trampoline (idempotent, never raises). Called by BOTH close()
+        and __del__ (audit R-7): the weakref trampoline is harmless once the cache is collected,
+        but atexit keeps every registration for the life of the process, so a sweep that builds
+        and drops caches accumulated one dead no-op callback per cache."""
+        hook, self._atexit_hook = self._atexit_hook, None
+        if hook is not None:
+            try:
+                atexit.unregister(hook)                      # removes ALL copies of this callable
+            except Exception:                                # pragma: no cover - teardown races
                 pass
+            _LIVE_ATEXIT_HOOKS.discard(id(hook))
+
+    def close(self) -> None:
+        """Flush any unsaved entries and UNREGISTER the atexit hook (audit R-7). Optional -- a
+        live cache is still flushed at interpreter exit, and a dropped one at collection -- but
+        calling it makes the persistence point explicit and releases the atexit slot. Idempotent.
+        Do not keep solving through a closed cache: the exit-time safety net is gone (call
+        flush() yourself, or build a new cache)."""
+        self._flush_if_dirty()
+        self._release_atexit()
+
+    def __del__(self):
+        # audit R-7: with the atexit registration weakened to a weakref, a cache dropped WITHOUT
+        # close() would otherwise lose its batched tail (the trampoline only fires for caches
+        # still alive at exit). Best-effort, never raises -- the docstring's "a batched tail is
+        # never silently dropped" contract holds for both the dropped and the live case. The
+        # trampoline is released here too, so dropping a cache really does return the process to
+        # where it started instead of leaving a dead closure registered forever.
+        try:
+            self._flush_if_dirty()
+        except Exception:                                    # pragma: no cover - teardown races
+            pass
+        try:
+            self._release_atexit()
+        except Exception:                                    # pragma: no cover - teardown races
+            pass
 
     def flush(self) -> str:
         """Write the in-memory cache to disk (HDF5/Zarr; a WHOLE-store rewrite -- see the
         class docstring cost model). The rewrite is deliberate: save_arrays truncates (HDF5
         mode-'w' / Zarr rmtree-first), which is what makes a load-side schema discard
         permanent -- an append/merge flush would resurrect the discarded stale entries
-        under the fresh schema stamp (audit 6.2 hazard; GATE D2)."""
-        self._unsaved = 0
+        under the fresh schema stamp (audit 6.2 hazard; GATE D2).
+
+        The dirty flag is cleared at the END, only after the write has SUCCEEDED (audit R-7): it
+        used to be zeroed as the FIRST statement, so a failing write DISARMED the atexit safety
+        net -- _unsaved dropped to 0, _flush_if_dirty then found nothing to do, and the batch was
+        never retried even though the entries were still sitting in _mem."""
         # audit S5-4 MERGE step: union same-schema entries already on disk that this process
         # does not hold (disjoint concurrent writers no longer clobber each other). Entries
         # under a DIFFERENT schema are ignored -- never resurrected (GATE D2 semantics).
@@ -336,12 +473,19 @@ class OpticalSolverCache:
             tmp = str(self.path) + ".tmp-flush"
             save_arrays(tmp, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs, fmt="hdf5")
             os.replace(tmp, self.path)
-            return self.path
-        return save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs,
-                           fmt=self.fmt)                     # _SCHEMA (single source): the load-side
+            out = self.path
+        else:
+            out = save_arrays(self.path, {_PK_KEYS: kmat, _PK_VALS: vmat}, attrs,
+                              fmt=self.fmt)                  # _SCHEMA (single source): the load-side
                                                             # discard check uses the SAME constant, so
                                                             # a future bump cannot make the cache
                                                             # write-only (flush stamping a stale int)
+        self._unsaved = 0                                    # audit R-7: ONLY after a successful
+                                                            # write -- any exception above
+                                                            # propagates with the dirty flag intact,
+                                                            # so the next autosave / the atexit net
+                                                            # (and __del__) still retry the batch.
+        return out
 
     def stats(self) -> dict:
         tot = self.hits + self.misses

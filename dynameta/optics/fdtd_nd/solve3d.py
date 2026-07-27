@@ -2,6 +2,19 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol. The magneto-optic entry point implements
+the 'x'/'y' SUBSET (normal incidence).
 """
 from __future__ import annotations
 
@@ -10,11 +23,16 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
-from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_guard
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.solve2d import _ref_cache_call, _ring_time_s
+# audit D-3 / D-15: the absorber-thickness + probe-placement rule and the empty-band backstop are
+# SINGLE-SOURCED in solve2d (all three 3-D front ends below call the same helper), so the wave-3
+# redesign -- npml floor, attenuation-budget probe clearance, source demoted to a warning -- lands
+# here with no separate copy to drift. See solve2d's own module block for the measured evidence.
+from dynameta.optics.fdtd_nd.solve2d import (_check_band, _check_probe_placement, _flux_ratios,
+                                             _ref_cache_call, _window_memory_s)
 from dynameta.optics.fdtd_nd.kernels3d import _run_3d_mo, _run_3d_oblique, run_3d
 from dynameta.optics.fdtd_nd.kernels3d_numba import _run_3d_oblique_numba, _te3d_numba
 from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
@@ -78,6 +96,10 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM/2D guard
         raise NotImplementedError("solve_fdtd_3d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={}.".format(n_super, n_sub))
+    # audit D-1: the 3D grid fill below never reads L.hot_carrier, so a hot layer would march as a
+    # plain passive Drude film and return a bit-identical result (audit C5-7 policy: raise loudly).
+    hot_carrier_guard("solve_fdtd_3d", layers)
+    courant = courant_guard("solve_fdtd_3d", courant)        # audit D-11
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -145,15 +167,12 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_3d", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s; audit C3-6)".format(
-                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_3d", layers, tau)   # audit C3-6 + D-10
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -237,13 +256,14 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
                                                            + (n_super - n_sub) * (k_pR * dz - pad)))
     # total R/T from the full Poynting flux (all (kx,ky) diffraction orders)
-    P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i)
-    P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i)
-    P_trans = _flux3d(exR_t, eyR_t, hxR_t, hyR_t)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        R_flux = np.abs(P_refl) / np.abs(P_inc)
-        T_flux = np.abs(P_trans) / np.abs(P_inc)
+    P_inc = _flux3d(exL_i, eyL_i, hxL_i, hyL_i, dt)          # dt: half-timestep H de-stagger (D-2)
+    P_refl = _flux3d(exL_t - exL_i, eyL_t - eyL_i, hxL_t - hxL_i, hyL_t - hyL_i, dt)
+    P_trans = _flux3d(exR_t, eyR_t, hxR_t, hyR_t, dt)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
+    _check_band("solve_fdtd_3d", band, f_min, f_max)         # audit D-3 sub-mode
+    # audit D-9: signed ratios + in-band sign-flip warning, single-sourced with the 2-D front end
+    # (bit-identical to the old abs()/abs() whenever the Poynting signs are the physical ones).
+    R_flux, T_flux = _flux_ratios("solve_fdtd_3d", P_inc, P_refl, P_trans, band)
     return FDTD3DResult(freqs_Hz=f, R0=R0, T0=T0, R_flux=R_flux, T_flux=T_flux, band=band, r0=r0c, t0=t0c)
 
 
@@ -271,6 +291,9 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
             "solve_fdtd_3d_oblique: the oblique kernel carries no {} terms -- they would be "
             "silently ignored (audit C5-7); use the normal-incidence solver or split the "
             "problem.".format("/".join(_dropped)))
+    # audit D-1: hot_carrier's sentinel is None (not 0.0), so it cannot join `_dropped`.
+    hot_carrier_guard("solve_fdtd_3d_oblique", layers)
+    courant = courant_guard("solve_fdtd_3d_oblique", courant)   # audit D-11
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -297,14 +320,11 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_3d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s; audit C3-6)".format(
-                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_3d_oblique", layers, tau)   # audit C3-6 + D-10
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -340,6 +360,9 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     # audit C3-5 (mirrors solve_fdtd_2d_oblique): trust only sin_t < 0.95 -- the grazing
     # CPML echo corrupts R0/T0 beyond ~72 deg; warn on excluded excited points.
     _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit D-3 sub-mode: gate the EXCITATION mask only (the grazing cut may legitimately empty
+    # the trusted band at a large angle, and it already warns when it does).
+    _check_band("solve_fdtd_3d_oblique", _excited, f_min, f_max)
     band = _excited & (sin_t < 0.95)
     if np.any(_excited & (sin_t >= 0.95)):
         import warnings
@@ -352,6 +375,20 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
 
 
 
+
+
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# `pol` is the OpticalSpec LAB-AXIS family {'x','y','p'} restricted to its normal-incidence
+# 'x'/'y' subset (same contract as the 1-D fdtd_mo twin).  Map: dynameta.core.polarization.
+def _reject_pol_axis(pol, where: str):
+    """Guard the {'x','y'} subset.  LAZY import, failure path only."""
+    if pol not in ("x", "y"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(
+            pol, "lab_xyp", where=where, param="pol", allowed=("x", "y"),
+            extra="Normal-incidence engine: the source is a LINEAR LAB AXIS, so there is no "
+                  "distinct p-pol mode here (p-pol becomes a separate mode only once a plane of "
+                  "incidence exists).")
 
 
 def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min_m: float,
@@ -373,7 +410,16 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     any key present overwrites the corresponding field in the structure region. With wc==0 everywhere the
     engine is a plain per-cell DIAGONAL-anisotropic Yee solve (the cyclotron 2x2 collapses to diagonal),
     so this is the structured diagonal-tensor 3-D FDTD; nx,ny must resolve the lateral pattern. Reduces to
-    the scalar solve_fdtd_3d when exx==eyy==ezz, and to the 1-D anisotropic TMM when laterally uniform."""
+    the scalar solve_fdtd_3d when exx==eyy==ezz, and to the 1-D anisotropic TMM when laterally uniform.
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} and this engine implements
+    the 'x'/'y' SUBSET (normal incidence -- no plane of incidence, hence no distinct p-pol mode).
+    Anything else used to take the 'x' branch silently. Map: dynameta.core.polarization."""
+    _reject_pol_axis(pol, "solve_fdtd_3d_mo")
+    # audit D-1: closes the family (the MO layers are duck-typed and normally carry no hot_carrier,
+    # so this is a no-op there -- but the gyrotropic kernel has no hot-carrier path either).
+    hot_carrier_guard("solve_fdtd_3d_mo", layers)
+    courant = courant_guard("solve_fdtd_3d_mo", courant)     # audit D-11
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -440,14 +486,11 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     k_src = max(2, int(round(0.35 * pad / dz)))
     k_pL = int(round(0.7 * pad / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_3d_mo", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s; audit C3-6)".format(
-                          1.0 + t_ring / (200 * tau), t_ring), RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_3d_mo", layers, tau)   # audit C3-6 + D-10
     nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -470,5 +513,6 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
         T = np.abs(t_co) ** 2 + np.abs(t_cr) ** 2
         far = 0.5 * np.arctan2(2.0 * np.real(t_co * np.conj(t_cr)), np.abs(t_co) ** 2 - np.abs(t_cr) ** 2)
     band = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    _check_band("solve_fdtd_3d_mo", band, f_min, f_max)      # audit D-3 sub-mode
     return FDTD3DMOResult(freqs_Hz=f, band=band, t_co=t_co, t_cross=t_cr, r_co=r_co, r_cross=r_cr,
                           R=R, T=T, faraday_deg=np.degrees(far))

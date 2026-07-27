@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scipy.signal import hilbert
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import HBAR, Q_E
 from dynameta.optics.soa.qd_gain import ManyBody, QDGainModel, QDGainParams
 
@@ -100,7 +101,7 @@ def main():
     areas, peaks, hwhms = [], [], []
     for N in (0.0, 1e24, 3e24):
         gN, _ = mD.material_gain_index_mb([0.9], nud, N)
-        areas.append(float(np.trapezoid(gN, nud)))
+        areas.append(float(trapz(gN, nud)))
         peaks.append(float(gN.max()))
         hwhms.append(mD._mb_hwhm_Hz(N, 300.0))
     area_rel = (max(areas) - min(areas)) / np.mean(areas)       # oscillator strength conserved

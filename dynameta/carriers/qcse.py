@@ -38,7 +38,7 @@ from typing import Tuple
 
 import numpy as np
 
-from dynameta.constants import HBAR, Q_E as Q
+from dynameta.constants import Q_E as Q
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D
 
 # Analytic ground-state Stark coefficient of an infinite square well (2nd-order PT):

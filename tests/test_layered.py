@@ -74,7 +74,16 @@ def test_tmm_layered_solver_optical_result():
     stk = LayeredStack(1.0 + 0j, 1.0 + 0j, [LayeredSlab(250e-9, eps=complex(2.0 ** 2))])
     res = TmmLayeredSolver().solve(stk, 1300e-9, _Opt())
     assert 0.0 <= res.R <= 1.0 and res.T is not None
-    assert abs(res.R + res.T + res.A - 1.0) < 1e-9     # lossless
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY (TmmLayeredSolver sets A := 1 - R - T via
+    # _check_energy_budget), so it passed for a halved, doubled or sign-flipped T. What IS
+    # falsifiable is the PHYSICS: this stack is lossless (real eps, real end media), R and T are
+    # computed separately by tmm, so A must BE zero -- i.e. R + T = 1 as a statement about two
+    # independent numbers. Verified: a halved T fails here at |A| = 0.40.
+    assert abs(res.A) < 1e-12                          # lossless -> nothing absorbed
+    assert abs(res.R + res.T - 1.0) < 1e-12            # the SAME statement, spelled out
+    # per_region_absorption is a bookkeeping (not energy) check: tmm.absorp_in_each_layer closes
+    # with 1 - R - T by construction, so this pins the per-slab DECOMPOSITION, not the budget.
+    assert sum(res.per_region_absorption.values()) == pytest.approx(res.A, abs=1e-12)
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9         # |r|^2 == R
     assert -180.0 <= res.phase_deg <= 180.0
 
@@ -100,7 +109,15 @@ def test_make_layered_tmm_solver_seam():
     res = solve(d, None, {}, lam, 1.0 + 0j, 1.0 + 0j)   # geo/n_super/n_sub unused by TMM
     R, T, A = layered_rta(layered_stack_from_design(d, lam), lam, theta_deg=0.0, pol="s")
     assert abs(res.R - R) < 1e-12 and abs(res.T - T) < 1e-12
-    assert abs(res.R + res.T + res.A - 1.0) < 1e-9
+    # AUDIT T-1: `R + T + A == 1` is an identity here too (A := 1 - R - T). The seam's stack is
+    # LOSSLESS (air | n=2.2 | air), so the falsifiable statement is A == 0, i.e. R + T == 1 for two
+    # separately computed numbers. Verified: a halved T fails here at |A| = 0.30.
+    assert abs(res.A) < 1e-12                          # lossless -> nothing absorbed
+    assert abs(res.R + res.T - 1.0) < 1e-12
+    # bookkeeping (not energy): the seam must re-key slab_<i> -> DESIGN layer name (C5-4), and the
+    # per-layer decomposition must sum to the total.
+    assert set(res.per_region_absorption) == {"film"}
+    assert sum(res.per_region_absorption.values()) == pytest.approx(res.A, abs=1e-12)
     assert abs(abs(res.r) ** 2 - res.R) < 1e-9
 
 
@@ -225,3 +242,38 @@ def test_collapse_regions_to_layers_identity_and_conflict():
     with pytest.raises(ValueError):                        # genuinely split modulation -> loud
         collapse_regions_to_layers(d, {"ito_inpatch": EpsField(scalar=2.0 + 0j),
                                        "ito_outside": EpsField(scalar=3.0 + 0j)})
+
+
+def _tiny_design():
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    reg = MaterialRegistry()
+    for nm, e in [("air", 1.0 + 0j), ("hi", complex(4.0, 0.3)), ("glass", complex(2.25))]:
+        reg.add(Material(nm, ConstantOptical(e)))
+    return Design(name="t", unit_cell=UnitCell.square(300e-9),
+                  stack=Stack(layers=[Layer("a", 120e-9, "hi")],
+                              superstrate_material="air", substrate_material="glass"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+
+
+def test_byo_eps_seam_enforces_time_convention():
+    """audit V-5: EpsField.time_convention was WRITTEN by the bridge and read by nobody, so a
+    caller assembling EpsFields themselves (the whole point of the pluggable eps_by_region seam)
+    could hand any backend an exp(+i omega t) permittivity and get a silently AMPLIFYING solve.
+    The label is now checked at the seam -- here on the layered path; the FEM assembler, the FDTD
+    seam and the four lumenairy backends call the same helper."""
+    from dynameta.core.eps_field import EpsField, require_solver_time_convention
+    from dynameta.core.layered import collapse_regions_to_layers
+    d = _tiny_design()
+    good = {"a": EpsField(scalar=complex(4.0, 0.3))}
+    assert collapse_regions_to_layers(d, good)                 # default label passes
+    bad = {"a": EpsField(scalar=complex(4.0, -0.3), time_convention="exp(+iwt)")}
+    with pytest.raises(ValueError, match="time_convention"):
+        collapse_regions_to_layers(d, bad)
+    # the helper itself: names the offending region, and tolerates a duck-typed entry
+    with pytest.raises(ValueError, match=r"'a'"):
+        require_solver_time_convention(bad, "unit-test")
+    require_solver_time_convention({"a": object()}, "unit-test")   # no label -> no opinion
+    require_solver_time_convention(None, "unit-test")              # empty seam

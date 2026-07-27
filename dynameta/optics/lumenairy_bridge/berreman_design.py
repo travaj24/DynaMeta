@@ -27,34 +27,79 @@ post-tagged-5.14.4): the gauge-stable custom-VJP eig must return a plain (eigval
 matching jnp.linalg.eig's EigResult, else the custom_vjp structure check rejects the transform. The
 forward (numpy or traced) and eager grad are unaffected. See validation/lumenairy_berreman_jax.py
 (GATE B/D assert grad-of-vmap / grad-of-jit when the fix is present, version-conditional-skip else).
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident E_x,
+1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo -- {'s','p'} is
+the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'} -> row is
+_common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the grating bridge's,
+and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the normal-incidence /
+azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; acceptance
+unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE families ({'s','p'} and
+{'te','tm'}), whose aliases name the same physical mode in every geometry they cover; this
+vocabulary's crossings depend on the azimuth (or have no image at all), so they stay STRICT and are
+made explicitly, through normalize_pol.
 """
 
 from __future__ import annotations
 
+from dynameta.optics.lumenairy_bridge._common import _REQUIRED
+from dynameta.optics.lumenairy_bridge._common import \
+    require_halfspace_keywords as _require_halfspace_keywords
 from dynameta.optics.lumenairy_bridge.berreman_backend import _require_berreman
 
 __all__ = ["berreman_RT", "berreman_jones"]
 
+# HALF-SPACE ARGUMENT ORDER (finding V-4). These entry points mirror lumenairy's upstream
+# SUB-FIRST (n_substrate, n_superstrate) signature, which is the INVERSE of the rest of DynaMeta
+# (solve_fem, stack_rta, the optical_solver seam, and _common.p_basis_conversion in this same
+# package are all SUPER-first). Both are bare scalars, so a super-first positional call used to
+# type-check, run, and silently solve the stack upside down. The two indices are therefore
+# KEYWORD-ONLY: the order stops mattering, and a legacy positional call raises a TypeError that
+# names the migration instead of returning a wrong number.
 
-def berreman_RT(layers, n_substrate, n_superstrate, wavelength, *, angle=0.0, phi=0.0, row=0):
+
+def _reject_row(row, where: str):
+    """Guard the integer lab-`row` vocabulary (audit V-8): 0 = incident E_x, 1 = incident E_y.
+    A label from a SIBLING vocabulary ('x'/'y'/'p' from OpticalSpec, 's'/'p', 'te'/'tm') used to
+    reach the numpy fancy-index and either raise an opaque IndexError/TypeError deep inside, or --
+    for a bool -- index row 0/1 by accident.  Accepted set unchanged.  LAZY import, failure path
+    only.  The lab_xyp -> row leg of the map is _common.pol_row; the INVERSE is refused (row 0 is
+    ambiguous: 'x' and 'p' both map to it)."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where=where, param="row")
+
+
+def berreman_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                n_superstrate=_REQUIRED, angle=0.0, phi=0.0, row=0):
     """Differentiable (R, T) power for ONE incident lab polarization (row 0 = E_x, 1 = E_y) of a
     planar anisotropic multilayer. `layers` = [(eps, thickness), ...] superstrate-side first (eps
     scalar or (3, 3)); a SCALAR FOM ingredient suitable for jax.grad.
+
+    `n_substrate` / `n_superstrate` are KEYWORD-ONLY (audit V-4 -- see the module-level note):
+    berreman_RT(layers, wavelength, n_substrate=..., n_superstrate=...).
 
     Routes to the Berreman JAX twin automatically when any of layers / thickness / wavelength /
     angle / phi / half-space indices is a traced JAX array (gradients then flow through all of
     them); plain numpy floats give a concrete forward. Use as the analytic-gradient forward for a
     planar-anisotropic inverse-design FOM -- a fast exact alternative to optimize_fdtd's space-time
     march, and the only differentiable path for the anisotropic stacks the FEM cannot grad."""
+    _require_halfspace_keywords("berreman_RT", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "berreman_RT")                                     # audit V-8
     lum = _require_berreman()
     R, T, _Jr, _Jt = lum.berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength,
                                            angle=angle, phi=phi)
     return R[row], T[row]
 
 
-def berreman_jones(layers, n_substrate, n_superstrate, wavelength, *, angle=0.0, phi=0.0):
+def berreman_jones(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                   n_superstrate=_REQUIRED, angle=0.0, phi=0.0):
     """Differentiable full far field (R, T, jones_r, jones_t) of a planar anisotropic multilayer
     -- the (2,) power + (2, 2) lab-basis Jones, for a phase- / cross-pol-bearing FOM (a waveplate
-    retardance, a Faraday rotation angle). Same JAX auto-dispatch as berreman_RT."""
+    retardance, a Faraday rotation angle). Same JAX auto-dispatch as berreman_RT, and the same
+    KEYWORD-ONLY half-space indices (audit V-4)."""
+    _require_halfspace_keywords("berreman_jones", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
     return _require_berreman().berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength,
                                                  angle=angle, phi=phi)

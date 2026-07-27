@@ -10,8 +10,10 @@ T(omega) extraction. CFS-CPML absorbing layers (+ PEC backing) at the z ends; pe
 Backends (solve_fdtd_2d(backend=...)):
   * 'numba' (FASTEST for unit cells) -- a fused, prange-threaded, JIT-compiled CPU kernel
     (_te2d_numba). The metasurface unit-cell grid is cache-resident, so this runs ~500-1900 MC/s
-    (machine-precision identical to the reference; ~10-150x NumPy and FASTER than naive GPU here,
-    because a small grid cannot fill a GPU and pays launch/PCIe overhead).
+    (agreeing with the reference to the float64 rounding floor -- < 1e-9 on R/T, GATE D of
+    validation/fdtd_2d_reduces.py -- NOT bit-for-bit: see audit D-7 and the _te2d_numba docstring;
+    ~10-150x NumPy and FASTER than naive GPU here, because a small grid cannot fill a GPU and pays
+    launch/PCIe overhead).
   * 'numpy' (the REFERENCE oracle) -- the vectorized run loop, the correctness baseline every faster
     kernel is validated against, and the dependency-free default.
   * 'cupy' (NVIDIA GPU) -- the vectorized loop on the device; wins only on LARGE grids (big 3D volumes)
@@ -28,8 +30,10 @@ laterally-uniform stack at normal incidence (validation/fdtd_2d_reduces.py).
 IMPLEMENTED since this docstring's first draft: CPML, full 3D (solve_fdtd_3d), per-cell diagonal +
 magneto-optic tensor eps (solve_fdtd_3d_mo, gyrotropic magnetized-Drude ADE), Drude+Lorentz multipole
 ADE, oblique Bloch incidence (2D s/p + 3D, complex-envelope) with BOTH fused numba kernels (2D-TE, 2D-TM,
-full-vector 3D -- byte-exact, ~5-8x faster) AND differentiable JAX kernels (2D-TE, 2D-TM, full-vector 3D
--- byte-exact, jax.grad flows through the oblique scan for inverse-design-at-angle), plus a STRUCTURED
+full-vector 3D -- equal to the NumPy kernel to ~1e-12, the float64 rounding floor, NOT bit-for-bit;
+audit D-7; ~5-8x faster) AND differentiable JAX kernels (2D-TE, 2D-TM, full-vector 3D -- R0/T0 to < 1e-10,
+validation/fdtd_oblique_jax.py GATE A; jax.grad flows through the oblique scan for
+inverse-design-at-angle), plus a STRUCTURED
 (laterally-patterned) 3D diagonal-tensor solve (solve_fdtd_3d_mo `lateral_tensor=`, validated vs grcwa
 per-component), and (2026-06-11) GPU NONLINEAR kernels (chi2/Raman/gain) on cupy + the numba-cuda
 cooperative kernel, hardware-validated (validation/fdtd_gpu_nonlinear.py, worst ~2e-15, dynamic gain
@@ -58,3 +62,14 @@ from dynameta.optics.fdtd_nd.kernels3d_jax import run_3d_jax, run_3d_oblique_jax
 from dynameta.optics.fdtd_nd.solve2d import solve_fdtd_2d, solve_fdtd_2d_oblique
 from dynameta.optics.fdtd_nd.solve3d import (solve_fdtd_3d, solve_fdtd_3d_mo,
                                              solve_fdtd_3d_oblique)
+
+# audit T-4: the re-export list above IS the package's public surface (the note above says so);
+# declaring it makes that machine-readable so `ruff check .` runs repo-wide without 25 phantom
+# "unused import" hits here. Keep in sync when a re-export is added or dropped.
+__all__ = [
+    "FDTD2DObliqueResult", "FDTD2DResult", "FDTD3DMOResult", "FDTD3DResult", "FDTDLayer",
+    "HAVE_NUMBA", "available_backends", "cpml_z", "have_jax", "have_numba_cuda", "njit",
+    "prange", "resolve_backend", "run_2d_te", "run_2d_te_jax", "run_2d_te_oblique_jax",
+    "run_2d_tm_oblique_jax", "run_3d", "run_3d_jax", "run_3d_oblique_jax", "solve_fdtd_2d",
+    "solve_fdtd_2d_oblique", "solve_fdtd_3d", "solve_fdtd_3d_mo", "solve_fdtd_3d_oblique",
+]

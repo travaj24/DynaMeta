@@ -9,16 +9,36 @@ cannot run -- the heavy NGSolve/DEVSIM stack is not installed in CI.
   python -m validation.run_all --tier full           # everything + the examples/ workflows
   python -m validation.run_all oblique sp            # only scripts whose name matches a token
   python -m validation.run_all --tier smoke lc       # tier and tokens compose (AND)
+  python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity   # declared exception
 
 Tiers:
-  smoke -- the SMOKE set below: pure numpy/scipy scripts measured/verified < ~30 s each, no
-           DEVSIM/NGSolve and no multi-minute FDTD time loops. A NEW fast solver-free
-           validation must be ADDED to the set explicitly (opt-in keeps the tier honest:
-           import-grepping misclassifies lazy-import and long-numpy cases).
+  smoke -- the SMOKE set below: solver-free scripts MEASURED at < 60 s each, no DEVSIM/NGSolve and
+           no multi-minute FDTD time loops (most are pure numpy/scipy and finish in seconds; the
+           lumenairy-bridge gates pull lumenairy/jax, both of which CI already installs). A NEW
+           fast solver-free validation must be ADDED to the set explicitly (opt-in keeps the tier
+           honest: import-grepping misclassifies lazy-import and long-numpy cases). A solver-free
+           script that MEASURES too slow goes in SMOKE_EXCLUDED with its time, so the reverse-drift
+           warning below names only genuinely uncurated scripts (audit X-26).
   full  -- every gated validation PLUS the exit-gated examples/ workflows.
 
-Exits non-zero if ANY selected script fails or errors. Pure-diagnostic scripts (no PASS/FAIL
-verdict) are skipped. Budget: smoke ~ a few minutes; full ~ hours with the [solvers] extra.
+EXIT-CODE CONTRACT (audit T-3 -- the tier used to read green while executing nothing):
+  0   PASS.
+  42  SKIP: the script declared a required capability absent (numba/CUDA/jax/ngsolve/devsim).
+      Counted SEPARATELY from PASS in the summary, never green-washed into it.
+      * In the SMOKE tier a 42 is a FAILURE by default: smoke is the CI-able tier, so a
+        capability it needs is a capability CI was supposed to install. Naming the script in
+        --allow-skip turns that back into an informational skip -- and forces the exception
+        to be visible in the workflow file (e.g. numba, which the dedicated `numba` CI leg
+        runs for real instead).
+      * In the other tiers a 42 stays informational: those tiers legitimately run without
+        the [solvers] extra.
+  124 TIMEOUT (PER_SCRIPT_TIMEOUT_S).
+  ANY OTHER non-zero (including a code this runner does not know) is a FAILURE. There is no
+  "unrecognized, therefore harmless" branch.
+
+Exits non-zero if ANY selected script fails, errors, times out, or (smoke, undeclared) skips.
+Pure-diagnostic scripts (no PASS/FAIL verdict) are excluded. Budget: smoke ~ a few minutes;
+full ~ hours with the [solvers] extra.
 """
 import os
 import re
@@ -31,7 +51,16 @@ REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
 SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
         "reference_modulator_spectrum"}
+# The `_` prefix excludes a file from EVERY tier (see _gated), and it carries TWO opposite
+# meanings: a legitimately SHARED FIXTURE (imported by other validations, never run on its own)
+# and a PARKED WIP (a real gate suite that nothing executes). Declare the fixtures here so the
+# second kind is NAMED on every run instead of vanishing silently -- audit X-6, where a parked
+# `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
+# executable gate anywhere and nobody could see it.
+FIXTURES = {"_reference_device"}
 PER_SCRIPT_TIMEOUT_S = 1800
+SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
+TIMEOUT_RC = 124
 
 # The fast solver-free tier (opt-in; see module docstring). Verified 2026-06-10: each is pure
 # numpy/scipy at runtime (lazy-import traps like results_io_demo included deliberately;
@@ -67,13 +96,47 @@ SMOKE = {
     "qd_soa_vectorial_pdg", "qd_soa_wdm",
     # the rare-earth fiber amplifier (EDFA/YDFA) end-to-end gates -- pure numpy/scipy
     "fiber_amp_physics",
+    # audit X-19/X-26: the solver-free validations the reverse-drift warning below had been naming
+    # since they shipped. `lumenairy` is a CORE dependency CI already installs, so the bridge gates
+    # -- the only executable coverage of the 11-module optics/lumenairy_bridge subsystem -- cost
+    # nothing extra to run. Wall-clock MEASURED 2026-07-26 (this box, cold start, per script):
+    #   bic_capstone 13.9 s | inverse_design_oracle 3.6 s | lumenairy_berreman_bridge 3.0 s
+    #   lumenairy_emt_screen 2.1 s | lumenairy_translate 3.1 s | lumenairy_rcwa_jax 35.8 s
+    #   lumenairy_pmm_bridge 47.8 s | nonlocal_hydro_material 0.4 s | resonance_pole_finder 2.5 s
+    # = ~112 s added to the tier. The three that measured OVER the 60 s bar are in SMOKE_EXCLUDED
+    # below with their times, so the reverse-drift warning stays signal rather than noise.
+    "bic_capstone", "inverse_design_oracle", "lumenairy_berreman_bridge", "lumenairy_emt_screen",
+    "lumenairy_pmm_bridge", "lumenairy_rcwa_jax", "lumenairy_translate",
+    # audit X-19: cheap smoke wrappers for two optics modules that had NO validation script at all,
+    # so their only oracle was the test written beside the implementation in the same commit
+    "nonlocal_hydro_material", "resonance_pole_finder",
+}
+
+# Solver-free validations DELIBERATELY outside SMOKE, with the reason (audit X-26: "add them to
+# SMOKE after measuring runtime, or record an explicit exclusion reason next to each so the
+# reverse-drift warning stops being noise"). The reverse-drift check below subtracts this set, so
+# anything it still names is genuinely uncurated. Re-measure before moving one INTO the tier.
+SMOKE_EXCLUDED = {
+    "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
+    "lumenairy_berreman_jax":    "145 s measured 2026-07-26 (jax jit warm-up + sweep)",
+    "lumenairy_pmm2d_bridge":    "268 s measured 2026-07-26 (2-D PMM cascade; the slowest gate)",
 }
 
 
 def _gated(directory, skip=()):
     out = []
     for fn in sorted(os.listdir(directory)):
-        if not fn.endswith(".py") or fn.startswith("_"):
+        if not fn.endswith(".py"):
+            continue
+        if fn.startswith("_"):
+            # audit X-6: a `_`-prefixed file runs in NO tier. That is correct for a shared fixture
+            # and wrong for a parked gate suite, and the prefix cannot tell them apart -- so name
+            # every non-fixture one loudly rather than dropping it in silence.
+            if fn[:-3] not in FIXTURES:
+                print("[run_all] NOTE: {}/{} is `_`-prefixed, so it is EXCLUDED FROM EVERY TIER. "
+                      "If it is a gate suite, rename it (drop the underscore) or gate it from "
+                      "tests/; if it is a shared fixture, add it to FIXTURES.".format(
+                          os.path.basename(directory), fn), flush=True)
             continue
         name = fn[:-3]
         if name in skip:
@@ -104,7 +167,23 @@ def main(argv):
             print("[run_all] unknown tier {!r} (smoke | full)".format(tier), flush=True)
             return 2
         args = args[:i] + args[i + 2:]
+    # audit T-3: declared exceptions to the smoke tier's strict-skip rule. Repeatable and/or
+    # comma-separated; a name here must be a script the CALLER runs elsewhere for real (the
+    # workflow file is where that promise is visible).
+    allow_skip = set()
+    while "--allow-skip" in args:
+        i = args.index("--allow-skip")
+        try:
+            value = args[i + 1]
+        except IndexError:
+            print("[run_all] --allow-skip needs a value: NAME[,NAME...]", flush=True)
+            return 2
+        allow_skip.update(n for n in value.replace(",", " ").split() if n)
+        args = args[:i] + args[i + 2:]
     tokens = args
+    # smoke is the CI-able tier, so "capability absent" there means CI did not install
+    # something it was supposed to -- a red, not a shrug (audit T-3).
+    strict_skip = tier == "smoke"
 
     jobs = [("validation", n) for n in _gated(HERE, skip=SKIP)]
     n_gated = len(jobs)
@@ -134,17 +213,25 @@ def main(argv):
             "dynameta.pipeline", "LayeredOpticalBuilder", "make_fem_optical_solver",
         )
         extra = []
-        for n in sorted(all_gated - SMOKE):
+        for n in sorted(all_gated - SMOKE - set(SMOKE_EXCLUDED)):
             src = open(os.path.join(HERE, n + ".py"), encoding="utf-8").read()
             if not any(h in src for h in _HEAVY):
                 extra.append(n)
         if extra:
             # "no heavy path" = no NGSolve/DEVSIM/FDTD/jax-FDTD import; a few entries still pull
             # lumenairy/jax (the bridge validations) -- fast but not pure-numpy, so verify the runtime
-            # before adding them to the pure-numpy smoke tier.
+            # before adding them to the pure-numpy smoke tier. A script that has been MEASURED and
+            # judged too slow belongs in SMOKE_EXCLUDED with its time, not here (audit X-26).
             print("[run_all] WARNING: {} gated validation(s) with NO NGSolve/DEVSIM/FDTD heavy path NOT "
-                  "in SMOKE (curate into the smoke tier or confirm intentional; verify runtime -- a few "
-                  "pull lumenairy/jax): {}".format(len(extra), ", ".join(extra)), flush=True)
+                  "in SMOKE and NOT in SMOKE_EXCLUDED (curate into the smoke tier, or record a measured "
+                  "exclusion reason in SMOKE_EXCLUDED): {}".format(len(extra), ", ".join(extra)),
+                  flush=True)
+        # keep SMOKE_EXCLUDED honest in both directions: a name that no longer exists, or that has
+        # since been curated INTO SMOKE, is stale bookkeeping the next reader would trust.
+        stale_ex = [n for n in sorted(SMOKE_EXCLUDED) if n not in all_gated or n in SMOKE]
+        if stale_ex:
+            print("[run_all] WARNING: SMOKE_EXCLUDED name(s) that are no longer excludable gated "
+                  "scripts (deleted, or now in SMOKE): {}".format(", ".join(stale_ex)), flush=True)
     elif tier == "full":
         ex_dir = os.path.join(REPO, "examples")
         if os.path.isdir(ex_dir):
@@ -166,25 +253,49 @@ def main(argv):
                                cwd=REPO, timeout=PER_SCRIPT_TIMEOUT_S)
             rc = p.returncode
         except subprocess.TimeoutExpired:
-            rc = 124
+            rc = TIMEOUT_RC
         dt = time.time() - t0
-        # audit C6-6: rc == 42 is the SKIP convention (required capability absent --
+        # audit C6-6: rc == SKIP_RC is the SKIP convention (required capability absent --
         # CUDA/cupy/jax/ngsolve/devsim/lumenairy not installed), counted separately so a
-        # never-executed physics gate cannot read as a green PASS in the summary
-        tag = ("PASS" if rc == 0 else "SKIP" if rc == 42
-               else ("TIMEOUT" if rc == 124 else "FAIL(rc={})".format(rc)))
-        results.append((pkg + "." + name, rc, dt))
+        # never-executed physics gate cannot read as a green PASS in the summary. audit T-3:
+        # in the smoke tier that skip is itself a FAILURE unless --allow-skip declares it,
+        # because smoke is the tier CI is supposed to be able to run in full.
+        undeclared_skip = rc == SKIP_RC and strict_skip and name not in allow_skip
+        if rc == 0:
+            tag = "PASS"
+        elif rc == SKIP_RC:
+            tag = "SKIP!" if undeclared_skip else "SKIP"
+        elif rc == TIMEOUT_RC:
+            tag = "TIMEOUT"
+        else:
+            tag = "FAIL(rc={})".format(rc)          # incl. any rc this runner does not know
+        results.append((pkg + "." + name, rc, dt, undeclared_skip))
         print("[run_all] {:48s} {:8s} ({:5.0f}s)".format(pkg + "." + name, tag, dt), flush=True)
-    skipped = [r for r in results if r[1] == 42]
-    failed = [r for r in results if r[1] not in (0, 42)]
-    print("\n[run_all] {}/{} passed; {} skipped (capability absent); {} failed/errored".format(
-        len(results) - len(failed) - len(skipped), len(results), len(skipped), len(failed)),
-        flush=True)
+    bad_skips = [r for r in results if r[3]]
+    skipped = [r for r in results if r[1] == SKIP_RC and not r[3]]
+    failed = [r for r in results if r[1] not in (0, SKIP_RC)]
+    print("\n[run_all] {}/{} passed; {} skipped (capability absent, declared); {} failed/errored;"
+          " {} skipped-but-required".format(
+              len(results) - len(failed) - len(skipped) - len(bad_skips), len(results),
+              len(skipped), len(failed), len(bad_skips)), flush=True)
     if skipped:
-        print("[run_all] SKIPPED: " + ", ".join(n for n, _, _ in skipped), flush=True)
+        print("[run_all] SKIPPED (declared): " + ", ".join(n for n, _, _, _ in skipped), flush=True)
     if failed:
-        print("[run_all] FAILURES: " + ", ".join(n for n, _, _ in failed), flush=True)
-    return 0 if not failed else 1
+        print("[run_all] FAILURES: " + ", ".join(n for n, _, _, _ in failed), flush=True)
+    if bad_skips:
+        print("[run_all] REQUIRED-BUT-SKIPPED (smoke tier: install the missing capability, or "
+              "pass --allow-skip NAME once something else runs it for real): "
+              + ", ".join(n for n, _, _, _ in bad_skips), flush=True)
+    # keep the exception list from rotting: an --allow-skip name that did NOT skip is either a
+    # typo or a capability that is now installed, and either way the caller should drop it.
+    selected = {n.split(".", 1)[-1] for n, _, _, _ in results}
+    stale = (allow_skip & selected) - {n.split(".", 1)[-1] for n, rc, _, _ in results
+                                       if rc == SKIP_RC}
+    if stale:
+        print("[run_all] NOTE: --allow-skip name(s) that ran instead of skipping: {} (the "
+              "capability is present -- drop them from the caller)".format(
+                  ", ".join(sorted(stale))), flush=True)
+    return 0 if not (failed or bad_skips) else 1
 
 
 if __name__ == "__main__":

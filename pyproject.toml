@@ -32,6 +32,7 @@ materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + r
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
 jax = ["jax>=0.11; python_version>='3.12'"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
+numba = ["numba>=0.58"]                                    # JIT/prange CPU kernels: 13 modules (fdtd_nd kernels2d/3d + oblique, soa, numba_env), 16 numba-gated tests, 1 parity oracle. OPTIONAL (every kernel has a numpy reference path) -- but audit T-3: it was declared by NO extra, so nothing could install it and all 16 gates ran nowhere. Installed by the `numba` CI leg.
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
@@ -39,8 +40,51 @@ dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
 include = ["dynameta*"]
 
 [tool.pytest.ini_options]
+# audit T-13: this table used to hold `markers` and nothing else, which cost two whole classes of
+# regression. (a) NO WARNINGS POLICY: dynameta has 83 `warnings.warn` sites (40 explicitly
+# RuntimeWarning, 6 FEMDiagnosticWarning) and only 5 were pinned by a `pytest.warns` assertion, so
+# a RuntimeWarning raised on a DEFAULT path during any test was invisible -- and a warning that
+# STOPPED firing was equally invisible. (b) NO MARKER STRICTNESS: `slow` is the CI selection axis
+# (`-m "not slow"`), so a typo'd `@pytest.mark.slwo` would have become an unknown mark and run in
+# the fast leg -- or, worse, a genuinely slow test would never have been deselected.
+addopts = "--strict-markers"
 markers = [
     "slow: full validation-suite wrappers excluded from the fast CI legs (covered by the py3.13 smoke tier; run with -m slow)",
+]
+# ALLOW-LIST, not a deny-list: every warning is an ERROR unless it is exempted below WITH A REASON.
+# pytest applies these in order and the LAST matching filter wins, so "error" has to come first.
+# Entries are message- or category-scoped on purpose -- never a bare category-wide "ignore" -- and
+# each one should be deleted as soon as its cause is fixed. (The FEM solver's advisory category,
+# FEMDiagnosticWarning, is exempted in tests/conftest.py instead: naming it here would import
+# dynameta.optics.solver, which imports ngsolve at module scope, and pytest would then fail to
+# START on the four CI legs without the [solvers] extra.)
+filterwarnings = [
+    "error",
+    # The bridge's lumenairy VERSION-CEILING advisory (audit Q-16, optics/lumenairy_bridge/_common.py):
+    # fires once per process on the first bridge call whenever the installed lumenairy is newer than
+    # the version the bridge gates were last re-run against. It is a deliberate soft signal to a
+    # human -- "no evidence this is broken, only no evidence it is not" -- with its own dedicated
+    # gate (test_lumenairy_bridge.py::test_bridge_version_ceiling_is_a_one_time_soft_warning), so it
+    # must not turn every bridge test red on a freshly-resolved environment.
+    "ignore:lumenairy .* is NEWER than the last version:RuntimeWarning",
+    # The 3-D mesher's SYMMETRY-REDUCTION hint (optics/ngsolve_layered.py): "this design is c2v
+    # (or c4v), you could set mesh_3d.symmetry='half_x'/'quarter'". The reduction is OPT-IN by
+    # design (never automatic), so this advisory fires on the DEFAULT path of every mirror- or
+    # 4-fold-symmetric design -- i.e. in ordinary FEM tests that are doing nothing wrong.
+    # MEASURED: 2 failures (test_mesh_periodicity, test_shg_fem) under a bare `error`.
+    "ignore:this design is c[24]v at normal incidence:UserWarning",
+    # numba-cuda's OCCUPANCY hint, raised by its own dispatcher (numba_cuda/.../dispatcher.py) on
+    # every launch of the deliberately tiny grids in tests/test_fdtd_cuda.py. A pure performance
+    # advisory about a test fixture, from third-party code, on a path that only exists on a machine
+    # with a CUDA GPU (the whole file skips otherwise -- so CI never sees it and could not have
+    # caught this). MEASURED: 3 failures on this workstation. Matched by message because naming
+    # NumbaPerformanceWarning here would import numba.cuda at pytest startup.
+    "ignore:.*Grid size .* will likely result in GPU under-utilization",
+    # (The temporary `ignore:solve_fem_sourced.*p_down is undefined:UserWarning` exemption that
+    # sat here is GONE: the warn site (optics/solver.py, the lossy-substrate p_down refusal) now
+    # carries the purpose-built FEMDiagnosticWarning category like the solver's other regime
+    # advisories, so tests/conftest.py's conditional `ignore::FEMDiagnosticWarning` covers it and
+    # this list no longer needs a message-scoped special case for it.)
 ]
 
 [tool.ruff]
@@ -51,3 +95,24 @@ line-length = 120
 # imports/vars); the E7xx statement-style family is deliberately excluded (semicolon-compact
 # physics style is the house convention).
 select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# audit T-4: `ruff check .` now RUNS in CI (the `lint` job), so the repo has to be clean under it.
+# The SHIPPED package `dynameta/` was cleared to zero and is gated in full -- 75 of its 157 F401
+# were phantom hits on three pure re-export __init__ facades (now declared via __all__ instead of
+# deleted, since they ARE the public API), 17 were genuinely unused imports (removed), 5 were dead
+# locals (removed / one renamed because the call it binds is a validity check).
+#
+# tests/ and validation/ keep 81 pre-existing hits (7+58 F401, 1+13 F841, 1+1 F811) that are NOT
+# mechanically safe to autofix, so they are scoped OUT rather than green-washed by weakening
+# `select`: the capability-probe idiom (a bare `import devsim` inside a skip guard --
+# tests/test_contact_current.py:23, validation/carriers_3d_multisemi.py:54) reads as an unused
+# import but deleting it deletes the guard, and several unused locals bind a call that is kept for
+# its side effect. Everything ELSE in these trees is gated (E9 syntax errors, F821 undefined names,
+# F-string and comparison defects, ...). Two real defects are parked behind this and want a
+# follow-on: the physical constant shadowed inside an oracle (validation/schrodinger_poisson.py:125
+# rebinds the imported EPS0) and validation/'s own 9 files still calling `np.trapezoid` directly
+# (audit X-1's floor trap, fixed in dynameta/ but not in the oracles). Shrink this list; do not
+# grow it.
+"tests/*.py" = ["F401", "F811", "F841"]
+"validation/*.py" = ["F401", "F811", "F841"]

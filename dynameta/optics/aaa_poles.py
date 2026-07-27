@@ -55,9 +55,14 @@ The SELECTION / FILTERING rule is therefore the SAME in both cases: keep poles w
 conjugate mirror, and for complex analytic data it is a no-op that simply confirms the clean data
 placed every physical pole correctly.  On top of physicality, :func:`find_resonances` rejects
 spurious FROISSART DOUBLETS (a pole with a near-coincident zero, the signature of over-fitting or
-noise) by (i) a residue-magnitude floor -- a Froissart pole nearly cancels against its partner
-zero, so its residue is tiny -- and (ii) a stability test: a genuine resonance pole barely moves
-when the sample set is decimated, whereas a Froissart / noise-driven pole jumps.
+noise) by (i) a pole-zero SCALE-SEPARATION test -- a doublet's zero cancels its pole to ROUNDING
+(~1e-13 of the linewidth-half), decades below any physical pole-zero gap; (ii) a LOCAL
+residue-magnitude floor -- a Froissart pole nearly cancels against its partner zero, so its residue
+is tiny; and (iii) a stability test: a genuine resonance pole barely moves when the sample set is
+decimated, whereas a Froissart / noise-driven pole jumps.  Filter (i) is a scale separation, NOT a
+"physical poles have no nearby zero" rule: a genuine pole-zero gap equals the external-coupling
+fraction ``2 ge/(gi + ge)`` and vanishes for an under-coupled resonance -- see the
+``froissart_frac`` discussion in :func:`find_resonances` (audit Q-6).
 
 References
 ----------
@@ -109,21 +114,14 @@ __all__ = [
 
 
 # ------------------------------------------------------------------------------------------------
-# Quality factor (identical to optics.resonance.pole_q)
+# Quality factor -- ALIAS of optics.resonance.pole_q (audit X-5)
 # ------------------------------------------------------------------------------------------------
-def q_from_pole(omega_tilde) -> float:
-    """Quality factor of a complex pole ``omega_tilde = omega_0 - i*gamma/2``:
-
-        Q = |Re(omega_tilde)| / (2 |Im(omega_tilde)|).
-
-    Returns ``+inf`` for a real (lossless / undamped) pole.  This is byte-identical to
-    :func:`dynameta.optics.resonance.pole_q` -- the single Q convention across the resonance
-    tooling."""
-    w = complex(omega_tilde)
-    im = abs(w.imag)
-    if im == 0.0:
-        return float("inf")
-    return abs(w.real) / (2.0 * im)
+# There is one Q convention and now one implementation of it.  `q_from_pole` and `resonance.pole_q`
+# used to be byte-identical copies under two public names, and their DOCSTRINGS had already drifted
+# (this one documented the `|Re|` the code applies; the other did not).  `q_from_pole` is kept as
+# the spelling this module's own API reads in, but it is the same function object as `pole_q`, so
+# there is exactly one docstring, one convention and nothing left to drift.
+from dynameta.optics.resonance import pole_q as q_from_pole                 # noqa: E402
 
 
 # ------------------------------------------------------------------------------------------------
@@ -424,11 +422,49 @@ def _physical_candidates(result: AAAResult, lo: float, hi: float, band_margin: f
     return out
 
 
+# NOISE-SCALED Froissart threshold (fix-verify W1 kill 4).  A Froissart doublet manufactured by
+# DATA NOISE separates by roughly the noise level, not by rounding: measured on a 4-pole rational
+# + eta * max|f| complex Gaussian noise (25 seeds x eta = 0 .. 1e-3), the spurious pole-zero gaps
+# min|p - z| / |Im p| span [~0.3 q, ~3000 q], where q = max|f - r| / max|f| is the misfit the AAA
+# fit itself reports, while the genuine resonances stay at O(1) (6.7 here).  So the threshold is
+#
+#     eff = clip( GAIN * sqrt(q),  froissart_frac,  _FROISSART_MAX_FRAC ).
+#
+# GAIN = 16 is fixed by requiring the 1e-6-relative-noise case (q ~ 1.0e-5) to land on the 0.05 that
+# empirically rejected every spurious pole there.  The CAP is that same legacy 0.05: the scaled
+# rule interpolates between the clean-data 1e-4 and the old constant and never goes past it, which
+# (a) keeps the threshold below the 0.60..0.97 pole-zero gaps of genuine Fabry-Perot poles even
+# when the fit is very poor, and (b) matters because ``max_error`` is a MAX over samples -- on
+# noisy data a single spurious near-real-axis pole of the approximant can put it O(1) (measured 0.03
+# .. 2.65 on the 0.1%-noise transmittance gate), which uncapped would delete real physics.  On
+# CLEAN data q <= tol (1e-11 by default), so GAIN sqrt(q) <= 5.1e-5, below the 1e-4 floor: nothing
+# changes.
+_FROISSART_NOISE_GAIN = 16.0
+_FROISSART_MAX_FRAC = 0.05
+
+
+def _aaa_misfit(result: AAAResult, f: np.ndarray) -> float:
+    """AAA's own max residual, RELATIVE to the response scale: max|f - r| / max|f|.  This is the
+    noise floor the fit could not descend below (a clean analytic response converges to ~1e-13 or
+    to the requested ``tol``; noisy data plateaus at, or above, the noise level)."""
+    scale = float(np.max(np.abs(np.asarray(f)))) or 1.0
+    err = float(result.max_error)
+    return err / scale if np.isfinite(err) and err > 0.0 else 0.0
+
+
+def _froissart_threshold(result: AAAResult, f: np.ndarray, froissart_frac: float) -> float:
+    """Pole-zero coincidence threshold, scaled up by the AAA misfit and capped (see
+    ``_FROISSART_NOISE_GAIN`` / ``_FROISSART_MAX_FRAC``).  Never below ``froissart_frac``: on clean
+    data this returns exactly the shipped constant."""
+    scaled = min(_FROISSART_NOISE_GAIN * math.sqrt(_aaa_misfit(result, f)), _FROISSART_MAX_FRAC)
+    return max(float(froissart_frac), scaled)
+
+
 def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Optional[float] = None,
                     stability_check: bool = True, tol: float = 1e-11, max_degree: int = 100,
                     band: Optional[Tuple[float, float]] = None, band_margin: float = 0.02,
                     stability_rtol: float = 5e-3, residue_rel_floor: float = 1e-6,
-                    im_atol_rel: float = 1e-9, froissart_frac: float = 0.05,
+                    im_atol_rel: float = 1e-9, froissart_frac: float = 1e-4,
                     broad_warn_frac: float = 0.5) -> List[Resonance]:
     """Extract physical resonances from a real-frequency sweep with spurious-pole filtering.
 
@@ -439,21 +475,56 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
             upper-half conjugate mirror of each pole (see the module docstring); for complex
             analytic ``response`` it merely confirms the clean placement.
       (ii)  FROISSART pole-zero coincidence -- a Froissart doublet is, BY DEFINITION, a pole with a
-            near-coincident zero (the spurious pole nearly cancels against its partner zero).  Its
-            robust signature is GEOMETRIC: the nearest AAA zero lies within
-            ``froissart_frac * |Im(pole)|`` (a tiny fraction of the pole's own linewidth-half).  A
-            genuine resonance -- even a very weakly coupled one with a small residue -- has NO such
-            near-coincident zero (its nearest zero is order the linewidth away or is a real
-            transmission / Fano zero).  This is what separates a spurious doublet from a physically
-            weak pole, which a residue-magnitude floor CANNOT (both have small residues).  Set
-            ``froissart_frac = 0`` to disable.
+            near-coincident zero, and that cancellation is essentially EXACT (it is a rounding-level
+            artefact of over-fitting, not a physical feature).  The filter is a SCALE-SEPARATION
+            test, not a presence/absence test: the nearest AAA zero must lie farther than
+            ``froissart_frac * |Im(pole)|``.  Measured on this module's own Froissart gate
+            (deliberate over-fit, ``tol=0``, ``max_degree=40``), the separations
+            ``min|pole - zero| / |Im(pole)|`` are 5.9e-14 .. 1.6e-13 for the manufactured doublets
+            and 0.60 .. 0.97 for the genuine Fabry-Perot poles -- about THIRTEEN decades apart.
+            The default ``1e-4`` sits ~9 decades above the doublets and ~4 decades below the
+            genuine poles, i.e. in the middle of that void.  Set ``froissart_frac = 0`` to disable.
+
+            This is NOT the rule "a genuine pole never has a nearby zero" -- that claim is FALSE,
+            and believing it is what made the previous ``0.05`` default silently delete PHYSICAL
+            resonances (audit Q-6).  A genuine pole-zero gap is a COUPLING RATIO and can be made
+            arbitrarily small: for a side-coupled single-mode resonator (Haus CMT,
+            ``t = [i(w0 - w) + (gi - ge)/2] / [i(w0 - w) + (gi + ge)/2]`` with intrinsic loss ``gi``
+            and external coupling ``ge``) the pole is ``w0 - i(gi + ge)/2`` and the zero is
+            ``w0 - i(gi - ge)/2``, so
+
+                |pole - zero| / |Im(pole)| = 2 ge / (gi + ge)   ->   0   as ge/gi -> 0,
+
+            the EXTERNAL-COUPLING FRACTION.  Pole-zero coincidence therefore MEANS weak external
+            coupling (an under-coupled / high-``Q_abs`` resonance), which is physics, not
+            spuriousness.  At ``0.05`` the kill condition was ``gi/ge > 39`` and ``find_resonances``
+            returned ``[]`` with no warning; at ``1e-4`` the same sweep recovers the resonance down
+            to ``ge/gi = 1e-4`` (measured ``Q`` 1188.1 at ``ge/gi = 0.01``, 1199.9 at ``1e-4``)
+            while the Froissart gate still removes every manufactured doublet.  The residual cliff
+            is ``ge/gi = froissart_frac / 2`` (5e-5 at the default), and emptying the candidate
+            list now WARNS instead of returning ``[]`` silently.
+
+            NOISE SCALING (fix-verify W1 kill 4).  ``froissart_frac`` is a FLOOR, not the threshold:
+            the constant ``1e-4`` is calibrated to the ROUNDING-level doublets of a clean fit, and
+            on noisy data the doublets separate by roughly the noise instead.  On a 4-pole rational
+            with 1e-6 RELATIVE noise the pole-zero gaps of the noise-manufactured poles reach 3e-2,
+            so a fixed ``1e-4`` admitted 25 spurious resonances over a 25-seed sweep (the old
+            ``0.05`` admitted none).  The threshold is therefore
+            ``clip(16 * sqrt(max|f - r| / max|f|), froissart_frac, 0.05)`` -- AAA's OWN reported
+            misfit is the noise floor it could not descend below, and the cap is the legacy
+            constant, so the rule interpolates between the clean-data ``1e-4`` and the old ``0.05``
+            and never goes past either end.  Clean data (misfit <= ``tol`` ~ 1e-11) keeps the
+            ``1e-4`` behaviour bit for bit; 1e-6-noise data lands back at ~5e-2 and rejects all 25.
+            See ``_FROISSART_NOISE_GAIN`` / ``_FROISSART_MAX_FRAC``.
       (iii) RESIDUE FLOOR -- optional junk guard.  If ``residue_floor`` is given it is an ABSOLUTE
             ``|residue| >= residue_floor`` cut; otherwise the pole's Lorentzian PEAK contribution
             ``|residue| / |Im(pole)|`` must be ``>= residue_rel_floor`` times the LOCAL response
             magnitude near ``Re(pole)``.  The floor is LOCAL (per-pole), NOT relative to the global
             ``max|residue|`` -- the old global rule killed a genuine weak pole merely because a
-            DIFFERENT, dominant resonance carried a huge residue (the pole-zero test above, not the
-            residue, is now the real Froissart discriminator).
+            DIFFERENT, dominant resonance carried a huge residue.  On the Froissart gate (ii) and
+            (iii) are REDUNDANT (the doublets there carry residues ~1e-13 of the genuine poles', so
+            the floor alone removes all of them); they separate on the ATTACK-1 spectrum, where a
+            genuine pole has a tiny residue but no coincident zero.
       (iv)  STABILITY (if ``stability_check``) -- the pole must persist, to within
             ``stability_rtol * |pole|``, when the sample set is DECIMATED (every other sample).  A
             genuine resonance barely moves; a Froissart / noise-driven pole jumps.
@@ -476,8 +547,14 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
     band : (float, float), optional
         Physical band ``(omega_lo, omega_hi)``; defaults to the sampled range.
     froissart_frac : float
-        Pole-zero coincidence threshold as a fraction of the pole's ``|Im|`` (default 0.05); a pole
-        with a zero closer than this is a Froissart doublet.  ``0`` disables the test.
+        FLOOR for the pole-zero coincidence threshold, as a fraction of the pole's ``|Im|``
+        (default ``1e-4``); a pole with a zero closer than the threshold is a Froissart doublet.
+        Calibrated to the ~13-decade void between manufactured doublets (~1e-13) and genuine poles
+        (~1e0), see (ii); it must stay well BELOW the smallest external-coupling fraction
+        ``2 ge/(gi + ge)`` of interest, because that is what the test measures on a genuine
+        resonance.  The threshold actually applied is raised above this floor in proportion to
+        ``sqrt`` of the AAA misfit when the data is noisy (see the NOISE SCALING note in (ii)).
+        ``0`` disables the test entirely.
     broad_warn_frac : float
         Emit a ``RuntimeWarning`` when a surviving pole's FWHM (``2|Im|``) exceeds this fraction of
         the sweep span (default 0.5) -- the resonance nearly fills the window, so its ``Q`` is a
@@ -513,11 +590,22 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
         zeros = np.asarray(res.zeros, dtype=np.complex128)
         zeros = zeros[np.isfinite(zeros)]
         if zeros.size:
+            eff_frac = _froissart_threshold(res, f, float(froissart_frac))
             kept = []
             for p, r in cand:
                 dz = float(np.min(np.abs(zeros - p)))
-                if dz > froissart_frac * abs(p.imag):
+                if dz > eff_frac * abs(p.imag):
                     kept.append((p, r))
+            if not kept:
+                warnings.warn(
+                    "aaa_poles.find_resonances: the Froissart pole-zero filter removed ALL {} "
+                    "in-band candidate pole(s) (effective threshold {:.3e} = froissart_frac {:.3e} "
+                    "scaled by the AAA misfit {:.3e}); returning []. If the response is a genuine "
+                    "UNDER-COUPLED resonance its pole-zero gap 2 ge/(gi + ge) can legitimately sit "
+                    "below the threshold -- lower froissart_frac (or set it to 0) to keep it, and "
+                    "see the froissart_frac note in this docstring.".format(
+                        len(cand), eff_frac, float(froissart_frac),
+                        _aaa_misfit(res, f)), RuntimeWarning, stacklevel=2)
             cand = kept
             if not cand:
                 return []

@@ -17,6 +17,19 @@ rotation angle are read. Convention exp(-i w t), SI, Im(eps) > 0 = loss.
 
 Validated (validation/fdtd_mo_vs_tmm.py) vs (a) per-polarization scalar TMM for a birefringent
 (eps_xx != eps_yy) slab and (b) the circular-eigenmode Jones-TMM Faraday rotation for a gyrotropic slab.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol. This engine implements the 'x'/'y'
+SUBSET (normal incidence: no plane of incidence, so no distinct p-pol mode).
 """
 from __future__ import annotations
 
@@ -27,6 +40,7 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
 from dynameta.optics.fdtd_nd import HAVE_NUMBA, njit, resolve_backend
+from dynameta.optics.fdtd_nd.spec import courant_guard         # audit D-11 (the 8th front end)
 
 
 @dataclass
@@ -216,6 +230,21 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, 
     return eL, eR
 
 
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# `pol` here is the OpticalSpec LAB-AXIS family {'x','y','p'} restricted to its normal-incidence
+# 'x'/'y' subset.  Map, siblings and conversions: dynameta.core.polarization.  Accepted set
+# unchanged; only the silent 'anything-else -> x' fallthrough became a named error.
+def _reject_pol_axis(pol, where: str):
+    """Guard the {'x','y'} subset.  LAZY import, failure path only."""
+    if pol not in ("x", "y"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(
+            pol, "lab_xyp", where=where, param="pol", allowed=("x", "y"),
+            extra="Normal-incidence engine: the source is a LINEAR LAB AXIS, so there is no "
+                  "distinct p-pol mode here (p-pol becomes a separate mode only once a plane of "
+                  "incidence exists).")
+
+
 def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m: float,
                      resolution: int = 60, courant: float = 0.5, n_pad_wave: float = 6.0,
                      settle: float = 14.0, pol: str = "y", source_amp: float = 1.0,
@@ -224,7 +253,21 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     input linearly polarized along `pol` ('x' or 'y'). The two-run reference method gives the COMPLEX
     co-pol (same axis as input) and cross-pol (orthogonal) reflection/transmission; the Faraday angle is
     the major-axis rotation of the transmitted polarization ellipse. backend='numba' JITs the time loop
-    (~same answer to ~1e-12); 'auto'/'cpu' select it when present, else the NumPy reference runs."""
+    (~same answer to ~1e-12); 'auto'/'cpu' select it when present, else the NumPy reference runs.
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} and this engine
+    implements the 'x'/'y' SUBSET (normal incidence -- there is no plane of incidence, hence no
+    distinct p-pol mode). Anything else used to take the 'x' branch silently, including the
+    in-vocabulary 'p' and the plane-of-incidence 's'. Map: dynameta.core.polarization."""
+    _reject_pol_axis(pol, "solve_fdtd_mo_1d")
+    # audit D-11 (wave-5 residual): this is the EIGHTH `courant` front end and the only one the
+    # wave-5 rollout missed -- it builds dt = courant*dz/c exactly like solve_fdtd_1d, so S =
+    # c dt / dz = courant here too and the shared bound applies verbatim. Unguarded it marched an
+    # unstable leapfrog into overflow: with the guard bypassed, courant=1.05 returns NO RAISE and
+    # R/T that are 100 % NaN over all 2134 frequency bins with an EMPTY band mask, and courant=2.0
+    # explodes far enough that the emptied band surfaces as numpy's confusing "zero-size array to
+    # reduction operation fmax" rather than anything naming the CFL bound.
+    courant = courant_guard("solve_fdtd_mo_1d", courant)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)

@@ -63,7 +63,9 @@ def test_liquid_crystal_uniaxial_eigenvalues_are_rotation_invariant():
         eps = lc.eps({"director_angle_rad": th}, LAM)
         assert np.allclose(eps, eps.T)                        # symmetric tensor
         ev = np.sort(np.linalg.eigvals(eps).real)
-        assert np.allclose(ev, np.sort([no ** 2, no ** 2, ne ** 2]), atol=1e-9)
+        # AUDIT T-6: rtol=0.0 -- eigenvalues are O(3); numpy's default rtol=1e-5 would relax this
+        # rotation-invariance gate to ~3e-5 absolute.
+        assert np.allclose(ev, np.sort([no ** 2, no ** 2, ne ** 2]), rtol=0.0, atol=1e-9)
         # tilt mixes x-z: off-diagonal eps_xz = (ne^2-no^2) cos(theta) sin(theta)
         assert eps[0, 2] == pytest.approx((ne ** 2 - no ** 2) * np.cos(th) * np.sin(th), abs=1e-9)
 

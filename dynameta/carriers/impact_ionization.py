@@ -40,7 +40,6 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from dynameta.constants import Q_E
 
 __all__ = ["ChynowethParams", "SILICON_VANOVERSTRAETEN", "impact_generation_edges",
            "substrate_current"]

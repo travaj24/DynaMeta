@@ -2,6 +2,21 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on -- widened the
+ACCEPTED set here by exactly the UNCONDITIONAL aliases: this module's entry points also take
+`'te'`/`'tm'` and mixed case, normalized to `'s'`/`'p'` at the door, because in a planar stack TE is s
+and TM is p by definition of the plane of incidence, at every angle and in every material. No valid
+call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDENT spellings
+(OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
+`normalize_pol`, which demands the azimuth and refuses rather than guess. Read the FIXED-k_par 2-D TE/TM subtlety there
+before carrying a TE label in from elsewhere: 'TE' here is E_y OUT of the simulation plane, and
+the physical angle sweeps with frequency while the s/p label does not.
 """
 from __future__ import annotations
 
@@ -10,7 +25,7 @@ from typing import List, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, T_REF
-from dynameta.optics.fdtd_nd.spec import FDTDLayer
+from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_guard
 from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
@@ -55,7 +70,29 @@ def _ring_time_s(layers) -> float:
     rfft with O(0.1) silent R0/T0 bias (probe: |dT0| = 0.102 vs the TMM oracle for a
     Q~600 line, no warning possible since the band mask checks excitation only). Returns
     the (2/Gamma) ln(1/1e-4) ~ 18.4/Gamma memory of the NARROWEST active Lorentz/gain
-    pole (0.0 when no pole is active -> the legacy window, byte-identical)."""
+    pole (0.0 when no pole is active -> the legacy window, byte-identical).
+
+    THE RAMAN POLE IS DELIBERATELY ABSENT (audit D-10, re-measured 2026-07-26). Its vibrational
+    ADE Q'' + gam_R Q' + W_R^2 Q = W_R^2 E^2 does carry an 18.4/gam_R memory, but the polarization
+    it feeds back is P_R = eps0 chi3R E Q -- PROPORTIONAL TO E -- so once the pulse has left, Q
+    rings on into a field that is already gone and NOTHING reaches the probes. Measured on a
+    strongly driven fixture (chi3R = 1e-22, source_amp = 3e10 V/m, i.e. chi3R E^2 = 0.09 -- far
+    beyond any shipped Raman fixture), tail/peak of the transmitted probe series in the last 2 % of
+    the LEGACY window:
+        Raman layer        2.3e-13   (extending by 18.4/gam_R -> 2.0e-13, and 3.8x the steps)
+        narrow Lorentz     1.8e-3    (the C3-6 case; the extension takes it to 1.4e-8)
+    i.e. the Raman run is already at the numerical floor and the extension buys nothing while
+    multiplying every Raman solve's cost by 2-6x. Do not "complete" this function with a Raman term.
+
+    THE GAIN POLE IS INCLUDED FOR BOTH SIGNS of gain_dN_m3, likewise measured. The ADE's homogeneous
+    coefficients (2 - w^2 dt^2)/den and (dw dt/2 - 1)/den do not contain dN at all -- only the DRIVE
+    -kappa dN dt^2/den does -- so 18.4/dw is the oscillator memory whether the line amplifies or
+    absorbs, and extending the window HELPS an amplifying line (same fixture, transmitted tail/peak
+    at the end of the window: 1.3e-4 legacy -> 9.0e-8 extended). What is true is that with gain the
+    COUPLED field+medium pole is less damped than dw/2, so 18.4/dw is no longer an upper bound: at
+    the extended window the amplifying residue is still 161x the same line's passive residue
+    (9.0e-8 vs 5.6e-10), and above the lasing threshold no finite window converges at all. That is
+    why the front ends warn (see `_window_memory_s`) instead of silently trusting the extension."""
     t_ring = 0.0
     for L in layers:
         if getattr(L, "lorentz_delta_eps", 0.0) != 0.0 and getattr(L, "lorentz_gamma_rad_s", 0.0) > 0.0:
@@ -63,6 +100,322 @@ def _ring_time_s(layers) -> float:
         if getattr(L, "gain_dN_m3", 0.0) != 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0:
             t_ring = max(t_ring, 18.4 / float(L.gain_dw_rad_s))
     return t_ring
+
+
+def _window_memory_s(entry_point, layers, tau) -> float:
+    """`_ring_time_s` + the two window warnings, single-sourced for all five front ends (audit
+    D-10 / D-15: the C3-6 warn block was re-typed verbatim in five places and the amplifying-line
+    caveat had nowhere to live). Returns the same t_ring `_ring_time_s` does, so the callers'
+    `nsteps` arithmetic is unchanged.
+
+    THE GAIN CAVEAT DOES NOT DEPEND ON WHICH POLE WON THE MAX (wave-5 residual). It used to be
+    emitted only for a gain line whose OWN 18.4/dw equalled t_ring, so a stack with a narrower
+    passive Lorentz line -- which sets a LONGER t_ring and therefore the extension -- silenced the
+    caveat completely (measured: [Lorentz gam=1e12, amplifying gain dw=1e13] extended the window and
+    warned C3-6, with no AMPLIFYING warning at all). The caveat is about whether the extended window
+    can be trusted, and an amplifying line makes it untrustworthy no matter which pole sized it: the
+    coupled field+medium pole is less damped than dw/2 for EVERY gain line present, so any of them
+    can still be ringing up at the end of the window. It now fires whenever a gain line exists on an
+    extended window, naming the NARROWEST one (the longest-memory amplifier)."""
+    t_ring = _ring_time_s(layers)
+    base = 200.0 * float(tau)
+    if t_ring > base:
+        import warnings
+        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
+                      "(material memory {:.2e} s > the 200*tau source window; audit "
+                      "C3-6)".format(1.0 + t_ring / base, t_ring), RuntimeWarning, stacklevel=3)
+        amp = [float(L.gain_dw_rad_s) for L in layers
+               if getattr(L, "gain_dN_m3", 0.0) > 0.0 and getattr(L, "gain_dw_rad_s", 0.0) > 0.0]
+        if amp:
+            warnings.warn(
+                "{}: the extended window above contains an AMPLIFYING line (gain_dN_m3 > 0, "
+                "narrowest dw = {:.3e} rad/s -- whether or not that line is the pole that SIZED the "
+                "window), and 18.4/dw is only the bare-oscillator memory there: gain shifts the "
+                "coupled field+medium pole toward zero damping, so the true ring-down is LONGER "
+                "(measured 161x the passive residue at the same extended window) and above the "
+                "lasing threshold no finite window converges. Treat R/T as unconverged unless you "
+                "have checked the tail; audit D-10.".format(entry_point, min(amp)),
+                RuntimeWarning, stacklevel=3)
+    return t_ring
+
+
+# --- absorber thickness + probe placement vs the CPML (audit D-3, wave-3 redesign) --------------
+# WHAT ACTUALLY CORRUPTS R/T. Measured 2026-07-26 on four fixtures (lossless eps=4 slab, backend
+# 'numpy') with this guard bypassed, holding the GEOMETRY fixed and sweeping ONLY npml -- which
+# isolates absorber effects from near-field contamination. The tables live in
+# tests/test_fdtd_seam.py (test_d3_guard_verdict_matches_the_measured_fixtures and
+# test_d3_npml_floor_is_a_hard_raise_below_the_measured_cliff); the headline rows are:
+#
+#  (1) TOO THIN AN ABSORBER -- the mode the pre-wave-3 guard did not test AT ALL. `npml` was never
+#      validated, so npml <= 2 passed silently at (600 nm fixture) R0+T0 up to 1.8387 and (300 nm
+#      fixture) R_flux+T_flux up to 2.9721 -- an 84-197 % energy-budget violation on a LOSSLESS
+#      slab, WORSE than anything the guard did reject. npml=3 still costs 3.2-6.3 %, npml=4 lands
+#      within 0.7-2.0 %, npml>=5 within 0.5 %. Hence a hard floor `_NPML_MIN` = 4 plus a warning
+#      below `_NPML_WARN` = 6.
+#
+#  (2) A PROBE PLANE BURIED IN THE GRADED ABSORBER -- the binding placement constraint. cpml_z
+#      grades sigma as (depth/npml)^3, so burial depth matters far more than "inside/outside":
+#      600 nm fixture (k_pL=11, k_pR=38, nz=50), R_flux+T_flux vs probe depth d:
+#          d = 0 (npml=11): 1.0000     d = 1 (npml=12): 0.9983     d = 2 (npml=13): 0.9836
+#          d = 3 (npml=14): 0.9416     d = 4 (npml=15): 0.8670     d = 9 (npml=20): 0.3052
+#      The predicted one-way attenuation `_pml_atten` tracks that within a factor ~1.5 (d=2:
+#      predicted 1.7 % power deficit vs 1.6 % measured; d=3: 5.1 % vs 5.8 %; d=4: 10.3 % vs 13.3 %),
+#      so the rule is an ATTENUATION budget, not a cell count -- one cell of burial is harmless at
+#      npml=12 (0.13 %) and fatal at npml=4 (10.8 %).
+#
+#  (3) THE SOURCE IS NOT A CORRECTNESS PROBLEM -- and rejecting it was the wave-2 guard's mistake.
+#      R0/T0/R_flux/T_flux are two-run DFT RATIOS against a vacuum reference injected through the
+#      SAME absorber, and the reflected/transmitted wave inherits the same launch attenuation as
+#      the incident wave that produced it, so the attenuation cancels: with the source buried 5-6
+#      cells (npml=11-12) and the probes clear, both narrow-band fixtures return R0+T0 = 1.0000 and
+#      R_flux+T_flux within 2e-4. Burial only costs SNR (a broadband 1.2-1.8 um fixture with the
+#      source 5-8 cells deep scattered its band-edge bins by up to +-1.2 %), so it WARNS. The
+#      terminal case -- the pulse never reaching the probe at all -- is caught by _check_band.
+#
+# Consequence for the callers: the old `k_src >= npml + 2` rule rejected npml=5..12 thin-pad
+# configurations that measure PERFECT, including the library default npml=12 and
+# validation/fdtd_oblique_jax.py GATE D (which passed by exactly one cell).
+_NPML_MIN = 4                                                # hard floor on the CPML thickness (cells)
+_NPML_WARN = 6                                               # below this the budget error is 0.5-2 %
+_PROBE_ATTEN_MAX = 3.0e-3                                    # tolerated one-way amplitude loss at a probe
+
+
+def _pml_atten(depth_cells, npml, m=3.0, R0=1.0e-6):
+    """One-way AMPLITUDE attenuation between the CPML interface and a plane `depth_cells` cells
+    inside the graded absorber (0.0 at or outside the interface).
+
+    cpml_z grades sigma_j = sigma_max (j/npml)^m at depth j cells with
+    sigma_max*dz = -(m+1) ln(R0) / (2 eta0 npml), and its docstring pins the one-way attenuation at
+    exp(-n eta0 Int sigma dz) with sigma ~ 1/n matched to the end medium -- so n cancels and the
+    exponent is a pure function of (depth, npml). Summing the Yee cells the wave crosses:
+
+        a(d, npml) = 1 - exp(-[-(m+1) ln R0 / (2 npml)] * sum_{j=1..d} (j/npml)^m)
+                   = 1 - exp(-27.63 * (d(d+1)/2)^2 / npml^4)          for m=3, R0=1e-6
+
+    `m` / `R0` are cpml_z's own defaults: every solve_* front end calls cpml_z(nz, dz, dt, npml,
+    n_super, n_sub) and never overrides them (pinned by test_d3_atten_model_uses_cpml_z_defaults).
+    The flux extraction's H_x average also reads k-1, i.e. half a cell deeper than the E plane;
+    that half cell is inside the factor-1.5 accuracy of this estimate and is absorbed by the
+    `_PROBE_ATTEN_MAX` margin.
+    """
+    d = int(depth_cells)
+    if d <= 0:
+        return 0.0
+    a = (-(m + 1.0) * np.log(R0) / (2.0 * npml)) * sum((j / float(npml)) ** m
+                                                       for j in range(1, d + 1))
+    return float(1.0 - np.exp(-a))
+
+
+def _max_probe_depth(npml):
+    """Deepest probe burial (cells) whose `_pml_atten` still fits the `_PROBE_ATTEN_MAX` budget:
+    0 for npml <= 9 (one cell already costs 0.42-10.2 % there), 1 at npml=10..16, 2 at 17..23,
+    3 at 24..30, ... -- the budget grows as npml^4 because sigma is graded (depth/npml)^3."""
+    d = 0
+    while _pml_atten(d + 1, npml) <= _PROBE_ATTEN_MAX:
+        d += 1
+    return d
+
+
+def _check_probe_placement(entry_point, k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution):
+    """audit D-3: refuse an absorber too thin to absorb, or an R/T probe plane buried in it.
+
+    Two hard rules and one warning (see the module-level block above for the measured evidence):
+
+      * `npml >= _NPML_MIN` -- nothing else checked the absorber itself.
+      * both probe planes must clear the graded absorber to within `_PROBE_ATTEN_MAX` of one-way
+        amplitude attenuation. cpml_z puts the low-z grading on cells 0..npml-1 (depth
+        npml - k, zero AT k = npml) and the high-z grading on cells nz-npml..nz-1 (depth
+        k - (nz-1-npml)), so the burial depths are `npml - k_pL` and `k_pR - (nz-1-npml)`.
+      * a source inside the absorber only WARNS: the two-run ratio cancels its launch attenuation.
+
+    Every front end places k_src / k_pL / k_pR as FRACTIONS OF THE Z PAD (0.35 pad, 0.7 pad, and
+    0.3 pad past the structure) while `npml` is a fixed CELL count, so a thin pad (small
+    `n_pad_wave`, or a coarse `resolution`) slides them into the absorber. Both probes bind at the
+    SAME pad depth -- k_pL - npml and (nz-1-npml) - k_pR are both 0.7*pad/dz - npml -- so one
+    number, `0.7 * pad/dz >= npml - _max_probe_depth(npml)`, is the whole placement contract, and
+    the message inverts it onto each knob.
+    """
+    npml = int(npml)
+    if npml < _NPML_MIN:
+        raise ValueError(
+            "{}: npml={} is too thin a CPML -- the absorber itself, not the probe placement, then "
+            "dominates the error. Measured on a LOSSLESS eps=4 slab with the probes fully clear: "
+            "npml=1 gives R_flux+T_flux up to 2.97, npml=2 up to 1.46 (R0+T0 up to 1.84), npml=3 "
+            "still 3.2-6.3 % off; npml>=4 lands within 2 % and npml>=5 within 0.5 % (audit D-3). "
+            "Use npml >= {} (>= 8 recommended); the Roden-Gedney polynomial grading needs several "
+            "cells before the discretized profile absorbs anything.".format(
+                entry_point, npml, _NPML_MIN))
+    if npml < _NPML_WARN:
+        import warnings
+        warnings.warn(
+            "{}: npml={} is a thin CPML -- measured energy-budget error on a lossless slab is "
+            "0.5-2.0 % at npml=4-5 versus <0.1 % at npml>=8 (audit D-3). Raise npml if you need "
+            "better than ~1 %.".format(entry_point, npml), RuntimeWarning, stacklevel=3)
+
+    d_lo = npml - k_pL                                       # cells the R probe sits inside the low-z PML
+    d_hi = k_pR - (nz - 1 - npml)                            # cells the T probe sits inside the high-z PML
+    a_lo, a_hi = _pml_atten(d_lo, npml), _pml_atten(d_hi, npml)
+    bad = []
+    if a_lo > _PROBE_ATTEN_MAX:
+        bad.append("left (R) probe k_pL={} is {} cell(s) inside the low-z CPML (npml={}) -> "
+                   "{:.2%} one-way amplitude attenuation".format(k_pL, d_lo, npml, a_lo))
+    if a_hi > _PROBE_ATTEN_MAX:
+        bad.append("right (T) probe k_pR={} is {} cell(s) inside the high-z CPML (nz={}, npml={}) "
+                   "-> {:.2%} one-way amplitude attenuation".format(k_pR, d_hi, nz, npml, a_hi))
+    if bad:
+        # 0.7 * (pad/dz) is the single scale BOTH probe clearances reduce to (see the docstring).
+        d_max = _max_probe_depth(npml)
+        p_cells = pad / dz
+        p_need = (npml - d_max) / 0.7
+        scale = p_need / p_cells if p_cells > 0 else float("inf")
+        npml_ok = 0
+        for n in range(_NPML_MIN, npml):                     # largest npml this pad can still carry
+            if n - _max_probe_depth(n) <= 0.7 * p_cells:
+                npml_ok = n
+        fix_npml = ("OR lowering npml to <= {} (currently {})".format(npml_ok, npml) if npml_ok
+                    else "(npml cannot help: even the floor npml={} would not clear this pad)"
+                         .format(_NPML_MIN))
+        raise ValueError(
+            "{}: {} -- the R/T probe planes are placed as fractions of the z pad and have fallen "
+            "INSIDE the CPML, where the graded absorber damps the recorded field and R/T degrade "
+            "SILENTLY (measured on a LOSSLESS slab with both probes at the same depth d: "
+            "R_flux+T_flux = 0.9836 at d=2 / 0.87 % predicted attenuation, 0.8670 at d=4 / 5.3 %, "
+            "0.3052 at d=9 / 29.5 %; audit D-3). The tolerance is {:.2%}, "
+            "i.e. at npml={} a probe may be at most {} cell(s) deep. The pad is {:.1f} cells and "
+            "needs >= {:.1f}: fix by raising n_pad_wave to >= {:.2f} (currently {:g}) at "
+            "resolution={:g}, OR raising resolution to >= {:d} (currently {:g}) at "
+            "n_pad_wave={:g}, {}.".format(
+                entry_point, "; ".join(bad), _PROBE_ATTEN_MAX, npml, d_max, p_cells, p_need,
+                n_pad_wave * scale, n_pad_wave, resolution,
+                int(np.ceil(resolution * scale)), resolution, n_pad_wave, fix_npml))
+
+    d_src = npml - k_src                                     # informational only: the ratio cancels it
+    if d_src > 0:
+        import warnings
+        warnings.warn(
+            "{}: the soft source k_src={} sits {} cell(s) inside the low-z CPML (npml={}), so the "
+            "launch leaves the absorber {:.0%} down in amplitude. This is NOT rejected: R0/T0/"
+            "R_flux/T_flux are two-run DFT ratios against a vacuum reference injected through the "
+            "SAME absorber, so the launch attenuation cancels (measured: both narrow-band "
+            "fixtures return R0+T0=1.0000 with the source 5-6 cells deep and the probes clear). "
+            "What it does cost is SNR -- a broadband 1.2-1.8 um fixture with the source 5-8 cells "
+            "deep scattered its band-edge bins by up to +-1.2 %. Raise n_pad_wave / resolution (or "
+            "lower npml) if you need better than ~1 % there; audit D-3.".format(
+                entry_point, k_src, d_src, npml, _pml_atten(d_src, npml)),
+            RuntimeWarning, stacklevel=3)
+
+
+def _check_band(entry_point, band, f_min, f_max):
+    """audit D-3 (sub-mode): refuse an EMPTY well-excited band mask instead of returning silent zeros.
+
+    With the source buried deep enough in the CPML the injected pulse never reaches the reference
+    probe, so `np.abs(mL_inc) > 0.05 * max(...)` selects NOTHING (measured: band.sum() == 0 of 2617
+    bins, no raise). Every downstream consumer then dies far from the cause with an opaque
+    `ValueError: zero-size array to reduction operation minimum` on `result.R0[result.band].min()`.
+
+    This is now the HARD backstop for a buried source: `_check_probe_placement` only warns about
+    one (its launch attenuation cancels in the two-run ratio), so the terminal case -- no signal at
+    all -- has to be caught here. Called from all six front ends including solve_fdtd_1d, whose Mur
+    ABCs have no absorber; there an empty band means the source band and lambda_min/lambda_max
+    disagree.
+    """
+    if not np.any(band):
+        raise ValueError(
+            "{}: the well-excited frequency band is EMPTY ({} rfft bins, none above the 5%-of-peak "
+            "incident-amplitude threshold in [{:.4g}, {:.4g}] Hz) -- the source pulse never reached "
+            "the reference probe. This is the deep-overlap mode of audit D-3: check that the source "
+            "and probe planes clear the CPML (raise n_pad_wave / resolution, or lower npml), and "
+            "that lambda_min_m/lambda_max_m bracket the source band.".format(
+                entry_point, int(np.size(band)), f_min, f_max))
+
+
+_NEG_FLUX_TOL = 1.0e-6                                       # ignore sign noise on a ~0 R/T bin
+
+
+def _flux_ratios(entry_point, P_inc, P_refl, P_trans, band):
+    """audit D-9: the SIGNED (R_flux, T_flux) from the signed z-Poynting integrals, + an in-band
+    sign-flip warning.
+
+    `_flux`/`_flux3d` return the signed +z power per frequency, and the physical signs are fixed:
+    the incident reference and the transmitted field carry net FORWARD power (P_inc > 0,
+    P_trans > 0) while the scattered field at the ENTRANCE plane carries net BACKWARD power
+    (P_refl < 0). Taking `np.abs` of each turned a physically impossible result -- net backward
+    power at the exit plane, net forward power in the reflected field -- into a positive,
+    plausible-looking ratio, destroying exactly the diagnostic a user needs when audit D-2/D-3 is
+    biting or a gain layer is above threshold.
+
+    The convention here is the SAME NUMBER in the physical case: R_flux = -P_refl/P_inc and
+    T_flux = P_trans/P_inc are BIT-IDENTICAL to abs(P)/abs(P_inc) whenever the signs are the
+    physical ones (IEEE negation is exact), so every shipped R/T is unchanged; only an unphysical
+    bin now comes back NEGATIVE instead of disguised as positive. `_NEG_FLUX_TOL` keeps the warning
+    off the sign noise of a bin whose true R (or T) is ~0.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R_flux = -P_refl / P_inc
+        T_flux = P_trans / P_inc
+    bad = []
+    b = np.asarray(band, dtype=bool)
+    if np.any(b):
+        for name, arr in (("R_flux", R_flux), ("T_flux", T_flux)):
+            v = np.asarray(arr)[b]
+            v = v[np.isfinite(v)]
+            if v.size and float(np.min(v)) < -_NEG_FLUX_TOL:
+                bad.append("{} reaches {:.4g} on {} in-band bin(s)".format(
+                    name, float(np.min(v)), int(np.sum(v < -_NEG_FLUX_TOL))))
+        if np.any(np.asarray(P_inc)[b] <= 0.0):
+            bad.append("the incident reference itself carries net BACKWARD power in-band")
+    if bad:
+        import warnings
+        warnings.warn(
+            "{}: the Poynting flux has a physically impossible SIGN in-band ({}) -- net backward "
+            "power at the exit plane, or net forward power in the scattered field at the entrance "
+            "plane. This used to be hidden by an abs() on both the numerator and the denominator "
+            "(audit D-9). Usual causes: probe planes inside the CPML or too thin an absorber (audit "
+            "D-3), an evanescent/near-cutoff order (audit D-2), or a gain layer above threshold."
+            .format(entry_point, "; ".join(bad)), RuntimeWarning, stacklevel=3)
+    return R_flux, T_flux
+
+
+def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub):
+    """audit D-6: `lateral_eps_inf` REPLACES the whole eps_inf grid, so the painter owns the pads.
+
+    The 2-D comment used to say the pattern is "applied in the structure region"; it is not (and the
+    3-D twin behaves the same way -- only fdtd_seam.make_structured_lateral, which paints the pads
+    itself, documented the real contract). A caller who follows the old comment and returns
+    `np.ones((nx, nz))` outside the structure LOSES the superstrate/substrate entirely, while
+
+      * the incident reference run is still homogeneous n_super,
+      * the CPML is still impedance-matched to n_super / n_sub per end,
+      * T0 is still multiplied by the n_sub/n_super flux ratio,
+
+    so R/T come back silently mis-normalized. Rather than let that pass, require the pads to carry
+    the declared end media (exactly what make_structured_lateral does). The check is vacuous for the
+    default vacuum end media only if the painter really did leave ones there -- which is the point:
+    it also catches a painter that floods the WHOLE grid with the structure index."""
+    eps = np.asarray(eps_grid, dtype=float)
+    lo = zc < pad                                            # superstrate pad
+    hi = zc >= pad + z_struct                                # substrate pad
+    bad = []
+    for mask, want, side, knob in ((lo, float(n_super) ** 2, "superstrate (low-z)", "n_super"),
+                                   (hi, float(n_sub) ** 2, "substrate (high-z)", "n_sub")):
+        if not np.any(mask):
+            continue
+        block = eps[:, mask]
+        if not np.allclose(block, want, rtol=1e-9, atol=1e-12):
+            bad.append("{} pad carries eps_inf in [{:.6g}, {:.6g}] but {}={:g} demands {:.6g}"
+                       .format(side, float(block.min()), float(block.max()), knob,
+                               float(n_super if knob == "n_super" else n_sub), want))
+    if bad:
+        raise ValueError(
+            "{}: `lateral_eps_inf` REPLACES THE WHOLE (nx, nz) grid -- pads included -- so the "
+            "painter must fill the z pads with the END-MEDIA permittivity, and this one did not: "
+            "{}. The incident reference run, the per-end CPML match and T0's n_sub/n_super flux "
+            "factor all still assume the declared end media, so R/T would come back silently "
+            "mis-normalized (audit D-6). Fill zc < pad with n_super**2 and zc >= pad + z_struct "
+            "with n_sub**2 inside your painter (optics.fdtd_seam.make_structured_lateral does this "
+            "for you), or leave them at 1.0 for the default vacuum end media."
+            .format(entry_point, "; ".join(bad)))
 
 
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
@@ -130,7 +483,11 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
     building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
     grating, else the stack is laterally
-    UNIFORM (and the result reduces to the 1D solver / TMM). Returns both the 0-order (specular, x-mean)
+    UNIFORM (and the result reduces to the 1D solver / TMM). `lateral_eps_inf` REPLACES THE WHOLE GRID,
+    z PADS INCLUDED (same as solve_fdtd_3d), so the painter OWNS the super/substrate pads and must fill
+    zc < pad with n_super**2 and zc >= pad + z_struct with n_sub**2 -- optics.fdtd_seam
+    .make_structured_lateral does it for you, and a painter that does not is now REFUSED rather than
+    silently mis-normalized (audit D-6). Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
     n_super / n_sub (default 1 = vacuum) are the lossless semi-infinite superstrate / substrate indices
@@ -141,12 +498,19 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
     backend selects the compute kernel (see available_backends()): 'auto' (default-fastest CPU present),
     'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
-    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. All backends are byte-for-byte equivalent on
-    R/T (validation/fdtd_2d_reduces.py GATE D); xp is an advanced override for a custom array module."""
+    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. Every backend AGREES WITH THE NUMPY
+    REFERENCE TO THE FLOAT64 ROUNDING FLOOR on R/T, NOT bit-for-bit (audit D-7): the numba/CUDA kernels
+    factor the E-update constant differently (`e0dt*eps_inf` vs `EPS0*eps_eff/dt`) and carry
+    fastmath=True, which licenses reassociation. What is actually GATED: max|dR|,max|dT| < 1e-9 on a
+    non-dispersive lossless slab (validation/fdtd_2d_reduces.py GATE D) and < 1e-12 with the R15/R20
+    chi2/Raman/gain nonlinearities active (validation/fdtd_nonlinear_backends.py GATES A/B/E,
+    validation/fdtd_gpu_nonlinear.py on real hardware); 3-D backend parity is
+    validation/fdtd_3d_reduces.py. xp is an advanced override for a custom array module."""
     if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM guard
         raise NotImplementedError("solve_fdtd_2d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
                                   "for an absorbing incidence/exit medium).".format(n_super, n_sub))
+    courant = courant_guard("solve_fdtd_2d", courant)        # audit D-11 (CFL bound, shared)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
@@ -231,10 +595,18 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                 hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
         z += L.thickness_m
     if lateral_eps_inf is not None:
-        # a laterally-structured grating: overwrite eps_inf in the structure band with the (nx, *)
-        # lateral pattern (callable(nx,nz)->array, or an (nx,nz) array applied in the structure region)
+        # a laterally-structured grating: the pattern REPLACES THE WHOLE (nx, nz) eps_inf grid, PADS
+        # INCLUDED -- not just the structure band (audit D-6: the comment here used to say "applied in
+        # the structure region", which is what a caller reads before writing the painter, and only
+        # fdtd_seam.make_structured_lateral knew the real contract). Same semantics as solve_fdtd_3d.
+        # The painter therefore OWNS the n_super/n_sub pads and must fill them with n_super**2 /
+        # n_sub**2 -- the two lines above that did so are discarded here -- while the incident
+        # reference run, the per-end CPML match and T0's n_sub/n_super flux factor all still assume
+        # the declared end media. `_check_lateral_pads` turns that from a silent mis-normalization
+        # into a raise; make_structured_lateral already paints the pads for you.
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
+        _check_lateral_pads("solve_fdtd_2d", eps_inf, zc, pad, z_struct, n_super, n_sub)
         # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) BEFORE this override. If the
         # lateral pattern's peak index exceeds the sizing index, dz is too coarse and R/T are silently
         # under-resolved. Raise rather than mis-solve -- size `layers` eps_inf to the pattern's max index
@@ -260,16 +632,12 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_2d", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
 
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s > the 200*tau source window; audit "
-                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
-                      RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_2d", layers, tau)  # audit C3-6 pole memory + D-10 caveat
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -373,13 +741,14 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         t0c = np.conj(mTrans / mR_inc) * np.exp(1j * k0 * (n_sub * z_struct
                                                            + (n_super - n_sub) * (k_pR * dz - pad)))
     # ---- TOTAL R/T from the Poynting flux (all diffraction orders) ----
-    P_inc = _flux(eyL_i, hxL_i)
-    P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i)
-    P_trans = _flux(eyR_t, hxR_t)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        R_flux = np.abs(P_refl) / np.abs(P_inc)
-        T_flux = np.abs(P_trans) / np.abs(P_inc)
+    P_inc = _flux(eyL_i, hxL_i, dt)                          # dt: half-timestep H de-stagger (D-2)
+    P_refl = _flux(eyL_t - eyL_i, hxL_t - hxL_i, dt)
+    P_trans = _flux(eyR_t, hxR_t, dt)
     band = (f >= f_min) & (f <= f_max) & (np.abs(mL_inc) > 0.05 * np.max(np.abs(mL_inc)))
+    _check_band("solve_fdtd_2d", band, f_min, f_max)         # audit D-3 sub-mode
+    # audit D-9: signed ratios (bit-identical to the old abs()/abs() for physical signs) + the
+    # in-band sign-flip warning. Ordered after `band` because the check is an IN-BAND statement.
+    R_flux, T_flux = _flux_ratios("solve_fdtd_2d", P_inc, P_refl, P_trans, band)
     # OPT-IN (roadmap 3.1): expose the exit/entry-plane E_y + H_x x-lines already recorded above, as
     # copies. Purely additive -- R0/T0/R_flux/T_flux/band/r0/t0 are computed identically whether or not
     # the trace is attached, so return_time_trace=False (default) is byte-identical to the legacy path.
@@ -402,6 +771,33 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 
 
 
+# ---- polarization vocabulary (audit V-8) --------------------------------------------------------
+# This solver speaks the plane-of-incidence {'s', 'p'} and glosses them TE / TM.  Read the
+# fixed-k_par TE/TM subtlety in dynameta.core.polarization before carrying a TE label in from
+# elsewhere: 'TE' here means E_y OUT of the 2-D (x, z) simulation plane (the opposite waveguide
+# convention exists), and because k_par is held FIXED across the band the PHYSICAL angle sweeps
+# with frequency -- the s/p label does not, but the angle it refers to does (read result.theta_deg,
+# not the angle_deg you passed).  Accepted set unchanged.
+_POL_2D_GLOSS = ("Here 's' is glossed TE (E_y out of the 2-D plane) and 'p' TM (H_y out of "
+                 "plane) -- and 'te'/'tm' are ACCEPTED as unconditional aliases in THAT sense "
+                 "(acceptance unification (b)). The opposite 2-D convention (TE = E in-plane) is "
+                 "common in waveguide literature: the alias is not a licence to carry a label in "
+                 "from a convention that means something else by it.")
+
+
+def _reject_pol(pol, where: str):
+    """Raise the shared V-8 vocabulary error.  LAZY import, failure path only."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, "sp", where=where, param="pol", extra=_POL_2D_GLOSS)
+
+
+def _accept_pol(pol, where: str) -> str:
+    """ACCEPTANCE UNIFICATION (b): normalize 'te'/'tm'/mixed case to 's'/'p', or raise.  Reached
+    only when `pol` is not already 's'/'p', so a valid call is bit-identical and pays nothing."""
+    from dynameta.core.polarization import accept_pol
+    return accept_pol(pol, "sp", where=where, param="pol", extra=_POL_2D_GLOSS)
+
+
 def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_deg: float,
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
@@ -416,7 +812,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     angle_deg=0 reduces to the normal-incidence solver. backend selects the TE kernel (numpy/numba); TM is
     the NumPy reference."""
     if pol not in ("s", "p"):
-        raise ValueError("pol must be 's' (TE) or 'p' (TM); got {!r}".format(pol))
+        pol = _accept_pol(pol, "solve_fdtd_2d_oblique")                 # audit V-8 / unification (b)
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
         raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
                                   "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")
@@ -430,6 +826,10 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
             "solve_fdtd_2d_oblique: the oblique kernel carries no {} terms -- they would be "
             "silently ignored (audit C5-7); use the normal-incidence solver or split the "
             "problem.".format("/".join(_dropped)))
+    # audit D-1: hot_carrier cannot join `_dropped` (its sentinel is None, not 0.0, so the
+    # `!= 0.0` test would fire on every passive layer); guarded by the shared spec helper.
+    hot_carrier_guard("solve_fdtd_2d_oblique", layers)
+    courant = courant_guard("solve_fdtd_2d_oblique", courant)   # audit D-11
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -457,15 +857,11 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
     k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    _check_probe_placement("solve_fdtd_2d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
+                           n_pad_wave, resolution)          # audit D-3
     tau = 1.0 / (np.pi * (f_max - f_min))
     t0 = settle * tau
-    t_ring = _ring_time_s(layers)                            # audit C3-6: pole memory
-    if t_ring > 200 * tau:
-        import warnings
-        warnings.warn("FDTD window extended {:.1f}x for a narrow Lorentz/gain line "
-                      "(material memory {:.2e} s > the 200*tau source window; audit "
-                      "C3-6)".format(1.0 + t_ring / (200 * tau), t_ring),
-                      RuntimeWarning, stacklevel=2)
+    t_ring = _window_memory_s("solve_fdtd_2d_oblique", layers, tau)   # audit C3-6 + D-10
     nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
     tgrid = np.arange(nsteps) * dt
     src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
@@ -507,6 +903,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # warn when the mask removes otherwise-excited in-band points so the truncation is
     # visible rather than silent.
     _excited = (f >= f_min) & (f <= f_max) & (np.abs(inc_L) > 0.05 * np.max(np.abs(inc_L)))
+    # audit D-3 sub-mode: gate the EXCITATION mask only -- the grazing (sin_t) cut below may
+    # legitimately empty the trusted band at a large angle, and it already warns when it does.
+    _check_band("solve_fdtd_2d_oblique", _excited, f_min, f_max)
     band = _excited & (sin_t < 0.95)
     _cut = _excited & (sin_t >= 0.95)
     if np.any(_cut):

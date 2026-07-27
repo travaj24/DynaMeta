@@ -7,24 +7,38 @@ GATE A (weak-anchoring dynamics -> static): LCDynamics with finite W held at a f
         the SAME profile (surface + midplane tilt) as the static director_profile_bvp(W) -- the surface
         torque balance with surface viscosity gamma_s has the static Rapini-Papoular BC as its fixed point.
 GATE B (backflow): backflow SPEEDS UP the switching (rise/decay times shorter than no-backflow); the
-        effective rotational viscosity gamma1_eff(theta) = gamma1 - g^2/eta_shear is < gamma1; and
+        effective rotational viscosity gamma1_eff(theta) = gamma1 - m^2/eta is < gamma1; and
         alpha2 = alpha3 = 0 reproduces the no-backflow result byte-for-byte. (The local model OVERESTIMATES
         the speedup vs the full no-slip nonlocal flow; the direction + off-limit are the robust checks.)
+GATE D (Leslie/Miesowicz anchors -- AUDIT C-2 + N4): with m(theta) = alpha3 sin^2 - alpha2 cos^2 and the
+        theta-dependent Miesowicz eta(theta), gamma1_eff/gamma1 must be ~0.99 PLANAR and ~0.19 HOMEOTROPIC
+        for 5CB (the shipped swapped coefficients gave exactly the complementary profile), the flow-
+        alignment angle must be 10.96 deg, and Parodi's relation must return the MEASURED eta_c = 0.1052
+        Pa s from the measured eta_b = 0.0204 Pa s.
+GATE E (backflow magnitude -- AUDIT C-2 re-grade): a NEAR-THRESHOLD planar cell must show no enhancement
+        (x1.00; the swapped coefficients reported x2.44 there -- a pure artefact), while a STRONGLY DRIVEN
+        cell keeps a REAL x1.34-1.46 enhancement. "Pure artefact" is valid only near planar.
 
 Run: python -m validation.lc_dynamics_anchoring_backflow
 """
 import os
 import sys
 import math
+import warnings
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.carriers.lc_dynamics import LCDynamics
-from dynameta.carriers.lc_director import director_profile_bvp, n_eff_from_theta_profile
+from dynameta.carriers.lc_director import (director_profile_bvp, n_eff_from_theta_profile,
+                                           freedericksz_threshold_V)
 
 THB = math.radians(89.9)
+# 5CB Leslie coefficients: the module defaults (flow-alignment angle 10.96 deg) and the literature set.
+A2, A3 = -0.08, -0.003
+G1_LESLIE = A3 - A2                     # 0.077 Pa s -- the Leslie identity gamma1 = alpha3 - alpha2
+A2_LIT, A3_LIT = -0.0812, -0.0036
 
 
 def main():
@@ -47,14 +61,17 @@ def main():
                               math.degrees(th_dyn[th_dyn.size // 2]), math.degrees(th_st[th_st.size // 2]),
                               dmax, "OK" if g_a else "FAIL"), flush=True)
 
-    # GATE B: backflow speeds up switching; alpha2=alpha3=0 reproduces no-backflow
-    base = dict(K11=17e-12, K33=18e-12, gamma1=0.085, eps_para=18.7, eps_perp=4.0, theta_b_rad=THB,
+    # GATE B: backflow speeds up switching; alpha2=alpha3=0 reproduces no-backflow.
+    # RE-BASELINED for AUDIT C-2/N4: gamma1 is now the Leslie-consistent alpha3 - alpha2 = 0.077 Pa s
+    # (was 0.085, a 10.4% violation of the identity that the solver now warns about), the coupling is
+    # m = alpha3 sin^2 - alpha2 cos^2, and eta is the theta-dependent Miesowicz viscosity.
+    base = dict(K11=17e-12, K33=18e-12, gamma1=G1_LESLIE, eps_para=18.7, eps_perp=4.0, theta_b_rad=THB,
                 geometry="planar", d_planar=1e-6, field_model="uniform", n_o=1.56, n_e=1.92, nz=81)
     pk = dict(V0=2.0, Ton=3e-3, T_end=9e-3, n_t=200)
     rno = LCDynamics(**base).simulate_pulse(**pk)
-    rbf = LCDynamics(include_backflow=True, alpha2_Pa_s=-0.08, alpha3_Pa_s=-0.003, eta_shear_Pa_s=0.08,
+    rbf = LCDynamics(include_backflow=True, alpha2_Pa_s=A2, alpha3_Pa_s=A3,
                      **base).simulate_pulse(**pk)
-    rz = LCDynamics(include_backflow=True, alpha2_Pa_s=0.0, alpha3_Pa_s=0.0, eta_shear_Pa_s=0.08,
+    rz = LCDynamics(include_backflow=True, alpha2_Pa_s=0.0, alpha3_Pa_s=0.0,
                     **base).simulate_pulse(**pk)
     faster = (rbf.rise_10_90_s < rno.rise_10_90_s) and (rbf.decay_90_10_s < rno.decay_90_10_s)
     off_identical = (abs(rz.rise_10_90_s - rno.rise_10_90_s) < 1e-9) and \
@@ -91,7 +108,53 @@ def main():
               neff_reported, neff_state, consistent, math.degrees(float(th_final[0])), neff_repin,
               discriminates, "OK" if g_c else "FAIL"), flush=True)
 
-    ok = g_a and g_b and g_c
+    # GATE D: Leslie/Miesowicz anchors (AUDIT C-2 coupling swap + N4 theta-dependent eta)
+    lc = LCDynamics(include_backflow=True, alpha2_Pa_s=A2, alpha3_Pa_s=A3, **base)
+    lit = LCDynamics(include_backflow=True, alpha2_Pa_s=A2_LIT, alpha3_Pa_s=A3_LIT,
+                     **{**base, "gamma1": A3_LIT - A2_LIT})
+    r_pl = float(lc.gamma1_eff_of_theta(0.5 * math.pi)) / lc.gamma1
+    r_ho = float(lc.gamma1_eff_of_theta(0.0)) / lc.gamma1
+    r_pl_l = float(lit.gamma1_eff_of_theta(0.5 * math.pi)) / lit.gamma1
+    r_ho_l = float(lit.gamma1_eff_of_theta(0.0)) / lit.gamma1
+    p_L = math.degrees(lc.flow_alignment_angle_rad())
+    eta_c_lit = lit.eta_c_effective_Pa_s()
+    g_d = (abs(r_pl - 0.99) < 0.05 * 0.99 and abs(r_ho - 0.19) < 0.05 * 0.19
+           and abs(r_pl_l - 0.99) < 0.05 * 0.99 and abs(r_ho_l - 0.19) < 0.05 * 0.19
+           and abs(p_L - 10.96) < 0.05 and abs(eta_c_lit - 0.1052) < 1e-6
+           and abs(float(lit.eta_shear_of_theta(0.5 * math.pi)) - 0.0204) < 1e-9)
+    print("[db] D Leslie/Miesowicz anchors: gamma1_eff/gamma1 planar={:.4f}/{:.4f} (~0.99), homeotropic="
+          "{:.4f}/{:.4f} (~0.19) [module/literature 5CB]; flow-alignment {:.3f} deg (10.96); Parodi "
+          "eta_c={:.4f} Pa s (measured 0.1052) -> {}".format(r_pl, r_pl_l, r_ho, r_ho_l, p_L,
+                                                             eta_c_lit, "OK" if g_d else "FAIL"),
+          flush=True)
+
+    # GATE E: backflow MAGNITUDE -- near-planar cells lose the (artefactual) enhancement, strongly
+    # driven cells keep a real one. The shipped oracle cell's gamma1 = 0.085 is kept for the strong-
+    # drive row so the number is directly comparable to the C-2 re-grade's ~1.46x (it also trips the
+    # Leslie-identity warning, which is captured and reported rather than suppressed).
+    Vth = freedericksz_threshold_V(17e-12, 18.7 - 4.0)
+    pk_nt = dict(V0=1.10 * Vth, Ton=10e-3, T_end=30e-3, n_t=300)
+    rno_nt = LCDynamics(**base).simulate_pulse(**pk_nt)
+    rbf_nt = LCDynamics(include_backflow=True, alpha2_Pa_s=A2, alpha3_Pa_s=A3,
+                        **base).simulate_pulse(**pk_nt)
+    x_nt = rno_nt.rise_10_90_s / rbf_nt.rise_10_90_s
+    base85 = {**base, "gamma1": 0.085}
+    pk_hi = dict(V0=5.0, Ton=1e-3, T_end=5e-3, n_t=1200)
+    rno_hi = LCDynamics(**base85).simulate_pulse(**pk_hi)
+    with warnings.catch_warnings(record=True) as wrec:
+        warnings.simplefilter("always")
+        rbf_hi = LCDynamics(include_backflow=True, alpha2_Pa_s=A2, alpha3_Pa_s=A3,
+                            **base85).simulate_pulse(**pk_hi)
+    warned = any("Leslie identity" in str(w.message) for w in wrec)
+    x_hi_r = rno_hi.rise_10_90_s / rbf_hi.rise_10_90_s
+    x_hi_d = rno_hi.decay_90_10_s / rbf_hi.decay_90_10_s
+    g_e = (abs(x_nt - 1.0) < 2e-2) and (1.34 < x_hi_r < 1.46) and (1.34 < x_hi_d < 1.46) and warned
+    print("[db] E backflow magnitude: near-threshold ({:.2f} V_th) rise x{:.4f} (~1.000, swapped coeffs "
+          "gave x2.44); strongly driven ({:.2f} V_th) rise x{:.4f} / decay x{:.4f} (re-grade band "
+          "1.34-1.46); inconsistent-gamma1 warning raised={} -> {}".format(
+              1.10, x_nt, 5.0 / Vth, x_hi_r, x_hi_d, warned, "OK" if g_e else "FAIL"), flush=True)
+
+    ok = g_a and g_b and g_c and g_d and g_e
     print("[db] *** LC WEAK-ANCHORING DYNAMICS + BACKFLOW: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

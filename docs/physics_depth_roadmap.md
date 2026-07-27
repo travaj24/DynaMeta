@@ -132,9 +132,12 @@ is now EXPERIMENTAL (cef01d9), parked. The corrections are folded into the lines
 
 Still deferred (documented): DG oxide-interface hard wall + bipolar -- no longer unstarted:
 `setup_dg_hard_wall` exists EXPERIMENTAL (commit cef01d9) as contact-row pins, parked (Newton
-stalls / DEVSIM convergence failure on the log-singular boundary layer); its failing WIP gate
-suite `validation/_dg_hard_wall_wip.py` is underscore-excluded from run_all; bipolar twin queued
-after. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
+stalls / DEVSIM convergence failure on the log-singular boundary layer). Its discrete mechanics
+(u-floor pin, n = u^2 wall row, ramped Lambda pin) are now GATED in
+`tests/test_density_gradient.py::test_dg_hard_wall_pins_the_wall_rows`; the four physics gates the
+continuation plan must clear live in that test's docstring (audit X-6 -- they used to sit in a
+`_`-prefixed validation that `run_all` skipped in every tier, i.e. an export with no gate at all).
+Bipolar twin queued after. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
 shipped 2026-06-10 evening and left this list.
 
 ---

@@ -38,9 +38,8 @@ from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.constants import HBAR, KB, M_E  # for the effective DOS N_c(N_v) from the DOS mass
+from dynameta.constants import HBAR, KB  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
-from dynameta.geometry.electrode import Electrode
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
@@ -578,10 +577,14 @@ class LayeredDevsimBuilder:
         except Exception:
             pass
 
-        # (1) seed the built-in (charge-neutral) potential + carriers
+        # (1) seed the built-in (charge-neutral) potential + carriers, in the frame the ohmic
+        # contacts PIN -- which carries the Fermi-Dirac degeneracy correction (with the sign the
+        # local doping type takes) whenever the region runs the FD g-factor. audit C-10: a bare
+        # Boltzmann seed contradicts an FD contact by 0.178 V per degenerate contact at eta = 10, and
+        # this 2-D staged solve goes STRAIGHT into the coupled 3-variable Newton from it.
         for s in sorted(self._bipolar_regions):
             ds.node_model(device=self.device, region=s, name="_seed_psi",
-                          equation="V_t*log(IntrinsicElectrons/n_i)")
+                          equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(self.device, s)))
             ds.set_node_values(device=self.device, region=s, name="Potential",
                                values=ds.get_node_model_values(device=self.device, region=s, name="_seed_psi"))
             ds.set_node_values(device=self.device, region=s, name="Electrons",
@@ -593,9 +596,11 @@ class LayeredDevsimBuilder:
         for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
             ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
-        # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed
-        ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
-                 maximum_iterations=max_iter)
+        # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed.
+        # solve_dc is the identical ds.solve call plus the C10-d solution-level FD-ceiling
+        # check on the converged state (the layered bipolar path previously bypassed it).
+        solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
+                 max_iter=max_iter)
         # (5) ramp the biased electrodes to their targets (a fine step -- the diode I-V is exponential,
         # so a coarse step overshoots and the coupled Newton diverges).
         vbip = min(v_step, 0.05)
@@ -607,8 +612,8 @@ class LayeredDevsimBuilder:
             for _ in range(n_steps):
                 v_now += dv
                 ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v_now)
-                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
-                         maximum_iterations=max_iter)
+                solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
+                         max_iter=max_iter)
         if verbose:
             print("[carriers] bipolar staged solve done (bias={})".format(bias.voltages), flush=True)
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)

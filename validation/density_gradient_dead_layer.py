@@ -1,7 +1,8 @@
 """R19 density-gradient quantum-correction oracle (frozen-potential closure).
 
 GATE A (operator closed form): quantum_potential_V on a Gaussian n(z) = n0 exp(-z^2/2s^2):
-        (sqrt n)''/sqrt n = z^2/4s^4 - 1/2s^2 analytically -- FD vs closed form < 1e-3 interior.
+        (sqrt n)''/sqrt n = z^2/4s^4 - 1/2s^2 analytically -- FD vs closed form < 1e-3 at EVERY
+        node, ends included (audit C-3/N3 removed the old interior-only mask).
 GATE B (off-switch + bulk limit): gamma = 0 returns n_cl EXACTLY; on a FLAT profile the DG
         solution is sqrt(n_cl) outside the dead layer (|n_dg/n_cl - 1| < 5e-6 beyond 10 L_q, the BVP tol floor)
         with the wall-side suppression following the tanh^2(z/L_q) hard-wall closed form
@@ -42,12 +43,15 @@ def main():
     lam = quantum_potential_V(z, n, MSTAR)
     b = HBAR ** 2 / (6.0 * MSTAR * Q)
     lam_cf = b * (z ** 2 / (4.0 * s ** 4) - 1.0 / (2.0 * s ** 2))
-    inner = np.abs(z) < 10e-9
-    relA = float(np.max(np.abs(lam[inner] - lam_cf[inner])) / np.max(np.abs(lam_cf[inner])))
+    # audit C-3/N3: the `|z| < 10e-9` mask is GONE -- the stencil is second-order at EVERY node now
+    # (it was (1/2) f'' at the two end nodes and (3/4) f'' at their neighbours, h-independently, so
+    # the unmasked error here was 4.96e-1 against a 1e-3 budget; it is now 8.5e-5).
+    relA = float(np.max(np.abs(lam - lam_cf)) / np.max(np.abs(lam_cf)))
     g_a = bool(relA < 1e-3 and np.all(quantum_potential_V(z, n, MSTAR, gamma=0.0) == 0.0))
     ok = ok and g_a
-    print("[dg] GATE A: Lambda on a Gaussian vs closed form b(z^2/4s^4 - 1/2s^2), rel {:.1e}; "
-          "gamma=0 -> zeros -> {}".format(relA, "PASS" if g_a else "FAIL"), flush=True)
+    print("[dg] GATE A: Lambda on a Gaussian vs closed form b(z^2/4s^4 - 1/2s^2) at EVERY node "
+          "(no interior mask), rel {:.1e}; gamma=0 -> zeros -> {}".format(
+              relA, "PASS" if g_a else "FAIL"), flush=True)
 
     # ---- GATE B: off-switch + flat-profile hard-wall closed form ----
     zf = np.linspace(0.0, 20e-9, 1201)

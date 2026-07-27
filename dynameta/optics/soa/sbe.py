@@ -28,6 +28,8 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, HBAR, KB, M_E, Q_E
 
+__all__ = ["reduced_sbe_susceptibility", "sbe_gain_per_m"]
+
 
 def _quasi_fermi_2d(N_2d_m2, m_eff, T_K):
     """2-D quasi-Fermi level E_F [J] (from the band edge) for density N at temperature T, parabolic

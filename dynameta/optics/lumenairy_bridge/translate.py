@@ -5,15 +5,32 @@ the REVERSE direction and the materials mapping -- the synergy layer that lets a
 Lumenairy-born device gain DynaMeta's multiphysics axes (carriers, thermal, reliability,
 effects) and lets DynaMeta materials drive Lumenairy's dispersive solves.
 
-Conventions are identical on both sides (exp(-i omega t), Im(eps) > 0, metres); the ONE
-mapping trap is index-vs-permittivity: Lumenairy REGION media (n_superstrate/n_substrate)
-are refractive INDICES while every layer spec is a PERMITTIVITY -- both handled here.
+The SIGN conventions are identical on both sides (exp(-i omega t), Im(eps) > 0, metres); the
+mapping traps this module handles are index-vs-permittivity -- Lumenairy REGION media
+(n_superstrate/n_substrate) are refractive INDICES while every layer spec is a PERMITTIVITY --
+and layer ORDER. See the package header for the full list of translated quantities (audit V-7).
 
-Version pin: the reverse translator reads RCWAStack's public attributes (period_x, period_y,
-is_1d, n_superstrate, n_substrate) plus the slotted per-layer record
-(thickness/.kind/.data/.dispersive) via _common.stack_layer_records -- the one
-version-ceilinged reader of the private `_layers` slot (no public accessor exists through
-5.21.3). A Lumenairy release changing that record bumps the bridge floor."""
+Version pin (audit V-7 -- this paragraph described machinery `_common.py` had already retired):
+the reverse translator reads RCWAStack's public attributes (period_x, period_y, is_1d,
+n_superstrate, n_substrate) plus the per-layer record (thickness/.kind/.data/.dispersive)
+through `_common.stack_layer_records`. Since lumenairy 5.22 that helper reads the PUBLIC
+read-only `RCWAStack.layers` tuple -- there is no private-slot access and no version CEILING
+left here; the single bridge-wide FLOOR is `_common.VERSION_FLOOR`, and the soft "newer than
+verified" notice is `_common.VERSION_VERIFIED_MAX` (finding Q-16). A Lumenairy release that
+changes the record shape still bumps the floor.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol.
+"""
 
 from __future__ import annotations
 
@@ -88,7 +105,12 @@ def rcwa_stack_to_design(stack, *, name: str = "lumenairy_import",
 
     Lumenairy stacks are built SUPERSTRATE-side first; DynaMeta Stacks are bottom-to-top --
     the layer list is reversed here, and layer_names (when given) follows the LUMENAIRY
-    (top-first) order to match how the stack was written."""
+    (top-first) order to match how the stack was written.
+
+    `polarization` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} (audit V-8): it is handed
+    straight to the OpticalSpec this builds, which validates it and names the sibling family on a
+    wrong label. Note the asymmetry with the SAME package's rcwa_grating_RT, which speaks
+    {'te','tm'} -- see dynameta.core.polarization."""
     from dynameta.optics.lumenairy_bridge._common import stack_layer_records
     layers_rec = stack_layer_records(stack)
     bad = [i for i, L in enumerate(layers_rec) if L.kind != "uniform"]

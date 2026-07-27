@@ -49,7 +49,16 @@ def hci_time_to_failure_s(I_sub_A, T_K, *, C_s: float, width_m: float, m_exp: fl
     if not (C_s > 0.0 and width_m > 0.0 and I_ref_A_m > 0.0):
         raise ValueError("HCI: C_s, width_m, I_ref_A_m must be > 0")
     if not (m_exp > 0.0):
-        raise ValueError("HCI: current exponent m must be > 0 (Takeda ~ 2/3)")
+        # audit R-12: this string used to teach the exponent attribution the MODULE DOCSTRING
+        # says was corrected (audit P3) -- the (I_sub/W) power law is HU's lucky-electron model
+        # (m = phi_it/phi_i ~ 2.9-3); Takeda-Suzuki is tau ~ exp(beta/V_DS) with no I_sub power
+        # at all. Not cosmetic: m = 2/3 vs m = 3 differ by ~200x over a 10x current
+        # extrapolation, so the surviving user-facing string was the one people would trust.
+        raise ValueError(
+            "HCI: current exponent m must be > 0. m is the Hu lucky-electron exponent "
+            "phi_it/phi_i (literature ~2.9-3); the shipped default 2/3 is a CALIBRATION-bearing "
+            "knob, not the Takeda-Suzuki law (which is tau ~ exp(beta/V_DS), no I_sub power). "
+            "Re-fit m to device data.")
     I = np.asarray(I_sub_A, dtype=np.float64)
     if np.any(I < 0.0):
         raise ValueError("HCI: I_sub must be >= 0")

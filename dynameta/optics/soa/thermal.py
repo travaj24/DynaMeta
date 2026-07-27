@@ -20,6 +20,9 @@ from __future__ import annotations
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 
+__all__ = ["thermal_profile_steady_1d", "thermal_profile_transient_1d", "sample_T_along_axis",
+           "dome_analytic"]
+
 
 def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K, *, ends="sunk"):
     """Steady T(z) [K] from the 1-D fin equation kappa A T'' - (T-T0)/Rth' = -q(z). q_per_m is the

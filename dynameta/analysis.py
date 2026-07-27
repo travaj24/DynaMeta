@@ -252,9 +252,53 @@ def resonance_shift(wavelengths_nm: Sequence[float],
 #     q    = C_D / (2 b_bg),   a_bg = C0 - b_bg.
 # The peak limit q -> +-inf shows up as b_bg -> 0 (reported q = +-inf, x0/gamma still
 # exact); the dip limit q -> 0 shows up as C_D -> 0 (reported q = 0). Both fit stably.
+#
+# WHERE THE q -> +-inf CUT-OFF BELONGS (audit Q-10). q is recovered as (C_L + Rq) / C_D on the
+# peak branch, so it is well determined for exactly as long as C_D is ABOVE the linear solve's
+# own noise floor -- and C_D / (|C0| + Rq) = 2 / q, so that floor is a statement about q and
+# nothing else. The cut-off used to be placed on b_bg / (|C0| + Rq) instead; since b_bg -> b and
+# Rq -> b q^2, that test reads 1 <= 1e-12 q^2 and fired from |q| ~ 1e6 -- on data the fit had
+# reproduced to 1e-16. Measured on an exact Fano (a_bg = 0.1, b_bg = 0.7, 2001 samples): q is
+# recovered to 4.6e-12 relative at q = 1e6, 4.3e-6 at 1e12 and 5.5e-3 at 1e15, while a GENUINE
+# Lorentzian peak (no dispersive component at all) leaves C_D / (|C0| + Rq) = 6.1e-18 and a
+# symmetric q = 0 dip leaves 1.4e-17. `_FANO_Q_COND_REL = 1e-12` therefore sits ~6 decades above
+# the genuine-degeneracy floor and ~6 decades below the first loss of a useful digit in q.
+# Reporting q = +-inf now also sets b_bg = 0 and a_bg = C0, so the returned triple is the actual
+# limit rather than a finite b_bg paired with an infinite q (which reconstructs to inf); the
+# finite peak amplitude survives as FanoFit.peak_height = b_bg q^2 = C_L + b_bg.
 # ------------------------------------------------------------------------------
 
 _FANO_X_KINDS = ("freq", "wavelength", "energy")
+
+# Relative floor below which the DISPERSIVE weight C_D carries no information and q is genuinely
+# degenerate with the background scale (the Lorentzian-peak limit). See the block comment above
+# for the measurement that sets it.
+_FANO_Q_COND_REL = 1e-12
+
+# ------------------------------------------------------------------------------
+# CAN THE DATA SUPPORT THE MAGNITUDE OF q?  (audit Q-10 residual)
+# ------------------------------------------------------------------------------
+# `_FANO_Q_COND_REL` asks whether the dispersive weight C_D is above the LINEAR SOLVE's roundoff.
+# On noisy data the binding floor is not roundoff, it is the NOISE -- and the two are ~13 decades
+# apart. All of q's information sits in C_D = 2 b_bg q, which relative to the resonant amplitude
+# is ~2/q: the larger q, the fainter the asymmetry that measures it. So a fit can reproduce the
+# data to its noise level and still return a q that is wrong by orders of magnitude, with nothing
+# in the returned record to say so. Measured (a_bg = 0.1, b_bg = 0.7, 2001 samples, noise as a
+# fraction of ptp): at 1e-3 noise and q_true = 1e6 the returned q was 22x wrong.
+#
+# The statistic that separates the two is the fit's own SNR on the quantity q is made of,
+# |C_D| / residual_rms. Calibrated over 6 noise levels x 12 decades of q, 12 trials each, the
+# worst relative error in q tracks it as ~0.2 / SNR:
+#
+#     |C_D|/residual_rms      ~2e3     ~2e2     ~2e1     ~2e0     < 1
+#     worst rel. error in q   3e-4     2e-3     3e-2     2e-1     >= 1  (100 % wrong or more)
+#
+# `_FANO_Q_TRUST_SNR = 20` therefore corresponds to "q is good to ~1 % or better". It separates
+# the two calibration anchors by wide margins: a NOISELESS fit measures SNR >= 1.5e4 at every q
+# from 1e0 to 1e12 (a 700x margin -- clean fits stay reliable at any magnitude), while 1e-3 noise
+# with q >= 1e6 never exceeds 0.58 (a 35x margin the other way). This sets the reported
+# `FanoFit.q_reliable` ONLY; no returned value changes.
+_FANO_Q_TRUST_SNR = 20.0
 
 
 @dataclass(frozen=True)
@@ -263,7 +307,32 @@ class FanoFit:
     (Hz for x_kind='freq', nm for 'wavelength', ...). q is the Fano asymmetry parameter
     (Fano, Phys. Rev. 124:1866 (1961)); a_bg / b_bg the constant background and resonant
     amplitude of T = a_bg + b_bg (q + eps_r)^2 / (1 + eps_r^2); Q = |omega0| / gamma_fwhm;
-    residual_rms the RMS of (fit - data). q = +-inf flags the Lorentzian-peak limit."""
+    residual_rms the RMS of (fit - data).
+
+    q = +-inf flags the Lorentzian-peak limit, and there b_bg is reported as EXACTLY 0.0 with
+    a_bg = the full background, so the triple is the honest limit (audit Q-10: it used to pair
+    q = inf with a finite b_bg, a combination that reconstructs to inf).
+
+    peak_height is the on-resonance excursion above the background, T(omega0) - a_bg = b_bg q^2
+    (= C_L + b_bg in the fitted symmetric+dispersive basis). It is FINITE in both edge regimes
+    and is what keeps the q -> +-inf limit reconstructible: there the lineshape is the pure
+    Lorentzian T = a_bg + peak_height / (1 + eps_r^2). Always set by fano_fit(); the nan default
+    exists only for hand-constructed records.
+
+    q_reliable says whether the DATA SUPPORT THE MAGNITUDE of the reported q (audit Q-10). All of
+    q's information lives in the dispersive weight C_D = 2 b_bg q, which relative to the resonant
+    amplitude is ~2/q -- so the larger q, the fainter the asymmetry that measures it, and a fit
+    can reproduce noisy data to its noise level while returning a q that is orders of magnitude
+    wrong (measured: 22x wrong at 1e-3 noise with q_true = 1e6, with a residual of exactly the
+    injected noise and nothing else amiss). q_reliable is True when |C_D| >= 20 * residual_rms,
+    calibrated to ~1 % worst-case error in q; see the `_FANO_Q_TRUST_SNR` block comment for the
+    measured SNR-vs-error table. It is False on the q = +-inf branch by construction: there q is
+    a DEGENERACY FLAG, not a measurement, and peak_height / lorentzian_fit are the instruments.
+
+    A False q_reliable does NOT mean the fit is bad. omega0, gamma_fwhm, Q and peak_height are
+    determined by the SYMMETRIC part of the lineshape and stay accurate; it is specifically the
+    magnitude of q (and, with it, the a_bg / b_bg split) that the data cannot pin down. The other
+    fields, and the fitted values themselves, are unchanged by this flag."""
     omega0: float
     gamma_fwhm: float
     q: float
@@ -271,6 +340,8 @@ class FanoFit:
     b_bg: float
     Q: float
     residual_rms: float
+    peak_height: float = float("nan")
+    q_reliable: bool = True
 
 
 @dataclass(frozen=True)
@@ -340,7 +411,15 @@ def _fano_varpro(x, y, ncols):
     """Core VARPRO fit shared by fano_fit / lorentzian_fit. Fits T(x) with ncols amplitude
     columns; only (x0, gamma) are nonlinear. Returns (x0, gamma, coeffs, resid_rms) in the
     ORIGINAL x-units. Robust to arbitrary x-scale (Hz ~ 1e14 or nm ~ 1e3) via internal
-    normalization, and to seed choice via a small multi-start."""
+    normalization, to seed choice via a small multi-start, and to arbitrary SPECTRUM SCALE --
+    the gradient-norm termination is DISABLED (see the least_squares call below), so a
+    spectrum of magnitude 1e-12 is fitted exactly, as is a 1e-8 feature on a unit baseline.
+
+    Remaining amplitude floor (numerical, NOT a tolerance): a feature riding a MUCH larger
+    baseline is limited by the 2-point finite-difference Jacobian, whose step perturbs the
+    residual below its own rounding once the feature drops under ~3e-9 of the baseline
+    (measured); there the fit falls back to the seed. ``resid_rms`` is the loud tell -- it is
+    <= ~1e-6 of the feature amplitude on a recovered fit and ~1e-1 of it on a seed fallback."""
     from scipy.optimize import least_squares
 
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -373,8 +452,17 @@ def _fano_varpro(x, y, ncols):
     for x0s, gs in _fano_seed_candidates(u, y):
         p0 = np.array([min(max(x0s, lo[0]), hi[0]), min(max(gs, lo[1]), hi[1])])
         try:
+            # gtol MUST stay disabled.  scipy's `gtol` is an ABSOLUTE bound on the scaled
+            # gradient norm, not a relative one, so any finite value is a bound on the
+            # SPECTRUM AMPLITUDE: with gtol = 1e-15 a feature below ~3e-8 (on any baseline)
+            # made trf terminate on the very first iteration and _fano_varpro returned the
+            # SEED (gamma = 0.15 * span) as a 200%-wrong FWHM and 3x-wrong Q, silently
+            # (audit Q-3).  `gtol=None` is scipy's spelling of "disable this test" -- it is
+            # numerically identical to gtol=0.0 (check_tolerance maps None -> 0) but does not
+            # emit the "below machine epsilon" UserWarning once per seed.  ftol / xtol (both
+            # RELATIVE, and both above EPS) remain the termination criteria.
             sol = least_squares(resid, p0, bounds=(lo, hi), method="trf",
-                                ftol=1e-15, xtol=1e-15, gtol=1e-15, max_nfev=4000)
+                                ftol=1e-15, xtol=1e-15, gtol=None, max_nfev=4000)
         except Exception:                               # pragma: no cover - degenerate seed
             continue
         cost = float(sol.cost)
@@ -409,16 +497,39 @@ def fano_fit(x_hz_or_nm: Sequence[float], spectrum: Sequence[float], *,
                    is a units-ratio and is the resonance Q for a frequency/energy axis and
                    the first-order lambda0/Delta_lambda for a wavelength axis).
 
-    Returns a FanoFit(omega0, gamma_fwhm, q, a_bg, b_bg, Q, residual_rms).
+    Returns a FanoFit(omega0, gamma_fwhm, q, a_bg, b_bg, Q, residual_rms, peak_height,
+    q_reliable).
+
+    IS THE REPORTED q BELIEVABLE AS A NUMBER? (audit Q-10). The conditioning cut-off below asks
+    whether C_D is above the LINEAR SOLVE's roundoff; on measured data the binding floor is the
+    NOISE, ~13 decades higher. Because C_D/(model scale) is 2/q, a large q is measured by an
+    ever-fainter asymmetry, and the fit will happily return one that the data cannot support:
+    with 1e-3 fractional noise and q_true = 1e6 the returned q was 22x wrong, at a residual equal
+    to the injected noise. ``FanoFit.q_reliable`` reports this -- True when the dispersive weight
+    clears the residual by the calibrated factor (~1 % worst-case error in q), False otherwise
+    and False on the +-inf branch. LARGE |q| RETURNED WITH A LARGE residual_rms IS
+    MAGNITUDE-UNRELIABLE: treat it as "asymmetry too faint to measure here", not as a number.
+    The flag changes no returned value, and omega0 / gamma_fwhm / Q / peak_height -- which come
+    from the symmetric part of the lineshape -- remain accurate when it is False.
 
     Method / failure modes: the fit is done in the numerically stable symmetric+dispersive
     ("Fano phase") parameterization and (a_bg, b_bg, q) are RECOVERED afterward (see the
     module comment above). Both edge regimes fit WITHOUT divergence:
       * q -> +-inf  (Lorentzian PEAK limit): b_bg -> 0, so q is degenerate with the
-        background scale; the returned q is +-inf (or a large magnitude) while omega0 /
-        gamma_fwhm / Q remain well-determined. Use lorentzian_fit() for this regime.
+        background scale; the returned q is +-inf while omega0 / gamma_fwhm / Q remain
+        well-determined. Use lorentzian_fit() for this regime.
+        The cut-off is on the CONDITIONING of q -- the dispersive weight C_D relative to the
+        model scale, which is exactly 2/q -- so a large but exactly recoverable q comes back as
+        that number and not as inf (audit Q-10; the cut-off now sits near |q| ~ 2e12, and
+        |q| = 1e6 is returned to 5e-12 relative). In the inf branch b_bg is 0.0 and a_bg is the
+        full background; the finite peak amplitude is peak_height. The SIGN of the reported inf
+        follows the residual C_D, which on an exactly symmetric peak is roundoff (~5e-18 of the
+        model scale) -- +inf and -inf are the same lineshape here, so only |q| = inf is
+        meaningful.
       * q -> 0      (symmetric DIP limit): the dispersive weight C_D -> 0 and q -> 0
-        cleanly; the shape is a pure Lorentzian dip on the a_bg background.
+        cleanly; the shape is a pure Lorentzian dip on the a_bg background. This branch is
+        untouched by the cut-off, which applies only where C_L > 0 (the peak side) -- C_D -> 0
+        with C_L <= 0 means q -> 0, not q -> inf.
     """
     if x_kind not in _FANO_X_KINDS:
         raise ValueError("x_kind must be one of {}".format(_FANO_X_KINDS))
@@ -434,17 +545,39 @@ def fano_fit(x_hz_or_nm: Sequence[float], spectrum: Sequence[float], *,
         b_bg = (C_D * C_D) / (2.0 * (Rq + C_L)) if (Rq + C_L) > 0.0 else 0.0
     else:
         b_bg = 0.5 * (-C_L + Rq)
+    # On-resonance excursion T(x0) - a_bg = b_bg q^2 = C_L + b_bg. Finite in BOTH edge limits
+    # (it is the fitted Lorentzian weight plus the dip offset), so it survives the q -> +-inf
+    # branch below where b_bg is zeroed -- audit Q-10.
+    peak_height = C_L + b_bg
     b_scale = abs(C0) + Rq + 1e-300
-    if b_bg <= 1e-12 * b_scale:                         # Lorentzian-peak limit: q degenerate
+    # Q-10: the q -> +-inf degeneracy is a statement about the DISPERSIVE weight, and it exists
+    # only on the peak branch (C_L > 0). C_D/(|C0| + Rq) is 2/q there, so this is a clean
+    # conditioning test on q itself. For C_L <= 0 the recovery is the q -> 0 dip branch, where q
+    # is well determined however small C_D gets; the ONLY degenerate case on that side is a
+    # spectrum with no resonant feature at all (b_bg itself at the floor), which is the test the
+    # code has always applied and is kept bit-for-bit.
+    if C_L > 0.0:
+        q_degenerate = abs(C_D) <= _FANO_Q_COND_REL * b_scale      # peak branch: |q| -> inf
+    else:
+        q_degenerate = b_bg <= 1e-12 * b_scale                     # no resonant feature at all
+    if q_degenerate:
         q = float(np.inf) if C_D >= 0.0 else float(-np.inf)
-        a_bg = C0 - b_bg
+        b_bg = 0.0                                      # the limit: b_bg -> 0 with b_bg q^2 finite
+        a_bg = C0
     else:
         q = C_D / (2.0 * b_bg)
         a_bg = C0 - b_bg
+    # Q-10 residual: can the data support this MAGNITUDE of q? The dispersive weight C_D is the
+    # only thing that measures q, so compare it with the fit's own residual (see the
+    # `_FANO_Q_TRUST_SNR` block comment). The +-inf branch is a degeneracy flag, not a
+    # measurement, and is never "reliable" as a magnitude. Nothing here changes a returned value.
+    q_reliable = bool(np.isfinite(q)
+                      and (resid_rms <= 0.0 or abs(C_D) >= _FANO_Q_TRUST_SNR * resid_rms))
     Q = abs(x0) / gamma if gamma > 0 else float("inf")
     return FanoFit(omega0=float(x0), gamma_fwhm=float(gamma), q=float(q),
                    a_bg=float(a_bg), b_bg=float(b_bg), Q=float(Q),
-                   residual_rms=float(resid_rms))
+                   residual_rms=float(resid_rms), peak_height=float(peak_height),
+                   q_reliable=q_reliable)
 
 
 def lorentzian_fit(x: Sequence[float], spectrum: Sequence[float]) -> LorentzianFit:

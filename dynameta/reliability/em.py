@@ -46,7 +46,12 @@ def black_mttf_s(J_A_m2, T_K, *, A_s: float, n_exp: float = 2.0, Ea_eV: float = 
     if not (A_s > 0.0):
         raise ValueError("EM: A_s must be > 0")
     if not (n_exp > 0.0):
-        raise ValueError("EM: current exponent n must be > 0 (1 = nucleation, 2 = growth)")
+        # audit R-12: this string carried the exponent attribution the MODULE DOCSTRING says was
+        # corrected (audit P3, Lloyd 1991 / JEP122) -- n ~ 2 is void-NUCLEATION-limited (Korhonen
+        # sigma ~ J sqrt(t) -> t_nuc ~ J^-2), n ~ 1 is void-GROWTH-limited. The header was fixed
+        # and this user-facing message, which is what a caller actually reads, kept the swap.
+        raise ValueError("EM: current exponent n must be > 0 "
+                         "(2 = void NUCLEATION-limited, 1 = void GROWTH-limited)")
     if Ea_eV < 0.0:
         raise ValueError("EM: Ea_eV must be >= 0")
     J = np.asarray(J_A_m2, dtype=np.float64)
@@ -109,11 +114,21 @@ class EmParams:
         return replace(base, A_s=mttf_s / m_unit)
 
 
-def miner_time_to_failure_s(t_grid_s, J_of_t, T_of_t, params: EmParams) -> float:
+def miner_time_to_failure_s(t_grid_s, J_of_t, T_of_t, params: EmParams, *,
+                            length_m: float = None) -> float:
     """Miner damage accumulation for a time-varying duty cycle: failure when
     integral dt / MTTF(J(t), T(t)) = 1. t_grid_s must resolve the J/T waveform; returns inf if the
     accumulated damage never reaches 1 within the grid (caller extends the grid or treats as
-    censored). Immortal (J = 0 / Blech) intervals contribute zero damage."""
+    censored). Immortal intervals contribute zero damage.
+
+    ``length_m`` (audit R-11) forwards the feature length to ``EmParams.mttf_s`` so BLECH
+    immortality applies per interval, exactly as it does in the steady-state call. Without it
+    only the trivial ``J = 0`` interval is immortal: this docstring used to promise
+    "Immortal (J = 0 / Blech) intervals contribute zero damage" while having no way to evaluate
+    the Blech criterion at all, and the two entry points disagreed by an infinity --
+    ``params.mttf_s(J, T, length_m=L)`` returned ``inf`` on a sub-critical J*L for which Miner
+    returned a finite 2.99e10 s. ``None`` (the default) keeps the pre-fix numbers exactly.
+    """
     t = np.asarray(t_grid_s, dtype=np.float64)
     if t.ndim != 1 or t.size < 2 or np.any(np.diff(t) <= 0):
         raise ValueError("EM: t_grid_s must be 1D strictly increasing with >= 2 samples")
@@ -122,7 +137,7 @@ def miner_time_to_failure_s(t_grid_s, J_of_t, T_of_t, params: EmParams) -> float
     # trips (audit 6.2)
     J = np.array([float(J_of_t(tt)) for tt in t], dtype=np.float64)
     T = np.array([float(T_of_t(tt)) for tt in t], dtype=np.float64)
-    rate = 1.0 / params.mttf_s(J, T)                        # 1/MTTF; inf MTTF -> 0 rate
+    rate = 1.0 / params.mttf_s(J, T, length_m=length_m)     # 1/MTTF; inf MTTF -> 0 rate
     # trapezoid cumulative damage
     dmg = np.concatenate([[0.0], np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(t))])
     if dmg[-1] < 1.0:

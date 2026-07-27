@@ -40,7 +40,29 @@ equations, ASE/noise, calibration) and the dynameta.optics.lumenairy_bridge back
 the Berreman 4x4 anisotropic-planar and EMT (Rytov) screen tiers, and the axisymmetric BOR-PMM
 backend (bor_backend; lumenairy is a required core dep, imported lazily) -- plus the OPT-IN FEM
 mirror-symmetry domain reduction (geometry.specs.Mesh3DSpec.symmetry: PEC/PMC half/quarter cell,
-never automatic). (Module map refreshed per audit 6.3.)
+never automatic).
+
+v0.8 adds dynameta.optics.fiber_amp: Giles steady-state Er / Yb / Er:Yb fiber amplifiers with
+resolved ASE bands (steady_state, eryb, rare_earth, spectroscopy, concentration), the PSD-based
+multi-stage AmplifierChain and its noise figure / OSNR bookkeeping (chain, noise,
+optics.amp_noise), transient and pulsed operation (dynamics, pulse -- GNLSE with Raman and
+self-steepening -- cpa), thermal feedback (thermal), waveguide / large-mode-area and
+polarization-dependent-gain modelling (waveguide, lma, polarization), the nonlinear limit set
+(nonlinear_limits: SBS, SRS, TMI, self-focusing, B-integral), detection and metrics
+(detection, metrics, calibration); plus optics.soa.qw_gain (quantum-well SOA gain + co-fit).
+
+v0.9 adds the ENZ / BIC / nonlinear-optics tier: optics.twm_reference (three-wave mixing --
+SHG/SFG/DFG/OPA coupled-wave reference + QPM), optics.spdc_design (SPDC joint spectral amplitude,
+heralding, group-velocity matching), optics.resonance (complex-omega pole finder, argument-
+principle root counting, pole tracking, the q_budget Q_rad/Q_abs split, berreman_enz_pole),
+optics.ringdown (matrix-pencil harmonic inversion of a time trace), optics.aaa_poles (AAA
+rational fitting, Froissart-doublet filtering, resonance extraction from a sweep), optics.bic
+(polarization-vortex topological charge maps for bound states in the continuum),
+optics.nonlocal_tmm + optics.hydro_fem + optics.hydro_fdtd (hydrodynamic non-local metal
+response), optics.harmonics, optics.hot_carrier, and dynameta.analysis (Fano / Lorentzian
+fitting, Kramers-Kronig consistency checks).
+
+(Module map refreshed per audit 6.3; v0.8/v0.9 gap closed per audit R-9.)
 """
 
 __version__ = "0.9.0"
