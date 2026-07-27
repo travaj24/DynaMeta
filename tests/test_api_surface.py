@@ -29,13 +29,12 @@ _OPTIONAL = {"devsim", "ngsolve", "gmsh", "h5py", "zarr", "matplotlib", "numba",
              "cupy", "tmm", "jarvis", "mp_api", "refractiveindex", "netgen", "scipy", "lumenairy"}
 
 
-def _classify_import_error(name, exc, skipped):
-    """A missing OPTIONAL extra is a skip; anything else is a broken package.
+def _missing_optional_in_chain(exc):
+    """Return the first _OPTIONAL package named anywhere in exc's exception chain, else None.
 
     The repo's lazy-dep convention re-raises a MISSING optional package as a chained custom
     ImportError ("<module> requires the optional 'devsim' package ..."), whose own `.name` is
-    None -- the original ModuleNotFoundError lives in the exception CHAIN. Walk the chain
-    (__cause__/__context__) and accept the module if ANY link names an optional package;
+    None -- the original ModuleNotFoundError lives in the CHAIN (__cause__/__context__);
     caught on CI legs without the [solvers] extra (first PR-6 run), invisible on the dev box
     where every extra is installed."""
     link, seen = exc, set()
@@ -43,9 +42,17 @@ def _classify_import_error(name, exc, skipped):
         seen.add(id(link))
         missing = (getattr(link, "name", None) or "").split(".")[0]
         if isinstance(link, ImportError) and missing in _OPTIONAL:
-            skipped.append((name, missing))
-            return
+            return missing
         link = link.__cause__ or link.__context__
+    return None
+
+
+def _classify_import_error(name, exc, skipped):
+    """A missing OPTIONAL extra is a skip; anything else is a broken package."""
+    pkg = _missing_optional_in_chain(exc)
+    if pkg is not None:
+        skipped.append((name, pkg))
+        return
     raise AssertionError(
         "{} failed to import for a NON-optional reason: {!r}".format(name, exc)) from exc
 
@@ -84,18 +91,31 @@ def _resolve_public_name(m, name):
     Returns the object, or _OPTIONAL_UNRESOLVED when the failure chain names a declared
     optional package; re-raises anything else (a genuinely broken re-export must still fail).
     Caught on the second PR-6 CI run -- the module WALK was already chain-aware, the per-name
-    resolution was not."""
+    resolution was not.
+
+    A package's `__all__` may also name a SUBMODULE it does not import eagerly (e.g.
+    carriers.ac_analysis). On a full install the module walk imports it, which binds it onto
+    the package; on a leg missing the optional extra that walk-time import FAILED, nothing got
+    bound, and the getattr raises plain AttributeError (third PR-6 run). Re-attempting the
+    import here tells the two apart -- a name that is neither attribute nor submodule still
+    raises AttributeError, so the __all__ gate keeps its failure mode."""
     try:
         return getattr(m, name)
     except ImportError as exc:
-        link, seen = exc, set()
-        while link is not None and id(link) not in seen:
-            seen.add(id(link))
-            missing = (getattr(link, "name", None) or "").split(".")[0]
-            if isinstance(link, ImportError) and missing in _OPTIONAL:
-                return _OPTIONAL_UNRESOLVED
-            link = link.__cause__ or link.__context__
+        if _missing_optional_in_chain(exc) is not None:
+            return _OPTIONAL_UNRESOLVED
         raise
+    except AttributeError:
+        subname = "{}.{}".format(m.__name__, name)
+        try:
+            return importlib.import_module(subname)
+        except ImportError as exc:
+            if _missing_optional_in_chain(exc) is not None:
+                return _OPTIONAL_UNRESOLVED
+            if isinstance(exc, ModuleNotFoundError) and exc.name == subname:
+                raise AttributeError(
+                    "module {!r} has no attribute {!r}".format(m.__name__, name)) from None
+            raise                                           # a submodule broken for a real reason
 
 
 @pytest.fixture(scope="module")
