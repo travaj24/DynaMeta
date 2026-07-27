@@ -3,6 +3,7 @@ validation/qd_soa_gain_core.py and validation/qd_soa_traveling_wave.py)."""
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.soa import (QDGainModel, QDGainParams, TravelingWaveSOA,
                                  TwoLevelSaturableGain, UltrafastCompression,
                                  agrawal_olsson_output)
@@ -623,11 +624,11 @@ def test_rin_and_linewidth():
     # RIN Parseval
     P = 1e-3 * (1 + 0.05 * rng.standard_normal(N))
     f, rin = rin_spectrum(P, dt)
-    assert abs(np.trapezoid(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0) < 1e-3
+    assert abs(trapz(rin, f) / (np.var(P) / P.mean() ** 2) - 1.0) < 1e-3
     # RIN sinusoid integral == m^2/2
     t = np.arange(N) * dt
     f2, rin2 = rin_spectrum(1e-3 * (1 + 0.1 * np.cos(2 * np.pi * 2e9 * t)), dt)
-    assert abs(np.trapezoid(rin2, f2) - 0.005) / 0.005 < 1e-3
+    assert abs(trapz(rin2, f2) - 0.005) / 0.005 < 1e-3
     # linewidth recovery + pure tone
     v = 1e-3
     dnu = linewidth_from_field(np.exp(1j * np.cumsum(np.sqrt(v) * rng.standard_normal(N))), dt)
@@ -873,6 +874,82 @@ def test_es_band_reduction_and_gain():
     assert abs(g_num - g_ref) / abs(g_ref) < 1e-12
 
 
+def test_es_band_emission_source_mirrors_the_gain():
+    # audit A-4: the ASE/Langevin SOURCE was GS-only while the gain beside it was GS+ES.
+    # total_emission_gain is the emission partner of total_material_gain, carrying the ES band's
+    # OWN upper-state population rho_ES^2 (not the GS one), and emission_gain_per_m_slices is its
+    # slice-layout twin. Independent oracle: the analytic Lorentzian ensemble sum.
+    gs = QDGainModel(QDGainParams(n_groups=11).with_detailed_balance_taus())
+    y = gs.steady_state(30e-3)
+    nu = np.linspace(gs.p.nu0_Hz - 5e12, gs.p.nu0_Hz + 2e13, 30)
+    # sigma_pk_ES = 0 -> byte-identical to the GS-only form (the off-switch)
+    assert np.array_equal(gs.emission_gain_per_m(gs.rho_GS(y), nu),
+                          gs.total_emission_gain(gs.rho_ES(y), gs.rho_GS(y), nu))
+    st = gs.init_slices(3, 30e-3)
+    assert np.array_equal(gs.emission_gain_per_m_slices(st, float(gs.p.nu0_Hz)),
+                          gs._gain_scale * gs._gain_pref * np.sum(
+                              np.asarray(st[2]) ** 2
+                              * gs._gain_line_weights(float(gs.p.nu0_Hz))[None, :], axis=1))
+    es = QDGainModel(QDGainParams(n_groups=11, sigma_pk_ES_m2=3e-19).with_detailed_balance_taus())
+    ye = es.steady_state(40e-3)
+    rES, rGS = es.rho_ES(ye), es.rho_GS(ye)
+    nu_ES = float(es.nu_ES_j[es.ng // 2])
+    hwE = es._hw_ES
+    gsp_num = float(es.total_emission_gain(rES, rGS, nu_ES))
+    gsp_ref = float(es.emission_gain_per_m(rGS, nu_ES)) + float(np.sum(
+        es.p.N_q_m3 * es.w_j * es.p.mu_ES * es.p.sigma_pk_ES_m2
+        * hwE ** 2 / ((nu_ES - es.nu_ES_j) ** 2 + hwE ** 2) * rES * rES))
+    assert abs(gsp_num - gsp_ref) / abs(gsp_ref) < 1e-12
+    # the slice twin agrees with the lumped form on the same state
+    st_e = es._y_to_slice(ye)
+    assert float(es.emission_gain_per_m_slices(st_e, nu_ES)[0]) == pytest.approx(gsp_num, rel=1e-12)
+    # and above transparency the two-band pair still satisfies g_sp = g n_sp band-by-band, so the
+    # ES source is NOT the GS one extrapolated: it exceeds the GS-only source at the ES centre
+    assert gsp_num > 5.0 * float(es.emission_gain_per_m(rGS, nu_ES))
+
+
+def test_two_band_ase_spectrum_carries_the_es_lobe():
+    # audit A-4 gate: with an ES band enabled the self-consistent ASE spectrum must show a SECOND
+    # lobe at nu_ES with a finite n_sp >= 1 (the quantum limit); with sigma_pk_ES = 0 the whole
+    # path stays byte-identical to the old GS-only gain/emission pair.
+    from dynameta.constants import H_PLANCK
+    from dynameta.optics.soa import ase_self_consistent, ase_spectrum_bidirectional
+    L, I, nz = 1.0e-3, 60e-3, 20
+    es = QDGainModel(QDGainParams(n_groups=1, sigma_pk_ES_m2=3e-19).with_detailed_balance_taus())
+    nu0, nu_ES = es.p.nu0_Hz, float(es.nu_ES_j[0])
+    nu = np.linspace(nu0 - 4e12, nu_ES + 4e12, 61)
+    dnu = np.abs(np.gradient(nu))
+    r = ase_self_consistent(es, I, 0.0, nu0, nu, dnu, L, n_slices=nz, ase_saturation=False)
+    S = r["S_f"]
+    k0, k_es = int(np.argmin(np.abs(nu - nu0))), int(np.argmin(np.abs(nu - nu_ES)))
+    k_mid = int(np.argmin(np.abs(nu - 0.5 * (nu0 + nu_ES))))
+    peaks = [i for i in range(1, S.size - 1) if S[i] > S[i - 1] and S[i] > S[i + 1]]
+    assert peaks == [k0, k_es]                              # exactly two lobes, GS and ES
+    assert S[k_es] > 100.0 * S[k_mid]                       # a real lobe, not a monotone tail
+    nsp = S / (H_PLANCK * nu * (r["G"] - 1.0))
+    assert np.isfinite(nsp[k_es]) and nsp[k_es] >= 1.0      # quantum limit holds in the ES band
+    assert r["G"][k_es] > 10.0                              # ... and the band actually amplifies
+    # the GS-only source would have put ~nothing there: pin the gap the fix closes
+    y = es.steady_state(I, S_conf_m3=0.0, nu_s_Hz=nu0)
+    old = ase_spectrum_bidirectional(
+        np.tile(es.material_gain_per_m(es.rho_GS(y), nu), (nz, 1)),
+        np.tile(es.emission_gain_per_m(es.rho_GS(y), nu), (nz, 1)),
+        L / nz, nu, dnu, es.p.Gamma, m_pol=2)
+    assert 10.0 * np.log10(S[k_es] / old["S_f"][k_es]) > 20.0
+    # GS-only device: the two-band path IS the old path, bit for bit
+    gs = QDGainModel(QDGainParams(n_groups=1).with_detailed_balance_taus())
+    rg = ase_self_consistent(gs, I, 0.0, nu0, nu, dnu, L, n_slices=nz, ase_saturation=False)
+    yg = gs.steady_state(I, S_conf_m3=0.0, nu_s_Hz=nu0)
+    ref = ase_spectrum_bidirectional(
+        np.tile(gs.material_gain_per_m(gs.rho_GS(yg), nu), (nz, 1)),
+        np.tile(gs.emission_gain_per_m(gs.rho_GS(yg), nu), (nz, 1)),
+        L / nz, nu, dnu, gs.p.Gamma, m_pol=2)
+    ref_gain_gs = gs.material_gain_per_m(gs.rho_GS(yg), nu)
+    assert np.array_equal(rg["S_f"], ref["S_f"]) and np.array_equal(rg["S_b"], ref["S_b"])
+    assert np.array_equal(rg["g_sat"], ref_gain_gs)
+    assert np.array_equal(rg["g_unsat"], ref_gain_gs)
+
+
 def test_es_numba_parity():
     from dynameta.optics.soa.qd_gain import _HAVE_NUMBA
     if not _HAVE_NUMBA:
@@ -1051,3 +1128,72 @@ def test_calibrate_device_small_target():
     p = dev.params
     spacing = 2.0 * p.span_sigma * (p.fwhm_inhom_Hz / 2.35482) / (p.n_groups - 1)
     assert spacing <= 0.5 * p.fwhm_hom_Hz * 1.001
+
+
+# ============ Audit 2026-07-25 X-9 / T-8: a FAST gate on fit_net_bandwidth=False ============
+
+def test_calibrate_device_small_target_legacy_bandwidth():
+    # X-9 / T-8: the ONLY caller of fit_net_bandwidth=False anywhere was
+    # test_calibration_reports_both_bandwidth_notions, which is @slow (MEASURED 612.8 s, so the
+    # marker is correct) and therefore excluded by -m "not slow" from all four CI legs -- the
+    # documented legacy interpretation shipped with no fast coverage at all. This is that gate:
+    # the same easy narrowband target test_calibrate_device_small_target uses for the co-fit,
+    # run down the legacy branch, pinning what the FLAG changes rather than what the fit finds.
+    from dynameta.optics.soa.calibration import DeviceTargets, calibrate_device
+    tgt = DeviceTargets(name="small", peak_nm=1310.0, G0_dB=20.0, net_bw_3dB_nm=25.0,
+                        Psat_out_dBm=15.0, drive_A=0.5, L_m=4.0e-3)
+    r = calibrate_device(tgt, verbose=False, fit_net_bandwidth=False).report
+    assert r["fit_net_bandwidth"] is False                     # the branch actually taken
+    # LEGACY SEMANTIC: 'bandwidth_nm' aliases the MATERIAL half-max width (the pre-co-fit
+    # interpretation), not the net -3 dB band the co-fit reports for the same key.
+    assert r["bandwidth_nm"] == pytest.approx(r["material_fwhm_nm"])
+    assert r["bandwidth_nm"] != pytest.approx(r["net_3dB_bw_nm"])
+    # ... and it is the MATERIAL width that gets fitted to the datasheet number, which is
+    # exactly why the net band then lands ~3-4x narrower than the sheet (audit C4-8).
+    assert abs(r["material_fwhm_nm"] - 25.0) < 3.0
+    assert r["net_3dB_bw_nm"] < 0.5 * r["material_fwhm_nm"]
+    assert abs(r["G0_dB"] - 20.0) < 0.5                        # the G0 pin is branch-independent
+    assert abs(r["Psat_out_dBm"] - 15.0) < 0.5                 # so is the Psat pin
+    assert r["es_ratio"] == 0.0                                # no ES band requested -> no ES
+    # the co-fit twin (test_calibrate_device_small_target) pins the OTHER alias, so the pair
+    # discriminates the two interpretations rather than just exercising both code paths.
+
+
+# ============ Audit 2026-07-25 X-10: the package facade must stay EXHAUSTIVE ============
+
+def test_package_facade_is_exhaustive():
+    # X-10 / A-20: dynameta.optics.soa is an EAGER facade (it imports every submodule at import
+    # time and its __all__ mirrors those imports), so a name in a submodule's __all__ that never
+    # reaches the package __all__ is an ACCIDENT, not a design choice -- unlike dynameta.optics /
+    # dynameta.carriers, which are deliberate PEP-562 lazy facades. The audit found 20 such names
+    # here: 16 of qw_gain's 17 (the ENTIRE quantum-well/bulk device API -- gain_peak,
+    # steady_state_N, device_gain_dB, noise_figure_db, ...), plus metrics' transfer_derivatives /
+    # harmonic_amplitudes and temperature's B_LO_10MEV_HZ / fwhm_hom_at_temperature.
+    import importlib
+    import pkgutil
+
+    # audit W5-7/W5-8: seven submodules (calibration, lineshape, maxwell_bloch, noise_metrics,
+    # sbe, thermal, transverse_bpm) declared NO __all__ at all, so the loop below skipped them
+    # entirely -- the gate was checking 7 of 14 modules and the "checked >= 7" floor made that
+    # look complete. calibration.device_saturation_curve was the live casualty: a public,
+    # separately-tested entry point invisible from the package. The gate now REQUIRES an __all__
+    # from every submodule and asserts it checked all of them.
+    import dynameta.optics.soa as pkg
+    exported = set(pkg.__all__)
+    assert len(exported) == len(pkg.__all__)                   # no duplicate entries
+    submodules = [info.name for info in pkgutil.iter_modules(pkg.__path__)]
+    checked = []
+    for name in submodules:
+        sub = importlib.import_module("dynameta.optics.soa." + name)
+        names = getattr(sub, "__all__", None)
+        assert names is not None, ("submodule declares no __all__", name)
+        missing = sorted(set(names) - exported)
+        assert not missing, (name, missing)
+        checked.append(name)
+    assert checked == submodules
+    assert len(submodules) == 14, submodules                   # pin the count itself
+    for name in pkg.__all__:                                   # ... and every export resolves
+        assert getattr(pkg, name, None) is not None, name
+    # the name the drift actually cost, spelled out
+    from dynameta.optics.soa.calibration import device_saturation_curve
+    assert pkg.device_saturation_curve is device_saturation_curve

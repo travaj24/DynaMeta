@@ -69,7 +69,8 @@ def main():
     # ---- GATE A: AD vs FD (Richardson) over eps-real, eps-imag, thickness, wavelength, angle ----
     def R_of(ne_re, ne_im, d, lam, ang):
         ne = ne_re + 1j * ne_im
-        R, _T = berreman_RT([(_uniaxial(ne, jnp), d)], N_SUB, N_SUP, lam, angle=ang, row=0)
+        R, _T = berreman_RT([(_uniaxial(ne, jnp), d)], lam, n_substrate=N_SUB,
+                            n_superstrate=N_SUP, angle=ang, row=0)
         return jnp.real(R)
 
     p0 = (1.74, 0.05, D0, LAM, 0.20)
@@ -100,7 +101,8 @@ def main():
     lams = jnp.linspace(1.40e-6, 1.70e-6, 12)
 
     def R_at(ne, lam):
-        R, _T = berreman_RT([(_uniaxial(ne, jnp), D0)], N_SUB, N_SUP, lam, angle=0.0, row=0)
+        R, _T = berreman_RT([(_uniaxial(ne, jnp), D0)], lam, n_substrate=N_SUB,
+                            n_superstrate=N_SUP, angle=0.0, row=0)
         return jnp.real(R)
 
     R_jit = jax.jit(R_at)
@@ -132,9 +134,11 @@ def main():
         "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: JAX forward == concrete numpy forward (same physics) ----
-    R_np, T_np = berreman_RT([(_uniaxial(1.74, np), D0)], N_SUB, N_SUP, LAM, angle=0.2, row=0)
+    R_np, T_np = berreman_RT([(_uniaxial(1.74, np), D0)], LAM, n_substrate=N_SUB,
+                             n_superstrate=N_SUP, angle=0.2, row=0)
     R_jx, T_jx = berreman_RT([(_uniaxial(jnp.asarray(1.74), jnp), jnp.asarray(D0))],
-                             N_SUB, N_SUP, jnp.asarray(LAM), angle=jnp.asarray(0.2), row=0)
+                             jnp.asarray(LAM), n_substrate=N_SUB, n_superstrate=N_SUP,
+                             angle=jnp.asarray(0.2), row=0)
     twin_err = max(abs(float(R_np) - float(R_jx)), abs(float(T_np) - float(T_jx)))
     g_c = bool(twin_err < 1e-12)
     ok = ok and g_c

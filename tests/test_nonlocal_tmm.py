@@ -203,13 +203,41 @@ def test_gate4_energy_budget():
         assert R + T + A == pytest.approx(1.0, abs=1e-12)
         assert abs(A) < 1e-10
     # (c) Lossy + GNOR: R, T, A must all be physical (>= 0) -- no spurious interior gain.
+    #
+    # AUDIT T-1: `R + T + A == 1` is an IDENTITY for this producer (stack_rt returns
+    # A := 1 - R - T), and unlike (a)/(b) a LOSSY layer has no `abs(A) < tol` physics anchor to
+    # rescue it -- the old assertion here passed for a halved or sign-flipped T. nonlocal_tmm
+    # exposes no internal-field/Joule-integral absorption, so there is no independent A to compare
+    # against directly; the independent gate is the LOCAL limit, where the very same code path is
+    # pinned to the `tmm` package (a wholly separate implementation):
+    #   * s-pol carries NO longitudinal physics at all -- eps_T is the whole story, GNOR included --
+    #     so the lossy s-pol result must equal the local tmm slab to machine precision;
+    #   * p-pol is genuinely nonlocal (it deviates from local by up to ~0.5 in R/T at the m=1 bulk
+    #     plasmon, so a local tolerance would be meaningless), so its independent anchor is the
+    #     beta -> 0, D = 0 twin of the same lossy film, which must reproduce the local tmm slab.
     lossy = nt.HydroLayer(1.0, wp, 5e13, beta, 3e-9, D=2e-4)
+    lossy_local = nt.HydroLayer(1.0, wp, 5e13, 1e-3, 3e-9)        # beta -> 0, D = 0 twin
+    from dynameta.constants import C_LIGHT as _C
     for f in np.linspace(0.53, 1.21, 60):
         w = f * wp
+        lam = 2.0 * math.pi * _C / w
+        n_T = _passive_n(complex(nt.eps_transverse(w, lossy)))    # the transverse (local) index
         for pol in ("s", "p"):
             R, T, A = nt.rta(w, [lossy], pol=pol, n_super=1.0, n_sub=1.3, theta_rad=theta)
             assert R >= -1e-12 and T >= -1e-12 and A >= -1e-12
-            assert R + T + A == pytest.approx(1.0, abs=1e-12)
+            assert A > 1e-4                                       # a lossy film genuinely absorbs
+            R_t, T_t, A_t = stack_rta(1.0, [(n_T, lossy.thickness_m)], 1.3, lam,
+                                      theta_deg=40.0, pol=pol)
+            if pol == "s":
+                assert R == pytest.approx(R_t, abs=1e-12)         # s-pol IS the local result
+                assert T == pytest.approx(T_t, abs=1e-12)
+                assert A == pytest.approx(A_t, abs=1e-12)
+            else:
+                R0, T0, A0 = nt.rta(w, [lossy_local], pol="p", n_super=1.0, n_sub=1.3,
+                                    theta_rad=theta)
+                assert R0 == pytest.approx(R_t, abs=1e-8)         # p-pol beta->0 == local tmm
+                assert T0 == pytest.approx(T_t, abs=1e-8)
+                assert A0 == pytest.approx(A_t, abs=1e-8)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -300,3 +328,34 @@ def test_gate7_enz_blueshift_one_over_d():
     assert shifts[10e-9] > 0.0 and shifts[50e-9] > 0.0
     # monotonicity / 1/d: a thinner film blueshifts MORE.
     assert shifts[10e-9] > shifts[50e-9]
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT V-3: the polarization vocabulary is EXACTLY {'p', 's'} here too (the twin gate lives in
+# tests/test_resonance.py::test_admittance_twins_agree_on_off_vocabulary)
+# ------------------------------------------------------------------------------------------------
+def test_public_entry_points_validate_pol():
+    """stack_rt / pole_function already raised; the private _admittance they share with
+    optics.resonance did NOT -- it silently returned the S-POL admittance for any unrecognized
+    string, the MIRROR of resonance's p-pol fallthrough. All three now reject the same set."""
+    layers = [nt.DielectricLayer(4.0 + 0j, 100e-9)]
+    w = 2.0 * math.pi * 3.0e8 / 1300e-9
+    # ACCEPTANCE UNIFICATION (b): 'TE'/'TM'/'te'/'tm'/'S'/'P' are ACCEPTED now (unconditional
+    # aliases of 's'/'p') and moved to the alias leg below; the azimuth-DEPENDENT lab axes, the
+    # integer row and non-labels stay off-vocabulary. Map + full gate: core/polarization.py,
+    # tests/test_polarization_vocabulary.py.
+    for bad in ("x", "y", "X", 0, 1, "", "sp", "tem"):
+        with pytest.raises(ValueError, match="pol must be"):
+            nt.stack_rt(w, layers, pol=bad)
+        with pytest.raises(ValueError, match="pol must be"):
+            nt.pole_function(layers, pol=bad)
+        with pytest.raises(ValueError, match="pol must be"):
+            nt._admittance(4.0 + 0j, 1.2e7 + 0j, bad)
+    for good in ("p", "s"):                                   # canonical: bit-identical path
+        assert nt.stack_rt(w, layers, pol=good) is not None
+        assert callable(nt.pole_function(layers, pol=good))
+    for alias, canonical in (("TE", "s"), ("te", "s"), ("S", "s"),
+                             ("TM", "p"), ("tm", "p"), ("P", "p")):
+        assert nt.stack_rt(w, layers, pol=alias).r == nt.stack_rt(w, layers, pol=canonical).r
+        assert (nt._admittance(4.0 + 0j, 1.2e7 + 0j, alias)
+                == nt._admittance(4.0 + 0j, 1.2e7 + 0j, canonical))

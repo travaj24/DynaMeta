@@ -13,24 +13,101 @@ nothing below it was ever tested. The old per-backend floors (5.14.2 / 5.14.4 / 
 predate all of that and advertised support that was never demonstrated. parse_version
 tolerates pre/post-release suffixes ('5.22.0rc1' -> (5, 22, 0)); the previous
 tuple(int(p) ...) parse -- copy-pasted x3 -- crashed on them.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol. _POL_ROW is the lab -> row leg of the
+map and is NOT injective ('x' and 'p' both land on row 0), which is why the inverse is refused.
 """
 
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Tuple
 
 import numpy as np
 
-__all__ = ["VERSION_FLOOR", "parse_version", "require_lumenairy", "pol_row", "angles_rad",
-           "guard_incidence_side", "guard_conical_ppol", "p_basis_conversion",
-           "stack_layer_records", "conical_synthesis", "pol_tangential_unit"]
+__all__ = ["VERSION_FLOOR", "VERSION_VERIFIED_MAX", "parse_version", "require_lumenairy",
+           "pol_row", "angles_rad", "guard_incidence_side", "guard_conical_ppol",
+           "p_basis_conversion", "stack_layer_records", "conical_synthesis",
+           "pol_tangential_unit", "require_halfspace_keywords"]
+
+_REQUIRED = object()      # sentinel: "this keyword-only argument was not supplied"
+
+
+def require_halfspace_keywords(fn_name: str, legacy_positional, **named):
+    """Enforce KEYWORD-ONLY half-space indices on the differentiable ``*_design`` API, and turn
+    the legacy positional call into a LOUD, self-explaining TypeError (finding V-4).
+
+    Those nine entry points mirror lumenairy's upstream ``(n_substrate, n_superstrate)`` order,
+    which is the INVERSE of the 46 other super/sub-taking functions in DynaMeta (including
+    :func:`p_basis_conversion` in this very module, ``solve_fem``, ``stack_rta``,
+    ``nonlocal_tmm.stack_rt``, the ``optical_solver`` seam contract).  Both are bare scalars, so
+    a super-first positional call used to type-check, run, and silently solve the stack UPSIDE
+    DOWN -- 614%-class errors on an asymmetric device with a perfectly plausible R + T.
+
+    The meanings are NOT renormalized (that would silently change the answer for every existing
+    super-first-by-accident caller and break the validation scripts that pass ``N_SUB, N_SUP``
+    correctly).  Instead the ambiguity is REMOVED: the two indices must now be named at the call
+    site, so neither order can be got wrong without the interpreter saying so.
+
+    ``legacy_positional`` is the function's ``*args`` catch-all: any leftover positional argument
+    is a pre-change call and raises.  ``named`` are the keyword-only parameters that have no
+    default; a missing one raises the same way.
+    """
+    if legacy_positional:
+        raise TypeError(
+            "{0}: the half-space indices are now KEYWORD-ONLY (audit V-4). This looks like the "
+            "old positional call {0}(..., n_substrate, n_superstrate, ...): DynaMeta's *_design "
+            "API mirrors lumenairy's SUB-FIRST order, the inverse of the rest of the library "
+            "(solve_fem, stack_rta, the optical_solver seam and p_basis_conversion are all "
+            "SUPER-first), so a positional pair that was written super-first solved the stack "
+            "upside down in silence. Pass them by name -- {0}(..., n_substrate=..., "
+            "n_superstrate=...) -- and the order stops mattering. ({1} unexpected positional "
+            "argument(s) received.)".format(fn_name, len(legacy_positional)))
+    missing = [k for k, v in named.items() if v is _REQUIRED]
+    if missing:
+        raise TypeError(
+            "{}: missing required keyword-only argument(s) {} (audit V-4: the half-space "
+            "indices and the source wavelength must be named, not positional).".format(
+                fn_name, ", ".join(sorted(missing))))
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
 VERSION_FLOOR = (5, 22, 0)
+# SOFT CEILING (finding Q-16). The floor states what was VERIFIED; it said nothing about newer
+# releases, and the development environment had already run seven minor versions past it (5.29
+# against a 5.22 verification, spanning new propagators and a carrier-backend rework) in
+# complete silence. This is the (major, minor) of the last release the bridge gates were
+# actually re-run against; above it the bridge still runs -- lumenairy is backward compatible in
+# practice and refusing would be worse -- but says so ONCE per process. Bumping this is the
+# CHEAP half of the same correctness work: re-run validation/lumenairy_*.py and raise it.
+VERSION_VERIFIED_MAX = (5, 22)
+_CEILING_WARNED = False
 
+# The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
+# family {'x','y','p'}, the lumenairy differentiable side speaks the integer lab `row` (0 = E_x,
+# 1 = E_y), and rcwa_design.rcwa_grating_RT speaks {'te','tm'}.  _POL_ROW is the x/y/p -> row leg
+# and it is NOT injective ('x' and 'p' both land on row 0, because p-pol's transverse E points
+# along lab x at phi = 0) -- which is why core.polarization refuses the row -> label inverse.
+# Map, converter and caveats: dynameta.core.polarization.
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
+
+
+def _reject_pol(pol, where: str, param: str = "polarization"):
+    """Raise the shared V-8 vocabulary error for a label outside {'x','y','p'}.  LAZY import,
+    failure path only -- the bridge's import-light contract is untouched."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, "lab_xyp", where=where, param=param)
 
 
 def parse_version(vstr) -> Tuple[int, int, int]:
@@ -66,14 +143,37 @@ def require_lumenairy():
             "accessor) were validated against the 5.22 surface only -- older releases were "
             "never exercised. pip install -U lumenairy".format(
                 ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
+    _warn_above_ceiling(lumenairy.__version__)
     return lumenairy
 
 
+def _warn_above_ceiling(vstr) -> None:
+    """One-time RuntimeWarning when the installed lumenairy is NEWER than the last version the
+    bridge gates were re-run against (finding Q-16). Not an error: the bridge has no evidence
+    the newer release is broken, only no evidence that it is not."""
+    global _CEILING_WARNED
+    if _CEILING_WARNED:
+        return
+    if parse_version(vstr)[:2] <= VERSION_VERIFIED_MAX:
+        return
+    _CEILING_WARNED = True
+    warnings.warn(
+        "lumenairy {} is NEWER than the last version the DynaMeta bridge gates were re-run "
+        "against ({}.{}.x). The bridge is running anyway -- nothing is known to be broken -- but "
+        "its conventions (layer order, p-pol sign, incidence side, per-order amplitude contract) "
+        "are pinned against the {}.{} surface only. Re-run validation/lumenairy_*.py and raise "
+        "dynameta.optics.lumenairy_bridge._common.VERSION_VERIFIED_MAX to clear this.".format(
+            vstr, VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1],
+            VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1]),
+        RuntimeWarning, stacklevel=3)
+
+
 def pol_row(optical) -> int:
+    """OpticalSpec lab-axis label -> lumenairy lab Jones/power ROW (audit V-8: the x/y/p -> row
+    leg of the vocabulary map; 'x' and 'p' share row 0)."""
     pol = getattr(optical, "polarization", "y") or "y"
     if pol not in _POL_ROW:
-        raise ValueError("lumenairy bridge: polarization must be 'x', 'y' or 'p' "
-                         "(got {!r})".format(pol))
+        _reject_pol(pol, "lumenairy bridge pol_row")
     return _POL_ROW[pol]
 
 
@@ -122,7 +222,13 @@ def p_basis_conversion(pol: str, theta_rad: float, n_super: complex,
     p-pol phases were validated against tmm). Measured: at 30 deg p-pol the Jones r_xx is
     EXACTLY -r_p(tmm) (R/T agree to machine precision, phase off by pi) and
     t_xx = t_p * cos(theta_t)/cos(theta_i) (the lab-x projection of the p-hat fields).
-    s-pol ('y') and 'x' need no conversion (the bases coincide)."""
+    s-pol ('y') and 'x' need no conversion (the bases coincide).
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'} (map:
+    dynameta.core.polarization). The "anything but 'p'" fallthrough used to silently treat an
+    off-vocabulary label as needing no conversion; same accepted set, named rejection."""
+    if pol not in _POL_ROW:
+        _reject_pol(pol, "p_basis_conversion", param="pol")
     if pol != "p":
         return 1.0, 1.0
     cos_i = np.sqrt(1.0 + 0j - np.sin(theta_rad) ** 2)
@@ -147,7 +253,14 @@ def pol_tangential_unit(pol: str, phi: float) -> "np.ndarray":
     """Incident tangential (lab x, y) unit vector of the rotated s/p eigen-polarization the FEM
     solver and OpticalSpec use: 'y' = s-hat = (-sin phi, cos phi) (perpendicular to the plane of
     incidence); 'x'/'p' = the in-plane transverse direction (cos phi, sin phi). At phi = 0 these
-    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path."""
+    reduce to lab y and lab x, so the synthesis is continuous with the in-plane fast path.
+
+    AUDIT V-8: `pol` is the OpticalSpec LAB-AXIS vocabulary {'x','y','p'}. NOTE the phi != 0
+    reading of 'y' HERE (the rotated s-hat, matching the FEM solver) is NOT the reading
+    _POL_ROW gives it (lab row 1) -- the split documented in dynameta.core.polarization and the
+    reason guard_conical_ppol refuses conical incidence for the bridge's row-based paths."""
+    if pol not in _POL_ROW:
+        _reject_pol(pol, "pol_tangential_unit", param="pol")
     if pol == "y":
         return np.array([-np.sin(phi), np.cos(phi)], dtype=float)
     return np.array([np.cos(phi), np.sin(phi)], dtype=float)          # 'x' or 'p'

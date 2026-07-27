@@ -12,7 +12,7 @@ from typing import List, Protocol, runtime_checkable
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, HBAR
+from dynameta.constants import C_LIGHT, HBAR, H_PLANCK
 from dynameta.core.backend import array_namespace, is_numpy_array
 
 @runtime_checkable
@@ -133,8 +133,34 @@ def _E_vec(fields: dict):
 
 
 def _photon_energy_J(lambda_m: float) -> float:
-    """Photon energy E = h c / lambda = 2 pi hbar c / lambda (J)."""
-    return 2.0 * np.pi * HBAR * C_LIGHT / float(lambda_m)
+    """Photon energy E = h c / lambda (J).
+
+    audit X-7 / R-17: h is taken from constants.H_PLANCK (the exact SI definition) instead of
+    being re-derived as 2*pi*HBAR, which drifts by 6.1e-10 relative (HBAR is a CODATA-rounded
+    12-digit literal). This sits upstream of the whole electro-absorption / Kramers-Kronig stack.
+    """
+    return H_PLANCK * C_LIGHT / float(lambda_m)
+
+
+def _kk_endpoint_weights(n: int) -> np.ndarray:
+    """Maclaurin-rule sample weights: 1 everywhere, 1/2 at the two grid ENDPOINTS (audit R-3).
+
+    The alternate-point (Maclaurin) principal-value rule splits the grid by parity. The branch
+    that sums the INTERIOR odd nodes of an odd-length grid is the composite MIDPOINT rule and is
+    already O(h^2); the branch that sums the panel NODES is the composite TRAPEZOID rule, and the
+    vectorized form weights the two endpoints by 2h where trapezoid needs h -- so that branch was
+    only O(h). Halving indices 0 and N-1 fixes WHICHEVER branch sums them:
+
+      * ODD-length grid  -> index N-1 is even, so both endpoints sit in the even block and only
+        the odd-index branch (which sums even j) was first-order.
+      * EVEN-length grid -> index N-1 is odd, so the two endpoints sit in DIFFERENT parity blocks
+        and BOTH branches were first-order (measured order ~1.0 on both). Reachable through the
+        public e_grid_J=(lo, hi, N) overrides, so the shipped odd default is not a safeguard.
+    """
+    w = np.ones(int(n), dtype=np.float64)
+    w[0] = 0.5
+    w[-1] = 0.5
+    return w
 
 
 def kramers_kronig_dn(e_grid_J: np.ndarray, dalpha_per_m: np.ndarray) -> np.ndarray:
@@ -146,7 +172,14 @@ def kramers_kronig_dn(e_grid_J: np.ndarray, dalpha_per_m: np.ndarray) -> np.ndar
     Evaluated AT each grid point by the Maclaurin (alternate-point) method on a UNIFORM grid: the
     principal value is approximated by summing only grid points of opposite parity to the
     evaluation index (which omits the singular E'=E term), giving an O(h^2) estimate with no
-    explicit pole handling. dalpha in 1/m, E in J; returns dn dimensionless on the same grid."""
+    explicit pole handling. The two grid ENDPOINTS carry HALF weight (audit R-3): without that the
+    node-summing parity branch is composite-trapezoid with double-weighted ends and collapses to
+    O(h) -- for an odd-length grid on one parity, for an even-length grid on BOTH. See
+    _kk_endpoint_weights. dalpha in 1/m, E in J; returns dn dimensionless on the same grid.
+
+    NOTE: the rule integrates only over [E[0], E[-1]]. Nothing here corrects the E' > E[-1] tail;
+    a model whose dalpha does not decay fast inside the grid must supply its own tail term (see
+    BursteinMossEdge, audit R-2)."""
     E = np.asarray(e_grid_J, dtype=np.float64)
     a = np.asarray(dalpha_per_m, dtype=np.float64)
     if E.ndim != 1 or E.shape != a.shape or E.size < 3:
@@ -159,23 +192,31 @@ def kramers_kronig_dn(e_grid_J: np.ndarray, dalpha_per_m: np.ndarray) -> np.ndar
     # Python loop): dn[i] = pref * sum_{(j-i) ODD} a[j]/(E[j]^2 - E[i]^2). An EVEN index i sums over
     # ODD j (and vice-versa), so splitting into the two parity blocks halves the work and memory vs
     # a full NxN matrix and never touches the singular i=j term (i=j is even parity, excluded).
-    # Bit-identical to the loop to ~1e-17.
+    # (It reproduced the original O(N^2) Python loop to ~1e-17; both now carry the R-3 endpoint
+    # half-weights, so that equivalence is to the CORRECTED rule, not to the shipped one.)
     E2 = E * E
     even = np.arange(E.size) % 2 == 0
     odd = ~even
+    aw = a * _kk_endpoint_weights(E.size)                  # R-3 endpoint half-weights
     dn = np.empty(E.size)
-    dn[even] = pref * (a[odd][None, :] / (E2[odd][None, :] - E2[even][:, None])).sum(axis=1)
-    dn[odd] = pref * (a[even][None, :] / (E2[even][None, :] - E2[odd][:, None])).sum(axis=1)
+    dn[even] = pref * (aw[odd][None, :] / (E2[odd][None, :] - E2[even][:, None])).sum(axis=1)
+    dn[odd] = pref * (aw[even][None, :] / (E2[even][None, :] - E2[odd][:, None])).sum(axis=1)
     return dn
 
 
 # The Maclaurin KK transform above is, for a FIXED grid, a constant LINEAR map dn = K @ dalpha
-# (K[i, j] = pref/(E[j]^2 - E[i]^2) on opposite-parity i-j, 0 on same-parity). A caller that
+# (K[i, j] = w[j] * pref/(E[j]^2 - E[i]^2) on opposite-parity i-j, 0 on same-parity, with w the
+# R-3 endpoint half-weights -- which is why they are baked into the cached blocks). A caller that
 # transforms MANY dalpha profiles on ONE grid (BursteinMossEdge: _N_EG = 64 rows per bias) can
 # therefore build the two non-zero parity blocks ONCE and push all rows through two BLAS matmuls
 # instead of re-running the O(N^2) divide-and-sum per row (audit 6.2 perf). Keyed on the grid
 # VALUES (bytes), not object identity -- callers rebuild equal-valued grids per call via linspace.
-# Blocks are ~N^2/2 doubles (~36 MB at N=3001), so the cache is kept tiny (LRU-of-2).
+# Blocks are ~N^2/2 doubles (~36 MB at N=3001), so the cache is kept tiny: at most two grids,
+# evicted least-recently-USED (audit R-20: this was described as "LRU-of-2" while a HIT did not
+# move the entry, i.e. it was insertion-order FIFO. With capacity 2 that is not academic --
+# alternating between a hot grid and two cold ones evicts the hot one every time, exactly the
+# access pattern LRU exists to survive. _kk_parity_kernel now re-inserts on hit, which makes the
+# dict's insertion order a true recency order.)
 _KK_KERNEL_CACHE: dict = {}
 _KK_KERNEL_CACHE_MAX = 2
 
@@ -186,14 +227,18 @@ def _kk_parity_kernel(E: np.ndarray):
     key = E.tobytes()
     hit = _KK_KERNEL_CACHE.get(key)
     if hit is not None:
+        # audit R-20: make the documented LRU real -- move the hit to the MOST-RECENT end so the
+        # insertion-order eviction below is recency-based, not FIFO.
+        _KK_KERNEL_CACHE[key] = _KK_KERNEL_CACHE.pop(key)
         return hit
     h = E[1] - E[0]
     pref = (HBAR * C_LIGHT / np.pi) * 2.0 * h
     E2 = E * E
     even = np.arange(E.size) % 2 == 0
     odd = ~even
-    K_eo = pref / (E2[odd][None, :] - E2[even][:, None])
-    K_oe = pref / (E2[even][None, :] - E2[odd][:, None])
+    w = _kk_endpoint_weights(E.size)                      # R-3 endpoint half-weights, baked in
+    K_eo = pref * w[odd][None, :] / (E2[odd][None, :] - E2[even][:, None])
+    K_oe = pref * w[even][None, :] / (E2[even][None, :] - E2[odd][:, None])
     while len(_KK_KERNEL_CACHE) >= _KK_KERNEL_CACHE_MAX:
         _KK_KERNEL_CACHE.pop(next(iter(_KK_KERNEL_CACHE)))       # evict oldest (insertion order)
     _KK_KERNEL_CACHE[key] = (even, K_eo, K_oe)
@@ -204,8 +249,9 @@ def kramers_kronig_dn_rows(e_grid_J: np.ndarray, dalpha_rows: np.ndarray,
                            e_eval_J: float = None) -> np.ndarray:
     """Batched kramers_kronig_dn: dn for MANY dalpha rows (shape (M, N)) on ONE fixed uniform grid.
     Row-for-row it equals kramers_kronig_dn up to summation reassociation only (BLAS dot vs
-    pairwise .sum; ~1e-15 relative) -- the per-element terms pref*a[j]/(E[j]^2-E[i]^2) are the
-    same. Same grid validation as kramers_kronig_dn.
+    pairwise .sum; ~1e-15 relative) -- the per-element terms pref*w[j]*a[j]/(E[j]^2-E[i]^2), with
+    w the R-3 endpoint half-weights, are the same on both paths (they must be: BursteinMossEdge
+    reaches the KK transform only through here). Same grid validation as kramers_kronig_dn.
 
     e_eval_J = None: returns the full (M, N) dn rows via the cached parity kernel (two matmuls).
     e_eval_J given (a photon energy INSIDE the grid): returns the (M,) dn AT that energy only --
@@ -235,10 +281,11 @@ def kramers_kronig_dn_rows(e_grid_J: np.ndarray, dalpha_rows: np.ndarray,
     E2 = E * E
     i0 = int(np.clip(np.searchsorted(E, e_eval, side="right") - 1, 0, E.size - 2))
     parity = np.arange(E.size) % 2
+    w = _kk_endpoint_weights(E.size)              # R-3 endpoint half-weights
 
     def _dn_at(i):                                # dn[i] rows: one O(N) kernel row, one matvec
         opp = parity != (i % 2)                   # opposite-parity columns (excludes j == i)
-        return A[:, opp] @ (pref / (E2[opp] - E2[i]))
+        return A[:, opp] @ (pref * w[opp] / (E2[opp] - E2[i]))
 
     d0, d1 = _dn_at(i0), _dn_at(i0 + 1)
     w = (e_eval - E[i0]) / (E[i0 + 1] - E[i0])    # np.interp's local-linear weight in [0, 1]

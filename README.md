@@ -146,7 +146,7 @@ print("resonance shift, +2V vs -2V: {:+.1f} nm".format(shift_nm))
 
 ## Status
 
-v0.7.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
+v0.9.0 (pyproject) -- general bridge API: the `OpticalModel`/`TransportModel`
 materials split, declarative `UnitCell` + `Stack` (`Layer` = background +
 `Inclusion`s) + `Electrode` geometry, and `run_pipeline`; plus the
 modulation-mechanism family (Pockels/Kerr/FK, thermo-optic, QCSE,
@@ -155,7 +155,29 @@ nonlinear), the reliability axis (REL1-10 + D1-D4 drivers), the standalone
 QD-SOA traveling-wave gain module (`dynameta.optics.soa`), and the required-core
 Lumenairy optical backends -- RCWA/PMM plus the Berreman 4x4 anisotropic-planar,
 EMT (Rytov) screen, and BOR-PMM axisymmetric tiers
-(`dynameta.optics.lumenairy_bridge`). The reference
+(`dynameta.optics.lumenairy_bridge`).
+
+Shipped since (audit R-9 -- this section stated v0.7.0 while shipping 0.9.0 and
+omitted both later releases):
+
+- **v0.8.0, fiber and semiconductor amplifiers** (`dynameta.optics.fiber_amp`):
+  Giles steady-state Er/Yb amplifiers with ASE, `AmplifierChain` multi-stage
+  cascades with PSD-based noise figure, thermal feedback, LMA/mode-area and
+  polarization (PDG) modelling, the nonlinear limit set (SBS/SRS/TMI/MPI),
+  GNLSE pulse propagation with Raman and self-steepening, CPA, spectroscopy and
+  calibration; plus the SOA quantum-well gain and co-fit extensions
+  (`dynameta.optics.soa.qw_gain`) and `dynameta.optics.amp_noise`.
+- **v0.9.0, ENZ / BIC / nonlinear optics**: `optics.twm_reference` (SFG/DFG/OPA
+  three-wave mixing), `optics.spdc_design` (SPDC / JSA / heralding),
+  `optics.resonance` (complex-omega pole finder, `q_budget` Q_rad/Q_abs split,
+  `berreman_enz_pole`), `optics.ringdown` (matrix-pencil harmonic inversion),
+  `optics.aaa_poles` (AAA rational fit + Froissart filtering),
+  `optics.bic` (polarization-vortex topological charge maps),
+  `optics.nonlocal_tmm` (hydrodynamic non-local TMM), `optics.hydro_fem` /
+  `optics.hydro_fdtd`, `optics.harmonics`, `optics.hot_carrier`, and
+  `dynameta.analysis` (Fano / Lorentzian fitting, KK checks).
+
+The reference
 gated-ITO modulator (the
 [validation/_reference_device.py](validation/_reference_device.py) fixture) is the
 validated end-to-end run. Forward plan:

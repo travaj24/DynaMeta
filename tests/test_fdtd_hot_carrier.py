@@ -233,6 +233,72 @@ def test_gate6_numba_backend_refuses_hot_carrier():
         _solve([_hot_layer()], backend="numba")
 
 
+# ================= gate 7: the per-ENTRY-POINT guard (audit D-1) =================
+# The per-BACKEND guard above is only half the C5-7 policy. solve_fdtd_1d / _2d_oblique /
+# _3d / _3d_oblique never read L.hot_carrier at all: before this fix they marched the layer as a
+# plain passive Drude film and returned a result BIT-IDENTICAL to hot_carrier=None -- no raise, no
+# warning -- while the one supported path moves max|dR0| by up to 0.166 absolute for the same layer.
+
+_D1_ENTRY_POINTS = ("solve_fdtd_1d", "solve_fdtd_2d_oblique", "solve_fdtd_3d", "solve_fdtd_3d_oblique")
+
+
+def _call_entry_point(name, layers):
+    """Invoke one non-2D-TE FDTD entry point on `layers` with a small, otherwise-valid config."""
+    from dynameta.optics.fdtd import solve_fdtd_1d
+    from dynameta.optics.fdtd_nd import (solve_fdtd_2d_oblique, solve_fdtd_3d,
+                                         solve_fdtd_3d_oblique)
+    band = dict(lambda_min_m=1.0e-6, lambda_max_m=1.4e-6, resolution=8)
+    if name == "solve_fdtd_1d":
+        return solve_fdtd_1d(layers, **band)
+    if name == "solve_fdtd_2d_oblique":
+        return solve_fdtd_2d_oblique(layers, period_x_m=120e-9, angle_deg=15.0, nx=4, **band)
+    if name == "solve_fdtd_3d":
+        return solve_fdtd_3d(layers, period_x_m=120e-9, period_y_m=120e-9, nx=4, ny=4, **band)
+    return solve_fdtd_3d_oblique(layers, period_x_m=120e-9, period_y_m=120e-9, angle_deg=15.0,
+                                 nx=4, ny=4, **band)
+
+
+@pytest.mark.parametrize("entry_point", _D1_ENTRY_POINTS)
+def test_gate7_entry_points_refuse_hot_carrier(entry_point):
+    """audit D-1: every entry point that cannot march hot_carrier RAISES, naming the one that can.
+
+    The raise must fire at SETUP (before any march), so this parametrization is cheap."""
+    with pytest.raises(NotImplementedError) as exc:
+        _call_entry_point(entry_point, [_hot_layer()])
+    msg = str(exc.value)
+    assert entry_point in msg                                # names the offending entry point
+    assert "run_2d_te" in msg and "solve_fdtd_2d" in msg     # names the SUPPORTED path
+    assert "backend='numpy'" in msg                          # ... including its one supported backend
+
+
+@pytest.mark.parametrize("entry_point", _D1_ENTRY_POINTS)
+def test_gate7_entry_points_unchanged_without_hot_carrier(entry_point):
+    """The guard is a pure no-op for a passive layer: the same entry point still solves, and two
+    identical calls are BIT-identical (nothing in the numerical path was perturbed)."""
+    r0 = _call_entry_point(entry_point, [_cold_layer()])
+    r1 = _call_entry_point(entry_point, [_cold_layer()])
+    for nm in ("R0", "T0", "R", "T"):
+        a, b = getattr(r0, nm, None), getattr(r1, nm, None)
+        if a is not None:
+            assert a.tobytes() == b.tobytes()
+    assert np.any(r0.band)
+
+
+def test_gate7_guard_helper_is_a_noop_on_layers_without_the_field():
+    """spec.hot_carrier_guard is getattr-based, so a duck-typed layer with NO hot_carrier attribute
+    (the magneto-optic layers solve_fdtd_3d_mo accepts) passes straight through."""
+    from dynameta.optics.fdtd_nd.spec import hot_carrier_guard
+
+    class _MOLike:                                           # no hot_carrier attribute at all
+        thickness_m = 100e-9
+        eps_xx = eps_yy = 4.0
+
+    assert hot_carrier_guard("solve_fdtd_3d_mo", [_MOLike()]) is None
+    assert hot_carrier_guard("solve_fdtd_1d", [_cold_layer()]) is None
+    with pytest.raises(NotImplementedError, match="hot-carrier"):
+        hot_carrier_guard("solve_fdtd_1d", [_cold_layer(), _hot_layer()])
+
+
 # ============================ params + off-switch guards ============================
 
 def test_hot_carrier_param_guards():

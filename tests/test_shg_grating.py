@@ -80,7 +80,10 @@ def _flat_gold_design(period_m, theta_deg, pol="p", period_y_m=None):
 
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("gold", ConstantOptical(EPS_W)))
+    # is_metal routes gold regions to maxh_metal_m (audit F-23: the per-region maxh knobs are
+    # now LIVE, and an unmarked metal inclusion would fall to the 5 nm maxh_inclusion_m default
+    # -- a ~86x element blow-up on this cell).
+    reg.add(Material("gold", ConstantOptical(EPS_W), is_metal=True))
     stack = Stack(layers=[Layer("metalL", 400e-9, "gold"), Layer("capL", 300e-9, "air")],
                   superstrate_material="air", substrate_material="gold")
     m3 = Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=800e-9, substrate_buffer_m=250e-9,
@@ -104,7 +107,9 @@ def _grating_gold_design(period_m, theta_deg, h_m):
 
     reg = MaterialRegistry()
     reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("gold", ConstantOptical(EPS_W)))
+    # is_metal: route the gold tooth to maxh_metal_m (45 nm), not the 5 nm inclusion
+    # default -- see audit F-23 (per-region maxh knobs are now live).
+    reg.add(Material("gold", ConstantOptical(EPS_W), is_metal=True))
     if h_m <= 0.0:
         layers = [Layer("metalL", 300e-9, "gold"), Layer("capL", 250e-9, "air")]
     else:

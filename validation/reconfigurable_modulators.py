@@ -76,8 +76,10 @@ def part2_liquid_crystal():
     # the convention bridge feeds the optical LiquidCrystalModel; eigenvalues are invariant for any tilt
     lc = LiquidCrystalModel(n_o=no, n_e=ne)
     eps = np.asarray(lc.eps(director_to_extra_fields(above.theta_field_rad), LAM))
+    # AUDIT T-6: rtol=0.0 -- eigenvalues are O(3); numpy's default rtol=1e-5 would gate at ~3e-5.
     eig_ok = all(np.allclose(np.sort(np.linalg.eigvalsh(eps[i].real)),
-                             np.sort([no ** 2, no ** 2, ne ** 2]), atol=1e-9) for i in range(eps.shape[0]))
+                             np.sort([no ** 2, no ** 2, ne ** 2]), rtol=0.0, atol=1e-9)
+                 for i in range(eps.shape[0]))
     iso_ok = bool(np.allclose(LiquidCrystalModel(1.6, 1.6).eps({"director_angle_rad": 0.7}, LAM),
                               1.6 ** 2 * np.eye(3)))
     # Erickson-Leslie dynamics: an above-threshold pulse switches n_eff up and relaxes back, finite rise/decay

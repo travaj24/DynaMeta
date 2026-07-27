@@ -11,10 +11,23 @@ boundary-value problem
     b u'' = V_t u ln(u^2 / n_cl(z)),    u(0) = 0 (oxide hard wall),  u(L) = sqrt(n_cl(L)),
 
 whose characteristic length L_q = sqrt(b/V_t) = hbar sqrt(gamma/(6 m kB T)) ~ 1.2 nm for ITO
-(m = 0.35 m0, 300 K) -- EXACTLY the quantum dead-layer scale the in-house Schrodinger-Poisson
-solver shows (the accumulation peak displaced ~1 nm off the oxide interface where classical
-DD peaks AT it). dg_correct_density_1d solves this BVP on a CLASSICAL profile n_cl(z) and
-returns the quantum-corrected n(z); gamma = 0 returns n_cl EXACTLY (off-switch).
+(m = 0.35 m0, 300 K) -- the quantum dead-layer scale the in-house Schrodinger-Poisson solver
+shows (the accumulation peak displaced ~1 nm off the oxide interface where classical DD peaks
+AT it). dg_correct_density_1d solves this BVP on a CLASSICAL profile n_cl(z) and returns the
+quantum-corrected n(z); gamma = 0 returns n_cl EXACTLY (off-switch).
+
+STATISTICS -- read before quoting L_q (audit C-8). That BVP is the BOLTZMANN closure: it follows
+from n = n_cl exp(Lambda/V_t). Degenerate ITO (eta ~ 10-20, which the rest of this subsystem
+insists on) obeys n = N_c F_1/2(eta_cl + Lambda/V_t), which linearises to
+n = n_cl (1 + Lambda/(g V_t)) with the generalized-Einstein factor g = F_1/2/F_-1/2
+(carriers.einstein.g_einstein) -- i.e. V_t -> g V_t and L_q -> sqrt(b/(g V_t)), a factor sqrt(g)
+SHORTER: 1.1847 nm becomes 0.4543 nm at g = 6.8 (eta ~ 10) and 0.3236 nm at g = 13.4 (eta ~ 20),
+2.6-3.7x. The in-Newton twin (physics_density_gradient.py:85-100) already carries the FD form via
+vdiff_dg/g_enh. So `gamma` here is a FITTED parameter that absorbs the degeneracy factor
+(gamma_eff = gamma g): the ~1.2 nm agreement with Schrodinger-Poisson in
+validation/density_gradient_dead_layer.py GATE C is a CALIBRATION at gamma = 1, not a derivation
+from FD statistics. Pass dg_length_m(..., degeneracy_g=g_einstein(n/N_c)) for the FD-consistent
+length, and read `gamma` as a shape knob rather than a first-principles 1.
 
 SCOPE (honest): the electrostatic potential is FROZEN (no Poisson feedback), so this is the
 post-hoc correction sanctioned as the R19 fallback -- quantitative for the dead-layer SHAPE
@@ -29,21 +42,81 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import HBAR, KB, M_E, Q_E
+from dynameta.constants import HBAR, KB, Q_E
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m"]
 
 
-def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = 300.0) -> float:
-    """The DG dead-layer length L_q = hbar sqrt(gamma/(6 m kB T)) [m]."""
-    if not (m_eff_kg > 0.0 and gamma >= 0.0 and T_K > 0.0):
-        raise ValueError("density_gradient: m_eff_kg > 0, gamma >= 0, T_K > 0 required")
-    return float(HBAR * np.sqrt(gamma / (6.0 * m_eff_kg * KB * T_K)))
+def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = 300.0,
+                degeneracy_g: float = 1.0) -> float:
+    """The DG dead-layer length L_q = sqrt(b/(g V_t)) = hbar sqrt(gamma/(6 m kB T g)) [m].
+
+    degeneracy_g is the generalized-Einstein factor g = F_1/2(eta)/F_-1/2(eta) of the statistics
+    the profile actually obeys -- `carriers.einstein.g_einstein(n/N_c)`. The default g = 1 is the
+    BOLTZMANN limit and the byte-identical off-switch (what this function always returned, and
+    what the BVP in dg_correct_density_1d closes with; see the module header on audit C-8). For
+    degenerate ITO the FD-consistent length is sqrt(g) SHORTER -- 1.1847 nm -> 0.3236 nm at
+    g = 13.4 -- and the difference is exactly what the fitted `gamma` absorbs."""
+    if not (m_eff_kg > 0.0 and gamma >= 0.0 and T_K > 0.0 and degeneracy_g > 0.0):
+        raise ValueError("density_gradient: m_eff_kg > 0, gamma >= 0, T_K > 0, degeneracy_g > 0 "
+                         "required")
+    return float(HBAR * np.sqrt(gamma / (6.0 * m_eff_kg * KB * T_K * degeneracy_g)))
+
+
+def _fd_weights_d2(nodes, x0) -> np.ndarray:
+    """Finite-difference weights w with sum_j w_j f(nodes_j) = f''(x0) + O(h^(k-2)) for a k-node
+    stencil (Fornberg), from the local Vandermonde system sum_j w_j (z_j - x0)^p = 2! delta_{p,2}.
+    The offsets are scaled by the stencil half-width before the solve and the result unscaled, so
+    the 4x4 system is conditioned on O(1) numbers rather than on 1e-9-sized metres."""
+    d = np.asarray(nodes, dtype=np.float64) - float(x0)
+    hs = float(np.max(np.abs(d)))
+    if hs <= 0.0 or np.unique(d).size != d.size:
+        raise ValueError("density_gradient: degenerate FD stencil (repeated or coincident z nodes)")
+    k = d.size
+    v = np.vander(d / hs, k, increasing=True).T          # V[p, j] = (d_j/hs)**p
+    rhs = np.zeros(k)
+    rhs[2] = 2.0
+    return np.linalg.solve(v, rhs) / hs ** 2
+
+
+def _second_derivative(f: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """f''(z) on a 1-D (possibly non-uniform) grid, SECOND-ORDER AT EVERY NODE -- ends included.
+
+    audit C-3 / N3 (= 2026-07-17 ledger S1-6): this used to be `np.gradient(np.gradient(f, z), z)`,
+    which is NOT a second-difference stencil. `np.gradient`'s default `edge_order=1` makes the INNER
+    pass a one-sided first-order slope at nodes 0 and N-1, and the outer centred pass then mixes
+    that biased slope into nodes 1 and N-2, so FOUR nodes converge to the wrong limit:
+
+        node 0, N-1 -> (1/2) f''        node 1, N-2 -> (3/4) f''
+
+    i.e. 50% and 25% errors that are INDEPENDENT of h -- refining the grid does not remove them.
+    (The interior was convergent but used the WIDE composition (f[i+2] - 2 f[i] + f[i-2])/(2h)^2,
+    whose leading error is 4x the 3-point stencil's.)
+
+    Interior: the 3-point non-uniform second difference, exact for quadratics. Ends: a 4-point
+    one-sided stencil, exact for cubics -> O(h^2) one-sided, with the weights solved from the local
+    Vandermonde system so a non-uniform mesh at the ends is handled too. Gated at all four
+    previously-broken nodes by tests/test_density_gradient.py (observed order ~2)."""
+    f = np.asarray(f, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    d = np.diff(z)
+    if not (np.all(d > 0.0) or np.all(d < 0.0)):
+        raise ValueError("density_gradient: z_m must be strictly monotonic (increasing or "
+                         "decreasing) -- the second-difference stencils divide by the spacings")
+    h1 = z[1:-1] - z[:-2]
+    h2 = z[2:] - z[1:-1]
+    out = np.empty_like(z)
+    out[1:-1] = 2.0 * (h2 * f[:-2] - (h1 + h2) * f[1:-1] + h1 * f[2:]) / (h1 * h2 * (h1 + h2))
+    out[0] = float(_fd_weights_d2(z[:4], z[0]) @ f[:4])
+    out[-1] = float(_fd_weights_d2(z[-4:], z[-1]) @ f[-4:])
+    return out
 
 
 def quantum_potential_V(z_m, n_m3, m_eff_kg: float, *, gamma: float = 1.0) -> np.ndarray:
     """Lambda(z) = b (sqrt(n))'' / sqrt(n) [VOLTS] on a solved density profile (second-order
-    finite differences; non-uniform z supported). gamma = 0 -> exactly zeros."""
+    finite differences AT EVERY NODE, ends included -- audit C-3/N3; non-uniform z supported).
+    gamma = 0 -> exactly zeros."""
     z = np.asarray(z_m, dtype=np.float64)
     n = np.asarray(n_m3, dtype=np.float64)
     if z.ndim != 1 or z.shape != n.shape or z.size < 5:
@@ -54,8 +127,7 @@ def quantum_potential_V(z_m, n_m3, m_eff_kg: float, *, gamma: float = 1.0) -> np
         return np.zeros_like(n)
     b = gamma * HBAR ** 2 / (6.0 * m_eff_kg * Q_E)
     u = np.sqrt(n)
-    upp = np.gradient(np.gradient(u, z), z)
-    return b * upp / u
+    return b * _second_derivative(u, z) / u
 
 
 def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
@@ -67,7 +139,11 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
     insulating (oxide) end where u = sqrt(n) -> 0; the other end is pinned to the classical
     bulk. conserve_charge=True rescales n_dg so int n dz matches the classical profile (the
     frozen-potential closure otherwise trades interface charge for the dead layer). gamma = 0
-    returns n_cl EXACTLY."""
+    returns n_cl EXACTLY.
+
+    The closure is BOLTZMANN (n = n_cl exp(Lambda/V_t)); on a degenerate profile `gamma` is a
+    fitted parameter absorbing the generalized-Einstein factor g -- see the module header
+    (audit C-8) before quoting the dead-layer length as derived."""
     z = np.asarray(z_m, dtype=np.float64)
     n_cl = np.asarray(n_cl_m3, dtype=np.float64)
     if z.ndim != 1 or z.shape != n_cl.shape or z.size < 5:
@@ -115,5 +191,5 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
     if flip:
         n_dg = n_dg[::-1]
     if conserve_charge:
-        n_dg = n_dg * (np.trapezoid(n_cl, z) / max(np.trapezoid(n_dg, z), 1e-300))
+        n_dg = n_dg * (trapz(n_cl, z) / max(trapz(n_dg, z), 1e-300))
     return n_dg

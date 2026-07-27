@@ -18,7 +18,14 @@ Independent oracles:
 GATE A (golden statics): director_profile_bvp planar-uniform theta_center + n_eff match the golden tuples
         (< 1.0 deg, < 4e-3 n_eff).
 GATE B (1-constant reduction): BVP(K11=K33, poisson) bridged to plate-plane matches director_profile to
-        < 2e-2 rad across V (no regression of the existing 1-constant path).
+        < 8e-3 rad across V (no regression of the existing 1-constant path). RE-PINNED for AUDIT C-4:
+        the series-capacitance normalisation was integrated on solve_bvp's collocation MIDPOINT grid,
+        short by one full cell, so E was biased high by 1/(1 - h/d_lc). With the domain-spanning
+        quadrature this gate's max residual drops 1.0919e-2 -> 5.7013e-3 rad against the same
+        analytic elliptic-quadrature oracle (and the sibling unit test 1.1861e-2 -> 1.2472e-3).
+GATE F (normalisation exactness, AUDIT C-4/N2): the Poisson voltage division must return E == V/d_lc
+        EXACTLY for a uniform director on ANY abscissae -- node grid or the interior-only collocation
+        midpoint grid the BVP right-hand side actually sees.
 GATE C (Freedericksz + branch): below V_th the cell stays at theta_b (no tilt); above it tilts toward the
         field (theta_center < theta_b - 5 deg by V = 1.5 V_th).
 GATE D (Poisson voltage division): with fixed dielectric layers V_lc < V_app and matches the golden
@@ -78,7 +85,7 @@ def main():
                                   nz=301)
         th_bridge = 0.5 * math.pi - bv.theta_field_rad[len(bv.theta_field_rad) // 2]
         dred = max(dred, abs(dp.theta_max_rad - th_bridge))
-    g_b = dred < 2e-2
+    g_b = dred < 8e-3                       # AUDIT C-4 re-pin (was 2e-2 with a 1.0919e-2 residual)
     print("[lc] B 1-constant reduction vs director_profile (pi/2 bridge): max|d theta|={:.2e} rad -> {}"
           .format(dred, "OK" if g_b else "FAIL"), flush=True)
 
@@ -101,6 +108,9 @@ def main():
     geo_u = compute_lc_geometry(geometry="planar", nz=50, d_planar=GAP)
     _Eu, vlc_u = solve_lc_field_profile(th_flat, 2.0, geo_u, eps_para=EPS_PARA, eps_perp=EPS_PERP,
                                         field_model="uniform")
+    # AUDIT C-4 note: the golden 1.6141 came from the external solver this module was ported from,
+    # which carries the SAME midpoint-grid normalisation defect; with it corrected here V_lc moves to
+    # 1.6170 (+0.18%), still inside the 1% golden budget while the analytic-oracle GATE B improves 2x.
     g_d = (abs(res_p.V_lc - 1.6141) < 0.02) and (res_p.V_lc < 2.0) and (abs(vlc_u - 2.0) < 1e-12)
     print("[lc] D Poisson division: V_app=2 -> V_lc={:.4f} (golden 1.6141, < V_app); uniform V_lc={:.4f}"
           " (==V_app) -> {}".format(res_p.V_lc, vlc_u, "OK" if g_d else "FAIL"), flush=True)
@@ -115,7 +125,32 @@ def main():
     print("[lc] E n_eff limits: planar={:.4f} (n_o={:.2f}), homeotropic={:.4f} (n_e={:.2f}); bridge "
           "pi/2->0, 0->pi/2 -> {}".format(n_planar, N_O, n_homeo, N_E, "OK" if g_e else "FAIL"), flush=True)
 
-    ok = g_a and g_b and g_c and g_d and g_e
+    # GATE F: AUDIT C-4/N2 -- the series-capacitance normalisation must span the FULL cell on any grid
+    from dynameta.carriers.lc_director import LCGeometry
+    worst_ok = worst_bias = 0.0
+    for nz in (11, 51, 121, 202):
+        g0 = compute_lc_geometry(geometry="planar", nz=nz, d_planar=GAP)
+        span = (float(g0.z_m[0]), float(g0.z_m[0]) + g0.d_lc)
+        thu = np.full(nz, THB)
+        Ef, vf = solve_lc_field_profile(thu, 2.0, g0, eps_para=EPS_PARA, eps_perp=EPS_PERP,
+                                        field_model="poisson", quad_span=span)
+        worst_ok = max(worst_ok, float(np.max(np.abs(Ef - 2.0 / g0.d_lc))) / (2.0 / g0.d_lc),
+                       abs(vf - 2.0) / 2.0)
+        zmid = 0.5 * (g0.z_m[:-1] + g0.z_m[1:])                  # what solve_bvp hands the RHS
+        gmid = LCGeometry("planar", g0.d_lc, zmid, zmid, g0.r_in, g0.r_out)
+        thm = np.full(zmid.size, THB)
+        Em, _ = solve_lc_field_profile(thm, 2.0, gmid, eps_para=EPS_PARA, eps_perp=EPS_PERP,
+                                       field_model="poisson", quad_span=span)
+        worst_ok = max(worst_ok, float(np.max(np.abs(Em - 2.0 / g0.d_lc))) / (2.0 / g0.d_lc))
+        Eb, _ = solve_lc_field_profile(thm, 2.0, gmid, eps_para=EPS_PARA, eps_perp=EPS_PERP,
+                                       field_model="poisson")    # the un-spanned (old) quadrature
+        worst_bias = max(worst_bias, abs(float(Eb[0]) / (2.0 / g0.d_lc) - 1.0))
+    g_f = (worst_ok < 1e-12) and (worst_bias > 4e-3)              # exact now; the defect was real
+    print("[lc] F normalisation span (nodes + collocation midpoints, nz 11..202): worst |E/(V/d) - 1| = "
+          "{:.2e} (exact); the un-spanned quadrature biases up to {:+.2%} -> {}".format(
+              worst_ok, worst_bias, "OK" if g_f else "FAIL"), flush=True)
+
+    ok = g_a and g_b and g_c and g_d and g_e and g_f
     print("[lc] *** TWO-CONSTANT LC STATIC BVP: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

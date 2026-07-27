@@ -216,3 +216,85 @@ def test_gain_scalar_vs_array_consistency():
     g_arr = qw.material_gain_per_m(np.array([nu0, nu0]), 2.0e24, p)
     assert np.isscalar(g_scalar) or np.ndim(g_scalar) == 0
     assert np.allclose(g_arr, g_scalar)
+
+
+def test_device_routines_reject_a_length_the_params_were_not_built_for():
+    """audit A-13: BulkGainParams pins the ENERGY-CONSISTENCY requirement
+    A_xsec = V_active / L_device (dP/dz = Gamma g P must equal the carrier stimulated loss times
+    A_xsec h nu), and notes the default pair is consistent at the reference L = 600 um. But every
+    device-level routine took L_m as a FREE argument and never checked it, so calling them with
+    the thorlabs_boa1004p preset's own 1.5 mm chip length injected a 600 um device's current
+    density I/(q V_active) into a 1.5 mm device -- the pump term and the stimulated term then
+    describe different geometries, silently."""
+    p = _ref_params()
+    nu_pk = qw.gain_peak(qw.steady_state_N(DRIVE_A, p, P_W=0.0), p)[0]
+    L_implied = p.V_active_m3 / p.A_xsec_m2
+    assert L_implied == pytest.approx(L_M, rel=1e-4)        # the shipped pair IS the 600 um one
+    # the reference operating point still runs (the guard must not reject the library's own preset,
+    # whose A_xsec is a 5-digit rounding of V_active / 600 um -- consistent only to ~2.4e-5)
+    assert np.isfinite(float(qw.device_gain_dB(DRIVE_A, nu_pk, L_M, ALPHA_I, params=p)))
+    # ... and the 2.5x geometry mismatch the finding names now raises, on EVERY device entry point
+    L_bad = 1.5e-3                                          # thorlabs_boa1004p chip length
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.device_gain_dB(DRIVE_A, nu_pk, L_bad, ALPHA_I, params=p)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.device_output_power_W(DRIVE_A, nu_pk, L_bad, ALPHA_I, 1e-9, p, nz=20)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.saturation_output_power_dbm(DRIVE_A, nu_pk, L_bad, ALPHA_I, p, nz=20)
+    with pytest.raises(ValueError, match="inconsistent with the params geometry"):
+        qw.noise_figure_db(DRIVE_A, nu_pk, L_bad, ALPHA_I, p, nz=20)
+    # the SUPPORTED way to model that device: rescale the active volume with the length
+    p15 = replace(p, V_active_m3=p.V_active_m3 * (L_bad / L_implied))
+    assert np.isfinite(float(qw.device_gain_dB(DRIVE_A, nu_pk, L_bad, ALPHA_I, params=p15)))
+
+
+def test_noise_figure_db_is_a_peak_wavelength_answer():
+    """audit X-8(a): noise_figure_db accepted nu_Hz and then never referenced it (AST-verified) --
+    n_sp AND the net gain are both evaluated at the GAIN PEAK, so a caller asking for the NF at
+    their operating wavelength silently got the peak-wavelength number. The value is unchanged
+    (it was always the peak answer and that IS what the docstring describes); what changes is
+    that asking for something else now says so, and nu_Hz=None is the honest spelling."""
+    p = _ref_params()
+    nu_pk = qw.gain_peak(qw.steady_state_N(DRIVE_A, p, P_W=0.0), p)[0]
+    at_peak = qw.noise_figure_db(DRIVE_A, nu_pk, L_M, ALPHA_I, p, nz=60)
+    # nu_Hz=None means "the peak", and returns the identical number -- bit for bit
+    assert qw.noise_figure_db(DRIVE_A, None, L_M, ALPHA_I, p, nz=60) == at_peak
+    assert qw.noise_figure_db(DRIVE_A, L_m=L_M, alpha_i_per_m=ALPHA_I, params=p,
+                              nz=60) == at_peak
+    # an off-peak request warns instead of substituting silently -- and, because the substitution
+    # is what it always did, still returns the peak answer (no behaviour change)
+    nu_off = C_LIGHT / 1.60e-6
+    assert abs(nu_off - nu_pk) > 1e-9 * nu_pk
+    with pytest.warns(RuntimeWarning, match="not the gain peak"):
+        off = qw.noise_figure_db(DRIVE_A, nu_off, L_M, ALPHA_I, p, nz=60)
+    assert off == at_peak
+    # the peak itself must not warn (the shipped call sites all pass it)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        qw.noise_figure_db(DRIVE_A, nu_pk, L_M, ALPHA_I, p, nz=60)
+
+
+def test_noise_figure_db_still_requires_its_model_arguments():
+    """audit W5-6: giving nu_Hz a None default (the X-8 fix above) forced None defaults onto every
+    argument to its RIGHT -- L_m, alpha_i_per_m and params -- so three REQUIRED model arguments
+    became silently optional. Omitting them did not raise TypeError; it raised AttributeError from
+    deep inside steady_state_N ("'NoneType' object has no attribute 'A_srh_per_s'"), i.e. a
+    missing-argument mistake reported as a broken model. Only nu_Hz is genuinely optional."""
+    p = _ref_params()
+    nu_pk = qw.gain_peak(qw.steady_state_N(DRIVE_A, p, P_W=0.0), p)[0]
+    for call, expect in (
+            (lambda: qw.noise_figure_db(DRIVE_A), ("L_m", "alpha_i_per_m", "params")),
+            (lambda: qw.noise_figure_db(DRIVE_A, nu_pk), ("L_m", "alpha_i_per_m", "params")),
+            (lambda: qw.noise_figure_db(DRIVE_A, nu_pk, L_M), ("alpha_i_per_m", "params")),
+            (lambda: qw.noise_figure_db(DRIVE_A, nu_pk, L_M, ALPHA_I), ("params",)),
+            (lambda: qw.noise_figure_db(DRIVE_A, nu_Hz=None, alpha_i_per_m=ALPHA_I, params=p),
+             ("L_m",)),
+    ):
+        with pytest.raises(TypeError, match="missing required argument") as exc:
+            call()
+        for name in expect:
+            assert name in str(exc.value), (name, str(exc.value))
+        assert "nu_Hz" not in str(exc.value).split("Only nu_Hz")[0]     # nu_Hz is NOT required
+    # and the complete call is unaffected
+    assert np.isfinite(qw.noise_figure_db(DRIVE_A, None, L_M, ALPHA_I, p, nz=40))

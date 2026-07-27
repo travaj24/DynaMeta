@@ -37,10 +37,17 @@ from dataclasses import dataclass
 from typing import List
 
 import numpy as np
-from scipy.integrate import cumulative_trapezoid, trapezoid
+# audit X-1: the SCALAR trapezoid has exactly one home (core.numerics.trapz) -- these four call
+# sites used scipy's `trapezoid` directly, which is floor-safe (scipy>=1.10) but made the "one
+# home" claim in that docstring false. Routing them here is byte-identical (verified: LP01/LP11
+# second-moment radius and A_eff bit-for-bit unchanged). `cumulative_trapezoid` stays on scipy --
+# it is a different (cumulative) reduction with no core.numerics home, and the name predates the
+# declared scipy floor; it is the guard's second documented exception.
+from scipy.integrate import cumulative_trapezoid
 from scipy.optimize import brentq
 from scipy.special import jn_zeros, jv, kv
 
+from dynameta.core.numerics import trapz
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap
 
 __all__ = [
@@ -252,7 +259,7 @@ def second_moment_radius_m(mode: LPMode) -> float:
     r = _overlap_grid(mode, extra=16.0)
     psi = mode_field(mode, r)
     w0 = psi * psi * r
-    r2 = trapezoid(w0 * r * r, r) / trapezoid(w0, r)
+    r2 = trapz(w0 * r * r, r) / trapz(w0, r)
     return float(np.sqrt(2.0 * r2))
 
 
@@ -279,8 +286,8 @@ def effective_area_m2(mode: LPMode) -> float:
     intensity). For the LP01 mode A_eff ~ pi w^2 with w the mode-field radius."""
     r = _overlap_grid(mode, extra=16.0)
     psi = mode_field(mode, r)
-    num = (trapezoid(psi * psi * r, r)) ** 2
-    den = trapezoid(psi ** 4 * r, r)
+    num = (trapz(psi * psi * r, r)) ** 2
+    den = trapz(psi ** 4 * r, r)
     return float(2.0 * np.pi * num / den)
 
 

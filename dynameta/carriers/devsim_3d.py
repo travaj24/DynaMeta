@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -63,7 +63,8 @@ from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.carriers.physics_equilibrium import M_E, V_T
+from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
+# comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.constants import HBAR, KB
 
 
@@ -285,7 +286,6 @@ class Stacked3DSpec:
         else:                                   # single semiconductor (gate above OR below)
             primary_idx, gate_adj_idx, extra_idxs = semi_idxs[0], semi_idxs[0], []
             step = 1 if gate_idx > semi_idxs[0] else -1
-        semi_idx = primary_idx
         semi_L = layers[primary_idx]
         for i in semi_idxs:                     # every semiconductor in the run must be laterally uniform
             if layers[i].inclusions:
@@ -566,10 +566,23 @@ class Devsim3DEquilibrium:
                 N_b = float(self.spec.body_net_doping_m3)
             else:
                 N_b = (-1.0 if self.spec.acceptor else 1.0) * float(self.spec.n_bg_m3)
-            n0 = 0.5 * (abs(N_b) + np.sqrt(N_b * N_b + 4.0 * ni * ni))  # CELEC/CHOLE majority
-            phi_bi = (1.0 if N_b >= 0.0 else -1.0) * V_T * np.log(n0 / ni)
+            # audit C-10: the body contact pins the FD-CONSISTENT built-in offset whenever its
+            # region runs the FD g-factor (which _setup_bipolar_semi hardcodes), so the gate
+            # reference has to carry the same degeneracy correction -- re-deriving the Boltzmann
+            # log() here would re-open the C2-1 frame mismatch for a DEGENERATE body (0.178 V at
+            # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
+            # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
+            # same correction (FDContactShift is the node model the contact installed).
+            _Nc = _effective_dos_m3(self.spec.dos_mass_kg)
+            _Nv = (_effective_dos_m3(float(self.spec.dos_mass_p_kg))
+                   if self.spec.dos_mass_p_kg else _Nc)
+            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
+            # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
+            # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
+            # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.
             ds.node_model(device=self.device, region="semi", name="_seed_psi",
-                          equation="V_t*log(IntrinsicElectrons/n_i)")
+                          equation=BP.equilibrium_seed_psi_expr(
+                              BP.fd_shift_model(self.device, "semi")))
             ds.set_node_values(device=self.device, region="semi", name="Potential",
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="_seed_psi"))
@@ -580,13 +593,18 @@ class Devsim3DEquilibrium:
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="IntrinsicHoles"))
             ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi)   # flat band
-            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                     relative_error=1e-5, maximum_iterations=100)
+            # audit C10-d: these two calls are `ds.solve(type='dc', solver_type='direct', ...)`
+            # routed through solve_dc(method='newton'), which is that exact call plus the post-solve
+            # Fermi-Dirac ceiling check -- byte-identical solver arguments, so the numerics cannot
+            # move. THIS is the device the check exists for: the body doping can sit under the
+            # ceiling while the gate ramp drives n/N_dos in the channel far past it.
+            solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                     max_iter=100, semiconductor_regions=["semi"])
             n_steps = max(1, int(abs(vg) / 0.05 + 0.5))      # fine gate steps (the coupled Newton is stiff)
             for k in range(1, n_steps + 1):
                 ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi + vg * k / n_steps)
-                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                         relative_error=1e-5, maximum_iterations=100)
+                solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                         max_iter=100, semiconductor_regions=["semi"])
         elif getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
             # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
@@ -654,7 +672,6 @@ class Devsim3DEquilibrium:
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        tsemi, tox = s.semi_thk_m * 1e9, s.oxide_thk_m * 1e9
         os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
@@ -662,7 +679,6 @@ class Devsim3DEquilibrium:
         occ = gmsh.model.occ
         stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
         ztop = stack[-1][4]                                     # top of the topmost dielectric
-        z_semi_top = stack[0][4]                                # semi/oxide interface (= tsemi)
         boundaries = [stack[k][3] for k in range(1, len(stack))]   # interior z-boundaries (semi/ox, ox/diel1,...)
         frac = float(s.gate_patch_frac)
         patterned = frac < 1.0 - 1e-9

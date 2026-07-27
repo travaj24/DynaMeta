@@ -28,6 +28,8 @@ force solve_vs_wavelength; this bridge rebuilds CONCRETE stacks per wavelength i
 
 from __future__ import annotations
 
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
+
 import time
 from typing import List, Optional, Tuple
 
@@ -219,6 +221,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                              per_region_absorption=pra)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+        _require_eps_convention(eps_by_region, "make_lumenairy_pmm_solver")   # audit V-5
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):

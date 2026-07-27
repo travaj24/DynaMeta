@@ -86,10 +86,12 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
-from dynameta.optics.fiber_amp.steady_state import AseBand, Pump, Signal, SteadyStateResult
+from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
+                                                    _KEEP, _frozen_profile_interp)
 
 __all__ = ["ErYbAmplifier"]
 
@@ -150,6 +152,43 @@ class ErYbAmplifier:
         self._tau_er = float(er_ion.tau_s)
         self._tau_yb = float(yb_ion.tau_s)
         self.upconversion_C_up = float(upconversion_C_up)
+
+    # ---- type-preserving clone protocol ---------------------------------------------------
+    def _clone(self, *, pumps: Optional[List[Pump]] = None,
+               signals: Optional[List[Signal]] = None, ase=_KEEP, yb_ase=_KEEP) -> "ErYbAmplifier":
+        """Clone through THIS class's own constructor, carrying EVERY opt-in: both ions'
+        spectroscopy, the fiber, both ASE bands, the Yb density, the forward/back transfer
+        coefficients, A_32 and the Er upconversion coefficient. The single place that lists what
+        an ErYb clone must carry (the FiberAmplifier._clone analogue); the three public protocol
+        methods below all route through it, so adding an opt-in to __init__ needs ONE edit here.
+        PRIVATE -- callers outside the class use with_signals / with_pumps / without_ase."""
+        return ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber,
+                             list(self.pumps) if pumps is None else list(pumps),
+                             list(self.signals) if signals is None else list(signals),
+                             self.ase if ase is _KEEP else ase,
+                             n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
+                             k_back_m3_s=self._k_back, a32_per_s=self._a32,
+                             yb_ase=self.yb_ase if yb_ase is _KEEP else yb_ase,
+                             upconversion_C_up=self.upconversion_C_up)
+
+    # ---- PUBLIC amplifier re-seed protocol -------------------------------------------------
+    # The SAME three methods FiberAmplifier exposes, so AmplifierChain and metrics.* can rebuild
+    # a stage without knowing which class they hold (audit A-3: the chain rebuilt every stage as
+    # a FiberAmplifier and crashed here on the missing .ion; the A-3 follow-on found metrics.*
+    # still reaching past the protocol into FiberAmplifier._clone, which does not exist here).
+    def with_signals(self, signals: List[Signal]) -> "ErYbAmplifier":
+        """Re-seed with a new signal list, preserving this class and every opt-in (see _clone)."""
+        return self._clone(signals=signals)
+
+    def with_pumps(self, pumps: List[Pump]) -> "ErYbAmplifier":
+        """Re-seed with a new pump list, preserving this class and every opt-in (see _clone).
+        Used by metrics.slope_efficiency to sweep the launched pump."""
+        return self._clone(pumps=pumps)
+
+    def without_ase(self) -> "ErYbAmplifier":
+        """A copy with BOTH ASE bands dropped (the Er C-band and the Yb-band parasitic band) --
+        the ASE-free configuration metrics.gain_spectrum probes the small-signal gain in."""
+        return self._clone(ase=None, yb_ase=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self):
@@ -313,23 +352,12 @@ class ErYbAmplifier:
                 P[bwd] = Pb
             return P
 
-        # Lean frozen-profile interpolator on the uniform mesh (steady_state audit S6-2).
-        inv_dz = (n_nodes - 1) / L
-
+        # Lean frozen-profile interpolator on the uniform mesh (steady_state audit S6-2). Audit
+        # X-3: IMPORTED, not re-copied -- the verbatim copy that used to live here carried the
+        # endpoint-clamp / uniform-mesh contract twice in a module that already imports from
+        # steady_state.
         def _make_interp(Y):
-            slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
-            ncap = n_nodes - 2
-
-            def f(zz):
-                if zz <= 0.0:
-                    return Y[:, 0]
-                if zz >= L:
-                    return Y[:, -1]
-                j = int(zz * inv_dz)
-                if j > ncap:
-                    j = ncap
-                return Y[:, j] + slopes[:, j] * (zz - z[j])
-            return f
+            return _frozen_profile_interp(Y, z, L, n_nodes)
 
         last_out = None
         last_prof = None
@@ -411,8 +439,8 @@ class ErYbAmplifier:
                           for j in range(P.shape[1])])
         transfer = self._k_tr * n1 * nYb2
         total = (self._k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
-        num = float(np.trapezoid(transfer, z))
-        den = float(np.trapezoid(total, z))
+        num = float(trapz(transfer, z))
+        den = float(trapz(total, z))
         return num / den if den > 0.0 else 0.0
 
     def transfer_efficiency(self, result: SteadyStateResult) -> float:
@@ -431,7 +459,7 @@ class ErYbAmplifier:
         se_er = float(self.er_ion.sigma_e.sigma(lam)); sa_er = float(self.er_ion.sigma_a.sigma(lam))
         g = gam * (self._n_yb * (se_yb * b2 - sa_yb * (1.0 - b2))
                    + self._n_er * (se_er * f2 - sa_er * (1.0 - f2)))
-        ln_gain = float(np.trapezoid(g, z))
+        ln_gain = float(trapz(g, z))
         return 10.0 / np.log(10.0) * ln_gain
 
     def yb_parasitic_gain_dB(self, result: SteadyStateResult) -> float:

@@ -22,6 +22,18 @@ minimum; ~1-2% for a single THIN resonant slab whose Fabry-Perot fringe shifts w
 dispersion -- a general single-slab FDTD effect, identical lossless/lossy, that tightens with resolution).
 The lossy/absorbing path (one inverted Drude pole, exact eps at lambda) matches TMM to ~few 1e-3 when not
 FP-dominated. Convention exp(-i omega t), SI; Im(eps) > 0 = loss.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol.
 """
 from __future__ import annotations
 
@@ -33,6 +45,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
@@ -41,15 +54,70 @@ from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 _VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-13: matches the kernel's own guard; the old 1e-3 silently truncated a weakly-absorbing substrate, biasing T ~2% high)
 
 
+def _require_passive_eps(eps_imag, eps_real, *, where: str = "_eps_to_fdtd_layer") -> None:
+    """AUDIT V-2: reject a NON-FINITE eps, and reject Im(eps) < 0 (= GAIN under exp(-i omega t)),
+    instead of clamping either to a lossless medium.
+
+    `eps_imag` may be a scalar or an array (the vectorized twin passes the whole grid). The old
+    `max(0, Im)` / `np.maximum(Im, 0)` clamp was UNBOUNDED: a sign-convention slip such as
+    eps = -180 - 30j was silently realized as the strictly real -180+0j -- a collisionless metal
+    with gamma = 0.0 and absorption identically zero -- with no warning anywhere. The sibling
+    materials.DrudeOptical raises on the analogous input (a negative damping), so this seam now
+    does too. -0.0 is NOT a violation (it is +0.0 numerically) and is normalized downstream.
+
+    NON-FINITE eps fell straight through that guard, because every comparison against NaN is
+    False (audit V-2 follow-on). Worse, the two twins then DISAGREED, breaking the byte-identity
+    contract the vectorized twin advertises: `eps = 4 + nan*1j` reached the scalar path's
+    `max(0.0, nan)`, which returns 0.0 and yields a perfectly ordinary LOSSLESS eps_inf = 4
+    dielectric, while `np.maximum(nan, 0.0)` propagates NaN and the vector twin emitted an
+    all-NaN layer. An infinite Im(eps) likewise produced eps_inf = inf / wp = inf. Both are now
+    refused at the seam: a NaN/inf permittivity is a broken upstream model (a dispersion fit that
+    diverged, an ENZ pole hit exactly, an uninitialised grid cell), never a medium."""
+    im = np.asarray(eps_imag, dtype=np.float64)
+    re = np.broadcast_to(np.asarray(eps_real, dtype=np.float64), im.shape)
+    nonfinite = ~(np.isfinite(im) & np.isfinite(re))
+    if bool(np.any(nonfinite)):
+        k = int(np.argmax(nonfinite))                       # first offending cell
+        raise ValueError(
+            "{}: eps must be FINITE (NaN/inf in either part); got eps = {:.6g}{:+.6g}j{}. This is "
+            "NOT clamped: a non-finite imaginary part slipped through the Im(eps) >= 0 guard "
+            "(every comparison against NaN is False) and was then realized as a LOSSLESS eps_inf "
+            "= {:.6g} dielectric by the scalar path while the vectorized twin propagated NaN -- "
+            "the two twins disagreed (audit V-2). Fix the upstream permittivity model (a diverged "
+            "dispersion fit, an exact ENZ pole, an uninitialised grid cell).".format(
+                where, float(re.ravel()[k]), float(im.ravel()[k]),
+                ("" if im.size == 1 else " at flat index {}".format(k)), float(re.ravel()[k])))
+    bad = im < 0.0                                          # -0.0 < 0.0 is False -> accepted
+    if not bool(np.any(bad)):
+        return
+    k = int(np.argmax(bad))                                 # first offending cell
+    im_bad, re_bad = float(im.ravel()[k]), float(re.ravel()[k])
+    raise ValueError(
+        "{}: Im(eps) must be >= 0 (passive) under the exp(-i omega t) convention; got eps = "
+        "{:.6g}{:+.6g}j{} (Im < 0 = GAIN). This is NOT clamped: the old silent clamp realized it "
+        "as the strictly real {:.6g}+0j -- a lossless (gamma = 0) layer whose absorption is "
+        "identically zero (audit V-2). Conjugate the permittivity if it came from an exp(+i omega "
+        "t) source, or fix the sign of the damping.".format(
+            where, re_bad, im_bad, ("" if im.size == 1 else " at flat index {}".format(k)), re_bad))
+
+
 def _eps_to_fdtd_layer(thickness_m, eps, lambda_m, loss_tol: float = 1.0e-6) -> FDTDLayer:
     """Map a single complex eps(lambda_m) to an FDTDLayer. A pure positive-real eps -> a non-dispersive
     dielectric. A lossy and/or negative-real eps (absorber / metal) -> ONE Drude pole inverted to
     reproduce eps EXACTLY at this omega, with eps_inf held >= 1 so the FDTD background stays stable:
         eps(w) = eps_inf - wp^2/(w^2 + i gamma w),  matched at w0 = 2*pi*c/lambda_m.
-    Only this omega is read out, so the Drude's off-omega dispersion is irrelevant to the result."""
+    Only this omega is read out, so the Drude's off-omega dispersion is irrelevant to the result.
+
+    RAISES on Im(eps) < 0 (gain under exp(-i omega t)), like the sibling DrudeOptical does for a
+    negative damping. It used to CLAMP instead, unbounded despite a "clamp tiny negatives" comment
+    (audit V-2): eps = -180 - 30j was realized as a strictly REAL -180+0j, i.e. a collisionless
+    metal with gamma = 0 and absorption identically zero, with no warning. Also RAISES on a
+    non-finite eps, which slipped through that guard (NaN compares False) and came out as an
+    ordinary lossless dielectric here while the vectorized twin returned NaN."""
     eps = complex(eps)
     er = eps.real
-    ei = max(0.0, eps.imag)                                 # passive (Im(eps) >= 0); clamp tiny negatives
+    _require_passive_eps(eps.imag, er)                       # audit V-2 (was: silent unbounded clamp)
+    ei = max(0.0, eps.imag)                                 # passive (Im(eps) >= 0); normalizes -0.0
     if ei <= loss_tol * (abs(er) + 1.0) and er > 0.0:
         return FDTDLayer(thickness_m=float(thickness_m), eps_inf=float(er))   # pure dielectric
     omega0 = 2.0 * math.pi * C_LIGHT / lambda_m
@@ -72,10 +140,14 @@ def effect_eps_to_fdtd_grid(eps_grid, lambda_m: float, loss_tol: float = 1.0e-6)
     lateral_gam, or solve_fdtd_3d_mo's lateral_tensor). Byte-identical to _eps_to_fdtd_layer cell-by-cell,
     so a uniform grid reduces to the validated single-layer inversion exactly. exp(-i w t), Im(eps) >= 0
     = loss; the same one-Drude-pole inversion is single-omega-exact (re-sample/re-fit per cell across a
-    band for a broadband sweep)."""
+    band for a broadband sweep). Im(eps) < 0 in ANY cell raises, exactly as in the scalar twin
+    (audit V-2) -- the byte-identity contract covers the guard as well as the arithmetic, which is
+    why a NON-FINITE cell raises here too: it used to divide the twins (scalar -> a lossless
+    dielectric, vector -> an all-NaN layer)."""
     eps = np.asarray(eps_grid, dtype=np.complex128)
     er = eps.real
-    ei = np.maximum(eps.imag, 0.0)                          # passive clamp (same as _eps_to_fdtd_layer)
+    _require_passive_eps(eps.imag, er, where="effect_eps_to_fdtd_grid")   # audit V-2
+    ei = np.maximum(eps.imag, 0.0)                          # passive: normalizes -0.0 (same as the scalar twin)
     omega0 = 2.0 * math.pi * C_LIGHT / float(lambda_m)
     lossless = (ei <= loss_tol * (np.abs(er) + 1.0)) & (er > 0.0)
     absorber = (~lossless) & (er < 1.0)                     # eps_inf pinned to 1
@@ -108,6 +180,13 @@ def _guard_optical_spec(design, *, structured: bool) -> None:
     phi = float(getattr(opt, "azimuth_deg", 0.0) or 0.0)
     side = getattr(opt, "incidence_side", "top") or "top"
     pol = getattr(opt, "polarization", "y") or "y"
+    if pol not in ("x", "y", "p"):
+        # audit V-8: this seam getattr's a duck-typed `optical`, so an off-vocabulary label (the
+        # plane-of-incidence 's', say) reached the structured/uniform branch below and was either
+        # accepted silently (uniform stack) or reported as an unsupported 'y'-source case.  It is
+        # a VOCABULARY error; the accepted set is unchanged.  LAZY import, failure path only.
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(pol, "lab_xyp", where="FDTD seam", param="polarization")
     if abs(theta) > 1e-9 or abs(phi) > 1e-9:
         raise NotImplementedError(
             "FDTD seam: oblique/conical incidence (theta={:g} deg, azimuth={:g} deg) is not "
@@ -122,7 +201,8 @@ def _guard_optical_spec(design, *, structured: bool) -> None:
         raise NotImplementedError(
             "FDTD seam: a structured cell is solved with a y-polarized source; "
             "polarization={!r} would silently get the 'y' answer (audit C5-7) -- use the "
-            "FEM/RCWA solver for other polarizations.".format(pol))
+            "FEM/RCWA solver for other polarizations. ('x'/'y'/'p' is the OpticalSpec lab-axis "
+            "vocabulary -- see dynameta.core.polarization, audit V-8.)".format(pol))
 
 
 def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Dict] = None):
@@ -376,6 +456,7 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         raise ValueError("make_fdtd_optical_solver: dim must be 2 or 3")
 
     def _solve(design, geometry, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
+        _require_eps_convention(eps_by_region, "make_fdtd_optical_solver")   # audit V-5
         ns, nb = complex(n_super), complex(n_sub)
         if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
             raise NotImplementedError(

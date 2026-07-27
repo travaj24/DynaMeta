@@ -46,7 +46,9 @@ def _zprofile(dev, region, zg):
 
 def _collapse(z, n, zg):
     zs = np.unique(np.round(z, 13))
-    vals = np.array([n[np.isclose(z, zz, atol=1e-12)].mean() for zz in zs])
+    # AUDIT T-6: rtol=0.0 -- this is a coordinate-match mask, so the window must be a fixed 1 pm
+    # (zs comes from np.round(z, 13), i.e. residuals <= 5e-14 m), not 1e-5 * |z|.
+    vals = np.array([n[np.isclose(z, zz, rtol=0.0, atol=1e-12)].mean() for zz in zs])
     return np.interp(zg, zs, vals)
 
 

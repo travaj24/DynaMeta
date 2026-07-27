@@ -15,6 +15,7 @@ often-quoted 3 fs belongs to the measured-gain-slope convention, not this h_R)."
 
 import numpy as np
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.pulse import (propagate_gnlse, raman_response_freq, sech_pulse)
 
 T0 = 57e-15                       # ~100 fs FWHM fundamental soliton
@@ -58,7 +59,7 @@ def _gordon_rate_hz_m(model, t0):
         tau_b = 96e-15
         hb = (2.0 * tau_b - tt) / tau_b ** 2 * np.exp(-tt / tau_b)
         h = 0.79 * ha + 0.21 * hb
-    T_R = f_R * np.trapezoid(tt * h, tt) / np.trapezoid(h, tt)
+    T_R = f_R * trapz(tt * h, tt) / trapz(h, tt)
     return 4.0 / (15.0 * np.pi) * abs(B2) * T_R / t0 ** 4
 
 

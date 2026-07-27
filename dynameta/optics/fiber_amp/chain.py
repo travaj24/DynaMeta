@@ -23,7 +23,8 @@ Pure numpy; SI units."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 import numpy as np
@@ -74,14 +75,16 @@ class ChainResult:
     rho_out_1pol_W_Hz: float
     osnr_dB: float                  # in ref_bw_nm
     ref_bw_nm: float
+    m_out: int = 2                  # ASE mode count the OSNR was referenced to (audit A-12)
 
 
 class AmplifierChain:
-    """An ordered chain of amplifier stages (FiberAmplifier / ErYbAmplifier -- anything with
-    .signals and .solve() returning a SteadyStateResult) and PassiveElements. solve() walks the
-    chain: each amplifier is re-solved with ITS actual input signal power (metrics-style clone
-    via the element's own signal list with the power swapped), so inter-stage losses and
-    saturation interact correctly."""
+    """An ordered chain of amplifier stages (FiberAmplifier / ErYbAmplifier -- anything
+    implementing with_signals(signals) and solve() -> SteadyStateResult) and PassiveElements.
+    solve() walks the chain: each amplifier is re-solved with ITS actual input signal power (the
+    element's own with_signals re-seed with the power swapped), so inter-stage losses and
+    saturation interact correctly. with_signals is REQUIRED, not optional: a stage that exposes
+    .signals without it raises a TypeError naming the method (see _reseed_signal)."""
 
     def __init__(self, elements: List, *, signal_index: int = 0):
         if not elements:
@@ -90,8 +93,18 @@ class AmplifierChain:
         self.signal_index = int(signal_index)
 
     def solve(self, P_in_W: float, signal_lambda_m: float, *, ref_bw_nm: float = 0.1,
-              **solve_kw) -> ChainResult:
-        from dynameta.optics.fiber_amp.metrics import _set_signal
+              m_out: Optional[int] = None, **solve_kw) -> ChainResult:
+        """Walk the chain and return the end-to-end powers, gain, NF and OSNR.
+
+        ``m_out`` is the number of ASE MODES the reported OSNR is referenced to (the PSD ``rho``
+        the chain tracks is always PER POLARIZATION, so ``P_ase_ref = m_out rho dnu_ref``).
+        ``None`` (the default) DERIVES it from the last amplifier stage's own solve
+        (``meta['m_modes']``) rather than assuming both polarizations: audit A-12 found a literal
+        ``m_out = 2`` here while every stage already honours ``AseBand.m_modes``, so a chain of
+        polarized-ASE stages (``m_modes=1``) reported an OSNR 3 dB pessimistic. Stages that
+        disagree on ``m_modes`` raise a ``UserWarning`` (the last stage wins, since it sets the
+        ASE actually reaching the output). A chain with no amplifier stage falls back to 2.
+        ``nf_total`` is unaffected either way -- it is a per-polarization PSD form."""
         from dynameta.optics.fiber_amp.noise import analyze_noise
 
         nu_s = C_LIGHT / signal_lambda_m
@@ -100,6 +113,7 @@ class AmplifierChain:
         rho = 0.0                                   # in-band per-pol PSD [W/Hz]
         p_ase = 0.0                                 # out-of-band total ASE ledger [W]
         records: List[StageRecord] = []
+        m_seen: List[int] = []                      # per-amp-stage ASE mode counts (audit A-12)
         for el in self.elements:
             if isinstance(el, PassiveElement):
                 t = 10.0 ** (-el.loss_dB / 10.0)
@@ -111,31 +125,84 @@ class AmplifierChain:
                                            rho, p_ase))
                 P = P_new
             else:
-                amp = _set_signal(el, P, self.signal_index) if hasattr(el, "signals") else el
+                amp = _reseed_signal(el, P, self.signal_index)
                 res = amp.solve(**solve_kw)
-                nr = analyze_noise(res, signal_lambda_m)
+                # forward the caller's reference bandwidth (audit A-2): analyze_noise builds
+                # P_ase_ref_W in ITS bandwidth, and the rho_gen inversion below divides by the
+                # caller's -- at its 0.1 nm default against a ref_bw_nm != 0.1 caller the two
+                # disagreed by exactly 0.1/ref_bw_nm, so every stage's generated PSD was
+                # mis-scaled and the chain NF walked below the quantum limit (n_sp < 1).
+                nr = analyze_noise(res, signal_lambda_m, ref_bw_nm=ref_bw_nm)
                 G = float(nr.gain_lin)
                 P_new = P * G
                 # per-pol PSD the stage generated at the signal wavelength (analyze_noise
-                # reports the m*rho*dnu_ref reference-band power; invert its own definition)
+                # reports the m*rho*dnu_ref reference-band power; invert its own definition --
+                # same bandwidth on both sides, so this returns rho_1pol(nu_s) exactly)
+                m_stage = _meta_m(res)
+                m_seen.append(m_stage)
                 rho_gen = (float(nr.meta["P_ase_ref_W"])
-                           / (_ref_dnu(signal_lambda_m, ref_bw_nm) * _meta_m(res)))
+                           / (_ref_dnu(signal_lambda_m, ref_bw_nm) * m_stage))
                 p_ase_gen = _total_fwd_ase_W(res)
                 rho = rho * G + rho_gen
                 p_ase = p_ase * G + p_ase_gen
                 name = getattr(el, "name", None) or type(el).__name__
                 records.append(StageRecord(name, "amp", P, P_new, _DB(G),
                                            float(nr.nf_dB), rho, p_ase,
-                                           meta={"converged": res.meta.get("converged")}))
+                                           meta={"converged": res.meta.get("converged"),
+                                                 "m_modes": m_stage}))
                 P = P_new
         G_tot = P / P_in0
         nf_tot = nf_from_psd(G_tot, rho, nu_s)
         dnu_ref = _ref_dnu(signal_lambda_m, ref_bw_nm)
-        m_out = 2
-        p_ase_ref = m_out * rho * dnu_ref
+        # audit A-12: DERIVE the OSNR mode count from the stage that actually sets the output
+        # ASE, instead of the literal 2 that made every polarized-ASE chain 3 dB pessimistic.
+        if m_out is None:
+            if m_seen and len(set(m_seen)) > 1:
+                warnings.warn(
+                    "AmplifierChain.solve: stages disagree on the ASE mode count "
+                    "(m_modes = {}); the OSNR is referenced to the LAST amplifier stage's "
+                    "m_modes = {} (it sets the ASE reaching the output). Pass m_out= "
+                    "explicitly to pin it.".format(m_seen, m_seen[-1]),
+                    stacklevel=2)
+            m_ref = m_seen[-1] if m_seen else 2         # all-passive chain: keep the 2-pol default
+        else:
+            m_ref = int(m_out)
+            if m_ref < 1:
+                raise ValueError("AmplifierChain.solve: m_out must be >= 1 (got {!r})".format(m_out))
+        p_ase_ref = m_ref * rho * dnu_ref
         osnr = P / p_ase_ref if p_ase_ref > 0.0 else np.inf
         return ChainResult(float(signal_lambda_m), records, float(P), float(_DB(G_tot)),
-                           float(_DB(nf_tot)), float(rho), float(_DB(osnr)), float(ref_bw_nm))
+                           float(_DB(nf_tot)), float(rho), float(_DB(osnr)), float(ref_bw_nm),
+                           int(m_ref))
+
+
+def _reseed_signal(el, P_W: float, index: int):
+    """Re-seed an amplifier stage with the signal power it ACTUALLY sees at its input, preserving
+    the stage's TYPE (audit A-3). CONTRACT: an amplifier stage MUST implement
+    with_signals(signals) -> a copy of ITSELF carrying that signal list and every opt-in
+    (FiberAmplifier and ErYbAmplifier both do, each rebuilding through its own constructor). The
+    chain used to call metrics._set_signal, which unconditionally rebuilt a FiberAmplifier from
+    amp.ion / amp.concentration / amp.raman and so raised AttributeError on the ErYbAmplifier the
+    class docstring advertises.
+
+    A stage with .signals but NO with_signals now raises a TypeError naming the missing method.
+    The "legacy FiberAmplifier-shaped rebuild" this docstring used to advertise as the duck-typed
+    fallback never worked: metrics._set_signal reached for the FiberAmplifier-private `_clone`,
+    so a third-party stage got `AttributeError: 'DuckAmp' object has no attribute '_clone'`
+    instead. An object without .signals passes through unchanged (a pre-configured stage)."""
+    if hasattr(el, "with_signals"):
+        sigs = list(el.signals)
+        sigs[index] = replace(sigs[index], power_W=float(P_W))
+        return el.with_signals(sigs)
+    if hasattr(el, "signals"):
+        raise TypeError(
+            "AmplifierChain stage {!r} ({}) exposes .signals but not with_signals(signals), so "
+            "the chain cannot re-seed it at its actual input power. Implement "
+            "with_signals(signals) -> a copy of the stage carrying that signal list and every "
+            "opt-in (FiberAmplifier and ErYbAmplifier both do); a stage with NO .signals at all "
+            "is passed through unchanged as a pre-configured element.".format(
+                getattr(el, "name", None) or type(el).__name__, type(el).__name__))
+    return el
 
 
 def _ref_dnu(lambda_m, ref_bw_nm):

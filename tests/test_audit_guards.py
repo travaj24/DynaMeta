@@ -124,12 +124,17 @@ def test_sweep_duplicate_bias_labels_raise():
           wavelengths_nm=[1300.0])                             # distinct labels fine
 
 
-def test_dispersion_check_catches_inband_feature():
-    # audit C5-12: equal band-edge n with an in-band resonance must DISABLE the fast path
-    # (the old two-edge check false-passed and froze a wrong band-centre index)
-    import warnings
+def test_inband_bump_fixture_defeats_a_two_edge_check():
+    """AUDIT T-17/T-10: this checks the FIXTURE, not the guard -- it asserts that a substrate with
+    eps 4 -> 6 -> 4 has equal band-EDGE indices (so any two-edge dispersion check is blind to it)
+    while the band-CENTRE freeze point differs. It never calls run_pipeline, so on its own it
+    cannot tell the C5-12 fix from the code it replaced; it is kept as the fixture's precondition.
+
+    THE GUARD ITSELF is gated in tests/test_pipeline_effects.py::
+    test_inband_dispersion_bump_disables_sweep_fast_path, which drives this same fixture through
+    the real run_pipeline and is the only test in the suite that fails on the pre-fix form.
+    """
     import numpy as np
-    import pytest
     from dynameta.geometry import Design, Layer, Stack, UnitCell
     from dynameta.materials import Material, MaterialRegistry, ConstantOptical, TabulatedOptical
     from dynameta.optics.tmm_reference import end_media_indices
@@ -144,9 +149,10 @@ def test_dispersion_check_catches_inband_feature():
                electrodes=[], materials=reg)
     lams = [1.20e-6, 1.325e-6, 1.45e-6]
     # edges are equal (the old check's blind spot)...
-    ns_lo, nb_lo = end_media_indices(d, lams[0])
-    ns_hi, nb_hi = end_media_indices(d, lams[-1])
+    _, nb_lo = end_media_indices(d, lams[0])
+    _, nb_hi = end_media_indices(d, lams[-1])
     assert abs(nb_lo - nb_hi) < 1e-12
-    # ...but the band-centre (freeze point) differs -- the NEW check must flag it
+    # ...but the band-centre (freeze point) differs, which is what makes the fixture usable as a
+    # discriminator -- the flagging itself is asserted in test_pipeline_effects (see docstring).
     _, nb_c = end_media_indices(d, 0.5 * (lams[0] + lams[-1]))
     assert abs(nb_c - nb_lo) > 0.1

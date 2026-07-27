@@ -376,8 +376,12 @@ class ExtendedDrudeOptical(OpticalModel):
 
     CAUSALITY: an arbitrary gamma(omega) inserted into the Drude form is NOT guaranteed
     to yield a Kramers-Kronig-causal eps. Use check_kk(model, omega_grid) to get a KK
-    residual diagnostic (it reports; it does not enforce). Smooth, bounded, monotone
-    gamma(omega) (the ITO preset) is nearly causal; a discontinuous gamma(omega) is not.
+    residual diagnostic (it reports; it does not enforce). Measured with the finding-Q-5
+    quadrature (see check_kk's operating-envelope table): plain Drude sits at rms_norm
+    ~2.5e-4 on the shipped grid and FALLS with refinement (causal); the ITO preset holds a
+    grid-independent ~1.1e-2 -- comparable to a 2x jump in gamma(omega) -- because the
+    omega^1.5 impurity crossover is non-analytic at omega = 0, so it is "nearly causal" and
+    NOT in the causal class; a discontinuous gamma(omega) is worse still.
     """
     eps_inf:     float
     m_opt_kg:    MassOrFn
@@ -464,7 +468,7 @@ def gamma_ito_extended(omega_rad_s, *, gamma_dc_rad_s: float = 1.5e14,
     return gamma_inf_rad_s + (gamma_dc_rad_s - gamma_inf_rad_s) / (1.0 + (omega / omega_c_rad_s) ** p)
 
 
-def _maclaurin_re_from_im(omega, im_chi, h):
+def _maclaurin_re_from_im(omega, im_chi, h, *, edge_correct: bool = True, chunk: int = 0):
     """Discrete Kramers-Kronig (Maclaurin method, Ohta & Ishida, Appl. Spectrosc. 42, 952
     (1988)): reconstruct Re(chi)(omega_j) from Im(chi) on a UNIFORM grid by summing only the
     OPPOSITE-parity points (which skips the omega'=omega_j singularity of the principal value):
@@ -472,29 +476,110 @@ def _maclaurin_re_from_im(omega, im_chi, h):
         Re(chi)(w_j) = (4 h / pi) * sum_{k: (k-j) odd} w_k Im(chi)(w_k) / (w_k^2 - w_j^2).
 
     Sign is the exp(-i omega t) convention (Im(eps) >= 0 for absorption; Landau-Lifshitz form).
+
+    ENDPOINT CONSISTENCY (``edge_correct``, finding Q-5).  The sum is a MIDPOINT rule with cells of
+    width ``2h`` centred on each summed point, so the two parities of ``j`` integrate DIFFERENT
+    domains: for odd ``j`` the summed set starts at ``k = 0`` and its first cell reaches down to
+    ``w_0 - h``, while for even ``j`` it starts at ``k = 1`` and the strip ``[w_0 - h, w_1 - h]``
+    is simply MISSING.  The integrand there is ``p(w) = w Im(chi)(w)``, which for a Drude metal
+    tends to the FINITE, LARGE value ``wp^2 / gamma`` as ``w -> 0``, so the omission is not small:
+    measured on the shipped grid, the odd-``j`` points reproduce ``Re(eps)`` to ~1e-4 (exact to the
+    grid's own truncation) while the even-``j`` points are wrong by ~0.9 -- a pure PARITY ARTEFACT
+    that was the whole of the diagnostic's "causal floor" (and why the residual scaled as O(h) and
+    why the Drude DC pole was its worst case).  The correction adds each parity's own missing
+    low-edge strip ``[0, w_klo - h]`` (and, symmetrically, the missing high-edge strip) as a
+    midpoint contribution with ``p`` linearly extrapolated from the first/last two grid points.
+    Measured effect on a causal Drude at N = 8000: ``rms_norm`` 1.97e-2 -> 2.48e-4 (80x), and the
+    residual then converges at ~O(h^2) instead of O(h).
+
+    ``chunk`` only sets the row-block size of the vectorized evaluation (memory vs speed);
+    ``chunk = 0`` (the default) sizes it to keep the working set near 100 MB.
     """
     omega = np.asarray(omega, dtype=np.float64)
     im_chi = np.asarray(im_chi, dtype=np.float64)
     N = omega.size
+    h = float(h)
     idx = np.arange(N)
     w2 = omega * omega
+    p = omega * im_chi                                  # p(w) = w Im(chi)(w)
+    pref = 4.0 * h / np.pi
     re = np.empty(N, dtype=np.float64)
-    for j in range(N):
-        mask = ((idx - j) & 1) == 1
-        wk = omega[mask]
-        re[j] = (4.0 * h / np.pi) * np.sum(wk * im_chi[mask] / (wk * wk - w2[j]))
-    return re
+    step = int(chunk) if int(chunk) > 0 else max(32, min(512, 4_000_000 // max(1, N)))
+    # PERF (audit P-4): the opposite-parity mask takes only TWO distinct values over the whole
+    # sum -- the ODD columns for an even ``j``, the EVEN columns for an odd ``j`` -- so the rows
+    # are processed ONE PARITY AT A TIME against a single broadcast (1,N) column mask.  That
+    # removes, per block, the int64 ``idx - j`` precursor, the ``& 1``/``== 1`` passes, the
+    # boolean mask itself and both ``np.where`` temporaries, leaving one broadcast subtract, one
+    # divide, one masked zero-fill and the SAME per-row reduction, all in one reused buffer.
+    # BYTE-IDENTICAL by construction: each row holds exactly the values the mask/where pair
+    # produced (the same-parity columns are zeroed after the divide instead of being divided by
+    # 1.0 and then discarded), and every row is still summed on its own contiguous (N,) block,
+    # i.e. through the identical pairwise reduction.  ``errstate`` only silences the 1/0 on the
+    # zeroed diagonal, which the pre-P-4 form divided by 1.0 instead.
+    zero_cols = ((idx & 1) == 0, (idx & 1) == 1)        # columns to ZERO for j even / j odd
+    buf = np.empty((min(step, max(N, 1)), N), dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for par in (0, 1):
+            w2_par = w2[par::2]                         # the j of this parity (strided view)
+            re_par = re[par::2]                         # write-through view into `re`
+            zc = zero_cols[par][None, :]
+            for a in range(0, w2_par.size, step):
+                b = min(a + step, w2_par.size)
+                blk = buf[:b - a]
+                np.subtract(w2[None, :], w2_par[a:b, None], out=blk)        # den
+                np.divide(p[None, :], blk, out=blk)                         # p / den
+                np.copyto(blk, 0.0, where=zc)                               # same-parity -> 0
+                re_par[a:b] = pref * blk.sum(axis=1)
+    if not edge_correct or N < 4:
+        return re
+
+    # --- both parities must integrate the SAME domain ---------------------------------------
+    # a_lo is SIGNED: > 0 means the strip [0, a_lo) is MISSING (add it); < 0 means the first cell
+    # reached below omega = 0 and, since p(w) = w Im(w) is EVEN, the strip [0, |a_lo|) was counted
+    # TWICE (subtract it).  a_lo == 0 is the exactly-covered case (grids starting at omega_0 = h).
+    slope_lo = (p[1] - p[0]) / (omega[1] - omega[0])
+    k_lo = np.where((idx & 1) == 1, 0, 1)               # lowest summed index for each j
+    a_lo = omega[k_lo] - h
+    mid_lo = 0.5 * np.abs(a_lo)
+    p_lo = p[0] + slope_lo * (mid_lo - omega[0])        # linear extrapolation of p toward DC
+    den_lo = mid_lo * mid_lo - w2
+    corr_lo = np.where((a_lo != 0.0) & (den_lo != 0.0),
+                       (2.0 / np.pi) * a_lo * p_lo / np.where(den_lo != 0.0, den_lo, 1.0), 0.0)
+
+    last = N - 1
+    k_hi = np.where(((last - idx) & 1) == 1, last, last - 1)       # highest summed index
+    b_hi = omega[k_hi] + h
+    w_top = omega[last] + h
+    wid_hi = np.maximum(0.0, w_top - b_hi)              # uncovered strip [b_hi, w_top)
+    mid_hi = 0.5 * (b_hi + w_top)
+    den_hi = mid_hi * mid_hi - w2
+    corr_hi = np.where((wid_hi > 0.0) & (den_hi != 0.0),
+                       (2.0 / np.pi) * wid_hi * p[last] / np.where(den_hi != 0.0, den_hi, 1.0),
+                       0.0)
+    return re + corr_lo + corr_hi
 
 
-def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2) -> dict:
+def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2,
+             edge_correct: bool = True, self_calib: bool = True) -> dict:
     """Kramers-Kronig causality DIAGNOSTIC for a frequency-domain OpticalModel (roadmap 2.3).
 
     An arbitrary gamma(omega) in the Drude form need not be causal. This reconstructs
     Re(eps) from Im(eps) via the Maclaurin discrete KK transform on a WIDE UNIFORM omega
     grid and compares it to the model's OWN Re(eps). It REPORTS a residual; it does NOT
     enforce (a caller decides). The diagnostic discriminates: the residual is SMALL for a
-    causal model (plain Drude, the smooth ITO extended-Drude preset) and LARGE for an
-    acausal gamma(omega) such as a step (a discontinuous eps cannot satisfy KK).
+    causal model (plain Drude, a Lorentz oscillator, the smooth ITO extended-Drude preset)
+    and LARGE for an acausal eps (a discontinuous gamma(omega); a sign-flipped Im).
+
+    QUADRATURE (finding Q-5).  The bare Maclaurin sum was only FIRST-order accurate here: on a
+    causal Drude its normalized residual scaled as O(h), i.e. the old "causal floor" was pure
+    quadrature error carrying NO causality information, and the Drude DC pole was its worst case
+    (a manifestly causal 2-oscillator Lorentz scored ~330x BELOW the shipped "causal reference"
+    on the same grid, so the reference itself destroyed the discrimination). The cause was a
+    PARITY ARTEFACT at the low-frequency edge -- see :func:`_maclaurin_re_from_im`, which now makes
+    both parities integrate the same domain. Measured on a causal Drude at N = 8000 the residual
+    drops 80x and then converges at ~O(h^2), so the causal floor FALLS with grid refinement while
+    a genuine acausality does not: the causal/acausal ordering is now grid-independent, and no
+    external "reference model" is needed.
 
     Args:
       model       : any OpticalModel (eps(lambda_m, n_m3=...) contract).
@@ -507,10 +592,80 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
                     the DC-pole edge skipped).
       dc_skip     : grid points skipped at the low-omega edge when auto-picking the band
                     (the DC pole is under-resolved on a uniform grid).
+      edge_correct: endpoint-consistent Maclaurin variant (default True). False reproduces the
+                    legacy parity-asymmetric sum -- kept ONLY to exhibit the old O(h) floor.
+      self_calib  : also run the transform on the step-DOUBLED sub-grid (``omega[::2]``) to get a
+                    data-driven estimate of the remaining quadrature error (default True; set
+                    False to save ~25% of the runtime when only ``rms_norm`` is wanted).
 
     Returns a dict with arrays (omega, re_model, re_kk, residual, band_mask), eps_inf_est,
     the normalization scale, and the headline diagnostics max_norm / rms_norm (residual over
     the band, normalized by the dispersive Re swing) plus raw max_abs / rms_abs.
+
+    HOW TO READ THE RESULT (finding Q-5).  ``rms_norm`` is the headline: a causal model's residual
+    FALLS with grid refinement (~O(h^2)) while a genuine acausality holds a fixed residual, so
+    REFINING the grid can only widen the separation. There is no need for an external "causal
+    reference model" (the shipped gate used to compare against plain Drude, the single worst causal
+    reference there is).
+
+    RESOLUTION ENVELOPE (fix-verify W1 item 5 -- the claim above holds only INSIDE it).  Grid
+    refinement can never invert the ranking, but that is a statement about refining FROM a resolved
+    grid; it is NOT a licence to compare residuals on a COARSE one, and the ranking really does
+    invert below about N = 6000 on the reference grid.  The Maclaurin quadrature has to RESOLVE the
+    sharpest feature of Im(eps): a Lorentz line of FWHM ``gamma`` needs ``gamma / h`` grid points
+    across it, and under-resolving it inflates a perfectly CAUSAL model's residual.  Measured on
+    the reference grid (``wmax = 80 wp``, band [0.4 wp, 5 wp]) with the 2-oscillator Lorentz whose
+    narrowest line is ``gamma = 1e14``:
+
+      N        h          gamma/h   lorentz2 rms_norm   worst acausal separation
+      2000     8.53e13    1.17      4.56e-2             NONE -- the causal Lorentz outscores the
+                                                        10x gamma jump (4.66e-2)
+      4000     4.27e13    2.35      7.79e-3             NONE -- level with the 2x jump (7.93e-3)
+      6000     2.84e13    3.52      1.11e-3             7.2x on the 2x jump
+      8000     2.13e13    4.69      1.76e-4             39x   (and the drude floor takes over)
+      16000    1.07e13    9.38      1.92e-5             150x
+
+    So: keep ``gamma_min / h >= ~5`` for every line in the model.  ``feature_pts`` in the returned
+    dict is a MODEL-FREE estimate of that ratio (the sharpest curvature of the sampled Im(eps)
+    inside the band, read as a Lorentzian width in grid points), and a ``RuntimeWarning`` fires
+    below ``_KK_MIN_FEATURE_PTS``.  A discontinuous ``gamma(omega)`` is of course never resolved
+    (``feature_pts`` pinned near 3-5 at every N) -- that is itself the tell, and its ``rms_norm``
+    stays flat under refinement while a resolved causal model's falls.
+
+    Secondary keys:
+      h, h_rel         : the grid step [rad/s] and h / (omega[-1] - omega[0]).
+      quad_floor_norm  : rms over the band of the difference between the step-``h`` and step-
+                         ``2h`` reconstructions, normalized by the same scale -- a data-driven
+                         estimate of the grid's own quadrature error. ``nan`` when
+                         ``self_calib=False``.
+      causality_ratio  : ``rms_norm / quad_floor_norm``, i.e. how far the residual sits above the
+                         grid's quadrature error. A HINT, not a gate: once the residual is
+                         dominated by the finite-grid ``eps_inf_est`` offset rather than by
+                         quadrature (which happens quickly for a well-resolved Lorentz), the
+                         ratio saturates and can exceed a genuinely acausal model's. Gate on
+                         ``rms_norm``.
+      rms_norm_per_h   : ``rms_norm / h_rel`` -- the legacy O(h) floor indicator, reported so a
+                         caller can see at a glance whether a residual is still quadrature-limited
+                         (roughly grid-INVARIANT for an O(h)-limited residual; it FALLS with
+                         refinement now, from ~158 to ~2.0 on a Drude at N = 8000).
+
+    OPERATING ENVELOPE (measured; grid ``linspace(wmax/N, wmax, N)``, ``wmax = 80 wp``, band
+    [0.4 wp, 5 wp], ITO-like Drude).  ``rms_norm``:
+
+      model                        N = 8000     N = 32000    verdict
+      plain Drude                  2.48e-4      2.95e-5      causal (falls ~O(h^2))
+      2-oscillator Lorentz         7.75e-4      1.47e-5      causal (falls)
+      gamma_ito_extended preset    1.09e-2      1.07e-2      NOT in the causal class: a genuine,
+                                                             grid-independent ~1% residual (the
+                                                             omega^1.5 crossover is non-analytic
+                                                             at omega = 0)
+      2x jump in gamma(omega)      9.82e-3      9.57e-3      acausal (flat)
+      10x jump in gamma(omega)     2.32e-2      1.72e-2      acausal (flat)
+      Lorentz with Im sign flipped 6.01e-1      6.00e-1      acausal (flat)
+
+    So a 2x discontinuity is separated from every causal model by >= 12x at the shipped grid and
+    >= 325x at 4x the grid. Discrimination is limited only by how far the causal floor has fallen:
+    refine the grid to resolve smaller violations.
     """
     omega = np.asarray(omega_grid, dtype=np.float64).ravel()
     if omega.ndim != 1 or omega.size < 16:
@@ -528,8 +683,17 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
     re_model = eps.real
     im_chi = eps.imag                                   # Im(eps) = Im(chi); eps_inf is real
     eps_inf_est = float(re_model[-1])                   # chi -> 0 as omega -> inf
-    re_kk = eps_inf_est + _maclaurin_re_from_im(omega, im_chi, h)
+    chi = _maclaurin_re_from_im(omega, im_chi, h, edge_correct=edge_correct)
+    re_kk = eps_inf_est + chi
     residual = re_model - re_kk
+    # step-DOUBLED companion on omega[::2] (same rule, same endpoint treatment) -> the grid's own
+    # quadrature-error estimate, evaluated on the shared points.
+    quad_err = np.full(omega.size, np.nan, dtype=np.float64)
+    if self_calib and omega.size >= 8:
+        sub = omega[::2]
+        chi2 = _maclaurin_re_from_im(sub, im_chi[::2], float(sub[1] - sub[0]),
+                                     edge_correct=edge_correct)
+        quad_err[::2] = chi[::2] - chi2
     if metric_band is not None:
         lo, hi = float(metric_band[0]), float(metric_band[1])
         band = (omega >= lo) & (omega <= hi)
@@ -541,13 +705,73 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
     if not (scale > 0.0):
         scale = 1.0
     r = residual[band]
+    rms_norm = float(np.sqrt(np.mean(r * r)) / scale)
+    q = quad_err[band]
+    q = q[np.isfinite(q)]
+    quad_floor_norm = (float(np.sqrt(np.mean(q * q)) / scale) if q.size else float("nan"))
+    span = float(omega[-1] - omega[0])
+    h_rel = (h / span) if span > 0.0 else float("nan")
+    if np.isfinite(quad_floor_norm) and quad_floor_norm > 0.0:
+        causality_ratio = float(rms_norm / quad_floor_norm)
+    elif np.isfinite(quad_floor_norm):
+        causality_ratio = float("inf")
+    else:
+        causality_ratio = float("nan")
+    feature_pts = _kk_feature_pts(im_chi, band)
+    if feature_pts < _KK_MIN_FEATURE_PTS:
+        warnings.warn(
+            "check_kk: the sharpest feature of Im(eps) inside the metric band spans only about "
+            "{:.2f} grid points (h = {:.4g} rad/s, N = {}); the Maclaurin quadrature needs >= {:g} "
+            "to resolve a line, and UNDER-RESOLVING a line inflates the residual of a perfectly "
+            "CAUSAL model. rms_norm = {:.4e} is therefore NOT comparable against another model's "
+            "on this grid -- on the reference grid the ranking inverts below N ~ 6000 (a causal "
+            "2-oscillator Lorentz with gamma/h = 2.3 scored 7.8e-3, level with an acausal 2x jump "
+            "in gamma). Refine the grid, or narrow the band away from the sharp feature. A "
+            "DISCONTINUOUS gamma(omega) never resolves at any N -- that is itself the tell; "
+            "confirm by checking whether rms_norm falls under refinement.".format(
+                feature_pts, h, omega.size, _KK_MIN_FEATURE_PTS, rms_norm),
+            RuntimeWarning, stacklevel=2)
     return {
         "omega": omega, "re_model": re_model, "re_kk": re_kk, "residual": residual,
         "band_mask": band, "eps_inf_est": eps_inf_est, "scale": scale,
         "max_abs": float(np.max(np.abs(r))), "rms_abs": float(np.sqrt(np.mean(r * r))),
         "max_norm": float(np.max(np.abs(r)) / scale),
-        "rms_norm": float(np.sqrt(np.mean(r * r)) / scale),
+        "rms_norm": rms_norm,
+        "h": h, "h_rel": h_rel,
+        "quad_floor_norm": quad_floor_norm,
+        "causality_ratio": causality_ratio,
+        "rms_norm_per_h": float(rms_norm / h_rel) if h_rel > 0.0 else float("nan"),
+        "feature_pts": feature_pts,
+        "edge_correct": bool(edge_correct),
     }
+
+
+# Minimum resolved width, in grid points, of the sharpest Im(eps) feature inside the metric band
+# (fix-verify W1 item 5).  Below this the quadrature error of a CAUSAL model swamps the causality
+# signal and the causal/acausal ranking can invert; see check_kk's RESOLUTION ENVELOPE table.
+_KK_MIN_FEATURE_PTS = 5.0
+
+
+def _kk_feature_pts(im_chi: np.ndarray, band: np.ndarray) -> float:
+    """MODEL-FREE width, in grid points, of the sharpest feature of ``Im(eps)`` inside ``band``.
+
+    A Lorentzian of FWHM ``G`` sampled at step ``h`` has, at its peak, the second difference
+    ``y[k-1] - 2 y[k] + y[k+1] ~= -2 A (2h/G)^2``, so the largest band-normalized second difference
+    ``rho = max|d2| / max|y|`` inverts to ``G/h ~= sqrt(8/rho)``.  Restricted to the metric band on
+    purpose: the low-omega Drude edge (``Im ~ 1/omega^3``) is the sharpest thing on any uniform
+    grid, it is never resolved, and check_kk already excludes it from the band."""
+    y = np.abs(np.asarray(im_chi, dtype=np.float64))
+    if y.size < 3:
+        return float("inf")
+    d2 = np.abs(y[2:] - 2.0 * y[1:-1] + y[:-2])
+    inner = np.asarray(band, dtype=bool)[1:-1]
+    if not np.any(inner):
+        return float("inf")
+    ymax = float(np.max(y[np.asarray(band, dtype=bool)]))
+    if not (ymax > 0.0):
+        return float("inf")
+    rho = float(np.max(d2[inner])) / ymax
+    return float(np.sqrt(8.0 / rho)) if rho > 0.0 else float("inf")
 
 
 def _kk_auto_band(omega, re_model, dc_skip):

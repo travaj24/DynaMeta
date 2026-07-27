@@ -192,6 +192,48 @@ Strickland-Mourou (CPA).
   shape(omega). GAIN NARROWING (parabolic band) obeys 1/Omega_out^2 = 1/Omega_in^2 + G0/Omega_g^2
   to 0.01% -- the effect that bounds the recompressed pulse. Couple e_sat to
   dynamics.saturation_energy, g_small to the CW inversion.
+- **Frantz-Nodvik temporal reshaping (Phase 13, OPT-IN; audit A-10)**: the law above is the CW
+  one -- `E` is the TOTAL pulse energy at that z, one scalar over the whole time window, so it
+  cannot reshape a pulse. Correct for a pulse long against the upper-state lifetime; in the
+  short-pulse (CPA) regime it under-extracts by up to 27% (measured, mid-regime) and produces no
+  edge asymmetry at all. `SaturableGain(frantz_nodvik=True)` applies sec.8's instantaneous law
+  G(t) = G0/(G0-(G0-1)exp(-U_in(t)/E_sat)) in the TIME domain each split-step half-step, with
+  G0 = exp(g_small dz) the sub-step small-signal gain; the map is linear in u = expm1(U/E_sat)
+  with factor G0, so slicing the fiber is exact. A non-flat band composes as a RELATIVE filter
+  exp[0.5 g_realized (shape(omega)-1) dz] at the FN-realized (saturated) gain, so narrowing
+  stops as the amplifier saturates and a flat band is exactly the identity. Finite
+  `recovery_time_s` integrates dg/dt = (g0-g)/tau - g P/E_sat and restores the CW law
+  g_small/(1 + P tau/E_sat) for pulses long against tau. Measured: E_out tracks
+  frantz_nodvik_output_energy to 2e-6 (2nd-order in dt), a direct method-of-lines ODE integration
+  of the PDE pair to 1e-7..2e-6, 1-step == 400-step to 5e-5, leading/trailing gain ratio 141 on a
+  flat top (CW: 1.000) with the centroid moving 26 ps EARLIER, and the CPA chain gains +1.09 dB
+  over the CW law on the same seed. OFF by default and byte-identical when off. A negative
+  `g_small_per_m` -- a saturable ABSORBER -- is legal on all three branches (CW, tau = inf,
+  finite tau; audit W5-3 fixed the last, which returned an all-NaN field).
+  - *Order (audit W5-1/W5-2).* `recovery_time_s = inf` is the EXACT slab map, so the split keeps
+    its O(h^2) (measured 2.04 with beta2 = 1 ps^2/m and gamma = 3e-4 /W/m in the same step). A
+    FINITE `recovery_time_s` switches to the thin-slab exponential-Euler gain, which is O(h) and
+    drops the WHOLE propagator to first order (measured 1.06 on the same case; the branch-to-
+    branch gap converges at order 1.00 over a 64x refinement, not 2). Spell "no recovery" as
+    `np.inf`, never 1e30: the huge-but-finite value takes the first-order branch and disagrees
+    with the exact one by 0.39% at n_steps = 100, falling only as 1/n_steps.
+  - *Window containment (audit W5-4).* The FN factor builds U(t) = INT P dt' from the LEFT EDGE
+    of the periodic FFT window, so it is the one operator here that is NOT roll-equivariant: a
+    pulse straddling the boundary has its leading part treated as trailing (saturated instead of
+    unsaturated), a silent 43.8% energy error on a half-window cyclic shift, while the CW path is
+    exact under the same roll. FN mode now measures the edge power each half-step and warns
+    (RuntimeWarning) once above 1e-3 of the peak. Keep the pulse centred and the window wide.
+  - *Relative band filter accuracy (audit W5-5).* The exact homogeneous system is
+    dP_i/dz = s_i n P_i with dn/dt = -(n/E_sat) SUM_j s_j P_j -- one shared inversion depleted by
+    the SHAPE-WEIGHTED total power. The filter reproduces the log-gain RATIO s_i/s_j exactly (the
+    gain-narrowing physics), but the FN factor saturates on the UNWEIGHTED total power at the
+    centre gain, so wing energy over-saturates the model and it UNDER-extracts. Measured against a
+    two-line RK4 oracle (parabolic band, Omega = 3e13 rad/s): exact to 5e-5 with all energy at
+    the band centre, -0.69% at the shipped CPA example's exposure (mean shape 0.975,
+    E_in = 0.5 E_sat -- pinned as a regression in tests/test_fiber_amp.py), -0.91% at the same
+    band with E_in = 3 E_sat, and -13.4% in a designed worst case (half the energy at
+    shape = 0.305, E_in = 3 E_sat). Use a flat band or the CW path if the wing energetics must be
+    better than that.
 - **CPA chain (Phase 14)**: seed -> stretch(+GDD) -> amplify(GNLSE) -> compress(-GDD). Linear
   recompression recovers a transform-limited pulse (Strehl 1.0000, exact FWHM); stretching lowers
   the in-fiber peak power and hence the B-integral; and the B-integral is the compression
