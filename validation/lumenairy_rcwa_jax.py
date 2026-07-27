@@ -20,8 +20,16 @@ GATE B (gradient correctness vs the independent path): jax.grad of R through rcw
 GATE C (gradient nonzero + descent sanity): two half-Newton gradient-descent steps on
         |R(eps) - R_target|^2 (eager grad) strictly reduce the objective.
 GATE D (PMM design twin): pmm_stack_RT on the same lamellar geometry (analytic segments)
-        matches make_lumenairy_pmm_solver < 1e-9, and jax.grad w.r.t. the ridge eps AND the
-        WAVELENGTH match Richardson FD of the non-JAX PMM bridge < 1e-5 relative.
+        matches make_lumenairy_pmm_solver < 1e-9, and jax.grad w.r.t. the ridge eps matches
+        Richardson FD of the non-JAX PMM bridge < 1e-5 relative. The WAVELENGTH leg is
+        version-conditional: lumenairy >= 5.30 REFUSES a traced wavelength on the PMM
+        differentiable path (its propagating-order set m_prop = floor(n_max*period/wavelength)
+        is selected FROM the wavelength and cannot be read from a tracer -- lumenairy's W7 F-E
+        measurement: a jitted traced solve silently used a SMALLER order set, 4.2% forward /
+        20.7% wrong d/d(wavelength)), so the gate pins the NotImplementedError refusal as the
+        contract and pins wavelength SENSITIVITY by Richardson FD at concrete wavelengths
+        through BOTH code paths (twin FD == bridge FD). Pre-5.30 keeps the original traced
+        d/d(wavelength) AD-vs-FD pin (valid in this fixture, between order cutoffs).
 GATE E (D1 uniform-layer STACK twin): a physically-uniform slab passes straight to
         add_layer(eps=) -- the twin keeps a 'uniform' layer (no lifted constant-cell
         eigensolve) and jax.grad of R w.r.t. the uniform eps AND the WAVELENGTH (a stack-twin
@@ -206,17 +214,50 @@ def main():
     Rpj = float(twin_pmm_R(jnp.asarray(EPS_RIDGE), jnp.asarray(LAM)))
     par_p = abs(Rpb - Rpj)
     gp_e = float(jax.grad(lambda e: twin_pmm_R(e, jnp.asarray(LAM)))(jnp.asarray(EPS_RIDGE)))
-    gp_l = float(jax.grad(lambda w: twin_pmm_R(jnp.asarray(EPS_RIDGE), w))(jnp.asarray(LAM)))
     fdp_e = _richardson(lambda e: bridge_pmm_R(e, LAM), EPS_RIDGE, 1e-5)
-    fdp_l = _richardson(lambda w: bridge_pmm_R(EPS_RIDGE, w), LAM, 2e-12)
     relp_e = abs(gp_e - fdp_e) / (abs(fdp_e) + 1e-30)
-    relp_l = abs(gp_l - fdp_l) / (abs(fdp_l) + 1e-30)
-    g_d = bool(par_p < 1e-9 and relp_e < 1e-5 and relp_l < 1e-5
-               and abs(gp_e) > 0.0 and abs(gp_l) > 0.0)
-    ok = ok and g_d
-    print("[rjx] GATE D: PMM twin==bridge {:.2e}; AD vs bridge-FD rel: d/d(eps) {:.2e}, "
-          "d/d(wavelength) {:.2e} -> {}".format(par_p, relp_e, relp_l,
-                                                "PASS" if g_d else "FAIL"), flush=True)
+
+    import lumenairy as _lum_mod
+    from dynameta.optics.lumenairy_bridge._common import parse_version as _pv
+    if _pv(_lum_mod.__version__) >= (5, 30, 0):
+        # 5.30 (lumenairy W7 F-E): the PMM differentiable path REFUSES a traced wavelength --
+        # see the module docstring. Pin the refusal (a regression back to the silent
+        # smaller-order-set solve must turn this gate red; NOTE the FD leg below CANNOT catch
+        # that regression -- at concrete wavelengths the pre-fix code was bit-exact, verified:
+        # this fixture's traced and numpy order sets coincide -- so `refused` is the whole
+        # W7 pin), then pin wavelength SENSITIVITY with concrete-wavelength Richardson FD
+        # through BOTH engine paths. Step 2e-10: measured (fix-verification 2026-07-27) the
+        # paths' forward parity is 2.7e-14 and every step 2e-12..2e-8 lands rel <= 4.7e-7,
+        # so 2e-10 sits mid-plateau (measured rel 5.4e-9) with no cliff on either side.
+        try:
+            jax.grad(lambda w: twin_pmm_R(jnp.asarray(EPS_RIDGE), w))(jnp.asarray(LAM))
+            refused = False                       # solved -- the 5.30 contract regressed
+        except NotImplementedError as exc:
+            refused = "TRACED wavelength" in str(exc)   # the W7 F-E refusal, not a look-alike
+        fdp_l = _richardson(lambda w: bridge_pmm_R(EPS_RIDGE, w), LAM, 2e-10)
+        fdt_l = _richardson(
+            lambda w: float(twin_pmm_R(jnp.asarray(EPS_RIDGE), jnp.asarray(w))), LAM, 2e-10)
+        relp_l = abs(fdt_l - fdp_l) / (abs(fdp_l) + 1e-30)
+        g_d = bool(par_p < 1e-9 and relp_e < 1e-5 and abs(gp_e) > 0.0
+                   and refused and relp_l < 1e-4 and abs(fdp_l) > 0.0)
+        ok = ok and g_d
+        print("[rjx] GATE D: PMM twin==bridge {:.2e}; AD vs bridge-FD rel: d/d(eps) {:.2e}; "
+              "traced-wavelength refused (>=5.30 contract) {}; concrete-FD twin==bridge "
+              "d/d(wavelength) rel {:.2e} -> {}".format(
+                  par_p, relp_e, refused, relp_l, "PASS" if g_d else "FAIL"), flush=True)
+    else:
+        # pre-5.30 surface: the traced wavelength solves, and in THIS fixture (between order
+        # cutoffs) its gradient is valid -- the original pin, unchanged.
+        gp_l = float(jax.grad(lambda w: twin_pmm_R(jnp.asarray(EPS_RIDGE), w))(
+            jnp.asarray(LAM)))
+        fdp_l = _richardson(lambda w: bridge_pmm_R(EPS_RIDGE, w), LAM, 2e-12)
+        relp_l = abs(gp_l - fdp_l) / (abs(fdp_l) + 1e-30)
+        g_d = bool(par_p < 1e-9 and relp_e < 1e-5 and relp_l < 1e-5
+                   and abs(gp_e) > 0.0 and abs(gp_l) > 0.0)
+        ok = ok and g_d
+        print("[rjx] GATE D: PMM twin==bridge {:.2e}; AD vs bridge-FD rel: d/d(eps) {:.2e}, "
+              "d/d(wavelength) {:.2e} -> {}".format(par_p, relp_e, relp_l,
+                                                    "PASS" if g_d else "FAIL"), flush=True)
 
     # ---- GATE E: uniform-layer STACK twin traces eps AND wavelength (D1, lumenairy 5.22) --
     # A physically-uniform slab passes straight to add_layer(eps=): the twin keeps a raw
