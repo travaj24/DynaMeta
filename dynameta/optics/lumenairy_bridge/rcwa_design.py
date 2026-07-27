@@ -28,12 +28,24 @@ entry point below scopes itself honestly and raises for the rest):
   tests/unit/test_v5_10_3_rcwa_2d_autodiff.py (eps-cell + depth AD == FD, vmap forward,
   vmap-of-grad, Hessian).
 - PMMStack.solve (1-D lamellar spectral element -- no Fourier-factorization accuracy floor):
-  traced segment eps (scalar or in-plane (3, 3), re AND im), layer thicknesses, wavelength,
-  angle, half-space indices. STATIC: period, segment WIDTHS (frozen union grid), degree,
-  order count; slant / out-of-plane tensors / stabilize / retain_internal raise upstream.
+  traced segment eps (scalar or in-plane (3, 3), re AND im), layer thicknesses, angle,
+  half-space indices. STATIC: period, segment WIDTHS (frozen union grid), degree, order
+  count, and -- lumenairy >= 5.30 (W7 F-E) -- the WAVELENGTH: PMM sizes its propagating-order
+  set FROM the wavelength (m_prop = floor(n_max*period/wavelength)), which cannot be read
+  from a tracer, so the differentiable path raises NotImplementedError on a traced wavelength
+  instead of silently solving a smaller order set (lumenairy measured 4.2% forward / 20.7%
+  wrong d/d(wavelength) under jit). Wavelength sensitivity: finite differences over concrete
+  wavelengths (gate-pinned twin==bridge) or PMMStack.solve_vs_wavelength on the numpy side;
+  the RCWAStack twin still traces the wavelength (its order count is the explicit static
+  n_orders). Slant / out-of-plane tensors / stabilize / retain_internal raise upstream.
   Upstream pin: tests/unit/test_v5_14_2_jax_stacks.py. The PMM twin is SHIPPED (not skipped):
-  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces exactly the
-  source/half-space parameters the RCWAStack twin cannot -- the two are complementary.
+  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the angle
+  and half-space parameters the RCWAStack twin cannot -- the two are complementary. ANGLE
+  CAVEAT (measured on 5.30.0, fix-verification 2026-07-27): the angle gradient is correct
+  OFF-normal (AD==FD to ~6e-7 at theta 0.15-0.4 rad) but INVALID at exactly theta = 0 -- the
+  +/-m order degeneracy breaks lumenairy's eig VJP there (AD dR/dtheta = 4.1e-3 on a
+  mirror-symmetric lossless fixture where symmetry AND energy conservation both force 0;
+  clean by theta ~ 1e-4). Differentiate the angle away from exact normal incidence.
 
 Convention: identical on both sides (public exp(-i omega t), Im(eps) > 0 lossy, metres,
 radians). Efficiency rows are keyed INCIDENT lab E_x (row 0) / E_y (row 1) -- never relabel
@@ -325,8 +337,9 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
     if _is_jaxish(period):
         raise TypeError(
             "{}: period must be a concrete number (the PMM union grid / segment walls are "
-            "frozen NumPy geometry; only the segment eps VALUES, thicknesses, wavelength, "
-            "angle and half-space indices trace).".format(fn_name))
+            "frozen NumPy geometry; only the segment eps VALUES, thicknesses, angle and "
+            "half-space indices trace -- the wavelength is static too on lumenairy >= 5.30, "
+            "see the docstring).".format(fn_name))
     st = lum.PMMStack(period, n_substrate=n_substrate, n_superstrate=n_superstrate,
                       degree=int(degree), n_orders=int(n_orders))
     for spec, thickness in layers:
@@ -357,11 +370,15 @@ def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     `layers` = [(spec, thickness), ...] superstrate-side first; spec is either a segment list
     [(width_fraction, eps), ...] (widths STATIC and summing to 1; eps scalar or in-plane
     (3, 3) tensor) or a bare eps for a uniform layer. Gradients flow through every jax-typed
-    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- wavelength, angle and the
-    half-space indices. STATIC: period, widths, degree, n_orders. Out-of-plane tensors /
-    slants raise upstream (lumenairy's own guards). NOTE the traced-wavelength caveat
-    (lumenairy pmm/_jax_stack.py): the far-field order set is sized from concrete numbers, so
-    wavelength gradients are valid BETWEEN order cutoffs (Wood anomalies)."""
+    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- the angle (OFF-normal
+    only: at exactly angle=0 the eig VJP hits the +/-m degeneracy and the angle gradient is
+    invalid, see the module docstring) and the half-space indices. STATIC: period, widths,
+    degree, n_orders, and (lumenairy >= 5.30) the
+    WAVELENGTH -- PMM sizes its propagating-order set from the wavelength, so the
+    differentiable path raises NotImplementedError on a traced one rather than silently
+    solving a smaller order set (see the module docstring); use concrete-wavelength finite
+    differences for wavelength sensitivity. Out-of-plane tensors / slants raise upstream
+    (lumenairy's own guards)."""
     _require_halfspace_keywords("pmm_stack_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     _reject_row(row, "pmm_stack_RT")                                    # audit V-8

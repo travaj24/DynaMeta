@@ -5,14 +5,17 @@ Berreman backends imported its underscore helpers, and bor_backend copy-pasted t
 gate (drifting to its own floor). The shared surface now lives HERE under public names;
 rcwa_backend keeps underscore aliases for back-compat.
 
-ONE version floor (VERSION_FLOOR): the bridge is VERIFIED against lumenairy 5.22.x only --
+ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.30.x span --
 every audited path (the C5-1 asymmetric-profile gates, C4-2 conical guards, per-layer
 absorption, BOR, Berreman OOP, the D1 JAX-twin traced-source/uniform-eps surface, the A2
 public RCWAStack.layers accessor) was exercised against the installed 5.22 source, and
-nothing below it was ever tested. The old per-backend floors (5.14.2 / 5.14.4 / 5.16.0)
-predate all of that and advertised support that was never demonstrated. parse_version
-tolerates pre/post-release suffixes ('5.22.0rc1' -> (5, 22, 0)); the previous
-tuple(int(p) ...) parse -- copy-pasted x3 -- crashed on them.
+nothing below it was ever tested; the gate set was re-run against 5.30.0 (2026-07-27), whose
+one deliberate surface change -- PMM's differentiable path refusing a traced wavelength --
+is pinned version-conditionally (see rcwa_design.py and VERSION_VERIFIED_MAX below). The old
+per-backend floors (5.14.2 / 5.14.4 / 5.16.0) predate all of that and advertised support
+that was never demonstrated. parse_version tolerates pre/post-release suffixes
+('5.22.0rc1' -> (5, 22, 0)); the previous tuple(int(p) ...) parse -- copy-pasted x3 --
+crashed on them.
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
 incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
@@ -84,14 +87,16 @@ def require_halfspace_keywords(fn_name: str, legacy_positional, **named):
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
 VERSION_FLOOR = (5, 22, 0)
-# SOFT CEILING (finding Q-16). The floor states what was VERIFIED; it said nothing about newer
-# releases, and the development environment had already run seven minor versions past it (5.29
-# against a 5.22 verification, spanning new propagators and a carrier-backend rework) in
-# complete silence. This is the (major, minor) of the last release the bridge gates were
-# actually re-run against; above it the bridge still runs -- lumenairy is backward compatible in
-# practice and refusing would be worse -- but says so ONCE per process. Bumping this is the
+# SOFT CEILING (finding Q-16). The floor states the OLDEST verified surface; this is the
+# (major, minor) of the NEWEST release the bridge gates were re-run against. Re-verified at
+# 5.30.0 (2026-07-27): all 5 lumenairy validation gates + the bridge pytest surface, including
+# the one deliberate 5.30 contract change the re-run surfaced -- PMM's differentiable path now
+# REFUSES a traced wavelength (W7 F-E; see rcwa_design.py and the version-conditional GATE D
+# in validation/lumenairy_rcwa_jax.py). Above the ceiling the bridge still runs -- lumenairy
+# is backward compatible in practice and refusing would be worse -- but says so ONCE per
+# process (a RuntimeWarning naming both versions). Bumping this is the
 # CHEAP half of the same correctness work: re-run validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 22)
+VERSION_VERIFIED_MAX = (5, 30)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
@@ -140,7 +145,7 @@ def require_lumenairy():
             "lumenairy >= {} required (found {}); the bridge's audited fixes (graded-profile "
             "slab order, conical guards, per-layer absorption, Berreman OOP-oblique, BOR, the "
             "D1 JAX-twin traced-source/uniform-eps surface, the A2 public RCWAStack.layers "
-            "accessor) were validated against the 5.22 surface only -- older releases were "
+            "accessor) were validated on the 5.22..5.30 span only -- older releases were "
             "never exercised. pip install -U lumenairy".format(
                 ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
     _warn_above_ceiling(lumenairy.__version__)
