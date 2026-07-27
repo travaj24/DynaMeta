@@ -74,6 +74,30 @@ def _public_names(mods):
             yield m, name
 
 
+_OPTIONAL_UNRESOLVED = object()
+
+
+def _resolve_public_name(m, name):
+    """getattr through a PEP-562 lazy re-export facade. Accessing such a name IMPORTS its
+    backing module, so on a leg without an optional extra the access raises the chained
+    optional-dep ImportError (hasattr/getattr do NOT swallow it -- only AttributeError).
+    Returns the object, or _OPTIONAL_UNRESOLVED when the failure chain names a declared
+    optional package; re-raises anything else (a genuinely broken re-export must still fail).
+    Caught on the second PR-6 CI run -- the module WALK was already chain-aware, the per-name
+    resolution was not."""
+    try:
+        return getattr(m, name)
+    except ImportError as exc:
+        link, seen = exc, set()
+        while link is not None and id(link) not in seen:
+            seen.add(id(link))
+            missing = (getattr(link, "name", None) or "").split(".")[0]
+            if isinstance(link, ImportError) and missing in _OPTIONAL:
+                return _OPTIONAL_UNRESOLVED
+            link = link.__cause__ or link.__context__
+        raise
+
+
 @pytest.fixture(scope="module")
 def surface():
     mods, skipped = _walk_modules()
@@ -99,7 +123,9 @@ def test_every_all_entry_exists_and_is_declared_once(surface):
         all_ = list(getattr(m, "__all__", ()) or ())
         for name in all_:
             assert isinstance(name, str), "{}.__all__ contains a non-string".format(m.__name__)
-            if not hasattr(m, name):
+            try:
+                _resolve_public_name(m, name)               # optional-backed names resolve lazily
+            except AttributeError:
                 missing.append("{}.{}".format(m.__name__, name))
         if len(set(all_)) != len(all_):
             duped.append("{}: {}".format(m.__name__,
@@ -116,7 +142,9 @@ def test_every_public_callable_has_an_introspectable_signature(surface):
     _mods, _skipped, names = surface
     bad = []
     for m, name in names:
-        obj = getattr(m, name)
+        obj = _resolve_public_name(m, name)
+        if obj is _OPTIONAL_UNRESOLVED:
+            continue                                        # backing optional extra absent on this leg
         if not callable(obj) or not str(getattr(obj, "__module__", "")).startswith("dynameta"):
             continue
         if inspect.isclass(obj) and issubclass(obj, BaseException):
@@ -137,7 +165,9 @@ def test_zero_argument_constructible_public_classes_construct_and_repr(surface):
     _mods, _skipped, names = surface
     made, failures = 0, []
     for m, name in names:
-        obj = getattr(m, name)
+        obj = _resolve_public_name(m, name)
+        if obj is _OPTIONAL_UNRESOLVED:
+            continue                                        # backing optional extra absent on this leg
         if not inspect.isclass(obj) or not str(getattr(obj, "__module__", "")).startswith("dynameta"):
             continue
         if getattr(obj, "_is_protocol", False):
