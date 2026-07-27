@@ -30,11 +30,22 @@ _OPTIONAL = {"devsim", "ngsolve", "gmsh", "h5py", "zarr", "matplotlib", "numba",
 
 
 def _classify_import_error(name, exc, skipped):
-    """A missing OPTIONAL extra is a skip; anything else is a broken package."""
-    missing = (getattr(exc, "name", None) or "").split(".")[0]
-    if isinstance(exc, ImportError) and missing in _OPTIONAL:
-        skipped.append((name, missing))
-        return
+    """A missing OPTIONAL extra is a skip; anything else is a broken package.
+
+    The repo's lazy-dep convention re-raises a MISSING optional package as a chained custom
+    ImportError ("<module> requires the optional 'devsim' package ..."), whose own `.name` is
+    None -- the original ModuleNotFoundError lives in the exception CHAIN. Walk the chain
+    (__cause__/__context__) and accept the module if ANY link names an optional package;
+    caught on CI legs without the [solvers] extra (first PR-6 run), invisible on the dev box
+    where every extra is installed."""
+    link, seen = exc, set()
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        missing = (getattr(link, "name", None) or "").split(".")[0]
+        if isinstance(link, ImportError) and missing in _OPTIONAL:
+            skipped.append((name, missing))
+            return
+        link = link.__cause__ or link.__context__
     raise AssertionError(
         "{} failed to import for a NON-optional reason: {!r}".format(name, exc)) from exc
 

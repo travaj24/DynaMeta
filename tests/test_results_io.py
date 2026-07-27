@@ -373,19 +373,23 @@ def test_dropped_dirty_cache_still_persists_its_tail(tmp_path):
 
 
 def test_close_flushes_and_unregisters(tmp_path):
+    # Count OUR trampolines (cache._live_atexit_hook_count), never atexit._ncallbacks()
+    # deltas: on a fresh CI interpreter the first h5py/zarr import happens INSIDE the cache
+    # construction and registers its own atexit hooks, so global-count deltas are not
+    # attributable (first PR-6 CI run; the dev box's warm imports masked it).
     if not _FORMATS:
         pytest.skip("no io backend (h5py/zarr) installed")
-    import atexit
-    n0 = atexit._ncallbacks()
+    from dynameta.cache import _live_atexit_hook_count
+    n0 = _live_atexit_hook_count()
     c = _mk_cache(tmp_path, "r7d", autosave=True, autosave_every=64)
     c(_design(), None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, 1.4e-6, 1.0, 1.0)
     assert c._atexit_hook is not None and c._unsaved == 1
-    assert atexit._ncallbacks() == n0 + 1                      # the hook is registered
+    assert _live_atexit_hook_count() == n0 + 1                 # the hook is registered
     c.close()
     assert c._unsaved == 0 and os.path.exists(c.path) and c._atexit_hook is None
-    assert atexit._ncallbacks() == n0, "close() must release the atexit slot"
+    assert _live_atexit_hook_count() == n0, "close() must release the atexit slot"
     c.close()                                                  # idempotent
-    assert atexit._ncallbacks() == n0
+    assert _live_atexit_hook_count() == n0
 
 
 def test_dropped_caches_do_not_accumulate_atexit_trampolines(tmp_path):
@@ -396,26 +400,27 @@ def test_dropped_caches_do_not_accumulate_atexit_trampolines(tmp_path):
     batched tails still get persisted."""
     if not _FORMATS:
         pytest.skip("no io backend (h5py/zarr) installed")
-    import atexit
     import gc
+    from dynameta.cache import _live_atexit_hook_count
     d = _design()
     eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
     gc.collect()
-    n0 = atexit._ncallbacks()
+    # our own registry, not atexit._ncallbacks(): see test_close_flushes_and_unregisters
+    n0 = _live_atexit_hook_count()
     for i in range(5):
         c = _mk_cache(tmp_path, "r7e%d" % i, autosave=True, autosave_every=64)
         c(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
         assert c._unsaved == 1                                 # batched, nothing written yet
         del c
     gc.collect()
-    assert atexit._ncallbacks() == n0, "dropped caches left dead atexit trampolines behind"
+    assert _live_atexit_hook_count() == n0, "dropped caches left dead atexit trampolines behind"
     for i in range(5):                                         # ... and every tail survived
         c2 = _mk_cache(tmp_path, "r7e%d" % i, autosave=False)
         c2(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
         assert c2.stats()["hits"] == 1
         c2.close()
     gc.collect()
-    assert atexit._ncallbacks() == n0
+    assert _live_atexit_hook_count() == n0
 
 
 def test_cache_construction_preloads_the_store_backend(tmp_path):

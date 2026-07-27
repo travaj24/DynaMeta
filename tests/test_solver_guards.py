@@ -448,6 +448,7 @@ def test_f8_unmatched_sheet_bc_name_raises_and_lists_the_interfaces():
 def test_f8_unmatched_boundary_really_assembles_to_zero():
     """Negative control: NGSolve itself does not object -- a linear form over an unknown boundary
     assembles cleanly with ||f|| = 0, which is why the guard has to exist."""
+    pytest.importorskip("ngsolve")
     import ngsolve as ng
     geo, _eps, _opt = _fem_cell()
     fes = ng.Periodic(ng.HCurl(geo.mesh, order=1, complex=True, dirichlet=""))
@@ -462,6 +463,7 @@ def test_f8_unmatched_boundary_really_assembles_to_zero():
 def test_f15_oblique_pml_advisory_is_emitted_once_per_process():
     """The advisory describes the PML, not the solve: a sweep must not repeat it per wavelength.
     The per-solve REGIME GUARD (the 50 deg raise) stays unconditional."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import solver as S
     S._ADVISED_ONCE.discard("oblique_pml")
     opt = type("O", (), {"incidence_angle_deg": 30.0, "azimuth_deg": 0.0,
@@ -483,6 +485,7 @@ def test_f15_oblique_pml_advisory_is_emitted_once_per_process():
 def test_f15_fit_warnings_are_aggregated_into_one_per_solve():
     """Four bad bands in one solve used to emit four near-identical warnings. They must arrive as
     ONE warning naming every band; outside a solve the immediate warning is preserved."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import solver as S
     M = np.column_stack([np.ones(7), np.linspace(0.0, 1.0, 7)])
     Es = np.linspace(0.0, 1.0, 7) ** 3 + 0.7                    # cubic: not a two-wave field
@@ -510,6 +513,7 @@ def test_f15_fit_warnings_are_aggregated_into_one_per_solve():
 def test_f15_ordinary_solve_is_quiet_and_reports_its_fit_quality():
     """The threshold's "validated cases do not false-fire" claim, MEASURED: a converged coarse
     solve emits ZERO diagnostics and carries a fit residual far below the threshold."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import solver as S
     geo, eps_cf, opt = _fem_cell()
     with warnings.catch_warnings(record=True) as rec:
@@ -525,6 +529,7 @@ def test_f9_quasiperiodic_matrix_is_hermitian_not_symmetric():
     """The fact behind F-9: ng.Periodic(..., phase=...) conjugates the phase on the TEST side, so
     even a REAL symmetric integrand assembles Hermitian-not-symmetric -- `symmetric=True` on that
     space is a false statement (inert in ngsolve 6.2.2604, but it must not be asserted)."""
+    pytest.importorskip("ngsolve")
     import ngsolve as ng
     from dynameta.optics import solver as S
     geo, _eps, _opt = _fem_cell(theta=30.0, pol="y")
@@ -546,6 +551,7 @@ def test_f13_sourced_tensor_eps_is_refused_with_the_upml_reason():
     scalar stretch is wrong for an anisotropic medium; solve_fem_sourced has no such branch and
     calls SetPML unconditionally. It used to fail deep inside NGSolve ("Dimensions don't match,
     op = -") with no hint that the sourced path simply cannot do tensors."""
+    pytest.importorskip("ngsolve")
     import ngsolve as ng
     from dynameta.optics import solver as S
     geo, _eps, opt = _fem_cell()
@@ -562,6 +568,7 @@ def test_f13_sourced_path_enforces_the_same_oblique_pml_envelope():
     no PML advisory, so shg_structured_two_step at 70 deg ran straight past the envelope where
     solve_fem refuses. The source carries k_par rather than an angle, so the guard recovers
     sin(theta) = |k_par|/(n_super k0) -- and must NOT false-fire at exactly the cap."""
+    pytest.importorskip("ngsolve")
     import numpy as np
     from dynameta.optics import solver as S
     from dynameta.optics.ngsolve_layered import S as _S
@@ -597,6 +604,7 @@ def test_f13_sourced_grazing_port_is_refused_but_deep_evanescent_is_not():
     to a rank-1 DC fit, so the up/down split is arbitrary -- solve_fem refuses exactly this on its
     substrate order. A DEEPLY evanescent port (|kz| large and imaginary) is a different, legitimate
     case: decaying vs growing exponential, well separated."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics.solver import _refuse_grazing_port
     k0 = 2.0 * np.pi / 1200.0
     with pytest.raises(NotImplementedError, match="grazing cutoff"):
@@ -622,6 +630,7 @@ def test_f12_shared_background_keeps_all_three_polarization_branches():
     the construction solve_fem uses" -- and it had drifted to TWO branches (`if pol == 'p' ... else
     s-pol E along y`), so polarization='x', the OpticalSpec DEFAULT, was built as the ORTHOGONAL
     mode. There is now ONE implementation with all three branches; this pins the mode of each."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import solver as S
     geo, _eps, _opt = _fem_cell()
     z0, z1 = geo.z_intervals_nm["superstrate"]
@@ -645,6 +654,7 @@ def test_f12_solve_fem_and_shg_build_the_background_from_the_SAME_helper(monkeyp
     (a duplicate is what drifted). Also pins the consequence -- for polarization='x' the SHG
     reconstruction now gets an x-directed field probed along x, where it used to get E-along-y
     probed with (0,1,0)."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import shg_fem
     from dynameta.optics import solver as S
     geo, eps_cf, opt = _fem_cell(pol="x")
@@ -822,6 +832,7 @@ def test_f9_bddc_cg_falls_back_on_a_bloch_phased_space():
     """`ng.solvers.CGSolver` runs COCG (complex-SYMMETRIC pseudo inner product), which has no
     convergence theory on the non-symmetric oblique matrix. The documented option must fall back
     to the GMRes route (once per process) rather than iterate an invalid Krylov method."""
+    pytest.importorskip("ngsolve")
     from dynameta.optics import solver as S
     geo, eps_cf, opt = _fem_cell(theta=30.0, pol="y")
     S._ADVISED_ONCE.discard("bddc_cg_nonsymmetric")
