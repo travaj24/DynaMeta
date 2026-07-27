@@ -8,8 +8,13 @@ INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSp
 {'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
 Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
 `normalize_pol` converter and the normal-incidence / azimuth caveats live in
-`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
-repo is a deliberate follow-on, not part of the map. Read the FIXED-k_par 2-D TE/TM subtlety there
+`dynameta.core.polarization`. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on -- widened the
+ACCEPTED set here by exactly the UNCONDITIONAL aliases: this module's entry points also take
+`'te'`/`'tm'` and mixed case, normalized to `'s'`/`'p'` at the door, because in a planar stack TE is s
+and TM is p by definition of the plane of incidence, at every angle and in every material. No valid
+call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDENT spellings
+(OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
+`normalize_pol`, which demands the azimuth and refuses rather than guess. Read the FIXED-k_par 2-D TE/TM subtlety there
 before carrying a TE label in from elsewhere: 'TE' here is E_y OUT of the simulation plane, and
 the physical angle sweeps with frequency while the s/p label does not.
 """
@@ -773,12 +778,24 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
 # convention exists), and because k_par is held FIXED across the band the PHYSICAL angle sweeps
 # with frequency -- the s/p label does not, but the angle it refers to does (read result.theta_deg,
 # not the angle_deg you passed).  Accepted set unchanged.
+_POL_2D_GLOSS = ("Here 's' is glossed TE (E_y out of the 2-D plane) and 'p' TM (H_y out of "
+                 "plane) -- and 'te'/'tm' are ACCEPTED as unconditional aliases in THAT sense "
+                 "(acceptance unification (b)). The opposite 2-D convention (TE = E in-plane) is "
+                 "common in waveguide literature: the alias is not a licence to carry a label in "
+                 "from a convention that means something else by it.")
+
+
 def _reject_pol(pol, where: str):
     """Raise the shared V-8 vocabulary error.  LAZY import, failure path only."""
     from dynameta.core.polarization import pol_vocabulary_error
-    raise pol_vocabulary_error(
-        pol, "sp", where=where, param="pol",
-        extra="Here 's' is glossed TE (E_y out of the 2-D plane) and 'p' TM (H_y out of plane).")
+    raise pol_vocabulary_error(pol, "sp", where=where, param="pol", extra=_POL_2D_GLOSS)
+
+
+def _accept_pol(pol, where: str) -> str:
+    """ACCEPTANCE UNIFICATION (b): normalize 'te'/'tm'/mixed case to 's'/'p', or raise.  Reached
+    only when `pol` is not already 's'/'p', so a valid call is bit-identical and pays nothing."""
+    from dynameta.core.polarization import accept_pol
+    return accept_pol(pol, "sp", where=where, param="pol", extra=_POL_2D_GLOSS)
 
 
 def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_deg: float,
@@ -795,7 +812,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     angle_deg=0 reduces to the normal-incidence solver. backend selects the TE kernel (numpy/numba); TM is
     the NumPy reference."""
     if pol not in ("s", "p"):
-        _reject_pol(pol, "solve_fdtd_2d_oblique")                       # audit V-8
+        pol = _accept_pol(pol, "solve_fdtd_2d_oblique")                 # audit V-8 / unification (b)
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
         raise NotImplementedError("solve_fdtd_2d_oblique supports Drude dispersion only (no Lorentz pole "
                                   "yet); use solve_fdtd_2d at normal incidence for a Lorentz material.")

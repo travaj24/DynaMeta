@@ -188,13 +188,15 @@ References
   plasmonics with a quantum-corrected model", Nat. Commun. 3, 825 (2012) -- the QCM gap material.
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks `pol_axis` in {'x', 'y'} -- a 2-D IN-PLANE
-cross-section, where the wave propagates inside the plane and there is NO layer normal. It is one
-of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'}
+cross-section, where the wave propagates inside the plane and there is NO layer normal. It is one of
+five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'}
 OpticalSpec's LAB AXIS, {'te','tm'} the grating bridge's, and the integer `row` 0/1 the
 differentiable forwards'. None of them convert to or from this one. The map, the `normalize_pol`
 converter and the normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set
-ACCEPTED here is UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not
-part of the map.
+ACCEPTED here is UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two
+PLANE-OF-INCIDENCE families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode
+in every geometry they cover; this vocabulary's crossings depend on the azimuth (or have no image at
+all), so they stay STRICT and are made explicitly, through normalize_pol.
 """
 
 from __future__ import annotations

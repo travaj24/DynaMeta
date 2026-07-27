@@ -593,13 +593,18 @@ class Devsim3DEquilibrium:
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="IntrinsicHoles"))
             ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi)   # flat band
-            ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                     relative_error=1e-5, maximum_iterations=100)
+            # audit C10-d: these two calls are `ds.solve(type='dc', solver_type='direct', ...)`
+            # routed through solve_dc(method='newton'), which is that exact call plus the post-solve
+            # Fermi-Dirac ceiling check -- byte-identical solver arguments, so the numerics cannot
+            # move. THIS is the device the check exists for: the body doping can sit under the
+            # ceiling while the gate ramp drives n/N_dos in the channel far past it.
+            solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                     max_iter=100, semiconductor_regions=["semi"])
             n_steps = max(1, int(abs(vg) / 0.05 + 0.5))      # fine gate steps (the coupled Newton is stiff)
             for k in range(1, n_steps + 1):
                 ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi + vg * k / n_steps)
-                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                         relative_error=1e-5, maximum_iterations=100)
+                solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
+                         max_iter=100, semiconductor_regions=["semi"])
         elif getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
             # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the

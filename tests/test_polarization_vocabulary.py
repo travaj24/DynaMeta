@@ -5,7 +5,7 @@ OpticalSpec's `{'x','y','p'}`, the grating bridge's `{'te','tm'}`, the different
 integer `row`, and hydro_fem's 2-D in-plane `pol_axis`). `dynameta/core/polarization.py` documents
 which is which and converts between them; THIS file is what stops that document from rotting.
 
-Three gates:
+Five gates:
 
 1. THE MAP IS EXECUTABLE. Every entry point listed in `VOCABULARIES` is driven twice through the
    SAME probe: once with its own vocabulary (must NOT be rejected by the vocabulary guard) and
@@ -18,12 +18,30 @@ Three gates:
 2. BYTE-IDENTITY OF THE VALID PATH. Six representative valid calls, one per family (two for the
    two biggest), pinned to goldens captured BEFORE the V-8 edits. V-8 was validation + doc only;
    a valid call that moves is a bug in the guard, not a new answer. (The full 35-call bit-exact
-   before/after sweep lives in the audit record; these six are the shipped regression.)
+   before/after sweep lives in the audit record; these six are the shipped regression.) These
+   goldens ALSO gate acceptance unification (b) below: widening what is ACCEPTED must not move
+   what was already accepted, and 's'/'p' still never reach the widening branch at all.
 
 3. THE NORMAL-INCIDENCE x/y <-> s/p CORRESPONDENCE IS NUMERIC. One stack, solved through an s/p
    API (tmm_reference) and an x/y API (the lumenairy Berreman bridge, via OpticalSpec ->
    _common.pol_row -> lab Jones rows), must agree to 1e-12 in R -- and must DISAGREE at oblique
    incidence, which is why the correspondence is documented as normal-incidence-only.
+
+4. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on. The `sp` family additionally accepts
+   'te'/'tm' and mixed case, normalized to 's'/'p' at the boundary, because TE == s and TM == p
+   UNCONDITIONALLY in a planar stack (the plane of incidence defines them). Gated three ways:
+   every sp entry point accepts every alias spelling (parametrized over the map, so an entry point
+   cannot be added without inheriting the widening); the alias result is EXACTLY equal -- `==`,
+   not approx -- to the canonical one on three representative engines, which is the whole claim
+   ("same call after a two-character normalization"); and the widening stops precisely where the
+   physics stops, so a lab axis / row / empty string into an sp API still raises.
+
+5. THE DOCUMENTED CONVERSION ROUTE RUNS. The HOW TO CONVERT recipe in
+   `dynameta/core/polarization.py` is executed end to end: normalize_pol('y', 'lab_xyp', to='sp',
+   azimuth_deg=0.0) -> 's' fed into an s/p engine reproduces the x/y engine's answer at 1e-12 (the
+   same two-independent-engine anchor as gate 3), and the same call WITHOUT the azimuth, or with a
+   conical one, refuses. Plus: every strict guard's rejection message actually carries the
+   normalize_pol call for the value in hand.
 
 Run: python -m pytest tests/test_polarization_vocabulary.py -q
 """
@@ -36,7 +54,7 @@ import pytest
 
 from dynameta.core.polarization import (VOCABULARIES, PolarizationConversionError,
                                         PolarizationVocabularyError, all_entry_points,
-                                        normalize_pol)
+                                        conversion_example, normalize_pol)
 
 C = 299792458.0
 LAM = 1300e-9
@@ -278,21 +296,84 @@ def test_entry_point_accepts_its_own_vocabulary(vocab, ep):
             pass
 
 
+def _alias_spellings(voc):
+    """Every UNCONDITIONAL spelling the vocabulary must now take beyond its canonical values:
+    the declared aliases, plus mixed case of both, for a case-insensitive family."""
+    out = []
+    for spelling, _canon in voc.aliases:
+        out.append(spelling)
+        if voc.case_insensitive:
+            out.append(spelling.upper())
+    if voc.case_insensitive:
+        out.extend(v.upper() for v in voc.values if isinstance(v, str))
+    return out
+
+
+_ALIASED = [(v, ep) for v, ep in _DRIVEN
+            if VOCABULARIES[v].aliases and ep.values is None]
+
+
+@pytest.mark.parametrize("vocab,ep", _ALIASED, ids=[ep.dotted for _v, ep in _ALIASED])
+def test_entry_point_accepts_the_unconditional_aliases(vocab, ep):
+    """ACCEPTANCE UNIFICATION (b), driven from the map so it cannot be implemented in 12 of 13
+    places: every entry point whose vocabulary declares unconditional aliases must accept EVERY
+    alias spelling, in either case, without a vocabulary error.
+
+    'Unconditional' is the load-bearing word -- these are spellings that name the SAME physical
+    mode in every geometry the vocabulary covers (TE is s and TM is p by definition of the plane
+    of incidence), which is why widening here is not the breaking re-pointing that widening
+    lab 'y' -> 's' would be."""
+    for good in _alias_spellings(VOCABULARIES[vocab]):
+        try:
+            _call(ep, good)
+        except PolarizationVocabularyError as exc:
+            pytest.fail("{} rejected the unconditional alias {!r}: {}".format(
+                ep.dotted, good, exc))
+        except Exception:                             # noqa: BLE001 -- physics is out of scope here
+            pass
+
+
+def test_the_aliased_families_are_exactly_the_two_that_share_the_plane_of_incidence():
+    """The widening is a claim about PHYSICS, so pin which families got it. sp and tetm both name
+    E relative to the plane of incidence (of a stack / of a classical grating mount), so they are
+    interchangeable spellings. lab_xyp is azimuth-dependent, row is a non-injective index, and
+    axis_xy is a different geometry -- none of them may acquire an alias without a physics
+    argument that does not exist."""
+    aliased = {name for name, voc in VOCABULARIES.items() if voc.aliases}
+    assert aliased == {"sp", "tetm"}, aliased
+    assert VOCABULARIES["sp"].alias_map == {"te": "s", "tm": "p"}
+    assert VOCABULARIES["tetm"].alias_map == {"s": "te", "p": "tm"}
+    # 13 sp entry points inherit the widening + the 1 tetm grating entry point
+    assert len([ep for _v, ep in _ALIASED if _v == "sp"]) == 13
+    assert len([ep for _v, ep in _ALIASED if _v == "tetm"]) == 1
+
+
 @pytest.mark.parametrize("vocab,ep", _DRIVEN, ids=[ep.dotted for _v, ep in _DRIVEN])
 def test_entry_point_rejects_a_sibling_vocabulary_and_names_its_own(vocab, ep):
     """The V-8 deliverable: a label from a SIBLING family must raise (not fall through to an
     `else` branch), and the message must name the vocabulary this entry point speaks and point at
     the shared map. Raising here also proves the probe REACHES the guard, which is what makes the
-    positive leg above meaningful."""
+    positive leg above meaningful.
+
+    Under acceptance unification (b) the probes for the two plane-of-incidence families are the
+    GEOMETRY-DEPENDENT crossings (a lab axis / a row), not each other's spellings -- 'te' into an
+    s/p API is now a lossless alias, so it would no longer be a wrong value. What survives here is
+    exactly the boundary that must survive: a vocabulary whose correspondence needs an azimuth the
+    entry point was never given.
+
+    Part 2(b): the message must also carry the EXPLICIT conversion the caller should have made,
+    with the context arguments that value actually needs."""
     voc = VOCABULARIES[vocab]
     wrong = voc.wrong_value()
     assert wrong not in ep.accepted_values(voc), "probe value is not actually wrong here"
+    assert wrong not in _alias_spellings(voc), "probe value is an accepted alias, not a wrong one"
     with pytest.raises(PolarizationVocabularyError) as excinfo:
         _call(ep, wrong)
     msg = str(excinfo.value)
     assert "dynameta.core.polarization" in msg, msg
     assert repr(voc.name) in msg or all(repr(v) in msg for v in voc.values), msg
     assert ep.parameter in msg, msg
+    assert "normalize_pol" in msg, msg
 
 
 def test_subset_entry_points_refuse_the_unimplemented_member_by_name():
@@ -392,6 +473,121 @@ def test_six_representative_valid_calls_are_unchanged():
 
 
 # ------------------------------------------------------------------------------------------------
+# Gate 4 -- acceptance unification (b): the alias is the SAME CALL, not a nearby one
+# ------------------------------------------------------------------------------------------------
+def test_the_unconditional_aliases_are_bit_for_bit_the_canonical_call():
+    """THE numeric claim behind acceptance unification (b): 'TE' is not "close to" 's', it IS 's'
+    -- the label is normalized at the door and the identical code path runs. So the comparison is
+    `==` on the raw floats/complexes, not pytest.approx: any difference at all would mean the
+    alias took a different branch somewhere, which is precisely the silent re-pointing the V-8
+    ledger refused to risk.
+
+    Three representative engines, deliberately unrelated: the third-party `tmm` wrapper (s/p goes
+    straight into coh_tmm), the hand-written nonlocal admittance stack (s/p selects the admittance
+    FORM), and the closed-form surface-SHG oracle (s/p selects a symmetry branch that ZEROES the
+    answer for s). Oblique incidence throughout -- at normal incidence the stack is
+    polarization-degenerate and the comparison would be vacuous."""
+    pytest.importorskip("tmm")
+    import dynameta.optics.nonlocal_tmm as nt
+    from dynameta.optics.shg_fem import rudnick_stern_flat_shg
+    from dynameta.optics.tmm_reference import stack_rta
+
+    layers = [(2.0 + 0j, 250e-9), (1.6 + 0.02j, 90e-9)]
+
+    def _tmm(pol):
+        return stack_rta(1.0, layers, 1.5, LAM, theta_deg=20.0, pol=pol)
+
+    def _nl(pol):
+        r = nt.stack_rt(OMEGA, [nt.DielectricLayer(4.0 + 0.1j, 100e-9)], pol=pol, n_sub=1.5,
+                        theta_rad=0.4)
+        return (r.R, r.T, r.r, r.t)
+
+    def _shg(pol):
+        d = rudnick_stern_flat_shg(800e-9, 45.0, -20 + 1j, -5 + 0.5j, 1e-20, polarization=pol)
+        return (d["S_up"], d["E_perp_in"], d["A"])
+
+    for engine in (_tmm, _nl, _shg):
+        for canonical, aliases in (("s", ("te", "TE", "Te", "S")), ("p", ("tm", "TM", "P"))):
+            ref = engine(canonical)
+            for alias in aliases:
+                assert engine(alias) == ref, (engine.__name__, alias, canonical)
+    # and the two modes are genuinely different here, so the equality above is not vacuous
+    assert _tmm("s") != _tmm("p")
+    assert _nl("s") != _nl("p")
+    assert _shg("s") != _shg("p")
+
+
+def test_a_canonical_label_never_reaches_the_widening_branch(monkeypatch):
+    """STRUCTURAL byte-identity, complementing the six numeric goldens above: every guard keeps its
+    original `if pol not in ('s','p')` test and only the BRANCH BODY changed, so a canonical label
+    cannot reach the normalizer at all. Booby-trap the shared boundary and drive every mapped entry
+    point with its canonical values: if any of them now routes 's' or 'p' through normalization,
+    this fails -- which is the only way unification (b) could have moved a valid answer."""
+    import dynameta.core.polarization as P
+
+    def _trap(*a, **k):
+        raise AssertionError("a canonical label reached accept_pol: {!r}".format(a[:1]))
+
+    monkeypatch.setattr(P, "accept_pol", _trap)
+    for vocab, ep in _DRIVEN:
+        for good in ep.accepted_values(VOCABULARIES[vocab]):
+            try:
+                _call(ep, good)
+            except AssertionError:
+                raise
+            except Exception:                         # noqa: BLE001 -- physics is out of scope here
+                pass
+
+
+def test_the_grating_guard_still_mirrors_lumenairys_own_accepted_set():
+    """PART (b) of the unification, VERIFIED rather than changed: the 1-D grating entry point was
+    already the widest of the five, and its accepted set is supposed to be byte-for-byte what
+    `lumenairy.rcwa_efficiency_1d` normalizes upstream. Probe both sides with the same alphabet and
+    require the same verdict on every letter -- if lumenairy ever widens (or narrows) its own set,
+    this is where DynaMeta finds out, instead of a lossless alias silently going missing."""
+    core = pytest.importorskip("lumenairy.elements.rcwa._core")
+    _normalize_pol = getattr(core, "_normalize_pol", None)
+    assert _normalize_pol is not None, (
+        "lumenairy.elements.rcwa._core._normalize_pol is gone -- the bridge guard claims to mirror "
+        "it byte-for-byte, so that claim now needs re-deriving against whatever replaced it")
+
+    from dynameta.optics.lumenairy_bridge.rcwa_design import _reject_grating_pol
+
+    for probe in ("te", "TE", "Te", "tm", "TM", "s", "S", "p", "P", "x", "y", "X", "", "sp", 0, 1,
+                  "tem", "e", "h"):
+        try:
+            _normalize_pol("probe", probe)
+        except (ValueError, AttributeError, TypeError):
+            upstream_ok = False
+        else:
+            upstream_ok = True
+        try:
+            _reject_grating_pol(probe, "probe")
+        except PolarizationVocabularyError:
+            bridge_ok = False
+        else:
+            bridge_ok = True
+        assert bridge_ok == upstream_ok, (probe, bridge_ok, upstream_ok)
+
+
+def test_the_widening_stops_where_the_physics_stops():
+    """The other half of (b): what was NOT unified. A geometry-DEPENDENT spelling into an s/p API
+    still raises -- lab 'x'/'y' (needs the azimuth), an integer row (an index, not a label), and
+    anything that is not a polarization at all. If this ever goes green by accepting 'y', the
+    conical hazard documented in the map has been shipped as a silent default."""
+    from dynameta.optics.resonance import smatrix_pole_func
+    from dynameta.optics.tmm_reference import stack_rta
+
+    pytest.importorskip("tmm")
+    layers = [(2.0 + 0j, 250e-9)]
+    for bad in ("x", "y", "X", "Y", 0, 1, "", "sp", "tem", "s ", None, "te-tm"):
+        with pytest.raises(PolarizationVocabularyError):
+            stack_rta(1.0, layers, 1.5, LAM, pol=bad)
+        with pytest.raises(PolarizationVocabularyError):
+            smatrix_pole_func([(4.0 + 0.1j, 200e-9)], pol=bad)
+
+
+# ------------------------------------------------------------------------------------------------
 # Gate 3 -- the normal-incidence x/y <-> s/p correspondence, numerically
 # ------------------------------------------------------------------------------------------------
 def _lab_R(pol, theta_deg):
@@ -453,14 +649,19 @@ def test_the_correspondence_is_normal_incidence_only_discrimination():
 # ------------------------------------------------------------------------------------------------
 # normalize_pol: the conversions, and every refusal the map promises
 # ------------------------------------------------------------------------------------------------
-def test_normalize_pol_validates_without_widening_any_accepted_set():
-    """The converter must not become a back door that admits spellings no module accepts."""
+def test_normalize_pol_admits_exactly_what_the_entry_points_admit():
+    """The converter must not become a back door: its accepted set has to be the entry points'
+    accepted set, no wider. Post-unification that is the canonical values PLUS the unconditional
+    aliases -- and still nothing azimuth-dependent."""
     for name, voc in VOCABULARIES.items():
         for good in voc.values:
             assert normalize_pol(good, name) == good
     assert normalize_pol("TE", "tetm") == "te"        # lumenairy's own alias, case-insensitive
     assert normalize_pol("s", "tetm") == "te"
-    for bad, vocab in [("S", "sp"), ("TE", "sp"), ("y", "sp"), ("s", "lab_xyp"),
+    assert normalize_pol("TE", "sp") == "s"           # unification (b), the mirror image
+    assert normalize_pol("tm", "sp") == "p"
+    assert normalize_pol("S", "sp") == "s"
+    for bad, vocab in [("y", "sp"), ("x", "sp"), (0, "sp"), ("", "sp"), ("s", "lab_xyp"),
                        ("X", "lab_xyp"), ("te", "lab_xyp"), ("x", "tetm"), (2, "row"),
                        ("0", "row"), (True, "row"), ("s", "axis_xy"), ("p", "axis_xy")]:
         with pytest.raises(PolarizationVocabularyError):
@@ -511,20 +712,150 @@ def test_normalize_pol_round_trips_where_the_map_says_it_can():
     assert normalize_pol("p", "lab_xyp", to="row", **at0) == 0
 
 
+def test_normalize_pol_covers_every_ordered_pair_of_the_four_stack_vocabularies():
+    """PART 2(a): the converter's COVERAGE table, executed. Every ordered pair over the four
+    planar-stack vocabularies must resolve -- either to a value or to a NAMED refusal -- and none
+    may fall off the end into "there is no defined mapping", which is what `tetm <-> row` used to
+    do (it needs three hops, and only two were wired). `axis_xy` is excluded on purpose: it is the
+    one family with no conversion at all, and its refusal is gated separately below."""
+    stack_vocabs = ("sp", "lab_xyp", "tetm", "row")
+    at0 = dict(azimuth_deg=0.0, theta_deg=0.0)
+    resolved = {}
+    for frm in stack_vocabs:
+        for to in stack_vocabs:
+            if frm == to:
+                continue
+            for value in VOCABULARIES[frm].values:
+                try:
+                    out = normalize_pol(value, frm, to=to, **at0)
+                except PolarizationConversionError as exc:
+                    assert "no defined mapping" not in str(exc), (frm, to, value, str(exc))
+                    resolved[(frm, to, value)] = "refused"
+                    continue
+                assert out in VOCABULARIES[to].values, (frm, to, value, out)
+                resolved[(frm, to, value)] = out
+    # the three-hop pairs specifically (the gap this test exists to close)
+    assert resolved[("tetm", "row", "te")] == 1
+    assert resolved[("tetm", "row", "tm")] == 0
+    assert resolved[("row", "tetm", 1)] == "te"
+    assert resolved[("row", "tetm", 0)] == "refused"      # row 0 is not injective, at any hop count
+    assert resolved[("row", "sp", 0)] == "refused"
+    # theta enters ONLY through the 'x' leg: 'y' <-> 's' is theta-independent (s-hat = y at phi=0)
+    assert normalize_pol("y", "lab_xyp", to="sp", azimuth_deg=0.0) == "s"
+    assert normalize_pol("s", "sp", to="lab_xyp", azimuth_deg=0.0) == "y"
+
+
+def test_missing_context_errors_name_the_parameter_and_show_the_call():
+    """PART 2(a): a refusal for MISSING context is only useful if it says which argument is
+    missing and what the call looks like with it. Both, for both angles."""
+    with pytest.raises(PolarizationConversionError) as exc:
+        normalize_pol("y", "lab_xyp", to="sp")
+    assert "azimuth_deg" in str(exc.value)
+    assert "normalize_pol('y', 'lab_xyp', to='sp', azimuth_deg=0.0)" in str(exc.value)
+    with pytest.raises(PolarizationConversionError) as exc:
+        normalize_pol("x", "lab_xyp", to="sp", azimuth_deg=0.0)
+    assert "theta_deg" in str(exc.value)
+    assert "normalize_pol('x', 'lab_xyp', to='sp', azimuth_deg=0.0, theta_deg=0.0)" in str(exc.value)
+
+
 def test_the_two_admittance_twins_still_share_one_vocabulary_and_one_message():
     """AUDIT V-3/V-8: the duplicated _admittance helpers had MIRROR-IMAGE silent fallbacks. Both
     raise now, and (the V-8 half) both raise the SAME shared text, so the twins cannot drift
-    apart in their error contract the way they drifted apart in their defaults."""
+    apart in their error contract the way they drifted apart in their defaults.
+
+    Acceptance unification (b) moved 'TE'/'TM'/'S'/'P' OUT of this list and into the one below:
+    they are accepted now. That is the same contract, not a weaker one -- what matters is that the
+    twins agree, and they must agree about acceptance exactly as much as about rejection, since a
+    twin that took 'TE' as s while the other took it as p would be the V-3 bug rebuilt."""
     from dynameta.optics.nonlocal_tmm import _admittance as adm_nl
     from dynameta.optics.resonance import _admittance as adm_res
 
-    for bad in ("TE", "TM", "te", "tm", "S", "P", "x", "y", "", "sp"):
+    eps, kz = 4.0 + 0.1j, 1.2e7 + 0j
+    for bad in ("x", "y", "X", "Y", "", "sp", "tem", 0, 1, "ss"):
         msgs = []
         for fn in (adm_res, adm_nl):
             with pytest.raises(PolarizationVocabularyError) as exc:
-                fn(4.0 + 0.1j, 1.2e7 + 0j, bad)
+                fn(eps, kz, bad)
             msgs.append(str(exc.value))
             assert "pol must be" in msgs[-1]              # the long-standing matched phrase
             assert "dynameta.core.polarization" in msgs[-1]
         head = [m.split(" -- ")[0].split(": ", 1)[1] for m in msgs]
         assert head[0] == head[1], msgs                   # one vocabulary, one sentence
+    # ... and they normalize the aliases identically (the twins share ONE accepted set)
+    for alias, canonical in (("TE", "s"), ("te", "s"), ("S", "s"), ("TM", "p"), ("tm", "p"),
+                             ("P", "p")):
+        assert adm_res(eps, kz, alias) == adm_res(eps, kz, canonical)
+        assert adm_nl(eps, kz, alias) == adm_nl(eps, kz, canonical)
+    # the two admittance FORMS still differ, so the equalities above are not vacuous
+    assert adm_res(eps, kz, "s") != adm_res(eps, kz, "p")
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 5 -- the documented conversion route, executed (part 2d)
+# ------------------------------------------------------------------------------------------------
+def test_the_documented_conversion_recipe_runs_end_to_end():
+    """The HOW TO CONVERT section of dynameta/core/polarization.py, executed verbatim.
+
+        pol = normalize_pol('y', 'lab_xyp', to='sp', azimuth_deg=0.0)
+        R, T, A = stack_rta(..., pol=pol)
+
+    The claim is that the converted label reaches the SAME physical mode the lab-axis API would
+    have solved -- so the check is the V-8 cross-engine anchor: the s/p engine (Byrnes-`tmm`) fed
+    the CONVERTED label must reproduce the x/y engine (lumenairy Berreman 4x4, reached through
+    OpticalSpec -> _common.pol_row -> lab Jones row) fed the ORIGINAL one, at 1e-12.
+
+    Run at 40 deg on purpose: at normal incidence every spelling agrees and the recipe would prove
+    nothing. Here R_s and R_p are far apart, so a recipe that produced 'p' instead of 's' would
+    miss by ~67%."""
+    pytest.importorskip("lumenairy")
+    pytest.importorskip("tmm")
+    th = 40.0
+    pol = normalize_pol("y", "lab_xyp", to="sp", azimuth_deg=0.0)
+    assert pol == "s"
+    assert _sp_R(pol, th) == pytest.approx(_lab_R("y", th), abs=1e-12)
+    assert _sp_R(normalize_pol("p", "lab_xyp", to="sp", azimuth_deg=0.0), th) == pytest.approx(
+        _lab_R("p", th), abs=1e-12)
+    # not vacuous: the two conversions land on genuinely different physics
+    assert abs(_sp_R("s", th) - _sp_R("p", th)) > 0.05 * max(_sp_R("s", th), _sp_R("p", th))
+    # the normal-incidence leg of the same recipe, where 'x' also has an image
+    assert _sp_R(normalize_pol("x", "lab_xyp", to="sp", azimuth_deg=0.0, theta_deg=0.0),
+                 0.0) == pytest.approx(_lab_R("x", 0.0), abs=1e-12)
+
+
+def test_the_documented_refusals_are_what_the_docs_say_they_are():
+    """The other half of the recipe: the SAME call refuses without the azimuth, and refuses again
+    when the azimuth says conical -- which is the phi != 0 hazard the strict APIs exist to keep
+    the caller in front of. `azimuth_deg=0.0` is an ASSERTION, not a default."""
+    with pytest.raises(PolarizationConversionError, match="azimuth_deg"):
+        normalize_pol("y", "lab_xyp", to="sp")
+    with pytest.raises(PolarizationConversionError, match="conical"):
+        normalize_pol("y", "lab_xyp", to="sp", azimuth_deg=30.0)
+    # and the strict entry point that sent the caller here still refuses the raw label
+    pytest.importorskip("tmm")
+    from dynameta.optics.tmm_reference import stack_rta
+    with pytest.raises(PolarizationVocabularyError) as exc:
+        stack_rta(1.0, [(2.0 + 0j, 250e-9)], 1.5, LAM, theta_deg=40.0, pol="y")
+    msg = str(exc.value)
+    assert "normalize_pol('y', 'lab_xyp', to='sp', azimuth_deg=phi)" in msg, msg
+    assert "azimuth" in msg and "phi = 0" in msg, msg
+
+
+def test_the_printed_conversion_example_matches_what_normalize_pol_actually_demands():
+    """The example in an error message is generated by PROBING the converter, so it cannot drift
+    from it. Pin that link: for each cross-vocabulary case, the arguments the message names are
+    exactly the ones whose absence makes the conversion raise."""
+    cases = [("y", "lab_xyp", "sp", ("azimuth_deg",)),
+             ("x", "lab_xyp", "sp", ("azimuth_deg", "theta_deg")),
+             ("s", "sp", "lab_xyp", ("azimuth_deg",)),
+             ("x", "lab_xyp", "row", ())]
+    for value, frm, to, expected in cases:
+        text = conversion_example(value, frm, to)
+        for name in ("azimuth_deg", "theta_deg"):
+            assert (name in text) == (name in expected), (value, frm, to, name, text)
+        kwargs = {"azimuth_deg": 0.0, "theta_deg": 0.0}
+        assert normalize_pol(value, frm, to=to, **kwargs) is not None
+        for name in expected:                       # each named argument is genuinely required
+            partial = dict(kwargs)
+            partial[name] = None
+            with pytest.raises(PolarizationConversionError):
+                normalize_pol(value, frm, to=to, **partial)

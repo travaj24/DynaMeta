@@ -41,16 +41,18 @@ superstrate at angle rather than returning a silently-wrong result. Validated ag
 the `tmm` library (validation/oblique_vs_tmm.py).
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
-incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
-It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
-(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
-{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
-Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
-`normalize_pol` converter and the normal-incidence / azimuth caveats live in
-`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
-repo is a deliberate follow-on, not part of the map. At azimuth phi != 0 THIS module reads 'y' as
-the ROTATED s-hat, while the lumenairy bridge reads the same letter as lab row 1 -- the documented
-split, and why the bridge refuses conical.
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol. At azimuth phi != 0 THIS module reads
+'y' as the ROTATED s-hat, while the lumenairy bridge reads the same letter as lab row 1 -- the
+documented split, and why the bridge refuses conical.
 """
 
 from __future__ import annotations
@@ -373,8 +375,11 @@ def _validate_sheet_bcs(mesh, sheet_bcs) -> None:
 # ---- polarization vocabulary (audit V-8) --------------------------------------------------------
 # This solver speaks the OpticalSpec LAB-AXIS family {'x', 'y', 'p'} everywhere.  The four sibling
 # spellings, the conversions, and the normal-incidence / azimuth caveats are documented in
-# dynameta.core.polarization; the set accepted here is unchanged (unifying acceptance across the
-# repo is a follow-on, not part of the map).
+# dynameta.core.polarization; the set accepted here is unchanged -- acceptance unification (b)
+# widened only the plane-of-incidence families ({'s','p'}, {'te','tm'}), whose aliases hold at every
+# geometry.  The lab-axis crossing does NOT: 'y' is s-pol only at phi = 0, and THIS module reads 'y'
+# at phi != 0 as the rotated s-hat while the lumenairy bridge reads it as lab row 1.  So it stays
+# strict, and a caller crossing in from {'s','p'} converts explicitly with normalize_pol.
 def _reject_pol_unless_lab(polarization, where: str):
     """Guard the lab-axis vocabulary.  LAZY import, failure path only, so the valid path is
     untouched and no import edge is added."""

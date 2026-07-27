@@ -54,8 +54,13 @@ INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSp
 {'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
 Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
 `normalize_pol` converter and the normal-incidence / azimuth caveats live in
-`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
-repo is a deliberate follow-on, not part of the map. This file speaks BOTH: the closed-form
+`dynameta.core.polarization`. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on -- widened the
+ACCEPTED set here by exactly the UNCONDITIONAL aliases: this module's entry points also take
+`'te'`/`'tm'` and mixed case, normalized to `'s'`/`'p'` at the door, because in a planar stack TE is s
+and TM is p by definition of the plane of incidence, at every angle and in every material. No valid
+call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDENT spellings
+(OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
+`normalize_pol`, which demands the azimuth and refuses rather than guess. This file speaks BOTH: the closed-form
 oracles take {'s','p'} while the FEM path reads design.optical.polarization, the lab
 {'x','y','p'}.
 """
@@ -113,6 +118,18 @@ def _reject_pol(pol, where: str, vocabulary: str = "sp", param: str = "pol"):
     raise pol_vocabulary_error(pol, vocabulary, where=where, param=param)
 
 
+def _accept_pol(pol, where: str, param: str = "pol") -> str:
+    """ACCEPTANCE UNIFICATION (b): normalize an sp-family label to the canonical 's'/'p', accepting
+    the UNCONDITIONAL 'te'/'tm' and mixed-case spellings (in a planar stack TE is s and TM is p by
+    definition of the plane of incidence, at every angle), or raise the shared V-8 error.
+
+    Reached ONLY when the label is not already 's'/'p' -- every caller keeps that cheap `not in`
+    test inline -- so a valid call runs bit-identically and this module still gains no import edge
+    on the happy path (the import is lazy, inside the widening/failure branch)."""
+    from dynameta.core.polarization import accept_pol
+    return accept_pol(pol, "sp", where=where, param=param)
+
+
 def _ppol_normal_field_inside(E0: float, theta: float, eps_w: complex) -> complex:
     """Normal component E_perp (=E_z) of the fundamental just INSIDE the metal, for a unit-amplitude
     p-pol plane wave incident from vacuum at polar angle theta (the Sipe prescription evaluates the
@@ -157,8 +174,9 @@ def rudnick_stern_flat_shg(lambda_m: float, theta_deg: float, eps_w: complex, ep
     if polarization not in ("s", "p"):
         # audit V-8: this used to fall through to the p-pol branch for ANY string that was not
         # exactly 's', so 'x' / 'y' (the OpticalSpec vocabulary this module ALSO consumes on its
-        # FEM path) silently produced the p-pol answer.  Same accepted set, named rejection.
-        _reject_pol(polarization, "rudnick_stern_flat_shg", param="polarization")
+        # FEM path) silently produced the p-pol answer.  'x'/'y' still raise -- that crossing needs
+        # the azimuth; 'te'/'tm'/mixed case are normalized here (unification (b)).
+        polarization = _accept_pol(polarization, "rudnick_stern_flat_shg", param="polarization")
     theta = math.radians(float(theta_deg))
     omega = 2.0 * math.pi * C_LIGHT / lambda_m
     Omega = 2.0 * omega
@@ -448,8 +466,8 @@ def rudnick_stern_flat_sfg(omega1_rad_s: float, omega2_rad_s: float,
     the DFG-conjugated field actually used), 'K_par3' (1/m), 'k3' (1/m vacuum), 'omega3' (rad/s),
     'theta3_deg' (emission polar angle), 'beta1', 'beta2', 'propagating' (bool).
     """
-    if polarization not in ("s", "p"):
-        _reject_pol(polarization, "rudnick_stern_flat_sfg", param="polarization")   # audit V-8
+    if polarization not in ("s", "p"):                                           # audit V-8
+        polarization = _accept_pol(polarization, "rudnick_stern_flat_sfg", param="polarization")
     proc = str(process).lower()
     if proc not in ("sfg", "dfg"):
         raise ValueError("process must be 'sfg' or 'dfg'")
