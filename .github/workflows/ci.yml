@@ -10,7 +10,9 @@ name: CI
 #   test     ubuntu  3.10 core+dev+plot+h5py, FLOATING resolve fast suite                     unchanged
 #   test     ubuntu  3.11   (every leg lands on the NEWEST     fast suite                     unchanged
 #   test     ubuntu  3.12    numpy 2.x -- `numpy>=1.24` is an  fast suite + coverage          + cov overhead
-#   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite + smoke tier        unchanged
+#   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite                     unchanged
+#   smoke    ubuntu  3.13 core+dev+plot+h5py+zarr+jax          93-script smoke validation     ~50 min
+#                                                              tier (own job -- see it)       (parallel)
 #   floor    ubuntu  3.10 the OLDEST DECLARED pins             import sweep + fast suite      1 suite / ncores
 #                                                              (`-n auto`, the WHOLE suite,    (xdist)
 #                                                              no per-file exclusions; one
@@ -60,10 +62,9 @@ jobs:
   test:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # audit T-14: every job carries an explicit cap. GitHub's silent default is 6 h, and
-    # run_all's own per-script cap is 1800 s x 93 smoke scripts, so "hung job" used to mean
-    # "burn the day". These are CAPS, not budgets -- see the table at the top. 75 rather than 60
-    # because the 3.12 leg now also carries coverage instrumentation.
+    # audit T-14: every job carries an explicit cap; GitHub's silent default is 6 h. These are
+    # CAPS, not budgets -- see the table at the top. 75 rather than 60 because the 3.12 leg
+    # carries coverage instrumentation (51-52 min measured on the runner, 2026-07-27).
     # (audit X-19/X-26 added 9 measured solver-free scripts to the tier, ~112 s of real work --
     # the 7 curated bridge/capstone gates plus 2 new material/pole-finder wrappers.)
     timeout-minutes: 75
@@ -94,7 +95,7 @@ jobs:
       - name: Run fast tests
         # audit S6-3: the @slow tests (now 9 -- 8 in test_soa.py, 1 in test_harmonics.py) are
         # excluded from all four legs; seven are wrappers whose underlying validation modules run
-        # once in the py3.13 smoke tier, and ALL NINE run in the `nightly` job, step (a).
+        # once in the `smoke` job, and ALL NINE run in the `nightly` job, step (a).
         if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
       # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
@@ -104,13 +105,35 @@ jobs:
       - name: Run fast tests + coverage
         if: matrix.python-version == '3.12'
         run: pytest tests/ -q -m "not slow" --cov=dynameta --cov-report=term --cov-fail-under=65
-      # audit 1.2/6.3: the smoke validation tier was advertised 'CI-able' but never
-      # wired in -- its physics oracles gated nothing automatically. One leg (the
-      # numpy-2.x python) runs the curated pure-numpy tier. audit T-3: a smoke-tier
-      # capability-skip (exit 42) is now a FAILURE unless declared with --allow-skip;
-      # qd_soa_numba_parity is declared here because the `numba` job runs it for real.
+  smoke:
+    # audit 1.2/6.3: the smoke validation tier was advertised 'CI-able' but never wired in -- its
+    # physics oracles gated nothing automatically. It first ran as a tail step of the py3.13 test
+    # leg; the first run that REACHED it (2026-07-27, run 30241608397) proved that home wrong by
+    # measurement: 60 of the 93 modules completed in 32 min on the 4-vCPU runner (the tier is
+    # ~15 min on the dev box) before the job's 75-min cap -- 42 min of which the fast suite had
+    # already spent -- cancelled a healthy, gate-after-gate-passing run. The full tier alone wants
+    # ~50 min of runner wall, so it gets its OWN job and its own cap: failures attribute cleanly
+    # ("smoke red" is a physics-oracle verdict, never a shared-budget artifact), the py3.13 test
+    # leg finishes with its siblings, and total PR wall-clock stays bounded by the slowest single
+    # job. 120 is a CAP, not a budget: ~2.4x the extrapolated need, same headroom philosophy as
+    # every other leg. audit T-3: a smoke-tier capability-skip (exit 42) is a FAILURE unless
+    # declared with --allow-skip; qd_soa_numba_parity is declared because the `numba` job runs
+    # that oracle for real (numba is deliberately not installed here).
+    name: smoke validation tier (py3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter and install as the py3.13 test leg -- the tier is curated
+          # pure-numpy, and 3.13 is the newest-resolve canary python.
+          python-version: "3.13"
+      - name: Install (core + dev + plot + h5py + zarr + jax)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3" "jax>=0.11"
       - name: Run smoke validation tier
-        if: matrix.python-version == '3.13'
         run: python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity
 
   floor:
