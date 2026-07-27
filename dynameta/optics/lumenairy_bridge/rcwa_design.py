@@ -51,13 +51,17 @@ Carrier modulation: drude_eps_jax lifts an existing materials-machinery DrudeOpt
 jax-traceable carrier-density -> eps closure (same constants, same formula, eagerly validated
 static parameters), so a carrier-actuated layer chains n_m3 -> eps -> R/T with one jax.grad.
 
-POLARIZATION VOCABULARY (audit V-8): this module speaks TWO of the five -- {'te', 'tm'} for the
-1-D grating entry point (plus lumenairy's own case-insensitive 's'/'p' aliases) and the integer
-lab `row` 0/1 (0 = E_x, 1 = E_y) for the stack entry points. It is one of five spellings in the
-repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS, and
-`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
-normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
-UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not part of the map.
+POLARIZATION VOCABULARY (audit V-8): this module speaks TWO of the five -- {'te', 'tm'} for the 1-D
+grating entry point (plus lumenairy's own case-insensitive 's'/'p' aliases) and the integer lab
+`row` 0/1 (0 = E_x, 1 = E_y) for the stack entry points. It is one of five spellings in the repo --
+{'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS, and `pol_axis`
+hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the normal-incidence /
+azimuth caveats live in `dynameta.core.polarization`. NEITHER set changed under acceptance
+unification (b): the grating entry point ALREADY took the unconditional 's'/'p' aliases (its
+accepted set is byte-for-byte lumenairy's own `_normalize_pol`, and the {'s','p'} family is now the
+mirror image of it), while the integer `row` is an INDEX, not a label -- `{'x': 0, 'y': 1, 'p': 0}`
+is not injective, so there is no lossless alias to admit and a label crossing into it stays
+explicit, through normalize_pol.
 """
 
 from __future__ import annotations

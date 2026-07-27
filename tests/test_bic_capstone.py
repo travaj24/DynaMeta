@@ -21,6 +21,11 @@ Guarded by importorskip -- lumenairy is a required dynameta dependency but the f
 lack it skip cleanly. Every leg is well under the ~120 s slow-marker threshold (measured ~7 s
 total), so no @pytest.mark.slow is needed here (contrast tests/test_soa.py, whose full validation
 wrappers ARE marked slow).
+
+ENVIRONMENT REQUIREMENT: this file is SKIPPED under numpy 1.x -- i.e. exactly on the CI `floor`
+leg, the only environment in which it has ever been seen to hang. See the guard below for the
+measurements; everywhere else (every `test` leg, which all resolve numpy 2.x) it runs for real.
+The package floor in pyproject stays `lumenairy>=5.22`: nothing here asks for a newer lumenairy.
 """
 import math
 
@@ -28,6 +33,36 @@ import numpy as np
 import pytest
 
 pytest.importorskip("lumenairy")
+
+# ------------------------------------------------------------------------------------------------
+# FLOOR-ENVIRONMENT SKIP GUARD -- the honest replacement for the `--ignore` this file used to carry
+# in the `floor` CI leg.
+#
+# THE SYMPTOM: run under the DECLARED FLOOR pin set (py3.10 + numpy 1.24.4 + scipy 1.10.1 +
+# lumenairy 5.22.0) this module does not finish -- >15 min at ~750% CPU before it was killed, vs
+# ~9 s everywhere else. That is a real limitation of the declared floor, recorded rather than
+# papered over by letting the floor leg float its pins.
+#
+# THE CAUSE IS *NOT* ISOLATED TO lumenairy, and the guard says only what was measured. Three
+# configurations were run against THIS file on 2026-07-26 (this box; each a single-file pytest):
+#     lumenairy 5.22.0 + numpy 2.5.1 + scipy 1.18.0, py3.13   ->  9 passed in 8.81 s
+#     lumenairy 5.22.0 + numpy 2.1.3 + scipy 1.14.1, py3.13   ->  9 passed in 8.03 s
+#     lumenairy 5.29.0 + numpy 2.4.4 + scipy 1.17.1, py3.14   ->  9 passed in 8.58 s
+# The first two pin the SAME lumenairy the floor leg installs, so "lumenairy 5.22 hangs" is
+# falsified as a standalone explanation and a `lumenairy.__version__ < X` gate would have been a
+# false comment with a green tick on it. The guard therefore keys on the numpy-1.x half of the pin
+# set -- the one marker that NO measured-good configuration carries, and the same fact the floor
+# leg's own trip-wire asserts (`not hasattr(numpy, "trapezoid")`, which only holds before 2.0).
+#
+# WHAT WAS NOT ISOLATED (no py3.10 or py3.11 interpreter was available on the measuring box, and
+# numpy 1.24 / scipy 1.10 have no wheels for py3.12+): whether the trigger is numpy 1.x, scipy
+# 1.10, py3.10, or a combination. SO: IF YOU RAISE THE NUMPY FLOOR, re-measure this file on the
+# new pin set before assuming the hang went with it -- this guard would stop firing.
+if int(np.__version__.split(".")[0]) < 2:
+    pytest.skip("hangs on the declared floor pin set (>15 min at ~750% CPU under py3.10 + numpy "
+                "1.24 + scipy 1.10 + lumenairy 5.22; ~9 s on every numpy-2.x environment "
+                "measured, lumenairy 5.22 INCLUDED -- see the guard comment above)",
+                allow_module_level=True)
 
 from dynameta.analysis import quasi_bic_scaling                       # noqa: E402
 from dynameta.constants import C_LIGHT                                # noqa: E402

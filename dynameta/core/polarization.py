@@ -2,14 +2,40 @@
 "which polarization" that coexist across ~18 DynaMeta modules, plus the validator/converter and
 the shared error text every one of those modules now raises through.
 
-SCOPE (read this first). This module is VALIDATION + DOCUMENTATION only. Every entry point in the
-map keeps accepting EXACTLY the vocabulary it accepted before -- no parameter was renamed, no new
-spelling was made acceptable anywhere, and no valid call changed by a single bit. What changed is
-that an INVALID label now fails with a message that names the sibling vocabulary the label came
-from and points here, instead of falling through to "whatever the ``else`` branch was".
-UNIFICATION-OF-ACCEPTANCE (making, say, ``smatrix_pole_func`` take ``'TE'`` or ``OpticalSpec``
-take ``'s'``) is a BREAKING design decision and a deliberate FOLLOW-ON, not part of this change:
-it would silently re-point existing call sites at a different physical mode.
+SCOPE (read this first). This module is VALIDATION + CONVERSION + DOCUMENTATION. No parameter was
+renamed and NO VALID CALL CHANGED BY A SINGLE BIT: a canonical label (``'s'``, ``'p'``, ``'x'``,
+``0`` ...) still travels the exact path it always did -- every guard is a fast ``not in`` test that
+fires only on labels that used to be REJECTED, and the shared error text below is imported LAZILY
+inside that failure branch. What changed, in two steps:
+
+  * V-8 (wave 5) made an INVALID label fail with a message that names the sibling vocabulary the
+    label came from and points here, instead of falling through to "whatever the ``else`` branch
+    was".
+  * ACCEPTANCE UNIFICATION, option (b) -- the V-8 follow-on, implemented here. The ``sp`` family
+    (the 13 planar-stack entry points listed below) additionally accepts ``'te'``/``'tm'`` and
+    MIXED CASE, normalized to ``'s'``/``'p'`` at the boundary. That widening is UNCONDITIONAL
+    because the identity behind it is geometry-INDEPENDENT and lossless: in a planar stack TE is
+    s and TM is p BY DEFINITION of the plane of incidence -- at every theta, every azimuth, in
+    every material. Nothing that used to work stops working, nothing that used to work changes
+    answer; only previously-RAISING spellings now succeed, and they succeed with the mode their
+    name already meant. ``'TE'`` is exactly ``'s'``, bit for bit, because it IS the same call
+    after a two-character normalization at the door.
+
+What was deliberately NOT unified, and why -- these stay STRICT, and an ``sp`` API handed ``'y'``
+still raises:
+
+  * ``lab_xyp`` <-> ``sp`` is AZIMUTH-DEPENDENT (``'y'`` is s-pol only at phi = 0, and at phi != 0
+    the repo itself carries two incompatible readings of ``'y'`` -- see below). Auto-accepting
+    ``'y'`` in an s/p API would silently re-point a call site at a different physical mode at
+    exactly the geometries where it matters.
+  * ``axis_xy`` <-> anything: a different GEOMETRY (a 2-D in-plane cross-section, no layer normal),
+    so no conversion exists to widen.
+  * ``row`` -> a label: ``{'x': 0, 'y': 1, 'p': 0}`` is not injective, so the reverse is not a
+    function.
+
+The route across those three is EXPLICIT and yours to authorize: :func:`normalize_pol`, which
+DEMANDS the geometry the conversion depends on and refuses rather than default. See
+HOW TO CONVERT below; every strict guard's error message prints the exact call for you.
 
 
 THE MAP
@@ -22,10 +48,13 @@ solves, which is why they did not (and still do not) collapse into one.
 | vocabulary | values              | what the label names                                   |
 +============+=====================+========================================================+
 | ``sp``     | ``'s'``, ``'p'``    | orientation of E relative to the PLANE OF INCIDENCE    |
-|            | (case-sensitive)    | (the plane through the layer normal z and k_par).      |
-|            |                     | s = E perpendicular to it (TE); p = E in it (TM).      |
-|            |                     | The physics-standard spelling; undefined at theta = 0  |
+|            | (+ the ``'te'`` /   | (the plane through the layer normal z and k_par).      |
+|            | ``'tm'`` aliases,   | s = E perpendicular to it (TE); p = E in it (TM).      |
+|            | case-INsensitive)   | The physics-standard spelling; undefined at theta = 0  |
 |            |                     | (no plane of incidence) where s and p degenerate.      |
+|            |                     | TE == s and TM == p unconditionally here, so those two |
+|            |                     | spellings are accepted and normalized at the door      |
+|            |                     | (acceptance unification (b)); ``'x'``/``'y'`` are NOT. |
 +------------+---------------------+--------------------------------------------------------+
 | ``lab_xyp``| ``'x'``, ``'y'``,   | ``OpticalSpec.polarization``: the LAB AXIS the incident|
 |            | ``'p'``             | E lies along, for a stack whose normal is z. ``'y'`` is|
@@ -35,10 +64,12 @@ solves, which is why they did not (and still do not) collapse into one.
 |            |                     | rejects ``'x'`` at theta != 0 or phi != 0.             |
 +------------+---------------------+--------------------------------------------------------+
 | ``tetm``   | ``'te'``, ``'tm'``  | lumenairy's 1-D grating spelling: te = E along the     |
-|            | (+ lumenairy's own  | grooves (= s for a classical mount), tm = p. The ONE   |
-|            | case-insensitive    | family that also accepts ``'s'``/``'p'`` -- not a      |
-|            | ``'s'``/``'p'``     | DynaMeta choice: ``lumenairy.rcwa_efficiency_1d``      |
-|            | aliases)            | normalizes them upstream and always has.               |
+|            | (+ lumenairy's own  | grooves (= s for a classical mount), tm = p. Accepts   |
+|            | case-insensitive    | ``'s'``/``'p'`` case-insensitively -- not a DynaMeta   |
+|            | ``'s'``/``'p'``     | choice: ``lumenairy.rcwa_efficiency_1d._normalize_pol``|
+|            | aliases)            | normalizes them upstream and always has, and this      |
+|            |                     | guard's accepted set is byte-for-byte that one. The    |
+|            |                     | ``sp`` family is now its mirror image (b).             |
 +------------+---------------------+--------------------------------------------------------+
 | ``row``    | ``0``, ``1``        | an INDEX, not a label: the row of a lab-basis Jones /  |
 |            | (int)               | power pair, ``0 = incident E_x``, ``1 = incident E_y``.|
@@ -89,6 +120,53 @@ conversion is never resolved by a default here.
 0 -> a label is therefore refused; row 1 -> ``'y'`` is fine.
 
 
+HOW TO CONVERT
+==============
+
+Two routes, and the split between them is the whole design:
+
+1. UNCONDITIONAL aliases -- just pass them. The entry point normalizes at the door because the
+   identity holds for every geometry::
+
+       stack_rta(..., pol='TE')    # == pol='s',  bit for bit
+       stack_rt(...,  pol='tm')    # == pol='p',  bit for bit
+       stack_rta(..., pol='S')     # == pol='s'   (mixed case is accepted for the sp family)
+
+   The set is exactly {s, p, te, tm}, case-insensitive, on the 13 ``sp`` entry points below, and
+   {te, tm, s, p}, case-insensitive, on the ``tetm`` grating entry point. Nothing else.
+
+2. CONDITIONAL conversions -- the API stays STRICT and YOU convert, supplying the geometry::
+
+       from dynameta.core.polarization import normalize_pol
+
+       pol = normalize_pol('y', 'lab_xyp', to='sp', azimuth_deg=0.0)      # -> 's'
+       R, T, A = stack_rta(n_super, layers, n_sub, lam, theta_deg=40.0, pol=pol)
+
+   The azimuth is a REQUIRED argument, not a defaulted one, and that is the point: it is the
+   caller who knows the mount, and the answer changes with it. ``azimuth_deg=0.0`` is an
+   ASSERTION ("this is an in-plane mount"), not a fallback::
+
+       normalize_pol('y', 'lab_xyp', to='sp')                    # raises: says "pass azimuth_deg"
+       normalize_pol('y', 'lab_xyp', to='sp', azimuth_deg=30.0)  # raises: conical, 'y' is ambiguous
+
+   THE phi != 0 HAZARD, which is why this cannot be automatic: at conical incidence the label
+   ``'y'`` means the ROTATED s-hat ``(-sin phi, cos phi, 0)`` to ``optics/solver.py`` and
+   ``OpticalSpec``, but lab row 1 = E_y -- a phi-dependent s/p MIXTURE -- to the lumenairy bridge
+   (``_POL_ROW``). Those two readings disagree, the bridge refuses conical incidence outright for
+   exactly that reason (audit C4-2), and an implicit ``'y' -> 's'`` inside an s/p entry point
+   would have silently picked one of them for you at every azimuth.
+
+   The same shape applies to the other conditional legs: ``'x' -> 's'`` additionally needs
+   ``theta_deg`` and is valid only at theta = 0 (E along lab x is not transverse to an oblique
+   wavevector); ``'p' -> row`` needs ``azimuth_deg``; ``row 0`` -> a label is refused outright;
+   and anything touching ``axis_xy`` is refused because it is a different problem, not a
+   different spelling.
+
+Every strict guard prints the conversion call for you: the rejection message for a cross-family
+label ends with the exact ``normalize_pol(...)`` line, listing only the context arguments THAT
+value actually needs, and why you are the one supplying them.
+
+
 THE FIXED-k_par 2-D TE/TM SUBTLETY
 ==================================
 
@@ -100,7 +178,10 @@ hide in that gloss:
    plane. DynaMeta uses TE = E_y out of plane, TM = H_y out of plane. That coincides with s/p
    ONLY because the simulation plane IS the plane of incidence (these solvers are in-plane;
    there is no azimuth). The OPPOSITE 2-D convention (TE = E in-plane) is common in waveguide
-   literature -- do not carry a TE label across from there.
+   literature -- do not carry a TE label across from there. These two solvers DO accept
+   ``'te'``/``'tm'`` under acceptance unification (b), and read them as THIS module's s/p; the
+   alias is sound for the plane-of-incidence identity, and it is not a licence to import a label
+   from a convention that means something else by it.
 2. The solve holds k_par FIXED across the band (it is a complex-envelope Bloch march), so the
    PHYSICAL angle sweeps with frequency: ``theta(f) = asin(k_par c / omega)``. The s/p LABEL is
    frequency-independent -- s/p is defined by the plane of incidence, which does not move -- but
@@ -146,9 +227,12 @@ __all__ = [
     "Vocabulary",
     "VOCABULARIES",
     "MAP_REFERENCE",
-    "UNIFICATION_FOLLOW_ON",
+    "HOW_TO_CONVERT",
+    "UNCONDITIONAL_ALIASES",
     "DOCSTRING_XREF",
     "ANGLE_TOL_DEG",
+    "accept_pol",
+    "conversion_example",
     "normalize_pol",
     "vocabulary_of",
     "all_entry_points",
@@ -179,9 +263,19 @@ MAP_REFERENCE = ("The repo's polarization-vocabulary map -- which spelling means
                  "geometry, and normalize_pol() to convert between them -- is "
                  "dynameta.core.polarization (audit V-8).")
 
-UNIFICATION_FOLLOW_ON = ("This entry point still accepts EXACTLY its own vocabulary; unifying "
-                         "which spellings are ACCEPTED across the repo is a breaking change and "
-                         "a deliberate follow-on, not part of the V-8 map.")
+HOW_TO_CONVERT = ("HOW TO CONVERT: an UNCONDITIONAL alias (te/tm and mixed case for the s/p "
+                  "family) is simply accepted and normalized at the door; a geometry-DEPENDENT "
+                  "one (lab x/y/p <-> s/p, row -> label) is never implicit -- convert it "
+                  "yourself with normalize_pol(), which demands the azimuth (and, for 'x', the "
+                  "polar angle) and refuses rather than guess. See the HOW TO CONVERT section of "
+                  "dynameta.core.polarization.")
+
+UNCONDITIONAL_ALIASES = ("ACCEPTANCE UNIFICATION (b): this entry point also takes 'te'/'tm' and "
+                         "mixed case, normalized to 's'/'p' at the boundary -- in a planar stack "
+                         "TE is s and TM is p by definition of the plane of incidence, at every "
+                         "angle, so the widening is unconditional and lossless. The "
+                         "geometry-DEPENDENT spellings (OpticalSpec's lab 'x'/'y', the integer "
+                         "row) are still REFUSED: convert those explicitly with normalize_pol().")
 
 DOCSTRING_XREF = ("POLARIZATION VOCABULARY: this module speaks {names}. It is one of five "
                   "spellings in the repo; the map is dynameta.core.polarization (audit V-8).")
@@ -219,14 +313,25 @@ class EntryPoint:
 @dataclass(frozen=True)
 class Vocabulary:
     """One polarization vocabulary: what it accepts, what the label MEANS, and every entry point
-    that speaks it."""
+    that speaks it.
+
+    ``aliases`` is the UNCONDITIONAL widening (acceptance unification (b)): pairs of
+    ``(spelling, canonical)`` where the spelling names the SAME physical mode as the canonical
+    value in EVERY geometry this vocabulary covers, so accepting it is lossless and needs no
+    context. A geometry-DEPENDENT correspondence is NOT an alias and must never be listed here --
+    it lives in :func:`normalize_pol`, which demands the geometry and refuses rather than guess."""
     name: str
     values: Tuple
     geometry: str
     meaning: str
     entry_points: Tuple[EntryPoint, ...]
-    aliases: Tuple[str, ...] = ()
+    aliases: Tuple[Tuple[str, str], ...] = ()
     case_insensitive: bool = False
+
+    @property
+    def alias_map(self) -> Dict[str, str]:
+        """``{spelling: canonical}`` for the unconditional aliases."""
+        return dict(self.aliases)
 
     @property
     def accepted(self) -> str:
@@ -236,9 +341,9 @@ class Vocabulary:
                 else "{} or {}".format(", ".join(vals[:-1]), vals[-1]))
         if self.aliases:
             core += " (or the {} aliases)".format(
-                ", ".join(repr(a) for a in self.aliases))
-        if not self.case_insensitive and all(isinstance(v, str) for v in self.values):
-            core += " (case-sensitive)"
+                ", ".join(repr(a) for a, _ in self.aliases))
+        if all(isinstance(v, str) for v in self.values):
+            core += " (case-insensitive)" if self.case_insensitive else " (case-sensitive)"
         return core
 
     def wrong_value(self):
@@ -261,6 +366,8 @@ def _add(v: Vocabulary) -> Vocabulary:
 _add(Vocabulary(
     name="sp",
     values=("s", "p"),
+    aliases=(("te", "s"), ("tm", "p")),
+    case_insensitive=True,
     geometry="planar stack, orientation of E relative to the plane of incidence",
     meaning="s = E perpendicular to the plane of incidence (TE); p = E in it (TM)",
     entry_points=(
@@ -335,15 +442,16 @@ _add(Vocabulary(
 _add(Vocabulary(
     name="tetm",
     values=("te", "tm"),
-    aliases=("s", "p"),
+    aliases=(("s", "te"), ("p", "tm")),
     case_insensitive=True,
     geometry="1-D grating, classical (in-plane) mount",
     meaning="te = E along the grooves (= s); tm = p",
     entry_points=(
         EntryPoint("dynameta.optics.lumenairy_bridge.rcwa_design", "rcwa_grating_RT",
                    "polarization",
-                   note="the only family that also takes 's'/'p', case-insensitively -- "
-                        "lumenairy.rcwa_efficiency_1d normalizes them upstream"),
+                   note="takes 's'/'p' case-insensitively, byte-for-byte the set "
+                        "lumenairy.rcwa_efficiency_1d._normalize_pol accepts (it normalizes them "
+                        "upstream and always has); the sp family is now the mirror image"),
     ),
 ))
 
@@ -376,9 +484,12 @@ _add(Vocabulary(
 
 # One value per vocabulary that is VALID somewhere else in the repo and must be rejected here --
 # the negative probe the executable-map test drives, and the reason the error text can always
-# name a sibling.
+# name a sibling.  Under acceptance unification (b) the two families that share the PLANE-OF-
+# INCIDENCE identity (sp and tetm) accept each other's spellings, so BOTH of their probes have to
+# be a lab axis: the surviving strict boundary is the geometry-dependent one, and that is exactly
+# what these probes now measure.
 _WRONG_PROBE = {
-    "sp": "y",        # lab_xyp
+    "sp": "y",        # lab_xyp ('te'/'tm' ARE accepted here now, so the probe must be a lab axis)
     "lab_xyp": "s",   # sp
     "tetm": "y",      # lab_xyp ('s'/'p' ARE accepted here, so the probe must be a lab axis)
     "row": "x",       # lab_xyp
@@ -397,8 +508,12 @@ def all_entry_points() -> List[Tuple[str, EntryPoint]]:
 
 def vocabulary_of(value, exclude: Sequence[str] = ()) -> List[str]:
     """Names of the vocabularies that WOULD accept ``value``, excluding ``exclude``. Used to build
-    an error that says where a rejected label actually came from."""
-    out = []
+    an error that says where a rejected label actually came from.
+
+    A vocabulary in which ``value`` is CANONICAL is listed before one where it is only an
+    unconditional alias, so the error names ``'te'`` as the grating family's word rather than the
+    s/p family's borrowing of it."""
+    canonical, alias = [], []
     for name, voc in VOCABULARIES.items():
         if name in exclude:
             continue
@@ -406,13 +521,22 @@ def vocabulary_of(value, exclude: Sequence[str] = ()) -> List[str]:
             _canonical(value, voc)
         except PolarizationVocabularyError:
             continue
-        out.append(name)
-    return out
+        (canonical if _is_canonical_spelling(value, voc) else alias).append(name)
+    return canonical + alias
+
+
+def _is_canonical_spelling(value, voc: Vocabulary) -> bool:
+    if not isinstance(value, str):
+        return True
+    cand = value.lower() if voc.case_insensitive else value
+    return cand in voc.values
 
 
 def _canonical(value, voc: Vocabulary):
     """The canonical form of ``value`` in ``voc``, or raise. This is the ONLY acceptance test in
-    the repo, and it accepts exactly what the modules accepted before V-8 -- nothing more."""
+    the repo: the vocabulary's own values, plus the UNCONDITIONAL aliases declared in the table
+    (acceptance unification (b)) -- and nothing else. Geometry-dependent correspondences are not
+    reachable from here; they need :func:`normalize_pol` and an explicit azimuth."""
     if voc.name == "row":
         if isinstance(value, bool) or not isinstance(value, int) or value not in voc.values:
             raise PolarizationVocabularyError("not in {}".format(voc.name))
@@ -422,8 +546,9 @@ def _canonical(value, voc: Vocabulary):
     cand = value.lower() if voc.case_insensitive else value
     if cand in voc.values:
         return cand
-    if voc.case_insensitive and cand in voc.aliases:
-        return {"s": "te", "p": "tm"}[cand]
+    alias = voc.alias_map.get(cand)
+    if alias is not None:
+        return alias
     raise PolarizationVocabularyError("not in {}".format(voc.name))
 
 
@@ -464,9 +589,9 @@ def pol_vocabulary_error(value, vocabulary: str, *, where: Optional[str] = None,
         msg.append("{!r} is the {!r} vocabulary ({}: {}), spoken by {}.".format(
             value, other.name, other.geometry, other.meaning,
             ", ".join(ep.dotted for ep in other.entry_points[:3])))
-        msg.append("This entry point does NOT accept it. Convert explicitly: "
-                   "normalize_pol({!r}, {!r}, to={!r}, theta_deg=..., azimuth_deg=...).".format(
-                       value, other.name, voc.name))
+        msg.append("This entry point does NOT accept it: the two are not the same word for the "
+                   "same thing, so there is no unconditional alias to widen to. "
+                   + conversion_example(value, other.name, voc.name))
     else:
         msg.append("It belongs to no DynaMeta polarization vocabulary; the others are {}.".format(
             ", ".join("{} {}".format(v.name, list(v.values))
@@ -484,6 +609,43 @@ def _conversion_error(value, frm: str, to: str, why: str) -> PolarizationConvers
 
 
 # ------------------------------------------------------------------------------------------------
+# The ONE acceptance boundary the strict entry points call (acceptance unification (b))
+# ------------------------------------------------------------------------------------------------
+def accept_pol(value, vocabulary: str = "sp", *, where: Optional[str] = None, param: str = "pol",
+               extra: str = "", allowed: Optional[Sequence] = None):
+    """Accept-and-normalize ONE polarization label at an entry point's boundary, or raise the
+    shared vocabulary error.
+
+    This is the single implementation of acceptance unification (b): it returns the CANONICAL
+    value of ``value`` in ``vocabulary`` -- so an ``sp`` entry point handed ``'TE'`` gets back
+    ``'s'`` and then runs the identical code path a ``pol='s'`` call runs, bit for bit -- and it
+    admits ONLY the unconditional aliases declared in :data:`VOCABULARIES` (same physical mode in
+    every geometry the vocabulary covers). A geometry-DEPENDENT spelling (lab ``'x'``/``'y'`` into
+    an s/p API, a ``row`` index, ...) is still REFUSED here, with the explicit
+    :func:`normalize_pol` call printed in the message.
+
+    Callers keep their own cheap ``if value not in (canonical values)`` test in front of this, so
+    the valid path neither imports this module nor pays a function call:
+
+        if pol not in ("s", "p"):
+            pol = _accept_pol(pol, "stack_rta")     # normalizes an alias, or raises
+
+    ``allowed`` marks an entry point that implements only a SUBSET of its vocabulary (see
+    :func:`pol_vocabulary_error`); the subset is tested AFTER normalization, so a subset entry
+    point cannot be entered through an alias either."""
+    voc = VOCABULARIES[vocabulary]
+    try:
+        canon = _canonical(value, voc)
+    except PolarizationVocabularyError:
+        raise pol_vocabulary_error(value, vocabulary, where=where, param=param, extra=extra,
+                                   allowed=allowed) from None
+    if allowed is not None and canon not in tuple(allowed):
+        raise pol_vocabulary_error(value, vocabulary, where=where, param=param, extra=extra,
+                                   allowed=allowed)
+    return canon
+
+
+# ------------------------------------------------------------------------------------------------
 # normalize_pol
 # ------------------------------------------------------------------------------------------------
 def _zero(angle: Optional[float]) -> bool:
@@ -495,10 +657,12 @@ def _need_azimuth(value, frm, to, azimuth_deg):
         raise _conversion_error(
             value, frm, to,
             "the s/p <-> lab-axis correspondence holds only at azimuth phi = 0 and this call did "
-            "not say what phi is. Pass azimuth_deg explicitly (azimuth_deg=0.0 asserts an "
-            "in-plane mount); at phi != 0 the label 'y' means the ROTATED s-hat to the FEM solver "
-            "and OpticalSpec, but lab row 1 = E_y (a phi-dependent s/p MIXTURE) to the lumenairy "
-            "bridge, which is why the bridge refuses conical incidence outright (audit C4-2).")
+            "not say what phi is. Pass the azimuth_deg argument explicitly -- e.g. "
+            "normalize_pol({!r}, {!r}, to={!r}, azimuth_deg=0.0), where azimuth_deg=0.0 ASSERTS "
+            "an in-plane mount rather than defaulting to one. At phi != 0 the label 'y' means the "
+            "ROTATED s-hat to the FEM solver and OpticalSpec, but lab row 1 = E_y (a phi-dependent "
+            "s/p MIXTURE) to the lumenairy bridge, which is why the bridge refuses conical "
+            "incidence outright (audit C4-2).".format(value, frm, to))
 
 
 def _lab_to_sp(value, theta_deg, azimuth_deg):
@@ -520,8 +684,9 @@ def _lab_to_sp(value, theta_deg, azimuth_deg):
             value, "lab_xyp", "sp",
             "'x' (E along lab x) has an s/p image ONLY at normal incidence, where a scalar "
             "layered stack is polarization-degenerate; at theta != 0 it is not even transverse to "
-            "the wavevector (OpticalSpec rejects it there). Pass theta_deg to assert which branch "
-            "you are on.")
+            "the wavevector (OpticalSpec rejects it there). Pass the theta_deg argument to assert "
+            "which branch you are on -- e.g. normalize_pol('x', 'lab_xyp', to='sp', "
+            "azimuth_deg=0.0, theta_deg=0.0).")
     if not _zero(theta_deg):
         raise _conversion_error(
             value, "lab_xyp", "sp",
@@ -607,6 +772,123 @@ _CONVERSIONS = {
     ("row", "lab_xyp"): _row_to_lab,
 }
 
+# Deterministic pivot order for the multi-hop search below.  `axis_xy` is absent on purpose: it is
+# not a spelling of the other four, so it is never a pivot and never a destination.
+_PIVOT_ORDER = ("sp", "lab_xyp", "tetm", "row")
+
+
+def _conversion_path(frm: str, to: str) -> Optional[List[Tuple[str, str]]]:
+    """The shortest chain of DEFINED hops from ``frm`` to ``to``, or None.
+
+    Only the six hops in ``_CONVERSIONS`` are primitive; every other convertible pair is a
+    composition of them (``tetm -> row`` is te -> s -> 'y' -> 1, three hops). Composing rather
+    than adding direct entries keeps ONE implementation of each physical correspondence, so every
+    refusal on the way -- the azimuth demand, the conical refusal, the non-injective row 0 -- fires
+    for the composed pairs too instead of being re-derived and forgotten."""
+    if (frm, to) in _CONVERSIONS:
+        return [(frm, to)]
+    seen = {frm}
+    queue: List[Tuple[str, List[Tuple[str, str]]]] = [(frm, [])]
+    while queue:
+        node, path = queue.pop(0)
+        for nxt in _PIVOT_ORDER:
+            if (node, nxt) not in _CONVERSIONS or nxt in seen:
+                continue
+            if nxt == to:
+                return path + [(node, nxt)]
+            seen.add(nxt)
+            queue.append((nxt, path + [(node, nxt)]))
+    return None
+
+
+def _convert(canon, vocabulary: str, to: str, theta_deg, azimuth_deg):
+    """Run the (possibly multi-hop) conversion of an ALREADY-CANONICAL value. Raises
+    :class:`PolarizationConversionError` for anything ambiguous or undefined."""
+    if "axis_xy" in (vocabulary, to):
+        _refuse_axis(canon, vocabulary, to)
+    path = _conversion_path(vocabulary, to)
+    if path is None:
+        raise _conversion_error(canon, vocabulary, to, "there is no defined mapping between them.")
+    out = canon
+    for frm_i, to_i in path:
+        out = _CONVERSIONS[(frm_i, to_i)](out, theta_deg, azimuth_deg)
+    return out
+
+
+# ------------------------------------------------------------------------------------------------
+# The explicit-conversion example every STRICT guard prints (part 2b)
+# ------------------------------------------------------------------------------------------------
+_CONTEXT_SYMBOL = {"azimuth_deg": "phi", "theta_deg": "theta"}
+
+_WHY_YOU_SUPPLY_IT = {
+    ("azimuth_deg",): ("YOU supply the azimuth because the mapping DEPENDS on it: 'y' is s-pol "
+                       "only at phi = 0, and at phi != 0 the repo carries two incompatible "
+                       "readings of it (rotated s-hat vs lab row 1)"),
+    ("theta_deg",): ("YOU supply the polar angle because the mapping DEPENDS on it: the lab axes "
+                     "coincide with s/p only where the stack is polarization-degenerate"),
+    ("azimuth_deg", "theta_deg"): ("YOU supply BOTH angles because the mapping depends on both: "
+                                   "'x' is transverse to the wavevector only at theta = 0, and "
+                                   "the lab axes are the s/p basis only at phi = 0"),
+}
+
+
+def _required_context(value, frm: str, to: str) -> Tuple[str, ...]:
+    """Which of ``azimuth_deg`` / ``theta_deg`` this particular conversion actually CONSULTS,
+    measured by running it once with each omitted at the in-plane normal-incidence geometry.
+
+    Probed rather than tabulated on purpose: the example printed in an error can then never drift
+    away from what the converter really demands (``'y' -> 's'`` needs only the azimuth, ``'x' ->
+    's'`` needs both, ``'te' -> 's'`` needs neither).
+
+    A conversion that fails even WITH both angles is refused outright, not context-hungry (row 0
+    -> a label), so it needs nothing and reports nothing -- the caller prints the refusal itself."""
+    try:
+        _convert(value, frm, to, 0.0, 0.0)
+    except PolarizationConversionError:
+        return ()
+    except Exception:                                      # noqa: BLE001 -- probing only
+        return ()
+    needed = []
+    for name in ("azimuth_deg", "theta_deg"):
+        kw = {"azimuth_deg": 0.0, "theta_deg": 0.0}
+        kw[name] = None
+        try:
+            _convert(value, frm, to, kw["theta_deg"], kw["azimuth_deg"])
+        except PolarizationConversionError:
+            needed.append(name)
+        except Exception:                                  # noqa: BLE001 -- probing only
+            pass
+    return tuple(needed)
+
+
+def conversion_example(value, frm: str, to: str) -> str:
+    """The one-line "convert it yourself" sentence for a label of vocabulary ``frm`` that reached
+    an entry point speaking ``to``. Written HERE, once, so all 19 strict guards say the same thing
+    and say it correctly for the value in hand (see :func:`_required_context`)."""
+    if "axis_xy" in (frm, to):
+        return ("There is no conversion to offer: {!r} is a 2-D IN-PLANE cross-section geometry "
+                "(hydro_fem) and {!r} is a planar stack -- different problems that happen to share "
+                "the letters 'x' and 'y', not different spellings. {}".format(
+                    "axis_xy", to if frm == "axis_xy" else frm, HOW_TO_CONVERT))
+    try:
+        canon = _canonical(value, VOCABULARIES[frm])
+    except PolarizationVocabularyError:                    # pragma: no cover -- caller checked
+        canon = value
+    needed = _required_context(canon, frm, to)
+    call = "normalize_pol({!r}, {!r}, to={!r}{})".format(
+        value, frm, to, "".join(", {}={}".format(n, _CONTEXT_SYMBOL[n]) for n in needed))
+    if not needed:
+        try:
+            _convert(canon, frm, to, 0.0, 0.0)
+        except PolarizationConversionError as exc:
+            why = str(exc).split(" -- ", 1)[-1].replace(MAP_REFERENCE, "").strip()
+            return "normalize_pol REFUSES this conversion outright, at every geometry: {}".format(
+                why)
+        return "Convert explicitly: {} -- this pair is geometry-independent.".format(call)
+    return "Convert explicitly: {} -- {}. normalize_pol REFUSES rather than pick a reading when "\
+           "the geometry it needs is missing or makes the label ambiguous.".format(
+               call, _WHY_YOU_SUPPLY_IT[tuple(sorted(needed))])
+
 
 def normalize_pol(value, vocabulary: str = "sp", *, to: Optional[str] = None,
                   theta_deg: Optional[float] = None, azimuth_deg: Optional[float] = None,
@@ -615,21 +897,42 @@ def normalize_pol(value, vocabulary: str = "sp", *, to: Optional[str] = None,
 
     With ``to=None`` (the default) this is a pure GUARD: it returns the canonical form of
     ``value`` in ``vocabulary`` and raises :class:`PolarizationVocabularyError` -- naming the
-    sibling vocabulary the label came from -- otherwise. The accepted set is exactly what the
-    corresponding modules accepted before audit V-8: no new spelling is admitted anywhere, so a
-    call that worked keeps working, bit for bit.
+    sibling vocabulary the label came from -- otherwise. The accepted set is the vocabulary's own
+    values plus its UNCONDITIONAL aliases (``'te'``/``'tm'`` and mixed case for ``sp``,
+    ``'s'``/``'p'`` and mixed case for ``tetm``), exactly what the corresponding entry points
+    accept -- this function is never a back door to a wider set than the modules take.
 
-    With ``to=<other vocabulary>`` it converts, and REFUSES rather than guess whenever the
-    conversion depends on geometry the caller did not supply:
+    With ``to=<other vocabulary>`` it converts. COVERAGE -- every ordered pair over the four
+    stack vocabularies is defined, six of them primitively and the rest by composition
+    (:func:`_conversion_path`), and each one REFUSES rather than guess when the geometry it
+    depends on is missing:
 
-      * ``lab_xyp`` <-> ``sp`` needs ``azimuth_deg`` (the 'y' <-> 's' identity holds only at
-        phi = 0; at phi != 0 the repo itself carries two incompatible readings of 'y');
-      * ``'x'`` -> ``'s'`` additionally needs ``theta_deg`` and is valid only at theta = 0;
-      * ``lab_xyp`` -> ``row`` needs ``azimuth_deg`` for ``'p'``;
-      * ``row`` 0 -> a label is refused outright (``{'x': 0, 'y': 1, 'p': 0}`` is not injective);
-      * ``sp`` <-> ``tetm`` refuses a conical mount;
-      * anything involving ``axis_xy`` (the 2-D in-plane hydro_fem geometry) is refused -- it is
-        a different problem, not a different spelling.
+      ============  ============  ==================================================================
+      from          to            required context / refusal
+      ============  ============  ==================================================================
+      ``lab_xyp``   ``sp``        ``azimuth_deg`` always ('y' <-> 's' holds only at phi = 0, and at
+                                  phi != 0 the repo carries two incompatible readings of 'y');
+                                  ``'x'`` additionally needs ``theta_deg`` and is valid only at
+                                  theta = 0 (sibling finding Q-24)
+      ``sp``        ``lab_xyp``   ``azimuth_deg``; refused at phi != 0
+      ``lab_xyp``   ``row``       ``azimuth_deg`` for ``'p'`` only (conical p-pol carries no single
+                                  row); ``'x'``/``'y'`` are context-free
+      ``row``       ``lab_xyp``   row 1 -> ``'y'``; row 0 is REFUSED outright
+                                  (``{'x': 0, 'y': 1, 'p': 0}`` is not injective)
+      ``sp``        ``tetm``      context-free at a classical mount; refused at phi != 0
+      ``tetm``      ``sp``        context-free at a classical mount; refused at phi != 0
+      ``sp``        ``row``       composed via ``lab_xyp`` (inherits the azimuth demand)
+      ``row``       ``sp``        composed via ``lab_xyp`` (row 0 still refused)
+      ``tetm``      ``lab_xyp``   composed via ``sp``
+      ``lab_xyp``   ``tetm``      composed via ``sp``
+      ``tetm``      ``row``       composed via ``sp`` -> ``lab_xyp`` (three hops)
+      ``row``       ``tetm``      composed via ``lab_xyp`` -> ``sp`` (row 0 still refused)
+      ``axis_xy``   anything      REFUSED, both directions: the 2-D in-plane hydro_fem geometry is
+                                  a different problem, not a different spelling
+      ============  ============  ==================================================================
+
+    Note that ``theta_deg`` enters ONLY through the ``'x'`` leg: at phi = 0 the s-hat is the lab
+    y-axis for every polar angle, so ``'y' <-> 's'`` is theta-independent and does not ask for it.
 
     Parameters
     ----------
@@ -664,15 +967,4 @@ def normalize_pol(value, vocabulary: str = "sp", *, to: Optional[str] = None,
     if to not in VOCABULARIES:
         raise KeyError("unknown polarization vocabulary {!r}; known: {}".format(
             to, sorted(VOCABULARIES)))
-    if "axis_xy" in (vocabulary, to):
-        _refuse_axis(canon, vocabulary, to)
-    fn = _CONVERSIONS.get((vocabulary, to))
-    if fn is not None:
-        return fn(canon, theta_deg, azimuth_deg)
-    # Two hops through the pivot the pair shares.
-    for pivot in ("sp", "lab_xyp"):
-        first = _CONVERSIONS.get((vocabulary, pivot))
-        second = _CONVERSIONS.get((pivot, to))
-        if first is not None and second is not None:
-            return second(first(canon, theta_deg, azimuth_deg), theta_deg, azimuth_deg)
-    raise _conversion_error(canon, vocabulary, to, "there is no defined mapping between them.")
+    return _convert(canon, vocabulary, to, theta_deg, azimuth_deg)

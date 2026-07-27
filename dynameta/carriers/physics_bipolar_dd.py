@@ -60,6 +60,13 @@ that does it undershoot (-0.24 % at eta = 60, -1.20 % at 100). The g-FACTOR is t
 over early -- +0.009 % at eta = 30, -0.041 % at 31, -1.07 % at 50 -- so g undershoots past eta ~ 30,
 which is where _FD_U_MAX comes from.
 
+WHO CHECKS THAT CEILING -- two tests, because a doping profile and a converged solution are different
+things. (1) SETUP time, `_fd_contact_shift`: the charge-neutral majority density NetDoping implies.
+(2) POST-SOLVE, `warn_if_solution_exceeds_fd_ceiling` (audit C10-d), which `dc_solve.solve_dc` runs on
+every converged DC/Gummel solve: max(Electrons)/N_dos and max(Holes)/N_dos_p from the SOLUTION. Only
+(2) can see a gated accumulation cap, whose body doping sits below the ceiling while the gate drives
+the channel far past it -- the devsim_3d `Stacked3DSpec` case exactly.
+
 Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
   (1) potential-only pre-solve (freeze carriers); (2) seed Electrons/Holes from the
   Boltzmann equilibrium node models; (3) coupled 3-variable Newton; (4) bias ramp.
@@ -68,11 +75,13 @@ Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, _poisson_edge_models, require_positive)
+    Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
@@ -191,7 +200,6 @@ def _fd_contact_shift(device: str, contact: str):
         _param = "N_dos_p"
         N_v = float(ds.get_parameter(device=device, region=region, name=_param))
     except Exception as exc:                                   # audit C-10: do NOT revert silently
-        import warnings
         warnings.warn(
             "setup_contact_ohmic_bipolar: region {!r} declares fd_enhancement > 0 (Fermi-Dirac "
             "transport) but its material parameter {!r} could not be read ({}: {}), so contact {!r} "
@@ -214,11 +222,11 @@ def _fd_contact_shift(device: str, contact: str):
     # CEILING WARNING. It reads NetDoping ONLY -- i.e. the CHARGE-NEUTRAL majority density at the
     # contact -- so it cannot see degeneracy that the SOLUTION produces: a gated/accumulation device
     # (the MOS-cap builders, an ENZ accumulation layer) can drive n/N_dos far past this ceiling in
-    # the channel while the contact's own doping sits comfortably below it, and NOTHING warns there.
-    # The transport g-factor is what degrades in that case, not this offset. A solution-level check
-    # (post-solve max(Electrons)/N_dos) is a deliberate follow-on, not implemented here.
+    # the channel while the contact's own doping sits comfortably below it. The transport g-factor is
+    # what degrades in that case, not this offset. That SOLUTION-level half is now covered by
+    # `warn_if_solution_exceeds_fd_ceiling` (audit C10-d), which `dc_solve.solve_dc` runs on every
+    # converged DC/Gummel solve; this setup-time test remains the one that fires BEFORE any solve.
     if float(np.max(u)) > _FD_U_MAX:
-        import warnings
         warnings.warn(
             "setup_contact_ohmic_bipolar: the contact's majority density reaches n/N_dos = {:.3g} "
             "(eta > 32), beyond the validated ceiling of the rational g fit (carriers.einstein). "
@@ -227,8 +235,9 @@ def _fd_contact_shift(device: str, contact: str):
             "overshoots the exact Fermi-Dirac value out to eta ~ 50 (+0.40 % at the ceiling, "
             "+0.009 % at 50) and only undershoots beyond that (-0.24 % at 60) -- so the two do NOT "
             "err in the same direction (audit C-10 / DD-2, re-measured 2026-07-26). NOTE this test "
-            "sees NetDoping only: a gated/accumulation device can exceed the ceiling at the "
-            "SOLUTION level with no warning at all. Supply a larger N_dos, or drop fd_enhancement "
+            "sees NetDoping only; the SOLUTION-level exceedance a gated/accumulation device produces "
+            "is caught after each converged solve instead (audit C10-d, "
+            "warn_if_solution_exceeds_fd_ceiling). Supply a larger N_dos, or drop fd_enhancement "
             "and accept the Boltzmann model knowingly.".format(float(np.max(u))),
             RuntimeWarning, stacklevel=3)
     # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
@@ -240,6 +249,123 @@ def _fd_contact_shift(device: str, contact: str):
     ds.set_node_values(device=device, region=region, name=name,
                        values=[float(v) for v in shift])
     return name
+
+
+# --- audit C10-d: the SOLUTION-level counterpart of the ceiling test above ----------------------
+# The rational g fit is anchored at the Boltzmann end and NOT at the degenerate one, so it drifts
+# once eta runs past ~32 (u = n/N_dos past _FD_U_MAX). MEASURED 2026-07-26 against exact Gauss
+# quadrature of F_1/2 and F_-1/2 (scratch probe; the same oracle tests/test_devsim_smoke.py uses):
+#
+#     eta        32      50      100     200          <- 32 is _FD_U_MAX's eta, the ceiling
+#     g fit    -0.09%  -1.07%  -3.24%  -5.61%         <- the TRANSPORT factor: undershoots
+#     Delta    +0.40%  +0.01%  -1.20%  -2.96%         <- the built-in OFFSET: crosses over at ~50
+#
+# so the two halves do not err in the same direction, and quoting one for the other misleads.
+# Anchors only: the warning INTERPOLATES linearly in eta between them and clamps outside.
+_FD_FIT_ERR_ANCHORS = ((32.0, -0.09, +0.40), (50.0, -1.07, +0.01),
+                       (100.0, -3.24, -1.20), (200.0, -5.61, -2.96))
+# (carrier solution variable, its band-DOS parameter) -- Holes is absent on a unipolar region, and
+# reading it is simply skipped there, so the same check covers both.
+_FD_CARRIERS = (("Electrons", "N_dos"), ("Holes", "N_dos_p"))
+
+
+def _fd_eta_from_u(u: float) -> float:
+    """eta = (E_F - E_c)/kT implied by u = n/N_dos, i.e. the inverse of F_1/2 in the SAME
+    Aymerich-Humet frame the equilibrium module uses. Diagnostic only (it labels a warning), so any
+    inversion failure falls back to the degenerate asymptote u -> (4/(3 sqrt(pi))) eta^(3/2), which
+    is good to 0.003 % by eta = 200 -- a diagnostic must never be the thing that raises."""
+    u = float(u)
+    asym = (0.75 * np.sqrt(np.pi) * max(u, 1e-300)) ** (2.0 / 3.0)
+    try:
+        return float(invert_F12(u, eta_max=max(100.0, 4.0 * asym), tol=1e-6))
+    except Exception:                                          # pragma: no cover - diagnostic guard
+        return float(asym)
+
+
+def _fd_fit_error_pct(eta: float) -> "tuple[float, float]":
+    """(g-fit, built-in-offset) relative error [%] at `eta`, linearly interpolated between the
+    measured anchors of _FD_FIT_ERR_ANCHORS and clamped to the end anchors outside their range."""
+    lo = _FD_FIT_ERR_ANCHORS[0]
+    if eta <= lo[0]:
+        return lo[1], lo[2]
+    for hi in _FD_FIT_ERR_ANCHORS[1:]:
+        if eta <= hi[0]:
+            t = (eta - lo[0]) / (hi[0] - lo[0])
+            return lo[1] + t * (hi[1] - lo[1]), lo[2] + t * (hi[2] - lo[2])
+        lo = hi
+    return lo[1], lo[2]
+
+
+def warn_if_solution_exceeds_fd_ceiling(device: str, regions=None, *, stacklevel: int = 3):
+    """audit C10-d. After a CONVERGED solve, warn once if the solution carrier density on any
+    Fermi-Dirac region has run past the rational g fit's validated ceiling (u = n/N_dos > _FD_U_MAX,
+    eta > 32). Returns the largest u seen on an FD region (None if there is no FD region at all).
+
+    WHY THIS EXISTS SEPARATELY FROM THE SETUP-TIME TEST. `_fd_contact_shift` warns when the CHARGE-
+    NEUTRAL doping at an ohmic contact is past the ceiling. That is the only degeneracy a doping
+    profile can express -- and it is blind to exactly the device this library was built for: a gated
+    accumulation cap (devsim_3d's `Stacked3DSpec`, the ENZ modulator) whose body doping sits
+    comfortably below the ceiling while the gate drives n/N_dos far past it IN THE CHANNEL. Nothing
+    warned there; the transport g-factor was quietly extrapolated. This reads the converged state
+    instead, so it sees what the solve actually produced.
+
+    COST: one `get_parameter` per region to find the FD regions, then one node-array read per
+    carrier per FD region (two on a bipolar region). No quadrature, no per-node transcendental --
+    the eta inversion runs ONCE, on the single worst node, and only when the ceiling is exceeded.
+
+    SILENT when a region carries no `fd_enhancement` parameter (not a bipolar region), when it
+    carries `fd_enhancement = 0` (a deliberate Boltzmann choice -- the ceiling is a property of the
+    FD FIT, so a Boltzmann region has no ceiling to exceed), or when every u stays under it."""
+    try:
+        names = list(regions) if regions is not None else list(ds.get_region_list(device=device))
+    except Exception:                                          # pragma: no cover - devsim internals
+        return None
+    seen_fd = False
+    worst_u = 0.0
+    over = []                                                  # (u, region, carrier) past the ceiling
+    for region in names:
+        try:
+            if not (float(ds.get_parameter(device=device, region=region,
+                                           name="fd_enhancement")) > 0.0):
+                continue                                       # Boltzmann region, or not bipolar
+        except Exception:
+            continue                                           # no such parameter: not an FD region
+        seen_fd = True
+        for var, dos_name in _FD_CARRIERS:
+            try:
+                dos = float(ds.get_parameter(device=device, region=region, name=dos_name))
+                vals = ds.get_node_model_values(device=device, region=region, name=var)
+            except Exception:
+                continue                                       # carrier/DOS absent (unipolar region)
+            if not (dos > 0.0) or len(vals) == 0:
+                continue
+            u = float(np.max(np.asarray(vals, dtype=np.float64))) / dos
+            worst_u = max(worst_u, u)
+            if u > _FD_U_MAX:
+                over.append((u, region, var))
+    if not over:
+        return worst_u if seen_fd else None
+    over.sort(reverse=True)
+    u, region, var = over[0]
+    eta = _fd_eta_from_u(u)
+    g_pct, d_pct = _fd_fit_error_pct(eta)
+    extra = ("; also over the ceiling: " + ", ".join(
+        "{} {} = {:.3g}".format(r, v, uu) for uu, r, v in over[1:])) if len(over) > 1 else ""
+    warnings.warn(
+        "Fermi-Dirac ceiling exceeded BY THE SOLUTION: region {!r} converged with "
+        "max({})/{} = {:.4g} (eta = {:.1f}), past the rational g fit's validated ceiling of "
+        "{:.4g} (eta = 32; carriers.einstein){}. Interpolating the measured error table (vs exact "
+        "quadrature of F_1/2 and F_-1/2, 2026-07-26 -- eta 32/50/100/200: g -0.09/-1.07/-3.24/"
+        "-5.61 %, built-in offset +0.40/+0.01/-1.20/-2.96 %), the transport g-factor is off by "
+        "about {:+.2f} % here and the ohmic built-in offset by about {:+.2f} % -- they do NOT err "
+        "in the same direction. The doping-level test at contact setup cannot see this: it reads "
+        "NetDoping only, so a gated/accumulation device whose contact doping sits below the ceiling "
+        "gets no warning from it (audit C10-d). Supply a larger N_dos/N_dos_p, reduce the "
+        "accumulation, or set fd_enhancement=False and accept the Boltzmann model knowingly.".format(
+            region, var, "N_dos" if var == "Electrons" else "N_dos_p", u, eta, _FD_U_MAX, extra,
+            g_pct, d_pct),
+        RuntimeWarning, stacklevel=stacklevel)
+    return worst_u
 
 
 def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:

@@ -4,14 +4,16 @@ Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
-incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence).
-It is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling
-(tmm_reference, resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD),
-{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
-Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
-`normalize_pol` converter and the normal-incidence / azimuth caveats live in
-`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
-repo is a deliberate follow-on, not part of the map.
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol.
 """
 from __future__ import annotations
 
