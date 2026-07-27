@@ -60,6 +60,18 @@ _OPT = ("T", "A", "A_independent", "R_flux", "T_flux")     # fields that may be 
 # OpticalResult.per_region_absorption (D2) is deliberately NOT cached: a variable-length
 # per-design diagnostic dict, not a scalar solver output -- a cache HIT returns it as None.
 
+# ids of THIS module's currently-registered atexit trampolines (audit R-7 accounting). Tests
+# must count these, never atexit._ncallbacks() deltas: on a fresh CI interpreter the FIRST
+# h5py/zarr import happens inside a cache construction and registers ITS OWN atexit hooks,
+# so global-count deltas are not attributable to us (caught on the first PR-6 CI run, where
+# the dev box's warm imports had masked it).
+_LIVE_ATEXIT_HOOKS: set = set()
+
+
+def _live_atexit_hook_count() -> int:
+    """Number of OpticalSolverCache atexit trampolines currently registered (test hook)."""
+    return len(_LIVE_ATEXIT_HOOKS)
+
 
 def _eps_fingerprint(eps_by_region) -> bytes:
     """Content hash of the per-region EpsFields.
@@ -293,6 +305,7 @@ class OpticalSolverCache:
 
             self._atexit_hook = _atexit_flush
             atexit.register(_atexit_flush)                    # batched mode: never drop the tail
+            _LIVE_ATEXIT_HOOKS.add(id(_atexit_flush))         # OUR registrations only (see below)
         if os.path.exists(path):
             try:
                 arrays, meta = load_arrays(path, fmt=fmt)
@@ -385,6 +398,7 @@ class OpticalSolverCache:
                 atexit.unregister(hook)                      # removes ALL copies of this callable
             except Exception:                                # pragma: no cover - teardown races
                 pass
+            _LIVE_ATEXIT_HOOKS.discard(id(hook))
 
     def close(self) -> None:
         """Flush any unsaved entries and UNREGISTER the atexit hook (audit R-7). Optional -- a
