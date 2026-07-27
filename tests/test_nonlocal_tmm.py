@@ -340,13 +340,22 @@ def test_public_entry_points_validate_pol():
     string, the MIRROR of resonance's p-pol fallthrough. All three now reject the same set."""
     layers = [nt.DielectricLayer(4.0 + 0j, 100e-9)]
     w = 2.0 * math.pi * 3.0e8 / 1300e-9
-    for bad in ("TE", "TM", "te", "tm", "S", "P", "x", ""):
+    # ACCEPTANCE UNIFICATION (b): 'TE'/'TM'/'te'/'tm'/'S'/'P' are ACCEPTED now (unconditional
+    # aliases of 's'/'p') and moved to the alias leg below; the azimuth-DEPENDENT lab axes, the
+    # integer row and non-labels stay off-vocabulary. Map + full gate: core/polarization.py,
+    # tests/test_polarization_vocabulary.py.
+    for bad in ("x", "y", "X", 0, 1, "", "sp", "tem"):
         with pytest.raises(ValueError, match="pol must be"):
             nt.stack_rt(w, layers, pol=bad)
         with pytest.raises(ValueError, match="pol must be"):
             nt.pole_function(layers, pol=bad)
         with pytest.raises(ValueError, match="pol must be"):
             nt._admittance(4.0 + 0j, 1.2e7 + 0j, bad)
-    for good in ("p", "s"):                                   # the accepted set is unchanged
+    for good in ("p", "s"):                                   # canonical: bit-identical path
         assert nt.stack_rt(w, layers, pol=good) is not None
         assert callable(nt.pole_function(layers, pol=good))
+    for alias, canonical in (("TE", "s"), ("te", "s"), ("S", "s"),
+                             ("TM", "p"), ("tm", "p"), ("P", "p")):
+        assert nt.stack_rt(w, layers, pol=alias).r == nt.stack_rt(w, layers, pol=canonical).r
+        assert (nt._admittance(4.0 + 0j, 1.2e7 + 0j, alias)
+                == nt._admittance(4.0 + 0j, 1.2e7 + 0j, canonical))

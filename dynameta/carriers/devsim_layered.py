@@ -596,9 +596,11 @@ class LayeredDevsimBuilder:
         for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
             ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
-        # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed
-        ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
-                 maximum_iterations=max_iter)
+        # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed.
+        # solve_dc is the identical ds.solve call plus the C10-d solution-level FD-ceiling
+        # check on the converged state (the layered bipolar path previously bypassed it).
+        solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
+                 max_iter=max_iter)
         # (5) ramp the biased electrodes to their targets (a fine step -- the diode I-V is exponential,
         # so a coarse step overshoots and the coupled Newton diverges).
         vbip = min(v_step, 0.05)
@@ -610,8 +612,8 @@ class LayeredDevsimBuilder:
             for _ in range(n_steps):
                 v_now += dv
                 ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v_now)
-                ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol, relative_error=rel_tol,
-                         maximum_iterations=max_iter)
+                solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
+                         max_iter=max_iter)
         if verbose:
             print("[carriers] bipolar staged solve done (bias={})".format(bias.voltages), flush=True)
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)

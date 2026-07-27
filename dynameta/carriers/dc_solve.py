@@ -38,6 +38,10 @@ import numpy as np
 import devsim as ds
 
 from dynameta.carriers import eq_registry as R
+# audit C10-d: the Fermi-Dirac SOLUTION-level ceiling test. solve_dc is the one wrapper that owns a
+# CONVERGED state (both its methods return only after the solve succeeded), which is what the check
+# needs -- the doping-level test at contact setup runs before any solve and cannot see accumulation.
+from dynameta.carriers.physics_bipolar_dd import warn_if_solution_exceeds_fd_ceiling
 
 POTENTIAL_EQ = "PotentialEquation"
 # The Gummel path is UNIPOLAR (electron-only): it freezes exactly these continuity equations during
@@ -58,6 +62,7 @@ def solve_dc(device: str, *, method: str = "newton",
     if method == "newton":
         ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                   relative_error=rel_tol, maximum_iterations=max_iter)
+        warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d (converged state)
         return
     if method == "gummel":
         warnings.warn(
@@ -72,6 +77,7 @@ def solve_dc(device: str, *, method: str = "newton",
         if not (set(CARRIER_EQS) & R.equation_names(device)):
             ds.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
                       relative_error=rel_tol, maximum_iterations=max_iter)
+            warn_if_solution_exceeds_fd_ceiling(device)         # audit C10-d (converged state)
             return
         # audit C-6: the signature default semiconductor_regions=() makes the Gummel convergence
         # test VACUOUS -- _snapshot returns {}, _max_rel_change({}, {}) == 0.0 < gummel_tol, and the
@@ -88,6 +94,9 @@ def solve_dc(device: str, *, method: str = "newton",
                 "them.".format(list(_TRACK_VARS), device))
         _gummel(device, abs_tol, rel_tol, gummel_inner_iter, gummel_outer_max,
                 gummel_tol, semiconductor_regions, verbose)
+        # ONE check per solve_dc call, not one per outer iteration: _gummel raises unless the outer
+        # loop actually converged, so this line is reached only with a converged state in hand.
+        warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d
         return
     raise ValueError("unknown dc solve method: {!r}".format(method))
 

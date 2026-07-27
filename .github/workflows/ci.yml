@@ -12,24 +12,49 @@ name: CI
 #   test     ubuntu  3.12    numpy 2.x -- `numpy>=1.24` is an  fast suite + coverage          + cov overhead
 #   test     ubuntu  3.13    open floor), +zarr(3.11+) +jax    fast suite + smoke tier        unchanged
 #   floor    ubuntu  3.10 the OLDEST DECLARED pins             import sweep + fast suite      1 suite / ncores
-#                                                              (`-n auto`, the WHOLE suite     (xdist)
-#                                                              bar test_bic_capstone)
+#                                                              (`-n auto`, the WHOLE suite,    (xdist)
+#                                                              no per-file exclusions; one
+#                                                              module self-skips on numpy 1.x)
 #   numba    windows 3.12 core+dev+[numba]                     16 numba tests + parity oracle ~8 min
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
 #   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
+#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 3 heavy FEM     hours
+#            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
+#            DISPATCH ONLY                                     oracles + full validation tier   on PRs)
 #
-# The "added cost" figures for the new legs are measured (2026-07-26, this repo, 2 threads per
-# process); the four `test` legs are untouched apart from coverage on 3.12.
+# The "added cost" figures for the PR legs are measured (2026-07-26, this repo, 2 threads per
+# process); the four `test` legs are untouched apart from coverage on 3.12. The `nightly` figure is
+# an ESTIMATE assembled from per-item measurements -- that job's own comment states exactly which
+# of its numbers are measured and which are not.
 #
 # Not covered by ANY leg (stated so the next audit does not have to rediscover it): CUDA kernels,
-# the [materials-db] extra, macOS, the heavy FEM modules named in the `solvers` job, and the
-# ~35 CPU-min of @slow validation wrappers.
+# the [materials-db] extra, macOS, tests/test_bic_capstone.py under numpy 1.x (it does not
+# finish there; the file skips itself -- see its guard), and the rectangular-cell grating
+# parametrization test_spol_suppressed_vs_ppol[2.7e-07-1.9e-07] (63.8 GB peak working set --
+# exceeds every hosted runner; deselected in nightly step (b2), covered on the dev workstation
+# only). The heavy FEM modules and the @slow validation wrappers came OFF this list when the
+# `nightly` job landed -- it runs both.
 
 on:
   push:
     branches: [main]
   pull_request:
+  # The nightly tier's triggers. What adding them here does and does NOT do:
+  #   * `schedule` and `workflow_dispatch` are WORKFLOW-level -- GitHub has no per-job trigger --
+  #     so every OTHER job in this file also fires on the cron and on a manual dispatch. That is
+  #     left deliberately: the four `test` legs float their resolve, so a nightly re-run is a
+  #     canary for a freshly released numpy/scipy/lumenairy breaking us with no PR in flight. The
+  #     direction that needed enforcing is the reverse one, and it IS enforced -- the `nightly`
+  #     job below carries an `if:` so the 2-3 h tier never runs on a push or a pull_request.
+  #   * `schedule` only ever runs on the DEFAULT branch: until this file lands on main the nightly
+  #     job is reachable by workflow_dispatch only, and it cannot be exercised from a branch.
+  #   * GitHub disables scheduled workflows after 60 days with no repository activity.
+  # 07:17 UTC (~02:17 America/Chicago), off the top of the hour on purpose: scheduled runs queue
+  # behind everybody else's `0 * * * *` and are routinely delayed by tens of minutes there.
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -67,8 +92,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'" "jax>=0.11; python_version >= '3.12'"
       - name: Run fast tests
-        # audit S6-3: the 7 @slow validation-wrapper tests (~35 CPU-min across the matrix) are
-        # excluded here; their underlying validation modules run once in the py3.13 smoke tier.
+        # audit S6-3: the @slow tests (now 9 -- 8 in test_soa.py, 1 in test_harmonics.py) are
+        # excluded from all four legs; seven are wrappers whose underlying validation modules run
+        # once in the py3.13 smoke tier, and ALL NINE run in the `nightly` job, step (a).
         if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
       # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
@@ -152,11 +178,17 @@ jobs:
               sys.exit(1)
           PY
       - name: Run the fast suite at the floor
-        # The whole fast suite minus ONE module, and that exclusion is a finding, not a
-        # convenience:
-        #   * test_bic_capstone HANGS at lumenairy 5.22.0 (>15 min at 750% CPU, vs ~20 s at
-        #     5.28) -- a real limitation of the declared lumenairy floor, recorded here rather
-        #     than papered over by letting lumenairy float on this leg.
+        # The WHOLE fast suite -- this leg no longer excludes anything by name.
+        # tests/test_bic_capstone.py used to be `--ignore`d here because it does not finish on
+        # these pins (>15 min at ~750% CPU before it was killed, vs ~9 s elsewhere). That
+        # exclusion now lives INSIDE the file as a numpy-1.x skip guard, which is strictly better
+        # in three ways: it states the CONDITION where a workflow line could only state a
+        # filename; it reports a visible SKIP with a reason instead of silently collecting
+        # nothing; and it travels with the test to anyone who runs the floor pins locally. Read
+        # that guard before touching it -- it also carries the measurement that FALSIFIES the
+        # original "lumenairy 5.22.0 is the cause" attribution (this same file passes in 8.0-8.8 s
+        # with lumenairy 5.22.0 installed, on numpy 2.x), which is why the guard keys on numpy and
+        # why the package floor stays `lumenairy>=5.22`.
         # The EIGHT per-test `--deselect` lines that used to sit here were the last of audit X-1:
         # those tests called `np.trapezoid` DIRECTLY, which does not exist before numpy 2.0, so
         # the trap the X-1 fix removed from the library still lived in tests/. All 17 call sites
@@ -164,9 +196,7 @@ jobs:
         # library uses), the list is gone, and
         # tests/test_numerics.py::test_no_direct_numpy_trapezoid_in_tests_and_validation keeps it
         # gone. Everything runs, so a new floor break anywhere turns this leg red.
-        run: |
-          pytest tests/ -q -m "not slow" -n auto \
-            --ignore=tests/test_bic_capstone.py
+        run: pytest tests/ -q -m "not slow" -n auto
 
   numba:
     # audit T-3: `numba` was declared by no extra and installed by no leg, so 13 library modules /
@@ -256,7 +286,7 @@ jobs:
       - name: Run the ngsolve/devsim-gated test modules
         # The 25 modules that mention ngsolve or devsim, MINUS the three that dominate the clock
         # (test_fem_drivers > 300 s, test_graded_tensor_fem > 240 s, test_shg_grating -- the heavy
-        # grating/driver sweeps; they are the nightly/on-demand tier, not the PR tier). Every file
+        # grating/driver sweeps; they run in the `nightly` job, steps (b1)/(b2)). Every file
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
         # which is exactly the T-5 failure mode.
@@ -279,8 +309,132 @@ jobs:
         # (15 s), thermal_fem (26 s) and, by substring, thermal_fem_twotemp (5 s) -- all measured
         # PASS locally on 2026-07-26 against ngsolve 6.2.2606. It is a deliberately small beachhead:
         # every other FEM oracle probed (superstrate_index_fem, graded_tmm_vs_fem,
-        # per_region_absorption, symmetry_reduced_fem) exceeds 180 s each and belongs in a nightly
-        # tier, and the full gated set is 122 scripts / hours. Grow this list with measurements.
+        # per_region_absorption, symmetry_reduced_fem) exceeds 180 s each and runs in the `nightly`
+        # job instead (step (c1); the whole gated set runs there too, step (c2)). Grow this list
+        # with measurements.
         # A capability skip here is informational (this is not the smoke tier), but with the extra
         # installed there should be none: an exit 42 means the install step silently did not take.
         run: python -m validation.run_all electrostatics_fem thermal_fem
+
+  nightly:
+    # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
+    # in this file (the `solvers` job's three excluded modules, the four FEM oracles it names but
+    # does not run, the `test` legs' `-m "not slow"`) was a measurement, not a dismissal -- but
+    # until this job existed, "excluded from the PR legs" meant "executed nowhere", which is the
+    # exact T-3/T-5 failure mode the audit was about. This tier closes that.
+    #
+    # NOT REACHABLE FROM A PULL REQUEST. `schedule:`/`workflow_dispatch:` are workflow-level
+    # triggers (GitHub has no per-job trigger), so this `if:` is the whole mechanism keeping a
+    # multi-hour job off the PR path. Do not delete it.
+    name: nightly (slow suite + heavy FEM + full validation tier)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # WHAT THIS CAP IS BUILT FROM, per step. MEASURED = run on the dev workstation 2026-07-26
+    # (py3.14, ngsolve 6.2.2604 + devsim 2.10.0, each file run on its own, serially). That box has
+    # far more cores and RAM than a GitHub-hosted runner (4 vCPU / 16 GB), so every local number
+    # below is a FLOOR for the CI wall, not a forecast:
+    #   (a) pytest -m slow          9 tests    736 s MEASURED (test_soa.py 719 s -- the Innolume
+    #                                          co-fit dominates it -- plus test_harmonics.py 17 s)
+    #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
+    #                                          test_graded_tensor_fem.py 258 s / 1 passed)
+    #   (b2) test_shg_grating.py    7 tests   1428 s MEASURED / 7 passed -- but 230 CPU-min and a
+    #                                          26.5 GB private / 63.8 GB peak-working-set profile,
+    #                                          i.e. it finished in 24 min only because that box has
+    #                                          the cores and the RAM. See the step's own comment.
+    #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
+    #                                          them out of the `solvers` leg put EACH over 180 s,
+    #                                          so >= 12 min there and more on a runner
+    #   (c2) run_all --tier full   204 gated validations + 7 examples: the aggregate is NOT
+    #        MEASURED and cannot be cheaply bounded. 93 of the 204 are the SMOKE subset (each
+    #        measured < 60 s by construction, a few minutes in total); the OTHER 111 are the
+    #        solver/FDTD-backed oracles, individually unmeasured, against a per-script cap of
+    #        1800 s. The runner's own docstring estimates this tier at "hours".
+    # (a)+(b) therefore MEASURE 43 min on the workstation, and (b2) alone is 230 CPU-min -- on 4
+    # vCPU that is an hour of wall by itself, so a runner plausibly spends 1.5-2 h reaching (c2).
+    # 300 is a CAP, not a budget, and it is a guess about (c2); GitHub's hard ceiling for one job
+    # is 6 h, so if the first real nightly run overruns this, the answer is NOT to nudge the number
+    # toward 360: split (c2) by token across several jobs so each piece keeps a meaningful cap, and
+    # record the measured aggregate here.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter as the `solvers` job, for the same reason: 3.12 is the version the
+          # ngsolve/devsim wheel set and this test selection were verified against locally.
+          python-version: "3.12"
+      - name: System libs for gmsh
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
+      - name: Install (core + dev + plot + solvers + io backends + jax)
+        # A SUPERSET of every PR leg's install: [solvers] for the FEM/DEVSIM work, h5py AND zarr
+        # so both IO backends are live at once (the `test` legs each get only one), and jax so the
+        # differentiable backends and the jax-FDTD validations run instead of exit-42-ing.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]" "h5py>=3.8" "zarr>=3" "jax>=0.11"
+      - name: Assert the whole optional stack really imported
+        # Same trip-wire logic as the other legs: a silently-partial install would turn most of
+        # this job into skips, and in the non-smoke tiers run_all treats a skip as informational.
+        run: |
+          python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
+          python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
+      - name: (a) the @slow tests every PR leg deselects
+        # The 9 `-m slow` tests (8 in test_soa.py, 1 in test_harmonics.py): the QD-SOA validation
+        # wrappers, the multi-minute Innolume co-fit, and the blazed-grating FDTD deflection oracle.
+        # `-m "not slow"` on the four `test` legs is what makes them cheap; this is the other half.
+        # PARTIAL OVERLAP with (c2) is deliberate and is not pure duplication: seven of these are
+        # thin wrappers around validation modules (c2) also runs, but only the pytest route puts
+        # them under pyproject's `filterwarnings = ["error", ...]` policy -- a RuntimeWarning on a
+        # default path fails here and is invisible to run_all's exit-code gate.
+        run: pytest tests/ -q -m slow
+      - name: (b1) the heavy FEM/solver modules the `solvers` job excludes
+        # Two of the three modules named in that job's comment as too slow for the PR tier. KEEP
+        # THIS IN SYNC WITH IT: a module dropped from the solvers leg for being slow belongs here
+        # in the same commit, or it goes back to running nowhere. Both MEASURED green locally
+        # 2026-07-26 (173 s / 8 passed and 258 s / 1 passed). The third module is the next step,
+        # separated so that these two always get a verdict.
+        if: ${{ !cancelled() }}
+        run: |
+          pytest -q -m "not slow" \
+            tests/test_fem_drivers.py tests/test_graded_tensor_fem.py
+      - name: (b2) test_shg_grating.py (the 3-D SHG grating cells)
+        # ITS OWN STEP BECAUSE IT IS THE ONE ITEM HERE THAT MAY NOT FIT ON THE RUNNER, and that is
+        # a MEASUREMENT, not a worry. Locally on 2026-07-26 it PASSED 7/7 in 1428 s -- while
+        # burning 230 CPU-min (so ~10 cores in parallel) and peaking at 26.5 GB private commit /
+        # 63.8 GB working set. A GitHub-hosted ubuntu runner is 4 vCPU and 16 GB: the CPU-min alone
+        # is an hour of wall there, and the memory does not obviously fit. An earlier attempt on
+        # the same box DID die -- killed at 1563 s having finished 6 of 7 tests -- while two other
+        # pytest sessions shared the machine, which is exactly the memory-pressure signature.
+        # The cost is concentrated in ONE test: at the 1563 s mark of the killed attempt the first
+        # six -- including the square-cell twin -- had all completed, and the survivor in flight was
+        # test_spol_suppressed_vs_ppol[2.7e-07-1.9e-07], the RECTANGULAR (270 x 190 nm) 3-D
+        # vectorial FEM cell. (Per-test durations were not recorded; that is the evidence there is.)
+        # DECISION (2026-07-26, pre-first-nightly): remedy (i) applied UP FRONT -- 63.8 GB peak
+        # working set cannot fit a 16 GB runner, so shipping the full file would be a guaranteed
+        # capacity red misread as physics. The rectangular-cell parametrization is deselected here
+        # and recorded in the not-covered list at the top of this file; it stays covered on the
+        # dev workstation (run tests/test_shg_grating.py locally, 7/7 in ~24 min). Revisit with a
+        # larger runner (remedy (ii)) if one becomes available. NOT `continue-on-error`: an
+        # ignored red is the exact green-washing audit T-3 was about.
+        if: ${{ !cancelled() }}
+        run: pytest -q -m "not slow" tests/test_shg_grating.py -k "not (2.7e-07 and 1.9e-07)"
+      - name: (c1) the four heavy FEM validation oracles, by name
+        # Exactly the four the `solvers` job names and cannot afford (> 180 s each). These tokens
+        # select 4 of the 204 gated scripts and nothing else (verified by substring 2026-07-26).
+        # This step is a strict SUBSET of (c2) below and runs FIRST on purpose: if the full tier
+        # overruns the job cap, these four still have a verdict.
+        if: ${{ !cancelled() }}
+        run: |
+          python -m validation.run_all \
+            superstrate_index_fem graded_tmm_vs_fem per_region_absorption symmetry_reduced_fem
+      - name: (c2) the full validation tier
+        # run_all defines exactly two tiers, `smoke` and `full` (there is no separate "heavy"
+        # one), so this -- 204 gated validations + the 7 exit-gated examples/ workflows -- is the
+        # invocation that reaches the 111 non-smoke oracles no other leg can. NO --allow-skip:
+        # outside the smoke tier an exit-42 is informational BY CONTRACT (that strictness is the
+        # smoke tier's alone), and with the install above exactly two scripts should take it --
+        # fdtd_numba_cuda (no GPU on this runner) and qd_soa_numba_parity (numba is deliberately
+        # NOT installed here; the dedicated `numba` job runs that oracle for real on Windows).
+        # Runs LAST because it is the one step whose wall-clock is not bounded by measurement.
+        if: ${{ !cancelled() }}
+        run: python -m validation.run_all --tier full

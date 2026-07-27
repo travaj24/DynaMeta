@@ -924,7 +924,15 @@ def test_drude_eps_passive_sign_and_enz():
 # ------------------------------------------------------------------------------------------------
 # AUDIT V-3: the polarization vocabulary is EXACTLY {'s', 'p'} at every entry point
 # ------------------------------------------------------------------------------------------------
-_OFF_VOCAB = ["TE", "TM", "te", "tm", "S", "P", "x", "y", "", "sp"]
+# ACCEPTANCE UNIFICATION (b), the V-8 follow-on: 'TE'/'TM'/'te'/'tm'/'S'/'P' left this list --
+# they are ACCEPTED now, as UNCONDITIONAL aliases of 's'/'p' (in a planar stack TE is s and TM is p
+# by definition of the plane of incidence), normalized to canonical form at the door. That is not a
+# weakening of the V-3 fix: the fix was "stop silently returning the p-pol function for a label you
+# do not understand", and these labels ARE understood, exactly and unambiguously. What stays
+# off-vocabulary is what has no unconditional image: the azimuth-DEPENDENT lab axes, the integer
+# row (an index), and non-labels. Full gate: tests/test_polarization_vocabulary.py.
+_OFF_VOCAB = ["x", "y", "X", "Y", 0, 1, "", "sp", "tem"]
+_ALIASES = [("TE", "s"), ("te", "s"), ("S", "s"), ("TM", "p"), ("tm", "p"), ("P", "p")]
 
 
 def test_smatrix_pole_func_validates_pol():
@@ -938,16 +946,23 @@ def test_smatrix_pole_func_validates_pol():
             smatrix_pole_func(layers, pol=bad)                # eager: no closure is handed back
         with pytest.raises(ValueError, match="pol must be"):
             layered_smatrix_complex(1.0e15, layers, pol=bad)
-    for good in ("s", "p"):                                   # the accepted set is unchanged
+    for good in ("s", "p"):                                   # canonical: bit-identical path
         assert callable(smatrix_pole_func(layers, pol=good))
         assert layered_smatrix_complex(1.0e15, layers, pol=good) is not None
+    for alias, canonical in _ALIASES:                         # unification (b): SAME call
+        assert (layered_smatrix_complex(1.0e15, layers, pol=alias).r
+                == layered_smatrix_complex(1.0e15, layers, pol=canonical).r)
+        assert (smatrix_pole_func(layers, pol=alias)(1.0e15)
+                == smatrix_pole_func(layers, pol=canonical)(1.0e15))
 
 
 def test_pol_fallthrough_was_answer_changing():
     """Discrimination: s and p pole functions are genuinely different at oblique incidence, so the
-    old silent p-pol default was not a harmless alias -- a pol='TE' pole hunt returned plausible
-    p-pol poles. (Also pins that the two accepted spellings still disagree, i.e. the guard did not
-    accidentally collapse them.)"""
+    old silent p-pol default was not a harmless alias -- a pol='TE' pole hunt used to return
+    plausible P-POL poles, when TE means S. (That same input is now ACCEPTED under acceptance
+    unification (b) and resolves to 's' -- the alias-equality legs above pin it -- so what was a
+    wrong answer is now the right one. This test pins the other half: the two modes still disagree,
+    i.e. the guard did not accidentally collapse them into one.)"""
     lam = 1300e-9
     omega = 2.0 * math.pi * C_LIGHT / lam
     layers = [(4.0 + 0.1j, 200e-9)]
@@ -971,6 +986,9 @@ def test_admittance_twins_agree_on_off_vocabulary():
             adm_nl(eps, kz, bad)
     for good in ("s", "p"):                                   # and they still agree where defined
         assert adm_res(eps, kz, good) == adm_nl(eps, kz, good)
+    for alias, canonical in _ALIASES:                         # ... including on the (b) aliases:
+        assert adm_res(eps, kz, alias) == adm_res(eps, kz, canonical)   # a twin that read 'TE' as
+        assert adm_nl(eps, kz, alias) == adm_nl(eps, kz, canonical)     # p would rebuild V-3
 
 
 # ------------------------------------------------------------------------------------------------

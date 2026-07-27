@@ -13,8 +13,13 @@ INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSp
 {'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
 Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
 `normalize_pol` converter and the normal-incidence / azimuth caveats live in
-`dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; unifying acceptance across the
-repo is a deliberate follow-on, not part of the map. This file also consumes OpticalSpec's lab
+`dynameta.core.polarization`. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on -- widened the
+ACCEPTED set here by exactly the UNCONDITIONAL aliases: this module's entry points also take
+`'te'`/`'tm'` and mixed case, normalized to `'s'`/`'p'` at the door, because in a planar stack TE is s
+and TM is p by definition of the plane of incidence, at every angle and in every material. No valid
+call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDENT spellings
+(OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
+`normalize_pol`, which demands the azimuth and refuses rather than guess. This file also consumes OpticalSpec's lab
 {'x','y','p'} (TmmLayeredSolver / _pol_for); _pol_for's 'x' -> 's' leg is the NORMAL-INCIDENCE
 branch only (sibling finding Q-24).
 """
@@ -91,7 +96,7 @@ def stack_rta(n_super: complex, layers: Sequence[Tuple[complex, float]], n_sub: 
     """
     import tmm
     if pol not in ("s", "p"):
-        _reject_pol(pol, "stack_rta")
+        pol = _accept_pol(pol, "stack_rta")            # 'TE'/'tm'/'S' -> 's'/'p'; a lab axis raises
     theta_deg = _require_theta(theta_deg)
     if abs(complex(n_super).imag) > 1e-9:                      # mirror _coh_tmm_stack's LTM-5 guard
         raise ValueError("stack_rta: R/T/A and the energy budget A=1-R-T are defined only for a "
@@ -158,6 +163,18 @@ def _reject_pol(pol, where: str, vocabulary: str = "sp", param: str = "pol"):
     raise pol_vocabulary_error(pol, vocabulary, where=where, param=param)
 
 
+def _accept_pol(pol, where: str, param: str = "pol") -> str:
+    """ACCEPTANCE UNIFICATION (b): normalize an sp-family label to the canonical 's'/'p', accepting
+    the UNCONDITIONAL 'te'/'tm' and mixed-case spellings (in a planar stack TE is s and TM is p by
+    definition of the plane of incidence, at every angle), or raise the shared V-8 error.
+
+    Reached ONLY when the label is not already 's'/'p' -- every caller keeps that cheap `not in`
+    test inline -- so a valid call runs bit-identically and this module still gains no import edge
+    on the happy path (the import is lazy, inside the widening/failure branch)."""
+    from dynameta.core.polarization import accept_pol
+    return accept_pol(pol, "sp", where=where, param=param)
+
+
 def _pol_for(optical) -> str:
     """Map an OpticalSpec polarization (the lab-axis {'x','y','p'} vocabulary) to a tmm
     {'s','p'}. 'y' (E perp plane) -> s; 'p' -> p; 'x' -> s (at normal incidence a layered stack
@@ -183,8 +200,9 @@ def _coh_tmm_stack(stack, lambda_m, theta_deg, pol):
     if pol not in ("s", "p"):
         # audit V-8: layered_rta / layered_per_layer_absorption used to hand `pol` straight to
         # tmm, so an off-vocabulary label surfaced (if at all) as a third-party error naming
-        # neither this module's vocabulary nor its siblings.  Same accepted set, named rejection.
-        _reject_pol(pol, "layered TMM")
+        # neither this module's vocabulary nor its siblings.  Now: a 'te'/'tm'/mixed-case spelling
+        # is NORMALIZED here (unification (b)) and `tmm` still sees only 's'/'p'; a lab axis raises.
+        pol = _accept_pol(pol, "layered TMM")
     if not stack.is_unstructured:
         raise ValueError("layered TMM requires an unstructured (all-scalar-slab) stack; "
                          "a laterally-structured slab needs the FEM solver / RCWA.")

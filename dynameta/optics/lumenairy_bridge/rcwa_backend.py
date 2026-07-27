@@ -46,13 +46,16 @@ Inclusion eps comes from the material registry at lambda; an eps_by_region overr
 to the layer BACKGROUND only (rasterizer contract). The Lumenairy analytic-shapes fast path
 is a documented follow-on (requires the shape-frame pin + disjointness mapping).
 
-POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident
-E_x, 1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo --
-{'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'}
--> row is _common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the
-grating bridge's, and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the
-normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
-UNCHANGED; unifying acceptance across the repo is a deliberate follow-on, not part of the map.
+POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident E_x,
+1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo -- {'s','p'} is
+the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'} -> row is
+_common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the grating bridge's,
+and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the normal-incidence /
+azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; acceptance
+unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE families ({'s','p'} and
+{'te','tm'}), whose aliases name the same physical mode in every geometry they cover; this
+vocabulary's crossings depend on the azimuth (or have no image at all), so they stay STRICT and are
+made explicitly, through normalize_pol.
 """
 
 from __future__ import annotations

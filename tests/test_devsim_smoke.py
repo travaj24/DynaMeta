@@ -137,8 +137,12 @@ def test_c10_fd_potential_shift_matches_the_exact_fermi_dirac_offset():
     assert np.all(np.diff(fd_potential_shift(np.array([0.0, 0.1, 1.0, 10.0, 100.0]))) > 0.0)
 
 
-def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16):
-    """Smallest 1-D bipolar device: uniform n-type bar with one ohmic contact."""
+def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16, contacts=("lo",)):
+    """Smallest 1-D bipolar device: uniform n-type bar with one ohmic contact.
+
+    `contacts` selects which mesh contacts get the ohmic bipolar recipe; the default ("lo",) is the
+    build the C-10 contact-expression gates inspect WITHOUT solving. Pass ("lo", "hi") for a device
+    that is well-posed enough to actually solve (the C10-d gates)."""
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
     mesh = dev + "_mesh"
@@ -163,7 +167,8 @@ def _bipolar_1d_device(dev, fd_enhancement, nd_m3, n_dos_m3, n_i_m3=1.0e16):
                             mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-7,
                             tau_p_s=1e-7, fd_enhancement=fd_enhancement)
     BP.setup_equilibrium_seed_models(dev, "bulk")
-    BP.setup_contact_ohmic_bipolar(dev, "lo")
+    for _c in contacts:
+        BP.setup_contact_ohmic_bipolar(dev, _c)
     return mesh
 
 
@@ -348,3 +353,219 @@ def test_c10_quadrature_is_chunked_and_bit_identical():
     # shapes/scalars survive the flatten-reshape
     assert isinstance(BP.fd_potential_shift(1.0), float)
     assert np.asarray(BP.fd_potential_shift(np.zeros((3, 4)) + 2.0)).shape == (3, 4)
+
+
+# ==================================================================================================
+# audit C10-d: the SOLUTION-level Fermi-Dirac ceiling check. The setup-time test in
+# `_fd_contact_shift` reads NetDoping, which is the only degeneracy a DOPING PROFILE can express --
+# and it is blind to the device this library exists for: a gated accumulation cap whose body doping
+# sits under the ceiling while the gate drives n/N_dos past it IN THE CHANNEL. `solve_dc` now runs
+# `warn_if_solution_exceeds_fd_ceiling` on every converged DC/Gummel solve.
+# ==================================================================================================
+
+def _seed_bipolar(dev, region="bulk"):
+    """Seed Potential/Electrons/Holes from the charge-neutral equilibrium, in the frame the ohmic
+    contact pins -- the same three lines devsim_3d / devsim_layered / bipolar_diode all use."""
+    from dynameta.carriers import physics_bipolar_dd as BP
+    devsim.node_model(device=dev, region=region, name="_seed_psi",
+                      equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(dev, region)))
+    for var, src in (("Potential", "_seed_psi"), ("Electrons", "IntrinsicElectrons"),
+                     ("Holes", "IntrinsicHoles")):
+        devsim.set_node_values(device=dev, region=region, name=var,
+                               values=devsim.get_node_model_values(device=dev, region=region,
+                                                                   name=src))
+
+
+def _solve_and_catch(dev, abs_tol, regions=("bulk",)):
+    """One converged coupled-Newton solve through the choke point, returning the warnings it raised.
+    `simplefilter('always')` locally overrides the suite's filterwarnings=error so a DELIBERATELY
+    over-ceiling device can be driven without turning the assertion into an exception."""
+    import warnings as _w
+    from dynameta.carriers.dc_solve import solve_dc
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        solve_dc(dev, method="newton", abs_tol=abs_tol, rel_tol=1e-6, max_iter=60,
+                 semiconductor_regions=list(regions))
+    return caught
+
+
+def _max_u(dev, region="bulk", var="Electrons", dos="N_dos"):
+    n = np.asarray(devsim.get_node_model_values(device=dev, region=region, name=var), dtype=float)
+    return float(np.max(n)) / float(devsim.get_parameter(device=dev, region=region, name=dos))
+
+
+def test_c10d_measured_fit_error_anchors_match_exact_fermi_dirac_quadrature():
+    """The warning quotes a MEASURED error table; pin it to the oracle so it cannot rot into folklore.
+    The anchors are the rational g fit and the built-in offset Delta against exact Gauss quadrature of
+    F_1/2 and F_-1/2 -- an independent route sharing no code with either fit. They also encode the
+    finding that matters: g UNDERSHOOTS from the ceiling on, while Delta still OVERSHOOTS there and
+    only crosses over near eta = 50, so the two do not err in the same direction."""
+    import math
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers.einstein import g_einstein
+    quad = pytest.importorskip("scipy.integrate").quad
+
+    def Fj(j, eta):                                    # F_j(eta)/Gamma(j+1): -> exp(eta) as eta -> -inf
+        f = lambda x: x ** j / (1.0 + math.exp(min(700.0, x - eta)))
+        hi = max(eta, 0.0)
+        a, _ = quad(f, 0.0, hi + 60.0, limit=600, points=[hi] if eta > 0 else None)
+        b, _ = quad(f, hi + 60.0, hi + 400.0, limit=400)
+        return (a + b) / math.gamma(j + 1.0)
+
+    for eta, g_pct, d_pct in BP._FD_FIT_ERR_ANCHORS:
+        u = Fj(0.5, eta)
+        g_meas = 100.0 * (float(g_einstein(u)) / (u / Fj(-0.5, eta)) - 1.0)
+        d_meas = 100.0 * (float(BP.fd_potential_shift(u)) / (eta - math.log(u)) - 1.0)
+        assert g_meas == pytest.approx(g_pct, abs=0.02), (eta, g_meas, g_pct)
+        assert d_meas == pytest.approx(d_pct, abs=0.02), (eta, d_meas, d_pct)
+    assert BP._FD_FIT_ERR_ANCHORS[0][0] == 32.0                  # the anchor IS the ceiling
+    assert BP._FD_U_MAX == pytest.approx(Fj(0.5, 32.0), rel=5e-3)
+    assert BP._FD_FIT_ERR_ANCHORS[0][1] < 0.0 < BP._FD_FIT_ERR_ANCHORS[0][2]   # opposite signs there
+    # interpolation is monotone and clamps outside the anchors
+    assert BP._fd_fit_error_pct(10.0) == BP._FD_FIT_ERR_ANCHORS[0][1:]
+    assert BP._fd_fit_error_pct(1e6) == BP._FD_FIT_ERR_ANCHORS[-1][1:]
+    assert BP._FD_FIT_ERR_ANCHORS[1][1] < BP._fd_fit_error_pct(41.0)[0] < BP._FD_FIT_ERR_ANCHORS[0][1]
+    # the eta label itself, and its fallback for u past any sane bracket
+    assert BP._fd_eta_from_u(BP._FD_U_MAX) == pytest.approx(32.0, abs=0.1)
+    assert BP._fd_eta_from_u(2127.7) == pytest.approx(200.0, rel=1e-3)
+
+
+def test_c10d_converged_solve_below_the_ceiling_is_silent():
+    """GATE 1: the shipped bipolar bar (the Si-diode doping the validation gates use, u = 0.036)
+    solved at equilibrium must raise NOTHING -- the check may not tax the default path."""
+    dev = "c10d_ok"
+    mesh = _bipolar_1d_device(dev, True, 1.0e24, 2.8e25, contacts=("lo", "hi"))
+    try:
+        _seed_bipolar(dev)
+        caught = _solve_and_catch(dev, abs_tol=1.0e13)
+        assert _max_u(dev) < 1.0                                 # nowhere near the ceiling
+        assert [str(w.message) for w in caught] == []
+    finally:
+        _cleanup(dev, mesh)
+
+
+def test_c10d_degenerate_solution_warns_exactly_once_naming_the_region_and_eta():
+    """GATE 2: a bar whose SOLUTION runs past u = 136 gets exactly ONE RuntimeWarning per solve,
+    naming the region, the max u, the implied eta and the fit error there -- and it comes from the
+    SOLVE, not from device construction (the setup-time NetDoping test is caught separately)."""
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers.physics_equilibrium import invert_F12
+    import warnings as _w
+    dev = "c10d_deg"
+    with _w.catch_warnings(record=True) as setup_w:              # the doping-level test also fires here
+        _w.simplefilter("always")
+        mesh = _bipolar_1d_device(dev, True, 3.0e26, 1.0e24, contacts=("lo", "hi"))
+        _seed_bipolar(dev)
+    try:
+        caught = _solve_and_catch(dev, abs_tol=1.0e14)
+        u = _max_u(dev)
+        assert u == pytest.approx(300.0, rel=1e-6)               # solution == doping on a flat bar
+        assert len(caught) == 1, [str(w.message) for w in caught]
+        w = caught[0]
+        assert w.category is RuntimeWarning
+        msg = str(w.message)
+        assert "'bulk'" in msg and "SOLUTION" in msg and "C10-d" in msg
+        assert "max(Electrons)/N_dos = 300" in msg
+        eta = invert_F12(u, eta_max=1000.0, tol=1e-6)            # independent inversion: eta = 54.2
+        assert "eta = {:.1f}".format(eta) in msg
+        assert 54.0 < eta < 54.5
+        g_pct, d_pct = BP._fd_fit_error_pct(eta)
+        assert "{:+.2f} %".format(g_pct) in msg and "{:+.2f} %".format(d_pct) in msg
+        assert -1.4 < g_pct < -1.0                               # g undershoots by ~1.2 % there
+        # the two tests are DISTINCT: the setup one reads NetDoping, this one reads the solution
+        assert any("majority density" in str(x.message) for x in setup_w), setup_w
+        assert not any("BY THE SOLUTION" in str(x.message) for x in setup_w)
+    finally:
+        _cleanup(dev, mesh)
+
+
+def test_c10d_boltzmann_region_never_warns_even_when_wildly_degenerate():
+    """GATE 3: the ceiling belongs to the Fermi-Dirac FIT, so fd_enhancement=False has no ceiling to
+    exceed. The SAME u = 300 device built with Boltzmann statistics must be silent at setup AND at
+    solve -- otherwise the check would be nagging about a model the caller deliberately did not pick."""
+    import warnings as _w
+    dev = "c10d_bz"
+    with _w.catch_warnings(record=True) as setup_w:
+        _w.simplefilter("always")
+        mesh = _bipolar_1d_device(dev, False, 3.0e26, 1.0e24, contacts=("lo", "hi"))
+        _seed_bipolar(dev)
+    try:
+        caught = _solve_and_catch(dev, abs_tol=1.0e14)
+        assert _max_u(dev) == pytest.approx(300.0, rel=1e-6)     # the density IS over the ceiling
+        assert [str(w.message) for w in setup_w] == []
+        assert [str(w.message) for w in caught] == []
+    finally:
+        _cleanup(dev, mesh)
+
+
+def test_c10d_gated_accumulation_exceeds_a_ceiling_the_doping_test_cannot_see():
+    """The residual C10-d exists FOR this device. A 1-D bipolar MOS cap with body doping u = 100 --
+    comfortably UNDER the 136 ceiling, so the setup-time NetDoping test is silent and correct to be --
+    is driven into accumulation by the gate. MEASURED on the shipped physics: u rises 100 -> 111 at
+    Vg = +0.4 V, 135 at +1.2 V (still silent), and crosses at +1.6 V, where the post-solve check
+    fires naming the CHANNEL region. Before this item nothing warned at any bias."""
+    import warnings as _w
+    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers import physics_equilibrium as EQ
+    dev, mesh = "c10d_gc", "c10d_gc_mesh"
+    t_ox, t_semi, nd, n_dos, n_i = 10e-9, 12e-9, 1.0e26, 1.0e24, 1.0e16
+    for _d in list(devsim.get_device_list()):
+        if _d == dev:
+            devsim.delete_device(device=_d)
+    for _m in list(devsim.get_mesh_list()):
+        if _m == mesh:
+            devsim.delete_mesh(mesh=_m)
+    _R.clear(dev)
+    with _w.catch_warnings(record=True) as setup_w:
+        _w.simplefilter("always")
+        devsim.create_1d_mesh(mesh=mesh)
+        devsim.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=1e-9, tag="gate")
+        devsim.add_1d_mesh_line(mesh=mesh, pos=t_ox, ps=5e-11, tag="mid")   # resolve the accumulation
+        devsim.add_1d_mesh_line(mesh=mesh, pos=t_ox + t_semi, ps=1e-9, tag="back")
+        devsim.add_1d_contact(mesh=mesh, name="gate", tag="gate", material="metal")
+        devsim.add_1d_contact(mesh=mesh, name="back", tag="back", material="metal")
+        devsim.add_1d_region(mesh=mesh, material="oxide", region="ox", tag1="gate", tag2="mid")
+        devsim.add_1d_region(mesh=mesh, material="semi", region="semi", tag1="mid", tag2="back")
+        devsim.add_1d_interface(mesh=mesh, name="ox_semi", tag="mid")
+        devsim.finalize_mesh(mesh=mesh)
+        devsim.create_device(mesh=mesh, device=dev)
+        EQ.setup_dielectric_region(dev, "ox", eps_static=9.0)
+        devsim.node_model(device=dev, region="semi", name="NetDoping",
+                          equation="{:.10e}".format(nd))
+        BP.setup_bipolar_region(dev, "semi", eps_static=9.5, n_dos_m3=n_dos, n_i_m3=n_i,
+                                mobility_n_m2Vs=0.003, mobility_p_m2Vs=0.001,
+                                tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=True)
+        BP.setup_equilibrium_seed_models(dev, "semi")
+        EQ.setup_interface(dev, "ox_semi")
+        EQ.setup_contact(dev, "gate")
+        BP.setup_contact_ohmic_bipolar(dev, "back")
+        _seed_bipolar(dev, region="semi")
+        phi_bi = BP.ohmic_built_in_offset_V(nd, n_i_m3=n_i, n_dos_m3=n_dos, n_dos_p_m3=n_dos)
+        nx = len(devsim.get_node_model_values(device=dev, region="ox", name="x"))
+        devsim.set_node_values(device=dev, region="ox", name="Potential", values=[phi_bi] * nx)
+    try:
+        assert nd / n_dos == pytest.approx(100.0)                # the DOPING is under the ceiling ...
+        assert nd / n_dos < BP._FD_U_MAX
+        assert [str(x.message) for x in setup_w] == []           # ... so setup is silent, correctly
+        devsim.set_parameter(device=dev, name="back_bias", value=0.0)
+        seen = {}
+        for vg in (0.0, 0.4, 0.8, 1.2, 1.6):                     # flat band, then into accumulation
+            devsim.set_parameter(device=dev, name="gate_bias", value=phi_bi + vg)
+            caught = _solve_and_catch(dev, abs_tol=1.0e14, regions=("semi",))
+            seen[vg] = (_max_u(dev, region="semi"), [str(x.message) for x in caught])
+        assert seen[0.0][0] == pytest.approx(100.0, rel=1e-3)    # flat band == the doping
+        for vg in (0.0, 0.4, 0.8, 1.2):                          # ... and rising, still under
+            assert seen[vg][0] < BP._FD_U_MAX, (vg, seen[vg][0])
+            assert seen[vg][1] == [], (vg, seen[vg][1])
+        u16, msgs16 = seen[1.6]
+        assert u16 > BP._FD_U_MAX and u16 == pytest.approx(147.4, rel=0.02)
+        assert len(msgs16) == 1 and "'semi'" in msgs16[0] and "BY THE SOLUTION" in msgs16[0]
+        assert seen[0.4][0] > seen[0.0][0] and u16 > seen[1.2][0]        # monotone accumulation
+    finally:
+        try:
+            devsim.delete_device(device=dev)
+            devsim.delete_mesh(mesh=mesh)
+            _R.clear(dev)
+        except Exception:
+            pass
