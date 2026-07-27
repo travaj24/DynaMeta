@@ -108,7 +108,8 @@ def main():
 
     def twin_RT(thick, eps_ridge):
         cell = jnp.where(mask, eps_ridge + 0.0j, 1.0 + 0.0j)
-        return rcwa_stack_RT([(cell, thick)], 1.5 + 0j, 1.0 + 0j, LAM, period_x=PER,
+        return rcwa_stack_RT([(cell, thick)], LAM, n_substrate=1.5 + 0j,
+                             n_superstrate=1.0 + 0j, period_x=PER,
                              n_orders=N_ORD, row=0)
 
     # ---- GATE A: twin forward == the non-JAX bridge solve (independent lumenairy path) ----
@@ -131,16 +132,18 @@ def main():
                 electrodes=[], materials=reg,
                 optical=OpticalSpec(polarization="x", incidence_angle_deg=0.0))
     ru = make_lumenairy_rcwa_solver(n_orders=2)(du, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-    Ru, Tu = rcwa_stack_RT([(jnp.asarray(4.0 + 0.3j), 120e-9)], 1.5 + 0j, 1.0 + 0j, LAM,
+    Ru, Tu = rcwa_stack_RT([(jnp.asarray(4.0 + 0.3j), 120e-9)], LAM,
+                           n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j,
                            period_x=300e-9, n_orders=2, row=0)
     par_u = max(abs(ru.R - float(Ru)), abs(ru.T - float(Tu)))
 
     # functional grating twin: jax forward == its own numpy forward (general-2N vs fast path)
-    args = (PER, EPS_RIDGE + 0j, 1.0 + 0j, 1.5 + 0j, 1.0 + 0j, T0, 0.5, LAM)
-    Rn, Tn = rcwa_grating_RT(*args, angle=0.0, polarization="tm", n_orders=N_ORD)
-    Rx, Tx = rcwa_grating_RT(PER, jnp.asarray(EPS_RIDGE + 0j), 1.0 + 0j, 1.5 + 0j, 1.0 + 0j,
+    args = (PER, EPS_RIDGE + 0j, 1.0 + 0j, T0, 0.5, LAM)
+    half = dict(n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j)
+    Rn, Tn = rcwa_grating_RT(*args, angle=0.0, polarization="tm", n_orders=N_ORD, **half)
+    Rx, Tx = rcwa_grating_RT(PER, jnp.asarray(EPS_RIDGE + 0j), 1.0 + 0j,
                              jnp.asarray(T0), 0.5, jnp.asarray(LAM), angle=0.0,
-                             polarization="tm", n_orders=N_ORD)
+                             polarization="tm", n_orders=N_ORD, **half)
     par_f = max(abs(float(Rn) - float(Rx)), abs(float(Tn) - float(Tx)))
     g_a = bool(par_g < 1e-10 and par_u < 1e-10 and par_f < 1e-12)
     ok = ok and g_a
@@ -194,7 +197,8 @@ def main():
 
     def twin_pmm_R(eps_ridge, lam):
         segs = [(0.25, 1.0 + 0j), (0.5, eps_ridge + 0.0j), (0.25, 1.0 + 0j)]
-        R, _T = pmm_stack_RT([(segs, T0)], 1.5 + 0j, 1.0 + 0j, lam, period=PER,
+        R, _T = pmm_stack_RT([(segs, T0)], lam, n_substrate=1.5 + 0j,
+                             n_superstrate=1.0 + 0j, period=PER,
                              degree=DEG, n_orders=NOP, row=0)
         return jnp.real(R)
 
@@ -237,7 +241,8 @@ def main():
             _uniform_design(float(eps)), None, {}, float(lam), 1.0 + 0j, 1.5 + 0j).R
 
     def twin_uR(eps, lam):
-        R, _T = rcwa_stack_RT([(eps + 0.0j, THK_U)], 1.5 + 0j, 1.0 + 0j, lam,
+        R, _T = rcwa_stack_RT([(eps + 0.0j, THK_U)], lam, n_substrate=1.5 + 0j,
+                              n_superstrate=1.0 + 0j,
                               period_x=PER_U, n_orders=NRU, row=0)
         return jnp.real(R)
 

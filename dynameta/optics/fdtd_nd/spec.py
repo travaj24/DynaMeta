@@ -72,3 +72,83 @@ class FDTDLayer:
             w0 = self.lorentz_w0_rad_s
             e = e + self.lorentz_delta_eps * w0 ** 2 / (w0 ** 2 - w_rad_s ** 2 - 1j * self.lorentz_gamma_rad_s * w_rad_s)
         return e
+
+
+def hot_carrier_guard(entry_point: str, layers) -> None:
+    """audit C5-7 / D-1: refuse a `hot_carrier` layer on an entry point that cannot march it.
+
+    FDTDLayer.hot_carrier (roadmap 2.1, the per-cell two-temperature ADE) is implemented in exactly
+    ONE kernel -- fdtd_nd.kernels2d.run_2d_te -- reached only through
+    solve_fdtd_2d(..., backend='numpy'). Every other front end fills its material grids from the
+    layer's Drude/Lorentz/chi fields and never reads `hot_carrier`, so it marches the layer as a
+    plain PASSIVE film and returns a result BIT-IDENTICAL to hot_carrier=None (measured 2026-07-25:
+    array_equal True on all four dropping entry points, no raise, no warning). The dropped physics is
+    large, not marginal: on the one supported path a drive sweep moves max|dR0| by up to 0.166
+    absolute (absorbed fraction 0.025 -> 0.19).
+
+    The repo policy (audit C5-7) is "raise loudly rather than mis-solve", and the per-BACKEND half of
+    it already exists one level down (solve2d._dispatch_2d_te refuses numba/jax/cupy with hot != None);
+    this is the missing per-ENTRY-POINT half, factored to ONE implementation so the five call sites
+    (solve_fdtd_1d, solve_fdtd_2d_oblique, solve_fdtd_3d, solve_fdtd_3d_oblique, solve_fdtd_3d_mo)
+    cannot drift. Layers WITHOUT a hot_carrier take a single `any(...)` over None and are otherwise
+    byte-identical to the pre-guard path.
+    """
+    if any(getattr(L, "hot_carrier", None) is not None for L in layers):
+        raise NotImplementedError(
+            "{}: hot-carrier two-temperature dynamics (FDTDLayer.hot_carrier) are carried ONLY by the "
+            "2-D-TE NumPy reference kernel (optics.fdtd_nd.kernels2d.run_2d_te, i.e. "
+            "solve_fdtd_2d(..., backend='numpy')) -- this entry point has no hot-carrier path and "
+            "would SILENTLY ignore the term, returning the passive-layer result bit-for-bit "
+            "(audit C5-7 / D-1). Use solve_fdtd_2d(..., backend='numpy'), or clear "
+            "hot_carrier.".format(entry_point))
+
+
+def courant_guard(entry_point: str, courant) -> float:
+    """audit D-11: refuse a `courant` outside the CFL bound, at EVERY front end.
+
+    Every solve_* docstring says "`courant` the CFL fraction (<= 1 ...)", but only ONE of the EIGHT
+    sites enforced it (fdtd.solve_fdtd_1d's NONUNIFORM branch). The eight are solve_fdtd_1d (both
+    branches), fdtd.run_uniform_time_boundary, solve_fdtd_2d, solve_fdtd_2d_oblique, solve_fdtd_3d,
+    solve_fdtd_3d_oblique, solve_fdtd_3d_mo and fdtd_mo.solve_fdtd_mo_1d -- the last was still
+    unguarded after the first rollout (it counted "six") and was closed in wave 5. The number is the
+    Courant number itself at all of them -- each builds dt so that the Yee stability parameter comes
+    out equal to `courant`:
+
+        1-D uniform   dt = courant*dz/c                                   -> S = c dt / dz      = courant
+        1-D nonuniform dt = courant*dz_min/c                              -> S = c dt / dz_min  = courant
+        1-D MO        dt = courant*dz/c                                   -> S = c dt / dz      = courant
+        2-D           dt = courant / (c sqrt(1/dx^2 + 1/dz^2))            -> S = courant
+        3-D           dt = courant / (c sqrt(1/dx^2 + 1/dy^2 + 1/dz^2))   -> S = courant
+
+    so one shared test covers all of them. Above S = 1 the leapfrog is UNCONDITIONALLY unstable:
+    `courant=2.0` used to march to overflow-driven garbage (inf/NaN probes, or a finite but
+    meaningless R/T once the FFT of an exploded trace is normalized) with no raise anywhere --
+    measured on `probes_fdtd/p6_probe_in_pml.py`. `courant <= 0` is refused for the same reason
+    (dt <= 0 gives a zero/negative time step and a nonsensical nsteps).
+
+    Returns the validated float so a caller can use it directly. The 1e-9 slack admits `courant=1.0`
+    written with rounding noise while still rejecting the 1.05 the nonuniform gate pins.
+
+    1-ULP ASSOCIATION QUIRK vs the surviving nonuniform raise (fdtd.py, `dt > (dz_min/c)*(1+1e-9)`).
+    That gate tests the PRODUCT courant*dz_min/c against (dz_min/c)*(1+1e-9); this one tests
+    `courant` against 1+1e-9 directly. The two rearrangements are not bit-for-bit equivalent, so on
+    a razor-edge input they can disagree by one ULP, in BOTH directions and depending on dz_min:
+    scanning 7 values of dz_min, `courant = 1.0 + 1e-9` exactly raises on the old gate but passes
+    this one at dz_min = 1.234e-7, while `nextafter(1.0 + 1e-9, 2)` passes the old gate but raises
+    here at dz_min = 2.5e-3. Both verdicts are equally defensible at S = 1 + 1e-9 (the physical
+    boundary is S = 1, and 1e-9 of slack is arbitrary), so the disagreement is documented rather
+    than chased; every non-razor-edge input, including the whole `courant <= 0`/NaN class the old
+    gate let through silently, agrees.
+    """
+    c = float(courant)
+    if not (c > 0.0) or not (c == c):                        # NaN-safe: NaN fails both comparisons
+        raise ValueError("{}: courant must be > 0 (got {!r}); it is the Courant/CFL fraction "
+                         "S = c dt / dz_eff, and dt <= 0 cannot march (audit D-11)".format(
+                             entry_point, courant))
+    if c > 1.0 + 1e-9:
+        raise ValueError(
+            "{}: courant={:.4g} exceeds the Courant/CFL stability bound S <= 1 -- the Yee leapfrog "
+            "is unconditionally UNSTABLE above it and the march returns overflow-driven garbage "
+            "rather than an error (audit D-11). Use courant <= 1 (<= ~0.99 for long/Drude runs, "
+            "~0.5 is the shipped default).".format(entry_point, c))
+    return c

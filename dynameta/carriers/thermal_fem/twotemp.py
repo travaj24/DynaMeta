@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.thermal_fem.common import ThermalLayerTwoTemp, _S, _build_layered_mesh, _mean_T_per_layer, _per_material_cf
+from dynameta.carriers.thermal_fem.common import ThermalLayerTwoTemp, _S, _build_layered_mesh, mean_T_per_layer, _per_material_cf
 
 @dataclass
 class ThermalTwoTempResult:
@@ -22,10 +22,10 @@ class ThermalTwoTempResult:
     layers: List[ThermalLayerTwoTemp]
 
     def mean_Te_per_layer(self) -> np.ndarray:
-        return _mean_T_per_layer(self.mesh, self.Te, self.layers)
+        return mean_T_per_layer(self.mesh, self.Te, self.layers)
 
     def mean_Tl_per_layer(self) -> np.ndarray:
-        return _mean_T_per_layer(self.mesh, self.Tl, self.layers)
+        return mean_T_per_layer(self.mesh, self.Tl, self.layers)
 
     def Te_at(self, x_m: float, y_m: float, z_m: float) -> float:
         return float(np.real(self.Te(self.mesh(x_m * _S, y_m * _S, z_m * _S))))
@@ -238,8 +238,8 @@ def solve_thermal_transient_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, pe
             cvec[maskV] = gvec[maskV]
 
     t_list = [0.0]
-    mean_te = [_mean_T_per_layer(mesh, u.components[0], layers)]
-    mean_tl = [_mean_T_per_layer(mesh, u.components[1], layers)]
+    mean_te = [mean_T_per_layer(mesh, u.components[0], layers)]
+    mean_tl = [mean_T_per_layer(mesh, u.components[1], layers)]
     snaps = [(_copy_component(V, u, 0), _copy_component(V, u, 1))] if store_fields else None
 
     with ng.TaskManager():
@@ -265,8 +265,8 @@ def solve_thermal_transient_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, pe
             f_old = f_new
             if (step % store_every == 0) or (step == n_steps):
                 t_list.append(t)
-                mean_te.append(_mean_T_per_layer(mesh, u.components[0], layers))
-                mean_tl.append(_mean_T_per_layer(mesh, u.components[1], layers))
+                mean_te.append(mean_T_per_layer(mesh, u.components[0], layers))
+                mean_tl.append(mean_T_per_layer(mesh, u.components[1], layers))
                 if store_fields:
                     snaps.append((_copy_component(V, u, 0), _copy_component(V, u, 1)))
 

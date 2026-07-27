@@ -195,7 +195,9 @@ def test_intersubband_single_band_reduces_to_drude():
     n3d = float(res.sheet_density_m2.sum()) / (res.z_m[-1] - res.z_m[0])
     d = complex(DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAM_INTRA).eps(1300e-9, n_m3=n3d))
     assert eps_t.shape == (3, 3)
-    assert np.allclose(eps_t, as_tensor(np.asarray(d)), atol=1e-13)   # isotropic == Drude*I
+    # AUDIT T-6: rtol=0.0 -- |eps| ~ 12 here, so numpy's default rtol=1e-5 turned the intended
+    # 1e-13 machine gate into a ~1e-4 absolute one.
+    assert np.allclose(eps_t, as_tensor(np.asarray(d)), rtol=0.0, atol=1e-13)  # isotropic == Drude*I
     assert abs(eps_t[0, 1]) == 0.0 and abs(eps_t[2, 2] - eps_t[0, 0]) < 1e-13
 
 
@@ -229,15 +231,20 @@ def test_burstein_moss_reduces_and_off_switch():
     edge = BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     comp = ComposedEffect(background=bg, deltas=[DeltaEffect(edge, baseline_fields={"n": n_ref})])
     # at n_ref the delta is identically zero -> bare Drude
+    # AUDIT T-6: rtol=0.0 -- the delta is identically zero at n_ref, so this is an exactness check
+    # and must not inherit numpy's 1e-5 relative default (|eps| ~ 4 -> 4e-5 absolute).
     assert np.allclose(comp.eps({"n": n_ref}, 1300e-9),
-                       as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n_ref)))), atol=1e-12)
+                       as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n_ref)))),
+                       rtol=0.0, atol=1e-12)
     # enabled=False -> bare Drude at ALL n (true off-switch)
     off = ComposedEffect(background=bg, deltas=[DeltaEffect(
         BursteinMossEdge(eps_inf=eps_inf, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
                          enabled=False), baseline_fields={"n": n_ref})])
     for n in (2e26, 1e27):
+        # AUDIT T-6: rtol=0.0 -- a true off-switch must reproduce the bare Drude tensor exactly.
         assert np.allclose(off.eps({"n": n}, 1300e-9),
-                           as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n)))), atol=1e-14)
+                           as_tensor(np.asarray(complex(drude.eps(1300e-9, n_m3=n)))),
+                           rtol=0.0, atol=1e-14)
 
 
 def test_burstein_moss_blueshift_and_passive():
@@ -257,6 +264,309 @@ def test_burstein_moss_requires_density():
     edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
     with pytest.raises(ValueError):
         edge.eps({}, 1300e-9)
+
+
+# ---- audit R-1: the ISB pair filter must gate on the POPULATION DIFFERENCE -------------------
+
+def _two_band_subband(ns, L=2e-9, nz=160):
+    """Two hard-wall sub-bands with an analytic dipole: z_01 = -16 L/(9 pi^2)."""
+    from dynameta.carriers.schrodinger_poisson import SubbandResult
+    z = np.linspace(0.0, L, nz)
+    h = z[1] - z[0]
+    p1 = np.sin(np.pi * z / L)
+    p2 = np.sin(2 * np.pi * z / L)
+    p1 = p1 / np.sqrt(np.sum(p1 ** 2) * h)
+    p2 = p2 / np.sqrt(np.sum(p2 ** 2) * h)
+    E = np.array([0.0, 0.95 * 1.602176634e-19])
+    return SubbandResult(energies_J=E, psi=np.stack([p1, p2], axis=1), z_m=z,
+                         sheet_density_m2=np.asarray(ns, dtype=float))
+
+
+def test_intersubband_full_ground_empty_excited_is_the_strongest_line():
+    """audit R-1: the canonical absorber -- ground FULL, first excited EMPTY -- has the largest
+    population difference and must produce the STRONGEST line. The shipped filter drew BOTH i and j
+    from the occupancy-filtered set and deleted exactly this configuration (bare Drude, no warning).
+    Anchored on the closed-form Lorentzian ON resonance: Im(chi_zz) = S_01/(eps0 w_12 gamma)."""
+    from dynameta.constants import HBAR, C_LIGHT, Q_E, EPS0
+    from dynameta.core.numerics import trapz
+    ns = 5.0e17
+    res = _two_band_subband([ns, 0.0])                       # EMPTY excited sub-band
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    E, z, psi = res.energies_J, res.z_m, res.psi
+    w12 = (E[1] - E[0]) / HBAR
+    lam12 = 2.0 * np.pi * C_LIGHT / w12
+    t = m.eps({"subband": res}, lam12)
+    Leff = float(z[-1] - z[0])
+    z01 = trapz(psi[:, 0] * z * psi[:, 1], z)
+    S01 = (ns / Leff) * Q_E * Q_E * z01 * z01 * (2.0 * w12) / HBAR
+    assert float((t[2, 2] - t[0, 0]).imag) == pytest.approx(S01 / (EPS0 * w12 * GAM_INTER), rel=3e-2)
+    # ... and it must be STRONGER than the same well with the upper band partly filled
+    weaker = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER).eps(
+        {"subband": _two_band_subband([ns, 0.4 * ns])}, lam12)
+    assert (t[2, 2] - t[0, 0]).imag > (weaker[2, 2] - weaker[0, 0]).imag > 0.0
+
+
+def test_intersubband_inverted_population_reaches_the_gain_warning():
+    """audit R-1 (inverted case): n_s = [0, n] is the strongest possible inversion. The shipped
+    filter removed the pair before the N_ij < 0 warning at the line-strength step could fire, so the
+    module's only unphysical-occupancy diagnostic was unreachable in the configuration it exists for."""
+    from dynameta.constants import HBAR, C_LIGHT
+    res = _two_band_subband([0.0, 5.0e17])
+    lam12 = 2.0 * np.pi * C_LIGHT / ((res.energies_J[1] - res.energies_J[0]) / HBAR)
+    m = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER)
+    with pytest.warns(UserWarning, match="inverted population"):
+        t = m.eps({"subband": res}, lam12)
+    assert abs(t[2, 2] - t[0, 0]) < 1e-12                    # clamped to 0: no gain, exp(-iwt)
+
+
+def test_intersubband_equal_populations_give_no_line():
+    from dynameta.constants import HBAR, C_LIGHT
+    res = _two_band_subband([3.0e17, 3.0e17])                # N_ij = 0 -> nothing to radiate
+    lam12 = 2.0 * np.pi * C_LIGHT / ((res.energies_J[1] - res.energies_J[0]) / HBAR)
+    t = IntersubbandEffect(EPS_INF, M_OPT, GAM_INTRA, GAM_INTER).eps({"subband": res}, lam12)
+    assert abs(t[2, 2] - t[0, 0]) < 1e-13
+
+
+# ---- audit R-3: Maclaurin KK endpoint half-weights (BOTH parities, BOTH grid lengths) ---------
+
+_KK_E_LO, _KK_E_HI, _KK_SIG = 1.602176634e-19, 6.0 * 1.602176634e-19, 0.25 * 1.602176634e-19
+
+
+def _kk_bump(center):
+    return lambda E: np.exp(-0.5 * ((E - center) / _KK_SIG) ** 2)
+
+
+def _kk_pv_reference(profile, e_eval):
+    """PV reference by quadrature. Every evaluation energy used below sits where the profile is
+    < 1e-30, so the pole contributes nothing and a split-range quad is exact."""
+    from scipy.integrate import quad
+    from dynameta.constants import HBAR, C_LIGHT
+    d = 1e-6 * 1.602176634e-19
+    lo = quad(lambda E: profile(E) / (E ** 2 - e_eval ** 2), _KK_E_LO, e_eval - d, limit=400)[0] \
+        if e_eval - d > _KK_E_LO else 0.0
+    hi = quad(lambda E: profile(E) / (E ** 2 - e_eval ** 2), e_eval + d, _KK_E_HI, limit=400)[0] \
+        if e_eval + d < _KK_E_HI else 0.0
+    return (HBAR * C_LIGHT / np.pi) * (lo + hi)
+
+
+def _kk_order(profile, n0, idx=None, idx_from_end=None, levels=3):
+    """Convergence order by 3x refinement. An ODD refinement factor preserves BOTH the evaluation
+    index parity and the grid-length parity, and keeps the coarse evaluation ENERGY on every grid."""
+    from dynameta.core.effects.base import kramers_kronig_dn
+    errs = []
+    for k in range(levels):
+        n = 3 ** k * (n0 - 1) + 1
+        E = np.linspace(_KK_E_LO, _KK_E_HI, n)
+        dn = kramers_kronig_dn(E, profile(E))
+        i = (n - idx_from_end) if idx_from_end is not None else 3 ** k * idx
+        errs.append(abs(dn[i] - _kk_pv_reference(profile, E[i])))
+    return min(np.log(errs[k] / errs[k + 1]) / np.log(3.0) for k in range(levels - 1))
+
+
+@pytest.mark.parametrize("n0", [244, 245])                   # even N and odd N
+def test_kramers_kronig_second_order_at_both_parities_and_both_grid_lengths(n0):
+    """audit R-3. The alternate-point rule is composite-MIDPOINT on the branch summing interior
+    nodes but composite-TRAPEZOID on the branch summing the panel NODES, where the vectorized form
+    double-weighted the two grid endpoints -> O(h). For an ODD-length grid that hits one parity; for
+    an EVEN-length grid (reachable via the public e_grid_J override) the endpoints land in DIFFERENT
+    parity blocks and BOTH branches collapse, so halving only the odd branch is not enough. Measured
+    orders with the fix reverted: 1.00 on the exposed branches; with it, 2.00 everywhere."""
+    both = lambda E: _kk_bump(_KK_E_LO)(E) + _kk_bump(_KK_E_HI)(E)
+    mid = (n0 - 1) // 2
+    checks = [
+        (both, dict(idx=mid)), (both, dict(idx=mid + 1)),            # interior, both parities
+        (_kk_bump(_KK_E_HI), dict(idx=0)), (_kk_bump(_KK_E_HI), dict(idx=1)),
+        (_kk_bump(_KK_E_LO), dict(idx_from_end=2)), (_kk_bump(_KK_E_LO), dict(idx_from_end=1)),
+    ]
+    for profile, where in checks:
+        assert _kk_order(profile, n0, **where) >= 1.9, where
+
+
+@pytest.mark.parametrize("n", [401, 402])                    # odd and even grid lengths
+def test_kramers_kronig_batched_paths_agree_with_the_scalar_rule(n):
+    """The R-3 endpoint weights are applied in THREE places (the scalar rule, the cached parity
+    kernel, and the O(N) probe-row path). All three must stay in step -- BursteinMossEdge reaches
+    the transform only through the third."""
+    from dynameta.core.effects.base import kramers_kronig_dn, kramers_kronig_dn_rows
+    from dynameta.constants import Q_E
+    E = np.linspace(0.4 * Q_E, 5.0 * Q_E, n)
+    rows = np.stack([np.exp(-0.5 * ((E - c * Q_E) / (0.4 * Q_E)) ** 2) for c in (1.0, 2.5, 4.6)])
+    ref = np.stack([kramers_kronig_dn(E, r) for r in rows])
+    assert np.allclose(kramers_kronig_dn_rows(E, rows), ref, rtol=1e-12, atol=0.0)
+    e_eval = float(E[n // 3]) + 0.37 * float(E[1] - E[0])    # between two nodes
+    got = kramers_kronig_dn_rows(E, rows, e_eval_J=e_eval)
+    want = np.array([np.interp(e_eval, E, r) for r in ref])
+    assert np.allclose(got, want, rtol=1e-12, atol=0.0)
+
+
+def test_kramers_kronig_matches_an_analytic_pair():
+    """Closed-form KK pair: a(E') = A/(E'^2 + c^2)  ->  dn(E) = -hbar c A / (2 c (E^2 + c^2))
+    (partial fractions plus P int_0^inf dE'/(E'^2 - E^2) = 0). The lower endpoint is HOT here, so
+    this also exercises the R-3 endpoint weight."""
+    from dynameta.core.effects.base import kramers_kronig_dn
+    from dynameta.constants import HBAR, C_LIGHT, Q_E
+    A, c = 1.0e6, 0.8 * Q_E
+    E = np.linspace(1e-24, 60.0 * c, 6001)
+    dn = kramers_kronig_dn(E, A / (E ** 2 + c ** 2))
+    sel = np.array([200, 501, 1200, 3001])
+    exact = -HBAR * C_LIGHT * A / (2.0 * c * (E[sel] ** 2 + c ** 2))
+    assert np.max(np.abs(dn[sel] / exact - 1.0)) < 1e-2
+
+
+# ---- audit R-2: BursteinMossEdge KK grid truncation + DeltaEffect grid pinning ----------------
+
+def _bm_dn_quad(alpha_edge, Eg_J, e_ph_J, p=0.5):
+    """EXACT dn including the tail to infinity, via E' = Eg/t (the probe is below the gap, so the
+    KK integral has no pole in range). This is the oracle the audit prescribes -- a wider grid
+    cannot see a truncation that is common to both halves of a difference."""
+    from scipy.integrate import quad
+    def f(t):
+        ep = Eg_J / t
+        return ((((ep - Eg_J) / Eg_J) ** p * (Eg_J / ep) ** 2 * ep / (ep ** 2 - e_ph_J ** 2))
+                * (Eg_J / t ** 2))
+    return alpha_edge / np.pi * quad(f, 1e-14, 1.0, limit=600)[0]
+
+
+def test_burstein_moss_dn_matches_quad_to_infinity():
+    """audit R-2: the shipped auto grid stopped 5 eV above the edge and was 44-50% LOW in absolute
+    dn -- the cutoff-free Tauc tail leaves an E_hi^-1.5 remainder. The grid is now sized from that
+    law and what remains is added back in closed form."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    from dynameta.core.effects.base import _photon_energy_J
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    n_re0 = np.sqrt(complex(4.25)).real
+    for lam in (1300e-9, 1550e-9):
+        for n in (1e26, 7e26, 1e27):
+            got = float(np.sqrt(complex(edge.eps({"n": np.asarray(float(n))}, lam))).real - n_re0)
+            ref = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(float(n)))),
+                              _photon_energy_J(lam))
+            assert got == pytest.approx(ref, rel=2e-2)
+
+
+def test_burstein_moss_delta_uses_one_pinned_grid():
+    """audit R-2: the grid was rebuilt PER eps() CALL from the per-call Eg_opt(n), so DeltaEffect
+    integrated its two halves on DIFFERENT grids and the common truncation did not cancel (the delta
+    came out 14-16x too large). The grid is now a pure function of the configuration."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    from dynameta.core.effects.base import _photon_energy_J
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5)
+    n_re0, scale = np.sqrt(complex(4.25)).real, edge._kk_dn_scale()
+    grid0 = edge._kk_grid()
+    dn = lambda n, lam: float(np.sqrt(complex(edge.eps({"n": np.asarray(float(n))}, lam))).real - n_re0)
+    for lam in (1300e-9, 1550e-9):
+        e_ph = _photon_energy_J(lam)
+        ref = dn(4e26, lam)
+        q_ref = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(4e26))), e_ph)
+        for n in (1e26, 7e26, 1e27):
+            d_model = dn(n, lam) - ref
+            d_quad = _bm_dn_quad(1.5, float(edge.optical_gap_J(np.asarray(float(n)))), e_ph) - q_ref
+            assert abs(d_model - d_quad) / scale < 1e-4
+    assert edge._kk_grid() is grid0                           # same object across every n and lambda
+
+
+def test_burstein_moss_tail_test_replaces_the_bracket_only_guard():
+    """audit R-2: the old guard only checked that the grid BRACKETED the gap and the probe, so it
+    accepted a grid ending 1 meV above Eg. A grid of the SHIPPED width must now be flagged."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    short = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                             e_grid_J=(1e-21, 9.0 * Q_E, 3001))
+    with pytest.warns(RuntimeWarning, match="Kramers-Kronig grid ends"):
+        short.eps({"n": np.asarray(4e26)}, 1300e-9)
+    # p >= 2 is a genuinely divergent KK integral, not a grid choice
+    with pytest.raises(ValueError, match="tauc_exponent"):
+        BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                         tauc_exponent=2.0).eps({"n": np.asarray(4e26)}, 1300e-9)
+
+
+def test_burstein_moss_tauc_p0_is_a_clean_step_and_stays_passive():
+    """FIX-VERIFY W1 kill 1. ``_eps2`` evaluated the Tauc shape factor as ``x ** p`` with
+    ``x = max(E - Eg, 0)/Eg``.  IEEE-754 (and numpy) define ``0.0 ** 0.0 == 1.0``, so at
+    ``tauc_exponent = 0`` -- the physical 2-D / constant-joint-DOS edge, and an ALLOWED exponent --
+    the factor was 1 EVERYWHERE BELOW THE GAP and eps2 came out ``alpha_edge (Eg/E)^2``, diverging
+    toward E -> 0 (measured: 1.5 at the gap, 6.0 at 0.5 Eg, 24.0 at 0.25 Eg).  That sub-gap
+    absorption also entered the KK quadrature, whose grid starts at ~0, and the resulting dn drove
+    ``n_re`` negative: ``eps(0.5 Eg)`` came back ``82.6 - 57.4j`` -- Im(eps) < 0, i.e. GAIN out of a
+    passive interband edge.  The shape factor is now masked on ``x > 0``, so p = 0 is a clean step
+    and every p > 0 is byte-identical to the unmasked form."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+    from dynameta.core.effects.base import _photon_energy_J
+    edge = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                            tauc_exponent=0.0)
+    n = np.asarray(1e26)
+    Eg = float(edge.optical_gap_J(n))
+
+    # (a) the step: EXACTLY zero below (and at) the gap, alpha_edge (Eg/E)^2 above it.
+    below = np.array([1e-30, 0.1, 0.25, 0.5, 0.9, 0.999, 1.0]) * Eg
+    above = np.array([1.0001, 1.2, 2.0, 10.0]) * Eg
+    assert np.all(np.asarray(edge._eps2(below, Eg)) == 0.0)
+    assert np.allclose(np.asarray(edge._eps2(above, Eg)), 1.5 * (Eg / above) ** 2,
+                       rtol=0.0, atol=0.0)
+
+    # (b) passivity at the 0.5 Eg probe the pre-fix code turned into gain.
+    e_half = complex(edge.eps({"n": n}, _photon_energy_J(1.0) / (0.5 * Eg)))
+    assert e_half.imag == 0.0 and e_half.real > 0.0
+    for frac in (0.1, 0.25, 0.5, 0.75, 0.95, 1.2, 2.0):
+        assert complex(edge.eps({"n": n}, _photon_energy_J(1.0) / (frac * Eg))).imag >= 0.0
+
+    # (c) continuity as p -> 0 (the pre-fix p = 0 branch was discontinuous in p by construction).
+    n_re0 = np.sqrt(complex(4.25)).real
+    lam = _photon_energy_J(1.0) / (0.5 * Eg)
+    dn = {}
+    for p in (0.0, 1e-9):
+        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                              tauc_exponent=p)
+        dn[p] = float(np.sqrt(complex(ed.eps({"n": n}, lam))).real - n_re0)
+    assert dn[1e-9] == pytest.approx(dn[0.0], rel=1e-8)
+    # and it is the RIGHT number: the step edge's KK partner, to the O(h) the 10 meV grid allows
+    assert dn[0.0] == pytest.approx(_bm_dn_quad(1.5, Eg, 0.5 * Eg, p=0.0), rel=2e-3)
+
+    # (d) p > 0 is untouched, bit for bit.
+    rng = np.random.default_rng(0)
+    E = np.concatenate([np.linspace(1e-25, 5 * Eg, 20001), np.array([Eg]),
+                        rng.uniform(1e-25, 5 * Eg, 5000)])
+    for p in (0.25, 0.5, 1.0, 1.9):
+        ed = BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                              tauc_exponent=p)
+        x = np.maximum(E - Eg, 0.0) / Eg
+        assert np.array_equal(np.asarray(ed._eps2(E, Eg)), 1.5 * x ** p * (Eg / E) ** 2)
+
+
+def test_burstein_moss_auto_kk_grid_is_size_capped():
+    """FIX-VERIFY W1 kill 1 (second half).  The auto E_hi scales as ``tol^(-1/(2-p))``, so at the
+    fixed 10 meV spacing the grid is 7.7e4 points at p = 0.5 but 1.56e9 -- a 12.4 GB float64 array,
+    before the per-row temporaries -- at p = 1.5 (direct-forbidden Tauc).  ``_KK_ROW_CHUNK_BYTES``
+    cannot help: a chunk is never smaller than ONE row of ``grid.size`` doubles.  The auto grid is
+    now capped and raises with the ``e_grid_J`` escape hatch named; the override itself still
+    works (only warning about the tail)."""
+    from dynameta.constants import Q_E
+    from dynameta.core.effects import BursteinMossEdge
+
+    def mk(p, **kw):
+        return BursteinMossEdge(eps_inf=4.25, Eg0_J=3.6 * Q_E, m_vc_kg=0.5 * M_E, alpha_edge=1.5,
+                                tauc_exponent=p, **kw)
+
+    for p, npts in ((0.5, 76849), (1.0, 1080001)):                 # under the cap, unchanged
+        assert mk(p)._kk_grid().size == npts
+    for p in (1.5, 1.9):
+        with pytest.raises(ValueError, match="e_grid_J"):
+            mk(p)._kk_grid()
+    # the escape hatch: an explicit grid at p = 1.5 runs, warns about the tail, and stays passive
+    over = mk(1.5, e_grid_J=(1e-21, 2000.0 * Q_E, 20001))
+    with pytest.warns(RuntimeWarning, match="Kramers-Kronig grid ends"):
+        val = complex(over.eps({"n": np.asarray(1e26)}, 1550e-9))
+    assert np.isfinite(val.real) and val.imag >= 0.0
+
+
+def test_photon_energy_uses_the_exact_planck_constant():
+    """audit X-7 / R-17: h was re-derived as 2*pi*HBAR (6.1e-10 relative drift) upstream of the
+    whole electro-absorption / KK stack."""
+    from dynameta.constants import C_LIGHT, H_PLANCK
+    from dynameta.core.effects.base import _photon_energy_J
+    assert _photon_energy_J(1300e-9) == H_PLANCK * C_LIGHT / 1300e-9
 
 
 # ---- VectorMagnetoOpticModel (R13) -----------------------------------------------------------

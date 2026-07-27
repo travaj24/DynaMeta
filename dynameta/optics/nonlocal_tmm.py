@@ -103,6 +103,28 @@ References
 
 Conventions: SI units, exp(-i*omega*t) (a passive/absorbing medium has Im(eps) > 0), pure
 numpy/scipy, ASCII-only.
+
+THE HOME OF THE HYDRODYNAMIC MATERIAL MODEL (audit X-4/X-5). ``beta_from_vf``, ``eps_transverse``,
+``beta_eff_squared`` and ``kL_squared`` are defined HERE and nowhere else; the FEM tier
+(``optics.hydro_fem.HydroParams``) delegates to them through ``HydroParams.as_layer()`` and the
+FDTD tier (``optics.hydro_fdtd``) re-exports ``beta_from_vf`` verbatim. A change to any of the four
+is a change to every hydrodynamic solver in the library, which is the point: the cross-solver
+bulk-plasmon gates compare solvers, not two transcriptions of one formula. The contract is gated by
+tests/test_hydro_fem.py::test_hydroparams_match_nonlocal_tmm, which covers every shared function
+over metals x GNOR settings x real and complex frequencies, EXACTLY.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'s', 'p'} -- E relative to the PLANE OF
+INCIDENCE. It is one of five spellings in the repo -- {'x','y','p'} is OpticalSpec's LAB AXIS,
+{'te','tm'} the lumenairy grating bridge's, the integer `row` 0/1 the differentiable
+Berreman/RCWA/PMM forwards', and `pol_axis` hydro_fem's 2-D in-plane axis. The map, the
+`normalize_pol` converter and the normal-incidence / azimuth caveats live in
+`dynameta.core.polarization`. ACCEPTANCE UNIFICATION (b) -- the V-8 follow-on -- widened the
+ACCEPTED set here by exactly the UNCONDITIONAL aliases: this module's entry points also take
+`'te'`/`'tm'` and mixed case, normalized to `'s'`/`'p'` at the door, because in a planar stack TE is s
+and TM is p by definition of the plane of incidence, at every angle and in every material. No valid
+call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDENT spellings
+(OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
+`normalize_pol`, which demands the azimuth and refuses rather than guess.
 """
 
 from __future__ import annotations
@@ -265,12 +287,53 @@ def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
     return np.sqrt(eps * k0 * k0 - k_par * k_par + 0j)
 
 
+# The ONE polarization vocabulary of this module (audit V-3/V-8): the 'sp' family of
+# dynameta.core.polarization, matching the stack_rt / pole_function checks -- and, since ACCEPTANCE
+# UNIFICATION (b), its unconditional 'te'/'tm' + mixed-case aliases, normalized at the door exactly
+# as in the resonance twin (the two must accept and reject the SAME set, or the V-3 divergence
+# comes back through the front door).  The geometry-DEPENDENT lab 'x'/'y' and the integer `row`
+# stay REFUSED.  No valid call moved: 's'/'p' never reach the guard.
+_POL_NO_DEFAULT = ("There is no default here: 'x' -- and every other off-vocabulary label -- used "
+                   "to return the s-polarized admittance silently, the MIRROR of the p-pol "
+                   "fallthrough in optics.resonance (audit V-3). 'TE'/'TM' left that class in the "
+                   "other direction: they are now ACCEPTED as unconditional aliases of 's'/'p'.")
+
+
+def _reject_pol(pol, where: str):
+    """Raise the shared V-8 vocabulary error for a ``pol`` the 'sp' vocabulary does not accept.
+
+    LAZY import, failure path only: the valid path pays nothing and this module gains no import
+    edge (dynameta.core.polarization is stdlib-only documentation + validation)."""
+    from dynameta.core.polarization import pol_vocabulary_error
+    raise pol_vocabulary_error(pol, "sp", where=where, param="pol", extra=_POL_NO_DEFAULT)
+
+
+def _accept_pol(pol, where: str, param: str = "pol") -> str:
+    """ACCEPTANCE UNIFICATION (b): normalize an sp-family label to the canonical 's'/'p', accepting
+    the UNCONDITIONAL 'te'/'tm' and mixed-case spellings (in a planar stack TE is s and TM is p by
+    definition of the plane of incidence, at every angle), or raise the shared V-8 error.
+
+    Reached ONLY when the label is not already 's'/'p' -- every caller keeps that cheap `not in`
+    test inline -- so a valid call runs bit-identically and this module still gains no import edge
+    on the happy path (the import is lazy, inside the widening/failure branch)."""
+    from dynameta.core.polarization import accept_pol
+    return accept_pol(pol, "sp", where=where, param=param, extra=_POL_NO_DEFAULT)
+
+
 def _admittance(eps: complex, kz: complex, pol: str) -> complex:
     """Physical optical admittance ``Y = H_tan / E_tan`` for a forward wave (H_tan is H_y for
     p-pol, and -H_x for s-pol, so both polarizations share the same sign pattern):
     p-pol (TM) ``Y = omega*eps0*eps / kz``; s-pol (TE) ``Y = kz / (omega*mu0)``.  The
     reflectance / transmittance built from these reproduce the exact Fresnel power coefficients
-    (validated against ``tmm`` in the tests)."""
+    (validated against ``tmm`` in the tests).
+
+    AUDIT V-3/V-8: RAISES on any other ``pol``.  This twin used to fall through to S-pol while the
+    verbatim copy in ``optics.resonance`` fell through to P-pol, so the two modules returned
+    DIFFERENT physics for the same off-vocabulary string (``"TE"``, ``"TM"``, ``"x"``, ``"P"``).
+    Both now raise -- the stricter behaviour, and the one this module's public entry points
+    (``stack_rt``, ``pole_function``) already had."""
+    if pol not in ("p", "s"):
+        pol = _accept_pol(pol, "_admittance")
     if pol == "p":
         return eps / kz          # reduced by the common omega*eps0 (cancels in every ratio used)
     return kz                    # reduced by the common 1/(omega*mu0)
@@ -463,7 +526,7 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     RTA
     """
     if pol not in ("p", "s"):
-        raise ValueError("pol must be 'p' or 's'")
+        pol = _accept_pol(pol, "stack_rt")               # audit V-3/V-8: one vocabulary, one message
     w = complex(omega)
     k0 = w / C_LIGHT
     eps_super = complex(n_super) ** 2
@@ -518,7 +581,7 @@ def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub
     for GENUINE nonlocal stacks (finite ``beta``); in the ``beta -> 0`` local limit there is no
     bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there)."""
     if pol not in ("p", "s"):
-        raise ValueError("pol must be 'p' or 's'")
+        pol = _accept_pol(pol, "pole_function")          # audit V-3/V-8: one vocabulary, one message
     kpar = complex(k_par_m)
     eps_super = complex(n_super) ** 2
     eps_sub = complex(n_sub) ** 2

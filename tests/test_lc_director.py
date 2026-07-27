@@ -8,7 +8,7 @@ import pytest
 from dynameta.constants import EPS0
 from dynameta.carriers.lc_director import (
     freedericksz_threshold_V, director_profile, director_profile_bvp, solve_lc_field_profile,
-    compute_lc_geometry, n_local_from_theta, n_eff_from_theta_profile, eps_along_field,
+    compute_lc_geometry, LCGeometry, n_local_from_theta, n_eff_from_theta_profile, eps_along_field,
     flexo_p_along_field, director_to_extra_fields,
     haller_order_parameter, K_of_temperature, gamma1_of_temperature,
     chiral_director_profile_bvp, cholesteric_q0, gooch_tarry_transmission, mauguin_number)
@@ -109,13 +109,111 @@ def test_field_profile_uniform_exact_and_poisson_division():
 def test_bvp_reduces_to_one_constant_director_profile():
     # the two-constant BVP at K11==K33 (constant-displacement 'poisson' field, no fixed layers)
     # reproduces the existing 1-constant elliptic-quadrature director_profile THROUGH the pi/2 bridge.
+    # RE-PINNED for AUDIT C-4: the series-capacitance normalisation used to be integrated on
+    # solve_bvp's midpoint grid (short one cell), which alone accounted for 89% of the old residual --
+    # 1.1861e-2 rad against the 2.0e-2 budget. With the domain-spanning quadrature it is 1.2472e-3.
     Kc, dEps, ep, d = 17e-12, 14.7, 4.0, 1e-6
     V = 1.8
     dp = director_profile(Kc, dEps, ep, d, V)
     bv = director_profile_bvp(V_app=V, K11=Kc, K33=Kc, eps_para=ep + dEps, eps_perp=ep, d_planar=d,
                               theta_b_rad=np.radians(89.97), field_model="poisson", nz=201)
     th_bridge = 0.5 * np.pi - bv.theta_field_rad[bv.theta_field_rad.size // 2]
-    assert abs(dp.theta_max_rad - th_bridge) < 2e-2
+    assert abs(dp.theta_max_rad - th_bridge) < 3e-3
+
+
+def test_poisson_normalisation_spans_the_full_cell_on_any_grid():
+    # AUDIT C-4 / N2 GATE: the global series-capacitance normalisation must be EXACT for a uniform
+    # field on ANY abscissae -- including the interior-only collocation MIDPOINT grid that solve_bvp
+    # hands the BVP right-hand side, where the old plain-trapz version was short one full cell
+    # (E too large by 1/(1 - h/d_lc): +11.1% at nz=11, +2.04% at nz=51).
+    for nz in (11, 13, 51, 64, 201):
+        geo = compute_lc_geometry(geometry="planar", nz=nz, d_planar=1e-6)
+        span = (float(geo.z_m[0]), float(geo.z_m[0]) + geo.d_lc)
+        th = np.full(nz, np.radians(89.9))
+        E, vlc = solve_lc_field_profile(th, 2.0, geo, eps_para=18.7, eps_perp=4.0,
+                                        field_model="poisson", quad_span=span)
+        assert np.max(np.abs(E - 2.0 / geo.d_lc)) / (2.0 / geo.d_lc) < 1e-12
+        assert vlc == pytest.approx(2.0, rel=1e-12)
+        # the midpoint grid: WITH quad_span exact, WITHOUT it biased by exactly 1/(1 - h/d_lc)
+        zm = 0.5 * (geo.z_m[:-1] + geo.z_m[1:])
+        gm = LCGeometry("planar", geo.d_lc, zm, zm, geo.r_in, geo.r_out)
+        thm = np.full(zm.size, np.radians(89.9))
+        Em, _ = solve_lc_field_profile(thm, 2.0, gm, eps_para=18.7, eps_perp=4.0,
+                                       field_model="poisson", quad_span=span)
+        assert np.max(np.abs(Em - 2.0 / geo.d_lc)) / (2.0 / geo.d_lc) < 1e-12
+        Eb, _ = solve_lc_field_profile(thm, 2.0, gm, eps_para=18.7, eps_perp=4.0,
+                                       field_model="poisson")
+        h = geo.d_lc / (nz - 1)
+        assert float(Eb[0]) / (2.0 / geo.d_lc) == pytest.approx(1.0 / (1.0 - h / geo.d_lc), rel=1e-12)
+
+
+def test_span_weights_reduce_to_trapezoid_on_a_node_grid():
+    # the domain-spanning rule is the trapezoid rule when the abscissae already include both ends,
+    # and always sums to the domain length (which is what makes the uniform-field case exact).
+    from dynameta.carriers.lc_director import _span_weights
+    for x in (np.linspace(0.0, 1.0, 7), np.array([0.0, 0.1, 0.35, 0.8, 1.0])):
+        w = _span_weights(x, 0.0, 1.0)
+        assert w.sum() == pytest.approx(1.0, rel=1e-15)
+        y = 3.0 * x + 0.5                                    # trapezoid is exact for a line
+        assert float(np.sum(w * y)) == pytest.approx(2.0, rel=1e-14)
+    xm = np.array([0.125, 0.375, 0.625, 0.875])              # midpoints only
+    assert _span_weights(xm, 0.0, 1.0).sum() == pytest.approx(1.0, rel=1e-15)
+
+
+def test_chiral_bvp_poisson_normalisation_matches_the_tilt_solver():
+    # AUDIT N2 (C-4's defect verbatim in chiral_director_profile_bvp): with the twist decoupled
+    # (phi_top == phi_bottom, q0 = 0) the chiral solver must reproduce director_profile_bvp under a
+    # POISSON field too.
+    #
+    # SCOPE (fix-verify W1 item 8). This is a CONSISTENCY check between the two solvers, NOT a
+    # regression gate for N2: both solvers carried the identical normalisation defect, so it passed
+    # pre-fix as well (measured -- the earlier comment's claim that "their converged midplane tilts
+    # differed by ~0.2 deg before the fix" is false). The discriminating gate is
+    # test_chiral_bvp_poisson_is_grid_convergent below.
+    ck = dict(K11=11e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=4e-6, nz=121,
+              theta_b_rad=np.radians(89.9), field_model="poisson")
+    ch = chiral_director_profile_bvp(V_app=2.0, K22=7e-12, phi_bottom_rad=0.0, phi_top_rad=0.0,
+                                     q0_rad_m=0.0, **ck)
+    st = director_profile_bvp(V_app=2.0, **ck)
+    assert ch.success
+    assert np.max(np.abs(ch.theta_field_rad - st.theta_field_rad)) < 1e-6
+
+
+def test_chiral_bvp_poisson_is_grid_convergent():
+    """AUDIT N2, the DISCRIMINATING gate (fix-verify W1 item 8).
+
+    The defect was the series-capacitance normalisation of the Poisson field: on solve_bvp's
+    adapted MIDPOINT abscissae the denominator ``int dz / eps(theta)`` was evaluated with a plain
+    trapezoid over the NODES it happened to hold, which spans only ``d_lc - h`` instead of the full
+    cell, so E was biased by ``1/(1 - h/d_lc)``. That bias is O(h) and it is what makes the solved
+    tilt move with ``nz``. It is invisible to a same-``nz`` comparison of two solvers that share the
+    bug, and visible immediately under grid refinement -- so refine.
+
+    Measured midplane tilt (twisted case, phi_top = pi/2, so the chiral solver is genuinely
+    exercised), |theta_mid(nz) - theta_mid(nz = 961)| in degrees:
+
+        nz = 121:   PRE-fix 0.757    POST-fix 0.032      (24x)
+        nz = 61:    PRE-fix 0.657    POST-fix 0.089
+
+    Pre-fix the sequence is not even monotone in nz (17.499, 17.399, 17.830, 18.156 deg for
+    nz = 61, 121, 241, 961) -- the hallmark of an h-dependent forcing rather than a converging
+    discretisation.
+    """
+    ck = dict(K11=11e-12, K33=18e-12, eps_para=18.7, eps_perp=4.0, d_planar=4e-6,
+              theta_b_rad=np.radians(89.9), field_model="poisson")
+    mids = {}
+    for nz in (61, 121, 241):
+        r = chiral_director_profile_bvp(V_app=2.0, K22=7e-12, phi_bottom_rad=0.0,
+                                        phi_top_rad=0.5 * np.pi, q0_rad_m=0.0, nz=nz, **ck)
+        assert r.success, nz
+        mids[nz] = np.degrees(float(r.theta_field_rad[r.theta_field_rad.size // 2]))
+    # monotone convergence, and the coarse-to-fine drift is an order of magnitude under the
+    # pre-fix 0.66-0.76 deg
+    assert mids[61] > mids[121] > mids[241], mids
+    assert abs(mids[61] - mids[241]) < 0.15, mids
+    assert abs(mids[121] - mids[241]) < 0.05, mids
+    # ... and the drift SHRINKS with refinement (an O(h) forcing error would not)
+    assert abs(mids[121] - mids[241]) < 0.6 * abs(mids[61] - mids[121]), mids
 
 
 def test_bvp_freedericksz_threshold_and_branch():
@@ -153,7 +251,9 @@ def test_bridge_into_liquid_crystal_model_is_uniaxial_with_right_axis():
     eps = np.asarray(lcm.eps(director_to_extra_fields(th_field), 1.5e-6)).real
     for i, thf in enumerate(th_field):
         w, V = np.linalg.eigh(eps[i])
-        assert np.allclose(np.sort(w), np.sort([n_o ** 2, n_o ** 2, n_e ** 2]), atol=1e-9)
+        # AUDIT T-6: rtol=0.0 -- eigenvalues are O(3), so numpy's default rtol=1e-5 would have made
+        # the "uniaxial" gate 3e-5 absolute instead of the intended 1e-9.
+        assert np.allclose(np.sort(w), np.sort([n_o ** 2, n_o ** 2, n_e ** 2]), rtol=0.0, atol=1e-9)
         ext = V[:, int(np.argmax(w))]
         th_opt = 0.5 * np.pi - float(thf)
         want = np.array([np.cos(th_opt), 0.0, np.sin(th_opt)])

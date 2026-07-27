@@ -339,3 +339,143 @@ def test_solver_result_harmonic_order_resolved(solver_runs):
     assert 0.0 < hs["P_2w"] / hs["P_w"] < 1e-3
     ce = conversion_efficiency(r_true, f0_solver)            # incident_right from the trace
     assert ce["normalization"] == "incident" and ce["eta_shg"] > 0.0
+
+
+# =================================================================================================
+# audit D-4: diffraction-order LABELS must match the physical propagation direction
+# =================================================================================================
+# np.fft.rfft yields exp(+i w t) phasors; the library convention is exp(-i w t). _order_spectra used
+# to skip the np.conj every sibling extractor applies, and that conjugation also flips the sign of
+# the x phase -- so a physical +1 order was filed in bin -1 and an asymmetric grating's blaze ratio
+# came out INVERTED. Synthesizing the field makes the ground truth exact.
+_D4_N, _D4_NX, _D4_K0, _D4_DT = 2048, 8, 64, 1.0e-16
+_D4_ETA = 376.730313668                                       # vacuum wave impedance (sign only matters)
+
+
+def _synth_orders(amps, *, with_h=True):
+    """Real (nsteps, nx) exit-plane trace carrying the given {order: complex amplitude} mix, at the
+    kernel's OWN staggering: E at t=(n+1)dt, H at t=(n+1/2)dt (kernels2d.py:252-253). Each order is a
+    forward (+z) plane wave, so H_x = -E_y / eta and S_z = -Re(E_y H_x*) > 0."""
+    n = np.arange(_D4_N)[:, None]
+    ix = np.arange(_D4_NX)[None, :]
+    f0 = _D4_K0 / (_D4_N * _D4_DT)                            # exactly on rfft bin k0 (no leakage)
+    w = 2.0 * np.pi * f0
+    e = np.zeros((_D4_N, _D4_NX)); h = np.zeros((_D4_N, _D4_NX))
+    for m, a in amps.items():
+        xph = np.exp(2j * np.pi * m * ix / _D4_NX)            # physical exp(+i m G x)
+        e += np.real(a * xph * np.exp(-1j * w * (n + 1.0) * _D4_DT))
+        h += np.real((-a / _D4_ETA) * xph * np.exp(-1j * w * (n + 0.5) * _D4_DT))
+    return (e, (h if with_h else None), _D4_DT, f0)
+
+
+@pytest.mark.parametrize("with_h", [False, True])
+def test_d4_plus_one_order_is_labelled_plus_one(with_h):
+    """A synthesized PURE +1 order must report all of its power in bin +1 (it was reported as -1:
+    measured 100% of the power in the wrong bin, both for the |E|^2 and the Poynting density)."""
+    from dynameta.optics.harmonics import _order_spectra
+    e, h, dt, f0 = _synth_orders({1: 1.0 + 0j}, with_h=with_h)
+    f, S, orders, ptype = _order_spectra(e, h, dt)
+    o = list(orders)
+    k = int(np.argmin(np.abs(f - f0)))
+    row = S[k]
+    assert row[o.index(1)] > 0.0
+    assert row[o.index(1)] / np.abs(row).sum() > 1.0 - 1e-9   # 100% in the +1 bin
+    assert abs(row[o.index(-1)]) < 1e-9 * row[o.index(1)]
+    if with_h:                                                # forward wave -> POSITIVE +z flux
+        assert ptype == "poynting_flux" and row[o.index(1)] > 0.0
+
+
+def test_d4_minus_one_order_is_labelled_minus_one():
+    from dynameta.optics.harmonics import _order_spectra
+    e, h, dt, f0 = _synth_orders({-1: 1.0 + 0j})
+    f, S, orders, _ = _order_spectra(e, h, dt)
+    o = list(orders)
+    row = S[int(np.argmin(np.abs(f - f0)))]
+    assert row[o.index(-1)] / np.abs(row).sum() > 1.0 - 1e-9
+    assert abs(row[o.index(1)]) < 1e-9 * row[o.index(-1)]
+
+
+def test_d4_blaze_asymmetry_is_not_inverted_through_public_api():
+    """A blazed-style mix with PHYSICAL P(+1)/P(-1) = 16.0 must report 16.0, not 0.0625 -- through
+    the PUBLIC harmonic_spectrum, which is where the mislabelling was reachable."""
+    from dynameta.optics.harmonics import harmonic_spectrum
+    e, h, dt, f0 = _synth_orders({1: 4.0 + 0j, -1: 1.0 + 0j})   # |4|^2 / |1|^2 = 16
+    hs = harmonic_spectrum((e, h, dt), f0, max_order=1)
+    o = list(hs["orders"])
+    p = hs["power_by_order"][1]
+    ratio = p[o.index(1)] / p[o.index(-1)]
+    assert ratio == pytest.approx(16.0, rel=1e-6)
+    assert ratio > 1.0                                        # the pre-fix value was 1/16
+
+
+def test_d4_relabelling_leaves_every_magnitude_and_the_order_sum_untouched():
+    """The fix is a pure relabelling m -> -m: the per-order power MULTISET, the order sum and the
+    order-summed spectrum are bit-comparable to the pre-fix (unconjugated) transform."""
+    from dynameta.optics.harmonics import _order_spectra
+    e, h, dt, f0 = _synth_orders({1: 4.0 + 0j, -1: 1.0 + 0j, 0: 2.0 + 0j})
+    f, S, orders, _ = _order_spectra(e, h, dt)
+    # the pre-fix transform, reproduced verbatim (no np.conj on either time transform), but with
+    # the SAME D-2 half-step de-stagger so this isolates D-4 alone
+    nsteps, nx = e.shape
+    ph = np.exp(1j * np.pi * f * dt)[:, None]
+    Ek_old = np.fft.fft(np.fft.rfft(e, axis=0), axis=1)
+    Hk_old = np.fft.fft(np.fft.rfft(h, axis=0) * ph, axis=1)
+    S_old = -np.real(Ek_old * np.conj(Hk_old)) / nx
+    k = int(np.argmin(np.abs(f - f0)))
+    o = list(orders)
+    for m in (-1, 0, 1):                                      # bin m now holds what bin -m held
+        assert S[k][o.index(m)] == pytest.approx(S_old[k][o.index(-m)], rel=1e-12, abs=1e-30)
+    assert S.sum(axis=1) == pytest.approx(S_old.sum(axis=1), rel=1e-12, abs=1e-30)
+
+
+def test_d4_single_column_trace_is_unaffected():
+    """nx == 1 (a 1-D trace or a single-order series) has only bin 0, so the relabelling is a
+    no-op there -- the 1-D FDTD consumers are untouched."""
+    from dynameta.optics.harmonics import _order_spectra
+    e, h, dt, f0 = _synth_orders({0: 1.0 + 0j})
+    f, S1, orders1, _ = _order_spectra(e[:, :1], h[:, :1], dt)
+    assert list(orders1) == [0] and S1[int(np.argmin(np.abs(f - f0)))][0] > 0.0
+
+
+@pytest.mark.slow
+def test_d4_blazed_grating_deflects_toward_its_thickening_side():
+    """INDEPENDENT prove-out of the D-4 label SIGN against geometry, not against the FFT argument.
+
+    A thin phase element imprints phi(x) = k0 (n-1) h(x). Under exp(-i w t) with forward exp(+i k z),
+    a staircase whose step height INCREASES with +x has dphi/dx > 0, i.e. transverse wavevector
+    kx > 0, so it must deflect toward +x and the +1 order must dominate; mirroring the staircase must
+    flip that to -1. Measured through the public harmonic_spectrum on a real 2-D FDTD march:
+    P(+1)/P(-1) = 14.42 for the +x-thickening blaze and 0.069 (= 1/14.42) mirrored, with the whole
+    order row exactly mirrored (P(-2) <-> P(+2), P(0) unchanged). Before the fix the +x-thickening
+    blaze reported 0.069 -- i.e. deflecting the wrong way."""
+    lmin, lmax, period, nx, nstep, n_hi = 1.15e-6, 1.45e-6, 3.2e-6, 16, 8, 2.0
+    f0 = C_LIGHT / (0.5 * (lmin + lmax))
+
+    def _staircase(flip):
+        def lat(nxx, nz, zc, pad, zstruct):
+            e = np.ones((nxx, nz))
+            for i in range(nxx):
+                s = int(i * nstep / nxx)                 # step index, increasing with +x
+                if flip:
+                    s = nstep - 1 - s
+                m = (zc >= pad) & (zc < pad + zstruct * (s + 1) / nstep)
+                e[i, m] = n_hi ** 2
+            return e
+        return lat
+
+    def _orders(flip):
+        r = solve_fdtd_2d([FDTDLayer(thickness_m=900e-9, eps_inf=n_hi ** 2)], period_x_m=period,
+                          nx=nx, lateral_eps_inf=_staircase(flip), lambda_min_m=lmin,
+                          lambda_max_m=lmax, resolution=16, n_pad_wave=3.0, return_time_trace=True)
+        hs = harmonic_spectrum(r, f0, max_order=1, bandwidth_frac=0.12)
+        o = list(hs["orders"])
+        p = hs["power_by_order"][1]
+        return {m: float(p[o.index(m)]) for m in (-2, -1, 0, 1, 2)}
+
+    up, dn = _orders(False), _orders(True)
+    assert up[1] / up[-1] > 5.0                          # thickens toward +x -> deflects to +1
+    assert dn[-1] / dn[1] > 5.0                          # mirrored -> deflects to -1
+    for m in (1, 2):                                     # the mirror is exact, order by order
+        assert up[m] == pytest.approx(dn[-m], rel=1e-9)
+        assert up[-m] == pytest.approx(dn[m], rel=1e-9)
+    assert up[0] == pytest.approx(dn[0], rel=1e-9)

@@ -20,6 +20,7 @@ Gates (see docs/enz_bic_nonlinear_roadmap.md 5.5):
 Run: python -m pytest tests/test_aaa_poles.py -q
 """
 import importlib.util
+import inspect
 import math
 
 import numpy as np
@@ -236,6 +237,130 @@ def test_froissart_doublets_manufactured_then_filtered():
     for r, m in zip(filt, ms):
         assert abs(q_from_pole(r.omega_tilde) - pole_q(exact[m])) <= 1e-3 * pole_q(exact[m])
 
+    # AUDIT Q-6 -- the pole-zero filter is a SCALE-SEPARATION test, and the scales must actually
+    # separate by many decades on this very gate.  Measure them: manufactured doublets cancel to
+    # ROUNDING (min|p - z| / |Im p| ~ 1e-13), genuine poles sit at ~1e0.  The default
+    # froissart_frac (1e-4) must lie strictly inside that void, with margin on both sides.
+    zeros = np.array([z for z in raw.zeros if np.isfinite(z)], dtype=complex)
+    gaps_genuine, gaps_doublet = [], []
+    for p in raw_in_band_lower:
+        gap = float(np.min(np.abs(zeros - p))) / abs(p.imag)
+        genuine = any(abs(p - exact[m]) <= 1e-3 * abs(exact[m]) for m in ms)
+        (gaps_genuine if genuine else gaps_doublet).append(gap)
+    assert len(gaps_genuine) == 4 and len(gaps_doublet) >= 4
+    # The doublet-gap MAGNITUDE is BLAS/platform-dependent (dev box ~1e-13, CI manylinux
+    # wheels measured 3.6e-8 on the same spectrum -- second PR-6 CI run), so pin the
+    # SEPARATION, which is the physics the filter keys on, not an absolute rounding level.
+    assert max(gaps_doublet) < 1e-6                       # doublets: far below any physical gap
+    assert min(gaps_genuine) > 1e-2                       # genuine: a physical, resolvable gap
+    assert min(gaps_genuine) / max(gaps_doublet) > 1e4    # >= 4 decades of void on EVERY platform
+    default_frac = inspect.signature(find_resonances).parameters["froissart_frac"].default
+    assert max(gaps_doublet) < default_frac < min(gaps_genuine)
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate 3b (audit Q-6): UNDER-COUPLED resonance must survive the Froissart filter.
+#
+# For a side-coupled single-mode resonator (Haus CMT) the pole-zero gap IS the external-coupling
+# fraction, |pole - zero| / |Im pole| = 2 ge / (gi + ge), so a weakly-coupled (absorption-dominated)
+# resonance has an arbitrarily small gap while being entirely physical.  The shipped
+# froissart_frac = 0.05 therefore deleted every resonance with gi/ge > 39 and returned [] with NO
+# warning; the calibrated 1e-4 default keeps them.
+# ------------------------------------------------------------------------------------------------
+def test_under_coupled_cmt_resonance_survives_froissart_filter():
+    w0 = 1.0e15
+    gi = w0 / 1200.0                                       # intrinsic (absorption) linewidth
+    ge = 0.01 * gi                                         # UNDER-coupled: ge/gi = 1e-2
+
+    def t_cmt(w, ge_):
+        d = 1j * (w0 - np.asarray(w, dtype=complex))
+        return (d + 0.5 * (gi - ge_)) / (d + 0.5 * (gi + ge_))
+
+    gtot = gi + ge
+    q_true = w0 / gtot                                     # pole = w0 - i gtot/2 -> Q = w0/gtot
+    assert abs(q_true - 1188.1) < 0.1                      # the audit's Q ~ 1188 configuration
+    w = np.linspace(w0 - 20 * gtot, w0 + 20 * gtot, 600)
+    f = t_cmt(w, ge)
+
+    # the analytic pole-zero gap is the coupling fraction, well below the OLD 0.05 threshold
+    gap = 2.0 * ge / gtot
+    assert abs(gap - 1.9802e-2) < 1e-5
+
+    reso = find_resonances(w, f, tol=1e-13)                # DEFAULT froissart_frac
+    assert len(reso) == 1, "under-coupled resonance deleted by the Froissart filter (Q-6)"
+    assert abs(reso[0].Q - q_true) <= 1e-3 * q_true
+    assert abs(reso[0].omega_tilde.real - w0) <= 1e-6 * w0
+
+    # the old default is the regression: it returns [] -- and, since fix-verify W1 kill 4, it says
+    # so out loud instead of silently (the emptied-candidate-list warning names froissart_frac).
+    with pytest.warns(RuntimeWarning, match="froissart_frac"):
+        assert find_resonances(w, f, tol=1e-13, froissart_frac=0.05) == []
+
+    # ... and the calibrated default still holds two decades deeper into under-coupling
+    for r in (1e-3, 1e-4):
+        gtot_r = gi * (1.0 + r)
+        wr = np.linspace(w0 - 20 * gtot_r, w0 + 20 * gtot_r, 600)
+        got = find_resonances(wr, t_cmt(wr, r * gi), tol=1e-13)
+        assert len(got) == 1, r
+        assert abs(got[0].Q - w0 / gtot_r) <= 1e-3 * (w0 / gtot_r), r
+
+
+def test_froissart_threshold_scales_with_the_aaa_misfit_on_noisy_data():
+    """FIX-VERIFY W1 kill 4.  ``froissart_frac = 1e-4`` is calibrated to the ROUNDING-level
+    pole-zero gaps of a CLEAN over-fit (~1e-13).  Noise manufactures doublets that separate by
+    roughly the NOISE instead: on a 4-pole rational with 1e-6 relative complex noise the spurious
+    gaps reach 3e-2, and the fixed 1e-4 admitted 25 spurious resonances over a 25-seed sweep where
+    the old 0.05 admitted none.  The threshold is now
+    ``clip(16 sqrt(AAA misfit), froissart_frac, 0.05)``, so clean data is untouched and noisy data
+    recovers the old rejection."""
+    from dynameta.optics.aaa_poles import (_aaa_misfit, _froissart_threshold,
+                                           _FROISSART_MAX_FRAC)
+
+    w0 = 1.0e15
+    true = [complex(0.80 * w0, -0.0100 * w0), complex(1.00 * w0, -0.0040 * w0),
+            complex(1.25 * w0, -0.0025 * w0), complex(1.45 * w0, -0.0060 * w0)]
+    resid = [0.9 + 0.2j, 1.4 - 0.5j, 0.6 + 0.9j, 1.1 + 0.0j]
+
+    def f_true(wv):
+        out = np.full(np.shape(wv), 0.25 + 0.0j)
+        for p, r in zip(true, resid):
+            out = out + r * w0 / (np.asarray(wv, dtype=complex) - p)
+        return out
+
+    def is_true(p):
+        return any(abs(p - t) <= 2e-2 * abs(t) for t in true)
+
+    w = np.linspace(0.6 * w0, 1.7 * w0, 400)
+    clean = f_true(w)
+
+    # (a) CLEAN data: the misfit is at machine level, so the threshold IS the shipped constant.
+    res_clean = aaa(w.astype(np.complex128), clean, tol=1e-13, max_degree=40)
+    assert _aaa_misfit(res_clean, clean) < 1e-10
+    assert _froissart_threshold(res_clean, clean, 1e-4) == 1e-4
+    got = find_resonances(w, clean, tol=1e-13, max_degree=40)
+    assert len(got) == 4 and all(is_true(r.omega_tilde) for r in got)
+
+    # (b) 1e-6 RELATIVE noise, 8 of the verifier's 25 seeds: 4 genuine and ZERO spurious each.
+    for seed in range(1000, 1008):
+        rng = np.random.default_rng(seed)
+        fn = clean + 1e-6 * float(np.max(np.abs(clean))) * (rng.standard_normal(400)
+                                                            + 1j * rng.standard_normal(400))
+        rn = aaa(w.astype(np.complex128), fn, tol=1e-13, max_degree=40)
+        eff = _froissart_threshold(rn, fn, 1e-4)
+        assert 1e-3 < eff <= _FROISSART_MAX_FRAC, (seed, eff)     # scaled well above the floor
+        out = find_resonances(w, fn, tol=1e-13, max_degree=40)
+        n_true = sum(1 for r in out if is_true(r.omega_tilde))
+        assert n_true == 4, (seed, n_true, len(out))
+        assert len(out) - n_true == 0, (seed, len(out) - n_true)  # pre-fix: 1 spurious per seed
+
+    # (c) the scaling is CAPPED at the legacy constant: ``max_error`` is a MAX over samples and a
+    #     single near-real-axis approximant pole can put it O(1), which uncapped would delete real
+    #     physics (the 0.1%-noise transmittance gate above measures misfits up to 2.65).
+    class _Fake:
+        max_error = 1.0e3
+    assert _froissart_threshold(_Fake(), np.array([1.0 + 0j]), 1e-4) == _FROISSART_MAX_FRAC
+    assert _froissart_threshold(_Fake(), np.array([1.0 + 0j]), 0.2) == 0.2   # explicit floor wins
+
 
 # ------------------------------------------------------------------------------------------------
 # Gate 4: Lorentzian / Fano + slowly-varying background; AAA vs construction, fano_fit agrees
@@ -344,7 +469,10 @@ def test_no_window_bias_and_narrow_window_warns():
         half = 0.5 * m * gamma
         w = np.linspace(w0 - half, w0 + half, 400)
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            # AUDIT T-13: narrowed from a blanket simplefilter("ignore"). Only the narrow-window
+            # diagnostic this sweep deliberately provokes (and asserts on, 10 lines below) is
+            # suppressed; any OTHER warning from find_resonances still reaches the session policy.
+            warnings.filterwarnings("ignore", message=".*high-variance.*")
             reso = find_resonances(w, fn(w), tol=1e-13)
         best = min(reso, key=lambda rr: abs(rr.omega_tilde.real - w0))
         assert abs(best.Q - Q_true) <= 1e-3 * Q_true           # unbiased at every span
@@ -415,7 +543,8 @@ def test_rcwa_bridge_gmr_aaa_vs_fano():
 
     def R_of_lambda(lam):
         layers = [(cell, d_grating), (eps_wg, d_wg)]
-        R, _T = rcwa_stack_RT(layers, n_sub, 1.0, lam, period_x=period, theta=0.0,
+        R, _T = rcwa_stack_RT(layers, lam, n_substrate=n_sub, n_superstrate=1.0,
+                              period_x=period, theta=0.0,
                               n_orders=n_orders, row=0)
         return float(R)
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import numpy as np
 
+__all__ = ["lorentzian_area", "biexp_memory_kernel", "nonmarkovian_lineshape"]
+
 
 def lorentzian_area(df_Hz, gamma_Hz):
     """AREA-NORMALIZED Lorentzian Lor(df; g) = (g/pi)/(df^2 + g^2) [1/Hz], HWHM = g, integral = 1.

@@ -74,10 +74,13 @@ def _design(layers, *, pol="y", theta=0.0, phi=0.0, sub="glass", mesh=False, per
         reg.add(Material(nm, ConstantOptical(eps)))
     kw = {}
     if mesh:
+        # maxh_inclusion_m: audit F-23 made the per-region knobs LIVE; the dielectric pillar
+        # (not is_metal) would otherwise fall to the 5 nm inclusion default -- a 483x element
+        # blow-up on this cell (mis-mesh caught by the wave-3 fix verifier).
         kw["mesh_3d"] = Mesh3DSpec(pml_thk_m=500e-9, superstrate_buffer_m=1400e-9,
                                    substrate_buffer_m=1400e-9, maxh_superstrate_m=45e-9,
                                    maxh_substrate_m=45e-9, maxh_background_m=22e-9,
-                                   fem_order=2)
+                                   maxh_inclusion_m=22e-9, fem_order=2)
     return Design(name="brg", unit_cell=UnitCell.square(per),
                   stack=Stack(layers=layers, superstrate_material="air",
                               substrate_material=sub),

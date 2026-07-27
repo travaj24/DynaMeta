@@ -1,5 +1,6 @@
 """Fast unit tests for the coupled carrier->optics transient (TMM-based, no FDTD/DEVSIM)."""
 import numpy as np
+import pytest
 
 from dynameta.materials import DrudeOptical, M_E
 from dynameta.transient_optics import (enz_reflector_stack, optical_transient_response, rc_accumulation)
@@ -56,3 +57,65 @@ def test_enz_stack_depth_ordering_air_first():
     R_rev, T_rev, A_rev = layered_rta(enz_reflector_stack(eps[::-1], lam, t_ito_m=40e-9), lam)
     assert abs((R_fwd + T_fwd + A_fwd) - 1.0) < 1e-9 and abs((R_rev + T_rev + A_rev) - 1.0) < 1e-9
     assert abs(R_fwd - R_rev) > 1e-3                          # the flip is optically visible in R
+
+
+def test_orientation_is_declared_not_assumed():
+    """audit V-9: enz_reflector_stack documents an AIR-SIDE-FIRST depth array -- the inverse of
+    core.layered's substrate-first convention -- and diagnoses the hazard in prose, while
+    optical_transient_response accepted any 1-D array with no orientation argument and no check.
+    A flipped profile changes R(t) while R + T + A still closes to 1 (the invisible-flip class),
+    so the orientation must be DECLARED."""
+    from dynameta.materials.optical_model import DrudeOptical
+    dm = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * 9.109e-31, gamma_rad_s=1.8e14)
+    times = np.linspace(0.0, 2e-12, 5)
+    # a strongly ASYMMETRIC accumulation profile through the ENZ crossing (a thicker ITO makes
+    # the depth ORDER matter, which is exactly the regime this contract exists for)
+    prof_air_first = np.linspace(1.0e26, 3.0e27, 24)
+    n_air = lambda _t: prof_air_first
+    n_sub = lambda _t: prof_air_first[::-1]
+    stack = lambda eps, lam: enz_reflector_stack(eps, lam, t_ito_m=80e-9)
+    run = lambda nof, **kw: optical_transient_response(times, nof, 1.55e-6, drude_model=dm,
+                                                       build_stack=stack, **kw)
+
+    _t, R_a, T_a, _e = run(n_air)
+    _t, R_s, _T, _e = run(n_sub, orientation="substrate_first")
+    # declaring the orientation makes the two descriptions of the SAME device agree BIT-EXACTLY
+    assert np.array_equal(R_a, R_s)
+    # ... while the undeclared flip is a genuinely different, entirely plausible-looking R(t)
+    _t, R_wrong, T_wrong, _e = run(n_sub)
+    assert abs(R_wrong[0] - R_a[0]) / R_a[0] > 1e-2                  # measured ~5.6%
+    assert np.all((R_wrong >= 0.0) & (R_wrong <= 1.0))
+    assert np.all(R_wrong + T_wrong <= 1.0 + 1e-12)                  # budget still closes:
+    assert np.all(R_a + T_a <= 1.0 + 1e-12)                          # nothing downstream can see it
+    with pytest.raises(ValueError, match="orientation must be"):
+        run(n_air, orientation="top")
+
+
+def test_quasi_static_validity_is_checked_not_assumed():
+    """audit R-13: optical_transient_response is a quasi-static (adiabatic) map -- each sample is
+    an INDEPENDENT steady-state TMM solve -- with no stated validity condition and no guard, so a
+    drive faster than the stack's own optical round trip returned a smooth plausible R(t) that is
+    simply wrong. The condition is now measured against the round trip 2 sum_j Re(n_j) d_j / c."""
+    import warnings
+
+    from dynameta.materials.optical_model import DrudeOptical
+    dm = DrudeOptical(eps_inf=4.0, m_opt_kg=0.35 * 9.109e-31, gamma_rad_s=1.8e14)
+    n_of_t = lambda _t: 6.0e26
+    with warnings.catch_warnings():                       # ps sampling: comfortably adiabatic
+        warnings.simplefilter("error")
+        optical_transient_response(np.linspace(0.0, 1e-9, 32), n_of_t, 1.55e-6, drude_model=dm)
+    with pytest.warns(RuntimeWarning, match="QUASI-STATIC"):          # sub-round-trip drive
+        optical_transient_response(np.linspace(0.0, 8e-15, 17), n_of_t, 1.55e-6, drude_model=dm)
+    with warnings.catch_warnings():                       # ... and it is silenceable
+        warnings.simplefilter("error")
+        optical_transient_response(np.linspace(0.0, 8e-15, 17), n_of_t, 1.55e-6, drude_model=dm,
+                                   adiabatic_rt_factor=0.0)
+
+
+def test_rc_accumulation_rejects_negative_time():
+    """audit R-13 (same file): rc_accumulation is the t >= 0 step response of a gate switched at
+    t = 0; a negative t extrapolates the exponential backwards and returns a density BELOW n_off
+    (at t = -tau, 172% past it in the wrong direction) with no signal."""
+    assert rc_accumulation([0.0], 1e26, 6e26, 1e-9)[0] == pytest.approx(1e26, rel=1e-12)
+    with pytest.raises(ValueError, match="times_s must be >= 0"):
+        rc_accumulation([-1e-9, 0.0, 1e-9], 1e26, 6e26, 1e-9)

@@ -2,6 +2,19 @@
 
 Split from the former monolithic fdtd_nd.py; see the package __init__ docstring
 for conventions. Bodies are verbatim from the original module.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks {'x', 'y', 'p'} -- the LAB AXIS of the
+incident E ('y' = s-pol, 'p' = p-pol, 'x' = E along lab x, transverse only at normal incidence). It
+is one of five spellings in the repo -- {'s','p'} is the PLANE-OF-INCIDENCE spelling (tmm_reference,
+resonance, nonlocal_tmm, shg_fem's closed forms, the oblique 2-D FDTD), {'te','tm'} the lumenairy
+grating bridge's, the integer `row` 0/1 the differentiable Berreman/RCWA/PMM forwards', and
+`pol_axis` hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the
+normal-incidence / azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is
+UNCHANGED; acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol. The magneto-optic kernel implements the
+'x'/'y' SUBSET (normal incidence).
 """
 from __future__ import annotations
 
@@ -349,7 +362,15 @@ def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, 
     while Jz is a plain scalar Drude. This is the PHYSICALLY-CORRECT time-domain origin of the
     frequency-domain off-diagonal i*g. Normal incidence (Bloch zero-phase rolls), CFS-CPML + PEC in z,
     real fields, soft plane source on `pol` ('x'/'y'). Records the Ex,Ey probe planes (the co/cross-pol
-    transmission + Faraday come from them). Reduces to the 1-D fdtd_mo for a laterally-uniform slab."""
+    transmission + Faraday come from them). Reduces to the 1-D fdtd_mo for a laterally-uniform slab.
+
+    AUDIT V-8: `pol` is the {'x','y'} normal-incidence subset of the OpticalSpec LAB-AXIS
+    vocabulary; anything else used to fall through to the 'x' source silently. solve_fdtd_3d_mo
+    validates first, so this guard only fires on a direct call. Map: dynameta.core.polarization."""
+    if pol not in ("x", "y"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(pol, "lab_xyp", where="_run_3d_mo", param="pol",
+                                   allowed=("x", "y"))
     nx, ny, nz = exx.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     r = (lambda a: np.asarray(a).reshape(1, 1, nz))

@@ -1,6 +1,8 @@
 """Fast unit tests for the results/io layer: the HDF5+Zarr store, the SweepResults container, the
 persistent optical-solver cache, and the matplotlib viz helpers (all without a real solver)."""
 import os
+import pathlib
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,6 +15,14 @@ from dynameta.results import SweepResults
 
 _FORMATS = available_formats()
 _EXT = {"hdf5": ".h5", "zarr": ".zarr"}
+
+# audit T-13 (`filterwarnings = error`): most of the cache tests below build their inner solver as
+# a LOCAL closure and deliberately leave tag='' -- which is exactly the shape the S5-2 advisory
+# (cache.py:252, "no cache_fingerprint and tag=''") warns about. Here the collision it warns about
+# is the mechanism under test (see test_solver_identity_..., which needs two same-qualname
+# closures to be told apart), so the advisory is expected, not a defect. Message-scoped so every
+# other warning in this module is still an error.
+pytestmark = pytest.mark.filterwarnings("ignore:OpticalSolverCache")
 
 
 def _rows():
@@ -274,3 +284,262 @@ def test_cache_autosave_batching(tmp_path):
     c.flush()                                                 # drain the 2-miss tail
     c2 = OpticalSolverCache(inner, p, autosave_every=1)
     assert len(c2._mem) == 6                                  # everything persisted
+
+
+# ------------------------------------------------------------------------------------------------
+# AUDIT R-7: the dirty flag and the atexit safety net
+# ------------------------------------------------------------------------------------------------
+def _mk_cache(tmp_path, name, **kw):
+    from dynameta.cache import OpticalSolverCache
+
+    def inner(design, geo, eps, lam, ns, nb):
+        return OpticalResult(r=complex(lam * 1e5, 0), R=float(lam * 1e5), phase_deg=0.0,
+                             solve_time_s=0.25)
+    inner.cache_fingerprint = "r7-probe"
+    return OpticalSolverCache(inner, str(tmp_path / (name + _EXT[_FORMATS[0]])), **kw)
+
+
+def test_failed_flush_keeps_dirty_flag_and_next_flush_retries(tmp_path, monkeypatch):
+    """flush() used to zero the dirty flag as its FIRST statement, BEFORE any I/O -- so a failing
+    write disarmed the atexit net: _unsaved dropped to 0, _flush_if_dirty found nothing to do, and
+    the batch was never retried even though the rows were still in _mem. The flag must survive a
+    failed write, and the next flush must persist everything."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import dynameta.cache as C
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c = _mk_cache(tmp_path, "r7a", autosave=False)
+    for lam in (1.40e-6, 1.45e-6, 1.50e-6):
+        c(d, None, eps, lam, 1.0, 1.0)
+    assert c._unsaved == 3
+
+    boom = {"n": 0}
+
+    def failing_save(*a, **kw):
+        boom["n"] += 1
+        raise OSError("disk full (injected)")
+
+    monkeypatch.setattr(C, "save_arrays", failing_save)
+    with pytest.raises(OSError):
+        c.flush()
+    assert boom["n"] == 1
+    assert c._unsaved == 3, "a FAILED flush must leave the cache dirty"
+    c._flush_if_dirty()                                       # the atexit path: still armed, retries
+    assert boom["n"] == 2 and c._unsaved == 3                 # swallowed, still dirty
+    monkeypatch.undo()                                        # disk comes back
+    c.flush()
+    assert c._unsaved == 0
+    # everything the failed flushes held is on disk (nothing was dropped)
+    c2 = _mk_cache(tmp_path, "r7a", autosave=False)
+    for lam in (1.40e-6, 1.45e-6, 1.50e-6):
+        c2(d, None, eps, lam, 1.0, 1.0)
+    assert c2.stats()["hits"] == 3 and c2.stats()["misses"] == 0
+
+
+def test_autosave_cache_is_garbage_collectable(tmp_path):
+    """The atexit registration used to hold a BOUND METHOD, which keeps the cache (and its whole
+    _mem store) alive for the life of the process. It is now a weakref trampoline, so a dropped
+    cache is collected -- probed with a weakref."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import gc
+    import weakref
+    c = _mk_cache(tmp_path, "r7b", autosave=True, autosave_every=1)
+    c(_design(), None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, 1.4e-6, 1.0, 1.0)
+    assert c._unsaved == 0                                    # autosave_every=1 -> already clean
+    ref = weakref.ref(c)
+    del c
+    gc.collect()
+    assert ref() is None, "an autosave cache must not be kept alive by its atexit registration"
+
+
+def test_dropped_dirty_cache_still_persists_its_tail(tmp_path):
+    """Weakening the atexit hold must NOT reintroduce tail loss: a dirty cache dropped without
+    close() is flushed at collection."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import gc
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    c = _mk_cache(tmp_path, "r7c", autosave=True, autosave_every=64)
+    c(d, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c._unsaved == 1 and not os.path.exists(c.path)     # batched: nothing written yet
+    del c
+    gc.collect()
+    c2 = _mk_cache(tmp_path, "r7c", autosave=False)
+    c2(d, None, eps, 1.4e-6, 1.0, 1.0)
+    assert c2.stats()["hits"] == 1, "the batched tail of a dropped cache was lost"
+
+
+def test_close_flushes_and_unregisters(tmp_path):
+    # Count OUR trampolines (cache._live_atexit_hook_count), never atexit._ncallbacks()
+    # deltas: on a fresh CI interpreter the first h5py/zarr import happens INSIDE the cache
+    # construction and registers its own atexit hooks, so global-count deltas are not
+    # attributable (first PR-6 CI run; the dev box's warm imports masked it).
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    from dynameta.cache import _live_atexit_hook_count
+    n0 = _live_atexit_hook_count()
+    c = _mk_cache(tmp_path, "r7d", autosave=True, autosave_every=64)
+    c(_design(), None, {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}, 1.4e-6, 1.0, 1.0)
+    assert c._atexit_hook is not None and c._unsaved == 1
+    assert _live_atexit_hook_count() == n0 + 1                 # the hook is registered
+    c.close()
+    assert c._unsaved == 0 and os.path.exists(c.path) and c._atexit_hook is None
+    assert _live_atexit_hook_count() == n0, "close() must release the atexit slot"
+    c.close()                                                  # idempotent
+    assert _live_atexit_hook_count() == n0
+
+
+def test_dropped_caches_do_not_accumulate_atexit_trampolines(tmp_path):
+    """audit R-7 follow-on: the weakref trampoline stops a dropped cache from being IMMORTAL, but
+    atexit keeps every registration for the life of the process -- so a sweep that built and
+    dropped caches left one dead no-op callback behind per cache (probe: 9 callbacks after 5
+    dropped caches). __del__ now unregisters, so the count must return to its baseline while the
+    batched tails still get persisted."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import gc
+    from dynameta.cache import _live_atexit_hook_count
+    d = _design()
+    eps = {"s": SimpleNamespace(is_uniform=True, scalar=4.0 + 0j)}
+    gc.collect()
+    # our own registry, not atexit._ncallbacks(): see test_close_flushes_and_unregisters
+    n0 = _live_atexit_hook_count()
+    for i in range(5):
+        c = _mk_cache(tmp_path, "r7e%d" % i, autosave=True, autosave_every=64)
+        c(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
+        assert c._unsaved == 1                                 # batched, nothing written yet
+        del c
+    gc.collect()
+    assert _live_atexit_hook_count() == n0, "dropped caches left dead atexit trampolines behind"
+    for i in range(5):                                         # ... and every tail survived
+        c2 = _mk_cache(tmp_path, "r7e%d" % i, autosave=False)
+        c2(d, None, eps, 1.4e-6 + i * 1e-9, 1.0, 1.0)
+        assert c2.stats()["hits"] == 1
+        c2.close()
+    gc.collect()
+    assert _live_atexit_hook_count() == n0
+
+
+def test_cache_construction_preloads_the_store_backend(tmp_path):
+    """audit R-7: every write path is DEFERRED (autosave batches; the last batch is written by the
+    atexit hook or by __del__), so a cache whose whole run fits in one batch used to reach
+    save_arrays -- and therefore `import h5py` -- for the FIRST time during interpreter SHUTDOWN.
+    That segfaults on Windows / CPython 3.14 / h5py 3.16 (0xC0000005, no traceback, AFTER the rows
+    are written). Constructing the cache must import the backend while the interpreter is healthy.
+    The companion subprocess gate is test_cache_flush_at_interpreter_shutdown_does_not_crash."""
+    if not _FORMATS:
+        pytest.skip("no io backend (h5py/zarr) installed")
+    import sys
+    mod = {"hdf5": "h5py", "zarr": "zarr"}[_FORMATS[0]]
+    code = ("import sys; "
+            "from dynameta.cache import OpticalSolverCache; "
+            "assert {m!r} not in sys.modules, 'importing dynameta.cache already loaded it'; "
+            "c = OpticalSolverCache(lambda *a: None, r'{p}'); "
+            "print({m!r} in sys.modules)").format(
+                m=mod, p=str(tmp_path / ("pre" + _EXT[_FORMATS[0]])).replace("\\", "\\\\"))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(pathlib.Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().endswith("True"), out.stdout + out.stderr
+    # best effort: an unknown extension must NOT turn construction into a raise
+    OpticalSolverCache = __import__("dynameta.cache", fromlist=["x"]).OpticalSolverCache
+    OpticalSolverCache(lambda *a: None, str(tmp_path / "no_such_extension.bogus"))
+
+
+@pytest.mark.parametrize("mode", ["drop", "keep", "cycle", "shutdown"])
+def test_cache_flush_at_interpreter_shutdown_does_not_crash(tmp_path, mode):
+    """The R-7 segfault itself, in a subprocess, over the four teardown orderings: dropped before
+    exit (__del__ runs mid-run), alive at exit (the atexit trampoline runs), held in a reference
+    CYCLE (only the GC can reclaim it), and held by a module global cleared during shutdown (a
+    LATE __del__). Pre-fix: rc=0 for 'drop' and 0xC0000005 for the other three. All four must exit
+    cleanly AND leave the batched tail on disk."""
+    if not _FORMATS or _FORMATS[0] != "hdf5":
+        pytest.skip("the shutdown segfault is the HDF5/h5py path")
+    import sys
+    p = str(tmp_path / ("shut" + _EXT["hdf5"]))
+    child = '''
+import sys
+from types import SimpleNamespace
+sys.path.insert(0, {root!r})
+from dynameta.cache import OpticalSolverCache
+from dynameta.core.interfaces import OpticalResult
+from dynameta.geometry import Design, Layer, Stack, UnitCell
+from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+reg = MaterialRegistry()
+for nm, e in [("air", 1.0), ("m", 4.0)]:
+    reg.add(Material(nm, ConstantOptical(complex(e))))
+d = Design(name="c", unit_cell=UnitCell.square(220e-9),
+           stack=Stack(layers=[Layer("s", 100e-9, "m", inclusions=[])],
+                       superstrate_material="air", substrate_material="air"),
+           electrodes=[], materials=reg)
+def inner(design, geo, eps, lam, ns, nb):
+    return OpticalResult(r=complex(lam*1e5, 0), R=float(lam*1e5), phase_deg=0.0, solve_time_s=0.25)
+inner.cache_fingerprint = "r7-probe"
+eps = {{"s": SimpleNamespace(is_uniform=True, scalar=4.0+0j)}}
+c = OpticalSolverCache(inner, {path!r}, autosave=True, autosave_every=64)
+for i in range(5):
+    c(d, None, eps, 1.0e-6 + i*1e-9, 1.0, 1.0)
+assert c._unsaved == 5
+mode = {mode!r}
+if mode == "drop":
+    del c
+elif mode == "cycle":
+    c._self_cycle = c; del c
+elif mode == "shutdown":
+    import __main__; __main__._keep = c
+'''.format(root=str(pathlib.Path(__file__).resolve().parents[1]), path=p, mode=mode)
+    out = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True,
+                         cwd=str(pathlib.Path(__file__).resolve().parents[1]))
+    assert out.returncode == 0, "rc={} (0xC0000005 = -1073741819) stderr={!r}".format(
+        out.returncode, out.stderr[-400:])
+    probe = _mk_cache(tmp_path, "unused", autosave=False)      # a throwaway to reach the class
+    c2 = type(probe)(probe.inner, p, autosave=False)
+    assert len(c2._mem) == 5, "the batched tail was not persisted in mode " + mode
+
+
+def test_cache_eps_fingerprint_separates_axes_shape_and_tensor():
+    """audit R-8: the EpsField fingerprint hashed only the VALUES. Two physically different
+    gridded states -- same numbers on axes differing 100x, and a (2,3,4) grid vs its (4,3,2)
+    reshape (identical C-order bytes) -- shared one key, i.e. a cache HIT for a different solve;
+    and a scalar+tensor field collided with the same scalar alone (the scalar branch returned
+    before reaching `tensor`). Every distinction must now change the fingerprint."""
+    from dynameta.cache import _eps_fingerprint
+    from dynameta.core.eps_field import EpsField
+    ax = lambda n, span: np.linspace(0.0, span, n)
+    v = np.arange(24, dtype=complex).reshape(2, 3, 4)
+    fp = lambda ef: _eps_fingerprint({"r": ef})
+
+    small = EpsField(values_zyx=v, x_axis_u=ax(4, 1.0), y_axis_u=ax(3, 1.0), z_axis_u=ax(2, 1.0))
+    big = EpsField(values_zyx=v, x_axis_u=ax(4, 100.0), y_axis_u=ax(3, 1.0), z_axis_u=ax(2, 1.0))
+    transposed = EpsField(values_zyx=v.reshape(4, 3, 2), x_axis_u=ax(2, 1.0),
+                          y_axis_u=ax(3, 1.0), z_axis_u=ax(4, 1.0))
+    assert fp(small) != fp(big)                       # AXES (VoxelCoefficient bounds)
+    assert fp(small) != fp(transposed)                # SHAPE (same bytes, different grid)
+    # scalar vs scalar+tensor, and the convention label
+    s = EpsField(scalar=2.0 + 0j)
+    st = EpsField(scalar=2.0 + 0j, tensor=np.eye(3, dtype=complex) * 3.0)
+    assert fp(s) != fp(st)
+    assert fp(s) != fp(EpsField(scalar=2.0 + 0j, time_convention="exp(+iwt)"))
+    # and it stays a CONTENT hash: an identical rebuild must still hit
+    same = EpsField(values_zyx=v.copy(), x_axis_u=ax(4, 1.0), y_axis_u=ax(3, 1.0),
+                    z_axis_u=ax(2, 1.0))
+    assert fp(small) == fp(same)
+
+
+def test_sweep_rejects_duplicate_and_nonpositive_wavelengths():
+    """audit R-4: Sweep guarded duplicate bias LABELS -- with a comment naming the wavelength
+    collision as a sibling hazard -- while accepting duplicate and non-positive wavelengths.
+    SweepResults.from_rows keys the grid off a SET, so a duplicate silently overwrote its own
+    row with the last solve after paying for the extra solve."""
+    from dynameta.sweep import BiasPoint, Sweep
+    bp = [BiasPoint({"gate": 0.0}, "v0")]
+    assert Sweep(bp, [1310.0, 1550.0]).wavelengths_nm == [1310.0, 1550.0]
+    assert Sweep(bp).wavelengths_nm == []                       # empty stays legal
+    with pytest.raises(ValueError, match="duplicate wavelengths_nm"):
+        Sweep(bp, [1310.0, 1550.0, 1310.0])
+    for bad in ([1310.0, -5.0], [0.0], [float("nan")], [float("inf")]):
+        with pytest.raises(ValueError, match="finite and > 0"):
+            Sweep(bp, bad)

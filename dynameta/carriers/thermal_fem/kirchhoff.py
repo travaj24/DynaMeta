@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import ngsolve as ng
 
-from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, _add_load_terms, _build_layered_mesh, _build_thermal_forms, _mean_T_per_layer
+from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, add_load_terms, _build_layered_mesh, build_thermal_forms, mean_T_per_layer
 from dynameta.carriers.thermal_fem.transient import ThermalTransientResult
 
 # ---- R21: temperature-dependent k(T) via the EXACT Kirchhoff transform ------------------------
@@ -92,7 +92,7 @@ def solve_thermal_kirchhoff_fem(layers: List[ThermalLayer], k_of_T, *, period_x_
     # theta-problem: unit conductivity everywhere on the SAME mesh/loads as the linear path
     theta_layers = [ThermalLayer(name=L.name, thickness_m=L.thickness_m, k_thermal=1.0)
                     for L in layers]
-    mesh, fes, u, v, a, f, _ = _build_thermal_forms(
+    mesh, fes, u, v, a, f, _ = build_thermal_forms(
         theta_layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
     th = ng.GridFunction(fes)                    # theta(T_sink) = 0 on the sink face (Dirichlet 0)
     with ng.TaskManager():
@@ -206,8 +206,11 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
     TANGENT approximation to the enthalpy increment: the physical (chord) enthalpy balance
     closes O(dt) -- validated under dt-refinement in validation/thermal_ct_transient.py.
     bottom_bc: 'sink' (Dirichlet T_sink, the default) or 'insulated' (pure-Neumann bottom; the
-    domain then stores ALL injected energy -- the enthalpy-balance configuration; the result's
-    steady_limit_T is meaningless there).
+    domain then stores ALL injected energy -- the enthalpy-balance configuration; there is no
+    steady limit there, so the result's steady_limit_T returns None -- audit C-9).
+    The returned result also carries `k_of_T`, so steady_limit_T returns None on THIS path even
+    with bottom_bc='sink': the closed form it evaluates is the series-resistance limit of the
+    CONSTANT L.k_thermal, which this solver reads only for its > 0 validation (audit C-9).
     Cost note: the system matrix is refactored EVERY step (k changes); use the constant-k
     solve_thermal_transient_fem when k is constant. Constant callables reproduce it to solver
     roundoff."""
@@ -276,7 +279,7 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
     a = ng.BilinearForm(fes)
     a += kg * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
-    _add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
+    add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
 
     T = ng.GridFunction(fes)
     T.Set(ng.CoefficientFunction(float(T_sink_K if T_init_K is None else T_init_K)))
@@ -306,7 +309,7 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
                                  "transient (M would lose positive-definiteness)")
 
     t_list = [0.0]
-    mean_list = [_mean_T_per_layer(mesh, T, layers)]
+    mean_list = [mean_T_per_layer(mesh, T, layers)]
     with ng.TaskManager():
         if not has_ct:
             m.Assemble()
@@ -328,9 +331,12 @@ def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, per
             t += dt
             if (step % store_every == 0) or (step == n_steps):
                 t_list.append(t)
-                mean_list.append(_mean_T_per_layer(mesh, T, layers))
+                mean_list.append(mean_T_per_layer(mesh, T, layers))
 
     return ThermalTransientResult(
         mesh=mesh, layers=list(layers), t_s=np.asarray(t_list, dtype=np.float64),
         mean_T_per_layer_t=np.asarray(mean_list, dtype=np.float64), T_final=T,
-        flux_W_m2=float(flux_W_m2), T_sink_K=float(T_sink_K), joule_W_m3=joule_W_m3)
+        flux_W_m2=float(flux_W_m2), T_sink_K=float(T_sink_K), joule_W_m3=joule_W_m3,
+        # audit C-9: record what this run ACTUALLY used so `steady_limit_T` does not hand back the
+        # constant-L.k_thermal series limit of a different material (or of a BC never imposed).
+        k_of_T=k_of_T_by, bottom_bc=str(bottom_bc))

@@ -3,6 +3,18 @@ Solver-configuration specs carried by a Design: Stage-1 DEVSIM mesh, Stage-3
 NGSolve mesh, and the optical/incidence configuration. Field names are generic
 (no 'mirror'/'patch' coupling); the builders key mesh sizing off material role
 + stack position, not off layer names.
+
+POLARIZATION VOCABULARY (audit V-8): ``OpticalSpec.polarization`` is the LAB-AXIS family {'x', 'y',
+'p'} -- 'y' = s-pol, 'p' = p-pol, 'x' = E along lab x (transverse only at normal incidence). It is
+ONE of five spellings in the repo; the siblings are the plane-of-incidence {'s','p'} (tmm_reference
+/ resonance / nonlocal_tmm / shg_fem / the oblique 2-D FDTD), {'te','tm'} (the lumenairy grating
+bridge), the integer ``row`` 0/1 of the differentiable Berreman/RCWA/PMM forwards, and ``pol_axis``
+(hydro_fem's 2-D in-plane cross-section). The map, the ``normalize_pol`` converter, and the
+normal-incidence / azimuth caveats live in ``dynameta.core.polarization``. The set ACCEPTED here is
+unchanged -- acceptance unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE
+families ({'s','p'} and {'te','tm'}), whose aliases name the same physical mode in every geometry
+they cover; this vocabulary's crossings depend on the azimuth (or have no image at all), so they
+stay STRICT and are made explicitly, through normalize_pol.
 """
 
 from __future__ import annotations
@@ -41,7 +53,13 @@ class Mesh3DSpec:
     metal_skin_thk_m:        float = 0.0         # 0 disables the split
     maxh_metal_skin_m:       Optional[float] = None
     maxh_metal_bulk_m:       float = 35e-9
-    # In-inclusion vs background lateral refinement of cavity layers:
+    # maxh_inclusion_m sizes the INCLUSION solids only (`<layer>__incl<j>`, i.e. a Layer that
+    # actually carries an Inclusion). maxh_background_m is the catch-all for everything else: plain
+    # full-cell bands, an inclusion layer's background remainder, AND BOTH HALVES OF A CAVITY SPLIT
+    # (`_inpatch` + `_outside`) -- a cavity layer follows the BACKGROUND knob, not this one, since
+    # the in-patch column is full-layer-thickness background material (see
+    # ngsolve_layered.LayeredOpticalBuilder._maxh; putting it on maxh_inclusion_m's 5 nm default
+    # cost 5.1M elements / 493 s of meshing on a 250 nm air cap).
     maxh_inclusion_m:        float = 5e-9
     maxh_background_m:       float = 30e-9
     fem_order:               int = 2
@@ -77,7 +95,15 @@ class OpticalSpec:
 
     def __post_init__(self) -> None:
         if self.polarization not in ("x", "y", "p"):
-            raise ValueError("polarization must be 'x', 'y' (s-pol), or 'p' (p-pol)")
+            # audit V-8: same accepted set, but the rejection now comes from the shared
+            # vocabulary home and NAMES the sibling family a wrong label came from ('s'/'p' is
+            # the plane-of-incidence spelling, 'te'/'tm' the grating bridge's).  LAZY import,
+            # failure path only, so this dataclass module keeps its stdlib-only import cost.
+            from dynameta.core.polarization import pol_vocabulary_error
+            raise pol_vocabulary_error(
+                self.polarization, "lab_xyp", where="OpticalSpec", param="polarization",
+                extra="'y' is s-pol (E perpendicular to the x-z plane of incidence) and 'p' is "
+                      "p-pol; 'x' (E along lab x) is accepted at NORMAL incidence only.")
         # Oblique incidence (Bloch-Floquet) is implemented for s-pol ('y', E along y
         # perpendicular to the x-z plane) and p-pol ('p', E in the x-z plane). 'x'
         # (E along x) is not transverse at oblique incidence.

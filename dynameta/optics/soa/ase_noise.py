@@ -14,6 +14,12 @@ the linear rho the original spec Section 6 wrote). At full inversion rho -> 1, n
 the noise figure -> 2 (the 3 dB quantum limit); approaching transparency rho -> 1/2,
 n_sp -> infinity.
 
+BAND SCOPE (audit A-4). The self-consistent entry points drive the FULL two-band gain/emission
+pair (QDGainModel.total_material_gain / total_emission_gain): with an ES band enabled
+(sigma_pk_ES > 0) the ASE spectrum carries the ES lobe, and n_sp/NF there are the ES band's own.
+The n_sp closed forms below are the GROUND-STATE occupation forms; on a two-band device read the
+inversion factor off the propagated PSD (spectral_noise_figure) rather than from rho_GS.
+
 Forward ASE along z (per polarization, per Hz): dS/dz = Gamma g S + Gamma g n_sp h nu, so the
 output spectral density is S_ASE = h nu * integral_0^L Gamma g(z) n_sp(z) G(z->L) dz, which
 collapses to the textbook S_ASE = n_sp h nu (G - 1) for a uniform inversion. The z-resolved
@@ -253,7 +259,9 @@ def ase_self_consistent(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid_Hz, dnu_g
                         beta=0.5, tol=1e-6, max_iter=60, ase_strength=1.0):
     """Lumped self-consistent ASE: the integrated bidirectional ASE photon density saturates the
     (single-section, uniform-profile) carrier state alongside the signal -- the 'backward ASE
-    depletes the inversion' physics. Iterates
+    depletes the inversion' physics. TWO-BAND: the gain/emission pair is the FULL GS+ES
+    (total_material_gain / total_emission_gain), so an ES-active device carries its ES ASE lobe
+    (audit A-4; identical to the old GS-only pair whenever sigma_pk_ES = 0). Iterates
       y = model.steady_state(I, S_conf = S_conf_signal + ase_strength*S_ase, nu_s) -> g, g_sp(nu)
       -> ase_spectrum_bidirectional (N uniform slices) -> S_ase (z-averaged confined density,
          S_ase = Gamma/(v_g A_mode) m_pol sum_k (S_f_mean+S_b_mean) dnu_k/(h nu_k)) -> repeat,
@@ -275,15 +283,15 @@ def ase_self_consistent(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid_Hz, dnu_g
         y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * S_ase_load,
                                nu_s_Hz=nu_s_Hz)
         rho = model.rho_GS(y)
-        g_nu = model.material_gain_per_m(rho, nu)
-        gsp_nu = model.emission_gain_per_m(rho, nu)
+        g_nu = model.total_material_gain(model.rho_ES(y), rho, nu)
+        gsp_nu = model.total_emission_gain(model.rho_ES(y), rho, nu)
         res = ase_spectrum_bidirectional(np.tile(g_nu, (nz, 1)), np.tile(gsp_nu, (nz, 1)), dz,
                                          nu, dnu, p.Gamma, alpha_i_per_m=alpha_i_per_m, m_pol=m_pol)
         res["g_sat"] = g_nu
         return res
 
-    g_unsat = model.material_gain_per_m(model.rho_GS(
-        model.steady_state(I_A, S_conf_m3=S_conf_signal_m3, nu_s_Hz=nu_s_Hz)), nu)
+    y_un = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3, nu_s_Hz=nu_s_Hz)
+    g_unsat = model.total_material_gain(model.rho_ES(y_un), model.rho_GS(y_un), nu)
     if not ase_saturation:
         res = spectrum(0.0)
         res.update({"S_ase": 0.0, "g_unsat": g_unsat, "n_iter": 0, "converged": True})
@@ -308,7 +316,8 @@ def ase_self_consistent_zresolved(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid
                                   ase_saturation=True, beta=0.5, tol=1e-6, max_iter=80,
                                   ase_strength=1.0):
     """Z-RESOLVED self-consistent ASE: refines the lumped ase_self_consistent so EACH slice's gain is
-    saturated by its OWN local ASE photon density (not one device-averaged S_ase). The coupled
+    saturated by its OWN local ASE photon density (not one device-averaged S_ase). Same two-band
+    GS+ES gain/emission pair as the lumped sibling (audit A-4). The coupled
     fixed point, iterated to convergence:
       g(z, nu), g_sp(z, nu)  from  model.steady_state(I, S_conf = S_signal + ase_strength S_ase(z))
       -> ase_spectrum_bidirectional(return_profile) -> S_f(z, nu), S_b(z, nu)
@@ -348,14 +357,14 @@ def ase_self_consistent_zresolved(model, I_A, S_conf_signal_m3, nu_s_Hz, nu_grid
                 y = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3 + ase_strength * key,
                                        nu_s_Hz=nu_s_Hz)
                 rho = model.rho_GS(y)
-                rows[key] = (model.material_gain_per_m(rho, nu),
-                             model.emission_gain_per_m(rho, nu))
+                rows[key] = (model.total_material_gain(model.rho_ES(y), rho, nu),
+                             model.total_emission_gain(model.rho_ES(y), rho, nu))
             rows_g.append(rows[key][0])
             rows_gsp.append(rows[key][1])
         return np.atleast_2d(np.array(rows_g)), np.atleast_2d(np.array(rows_gsp))
 
-    g_unsat = model.material_gain_per_m(model.rho_GS(
-        model.steady_state(I_A, S_conf_m3=S_conf_signal_m3, nu_s_Hz=nu_s_Hz)), nu)
+    y_un = model.steady_state(I_A, S_conf_m3=S_conf_signal_m3, nu_s_Hz=nu_s_Hz)
+    g_unsat = model.total_material_gain(model.rho_ES(y_un), model.rho_GS(y_un), nu)
 
     def spectrum(S_ase_z):
         g_z, gsp_z = gains(S_ase_z)

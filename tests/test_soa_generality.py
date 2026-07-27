@@ -15,6 +15,7 @@ tests pin 7.50 (NOT 30) and the low-drive occupation ratio to exp(-dE/kT) (NOT 2
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import C_LIGHT, H_PLANCK, KB, Q_E
 from dynameta.optics.soa.qd_gain import QDGainModel, QDGainParams
 
@@ -247,8 +248,8 @@ def test_sech_integrated_gain_conserved():
     nus = mL.p.nu0_Hz + np.linspace(-60e12, 60e12, 6001)
     yL = mL.steady_state(40e-3)
     yS = mS.steady_state(40e-3)
-    IL = np.trapezoid(mL.material_gain_per_m(mL.rho_GS(yL), nus), nus)
-    IS = np.trapezoid(mS.material_gain_per_m(mS.rho_GS(yS), nus), nus)
+    IL = trapz(mL.material_gain_per_m(mL.rho_GS(yL), nus), nus)
+    IS = trapz(mS.material_gain_per_m(mS.rho_GS(yS), nus), nus)
     assert abs(IL - IS) / abs(IL) < 1e-2
 
 

@@ -10,7 +10,16 @@ GATE C (off-switch on every backend): zero nonlinear fields -> each backend ARRA
 GATE D (jax differentiability): jax.grad of a scalar of R0 wrt chi2_m_V through the FULL time
         loop is finite and matches a central finite difference (< 5e-3 rel) -- the nonlinear
         carry stays differentiable.
-GATE E (GPU guard): numba-cuda raises NotImplementedError when a nonlinearity is active.
+GATE E (GPU nonlinear parity): the numba-cuda cooperative kernel with chi2 + Raman + gain ALL
+        active matches the numpy reference on R0/T0 (< 1e-12).
+
+AUDIT D-5: GATE E used to assert that numba-cuda RAISES NotImplementedError for an active
+nonlinearity -- a guard the 2026-06-11 GPU-nonlinear work removed by implementing the kernels.
+It could not fail, because `except Exception: g_e = True` turned "no CUDA toolkit, backend
+resolution itself raised" into a PASS on every CPU box; and on a machine with a real GPU it would
+have FAILED a feature that works. It now tests what exists (GPU == CPU parity) and SKIPS honestly
+-- reported in the banner, never folded into the verdict -- when no CUDA device is present.
+GATE D reports the same way when jax is absent.
 
 Run: python -m validation.fdtd_nonlinear_backends
 """
@@ -23,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.constants import M_E, Q_E
 from dynameta.optics.fdtd import FDTDLayer
-from dynameta.optics.fdtd_nd import solve_fdtd_2d, available_backends
+from dynameta.optics.fdtd_nd import solve_fdtd_2d, available_backends, have_numba_cuda
 
 KW = dict(period_x_m=100e-9, lambda_min_m=1.0e-6, lambda_max_m=1.4e-6, resolution=14)
 W0 = 2.0 * np.pi * 2.5e14
@@ -47,6 +56,7 @@ def _cmp(a, b):
 def main():
     print("[nb] === R15/R20 nonlinear-kernel backend equivalence ===", flush=True)
     ok = True
+    skipped = []
     backends = [b for b in ("numba", "jax") if b in available_backends()]
     if not backends:
         print("[nb] FAIL: neither numba nor jax available", flush=True)
@@ -89,7 +99,6 @@ def main():
         "PASS" if g_c else "FAIL"), flush=True)
 
     # ---- GATE D: jax.grad through the chi2 carry ----
-    g_d = True
     if "jax" in backends:
         import jax
 
@@ -125,24 +134,29 @@ def main():
         g_d = bool(np.isfinite(gv) and relD < 5e-3)
         print("[nb] GATE D: jax.grad d(sum E^2)/d chi2 = {:.6e} vs FD {:.6e} (rel {:.1e}) -> {}"
               .format(gv, fd, relD, "PASS" if g_d else "FAIL"), flush=True)
+        ok = ok and g_d
     else:
-        print("[nb] GATE D: jax not available -- skipped (counts as pass on this box)", flush=True)
-    ok = ok and g_d
+        skipped.append("D (jax absent)")
+        print("[nb] GATE D: SKIPPED -- jax is not available on this box (not counted as a pass)",
+              flush=True)
 
-    # ---- GATE E: GPU guard ----
-    g_e = False
-    try:
-        _run("numba-cuda", chi2_m_V=1e-13)
-    except NotImplementedError:
-        g_e = True
-    except Exception:
-        g_e = True          # no CUDA toolkit -> backend resolution itself raises; guard moot
-    ok = ok and g_e
-    print("[nb] GATE E: numba-cuda raises with active nonlinearity -> {}".format(
-        "PASS" if g_e else "FAIL"), flush=True)
+    # ---- GATE E: numba-cuda nonlinear kernels == the numpy reference ----
+    # (audit D-5: this used to assert a NotImplementedError guard that no longer exists, and the
+    # `except Exception: g_e = True` arm made it unfailable on a CPU-only box.)
+    if have_numba_cuda():
+        worstE = _cmp(_run("numba-cuda", **NL), ref)
+        g_e = bool(worstE < 1e-12)
+        ok = ok and g_e
+        print("[nb] GATE E: numba-cuda all-active nonlinear vs numpy, worst {:.1e} -> {}".format(
+            worstE, "PASS" if g_e else "FAIL"), flush=True)
+    else:
+        skipped.append("E (no CUDA device)")
+        print("[nb] GATE E: SKIPPED -- no numba-CUDA device here, so the GPU nonlinear kernels "
+              "cannot be exercised (not counted as a pass)", flush=True)
 
-    print("[nb] *** NONLINEAR BACKEND EQUIVALENCE: {} ***".format("PASS" if ok else "FAIL"),
-          flush=True)
+    print("[nb] *** NONLINEAR BACKEND EQUIVALENCE: {}{} ***".format(
+        "PASS" if ok else "FAIL",
+        " (SKIPPED: {})".format("; ".join(skipped)) if skipped else ""), flush=True)
     return ok
 
 

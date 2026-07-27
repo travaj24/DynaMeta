@@ -192,7 +192,14 @@ def multiphonon_lifetime(tau_radiative_s: float, T_K: float, *, gap_cm: float,
     The exp(-alpha*gap) ENERGY-GAP LAW is the dominant gap dependence -- a LARGER gap is
     exponentially LESS quenched, which is why Er (4I13/2 ~6500 cm^-1) is nearly radiative /
     T-independent while a small-gap transition quenches strongly. The (nbar+1)^p factor makes
-    W_nr rise with T. coupling=0 -> purely radiative (tau_radiative, T-independent)."""
+    W_nr rise with T. coupling=0 -> purely radiative (tau_radiative, T-independent).
+
+    UNITS of `alpha_per_cm` (audit A-16): the NAME says 1/cm; the quantity is in CENTIMETRES.
+    It multiplies `gap_cm` (a wavenumber, cm^-1) in the exponent, so `alpha * gap` is
+    dimensionless only if alpha carries cm -- i.e. alpha is the Miyakawa-Dexter gap-law slope
+    per unit WAVENUMBER, conventionally quoted as ~4.5e-3 cm (silica). Read the default as
+    "4.5e-3 per cm^-1", not "4.5e-3 cm^-1". The name is kept for back-compat; the value and the
+    physics are unchanged."""
     if coupling_per_s <= 0.0:
         return float(tau_radiative_s)
     nu_ph = C_LIGHT * (phonon_cm * 100.0)               # phonon frequency [Hz] (cm^-1 -> m^-1 -> Hz)

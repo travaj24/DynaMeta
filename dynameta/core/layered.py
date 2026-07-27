@@ -16,6 +16,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from dynameta.core.eps_field import require_solver_time_convention
+
 
 @dataclass
 class LayeredSlab:
@@ -209,6 +211,8 @@ def collapse_regions_to_layers(design, eps_by_region) -> dict:
     first, so overlapping layer-name prefixes cannot mis-assign."""
     if not eps_by_region:
         return {}
+    # audit V-5: every layered backend reaches its eps_by_region through here.
+    require_solver_time_convention(eps_by_region, "collapse_regions_to_layers")
     remaining = dict(eps_by_region)
     out = {}
     for L in sorted(design.stack.layers, key=lambda l: -len(l.name)):

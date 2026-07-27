@@ -25,6 +25,7 @@ as deferred with verified blockers (see the module's TIER 2 SCOPE note).
 Run: python -m pytest tests/test_hydro_fdtd.py -q
 """
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -144,13 +145,28 @@ def test_gate3_energy_budget_lossless():
 
 
 def test_gate3_lossy_physical():
-    """A lossy film has physical (>= 0) reflectance / transmittance / absorptance summing to 1."""
+    """A lossy film has physical (>= 0) reflectance / transmittance / absorptance, and the
+    absorptance matches the INDEPENDENT frequency-domain oracle.
+
+    AUDIT T-1: `R + T + A == 1` is an identity here -- solve_tm_spectrum sets ``A = 1 - R - T``
+    from the two-run flux ratios -- so it passed for a halved or sign-flipped T and gated nothing.
+    A LOSSY film has no `A ~ 0` physics anchor either (that is gate 3's lossless half), so the
+    absorptance is gated against ``optics.nonlocal_tmm`` -- a wholly separate frequency-domain
+    solver on the same slab -- exactly as gate 1 does for R/T. Measured worst deviation over the
+    band: |dR| 5.5e-4, |dT| 5.2e-4, |dA| 3.0e-5 (grid-dispersion limited); gated at 5e-3.
+    """
     lossy = hf.HydroSlab(1.0, 1.2e16, 2e14, 1e-3, 20e-9)
+    lossy_nt = nt.HydroLayer(1.0, 1.2e16, 2e14, 1e-3, 20e-9)      # the SAME film for the oracle
     res = hf.solve_tm_spectrum([lossy], kx_per_m=0.0, lambda_min_m=650e-9, lambda_max_m=750e-9,
                                cells_per_vacuum=40, min_periods=40)
+    assert res.omega.size >= 5
     assert np.all(res.R >= -1e-9) and np.all(res.T >= -1e-9) and np.all(res.A >= -1e-9)
     assert np.all(res.A > 0.0)                                # a lossy metal absorbs
-    assert np.allclose(res.R + res.T + res.A, 1.0, atol=1e-9)
+    worst = 0.0
+    for i, w in enumerate(res.omega):
+        R_t, T_t, A_t = nt.rta(w, [lossy_nt], pol="p", k_par_m=0.0)
+        worst = max(worst, abs(res.R[i] - R_t), abs(res.T[i] - T_t), abs(res.A[i] - A_t))
+    assert worst < 5e-3, "lossy R/T/A deviates from nonlocal_tmm by {:.2e}".format(worst)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -195,8 +211,14 @@ def test_tier2_linear_limit_rings_at_omega1():
                                                cells_per_longitudinal=12, record_periods=40,
                                                nonlinear=True)
     step = max(1, int(round(0.05 / (wp * dt))))
-    modes = matrix_pencil(rec[::step] - rec.mean(), dt * step, svd_tol=1e-9,
-                          amp_floor=1e-2, max_modes=6)
+    # audit T-13 (`filterwarnings = error`): this ring-down is by construction almost UNDAMPED, so
+    # the pencil routinely returns a pair of marginal poles at |z| = 1 + O(eps) and warns that it
+    # dropped them as "growing". That is the documented, correct behaviour here (the surviving
+    # mode is what the assertions use), so silence exactly that diagnostic -- nothing else.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="matrix_pencil: dropped .* GROWING pole")
+        modes = matrix_pencil(rec[::step] - rec.mean(), dt * step, svd_tol=1e-9,
+                              amp_floor=1e-2, max_modes=6)
     cand = [x for x in modes if x.omega_rad_s > 0.5 * wp]
     assert cand, "nonlinear solver linear limit produced no ring-down mode"
     w_fdtd = max(cand, key=lambda x: abs(x.amplitude)).omega_rad_s

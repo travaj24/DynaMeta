@@ -26,6 +26,41 @@ from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
 
 __all__ = ["Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "SteadyStateResult"]
 
+# "carry the current value through the clone" sentinel: distinguishes "not supplied" from an
+# explicit None (ase=None DROPS the ASE band -- see FiberAmplifier.without_ase).
+_KEEP = object()
+
+
+def _frozen_profile_interp(Y, z, L: float, n_nodes: int):
+    """Lean frozen-profile interpolator on the UNIFORM mesh z = linspace(0, L, n_nodes): returns
+    f(zz) -> Y[:, zz] by piecewise-linear lookup, for the relaxation sweeps that propagate one
+    beam direction through a frozen profile of the other.
+
+    Why not scipy.interpolate.interp1d (audit S6-2): the mesh is uniform, so interp1d's per-call
+    validation machinery is ~43% of the solve runtime -- pure overhead here. The endpoint clamps
+    reproduce interp1d's fill_value=(left, right) EXACTLY; the interior uses the identical linear
+    form, and LSODA samples strictly inside (0, L), so results are unchanged.
+
+    SINGLE HOME (audit X-3): this was the repo's largest verbatim cross-file duplicate -- copied
+    into eryb.py (which already imports from this module), provenance comment and all, so the
+    endpoint-clamp / uniform-mesh correctness contract was carried twice. Both solvers now call
+    this one function; the arithmetic is unchanged, so both remain bit-identical to the copies."""
+    inv_dz = (n_nodes - 1) / L
+    slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
+    ncap = n_nodes - 2
+
+    def f(zz):
+        if zz <= 0.0:
+            return Y[:, 0]
+        if zz >= L:
+            return Y[:, -1]
+        j = int(zz * inv_dz)
+        if j > ncap:
+            j = ncap
+        return Y[:, j] + slopes[:, j] * (zz - z[j])
+    return f
+
+
 @dataclass(frozen=True)
 class Pump:
     """A pump beam: power [W], wavelength [m], direction 'fwd' (co, seeded at z=0) or 'bwd'
@@ -129,6 +164,58 @@ class FiberAmplifier:
             self.upconversion_C_up = float(upconversion_C_up)
             self._n_active = fiber.n_t_m3
             self._n_dark = 0.0
+
+    # ---- type-preserving clone protocol ---------------------------------------------------
+    def _clone(self, *, pumps: Optional[List[Pump]] = None,
+               signals: Optional[List[Signal]] = None, ase=_KEEP) -> "FiberAmplifier":
+        """Clone this amplifier with the pump list, signal list and/or ASE band swapped, carrying
+        EVERY opt-in through: the ASE band, the ConcentrationModel, the normalised
+        upconversion_C_up (audit S3-1/A-1: the raw-C_up spelling was dropped by clones that only
+        forwarded the concentration model), the RamanStokes coupling, and the axial temperature
+        profile set by set_temperature_profile / solve_with_thermal_feedback (audit A-5: every
+        clone used to run the COLD model, so metrics.*(amp) disagreed with amp.solve() by ~2.4 dB
+        on a hot fiber). The _Tz tuple is immutable in practice (set_temperature_profile copies
+        its inputs and nothing mutates it in place), so it is shared rather than re-copied.
+
+        FiberAmplifier-PRIVATE. Anything that must also work on an ErYbAmplifier -- metrics.py
+        and chain.py, i.e. everything the user hands an amplifier to -- uses the three PUBLIC
+        protocol methods below (with_signals / with_pumps / without_ase) instead; reaching for
+        _clone from metrics.py is what made every metric raise AttributeError on an ErYbAmplifier
+        (audit A-3 follow-on). dynamics._amp_with_boundary keeps using _clone deliberately: the
+        transient march is FiberAmplifier-only anyway (it reads _n_active / _mcc_matrix /
+        concentration, none of which ErYbAmplifier has) and it needs pumps AND signals swapped in
+        ONE construction."""
+        new = FiberAmplifier(self.ion, self.fiber,
+                             self.pumps if pumps is None else list(pumps),
+                             self.signals if signals is None else list(signals),
+                             self.ase if ase is _KEEP else ase,
+                             upconversion_C_up=self.upconversion_C_up,
+                             concentration=self.concentration, raman=self.raman)
+        new._Tz = self._Tz
+        return new
+
+    # ---- PUBLIC amplifier re-seed protocol -------------------------------------------------
+    # with_signals / with_pumps / without_ase are THE contract every amplifier class in this
+    # package implements (FiberAmplifier and ErYbAmplifier both do) and the ONLY route
+    # AmplifierChain and metrics.* use to rebuild a stage. Each returns a copy of the SAME class
+    # carrying every opt-in.
+    def with_signals(self, signals: List[Signal]) -> "FiberAmplifier":
+        """Re-seed the amplifier with a new signal list, preserving its TYPE and every opt-in
+        (see _clone). ErYbAmplifier implements the same method, so a chain can hold either class
+        (audit A-3: the chain used to rebuild every stage as a FiberAmplifier from amp.ion, which
+        hard-crashed on an ErYbAmplifier)."""
+        return self._clone(signals=signals)
+
+    def with_pumps(self, pumps: List[Pump]) -> "FiberAmplifier":
+        """Re-seed the amplifier with a new pump list, preserving its TYPE and every opt-in
+        (see _clone). Used by metrics.slope_efficiency to sweep the launched pump."""
+        return self._clone(pumps=pumps)
+
+    def without_ase(self) -> "FiberAmplifier":
+        """A copy with the ASE band DROPPED (ase=None) and everything else -- including the axial
+        temperature profile (audit A-5) -- carried through. Used by metrics.gain_spectrum, whose
+        small-signal probe is ASE-independent and much faster without the band."""
+        return self._clone(ase=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self) -> Tuple[ChannelSet, np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -315,26 +402,8 @@ class FiberAmplifier:
                 P[bwd] = Pb
             return P
 
-        # Lean frozen-profile interpolator (audit S6-2): the mesh is uniform, so scipy interp1d's
-        # per-call validation machinery (~43% of solve runtime) is pure overhead. Endpoint clamps
-        # reproduce interp1d's fill_value=(left, right) exactly; interior uses the identical
-        # linear form, and LSODA samples strictly inside (0, L), so results are unchanged.
-        inv_dz = (n_nodes - 1) / L
-
-        def _make_interp(Y):
-            slopes = (Y[:, 1:] - Y[:, :-1]) * inv_dz
-            ncap = n_nodes - 2
-
-            def f(zz):
-                if zz <= 0.0:
-                    return Y[:, 0]
-                if zz >= L:
-                    return Y[:, -1]
-                j = int(zz * inv_dz)
-                if j > ncap:
-                    j = ncap
-                return Y[:, j] + slopes[:, j] * (zz - z[j])
-            return f
+        def _make_interp(Y):                         # audit X-3: ONE implementation, module level
+            return _frozen_profile_interp(Y, z, L, n_nodes)
 
         mcc_mat = self._mcc_matrix(ch, z)            # (K, M) sigma_e T-scaling or None
         mcc_of = _make_interp(mcc_mat) if mcc_mat is not None else None
@@ -397,4 +466,12 @@ class FiberAmplifier:
                                        "sigma_e": ch.sigma_e.copy(),
                                        "sigma_esa": ch.sigma_esa.copy(),
                                        "gamma": ch.gamma.copy(),
+                                       # audit A-6: the sigma_* above are the T_ref ChannelSet
+                                       # values. Under a temperature profile the solve actually
+                                       # used sigma_e * mcc(z), so noise.local_inversion_factor
+                                       # -- which advertises "the cross-sections the solve
+                                       # cached" -- mixed a T_ref sigma_e with the HOT nbar2_z.
+                                       # Cache the (K, M) McCumber scaling so it can undo that;
+                                       # None on an isothermal solve (byte-identical path).
+                                       "mcc": None if mcc_mat is None else mcc_mat.copy(),
                                        "m_modes": c["m_modes"]})

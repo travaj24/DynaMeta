@@ -25,7 +25,8 @@ solution (Lambda-eq collapses to Lambda u = 0 -> Lambda = 0, the current to the 
 SCOPE (v1, validated): 1D/2D unipolar regions with ohmic contacts (u pinned to sqrt(n_contact),
 Lambda to 0 -- bulk contacts carry no quantum correction). The oxide-interface hard wall
 (u -> 0, the MOS dead layer) now has an EXPERIMENTAL implementation, setup_dg_hard_wall
-(contact-row pins, unvalidated -- see its docstring); the validated post-hoc closure
+(contact-row pins; the pins are gated in tests/test_density_gradient.py, the resulting dead-layer
+PROFILE is not validated -- see its docstring); the validated post-hoc closure
 (carriers.density_gradient) remains the dead-layer tool. Bipolar adds the hole twin
 symmetrically (follow-on).
 """
@@ -126,12 +127,14 @@ def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
 
 
 def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 15.0) -> None:
-    """EXPERIMENTAL / NOT YET VALIDATED (see validation/_dg_hard_wall_wip.py): the Newton
-    landscape near the log-singular wall is so flat that ramped solves stall on spurious
-    wide-depletion states at practical tolerances -- the discrete mechanics below are pinned
-    and probed, but the dead-layer profile has NOT yet been validated against the post-hoc
-    BVP. The post-hoc closure (carriers.density_gradient.dg_correct_density_1d) remains THE
-    validated dead-layer tool.
+    """EXPERIMENTAL / NOT YET VALIDATED (gated by tests/test_density_gradient.py::
+    test_dg_hard_wall_pins_the_wall_rows): the Newton landscape near the log-singular wall is so
+    flat that ramped solves stall on spurious wide-depletion states at practical tolerances -- the
+    discrete mechanics below are pinned and probed (that test asserts every one of them), but the
+    dead-layer PROFILE has NOT been validated against the post-hoc BVP: re-measured 2026-07-26,
+    the frozen-psi in-Newton profile differs from dg_correct_density_1d by max |dn|/N0 = 0.80 and
+    the self-consistent leg raises a DEVSIM convergence failure. The post-hoc closure
+    (carriers.density_gradient.dg_correct_density_1d) remains THE validated dead-layer tool.
 
     Oxide/insulator HARD WALL at `contact` for the in-Newton DG system (the MOS dead-layer
     boundary): u -> 0 (a tiny positive floor) Dirichlet, plus a DEEP REGULARIZATION pin on
@@ -144,8 +147,9 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
     DIFFERENT closure and does not solve this system). The wall node's Lambda row is
     therefore pinned to the deep value -lambda_pin_factor * V_t: any pin a few V_t below the
     first interior node's Lambda drives the wall-edge Scharfetter-Gummel density to ~ 0
-    (relative error e^(dLambda/V_t)), and the validation gates INSENSITIVITY to the factor
-    (validation/_dg_hard_wall_wip.py GATE C).
+    (relative error e^(dLambda/V_t)). Insensitivity to the factor is a claim about the CONVERGED
+    profile and so is not gated while the profile itself is open (above); what IS gated is that
+    the pin is installed at zero depth and co-ramps with set_dg_gamma.
 
     The ELECTRON row at the wall node is pinned to the SAME constraint as the bulk,
     n = u^2 (the pinned u-floor then makes n(wall) = floor^2 ~ 0, the dead-layer endpoint).
@@ -159,7 +163,9 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
 
     Continuation plan (from cef01d9): tighter-tolerance damped Newton solves or a u_floor
     continuation on the wall row; then the bipolar (hole) DG twin with
-    psi_eff,p = psi - Lambda_p."""
+    psi_eff,p = psi - Lambda_p. The four physics gates that plan has to clear are written out in
+    test_dg_hard_wall_pins_the_wall_rows' docstring (they used to live in a parked, never-executed
+    validation/_dg_hard_wall_wip.py -- audit X-6)."""
     if not (lambda_pin_factor > 0.0):
         raise ValueError("setup_dg_hard_wall: lambda_pin_factor must be > 0")
     from dynameta.constants import V_T

@@ -14,9 +14,8 @@ or List[CarrierField].
 from __future__ import annotations
 
 import re
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
-import numpy as np
 
 from dynameta.reliability.em import EmParams, current_density_A_m2
 from dynameta.reliability.lidt import ThermalNode, cw_critical_intensity_W_m2, stack_absorbed_of_T

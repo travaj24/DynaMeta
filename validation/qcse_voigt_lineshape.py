@@ -24,6 +24,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import HBAR, C_LIGHT, M_E, Q_E as Q
 from dynameta.carriers.qcse import QuantumWell
 from dynameta.core.effects import ElectroAbsorptionModel
@@ -114,7 +115,7 @@ def main():
     for r in (0.0, 0.5, 2.0):
         prof = _eam(qw, ET0, lineshape="voigt", Gamma0_J=r * SIG)._alpha(
             ET0 + xw, ET0, 1.0, 1.0, r * SIG)                     # alpha0 already folded in
-        deficit = (area0 - np.trapezoid(prof, xw)) / area0
+        deficit = (area0 - trapz(prof, xw)) / area0
         tail = 1.0 - (2.0 / np.pi) * np.arctan(X / (r * SIG)) if r > 0 else 0.0
         worstD = max(worstD, abs(deficit - tail))
     g_d = bool(worstD < 1e-3)

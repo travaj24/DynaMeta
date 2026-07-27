@@ -3,6 +3,7 @@ Pure numpy/scipy (no devsim/ngsolve/fdtd). The rigorous oracle is validation/car
 import numpy as np
 import pytest
 
+from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import M_E, KB
 from dynameta.materials import DrudeOptical
 from dynameta.carriers.carrier_heating import (TwoTempParams, two_temperature_response,
@@ -17,10 +18,14 @@ PARAMS = TwoTempParams(C_e=lambda Te: GAMMA_E * Te, C_l=2.4e6, G_e_l=6.0e15, alp
 
 
 def test_kane_mass_off_switch_and_monotone():
-    # alpha=0 -> m0 EXACTLY (the byte-identical off-switch)
+    # alpha=0 -> m0 EXACTLY (the byte-identical off-switch), at EVERY T_e and on arrays (audit C-1:
+    # the f-sum bracket collapses to 1 identically, so this is exact, not merely close)
     assert kane_mass_of_Te(M0, 0.0, N, 5000.0) == M0
     assert float(kane_mass_of_Te(M0, 0.0, N, 300.0)) == M0
-    # <m*> rises with Te (hot electrons climb the nonparabolic band)
+    for Te in (0.0, 1.0, 300.0, 3000.0, 12000.0):
+        assert kane_mass_of_Te(M0, 0.0, N, Te) == M0
+    assert np.all(kane_mass_of_Te(M0, 0.0, N, np.linspace(300.0, 6000.0, 7)) == M0)
+    # m_c rises with Te (hot electrons occupy higher, heavier states on the nonparabolic band)
     m_cold = float(kane_mass_of_Te(M0, ALPHA_EV, N, 300.0))
     m_hot = float(kane_mass_of_Te(M0, ALPHA_EV, N, 3000.0))
     assert m_hot > m_cold > M0
@@ -52,8 +57,7 @@ def test_two_temperature_energy_conservation():
     t = np.linspace(0.0, 4e-12, 800)
     pump = lambda tt: 2e20 * np.exp(-((tt - 0.4e-12) / 5e-14) ** 2)
     _t, Te, Tl = two_temperature_response(t, pump, PARAMS, T0_K=300.0)
-    U_in = np.trapezoid(np.array([pump(tt) for tt in t]), t) if hasattr(np, "trapezoid") else \
-        np.trapz(np.array([pump(tt) for tt in t]), t)
+    U_in = trapz(np.array([pump(tt) for tt in t]), t)
     U_e = 0.5 * GAMMA_E * (Te[-1] ** 2 - 300.0 ** 2)             # electron energy (C_e = gamma_e Te)
     U_l = PARAMS.C_l * (Tl[-1] - 300.0)
     assert abs((U_e + U_l) - U_in) / U_in < 0.05                # conserved (G only redistributes)
@@ -80,19 +84,21 @@ def test_optical_transient_requires_exactly_one_drude():
                                    drude_of_t=lambda tt: DRUDE0)                    # both
 
 
-def test_kane_mass_sommerfeld_coefficient_vs_exact_fd():
+def test_legacy_mean_energy_mass_sommerfeld_coefficient_vs_exact_fd():
     # audit C2-2: the (5 pi^2/12) Sommerfeld coefficient must carry the Kane-DOS factor
     # (1+2aE_F)/(1+aE_F). Every prior gate pinned limits/scaling only and was blind to
     # it (parabolic coefficient understated the heating SHIFT d<E> by 18-25% here).
     # Reference: EXACT Fermi-Dirac mean energy over the Kane DOS at fixed n -- an
     # independent numeric path with no Sommerfeld expansion. The pinned quantity is the
     # Te-EXCURSION dm(Te) = m(Te) - m(Te->0) (the modulation observable); the T=0
-    # baseline itself keeps the module's parabolic (3/5)E_F convention (a static offset
-    # absorbed by DrudeOptical calibration, out of C2-2 scope).
+    # baseline itself keeps the parabolic (3/5)E_F convention (a static offset, out of C2-2 scope).
+    # audit C-1: the MEAN-ENERGY mass this gate pins is no longer the Drude mass -- it moved to the
+    # private _kane_mass_mean_energy_of_Te and the wp^2 path now uses the f-sum mass. Re-targeted
+    # here (rather than deleted) so the C2-2 coefficient regression keeps a live gate.
     import numpy as np
     from scipy.integrate import quad
     from scipy.optimize import brentq
-    from dynameta.carriers.carrier_heating import fermi_energy_J, kane_mass_of_Te
+    from dynameta.carriers.carrier_heating import fermi_energy_J, _kane_mass_mean_energy_of_Te
     from dynameta.constants import HBAR, KB, M_E, Q_E
 
     m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
@@ -115,14 +121,167 @@ def test_kane_mass_sommerfeld_coefficient_vs_exact_fd():
         return quad(lambda E: E * g(E) * fd(E, mu, kT), 0.0, Emax, limit=300)[0] / n
 
     T0 = 1.0                                                    # ~T=0 baseline
-    m_base_code = float(kane_mass_of_Te(m0, alpha, n, T0))
+    m_base_code = float(_kane_mass_mean_energy_of_Te(m0, alpha, n, T0))
     m_base_ex = m0 * (1.0 + 2.0 * a * mean_E_exact(T0))
     for Te in (600.0, 1000.0, 1500.0):
-        dm_code = float(kane_mass_of_Te(m0, alpha, n, Te)) - m_base_code
+        dm_code = float(_kane_mass_mean_energy_of_Te(m0, alpha, n, Te)) - m_base_code
         dm_ex = m0 * (1.0 + 2.0 * a * mean_E_exact(Te)) - m_base_ex
         # corrected coefficient tracks the exact shift to a few % (Sommerfeld O(x^4)
         # truncation); the pre-fix parabolic coefficient missed by 18-25% -> 5x margin
         assert abs(dm_code / dm_ex - 1.0) < 0.05, (Te, dm_code / dm_ex)
+
+
+def test_kane_mass_rejects_non_finite_inputs():
+    """FIX-VERIFY W1 item 6. Every comparison against NaN is False, so ``np.any(n <= 0)`` and
+    ``np.any(Te < 0)`` both passed a NaN straight through; it then died deep inside the chemical-
+    potential root finder as ``RuntimeError: kane_mass_of_Te: could not bracket mu(T_e) from
+    above`` -- a message that points at brentq rather than at the caller's argument."""
+    import numpy as np
+    import pytest as _pytest
+    from dynameta.carriers.carrier_heating import kane_mass_of_Te
+    from dynameta.constants import M_E
+
+    m0, alpha, n = 0.35 * M_E, 0.5, 1.0e27
+    for bad_n, bad_te in ((np.nan, 300.0), (n, np.nan), (np.inf, 300.0), (n, np.inf)):
+        with _pytest.raises(ValueError, match="finite"):
+            kane_mass_of_Te(m0, alpha, bad_n, bad_te)
+    # arrays too (the guard runs after broadcasting)
+    with _pytest.raises(ValueError, match="finite"):
+        kane_mass_of_Te(m0, alpha, np.array([n, np.nan]), 300.0)
+    # the existing sign guards still fire, with their own message
+    with _pytest.raises(ValueError, match="n_m3 > 0"):
+        kane_mass_of_Te(m0, alpha, -1.0, 300.0)
+    with _pytest.raises(ValueError, match="Te_K >= 0"):
+        kane_mass_of_Te(m0, alpha, n, -1.0)
+    # and a valid call is untouched
+    assert float(kane_mass_of_Te(m0, alpha, n, 300.0)) > m0
+
+
+# ===================== audit C-1: the f-sum (Drude/conductivity) mass =====================
+# wp^2 = n e^2/(eps0 m) is an f-SUM-RULE quantity, so kane_mass_of_Te must return the conductivity
+# mass 1/m_c = (1/(3n)) Int g(E) f(E) [Lap_k E/hbar^2] dE -- NOT the mass evaluated at the mean
+# energy (which the module used to return: 17.2% low at the repo ITO preset). The auditor's proposed
+# closed form m0(1 + 2 a mu(T_e)) is NOT the fix -- mu FALLS with T_e at fixed n, so it inverts the
+# sign of the whole R9 observable; only the direct integral is correct.
+
+def test_c1_fsum_mass_T0_identity_is_fermi_surface_mass():
+    """GATE 1 (C-1). At T_e = 0 the f-sum integral reduces ANALYTICALLY (divergence theorem over the
+    Fermi sphere) to the Fermi-surface mass m_c = m0 (1 + 2 alpha E_F). That closed form is the gate,
+    never the implementation -- and it is independently the value materials.KaneOpticalMass returns,
+    so the two entry points must agree to the same tolerance."""
+    from dynameta.constants import Q_E
+    from dynameta.materials import KaneOpticalMass
+
+    for alpha in (0.05, 0.2, 0.5, 1.0, 2.0):
+        for n in (1.0e24, 1.0e25, 1.0e26, 1.0e27, 5.0e27):
+            for m0 in (0.20 * M_E, 0.35 * M_E):
+                m_c = float(kane_mass_of_Te(m0, alpha, n, 0.0))
+                E_F = float(fermi_energy_J(n, m0, alpha))
+                closed = m0 * (1.0 + 2.0 * (alpha / Q_E) * E_F)
+                assert m_c == pytest.approx(closed, rel=1e-10), (alpha, n, m0)
+                assert m_c == pytest.approx(float(KaneOpticalMass(m0_kg=m0, alpha_eV=alpha)(n)),
+                                            rel=1e-10), (alpha, n, m0)
+    # continuity into the T=0 limit: 1 K is indistinguishable from 0 K at these E_F
+    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 1.0)) == pytest.approx(
+        float(kane_mass_of_Te(M0, ALPHA_EV, N, 0.0)), rel=1e-8)
+
+
+def test_c1_fsum_mass_vs_independent_energy_space_quadrature():
+    """GATE (C-1) INDEPENDENT ORACLE: re-evaluate the f-sum integral in ENERGY space with adaptive
+    scipy.quad and a scipy.brentq mu(T_e) solve -- a different variable, a different quadrature rule
+    and a different mu bracket from the shipped fixed-order k-space Gauss-Legendre implementation.
+    Measured agreement is ~1e-12; gated at 1e-8."""
+    from scipy.integrate import quad
+    from scipy.optimize import brentq
+    from dynameta.constants import HBAR, Q_E
+
+    def m_cond_energy_space(m0, alpha, n, Te):
+        a = alpha / Q_E
+        pref = (2.0 * m0) ** 1.5 / (2.0 * np.pi ** 2 * HBAR ** 3)        # g_s=2, g_v=1
+        g = lambda E: pref * (1.0 + 2.0 * a * E) * np.sqrt(max(E * (1.0 + a * E), 0.0))
+        # (1/3) Lap_k E / hbar^2 for E(1+aE) = hbar^2 k^2/(2 m0)
+        w = lambda E: (1.0 / (3.0 * m0)) * (3.0 / (1.0 + 2.0 * a * E)
+                                            - 4.0 * a * E * (1.0 + a * E) / (1.0 + 2.0 * a * E) ** 3)
+        E_F = float(fermi_energy_J(n, m0, alpha))
+        kT = KB * Te
+        f = lambda E, mu: 1.0 / (1.0 + np.exp(np.clip((E - mu) / kT, -500.0, 500.0)))
+        Emax = E_F + 80.0 * kT
+        n_of = lambda mu: quad(lambda E: g(E) * f(E, mu), 0.0, Emax, limit=400)[0]
+        lo = E_F - max(kT, 0.05 * E_F)
+        while n_of(lo) > n:
+            lo -= max(kT, 0.05 * E_F)
+        mu = brentq(lambda m: n_of(m) - n, lo, E_F + 10.0 * kT, xtol=1e-16 * E_F, rtol=8.9e-16)
+        dens = quad(lambda E: g(E) * f(E, mu), 0.0, Emax, limit=400)[0]
+        inv = quad(lambda E: g(E) * f(E, mu) * w(E), 0.0, Emax, limit=400)[0]
+        return dens / inv
+
+    for n in (1.0e25, 1.0e26, 1.0e27):
+        for Te in (300.0, 1000.0, 3000.0, 6000.0):
+            got = float(kane_mass_of_Te(M0, ALPHA_EV, n, Te))
+            ref = m_cond_energy_space(M0, ALPHA_EV, n, Te)
+            assert got == pytest.approx(ref, rel=1e-8), (n, Te, got / ref - 1.0)
+
+
+def test_c1_n5_rise_sign_in_both_aEF_regimes():
+    """GATE 3 (C-1 + re-grade N5). Two statements, both keyed on a*E_F:
+      (a) the TRUE f-sum mass rises monotonically with T_e in BOTH regimes -- the R9 sign
+          (wp DROPS, Re(eps) moves toward eps_inf) never flips; and
+      (b) the pre-fix mean-energy mass gets the SIZE of that rise wrong with a PARAMETER-DEPENDENT
+          SIGN of error: it UNDER-states below a*E_F ~ 0.15 (0.876x at a*E_F = 0.102, 600 K) and
+          OVER-states above it (1.219x at the repo ITO preset a*E_F = 0.378, 600 K). N5's point is
+          exactly that C-1 cannot be stated as a universal over-statement."""
+    from dynameta.constants import Q_E
+    from dynameta.carriers.carrier_heating import _kane_mass_mean_energy_of_Te
+
+    cases = {}
+    for n in (1.0e26, 1.0e27):                      # a*E_F = 0.1019 (low) and 0.3780 (high)
+        a_EF = ALPHA_EV * float(fermi_energy_J(n, M0, ALPHA_EV)) / Q_E
+        Tes = np.linspace(0.0, 6000.0, 61)
+        m = np.asarray(kane_mass_of_Te(M0, ALPHA_EV, n, Tes), dtype=float)
+        assert np.all(np.diff(m) > 0.0), (n, a_EF)                       # (a) monotone rise
+        m_t0, m_t6 = float(m[0]), float(kane_mass_of_Te(M0, ALPHA_EV, n, 600.0))
+        l_t0 = float(_kane_mass_mean_energy_of_Te(M0, ALPHA_EV, n, 0.0))
+        l_t6 = float(_kane_mass_mean_energy_of_Te(M0, ALPHA_EV, n, 600.0))
+        cases[n] = (a_EF, (l_t6 / l_t0 - 1.0) / (m_t6 / m_t0 - 1.0))
+    a_lo, ratio_lo = cases[1.0e26]
+    a_hi, ratio_hi = cases[1.0e27]
+    assert a_lo == pytest.approx(0.10188, rel=1e-3) and a_hi == pytest.approx(0.37802, rel=1e-3)
+    assert ratio_lo < 1.0 and ratio_lo == pytest.approx(0.8757, rel=1e-3)   # (b) UNDER-states
+    assert ratio_hi > 1.0 and ratio_hi == pytest.approx(1.2193, rel=1e-3)   # (b) OVER-states
+
+
+def test_c1_ito_preset_cold_mass_and_enz_crossing_goldens():
+    """GATE 4 (C-1) -- the repo ITO preset (m0 = 0.35 m_e, alpha = 0.5/eV, n = 1e27, a*E_F = 0.378).
+    RE-BASELINED at C-1: the cold (300 K) conductivity mass is 1.7587969739 m0, +20.7629% above the
+    pre-fix mean-energy value 1.4564050460 m0 (equivalently, the old mass was 17.193% LOW and every
+    wp^2 built from it 20.763% HIGH), and the cold ENZ crossing moves 148.802 nm to the RED,
+    1493.4033 -> 1642.2053 nm. New values pinned at rtol 1e-8 (BLAS-safe)."""
+    from dynameta.constants import EPS0, C_LIGHT, Q_E
+    from dynameta.carriers.carrier_heating import _kane_mass_mean_energy_of_Te
+
+    m_new = float(kane_mass_of_Te(M0, ALPHA_EV, N, 300.0))
+    m_old = float(_kane_mass_mean_energy_of_Te(M0, ALPHA_EV, N, 300.0))
+    assert m_new / M0 == pytest.approx(1.7587969739, rel=1e-8)             # NEW golden (C-1)
+    assert m_old / M0 == pytest.approx(1.4564050460, rel=1e-8)             # pre-fix, for the delta
+    assert m_old / m_new - 1.0 == pytest.approx(-0.171931, rel=1e-5)       # mass was 17.19% low
+    assert m_new / m_old - 1.0 == pytest.approx(+0.207629, rel=1e-5)       # wp^2 was 20.76% high
+    # hot points on the same preset (the R9 modulation observable), also re-baselined
+    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 600.0)) / M0 == pytest.approx(1.7670575837, rel=1e-8)
+    assert float(kane_mass_of_Te(M0, ALPHA_EV, N, 3000.0)) / M0 == pytest.approx(2.0014807657, rel=1e-8)
+
+    # cold ENZ crossing: Re(eps) = eps_inf - wp^2/(w^2 + gamma^2) = 0 for the module's own Drude
+    def lam_enz(m, eps_inf=3.9, gamma=GAMMA0):
+        wp2 = N * Q_E ** 2 / (EPS0 * m)
+        return 2.0 * np.pi * C_LIGHT / np.sqrt(wp2 / eps_inf - gamma ** 2)
+
+    lam_new, lam_old = lam_enz(m_new), lam_enz(m_old)
+    assert lam_new * 1e9 == pytest.approx(1642.2053088, rel=1e-8)          # NEW golden (C-1)
+    assert lam_old * 1e9 == pytest.approx(1493.4032846, rel=1e-8)          # pre-fix
+    assert (lam_new - lam_old) * 1e9 == pytest.approx(148.802, rel=1e-5)   # 148.8 nm to the RED
+    # the crossing is a genuine Re(eps) = 0 of the shipped DrudeOptical, not just of the closed form
+    eps = complex(DrudeOptical(eps_inf=3.9, m_opt_kg=m_new,
+                               gamma_rad_s=GAMMA0).eps(lam_new, n_m3=N))
+    assert abs(eps.real) < 1e-9 * 3.9
 
 
 def test_transient_rejects_silent_callable_substitution():
@@ -146,3 +305,95 @@ def test_transient_rejects_silent_callable_substitution():
     with pytest.raises(ValueError, match="gamma_rad_s"):
         carrier_heating_transient(t, I, 1.5e-6, drude0=d_gam, ttm_params=ttm,
                                   n_m3=6e26, alpha_per_eV=0.5, m0_kg=0.3 * M_E)
+
+
+def test_c7_pump_off_reproduces_gamma0_at_every_base_temperature():
+    """audit C-7: the module's documented byte-identical off-switch (pump off -> the per-instant
+    Drude collapses to drude0) used to hold ONLY at T0_K = 300 K. gamma_of_Te's T_ref was pinned at
+    T_REF while the caller owned T0_K, so with the pump OFF (T_e == T_l == T0_K exactly, verified
+    below) the damping came out gamma0*(T0/300)^p -- 0.2567*gamma0 at 77 K, 1.6667*gamma0 at 500 K
+    for p=1: a DIFFERENT material with every heating knob off."""
+    t = np.linspace(0.0, 1e-12, 12)
+    zero = lambda tt: 0.0
+    for T0 in (77.0, 300.0, 500.0):
+        _t, Te, Tl = two_temperature_response(t, zero, PARAMS, T0_K=T0)
+        assert np.max(np.abs(Te - T0)) == 0.0 and np.max(np.abs(Tl - T0)) == 0.0   # TTM is exact
+        # the pre-fix damping ratio (the bug, reproduced from the pinned-300 K reading)
+        legacy = float(gamma_of_Te(GAMMA0, T0, p=1.0)) / GAMMA0
+        assert legacy == pytest.approx((T0 / 300.0) ** 1.0, rel=1e-12)
+        # the shipped path now references gamma0 to T0_K, so the off-switch is exact off 300 K too
+        assert float(gamma_of_Te(GAMMA0, T0, p=1.0, T_ref_K=T0)) == GAMMA0
+    assert float(gamma_of_Te(GAMMA0, 77.0, p=1.0)) / GAMMA0 == pytest.approx(0.256667, rel=1e-5)
+
+
+def test_c7_cryogenic_transient_is_the_cold_material_and_the_legacy_reading_survives():
+    """End-to-end C-7: a 77 K pump-off run must return EXACTLY the fixed-drude0 transient (it did
+    not before -- 3.9x wrong damping), while gamma_T_ref_K=300.0 reproduces the legacy 300 K-
+    calibrated reading bit-for-bit. Default T0_K = 300 K is byte-identical either way."""
+    t = np.linspace(0.0, 1e-12, 40)
+    off = lambda tt: 0.0
+    _t, R_fix, _T, _e = optical_transient_response(t, lambda tt: N, 1500e-9, drude_model=DRUDE0)
+    kw = dict(drude0=DRUDE0, ttm_params=PARAMS, n_m3=N, alpha_per_eV=0.0)   # mass off-switch on
+    _th, R77, _Th, _eh, Te77, _Tl = carrier_heating_transient(t, off, 1500e-9, T0_K=77.0, **kw)
+    assert np.max(np.abs(Te77 - 77.0)) == 0.0
+    assert np.max(np.abs(R77 - R_fix)) < 1e-12                    # cold run == the calibrated Drude
+    # the legacy (300 K-referenced) reading is still reachable, and is NOT the same material
+    _th2, R77_legacy, _T2, _e2, _Te2, _Tl2 = carrier_heating_transient(
+        t, off, 1500e-9, T0_K=77.0, gamma_T_ref_K=300.0, **kw)
+    assert np.max(np.abs(R77_legacy - R_fix)) > 1e-6
+    # T0_K = 300 (the default) is untouched by the fix
+    _th3, R300, _T3, _e3, _Te3, _Tl3 = carrier_heating_transient(t, off, 1500e-9, **kw)
+    assert np.array_equal(R300, R_fix)
+    with pytest.raises(ValueError, match="C-7"):
+        carrier_heating_transient(t, off, 1500e-9, T0_K=0.0, **kw)
+
+
+def test_c7_reference_and_base_temperatures_must_be_FINITE_and_positive():
+    """audit C-7 residual. `not (gamma_T_ref > 0.0)` accepts +inf, and Gamma = gamma0 (T_e/inf)^p is
+    then EXACTLY 0: a silently LOSSLESS Drude (measured: eps[0] came back purely real, -1.866+0j,
+    with no raise). And with an explicit gamma_T_ref_K, T0_K was not validated at all -- it reached
+    the TTM, where it raised only incidentally, through C-11's heat-capacity check, naming the wrong
+    quantity (and only for a C_e whose sign happens to flip)."""
+    t = np.linspace(0.0, 1e-12, 20)
+    off = lambda tt: 0.0
+    kw = dict(drude0=DRUDE0, ttm_params=PARAMS, n_m3=N, alpha_per_eV=0.0)
+    for bad in (float("inf"), float("-inf"), float("nan"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="C-7"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=300.0, gamma_T_ref_K=bad, **kw)
+    # T0_K is now validated on ITS OWN, i.e. also when gamma_T_ref_K is explicit
+    for bad in (0.0, -5.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="T0_K"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=bad, gamma_T_ref_K=300.0, **kw)
+        with pytest.raises(ValueError, match="C-7"):
+            carrier_heating_transient(t, off, 1500e-9, T0_K=bad, **kw)
+    # the healthy path is untouched (and finite/positive references still work at any base T)
+    for T0 in (77.0, 300.0, 500.0):
+        _t, R, _T, eps, _Te, _Tl = carrier_heating_transient(t, off, 1500e-9, T0_K=T0, **kw)
+        assert np.all(np.isfinite(R)) and float(np.max(np.abs(np.imag(eps)))) > 0.0   # NOT lossless
+
+
+def test_c11_nonpositive_electron_heat_capacity_raises():
+    """audit C-11: C_e was never validated. C_e < 0 flips the sign of the electron-gas energy
+    equation and used to integrate SILENTLY to a plausible (t, Te, Tl); C_e == 0 died inside
+    solve_ivp as 'array must not contain infs or NaNs'. Both now raise at setup, and a CALLABLE
+    that only goes non-positive along the trajectory is caught after the solve."""
+    t = np.linspace(0.0, 1e-12, 25)
+    pump = lambda tt: 3e20 * np.exp(-((tt - 0.4e-12) / 6e-14) ** 2)
+    for bad in (-3.0e4, 0.0, float("nan")):
+        with pytest.raises(ValueError, match="C-11"):
+            two_temperature_response(t, pump, TwoTempParams(C_e=bad, C_l=2.4e6, G_e_l=6e15),
+                                     T0_K=300.0)
+    # a callable that is fine at T0 but goes non-positive as the gas heats (a fitted closure). The
+    # setup check cannot see it -- the per-rhs check does, and it names the offending (Te, C_e).
+    ttm = TwoTempParams(C_e=(lambda Te: 3.0e4 if Te < 400.0 else -3.0e4), C_l=2.4e6, G_e_l=6e15)
+    assert ttm.C_e_of(300.0) > 0.0
+    with pytest.raises(ValueError, match="C-11"):
+        two_temperature_response(t, pump, ttm, T0_K=300.0)
+    # a closure that is positive everywhere on the physical Te >= 0 axis is NEVER tripped by the
+    # rhs check, even though it is negative at (unphysical) negative temperatures
+    ok = TwoTempParams(C_e=(lambda Te: GAMMA_E * Te + 1.0), C_l=2.4e6, G_e_l=6e15)
+    _t, Te_ok, _Tl_ok = two_temperature_response(t, pump, ok, T0_K=300.0)
+    assert float(np.max(Te_ok)) > 300.0
+    # the healthy path is untouched
+    _t, Te, _Tl = two_temperature_response(t, pump, PARAMS, T0_K=300.0)
+    assert float(np.max(Te)) > 300.0

@@ -53,9 +53,22 @@ Cross-library pins (first pinned at lumenairy 5.14.4/5.14.5, re-verified on the 
   for out-of-plane-tensor stacks at OBLIQUE incidence too. This backend therefore runs ONE class
   solve for the whole far field + absorption (see _solve_berreman_stack), retiring the old pattern
   that called the FUNCTIONAL berreman_jones_1d for jones_t plus a SECOND retain_internal class solve.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident E_x,
+1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo -- {'s','p'} is
+the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS ({'x','y','p'} -> row is
+_common.pol_row, and the INVERSE is refused: row 0 is ambiguous), {'te','tm'} the grating bridge's,
+and `pol_axis` hydro_fem's. The map, the `normalize_pol` converter and the normal-incidence /
+azimuth caveats live in `dynameta.core.polarization`. The set ACCEPTED here is UNCHANGED; acceptance
+unification (b), the V-8 follow-on, widened only the two PLANE-OF-INCIDENCE families ({'s','p'} and
+{'te','tm'}), whose aliases name the same physical mode in every geometry they cover; this
+vocabulary's crossings depend on the azimuth (or have no image at all), so they stay STRICT and are
+made explicitly, through normalize_pol.
 """
 
 from __future__ import annotations
+
+from dynameta.core.eps_field import require_solver_time_convention as _require_eps_convention
 
 import time
 import warnings
@@ -170,6 +183,12 @@ def berreman_result_to_optical_result(R_arr, T_arr, jones_r, jones_t, row: int, 
     Jones (Jr[row,row]/Jt[row,row]) times the p-basis conversion factors when applicable; A =
     1 - R - T. With layer_absorption (n_layers, 2) + layer_names, per_region_absorption is filled
     keyed by design layer (graded slabs summed) and A_independent = sum over layers."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        # audit V-8: `row` is the integer lab-`row` vocabulary (0 = incident E_x, 1 = E_y).  A
+        # sibling label ('x'/'y'/'p', 's'/'p', 'te'/'tm') used to reach the fancy-index and die
+        # opaquely.  Accepted set unchanged; LAZY import, failure path only.
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where="berreman_result_to_optical_result", param="row")
     R = float(R_arr[row])
     T = float(T_arr[row])
     r = complex(np.asarray(jones_r)[row, row]) * complex(r_factor)
@@ -280,6 +299,7 @@ def make_lumenairy_berreman_solver(*, absorption: bool = False, n_slices: Option
                                                   layer_names=a_names)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+        _require_eps_convention(eps_by_region, "make_lumenairy_berreman_solver")   # audit V-5
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):

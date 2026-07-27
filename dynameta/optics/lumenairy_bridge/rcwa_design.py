@@ -50,16 +50,39 @@ bridge, descent sanity).
 Carrier modulation: drude_eps_jax lifts an existing materials-machinery DrudeOptical into a
 jax-traceable carrier-density -> eps closure (same constants, same formula, eagerly validated
 static parameters), so a carrier-actuated layer chains n_m3 -> eps -> R/T with one jax.grad.
+
+POLARIZATION VOCABULARY (audit V-8): this module speaks TWO of the five -- {'te', 'tm'} for the 1-D
+grating entry point (plus lumenairy's own case-insensitive 's'/'p' aliases) and the integer lab
+`row` 0/1 (0 = E_x, 1 = E_y) for the stack entry points. It is one of five spellings in the repo --
+{'s','p'} is the PLANE-OF-INCIDENCE spelling, {'x','y','p'} OpticalSpec's LAB AXIS, and `pol_axis`
+hydro_fem's 2-D in-plane axis. The map, the `normalize_pol` converter and the normal-incidence /
+azimuth caveats live in `dynameta.core.polarization`. NEITHER set changed under acceptance
+unification (b): the grating entry point ALREADY took the unconditional 's'/'p' aliases (its
+accepted set is byte-for-byte lumenairy's own `_normalize_pol`, and the {'s','p'} family is now the
+mirror image of it), while the integer `row` is an INDEX, not a label -- `{'x': 0, 'y': 1, 'p': 0}`
+is not injective, so there is no lossless alias to admit and a label crossing into it stays
+explicit, through normalize_pol.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from dynameta.optics.lumenairy_bridge._common import _REQUIRED
+from dynameta.optics.lumenairy_bridge._common import \
+    require_halfspace_keywords as _require_halfspace_keywords
 from dynameta.optics.lumenairy_bridge._common import require_lumenairy as _require_lumenairy
 
 __all__ = ["rcwa_grating_RT", "rcwa_stack_RT", "rcwa_stack_jones", "pmm_stack_RT",
            "pmm_stack_jones", "drude_eps_jax"]
+
+# HALF-SPACE ARGUMENT ORDER (finding V-4): `n_substrate` / `n_superstrate` are KEYWORD-ONLY on
+# every public entry point below. These signatures mirror lumenairy's upstream SUB-FIRST order,
+# the inverse of the 46 super-first functions elsewhere in DynaMeta (including
+# _common.p_basis_conversion in this same package), and both arguments are bare scalars -- so a
+# super-first POSITIONAL call type-checked, ran, and solved the stack upside down in silence.
+# Naming them removes the ambiguity; a legacy positional call now raises a TypeError that spells
+# out the migration. The MEANINGS are unchanged (nothing is silently transposed).
 
 
 def _is_jaxish(x) -> bool:
@@ -67,6 +90,33 @@ def _is_jaxish(x) -> bool:
     bridge stays import-light (hygiene contract) and the check must not concretize a trace."""
     mod = type(x).__module__ or ""
     return mod.split(".")[0] in ("jax", "jaxlib")
+
+
+def _require_jax_x64(fn_name: str, *values) -> None:
+    """audit R-14: this module's docstring says it REQUIRES jax double precision (lumenairy's
+    traced RCWA/PMM solves refuse or warn on f32 -- the eigenproblem is ill-conditioned there),
+    and it was the one jax entry point in the repo that set `jax_enable_x64` NOWHERE and checked
+    it nowhere: `rcwa_stack_jones` under a default-configured jax returned a SILENT float32
+    result. Five sibling modules each set the flag themselves; the bridge must not, because
+    flipping a global on someone else's traced program is worse than refusing -- so it CHECKS,
+    only when a jax value actually arrives, and names the one-line fix.
+
+    Import-light: `jax` is touched only once a jax-typed argument has already been seen, so the
+    numpy path never imports it."""
+    if not any(_is_jaxish(v) for v in values):
+        return
+    import jax
+
+    from dynameta.core.backend import require_jax_011
+    require_jax_011(jax)
+    if not bool(jax.config.read("jax_enable_x64")):
+        raise RuntimeError(
+            "{}: jax x64 is OFF, so this differentiable solve would run in float32 and return a "
+            "silently wrong result (the RCWA/PMM eigenproblem is ill-conditioned in single "
+            "precision -- lumenairy's traced solves refuse or warn on it). Enable it at program "
+            "start, BEFORE any jax array is built: jax.config.update('jax_enable_x64', True) "
+            "(or JAX_ENABLE_X64=1). The bridge deliberately does not flip this global for you: "
+            "it governs every array in your program, not just this call.".format(fn_name))
 
 
 def _require_static(fn_name: str, **kwargs) -> None:
@@ -89,11 +139,43 @@ def _require_static(fn_name: str, **kwargs) -> None:
                 "whose lumenairy twins trace them.".format(fn_name, name))
 
 
-def rcwa_grating_RT(period, eps_ridge, eps_groove, n_substrate, n_superstrate, depth,
-                    duty_cycle, wavelength, *, angle=0.0, polarization="te", n_orders=11,
-                    formulation="auto"):
+# ---- polarization vocabularies spoken in THIS file (audit V-8) ----------------------------------
+# TWO of the repo's five: rcwa_grating_RT takes {'te','tm'} (lumenairy's grating spelling, which
+# ALSO accepts 's'/'p' case-insensitively -- lumenairy.rcwa_efficiency_1d normalizes them upstream
+# and always has), while rcwa_stack_RT / pmm_stack_RT take the integer lab `row` (0 = E_x,
+# 1 = E_y).  Both accepted sets are UNCHANGED; only the rejections moved to the shared home so a
+# label from a sibling family is named instead of dying inside lumenairy or inside a fancy-index.
+# Map, converter and caveats: dynameta.core.polarization.
+def _reject_grating_pol(polarization, where: str):
+    """Guard the {'te','tm'} vocabulary INCLUDING lumenairy's own case-insensitive 's'/'p'
+    aliases -- the accepted set is byte-for-byte what `lumenairy.rcwa_efficiency_1d._normalize_pol`
+    accepts, so nothing that used to work stops working and the ORIGINAL string is still what gets
+    passed downstream.  Only the REJECTION changes: a lab-axis 'x'/'y' now names its own family
+    instead of producing a lumenairy error that mentions neither.  LAZY import, failure path
+    only."""
+    if str(polarization).lower() not in ("te", "tm", "s", "p"):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(polarization, "tetm", where=where, param="polarization")
+
+
+def _reject_row(row, where: str):
+    """Guard the integer lab-`row` vocabulary (audit V-8): 0 = incident E_x, 1 = incident E_y.
+    A sibling label ('x'/'y'/'p', 's'/'p', 'te'/'tm') used to reach the numpy fancy-index and die
+    opaquely (or, for a bool, silently index row 0/1).  Accepted set unchanged."""
+    if isinstance(row, bool) or not isinstance(row, int) or row not in (0, 1):
+        from dynameta.core.polarization import pol_vocabulary_error
+        raise pol_vocabulary_error(row, "row", where=where, param="row")
+
+
+def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength=_REQUIRED,
+                    *_legacy, n_substrate=_REQUIRED, n_superstrate=_REQUIRED,
+                    angle=0.0, polarization="te", n_orders=11, formulation="auto"):
     """Differentiable (R_total, T_total) of a 1-D binary grating for ONE linear polarization
     ('te' = s = E along the grooves, 'tm' = p) -- the scalar FOM ingredients for jax.grad.
+
+    `n_substrate` / `n_superstrate` are KEYWORD-ONLY (audit V-4 -- see the module-level note):
+    rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength,
+    n_substrate=..., n_superstrate=...).
 
     Routes to lumenairy's JAX twin when ANY of eps_ridge / eps_groove / n_substrate /
     n_superstrate / depth / angle / wavelength is a jax array (gradients then flow through all
@@ -102,6 +184,11 @@ def rcwa_grating_RT(period, eps_ridge, eps_groove, n_substrate, n_superstrate, d
     materials convention and is lifted to lumenairy's native refractive INDEX by the principal
     sqrt (differentiable; a passive Im(eps) > 0 maps to Im(n) > 0); the half-spaces are
     indices, as everywhere in the bridge."""
+    _require_halfspace_keywords("rcwa_grating_RT", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_grating_pol(polarization, "rcwa_grating_RT")                # audit V-8
+    _require_jax_x64("rcwa_grating_RT", eps_ridge, eps_groove, n_substrate, n_superstrate,
+                     depth, wavelength, angle)                      # audit R-14
     lum = _require_lumenairy()
     orders, R, T = lum.rcwa_efficiency_1d(
         period, eps_ridge ** 0.5, eps_groove ** 0.5, n_substrate, n_superstrate, depth,
@@ -157,8 +244,10 @@ def _add_stack_layers(stack, layers, is_2d: bool, formulation: str, fn_name: str
                     fn_name, np.shape(eps)))
 
 
-def _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength, *, period_x, period_y,
+def _solve_rcwa_stack(layers, wavelength, *, n_substrate, n_superstrate, period_x, period_y,
                       theta, phi, n_orders, n_orders_y, formulation, fn_name):
+    _require_jax_x64(fn_name, wavelength, theta, phi,
+                     *[e for e, _t in layers], *[t for _e, t in layers])   # audit R-14
     lum = _require_lumenairy()
     _require_static(fn_name, n_substrate=n_substrate, n_superstrate=n_superstrate,
                     period_x=period_x, period_y=period_y)
@@ -178,11 +267,14 @@ def _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength, *, period_
     return stack.solve()
 
 
-def rcwa_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period_x, period_y=None,
+def rcwa_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                  n_superstrate=_REQUIRED, period_x, period_y=None,
                   theta=0.0, phi=0.0, n_orders=11, n_orders_y=None, formulation="laurent",
                   row=0):
     """Differentiable order-summed (R, T) of a patterned multilayer for ONE incident lab
     polarization (row 0 = E_x, 1 = E_y) -- a scalar FOM ingredient for jax.grad.
+
+    `n_substrate` / `n_superstrate` are KEYWORD-ONLY (audit V-4 -- see the module-level note).
 
     `layers` = [(eps_spec, thickness), ...] superstrate-side first (the berreman_RT layer
     convention); see _add_stack_layers for the shape dispatch (a uniform scalar, concrete or
@@ -193,7 +285,11 @@ def rcwa_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period_x, p
     pmm_stack_RT trace the half-space indices). A 1-D stack (period_y=None) is genuinely
     cheaper and better-conditioned than a y-degenerate 2-D one -- keep lamellar problems
     1-D."""
-    res = _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength,
+    _require_halfspace_keywords("rcwa_stack_RT", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "rcwa_stack_RT")                                   # audit V-8
+    res = _solve_rcwa_stack(layers, wavelength,
+                            n_substrate=n_substrate, n_superstrate=n_superstrate,
                             period_x=period_x, period_y=period_y, theta=theta, phi=phi,
                             n_orders=n_orders, n_orders_y=n_orders_y,
                             formulation=formulation, fn_name="rcwa_stack_RT")
@@ -201,15 +297,19 @@ def rcwa_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period_x, p
     return R[row].sum(), T[row].sum()
 
 
-def rcwa_stack_jones(layers, n_substrate, n_superstrate, wavelength, *, period_x,
+def rcwa_stack_jones(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                     n_superstrate=_REQUIRED, period_x,
                      period_y=None, theta=0.0, phi=0.0, n_orders=11, n_orders_y=None,
                      formulation="laurent"):
     """Differentiable full far field of a patterned multilayer: (orders, R_eff, T_eff,
     jones_r, jones_t) with per-order (2, N) efficiencies and the zeroth-order (2, 2) lab-basis
     Jones matrices -- for phase-bearing FOMs (the modulator observable r = jones_r[row, row])
-    and per-order targets. Same layer convention, tracing surface and static-argument policy
-    as rcwa_stack_RT."""
-    res = _solve_rcwa_stack(layers, n_substrate, n_superstrate, wavelength,
+    and per-order targets. Same layer convention, tracing surface, static-argument policy and
+    KEYWORD-ONLY half-space indices (audit V-4) as rcwa_stack_RT."""
+    _require_halfspace_keywords("rcwa_stack_jones", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    res = _solve_rcwa_stack(layers, wavelength,
+                            n_substrate=n_substrate, n_superstrate=n_superstrate,
                             period_x=period_x, period_y=period_y, theta=theta, phi=phi,
                             n_orders=n_orders, n_orders_y=n_orders_y,
                             formulation=formulation, fn_name="rcwa_stack_jones")
@@ -217,8 +317,10 @@ def rcwa_stack_jones(layers, n_substrate, n_superstrate, wavelength, *, period_x
     return orders, R, T, res.jones_reflection(), res.jones_transmission()
 
 
-def _solve_pmm_stack(layers, n_substrate, n_superstrate, wavelength, *, period, angle,
+def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, angle,
                      degree, n_orders, fn_name):
+    _require_jax_x64(fn_name, wavelength, angle, n_substrate, n_superstrate,
+                     *[t for _s, t in layers])                            # audit R-14
     lum = _require_lumenairy()
     if _is_jaxish(period):
         raise TypeError(
@@ -243,11 +345,14 @@ def _solve_pmm_stack(layers, n_substrate, n_superstrate, wavelength, *, period, 
     return st.solve()
 
 
-def pmm_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period, angle=0.0,
+def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                 n_superstrate=_REQUIRED, period, angle=0.0,
                  degree=12, n_orders=21, row=0):
     """Differentiable order-summed (R, T) of a 1-D lamellar stack via lumenairy's PMM JAX
     twin (spectral element -- no Fourier-factorization accuracy floor) for ONE incident lab
     polarization (row 0 = E_x, 1 = E_y).
+
+    `n_substrate` / `n_superstrate` are KEYWORD-ONLY (audit V-4 -- see the module-level note).
 
     `layers` = [(spec, thickness), ...] superstrate-side first; spec is either a segment list
     [(width_fraction, eps), ...] (widths STATIC and summing to 1; eps scalar or in-plane
@@ -257,18 +362,27 @@ def pmm_stack_RT(layers, n_substrate, n_superstrate, wavelength, *, period, angl
     slants raise upstream (lumenairy's own guards). NOTE the traced-wavelength caveat
     (lumenairy pmm/_jax_stack.py): the far-field order set is sized from concrete numbers, so
     wavelength gradients are valid BETWEEN order cutoffs (Wood anomalies)."""
-    _orders, R, T, _jones = _solve_pmm_stack(layers, n_substrate, n_superstrate, wavelength,
+    _require_halfspace_keywords("pmm_stack_RT", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _reject_row(row, "pmm_stack_RT")                                    # audit V-8
+    _orders, R, T, _jones = _solve_pmm_stack(layers, wavelength, n_substrate=n_substrate,
+                                             n_superstrate=n_superstrate,
                                              period=period, angle=angle, degree=degree,
                                              n_orders=n_orders, fn_name="pmm_stack_RT")
     return R[row].sum(), T[row].sum()
 
 
-def pmm_stack_jones(layers, n_substrate, n_superstrate, wavelength, *, period, angle=0.0,
+def pmm_stack_jones(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
+                    n_superstrate=_REQUIRED, period, angle=0.0,
                     degree=12, n_orders=21):
     """Differentiable full PMM far field: (orders, R_eff, T_eff, jones_r) -- per-order (2, M)
     efficiencies plus the zeroth-order (2, 2) reflection Jones (PMM exposes NO transmission
-    Jones; see pmm_backend). Same layer convention and tracing surface as pmm_stack_RT."""
-    return _solve_pmm_stack(layers, n_substrate, n_superstrate, wavelength, period=period,
+    Jones; see pmm_backend). Same layer convention, tracing surface and KEYWORD-ONLY half-space
+    indices (audit V-4) as pmm_stack_RT."""
+    _require_halfspace_keywords("pmm_stack_jones", _legacy, wavelength=wavelength,
+                                n_substrate=n_substrate, n_superstrate=n_superstrate)
+    return _solve_pmm_stack(layers, wavelength, n_substrate=n_substrate,
+                            n_superstrate=n_superstrate, period=period,
                             angle=angle, degree=degree, n_orders=n_orders,
                             fn_name="pmm_stack_jones")
 

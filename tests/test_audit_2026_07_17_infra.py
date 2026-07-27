@@ -97,7 +97,12 @@ def test_fdtd_1d_dielectric_slab_vs_airy():
     n_slab, d = 2.0, 0.30e-6
     res = solve_fdtd_1d([FDTDLayer(thickness_m=d, eps_inf=n_slab ** 2)],
                         lambda_min_m=1.2e-6, lambda_max_m=1.45e-6, resolution=30)
-    lam_arr = _c() / res.freqs_Hz
+    # audit T-13: `freqs_Hz` carries the DC bin, so this oracle divided by zero on every call
+    # (5x per suite -- T-16: four other files import and re-invoke this test). The resulting inf
+    # sits outside `band` and never reached an assertion, but under the new
+    # `filterwarnings = error` policy the RuntimeWarning is a failure. Scope it, do not hide it.
+    with np.errstate(divide="ignore"):
+        lam_arr = _c() / res.freqs_Hz
     band = res.band
     r12 = (1 - n_slab) / (1 + n_slab)
     delta = 2.0 * np.pi * n_slab * d / lam_arr
