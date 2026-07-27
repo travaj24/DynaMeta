@@ -275,8 +275,11 @@ jobs:
           # 3.12 on purpose: that is the interpreter this leg's install and test selection were
           # verified against locally (ngsolve 6.2.2606 cp312 wheel + devsim 2.10.0 cp39-abi3).
           python-version: "3.12"
-      - name: System libs for gmsh
-        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        # devsim searches DEVSIM_MATH_LIBS="libopenblas.so:liblapack.so:libblas.so" at import
+        # and hard-fails without one (first PR-6 CI run: "MISSING DLL" x3 -> RuntimeError).
+        # The dev box never sees this because its devsim wheel finds a system BLAS.
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
       - name: Install (core + dev + plot + solvers)
         run: |
           python -m pip install --upgrade pip
@@ -363,8 +366,8 @@ jobs:
           # Same interpreter as the `solvers` job, for the same reason: 3.12 is the version the
           # ngsolve/devsim wheel set and this test selection were verified against locally.
           python-version: "3.12"
-      - name: System libs for gmsh
-        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
       - name: Install (core + dev + plot + solvers + io backends + jax)
         # A SUPERSET of every PR leg's install: [solvers] for the FEM/DEVSIM work, h5py AND zarr
         # so both IO backends are live at once (the `test` legs each get only one), and jax so the
