@@ -21,7 +21,7 @@ name: CI
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
 #   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
-#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 3 heavy FEM     hours
+#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM     hours
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
 #            DISPATCH ONLY                                     oracles + full validation tier   on PRs)
 #
@@ -32,11 +32,14 @@ name: CI
 #
 # Not covered by ANY leg (stated so the next audit does not have to rediscover it): CUDA kernels,
 # the [materials-db] extra, macOS, tests/test_bic_capstone.py under numpy 1.x (it does not
-# finish there; the file skips itself -- see its guard), and the rectangular-cell grating
-# parametrization test_spol_suppressed_vs_ppol[2.7e-07-1.9e-07] (63.8 GB peak working set --
-# exceeds every hosted runner; deselected in nightly step (b2), covered on the dev workstation
-# only). The heavy FEM modules and the @slow validation wrappers came OFF this list when the
-# `nightly` job landed -- it runs both.
+# finish there; the file skips itself -- see its guard), and tests/test_shg_grating.py in its
+# ENTIRETY (dev workstation only). The shg-grating exclusion is twice-measured: the file peaks
+# at 26.5 GB private / 63.8 GB working set on the dev box, and the first two real nightly runs
+# (30348065879 / 30441185460, 2026-07-28/29) deselected only the worst rectangular-cell
+# parametrization and STILL got a runner shutdown signal -- the 16 GB memory kill -- 6 minutes
+# into the FIRST cell, which also cancelled the (c1)/(c2) validation steps behind it. Run it
+# locally (7/7 in ~24 min); revisit if a larger runner becomes available. The other heavy FEM
+# modules and the @slow validation wrappers stay covered -- the `nightly` job runs both.
 
 on:
   push:
@@ -311,8 +314,9 @@ jobs:
         run: python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
       - name: Run the ngsolve/devsim-gated test modules
         # The 25 modules that mention ngsolve or devsim, MINUS the three that dominate the clock
-        # (test_fem_drivers > 300 s, test_graded_tensor_fem > 240 s, test_shg_grating -- the heavy
-        # grating/driver sweeps; they run in the `nightly` job, steps (b1)/(b2)). Every file
+        # (test_fem_drivers > 300 s and test_graded_tensor_fem > 240 s run in the `nightly` job,
+        # step (b1); test_shg_grating does not fit ANY hosted runner -- see the top-of-file
+        # not-covered list -- and is dev-workstation-only). Every file
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
         # which is exactly the T-5 failure mode.
@@ -363,10 +367,6 @@ jobs:
     #                                          co-fit dominates it -- plus test_harmonics.py 17 s)
     #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
     #                                          test_graded_tensor_fem.py 258 s / 1 passed)
-    #   (b2) test_shg_grating.py    7 tests   1428 s MEASURED / 7 passed -- but 230 CPU-min and a
-    #                                          26.5 GB private / 63.8 GB peak-working-set profile,
-    #                                          i.e. it finished in 24 min only because that box has
-    #                                          the cores and the RAM. See the step's own comment.
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
     #                                          them out of the `solvers` leg put EACH over 180 s,
     #                                          so >= 12 min there and more on a runner
@@ -375,12 +375,14 @@ jobs:
     #        measured < 60 s by construction, a few minutes in total); the OTHER 111 are the
     #        solver/FDTD-backed oracles, individually unmeasured, against a per-script cap of
     #        1800 s. The runner's own docstring estimates this tier at "hours".
-    # (a)+(b) therefore MEASURE 43 min on the workstation, and (b2) alone is 230 CPU-min -- on 4
-    # vCPU that is an hour of wall by itself, so a runner plausibly spends 1.5-2 h reaching (c2).
-    # 300 is a CAP, not a budget, and it is a guess about (c2); GitHub's hard ceiling for one job
-    # is 6 h, so if the first real nightly run overruns this, the answer is NOT to nudge the number
-    # toward 360: split (c2) by token across several jobs so each piece keeps a meaningful cap, and
-    # record the measured aggregate here.
+    # There is no (b2) any more: test_shg_grating.py was tried on the first two real nightlies
+    # (2026-07-28/29) with its worst parametrization deselected and memory-killed the runner both
+    # times, taking (c1)/(c2) down with it -- it is dev-workstation-only now (top-of-file list).
+    # (a)+(b1) MEASURE ~19 min on the workstation; a runner plausibly spends 30-45 min reaching
+    # (c2). 300 is a CAP, not a budget, and it is a guess about (c2); GitHub's hard ceiling for
+    # one job is 6 h, so if the first full nightly run overruns this, the answer is NOT to nudge
+    # the number toward 360: split (c2) by token across several jobs so each piece keeps a
+    # meaningful cap, and record the measured aggregate here.
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -417,33 +419,15 @@ jobs:
         # Two of the three modules named in that job's comment as too slow for the PR tier. KEEP
         # THIS IN SYNC WITH IT: a module dropped from the solvers leg for being slow belongs here
         # in the same commit, or it goes back to running nowhere. Both MEASURED green locally
-        # 2026-07-26 (173 s / 8 passed and 258 s / 1 passed). The third module is the next step,
-        # separated so that these two always get a verdict.
+        # 2026-07-26 (173 s / 8 passed and 258 s / 1 passed). The third module
+        # (test_shg_grating.py) is deliberately ABSENT: it memory-killed the runner on both of
+        # the first two real nightlies even with its worst parametrization deselected -- and the
+        # shutdown cancelled the (c1)/(c2) steps behind it, which cost more coverage than the
+        # file was buying. Dev-workstation-only now; see the not-covered list at the top.
         if: ${{ !cancelled() }}
         run: |
           pytest -q -m "not slow" \
             tests/test_fem_drivers.py tests/test_graded_tensor_fem.py
-      - name: (b2) test_shg_grating.py (the 3-D SHG grating cells)
-        # ITS OWN STEP BECAUSE IT IS THE ONE ITEM HERE THAT MAY NOT FIT ON THE RUNNER, and that is
-        # a MEASUREMENT, not a worry. Locally on 2026-07-26 it PASSED 7/7 in 1428 s -- while
-        # burning 230 CPU-min (so ~10 cores in parallel) and peaking at 26.5 GB private commit /
-        # 63.8 GB working set. A GitHub-hosted ubuntu runner is 4 vCPU and 16 GB: the CPU-min alone
-        # is an hour of wall there, and the memory does not obviously fit. An earlier attempt on
-        # the same box DID die -- killed at 1563 s having finished 6 of 7 tests -- while two other
-        # pytest sessions shared the machine, which is exactly the memory-pressure signature.
-        # The cost is concentrated in ONE test: at the 1563 s mark of the killed attempt the first
-        # six -- including the square-cell twin -- had all completed, and the survivor in flight was
-        # test_spol_suppressed_vs_ppol[2.7e-07-1.9e-07], the RECTANGULAR (270 x 190 nm) 3-D
-        # vectorial FEM cell. (Per-test durations were not recorded; that is the evidence there is.)
-        # DECISION (2026-07-26, pre-first-nightly): remedy (i) applied UP FRONT -- 63.8 GB peak
-        # working set cannot fit a 16 GB runner, so shipping the full file would be a guaranteed
-        # capacity red misread as physics. The rectangular-cell parametrization is deselected here
-        # and recorded in the not-covered list at the top of this file; it stays covered on the
-        # dev workstation (run tests/test_shg_grating.py locally, 7/7 in ~24 min). Revisit with a
-        # larger runner (remedy (ii)) if one becomes available. NOT `continue-on-error`: an
-        # ignored red is the exact green-washing audit T-3 was about.
-        if: ${{ !cancelled() }}
-        run: pytest -q -m "not slow" tests/test_shg_grating.py -k "not (2.7e-07 and 1.9e-07)"
       - name: (c1) the four heavy FEM validation oracles, by name
         # Exactly the four the `solvers` job names and cannot afford (> 180 s each). These tokens
         # select 4 of the 204 gated scripts and nothing else (verified by substring 2026-07-26).
