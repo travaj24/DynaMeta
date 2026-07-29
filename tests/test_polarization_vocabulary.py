@@ -456,6 +456,8 @@ def test_six_representative_valid_calls_are_unchanged():
 
     # (6) {'te','tm'} and integer `row` -- the two lumenairy-bridge families
     lum = pytest.importorskip("lumenairy")
+    from dynameta.optics.lumenairy_bridge._common import parse_version
+    lum_530 = parse_version(lum.__version__) >= (5, 30, 0)
     del lum
     from dynameta.optics.lumenairy_bridge.berreman_design import berreman_RT
     from dynameta.optics.lumenairy_bridge.rcwa_design import rcwa_grating_RT
@@ -463,8 +465,18 @@ def test_six_representative_valid_calls_are_unchanged():
     Rg, Tg = rcwa_grating_RT(600e-9, 4.0 + 0j, 1.0 + 0j, 250e-9, 0.5, 1.31e-6,
                              n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j,
                              polarization="te", n_orders=7)
-    assert float(Rg) == pytest.approx(0.10697476345509854, rel=1e-11)
-    assert float(Tg) == pytest.approx(0.8930252365449003, rel=1e-11)
+    # This gate pins the VOCABULARY route, but its method is an engine golden -- and the
+    # ENGINE moved: lumenairy 5.30's audit W7 replaced the lamellar cell's rasterized duty
+    # Fourier coefficients with the exact analytic series, legitimately shifting R by
+    # rel ~9.2e-8 (both values lossless, R+T == 1). Pin per era; the 5.22-pinned floor leg
+    # takes the first branch, every >= 5.30 resolve the second (measured 2026-07-29:
+    # 5.30/5.31 agree across CI+dev platforms to rel < 4e-14 against these numbers).
+    if lum_530:
+        assert float(Rg) == pytest.approx(0.10697475359703666, rel=1e-11)
+        assert float(Tg) == pytest.approx(0.89302524640296754, rel=1e-11)
+    else:
+        assert float(Rg) == pytest.approx(0.10697476345509854, rel=1e-11)
+        assert float(Tg) == pytest.approx(0.8930252365449003, rel=1e-11)
 
     Rb, Tb = berreman_RT([(np.diag([4.0 + 0j, 4.4 + 0j, 4.0 + 0j]), 250e-9)], 1.31e-6,
                          n_substrate=1.5 + 0j, n_superstrate=1.0 + 0j, angle=0.2, row=0)
