@@ -92,11 +92,14 @@ VERSION_FLOOR = (5, 22, 0)
 # 5.30.0 (2026-07-27): all 5 lumenairy validation gates + the bridge pytest surface, including
 # the one deliberate 5.30 contract change the re-run surfaced -- PMM's differentiable path now
 # REFUSES a traced wavelength (W7 F-E; see rcwa_design.py and the version-conditional GATE D
-# in validation/lumenairy_rcwa_jax.py). Above the ceiling the bridge still runs -- lumenairy
+# in validation/lumenairy_rcwa_jax.py). Re-verified at 5.31.0 (2026-07-29): gates 5/5 local +
+# the full 93-script smoke tier green on CI against the 5.31.0 wheel; its one observable shift
+# (the W7 exact-duty lamellar Fourier series, rel ~9.2e-8 on a grating R) is era-pinned in
+# tests/test_polarization_vocabulary.py. Above the ceiling the bridge still runs -- lumenairy
 # is backward compatible in practice and refusing would be worse -- but says so ONCE per
 # process (a RuntimeWarning naming both versions). Bumping this is the
 # CHEAP half of the same correctness work: re-run validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 30)
+VERSION_VERIFIED_MAX = (5, 31)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
