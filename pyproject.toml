@@ -33,7 +33,11 @@ reference = ["tmm"]                                        # coherent-TMM oracle
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
 jax = ["jax>=0.11; python_version>='3.12'"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
 numba = ["numba>=0.58"]                                    # JIT/prange CPU kernels: 13 modules (fdtd_nd kernels2d/3d + oblique, soa, numba_env), 16 numba-gated tests, 1 parity oracle. OPTIONAL (every kernel has a numpy reference path) -- but audit T-3: it was declared by NO extra, so nothing could install it and all 16 gates ran nowhere. Installed by the `numba` CI leg.
-dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm"]
+# threadpoolctl: lumenairy >= 5.30 (its audit M6 fix) warns ONCE when set_blas_threads /
+# rcwa_blas_threads is called without it (the BLAS-thread cap is silently INERT otherwise);
+# under this repo's filterwarnings=["error"] that warning fails test_threaded_sweep_matches_serial
+# on any leg missing the package -- and WITH it the cap the bridge requests is actually effective.
+dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm", "threadpoolctl"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
 [tool.setuptools.packages.find]
