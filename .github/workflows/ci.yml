@@ -433,6 +433,16 @@ jobs:
         # select 4 of the 204 gated scripts and nothing else (verified by substring 2026-07-26).
         # This step is a strict SUBSET of (c2) below and runs FIRST on purpose: if the full tier
         # overruns the job cap, these four still have a verdict.
+        # MEASURED PEAKS (dev box, 2026-08-04, process-tree RSS): graded_tmm_vs_fem 49.7 GB,
+        # per_region_absorption 27.0 GB, superstrate_index_fem 10.1 GB, symmetry_reduced_fem
+        # 1.5 GB. The first three CANNOT fit this 16 GB runner -- graded drew the OOM shutdown
+        # signal on three consecutive nightlies (runs 30348065879/30441577357/30898049092),
+        # cancelling (c2) before it EVER executed. They now carry available-RAM capability
+        # guards (validation/_ram_guard.py) and exit 42 here -- informational outside the smoke
+        # tier by run_all's contract -- so this step reports three visible skips plus a real
+        # symmetry_reduced_fem verdict, and (c2) finally gets to run. All four stay fully
+        # exercised on the dev workstation. If (c2)'s first complete run surfaces MORE
+        # over-budget oracles, give them the same measured guard, not a bigger runner guess.
         if: ${{ !cancelled() }}
         run: |
           python -m validation.run_all \
