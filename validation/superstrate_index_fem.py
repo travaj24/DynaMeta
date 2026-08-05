@@ -12,6 +12,13 @@ Run: python -m validation.superstrate_index_fem
 import sys, os, warnings
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Available-RAM capability guard (see validation/_ram_guard.py): measured peak process-tree
+# RSS 10.08 GB on the dev workstation 2026-08-04 (2027 s). A 16 GB hosted runner has only
+# ~13 GB AVAILABLE -- thinner margin than mesh variance, and a wrong "run" decision draws
+# the OOM shutdown that cancels every step behind it, so the threshold is set to skip there
+# deliberately (16 > 13) rather than gamble the whole nightly on 3 GB of headroom.
+from validation._ram_guard import require_available_ram_gb
+require_available_ram_gb(16, "superstrate_index_fem", "measured 10.1 GB peak, 2026-08-04")
 from dynameta.materials import Material, MaterialRegistry, ConstantOptical
 from dynameta.geometry import UnitCell, Stack, Layer, Design
 from dynameta.geometry.specs import OpticalSpec, Mesh3DSpec

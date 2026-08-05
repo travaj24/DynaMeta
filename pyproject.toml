@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.9.0"
+version = "0.10.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -37,7 +37,10 @@ numba = ["numba>=0.58"]                                    # JIT/prange CPU kern
 # rcwa_blas_threads is called without it (the BLAS-thread cap is silently INERT otherwise);
 # under this repo's filterwarnings=["error"] that warning fails test_threaded_sweep_matches_serial
 # on any leg missing the package -- and WITH it the cap the bridge requests is actually effective.
-dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm", "threadpoolctl"]
+# psutil: the validation tier's available-RAM capability guards (validation/_ram_guard.py --
+# the heavy 3-D FEM oracles exit 42 on machines that cannot fit them instead of drawing the
+# 16 GB runner's OOM shutdown signal, which cancelled three nightlies in a row behind them).
+dev = ["pytest>=7.0", "pytest-cov", "ruff", "tmm", "threadpoolctl", "psutil"]
 # Everything: pip install dynameta[solvers,io,plot,materials-db]
 
 [tool.setuptools.packages.find]
