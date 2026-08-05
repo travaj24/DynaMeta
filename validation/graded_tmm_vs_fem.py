@@ -10,6 +10,12 @@ must conserve energy R+T~1 (lossless). Run: python -m validation.graded_tmm_vs_f
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Available-RAM capability guard (see validation/_ram_guard.py): measured peak process-tree
+# RSS 49.65 GB on the dev workstation 2026-08-04 (1508 s). On a 16 GB hosted runner this
+# oracle drew the OOM shutdown signal on three consecutive nightlies, cancelling (c2) behind
+# it. Threshold = measured x ~1.3.
+from validation._ram_guard import require_available_ram_gb
+require_available_ram_gb(64, "graded_tmm_vs_fem", "measured 49.7 GB peak, 2026-08-04")
 from dynameta.materials import Material, MaterialRegistry, ConstantOptical
 from dynameta.geometry import UnitCell, Stack, Layer, Design
 from dynameta.geometry.specs import OpticalSpec, Mesh3DSpec

@@ -142,6 +142,12 @@ from dynameta.optics.fiber_amp.lma import (LPMode, ModeOverlap, solve_lp_modes, 
                                            second_moment_radius_m, total_mode_count,
                                            effective_cladding_overlap,
                                            mode_resolved_gain_overlaps)
+from dynameta.optics.fiber_amp.transverse import (RadialGrid, ResolvedFiberAmplifier,
+                                                  ResolvedResult, mean_field_equivalent,
+                                                  saturation_correction_kappa,
+                                                  tshb_closed_form_J, tshb_mean_field_J)
+from dynameta.optics.fiber_amp.gain_bpm import (BPMResult, GainBPM, ThermalLoop,
+                                                quadratic_duct_period_m, quadratic_duct_radius_m)
 from dynameta.optics.fiber_amp.polarization import (TwoPolSaturation, f_from_pdg_slope,
                                                     pdg_cascade_db, pdg_db)
 from dynameta.optics.fiber_amp.chain import (AmplifierChain, ChainResult, PassiveElement,
@@ -184,5 +190,9 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "LPMode", "ModeOverlap", "cladding_absorption_two_population", "effective_area_m2",
            "marcuse_bend_loss_dB_per_m", "mode_degeneracy", "mode_field", "one_over_e_radius_m",
            "second_moment_radius_m", "total_mode_count",
+           "RadialGrid", "ResolvedFiberAmplifier", "ResolvedResult", "mean_field_equivalent",
+           "saturation_correction_kappa", "tshb_closed_form_J", "tshb_mean_field_J",
+           "GainBPM", "BPMResult", "ThermalLoop", "quadratic_duct_radius_m",
+           "quadratic_duct_period_m",
            "TwoPolSaturation", "f_from_pdg_slope", "pdg_cascade_db", "pdg_db",
            "AmplifierChain", "ChainResult", "PassiveElement", "StageRecord"]

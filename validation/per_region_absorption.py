@@ -20,6 +20,11 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Available-RAM capability guard (see validation/_ram_guard.py): measured peak process-tree
+# RSS 27.00 GB on the dev workstation 2026-08-04 (889 s) -- does not fit a 16 GB hosted
+# runner. Threshold = measured x ~1.3.
+from validation._ram_guard import require_available_ram_gb
+require_available_ram_gb(35, "per_region_absorption", "measured 27.0 GB peak, 2026-08-04")
 
 from dynameta.materials import Material, MaterialRegistry, ConstantOptical
 from dynameta.geometry import UnitCell, Stack, Layer, Design

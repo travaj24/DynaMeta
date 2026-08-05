@@ -94,8 +94,17 @@ SMOKE = {
     "qd_soa_spectral_dispersion", "qd_soa_thermal_profile", "qd_soa_transport",
     "qd_soa_transverse_bpm", "qd_soa_traveling_wave", "qd_soa_ultrafast",
     "qd_soa_vectorial_pdg", "qd_soa_wdm",
-    # the rare-earth fiber amplifier (EDFA/YDFA) end-to-end gates -- pure numpy/scipy
-    "fiber_amp_physics",
+    # the rare-earth fiber amplifier (EDFA/YDFA) end-to-end gates -- pure numpy/scipy.
+    # fiber_radial_inversion = the radially-resolved-inversion / TSHB gates. MEASURED 2026-08-04,
+    # this box, cold subprocess: 29.2 / 29.3 / 40.9 / 54 / 56.8 / 58.9 s wall. That spread is NOT
+    # the gates -- the script prints its own total, which was 0.4-2.0 s in every one of those runs
+    # -- it is `import dynameta.optics.fiber_amp`, measured ALONE at 14 s (quiet box) to 40 s
+    # (loaded box) in the same session. fiber_amp_physics, already in this tier and paying the
+    # same import, measured 38.6 / 42.0 / 45.6 / 47.6 / 56.6 s across the same runs, so the new
+    # script is the CHEAPER of the two on its own work and adds no new dependency. Under the 60 s
+    # bar on the merits; if the tier ever needs to shed time, the import is the thing to attack,
+    # not either script.
+    "fiber_amp_physics", "fiber_radial_inversion",
     # audit X-19/X-26: the solver-free validations the reverse-drift warning below had been naming
     # since they shipped. `lumenairy` is a CORE dependency CI already installs, so the bridge gates
     # -- the only executable coverage of the 11-module optics/lumenairy_bridge subsystem -- cost
@@ -117,6 +126,18 @@ SMOKE = {
 # reverse-drift warning stops being noise"). The reverse-drift check below subtracts this set, so
 # anything it still names is genuinely uncurated. Re-measure before moving one INTO the tier.
 SMOKE_EXCLUDED = {
+    # The scalar gain-BPM field solver. Unlike the other two fiber scripts, whose run_all time is
+    # almost entirely `import dynameta.optics.fiber_amp`, this one does real work of its own -- and
+    # that work is CPU-bound FFT marching, so unlike an import it does not amortize against a busy
+    # box. MEASURED 2026-08-04, same box, same session, gate body / run_all: 16.1-17.6 s / 18-23 s
+    # with the box quiet (fiber_radial_inversion was 0.6 s / 3 s in the same runs), and
+    # 61.7-86.4 s / 108-145 s with one competing full-CPU workload. The dev box's own reading that
+    # day was 66 s in run_all. Quiet it would fit the tier; loaded it is 2x over, and the smoke
+    # tier is the one CI runs on shared hardware -- so it stays out until the FFT budget or the
+    # 14-40 s fiber_amp import is attacked.
+    "fiber_gain_bpm":            "gate body 16-18 s quiet / 62-86 s on a loaded box, 18-145 s in "
+                                 "run_all, measured 2026-08-04 -- over the ~60 s smoke bar "
+                                 "whenever the box is busy",
     "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
     "lumenairy_berreman_jax":    "145 s measured 2026-07-26 (jax jit warm-up + sweep)",
     "lumenairy_pmm2d_bridge":    "268 s measured 2026-07-26 (2-D PMM cascade; the slowest gate)",
