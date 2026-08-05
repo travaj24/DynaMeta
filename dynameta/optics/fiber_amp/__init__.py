@@ -74,6 +74,18 @@ Realism extensions (2026-07 generality campaign; all opt-in / standalone):
   Phase 20 polarization / chain   : PDG/PHB two-pol model + measured anchors; multi-stage chains
            with PSD-based Friis-reproducing noise cascade.
 
+Link-level layers (2026-08-04 consumer audit; both are BOOKKEEPING over the optical core, no new
+physics, and neither is reachable from the solvers -- nothing below them imports them):
+  Phase 21 efficiency             : the ELECTRICAL (wall-plug) budget the package previously
+           stopped short of -- pump-diode WPE, fibre coupling, controller/TEC overhead, the
+           electrical -> diode -> coupling -> absorption -> quantum-defect -> extraction chain,
+           and energy per bit. metrics.py's PCE is optical-optical only (audit F-7).
+  Phase 22 comms                  : IM-DD link metrics for a modulated signal -- PAM-N levels,
+           unequal-variance maximum-likelihood decision thresholds, Gaussian SER/BER, Q factor,
+           and the largest constellation an operating point supports. The per-level variances are
+           EVALUATED per level rather than scaled, because two of the four terms are
+           level-independent (audit F-6).
+
 FACADE CONTRACT (audit X-10). This is an EAGER, EXHAUSTIVE facade -- unlike dynameta.optics and
 dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are by design. Every name
 in a submodule's __all__ MUST be re-exported here; drift is a bug, not a design choice (it left
@@ -84,12 +96,13 @@ tests/test_fiber_amp.py::test_package_facade_is_exhaustive enforces it mechanica
 from dynameta.optics.fiber_amp.spectroscopy import (CrossSectionModel, RareEarthIon, erbium,
                                                     ytterbium, at_temperature,
                                                     multiphonon_lifetime)
-from dynameta.optics.fiber_amp.waveguide import (FiberSpec, cladding_pump_overlap,
-                                                 mode_field_radius_m, overlap_gamma)
+from dynameta.optics.fiber_amp.waveguide import (V_MARCUSE_MAX, V_MARCUSE_MIN, FiberSpec,
+                                                 cladding_pump_overlap, marcuse_validity,
+                                                 mode_field_radius_m, overlap_gamma, v_number)
 from dynameta.optics.fiber_amp.rare_earth import (ChannelSet, gain_coeff_per_m,
                                                   metastable_fraction)
-from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, RamanStokes,
-                                                   Signal, SteadyStateResult)
+from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, FiberAmplifier, Pump,
+                                                   RamanStokes, Signal, SteadyStateResult)
 from dynameta.optics.fiber_amp.noise import (AseSpectrum, NoiseResult, analyze_noise,
                                             local_inversion_factor, noise_figure,
                                             output_ase_spectrum)
@@ -97,7 +110,7 @@ from dynameta.optics.fiber_amp.metrics import (CompressionCurve, GainSpectrum, S
                                               gain_compression_curve, gain_flatness,
                                               gain_spectrum, power_conversion_efficiency,
                                               saturation_output_power, slope_efficiency,
-                                              stokes_limit)
+                                              stokes_limit, effective_pump_lambda_m)
 from dynameta.optics.fiber_amp.concentration import (ConcentrationModel, erbium_upconversion,
                                                     ytterbium_photodarkening)
 from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, net_forward_flux,
@@ -152,6 +165,12 @@ from dynameta.optics.fiber_amp.polarization import (TwoPolSaturation, f_from_pdg
                                                     pdg_cascade_db, pdg_db)
 from dynameta.optics.fiber_amp.chain import (AmplifierChain, ChainResult, PassiveElement,
                                              StageRecord)
+from dynameta.optics.fiber_amp.efficiency import (PumpSource, WallPlugBudget, energy_per_bit_J,
+                                                  wall_plug_efficiency)
+from dynameta.optics.fiber_amp.comms import (FEC_THRESHOLDS, LevelStatistics, LinkPerformance,
+                                             PamFormat, gray_map, level_statistics,
+                                             link_performance, max_pam_order, ml_thresholds,
+                                             pam_levels_W, pam_ser, q_to_ser, ser_to_ber)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
@@ -195,4 +214,11 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "GainBPM", "BPMResult", "ThermalLoop", "quadratic_duct_radius_m",
            "quadratic_duct_period_m",
            "TwoPolSaturation", "f_from_pdg_slope", "pdg_cascade_db", "pdg_db",
-           "AmplifierChain", "ChainResult", "PassiveElement", "StageRecord"]
+           "AmplifierChain", "ChainResult", "PassiveElement", "StageRecord",
+           # v0.9.1 audit-2026-08-04 additions
+           "ChannelPlan", "effective_pump_lambda_m",
+           "v_number", "marcuse_validity", "V_MARCUSE_MIN", "V_MARCUSE_MAX",
+           "PumpSource", "WallPlugBudget", "wall_plug_efficiency", "energy_per_bit_J",
+           "PamFormat", "LevelStatistics", "LinkPerformance", "pam_levels_W", "gray_map",
+           "ml_thresholds", "pam_ser", "ser_to_ber", "q_to_ser", "level_statistics",
+           "link_performance", "max_pam_order", "FEC_THRESHOLDS"]

@@ -14,14 +14,49 @@ from typing import Callable, Optional, Union
 
 import numpy as np
 
-__all__ = ["FiberSpec", "mode_field_radius_m", "overlap_gamma", "cladding_pump_overlap"]
+__all__ = ["FiberSpec", "mode_field_radius_m", "overlap_gamma", "cladding_pump_overlap",
+           "v_number", "marcuse_validity", "V_MARCUSE_MIN", "V_MARCUSE_MAX"]
+
+
+V_MARCUSE_MIN = 1.2
+V_MARCUSE_MAX = 2.405
+
+
+def v_number(core_radius_m: float, na: float, lambda_m):
+    """Normalized frequency V = 2 pi a NA / lambda (same shape as lambda_m)."""
+    return 2.0 * np.pi * float(core_radius_m) * float(na) / np.asarray(lambda_m, dtype=np.float64)
+
+
+def marcuse_validity(core_radius_m: float, na: float, lambda_m):
+    """(all_in_range, V_min, V_max) for the Marcuse Gaussian-mode fit's stated validity window
+    V_MARCUSE_MIN < V < V_MARCUSE_MAX (audit 2026-08-04 F-9).
+
+    Why this is a QUERY and not a warning on mode_field_radius_m itself:
+      * `lambda_m` is routinely the WHOLE channel-wavelength array (rare_earth.ChannelSet.build ->
+        overlap_gamma calls it once per solve with every pump, signal and ASE-bin wavelength), so V
+        is an ndarray and any scalar `if` on it raises. This returns reduced scalars instead.
+      * a warning on the default path would fire inside the solver hot loop for every large-mode-
+        area or cladding-pumped fiber, i.e. on a large fraction of this package's own fixtures --
+        and the repo runs pytest with `filterwarnings = ["error"]`, so it would convert working
+        configurations into hard failures rather than informing anybody.
+    Callers that WANT the diagnostic (a design script, a report) can ask. What is out of range is
+    not automatically wrong: at V = 8.2 the Gaussian's Gamma is only ~1.1% off, but its SATURATION
+    integral is off by up to 13% (0.85 dB/m) -- use transverse.ResolvedFiberAmplifier or
+    lma.solve_lp_modes for a multimode core, which take the exact LP field.
+    """
+    V = v_number(core_radius_m, na, lambda_m)
+    vmin, vmax = float(np.min(V)), float(np.max(V))
+    return bool(vmin > V_MARCUSE_MIN and vmax < V_MARCUSE_MAX), vmin, vmax
 
 
 def mode_field_radius_m(core_radius_m: float, na: float, lambda_m):
     """Gaussian-approximation 1/e field radius w of the LP01 mode (Marcuse):
         w/a = 0.65 + 1.619 V^-1.5 + 2.879 V^-6,   V = 2 pi a NA / lambda.
     Valid ~ 1.2 < V < 2.4 (single-mode). Grows with lambda (weaker guiding) -> larger w ->
-    smaller overlap, the physical origin of the wavelength-dependent Gamma."""
+    smaller overlap, the physical origin of the wavelength-dependent Gamma.
+
+    The validity window is NOT enforced here -- `lambda_m` is usually the whole channel array and
+    this sits in the solver hot path. Query it explicitly with marcuse_validity() (audit F-9)."""
     a = float(core_radius_m)
     V = 2.0 * np.pi * a * float(na) / np.asarray(lambda_m, dtype=np.float64)
     V = np.maximum(V, 1e-6)
@@ -46,9 +81,22 @@ class FiberSpec:
 
     def __post_init__(self):
         for nm, v in (("core_radius_m", self.core_radius_m), ("na", self.na),
-                      ("n_t_m3", self.n_t_m3), ("length_m", self.length_m)):
+                      ("length_m", self.length_m)):
             if not (v > 0.0):
                 raise ValueError("FiberSpec: {} must be > 0 (got {!r})".format(nm, v))
+        # n_t_m3 == 0 is LEGAL: an undoped (passive) fiber (audit 2026-08-04 F-10). Every gain and
+        # spontaneous-source term is proportional to n_t, so n_t = 0 degrades exactly to a pure-loss
+        # channel -- which is the correct physics for a transmission fiber, a pigtail, or the span
+        # between two stages of an AmplifierChain. Modelling one previously needed a sentinel
+        # (tests/test_fiber_srs.py used n_t_m3=1.0 with the comment "n_t must be > 0").
+        # NOTE for callers: a few routines DIVIDE by the active density -- the cooperative-
+        # upconversion branch of steady_state._nbar2_c / rare_earth.metastable_fraction (whose
+        # quadratic term has n_t in the denominator) and calibration.giles_calibrated_fiber (which
+        # forms sigma = alpha / n_t). Those raise or refuse on their own; upconversion with n_t = 0
+        # is meaningless by construction, since there are no ions to upconvert.
+        if not (self.n_t_m3 >= 0.0):
+            raise ValueError("FiberSpec: n_t_m3 must be >= 0 (got {!r}); 0 means an undoped, "
+                             "purely passive fiber".format(self.n_t_m3))
         if self.clad_radius_m is not None and not (self.clad_radius_m > self.core_radius_m):
             raise ValueError("FiberSpec: clad_radius_m must exceed core_radius_m")
 
