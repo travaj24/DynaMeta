@@ -1047,7 +1047,7 @@ def test_package_facade_is_exhaustive():
     # skipped it and 17 of the 18 still cleared the floor) -- exactly the drift this gate exists
     # to catch. Equality against the live submodule count leaves no slack.
     assert checked == submodules
-    assert len(submodules) == 18, submodules                  # pin the count itself
+    assert len(submodules) == 20, submodules                  # pin the count itself (20: +gain_bpm)
     for name in pkg.__all__:                                  # ... and every export resolves
         assert getattr(pkg, name, None) is not None, name
 
