@@ -107,7 +107,8 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 # consolidated there; eryb.py imports it the same way). Importing it is the composition this
 # module is supposed to do -- re-typing it would re-open exactly that defect.
 from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, Signal,
-                                                    _frozen_profile_interp)
+                                                    _frozen_profile_interp,
+                                                    _relaxation_residuals)
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m, overlap_gamma
 
 __all__ = ["RadialGrid", "ResolvedResult", "ResolvedFiberAmplifier", "mean_field_equivalent",
@@ -830,16 +831,15 @@ class ResolvedFiberAmplifier:
                                rtol=1e-7, atol=1e-15)
                 P_bwd = sb.y[:, ::-1]
 
-            # identical convergence test to steady_state.solve (audit S3-34): endpoint powers AND
-            # the interior profile, each channel measured against its own peak power.
+            # SAME convergence test as steady_state.solve -- literally the same function now
+            # (audit F-13: this was a byte-identical COPY, so the endpoint-denominator defect
+            # existed in triplicate and fixing one solver would have desynchronised the iteration
+            # counts that the mean-field-vs-resolved 1e-9 reduction gates compare).
             out = np.concatenate([P_fwd[:, -1], (P_bwd[:, 0] if bwd.size else [])])
             prof = np.concatenate([P_fwd, P_bwd], axis=0) if bwd.size else P_fwd.copy()
             if last_out is not None:
-                denom = np.maximum(np.abs(out), 1e-15)
-                end_ok = float(np.max(np.abs(out - last_out) / denom)) < tol
-                ch_peak = np.maximum(np.max(np.abs(prof), axis=1, keepdims=True), 1e-300)
-                prof_ok = float(np.max(np.abs(prof - last_prof) / ch_peak)) < tol
-                if end_ok and prof_ok:
+                end_resid, prof_resid = _relaxation_residuals(out, last_out, prof, last_prof)
+                if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
             last_out = out

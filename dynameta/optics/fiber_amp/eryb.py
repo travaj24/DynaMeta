@@ -90,8 +90,10 @@ from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.tr
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
-from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
-                                                    _KEEP, _frozen_profile_interp)
+from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, Signal,
+                                                    SteadyStateResult, _KEEP,
+                                                    _frozen_profile_interp,
+                                                    _relaxation_residuals)
 
 __all__ = ["ErYbAmplifier"]
 
@@ -189,6 +191,32 @@ class ErYbAmplifier:
         """A copy with BOTH ASE bands dropped (the Er C-band and the Yb-band parasitic band) --
         the ASE-free configuration metrics.gain_spectrum probes the small-signal gain in."""
         return self._clone(ase=None, yb_ase=None)
+
+    # ---- PUBLIC channel plan --------------------------------------------------------------
+    def channel_plan(self) -> "ChannelPlan":
+        """This amplifier's channel structure -- see steady_state.ChannelPlan (audit F-3).
+
+        `channels` is None: every channel here carries BOTH ions' cross-sections, so there is no
+        single ChannelSet to hand back. The per-ion spectroscopy is in `_plan()`'s dict under
+        'sa_er'/'se_er'/'sa_yb'/'se_yb'. Everything geometric and structural -- wavelengths,
+        directions, the ASE mask and its frequency bin widths, launched powers, overlap, background
+        loss, mode counts -- is ion-independent and is reported here.
+
+        Note this amplifier has TWO ASE bands (the Er signal band and the optional Yb band), so
+        `indices('ase', 'fwd')` spans both; separate them by wavelength.
+        """
+        pl = self._plan()
+        return ChannelPlan(lambda_m=np.asarray(pl["lam"], float).copy(),
+                           direction=np.asarray(pl["u"], float).copy(),
+                           is_ase=np.asarray(pl["is_ase"], bool).copy(),
+                           dnu_hz=np.asarray(pl["dnu"], float).copy(),
+                           kind=list(pl["kind"]),
+                           launched_W=np.asarray(pl["bc"], float).copy(),
+                           gamma=np.asarray(pl["gamma"], float).copy(),
+                           loss_per_m=np.asarray(pl["loss"], float).copy(),
+                           m_modes=np.where(np.asarray(pl["is_ase"], bool),
+                                            np.asarray(pl["m"], float), 0.0),
+                           channels=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self):
@@ -387,11 +415,11 @@ class ErYbAmplifier:
             out = np.concatenate([P_fwd[:, -1], (P_bwd[:, 0] if bwd.size else [])])
             prof = np.concatenate([P_fwd, P_bwd], axis=0) if bwd.size else P_fwd.copy()
             if last_out is not None:
-                denom = np.maximum(np.abs(out), 1e-15)
-                end_ok = float(np.max(np.abs(out - last_out) / denom)) < tol
-                ch_peak = np.maximum(np.max(np.abs(prof), axis=1, keepdims=True), 1e-300)
-                prof_ok = float(np.max(np.abs(prof - last_prof) / ch_peak)) < tol
-                if end_ok and prof_ok:
+                # SAME convergence test as steady_state.solve -- literally the same function now
+                # (audit F-13: this was a byte-identical COPY, so the endpoint-denominator defect
+                # existed in triplicate).
+                end_resid, prof_resid = _relaxation_residuals(out, last_out, prof, last_prof)
+                if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
             last_out = out

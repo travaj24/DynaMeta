@@ -86,6 +86,13 @@ def giles_calibrated_fiber(name: str, lambda_m, alpha_dB_per_m, gstar_dB_per_m, 
     published spectra. n_t_m3 is the ion density used to define the doped area and the intensity
     scale (the Giles saturation parameter); pick the vendor's value or a standard one."""
     lam = np.asarray(lambda_m, float)
+    # This path DEFINES the cross-sections as alpha/n_t, so an undoped fiber is not expressible
+    # here even though FiberSpec now permits n_t = 0 (audit F-10). Refuse explicitly rather than
+    # divide by zero and hand back inf cross-sections.
+    if not (float(n_t_m3) > 0.0):
+        raise ValueError("giles_calibrated_fiber: n_t_m3 must be > 0 (got {!r}) -- the Giles "
+                         "calibration defines sigma = alpha / n_t, so an undoped fiber has no "
+                         "cross-sections to calibrate".format(n_t_m3))
     alpha = dB_per_m_to_per_m(alpha_dB_per_m)
     gstar = dB_per_m_to_per_m(gstar_dB_per_m)
     sa_eff = alpha / n_t_m3
