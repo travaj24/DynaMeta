@@ -448,6 +448,16 @@ jobs:
           python -m validation.run_all \
             superstrate_index_fem graded_tmm_vs_fem per_region_absorption symmetry_reduced_fem
       - name: (c2) the full validation tier
+        # FIRST EXECUTION (run 31247382381, 2026-08-08, after the (c1) guards landed) reached
+        # alphabetically into the tier and then drew the runner OOM shutdown at
+        # boundary_inclusion_corner_circle -- proving the per-script-guard approach cannot
+        # enumerate every over-budget oracle up front. run_all now carries its own RAM
+        # watchdog (see its exit-code contract, code 125): any script whose process tree
+        # crosses 0.85 x the available-at-start memory is killed BY THE RUNNER SCRIPT and
+        # reported OVER-BUDGET, so a too-big oracle costs one visible line instead of the
+        # whole job and everything queued behind it. Oracles it reports over-budget here are
+        # covered on the dev workstation; the guard thresholds in (c1) stay because they skip
+        # in seconds what the watchdog would kill only after minutes of doomed meshing.
         # run_all defines exactly two tiers, `smoke` and `full` (there is no separate "heavy"
         # one), so this -- 204 gated validations + the 7 exit-gated examples/ workflows -- is the
         # invocation that reaches the 111 non-smoke oracles no other leg can. NO --allow-skip:
