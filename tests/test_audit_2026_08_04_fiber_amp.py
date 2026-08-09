@@ -57,14 +57,19 @@ class TestF13ConvergedFlag:
         endpoint denominator on this exact fiber -- so the gate could not fail if the fix were
         reverted. 0.243 mW is the audit's own discriminating operating point (its F-13 trace):
         the old test never converges (400 iterations, `converged` False, 34.722740 dB), the new
-        one stops at 118 with 34.722738 dB. Both pinned below, since a fix that changed WHERE the
-        solve lands would be a different bug."""
+        one does, with an identical gain. The iteration COUNT is not pinned to a number: it is a
+        property of the Gauss-Seidel trajectory through LSODA/BLAS arithmetic and moved across
+        the CI platforms (measured 89 / 99 / 118 / 137 on floor / py3.13 / dev box / py3.10, the
+        first PR-11 round). What discriminates is CONVERGED-WELL-INSIDE-THE-CAP vs never: the
+        pre-audit denominator exhausts all 400 on every platform, so < 300 is the pin, with
+        2.2x headroom over the worst measured platform. The gain pin stays tight -- a fix that
+        changed WHERE the solve lands would be a different bug."""
         r = _ydfa(sig_W=0.243e-3).solve(n_nodes=201, max_iter=400, relax=1.0)
         pmp = [i for i, k in enumerate(r.kind) if k == "pump"][0]
         # the guard is only exercised if the pump really is absorbed into the noise floor
         assert abs(r.power_W[pmp, -1]) < 1e-12 * r.power_W[pmp, 0]
         assert r.meta["converged"]
-        assert r.meta["iterations"] == pytest.approx(118, abs=15)   # measured 118; never, before
+        assert r.meta["iterations"] < 300           # never converged at ANY count, before
         assert float(r.signal_gain_dB[0]) == pytest.approx(34.72274, abs=1e-3)
 
     def test_stopping_early_does_not_move_the_answer(self):
