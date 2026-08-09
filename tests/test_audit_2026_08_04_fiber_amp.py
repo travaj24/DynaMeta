@@ -256,7 +256,11 @@ class TestF14Relaxation:
         def yb(pumps, relax):
             a = FiberAmplifier(YB, FiberSpec(3.0e-6, 0.12, 6.0e25, 6.0), pumps,
                                [Signal(20e-3, 1.060e-6)], AseBand(1.02e-6, 1.10e-6, 20))
-            return a.solve(n_nodes=201, relax=relax, max_iter=800)
+            # max_iter is a PLATFORM budget, not physics: the damped trajectory's length moves
+            # with the LSODA/BLAS stack (measured to the same 17.921929 dB fixed point: 177
+            # iterations on the dev box, 316 on scipy 1.11, > 800 on the scipy 1.10 floor leg
+            # -- the third PR-11 CI round). 3000 is ~10x the worst measured platform.
+            return a.solve(n_nodes=201, relax=relax, max_iter=3000)
 
         co = yb([Pump(2.0, 0.976e-6)], 1.0)
         assert co.meta["converged"] and co.meta["iterations"] < 20     # the easy case
