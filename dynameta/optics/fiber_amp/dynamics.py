@@ -56,7 +56,11 @@ from typing import Callable, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK
-from dynameta.optics.fiber_amp.steady_state import FiberAmplifier
+# ChannelPlan / SteadyStateResult are annotation targets on TransientResult (F-2/F-3): the
+# quoted forward references still need the names bound at module scope for ruff F821 and for
+# anyone resolving the annotations at runtime (the CI lint caught them unbound).
+from dynameta.optics.fiber_amp.steady_state import (ChannelPlan, FiberAmplifier,
+                                                    SteadyStateResult)
 
 __all__ = ["TransientResult", "simulate_transient", "saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
@@ -125,9 +129,13 @@ class TransientResult:
         P = np.asarray(self.power_zt[it], float)
         pl = self.plan
         sig = pl.indices("signal")
-        launched = pl.launched_W
-        gains = np.array([10.0 * np.log10(P[i, -1] / max(float(launched[i]), 1e-300))
-                          for i in sig])
+        # The gain denominator is THIS FRAME's launch, P[i, 0], not plan.launched_W -- which is the
+        # amplifier's CONFIGURED input and is exactly what signal_drive() overrides. Reading the
+        # configured value made the reported gain wrong by the drive ratio itself (measured +3.0105
+        # dB under a 2x drive, i.e. 10 log10(2)), and that error propagated into
+        # metrics.gain_flatness computed over frames. Signals are forward channels, so z = 0 is
+        # their input end -- the same convention signal_gain_dB uses on the march itself.
+        gains = np.array([10.0 * np.log10(P[i, -1] / max(float(P[i, 0]), 1e-300)) for i in sig])
         ch = pl.channels
         meta = {"converged": True, "iterations": 0,
                 "dnu_hz": pl.dnu_hz.copy(),
@@ -199,6 +207,12 @@ def _propagate_fixed(z, g, s, bc, u):
 _ASE_TO_LAUNCHED_LIMIT = 1.0
 _GAIN_INTEGRAL_LIMIT = 20.0
 
+# Ceiling on the opt-in (Nt, K, Nz) float64 profile matrix of simulate_transient(store_profiles=
+# True). 2 GiB is well above any legitimate use of frame_as_steady (the audit's own 80-step,
+# 42-channel, 121-node frame is 3.3 MB) and well below the point where the allocation stops being
+# an exception and becomes an OOM kill.
+_STORE_PROFILES_MAX_BYTES = 2 * 1024 ** 3
+
 
 def _no_raman(amp):
     """The transient fixed-inversion propagator assumes per-channel LINEAR gain; the SRS
@@ -233,7 +247,9 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     ase_psd_1pol_W_Hz() -- plus the ChannelPlan every array is indexed by. store_profiles=True
     additionally keeps the whole (Nt, K, Nz) power matrix, which enables frame_as_steady(index) and
     therefore lets noise.analyze_noise / detection.detection_noise run on a transient frame. The
-    memory cost is Nt*K*Nz floats, so it is opt-in."""
+    memory cost is Nt*K*Nz floats, so it is opt-in -- and a request above 2 GiB
+    (_STORE_PROFILES_MAX_BYTES) is REFUSED with the shape, because past that point the allocation
+    stops raising and starts taking the process down with it."""
     _no_raman(amp)
     # The march is FiberAmplifier-only (it reads _n_active / _mcc_matrix / concentration, none of
     # which the co-doped class has). Refuse by name instead of letting the _plan() shape mismatch
@@ -249,6 +265,22 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     z = np.linspace(0.0, L, n_nodes)
     A = amp.fiber.a_dope_m2
     na = amp._n_active
+    if store_profiles:
+        # Refuse BEFORE the initial steady solve, and before np.empty commits the pages. The
+        # (Nt, K, Nz) matrix scales as the product of three innocuous-looking arguments: an
+        # ASE-resolved amplifier at 2000 time steps and n_nodes = 201 is already 6-12 GiB, which
+        # on this class of box is an out-of-memory kill of the whole process rather than an
+        # exception. Say the shape and the size instead.
+        _need = 8 * int(np.size(t_grid)) * int(ch.lambda_m.size) * int(n_nodes)
+        if _need > _STORE_PROFILES_MAX_BYTES:
+            raise ValueError(
+                "simulate_transient(store_profiles=True) would allocate %.2f GiB for the "
+                "(Nt, K, Nz) = (%d, %d, %d) power matrix, above the %.2f GiB guard. Shorten "
+                "t_grid, drop n_nodes, narrow the AseBand (K counts BOTH ASE directions), or "
+                "leave store_profiles=False -- ase_fwd_W / ase_bwd_W are kept either way, and "
+                "frame_as_steady is the only thing that needs the full matrix."
+                % (_need / 1024.0 ** 3, np.size(t_grid), ch.lambda_m.size, n_nodes,
+                   _STORE_PROFILES_MAX_BYTES / 1024.0 ** 3))
 
     sig_idx = [i for i, k in enumerate(kind) if k == "signal"]
     pmp_idx = [i for i, k in enumerate(kind) if k == "pump"]

@@ -29,8 +29,21 @@ flattered:
      pump continuously while delivering signal only during bursts, so the honest average depends on
      traffic this module cannot see. duty_cycle=1.0 (the default) is the CW case.
 
-CROSS-CHECK. The optical power that fails to leave the fiber must equal thermal.total_heat_W. That
-is an independent closure on the solve, and `energy_balance_residual_W` reports it.
+CROSS-CHECK, and WHY IT IS NOT total_heat_W. Everything launched must leave as light or as heat.
+Written with `thermal.total_heat_W` as the heat that statement is VACUOUS: total_heat_W is defined
+as F(0) - F(L), which expands to exactly (launched - exiting) over the same two z-planes, so the
+residual is X - X and stays at machine zero on a corrupted solve (measured: perturbing the signal
+output endpoint by 1% left the residual at 5.6e-17 W). Integrating the local heat density instead
+does not help -- `np.gradient` followed by a trapezoid telescopes back to F(0) - F(L) exactly.
+
+So `energy_balance_residual_W` closes the balance against the DISSIPATION COMPUTED FROM THE LOCAL
+RATE BALANCE: absorbed minus stimulated-emitted minus spontaneously-seeded power, evaluated from
+the solve's own inversion profile and cached cross-sections and integrated over z. That is a
+different computation from the endpoint flux difference -- it asks whether the returned P(z) is
+actually a solution of the amplifier's own ODEs -- so it CAN fail, and it does: the same 1% endpoint
+perturbation moves it to -1.7e-3 W, a factor 1476. On a healthy solve what is left is trapezoid
+discretization, which falls as O(dz^2): measured 1.5e-5 / 3.9e-6 / 6.0e-7 / 1.5e-7 of the launched
+power at n_nodes = 81 / 161 / 401 / 801 on the reference EDFA.
 
 Pure numpy; SI units (W, m, s, J). ASCII only.
 """
@@ -42,12 +55,48 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
+from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs >=2.0)
 from dynameta.optics.fiber_amp.metrics import (effective_pump_lambda_m, power_conversion_efficiency,
                                                stokes_limit)
 from dynameta.optics.fiber_amp.steady_state import FiberAmplifier, SteadyStateResult
 from dynameta.optics.fiber_amp.thermal import total_heat_W
 
 __all__ = ["PumpSource", "WallPlugBudget", "wall_plug_efficiency", "energy_per_bit_J"]
+
+# Relative closure the power balance must reach before wall_plug_efficiency stops complaining.
+# The residual is trapezoid discretization on the rate integral (see the module docstring), so it
+# is set by n_nodes: 1.5e-5 of the launched power at n_nodes = 81, the coarsest mesh anything in
+# this repo solves on. 1e-3 leaves ~65x headroom there and still catches the 5.7e-3 a 1%-corrupted
+# endpoint produces -- which the previous 2e-2 threshold did not.
+_BALANCE_NOTE_FRAC = 1e-3
+
+
+def _dissipated_power_W(amp: FiberAmplifier, result: SteadyStateResult) -> float:
+    """Total dissipated optical power [W] from the LOCAL RATE BALANCE, independent of the endpoint
+    flux difference `thermal.total_heat_W` reports (module docstring on why that distinction is the
+    whole point of this function).
+
+    The net forward flux is F(z) = sum_fwd P - sum_bwd P, so dF/dz = sum_k (g_k P_k + s_k) with
+    g_k the local net gain coefficient and s_k the spontaneous source -- the amplifier's OWN
+    right-hand side, evaluated on the RETURNED profile rather than accumulated along it. The heat
+    is -INT dF/dz dz.
+
+    Returns NaN for an amplifier that does not expose the mean-field RHS (the co-doped and
+    radially-resolved classes carry their own, with different signatures), so the caller reports an
+    unavailable closure rather than a wrong one."""
+    if not hasattr(amp, "_dP_full_c"):
+        return float("nan")
+    ch, _bc, u, _is_ase, _kind = amp._plan()
+    P, z = result.power_W, result.z_m
+    if P.shape[0] != ch.lambda_m.size or P.shape[1] != z.size:
+        return float("nan")             # the result did not come from this amplifier's channels
+    amp._tau_s = ch.tau_s               # the back-compat single-call forms set this the same way
+    c = amp._coeffs(ch)
+    mcc = result.meta.get("mcc")
+    dF = np.array([float(np.sum(u * amp._dP_full_c(c, u, P[:, j],
+                                                   None if mcc is None else mcc[:, j])))
+                   for j in range(z.size)])
+    return -float(trapz(dF, z))
 
 
 @dataclass(frozen=True)
@@ -91,6 +140,8 @@ class WallPlugBudget:
     p_electrical_aux_W: float
     p_electrical_total_W: float
     heat_W: float
+    # launched - exiting - (dissipation from the LOCAL RATE BALANCE). NOT closed against
+    # thermal.total_heat_W, which would make it identically zero; see the module docstring.
     energy_balance_residual_W: float
     eta_optical_pce: float          # added signal / launched pump  (== metrics.power_conversion_*)
     eta_stokes_limit: float         # quantum-defect ceiling at the photon-weighted mean pump
@@ -133,8 +184,10 @@ def wall_plug_efficiency(amp: FiberAmplifier, result: SteadyStateResult,
                module docstring -- this is the caller's call, not something the solve knows.
 
     Returns a WallPlugBudget whose `chain` gives each stage's efficiency so the binding loss is
-    visible, and whose `energy_balance_residual_W` is an independent closure against
-    thermal.total_heat_W.
+    visible, and whose `energy_balance_residual_W` is an independent closure on the solve: the
+    launched power minus the exiting light minus the dissipation recomputed from the amplifier's
+    own rate equations (NOT from thermal.total_heat_W, against which the balance would be an
+    identity -- module docstring).
     """
     pumps = list(amp.pumps)
     if not pumps:
@@ -153,11 +206,10 @@ def wall_plug_efficiency(amp: FiberAmplifier, result: SteadyStateResult,
         raise ValueError("wall_plug_efficiency: tec_fraction_of_pump_heat must be >= 0")
 
     kinds = list(result.kind)
-    sig = [i for i, k in enumerate(kinds) if k == "signal"]
-    if not sig:
+    sig_all = [i for i, k in enumerate(kinds) if k == "signal"]
+    if not sig_all:
         raise ValueError("wall_plug_efficiency: the result carries no signal channel")
-    if signal_index is not None:
-        sig = [sig[int(signal_index)]]
+    sig = sig_all if signal_index is None else [sig_all[int(signal_index)]]
     p_sig_out = float(np.sum(result.power_W[sig, -1]))
     p_sig_in = float(np.sum(result.power_W[sig, 0]))
 
@@ -184,11 +236,15 @@ def wall_plug_efficiency(amp: FiberAmplifier, result: SteadyStateResult,
         heat = float(total_heat_W(result))
     except Exception:                                       # pragma: no cover - defensive
         heat = float("nan")
-    # Independent closure: every watt launched must exit as light or become heat.
-    launched_total = p_pump_launched + p_sig_in
+    # Independent closure: every watt launched must exit as light or become heat -- with the heat
+    # taken from the LOCAL RATE BALANCE, not from total_heat_W, which would make the statement an
+    # identity (module docstring). launched_total counts EVERY signal, whatever signal_index
+    # selected for the efficiency numerator: this is an energy balance over the whole fiber.
+    launched_total = p_pump_launched + float(np.sum(result.power_W[sig_all, 0]))
     exiting = float(np.sum([result.power_W[i, -1] if result.u[i] > 0 else result.power_W[i, 0]
                             for i in range(result.power_W.shape[0])]))
-    residual = launched_total - exiting - heat
+    heat_rate = _dissipated_power_W(amp, result)
+    residual = launched_total - exiting - heat_rate
 
     eta_abs = p_pump_absorbed / p_pump_launched if p_pump_launched > 0.0 else float("nan")
     chain = {
@@ -216,8 +272,14 @@ def wall_plug_efficiency(amp: FiberAmplifier, result: SteadyStateResult,
         notes.append("extraction exceeds the quantum-defect ceiling (%.4f) -- the solve is not "
                      "physical, or duty_cycle/signal_index is mismatched"
                      % chain["eta_extraction"])
-    if abs(residual) > 0.02 * max(launched_total, 1e-30):
-        notes.append("optical power balance closes to only %.3g W of %.3g W launched"
+    if not np.isfinite(residual):
+        notes.append("the independent optical power balance is unavailable for this amplifier "
+                     "class (it needs the mean-field right-hand side), so "
+                     "energy_balance_residual_W is NaN rather than zero")
+    elif abs(residual) > _BALANCE_NOTE_FRAC * max(launched_total, 1e-30):
+        notes.append("optical power balance closes to only %.3g W of %.3g W launched -- the "
+                     "returned P(z) does not satisfy the amplifier's own rate equations to the "
+                     "mesh's discretization error; check meta['converged'] and raise n_nodes"
                      % (residual, launched_total))
 
     return WallPlugBudget(

@@ -139,7 +139,16 @@ class _McCumberEmission:
 # criteria were (i) sigma_a strictly DECREASING over 1533-1570 nm, (ii) the trusted 1530 and 1560 nm
 # anchor values perturbed by < 2%, (iii) no perturbation of the 980 / 1480 nm pump bands. A grid
 # search over (peak, centre, FWHM) returned this as the minimum-perturbation single Gaussian:
-# 1530 nm moves +1.54%, 1560 nm +0.99%, and the pump bands move by < 1e-49 m^2 (i.e. not at all).
+# 1530 nm moves +1.54%, 1560 nm +0.99%.
+#
+# WHAT "no perturbation of the pump bands" MEANS, re-measured (the earlier "< 1e-49 m^2" was a
+# sigma_a-only statement and only exact AT the band centres). sigma_a at 976, 980, 1480 and 1490 nm
+# is bit-identical -- the difference is EXACTLY 0.0, not merely small. Away from the 1480 nm
+# centre the new Gaussian's tail does reach: +4.37e-37 m^2 at 1500 nm (rel 1.09e-11), +2.04e-32 at
+# 1510 (1.17e-06), +5.62e-29 at 1520 (8.38e-04) -- i.e. negligible everywhere a 1480 nm pump
+# actually sits, but not identically zero across the band. sigma_e at 1480 nm moves by 5981x, and
+# that is the DELIBERATE part of the refit (see erbium()'s docstring: the legacy sigma_e(1480) was
+# 4.6e-30 m^2, which said an in-band pump could fully invert Er).
 _ER_CBAND_REFIT_PEAK = (1.543e-6, 0.014e-6, 1.0e-25)
 
 
@@ -194,17 +203,23 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
 
     KNOWN CONSEQUENCE OF THE RED-SIDE BEHAVIOUR, measured, and the one thing to watch now that this
     is the default: the GAIN-TILT PEAK at LOW inversion moves out of the C band. Peak wavelength of
-    Gamma n_t (sigma_e nbar2 - sigma_a (1 - nbar2)) scanned over 1520-1620 nm:
+    the bare local gain sigma_e nbar2 - sigma_a (1 - nbar2), scanned over 1520-1620 nm on a 0.1 nm
+    grid (RE-MEASURED; the 0.60 row previously read 1531.8 nm, which is the value a Gamma(lambda)
+    weighting gives, not this one):
 
-        nbar2      0.95    0.90    0.70    0.60    0.50    0.45    0.35
-        legacy    1532.5  1532.5  1533.8  1535.0  1536.8  1537.5  1539.8  nm
-        refit     1530.8  1530.8  1531.0  1531.8  1567.8  1569.2  1576.0  nm
+        nbar2      0.95    0.90    0.70    0.61    0.60    0.50    0.45    0.35
+        legacy    1532.5  1532.6  1533.8  1534.8  1535.0  1536.7  1537.7  1539.7  nm
+        refit     1530.8  1530.8  1531.1  1531.6  1566.3  1568.1  1569.6  1576.3  nm
 
-    The two agree wherever an EDFA actually operates (nbar2 >~ 0.6). Below about 0.5 the refit puts
-    the peak in the L band, which is qualitatively right -- L-band EDFAs really do run at low
-    inversion -- but the POSITION is not trustworthy because sigma_e there rests on the extrapolated
-    tail. If you need gain tilt at low inversion, or the L band at all, use cband_refit=False or
-    supply measured spectra.
+    The refit's C-band-to-L-band CROSSOVER is at nbar2 = 0.6028 -- a step, not a drift, because two
+    separated maxima swap rank. Folding in a mode overlap Gamma(lambda) (which falls to the red)
+    pushes it down only to 0.589-0.598 for the single-mode EDFs in this repo. So nbar2 = 0.60 sits
+    ON the boundary and the safe statement is nbar2 >~ 0.61, where every weighting still puts the
+    peak at 1531.6 nm; the two models agree there. Below the crossover the refit puts the peak in
+    the L band, which is qualitatively right -- L-band EDFAs really do run at low inversion -- but
+    the POSITION is not trustworthy because sigma_e there rests on the extrapolated tail. If you
+    need gain tilt near or below nbar2 ~ 0.6, or the L band at all, use cband_refit=False or supply
+    measured spectra.
 
     VALIDITY of the refit: 1520-1570 nm, and it is NOT an L-band model. Outside that window the
     derived sigma_e is the product of two things that nearly cancel -- sigma_a's GAUSSIAN TAIL,
@@ -215,10 +230,21 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     agreement is a C-band statement. For the L band, fit RareEarthIon.mccumber_eps_J and supply a
     tabulated sigma_a that carries the real long-wavelength tail (audit F-12).
 
-    RE-BASELINING. Because this is now the default, C-band numbers move by roughly 0.1-0.5 dB of
-    gain and a few percent of PCE relative to the pre-2026-08 model; the affected gates and the
-    achieved-number block of docs/fiber_amp_model_spec.md were re-measured when the default flipped.
-    cband_refit=False reproduces the old ion EXACTLY for anyone reproducing an old result.
+    RE-BASELINING, and it is REGIME-DEPENDENT -- the "0.1-0.5 dB" this docstring used to quote is a
+    SATURATED-regime figure and badly understates the small-signal move. Re-measured at 1550 nm on
+    the reference 1.4 um-core / NA 0.23 / 1e25 m^-3 / 8 m EDFA at 300 mW of 976 nm pump, refit
+    minus legacy:
+
+        5 mW in (deep saturation)   +0.03 dB gain, +0.004 PCE
+        100 uW in                   +2.68 dB gain, +0.042 PCE
+        1 uW in (small signal)      +2.96 dB gain
+
+    Deep saturation is pump-limited, so the cross-sections barely matter; small-signal gain is
+    cross-section-limited and is where the +7% sigma_e at 1550 nm shows up at full leverage. A
+    shorter, weakly pumped preamp is milder (+0.75 dB on a 3 m / 50 mW fiber at 1 uW). The affected
+    gates and the achieved-number block of docs/fiber_amp_model_spec.md were re-measured when the
+    default flipped. cband_refit=False reproduces the old ion EXACTLY for anyone reproducing an old
+    result.
     """
     a_peaks = [
         (0.980e-6, 0.013e-6, 1.7e-25),                # 4I11/2 (980 nm pump)

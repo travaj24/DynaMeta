@@ -104,12 +104,39 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
     WHAT THE ELECTRONICS DO **NOT** ENTER, deliberately:
       * `nf_beat_dB` -- the amplifier's noise figure is a property of the AMPLIFIER and must not
         depend on what detects it (the same reasoning as audit S3-10, which removed an eta factor
-        for reporting sub-quantum-limit NF). It is computed from `var_optical` alone.
+        for reporting sub-quantum-limit NF). It is computed from the DETECTOR-FREE optical
+        variance: no thermal term, no dark current, and no avalanche excess noise (see below).
       * `added_rin_per_Hz` -- the excess intensity noise the AMPLIFIER adds; thermal noise is not
         intensity noise on the field.
-    `snr_elec_dB` DOES include them: it is what the receiver actually achieves.
+    `snr_elec_dB` DOES include them: it is what the receiver actually achieves, and
+    `meta['snr_optical_dB']` is the same receiver with its electronics removed but its DIODE
+    (dark current, avalanche gain) kept.
+
+    THE THREE DETECTOR KNOBS THAT STILL LEAKED INTO `nf_beat_dB` (post-audit fix). `var_optical`
+    is not detector-free: it carries the photodiode's dark-current shot noise and, with an APD,
+    the excess-noise factor F. Both were measured moving the reported AMPLIFIER noise figure --
+    +9.58 dB at a 10 mA dark current, +0.44 dB at F = 60 -- while the avalanche gain M cancelled
+    correctly. The NF's SNR is therefore built from a variance with `I_dark_A = 0` and with
+    neither M nor F applied; M cancels identically in `(M I)^2 / (M^2 var)` and F does not, so
+    dropping both is what makes the number a property of the amplifier alone.
     """
     from dynameta.optics.fiber_amp.noise import _meta_m_modes
+    # Input validation. Every one of these produced a silently wrong number rather than an error:
+    # a negative temperature or dark current makes a NEGATIVE variance (and then an `inf` SNR from
+    # the var_total <= 0 branch), load_ohm = 0.0 was falsy and silently dropped the Johnson term
+    # it was asked for, and a non-finite M or F slipped past the `M <= 0 or F < 1` test below
+    # because every comparison with NaN is False.
+    if float(temperature_K) < 0.0:
+        raise ValueError("detection_noise: temperature_K must be >= 0 (got %r)" % (temperature_K,))
+    if load_ohm is not None and not (float(load_ohm) > 0.0):
+        raise ValueError("detection_noise: load_ohm must be > 0, or None to omit the Johnson "
+                         "term (got %r)" % (load_ohm,))
+    if float(dark_current_A) < 0.0:
+        raise ValueError("detection_noise: dark_current_A must be >= 0 (got %r)"
+                         % (dark_current_A,))
+    if not (np.isfinite(apd_gain) and np.isfinite(apd_excess_noise_F)):
+        raise ValueError("detection_noise: apd_gain and apd_excess_noise_F must be finite; "
+                         "got M=%r, F=%r" % (apd_gain, apd_excess_noise_F))
     m_modes = _meta_m_modes(result, m_modes)     # default: the value the solve used (audit S3-31)
     nr = analyze_noise(result, signal_lambda_m, m_modes=m_modes)
     G = nr.gain_lin
@@ -138,6 +165,17 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
     I_sig, I_ase = v["I_sig"], v["I_ase"]
     var_shot, var_sig_sp, var_sp_sp = v["shot"], v["sig_spont"], v["spont_spont"]
     var_optical = v["total"]
+    # The AMPLIFIER-referred variance the noise figure is read from: same beat algebra with the
+    # DETECTOR's own dark current removed (and, below, with the APD block skipped). At the default
+    # dark_current_A = 0.0 this is the same object, so the no-electronics path performs no extra
+    # arithmetic and stays byte-identical.
+    I_sig_nf = I_sig
+    if dark_current_A:
+        var_optical_nf = beat_noise_variances(P_sig_out, rho_sp, responsivity_A_W=R,
+                                              electrical_bw_Hz=B_e, optical_bw_Hz=B_o,
+                                              m_pol=m_modes, I_dark_A=0.0)["total"]
+    else:
+        var_optical_nf = var_optical
 
     # Avalanche multiplication (audit F-5). Shot noise carries M^2 F, the beat terms and the mean
     # photocurrent carry M^2 and M; M = F = 1 is the identity and performs no arithmetic at all.
@@ -168,8 +206,11 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
     # OPTICAL variance ONLY, for the same reason (audit F-5): a noisier front end must not be
     # reported as a noisier amplifier. With no electronics supplied the two coincide exactly.
     snr_optical = I_sig ** 2 / var_optical if var_optical > 0.0 else np.inf
+    # ... and the NF from the AMPLIFIER-referred variance: no thermal term, no dark current, no
+    # avalanche multiplication. M would cancel anyway ((M I)^2 / (M^2 var)); F would NOT.
+    snr_optical_nf = I_sig_nf ** 2 / var_optical_nf if var_optical_nf > 0.0 else np.inf
     snr_in = P_sig_in / (2.0 * H_PLANCK * nu_s * B_e)
-    nf_beat = snr_in / snr_optical if snr_optical > 0.0 else np.inf
+    nf_beat = snr_in / snr_optical_nf if snr_optical_nf > 0.0 else np.inf
     added_rin = (var_sig_sp + var_sp_sp) / (I_sig ** 2 * B_e) if I_sig > 0.0 else np.inf
 
     return BeatNoiseResult(
@@ -179,6 +220,9 @@ def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
         meta={"rho_sp_W_per_Hz": float(rho_sp), "gain_lin": float(G),
               "P_signal_out_W": P_sig_out, "P_signal_in_W": P_sig_in,
               "snr_optical_dB": float(_DB(snr_optical)),
+              # the amplifier-referred SNR nf_beat_dB is built from; equal to snr_optical_dB
+              # whenever no dark current and no APD excess noise were supplied
+              "snr_optical_nf_dB": float(_DB(snr_optical_nf)),
               "dark_current_A": float(dark_current_A)},
         var_thermal=float(var_thermal), var_optical=float(var_optical),
         apd_gain=M, apd_excess_noise_F=F)

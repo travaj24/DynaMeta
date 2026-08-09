@@ -23,14 +23,20 @@ root between the two means is the threshold. ml_thresholds does that exactly and
 midpoint when the variances are equal.
 
 SCOPE. Gaussian semi-analytic error rates -- exact for this noise model, and the standard tool for
-error rates far below what Monte-Carlo can reach (a Q of 50 corresponds to a SER around 1e-500, so
-sampling is not an option). NOT modelled: ISI, receiver filter shaping beyond a noise-equivalent
-bandwidth, equalization, source RIN, clock recovery, or FEC coding gain. Those are link-design
-concerns above this layer.
+error rates far below what Monte-Carlo can reach. NOT modelled: ISI, receiver filter shaping beyond
+a noise-equivalent bandwidth, equalization, source RIN, clock recovery, or FEC coding gain. Those
+are link-design concerns above this layer.
+
+FLOAT64 IS THE FLOOR, not the model. Q(x) = 0.5 erfc(x/sqrt 2) underflows to exactly 0.0 just above
+x = 37.5, so `q_to_ser` and `pam_ser` return 0.0 -- not 1e-500 -- for any Q above that (the
+smallest representable double is 5e-324 in any case). `q_to_log10_ser` takes the log-domain route
+(scipy.special.log_ndtr) and stays exact arbitrarily deep in the tail: Q = 50 is
+log10 SER = -544.966336, Q = 100 is -2173.871543. Use it whenever the answer is meant to be READ
+rather than compared against a threshold that a 0.0 already satisfies.
 
 References: Agrawal, "Fiber-Optic Communication Systems" 4th ed. ch. 4-5 (IM/DD receiver, Q, PAM);
 Desurvire, "Erbium-Doped Fiber Amplifiers" ch. 2 (beat-noise variances); ITU-T G.975.1 and
-OIF-400ZR for the pre-FEC error-rate thresholds used by max_pam_order.
+OIF-400ZR for the pre-FEC BIT-error-rate thresholds used by max_pam_order.
 Pure numpy/scipy; SI units. ASCII only.
 """
 
@@ -45,25 +51,48 @@ import numpy as np
 from dynameta.constants import C_LIGHT, H_PLANCK, KB, Q_E, T_REF
 
 __all__ = ["PamFormat", "LevelStatistics", "LinkPerformance", "pam_levels_W", "gray_map",
-           "ml_thresholds", "pam_ser", "ser_to_ber", "q_to_ser", "level_statistics",
-           "link_performance", "max_pam_order", "FEC_THRESHOLDS"]
+           "ml_thresholds", "pam_ser", "ser_to_ber", "q_to_ser", "q_to_log10_ser",
+           "level_statistics", "link_performance", "max_pam_order", "FEC_THRESHOLDS"]
 
-# Pre-FEC error-rate thresholds a link is usually designed to. 'hard' is the classic
+# Pre-FEC BIT-error-rate thresholds a link is usually designed to. 'hard' is the classic
 # hard-decision-FEC operating point; 'ofec'/'sd' are soft-decision thresholds (OIF-400ZR uses
 # ~2e-2). These are DESIGN CONVENTIONS, quoted so max_pam_order's default is not a bare magic
-# number -- not physics.
+# number -- not physics. They are BER, not SER: G.975.1 and OIF-400ZR both specify a pre-FEC BER,
+# and for a Gray-coded PAM-N the two differ by log2(N) -- a whole octave of constellation
+# (measured: 4 of 9 operating points changed order when max_pam_order was corrected to compare
+# the BER).
 FEC_THRESHOLDS: Dict[str, float] = {"none": 1e-12, "hard": 1e-3, "ofec": 2.0e-2, "sd": 2.0e-2}
+
+# The ADC relation SNR = 6.02 N + 1.76 dB is defined for a FULL-SCALE SINE, whose rms is
+# (swing/2)/sqrt(2) = swing/(2 sqrt 2). LinkPerformance.snr_elec_dB is the PEAK-TO-PEAK swing over
+# the rms noise, so it must be reduced by 20 log10(2 sqrt 2) = 9.0309 dB before the relation
+# applies. Feeding the peak-to-peak ratio in directly -- which this module did -- overstates ENOB
+# by exactly 9.0309/6.02 = 1.5001 bits at every operating point.
+_SINE_PP_TO_RMS_DB = 20.0 * math.log10(2.0 * math.sqrt(2.0))
 
 
 def _qfunc(x):
-    """Gaussian tail Q(x) = 0.5 erfc(x/sqrt(2)); stable far into the tail."""
+    """Gaussian tail Q(x) = 0.5 erfc(x/sqrt(2)). Underflows to 0.0 at x ~ 37.5 -- see
+    q_to_log10_ser for the log-domain route."""
     from scipy.special import erfc
     return 0.5 * erfc(np.asarray(x, dtype=np.float64) / math.sqrt(2.0))
 
 
 def q_to_ser(q: float) -> float:
-    """Binary (OOK) symbol error rate from a Q factor: SER = Q_func(q)."""
+    """Binary (OOK) symbol error rate from a Q factor: SER = Q_func(q). Underflows to 0.0 for
+    q >~ 37.5 (module docstring); q_to_log10_ser is the log-domain form."""
     return float(_qfunc(float(q)))
+
+
+def q_to_log10_ser(q) -> float:
+    """log10 of the binary (OOK) symbol error rate at a Q factor, via scipy.special.log_ndtr(-q)
+    -- the LOG-DOMAIN route, exact arbitrarily deep in the tail where q_to_ser has underflowed to
+    0.0 (q >~ 37.5). log_ndtr is the log of the standard normal CDF, and Q(q) = Phi(-q).
+
+    Anchors (measured): q = 7 -> -11.892854, q = 37.5 -> -307.336737 (the last value q_to_ser can
+    represent -- q = 38 already returns 0.0), q = 50 -> -544.966336, q = 100 -> -2173.871543."""
+    from scipy.special import log_ndtr
+    return float(log_ndtr(-float(q)) / math.log(10.0))
 
 
 @dataclass(frozen=True)
@@ -280,8 +309,8 @@ class LinkPerformance:
     ber: float
     q_factor: float
     osnr_dB: float                  # in ref_bw_nm, measured BEFORE the passive loss (loss-invariant)
-    snr_elec_dB: float              # on the full PAM swing
-    enob: float                     # (SNR_dB - 1.76) / 6.02
+    snr_elec_dB: float              # PEAK-TO-PEAK PAM swing over the rms noise
+    enob: float                     # (snr_elec_dB - 9.0309 - 1.76) / 6.02 -- see _SINE_PP_TO_RMS_DB
     p_rx_mean_dBm: float
     dominant_noise: str
     meta: Dict[str, float] = field(default_factory=dict)
@@ -318,9 +347,11 @@ def link_performance(fmt: PamFormat, *, rho_sp_W_Hz: float, signal_lambda_m: flo
     snr_dB = 20.0 * math.log10(swing / sigma_rms) if sigma_rms > 0.0 else float("inf")
     p_rx = float(np.mean(st.levels_W))
     dom = max(st.terms_A2, key=lambda k: float(st.terms_A2[k][-1]))
+    enob = ((snr_dB - _SINE_PP_TO_RMS_DB - 1.76) / 6.02 if math.isfinite(snr_dB)
+            else float("inf"))
     return LinkPerformance(
         fmt=fmt, levels=st, ser=ser, ber=ber, q_factor=st.worst_q, osnr_dB=osnr,
-        snr_elec_dB=snr_dB, enob=(snr_dB - 1.76) / 6.02,
+        snr_elec_dB=snr_dB, enob=enob,
         p_rx_mean_dBm=10.0 * math.log10(max(p_rx, 1e-300) * 1e3),
         dominant_noise=dom.replace("_", "-"),
         meta={"responsivity_A_W": R, "electrical_bw_Hz": (float(electrical_bw_Hz)
@@ -330,11 +361,17 @@ def link_performance(fmt: PamFormat, *, rho_sp_W_Hz: float, signal_lambda_m: flo
               "ref_bw_nm": float(ref_bw_nm)})
 
 
-def max_pam_order(fmt: PamFormat, *, target_ser: float = FEC_THRESHOLDS["ofec"],
+def max_pam_order(fmt: PamFormat, *, target_ber: float = FEC_THRESHOLDS["ofec"],
                   orders: Sequence[int] = (2, 4, 8, 16, 32, 64, 128), **kw) -> int:
-    """The largest PAM order in `orders` that meets target_ser at this operating point, holding the
+    """The largest PAM order in `orders` that meets target_ber at this operating point, holding the
     MEAN power fixed (so the amplifier's operating point is identical across orders and only the
     receiver's job gets harder). Returns 0 if even the smallest order fails.
+
+    The comparison is against the BIT error rate, because that is what FEC_THRESHOLDS are: G.975.1
+    and OIF-400ZR both specify a pre-FEC BER. Scoring the SYMBOL error rate against them -- as this
+    function originally did -- is wrong by log2(N), which is an entire octave of constellation:
+    measured on a 9-point (0-20 dB) loss sweep of the reference operating point, 4 of the 9 answers
+    moved, every one of them by exactly one octave (e.g. 5 dB of loss: 64, not 32).
 
     Extra keywords are forwarded to link_performance.
     """
@@ -342,6 +379,6 @@ def max_pam_order(fmt: PamFormat, *, target_ser: float = FEC_THRESHOLDS["ofec"],
     best = 0
     for o in orders:
         r = link_performance(replace(fmt, order=int(o)), **kw)
-        if np.isfinite(r.ser) and r.ser <= float(target_ser):
+        if np.isfinite(r.ber) and r.ber <= float(target_ber):
             best = int(o)
     return best

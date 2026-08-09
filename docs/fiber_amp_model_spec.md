@@ -155,10 +155,15 @@ pre-2026-08 values are kept in parentheses and are reproducible with `erbium(cba
   3.32 dB (was 3.66-3.84), while a short heavily-doped preamp reaches NF -> 2.96 dB (n_sp -> 1.00),
   the 3.01 dB quantum floor. NF(PSD) == (2 n_sp(G-1)+1)/G to 1e-6.
 - Slope efficiency 0.548 <= Stokes 0.628 (87%); PCE 0.553 < ceiling. (was 0.602/96%, PCE 0.597.)
-- Gain-tilt peak migrates 1530.8 -> 1531.8 nm as inversion drops 0.95 -> 0.60 (was 1532.5 ->
-  1535.0). BELOW nbar2 ~ 0.5 the refit puts the peak in the L BAND (1567.8 nm at 0.50, 1576.0 at
-  0.35, against the legacy model's 1536.8 / 1539.8) -- qualitatively right, since L-band EDFAs do
-  run at low inversion, but the POSITION rests on an extrapolated sigma_e tail and is not
+- Gain-tilt peak (of the bare `sigma_e nbar2 - sigma_a (1 - nbar2)`, 1520-1620 nm on a 0.1 nm grid)
+  migrates 1530.8 -> 1531.6 nm as inversion drops 0.95 -> **0.61** (was 1532.5 -> 1534.8).
+  RE-MEASURED: this line previously read "-> 1531.8 nm at 0.60", which is the value a Gamma(lambda)
+  weighting gives; the bare spectrum is already at **1566.3 nm at nbar2 = 0.60**, because the
+  refit's C-to-L crossover is a STEP at **nbar2 = 0.6028** (0.589-0.598 with a single-mode EDF's
+  Gamma folded in). So 0.60 sits ON the boundary and 0.61 is the first inversion that is safe on
+  every weighting. Below the crossover the refit puts the peak in the L BAND (1568.1 nm at 0.50,
+  1576.3 at 0.35, against the legacy model's 1536.7 / 1539.7) -- qualitatively right, since L-band
+  EDFAs do run at low inversion, but the POSITION rests on an extrapolated sigma_e tail and is not
   trustworthy. Use `cband_refit=False` or measured spectra for low-inversion gain tilt or the
   L band; see the `erbium()` docstring.
 - Concentration OPT-IN: concentration=None is byte-identical to an all-default ConcentrationModel.
@@ -299,7 +304,8 @@ kappa(x) = tanh(x^2)/x^2,  x = b/w   ==>  P_sat_resolved = kappa P_sat_meanfield
 
 **Mode profiles.** Core-guided channels use the EXACT LP field (`lma.mode_field`) whenever
 `V > 2.405`, and the Marcuse Gaussian (`waveguide.mode_field_radius_m`) only below it. At
-`V = 8.2` the Gaussian's `Gamma` is 1.1% off but its SATURATION integral is off by up to 13%
+`V = 8.2193` the Gaussian's `Gamma` is 1.332% off (0.979180 against the exact LP01 0.992394;
+RE-MEASURED -- this line used to say 1.1%) but its SATURATION integral is off by up to 13%
 (0.85 dB/m) -- the dossier's binding correction. Cladding pumps are flat over the inner
 cladding, so `waveguide.cladding_pump_overlap` becomes an OUTPUT of the quadrature. A signal may
 carry an explicit `LPMode` (multi-mode competition, mutually incoherent, ONE shared
