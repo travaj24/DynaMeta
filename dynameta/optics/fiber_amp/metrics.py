@@ -32,7 +32,8 @@ from dynameta.optics.fiber_amp.steady_state import (FiberAmplifier, Signal, Stea
 
 __all__ = ["CompressionCurve", "SlopeEfficiency", "GainSpectrum",
            "gain_compression_curve", "saturation_output_power", "power_conversion_efficiency",
-           "slope_efficiency", "gain_spectrum", "gain_flatness", "stokes_limit"]
+           "slope_efficiency", "gain_spectrum", "gain_flatness", "stokes_limit",
+           "effective_pump_lambda_m"]
 
 
 # ---- amplifier cloning helpers -------------------------------------------------------------
@@ -155,8 +156,36 @@ def saturation_output_power(amp: FiberAmplifier, *, signal_index: int = 0,
 def stokes_limit(pump_lambda_m: float, signal_lambda_m: float) -> float:
     """Quantum-defect (Stokes) efficiency ceiling lambda_pump/lambda_signal: the maximum fraction
     of pump POWER convertible to signal power (each pump photon yields at most one signal photon
-    of lower energy). 980/1560 ~ 0.628 for Er; 976/1030 ~ 0.947 for Yb."""
+    of lower energy). 980/1560 ~ 0.628 for Er; 976/1030 ~ 0.947 for Yb.
+
+    For a MULTI-WAVELENGTH pump use effective_pump_lambda_m(pumps) for the first argument."""
     return float(pump_lambda_m / signal_lambda_m)
+
+
+def effective_pump_lambda_m(pumps) -> float:
+    """The single pump wavelength whose Stokes ceiling is correct for a MULTI-WAVELENGTH pump
+    (audit 2026-08-04 F-4): the PHOTON-FLUX-weighted mean
+
+        lambda_eff = (SUM_i P_i) / (SUM_i P_i / lambda_i)
+
+    (a power-weighted HARMONIC mean of the wavelengths). The quantum defect is a per-PHOTON
+    statement -- each pump photon converts to at most one signal photon -- so the ceiling is set by
+    the total photon flux, not by any one wavelength.
+
+    Why it matters: dual-wavelength pumping is standard in both ions this package targets (915 +
+    976 nm for Yb, 980 + 1480 nm for Er), and slope_efficiency used to report the ceiling from
+    `pumps[0]` alone. MEASURED on a 3 um-core / NA 0.12 / 6e25 m^-3 / 4 m Yb amplifier at 1060 nm
+    with 1 W at each of 915 and 976 nm: the reported ceiling was 0.8632 (915 nm alone) while the
+    measured slope was 0.8660 -- an apparent violation of energy conservation that is purely a
+    bookkeeping artifact, and that vanishes on swapping the pump order. The correct ceiling here is
+    0.8911.
+
+    Reduces EXACTLY to pumps[0].lambda_m for a single pump, and to the same value for any number of
+    pumps that share a wavelength. Returns NaN if the total pump power is zero.
+    """
+    num = float(sum(float(p.power_W) for p in pumps))
+    den = float(sum(float(p.power_W) / float(p.lambda_m) for p in pumps))
+    return num / den if den > 0.0 else float("nan")
 
 
 def power_conversion_efficiency(amp: FiberAmplifier, result: SteadyStateResult) -> float:
@@ -180,8 +209,11 @@ def slope_efficiency(amp: FiberAmplifier, pump_W: Sequence[float], *, signal_ind
     """Sweep the launched pump at a FIXED, gain-saturating input signal and fit the slope
     dP_signal_out/dP_pump above the transparency threshold. The saturating signal ensures the
     extracted power goes into the signal rather than ASE, so the slope tends toward the Stokes
-    ceiling for an efficient amplifier. Uses signal channel signal_index; its pump/signal
-    wavelengths set the Stokes limit."""
+    ceiling for an efficient amplifier. Uses signal channel signal_index.
+
+    The reported `stokes_limit` uses the PHOTON-WEIGHTED mean pump wavelength
+    (effective_pump_lambda_m), so it is correct for a multi-wavelength pump; it is unchanged for a
+    single pump (audit F-4)."""
     pump = np.atleast_1d(np.asarray(pump_W, float))
     if saturating_signal_W is not None:
         amp = _set_signal(amp, float(saturating_signal_W), signal_index)
@@ -199,7 +231,10 @@ def slope_efficiency(amp: FiberAmplifier, pump_W: Sequence[float], *, signal_ind
         slope = float(np.polyfit(pump[sel], s_out[sel], 1)[0])
     else:
         slope = np.nan
-    lam_p = amp.pumps[0].lambda_m
+    # Photon-weighted over ALL pumps (audit F-4). Read AFTER the sweep so that a stage which does
+    # not implement the re-seed protocol still fails inside _set_total_pump with its own TypeError
+    # (tests/test_fiber_chain.py pins that message), rather than here.
+    lam_p = effective_pump_lambda_m(amp.pumps)
     lam_s = amp.signals[signal_index].lambda_m
     return SlopeEfficiency(pump, s_out, slope, thr, stokes_limit(lam_p, lam_s))
 

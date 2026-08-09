@@ -85,7 +85,9 @@ def metastable_fraction(ch: ChannelSet, powers_W, fiber: FiberSpec, *,
     R_a = float(np.sum(ch.sigma_a * flux))
     R_e = float(np.sum(ch.sigma_e * flux))
     tau_s = ch.tau_s
-    if upconversion_C_up <= 0.0:
+    # The quadratic branch below divides by C_up * n_t, so it needs BOTH positive. n_t == 0 is an
+    # undoped fiber (audit F-10): no ions to upconvert, so the linear form is exact, not just safe.
+    if upconversion_C_up <= 0.0 or fiber.n_t_m3 <= 0.0:
         return tau_s * R_a / (1.0 + tau_s * (R_a + R_e))
     # cooperative upconversion: balance R_a(1-n) = n/tau + R_e n + C_up n_t n^2 -> quadratic in n
     A2 = upconversion_C_up * fiber.n_t_m3
