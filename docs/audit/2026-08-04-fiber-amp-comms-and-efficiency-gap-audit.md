@@ -15,10 +15,14 @@ pump (method in sec. "Verification method" below). What it did find is a) one qu
 consumer to reimplement package internals**, and c) two **whole missing layers** that the package's
 own roadmap documents assume will exist.
 
-**STATUS: all 14 findings IMPLEMENTED, 2026-08-05.** This document was written as a report ("no
-library code was modified"); the fixes landed the following day. Each finding's section now carries
-an **IMPLEMENTED** note recording what was actually done and where it diverged from the suggestion
-here. Gates live in `tests/test_audit_2026_08_04_fiber_amp.py` (66 tests, one class per finding).
+**STATUS: all 14 findings IMPLEMENTED, 2026-08-05; adversarially verified and re-worked
+2026-08-08.** This document was written as a report ("no library code was modified"); the fixes
+landed the following day, and an adversarial verification pass over the implementation produced a
+further 21 corrections (see "Post-implementation verification" below). What records what was
+actually done, and where it diverged from the suggestions here, is the **implementation-record
+table** in the next section -- there is no per-finding IMPLEMENTED note inside the sections below,
+and an earlier version of this sentence claimed there was. Gates live in
+`tests/test_audit_2026_08_04_fiber_amp.py` (81 tests in 12 classes).
 
 Two corrections to this document, found while implementing and confirmed by measurement -- recorded
 rather than quietly edited away, since the original claims were wrong:
@@ -59,7 +63,12 @@ rather than quietly edited away, since the original claims were wrong:
 
 ## Implementation record (2026-08-05)
 
-All 14 landed. Gates: `tests/test_audit_2026_08_04_fiber_amp.py` (68 tests, one class per finding).
+All 14 landed. Gates: `tests/test_audit_2026_08_04_fiber_amp.py` -- **81 tests in 12 classes**, not
+"one class per finding" as this line used to say. The map is: F-1, F-2, F-3, F-4, F-6, F-7, F-9,
+F-10, F-12, F-13, F-14 have a class each; **F-5 and F-8 SHARE `TestF5F8Detection`** (one signature
+change fixed both); **F-11 has NO class** -- it is a docstring-only finding (the `erbium()` summary
+now names the 1480 nm in-band pump) and there is nothing behavioural to gate.
+
 Regression control: the failure set of the full suite is **IDENTICAL** with and without these
 changes (26 failures in the affected files either way, all `ModuleNotFoundError` on absent optional
 extras -- `tmm`, DEVSIM, ngsolve). The fiber suite is 151/151 and the cross-solver 1e-9 reduction
@@ -67,7 +76,7 @@ gates are 62/62.
 
 | # | Implemented as | Deviation from the suggestion in this document |
 |---|---|---|
-| F-1 | `erbium(cband_refit=True)`: one fitted C-band `sigma_a` Gaussian (1.543 um, FWHM 14 nm, peak 1.0e-25) plus `sigma_e` DERIVED from `sigma_a` by McCumber. Consistency exact (1.000000x vs 2.058x); `sigma_a` monotone over 1533-1570 nm; 1530/1560 anchors move +1.54%/+0.99%; pump bands bit-identical; 1480 nm now correctly bleaches (max inversion 0.7425, not 1.0). | **OPT-IN; the default is unchanged.** The default carries six pinned numbers with thin margins and `EDFA_CBAND_TARGETS` is itself pinned at 1550 nm, so flipping it is a re-baselining decision rather than a fix to smuggle in -- a one-line change when wanted. Suggestions (b) and (c) were combined: anchor re-fit AND McCumber closure, which needs no external dataset. |
+| F-1 | `erbium(cband_refit=True)`: one fitted C-band `sigma_a` Gaussian (1.543 um, FWHM 14 nm, peak 1.0e-25) plus `sigma_e` DERIVED from `sigma_a` by McCumber. Consistency exact (1.000000x vs 2.058x); `sigma_a` monotone over 1533-1570 nm; 1530/1560 anchors move +1.54%/+0.99%; pump bands bit-identical; 1480 nm now correctly bleaches (max inversion 0.7425, not 1.0). | **`cband_refit=True` IS THE DEFAULT as shipped** (this row originally recorded the opt-in intermediate state; the commit that landed the audit flipped it and re-pinned the affected goldens -- test_fiber_amp.py and test_fiber_dynamics.py -- in the same change, and the full fast suite passed with the flip on the py3.10/3.12 CI legs of the first PR round). The re-baselining reasoning stands: anchors moved +1.54%/+0.99%, pump bands bit-identical. `cband_refit=False` remains available, and is the documented choice below inversion ~0.5 where the refit's L-band tail is extrapolated. Suggestions (b) and (c) were combined: anchor re-fit AND McCumber closure, which needs no external dataset. |
 | F-2 | `TransientResult.ase_fwd_W`/`ase_bwd_W`/`ase_lambda_m`/`ase_dnu_hz`/`plan`, `ase_psd_1pol_W_Hz()`, `frame_as_steady(index)`, `simulate_transient(store_profiles=)`. Transient ASE matches `output_ase_spectrum` on the same frame EXACTLY (0.0); `analyze_noise` on a fixed-point frame matches the steady solve to 0.005 dB NF. | As suggested. ASE is captured unconditionally (free); only the `(Nt, K, Nz)` matrix is opt-in. `meta` also carries `m_modes` and the per-z McCumber matrix, so a frame cannot mix a T_ref `sigma_e` with a hot `nbar2` (the A-6 trap in transient form). |
 | F-3 | `ChannelPlan` + `channel_plan()` on `FiberAmplifier` and `ErYbAmplifier`, with `indices(kind, direction)` and the plan-index == `power_W`-row contract gated. | `channels` is `None` for the co-doped case (two ions per channel, no single `ChannelSet`). `ResolvedFiberAmplifier` left alone -- its `_plan` is an 8-tuple with different meaning. |
 | F-4 | `metrics.effective_pump_lambda_m` (power-weighted harmonic = photon-flux-weighted); used by `slope_efficiency`. | As suggested. Read after the sweep so a stage lacking the re-seed protocol still fails with the message `test_fiber_chain.py` pins. |
@@ -76,10 +85,10 @@ gates are 62/62.
 | F-7 | New `efficiency.py`. Optical power balance closes against `total_heat_W` to 5.6e-17 W. | As suggested, including all three definitional choices; `duty_cycle` is a caller argument. |
 | F-8 | Folded into F-5's signature; delta gated against `2 q I_d B_e`. | As suggested. |
 | F-9 | `v_number`, `marcuse_validity() -> (ok, V_min, V_max)`, `V_MARCUSE_MIN/MAX`. | **NOT a warning, as this document suggested.** Two confirmed blockers: `lambda_m` is the whole channel array on the `ChannelSet.build -> overlap_gamma` hot path, so a scalar `if` on V raises; and under `filterwarnings=["error"]` a default warning turns ~10 working test files red. A query is the honest form; gated that no warning escapes a cladding-pumped solve. |
-| F-10 | `n_t_m3 == 0` accepted, with the three divide-by-density sites guarded. Gated against analytic Beer-Lambert to 1e-6, and 18 further entry points (noise, thermal, detection, SBS/SRS, MPI, transient, resolved solver) confirmed finite with `n_t = 0`. | As suggested, plus the guards this document listed only as caveats. |
+| F-10 | `n_t_m3 == 0` accepted, with the three divide-by-density sites guarded. Gated against analytic Beer-Lambert to 1e-6. | As suggested, plus the guards this document listed only as caveats. **The "18 further entry points confirmed finite" claim was unsupported** (2026-08-08 verification): no such gate existed, and `analyze_noise` on a passive span is NOT finite -- it returns `n_sp` NaN and `osnr_dB` +inf. Both are correct rather than broken (no inversion means no inversion factor; no ASE means no finite OSNR), and `nf_dB` correctly reduces to the attenuator's 1/G, so the resolution is a DOCUMENTED contract in `analyze_noise`'s docstring plus `TestF10PassiveFiber::test_the_noise_layer_on_a_passive_span_is_a_documented_contract`. What is now actually gated finite at `n_t = 0`, each on the same passive solve: `FiberAmplifier.solve` (`power_W`, `nbar2_z`), `output_ase_spectrum`, `thermal.heat_load_per_m`, `thermal.total_heat_W` (against the analytic attenuated power), `detection.detection_noise` (all three variances plus both SNRs), `simulate_transient` and `TransientResult.frame_as_steady`, `metastable_fraction` under upconversion, and `giles_calibrated_fiber`'s refusal. |
 | F-11 | `erbium()`'s docstring now names the 1480 nm in-band pump and its quantum-defect advantage. | As suggested. |
 | F-12 | `RareEarthIon.mccumber_eps_J` + `eps_J`, threaded through `sigma_e_mccumber`, `at_temperature` and `_mcc_matrix`. | **An additional defect was found while implementing:** `at_temperature` rebuilt the ion WITHOUT the new field, silently reverting a fitted eps on every T-scaled copy. Fixed and gated. |
-| F-13 | Peak-relative endpoint denominator (`_ENDPOINT_FLOOR_FRAC = 1e-9`) in a shared `_relaxation_residuals()`. Yb reference converges in 124 iterations instead of never; gains unchanged. Adversarially attacked with five fibers chosen to have a meaningful channel at a small endpoint (long reabsorbing Yb, counter- and bi-pumped, 40 m Er, a 200 nm ASE band): worst deviation from a `tol=1e-11`/2000-iteration solve is **8e-5 dB**, so no false convergence. | **Fixed in all THREE solvers.** `eryb.py` and `transverse.py` held byte-identical copies, so the defect existed in triplicate and a single-solver fix would have desynchronised the iteration counts the cross-solver 1e-9 gates compare. Deduplicating follows X-3's precedent. |
+| F-13 | Peak-relative endpoint denominator (`_ENDPOINT_FLOOR_FRAC = 1e-9`) in a shared `_relaxation_residuals()`. Yb reference at 0.243 mW converges in 118 iterations instead of never; gain 34.722738 dB against the old 34.722740. Adversarially attacked with fibers chosen to have a meaningful channel at a small endpoint (long reabsorbing Yb, counter- and bi-pumped, 40 m Er, a 200 nm ASE band): see the corrected bound at right. | **Fixed in all THREE solvers.** `eryb.py` and `transverse.py` held byte-identical copies, so the defect existed in triplicate and a single-solver fix would have desynchronised the iteration counts the cross-solver 1e-9 gates compare. Deduplicating follows X-3's precedent. **The "`tol=1e-11`/2000-iteration reference / worst 8e-5 dB" claim was wrong on both halves** (2026-08-08 verification): `tol=1e-11` is UNREACHABLE, because the sweeps run LSODA at `rtol=1e-7` and the inter-iterate residual therefore bottoms out there -- measured on the Yb reference, `tol` = 1e-8, 1e-9 and 1e-11 all stall at endpoint residual 6.405e-07 and exhaust `max_iter`, so the "reference" was max_iter-exhausted, never converged (`tol=1e-7` does converge, at 74 iterations). Re-measured against a reachable `tol=1e-7`/2000-iteration reference, the worst deviation among solves the flag calls CONVERGED is **1.06e-4 dB, on a 25 m reabsorbing Yb whose signal is dead at -143.4 dB**, and **5.2e-6 dB** across the physically meaningful cases (40 m Er 5.2e-6, 12 m reabsorbing Yb 1.4e-6, bi-pumped Yb 2.2e-7). The two cases that disagree by more (counter-pumped 0.12 dB, 40 m reabsorbing Yb 0.043 dB) are reported `converged=False` by both solves, i.e. they are not false convergence. |
 | F-14 | `solve(relax=)` (skipped entirely at the default 1.0, byte-identity verified on three fibers) + `endpoint_residual`/`profile_residual`/`relax`/`min_power_W` on `meta`. | Suggestions 1 and 2 implemented; suggestion 3 (sweep continuation) NOT -- it changes `solve`'s contract and is performance, not correctness. **Scope is WIDER than this document recorded -- see below.** |
 
 ### F-14 is broader than recorded: a COUNTER-PROPAGATING PUMP fails at any signal level
@@ -113,6 +122,57 @@ seeded, `0.2-0.3` for counter-pumped -- and always read `meta['converged']` and
 by a rounding error. The repo's own `co / counter / bi` gate (`test_fiber_amp.py:723`) passes because
 its Er fixture is far from this regime; **a counter-pumped high-gain Yb fixture would be a
 worthwhile addition to the suite.**
+
+---
+
+## Post-implementation verification (2026-08-08)
+
+An adversarial pass over the SHIPPED implementation confirmed every physics claim above and found
+21 further defects in it. All are fixed; the ones that changed a number a user reads are gated.
+
+**Wrong numbers (P1).**
+
+| # | Site | Defect and fix |
+|---|---|---|
+| K1 | `detection.py` | `nf_beat_dB` moved with the photodiode's DARK CURRENT (+0.13 dB at 10 mA on the reference EDFA) -- an AMPLIFIER noise figure that depends on its detector, the error audit S3-10 removed. The NF's SNR now comes from a dark-free variance. |
+| K2 | `detection.py` | Same, for the APD excess-noise factor `F` (+0.34 dB at F = 60; the avalanche GAIN `M` already cancelled bit-identically). `M` and `F` are both dropped from the NF's variance -- `M` cancels in `(M I)^2/(M^2 var)` anyway, `F` does not. The invariance gate now sweeps all four knobs; it previously swept only the two that were already invariant. |
+| K3 | `dynamics.py` | `frame_as_steady().signal_gain_dB` divided by `plan.launched_W`, the CONFIGURED input -- exactly what `signal_drive` overrides. Under a 2x drive the reported gain was high by the drive ratio itself (+3.010504 dB against 10 log10 2 = 3.010300), and it propagated into `metrics.gain_flatness` (23.086 dB where the truth is 3.086). Now `P[i, 0]`. |
+| K4 | `transverse.py`, `eryb.py` | The F-14 `relax=` remedy shipped in `steady_state` ONLY, while both other solvers run the SAME iteration. Measured counter-pumped Yb: `ResolvedFiberAmplifier` -30.105 dB `converged=False` against the mean-field twin's +17.891 dB -- a 48 dB gap with no knob. `relax` and the four `meta` diagnostics lifted into both; at `relax=0.3` the resolved solver converges to +17.952 dB, 0.0615 dB above the mean-field fixed point (positive, as a core-guided pump's TSHB should be). |
+
+**Verification that did not verify (P2).**
+
+| # | Site | Defect and fix |
+|---|---|---|
+| K5 | F-13 gate | Non-discriminating: the PRE-AUDIT stopping test also converges at its 20 mW / 201-node fixture, in 4 iterations. Moved to the audit's own 0.243 mW operating point (old: never converges in 400; new: 118 iterations at 34.722738 dB, both pinned). |
+| K6 | `efficiency.py` | The power-balance "closure" recomputed the sum `total_heat_W` expands to -- X - X, 5.6e-17 W on a deliberately corrupted solve. Rewritten against the dissipation recomputed from the amplifier's own RATE EQUATIONS: healthy 1.183e-06 W of 0.305 W launched (O(dz^2) discretization), corrupted 1.746e-03 W, a factor 1476. Note threshold tightened 2e-2 -> 1e-3 relative. |
+| K7 | F-6 per-level gate | Read both sides from the same `terms_A2` (circular), and its analytic flat term omitted `2 e (I_ase + I_dark) B_e` -- 336x its own stated `rel=1e-10`, surviving only on `pytest.approx`'s default `abs`. Replaced with a hand-written closed form at `rel=1e-10, abs=0` (matches to 1.7e-16), plus an explicit assertion that the incomplete form FAILS it. |
+| K8 | F-10 gate / doc | See the corrected F-10 record row above. |
+| K9 | `comms.py` | `max_pam_order` compared the SYMBOL error rate against `FEC_THRESHOLDS`, which are pre-FEC BIT error rates (G.975.1, OIF-400ZR). Wrong by log2(N) -- one full octave of constellation; 4 of 9 points on a 0-20 dB loss sweep moved. Now compares `r.ber`; the argument is `target_ber`. |
+| K10 | `comms.py` | SER underflows to exactly 0.0 above Q ~ 37.5 while the module docstring advertised 1e-500 at Q = 50. Added `q_to_log10_ser` (`scipy.special.log_ndtr`); Q = 100 is log10 SER = -2173.871543. |
+| K11 | `comms.py` | ENOB fed the PEAK-TO-PEAK swing ratio into the full-scale-SINE relation SNR = 6.02 N + 1.76 dB, overstating it by exactly 20 log10(2 sqrt 2)/6.02 = 1.5001 bits at every operating point. |
+
+**Docs contradicted by measurement (P3).** `spectroscopy.py`: the gain-tilt table's nbar2 = 0.60
+entry is 1566.3 nm, not 1531.8 -- the C-to-L crossover sits at nbar2 = 0.6028 (0.589-0.598 once a
+Gamma(lambda) weighting is folded in), so the safe boundary is nbar2 >~ 0.61 and the previously
+declared-safe 0.60 was ON it; the "0.1-0.5 dB" re-baselining figure is saturated-regime only
+(1550 nm small-signal measures +2.96 dB, +2.68 dB at 100 uW, +0.03 dB at 5 mW); "pump bands move
+< 1e-49 m^2" is exactly 0.0 at 976/980/1480/1490 nm but +4.4e-37 at 1500 and +5.6e-29 at 1520.
+`steady_state.py`: the "byte-identical to pre-2026-08" claim covers the BLEND only, not the result,
+because F-13 changed the stopping test in the same release; the `set_temperature_profile` docstring
+said `eps = hc/zero_line` where the code reads `ion.eps_J`. `thermal.py`: the 3-5x sigma_e(T) slope
+caveat is what the DEFAULT eps gives and is now tunable through `mccumber_eps_J` (F-12).
+`waveguide.py`, `__init__.py`, `steady_state.py` and `thermal.py`: `Gamma_p = A_core/A_clad` should
+read `A_dope/A_clad` in all four (S3-9 fixed the code, not the prose), and the Gaussian's Gamma
+error at V = 8.2193 is 1.332% (0.979180 against the exact LP01 0.992394), not ~1.1%.
+`transverse.py` and `fiber_amp_model_spec.md` carry the same 1.1% and are fixed with it.
+
+**Latent, fixed with tests.** `detection_noise` now rejects `temperature_K < 0`, `load_ohm <= 0`
+(0.0 was falsy and silently dropped the Johnson term asked for), `dark_current_A < 0`, and
+non-finite `apd_gain`/`apd_excess_noise_F` (which walked past the `M <= 0 or F < 1` test, since
+every comparison with NaN is False) -- each of them produced a negative variance or an `inf` SNR.
+`simulate_transient(store_profiles=True)` refuses an `(Nt, K, Nz)` allocation above 2 GiB with the
+shape in the message, before the initial solve and before any pages are committed; 6-12 GiB is
+reachable from three innocuous-looking arguments, and past a point that stops being an exception.
 
 ---
 

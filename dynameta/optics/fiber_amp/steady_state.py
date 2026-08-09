@@ -121,7 +121,8 @@ def _frozen_profile_interp(Y, z, L: float, n_nodes: int):
 class Pump:
     """A pump beam: power [W], wavelength [m], direction 'fwd' (co, seeded at z=0) or 'bwd'
     (counter, seeded at z=L). For double-clad pumping the FiberSpec carries clad_radius_m and
-    the overlap is A_core/A_clad -- set cladding=True to use it for this pump."""
+    the overlap is A_DOPE/A_clad (audit S3-9 -- A_core/A_clad only for uniform core doping) --
+    set cladding=True to use it for this pump."""
     power_W: float
     lambda_m: float
     direction: str = "fwd"
@@ -378,7 +379,7 @@ class FiberAmplifier:
             cladding.append(False)
         lam = np.asarray(lam); u = np.asarray(u); is_ase = np.asarray(is_ase, bool)
         ch = ChannelSet.build(self.ion, self.fiber, lam, u, is_ase=is_ase, dnu_hz=np.asarray(dnu))
-        # cladding pumps: replace the (core) overlap by A_core/A_clad
+        # cladding pumps: replace the (core) overlap by A_dope/A_clad (audit S3-9)
         gamma = ch.gamma.copy()
         for k, cl in enumerate(cladding):
             if cl:
@@ -414,7 +415,10 @@ class FiberAmplifier:
         sigma_e-proportional coefficient (local emission gain, stimulated-emission rate, ASE
         spontaneous source) is scaled per-z by the McCumber factor
             mcc_k(z) = exp[(eps - h nu_k) (1/(kB T(z)) - 1/(kB T_ref))],
-        eps = h c / zero_line -- the z-resolved form of spectroscopy.at_temperature (whose
+        eps = `self.ion.eps_J`, i.e. a fitted `mccumber_eps_J` when the ion carries one and
+        h c / zero_line_m otherwise (audit F-12; the code below reads the property, which is what
+        this line used to state as an unconditional h c / zero_line) -- the z-resolved form of
+        spectroscopy.at_temperature (whose
         GLOBAL scaling this reproduces exactly for a uniform profile; gated in tests).
         sigma_a and tau are held (their T-dependence is second order at these Delta-T; module
         docstring of spectroscopy). Cleared with clear_temperature_profile(). Used by
@@ -528,8 +532,14 @@ class FiberAmplifier:
         and `meta['relax_attempts']` the ladder entries tried.
 
         Pass a NUMBER to pin it and take exactly one attempt. relax = 1.0 is the plain Gauss-Seidel
-        iteration and is BYTE-IDENTICAL to this method's pre-2026-08 behaviour (the blend is skipped
-        entirely rather than multiplied by 1.0, so no arithmetic touches the arrays).
+        iteration: the BLEND is skipped entirely rather than multiplied by 1.0, so no arithmetic
+        touches the arrays and each ITERATE is bit-for-bit the pre-2026-08 one. That is a statement
+        about the BLEND ONLY -- it is NOT a claim that a relax = 1.0 solve reproduces the old
+        RESULT, because the audit-F-13 fix changed the STOPPING TEST in the same release, so the
+        same trajectory is now left at a different point. Measured on the Yb reference at 0.243 mW
+        of input: the old endpoint test never converged (400 iterations, `converged` False, gain
+        34.722740 dB) where the new one stops at 118 (34.722738 dB). Same path, different exit; the
+        returned profile differs by whatever the iteration still had left to converge.
 
         WHAT UNDER-RELAXATION IS. The solve alternates: integrate the forward channels through a
         frozen backward profile, then the backward channels through the new forward profile, and

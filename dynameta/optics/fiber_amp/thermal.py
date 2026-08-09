@@ -1,6 +1,7 @@
 """Cladding-pumped operation and the quantum-defect thermal load (docs sec.7). Double-clad
 pumping itself is already in the propagation model (Pump.cladding uses the overlap
-Gamma_p = A_core/A_clad from waveguide.cladding_pump_overlap); this module adds the heat side:
+Gamma_p = A_DOPE/A_clad from waveguide.cladding_pump_overlap -- the DOPED-area fraction, audit
+S3-9; A_core/A_clad only for uniform core doping); this module adds the heat side:
 
   * the local heat density Q(z) [W/m] deposited in the core, from the rigorous optical-power
     balance Q = -d/dz (net forward optical flux) -- the power that leaves the optical fields
@@ -143,7 +144,13 @@ def solve_with_thermal_feedback(amp, model: ThermalModel, b_outer_m: float, *,
     1030-1064 nm, an UPPER BOUND ~3-5x the measured NET slopes (~-0.1 to -0.3 %/K, Newell
     Opt. Commun. 273:256 (2007) / Brilliant-Lagonik OL 26:1669 (2001)) because real sigma_a
     co-broadening partially compensates and is held fixed here -- so this loop somewhat
-    OVERSTATES the thermal gain softening (conservative for derating). The ion temperature is
+    OVERSTATES the thermal gain softening (conservative for derating). THAT IS NOW TUNABLE, and
+    the caveat is no longer the whole story: the slope is linear in (eps - h nu), and eps is
+    `RareEarthIon.eps_J`, which since audit F-12 honours an explicit `mccumber_eps_J` instead of
+    forcing h c / zero_line_m. Fitting eps to the mean transition energy -- properly below the
+    absorption peak -- scales the slope down by the same factor for BOTH this loop and
+    `sigma_e_mccumber`, which is the single fix for both symptoms F-12 records. The 3-5x above is
+    what the DEFAULT (peak) eps gives. The ion temperature is
     the CORE CENTRE temperature (the dopant sits there). Returns (result, T_z_K, info) with info = {'iterations',
     'converged_T', 'max_dT_K', 'Q_per_m'}; the amplifier's profile is left SET (clear with
     amp.clear_temperature_profile()). b_outer_m = outer (coating/glass) radius for the radial
