@@ -126,11 +126,18 @@ class TestF14Relaxation:
         oscillation and finds the real fixed point."""
         bad = _ydfa(sig_W=0.05e-3).solve(n_nodes=201, max_iter=400, relax=1.0)
         good = _ydfa(sig_W=0.05e-3).solve(n_nodes=201, max_iter=400, relax=0.5)
-        assert float(bad.signal_gain_dB[0]) < 0.0 and not bad.meta["converged"]
         assert good.meta["converged"]
         assert float(good.signal_gain_dB[0]) > 30.0
         # and an amplifier absorbing 2 W of pump cannot be uninverted
         assert float(good.nbar2_z.mean()) > 0.25
+        # relax = 1.0: which branch the undamped iteration lands on is PLATFORM arithmetic
+        # (see the counter-pump twin below and the two CI rounds that taught this). The
+        # no-silent-wrong-answer contract: converged means the SAME fixed point, else loud.
+        if bad.meta["converged"]:
+            assert float(bad.signal_gain_dB[0]) == pytest.approx(
+                float(good.signal_gain_dB[0]), abs=0.1)
+        else:
+            assert float(bad.signal_gain_dB[0]) < 0.0     # this box: the spurious branch
 
     def test_gain_decreases_monotonically_with_input_power(self):
         """The physical invariant the spurious branch violated, and the cheap sweep gate that would
@@ -143,7 +150,12 @@ class TestF14Relaxation:
     def test_residuals_are_reported_and_discriminate(self):
         bad = _ydfa(sig_W=0.05e-3).solve(n_nodes=201, max_iter=200, relax=1.0)
         good = _ydfa(sig_W=0.05e-3).solve(n_nodes=201, max_iter=400, relax=0.5)
-        assert bad.meta["endpoint_residual"] > 1.0          # measured ~1e9
+        # the residual must AGREE with the flag on every platform (converged -> small, not ->
+        # loud): that is the discrimination, without pinning which way relax=1.0 falls here
+        if bad.meta["converged"]:
+            assert bad.meta["endpoint_residual"] < 1e-5
+        else:
+            assert bad.meta["endpoint_residual"] > 1.0      # this box: measured ~1e9
         assert good.meta["endpoint_residual"] < 1e-5
         assert "min_power_W" in good.meta and "relax" in good.meta
 
@@ -171,11 +183,21 @@ class TestF14Relaxation:
         res = ResolvedFiberAmplifier(YB, fib, [Pump(2.0, 0.976e-6, "bwd")],
                                      [Signal(20e-3, 1.060e-6)], AseBand(1.02e-6, 1.10e-6, 6),
                                      n_quad=8)
-        bad = res.solve(n_nodes=81, max_iter=50, relax=1.0)      # diverged by iteration 50 already
-        assert not bad.meta["converged"] and bad.meta["endpoint_residual"] > 1e3
         good = res.solve(n_nodes=81, max_iter=400, relax=0.3)
         assert good.meta["converged"] and good.meta["endpoint_residual"] < 1e-6
-        assert float(good.signal_gain_dB[0]) - float(bad.signal_gain_dB[0]) > 40.0
+        # relax = 1.0: whether the marginally-stable iteration decays is PLATFORM arithmetic
+        # (this box: -30.105 dB / residual 5.56e6; the py3.10 runner: it decayed -- second
+        # PR-11 CI round, the same lesson as the mean-field twin of this test). The contract
+        # is NO SILENT WRONG ANSWER: either the solve reports failure loudly with a residual
+        # that discriminates, or it converged -- on the SAME fixed point the damped solve found.
+        bad = res.solve(n_nodes=81, max_iter=400, relax=1.0)
+        if bad.meta["converged"]:
+            assert bad.meta["endpoint_residual"] < 1e-6
+            assert float(bad.signal_gain_dB[0]) == pytest.approx(
+                float(good.signal_gain_dB[0]), abs=0.1)
+        else:
+            assert bad.meta["endpoint_residual"] > 1e3
+            assert float(good.signal_gain_dB[0]) - float(bad.signal_gain_dB[0]) > 40.0
         mf = mean_field_equivalent(res).solve(n_nodes=81, max_iter=800, relax=0.3)
         assert mf.meta["converged"]
         delta = float(good.signal_gain_dB[0]) - float(mf.signal_gain_dB[0])
