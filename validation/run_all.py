@@ -33,6 +33,17 @@ EXIT-CODE CONTRACT (audit T-3 -- the tier used to read green while executing not
       * In the other tiers a 42 stays informational: those tiers legitimately run without
         the [solvers] extra.
   124 TIMEOUT (PER_SCRIPT_TIMEOUT_S).
+  125 OVER-BUDGET: the runner's own memory watchdog killed the script because its process-tree
+      RSS crossed the RAM budget (default 0.85 x the memory AVAILABLE when run_all started;
+      override with DYNAMETA_VALIDATION_RAM_BUDGET_GB; inert without psutil). WHY (nightly
+      runs 30898049092 / 31247382381): a 3-D FEM oracle that outgrows a 16 GB hosted runner
+      does not fail -- it draws the runner's OOM SHUTDOWN SIGNAL, which cancels the JOB and
+      every script queued behind it; (c2) died that way on its very first execution, at
+      boundary_inclusion_corner_circle, after the per-script guards had cleared (c1). The
+      watchdog converts that job-killing class into a per-script verdict so the tier KEEPS
+      RUNNING. Semantics mirror 42: a smoke-tier breach is a FAILURE (smoke scripts are small
+      pure-numpy by construction -- a breach there is a regression) unless --allow-skip names
+      it; elsewhere it is counted in its own OVER-BUDGET bucket, visibly, never as PASS.
   ANY OTHER non-zero (including a code this runner does not know) is a FAILURE. There is no
   "unrecognized, therefore harmless" branch.
 
@@ -61,6 +72,69 @@ FIXTURES = {"_reference_device"}
 PER_SCRIPT_TIMEOUT_S = 1800
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
+OVER_BUDGET_RC = 125              # killed by the RAM watchdog (see the exit-code contract)
+RAM_BUDGET_ENV = "DYNAMETA_VALIDATION_RAM_BUDGET_GB"
+_WATCHDOG_POLL_S = 1.0
+
+
+def _ram_budget_bytes():
+    """The per-script process-tree RSS budget: env override, else 0.85 x available-at-start
+    (a FIXED reference -- re-reading available per script would drift with OS caching), else
+    None (psutil absent -> watchdog inert, the pre-watchdog behavior)."""
+    env = os.environ.get(RAM_BUDGET_ENV)
+    if env:
+        return int(float(env) * 2 ** 30)
+    try:
+        import psutil
+    except ImportError:
+        return None
+    return int(0.85 * psutil.virtual_memory().available)
+
+
+def _run_watched(argv, timeout_s, budget_bytes):
+    """subprocess.run(argv, timeout=) plus the RSS watchdog. Returns (rc, peak_bytes).
+    Polls the child's process TREE every _WATCHDOG_POLL_S; on a budget breach the whole tree
+    is killed (children first -- an orphaned FEM solver would keep allocating) and the script
+    is reported OVER_BUDGET_RC. Without psutil (budget_bytes None) this degrades to the plain
+    timeout-only run."""
+    if budget_bytes is None:
+        p = subprocess.run(argv, cwd=REPO, timeout=timeout_s)
+        return p.returncode, 0
+    import psutil
+    child = subprocess.Popen(argv, cwd=REPO)
+    proc = psutil.Process(child.pid)
+    peak, t0 = 0, time.time()
+    while True:
+        rc = child.poll()
+        if rc is not None:
+            return rc, peak
+        total = 0
+        try:
+            for q in [proc] + proc.children(recursive=True):
+                try:
+                    total += q.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except psutil.NoSuchProcess:
+            continue                             # exited between poll() and the tree walk
+        peak = max(peak, total)
+        if total > budget_bytes:
+            for q in reversed([proc] + proc.children(recursive=True)):
+                try:
+                    q.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            child.wait()
+            return OVER_BUDGET_RC, peak
+        if time.time() - t0 > timeout_s:
+            for q in reversed([proc] + proc.children(recursive=True)):
+                try:
+                    q.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            child.wait()
+            return TIMEOUT_RC, peak
+        time.sleep(_WATCHDOG_POLL_S)
 
 # The fast solver-free tier (opt-in; see module docstring). Verified 2026-06-10: each is pure
 # numpy/scipy at runtime (lazy-import traps like results_io_demo included deliberately;
@@ -266,26 +340,40 @@ def main(argv):
         "; + {} examples".format(len([j for j in jobs if j[0] == "examples"]))
         if any(p == "examples" for p, _ in jobs) else ""), flush=True)
 
+    budget = _ram_budget_bytes()
+    if budget is not None:
+        print("[run_all] RAM watchdog: per-script process-tree budget {:.1f} GB ({})".format(
+            budget / 2 ** 30,
+            "env " + RAM_BUDGET_ENV if os.environ.get(RAM_BUDGET_ENV)
+            else "0.85 x available at start"), flush=True)
     results = []
     for pkg, name in jobs:
         t0 = time.time()
         try:
-            p = subprocess.run([sys.executable, "-u", "-m", pkg + "." + name],
-                               cwd=REPO, timeout=PER_SCRIPT_TIMEOUT_S)
-            rc = p.returncode
+            rc, peak = _run_watched([sys.executable, "-u", "-m", pkg + "." + name],
+                                    PER_SCRIPT_TIMEOUT_S, budget)
         except subprocess.TimeoutExpired:
-            rc = TIMEOUT_RC
+            rc, peak = TIMEOUT_RC, 0
         dt = time.time() - t0
         # audit C6-6: rc == SKIP_RC is the SKIP convention (required capability absent --
         # CUDA/cupy/jax/ngsolve/devsim/lumenairy not installed), counted separately so a
         # never-executed physics gate cannot read as a green PASS in the summary. audit T-3:
         # in the smoke tier that skip is itself a FAILURE unless --allow-skip declares it,
-        # because smoke is the tier CI is supposed to be able to run in full.
-        undeclared_skip = rc == SKIP_RC and strict_skip and name not in allow_skip
+        # because smoke is the tier CI is supposed to be able to run in full. OVER_BUDGET_RC
+        # mirrors those semantics exactly (see the exit-code contract): job-killing OOMs
+        # become per-script verdicts, strict in smoke, visible-informational elsewhere.
+        undeclared_skip = (rc in (SKIP_RC, OVER_BUDGET_RC) and strict_skip
+                           and name not in allow_skip)
         if rc == 0:
             tag = "PASS"
         elif rc == SKIP_RC:
             tag = "SKIP!" if undeclared_skip else "SKIP"
+        elif rc == OVER_BUDGET_RC:
+            tag = "OVERBUDGET!" if undeclared_skip else "OVERBUDGET"
+            print("[run_all] {}: RAM watchdog kill at {:.1f} GB tree RSS (budget {:.1f} GB) "
+                  "-- on a hosted runner this script would have drawn the OOM shutdown that "
+                  "cancels the whole job; run it on a bigger machine.".format(
+                      pkg + "." + name, peak / 2 ** 30, budget / 2 ** 30), flush=True)
         elif rc == TIMEOUT_RC:
             tag = "TIMEOUT"
         else:
@@ -294,13 +382,17 @@ def main(argv):
         print("[run_all] {:48s} {:8s} ({:5.0f}s)".format(pkg + "." + name, tag, dt), flush=True)
     bad_skips = [r for r in results if r[3]]
     skipped = [r for r in results if r[1] == SKIP_RC and not r[3]]
-    failed = [r for r in results if r[1] not in (0, SKIP_RC)]
-    print("\n[run_all] {}/{} passed; {} skipped (capability absent, declared); {} failed/errored;"
-          " {} skipped-but-required".format(
-              len(results) - len(failed) - len(skipped) - len(bad_skips), len(results),
-              len(skipped), len(failed), len(bad_skips)), flush=True)
+    over = [r for r in results if r[1] == OVER_BUDGET_RC and not r[3]]
+    failed = [r for r in results if r[1] not in (0, SKIP_RC, OVER_BUDGET_RC)]
+    print("\n[run_all] {}/{} passed; {} skipped (capability absent, declared); {} over-budget "
+          "(RAM watchdog); {} failed/errored; {} skipped-but-required".format(
+              len(results) - len(failed) - len(skipped) - len(over) - len(bad_skips),
+              len(results), len(skipped), len(over), len(failed), len(bad_skips)), flush=True)
     if skipped:
         print("[run_all] SKIPPED (declared): " + ", ".join(n for n, _, _, _ in skipped), flush=True)
+    if over:
+        print("[run_all] OVER-BUDGET (RAM watchdog; not run to completion on THIS machine): "
+              + ", ".join(n for n, _, _, _ in over), flush=True)
     if failed:
         print("[run_all] FAILURES: " + ", ".join(n for n, _, _, _ in failed), flush=True)
     if bad_skips:
@@ -311,7 +403,7 @@ def main(argv):
     # typo or a capability that is now installed, and either way the caller should drop it.
     selected = {n.split(".", 1)[-1] for n, _, _, _ in results}
     stale = (allow_skip & selected) - {n.split(".", 1)[-1] for n, rc, _, _ in results
-                                       if rc == SKIP_RC}
+                                       if rc in (SKIP_RC, OVER_BUDGET_RC)}
     if stale:
         print("[run_all] NOTE: --allow-skip name(s) that ran instead of skipping: {} (the "
               "capability is present -- drop them from the caller)".format(
