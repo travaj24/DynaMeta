@@ -16,11 +16,11 @@ import pytest
 
 from dynameta.constants import C_LIGHT, H_PLANCK, KB
 from dynameta.optics.fiber_amp import (
-    AseBand, ChannelPlan, FiberAmplifier, FiberSpec, PamFormat, Pump, PumpSource, Signal,
-    V_MARCUSE_MAX, V_MARCUSE_MIN, analyze_noise, detection_noise, effective_pump_lambda_m,
+    AseBand, ChannelPlan, FEC_THRESHOLDS, FiberAmplifier, FiberSpec, PamFormat, Pump, PumpSource,
+    Signal, V_MARCUSE_MAX, V_MARCUSE_MIN, analyze_noise, detection_noise, effective_pump_lambda_m,
     energy_per_bit_J, erbium, level_statistics, link_performance, marcuse_validity, max_pam_order,
-    ml_thresholds, output_ase_spectrum, pam_levels_W, pam_ser, ser_to_ber, simulate_transient,
-    stokes_limit, v_number, wall_plug_efficiency, ytterbium,
+    ml_thresholds, output_ase_spectrum, pam_levels_W, pam_ser, q_to_ser, ser_to_ber,
+    simulate_transient, stokes_limit, v_number, wall_plug_efficiency, ytterbium,
 )
 from dynameta.optics.fiber_amp.spectroscopy import at_temperature
 
@@ -48,21 +48,38 @@ def _ydfa(sig_W=20e-3, pump_W=2.0, pump_lam=0.976e-6, length_m=4.0):
 
 class TestF13ConvergedFlag:
     def test_flag_is_true_for_a_fully_absorbed_pump(self):
-        """The defect: a fully absorbed pump's endpoint is integrator noise (measured -1.2e-16 W
+        """The defect: a fully absorbed pump's endpoint is integrator noise (measured -1.3e-16 W
         after 3003 dB), and the old ABSOLUTE 1e-15 denominator floor made the endpoint residual
-        ~0.1 forever, so `converged` could never trip on an efficient amplifier."""
-        r = _ydfa().solve(n_nodes=201, relax=1.0)
+        ~0.1 forever, so `converged` could never trip on an efficient amplifier.
+
+        THE FIXTURE IS THE GATE. This used to run at the module's default 20 mW input, where the
+        PRE-AUDIT stopping test ALSO converges -- in 4 iterations, measured by re-running the old
+        endpoint denominator on this exact fiber -- so the gate could not fail if the fix were
+        reverted. 0.243 mW is the audit's own discriminating operating point (its F-13 trace):
+        the old test never converges (400 iterations, `converged` False, 34.722740 dB), the new
+        one stops at 118 with 34.722738 dB. Both pinned below, since a fix that changed WHERE the
+        solve lands would be a different bug."""
+        r = _ydfa(sig_W=0.243e-3).solve(n_nodes=201, max_iter=400, relax=1.0)
         pmp = [i for i, k in enumerate(r.kind) if k == "pump"][0]
         # the guard is only exercised if the pump really is absorbed into the noise floor
         assert abs(r.power_W[pmp, -1]) < 1e-12 * r.power_W[pmp, 0]
         assert r.meta["converged"]
-        assert r.meta["iterations"] < 150          # it used to burn all 200 and still say False
+        assert r.meta["iterations"] == pytest.approx(118, abs=15)   # measured 118; never, before
+        assert float(r.signal_gain_dB[0]) == pytest.approx(34.72274, abs=1e-3)
 
     def test_stopping_early_does_not_move_the_answer(self):
         """Discrimination: the fix must change WHEN the solve stops, not WHERE it lands. Compare
-        against a run forced to iterate far past convergence."""
+        against a run forced to iterate far past convergence.
+
+        `tol=1e-11` is UNREACHABLE, deliberately and by construction: the sweeps run LSODA at
+        rtol=1e-7, so successive iterates carry ~1e-7 of relative integrator noise and the residual
+        bottoms out there (measured on this fiber: 6.405e-07 at tol = 1e-8, 1e-9 and 1e-11 alike,
+        all `converged` False at max_iter). So this reference is max_iter-EXHAUSTED, not converged
+        -- which is exactly what is wanted from it, and is why the comparison is against the gain
+        rather than against the flag."""
         a = _ydfa().solve(n_nodes=201, relax=1.0)
         b = _ydfa().solve(n_nodes=201, tol=1e-11, max_iter=1200, relax=1.0)
+        assert not b.meta["converged"] and b.meta["iterations"] == 1200
         assert abs(float(a.signal_gain_dB[0]) - float(b.signal_gain_dB[0])) < 1e-3
 
     def test_a_channel_carrying_information_is_still_tested(self):
@@ -130,6 +147,78 @@ class TestF14Relaxation:
             with pytest.raises(ValueError, match="relax"):
                 _edfa().solve(n_nodes=41, relax=bad)
 
+    def test_the_resolved_solver_has_the_same_remedy(self):
+        """F-14 shipped `relax` on steady_state ONLY, while transverse.ResolvedFiberAmplifier runs
+        the SAME alternating frozen-direction iteration -- so the resolved solver kept the defect
+        with no knob to close it. Measured on the counter-pumped Yb reference (3 um core, NA 0.12,
+        6e25 m^-3, 6 m, 2 W bwd at 976 nm, 20 mW in at 1060 nm):
+
+            resolved  relax = 1.0   -30.105 dB   converged False, endpoint residual 5.56e+06
+            resolved  relax = 0.3   +17.952 dB   converged True   in 177 iterations
+            mean field relax = 0.3  +17.891 dB   converged True   in 114 iterations
+
+        i.e. a 48 dB gap that the resolved class could not escape. The under-relaxed answer is
+        cross-checked against the mean-field twin, which is also a TSHB-regime statement: a
+        CORE-GUIDED pump bleaches its own absorption non-uniformly, so the resolved gain sits
+        slightly ABOVE the mean-field one (+0.0615 dB here) rather than below."""
+        from dynameta.optics.fiber_amp import ResolvedFiberAmplifier, mean_field_equivalent
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 6.0)
+        res = ResolvedFiberAmplifier(YB, fib, [Pump(2.0, 0.976e-6, "bwd")],
+                                     [Signal(20e-3, 1.060e-6)], AseBand(1.02e-6, 1.10e-6, 6),
+                                     n_quad=8)
+        bad = res.solve(n_nodes=81, max_iter=50, relax=1.0)      # diverged by iteration 50 already
+        assert not bad.meta["converged"] and bad.meta["endpoint_residual"] > 1e3
+        good = res.solve(n_nodes=81, max_iter=400, relax=0.3)
+        assert good.meta["converged"] and good.meta["endpoint_residual"] < 1e-6
+        assert float(good.signal_gain_dB[0]) - float(bad.signal_gain_dB[0]) > 40.0
+        mf = mean_field_equivalent(res).solve(n_nodes=81, max_iter=800, relax=0.3)
+        assert mf.meta["converged"]
+        delta = float(good.signal_gain_dB[0]) - float(mf.signal_gain_dB[0])
+        assert abs(delta) < 1.0, delta                 # measured +0.0615 dB: a 16x margin
+        assert delta > 0.0, delta                      # core-guided pump -> resolved ABOVE
+        # and the four F-14 diagnostics are reported here too
+        for k in ("endpoint_residual", "profile_residual", "relax", "min_power_W"):
+            assert k in good.meta, k
+        assert good.meta["relax"] == 0.3
+
+    def test_the_resolved_default_is_byte_identical_and_relax_is_validated(self):
+        from dynameta.optics.fiber_amp import ResolvedFiberAmplifier
+        res = ResolvedFiberAmplifier(YB, FiberSpec(3.0e-6, 0.12, 6.0e25, 0.5),
+                                     [Pump(1.0, 0.976e-6)], [Signal(1e-3, 1.060e-6)], None,
+                                     n_quad=8)
+        a, b = res.solve(n_nodes=41, max_iter=20), res.solve(n_nodes=41, max_iter=20, relax=1.0)
+        assert np.array_equal(a.power_W, b.power_W)          # relax=1.0 skips the blend entirely
+        assert np.array_equal(a.nbar2_rz, b.nbar2_rz)
+        for bad in (0.0, -0.1, 1.5):
+            with pytest.raises(ValueError, match="relax"):
+                res.solve(n_nodes=21, max_iter=2, relax=bad)
+
+    def test_the_eryb_solver_has_the_same_remedy(self):
+        """The third copy of the iteration. relax = 1.0 must be BYTE-identical on an existing
+        eryb fixture (the blend is skipped, not multiplied by 1.0), and the knob must exist and
+        be validated."""
+        from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+
+        def ey():
+            return ErYbAmplifier(ER, ytterbium("phosphosilicate"),
+                                 FiberSpec(3.0e-6, 0.20, 1.0e25, 4.0, clad_radius_m=62.5e-6),
+                                 [Pump(1.0, 0.976e-6, "fwd", cladding=True)],
+                                 [Signal(1e-4, 1.550e-6)], AseBand(1.52e-6, 1.575e-6, 6),
+                                 n_yb_m3=2e26)
+
+        a, b = ey().solve(n_nodes=61), ey().solve(n_nodes=61, relax=1.0)
+        assert np.array_equal(a.power_W, b.power_W) and np.array_equal(a.nbar2_z, b.nbar2_z)
+        for k in ("endpoint_residual", "profile_residual", "relax", "min_power_W"):
+            assert k in a.meta, k
+        assert a.meta["relax"] == 1.0
+        # a damped solve finds the SAME fixed point -- the property that makes relax safe
+        c = ey().solve(n_nodes=61, max_iter=400, relax=0.4)
+        assert c.meta["converged"] and c.meta["relax"] == 0.4
+        assert float(c.signal_gain_dB[0]) == pytest.approx(float(a.signal_gain_dB[0]), abs=1e-2)
+        for bad in (0.0, -0.1, 1.5):
+            with pytest.raises(ValueError, match="relax"):
+                ey().solve(n_nodes=21, max_iter=2, relax=bad)
+
     def test_a_counter_propagating_pump_needs_under_relaxation(self):
         """Found by adversarial review AFTER the audit was written, and a much wider scope than the
         audit's low-signal case: a COUNTER-pumped amplifier fails at relax = 1 at ANY signal level.
@@ -144,9 +233,6 @@ class TestF14Relaxation:
 
         co = yb([Pump(2.0, 0.976e-6)], 1.0)
         assert co.meta["converged"] and co.meta["iterations"] < 20     # the easy case
-        bad = yb([Pump(2.0, 0.976e-6, "bwd")], 1.0)
-        assert not bad.meta["converged"] and float(bad.signal_gain_dB[0]) < 0.0
-        assert bad.meta["endpoint_residual"] > 1e3
         # relax <= 0.3 finds the SAME fixed point from two different paths -> it is the real one
         a, b = yb([Pump(2.0, 0.976e-6, "bwd")], 0.3), yb([Pump(2.0, 0.976e-6, "bwd")], 0.15)
         assert a.meta["converged"] and b.meta["converged"]
@@ -154,6 +240,21 @@ class TestF14Relaxation:
         assert float(a.signal_gain_dB[0]) > 10.0
         # and it is physical: counter-pumping cannot differ from co-pumping by tens of dB
         assert abs(float(a.signal_gain_dB[0]) - float(co.signal_gain_dB[0])) < 3.0
+        # relax = 1: whether the marginally-stable Gauss-Seidel oscillation decays is
+        # PLATFORM-DEPENDENT (this box: spurious branch at -30.8 dB, endpoint residual 6.5e6;
+        # the CI py3.11/py3.13 stacks: it decays and converges -- the original form of this test
+        # pinned the local pathology as universal and went red there, first PR-#10 CI round).
+        # The contract F-14 actually guards is NO SILENT WRONG ANSWER: either the solve reports
+        # its own failure loudly, or it converged -- in which case it must be on the SAME fixed
+        # point the doubly-cross-checked under-relaxed solve found, not the spurious branch.
+        bad = yb([Pump(2.0, 0.976e-6, "bwd")], 1.0)
+        if bad.meta["converged"]:
+            assert float(bad.signal_gain_dB[0]) == pytest.approx(
+                float(a.signal_gain_dB[0]), abs=0.1)
+            assert bad.meta["endpoint_residual"] < 1e-5
+        else:
+            assert bad.meta["endpoint_residual"] > 1e3
+            assert float(bad.signal_gain_dB[0]) < float(a.signal_gain_dB[0]) - 10.0
 
     def test_the_converged_counter_pumped_solve_conserves_photons(self):
         """Independent physical check on the branch relax<1 selects: the signal power added plus
@@ -261,6 +362,55 @@ class TestF2TransientAse:
         with pytest.raises(ValueError, match="store_profiles"):
             tr.frame_as_steady(0)
 
+    def test_a_driven_frame_reports_the_gain_of_its_own_launch(self):
+        """The defect: `frame_as_steady` divided the frame's output by `plan.launched_W`, the
+        amplifier's CONFIGURED input -- which is exactly the quantity `signal_drive` overrides. Under
+        a 2x drive the reported gain was therefore high by the drive ratio itself, a measured
+        +3.010504 dB against 10 log10(2) = 3.010300, and that error propagated into anything
+        computed over frames (metrics.gain_flatness read 23.086 dB where the truth was 3.086).
+
+        Two independent oracles, because the frame must agree with BOTH: the march's own
+        signal_gain_dB for the same step (exactly -- same numerator, same denominator), and a plain
+        steady solve of an amplifier CONFIGURED at the driven power (to 2.04e-4 dB, the transient's
+        own residual against its fixed point on this fixture)."""
+        sig = 5e-3
+        fib = FiberSpec(1.4e-6, 0.24, 1.0e25, 6.0)
+        amp = FiberAmplifier(ER, fib, [Pump(0.3, 0.980e-6)], [Signal(sig, 1.560e-6)],
+                             AseBand(1.52e-6, 1.575e-6, 12))
+        t = np.linspace(0.0, 60e-3, 80)                     # >> tau, i.e. at the fixed point
+        tr = simulate_transient(amp, t, n_nodes=61, store_profiles=True,
+                                signal_drive=lambda tt: np.array([2.0 * sig]))
+        fr = tr.frame_as_steady(len(t) - 1)
+        assert float(fr.power_W[fr.kind.index("signal"), 0]) == pytest.approx(2.0 * sig, rel=1e-15)
+        assert float(fr.signal_gain_dB[0]) == float(tr.signal_gain_dB[-1, 0])
+        driven = FiberAmplifier(ER, fib, [Pump(0.3, 0.980e-6)], [Signal(2.0 * sig, 1.560e-6)],
+                                AseBand(1.52e-6, 1.575e-6, 12)).solve(n_nodes=61)
+        assert driven.meta["converged"]
+        assert float(fr.signal_gain_dB[0]) == pytest.approx(float(driven.signal_gain_dB[0]),
+                                                            abs=1e-3)
+        # and the pre-fix denominator is exactly what would break it, by the drive ratio
+        wrong = 10.0 * math.log10(float(fr.power_W[fr.kind.index("signal"), -1])
+                                  / float(tr.plan.launched_W[fr.kind.index("signal")]))
+        assert wrong - float(fr.signal_gain_dB[0]) == pytest.approx(10.0 * math.log10(2.0),
+                                                                    abs=1e-3)
+
+    def test_store_profiles_refuses_an_oversized_allocation(self):
+        """This box's history is silent process deaths from memory pressure, and the (Nt, K, Nz)
+        matrix is the product of three innocuous-looking arguments: 2000 steps x 42 channels x 201
+        nodes is already 135 MB, and the shapes that reach 6-12 GiB are not exotic. The guard fires
+        BEFORE the initial steady solve and before np.empty commits any pages, so this test costs
+        nothing and allocates nothing."""
+        amp = _edfa(bins=10)
+        n_ch = amp.channel_plan().lambda_m.size
+        need = 3 * 1024 ** 3                                # ask for ~3 GiB
+        nt = int(need / (8 * n_ch * 401)) + 1
+        with pytest.raises(ValueError, match="store_profiles") as e:
+            simulate_transient(amp, np.linspace(0.0, 1e-3, nt), n_nodes=401, store_profiles=True)
+        assert "(%d, %d, %d)" % (nt, n_ch, 401) in str(e.value)     # the shape must be in it
+        # and the guard is scoped to the opt-in: a modest request still returns the matrix
+        ok = simulate_transient(amp, np.linspace(0.0, 1e-3, 8), n_nodes=41, store_profiles=True)
+        assert ok.power_zt is not None and ok.power_zt.shape == (8, n_ch, 41)
+
 
 # ============================ F-4: multi-pump Stokes ceiling ================================
 
@@ -324,13 +474,58 @@ class TestF5F8Detection:
 
     def test_noise_figure_is_independent_of_the_receiver(self):
         """The amplifier's NF must not depend on what detects it (the audit-S3-10 principle). Only
-        snr_elec_dB may move."""
+        snr_elec_dB may move.
+
+        THIS GATE USED TO SWEEP ONLY THE TWO KNOBS THAT WERE ALREADY INVARIANT (the TIA density and
+        the load), so it passed while the DIODE's own knobs leaked straight into the reported
+        amplifier noise figure. Measured on this fixture before the fix: 3.284766 dB at zero dark
+        current, 3.415694 dB at 10 mA of it, and 3.620575 dB at an APD excess-noise factor of 60 --
+        the last two are properties of the detector, not of the fiber. The avalanche GAIN M was the
+        only one that already cancelled (bit-identical at M = 1, 8, 100). All four are swept here,
+        with `==` rather than a tolerance because the fix routes the NF through an arithmetically
+        identical dark-free, F-free variance."""
         r, kw = self._base()
         a = detection_noise(r, 1.560e-6, **kw)
-        b = detection_noise(r, 1.560e-6, tia_current_noise_A_rtHz=50e-12, load_ohm=50.0, **kw)
-        assert b.nf_beat_dB == a.nf_beat_dB
-        assert b.added_rin_per_Hz == a.added_rin_per_Hz
-        assert b.snr_elec_dB < a.snr_elec_dB
+        for extra in (dict(tia_current_noise_A_rtHz=50e-12, load_ohm=50.0),
+                      dict(dark_current_A=1e-6), dict(dark_current_A=10e-3),
+                      dict(apd_gain=8.0, apd_excess_noise_F=3.0),
+                      dict(apd_gain=8.0, apd_excess_noise_F=60.0),
+                      dict(apd_gain=100.0, apd_excess_noise_F=1.0),
+                      dict(dark_current_A=1e-3, apd_gain=8.0, apd_excess_noise_F=6.0,
+                           tia_current_noise_A_rtHz=12e-12, load_ohm=50.0)):
+            b = detection_noise(r, 1.560e-6, **extra, **kw)
+            assert b.nf_beat_dB == a.nf_beat_dB, extra
+            assert b.meta["snr_optical_nf_dB"] == a.meta["snr_optical_nf_dB"], extra
+        # ... while the RECEIVER's own numbers do move, so the invariance is not a dead branch
+        hot = detection_noise(r, 1.560e-6, tia_current_noise_A_rtHz=50e-12, load_ohm=50.0, **kw)
+        assert hot.added_rin_per_Hz == a.added_rin_per_Hz     # RIN is optical too
+        assert hot.snr_elec_dB < a.snr_elec_dB
+        dark = detection_noise(r, 1.560e-6, dark_current_A=10e-3, **kw)
+        assert dark.var_shot > a.var_shot                     # the dark current IS in the budget
+        assert dark.meta["snr_optical_dB"] < a.meta["snr_optical_dB"]
+        assert dark.meta["snr_optical_nf_dB"] == a.meta["snr_optical_nf_dB"]
+
+    def test_receiver_inputs_are_validated(self):
+        """Each of these produced a silently wrong number rather than an error: a negative
+        temperature or dark current makes a NEGATIVE variance (and then `inf` SNR out of the
+        var_total <= 0 branch), load_ohm = 0.0 was falsy so the Johnson term asked for was
+        silently dropped, and a non-finite M or F walked past the `M <= 0 or F < 1` test because
+        every comparison with NaN is False."""
+        r, kw = self._base()
+        for bad, pat in ((dict(temperature_K=-1.0), "temperature_K"),
+                         (dict(load_ohm=0.0), "load_ohm"),
+                         (dict(load_ohm=-50.0), "load_ohm"),
+                         (dict(dark_current_A=-1e-9), "dark_current_A"),
+                         (dict(apd_gain=float("nan")), "finite"),
+                         (dict(apd_gain=float("inf")), "finite"),
+                         (dict(apd_excess_noise_F=float("nan")), "finite")):
+            with pytest.raises(ValueError, match=pat):
+                detection_noise(r, 1.560e-6, **bad, **kw)
+        # T = 0 K is legal (a cryogenic front end contributes no Johnson noise), and load_ohm=None
+        # still means "omit", which is what the 0.0 rejection above must not have broken
+        assert detection_noise(r, 1.560e-6, load_ohm=50.0, temperature_K=0.0,
+                               **kw).var_thermal == 0.0
+        assert detection_noise(r, 1.560e-6, load_ohm=None, **kw).var_thermal == 0.0
 
     def test_apd_identity_and_scaling(self):
         r, kw = self._base()
@@ -526,6 +721,54 @@ class TestF10PassiveFiber:
                                    core_radius_m=1.4e-6, na=0.24, length_m=1.0, tau_s=1e-2,
                                    zero_line_m=1.53e-6)
 
+    def _passive(self, bins=6):
+        """A 30 m undoped span with a real background loss -- and an AseBand, so the ASE machinery
+        is actually exercised rather than skipped."""
+        alpha, L, p_in = 1e-4, 30.0, 1e-3
+        f = FiberSpec(3.0e-6, 0.14, 0.0, L, background_loss_per_m=alpha)
+        amp = FiberAmplifier(ER, f, [Pump(0.0, 0.98e-6)], [Signal(p_in, 1.55e-6)],
+                             AseBand(1.52e-6, 1.58e-6, bins))
+        return amp, amp.solve(n_nodes=81), alpha, L, p_in
+
+    def test_the_noise_layer_on_a_passive_span_is_a_documented_contract(self):
+        """The audit-doc row claimed "18 further entry points confirmed finite" with n_t = 0 and no
+        such gate was ever written; the doc row is corrected to what is gated, and this is it.
+
+        On a passive span analyze_noise is NOT finite everywhere, and refusing would be wrong too,
+        because the two non-finite fields are the ones that are genuinely undefined while the rest
+        are exactly right. Pinned here so the contract is a decision and not an accident."""
+        amp, r, alpha, L, _ = self._passive()
+        nr = analyze_noise(r, 1.55e-6)
+        # NF of a passive attenuator IS 1/G -- the PSD form gives it for free with zero ASE
+        assert nr.nf_dB == pytest.approx(10.0 * alpha * L / math.log(10.0), rel=1e-6)
+        assert nr.nf_dB == pytest.approx(-float(r.signal_gain_dB[0]), rel=1e-12)
+        assert math.isinf(nr.osnr_dB) and nr.osnr_dB > 0    # no ASE -> no noise to beat it down
+        assert math.isnan(nr.n_sp)                          # no inversion -> undefined, not zero
+        assert math.isnan(nr.n_sp_local_min)
+        # every POWER is finite, and the ASE really is identically zero
+        assert float(np.max(nr.fwd_ase.power_W)) == 0.0
+        assert float(np.max(nr.bwd_ase.power_W)) == 0.0
+        assert np.isfinite(nr.meta["P_signal_out_W"]) and nr.meta["P_ase_ref_W"] == 0.0
+
+    def test_the_entry_points_gated_finite_with_no_ions(self):
+        """The concrete list the audit-doc row now names -- each called on the SAME passive solve.
+        `analyze_noise` is deliberately absent: it has its own contract, gated above."""
+        from dynameta.optics.fiber_amp.thermal import heat_load_per_m, total_heat_W
+        amp, r, alpha, L, p_in = self._passive()
+        assert np.all(np.isfinite(r.power_W)) and np.all(np.isfinite(r.nbar2_z))
+        assert np.all(np.isfinite(output_ase_spectrum(r, "fwd", signal_lambda_m=1.55e-6).psd_1pol))
+        assert np.all(np.isfinite(heat_load_per_m(r)))
+        # a lossy passive span dissipates exactly what it attenuates
+        assert float(total_heat_W(r)) == pytest.approx(p_in * (1.0 - math.exp(-alpha * L)),
+                                                       rel=1e-6)
+        b = detection_noise(r, 1.55e-6, optical_bw_Hz=50e9, electrical_bw_Hz=10e9)
+        for v in (b.var_shot, b.var_sig_sp, b.var_sp_sp, b.var_total, b.snr_elec_dB, b.nf_beat_dB):
+            assert np.isfinite(v)
+        tr = simulate_transient(amp, np.linspace(0.0, 1e-3, 12), n_nodes=41, store_profiles=True)
+        assert np.all(np.isfinite(tr.signal_out_W)) and np.all(np.isfinite(tr.nbar2_zt))
+        assert float(tr.frame_as_steady(5).signal_gain_dB[0]) == pytest.approx(
+            float(r.signal_gain_dB[0]), abs=1e-7)      # 41-node march vs 81-node solve: 9.7e-9 dB
+
 
 # ============================ F-6: the comms layer ==========================================
 
@@ -574,18 +817,50 @@ class TestF6Comms:
         ratio = (st.sigma_A ** 2) / st.levels_W
         assert ratio.max() / ratio.min() > 0.5 * fmt.extinction_ratio, ratio
 
-        # The exact statement, valid in EVERY regime: rescaling one level's total by the power ratio
-        # (what a caller does when they scale detection_noise's var_total) reproduces only the terms
-        # that are linear in P, so it misses the level-independent ones by exactly their share.
+    def test_per_level_variance_matches_a_hand_written_closed_form(self):
+        """The exact statement, valid in EVERY regime, against an analytic side written out HERE
+        rather than read back from `terms_A2` -- which is what the previous form of this gate did,
+        making it circular. Splitting sigma^2(P) into its linear and constant parts:
+
+            var(P) = [2 q R B_e + 4 R^2 rho B_e] P
+                   + 2 q (R m rho B_o + I_dark) B_e + m R^2 rho^2 (2 B_o - B_e) B_e + var_thermal
+
+        the CONSTANT part carries a shot term too -- from the detected ASE and the dark current --
+        and the earlier gate's `flat` omitted it. Measured on this fixture the omission leaves a
+        3.365e-08 relative error, 336x the rel=1e-10 the gate claimed; the assertion survived only
+        because pytest.approx's default abs=1e-12 swamps A^2 variances this small. Below: rel=1e-10
+        with abs=0 (the hand-written side lands at 1.7e-16, i.e. round-off), and the incomplete
+        form asserted to FAIL that same tolerance."""
+        from dynameta.constants import Q_E
+        fmt = PamFormat(order=4, mean_power_W=1e-3, extinction_ratio=12.0)
+        rho, R, b_o, b_e, m, i_d, tia = 1e-18, 1.0, 50e9, 10e9, 2, 5e-9, 1e-9
+        st = level_statistics(fmt, rho_sp_W_Hz=rho, responsivity_A_W=R, optical_bw_Hz=b_o,
+                              electrical_bw_Hz=b_e, m_pol=m, dark_current_A=i_d,
+                              tia_current_noise_A_rtHz=tia)
+        lin = 2.0 * Q_E * R * b_e + 4.0 * R ** 2 * rho * b_e
+        const = (2.0 * Q_E * (R * m * rho * b_o + i_d) * b_e
+                 + m * R ** 2 * rho ** 2 * (2.0 * b_o - b_e) * b_e
+                 + tia ** 2 * b_e)
         var = st.sigma_A ** 2
+        for k in range(var.size):
+            assert var[k] == pytest.approx(lin * st.levels_W[k] + const, rel=1e-10, abs=0.0)
+
+        # ... and the rescaling error is then the CONSTANT share times (P_k/P_0 - 1), exactly.
         scaled = var[0] * (st.levels_W / st.levels_W[0])
-        flat = st.terms_A2["spont_spont"] + st.terms_A2["thermal"]
-        assert flat[0] > 0.0
         for k in range(1, var.size):
-            # error of the rescaling == the level-independent share times (P_k/P_0 - 1)
-            want = flat[0] * (st.levels_W[k] / st.levels_W[0] - 1.0)
-            assert scaled[k] - var[k] == pytest.approx(want, rel=1e-10)
+            want = const * (st.levels_W[k] / st.levels_W[0] - 1.0)
+            assert scaled[k] - var[k] == pytest.approx(want, rel=1e-10, abs=0.0)
             assert scaled[k] > var[k]        # rescaling OVERSTATES the noise on the upper levels
+
+        # DISCRIMINATION: the pre-fix analytic side dropped 2 q (I_ase + I_dark) B_e from `const`.
+        # It must not survive the tolerance this test claims.
+        bad = st.terms_A2["spont_spont"][0] + st.terms_A2["thermal"][0]        # the old `flat`
+        assert 0.0 < bad < const
+        assert (const - bad) / const == pytest.approx(3.365e-8, rel=1e-2)      # the missing share
+        with pytest.raises(AssertionError):
+            for k in range(1, var.size):
+                want = bad * (st.levels_W[k] / st.levels_W[0] - 1.0)
+                assert scaled[k] - var[k] == pytest.approx(want, rel=1e-10, abs=0.0)
 
     def test_ser_degrades_with_order_and_improves_with_power(self):
         kw = dict(rho_sp_W_Hz=1e-19, signal_lambda_m=1.55e-6, quantum_efficiency=0.8,
@@ -606,11 +881,66 @@ class TestF6Comms:
         assert max(o) - min(o) < 1e-9
 
     def test_max_pam_order_is_monotone_in_received_power(self):
+        """RE-PINNED: the operating points now sit where the answer actually MOVES. The old sweep
+        (10 / 25 / 40 / 55 dB) reads 16, 0, 0, 0 -- monotone by exhaustion, which cannot fail."""
         kw = dict(rho_sp_W_Hz=1e-19, signal_lambda_m=1.55e-6, quantum_efficiency=0.8,
                   optical_bw_Hz=75e9, tia_current_noise_A_rtHz=12e-12, load_ohm=50.0)
         fmt = PamFormat(mean_power_W=1e-3)
-        orders = [max_pam_order(fmt, loss_dB=x, **kw) for x in (10.0, 25.0, 40.0, 55.0)]
-        assert orders == sorted(orders, reverse=True), orders
+        orders = [max_pam_order(fmt, loss_dB=x, **kw) for x in (0.0, 5.0, 10.0, 15.0, 20.0)]
+        assert orders == [128, 64, 16, 8, 2], orders
+
+    def test_max_pam_order_scores_the_BIT_error_rate(self):
+        """FEC_THRESHOLDS are pre-FEC BER (G.975.1, OIF-400ZR); scoring the SYMBOL error rate
+        against them is wrong by log2(N) -- a whole octave of constellation. Measured over a
+        9-point 0-20 dB loss sweep, 4 of the 9 answers moved, every one by exactly one octave."""
+        from dataclasses import replace
+        kw = dict(rho_sp_W_Hz=1e-19, signal_lambda_m=1.55e-6, quantum_efficiency=0.8,
+                  optical_bw_Hz=75e9, tia_current_noise_A_rtHz=12e-12, load_ohm=50.0)
+        fmt = PamFormat(mean_power_W=1e-3)
+        orders = (2, 4, 8, 16, 32, 64, 128)
+        moved = 0
+        for x in (0.0, 2.5, 5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0):
+            by_ber = max_pam_order(fmt, loss_dB=x, **kw)
+            by_ser = 0
+            for o in orders:
+                r = link_performance(replace(fmt, order=int(o)), loss_dB=x, **kw)
+                if np.isfinite(r.ser) and r.ser <= FEC_THRESHOLDS["ofec"]:
+                    by_ser = int(o)
+            assert by_ber >= by_ser                       # BER <= SER, so the BER answer is >=
+            if by_ber != by_ser:
+                moved += 1
+                assert by_ber == 2 * by_ser, (x, by_ber, by_ser)     # exactly one octave
+        assert moved == 4, moved
+        # the crossing itself: at 5 dB of loss the two verdicts are 64 and 32
+        assert max_pam_order(fmt, loss_dB=5.0, **kw) == 64
+        # and the threshold is honoured on the winner but not on the next order up
+        r = link_performance(replace(fmt, order=64), loss_dB=5.0, **kw)
+        assert r.ber <= FEC_THRESHOLDS["ofec"] < link_performance(
+            replace(fmt, order=128), loss_dB=5.0, **kw).ber
+
+    def test_the_symbol_error_rate_has_a_log_domain_route(self):
+        """Q(x) underflows to exactly 0.0 just above x = 37.5, so q_to_ser cannot represent the
+        deep tail the module's own scope paragraph talks about. q_to_log10_ser must, and must agree
+        with q_to_ser wherever q_to_ser is still representable."""
+        from dynameta.optics.fiber_amp import q_to_log10_ser
+        for q in (2.0, 5.0, 7.0, 20.0, 37.0):
+            assert q_to_log10_ser(q) == pytest.approx(math.log10(q_to_ser(q)), rel=1e-12)
+        assert q_to_ser(38.0) == 0.0                       # the floor, asserted rather than implied
+        assert q_to_log10_ser(38.0) == pytest.approx(-315.539790, abs=1e-5)
+        assert q_to_log10_ser(50.0) == pytest.approx(-544.966336, abs=1e-5)
+        assert q_to_log10_ser(100.0) == pytest.approx(-2173.871543, abs=1e-4)
+
+    def test_enob_uses_the_sine_rms_convention(self):
+        """SNR = 6.02 N + 1.76 dB is defined for a full-scale SINE (rms = swing/(2 sqrt 2)).
+        Feeding the PEAK-TO-PEAK swing ratio in directly overstates ENOB by exactly
+        20 log10(2 sqrt 2)/6.02 = 1.5001 bits at every operating point."""
+        kw = dict(rho_sp_W_Hz=1e-19, signal_lambda_m=1.55e-6, quantum_efficiency=0.8,
+                  optical_bw_Hz=75e9, tia_current_noise_A_rtHz=12e-12, load_ohm=50.0)
+        for loss in (0.0, 10.0, 25.0):
+            r = link_performance(PamFormat(order=4, mean_power_W=1e-3), loss_dB=loss, **kw)
+            want = (r.snr_elec_dB - 20.0 * math.log10(2.0 * math.sqrt(2.0)) - 1.76) / 6.02
+            assert r.enob == pytest.approx(want, rel=1e-12)
+            assert (r.snr_elec_dB - 1.76) / 6.02 - r.enob == pytest.approx(1.5001, abs=1e-4)
 
     def test_ser_to_ber_gray_coding(self):
         assert ser_to_ber(1e-3, 16) == pytest.approx(1e-3 / 4)
@@ -646,12 +976,52 @@ class TestF7WallPlug:
         b = wall_plug_efficiency(amp, r, [PumpSource(0.5)])
         assert b.eta_optical_pce == pytest.approx(power_conversion_efficiency(amp, r), rel=1e-15)
 
-    def test_optical_power_balance_closes_against_total_heat(self):
-        """An independent closure on the solve: everything launched must exit as light or heat."""
+    def test_optical_power_balance_is_a_real_closure_and_not_an_identity(self):
+        """RE-PINNED, because the previous form could not fail. Closed against `total_heat_W` the
+        balance is X - X: total_heat_W IS F(0) - F(L), which expands to (launched - exiting) over
+        the same two z-planes, so the residual sat at 5.6e-17 W whatever the solve contained --
+        including a deliberately corrupted one. (Integrating heat_load_per_m does not help either:
+        np.gradient followed by a trapezoid telescopes back to F(0) - F(L) exactly.)
+
+        The balance now closes against the dissipation recomputed from the amplifier's own RATE
+        EQUATIONS on the returned profile, which asks a different question -- is this P(z) actually
+        a solution? -- and therefore has an answer that can be wrong. Measured on this fixture at
+        n_nodes = 161: 1.183e-06 W of 0.305 W launched (3.88e-06 relative, pure trapezoid
+        discretization, falling as O(dz^2): 1.5e-05 / 3.9e-06 / 6.0e-07 / 1.5e-07 at n_nodes =
+        81 / 161 / 401 / 801)."""
         amp, r = self._solved()
         b = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.9)])
         launched = b.p_pump_launched_W + b.p_signal_in_W
-        assert abs(b.energy_balance_residual_W) < 1e-9 * launched
+        assert abs(b.energy_balance_residual_W) == pytest.approx(1.183e-06, rel=0.2)
+        assert abs(b.energy_balance_residual_W) < 1e-5 * launched
+        assert not b.notes
+        # it really is a discretization floor, not a fixed offset: refine and it falls quadratically
+        coarse = wall_plug_efficiency(amp, amp.solve(n_nodes=81), [PumpSource(0.45, 0.9)])
+        fine = wall_plug_efficiency(amp, amp.solve(n_nodes=401), [PumpSource(0.45, 0.9)])
+        assert abs(coarse.energy_balance_residual_W) > 3.0 * abs(b.energy_balance_residual_W)
+        assert abs(fine.energy_balance_residual_W) < 0.5 * abs(b.energy_balance_residual_W)
+
+    def test_a_corrupted_solve_breaks_the_power_balance(self):
+        """DISCRIMINATION for the gate above: perturb ONE endpoint by 1% and the residual must
+        jump. Measured 1.183e-06 W -> -1.746e-03 W, a factor 1476, and the note fires. Under the
+        old total_heat_W form both numbers were 5.551e-17 W -- identical, because the perturbation
+        cancels between `exiting` and the heat it is subtracted from."""
+        import copy
+        amp, r = self._solved()
+        clean = wall_plug_efficiency(amp, r, [PumpSource(0.45, 0.9)])
+        bad_r = copy.deepcopy(r)
+        bad_r.power_W[bad_r.kind.index("signal"), -1] *= 1.01
+        bad = wall_plug_efficiency(amp, bad_r, [PumpSource(0.45, 0.9)])
+        assert abs(bad.energy_balance_residual_W) > 100.0 * abs(clean.energy_balance_residual_W)
+        assert abs(bad.energy_balance_residual_W) == pytest.approx(1.746e-03, rel=0.2)
+        assert any("power balance" in n for n in bad.notes), bad.notes
+        # the old identity, reproduced here so its degeneracy is on the record rather than asserted
+        from dynameta.optics.fiber_amp.thermal import total_heat_W
+        for res in (r, bad_r):
+            launched = 0.3 + float(res.power_W[res.kind.index("signal"), 0])
+            exiting = float(np.sum([res.power_W[i, -1] if res.u[i] > 0 else res.power_W[i, 0]
+                                    for i in range(res.power_W.shape[0])]))
+            assert abs(launched - exiting - float(total_heat_W(res))) < 1e-15
 
     def test_electrical_power_is_the_diode_and_coupling_chain(self):
         amp, r = self._solved()

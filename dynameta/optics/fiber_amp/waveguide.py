@@ -1,7 +1,10 @@
 """Doped-fiber waveguide geometry for the amplifier core: the step-index single-mode fiber
 parameters, the fundamental-mode field radius (Marcuse), the mode/dopant OVERLAP integral
 Gamma(lambda) that turns bulk cross-sections into per-metre coefficients, and the effective /
-doped areas. Also the double-clad pump overlap Gamma_p = A_core/A_clad for high-power Yb.
+doped areas. Also the double-clad pump overlap for high-power Yb -- which is
+Gamma_p = A_DOPE/A_clad, the doped-area fraction, NOT A_core/A_clad (audit S3-9; the two coincide
+only for uniform core doping, b_dope = a_core, and using the core radius inflates the clad-pump
+absorption and gain by (a_core/b_dope)^2 for a confined dopant -- see cladding_pump_overlap).
 
 Pure numpy; SI units. Refs: Marcuse (BSTJ 56:703, 1977) for the Gaussian mode-field radius;
 Desurvire (EDFA book) for the top-hat-dopant overlap Gamma = 1 - exp(-2 b^2/w^2).
@@ -40,9 +43,11 @@ def marcuse_validity(core_radius_m: float, na: float, lambda_m):
         and the repo runs pytest with `filterwarnings = ["error"]`, so it would convert working
         configurations into hard failures rather than informing anybody.
     Callers that WANT the diagnostic (a design script, a report) can ask. What is out of range is
-    not automatically wrong: at V = 8.2 the Gaussian's Gamma is only ~1.1% off, but its SATURATION
-    integral is off by up to 13% (0.85 dB/m) -- use transverse.ResolvedFiberAmplifier or
-    lma.solve_lp_modes for a multimode core, which take the exact LP field.
+    not automatically wrong: at V = 8.2193 (the Smith & Smith LMA fixture at 1032 nm) the
+    Gaussian's Gamma is only 1.332% off the exact LP01 value -- 0.979180 against 0.992394,
+    RE-MEASURED; this line used to say ~1.1% -- but its SATURATION integral is off by up to 13%
+    (0.85 dB/m). Use transverse.ResolvedFiberAmplifier or lma.solve_lp_modes for a multimode core,
+    which take the exact LP field.
     """
     V = v_number(core_radius_m, na, lambda_m)
     vmin, vmax = float(np.min(V)), float(np.max(V))

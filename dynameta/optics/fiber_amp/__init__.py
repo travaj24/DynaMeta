@@ -37,8 +37,9 @@ Module map (phased build; each phase ships with discrimination-proven validation
            conversion efficiency, slope + quantum efficiency, gain flatness.
   Phase 5  concentration         : Er pair-induced quenching + cooperative upconversion;
            Yb photodarkening. OPT-IN (off by default -> byte-identical ideal model).
-  Phase 6  cladding / thermal    : double-clad pump overlap Gamma_p = A_core/A_clad, quantum-
-           defect heat load, radial thermal profile (high-power Yb).
+  Phase 6  cladding / thermal    : double-clad pump overlap Gamma_p = A_dope/A_clad (the DOPED
+           area, not the core -- audit S3-9; they coincide only for uniform core doping),
+           quantum-defect heat load, radial thermal profile (high-power Yb).
   Phase 7  dynamics              : transient N2(z, t) gain dynamics (add/drop, self-pulsing)
            + Frantz-Nodvik pulse energy extraction.
   Phase 8  calibration           : plug in datasheet cross-section spectra + measured gain/NF
@@ -170,7 +171,8 @@ from dynameta.optics.fiber_amp.efficiency import (PumpSource, WallPlugBudget, en
 from dynameta.optics.fiber_amp.comms import (FEC_THRESHOLDS, LevelStatistics, LinkPerformance,
                                              PamFormat, gray_map, level_statistics,
                                              link_performance, max_pam_order, ml_thresholds,
-                                             pam_levels_W, pam_ser, q_to_ser, ser_to_ber)
+                                             pam_levels_W, pam_ser, q_to_log10_ser, q_to_ser,
+                                             ser_to_ber)
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
@@ -220,5 +222,5 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "v_number", "marcuse_validity", "V_MARCUSE_MIN", "V_MARCUSE_MAX",
            "PumpSource", "WallPlugBudget", "wall_plug_efficiency", "energy_per_bit_J",
            "PamFormat", "LevelStatistics", "LinkPerformance", "pam_levels_W", "gray_map",
-           "ml_thresholds", "pam_ser", "ser_to_ber", "q_to_ser", "level_statistics",
-           "link_performance", "max_pam_order", "FEC_THRESHOLDS"]
+           "ml_thresholds", "pam_ser", "ser_to_ber", "q_to_ser", "q_to_log10_ser",
+           "level_statistics", "link_performance", "max_pam_order", "FEC_THRESHOLDS"]
