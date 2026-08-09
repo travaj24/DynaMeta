@@ -57,9 +57,10 @@ because a real mode burns a hole where it is intense while the area average neve
 
 MODE PROFILES (dossier sec.1.5, a BINDING correction). A core-guided channel uses the EXACT LP
 field of lma.mode_field whenever V > 2.405, and the Marcuse Gaussian of
-waveguide.mode_field_radius_m only below that cutoff (where Marcuse is in range). At V = 8.2 the
-Gaussian's Gamma is deceptively good (1.1% off) but its SATURATION integral is wrong by up to
-13% -- 0.85 dB/m of gain -- because the true LP01 at high V is far flatter than a Gaussian.
+waveguide.mode_field_radius_m only below that cutoff (where Marcuse is in range). At V = 8.2193 the
+Gaussian's Gamma is deceptively good (1.332% off: 0.979180 against the exact LP01 0.992394) but its
+SATURATION integral is wrong by up to 13% -- 0.85 dB/m of gain -- because the true LP01 at high V
+is far flatter than a Gaussian.
 Cladding pumps are flat, 1/A_clad over r <= R_clad, which reproduces
 waveguide.cladding_pump_overlap = A_dope/A_clad by quadrature instead of by assumption.
 
@@ -107,7 +108,8 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 # consolidated there; eryb.py imports it the same way). Importing it is the composition this
 # module is supposed to do -- re-typing it would re-open exactly that defect.
 from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, Signal,
-                                                    _frozen_profile_interp)
+                                                    _frozen_profile_interp,
+                                                    _relaxation_residuals)
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m, overlap_gamma
 
 __all__ = ["RadialGrid", "ResolvedResult", "ResolvedFiberAmplifier", "mean_field_equivalent",
@@ -780,15 +782,34 @@ class ResolvedFiberAmplifier:
 
     # ---- the relaxation solve --------------------------------------------------------------
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
-              method: str = "LSODA") -> ResolvedResult:
+              method: str = "LSODA", relax: float = 1.0) -> ResolvedResult:
         """Steady-state solve by the SAME relaxation as steady_state.solve: alternately integrate
         the forward channels 0->L and the backward channels L->0 as initial-value problems
         (scipy.integrate.solve_ivp), freezing the other direction's z-profile each half-sweep,
         until the endpoint powers AND the full interior profiles converge. The state is P(z)
         alone -- (F1.1) is algebraic at every node -- so the ODE set stays first order and the
         only difference from the mean-field solver is that each RHS evaluation does a radial
-        quadrature instead of one multiplication by Gamma_k."""
+        quadrature instead of one multiplication by Gamma_k.
+
+        UNDER-RELAXATION (`relax` in (0, 1], audit F-14). Because this is the same iteration, it
+        has the same failure mode, and it was shipped without the remedy: on a COUNTER-PUMPED
+        fiber the Gauss-Seidel oscillation stops decaying and the sweep can settle on a spurious,
+        essentially unpumped branch. Measured on a 3 um-core / NA 0.12 / 6e25 m^-3 / 6 m Yb fiber,
+        2 W counter-pumped at 976 nm with 20 mW in at 1060 nm: relax = 1 returns -30.2 dB with
+        `converged` False, while relax <= 0.3 converges to the same +17.9 dB fixed point the
+        mean-field twin finds -- a 48 dB gap that the resolved solver had no knob to close.
+        `relax` blends each pass with the previous profile,
+        `profile <- relax * (this pass) + (1 - relax) * (previous)`, which changes the PATH to the
+        fixed point and not the fixed point itself. relax = 1.0 (the default) skips the blend
+        entirely, so it is byte-identical to this method's pre-fix behaviour.
+
+        `meta` carries `endpoint_residual` / `profile_residual` / `relax` / `min_power_W`, the same
+        four diagnostics steady_state.solve reports, so a caller can see HOW converged a solve is
+        rather than only whether it tripped `tol`."""
         from scipy.integrate import solve_ivp
+        if not (0.0 < float(relax) <= 1.0):
+            raise ValueError("solve: relax must be in (0, 1]; got %r" % (relax,))
+        relax = float(relax)
         ch, bc, u, is_ase, kind, grid, nt_r, c = self._plan()
         L = self.fiber.length_m
         z = np.linspace(0.0, L, n_nodes)
@@ -808,6 +829,7 @@ class ResolvedFiberAmplifier:
         last_out = None
         last_prof = None
         converged = False
+        end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
         it = 0
         for it in range(max_iter):
             bwd_of = _frozen_profile_interp(P_bwd, z, L, n_nodes) if bwd.size else None
@@ -818,7 +840,11 @@ class ResolvedFiberAmplifier:
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
                            rtol=1e-7, atol=1e-15)
-            P_fwd = sf.y
+            # Under-relaxation (audit F-14), mirroring steady_state._solve_once: the relax == 1.0
+            # branch is taken verbatim so the default path performs NO arithmetic on the arrays
+            # and stays byte-identical -- a `1.0 * new + 0.0 * old` blend would not, because
+            # 0.0 * inf is NaN and -0.0 + 0.0 flips a sign.
+            P_fwd = sf.y if relax == 1.0 else relax * sf.y + (1.0 - relax) * P_fwd
 
             if bwd.size:
                 fwd_of = _frozen_profile_interp(P_fwd, z, L, n_nodes)
@@ -828,18 +854,18 @@ class ResolvedFiberAmplifier:
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
                                rtol=1e-7, atol=1e-15)
-                P_bwd = sb.y[:, ::-1]
+                new_bwd = sb.y[:, ::-1]
+                P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
-            # identical convergence test to steady_state.solve (audit S3-34): endpoint powers AND
-            # the interior profile, each channel measured against its own peak power.
+            # SAME convergence test as steady_state.solve -- literally the same function now
+            # (audit F-13: this was a byte-identical COPY, so the endpoint-denominator defect
+            # existed in triplicate and fixing one solver would have desynchronised the iteration
+            # counts that the mean-field-vs-resolved 1e-9 reduction gates compare).
             out = np.concatenate([P_fwd[:, -1], (P_bwd[:, 0] if bwd.size else [])])
             prof = np.concatenate([P_fwd, P_bwd], axis=0) if bwd.size else P_fwd.copy()
             if last_out is not None:
-                denom = np.maximum(np.abs(out), 1e-15)
-                end_ok = float(np.max(np.abs(out - last_out) / denom)) < tol
-                ch_peak = np.maximum(np.max(np.abs(prof), axis=1, keepdims=True), 1e-300)
-                prof_ok = float(np.max(np.abs(prof - last_prof) / ch_peak)) < tol
-                if end_ok and prof_ok:
+                end_resid, prof_resid = _relaxation_residuals(out, last_out, prof, last_prof)
+                if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
             last_out = out
@@ -878,6 +904,14 @@ class ResolvedFiberAmplifier:
             z, P, ch.lambda_m, u, is_ase, kind, nbar2_z, gains_dB, grid, nbar2_rz, nt_r, gain,
             c["gam"].copy(), nbar2_mode_z,
             meta={"converged": converged, "iterations": it + 1,
+                  # audit F-14, lifted here from steady_state: the ACTUAL final residuals, the
+                  # relax value that produced them, and the most negative returned power (a fully
+                  # absorbed channel sitting in integrator noise -- physically zero, but it will
+                  # surprise a log or a sqrt).
+                  "endpoint_residual": end_resid,
+                  "profile_residual": prof_resid,
+                  "relax": float(relax),
+                  "min_power_W": float(np.min(P)),
                   "dnu_hz": ch.dnu_hz.copy(),
                   "sigma_a": ch.sigma_a.copy(),
                   "sigma_e": ch.sigma_e.copy(),

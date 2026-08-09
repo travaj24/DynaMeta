@@ -56,7 +56,11 @@ from typing import Callable, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK
-from dynameta.optics.fiber_amp.steady_state import FiberAmplifier
+# ChannelPlan / SteadyStateResult are annotation targets on TransientResult (F-2/F-3): the
+# quoted forward references still need the names bound at module scope for ruff F821 and for
+# anyone resolving the annotations at runtime (the CI lint caught them unbound).
+from dynameta.optics.fiber_amp.steady_state import (ChannelPlan, FiberAmplifier,
+                                                    SteadyStateResult)
 
 __all__ = ["TransientResult", "simulate_transient", "saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
@@ -75,6 +79,78 @@ class TransientResult:
     signal_gain_dB: np.ndarray      # (Nt, n_signal)
     kind: list = field(default_factory=list)
     meta: dict = field(default_factory=dict)
+    # ---- resolved ASE, and the channel plan it is indexed by (audit 2026-08-04 F-2) ----------
+    # The march already computes the FULL frozen-inversion power matrix for every channel at every
+    # step (_propagate_fixed below); it used to keep only the signal and pump endpoints and discard
+    # every ASE channel, so time-resolved ASE / OSNR / noise figure was unreachable -- and
+    # noise.analyze_noise accepts only a SteadyStateResult, so there was no bridge at all. Both are
+    # free: the numbers were already in memory.
+    ase_fwd_W: Optional[np.ndarray] = None      # (Nt, n_bins) forward ASE per bin at z = L
+    ase_bwd_W: Optional[np.ndarray] = None      # (Nt, n_bins) backward ASE per bin at z = 0
+    ase_lambda_m: Optional[np.ndarray] = None   # (n_bins,) bin centres, sorted by wavelength
+    ase_dnu_hz: Optional[np.ndarray] = None     # (n_bins,) bin widths in FREQUENCY [Hz]
+    plan: Optional["ChannelPlan"] = None        # the channel structure every array is indexed by
+    power_zt: Optional[np.ndarray] = None       # (Nt, K, Nz), only if store_profiles=True
+
+    def ase_psd_1pol_W_Hz(self, direction: str = "fwd") -> np.ndarray:
+        """(Nt, n_bins) single-POLARIZATION ASE power spectral density [W/Hz].
+
+        P_bin = rho * m_modes * dnu_bin over m_modes polarization modes, so the per-polarization
+        density is P_bin / (m_modes dnu_bin) -- the same convention noise.output_ase_spectrum uses,
+        so the two agree bin for bin.
+        """
+        P = self.ase_fwd_W if direction == "fwd" else self.ase_bwd_W
+        if P is None or self.ase_dnu_hz is None:
+            raise ValueError("no resolved ASE on this result (the amplifier had no AseBand)")
+        m = float(self.meta.get("m_modes", 2))
+        return P / (m * np.maximum(self.ase_dnu_hz, 1e-300)[None, :])
+
+    def frame_as_steady(self, index: int) -> "SteadyStateResult":
+        """The `index`-th time step packaged as a SteadyStateResult, so the whole existing noise
+        layer (noise.analyze_noise / output_ase_spectrum / noise_figure, detection.detection_noise,
+        thermal.heat_load_per_m) applies to a transient frame with no new code.
+
+        Requires simulate_transient(..., store_profiles=True), since it needs the full z-resolved
+        channel powers rather than just the endpoints.
+
+        WHAT THIS IS AND IS NOT. It is the QUASI-STATIC reading of that instant, exact in the same
+        sense the march itself is: the transit time is ~1e-4 of the inversion response time, so the
+        powers really are the frozen-inversion solution for nbar2(z, t). It is NOT a claim that the
+        frame is a steady state OF THE DRIVE -- the inversion is still moving, and at a burst edge
+        it is moving fast. `meta['quasi_static_valid']` is propagated onto the returned result
+        (along with `meta['transient_frame']`) so the audit-A-7 flag cannot be lost by going through
+        this method.
+        """
+        if self.power_zt is None or self.plan is None:
+            raise ValueError("frame_as_steady needs the z-resolved profiles; re-run "
+                             "simulate_transient(..., store_profiles=True)")
+        from dynameta.optics.fiber_amp.steady_state import SteadyStateResult as _SSR
+        it = int(index)
+        P = np.asarray(self.power_zt[it], float)
+        pl = self.plan
+        sig = pl.indices("signal")
+        # The gain denominator is THIS FRAME's launch, P[i, 0], not plan.launched_W -- which is the
+        # amplifier's CONFIGURED input and is exactly what signal_drive() overrides. Reading the
+        # configured value made the reported gain wrong by the drive ratio itself (measured +3.0105
+        # dB under a 2x drive, i.e. 10 log10(2)), and that error propagated into
+        # metrics.gain_flatness computed over frames. Signals are forward channels, so z = 0 is
+        # their input end -- the same convention signal_gain_dB uses on the march itself.
+        gains = np.array([10.0 * np.log10(P[i, -1] / max(float(P[i, 0]), 1e-300)) for i in sig])
+        ch = pl.channels
+        meta = {"converged": True, "iterations": 0,
+                "dnu_hz": pl.dnu_hz.copy(),
+                "gamma": pl.gamma.copy(),
+                "m_modes": int(self.meta.get("m_modes", 2)),
+                "mcc": self.meta.get("mcc"),
+                # provenance: this did not come from a relaxation solve
+                "transient_frame": it, "t_s": float(self.t_s[it]),
+                "quasi_static_valid": bool(self.meta.get("quasi_static_valid", True))}
+        if ch is not None:
+            meta.update({"sigma_a": ch.sigma_a.copy(), "sigma_e": ch.sigma_e.copy(),
+                         "sigma_esa": ch.sigma_esa.copy()})
+        return _SSR(self.z_m.copy(), P, pl.lambda_m.copy(), pl.direction.copy(),
+                    pl.is_ase.copy(), list(pl.kind), np.asarray(self.nbar2_zt[it], float).copy(),
+                    gains, meta=meta)
 
 
 def _cumtrapz(y, x):
@@ -131,6 +207,12 @@ def _propagate_fixed(z, g, s, bc, u):
 _ASE_TO_LAUNCHED_LIMIT = 1.0
 _GAIN_INTEGRAL_LIMIT = 20.0
 
+# Ceiling on the opt-in (Nt, K, Nz) float64 profile matrix of simulate_transient(store_profiles=
+# True). 2 GiB is well above any legitimate use of frame_as_steady (the audit's own 80-step,
+# 42-channel, 121-node frame is 3.3 MB) and well below the point where the allocation stops being
+# an exception and becomes an OOM kill.
+_STORE_PROFILES_MAX_BYTES = 2 * 1024 ** 3
+
 
 def _no_raman(amp):
     """The transient fixed-inversion propagator assumes per-channel LINEAR gain; the SRS
@@ -145,7 +227,8 @@ def _no_raman(amp):
 def simulate_transient(amp: FiberAmplifier, t_grid, *,
                        signal_drive: Optional[Callable] = None,
                        pump_drive: Optional[Callable] = None,
-                       n_nodes: int = 81, nbar2_0=None) -> TransientResult:
+                       n_nodes: int = 81, nbar2_0=None,
+                       store_profiles: bool = False) -> TransientResult:
     """March the amplifier's inversion nbar2(z, t) over t_grid. signal_drive(t) / pump_drive(t),
     if given, return the input-power vector (length = number of signals / pumps) at time t --
     step functions of them produce add/drop transients; default (None) holds the configured
@@ -157,13 +240,47 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     meta['quasi_static_valid'] (bool), meta['max_ase_to_launched'], meta['max_ase_gain_integral'],
     meta['validity_limits'], meta['validity_warning'] -- and raises a RuntimeWarning when the flag
     goes False; the arrays are still returned (unchanged) but must not be trusted. See the module
-    docstring for the two measured failure cases and why sub-stepping cannot fix them."""
+    docstring for the two measured failure cases and why sub-stepping cannot fix them.
+
+    RESOLVED ASE (audit F-2): the result now carries the time-resolved ASE spectrum the march was
+    already computing -- ase_fwd_W / ase_bwd_W (Nt, n_bins), ase_lambda_m, ase_dnu_hz, and
+    ase_psd_1pol_W_Hz() -- plus the ChannelPlan every array is indexed by. store_profiles=True
+    additionally keeps the whole (Nt, K, Nz) power matrix, which enables frame_as_steady(index) and
+    therefore lets noise.analyze_noise / detection.detection_noise run on a transient frame. The
+    memory cost is Nt*K*Nz floats, so it is opt-in -- and a request above 2 GiB
+    (_STORE_PROFILES_MAX_BYTES) is REFUSED with the shape, because past that point the allocation
+    stops raising and starts taking the process down with it."""
     _no_raman(amp)
+    # The march is FiberAmplifier-only (it reads _n_active / _mcc_matrix / concentration, none of
+    # which the co-doped class has). Refuse by name instead of letting the _plan() shape mismatch
+    # surface as "too many values to unpack (expected 5)", which tells the caller nothing.
+    if not isinstance(amp, FiberAmplifier):
+        raise TypeError("simulate_transient supports FiberAmplifier only, not %s: the march reads "
+                        "the single-ion inversion state (_n_active, the McCumber matrix, the "
+                        "ConcentrationModel), and a co-doped amplifier has two coupled ion "
+                        "populations with no single nbar2 to march. Use %s.solve() for its steady "
+                        "operating point." % (type(amp).__name__, type(amp).__name__))
     ch, bc0, u, is_ase, kind = amp._plan()
     L = amp.fiber.length_m
     z = np.linspace(0.0, L, n_nodes)
     A = amp.fiber.a_dope_m2
     na = amp._n_active
+    if store_profiles:
+        # Refuse BEFORE the initial steady solve, and before np.empty commits the pages. The
+        # (Nt, K, Nz) matrix scales as the product of three innocuous-looking arguments: an
+        # ASE-resolved amplifier at 2000 time steps and n_nodes = 201 is already 6-12 GiB, which
+        # on this class of box is an out-of-memory kill of the whole process rather than an
+        # exception. Say the shape and the size instead.
+        _need = 8 * int(np.size(t_grid)) * int(ch.lambda_m.size) * int(n_nodes)
+        if _need > _STORE_PROFILES_MAX_BYTES:
+            raise ValueError(
+                "simulate_transient(store_profiles=True) would allocate %.2f GiB for the "
+                "(Nt, K, Nz) = (%d, %d, %d) power matrix, above the %.2f GiB guard. Shorten "
+                "t_grid, drop n_nodes, narrow the AseBand (K counts BOTH ASE directions), or "
+                "leave store_profiles=False -- ase_fwd_W / ase_bwd_W are kept either way, and "
+                "frame_as_steady is the only thing that needs the full matrix."
+                % (_need / 1024.0 ** 3, np.size(t_grid), ch.lambda_m.size, n_nodes,
+                   _STORE_PROFILES_MAX_BYTES / 1024.0 ** 3))
 
     sig_idx = [i for i, k in enumerate(kind) if k == "signal"]
     pmp_idx = [i for i, k in enumerate(kind) if k == "pump"]
@@ -244,6 +361,23 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     worst_gain_integral = 0.0
     nonfinite = False
 
+    # ---- resolved-ASE capture (audit F-2) --------------------------------------------------
+    # The forward and backward ASE bins are the SAME spectral grid generated twice by _plan, so one
+    # wavelength/bin-width vector describes both. Sort by wavelength once and index with it, so the
+    # reported spectrum is monotone in lambda like noise.output_ase_spectrum's.
+    if ase_fwd.size:
+        ase_order = np.argsort(ch.lambda_m[ase_fwd])
+        ase_fwd_idx = ase_fwd[ase_order]
+        ase_bwd_idx = ase_bwd[np.argsort(ch.lambda_m[ase_bwd])] if ase_bwd.size else ase_bwd
+        ase_lam = ch.lambda_m[ase_fwd_idx].copy()
+        ase_dnu = ch.dnu_hz[ase_fwd_idx].copy()
+        ase_f_zt = np.empty((Nt, ase_fwd_idx.size))
+        ase_b_zt = np.empty((Nt, ase_bwd_idx.size)) if ase_bwd_idx.size else None
+    else:
+        ase_fwd_idx = ase_bwd_idx = np.empty(0, int)
+        ase_lam = ase_dnu = ase_f_zt = ase_b_zt = None
+    prof_zt = np.empty((Nt, ch.lambda_m.size, z.size)) if store_profiles else None
+
     for it in range(Nt):
         t = float(t_grid[it])
         bc = boundary(t)
@@ -267,6 +401,16 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             else:
                 nonfinite = True
         n2_zt[it] = n2
+        # audit F-2: keep the resolved ASE the frozen-inversion step just computed (forward at
+        # z = L, backward at z = 0), and optionally the whole profile matrix. Read-only w.r.t. the
+        # march -- nothing below this touches P or n2 -- so every previously returned array stays
+        # byte-identical.
+        if ase_f_zt is not None:
+            ase_f_zt[it] = P[ase_fwd_idx, -1]
+        if ase_b_zt is not None:
+            ase_b_zt[it] = P[ase_bwd_idx, 0]
+        if prof_zt is not None:
+            prof_zt[it] = P
         for j, i in enumerate(sig_idx):
             sig_out[it, j] = P[i, -1]
             gain_dB[it, j] = 10.0 * np.log10(P[i, -1] / max(bc[i], 1e-300))
@@ -330,7 +474,14 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
                                  "validity_limits": {
                                      "ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
                                      "ase_gain_integral": _GAIN_INTEGRAL_LIMIT},
-                                 "validity_warning": warn_msg})
+                                 "validity_warning": warn_msg,
+                                 # audit F-2/A-5: the mode count and the per-z McCumber matrix the
+                                 # march actually used, so a frame handed to the noise layer is
+                                 # self-consistent rather than mixing a T_ref sigma_e with a hot
+                                 # nbar2 (the audit-A-6 trap, in transient form).
+                                 "m_modes": int(m), "mcc": None if mcc is None else mcc.copy()},
+                           ase_fwd_W=ase_f_zt, ase_bwd_W=ase_b_zt, ase_lambda_m=ase_lam,
+                           ase_dnu_hz=ase_dnu, plan=amp.channel_plan(), power_zt=prof_zt)
 
 
 def _amp_with_boundary(amp, bc, sig_idx, pmp_idx, kind):

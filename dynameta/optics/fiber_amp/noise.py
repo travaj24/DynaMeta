@@ -209,7 +209,26 @@ def analyze_noise(result: SteadyStateResult, signal_lambda_m: float, *, ref_bw_n
     """Full noise analysis at signal_lambda_m: gain, NF, effective n_sp, forward/backward ASE
     spectra, and OSNR in a ref_bw_nm optical bandwidth (default 0.1 nm, the standard OSNR grid).
     m_modes defaults to the value the solve used (result.meta). OSNR = signal output power /
-    forward-ASE power within ref_bw around the signal."""
+    forward-ASE power within ref_bw around the signal.
+
+    A PASSIVE SPAN (n_t_m3 = 0, audit F-10) is a supported input and has a DOCUMENTED non-finite
+    contract rather than an error, because every field below is either right or genuinely
+    undefined -- measured on a 30 m, 1e-4 1/m undoped fiber:
+
+      nf_dB      0.013029 dB == the attenuation. CORRECT and the reason this is not refused: with
+                 no ASE the PSD form collapses to NF = 1/G, which IS an attenuator's noise figure.
+      osnr_dB    +inf. CORRECT: an undoped fiber emits no ASE, so there is no noise to beat the
+                 signal down to a finite ratio. It is not a divide-by-zero escaping.
+      n_sp       NaN, and n_sp_local_min NaN. UNDEFINED, not missing: n_sp is the ratio of
+                 spontaneous to stimulated emission in an INVERTED medium, and a fiber with no
+                 ions has neither. (The effective form additionally needs G > 1.)
+      n_sp_local_in   a finite NEGATIVE number (-0.451 on that fixture). It is
+                 `local_inversion_factor`'s two-level formula evaluated at a net-ABSORBING
+                 operating point, which is what it does anywhere the medium is lossy; on a passive
+                 span it is meaningless in the same way n_sp is, and carries no ion density.
+
+    Everything that is a POWER -- both ASE spectra, P_signal_out_W, P_ase_ref_W -- is exactly
+    0.0 or the attenuated signal, finite in every case."""
     m_modes = _meta_m_modes(result, m_modes)
     fwd = output_ase_spectrum(result, "fwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
     bwd = output_ase_spectrum(result, "bwd", m_modes=m_modes, signal_lambda_m=signal_lambda_m)
