@@ -90,8 +90,10 @@ from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.tr
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
-from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
-                                                    _KEEP, _frozen_profile_interp)
+from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, Signal,
+                                                    SteadyStateResult, _KEEP,
+                                                    _frozen_profile_interp,
+                                                    _relaxation_residuals)
 
 __all__ = ["ErYbAmplifier"]
 
@@ -189,6 +191,32 @@ class ErYbAmplifier:
         """A copy with BOTH ASE bands dropped (the Er C-band and the Yb-band parasitic band) --
         the ASE-free configuration metrics.gain_spectrum probes the small-signal gain in."""
         return self._clone(ase=None, yb_ase=None)
+
+    # ---- PUBLIC channel plan --------------------------------------------------------------
+    def channel_plan(self) -> "ChannelPlan":
+        """This amplifier's channel structure -- see steady_state.ChannelPlan (audit F-3).
+
+        `channels` is None: every channel here carries BOTH ions' cross-sections, so there is no
+        single ChannelSet to hand back. The per-ion spectroscopy is in `_plan()`'s dict under
+        'sa_er'/'se_er'/'sa_yb'/'se_yb'. Everything geometric and structural -- wavelengths,
+        directions, the ASE mask and its frequency bin widths, launched powers, overlap, background
+        loss, mode counts -- is ion-independent and is reported here.
+
+        Note this amplifier has TWO ASE bands (the Er signal band and the optional Yb band), so
+        `indices('ase', 'fwd')` spans both; separate them by wavelength.
+        """
+        pl = self._plan()
+        return ChannelPlan(lambda_m=np.asarray(pl["lam"], float).copy(),
+                           direction=np.asarray(pl["u"], float).copy(),
+                           is_ase=np.asarray(pl["is_ase"], bool).copy(),
+                           dnu_hz=np.asarray(pl["dnu"], float).copy(),
+                           kind=list(pl["kind"]),
+                           launched_W=np.asarray(pl["bc"], float).copy(),
+                           gamma=np.asarray(pl["gamma"], float).copy(),
+                           loss_per_m=np.asarray(pl["loss"], float).copy(),
+                           m_modes=np.where(np.asarray(pl["is_ase"], bool),
+                                            np.asarray(pl["m"], float), 0.0),
+                           channels=None)
 
     # ---- channel plan --------------------------------------------------------------------
     def _plan(self):
@@ -330,8 +358,24 @@ class ErYbAmplifier:
 
     # ---- solve (relaxation, mirrors FiberAmplifier.solve) --------------------------------
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
-              method: str = "LSODA") -> SteadyStateResult:
+              method: str = "LSODA", relax: float = 1.0) -> SteadyStateResult:
+        """Steady-state relaxation solve; see FiberAmplifier.solve for the method.
+
+        UNDER-RELAXATION (`relax` in (0, 1], audit F-14). The same alternating frozen-direction
+        iteration as steady_state.solve, hence the same failure mode -- a counter-propagating pump
+        can stop the Gauss-Seidel oscillation from decaying and leave the sweep on a spurious,
+        essentially unpumped branch -- and this solver shipped without the remedy. `relax` blends
+        each pass with the previous profile,
+        `profile <- relax * (this pass) + (1 - relax) * (previous)`, which changes the PATH to the
+        fixed point and not the fixed point itself. relax = 1.0 (the default) skips the blend
+        entirely and is byte-identical to this method's pre-fix behaviour.
+
+        `meta` carries `endpoint_residual` / `profile_residual` / `relax` / `min_power_W`, the same
+        four diagnostics steady_state.solve reports."""
         from scipy.integrate import solve_ivp
+        if not (0.0 < float(relax) <= 1.0):
+            raise ValueError("solve: relax must be in (0, 1]; got %r" % (relax,))
+        relax = float(relax)
         pl = self._plan()
         c = self._coeffs(pl)
         u, is_ase, kind, bc = pl["u"], pl["is_ase"], pl["kind"], pl["bc"]
@@ -362,6 +406,7 @@ class ErYbAmplifier:
         last_out = None
         last_prof = None
         converged = False
+        end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
         it = 0
         for it in range(max_iter):
             bwd_of = _make_interp(P_bwd) if bwd.size else None
@@ -372,7 +417,11 @@ class ErYbAmplifier:
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
                            rtol=1e-7, atol=1e-15)
-            P_fwd = sf.y
+            # Under-relaxation (audit F-14), mirroring steady_state._solve_once: the relax == 1.0
+            # branch is taken verbatim so the default path performs NO arithmetic on the arrays
+            # and stays byte-identical -- a `1.0 * new + 0.0 * old` blend would not, because
+            # 0.0 * inf is NaN and -0.0 + 0.0 flips a sign.
+            P_fwd = sf.y if relax == 1.0 else relax * sf.y + (1.0 - relax) * P_fwd
 
             if bwd.size:
                 fwd_of = _make_interp(P_fwd)
@@ -382,16 +431,17 @@ class ErYbAmplifier:
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
                                rtol=1e-7, atol=1e-15)
-                P_bwd = sb.y[:, ::-1]
+                new_bwd = sb.y[:, ::-1]
+                P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
             out = np.concatenate([P_fwd[:, -1], (P_bwd[:, 0] if bwd.size else [])])
             prof = np.concatenate([P_fwd, P_bwd], axis=0) if bwd.size else P_fwd.copy()
             if last_out is not None:
-                denom = np.maximum(np.abs(out), 1e-15)
-                end_ok = float(np.max(np.abs(out - last_out) / denom)) < tol
-                ch_peak = np.maximum(np.max(np.abs(prof), axis=1, keepdims=True), 1e-300)
-                prof_ok = float(np.max(np.abs(prof - last_prof) / ch_peak)) < tol
-                if end_ok and prof_ok:
+                # SAME convergence test as steady_state.solve -- literally the same function now
+                # (audit F-13: this was a byte-identical COPY, so the endpoint-denominator defect
+                # existed in triplicate).
+                end_resid, prof_resid = _relaxation_residuals(out, last_out, prof, last_prof)
+                if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
             last_out = out
@@ -410,6 +460,12 @@ class ErYbAmplifier:
         m_modes = (self.ase.m_modes if self.ase is not None
                    else (self.yb_ase.m_modes if self.yb_ase is not None else 2))
         meta = {"converged": converged, "iterations": it + 1,
+                # audit F-14, lifted here from steady_state: the ACTUAL final residuals, the relax
+                # value that produced them, and the most negative returned power (a fully absorbed
+                # channel sitting in integrator noise -- physically zero, but it will surprise a
+                # log or a sqrt).
+                "endpoint_residual": end_resid, "profile_residual": prof_resid,
+                "relax": float(relax), "min_power_W": float(np.min(P)),
                 "dnu_hz": pl["dnu"].copy(), "gamma": pl["gamma"].copy(), "m_modes": m_modes,
                 "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),
                 "sigma_a_er": pl["sa_er"].copy(), "sigma_e_er": pl["se_er"].copy(),

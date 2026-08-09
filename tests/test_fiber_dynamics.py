@@ -156,8 +156,8 @@ def test_transient_flags_ase_dominance_at_a_tiny_signal_but_not_on_a_healthy_edf
     """The pre-existing half of A-7 (no temperature profile involved): the same 400 W Yb booster
     driven at a 1 uW signal lands 54 dB below its own solve(). The threshold is referenced to the
     LAUNCHED power, not to the signal, precisely so a healthy C-band EDFA -- which legitimately
-    carries 30-3000x more in-band ASE than signal and agrees with solve() to 1e-3 dB -- does NOT
-    trip it."""
+    carries several times to thousands of times more in-band ASE than signal, and agrees with
+    solve() to 1e-3 dB -- does NOT trip it."""
     t = np.linspace(0.0, 25e-3, 400)
     tiny = _hot_yb().with_signals([Signal(1e-6, 1.03e-6)])
     G_ss = float(tiny.solve(n_nodes=81).signal_gain_dB[0])
@@ -178,6 +178,12 @@ def test_transient_flags_ase_dominance_at_a_tiny_signal_but_not_on_a_healthy_edf
     ase_out = float(np.sum(r.power_W[[i for i, k in enumerate(r.kind)
                                       if k == "ase" and r.u[i] > 0], -1]))
     sig_out = float(r.power_W[[i for i, k in enumerate(r.kind) if k == "signal"][0], -1])
-    assert ase_out > 10.0 * sig_out
+    # RE-BASELINED 2026-08-05 when erbium(cband_refit=True) became the default (audit F-1): the
+    # refit raises sigma_e at 1550 nm from 2.57e-25 to 2.77e-25 m^2, so this fixture's signal grows
+    # and the ASE/signal ratio falls from >10x to 8.49x. The POINT of the assertion is unchanged --
+    # an ASE/SIGNAL monitor threshold, which would sit near 1x, still false-fires here by 8.5x --
+    # so the constant is lowered to a value that keeps a real margin without being brittle to the
+    # exact cross-sections. The monitor's actual criterion (ASE/LAUNCHED) is asserted below.
+    assert ase_out > 5.0 * sig_out
     assert ok.meta["max_ase_to_launched"] < ok.meta["validity_limits"]["ase_to_launched"]
     assert abs(float(ok.signal_gain_dB[-1, 0]) - float(r.signal_gain_dB[0])) < 0.05

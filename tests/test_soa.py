@@ -377,8 +377,12 @@ def test_thermal_profile_reduction_and_coupling():
     m = QDGainModel(QDGainParams(n_groups=15).with_detailed_balance_taus(), self_heating=sh)
     st = m.init_slices(nz, 40e-3)
     nu0 = m.p.nu0_Hz
-    assert np.array_equal(m.gain_per_m_thermal(st, nu0, np.full(nz, T0)),
-                          m.gain_per_m_slices(st, nu0))
+    # rtol 5e-12, not array_equal: the two sides are DIFFERENT float code paths computing the
+    # same quantity, and bit-equality between such paths is a platform/threading claim, not a
+    # correctness one (the repo's recorded float-== lesson; this assert tripped on the floor
+    # CI leg only after an unrelated test-file change reshuffled the xdist worker layout).
+    assert np.allclose(m.gain_per_m_thermal(st, nu0, np.full(nz, T0)),
+                       m.gain_per_m_slices(st, nu0), rtol=5e-12, atol=0.0)
     Tdome = thermal_profile_steady_1d(np.full(nz, 3e4), dz, kA, Rp, T0, ends="sunk")
     g = m.gain_per_m_thermal(st, nu0, Tdome)
     assert g[nz // 2] < g[0]
