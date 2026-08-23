@@ -96,6 +96,11 @@ Yb3+ (2F5/2 <-> 2F7/2):
 - Peak sigma_abs ~ 2.7e-24 m^2 at 976 nm (aluminosilicate) or 1.4e-24 m^2 at 974.5 nm
   (phosphosilicate); band ~850-1000 nm; peak ~7x the Er 980 nm value.
 - tau(2F5/2) = 0.83 ms (aluminosilicate) / 1.45 ms (phosphosilicate).
+- SIGNAL-BAND sigma_a (> 1000 nm) is DERIVED from sigma_e by detailed balance since
+  2026-08-23 (`ytterbium(mccumber_refit=True)`, the default): transparency inversion 0.071
+  at 1030 nm / 0.020 at 1060 nm, matching the textbook ~0.05 / ~0.01-0.02. The legacy
+  hand-placed tail overstated reabsorption 3.4x/7.5x there --
+  docs/audit/2026-08-23-yb-signal-band-mccumber-refit.md.
 
 ## 6. Concentration / degradation (opt-in; Phase 5)
 - Er cooperative (homogeneous) UPCONVERSION: adds `-C_up * N2^2` to the N2 rate (two excited
