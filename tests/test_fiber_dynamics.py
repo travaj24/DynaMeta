@@ -94,7 +94,11 @@ def test_thermal_profile_survives_metrics_clone_and_transient():
                                                  62.5e-6, n_nodes=81)
     assert T_z.max() > 400.0 and info["converged_T"]            # genuinely hot
     G_hot = float(amp.solve(n_nodes=81).signal_gain_dB[0])
-    assert G_cold - G_hot > 1.0                                 # the profile is worth >1 dB here
+    # Re-pinned when ytterbium(mccumber_refit) became the default (2026-08-23): the fixture's
+    # self-consistent operating point moved and the profile is now worth 0.479 dB here (was
+    # >1 dB) -- still 10-24x the 0.02 / 0.05 dB clone-agreement tolerances below, which are
+    # the discriminating asserts this size-pin protects.
+    assert G_cold - G_hot > 0.3                                 # the profile is clearly visible
     # the metric clone re-solves the SAME operating point: it must reproduce amp.solve() exactly
     G_metric = float(gain_compression_curve(amp, [5.0], signal_index=0).gain_dB[0])
     assert abs(G_metric - G_hot) < 0.02
@@ -112,18 +116,24 @@ def test_thermal_profile_survives_metrics_clone_and_transient():
 
 def test_transient_flags_ase_runaway_on_a_sub_reference_temperature_profile():
     """audit A-7: the A-5 temperature path also reaches T < T_ref, where McCumber > 1 BOOSTS
-    sigma_e. Past ~227 K this amplifier's frozen-inversion step runs the ASE away (the step
+    sigma_e. Cold enough, this amplifier's frozen-inversion step runs the ASE away (the step
     propagates exp(INT g dz) at a FIXED inversion, so in-step ASE never depletes the gain that
-    made it) and the march settles ~31 dB below its own solve(). That used to be SILENT. It must
+    made it) and the march settles far below its own solve(). That used to be SILENT. It must
     now raise a RuntimeWarning AND carry meta['quasi_static_valid'] = False -- while the hot side
     of the same sweep, and the same amplifier at 300 K, stay clean and keep agreeing with
-    solve()."""
+    solve().
+
+    The trip temperature is ion-model dependent: ~227 K under the pre-2026-08-23 Yb ion
+    (fixture ran at 220 K), ~185 K under ytterbium(mccumber_refit) -- the refit's smaller
+    signal-band sigma_a means less ASE feedstock until a deeper cold-boost. The fixture now
+    sits at 175 K, where the runaway is unambiguous (measured: ase/launched 2.6e80, gain
+    integral 204 vs the 20 limit, march 40 dB below solve())."""
     z = np.linspace(0.0, 5.0, 41)
     t = np.linspace(0.0, 25e-3, 400)
 
     # --- the broken cold case: the flag fires, the warning names the limitation ---
     cold = _hot_yb()
-    cold.set_temperature_profile(z, np.full(z.size, 220.0), T_ref_K=300.0)
+    cold.set_temperature_profile(z, np.full(z.size, 175.0), T_ref_K=300.0)
     G_ss = float(cold.solve(n_nodes=81).signal_gain_dB[0])
     with np.errstate(all="ignore"), pytest.warns(RuntimeWarning, match="quasi-static"):
         tr = simulate_transient(cold, t, n_nodes=81)
