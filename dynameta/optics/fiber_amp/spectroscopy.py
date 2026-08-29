@@ -192,7 +192,7 @@ _ER_CBAND_REFIT_PEAK = (1.543e-6, 0.014e-6, 1.0e-25)
 
 
 def erbium(host: str = "aluminosilicate", *, esa: bool = False,
-           cband_refit: bool = True) -> RareEarthIon:
+           cband_refit: bool = True, pump_band_refit: bool = False) -> RareEarthIon:
     """Er3+ in an aluminosilicate EDF (Strohhofer-Polman / standard EDF anchors).
 
     PUMP BANDS: 980 nm (4I11/2) AND 1480 nm in-band (the 4I13/2 upper edge, sigma_a 0.8e-25 m^2) --
@@ -285,8 +285,19 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     default flipped. cband_refit=False reproduces the old ion EXACTLY for anyone reproducing an old
     result.
     """
+    # pump_band_refit (2026-08-28 audit, OPT-IN): the legacy 4I11/2 entry -- a 13 nm-FWHM
+    # Gaussian at 980 nm peaking at 1.7e-25 m^2 -- evaluates to 1.31e-25 at 976 nm, ~1.8x
+    # below the vendor curves. The measured band (nLIGHT LIEKKI App. Designer; Kir'yanov et
+    # al. IEEE JQE 49, 511 (2013)) peaks at 977-978 nm with ~20-25 nm FWHM and sigma_a(peak)
+    # ~= 2.55e-25, putting 976 nm at ~93% of peak (~2.4e-25). The 11-13 nm width is the
+    # NEIGHBORING Yb3+ 976 nm peak's -- the classic conflation. Cross-checks: Er110-4/125 at
+    # n_t = 6.6e25 reproduces its 110 dB/m @1530 with these curves, and the 978 nm value then
+    # lands within 10% of Kir'yanov's measured 67.5 dB/m. Affects pump ABSORPTION LENGTH only
+    # (sigma_e ~ 0 across the band): more pump absorbed per metre, less unabsorbed residual.
+    pump_peak = ((0.978e-6, 0.021e-6, 2.55e-25) if pump_band_refit
+                 else (0.980e-6, 0.013e-6, 1.7e-25))
     a_peaks = [
-        (0.980e-6, 0.013e-6, 1.7e-25),                # 4I11/2 (980 nm pump)
+        pump_peak,                                    # 4I11/2 (980 nm pump band)
         (1.480e-6, 0.040e-6, 0.8e-25),                # 1480 nm in-band pump (4I13/2 upper edge)
         (1.530e-6, 0.011e-6, 5.7e-25),                # C-band absorption peak
         (1.560e-6, 0.035e-6, 1.69e-25),               # C-band shoulder anchor
@@ -304,7 +315,9 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     sigma_esa = CrossSectionModel((
         (0.980e-6, 0.016e-6, 0.4e-25),                # 4I11/2 -> 4F7/2 pump ESA at 980 nm
     )) if esa else None
-    return RareEarthIon("Er3+" + ("(cband_refit)" if cband_refit else ""), sigma_a, sigma_e,
+    name = "Er3+" + ("(cband_refit)" if cband_refit else "") \
+        + ("(pump978)" if pump_band_refit else "")
+    return RareEarthIon(name, sigma_a, sigma_e,
                         tau_s=10.0e-3, zero_line_m=1.530e-6, host=host, sigma_esa=sigma_esa)
 
 
