@@ -149,7 +149,8 @@ _YB_MELKUMOV_AS_SIGMA_A_PM2 = (
 def ytterbium_melkumov() -> RareEarthIon:
     """Yb3+ built from the MEASURED Melkumov et al. 2004 aluminosilicate spectrum (tabulated
     848-1180 nm, 1 nm resolution around the 976 nm peak) instead of the compact Gaussian-sum
-    fit of spectroscopy.ytterbium(). Motivation (2026-08-28 audit): the Gaussian fit carries
+    fit -- THE ion bare spectroscopy.ytterbium() returns since 2026-08-28 (it delegates
+    here). Motivation (2026-08-28 audit): the Gaussian fit carries
     1.62x too little oscillator strength for its own 0.83 ms lifetime (Fuchtbauer-Ladenburg),
     and its sigma_e(1060) = 1.95e-25 m^2 sits 1.6x below the measured 3.1e-25 -- the fit's
     three narrow Gaussians lose the spectral wings. This factory is FL-consistent (tau_rad
