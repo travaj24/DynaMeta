@@ -128,7 +128,7 @@ from dynameta.optics.fiber_amp.dynamics import (TransientResult, frantz_nodvik_g
 from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, EDFA_CBAND_TARGETS,
                                                   calibration_report,
                                                   dB_per_m_to_per_m, giles_calibrated_fiber,
-                                                  ion_from_cross_sections)
+                                                  ion_from_cross_sections, ytterbium_melkumov)
 from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
 from dynameta.optics.fiber_amp.pulse import (Pulse, gaussian_pulse, sech_pulse,
                                             dispersion_length, nonlinear_length, soliton_order,
@@ -193,6 +193,7 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
            "frantz_nodvik_instantaneous_gain",
            "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
+           "ytterbium_melkumov",
            "calibration_report", "dB_per_m_to_per_m", "EDFA_CBAND_TARGETS",
            "BeatNoiseResult", "detection_noise",
            "Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
