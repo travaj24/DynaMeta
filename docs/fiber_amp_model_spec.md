@@ -90,12 +90,29 @@ derive sigma_e from a measured sigma_a spectrum (or cross-check the two).
 Er3+ (aluminosilicate EDF):
 - 1560 nm signal: sigma_a = 1.69e-25 m^2, sigma_e = 3.04e-25 m^2.
 - 4I13/2 peak ~1530 nm: sigma ~ 5.7e-25 m^2 (Strohhofer-Polman Al2O3).
-- 980 nm pump (4I11/2): sigma_a ~ 1.7e-25 m^2. 1480 nm pump: in-band (upper manifold).
+- 4I11/2 pump band: peak sigma_a ~ 2.55e-25 m^2 at 977-978 nm, ~21 nm FWHM
+  (`pump_band_refit`, the DEFAULT since 2026-08-28; the legacy 1.7e-25-at-980-nm / 13 nm
+  entry -- which evaluates 1.8x low at 976 nm, its width conflated with the neighboring Yb
+  peak's -- via `erbium(pump_band_refit=False)`;
+  docs/audit/2026-08-28-measured-spectra-melkumov-er-pump-band.md). 1480 nm pump: in-band
+  (upper manifold).
 - tau(4I13/2) ~ 10 ms (tau = 0.01 s). n_t ~ 1e25 m^-3, core radius ~ 1.5-2 um.
 Yb3+ (2F5/2 <-> 2F7/2):
 - Peak sigma_abs ~ 2.7e-24 m^2 at 976 nm (aluminosilicate) or 1.4e-24 m^2 at 974.5 nm
   (phosphosilicate); band ~850-1000 nm; peak ~7x the Er 980 nm value.
 - tau(2F5/2) = 0.83 ms (aluminosilicate) / 1.45 ms (phosphosilicate).
+- DEFAULT since 2026-08-28 (aluminosilicate): the MEASURED Melkumov et al. 2004 tabulated
+  spectra (`calibration.ytterbium_melkumov()`; sigma_e(1060) = 3.1e-25 m^2,
+  Fuchtbauer-Ladenburg-consistent with tau = 0.83 ms). The Gaussian-sum parametric ion
+  remains available bit-exactly via `melkumov_tables=False` or an EXPLICIT
+  `mccumber_refit=True/False`; the fit carries 1.62x too little oscillator strength (its
+  narrow Gaussians lose the wings) -- docs/audit/2026-08-28-measured-spectra-melkumov-er-
+  pump-band.md.
+- Parametric variants: SIGNAL-BAND sigma_a (> 1000 nm) is DERIVED from sigma_e by detailed
+  balance since 2026-08-23 (`ytterbium(mccumber_refit=True)`): transparency inversion 0.071
+  at 1030 nm / 0.020 at 1060 nm, matching the textbook ~0.05 / ~0.01-0.02. The legacy
+  hand-placed tail overstated reabsorption 3.4x/7.5x there --
+  docs/audit/2026-08-23-yb-signal-band-mccumber-refit.md.
 
 ## 6. Concentration / degradation (opt-in; Phase 5)
 - Er cooperative (homogeneous) UPCONVERSION: adds `-C_up * N2^2` to the N2 rate (two excited

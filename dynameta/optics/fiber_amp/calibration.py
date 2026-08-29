@@ -28,6 +28,7 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec
 
 __all__ = ["CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
+           "ytterbium_melkumov",
            "EDFA_CBAND_TARGETS", "calibration_report", "dB_per_m_to_per_m"]
 
 _LN10_OVER_10 = np.log(10.0) / 10.0
@@ -102,6 +103,64 @@ def giles_calibrated_fiber(name: str, lambda_m, alpha_dB_per_m, gstar_dB_per_m, 
                       dopant_radius_m=dopant_radius_m, background_loss_per_m=background_loss_per_m,
                       clad_radius_m=clad_radius_m, overlap_override=1.0)
     return ion, fiber
+
+
+# ---- measured Yb3+ aluminosilicate spectrum (Melkumov et al. 2004) ---------------------------
+# Melkumov, Bufetov, Kravtsov, Shubin, Dianov, "Absorption and emission cross section of Yb3+
+# ions in Al2O3 and P2O5 doped fibers", FORC RAS Preprint No. 5 (2004), arXiv:1502.02885,
+# Appendix 2 (p. 56), aluminosilicate ("AC") columns, transcribed verbatim (sigma in pm^2).
+# Five cross-checked measurement methods; the deep signal-band absorption tail is the authors'
+# McCumber-derived extension, which they validate against direct measurement to <= 10% over
+# 950-1030 nm and <= 25% out to 1100 nm. Lifetime tau(2F5/2) = 0.83 ms (their Sec. "lifetimes",
+# reproducing Kirchhof & Unger OFC'99 Yb,Al 0.830 ms). Corroborated independently: Paschotta
+# et al. 1997 germanosilicate figures give sigma_e(1060) = 3.25e-25 (5% away), and the nLIGHT
+# LIEKKI Application Designer spectrum ~2.9e-25. Audit trail:
+# docs/audit/2026-08-28-measured-spectra-melkumov-er-pump-band.md
+_YB_MELKUMOV_AS_NM = (
+    848, 852, 856, 860, 864, 868, 872, 876, 880, 884, 888, 892, 896, 900, 904, 908,
+    912, 916, 920, 924, 928, 932, 936, 940, 944, 948, 952, 956, 960, 964, 968, 969,
+    970, 971, 972, 973, 974, 975, 976, 977, 978, 979, 980, 981, 982, 983, 984, 985,
+    986, 988, 992, 996, 1000, 1004, 1008, 1012, 1016, 1020, 1024, 1028, 1032, 1036,
+    1040, 1044, 1048, 1052, 1056, 1060, 1064, 1068, 1072, 1076, 1080, 1084, 1088,
+    1092, 1096, 1100, 1104, 1108, 1112, 1116, 1120, 1124, 1128, 1132, 1136, 1140,
+    1144, 1148, 1152, 1156, 1160, 1164, 1168, 1172, 1176, 1180)
+_YB_MELKUMOV_AS_SIGMA_E_PM2 = (
+    2.2e-5, 3.5e-5, 6.3e-5, 1.1e-4, 1.7e-4, 2.7e-4, 4.4e-4, 6.9e-4, 0.0011, 0.0017,
+    0.0026, 0.0039, 0.0058, 0.0086, 0.012, 0.017, 0.022, 0.029, 0.034, 0.039, 0.044,
+    0.048, 0.050, 0.053, 0.057, 0.062, 0.074, 0.095, 0.13, 0.17, 0.26, 0.34, 0.46,
+    0.70, 1.08, 1.58, 2.14, 2.65, 2.97, 2.94, 2.71, 2.28, 1.78, 1.29, 0.91, 0.67,
+    0.53, 0.45, 0.41, 0.36, 0.33, 0.33, 0.36, 0.40, 0.46, 0.53, 0.60, 0.65, 0.65,
+    0.65, 0.60, 0.55, 0.49, 0.44, 0.39, 0.35, 0.33, 0.31, 0.30, 0.29, 0.27, 0.26,
+    0.23, 0.22, 0.21, 0.19, 0.18, 0.16, 0.14, 0.12, 0.11, 0.098, 0.088, 0.076,
+    0.071, 0.061, 0.055, 0.047, 0.042, 0.035, 0.031, 0.027, 0.023, 0.021, 0.018,
+    0.014, 0.014, 0.012)
+_YB_MELKUMOV_AS_SIGMA_A_PM2 = (
+    0.033, 0.041, 0.057, 0.075, 0.090, 0.11, 0.14, 0.17, 0.21, 0.26, 0.31, 0.37,
+    0.43, 0.50, 0.57, 0.62, 0.65, 0.65, 0.62, 0.57, 0.51, 0.44, 0.38, 0.32, 0.28,
+    0.24, 0.23, 0.24, 0.26, 0.28, 0.35, 0.44, 0.57, 0.83, 1.21, 1.68, 2.17, 2.55,
+    2.69, 2.53, 2.22, 1.77, 1.32, 0.91, 0.61, 0.43, 0.32, 0.26, 0.23, 0.18, 0.14,
+    0.11, 0.099, 0.092, 0.088, 0.084, 0.078, 0.070, 0.059, 0.049, 0.038, 0.029,
+    0.022, 0.016, 0.012, 0.0090, 0.0072, 0.0057, 0.0046, 0.0038, 0.0030, 0.0024,
+    0.0018, 0.0015, 0.0012, 9.5e-4, 7.3e-4, 5.6e-4, 4.2e-4, 3.2e-4, 2.4e-4, 1.9e-4,
+    1.4e-4, 1.1e-4, 8.5e-5, 6.3e-5, 4.9e-5, 3.6e-5, 2.8e-5, 2.0e-5, 1.6e-5, 1.1e-5,
+    8.6e-6, 6.8e-6, 4.9e-6, 3.5e-6, 3.1e-6, 2.2e-6)
+
+
+def ytterbium_melkumov() -> RareEarthIon:
+    """Yb3+ built from the MEASURED Melkumov et al. 2004 aluminosilicate spectrum (tabulated
+    848-1180 nm, 1 nm resolution around the 976 nm peak) instead of the compact Gaussian-sum
+    fit -- THE ion bare spectroscopy.ytterbium() returns since 2026-08-28 (it delegates
+    here). Motivation (2026-08-28 audit): the Gaussian fit carries
+    1.62x too little oscillator strength for its own 0.83 ms lifetime (Fuchtbauer-Ladenburg),
+    and its sigma_e(1060) = 1.95e-25 m^2 sits 1.6x below the measured 3.1e-25 -- the fit's
+    three narrow Gaussians lose the spectral wings. This factory is FL-consistent (tau_rad
+    within ~15% of tau_s) and carries the real wings; use it wherever the Yb signal-band
+    magnitude is load-bearing (holding cost, saturation energy, gain crossovers)."""
+    lam = np.asarray(_YB_MELKUMOV_AS_NM, float) * 1e-9
+    sa = np.asarray(_YB_MELKUMOV_AS_SIGMA_A_PM2, float) * 1e-24
+    se = np.asarray(_YB_MELKUMOV_AS_SIGMA_E_PM2, float) * 1e-24
+    return ion_from_cross_sections("Yb3+(melkumov)", lam, sa, se, tau_s=0.83e-3,
+                                   zero_line_m=976e-9, host="aluminosilicate/melkumov2004")
 
 
 # ---- representative datasheet target (a generic single-mode C-band EDFA gain block) ----------
