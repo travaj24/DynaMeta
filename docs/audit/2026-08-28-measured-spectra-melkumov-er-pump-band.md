@@ -66,3 +66,30 @@ bit-exact reproduction; signal band untouched by the pump refit.
 `YB_1060_REFERENCE`-class fibers at n_t = 6e25 m^-3 imply ~560 dB/m @976 — about 2x
 commercial 6/125 parts. WPE-neutral (holding cost has no n_t term; transparency depends
 on n_t*L), but lengths are ~2x shorter than buyable fiber would need. Left as-is.
+
+## Follow-up (2026-08-28, same day): the corrected spectra are now the DEFAULTS
+
+At the user's direction ("if the defaults were wrong before, please make these the new
+defaults"), v0.11.0 flips both:
+
+- `erbium(pump_band_refit=True)` is the DEFAULT. `pump_band_refit=False` reproduces the
+  legacy 980 nm / 13 nm band bit-exactly.
+- `ytterbium()` (aluminosilicate) returns the measured Melkumov table
+  (`calibration.ytterbium_melkumov()`). Escape hatches, both bit-exact: pass
+  `melkumov_tables=False` for the parametric Gaussian-sum ion (mccumber_refit applied,
+  default True), or pass `mccumber_refit=True/False` EXPLICITLY -- an explicit
+  mccumber_refit always selects the parametric ion, so pre-flip call sites that pinned a
+  specific parametric variant keep meaning what they said (mccumber_refit's default is now
+  the None sentinel). The phosphosilicate host has no measured table and stays parametric.
+
+Gates: +5 default gates in `tests/test_measured_spectra_2026_08_28.py` (bare ytterbium()
+IS melkumov; explicit mccumber_refit still parametric and bit-identical to
+melkumov_tables=False; phospho stays parametric; bare erbium() carries the refit band;
+legacy Er band reproduced bit-exactly). `tests/test_yb_mccumber_refit.py` now requests its
+parametric variants explicitly. Consumers: `sat56_study.py` (Fiber_Amplifiers) keeps
+explicit overrides on both paths so MEASURED_SPECTRA=False still reproduces the
+pre-2026-08-28 study.
+
+Known consequence: any downstream result produced with bare `erbium()` / `ytterbium()`
+before this flip (e.g. the fiber_burst_pam 2 W base-study numbers regenerated 2026-08-24)
+reflects the parametric-era defaults and will shift when regenerated.

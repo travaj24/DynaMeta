@@ -2,9 +2,12 @@
 docs/audit/2026-08-28-measured-spectra-melkumov-er-pump-band.md):
 
   * calibration.ytterbium_melkumov(): Yb3+ built from the measured Melkumov 2004
-    aluminosilicate table instead of the Gaussian-sum fit;
+    aluminosilicate table instead of the Gaussian-sum fit -- THE DEFAULT ytterbium()
+    ion since 2026-08-28 (escape hatches: melkumov_tables=False, or an EXPLICIT
+    mccumber_refit=True/False, select the parametric variants bit-exactly);
   * spectroscopy.erbium(pump_band_refit=True): corrected 4I11/2 pump band
-    (978 nm peak, ~21 nm FWHM, 2.55e-25 peak) -- opt-in.
+    (978 nm peak, ~21 nm FWHM, 2.55e-25 peak) -- THE DEFAULT since 2026-08-28
+    (pump_band_refit=False reproduces the legacy band bit-exactly).
 
 The Fuchtbauer-Ladenburg gate is deliberately Yb-ONLY: Yb's 2F5/2 is essentially fully
 radiative, so 1/tau_rad = 8 pi n^2 c INT sigma_e / lambda^4 dlambda is a hard constraint.
@@ -15,6 +18,7 @@ it documents); the Melkumov table passes.
 """
 import numpy as np
 
+from dynameta.core.numerics import trapz  # floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp import erbium, ytterbium
 from dynameta.optics.fiber_amp.calibration import ytterbium_melkumov
 
@@ -25,7 +29,7 @@ N_SILICA = 1.45
 def _fl_tau_rad_s(ion, lam_lo=850e-9, lam_hi=1180e-9, n=1.45):
     lam = np.linspace(lam_lo, lam_hi, 4001)
     se = np.array([ion.sigma_e.sigma(x) for x in lam])
-    inv_tau = 8.0 * np.pi * n * n * C_LIGHT * np.trapezoid(se / lam ** 4, lam)
+    inv_tau = 8.0 * np.pi * n * n * C_LIGHT * trapz(se / lam ** 4, lam)
     return 1.0 / inv_tau
 
 
@@ -41,9 +45,63 @@ def test_yb_melkumov_fl_consistent():
 def test_yb_legacy_gaussian_fails_fl():
     """DISCRIMINATION: the Gaussian-sum fit carries ~1.6x too little oscillator strength;
     reverting to it must trip this gate."""
-    legacy = ytterbium()
+    legacy = ytterbium(melkumov_tables=False)
     ratio = _fl_tau_rad_s(legacy) / legacy.tau_s
     assert ratio > 1.45, ratio
+
+
+# --------------------------------------------------------------------- the 2026-08-28 defaults
+def test_yb_default_is_melkumov():
+    """Bare ytterbium() must BE the measured-table ion (and therefore FL-consistent)."""
+    ion = ytterbium()
+    assert ion.name == "Yb3+(melkumov)", ion.name
+    assert abs(ion.sigma_e.sigma(1060e-9) / 3.1e-25 - 1) < 0.02
+    ratio = _fl_tau_rad_s(ion) / ion.tau_s
+    assert 0.70 < ratio < 1.35, ratio
+
+
+def test_yb_explicit_mccumber_refit_still_parametric():
+    """Explicitly requesting a parametric variant must keep meaning what it said before the
+    default flip: mccumber_refit=True selects the Gaussian-sum ion with the derived signal
+    band (sigma_e(1060) ~ 1.95e-25, the fit's low value), bit-identical to
+    melkumov_tables=False."""
+    a = ytterbium(mccumber_refit=True)
+    b = ytterbium(melkumov_tables=False)
+    assert a.name == b.name == "Yb3+(mccumber_refit)"
+    for lam in (915e-9, 976e-9, 1030e-9, 1060e-9, 1090e-9):
+        assert a.sigma_a.sigma(lam) == b.sigma_a.sigma(lam)
+        assert a.sigma_e.sigma(lam) == b.sigma_e.sigma(lam)
+    assert abs(a.sigma_e.sigma(1060e-9) / 1.95e-25 - 1) < 0.03
+
+
+def test_yb_phospho_stays_parametric():
+    """No measured table for the phosphosilicate host -- it must keep the parametric model."""
+    ion = ytterbium("phosphosilicate")
+    assert ion.name == "Yb3+(mccumber_refit)", ion.name
+    assert abs(ion.tau_s - 1.45e-3) < 1e-6
+
+
+def test_er_default_is_pump_band_refit():
+    """Bare erbium() must carry the measured 4I11/2 band (sigma_a(976) ~ 2.4e-25)."""
+    s976 = erbium().sigma_a.sigma(976e-9)
+    assert 2.3e-25 < s976 < 2.6e-25, s976
+
+
+def test_default_yb_fixture_recovers_physical_branch():
+    """The Melkumov default's stronger ASE widens the relax=1.0 oscillation region: on the
+    F-13/F-14 audit fixture (2 W, fully absorbed pump) plain Gauss-Seidel now falls onto the
+    spurious near-unpumped branch. The SHIPPED relax='auto' ladder must walk to 0.5 and land
+    on the physical branch: converged, >30 dB of gain, and a genuinely inverted front end
+    (the spurious branch sits at nbar2 ~ 0.04 everywhere)."""
+    import numpy as np
+    from dynameta.optics.fiber_amp import AseBand, FiberAmplifier, FiberSpec, Pump, Signal
+    fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 4.0)
+    amp = FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)],
+                         [Signal(0.243e-3, 1.060e-6)], AseBand(1.02e-6, 1.10e-6, 24))
+    r = amp.solve(n_nodes=201, max_iter=400, relax="auto")
+    assert r.meta["converged"] and r.meta["relax_attempts"][-1] == 0.5
+    assert float(r.signal_gain_dB[0]) > 30.0
+    assert float(np.max(r.nbar2_z)) > 0.4
 
 
 # ------------------------------------------------------------------- Yb: anchors + McCumber
@@ -95,11 +153,11 @@ def test_er_pump_band_refit_values():
 
 
 def test_er_pump_band_legacy_reproduced_exactly():
-    """pump_band_refit=False must reproduce the pre-2026-08-28 ion bit-exactly."""
+    """pump_band_refit=False must reproduce the pre-2026-08-28 band bit-exactly: the legacy
+    Gaussian (980 nm / 13 nm FWHM / 1.7e-25 peak) evaluated directly."""
     legacy = erbium(pump_band_refit=False)
-    for lam in (960e-9, 976e-9, 980e-9, 990e-9, 1530e-9, 1550e-9):
-        assert legacy.sigma_a.sigma(lam) == erbium().sigma_a.sigma(lam)
     assert abs(legacy.sigma_a.sigma(976e-9) / 1.31e-25 - 1) < 0.01
+    assert abs(legacy.sigma_a.sigma(980e-9) / 1.7e-25 - 1) < 0.01
 
 
 def test_er_signal_band_untouched_by_pump_refit():
