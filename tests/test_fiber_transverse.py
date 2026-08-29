@@ -354,11 +354,12 @@ def test_mode_weighted_inversion_is_the_average_the_gain_actually_used():
     separate once the mode burns its hole."""
     amp = _amp(sig_W=1e-9)
     res = amp.solve()
-    # rel 5e-9, was 1e-9: the identity is asymptotic (the residual radial structure comes
-    # from pump/ASE saturation, not the 1 nW signal) and the ytterbium(mccumber_refit)
-    # default moved the fixture's operating point to 1.8e-9 relative separation.  Still 1e7x
-    # tighter than the saturated case below, so the gate keeps its discrimination.
-    assert res.nbar2_mode_z == pytest.approx(res.nbar2_z, rel=5e-9)     # unsaturated: identical
+    # rel 3e-8, was 1e-9 then 5e-9: the identity is asymptotic (the residual radial structure
+    # comes from pump/ASE saturation, not the 1 nW signal); the ytterbium(mccumber_refit)
+    # default moved the fixture to 1.8e-9 relative separation, the Melkumov-table default
+    # (2026-08-28, stronger ASE) to 1.35e-8.  Still ~1e6x tighter than the saturated case
+    # below, so the gate keeps its discrimination.
+    assert res.nbar2_mode_z == pytest.approx(res.nbar2_z, rel=3e-8)     # unsaturated: identical
     amp = _amp(sig_W=1.0)
     res = amp.solve()
     assert np.all(res.nbar2_mode_z < res.nbar2_z)      # the mode samples the burned region

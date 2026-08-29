@@ -25,7 +25,13 @@ from dynameta.optics.fiber_amp import (
 from dynameta.optics.fiber_amp.spectroscopy import at_temperature
 
 ER = erbium()
-YB = ytterbium()
+# PINNED to the parametric mccumber_refit ion (bit-identical to the pre-2026-08-28 default):
+# the F-13/F-14 gates below protect the RELAXATION MACHINERY against a fixture whose numbers
+# (34.57521 dB, converged-at-relax-1.0-inside-300) were measured on this ion. Under the
+# Melkumov-table default the same fixture's stronger ASE widens the relax=1.0 oscillation
+# region onto the spurious branch -- covered by its own gate,
+# tests/test_measured_spectra_2026_08_28.py::test_default_yb_fixture_recovers_physical_branch.
+YB = ytterbium(mccumber_refit=True)
 
 
 def _edf(length_m=6.0, n_t=1.0e25):

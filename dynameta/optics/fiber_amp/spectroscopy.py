@@ -192,14 +192,16 @@ _ER_CBAND_REFIT_PEAK = (1.543e-6, 0.014e-6, 1.0e-25)
 
 
 def erbium(host: str = "aluminosilicate", *, esa: bool = False,
-           cband_refit: bool = True, pump_band_refit: bool = False) -> RareEarthIon:
+           cband_refit: bool = True, pump_band_refit: bool = True) -> RareEarthIon:
     """Er3+ in an aluminosilicate EDF (Strohhofer-Polman / standard EDF anchors).
 
     PUMP BANDS: 980 nm (4I11/2) AND 1480 nm in-band (the 4I13/2 upper edge, sigma_a 0.8e-25 m^2) --
     the latter is what a high-power booster uses, because its quantum defect is far smaller
     (1480/1550 = 0.955 against 980/1550 = 0.632). SIGNAL: the 1530-1565 nm C band.
-    Peaks: sigma_a 5.7e-25 m^2 at 1530 nm, 1.69e-25 at 1560 nm, 1.7e-25 at 980 nm, 0.8e-25 at
-    1480 nm; sigma_e 5.7e-25 at 1532 nm, 3.04e-25 at 1560 nm. tau(4I13/2) = 10 ms.
+    Peaks: sigma_a 5.7e-25 m^2 at 1530 nm, 1.69e-25 at 1560 nm, 2.55e-25 at 978 nm
+    (pump_band_refit, the default since 2026-08-28; the legacy 1.7e-25-at-980-nm band via
+    pump_band_refit=False), 0.8e-25 at 1480 nm; sigma_e 5.7e-25 at 1532 nm, 3.04e-25 at
+    1560 nm. tau(4I13/2) = 10 ms.
 
     esa=True adds the 980 nm pump excited-state absorption (4I11/2->4F7/2, ~0.4e-25 m^2) that
     limits 980-pumped efficiency; the C-band signal ESA is negligible in silica so none is added.
@@ -285,15 +287,17 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     default flipped. cband_refit=False reproduces the old ion EXACTLY for anyone reproducing an old
     result.
     """
-    # pump_band_refit (2026-08-28 audit, OPT-IN): the legacy 4I11/2 entry -- a 13 nm-FWHM
-    # Gaussian at 980 nm peaking at 1.7e-25 m^2 -- evaluates to 1.31e-25 at 976 nm, ~1.8x
-    # below the vendor curves. The measured band (nLIGHT LIEKKI App. Designer; Kir'yanov et
-    # al. IEEE JQE 49, 511 (2013)) peaks at 977-978 nm with ~20-25 nm FWHM and sigma_a(peak)
-    # ~= 2.55e-25, putting 976 nm at ~93% of peak (~2.4e-25). The 11-13 nm width is the
-    # NEIGHBORING Yb3+ 976 nm peak's -- the classic conflation. Cross-checks: Er110-4/125 at
-    # n_t = 6.6e25 reproduces its 110 dB/m @1530 with these curves, and the 978 nm value then
-    # lands within 10% of Kir'yanov's measured 67.5 dB/m. Affects pump ABSORPTION LENGTH only
-    # (sigma_e ~ 0 across the band): more pump absorbed per metre, less unabsorbed residual.
+    # pump_band_refit (2026-08-28 audit; DEFAULT since 2026-08-28): the legacy 4I11/2 entry
+    # -- a 13 nm-FWHM Gaussian at 980 nm peaking at 1.7e-25 m^2 -- evaluates to 1.31e-25 at
+    # 976 nm, ~1.8x below the vendor curves. The measured band (nLIGHT LIEKKI App. Designer;
+    # Kir'yanov et al. IEEE JQE 49, 511 (2013)) peaks at 977-978 nm with ~20-25 nm FWHM and
+    # sigma_a(peak) ~= 2.55e-25, putting 976 nm at ~93% of peak (~2.4e-25). The 11-13 nm
+    # width is the NEIGHBORING Yb3+ 976 nm peak's -- the classic conflation. Cross-checks:
+    # Er110-4/125 at n_t = 6.6e25 reproduces its 110 dB/m @1530 with these curves, and the
+    # 978 nm value then lands within 10% of Kir'yanov's measured 67.5 dB/m. Affects pump
+    # ABSORPTION LENGTH only (sigma_e ~ 0 across the band): more pump absorbed per metre,
+    # less unabsorbed residual. pump_band_refit=False reproduces the pre-2026-08-28 band
+    # BIT-EXACTLY for anyone reproducing an old result.
     pump_peak = ((0.978e-6, 0.021e-6, 2.55e-25) if pump_band_refit
                  else (0.980e-6, 0.013e-6, 1.7e-25))
     a_peaks = [
@@ -321,7 +325,8 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
                         tau_s=10.0e-3, zero_line_m=1.530e-6, host=host, sigma_esa=sigma_esa)
 
 
-def ytterbium(host: str = "aluminosilicate", *, mccumber_refit: bool = True) -> RareEarthIon:
+def ytterbium(host: str = "aluminosilicate", *, mccumber_refit: Optional[bool] = None,
+              melkumov_tables: bool = True) -> RareEarthIon:
     """Yb3+ (2F5/2<->2F7/2): broad 850-1000 nm absorption (peak 976 nm), 1000-1100 nm emission,
     signal-band ground-state reabsorption (the quasi-three-level signature). Host peaks:
     sigma_a,peak = 2.7e-24 m^2 at 976 nm (aluminosilicate) / 1.4e-24 at 974.5 nm
@@ -330,7 +335,21 @@ def ytterbium(host: str = "aluminosilicate", *, mccumber_refit: bool = True) -> 
     electronic-structure reason Yb reaches near-quantum-defect efficiency; sigma_esa is left
     None.
 
-    mccumber_refit (DEFAULT since 2026-08-23; audit trail
+    melkumov_tables (DEFAULT since 2026-08-28; audit trail
+    docs/audit/2026-08-28-measured-spectra-melkumov-er-pump-band.md): for the aluminosilicate
+    host the ion is built from the MEASURED Melkumov et al. 2004 tabulated spectra
+    (calibration.ytterbium_melkumov()) rather than the Gaussian-sum fit below. The fit --
+    even with the McCumber-consistent signal-band sigma_a -- carries 1.62x too little
+    oscillator strength for its own 0.83 ms lifetime (Fuchtbauer-Ladenburg, a hard constraint
+    for the ~fully-radiative Yb 2F5/2) and sits 1.6x low at 1060 nm: its three narrow
+    emission Gaussians lose the spectral wings. Escape hatches, both reproducing their
+    variants BIT-EXACTLY: melkumov_tables=False gives the parametric Gaussian-sum ion (with
+    mccumber_refit applied, default True); passing mccumber_refit EXPLICITLY (True or False)
+    also selects the parametric ion, so pre-2026-08-28 call sites that pinned a specific
+    parametric variant keep meaning what they said. The phosphosilicate host has no measured
+    table here and always uses the parametric model.
+
+    mccumber_refit (parametric variants only; DEFAULT since 2026-08-23; audit trail
     docs/audit/2026-08-23-yb-signal-band-mccumber-refit.md): the SIGNAL-BAND sigma_a
     (lambda > 1000 nm) is DERIVED from sigma_e by detailed balance,
     sigma_a = sigma_e exp((h nu - eps)/kT), eps = h c / zero_line, T = 300 K -- so the two
@@ -351,7 +370,11 @@ def ytterbium(host: str = "aluminosilicate", *, mccumber_refit: bool = True) -> 
     way would need sigma_e(1060) ~ 1.5e-24 m^2, 5x above any measured value. The signal-band
     sigma_a was the defective spectrum. mccumber_refit=False reproduces the pre-2026-08-23 ion
     BIT-EXACTLY for anyone reproducing an old result; the pump band (<= 1000 nm) is identical
-    in both variants."""
+    in both parametric variants."""
+    if melkumov_tables and mccumber_refit is None and not host.startswith("phospho"):
+        from dynameta.optics.fiber_amp.calibration import ytterbium_melkumov
+        return ytterbium_melkumov()
+    mccumber_refit = True if mccumber_refit is None else mccumber_refit
     if host.startswith("phospho"):
         pk_a, lam_a, tau = 1.4e-24, 0.9745e-6, 1.45e-3
     else:                                              # aluminosilicate (default)

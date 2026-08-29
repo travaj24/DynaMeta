@@ -2,7 +2,12 @@
 (docs/audit/2026-08-23-yb-signal-band-mccumber-refit.md). Mirrors the erbium(cband_refit)
 gate style: every test is falsifiable, and the legacy variant is exercised alongside the
 refit so each gate PROVES it discriminates (the legacy must FAIL the physics condition the
-refit satisfies)."""
+refit satisfies).
+
+Since 2026-08-28 the DEFAULT ytterbium() is the measured Melkumov table
+(tests/test_measured_spectra_2026_08_28.py); the gates here pin the PARAMETRIC
+Gaussian-sum variants, so they request them explicitly via mccumber_refit=True/False
+(an explicit mccumber_refit always selects the parametric ion)."""
 
 import math
 
@@ -32,7 +37,7 @@ def test_refit_signal_band_obeys_own_mccumber():
     """By construction: sigma_a = sigma_e * exp((h nu - eps)/kT) in the signal band, to
     machine precision.  Trips if the hybrid's derivation, eps, or crossover drifts."""
     for host in ("aluminosilicate", "phosphosilicate"):
-        ion = ytterbium(host)
+        ion = ytterbium(host, mccumber_refit=True)
         lam = SIGNAL_NM * 1e-9
         want = ion.sigma_e.sigma(lam) * _mcc_ratio(lam, ion.zero_line_m)
         got = ion.sigma_a.sigma(lam)
@@ -70,7 +75,7 @@ def test_pump_band_identical_between_variants():
     """The refit must not touch the pump band: sigma_a below the 1000 nm crossover is the
     tabulated spectrum in BOTH variants, difference exactly zero."""
     for host in ("aluminosilicate", "phosphosilicate"):
-        new = ytterbium(host)
+        new = ytterbium(host, mccumber_refit=True)
         old = ytterbium(host, mccumber_refit=False)
         lam = PUMP_NM * 1e-9
         assert np.array_equal(new.sigma_a.sigma(lam), old.sigma_a.sigma(lam)), host
@@ -82,7 +87,7 @@ def test_transparency_inversions_hit_textbook_anchors():
     inversion sigma_a/(sigma_a+sigma_e) is ~0.05 at 1030 nm and ~0.01-0.02 at 1064 nm in
     every published Yb-silica dataset.  Refit must land in those windows; legacy must land
     OUTSIDE both (it gave 0.21 / 0.13)."""
-    new = ytterbium()
+    new = ytterbium(mccumber_refit=True)
     old = ytterbium(mccumber_refit=False)
 
     def transp(ion, lam):
@@ -103,7 +108,8 @@ def test_unpumped_signal_loss_matches_real_fiber_scale():
     lam = 1.060e-6
     gam = float(overlap_gamma(fib, lam))
     to_dB = 10.0 / math.log(10.0)
-    loss_new = gam * fib.n_t_m3 * float(ytterbium().sigma_a.sigma(lam)) * to_dB
+    loss_new = gam * fib.n_t_m3 * float(
+        ytterbium(mccumber_refit=True).sigma_a.sigma(lam)) * to_dB
     loss_old = gam * fib.n_t_m3 * float(
         ytterbium(mccumber_refit=False).sigma_a.sigma(lam)) * to_dB
     assert 0.3 < loss_new < 1.5, loss_new
@@ -115,7 +121,7 @@ def test_seam_at_crossover_is_benign():
     """The 1000 nm crossover sits in the pump/signal dead zone where the two branches nearly
     agree on the shipped model; the step across the seam must stay under 20% and both sides
     must be small against the pump band (< 2% of the 976 nm peak)."""
-    ion = ytterbium()
+    ion = ytterbium(mccumber_refit=True)
     lo = float(ion.sigma_a.sigma(0.9995e-6))
     hi = float(ion.sigma_a.sigma(1.0005e-6))
     assert abs(hi - lo) / lo < 0.20, (lo, hi)
@@ -126,7 +132,7 @@ def test_hybrid_sigma_is_finite_positive_and_composes():
     """The hybrid duck-type must behave like a CrossSectionModel everywhere the package
     samples it: finite, non-negative, scalar-in scalar-out, and at_temperature must compose
     (it rebuilds the ion around the existing sigma_a)."""
-    ion = ytterbium()
+    ion = ytterbium(mccumber_refit=True)
     lam = np.linspace(0.85e-6, 1.12e-6, 2001)
     s = ion.sigma_a.sigma(lam)
     assert np.all(np.isfinite(s)) and np.all(s >= 0.0)

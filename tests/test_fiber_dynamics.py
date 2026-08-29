@@ -95,10 +95,11 @@ def test_thermal_profile_survives_metrics_clone_and_transient():
     assert T_z.max() > 400.0 and info["converged_T"]            # genuinely hot
     G_hot = float(amp.solve(n_nodes=81).signal_gain_dB[0])
     # Re-pinned when ytterbium(mccumber_refit) became the default (2026-08-23): the fixture's
-    # self-consistent operating point moved and the profile is now worth 0.479 dB here (was
-    # >1 dB) -- still 10-24x the 0.02 / 0.05 dB clone-agreement tolerances below, which are
+    # self-consistent operating point moved and the profile was then worth 0.479 dB (was
+    # >1 dB). Re-pinned again for the Melkumov-table default (2026-08-28): measured 0.269 dB
+    # -- still 5-13x the 0.02 / 0.05 dB clone-agreement tolerances below, which are
     # the discriminating asserts this size-pin protects.
-    assert G_cold - G_hot > 0.3                                 # the profile is clearly visible
+    assert G_cold - G_hot > 0.2                                 # the profile is clearly visible
     # the metric clone re-solves the SAME operating point: it must reproduce amp.solve() exactly
     G_metric = float(gain_compression_curve(amp, [5.0], signal_index=0).gain_dB[0])
     assert abs(G_metric - G_hot) < 0.02
