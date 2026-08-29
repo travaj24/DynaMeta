@@ -25,7 +25,13 @@ from dynameta.optics.fiber_amp import (
 from dynameta.optics.fiber_amp.spectroscopy import at_temperature
 
 ER = erbium()
-YB = ytterbium()
+# PINNED to the parametric mccumber_refit ion (bit-identical to the pre-2026-08-28 default):
+# the F-13/F-14 gates below protect the RELAXATION MACHINERY against a fixture whose numbers
+# (34.57521 dB, converged-at-relax-1.0-inside-300) were measured on this ion. Under the
+# Melkumov-table default the same fixture's stronger ASE widens the relax=1.0 oscillation
+# region onto the spurious branch -- covered by its own gate,
+# tests/test_measured_spectra_2026_08_28.py::test_default_yb_fixture_recovers_physical_branch.
+YB = ytterbium(mccumber_refit=True)
 
 
 def _edf(length_m=6.0, n_t=1.0e25):
@@ -70,7 +76,11 @@ class TestF13ConvergedFlag:
         assert abs(r.power_W[pmp, -1]) < 1e-12 * r.power_W[pmp, 0]
         assert r.meta["converged"]
         assert r.meta["iterations"] < 300           # never converged at ANY count, before
-        assert float(r.signal_gain_dB[0]) == pytest.approx(34.72274, abs=1e-3)
+        # 34.72274 under the pre-2026-08-23 Yb ion; re-pinned when ytterbium(mccumber_refit)
+        # became the default: the 1030 nm ASE band gains 3.4x less reabsorption than the
+        # 1060 nm signal gains from the refit, so the self-consistent signal gain settles
+        # 0.148 dB LOWER (stronger ASE competition for the inversion), not higher.
+        assert float(r.signal_gain_dB[0]) == pytest.approx(34.57521, abs=1e-3)
 
     def test_stopping_early_does_not_move_the_answer(self):
         """Discrimination: the fix must change WHEN the solve stops, not WHERE it lands. Compare
@@ -137,7 +147,13 @@ class TestF14Relaxation:
             assert float(bad.signal_gain_dB[0]) == pytest.approx(
                 float(good.signal_gain_dB[0]), abs=0.1)
         else:
-            assert float(bad.signal_gain_dB[0]) < 0.0     # this box: the spurious branch
+            # This box, pre-refit: -12.6 dB (the near-unpumped branch was strongly ABSORBING
+            # at 1060 nm). Under ytterbium(mccumber_refit) the transparency inversion drops
+            # 0.133 -> 0.020, so the same nbar2 ~ 0.036 spurious branch sits just ABOVE
+            # transparency: measured +2.196 dB. The sign is no longer the discriminator;
+            # the DECISIVE separation from the physical branch (> 30 dB here) is.
+            assert (float(good.signal_gain_dB[0])
+                    - float(bad.signal_gain_dB[0])) > 15.0
 
     def test_gain_decreases_monotonically_with_input_power(self):
         """The physical invariant the spurious branch violated, and the cheap sweep gate that would
@@ -197,7 +213,11 @@ class TestF14Relaxation:
                 float(good.signal_gain_dB[0]), abs=0.1)
         else:
             assert bad.meta["endpoint_residual"] > 1e3
-            assert float(good.signal_gain_dB[0]) - float(bad.signal_gain_dB[0]) > 40.0
+            # 48 dB pre-refit (good +17.95 / bad -30.1). Under ytterbium(mccumber_refit) the
+            # spurious branch is far SHALLOWER because the signal-band reabsorption that dug
+            # it is 7.5x smaller: measured good +19.067 / bad -1.830, a 20.9 dB separation.
+            # The contract is unchanged -- loud failure, decisively separated fixed points.
+            assert float(good.signal_gain_dB[0]) - float(bad.signal_gain_dB[0]) > 15.0
         mf = mean_field_equivalent(res).solve(n_nodes=81, max_iter=800, relax=0.3)
         assert mf.meta["converged"]
         delta = float(good.signal_gain_dB[0]) - float(mf.signal_gain_dB[0])
