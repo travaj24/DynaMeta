@@ -7,6 +7,9 @@ GATE A (reduces to 2D, machine): a laterally-uniform stack driven y-polarized at
         The 2D kernel itself carries the R15/R20 closed-form oracles, so equality transfers them.
 GATE B (public plumbing): solve_fdtd_3d with each nonlinearity active runs and CHANGES the
         spectrum vs the zero run (the layer fields reach the kernel); zero fields ARRAY-EQUAL.
+        The active-effect half is measured on the SHARED in-band frequency support, because an
+        active gain line lengthens the FDTD time window and hence the rfft axis (see the comment
+        in the GATE B block below).
 GATE C (guards): backend='numba' raises with an active 3D nonlinearity; Raman/gain without
         their resonance parameters raise.
 
@@ -94,6 +97,20 @@ def main():
               resolution=10, backend="numpy", source_amp=1.0e8)
     base = solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0)], **kw)
     zero = solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=0.0, gain_dN_m3=0.0)], **kw)
+    # THE RUNS DO NOT SHARE A FREQUENCY GRID. An active gain line carries material memory
+    # 18.4/gain_dw_rad_s, and the solver extends its time window by that (solve2d._window_memory_s,
+    # audit C3-6/D-10) -- so the gain run marches ~6.3e3 more steps than `base` and its rfft axis is
+    # LONGER (24436 vs 21270 bins here). WHAT DRIFTED: that window extension landed 2026-07-12,
+    # a month AFTER this gate was written, and the gate's `r.band & base.band` mask-AND over
+    # POSITIONAL indices silently assumed one common axis; it broke on the 2026-08-30 nightly, the
+    # first run that ever executed the full validation tier in CI. The physics comparison is on a
+    # COMMON FREQUENCY SUPPORT: both windows sample the same underlying continuous spectrum (each
+    # ends 200*tau after the probes have rung down; the longer one only samples it more finely), so
+    # interpolating onto base's in-band bins is EXACT wherever the grids coincide -- chi2 and raman
+    # add no material memory, so their axes are still bit-identical to base's -- and honest where
+    # they do not. `zero` adds no memory either, so the ARRAY-EQUAL half below stays bit-exact.
+    f_ref = base.freqs_Hz[base.band]
+    R0_ref = base.R0[base.band]
     effects = {}
     for nm, f in (("chi2", dict(chi2_m_V=5e-12)),
                   ("raman", dict(raman_chi3_m2_V2=1e-21, raman_w_rad_s=2e13 * 2 * np.pi,
@@ -101,8 +118,16 @@ def main():
                   ("gain", dict(gain_w_rad_s=W0, gain_dw_rad_s=dwg,
                                 gain_kappa_C2_kg=Q_E ** 2 / M_E, gain_dN_m3=5e24))):
         r = solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0, **f)], **kw)
-        m = r.band & base.band
-        effects[nm] = float(np.max(np.abs(r.R0[m] - base.R0[m])))
+        fr, R0r = r.freqs_Hz[r.band], r.R0[r.band]
+        m = (f_ref >= fr[0]) & (f_ref <= fr[-1])              # the shared in-band support
+        # tripwire, not the physics gate: differing SAMPLING is fine (interpolated above), a
+        # differing excited BAND is not -- it would mean the two runs no longer probe the same
+        # spectrum and the comparison below would be quietly measuring less and less of it.
+        if int(m.sum()) < int(0.9 * f_ref.size):
+            raise RuntimeError("[n3] GATE B: {} shares only {}/{} of base's in-band bins -- the two "
+                               "runs no longer cover the same spectrum".format(nm, int(m.sum()),
+                                                                               f_ref.size))
+        effects[nm] = float(np.max(np.abs(np.interp(f_ref[m], fr, R0r) - R0_ref[m])))
     g_b = bool(np.array_equal(base.R0, zero.R0)
                and all(np.isfinite(v) and v > 1e-12 for v in effects.values()))
     ok = ok and g_b
