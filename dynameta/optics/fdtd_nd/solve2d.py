@@ -418,6 +418,38 @@ def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub
             .format(entry_point, "; ".join(bad)))
 
 
+def _grid_n_band_max(eps_inf, wp, gam, w_band) -> float:
+    """Peak index of a per-cell Drude GRID over the band -- the grid twin of solve_fdtd_2d's
+    `_n_band_max`, which reads the same quantity off an FDTDLayer through FDTDLayer.eps_at.
+
+    THE INDEX THAT SETS dz IS THE PHYSICAL ONE, |sqrt(eps_inf - wp^2/(w^2 + i gam w))| maximized
+    over the band -- NOT the bare Drude BACKGROUND eps_inf. For a lossy cell the two differ BY
+    CONSTRUCTION: the seam's single-pole inversion of a high-index lossy eps
+    (fdtd_seam._eps_to_fdtd_layer and its bit-identical vectorized twin effect_eps_to_fdtd_grid)
+    sets eps_inf = Re(eps) + Im(eps) and hands the excess straight back through the pole, so
+    eps_inf OVERSTATES the index by ~Im/(2 Re) -- 4.1 % for eps = 6.25 + 0.6j at 1300 nm
+    (sqrt(6.85) = 2.617 against the true band max 2.514).
+
+    Reading eps_inf alone therefore rejected a lateral (eps_inf, wp, gam) grid that is
+    CELL-FOR-CELL IDENTICAL to the material grid solve_fdtd_2d builds itself from the same
+    FDTDLayer and marches without complaint -- i.e. it forbade the whole R4 per-cell LOSSY seam
+    for Re(eps) > 1 (only the metal branch, which pins eps_inf = 1, slipped through). Caught by
+    validation/fdtd_effect_seam.py on the 2026-08-30 nightly, the first run that ever executed
+    the full validation tier in CI.
+
+    With wp == 0 everywhere (the lossless structured seam, every pre-R4 caller) this returns
+    exactly max(1, sqrt(max eps_inf)) -- the quantity the guard used before -- so those callers
+    are unchanged."""
+    eps_inf = np.asarray(eps_inf, dtype=float)
+    wp2 = np.asarray(wp, dtype=float) ** 2
+    gam = np.asarray(gam, dtype=float)
+    n = 1.0
+    for w in np.asarray(w_band, dtype=float):
+        eps = eps_inf - wp2 / (w ** 2 + 1j * gam * w)
+        n = max(n, float(np.max(np.abs(np.sqrt(eps)))))
+    return n
+
+
 def _dispatch_2d_te(name, eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np,
                     lor=None, chi2=None, raman=None, gain=None, hot=None, hot_out=None):
     """Run ONE 2D-TE pass on the named backend and return the four probe x-lines as NumPy arrays, so the
@@ -607,17 +639,6 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
         _check_lateral_pads("solve_fdtd_2d", eps_inf, zc, pad, z_struct, n_super, n_sub)
-        # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) BEFORE this override. If the
-        # lateral pattern's peak index exceeds the sizing index, dz is too coarse and R/T are silently
-        # under-resolved. Raise rather than mis-solve -- size `layers` eps_inf to the pattern's max index
-        # (the make_structured_lateral seam already does this) so n_max/dz are derived correctly.
-        _n_lat = float(np.sqrt(max(1.0, float(np.max(np.real(eps_inf))))))
-        if _n_lat > n_max * (1.0 + 1e-9):
-            raise NotImplementedError(
-                "solve_fdtd_2d: lateral pattern peak index {:.3f} exceeds the grid-sizing index {:.3f} "
-                "from `layers` (+ end media) -- dz is under-resolved by {:.0%}. Size the `layers` "
-                "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
-                    _n_lat, n_max, _n_lat / n_max - 1.0))
     # PER-CELL LOSSY/graded eps (R4): a Drude (wp,gam) grid alongside eps_inf lets a slow drive (gate E,
     # T, PCM fraction) paint a graded ABSORBING eps the eps_inf-only lateral seam cannot carry. Each is a
     # callable(nx,nz,zc,pad,z_struct)->array or an (nx,nz) array (zero in the pads). Default None -> the
@@ -628,6 +649,23 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     if lateral_gam is not None:
         gam = np.asarray(lateral_gam(nx, nz, zc, pad, z_struct) if callable(lateral_gam) else lateral_gam,
                          dtype=float)
+    if lateral_eps_inf is not None:
+        # GRID-SIZING GUARD: dz was derived from `layers` (+ end media) BEFORE these overrides. If the
+        # overridden pattern's peak index exceeds the sizing index, dz is too coarse and R/T are silently
+        # under-resolved. Raise rather than mis-solve -- size `layers` eps_inf to the pattern's max index
+        # (the make_structured_lateral seam already does this) so n_max/dz are derived correctly.
+        # It runs HERE, after the wp/gam overrides, so it sees the material grid that is actually
+        # marched and measures its DISPERSIVE band-peak index (`_grid_n_band_max`) rather than the bare
+        # Drude background eps_inf -- reading eps_inf alone false-tripped on every lossy R4 cell with
+        # Re(eps) > 1, including grids bit-identical to an accepted `layers` fill. See
+        # `_grid_n_band_max`; the pre-2026-08-30 guard is recovered exactly when wp == 0.
+        _n_lat = _grid_n_band_max(eps_inf, wp, gam, w_band)
+        if _n_lat > n_max * (1.0 + 1e-9):
+            raise NotImplementedError(
+                "solve_fdtd_2d: lateral pattern peak index {:.3f} exceeds the grid-sizing index {:.3f} "
+                "from `layers` (+ end media) -- dz is under-resolved by {:.0%}. Size the `layers` "
+                "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
+                    _n_lat, n_max, _n_lat / n_max - 1.0))
 
     k_src = max(2, int(round((0.35 * pad) / dz)))
     k_pL = int(round((0.7 * pad) / dz))
