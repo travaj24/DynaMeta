@@ -21,9 +21,12 @@ name: CI
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
 #   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
-#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM     hours
+#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~15 min
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
-#            DISPATCH ONLY                                     oracles + full validation tier   on PRs)
+#            DISPATCH ONLY                                     oracles                          on PRs)
+#   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      ~70 min
+#   validat. SCHEDULE +                                        sharded 4 ways (run_all         per shard,
+#   (x4)     DISPATCH ONLY                                     --shard K/4), in parallel       in parallel
 #
 # The "added cost" figures for the PR legs are measured (2026-07-26, this repo, 2 threads per
 # process); the four `test` legs are untouched apart from coverage on 3.12. The `nightly` figure is
@@ -40,6 +43,27 @@ name: CI
 # into the FIRST cell, which also cancelled the (c1)/(c2) validation steps behind it. Run it
 # locally (7/7 in ~24 min); revisit if a larger runner becomes available. The other heavy FEM
 # modules and the @slow validation wrappers stay covered -- the `nightly` job runs both.
+#
+# ALSO NOT COVERED ON CI, and this list is MEASURED, not assumed: ten validation oracles whose
+# process tree crosses the RAM watchdog's budget on a 16 GB runner (12.5-13.0 GB peak against a
+# 12.4 GB budget) and are therefore reported OVER-BUDGET rather than run, every night --
+# boundary_inclusion_corner_circle, boundary_inclusion_grating, conical_structured,
+# inclusion_shapes, lc_tilted_fem, lc_uniaxial_fem, magneto_optic_faraday,
+# pockels_phase_modulator, tensor_isotropic_gate, thermo_optic_modulator (run 33312685617,
+# 2026-08-30, the tier's first complete execution). They are exercised on the dev workstation
+# only. OVER-BUDGET is informational outside the smoke tier BY CONTRACT, so this is a silent
+# coverage hole unless it is written down -- hence this paragraph. Shrinking a fixture until it
+# fits is the fix that would actually restore CI coverage; a bigger runner is the other.
+#
+# AND: the three oracles that compare against `grcwa` (the third-party RCWA package) --
+# fdtd_3d_structured_tensor, fdtd_seam_structured_vs_rcwa, fdtd_structured_nonvacuum. grcwa is
+# not a declared dependency, so on the runner they now exit 42 (capability absent) instead of
+# crashing with rc=1, which is what they did on 2026-08-30. INSTALLING grcwa here would restore
+# real coverage and is the obvious follow-up -- but it must be MEASURED first, not added blind:
+# fdtd_3d_structured_tensor takes 1574 s on the dev workstation against run_all's 1800 s
+# PER-SCRIPT cap, and the comparable fdtd_3d_reduces measured 1518 s on this runner, so that one
+# script would sit inside ~13% of a timeout. Adding it blind trades a fast clean skip for a slow
+# red. Measure it on a runner (workflow_dispatch) before declaring the dependency.
 
 on:
   push:
@@ -356,7 +380,7 @@ jobs:
     # NOT REACHABLE FROM A PULL REQUEST. `schedule:`/`workflow_dispatch:` are workflow-level
     # triggers (GitHub has no per-job trigger), so this `if:` is the whole mechanism keeping a
     # multi-hour job off the PR path. Do not delete it.
-    name: nightly (slow suite + heavy FEM + full validation tier)
+    name: nightly (slow suite + heavy FEM oracles)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # WHAT THIS CAP IS BUILT FROM, per step. MEASURED = run on the dev workstation 2026-07-26
@@ -370,20 +394,20 @@ jobs:
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
     #                                          them out of the `solvers` leg put EACH over 180 s,
     #                                          so >= 12 min there and more on a runner
-    #   (c2) run_all --tier full   204 gated validations + 7 examples: the aggregate is NOT
-    #        MEASURED and cannot be cheaply bounded. 93 of the 204 are the SMOKE subset (each
-    #        measured < 60 s by construction, a few minutes in total); the OTHER 111 are the
-    #        solver/FDTD-backed oracles, individually unmeasured, against a per-script cap of
-    #        1800 s. The runner's own docstring estimates this tier at "hours".
+    # (c2) IS NO LONGER IN THIS JOB -- it is the `nightly-validation` matrix below. WHY, measured:
+    # the full tier finally ran end-to-end on 2026-08-30 (run 33312685617) and took 4 h 16 min
+    # (13:08:37 -> 17:24:47 in that job's log) inside this job's 300-minute cap, which had ALREADY
+    # cancelled the three nightlies before it (33254323139 / 33203839515 / 33102686981, each
+    # killed at exactly 5 h 00 m). One 4.3-hour step under a 5-hour cap is not a margin, it is a
+    # coin flip -- so (c2) is now sharded four ways across parallel jobs, exactly as the note that
+    # used to sit here prescribed ("split (c2) ... so each piece keeps a meaningful cap, and
+    # record the measured aggregate here"). The aggregate is recorded above and on that job.
     # There is no (b2) any more: test_shg_grating.py was tried on the first two real nightlies
     # (2026-07-28/29) with its worst parametrization deselected and memory-killed the runner both
     # times, taking (c1)/(c2) down with it -- it is dev-workstation-only now (top-of-file list).
-    # (a)+(b1) MEASURE ~19 min on the workstation; a runner plausibly spends 30-45 min reaching
-    # (c2). 300 is a CAP, not a budget, and it is a guess about (c2); GitHub's hard ceiling for
-    # one job is 6 h, so if the first full nightly run overruns this, the answer is NOT to nudge
-    # the number toward 360: split (c2) by token across several jobs so each piece keeps a
-    # meaningful cap, and record the measured aggregate here.
-    timeout-minutes: 300
+    # What is left here -- (a)+(b1)+(c1) -- MEASURED 15 min INCLUDING the install on the runner
+    # (12:53 -> 13:08 in the same log). 90 is a 6x cap over that, not a budget.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -447,24 +471,58 @@ jobs:
         run: |
           python -m validation.run_all \
             superstrate_index_fem graded_tmm_vs_fem per_region_absorption symmetry_reduced_fem
-      - name: (c2) the full validation tier
-        # FIRST EXECUTION (run 31247382381, 2026-08-08, after the (c1) guards landed) reached
-        # alphabetically into the tier and then drew the runner OOM shutdown at
-        # boundary_inclusion_corner_circle -- proving the per-script-guard approach cannot
-        # enumerate every over-budget oracle up front. run_all now carries its own RAM
-        # watchdog (see its exit-code contract, code 125): any script whose process tree
-        # crosses 0.85 x the available-at-start memory is killed BY THE RUNNER SCRIPT and
-        # reported OVER-BUDGET, so a too-big oracle costs one visible line instead of the
-        # whole job and everything queued behind it. Oracles it reports over-budget here are
-        # covered on the dev workstation; the guard thresholds in (c1) stay because they skip
-        # in seconds what the watchdog would kill only after minutes of doomed meshing.
-        # run_all defines exactly two tiers, `smoke` and `full` (there is no separate "heavy"
-        # one), so this -- 204 gated validations + the 7 exit-gated examples/ workflows -- is the
-        # invocation that reaches the 111 non-smoke oracles no other leg can. NO --allow-skip:
-        # outside the smoke tier an exit-42 is informational BY CONTRACT (that strictness is the
-        # smoke tier's alone), and with the install above exactly two scripts should take it --
-        # fdtd_numba_cuda (no GPU on this runner) and qd_soa_numba_parity (numba is deliberately
-        # NOT installed here; the dedicated `numba` job runs that oracle for real on Windows).
-        # Runs LAST because it is the one step whose wall-clock is not bounded by measurement.
-        if: ${{ !cancelled() }}
-        run: python -m validation.run_all --tier full
+
+  nightly-validation:
+    # (c2), SHARDED. run_all defines exactly two tiers, `smoke` and `full` (there is no separate
+    # "heavy" one), so `--tier full` -- 206 gated validations + the 7 exit-gated examples/
+    # workflows -- is the invocation that reaches the ~111 non-smoke oracles no other leg can.
+    #
+    # WHY FOUR JOBS INSTEAD OF ONE STEP (measured, run 33312685617 on 2026-08-30): the tier's
+    # first-ever complete execution took 4 h 16 min and returned 193/213 passed, 5 declared
+    # skips, 10 RAM-watchdog OVER-BUDGET and 5 real failures. At 4.3 h it was one slow oracle
+    # away from the cap that had already cancelled the three nightlies before it. `--shard K/N`
+    # (see run_all's docstring) slices the SAME selection round-robin, so the four shards are
+    # disjoint, their union is exactly the unsharded tier, and each carries the identical exit
+    # contract -- a red shard is a red job. 256 min / 4 = ~64 min of work per shard plus ~5 min
+    # of install; the 120 cap is ~1.7x that. Raise N before raising the cap.
+    #
+    # The RAM watchdog (run_all exit code 125) still protects every shard: an oracle whose
+    # process tree crosses 0.85 x available-at-start is killed by the runner script and reported
+    # OVER-BUDGET, so a too-big oracle costs one visible line instead of the whole job -- the
+    # lesson of run 31247382381, where a single unguarded script OOM-killed the entire tier.
+    # The (c1) guards in the job above stay: they skip in seconds what the watchdog would kill
+    # only after minutes of doomed meshing.
+    #
+    # NO --allow-skip: outside the smoke tier an exit-42 is informational BY CONTRACT (that
+    # strictness is the smoke tier's alone). With this install exactly two scripts take it --
+    # fdtd_numba_cuda (no GPU here) and qd_soa_numba_parity (numba deliberately NOT installed;
+    # the dedicated `numba` job runs that oracle for real on Windows) -- plus the three (c1)
+    # oracles whose available-RAM guards fire on a 16 GB runner.
+    name: nightly validation tier (shard ${{ matrix.shard }}/4)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false          # one red shard must not hide the other three
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # KEEP THESE TWO STEPS BYTE-IDENTICAL TO THE `nightly` JOB ABOVE. GitHub has no way to
+      # share steps between jobs without a composite action, so this is a deliberate duplicate;
+      # a divergence here silently changes which oracles can run.
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
+      - name: Install (core + dev + plot + solvers + io backends + jax)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]" "h5py>=3.8" "zarr>=3" "jax>=0.11"
+      - name: Assert the whole optional stack really imported
+        run: |
+          python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
+          python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
+      - name: (c2) full validation tier, shard ${{ matrix.shard }} of 4
+        run: python -m validation.run_all --tier full --shard ${{ matrix.shard }}/4

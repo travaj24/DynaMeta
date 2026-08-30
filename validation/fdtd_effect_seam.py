@@ -67,6 +67,15 @@ def main():
     print("[fe] === FDTD per-cell effect eps(t) hook (lateral wp/gam) vs TMM ===", flush=True)
 
     # GATE A: uniform lossy slab via lateral grids == explicit FDTDLayer (SAME sizing layer -> same mesh)
+    # This gate is also the oracle for solve_fdtd_2d's lateral GRID-SIZING GUARD: both calls pass the
+    # SAME `layers`, so both derive the same n_max/dz/dt/nsteps, and the lateral (eps_inf, wp, gam)
+    # grids reproduce cell-for-cell what the solver's own `layers` fill would write -- max|d| must be
+    # EXACTLY 0. Until 2026-08-30 the guard measured the lateral peak index as sqrt(max eps_inf), i.e.
+    # the bare Drude BACKGROUND, and refused this run (2.617 vs 2.514, "under-resolved by 4%") even
+    # though the accepted explicit run marches the identical grid: the seam's high-index-lossy
+    # inversion puts eps_inf = Re(eps) + Im(eps) and takes the excess back out through the pole. The
+    # guard now reads the same DISPERSIVE band-peak index the `layers` path uses; the first-ever
+    # full-tier nightly (2026-08-30) is what finally executed this script in CI and caught it.
     L = _eps_to_fdtd_layer(D, EPS_A, LAM)
     Rl, Tl = _flux_at(solve_fdtd_2d([L], period_x_m=PERIOD, nx=4, lambda_min_m=1200e-9,
                                     lambda_max_m=1400e-9, resolution=34))
