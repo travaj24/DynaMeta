@@ -11,6 +11,9 @@ with eps_zz == eps_xx makes the x-pol problem IDENTICAL to a fully isotropic eps
 RCWA answer is the oracle; eps_yy is set DIFFERENT and must not affect it. The mirror (y-pol vs eps_yy)
 pins the other in-plane component.
 
+Skipped (exit 42 = the run_all SKIP category, audit C6-6) if grcwa is not installed -- it is the
+oracle for every gate, so without it there is nothing to compare the FDTD against.
+
 GATE 0 (oracle sanity): grcwa on a uniform slab == analytic Airy.
 GATE A (isotropic structured): exx=eyy=ezz patterned -> FDTD R/T == grcwa, R+T = 1.
 GATE B (x-pol -> eps_xx): anisotropic (exx=hi, eyy=lo, ezz=exx), x-pol -> matches grcwa(eps=hi) and is
@@ -27,7 +30,21 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import grcwa
+try:
+    import grcwa
+except ModuleNotFoundError:
+    # grcwa IS the oracle here: every gate below measures the FDTD tensor solve against a
+    # frequency-domain RCWA answer (uniform-slab Airy for GATE 0, the isotropic pillar array for
+    # GATE A, and the per-polarization eps_xx / eps_yy discriminators for GATES B and C). With no
+    # independent reference there is nothing to compare against, so the honest verdict is
+    # CAPABILITY ABSENT, not a pass and not a crash. grcwa is an optional third-party package --
+    # installed on the dev boxes, missing from the CI image -- and this bare module-scope import
+    # died with rc=1 one second into the 2026-08-30 nightly, the first run that ever executed the
+    # full validation tier in CI, where it read as a physics failure rather than a missing tool.
+    print("[st] SKIP: grcwa is not installed -- it is the RCWA oracle this script's 3-D "
+          "diagonal-tensor FDTD R/T is measured against, so no gate here can be evaluated "
+          "without it (exit 42; run_all counts it separately, audit C6-6)", flush=True)
+    raise SystemExit(42)
 
 from dynameta.optics.fdtd_mo import MOLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_3d_mo

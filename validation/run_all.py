@@ -10,6 +10,16 @@ cannot run -- the heavy NGSolve/DEVSIM stack is not installed in CI.
   python -m validation.run_all oblique sp            # only scripts whose name matches a token
   python -m validation.run_all --tier smoke lc       # tier and tokens compose (AND)
   python -m validation.run_all --tier smoke --allow-skip qd_soa_numba_parity   # declared exception
+  python -m validation.run_all --tier full --shard 2/4     # shard 2 of 4 (1-based), see below
+
+Sharding (--shard K/N): run only every N-th script of the selection, offset K-1. Applied AFTER
+the tier and token filters, so N shards are disjoint and their union is exactly the unsharded
+selection. The stride is ROUND-ROBIN rather than contiguous because this repo's cost correlates
+with the alphabetical name prefix (the fdtd_* family holds most of the multi-minute scripts), so
+a block split would pile them into one shard. WHY IT EXISTS: the full tier measured 4 h 15 min on
+a hosted runner (2026-08-30, the first run that ever completed), against a 300-minute job cap
+that had already cancelled three nightlies -- see the `nightly` job in .github/workflows/ci.yml.
+Each shard carries the SAME exit contract as an unsharded run, so a red shard is a red job.
 
 Tiers:
   smoke -- the SMOKE set below: solver-free scripts MEASURED at < 60 s each, no DEVSIM/NGSolve and
@@ -68,7 +78,7 @@ SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml
 # second kind is NAMED on every run instead of vanishing silently -- audit X-6, where a parked
 # `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
 # executable gate anywhere and nobody could see it.
-FIXTURES = {"_reference_device"}
+FIXTURES = {"_reference_device", "_ram_guard"}
 PER_SCRIPT_TIMEOUT_S = 1800
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
@@ -236,7 +246,10 @@ def _gated(directory, skip=()):
         name = fn[:-3]
         if name in skip:
             continue
-        src = open(os.path.join(directory, fn), encoding="utf-8").read()
+        with open(os.path.join(directory, fn), encoding="utf-8") as fh:
+            src = fh.read()          # context-managed: a bare open().read() leaks the handle,
+        # which is a ResourceWarning -- i.e. an ERROR under this repo's filterwarnings policy the
+        # moment anything imports this module from pytest (tests/test_validation_runner.py does).
         # audit 6.3: the old behavior INCLUDED only scripts matching this regex, silently
         # classifying a raise/assert-gated validation as a diagnostic and NEVER RUNNING it.
         # Any non-zero exit gates equally well, so membership is now everything-except-SKIP
@@ -275,6 +288,27 @@ def main(argv):
             return 2
         allow_skip.update(n for n in value.replace(",", " ").split() if n)
         args = args[:i] + args[i + 2:]
+    # --shard K/N: run only shard K (1-based) of N. See the module docstring. Parsed here,
+    # APPLIED after the tier+token filters so a shard is a slice of exactly what would have run.
+    shard = None
+    if "--shard" in args:
+        i = args.index("--shard")
+        try:
+            value = args[i + 1]
+        except IndexError:
+            print("[run_all] --shard needs a value: K/N (1-based)", flush=True)
+            return 2
+        try:
+            k_s, n_s = value.split("/")
+            shard = (int(k_s), int(n_s))
+        except ValueError:
+            print("[run_all] --shard wants K/N with integers, got {!r}".format(value), flush=True)
+            return 2
+        if not (shard[1] >= 1 and 1 <= shard[0] <= shard[1]):
+            print("[run_all] --shard K/N needs N >= 1 and 1 <= K <= N, got {}/{}".format(
+                *shard), flush=True)
+            return 2
+        args = args[:i] + args[i + 2:]
     tokens = args
     # smoke is the CI-able tier, so "capability absent" there means CI did not install
     # something it was supposed to -- a red, not a shrug (audit T-3).
@@ -309,7 +343,8 @@ def main(argv):
         )
         extra = []
         for n in sorted(all_gated - SMOKE - set(SMOKE_EXCLUDED)):
-            src = open(os.path.join(HERE, n + ".py"), encoding="utf-8").read()
+            with open(os.path.join(HERE, n + ".py"), encoding="utf-8") as fh:
+                src = fh.read()                                  # context-managed: see _gated
             if not any(h in src for h in _HEAVY):
                 extra.append(n)
         if extra:
@@ -333,6 +368,18 @@ def main(argv):
             jobs += [("examples", n) for n in _gated(ex_dir)]
     if tokens:
         jobs = [(p, n) for p, n in jobs if any(t in n for t in tokens)]
+
+    n_before_shard = len(jobs)
+    if shard is not None:
+        # ROUND-ROBIN, not contiguous blocks. The list is alphabetical, and in this repo cost is
+        # strongly correlated with the name PREFIX -- the fdtd_* family alone holds most of the
+        # multi-minute scripts (fdtd_drude_lorentz_vs_tmm measured 889 s on the runner) -- so a
+        # contiguous split would hand one shard nearly all of them. Striding interleaves the
+        # families across shards, which is what keeps every shard inside its own cap.
+        jobs = jobs[shard[0] - 1::shard[1]]
+        print("[run_all] SHARD {}/{}: {} of {} selected scripts (round-robin stride; shards are "
+              "disjoint and their union is the whole selection)".format(
+                  shard[0], shard[1], len(jobs), n_before_shard), flush=True)
 
     print("[run_all] {} of {} gated validations selected (tier={}{}){}\n".format(
         len([j for j in jobs if j[0] == "validation"]), n_gated, tier or "all",
