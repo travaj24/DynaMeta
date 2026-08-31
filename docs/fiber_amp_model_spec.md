@@ -118,8 +118,17 @@ Yb3+ (2F5/2 <-> 2F7/2):
 - Er cooperative (homogeneous) UPCONVERSION: adds `-C_up * N2^2` to the N2 rate (two excited
   ions -> one higher + one ground), and pair-induced quenching (fast decay of a fraction of
   clustered ions). C_up ~ 1e-24 ... 1e-23 m^3/s host-dependent.
-- Yb PHOTODARKENING: a slowly-growing background loss `l_PD(z, t)` (color-center formation),
-  scaling super-linearly with inversion; time-dependent.
+- Yb PHOTODARKENING: colour-centre formation drives an EQUILIBRIUM excess background loss that
+  is ~LINEAR in inversion (Jetschke 2007; Jauregui AOP 2020) and ~quadratic in Yb density across
+  fibers (Taccheo 2011); the steep exponents (4.3 Jetschke/Roepke 2009, 7 Koponen 2008) are RATE
+  laws (time-to-equilibrium), not equilibrium laws. Modelled as the equilibrium gray loss
+  `pd_loss_per_m * nbar2^pd_exponent` with pd_exponent = 1 the default since the 2026-08-31
+  literature audit (the legacy default 7 under-predicted equilibrium by 10^2-10^3 at amplifier
+  inversions). `ytterbium_photodarkening()` anchors on a measured dB/m at the 0.46 benchmark.
+- PAIR CONVENTIONS (2026-08-31): `pair_convention="dark"` (default) = every paired ion
+  permanently ground, the pessimistic bound; `"delevaque"` = literature-standard (Nilsson PTL
+  1993, one ion per pair quenched): pair_fraction counts ions IN pairs, half dark, half active.
+  delevaque(2f) == dark(f) exactly.
 
 ## 7. Cladding pumping / thermal (Phase 6)
 - Double-clad: pump overlap with the CORE `Gamma_p ~= A_core / A_clad` (pump fills the inner
@@ -184,9 +193,11 @@ pre-2026-08 values are kept in parentheses and are reproducible with `erbium(cba
   trustworthy. Use `cband_refit=False` or measured spectra for low-inversion gain tilt or the
   L band; see the `erbium()` docstring.
 - Concentration OPT-IN: concentration=None is byte-identical to an all-default ConcentrationModel.
-  Upconversion clamps nbar2/gain; 10% PIQ -> 1.65 dB unbleachable penalty; photodarkening ~nbar2^7
-  costs 4.99 dB at nbar2=0.996 (915 nm pump) vs 0.13 dB at 0.499 (976 nm zero-line) -- the latter
-  re-validating the Yb quasi-3-level 50% inversion cap when pumped on the zero line.
+  Upconversion clamps nbar2/gain; 10% PIQ -> 1.65 dB unbleachable penalty; photodarkening at the
+  legacy nbar2^7 configuration cost 4.99 dB at nbar2=0.996 (915 nm pump) vs 0.13 dB at 0.499
+  (976 nm zero-line) -- the latter re-validating the Yb quasi-3-level 50% inversion cap when
+  pumped on the zero line. (Those pinned numbers used pd_exponent=7 explicitly; the DEFAULT
+  equilibrium exponent is 1 since 2026-08-31 -- see sec. 6.)
 - Cladding overlap ratio 7.67e-3 = Gamma_p/Gamma_core(980) to 0.03%. Heat balance exact
   (pump_abs - sig_add - ASE_out == F(0)-F(L) == integral Q dz). Brown-Hoffman centre rise matches
   an independent FD solve of the cylindrical heat equation. qd(Yb 976->1030)=5% << qd(Er)=37%.
