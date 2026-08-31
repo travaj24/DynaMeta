@@ -399,8 +399,14 @@ def test_thermal_profile_reduction_and_coupling():
     mes = QDGainModel(QDGainParams(n_groups=15, sigma_pk_ES_m2=1e-19).with_detailed_balance_taus(),
                       self_heating=sh)
     ste = mes.init_slices(nz, 40e-3)
-    assert np.array_equal(mes.gain_per_m_thermal(ste, nu0, np.full(nz, T0)),
-                          mes.gain_per_m_slices(ste, nu0))
+    # SIBLING of the rtol'd assert above, and the reason this one is not array_equal either: the
+    # same two DIFFERENT float code paths (thermal-at-exactly-T0 vs isothermal), here with the ES
+    # band active. Fixing the first instance on 2026-08-30 and leaving this one is what let the
+    # floor CI leg go red again the very next run (33347138729) -- the defect was the CLASS
+    # "bit-equality between two implementations", not the single line. The uniform-hot twins at
+    # lines ~392/~406 were already tolerance-based; only the at-T0 pair claimed bit-equality.
+    assert np.allclose(mes.gain_per_m_thermal(ste, nu0, np.full(nz, T0)),
+                       mes.gain_per_m_slices(ste, nu0), rtol=5e-12, atol=0.0)
     ghe = mes.gain_per_m_thermal(ste, nu0, np.full(nz, 330.0))
     mes.set_temperature(330.0)
     assert np.max(np.abs(ghe - mes.gain_per_m_slices(ste, nu0))) < 1e-9
