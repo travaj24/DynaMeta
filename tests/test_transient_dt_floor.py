@@ -12,14 +12,35 @@ deterministically on every runner, and so the "converged" report can be forced t
 is the whole point, since a reported convergence is not evidence that a step is physical.
 """
 
-import pytest
+import sys
+import types
 
-from dynameta.carriers import transient as tr
+import pytest
 
 
 class _StubError(Exception):
     """Stands in for ds.error; deliberately NOT RuntimeError, so the guard's own RuntimeError can
     never be swallowed by the module's `except ds.error` clause."""
+
+
+# carriers.transient imports devsim at module scope, but NOTHING here needs the real solver -- every
+# gate replaces `tr.ds` with the stub below. Rather than strand these gates on the one CI leg that
+# ships devsim (they are control-flow gates, and the control flow is identical on every leg), stand
+# a shim in for the import and withdraw it immediately afterwards. Withdrawing matters: leaving a
+# fake `devsim` in sys.modules would silently defeat `importorskip("devsim")` in any module imported
+# after this one, turning correct skips into failures somewhere else entirely.
+try:
+    import devsim as _real_devsim                                          # noqa: F401
+    _shim = None
+except ImportError:
+    _shim = types.ModuleType("devsim")
+    _shim.error = _StubError
+    sys.modules["devsim"] = _shim
+try:
+    from dynameta.carriers import transient as tr
+finally:
+    if _shim is not None and sys.modules.get("devsim") is _shim:
+        del sys.modules["devsim"]
 
 
 # class (1): the DEVICE equations are far from converged, so transient_step halves and retries
