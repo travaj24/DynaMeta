@@ -95,11 +95,34 @@ VERSION_FLOOR = (5, 22, 0)
 # in validation/lumenairy_rcwa_jax.py). Re-verified at 5.31.0 (2026-07-29): gates 5/5 local +
 # the full 93-script smoke tier green on CI against the 5.31.0 wheel; its one observable shift
 # (the W7 exact-duty lamellar Fourier series, rel ~9.2e-8 on a grating R) is era-pinned in
-# tests/test_polarization_vocabulary.py. Above the ceiling the bridge still runs -- lumenairy
-# is backward compatible in practice and refusing would be worse -- but says so ONCE per
-# process (a RuntimeWarning naming both versions). Bumping this is the
-# CHEAP half of the same correctness work: re-run validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 31)
+# tests/test_polarization_vocabulary.py.
+#
+# RE-VERIFIED AT 5.42.1 (2026-08-31), eleven minor versions on, by DIFFERENTIAL measurement
+# rather than by "the gates are green": lumenairy v5.31.0 was extracted alongside and the SAME
+# bridge was run against both, comparing 1198 observables as exact float reprs across the whole
+# bridged surface (RCWA scalar/2-D/conical/OOP-tensor/graded/absorption, PMM 1-D and 2-D pure
+# and hybrid, Berreman, EMT, BOR, the differentiable twins and their gradients, dispersive
+# translate, and every name in __all__). NINE values moved; all nine are ONE mechanism, and
+# nothing was removed, renamed, or had a pre-existing default changed.
+#   * THE ONE SHIFT: PMM2DStackHybrid's cascade default became 'fast' at 5.36.0 (was
+#     'monolithic'), which merges adjacent modally-identical layers. Worst observed move
+#     rel 6.2e-15, on the cancellation-amplified A = 1-R-T; 6.8e-16 on a primary R/T/r. It
+#     fires only at OBLIQUE incidence with adjacent identical layers and absorption=False
+#     (at normal incidence the even-parity fold bypasses the cascade entirely). Named here
+#     the way 5.30's 9.2e-8 exact-duty shift is, so the next reader can tell a KNOWN shift
+#     from a new one.
+#   * TWO CAVEATS ON THE EVIDENCE. (1) The tree measured was lumenairy HEAD f70628d, three
+#     BOR-only commits past the v5.42.1 tag -- bit-identical through the bridge, but not
+#     literally the tagged wheel CI installs. (2) The theta=0 PMM angle-gradient defect is
+#     NOT fixed upstream: re-measured at 5.42.1 as d(R+T)/dtheta = -3.0e-6 where the truth is
+#     exactly 0 (clean by theta ~ 1e-4), bit-identical to 5.31.0 -- so the ANGLE CAVEAT in
+#     rcwa_design.py stays, and this ceiling does not certify that path at exactly normal
+#     incidence.
+# Above the ceiling the bridge still runs -- lumenairy is backward compatible in practice and
+# refusing would be worse -- but says so ONCE per process (a RuntimeWarning naming both
+# versions). Bumping this is the CHEAP half of the same correctness work: re-run
+# validation/lumenairy_*.py and raise it.
+VERSION_VERIFIED_MAX = (5, 42)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS

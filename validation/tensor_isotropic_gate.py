@@ -29,8 +29,18 @@ def _design():
     cell = UnitCell.square(300e-9)
     stack = Stack(layers=[Layer("s", 200e-9, "slab")],
                   superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background 25 -> 45 nm, maxh_super/substrate 45 -> 70 nm.
+    # Nightly run 33312685617 (2026-08-30, the tier's first complete execution) reported this oracle
+    # OVER-BUDGET on the 16 GB runner and it therefore never executed there. Note the 12.7 GB in that
+    # log is the WATCHDOG KILL POINT (budget 12.4 GB + one poll), not the peak: measured peak
+    # process-tree RSS on the dev box was 22.0 GB BEFORE this shrink and 1.3 GB AFTER (400 s -> 22 s).
+    # WHAT THE GATE ASSERTS AND ITS TOLERANCE ARE UNCHANGED. The claim is an IDENTITY -- a
+    # diagonal-isotropic 3x3 tensor eps must reduce to the scalar path -- checked on the SAME mesh
+    # with the SAME solver at the SAME TOL = 1e-6, so it is mesh-INDEPENDENT (both legs move
+    # together; |dR|/|dT|/|dA_ind| stayed at ~1e-15). At 1300 nm in eps = 6 + 0.5i (n ~ 2.45) a 45 nm
+    # maxh is still ~12 order-2 elements per in-medium wavelength, and A_ind is unmoved at 0.1458.
     m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
-                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=25e-9)
+                    maxh_superstrate_m=70e-9, maxh_substrate_m=70e-9, maxh_background_m=45e-9)
     return Design(name="iso", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 

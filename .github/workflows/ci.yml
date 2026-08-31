@@ -46,16 +46,30 @@ name: CI
 # locally (7/7 in ~24 min); revisit if a larger runner becomes available. The other heavy FEM
 # modules and the @slow validation wrappers stay covered -- the `nightly` job runs both.
 #
-# ALSO NOT COVERED ON CI, and this list is MEASURED, not assumed: ten validation oracles whose
-# process tree crosses the RAM watchdog's budget on a 16 GB runner (12.5-13.0 GB peak against a
-# 12.4 GB budget) and are therefore reported OVER-BUDGET rather than run, every night --
-# boundary_inclusion_corner_circle, boundary_inclusion_grating, conical_structured,
+# RECOVERED 2026-08-31 -- the ten oracles that used to be reported OVER-BUDGET every night
+# (boundary_inclusion_corner_circle, boundary_inclusion_grating, conical_structured,
 # inclusion_shapes, lc_tilted_fem, lc_uniaxial_fem, magneto_optic_faraday,
-# pockels_phase_modulator, tensor_isotropic_gate, thermo_optic_modulator (run 33312685617,
-# 2026-08-30, the tier's first complete execution). They are exercised on the dev workstation
-# only. OVER-BUDGET is informational outside the smoke tier BY CONTRACT, so this is a silent
-# coverage hole unless it is written down -- hence this paragraph. Shrinking a fixture until it
-# fits is the fix that would actually restore CI coverage; a bigger runner is the other.
+# pockels_phase_modulator, tensor_isotropic_gate, thermo_optic_modulator) now FIT and run.
+# Measured peaks fell from 22 GB - 45+ GB to 1.3 - 6.9 GB against the ~12.4 GB budget, with
+# every gate's value and tolerance unchanged; runtimes fell with them (lc_tilted_fem 2375 s ->
+# 77 s). Nine were grossly over-resolved -- maxh 22-25 nm is 27-45 order-2 elements per
+# wavelength, coarsened to 8-19 per wavelength -- and inclusion_shapes needed no mesh change at
+# all, only the library-default linear solver (see its file).
+#
+# CORRECTION TO WHAT THIS PARAGRAPH USED TO SAY. It reported those oracles as peaking at
+# "12.5-13.0 GB, 1-5% over budget". That was wrong, and wrong in a way worth remembering: the
+# watchdog KILLS ON CROSSING, so the number it prints is the budget plus one poll interval of
+# growth -- the KILL POINT, never the peak. The true peaks were 2-4x the budget, and four of
+# the ten had not finished their first solve at 45 GB. Never read a watchdog kill figure as a
+# measurement of what a script wants.
+#
+# STILL NOT COVERED ON CI: tests/test_shg_grating.py in its entirety (above), and one library
+# limitation worth fixing separately -- dynameta/optics/ngsolve_layered.py approximates an
+# Ellipse by an inscribed 72-gon, which pins ~11 nm perimeter facets no matter what
+# maxh_inclusion_m says and drives inclusion_shapes' LU fill to ~174 kB/DOF against ~60 for its
+# siblings. Mesh coarsening alone could not bring that one under budget (40.2 GB at the
+# coarsest tried); an adaptive facet count, or a true OCC ellipse so curvature-based meshing
+# applies, is the real fix.
 #
 # AND: the three oracles that compare against `grcwa` (the third-party RCWA package) --
 # fdtd_3d_structured_tensor, fdtd_seam_structured_vs_rcwa, fdtd_structured_nonvacuum. grcwa is
@@ -539,4 +553,24 @@ jobs:
           python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
           python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
       - name: (c2) full validation tier, shard ${{ matrix.shard }} of 4
-        run: python -m validation.run_all --tier full --shard ${{ matrix.shard }}/4
+        # tee the whole run to a file so the artifact step below has something to upload: the
+        # tier prints to stdout and writes no log, so today the ONLY way to see which script
+        # failed and what it printed is `gh api .../jobs/<id>/logs` and a grep -- which is what
+        # every triage in the 2026-08-30/31 nightly campaign actually had to do. PIPESTATUS
+        # propagates the runner's exit code, which `tee` would otherwise zero. (Pattern taken
+        # from lumenairy's own validate.yml, whose validation job does exactly this.)
+        shell: bash
+        run: |
+          python -m validation.run_all --tier full --shard ${{ matrix.shard }}/4 2>&1 | tee validation_shard_${{ matrix.shard }}.txt
+          exit ${PIPESTATUS[0]}
+      - name: Upload this shard's validation log on failure
+        # Only on failure: a green shard's log is 200 PASS lines nobody reads. On a red one this
+        # is the whole triage surface -- the failing script, its gate output, the RAM-watchdog
+        # and OVER-BUDGET lines, and the summary -- downloadable instead of API-scraped.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-shard-${{ matrix.shard }}
+          path: validation_shard_${{ matrix.shard }}.txt
+          if-no-files-found: warn
+          retention-days: 14

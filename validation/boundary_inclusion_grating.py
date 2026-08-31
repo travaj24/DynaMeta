@@ -49,9 +49,26 @@ def _grating(cx_nm):
     stripe = Rectangle(cx_m=cx_nm * 1e-9, cy_m=PY / 2 * 1e-9, width_m=W * 1e-9, height_m=PY * 1e-9)
     layers = [Layer("grating", THK * 1e-9, "air", inclusions=[Inclusion(stripe, "hi")])]
     stack = Stack(layers=layers, superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background/maxh_inclusion 18 -> 40 nm and
+    # maxh_super/substrate 40 -> 75 nm. Nightly run 33312685617 (2026-08-30) reported this oracle
+    # OVER-BUDGET on the 16 GB runner, so it has never executed on CI. The 12.5 GB in that log is the
+    # WATCHDOG KILL POINT (12.4 GB budget + one poll), NOT the peak: the old fixture is 1.10M order-3
+    # HCurl DOFs whose UMFPACK factorization passed 45 GB on the dev box WITHOUT FINISHING ITS FIRST
+    # SOLVE. After the shrink the measured dev-box peak is 6.1-6.6 GB (two runs) in ~80 s.
+    # THE CLAIM AND THE TOLERANCE ARE UNCHANGED (specular translation-invariance |dR|,|dT| and
+    # R+T = 1, both at the SAME TOL = 0.02, plus the same 0.02 < R < 0.98 non-degeneracy guard and
+    # the same n_px/n_py > 0 assertion). Six passing mesh rungs -- (maxh_bg/incl, maxh_buf) =
+    # (35,75)/(38,75)/(40,75)/(45,75)/(35,80)/(40,80) nm -- ALL return R = 0.2968, T = 0.7035,
+    # |dR| = |dT| = 0.0000 and |R+T-1| = 0.0003, i.e. the answer is converged, not merely passing.
+    # CAUTION FOR THE NEXT PERSON WHO TOUCHES THESE NUMBERS: this fixture has a cliff. Coarsening the
+    # BUFFER further -- (45,80), (55,80), (45,110), (55,140) -- makes the transmitted probe band stop
+    # being a clean two-wave field and the answer goes visibly unphysical (T > 1, "energy created").
+    # That failure is LOUD (solve_fem raises its two-wave-fit / unphysical-T / energy-closure
+    # warnings and the gate FAILS), never a silent wrong pass -- but do not push maxh_super/substrate
+    # past 75 nm here without re-running the ladder.
     m3 = Mesh3DSpec(pml_thk_m=700e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
-                     maxh_superstrate_m=40e-9, maxh_substrate_m=40e-9,
-                     maxh_background_m=18e-9, maxh_inclusion_m=18e-9)
+                     maxh_superstrate_m=75e-9, maxh_substrate_m=75e-9,
+                     maxh_background_m=40e-9, maxh_inclusion_m=40e-9)
     return Design(name="grat", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 

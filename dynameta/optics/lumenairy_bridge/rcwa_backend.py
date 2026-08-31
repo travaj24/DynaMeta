@@ -301,12 +301,20 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
     end media from the Design, the make_layered_tmm_solver precedent).
 
     n_workers threads the solve_sweep wavelengths (audit 8.1-2): each wavelength builds its
-    OWN concrete stack (the bridge's dispersive policy) and solves on a bounded thread pool
-    with the per-worker BLAS cap pinned to blas_per_worker via lumenairy's thread-local
-    rcwa_blas_threads (keep n_workers * blas_per_worker within the core count). Results are
-    stored by index, so the output ORDER is identical to serial; the numbers are too (each
-    solve is an independent LAPACK problem). Default n_workers=1 = the serial path,
-    byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths)."""
+    OWN concrete stack (the bridge's dispersive policy) and solves on a bounded thread pool,
+    with the BLAS cap applied ONCE around the pool on the calling thread -- applying it is
+    PROCESS-GLOBAL on OpenBLAS, so a per-worker cap would race (lumenairy audit M4; see the
+    comment at the call site). Keep n_workers * blas_per_worker within the core count.
+
+    Results are stored by index, so the output ORDER is identical to serial. THE NUMBERS ARE
+    BYTE-IDENTICAL ONLY AT MATCHED BLAS THREADING: each wavelength is an independent LAPACK
+    problem, so threading itself changes nothing, but a different BLAS thread count changes
+    the reduction order and hence the last bits (measured ~5e-14 on R/T at n_orders=21). The
+    serial branch below deliberately does NOT apply the cap -- capping the default path to
+    blas_per_worker=1 would be a silent single-thread performance regression -- so serial and
+    parallel agree exactly when blas_per_worker equals the ambient BLAS thread count and to
+    ~1e-13 otherwise. No physics claim rests on those bits. Default n_workers=1 = the serial
+    path, byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths)."""
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
@@ -335,17 +343,38 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                    else max(1, int(n_workers)))
         if workers == 1 or len(lams) < 2:
             return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
+        import contextlib
         from concurrent.futures import ThreadPoolExecutor
-        from lumenairy.elements.rcwa import rcwa_blas_threads
 
         def _one(lam):
-            # the BLAS cap is thread-local (lumenairy's own sweep pattern), so each
-            # worker pins its own; eps assembly + stack build are independent per call
-            with rcwa_blas_threads(int(blas_per_worker)):
-                return _solve_at(design, assemble_at(lam), lam)
+            return _solve_at(design, assemble_at(lam), lam)
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(_one, lams))
+        # ONE PROCESS-GLOBAL CAP AROUND THE POOL -- not lumenairy's rcwa_blas_threads, and not
+        # one cap per worker. Both of those are wrong here, for DIFFERENT reasons, and the
+        # 2026-08-31 bridge audit (vs lumenairy 5.42.1) measured both:
+        #   * PER WORKER (what this used to do, citing a "thread-local, so each worker pins its
+        #     own" rationale): lumenairy's audit M4 REFUTED that rationale and its own
+        #     _blas_threads_quiet now says the opposite outright -- "Applying a cap is
+        #     process-global on OpenBLAS, so per-worker enter/exit pairs race". Measured on a
+        #     24-core box at n_orders=21: nondeterministic last-bit divergence, 1 run in 12,
+        #     max|dT| 5.5e-14.
+        #   * rcwa_blas_threads AROUND THE POOL: inert. It only sets a THREAD-LOCAL request
+        #     (_BLAS_STATE = threading.local()); the apply happens later inside each solve via
+        #     _blas_limit(), which reads the CALLING thread's request -- so a worker sees None
+        #     and runs uncapped while the serial path runs capped. Measured: the two paths then
+        #     differ systematically (rel ~1e-14 on R), which is exactly what the repaired
+        #     threaded-sweep test caught when this was tried.
+        # threadpool_limits caps the pool PROCESS-GLOBALLY for the whole parallel section with
+        # a single set/restore: every worker is covered, and there is nothing to race. Absent
+        # threadpoolctl the cap is inert -- the same graceful degradation lumenairy documents.
+        try:
+            from threadpoolctl import threadpool_limits
+            cap = threadpool_limits(limits=max(1, int(blas_per_worker)), user_api="blas")
+        except ImportError:                        # optional dep; cap inert, solve unaffected
+            cap = contextlib.nullcontext()
+        with cap:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                return list(pool.map(_one, lams))
 
     _solve.solve_sweep = _solve_sweep
     return _solve
