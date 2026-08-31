@@ -136,20 +136,36 @@ def main():
         "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: guards ----
-    guards = 0
-    try:
-        solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)],
-                      **{**kw, "backend": "numba"})
-    except NotImplementedError:
-        guards += 1
+    # THE NUMBA GUARD IS ONLY EXERCISABLE WHERE NUMBA IS INSTALLED. Asking for backend='numba'
+    # without it makes resolve_backend raise RuntimeError("backend not available") FIRST -- a
+    # different thing entirely from the NotImplementedError this gate is probing for, and it
+    # escaped the `except NotImplementedError` and crashed the script. That is exactly what
+    # happened on the 2026-08-30 sharded nightly (run 33340159183, shard 4/4): the nightly image
+    # deliberately carries NO numba -- the dedicated `numba` CI job runs those kernels on Windows
+    # instead -- so this gate had passed on every machine that has numba and could not run at all
+    # on the one that does not. Probe availability with the house helper (the same one
+    # fdtd_3d_reduces GATE G uses) and report which guards were actually exercised, rather than
+    # either crashing or silently counting an untested guard as proven.
+    from dynameta.optics.fdtd_nd import available_backends
+    have_numba = "numba" in available_backends()
+    guards, expected = 0, 1                       # the missing-resonance guard is always testable
+    if have_numba:
+        expected += 1
+        try:
+            solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0, chi2_m_V=1e-12)],
+                          **{**kw, "backend": "numba"})
+        except NotImplementedError:
+            guards += 1
     try:
         solve_fdtd_3d([FDTDLayer(150e-9, eps_inf=2.0, raman_chi3_m2_V2=1e-21)], **kw)
     except ValueError:
         guards += 1
-    g_c = bool(guards == 2)
+    g_c = bool(guards == expected)
     ok = ok and g_c
-    print("[n3] GATE C: numba-with-nonlinearity + missing-resonance guards raise -> {}".format(
-        "PASS" if g_c else "FAIL"), flush=True)
+    print("[n3] GATE C: {}missing-resonance guard raises ({}/{}) -> {}".format(
+        "numba-with-nonlinearity + " if have_numba else
+        "numba guard NOT EXERCISED (numba absent; the `numba` CI job covers it) -- ",
+        guards, expected, "PASS" if g_c else "FAIL"), flush=True)
 
     print("[n3] *** 3D NONLINEAR FDTD: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
