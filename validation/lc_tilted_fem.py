@@ -45,8 +45,23 @@ def _design():
     cell = UnitCell.square(300e-9)
     stack = Stack(layers=[Layer("s", L * 1e-9, "lc")],
                   superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background 22 -> 50 nm, maxh_super/substrate 45 -> 80 nm.
+    # Nightly run 33312685617 (2026-08-30) reported this oracle OVER-BUDGET on the 16 GB runner, so
+    # it has never executed on CI. The 12.9 GB in that log is the WATCHDOG KILL POINT (12.4 GB budget
+    # + one poll), NOT the peak -- the measured peak process-tree RSS on the dev box was 36.2 GB
+    # before this shrink, and the run took 2375 s, itself uncomfortably near run_all's 2700 s
+    # per-script timeout. ALL FIVE TILTS ARE KEPT (the claim is tilt-INVARIANCE, so the tilt list is
+    # the claim, not a fixture knob -- and 45 deg, where eps_xz = (n_e^2 - n_o^2) sin cos is
+    # LARGEST, is the whole point); only the mesh is coarser. THE CLAIMS AND TOLERANCES ARE
+    # UNCHANGED (TOL_O = 2e-2 ordinary tilt-invariance + energy/flux closure, TOL_E = 3e-2
+    # extraordinary vs the n_eff(theta) TMM). At 1550 nm in n_o/n_e = 1.53/1.71 the in-medium
+    # wavelength is 906-1013 nm, so 22 nm was ~45 order-2 elements per wavelength and 50 nm is
+    # still ~19. Measured after: 1.7 GB peak in 77 s. Gate deltas across all five tilts -- ordinary
+    # dT 1.6e-04 -> 2.3e-04; extraordinary dT (theta = 0/30/45/60/90) 2.4e-03/1.1e-03/3.3e-04/
+    # 4.5e-05/1.6e-04 -> 2.3e-03/1.0e-03/2.7e-04/1.1e-04/2.2e-04; R+T = 1.0001 and the
+    # fit-independent flux R+T = 1.0000 at every tilt, both before and after.
     m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
-                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=22e-9)
+                    maxh_superstrate_m=80e-9, maxh_substrate_m=80e-9, maxh_background_m=50e-9)
     return Design(name="lc_tilt", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 

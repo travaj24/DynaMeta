@@ -78,7 +78,7 @@ SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml
 # second kind is NAMED on every run instead of vanishing silently -- audit X-6, where a parked
 # `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
 # executable gate anywhere and nobody could see it.
-FIXTURES = {"_reference_device", "_ram_guard"}
+FIXTURES = {"_reference_device", "_ram_guard", "_harness"}
 # PER-SCRIPT WALL-CLOCK CAP. Its job is catching a HUNG script, so it must sit well clear of the
 # slowest LEGITIMATE one -- and 1800 s did not. MEASURED: fdtd_3d_reduces (the 3-D full-vector
 # keystone: reduces to 1-D/TMM, reduces to the 2-D engine, diffraction, Drude, cross-pol, Kerr,

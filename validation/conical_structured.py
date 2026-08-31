@@ -33,9 +33,26 @@ def main():
     patch = centered_square(cell, SIDE * 1e-9)             # c4v square patch (x<->y symmetric)
     stack = Stack(layers=[Layer("patch", THK * 1e-9, "air", inclusions=[Inclusion(patch, "hi")])],
                    superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background/maxh_inclusion 22 -> 60 nm and
+    # maxh_super/substrate 45 -> 100 nm. Nightly run 33312685617 (2026-08-30) reported this oracle
+    # OVER-BUDGET on the 16 GB runner, so it has never executed on CI. The 12.6 GB in that log is the
+    # WATCHDOG KILL POINT (12.4 GB budget + one poll), NOT the peak: the old fixture is 1.19M order-3
+    # HCurl DOFs and its UMFPACK factorization blew past 45 GB on the dev box WITHOUT FINISHING ITS
+    # FIRST SOLVE (measurement stopped there deliberately) -- i.e. this oracle could never have run
+    # on a hosted runner at all. After the shrink the measured dev-box peak is 5.9-6.2 GB (two
+    # runs) in 63-107 s.
+    # THE CLAIM AND THE TOLERANCE ARE UNCHANGED (c4v phi=0 vs phi=90 specular equality and
+    # R+T = 1, both at the SAME TOL = 0.02). A four-rung mesh ladder shows the answer is CONVERGED,
+    # not merely passing -- (maxh_bg/incl, maxh_buf) = (40,70)/(50,85)/(60,100)/(70,120) nm give
+    # R = 0.0793/0.0794/0.0794/0.0795, T = 0.9208 at every rung, |dR| = |dT| <= 1e-04 and
+    # |R+T-1| = 2e-04 at every rung, at peaks of 17.6/9.5/6.2/3.7 GB. 60 nm is ~11 order-3 elements
+    # per in-medium wavelength (1300/2.0 = 650 nm) and 4 across the 240 nm patch, whose faces are
+    # planar and therefore represented exactly. The 100 nm buffer/PML knob is NOT pushed further on
+    # purpose: it is the global mesh cap, and the sibling boundary-inclusion oracles show that a too-
+    # coarse PML leaks back and the solver then raises its own two-wave-fit / unphysical-R warnings.
     m3 = Mesh3DSpec(pml_thk_m=700e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
-                     maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9,
-                     maxh_background_m=22e-9, maxh_inclusion_m=22e-9)
+                     maxh_superstrate_m=100e-9, maxh_substrate_m=100e-9,
+                     maxh_background_m=60e-9, maxh_inclusion_m=60e-9)
     d = Design(name="cpatch", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
     geo = LayeredOpticalBuilder(d).build()
     lam_m = LAM * 1e-9

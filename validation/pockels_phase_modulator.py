@@ -45,8 +45,19 @@ def _design():
     cell = UnitCell.square(300e-9)
     stack = Stack(layers=[Layer("s", L * 1e-9, "eo")],
                   superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background 22 -> 45 nm, maxh_super/substrate 45 -> 70 nm.
+    # Nightly run 33312685617 (2026-08-30) reported this oracle OVER-BUDGET on the 16 GB runner, so
+    # it has never executed on CI. The 12.6 GB in that log is the WATCHDOG KILL POINT (12.4 GB budget
+    # + one poll), NOT the peak -- the measured peak process-tree RSS on the dev box was 37.1 GB
+    # before this shrink and 2.7 GB after (1282 s -> 46 s); measured gate deltas: max|dR| 2.02e-03
+    # -> 2.07e-03, max|dT| 2.41e-03 -> 2.46e-03, max|d(dphi)| 2.41e-04 -> 2.49e-04, and dphi(6 V) =
+    # 0.0677 rad both ways. BOTH CLAIMS AND BOTH TOLERANCES ARE UNCHANGED (FEM tensor == TMM scalar-n_y
+    # at TOL_RT = 0.015, and the dphi(V) modulation at TOL_PHASE = 3e-3). At 1300 nm in n_o = 2.21
+    # the in-medium wavelength is 588 nm, so 45 nm is still ~13 order-2 elements per wavelength
+    # (22 nm was ~27) -- and the sharp gate here is a DIFFERENCE in V, in which the mesh error
+    # cancels, which is why TOL_PHASE can be 3e-3 in the first place.
     m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
-                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=22e-9)
+                    maxh_superstrate_m=70e-9, maxh_substrate_m=70e-9, maxh_background_m=45e-9)
     return Design(name="pockels", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 
