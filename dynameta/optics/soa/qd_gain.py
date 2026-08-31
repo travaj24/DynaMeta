@@ -59,6 +59,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E
+from dynameta.core.numerics import ZeroInitBDF
 
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
@@ -1106,8 +1107,12 @@ class QDGainModel:
             raise ValueError("steady_state: I and S_conf must be >= 0")
         nu_s = float(nu_s_Hz) if nu_s_Hz is not None else self.p.nu0_Hz
         y0 = self._initial_state() if y0 is None else np.asarray(y0, dtype=np.float64).copy()
+        # ZeroInitBDF, not "BDF": scipy's BDF reads one uninitialised row of its difference
+        # array on the first step, which signals IEEE INVALID whenever the recycled heap bytes
+        # spell a signalling NaN -- a ~9% flake of the numba CI leg (job 99382994280,
+        # 2026-08-31). Same arithmetic, same trajectory; see core.numerics.ZeroInitBDF.
         sol = solve_ivp(lambda t, y: self.rhs(y, I_A, S_conf_m3, nu_s),
-                        (0.0, t_end_s), y0, method="BDF", rtol=1e-9, atol=1e-12,
+                        (0.0, t_end_s), y0, method=ZeroInitBDF, rtol=1e-9, atol=1e-12,
                         dense_output=False, t_eval=[t_end_s])
         if not sol.success:
             raise RuntimeError("QDGainModel.steady_state: integration failed ({})".format(
@@ -1120,8 +1125,8 @@ class QDGainModel:
         if np.max(np.abs(res[nd:])) > 1e-6 or np.max(np.abs(res[:nd])) > 1e-3 * scale:
             # one more relaxation leg if not yet converged
             sol = solve_ivp(lambda t, yy: self.rhs(yy, I_A, S_conf_m3, nu_s),
-                            (0.0, 10.0 * t_end_s), y, method="BDF", rtol=1e-10, atol=1e-13,
-                            t_eval=[10.0 * t_end_s])
+                            (0.0, 10.0 * t_end_s), y, method=ZeroInitBDF, rtol=1e-10,
+                            atol=1e-13, t_eval=[10.0 * t_end_s])
             if not sol.success:
                 raise RuntimeError("QDGainModel.steady_state: relaxation leg failed "
                                    "({})".format(sol.message))
