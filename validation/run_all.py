@@ -79,7 +79,17 @@ SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml
 # `_dg_hard_wall_wip.py` was the only caller of a shipped `__all__` export, so that export had no
 # executable gate anywhere and nobody could see it.
 FIXTURES = {"_reference_device", "_ram_guard"}
-PER_SCRIPT_TIMEOUT_S = 1800
+# PER-SCRIPT WALL-CLOCK CAP. Its job is catching a HUNG script, so it must sit well clear of the
+# slowest LEGITIMATE one -- and 1800 s did not. MEASURED: fdtd_3d_reduces (the 3-D full-vector
+# keystone: reduces to 1-D/TMM, reduces to the 2-D engine, diffraction, Drude, cross-pol, Kerr,
+# jax==numpy) took 1518 s on the runner of 2026-08-30 and TIMED OUT at 1800 s on 2026-08-31
+# (run 33357747920, shard 2/4) with no code change between them -- that run's shards took
+# 1 h 29 m where the previous took 1 h 11 m, i.e. the runner was ~25% slower. A cap only 1.19x
+# the measured cost of a healthy script is a coin flip on runner speed, which is the same defect
+# class as the 300-minute job cap this tier was sharded to escape. 2700 s is ~1.8x the slowest
+# measured script and still ~1/3 of the 150-minute shard cap, so one pathological script cannot
+# eat a whole shard. Raise the SHARD cap with it, never this alone.
+PER_SCRIPT_TIMEOUT_S = 2700
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
 OVER_BUDGET_RC = 125              # killed by the RAM watchdog (see the exit-code contract)
