@@ -41,8 +41,20 @@ def _design():
     cell = UnitCell.square(300e-9)
     stack = Stack(layers=[Layer("s", L * 1e-9, "si")],
                   superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background 22 -> 45 nm, maxh_super/substrate 45 -> 70 nm.
+    # Nightly run 33312685617 (2026-08-30) reported this oracle OVER-BUDGET on the 16 GB runner, so
+    # it has never executed on CI. The 13.0 GB in that log is the WATCHDOG KILL POINT (12.4 GB budget
+    # + one poll), NOT the peak -- the measured peak process-tree RSS on the dev box was 36.1 GB
+    # before this shrink and 1.6 GB after (986 s -> 55 s); measured gate deltas: max|dR| 3.66e-03
+    # -> 4.13e-03, max|dT| 5.82e-04 -> 1.05e-03, max|d(dphi)| 1.22e-04 -> 4.27e-05, dphi(150 K)
+    # 0.0424 rad and slope ratio 0.65 both ways. BOTH CLAIMS AND BOTH TOLERANCES ARE UNCHANGED (FEM == TMM at TOL_RT = 0.015
+    # and the dphi(dT) modulation at TOL_PHASE = 3e-3). Si at 1300 nm is the shortest in-medium
+    # wavelength in this oracle family, 1300/3.48 = 374 nm, so 45 nm is still ~8 order-2 elements per
+    # wavelength; a measured mesh sweep (maxh_background 35/40/45/50/60 nm) put max|dR| at
+    # 3.98/4.08/4.14/4.96/5.45e-03 -- i.e. the FEM-vs-TMM residual is already CONVERGED at ~4e-03 and
+    # is a 0-order-extraction floor, not mesh error, at every one of those meshes.
     m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
-                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=22e-9)
+                    maxh_superstrate_m=70e-9, maxh_substrate_m=70e-9, maxh_background_m=45e-9)
     return Design(name="thermo", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 

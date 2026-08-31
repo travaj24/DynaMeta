@@ -106,8 +106,20 @@ def _gate_d_fem():
     cell = UnitCell.square(300e-9)
     stack = Stack(layers=[Layer("s", L_FEM_NM * 1e-9, "mo")],
                   superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background 25 -> 50 nm, maxh_super/substrate 45 -> 80 nm.
+    # Nightly run 33312685617 (2026-08-30) reported this oracle OVER-BUDGET on the 16 GB runner, so
+    # GATE D has never executed on CI. The 12.6 GB in that log is the WATCHDOG KILL POINT (12.4 GB
+    # budget + one poll), NOT the peak -- the measured peak process-tree RSS on the dev box was
+    # 34.9 GB before this shrink and 1.7 GB after (231 s -> 12 s). GATE D's CLAIM AND TOLERANCES ARE
+    # UNCHANGED (TOL_FEM_T = 3e-2 vs the circular-eigenmode Jones-TMM, TOL_FEM_E = 2e-2 for the
+    # lossless flux closure); only the mesh is coarser, and it stays well resolved -- at 1550 nm in
+    # eps_r = 4 the in-medium wavelength is 775 nm, so 50 nm is ~15 order-2 elements per wavelength
+    # (25 nm was ~31). The gate quantities are unmoved: flux T_total 0.6816 -> 0.6815 (ref 0.6960,
+    # dT 1.4e-02 -> 1.5e-02), lstsq T_co dT 1.2e-02 both ways, flux closure 1.0000 -> 0.9999. The
+    # ~1.45e-02 FEM-vs-TMM offset is a PRE-EXISTING property of this gate, not an artifact of the
+    # coarser mesh -- it barely moved when the DOF count fell by ~6x.
     m3 = Mesh3DSpec(pml_thk_m=600e-9, superstrate_buffer_m=900e-9, substrate_buffer_m=900e-9,
-                    maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9, maxh_background_m=25e-9)
+                    maxh_superstrate_m=80e-9, maxh_substrate_m=80e-9, maxh_background_m=50e-9)
     design = Design(name="mo", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
     eps_tensor = np.asarray(MagnetoOpticModel(eps_r=EPS_R_FEM, g=G_FEM).eps({}, lam_m), dtype=complex)

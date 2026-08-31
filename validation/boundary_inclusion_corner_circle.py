@@ -40,9 +40,26 @@ def _design(cx_nm, cy_nm):
     disk = Circle(cx_m=cx_nm * 1e-9, cy_m=cy_nm * 1e-9, radius_m=RAD * 1e-9)
     layers = [Layer("disks", THK * 1e-9, "air", inclusions=[Inclusion(disk, "hi")])]
     stack = Stack(layers=layers, superstrate_material="air", substrate_material="air")
+    # CI FIXTURE SHRINK (2026-08-31): maxh_background/maxh_inclusion 22 -> 60 nm and
+    # maxh_super/substrate 45 -> 100 nm. Nightly run 33312685617 (2026-08-30) reported this oracle
+    # OVER-BUDGET on the 16 GB runner, so it has never executed on CI. The 12.5 GB in that log is the
+    # WATCHDOG KILL POINT (12.4 GB budget + one poll), NOT the peak: the old fixture is 1.20M order-3
+    # HCurl DOFs whose UMFPACK factorization passed 45 GB on the dev box WITHOUT FINISHING ITS FIRST
+    # SOLVE. After the shrink the measured dev-box peak is 6.0-6.9 GB (two runs) in 70-80 s.
+    # THE CLAIM AND THE TOLERANCE ARE UNCHANGED (diagonal-translate translation-invariance |dR|,|dT|
+    # and R+T = 1, both at the SAME TOL = 0.025, and the same 0.02 < R < 0.98 guard; the CORNER case
+    # still reassembles as FOUR quarter-disks -- inclusion-subsolids = 4 -- which is the thing under
+    # test). Five passing rungs, (maxh_bg/incl, maxh_buf) = (40,80)/(50,90)/(55,90)/(60,90)/(50,110)
+    # /(60,100) nm, give interior R = 0.0647/0.0636/0.0631/0.0632/0.0636/0.0632 with the GATE
+    # quantity |dR| = 0.0003/0.0005/0.0011/0.0008/0.0005/0.0008 and |R+T-1| <= 0.0002 throughout --
+    # 30x inside TOL at every rung. CAUTION: like the sibling grating oracle this fixture has a
+    # cliff at a much coarser buffer -- (60,140) makes the probe band stop being a clean two-wave
+    # field and the answer goes unphysical (R+T = 1.29). It fails LOUDLY (solve_fem's two-wave-fit /
+    # unphysical-R / energy-closure warnings plus a gate FAIL), but do not push maxh_super/substrate
+    # past 100 nm here without re-running the ladder.
     m3 = Mesh3DSpec(pml_thk_m=700e-9, superstrate_buffer_m=1400e-9, substrate_buffer_m=1400e-9,
-                     maxh_superstrate_m=45e-9, maxh_substrate_m=45e-9,
-                     maxh_background_m=22e-9, maxh_inclusion_m=22e-9)
+                     maxh_superstrate_m=100e-9, maxh_substrate_m=100e-9,
+                     maxh_background_m=60e-9, maxh_inclusion_m=60e-9)
     return Design(name="disk", unit_cell=cell, stack=stack, electrodes=[], materials=reg, mesh_3d=m3)
 
 

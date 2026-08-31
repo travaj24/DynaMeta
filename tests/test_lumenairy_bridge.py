@@ -628,15 +628,32 @@ def test_translate_reads_layers_via_common():
 
 @needs_lum
 def test_threaded_sweep_matches_serial():
-    # audit 8.1-2: n_workers threads solve_sweep; results stored by index and each
-    # wavelength is an independent LAPACK problem, so the output must be byte-identical
+    """audit 8.1-2: n_workers threads solve_sweep; results are stored by index and each
+    wavelength is an independent LAPACK problem, so THREADING ITSELF must change nothing.
+
+    WHAT THIS GATE HAD TO LEARN (2026-08-31 bridge audit vs lumenairy 5.42.1). It asserted
+    bit-equality between the serial and threaded paths while the two ran at DIFFERENT BLAS
+    thread counts by construction -- the threaded branch applied blas_per_worker, the serial
+    branch applied nothing -- and it passed only because n_orders=5 is too small for OpenBLAS
+    to split a reduction at all. Scaled to n_orders=21 and nothing else changed, it failed
+    nondeterministically (1 trial in 12, max|dT| 5.5e-14). Two different reduction orders
+    cannot be asserted bit-equal; that is the repo's recorded float-== lesson in a new dress.
+
+    So the comparison is made AT MATCHED BLAS THREADING, which is the claim that actually
+    matters and is exactly true: with the same cap on both sides the paths agree to 0.0. The
+    fixture also runs at n_orders=21, where the old pattern demonstrably broke -- a gate at
+    n_orders=5 could not have caught the defect it exists to catch."""
+    from lumenairy.elements.rcwa import rcwa_blas_threads
+
     from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
     d = _grating_design(600e-9, pol="x")
     lams = [1.2e-6, 1.3e-6, 1.4e-6, 1.5e-6]
-    ser = make_lumenairy_rcwa_solver(n_orders=5).solve_sweep(
-        d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
-    par = make_lumenairy_rcwa_solver(n_orders=5, n_workers=4).solve_sweep(
-        d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
+    with rcwa_blas_threads(1):                     # same ambient threading for BOTH paths
+        ser = make_lumenairy_rcwa_solver(n_orders=21).solve_sweep(
+            d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
+        par = make_lumenairy_rcwa_solver(n_orders=21, n_workers=4,
+                                         blas_per_worker=1).solve_sweep(
+            d, None, lambda lam: {}, lams, 1.0 + 0j, 1.5 + 0j)
     for a, b in zip(ser, par):
         assert a.R == b.R and a.T == b.T and a.r == b.r and a.phase_deg == b.phase_deg
 
