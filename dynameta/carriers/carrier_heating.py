@@ -35,6 +35,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from dynameta.constants import Q_E, HBAR, KB, T_REF
+from dynameta.core.numerics import ZeroInitBDF
 from dynameta.materials.optical_model import DrudeOptical
 
 # T_REF imported from dynameta.constants (audit S1-15)
@@ -323,8 +324,11 @@ def two_temperature_response(times_s, intensity_of_t: Callable, params: TwoTempP
         flow = params.G_e_l * (Te - Tl)
         return [(-flow + Q) / Ce, flow / params.C_l]
 
-    sol = solve_ivp(rhs, (float(t[0]), float(t[-1])), [float(T0_K), float(T0_K)], method="BDF",
-                    t_eval=t, rtol=1e-7, atol=1e-6, max_step=ms)
+    # ZeroInitBDF, not "BDF": scipy's BDF reads one uninitialised row of its difference array on
+    # the first step (see core.numerics.ZeroInitBDF). Same trajectory, minus the spurious
+    # "invalid value encountered in subtract" the recycled heap can plant there.
+    sol = solve_ivp(rhs, (float(t[0]), float(t[-1])), [float(T0_K), float(T0_K)],
+                    method=ZeroInitBDF, t_eval=t, rtol=1e-7, atol=1e-6, max_step=ms)
     if not sol.success:
         raise RuntimeError("two_temperature_response: ODE integration failed ({})".format(sol.message))
     return t, sol.y[0], sol.y[1]
