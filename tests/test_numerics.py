@@ -1,5 +1,8 @@
-"""Unit coverage for the shared trapezoidal integrator (core.numerics.trapz) -- previously used
-library-wide but never directly tested (audit xcut-1). Pure numpy."""
+"""Unit coverage for the shared numeric helpers in core.numerics: the trapezoidal integrator
+(trapz -- used library-wide but never directly tested, audit xcut-1) and ZeroInitBDF, the
+BDF subclass that stops scipy reading a row of its own difference array that it never wrote."""
+import warnings
+
 import numpy as np
 import pytest
 
@@ -275,3 +278,67 @@ def test_trapz_is_bit_identical_to_numpy_trapezoid_on_real_data():
         xx = np.sort(rng.normal(0.0, 10.0, n))
         yy = rng.normal(0.0, 1e6, n)
         assert trapz(yy, xx) == float(_NUMPY_TRAPEZOID(yy, xx))
+
+
+# ---------------------------------------------------------------------------------------------
+# ZeroInitBDF: scipy's BDF reads one row of its difference array that it never wrote
+# ---------------------------------------------------------------------------------------------
+# scipy allocates D = np.empty((MAX_ORDER + 3, n)) and writes only D[0] and D[1]; on the first
+# accepted step (order 1) `D[order + 2] = d - D[order + 1]` reads D[2] as it came from the heap.
+# A subtract signals IEEE INVALID for a SIGNALLING-NaN operand, so ~1 recycled bit pattern in
+# 4096 turns that line into "RuntimeWarning: invalid value encountered in subtract" -- a test
+# failure under this repo's filterwarnings=["error"], and a ~9% flake of the numba CI leg
+# (job 99382994280, 2026-08-31). These two gates pin the fix AND the hazard it removes.
+_SNAN = np.array([0x7FF0000000000001], dtype=np.uint64).view(np.float64)[0]
+
+
+def _decay_ivp():
+    """A trivial stiff-ish linear decay -- enough state for BDF, no physics in the way."""
+    k = np.array([1.0, 10.0, 100.0])
+    return (lambda t, y: -k * y), 0.0, np.array([1.0, 1.0, 1.0]), 1.0
+
+
+def test_zero_init_bdf_initialises_the_row_scipy_leaves_to_the_heap():
+    from dynameta.core.numerics import ZeroInitBDF
+    fun, t0, y0, tb = _decay_ivp()
+    s = ZeroInitBDF(fun, t0, y0, tb)
+    # also pins scipy's attribute name/shape: a rename upstream fails HERE, loudly, once.
+    assert s.D.shape[0] > 2 and np.all(s.D[2:] == 0.0)
+
+
+def test_uninitialised_bdf_row_signals_invalid_where_zero_init_does_not():
+    from scipy.integrate import BDF
+
+    from dynameta.core.numerics import ZeroInitBDF
+    with warnings.catch_warnings(record=True) as probe:                 # platform capability
+        warnings.simplefilter("always")
+        _ = np.array([1.0]) - np.array([_SNAN])
+    if not probe:
+        pytest.skip("this platform does not signal IEEE INVALID on a signalling-NaN operand")
+    fun, t0, y0, tb = _decay_ivp()
+    bad = BDF(fun, t0, y0, tb)
+    bad.D[2:] = _SNAN                                                   # what the heap can hand it
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        bad.step()
+    assert any("invalid value encountered in subtract" in str(w.message) for w in rec), \
+        "the pre-fix hazard no longer reproduces -- re-read scipy's bdf.py before deleting this"
+    good = ZeroInitBDF(fun, t0, y0, tb)
+    with warnings.catch_warnings(record=True) as rec2:
+        warnings.simplefilter("always")
+        good.step()
+    assert not rec2, [str(w.message) for w in rec2]
+    # and the fix is answer-preserving: the accepted step is bit-identical to scipy's own
+    ref = BDF(fun, t0, y0, tb)
+    ref.D[2:] = 0.0
+    ref.step()
+    assert np.array_equal(good.y, ref.y) and good.t == ref.t
+
+
+def test_resolve_ivp_method_maps_only_bdf():
+    from dynameta.core.numerics import ZeroInitBDF, resolve_ivp_method
+    for spelling in ("BDF", "bdf", " Bdf "):
+        assert resolve_ivp_method(spelling) is ZeroInitBDF
+    for other in ("LSODA", "RK45", "Radau", "DOP853"):
+        assert resolve_ivp_method(other) == other
+    assert resolve_ivp_method(ZeroInitBDF) is ZeroInitBDF                # already a class

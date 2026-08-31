@@ -67,6 +67,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from dynameta.constants import EPS0
+from dynameta.core.numerics import resolve_ivp_method
 from dynameta.carriers.lc_director import (
     LCGeometry, compute_lc_geometry, solve_lc_field_profile, flexo_direct_torque,
     n_eff_from_theta_profile)
@@ -486,8 +487,12 @@ class LCDynamics:
             ms = float(np.nanmin(d_eval)) if d_eval.size else float("inf")
             if math.isfinite(ms) and ms > 0:
                 kwargs["max_step"] = ms
+        # resolve_ivp_method: the documented default is the string "BDF", but scipy's BDF reads
+        # one uninitialised row of its difference array on the first step (core.numerics
+        # .ZeroInitBDF). Same solver, same trajectory, no sNaN trap.
         sol = solve_ivp(rhs, (float(t_eval[0]), float(t_eval[-1])), th0, t_eval=t_eval,
-                        method=str(method), rtol=float(rtol), atol=float(atol), **kwargs)
+                        method=resolve_ivp_method(str(method)), rtol=float(rtol),
+                        atol=float(atol), **kwargs)
         if not sol.success:
             raise RuntimeError("LCDynamics.simulate solve_ivp failed: {}".format(sol.message))
 
