@@ -24,9 +24,11 @@ name: CI
 #   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~15 min
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
 #            DISPATCH ONLY                                     oracles                          on PRs)
-#   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      62-78 min
+#   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      42-89 min
 #   validat. SCHEDULE +                                        sharded 4 ways (run_all         per shard,
 #   (x4)     DISPATCH ONLY                                     --shard K/4), in parallel       MEASURED
+#                                                                                              (~25% runner
+#                                                                                               variance)
 #
 # The "added cost" figures for the PR legs are measured (2026-07-26, this repo, 2 threads per
 # process); the four `test` legs are untouched apart from coverage on 3.12. The `nightly` figure is
@@ -59,11 +61,13 @@ name: CI
 # fdtd_3d_structured_tensor, fdtd_seam_structured_vs_rcwa, fdtd_structured_nonvacuum. grcwa is
 # not a declared dependency, so on the runner they now exit 42 (capability absent) instead of
 # crashing with rc=1, which is what they did on 2026-08-30. INSTALLING grcwa here would restore
-# real coverage and is the obvious follow-up -- but it must be MEASURED first, not added blind:
-# fdtd_3d_structured_tensor takes 1574 s on the dev workstation against run_all's 1800 s
-# PER-SCRIPT cap, and the comparable fdtd_3d_reduces measured 1518 s on this runner, so that one
-# script would sit inside ~13% of a timeout. Adding it blind trades a fast clean skip for a slow
-# red. Measure it on a runner (workflow_dispatch) before declaring the dependency.
+# real coverage and is the obvious follow-up. The original objection was that
+# fdtd_3d_structured_tensor takes 1574 s on the dev workstation against run_all's then-1800 s
+# per-script cap -- inside ~13% of a timeout. That cap is now 2700 s (raised after the comparable
+# fdtd_3d_reduces, measured 1518 s on one runner, TIMED OUT on a ~25%-slower one), so the margin
+# is ~1.7x and the objection is much weaker. It is NOT gone: 1574 s is a DEV-BOX number, and the
+# runner-vs-dev-box ratio for these 3-D FDTD scripts is unmeasured. Dispatch a run with grcwa
+# installed and read the actual per-script time before declaring the dependency.
 
 on:
   push:
@@ -486,9 +490,15 @@ jobs:
     # contract -- a red shard is a red job. MEASURED on the first sharded run (33340159183,
     # 2026-08-30, workflow_dispatch): the four shards took 1 h 18 m / 1 h 11 m / 1 h 02 m /
     # 1 h 04 m of total job time (install included) and split the tier 54/53/53/53, so the
-    # 120-minute cap is ~1.5x the slowest shard and the whole tier's wall-clock fell from
-    # 4 h 16 m to 1 h 18 m. Raise N before raising the cap: N=6 was measured to split the
-    # expensive fdtd_* family 6/7/7/7/6/6, so the stride keeps balancing as N grows.
+    # cap was ~1.5x the slowest shard and the whole tier's wall-clock fell from 4 h 16 m to
+    # 1 h 18 m. Raise N before raising the cap: N=6 was measured to split the expensive fdtd_*
+    # family 6/7/7/7/6/6, so the stride keeps balancing as N grows.
+    # RUNNER VARIANCE IS REAL AND LARGE, so the cap is 150 rather than 120. The SAME four shards,
+    # on identical code three hours apart: 1 h 11 m / 1 h 11 m / 1 h 20 m / 1 h 23 m (run
+    # 33347138729, 01:17) against 1 h 29 m / 1 h 29 m / 0 h 42 m / 1 h 11 m (run 33357747920,
+    # 04:37) -- individual shards swing by a factor of ~1.9 and the worst observed is 1 h 29 m.
+    # 150 keeps ~1.7x over that instead of 1.35x. run_all's per-script cap was raised alongside
+    # it (1800 -> 2700 s) for the same reason and must stay ~1/3 of this.
     #
     # The RAM watchdog (run_all exit code 125) still protects every shard: an oracle whose
     # process tree crosses 0.85 x available-at-start is killed by the runner script and reported
@@ -505,7 +515,7 @@ jobs:
     name: nightly validation tier (shard ${{ matrix.shard }}/4)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false          # one red shard must not hide the other three
       matrix:
