@@ -36,6 +36,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from dynameta.constants import MU0
+from dynameta.core.numerics import resolve_ivp_method
 
 from dynameta.constants import GAMMA_E_RAD_ST as GAMMA_ELECTRON_RAD_ST  # noqa: E402 (audit S1-12: single-source CODATA; module name kept as a re-export alias)
 _ = GAMMA_ELECTRON_RAD_ST  # value: 1.760859630e11      # free-electron gyromagnetic ratio [rad/(s T)]
@@ -134,8 +135,11 @@ class LLGMacrospin:
             return -coeff * (mxH + a * np.cross(m, mxH))
 
         ms = float(max_step) if max_step is not None else float(np.min(np.diff(t)))
-        sol = solve_ivp(rhs, (float(t[0]), float(t[-1])), m0, t_eval=t, method=method,
-                        rtol=rtol, atol=atol, max_step=ms)
+        # resolve_ivp_method: the documented default is the string "BDF", but scipy's BDF reads
+        # one uninitialised row of its difference array on the first step (core.numerics
+        # .ZeroInitBDF). Same solver, same trajectory, no sNaN trap.
+        sol = solve_ivp(rhs, (float(t[0]), float(t[-1])), m0, t_eval=t,
+                        method=resolve_ivp_method(method), rtol=rtol, atol=atol, max_step=ms)
         if not sol.success:
             raise RuntimeError("LLG: solve_ivp failed ({})".format(sol.message))
         m_t = sol.y.T.copy()
