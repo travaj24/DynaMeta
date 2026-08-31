@@ -22,7 +22,20 @@ from dynameta.geometry.specs import OpticalSpec
 from dynameta.geometry.stack import Inclusion
 from dynameta.materials import ConstantOptical, Material, MaterialRegistry
 
-needs_lum = pytest.importorskip("lumenairy")
+_lum = pytest.importorskip("lumenairy")
+
+# `layer_grids` arrived in lumenairy 5.32; the bridge's declared FLOOR is 5.22, and the floor CI
+# leg pins 5.22.*. Everything in this file except the floor-safety gate below therefore needs
+# >= 5.32 -- and the DEFAULT path must keep working underneath it, which is what the first push
+# of this feature got wrong (it forwarded the keyword unconditionally and broke PMM outright on
+# the floor). The skip is version-conditional rather than blanket so the >= 5.32 evidence is
+# genuinely exercised wherever it can be.
+from dynameta.optics.lumenairy_bridge._common import parse_version  # noqa: E402
+
+_HAS_PER_LAYER = parse_version(_lum.__version__) >= (5, 32, 0)
+needs_per_layer = pytest.mark.skipif(
+    not _HAS_PER_LAYER,
+    reason="layer_grids needs lumenairy >= 5.32 (installed {})".format(_lum.__version__))
 
 LAM = 1.31e-6
 PERIOD = 600e-9
@@ -54,7 +67,7 @@ def _solve(layer_grids, degree):
     return solver(_stack_design(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
 
 
-def test_default_is_shared_and_unchanged():
+def test_default_path_is_unchanged_and_works_on_the_declared_floor():
     """The default must be the pre-5.32 behaviour, byte-for-byte: this option may not move a
     single existing number. Explicit 'shared' and the default are the SAME call."""
     a = _solve("shared", 8)
@@ -65,6 +78,7 @@ def test_default_is_shared_and_unchanged():
     assert a.r == b.r
 
 
+@needs_per_layer
 def test_per_layer_agrees_on_the_physics_and_converges_toward_shared():
     """The two grids are different discretisations of the SAME problem, so they must agree to
     a discretisation error that SHRINKS with degree -- the honest form of 'same answer'. A
@@ -77,6 +91,7 @@ def test_per_layer_agrees_on_the_physics_and_converges_toward_shared():
     assert gap16 < gap8, (gap8, gap16)          # and CONVERGING, which is the real claim
 
 
+@needs_per_layer
 def test_the_trade_is_real_exact_closure_is_what_is_given_up():
     """The cost side, pinned so nobody 'optimises' the default over to per-layer without
     meeting it. The union grid closes energy to ~1e-13; the non-conforming mortar does not.
@@ -95,6 +110,7 @@ def test_the_trade_is_real_exact_closure_is_what_is_given_up():
     assert close_p > close_s, (close_s, close_p)   # ... and this is the trade, not noise
 
 
+@needs_per_layer
 def test_bad_value_is_refused_and_the_cache_key_separates_the_two():
     """Two solvers differing only in layer_grids are DIFFERENT solves (different grids,
     different closure). If they shared a cache fingerprint, a cached 'shared' result could be
@@ -109,6 +125,7 @@ def test_bad_value_is_refused_and_the_cache_key_separates_the_two():
     assert "layer_grids" in fp_s
 
 
+@needs_per_layer
 def test_absorption_survives_the_mortar():
     """layer_absorption() is the per-region budget consumers read; the audit verified it works
     on the per-layer path, so pin it -- a mortar that silently dropped per-region absorption

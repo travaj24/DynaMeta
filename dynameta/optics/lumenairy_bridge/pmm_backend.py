@@ -129,9 +129,27 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     if str(layer_grids) not in ("shared", "per-layer"):
         raise ValueError("design_to_pmm_stack: layer_grids must be 'shared' or 'per-layer', "
                          "got {!r}".format(layer_grids))
+    # PASS THE KEYWORD ONLY WHEN IT IS ASKED FOR. `layer_grids` arrived in lumenairy 5.32, and
+    # this bridge's declared floor is VERSION_FLOOR = 5.22 -- so forwarding it unconditionally
+    # (even as the default 'shared') breaks the PMM backend outright on every supported version
+    # below 5.32 with "PMMStack.__init__() got an unexpected keyword argument". That is exactly
+    # what the floor CI leg caught on the first push of this feature: not the new opt-in path,
+    # but the DEFAULT one, on the oldest pins the library promises to support. Omitting the
+    # kwarg at the default reproduces pre-5.32 behaviour bit-for-bit (lumenairy's own default is
+    # 'shared'); asking for 'per-layer' on a floor install raises with the version named,
+    # because there the speed-up genuinely does not exist.
+    kw = {}
+    if str(layer_grids) != "shared":
+        from dynameta.optics.lumenairy_bridge._common import parse_version
+        if parse_version(lum.__version__) < (5, 32, 0):
+            raise NotImplementedError(
+                "design_to_pmm_stack: layer_grids={!r} needs lumenairy >= 5.32 (installed "
+                "{}); the per-layer spectral-element grid and its non-conforming mortar do "
+                "not exist below that. Use the default 'shared' grid, or upgrade.".format(
+                    layer_grids, lum.__version__))
+        kw["layer_grids"] = str(layer_grids)
     stack = lum.PMMStack(px, n_substrate=complex(n_sub), n_superstrate=complex(n_super),
-                         degree=int(degree), n_orders=int(n_orders),
-                         layer_grids=str(layer_grids))
+                         degree=int(degree), n_orders=int(n_orders), **kw)
     names: List[str] = []
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
