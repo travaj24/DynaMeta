@@ -17,6 +17,7 @@ Run: python -m pytest tests/test_audit_2026_07_25_infra.py -q
 """
 import importlib.util
 import json
+import math
 import subprocess
 
 import numpy as np
@@ -166,22 +167,31 @@ def test_t9_erbium_upconversion_levels_are_ordered_and_only_heavy_quenches():
     assert heavy.dark_density(n_t) == pytest.approx(0.03 * n_t, rel=1e-12)
 
 
-def test_t9_ytterbium_photodarkening_follows_the_koponen_power_law():
+def test_t9_ytterbium_photodarkening_follows_the_equilibrium_law():
+    # 2026-08-31 literature audit: the equilibrium loss is LINEAR in inversion (Jetschke 2007;
+    # Jauregui AOP 2020); the legacy exponent 7 is the Koponen RATE law and under-predicts
+    # equilibrium by 10^2-10^3 at amplifier inversions. The factory now takes a measured
+    # equilibrium anchor (dB/m at the 0.46 benchmark inversion) instead of a raw 1/m scale.
     from dynameta.optics.fiber_amp import ytterbium_photodarkening
     m = ytterbium_photodarkening()
-    assert (m.pd_loss_per_m, m.pd_exponent) == (0.5, 7.0)              # documented default
+    assert m.pd_exponent == 1.0                                        # equilibrium default
     assert m.c_up_m3_s == 0.0 and m.pair_fraction == 0.0               # photodarkening ONLY
     assert not m.is_identity
+    ln10_10 = math.log(10.0) / 10.0
+    # the anchor round-trips: at nbar2_ref the loss equals the measured dB/m anchor
+    assert float(m.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12)
     n = np.array([0.0, 0.25, 0.5, 1.0])
     loss = m.photodarkening_loss_per_m(n)
     assert loss.shape == n.shape                                       # shape-preserving (S3-38)
-    assert np.allclose(loss, 0.5 * n ** 7.0, rtol=1e-13, atol=0.0)     # AUDIT T-6: explicit rtol
-    assert loss[-1] == pytest.approx(0.5)                              # full inversion -> the scale
-    assert loss[1] < 1e-3 * loss[-1]                                   # negligible at low inversion
-    # the exponent is a real knob, and a steeper law is smaller everywhere below full inversion
-    steep = ytterbium_photodarkening(pd_loss_per_m=0.5, pd_exponent=9.0)
-    assert float(steep.photodarkening_loss_per_m(0.5)) < float(m.photodarkening_loss_per_m(0.5))
-    assert float(steep.photodarkening_loss_per_m(1.0)) == pytest.approx(0.5)
+    assert np.allclose(loss, m.pd_loss_per_m * n, rtol=1e-13, atol=0.0)
+    # linear law: dropping 0.46 -> 0.115 suppresses by exactly 4x, NOT by 4^7 ~ 1.6e4
+    assert (float(m.photodarkening_loss_per_m(0.46))
+            / float(m.photodarkening_loss_per_m(0.115))) == pytest.approx(4.0, rel=1e-12)
+    # the exponent knob still exists for rate-law studies, anchored at the same benchmark
+    steep = ytterbium_photodarkening(alpha_eq_dB_per_m=0.58, pd_exponent=7.0)
+    assert float(steep.photodarkening_loss_per_m(0.46)) == pytest.approx(0.58 * ln10_10, rel=1e-12)
+    assert float(steep.photodarkening_loss_per_m(0.115)) < 1e-3 * float(
+        m.photodarkening_loss_per_m(0.115))
 
 
 def test_t9_ion_from_cross_sections_round_trips_the_table_and_pins_mccumber():
