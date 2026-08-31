@@ -24,9 +24,9 @@ name: CI
 #   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~15 min
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
 #            DISPATCH ONLY                                     oracles                          on PRs)
-#   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      ~70 min
+#   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      62-78 min
 #   validat. SCHEDULE +                                        sharded 4 ways (run_all         per shard,
-#   (x4)     DISPATCH ONLY                                     --shard K/4), in parallel       in parallel
+#   (x4)     DISPATCH ONLY                                     --shard K/4), in parallel       MEASURED
 #
 # The "added cost" figures for the PR legs are measured (2026-07-26, this repo, 2 threads per
 # process); the four `test` legs are untouched apart from coverage on 3.12. The `nightly` figure is
@@ -483,8 +483,12 @@ jobs:
     # away from the cap that had already cancelled the three nightlies before it. `--shard K/N`
     # (see run_all's docstring) slices the SAME selection round-robin, so the four shards are
     # disjoint, their union is exactly the unsharded tier, and each carries the identical exit
-    # contract -- a red shard is a red job. 256 min / 4 = ~64 min of work per shard plus ~5 min
-    # of install; the 120 cap is ~1.7x that. Raise N before raising the cap.
+    # contract -- a red shard is a red job. MEASURED on the first sharded run (33340159183,
+    # 2026-08-30, workflow_dispatch): the four shards took 1 h 18 m / 1 h 11 m / 1 h 02 m /
+    # 1 h 04 m of total job time (install included) and split the tier 54/53/53/53, so the
+    # 120-minute cap is ~1.5x the slowest shard and the whole tier's wall-clock fell from
+    # 4 h 16 m to 1 h 18 m. Raise N before raising the cap: N=6 was measured to split the
+    # expensive fdtd_* family 6/7/7/7/6/6, so the stride keeps balancing as N grows.
     #
     # The RAM watchdog (run_all exit code 125) still protects every shard: an oracle whose
     # process tree crosses 0.85 x available-at-start is killed by the runner script and reported
