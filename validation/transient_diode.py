@@ -45,6 +45,14 @@ def _settle_test(v_from, v_to, label):
     import devsim as ds
     ramp_to(v_from)
     _solve()
+    # The reverse step is the stiff one, and it stalled MID-transient on nightly run 33347138729
+    # (2026-08-31) while passing on the dispatch an hour earlier with identical code. Cause (see
+    # carriers/transient.py): by t ~ 3e-11 s the terminal current has decayed ~13 decades from the
+    # displacement spike (5.6e9 A/m^2) onto the DC reverse leakage (1.8e-4 A/m^2), so its relative
+    # round-off floor climbs ABOVE the solver's 1e-6 exit tolerance and Newton's iteration count
+    # there is set by round-off noise, not by physics. NOTHING is tuned here on purpose -- the
+    # stimulus, T_END and both gate thresholds are the originals; the fix is transient_step's
+    # step-size RESPONSE to that stall (grow dt, do not halve it).
     t_s, I = TR.transient_step(v_to, t_end=T_END, source_name="V1")
     i_trans_end = float(I[-1])
     ds.circuit_alter(name="V1", value=v_to)        # independent DC at the final bias
