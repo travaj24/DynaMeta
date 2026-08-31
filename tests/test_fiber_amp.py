@@ -207,6 +207,36 @@ def test_piq_unbleachable_residual_gain_penalty():
     assert float(piq.solve().signal_gain_dB[0]) < float(base.solve().signal_gain_dB[0]) - 0.5
 
 
+def test_delevaque_pair_convention_halves_the_dark_pool():
+    # 2026-08-31 literature audit: "dark" treats every paired ion as permanently ground (the
+    # pessimistic bound); "delevaque" is the literature-standard convention (Nilsson PTL 1993:
+    # "one ion per pair completely quenched") where pair_fraction counts ions IN pairs and only
+    # half of them are dark. delevaque(2f) must reproduce dark(f) exactly, and at the SAME
+    # pair_fraction delevaque must cost strictly less gain than dark.
+    n_t = 1.0e25
+    dele = ConcentrationModel(pair_fraction=0.10, pair_convention="delevaque")
+    dark = ConcentrationModel(pair_fraction=0.10)
+    assert abs(dele.dark_density(n_t) - 0.05 * n_t) < 1e-15 * n_t
+    assert abs(dele.active_density(n_t) - 0.95 * n_t) < 1e-15 * n_t
+    assert abs(dele.active_density(n_t) + dele.dark_density(n_t) - n_t) < 1e-15 * n_t
+    half = ConcentrationModel(pair_fraction=0.05)
+    assert dele.dark_density(n_t) == half.dark_density(n_t)
+    assert dele.active_density(n_t) == half.active_density(n_t)
+
+    def gain(conc):
+        amp = FiberAmplifier(ER, _edf(6.0), [Pump(800e-3, 0.980e-6, "fwd")],
+                             [Signal(1e-6, 1.560e-6)], AseBand(1.52e-6, 1.575e-6, 8),
+                             concentration=conc)
+        return float(amp.solve().signal_gain_dB[0])
+
+    assert gain(dele) > gain(dark) + 0.3        # same pair_fraction: delevaque is milder
+    try:
+        ConcentrationModel(pair_fraction=0.10, pair_convention="pairs")
+        raise AssertionError("bad pair_convention must raise ValueError")
+    except ValueError:
+        pass
+
+
 def test_photodarkening_worse_at_high_inversion():
     pd = ConcentrationModel(pd_loss_per_m=2.0, pd_exponent=7.0)
 
