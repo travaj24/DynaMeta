@@ -96,11 +96,29 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
 
 def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
                         degree: int = 16, n_orders: int = 21,
-                        n_slices: Optional[int] = None):
+                        n_slices: Optional[int] = None,
+                        layer_grids: str = "shared"):
     """Translate a 1-D-compatible DynaMeta Design into a Lumenairy PMMStack at one
     wavelength. Returns (stack, layer_names_top_first). Same layer dispatch as the RCWA
     bridge except: structured GRIDDED EpsFields raise (analytic segments only) and
-    patterned layers go through layer_to_pmm_segments."""
+    patterned layers go through layer_to_pmm_segments.
+
+    layer_grids (lumenairy >= 5.32, OPT-IN, default unchanged): 'shared' builds ONE union
+    spectral-element grid carrying every layer's walls -- so a stack of layers with different
+    wall positions pays, in every layer, for the walls of all the others. 'per-layer' gives
+    each layer only its own walls and couples them with a non-conforming mortar.
+
+    WHY IT IS OPT-IN RATHER THAN THE DEFAULT. The payoff is large and it grows with degree --
+    MEASURED here on a 4-layer lamellar stack with distinct walls at 30 deg: 14.7x at
+    degree 8, 73x at degree 12, 3.2x at degree 16, both paths converging to the same R (gap
+    1.07e-6 -> 9.9e-8). But the mortar is NON-CONFORMING, so it trades the union grid's exact
+    energy closure (|R+T-1| ~ 1e-13) for 4.9e-7 at degree 8, tightening to 2.2e-8 by degree
+    16. This backend's job in DynaMeta is to be the CONVERGENCE REFEREE for the RCWA path --
+    the one that has no Fourier-factorization accuracy floor -- and a referee that quietly
+    stopped closing energy at 1e-13 would be a worse referee even while being 73x faster. So
+    the caller asks for the speed explicitly and knows what it costs. (Bridge audit
+    2026-08-31 vs lumenairy 5.42.1; conical and layer_absorption() verified unchanged on the
+    per-layer path.)"""
     lum = _require_lumenairy()
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)
@@ -108,8 +126,30 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     # mesh-region-keyed dicts (the run_pipeline/FEM bridge output) collapse to design-layer
     # keys; identity when already layer-keyed
     eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})
+    if str(layer_grids) not in ("shared", "per-layer"):
+        raise ValueError("design_to_pmm_stack: layer_grids must be 'shared' or 'per-layer', "
+                         "got {!r}".format(layer_grids))
+    # PASS THE KEYWORD ONLY WHEN IT IS ASKED FOR. `layer_grids` arrived in lumenairy 5.32, and
+    # this bridge's declared floor is VERSION_FLOOR = 5.22 -- so forwarding it unconditionally
+    # (even as the default 'shared') breaks the PMM backend outright on every supported version
+    # below 5.32 with "PMMStack.__init__() got an unexpected keyword argument". That is exactly
+    # what the floor CI leg caught on the first push of this feature: not the new opt-in path,
+    # but the DEFAULT one, on the oldest pins the library promises to support. Omitting the
+    # kwarg at the default reproduces pre-5.32 behaviour bit-for-bit (lumenairy's own default is
+    # 'shared'); asking for 'per-layer' on a floor install raises with the version named,
+    # because there the speed-up genuinely does not exist.
+    kw = {}
+    if str(layer_grids) != "shared":
+        from dynameta.optics.lumenairy_bridge._common import parse_version
+        if parse_version(lum.__version__) < (5, 32, 0):
+            raise NotImplementedError(
+                "design_to_pmm_stack: layer_grids={!r} needs lumenairy >= 5.32 (installed "
+                "{}); the per-layer spectral-element grid and its non-conforming mortar do "
+                "not exist below that. Use the default 'shared' grid, or upgrade.".format(
+                    layer_grids, lum.__version__))
+        kw["layer_grids"] = str(layer_grids)
     stack = lum.PMMStack(px, n_substrate=complex(n_sub), n_superstrate=complex(n_super),
-                         degree=int(degree), n_orders=int(n_orders))
+                         degree=int(degree), n_orders=int(n_orders), **kw)
     names: List[str] = []
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
@@ -149,7 +189,8 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
 
 def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
                               n_slices: Optional[int] = None,
-                              stabilize=None, absorption: bool = False):
+                              stabilize=None, absorption: bool = False,
+                              layer_grids: str = "shared"):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy PMM (the exact seam
     signature + solve_sweep, mirroring the RCWA bridge incl. per-wavelength end media).
     1-D lamellar devices only; in-plane incidence only (azimuth raises). OpticalResult.t
@@ -175,6 +216,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         pol = getattr(design.optical, "polarization", "y")
         stack, names = design_to_pmm_stack(design, lambda_m, eps_by_region=eps_by_region,
                                            degree=degree, n_orders=n_orders,
+                                           layer_grids=layer_grids,
                                            n_slices=n_slices)
         stack.set_source(lambda_m, theta=theta, phi=phi)
         # retain_internal only where the absorption block below will actually consume it
@@ -228,5 +270,5 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         return [_solve_at(design, assemble_at(lam), lam) for lam in lams]
 
     _solve.solve_sweep = _solve_sweep
-    _solve.cache_fingerprint = "pmm(degree={},n_orders={},n_slices={},stabilize={},absorption={})".format(degree, n_orders, n_slices, stabilize, absorption)
+    _solve.cache_fingerprint = "pmm(degree={},n_orders={},n_slices={},stabilize={},absorption={},layer_grids={})".format(degree, n_orders, n_slices, stabilize, absorption, layer_grids)
     return _solve

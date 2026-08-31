@@ -35,7 +35,30 @@ def _solve(shape, label):
     eps_vals = {r: complex(d.materials.get(geo.material_by_region[r]).eps(lam_m))
                 for r in geo.mesh.GetMaterials()}
     eps_cf = geo.mesh.MaterialCF(eps_vals, default=1.0)
-    opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0, linear_solver="umfpack")
+    # CI FIX (2026-08-31): LINEAR SOLVER ONLY -- umfpack -> bddc_gmres (the library DEFAULT).
+    # NOTHING ELSE CHANGES: same mesh, same order, same geometry, same eps, same gate, same TOL.
+    # Nightly run 33312685617 (2026-08-30) reported this oracle OVER-BUDGET on the 16 GB runner, so
+    # it has never executed on CI. The 12.5 GB in that log is the WATCHDOG KILL POINT (12.4 GB budget
+    # + one poll), NOT the peak: with the direct UMFPACK factorization this fixture passed 45 GB on
+    # the dev box WITHOUT FINISHING ITS FIRST SOLVE. With bddc_gmres the SAME fixture peaks at
+    # 3.2 GB in 142-171 s.
+    # WHY NOT SHRINK THE MESH LIKE THE SIBLING ORACLES. It does not work here, and that is MEASURED:
+    # at (maxh_bg, maxh_incl, maxh_buf) = (45,40,80)/(50,50,85)/(60,60,100) nm the umfpack peak is
+    # still 40.2/38.2/25.6 GB. The floor is upstream of this file -- the builder approximates an
+    # Ellipse by an INSCRIBED 72-GON (dynameta/optics/ngsolve_layered.py, `n = 72`), so the
+    # perimeter carries ~11 nm facets no matter what maxh_inclusion_m says: at maxh 45 nm the
+    # ellipse cell meshes to ~22k elements where the same-size circle or hexagon needs ~7k, and the
+    # resulting fine embedded feature also gives the LU pathological fill (~174 kB/DOF vs ~60 for
+    # the sibling oracles). Coarsening the mesh here would buy a factor of ~1.6 and cost accuracy;
+    # changing the solver buys a factor of >14 and costs nothing.
+    # THE SWAP IS VALIDATED AGAINST THE DIRECT SOLVE ON THE SAME MESH: at (45,40,80) umfpack and
+    # bddc_gmres both return ellipse R = 0.0272 / T = 0.9726 / |R+T-1| = 0.0002 and hexagon
+    # R = 0.0621 / T = 0.9377 / |R+T-1| = 0.0003 -- identical to four decimals -- and on the
+    # SHIPPED (unchanged) mesh bddc_gmres returns ellipse 0.0272/0.9726/0.0002 and hexagon
+    # 0.0619/0.9379/0.0002, agreeing with the direct solve on three independent coarser meshes.
+    # solve_fem raises its own warning if GMRES fails to reach 1e-3 relative residual and declares
+    # R/T/A unreliable, so a non-converged solve is LOUD, not a silent pass; none fired here.
+    opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0, linear_solver="bddc_gmres")
     res = solve_fem(geo, lam_m, eps_cf, opt, order=2, n_super=1.0 + 0j, n_sub=1.0 + 0j)
     T = res.T if res.T is not None else float("nan")
     e = abs(res.R + T - 1.0)
