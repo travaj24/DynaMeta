@@ -1,6 +1,7 @@
 """3D full-vector FDTD oracle: optics.fdtd_nd.solve_fdtd_3d is a doubly-periodic (x AND y) 6-component
 Yee solver (Bloch-periodic x/y at normal incidence, CFS-CPML + PEC in z) -- the 2D-TE engine is its
-d/dy=0, {Ey,Hx,Hz} reduction. Seven gates establish it is correct (the last = backend equivalence):
+d/dy=0, {Ey,Hx,Hz} reduction. Five gates here establish it is correct (the last = backend
+equivalence); the two genuinely 2D-periodic gates live in their own scripts (see the note below).
 
 GATE A (reduces to TMM/1D): a laterally-UNIFORM non-dispersive slab -- the specular 0-order R0/T0 AND
         the all-order Poynting flux R_flux/T_flux both == the analytic Airy R/T (so the full vector 3D
@@ -9,13 +10,20 @@ GATE A (reduces to TMM/1D): a laterally-UNIFORM non-dispersive slab -- the specu
 GATE B (reduces to the 2D engine): a y-UNIFORM binary grating (varies in x only) -- with a y-polarized
         source and d/dy=0 the problem is pure 2D-TE, so solve_fdtd_3d must reproduce the validated
         solve_fdtd_2d R0/T0 and flux (small residual from the 3D CFL dt differing via 1/dy^2).
-GATE C (genuine 3D diffraction + energy): a true 2D-periodic dielectric pillar -- the all-order flux
-        conserves energy (median |R+T-1| small; the max spikes only at grazing diffraction-order
-        emergence, the npml-independent PML limit) WHILE the specular 0-order R0+T0 dips below 1
-        (energy correctly diffracted into the (kx,ky) orders that only a 2D-periodic cell supports).
 GATE D (lossy -> defeats the lossless trap): a uniform absorbing Drude slab == the analytic complex-n
         Airy. A lossless cell auto-balances total power even with a wrong field split, so energy closure
         alone cannot prove correctness -- an absorbing slab cannot fake the right R/T.
+
+SPLIT 2026-09-01. GATE C (2D-periodic pillar diffraction) and GATE E (asymmetric-cell
+cross-polarization) moved UNCHANGED to validation/fdtd_3d_pillar_diffraction.py and
+validation/fdtd_3d_crosspol.py. They are true 2D-periodic cells carrying a full lateral grid and
+cost 1191 s and 690 s of this script's original 2133 s, where the gates that remain here run on a
+4x4 lateral grid in tens of seconds. Because run_all's PER_SCRIPT_TIMEOUT_S is GLOBAL, one
+2133 s script set the cap for all ~215: at the ~1.9x runner variance measured across the nightly
+shards it needs ~4000 s, and a 4000 s cap cannot detect a hang anywhere else. This script had
+already timed out at 1800 s and again at 2700 s (nightly 33445577932) while PASSING at 1935 s in
+between -- a cap sitting inside the noise, not a broken gate. No gate was weakened to fit a
+budget; they were separated so each is decided by its physics.
 
 Run: python -m validation.fdtd_3d_reduces
 """
@@ -91,26 +99,6 @@ def main():
     print("[f3] B y-uniform grating 3D==2D: 0-order max|d|={:.2e} flux max|d|={:.2e} (3D reduces to 2D-TE) "
           "-> {}".format(d0B, dfB, "PASS" if gate_b else "FAIL"), flush=True)
 
-    # GATE C: true 2D-periodic dielectric pillar -> all-order flux conserves; 0-order dips (diffraction)
-    def pillar(nx, ny, nz, zc, pad, zs):
-        e = np.ones((nx, ny, nz)); inb = (zc >= pad) & (zc < pad + zs)
-        qx, qy = nx // 4, ny // 4
-        blk = np.zeros((nx, ny), dtype=bool); blk[qx:nx - qx, qy:ny - qy] = True
-        for k in np.where(inb)[0]:
-            e[:, :, k] = np.where(blk, 6.25, 1.0)            # n=2.5 pillar in vacuum
-        return e
-
-    rC = solve_fdtd_3d([FDTDLayer(thickness_m=500e-9, eps_inf=6.25)], period_x_m=900e-9, period_y_m=900e-9,
-                       lateral_eps_inf=pillar, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=14, n_pad_wave=4.0)
-    mC = rC.band
-    e_abs = np.abs(rC.R_flux[mC] + rC.T_flux[mC] - 1.0)
-    en_med, en_max = float(np.median(e_abs)), float(np.max(e_abs))
-    spec_min = float((rC.R0[mC] + rC.T0[mC]).min())
-    gate_c = bool(en_med < 1e-2 and spec_min < 0.95)
-    print("[f3] C 2D-periodic pillar: flux |R+T-1| median={:.2e} max={:.2e} (grazing) ; 0-order "
-          "min(R0+T0)={:.3f} (<1 = diffracted) -> {}".format(
-              en_med, en_max, spec_min, "PASS" if gate_c else "FAIL"), flush=True)
-
     # GATE D (lossy -> defeats the lossless trap): a uniform absorbing Drude slab must match the analytic
     # complex-n Airy. A lossless cell auto-balances total power even with a wrong field split, so energy
     # closure alone cannot prove per-order correctness -- but an ABSORBING slab cannot fake the right R/T.
@@ -130,28 +118,6 @@ def main():
     gate_d = bool(dD < 1e-2)
     print("[f3] D Drude slab (lossy): n in [{:.2f},{:.2f}] ; 0-order max|d-Airy|={:.2e} -> {}".format(
         float(nD.real.min()), float(nD.real.max()), dD, "PASS" if gate_d else "FAIL"), flush=True)
-
-    # GATE E (cross-polarization): an ASYMMETRIC (L-shaped) 2D-periodic pillar has no mirror symmetry, so
-    # a y-polarized input generates x-pol (the full Ex/Ez/Hy coupling + the Ex Hy* cross term in S_z). The
-    # all-order flux STILL conserves energy -- a wrong cross-term sign or a missing component would break
-    # energy badly here (a dedicated probe measured cross-pol |Ex|/|Ey| 0-order = 0.87 for this cell).
-    def lshape(nx, ny, nz, zc, pad, zs):
-        e = np.ones((nx, ny, nz)); inb = (zc >= pad) & (zc < pad + zs)
-        blk = np.zeros((nx, ny), dtype=bool)
-        blk[nx // 4:nx - nx // 4, ny // 4:ny // 2] = True
-        blk[nx // 4:nx // 2, ny // 4:ny - ny // 4] = True    # L (no mirror symmetry -> y->x conversion)
-        for k in np.where(inb)[0]:
-            e[:, :, k] = np.where(blk, 6.25, 1.0)
-        return e
-    rE = solve_fdtd_3d([FDTDLayer(thickness_m=450e-9, eps_inf=6.25)], period_x_m=950e-9, period_y_m=950e-9,
-                       lateral_eps_inf=lshape, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=12, n_pad_wave=4.0)
-    mE = rE.band
-    eE = np.abs(rE.R_flux[mE] + rE.T_flux[mE] - 1.0)
-    eE_med = float(np.median(eE)); spec_minE = float((rE.R0[mE] + rE.T0[mE]).min())
-    gate_e = bool(eE_med < 1e-2 and spec_minE < 0.9)
-    print("[f3] E cross-pol (asymmetric L-pillar): flux |R+T-1| median={:.2e} ; co-pol 0-order "
-          "min(R0+T0)={:.3f} (strong cross-pol + diffraction, energy still closes) -> {}".format(
-              eE_med, spec_minE, "PASS" if gate_e else "FAIL"), flush=True)
 
     # GATE F (Kerr self-action): a chi3 slab at low vs high source amplitude must SHIFT the transmission
     # (intensity-dependent eps_eff = eps_inf + chi3|E|^2 = self-phase modulation) and stay lossless.
@@ -186,9 +152,9 @@ def main():
         print("[f3] G {}==numpy (3D): max|dR0,dT0|={:.2e} (machine precision) -> {}".format(
             bk, dG, "PASS" if ok else "FAIL"), flush=True)
 
-    overall = gate_a and gate_b and gate_c and gate_d and gate_e and gate_f and gate_g
-    print("[f3] *** 3D FULL-VECTOR FDTD (reduces to 1D/TMM; reduces to 2D engine; 3D diffraction; "
-          "lossy Drude; cross-pol; Kerr; numba==numpy): {} ***".format("PASS" if overall else "FAIL"), flush=True)
+    overall = gate_a and gate_b and gate_d and gate_f and gate_g
+    print("[f3] *** 3D FULL-VECTOR FDTD (reduces to 1D/TMM; reduces to 2D engine; lossy Drude; "
+          "Kerr; numba==numpy): {} ***".format("PASS" if overall else "FAIL"), flush=True)
     return overall
 
 
