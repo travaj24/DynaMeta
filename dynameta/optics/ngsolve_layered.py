@@ -37,7 +37,6 @@ stay STRICT and are made explicitly, through normalize_pol.
 
 from __future__ import annotations
 
-import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -196,12 +195,25 @@ class LayeredOpticalBuilder:
             return self._polygon_prism([(x * S, y * S) for x, y in inc_shape.vertices_m()],
                                         z_lo, z_hi)
         if k == "ellipse":
+            # A TRUE ellipse (OCC analytic curve), not the inscribed 72-gon this used to build:
+            # that under-filled the area by a systematic 0.127% (audit GEO-3), always in the same
+            # direction, whereas the primitive reproduces pi*rx*ry*h to ~4e-7 -- and it makes an
+            # ellipse with rx == ry agree with the `circle` branch instead of quietly disagreeing.
+            #
+            # occ.WorkPlane.Ellipse(major, minor) SEGFAULTS -- SIGSEGV, not a Python exception, so
+            # it cannot be caught or reported -- whenever minor > major (verified on netgen's OCC
+            # build). A tall inclusion (ry > rx) is therefore never expressed by passing the radii
+            # in their natural order. Instead the major axis is chosen BY CONSTRUCTION: point the
+            # workplane's local x along global Y and swap the radii, so `major >= minor` always
+            # holds by the shape of the code rather than by the caller's luck.
             cx, cy = inc_shape.center_m()
-            n = 72   # inscribed n-gon: area 0.127% below the true ellipse, aspect-INdependent
-            #          (audit GEO-3; far below mesh/validation tolerance -- raise n if needed)
-            pts = [((cx + inc_shape.rx_m * math.cos(t)) * S, (cy + inc_shape.ry_m * math.sin(t)) * S)
-                    for t in (2.0 * math.pi * i / n for i in range(n))]
-            return self._polygon_prism(pts, z_lo, z_hi)
+            rx, ry = inc_shape.rx_m * S, inc_shape.ry_m * S
+            origin = (cx * S, cy * S, z_lo)
+            if rx >= ry:
+                axes, major, minor = occ.Axes(origin, occ.Z), rx, ry
+            else:
+                axes, major, minor = occ.Axes(origin, occ.Z, occ.Y), ry, rx
+            return occ.WorkPlane(axes).Ellipse(major, minor).Face().Extrude(z_hi - z_lo)
         raise NotImplementedError(
             "inclusion shape '{}' not supported by the default OCC builder".format(k))
 
