@@ -44,8 +44,10 @@ def _meta_m_modes(result: SteadyStateResult, m_modes) -> int:
 def local_inversion_factor(result: SteadyStateResult, lambda_m: float) -> np.ndarray:
     """Medium spontaneous-emission factor along z at wavelength lambda_m,
         n_sp(z) = sigma_e nbar2 / (sigma_e nbar2 - sigma_a (1 - nbar2) - sigma_esa nbar2),
-    using the cross-sections the solve cached (result.meta). The denominator is the NET
-    stimulated coefficient the solver actually used, including opt-in excited-state absorption
+    using the cross-sections the solve cached (result.meta). The denominator is the net
+    STIMULATED coefficient (by the same convention that excludes background loss, it also
+    excludes a ConcentrationModel's unbleachable dark absorption and photodarkening -- 
+    audit B6), including opt-in excited-state absorption
     (audit S3-33: omitting the ESA term made the reported n_sp inconsistent with the gain under
     ESA; with sigma_esa = 0 this is the classic two-level form, >= 1 by construction). This is
     the honest medium n_sp, as opposed to the ASE-PSD-derived effective factor which carries
