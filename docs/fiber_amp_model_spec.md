@@ -131,7 +131,7 @@ Yb3+ (2F5/2 <-> 2F7/2):
   delevaque(2f) == dark(f) exactly.
 
 ## 7. Cladding pumping / thermal (Phase 6)
-- Double-clad: pump overlap with the CORE `Gamma_p ~= A_core / A_clad` (pump fills the inner
+- Double-clad: pump overlap with the DOPED area `Gamma_p ~= A_dope / A_clad` (pump fills the inner
   cladding, only the core fraction is absorbed) -- the key high-power-Yb geometry factor.
 - Quantum-defect heat load per unit length `q_heat = (1 - lambda_p/lambda_s) * (dP_p_absorbed/dz)`;
   radial thermal profile from the heat equation. Stokes efficiency ceiling `lambda_p/lambda_s`.
