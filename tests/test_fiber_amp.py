@@ -272,10 +272,18 @@ def test_concentration_hardening_2026_09_01():
         _w.simplefilter("always")
         assert abs(_launched_pump_W(dp) - 150e-3) < 1e-15
         assert any("EXCLUDED" in str(r.message) for r in rec)
-    # R8: sampling a measured table outside its range must warn (flat-hold is silent gain)
+    # R8: out-of-range sampling warns when the held edge value is significant (>2% of
+    # peak); a negligible tail (Yb sigma_e at 1550 nm = 0.4% of peak, the Er:Yb chain
+    # case) is intended flat-hold and stays silent
     with _w.catch_warnings(record=True) as rec:
         _w.simplefilter("always")
-        ion.sigma_e.sigma(1550e-9)
+        ion.sigma_e.sigma(1550e-9)                    # 0.4% of peak -> intended, silent
+        assert not any("held flat" in str(r.message) for r in rec)
+    from dynameta.optics.fiber_amp.calibration import CrossSectionTable as _CT
+    big_edge = _CT(np.array([1.50e-6, 1.55e-6]), np.array([4.0e-25, 6.0e-25]))
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        big_edge.sigma(1.60e-6)                       # edge = 100% of peak -> warns
         assert any("held flat" in str(r.message) for r in rec)
 
 
