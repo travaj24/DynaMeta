@@ -42,20 +42,35 @@ def _solve(shape, label):
     # + one poll), NOT the peak: with the direct UMFPACK factorization this fixture passed 45 GB on
     # the dev box WITHOUT FINISHING ITS FIRST SOLVE. With bddc_gmres the SAME fixture peaks at
     # 3.2 GB in 142-171 s.
-    # WHY NOT SHRINK THE MESH LIKE THE SIBLING ORACLES. It does not work here, and that is MEASURED:
-    # at (maxh_bg, maxh_incl, maxh_buf) = (45,40,80)/(50,50,85)/(60,60,100) nm the umfpack peak is
-    # still 40.2/38.2/25.6 GB. The floor is upstream of this file -- the builder approximates an
-    # Ellipse by an INSCRIBED 72-GON (dynameta/optics/ngsolve_layered.py, `n = 72`), so the
-    # perimeter carries ~11 nm facets no matter what maxh_inclusion_m says: at maxh 45 nm the
-    # ellipse cell meshes to ~22k elements where the same-size circle or hexagon needs ~7k, and the
-    # resulting fine embedded feature also gives the LU pathological fill (~174 kB/DOF vs ~60 for
-    # the sibling oracles). Coarsening the mesh here would buy a factor of ~1.6 and cost accuracy;
-    # changing the solver buys a factor of >14 and costs nothing.
+    # WHY NOT SHRINK THE MESH LIKE THE SIBLING ORACLES (as of 2026-08-31 this reasoning is
+    # SUPERSEDED -- kept because it records what was true, and why the conclusion changed).
+    # It did not work: at (maxh_bg, maxh_incl, maxh_buf) = (45,40,80)/(50,50,85)/(60,60,100) nm
+    # the umfpack peak was still 40.2/38.2/25.6 GB. The floor was UPSTREAM of this file -- the
+    # builder approximated an Ellipse by an INSCRIBED 72-GON, so the perimeter carried ~11 nm
+    # facets no matter what maxh_inclusion_m said: at maxh 45 nm the ellipse cell meshed to ~22k
+    # elements where the same-size circle or hexagon needed ~7k, and that fine embedded feature
+    # gave the LU pathological fill (~174 kB/DOF vs ~60 for the sibling oracles).
+    # THE 72-GON IS GONE: ngsolve_layered now builds a TRUE OCC ellipse, so the perimeter is an
+    # analytic curve the mesher discretizes at maxh like any other. Re-measured at the very same
+    # (45,40,80) nm, the ellipse cell is no longer an outlier at all -- 8231 elements against
+    # 7910 for the hexagon and 7754 for the circle, a 4% spread where it used to be ~3x. At the
+    # SHIPPED (24,24,45) nm all four shapes sit within 1.4% of each other (42.2k/42.6k/42.0k).
+    # The cost driver behind the over-budget kill is therefore fixed at the source rather than
+    # worked around. bddc_gmres is KEPT regardless: it is the library default, it was validated
+    # against the direct solve below, and it is far cheaper than a direct factorization at this
+    # size. Whether umfpack now fits the 12.4 GB budget again is UNMEASURED -- deliberately, as
+    # the previous attempt reached 45 GB on this box and memory pressure here has historically
+    # produced silent process deaths rather than clean failures.
     # THE SWAP IS VALIDATED AGAINST THE DIRECT SOLVE ON THE SAME MESH: at (45,40,80) umfpack and
     # bddc_gmres both return ellipse R = 0.0272 / T = 0.9726 / |R+T-1| = 0.0002 and hexagon
     # R = 0.0621 / T = 0.9377 / |R+T-1| = 0.0003 -- identical to four decimals -- and on the
     # SHIPPED (unchanged) mesh bddc_gmres returns ellipse 0.0272/0.9726/0.0002 and hexagon
     # 0.0619/0.9379/0.0002, agreeing with the direct solve on three independent coarser meshes.
+    # Those ellipse figures are the 72-GON's. With the true ellipse the same run gives
+    # 0.0270/0.9728/0.0002 -- the hexagon is bit-for-bit unmoved (0.0619/0.9379/0.0002), which is
+    # the control: only the shape that changed, changed. A ~0.7% shift in R is the expected size
+    # for an inclusion whose area grew by the 0.127% the inscribed polygon was missing, and the
+    # gate here is energy conservation (TOL=0.02), which neither geometry threatens.
     # solve_fem raises its own warning if GMRES fails to reach 1e-3 relative residual and declares
     # R/T/A unreliable, so a non-converged solve is LOUD, not a silent pass; none fired here.
     opt = OpticalSpec(polarization="y", incidence_angle_deg=0.0, linear_solver="bddc_gmres")
