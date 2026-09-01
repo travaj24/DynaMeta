@@ -89,6 +89,25 @@ FIXTURES = {"_reference_device", "_ram_guard", "_harness"}
 # class as the 300-minute job cap this tier was sharded to escape. 2700 s is ~1.8x the slowest
 # measured script and still ~1/3 of the 150-minute shard cap, so one pathological script cannot
 # eat a whole shard. Raise the SHARD cap with it, never this alone.
+#
+# 2026-09-01: 2700 s WAS NOT ENOUGH EITHER -- fdtd_3d_reduces timed out again on nightly
+# 33445577932 after PASSING at 1935 s in between. Raising the cap a third time was the wrong move:
+# this cap is GLOBAL, so the single slowest script sets the hang detector for all ~210, and at the
+# ~1.9x runner variance measured across the four shards a 2133 s script needs ~4000 s -- a cap that
+# could not detect a hang in anything else. The script was SPLIT instead. Per-gate timing on the
+# dev box showed 88% of its 2133 s sat in two gates, both true 2D-periodic cells carrying a full
+# lateral grid: the pillar-diffraction gate at 1191 s and the cross-polarization L-pillar at 690 s,
+# against 25/64/102/43/18 s for the five that run on a 4x4 lateral grid. (The high-resolution
+# Drude gate, resolution=60, was the natural suspect and cost 102 s -- measure, do not assume.)
+# They now live in fdtd_3d_pillar_diffraction.py and fdtd_3d_crosspol.py, UNCHANGED, so no gate
+# was weakened to fit a budget.
+# THE CAP IS DELIBERATELY LEFT AT 2700 s. The script that forced it is gone, but tightening a
+# global safety limit needs the NEW slowest, and that is only partly known: the next-most-expensive
+# script on record is fdtd_3d_structured_tensor at 1574 s (dev box, ci.yml) -- except it exits 42 on
+# CI today because grcwa is undeclared, so it does not currently bind there at all. Declaring grcwa
+# would put a ~1574 s script back into the tier and consume most of the headroom this split just
+# won, which is a reason to measure that dispatch before lowering anything. Revisit once one full
+# nightly reports per-script times with the split in place.
 PER_SCRIPT_TIMEOUT_S = 2700
 SKIP_RC = 42                      # the capability-absent convention (audit C6-6 / T-3)
 TIMEOUT_RC = 124
