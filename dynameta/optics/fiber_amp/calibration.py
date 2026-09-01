@@ -63,6 +63,13 @@ class CrossSectionTable:
 
     def sigma(self, lambda_m):
         lam = np.asarray(lambda_m, float)
+        if np.any(lam < self.lambda_m[0] - 1e-12) or np.any(lam > self.lambda_m[-1] + 1e-12):
+            import warnings
+            warnings.warn("CrossSectionTable: wavelength outside the measured range "
+                          "[%.1f, %.1f] nm -- the edge value is held flat, which can "
+                          "manufacture gain from nothing (audit R8)"
+                          % (self.lambda_m[0] * 1e9, self.lambda_m[-1] * 1e9),
+                          stacklevel=2)
         out = np.interp(lam, self.lambda_m, self.sigma_m2)      # flat-held outside range
         return out if out.ndim else float(out)
 
@@ -159,8 +166,12 @@ def ytterbium_melkumov() -> RareEarthIon:
     lam = np.asarray(_YB_MELKUMOV_AS_NM, float) * 1e-9
     sa = np.asarray(_YB_MELKUMOV_AS_SIGMA_A_PM2, float) * 1e-24
     se = np.asarray(_YB_MELKUMOV_AS_SIGMA_E_PM2, float) * 1e-24
+    # zero line = the TABLE'S OWN sigma_e/sigma_a = 1 crossing (974.26 nm by interpolation;
+    # the ratio at 976 nm is 1.104, so declaring 976 skewed every McCumber exponent by
+    # ~1.10x -- audit B3 2026-09-01).  976 nm pumping therefore sits 1.7 nm ABOVE the zero
+    # line and the inversion clamp is sigma_a/(sigma_a+sigma_e) = 0.475, not 0.500.
     return ion_from_cross_sections("Yb3+(melkumov)", lam, sa, se, tau_s=0.83e-3,
-                                   zero_line_m=976e-9, host="aluminosilicate/melkumov2004")
+                                   zero_line_m=974.26e-9, host="aluminosilicate/melkumov2004")
 
 
 # ---- representative datasheet target (a generic single-mode C-band EDFA gain block) ----------

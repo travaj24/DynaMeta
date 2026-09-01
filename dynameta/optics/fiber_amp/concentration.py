@@ -74,6 +74,10 @@ class ConcentrationModel:
                       ("pd_exponent", self.pd_exponent)):
             if v < 0.0:
                 raise ValueError("ConcentrationModel: {} must be >= 0".format(nm))
+        if self.pd_loss_per_m > 0.0 and self.pd_exponent <= 0.0:
+            raise ValueError("ConcentrationModel: pd_exponent must be > 0 when "
+                             "pd_loss_per_m > 0 (numpy 0**0 == 1 would put the full "
+                             "photodarkening loss on an UNPUMPED fiber -- audit B2)")
 
     @property
     def is_identity(self) -> bool:

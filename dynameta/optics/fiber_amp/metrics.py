@@ -90,8 +90,26 @@ def _set_signal(amp: FiberAmplifier, P_W: float, index: int = 0) -> FiberAmplifi
     return _with(amp, signals=sigs)
 
 
+def _true_pumps(amp: FiberAmplifier):
+    """Pumps that are actually pumps: excludes any Pump channel at a signal wavelength
+    (the double-pass mirror spelling), which would otherwise be summed into launched pump,
+    residual pump and the Stokes ceiling (audit R5 2026-09-01: PCE read 12x low and the
+    residual 192x high on a DP amplifier).  Warns once per call when it excludes one."""
+    sig_lams = [float(s.lambda_m) for s in amp.signals]
+    true, dropped = [], []
+    for p in amp.pumps:
+        (dropped if any(abs(float(p.lambda_m) - sl) < 1e-12 for sl in sig_lams)
+         else true).append(p)
+    if dropped:
+        import warnings
+        warnings.warn("pump aggregate: %d Pump channel(s) at a signal wavelength look "
+                      "like double-pass mirror injections and are EXCLUDED from pump "
+                      "accounting (audit R5)" % len(dropped), stacklevel=3)
+    return true
+
+
 def _launched_pump_W(amp: FiberAmplifier) -> float:
-    return float(sum(p.power_W for p in amp.pumps))
+    return float(sum(p.power_W for p in _true_pumps(amp)))
 
 
 def _signal_out_in(result: SteadyStateResult):
