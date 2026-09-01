@@ -85,6 +85,10 @@ def metastable_fraction(ch: ChannelSet, powers_W, fiber: FiberSpec, *,
     R_a = float(np.sum(ch.sigma_a * flux))
     R_e = float(np.sum(ch.sigma_e * flux))
     tau_s = ch.tau_s
+    # NOTE (audit B4 2026-09-01): this REFERENCE form uses the total fiber.n_t_m3 in the
+    # upconversion quadratic; the solver uses the pair-reduced ACTIVE density when a
+    # ConcentrationModel is present (steady_state), so the two differ by O(1e-5) in nbar2
+    # at a 4% pair fraction.  For charged configs, read nbar2 from the solve, not from here.
     # The quadratic branch below divides by C_up * n_t, so it needs BOTH positive. n_t == 0 is an
     # undoped fiber (audit F-10): no ions to upconvert, so the linear form is exact, not just safe.
     if upconversion_C_up <= 0.0 or fiber.n_t_m3 <= 0.0:

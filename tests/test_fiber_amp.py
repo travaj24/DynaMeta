@@ -237,6 +237,48 @@ def test_delevaque_pair_convention_halves_the_dark_pool():
         pass
 
 
+def test_concentration_hardening_2026_09_01():
+    # B2: pd_exponent = 0 with pd_loss_per_m > 0 would put the full loss on an UNPUMPED fiber
+    try:
+        ConcentrationModel(pd_loss_per_m=1.0, pd_exponent=0.0)
+        raise AssertionError("pd_exponent=0 with pd_loss>0 must raise")
+    except ValueError:
+        pass
+    # B3: the Melkumov zero line must be the TABLE'S OWN detailed-balance crossing
+    from dynameta.optics.fiber_amp.calibration import ytterbium_melkumov
+    from dynameta.constants import C_LIGHT, H_PLANCK
+    ion = ytterbium_melkumov()
+    lam_zero = H_PLANCK * C_LIGHT / ion.eps_J
+    ratio = ion.sigma_e.sigma(lam_zero) / ion.sigma_a.sigma(lam_zero)
+    assert abs(lam_zero - 974.26e-9) < 0.5e-9
+    assert abs(ratio - 1.0) < 0.05                # sigma_e == sigma_a at the declared zero line
+    # B1: a conflicting raw upconversion_C_up must WARN (the ConcentrationModel wins)
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        amp = FiberAmplifier(ER, _edf(6.0), [Pump(150e-3, 0.980e-6, "fwd")],
+                             [Signal(1e-6, 1.560e-6)], None, upconversion_C_up=9.9e-23,
+                             concentration=ConcentrationModel(pair_fraction=0.04,
+                                                              pair_convention="delevaque"))
+        assert amp.upconversion_C_up == 0.0
+        assert any("OVERRIDDEN" in str(r.message) for r in rec)
+    # R5: a double-pass mirror channel (Pump at the signal wavelength) must be EXCLUDED
+    # from launched-pump aggregates, with a warning
+    from dynameta.optics.fiber_amp.metrics import _launched_pump_W
+    dp = FiberAmplifier(ER, _edf(6.0), [Pump(150e-3, 0.980e-6, "fwd"),
+                                        Pump(2e-3, 1.560e-6, "bwd")],
+                        [Signal(1e-6, 1.560e-6)], None)
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        assert abs(_launched_pump_W(dp) - 150e-3) < 1e-15
+        assert any("EXCLUDED" in str(r.message) for r in rec)
+    # R8: sampling a measured table outside its range must warn (flat-hold is silent gain)
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        ion.sigma_e.sigma(1550e-9)
+        assert any("held flat" in str(r.message) for r in rec)
+
+
 def test_photodarkening_worse_at_high_inversion():
     pd = ConcentrationModel(pd_loss_per_m=2.0, pd_exponent=7.0)
 
@@ -387,7 +429,11 @@ def test_cross_section_table_interpolates_and_holds_flat():
     lam = np.linspace(1.50e-6, 1.60e-6, 20)
     tab = CrossSectionTable(lam, ER.sigma_a.sigma(lam))
     assert np.max(np.abs(tab.sigma(lam) - ER.sigma_a.sigma(lam))) < 1e-30
-    assert abs(tab.sigma(1.40e-6) - tab.sigma_m2[0]) < 1e-30     # clamped below range
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:            # flat-hold now WARNS (audit R8)
+        _w.simplefilter("always")
+        assert abs(tab.sigma(1.40e-6) - tab.sigma_m2[0]) < 1e-30   # clamped below range
+        assert any("held flat" in str(r.message) for r in rec)
 
 
 def test_giles_calibration_roundtrip():

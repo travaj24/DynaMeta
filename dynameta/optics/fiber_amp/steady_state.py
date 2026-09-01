@@ -272,6 +272,14 @@ class FiberAmplifier:
             concentration = None
         self.concentration = concentration
         if concentration is not None:
+            if float(upconversion_C_up) != 0.0 and \
+                    float(upconversion_C_up) != float(concentration.c_up_m3_s):
+                import warnings
+                warnings.warn("FiberAmplifier: upconversion_C_up=%.3g is OVERRIDDEN by "
+                              "ConcentrationModel.c_up_m3_s=%.3g (the model wins; pass "
+                              "C_up through the ConcentrationModel only -- audit B1)"
+                              % (float(upconversion_C_up), concentration.c_up_m3_s),
+                              stacklevel=2)
             self.upconversion_C_up = float(concentration.c_up_m3_s)
             self._n_active = concentration.active_density(fiber.n_t_m3)
             self._n_dark = concentration.dark_density(fiber.n_t_m3)
