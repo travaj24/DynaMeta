@@ -19,7 +19,7 @@ Branch `feat/eryb-transient-closure`. Version `0.11.0 -> 0.11.1`.
 | `efficiency.py` | `_dissipated_power_W` tries `amp._rate_balance_dissipation_W` first, then the existing `_dP_full_c` path, then NaN |
 | `dynamics.py` | `simulate_transient_eryb`, the 2x2 `phi_1` kernel (`_phi1_dt_2x2`), `_split_eryb_seed`, the `simulate_transient` dispatch, `frame_as_steady`'s co-doped branch, `amplifier_saturation_energy` |
 | `eryb.py` | `solve(relax="auto")` -- the body became `_solve_once` and `solve` gained the same `(1.0, 0.5, 0.25)` ladder wrapper `FiberAmplifier.solve` has, plus `meta['relax_attempts']`. The DEFAULT stays `1.0` (one attempt, unchanged); accepting the string is what lets code written against the single-ion class -- the downstream `solve_closed(amp, relax="auto")` -- run against a co-doped amplifier at all, where it previously raised `ValueError` before the mesh refinement could even start |
-| `tests/test_fiber_eryb_transient.py` | 20 gates |
+| `tests/test_fiber_eryb_transient.py` | 21 gates |
 
 ### API (exact call forms)
 
@@ -215,7 +215,34 @@ signal, C-band ASE in 8 bins. Steady gain 24.49151 dB at 161 nodes.
 | (c) mesh part of the same residual | `O(dz^2)` | **2.33e-4 / 5.81e-5 / 1.45e-5** at 81/161/321 nodes -- exactly 4x per doubling |
 | (d) steady closure | `< 1e-5` of launched pump after refinement | table in sec. 2: **2.14e-6** at 641 nodes |
 | (e) stiff regime | no NaN, populations in `[0,1]`, `dt` over 1e-8..1e-4 s | all finite and in range; `||dt J||_inf` spans **3.6e-4 .. 3.63** on the 1 m fixture and **4.0e-3 .. 40.5** on the core-pumped one. Population overshoot before the clip is **0.0** up to `||dt J|| = 12.8` and **8.6e-2** at 40.5 |
-| (f) single-ion byte-identity | unchanged | 14 pinned `float64` values (march gains, `nbar2` sums, ASE sums, the full profile matrix sum, a `frame_as_steady` frame, and the `wall_plug_efficiency` residual / eta / heat) compared with `==` against values captured on `main @ 3496a99`. All equal. `frame_as_steady`'s meta key set is unchanged too |
+| (f) single-ion path unchanged | unchanged | 14 values recorded on `main @ 3496a99` (march gains, `nbar2` sums, ASE sums, the full profile-matrix sum, a `frame_as_steady` frame, and the `wall_plug_efficiency` residual / eta / heat) reproduce to **1e-9 relative** (march-derived) and **1e-5** (solve-derived); `frame_as_steady`'s meta key set is unchanged; and a structural test asserts the three new branches are unreachable on a `FiberAmplifier`. See "A gate this work got wrong first" below |
+
+### A gate this work got wrong first, and what CI proved
+
+Gate (f) originally compared those 14 `float64` values with `==`, on the reasoning that the march
+is a fixed sequence of numpy reductions and must therefore be bit-reproducible. **This branch's
+first CI run falsified that twice**, while every other test on both legs passed (1362 and 1392
+passed respectively):
+
+* **floor leg** (numpy 1.24 / scipy 1.10 / py3.10): all ten MARCH values matched bit for bit, but
+  the wall-plug residual came out 1.0193e-4 W against 1.0187e-4 W -- 6.2e-4 relative.
+  `amp.solve()` drives scipy's **adaptive LSODA**, whose step sequence differs between scipy
+  versions, so it settles on a slightly different point of the same fixed point. In the unit that
+  number means -- a fraction of the launched pump -- the shift is 5.2e-7.
+* **py3.10 leg** (newest numpy): `gain_last` differed by **one ULP** (`...d80` vs `...d7f`) -- a
+  reduction-order / BLAS difference inside the march itself.
+
+So bitwise reproducibility is a property of the BUILD, not of this change, and asserting it was a
+false gate: it would go red on any runner whose numpy or scipy differs from the recording box, for
+reasons having nothing to do with the code under test. The gate now holds the march values to
+1e-9 relative and the solve-derived ones to 1e-5 -- still 7+ and 4+ orders tighter than any
+regression this change could cause, since a mis-routed march or a mis-fired efficiency hook moves
+gains by dB or returns NaN. The *environment-independent* half of the claim was added alongside
+it: `test_the_new_branches_are_structurally_unreachable_for_a_single_ion_amplifier` asserts that
+`FiberAmplifier` does not define `_rate_balance_dissipation_W` (so the efficiency hook cannot
+fire), is not an `ErYbAmplifier` (so the dispatch cannot fire), and has a `ChannelPlan.channels`
+that is not None (so `frame_as_steady`'s co-doped branch is dead code for it). That is the actual
+claim, and it does not depend on a numpy build.
 
 The `t = 20 us` reference time in gate (c) is deliberate. Taking the **maximum over the whole
 march** instead puts the number at the first step after the drive edge, where the reservoirs move
