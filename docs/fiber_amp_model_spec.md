@@ -682,3 +682,85 @@ ORDERING seen by a weak LP11 probe (below).
   loaded figure is 2x the smoke tier's ~60 s per-script bar, so the script sits in
   `run_all.SMOKE_EXCLUDED` with its measured spread rather than being gambled into a tier CI runs
   on shared hardware.
+
+## 14. Er:Yb co-doped energy closure and transient march (eryb.py + dynamics.py)
+
+Added 2026-09-13; full derivation, measurements and limits in
+`docs/audit/2026-09-13-eryb-transient-closure.md`.
+
+**Stored energy and the dissipation split.** With `eps_Er`, `eps_Yb` the two McCumber zero-line
+quanta (`RareEarthIon.eps_J`; 1.2984e-19 J at 1530 nm and 2.0375e-19 J at 975 nm), `A = A_dope`,
+and `n_{a,e},k` the per-channel photon rates per unit length:
+
+```
+U(z)     = A (eps_Er N_Er f2 + eps_Yb N_Yb b2)                      [J/m]
+Phi_tr   = A k_tr phi N_Er N_Yb b2 (1 - f2)                         [1/(m s)]
+q_opt(z) = -dF/dz                                                   [W/m]
+
+D_Er   = SUM_k (h nu_k - eps_Er)(n_a,k - n_e,k) + (eps_Er Phi_dec_Er - P_sp_Er) + eps_Er Phi_up
+D_Yb   = SUM_k (h nu_k - eps_Yb)(n_a,k - n_e,k) + (eps_Yb Phi_dec_Yb - P_sp_Yb)
+D_tr   = (eps_Yb - eps_Er) Phi_tr
+D_loss = SUM_k l_k P_k
+
+q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr          (ErYbAmplifier.energy_terms)
+```
+
+Each event is charged at its LEVEL's energy and the remainder is dissipated, so the
+`Yb -> Er` transfer defect `D_tr` (the `4I11/2 -> 4I13/2` multiphonon relaxation, 0.4614 eV, 36%
+of a 976 nm pump photon) is charged EXACTLY ONCE, to the transfer event, with a `+` sign on the
+dissipation side -- not to the Yb absorption and not to the Er emission. Both ions' fluorescence
+appears as `eps Phi_dec - P_sp` (only the guided ASE fraction returns to the field).
+
+At the steady state `dU/dt = 0`, so the aggregate `ErYbAmplifier._rate_balance_dissipation_W` --
+`-INT dF/dz dz` evaluated from the amplifier's OWN right-hand side on the returned profile --
+already contains every term above. `efficiency._dissipated_power_W` calls that hook first, so
+`wall_plug_efficiency(...).energy_balance_residual_W` is finite and `O(dz^2)`-convergent for a
+co-doped result. MEASURED on the core-pumped reference point (a 2.8 um, NA 0.20, N_Er 2e25,
+N_Yb 2e26, k_tr 2e-22, 200 mW 976 nm co-pump, 0.5 mW 1550 nm signal, 24 C-band bins + a
+1000-1100 nm Yb band, L 2 m), residual / launched pump: 2.118e-3 / 1.164e-4 / 9.97e-6 / 2.14e-6 /
+6.08e-7 at 81 / 161 / 321 / 641 / 1281 nodes. Nothing may be added on top of the aggregate; doing
+so double-counts.
+
+**Transient (`dynamics.simulate_transient_eryb`; `simulate_transient` dispatches to it).** The
+same two-timescale split as sec. 8's single-ion march -- powers quasi-static through the frozen
+`g(z; f2, b2)`, populations advanced locally -- with the reservoir now a PAIR. The update is an
+EXPONENTIAL ROSENBROCK step (ETD1 with the exact 2x2 Jacobian of `eryb._fb_rhs`),
+
+```
+y' = F(y), y = (f2, b2);   y_{n+1} = y_n + [dt phi_1(dt J)] F(y_n),  phi_1(X) = (e^X - I) X^-1,
+```
+
+chosen because (i) it reduces EXACTLY to sec. 8's scalar `n2_ss + (n2 - n2_ss) exp(-B dt)` when
+`k_tr -> 0`, (ii) `F(y) = 0` is an exact fixed point at any `dt`, so the long-time limit is
+`ErYbAmplifier.solve()`'s own fixed point, (iii) `tr(J) < 0`, `det(J) > 0` and a non-negative
+discriminant make both eigenvalues real and negative at every operating point, so it is
+unconditionally stable in a problem whose stiffness ratio is ~1e3 (`k_tr N_Er = 4.0e3 /s` and
+`R_a_Yb ~ 1e5 /s` against `1/tau_Er = 1.0e2 /s`), and (iv) it needs no inner Newton solve.
+`phi_1` is evaluated by scaling-and-squaring on the 2x2 itself (`phi_1(2X) = phi_1(X)(e^X + I)/2`)
+rather than by an eigen-decomposition, whose divided difference loses all its digits when the Er
+and Yb eigenvalues coalesce -- which they do as the pump rises. ETD1 is first order ON THE PATH
+(Jacobian and powers frozen across the step), the same order as the single-ion march, so the
+step-by-step energy balance closes as `O(dt)`: MEASURED 1.77e-3 / 9.50e-4 / 4.92e-4 of the
+launched power at `dt` 1e-6 / 5e-7 / 2.5e-7 s on an idle->data step.
+
+`TransientResult` is unchanged in type: `nbar2_zt` is the Er fraction `f2` and the Yb inversion
+`b2` rides on `meta['beta_yb']` (Nt, Nz). `nbar2_0` additionally accepts a TUPLE `(f2_0, b2_0)`;
+a bare scalar/array is `f2` alone and `b2` is then seeded from its own quasi-equilibrium at that
+`f2` and the first drive (`eryb._b2_quasi_equilibrium`), because `tau_Yb` is ~7x shorter than
+`tau_Er` and a zero seed would inject a spurious millisecond of Yb charging. `frame_as_steady`
+copies both ions' cross-sections and the frame's `b2` from `meta` (a co-doped `ChannelPlan` has
+`channels = None`, since every channel carries two ions).
+
+**Scope, unchanged from sec. 8 and worth restating for the co-doped case.** The frozen-population
+step still over-amplifies ASE once ASE stops being a perturbation (audit A-7), and a co-doped
+amplifier reaches that sooner because the transfer can invert Er hard: MEASURED, a cold
+`(0.02, 0.02)` start on a UNIFORM 300 us grid trips `meta['quasi_static_valid']` with frozen-step
+ASE at 342x the launched power, while the same start on a 150 us uniform or a log-spaced grid is
+valid and lands on `solve()`. `meta['max_dt_times_rate']` and `meta['max_population_overshoot']`
+are reported (not gated) so a caller can see when the Yb reservoir was slaved rather than
+resolved.
+
+`ErYbAmplifier.solve` also now accepts `relax="auto"` (the same (1.0, 0.5, 0.25) ladder
+`FiberAmplifier.solve` walks, reported on `meta['relax_attempts']`) so code written against
+the single-ion class is substitutable. Its DEFAULT is still the numeric 1.0 -- one attempt,
+unchanged.
