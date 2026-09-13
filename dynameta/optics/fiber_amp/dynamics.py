@@ -44,7 +44,16 @@ the same over-amplified ASE; only a genuinely ASE-coupled transient (a saturatin
 step) would, which is out of scope here. Use amp.solve() for the steady operating point in that
 regime.
 
-Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.8.
+CO-DOPED (Er:Yb). simulate_transient DISPATCHES an eryb.ErYbAmplifier to
+simulate_transient_eryb, which marches TWO coupled z-local reservoirs -- the Er metastable
+fraction f2 and the Yb inversion b2 -- with the same quasi-static power step and an
+EXPONENTIAL ROSENBROCK update (ETD1 with the exact 2x2 Jacobian) that reduces term for term
+to the scalar exponential integrator above when the transfer coupling vanishes. The return
+type is unchanged: nbar2_zt is f2 and meta['beta_yb'] carries b2. See that function and the
+block comment above it for the integrator's four properties and its first-order-on-the-path
+price, and docs/audit/2026-09-13-eryb-transient-closure.md for the measured numbers.
+
+Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.8 (co-doped: sec.14).
 """
 
 from __future__ import annotations
@@ -62,7 +71,8 @@ from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp.steady_state import (ChannelPlan, FiberAmplifier,
                                                     SteadyStateResult)
 
-__all__ = ["TransientResult", "simulate_transient", "saturation_energy",
+__all__ = ["TransientResult", "simulate_transient", "simulate_transient_eryb",
+           "saturation_energy", "amplifier_saturation_energy",
            "frantz_nodvik_output_energy", "frantz_nodvik_gain", "frantz_nodvik_pulse",
            "frantz_nodvik_instantaneous_gain"]
 
@@ -148,6 +158,20 @@ class TransientResult:
         if ch is not None:
             meta.update({"sigma_a": ch.sigma_a.copy(), "sigma_e": ch.sigma_e.copy(),
                          "sigma_esa": ch.sigma_esa.copy()})
+        else:
+            # CO-DOPED frame. ChannelPlan.channels is None there by design (every channel carries
+            # TWO ions' cross-sections, so there is no single ChannelSet), and without this the
+            # frame would reach the noise/thermal layer with no cross-sections at all. Take them
+            # -- and THIS frame's Yb inversion -- from the march's own meta, which is where
+            # simulate_transient_eryb puts them, so the frame is self-consistent rather than
+            # silently spectroscopy-free.
+            for key in ("sigma_a", "sigma_e", "sigma_a_er", "sigma_e_er", "sigma_a_yb",
+                        "sigma_e_yb", "n_er_m3", "n_yb_m3", "k_tr_m3_s"):
+                if key in self.meta:
+                    meta[key] = self.meta[key]
+            beta = self.meta.get("beta_yb")
+            if beta is not None:
+                meta["beta_yb_z"] = np.asarray(beta[it], float).copy()
         return _SSR(self.z_m.copy(), P, pl.lambda_m.copy(), pl.direction.copy(),
                     pl.is_ase.copy(), list(pl.kind), np.asarray(self.nbar2_zt[it], float).copy(),
                     gains, meta=meta)
@@ -235,6 +259,12 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     input powers. Powers are quasi-static each step; nbar2 advances by an exponential integrator.
     Initialised from the steady state at the first drive unless nbar2_0 is supplied.
 
+    CO-DOPED AMPLIFIERS (2026-09-13). An eryb.ErYbAmplifier is DISPATCHED to
+    simulate_transient_eryb, which marches the two coupled reservoirs (Er f2, Yb b2) and returns
+    the same TransientResult type with nbar2_zt = f2 and meta['beta_yb'] = b2. The call form is
+    identical, so downstream code that swaps the amplifier class needs no branch; nbar2_0 there
+    additionally accepts a (f2, b2) tuple. See that function for the integrator and its limits.
+
     VALIDITY (audit A-7): the frozen-inversion step is only trustworthy while the ASE stays a
     perturbation. The march measures that every step and reports it on the result --
     meta['quasi_static_valid'] (bool), meta['max_ase_to_launched'], meta['max_ase_gain_integral'],
@@ -251,15 +281,25 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     (_STORE_PROFILES_MAX_BYTES) is REFUSED with the shape, because past that point the allocation
     stops raising and starts taking the process down with it."""
     _no_raman(amp)
-    # The march is FiberAmplifier-only (it reads _n_active / _mcc_matrix / concentration, none of
-    # which the co-doped class has). Refuse by name instead of letting the _plan() shape mismatch
-    # surface as "too many values to unpack (expected 5)", which tells the caller nothing.
+    # DISPATCH (2026-09-13). The body below is the SINGLE-ION march: it reads _n_active, the
+    # McCumber matrix and the ConcentrationModel, and advances ONE scalar reservoir per node. A
+    # CO-DOPED amplifier has two coupled ion populations and no single nbar2, so it is handed to
+    # simulate_transient_eryb -- same signature, same TransientResult (nbar2_zt = the Er
+    # metastable fraction, meta['beta_yb'] = the Yb inversion). Every OTHER class still refuses by
+    # name rather than letting the _plan() shape mismatch surface as "too many values to unpack
+    # (expected 5)", which tells the caller nothing.
     if not isinstance(amp, FiberAmplifier):
-        raise TypeError("simulate_transient supports FiberAmplifier only, not %s: the march reads "
-                        "the single-ion inversion state (_n_active, the McCumber matrix, the "
-                        "ConcentrationModel), and a co-doped amplifier has two coupled ion "
-                        "populations with no single nbar2 to march. Use %s.solve() for its steady "
-                        "operating point." % (type(amp).__name__, type(amp).__name__))
+        from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+        if isinstance(amp, ErYbAmplifier):
+            return simulate_transient_eryb(amp, t_grid, signal_drive=signal_drive,
+                                           pump_drive=pump_drive, n_nodes=n_nodes,
+                                           nbar2_0=nbar2_0, store_profiles=store_profiles)
+        raise TypeError("simulate_transient supports FiberAmplifier and ErYbAmplifier only, not "
+                        "%s: the single-ion march reads the single-ion inversion state "
+                        "(_n_active, the McCumber matrix, the ConcentrationModel) and the "
+                        "co-doped march reads the two-reservoir rate pair; neither fits this "
+                        "class. Use %s.solve() for its steady operating point."
+                        % (type(amp).__name__, type(amp).__name__))
     ch, bc0, u, is_ase, kind = amp._plan()
     L = amp.fiber.length_m
     z = np.linspace(0.0, L, n_nodes)
@@ -498,6 +538,381 @@ def _amp_with_boundary(amp, bc, sig_idx, pmp_idx, kind):
     for j, i in enumerate(sig_idx):
         signals[j] = replace(signals[j], power_W=float(bc[i]))
     return amp._clone(pumps=pumps, signals=signals)
+
+
+# ================= co-doped (Er:Yb) transient: two coupled z-local reservoirs =================
+#
+# WHY THIS NEEDS ITS OWN MARCH. The single-ion march advances ONE scalar per node by an
+# exponential integrator on a linear balance, n2' = R_a - B n2, whose exact solution over a step
+# is n2_ss + (n2 - n2_ss) e^{-B dt}. The co-doped amplifier has TWO reservoirs per node, f2 (Er
+# 4I13/2) and b2 (Yb 2F5/2), coupled BOTH ways by the energy transfer: Yb inversion pumps Er
+# (+k_tr N_Yb b2 (1 - f2) in the Er equation) and Er GROUND drains Yb (-k_tr N_Er b2 (1 - f2) in
+# the Yb equation). Nothing decouples them and the two timescales are far apart -- for this
+# repo's phosphosilicate numbers (k_tr 2e-22, N_Er 2e25, tau_Er 10 ms, tau_Yb 1.45 ms) the
+# transfer drain is k_tr N_Er = 4.0e3 /s against 1/tau_Yb = 6.9e2 /s and 1/tau_Er = 1.0e2 /s, and
+# a saturating 976 nm pump adds R_a_Yb ~ 1e5 /s on top. So the Yb reservoir is 1e3 x faster than
+# the Er one it feeds: dt resolving Yb would need ~1e-6 s where the Er transient the caller cares
+# about runs for 1e-2 s, i.e. 1e4 steps of pure overhead.
+#
+# INTEGRATOR: EXPONENTIAL ROSENBROCK (ETD1 with the EXACT local Jacobian).
+#
+#     y' = F(y),  y = (f2, b2);   y_{n+1} = y_n + [dt phi_1(dt J)] F(y_n),
+#     J = dF/dy at y_n,  phi_1(X) = (e^X - I) X^{-1} = SUM_{k>=0} X^k/(k+1)!
+#
+# Four properties, each of which a cheaper scheme gives up:
+#   1. It REDUCES EXACTLY to the existing single-ion update when the coupling vanishes. With
+#      k_tr = 0 the Jacobian is diagonal, J11 = -(R_a + R_e + 1/tau) = -B, and the formula
+#      collapses to f2_ss + (f2 - f2_ss) e^{-B dt} term for term. The Er-only limit of this march
+#      is therefore the same physics as simulate_transient, not merely a close one (gate (a)).
+#   2. The AMPLIFIER'S OWN STEADY STATE IS AN EXACT FIXED POINT. F(y) = 0 gives y_{n+1} = y_n for
+#      ANY dt, because the increment carries F(y_n) as a factor. That is what lets a constant-drive
+#      march started from amp.solve() sit still (gate (b)); an implicit Euler on a LINEARISED pair
+#      would only have it as a fixed point if the linearisation were re-centred every step.
+#   3. It is UNCONDITIONALLY STABLE, and that is the property a SPLIT scheme does not have.
+#      eryb._fb_jacobian shows tr(J) < 0, det(J) > 0 and a non-negative discriminant at every
+#      operating point, so both eigenvalues are real and negative; e^{dt J} is a contraction for
+#      every dt > 0, and as dt -> inf the step becomes y_n - J^{-1} F(y_n), a Newton step onto the
+#      steady state. Populations cannot ring or blow up no matter how the caller spaces t_grid
+#      (gate (e) sweeps dt over 1e-8 .. 1e-4 s). A semi-implicit split (freeze b2, advance f2, then
+#      swap) SHARES the fixed point -- both sub-steps vanish only at a root of the pair -- but not
+#      this: as dt grows each sub-step runs to its own local root, so the step DEGENERATES INTO the
+#      naive block Gauss-Seidel iteration whose positive Yb<->Er feedback has spectral radius
+#      ~ k_tr^2 N_Er N_Yb tau_Er tau_Yb >> 1 and diverges (eryb module docstring). A split march
+#      is therefore stability-limited to dt well inside 1/(k_tr N_Er) ~ 250 us, which is the regime
+#      the whole two-timescale design exists to leave.
+#   4. It needs NO nonlinear solve. A safeguarded implicit Euler with a Newton iteration per node
+#      is the other admissible choice and is equally stable, but it costs an inner loop per node
+#      per step with a convergence test that can fail, and it is only first-order accurate on the
+#      path -- the same order this is -- so it buys nothing here.
+# The price is that ETD1 is first-order in the PATH (the Jacobian is frozen across the step), so
+# the transient trajectory carries an O(dt) error even though its endpoints and stability do not.
+# That is the same order as the single-ion march and is measured in the audit note.
+#
+# phi_1 OF A 2x2, ROBUSTLY. The eigen-decomposition route (f(J) = alpha I + beta J with beta a
+# divided difference of the two eigenvalues) loses all its digits when the eigenvalues coalesce,
+# which happens routinely here -- the Er and Yb blocks cross as the pump rises. So phi_1 is
+# evaluated by SCALING AND SQUARING instead, on the matrix itself and with no branch: scale X by
+# 2^-m to ||X|| <= 1/2, Taylor both e^X and phi_1(X) there (order 18: the truncation is
+# 0.5^19/20! ~ 8e-25), then square up with the exact doubling identities
+#     e^{2X} = (e^X)^2,     phi_1(2X) = (1/2) phi_1(X) (e^X + I),
+# which follow from e^{2X} - I = (e^X - I)(e^X + I). Everything is vectorized over z.
+
+
+_PHI1_TAYLOR_ORDER = 18          # 0.5^19/20! ~ 8e-25 truncation at the scaled norm below
+_PHI1_SCALE_TARGET = 0.5
+_PHI1_MAX_SQUARINGS = 64         # || dt J || up to ~1e19 before this binds; a guard, not a limit
+
+
+def _mm2(A, B):
+    """2x2 matrix product of two 4-tuples of (N,) arrays (row-major a11, a12, a21, a22)."""
+    a11, a12, a21, a22 = A
+    b11, b12, b21, b22 = B
+    return (a11 * b11 + a12 * b21, a11 * b12 + a12 * b22,
+            a21 * b11 + a22 * b21, a21 * b12 + a22 * b22)
+
+
+def _i_plus_sXY(X, Y, s):
+    """I + s X Y for 4-tuples of (N,) arrays (the Horner step of both Taylor series)."""
+    p11, p12, p21, p22 = _mm2(X, Y)
+    return (1.0 + s * p11, s * p12, s * p21, 1.0 + s * p22)
+
+
+def _phi1_dt_2x2(j11, j12, j21, j22, dt):
+    """dt * phi_1(dt J) for a BATCH of 2x2 Jacobians given as four (N,) arrays.
+
+    phi_1(X) = (e^X - I) X^{-1} = SUM_{k>=0} X^k/(k+1)!, so the returned M gives the exponential
+    Rosenbrock step y <- y + M F(y). Scaling-and-squaring (see the block comment above): no
+    eigenvalue branch, no matrix inverse, exact in the limits M -> dt I (dt -> 0) and
+    M -> -J^{-1} (dt -> inf, all eigenvalues negative)."""
+    x = (dt * j11, dt * j12, dt * j21, dt * j22)
+    nrm = float(np.max(np.maximum(np.abs(x[0]) + np.abs(x[1]), np.abs(x[2]) + np.abs(x[3]))))
+    m = 0
+    if np.isfinite(nrm) and nrm > _PHI1_SCALE_TARGET:
+        m = min(int(np.ceil(np.log2(nrm / _PHI1_SCALE_TARGET))), _PHI1_MAX_SQUARINGS)
+        sc = 0.5 ** m
+        x = (x[0] * sc, x[1] * sc, x[2] * sc, x[3] * sc)
+    one = np.ones_like(x[0])
+    zero = np.zeros_like(x[0])
+    E = (one, zero, zero, one)                       # -> e^X
+    S = (one, zero, zero, one)                       # -> phi_1(X)
+    for k in range(_PHI1_TAYLOR_ORDER, 0, -1):
+        E = _i_plus_sXY(x, E, 1.0 / k)
+        S = _i_plus_sXY(x, S, 1.0 / (k + 1.0))
+    for _ in range(m):
+        S = tuple(0.5 * v for v in _mm2(S, (E[0] + 1.0, E[1], E[2], E[3] + 1.0)))
+        E = _mm2(E, E)
+    return tuple(dt * v for v in S)
+
+
+def _split_eryb_seed(nbar2_0):
+    """(f2_seed, b2_seed) from the nbar2_0 argument. A TUPLE of length 2 is the (f2, b2) pair;
+    anything else (scalar, list, ndarray) is f2 alone and leaves b2 to be seeded from the Yb
+    quasi-equilibrium. The tuple/list distinction is deliberate and documented rather than
+    sniffed from shapes -- a 2-node mesh would otherwise make `[0.3, 0.4]` ambiguous."""
+    if isinstance(nbar2_0, tuple):
+        if len(nbar2_0) != 2:
+            raise ValueError("simulate_transient(nbar2_0=...): a tuple seed must be the pair "
+                             "(f2, b2) for the co-doped amplifier; got length %d" % len(nbar2_0))
+        return nbar2_0[0], nbar2_0[1]
+    return nbar2_0, None
+
+
+def simulate_transient_eryb(amp, t_grid, *,
+                            signal_drive: Optional[Callable] = None,
+                            pump_drive: Optional[Callable] = None,
+                            n_nodes: int = 81, nbar2_0=None,
+                            store_profiles: bool = False) -> TransientResult:
+    """March an eryb.ErYbAmplifier's TWO coupled reservoirs f2(z, t) (Er 4I13/2) and b2(z, t) (Yb
+    2F5/2) over t_grid. Same call signature and same return type as simulate_transient, which
+    dispatches here, so a caller holding either amplifier class writes the same line.
+
+    ARGUMENTS. signal_drive(t) / pump_drive(t) return the input-power vector at time t exactly as
+    for the single-ion march. nbar2_0 additionally accepts a TUPLE (f2_0, b2_0) -- each entry a
+    scalar or a length-n_nodes array -- to set BOTH reservoirs. A bare scalar/array still means f2
+    alone, and b2 is then seeded from its own quasi-equilibrium at that f2 and the first drive (the
+    closed form eryb._b2_quasi_equilibrium, iterated against the frozen-population propagation):
+    tau_Yb is ~7x shorter than tau_Er and the Yb reservoir has no independently meaningful history
+    at a given Er state, so starting it at 0 would inject a spurious millisecond of Yb charging
+    that the caller did not ask for. nbar2_0 = None seeds both from amp.solve() at the first drive.
+
+    RETURNS a TransientResult with nbar2_zt = f2(t, z) and the Yb inversion history on
+    meta['beta_yb'] (Nt, Nz), alongside the usual resolved ASE arrays, per-signal gain, channel
+    plan and (opt-in) full profile matrix. frame_as_steady(i) works on the result and carries
+    f2, b2 and both ions' cross-sections onto the frame.
+
+    VALIDITY. The same audit-A-7 quasi-static monitor as the single-ion march (frozen-step ASE
+    power against launched power, and the ASE gain integral), reported identically on
+    meta['quasi_static_valid'] / ['max_ase_to_launched'] / ['max_ase_gain_integral']. Two
+    co-doped-specific diagnostics are added, both REPORTED rather than gated because the
+    integrator is stable at any of them: meta['max_dt_times_rate'], the largest ||dt J||_inf the
+    march saw (>> 1 means the Yb reservoir was slaved to the Er state within a step rather than
+    resolved -- correct for the endpoints, first-order on the path), and
+    meta['max_population_overshoot'], the largest excursion outside [0, 1] the clip had to undo."""
+    _no_raman(amp)
+    pl = amp._plan()
+    lam, u, is_ase, kind = pl["lam"], pl["u"], np.asarray(pl["is_ase"], bool), list(pl["kind"])
+    bc0 = np.asarray(pl["bc"], float)
+    K = int(lam.size)
+    L = amp.fiber.length_m
+    z = np.linspace(0.0, L, n_nodes)
+    t_grid = np.asarray(t_grid, float)
+    Nt = int(t_grid.size)
+    if store_profiles:
+        _need = 8 * Nt * K * int(n_nodes)
+        if _need > _STORE_PROFILES_MAX_BYTES:
+            raise ValueError(
+                "simulate_transient(store_profiles=True) would allocate %.2f GiB for the "
+                "(Nt, K, Nz) = (%d, %d, %d) power matrix, above the %.2f GiB guard. Shorten "
+                "t_grid, drop n_nodes, narrow the AseBand (K counts BOTH ASE directions and BOTH "
+                "bands), or leave store_profiles=False -- ase_fwd_W / ase_bwd_W are kept either "
+                "way, and frame_as_steady is the only thing that needs the full matrix."
+                % (_need / 1024.0 ** 3, Nt, K, n_nodes, _STORE_PROFILES_MAX_BYTES / 1024.0 ** 3))
+
+    c = amp._coeffs(pl)
+    sig_idx = [i for i, k in enumerate(kind) if k == "signal"]
+    pmp_idx = [i for i, k in enumerate(kind) if k == "pump"]
+    g_e_er, g_a_er = c["g_e_er"][:, None], c["g_a_er"][:, None]
+    g_e_yb, g_a_yb = c["g_e_yb"][:, None], c["g_a_yb"][:, None]
+    loss_col = c["loss"][:, None]
+    s_er_col, s_yb_col = c["s_er"][:, None], c["s_yb"][:, None]
+    m_modes = (amp.ase.m_modes if amp.ase is not None
+               else (amp.yb_ase.m_modes if amp.yb_ase is not None else 2))
+
+    def boundary(t):
+        bc = bc0.copy()
+        if signal_drive is not None:
+            for j, i in enumerate(sig_idx):
+                bc[i] = signal_drive(t)[j]
+        if pump_drive is not None:
+            for j, i in enumerate(pmp_idx):
+                bc[i] = pump_drive(t)[j]
+        return bc
+
+    def g_s(f2, b2):
+        """Frozen-population gain g (K, Nz) and spontaneous source s (K, Nz) -- term for term the
+        bracket of eryb._dP, so the march and the steady solve propagate the SAME operator."""
+        f, b = f2[None, :], b2[None, :]
+        g = (g_e_er * f - g_a_er * (1.0 - f) + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
+        return g, s_er_col * f + s_yb_col * b
+
+    # ---- seed both reservoirs --------------------------------------------------------------
+    t0 = float(t_grid[0])
+    bc_0 = boundary(t0)
+    b2_seed_shift = 0.0
+    if nbar2_0 is None:
+        amp0 = _amp_with_boundary(amp, bc_0, sig_idx, pmp_idx, kind)
+        r0 = amp0.solve(n_nodes=n_nodes)
+        f2 = np.interp(z, r0.z_m, np.asarray(r0.nbar2_z, float))
+        b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_z"], float))
+    else:
+        f_seed, b_seed = _split_eryb_seed(nbar2_0)
+        f2 = np.broadcast_to(np.asarray(f_seed, float), z.shape).astype(float).copy()
+        if b_seed is not None:
+            b2 = np.broadcast_to(np.asarray(b_seed, float), z.shape).astype(float).copy()
+        else:
+            b2 = np.zeros_like(f2)
+            for _ in range(24):
+                g, s = g_s(f2, b2)
+                P0 = _propagate_fixed(z, g, s, bc_0, u)
+                _ra_e, _re_e, ra_y, re_y = amp._rates_profile(c, P0)
+                b_new = np.clip(amp._b2_quasi_equilibrium(ra_y, re_y, f2, b2), 0.0, 1.0)
+                b2_seed_shift = float(np.max(np.abs(b_new - b2)))
+                b2 = 0.5 * (b2 + b_new)              # under-relaxed: the fixed point is on a
+                if b2_seed_shift < 1e-12:            # pump the Yb itself depletes
+                    break
+    f2 = np.clip(f2, 0.0, 1.0)
+    b2 = np.clip(b2, 0.0, 1.0)
+
+    # ---- outputs ---------------------------------------------------------------------------
+    f2_zt = np.empty((Nt, z.size))
+    b2_zt = np.empty((Nt, z.size))
+    sig_out = np.empty((Nt, len(sig_idx)))
+    pmp_out = np.empty((Nt, len(pmp_idx)))
+    gain_dB = np.empty((Nt, len(sig_idx)))
+
+    dz = np.diff(z)
+    ase_fwd = np.where(is_ase & (u > 0.0))[0]
+    ase_bwd = np.where(is_ase & (u < 0.0))[0]
+    ase_any = np.where(is_ase)[0]
+    worst_ase_ratio = 0.0
+    worst_gain_integral = 0.0
+    worst_dt_rate = 0.0
+    worst_overshoot = 0.0
+    nonfinite = False
+
+    if ase_fwd.size:
+        ase_fwd_idx = ase_fwd[np.argsort(lam[ase_fwd])]
+        ase_bwd_idx = ase_bwd[np.argsort(lam[ase_bwd])] if ase_bwd.size else ase_bwd
+        ase_lam = lam[ase_fwd_idx].copy()
+        ase_dnu = np.asarray(pl["dnu"], float)[ase_fwd_idx].copy()
+        ase_f_zt = np.empty((Nt, ase_fwd_idx.size))
+        ase_b_zt = np.empty((Nt, ase_bwd_idx.size)) if ase_bwd_idx.size else None
+    else:
+        ase_fwd_idx = ase_bwd_idx = np.empty(0, int)
+        ase_lam = ase_dnu = ase_f_zt = ase_b_zt = None
+    prof_zt = np.empty((Nt, K, z.size)) if store_profiles else None
+
+    for it in range(Nt):
+        t = float(t_grid[it])
+        bc = boundary(t)
+        g, s = g_s(f2, b2)
+        P = _propagate_fixed(z, g, s, bc, u)
+        if not np.all(np.isfinite(P)):
+            nonfinite = True
+        if ase_any.size:
+            p_ase = (float(np.sum(P[ase_fwd, -1])) if ase_fwd.size else 0.0) \
+                + (float(np.sum(P[ase_bwd, 0])) if ase_bwd.size else 0.0)
+            p_launched = float(np.sum(np.maximum(bc, 0.0)))
+            if not np.isfinite(p_ase):
+                nonfinite = True
+            elif p_launched > 0.0:
+                worst_ase_ratio = max(worst_ase_ratio, p_ase / p_launched)
+            gi = np.sum(0.5 * (g[ase_any, 1:] + g[ase_any, :-1]) * dz, axis=1)
+            gi_max = float(np.max(gi))
+            if np.isfinite(gi_max):
+                worst_gain_integral = max(worst_gain_integral, gi_max)
+            else:
+                nonfinite = True
+        f2_zt[it] = f2
+        b2_zt[it] = b2
+        if ase_f_zt is not None:
+            ase_f_zt[it] = P[ase_fwd_idx, -1]
+        if ase_b_zt is not None:
+            ase_b_zt[it] = P[ase_bwd_idx, 0]
+        if prof_zt is not None:
+            prof_zt[it] = P
+        for j, i in enumerate(sig_idx):
+            sig_out[it, j] = P[i, -1]
+            gain_dB[it, j] = 10.0 * np.log10(P[i, -1] / max(bc[i], 1e-300))
+        for j, i in enumerate(pmp_idx):
+            pmp_out[it, j] = P[i, -1] if u[i] > 0 else P[i, 0]
+        if it == Nt - 1:
+            break
+
+        # ---- advance the coupled pair (exponential Rosenbrock; see the block comment) -------
+        dt = float(t_grid[it + 1] - t)
+        rates = amp._rates_profile(c, P)
+        f_rhs, b_rhs = amp._fb_rhs(rates[0], rates[1], rates[2], rates[3], f2, b2)
+        j11, j12, j21, j22 = amp._fb_jacobian(rates[0], rates[1], rates[2], rates[3], f2, b2)
+        worst_dt_rate = max(worst_dt_rate, float(np.max(
+            np.maximum(np.abs(j11) + np.abs(j12), np.abs(j21) + np.abs(j22)))) * abs(dt))
+        m11, m12, m21, m22 = _phi1_dt_2x2(j11, j12, j21, j22, dt)
+        f_new = f2 + m11 * f_rhs + m12 * b_rhs
+        b_new = b2 + m21 * f_rhs + m22 * b_rhs
+        if np.all(np.isfinite(f_new)) and np.all(np.isfinite(b_new)):
+            worst_overshoot = max(worst_overshoot,
+                                  float(np.max(np.maximum(np.maximum(-f_new, f_new - 1.0),
+                                                          np.maximum(-b_new, b_new - 1.0)))))
+        else:
+            nonfinite = True
+        f2 = np.clip(f_new, 0.0, 1.0)
+        b2 = np.clip(b_new, 0.0, 1.0)
+
+    reasons = []
+    if nonfinite:
+        reasons.append("non-finite channel powers or populations appeared during the march")
+    if worst_ase_ratio > _ASE_TO_LAUNCHED_LIMIT:
+        reasons.append("frozen-step ASE power reached {:.3g}x the LAUNCHED optical power (limit "
+                       "{:g}x)".format(worst_ase_ratio, _ASE_TO_LAUNCHED_LIMIT))
+    if worst_gain_integral > _GAIN_INTEGRAL_LIMIT:
+        reasons.append("frozen-step ASE gain integral reached INT g dz = {:.4g} (limit {:g}, i.e."
+                       " a single-pass ASE gain of e^{:g})".format(
+                           worst_gain_integral, _GAIN_INTEGRAL_LIMIT, _GAIN_INTEGRAL_LIMIT))
+    warn_msg = None
+    if reasons:
+        warn_msg = (
+            "simulate_transient: the quasi-static (frozen-population) step is OUT OF ITS VALID "
+            "REGIME for this co-doped amplifier -- " + "; ".join(reasons) + ". The step propagates "
+            "exp(INT g dz) at FIXED (f2, b2), so ASE generated inside a step does not deplete the "
+            "inversion that made it; once the ASE stops being a perturbation the march converges "
+            "somewhere other than amp.solve()'s fixed point. These results are NOT trustworthy: "
+            "use amp.solve() for the steady operating point, raise the signal power, or "
+            "narrow/disable the ASE bands. Sub-stepping does not help -- the frozen-population "
+            "propagation is already exact. See TransientResult.meta['quasi_static_valid'] "
+            "(audit A-7, co-doped extension).")
+        warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
+
+    meta = {"n_signal": len(sig_idx), "n_pump": len(pmp_idx),
+            "quasi_static_valid": not reasons,
+            "max_ase_to_launched": float(worst_ase_ratio),
+            "max_ase_gain_integral": float(worst_gain_integral),
+            "nonfinite_powers": bool(nonfinite),
+            "validity_limits": {"ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
+                                "ase_gain_integral": _GAIN_INTEGRAL_LIMIT},
+            "validity_warning": warn_msg,
+            "m_modes": int(m_modes), "mcc": None,
+            # ---- co-doped state and provenance ----
+            "beta_yb": b2_zt,                       # (Nt, Nz) the Yb inversion history
+            "beta_yb_seed_residual": float(b2_seed_shift),
+            "max_dt_times_rate": float(worst_dt_rate),
+            "max_population_overshoot": float(worst_overshoot),
+            "integrator": "exponential-rosenbrock-2x2",
+            "n_er_m3": amp._n_er, "n_yb_m3": amp._n_yb,
+            "k_tr_m3_s": amp._k_tr, "k_back_m3_s": amp._k_back, "a32_per_s": amp._a32,
+            # the per-ion cross-sections frame_as_steady needs (ChannelPlan.channels is None for a
+            # co-doped plan -- there is no single ChannelSet when every channel carries two ions)
+            "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),
+            "sigma_a_er": pl["sa_er"].copy(), "sigma_e_er": pl["se_er"].copy(),
+            "sigma_a_yb": pl["sa_yb"].copy(), "sigma_e_yb": pl["se_yb"].copy()}
+    return TransientResult(t_grid, z, f2_zt, sig_out, pmp_out, gain_dB, list(kind), meta=meta,
+                           ase_fwd_W=ase_f_zt, ase_bwd_W=ase_b_zt, ase_lambda_m=ase_lam,
+                           ase_dnu_hz=ase_dnu, plan=amp.channel_plan(), power_zt=prof_zt)
+
+
+def amplifier_saturation_energy(amp, lambda_m: float) -> float:
+    """Frantz-Nodvik saturation energy [J] of whichever amplifier object is handed in, at
+    lambda_m. The single-ion classes carry their ion as `.ion`; the co-doped ErYbAmplifier carries
+    two, and the one that saturates at a C-band signal is the ERBIUM ion (`.er_ion`) -- Yb has no
+    1550 nm cross-section to speak of, so E_sat there is the plain Er number on the same fiber.
+    A thin adapter over saturation_energy so a study that swaps amplifier classes does not have to
+    branch on the attribute name."""
+    ion = getattr(amp, "ion", None)
+    if ion is None:
+        ion = getattr(amp, "er_ion", None)
+    if ion is None:
+        raise TypeError("amplifier_saturation_energy: %s carries neither .ion nor .er_ion"
+                        % type(amp).__name__)
+    return saturation_energy(ion, amp.fiber, lambda_m)
 
 
 # ============================ Frantz-Nodvik fast-pulse extraction ============================
