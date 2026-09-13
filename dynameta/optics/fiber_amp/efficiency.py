@@ -81,9 +81,19 @@ def _dissipated_power_W(amp: FiberAmplifier, result: SteadyStateResult) -> float
     right-hand side, evaluated on the RETURNED profile rather than accumulated along it. The heat
     is -INT dF/dz dz.
 
-    Returns NaN for an amplifier that does not expose the mean-field RHS (the co-doped and
-    radially-resolved classes carry their own, with different signatures), so the caller reports an
-    unavailable closure rather than a wrong one."""
+    CLASS HOOK (2026-09-13). An amplifier whose right-hand side has a different signature -- the
+    co-doped ErYbAmplifier carries TWO populations and a channel plan that is a dict rather than
+    the 5-tuple unpacked below -- supplies its own aggregate as `_rate_balance_dissipation_W`,
+    which is tried FIRST. The physics is the same statement in both cases (the amplifier's own RHS
+    evaluated on the returned profile, integrated over z); only the assembly differs, so the hook
+    lives with the RHS rather than as a second copy of it here. FiberAmplifier does NOT define it,
+    so its path below is untouched.
+
+    Returns NaN for an amplifier that exposes neither (the radially-resolved class), so the caller
+    reports an unavailable closure rather than a wrong one."""
+    hook = getattr(amp, "_rate_balance_dissipation_W", None)
+    if hook is not None:
+        return float(hook(result))
     if not hasattr(amp, "_dP_full_c"):
         return float("nan")
     ch, _bc, u, _is_ase, _kind = amp._plan()
@@ -188,6 +198,12 @@ def wall_plug_efficiency(amp: FiberAmplifier, result: SteadyStateResult,
     launched power minus the exiting light minus the dissipation recomputed from the amplifier's
     own rate equations (NOT from thermal.total_heat_W, against which the balance would be an
     identity -- module docstring).
+
+    CO-DOPED AMPLIFIERS. `amp` may also be an eryb.ErYbAmplifier: the closure then runs through
+    that class's own two-population right-hand side (_rate_balance_dissipation_W), so
+    energy_balance_residual_W is finite and mesh-convergent there too. The Yb -> Er transfer
+    defect, and both ions' fluorescence, are already inside the dissipation -- see
+    ErYbAmplifier.energy_terms for the term-by-term split and why nothing is added on top.
     """
     pumps = list(amp.pumps)
     if not pumps:
