@@ -463,10 +463,25 @@ def test_amplifier_saturation_energy_picks_the_right_ion():
 
 # ==================== gate (f): the single-ion paths are BYTE-IDENTICAL =====================
 
-# Captured on main @ 3496a99 (pre-change) with tests/../scratch ref_gen.py and re-read on this
-# branch: the dispatch, the frame_as_steady fallback and the efficiency hook must not perturb one
-# bit of the FiberAmplifier path. Exact float64 hex, compared with ==.
-_MAIN_REF = {
+# Recorded on main @ 3496a99 (pre-change) and re-read on this branch: the dispatch, the
+# frame_as_steady fallback and the efficiency hook must not move the FiberAmplifier path.
+#
+# WHY TOLERANCES AND NOT `==`. The first version of this gate compared float64 hex with `==`.
+# That was WRONG, and this branch's first CI run falsified it twice, in two different ways, while
+# every other test on both legs passed:
+#   * floor leg (numpy 1.24 / scipy 1.10 / py3.10): all ten MARCH values matched bit for bit, but
+#     the wall-plug residual came out 1.0193e-4 W against the 1.0187e-4 W recorded here -- 6.2e-4
+#     relative. `amp.solve()` drives scipy's ADAPTIVE LSODA, whose step sequence differs between
+#     scipy versions, so it settles on a slightly different point of the same fixed point.
+#   * py3.10 leg (newest numpy): `gain_last` differed by ONE ULP (...d80 vs ...d7f) -- a reduction
+#     order / BLAS difference inside the march itself.
+# Bitwise reproducibility is therefore a property of the BUILD, not of this change, and asserting
+# it is a FALSE GATE. What is pinned below are tolerances 7+ orders tighter than any regression
+# this change could cause -- a mis-routed march or a mis-fired efficiency hook moves gains by dB
+# or returns NaN, not by 1e-9 -- and the environment-INDEPENDENT half of the claim (that the three
+# new branches cannot be entered AT ALL on a FiberAmplifier) is the structural test below it.
+_MARCH_RTOL = 1e-9             # 1 ULP is 2e-16 relative, so this carries ~7 orders of headroom
+_MAIN_REF_MARCH = {            # march-derived
     "gain_first": float.fromhex("-0x1.134743697490ep+5"),
     "gain_last": float.fromhex("0x1.d896223627d7fp+4"),
     "nbar2_sum": float.fromhex("0x1.623cd0a5dfcd6p+7"),
@@ -477,11 +492,18 @@ _MAIN_REF = {
     "power_sum": float.fromhex("0x1.4151a15d47f9cp+4"),
     "frame7_gain": float.fromhex("0x1.d8994926e9221p+4"),
     "frame7_nbar2": float.fromhex("0x1.802b6c8f4d9bep+3"),
-    "wpe_resid": float.fromhex("0x1.ab429dfd45c00p-14"),
+}
+# solve()-derived: LSODA-path dependent across scipy versions, so a looser (still tiny) bound.
+_SOLVE_RTOL = 1e-5
+_MAIN_REF_SOLVE = {
     "wpe_eta": float.fromhex("0x1.35c525dfa543dp-3"),
     "wpe_heat": float.fromhex("0x1.c579edf2f9106p-5"),
     "ss_gain": float.fromhex("0x1.d878d5553d0c6p+4"),
 }
+# the power-balance residual, held in the unit it MEANS: a fraction of the launched pump.
+_REF_PUMP_W = 0.120
+_MAIN_REF_RESID_OVER_PUMP = float.fromhex("0x1.ab429dfd45c00p-14") / _REF_PUMP_W
+_RESID_TOL_OVER_PUMP = 1e-5    # 20x the 5.2e-7-of-launched shift the floor leg measured
 
 
 def _single_ion_reference_run():
@@ -509,14 +531,35 @@ def _single_ion_reference_run():
         "wpe_eta": float(b.eta_wallplug),
         "wpe_heat": float(b.heat_W),
         "ss_gain": float(ss.signal_gain_dB[0]),
-    }, fr
+    }, fr, amp
 
 
-def test_single_ion_march_and_efficiency_are_byte_identical_to_main():
-    got, fr = _single_ion_reference_run()
-    for key, want in _MAIN_REF.items():
-        assert got[key] == want, (key, got[key].hex(), want.hex())
+def test_single_ion_march_and_efficiency_are_unchanged_from_main():
+    got, fr, amp = _single_ion_reference_run()
+    for key, want in _MAIN_REF_MARCH.items():
+        assert abs(got[key] - want) <= _MARCH_RTOL * abs(want), (key, got[key].hex(), want.hex())
+    for key, want in _MAIN_REF_SOLVE.items():
+        assert abs(got[key] - want) <= _SOLVE_RTOL * abs(want), (key, got[key], want)
+    assert abs(got["wpe_resid"] / _REF_PUMP_W - _MAIN_REF_RESID_OVER_PUMP) < _RESID_TOL_OVER_PUMP
     # the frame's meta must not have GROWN co-doped keys on a single-ion amplifier either
     assert set(fr.meta) == {"converged", "iterations", "dnu_hz", "gamma", "m_modes", "mcc",
                             "transient_frame", "t_s", "quasi_static_valid",
                             "sigma_a", "sigma_e", "sigma_esa"}
+
+
+def test_the_new_branches_are_structurally_unreachable_for_a_single_ion_amplifier():
+    """The environment-INDEPENDENT half of gate (f). The numeric pins above say the ANSWERS did
+    not move; these say the three new branches cannot even be ENTERED on a FiberAmplifier, which
+    is the actual claim and does not depend on a numpy/scipy build.
+
+      * efficiency._dissipated_power_W tries `_rate_balance_dissipation_W` FIRST -- FiberAmplifier
+        must not define it, or the single-ion closure would silently change algorithm.
+      * simulate_transient dispatches only on isinstance(amp, ErYbAmplifier).
+      * frame_as_steady's co-doped branch runs only when plan.channels is None.
+    """
+    _, fr, amp = _single_ion_reference_run()
+    assert not hasattr(amp, "_rate_balance_dissipation_W")
+    assert hasattr(amp, "_dP_full_c")                       # so it takes the ORIGINAL path
+    assert isinstance(amp, FiberAmplifier) and not isinstance(amp, ErYbAmplifier)
+    assert amp.channel_plan().channels is not None          # so the co-doped frame branch is dead
+    assert "beta_yb_z" not in fr.meta and "sigma_a_yb" not in fr.meta
