@@ -25,7 +25,7 @@ Branch `feat/eryb-two-population-physics`. Version `0.11.1 -> 0.11.2`.
 | `thermal.py` | `solve_with_thermal_feedback` accepts `ErYbAmplifier` and prefers the amplifier's own `_heat_profile_W_per_m`; `info['heat_source']` |
 | `calibration.py` | `ytterbium_melkumov(host=...)` with the measured P2O5 columns of the same printed table; `er_yb_phosphosilicate_reference()` |
 | `spectroscopy.py` | `erbium(host="phosphosilicate")` re-anchored to the measured P-host C band (`p_host_spectra=False` restores the old label-only ion bit-exactly) |
-| `tests/test_fiber_eryb_physics.py` | 25 gates |
+| `tests/test_fiber_eryb_physics.py` | 26 gates |
 | `validation/eryb_two_population_anchors.py` | the anchor report (a script, not a gate) |
 
 ### API -- exact call forms
@@ -271,13 +271,14 @@ hook, so the single-ion loop is unchanged; `info['heat_source']` records which r
 
 ## 3. Measured gate numbers
 
-`tests/test_fiber_eryb_physics.py`, 25 gates, 52 s. The fixture is a 6 um-core cladding-pumped
+`tests/test_fiber_eryb_physics.py`, 26 gates, 53 s. The fixture is a 6 um-core cladding-pumped
 Er:Yb at the study's own densities (N_Er 4e25, N_Yb 4e26), 1 W of 976 nm into a 125 um cladding,
 20 mW of 1550 nm seed, 3 m: 13.8 dB, `eta_tr` 0.756, 1-um parasitic gain -24.9 dB.
 
 | Gate | Measured |
 | --- | --- |
-| defaults == v0.11.1 (steady, closure, transient) | 24 pinned values, all within `1e-9` relative (LSODA-path-sensitive ones within `1e-5`); `k2_defect` and `k2_rate_per_m` identically `0.0` |
+| defaults == v0.11.1 (steady, closure, transient) | 24 pinned values, all within `1e-5` relative; `k2_defect` and `k2_rate_per_m` identically `0.0`. On this machine all 29 recorded values came back BIT-IDENTICAL, but that is not what the gate asserts -- see the note below |
+| explicit defaults == omitting them, BITWISE | every array of the steady solve, `energy_terms` and the march compares exactly equal in one process, including an all-default (identity) `ConcentrationModel` |
 | the new branches are unreachable with the defaults | `_two_pop is False`, `_mcc_matrices -> None`, `_fbb` returns `b2nc = None` and `bbar is b2c` (the same object) |
 | f = 0 == k_tr = 0 at the same total N_Yb | `1e-5` dB; `eta_transfer == 0.0` exactly; `max b2nc = 0.16` (the ytterbium is still there and still absorbing) |
 | coupled fraction, at fixed `f k_tr = 2.7e-21` | `eta_tr` 0.335 / 0.541 / 0.711 / 0.859 and 1-um parasitic gain +20.6 / +5.9 / -17.3 / -37.9 dB at f = 0.3 / 0.5 / 0.7 / 0.9 -- monotone in both, a 58 dB spread |
@@ -293,6 +294,24 @@ Er:Yb at the study's own densities (N_Er 4e25, N_Yb 4e26), 1 W of 976 nm into a 
 | Melkumov PhS anchors | 976 nm `1.01e-24 / 1.18e-24`, 1030 nm `1.80e-26 / 3.25e-25`, 1060 nm `2.20e-27 / 1.50e-25` -- all EXACT (printed rows, or the linear interpolation the paper's own reference values require); absorption FWHM 5.59 nm against 7.66 nm for aluminosilicate |
 | Melkumov AS branch | the shipped tuples reproduced entry for entry; `ytterbium()` and `ytterbium_melkumov()` unchanged |
 | P-host erbium | `sigma_a` exact at 1535 / 1550 / 1560 nm (<1%), peak at 1535.3 nm, `tau` 9.0 ms, `sigma_e(1560)` 0.62x the aluminosilicate fit, emission McCumber-derived to 1e-12 |
+
+### Why the v0.11.1 pins are held at 1e-5 and not at 1e-9
+
+All 29 recorded values reproduce BIT FOR BIT on the recording machine, and the temptation is to
+pin that. The 2026-09-13 note records CI falsifying exactly such a pin twice -- once through
+scipy's adaptive LSODA step sequence (6.2e-4 relative on the floor leg) and once through a 1-ULP
+BLAS reduction difference -- so bitwise reproducibility is a property of the BUILD, not of this
+change, and asserting it is a false gate. The 2026-09-13 gate could still hold its MARCH block to
+1e-9 because it seeded the march from an explicit number; this fixture seeds from `amp.solve()`,
+so the march inherits the steady solve's LSODA path and EVERY pinned value here is path-dependent.
+One tolerance is therefore used for the whole block. 1e-5 is four orders above the largest
+environment shift that note measured and eleven orders below any regression this change could
+cause.
+
+What replaces the bitwise pin is a pair of gates a build cannot move: an in-process comparison of
+the bare amplifier against one with every new parameter SPELLED OUT at its default (exact array
+equality, on the steady solve, `energy_terms` and the march), and the structural gate that the new
+branches cannot be entered at all.
 
 ---
 
@@ -441,7 +460,7 @@ this supports is the ORDERING and the ETE dependence, not the number.
 
 ```
 ruff check dynameta/ tests/ validation/                       -> clean
-pytest tests/test_fiber_eryb_physics.py                       -> 25 passed
+pytest tests/test_fiber_eryb_physics.py                       -> 26 passed
 pytest tests/test_fiber_eryb.py tests/test_fiber_eryb_transient.py
        tests/test_fiber_thermal_feedback.py
        tests/test_measured_spectra_2026_08_28.py
