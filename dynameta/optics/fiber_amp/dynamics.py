@@ -51,9 +51,13 @@ EXPONENTIAL ROSENBROCK update (ETD1 with the exact 2x2 Jacobian) that reduces te
 to the scalar exponential integrator above when the transfer coupling vanishes. The return
 type is unchanged: nbar2_zt is f2 and meta['beta_yb'] carries b2. See that function and the
 block comment above it for the integrator's four properties and its first-order-on-the-path
-price, and docs/audit/2026-09-13-eryb-transient-closure.md for the measured numbers.
+price, and docs/audit/2026-09-13-eryb-transient-closure.md for the measured numbers. The
+reservoir COUNT follows the amplifier: three when it carries an uncoupled ytterbium pool
+(2026-09-14) and FOUR when it carries an explicit Er 4I11/2 level (`tau32_s`, 2026-09-15,
+y = (f2, f3, b2c, b2nc)). All of them are the same update through the size-parametrized
+`_phi1_dt_nxn` kernel with that state's own exact Jacobian -- there is no second scheme.
 
-Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.8 (co-doped: sec.14).
+Pure numpy/scipy; SI units. docs/fiber_amp_model_spec.md sec.8 (co-doped: sec.14-16).
 """
 
 from __future__ import annotations
@@ -172,6 +176,12 @@ class TransientResult:
             beta = self.meta.get("beta_yb")
             if beta is not None:
                 meta["beta_yb_z"] = np.asarray(beta[it], float).copy()
+            # the frame's Er 4I11/2 population, so a co-doped frame carrying an explicit level
+            # reaches ErYbAmplifier.energy_terms / _heat_profile_W_per_m complete (they REFUSE a
+            # missing f3 rather than defaulting it)
+            n3_zt = self.meta.get("er_4i11_2")
+            if n3_zt is not None:
+                meta["er_4i11_2_z"] = np.asarray(n3_zt[it], float).copy()
         return _SSR(self.z_m.copy(), P, pl.lambda_m.copy(), pl.direction.copy(),
                     pl.is_ase.copy(), list(pl.kind), np.asarray(self.nbar2_zt[it], float).copy(),
                     gains, meta=meta)
@@ -698,6 +708,34 @@ def _split_eryb_seed(nbar2_0):
     return nbar2_0, None, None
 
 
+def _split_eryb_seed_n3(nbar2_0, two_pop):
+    """(f2_seed, f3_seed, b2_seed, b2nc_seed) from nbar2_0 for an amplifier with an EXPLICIT
+    4I11/2 level. The tuple length reads DIFFERENTLY here, and deliberately so: with a fourth
+    population in play a 3-tuple is (f2, f3, b2_coupled), not the two-population
+    (f2, b2c, b2nc), and the full state needs the 4-tuple (f2, f3, b2c, b2nc). A 2-tuple is
+    still (f2, b2) and a bare scalar/array is still f2 alone; anything not supplied is seeded
+    from the closed-form quasi-equilibrium at the first drive. The ambiguity is resolved by the
+    AMPLIFIER (tau32_s set or not), never by sniffing shapes, and both readings are refused
+    outright on the wrong class of amplifier below."""
+    if isinstance(nbar2_0, tuple):
+        if len(nbar2_0) == 2:
+            return nbar2_0[0], None, nbar2_0[1], None
+        if len(nbar2_0) == 3:
+            return nbar2_0[0], nbar2_0[1], nbar2_0[2], None
+        if len(nbar2_0) == 4:
+            if not two_pop:
+                raise ValueError(
+                    "simulate_transient(nbar2_0=...): a 4-tuple seed (f2, f3, b2c, b2nc) needs "
+                    "an UNCOUPLED ytterbium pool, but this amplifier has one pool "
+                    "(yb_coupled_fraction = 1, k_tr2 = 0, no migration) -- pass the triple "
+                    "(f2, f3, b2)")
+            return nbar2_0
+        raise ValueError("simulate_transient(nbar2_0=...): with an explicit 4I11/2 level "
+                         "(tau32_s set) a tuple seed must be (f2, b2), (f2, f3, b2) or "
+                         "(f2, f3, b2_coupled, b2_uncoupled); got length %d" % len(nbar2_0))
+    return nbar2_0, None, None, None
+
+
 def simulate_transient_eryb(amp, t_grid, *,
                             signal_drive: Optional[Callable] = None,
                             pump_drive: Optional[Callable] = None,
@@ -723,6 +761,17 @@ def simulate_transient_eryb(amp, t_grid, *,
     two-reservoir step is that kernel at n = 2, not a separate scheme. nbar2_0 then also accepts a
     TRIPLE (f2_0, b2c_0, b2nc_0); a PAIR seeds b2nc from the same quasi-equilibrium closed form as
     b2c, and None seeds all three from amp.solve().
+
+    FOUR RESERVOIRS. When the amplifier carries an EXPLICIT Er 4I11/2 level (`tau32_s` set) the
+    state gains f3(z, t) and becomes y = (f2, f3, b2c, b2nc) -- or the triple (f2, f3, b2c) with
+    one ytterbium pool -- advanced by the SAME exponential Rosenbrock step with the exact
+    Jacobian eryb._fb_jacobian_n3 through the same `_phi1_dt_nxn` kernel at n = 4 (or 3). That
+    Jacobian has to be exact here more than anywhere else: 1/tau_32 is 1e5-1e9 1/s against
+    1/tau_Er = 1e2, so the 4I11/2 row is up to seven orders stiffer than the level it feeds, and
+    the step's stability at dt from 1e-8 to 1e-3 s rests on integrating it exponentially rather
+    than resolving it. On this path nbar2_0 reads as (f2, b2), (f2, f3, b2) or
+    (f2, f3, b2c, b2nc) -- see `_split_eryb_seed_n3` -- and the history is on
+    meta['er_4i11_2'] (Nt, Nz).
 
     RETURNS a TransientResult with nbar2_zt = f2(t, z) and the Yb inversion history on
     meta['beta_yb'] (Nt, Nz) -- the POPULATION-WEIGHTED inversion f b2c + (1-f) b2nc, which is
@@ -750,6 +799,7 @@ def simulate_transient_eryb(amp, t_grid, *,
             "amp.clear_temperature_profile() to march the isothermal amplifier, or use "
             "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state.")
     two_pop = bool(getattr(amp, "_two_pop", False))
+    n3 = bool(getattr(amp, "_n3", False))
     fc = float(getattr(amp, "_fc", 1.0))
     pl = amp._plan()
     lam, u, is_ase, kind = pl["lam"], pl["u"], np.asarray(pl["is_ase"], bool), list(pl["kind"])
@@ -777,6 +827,9 @@ def simulate_transient_eryb(amp, t_grid, *,
     g_e_yb, g_a_yb = c["g_e_yb"][:, None], c["g_a_yb"][:, None]
     loss_col = c["loss"][:, None]
     s_er_col, s_yb_col = c["s_er"][:, None], c["s_yb"][:, None]
+    if n3:
+        g_e_er2, g_e_er3 = c["g_e_er2"][:, None], c["g_e_er3"][:, None]
+        s_er2_col, s_er3_col = c["s_er2"][:, None], c["s_er3"][:, None]
     m_modes = (amp.ase.m_modes if amp.ase is not None
                else (amp.yb_ase.m_modes if amp.yb_ase is not None else 2))
 
@@ -790,27 +843,70 @@ def simulate_transient_eryb(amp, t_grid, *,
                 bc[i] = pump_drive(t)[j]
         return bc
 
-    def g_s(f2, b2):
+    def g_s(f2, b2, f3=None):
         """Frozen-population gain g (K, Nz) and spontaneous source s (K, Nz) -- term for term the
-        bracket of eryb._dP, so the march and the steady solve propagate the SAME operator."""
+        bracket of eryb._dP, so the march and the steady solve propagate the SAME operator. With
+        an explicit 4I11/2 that bracket absorbs from n1 = 1 - f2 - f3 and emits from n3 at a
+        level-3 channel, which is what the `f3` argument carries."""
         f, b = f2[None, :], b2[None, :]
-        g = (g_e_er * f - g_a_er * (1.0 - f) + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
-        return g, s_er_col * f + s_yb_col * b
+        if f3 is None:
+            g = (g_e_er * f - g_a_er * (1.0 - f) + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
+            return g, s_er_col * f + s_yb_col * b
+        f3c = f3[None, :]
+        g = (g_e_er2 * f + g_e_er3 * f3c - g_a_er * (1.0 - f - f3c)
+             + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
+        return g, s_er2_col * f + s_er3_col * f3c + s_yb_col * b
 
     # ---- seed the reservoirs ---------------------------------------------------------------
     t0 = float(t_grid[0])
     bc_0 = boundary(t0)
     b2_seed_shift = 0.0
     b2n = None
+    f3 = None
     if nbar2_0 is None:
         amp0 = _amp_with_boundary(amp, bc_0, sig_idx, pmp_idx, kind)
         r0 = amp0.solve(n_nodes=n_nodes)
         f2 = np.interp(z, r0.z_m, np.asarray(r0.nbar2_z, float))
+        if n3:
+            f3 = np.interp(z, r0.z_m, np.asarray(r0.meta["er_4i11_2_z"], float))
         if two_pop:
             b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_coupled_z"], float))
             b2n = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_uncoupled_z"], float))
         else:
             b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_z"], float))
+    elif n3:
+        # EXPLICIT 4I11/2: four reservoirs, so the seed tuple is read by _split_eryb_seed_n3 and
+        # anything the caller left out is filled from the SAME closed form the steady solve uses
+        # (eryb._n3_quasi_equilibrium), iterated against the frozen-population propagation. A
+        # zero seed for n3 would be the worst possible one: tau_32 is 1e2-1e5 times shorter than
+        # tau_Er, so it would inject a relaxation transient that the physics resolves before the
+        # first stored frame.
+        f_seed, f3_seed, b_seed, bn_seed = _split_eryb_seed_n3(nbar2_0, two_pop)
+        f2 = np.broadcast_to(np.asarray(f_seed, float), z.shape).astype(float).copy()
+        f3 = (np.broadcast_to(np.asarray(f3_seed, float), z.shape).astype(float).copy()
+              if f3_seed is not None else np.zeros_like(f2))
+        b2 = (np.broadcast_to(np.asarray(b_seed, float), z.shape).astype(float).copy()
+              if b_seed is not None else np.zeros_like(f2))
+        b2n = (np.broadcast_to(np.asarray(bn_seed, float), z.shape).astype(float).copy()
+               if bn_seed is not None else (np.zeros_like(f2) if two_pop else None))
+        if f3_seed is None or b_seed is None or (two_pop and bn_seed is None):
+            for _ in range(24):
+                g, s = g_s(f2, b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n, f3)
+                P0 = _propagate_fixed(z, g, s, bc_0, u)
+                rt = amp._rates_profile_n3(c, P0)
+                f3_new, b_new, bn_new = amp._n3_quasi_equilibrium(rt[2], rt[3], rt[4], rt[5], f2)
+                f3_new = np.clip(f3_new, 0.0, 1.0)
+                b_new = np.clip(b_new, 0.0, 1.0)
+                b2_seed_shift = float(max(np.max(np.abs(f3_new - f3)),
+                                          np.max(np.abs(b_new - b2))))
+                if two_pop:
+                    bn_new = np.clip(bn_new, 0.0, 1.0)
+                    b2_seed_shift = max(b2_seed_shift, float(np.max(np.abs(bn_new - b2n))))
+                    b2n = 0.5 * (b2n + bn_new)
+                f3 = 0.5 * (f3 + f3_new)
+                b2 = 0.5 * (b2 + b_new)
+                if b2_seed_shift < 1e-12:
+                    break
     else:
         f_seed, b_seed, bn_seed = _split_eryb_seed(nbar2_0)
         if bn_seed is not None and not two_pop:
@@ -854,12 +950,16 @@ def simulate_transient_eryb(amp, t_grid, *,
     b2 = np.clip(b2, 0.0, 1.0)
     if b2n is not None:
         b2n = np.clip(b2n, 0.0, 1.0)
+    if f3 is not None:
+        f3 = np.clip(f3, 0.0, np.maximum(1.0 - f2, 0.0))
 
     # ---- outputs ---------------------------------------------------------------------------
     f2_zt = np.empty((Nt, z.size))
     b2_zt = np.empty((Nt, z.size))
     b2c_zt = np.empty((Nt, z.size)) if two_pop else None
     b2n_zt = np.empty((Nt, z.size)) if two_pop else None
+    f3_zt = np.empty((Nt, z.size)) if n3 else None
+    n_state = 2 + (1 if two_pop else 0) + (1 if n3 else 0)
     sig_out = np.empty((Nt, len(sig_idx)))
     pmp_out = np.empty((Nt, len(pmp_idx)))
     gain_dB = np.empty((Nt, len(sig_idx)))
@@ -890,7 +990,7 @@ def simulate_transient_eryb(amp, t_grid, *,
         t = float(t_grid[it])
         bc = boundary(t)
         bb = b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n
-        g, s = g_s(f2, bb)
+        g, s = g_s(f2, bb, f3)
         P = _propagate_fixed(z, g, s, bc, u)
         if not np.all(np.isfinite(P)):
             nonfinite = True
@@ -913,6 +1013,8 @@ def simulate_transient_eryb(amp, t_grid, *,
         if two_pop:
             b2c_zt[it] = b2
             b2n_zt[it] = b2n
+        if n3:
+            f3_zt[it] = f3
         if ase_f_zt is not None:
             ase_f_zt[it] = P[ase_fwd_idx, -1]
         if ase_b_zt is not None:
@@ -929,12 +1031,29 @@ def simulate_transient_eryb(amp, t_grid, *,
 
         # ---- advance the coupled pair (exponential Rosenbrock; see the block comment) -------
         dt = float(t_grid[it + 1] - t)
-        rates = amp._rates_profile(c, P)
-        if two_pop:
+        rates = None
+        if n3:
+            # FOUR reservoirs (three when the ytterbium is one pool): the SAME exponential
+            # Rosenbrock step through the SAME size-parametrized phi_1 kernel, with the exact
+            # Jacobian eryb._fb_jacobian_n3. The 4I11/2 row is the stiffest in the system -- A_32
+            # is 1e5-1e9 1/s against 1/tau_Er = 1e2 -- which is precisely why the step has to be
+            # exponential and the Jacobian exact rather than frozen.
+            rt = amp._rates_profile_n3(c, P)
+            b2n_arg = b2 if b2n is None else b2n
+            rhs4 = amp._fb_rhs_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5], f2, f3, b2, b2n_arg)
+            J4 = amp._fb_jacobian_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5],
+                                     f2, f3, b2, b2n_arg)
+            ns = 4 if two_pop else 3
+            rhs = tuple(rhs4[:ns])
+            J = [[J4[i][j] for j in range(ns)] for i in range(ns)]
+            y = (f2, f3, b2) if ns == 3 else (f2, f3, b2, b2n)
+        elif two_pop:
+            rates = amp._rates_profile(c, P)
             rhs = amp._fb_rhs3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
             J = amp._fb_jacobian3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
             y = (f2, b2, b2n)
         else:
+            rates = amp._rates_profile(c, P)
             rhs = amp._fb_rhs(rates[0], rates[1], rates[2], rates[3], f2, b2)
             j11, j12, j21, j22 = amp._fb_jacobian(rates[0], rates[1], rates[2], rates[3], f2, b2)
             J = [[j11, j12], [j21, j22]]
@@ -968,9 +1087,17 @@ def simulate_transient_eryb(amp, t_grid, *,
         else:
             nonfinite = True
         f2 = np.clip(y_new[0], 0.0, 1.0)
-        b2 = np.clip(y_new[1], 0.0, 1.0)
-        if two_pop:
-            b2n = np.clip(y_new[2], 0.0, 1.0)
+        if n3:
+            # the population constraint is f2 + f3 <= 1 (N_Er = n1 + n2 + n3), so f3 is clipped
+            # against the ALREADY CLIPPED f2 rather than against 1
+            f3 = np.clip(y_new[1], 0.0, np.maximum(1.0 - f2, 0.0))
+            b2 = np.clip(y_new[2], 0.0, 1.0)
+            if two_pop:
+                b2n = np.clip(y_new[3], 0.0, 1.0)
+        else:
+            b2 = np.clip(y_new[1], 0.0, 1.0)
+            if two_pop:
+                b2n = np.clip(y_new[2], 0.0, 1.0)
 
     reasons = []
     if nonfinite:
@@ -1012,10 +1139,15 @@ def simulate_transient_eryb(amp, t_grid, *,
             "beta_yb_coupled": b2c_zt, "beta_yb_uncoupled": b2n_zt,
             "yb_coupled_fraction": fc, "k_tr2_m3_s": amp._k_tr2,
             "yb_migration_rate_per_s": amp._w_mig,
+            # the Er 4I11/2 fraction history (Nt, Nz), None unless tau32_s is set
+            "er_4i11_2": f3_zt, "tau32_s": getattr(amp, "_tau32", None),
+            "yb_sigma_e_scale": getattr(amp, "_yb_se_scale", 1.0),
             "beta_yb_seed_residual": float(b2_seed_shift),
             "max_dt_times_rate": float(worst_dt_rate),
             "max_population_overshoot": float(worst_overshoot),
-            "integrator": "exponential-rosenbrock-2x2",
+            # the state SIZE follows the amplifier (2 reservoirs, 3 with an uncoupled Yb pool,
+            # 4 with an explicit 4I11/2); the scheme and the kernel are the same one
+            "integrator": "exponential-rosenbrock-%dx%d" % (n_state, n_state),
             "n_er_m3": amp._n_er, "n_yb_m3": amp._n_yb,
             "k_tr_m3_s": amp._k_tr, "k_back_m3_s": amp._k_back, "a32_per_s": amp._a32,
             # the per-ion cross-sections frame_as_steady needs (ChannelPlan.channels is None for a
