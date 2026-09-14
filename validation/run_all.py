@@ -254,6 +254,13 @@ SMOKE_EXCLUDED = {
     "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
     "lumenairy_berreman_jax":    "145 s measured 2026-07-26 (jax jit warm-up + sweep)",
     "lumenairy_pmm2d_bridge":    "268 s measured 2026-07-26 (2-D PMM cascade; the slowest gate)",
+    # Not a gate at all: it REPORTS predicted-vs-measured residuals against an external anchor
+    # folder (the 2026-09-14 Er:Yb literature record) that is not in the repo, and exits 0 with a
+    # message saying so when the folder is absent -- which is what CI would always see. It is
+    # also 1500 s at its default 401 nodes (76 relaxation solves across four parameter columns).
+    # Both reasons are independent and either alone keeps it out of the tier.
+    "eryb_two_population_anchors": "a reporting script, not a gate: needs an external anchor "
+                                   "folder absent from CI, and ~1500 s at its default node count",
 }
 
 
