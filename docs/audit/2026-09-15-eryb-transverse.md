@@ -1,8 +1,10 @@
 # Radially resolved Er:Yb co-doped amplifier -- build + audit note (2026-09-15)
 
-Branch `feat/eryb-transverse`, worktree `DynaMeta-eryb4`, from `main` at 21dff60 (v0.11.2).
+Branch `feat/eryb-transverse`, worktree `DynaMeta-eryb4`, branched from `main` at 21dff60
+(v0.11.2) and MERGED with `main` at 1bef664 (v0.11.3, PR #29: W_mig calibration, the co-doped
+temperature laws and `eryb_fit`). Version 0.11.5 (0.11.4 is reserved for PR #30).
 New module `dynameta/optics/fiber_amp/transverse_eryb.py` (`ResolvedErYbAmplifier`); new gate file
-`tests/test_fiber_transverse_eryb.py` (24 gates); model spec section 16 + 16a.
+`tests/test_fiber_transverse_eryb.py` (24 gates); model spec section 17 + 17a (16 is PR #29's).
 `transverse.py` was touched only to EXTRACT its geometry kernel into module-level functions that
 both resolved solvers now call (byte-identity re-verified, section 2); `eryb.py` was not touched
 at all.
@@ -235,6 +237,15 @@ big" without the shape does not tell a caller which axis to coarsen. The study's
   Resolved, the gray loss is a per-node property of the doped glass and a channel picks up
   `INT pd(bbar(r)) i_k(r) dA`, i.e. the confinement factor. Those are two different models and
   answering the second under the name of the first would be silent.
+* `rate_temperature` (`RateTemperatureLaw`) and `yb_stark_thermal` (`YbStarkThermal`), the two
+  temperature opt-ins `eryb.py` gained in PR #29 (v0.11.3). Both act ONLY through the axial T(z)
+  profile this class already refuses -- the Arrhenius law scales `k_tr` / `K2` / `W_mig` at T(z),
+  the Stark law depopulates the Yb lower manifold at T(z) -- so they are refused for the same
+  reason AND because with no profile set they would be carried completely inert, which is the
+  worse failure mode. They are ACCEPTED as constructor keywords so that a port from
+  `ErYbAmplifier` fails with a physics message instead of a `TypeError`, and an all-zero
+  `RateTemperatureLaw` (the exact identity, which `eryb.py` itself collapses to `None`) is
+  accepted and gated.
 * Nonzero `sigma_esa`. `eryb.py` drops the ESA term silently; this class refuses rather than
   inherit that. (Neither `erbium()` host nor either ytterbium factory carries ESA by default, so
   no shipped configuration is affected.)
