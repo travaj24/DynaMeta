@@ -484,9 +484,10 @@ and `device_observables` use.
 
 ## 6. Gate numbers
 
-`tests/test_fiber_eryb_migration_thermal.py`, **19 gates, 285 s** (on a box running
-sixteen competing full-core workloads; the three device-fit / threshold gates are 80-90 s
-each because every residual evaluation inside them is a full relaxation solve).
+`tests/test_fiber_eryb_migration_thermal.py`, **19 gates, 243-285 s** (two runs on the same box,
+under nine and sixteen competing full-core workloads; the three device-fit / threshold gates are
+80-90 s each because every residual evaluation inside them is a full relaxation solve, and the
+other sixteen are 35 s between them).
 
 | Gate | Measured |
 | --- | --- |
@@ -559,7 +560,7 @@ each because every residual evaluation inside them is a full relaxation solve).
 
 ```
 ruff check .                                                  -> clean (the whole tree)
-pytest tests/test_fiber_eryb_migration_thermal.py             -> 19 passed, 285 s
+pytest tests/test_fiber_eryb_migration_thermal.py             -> 19 passed, 243 s
 pytest tests/test_fiber_eryb_physics.py tests/test_fiber_eryb.py
        tests/test_fiber_eryb_transient.py tests/test_fiber_thermal_feedback.py
        tests/test_measured_spectra_2026_08_28.py
