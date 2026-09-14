@@ -198,10 +198,12 @@ Three readings.
   the part of the direct erbium pumping that used to be charged inside `D_Er`. So the TOTAL does
   not move and only the naming does -- which is the gate, and the reallocation is *exactly* equal
   and opposite between `D_Er` and the pair (measured below).
-* **`D_bk` is negative, and that is not a sign error.** `eps_3 = 2.0334e-19 J` (977 nm) sits
-  *below* `eps_Yb = 2.0384e-19 J` (975 nm), so back-transfer is uphill by 3.1 meV and absorbs a
-  phonon per event. It is a real, tiny anti-Stokes term. Its magnitude on the reference fixture at
-  `tau_32 = 7 us`, `k_back = k_tr`, is `-0.052 W/m` summed against a `+14.06 W/m` relaxation term.
+* **`D_bk` is negative, and that is not a sign error.** `eps_3 = 2.0332e-19 J` (977 nm) sits
+  *below* `eps_Yb` (`2.0384e-19` at the parametric ytterbium's 974.5 nm zero line,
+  `2.0421e-19` at the Melkumov phosphosilicate table's 972.75 nm), so back-transfer is uphill by
+  **3.3-5.5 meV** depending on the ion and ABSORBS a phonon per event. It is a real, tiny
+  anti-Stokes term. Its magnitude on the reference fixture at `tau_32 = 7 us`, `k_back = k_tr`, is
+  `-0.052 W/m` summed against a `+14.06 W/m` relaxation term.
 * **The level-3 guided spontaneous emission is credited against the relaxation** (`- P_sp_lvl3`),
   the same way C-band ASE is credited against the `4I13/2` decay. The model carries no separate
   radiative branching ratio for `4I11/2`, whose relaxation in a phosphosilicate host is
@@ -330,19 +332,42 @@ What the fit does NOT establish: that 0.35 is a property of ytterbium. The scale
 everything the model gets wrong about the 1-um band at this operating point -- the Yb emission
 spectrum itself, the uncoupled-pool fraction (not used here), the Yb ASE bin structure, and any
 error in the pump absorption that sets where the inversion sits. It is a CALIBRATION against one
-measurement, and it is `k_tr`-dependent: the section-4.1 table shows the unscaled over-prediction
-falling 14x between `k_tr = 1e-22` and `1e-21`, so a fit at the higher coefficient returns a
-scale nearer 1. Quote the scale with the ion pair and the transfer coefficient it was fitted with.
+measurement, and the transfer coefficient trades against it directly. MEASURED, parametric ions:
+
+| `k_tr` | fitted scale | signal change |
+| --- | --- | --- |
+| 1.0e-22 (Morasse's own fit) | 0.3482 | +0.0213 dB |
+| 3.0e-22 | **0.4082** | +0.0006 dB |
+| 1.0e-21 (the device-validated effective value) | 0.4479 | -0.0012 dB |
+
+A stronger transfer drains the ytterbium into the erbium and leaves less 1-um ASE to remove, so
+the fitted scale RISES with `k_tr` -- through Morasse's 0.40 at `k_tr = 3e-22` and past it. The
+signal insensitivity holds across the whole range (worst 0.02 dB), which is the property the
+calibration rests on; the scale itself is not identified without also fixing `k_tr`. Quote it
+with the ion pair AND the transfer coefficient it was fitted with.
 
 ### 4.3 The explicit 4I11/2 on the same fiber
 
 The same measured fiber, `k_tr = 1e-22`, is also the cleanest place to read the `tau_32`
-sensitivity, because nothing else about it is a guess. The script reports the gain, `max n3/N_Er`
-and the back-transfer ratio at `tau_32 = 1 / 7 / 10 / 50 us` with `k_back = 0` and
-`k_back = k_tr`; see its output. The qualitative statement it supports is the one the gates
-measure on the two reference fixtures: at the phosphosilicate end (1-7 us) the adiabatic model is
-right to within hundredths of a dB and `n3` stays under 1% of `N_Er`, and it is the
-aluminosilicate end (50 us) together with a non-zero `k_back` that costs dB.
+sensitivity, because nothing else about it is a guess. Adiabatic gain 20.468 dB:
+
+| `tau_32` | d gain, `k_back = 0` | max `n3/N_Er` | d gain, `k_back = k_tr` | max `n3/N_Er` | back/fwd |
+| --- | --- | --- | --- | --- | --- |
+| 1 us | -0.0055 dB | 0.31% | **-0.119 dB** | 0.30% | 0.073 |
+| 7 us | -0.038 dB | 2.2% | **-0.775 dB** | 1.8% | 0.352 |
+| 10 us | -0.055 dB | 3.1% | **-1.072 dB** | 2.3% | 0.436 |
+| 50 us | -0.273 dB | 13.7% | **-3.944 dB** | 5.9% | 0.792 |
+
+Three readings. The BOTTLENECK ALONE is small even at 50 us (-0.27 dB): holding 14% of the erbium
+in `4I11/2` costs little on this fiber, because what it removes is ground-state acceptor and the
+transfer here is not acceptor-limited. The BACK-TRANSFER is what costs dB -- and it is the term
+the adiabatic model cannot carry at all, since its `phi` factor is 0.999 at any plausible
+`k_back`. And `n3/N_Er` at Sefler's 7 us is **2.2% here** against 0.29% on the core-pumped
+reference fixture, so the "under 1%" reading of the gates is a statement about THAT operating
+point and not about EYDFAs generally: the fraction tracks `tau_32` x (transfer + direct pump
+rate), and 4.31 W into this fiber's 65.6 um cladding drives the erbium harder per ion than the
+gate fixture does. Note also that the back-transfer LOWERS `n3` while costing gain (1.8% against
+2.2% at 7 us) -- it is draining the level, not filling it.
 
 ---
 
@@ -378,7 +403,12 @@ aluminosilicate end (50 us) together with a non-zero `k_back` that costs dB.
 7. **The fit needs a 1-um band that is actually resolved.** With too few `yb_ase` bins the total
    1-um power is a coarse quadrature of a structured spectrum, and the fitted scale inherits that
    error; 10-12 bins over 1000-1100 nm is what the validation script uses.
-8. **A four-reservoir march is `O(dt)` on the path, as before.** The endpoints, the fixed point
+8. **Back-transfer sees the COUPLED ytterbium only.** The acceptor density is
+   `n5c = f N_Yb (1 - b2c)`, so an uncoupled ion can neither donate nor receive. That is the same
+   statement the 2026-09-14 branch makes about the forward transfer and it is consistent, but it
+   means a fiber modelled with a small `f` has a proportionally small back-transfer as well --
+   the two are not independent knobs.
+9. **A four-reservoir march is `O(dt)` on the path, as before.** The endpoints, the fixed point
    and the stability are unaffected, but `tau_32` is now the shortest time constant in the system,
    so a trajectory resolved at `dt >> tau_32` has the `4I11/2` slaved rather than resolved.
    `meta['max_dt_times_rate']` reports it.
@@ -389,19 +419,20 @@ aluminosilicate end (50 us) together with a non-zero `k_back` that costs dB.
 
 ```
 ruff check .                                                  -> clean (the whole tree)
-pytest tests/test_fiber_eryb_4i11_2.py                        -> 19 passed
+pytest tests/test_fiber_eryb_4i11_2.py                        -> 19 passed, 440 s
 pytest tests/test_fiber_eryb.py tests/test_fiber_eryb_physics.py
-       tests/test_fiber_eryb_transient.py                     -> 57 passed (unchanged)
+       tests/test_fiber_eryb_transient.py                     -> 57 passed, UNCHANGED
 pytest tests/test_fiber_amp.py tests/test_audit_2026_08_04_fiber_amp.py
        tests/test_fiber_chain.py tests/test_fiber_dynamics.py
-       tests/test_numerics.py                                 -> 194 passed
-pytest tests/test_fiber_thermal_feedback.py
+       tests/test_numerics.py tests/test_fiber_thermal_feedback.py
        tests/test_measured_spectra_2026_08_28.py
-       tests/test_yb_mccumber_refit.py tests/test_validation_runner.py
-       tests/test_fiber_bpm.py tests/test_fiber_gnlse.py tests/test_fiber_lma.py
+       tests/test_yb_mccumber_refit.py                        -> 221 passed
+pytest tests/test_audit_2026_07_25_infra.py tests/test_fiber_bpm.py
+       tests/test_fiber_gnlse.py tests/test_fiber_lma.py
        tests/test_fiber_nonlinear.py tests/test_fiber_srs.py
-       tests/test_fiber_transverse.py                         -> (see the PR)
-python -m validation.eryb_morasse_yb_sigma_scale --nodes 201  -> section 4
+       tests/test_fiber_transverse.py                         -> 133 passed
+pytest tests/test_validation_runner.py                        -> 14 passed
+python -m validation.eryb_morasse_yb_sigma_scale --nodes 201  -> section 4, exit 0
 ```
 
 The pytest lines above are every test file in the repo that imports `fiber_amp`, which is the
