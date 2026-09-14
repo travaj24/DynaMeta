@@ -145,6 +145,12 @@ nodes and weights, the iteration count and `n_grid`. Every array was BIT-IDENTIC
 (`np.array_equal`, worst absolute difference 0.0), and `tests/test_fiber_transverse.py` (35 gates)
 passes unchanged.
 
+`tests/test_fiber_amp.py::test_package_facade_is_exhaustive` pins the fiber_amp submodule COUNT
+(a drift guard, audit W5-8); a new module makes it 23, so that one number is bumped. The
+substantive half of that gate -- every name in every submodule's `__all__` re-exported from the
+package facade -- passed unchanged, which is why the seven extracted kernel functions and the
+three new names are in the package `__all__`.
+
 `eryb.py` was not modified. `ResolvedErYbAmplifier` CONSTRUCTS an `ErYbAmplifier` internally and
 calls its `_plan()` for the channel table and its validated constructor state for the densities,
 rate constants and the active/dark erbium split -- so the two classes cannot drift in the channel
@@ -267,6 +273,11 @@ fiber, so `Gamma = 0.546` and the signal is weakly confined; the pump is a flat 
 with nothing to burn; and at 2.1 mW in / 32 mW out the C band is only lightly saturated. The
 transfer covariance at mid-fiber is `-5.6e-6` of the local transfer rate. **The transverse
 correction does not change any engineering conclusion at point A.**
+
+MESH CONVERGENCE (the delta is small, so it is worth proving it is not a discretization
+artifact): at `n_nodes = 201` instead of 121 the same run gives 11.834825 -> 11.800526 dB, a delta
+of `-0.0342991 dB` against `-0.0342976 dB` at 121 -- four significant figures unchanged, and the
+closure holds at 1.1e-15. The correction is physical.
 
 The 1-um parasitic gain is -191 dB (scalar) / -195 dB (resolved): the ytterbium is essentially
 fully de-excited by an erbium acceptor pool 10x more abundant per unit of stored energy than the
