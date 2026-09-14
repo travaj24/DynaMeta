@@ -889,3 +889,104 @@ DELIBERATELY the aluminosilicate ones (1-2% of an EYDFA's pump absorption).
 `p_host_spectra=False` restores the old label-only ion bit-exactly.
 `calibration.er_yb_phosphosilicate_reference()` returns `(er_ion, yb_ion, FiberSpec, kwargs)` for
 the Rybaltovsky-class reference fiber with every value's provenance in its docstring.
+
+## 16. Radially-resolved Er:Yb co-doping -- the LOCAL transfer (transverse_eryb.py)
+
+Sec. 12 undoes the mean-field closure for ONE ion. Sec. 14/15 keep it for two.
+`transverse_eryb.py` (`ResolvedErYbAmplifier`) undoes it for the co-dope, which is where it
+binds hardest, because the Yb -> Er energy transfer is a LOCAL, BIMOLECULAR event:
+
+```
+R_tr(r) = k_tr n_Yb2(r) n_Er1(r)                                                   (E1.1)
+```
+
+An excited Yb donor must meet a GROUND Er acceptor AT THE SAME POINT. Mean-field replaces that
+product of two radial profiles by the product of their two area averages, and the two differ by
+the covariance `<n_Yb2 n_Er1> - <n_Yb2><n_Er1>` (E1.2). In a cladding-pumped EYDFA the two
+profiles are not the same shape: the pump is FLAT across the core, so the Yb it excites is nearly
+flat, while the C-band signal is a confined LP01 that burns the erbium hardest on axis.
+
+**Per-node rates (E1.3) and balances (E1.4).** Every channel carries a normalized transverse
+profile `i_k` (sec. 12's, the same functions), so `I_k(r) = P_k i_k(r)` and
+
+```
+R_{a/e}_Er(r) = SUM_k sigma_{a/e}_Er,k P_k i_k(r)/(h nu_k),   Yb likewise
+Er:   R_a_Er(1-f2) - R_e_Er f2 - f2/tau_Er + k_tr b2c f n_Yb(r)(1-f2) phi - C_up n_Er(r) f2^2 = 0
+Ybc:  R_a_Yb(1-b2c) - R_e_Yb b2c - b2c/tau_Yb - k_tr b2c n_Er(r)(1-f2) phi
+      - K2 b2c n_Er(r) f2 - W_mig(1-f)(b2c - b2nc)                                            = 0
+Ybnc: R_a_Yb(1-b2nc) - R_e_Yb b2nc - b2nc/tau_Yb + W_mig f (b2c - b2nc)                       = 0
+```
+
+The DENSITIES ARE INSIDE the balance. Sec. 14/15's reduction carries over node by node: at fixed
+`f2` the two Yb balances are linear in `(b2c, b2nc)`, the determinant collapses
+(`det = Dc D + W(f Dc + (1-f) D) > 0`), and one bracketed scalar equation per node remains,
+solved by a VECTORIZED safeguarded Newton/bisection stepped in lockstep across nodes.
+
+**Propagation (E1.5).**
+```
+dP_k/dz = u_k P_k { se_Er,k Je_Er,k - sa_Er,k Ja_Er,k + se_Yb,k Je_Yb,k - sa_Yb,k Ja_Yb,k
+                  - sa_Er,k Jdark,k - l_k }
+        + u_k m h nu_k dnu_k [ se_Er,k Je_Er,k + se_Yb,k Je_Yb,k ]              (ASE channels)
+Je_Er,k = INT n_Er(r) f2(r) i_k dA,   Ja_Er,k = INT n_Er(r)(1-f2(r)) i_k dA,  Yb the same
+with the population-weighted bbar(r) = f b2c(r) + (1-f) b2nc(r)
+```
+Constant populations over a top-hat dopant give `Je = Gamma_k n f2` and this IS sec. 14's ODE.
+
+**Separate Er and Yb radial profiles** (`er_profile` / `yb_profile`, `RadialDopant(radius, shape)`;
+default BOTH top-hat to `fiber.b_dope_m`, the scalar geometry). A wider Yb is the standard way to
+keep pump absorption while confining the erbium -- and because the transfer is local it is NOT
+free. MEASURED on a 2 m, 3 um-core fixture at fixed launched pump, doubling the Yb radius drops
+`eta_tr` 0.176 -> 0.051 and the C-band gain 14.87 -> 14.03 dB; the 1-um parasitic gain FALLS too
+(19.47 -> 15.84 dB), because 4x the ytterbium shares one pump, so inversion per ion falls faster
+than density adds gain. At fixed pump the wide-Yb geometry is just more absorber, not a 1-um trade.
+
+**Energy closure per ring.** `energy_terms` integrates each term of sec. 14's identity over the
+cross-section -- `U = INT[eps_Er n_Er f2 + eps_Yb n_Yb bbar] dA`,
+`Phi_tr = INT k_tr phi n_Er(1-f2) f n_Yb b2c dA`, `Phi_K2 = INT K2 n_Er f2 f n_Yb b2c dA` -- so
+`q_opt = dU/dt + D_loss + D_Er + D_Yb + D_tr + D_K2` holds per node and therefore summed.
+`_rate_balance_dissipation_W` is the `efficiency._dissipated_power_W` hook, so
+`wall_plug_efficiency` returns a FINITE residual for a ring-resolved co-doped result (it returns
+NaN for `ResolvedFiberAmplifier`, which defines no hook). `transfer_covariance` reports
+`Phi_tr` minus the mean-field product of the same averaged densities.
+
+**Scope / refusals (v1).** `FiberSpec.overlap_override` unless `uniform_illumination=True` (where
+the solver deliberately reproduces the mean-field model and the override IS its Gamma);
+`set_temperature_profile` (T would have to become `T(r,z)`); `ConcentrationModel.pd_loss_per_m != 0`
+(sec. 15 applies the Yb photodarkening gray loss as a channel-uniform background with NO overlap
+factor -- resolved it picks up the confinement factor, so the two are different models);
+nonzero `sigma_esa` (which sec. 14 drops silently). `C_up` and pair-induced quenching ARE
+supported: both are strictly local and both reduce exactly. RAM: `state_bytes` reports the
+ring x z-node x channel float64 footprint and `solve` refuses above the package's existing 2 GiB
+bar (`dynamics._STORE_PROFILES_MAX_BYTES`, imported not re-declared).
+
+**A CONFOUND THAT MUST NOT BE REPORTED AS TSHB.** Above `V = 2.405` the resolved solver switches
+to the exact LP field while the mean-field one keeps the Marcuse Gaussian, so a
+resolved-minus-scalar delta on such a fiber mixes a mode-shape correction with hole burning.
+On the reference fiber's core-pumped point the 976 nm quadrature overlap is 0.8527 against
+Marcuse's 0.8361 (+2.0%). Sec. 16a separates the two.
+
+### 16a. Achieved (`tests/test_fiber_transverse_eryb.py`, 24 gates from 19 test functions)
+- **Uniform-illumination reduction** (gate 1): forcing every core channel to `Gamma_k/A_dope`
+  reproduces `ErYbAmplifier` to `3.3e-7 dB` in gain and `4.8e-10` in `eta_tr` (one and two Yb
+  pools, K2 and migration on; bar 1e-3 dB), and with a `FiberSpec.overlap_override` too.
+- **Single-ion reduction** (gate 2): `N_Yb -> 0`, `k_tr = 0` reproduces
+  `ResolvedFiberAmplifier`'s TSHB answer to `2.2e-8 dB` on the same fiber -- while that fixture's
+  own mean-field gain is 0.020 dB away, so the gate discriminates.
+- **Node kernel vs scalar root find**: the vectorized `_solve_populations_nodes` matches
+  `ErYbAmplifier._solve_fbb` / `_solve_fb` to `< 1e-13` in every population over four decades of
+  rate, with and without two pools / k_back / C_up.
+- **Ring-summed closure** (gate 3): `1.3e-15` on the 8 m study point, `4.4e-15` on the 0.3 m
+  core-pumped one, `< 1e-14` on the test fixtures (bar 1e-5). `wall_plug_efficiency` returns a
+  finite residual (`-1.6e-5 W` on the study point).
+- **The effect is real and correctly signed**: on a LOW-NA fixture (V = 1.95, both solvers on the
+  same Marcuse profile, so hole burning alone) the resolved-minus-scalar gain is `-0.0006 dB` at
+  1 nW and `-0.138 dB` at 10 mW -- negative, as the uniform-pump argument of sec. 12 requires.
+- **Transfer covariance** is `> 1e-3` of the transfer rate under saturation and `< 1e-12` under
+  uniform illumination.
+- **Study points** (reference fiber, `a = 2.0 um`, NA 0.20, `N_Er = 4e25`, `N_Yb = 4e26`, 125 um
+  cladding, `f = 0.9`, `k_tr = 1.11e-21`, `K2 = 2e-22`, seed 2.1 mW at 1550 nm, 176 mW pump):
+  cladding-pumped 8 m -> gain 11.835 -> 11.800 dB (`-0.034 dB`), wall-plug 7.655% -> 7.591%
+  (`-0.84%` relative); core-pumped 0.3 m -> gain 0.723 -> 0.798 dB (`+0.075 dB`), 1-um parasitic
+  gain 3.174 -> 3.740 dB (`+0.566 dB`) -- of which only `+0.020 dB` is the radial inversion
+  profile and `+0.546 dB` is the exact-LP01-vs-Marcuse weighting at `V(1030) = 2.440`.
+  Full decomposition in `docs/audit/2026-09-15-eryb-transverse.md`.
