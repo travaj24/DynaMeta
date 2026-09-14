@@ -72,6 +72,76 @@ reabsorption cascade is NOT in this z-local model. transfer_efficiency() reports
 model value (a rate-integral consistent with the low-power analytic form), and the model does
 NOT force the >95% number.
 
+TWO YTTERBIUM POPULATIONS (opt-in, `yb_coupled_fraction` f; DEFAULT 1.0 = the single-pool model
+above, bit for bit). Dong, Matniyaz, Kalichevsky-Dong, Nilsson, Jeong, Opt. Express 28(11), 16244
+(2020) Eqs. (1)-(12) split the ytterbium into a fraction f COUPLED to erbium (n5c, n6c) and a
+fraction 1-f UNCOUPLED (n5nc, n6nc). Only the coupled pool transfers; BOTH pools are pumped,
+decay with tau_Yb, and absorb and emit at every channel wavelength, and the propagation sees
+their sum n6 = n6c + n6nc. That is the whole point: the uncoupled pool converts pump into Yb
+fluorescence and 1-um ASE without ever reaching the erbium, which is what sets the measured
+1-um ASE floor and why a single-population model over-predicts output at high pump. With
+b2c = n6c/(f N_Yb) and b2nc = n6nc/((1-f) N_Yb) the z-local steady state becomes the TRIPLE
+
+    Er:   R_a_Er (1 - f2) - R_e_Er f2 - f2/tau_Er + k_tr b2c (f N_Yb) (1 - f2)
+          - C_up N_Er f2^2                                                          = 0
+    Ybc:  R_a_Yb (1 - b2c) - R_e_Yb b2c - b2c/tau_Yb - k_tr b2c N_Er (1 - f2) phi
+          - K2 b2c N_Er f2 - W_mig (1 - f) (b2c - b2nc)                             = 0
+    Ybnc: R_a_Yb (1 - b2nc) - R_e_Yb b2nc - b2nc/tau_Yb + W_mig f (b2c - b2nc)      = 0
+
+and the field sees the POPULATION-WEIGHTED mean inversion bbar = f b2c + (1 - f) b2nc, which is
+what enters the propagation, the Yb parasitic-gain diagnostic and the photodarkening law.
+
+SECONDARY TRANSFER K2 (`k_tr2_m3_s`, default 0). Yb(2F5/2) + Er(4I13/2) -> Yb(2F7/2) +
+Er(4F9/2), and the 4F9/2 relaxes multiphonon-fast back to 4I13/2. The ERBIUM POPULATION IS
+UNCHANGED by the round trip and the whole Yb quantum becomes heat, so K2 enters as a pure drain
+-K2 b2c N_Er f2 on the COUPLED Yb inversion (the same near-neighbour geometry as k_tr) and as a
+separate `k2_defect` term in energy_terms. Sefler, Mack, Valley, Rose, JOSA B 21(10), 1740 (2004)
+Table 1 measure K2 = 1.5-4e-22 m^3/s on three double-clad Er:Yb fibers -- COMPARABLE to their own
+K1 = 2-4e-22 -- and Laroche et al. 2006 report the secondary transfer as more efficient than
+upconversion. Canat's 2006 thesis fits K_tr,2 = 1-2e-22 on his two fibers. It is the mechanism
+that clamps the output once the erbium is inverted: exactly where the single-population model
+over-predicts.
+
+Yb-Yb MIGRATION (`yb_migration_rate_per_s` W_mig, default 0) and the ensemble-versus-pair
+reconciliation. The exchange term is DERIVED, not posited. Migration hops an excitation from an
+excited Yb to a ground-state Yb, so the volumetric coupled -> uncoupled rate is W' n6c n5nc and
+the reverse is W' n6nc n5c. Their difference is
+
+    J = W' [n6c n5nc - n6nc n5c] = W' f (1-f) N_Yb^2 (b2c - b2nc),
+
+because the (1 - b) factors cancel identically -- a bimolecular exchange with detailed balance
+collapses to a difference of EXCITATION FRACTIONS. Writing W_mig = W' N_Yb [1/s],
+
+    d n6nc/dt |_mig = +J = -W_mig f (n6nc - n6c (1-f)/f),
+    d b2nc/dt |_mig = +W_mig f (b2c - b2nc),   d b2c/dt |_mig = -W_mig (1-f) (b2c - b2nc),
+
+which conserves f b2c + (1-f) b2nc exactly and has b2c = b2nc as its ONLY equilibrium (equal
+excitation fractions, never equal densities). This is the physics behind the decay-measurement
+versus device-fit split in the k_tr literature: Cheng et al., Materials 15(3), 996 (2022) measure
+one bi-exponential Yb decay in Er/Yb/P glass that yields a FAST-PAIR rate 3.07e-21 m^3/s (the
+close-coupled neighbour, the right number for the coupled pool of a two-population model) and an
+ENSEMBLE-YIELD rate 1.2e-22 m^3/s (the right number for a single-population model) -- a factor of
+26 from the same data. With W_mig > 0 the two pools exchange, so a large coupled-pool k_tr and a
+small f reproduce an ensemble yield that a single pool would need a small k_tr to match.
+
+CONCENTRATION QUENCHING AND PHOTODARKENING (`concentration=ConcentrationModel(...)`, default
+None). Identical semantics to FiberAmplifier: pair-induced quenching in either convention removes
+`concentration.dark_density(N_Er)` erbium ions from the active pool and adds their UNBLEACHABLE
+absorption Gamma sigma_a_Er n_dark to every channel's background loss; C_up arrives through the
+model (the ONE entry point -- passing both `upconversion_C_up` and a model warns and the model
+wins, as in the single-ion class); and the Yb photodarkening equilibrium gray loss
+pd_loss_per_m * bbar^pd_exponent is evaluated at the POPULATION-WEIGHTED Yb inversion of both
+pools. Dark erbium is inert apart from its absorption -- it is not a transfer acceptor here, so a
+Yb excitation transferred into a quenched pair is NOT modelled; state that when the pair fraction
+is large.
+
+DISTRIBUTED TEMPERATURE (`set_temperature_profile`). Per-z McCumber scaling of BOTH ions'
+emission spectra about THEIR OWN zero lines: mcc_ion,k(z) = exp[(eps_ion - h nu_k)(1/kT(z) -
+1/kT_ref)], eps_ion = RareEarthIon.eps_J. thermal.solve_with_thermal_feedback accepts this class
+and drives Q(z) from `_heat_profile_W_per_m` -- the rate-balance dissipation (quantum defect +
+transfer defect + K2 defect + both ions' fluorescence + background loss), not a numerical
+gradient of the net flux.
+
 References: Karasek, IEEE JQE 33(10):1699 (1997) [Er:Yb rate model, k_tr]; Laroche, Girard,
 Sahu, Clarkson, Nilsson, JOSA B 23(2):195 (2006) [k_tr measured in phosphosilicate Er:Yb FIBER,
 ~6.4e-23 to 1.1e-22 m^3/s]; Hwang, Jiang, Luo, Watson, Sorbello, Peyghambarian, JOSA B 17(5):833
@@ -80,7 +150,14 @@ k_tr N_Er tau_Yb = 32-64 -- the '>95%' and the fiber's ~0.80-0.85 (N_Er ~ 4e25) 
 at different Er loadings, which resolves the DISCREPANCY NOTE above without a reabsorption
 cascade]; Paschotta et al., IEEE JQE 33(7):1049 (1997) [Yb lifetime]; Giles & Desurvire, JLT
 9(2):271 (1991) [coupled-power EDFA core]. (Citation audit 2026-09-13: the earlier 'Di Pasquale
-& Federighi, JOSA B 23(3):195' attribution was wrong -- that paper is Laroche et al., issue 2.) Pure
+& Federighi, JOSA B 23(3):195' attribution was wrong -- that paper is Laroche et al., issue 2.)
+Two-population / secondary-transfer / migration references: Dong et al., Opt. Express 28(11),
+16244 (2020) [two Yb populations, C63 = 2-3e-20 at f = 15-25%]; Sefler, Mack, Valley, Rose, JOSA B
+21(10), 1740 (2004) [K2 secondary transfer 1.5-4e-22, f_NP = 15-17%]; Canat, PhD thesis SUPAERO
+(2006) [K_tr,2 1-2e-22, f_np 5-15%]; Cheng et al., Materials 15(3), 996 (2022) [bi-exponential Yb
+decay -> 3.07e-21 pair / 1.2e-22 ensemble]; Le Gouet et al., JLT 37(15), 3611 (2019) [Er:Yb Al:P
+pair fraction 2k = 1.6%]. Full audit trail:
+docs/audit/2026-09-14-eryb-two-population-physics.md. Pure
 numpy/scipy; SI units; exp(-i omega t); ASCII-only. docs/fiber_amp_model_spec.md sec.1;
 FORMULATION DOSSIER MODULE 1.
 """
@@ -91,7 +168,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, H_PLANCK
+from dynameta.constants import C_LIGHT, H_PLANCK, KB
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
@@ -137,18 +214,47 @@ class ErYbAmplifier:
         A second ASE band (typically 1000-1100 nm) that tracks Yb-band / 1-um parasitic ASE.
     upconversion_C_up : float
         Er cooperative-upconversion coefficient C_up [m^3/s] (default 0; adds -C_up N_Er f2^2 to
-        the Er balance, as in FiberAmplifier).
+        the Er balance, as in FiberAmplifier). OVERRIDDEN by `concentration.c_up_m3_s` when a
+        ConcentrationModel is supplied -- the model is the ONE entry point, and passing a nonzero
+        raw value alongside a model with a different one warns (the single-ion audit-B1 rule).
+    yb_coupled_fraction : float
+        f, the fraction of the ytterbium COUPLED to the erbium (default 1.0 = the single-pool
+        model, bit-identical). f < 1 activates the Dong 2020 two-population model: (1 - f) N_Yb
+        ions are pumped, decay and radiate at every channel but never transfer. Measured/fitted
+        values: 0.83-0.85 (Sefler 2004, three double-clad fibers), 0.15-0.25 (Dong 2020, two
+        high-power lasers), 0.85-0.95 (Canat 2006), 0.2-0.4 and 0.9 (the FORC "ETE" series).
+    k_tr2_m3_s : float
+        K2, the SECONDARY transfer coefficient [m^3/s] (default 0): Yb* + Er(4I13/2) ->
+        Yb + Er(4F9/2 -> fast back to 4I13/2). Drains the coupled Yb inversion, leaves the Er
+        population unchanged, and dumps the Yb quantum as heat. Sefler 2004: 1.5-4e-22.
+    yb_migration_rate_per_s : float
+        W_mig [1/s], the Yb-Yb migration exchange between the two pools (default 0). Detailed
+        balance makes it a difference of EXCITATION FRACTIONS (module docstring); its only
+        equilibrium is b2c = b2nc, and it conserves the total Yb excitation exactly.
+    concentration : ConcentrationModel, optional
+        Er pair-induced quenching (either convention), C_up, and the Yb photodarkening
+        equilibrium gray loss -- the SAME object and the same semantics FiberAmplifier takes
+        (concentration.py). None (default) -> the ideal model, bit-identical.
     """
 
     def __init__(self, er_ion: RareEarthIon, yb_ion: RareEarthIon, fiber: FiberSpec,
                  pumps: List[Pump], signals: List[Signal], ase: Optional[AseBand] = None, *,
                  n_yb_m3: float, k_tr_m3_s: float = 2.0e-22, k_back_m3_s: float = 0.0,
                  a32_per_s: float = 5.0e5, yb_ase: Optional[AseBand] = None,
-                 upconversion_C_up: float = 0.0):
+                 upconversion_C_up: float = 0.0, yb_coupled_fraction: float = 1.0,
+                 k_tr2_m3_s: float = 0.0, yb_migration_rate_per_s: float = 0.0,
+                 concentration=None):
         if not (n_yb_m3 > 0.0):
             raise ValueError("ErYbAmplifier: n_yb_m3 (N_Yb) must be > 0")
         if not (a32_per_s > 0.0):
             raise ValueError("ErYbAmplifier: a32_per_s must be > 0")
+        if not (0.0 <= float(yb_coupled_fraction) <= 1.0):
+            raise ValueError("ErYbAmplifier: yb_coupled_fraction must be in [0, 1]; got %r"
+                             % (yb_coupled_fraction,))
+        if float(k_tr2_m3_s) < 0.0:
+            raise ValueError("ErYbAmplifier: k_tr2_m3_s must be >= 0")
+        if float(yb_migration_rate_per_s) < 0.0:
+            raise ValueError("ErYbAmplifier: yb_migration_rate_per_s must be >= 0")
         self.er_ion, self.yb_ion, self.fiber = er_ion, yb_ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase, self.yb_ase = ase, yb_ase
@@ -159,25 +265,64 @@ class ErYbAmplifier:
         self._a32 = float(a32_per_s)
         self._tau_er = float(er_ion.tau_s)
         self._tau_yb = float(yb_ion.tau_s)
-        self.upconversion_C_up = float(upconversion_C_up)
+        self._fc = float(yb_coupled_fraction)
+        self._k_tr2 = float(k_tr2_m3_s)
+        self._w_mig = float(yb_migration_rate_per_s)
+        # THE single predicate that routes between the retained one-pool algebra and the
+        # three-unknown one. Every new transfer mechanism is off exactly when this is False,
+        # and every legacy code path below is then taken verbatim -- which is what makes the
+        # byte-identity claim a structural property and not a numerical coincidence.
+        self._two_pop = (self._fc != 1.0 or self._k_tr2 > 0.0 or self._w_mig > 0.0)
+        self._Tz = None                     # optional axial T profile (set_temperature_profile)
+        # an all-default (identity) model collapses to the None path: truly byte-identical
+        if concentration is not None and getattr(concentration, "is_identity", False):
+            concentration = None
+        self.concentration = concentration
+        if concentration is not None:
+            if float(upconversion_C_up) != 0.0 and \
+                    float(upconversion_C_up) != float(concentration.c_up_m3_s):
+                import warnings
+                warnings.warn("ErYbAmplifier: upconversion_C_up=%.3g is OVERRIDDEN by "
+                              "ConcentrationModel.c_up_m3_s=%.3g (the model wins; pass C_up "
+                              "through the ConcentrationModel only -- the single-ion audit-B1 "
+                              "rule, now shared by both amplifier classes)"
+                              % (float(upconversion_C_up), concentration.c_up_m3_s),
+                              stacklevel=2)
+            self.upconversion_C_up = float(concentration.c_up_m3_s)
+            # _n_er is the ACTIVE erbium everywhere below (the FiberAmplifier._n_active rule):
+            # dark ions hold no gain and accept no transfer, they only absorb (see _coeffs).
+            self._n_er_total = float(fiber.n_t_m3)
+            self._n_er = float(concentration.active_density(fiber.n_t_m3))
+            self._n_er_dark = float(concentration.dark_density(fiber.n_t_m3))
+        else:
+            self.upconversion_C_up = float(upconversion_C_up)
+            self._n_er_total = self._n_er
+            self._n_er_dark = 0.0
 
     # ---- type-preserving clone protocol ---------------------------------------------------
     def _clone(self, *, pumps: Optional[List[Pump]] = None,
                signals: Optional[List[Signal]] = None, ase=_KEEP, yb_ase=_KEEP) -> "ErYbAmplifier":
         """Clone through THIS class's own constructor, carrying EVERY opt-in: both ions'
         spectroscopy, the fiber, both ASE bands, the Yb density, the forward/back transfer
-        coefficients, A_32 and the Er upconversion coefficient. The single place that lists what
+        coefficients, A_32, the Er upconversion coefficient, the two-population parameters
+        (coupled fraction, secondary transfer, migration), the ConcentrationModel and the axial
+        temperature profile. The single place that lists what
         an ErYb clone must carry (the FiberAmplifier._clone analogue); the three public protocol
         methods below all route through it, so adding an opt-in to __init__ needs ONE edit here.
         PRIVATE -- callers outside the class use with_signals / with_pumps / without_ase."""
-        return ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber,
-                             list(self.pumps) if pumps is None else list(pumps),
-                             list(self.signals) if signals is None else list(signals),
-                             self.ase if ase is _KEEP else ase,
-                             n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
-                             k_back_m3_s=self._k_back, a32_per_s=self._a32,
-                             yb_ase=self.yb_ase if yb_ase is _KEEP else yb_ase,
-                             upconversion_C_up=self.upconversion_C_up)
+        new = ErYbAmplifier(self.er_ion, self.yb_ion, self.fiber,
+                            list(self.pumps) if pumps is None else list(pumps),
+                            list(self.signals) if signals is None else list(signals),
+                            self.ase if ase is _KEEP else ase,
+                            n_yb_m3=self._n_yb, k_tr_m3_s=self._k_tr,
+                            k_back_m3_s=self._k_back, a32_per_s=self._a32,
+                            yb_ase=self.yb_ase if yb_ase is _KEEP else yb_ase,
+                            upconversion_C_up=self.upconversion_C_up,
+                            yb_coupled_fraction=self._fc, k_tr2_m3_s=self._k_tr2,
+                            yb_migration_rate_per_s=self._w_mig,
+                            concentration=self.concentration)
+        new._Tz = self._Tz                  # the axial T profile rides along (audit A-5)
+        return new
 
     # ---- PUBLIC amplifier re-seed protocol -------------------------------------------------
     # The SAME three methods FiberAmplifier exposes, so AmplifierChain and metrics.* can rebuild
@@ -272,7 +417,7 @@ class ErYbAmplifier:
         N_Er, N_Yb = self._n_er, self._n_yb
         s_er = np.where(pl["is_ase"], gamma * N_Er * pl["se_er"] * m * H_PLANCK * nu * dnu, 0.0)
         s_yb = np.where(pl["is_ase"], gamma * N_Yb * pl["se_yb"] * m * H_PLANCK * nu * dnu, 0.0)
-        return {
+        c = {
             "flux_a_er": gamma * pl["sa_er"] * inv_hnuA,
             "flux_e_er": gamma * pl["se_er"] * inv_hnuA,
             "flux_a_yb": gamma * pl["sa_yb"] * inv_hnuA,
@@ -281,15 +426,94 @@ class ErYbAmplifier:
             "g_e_yb": gamma * N_Yb * pl["se_yb"], "g_a_yb": gamma * N_Yb * pl["sa_yb"],
             "loss": pl["loss"], "s_er": s_er, "s_yb": s_yb,
         }
+        if self.concentration is not None:
+            # Unbleachable pair-induced-quenching absorption: the dark erbium sits permanently
+            # in 4I15/2, so it absorbs Gamma sigma_a_Er n_dark at EVERY channel and holds no
+            # gain. Identical in form to FiberAmplifier._coeffs -- one convention, two classes.
+            c["loss"] = c["loss"] + gamma * self._n_er_dark * pl["sa_er"]
+        return c
+
+    # ---- distributed temperature profile (per-ion McCumber z-scaling) ---------------------
+    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = 300.0):
+        """Impose an axial temperature profile T(z) on the co-doped gain medium. EVERY
+        sigma_e-proportional coefficient of BOTH ions (local emission gain, stimulated-emission
+        rate, ASE spontaneous source) is scaled per-z by that ION's OWN McCumber factor
+
+            mcc_ion,k(z) = exp[(eps_ion - h nu_k) (1/(kB T(z)) - 1/(kB T_ref))],
+
+        eps_ion = `RareEarthIon.eps_J` -- a fitted `mccumber_eps_J` when the ion carries one and
+        h c / zero_line_m otherwise. The two ions have DIFFERENT zero lines (Er 4I13/2 ~1530 nm,
+        Yb 2F5/2 ~974 nm), so a single shared factor would be wrong by orders of magnitude in the
+        pump band: each spectrum is scaled about its own line, which is the co-doped statement of
+        FiberAmplifier.set_temperature_profile and reproduces spectroscopy.at_temperature applied
+        to BOTH ions exactly for a uniform profile (gated). sigma_a and the two lifetimes are
+        held (their T-dependence is second order at these Delta-T; spectroscopy docstring), and
+        so are k_tr, K2 and W_mig -- their measured temperature dependence (Cheng 2022: the Yb
+        transfer component moves 8.20 -> 7.56 us over 300-480 K, ~8%) is NOT modelled here.
+
+        Cleared with clear_temperature_profile(). Used by thermal.solve_with_thermal_feedback,
+        which drives Q(z) from this class's own rate balance (`_heat_profile_W_per_m`)."""
+        z = np.asarray(z_m, float)
+        T = np.asarray(T_K, float)
+        if z.shape != T.shape or z.ndim != 1 or z.size < 2:
+            raise ValueError("set_temperature_profile: z_m and T_K must be equal-length 1-D")
+        if not np.all(T > 0.0):
+            raise ValueError("set_temperature_profile: T_K must be > 0 everywhere")
+        self._Tz = (z.copy(), T.copy(), float(T_ref_K))
+
+    def clear_temperature_profile(self):
+        self._Tz = None
+
+    def _mcc_matrices(self, pl, z):
+        """((K, M), (K, M)) McCumber sigma_e scale factors for the Er and the Yb spectra on the
+        mesh z, or None when no profile is set (in which case every caller takes the untouched
+        no-temperature branch)."""
+        if getattr(self, "_Tz", None) is None:
+            return None
+        zt, Tt, T_ref = self._Tz
+        T = np.interp(np.asarray(z, float), zt, Tt)
+        nu = C_LIGHT / pl["lam"]
+        dinv = 1.0 / (KB * T) - 1.0 / (KB * T_ref)
+        return (np.exp(np.outer(float(self.er_ion.eps_J) - H_PLANCK * nu, dinv)),
+                np.exp(np.outer(float(self.yb_ion.eps_J) - H_PLANCK * nu, dinv)))
 
     # ---- z-local coupled algebra ---------------------------------------------------------
+    @staticmethod
+    def _bracketed_newton(hdh):
+        """Safeguarded Newton/bisection for a residual H(f2) that satisfies H(0) >= 0 and
+        H(1) < 0, returning (f2, unpumped). `hdh(f)` returns (H, dH/df). THE single home of the
+        root find: `_solve_fb` (one Yb pool) and `_solve_fbb` (two) differ only in the closed
+        form of b2(f2) they substitute, never in how the scalar equation is solved."""
+        if hdh(0.0)[0] <= 0.0:                            # no drive (unpumped, unseeded)
+            return 0.0, True
+        lo, hi, f = 0.0, 1.0, 0.5
+        for _ in range(80):
+            H, dH = hdh(f)
+            if H > 0.0:
+                lo = f
+            else:
+                hi = f
+            f_new = f - H / dH if dH < 0.0 else 0.5 * (lo + hi)
+            if not (lo < f_new < hi):
+                f_new = 0.5 * (lo + hi)
+            if abs(f_new - f) <= 1e-13 or (hi - lo) <= 1e-13:
+                f = f_new
+                break
+            f = f_new
+        return f, False
+
     def _solve_fb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float
                   ) -> Tuple[float, float]:
         """Steady-state (f2, b2) at one z from the four per-ion rates. b2 is a closed form in f2
         (the Yb equation is linear in b2 for fixed f2); substituting it into the Er residual
         H(f2) leaves a single bracketed scalar equation on [0, 1] solved by a safeguarded
         Newton/bisection. H(0) >= 0 and H(1) < 0 (the transfer/absorption drive vanishes at full
-        inversion, leaving only decay), so the root is bracketed and the solve cannot diverge."""
+        inversion, leaving only decay), so the root is bracketed and the solve cannot diverge.
+
+        THIS IS THE ONE-Yb-POOL SPECIALIZATION (yb_coupled_fraction = 1, k_tr2 = 0, no
+        migration), retained verbatim so the default model is bit-identical; `_solve_fbb` is the
+        general three-unknown form and a gate holds the two to ~1e-14 of each other in the limit
+        where both apply. Callers go through `_fbb`, which routes on `_two_pop`."""
         N_Er, N_Yb = self._n_er, self._n_yb
         k_tr, k_back, A32 = self._k_tr, self._k_back, self._a32
         inv_tE, inv_tY = 1.0 / self._tau_er, 1.0 / self._tau_yb
@@ -320,47 +544,159 @@ class ErYbAmplifier:
             dH = -Da + c * phi * (dbdf * (1.0 - f) - b) - 2.0 * Cup * N_Er * f
             return H, dH, b
 
-        H0, _, b0 = _HdH(0.0)
-        if H0 <= 0.0:                                     # no drive (unpumped, unseeded)
-            return 0.0, b0
-        lo, hi, f = 0.0, 1.0, 0.5
-        for _ in range(80):
-            H, dH, _ = _HdH(f)
-            if H > 0.0:
-                lo = f
-            else:
-                hi = f
-            f_new = f - H / dH if dH < 0.0 else 0.5 * (lo + hi)
-            if not (lo < f_new < hi):
-                f_new = 0.5 * (lo + hi)
-            if abs(f_new - f) <= 1e-13 or (hi - lo) <= 1e-13:
-                f = f_new
-                break
-            f = f_new
+        f, _ = self._bracketed_newton(lambda x: _HdH(x)[:2])
         b, _, _, _ = _b_phi(f)
         return float(min(max(f, 0.0), 1.0)), float(min(max(b, 0.0), 1.0))
 
-    def _dP(self, c, u, P):
-        """dP_k/dz [W/m] for every channel from the local power vector P (K,)."""
-        P = np.maximum(P, 0.0)
-        Ra_Er = float(np.dot(c["flux_a_er"], P)); Re_Er = float(np.dot(c["flux_e_er"], P))
-        Ra_Yb = float(np.dot(c["flux_a_yb"], P)); Re_Yb = float(np.dot(c["flux_e_yb"], P))
+    def _solve_fbb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float
+                   ) -> Tuple[float, float, float]:
+        """Steady-state (f2, b2c, b2nc) at one z with TWO ytterbium pools, the secondary transfer
+        K2 and the migration exchange -- the three-unknown counterpart of `_solve_fb`, entered
+        only when `_two_pop` is True.
+
+        THE REDUCTION, and why it is still ONE bracketed scalar equation. At FIXED f2 the two Yb
+        balances of the module docstring are LINEAR in (b2c, b2nc): the transfer drain, the K2
+        drain and the migration exchange are all proportional to b2c or b2nc with f2-dependent
+        coefficients only. Writing
+
+            D   = R_a_Yb + R_e_Yb + 1/tau_Yb                               (both pools share it)
+            Dc  = D + k_tr N_Er (1 - f2) phi + K2 N_Er f2                  (coupled extra drain)
+            A   = [[Dc + W (1-f),   -W (1-f)],  [-W f,   D + W f]],   RHS = (R_a_Yb, R_a_Yb)
+
+        the determinant collapses (the W^2 f(1-f) cross terms cancel exactly) to
+
+            det = Dc D + W (f Dc + (1 - f) D)  > 0    always,
+            b2c = R_a_Yb (D + W) / det,      b2nc = R_a_Yb (Dc + W) / det,
+
+        a closed form in f2 with NO matrix solve and no possibility of a singular system. It has
+        the right limits term by term: W -> 0 gives b2c = R_a/Dc and b2nc = R_a/D (an untouched
+        plain-Yb pool); W -> inf gives b2c = b2nc = R_a/(f Dc + (1-f) D), the fully-mixed pool.
+        Substituting b2c into the Er residual leaves the SAME scalar H(f2) on [0, 1] with
+        H(0) >= 0 (the transfer and absorption drive) and H(1) < 0 (decay only), so
+        `_bracketed_newton` is as unconditionally robust here as in the one-pool case. The Newton
+        slope carries d b2c/d f2 = -b2c (D + W f) dDc/df2 / det with dDc/df2 = K2 N_Er - k_tr
+        N_Er phi, which reduces to the one-pool `R_a s phi / Dc^2` when W = K2 = 0.
+
+        phi is iterated with the same three-pass inner fixed point `_solve_fb` uses and is
+        exactly 1.0 when k_back = 0 (the default). Note f2 = 0 exactly reproduces the Er-only
+        limit and f = 0 reproduces a pure Yb-loss fiber: with no coupled pool c_in = 0, the Er
+        equation loses its transfer drive, and b2nc = R_a_Yb / D is the textbook two-level Yb."""
+        N_Er, N_Yb = self._n_er, self._n_yb
+        fc = self._fc
+        k_tr, k_back, A32 = self._k_tr, self._k_back, self._a32
+        K2, Wm = self._k_tr2, self._w_mig
+        inv_tE, inv_tY = 1.0 / self._tau_er, 1.0 / self._tau_yb
+        Cup = self.upconversion_C_up
+        c_in = k_tr * fc * N_Yb                       # transfer-IN coefficient (x b2c)
+        s_out = k_tr * N_Er                           # coupled-Yb drain coefficient (x (1-f2))
+        D = Ra_Yb + Re_Yb + inv_tY
+        Da = Ra_Er + Re_Er + inv_tE
+
+        def _pools(f):
+            # phi = 1 seed, then the same three-pass inner fixed point _solve_fb's _b_phi runs,
+            # in the SAME order: phi is updated from the current b2c FIRST and (Dc, det, b2c)
+            # are then recomputed, so every value returned belongs to the same phi. (Updating
+            # phi last would hand _HdH a phi that the Dc it also returns was not built with.)
+            phi = 1.0
+            Dc = D + s_out * (1.0 - f) + K2 * N_Er * f
+            det = Dc * D + Wm * (fc * Dc + (1.0 - fc) * D)
+            bc = Ra_Yb * (D + Wm) / det
+            if k_back > 0.0:
+                for _ in range(3):
+                    phi = A32 / (A32 + k_back * fc * (1.0 - bc) * N_Yb)
+                    Dc = D + s_out * (1.0 - f) * phi + K2 * N_Er * f
+                    det = Dc * D + Wm * (fc * Dc + (1.0 - fc) * D)
+                    bc = Ra_Yb * (D + Wm) / det
+            return bc, Ra_Yb * (Dc + Wm) / det, phi, Dc, det
+
+        def _HdH(f):
+            bc, _bn, phi, _Dc, det = _pools(f)
+            dDc = K2 * N_Er - s_out * phi
+            dbdf = -bc * (D + Wm * fc) * dDc / det    # >0: less drain as f rises
+            G = c_in * phi * bc
+            H = Ra_Er * (1.0 - f) - Re_Er * f - f * inv_tE + G * (1.0 - f) - Cup * N_Er * f * f
+            dH = -Da + c_in * phi * (dbdf * (1.0 - f) - bc) - 2.0 * Cup * N_Er * f
+            return H, dH
+
+        f, _ = self._bracketed_newton(_HdH)
+        bc, bn, _phi, _Dc, _det = _pools(f)
+        return (float(min(max(f, 0.0), 1.0)), float(min(max(bc, 0.0), 1.0)),
+                float(min(max(bn, 0.0), 1.0)))
+
+    def _fbb(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb):
+        """(f2, b2c, b2nc, bbar) at one z, routed to the one- or two-pool algebra. bbar is the
+        POPULATION-WEIGHTED Yb inversion f b2c + (1-f) b2nc -- the only Yb quantity the optical
+        field, the parasitic-gain diagnostic and the photodarkening law ever see. b2nc is None
+        for the one-pool model, where bbar IS b2 (the same object, so the caller is bitwise
+        unaffected)."""
+        if self._two_pop:
+            f2, b2c, b2nc = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+            return f2, b2c, b2nc, self._fc * b2c + (1.0 - self._fc) * b2nc
         f2, b2 = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
-        g = (c["g_e_er"] * f2 - c["g_a_er"] * (1.0 - f2)
-             + c["g_e_yb"] * b2 - c["g_a_yb"] * (1.0 - b2) - c["loss"])
-        src = c["s_er"] * f2 + c["s_yb"] * b2
+        return f2, b2, None, b2
+
+    def _dP(self, c, u, P, mcc=None):
+        """dP_k/dz [W/m] for every channel from the local power vector P (K,). `mcc` is the
+        optional (mcc_er, mcc_yb) pair of (K,) per-channel McCumber sigma_e scale factors AT THIS
+        z (set_temperature_profile); None -- the default and the only path a profile-free
+        amplifier takes -- runs the untouched isothermal arithmetic."""
+        P = np.maximum(P, 0.0)
+        if mcc is None:
+            Ra_Er = float(np.dot(c["flux_a_er"], P)); Re_Er = float(np.dot(c["flux_e_er"], P))
+            Ra_Yb = float(np.dot(c["flux_a_yb"], P)); Re_Yb = float(np.dot(c["flux_e_yb"], P))
+            ge_er, ge_yb, s_er, s_yb = c["g_e_er"], c["g_e_yb"], c["s_er"], c["s_yb"]
+        else:
+            m_er, m_yb = mcc
+            Ra_Er = float(np.dot(c["flux_a_er"], P))
+            Re_Er = float(np.dot(c["flux_e_er"] * m_er, P))
+            Ra_Yb = float(np.dot(c["flux_a_yb"], P))
+            Re_Yb = float(np.dot(c["flux_e_yb"] * m_yb, P))
+            ge_er, ge_yb = c["g_e_er"] * m_er, c["g_e_yb"] * m_yb
+            s_er, s_yb = c["s_er"] * m_er, c["s_yb"] * m_yb
+        f2, _b2c, _b2nc, b2 = self._fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+        g = (ge_er * f2 - c["g_a_er"] * (1.0 - f2)
+             + ge_yb * b2 - c["g_a_yb"] * (1.0 - b2) - c["loss"])
+        if self.concentration is not None:
+            # Yb photodarkening equilibrium gray loss at the POPULATION-WEIGHTED Yb inversion --
+            # both pools darken the glass, and an uncoupled pool sits at a HIGHER inversion than
+            # a coupled one, so reading it off b2c alone would understate the loss.
+            g = g - self.concentration.photodarkening_loss_per_m(b2)
+        src = s_er * f2 + s_yb * b2
         return u * (g * P + src)
 
-    def _fb_profile(self, c, P):
-        """(f2(z), b2(z)) at each z given the full power profile P (K, M)."""
+    def _fb_profile(self, c, P, mcc=None):
+        """(f2(z), b2(z), b2nc(z)) at each z given the full power profile P (K, M). b2 is the
+        COUPLED Yb inversion and b2nc the uncoupled one; b2nc is None for the one-pool model, in
+        which case b2 is simply the Yb inversion. `mcc` is the optional ((K, M), (K, M)) McCumber
+        scale pair on the SAME mesh."""
         M = P.shape[1]
         f2 = np.empty(M); b2 = np.empty(M)
+        b2nc = np.empty(M) if self._two_pop else None
         for j in range(M):
             Pj = np.maximum(P[:, j], 0.0)
-            Ra_Er = float(np.dot(c["flux_a_er"], Pj)); Re_Er = float(np.dot(c["flux_e_er"], Pj))
-            Ra_Yb = float(np.dot(c["flux_a_yb"], Pj)); Re_Yb = float(np.dot(c["flux_e_yb"], Pj))
-            f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
-        return f2, b2
+            if mcc is None:
+                Ra_Er = float(np.dot(c["flux_a_er"], Pj))
+                Re_Er = float(np.dot(c["flux_e_er"], Pj))
+                Ra_Yb = float(np.dot(c["flux_a_yb"], Pj))
+                Re_Yb = float(np.dot(c["flux_e_yb"], Pj))
+            else:
+                Ra_Er = float(np.dot(c["flux_a_er"], Pj))
+                Re_Er = float(np.dot(c["flux_e_er"] * mcc[0][:, j], Pj))
+                Ra_Yb = float(np.dot(c["flux_a_yb"], Pj))
+                Re_Yb = float(np.dot(c["flux_e_yb"] * mcc[1][:, j], Pj))
+            if self._two_pop:
+                f2[j], b2[j], b2nc[j] = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+            else:
+                f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+        return f2, b2, b2nc
+
+    def _bbar(self, b2c, b2nc):
+        """Population-weighted Yb inversion f b2c + (1-f) b2nc -- what the optical field sees
+        (Dong 2020 n6 = n6c + n6nc). Returns b2c UNCHANGED (the same object) for the one-pool
+        model, so every downstream expression is bitwise what it always was."""
+        if b2nc is None:
+            return b2c
+        return self._fc * b2c + (1.0 - self._fc) * b2nc
 
     # ---- vectorized rate / RHS / Jacobian surface (shared with the transient march) --------
     # The steady solve needs only the z-local ROOT of the coupled pair (_solve_fb). A TIME MARCH
@@ -369,42 +705,75 @@ class ErYbAmplifier:
     # _fb_jacobian are the same two equations written once for a root find and once for an
     # integrator (dynamics.simulate_transient_eryb reads these rather than re-deriving them).
 
-    def _rates_profile(self, c, P):
+    def _rates_profile(self, c, P, mcc=None):
         """(R_a_Er, R_e_Er, R_a_Yb, R_e_Yb) [1/s] at every z from the power profile P (K, M) --
-        the vectorized counterpart of the four np.dot calls _fb_profile makes per node."""
+        the vectorized counterpart of the four np.dot calls _fb_profile makes per node. `mcc` is
+        the optional ((K, M), (K, M)) McCumber sigma_e scale pair; it multiplies the two EMISSION
+        rates only (sigma_a and the lifetimes are held)."""
         Pz = np.maximum(np.asarray(P, float), 0.0)
-        return (c["flux_a_er"] @ Pz, c["flux_e_er"] @ Pz,
-                c["flux_a_yb"] @ Pz, c["flux_e_yb"] @ Pz)
+        if mcc is None:
+            return (c["flux_a_er"] @ Pz, c["flux_e_er"] @ Pz,
+                    c["flux_a_yb"] @ Pz, c["flux_e_yb"] @ Pz)
+        m_er, m_yb = mcc
+        return (c["flux_a_er"] @ Pz,
+                np.sum(c["flux_e_er"][:, None] * m_er * Pz, axis=0),
+                c["flux_a_yb"] @ Pz,
+                np.sum(c["flux_e_yb"][:, None] * m_yb * Pz, axis=0))
 
     def _phi(self, b2):
         """Back-transfer branching factor phi = A_32 / (A_32 + k_back (1 - b2) N_Yb): the fraction
-        of Er 4I11/2 population that relaxes to 4I13/2 before back-transferring (module docstring).
-        EXACTLY 1.0 when k_back = 0 (the default), so every expression carrying it stays
-        byte-identical to the no-back-transfer algebra."""
+        of Er 4I11/2 population that relaxes to 4I13/2 before back-transferring (module
+        docstring). The back-transfer acceptor is a GROUND-STATE COUPLED Yb, n5c = f N_Yb
+        (1 - b2c), hence the f factor -- which is exactly 1.0 in the one-pool model, so
+        multiplying by it changes no bit there. EXACTLY 1.0 overall when k_back = 0 (the
+        default), so every expression carrying phi stays byte-identical to the
+        no-back-transfer algebra."""
         b = np.asarray(b2, float)
         if self._k_back <= 0.0:
             return np.ones_like(b)
-        return self._a32 / (self._a32 + self._k_back * (1.0 - b) * self._n_yb)
+        return self._a32 / (self._a32 + self._k_back * self._fc * (1.0 - b) * self._n_yb)
 
     def _dphi_db(self, b2, phi):
-        """d(phi)/d(b2) = phi^2 k_back N_Yb / A_32 (identically 0 when k_back = 0)."""
+        """d(phi)/d(b2c) = phi^2 k_back f N_Yb / A_32 (identically 0 when k_back = 0)."""
         b = np.asarray(b2, float)
         if self._k_back <= 0.0:
             return np.zeros_like(b)
-        return phi * phi * self._k_back * self._n_yb / self._a32
+        return phi * phi * self._k_back * self._fc * self._n_yb / self._a32
+
+    def _fb_rhs3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc):
+        """(df2/dt, db2c/dt, db2nc/dt) [1/s]: the module docstring's THREE balances before the
+        steady-state condition is imposed -- THE single home of the population algebra. The
+        one-pool pair `_fb_rhs` is this function at b2nc = b2c (the migration term then vanishes
+        identically, whatever W_mig is) with k_tr2 = 0 and f = 1, and `_solve_fbb` returns the
+        (f2, b2c, b2nc) at which all three vanish, so a march built on this has the steady
+        solve's own fixed point -- not a nearby one.
+
+        EVERY new term is multiplied by a coefficient that is exactly 0 or exactly 1 in the
+        legacy configuration (f = 1 makes `k_tr * f * N_Yb` the identical product `k_tr * N_Yb`;
+        K2 = 0 and W_mig = 0 subtract exact zeros), which is why the default path is bit-exact
+        rather than merely close."""
+        fc = self._fc
+        phi = self._phi(b2c)
+        tr = phi * b2c * (1.0 - f2)           # transfer shape; x k_tr f N_Yb (in) / N_Er (out)
+        mig = self._w_mig * (b2c - b2nc)      # detailed-balance exchange (module docstring)
+        df = (Ra_Er * (1.0 - f2) - Re_Er * f2 - f2 / self._tau_er
+              + self._k_tr * fc * self._n_yb * tr
+              - self.upconversion_C_up * self._n_er * f2 * f2)
+        dbc = (Ra_Yb * (1.0 - b2c) - Re_Yb * b2c - b2c / self._tau_yb
+               - self._k_tr * self._n_er * tr
+               - self._k_tr2 * self._n_er * f2 * b2c
+               - (1.0 - fc) * mig)
+        dbn = (Ra_Yb * (1.0 - b2nc) - Re_Yb * b2nc - b2nc / self._tau_yb
+               + fc * mig)
+        return df, dbc, dbn
 
     def _fb_rhs(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2):
-        """(df2/dt, db2/dt) [1/s]: the module docstring's coupled pair BEFORE the steady-state
-        condition is imposed. _solve_fb returns the (f2, b2) at which both of these vanish, so a
-        march built on this has the steady solve's own fixed point -- not a nearby one."""
-        phi = self._phi(b2)
-        tr = phi * b2 * (1.0 - f2)                  # transfer shape; x k_tr N_Yb (in) / N_Er (out)
-        df = (Ra_Er * (1.0 - f2) - Re_Er * f2 - f2 / self._tau_er
-              + self._k_tr * self._n_yb * tr
-              - self.upconversion_C_up * self._n_er * f2 * f2)
-        db = (Ra_Yb * (1.0 - b2) - Re_Yb * b2 - b2 / self._tau_yb
-              - self._k_tr * self._n_er * tr)
-        return df, db
+        """(df2/dt, db2/dt) [1/s] for a SINGLE Yb pool -- `_fb_rhs3` evaluated at b2nc = b2c, so
+        the migration exchange is identically zero and only the Er and coupled-Yb balances
+        survive. This is the pair the one-pool march and `energy_terms` use; with an uncoupled
+        pool active the caller must use `_fb_rhs3`, which the three-reservoir march does."""
+        df, dbc, _ = self._fb_rhs3(Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2, b2)
+        return df, dbc
 
     def _fb_jacobian(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2):
         """The EXACT 2x2 Jacobian (J11, J12, J21, J22) of _fb_rhs at (f2, b2).
@@ -422,29 +791,70 @@ class ErYbAmplifier:
         k_out (1 - f2) -> k_out (1 - f2)(phi + b2 dphi/db) and k_in b2 -> k_in phi b2. The
         discriminant (J11 - J22)^2 + 4 J12 J21 is likewise a sum of non-negative terms. Both
         eigenvalues are therefore REAL and NEGATIVE at every operating point: the linearised pair
-        is a stable node, never a spiral, at any pump level and any transfer strength."""
-        phi = self._phi(b2)
-        dphi = self._dphi_db(b2, phi)
-        k_in = self._k_tr * self._n_yb              # transfer-IN coefficient (Er equation)
+        is a stable node, never a spiral, at any pump level and any transfer strength.
+
+        This 2x2 is `_fb_jacobian3`'s leading block at b2nc = b2c; see there for the 3x3 the
+        two-population march uses and for what survives of the argument above."""
+        j = self._fb_jacobian3(Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2, b2)
+        return j[0][0], j[0][1], j[1][0], j[1][1]
+
+    def _fb_jacobian3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc):
+        """The EXACT 3x3 Jacobian of `_fb_rhs3` at (f2, b2c, b2nc), as a nested 3x3 list of
+        arrays (row-major, y = (f2, b2c, b2nc)).
+
+        STRUCTURE. J[0][2] = J[2][0] = 0: within a frozen-power step the erbium and the UNCOUPLED
+        ytterbium never see each other -- they are connected only through the coupled pool. The
+        diagonal is strictly negative (minus a sum of absorption, stimulated-emission, decay,
+        transfer, K2 and migration rates). The migration block
+
+            W [[-(1-f), (1-f)], [f, -f]]
+
+        is a Markov generator with eigenvalues 0 and -W, and the similarity diag(1/sqrt(f),
+        1/sqrt(1-f)) symmetrizes it, so it contributes REAL non-positive eigenvalues and cannot
+        introduce a spiral by itself. With K2 = 0 the cross terms still cancel out of the
+        determinant exactly as in the 2x2 case. With K2 > 0 the (b2c, f2) cross term picks up
+        -K2 N_Er b2c and the cancellation is no longer exact, so no theorem is claimed for that
+        corner: what IS asserted, and gated numerically over a sweep of operating points, is that
+        every eigenvalue keeps a strictly negative real part, which is what the exponential
+        Rosenbrock step in dynamics needs. phi_1 is evaluated on the matrix itself (scaling and
+        squaring, no eigen-decomposition), so a complex pair would be handled correctly anyway."""
+        fc = self._fc
+        phi = self._phi(b2c)
+        dphi = self._dphi_db(b2c, phi)
+        k_in = self._k_tr * fc * self._n_yb         # transfer-IN coefficient (Er equation)
         k_out = self._k_tr * self._n_er             # transfer-OUT coefficient (Yb equation)
-        dtr_df = -phi * b2
-        dtr_db = (1.0 - f2) * (phi + b2 * dphi)
-        j11 = (-(Ra_Er + Re_Er + 1.0 / self._tau_er) + k_in * dtr_df
+        k2n = self._k_tr2 * self._n_er
+        dtr_df = -phi * b2c
+        dtr_db = (1.0 - f2) * (phi + b2c * dphi)
+        zero = np.zeros_like(np.asarray(dtr_df, float))
+        j00 = (-(Ra_Er + Re_Er + 1.0 / self._tau_er) + k_in * dtr_df
                - 2.0 * self.upconversion_C_up * self._n_er * f2)
-        j12 = k_in * dtr_db
-        j21 = -k_out * dtr_df
-        j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - k_out * dtr_db
-        return j11, j12, j21, j22
+        j01 = k_in * dtr_db
+        j10 = -k_out * dtr_df - k2n * b2c
+        j11 = (-(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - k_out * dtr_db - k2n * f2
+               - self._w_mig * (1.0 - fc))
+        j12 = self._w_mig * (1.0 - fc) + zero
+        j21 = self._w_mig * fc + zero
+        j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - self._w_mig * fc
+        return [[j00, j01, zero], [j10, j11, j12], [zero, j21, j22 + zero]]
 
     def _b2_quasi_equilibrium(self, Ra_Yb, Re_Yb, f2, b2):
         """The Yb inversion that balances the Yb equation at a FIXED Er state: the closed form
         b2 = R_a_Yb / (R_a_Yb + R_e_Yb + 1/tau_Yb + k_tr N_Er (1 - f2) phi) that _solve_fb
         substitutes into H(f2). phi is evaluated at the incoming b2 (exactly 1 unless k_back > 0).
-        Used to SEED the Yb reservoir of a transient whose caller supplied only f2."""
+        Used to SEED the Yb reservoir of a transient whose caller supplied only f2.
+
+        With TWO pools this returns the PAIR (b2c, b2nc) from `_solve_fbb`'s closed form at the
+        same fixed f2 -- the caller then has both reservoirs seeded consistently."""
         phi = self._phi(b2)
         denom = (Ra_Yb + Re_Yb + 1.0 / self._tau_yb
                  + self._k_tr * self._n_er * (1.0 - f2) * phi)
-        return Ra_Yb / denom
+        if not self._two_pop:
+            return Ra_Yb / denom
+        D = Ra_Yb + Re_Yb + 1.0 / self._tau_yb
+        Dc = denom + self._k_tr2 * self._n_er * f2
+        det = Dc * D + self._w_mig * (self._fc * Dc + (1.0 - self._fc) * D)
+        return (Ra_Yb * (D + self._w_mig) / det, Ra_Yb * (Dc + self._w_mig) / det)
 
     # ---- solve (relaxation, mirrors FiberAmplifier.solve) --------------------------------
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
@@ -527,6 +937,18 @@ class ErYbAmplifier:
         def _make_interp(Y):
             return _frozen_profile_interp(Y, z, L, n_nodes)
 
+        # Per-z McCumber sigma_e scaling of BOTH ions, frozen on the solver mesh and interpolated
+        # into the IVP exactly as steady_state does for the single ion. None -- and therefore the
+        # untouched isothermal RHS -- whenever no profile is set.
+        mcc_mat = self._mcc_matrices(pl, z)
+        mcc_er_of = _make_interp(mcc_mat[0]) if mcc_mat is not None else None
+        mcc_yb_of = _make_interp(mcc_mat[1]) if mcc_mat is not None else None
+
+        def _mcc_at(zz):
+            if mcc_mat is None:
+                return None
+            return (mcc_er_of(zz), mcc_yb_of(zz))
+
         last_out = None
         last_prof = None
         converged = False
@@ -537,7 +959,7 @@ class ErYbAmplifier:
 
             def rhs_f(zz, Pf):
                 Pb = bwd_of(zz) if bwd.size else np.zeros(0)
-                return self._dP(c, u, _assemble(Pf, Pb))[fwd]
+                return self._dP(c, u, _assemble(Pf, Pb), _mcc_at(zz))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
                            rtol=1e-7, atol=1e-15)
@@ -551,7 +973,7 @@ class ErYbAmplifier:
                 fwd_of = _make_interp(P_fwd)
 
                 def rhs_b(zz, Pb):
-                    return self._dP(c, u, _assemble(fwd_of(zz), Pb))[bwd]
+                    return self._dP(c, u, _assemble(fwd_of(zz), Pb), _mcc_at(zz))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
                                rtol=1e-7, atol=1e-15)
@@ -575,12 +997,13 @@ class ErYbAmplifier:
         P[fwd] = P_fwd
         if bwd.size:
             P[bwd] = P_bwd
-        f2, b2 = self._fb_profile(c, P)
+        f2, b2, b2nc = self._fb_profile(c, P, mcc_mat)
+        bbar = self._bbar(b2, b2nc)
         sig_idx = [i for i, kd in enumerate(kind) if kd == "signal"]
         gains_dB = np.array([10.0 * np.log10(P[i, -1] / bc[i]) for i in sig_idx])
 
-        eta_tr = self._transfer_efficiency(c, P, f2, b2, z)
-        yb_par_dB = self._yb_parasitic_gain_dB(P, f2, b2, z)
+        eta_tr = self._transfer_efficiency(c, P, f2, b2, z, b2nc, mcc_mat)
+        yb_par_dB = self._yb_parasitic_gain_dB(P, f2, bbar, z)
         m_modes = (self.ase.m_modes if self.ase is not None
                    else (self.yb_ase.m_modes if self.yb_ase is not None else 2))
         meta = {"converged": converged, "iterations": it + 1,
@@ -594,14 +1017,29 @@ class ErYbAmplifier:
                 "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),
                 "sigma_a_er": pl["sa_er"].copy(), "sigma_e_er": pl["se_er"].copy(),
                 "sigma_a_yb": pl["sa_yb"].copy(), "sigma_e_yb": pl["se_yb"].copy(),
-                "beta_yb_z": b2, "eta_transfer": eta_tr,
+                "beta_yb_z": bbar, "eta_transfer": eta_tr,
                 "yb_parasitic_gain_dB": yb_par_dB,
                 "n_er_m3": self._n_er, "n_yb_m3": self._n_yb,
-                "k_tr_m3_s": self._k_tr, "k_back_m3_s": self._k_back, "a32_per_s": self._a32}
+                "k_tr_m3_s": self._k_tr, "k_back_m3_s": self._k_back, "a32_per_s": self._a32,
+                # ---- two-population / concentration / temperature state ----
+                # beta_yb_z above is the POPULATION-WEIGHTED inversion the field sees; the two
+                # pools are reported separately, and beta_yb_uncoupled_z is None for the
+                # one-pool model (where beta_yb_coupled_z IS beta_yb_z, the same array).
+                "beta_yb_coupled_z": b2, "beta_yb_uncoupled_z": b2nc,
+                "yb_coupled_fraction": self._fc, "k_tr2_m3_s": self._k_tr2,
+                "yb_migration_rate_per_s": self._w_mig,
+                "n_er_active_m3": self._n_er, "n_er_dark_m3": self._n_er_dark,
+                "upconversion_C_up": self.upconversion_C_up,
+                # 'mcc' is the ERBIUM matrix, matching meta['sigma_a'] / ['sigma_e'] (which are
+                # also the Er spectra) so noise.local_inversion_factor -- a C-band quantity --
+                # keeps reading a (K, M) array of the right ion. The per-ion pair is explicit.
+                "mcc": None if mcc_mat is None else mcc_mat[0].copy(),
+                "mcc_er": None if mcc_mat is None else mcc_mat[0].copy(),
+                "mcc_yb": None if mcc_mat is None else mcc_mat[1].copy()}
         return SteadyStateResult(z, P, pl["lam"], u, is_ase, kind, f2, gains_dB, meta=meta)
 
     # ---- diagnostics ---------------------------------------------------------------------
-    def _transfer_efficiency(self, c, P, f2, b2, z) -> float:
+    def _transfer_efficiency(self, c, P, f2, b2, z, b2nc=None, mcc=None) -> float:
         """Fraction of Yb excited-state de-excitations that end as a USEFUL Yb->Er transfer,
         as a rate integral weighted by the excited-Yb density n_Yb2 = b2 N_Yb:
 
@@ -611,14 +1049,37 @@ class ErYbAmplifier:
         Yb stimulated-emission rate (a Yb photon re-emitted to the field instead of transferred).
         The denominator is the total Yb* loss rate: transfer + spontaneous decay + stimulated
         emission. At low power (R_e_Yb -> 0, f2 -> 0 so n1 -> N_Er) this collapses to the
-        analytic k_tr N_Er tau_Yb / (1 + k_tr N_Er tau_Yb) -- see the module DISCREPANCY NOTE."""
+        analytic k_tr N_Er tau_Yb / (1 + k_tr N_Er tau_Yb) -- see the module DISCREPANCY NOTE.
+
+        WITH TWO POOLS this becomes the quantity FORC call the ENERGY TRANSFER EFFICIENCY (ETE):
+        the UNCOUPLED pool's excitation appears in the denominator (it de-excites by fluorescence
+        and stimulated emission and never transfers) and the secondary transfer K2 joins the
+        non-useful channels of the coupled pool,
+
+            eta = INT k_tr n1 n6c dz
+                  / INT [(k_tr n1 + K2 n2 + 1/tau_Yb + R_e_Yb) n6c + (1/tau_Yb + R_e_Yb) n6nc] dz
+
+        with n6c = f N_Yb b2c and n6nc = (1-f) N_Yb b2nc. At f = 1 and K2 = 0 the extra terms are
+        identically zero and the expression is the one above."""
         N_Er, N_Yb = self._n_er, self._n_yb
         n1 = (1.0 - f2) * N_Er
-        nYb2 = b2 * N_Yb
-        Re_Yb = np.array([float(np.dot(c["flux_e_yb"], np.maximum(P[:, j], 0.0)))
-                          for j in range(P.shape[1])])
-        transfer = self._k_tr * n1 * nYb2
-        total = (self._k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
+        if mcc is None:
+            Re_Yb = np.array([float(np.dot(c["flux_e_yb"], np.maximum(P[:, j], 0.0)))
+                              for j in range(P.shape[1])])
+        else:
+            Re_Yb = np.array([float(np.dot(c["flux_e_yb"] * mcc[1][:, j],
+                                           np.maximum(P[:, j], 0.0)))
+                              for j in range(P.shape[1])])
+        if b2nc is None:
+            nYb2 = b2 * N_Yb
+            transfer = self._k_tr * n1 * nYb2
+            total = (self._k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
+        else:
+            n6c = self._fc * N_Yb * b2
+            n6nc = (1.0 - self._fc) * N_Yb * b2nc
+            idle = 1.0 / self._tau_yb + Re_Yb
+            transfer = self._k_tr * n1 * n6c
+            total = ((self._k_tr * n1 + self._k_tr2 * N_Er * f2 + idle) * n6c + idle * n6nc)
         num = float(trapz(transfer, z))
         den = float(trapz(total, z))
         return num / den if den > 0.0 else 0.0
@@ -628,7 +1089,7 @@ class ErYbAmplifier:
         return float(result.meta["eta_transfer"])
 
     def _yb_parasitic_gain_dB(self, P, f2, b2, z) -> float:
-        """Single-pass 1030 nm Yb parasitic gain [dB] from the b2 profile (computed even with no
+        """Single-pass 1030 nm Yb parasitic gain [dB] from the POPULATION-WEIGHTED b2 profile (computed even with no
         yb_ase channels): G_dB = (10/ln10) INT Gamma(1030) [N_Yb (sigma_e_Yb b2 - sigma_a_Yb
         (1 - b2)) + N_Er (sigma_e_Er f2 - sigma_a_Er (1 - f2))] dz. The Er terms are ~0 at 1030
         nm. A large positive value flags 1-um parasitic-lasing risk (compare to the round-trip
@@ -685,11 +1146,48 @@ class ErYbAmplifier:
             return float("nan")
         c = self._coeffs(pl)
         u = pl["u"]
-        dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j]))) for j in range(z.size)])
+        mcc = self._mcc_matrices(pl, z)
+        if mcc is None:
+            dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j]))) for j in range(z.size)])
+        else:
+            dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j],
+                                                     (mcc[0][:, j], mcc[1][:, j]))))
+                           for j in range(z.size)])
         return -float(trapz(dF, z))
 
-    def energy_terms(self, power_W, f2, b2) -> dict:
+    def _heat_profile_W_per_m(self, result) -> np.ndarray:
+        """Local heat density Q(z) [W/m] from THIS amplifier's own rate balance, for
+        thermal.solve_with_thermal_feedback -- the co-doped counterpart of
+        thermal.heat_load_per_m, which the single-ion class still uses.
+
+        WHY NOT THE FLUX GRADIENT. `heat_load_per_m` is -d/dz of the net forward flux evaluated
+        by np.gradient on the returned profile: second-order accurate, but it inherits the mesh
+        error of the solve AND it says nothing about WHICH mechanism deposited the heat. This
+        returns `energy_terms(...)['dissipation']`, the analytic sum
+
+            background loss + Er dissipation + Yb dissipation + transfer defect + K2 defect,
+
+        which at the steady state equals q_optical identically (that identity is the closure
+        gate). For an EYDFA the transfer defect is the DOMINANT term -- the 4I11/2 -> 4I13/2
+        multiphonon step, 36% of every 976 nm pump photon that reaches the erbium -- and the Yb
+        fluorescence of an uncoupled pool is the second, so a co-doped thermal loop driven by the
+        Er quantum defect alone would understate the load badly."""
+        z = np.asarray(result.z_m, float)
+        f2 = np.asarray(result.nbar2_z, float)
+        b2c = np.asarray(result.meta.get("beta_yb_coupled_z", result.meta["beta_yb_z"]), float)
+        b2nc = result.meta.get("beta_yb_uncoupled_z")
+        terms = self.energy_terms(result.power_W, f2, b2c, b2nc, z_m=z)
+        return np.asarray(terms["dissipation"], float)
+
+    def energy_terms(self, power_W, f2, b2, b2_uncoupled=None, *, z_m=None) -> dict:
         """Per-z energy bookkeeping [W/m] for one profile: powers (K, M), f2 (M,), b2 (M,).
+
+        `b2` is the COUPLED Yb inversion and `b2_uncoupled` the uncoupled pool's; the latter is
+        REQUIRED (and refused if missing) whenever an uncoupled pool exists, because guessing it
+        would silently mis-state both the stored energy and the Yb fluorescence. For the one-pool
+        model it must be None and `b2` is simply the Yb inversion. `z_m` is needed only when a
+        temperature profile is set (it is what the per-z McCumber factors are interpolated onto);
+        omitting it on a profiled amplifier is refused rather than silently run isothermally.
 
         DERIVATION. Write eps_Er and eps_Yb for the two stored excitation energies (the ions'
         McCumber zero-line quanta, RareEarthIon.eps_J: ~1.30e-19 J at 1530 nm for Er 4I13/2,
@@ -724,12 +1222,34 @@ class ErYbAmplifier:
         q_opt is dissipation, which is why `_rate_balance_dissipation_W` needs no extra term.
 
         Returns a dict of (M,) arrays: 'q_optical', 'stored_J_per_m', 'd_stored_dt',
-        'background_loss', 'er_dissipation', 'yb_dissipation', 'transfer_defect', 'dissipation'
-        (the four summed), 'transfer_rate_per_m', 'df2_dt', 'db2_dt'. The identity above is an
+        'background_loss', 'er_dissipation', 'yb_dissipation', 'transfer_defect', 'k2_defect',
+        'dissipation' (the five summed), 'transfer_rate_per_m', 'k2_rate_per_m', 'df2_dt',
+        'db2_dt', plus 'db2nc_dt' and 'beta_yb_mean' when a second pool is present. 'k2_defect'
+        and 'k2_rate_per_m' are identically zero when k_tr2 = 0. The identity above is an
         algebraic rearrangement of one rate balance, so a departure from it beyond round-off is an
         implementation defect, not physics -- which is what makes it usable as a gate on a
         TRANSIENT march, where dU/dt is no longer zero and the marched populations are an
-        independent computation from the propagated powers."""
+        independent computation from the propagated powers.
+
+        TWO-POPULATION AND SECONDARY-TRANSFER EXTENSION. With f < 1 every OPTICAL Yb term and the
+        Yb fluorescence are evaluated at the population-weighted bbar = f b2c + (1-f) b2nc (the
+        uncoupled pool absorbs, emits and fluoresces exactly like the coupled one), the stored
+        energy is A eps_Yb N_Yb bbar, and its rate is A eps_Yb N_Yb (f db2c/dt + (1-f) db2nc/dt)
+        -- in which the migration exchange cancels identically, which is the numerical signature
+        that the exchange term conserves excitation. The transfer terms carry the COUPLED density
+        f N_Yb, and the secondary transfer adds ONE new dissipation channel,
+
+            Phi_K2 = A K2 N_Er f2 (f N_Yb b2c),      D_K2 = eps_Yb Phi_K2,
+
+        charged at the FULL Yb quantum because the erbium ends the round trip in the same level
+        it started in (4I13/2 -> 4F9/2 -> 4I13/2): nothing of that excitation reaches the field
+        and nothing of it is stored. The identity becomes
+
+            q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr + D_K2,
+
+        and `dissipation` is the sum of those five. Pair-induced quenching needs no term of its
+        own: dark erbium is already in `D_loss` through the unbleachable absorption `_coeffs`
+        adds, and so is the photodarkening gray loss, both of which are pure heat."""
         pl = self._plan()
         c = self._coeffs(pl)
         P = np.maximum(np.asarray(power_W, float), 0.0)
@@ -738,19 +1258,50 @@ class ErYbAmplifier:
         if P.ndim != 2 or f2.shape != (P.shape[1],) or b2.shape != (P.shape[1],):
             raise ValueError("energy_terms: power_W must be (K, M) with f2, b2 of shape (M,); "
                              "got %r, %r, %r" % (P.shape, f2.shape, b2.shape))
+        if self._two_pop and b2_uncoupled is None:
+            raise ValueError(
+                "energy_terms: this amplifier has an UNCOUPLED ytterbium pool "
+                "(yb_coupled_fraction=%g, k_tr2=%g, migration=%g), so the uncoupled inversion "
+                "must be passed as the 4th argument -- solve() reports it on "
+                "meta['beta_yb_uncoupled_z'] and the march on meta['beta_yb_uncoupled']. "
+                "Defaulting it would mis-state both the stored energy and the Yb fluorescence."
+                % (self._fc, self._k_tr2, self._w_mig))
+        if b2_uncoupled is not None and not self._two_pop:
+            raise ValueError("energy_terms: this amplifier has ONE ytterbium pool, so "
+                             "b2_uncoupled must be None (got an array of shape %r)"
+                             % (np.shape(b2_uncoupled),))
+        b2nc = None if b2_uncoupled is None else np.asarray(b2_uncoupled, float)
+        if b2nc is not None and b2nc.shape != (P.shape[1],):
+            raise ValueError("energy_terms: b2_uncoupled must have shape (M,); got %r"
+                             % (b2nc.shape,))
+        mcc = None
+        if getattr(self, "_Tz", None) is not None:
+            if z_m is None:
+                raise ValueError("energy_terms: a temperature profile is set, so z_m (the mesh "
+                                 "the powers live on) is required to evaluate the per-z McCumber "
+                                 "factors -- pass result.z_m")
+            zz = np.asarray(z_m, float)
+            if zz.shape != (P.shape[1],):
+                raise ValueError("energy_terms: z_m must have shape (M,); got %r" % (zz.shape,))
+            mcc = self._mcc_matrices(pl, zz)
         A = self.fiber.a_dope_m2
         N_Er, N_Yb = self._n_er, self._n_yb
         eps_er = float(self.er_ion.eps_J)
         eps_yb = float(self.yb_ion.eps_J)
         inv_h = (1.0 / (H_PLANCK * (C_LIGHT / pl["lam"])))[:, None]
-        one_f, one_b = (1.0 - f2)[None, :], (1.0 - b2)[None, :]
+        bbar = self._bbar(b2, b2nc)
+        one_f, one_b = (1.0 - f2)[None, :], (1.0 - bbar)[None, :]
+        ge_er = c["g_e_er"][:, None] if mcc is None else c["g_e_er"][:, None] * mcc[0]
+        ge_yb = c["g_e_yb"][:, None] if mcc is None else c["g_e_yb"][:, None] * mcc[1]
+        se_pref = c["s_er"][:, None] if mcc is None else c["s_er"][:, None] * mcc[0]
+        sy_pref = c["s_yb"][:, None] if mcc is None else c["s_yb"][:, None] * mcc[1]
 
         pw_a_er = c["g_a_er"][:, None] * one_f * P
-        pw_e_er = c["g_e_er"][:, None] * f2[None, :] * P
-        pw_sp_er = c["s_er"][:, None] * f2[None, :]
+        pw_e_er = ge_er * f2[None, :] * P
+        pw_sp_er = se_pref * f2[None, :]
         pw_a_yb = c["g_a_yb"][:, None] * one_b * P
-        pw_e_yb = c["g_e_yb"][:, None] * b2[None, :] * P
-        pw_sp_yb = c["s_yb"][:, None] * b2[None, :]
+        pw_e_yb = ge_yb * bbar[None, :] * P
+        pw_sp_yb = sy_pref * bbar[None, :]
         loss_W = np.sum(c["loss"][:, None] * P, axis=0)
 
         p_a_er, p_e_er, p_sp_er = pw_a_er.sum(0), pw_e_er.sum(0), pw_sp_er.sum(0)
@@ -760,12 +1311,16 @@ class ErYbAmplifier:
 
         q_opt = (p_a_er + p_a_yb + loss_W) - (p_e_er + p_e_yb + p_sp_er + p_sp_yb)
 
-        ra_er, re_er, ra_yb, re_yb = self._rates_profile(c, P)
-        df, db = self._fb_rhs(ra_er, re_er, ra_yb, re_yb, f2, b2)
+        ra_er, re_er, ra_yb, re_yb = self._rates_profile(c, P, mcc)
+        df, db, dbn = self._fb_rhs3(ra_er, re_er, ra_yb, re_yb, f2, b2,
+                                    b2 if b2nc is None else b2nc)
+        dbbar = db if b2nc is None else self._fc * db + (1.0 - self._fc) * dbn
         phi = self._phi(b2)
-        tr_rate = A * self._k_tr * phi * N_Er * N_Yb * b2 * (1.0 - f2)
+        n_yb_c = self._fc * N_Yb                     # the COUPLED Yb density (= N_Yb at f = 1)
+        tr_rate = A * self._k_tr * phi * N_Er * n_yb_c * b2 * (1.0 - f2)
+        k2_rate = A * self._k_tr2 * N_Er * f2 * n_yb_c * b2
         dec_er = A * N_Er * f2 / self._tau_er
-        dec_yb = A * N_Yb * b2 / self._tau_yb
+        dec_yb = A * N_Yb * bbar / self._tau_yb
         up_er = A * N_Er * self.upconversion_C_up * N_Er * f2 * f2
 
         d_er = ((p_a_er - p_e_er) - eps_er * (n_a_er - n_e_er)
@@ -773,18 +1328,30 @@ class ErYbAmplifier:
         d_yb = ((p_a_yb - p_e_yb) - eps_yb * (n_a_yb - n_e_yb)
                 + (eps_yb * dec_yb - p_sp_yb))
         d_tr = (eps_yb - eps_er) * tr_rate
-        return {"q_optical": q_opt,
-                "stored_J_per_m": A * (eps_er * N_Er * f2 + eps_yb * N_Yb * b2),
-                "d_stored_dt": A * (eps_er * N_Er * df + eps_yb * N_Yb * db),
-                "background_loss": loss_W, "er_dissipation": d_er, "yb_dissipation": d_yb,
-                "transfer_defect": d_tr, "dissipation": loss_W + d_er + d_yb + d_tr,
-                "transfer_rate_per_m": tr_rate, "df2_dt": df, "db2_dt": db}
+        d_k2 = eps_yb * k2_rate
+        out = {"q_optical": q_opt,
+               "stored_J_per_m": A * (eps_er * N_Er * f2 + eps_yb * N_Yb * bbar),
+               "d_stored_dt": A * (eps_er * N_Er * df + eps_yb * N_Yb * dbbar),
+               "background_loss": loss_W, "er_dissipation": d_er, "yb_dissipation": d_yb,
+               "transfer_defect": d_tr, "k2_defect": d_k2,
+               "dissipation": loss_W + d_er + d_yb + d_tr + d_k2,
+               "transfer_rate_per_m": tr_rate, "k2_rate_per_m": k2_rate,
+               "df2_dt": df, "db2_dt": db}
+        if b2nc is not None:
+            out["db2nc_dt"] = dbn
+            out["beta_yb_mean"] = bbar
+        return out
 
-    def stored_energy_J(self, f2, b2, z) -> float:
-        """Total excitation energy stored in BOTH reservoirs [J]:
-        INT A_dope (eps_Er N_Er f2(z) + eps_Yb N_Yb b2(z)) dz. This is the `stored` that a
-        transient energy balance differentiates -- see energy_terms for eps_* and the identity."""
+    def stored_energy_J(self, f2, b2, z, b2_uncoupled=None) -> float:
+        """Total excitation energy stored in the reservoirs [J]:
+        INT A_dope (eps_Er N_Er f2(z) + eps_Yb N_Yb bbar(z)) dz, bbar = f b2c + (1-f) b2nc. This
+        is the `stored` that a transient energy balance differentiates -- see energy_terms for
+        eps_* and the identity. With two pools BOTH count: an uncoupled ytterbium ion stores the
+        same 2.04e-19 J as a coupled one, it simply cannot hand it to the erbium. Pass the
+        uncoupled inversion as `b2_uncoupled` (None, and `b2` is the single pool's inversion)."""
         A = self.fiber.a_dope_m2
+        bb = b2 if b2_uncoupled is None else self._bbar(np.asarray(b2, float),
+                                                        np.asarray(b2_uncoupled, float))
         u = A * (float(self.er_ion.eps_J) * self._n_er * np.asarray(f2, float)
-                 + float(self.yb_ion.eps_J) * self._n_yb * np.asarray(b2, float))
+                 + float(self.yb_ion.eps_J) * self._n_yb * np.asarray(bb, float))
         return float(trapz(u, np.asarray(z, float)))

@@ -603,58 +603,99 @@ _PHI1_SCALE_TARGET = 0.5
 _PHI1_MAX_SQUARINGS = 64         # || dt J || up to ~1e19 before this binds; a guard, not a limit
 
 
-def _mm2(A, B):
-    """2x2 matrix product of two 4-tuples of (N,) arrays (row-major a11, a12, a21, a22)."""
-    a11, a12, a21, a22 = A
-    b11, b12, b21, b22 = B
-    return (a11 * b11 + a12 * b21, a11 * b12 + a12 * b22,
-            a21 * b11 + a22 * b21, a21 * b12 + a22 * b22)
+def _mmn(A, B):
+    """n x n matrix product of two nested n x n lists of (N,) arrays (row-major). The inner sum
+    is accumulated in ASCENDING k with no reordering, so at n = 2 it evaluates exactly
+    `a11 b11 + a12 b21` etc. -- the arithmetic the 2x2 spelling has always performed, term for
+    term. (An np.matmul over a (N, n, n) stack would be the obvious alternative and is NOT used:
+    its reduction order is a BLAS property, so it would make the kernel's output build-dependent
+    and turn the existing pinned march values into a false gate.)"""
+    n = len(A)
+    out = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            acc = A[i][0] * B[0][j]
+            for k in range(1, n):
+                acc = acc + A[i][k] * B[k][j]
+            row.append(acc)
+        out.append(row)
+    return out
 
 
-def _i_plus_sXY(X, Y, s):
-    """I + s X Y for 4-tuples of (N,) arrays (the Horner step of both Taylor series)."""
-    p11, p12, p21, p22 = _mm2(X, Y)
-    return (1.0 + s * p11, s * p12, s * p21, 1.0 + s * p22)
+def _i_plus_sXYn(X, Y, s):
+    """I + s X Y for nested n x n lists of (N,) arrays (the Horner step of both Taylor series)."""
+    Pm = _mmn(X, Y)
+    n = len(X)
+    return [[(1.0 + s * Pm[i][j]) if i == j else (s * Pm[i][j]) for j in range(n)]
+            for i in range(n)]
 
 
-def _phi1_dt_2x2(j11, j12, j21, j22, dt):
-    """dt * phi_1(dt J) for a BATCH of 2x2 Jacobians given as four (N,) arrays.
+def _phi1_dt_nxn(J, dt):
+    """dt * phi_1(dt J) for a BATCH of n x n Jacobians given as a nested n x n list of (N,)
+    arrays; returns the same nested-list shape.
 
     phi_1(X) = (e^X - I) X^{-1} = SUM_{k>=0} X^k/(k+1)!, so the returned M gives the exponential
     Rosenbrock step y <- y + M F(y). Scaling-and-squaring (see the block comment above): no
     eigenvalue branch, no matrix inverse, exact in the limits M -> dt I (dt -> 0) and
-    M -> -J^{-1} (dt -> inf, all eigenvalues negative)."""
-    x = (dt * j11, dt * j12, dt * j21, dt * j22)
-    nrm = float(np.max(np.maximum(np.abs(x[0]) + np.abs(x[1]), np.abs(x[2]) + np.abs(x[3]))))
+    M -> -J^{-1} (dt -> inf, all eigenvalues in the left half-plane). The size n is a parameter
+    rather than a second copy of the algorithm: n = 2 is the single-Yb-pool pair and n = 3 the
+    two-population triple (f2, b2c, b2nc)."""
+    n = len(J)
+    x = [[dt * J[i][j] for j in range(n)] for i in range(n)]
+    rows = []
+    for i in range(n):
+        acc = np.abs(x[i][0])
+        for j in range(1, n):
+            acc = acc + np.abs(x[i][j])
+        rows.append(acc)
+    rowmax = rows[0]
+    for r in rows[1:]:
+        rowmax = np.maximum(rowmax, r)
+    nrm = float(np.max(rowmax))
     m = 0
     if np.isfinite(nrm) and nrm > _PHI1_SCALE_TARGET:
         m = min(int(np.ceil(np.log2(nrm / _PHI1_SCALE_TARGET))), _PHI1_MAX_SQUARINGS)
         sc = 0.5 ** m
-        x = (x[0] * sc, x[1] * sc, x[2] * sc, x[3] * sc)
-    one = np.ones_like(x[0])
-    zero = np.zeros_like(x[0])
-    E = (one, zero, zero, one)                       # -> e^X
-    S = (one, zero, zero, one)                       # -> phi_1(X)
+        x = [[x[i][j] * sc for j in range(n)] for i in range(n)]
+    one = np.ones_like(x[0][0])
+    zero = np.zeros_like(x[0][0])
+    E = [[one if i == j else zero for j in range(n)] for i in range(n)]      # -> e^X
+    S = [[one if i == j else zero for j in range(n)] for i in range(n)]      # -> phi_1(X)
     for k in range(_PHI1_TAYLOR_ORDER, 0, -1):
-        E = _i_plus_sXY(x, E, 1.0 / k)
-        S = _i_plus_sXY(x, S, 1.0 / (k + 1.0))
+        E = _i_plus_sXYn(x, E, 1.0 / k)
+        S = _i_plus_sXYn(x, S, 1.0 / (k + 1.0))
     for _ in range(m):
-        S = tuple(0.5 * v for v in _mm2(S, (E[0] + 1.0, E[1], E[2], E[3] + 1.0)))
-        E = _mm2(E, E)
-    return tuple(dt * v for v in S)
+        EpI = [[E[i][j] + 1.0 if i == j else E[i][j] for j in range(n)] for i in range(n)]
+        SE = _mmn(S, EpI)
+        S = [[0.5 * SE[i][j] for j in range(n)] for i in range(n)]
+        E = _mmn(E, E)
+    return [[dt * S[i][j] for j in range(n)] for i in range(n)]
+
+
+def _phi1_dt_2x2(j11, j12, j21, j22, dt):
+    """dt * phi_1(dt J) for a BATCH of 2x2 Jacobians given as four (N,) arrays, returned as a
+    4-tuple (m11, m12, m21, m22). The 2x2 spelling of `_phi1_dt_nxn`, kept because the 2x2 is the
+    shape the single-Yb-pool march and its pinned gate values speak in."""
+    M = _phi1_dt_nxn([[j11, j12], [j21, j22]], dt)
+    return (M[0][0], M[0][1], M[1][0], M[1][1])
 
 
 def _split_eryb_seed(nbar2_0):
-    """(f2_seed, b2_seed) from the nbar2_0 argument. A TUPLE of length 2 is the (f2, b2) pair;
-    anything else (scalar, list, ndarray) is f2 alone and leaves b2 to be seeded from the Yb
-    quasi-equilibrium. The tuple/list distinction is deliberate and documented rather than
+    """(f2_seed, b2_seed, b2nc_seed) from the nbar2_0 argument. A TUPLE of length 2 is the
+    (f2, b2) pair and of length 3 the two-population triple (f2, b2_coupled, b2_uncoupled);
+    anything else (scalar, list, ndarray) is f2 alone and leaves the ytterbium to be seeded from
+    its quasi-equilibrium. The tuple/list distinction is deliberate and documented rather than
     sniffed from shapes -- a 2-node mesh would otherwise make `[0.3, 0.4]` ambiguous."""
     if isinstance(nbar2_0, tuple):
-        if len(nbar2_0) != 2:
-            raise ValueError("simulate_transient(nbar2_0=...): a tuple seed must be the pair "
-                             "(f2, b2) for the co-doped amplifier; got length %d" % len(nbar2_0))
-        return nbar2_0[0], nbar2_0[1]
-    return nbar2_0, None
+        if len(nbar2_0) == 2:
+            return nbar2_0[0], nbar2_0[1], None
+        if len(nbar2_0) == 3:
+            return nbar2_0[0], nbar2_0[1], nbar2_0[2]
+        raise ValueError("simulate_transient(nbar2_0=...): a tuple seed must be the pair "
+                         "(f2, b2) -- or the triple (f2, b2_coupled, b2_uncoupled) for a "
+                         "two-population co-doped amplifier; got length %d" % len(nbar2_0))
+    return nbar2_0, None, None
 
 
 def simulate_transient_eryb(amp, t_grid, *,
@@ -675,10 +716,21 @@ def simulate_transient_eryb(amp, t_grid, *,
     at a given Er state, so starting it at 0 would inject a spurious millisecond of Yb charging
     that the caller did not ask for. nbar2_0 = None seeds both from amp.solve() at the first drive.
 
+    THREE RESERVOIRS. When the amplifier carries an UNCOUPLED ytterbium pool (yb_coupled_fraction
+    < 1, a secondary transfer k_tr2 > 0 or a migration rate > 0 -- eryb._two_pop), the state is
+    the TRIPLE y = (f2, b2c, b2nc) and the very same exponential Rosenbrock step is taken with the
+    exact 3x3 Jacobian eryb._fb_jacobian3, through the size-parametrized kernel _phi1_dt_nxn. The
+    two-reservoir step is that kernel at n = 2, not a separate scheme. nbar2_0 then also accepts a
+    TRIPLE (f2_0, b2c_0, b2nc_0); a PAIR seeds b2nc from the same quasi-equilibrium closed form as
+    b2c, and None seeds all three from amp.solve().
+
     RETURNS a TransientResult with nbar2_zt = f2(t, z) and the Yb inversion history on
-    meta['beta_yb'] (Nt, Nz), alongside the usual resolved ASE arrays, per-signal gain, channel
-    plan and (opt-in) full profile matrix. frame_as_steady(i) works on the result and carries
-    f2, b2 and both ions' cross-sections onto the frame.
+    meta['beta_yb'] (Nt, Nz) -- the POPULATION-WEIGHTED inversion f b2c + (1-f) b2nc, which is
+    what the optical field sees and what the one-pool model has always reported -- alongside the
+    usual resolved ASE arrays, per-signal gain, channel plan and (opt-in) full profile matrix.
+    With two pools meta['beta_yb_coupled'] and meta['beta_yb_uncoupled'] carry the pools
+    separately (both None-free only in that case). frame_as_steady(i) works on the result and
+    carries f2, b2 and both ions' cross-sections onto the frame.
 
     VALIDITY. The same audit-A-7 quasi-static monitor as the single-ion march (frozen-step ASE
     power against launched power, and the ASE gain integral), reported identically on
@@ -689,6 +741,16 @@ def simulate_transient_eryb(amp, t_grid, *,
     resolved -- correct for the endpoints, first-order on the path), and
     meta['max_population_overshoot'], the largest excursion outside [0, 1] the clip had to undo."""
     _no_raman(amp)
+    if getattr(amp, "_Tz", None) is not None:
+        raise NotImplementedError(
+            "simulate_transient: this co-doped amplifier carries an axial temperature profile "
+            "(set_temperature_profile / solve_with_thermal_feedback), which the march does not "
+            "yet apply -- the frozen-population step would silently propagate the COLD "
+            "cross-sections and disagree with amp.solve() by dB. Call "
+            "amp.clear_temperature_profile() to march the isothermal amplifier, or use "
+            "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state.")
+    two_pop = bool(getattr(amp, "_two_pop", False))
+    fc = float(getattr(amp, "_fc", 1.0))
     pl = amp._plan()
     lam, u, is_ase, kind = pl["lam"], pl["u"], np.asarray(pl["is_ase"], bool), list(pl["kind"])
     bc0 = np.asarray(pl["bc"], float)
@@ -735,37 +797,69 @@ def simulate_transient_eryb(amp, t_grid, *,
         g = (g_e_er * f - g_a_er * (1.0 - f) + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
         return g, s_er_col * f + s_yb_col * b
 
-    # ---- seed both reservoirs --------------------------------------------------------------
+    # ---- seed the reservoirs ---------------------------------------------------------------
     t0 = float(t_grid[0])
     bc_0 = boundary(t0)
     b2_seed_shift = 0.0
+    b2n = None
     if nbar2_0 is None:
         amp0 = _amp_with_boundary(amp, bc_0, sig_idx, pmp_idx, kind)
         r0 = amp0.solve(n_nodes=n_nodes)
         f2 = np.interp(z, r0.z_m, np.asarray(r0.nbar2_z, float))
-        b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_z"], float))
+        if two_pop:
+            b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_coupled_z"], float))
+            b2n = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_uncoupled_z"], float))
+        else:
+            b2 = np.interp(z, r0.z_m, np.asarray(r0.meta["beta_yb_z"], float))
     else:
-        f_seed, b_seed = _split_eryb_seed(nbar2_0)
+        f_seed, b_seed, bn_seed = _split_eryb_seed(nbar2_0)
+        if bn_seed is not None and not two_pop:
+            raise ValueError("simulate_transient(nbar2_0=...): a TRIPLE seed was given but this "
+                             "amplifier has ONE ytterbium pool (yb_coupled_fraction = 1, "
+                             "k_tr2 = 0, no migration), so the seed must be the pair (f2, b2)")
         f2 = np.broadcast_to(np.asarray(f_seed, float), z.shape).astype(float).copy()
-        if b_seed is not None:
+        if two_pop:
+            b2n = (np.broadcast_to(np.asarray(bn_seed, float), z.shape).astype(float).copy()
+                   if bn_seed is not None else None)
+        if b_seed is not None and (b2n is not None or not two_pop):
             b2 = np.broadcast_to(np.asarray(b_seed, float), z.shape).astype(float).copy()
         else:
-            b2 = np.zeros_like(f2)
+            # Quasi-equilibrium seed, iterated against the frozen-population propagation. With
+            # two pools the closed form returns BOTH inversions at the same fixed f2, so the
+            # uncoupled reservoir is seeded consistently rather than at zero -- exactly the
+            # argument that put the coupled one at its quasi-equilibrium.
+            if b_seed is not None:
+                b2 = np.broadcast_to(np.asarray(b_seed, float), z.shape).astype(float).copy()
+            else:
+                b2 = np.zeros_like(f2)
+            if two_pop and b2n is None:
+                b2n = np.zeros_like(f2)
             for _ in range(24):
-                g, s = g_s(f2, b2)
+                g, s = g_s(f2, b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n)
                 P0 = _propagate_fixed(z, g, s, bc_0, u)
                 _ra_e, _re_e, ra_y, re_y = amp._rates_profile(c, P0)
-                b_new = np.clip(amp._b2_quasi_equilibrium(ra_y, re_y, f2, b2), 0.0, 1.0)
-                b2_seed_shift = float(np.max(np.abs(b_new - b2)))
+                qe = amp._b2_quasi_equilibrium(ra_y, re_y, f2, b2)
+                if two_pop:
+                    b_new, bn_new = np.clip(qe[0], 0.0, 1.0), np.clip(qe[1], 0.0, 1.0)
+                    b2_seed_shift = float(max(np.max(np.abs(b_new - b2)),
+                                              np.max(np.abs(bn_new - b2n))))
+                    b2n = 0.5 * (b2n + bn_new)
+                else:
+                    b_new = np.clip(qe, 0.0, 1.0)
+                    b2_seed_shift = float(np.max(np.abs(b_new - b2)))
                 b2 = 0.5 * (b2 + b_new)              # under-relaxed: the fixed point is on a
                 if b2_seed_shift < 1e-12:            # pump the Yb itself depletes
                     break
     f2 = np.clip(f2, 0.0, 1.0)
     b2 = np.clip(b2, 0.0, 1.0)
+    if b2n is not None:
+        b2n = np.clip(b2n, 0.0, 1.0)
 
     # ---- outputs ---------------------------------------------------------------------------
     f2_zt = np.empty((Nt, z.size))
     b2_zt = np.empty((Nt, z.size))
+    b2c_zt = np.empty((Nt, z.size)) if two_pop else None
+    b2n_zt = np.empty((Nt, z.size)) if two_pop else None
     sig_out = np.empty((Nt, len(sig_idx)))
     pmp_out = np.empty((Nt, len(pmp_idx)))
     gain_dB = np.empty((Nt, len(sig_idx)))
@@ -795,7 +889,8 @@ def simulate_transient_eryb(amp, t_grid, *,
     for it in range(Nt):
         t = float(t_grid[it])
         bc = boundary(t)
-        g, s = g_s(f2, b2)
+        bb = b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n
+        g, s = g_s(f2, bb)
         P = _propagate_fixed(z, g, s, bc, u)
         if not np.all(np.isfinite(P)):
             nonfinite = True
@@ -814,7 +909,10 @@ def simulate_transient_eryb(amp, t_grid, *,
             else:
                 nonfinite = True
         f2_zt[it] = f2
-        b2_zt[it] = b2
+        b2_zt[it] = bb
+        if two_pop:
+            b2c_zt[it] = b2
+            b2n_zt[it] = b2n
         if ase_f_zt is not None:
             ase_f_zt[it] = P[ase_fwd_idx, -1]
         if ase_b_zt is not None:
@@ -832,21 +930,47 @@ def simulate_transient_eryb(amp, t_grid, *,
         # ---- advance the coupled pair (exponential Rosenbrock; see the block comment) -------
         dt = float(t_grid[it + 1] - t)
         rates = amp._rates_profile(c, P)
-        f_rhs, b_rhs = amp._fb_rhs(rates[0], rates[1], rates[2], rates[3], f2, b2)
-        j11, j12, j21, j22 = amp._fb_jacobian(rates[0], rates[1], rates[2], rates[3], f2, b2)
-        worst_dt_rate = max(worst_dt_rate, float(np.max(
-            np.maximum(np.abs(j11) + np.abs(j12), np.abs(j21) + np.abs(j22)))) * abs(dt))
-        m11, m12, m21, m22 = _phi1_dt_2x2(j11, j12, j21, j22, dt)
-        f_new = f2 + m11 * f_rhs + m12 * b_rhs
-        b_new = b2 + m21 * f_rhs + m22 * b_rhs
-        if np.all(np.isfinite(f_new)) and np.all(np.isfinite(b_new)):
-            worst_overshoot = max(worst_overshoot,
-                                  float(np.max(np.maximum(np.maximum(-f_new, f_new - 1.0),
-                                                          np.maximum(-b_new, b_new - 1.0)))))
+        if two_pop:
+            rhs = amp._fb_rhs3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
+            J = amp._fb_jacobian3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
+            y = (f2, b2, b2n)
+        else:
+            rhs = amp._fb_rhs(rates[0], rates[1], rates[2], rates[3], f2, b2)
+            j11, j12, j21, j22 = amp._fb_jacobian(rates[0], rates[1], rates[2], rates[3], f2, b2)
+            J = [[j11, j12], [j21, j22]]
+            y = (f2, b2)
+        n_st = len(y)
+        rowsum = np.abs(J[0][0])
+        for _j in range(1, n_st):
+            rowsum = rowsum + np.abs(J[0][_j])
+        for _i in range(1, n_st):
+            acc = np.abs(J[_i][0])
+            for _j in range(1, n_st):
+                acc = acc + np.abs(J[_i][_j])
+            rowsum = np.maximum(rowsum, acc)
+        worst_dt_rate = max(worst_dt_rate, float(np.max(rowsum)) * abs(dt))
+        M = _phi1_dt_nxn(J, dt)
+        y_new = []
+        for _i in range(n_st):
+            # accumulate STARTING FROM y[i], left to right -- the association the two-reservoir
+            # step has always used (y + m0 r0) + m1 r1. Summing the increment first and adding it
+            # to y last is algebraically the same and numerically is not: it moves the pinned
+            # one-pool march by ~1 ULP per node, which would falsify the byte-identity gate.
+            acc_y = y[_i] + M[_i][0] * rhs[0]
+            for _j in range(1, n_st):
+                acc_y = acc_y + M[_i][_j] * rhs[_j]
+            y_new.append(acc_y)
+        if all(np.all(np.isfinite(v)) for v in y_new):
+            over = np.maximum(-y_new[0], y_new[0] - 1.0)
+            for v in y_new[1:]:
+                over = np.maximum(over, np.maximum(-v, v - 1.0))
+            worst_overshoot = max(worst_overshoot, float(np.max(over)))
         else:
             nonfinite = True
-        f2 = np.clip(f_new, 0.0, 1.0)
-        b2 = np.clip(b_new, 0.0, 1.0)
+        f2 = np.clip(y_new[0], 0.0, 1.0)
+        b2 = np.clip(y_new[1], 0.0, 1.0)
+        if two_pop:
+            b2n = np.clip(y_new[2], 0.0, 1.0)
 
     reasons = []
     if nonfinite:
@@ -883,6 +1007,11 @@ def simulate_transient_eryb(amp, t_grid, *,
             "m_modes": int(m_modes), "mcc": None,
             # ---- co-doped state and provenance ----
             "beta_yb": b2_zt,                       # (Nt, Nz) the Yb inversion history
+            # the two pools separately (None unless an uncoupled pool exists); beta_yb above is
+            # their population-weighted mean, i.e. what the optical field sees
+            "beta_yb_coupled": b2c_zt, "beta_yb_uncoupled": b2n_zt,
+            "yb_coupled_fraction": fc, "k_tr2_m3_s": amp._k_tr2,
+            "yb_migration_rate_per_s": amp._w_mig,
             "beta_yb_seed_residual": float(b2_seed_shift),
             "max_dt_times_rate": float(worst_dt_rate),
             "max_population_overshoot": float(worst_overshoot),
