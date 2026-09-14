@@ -142,6 +142,24 @@ and drives Q(z) from `_heat_profile_W_per_m` -- the rate-balance dissipation (qu
 transfer defect + K2 defect + both ions' fluorescence + background loss), not a numerical
 gradient of the net flux.
 
+TWO OPT-IN CO-DOPED TEMPERATURE EFFECTS ON TOP OF THAT (2026-09-15; both default OFF and both
+exactly the identity at T = T_ref, so they change nothing without a profile). `rate_temperature=
+RateTemperatureLaw(...)` gives k_tr, K2 and W_mig an Arrhenius temperature dependence -- Cheng
+et al. 2022 measure the transfer rate 1/tau_1 - 1/tau_2 rising 8.5% over 300-480 K, which is
+`RATE_ARRHENIUS_CHENG_2022`. `yb_stark_thermal=YbStarkThermal(...)` applies the Boltzmann
+depopulation of the Stark level the 976 nm line uses (Canat 2006 / Dussardier 2005: 7% at 300 K,
+13% at 400 K) to BOTH Yb cross-sections in a narrow band about the zero line. The second is
+ORTHOGONAL to the McCumber factor and does not double count it: at the Yb zero line h nu =
+eps_Yb, so mcc_Yb is identically 1 there at every temperature, and mcc never touches sigma_a at
+all. Both raise the 1-um parasitic threshold of a hot fiber, which is the qualitative effect
+Canat / Dussardier and Morasse 2007 report (Morasse: a core-temperature rise moved his measured
+1-um onset from 14 W to 35 W of pump).
+
+CALIBRATION AND FITTING (`eryb_fit.py`). `eryb_calibrate_pools` fits (f, k_tr, W_mig) to measured
+Yb fluorescence decays and quenched Yb lifetimes; `eryb_fit_to_device` fits (f, k_tr) jointly to
+a device's measured output power and 1-um ASE fraction with W_mig held. The recommended
+phosphosilicate migration rate is `eryb_fit.W_MIG_PHOSPHOSILICATE_PER_S`.
+
 References: Karasek, IEEE JQE 33(10):1699 (1997) [Er:Yb rate model, k_tr]; Laroche, Girard,
 Sahu, Clarkson, Nilsson, JOSA B 23(2):195 (2006) [k_tr measured in phosphosilicate Er:Yb FIBER,
 ~6.4e-23 to 1.1e-22 m^3/s]; Hwang, Jiang, Luo, Watson, Sorbello, Peyghambarian, JOSA B 17(5):833
@@ -164,6 +182,7 @@ FORMULATION DOSSIER MODULE 1.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -178,7 +197,182 @@ from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, 
                                                     _frozen_profile_interp,
                                                     _relaxation_residuals)
 
-__all__ = ["ErYbAmplifier"]
+__all__ = ["ErYbAmplifier", "RateTemperatureLaw", "YbStarkThermal",
+           "YB_STARK_976_CANAT_DUSSARDIER", "RATE_ARRHENIUS_CHENG_2022",
+           "RATE_ARRHENIUS_30PCT_300_480K"]
+
+
+@dataclass(frozen=True)
+class RateTemperatureLaw:
+    """ARRHENIUS temperature scaling of the three CO-DOPED rate coefficients (OPT-IN; the
+    all-zero default is the exact identity and reproduces the isothermal model bit for bit).
+
+        rate(T) = rate(T_ref) exp[-(Ea/kB) (1/T - 1/T_ref)]
+
+    with Ea/kB in KELVIN -- one activation temperature per coefficient, exposed rather than
+    buried, so a caller who disagrees with the calibration below can state their own. T_ref is
+    NOT carried here: it is the T_ref of the amplifier's own `set_temperature_profile`, which is
+    what makes a UNIFORM profile at T_ref an exact identity (gated) rather than a near one.
+
+    WHAT IS MEASURED (Cheng et al., Materials 15(3), 996 (2022), Table 2, Er/Yb/P silica core
+    glass, external heating 300 -> 480 K; the only temperature series on a co-doped
+    phosphosilicate located by the 2026-09-14 literature validation):
+
+        quantity                                300 K        480 K       change
+        Yb decay FAST component tau_1           8.20 us      7.56 us     -7.8%
+        Yb decay SLOW component tau_2           1333.76 us   1279.25 us  -4.1%
+        Er 4I13/2 lifetime                      9.12 ms      8.14 ms     -10.7%
+        sigma_a_Yb(974 nm)                      9.43e-25     5.86e-25    -37.9%
+        sigma_a_Yb(940 nm)                      1.73e-25     1.73e-25    0 (stated insensitive)
+        sigma_a_Yb(915 nm)                      1.73e-25     1.26e-25    -27.2%
+        sigma_a_Yb(1018 nm)                     2.9e-26      6.0e-26     +107%
+
+    The TRANSFER INDICATOR this model actually carries is the transfer rate itself, and the two
+    decay components give it directly as R_tr = 1/tau_1 - 1/tau_2: 1.2120e5 -> 1.3149e5 1/s, i.e.
+    +8.5% over 300 -> 480 K. `RATE_ARRHENIUS_CHENG_2022` is the Arrhenius law fitted to exactly
+    that pair (Ea/kB = 65 K); it scales k_tr ONLY, because Cheng measure no separate indicator
+    for the secondary transfer or for migration and assuming the same activation energy for them
+    would be an invention. `RATE_ARRHENIUS_30PCT_300_480K` (Ea/kB = 210 K) is the law for the
+    frequently-quoted "+30% transfer degradation over 300 -> 480 K" reading; NO measurement
+    supporting that larger figure is present in the 2026-09-14 anchor collection, so it is
+    shipped as a clearly-labelled alternative and NOT as the calibration.
+
+    Sign convention: a POSITIVE Ea makes the rate RISE with temperature (the measured direction
+    for the Yb -> Er transfer), because 1/T - 1/T_ref < 0 for T > T_ref.
+    """
+
+    k_tr_ea_over_k_K: float = 0.0
+    k_tr2_ea_over_k_K: float = 0.0
+    w_mig_ea_over_k_K: float = 0.0
+
+    @property
+    def is_identity(self) -> bool:
+        """True when every activation temperature is exactly 0 -- the constructor then drops the
+        law entirely, so an identity law is byte-identical to passing None."""
+        return (float(self.k_tr_ea_over_k_K) == 0.0 and float(self.k_tr2_ea_over_k_K) == 0.0
+                and float(self.w_mig_ea_over_k_K) == 0.0)
+
+    @staticmethod
+    def ea_over_k_from_ratio(ratio: float, T1_K: float, T2_K: float) -> float:
+        """The activation temperature Ea/kB [K] for which rate(T2)/rate(T1) = `ratio`. The ONE
+        place the two shipped constants below are derived, so neither is a transcribed number."""
+        if not (ratio > 0.0 and T1_K > 0.0 and T2_K > 0.0 and T1_K != T2_K):
+            raise ValueError("ea_over_k_from_ratio: need ratio > 0 and two distinct T > 0")
+        return float(np.log(ratio) / (1.0 / float(T1_K) - 1.0 / float(T2_K)))
+
+    def scale(self, T_K, T_ref_K):
+        """(s_k_tr, s_k_tr2, s_w_mig) multipliers at temperature(s) T_K about T_ref_K. Exactly
+        (1, 1, 1) at T == T_ref for any activation energy, and exactly (1, 1, 1) everywhere for
+        the identity law."""
+        dinv = 1.0 / np.asarray(T_K, float) - 1.0 / float(T_ref_K)
+        return (np.exp(-float(self.k_tr_ea_over_k_K) * dinv),
+                np.exp(-float(self.k_tr2_ea_over_k_K) * dinv),
+                np.exp(-float(self.w_mig_ea_over_k_K) * dinv))
+
+
+@dataclass(frozen=True)
+class YbStarkThermal:
+    """THERMAL DEPOPULATION of the Stark level the 976 nm ytterbium line uses (OPT-IN, default
+    off). Both the 2F7/2 ground manifold and the 2F5/2 excited manifold are Stark-split; the
+    976 nm line is the ZERO-PHONON line joining the LOWEST sub-level of each. As the fiber heats,
+    population spreads into the higher sub-levels and the zero line loses oscillator strength in
+    proportion to the Boltzmann occupancy of the level it starts and ends on.
+
+        p0(T) = 1 / Z(T),   Z(T) = 1 + g exp(-Delta_E / (kB T)),
+        factor(T) = p0(T) / p0(T_ref) = Z(T_ref) / Z(T)   <= 1 for T > T_ref
+
+    -- a two-level effective manifold (one lumped excited Stark level of weight `degeneracy` at
+    `delta_E_over_k_K` kelvin above the lowest), which is the simplest form that reproduces the
+    measured pair. Canat (2006) / Dussardier (2005) give the 976 nm terminal level's thermal
+    depopulation as 7% at 300 K and 13% at 400 K; `YB_STARK_976_CANAT_DUSSARDIER` is built from
+    those two points by `from_upper_fractions`, so the ANCHORS, not a transcribed (Delta_E, g),
+    are what the code carries. The resulting Delta_E/kB is 823 K = 572 cm^-1, the right magnitude
+    for the Yb 2F5/2 Stark splitting.
+
+    WHY IT IS NOT ALREADY IN THE McCUMBER SCALING, and why applying it does NOT double count.
+    `set_temperature_profile` scales sigma_e by exp[(eps_ion - h nu)(1/kT - 1/kT_ref)]. At the
+    ytterbium ZERO LINE h nu = eps_Yb exactly, so that factor is IDENTICALLY 1 at 976 nm at every
+    temperature (gated), and it never touches sigma_a at any wavelength. The Stark depopulation
+    is therefore orthogonal to it by construction: McCumber moves the RATIO sigma_e/sigma_a away
+    from the zero line, this moves the SCALE of both AT the zero line.
+
+    BOTH cross-sections are multiplied by the SAME factor, and that is forced rather than chosen:
+    McCumber requires sigma_e = sigma_a at the zero line at every temperature, so any scale
+    applied to one must be applied to the other or the relation is broken.
+
+    BAND. The factor is applied only to channels within `band_half_width_m` of `band_center_m`
+    (default 976 +/- 15 nm, which covers the 5.6 nm FWHM phosphosilicate pump line and excludes
+    both 940 nm -- which Cheng measure to be temperature-INSENSITIVE -- and 1018 nm, whose
+    cross-section RISES with temperature because it terminates on a thermally populated upper
+    ground-manifold level). Outside the band nothing is scaled: this is a zero-line model, not a
+    spectrum model, and pretending otherwise would get the 1-um band's sign wrong.
+
+    SIZE CHECK. At 480 K this gives 0.89 of the 300 K cross-section, while Cheng MEASURE
+    sigma_a_Yb(974 nm) falling to 0.62 -- so the Stark depopulation accounts for about a third of
+    the measured loss and thermal line broadening (not modelled) for the rest. Read it as a LOWER
+    BOUND on the pump-band softening.
+    """
+
+    delta_E_over_k_K: float
+    degeneracy: float = 1.0
+    band_center_m: float = 976e-9
+    band_half_width_m: float = 15e-9
+
+    def __post_init__(self):
+        if not (self.delta_E_over_k_K > 0.0):
+            raise ValueError("YbStarkThermal: delta_E_over_k_K must be > 0")
+        if not (self.degeneracy > 0.0):
+            raise ValueError("YbStarkThermal: degeneracy must be > 0")
+        if not (self.band_center_m > 0.0 and self.band_half_width_m > 0.0):
+            raise ValueError("YbStarkThermal: band_center_m and band_half_width_m must be > 0")
+
+    @classmethod
+    def from_upper_fractions(cls, T1_K: float, frac1: float, T2_K: float, frac2: float, **kw):
+        """Build the two-level manifold from two MEASURED upper-Stark-level population fractions
+        (1 - p0) at two temperatures -- an exact 2-point inversion, not a fit."""
+        x1 = float(frac1) / (1.0 - float(frac1))
+        x2 = float(frac2) / (1.0 - float(frac2))
+        if not (x1 > 0.0 and x2 > 0.0):
+            raise ValueError("from_upper_fractions: fractions must lie strictly in (0, 1)")
+        dE = float(np.log(x2 / x1) / (1.0 / float(T1_K) - 1.0 / float(T2_K)))
+        g = float(x1 * np.exp(dE / float(T1_K)))
+        return cls(delta_E_over_k_K=dE, degeneracy=g, **kw)
+
+    def upper_fraction(self, T_K):
+        """1 - p0(T): the fraction of the manifold NOT in the level the zero line uses."""
+        x = float(self.degeneracy) * np.exp(-float(self.delta_E_over_k_K) / np.asarray(T_K, float))
+        return x / (1.0 + x)
+
+    def factor(self, T_K, T_ref_K):
+        """Z(T_ref)/Z(T): the multiplier on BOTH Yb cross-sections inside the band. Exactly 1.0
+        at T == T_ref."""
+        gg = float(self.degeneracy)
+        dE = float(self.delta_E_over_k_K)
+        z_ref = 1.0 + gg * np.exp(-dE / float(T_ref_K))
+        z = 1.0 + gg * np.exp(-dE / np.asarray(T_K, float))
+        return z_ref / z
+
+    def band_mask(self, lambda_m):
+        """Boolean (K,) mask of the channels the factor applies to."""
+        lam = np.asarray(lambda_m, float)
+        return np.abs(lam - float(self.band_center_m)) <= float(self.band_half_width_m)
+
+
+# The 976 nm terminal-level thermal depopulation Canat (2006) / Dussardier (2005) quote: 7% at
+# 300 K, 13% at 400 K -> Delta_E/kB = 823 K (572 cm^-1), degeneracy 1.17. A DOCUMENTED CONSTANT,
+# not a default: ErYbAmplifier(yb_stark_thermal=...) is opt-in and defaults to None.
+YB_STARK_976_CANAT_DUSSARDIER = YbStarkThermal.from_upper_fractions(300.0, 0.07, 400.0, 0.13)
+
+# Arrhenius law fitted to Cheng 2022's OWN two decay components: the transfer rate
+# R_tr = 1/tau_1 - 1/tau_2 rises from 1.2120e5 to 1.3149e5 1/s over 300 -> 480 K (+8.5%).
+RATE_ARRHENIUS_CHENG_2022 = RateTemperatureLaw(
+    k_tr_ea_over_k_K=RateTemperatureLaw.ea_over_k_from_ratio(
+        (1.0 / 7.56e-6 - 1.0 / 1279.25e-6) / (1.0 / 8.20e-6 - 1.0 / 1333.76e-6), 300.0, 480.0))
+
+# The larger "+30% over 300 -> 480 K" transfer-degradation figure, shipped as a labelled
+# ALTERNATIVE: no measurement supporting it is present in the 2026-09-14 anchor collection.
+RATE_ARRHENIUS_30PCT_300_480K = RateTemperatureLaw(
+    k_tr_ea_over_k_K=RateTemperatureLaw.ea_over_k_from_ratio(1.30, 300.0, 480.0))
 
 
 class ErYbAmplifier:
@@ -235,6 +429,18 @@ class ErYbAmplifier:
         Er pair-induced quenching (either convention), C_up, and the Yb photodarkening
         equilibrium gray loss -- the SAME object and the same semantics FiberAmplifier takes
         (concentration.py). None (default) -> the ideal model, bit-identical.
+    rate_temperature : RateTemperatureLaw, optional
+        Arrhenius temperature scaling of k_tr, K2 and W_mig (default None = isothermal
+        coefficients, bit-identical). ACTS ONLY when an axial temperature profile is set: the
+        law's T_ref is the profile's own, so a UNIFORM profile at T_ref is an exact identity.
+        `RATE_ARRHENIUS_CHENG_2022` is the shipped calibration (+8.5% on k_tr over 300-480 K,
+        from Cheng 2022's own two decay components).
+    yb_stark_thermal : YbStarkThermal, optional
+        Thermal depopulation of the Stark level the 976 nm Yb line uses -- a multiplier on BOTH
+        Yb cross-sections inside a narrow band about the zero line (default None). Also acts only
+        under a temperature profile. `YB_STARK_976_CANAT_DUSSARDIER` is the shipped constant
+        (7% depopulated at 300 K, 13% at 400 K). It is ORTHOGONAL to the McCumber scaling, which
+        is identically 1 at the Yb zero line and never touches sigma_a -- see the class.
     """
 
     def __init__(self, er_ion: RareEarthIon, yb_ion: RareEarthIon, fiber: FiberSpec,
@@ -243,7 +449,7 @@ class ErYbAmplifier:
                  a32_per_s: float = 5.0e5, yb_ase: Optional[AseBand] = None,
                  upconversion_C_up: float = 0.0, yb_coupled_fraction: float = 1.0,
                  k_tr2_m3_s: float = 0.0, yb_migration_rate_per_s: float = 0.0,
-                 concentration=None):
+                 concentration=None, rate_temperature=None, yb_stark_thermal=None):
         if not (n_yb_m3 > 0.0):
             raise ValueError("ErYbAmplifier: n_yb_m3 (N_Yb) must be > 0")
         if not (a32_per_s > 0.0):
@@ -274,6 +480,16 @@ class ErYbAmplifier:
         # byte-identity claim a structural property and not a numerical coincidence.
         self._two_pop = (self._fc != 1.0 or self._k_tr2 > 0.0 or self._w_mig > 0.0)
         self._Tz = None                     # optional axial T profile (set_temperature_profile)
+        # An IDENTITY rate law collapses to the None path exactly as an identity
+        # ConcentrationModel does, so `RateTemperatureLaw()` is byte-identical to omitting it.
+        if rate_temperature is not None and getattr(rate_temperature, "is_identity", False):
+            rate_temperature = None
+        self.rate_temperature = rate_temperature
+        self.yb_stark_thermal = yb_stark_thermal
+        # THE predicate that decides whether a set temperature profile does anything BEYOND the
+        # per-ion McCumber sigma_e scaling. False (the default) -> _mcc_matrices' 3rd and 4th
+        # slots are None and every consumer takes its untouched pre-2026-09-15 branch.
+        self._t_rates = (rate_temperature is not None or yb_stark_thermal is not None)
         # an all-default (identity) model collapses to the None path: truly byte-identical
         if concentration is not None and getattr(concentration, "is_identity", False):
             concentration = None
@@ -305,8 +521,8 @@ class ErYbAmplifier:
         """Clone through THIS class's own constructor, carrying EVERY opt-in: both ions'
         spectroscopy, the fiber, both ASE bands, the Yb density, the forward/back transfer
         coefficients, A_32, the Er upconversion coefficient, the two-population parameters
-        (coupled fraction, secondary transfer, migration), the ConcentrationModel and the axial
-        temperature profile. The single place that lists what
+        (coupled fraction, secondary transfer, migration), the ConcentrationModel, the rate
+        temperature law, the Yb Stark-thermal model and the axial temperature profile. The single place that lists what
         an ErYb clone must carry (the FiberAmplifier._clone analogue); the three public protocol
         methods below all route through it, so adding an opt-in to __init__ needs ONE edit here.
         PRIVATE -- callers outside the class use with_signals / with_pumps / without_ase."""
@@ -320,7 +536,9 @@ class ErYbAmplifier:
                             upconversion_C_up=self.upconversion_C_up,
                             yb_coupled_fraction=self._fc, k_tr2_m3_s=self._k_tr2,
                             yb_migration_rate_per_s=self._w_mig,
-                            concentration=self.concentration)
+                            concentration=self.concentration,
+                            rate_temperature=self.rate_temperature,
+                            yb_stark_thermal=self.yb_stark_thermal)
         new._Tz = self._Tz                  # the axial T profile rides along (audit A-5)
         return new
 
@@ -446,10 +664,24 @@ class ErYbAmplifier:
         Yb 2F5/2 ~974 nm), so a single shared factor would be wrong by orders of magnitude in the
         pump band: each spectrum is scaled about its own line, which is the co-doped statement of
         FiberAmplifier.set_temperature_profile and reproduces spectroscopy.at_temperature applied
-        to BOTH ions exactly for a uniform profile (gated). sigma_a and the two lifetimes are
-        held (their T-dependence is second order at these Delta-T; spectroscopy docstring), and
-        so are k_tr, K2 and W_mig -- their measured temperature dependence (Cheng 2022: the Yb
-        transfer component moves 8.20 -> 7.56 us over 300-480 K, ~8%) is NOT modelled here.
+        to BOTH ions exactly for a uniform profile (gated). The two LIFETIMES are held (their
+        T-dependence is second order at these Delta-T; spectroscopy docstring).
+
+        WHAT ELSE THE PROFILE DRIVES, when the constructor was given it (2026-09-15). Both of
+        these are OPT-IN and both are exactly the identity at T == T_ref, so a uniform profile at
+        the reference temperature reproduces the isothermal solve bit for bit whether they are
+        set or not:
+          * `rate_temperature=RateTemperatureLaw(...)` -- Arrhenius scaling of k_tr, K2 and
+            W_mig, per z. Cheng 2022 measure the Yb transfer component moving 8.20 -> 7.56 us
+            over 300-480 K, i.e. the transfer RATE 1/tau_1 - 1/tau_2 rising 8.5%;
+            `RATE_ARRHENIUS_CHENG_2022` is that law. k_back is NOT scaled (no measurement, and
+            it is 0 by default).
+          * `yb_stark_thermal=YbStarkThermal(...)` -- the Boltzmann depopulation of the Stark
+            level the 976 nm line uses, a multiplier on BOTH Yb cross-sections inside a narrow
+            band about the zero line. It is ORTHOGONAL to the McCumber factor above, which is
+            identically 1 at the Yb zero line (h nu = eps_Yb there) and never touches sigma_a at
+            any wavelength, so the two do not double count; `YB_STARK_976_CANAT_DUSSARDIER` is
+            the shipped constant. sigma_a is otherwise still held.
 
         Cleared with clear_temperature_profile(). Used by thermal.solve_with_thermal_feedback,
         which drives Q(z) from this class's own rate balance (`_heat_profile_W_per_m`)."""
@@ -465,17 +697,34 @@ class ErYbAmplifier:
         self._Tz = None
 
     def _mcc_matrices(self, pl, z):
-        """((K, M), (K, M)) McCumber sigma_e scale factors for the Er and the Yb spectra on the
-        mesh z, or None when no profile is set (in which case every caller takes the untouched
-        no-temperature branch)."""
+        """THE temperature bundle on the mesh z, or None when no profile is set (in which case
+        every caller takes the untouched no-temperature branch). A 4-tuple:
+
+            [0] (K, M) McCumber sigma_e scale for the ERBIUM spectrum
+            [1] (K, M) McCumber sigma_e scale for the YTTERBIUM spectrum
+            [2] (K, M) Yb Stark-band scale on BOTH Yb cross-sections, or None (YbStarkThermal)
+            [3] (3, M) Arrhenius scale for (k_tr, K2, W_mig), or None (RateTemperatureLaw)
+
+        Slots 2 and 3 are None unless the caller opted in, and every consumer branches on
+        `is None` rather than multiplying by ones -- which is what keeps a profiled amplifier
+        with neither opt-in byte-identical to the pre-2026-09-15 two-slot version."""
         if getattr(self, "_Tz", None) is None:
             return None
         zt, Tt, T_ref = self._Tz
         T = np.interp(np.asarray(z, float), zt, Tt)
         nu = C_LIGHT / pl["lam"]
         dinv = 1.0 / (KB * T) - 1.0 / (KB * T_ref)
+        stark = rscale = None
+        if getattr(self, "_t_rates", False):
+            if self.yb_stark_thermal is not None:
+                stark = np.ones((pl["lam"].size, T.size))
+                stark[self.yb_stark_thermal.band_mask(pl["lam"]), :] = \
+                    np.asarray(self.yb_stark_thermal.factor(T, T_ref), float)[None, :]
+            if self.rate_temperature is not None:
+                sc = self.rate_temperature.scale(T, T_ref)
+                rscale = np.vstack([np.broadcast_to(np.asarray(x, float), T.shape) for x in sc])
         return (np.exp(np.outer(float(self.er_ion.eps_J) - H_PLANCK * nu, dinv)),
-                np.exp(np.outer(float(self.yb_ion.eps_J) - H_PLANCK * nu, dinv)))
+                np.exp(np.outer(float(self.yb_ion.eps_J) - H_PLANCK * nu, dinv)), stark, rscale)
 
     # ---- z-local coupled algebra ---------------------------------------------------------
     @staticmethod
@@ -502,7 +751,7 @@ class ErYbAmplifier:
             f = f_new
         return f, False
 
-    def _solve_fb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float
+    def _solve_fb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float, rs=None
                   ) -> Tuple[float, float]:
         """Steady-state (f2, b2) at one z from the four per-ion rates. b2 is a closed form in f2
         (the Yb equation is linear in b2 for fixed f2); substituting it into the Er residual
@@ -516,6 +765,8 @@ class ErYbAmplifier:
         where both apply. Callers go through `_fbb`, which routes on `_two_pop`."""
         N_Er, N_Yb = self._n_er, self._n_yb
         k_tr, k_back, A32 = self._k_tr, self._k_back, self._a32
+        if rs is not None:
+            k_tr = k_tr * rs[0]                           # RateTemperatureLaw, this z only
         inv_tE, inv_tY = 1.0 / self._tau_er, 1.0 / self._tau_yb
         Cup = self.upconversion_C_up
         c = k_tr * N_Yb                                   # transfer-IN coefficient (x b2)
@@ -548,7 +799,7 @@ class ErYbAmplifier:
         b, _, _, _ = _b_phi(f)
         return float(min(max(f, 0.0), 1.0)), float(min(max(b, 0.0), 1.0))
 
-    def _solve_fbb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float
+    def _solve_fbb(self, Ra_Er: float, Re_Er: float, Ra_Yb: float, Re_Yb: float, rs=None
                    ) -> Tuple[float, float, float]:
         """Steady-state (f2, b2c, b2nc) at one z with TWO ytterbium pools, the secondary transfer
         K2 and the migration exchange -- the three-unknown counterpart of `_solve_fb`, entered
@@ -585,6 +836,10 @@ class ErYbAmplifier:
         fc = self._fc
         k_tr, k_back, A32 = self._k_tr, self._k_back, self._a32
         K2, Wm = self._k_tr2, self._w_mig
+        if rs is not None:
+            # RateTemperatureLaw at THIS z. k_back is deliberately NOT scaled: no temperature
+            # measurement of the back transfer exists and it is exactly 0 by default anyway.
+            k_tr, K2, Wm = k_tr * rs[0], K2 * rs[1], Wm * rs[2]
         inv_tE, inv_tY = 1.0 / self._tau_er, 1.0 / self._tau_yb
         Cup = self.upconversion_C_up
         c_in = k_tr * fc * N_Yb                       # transfer-IN coefficient (x b2c)
@@ -623,16 +878,16 @@ class ErYbAmplifier:
         return (float(min(max(f, 0.0), 1.0)), float(min(max(bc, 0.0), 1.0)),
                 float(min(max(bn, 0.0), 1.0)))
 
-    def _fbb(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb):
+    def _fbb(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs=None):
         """(f2, b2c, b2nc, bbar) at one z, routed to the one- or two-pool algebra. bbar is the
         POPULATION-WEIGHTED Yb inversion f b2c + (1-f) b2nc -- the only Yb quantity the optical
         field, the parasitic-gain diagnostic and the photodarkening law ever see. b2nc is None
         for the one-pool model, where bbar IS b2 (the same object, so the caller is bitwise
         unaffected)."""
         if self._two_pop:
-            f2, b2c, b2nc = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+            f2, b2c, b2nc = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
             return f2, b2c, b2nc, self._fc * b2c + (1.0 - self._fc) * b2nc
-        f2, b2 = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+        f2, b2 = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
         return f2, b2, None, b2
 
     def _dP(self, c, u, P, mcc=None):
@@ -641,21 +896,26 @@ class ErYbAmplifier:
         z (set_temperature_profile); None -- the default and the only path a profile-free
         amplifier takes -- runs the untouched isothermal arithmetic."""
         P = np.maximum(P, 0.0)
+        ga_yb, rs = c["g_a_yb"], None
         if mcc is None:
             Ra_Er = float(np.dot(c["flux_a_er"], P)); Re_Er = float(np.dot(c["flux_e_er"], P))
             Ra_Yb = float(np.dot(c["flux_a_yb"], P)); Re_Yb = float(np.dot(c["flux_e_yb"], P))
             ge_er, ge_yb, s_er, s_yb = c["g_e_er"], c["g_e_yb"], c["s_er"], c["s_yb"]
         else:
-            m_er, m_yb = mcc
+            m_er, m_yb, st, rs = mcc
+            fa_yb = c["flux_a_yb"] if st is None else c["flux_a_yb"] * st
+            fe_yb = c["flux_e_yb"] * m_yb if st is None else c["flux_e_yb"] * m_yb * st
             Ra_Er = float(np.dot(c["flux_a_er"], P))
             Re_Er = float(np.dot(c["flux_e_er"] * m_er, P))
-            Ra_Yb = float(np.dot(c["flux_a_yb"], P))
-            Re_Yb = float(np.dot(c["flux_e_yb"] * m_yb, P))
+            Ra_Yb = float(np.dot(fa_yb, P))
+            Re_Yb = float(np.dot(fe_yb, P))
             ge_er, ge_yb = c["g_e_er"] * m_er, c["g_e_yb"] * m_yb
             s_er, s_yb = c["s_er"] * m_er, c["s_yb"] * m_yb
-        f2, _b2c, _b2nc, b2 = self._fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+            if st is not None:
+                ga_yb, ge_yb, s_yb = c["g_a_yb"] * st, ge_yb * st, s_yb * st
+        f2, _b2c, _b2nc, b2 = self._fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
         g = (ge_er * f2 - c["g_a_er"] * (1.0 - f2)
-             + ge_yb * b2 - c["g_a_yb"] * (1.0 - b2) - c["loss"])
+             + ge_yb * b2 - ga_yb * (1.0 - b2) - c["loss"])
         if self.concentration is not None:
             # Yb photodarkening equilibrium gray loss at the POPULATION-WEIGHTED Yb inversion --
             # both pools darken the glass, and an uncoupled pool sits at a HIGHER inversion than
@@ -672,22 +932,28 @@ class ErYbAmplifier:
         M = P.shape[1]
         f2 = np.empty(M); b2 = np.empty(M)
         b2nc = np.empty(M) if self._two_pop else None
+        st_m = None if mcc is None else mcc[2]
+        rs_m = None if mcc is None else mcc[3]
         for j in range(M):
             Pj = np.maximum(P[:, j], 0.0)
+            rs = None if rs_m is None else rs_m[:, j]
             if mcc is None:
                 Ra_Er = float(np.dot(c["flux_a_er"], Pj))
                 Re_Er = float(np.dot(c["flux_e_er"], Pj))
                 Ra_Yb = float(np.dot(c["flux_a_yb"], Pj))
                 Re_Yb = float(np.dot(c["flux_e_yb"], Pj))
             else:
+                fa_yb = c["flux_a_yb"] if st_m is None else c["flux_a_yb"] * st_m[:, j]
+                fe_yb = (c["flux_e_yb"] * mcc[1][:, j] if st_m is None
+                         else c["flux_e_yb"] * mcc[1][:, j] * st_m[:, j])
                 Ra_Er = float(np.dot(c["flux_a_er"], Pj))
                 Re_Er = float(np.dot(c["flux_e_er"] * mcc[0][:, j], Pj))
-                Ra_Yb = float(np.dot(c["flux_a_yb"], Pj))
-                Re_Yb = float(np.dot(c["flux_e_yb"] * mcc[1][:, j], Pj))
+                Ra_Yb = float(np.dot(fa_yb, Pj))
+                Re_Yb = float(np.dot(fe_yb, Pj))
             if self._two_pop:
-                f2[j], b2[j], b2nc[j] = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+                f2[j], b2[j], b2nc[j] = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
             else:
-                f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
+                f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
         return f2, b2, b2nc
 
     def _bbar(self, b2c, b2nc):
@@ -714,11 +980,15 @@ class ErYbAmplifier:
         if mcc is None:
             return (c["flux_a_er"] @ Pz, c["flux_e_er"] @ Pz,
                     c["flux_a_yb"] @ Pz, c["flux_e_yb"] @ Pz)
-        m_er, m_yb = mcc
+        m_er, m_yb, st = mcc[0], mcc[1], mcc[2]
+        fa_yb = (c["flux_a_yb"] @ Pz if st is None
+                 else np.sum(c["flux_a_yb"][:, None] * st * Pz, axis=0))
+        fe_yb = (c["flux_e_yb"][:, None] * m_yb if st is None
+                 else c["flux_e_yb"][:, None] * m_yb * st)
         return (c["flux_a_er"] @ Pz,
                 np.sum(c["flux_e_er"][:, None] * m_er * Pz, axis=0),
-                c["flux_a_yb"] @ Pz,
-                np.sum(c["flux_e_yb"][:, None] * m_yb * Pz, axis=0))
+                fa_yb,
+                np.sum(fe_yb * Pz, axis=0))
 
     def _phi(self, b2):
         """Back-transfer branching factor phi = A_32 / (A_32 + k_back (1 - b2) N_Yb): the fraction
@@ -740,7 +1010,7 @@ class ErYbAmplifier:
             return np.zeros_like(b)
         return phi * phi * self._k_back * self._fc * self._n_yb / self._a32
 
-    def _fb_rhs3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc):
+    def _fb_rhs3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc, rs=None):
         """(df2/dt, db2c/dt, db2nc/dt) [1/s]: the module docstring's THREE balances before the
         steady-state condition is imposed -- THE single home of the population algebra. The
         one-pool pair `_fb_rhs` is this function at b2nc = b2c (the migration term then vanishes
@@ -753,15 +1023,18 @@ class ErYbAmplifier:
         K2 = 0 and W_mig = 0 subtract exact zeros), which is why the default path is bit-exact
         rather than merely close."""
         fc = self._fc
+        k_tr, k_tr2, w_mig = self._k_tr, self._k_tr2, self._w_mig
+        if rs is not None:
+            k_tr, k_tr2, w_mig = k_tr * rs[0], k_tr2 * rs[1], w_mig * rs[2]
         phi = self._phi(b2c)
         tr = phi * b2c * (1.0 - f2)           # transfer shape; x k_tr f N_Yb (in) / N_Er (out)
-        mig = self._w_mig * (b2c - b2nc)      # detailed-balance exchange (module docstring)
+        mig = w_mig * (b2c - b2nc)            # detailed-balance exchange (module docstring)
         df = (Ra_Er * (1.0 - f2) - Re_Er * f2 - f2 / self._tau_er
-              + self._k_tr * fc * self._n_yb * tr
+              + k_tr * fc * self._n_yb * tr
               - self.upconversion_C_up * self._n_er * f2 * f2)
         dbc = (Ra_Yb * (1.0 - b2c) - Re_Yb * b2c - b2c / self._tau_yb
-               - self._k_tr * self._n_er * tr
-               - self._k_tr2 * self._n_er * f2 * b2c
+               - k_tr * self._n_er * tr
+               - k_tr2 * self._n_er * f2 * b2c
                - (1.0 - fc) * mig)
         dbn = (Ra_Yb * (1.0 - b2nc) - Re_Yb * b2nc - b2nc / self._tau_yb
                + fc * mig)
@@ -798,7 +1071,7 @@ class ErYbAmplifier:
         j = self._fb_jacobian3(Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2, b2)
         return j[0][0], j[0][1], j[1][0], j[1][1]
 
-    def _fb_jacobian3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc):
+    def _fb_jacobian3(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2c, b2nc, rs=None):
         """The EXACT 3x3 Jacobian of `_fb_rhs3` at (f2, b2c, b2nc), as a nested 3x3 list of
         arrays (row-major, y = (f2, b2c, b2nc)).
 
@@ -819,11 +1092,14 @@ class ErYbAmplifier:
         Rosenbrock step in dynamics needs. phi_1 is evaluated on the matrix itself (scaling and
         squaring, no eigen-decomposition), so a complex pair would be handled correctly anyway."""
         fc = self._fc
+        k_tr, k_tr2, w_mig = self._k_tr, self._k_tr2, self._w_mig
+        if rs is not None:
+            k_tr, k_tr2, w_mig = k_tr * rs[0], k_tr2 * rs[1], w_mig * rs[2]
         phi = self._phi(b2c)
         dphi = self._dphi_db(b2c, phi)
-        k_in = self._k_tr * fc * self._n_yb         # transfer-IN coefficient (Er equation)
-        k_out = self._k_tr * self._n_er             # transfer-OUT coefficient (Yb equation)
-        k2n = self._k_tr2 * self._n_er
+        k_in = k_tr * fc * self._n_yb               # transfer-IN coefficient (Er equation)
+        k_out = k_tr * self._n_er                   # transfer-OUT coefficient (Yb equation)
+        k2n = k_tr2 * self._n_er
         dtr_df = -phi * b2c
         dtr_db = (1.0 - f2) * (phi + b2c * dphi)
         zero = np.zeros_like(np.asarray(dtr_df, float))
@@ -832,10 +1108,10 @@ class ErYbAmplifier:
         j01 = k_in * dtr_db
         j10 = -k_out * dtr_df - k2n * b2c
         j11 = (-(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - k_out * dtr_db - k2n * f2
-               - self._w_mig * (1.0 - fc))
-        j12 = self._w_mig * (1.0 - fc) + zero
-        j21 = self._w_mig * fc + zero
-        j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - self._w_mig * fc
+               - w_mig * (1.0 - fc))
+        j12 = w_mig * (1.0 - fc) + zero
+        j21 = w_mig * fc + zero
+        j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - w_mig * fc
         return [[j00, j01, zero], [j10, j11, j12], [zero, j21, j22 + zero]]
 
     def _b2_quasi_equilibrium(self, Ra_Yb, Re_Yb, f2, b2):
@@ -943,11 +1219,20 @@ class ErYbAmplifier:
         mcc_mat = self._mcc_matrices(pl, z)
         mcc_er_of = _make_interp(mcc_mat[0]) if mcc_mat is not None else None
         mcc_yb_of = _make_interp(mcc_mat[1]) if mcc_mat is not None else None
+        # Slots 2 and 3 (the Yb Stark band scale and the Arrhenius rate scale) ride the SAME
+        # frozen-profile interpolator, so every temperature-dependent coefficient the RHS sees
+        # is evaluated at the same interpolated z as the McCumber factors.
+        stark_of = (_make_interp(mcc_mat[2])
+                    if (mcc_mat is not None and mcc_mat[2] is not None) else None)
+        rscale_of = (_make_interp(mcc_mat[3])
+                     if (mcc_mat is not None and mcc_mat[3] is not None) else None)
 
         def _mcc_at(zz):
             if mcc_mat is None:
                 return None
-            return (mcc_er_of(zz), mcc_yb_of(zz))
+            return (mcc_er_of(zz), mcc_yb_of(zz),
+                    None if stark_of is None else stark_of(zz),
+                    None if rscale_of is None else rscale_of(zz))
 
         last_out = None
         last_prof = None
@@ -1063,23 +1348,30 @@ class ErYbAmplifier:
         identically zero and the expression is the one above."""
         N_Er, N_Yb = self._n_er, self._n_yb
         n1 = (1.0 - f2) * N_Er
+        k_tr, k_tr2 = self._k_tr, self._k_tr2
         if mcc is None:
             Re_Yb = np.array([float(np.dot(c["flux_e_yb"], np.maximum(P[:, j], 0.0)))
                               for j in range(P.shape[1])])
         else:
-            Re_Yb = np.array([float(np.dot(c["flux_e_yb"] * mcc[1][:, j],
+            st = mcc[2]
+            Re_Yb = np.array([float(np.dot(c["flux_e_yb"] * mcc[1][:, j]
+                                           * (1.0 if st is None else st[:, j]),
                                            np.maximum(P[:, j], 0.0)))
                               for j in range(P.shape[1])])
+            if mcc[3] is not None:
+                # the transfer coefficients are z-dependent under a RateTemperatureLaw, so the
+                # rate integral has to carry them INSIDE the integrand, not outside it
+                k_tr, k_tr2 = k_tr * mcc[3][0], k_tr2 * mcc[3][1]
         if b2nc is None:
             nYb2 = b2 * N_Yb
-            transfer = self._k_tr * n1 * nYb2
-            total = (self._k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
+            transfer = k_tr * n1 * nYb2
+            total = (k_tr * n1 + 1.0 / self._tau_yb + Re_Yb) * nYb2
         else:
             n6c = self._fc * N_Yb * b2
             n6nc = (1.0 - self._fc) * N_Yb * b2nc
             idle = 1.0 / self._tau_yb + Re_Yb
-            transfer = self._k_tr * n1 * n6c
-            total = ((self._k_tr * n1 + self._k_tr2 * N_Er * f2 + idle) * n6c + idle * n6nc)
+            transfer = k_tr * n1 * n6c
+            total = ((k_tr * n1 + k_tr2 * N_Er * f2 + idle) * n6c + idle * n6nc)
         num = float(trapz(transfer, z))
         den = float(trapz(total, z))
         return num / den if den > 0.0 else 0.0
@@ -1150,9 +1442,11 @@ class ErYbAmplifier:
         if mcc is None:
             dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j]))) for j in range(z.size)])
         else:
-            dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j],
-                                                     (mcc[0][:, j], mcc[1][:, j]))))
-                           for j in range(z.size)])
+            dF = np.array([float(np.sum(u * self._dP(
+                c, u, P[:, j], (mcc[0][:, j], mcc[1][:, j],
+                                None if mcc[2] is None else mcc[2][:, j],
+                                None if mcc[3] is None else mcc[3][:, j]))))
+                for j in range(z.size)])
         return -float(trapz(dF, z))
 
     def _heat_profile_W_per_m(self, result) -> np.ndarray:
@@ -1291,15 +1585,19 @@ class ErYbAmplifier:
         inv_h = (1.0 / (H_PLANCK * (C_LIGHT / pl["lam"])))[:, None]
         bbar = self._bbar(b2, b2nc)
         one_f, one_b = (1.0 - f2)[None, :], (1.0 - bbar)[None, :]
+        st = None if mcc is None else mcc[2]
         ge_er = c["g_e_er"][:, None] if mcc is None else c["g_e_er"][:, None] * mcc[0]
         ge_yb = c["g_e_yb"][:, None] if mcc is None else c["g_e_yb"][:, None] * mcc[1]
         se_pref = c["s_er"][:, None] if mcc is None else c["s_er"][:, None] * mcc[0]
         sy_pref = c["s_yb"][:, None] if mcc is None else c["s_yb"][:, None] * mcc[1]
+        ga_yb = c["g_a_yb"][:, None]
+        if st is not None:
+            ge_yb, sy_pref, ga_yb = ge_yb * st, sy_pref * st, ga_yb * st
 
         pw_a_er = c["g_a_er"][:, None] * one_f * P
         pw_e_er = ge_er * f2[None, :] * P
         pw_sp_er = se_pref * f2[None, :]
-        pw_a_yb = c["g_a_yb"][:, None] * one_b * P
+        pw_a_yb = ga_yb * one_b * P
         pw_e_yb = ge_yb * bbar[None, :] * P
         pw_sp_yb = sy_pref * bbar[None, :]
         loss_W = np.sum(c["loss"][:, None] * P, axis=0)
@@ -1311,14 +1609,18 @@ class ErYbAmplifier:
 
         q_opt = (p_a_er + p_a_yb + loss_W) - (p_e_er + p_e_yb + p_sp_er + p_sp_yb)
 
+        rs_m = None if mcc is None else mcc[3]
         ra_er, re_er, ra_yb, re_yb = self._rates_profile(c, P, mcc)
         df, db, dbn = self._fb_rhs3(ra_er, re_er, ra_yb, re_yb, f2, b2,
-                                    b2 if b2nc is None else b2nc)
+                                    b2 if b2nc is None else b2nc, rs_m)
         dbbar = db if b2nc is None else self._fc * db + (1.0 - self._fc) * dbn
         phi = self._phi(b2)
+        k_tr, k_tr2 = self._k_tr, self._k_tr2
+        if rs_m is not None:
+            k_tr, k_tr2 = k_tr * rs_m[0], k_tr2 * rs_m[1]
         n_yb_c = self._fc * N_Yb                     # the COUPLED Yb density (= N_Yb at f = 1)
-        tr_rate = A * self._k_tr * phi * N_Er * n_yb_c * b2 * (1.0 - f2)
-        k2_rate = A * self._k_tr2 * N_Er * f2 * n_yb_c * b2
+        tr_rate = A * k_tr * phi * N_Er * n_yb_c * b2 * (1.0 - f2)
+        k2_rate = A * k_tr2 * N_Er * f2 * n_yb_c * b2
         dec_er = A * N_Er * f2 / self._tau_er
         dec_yb = A * N_Yb * bbar / self._tau_yb
         up_er = A * N_Er * self.upconversion_C_up * N_Er * f2 * f2
