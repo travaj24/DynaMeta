@@ -18,8 +18,9 @@ import numpy as np
 import pytest
 
 from dynameta.optics.fiber_amp import (
-    AseBand, ConcentrationModel, FiberSpec, Pump, PumpSource, Signal, erbium, simulate_transient,
-    wall_plug_efficiency, ytterbium,
+    RATE_ARRHENIUS_30PCT_300_480K, RATE_ARRHENIUS_CHENG_2022, YB_STARK_976_CANAT_DUSSARDIER,
+    AseBand, ConcentrationModel, FiberSpec, Pump, PumpSource, RateTemperatureLaw, Signal, erbium,
+    simulate_transient, wall_plug_efficiency, ytterbium,
 )
 from dynameta.optics.fiber_amp.eryb import (
     ErYbAmplifier, YbSigmaEScaleFit, _eryb_1um_and_signal, eryb_fit_yb_sigma_e_scale,
@@ -512,3 +513,69 @@ def test_the_two_upgrades_compose():
     assert tr.meta["quasi_static_valid"] and np.all(np.isfinite(tr.signal_gain_dB))
     fr = a.with_signals(list(a.signals))
     assert fr._tau32 == TAU32_SEFLER and fr._yb_se_scale == 0.4       # both ride the clone
+
+
+# ============ gate 7: the two 2026-09-15 builds are orthogonal (the merge gate) ==============
+
+def test_this_build_and_the_migration_thermal_build_are_orthogonal():
+    """THE MERGE GATE. This branch and `feat/eryb-migration-thermal-fit` (v0.11.3) both rewrote
+    the same five methods -- `_mcc_matrices`, `_dP`, `_fb_profile`, `_rates_profile`,
+    `energy_terms` -- one to carry an explicit 4I11/2 and a scaled Yb emission, the other to
+    carry an Arrhenius rate law and a Stark-band cross-section scale. After the merge each pair
+    must still be INERT when the other pair is on, and all four must compose.
+
+    The four assertions, in the order that localises a mistake fastest:
+      (a) with a temperature profile set and BOTH of the v0.11.3 options OFF, this build's
+          numbers are what they were before the merge -- so their 4-slot temperature bundle did
+          not change the isothermal-rate path;
+      (b) with BOTH of this build's options OFF, the v0.11.3 options move the gain by a sized
+          amount -- the premise that makes (c) meaningful;
+      (c) turning this build's options on TOP of theirs changes the gain again, and the energy
+          identity still closes to round-off with all four active;
+      (d) the Arrhenius law actually reaches the explicit-4I11/2 algebra: at the same profile,
+          scaling k_tr with temperature must move the 4I11/2 population, which it can only do if
+          `rs` is threaded into `_n3_coeffs`."""
+    z_prof = np.linspace(0.0, 3.0, 21)
+    T_prof = 300.0 + 60.0 * np.exp(-z_prof / 0.5)
+
+    def hot(**kw):
+        a = clad_amp(**kw)
+        a.set_temperature_profile(z_prof, T_prof, T_ref_K=300.0)
+        return a
+
+    # (a) their bundle is inert on this build's path when their options are off
+    g_iso = float(clad_amp(tau32_s=TAU32_SEFLER).solve(n_nodes=81).signal_gain_dB[0])
+    r_t = hot(tau32_s=TAU32_SEFLER).solve(n_nodes=81)
+    g_t = float(r_t.signal_gain_dB[0])
+    assert abs(g_t - g_iso) > 1e-3                      # the profile itself does something
+    r_t2 = hot(tau32_s=TAU32_SEFLER, rate_temperature=RateTemperatureLaw(),
+               yb_stark_thermal=None).solve(n_nodes=81)
+    assert float(r_t2.signal_gain_dB[0]) == g_t         # an identity law is exactly the None path
+
+    # (b) their options move the gain with MY options off -- the premise for (c)
+    g_plain = float(hot().solve(n_nodes=81).signal_gain_dB[0])
+    g_theirs = float(hot(rate_temperature=RATE_ARRHENIUS_CHENG_2022,
+                         yb_stark_thermal=YB_STARK_976_CANAT_DUSSARDIER
+                         ).solve(n_nodes=81).signal_gain_dB[0])
+    assert abs(g_theirs - g_plain) > 1e-3, (g_theirs, g_plain)
+
+    # (c) all four on: it solves, it moves, and the closure still holds to round-off
+    a_all = hot(tau32_s=TAU32_SEFLER, k_back_m3_s=2e-22, yb_sigma_e_scale=0.4,
+                rate_temperature=RATE_ARRHENIUS_CHENG_2022,
+                yb_stark_thermal=YB_STARK_976_CANAT_DUSSARDIER)
+    r_all = a_all.solve(n_nodes=161)
+    assert r_all.meta["converged"]
+    assert abs(float(r_all.signal_gain_dB[0]) - g_theirs) > 1e-3
+    et = a_all.energy_terms(r_all.power_W, r_all.nbar2_z, r_all.meta["beta_yb_z"],
+                            z_m=r_all.z_m, f3=r_all.meta["er_4i11_2_z"])
+    rel = np.max(np.abs(et["q_optical"] - et["d_stored_dt"] - et["dissipation"])
+                 / np.maximum(np.abs(et["q_optical"]), 1e-30))
+    assert float(rel) < 1e-11, float(rel)
+
+    # (d) the Arrhenius scale reaches the 4I11/2 algebra itself, not just the two-level one
+    r_no_law = hot(tau32_s=TAU32_SEFLER).solve(n_nodes=81)
+    r_law = hot(tau32_s=TAU32_SEFLER,
+                rate_temperature=RATE_ARRHENIUS_30PCT_300_480K).solve(n_nodes=81)
+    assert not np.array_equal(r_no_law.meta["er_4i11_2_z"], r_law.meta["er_4i11_2_z"])
+    assert float(np.max(np.abs(r_law.meta["er_4i11_2_z"]
+                               - r_no_law.meta["er_4i11_2_z"]))) > 1e-6
