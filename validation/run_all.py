@@ -261,6 +261,15 @@ SMOKE_EXCLUDED = {
     # Both reasons are independent and either alone keeps it out of the tier.
     "eryb_two_population_anchors": "a reporting script, not a gate: needs an external anchor "
                                    "folder absent from CI, and ~1500 s at its default node count",
+    # The 2026-09-15 migration / thermal / fit report. Unlike its predecessor it is SELF-CONTAINED
+    # (every anchor is transcribed into the file), so the CI-folder reason does not apply -- but
+    # it is still a REPORT rather than a gate, and its section 3 runs an optimiser whose every
+    # residual evaluation is a full relaxation solve (five fibers x up to 30 evaluations). The
+    # physics it reports is gated in tests/test_fiber_eryb_migration_thermal.py, which IS in CI.
+    "eryb_migration_thermal_fit": "a reporting script, not a gate: sections 2-4 are ~2000 s of "
+                                  "relaxation solves (the device fit calls the solver inside an "
+                                  "optimiser); its physics is gated in "
+                                  "tests/test_fiber_eryb_migration_thermal.py",
 }
 
 
