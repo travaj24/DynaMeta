@@ -890,7 +890,155 @@ DELIBERATELY the aluminosilicate ones (1-2% of an EYDFA's pump absorption).
 `calibration.er_yb_phosphosilicate_reference()` returns `(er_ion, yb_ion, FiberSpec, kwargs)` for
 the Rybaltovsky-class reference fiber with every value's provenance in its docstring.
 
-## 16. Self-consistent (ASE-coupled) transient step -- lifting the quasi-static limit
+---
+
+## 16. Er:Yb migration calibration, co-doped temperature laws, and the (f, k_tr) device fit
+
+Added 2026-09-15; derivations, calibrated numbers, residual tables and gate numbers in
+`docs/audit/2026-09-15-eryb-migration-thermal-fit.md`. Everything here is opt-in and the
+2026-09-14 model is reproduced BITWISE with all of it off -- including a model already running
+under a temperature profile (`tests/test_fiber_eryb_migration_thermal.py`, block (a)).
+
+### 16.1 The free two-pool decay, and where W_mig comes from
+
+Section 15's migration exchange was DERIVED but not MEASURED: it shipped with the honest
+admission that no determination of `W_mig` had been located. It has one now, and it is a closed
+form rather than a fit.
+
+Switch the pump off and hold the erbium in its ground state (`f2 -> 0`, the low-excitation
+condition every published Yb decay is taken under) and the section-15 triple collapses to a
+LINEAR 2x2 in the two pools:
+
+```
+d b2c /dt = -(a + (1-f) W) b2c + (1-f) W b2nc,     a = 1/tau_Yb + k_tr N_Er phi
+d b2nc/dt = +f W b2c - (d + f W) b2nc,             d = 1/tau_Yb
+```
+
+A pulse excites both pools to the SAME excitation fraction per ion, so `b2c(0) = b2nc(0) = 1`, and
+the measured fluorescence follows the population-weighted `I(t) = f b2c + (1-f) b2nc`:
+
+```
+lam_{1,2} = [tr -/+ sqrt(tr^2 - 4 det)]/2,  tr = a + d + W,  det = a d + W (f a + (1-f) d)
+disc      = (A - D)^2 + 4 f (1-f) W^2 >= 0          A SUM OF SQUARES: always bi-exponential
+I(t)      = A1 exp(-lam1 t) + A2 exp(-lam2 t),  A1 + A2 = 1,  A1 lam1 + A2 lam2 = f a + (1-f) d
+INT b2c   = (d + W)/det,   INT b2nc = (a + W)/det,   yield = f (a - d) (d + W)/det
+```
+
+The two integrals are the SAME closed forms `_solve_fbb` uses for the steady state (there with
+the pump on) -- one piece of algebra, written once for a root find and once for a decay. The
+discriminant being a sum of squares is why the decay can never be a damped oscillation.
+
+**The inversion.** Three measured numbers plus an Er-free control determine all three parameters:
+
+```
+m1 = A1 lam1 + A2 lam2,   W = (lam1 - d)(lam2 - d)/(m1 - d),
+R  = k_tr N_Er = lam1 + lam2 - 2 d - W,   f = (m1 - d)/R
+```
+
+`W_mig` is read off the SLOW component's excess rate over the Er-free control. A genuinely
+uncoupled pool decays at exactly the intrinsic rate; every `1/s` by which it decays faster is
+excitation that migrated into the coupled pool and was transferred. `eryb_fit.
+yb_two_pool_from_decay` is that inversion, and it REFUSES (rather than clipping) a slow component
+longer than the control, which would need `W < 0` and means the two samples are not the same host.
+
+**Applied to Cheng et al., Materials 15(3), 996 (2022)** -- the only located record that prints a
+bi-exponential (`tau_1 = 8.20 us`, `tau_2 = 1333.76 us`, `A1 = 0.864`) AND an Er-free control
+(`tau_Yb0 = 1793.46 us`) from the same melt:
+
+```
+f = 0.864,   k_tr = 3.06e-21 m^3/s,   W_mig = 2.22e2 1/s
+```
+
+and that ONE parameter set reproduces BOTH coefficients the literature extracts from that single
+measurement: the fast-pair `3.07e-21` and the ensemble-yield `1.20e-22` (the model's own transfer
+yield at these parameters is `0.8949`, the measured value to four figures). Reconciling those two
+is the entire job `W_mig` was introduced to do. `eryb_fit.W_MIG_PHOSPHOSILICATE_PER_S = 2.2e2` is
+a DOCUMENTED CONSTANT, not a default; `yb_migration_rate_per_s` still defaults to 0.
+
+### 16.2 What the anchors do and do not constrain
+
+`eryb_calibrate_pools(decays=..., lifetimes=...)` fits `(f, k_tr, W_mig)` with `f` and `k_tr`
+box-constrained to the literature ranges and `W_mig` free, scoring point measurements as log
+residuals and stated BANDS ("50-70% relaxed within 10 us") as zero inside the band. It also
+profiles `W_mig` -- re-minimising `(f, k_tr)` at each `W` on a log grid -- because a flat profile
+is itself the result.
+
+Two datasets, two different things constrained, and the profile says so rather than averaging:
+
+* the DECAYS (Cheng's exact triple; Jeong 2007's stated pattern on the 297 W SPI fiber) pin
+  `W_mig` near `2e2 1/s` and fail above `~1e5 1/s`;
+* Laroche et al. 2006's five quenched lifetimes are reproduced within 25% ONLY in the fully MIXED
+  limit `W_mig >> k_tr N_Er ~ 1e5 1/s`, where the two pools share one excitation and the model is
+  a single population again at the effective product `f k_tr = 7.5e-23` -- which is Laroche's own
+  measured `6.4-8.6e-23`, from an independent route. That dataset therefore constrains the
+  PRODUCT and is silent about `W_mig` (its profile is flat over four decades).
+
+The model observable for a quenched lifetime is the AMPLITUDE-WEIGHTED mean `A1/lam1 + A2/lam2`,
+which is what a single quoted fluorescence lifetime means and what makes the comparison exact in
+the one-pool limit (`f = 1` gives `1/(1/tau_Yb + k_tr N_Er)`, Laroche's own inversion formula).
+
+### 16.3 Temperature: two opt-in co-doped laws
+
+**`RateTemperatureLaw(k_tr_ea_over_k_K, k_tr2_ea_over_k_K, w_mig_ea_over_k_K)`.** Arrhenius
+scaling `rate(T) = rate(T_ref) exp[-(Ea/kB)(1/T - 1/T_ref)]` applied per z to `k_tr`, `K2` and
+`W_mig`; `T_ref` is the temperature profile's own, so a uniform profile at `T_ref` is an EXACT
+identity, and an all-zero law is dropped in the constructor. What is measured (Cheng 2022,
+Table 2, 300 -> 480 K): `tau_1` `8.20 -> 7.56 us`, `tau_2` `1333.76 -> 1279.25 us`, `tau_Er`
+`9.12 -> 8.14 ms`, `sigma_a_Yb` `-37.9%` at 974 nm, `0%` at 940 nm, `-27.2%` at 915 nm, `+107%`
+at 1018 nm. The transfer indicator the model carries is the transfer RATE `1/tau_1 - 1/tau_2`,
+`1.2120e5 -> 1.3149e5 1/s`, i.e. **+8.5%**; `RATE_ARRHENIUS_CHENG_2022` is the law fitted to
+exactly that pair (`Ea/kB = 65.2 K`) and it scales `k_tr` only, because no separate indicator for
+`K2` or `W_mig` is measured. `RATE_ARRHENIUS_30PCT_300_480K` (`Ea/kB = 209.9 K`) is the
+frequently-quoted "+30% over 300-480 K" reading, shipped as a labelled ALTERNATIVE: no
+measurement supporting the larger figure is present in the 2026-09-14 anchor collection.
+
+**`YbStarkThermal(delta_E_over_k_K, degeneracy, band_center_m, band_half_width_m)`.** The 976 nm
+line is the zero-phonon line joining the LOWEST Stark sub-level of each manifold, so it loses
+oscillator strength as population spreads upward:
+
+```
+p0(T) = 1/Z(T),  Z(T) = 1 + g exp(-Delta_E/(kB T)),   factor(T) = Z(T_ref)/Z(T)
+```
+
+`YB_STARK_976_CANAT_DUSSARDIER` is built by `from_upper_fractions(300, 0.07, 400, 0.13)` from
+Canat (2006) / Dussardier (2005)'s two measured depopulations -- an exact 2-point inversion
+giving `Delta_E/kB = 823 K = 572 cm^-1`, `g = 1.17`, which is the right magnitude for the Yb
+`2F5/2` splitting. The factor multiplies BOTH Yb cross-sections, and that is forced rather than
+chosen: McCumber requires `sigma_e = sigma_a` at the zero line at every temperature.
+
+**It does not double count the McCumber scaling, and that is proven rather than argued.** The
+per-ion factor `exp[(eps_Yb - h nu)(1/kT - 1/kT_ref)]` is IDENTICALLY 1 at `h nu = eps_Yb` at
+every temperature (gated to `1e-12`), and it never touches `sigma_a` at any wavelength. McCumber
+moves the RATIO away from the zero line; this moves the SCALE at it. The band is deliberately
+narrow (976 +/- 15 nm) because this is a zero-line model: 940 nm is measured to be
+temperature-insensitive and 1018 nm RISES with temperature, so applying a zero-line factor across
+the spectrum would get the 1-um band's sign wrong. Size check: at 480 K the factor is 0.888 while
+Cheng measure `sigma_a_Yb(974)` at 0.62, so the Stark depopulation accounts for about a third of
+the measured loss and thermal line broadening (not modelled) for the rest -- read it as a LOWER
+BOUND on pump-band softening.
+
+Both laws are wired through `set_temperature_profile` and therefore through
+`thermal.solve_with_thermal_feedback`, which keeps driving `Q(z)` from the co-doped rate balance.
+The transient march still refuses a temperature profile.
+
+### 16.4 The per-device (f, k_tr) fit
+
+`eryb_fit_to_device(build, DeviceTarget(...), migration_per_s=...)` fits the coupled fraction and
+the coupled-pool `k_tr` of ONE fiber to its measured output power AND its measured 1-um ASE
+fraction, with `W_mig` held. Both observables, always: the output power is sensitive almost
+entirely to the PRODUCT `f k_tr` (the effective transfer strength) and the 1-um fraction to the
+SPLIT (it is the uncoupled pool that radiates at 1 um), which is section 15's limit 8 -- Dong's
+own paper fits two mutually inconsistent one-pool coefficients to the same laser from two
+different observables. The optimisation runs in `(logit f, ln k_tr)`, so the literature boxes are
+exact and both parameters are scale-free, and the returned `DeviceFit` carries the covariance,
+the correlation, the condition number, the least-constrained eigendirection, and the two numbers
+that matter: `sigma_ln_f_k` (the uncertainty on the well-determined product) against
+`sigma_ln_ratio` (the uncertainty along the degenerate direction). A "no obvious 1-um ASE"
+statement is scored as a one-sided UPPER BOUND, costing nothing below it.
+
+---
+
+## 17. Self-consistent (ASE-coupled) transient step -- lifting the quasi-static limit
 
 Added 2026-09-15; full derivation, measurements and limits in
 `docs/audit/2026-09-15-march-self-consistent-ase.md`.
