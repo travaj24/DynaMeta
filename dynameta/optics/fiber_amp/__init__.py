@@ -69,7 +69,8 @@ Realism extensions (2026-07 generality campaign; all opt-in / standalone):
            optical shock in the GNLSE.
   Phase 17 thermal (+ solver hook): thermal lens, thermal-guiding onset, and the SELF-CONSISTENT
            distributed-T(z) feedback loop (set_temperature_profile: per-z McCumber sigma_e).
-  Phase 18 eryb                   : Er:Yb co-doped amplifier (Yb-sensitized transfer).
+  Phase 18 eryb / eryb_fit        : Er:Yb co-doped amplifier (Yb-sensitized transfer); the
+           two-population pool calibration and the per-device (f, k_tr) fit (eryb_fit).
   Phase 19 lma                    : LP-mode solver, per-mode dopant overlaps, Marcuse bend loss,
            cladding-pump geometry efficiency.
   Phase 20 polarization / chain   : PDG/PHB two-pol model + measured anchors; multi-stage chains
@@ -150,7 +151,23 @@ from dynameta.optics.fiber_amp.nonlinear_limits import (TMI_C0_DEFAULT, brilloui
                                                         capture_fraction, double_rayleigh_mpi,
                                                         mpi_beat_variance_ratio, mpi_rin_per_hz,
                                                         mpi_power_penalty_dB)
-from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+from dynameta.optics.fiber_amp.eryb import (ErYbAmplifier, RateTemperatureLaw,
+                                           YbStarkThermal,
+                                           YB_STARK_976_CANAT_DUSSARDIER,
+                                           RATE_ARRHENIUS_CHENG_2022,
+                                           RATE_ARRHENIUS_30PCT_300_480K)
+from dynameta.optics.fiber_amp.eryb_fit import (YbDecayModes, yb_two_pool_decay,
+                                               yb_two_pool_from_decay, YbDecayAnchor,
+                                               YbLifetimeAnchor, PoolCalibration,
+                                               eryb_calibrate_pools, DeviceTarget,
+                                               DeviceFit, device_observables,
+                                               eryb_fit_to_device, CHENG_2022_DECAY,
+                                               JEONG_2007_DECAY, LAROCHE_2006_LIFETIMES,
+                                               W_MIG_PHOSPHOSILICATE_PER_S,
+                                               W_MIG_PHOSPHOSILICATE_RANGE_PER_S,
+                                               W_MIG_PHOSPHOSILICATE_CEILING_PER_S,
+                                               F_COUPLED_LITERATURE_BOUNDS,
+                                               K_TR_FAST_LITERATURE_BOUNDS_M3_S)
 from dynameta.optics.fiber_amp.lma import (LPMode, ModeOverlap, solve_lp_modes, dopant_overlap,
                                            cladding_absorption_two_population,
                                            effective_area_m2, marcuse_bend_loss_dB_per_m,
@@ -210,6 +227,16 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "TMI_C0_DEFAULT", "brillouin_phonon_number", "effective_length_m",
            "raman_gain_coefficient", "srs_stokes_wavelength_m",
            "ErYbAmplifier",
+           # 2026-09-15 migration / thermal / fit build (all opt-in; defaults unchanged)
+           "RateTemperatureLaw", "YbStarkThermal", "YB_STARK_976_CANAT_DUSSARDIER",
+           "RATE_ARRHENIUS_CHENG_2022", "RATE_ARRHENIUS_30PCT_300_480K",
+           "YbDecayModes", "yb_two_pool_decay", "yb_two_pool_from_decay",
+           "YbDecayAnchor", "YbLifetimeAnchor", "PoolCalibration",
+           "eryb_calibrate_pools", "DeviceTarget", "DeviceFit", "device_observables",
+           "eryb_fit_to_device", "CHENG_2022_DECAY", "JEONG_2007_DECAY",
+           "LAROCHE_2006_LIFETIMES", "W_MIG_PHOSPHOSILICATE_PER_S",
+           "W_MIG_PHOSPHOSILICATE_RANGE_PER_S", "W_MIG_PHOSPHOSILICATE_CEILING_PER_S",
+           "F_COUPLED_LITERATURE_BOUNDS", "K_TR_FAST_LITERATURE_BOUNDS_M3_S",
            "solve_lp_modes", "dopant_overlap", "marcuse_bend_loss_per_m",
            "pump_absorption_efficiency", "effective_cladding_overlap",
            "mode_resolved_gain_overlaps",
