@@ -342,6 +342,17 @@ is TSHB, and reporting the sum as TSHB would be wrong. Gate
 `test_exact_lp_profile_switch_is_a_separate_effect_from_hole_burning` pins the separation so this
 cannot be lost.
 
+### 5.0 Unchanged by the v0.11.3 merge
+
+Every number in sections 5 and 3 was RE-RUN after merging `main` at 1bef664 (PR #29: W_mig
+calibration, `RateTemperatureLaw` / `YbStarkThermal`, `eryb_fit`) and reproduces to every printed
+digit -- both study points bit-for-bit, `11.834719507405362 -> 11.800421909124550 dB` and
+`0.7229656180388068 -> 0.7982270041044350 dB`. That is the expected result and worth stating as a
+check rather than an assumption: PR #29's new physics is entirely temperature-driven and this
+class refuses the axial profile that would activate it, so an operating point at T_ref must be
+untouched. The seven fiber_amp gate files, PR #29's `test_fiber_eryb_migration_thermal.py`
+included, pass on the merged tree (214).
+
 ### 5.1 Bottom line for the study
 
 * **Point A (8 m, cladding-pumped): the transverse physics is a 0.03 dB / 0.8%-relative
