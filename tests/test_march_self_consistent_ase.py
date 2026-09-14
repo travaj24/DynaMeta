@@ -41,7 +41,8 @@ import pytest
 
 from dynameta.optics.fiber_amp import march_ase
 from dynameta.optics.fiber_amp.dynamics import simulate_transient
-from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+from dynameta.optics.fiber_amp.eryb import (RATE_ARRHENIUS_CHENG_2022,
+                                            YB_STARK_976_CANAT_DUSSARDIER, ErYbAmplifier)
 from dynameta.optics.fiber_amp.spectroscopy import erbium, ytterbium
 from dynameta.optics.fiber_amp.steady_state import AseBand, FiberAmplifier, Pump, Signal
 from dynameta.optics.fiber_amp.waveguide import FiberSpec
@@ -500,3 +501,57 @@ def test_meta_reports_nothing_self_consistent_in_the_default_mode():
     for key in ("ase_mode_steps", "ase_switch_steps", "ase_switch_times", "ase_inner_relax",
                 "ase_inner_tol", "max_self_consistency_residual", "max_step_power_residual"):
         assert r.meta[key] is None, key
+
+
+# ==================== composition with the other co-doped opt-ins ===========================
+
+def test_every_mode_composes_with_the_temperature_dependent_rate_opt_ins():
+    """The 2026-09-15 co-doped thermal options (RateTemperatureLaw on k_tr / K2 / W_mig, and
+    YbStarkThermal on the Yb band) ACT ONLY under an axial temperature profile -- eryb's
+    _mcc_matrices returns None without one, so every consumer takes its isothermal branch. Two
+    halves, and the second is what makes the first worth asserting:
+
+      * WITHOUT a profile they are inert, so an amplifier carrying them marches BIT-FOR-BIT like
+        one that does not, in ALL THREE modes. The self-consistent step calls the amplifier's own
+        _fb_rhs3 / _fb_jacobian3 / _rates_profile, so it inherits that inertness rather than
+        re-deriving it -- but inheriting it silently is exactly how a composition bug hides.
+      * WITH a profile the march REFUSES BY NAME in all three modes, and the message names the
+        opt-ins it is also refusing. ase_mode changes the population UPDATE, not the
+        cross-sections the step propagates through, so it cannot rescue a profiled amplifier and
+        must not appear to."""
+    t = np.arange(0.0, 6e-3 + 1e-12, 300e-6)
+    plain = _eryb()
+    hot_opts = dict(n_yb_m3=4.0e26, k_tr_m3_s=1.11e-21, yb_coupled_fraction=0.9,
+                    k_tr2_m3_s=2.0e-22, yb_ase=AseBand(1.000e-6, 1.100e-6, 12),
+                    rate_temperature=RATE_ARRHENIUS_CHENG_2022,
+                    yb_stark_thermal=YB_STARK_976_CANAT_DUSSARDIER)
+    with_opts = ErYbAmplifier(ER_AL, YB_PH,
+                              FiberSpec(2.0e-6, 0.20, 4.0e25, 8.0, clad_radius_m=62.5e-6),
+                              [Pump(0.176, 0.976e-6, "fwd", cladding=True)],
+                              [Signal(2.1e-3, 1.550e-6)], AseBand(1.520e-6, 1.570e-6, 24),
+                              **hot_opts)
+    # PREMISE: the opt-ins really are attached (a constructor that dropped them would make the
+    # equality below vacuous -- RateTemperatureLaw() IS dropped when identity, this one is not).
+    assert with_opts.rate_temperature is not None
+    assert with_opts.yb_stark_thermal is not None
+
+    for mode in march_ase.ASE_MODES:
+        a, _ = _march(plain, t, n_nodes=161, nbar2_0=0.0, ase_mode=mode)
+        b, _ = _march(with_opts, t, n_nodes=161, nbar2_0=0.0, ase_mode=mode)
+        for name in ("nbar2_zt", "signal_gain_dB", "ase_fwd_W", "ase_bwd_W"):
+            assert np.array_equal(getattr(a, name), getattr(b, name)), (mode, name)
+        assert np.array_equal(a.meta["beta_yb"], b.meta["beta_yb"]), mode
+        assert a.meta["n_self_consistent_steps"] == b.meta["n_self_consistent_steps"], mode
+
+    # ... and with a profile, every mode refuses, naming what it refuses.
+    z = np.linspace(0.0, 8.0, 17)
+    with_opts.set_temperature_profile(z, np.full(z.size, 360.0), T_ref_K=300.0)
+    for mode in march_ase.ASE_MODES:
+        with pytest.raises(NotImplementedError, match="temperature profile"):
+            simulate_transient(with_opts, t, n_nodes=161, nbar2_0=0.0, ase_mode=mode)
+    try:
+        simulate_transient(with_opts, t, n_nodes=161, nbar2_0=0.0, ase_mode="self_consistent")
+    except NotImplementedError as exc:
+        msg = str(exc)
+    assert "rate_temperature" in msg and "yb_stark_thermal" in msg
+    assert "self_consistent" in msg                      # it says the new modes do not help
