@@ -150,7 +150,8 @@ from dynameta.optics.fiber_amp.nonlinear_limits import (TMI_C0_DEFAULT, brilloui
                                                         capture_fraction, double_rayleigh_mpi,
                                                         mpi_beat_variance_ratio, mpi_rin_per_hz,
                                                         mpi_power_penalty_dB)
-from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
+from dynameta.optics.fiber_amp.eryb import (ErYbAmplifier, YbSigmaEScaleFit,
+                                            eryb_fit_yb_sigma_e_scale)
 from dynameta.optics.fiber_amp.lma import (LPMode, ModeOverlap, solve_lp_modes, dopant_overlap,
                                            cladding_absorption_two_population,
                                            effective_area_m2, marcuse_bend_loss_dB_per_m,
@@ -209,7 +210,7 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "mpi_beat_variance_ratio", "mpi_rin_per_hz", "mpi_power_penalty_dB",
            "TMI_C0_DEFAULT", "brillouin_phonon_number", "effective_length_m",
            "raman_gain_coefficient", "srs_stokes_wavelength_m",
-           "ErYbAmplifier",
+           "ErYbAmplifier", "YbSigmaEScaleFit", "eryb_fit_yb_sigma_e_scale",
            "solve_lp_modes", "dopant_overlap", "marcuse_bend_loss_per_m",
            "pump_absorption_efficiency", "effective_cladding_overlap",
            "mode_resolved_gain_overlaps",
