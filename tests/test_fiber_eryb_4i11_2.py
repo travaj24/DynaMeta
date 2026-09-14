@@ -259,10 +259,14 @@ def test_tau32_on_the_core_pumped_reference_point():
     i.e. the adiabatic model is a good approximation THERE, which is the honest reading. The
     sweep also has to be monotone in the right directions: a longer tau_32 holds more population
     in 4I11/2 (less erbium ground available to accept transfer) and therefore less gain."""
-    g0 = float(core_amp().solve(n_nodes=321).signal_gain_dB[0])
+    # 161 nodes: MEASURED 2026-09-14 against 241 and 321. The quantity the gate bounds,
+    # g0 - g(7 us), is 0.018382 / 0.018371 / 0.018368 dB at 161 / 241 / 321 -- mesh-converged to
+    # 1.4e-5 dB, three orders inside the 0.03 bound -- and the three f3 maxima agree to every
+    # printed digit (4.2e-4 / 2.90e-3 / 2.010e-2), so both 1% thresholds keep their margin.
+    g0 = float(core_amp().solve(n_nodes=161).signal_gain_dB[0])
     out = []
     for t32 in (1e-6, TAU32_SEFLER, TAU32_SLOW):
-        r = core_amp(tau32_s=t32).solve(n_nodes=321)
+        r = core_amp(tau32_s=t32).solve(n_nodes=161)
         assert r.meta["converged"]
         out.append((float(r.signal_gain_dB[0]), float(r.meta["er_4i11_2_z"].max())))
     gains = [g for g, _ in out]
@@ -282,18 +286,21 @@ def test_back_transfer_loss_is_monotone_in_tau32_at_fixed_k_back():
     (C36 = C63)."""
     k = 2.0e-22
     ratios, gains = [], []
-    # 121 nodes: MEASURED, every number below reproduces its 161-node value to 1e-4 dB and the
-    # returned fractions to every printed digit (they are ratios of z-integrals, not
-    # endpoint-sensitive gains), at 60% of the cost -- and this sweep is the most expensive in
-    # the file, because a k_back = k_tr back-transfer couples the two ions both ways at once
+    # 81 nodes: MEASURED 2026-09-14 against 101 and 121 (the previous setting, itself measured
+    # against 161). The returned fractions are ratios of z-integrals, not endpoint-sensitive
+    # gains, and reproduce to SIX decimals across the three meshes (0.070714 / 0.344765-0.344763
+    # / 0.784101-0.784099); the gains move by at most 4.9e-4 dB, against monotone steps of 0.29
+    # and 1.76 dB and a back-transfer loss of 2.002 dB gated at > 1.0. This sweep was the most
+    # expensive in the file -- a k_back = k_tr back-transfer couples the two ions both ways at
+    # once -- which is why it is the one that pays for the finer mesh and does not need it.
     for t32 in (1e-6, TAU32_SEFLER, TAU32_SLOW):
-        r = clad_amp(tau32_s=t32, k_back_m3_s=k).solve(n_nodes=121)
+        r = clad_amp(tau32_s=t32, k_back_m3_s=k).solve(n_nodes=81)
         assert r.meta["converged"]
         ratios.append(float(r.meta["back_transfer_ratio"]))
         gains.append(float(r.signal_gain_dB[0]))
     assert ratios[0] < ratios[1] < ratios[2] and ratios[0] > 0.0
     assert gains[0] > gains[1] > gains[2]
-    g_no_back = float(clad_amp(tau32_s=TAU32_SLOW).solve(n_nodes=121).signal_gain_dB[0])
+    g_no_back = float(clad_amp(tau32_s=TAU32_SLOW).solve(n_nodes=81).signal_gain_dB[0])
     assert g_no_back - gains[2] > 1.0                  # ~2.0 dB of back-transfer loss at 50 us
     # k_back = 0 must leave NOTHING behind: the ratio is exactly zero, not merely small
     assert clad_amp(tau32_s=TAU32_SEFLER).solve(n_nodes=41).meta["back_transfer_ratio"] == 0.0
@@ -563,7 +570,10 @@ def test_this_build_and_the_migration_thermal_build_are_orthogonal():
     a_all = hot(tau32_s=TAU32_SEFLER, k_back_m3_s=2e-22, yb_sigma_e_scale=0.4,
                 rate_temperature=RATE_ARRHENIUS_CHENG_2022,
                 yb_stark_thermal=YB_STARK_976_CANAT_DUSSARDIER)
-    r_all = a_all.solve(n_nodes=161)
+    # 81 nodes, the SAME mesh as g_theirs above, so (c)'s gain comparison is no longer made
+    # across two meshes. The closure here is a per-z round-off identity, not a mesh-convergence
+    # statement: MEASURED 3.125e-14 / 3.775e-14 / 3.723e-14 at 81 / 121 / 161, i.e. flat in dz.
+    r_all = a_all.solve(n_nodes=81)
     assert r_all.meta["converged"]
     assert abs(float(r_all.signal_gain_dB[0]) - g_theirs) > 1e-3
     et = a_all.energy_terms(r_all.power_W, r_all.nbar2_z, r_all.meta["beta_yb_z"],
@@ -572,8 +582,10 @@ def test_this_build_and_the_migration_thermal_build_are_orthogonal():
                  / np.maximum(np.abs(et["q_optical"]), 1e-30))
     assert float(rel) < 1e-11, float(rel)
 
-    # (d) the Arrhenius scale reaches the 4I11/2 algebra itself, not just the two-level one
-    r_no_law = hot(tau32_s=TAU32_SEFLER).solve(n_nodes=81)
+    # (d) the Arrhenius scale reaches the 4I11/2 algebra itself, not just the two-level one.
+    # r_t IS the no-law solve -- same constructor, same nodes -- so (a)'s result is reused here
+    # rather than recomputed (2026-09-14: one 81-node hot solve, ~12 s of the py3.12 leg).
+    r_no_law = r_t
     r_law = hot(tau32_s=TAU32_SEFLER,
                 rate_temperature=RATE_ARRHENIUS_30PCT_300_480K).solve(n_nodes=81)
     assert not np.array_equal(r_no_law.meta["er_4i11_2_z"], r_law.meta["er_4i11_2_z"])

@@ -278,7 +278,7 @@ into a 125 um cladding, 20 mW seed, 3 m, 13.82 dB) and the **core-pumped** refer
 | the split conserves the totals | `W12 + W13 == R_a_Er`, `W21 + W31 == R_e_Er` | equal to `1e-15` relative; the level-3 mask is 1 below 1.15 um and 0 above 1.25 um, crossover 1192 nm |
 | closure total, adiabatic limit | unchanged; only the naming moves | total dissipation **3.6e-10** relative; the reallocation is exactly equal and opposite, `(D_tr + D_32) - D_tr(adiabatic) = +0.18267` against `D_Er(adiabatic) - D_Er(explicit) = +0.18267`, agreeing to **1.5e-10 of the total dissipation** (the scale the O(`f3`) error lives on; the moved piece is only 0.7% of the total, so quoted against ITSELF that is 2.3e-8). Evaluating both splits on the SAME profile -- which removes the two independent LSODA paths and leaves only the bookkeeping -- gives 2.4e-9 of the total, i.e. exactly the `f3 = 2.7e-9` the limit carries. The relaxation term is 143x the transfer defect once split -- `eps_Yb - eps_3` is a 3 meV near-resonance and `eps_3 - eps_Er` the 0.46 eV multiphonon drop |
 | closure, EVERYTHING on | per-z identity `< 1e-11`, wall-plug `< 1e-5` of the launched pump | per-z **2.0e-14**; residual/pump **5.41e-5 / 1.35e-5 / 3.38e-6** at 161 / 321 / 641 nodes -- 4x per doubling exactly, i.e. the `O(dz^2)` trapezoid on the rate integral, MESH-limited rather than model-limited (explicit level + explicit back-transfer + routed upconversion + two Yb pools at `k_tr = 3e-21` + K2 + migration + concentration; at that transfer coefficient the pump is gone in centimetres). The simpler explicit-level-plus-back-transfer configuration closes at **3.4e-6 already at 161 nodes** |
-| `tau_32 = 7 us`, core-pumped | a stated small gain change, `n3/N_Er < 1%` | gain **8.5106 -> 8.4922 dB, -0.0184 dB**; `max f3 = 2.9e-3` (mean 5.5e-4), i.e. **0.29% of N_Er**, under the 1% bar. At 50 us: `-0.129 dB` and `f3 = 2.0%` |
+| `tau_32 = 7 us`, core-pumped | a stated small gain change, `n3/N_Er < 1%` | gain **8.5066 -> 8.4883 dB, -0.0184 dB** (161 nodes; at 321 the pair reads 8.5106 -> 8.4922 and the DIFFERENCE is the same -0.0184 to four decimals -- see section 8); `max f3 = 2.9e-3` (mean 5.5e-4), i.e. **0.29% of N_Er**, under the 1% bar. At 50 us: `-0.129 dB` and `f3 = 2.0%` |
 | `tau_32` monotonicity | longer `tau_32` -> more 4I11/2, less gain | cladding: `-1.7e-3 / -1.2e-2 / -9.2e-2` dB and `f3 = 2.7e-3 / 1.9e-2 / 1.2e-1` at 1 / 7 / 50 us |
 | back-transfer | measurable at 50 us, monotone in `tau_32` at fixed `k_back` | at `k_back = k_tr = 2e-22` (Dong's own `C36 = C63`): returned fraction **0.071 / 0.345 / 0.596 / 0.784** and gain **13.771 / 13.484 / 12.928 / 11.727 dB** at `tau_32 = 1 / 7 / 20 / 50 us`. At 50 us the penalty against `k_back = 0` (13.729 dB) is **2.00 dB**. With `k_back = 0` the reported ratio is exactly `0.0` |
 | upconversion routing | a no-op in the adiabatic limit, refused without `tau32_s` | `< 1e-6` dB at `tau_32 = 1 ps`, `> 1e-4` dB at 50 us; `ValueError` when `tau32_s is None` |
@@ -496,3 +496,77 @@ v0.11.3's options are off by default.
 
 Version `0.11.3 -> 0.11.4`; the model spec's section for this build is **17**, theirs having
 taken 16.
+
+## 8. The py3.12 CI leg, and what the gates cost
+
+The first CI run on the merged head (31e1c93, run 34896908068) came back 8/9. The ninth,
+`tests (py3.12)`, was **CANCELLED, not failed**: its `Run fast tests + coverage` step ran 74.6
+minutes into the job's `timeout-minutes: 75`. No assertion fired. That leg is the only one of the
+four interpreters carrying coverage instrumentation, and it runs about **1.7x** the plain legs --
+73 min against 35 / 44 / 53 min for py3.10 / 3.11 / 3.13 on main at 1bef664, the immediate parent
+of the merge. So main itself had already arrived at two minutes of headroom under a cap whose own
+comment set it at "51-52 min measured on the runner, 2026-07-27"; #29's 19 gates and this build's
+20 pushed it over. This is a shared-budget artifact, and the honest reading is that the cap had
+silently stopped being the 2x-headroom cap the file says every cap is.
+
+**The cap.** `timeout-minutes: 75 -> 120` on the `test` matrix job, with the reason recorded
+inline. Nothing else in the matrix changed.
+
+**What the gates actually cost.** Measured on the merged tree, single process, `-m "not slow"
+-p no:randomly --durations=40`, over `test_fiber_amp.py` + the five `test_fiber_eryb*.py` files:
+175 tests in 717 s. Everything above 20 s, attributed:
+
+| test | s | origin |
+| --- | --- | --- |
+| `test_this_build_and_the_migration_thermal_build_are_orthogonal` | 97.2 | #30 |
+| `test_every_metric_runs_on_an_eryb_amplifier_and_matches_a_direct_resolve` | 55.6 | pre-existing |
+| `test_one_observable_leaves_the_split_undetermined_and_the_fit_says_so` | 54.0 | #29 |
+| `test_the_device_fit_recovers_a_synthetic_f_and_k_to_5_percent[0.45-2e-21]` | 45.6 | #29 |
+| `test_the_one_um_threshold_of_a_hot_fiber_rises_with_temperature` | 40.6 | #29 |
+| `test_back_transfer_loss_is_monotone_in_tau32_at_fixed_k_back` | 38.4 | #30 |
+| `test_tau32_on_the_core_pumped_reference_point` | 38.3 | #30 |
+| `test_tau32_to_zero_reproduces_the_adiabatic_model` | 32.5 | #30 |
+| `test_the_march_settles_onto_solve_..._stiff_dt_sweep` | 31.4 | #30 |
+| `test_the_upconversion_routing_is_a_no_op_...` | 24.5 | #30 |
+| `test_closure_holds_per_z_and_in_the_wall_plug_budget_with_the_level_on` | 22.8 | #30 |
+| `test_step_drive_energy_balance_closes_and_is_first_order_in_dt` | 20.8 | pre-existing |
+| `test_step_drive_mesh_error_is_second_order_in_dz` | 20.6 | pre-existing |
+
+This build's file is 20 gates in ~340 s; #29's is 19 gates in ~159 s.
+
+**What moved, and what deliberately did not.** Nothing was marked `slow`. That marker's declared
+contract in `pyproject.toml` is "full validation-suite wrappers excluded from the fast CI legs
+(covered by the py3.13 smoke tier)", and these are not wrappers: the smoke tier does NOT cover
+them (this build's validation script is in `SMOKE_EXCLUDED`, and it asserts nothing by design), so
+marking a gate `slow` here would remove it from PR gating and buy back only nightly coverage. The
+reductions below are instead node counts, each one MEASURED against the setting it replaced and
+each one leaving the gated quantity where it was:
+
+* **orthogonality gate**, 97.2 s, two changes. (a)'s `hot(tau32_s=7 us)` solve and (d)'s
+  `r_no_law` were the same constructor at the same node count, solved twice; (d) now reuses
+  (a)'s result. And (c)'s all-four-on solve goes `161 -> 81`, which is also the mesh `g_theirs`
+  already used, so the gain comparison stops straddling two meshes. Its closure is a per-z
+  round-off identity, not a mesh-convergence statement, and is flat in dz: 3.125e-14 / 3.775e-14
+  / 3.723e-14 at 81 / 121 / 161 against a 1e-11 gate.
+* **core-pumped reference point**, 38.3 s, `321 -> 161`. The bounded quantity `g0 - g(7 us)` is
+  0.018382 / 0.018371 / 0.018368 dB at 161 / 241 / 321 -- converged to 1.4e-5 dB inside a 0.03
+  bound -- and the three 4I11/2 maxima (4.2e-4, 2.90e-3, 2.010e-2) agree to every printed digit,
+  so both 1%-of-N_Er thresholds keep their margin and both monotonicities hold at all three.
+* **back-transfer monotonicity**, 38.4 s, `121 -> 81`. The returned fractions are ratios of
+  z-integrals and reproduce to six decimals across 81 / 101 / 121; the gains move by at most
+  4.9e-4 dB against monotone steps of 0.29 and 1.76 dB, and the 2.002 dB loss is gated at > 1.0.
+
+**Left alone, on purpose.** `test_tau32_to_zero_reproduces_the_adiabatic_model` (32.5 s) stays at
+161 nodes. It is the brief's primary acceptance criterion, and its residual is discretization
+noise that falls with the mesh -- 9.596e-8 / 3.212e-8 / 4.191e-9 dB at 81 / 121 / 161 against a
+1e-6 gate -- so dropping to 81 would cut the margin from 240x to 10x to save ~15 s. That is a bad
+trade for the one number the whole upgrade is judged on. (The f3 maximum is 2.67e-9 at all three
+meshes, which is what identifies the residual as path noise rather than a real n3 effect.)
+`test_closure_holds_per_z_and_in_the_wall_plug_budget_with_the_level_on` (22.8 s) keeps 321 and
+641: the O(dz^2) ratio across a doubling IS its gate, and at 161 the wall-plug residual is 5.4e-5,
+which fails its own 1e-5 bound.
+
+#29's three gates above 20 s (140 s between them) are left untouched. They are another build's
+physics gates, their margins have not been measured here, and the cap change already covers the
+budget; they are the obvious next candidates if the leg creeps back up.
+
