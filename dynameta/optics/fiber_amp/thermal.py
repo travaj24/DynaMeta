@@ -152,18 +152,36 @@ def solve_with_thermal_feedback(amp, model: ThermalModel, b_outer_m: float, *,
     `sigma_e_mccumber`, which is the single fix for both symptoms F-12 records. The 3-5x above is
     what the DEFAULT (peak) eps gives. The ion temperature is
     the CORE CENTRE temperature (the dopant sits there). Returns (result, T_z_K, info) with info = {'iterations',
-    'converged_T', 'max_dT_K', 'Q_per_m'}; the amplifier's profile is left SET (clear with
-    amp.clear_temperature_profile()). b_outer_m = outer (coating/glass) radius for the radial
-    conduction stack; model supplies conductivities/convection/coolant."""
+    'converged_T', 'max_dT_K', 'Q_per_m', 'heat_source'}; the amplifier's profile is left SET
+    (clear with amp.clear_temperature_profile()). b_outer_m = outer (coating/glass) radius for the
+    radial conduction stack; model supplies conductivities/convection/coolant.
+
+    CO-DOPED AMPLIFIERS (2026-09-14). `amp` may also be an eryb.ErYbAmplifier. Two things change
+    and nothing else does. (1) The temperature acts on BOTH ions: ErYbAmplifier.
+    set_temperature_profile scales each ion's sigma_e about ITS OWN McCumber zero line (Er
+    ~1530 nm, Yb ~974 nm), because a single shared eps would be wrong by orders of magnitude in
+    the pump band. (2) Q(z) comes from the amplifier's OWN rate balance when it offers the
+    `_heat_profile_W_per_m` hook -- quantum defect + the Yb->Er TRANSFER DEFECT (the 4I11/2 ->
+    4I13/2 multiphonon step, 36% of every transferred 976 nm photon and the dominant EYDFA heat
+    term) + the K2 secondary-transfer defect + both ytterbium pools' fluorescence + background
+    loss -- rather than from np.gradient of the net flux. FiberAmplifier does not define that
+    hook, so the single-ion loop runs the identical `heat_load_per_m` path it always has; `info`
+    records which was used. The Brown-Hoffman radial stack, the under-relaxation, the T_ref
+    first-iteration rule and the convergence test are unchanged for both classes."""
     coef = (1.0 / (4.0 * np.pi * model.core_k_W_mK)
             + np.log(b_outer_m / amp.fiber.core_radius_m) / (2.0 * np.pi * model.clad_k_W_mK)
             + 1.0 / (2.0 * np.pi * b_outer_m * model.h_conv_W_m2K))   # K per (W/m)
     T_z = None
     res = None
-    info = {"iterations": 0, "converged_T": False, "max_dT_K": np.inf, "Q_per_m": None}
+    # The amplifier's own rate-balance heat profile when it has one (ErYbAmplifier), else the
+    # flux-gradient form. Resolved ONCE, before the loop, so the source cannot change between
+    # iterations and can be reported.
+    heat_hook = getattr(amp, "_heat_profile_W_per_m", None)
+    info = {"iterations": 0, "converged_T": False, "max_dT_K": np.inf, "Q_per_m": None,
+            "heat_source": ("rate_balance" if heat_hook is not None else "flux_gradient")}
     for it in range(max_iter):
         res = amp.solve(**solve_kw)
-        Q = np.maximum(heat_load_per_m(res), 0.0)
+        Q = np.maximum(heat_load_per_m(res) if heat_hook is None else heat_hook(res), 0.0)
         T_new = model.T_coolant_K + coef * Q
         if T_z is None:
             # the UNPROFILED first solve represents a uniform T_ref (the ion's reference

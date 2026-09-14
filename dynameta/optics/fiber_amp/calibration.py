@@ -28,7 +28,7 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec
 
 __all__ = ["CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
-           "ytterbium_melkumov",
+           "ytterbium_melkumov", "er_yb_phosphosilicate_reference",
            "EDFA_CBAND_TARGETS", "calibration_report", "dB_per_m_to_per_m"]
 
 _LN10_OVER_10 = np.log(10.0) / 10.0
@@ -164,25 +164,176 @@ _YB_MELKUMOV_AS_SIGMA_A_PM2 = (
     8.6e-6, 6.8e-6, 4.9e-6, 3.5e-6, 3.1e-6, 2.2e-6)
 
 
-def ytterbium_melkumov() -> RareEarthIon:
-    """Yb3+ built from the MEASURED Melkumov et al. 2004 aluminosilicate spectrum (tabulated
-    848-1180 nm, 1 nm resolution around the 976 nm peak) instead of the compact Gaussian-sum
-    fit -- THE ion bare spectroscopy.ytterbium() returns since 2026-08-28 (it delegates
-    here). Motivation (2026-08-28 audit): the Gaussian fit carries
-    1.62x too little oscillator strength for its own 0.83 ms lifetime (Fuchtbauer-Ladenburg),
-    and its sigma_e(1060) = 1.95e-25 m^2 sits 1.6x below the measured 3.1e-25 -- the fit's
-    three narrow Gaussians lose the spectral wings. This factory is FL-consistent (tau_rad
-    within ~15% of tau_s) and carries the real wings; use it wherever the Yb signal-band
-    magnitude is load-bearing (holding cost, saturation energy, gain crossovers)."""
-    lam = np.asarray(_YB_MELKUMOV_AS_NM, float) * 1e-9
-    sa = np.asarray(_YB_MELKUMOV_AS_SIGMA_A_PM2, float) * 1e-24
-    se = np.asarray(_YB_MELKUMOV_AS_SIGMA_E_PM2, float) * 1e-24
-    # zero line = the TABLE'S OWN sigma_e/sigma_a = 1 crossing (974.26 nm by interpolation;
+# ---- measured Yb3+ PHOSPHOSILICATE spectrum (Melkumov et al. 2004, same table) ---------------
+# The P2O5-doped ("FS"/PhS) columns of the SAME Appendix 2 table, on the SAME 98-row wavelength
+# grid, transcribed verbatim (sigma in pm^2). Reading convention validated by the AS columns of
+# that table, which reproduce the aluminosilicate tuples above ENTRY FOR ENTRY (gated).
+#
+# WHAT IS DIFFERENT ABOUT THE P HOST, and why it matters for an Er:Yb fiber (every Er:Yb fiber is
+# phosphosilicate -- P is the co-dopant that makes the 4I11/2 -> 4I13/2 step fast enough for the
+# sensitization to work at all):
+#   * the pump line is NARROWER and WEAKER: peak 1.38 pm^2 at 974 nm with a 5.59 nm FWHM in
+#     absorption (5.99 nm in emission), against 2.69 pm^2 at 976 nm / 7.66 nm in aluminosilicate.
+#     Both widths are computed from these printed rows by linear interpolation at half maximum,
+#     not quoted: an earlier project note carried "4.7 nm", which this table does NOT reproduce
+#     and which should be treated as unverified.
+#   * BECAUSE the line is narrow, the standard 976 nm pump sits well down its flank:
+#     sigma_a(976) = 1.01 pm^2, not the 1.38 pm^2 peak. Using the peak at the pump wavelength
+#     overstates the pump absorption by 37%.
+#   * the zero line is at 972.75 nm (this table's own sigma_e = sigma_a crossing, between the
+#     printed 972 and 973 nm rows), 1.5 nm blue of the aluminosilicate 974.23 nm. So 976 nm
+#     pumping sits 3.2 nm ABOVE the P-host zero line, sigma_e(976) = 1.18 > sigma_a(976) = 1.01,
+#     and the 976 nm Yb inversion clamps at sigma_a/(sigma_a+sigma_e) = 0.461.
+#   * tau(2F5/2) = 1.45 ms against 0.83 ms (Melkumov p. 30 and Table 1) -- phosphosilicate Yb
+#     lives 1.75x longer, which is why its holding cost is what it is. Independent support:
+#     Cheng et al., Materials 15(3), 996 (2022) recover 1.33 ms from an Er-free control, and
+#     Kirchhof & Unger OFC'99 WM1 (quoted in Melkumov's own Table 1) 1.276 ms; the spread is
+#     real phosphate-composition scatter and 1.45 ms is this table's own fiber.
+# Cross-check on the absolute scale: Cheng et al. measure sigma_a(974) = 9.43e-25 m^2 in Er/Yb/P
+# core glass, 32% BELOW Melkumov -- a genuine host-to-host spread, not an error in either.
+_YB_MELKUMOV_PHS_SIGMA_A_PM2 = (
+    0.0011, 0.0015, 0.0035, 0.0057, 0.009, 0.014, 0.017, 0.023, 0.028, 0.033, 0.042, 0.054,
+    0.072, 0.1, 0.14, 0.19, 0.23, 0.24, 0.22, 0.21, 0.22, 0.23, 0.23, 0.25, 0.26, 0.26, 0.26,
+    0.26, 0.26, 0.27, 0.32, 0.34, 0.39, 0.5, 0.76, 1.15, 1.38, 1.29, 1.01, 0.75, 0.56, 0.43,
+    0.35, 0.29, 0.25, 0.22, 0.21, 0.19, 0.18, 0.17, 0.14, 0.12, 0.11, 0.091, 0.075, 0.061,
+    0.048, 0.037, 0.029, 0.021, 0.015, 0.011, 0.0076, 0.0057, 0.0044, 0.0036, 0.0029, 0.0022,
+    0.0016, 0.0011, 0.00074, 0.00049, 0.00031, 0.00021, 0.00014, 9.7e-05, 6.5e-05, 4.5e-05,
+    3.2e-05, 2.3e-05, 1.7e-05, 1.2e-05, 9e-06, 7e-06, 5.5e-06, 4.4e-06, 3.6e-06, 3e-06,
+    2.4e-06, 2e-06, 1.7e-06, 1.3e-06, 1.1e-06, 9.1e-07, 7.5e-07, 5.9e-07, 4.6e-07, 3.9e-07)
+_YB_MELKUMOV_PHS_SIGMA_E_PM2 = (
+    1e-05, 1.9e-05, 2e-05, 2.2e-05, 2.8e-05, 4.6e-05, 7e-05, 0.0001, 0.00016, 0.00024, 0.00038,
+    0.00062, 0.0011, 0.0019, 0.0032, 0.0056, 0.0085, 0.012, 0.013, 0.016, 0.021, 0.026, 0.033,
+    0.044, 0.057, 0.069, 0.09, 0.11, 0.14, 0.18, 0.25, 0.28, 0.34, 0.45, 0.73, 1.16, 1.46,
+    1.43, 1.18, 0.93, 0.73, 0.59, 0.5, 0.43, 0.4, 0.37, 0.36, 0.35, 0.35, 0.41, 0.42, 0.45,
+    0.47, 0.49, 0.49, 0.48, 0.45, 0.43, 0.39, 0.35, 0.3, 0.26, 0.21, 0.19, 0.18, 0.17, 0.16,
+    0.15, 0.13, 0.11, 0.083, 0.064, 0.049, 0.038, 0.03, 0.025, 0.019, 0.016, 0.013, 0.011,
+    0.0093, 0.0078, 0.0068, 0.0062, 0.0057, 0.0052, 0.0051, 0.0049, 0.0044, 0.0042, 0.0041,
+    0.0039, 0.0036, 0.0035, 0.0033, 0.003, 0.0027, 0.0026)
+
+_YB_MELKUMOV_HOSTS = {
+    # host -> (sigma_a pm^2, sigma_e pm^2, tau_s, zero_line_m, host label)
+    "aluminosilicate": (_YB_MELKUMOV_AS_SIGMA_A_PM2, _YB_MELKUMOV_AS_SIGMA_E_PM2,
+                        0.83e-3, 974.26e-9, "aluminosilicate/melkumov2004"),
+    "phosphosilicate": (_YB_MELKUMOV_PHS_SIGMA_A_PM2, _YB_MELKUMOV_PHS_SIGMA_E_PM2,
+                        1.45e-3, 972.75e-9, "phosphosilicate/melkumov2004"),
+}
+
+
+def ytterbium_melkumov(host: str = "aluminosilicate") -> RareEarthIon:
+    """Yb3+ built from the MEASURED Melkumov et al. 2004 spectrum (tabulated 848-1180 nm, 1 nm
+    resolution around the pump peak) instead of the compact Gaussian-sum fit -- THE ion bare
+    spectroscopy.ytterbium() returns since 2026-08-28 for the aluminosilicate host (it delegates
+    here). Motivation (2026-08-28 audit): the Gaussian fit carries 1.62x too little oscillator
+    strength for its own 0.83 ms lifetime (Fuchtbauer-Ladenburg), and its sigma_e(1060) =
+    1.95e-25 m^2 sits 1.6x below the measured 3.1e-25 -- the fit's three narrow Gaussians lose
+    the spectral wings. This factory is FL-consistent (tau_rad within ~15% of tau_s) and carries
+    the real wings; use it wherever the Yb signal-band magnitude is load-bearing (holding cost,
+    saturation energy, gain crossovers).
+
+    host (2026-09-14) selects which pair of columns of the SAME printed table is used:
+
+      * "aluminosilicate" (DEFAULT, unchanged): peak 2.69 / 2.97 pm^2 at 976 nm, 7.66 nm FWHM,
+        tau = 0.83 ms, zero line 974.26 nm. Bit-identical to the no-argument call.
+      * "phosphosilicate": peak 1.38 / 1.46 pm^2 at 974 nm, 5.59 nm absorption FWHM, tau =
+        1.45 ms, zero line 972.75 nm -- the host of every Er:Yb fiber, and NOT what
+        spectroscopy.ytterbium("phosphosilicate") returns (that stays the parametric Gaussian
+        model, which peaks 1.4e-24 at 974.5 nm with an 8 nm FWHM and therefore reads 1.27e-24 at
+        a 976 nm pump, 26% above this table's 1.01e-24). Pass this ion explicitly when the P-host
+        pump absorption or the 1-um parasitic band matters -- i.e. in every ErYbAmplifier.
+
+    Anchors this factory reproduces from the printed rows (linear interpolation on the 4 nm grid
+    is the convention that reproduces the paper's own reference values exactly, gated):
+    PhS 976 nm 1.01e-24 / 1.18e-24, 1030 nm 1.80e-26 / 3.25e-25, 1060 nm 2.20e-27 / 1.50e-25;
+    AS 976 nm 2.69e-24 / 2.97e-24, 1030 nm 4.35e-26 / 6.25e-25, 1060 nm 5.70e-27 / 3.10e-25."""
+    try:
+        sa_pm2, se_pm2, tau, lam0, label = _YB_MELKUMOV_HOSTS[host]
+    except KeyError:
+        raise ValueError("ytterbium_melkumov: host must be one of %s; got %r"
+                         % (sorted(_YB_MELKUMOV_HOSTS), host)) from None
+    lam = np.asarray(_YB_MELKUMOV_AS_NM, float) * 1e-9      # ONE grid, both hosts
+    sa = np.asarray(sa_pm2, float) * 1e-24
+    se = np.asarray(se_pm2, float) * 1e-24
+    # zero line = the TABLE'S OWN sigma_e/sigma_a = 1 crossing (AS: 974.26 nm by interpolation;
     # the ratio at 976 nm is 1.104, so declaring 976 skewed every McCumber exponent by
     # ~1.10x -- audit B3 2026-09-01).  976 nm pumping therefore sits 1.7 nm ABOVE the zero
-    # line and the inversion clamp is sigma_a/(sigma_a+sigma_e) = 0.475, not 0.500.
-    return ion_from_cross_sections("Yb3+(melkumov)", lam, sa, se, tau_s=0.83e-3,
-                                   zero_line_m=974.26e-9, host="aluminosilicate/melkumov2004")
+    # line and the inversion clamp is sigma_a/(sigma_a+sigma_e) = 0.475, not 0.500. For the
+    # PhS columns the crossing is at 972.75 nm and the 976 nm clamp is 0.461.
+    name = "Yb3+(melkumov)" if host == "aluminosilicate" else "Yb3+(melkumov,phs)"
+    return ion_from_cross_sections(name, lam, sa, se, tau_s=tau,
+                                   zero_line_m=lam0, host=label)
+
+
+def er_yb_phosphosilicate_reference(population: str = "two"):
+    """The REFERENCE core-pumpable Er:Yb phosphosilicate fiber as (er_ion, yb_ion, fiber, kwargs),
+    ready for `ErYbAmplifier(er_ion, yb_ion, fiber, pumps, signals, ase, **kwargs)`. Every number
+    below is sourced; nothing here is tuned to a device measurement this repo also gates on.
+
+    GEOMETRY AND DOPING -- Rybaltovsky, Lipatov, Lobanov, Abramov, Umnikov, Bazakutsa, Bobkov,
+    Butov, Gur'yanov, JOSA B 37(10), 3077 (2020), Table 1, fiber #2: 4 um core (a = 2.0 um),
+    delta_n = 0.014 i.e. NA = 0.20, 125 um cladding, 60 dB/m at 1535 nm and 1500 dB/m at 976 nm.
+    Back-computing those two absorptions with the Marcuse overlap and the two ions' own
+    cross-sections gives N_Er = 4.0e25 m^-3 and N_Yb = 4.0e26 m^-3 (Yb:Er = 10:1). Three
+    independent checks pass: the derived MFD (6.37 um) lands inside the Fibercore Er/Yb catalogue
+    box (5.3-6.8 um); the composition (0.1 / 0.8 mol% Er2O3 / Yb2O3) gives 4.0e25 and ~3.2e26
+    without using the absorptions at all; and the full-inversion gain at 1550 nm, 28.4 dB/m,
+    matches Rybaltovsky's measured 0.27 dB/cm. Length 0.8 m (the family is 0.4-1.5 m).
+    Background loss 30 dB/km (research-grade; Rybaltovsky, Le Gouet).
+
+    IONS. Er: `spectroscopy.erbium("phosphosilicate")`, the P-host-anchored spectrum (1535 nm
+    peak, sigma_a 5.95e-25, tau 9.0 ms). Yb: `ytterbium_melkumov("phosphosilicate")`, the
+    measured P2O5 table (tau 1.45 ms, 5.6 nm pump line, zero line 972.75 nm).
+
+    TRANSFER, and the ONE genuinely contested number. Two consistent parameterizations are
+    returned; `kwargs` carries the TWO-POPULATION one, because it is the one that carries the
+    measured physics:
+      * single population: k_tr = 1.0e-21 m^3/s, f = 1. An EFFECTIVE, device-validated
+        coefficient: it reproduces the Exail datasheet PCE, the Bai 2015 small-core stage
+        (2.63 W / 19.4 dB against a measured 2.6 W / 19.4 dB) and the measured core-pumped
+        roll-off. It is NOT a measured microscopic rate and it over-predicts large-core > 20 W
+        output by 1.4-2x. Available as `kwargs_single_population`.
+      * two populations (`population="two"`, THE DEFAULT): f = 0.9 with a coupled-pool k_tr = 3.0e-21 m^3/s --
+        Cheng et al., Materials 15(3), 996 (2022), whose bi-exponential Yb decay in Er/Yb/P glass
+        gives a fast-pair rate of 3.07e-21 m^3/s (and an ensemble yield of 1.2e-22 from the same
+        measurement, the factor of 26 that the coupled fraction exists to absorb). f = 0.9 is the
+        high-ETE commercial-fiber end of the measured range (FORC put Nufern LMA-EYDF-25P/300 at
+        ~0.9; Sefler 2004 measured 0.83-0.85 on OFS/INO double-clad fiber).
+    K2 = 2.0e-22 m^3/s (Sefler 2004 Table 1: 1.5-4.0e-22 across three fibers; Canat 2006 fits
+    1-2e-22). k_back = 0 -- no primary source for a phosphosilicate FIBER value was found, and
+    the 2.3e-24 that circulated in this project came from misreading Vysokikh's chi_2, which is a
+    Yb stimulated-emission rate; with A_32 = 3e5 and any plausible k_back, phi > 0.999.
+    W_mig = 0 by default: no measurement of the migration rate between the pools was located, and
+    it is the one parameter here with no source at all.
+    C_up = 1.1e-24 m^3/s (Hwang et al., JOSA B 17(5), 833 (2000), bulk phosphate at 5-10x this
+    density; the Er:Yb FIBER modelling literature clusters 3-10e-24, so this is the conservative
+    end -- see concentration.py). Pair fraction 2k = 1.6% (Le Gouet et al., JLT 37(15), 3611
+    (2019), measured on an Er:Yb Al:P fiber), in the Delevaque convention, i.e. 0.8% dark.
+
+    Returns (er_ion, yb_ion, fiber, kwargs) with kwargs containing ONLY ErYbAmplifier
+    constructor keywords, so `ErYbAmplifier(er, yb, fiber, pumps, signals, ase, **kwargs)` runs
+    as written. The preset is a STARTING POINT for a study, not a
+    calibrated device model: k_tr, f, K2 and C_up all sit inside literature ranges that span an
+    order of magnitude, and section 4 of the 2026-09-14 audit note reports what each does to the
+    predictions."""
+    from dynameta.optics.fiber_amp.concentration import ConcentrationModel
+    from dynameta.optics.fiber_amp.spectroscopy import erbium
+
+    er = erbium("phosphosilicate")
+    yb = ytterbium_melkumov("phosphosilicate")
+    fiber = FiberSpec(core_radius_m=2.0e-6, na=0.20, n_t_m3=4.0e25, length_m=0.8,
+                      clad_radius_m=62.5e-6,
+                      background_loss_per_m=float(dB_per_m_to_per_m(30.0e-3)))
+    conc = ConcentrationModel(c_up_m3_s=1.1e-24, pair_fraction=0.016,
+                              pair_convention="delevaque")
+    if population not in ("two", "single"):
+        raise ValueError("er_yb_phosphosilicate_reference: population must be 'two' or "
+                         "'single'; got %r" % (population,))
+    kwargs = dict(n_yb_m3=4.0e26, k_back_m3_s=0.0, a32_per_s=3.0e5,
+                  yb_migration_rate_per_s=0.0, concentration=conc)
+    if population == "two":
+        kwargs.update(k_tr_m3_s=3.0e-21, yb_coupled_fraction=0.9, k_tr2_m3_s=2.0e-22)
+    else:
+        kwargs.update(k_tr_m3_s=1.0e-21, yb_coupled_fraction=1.0, k_tr2_m3_s=0.0)
+    return er, yb, fiber, kwargs
 
 
 # ---- representative datasheet target (a generic single-mode C-band EDFA gain block) ----------

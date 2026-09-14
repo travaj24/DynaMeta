@@ -764,3 +764,128 @@ resolved.
 `FiberAmplifier.solve` walks, reported on `meta['relax_attempts']`) so code written against
 the single-ion class is substitutable. Its DEFAULT is still the numeric 1.0 -- one attempt,
 unchanged.
+
+## 15. Er:Yb two-population physics, secondary transfer, migration, concentration and heat
+
+Added 2026-09-14; derivations, integrator, gate numbers and validation residuals in
+`docs/audit/2026-09-14-eryb-two-population-physics.md`. EVERY mechanism in this section is
+opt-in, and with all of them at their defaults `ErYbAmplifier` reproduces v0.11.1 bit for bit --
+asserted, not argued (`tests/test_fiber_eryb_physics.py`, gate 1).
+
+**Two ytterbium populations (`yb_coupled_fraction` f, default 1.0).** Dong et al., Opt. Express
+28(11), 16244 (2020) Eqs. (1)-(12) split the ytterbium into a fraction `f` COUPLED to the erbium
+and `1 - f` UNCOUPLED. Only the coupled pool transfers; both are pumped, both decay with
+`tau_Yb`, and both absorb and emit at every channel, so the propagation sees `n6 = n6c + n6nc`.
+With `b2c = n6c/(f N_Yb)` and `b2nc = n6nc/((1-f) N_Yb)` the z-local steady state is the triple
+
+```
+Er:   R_a_Er (1-f2) - R_e_Er f2 - f2/tau_Er + k_tr b2c (f N_Yb)(1-f2) - C_up N_Er f2^2      = 0
+Ybc:  R_a_Yb (1-b2c) - R_e_Yb b2c - b2c/tau_Yb - k_tr b2c N_Er (1-f2) phi
+      - K2 b2c N_Er f2 - W (1-f)(b2c - b2nc)                                                = 0
+Ybnc: R_a_Yb (1-b2nc) - R_e_Yb b2nc - b2nc/tau_Yb + W f (b2c - b2nc)                        = 0
+```
+
+and the optical field, the 1-um parasitic diagnostic and the photodarkening law all see the
+POPULATION-WEIGHTED `bbar = f b2c + (1-f) b2nc` (`meta['beta_yb_z']`; the pools are reported
+separately on `meta['beta_yb_coupled_z']` / `['beta_yb_uncoupled_z']`).
+
+**The scalar-in-f2 reduction survives.** At fixed `f2` the two ytterbium balances are LINEAR in
+`(b2c, b2nc)`, and the 2x2 has a closed form whose `W^2 f(1-f)` cross terms cancel exactly:
+
+```
+D   = R_a_Yb + R_e_Yb + 1/tau_Yb
+Dc  = D + k_tr N_Er (1-f2) phi + K2 N_Er f2
+det = Dc D + W (f Dc + (1-f) D)   > 0 always
+b2c = R_a_Yb (D + W)/det,     b2nc = R_a_Yb (Dc + W)/det
+```
+
+Substituting `b2c` into the Er residual leaves the SAME bracketed scalar `H(f2)` on `[0, 1]` with
+`H(0) >= 0` and `H(1) < 0`, solved by the same safeguarded Newton/bisection, with
+`d b2c/d f2 = -b2c (D + W f) (K2 N_Er - k_tr N_Er phi)/det`. `W -> 0` gives `b2c = R_a/Dc` and
+`b2nc = R_a/D`; `W -> inf` gives `b2c = b2nc = R_a/(f Dc + (1-f) D)`.
+
+**Secondary transfer (`k_tr2_m3_s` K2, default 0).** `Yb* + Er(4I13/2) -> Yb + Er(4F9/2)`, and
+the `4F9/2` relaxes multiphonon-fast back to `4I13/2`: the ERBIUM POPULATION IS UNCHANGED and the
+whole Yb quantum becomes heat. It is a pure drain `-K2 b2c N_Er f2` on the coupled inversion and
+a separate `k2_defect = eps_Yb Phi_K2` in `energy_terms`, `Phi_K2 = A K2 N_Er f2 (f N_Yb b2c)`.
+Sefler et al., JOSA B 21(10), 1740 (2004) Table 1 measure `K2 = 1.5-4e-22 m^3/s` on three
+double-clad fibers -- comparable to their own `K1` -- and Canat's 2006 thesis fits `1-2e-22`.
+
+**Yb-Yb migration (`yb_migration_rate_per_s` W, default 0), derived rather than posited.** A
+bimolecular exchange `W' n6c n5nc` against `W' n6nc n5c` has its `(1 - b)` factors cancel
+identically, so with `W = W' N_Yb`,
+
+```
+d b2nc/dt |_mig = +W f (b2c - b2nc),      d b2c/dt |_mig = -W (1-f)(b2c - b2nc),
+```
+
+which conserves `f b2c + (1-f) b2nc` exactly and has EQUAL EXCITATION FRACTIONS (never equal
+densities) as its only equilibrium. This is the ensemble-versus-pair reconciliation: Cheng et
+al., Materials 15(3), 996 (2022) get a fast-pair rate `3.07e-21` and an ensemble yield `1.2e-22`
+from ONE bi-exponential Yb decay, a factor of 26; with `W > 0` a large coupled-pool `k_tr` on a
+small pool delivers the ensemble yield a single pool would need a small `k_tr` to match.
+
+**Energy closure.** The identity gains one term and the Yb terms gain the second pool:
+
+```
+q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr + D_K2,
+U = A (eps_Er N_Er f2 + eps_Yb N_Yb bbar),   D_K2 = eps_Yb Phi_K2,
+Phi_tr = A k_tr phi N_Er (f N_Yb) b2c (1 - f2).
+```
+
+`dU/dt` uses `f db2c/dt + (1-f) db2nc/dt`, in which the migration exchange cancels identically --
+the numerical signature that it conserves excitation. Pair-induced quenching and photodarkening
+need no term of their own: both are already inside `D_loss`. MEASURED with every mechanism on
+(f 0.85, k_tr 3e-21, K2 2e-22, W 5e3, pairs 3% Delevaque, photodarkening 0.02/m, on the
+`tests/test_fiber_eryb_physics.py` reference fixture): the per-z identity closes to `< 2e-15`
+relative, and the independent wall-plug residual is `5.7e-5 / 1.4e-5 / 3.5e-6` of the launched
+pump at 161 / 321 / 641 nodes.
+
+**Transient.** Three reservoirs `y = (f2, b2c, b2nc)` when a pool exists, marched by the SAME
+exponential Rosenbrock step with the exact 3x3 Jacobian `eryb._fb_jacobian3`, through the
+size-parametrized kernel `dynamics._phi1_dt_nxn` (the two-reservoir step is that kernel at
+`n = 2`, not a second scheme). `J[0][2] = J[2][0] = 0`: within a frozen-power step the erbium and
+the uncoupled ytterbium meet only through the coupled pool. The migration block is a Markov
+generator, symmetrizable by `diag(1/sqrt(f), 1/sqrt(1-f))`, so it contributes real non-positive
+eigenvalues; with `K2 > 0` the determinant cancellation is no longer exact and no theorem is
+claimed -- the gate instead measures `max Re(eig) < 0` over 300 random operating points (worst
+`-6.5e2` 1/s). `nbar2_0` accepts a TRIPLE `(f2, b2c, b2nc)`; a PAIR seeds the uncoupled pool from
+the same quasi-equilibrium closed form. `meta['beta_yb']` stays the population-weighted mean.
+The march REFUSES an amplifier carrying a temperature profile rather than silently running the
+cold cross-sections.
+
+**Concentration quenching and photodarkening (`concentration=ConcentrationModel(...)`).** The
+same object and the same semantics `FiberAmplifier` takes: pair-induced quenching in both
+conventions (dark erbium is removed from the active pool and adds `Gamma sigma_a_Er n_dark` to
+every channel's background loss), `C_up` through the model as the ONE entry point (a raw
+`upconversion_C_up` alongside it warns and the model wins), and the Yb photodarkening equilibrium
+gray loss `pd_loss_per_m * bbar^pd_exponent` at the POPULATION-WEIGHTED inversion -- an uncoupled
+pool sits at a HIGHER inversion than a coupled one, so reading `b2c` would understate it. Gated
+against the single-ion class in the Er-only limit to `1e-4` dB in both conventions. LIMIT: dark
+erbium is inert apart from its absorption, so a Yb excitation transferred into a quenched pair is
+not modelled.
+
+**Distributed temperature.** `ErYbAmplifier.set_temperature_profile` scales each ion's `sigma_e`
+about ITS OWN McCumber zero line (Er ~1530 nm, Yb ~974 nm) -- a single shared `eps` would be
+wrong by orders of magnitude in the pump band. `thermal.solve_with_thermal_feedback` accepts the
+class and drives `Q(z)` from `_heat_profile_W_per_m`, the analytic rate balance (quantum defect +
+transfer defect + K2 defect + BOTH pools' fluorescence + background loss), rather than from
+`np.gradient` of the net flux; `info['heat_source']` records which path ran, and
+`FiberAmplifier` -- which defines no such hook -- keeps the flux-gradient path unchanged. MEASURED:
+a uniform profile reproduces `at_temperature` applied to both ions to `1.1e-7 dB` at 380 K, and a
+hot cladding-pumped Er:Yb (`h = 200 W/m^2/K`, coolant 320 K) converges in 2 iterations to a
+`0.165 K` residual at a 331 K core.
+
+**Calibration.** `ytterbium_melkumov(host="phosphosilicate")` builds the Yb from the P2O5 columns
+of the same printed Melkumov 2004 table (98 rows, one grid): peak `1.38 / 1.46e-24` at 974 nm,
+absorption FWHM `5.59 nm`, `tau = 1.45 ms`, zero line 972.75 nm, so a 976 nm pump sits on the
+BLEACHING side and clamps at `b2 = 0.461`. The aluminosilicate branch is unchanged and the AS
+columns of that table reproduce the shipped tuples entry for entry (gated).
+`spectroscopy.erbium(host="phosphosilicate")` stops being a label: the C band is re-anchored to
+Le Gouet et al., JLT 37(15), 3611 (2019) (peak 1535 nm, `sigma_a(1535) = 5.95e-25`, the red wing
+0.59x the aluminosilicate fit at 1560 nm), `tau = 9.0 ms` (Cheng 2022), emission McCumber-derived
+with `eps` FITTED to the measured ratio (1540.44 nm). Validity 1530-1565 nm; the pump bands are
+DELIBERATELY the aluminosilicate ones (1-2% of an EYDFA's pump absorption).
+`p_host_spectra=False` restores the old label-only ion bit-exactly.
+`calibration.er_yb_phosphosilicate_reference()` returns `(er_ion, yb_ion, FiberSpec, kwargs)` for
+the Rybaltovsky-class reference fiber with every value's provenance in its docstring.
