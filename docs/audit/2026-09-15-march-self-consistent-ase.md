@@ -7,7 +7,10 @@ adds an opt-in step that makes the population change implicit and solves the res
 ASE-coupled power problem to the steady solver's own tolerance, on BOTH amplifier classes. The
 default march is unchanged -- asserted byte-for-byte, not argued.
 
-Branch `feat/march-self-consistent-ase`. Version `0.11.2 -> 0.11.3`.
+Branch `feat/march-self-consistent-ase`, merged onto main `1bef664` (v0.11.3: the Er:Yb
+migration calibration, the co-doped temperature laws and `eryb_fit`). Version
+`0.11.5 -> 0.11.6` -- the slot after PR #30 (0.11.4) and PR #27 (0.11.5), which merge
+ahead of this one.
 
 ---
 
