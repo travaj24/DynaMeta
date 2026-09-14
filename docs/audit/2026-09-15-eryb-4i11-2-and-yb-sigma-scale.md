@@ -21,9 +21,12 @@ previous model could not express.
    measurement behind it.
 
 With `tau32_s = None` and `yb_sigma_e_scale = 1.0` -- the defaults -- the class reproduces
-v0.11.2 bit for bit, asserted in one process rather than argued.
+v0.11.2 bit for bit, asserted in one process rather than argued; the same in-process gate holds
+against v0.11.3 after the merge (section 7).
 
-Branch `feat/eryb-explicit-4i11-2-and-yb-sigma-scale`. Version `0.11.2 -> 0.11.3`.
+Branch `feat/eryb-explicit-4i11-2-and-yb-sigma-scale`. Version `0.11.3 -> 0.11.4` (this branch
+was cut from v0.11.2 and merged `origin/main` at v0.11.3, which took that number for the
+migration / thermal / fit build -- see section 7).
 
 ---
 
@@ -36,7 +39,7 @@ Branch `feat/eryb-explicit-4i11-2-and-yb-sigma-scale`. Version `0.11.2 -> 0.11.3
 | `eryb.py` | `YbSigmaEScaleFit` + `eryb_fit_yb_sigma_e_scale(amp, measured_1um_ase_W, direction)` -- the bracketed one-parameter fit |
 | `dynamics.py` | the FOUR-reservoir march (`_split_eryb_seed_n3`, the n = 4 / n = 3 exponential Rosenbrock step through the existing `_phi1_dt_nxn`), `meta['er_4i11_2']`, the 4I11/2 frame on `frame_as_steady` |
 | `__init__.py` | `YbSigmaEScaleFit`, `eryb_fit_yb_sigma_e_scale` exported |
-| `tests/test_fiber_eryb_4i11_2.py` | 19 gates |
+| `tests/test_fiber_eryb_4i11_2.py` | 20 gates (19 + the merge-orthogonality gate of section 7) |
 | `validation/eryb_morasse_yb_sigma_scale.py` | the Morasse 2006 fit + the tau_32 sweep on the same fiber (a reporting script) |
 
 ### API -- exact call forms
@@ -261,7 +264,7 @@ to be judged on -- the SIGNAL change it causes. Monotonicity is not assumed; if 
 
 ## 3. Measured gate numbers
 
-`tests/test_fiber_eryb_4i11_2.py`, 19 gates. Two fixtures: the **cladding-pumped** reference of
+`tests/test_fiber_eryb_4i11_2.py`, 20 gates. Two fixtures: the **cladding-pumped** reference of
 `test_fiber_eryb_physics.py` (6 um core, `N_Er` 4e25, `N_Yb` 4e26, `k_tr` 2e-22, 1 W of 976 nm
 into a 125 um cladding, 20 mW seed, 3 m, 13.82 dB) and the **core-pumped** reference of the
 2026-09-13 closure note (2.8 um core, `N_Er` 2e25, `N_Yb` 2e26, 200 mW of 976 nm, 0.5 mW seed,
@@ -446,3 +449,47 @@ complete blast radius: this change touches `dynameta/optics/fiber_amp/eryb.py`,
 `dynamics.py`, the package `__init__`, the two version strings, one validation script,
 `validation/run_all.py`'s exclusion table and the docs, and nothing else. The full matrix runs on
 the PR.
+
+---
+
+## 7. The merge with the migration / thermal / fit build (v0.11.3)
+
+`feat/eryb-migration-thermal-fit` landed on `main` as PR #29 while this branch was open, and the
+two touched the SAME five methods: `_mcc_matrices`, `_dP`, `_fb_profile`, `_rates_profile` and
+`energy_terms`. That is not a coincidence -- both builds add a per-z quantity the z-local solve
+has to see, so both had to widen the same channels. The merge is therefore worth recording.
+
+**What their build changed.** `_mcc_matrices` returns a FOUR-slot temperature bundle instead of a
+pair: the two McCumber matrices, plus (2) a Yb Stark-band scale on BOTH ytterbium cross-sections
+and (3) an Arrhenius `(k_tr, K2, W_mig)` scale, each `None` unless its option was passed. Every
+solver entry point gained an `rs=None` argument carrying slot 3 at that z.
+
+**How the two combine.** Slot 2 is an ytterbium-spectrum scale and slot 3 a rate scale, while
+this build's two options are an erbium-level split and an ytterbium-EMISSION scale, so nothing
+had to be reconciled physically -- only threaded:
+
+* the explicit-4I11/2 branch of `_dP` and `_fb_profile` reads the ytterbium coefficients AFTER
+  the Stark factor has been applied to them, and passes `rs` on;
+* `_n3_coeffs` gained the same `rs` argument, so a `RateTemperatureLaw` scales `k_tr`, `K2` and
+  `W_mig` in the QUADRATIC's coefficients exactly as it does in the one- and two-pool closed
+  forms -- `k_back` is left unscaled there too, for their stated reason;
+* `energy_terms` hoists the Arrhenius-scaled `k_tr`/`k_tr2` ABOVE the branch, so the shared
+  `k2_rate` and both branches' transfer rates read one scaled value;
+* `yb_sigma_e_scale` multiplies `sigma_e_Yb` in `_plan`, upstream of everything temperature, so a
+  scaled AND hot amplifier is scaled-then-McCumber-then-Stark. Each factor is applied once.
+
+**Gate.** `test_this_build_and_the_migration_thermal_build_are_orthogonal` asserts the four
+statements that matter, on a hot fiber (300 K + 60 K exponential): their bundle is INERT on this
+build's path with their options off (an identity `RateTemperatureLaw` is exactly the `None` path,
+bitwise); their options move the gain with this build's off (the premise); all four on solve,
+move the gain again, and close the energy identity to **< 1e-11** per z (measured **3.7e-14**);
+and the Arrhenius law reaches the 4I11/2 algebra itself -- with `RATE_ARRHENIUS_30PCT_300_480K`
+the `n3` profile MOVES, which it can only do if `rs` is threaded into `_n3_coeffs`.
+
+Numbers unchanged by the merge, re-measured on the merged tree at 81 nodes: adiabatic
+13.821267912 dB, `tau_32 = 7 us` 13.809015816 dB, `tau_32 -> 0` within **-9.6e-8 dB** of the
+adiabatic value -- identical to the pre-merge values, which is the operational statement that
+v0.11.3's options are off by default.
+
+Version `0.11.3 -> 0.11.4`; the model spec's section for this build is **17**, theirs having
+taken 16.
