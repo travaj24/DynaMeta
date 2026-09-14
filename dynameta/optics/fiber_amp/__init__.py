@@ -86,6 +86,14 @@ physics, and neither is reachable from the solvers -- nothing below them imports
            and the largest constellation an operating point supports. The per-level variances are
            EVALUATED per level rather than scaled, because two of the four terms are
            level-independent (audit F-6).
+  Phase 23 march_ase              : the OPT-IN self-consistent (ASE-coupled) transient step --
+           simulate_transient(ase_mode="self_consistent" | "auto") on BOTH amplifier classes.
+           The default step freezes the populations, so ASE generated inside a step never
+           depletes the inversion that made it and the march leaves its regime once the ASE
+           stops being a perturbation (audit A-7). This solves P = propagate(gain(advance(P)))
+           per step -- the population change made IMPLICIT -- to the steady solver's own
+           residuals and tolerance. Default OFF and byte-identical when off; see
+           docs/audit/2026-09-15-march-self-consistent-ase.md and model spec sec.16.
 
 FACADE CONTRACT (audit X-10). This is an EAGER, EXHAUSTIVE facade -- unlike dynameta.optics and
 dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are by design. Every name
@@ -121,6 +129,8 @@ from dynameta.optics.fiber_amp.thermal import (ThermalModel, heat_load_per_m, ne
                                               thermal_guiding_onset_Q_per_m,
                                               thermo_optic_phase_rad,
                                               solve_with_thermal_feedback)
+from dynameta.optics.fiber_amp.march_ase import (ASE_MODES, SelfConsistentControl,
+                                                 StepReport)
 from dynameta.optics.fiber_amp.dynamics import (TransientResult, amplifier_saturation_energy,
                                                frantz_nodvik_gain,
                                                frantz_nodvik_instantaneous_gain,
@@ -177,7 +187,8 @@ from dynameta.optics.fiber_amp.comms import (FEC_THRESHOLDS, LevelStatistics, Li
                                              pam_levels_W, pam_ser, q_to_log10_ser, q_to_ser,
                                              ser_to_ber)
 
-__all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
+__all__ = ["ASE_MODES", "SelfConsistentControl", "StepReport",
+           "CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime",
            "FiberSpec", "overlap_gamma", "cladding_pump_overlap", "mode_field_radius_m",
            "ChannelSet", "metastable_fraction", "gain_coeff_per_m",

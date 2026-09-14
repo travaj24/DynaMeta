@@ -1131,8 +1131,9 @@ def test_package_facade_is_exhaustive():
     # skipped it and 17 of the 18 still cleared the floor) -- exactly the drift this gate exists
     # to catch. Equality against the live submodule count leaves no slack.
     assert checked == submodules
-    # pin the count itself (20 -> 22 with the audit-2026-08-04 link layers: +efficiency, +comms)
-    assert len(submodules) == 22, submodules
+    # pin the count itself (20 -> 22 with the audit-2026-08-04 link layers: +efficiency, +comms;
+    # 22 -> 23 with the 2026-09-15 self-consistent ASE step: +march_ase)
+    assert len(submodules) == 23, submodules
     for name in pkg.__all__:                                  # ... and every export resolves
         assert getattr(pkg, name, None) is not None, name
 
