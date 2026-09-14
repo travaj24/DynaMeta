@@ -340,6 +340,12 @@ measurement, and the transfer coefficient trades against it directly. MEASURED, 
 | 3.0e-22 | **0.4082** | +0.0006 dB |
 | 1.0e-21 (the device-validated effective value) | 0.4479 | -0.0012 dB |
 
+One robustness check, because a fitted parameter that moved with the mesh would not be worth
+quoting: re-running the whole fit at **81 nodes** instead of 201 returns 0.3484 and 0.3333 against
+the 0.3482 and 0.3332 above -- 0.06% and 0.03%, i.e. the fit is mesh-insensitive even where the
+unscaled 1-um ASE it fits is not (66.29 mW against 66.63 mW, 0.5%). The script's `--quick` flag
+runs that reduced matrix.
+
 A stronger transfer drains the ytterbium into the erbium and leaves less 1-um ASE to remove, so
 the fitted scale RISES with `k_tr` -- through Morasse's 0.40 at `k_tr = 3e-22` and past it. The
 signal insensitivity holds across the whole range (worst 0.02 dB), which is the property the
