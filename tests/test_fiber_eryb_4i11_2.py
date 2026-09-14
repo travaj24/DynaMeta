@@ -281,14 +281,18 @@ def test_back_transfer_loss_is_monotone_in_tau32_at_fixed_k_back():
     (C36 = C63)."""
     k = 2.0e-22
     ratios, gains = [], []
+    # 121 nodes: MEASURED, every number below reproduces its 161-node value to 1e-4 dB and the
+    # returned fractions to every printed digit (they are ratios of z-integrals, not
+    # endpoint-sensitive gains), at 60% of the cost -- and this sweep is the most expensive in
+    # the file, because a k_back = k_tr back-transfer couples the two ions both ways at once
     for t32 in (1e-6, TAU32_SEFLER, TAU32_SLOW):
-        r = clad_amp(tau32_s=t32, k_back_m3_s=k).solve(n_nodes=161)
+        r = clad_amp(tau32_s=t32, k_back_m3_s=k).solve(n_nodes=121)
         assert r.meta["converged"]
         ratios.append(float(r.meta["back_transfer_ratio"]))
         gains.append(float(r.signal_gain_dB[0]))
     assert ratios[0] < ratios[1] < ratios[2] and ratios[0] > 0.0
     assert gains[0] > gains[1] > gains[2]
-    g_no_back = float(clad_amp(tau32_s=TAU32_SLOW).solve(n_nodes=161).signal_gain_dB[0])
+    g_no_back = float(clad_amp(tau32_s=TAU32_SLOW).solve(n_nodes=121).signal_gain_dB[0])
     assert g_no_back - gains[2] > 1.0                  # ~2.0 dB of back-transfer loss at 50 us
     # k_back = 0 must leave NOTHING behind: the ratio is exactly zero, not merely small
     assert clad_amp(tau32_s=TAU32_SEFLER).solve(n_nodes=41).meta["back_transfer_ratio"] == 0.0
