@@ -267,6 +267,13 @@ doing its job), 11 on a cold start where the first steps have to find the operat
 nothing. Note the cost ratio FALLS with mesh (3.9x -> 3.3x at 161 -> 801 nodes): the per-step
 bookkeeping the two modes share grows with `n_nodes`, the inner iterations do not grow faster.
 
+READ THE COUNTS, NOT THE SECONDS. The wall-clock column is load-sensitive on a shared box -- the
+same table re-measured under contention reads 3.49 / 14.08 / 3.41 and 8.68 / 106.5 / 75.9 ms per
+step, i.e. 15-40% slower everywhere in the same proportions. What reproduces EXACTLY between the
+two runs is the work done: switches (0, 0, 11, 11), probes (0, 0, 7, 7) and inner iterations
+(436, 400, 453, 266 / 268). Those are the numbers to regress against; the seconds are quoted so
+the order of magnitude is on the record.
+
 ---
 
 ## 6. Guidance for the downstream burst-PAM study
