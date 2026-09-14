@@ -126,7 +126,8 @@ bi-exponential and can never be a damped oscillation -- no regime check is neede
 integrals are the SAME closed forms `_solve_fbb` already uses for the steady state (there with
 the pump on): one piece of algebra, written once for a root find and once for a decay. The
 closed form is gated against a fixed-step RK4 march of `_fb_rhs3` itself -- an oracle that shares
-no algebra with the eigen-decomposition -- to `6e-10` absolute over 0.5 ms.
+no algebra with the eigen-decomposition -- to better than `1e-9` absolute on `I(t)` over 0.5 ms
+and 25 000 steps, and its horizon-truncated integral to `2e-5` relative.
 
 ### 2.2 The inversion, and where the number comes from
 
@@ -462,8 +463,10 @@ launched pump, and the THRESHOLD at which it reaches 1% of the output:
 | 500 | off | 5.03e-5 | 5.88e-5 | 8.46e-5 | 1.92e-4 | 7.41e-4 | 3.90e-3 | **> 16 W** |
 | 500 | on | 4.83e-5 | 4.95e-5 | 5.63e-5 | 8.05e-5 | 1.77e-4 | 2.92e-3 | **> 16 W** |
 
-The threshold rises monotonically with temperature, and turning the two laws ON raises it further
-at every temperature and every pump level. That is the qualitative result Canat / Dussardier
+The threshold rises monotonically with temperature, and turning the two laws ON lowers the 1-um
+fraction further at every pump and every temperature ABOVE `T_ref` -- raising the 400 K threshold
+from 4.22 to 4.33 W. At `T_ref` itself they are the exact identity, which is the 300 K pair above
+and is a gate rather than a coincidence. That is the qualitative result Canat / Dussardier
 report and the one Morasse 2007 MEASURED -- a core-temperature rise moved his own 1-um onset from
 14 W to 35 W of pump, "which allowed us to reach 10 W output at 1563 nm instead of the 5 W
 normally predicted by the theory". Dong 2020's Fig. 3 room-temperature threshold near 200 W on the
