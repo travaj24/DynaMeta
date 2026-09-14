@@ -72,9 +72,15 @@ reabsorption cascade is NOT in this z-local model. transfer_efficiency() reports
 model value (a rate-integral consistent with the low-power analytic form), and the model does
 NOT force the >95% number.
 
-References: Karasek, IEEE JQE 33(9):1699 (1997) [Er:Yb rate model, k_tr]; Di Pasquale & Federighi,
-JOSA B 23(3):195 (2006) [measured k_tr ~ 1.1e-22]; Paschotta et al., IEEE JQE 33(7):1049 (1997)
-[Yb lifetime]; Giles & Desurvire, JLT 9(2):271 (1991) [coupled-power EDFA core]. Pure
+References: Karasek, IEEE JQE 33(10):1699 (1997) [Er:Yb rate model, k_tr]; Laroche, Girard,
+Sahu, Clarkson, Nilsson, JOSA B 23(2):195 (2006) [k_tr measured in phosphosilicate Er:Yb FIBER,
+~6.4e-23 to 1.1e-22 m^3/s]; Hwang, Jiang, Luo, Watson, Sorbello, Peyghambarian, JOSA B 17(5):833
+(2000) [k_tr ~ 1.1e-22 and >95% transfer measured in BULK phosphate at N_Er = 2-4e26 m^-3, where
+k_tr N_Er tau_Yb = 32-64 -- the '>95%' and the fiber's ~0.80-0.85 (N_Er ~ 4e25) are the same k_tr
+at different Er loadings, which resolves the DISCREPANCY NOTE above without a reabsorption
+cascade]; Paschotta et al., IEEE JQE 33(7):1049 (1997) [Yb lifetime]; Giles & Desurvire, JLT
+9(2):271 (1991) [coupled-power EDFA core]. (Citation audit 2026-09-13: the earlier 'Di Pasquale
+& Federighi, JOSA B 23(3):195' attribution was wrong -- that paper is Laroche et al., issue 2.) Pure
 numpy/scipy; SI units; exp(-i omega t); ASCII-only. docs/fiber_amp_model_spec.md sec.1;
 FORMULATION DOSSIER MODULE 1.
 """
@@ -91,7 +97,7 @@ from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
 from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, Signal,
-                                                    SteadyStateResult, _KEEP,
+                                                    SteadyStateResult, _KEEP, _RELAX_LADDER,
                                                     _frozen_profile_interp,
                                                     _relaxation_residuals)
 
@@ -356,10 +362,128 @@ class ErYbAmplifier:
             f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb)
         return f2, b2
 
+    # ---- vectorized rate / RHS / Jacobian surface (shared with the transient march) --------
+    # The steady solve needs only the z-local ROOT of the coupled pair (_solve_fb). A TIME MARCH
+    # needs the pair's right-hand side and its Jacobian on the whole mesh at once, so the forms
+    # below are the SINGLE HOME of that algebra: _solve_fb's residual H(f2) and _fb_rhs /
+    # _fb_jacobian are the same two equations written once for a root find and once for an
+    # integrator (dynamics.simulate_transient_eryb reads these rather than re-deriving them).
+
+    def _rates_profile(self, c, P):
+        """(R_a_Er, R_e_Er, R_a_Yb, R_e_Yb) [1/s] at every z from the power profile P (K, M) --
+        the vectorized counterpart of the four np.dot calls _fb_profile makes per node."""
+        Pz = np.maximum(np.asarray(P, float), 0.0)
+        return (c["flux_a_er"] @ Pz, c["flux_e_er"] @ Pz,
+                c["flux_a_yb"] @ Pz, c["flux_e_yb"] @ Pz)
+
+    def _phi(self, b2):
+        """Back-transfer branching factor phi = A_32 / (A_32 + k_back (1 - b2) N_Yb): the fraction
+        of Er 4I11/2 population that relaxes to 4I13/2 before back-transferring (module docstring).
+        EXACTLY 1.0 when k_back = 0 (the default), so every expression carrying it stays
+        byte-identical to the no-back-transfer algebra."""
+        b = np.asarray(b2, float)
+        if self._k_back <= 0.0:
+            return np.ones_like(b)
+        return self._a32 / (self._a32 + self._k_back * (1.0 - b) * self._n_yb)
+
+    def _dphi_db(self, b2, phi):
+        """d(phi)/d(b2) = phi^2 k_back N_Yb / A_32 (identically 0 when k_back = 0)."""
+        b = np.asarray(b2, float)
+        if self._k_back <= 0.0:
+            return np.zeros_like(b)
+        return phi * phi * self._k_back * self._n_yb / self._a32
+
+    def _fb_rhs(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2):
+        """(df2/dt, db2/dt) [1/s]: the module docstring's coupled pair BEFORE the steady-state
+        condition is imposed. _solve_fb returns the (f2, b2) at which both of these vanish, so a
+        march built on this has the steady solve's own fixed point -- not a nearby one."""
+        phi = self._phi(b2)
+        tr = phi * b2 * (1.0 - f2)                  # transfer shape; x k_tr N_Yb (in) / N_Er (out)
+        df = (Ra_Er * (1.0 - f2) - Re_Er * f2 - f2 / self._tau_er
+              + self._k_tr * self._n_yb * tr
+              - self.upconversion_C_up * self._n_er * f2 * f2)
+        db = (Ra_Yb * (1.0 - b2) - Re_Yb * b2 - b2 / self._tau_yb
+              - self._k_tr * self._n_er * tr)
+        return df, db
+
+    def _fb_jacobian(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, f2, b2):
+        """The EXACT 2x2 Jacobian (J11, J12, J21, J22) of _fb_rhs at (f2, b2).
+
+        STRUCTURE (this is what licenses the exponential update in dynamics): J11 < 0 and J22 < 0
+        (each is minus a sum of absorption, stimulated-emission, decay and transfer rates), while
+        J12 >= 0 and J21 >= 0 (more Yb inversion pumps Er; more Er ground drains Yb). So
+        tr(J) < 0; the cross terms CANCEL out of the determinant,
+
+            det(J) = a d + a k_out (1 - f2) + k_in b2 d  > 0,
+            a = R_a_Er + R_e_Er + 1/tau_Er + 2 C_up N_Er f2,   d = R_a_Yb + R_e_Yb + 1/tau_Yb,
+
+        written here for k_back = 0; with k_back > 0 both cross terms pick up the SAME
+        phi (phi + b2 dphi/db) factor and still cancel, leaving the same three positive terms with
+        k_out (1 - f2) -> k_out (1 - f2)(phi + b2 dphi/db) and k_in b2 -> k_in phi b2. The
+        discriminant (J11 - J22)^2 + 4 J12 J21 is likewise a sum of non-negative terms. Both
+        eigenvalues are therefore REAL and NEGATIVE at every operating point: the linearised pair
+        is a stable node, never a spiral, at any pump level and any transfer strength."""
+        phi = self._phi(b2)
+        dphi = self._dphi_db(b2, phi)
+        k_in = self._k_tr * self._n_yb              # transfer-IN coefficient (Er equation)
+        k_out = self._k_tr * self._n_er             # transfer-OUT coefficient (Yb equation)
+        dtr_df = -phi * b2
+        dtr_db = (1.0 - f2) * (phi + b2 * dphi)
+        j11 = (-(Ra_Er + Re_Er + 1.0 / self._tau_er) + k_in * dtr_df
+               - 2.0 * self.upconversion_C_up * self._n_er * f2)
+        j12 = k_in * dtr_db
+        j21 = -k_out * dtr_df
+        j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - k_out * dtr_db
+        return j11, j12, j21, j22
+
+    def _b2_quasi_equilibrium(self, Ra_Yb, Re_Yb, f2, b2):
+        """The Yb inversion that balances the Yb equation at a FIXED Er state: the closed form
+        b2 = R_a_Yb / (R_a_Yb + R_e_Yb + 1/tau_Yb + k_tr N_Er (1 - f2) phi) that _solve_fb
+        substitutes into H(f2). phi is evaluated at the incoming b2 (exactly 1 unless k_back > 0).
+        Used to SEED the Yb reservoir of a transient whose caller supplied only f2."""
+        phi = self._phi(b2)
+        denom = (Ra_Yb + Re_Yb + 1.0 / self._tau_yb
+                 + self._k_tr * self._n_er * (1.0 - f2) * phi)
+        return Ra_Yb / denom
+
     # ---- solve (relaxation, mirrors FiberAmplifier.solve) --------------------------------
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
-              method: str = "LSODA", relax: float = 1.0) -> SteadyStateResult:
-        """Steady-state relaxation solve; see FiberAmplifier.solve for the method.
+              method: str = "LSODA", relax=1.0) -> SteadyStateResult:
+        """Steady-state relaxation solve. `relax` is a number in (0, 1] -- DEFAULT 1.0, the plain
+        undamped Gauss-Seidel iteration, unchanged -- or the string "auto", which walks
+        steady_state._RELAX_LADDER (1.0, 0.5, 0.25) and returns the first attempt that CONVERGES,
+        exactly as FiberAmplifier.solve does, reporting the ladder entries tried on
+        `meta['relax_attempts']`.
+
+        WHY "auto" IS ACCEPTED BUT NOT THE DEFAULT (2026-09-13). Accepting it is what makes this
+        class substitutable in code written against FiberAmplifier -- a caller that passes the
+        single-ion default through (the downstream `solve_closed(amp, relax="auto")` pattern) used
+        to get a ValueError here. Making it the DEFAULT would be a behaviour flip for every
+        existing co-doped caller, so it is not: `relax=1.0` still takes exactly one attempt and
+        every previously-written call returns what it always did.
+
+        See _solve_once for the method and for what under-relaxation is."""
+        if isinstance(relax, str):
+            if relax != "auto":
+                raise ValueError("solve: relax must be a number in (0, 1] or \"auto\"; got %r"
+                                 % (relax,))
+            attempts, res = [], None
+            for rx in _RELAX_LADDER:
+                attempts.append(rx)
+                res = self._solve_once(n_nodes=n_nodes, max_iter=max_iter, tol=tol, method=method,
+                                       relax=rx)
+                if res.meta.get("converged"):
+                    break
+            res.meta["relax_attempts"] = tuple(attempts)
+            return res
+        res = self._solve_once(n_nodes=n_nodes, max_iter=max_iter, tol=tol, method=method,
+                               relax=relax)
+        res.meta["relax_attempts"] = (float(relax),)
+        return res
+
+    def _solve_once(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
+                    method: str = "LSODA", relax: float = 1.0) -> SteadyStateResult:
+        """ONE relaxation solve at a fixed `relax`; see FiberAmplifier._solve_once for the method.
 
         UNDER-RELAXATION (`relax` in (0, 1], audit F-14). The same alternating frozen-direction
         iteration as steady_state.solve, hence the same failure mode -- a counter-propagating pump
@@ -521,3 +645,146 @@ class ErYbAmplifier:
     def yb_parasitic_gain_dB(self, result: SteadyStateResult) -> float:
         """1030 nm Yb parasitic gain [dB] for a solved result (cached in meta by solve())."""
         return float(result.meta["yb_parasitic_gain_dB"])
+
+    # ---- energy bookkeeping (2026-09-13 closure work) --------------------------------------
+    def _rate_balance_dissipation_W(self, result: SteadyStateResult) -> float:
+        """Total dissipated optical power [W] from the LOCAL RATE BALANCE -- this class's
+        counterpart of the FiberAmplifier `_dP_full_c` path, and the hook
+        efficiency._dissipated_power_W looks for FIRST, so wall_plug_efficiency returns a finite
+        `energy_balance_residual_W` for a co-doped result instead of NaN.
+
+        The net forward flux is F(z) = sum_fwd P - sum_bwd P, so dF/dz = sum_k u_k dP_k/dz =
+        sum_k (g_k P_k + s_k) -- THIS amplifier's own right-hand side (_dP: both ions' gain, both
+        ions' spontaneous source, the z-local (f2, b2) re-solved from the returned powers by
+        _solve_fb) evaluated ON the returned profile rather than accumulated along it. The heat is
+        -INT dF/dz dz. Because the profile is re-fed through the same algebra the solve used, the
+        residual `launched - exiting - dissipated` measures whether the returned P(z) actually
+        satisfies the amplifier's ODEs, which a flux difference of the same two endpoints
+        (thermal.total_heat_W) cannot -- see the efficiency module docstring.
+
+        WHERE THE CO-DOPED LOSS CHANNELS SIT IN THIS NUMBER (all of them are INSIDE it; none is a
+        separate additive term, and adding one would DOUBLE-COUNT):
+          * Yb fluorescence. A Yb excitation lost to spontaneous decay leaves the guided field as
+            an unreplaced 976 nm absorption -- it entered the balance when the pump photon was
+            absorbed and never comes back out, except for the tiny guided fraction s_yb b2 that is
+            an explicit ASE source and IS returned to the field.
+          * Er fluorescence. Identically, via s_er f2 for the guided part.
+          * The Yb -> Er transfer defect. The model promotes Er straight from 4I15/2 to 4I13/2 (the
+            fast-4I11/2 limit adiabatically eliminates the intermediate level), so the 976 nm Yb
+            quantum minus the ~1530 nm Er quantum -- the 4I11/2 -> 4I13/2 multiphonon relaxation,
+            0.46 eV, ~36% of the pump photon -- never appears as light anywhere and is therefore
+            ALREADY the difference between the pump power absorbed by Yb and the signal power
+            emitted by Er. It is the dominant dissipation term of an EYDFA.
+        `energy_terms` splits exactly this number into those named pieces; this function is the
+        aggregate the efficiency layer wants.
+
+        Returns NaN when the result did not come from this amplifier's channel plan."""
+        pl = self._plan()
+        P, z = result.power_W, result.z_m
+        if P.shape[0] != pl["lam"].size or P.shape[1] != z.size:
+            return float("nan")
+        c = self._coeffs(pl)
+        u = pl["u"]
+        dF = np.array([float(np.sum(u * self._dP(c, u, P[:, j]))) for j in range(z.size)])
+        return -float(trapz(dF, z))
+
+    def energy_terms(self, power_W, f2, b2) -> dict:
+        """Per-z energy bookkeeping [W/m] for one profile: powers (K, M), f2 (M,), b2 (M,).
+
+        DERIVATION. Write eps_Er and eps_Yb for the two stored excitation energies (the ions'
+        McCumber zero-line quanta, RareEarthIon.eps_J: ~1.30e-19 J at 1530 nm for Er 4I13/2,
+        ~2.04e-19 J at 975 nm for Yb 2F5/2) and let A = A_dope. Per unit length, with photon
+        rates n_* = power/(h nu) summed over channels:
+
+            U(z)     = A (eps_Er N_Er f2 + eps_Yb N_Yb b2)                     stored [J/m]
+            Phi_tr   = A k_tr phi N_Er N_Yb b2 (1 - f2)                        transfers/(m s)
+            q_opt(z) = -dF/dz = (absorbed + background loss)
+                                - (stimulated emitted + guided spontaneous)
+
+        Each event is charged at the level's own energy and the remainder is dissipated: an
+        absorbed photon at h nu deposits eps_Er and sheds (h nu - eps_Er) to phonons; a
+        stimulated-emission event removes eps_Er and hands h nu to the field (the SAME expression
+        with the opposite sign -- anti-Stokes cooling when h nu > eps_Er); a spontaneous decay
+        removes eps_Er of which only the guided part sum_k s_k reaches the field; upconversion
+        removes eps_Er outright. Summing,
+
+            D_Er   = sum_k (h nu_k - eps_Er)(n_a,k - n_e,k) + (eps_Er Phi_dec_Er - P_sp_Er)
+                     + eps_Er Phi_up
+            D_Yb   = sum_k (h nu_k - eps_Yb)(n_a,k - n_e,k) + (eps_Yb Phi_dec_Yb - P_sp_Yb)
+            D_tr   = (eps_Yb - eps_Er) Phi_tr      <-- the 976 nm -> 1530 nm transfer defect
+            D_loss = sum_k l_k P_k
+
+        and the two sides close IDENTICALLY, which is the content of this method:
+
+            q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr.
+
+        The transfer defect enters with a PLUS sign on the dissipation side and is charged ONCE,
+        to the transfer event -- not to the Yb absorption (which already paid only its own
+        h nu - eps_Yb) and not to the Er emission. At the steady state dU/dt = 0 and the whole of
+        q_opt is dissipation, which is why `_rate_balance_dissipation_W` needs no extra term.
+
+        Returns a dict of (M,) arrays: 'q_optical', 'stored_J_per_m', 'd_stored_dt',
+        'background_loss', 'er_dissipation', 'yb_dissipation', 'transfer_defect', 'dissipation'
+        (the four summed), 'transfer_rate_per_m', 'df2_dt', 'db2_dt'. The identity above is an
+        algebraic rearrangement of one rate balance, so a departure from it beyond round-off is an
+        implementation defect, not physics -- which is what makes it usable as a gate on a
+        TRANSIENT march, where dU/dt is no longer zero and the marched populations are an
+        independent computation from the propagated powers."""
+        pl = self._plan()
+        c = self._coeffs(pl)
+        P = np.maximum(np.asarray(power_W, float), 0.0)
+        f2 = np.asarray(f2, float)
+        b2 = np.asarray(b2, float)
+        if P.ndim != 2 or f2.shape != (P.shape[1],) or b2.shape != (P.shape[1],):
+            raise ValueError("energy_terms: power_W must be (K, M) with f2, b2 of shape (M,); "
+                             "got %r, %r, %r" % (P.shape, f2.shape, b2.shape))
+        A = self.fiber.a_dope_m2
+        N_Er, N_Yb = self._n_er, self._n_yb
+        eps_er = float(self.er_ion.eps_J)
+        eps_yb = float(self.yb_ion.eps_J)
+        inv_h = (1.0 / (H_PLANCK * (C_LIGHT / pl["lam"])))[:, None]
+        one_f, one_b = (1.0 - f2)[None, :], (1.0 - b2)[None, :]
+
+        pw_a_er = c["g_a_er"][:, None] * one_f * P
+        pw_e_er = c["g_e_er"][:, None] * f2[None, :] * P
+        pw_sp_er = c["s_er"][:, None] * f2[None, :]
+        pw_a_yb = c["g_a_yb"][:, None] * one_b * P
+        pw_e_yb = c["g_e_yb"][:, None] * b2[None, :] * P
+        pw_sp_yb = c["s_yb"][:, None] * b2[None, :]
+        loss_W = np.sum(c["loss"][:, None] * P, axis=0)
+
+        p_a_er, p_e_er, p_sp_er = pw_a_er.sum(0), pw_e_er.sum(0), pw_sp_er.sum(0)
+        p_a_yb, p_e_yb, p_sp_yb = pw_a_yb.sum(0), pw_e_yb.sum(0), pw_sp_yb.sum(0)
+        n_a_er, n_e_er = (pw_a_er * inv_h).sum(0), (pw_e_er * inv_h).sum(0)
+        n_a_yb, n_e_yb = (pw_a_yb * inv_h).sum(0), (pw_e_yb * inv_h).sum(0)
+
+        q_opt = (p_a_er + p_a_yb + loss_W) - (p_e_er + p_e_yb + p_sp_er + p_sp_yb)
+
+        ra_er, re_er, ra_yb, re_yb = self._rates_profile(c, P)
+        df, db = self._fb_rhs(ra_er, re_er, ra_yb, re_yb, f2, b2)
+        phi = self._phi(b2)
+        tr_rate = A * self._k_tr * phi * N_Er * N_Yb * b2 * (1.0 - f2)
+        dec_er = A * N_Er * f2 / self._tau_er
+        dec_yb = A * N_Yb * b2 / self._tau_yb
+        up_er = A * N_Er * self.upconversion_C_up * N_Er * f2 * f2
+
+        d_er = ((p_a_er - p_e_er) - eps_er * (n_a_er - n_e_er)
+                + (eps_er * dec_er - p_sp_er) + eps_er * up_er)
+        d_yb = ((p_a_yb - p_e_yb) - eps_yb * (n_a_yb - n_e_yb)
+                + (eps_yb * dec_yb - p_sp_yb))
+        d_tr = (eps_yb - eps_er) * tr_rate
+        return {"q_optical": q_opt,
+                "stored_J_per_m": A * (eps_er * N_Er * f2 + eps_yb * N_Yb * b2),
+                "d_stored_dt": A * (eps_er * N_Er * df + eps_yb * N_Yb * db),
+                "background_loss": loss_W, "er_dissipation": d_er, "yb_dissipation": d_yb,
+                "transfer_defect": d_tr, "dissipation": loss_W + d_er + d_yb + d_tr,
+                "transfer_rate_per_m": tr_rate, "df2_dt": df, "db2_dt": db}
+
+    def stored_energy_J(self, f2, b2, z) -> float:
+        """Total excitation energy stored in BOTH reservoirs [J]:
+        INT A_dope (eps_Er N_Er f2(z) + eps_Yb N_Yb b2(z)) dz. This is the `stored` that a
+        transient energy balance differentiates -- see energy_terms for eps_* and the identity."""
+        A = self.fiber.a_dope_m2
+        u = A * (float(self.er_ion.eps_J) * self._n_er * np.asarray(f2, float)
+                 + float(self.yb_ion.eps_J) * self._n_yb * np.asarray(b2, float))
+        return float(trapz(u, np.asarray(z, float)))
