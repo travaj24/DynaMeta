@@ -190,9 +190,45 @@ class _McCumberAbsorptionHybrid:
 # 4.6e-30 m^2, which said an in-band pump could fully invert Er).
 _ER_CBAND_REFIT_PEAK = (1.543e-6, 0.014e-6, 1.0e-25)
 
+# ---- measured Er3+ C band in a PHOSPHORUS-CONTAINING host (erbium(host="phosphosilicate")) ----
+# Three sigma_a Gaussians whose amplitudes are solved so the model passes EXACTLY through the
+# three measured anchors 1535 / 1550 / 1560 nm of Le Gouet, Oudin, Perault, Abbes, Odier, Dubois,
+# J. Lightwave Technol. 37(15), 3611 (2019) (preprint arXiv:1901.00801), Fig. 4, on an Er:Yb
+# alumino-phosphosilicate fiber (iXblue IXF-2CF-EY-PM-12-130) that is pumped IN BAND at 1535 nm,
+# so the ytterbium plays no part in the measurement and the erbium spectra are clean. Their
+# absorption and full-inversion gain spectra give sigma_e/sigma_a with NO free parameter; the
+# absolute scale rests on their own N_Er = 2e25 m^-3 and Gamma = 0.90 and carries a ~15% stated
+# systematic (the paper's N_Er was itself deduced from the peak absorption with an assumed
+# 7e-25 m^2, which is inconsistent with its own Gamma -- the ratio column is the robust output).
+#
+# Centres and widths are the aluminosilicate set shifted +5 nm (the measured P-host red shift);
+# only the three amplitudes are fitted. Reproduction against the digitised curve:
+#   1535 nm  5.948e-25  (anchor, -0.01%)      1550 nm  2.141e-25  (anchor, +0.01%)
+#   1560 nm  1.313e-25  (anchor, +0.03%)      1530 nm  3.28e-25   (-8.3%)
+#   1545 nm  2.35e-25   (-29%)                1555 nm  1.68e-25   (+6.0%)
+#   1565 nm  1.21e-25   (+17%)                1570 nm  1.12e-25   (+66%)
+# i.e. it is a 1530-1565 nm model, and it is NOT a fit to the whole measured curve -- see the
+# VALIDITY paragraph in erbium()'s docstring.
+_ER_PHOSPHO_CBAND_PEAKS = (
+    (1.535e-6, 0.011e-6, 5.658e-25),              # C-band absorption peak (1530 -> 1535 nm)
+    (1.548e-6, 0.014e-6, 1.477e-25),              # the trough filler (_ER_CBAND_REFIT_PEAK + 5)
+    (1.565e-6, 0.035e-6, 1.186e-25),              # C-band shoulder anchor (1560 -> 1565 nm)
+)
+# McCumber eps for that host, as a WAVELENGTH: a least-squares fit of
+# sigma_e/sigma_a = exp((eps - h nu)/kT) to the measured RATIO over 1525-1575 nm at 300 K. It
+# lands at 1540.44 nm, 3.6 nm to the RED of the measured sigma_e = sigma_a crossing (1536.9 nm),
+# because one eps cannot honour both the crossing and the red wing of a real Stark manifold and
+# the fit prioritises the 1545-1565 nm band the amplifier operates in. That is exactly the
+# fitted-eps route audit F-12 recommends (eps properly BELOW the absorption peak) rather than
+# forcing eps = h c / peak. Residuals on sigma_e against the measurement: -18% at 1530 nm,
+# -7% at 1535, +3% at 1550, +5% at 1560.
+_ER_PHOSPHO_ZERO_LINE_M = 1.54044e-6
+_ER_PHOSPHO_TAU_S = 9.0e-3
+
 
 def erbium(host: str = "aluminosilicate", *, esa: bool = False,
-           cband_refit: bool = True, pump_band_refit: bool = True) -> RareEarthIon:
+           cband_refit: bool = True, pump_band_refit: bool = True,
+           p_host_spectra: Optional[bool] = None) -> RareEarthIon:
     """Er3+ in an aluminosilicate EDF (Strohhofer-Polman / standard EDF anchors).
 
     PUMP BANDS: 980 nm (4I11/2) AND 1480 nm in-band (the 4I13/2 upper edge, sigma_a 0.8e-25 m^2) --
@@ -271,6 +307,48 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     agreement is a C-band statement. For the L band, fit RareEarthIon.mccumber_eps_J and supply a
     tabulated sigma_a that carries the real long-wavelength tail (audit F-12).
 
+    HOST (2026-09-14). `host` used to be a pure LABEL: every host string returned the same
+    aluminosilicate spectra. It no longer is for "phosphosilicate" (and any host starting with
+    "phospho"), the host of every Er:Yb co-doped fiber, which now gets its own measured anchors:
+
+      * the C-band peak moves 1530 -> 1535 nm. Two independent measurements put it there in a
+        P-containing host -- Le Gouet et al. 2019 at 1535 nm on an Er:Yb alumino-phosphosilicate
+        FIBER, Cheng et al., Materials 15(3), 996 (2022) at 1534 nm on Er/Yb/P core GLASS.
+      * sigma_a(1535) = 5.95e-25 m^2, from Le Gouet's own 46.5 dB/m, N_Er = 2e25 and Gamma = 0.90
+        inverted self-consistently. Independent support: Rybaltovsky et al., JOSA B 37(10), 3077
+        (2020) fiber #2, whose measured 0.1 mol% Er2O3 and 60 dB/m at 1535 nm give 6.2e-25 with
+        the Marcuse overlap -- a 4% agreement from a different fiber and a different method.
+      * the RED WING is the real difference: the measured P-host sigma_e at 1560 nm is 0.59x the
+        aluminosilicate fit (sigma_a 0.77x). The sigma_e/sigma_a ratio, which sets the gain shape
+        and the transparency inversion, is 1.18 at 1550 nm and 1.41 at 1560 against 1.58 and 1.85
+        in aluminosilicate -- so an Er:Yb amplifier modelled with the Al spectrum is OPTIMISTIC
+        about the L-band edge. That is what this host fixes.
+      * tau(4I13/2) = 9.0 ms, not 10. Cheng et al. measure 8.99 and 9.12 ms at 300 K in Er/Yb/P
+        silica; a real Er:Yb phosphosilicate FIBER gives 9.9 ms. The higher phonon energy of a
+        P-rich host shortens it, which is the same property that makes 4I11/2 relax fast enough
+        for Yb sensitization to work at all.
+      * emission stays McCUMBER-DERIVED from that sigma_a, with the eps FITTED to the measured
+        sigma_e/sigma_a ratio (1540.44 nm, see _ER_PHOSPHO_ZERO_LINE_M) rather than forced to the
+        absorption peak.
+
+    THE PUMP BANDS ARE NOT RE-MEASURED: the 978 nm 4I11/2 and 1480 nm in-band Gaussians are the
+    aluminosilicate ones. In an EYDFA the Er 976 nm line carries only 1-2% of the fiber's pump
+    absorption -- the ytterbium carries the rest -- so its host dependence is immaterial there;
+    in a P-host Er-ONLY 980-pumped amplifier it is an untested assumption.
+
+    VALIDITY of the phosphosilicate spectrum: 1530-1565 nm. It passes exactly through the
+    measured 1535 / 1550 / 1560 nm anchors and is within 8% at 1530 and 6% at 1555, but it is
+    ANCHORED, not fitted to the whole curve: it reads 29% low at 1545 nm (the measured line has a
+    narrow peak on a broad shoulder that three wavelength-Gaussians cannot hold) and runs high
+    beyond 1565 nm. Below 1525 nm the measured P-host absorption has a substantial blue shoulder
+    (1.8e-25 at 1520 nm) that NEITHER host model reproduces. Use a measured table
+    (calibration.ion_from_cross_sections) for a gain SPECTRUM or an L-band claim.
+
+    p_host_spectra=False restores the pre-2026-09-14 behaviour -- host as a pure label, the
+    aluminosilicate spectra and tau = 10 ms -- BIT-EXACTLY, for anyone reproducing an old result.
+    The default (None) means "True for a phospho host, False otherwise", so the DEFAULT
+    aluminosilicate call is untouched.
+
     RE-BASELINING, and it is REGIME-DEPENDENT -- the "0.1-0.5 dB" this docstring used to quote is a
     SATURATED-regime figure and badly understates the small-signal move. Re-measured at 1550 nm on
     the reference 1.4 um-core / NA 0.23 / 1e25 m^-3 / 8 m EDFA at 300 mW of 976 nm pump, refit
@@ -300,17 +378,26 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     # BIT-EXACTLY for anyone reproducing an old result.
     pump_peak = ((0.978e-6, 0.021e-6, 2.55e-25) if pump_band_refit
                  else (0.980e-6, 0.013e-6, 1.7e-25))
+    if p_host_spectra is None:
+        p_host_spectra = host.startswith("phospho")
     a_peaks = [
         pump_peak,                                    # 4I11/2 (980 nm pump band)
         (1.480e-6, 0.040e-6, 0.8e-25),                # 1480 nm in-band pump (4I13/2 upper edge)
-        (1.530e-6, 0.011e-6, 5.7e-25),                # C-band absorption peak
-        (1.560e-6, 0.035e-6, 1.69e-25),               # C-band shoulder anchor
     ]
-    if cband_refit:
-        a_peaks.append(_ER_CBAND_REFIT_PEAK)          # fills the spurious 1543 nm trough
+    if p_host_spectra:
+        # the measured P-host C band; the pump bands above are the aluminosilicate ones (they
+        # carry 1-2% of an EYDFA's pump absorption -- see the HOST paragraph)
+        a_peaks.extend(_ER_PHOSPHO_CBAND_PEAKS)
+        zero_line, tau_s = _ER_PHOSPHO_ZERO_LINE_M, _ER_PHOSPHO_TAU_S
+    else:
+        a_peaks.append((1.530e-6, 0.011e-6, 5.7e-25))     # C-band absorption peak
+        a_peaks.append((1.560e-6, 0.035e-6, 1.69e-25))    # C-band shoulder anchor
+        if cband_refit:
+            a_peaks.append(_ER_CBAND_REFIT_PEAK)          # fills the spurious 1543 nm trough
+        zero_line, tau_s = 1.530e-6, 10.0e-3
     sigma_a = CrossSectionModel(tuple(a_peaks))
-    if cband_refit:
-        sigma_e = _McCumberEmission(sigma_a, H_PLANCK * C_LIGHT / 1.530e-6, 300.0)
+    if cband_refit or p_host_spectra:
+        sigma_e = _McCumberEmission(sigma_a, H_PLANCK * C_LIGHT / zero_line, 300.0)
     else:
         sigma_e = CrossSectionModel((
             (1.532e-6, 0.012e-6, 5.7e-25),            # emission peak (near the abs peak)
@@ -319,10 +406,11 @@ def erbium(host: str = "aluminosilicate", *, esa: bool = False,
     sigma_esa = CrossSectionModel((
         (0.980e-6, 0.016e-6, 0.4e-25),                # 4I11/2 -> 4F7/2 pump ESA at 980 nm
     )) if esa else None
-    name = "Er3+" + ("(cband_refit)" if cband_refit else "") \
+    name = "Er3+" + ("(phospho)" if p_host_spectra else "") \
+        + ("(cband_refit)" if cband_refit and not p_host_spectra else "") \
         + ("(pump978)" if pump_band_refit else "")
     return RareEarthIon(name, sigma_a, sigma_e,
-                        tau_s=10.0e-3, zero_line_m=1.530e-6, host=host, sigma_esa=sigma_esa)
+                        tau_s=tau_s, zero_line_m=zero_line, host=host, sigma_esa=sigma_esa)
 
 
 def ytterbium(host: str = "aluminosilicate", *, mccumber_refit: Optional[bool] = None,
