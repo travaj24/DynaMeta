@@ -459,11 +459,23 @@ this supports is the ORDERING and the ETE dependence, not the number.
 ## 6. Verification run
 
 ```
-ruff check dynameta/ tests/ validation/                       -> clean
-pytest tests/test_fiber_eryb_physics.py                       -> 26 passed
+ruff check .                                                  -> clean (the whole tree)
+pytest tests/test_fiber_eryb_physics.py                       -> 26 passed, 53 s
 pytest tests/test_fiber_eryb.py tests/test_fiber_eryb_transient.py
        tests/test_fiber_thermal_feedback.py
        tests/test_measured_spectra_2026_08_28.py
        tests/test_yb_mccumber_refit.py                        -> 58 passed
+pytest tests/test_fiber_amp.py tests/test_audit_2026_08_04_fiber_amp.py
+       tests/test_fiber_chain.py tests/test_fiber_dynamics.py
+       tests/test_numerics.py                                 -> 194 passed
+pytest tests/test_audit_2026_07_25_infra.py tests/test_fiber_bpm.py
+       tests/test_fiber_gnlse.py tests/test_fiber_lma.py
+       tests/test_fiber_nonlinear.py tests/test_fiber_srs.py
+       tests/test_fiber_transverse.py                         -> 133 passed
+pytest tests/test_validation_runner.py                        -> 14 passed
 python -m validation.eryb_two_population_anchors --nodes 241  -> section 4
 ```
+
+The four `pytest` lines above are EVERY test file in the repo that imports `fiber_amp`, which is
+the complete blast radius: this change touches `dynameta/optics/fiber_amp/*`, the two version
+strings and the docs, and nothing else. The full matrix runs on the PR.
