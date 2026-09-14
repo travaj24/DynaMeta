@@ -178,15 +178,18 @@ class TransientResult:
                 "mcc": self.meta.get("mcc"),
                 # provenance: this did not come from a relaxation solve
                 "transient_frame": it, "t_s": float(self.t_s[it]),
-                "quasi_static_valid": bool(self.meta.get("quasi_static_valid", True)),
-                # ... and, since 2026-09-15, WHICH march produced it and whether THAT march was
-                # inside its regime. In the default mode march_valid is quasi_static_valid, so
-                # nothing about an existing frame changes; in the self-consistent modes the two
-                # differ and the frame must not lose the one that matters (the audit-A-7
-                # "cannot be lost through the frame" rule, applied to the new flag).
-                "march_valid": bool(self.meta.get("march_valid",
-                                                  self.meta.get("quasi_static_valid", True))),
-                "ase_mode": self.meta.get("ase_mode", "quasi_static")}
+                "quasi_static_valid": bool(self.meta.get("quasi_static_valid", True))}
+        # ... and, in the SELF-CONSISTENT modes only, which march produced the frame and whether
+        # THAT march was inside its regime -- the audit-A-7 "the flag cannot be lost through the
+        # frame" rule, applied to the flag that matters there. Added conditionally because the
+        # frame's meta KEY SET is itself pinned as unchanged behaviour
+        # (test_fiber_eryb_transient.py::test_single_ion_march_and_efficiency_are_unchanged_from_
+        # main asserts it exactly), and in the default mode march_valid IS quasi_static_valid, so
+        # there is nothing to carry that is not already there.
+        _mode = self.meta.get("ase_mode", "quasi_static")
+        if _mode != "quasi_static":
+            meta["ase_mode"] = _mode
+            meta["march_valid"] = bool(self.meta.get("march_valid", True))
         if ch is not None:
             meta.update({"sigma_a": ch.sigma_a.copy(), "sigma_e": ch.sigma_e.copy(),
                          "sigma_esa": ch.sigma_esa.copy()})

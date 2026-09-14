@@ -353,23 +353,38 @@ def test_codoped_cold_start_300us_idle_seed_trips_the_flag_and_is_recovered():
     assert abs(_solve_dB(amp, 801) - float(s.signal_gain_dB[-1, 0])) < 1e-3
 
 
-def test_self_consistent_residue_is_mesh_convergent():
+def test_self_consistent_march_is_second_order_in_the_z_mesh():
     """DISCRIMINATION for the dB numbers above: is the residual gap against solve() a defect of
-    the self-consistent step, or the march's own z quadrature? It is the quadrature -- it falls
-    by ~4 per mesh doubling (second order), on the SAME fixture and by the SAME factor as the
-    healthy amplifier's quasi-static gap, which nothing in this work touched.
+    the self-consistent step, or the march's own z QUADRATURE? It is the quadrature -- the
+    march's own answer converges at SECOND ORDER in dz, which is exactly the order of the
+    trapezoid rule _propagate_fixed integrates with, so the gap against any mesh-independent
+    reference must shrink as dz^2 and cannot be a fixed defect of the step.
 
-    MEASURED: 1 uW signal, self-consistent vs solve(): 0.0165 / 0.0041 / 0.0010 dB at 81 / 161 /
-    321 nodes. Healthy, quasi-static vs solve(): 0.0084 / 0.0021 / 0.0005 dB."""
+    RICHARDSON, WITH NO ORACLE. The successive differences G(81) - G(161) and G(161) - G(321)
+    must be in the ratio ~4. Deliberately no solve() call: this fixture's steady solve is the
+    400 W booster at a 1 uW signal, the hardest relaxation in the repo, and its adaptive-LSODA
+    path at a FINE mesh is scipy-build dependent -- measured, the same three meshes give gaps of
+    0.0165 / 0.0041 / 0.0010 dB here and 0.0165 / 0.0041 / 0.0116 on the CI py3.10 floor leg,
+    where only the 321-node ORACLE moved. A gate that reads a build-dependent oracle to make a
+    statement about the MARCH is a flake, so this one reads only the march. The oracle agreement
+    itself is gated at 81 nodes, where every build agrees, by
+    test_single_ion_runaway_cases_are_recovered above.
+
+    MEASURED here: G = 76.549123 / 76.544919 / 76.543870 dB at 81 / 161 / 321 nodes, i.e.
+    successive differences 4.204e-3 and 1.049e-3, ratio 4.01."""
     t = np.linspace(0.0, 25e-3, 200)
     tiny = _hot_yb().with_signals([Signal(1e-6, 1.03e-6)])
-    gaps = []
+    gains = []
     for n in (81, 161, 321):
-        s, _ = _march(tiny, t, n_nodes=n, ase_mode="self_consistent")
-        gaps.append(abs(_solve_dB(tiny, n) - float(s.signal_gain_dB[-1, 0])))
-    assert np.all(np.diff(gaps) < 0.0), gaps                  # monotone fall, no floor
-    assert gaps[0] / gaps[-1] > 8.0, gaps                     # two doublings of second order
-    assert gaps[-1] < 2e-3, gaps                              # and it reaches the 1e-3 dB class
+        s, w = _march(tiny, t, n_nodes=n, ase_mode="self_consistent")
+        assert not w, n
+        assert s.meta["march_valid"] is True, n
+        gains.append(float(s.signal_gain_dB[-1, 0]))
+    d1, d2 = gains[0] - gains[1], gains[1] - gains[2]
+    assert abs(d1) > 1e-4 and abs(d2) > 1e-6, gains       # the mesh really is moving the answer
+    assert d1 * d2 > 0.0, gains                           # and monotonically, not oscillating
+    ratio = abs(d1) / abs(d2)
+    assert 3.0 < ratio < 6.0, (gains, ratio)              # SECOND order, not first and not noise
 
 
 # ==================== (4) "auto" ============================================================
@@ -459,9 +474,15 @@ def test_resolved_ase_and_frame_as_steady_still_work_in_every_mode():
         assert r.ase_psd_1pol_W_Hz("fwd").shape == r.ase_fwd_W.shape
         fr = r.frame_as_steady(len(t) - 1)
         assert fr.meta["quasi_static_valid"] is r.meta["quasi_static_valid"]
-        # the NEW flag and the mode cannot be lost through the frame either
-        assert fr.meta["march_valid"] is r.meta["march_valid"]
-        assert fr.meta["ase_mode"] == mode
+        # The NEW flag and the mode cannot be lost through the frame either -- but they are only
+        # ADDED in the new modes: the frame's meta key set in the default mode is itself pinned
+        # as unchanged behaviour by test_fiber_eryb_transient.py, so growing it there would be
+        # the very regression this work promises not to make.
+        if mode == "quasi_static":
+            assert "ase_mode" not in fr.meta and "march_valid" not in fr.meta
+        else:
+            assert fr.meta["march_valid"] is r.meta["march_valid"]
+            assert fr.meta["ase_mode"] == mode
         nf = analyze_noise(fr, 1.55e-6)
         assert np.isfinite(float(nf.nf_dB)), mode
         assert r.meta["ase_mode"] == mode

@@ -223,17 +223,31 @@ Every self-consistent march is finite throughout, raises no warning, and reports
 (1e-6); measured worst case over these five, `3.1e-6`.**
 
 The residue against `solve()` on the two Yb cases is the march's own z QUADRATURE, not the new
-step -- it falls as `O(dz^2)` on the same fixture and by the same factor as the HEALTHY march's
-gap, which nothing here touched:
+step. The march converges at SECOND ORDER in `dz` -- the order of the trapezoid rule
+`_propagate_fixed` integrates with -- so its distance from any mesh-independent reference must
+shrink as `dz^2` and cannot be a fixed defect of the step. Measured on the 1 uW fixture, with no
+oracle at all (Richardson on the march alone):
 
-| nodes | 1 uW signal: SC vs `solve()` | healthy Yb: QS vs `solve()` |
+| nodes | march `G` | successive difference |
 | --- | --- | --- |
-| 81 | `0.0165 dB` | `0.0084 dB` |
-| 161 | `0.0041 dB` | `0.0021 dB` |
-| 321 | `0.0010 dB` | `0.0005 dB` |
+| 81 | `76.549123 dB` | |
+| 161 | `76.544919 dB` | `4.204e-3` |
+| 321 | `76.543870 dB` | `1.049e-3` (ratio **4.01**) |
+| 641 | `76.543608 dB` | `2.62e-4` (ratio 4.00) |
 
-So the `< 1e-3 dB` target is met outright on the co-doped cases at 161 nodes, and on the
-single-ion cases at 321 nodes; at 81 nodes the mesh, not the step, is the limit.
+Against `solve()` on the same meshes the gaps are `0.0165 / 0.0041 / 0.0010 / 0.00026 dB`, the
+same factor of 4 per doubling, and the healthy amplifier's QUASI-STATIC gap (which nothing here
+touched) falls identically at `0.0084 / 0.0021 / 0.0005 dB`. So the `< 1e-3 dB` target is met
+outright on the co-doped cases at 161 nodes, and on the single-ion cases at 321; at 81 the mesh,
+not the step, is the limit.
+
+A CAVEAT WORTH RECORDING, because it cost a CI failure. The oracle's OWN fine-mesh path on this
+fixture is scipy-build dependent: the CI py3.10 floor leg reproduces the march exactly at 81 and
+161 nodes (`0.016485` / `0.004119`, four digits) and then reads a gap of `0.0116` at 321, i.e.
+its `solve(321)` landed ~0.011 dB elsewhere on the hardest relaxation in the repo (400 W booster,
+1 uW signal). The gate was therefore rewritten to read only the MARCH -- a test that consults a
+build-dependent oracle to make a statement about the march is a flake, not a gate. Oracle
+agreement is gated separately at 81 nodes, where every build agrees.
 
 ### (4) "auto" reproduces "self_consistent"
 
