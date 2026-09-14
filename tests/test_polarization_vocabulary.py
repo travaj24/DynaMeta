@@ -102,6 +102,13 @@ def _call(ep, value):
 # NEGATIVE leg (same probe, wrong label) is what proves the guard is reached at all.  Probes that
 # can run a real physical solve cheaply do so; the expensive ones (FDTD marches, FEM assembles)
 # pass None for the physical arguments and die downstream, which is fine and deliberate.
+#
+# ...WITH ONE LIMIT, learned the hard way (ngsolve 6.2.2607, 2026-09-09): "dies downstream" is only
+# safe while the death happens in PYTHON.  A probe whose junk arguments reach a COMPILED extension's
+# arithmetic (ngsolve CoefficientFunctions, devsim) is betting that the binding rejects them, and
+# that bet is not the extension's contract -- 6.2.2607 changed `None * ng.x` from a pybind11
+# TypeError into a null dereference and SIGSEGV'd the whole solvers leg for five nights.  So: junk
+# is fine up to the C++ boundary, and every probe that crosses it gets real numbers.
 # ------------------------------------------------------------------------------------------------
 def _probes():
     def _stack():
@@ -170,9 +177,25 @@ def _probes():
         lambda v: _m("dynameta.geometry.specs").OpticalSpec(polarization=v)
     P["dynameta.optics.solver.background_probe_pol"] = \
         lambda v: _m("dynameta.optics.solver").background_probe_pol(v, 0.3, 0.2)
+    # THE ONE PROBE WHOSE JUNK ARGUMENTS CROSS INTO C++.  This used to pass None for all eleven
+    # physical arguments, like the FDTD probes below.  Under ngsolve <= 6.2.2606 `None * ng.x`
+    # failed pybind11 overload resolution with a TypeError, which this gate swallowed along with
+    # every other probe's downstream death.  ngsolve 6.2.2607 (2026-09-09) instead binds None into
+    # the CoefficientFunction multiply and dereferences it: SIGSEGV, exit 139, the whole `solvers`
+    # leg dead mid-run -- it killed every main run from 2026-09-09 to 2026-09-13.
+    #
+    # A SEGFAULT IS NOT AN EXCEPTION, so the "pass None for the physical arguments and die
+    # downstream, which is fine and deliberate" contract above holds only for probes that die in
+    # PYTHON.  A probe whose junk reaches ngsolve/devsim arithmetic must be given real numbers.
+    # This is that tuple: normal incidence (kx = ky = phi = 0), nm units, vacuum over n = 1.5 --
+    # the same shape as the `_bg_args` helper in tests/test_solver_guards.py.  It builds
+    # CoefficientFunctions only (no mesh, no solve), so the probe stays cheap, and the guard it
+    # exists to exercise is still the first statement the call reaches.
+    _bg_k0 = 2 * math.pi / 1200.0
+    _bg = (_bg_k0, 0.0, 0.0, 0.0, complex(_bg_k0), complex(1.5 * _bg_k0), 100.0,
+           1.0 + 0j, 2.25 + 0j, 1.0 + 0j, 1.5 + 0j)
     P["dynameta.optics.solver._layered_background"] = \
-        lambda v: _m("dynameta.optics.solver")._layered_background(
-            v, None, None, None, None, None, None, None, None, None, None, None)
+        lambda v: _m("dynameta.optics.solver")._layered_background(v, *_bg)
     P["dynameta.optics.ngsolve_layered.LayeredOpticalBuilder._check_symmetry_supported"] = \
         lambda v: getattr(_m("dynameta.optics.ngsolve_layered").LayeredOpticalBuilder,
                           "_check_symmetry_supported")(None, _sym_design(v), "quarter")
