@@ -58,15 +58,28 @@ def _all_on(**kw):
     return ref_amp(**base)
 
 
-# =================== gate 1: the DEFAULTS are v0.11.1, to 1e-9 relative ======================
+# ================== gate 1: the DEFAULTS are v0.11.1, to 1e-5 relative =======================
 # Recorded on main @ a2ad5f1 (v0.11.1, pre-change) with the fixture above, re-read on this
-# branch. WHY TOLERANCES AND NOT `==`: the 2026-09-13 gate (f) recorded the lesson the hard way
-# -- CI falsified a bitwise pin twice, once through scipy's adaptive LSODA step sequence and once
-# through a 1-ULP BLAS reduction difference. Bitwise reproducibility is a property of the BUILD,
-# not of this change. The tolerances below carry ~7 orders of headroom: a mis-routed pool or a
-# leaked K2 term moves gains by dB, not by 1e-9. The STRUCTURAL half of the claim -- that the new
-# branches cannot be entered at all with the defaults -- is gate 1b, which no build can move.
-_V0111_RTOL = 1e-9
+# branch, where all 29 recorded values came back BIT-IDENTICAL. That bit-identity is NOT what is
+# asserted here, and the reason is the lesson the 2026-09-13 gate (f) recorded the hard way: CI
+# falsified a bitwise pin twice, once through scipy's adaptive LSODA step sequence (6.2e-4
+# relative on the floor leg) and once through a 1-ULP BLAS reduction difference. Bitwise
+# reproducibility is a property of the BUILD, not of this change.
+#
+# EVERY value pinned below is LSODA-path dependent -- including the transient ones, because this
+# fixture seeds the march from `amp.solve()` (nbar2_0 = None) rather than from an explicit
+# number, so the march inherits the steady solve's path. The 2026-09-13 gate could hold its march
+# block to 1e-9 precisely because it seeded explicitly; that distinction is the whole reason this
+# block uses one looser tolerance instead of two. 1e-5 still carries four orders of headroom over
+# the largest environment shift that note measured, and eleven orders over any regression this
+# change could cause: a mis-routed pool or a leaked K2 term moves gains by dB.
+#
+# The two halves of the claim that a build CANNOT move are separate gates:
+#   * test_explicit_defaults_are_bitwise_identical_to_omitting_them -- same process, same
+#     arithmetic, exact equality, so it is reproducible on every runner;
+#   * test_the_new_branches_are_structurally_unreachable_with_the_defaults -- the branches cannot
+#     be entered at all.
+_V0111_RTOL = 1e-5
 _V0111_STEADY = {
     "ss_gain_dB": 13.821288424131597,
     "ss_nbar2_sum": 57.21842385984466,
@@ -97,8 +110,6 @@ _V0111_TRANSIENT = {
     "tr_ase_bwd_sum": 0.006288938837448401,
     "tr_pmp_out_last": 0.012322195521123153,
 }
-# solve()-derived and therefore LSODA-path dependent across scipy versions: a looser (still tiny)
-# bound, exactly as the 2026-09-13 gate does for the single-ion numbers.
 _V0111_SOLVE_RTOL = 1e-5
 _V0111_WPE = {"wpe_eta": 0.18716025911380932, "wpe_heat_W": 0.5008411925823796}
 _V0111_RESID_OVER_PUMP = -7.726057247747775e-06
@@ -153,6 +164,36 @@ def test_defaults_reproduce_v0_11_1_steady_closure_and_transient():
     for k, want in _V0111_TRANSIENT.items():
         assert abs(got_t[k] - want) <= _V0111_RTOL * abs(want), (k, got_t[k], want)
     assert tr.meta["beta_yb_coupled"] is None and tr.meta["beta_yb_uncoupled"] is None
+
+
+def test_explicit_defaults_are_bitwise_identical_to_omitting_them():
+    """The build-INDEPENDENT numeric half of gate 1. Spelling every new parameter out at its
+    default value -- including an all-default (identity) ConcentrationModel -- must give the
+    SAME FLOATS as omitting them, to the last bit. This runs both amplifiers in ONE process with
+    ONE numpy and ONE scipy, so unlike a recorded pin it is exact on every runner, and it is the
+    assertion that actually says "the new physics is off by default"."""
+    bare = ref_amp()
+    spelled = ref_amp(yb_coupled_fraction=1.0, k_tr2_m3_s=0.0, yb_migration_rate_per_s=0.0,
+                      concentration=ConcentrationModel())
+    assert spelled._two_pop is False and spelled.concentration is None
+    r0, r1 = bare.solve(n_nodes=81), spelled.solve(n_nodes=81)
+    for name in ("power_W", "nbar2_z", "signal_gain_dB"):
+        assert np.array_equal(getattr(r0, name), getattr(r1, name)), name
+    for key in ("beta_yb_z", "eta_transfer", "yb_parasitic_gain_dB"):
+        assert np.array_equal(np.asarray(r0.meta[key]), np.asarray(r1.meta[key])), key
+    e0 = bare.energy_terms(r0.power_W, r0.nbar2_z, r0.meta["beta_yb_z"])
+    e1 = spelled.energy_terms(r1.power_W, r1.nbar2_z, r1.meta["beta_yb_z"])
+    assert set(e0) == set(e1)
+    for key in e0:
+        assert np.array_equal(np.asarray(e0[key]), np.asarray(e1[key])), key
+    t0 = simulate_transient(bare, np.linspace(0.0, 2e-3, 9), n_nodes=21,
+                            pump_drive=_pump_drive)
+    t1 = simulate_transient(spelled, np.linspace(0.0, 2e-3, 9), n_nodes=21,
+                            pump_drive=_pump_drive)
+    assert t0.meta["quasi_static_valid"] and t1.meta["quasi_static_valid"]
+    for name in ("nbar2_zt", "signal_gain_dB", "signal_out_W", "pump_out_W"):
+        assert np.array_equal(getattr(t0, name), getattr(t1, name)), name
+    assert np.array_equal(t0.meta["beta_yb"], t1.meta["beta_yb"])
 
 
 def test_the_new_branches_are_structurally_unreachable_with_the_defaults():
