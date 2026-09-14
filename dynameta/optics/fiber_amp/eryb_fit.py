@@ -781,10 +781,12 @@ def eryb_fit_to_device(build: Callable, target: DeviceTarget, *,
         top = float(evals.max()) if evals.size else 0.0
         cond = float(top / evals.min()) if (evals.size and evals.min() > 0.0) else float("inf")
         direction = np.asarray(evecs[:, 0], float)          # the LEAST constrained direction
+        # ONE errstate block over every step that can touch inf or 0/0: the repo runs pytest with
+        # filterwarnings = ["error"], so a stray RuntimeWarning from the singular case would fail
+        # a gate on some runners and not others.
         with np.errstate(divide="ignore", invalid="ignore"):
             inv_evals = np.where(evals > 1e-12 * max(top, 1e-300), 1.0 / evals, np.inf)
-        cov = evecs @ np.diag(inv_evals) @ evecs.T
-        with np.errstate(divide="ignore", invalid="ignore"):
+            cov = evecs @ np.diag(inv_evals) @ evecs.T
             corr = float(cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1]))
         # ln(f k) has gradient (1 - f, 1) in (logit f, ln k); the orthogonal (degenerate) ratio
         # direction ln(f/k) has gradient (1 - f, -1).
@@ -795,7 +797,7 @@ def eryb_fit_to_device(build: Callable, target: DeviceTarget, *,
             proj = (evecs.T @ g) ** 2
             with np.errstate(divide="ignore", invalid="ignore"):
                 terms = np.where(proj > 0.0, proj * inv_evals, 0.0)
-            return float(np.sqrt(np.sum(terms)))
+                return float(np.sqrt(np.sum(terms)))
 
         s_fk, s_ratio = _sigma(g_prod), _sigma(g_ratio)
     except np.linalg.LinAlgError:
