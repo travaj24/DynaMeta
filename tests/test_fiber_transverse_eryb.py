@@ -457,6 +457,22 @@ def test_scope_refusals():
     with pytest.raises(ValueError, match="photodarkening"):
         ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None,
                               concentration=ConcentrationModel(pd_loss_per_m=0.1), **kw)
+    # eryb.py's two 2026-09-15 temperature opt-ins act only through an axial T(z) profile, which
+    # this class refuses, so they are refused BY NAME rather than carried and silently ignored
+    from dynameta.optics.fiber_amp import (RATE_ARRHENIUS_CHENG_2022, RateTemperatureLaw,
+                                           YbStarkThermal)
+    with pytest.raises(ValueError, match="rate_temperature"):
+        ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None,
+                              rate_temperature=RATE_ARRHENIUS_CHENG_2022, **kw)
+    with pytest.raises(ValueError, match="yb_stark_thermal"):
+        ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None,
+                              yb_stark_thermal=YbStarkThermal(delta_E_over_k_K=600.0),
+                              **kw)
+    # ... but an all-zero law IS the identity and must be accepted, exactly as eryb.py treats it
+    ok = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None,
+                               rate_temperature=RateTemperatureLaw(), **kw)
+    assert ok.rate_temperature is None
+    assert np.isfinite(ok.solve(n_nodes=21).signal_gain_dB[0])
     amp = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None, **kw)
     with pytest.raises(ValueError, match="set_temperature_profile"):
         amp.set_temperature_profile([0.0, 1.0], [300.0, 350.0])

@@ -91,6 +91,10 @@ SCOPE / REFUSALS (v1; each raises ValueError with the physics reason -- see `_re
     solver is then deliberately NOT resolving anything and the override is the mean-field Gamma.
   * set_temperature_profile -- a z-only McCumber scaling is not meaningful once the inversion is
     resolved; it would have to become T(r, z).
+  * rate_temperature (RateTemperatureLaw) and yb_stark_thermal (YbStarkThermal) -- eryb.py's two
+    2026-09-15 temperature opt-ins, which act ONLY through that same axial T(z) profile, so they
+    are refused for the same reason AND because carrying them with no profile set would be inert.
+    An all-zero RateTemperatureLaw is the exact identity and is accepted.
   * ConcentrationModel.pd_loss_per_m != 0 -- eryb.py applies the photodarkening equilibrium gray
     loss as a CHANNEL-UNIFORM background (no overlap factor); resolved, it is a per-node property
     of the glass and picks up the confinement factor. The two are different models and v1 refuses
@@ -108,7 +112,7 @@ bar (dynamics._STORE_PROFILES_MAX_BYTES -- the same constant, not a second one).
 References: eryb.py's (the Er:Yb rate model, the two-population split, K2, migration);
 transverse.py's (Smith & Smith Eq. 1 for the local balance, Giles & Desurvire for the m h nu dnu
 seed); docs/fiber_transverse_grounding_2026_07_29.md sec.1 for the quadrature. Audit trail:
-docs/audit/2026-09-15-eryb-transverse.md; docs/fiber_amp_model_spec.md sec.16.
+docs/audit/2026-09-15-eryb-transverse.md; docs/fiber_amp_model_spec.md sec.17.
 Pure numpy/scipy; SI units; ASCII only. Power-only model.
 """
 
@@ -357,7 +361,7 @@ class ResolvedErYbAmplifier:
                  a32_per_s: float = 5.0e5, yb_ase: Optional[AseBand] = None,
                  upconversion_C_up: float = 0.0, yb_coupled_fraction: float = 1.0,
                  k_tr2_m3_s: float = 0.0, yb_migration_rate_per_s: float = 0.0,
-                 concentration=None,
+                 concentration=None, rate_temperature=None, yb_stark_thermal=None,
                  er_profile: DopantSpec = None, yb_profile: DopantSpec = None,
                  signal_modes: Optional[Sequence] = None, uniform_illumination: bool = False,
                  n_quad: int = 24, n_azimuthal: int = 32, r_max_m: Optional[float] = None):
@@ -373,6 +377,13 @@ class ResolvedErYbAmplifier:
                                  k_tr2_m3_s=k_tr2_m3_s,
                                  yb_migration_rate_per_s=yb_migration_rate_per_s,
                                  concentration=concentration)
+        # The two TEMPERATURE-DRIVEN opt-ins of eryb.py (2026-09-15) are accepted so a port fails
+        # with a physics message instead of a TypeError, and are then refused by name in
+        # `_refuse` -- they are functions of an axial T(z) this class cannot take.
+        self.rate_temperature = (None if rate_temperature is not None
+                                 and getattr(rate_temperature, "is_identity", False)
+                                 else rate_temperature)
+        self.yb_stark_thermal = yb_stark_thermal
         self.er_ion, self.yb_ion, self.fiber = er_ion, yb_ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase, self.yb_ase = ase, yb_ase
@@ -409,6 +420,21 @@ class ResolvedErYbAmplifier:
                 "mean-field ErYbAmplifier, e.g. Giles-calibrated fibers). It IS accepted with "
                 "uniform_illumination=True, where the solver deliberately reproduces the "
                 "mean-field model and the override is exactly the Gamma that model uses.")
+        for nm, opt in (("rate_temperature", self.rate_temperature),
+                        ("yb_stark_thermal", self.yb_stark_thermal)):
+            if opt is None:
+                continue
+            raise ValueError(
+                "ResolvedErYbAmplifier: {} is not supported in v1. Both of eryb.py's 2026-09-15 "
+                "temperature opt-ins act ONLY through an axial T(z) profile -- "
+                "RateTemperatureLaw Arrhenius-scales k_tr / K2 / W_mig at T(z), and "
+                "YbStarkThermal depopulates the Yb lower Stark manifold at T(z) -- and this "
+                "class refuses set_temperature_profile for the reason that makes them wrong "
+                "here: once the inversion is resolved across the mode the meaningful field is "
+                "T(r, z), not T(z). Carrying them silently would also be inert (with no profile "
+                "set they scale nothing), which is the worse failure. Use eryb.ErYbAmplifier for "
+                "the mean-field temperature model; an all-zero RateTemperatureLaw is the exact "
+                "identity and IS accepted.".format(nm))
         if self.concentration is not None and float(self.concentration.pd_loss_per_m) > 0.0:
             raise ValueError(
                 "ResolvedErYbAmplifier: ConcentrationModel.pd_loss_per_m = {:.6g} (Yb "
@@ -466,6 +492,9 @@ class ResolvedErYbAmplifier:
             upconversion_C_up=self.upconversion_C_up, yb_coupled_fraction=mf._fc,
             k_tr2_m3_s=mf._k_tr2, yb_migration_rate_per_s=mf._w_mig,
             concentration=self.concentration,
+            # both are None on any amplifier that exists (they are refused at construction), but
+            # they are carried so that relaxing the refusal later needs ONE edit, not two
+            rate_temperature=self.rate_temperature, yb_stark_thermal=self.yb_stark_thermal,
             er_profile=self.er_profile, yb_profile=self.yb_profile,
             signal_modes=(list(self.signal_modes) if signals is None else None),
             uniform_illumination=self.uniform_illumination,
