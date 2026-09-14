@@ -278,20 +278,46 @@ the order of magnitude is on the record.
 
 ## 6. Guidance for the downstream burst-PAM study
 
-* Both co-doped march sites are already on grids that stay inside the quasi-static regime:
-  `lib/sat56_study.py::droop_transient` uses LOG-SPACED frames seeded from `solve()` at the idle
-  drive, and `lib/fiber_burst_pam.py::run_two_timescale` a UNIFORM envelope grid capped at 200 ns
-  (`BurstSpec.max_dt_env_s`), which is four orders below the Er lifetime. On both shapes `auto`
-  takes zero self-consistent steps and returns the quasi-static arrays bit-for-bit, at 1.08-1.27x
-  the cost. **Switching them to `ase_mode="auto"` is therefore free insurance**: identical
-  numbers today, and automatic protection the moment a design point, a longer fiber, a colder
-  seed or a coarser grid enters the coupled regime -- which is exactly how the flag got tripped
-  in the first place (a cold-start uniform 300 us grid on the reference design).
+**Neither co-doped march site is in the unstable regime today.** On the study's own shapes --
+`lib/sat56_study.py::droop_transient` (an idle preamble, a 20 dB drive step at t = 0, then
+log-spaced burst frames, 801 nodes) and `lib/fiber_burst_pam.py::run_two_timescale` (a uniform
+envelope grid capped at 200 ns, four orders below the Er lifetime) -- `meta['quasi_static_valid']`
+stays True in every mode and all three modes land on the SAME end gain (13.5178 dB, four
+decimals). So the quasi-static numbers the study has are trustworthy as they stand.
+
+**But `auto` is NOT a no-op on the droop shape, and this is the number to know.** Measured on the
+droop shape at 801 nodes:
+
+| burst frames | `auto` switches | max path \|auto - QS\| | max path \|SC - QS\| | end gain, all modes |
+| --- | --- | --- | --- | --- |
+| 100 | 75 of 104 | -- | `0.1147 dB` | 13.5178 |
+| 200 | 135 of 204 (steps 0-134, t = -2 us .. +39 us) | `0.0270 dB` | `0.0563 dB` | 13.5178 |
+| 400 | 257 of 404 (steps 0-256, t = -2 us .. +28 us) | `0.0098 dB` | `0.0280 dB` | 13.5178 |
+| 800 | 502 of 804 | -- | `0.0140 dB` | 13.5178 |
+
+Two things to read off it. (i) `auto` switches exactly the frames just after the drive step,
+where the ASE is being re-established -- the right place. (ii) The path difference between modes
+HALVES with every doubling of frame density: it is the O(dt) path error of the integrator, not
+an ASE effect, and both modes converge to the same path. The study's droop metric is read off
+that path, so switching modes would move it by `0.01-0.03 dB` at the study's current frame
+density.
+
+**Recommendation.** Switch the co-doped marches to `ase_mode="auto"`, but as a re-run, not a
+retrofit: it is the safer default (it removes the whole class of silent failure that produced
+the flag in the first place, at 1.3-1.8x the cost on these shapes), and where it differs it is
+the better-conditioned side of an O(dt) error the study should be quantifying anyway. Do NOT
+paste `auto` numbers next to published `quasi_static` ones. If byte-identical continuity matters
+more, keep `"quasi_static"` and keep reading `meta['quasi_static_valid']` exactly as the study
+does now -- that flag has not changed meaning.
+
+Two smaller points:
+
 * `meta['march_valid']` is the flag to read in `auto`; `meta['quasi_static_valid']` keeps its old
   meaning (did the frozen step stay in its regime) and will still go False on a switched step --
   which is now information, not a reason to distrust the run.
-* Do NOT switch the study's default to `"self_consistent"`: on the healthy log grid it is 3-4x
-  the cost for numbers that agree to `1.1e-5 dB`.
+* Do NOT make `"self_consistent"` the study's default: on a march at its operating point it is
+  3-4x the cost for numbers that agree to `1.1e-5 dB`, and on the droop shape it moves the path
+  by the full O(dt) difference above rather than only the part `auto` judges necessary.
 
 ---
 
