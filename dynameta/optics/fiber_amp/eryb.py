@@ -1766,11 +1766,12 @@ class ErYbAmplifier:
         Three things to read off. `D_tr + D_32` is the adiabatic `(eps_Yb - eps_Er) Phi_tr` once
         every transferred ion relaxes immediately, so the TOTAL is unchanged in the adiabatic
         limit and only the naming moves -- which is the point of making the relaxation explicit.
-        `D_bk` is negative because the back-transfer is UPHILL (eps_3 = 2.033e-19 J at 977 nm
-        against eps_Yb = 2.038e-19 J at 975 nm, a 2.6 meV phonon absorbed per event): it is a
-        real, tiny anti-Stokes term, not a sign error. And the guided spontaneous emission of a
-        level-3 channel is credited against the relaxation energy (`- P_sp_lvl3`) exactly as the
-        C-band ASE is credited against the 4I13/2 decay; the model carries no separate radiative
+        `D_bk` is negative because the back-transfer is UPHILL: eps_3 = 2.0332e-19 J (977 nm) sits
+        BELOW eps_Yb = 2.0384-2.0421e-19 J (the shipped ytterbium zero lines, 974.5-972.75 nm),
+        so 3.3-5.5 meV of phonon energy is ABSORBED per event. It is a real, tiny anti-Stokes
+        term, not a sign error. And the guided spontaneous emission of a level-3 channel is
+        credited against the relaxation energy (`- P_sp_lvl3`) exactly as the C-band ASE is
+        credited against the 4I13/2 decay; the model carries no separate radiative
         branching ratio for 4I11/2, whose relaxation in a phosphosilicate host is multiphonon by
         ~1e3. The extra keys on this path are 'relaxation_32_defect', 'back_transfer_defect',
         'relaxation_32_rate_per_m', 'back_transfer_rate_per_m' and 'df3_dt'."""
@@ -1865,6 +1866,10 @@ class ErYbAmplifier:
             # charged to the 4I11/2 -> 4I13/2 relaxation -- which is where it always was, inside
             # the adiabatic transfer defect. Their SUM is unchanged in the adiabatic limit and
             # that is the gate.
+            # NOTE the block above computed pw_e_er / p_e_er / n_e_er charging EVERY channel's
+            # emission to n2; on this path they are discarded and recomputed per level, which is
+            # exactly what the split replaces. pw_a_er is reused as-is -- absorption is from n1
+            # at every channel either way, and `one_f` already carries the 1 - f2 - f3 form.
             w3c = c["w3"][:, None]
             ge2 = c["g_e_er2"][:, None] if mcc is None else c["g_e_er2"][:, None] * mcc[0]
             ge3 = c["g_e_er3"][:, None] if mcc is None else c["g_e_er3"][:, None] * mcc[0]

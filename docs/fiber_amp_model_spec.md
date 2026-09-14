@@ -951,7 +951,8 @@ q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr + D_K2 + D_32 + D_bk
 `D_tr + D_32` is sec. 14's transfer defect redistributed, so the TOTAL does not move in the
 adiabatic limit and only the naming does (MEASURED: total dissipation invariant to 3.6e-10
 relative, and the reallocation exactly equal and opposite to `D_Er`, 2.3e-8). `D_bk` is NEGATIVE
--- `eps_3` (977 nm) sits 3 meV below `eps_Yb` (975 nm), so back-transfer absorbs a phonon. The
+-- `eps_3` (977 nm) sits 3.3-5.5 meV BELOW `eps_Yb` (974.5 nm for the parametric ytterbium,
+972.75 nm for the Melkumov phosphosilicate table), so back-transfer absorbs a phonon. The
 level-3 guided spontaneous emission is credited against the relaxation, as C-band ASE is credited
 against the `4I13/2` decay; no separate `4I11/2` radiative branching ratio is carried.
 `energy_terms` REQUIRES `f3=` on this path and refuses it off it, the rule `b2_uncoupled`
@@ -993,4 +994,7 @@ unscaled model over-predicts by **843x** (parametric ions) and **1657x** (measur
 phosphosilicate ions) -- Morasse's own model was 247x high -- and the fit returns **0.348** and
 **0.333** against his 0.40, moving the signal output by **+0.021** and **-0.063 dB**. The scale is
 a calibration against one measurement at one operating point with one `k_tr`, not a spectroscopic
-constant: quote it with the ion pair and the transfer coefficient it was fitted with.
+constant, and `k_tr` trades against it directly: on the same fiber and ions the fitted scale runs
+**0.348 / 0.408 / 0.448** at `k_tr = 1e-22 / 3e-22 / 1e-21`, i.e. THROUGH Morasse's 0.40 and past
+it, while the signal change stays inside 0.02 dB throughout. Quote the scale with the ion pair AND
+the transfer coefficient it was fitted with.
