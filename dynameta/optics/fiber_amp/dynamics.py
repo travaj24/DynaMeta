@@ -996,13 +996,26 @@ def simulate_transient_eryb(amp, t_grid, *,
     _no_raman(amp)
     ase_mode = march_ase.check_ase_mode(ase_mode)
     if getattr(amp, "_Tz", None) is not None:
+        # The profile is the single gate on EVERY temperature-dependent co-doped coefficient:
+        # the two ions' per-z McCumber sigma_e scaling, and (2026-09-15) the YbStarkThermal band
+        # scale and the RateTemperatureLaw Arrhenius scaling of k_tr / K2 / W_mig, both of which
+        # eryb._mcc_matrices returns only when a profile is set. So refusing on _Tz refuses all
+        # of them together, and an amplifier carrying those opt-ins WITHOUT a profile is inert
+        # by the library's own contract and marches normally -- which is gated, not assumed
+        # (tests/test_march_self_consistent_ase.py).
+        extra = [n for n in ("rate_temperature", "yb_stark_thermal")
+                 if getattr(amp, n, None) is not None]
         raise NotImplementedError(
             "simulate_transient: this co-doped amplifier carries an axial temperature profile "
-            "(set_temperature_profile / solve_with_thermal_feedback), which the march does not "
+            "(set_temperature_profile / solve_with_thermal_feedback%s), which the march does not "
             "yet apply -- the frozen-population step would silently propagate the COLD "
             "cross-sections and disagree with amp.solve() by dB. Call "
             "amp.clear_temperature_profile() to march the isothermal amplifier, or use "
-            "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state.")
+            "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state. This "
+            "refusal covers ase_mode=\"self_consistent\" and \"auto\" too: those change the "
+            "population UPDATE, not the cross-sections the step propagates through."
+            % ("" if not extra else ", and the temperature-dependent " + " and ".join(extra)
+               + " it also carries"))
     two_pop = bool(getattr(amp, "_two_pop", False))
     fc = float(getattr(amp, "_fc", 1.0))
     pl = amp._plan()
