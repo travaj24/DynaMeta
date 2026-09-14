@@ -362,6 +362,14 @@ jobs:
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
         # which is exactly the T-5 failure mode.
+        #
+        # NOT PINNED, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg red every night
+        # from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py. The crash
+        # was NOT an ngsolve regression against this repo's physics: the `nightly` job installs the
+        # same 6.2.2607 and its heavy FEM oracles pass. It was a test probe handing `None` to a
+        # CoefficientFunction multiply -- a TypeError on <= 6.2.2606, a null dereference on 6.2.2607.
+        # The probe now passes real numbers. Pinning ngsolve would have frozen a healthy release to
+        # preserve an invalid probe, so the floor in pyproject.toml stays `ngsolve>=6.2`.
         run: |
           pytest -q -m "not slow" \
             tests/test_audit_2026_07_17_infra.py tests/test_audit_guards.py \
