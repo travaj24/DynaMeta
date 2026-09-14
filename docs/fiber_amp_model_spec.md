@@ -889,3 +889,71 @@ DELIBERATELY the aluminosilicate ones (1-2% of an EYDFA's pump absorption).
 `p_host_spectra=False` restores the old label-only ion bit-exactly.
 `calibration.er_yb_phosphosilicate_reference()` returns `(er_ion, yb_ion, FiberSpec, kwargs)` for
 the Rybaltovsky-class reference fiber with every value's provenance in its docstring.
+
+## 16. Self-consistent (ASE-coupled) transient step -- lifting the quasi-static limit
+
+Added 2026-09-15; full derivation, measurements and limits in
+`docs/audit/2026-09-15-march-self-consistent-ase.md`.
+
+**The limit being lifted.** The march of sec.8 (co-doped: sec.14) freezes the populations, solves
+`dP/dz = u (g P + s)` exactly for that frozen `g`, and then advances the populations. That step is
+EXPLICIT in the ASE feedback: ASE generated inside a step never depletes the inversion that made
+it, so a population error is multiplied by `exp(INT g dz)` before it re-enters the update. Once
+that exponent is large the iteration is unstable and the march settles somewhere other than
+`amp.solve()`. Audit A-7 (2026-08) measured the condition every step and reported it on
+`meta['quasi_static_valid']`; it could not fix it, and sub-stepping cannot either -- the frozen
+step is already the exact solution of its own ODE, so a finer `z` or `t` grid returns the same
+over-amplified ASE. For the same reason a literal "frozen-population BVP" is a no-op: at fixed
+populations the power problem is LINEAR and the two directions are decoupled.
+
+**The step.** Write `y` for the populations at the start of a step and `dt` for the step;
+`advance(P)` for the march's OWN population update (the exponential integrator of sec.8, or the
+exponential Rosenbrock step of sec.14) taken from `y` over `dt` with the rates read off a power
+profile `P`; `gain_source` and `propagate` for the march's own gain assembly and frozen-gain
+sweep. `ase_mode="self_consistent"` solves
+
+```
+P = propagate(gain_source(y_end)),        y_end = advance(P)
+```
+
+for `(P, y_end)` SIMULTANEOUSLY, by the damped fixed-point iteration the steady solver uses and
+against the same two residuals (`_relaxation_residuals`: endpoint and interior profile, each
+channel normalised by its own peak), to `ase_tol` (default `1e-6`, the steady solver's own). The
+populations are then advanced with the converged powers, i.e. the existing update at a converged
+`P`. Inside a step the gain now DEPLETES as the ASE grows, which is the negative feedback the
+frozen step lacks.
+
+Limits: `dt -> 0` collapses it onto the frozen step exactly (`advance(P) -> y`); `dt -> infinity`
+becomes the steady relaxation problem; and the amplifier's steady state is a fixed point for ANY
+`dt`, because the increment carries the rate right-hand side as a factor. So the march's long-time
+limit is still exactly `amp.solve()`'s, and the mode is first-order on the PATH exactly as the
+default march is -- what changes is stability, not order.
+
+**Modes.** `ase_mode="quasi_static"` (THE DEFAULT) is bit-for-bit the previous march.
+`"self_consistent"` takes every step as above. `"auto"` takes quasi-static steps until the
+monitor PREDICTS a violation: the ASE's share of the launched power times `|e^D - 1|`, `D` the
+drift of the ASE gain integral across the step (above `1e-2`); a one-propagation PROBE at the
+projected populations when that estimate is structurally blind (a cold fiber emits nothing, so
+the share is exactly 0 whatever the gain does); the two audit-A-7 margins at half their limits as
+a backstop; and an 8-step sticky window after any trip, because the instability is a property of
+the iteration rather than of one step. `meta['ase_mode_steps']`, `['ase_switch_steps']` and
+`['ase_switch_times']` log every switch, and `meta['march_valid']` is the flag to read in the new
+modes (`meta['quasi_static_valid']` keeps its old meaning).
+
+**What is unchanged.** The REPORTED powers at `t_i` remain the instantaneous frozen-population
+propagation at the populations the same frame reports -- the exact quasi-static pair at that
+instant -- so the resolved-ASE arrays, `power_zt` and `frame_as_steady` mean exactly what they
+meant. Only the population UPDATE reads the self-consistent powers.
+
+**Measured.** On the two documented single-ion runaway cases the default march lands `-50.1 dB`
+and `-67.4 dB` from `solve()`; self-consistent lands `+0.074` and `+0.017 dB`, falling as
+`O(dz^2)` to `0.005` and `0.001 dB` at 321 nodes -- the same second-order mesh law, and the same
+factor per doubling, as the HEALTHY march's gap. On the co-doped reference marched cold on a
+uniform 1 ms / 3 ms grid the default lands `+13.9` and `-10.0 dB` off and self-consistent within
+`5.3e-4 dB`. Step-by-step closure (`ase_step_residual=True`: re-propagate at the populations each
+step ENDED at, residual against the powers it USED) goes from `4.9e2 ... 1.3e232` to
+`<= 3.1e-6`. Where the flag stays True the modes agree to `3.8e-4 dB` / `1.9e-4` in ASE (C-band
+EDFA) and `1.1e-5 dB` / `3.2e-6` (co-doped, log-spaced). Cost on the reference co-doped fiber, ms
+per step: at 161 nodes `3.00 / 11.58 / 3.24` (quasi-static / self-consistent / auto) on a warm
+log-spaced grid and `3.60 / 52.30 / 40.88` on a cold uniform 300 us grid; at 801 nodes
+`4.88 / 16.00 / 6.19` and `6.72 / 90.06 / 64.72`.
