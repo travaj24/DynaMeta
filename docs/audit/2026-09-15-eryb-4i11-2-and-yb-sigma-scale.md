@@ -426,21 +426,24 @@ gate fixture does. Note also that the back-transfer LOWERS `n3` while costing ga
 
 ## 6. Verification run
 
+Re-run in full on the MERGED tree (see section 7); the counts below are that run.
+
 ```
 ruff check .                                                  -> clean (the whole tree)
-pytest tests/test_fiber_eryb_4i11_2.py                        -> 19 passed, 440 s
-pytest tests/test_fiber_eryb.py tests/test_fiber_eryb_physics.py
-       tests/test_fiber_eryb_transient.py                     -> 57 passed, UNCHANGED
+pytest tests/test_fiber_eryb_migration_thermal.py tests/test_fiber_eryb.py
+       tests/test_fiber_eryb_physics.py
+       tests/test_fiber_eryb_transient.py                     -> 76 passed (v0.11.3's 19
+                                                                 gates + the 57 pre-existing)
+pytest tests/test_fiber_eryb_4i11_2.py                        -> 20 passed, 545 s
 pytest tests/test_fiber_amp.py tests/test_audit_2026_08_04_fiber_amp.py
        tests/test_fiber_chain.py tests/test_fiber_dynamics.py
        tests/test_numerics.py tests/test_fiber_thermal_feedback.py
        tests/test_measured_spectra_2026_08_28.py
-       tests/test_yb_mccumber_refit.py                        -> 221 passed
-pytest tests/test_audit_2026_07_25_infra.py tests/test_fiber_bpm.py
+       tests/test_yb_mccumber_refit.py tests/test_validation_runner.py
+       tests/test_audit_2026_07_25_infra.py tests/test_fiber_bpm.py
        tests/test_fiber_gnlse.py tests/test_fiber_lma.py
        tests/test_fiber_nonlinear.py tests/test_fiber_srs.py
-       tests/test_fiber_transverse.py                         -> 133 passed
-pytest tests/test_validation_runner.py                        -> 14 passed
+       tests/test_fiber_transverse.py                         -> 368 passed
 python -m validation.eryb_morasse_yb_sigma_scale --nodes 201  -> section 4, exit 0
 ```
 
