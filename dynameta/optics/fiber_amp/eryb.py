@@ -72,9 +72,15 @@ reabsorption cascade is NOT in this z-local model. transfer_efficiency() reports
 model value (a rate-integral consistent with the low-power analytic form), and the model does
 NOT force the >95% number.
 
-References: Karasek, IEEE JQE 33(9):1699 (1997) [Er:Yb rate model, k_tr]; Di Pasquale & Federighi,
-JOSA B 23(3):195 (2006) [measured k_tr ~ 1.1e-22]; Paschotta et al., IEEE JQE 33(7):1049 (1997)
-[Yb lifetime]; Giles & Desurvire, JLT 9(2):271 (1991) [coupled-power EDFA core]. Pure
+References: Karasek, IEEE JQE 33(10):1699 (1997) [Er:Yb rate model, k_tr]; Laroche, Girard,
+Sahu, Clarkson, Nilsson, JOSA B 23(2):195 (2006) [k_tr measured in phosphosilicate Er:Yb FIBER,
+~6.4e-23 to 1.1e-22 m^3/s]; Hwang, Jiang, Luo, Watson, Sorbello, Peyghambarian, JOSA B 17(5):833
+(2000) [k_tr ~ 1.1e-22 and >95% transfer measured in BULK phosphate at N_Er = 2-4e26 m^-3, where
+k_tr N_Er tau_Yb = 32-64 -- the '>95%' and the fiber's ~0.80-0.85 (N_Er ~ 4e25) are the same k_tr
+at different Er loadings, which resolves the DISCREPANCY NOTE above without a reabsorption
+cascade]; Paschotta et al., IEEE JQE 33(7):1049 (1997) [Yb lifetime]; Giles & Desurvire, JLT
+9(2):271 (1991) [coupled-power EDFA core]. (Citation audit 2026-09-13: the earlier 'Di Pasquale
+& Federighi, JOSA B 23(3):195' attribution was wrong -- that paper is Laroche et al., issue 2.) Pure
 numpy/scipy; SI units; exp(-i omega t); ASCII-only. docs/fiber_amp_model_spec.md sec.1;
 FORMULATION DOSSIER MODULE 1.
 """
