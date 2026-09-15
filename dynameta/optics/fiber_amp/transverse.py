@@ -81,7 +81,10 @@ SCOPE / REFUSALS (v1; each raises ValueError with the reason -- see _refuse_unsu
                                                   T(r,z) to be meaningful here.
   * an ion with a NONZERO sigma_esa at any channel wavelength -- the ESA term of (F1.2) is
                                                   transcribed but deliberately not wired.
-  * Er:Yb co-doping (ErYbAmplifier)            -- two coupled ion species, two balances.
+  * Er:Yb co-doping (ErYbAmplifier)            -- two coupled ion species, two balances. Solved
+                                                  per ring by transverse_eryb.ResolvedErYbAmplifier
+                                                  (which reduces to THIS class at N_Yb -> 0,
+                                                  k_tr = 0); refused here, not unsupported.
   * FiberSpec.overlap_override                 -- an override REPLACES the overlap this solver
                                                   computes from the mode profile; honouring it
                                                   silently would be a lie about what was solved.
@@ -113,7 +116,10 @@ from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pum
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m, overlap_gamma
 
 __all__ = ["RadialGrid", "ResolvedResult", "ResolvedFiberAmplifier", "mean_field_equivalent",
-           "tshb_closed_form_J", "tshb_mean_field_J", "saturation_correction_kappa"]
+           "tshb_closed_form_J", "tshb_mean_field_J", "saturation_correction_kappa",
+           "build_normalized_profiles", "check_signal_modes", "cladding_intensity_profile",
+           "default_r_max_m", "flat_intensity_profile", "fundamental_psi2",
+           "quadrature_breakpoints"]
 
 # LP11 cutoff. Above it the Marcuse fit (valid ~1.2 < V < 2.4) is out of range and the exact LP
 # field must be used instead -- dossier sec.1.5, the binding correction.
@@ -291,6 +297,205 @@ def saturation_correction_kappa(x):
     return np.where(xx > 0.0, np.tanh(safe) / safe, 1.0)
 
 
+# ============================ shared transverse geometry kernel =========================
+# THE single home of the four geometry primitives every resolved solver in this package needs:
+# the fundamental-mode intensity shape, the synthetic mean-field ("flat") profile, the flat
+# cladding-pump profile, the default outer quadrature radius, and the panel breakpoints. They
+# were originally private methods of ResolvedFiberAmplifier; transverse_eryb.ResolvedErYbAmplifier
+# needs exactly the same five, and a second copy of a quadrature kernel is the defect this repo
+# has paid for before (steady_state audit X-3, the duplicated relaxation interpolator). The class
+# methods below now DELEGATE here, so the arithmetic is unchanged.
+
+def fundamental_psi2(fiber: FiberSpec, lambda_m: float, r_m) -> np.ndarray:
+    """|psi(r)|^2 of the FUNDAMENTAL guided mode of `fiber` at `lambda_m`, UNNORMALIZED.
+
+    V > 2.405 -> the exact LP01 field of lma.mode_field (J_0 core / K_0 cladding), obtained from
+    lma.solve_lp_modes (which returns the modes beta-descending, so [0] IS LP01). Otherwise the
+    Marcuse Gaussian exp(-2 r^2/w^2) of waveguide.mode_field_radius_m -- which keeps a resolved
+    solver in EXACT correspondence with the mean-field FiberAmplifier in the single-mode regime,
+    where both then use the same profile. Above cutoff the Gaussian is not merely out of its fit
+    range, it mis-states the SATURATION integral by up to 13% (dossier sec.1.5) -- which is the
+    whole reason this switch exists."""
+    a, na = fiber.core_radius_m, fiber.na
+    r = np.asarray(r_m, float)
+    V = 2.0 * np.pi * a * na / float(lambda_m)
+    if V > V_LP11_CUTOFF:
+        md = solve_lp_modes(a, na, float(lambda_m))[0]
+        psi = mode_field(md, r)
+        return psi * psi
+    w = float(mode_field_radius_m(a, na, float(lambda_m)))
+    return np.exp(-2.0 * r * r / (w * w))
+
+
+def flat_intensity_profile(fiber: FiberSpec, lambda_m: float, r_m, r_max_m: float) -> np.ndarray:
+    """The synthetic MEAN-FIELD profile: Gamma_k/A_dope inside the dopant, the residual
+    (1 - Gamma_k) spread uniformly outside it (where the dopant density is zero, so it only
+    carries the normalization (F1.0)). Reproduces the mean-field intensity
+    <I_k> = Gamma_k P_k/A_dope and the mean-field overlap Gamma_k simultaneously, hence reproduces
+    the mean-field solver EXACTLY. Gamma_k is waveguide.overlap_gamma, so a
+    FiberSpec.overlap_override -- when a caller has deliberately asked for the mean-field limit --
+    flows through here verbatim."""
+    r = np.asarray(r_m, float)
+    b = fiber.b_dope_m
+    gam = float(overlap_gamma(fiber, np.asarray([lambda_m], float))[0])
+    a_dope = np.pi * b * b
+    a_out = np.pi * (float(r_max_m) * float(r_max_m) - b * b)
+    inside = r <= b
+    out = np.where(inside, gam / a_dope, 0.0)
+    if a_out > 0.0:
+        out = out + np.where(inside, 0.0, (1.0 - gam) / a_out)
+    return out
+
+
+def cladding_intensity_profile(fiber: FiberSpec, r_m) -> np.ndarray:
+    """The dossier (F2.8) convention for a multimode cladding pump: FLAT over the inner cladding,
+    1/A_clad. INT_dope i_p dA = A_dope/A_clad = waveguide.cladding_pump_overlap by quadrature --
+    the pump overlap becomes an OUTPUT of the solve, not an input. This is also the exact
+    MEAN-FIELD bracket for a cladding pump (a flat intensity has no hole to burn), which is why a
+    cladding-pumped resolved solve differs from its mean-field twin only through the CORE-guided
+    channels."""
+    rc = float(fiber.clad_radius_m)
+    return np.where(np.asarray(r_m, float) <= rc, 1.0 / (np.pi * rc * rc), 0.0)
+
+
+def default_r_max_m(fiber: FiberSpec, lambda_m, cladding, modes=()) -> float:
+    """Outer quadrature radius: at least 6a (the lma._overlap_grid reach) and 1.2 b, plus each
+    CORE-guided channel's own tail -- a(1 + 12/W) for an exact LP mode, 5w for a Gaussian
+    (exp(-50) of the peak) -- plus any explicitly supplied LPMode's tail, plus the inner cladding
+    when a cladding pump has to be normalized. `cladding` is the per-channel flag list (True only
+    for cladding pumps, whose flat profile has no tail of its own)."""
+    a, na = fiber.core_radius_m, fiber.na
+    r_max = max(6.0 * a, 1.2 * fiber.b_dope_m)
+    for lm, cl in zip(np.asarray(lambda_m, float), cladding):
+        if cl:
+            continue
+        V = 2.0 * np.pi * a * na / float(lm)
+        if V > V_LP11_CUTOFF:
+            md = solve_lp_modes(a, na, float(lm))[0]
+            r_max = max(r_max, a * (1.0 + 12.0 / max(md.W, 0.25)))
+        else:
+            r_max = max(r_max, 5.0 * float(mode_field_radius_m(a, na, float(lm))))
+    for spec in modes:
+        if isinstance(spec, LPMode):
+            r_max = max(r_max, a * (1.0 + 12.0 / max(spec.W, 0.25)))
+    if any(cladding):
+        r_max = max(r_max, float(fiber.clad_radius_m))
+    return float(r_max)
+
+
+def quadrature_breakpoints(fiber: FiberSpec, r_max_m: float, *, cladding_present: bool = False,
+                           extra_m=()):
+    """Panel edges for RadialGrid.build: 0, the core radius, the dopant radius (plus any EXTRA
+    dopant radii -- a co-doped fiber may confine its two ions differently), the inner cladding
+    when a cladding pump is present, r_max, and a geometric (radius-doubling) refinement of
+    everything beyond the outermost doped radius. See RadialGrid for why the doubling is not
+    cosmetic (2.9e-8 of relative error in every confinement factor without it)."""
+    a, b = fiber.core_radius_m, fiber.b_dope_m
+    r_max = float(r_max_m)
+    extra = [float(x) for x in extra_m]
+    breaks = {0.0, min(a, b), max(a, b), r_max}
+    breaks.update(extra)
+    if cladding_present:
+        breaks.add(float(fiber.clad_radius_m))
+    x = max([max(a, b)] + extra)
+    while x * 2.0 < r_max:
+        x *= 2.0
+        breaks.add(x)
+    return [p for p in breaks if p <= r_max]
+
+
+def build_normalized_profiles(fiber: FiberSpec, grid: "RadialGrid", lambda_m, cladding,
+                              mode_of=None, *, flat_all: bool = False,
+                              where: str = "resolved solver") -> np.ndarray:
+    """(K, N) NORMALIZED transverse intensity profiles i_k, one row per channel, satisfying
+    (F1.0) INT i_k dA = 1 on the grid EXACTLY (each row is divided by its own quadrature integral,
+    so the truncation at r_max is absorbed rather than left as a silent leak; with r_max at
+    6a / 5w the discarded Gaussian tail is ~1e-26 of the power).
+
+    `cladding[k]` True -> the flat inner-cladding profile. `mode_of(k)` (optional) returns that
+    channel's explicit ModeSpec -- an LPMode, the string FLAT, or None for the fundamental.
+    `flat_all` forces EVERY core-guided channel to the synthetic mean-field profile, i.e. the
+    uniform-illumination limit in which a resolved solver reproduces its mean-field twin (a
+    cladding pump is already flat, so it is left alone and stays exact)."""
+    r = grid.r_m
+    K = int(np.asarray(lambda_m, float).size)
+    lam = np.asarray(lambda_m, float)
+    prof = np.empty((K, grid.size))
+    for k in range(K):
+        spec = None if mode_of is None else mode_of(k)
+        if k < len(cladding) and cladding[k]:
+            raw = cladding_intensity_profile(fiber, r)
+        elif flat_all or isinstance(spec, str):
+            raw = flat_intensity_profile(fiber, float(lam[k]), r, grid.r_max_m)
+        elif spec is not None:
+            psi = mode_field(spec, r)
+            raw = psi * psi
+            if spec.l >= 1:                           # LP_lm, l>=1: cos^2(l phi) azimuthal
+                raw = raw * np.cos(spec.l * grid.phi_rad) ** 2
+        else:
+            raw = fundamental_psi2(fiber, float(lam[k]), r)
+        norm = float(np.dot(grid.dA_m2, raw))
+        if not (norm > 0.0):
+            raise ValueError("{}: channel {} profile integrates to {} -- the quadrature grid "
+                             "does not reach the mode".format(where, k, norm))
+        prof[k] = raw / norm
+    return prof
+
+
+def check_signal_modes(fiber: FiberSpec, signals, signal_modes, *,
+                       where: str = "resolved solver") -> None:
+    """Validate user-supplied per-signal ModeSpecs against the fiber and their own Signal. THE
+    single home of the four mode refusals (wrong type / wrong core radius / wrong wavelength /
+    wrong NA) and of the degenerate cos-sin pair refusal; every resolved solver in this package
+    takes the same `signal_modes` spelling and must refuse the same spellings."""
+    seen_lm = {}
+    for i, spec in enumerate(signal_modes):
+        if spec is None:
+            continue
+        if isinstance(spec, str):
+            if spec != FLAT:
+                raise ValueError("{}: signal_modes[{}] = {!r}; the only string spelling is "
+                                 "{!r}".format(where, i, spec, FLAT))
+            continue
+        if not isinstance(spec, LPMode):
+            raise ValueError("{}: signal_modes[{}] must be None, an LPMode, or {!r} (got "
+                             "{!r})".format(where, i, FLAT, type(spec)))
+        a = fiber.core_radius_m
+        if abs(spec.core_radius_m - a) > 1e-9 * a:
+            raise ValueError("{}: signal_modes[{}] was solved for core radius {:.6e} m but the "
+                             "fiber has {:.6e} m".format(where, i, spec.core_radius_m, a))
+        lam_s = signals[i].lambda_m
+        if abs(spec.lambda_m - lam_s) > 1e-6 * lam_s:
+            raise ValueError("{}: signal_modes[{}] was solved at {:.6e} m but its Signal is at "
+                             "{:.6e} m".format(where, i, spec.lambda_m, lam_s))
+        # V ties the mode to the fiber's NA, which nothing else here does: a and lambda_m
+        # already match by the two checks above, so V = 2 pi a NA / lambda disagreeing can
+        # ONLY be an NA mismatch. Left unchecked, an LP01 solved on NA = 0.20 and used on an
+        # NA = 0.12 fiber is a tighter, more confined field than that fiber supports and ships
+        # +1.00 dB of gain silently (measured, a = 3 um, 0.5 m, 5 W cladding pump).
+        V_fiber = 2.0 * np.pi * a * fiber.na / spec.lambda_m
+        if abs(spec.V - V_fiber) > 1e-9 * V_fiber:
+            raise ValueError(
+                "{}: signal_modes[{}] has V = {:.9f} but the fiber gives "
+                "V = 2 pi a NA / lambda = {:.9f} at that wavelength -- the mode was solved "
+                "for a different NA ({:.6f} implied, fiber has {:.6f}) and its field is not "
+                "a mode of this fiber".format(where, i, spec.V, V_fiber,
+                                              spec.V * spec.lambda_m / (2.0 * np.pi * a),
+                                              fiber.na))
+        if spec.l >= 1 and (spec.l, spec.m) in seen_lm:
+            raise ValueError(
+                "{}: signal_modes[{}] and signal_modes[{}] are both "
+                "LP{}{} -- the degenerate cos/sin PAIR cannot be spelled in v1. LPMode "
+                "carries no orientation field and the profile builder hardcodes cos(l phi)^2, so "
+                "passing the same mode twice would model cos + cos, which piles both signals "
+                "into the SAME azimuthal lobes: measured -16.5% modal gain versus the correct "
+                "cos + sin pair at 200 W each on the Smith & Smith LMA fixture. (The "
+                "quarter-plane grid would integrate sin^2 exactly -- 6.7e-16 relative for "
+                "l = 1, 2, 3 -- so this is a missing spelling, not a quadrature "
+                "limitation.)".format(where, seen_lm[(spec.l, spec.m)], i, spec.l, spec.m))
+        seen_lm[(spec.l, spec.m)] = i
+
+
 # ============================ result ====================================================
 
 @dataclass
@@ -418,8 +623,10 @@ class ResolvedFiberAmplifier:
         if not isinstance(self.ion, RareEarthIon):
             raise ValueError(
                 "ResolvedFiberAmplifier: ion must be a RareEarthIon. Er:Yb co-doping "
-                "(ErYbAmplifier: two ion species with a Yb->Er transfer term) has no resolved "
-                "form in v1 -- it needs TWO coupled local balances, one per species.")
+                "(ErYbAmplifier: two ion species with a Yb->Er transfer term) is not solved by "
+                "THIS class -- it needs TWO coupled local balances, one per species. Use "
+                "transverse_eryb.ResolvedErYbAmplifier, which does exactly that per radial "
+                "ring (and reduces to this class in the N_Yb -> 0, k_tr = 0 limit).")
         if self.fiber.overlap_override is not None:
             raise ValueError(
                 "ResolvedFiberAmplifier: FiberSpec.overlap_override is not supported. This "
@@ -498,123 +705,31 @@ class ResolvedFiberAmplifier:
 
     # ---- transverse profiles -------------------------------------------------------------
     def _fundamental_psi2(self, lam: float, r: np.ndarray) -> np.ndarray:
-        """|psi(r)|^2 of the FUNDAMENTAL guided mode at lam, unnormalized.
-
-        V > 2.405 -> the exact LP01 field of lma.mode_field (J_0 core / K_0 cladding), obtained
-        from lma.solve_lp_modes (which returns the modes beta-descending, so [0] IS LP01).
-        Otherwise the Marcuse Gaussian exp(-2 r^2/w^2) of waveguide.mode_field_radius_m -- which
-        keeps this solver in EXACT correspondence with the mean-field FiberAmplifier in the
-        single-mode regime, where both then use the same profile. Above cutoff the Gaussian is
-        not merely out of its fit range, it mis-states the SATURATION integral by up to 13%
-        (dossier sec.1.5) -- which is the whole reason this switch exists."""
-        a, na = self.fiber.core_radius_m, self.fiber.na
-        V = 2.0 * np.pi * a * na / float(lam)
-        if V > V_LP11_CUTOFF:
-            md = solve_lp_modes(a, na, float(lam))[0]
-            psi = mode_field(md, r)
-            return psi * psi
-        w = float(mode_field_radius_m(a, na, float(lam)))
-        return np.exp(-2.0 * r * r / (w * w))
+        """|psi(r)|^2 of the FUNDAMENTAL guided mode at lam, unnormalized -- the shared kernel
+        `fundamental_psi2` bound to this amplifier's fiber."""
+        return fundamental_psi2(self.fiber, lam, r)
 
     def _profile_flat(self, lam: float, r: np.ndarray, r_max: float) -> np.ndarray:
-        """The synthetic MEAN-FIELD profile: Gamma_k/A_dope inside the dopant, the residual
-        (1 - Gamma_k) spread uniformly outside it (where nt = 0, so it only carries the
-        normalization). Reproduces the mean-field intensity <I_k> = Gamma_k P_k/A_dope and the
-        mean-field overlap Gamma_k simultaneously, hence reproduces steady_state EXACTLY."""
-        b = self.fiber.b_dope_m
-        gam = float(overlap_gamma(self.fiber, np.asarray([lam], float))[0])
-        a_dope = np.pi * b * b
-        a_out = np.pi * (r_max * r_max - b * b)
-        inside = r <= b
-        out = np.where(inside, gam / a_dope, 0.0)
-        if a_out > 0.0:
-            out = out + np.where(inside, 0.0, (1.0 - gam) / a_out)
-        return out
+        """The synthetic MEAN-FIELD profile -- the shared kernel `flat_intensity_profile` bound
+        to this amplifier's fiber."""
+        return flat_intensity_profile(self.fiber, lam, r, r_max)
 
     def _build_profiles(self, lam, cladding, grid: RadialGrid):
-        """(K, N) NORMALIZED transverse intensity profiles i_k, one row per channel, satisfying
-        (F1.0) INT i_k dA = 1 on the grid EXACTLY (each row is divided by its own quadrature
-        integral, so the truncation at r_max is absorbed rather than left as a silent leak; with
-        r_max at 6a / 5w the discarded Gaussian tail is ~1e-26 of the power)."""
-        r = grid.r_m
-        K = lam.size
+        """(K, N) NORMALIZED transverse intensity profiles -- the shared kernel
+        `build_normalized_profiles`, told which channels carry an explicit mode spec."""
         n_p, n_s = len(self.pumps), len(self.signals)
-        prof = np.empty((K, grid.size))
-        for k in range(K):
-            if k < n_p and cladding[k]:
-                # dossier (F2.8) convention: a multimode cladding pump is FLAT over the inner
-                # cladding. INT_dope i_p dA = A_dope/A_clad = waveguide.cladding_pump_overlap by
-                # quadrature -- the pump overlap becomes an OUTPUT here, not an input.
-                rc = float(self.fiber.clad_radius_m)
-                raw = np.where(r <= rc, 1.0 / (np.pi * rc * rc), 0.0)
-            elif n_p <= k < n_p + n_s and self.signal_modes[k - n_p] is not None:
-                spec = self.signal_modes[k - n_p]
-                if isinstance(spec, str):
-                    raw = self._profile_flat(float(lam[k]), r, grid.r_max_m)
-                else:
-                    psi = mode_field(spec, r)
-                    raw = psi * psi
-                    if spec.l >= 1:                       # LP_lm, l>=1: cos^2(l phi) azimuthal
-                        raw = raw * np.cos(spec.l * grid.phi_rad) ** 2
-            else:
-                raw = self._fundamental_psi2(float(lam[k]), r)
-            norm = float(np.dot(grid.dA_m2, raw))
-            if not (norm > 0.0):
-                raise ValueError("ResolvedFiberAmplifier: channel {} profile integrates to {} -- "
-                                 "the quadrature grid does not reach the mode".format(k, norm))
-            prof[k] = raw / norm
-        return prof
+
+        def mode_of(k):
+            return self.signal_modes[k - n_p] if n_p <= k < n_p + n_s else None
+
+        return build_normalized_profiles(self.fiber, grid, lam, cladding, mode_of,
+                                         where="ResolvedFiberAmplifier")
 
     def _check_modes(self):
-        """Validate the user-supplied LPModes against the fiber and their own signal."""
-        seen_lm = {}
-        for i, spec in enumerate(self.signal_modes):
-            if spec is None:
-                continue
-            if isinstance(spec, str):
-                if spec != FLAT:
-                    raise ValueError("ResolvedFiberAmplifier: signal_modes[{}] = {!r}; the only "
-                                     "string spelling is {!r}".format(i, spec, FLAT))
-                continue
-            if not isinstance(spec, LPMode):
-                raise ValueError("ResolvedFiberAmplifier: signal_modes[{}] must be None, an "
-                                 "LPMode, or {!r} (got {!r})".format(i, FLAT, type(spec)))
-            a = self.fiber.core_radius_m
-            if abs(spec.core_radius_m - a) > 1e-9 * a:
-                raise ValueError("ResolvedFiberAmplifier: signal_modes[{}] was solved for core "
-                                 "radius {:.6e} m but the fiber has {:.6e} m".format(
-                                     i, spec.core_radius_m, a))
-            lam_s = self.signals[i].lambda_m
-            if abs(spec.lambda_m - lam_s) > 1e-6 * lam_s:
-                raise ValueError("ResolvedFiberAmplifier: signal_modes[{}] was solved at "
-                                 "{:.6e} m but its Signal is at {:.6e} m".format(
-                                     i, spec.lambda_m, lam_s))
-            # V ties the mode to the fiber's NA, which nothing else here does: a and lambda_m
-            # already match by the two checks above, so V = 2 pi a NA / lambda disagreeing can
-            # ONLY be an NA mismatch. Left unchecked, an LP01 solved on NA = 0.20 and used on an
-            # NA = 0.12 fiber is a tighter, more confined field than that fiber supports and ships
-            # +1.00 dB of gain silently (measured, a = 3 um, 0.5 m, 5 W cladding pump).
-            V_fiber = 2.0 * np.pi * a * self.fiber.na / spec.lambda_m
-            if abs(spec.V - V_fiber) > 1e-9 * V_fiber:
-                raise ValueError(
-                    "ResolvedFiberAmplifier: signal_modes[{}] has V = {:.9f} but the fiber gives "
-                    "V = 2 pi a NA / lambda = {:.9f} at that wavelength -- the mode was solved "
-                    "for a different NA ({:.6f} implied, fiber has {:.6f}) and its field is not "
-                    "a mode of this fiber".format(i, spec.V, V_fiber,
-                                                  spec.V * spec.lambda_m / (2.0 * np.pi * a),
-                                                  self.fiber.na))
-            if spec.l >= 1 and (spec.l, spec.m) in seen_lm:
-                raise ValueError(
-                    "ResolvedFiberAmplifier: signal_modes[{}] and signal_modes[{}] are both "
-                    "LP{}{} -- the degenerate cos/sin PAIR cannot be spelled in v1. LPMode "
-                    "carries no orientation field and _build_profiles hardcodes cos(l phi)^2, so "
-                    "passing the same mode twice would model cos + cos, which piles both signals "
-                    "into the SAME azimuthal lobes: measured -16.5% modal gain versus the correct "
-                    "cos + sin pair at 200 W each on the Smith & Smith LMA fixture. (The "
-                    "quarter-plane grid would integrate sin^2 exactly -- 6.7e-16 relative for "
-                    "l = 1, 2, 3 -- so this is a missing spelling, not a quadrature "
-                    "limitation.)".format(seen_lm[(spec.l, spec.m)], i, spec.l, spec.m))
-            seen_lm[(spec.l, spec.m)] = i
+        """Validate the user-supplied LPModes against the fiber and their own signal -- the
+        shared kernel `check_signal_modes`."""
+        check_signal_modes(self.fiber, self.signals, self.signal_modes,
+                           where="ResolvedFiberAmplifier")
 
     def _plan(self):
         """Build (and cache) everything a solve needs: the channel table, the ChannelSet
@@ -649,14 +764,7 @@ class ResolvedFiberAmplifier:
                 "inner-cladding radius (the default already does).".format(
                     r_max, float(self.fiber.clad_radius_m),
                     (float(self.fiber.clad_radius_m) / r_max) ** 2))
-        breaks = {0.0, min(a, b), max(a, b), r_max}
-        if any(cladding):
-            breaks.add(float(self.fiber.clad_radius_m))
-        x = max(a, b)                             # radius-doubling refinement of the tail region
-        while x * 2.0 < r_max:
-            x *= 2.0
-            breaks.add(x)
-        breaks = [p for p in breaks if p <= r_max]
+        breaks = quadrature_breakpoints(self.fiber, r_max, cladding_present=any(cladding))
         n_phi = self.n_azimuthal if any(
             isinstance(s, LPMode) and s.l >= 1 for s in self.signal_modes) else 1
         grid = RadialGrid.build(breaks, n_nodes_per_panel=self.n_quad, n_azimuthal=n_phi)
@@ -687,26 +795,9 @@ class ResolvedFiberAmplifier:
         return self._cache
 
     def _default_r_max(self, lam, cladding) -> float:
-        """Outer quadrature radius: at least 6a (the lma._overlap_grid reach), plus each guided
-        channel's own tail -- a(1 + 12/W) for an exact LP mode, 5w for a Gaussian (exp(-50) of
-        the peak) -- and the inner cladding when a cladding pump has to be normalized."""
-        a, na = self.fiber.core_radius_m, self.fiber.na
-        r_max = max(6.0 * a, 1.2 * self.fiber.b_dope_m)
-        for k, lm in enumerate(lam):
-            if k < len(cladding) and k < len(self.pumps) and cladding[k]:
-                continue
-            V = 2.0 * np.pi * a * na / float(lm)
-            if V > V_LP11_CUTOFF:
-                md = solve_lp_modes(a, na, float(lm))[0]
-                r_max = max(r_max, a * (1.0 + 12.0 / max(md.W, 0.25)))
-            else:
-                r_max = max(r_max, 5.0 * float(mode_field_radius_m(a, na, float(lm))))
-        for spec in self.signal_modes:
-            if isinstance(spec, LPMode):
-                r_max = max(r_max, a * (1.0 + 12.0 / max(spec.W, 0.25)))
-        if any(cladding):
-            r_max = max(r_max, float(self.fiber.clad_radius_m))
-        return float(r_max)
+        """Outer quadrature radius -- the shared kernel `default_r_max_m` bound to this
+        amplifier's fiber and its explicitly-supplied signal modes."""
+        return default_r_max_m(self.fiber, lam, cladding, self.signal_modes)
 
     # ---- pointwise physics ----------------------------------------------------------------
     def _nbar2_nodes(self, c, P):
