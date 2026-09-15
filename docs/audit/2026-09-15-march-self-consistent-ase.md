@@ -293,8 +293,8 @@ the order of magnitude is on the record.
 
 ### (6) Composition with the other 2026-09-15 additions
 
-Merged on top of v0.11.4, so two independent options now exist alongside this one. The step
-composes with one of them and refuses the other by name:
+Merged on top of v0.11.5, so three independent options now exist alongside this one. The step
+composes with two of them, refuses the third by name, and never meets the fourth:
 
 * **Explicit Er 4I11/2 (`tau32_s`, v0.11.4) -- COMPOSES.** The inner iteration calls the march's
   own `advance()` closure, which builds the exact Jacobian for whatever reservoir tuple the
@@ -330,6 +330,10 @@ composes with one of them and refuses the other by name:
   balances do not carry, and is orthogonal to how the powers are solved. Both thermal objects
   WITHOUT a profile are pure constants and every mode reproduces the unprofiled amplifier
   bit-for-bit. Gate: the last test in `tests/test_march_self_consistent_ase.py`.
+
+* **Radially-resolved co-dope (`ResolvedErYbAmplifier`, v0.11.5) -- NO INTERSECTION.** That class
+  is a steady-state ring solver with no transient entry point; `simulate_transient` cannot be
+  called on it, so there is nothing to compose and nothing to refuse.
 
 ---
 
