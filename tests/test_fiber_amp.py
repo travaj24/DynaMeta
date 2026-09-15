@@ -1132,8 +1132,9 @@ def test_package_facade_is_exhaustive():
     # to catch. Equality against the live submodule count leaves no slack.
     assert checked == submodules
     # pin the count itself (20 -> 22 with the audit-2026-08-04 link layers: +efficiency,
-    # +comms; 22 -> 23 with the 2026-09-15 Er:Yb pool/device calibration: +eryb_fit)
-    assert len(submodules) == 23, submodules
+    # +comms; 22 -> 23 with the 2026-09-15 Er:Yb pool/device calibration: +eryb_fit;
+    # 23 -> 24 with the 2026-09-15 co-doped ring solver: +transverse_eryb)
+    assert len(submodules) == 24, submodules
     for name in pkg.__all__:                                  # ... and every export resolves
         assert getattr(pkg, name, None) is not None, name
 

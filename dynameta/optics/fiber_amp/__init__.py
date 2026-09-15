@@ -88,6 +88,15 @@ physics, and neither is reachable from the solvers -- nothing below them imports
            EVALUATED per level rather than scaled, because two of the four terms are
            level-independent (audit F-6).
 
+Radially-resolved (pre-reduction) solvers -- the mean-field closure of sec.1 undone:
+  Phase 23 transverse             : nbar2(r, phi, z) for a SINGLE ion -- transverse spatial hole
+           burning, exact LP mode profiles above cutoff, composite-GL quadrature, multi-mode
+           competition. Refuses co-doping (spec sec.12).
+  Phase 24 transverse_eryb        : the CO-DOPED ring solver -- both ions' populations per radial
+           ring, so the Yb -> Er transfer is the LOCAL product k_tr n_Yb2(r) n_Er1(r) rather
+           than a product of area averages, with separate Er and Yb radial dopant profiles and a
+           ring-summed energy closure (spec sec.18).
+
 FACADE CONTRACT (audit X-10). This is an EAGER, EXHAUSTIVE facade -- unlike dynameta.optics and
 dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are by design. Every name
 in a submodule's __all__ MUST be re-exported here; drift is a bug, not a design choice (it left
@@ -178,9 +187,15 @@ from dynameta.optics.fiber_amp.lma import (LPMode, ModeOverlap, solve_lp_modes, 
                                            effective_cladding_overlap,
                                            mode_resolved_gain_overlaps)
 from dynameta.optics.fiber_amp.transverse import (RadialGrid, ResolvedFiberAmplifier,
-                                                  ResolvedResult, mean_field_equivalent,
+                                                  ResolvedResult, build_normalized_profiles,
+                                                  check_signal_modes, cladding_intensity_profile,
+                                                  default_r_max_m, flat_intensity_profile,
+                                                  fundamental_psi2, mean_field_equivalent,
+                                                  quadrature_breakpoints,
                                                   saturation_correction_kappa,
                                                   tshb_closed_form_J, tshb_mean_field_J)
+from dynameta.optics.fiber_amp.transverse_eryb import (RadialDopant, ResolvedErYbAmplifier,
+                                                       eryb_mean_field_equivalent)
 from dynameta.optics.fiber_amp.gain_bpm import (BPMResult, GainBPM, ThermalLoop,
                                                 quadratic_duct_period_m, quadratic_duct_radius_m)
 from dynameta.optics.fiber_amp.polarization import (TwoPolSaturation, f_from_pdg_slope,
@@ -248,6 +263,10 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "second_moment_radius_m", "total_mode_count",
            "RadialGrid", "ResolvedFiberAmplifier", "ResolvedResult", "mean_field_equivalent",
            "saturation_correction_kappa", "tshb_closed_form_J", "tshb_mean_field_J",
+           "build_normalized_profiles", "check_signal_modes", "cladding_intensity_profile",
+           "default_r_max_m", "flat_intensity_profile", "fundamental_psi2",
+           "quadrature_breakpoints",
+           "RadialDopant", "ResolvedErYbAmplifier", "eryb_mean_field_equivalent",
            "GainBPM", "BPMResult", "ThermalLoop", "quadratic_duct_radius_m",
            "quadratic_duct_period_m",
            "TwoPolSaturation", "f_from_pdg_slope", "pdg_cascade_db", "pdg_db",
