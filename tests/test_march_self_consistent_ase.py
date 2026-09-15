@@ -555,3 +555,86 @@ def test_every_mode_composes_with_the_temperature_dependent_rate_opt_ins():
         msg = str(exc)
     assert "rate_temperature" in msg and "yb_stark_thermal" in msg
     assert "self_consistent" in msg                      # it says the new modes do not help
+
+
+# ============== (6) composition with the EXPLICIT Er 4I11/2 level (v0.11.4) ==================
+
+_TAU32_SEFLER = 7.0e-6              # the measured 4I11/2 lifetime the 4I11/2 branch ships with
+
+
+def _eryb_n3():
+    """The same reference co-doped design as `_eryb()`, with the EXPLICIT Er 4I11/2 level
+    switched on. That makes the march's state the FOUR-vector (f2, f3, b2c, b2nc) -- the third
+    erbium level and two ytterbium pools -- which is the largest state the exponential Rosenbrock
+    step is asked to carry and the stiffest: 1/tau_32 is ~1.4e5 1/s against 1/tau_Er ~ 1e2."""
+    return ErYbAmplifier(ER_AL, YB_PH,
+                         FiberSpec(2.0e-6, 0.20, 4.0e25, 8.0, clad_radius_m=62.5e-6),
+                         [Pump(0.176, 0.976e-6, "fwd", cladding=True)],
+                         [Signal(2.1e-3, 1.550e-6)], AseBand(1.520e-6, 1.570e-6, 24),
+                         n_yb_m3=4.0e26, k_tr_m3_s=1.11e-21, yb_coupled_fraction=0.9,
+                         k_tr2_m3_s=2.0e-22, yb_ase=AseBand(1.000e-6, 1.100e-6, 12),
+                         tau32_s=_TAU32_SEFLER)
+
+
+def test_every_mode_composes_with_the_explicit_4i11_2_level():
+    """The self-consistent step is state-size AGNOSTIC by construction -- it calls the march's own
+    `advance()` closure, which builds the exact Jacobian for whatever reservoir tuple the
+    amplifier carries and integrates it through the size-parametrized `_phi1_dt_nxn` kernel. With
+    `tau32_s` set that tuple is the FOUR-vector (f2, f3, b2c, b2nc). This gate says so in numbers
+    rather than by appeal to the structure:
+
+      * the DEFAULT mode on a 4-state amplifier is still the default call, BIT FOR BIT -- the
+        claim that adding the new modes did not perturb the 4I11/2 branch either;
+      * `self_consistent` and `auto` both run that 4-state march, stay finite, keep the
+        population constraint f2 + f3 <= 1, and CLOSE each step to the same 1e-5 the 2- and
+        3-state cases meet, which is the claim that the inner solve did not quietly degrade as
+        the state grew (the 4I11/2 row is the stiffest in the system, so an inner iteration that
+        stopped converging would show here first);
+      * the 4I11/2 history and the state size are reported in every mode.
+
+    PREMISE: the fourth reservoir is asserted to be in play before anything is concluded from it
+    -- a dropped `tau32_s` would otherwise make the whole test vacuous."""
+    amp = _eryb_n3()
+    t = np.arange(0.0, 6e-3 + 1e-12, 300e-6)
+
+    # (a) the default is untouched on this state size too -- the EXACT claim
+    a, _ = _march(amp, t, n_nodes=161, nbar2_0=0.0)
+    b, _ = _march(amp, t, n_nodes=161, nbar2_0=0.0, ase_mode="quasi_static")
+    for name in ("nbar2_zt", "signal_gain_dB", "ase_fwd_W", "ase_bwd_W"):
+        assert np.array_equal(getattr(a, name), getattr(b, name)), name
+    for key in ("beta_yb", "er_4i11_2"):
+        assert np.array_equal(a.meta[key], b.meta[key]), key
+    assert a.meta["tau32_s"] == _TAU32_SEFLER
+    assert a.meta["er_4i11_2"] is not None
+    assert a.meta["integrator"] == "exponential-rosenbrock-4x4"
+    assert float(np.max(a.meta["er_4i11_2"])) > 0.0          # the level is actually populated
+    assert a.meta["ase_mode"] == "quasi_static" and a.meta["n_self_consistent_steps"] == 0
+
+    # (b) both new modes carry the 4-state march, stay finite, and keep the population
+    #     constraint f2 + f3 <= 1 that the 4I11/2 clip enforces INSIDE the inner iteration
+    out = {}
+    for mode in ("self_consistent", "auto"):
+        r, w = _march(amp, t, n_nodes=161, nbar2_0=0.0, ase_mode=mode, ase_step_residual=True)
+        assert not w, (mode, [str(x.message)[:120] for x in w])
+        assert r.meta["ase_mode"] == mode and r.meta["march_valid"] is True, mode
+        assert r.meta["integrator"] == "exponential-rosenbrock-4x4", mode
+        assert np.all(np.isfinite(r.signal_gain_dB)) and np.all(np.isfinite(r.nbar2_zt)), mode
+        f3 = r.meta["er_4i11_2"]
+        assert f3 is not None and np.all(np.isfinite(f3)), mode
+        assert np.all(f3 >= 0.0) and np.all(r.nbar2_zt + f3 <= 1.0 + 1e-12), mode
+        out[mode] = r
+
+    # the FULLY self-consistent 4-state march closes every step at its inner tolerance -- the
+    # same claim the 2- and 3-state fixtures make, which is what says the inner iteration did not
+    # degrade as the state grew and stiffened (measured 1.0e-6 against the 1e-6 request)
+    assert out["self_consistent"].meta["max_step_power_residual"] < 1e-5,         out["self_consistent"].meta["max_step_power_residual"]
+
+    # "auto" spends the self-consistent step only where its monitor asks for it (11 of the 20
+    # steps here), so it makes the WEAKER per-step claim and the SAME end-state claim: it
+    # reproduces the fully self-consistent march, and both land on solve().
+    n_sc = out["auto"].meta["n_self_consistent_steps"]
+    assert 0 < n_sc < t.size - 1, n_sc
+    ref = out["self_consistent"].signal_gain_dB[-1, 0]
+    assert abs(out["auto"].signal_gain_dB[-1, 0] - ref) < 1e-3, (out["auto"].signal_gain_dB[-1, 0],
+                                                                 ref)
+    assert abs(ref - float(amp.solve(n_nodes=161).signal_gain_dB[0])) < 5e-3, ref
