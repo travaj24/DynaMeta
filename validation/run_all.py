@@ -261,6 +261,15 @@ SMOKE_EXCLUDED = {
     # Both reasons are independent and either alone keeps it out of the tier.
     "eryb_two_population_anchors": "a reporting script, not a gate: needs an external anchor "
                                    "folder absent from CI, and ~1500 s at its default node count",
+    # Also a reporting script. It needs NO external data (every Morasse 2006 parameter is in the
+    # file), but it spends ~40 relaxation solves plus four bracketed emission-scale fits at 201
+    # nodes on a 2.75 m deeply-absorbed fiber -- TENS OF MINUTES, one to two orders over the
+    # per-script smoke bar -- and it ASSERTS nothing, so a red run would mean nothing either.
+    # Either reason alone keeps it out of the tier. The gated half of the same work is
+    # tests/test_fiber_eryb_4i11_2.py.
+    "eryb_morasse_yb_sigma_scale": "a reporting script, not a gate: tens of minutes at its "
+                                   "default node count and it asserts nothing (the gates are in "
+                                   "tests/test_fiber_eryb_4i11_2.py)",
     # The 2026-09-15 migration / thermal / fit report. Unlike its predecessor it is SELF-CONTAINED
     # (every anchor is transcribed into the file), so the CI-folder reason does not apply -- but
     # it is still a REPORT rather than a gate, and its section 3 runs an optimiser whose every

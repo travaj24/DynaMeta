@@ -1,10 +1,11 @@
 # Radially resolved Er:Yb co-doped amplifier -- build + audit note (2026-09-15)
 
 Branch `feat/eryb-transverse`, worktree `DynaMeta-eryb4`, branched from `main` at 21dff60
-(v0.11.2) and MERGED with `main` at 1bef664 (v0.11.3, PR #29: W_mig calibration, the co-doped
-temperature laws and `eryb_fit`). Version 0.11.5 (0.11.4 is reserved for PR #30).
+(v0.11.2) and MERGED with `main` twice: 1bef664 (v0.11.3, PR #29: W_mig calibration, the
+co-doped temperature laws and `eryb_fit`) and 3e06b10 (v0.11.4, PR #30: the explicit Er 4I11/2
+level and the Yb emission-cross-section scale). Version 0.11.5.
 New module `dynameta/optics/fiber_amp/transverse_eryb.py` (`ResolvedErYbAmplifier`); new gate file
-`tests/test_fiber_transverse_eryb.py` (24 gates); model spec section 17 + 17a (16 is PR #29's).
+`tests/test_fiber_transverse_eryb.py` (29 gates); model spec section 18 + 18a (16 is PR #29's, 17 is PR #30's).
 `transverse.py` was touched only to EXTRACT its geometry kernel into module-level functions that
 both resolved solvers now call (byte-identity re-verified, section 2); `eryb.py` was not touched
 at all.
@@ -163,7 +164,7 @@ that could drop a keyword.
 
 ## 3. The gates
 
-`tests/test_fiber_transverse_eryb.py`, 24 gates (19 test functions, 4 parametrized), 20 s.
+`tests/test_fiber_transverse_eryb.py`, 29 gates (22 test functions, 5 parametrized), 39 s.
 
 | # | Gate | Bar | Measured |
 |---|------|-----|----------|
@@ -246,6 +247,14 @@ big" without the shape does not tell a caller which axis to coarsen. The study's
   `ErYbAmplifier` fails with a physics message instead of a `TypeError`, and an all-zero
   `RateTemperatureLaw` (the exact identity, which `eryb.py` itself collapses to `None`) is
   accepted and gated.
+* `tau32_s`, the EXPLICIT Er 4I11/2 level of PR #30 (v0.11.4), and with it
+  `upconversion_via_4i11_2` (which `eryb.py` already refuses without the level). The node kernel
+  solves `eryb.py`'s ADIABATIC reduction, whose entire numerical argument is that the co-doped
+  system collapses to ONE bracketed scalar equation per ring with `H(0) >= 0` and `H(1) < 0`. A
+  third erbium unknown needs that bracketing argument re-derived before it can be stepped in
+  lockstep across rings, and answering the reduced model under the explicit model's name would be
+  silent. `tau32_s=None` -- the default, the adiabatic fast-4I11/2 limit -- IS what this class
+  resolves.
 * Nonzero `sigma_esa`. `eryb.py` drops the ESA term silently; this class refuses rather than
   inherit that. (Neither `erbium()` host nor either ytterbium factory carries ESA by default, so
   no shipped configuration is affected.)
@@ -253,6 +262,29 @@ big" without the shape does not tell a caller which axis to coarsen. The study's
 `C_up` and pair-induced quenching are SUPPORTED, not refused: both are strictly local (a quadratic
 in the node's own `f2`; an unbleachable absorption at the node's own dark density) and both reduce
 to `eryb.py` exactly under uniform illumination -- gated.
+
+### 4.1 `yb_sigma_e_scale` is HONOURED end to end, and the gate that proves it caught a real bug
+
+PR #30's other option is one scalar on the Yb emission cross-section, fitted to a measured 1-um
+ASE. It costs this module NO code: `ErYbAmplifier._plan()` applies it once to `se_yb`, and
+`ResolvedErYbAmplifier` READS that plan rather than restating it, so the scale reaches every ring
+integral, every per-node stimulated-emission rate, the ASE spontaneous source, `eta_tr`'s
+`R_e_Yb` and the energy terms automatically. That is the payoff of composing with the twin.
+
+It was NOT free everywhere, and asserting composition without re-running the reduction would have
+shipped the gap. There is exactly one place this class reads the Yb spectrum OUTSIDE the plan --
+the 1030 nm parasitic-gain diagnostic, since 1030 nm is not a channel unless the caller happens to
+have put an ASE bin there -- and that read was unscaled. MEASURED at Morasse's 0.40: the unscaled
+read gave **7.373 dB** against the scalar class's **0.173 dB**, a 7.2 dB error in the one
+diagnostic a 1-um parasitic-lasing margin is read from. The uniform-illumination gate re-run with
+the option ON is what found it (`eryb.py` carries the same one-line correction in its own copy of
+the diagnostic, for the same reason). Gated now at three settings -- 1.0, 0.40 and 1.85 -- with a
+non-vacuity check that the diagnostic actually MOVES with the scale, plus a resolved-illumination
+gate (no scalar twin to lean on) that scaling the Yb emission down lowers the 1-um gain and raises
+the Yb inversion, and a re-seed check that a fitted scale survives a `metrics.*` sweep.
+
+`er_4i11_2_zero_line_m` rides along and is inert unless `tau32_s` is set (it only splits level-2
+from level-3 channels); gated bit-identical at a moved zero line.
 
 ---
 
