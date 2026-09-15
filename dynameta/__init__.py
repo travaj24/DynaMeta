@@ -65,7 +65,7 @@ fitting, Kramers-Kronig consistency checks).
 (Module map refreshed per audit 6.3; v0.8/v0.9 gap closed per audit R-9.)
 """
 
-__version__ = "0.11.5"
+__version__ = "0.11.6"
 
 # Geometry + materials data model (lightweight)
 # Windows: expose the pip 'tbb' wheel's runtime DLLs (<prefix>/Library/bin) so numba's
