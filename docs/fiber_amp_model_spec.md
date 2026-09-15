@@ -1035,3 +1035,114 @@ the correlation, the condition number, the least-constrained eigendirection, and
 that matter: `sigma_ln_f_k` (the uncertainty on the well-determined product) against
 `sigma_ln_ratio` (the uncertainty along the degenerate direction). A "no obvious 1-um ASE"
 statement is scored as a one-sided UPPER BOUND, costing nothing below it.
+
+## 17. Er:Yb explicit 4I11/2 level and the Yb emission cross-section scale
+
+Added 2026-09-15; derivations, gate numbers and the Morasse fit in
+`docs/audit/2026-09-15-eryb-4i11-2-and-yb-sigma-scale.md`. Both mechanisms are opt-in and with
+both at their defaults (`tau32_s=None`, `yb_sigma_e_scale=1.0`) `ErYbAmplifier` reproduces
+v0.11.2 bit for bit (and v0.11.3, whose two temperature options are equally orthogonal to
+these) -- asserted in one process (`tests/test_fiber_eryb_4i11_2.py`, gate 1), and the two
+2026-09-15 builds are gated ORTHOGONAL on a hot fiber in that file's last test.
+
+**Explicit 4I11/2 (`tau32_s`, default None = the adiabatic fast limit of sec. 14).** The measured
+`4I11/2` lifetimes are 7 us (Sefler 2004), 10 us (de Varona 2019 Table 5.1) and 0.1-10 us (Canat
+2006); Dong et al., Opt. Express 28(11), 16244 (2020) Table 1 carry `tau_32 = 1 ns` as an admitted
+modelling convention chosen to make back-transfer negligible. Setting `tau32_s` carries `n3` as a
+third erbium level, `N_Er = n1 + n2 + n3`:
+
+```
+Er2:  W12 f1 - W21 f2 - f2/tau_Er + f3/tau_32 - c_up C_up N_Er f2^2                      = 0
+Er3:  W13 f1 - W31 f3 - f3/tau_32 + k_tr b2c (f N_Yb) f1 - k_back f3 (f N_Yb)(1 - b2c)
+      + r_up C_up N_Er f2^2                                                              = 0
+Ybc:  R_a_Yb (1-b2c) - R_e_Yb b2c - b2c/tau_Yb - k_tr b2c N_Er f1 - K2 b2c N_Er f2
+      + k_back N_Er f3 (1 - b2c) - W (1-f)(b2c - b2nc)                                   = 0
+Ybnc: unchanged,                        f1 = 1 - f2 - f3
+```
+
+`W12/W21` and `W13/W31` are the SAME per-ion rate sums sec. 14 calls `R_a_Er` / `R_e_Er`, split
+over the channels by which erbium level the photon terminates on: a channel is LEVEL-3 when
+`h nu_k` is closer to the `4I11/2` zero line (`er_4i11_2_zero_line_m`, default 977 nm) than to the
+`4I13/2` one, i.e. below 1192 nm for the shipped ions -- an energy criterion, not a hand-assigned
+band edge; `W12` is the DIFFERENCE `R_a_Er - W13` (and `W21 = R_e_Er - W31`), so the
+totals round-trip to one float subtraction. The PROPAGATION then absorbs from `n1` alone
+(`1 - f2 - f3`), emits from `n3` at a level-3 channel and from `n2` at a level-2 one, and gives
+`n3` no C-band gain, no ESA and no mid-infrared transition. The `k_back` BACK-TRANSFER becomes
+explicit (`k_back n3 n5c`, returning excitation to the coupled Yb pool) and REPLACES the `phi`
+branching factor, which is forced to exactly 1.0 on this path; the adiabatic path keeps `phi`.
+`upconversion_via_4i11_2=True` routes upconversion as Dong Eq. (2) does (`(c_up, r_up) = (2, 1)`
+instead of `(1, 0)`); the two are the same model in the adiabatic limit, so the flag is refused
+unless `tau32_s` is set.
+
+**The reduction stays one bracketed scalar, through a quadratic.** At fixed `(f2, f3)` the two Yb
+balances are still linear in `(b2c, b2nc)` -- the back-transfer source `k_back N_Er f3 (1 - b2c)`
+adds a constant `kb_yb f3` to the coupled right-hand side and a drain `kb_yb f3` to its diagonal
+-- so sec. 15's closed form survives with `Dc = P0 + P1 f3` and `Sc = R_a_Yb + kb_yb f3`, both
+LINEAR in `f3`. Multiplying the `4I11/2` balance by the (strictly positive) determinant therefore
+gives a QUADRATIC in `f3` whose one root in `[0, 1 - f2]` is the closed form
+`f3(f2)`, taken with the cancellation-free `q = -(a1 + sign(a1) sqrt(disc))/2` pair so the stiff
+limit `tau_32 -> 0` loses no digits. Substituting leaves the same `H(f2)` on `[0, 1]` with
+`H(0) >= 0`, `H(1) < 0`, solved by the same safeguarded Newton/bisection, with `df3/df2` from
+implicit differentiation. There is no inner iteration: only `f2` is solved numerically.
+
+**Energy closure.** The erbium stores a third quantum `eps_3 = h c / er_4i11_2_zero_line_m` and
+each optical event is charged at the level it terminates on:
+
+```
+U      = A (eps_Er N_Er f2 + eps_3 N_Er f3 + eps_Yb N_Yb bbar)
+D_tr   = (eps_Yb - eps_3) Phi_tr,        Phi_tr = A k_tr N_Er f1 (f N_Yb) b2c
+D_32   = (eps_3 - eps_Er) Phi_32 - P_sp_lvl3,     Phi_32 = A N_Er f3 / tau_32
+D_bk   = (eps_3 - eps_Yb) Phi_bk,        Phi_bk = A k_back N_Er f3 (f N_Yb)(1 - b2c)
+q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr + D_K2 + D_32 + D_bk
+```
+
+`D_tr + D_32` is sec. 14's transfer defect redistributed, so the TOTAL does not move in the
+adiabatic limit and only the naming does (MEASURED: total dissipation invariant to 3.6e-10
+relative, and the reallocation exactly equal and opposite to `D_Er`, 2.3e-8). `D_bk` is NEGATIVE
+-- `eps_3` (977 nm) sits 3.3-5.5 meV BELOW `eps_Yb` (974.5 nm for the parametric ytterbium,
+972.75 nm for the Melkumov phosphosilicate table), so back-transfer absorbs a phonon. The
+level-3 guided spontaneous emission is credited against the relaxation, as C-band ASE is credited
+against the `4I13/2` decay; no separate `4I11/2` radiative branching ratio is carried.
+`energy_terms` REQUIRES `f3=` on this path and refuses it off it, the rule `b2_uncoupled`
+follows.
+
+**Transient.** Four reservoirs `y = (f2, f3, b2c, b2nc)` (three with one Yb pool), marched by the
+SAME exponential Rosenbrock step through the same `_phi1_dt_nxn` kernel at `n = 4`, with the
+exact Jacobian `eryb._fb_jacobian_n3`. `1/tau_32` is `1e5-1e9 1/s` against `1/tau_Er = 1e2`, so
+the `4I11/2` row is up to seven orders the stiffest and the exactness is load-bearing. No
+determinant theorem is claimed (`J[0][1] = A_32 - W12 > 0`, `J[2][0]` changes sign with `K2`); the
+gate measures `max Re(eig) = -1.5e3 1/s` over 300 operating points, with `max |Im| = 5.7e4` --
+complex pairs DO occur at four states, which is why `phi_1` is evaluated on the matrix rather than
+by eigen-decomposition. `nbar2_0` reads as `(f2, b2)`, `(f2, f3, b2)` or `(f2, f3, b2c, b2nc)` on
+this path; the history is `meta['er_4i11_2']`. MEASURED: finite and inside `f2, f3 >= 0`,
+`f2 + f3 <= 1` for `dt` 1e-8 .. 1e-3 s with zero pre-clip overshoot; a constant-drive march from
+`solve()` holds to 1.1e-3 dB and one started 88 dB away settles to 7.5e-4 dB.
+
+**Sensitivity (the numbers to design with).** On the 2026-09-13 CORE-pumped reference point,
+`tau_32 = 7 us` costs **0.018 dB** of gain and leaves `n3/N_Er` at **0.29%** -- i.e. the adiabatic
+model is right there, which is the honest reading -- while 50 us costs 0.129 dB at `n3 = 2.0%`. The
+loss that matters is BACK-TRANSFER: at `k_back = k_tr = 2e-22` (Dong's own `C36 = C63`) the
+returned fraction runs 0.071 / 0.345 / 0.596 / 0.784 at `tau_32 = 1 / 7 / 20 / 50 us` and the
+50 us penalty against `k_back = 0` is **2.0 dB**.
+
+**Yb emission scale (`yb_sigma_e_scale`, default 1.0).** ONE scalar on `sigma_e_Yb` at every
+channel -- pump line and 1-um band alike -- applied in `_plan`, so the modal gain, the
+stimulated-emission rate, the ASE prefactor, the McCumber products, the transfer-efficiency
+denominator and the 1030 nm parasitic diagnostic all scale together. `sigma_a_Yb` is NOT touched:
+what pins it is the fiber's measured pump absorption in dB/m, while the 1-um over-prediction is an
+emission statement. The price is that the scaled spectra stop satisfying McCumber -- the pump-line
+inversion clamp moves from `sigma_a/(sigma_a + sigma_e)` to `sigma_a/(sigma_a + s sigma_e)`,
+0.461 -> 0.639 on the Melkumov phosphosilicate table at `s = 0.4` -- which is why it is a
+calibration knob and not a default. `eryb_fit_yb_sigma_e_scale(amp, measured_1um_ase_W,
+direction)` fits it by a bracketed root find on `ln ASE_1um(ln s)` and reports the scale, the
+before/after 1-um power and the SIGNAL change, which is the number that says whether the
+correction is admissible. MEASURED on Morasse 2006's fully-measured CorActive cut-back (4.31 W at
+914.8 nm cladding, 7.3 mW at 1556.3 nm, 2.75 m, measured backward 1-um ASE 0.079 mW): the
+unscaled model over-predicts by **843x** (parametric ions) and **1657x** (measured
+phosphosilicate ions) -- Morasse's own model was 247x high -- and the fit returns **0.348** and
+**0.333** against his 0.40, moving the signal output by **+0.021** and **-0.063 dB**. The scale is
+a calibration against one measurement at one operating point with one `k_tr`, not a spectroscopic
+constant, and `k_tr` trades against it directly: on the same fiber and ions the fitted scale runs
+**0.348 / 0.408 / 0.448** at `k_tr = 1e-22 / 3e-22 / 1e-21`, i.e. THROUGH Morasse's 0.40 and past
+it, while the signal change stays inside 0.02 dB throughout. Quote the scale with the ion pair AND
+the transfer coefficient it was fitted with.
