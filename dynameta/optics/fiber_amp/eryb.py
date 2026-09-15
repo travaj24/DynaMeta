@@ -13,7 +13,8 @@ LEVELS. Yb: ground n_Yb1 (2F7/2), excited n_Yb2 (2F5/2), N_Yb = n_Yb1 + n_Yb2. E
 ground), n2 (4I13/2 metastable), n3 (4I11/2 pump band), N_Er = n1 + n2 + n3. fiber.n_t_m3 is
 N_Er; n_yb_m3 is N_Yb.
 
-FAST-4I11/2 LIMIT (standard for phosphosilicate; A_32 >> k_back n_Yb1). n3 is adiabatically
+FAST-4I11/2 LIMIT (the DEFAULT; standard for phosphosilicate, A_32 >> k_back n_Yb1 -- set
+`tau32_s` to carry n3 explicitly instead, see EXPLICIT Er 4I11/2 below). n3 is adiabatically
 eliminated: A_32 n3 -> (transfer + direct Er pump) feeding n2, back-transfer -> 0, and N_Er ~
 n1 + n2. The Er block collapses to the two-level EDFA algebra with an EXTRA optical-pump-like
 term = the Yb->Er transfer, and the direct Er absorption (which in the two-level treatment also
@@ -160,6 +161,71 @@ Yb fluorescence decays and quenched Yb lifetimes; `eryb_fit_to_device` fits (f, 
 a device's measured output power and 1-um ASE fraction with W_mig held. The recommended
 phosphosilicate migration rate is `eryb_fit.W_MIG_PHOSPHOSILICATE_PER_S`.
 
+EXPLICIT Er 4I11/2 (opt-in, `tau32_s`; DEFAULT None = the adiabatic fast limit above, bit for
+bit). Setting tau32_s carries the 4I11/2 population n3 as a THIRD erbium level instead of
+eliminating it, which is what the measured 4I11/2 lifetimes ask for: 7 us (Sefler, Mack, Valley,
+Rose, JOSA B 21(10), 1740 (2004)), "a few us" and 0.1-10 us (Canat, PhD thesis SUPAERO (2006)),
+10 us (de Varona Ortega, Hannover thesis (2019) Table 5.1), against the 1 ns MODELLING CONVENTION
+Dong et al., Opt. Express 28(11), 16244 (2020) Table 1 adopt precisely to make back-transfer
+negligible. With f3 = n3/N_Er and N_Er = n1 + n2 + n3 the z-local balances become (per ion, 1/s)
+
+    Er2: W12 f1 - W21 f2 - f2/tau_Er + f3/tau32 - c_up C_up N_Er f2^2                      = 0
+    Er3: W13 f1 - W31 f3 - f3/tau32 + k_tr b2c (f N_Yb) f1 - k_back f3 (f N_Yb)(1 - b2c)
+         + r_up C_up N_Er f2^2                                                             = 0
+    Ybc: R_a_Yb (1 - b2c) - R_e_Yb b2c - b2c/tau_Yb - k_tr b2c N_Er f1 - K2 b2c N_Er f2
+         + k_back N_Er f3 (1 - b2c) - W_mig (1 - f)(b2c - b2nc)                            = 0
+    Ybnc: unchanged,          f1 = 1 - f2 - f3.
+
+W12/W21 and W13/W31 are the SAME per-ion absorption/emission rate sums the adiabatic model calls
+R_a_Er/R_e_Er, split over the channels by which Er level the photon terminates on: a channel is a
+LEVEL-3 channel when h nu_k is closer to the 4I11/2 zero line (`er_4i11_2_zero_line_m`, default
+977 nm, the pump-band peak) than to the 4I13/2 one (RareEarthIon.eps_J), i.e. below 1192 nm for
+the shipped ions. W12 + W13 = R_a_Er and W21 + W31 = R_e_Er identically, so nothing is created or
+lost by the split, and no channel an EYDFA carries sits within 140 nm of the crossover (pumps
+900-1050 nm and a 1000-1100 nm Yb band are level-3; the 1480 nm in-band pump and the C band are
+level-2, which is the physically right assignment).
+
+Three consequences, all stated rather than buried. (i) The PROPAGATION sees Er absorption from
+n1 ALONE -- the ground fraction becomes 1 - f2 - f3, not 1 - f2 -- and no C-band gain from n3
+(the 4I11/2 -> 4I13/2 mid-infrared transition and 4I11/2 excited-state absorption are NOT
+modelled); at a level-3 channel the Er emission and the guided spontaneous source are charged to
+n3 rather than to n2, which is what makes the energy closure exact. For every Er spectrum this
+repo ships that emission is ~5e-33 m^2 at 976 nm (eight orders below sigma_a there, because
+sigma_e is McCumber-derived about the 1530 nm zero line), so W31 and the level-3 emission are
+numerically zero; the machinery is there for a tabulated ion that carries a real 980 nm emission
+band. (ii) The k_back BACK-TRANSFER is now EXPLICIT (k_back n3 n5c, returning the excitation to
+the coupled Yb pool) and the adiabatic phi refinement is switched off -- phi is exactly 1 on this
+path, because the branching it approximated is resolved. (iii) COOPERATIVE UPCONVERSION can be
+routed through 4I11/2 as Dong 2020 Eq. (2) writes it (`upconversion_via_4i11_2=True`, default
+False): -2 C_up n2^2 in the n2 balance and +C_up n2^2 in the n3 balance, i.e. (c_up, r_up) =
+(2, 1) instead of (1, 0). Both routings collapse to the SAME -C_up N_Er f2^2 in the adiabatic
+limit, which is this module's existing convention, so the default path is untouched either way.
+
+THE REDUCTION IS STILL ONE BRACKETED SCALAR, through a quadratic. At fixed f2 the two ytterbium
+balances stay linear in (b2c, b2nc) -- the back-transfer source k_back N_Er f3 (1 - b2c) is
+linear in b2c -- so the closed form of the two-population case survives with D_c and the coupled
+right-hand side picking up f3 terms, and BOTH are LINEAR IN f3. The 4I11/2 balance multiplied by
+that determinant is therefore a QUADRATIC in f3 whose coefficients are closed forms, with
+Q(0) >= 0 and Q(1 - f2) <= 0, so f3(f2) is the one root in [0, 1 - f2] by the stable quadratic
+formula -- no inner iteration. Substituting it into the 4I13/2 residual leaves the same scalar
+H(f2) on [0, 1] with H(0) >= 0 and H(1) < 0, solved by the same safeguarded Newton/bisection;
+dH/df2 carries df3/df2 from implicit differentiation of the quadratic. See `_n3_closed_form`.
+
+YTTERBIUM EMISSION SCALE (`yb_sigma_e_scale`, default 1.0 = unchanged, bit for bit). ONE scalar
+multiplying the Yb emission cross-section at EVERY channel -- the pump line and the 1-um band
+alike -- and nothing else: sigma_a_Yb is untouched. Morasse, Cliche, Babin et al. (2006) measured
+every parameter of a CorActive Er:Yb fiber and still over-predicted the backward 1-um ASE by
+1000x (19.5 mW against 0.079 mW measured) until the McCumber-DERIVED Yb emission cross-section
+was scaled by 0.4, with the signal output insensitive to the change. The scale exists so that
+correction is a stated model parameter rather than an edit to an ion. It is applied to sigma_e
+ONLY, deliberately: the quantity that pins sigma_a is the fiber's MEASURED pump absorption in
+dB/m, which is not in question, whereas the 1-um over-prediction is an emission statement. The
+price is that the scaled spectra no longer satisfy McCumber -- the inversion clamp at the pump
+line moves from sigma_a/(sigma_a + sigma_e) to sigma_a/(sigma_a + s sigma_e), which at s = 0.4 on
+the Melkumov phosphosilicate table is 0.461 -> 0.639 -- and that is the reason the scale is a
+calibration knob with a measured target behind it and not a default.
+`eryb_fit_yb_sigma_e_scale(amp, measured_1um_ase_W, direction)` fits it to a measured 1-um ASE.
+
 References: Karasek, IEEE JQE 33(10):1699 (1997) [Er:Yb rate model, k_tr]; Laroche, Girard,
 Sahu, Clarkson, Nilsson, JOSA B 23(2):195 (2006) [k_tr measured in phosphosilicate Er:Yb FIBER,
 ~6.4e-23 to 1.1e-22 m^3/s]; Hwang, Jiang, Luo, Watson, Sorbello, Peyghambarian, JOSA B 17(5):833
@@ -175,7 +241,15 @@ Two-population / secondary-transfer / migration references: Dong et al., Opt. Ex
 (2006) [K_tr,2 1-2e-22, f_np 5-15%]; Cheng et al., Materials 15(3), 996 (2022) [bi-exponential Yb
 decay -> 3.07e-21 pair / 1.2e-22 ensemble]; Le Gouet et al., JLT 37(15), 3611 (2019) [Er:Yb Al:P
 pair fraction 2k = 1.6%]. Full audit trail:
-docs/audit/2026-09-14-eryb-two-population-physics.md. Pure
+docs/audit/2026-09-14-eryb-two-population-physics.md.
+Explicit-4I11/2 and Yb-emission-scale references: Dong et al., Opt. Express 28(11), 16244 (2020)
+Eqs. (1)-(2) and Table 1 [the explicit n3 level scheme, tau_32 = 1 ns as a convention, C_up routed
+through 4I11/2, C36 = C63]; Sefler et al., JOSA B 21(10), 1740 (2004) [tau_32 = 7 us];
+de Varona Ortega, PhD thesis, Leibniz Universitaet Hannover (2019) Table 5.1 [explicit rho_3,
+tau_32 = 10 us]; Canat, PhD thesis SUPAERO (2006) [4I11/2 "a few us", 0.1-10 us]; Morasse,
+Cliche, Babin, IEEE/vendor CorActive cut-back (2006) [the 0.4x McCumber Yb sigma_e needed to
+match a measured 0.079 mW backward 1-um ASE against a 19.5 mW prediction]. Full audit trail:
+docs/audit/2026-09-15-eryb-4i11-2-and-yb-sigma-scale.md. Pure
 numpy/scipy; SI units; exp(-i omega t); ASCII-only. docs/fiber_amp_model_spec.md sec.1;
 FORMULATION DOSSIER MODULE 1.
 """
@@ -199,7 +273,8 @@ from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, 
 
 __all__ = ["ErYbAmplifier", "RateTemperatureLaw", "YbStarkThermal",
            "YB_STARK_976_CANAT_DUSSARDIER", "RATE_ARRHENIUS_CHENG_2022",
-           "RATE_ARRHENIUS_30PCT_300_480K"]
+           "RATE_ARRHENIUS_30PCT_300_480K",
+           "YbSigmaEScaleFit", "eryb_fit_yb_sigma_e_scale"]
 
 
 @dataclass(frozen=True)
@@ -425,6 +500,35 @@ class ErYbAmplifier:
         W_mig [1/s], the Yb-Yb migration exchange between the two pools (default 0). Detailed
         balance makes it a difference of EXCITATION FRACTIONS (module docstring); its only
         equilibrium is b2c = b2nc, and it conserves the total Yb excitation exactly.
+    tau32_s : float, optional
+        tau_32 [s], the Er 4I11/2 -> 4I13/2 relaxation time. DEFAULT None = the adiabatic fast
+        limit (the level is eliminated), bit-identical to every previous release. A float carries
+        n3 as an explicit third erbium level (module docstring): N_Er = n1 + n2 + n3, the
+        propagation absorbs from n1 only, the back-transfer k_back n3 n5c becomes explicit and
+        REPLACES the phi refinement, and the march gains a fourth reservoir. Measured values:
+        7 us (Sefler 2004), 10 us (de Varona 2019), 0.1-10 us (Canat 2006); 1 ns is Dong 2020's
+        modelling convention for "adiabatic". The adiabatic default is the right model for a
+        high-phosphorus host; set this when the 4I11/2 bottleneck or back-transfer is in question.
+    upconversion_via_4i11_2 : bool
+        Route cooperative upconversion through 4I11/2 as Dong 2020 Eq. (2) does -- -2 C_up n2^2
+        out of 4I13/2 and +C_up n2^2 into 4I11/2 -- instead of the single -C_up N_Er f2^2 this
+        module has always used (default False, unchanged). Both collapse to the same net loss in
+        the adiabatic limit, so it is REFUSED unless tau32_s is set, rather than silently
+        accepted as a no-op.
+    er_4i11_2_zero_line_m : float
+        The Er 4I11/2 zero line [m] (default 977e-9, the pump-band absorption peak). Used ONLY
+        when tau32_s is set: it sets the level-2/level-3 channel split (the midpoint in PHOTON
+        ENERGY between this line and the 4I13/2 one, 1192 nm for the shipped ions) and the
+        4I11/2 stored energy, hence how the total transfer heat divides between the transfer
+        defect and the 4I11/2 -> 4I13/2 relaxation. Their SUM does not depend on it.
+    yb_sigma_e_scale : float
+        ONE scalar multiplying the Yb EMISSION cross-section at every channel -- pump line and
+        1-um band alike -- with sigma_a_Yb untouched (default 1.0, bit-identical). Morasse 2006
+        needed 0.4 on a McCumber-derived Yb sigma_e to match a measured 1-um ASE 1000x below his
+        prediction, with the signal output insensitive. See the module docstring for why the
+        scale is on sigma_e only and what it costs (the spectra stop satisfying McCumber, so the
+        pump-line inversion clamp moves), and `eryb_fit_yb_sigma_e_scale` to fit it to a measured
+        1-um ASE.
     concentration : ConcentrationModel, optional
         Er pair-induced quenching (either convention), C_up, and the Yb photodarkening
         equilibrium gray loss -- the SAME object and the same semantics FiberAmplifier takes
@@ -449,11 +553,28 @@ class ErYbAmplifier:
                  a32_per_s: float = 5.0e5, yb_ase: Optional[AseBand] = None,
                  upconversion_C_up: float = 0.0, yb_coupled_fraction: float = 1.0,
                  k_tr2_m3_s: float = 0.0, yb_migration_rate_per_s: float = 0.0,
+                 tau32_s: Optional[float] = None, upconversion_via_4i11_2: bool = False,
+                 er_4i11_2_zero_line_m: float = 977.0e-9, yb_sigma_e_scale: float = 1.0,
                  concentration=None, rate_temperature=None, yb_stark_thermal=None):
         if not (n_yb_m3 > 0.0):
             raise ValueError("ErYbAmplifier: n_yb_m3 (N_Yb) must be > 0")
         if not (a32_per_s > 0.0):
             raise ValueError("ErYbAmplifier: a32_per_s must be > 0")
+        if tau32_s is not None and not (float(tau32_s) > 0.0):
+            raise ValueError("ErYbAmplifier: tau32_s must be > 0 (or None for the adiabatic "
+                             "fast-4I11/2 limit); got %r" % (tau32_s,))
+        if bool(upconversion_via_4i11_2) and tau32_s is None:
+            raise ValueError(
+                "ErYbAmplifier: upconversion_via_4i11_2=True needs an EXPLICIT 4I11/2 level "
+                "(tau32_s=...). In the adiabatic limit the two routings are the same model -- "
+                "Dong 2020's -2 C_up n2^2 out of 4I13/2 with +C_up n2^2 into 4I11/2 relaxes "
+                "straight back and leaves the net -C_up N_Er f2^2 this module already uses -- so "
+                "accepting the flag here would advertise a change that is not there.")
+        if not (float(er_4i11_2_zero_line_m) > 0.0):
+            raise ValueError("ErYbAmplifier: er_4i11_2_zero_line_m must be > 0")
+        if not (float(yb_sigma_e_scale) > 0.0):
+            raise ValueError("ErYbAmplifier: yb_sigma_e_scale must be > 0; got %r"
+                             % (yb_sigma_e_scale,))
         if not (0.0 <= float(yb_coupled_fraction) <= 1.0):
             raise ValueError("ErYbAmplifier: yb_coupled_fraction must be in [0, 1]; got %r"
                              % (yb_coupled_fraction,))
@@ -479,6 +600,14 @@ class ErYbAmplifier:
         # and every legacy code path below is then taken verbatim -- which is what makes the
         # byte-identity claim a structural property and not a numerical coincidence.
         self._two_pop = (self._fc != 1.0 or self._k_tr2 > 0.0 or self._w_mig > 0.0)
+        # THE second routing predicate, exactly parallel to _two_pop: the explicit 4I11/2 level.
+        # False -> every expression below takes the adiabatic path verbatim.
+        self._tau32 = None if tau32_s is None else float(tau32_s)
+        self._n3 = self._tau32 is not None
+        self._cup_via_n3 = bool(upconversion_via_4i11_2)
+        self._lam3 = float(er_4i11_2_zero_line_m)
+        self._eps3 = H_PLANCK * C_LIGHT / self._lam3        # 4I11/2 stored quantum [J]
+        self._yb_se_scale = float(yb_sigma_e_scale)
         self._Tz = None                     # optional axial T profile (set_temperature_profile)
         # An IDENTITY rate law collapses to the None path exactly as an identity
         # ConcentrationModel does, so `RateTemperatureLaw()` is byte-identical to omitting it.
@@ -517,12 +646,17 @@ class ErYbAmplifier:
 
     # ---- type-preserving clone protocol ---------------------------------------------------
     def _clone(self, *, pumps: Optional[List[Pump]] = None,
-               signals: Optional[List[Signal]] = None, ase=_KEEP, yb_ase=_KEEP) -> "ErYbAmplifier":
+               signals: Optional[List[Signal]] = None, ase=_KEEP, yb_ase=_KEEP,
+               yb_sigma_e_scale=_KEEP) -> "ErYbAmplifier":
         """Clone through THIS class's own constructor, carrying EVERY opt-in: both ions'
         spectroscopy, the fiber, both ASE bands, the Yb density, the forward/back transfer
         coefficients, A_32, the Er upconversion coefficient, the two-population parameters
-        (coupled fraction, secondary transfer, migration), the ConcentrationModel, the rate
-        temperature law, the Yb Stark-thermal model and the axial temperature profile. The single place that lists what
+        (coupled fraction, secondary transfer, migration), the explicit-4I11/2 parameters
+        (tau_32, the upconversion routing, the 4I11/2 zero line), the Yb emission scale, the
+        ConcentrationModel, the rate temperature law, the Yb Stark-thermal model and the
+        axial temperature profile. `yb_sigma_e_scale` is the one parameter this method can
+        OVERRIDE rather than only carry -- that is what `with_yb_sigma_e_scale` and the
+        calibration fit re-seed. The single place that lists what
         an ErYb clone must carry (the FiberAmplifier._clone analogue); the three public protocol
         methods below all route through it, so adding an opt-in to __init__ needs ONE edit here.
         PRIVATE -- callers outside the class use with_signals / with_pumps / without_ase."""
@@ -536,6 +670,12 @@ class ErYbAmplifier:
                             upconversion_C_up=self.upconversion_C_up,
                             yb_coupled_fraction=self._fc, k_tr2_m3_s=self._k_tr2,
                             yb_migration_rate_per_s=self._w_mig,
+                            tau32_s=self._tau32,
+                            upconversion_via_4i11_2=self._cup_via_n3,
+                            er_4i11_2_zero_line_m=self._lam3,
+                            yb_sigma_e_scale=(self._yb_se_scale
+                                              if yb_sigma_e_scale is _KEEP
+                                              else float(yb_sigma_e_scale)),
                             concentration=self.concentration,
                             rate_temperature=self.rate_temperature,
                             yb_stark_thermal=self.yb_stark_thermal)
@@ -560,6 +700,13 @@ class ErYbAmplifier:
         """A copy with BOTH ASE bands dropped (the Er C-band and the Yb-band parasitic band) --
         the ASE-free configuration metrics.gain_spectrum probes the small-signal gain in."""
         return self._clone(ase=None, yb_ase=None)
+
+    def with_yb_sigma_e_scale(self, scale: float) -> "ErYbAmplifier":
+        """A copy whose Yb EMISSION cross-section is scaled by `scale` at every channel, every
+        other opt-in preserved (see _clone). This is what `eryb_fit_yb_sigma_e_scale` re-seeds
+        along its bracket, and the supported way to apply a calibration result to an amplifier
+        that already exists."""
+        return self._clone(yb_sigma_e_scale=float(scale))
 
     # ---- PUBLIC channel plan --------------------------------------------------------------
     def channel_plan(self) -> "ChannelPlan":
@@ -619,10 +766,19 @@ class ErYbAmplifier:
         for k, cl in enumerate(cladding):
             if cl:
                 gamma[k] = cladding_pump_overlap(self.fiber)
+        # THE one place the Yb emission scale is applied: every downstream coefficient (the modal
+        # gain, the stimulated-emission rate, the ASE spontaneous prefactor, the McCumber
+        # products, the parasitic diagnostic's own lookup) is built from this array, so one
+        # multiplication scales the whole model consistently. The scale == 1.0 branch performs NO
+        # arithmetic on the array, which is what makes the default bit-identical rather than
+        # merely equal (the _solve_once relax == 1.0 idiom).
+        se_yb = ch_yb.sigma_e
+        if self._yb_se_scale != 1.0:
+            se_yb = se_yb * self._yb_se_scale
         return {"lam": lam, "u": u, "is_ase": is_ase, "dnu": dnu, "m": m, "kind": kind,
                 "bc": np.asarray(bc), "gamma": gamma, "loss": ch_er.loss_per_m.copy(),
                 "sa_er": ch_er.sigma_a, "se_er": ch_er.sigma_e,
-                "sa_yb": ch_yb.sigma_a, "se_yb": ch_yb.sigma_e}
+                "sa_yb": ch_yb.sigma_a, "se_yb": se_yb}
 
     def _coeffs(self, pl):
         """Hoist the per-channel overlap/cross-section/frequency products into a bundle once per
@@ -649,7 +805,30 @@ class ErYbAmplifier:
             # in 4I15/2, so it absorbs Gamma sigma_a_Er n_dark at EVERY channel and holds no
             # gain. Identical in form to FiberAmplifier._coeffs -- one convention, two classes.
             c["loss"] = c["loss"] + gamma * self._n_er_dark * pl["sa_er"]
+        if self._n3:
+            # LEVEL-2 / LEVEL-3 channel split for the explicit 4I11/2 (module docstring). A
+            # channel terminates on 4I11/2 when its photon energy is closer to THAT level's zero
+            # line than to the 4I13/2 one -- an energy criterion evaluated from the two zero
+            # lines, not a hand-assigned band edge. The masked copies are built ONCE per solve
+            # here so the hot loops multiply instead of branching; they exist only on this path.
+            w3 = np.asarray(H_PLANCK * nu > self._level_split_J(), float)
+            w2 = 1.0 - w3
+            c["w3"] = w3
+            c["flux_a_er3"] = c["flux_a_er"] * w3       # W13, the direct 4I11/2 pump absorption
+            c["flux_e_er3"] = c["flux_e_er"] * w3       # W31, its stimulated emission
+            c["g_e_er2"] = c["g_e_er"] * w2             # modal gain charged to n2 / to n3
+            c["g_e_er3"] = c["g_e_er"] * w3
+            c["s_er2"] = s_er * w2                      # spontaneous source, likewise
+            c["s_er3"] = s_er * w3
         return c
+
+    def _level_split_J(self) -> float:
+        """The photon energy [J] above which a channel is a LEVEL-3 (4I11/2) channel: the
+        midpoint between the two Er zero-line quanta, eps_3 = h c / er_4i11_2_zero_line_m and
+        eps_Er = RareEarthIon.eps_J. For the shipped ions that is 1.666e-19 J, i.e. 1192 nm --
+        so a 900-1100 nm pump or Yb ASE bin is level-3 and a 1480 nm in-band pump or a C-band bin
+        is level-2, with no channel within 140 nm of the boundary."""
+        return 0.5 * (float(self.er_ion.eps_J) + self._eps3)
 
     # ---- distributed temperature profile (per-ion McCumber z-scaling) ---------------------
     def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = 300.0):
@@ -878,6 +1057,159 @@ class ErYbAmplifier:
         return (float(min(max(f, 0.0), 1.0)), float(min(max(bc, 0.0), 1.0)),
                 float(min(max(bn, 0.0), 1.0)))
 
+    # ---- explicit 4I11/2: the closed forms and the z-local solve ---------------------------
+    def _n3_coeffs(self, rs=None):
+        """The rate-independent coefficients of the explicit-4I11/2 balances, hoisted once.
+        `rs` is the per-z Arrhenius scale triple (k_tr, K2, W_mig) a RateTemperatureLaw supplies
+        under a temperature profile -- None (the default and the only isothermal path) leaves
+        every coefficient at its constructor value. k_back is NOT scaled, matching the
+        one- and two-pool routines: no temperature measurement of the back transfer exists.
+        The coefficients are:
+
+            kin   = k_tr f N_Yb     transfer INTO 4I11/2, per unit b2c per unit ground fraction
+            kout  = k_tr N_Er       the matching drain on the COUPLED Yb, per unit f1
+            kb_er = k_back f N_Yb   back-transfer drain on n3, per unit (1 - b2c)
+            kb_yb = k_back N_Er     the matching source on the coupled Yb, per unit f3
+            K2n   = K2 N_Er,   cu = C_up N_Er,   A3 = 1/tau_32
+
+        plus the upconversion routing pair (c_up, r_up) = (2, 1) when the upconversion is routed
+        through 4I11/2 (Dong 2020 Eq. 2) and (1, 0) otherwise -- the two collapse to the same net
+        -C_up N_Er f2^2 once n3 relaxes, which is why the adiabatic model needs only one of them.
+        """
+        k_tr, k_tr2 = self._k_tr, self._k_tr2
+        if rs is not None:
+            k_tr, k_tr2 = k_tr * rs[0], k_tr2 * rs[1]
+        return (k_tr * self._fc * self._n_yb, k_tr * self._n_er,
+                self._k_back * self._fc * self._n_yb, self._k_back * self._n_er,
+                k_tr2 * self._n_er, self.upconversion_C_up * self._n_er,
+                1.0 / self._tau32,
+                (2.0, 1.0) if self._cup_via_n3 else (1.0, 0.0))
+
+    def _n3_closed_form(self, W13, W31, Ra_Yb, Re_Yb, f2, derivative=False, rs=None):
+        """(f3, b2c, b2nc, df3/df2) at a FIXED f2 -- the closed-form inner solve of the explicit
+        4I11/2 model, with no iteration anywhere. Works elementwise, so it serves both the scalar
+        z-local root find and the vectorized transient seed.
+
+        WHY IT IS CLOSED. At fixed (f2, f3) the two ytterbium balances are still LINEAR in
+        (b2c, b2nc): the new back-transfer source k_back N_Er f3 (1 - b2c) contributes a constant
+        `kb_yb f3` to the coupled right-hand side and a drain `kb_yb f3` to its diagonal. So the
+        two-population closed form survives with
+
+            D   = R_a_Yb + R_e_Yb + 1/tau_Yb
+            Dc  = D + kout (1 - f2 - f3) + K2n f2 + kb_yb f3   = P0 + P1 f3
+            Sc  = R_a_Yb + kb_yb f3                            (the coupled RHS)
+            det = (D + W f) Dc + W (1-f) D                     = E0 + E1 f3   > 0 always
+            b2c = [Sc (D + W f) + W (1-f) R_a_Yb] / det        = (C0 + C1 f3) / det
+            b2nc= [(Dc + W (1-f)) R_a_Yb + W f Sc] / det
+
+        BOTH numerator and denominator are LINEAR in f3, so multiplying the 4I11/2 balance
+
+            G(f3) = W13 f1 - (W31 + A3) f3 + r_up cu f2^2 + kin b2c f1 - kb_er (1 - b2c) f3
+
+        by det (> 0 on the whole interval, so no root is created or destroyed) gives a QUADRATIC
+
+            Q(f3) = a2 f3^2 + a1 f3 + a0,
+            a0 = S E0 + kin g0 C0,   a1 = S E1 - T E0 + kin (g0 C1 - C0) - kb_er (E0 - C0),
+            a2 = -T E1 - kin C1 - kb_er (E1 - C1),
+            S  = W13 g0 + r_up cu f2^2,   T = W13 + W31 + A3,   g0 = 1 - f2.
+
+        Q(0) = a0 >= 0 (a sum of non-negative products) and Q(g0) <= 0 whenever the level is
+        actually pumped from below, so exactly ONE root lies in [0, g0] -- a quadratic cannot
+        return to its starting sign inside an interval whose endpoints straddle zero. It is taken
+        with the cancellation-free pair q = -(a1 + sign(a1) sqrt(disc))/2, roots q/a2 and a0/q,
+        which also degenerates correctly to the linear root -a0/a1 as a2 -> 0 (a0/q -> -a0/a1) --
+        so the stiff limit tau_32 -> 0, where a2 and a1 both blow up like A3, loses no digits.
+        The result is clamped to [0, max(g0, 0)]: f2 + f3 <= 1 is the population constraint, and
+        the clamp is what keeps H(1) < 0 for the OUTER bracket when a routed upconversion would
+        otherwise feed n3 at f2 = 1.
+
+        `derivative=True` also returns df3/df2 by implicit differentiation of Q (dQ/df2 divided
+        by -dQ/df3, with da2/df2 = 0 since a2 carries no f2 at all); it is 0 where the root is
+        clamped or dQ/df3 underflows, which only costs the outer solve a bisection step."""
+        kin, kout, kb_er, kb_yb, K2n, cu, A3, (_c_up, r_up) = self._n3_coeffs(rs)
+        fc, Wm = self._fc, self._w_mig
+        D = Ra_Yb + Re_Yb + 1.0 / self._tau_yb
+        DW = D + Wm * fc
+        g0 = 1.0 - f2
+        P0 = D + kout * g0 + K2n * f2
+        P1 = kb_yb - kout
+        E0 = DW * P0 + Wm * (1.0 - fc) * D
+        E1 = DW * P1
+        C0 = Ra_Yb * (D + Wm)
+        C1 = kb_yb * DW
+        S = W13 * g0 + r_up * cu * f2 * f2
+        T = W13 + W31 + A3
+        a0 = S * E0 + kin * g0 * C0
+        a1 = S * E1 - T * E0 + kin * (g0 * C1 - C0) - kb_er * (E0 - C0)
+        a2 = -T * E1 - kin * C1 - kb_er * (E1 - C1)
+        disc = np.maximum(a1 * a1 - 4.0 * a2 * a0, 0.0)
+        sq = np.sqrt(disc)
+        q = -0.5 * (a1 + np.where(a1 >= 0.0, 1.0, -1.0) * sq)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r_a = np.where(a2 != 0.0, q / np.where(a2 != 0.0, a2, 1.0), np.inf)
+            r_b = np.where(q != 0.0, a0 / np.where(q != 0.0, q, 1.0), 0.0)
+        hi = np.maximum(g0, 0.0)
+        pick = (r_a >= 0.0) & (r_a <= hi)
+        f3 = np.where(pick, r_a, r_b)
+        f3 = np.where(np.isfinite(f3), f3, 0.0)
+        f3c = np.clip(f3, 0.0, hi)
+        Dc = P0 + P1 * f3c
+        det = E0 + E1 * f3c
+        Sc = Ra_Yb + kb_yb * f3c
+        b2c = (Sc * DW + Wm * (1.0 - fc) * Ra_Yb) / det
+        b2nc = ((Dc + Wm * (1.0 - fc)) * Ra_Yb + Wm * fc * Sc) / det
+        if not derivative:
+            return f3c, b2c, b2nc, 0.0
+        dS = -W13 + 2.0 * r_up * cu * f2
+        dE0 = DW * (K2n - kout)
+        da0 = dS * E0 + S * dE0 - kin * C0
+        da1 = dS * E1 - T * dE0 - kin * C1 - kb_er * dE0
+        dQ_df3 = 2.0 * a2 * f3c + a1
+        dQ_df2 = da0 + da1 * f3c
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df3 = np.where(dQ_df3 != 0.0, -dQ_df2 / np.where(dQ_df3 != 0.0, dQ_df3, 1.0), 0.0)
+        df3 = np.where(np.isfinite(df3) & (f3 > 0.0) & (f3 < hi), df3, 0.0)
+        return f3c, b2c, b2nc, df3
+
+    def _solve_f3fb(self, W12, W21, W13, W31, Ra_Yb, Re_Yb, rs=None):
+        """Steady-state (f2, f3, b2c, b2nc) at one z with an EXPLICIT 4I11/2 -- the four-unknown
+        counterpart of `_solve_fb` / `_solve_fbb`, entered only when `tau32_s` is set.
+
+        The reduction is the same one, one level deeper: `_n3_closed_form` gives (f3, b2c, b2nc)
+        in closed form at a fixed f2, so what is left is again ONE scalar residual on [0, 1],
+
+            H(f2) = W12 (1 - f2 - f3) - W21 f2 - f2/tau_Er + f3/tau_32 - c_up C_up N_Er f2^2,
+
+        with H(0) >= 0 (absorption and the relaxation feed, both non-negative) and H(1) < 0 (at
+        f2 = 1 the clamp forces f3 = 0 and only -W21 - 1/tau_Er - c_up C_up N_Er is left), solved
+        by the SAME `_bracketed_newton`. Its slope carries df3/df2 from the quadratic:
+
+            dH/df2 = -W12 (1 + df3) - W21 - 1/tau_Er + df3/tau_32 - 2 c_up C_up N_Er f2."""
+        _kin, _kout, _kb_er, _kb_yb, _K2n, cu, A3, (c_up, _r_up) = self._n3_coeffs(rs)
+        inv_tE = 1.0 / self._tau_er
+
+        def _HdH(f):
+            f3, _bc, _bn, df3 = self._n3_closed_form(W13, W31, Ra_Yb, Re_Yb, f,
+                                                    derivative=True, rs=rs)
+            H = (W12 * (1.0 - f - f3) - W21 * f - f * inv_tE + A3 * f3
+                 - c_up * cu * f * f)
+            dH = (-W12 * (1.0 + df3) - W21 - inv_tE + A3 * df3 - 2.0 * c_up * cu * f)
+            return float(H), float(dH)
+
+        f, _ = self._bracketed_newton(_HdH)
+        f3, bc, bn, _d = self._n3_closed_form(W13, W31, Ra_Yb, Re_Yb, f, rs=rs)
+        f = float(min(max(f, 0.0), 1.0))
+        return (f, float(min(max(f3, 0.0), 1.0 - f)), float(min(max(bc, 0.0), 1.0)),
+                float(min(max(bn, 0.0), 1.0)))
+
+    def _fbb_n3(self, W12, W21, W13, W31, Ra_Yb, Re_Yb, rs=None):
+        """(f2, f3, b2c, b2nc, bbar) at one z with the explicit 4I11/2. b2nc is None for the
+        one-pool model, where bbar IS b2c (the same object), exactly as `_fbb` does it."""
+        f2, f3, b2c, b2nc = self._solve_f3fb(W12, W21, W13, W31, Ra_Yb, Re_Yb, rs)
+        if self._two_pop:
+            return f2, f3, b2c, b2nc, self._fc * b2c + (1.0 - self._fc) * b2nc
+        return f2, f3, b2c, None, b2c
+
     def _fbb(self, Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs=None):
         """(f2, b2c, b2nc, bbar) at one z, routed to the one- or two-pool algebra. bbar is the
         POPULATION-WEIGHTED Yb inversion f b2c + (1-f) b2nc -- the only Yb quantity the optical
@@ -913,6 +1245,27 @@ class ErYbAmplifier:
             s_er, s_yb = c["s_er"] * m_er, c["s_yb"] * m_yb
             if st is not None:
                 ga_yb, ge_yb, s_yb = c["g_a_yb"] * st, ge_yb * st, s_yb * st
+        if self._n3:
+            # EXPLICIT 4I11/2. The Er block of the operator changes in exactly two places: the
+            # ground fraction that absorbs is 1 - f2 - f3 (n1 alone), and the emission and the
+            # spontaneous source at a LEVEL-3 channel are charged to n3 instead of n2. The
+            # YTTERBIUM block is untouched by the split -- it arrives already carrying whatever
+            # the temperature bundle applied to it (the McCumber factor, the Stark-band scale) --
+            # and W12 = R_a_Er - W13, W21 = R_e_Er - W31, so the totals are conserved.
+            W13 = float(np.dot(c["flux_a_er3"], P))
+            W31 = (float(np.dot(c["flux_e_er3"], P)) if mcc is None
+                   else float(np.dot(c["flux_e_er3"] * mcc[0], P)))
+            f2, f3, _b2c, _b2nc, b2 = self._fbb_n3(Ra_Er - W13, Re_Er - W31, W13, W31,
+                                                   Ra_Yb, Re_Yb, rs)
+            ge2 = c["g_e_er2"] if mcc is None else c["g_e_er2"] * mcc[0]
+            ge3 = c["g_e_er3"] if mcc is None else c["g_e_er3"] * mcc[0]
+            s2 = c["s_er2"] if mcc is None else c["s_er2"] * mcc[0]
+            s3 = c["s_er3"] if mcc is None else c["s_er3"] * mcc[0]
+            g = (ge2 * f2 + ge3 * f3 - c["g_a_er"] * (1.0 - f2 - f3)
+                 + ge_yb * b2 - ga_yb * (1.0 - b2) - c["loss"])
+            if self.concentration is not None:
+                g = g - self.concentration.photodarkening_loss_per_m(b2)
+            return u * (g * P + (s2 * f2 + s3 * f3 + s_yb * b2))
         f2, _b2c, _b2nc, b2 = self._fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
         g = (ge_er * f2 - c["g_a_er"] * (1.0 - f2)
              + ge_yb * b2 - ga_yb * (1.0 - b2) - c["loss"])
@@ -925,13 +1278,16 @@ class ErYbAmplifier:
         return u * (g * P + src)
 
     def _fb_profile(self, c, P, mcc=None):
-        """(f2(z), b2(z), b2nc(z)) at each z given the full power profile P (K, M). b2 is the
-        COUPLED Yb inversion and b2nc the uncoupled one; b2nc is None for the one-pool model, in
-        which case b2 is simply the Yb inversion. `mcc` is the optional ((K, M), (K, M)) McCumber
-        scale pair on the SAME mesh."""
+        """(f2(z), b2(z), b2nc(z), f3(z)) at each z given the full power profile P (K, M). b2 is
+        the COUPLED Yb inversion and b2nc the uncoupled one; b2nc is None for the one-pool model,
+        in which case b2 is simply the Yb inversion, and f3 (the Er 4I11/2 fraction) is None
+        unless `tau32_s` is set. `mcc` is the optional 4-slot temperature bundle on the SAME mesh
+        (`_mcc_matrices`: the two McCumber matrices, the Yb Stark-band scale and the Arrhenius
+        rate scale)."""
         M = P.shape[1]
         f2 = np.empty(M); b2 = np.empty(M)
         b2nc = np.empty(M) if self._two_pop else None
+        f3 = np.empty(M) if self._n3 else None
         st_m = None if mcc is None else mcc[2]
         rs_m = None if mcc is None else mcc[3]
         for j in range(M):
@@ -950,11 +1306,20 @@ class ErYbAmplifier:
                 Re_Er = float(np.dot(c["flux_e_er"] * mcc[0][:, j], Pj))
                 Ra_Yb = float(np.dot(fa_yb, Pj))
                 Re_Yb = float(np.dot(fe_yb, Pj))
-            if self._two_pop:
+            if self._n3:
+                W13 = float(np.dot(c["flux_a_er3"], Pj))
+                W31 = (float(np.dot(c["flux_e_er3"], Pj)) if mcc is None
+                       else float(np.dot(c["flux_e_er3"] * mcc[0][:, j], Pj)))
+                f2[j], f3[j], bc, bn = self._solve_f3fb(Ra_Er - W13, Re_Er - W31, W13, W31,
+                                                        Ra_Yb, Re_Yb, rs)
+                b2[j] = bc
+                if b2nc is not None:
+                    b2nc[j] = bn
+            elif self._two_pop:
                 f2[j], b2[j], b2nc[j] = self._solve_fbb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
             else:
                 f2[j], b2[j] = self._solve_fb(Ra_Er, Re_Er, Ra_Yb, Re_Yb, rs)
-        return f2, b2, b2nc
+        return f2, b2, b2nc, f3
 
     def _bbar(self, b2c, b2nc):
         """Population-weighted Yb inversion f b2c + (1-f) b2nc -- what the optical field sees
@@ -974,8 +1339,9 @@ class ErYbAmplifier:
     def _rates_profile(self, c, P, mcc=None):
         """(R_a_Er, R_e_Er, R_a_Yb, R_e_Yb) [1/s] at every z from the power profile P (K, M) --
         the vectorized counterpart of the four np.dot calls _fb_profile makes per node. `mcc` is
-        the optional ((K, M), (K, M)) McCumber sigma_e scale pair; it multiplies the two EMISSION
-        rates only (sigma_a and the lifetimes are held)."""
+        the optional temperature bundle (`_mcc_matrices`): its McCumber matrices multiply the two
+        EMISSION rates and its Yb Stark-band scale multiplies BOTH ytterbium rates (the lifetimes
+        are held)."""
         Pz = np.maximum(np.asarray(P, float), 0.0)
         if mcc is None:
             return (c["flux_a_er"] @ Pz, c["flux_e_er"] @ Pz,
@@ -990,6 +1356,23 @@ class ErYbAmplifier:
                 fa_yb,
                 np.sum(fe_yb * Pz, axis=0))
 
+    def _rates_profile_n3(self, c, P, mcc=None):
+        """(W12, W21, W13, W31, R_a_Yb, R_e_Yb) [1/s] at every z for the EXPLICIT-4I11/2 model:
+        `_rates_profile`'s four numbers with the two erbium ones split over the level-2 and
+        level-3 channels (`_coeffs`' masks). The split is exact -- W12 is computed as the
+        DIFFERENCE R_a_Er - W13 (and W21 as R_e_Er - W31), so no channel can be double-counted or
+        dropped. The erbium masks carry only the ERBIUM McCumber factor: the Yb Stark-band scale
+        of slot 2 is an ytterbium quantity and is already inside the R_a_Yb / R_e_Yb this returns
+        unchanged from `_rates_profile`."""
+        Ra_Er, Re_Er, Ra_Yb, Re_Yb = self._rates_profile(c, P, mcc)
+        Pz = np.maximum(np.asarray(P, float), 0.0)
+        W13 = c["flux_a_er3"] @ Pz
+        if mcc is None:
+            W31 = c["flux_e_er3"] @ Pz
+        else:
+            W31 = np.sum(c["flux_e_er3"][:, None] * mcc[0] * Pz, axis=0)
+        return Ra_Er - W13, Re_Er - W31, W13, W31, Ra_Yb, Re_Yb
+
     def _phi(self, b2):
         """Back-transfer branching factor phi = A_32 / (A_32 + k_back (1 - b2) N_Yb): the fraction
         of Er 4I11/2 population that relaxes to 4I13/2 before back-transferring (module
@@ -997,16 +1380,22 @@ class ErYbAmplifier:
         (1 - b2c), hence the f factor -- which is exactly 1.0 in the one-pool model, so
         multiplying by it changes no bit there. EXACTLY 1.0 overall when k_back = 0 (the
         default), so every expression carrying phi stays byte-identical to the
-        no-back-transfer algebra."""
+        no-back-transfer algebra.
+
+        EXACTLY 1.0 ALSO when tau32_s is set: phi is the adiabatic APPROXIMATION to a branching
+        that the explicit 4I11/2 level resolves, and applying both would charge the back-transfer
+        twice. That routing is asserted rather than assumed -- the explicit path never calls the
+        phi-carrying expressions -- and this guard makes it harmless if one ever does."""
         b = np.asarray(b2, float)
-        if self._k_back <= 0.0:
+        if self._k_back <= 0.0 or self._n3:
             return np.ones_like(b)
         return self._a32 / (self._a32 + self._k_back * self._fc * (1.0 - b) * self._n_yb)
 
     def _dphi_db(self, b2, phi):
-        """d(phi)/d(b2c) = phi^2 k_back f N_Yb / A_32 (identically 0 when k_back = 0)."""
+        """d(phi)/d(b2c) = phi^2 k_back f N_Yb / A_32 (identically 0 when k_back = 0, and
+        likewise when tau32_s is set -- see `_phi`)."""
         b = np.asarray(b2, float)
-        if self._k_back <= 0.0:
+        if self._k_back <= 0.0 or self._n3:
             return np.zeros_like(b)
         return phi * phi * self._k_back * self._fc * self._n_yb / self._a32
 
@@ -1113,6 +1502,78 @@ class ErYbAmplifier:
         j21 = w_mig * fc + zero
         j22 = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb) - w_mig * fc
         return [[j00, j01, zero], [j10, j11, j12], [zero, j21, j22 + zero]]
+
+    def _fb_rhs_n3(self, W12, W21, W13, W31, Ra_Yb, Re_Yb, f2, f3, b2c, b2nc, rs=None):
+        """(df2/dt, df3/dt, db2c/dt, db2nc/dt) [1/s] with an EXPLICIT 4I11/2 -- the FOUR balances
+        of the module docstring before the steady-state condition is imposed, and the single home
+        of that algebra (the march and `energy_terms` both read it rather than re-deriving).
+
+        `_solve_f3fb` returns the state at which all four vanish, so a march built on this has
+        the steady solve's own fixed point. Passing b2nc = b2c makes the migration term vanish
+        identically and leaves the first THREE components the one-Yb-pool system, which is how
+        the march treats a `tau32_s`-only amplifier (the 4th is then not a reservoir at all)."""
+        kin, kout, kb_er, kb_yb, K2n, cu, A3, (c_up, r_up) = self._n3_coeffs(rs)
+        fc = self._fc
+        f1 = 1.0 - f2 - f3
+        up = cu * f2 * f2
+        w_mig = self._w_mig if rs is None else self._w_mig * rs[2]
+        mig = w_mig * (b2c - b2nc)
+        df2 = W12 * f1 - W21 * f2 - f2 / self._tau_er + A3 * f3 - c_up * up
+        df3 = (W13 * f1 - W31 * f3 - A3 * f3 + kin * b2c * f1
+               - kb_er * (1.0 - b2c) * f3 + r_up * up)
+        dbc = (Ra_Yb * (1.0 - b2c) - Re_Yb * b2c - b2c / self._tau_yb
+               - kout * f1 * b2c - K2n * f2 * b2c + kb_yb * f3 * (1.0 - b2c)
+               - (1.0 - fc) * mig)
+        dbn = (Ra_Yb * (1.0 - b2nc) - Re_Yb * b2nc - b2nc / self._tau_yb + fc * mig)
+        return df2, df3, dbc, dbn
+
+    def _fb_jacobian_n3(self, W12, W21, W13, W31, Ra_Yb, Re_Yb, f2, f3, b2c, b2nc, rs=None):
+        """The EXACT 4x4 Jacobian of `_fb_rhs_n3` at (f2, f3, b2c, b2nc), as a nested 4x4 list of
+        arrays (row-major). This is what licenses the exponential Rosenbrock step once the
+        4I11/2 level is explicit, and it MUST be the exact one: 1/tau_32 is 1e5-1e9 1/s against
+        1/tau_Er = 1e2, so the 4I11/2 row is the stiffest in the system by up to seven orders and
+        a frozen or approximated Jacobian there would either ring or crawl.
+
+        STRUCTURE. J[0][3] = J[1][3] = J[3][0] = J[3][1] = 0 -- within a frozen-power step the
+        uncoupled ytterbium meets the erbium only through the coupled pool, exactly as in the 3x3
+        case. The diagonal is strictly negative: each entry is minus a sum of absorption,
+        stimulated-emission, decay, relaxation, transfer, back-transfer, K2 and migration rates.
+        The off-diagonal signs are NOT all positive here and no determinant theorem is claimed --
+        J[0][1] = A_32 - W12 is positive for any physical tau_32 (the relaxation feed dominates
+        the level-2 absorption it displaces) while J[2][0] = (kout - K2n) b2c changes sign with
+        K2 -- so what is asserted, and gated numerically over a sweep of operating points and
+        tau_32 from 1 ns to 50 us, is the property the scheme actually needs: every eigenvalue
+        keeps a strictly negative real part. phi_1 is evaluated on the matrix itself, so a
+        complex pair would be integrated correctly anyway."""
+        kin, kout, kb_er, kb_yb, K2n, cu, A3, (c_up, r_up) = self._n3_coeffs(rs)
+        fc = self._fc
+        Wm = self._w_mig if rs is None else self._w_mig * rs[2]
+        f1 = 1.0 - f2 - f3
+        zero = np.zeros_like(np.asarray(f2 + f3 + b2c, float))
+        dY = -(Ra_Yb + Re_Yb + 1.0 / self._tau_yb)
+        j00 = -W12 - W21 - 1.0 / self._tau_er - 2.0 * c_up * cu * f2 + zero
+        j01 = -W12 + A3 + zero
+        j10 = -W13 - kin * b2c + 2.0 * r_up * cu * f2
+        j11 = -W13 - W31 - A3 - kin * b2c - kb_er * (1.0 - b2c)
+        j12 = kin * f1 + kb_er * f3
+        j20 = (kout - K2n) * b2c
+        j21 = kout * b2c + kb_yb * (1.0 - b2c)
+        j22 = dY - kout * f1 - K2n * f2 - kb_yb * f3 - Wm * (1.0 - fc)
+        j23 = Wm * (1.0 - fc) + zero
+        j32 = Wm * fc + zero
+        j33 = dY - Wm * fc + zero
+        return [[j00, j01, zero, zero], [j10, j11, j12, zero],
+                [j20, j21, j22, j23], [zero, zero, j32, j33]]
+
+    def _n3_quasi_equilibrium(self, W13, W31, Ra_Yb, Re_Yb, f2, rs=None):
+        """(f3, b2c, b2nc) at a FIXED f2 from the same closed form the steady solve uses --
+        `_n3_closed_form` without its derivative. This seeds the 4I11/2 and ytterbium reservoirs
+        of a transient whose caller supplied only f2: tau_32 is 1e2-1e5 times shorter than
+        tau_Er, so those levels have no independently meaningful history at a given Er state and
+        starting them at zero would inject a spurious relaxation the caller did not ask for --
+        the same argument `_b2_quasi_equilibrium` makes for the ytterbium alone."""
+        f3, b2c, b2nc, _d = self._n3_closed_form(W13, W31, Ra_Yb, Re_Yb, f2, rs=rs)
+        return f3, b2c, b2nc
 
     def _b2_quasi_equilibrium(self, Ra_Yb, Re_Yb, f2, b2):
         """The Yb inversion that balances the Yb equation at a FIXED Er state: the closed form
@@ -1282,13 +1743,14 @@ class ErYbAmplifier:
         P[fwd] = P_fwd
         if bwd.size:
             P[bwd] = P_bwd
-        f2, b2, b2nc = self._fb_profile(c, P, mcc_mat)
+        f2, b2, b2nc, f3 = self._fb_profile(c, P, mcc_mat)
         bbar = self._bbar(b2, b2nc)
         sig_idx = [i for i, kd in enumerate(kind) if kd == "signal"]
         gains_dB = np.array([10.0 * np.log10(P[i, -1] / bc[i]) for i in sig_idx])
 
-        eta_tr = self._transfer_efficiency(c, P, f2, b2, z, b2nc, mcc_mat)
-        yb_par_dB = self._yb_parasitic_gain_dB(P, f2, bbar, z)
+        eta_tr = self._transfer_efficiency(c, P, f2, b2, z, b2nc, mcc_mat, f3)
+        yb_par_dB = self._yb_parasitic_gain_dB(P, f2, bbar, z, f3)
+        back_ratio = self._back_transfer_ratio(f2, f3, b2, z)
         m_modes = (self.ase.m_modes if self.ase is not None
                    else (self.yb_ase.m_modes if self.yb_ase is not None else 2))
         meta = {"converged": converged, "iterations": it + 1,
@@ -1315,6 +1777,16 @@ class ErYbAmplifier:
                 "yb_migration_rate_per_s": self._w_mig,
                 "n_er_active_m3": self._n_er, "n_er_dark_m3": self._n_er_dark,
                 "upconversion_C_up": self.upconversion_C_up,
+                # ---- explicit 4I11/2 and Yb emission scale ----
+                # er_4i11_2_z is the Er 4I11/2 FRACTION f3 = n3/N_Er, None in the adiabatic
+                # default; back_transfer_ratio is INT k_back n3 n5c dz / INT k_tr n1 n6c dz, the
+                # share of the forward transfer that the back-transfer returns to the ytterbium
+                # (also None when the level is eliminated, where the phi refinement carries it).
+                "tau32_s": self._tau32, "er_4i11_2_z": f3,
+                "back_transfer_ratio": back_ratio,
+                "upconversion_via_4i11_2": self._cup_via_n3,
+                "er_4i11_2_zero_line_m": self._lam3,
+                "yb_sigma_e_scale": self._yb_se_scale,
                 # 'mcc' is the ERBIUM matrix, matching meta['sigma_a'] / ['sigma_e'] (which are
                 # also the Er spectra) so noise.local_inversion_factor -- a C-band quantity --
                 # keeps reading a (K, M) array of the right ion. The per-ion pair is explicit.
@@ -1324,7 +1796,7 @@ class ErYbAmplifier:
         return SteadyStateResult(z, P, pl["lam"], u, is_ase, kind, f2, gains_dB, meta=meta)
 
     # ---- diagnostics ---------------------------------------------------------------------
-    def _transfer_efficiency(self, c, P, f2, b2, z, b2nc=None, mcc=None) -> float:
+    def _transfer_efficiency(self, c, P, f2, b2, z, b2nc=None, mcc=None, f3=None) -> float:
         """Fraction of Yb excited-state de-excitations that end as a USEFUL Yb->Er transfer,
         as a rate integral weighted by the excited-Yb density n_Yb2 = b2 N_Yb:
 
@@ -1345,9 +1817,17 @@ class ErYbAmplifier:
                   / INT [(k_tr n1 + K2 n2 + 1/tau_Yb + R_e_Yb) n6c + (1/tau_Yb + R_e_Yb) n6nc] dz
 
         with n6c = f N_Yb b2c and n6nc = (1-f) N_Yb b2nc. At f = 1 and K2 = 0 the extra terms are
-        identically zero and the expression is the one above."""
+        identically zero and the expression is the one above.
+
+        WITH AN EXPLICIT 4I11/2 the acceptor density is n1 = (1 - f2 - f3) N_Er, not
+        (1 - f2) N_Er: an ion parked in 4I11/2 is not in the ground state and cannot accept a
+        transfer. Passing `f3` is what keeps this diagnostic consistent with the transfer term the
+        BALANCE actually carries -- at the measured tau_32 that is a 2% correction, small but not
+        a rounding one, and getting it wrong would make eta_tr disagree with the rate it is meant
+        to summarise. The back-transfer is NOT subtracted here: it is a Yb SOURCE rather than a
+        Yb de-excitation, and `meta['back_transfer_ratio']` reports it separately."""
         N_Er, N_Yb = self._n_er, self._n_yb
-        n1 = (1.0 - f2) * N_Er
+        n1 = ((1.0 - f2) if f3 is None else (1.0 - f2 - np.asarray(f3, float))) * N_Er
         k_tr, k_tr2 = self._k_tr, self._k_tr2
         if mcc is None:
             Re_Yb = np.array([float(np.dot(c["flux_e_yb"], np.maximum(P[:, j], 0.0)))
@@ -1380,18 +1860,50 @@ class ErYbAmplifier:
         """eta_tr for a solved result (returns the value cached in meta by solve())."""
         return float(result.meta["eta_transfer"])
 
-    def _yb_parasitic_gain_dB(self, P, f2, b2, z) -> float:
+    def _back_transfer_ratio(self, f2, f3, b2c, z) -> Optional[float]:
+        """INT k_back n3 n5c dz / INT k_tr n1 n6c dz: the share of the forward Yb->Er transfer
+        that the EXPLICIT back-transfer hands straight back to the ytterbium, with n5c and n6c
+        the coupled pool's ground and excited densities. None when the 4I11/2 level is
+        adiabatically eliminated (there the branching is the phi refinement, which multiplies the
+        transfer rather than returning excitation), and exactly 0.0 when k_back = 0.
+
+        This is the number that says whether a long tau_32 matters: the back-transfer rate is
+        k_back n3 n5c and n3 grows in PROPORTION to tau_32, so the ratio is monotone in tau_32 at
+        fixed k_back, and it is the loss channel an explicit 4I11/2 exists to expose."""
+        if f3 is None:
+            return None
+        if self._k_back <= 0.0:
+            return 0.0
+        n6c = self._fc * self._n_yb * np.asarray(b2c, float)
+        n5c = self._fc * self._n_yb * (1.0 - np.asarray(b2c, float))
+        n1 = self._n_er * (1.0 - np.asarray(f2, float) - np.asarray(f3, float))
+        fwd = float(trapz(self._k_tr * n1 * n6c, z))
+        bwd = float(trapz(self._k_back * self._n_er * np.asarray(f3, float) * n5c, z))
+        return bwd / fwd if fwd > 0.0 else 0.0
+
+    def _yb_parasitic_gain_dB(self, P, f2, b2, z, f3=None) -> float:
         """Single-pass 1030 nm Yb parasitic gain [dB] from the POPULATION-WEIGHTED b2 profile (computed even with no
-        yb_ase channels): G_dB = (10/ln10) INT Gamma(1030) [N_Yb (sigma_e_Yb b2 - sigma_a_Yb
-        (1 - b2)) + N_Er (sigma_e_Er f2 - sigma_a_Er (1 - f2))] dz. The Er terms are ~0 at 1030
+        yb_ase channels): G_dB = (10/ln10) INT Gamma(1030) [N_Yb (s sigma_e_Yb b2 - sigma_a_Yb
+        (1 - b2)) + N_Er (sigma_e_Er f2 - sigma_a_Er (1 - f2))] dz, with s the Yb emission scale
+        (`yb_sigma_e_scale`, 1.0 by default) that the channel plan applies everywhere else -- this
+        is the one place the spectrum is read outside `_plan`, so it is scaled here too or the
+        diagnostic would contradict the ASE it is meant to predict. The Er terms are ~0 at 1030
         nm. A large positive value flags 1-um parasitic-lasing risk (compare to the round-trip
-        cavity loss -ln(R1 R2)/2; dossier design rule beta_Yb < ~0.05)."""
+        cavity loss -ln(R1 R2)/2; dossier design rule beta_Yb < ~0.05).
+
+        With an EXPLICIT 4I11/2 (f3 given) 1030 nm is a LEVEL-3 channel, so the erbium ground
+        fraction is 1 - f2 - f3 and the (numerically dead, ~1e-39 m^2) Er emission there is
+        charged to n3 -- the same bookkeeping the propagation uses, so the two agree."""
         lam = 1.030e-6
         gam = float(overlap_gamma(self.fiber, lam))
-        se_yb = float(self.yb_ion.sigma_e.sigma(lam)); sa_yb = float(self.yb_ion.sigma_a.sigma(lam))
+        se_yb = float(self.yb_ion.sigma_e.sigma(lam)) * self._yb_se_scale
+        sa_yb = float(self.yb_ion.sigma_a.sigma(lam))
         se_er = float(self.er_ion.sigma_e.sigma(lam)); sa_er = float(self.er_ion.sigma_a.sigma(lam))
-        g = gam * (self._n_yb * (se_yb * b2 - sa_yb * (1.0 - b2))
-                   + self._n_er * (se_er * f2 - sa_er * (1.0 - f2)))
+        if f3 is None:
+            g_er = self._n_er * (se_er * f2 - sa_er * (1.0 - f2))
+        else:
+            g_er = self._n_er * (se_er * f3 - sa_er * (1.0 - f2 - f3))
+        g = gam * (self._n_yb * (se_yb * b2 - sa_yb * (1.0 - b2)) + g_er)
         ln_gain = float(trapz(g, z))
         return 10.0 / np.log(10.0) * ln_gain
 
@@ -1470,11 +1982,19 @@ class ErYbAmplifier:
         f2 = np.asarray(result.nbar2_z, float)
         b2c = np.asarray(result.meta.get("beta_yb_coupled_z", result.meta["beta_yb_z"]), float)
         b2nc = result.meta.get("beta_yb_uncoupled_z")
-        terms = self.energy_terms(result.power_W, f2, b2c, b2nc, z_m=z)
+        terms = self.energy_terms(result.power_W, f2, b2c, b2nc, z_m=z,
+                                  f3=result.meta.get("er_4i11_2_z"))
         return np.asarray(terms["dissipation"], float)
 
-    def energy_terms(self, power_W, f2, b2, b2_uncoupled=None, *, z_m=None) -> dict:
+    def energy_terms(self, power_W, f2, b2, b2_uncoupled=None, *, z_m=None, f3=None) -> dict:
         """Per-z energy bookkeeping [W/m] for one profile: powers (K, M), f2 (M,), b2 (M,).
+
+        `f3` is the Er 4I11/2 fraction (M,), REQUIRED (and refused if missing) whenever `tau32_s`
+        is set and refused when it is not -- the same rule `b2_uncoupled` follows, and for the
+        same reason: without it the stored energy, the ground fraction that absorbs and the split
+        of the transfer heat between the transfer defect and the 4I11/2 relaxation would all be
+        silently wrong. solve() reports it on `meta['er_4i11_2_z']` and the march on
+        `meta['er_4i11_2']`.
 
         `b2` is the COUPLED Yb inversion and `b2_uncoupled` the uncoupled pool's; the latter is
         REQUIRED (and refused if missing) whenever an uncoupled pool exists, because guessing it
@@ -1543,7 +2063,37 @@ class ErYbAmplifier:
 
         and `dissipation` is the sum of those five. Pair-induced quenching needs no term of its
         own: dark erbium is already in `D_loss` through the unbleachable absorption `_coeffs`
-        adds, and so is the photodarkening gray loss, both of which are pure heat."""
+        adds, and so is the photodarkening gray loss, both of which are pure heat.
+
+        EXPLICIT 4I11/2 EXTENSION (`tau32_s` set, f3 passed). The erbium stores a third quantum,
+        every erbium optical event is charged at the level it actually terminates on, and the
+        transfer heat splits into the part the transfer itself pays and the part the relaxation
+        pays:
+
+            U      = A (eps_Er N_Er f2 + eps_3 N_Er f3 + eps_Yb N_Yb bbar)
+            Phi_tr = A k_tr N_Er (1 - f2 - f3) (f N_Yb) b2c        (lands on 4I11/2 now)
+            Phi_32 = A N_Er f3 / tau_32,     Phi_bk = A k_back N_Er f3 (f N_Yb)(1 - b2c)
+            D_Er   = SUM_{k in lvl2} (h nu_k - eps_Er)(n_a,k - n_e,k)
+                   + SUM_{k in lvl3} (h nu_k - eps_3 )(n_a,k - n_e,k)
+                   + (eps_Er Phi_dec_Er - P_sp_lvl2) + (c_up eps_Er - r_up eps_3) Phi_up
+            D_tr   = (eps_Yb - eps_3) Phi_tr
+            D_32   = (eps_3 - eps_Er) Phi_32 - P_sp_lvl3        <- NEW: the multiphonon step
+            D_bk   = (eps_3 - eps_Yb) Phi_bk                    <- NEW, and NEGATIVE
+
+            q_opt(z) = dU/dt(z) + D_loss + D_Er + D_Yb + D_tr + D_K2 + D_32 + D_bk
+
+        Three things to read off. `D_tr + D_32` is the adiabatic `(eps_Yb - eps_Er) Phi_tr` once
+        every transferred ion relaxes immediately, so the TOTAL is unchanged in the adiabatic
+        limit and only the naming moves -- which is the point of making the relaxation explicit.
+        `D_bk` is negative because the back-transfer is UPHILL: eps_3 = 2.0332e-19 J (977 nm) sits
+        BELOW eps_Yb = 2.0384-2.0421e-19 J (the shipped ytterbium zero lines, 974.5-972.75 nm),
+        so 3.3-5.5 meV of phonon energy is ABSORBED per event. It is a real, tiny anti-Stokes
+        term, not a sign error. And the guided spontaneous emission of a level-3 channel is
+        credited against the relaxation energy (`- P_sp_lvl3`) exactly as the C-band ASE is
+        credited against the 4I13/2 decay; the model carries no separate radiative
+        branching ratio for 4I11/2, whose relaxation in a phosphosilicate host is multiphonon by
+        ~1e3. The extra keys on this path are 'relaxation_32_defect', 'back_transfer_defect',
+        'relaxation_32_rate_per_m', 'back_transfer_rate_per_m' and 'df3_dt'."""
         pl = self._plan()
         c = self._coeffs(pl)
         P = np.maximum(np.asarray(power_W, float), 0.0)
@@ -1568,6 +2118,20 @@ class ErYbAmplifier:
         if b2nc is not None and b2nc.shape != (P.shape[1],):
             raise ValueError("energy_terms: b2_uncoupled must have shape (M,); got %r"
                              % (b2nc.shape,))
+        if self._n3 and f3 is None:
+            raise ValueError(
+                "energy_terms: this amplifier carries an EXPLICIT Er 4I11/2 level "
+                "(tau32_s=%g s), so its population fraction f3 must be passed as f3=... -- "
+                "solve() reports it on meta['er_4i11_2_z'] and the march on "
+                "meta['er_4i11_2']. Defaulting it to zero would mis-state the stored energy, "
+                "the erbium ground fraction and the split of the transfer heat."
+                % (self._tau32,))
+        if f3 is not None and not self._n3:
+            raise ValueError("energy_terms: this amplifier eliminates the Er 4I11/2 level "
+                             "adiabatically (tau32_s is None), so f3 must be None (got an array "
+                             "of shape %r)" % (np.shape(f3),))
+        if f3 is not None and np.shape(f3) != (P.shape[1],):
+            raise ValueError("energy_terms: f3 must have shape (M,); got %r" % (np.shape(f3),))
         mcc = None
         if getattr(self, "_Tz", None) is not None:
             if z_m is None:
@@ -1584,7 +2148,9 @@ class ErYbAmplifier:
         eps_yb = float(self.yb_ion.eps_J)
         inv_h = (1.0 / (H_PLANCK * (C_LIGHT / pl["lam"])))[:, None]
         bbar = self._bbar(b2, b2nc)
-        one_f, one_b = (1.0 - f2)[None, :], (1.0 - bbar)[None, :]
+        f3a = None if f3 is None else np.asarray(f3, float)
+        one_f = ((1.0 - f2)[None, :] if f3a is None else (1.0 - f2 - f3a)[None, :])
+        one_b = (1.0 - bbar)[None, :]
         st = None if mcc is None else mcc[2]
         ge_er = c["g_e_er"][:, None] if mcc is None else c["g_e_er"][:, None] * mcc[0]
         ge_yb = c["g_e_yb"][:, None] if mcc is None else c["g_e_yb"][:, None] * mcc[1]
@@ -1607,30 +2173,101 @@ class ErYbAmplifier:
         n_a_er, n_e_er = (pw_a_er * inv_h).sum(0), (pw_e_er * inv_h).sum(0)
         n_a_yb, n_e_yb = (pw_a_yb * inv_h).sum(0), (pw_e_yb * inv_h).sum(0)
 
+        # A RateTemperatureLaw makes the transfer coefficients z-DEPENDENT, so they are scaled
+        # once here and every rate below -- on either branch -- reads the scaled values.
+        rs_m = None if mcc is None else mcc[3]
+        k_tr, k_tr2 = self._k_tr, self._k_tr2
+        if rs_m is not None:
+            k_tr, k_tr2 = k_tr * rs_m[0], k_tr2 * rs_m[1]
+        dec_yb = A * N_Yb * bbar / self._tau_yb
+        n_yb_c = self._fc * N_Yb                     # the COUPLED Yb density (= N_Yb at f = 1)
+        k2_rate = A * k_tr2 * N_Er * f2 * n_yb_c * b2
+        d_yb = ((p_a_yb - p_e_yb) - eps_yb * (n_a_yb - n_e_yb)
+                + (eps_yb * dec_yb - p_sp_yb))
+        d_k2 = eps_yb * k2_rate
+
+        if f3a is not None:
+            # ---- EXPLICIT 4I11/2 -------------------------------------------------------------
+            # The erbium optical terms are re-split by LEVEL: everything absorbs from n1, a
+            # level-2 channel emits from n2 and a level-3 channel from n3, and each event is
+            # charged at ITS OWN level energy (eps_Er or eps_3). The transfer now lands on
+            # 4I11/2, so its defect is (eps_Yb - eps_3) and the remaining (eps_3 - eps_Er) is
+            # charged to the 4I11/2 -> 4I13/2 relaxation -- which is where it always was, inside
+            # the adiabatic transfer defect. Their SUM is unchanged in the adiabatic limit and
+            # that is the gate.
+            # NOTE the block above computed pw_e_er / p_e_er / n_e_er charging EVERY channel's
+            # emission to n2; on this path they are discarded and recomputed per level, which is
+            # exactly what the split replaces. pw_a_er is reused as-is -- absorption is from n1
+            # at every channel either way, and `one_f` already carries the 1 - f2 - f3 form.
+            w3c = c["w3"][:, None]
+            ge2 = c["g_e_er2"][:, None] if mcc is None else c["g_e_er2"][:, None] * mcc[0]
+            ge3 = c["g_e_er3"][:, None] if mcc is None else c["g_e_er3"][:, None] * mcc[0]
+            s2p = c["s_er2"][:, None] if mcc is None else c["s_er2"][:, None] * mcc[0]
+            s3p = c["s_er3"][:, None] if mcc is None else c["s_er3"][:, None] * mcc[0]
+            pw_a3 = pw_a_er * w3c
+            pw_a2 = pw_a_er - pw_a3
+            pw_e2 = ge2 * f2[None, :] * P
+            pw_e3 = ge3 * f3a[None, :] * P
+            pw_sp2 = s2p * f2[None, :]
+            pw_sp3 = s3p * f3a[None, :]
+            p_a2, p_a3 = pw_a2.sum(0), pw_a3.sum(0)
+            p_e2, p_e3 = pw_e2.sum(0), pw_e3.sum(0)
+            p_sp2, p_sp3 = pw_sp2.sum(0), pw_sp3.sum(0)
+            n_a2, n_a3 = (pw_a2 * inv_h).sum(0), (pw_a3 * inv_h).sum(0)
+            n_e2, n_e3 = (pw_e2 * inv_h).sum(0), (pw_e3 * inv_h).sum(0)
+            p_a_er, p_e_er, p_sp_er = p_a2 + p_a3, p_e2 + p_e3, p_sp2 + p_sp3
+            q_opt = (p_a_er + p_a_yb + loss_W) - (p_e_er + p_e_yb + p_sp_er + p_sp_yb)
+
+            rates = self._rates_profile_n3(c, P, mcc)
+            df, df3, db, dbn = self._fb_rhs_n3(rates[0], rates[1], rates[2], rates[3],
+                                               rates[4], rates[5], f2, f3a, b2,
+                                               b2 if b2nc is None else b2nc, rs_m)
+            dbbar = db if b2nc is None else self._fc * db + (1.0 - self._fc) * dbn
+            _ki, _ko, _ke, _ky, _K2n, _cu, A3, (c_up, r_up) = self._n3_coeffs(rs_m)
+            tr_rate = A * k_tr * N_Er * (1.0 - f2 - f3a) * n_yb_c * b2
+            back_rate = A * self._k_back * N_Er * f3a * n_yb_c * (1.0 - b2)
+            relax_rate = A * N_Er * f3a * A3
+            dec_er = A * N_Er * f2 / self._tau_er
+            up_er = A * N_Er * self.upconversion_C_up * N_Er * f2 * f2
+            d_er = ((p_a2 - p_e2) - eps_er * (n_a2 - n_e2)
+                    + (p_a3 - p_e3) - self._eps3 * (n_a3 - n_e3)
+                    + (eps_er * dec_er - p_sp2)
+                    + (c_up * eps_er - r_up * self._eps3) * up_er)
+            d_tr = (eps_yb - self._eps3) * tr_rate
+            d_32 = (self._eps3 - eps_er) * relax_rate - p_sp3
+            d_back = (self._eps3 - eps_yb) * back_rate
+            out = {"q_optical": q_opt,
+                   "stored_J_per_m": A * (eps_er * N_Er * f2 + self._eps3 * N_Er * f3a
+                                          + eps_yb * N_Yb * bbar),
+                   "d_stored_dt": A * (eps_er * N_Er * df + self._eps3 * N_Er * df3
+                                       + eps_yb * N_Yb * dbbar),
+                   "background_loss": loss_W, "er_dissipation": d_er, "yb_dissipation": d_yb,
+                   "transfer_defect": d_tr, "k2_defect": d_k2,
+                   "relaxation_32_defect": d_32, "back_transfer_defect": d_back,
+                   "dissipation": loss_W + d_er + d_yb + d_tr + d_k2 + d_32 + d_back,
+                   "transfer_rate_per_m": tr_rate, "k2_rate_per_m": k2_rate,
+                   "relaxation_32_rate_per_m": relax_rate,
+                   "back_transfer_rate_per_m": back_rate,
+                   "df2_dt": df, "df3_dt": df3, "db2_dt": db}
+            if b2nc is not None:
+                out["db2nc_dt"] = dbn
+                out["beta_yb_mean"] = bbar
+            return out
+
         q_opt = (p_a_er + p_a_yb + loss_W) - (p_e_er + p_e_yb + p_sp_er + p_sp_yb)
 
-        rs_m = None if mcc is None else mcc[3]
         ra_er, re_er, ra_yb, re_yb = self._rates_profile(c, P, mcc)
         df, db, dbn = self._fb_rhs3(ra_er, re_er, ra_yb, re_yb, f2, b2,
                                     b2 if b2nc is None else b2nc, rs_m)
         dbbar = db if b2nc is None else self._fc * db + (1.0 - self._fc) * dbn
         phi = self._phi(b2)
-        k_tr, k_tr2 = self._k_tr, self._k_tr2
-        if rs_m is not None:
-            k_tr, k_tr2 = k_tr * rs_m[0], k_tr2 * rs_m[1]
-        n_yb_c = self._fc * N_Yb                     # the COUPLED Yb density (= N_Yb at f = 1)
         tr_rate = A * k_tr * phi * N_Er * n_yb_c * b2 * (1.0 - f2)
-        k2_rate = A * k_tr2 * N_Er * f2 * n_yb_c * b2
         dec_er = A * N_Er * f2 / self._tau_er
-        dec_yb = A * N_Yb * bbar / self._tau_yb
         up_er = A * N_Er * self.upconversion_C_up * N_Er * f2 * f2
 
         d_er = ((p_a_er - p_e_er) - eps_er * (n_a_er - n_e_er)
                 + (eps_er * dec_er - p_sp_er) + eps_er * up_er)
-        d_yb = ((p_a_yb - p_e_yb) - eps_yb * (n_a_yb - n_e_yb)
-                + (eps_yb * dec_yb - p_sp_yb))
         d_tr = (eps_yb - eps_er) * tr_rate
-        d_k2 = eps_yb * k2_rate
         out = {"q_optical": q_opt,
                "stored_J_per_m": A * (eps_er * N_Er * f2 + eps_yb * N_Yb * bbar),
                "d_stored_dt": A * (eps_er * N_Er * df + eps_yb * N_Yb * dbbar),
@@ -1644,16 +2281,205 @@ class ErYbAmplifier:
             out["beta_yb_mean"] = bbar
         return out
 
-    def stored_energy_J(self, f2, b2, z, b2_uncoupled=None) -> float:
+    def stored_energy_J(self, f2, b2, z, b2_uncoupled=None, *, f3=None) -> float:
         """Total excitation energy stored in the reservoirs [J]:
         INT A_dope (eps_Er N_Er f2(z) + eps_Yb N_Yb bbar(z)) dz, bbar = f b2c + (1-f) b2nc. This
         is the `stored` that a transient energy balance differentiates -- see energy_terms for
         eps_* and the identity. With two pools BOTH count: an uncoupled ytterbium ion stores the
         same 2.04e-19 J as a coupled one, it simply cannot hand it to the erbium. Pass the
-        uncoupled inversion as `b2_uncoupled` (None, and `b2` is the single pool's inversion)."""
+        uncoupled inversion as `b2_uncoupled` (None, and `b2` is the single pool's inversion).
+
+        With an EXPLICIT 4I11/2 pass `f3` as well: that population stores eps_3 = 2.03e-19 J per
+        ion (a 977 nm quantum, 1.57x the metastable one), so leaving it out would understate the
+        stored energy by 1.57 f3/f2 of the erbium term. It is REQUIRED on that path rather than
+        defaulted, the same rule energy_terms follows."""
+        if self._n3 and f3 is None:
+            raise ValueError("stored_energy_J: this amplifier carries an EXPLICIT Er 4I11/2 "
+                             "level (tau32_s=%g s), so pass f3=result.meta['er_4i11_2_z'] -- "
+                             "that population stores a 977 nm quantum each and dropping it "
+                             "understates the stored energy." % (self._tau32,))
+        if f3 is not None and not self._n3:
+            raise ValueError("stored_energy_J: this amplifier eliminates the Er 4I11/2 level "
+                             "adiabatically (tau32_s is None), so f3 must be None")
         A = self.fiber.a_dope_m2
         bb = b2 if b2_uncoupled is None else self._bbar(np.asarray(b2, float),
                                                         np.asarray(b2_uncoupled, float))
         u = A * (float(self.er_ion.eps_J) * self._n_er * np.asarray(f2, float)
                  + float(self.yb_ion.eps_J) * self._n_yb * np.asarray(bb, float))
+        if f3 is not None:
+            u = u + A * self._eps3 * self._n_er * np.asarray(f3, float)
         return float(trapz(u, np.asarray(z, float)))
+
+
+# ============================ Yb emission-scale calibration ==================================
+@dataclass
+class YbSigmaEScaleFit:
+    """The result of `eryb_fit_yb_sigma_e_scale`: the fitted Yb emission scale and what it costs.
+
+    Fields: `scale` (the fitted multiplier on sigma_e_Yb), `ase_1um_W` (the 1-um ASE the fitted
+    amplifier emits in the requested direction) against `target_1um_W` (the measurement),
+    `ase_1um_unit_scale_W` (what the UNSCALED model predicted -- the over-prediction the fit
+    exists to remove), `signal_out_W` and `signal_out_unit_scale_W` with their ratio
+    `signal_change_dB` (the SENSITIVITY the fit has to be judged on: Morasse's point was that the
+    signal barely moves, so a 1-um-only correction is admissible), the `bracket` actually used,
+    the number of `solves` spent, and `converged` -- which is the AND of the root find converging
+    and every solve inside it reporting convergence."""
+    scale: float
+    ase_1um_W: float
+    target_1um_W: float
+    ase_1um_unit_scale_W: float
+    signal_out_W: float
+    signal_out_unit_scale_W: float
+    signal_change_dB: float
+    bracket: Tuple[float, float]
+    solves: int
+    converged: bool
+    direction: str
+
+    def __str__(self) -> str:
+        over = (self.ase_1um_unit_scale_W / self.target_1um_W
+                if self.target_1um_W > 0.0 else float("nan"))
+        return ("YbSigmaEScaleFit(scale=%.4g, 1um %.4g W -> target %.4g W (unscaled model "
+                "%.4g W, %.1fx), signal %.4g -> %.4g W (%+.3f dB), %d solves, converged=%s)"
+                % (self.scale, self.ase_1um_W, self.target_1um_W, self.ase_1um_unit_scale_W,
+                   over, self.signal_out_unit_scale_W, self.signal_out_W,
+                   self.signal_change_dB, self.solves, self.converged))
+
+
+def _eryb_1um_and_signal(amp, scale, direction, n_nodes, solve_kwargs):
+    """(1-um ASE output [W], signal output [W], converged) for `amp` at one Yb emission scale."""
+    a = amp.with_yb_sigma_e_scale(scale)
+    r = a.solve(n_nodes=n_nodes, **solve_kwargs)
+    lo, hi = amp.yb_ase.lambda_min_m, amp.yb_ase.lambda_max_m
+    want_u = 1.0 if direction == "fwd" else -1.0
+    end = -1 if direction == "fwd" else 0
+    p_ase = 0.0
+    for i, kd in enumerate(r.kind):
+        if kd == "ase" and lo <= r.lambda_m[i] <= hi and r.u[i] * want_u > 0.0:
+            p_ase += float(r.power_W[i, end])
+    sig = [i for i, kd in enumerate(r.kind) if kd == "signal"]
+    p_sig = float(r.power_W[sig[0], -1]) if sig else float("nan")
+    return p_ase, p_sig, bool(r.meta["converged"])
+
+
+def eryb_fit_yb_sigma_e_scale(amp, measured_1um_ase_W: float, direction: str = "bwd", *,
+                              n_nodes: int = 201, bracket: Tuple[float, float] = (0.2, 1.0),
+                              scale_min: float = 1.0e-3, scale_max: float = 50.0,
+                              rtol: float = 1.0e-3, max_solves: int = 40,
+                              **solve_kwargs) -> YbSigmaEScaleFit:
+    """Fit the ONE-parameter Yb emission scale `yb_sigma_e_scale` to a MEASURED 1-um ASE output.
+
+    WHAT PROBLEM THIS SOLVES. Morasse et al. (2006) measured every parameter of a CorActive
+    Er:Yb fiber -- core diameter, NA, both ion densities, both lifetimes, the cladding area, the
+    background loss -- and the model still over-predicted the backward 1-um ASE by a factor 1000
+    (19.5 mW against 0.079 mW measured), while the SIGNAL output was insensitive to the
+    correction. He fixed it by scaling the McCumber-derived Yb emission cross-section by 0.4.
+    That is a one-parameter calibration against one measurement, and this function is it: a
+    bracketed root find on the 1-um ASE output at a fixed operating point, reporting the scale
+    AND the signal change it causes -- because the second number is what says whether the
+    correction is admissible. A scale that also moves the signal by dB is not calibrating the
+    1-um band, it is refitting the amplifier.
+
+    ARGUMENTS. `amp` must carry a `yb_ase` band -- the 1-um ASE is read from THAT band's
+    wavelength range, not from a hardcoded window -- and its C-band `ase` must not overlap it.
+    `direction` is "bwd" (the backward output at z = 0, which is what a cut-back measurement
+    collects at the input end, and Morasse's case) or "fwd". `measured_1um_ase_W` is the total
+    power in the band, in watts. `n_nodes` and any extra keywords go to `ErYbAmplifier.solve`
+    (pass `relax=0.5` or `relax="auto"` for a long, deeply absorbed fiber).
+
+    METHOD. The 1-um ASE is exponential in the Yb gain integral, so the root find runs on
+    log(ASE) against log(scale): g(ln s) = ln ASE(s) - ln target, bracketed by geometric
+    expansion of `bracket` (halving/doubling outward, to `scale_min`/`scale_max`) and closed by
+    Brent's method to `rtol` in the scale. Every evaluation is a full relaxation solve, so the
+    count is reported and capped; a typical fit is 8-14 solves. Monotonicity is NOT assumed --
+    the bracket is established by an actual sign change, and if none exists inside
+    [scale_min, scale_max] the function RAISES rather than returning the nearest endpoint, which
+    is the honest outcome when a measurement and a model disagree by more than one emission scale
+    can absorb.
+
+    The fitted scale is a property of the ION MODEL as much as of the fiber: a McCumber-derived
+    sigma_e_Yb and a measured table do not need the same correction, so report which ion pair the
+    fit was run against. See the module docstring for what the scale does and does not touch."""
+    from scipy.optimize import brentq
+    if amp.yb_ase is None:
+        raise ValueError("eryb_fit_yb_sigma_e_scale: the amplifier carries no yb_ase band, so it "
+                         "emits no 1-um ASE to fit -- add yb_ase=AseBand(1.00e-6, 1.10e-6, n)")
+    if direction not in ("fwd", "bwd"):
+        raise ValueError("eryb_fit_yb_sigma_e_scale: direction must be 'fwd' or 'bwd'; got %r"
+                         % (direction,))
+    if not (float(measured_1um_ase_W) > 0.0):
+        raise ValueError("eryb_fit_yb_sigma_e_scale: measured_1um_ase_W must be > 0; got %r"
+                         % (measured_1um_ase_W,))
+    if amp.ase is not None and not (amp.ase.lambda_max_m <= amp.yb_ase.lambda_min_m
+                                    or amp.ase.lambda_min_m >= amp.yb_ase.lambda_max_m):
+        raise ValueError("eryb_fit_yb_sigma_e_scale: the Er ASE band [%.4g, %.4g] m overlaps the "
+                         "Yb band [%.4g, %.4g] m, so the 1-um output cannot be separated from "
+                         "the C-band one by wavelength"
+                         % (amp.ase.lambda_min_m, amp.ase.lambda_max_m,
+                            amp.yb_ase.lambda_min_m, amp.yb_ase.lambda_max_m))
+    lo, hi = float(bracket[0]), float(bracket[1])
+    if not (0.0 < lo < hi):
+        raise ValueError("eryb_fit_yb_sigma_e_scale: bracket must be (lo, hi) with 0 < lo < hi; "
+                         "got %r" % (bracket,))
+    target = float(measured_1um_ase_W)
+    state = {"n": 0, "ok": True}
+    cache = {}
+
+    def _ase(s):
+        key = float(s)
+        if key not in cache:
+            if state["n"] >= int(max_solves):
+                raise RuntimeError(
+                    "eryb_fit_yb_sigma_e_scale: exceeded max_solves=%d relaxation solves. Either "
+                    "the 1-um ASE is not responding to the scale at this operating point (check "
+                    "that the fiber produces 1-um ASE at scale 1.0 at all) or rtol=%g is tighter "
+                    "than the solve's own convergence." % (max_solves, rtol))
+            state["n"] += 1
+            p_ase, p_sig, conv = _eryb_1um_and_signal(amp, key, direction, n_nodes, solve_kwargs)
+            state["ok"] = state["ok"] and conv
+            cache[key] = (p_ase, p_sig)
+        return cache[key][0]
+
+    def _g(ln_s):
+        p = _ase(np.exp(ln_s))
+        if not (p > 0.0):
+            # a fully quenched 1-um band: log space cannot express it, and it is unambiguously
+            # BELOW any positive target, so return a large negative residual instead of -inf
+            return -700.0
+        return float(np.log(p) - np.log(target))
+
+    g_lo, g_hi = _g(np.log(lo)), _g(np.log(hi))
+    while g_lo > 0.0 and lo > scale_min:                  # the whole bracket over-predicts
+        hi, g_hi = lo, g_lo
+        lo = max(lo * 0.5, scale_min)
+        g_lo = _g(np.log(lo))
+    while g_hi < 0.0 and hi < scale_max:                  # the whole bracket under-predicts
+        lo, g_lo = hi, g_hi
+        hi = min(hi * 2.0, scale_max)
+        g_hi = _g(np.log(hi))
+    if g_lo > 0.0 or g_hi < 0.0:
+        raise RuntimeError(
+            "eryb_fit_yb_sigma_e_scale: no Yb emission scale in [%g, %g] reproduces a 1-um ASE "
+            "of %.4g W -- the model gives %.4g W at %g and %.4g W at %g. The measurement and the "
+            "model disagree by more than one emission scale can absorb at this operating point; "
+            "check the pump power, the fiber length and the band definition before widening "
+            "scale_min/scale_max." % (scale_min, scale_max, target, _ase(lo), lo, _ase(hi), hi))
+    ln_root = brentq(_g, np.log(lo), np.log(hi), xtol=float(np.log1p(rtol)), rtol=1e-12)
+    s_fit = float(np.exp(ln_root))
+    if s_fit not in cache:
+        _ase(s_fit)
+    p_ase, p_sig = cache[s_fit]
+    if 1.0 not in cache:
+        state["n"] += 1
+        p1_ase, p1_sig, conv1 = _eryb_1um_and_signal(amp, 1.0, direction, n_nodes, solve_kwargs)
+        state["ok"] = state["ok"] and conv1
+        cache[1.0] = (p1_ase, p1_sig)
+    p1_ase, p1_sig = cache[1.0]
+    d_sig_dB = (10.0 * np.log10(p_sig / p1_sig) if (p_sig > 0.0 and p1_sig > 0.0)
+                else float("nan"))
+    return YbSigmaEScaleFit(scale=s_fit, ase_1um_W=float(p_ase), target_1um_W=target,
+                            ase_1um_unit_scale_W=float(p1_ase), signal_out_W=float(p_sig),
+                            signal_out_unit_scale_W=float(p1_sig),
+                            signal_change_dB=float(d_sig_dB), bracket=(float(lo), float(hi)),
+                            solves=int(state["n"]), converged=bool(state["ok"]),
+                            direction=direction)

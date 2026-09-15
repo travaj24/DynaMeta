@@ -291,6 +291,46 @@ two runs is the work done: switches (0, 0, 11, 11), probes (0, 0, 7, 7) and inne
 (436, 400, 453, 266 / 268). Those are the numbers to regress against; the seconds are quoted so
 the order of magnitude is on the record.
 
+### (6) Composition with the other 2026-09-15 additions
+
+Merged on top of v0.11.4, so two independent options now exist alongside this one. The step
+composes with one of them and refuses the other by name:
+
+* **Explicit Er 4I11/2 (`tau32_s`, v0.11.4) -- COMPOSES.** The inner iteration calls the march's
+  own `advance()` closure, which builds the exact Jacobian for whatever reservoir tuple the
+  amplifier carries and integrates it through the size-parametrized `_phi1_dt_nxn` kernel, so the
+  state size is not a parameter of the self-consistent step at all. With `tau32_s` set that tuple
+  is the FOUR-vector `(f2, f3, b2c, b2nc)`, and the 4I11/2 population constraint `f2 + f3 <= 1`
+  is enforced INSIDE the iteration (in `advance()`, against the already-clipped `f2`) rather than
+  outside it, so every inner iterate is a physically admissible state. Measured on the reference
+  co-doped fiber with `tau32_s = 7 us`, 161 nodes, cold start, 21 frames at 300 us:
+
+  | mode | end gain | step closure | self-consistent steps |
+  | --- | --- | --- | --- |
+  | `quasi_static` | 13.5224248741 dB | `1.0` (open) | 0 of 20 |
+  | `self_consistent` | 13.5223425238 dB | **`1.0e-6`** | 20 of 20 |
+  | `auto` | 13.5223242727 dB | -- | 11 of 20 |
+  | `solve()` (oracle) | 13.5213544100 dB | -- | -- |
+
+  `auto` reproduces `self_consistent` to `1.8e-5 dB`, and the self-consistent march lands on
+  `solve()` to `9.9e-4 dB` -- which is the SAME `9.9e-4 dB` mesh residue the three-state march
+  leaves on the identical fixture with `tau32_s=None` (13.5172341753 vs 13.5162400824). The
+  fourth reservoir therefore costs the inner solve nothing in accuracy: the residue is still
+  pure z-quadrature. `ase_mode="quasi_static"` on a four-state amplifier is byte-identical to the
+  default call. Gate: `test_every_mode_composes_with_the_explicit_4i11_2_level`.
+
+* **Two-population Yb (`yb_coupled_fraction`, v0.11.0) and `yb_sigma_e_scale` (v0.11.4) --
+  COMPOSE.** Both are already the three-/four-state path above; `yb_sigma_e_scale` is a
+  cross-section, invisible to the march's structure.
+
+* **Axial temperature profile (`RateTemperatureLaw` / `YbStarkThermal`, v0.11.3) -- REFUSED BY
+  NAME.** `simulate_transient_eryb` has always refused a profiled amplifier, and it now names
+  which of the two thermal objects is attached and states explicitly that `ase_mode` does not
+  rescue it: the refusal is about z-dependent RATE COEFFICIENTS, which the transient's z-local
+  balances do not carry, and is orthogonal to how the powers are solved. Both thermal objects
+  WITHOUT a profile are pure constants and every mode reproduces the unprofiled amplifier
+  bit-for-bit. Gate: the last test in `tests/test_march_self_consistent_ase.py`.
+
 ---
 
 ## 6. Guidance for the downstream burst-PAM study
