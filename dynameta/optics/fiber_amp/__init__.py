@@ -95,7 +95,7 @@ Radially-resolved (pre-reduction) solvers -- the mean-field closure of sec.1 und
   Phase 24 transverse_eryb        : the CO-DOPED ring solver -- both ions' populations per radial
            ring, so the Yb -> Er transfer is the LOCAL product k_tr n_Yb2(r) n_Er1(r) rather
            than a product of area averages, with separate Er and Yb radial dopant profiles and a
-           ring-summed energy closure (spec sec.17).
+           ring-summed energy closure (spec sec.18).
 
 FACADE CONTRACT (audit X-10). This is an EAGER, EXHAUSTIVE facade -- unlike dynameta.optics and
 dynameta.carriers, which are deliberate PEP-562 lazy facades whose gaps are by design. Every name
@@ -161,7 +161,8 @@ from dynameta.optics.fiber_amp.nonlinear_limits import (TMI_C0_DEFAULT, brilloui
                                                         mpi_beat_variance_ratio, mpi_rin_per_hz,
                                                         mpi_power_penalty_dB)
 from dynameta.optics.fiber_amp.eryb import (ErYbAmplifier, RateTemperatureLaw,
-                                           YbStarkThermal,
+                                           YbStarkThermal, YbSigmaEScaleFit,
+                                           eryb_fit_yb_sigma_e_scale,
                                            YB_STARK_976_CANAT_DUSSARDIER,
                                            RATE_ARRHENIUS_CHENG_2022,
                                            RATE_ARRHENIUS_30PCT_300_480K)
@@ -242,6 +243,8 @@ __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "TMI_C0_DEFAULT", "brillouin_phonon_number", "effective_length_m",
            "raman_gain_coefficient", "srs_stokes_wavelength_m",
            "ErYbAmplifier",
+           # 2026-09-15 explicit-4I11/2 + Yb emission-scale build (opt-in; defaults unchanged)
+           "YbSigmaEScaleFit", "eryb_fit_yb_sigma_e_scale",
            # 2026-09-15 migration / thermal / fit build (all opt-in; defaults unchanged)
            "RateTemperatureLaw", "YbStarkThermal", "YB_STARK_976_CANAT_DUSSARDIER",
            "RATE_ARRHENIUS_CHENG_2022", "RATE_ARRHENIUS_30PCT_300_480K",
