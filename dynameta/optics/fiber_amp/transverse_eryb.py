@@ -102,8 +102,18 @@ SCOPE / REFUSALS (v1; each raises ValueError with the physics reason -- see `_re
     both are strictly local and both reduce EXACTLY to eryb.py in the uniform limit.
   * an ion with NONZERO sigma_esa at any channel wavelength -- eryb.py drops the ESA term
     silently; this class refuses rather than inherit that.
+  * tau32_s (the EXPLICIT Er 4I11/2 level) and, with it, upconversion_via_4i11_2 -- the node
+    kernel solves eryb.py's ADIABATIC reduction, in which n3 is eliminated and the whole co-doped
+    system collapses to ONE bracketed scalar per ring. A third erbium unknown needs its
+    bracketing argument re-derived before it can be stepped in lockstep across rings.
 Everything else ErYbAmplifier accepts is accepted: one or two Yb pools, K2, migration, k_back,
-C_up, pair quenching, both ASE bands, core or cladding pumps, forward and backward.
+C_up, pair quenching, both ASE bands, core or cladding pumps, forward and backward -- and
+`yb_sigma_e_scale` is HONOURED END TO END for free, because ErYbAmplifier applies it as one
+multiplication on `se_yb` inside `_plan()` and this class READS that plan rather than restating
+it, so the scale reaches every ring integral, every node rate, the ASE source, eta_tr and the
+1-um diagnostic with no code here at all (gated: the uniform-illumination reduction still holds
+to 1e-3 dB with the scale off its default). `er_4i11_2_zero_line_m` rides along and is inert
+unless tau32_s is set.
 
 RAM. The ring-resolved state is (z-node x ring) per population plus (channel x z-node) powers and
 (channel x ring) profiles; `state_bytes` reports it and `solve` REFUSES above the package's 2 GiB
@@ -112,7 +122,7 @@ bar (dynamics._STORE_PROFILES_MAX_BYTES -- the same constant, not a second one).
 References: eryb.py's (the Er:Yb rate model, the two-population split, K2, migration);
 transverse.py's (Smith & Smith Eq. 1 for the local balance, Giles & Desurvire for the m h nu dnu
 seed); docs/fiber_transverse_grounding_2026_07_29.md sec.1 for the quadrature. Audit trail:
-docs/audit/2026-09-15-eryb-transverse.md; docs/fiber_amp_model_spec.md sec.17.
+docs/audit/2026-09-15-eryb-transverse.md; docs/fiber_amp_model_spec.md sec.18.
 Pure numpy/scipy; SI units; ASCII only. Power-only model.
 """
 
@@ -362,6 +372,8 @@ class ResolvedErYbAmplifier:
                  upconversion_C_up: float = 0.0, yb_coupled_fraction: float = 1.0,
                  k_tr2_m3_s: float = 0.0, yb_migration_rate_per_s: float = 0.0,
                  concentration=None, rate_temperature=None, yb_stark_thermal=None,
+                 tau32_s: Optional[float] = None, upconversion_via_4i11_2: bool = False,
+                 er_4i11_2_zero_line_m: float = 977.0e-9, yb_sigma_e_scale: float = 1.0,
                  er_profile: DopantSpec = None, yb_profile: DopantSpec = None,
                  signal_modes: Optional[Sequence] = None, uniform_illumination: bool = False,
                  n_quad: int = 24, n_azimuthal: int = 32, r_max_m: Optional[float] = None):
@@ -376,7 +388,19 @@ class ResolvedErYbAmplifier:
                                  yb_coupled_fraction=yb_coupled_fraction,
                                  k_tr2_m3_s=k_tr2_m3_s,
                                  yb_migration_rate_per_s=yb_migration_rate_per_s,
-                                 concentration=concentration)
+                                 concentration=concentration,
+                                 # HONOURED, not refused: the Yb emission scale is applied inside
+                                 # ErYbAmplifier._plan (ONE multiplication on se_yb), and this
+                                 # class READS that plan, so it flows into every ring integral,
+                                 # every node rate, the ASE source, eta_tr and the 1-um
+                                 # diagnostic with no code here at all -- which is the whole
+                                 # point of composing with the twin rather than restating it.
+                                 # er_4i11_2_zero_line_m is inert unless tau32_s is set (it only
+                                 # splits level-2 from level-3 channels), so it rides along too.
+                                 tau32_s=tau32_s,
+                                 upconversion_via_4i11_2=upconversion_via_4i11_2,
+                                 er_4i11_2_zero_line_m=er_4i11_2_zero_line_m,
+                                 yb_sigma_e_scale=yb_sigma_e_scale)
         # The two TEMPERATURE-DRIVEN opt-ins of eryb.py (2026-09-15) are accepted so a port fails
         # with a physics message instead of a TypeError, and are then refused by name in
         # `_refuse` -- they are functions of an axial T(z) this class cannot take.
@@ -384,6 +408,10 @@ class ResolvedErYbAmplifier:
                                  and getattr(rate_temperature, "is_identity", False)
                                  else rate_temperature)
         self.yb_stark_thermal = yb_stark_thermal
+        self.tau32_s = None if tau32_s is None else float(tau32_s)
+        self.upconversion_via_4i11_2 = bool(upconversion_via_4i11_2)
+        self.er_4i11_2_zero_line_m = float(er_4i11_2_zero_line_m)
+        self.yb_sigma_e_scale = float(yb_sigma_e_scale)
         self.er_ion, self.yb_ion, self.fiber = er_ion, yb_ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase, self.yb_ase = ase, yb_ase
@@ -420,6 +448,20 @@ class ResolvedErYbAmplifier:
                 "mean-field ErYbAmplifier, e.g. Giles-calibrated fibers). It IS accepted with "
                 "uniform_illumination=True, where the solver deliberately reproduces the "
                 "mean-field model and the override is exactly the Gamma that model uses.")
+        if self.tau32_s is not None:
+            raise ValueError(
+                "ResolvedErYbAmplifier: tau32_s (the EXPLICIT Er 4I11/2 level) is not supported "
+                "in v1 -- and `upconversion_via_4i11_2` with it, which eryb.py already refuses "
+                "without it. The node kernel here solves eryb.py's ADIABATIC reduction: two "
+                "erbium unknowns (f2 and the eliminated n3) plus the two ytterbium pools, "
+                "collapsed to ONE bracketed scalar equation per ring. Carrying n3 explicitly "
+                "adds a third erbium unknown whose bracketing argument (H(0) >= 0, H(1) < 0) has "
+                "to be re-derived before it can be stepped in lockstep across rings, and "
+                "asserting the reduced answer under the explicit model's name would be silent. "
+                "Use eryb.ErYbAmplifier for the explicit level; tau32_s=None (the default, the "
+                "adiabatic fast-4I11/2 limit) is what this class resolves. NOTE that "
+                "yb_sigma_e_scale and er_4i11_2_zero_line_m ARE carried -- the first is honoured "
+                "end to end, the second is inert without tau32_s.")
         for nm, opt in (("rate_temperature", self.rate_temperature),
                         ("yb_stark_thermal", self.yb_stark_thermal)):
             if opt is None:
@@ -495,6 +537,12 @@ class ResolvedErYbAmplifier:
             # both are None on any amplifier that exists (they are refused at construction), but
             # they are carried so that relaxing the refusal later needs ONE edit, not two
             rate_temperature=self.rate_temperature, yb_stark_thermal=self.yb_stark_thermal,
+            # tau32_s is always None on an amplifier that exists (refused); the Yb emission scale
+            # and the 4I11/2 zero line are real state and MUST be carried, or a metrics.* sweep
+            # would silently drop a fitted scale
+            tau32_s=self.tau32_s, upconversion_via_4i11_2=self.upconversion_via_4i11_2,
+            er_4i11_2_zero_line_m=self.er_4i11_2_zero_line_m,
+            yb_sigma_e_scale=self.yb_sigma_e_scale,
             er_profile=self.er_profile, yb_profile=self.yb_profile,
             signal_modes=(list(self.signal_modes) if signals is None else None),
             uniform_illumination=self.uniform_illumination,
@@ -1020,7 +1068,13 @@ class ResolvedErYbAmplifier:
         i1030 = raw / float(np.dot(grid.dA_m2, raw))
         keep = c["keep"]
         wi = grid.dA_m2[keep] * i1030[keep]
-        se_yb = float(self.yb_ion.sigma_e.sigma(lam))
+        # The Yb emission scale `yb_sigma_e_scale` is applied by ErYbAmplifier._plan to every
+        # channel, and this is the ONE place this class reads the Yb spectrum OUTSIDE that plan
+        # (1030 nm is not a channel unless the caller happens to have put an ASE bin there), so
+        # it is scaled here too -- exactly as eryb.py scales its own copy of this diagnostic.
+        # Missing it is not cosmetic: at Morasse's 0.40 the unscaled read gives 7.37 dB against
+        # the scaled 0.17 dB, and the uniform-illumination gate is what caught it.
+        se_yb = float(self.yb_ion.sigma_e.sigma(lam)) * self.yb_sigma_e_scale
         sa_yb = float(self.yb_ion.sigma_a.sigma(lam))
         se_er = float(self.er_ion.sigma_e.sigma(lam))
         sa_er = float(self.er_ion.sigma_a.sigma(lam))

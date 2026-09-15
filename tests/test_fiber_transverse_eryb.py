@@ -38,6 +38,96 @@ def _plan(n_er_bins=4, n_yb_bins=3):
 
 # ============================ Gate 1: the uniform-illumination limit ========================
 
+@pytest.mark.parametrize("opts", [
+    pytest.param({}, id="defaults"),
+    pytest.param({"yb_sigma_e_scale": 0.40}, id="yb_sigma_e_scale"),
+    pytest.param({"yb_sigma_e_scale": 1.85, "er_4i11_2_zero_line_m": 972e-9},
+                 id="scale_up+zero_line"),
+])
+def test_uniform_illumination_reproduces_the_scalar_amplifier_with_the_v0_11_4_options(opts):
+    """GATE 1c. PR #30 added `yb_sigma_e_scale` (one scalar on the Yb emission cross-section,
+    fitted to a measured 1-um ASE) and `er_4i11_2_zero_line_m`. The first must reach EVERY
+    Yb-emission term of the ring solver -- the modal gain, the per-node stimulated-emission rate,
+    the ASE spontaneous source, `eta_tr`'s R_e_Yb and the 1030 nm diagnostic -- and the way that
+    is achieved here is composition: `ErYbAmplifier._plan()` applies the scale once to `se_yb`
+    and this class reads that plan. Composition is only a claim until the reduction is re-run
+    with the option ON, which is this gate. The second is inert without `tau32_s` and must stay
+    inert. Bar: the same 1e-3 dB.
+
+    Discrimination: 0.40 is Morasse's value and 1.85 is deliberately the other side of 1.0, so a
+    solver that had cached its own unscaled `se_yb` anywhere would miss by far more than the bar
+    (the Yb ASE source and the 1-um gain move by the scale itself)."""
+    fib = _clad_fiber(length_m=1.5)
+    pumps = [Pump(1.0, 0.976e-6, "fwd", cladding=True)]
+    sig = [Signal(1e-4, 1.550e-6)]
+    ase, yb_ase = _plan(3, 3)
+    kw = dict(n_yb_m3=8e25, k_tr_m3_s=2e-22, yb_ase=yb_ase, yb_coupled_fraction=0.9,
+              k_tr2_m3_s=2e-22, **opts)
+    s = ErYbAmplifier(ER, YB, fib, pumps, sig, ase, **kw).solve(n_nodes=61)
+    r = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, uniform_illumination=True,
+                              **kw).solve(n_nodes=61)
+    assert s.meta["converged"] and r.meta["converged"]
+    assert abs(float(r.signal_gain_dB[0]) - float(s.signal_gain_dB[0])) < 1e-3
+    assert abs(float(r.meta["eta_transfer"]) - float(s.meta["eta_transfer"])) < 1e-6
+    assert abs(float(r.meta["yb_parasitic_gain_dB"])
+               - float(s.meta["yb_parasitic_gain_dB"])) < 1e-3
+    assert np.max(np.abs(r.power_W - s.power_W)) / np.max(s.power_W) < 1e-6
+    # the scale really did reach the solver: meta['sigma_e_yb'] is the SCALED array, and the
+    # resolved solve's 1-um parasitic gain moves with it (so the gate above is not vacuous)
+    scale = opts.get("yb_sigma_e_scale", 1.0)
+    base = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, uniform_illumination=True,
+                                 **{k: v for k, v in kw.items()
+                                    if k != "yb_sigma_e_scale"}).solve(n_nodes=61)
+    moved = abs(float(r.meta["yb_parasitic_gain_dB"])
+                - float(base.meta["yb_parasitic_gain_dB"]))
+    assert (moved > 1e-2) if scale != 1.0 else (moved == 0.0)
+
+
+def test_the_resolved_solver_honours_the_yb_emission_scale_when_actually_resolving():
+    """The same option, with the illumination RESOLVED rather than flattened -- i.e. on the path
+    that has no scalar twin to lean on. Scaling the Yb emission down must lower the 1-um
+    parasitic gain and raise the Yb inversion (less stimulated emission draining it)."""
+    fib = _clad_fiber(length_m=1.5)
+    pumps = [Pump(1.0, 0.976e-6, "fwd", cladding=True)]
+    sig = [Signal(1e-3, 1.550e-6)]
+    ase, yb_ase = _plan(3, 3)
+    kw = dict(n_yb_m3=8e25, k_tr_m3_s=2e-22, yb_ase=yb_ase)
+    hi = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, **kw).solve(n_nodes=41)
+    lo = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, yb_sigma_e_scale=0.40,
+                               **kw).solve(n_nodes=41)
+    assert float(lo.meta["yb_parasitic_gain_dB"]) < float(hi.meta["yb_parasitic_gain_dB"]) - 1e-2
+    assert float(lo.meta["beta_yb_z"][0]) > float(hi.meta["beta_yb_z"][0])
+    # and it is carried by the re-seed protocol rather than dropped on a metrics.* sweep
+    assert lo.meta["sigma_e_yb"][0] == pytest.approx(0.40 * hi.meta["sigma_e_yb"][0], rel=1e-12)
+    amp = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, ase, yb_sigma_e_scale=0.40, **kw)
+    assert amp.with_pumps([Pump(0.5, 0.976e-6, "fwd", cladding=True)]).yb_sigma_e_scale == 0.40
+
+
+def test_the_explicit_4i11_2_level_is_refused_by_name():
+    """PR #30's explicit Er 4I11/2 (`tau32_s`) carries n3 as a THIRD erbium unknown; the node
+    kernel here solves the ADIABATIC reduction, whose whole numerical argument is that the
+    co-doped system collapses to ONE bracketed scalar per ring. Refused by name rather than
+    silently answering the reduced model under the explicit model's name."""
+    fib = _clad_fiber(length_m=1.0)
+    pumps = [Pump(1.0, 0.976e-6, "fwd", cladding=True)]
+    sig = [Signal(1e-3, 1.550e-6)]
+    kw = dict(n_yb_m3=8e25, k_tr_m3_s=2e-22)
+    with pytest.raises(ValueError, match="tau32_s"):
+        ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None, tau32_s=1e-5, **kw)
+    with pytest.raises(ValueError, match="tau32_s"):
+        ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None, tau32_s=1e-5,
+                              upconversion_via_4i11_2=True, **kw)
+    # eryb.py itself refuses the routing without the level, and that refusal must reach the port
+    with pytest.raises(ValueError, match="upconversion_via_4i11_2"):
+        ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None, upconversion_via_4i11_2=True, **kw)
+    # the zero line alone is INERT (it only splits level-2 from level-3 channels), so it is
+    # accepted and must change nothing
+    a = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None, **kw).solve(n_nodes=31)
+    b = ResolvedErYbAmplifier(ER, YB, fib, pumps, sig, None,
+                              er_4i11_2_zero_line_m=960e-9, **kw).solve(n_nodes=31)
+    assert np.array_equal(a.power_W, b.power_W)
+
+
 @pytest.mark.parametrize("two_pop", [False, True])
 def test_uniform_illumination_reproduces_the_scalar_amplifier(two_pop):
     """GATE 1. With every core channel forced to its MEAN-FIELD profile Gamma_k/A_dope (and the
