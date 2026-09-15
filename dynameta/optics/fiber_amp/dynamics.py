@@ -41,8 +41,30 @@ condition every step and, when it trips, sets meta['quasi_static_valid'] = False
 measured margins) and raises a RuntimeWarning naming the limitation. Sub-stepping does NOT help
 -- _propagate_fixed is the EXACT solution of the frozen-gain ODE, so a finer z or t grid returns
 the same over-amplified ASE; only a genuinely ASE-coupled transient (a saturating gain inside the
-step) would, which is out of scope here. Use amp.solve() for the steady operating point in that
-regime.
+step) would. Use amp.solve() for the steady operating point in that regime -- or, since
+2026-09-15, `ase_mode`.
+
+LIFTING THE LIMIT -- ase_mode (2026-09-15). `simulate_transient(..., ase_mode=...)` selects how
+each step treats the ASE feedback, on BOTH amplifier classes:
+
+  "quasi_static"    THE DEFAULT and bit-for-bit the march described above.
+  "self_consistent" Each step solves  P = propagate(gain(advance(P))),  advance(P) = the EXISTING
+                    population update taken with the rates read off P, to the STEADY SOLVER'S OWN
+                    residuals and tolerance (march_ase.solve_self_consistent_step). The gain
+                    therefore DEPLETES as the in-step ASE grows, which is the negative feedback
+                    the frozen step is missing; the update is implicit, the scheme is stable at
+                    any step, and its fixed point is still exactly amp.solve()'s.
+  "auto"            Quasi-static until the audit-A-7 monitor PREDICTS a violation -- the two
+                    documented margins at the step's own populations, plus the gain integral
+                    projected at the populations the explicit update would reach -- then
+                    self-consistent for exactly the steps that need it. meta['ase_mode_steps'],
+                    ['ase_switch_steps'] and ['ase_switch_times'] log every switch.
+
+The REPORTED powers, the resolved-ASE arrays and frame_as_steady are unchanged in meaning in
+every mode: they remain the instantaneous frozen-population propagation at the populations the
+same frame reports, which is the exact quasi-static pair at that instant. Only the population
+UPDATE reads the self-consistent powers. See march_ase's module docstring for the derivation and
+for why a literal "frozen-population BVP" is a no-op.
 
 CO-DOPED (Er:Yb). simulate_transient DISPATCHES an eryb.ErYbAmplifier to
 simulate_transient_eryb, which marches TWO coupled z-local reservoirs -- the Er metastable
@@ -69,6 +91,8 @@ from typing import Callable, Optional
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK
+from dynameta.optics.fiber_amp import march_ase
+from dynameta.optics.fiber_amp.steady_state import _relaxation_residuals
 # ChannelPlan / SteadyStateResult are annotation targets on TransientResult (F-2/F-3): the
 # quoted forward references still need the names bound at module scope for ruff F821 and for
 # anyone resolving the annotations at runtime (the CI lint caught them unbound).
@@ -159,6 +183,17 @@ class TransientResult:
                 # provenance: this did not come from a relaxation solve
                 "transient_frame": it, "t_s": float(self.t_s[it]),
                 "quasi_static_valid": bool(self.meta.get("quasi_static_valid", True))}
+        # ... and, in the SELF-CONSISTENT modes only, which march produced the frame and whether
+        # THAT march was inside its regime -- the audit-A-7 "the flag cannot be lost through the
+        # frame" rule, applied to the flag that matters there. Added conditionally because the
+        # frame's meta KEY SET is itself pinned as unchanged behaviour
+        # (test_fiber_eryb_transient.py::test_single_ion_march_and_efficiency_are_unchanged_from_
+        # main asserts it exactly), and in the default mode march_valid IS quasi_static_valid, so
+        # there is nothing to carry that is not already there.
+        _mode = self.meta.get("ase_mode", "quasi_static")
+        if _mode != "quasi_static":
+            meta["ase_mode"] = _mode
+            meta["march_valid"] = bool(self.meta.get("march_valid", True))
         if ch is not None:
             meta.update({"sigma_a": ch.sigma_a.copy(), "sigma_e": ch.sigma_e.copy(),
                          "sigma_esa": ch.sigma_esa.copy()})
@@ -241,6 +276,11 @@ def _propagate_fixed(z, g, s, bc, u):
 _ASE_TO_LAUNCHED_LIMIT = 1.0
 _GAIN_INTEGRAL_LIMIT = 20.0
 
+# The same two numbers as a mapping, for march_ase.auto_switch. meta['validity_limits'] keeps
+# building its own dict literal so a caller cannot mutate the module's copy through a result.
+_VALIDITY_LIMITS = {"ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
+                    "ase_gain_integral": _GAIN_INTEGRAL_LIMIT}
+
 # Ceiling on the opt-in (Nt, K, Nz) float64 profile matrix of simulate_transient(store_profiles=
 # True). 2 GiB is well above any legitimate use of frame_as_steady (the audit's own 80-step,
 # 42-channel, 121-node frame is 3.3 MB) and well below the point where the allocation stops being
@@ -258,11 +298,71 @@ def _no_raman(amp):
                                   "without it")
 
 
+def _ase_share(P, ase_fwd, ase_bwd, p_launched):
+    """Total ASE leaving the fiber as a fraction of the LAUNCHED power -- the audit-A-7 margin,
+    written so it can be evaluated on an ARBITRARY power profile. The in-loop monitor keeps its
+    own inlined copy (touching it would put arithmetic on the default march's path); this one
+    exists for "auto", which needs the same quantity at the PROJECTED populations."""
+    p_ase = (float(np.sum(P[ase_fwd, -1])) if ase_fwd.size else 0.0) \
+        + (float(np.sum(P[ase_bwd, 0])) if ase_bwd.size else 0.0)
+    if not np.isfinite(p_ase):
+        return float("inf")
+    return p_ase / p_launched if p_launched > 0.0 else 0.0
+
+
+def _ase_mode_meta(mode, ctrl, step_mode, switch_steps, t_grid, step_resid, want_resid):
+    """The ase_mode block of TransientResult.meta -- one home, both marches. Every entry is None
+    or 0 in the default mode, so a caller can read them unconditionally and see at a glance that
+    nothing self-consistent happened."""
+    sw = np.asarray(switch_steps, int)
+    return {
+        "ase_mode": mode,
+        # (Nt,) int8: 0 = this step was taken quasi-statically, 1 = self-consistently
+        "ase_mode_steps": step_mode,
+        "ase_switch_steps": None if ctrl is None else sw,
+        "ase_switch_times": None if ctrl is None else np.asarray(t_grid, float)[sw],
+        "n_self_consistent_steps": 0 if ctrl is None else int(ctrl.n_steps),
+        "ase_probe_propagations": 0 if ctrl is None else int(ctrl.n_probes),
+        "ase_inner_iterations_total": 0 if ctrl is None else int(ctrl.n_iter_total),
+        "ase_inner_iterations_max": 0 if ctrl is None else int(ctrl.max_iter_used),
+        "ase_inner_relax": (None if ctrl is None
+                            else float(ctrl.relax_ladder[min(int(ctrl.rung),
+                                                             len(ctrl.relax_ladder) - 1)])),
+        "ase_inner_tol": None if ctrl is None else float(ctrl.tol),
+        "ase_inner_nonconverged_steps": 0 if ctrl is None else int(ctrl.n_nonconverged),
+        "max_self_consistency_residual": (None if ctrl is None
+                                          else float(ctrl.max_profile_residual)),
+        "max_step_power_residual": float(step_resid) if want_resid else None,
+    }
+
+
+def _self_consistent_reasons(ctrl, nonfinite):
+    """Why a SELF-CONSISTENT / AUTO march is not trustworthy. The audit-A-7 quasi-static margins
+    are deliberately NOT among them: exceeding them is the condition this mode exists to handle,
+    and it is reported (meta['quasi_static_valid'] and the two margins) without being an error.
+    What IS an error is an inner solve that did not reach its tolerance, or powers that went
+    non-finite anyway."""
+    reasons = []
+    if nonfinite:
+        reasons.append("non-finite channel powers appeared during the march")
+    if ctrl is not None and ctrl.n_nonconverged:
+        reasons.append("the self-consistent step did not reach its tolerance on %d of %d steps "
+                       "(worst interior residual %.3g against tol %g, damping down to relax = "
+                       "%g)" % (ctrl.n_nonconverged, ctrl.n_steps, ctrl.max_profile_residual,
+                                ctrl.tol,
+                                ctrl.relax_ladder[min(int(ctrl.rung),
+                                                      len(ctrl.relax_ladder) - 1)]))
+    return reasons
+
+
 def simulate_transient(amp: FiberAmplifier, t_grid, *,
                        signal_drive: Optional[Callable] = None,
                        pump_drive: Optional[Callable] = None,
                        n_nodes: int = 81, nbar2_0=None,
-                       store_profiles: bool = False) -> TransientResult:
+                       store_profiles: bool = False,
+                       ase_mode: str = "quasi_static",
+                       ase_tol: float = 1e-6, ase_max_iter: int = 120,
+                       ase_step_residual: bool = False) -> TransientResult:
     """March the amplifier's inversion nbar2(z, t) over t_grid. signal_drive(t) / pump_drive(t),
     if given, return the input-power vector (length = number of signals / pumps) at time t --
     step functions of them produce add/drop transients; default (None) holds the configured
@@ -282,6 +382,38 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     goes False; the arrays are still returned (unchanged) but must not be trusted. See the module
     docstring for the two measured failure cases and why sub-stepping cannot fix them.
 
+    ase_mode (2026-09-15) LIFTS that limit rather than only reporting it:
+
+      "quasi_static"    THE DEFAULT; bit-for-bit the march above, and the only mode that can
+                        report meta['quasi_static_valid'] = False as a reason not to trust the
+                        result.
+      "self_consistent" Every step solves the ASE-coupled power problem -- P propagating through
+                        the gain of the populations that step ENDS at, the populations advanced
+                        by the existing exponential integrator with those powers -- to the steady
+                        solver's own residuals and tolerance (`ase_tol`, default 1e-6, capped at
+                        `ase_max_iter` inner iterations, warm-started from the previous step).
+                        Stable at any step; fixed point still exactly amp.solve()'s.
+      "auto"            Quasi-static until the A-7 monitor PREDICTS a violation (the two margins
+                        at the current populations, plus the ASE gain integral projected at the
+                        populations the explicit update would reach, each against half its
+                        documented limit), then self-consistent for exactly those steps.
+
+    In the two new modes the result additionally carries meta['ase_mode'], ['march_valid'] (the
+    flag to test in those modes -- False only if powers went non-finite or an inner solve did not
+    converge), ['ase_mode_steps'] (Nt int8: 0 quasi-static, 1 self-consistent), ['ase_switch_
+    steps'], ['ase_switch_times'], ['n_self_consistent_steps'], ['ase_probe_propagations'] (the
+    extra propagations "auto" spent measuring a projected ASE level), ['ase_inner_iterations_
+    total'], ['ase_inner_iterations_max'], ['ase_inner_relax'], ['ase_inner_nonconverged_steps']
+    and ['max_self_consistency_residual']. frame_as_steady carries ['march_valid'] and
+    ['ase_mode'] onto the frame alongside the existing ['quasi_static_valid'].
+
+    ase_step_residual (default False, any mode) additionally measures the STEP-BY-STEP closure:
+    after each update, re-propagate at the populations the step ended at and report the worst
+    relative disagreement with the powers the step actually used, on
+    meta['max_step_power_residual']. It costs one extra propagation per step, which is why it is
+    opt-in; it is the number that separates a step whose own inversion sustains its powers from
+    one whose does not.
+
     RESOLVED ASE (audit F-2): the result now carries the time-resolved ASE spectrum the march was
     already computing -- ase_fwd_W / ase_bwd_W (Nt, n_bins), ase_lambda_m, ase_dnu_hz, and
     ase_psd_1pol_W_Hz() -- plus the ChannelPlan every array is indexed by. store_profiles=True
@@ -291,6 +423,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     (_STORE_PROFILES_MAX_BYTES) is REFUSED with the shape, because past that point the allocation
     stops raising and starts taking the process down with it."""
     _no_raman(amp)
+    ase_mode = march_ase.check_ase_mode(ase_mode)
     # DISPATCH (2026-09-13). The body below is the SINGLE-ION march: it reads _n_active, the
     # McCumber matrix and the ConcentrationModel, and advances ONE scalar reservoir per node. A
     # CO-DOPED amplifier has two coupled ion populations and no single nbar2, so it is handed to
@@ -303,7 +436,10 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         if isinstance(amp, ErYbAmplifier):
             return simulate_transient_eryb(amp, t_grid, signal_drive=signal_drive,
                                            pump_drive=pump_drive, n_nodes=n_nodes,
-                                           nbar2_0=nbar2_0, store_profiles=store_profiles)
+                                           nbar2_0=nbar2_0, store_profiles=store_profiles,
+                                           ase_mode=ase_mode, ase_tol=ase_tol,
+                                           ase_max_iter=ase_max_iter,
+                                           ase_step_residual=ase_step_residual)
         raise TypeError("simulate_transient supports FiberAmplifier and ErYbAmplifier only, not "
                         "%s: the single-ion march reads the single-ion inversion state "
                         "(_n_active, the McCumber matrix, the ConcentrationModel) and the "
@@ -383,6 +519,31 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         R_e = np.sum(flux_e_pref * flux, axis=0)                 # sigma_e (x McCumber, if profiled)
         return R_a, R_e
 
+    def advance(n2z, P, dt):
+        """nbar2 after dt, from the powers P -- the exponential integrator on the local balance.
+        THE single home of the update: the quasi-static march calls it once per step with the
+        frozen-inversion powers, and the self-consistent step calls it inside its iteration with
+        the powers being solved for. Same arithmetic, same order, either way.
+
+        The cooperative-upconversion loss C n_a n2^2 is folded in SEMI-IMPLICITLY by linearizing
+        about the current n2 (rate C n_a n2_current per unit n2), so the update stays
+        unconditionally stable for any dt and its fixed point satisfies the exact quadratic
+        balance R_a(1-n2) = n2/tau + R_e n2 + C n_a n2^2 (audit S3-38: the old explicit-Euler
+        bolt-on biased the converged inversion by O(dt) and broke the stability claim).
+
+        Gate on the NORMALISED coefficient, not on the ConcentrationModel: FiberAmplifier folds
+        BOTH documented spellings (concentration.c_up_m3_s and the raw upconversion_C_up=) into
+        self.upconversion_C_up, and the steady-state _nbar2_c reads only that attribute. Gating
+        on the object dropped the raw-C_up opt-in entirely -- the transient came out bit-equal to
+        the C_up = 0 ideal and disagreed with its own steady-state solve by 4.5 dB at the repo's
+        own test value 3e-23 (audit A-1)."""
+        R_a, R_e = rates(P)
+        B = R_a + R_e + inv_tau
+        if amp.upconversion_C_up > 0.0:
+            B = B + amp.upconversion_C_up * na * n2z
+        n2_ss = R_a / B
+        return np.clip(n2_ss + (n2z - n2_ss) * np.exp(-B * dt), 0.0, 1.0)
+
     # initial inversion: steady state at the first drive (interp to z), unless supplied
     t0 = float(t_grid[0])
     if nbar2_0 is not None:
@@ -411,6 +572,20 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     worst_gain_integral = 0.0
     nonfinite = False
 
+    # ---- self-consistent ASE stepping (2026-09-15) -----------------------------------------
+    # ctrl is None for ase_mode == "quasi_static", which is what makes that path the untouched
+    # one: every branch below tests it, so the default march performs no extra arithmetic and
+    # returns byte-identical arrays.
+    fwd_idx = np.where(u > 0.0)[0]
+    bwd_idx = np.where(u < 0.0)[0]
+    ctrl = None
+    step_mode = None
+    switch_steps = []
+    worst_step_resid = 0.0
+    if ase_mode != "quasi_static":
+        ctrl = march_ase.SelfConsistentControl(tol=float(ase_tol), max_iter=int(ase_max_iter))
+        step_mode = np.zeros(Nt, np.int8)
+
     # ---- resolved-ASE capture (audit F-2) --------------------------------------------------
     # The forward and backward ASE bins are the SAME spectral grid generated twice by _plan, so one
     # wavelength/bin-width vector describes both. Sort by wavelength once and index with it, so the
@@ -434,22 +609,33 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         g, s = g_s(n2)
         P = _propagate_fixed(z, g, s, bc, u)
         # --- validity monitor (read-only) ---
-        if not np.all(np.isfinite(P)):
+        # step_* are THIS step's margins (the running worst_* are unchanged); "auto" reads them
+        # to decide whether this step needs the self-consistent solver.
+        step_ase_ratio = 0.0
+        step_gain_integral = 0.0
+        step_launched = 0.0
+        step_nonfinite = not np.all(np.isfinite(P))
+        if step_nonfinite:
             nonfinite = True
         if ase_any.size:
             p_ase = (float(np.sum(P[ase_fwd, -1])) if ase_fwd.size else 0.0) \
                 + (float(np.sum(P[ase_bwd, 0])) if ase_bwd.size else 0.0)
             p_launched = float(np.sum(np.maximum(bc, 0.0)))
+            step_launched = p_launched
             if not np.isfinite(p_ase):
                 nonfinite = True
+                step_nonfinite = True
             elif p_launched > 0.0:
-                worst_ase_ratio = max(worst_ase_ratio, p_ase / p_launched)
+                step_ase_ratio = p_ase / p_launched
+                worst_ase_ratio = max(worst_ase_ratio, step_ase_ratio)
             gi = np.sum(0.5 * (g[ase_any, 1:] + g[ase_any, :-1]) * dz, axis=1)
             gi_max = float(np.max(gi))
             if np.isfinite(gi_max):
+                step_gain_integral = gi_max
                 worst_gain_integral = max(worst_gain_integral, gi_max)
             else:
                 nonfinite = True
+                step_nonfinite = True
         n2_zt[it] = n2
         # audit F-2: keep the resolved ASE the frozen-inversion step just computed (forward at
         # z = L, backward at z = 0), and optionally the whole profile matrix. Read-only w.r.t. the
@@ -468,26 +654,66 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             pmp_out[it, j] = P[i, -1] if u[i] > 0 else P[i, 0]
         if it == Nt - 1:
             break
-        # advance nbar2 over dt with an exponential integrator on the local balance. The
-        # cooperative-upconversion loss C n_a n2^2 is folded in SEMI-IMPLICITLY by linearizing
-        # about the current n2 (rate C n_a n2_current per unit n2), so the update stays
-        # unconditionally stable for any dt and its fixed point satisfies the exact quadratic
-        # balance R_a(1-n2) = n2/tau + R_e n2 + C n_a n2^2 (audit S3-38: the old explicit-Euler
-        # bolt-on biased the converged inversion by O(dt) and broke the stability claim).
+        # advance nbar2 over dt with an exponential integrator on the local balance -- `advance`
+        # above is the single home of that update; see its docstring for the semi-implicit
+        # upconversion term (audit S3-38) and the normalised-coefficient gate (audit A-1).
         dt = float(t_grid[it + 1] - t)
-        R_a, R_e = rates(P)
-        B = R_a + R_e + inv_tau
-        # Gate on the NORMALISED coefficient, not on the ConcentrationModel: FiberAmplifier
-        # folds BOTH documented spellings (concentration.c_up_m3_s and the raw
-        # upconversion_C_up=) into self.upconversion_C_up, and the steady-state _nbar2_c reads
-        # only that attribute. Gating on the object dropped the raw-C_up opt-in entirely --
-        # the transient came out bit-equal to the C_up = 0 ideal and disagreed with its own
-        # steady-state solve by 4.5 dB at the repo's own test value 3e-23 (audit A-1).
-        if amp.upconversion_C_up > 0.0:
-            B = B + amp.upconversion_C_up * na * n2
-        n2_ss = R_a / B
-        n2 = n2_ss + (n2 - n2_ss) * np.exp(-B * dt)
-        n2 = np.clip(n2, 0.0, 1.0)
+        P_used = P
+        if ctrl is None:
+            n2 = advance(n2, P, dt)
+        else:
+            # The EXPLICIT update is taken first in every mode: "self_consistent" discards it,
+            # "auto" uses the populations it reaches to PROJECT this step's ASE gain integral,
+            # which is the predictive half of the switch criterion (a cold start looks perfectly
+            # healthy right up to the step that inverts the fiber).
+            n2_exp = None
+            take_sc = ase_mode == "self_consistent"
+            if not take_sc:
+                n2_exp = advance(n2, P, dt)
+                gi_proj = 0.0
+                probed = None
+                if ase_any.size:
+                    g_proj, s_proj = g_s(n2_exp)
+                    gi_proj = float(np.max(np.sum(
+                        0.5 * (g_proj[ase_any, 1:] + g_proj[ase_any, :-1]) * dz, axis=1)))
+                    if march_ase.needs_ase_probe(step_gain_integral, gi_proj):
+                        ctrl.n_probes += 1
+                        probed = _ase_share(_propagate_fixed(z, g_proj, s_proj, bc, u),
+                                            ase_fwd, ase_bwd, step_launched)
+                if march_ase.auto_switch(step_ase_ratio, step_gain_integral, gi_proj,
+                                         step_nonfinite, _VALIDITY_LIMITS, ctrl.switch_fraction,
+                                         ctrl.step_error, probed):
+                    ctrl.arm()
+                    take_sc = True
+                else:
+                    take_sc = ctrl.sticky()
+            if take_sc:
+                P_used, rep = march_ase.solve_self_consistent_step(
+                    lambda gg, ss: _propagate_fixed(z, gg, ss, bc, u),
+                    lambda Pq: advance(n2, Pq, dt), g_s, fwd_idx, bwd_idx, ctrl, P)
+                ctrl.record(rep)
+                step_mode[it] = 1
+                switch_steps.append(it)
+                n2 = advance(n2, P_used, dt)
+            else:
+                n2 = n2_exp
+                # keep the warm start FRESH: a switch that happens ten steps from now should
+                # start from this step's profile, not from the last switched step's. Free (an
+                # assignment), and it only ever costs inner iterations, never correctness.
+                ctrl.seed = P
+        if ase_step_residual:
+            # STEP-BY-STEP CLOSURE (opt-in, any mode): do the powers this step used survive at
+            # the inversion the step ENDED at? Re-propagate there and take the steady solver's
+            # own profile residual against them. A self-consistent step answers "yes to the
+            # inner tolerance" by construction; a quasi-static step in the runaway regime does
+            # not, and that difference is the honest measure of what the mode buys.
+            g_chk, s_chk = g_s(n2)
+            P_chk = _propagate_fixed(z, g_chk, s_chk, bc, u)
+            o_chk, pr_chk = march_ase.residual_views(P_chk, fwd_idx, bwd_idx)
+            o_use, pr_use = march_ase.residual_views(P_used, fwd_idx, bwd_idx)
+            _e_r, _p_r = _relaxation_residuals(o_chk, o_use, pr_chk, pr_use)
+            worst_step_resid = (max(worst_step_resid, _p_r) if np.isfinite(_p_r)
+                                else float("inf"))
 
     reasons = []
     if nonfinite:
@@ -500,7 +726,21 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
                        " a single-pass ASE gain of e^{:g})".format(
                            worst_gain_integral, _GAIN_INTEGRAL_LIMIT, _GAIN_INTEGRAL_LIMIT))
     warn_msg = None
-    if reasons:
+    # The ONLY mode that treats the audit-A-7 margins as a reason to distrust the result is the
+    # quasi-static one; the other two step through that regime on purpose. march_valid is the
+    # flag to test in those modes (and is identical to quasi_static_valid in the default one).
+    if ase_mode == "quasi_static":
+        march_valid = not reasons
+    else:
+        sc_reasons = _self_consistent_reasons(ctrl, nonfinite)
+        march_valid = not sc_reasons
+        if sc_reasons:
+            warnings.warn(
+                "simulate_transient(ase_mode=%r): the self-consistent ASE step did not close -- "
+                % ase_mode + "; ".join(sc_reasons) + ". Raise ase_max_iter, loosen ase_tol, or "
+                "shorten the time step; meta['march_valid'] is False and the returned arrays "
+                "must not be trusted.", RuntimeWarning, stacklevel=2)
+    if reasons and ase_mode == "quasi_static":
         warn_msg = (
             "simulate_transient: the quasi-static (frozen-inversion) step is OUT OF ITS VALID "
             "REGIME -- " + "; ".join(reasons) + ". The step propagates exp(INT g dz) at a FIXED "
@@ -513,23 +753,27 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             "propagation is already exact. See TransientResult.meta['quasi_static_valid'] "
             "(audit A-7).")
         warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
-    return TransientResult(t_grid, z, n2_zt, sig_out, pmp_out, gain_dB, list(kind),
-                           meta={"n_signal": len(sig_idx), "n_pump": len(pmp_idx),
-                                 # audit A-7 validity flag: False => the frozen-inversion step
-                                 # left its regime and the long-time limit is NOT amp.solve()
-                                 "quasi_static_valid": not reasons,
-                                 "max_ase_to_launched": float(worst_ase_ratio),
-                                 "max_ase_gain_integral": float(worst_gain_integral),
-                                 "nonfinite_powers": bool(nonfinite),
-                                 "validity_limits": {
-                                     "ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
+    meta = _ase_mode_meta(ase_mode, ctrl, step_mode, switch_steps, t_grid, worst_step_resid,
+                          ase_step_residual)
+    meta.update({"n_signal": len(sig_idx), "n_pump": len(pmp_idx),
+                 # audit A-7 validity flag: False => the frozen-inversion step left its regime
+                 # and the long-time limit is NOT amp.solve()
+                 "quasi_static_valid": not reasons,
+                 # the flag for THIS march: identical to quasi_static_valid in the default mode,
+                 # and the one to test in the other two
+                 "march_valid": bool(march_valid),
+                 "max_ase_to_launched": float(worst_ase_ratio),
+                 "max_ase_gain_integral": float(worst_gain_integral),
+                 "nonfinite_powers": bool(nonfinite),
+                 "validity_limits": {"ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
                                      "ase_gain_integral": _GAIN_INTEGRAL_LIMIT},
-                                 "validity_warning": warn_msg,
-                                 # audit F-2/A-5: the mode count and the per-z McCumber matrix the
-                                 # march actually used, so a frame handed to the noise layer is
-                                 # self-consistent rather than mixing a T_ref sigma_e with a hot
-                                 # nbar2 (the audit-A-6 trap, in transient form).
-                                 "m_modes": int(m), "mcc": None if mcc is None else mcc.copy()},
+                 "validity_warning": warn_msg,
+                 # audit F-2/A-5: the mode count and the per-z McCumber matrix the march
+                 # actually used, so a frame handed to the noise layer is self-consistent rather
+                 # than mixing a T_ref sigma_e with a hot nbar2 (the audit-A-6 trap, in
+                 # transient form).
+                 "m_modes": int(m), "mcc": None if mcc is None else mcc.copy()})
+    return TransientResult(t_grid, z, n2_zt, sig_out, pmp_out, gain_dB, list(kind), meta=meta,
                            ase_fwd_W=ase_f_zt, ase_bwd_W=ase_b_zt, ase_lambda_m=ase_lam,
                            ase_dnu_hz=ase_dnu, plan=amp.channel_plan(), power_zt=prof_zt)
 
@@ -740,7 +984,10 @@ def simulate_transient_eryb(amp, t_grid, *,
                             signal_drive: Optional[Callable] = None,
                             pump_drive: Optional[Callable] = None,
                             n_nodes: int = 81, nbar2_0=None,
-                            store_profiles: bool = False) -> TransientResult:
+                            store_profiles: bool = False,
+                            ase_mode: str = "quasi_static",
+                            ase_tol: float = 1e-6, ase_max_iter: int = 120,
+                            ase_step_residual: bool = False) -> TransientResult:
     """March an eryb.ErYbAmplifier's TWO coupled reservoirs f2(z, t) (Er 4I13/2) and b2(z, t) (Yb
     2F5/2) over t_grid. Same call signature and same return type as simulate_transient, which
     dispatches here, so a caller holding either amplifier class writes the same line.
@@ -788,16 +1035,36 @@ def simulate_transient_eryb(amp, t_grid, *,
     integrator is stable at any of them: meta['max_dt_times_rate'], the largest ||dt J||_inf the
     march saw (>> 1 means the Yb reservoir was slaved to the Er state within a step rather than
     resolved -- correct for the endpoints, first-order on the path), and
-    meta['max_population_overshoot'], the largest excursion outside [0, 1] the clip had to undo."""
+    meta['max_population_overshoot'], the largest excursion outside [0, 1] the clip had to undo.
+
+    ase_mode / ase_tol / ase_max_iter / ase_step_residual (2026-09-15) are exactly the
+    simulate_transient options, with the SAME meanings and the same meta keys; the
+    self-consistent step wraps the coupled pair's own exponential Rosenbrock update rather than
+    the single-ion exponential integrator, and is otherwise the same iteration. See that
+    function's docstring, and march_ase's, for what each mode does."""
     _no_raman(amp)
+    ase_mode = march_ase.check_ase_mode(ase_mode)
     if getattr(amp, "_Tz", None) is not None:
+        # The profile is the single gate on EVERY temperature-dependent co-doped coefficient:
+        # the two ions' per-z McCumber sigma_e scaling, and (2026-09-15) the YbStarkThermal band
+        # scale and the RateTemperatureLaw Arrhenius scaling of k_tr / K2 / W_mig, both of which
+        # eryb._mcc_matrices returns only when a profile is set. So refusing on _Tz refuses all
+        # of them together, and an amplifier carrying those opt-ins WITHOUT a profile is inert
+        # by the library's own contract and marches normally -- which is gated, not assumed
+        # (tests/test_march_self_consistent_ase.py).
+        extra = [n for n in ("rate_temperature", "yb_stark_thermal")
+                 if getattr(amp, n, None) is not None]
         raise NotImplementedError(
             "simulate_transient: this co-doped amplifier carries an axial temperature profile "
-            "(set_temperature_profile / solve_with_thermal_feedback), which the march does not "
+            "(set_temperature_profile / solve_with_thermal_feedback%s), which the march does not "
             "yet apply -- the frozen-population step would silently propagate the COLD "
             "cross-sections and disagree with amp.solve() by dB. Call "
             "amp.clear_temperature_profile() to march the isothermal amplifier, or use "
-            "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state.")
+            "amp.solve() / thermal.solve_with_thermal_feedback for the hot steady state. This "
+            "refusal covers ase_mode=\"self_consistent\" and \"auto\" too: those change the "
+            "population UPDATE, not the cross-sections the step propagates through."
+            % ("" if not extra else ", and the temperature-dependent " + " and ".join(extra)
+               + " it also carries"))
     two_pop = bool(getattr(amp, "_two_pop", False))
     n3 = bool(getattr(amp, "_n3", False))
     fc = float(getattr(amp, "_fc", 1.0))
@@ -974,6 +1241,110 @@ def simulate_transient_eryb(amp, t_grid, *,
     worst_overshoot = 0.0
     nonfinite = False
 
+    step_diag = {"rate": 0.0, "over": None}
+
+    def advance(y, P, dt):
+        """The coupled reservoirs after dt, from the powers P -- the exponential Rosenbrock step
+        of the block comment above, and THE single home of it. The quasi-static march calls it
+        once per step with the frozen-population powers; the self-consistent step calls it inside
+        its iteration with the powers being solved for.
+
+        y is whichever reservoir tuple this amplifier carries -- (f2, b2), (f2, b2c, b2nc),
+        (f2, f3, b2) or (f2, f3, b2c, b2nc) with an explicit 4I11/2 -- and the returned tuple is
+        clipped exactly as the march has always clipped it. The step is size-parametrized, so the
+        four state sizes differ only in which rhs/Jacobian pair is built here. The two reported
+        diagnostics (||dt J||_inf and the clip overshoot, the latter None when the step went
+        non-finite) are left in `step_diag` for `commit_diag` to fold into the running maxima --
+        so an inner iterate that is later discarded cannot pollute them."""
+        n_st = len(y)
+        if n3:
+            # FOUR reservoirs (three when the ytterbium is one pool): the SAME exponential
+            # Rosenbrock step through the SAME size-parametrized phi_1 kernel, with the exact
+            # Jacobian eryb._fb_jacobian_n3. The 4I11/2 row is the stiffest in the system -- A_32
+            # is 1e5-1e9 1/s against 1/tau_Er = 1e2 -- which is precisely why the step has to be
+            # exponential and the Jacobian exact rather than frozen.
+            rt = amp._rates_profile_n3(c, P)
+            b2n_arg = y[2] if n_st == 3 else y[3]
+            rhs4 = amp._fb_rhs_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5],
+                                  y[0], y[1], y[2], b2n_arg)
+            J4 = amp._fb_jacobian_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5],
+                                     y[0], y[1], y[2], b2n_arg)
+            rhs = tuple(rhs4[:n_st])
+            J = [[J4[_i][_j] for _j in range(n_st)] for _i in range(n_st)]
+        elif n_st == 3:
+            rt = amp._rates_profile(c, P)
+            rhs = amp._fb_rhs3(rt[0], rt[1], rt[2], rt[3], y[0], y[1], y[2])
+            J = amp._fb_jacobian3(rt[0], rt[1], rt[2], rt[3], y[0], y[1], y[2])
+        else:
+            rt = amp._rates_profile(c, P)
+            rhs = amp._fb_rhs(rt[0], rt[1], rt[2], rt[3], y[0], y[1])
+            j11, j12, j21, j22 = amp._fb_jacobian(rt[0], rt[1], rt[2], rt[3], y[0], y[1])
+            J = [[j11, j12], [j21, j22]]
+        rowsum = np.abs(J[0][0])
+        for _j in range(1, n_st):
+            rowsum = rowsum + np.abs(J[0][_j])
+        for _i in range(1, n_st):
+            acc = np.abs(J[_i][0])
+            for _j in range(1, n_st):
+                acc = acc + np.abs(J[_i][_j])
+            rowsum = np.maximum(rowsum, acc)
+        step_diag["rate"] = float(np.max(rowsum)) * abs(dt)
+        M = _phi1_dt_nxn(J, dt)
+        y_new = []
+        for _i in range(n_st):
+            # accumulate STARTING FROM y[i], left to right -- the association the two-reservoir
+            # step has always used (y + m0 r0) + m1 r1. Summing the increment first and adding it
+            # to y last is algebraically the same and numerically is not: it moves the pinned
+            # one-pool march by ~1 ULP per node, which would falsify the byte-identity gate.
+            acc_y = y[_i] + M[_i][0] * rhs[0]
+            for _j in range(1, n_st):
+                acc_y = acc_y + M[_i][_j] * rhs[_j]
+            y_new.append(acc_y)
+        if all(np.all(np.isfinite(v)) for v in y_new):
+            over = np.maximum(-y_new[0], y_new[0] - 1.0)
+            for v in y_new[1:]:
+                over = np.maximum(over, np.maximum(-v, v - 1.0))
+            step_diag["over"] = float(np.max(over))
+        else:
+            step_diag["over"] = None
+        if n3:
+            # the population constraint is f2 + f3 <= 1 (N_Er = n1 + n2 + n3), so f3 is clipped
+            # against the ALREADY CLIPPED f2 rather than against 1
+            f2c = np.clip(y_new[0], 0.0, 1.0)
+            out = [f2c, np.clip(y_new[1], 0.0, np.maximum(1.0 - f2c, 0.0))]
+            out.extend(np.clip(v, 0.0, 1.0) for v in y_new[2:])
+            return tuple(out)
+        return tuple(np.clip(v, 0.0, 1.0) for v in y_new)
+
+    def commit_diag():
+        """Fold the ACCEPTED step's diagnostics into the running maxima, in the order the march
+        has always folded them (the rate first, then the overshoot / the non-finite latch)."""
+        nonlocal worst_dt_rate, worst_overshoot, nonfinite
+        worst_dt_rate = max(worst_dt_rate, step_diag["rate"])
+        if step_diag["over"] is None:
+            nonfinite = True
+        else:
+            worst_overshoot = max(worst_overshoot, step_diag["over"])
+
+    def gs_y(y):
+        """(g, s) from a reservoir tuple: the population-weighted Yb inversion the optical field
+        sees is what g_s takes, and for ONE pool that is b2 itself (the same object, untouched).
+        With an explicit 4I11/2 the tuple is (f2, f3, b2...) and g_s takes f3 as well."""
+        if n3:
+            return g_s(y[0], y[2] if len(y) == 3 else fc * y[2] + (1.0 - fc) * y[3], y[1])
+        return g_s(y[0], y[1] if len(y) == 2 else fc * y[1] + (1.0 - fc) * y[2])
+
+    # ---- self-consistent ASE stepping (2026-09-15); see simulate_transient for the modes ----
+    fwd_idx = np.where(u > 0.0)[0]
+    bwd_idx = np.where(u < 0.0)[0]
+    ctrl = None
+    step_mode = None
+    switch_steps = []
+    worst_step_resid = 0.0
+    if ase_mode != "quasi_static":
+        ctrl = march_ase.SelfConsistentControl(tol=float(ase_tol), max_iter=int(ase_max_iter))
+        step_mode = np.zeros(Nt, np.int8)
+
     if ase_fwd.size:
         ase_fwd_idx = ase_fwd[np.argsort(lam[ase_fwd])]
         ase_bwd_idx = ase_bwd[np.argsort(lam[ase_bwd])] if ase_bwd.size else ase_bwd
@@ -992,22 +1363,32 @@ def simulate_transient_eryb(amp, t_grid, *,
         bb = b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n
         g, s = g_s(f2, bb, f3)
         P = _propagate_fixed(z, g, s, bc, u)
-        if not np.all(np.isfinite(P)):
+        # step_* are THIS step's margins (the running worst_* are unchanged); "auto" reads them.
+        step_ase_ratio = 0.0
+        step_gain_integral = 0.0
+        step_launched = 0.0
+        step_nonfinite = not np.all(np.isfinite(P))
+        if step_nonfinite:
             nonfinite = True
         if ase_any.size:
             p_ase = (float(np.sum(P[ase_fwd, -1])) if ase_fwd.size else 0.0) \
                 + (float(np.sum(P[ase_bwd, 0])) if ase_bwd.size else 0.0)
             p_launched = float(np.sum(np.maximum(bc, 0.0)))
+            step_launched = p_launched
             if not np.isfinite(p_ase):
                 nonfinite = True
+                step_nonfinite = True
             elif p_launched > 0.0:
-                worst_ase_ratio = max(worst_ase_ratio, p_ase / p_launched)
+                step_ase_ratio = p_ase / p_launched
+                worst_ase_ratio = max(worst_ase_ratio, step_ase_ratio)
             gi = np.sum(0.5 * (g[ase_any, 1:] + g[ase_any, :-1]) * dz, axis=1)
             gi_max = float(np.max(gi))
             if np.isfinite(gi_max):
+                step_gain_integral = gi_max
                 worst_gain_integral = max(worst_gain_integral, gi_max)
             else:
                 nonfinite = True
+                step_nonfinite = True
         f2_zt[it] = f2
         b2_zt[it] = bb
         if two_pop:
@@ -1031,73 +1412,72 @@ def simulate_transient_eryb(amp, t_grid, *,
 
         # ---- advance the coupled pair (exponential Rosenbrock; see the block comment) -------
         dt = float(t_grid[it + 1] - t)
-        rates = None
         if n3:
-            # FOUR reservoirs (three when the ytterbium is one pool): the SAME exponential
-            # Rosenbrock step through the SAME size-parametrized phi_1 kernel, with the exact
-            # Jacobian eryb._fb_jacobian_n3. The 4I11/2 row is the stiffest in the system -- A_32
-            # is 1e5-1e9 1/s against 1/tau_Er = 1e2 -- which is precisely why the step has to be
-            # exponential and the Jacobian exact rather than frozen.
-            rt = amp._rates_profile_n3(c, P)
-            b2n_arg = b2 if b2n is None else b2n
-            rhs4 = amp._fb_rhs_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5], f2, f3, b2, b2n_arg)
-            J4 = amp._fb_jacobian_n3(rt[0], rt[1], rt[2], rt[3], rt[4], rt[5],
-                                     f2, f3, b2, b2n_arg)
-            ns = 4 if two_pop else 3
-            rhs = tuple(rhs4[:ns])
-            J = [[J4[i][j] for j in range(ns)] for i in range(ns)]
-            y = (f2, f3, b2) if ns == 3 else (f2, f3, b2, b2n)
-        elif two_pop:
-            rates = amp._rates_profile(c, P)
-            rhs = amp._fb_rhs3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
-            J = amp._fb_jacobian3(rates[0], rates[1], rates[2], rates[3], f2, b2, b2n)
-            y = (f2, b2, b2n)
+            y = (f2, f3, b2, b2n) if two_pop else (f2, f3, b2)
         else:
-            rates = amp._rates_profile(c, P)
-            rhs = amp._fb_rhs(rates[0], rates[1], rates[2], rates[3], f2, b2)
-            j11, j12, j21, j22 = amp._fb_jacobian(rates[0], rates[1], rates[2], rates[3], f2, b2)
-            J = [[j11, j12], [j21, j22]]
-            y = (f2, b2)
-        n_st = len(y)
-        rowsum = np.abs(J[0][0])
-        for _j in range(1, n_st):
-            rowsum = rowsum + np.abs(J[0][_j])
-        for _i in range(1, n_st):
-            acc = np.abs(J[_i][0])
-            for _j in range(1, n_st):
-                acc = acc + np.abs(J[_i][_j])
-            rowsum = np.maximum(rowsum, acc)
-        worst_dt_rate = max(worst_dt_rate, float(np.max(rowsum)) * abs(dt))
-        M = _phi1_dt_nxn(J, dt)
-        y_new = []
-        for _i in range(n_st):
-            # accumulate STARTING FROM y[i], left to right -- the association the two-reservoir
-            # step has always used (y + m0 r0) + m1 r1. Summing the increment first and adding it
-            # to y last is algebraically the same and numerically is not: it moves the pinned
-            # one-pool march by ~1 ULP per node, which would falsify the byte-identity gate.
-            acc_y = y[_i] + M[_i][0] * rhs[0]
-            for _j in range(1, n_st):
-                acc_y = acc_y + M[_i][_j] * rhs[_j]
-            y_new.append(acc_y)
-        if all(np.all(np.isfinite(v)) for v in y_new):
-            over = np.maximum(-y_new[0], y_new[0] - 1.0)
-            for v in y_new[1:]:
-                over = np.maximum(over, np.maximum(-v, v - 1.0))
-            worst_overshoot = max(worst_overshoot, float(np.max(over)))
+            y = (f2, b2, b2n) if two_pop else (f2, b2)
+        P_used = P
+        if ctrl is None:
+            y_new = advance(y, P, dt)
+            commit_diag()
         else:
-            nonfinite = True
-        f2 = np.clip(y_new[0], 0.0, 1.0)
+            # The EXPLICIT update is taken first in every mode: "self_consistent" discards it,
+            # "auto" uses the populations it reaches to PROJECT this step's ASE gain integral,
+            # which is the predictive half of the switch criterion (a cold start looks perfectly
+            # healthy right up to the step that inverts the fiber).
+            y_exp = None
+            take_sc = ase_mode == "self_consistent"
+            if not take_sc:
+                y_exp = advance(y, P, dt)
+                gi_proj = 0.0
+                probed = None
+                if ase_any.size:
+                    g_proj, s_proj = gs_y(y_exp)
+                    gi_proj = float(np.max(np.sum(
+                        0.5 * (g_proj[ase_any, 1:] + g_proj[ase_any, :-1]) * dz, axis=1)))
+                    if march_ase.needs_ase_probe(step_gain_integral, gi_proj):
+                        ctrl.n_probes += 1
+                        probed = _ase_share(_propagate_fixed(z, g_proj, s_proj, bc, u),
+                                            ase_fwd, ase_bwd, step_launched)
+                if march_ase.auto_switch(step_ase_ratio, step_gain_integral, gi_proj,
+                                         step_nonfinite, _VALIDITY_LIMITS, ctrl.switch_fraction,
+                                         ctrl.step_error, probed):
+                    ctrl.arm()
+                    take_sc = True
+                else:
+                    take_sc = ctrl.sticky()
+            if take_sc:
+                P_used, rep = march_ase.solve_self_consistent_step(
+                    lambda gg, ss: _propagate_fixed(z, gg, ss, bc, u),
+                    lambda Pq: advance(y, Pq, dt), gs_y, fwd_idx, bwd_idx, ctrl, P)
+                ctrl.record(rep)
+                step_mode[it] = 1
+                switch_steps.append(it)
+                y_new = advance(y, P_used, dt)
+            else:
+                y_new = y_exp
+                ctrl.seed = P            # keep the warm start fresh (see simulate_transient)
+            commit_diag()
+        f2 = y_new[0]
         if n3:
-            # the population constraint is f2 + f3 <= 1 (N_Er = n1 + n2 + n3), so f3 is clipped
-            # against the ALREADY CLIPPED f2 rather than against 1
-            f3 = np.clip(y_new[1], 0.0, np.maximum(1.0 - f2, 0.0))
-            b2 = np.clip(y_new[2], 0.0, 1.0)
+            f3 = y_new[1]
+            b2 = y_new[2]
             if two_pop:
-                b2n = np.clip(y_new[3], 0.0, 1.0)
+                b2n = y_new[3]
         else:
-            b2 = np.clip(y_new[1], 0.0, 1.0)
+            b2 = y_new[1]
             if two_pop:
-                b2n = np.clip(y_new[2], 0.0, 1.0)
+                b2n = y_new[2]
+        if ase_step_residual:
+            # STEP-BY-STEP CLOSURE (opt-in, any mode): do the powers this step used survive at
+            # the populations the step ENDED at? See simulate_transient for the argument.
+            g_chk, s_chk = gs_y(y_new)
+            P_chk = _propagate_fixed(z, g_chk, s_chk, bc, u)
+            o_chk, pr_chk = march_ase.residual_views(P_chk, fwd_idx, bwd_idx)
+            o_use, pr_use = march_ase.residual_views(P_used, fwd_idx, bwd_idx)
+            _e_r, _p_r = _relaxation_residuals(o_chk, o_use, pr_chk, pr_use)
+            worst_step_resid = (max(worst_step_resid, _p_r) if np.isfinite(_p_r)
+                                else float("inf"))
 
     reasons = []
     if nonfinite:
@@ -1110,7 +1490,21 @@ def simulate_transient_eryb(amp, t_grid, *,
                        " a single-pass ASE gain of e^{:g})".format(
                            worst_gain_integral, _GAIN_INTEGRAL_LIMIT, _GAIN_INTEGRAL_LIMIT))
     warn_msg = None
-    if reasons:
+    # Only the quasi-static mode treats the audit-A-7 margins as a reason to distrust the result;
+    # the other two step through that regime on purpose (see simulate_transient).
+    if ase_mode == "quasi_static":
+        march_valid = not reasons
+    else:
+        sc_reasons = _self_consistent_reasons(ctrl, nonfinite)
+        march_valid = not sc_reasons
+        if sc_reasons:
+            warnings.warn(
+                "simulate_transient(ase_mode=%r): the self-consistent ASE step did not close on "
+                "this co-doped amplifier -- " % ase_mode + "; ".join(sc_reasons) + ". Raise "
+                "ase_max_iter, loosen ase_tol, or shorten the time step; meta['march_valid'] is "
+                "False and the returned arrays must not be trusted.", RuntimeWarning,
+                stacklevel=2)
+    if reasons and ase_mode == "quasi_static":
         warn_msg = (
             "simulate_transient: the quasi-static (frozen-population) step is OUT OF ITS VALID "
             "REGIME for this co-doped amplifier -- " + "; ".join(reasons) + ". The step propagates "
@@ -1123,8 +1517,12 @@ def simulate_transient_eryb(amp, t_grid, *,
             "(audit A-7, co-doped extension).")
         warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
 
-    meta = {"n_signal": len(sig_idx), "n_pump": len(pmp_idx),
+    meta = _ase_mode_meta(ase_mode, ctrl, step_mode, switch_steps, t_grid, worst_step_resid,
+                          ase_step_residual)
+    meta.update({
+            "n_signal": len(sig_idx), "n_pump": len(pmp_idx),
             "quasi_static_valid": not reasons,
+            "march_valid": bool(march_valid),
             "max_ase_to_launched": float(worst_ase_ratio),
             "max_ase_gain_integral": float(worst_gain_integral),
             "nonfinite_powers": bool(nonfinite),
@@ -1154,7 +1552,7 @@ def simulate_transient_eryb(amp, t_grid, *,
             # co-doped plan -- there is no single ChannelSet when every channel carries two ions)
             "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),
             "sigma_a_er": pl["sa_er"].copy(), "sigma_e_er": pl["se_er"].copy(),
-            "sigma_a_yb": pl["sa_yb"].copy(), "sigma_e_yb": pl["se_yb"].copy()}
+            "sigma_a_yb": pl["sa_yb"].copy(), "sigma_e_yb": pl["se_yb"].copy()})
     return TransientResult(t_grid, z, f2_zt, sig_out, pmp_out, gain_dB, list(kind), meta=meta,
                            ase_fwd_W=ase_f_zt, ase_bwd_W=ase_b_zt, ase_lambda_m=ase_lam,
                            ase_dnu_hz=ase_dnu, plan=amp.channel_plan(), power_zt=prof_zt)
