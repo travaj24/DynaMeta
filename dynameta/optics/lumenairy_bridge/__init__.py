@@ -56,6 +56,7 @@ from dynameta.optics.lumenairy_bridge.rcwa_backend import (LumenairyStackSolver,
                                                            design_to_rcwa_stack,
                                                            make_lumenairy_rcwa_solver,
                                                            rcwa_result_to_optical_result)
+from dynameta.optics.lumenairy_bridge._common import LumenairyFeatureUnavailable
 from dynameta.optics.lumenairy_bridge._shapes import (ShapesNotRepresentable,
                                                       layer_to_shapes_slab)
 from dynameta.optics.lumenairy_bridge.translate import (CallableOptical,
@@ -79,4 +80,5 @@ __all__ = ["LumenairyStackSolver", "design_to_rcwa_stack", "make_lumenairy_rcwa_
            "pmm_stack_RT", "pmm_stack_jones", "drude_eps_jax",
            "BorLayer", "BorResult", "BorStackSpec", "solve_bor", "bor_result_to_optical_result",
            "make_lumenairy_bor_solver", "make_bor_spec_solver", "ShapesNotRepresentable",
+           "LumenairyFeatureUnavailable",
            "layer_to_shapes_slab"]
