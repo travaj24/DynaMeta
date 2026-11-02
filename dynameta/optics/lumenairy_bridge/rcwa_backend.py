@@ -45,8 +45,8 @@ background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
 to the layer BACKGROUND only (rasterizer contract). The raster is PERIODIC (wrap-aware,
 _shapes.periodic_layer_eps_cell, 2026-11-02): a boundary-crossing inclusion contributes its
-wrapped piece at the opposite edge -- the FEM mesher's convention. The shared rasterizer clips
-it, which solved a different (narrower) structure; byte-identical for inclusions inside the
+wrapped piece at the opposite edge -- the FEM mesher's convention. The shared rasterizer used to
+clip it, which solved a different (narrower) structure; byte-identical for inclusions inside the
 closed cell.
 
 ANALYTIC SHAPES (2026-11-02, the follow-on this paragraph used to defer; lumenairy 5.50
