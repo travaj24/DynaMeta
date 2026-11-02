@@ -26,6 +26,7 @@ from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeomet
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
 from dynameta.optics.tmm_reference import end_media_indices   # pure (no ngsolve); shared n_super/n_sub
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 # NOTE: the FEM trio (LayeredOpticalBuilder / assemble_eps_cf / solve_fem) and the default
 # DEVSIM carrier builder are imported LAZILY inside the functions below, so a pure
 # layered/TMM path (run_pipeline with carrier_solver + optical_builder + optical_solver all
@@ -187,7 +188,7 @@ def run_pipeline(design: Design, sweep: Sweep, *,
         # discarding every completed solve in the run.
         import warnings
         warnings.warn("run_pipeline: optical solve failed ({}); emitting NaN row "
-                      "(on_error='skip')".format(exc), stacklevel=2)
+                      "(on_error='skip')".format(exc), AdvisoryWarning, stacklevel=2)
         return OpticalResult(r=None, R=float("nan"), phase_deg=float("nan"), solve_time_s=0.0)
 
     def _emit(label, lam_nm, res):
@@ -219,7 +220,7 @@ def run_pipeline(design: Design, sweep: Sweep, *,
                 import warnings
                 warnings.warn("run_pipeline: extra_fields callable changed its key set at bias '{}' "
                               "({} vs {}) -- the driven effect terms silently differ across the sweep."
-                              .format(bp.label, sorted(keys), sorted(ef_keys0)), RuntimeWarning,
+                              .format(bp.label, sorted(keys), sorted(ef_keys0)), UnreliableResultWarning,
                               stacklevel=2)
         if sweep_aware and len(sweep.wavelengths_nm) > 1:
             # FAST PATH: ONE broadband solve for THIS bias serves the whole wavelength list. Hand the solver

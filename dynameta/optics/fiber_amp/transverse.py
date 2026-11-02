@@ -704,11 +704,6 @@ class ResolvedFiberAmplifier:
                 np.asarray(dnu, float), kind, np.asarray(bc, float), cladding)
 
     # ---- transverse profiles -------------------------------------------------------------
-    def _fundamental_psi2(self, lam: float, r: np.ndarray) -> np.ndarray:
-        """|psi(r)|^2 of the FUNDAMENTAL guided mode at lam, unnormalized -- the shared kernel
-        `fundamental_psi2` bound to this amplifier's fiber."""
-        return fundamental_psi2(self.fiber, lam, r)
-
     def _profile_flat(self, lam: float, r: np.ndarray, r_max: float) -> np.ndarray:
         """The synthetic MEAN-FIELD profile -- the shared kernel `flat_intensity_profile` bound
         to this amplifier's fiber."""

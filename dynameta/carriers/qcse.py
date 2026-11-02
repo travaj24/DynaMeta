@@ -40,6 +40,7 @@ import numpy as np
 
 from dynameta.constants import Q_E as Q
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D
+from dynameta.warning_types import UnreliableResultWarning
 
 # Analytic ground-state Stark coefficient of an infinite square well (2nd-order PT):
 # dE_1 = -beta * q^2 m* F^2 L^4 / hbar^2, beta = (128/pi^6) sum_{n even} n^2/(n^2-1)^5.
@@ -202,7 +203,7 @@ class QuantumWell:
                     "DIFFERENT wells (strong-tilt regime -- the field separates the global ground states "
                     "across the stack), so the e-h overlap is a multi-well artifact, not the per-well "
                     "QCSE. Model a SINGLE QuantumWell at the local field for the EAM overlap here."
-                    .format(F), RuntimeWarning, stacklevel=2)
+                    .format(F), UnreliableResultWarning, stacklevel=2)
         p_in_min = min(p_e, p_h)
         ionized = p_in_min < self._IONIZE_TOL
         if ionized:
@@ -211,7 +212,7 @@ class QuantumWell:
                 "probability {:.2f} < {:.1f}) -- the downhill barrier has dropped below the well "
                 "floor, so E_T(F)/overlap are a Dirichlet-box artifact (n_pad-dependent), NOT a "
                 "true bound state. Reduce the field below the ionization onset for a trustworthy "
-                "result.".format(F, p_in_min, self._IONIZE_TOL), RuntimeWarning, stacklevel=2)
+                "result.".format(F, p_in_min, self._IONIZE_TOL), UnreliableResultWarning, stacklevel=2)
         # Reference each confinement energy to its band floor at the WELL CENTRE (z = L/2): the raw
         # eigenvalue carries a LINEAR tilt offset (+qF*L/2 for U_e = well + qFz, -qF*L/2 for U_h =
         # well - qFz). The linear parts cancel in the SUM E_e1 + E_hh1, but subtracting them

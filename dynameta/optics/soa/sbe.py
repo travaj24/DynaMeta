@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, HBAR, KB, M_E, Q_E
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["reduced_sbe_susceptibility", "sbe_gain_per_m"]
 
@@ -40,7 +41,7 @@ def _quasi_fermi_2d(N_2d_m2, m_eff, T_K):
 
 
 def reduced_sbe_susceptibility(hbar_omega_eV, *, Eg_eV=0.95, m_e=0.067, m_h=0.45, N_2d_m2=3.0e16,
-                               T_K=300.0, T2_s=100e-15, eps_r=12.5, d_qw_m=8e-9, mu_Cm=5e-29,
+                               T_K=T_REF, T2_s=100e-15, eps_r=12.5, d_qw_m=8e-9, mu_Cm=5e-29,
                                coulomb_V0=0.0, screen_kappa_m=2.0e8, nk=240, kmax_factor=6.0):
     """Reduced k-resolved SBE interband susceptibility chi(w) over the photon energies hbar_omega_eV.
     m_e, m_h in units of the free-electron mass. Returns (hw_eV, chi_complex). coulomb_V0=0 -> the

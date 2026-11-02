@@ -26,6 +26,7 @@ __all__ = [
     "absorbed_fraction", "tmm_absorption_by_layer_name",
     "oxide_stress_from_electrothermal", "tddb_tbd_from_electrothermal",
     "cw_damage_threshold_from_stack",
+    "collapse_fem_region_keys",         # audit V-21
 ]
 
 

@@ -17,6 +17,7 @@ from dynameta.core.backend import is_jax_array
 from dynameta.core.numerics import trapz
 from dynameta.core.effects.base import (_E_vec, _photon_energy_J, kramers_kronig_dn,
                                         kramers_kronig_dn_rows)
+from dynameta.warning_types import UnreliableResultWarning
 
 @dataclass
 class ElectroAbsorptionModel:
@@ -247,7 +248,7 @@ class ElectroAbsorptionModel:
             warnings.warn(
                 "ElectroAbsorptionModel: kappa_bg + dkappa < 0 -- the differential model implies "
                 "GAIN in the bleaching regime; clamping Im to 0. Supply an eps_bg whose Im embeds "
-                "the zero-field exciton absorption at the probe.", RuntimeWarning, stacklevel=2)
+                "the zero-field exciton absorption at the probe.", UnreliableResultWarning, stacklevel=2)
             kappa = 0.0
         return complex((nb.real + dn) + 1j * kappa) ** 2
 
@@ -525,7 +526,7 @@ class BursteinMossEdge:
                 "form, so the error is far smaller than the raw truncation, but widen e_grid_J (or "
                 "drop the override) if dn matters at that level.".format(
                     e_hi_grid / Q_E, need_e_hi / Q_E, float(self._KK_TAIL_REL), Eg_hi / Q_E,
-                    self._tauc_p() - 2.0), RuntimeWarning, stacklevel=2)
+                    self._tauc_p() - 2.0), UnreliableResultWarning, stacklevel=2)
 
         # grid-capable dn: precompute dn(Eg_opt) on a 1D Eg grid, interpolate onto the per-cell gaps.
         # absorption alpha = E eps2/(hbar c) [1/m] per Eg row; KK -> dn (index shift) at the probe.
@@ -643,7 +644,7 @@ class IntersubbandEffect:
                 N_ij = dns / Leff                                      # >= 0 (lower band fuller)
                 if N_ij < 0.0:                                        # population inversion -> gain
                     warnings.warn("IntersubbandEffect: inverted population (n_s[{}] < n_s[{}]) gives a "
-                                  "gain line; clamping to 0".format(i, j))
+                                  "gain line; clamping to 0".format(i, j), UnreliableResultWarning, stacklevel=2)
                     N_ij = 0.0
                 S_ij = N_ij * Q_E * Q_E * (z_ij * z_ij) * (2.0 * w_ij) / HBAR
                 eps_zz += S_ij / (EPS0 * (w_ij * w_ij - omega * omega - 1j * omega * gam))

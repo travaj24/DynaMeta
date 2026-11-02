@@ -236,6 +236,7 @@ from dynameta.optics.fiber_amp.thermal import (DN_DT_SILICA, ThermalModel,
 # that ever stops being true this call fails loudly on None rather than answering wrongly.
 from dynameta.optics.fiber_amp.transverse import V_LP11_CUTOFF, ResolvedFiberAmplifier
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = ["GainBPM", "BPMResult", "ThermalLoop", "quadratic_duct_radius_m",
            "quadratic_duct_period_m"]
@@ -1055,7 +1056,7 @@ class GainBPM:
                 "absorber out (absorber_inner_frac), or -- on a step-index fiber, where most of "
                 "what the boundary eats is radiation shed by the DISCRETIZED index step rather "
                 "than the guided mode -- raise index_taper_cells.".format(
-                    meta["absorbed_fraction"], _ABSORBED_FRACTION_BAR), UserWarning, stacklevel=2)
+                    meta["absorbed_fraction"], _ABSORBED_FRACTION_BAR), UnreliableResultWarning, stacklevel=2)
         return BPMResult(z, P_sig, rec["Pp"], rec["E"], self.x_m, rec["absorbed"],
                          rec["exchange"], residual, rec["w"], rec["Iax"], rec["Q"],
                          rec["amp"], rec["fields"], self, meta)

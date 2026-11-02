@@ -44,6 +44,7 @@ from dynameta.carriers import eq_registry as R
 # CONVERGED state (both its methods return only after the solve succeeded), which is what the check
 # needs -- the doping-level test at contact setup runs before any solve and cannot see accumulation.
 from dynameta.carriers.physics_bipolar_dd import warn_if_solution_exceeds_fd_ceiling
+from dynameta.warning_types import UnreliableResultWarning
 
 POTENTIAL_EQ = "PotentialEquation"
 # The Gummel path is UNIPOLAR (electron-only): it freezes exactly these continuity equations during
@@ -75,7 +76,7 @@ def solve_dc(device: str, *, method: str = "newton",
             "gated-accumulation case it targets (convergence unproven there; the proven "
             "route is the staged Poisson-presolve + coupled Newton recipe, "
             "validation/gated_dd*.py). "
-            "method='newton' (default) remains the supported general route.", stacklevel=2)
+            "method='newton' (default) remains the supported general route.", UnreliableResultWarning, stacklevel=2)
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):

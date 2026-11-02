@@ -95,6 +95,7 @@ from scipy.special import expit
 from dynameta.constants import C_LIGHT, H_PLANCK, HBAR, KB, M_E, Q_E
 from dynameta.carriers.physics_equilibrium import effective_dos_m3, invert_F12
 from dynameta.optics.amp_noise import nf_from_nsp
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "BulkGainParams",
@@ -505,7 +506,7 @@ def noise_figure_db(I_A: float, nu_Hz: float = None, L_m: float = None,
             "returned is the peak-wavelength noise figure, not the one you asked for. Pass "
             "nu_Hz=None to make that explicit (audit X-8).".format(
                 float(nu_Hz), C_LIGHT / float(nu_Hz) * 1e9, nu_pk, C_LIGHT / nu_pk * 1e9),
-            RuntimeWarning, stacklevel=2)
+            UnreliableResultWarning, stacklevel=2)
     modal = p.Gamma * g_pk
     if modal <= alpha_i_per_m:
         raise ValueError("noise_figure_db: modal gain Gamma*g_pk <= alpha_i (no net gain at peak)")
