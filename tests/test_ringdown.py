@@ -18,6 +18,9 @@ import pytest
 from scipy.signal import find_peaks, hilbert
 
 from dynameta.constants import C_LIGHT
+# audit V-17 leftover (wave-7, 2026-11-02): the ringdown unreliable-result warns are now
+# UnreliableResultWarning (a RuntimeWarning subclass); these pytest.warns pin the category.
+from dynameta.warning_types import UnreliableResultWarning
 from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
                                       fdtd_etalon_ringdown, _ringdown_window,
                                       _nls_refine_real, _real_reconstruction)
@@ -283,7 +286,7 @@ def test_gate9_contaminated_window_is_flagged_not_silent():
     from dynameta.optics.ringdown import _fit_quality, _FIT_RESID_TOL, _FIT_AMP_SANITY
 
     for n_slab, min_err in ((3.5, 0.50), (7.0, 0.50)):
-        with pytest.warns(RuntimeWarning) as rec:
+        with pytest.warns(UnreliableResultWarning) as rec:
             er = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                       resolution=30, start_frac=0.02)
         msgs = [str(w.message) for w in rec]
@@ -293,6 +296,9 @@ def test_gate9_contaminated_window_is_flagged_not_silent():
         # ... and it is flagged, twice: the window rule and the fit itself
         assert any("PEAKS at sample" in s for s in msgs), msgs
         assert any("does NOT describe the window" in s for s in msgs), msgs
+        # V-17 (wave-7): BOTH flags carry the unreliable-result category, not a bare RuntimeWarning
+        assert all(issubclass(w.category, UnreliableResultWarning) for w in rec
+                   if str(w.message).startswith("fdtd_etalon_ringdown")), [w.category for w in rec]
         assert "UNRELIABLE FIT" in er.refine_note, er.refine_note
         q = _fit_quality(er.signal_used, er.dt_used, er.modes)
         assert q["rms_rel"] > _FIT_RESID_TOL or q["amp_rel"] > _FIT_AMP_SANITY, q
@@ -368,7 +374,7 @@ def test_gate9_default_fits_the_whole_window_not_a_1200_sample_cut():
     m = int(round(2.0 * np.pi * er.f0_Hz * 10.0 * 1.0e-6 / (np.pi * C_LIGHT)))
     assert abs(er.q / _fp_closed_form_q(10.0, m) - 1.0) < 0.03, (er.q, m)
 
-    with pytest.warns(RuntimeWarning, match="TRUNCATED to max_fit_samples = 1200"):
+    with pytest.warns(UnreliableResultWarning, match="TRUNCATED to max_fit_samples = 1200"):
         e1 = fdtd_etalon_ringdown(10.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                   resolution=30, max_fit_samples=1200)
     assert e1.signal_used.size == 1200
@@ -415,7 +421,7 @@ def test_gate9_over_budget_window_coarsens_the_stride_before_cutting(monkeypatch
     assert abs(er.q / _fp_closed_form_q(7.0, m) - 1.0) < 0.03, (er.q, m)
 
     monkeypatch.setattr(rd_mod, "_FIT_SAMPLES_BUDGET", 300)
-    with pytest.warns(RuntimeWarning, match="pencil budget"):
+    with pytest.warns(UnreliableResultWarning, match="pencil budget"):
         e3 = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
     assert e3.signal_used.size == 300
 
@@ -441,7 +447,7 @@ def test_gate9_n20_default_matches_fabry_perot(monkeypatch):
     (Q -44.5%). @slow: one march, memoized for the legacy-cap contrast; nightly (a) runs it."""
     _memoize_fdtd_march(monkeypatch)
     kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
-    with pytest.warns(RuntimeWarning, match="WHOLE data-driven window"):
+    with pytest.warns(UnreliableResultWarning, match="WHOLE data-driven window"):
         er = fdtd_etalon_ringdown(20.0, 1.0e-6, **kw)
     assert "UNRELIABLE" not in er.refine_note, er.refine_note
     assert er.signal_used.size > 3000                       # the whole window (3176), not 1200
@@ -657,7 +663,7 @@ def test_gate10b_growing_poles_are_dropped_and_do_not_overflow():
     Vandermonde)."""
     dt, n = 1e-15, np.arange(400)
     y_grow = np.exp(+0.02 * n) * np.cos(0.3 * n)
-    with pytest.warns(RuntimeWarning, match="GROWING pole"):
+    with pytest.warns(UnreliableResultWarning, match="GROWING pole"):
         modes = matrix_pencil(y_grow, dt)
     assert all(m.gamma_rad_s >= 0.0 and m.q >= 0.0 for m in modes)       # contract restored
     kept = matrix_pencil(y_grow, dt, allow_gain=True)

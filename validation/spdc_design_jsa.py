@@ -191,12 +191,15 @@ def main():
     # (3) span below the carrier's float resolution: omega_s + omega_i aliases onto a few values
     g = 1.2e15 + np.linspace(-2.5, 2.5, 400)
     h3, w = _quiet(sd.heralded_bandwidths, _gauss_jsa(g, g, 1.0, 1.0, 0.0, 1.2e15, 1.2e15), g, g)
-    ok3 = (len(w) == 2 and all("NOT trustworthy" in str(q.message) for q in w)
+    # wave-7 (2026-11-02): the AXES themselves collapse too (21 distinct values of 400), so the
+    # signal / idler widths are refused as well (they used to come back 1.0 vs 1.18, 'resolved')
+    ok3 = (len(w) == 4 and all("NOT trustworthy" in str(q.message) for q in w)
            and math.isnan(h3["pump_bandwidth"]) and math.isnan(h3["phase_matching_bandwidth"])
+           and math.isnan(h3["signal_bandwidth"]) and math.isnan(h3["idler_bandwidth"])
            and _nan_iff_unresolved(h3))
     print("[spdc]   5 rad/s span on a 1.2e15 carrier ({} distinct axis values of 400): {} "
-          "warning(s), rotated widths nan -> {}".format(np.unique(g).size, len(w),
-                                                        "ok" if ok3 else "WRONG"), flush=True)
+          "warning(s), all four widths nan -> {}".format(np.unique(g).size, len(w),
+                                                         "ok" if ok3 else "WRONG"), flush=True)
     # (4) the resolved uniform grids of GATE B emitted nothing (asserted there); restate it here
     ok4 = not w3 and hb["pump_bandwidth_resolved"] and hb["phase_matching_bandwidth_resolved"] \
         and _nan_iff_unresolved(hb)
