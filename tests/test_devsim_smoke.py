@@ -462,7 +462,10 @@ def test_c10d_degenerate_solution_warns_exactly_once_naming_the_region_and_eta()
         assert u == pytest.approx(300.0, rel=1e-6)               # solution == doping on a flat bar
         assert len(caught) == 1, [str(w.message) for w in caught]
         w = caught[0]
-        assert w.category is RuntimeWarning
+        # audit V-17: an exact `is RuntimeWarning` until wave 6; the site now raises the library's
+        # UnreliableResultWarning, which keeps RuntimeWarning as a base (pinned both ways)
+        from dynameta.warning_types import UnreliableResultWarning
+        assert w.category is UnreliableResultWarning and issubclass(w.category, RuntimeWarning)
         msg = str(w.message)
         assert "'bulk'" in msg and "SOLUTION" in msg and "C10-d" in msg
         assert "max(Electrons)/N_dos = 300" in msg

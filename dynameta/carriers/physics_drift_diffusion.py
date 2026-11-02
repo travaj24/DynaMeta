@@ -66,6 +66,7 @@ from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_expr_devsim
 from dynameta.carriers.mobility import mu_edge_expr_devsim
+from dynameta.warning_types import UnreliableResultWarning
 
 
 def _g_expr(s: str) -> str:
@@ -94,7 +95,7 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
             "setup_semiconductor_region_dd: background degeneracy eta_bg={:.1f} is near the FD "
             "g-factor fit's validity edge (~eta=32); gate accumulation pushes the local eta "
             "higher, where g undershoots (the diffusion/Einstein term grows ~1-2% inaccurate). "
-            "Treat strong-accumulation DD results as approximate.".format(eta_bg), stacklevel=2)
+            "Treat strong-accumulation DD results as approximate.".format(eta_bg), UnreliableResultWarning, stacklevel=2)
     ds.set_parameter(device=device, region=region, name="Permittivity", value=eps_static * EPS0)
     ds.set_parameter(device=device, region=region, name="ElectronCharge", value=Q_E)
     ds.set_parameter(device=device, region=region, name="V_t", value=V_T)

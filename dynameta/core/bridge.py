@@ -26,6 +26,7 @@ from dynameta.core.n_to_eps import NToEpsMap
 
 # The sign convention the whole library + NGSolve assume (passive loss => Im(eps)>0).
 from dynameta.constants import SOLVER_TIME_CONVENTION  # noqa: E402  (single source; re-exported here)
+from dynameta.warning_types import AdvisoryWarning
 
 
 def assemble_eps(field: CarrierField,
@@ -68,7 +69,7 @@ def assemble_eps(field: CarrierField,
         if _dup:
             raise ValueError("Regions mapped both spatial and fixed: {}".format(sorted(_dup)))
 
-    mpp = alignment.unit_scale.metres_per_unit
+    to_u = alignment.unit_scale.to_units     # audit X-14: the UnitScale conversion API, not `/ mpp`
     out: Dict[str, EpsField] = {}
 
     for ra in alignment.region_alignments:
@@ -194,7 +195,7 @@ def assemble_eps(field: CarrierField,
         else:                                                  # scalar (Nx,Ny,Nz) -> (Nz,Ny,Nx)
             vals = np.transpose(eps_3d, (2, 1, 0)).astype(np.complex128)
         out[ra.mesh_region] = EpsField(
-            x_axis_u=x_remap_m / mpp, y_axis_u=y_remap_m / mpp, z_axis_u=z_remap_m / mpp,
+            x_axis_u=to_u(x_remap_m), y_axis_u=to_u(y_remap_m), z_axis_u=to_u(z_remap_m),
             values_zyx=vals, time_convention=field.time_convention)
 
     for region, mat_name in alignment.fixed_eps_regions.items():
@@ -207,7 +208,7 @@ def assemble_eps(field: CarrierField,
                 "assemble_eps: region '{}' (material '{}') is a FIXED-eps region, but an effect "
                 "model is registered for that material -- the effect (and any extra_fields) is "
                 "IGNORED on fixed regions. Declare the region spatial (a RegionAlignment) in the "
-                "optical builder if it is meant to modulate.".format(region, mat_name),
+                "optical builder if it is meant to modulate.".format(region, mat_name), AdvisoryWarning,
                 stacklevel=2)
         out[region] = EpsField(scalar=n_to_eps.scalar_eps(mat_name, lambda_m),
                                   time_convention=field.time_convention)

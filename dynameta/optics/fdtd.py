@@ -30,6 +30,7 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
                                           hot_carrier_guard)
 from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
+from dynameta.warning_types import UnreliableResultWarning
 
 
 @dataclass
@@ -503,7 +504,7 @@ def _second_carrier_hz(spec, f_min, f_max):
             "band [{:.4g}, {:.4g}] Hz set by lambda_min_m/lambda_max_m -- the grid step, source "
             "bandwidth and trustworthy `band` mask are all sized from that band, so this color is "
             "under-resolved / un-normalized. Widen [lambda_min_m, lambda_max_m] to bracket both "
-            "colors.".format(f2, f_min, f_max), stacklevel=2)
+            "colors.".format(f2, f_min, f_max), UnreliableResultWarning, stacklevel=2)
     return f2
 
 
@@ -763,7 +764,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
                 "already at {:.1e} of its peak -- an abrupt turn-on that leaks broadband content "
                 "into every mixing band (audit D-19). Use t0_s >= 3-4 tau_s (the primary uses "
                 "settle*tau = {:.3g} s).".format(t02, t02 / tau2, tau2,
-                                                 float(np.exp(-(t02 / tau2) ** 2)), t0),
+                                                 float(np.exp(-(t02 / tau2) ** 2)), t0), UnreliableResultWarning,
                 stacklevel=2)
     nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt,
                                       t_end_s=t_end2, tail_tau_s=tail2)

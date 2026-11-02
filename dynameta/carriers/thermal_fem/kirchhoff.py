@@ -13,6 +13,7 @@ import ngsolve as ng
 
 from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, add_load_terms, _build_layered_mesh, build_thermal_forms, mean_T_per_layer
 from dynameta.carriers.thermal_fem.transient import ThermalTransientResult
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 # ---- R21: temperature-dependent k(T) via the EXACT Kirchhoff transform ------------------------
 
@@ -33,12 +34,14 @@ def invert_kirchhoff(k_of_T, theta_W_per_m: Optional[float] = None,
     (DeprecationWarning). Positional calls are unaffected."""
     if theta_W_m is not None:
         import warnings
+
+        from dynameta.warning_types import DynaMetaDeprecationWarning
         if theta_W_per_m is not None:
             raise TypeError("invert_kirchhoff: pass theta_W_per_m only (theta_W_m is its deprecated "
                             "spelling)")
         warnings.warn("invert_kirchhoff(theta_W_m=...) is deprecated; use theta_W_per_m= (the "
                       "potential is in W/m, and `_m` means metres in dynameta -- audit V-23)",
-                      DeprecationWarning, stacklevel=2)
+                      DynaMetaDeprecationWarning, stacklevel=2)
         theta_W_per_m = theta_W_m
     if theta_W_per_m is None or T_ref_K is None:
         raise TypeError("invert_kirchhoff: theta_W_per_m and T_ref_K are required")
@@ -78,7 +81,7 @@ class ThermalKirchhoffResult:
 
 def solve_thermal_kirchhoff_fem(layers: List[ThermalLayer], k_of_T, *, period_x_m: float,
                                 period_y_m: float, flux_W_m2: float = 0.0,
-                                T_sink_K: float = 300.0,
+                                T_sink_K: float = T_REF,
                                 joule_W_m3: Optional[Union[float, Dict[str, float],
                                                            object]] = None,
                                 maxh_m: Optional[float] = None, order: int = 2,
@@ -156,7 +159,7 @@ class ThermalKirchhoffLayeredResult:
 
 
 def solve_thermal_kirchhoff_layered_1d(layers: List[ThermalLayer], k_of_T_by, *,
-                                       flux_W_m2: float = 0.0, T_sink_K: float = 300.0,
+                                       flux_W_m2: float = 0.0, T_sink_K: float = T_REF,
                                        joule_W_m3: Optional[Dict[str, float]] = None
                                        ) -> ThermalKirchhoffLayeredResult:
     """EXACT steady 1D multi-layer stack with PER-LAYER temperature-dependent conductivity --
@@ -200,7 +203,7 @@ def solve_thermal_kirchhoff_layered_1d(layers: List[ThermalLayer], k_of_T_by, *,
 
 def solve_thermal_transient_kt_fem(layers: List[ThermalLayer], k_of_T_by, *, period_x_m: float,
                                    period_y_m: float, t_end_s: float, dt_s: float,
-                                   flux_W_m2: float = 0.0, T_sink_K: float = 300.0,
+                                   flux_W_m2: float = 0.0, T_sink_K: float = T_REF,
                                    joule_W_m3: Optional[Union[float, Dict[str, float],
                                                               object]] = None,
                                    T_init_K: Optional[float] = None, theta: float = 1.0,

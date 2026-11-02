@@ -82,6 +82,7 @@ from dynameta.constants import C_LIGHT, H_PLANCK, KB
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.steady_state import SteadyStateResult
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = [
     # Brillouin spectroscopy
@@ -131,7 +132,7 @@ def brillouin_linewidth_hz(lambda_m, dnu_ref_hz: float = DNU_B_REF_HZ,
     return float(dnu_ref_hz) * (float(lambda_ref_m) / np.asarray(lambda_m, dtype=np.float64)) ** 2
 
 
-def brillouin_phonon_number(lambda_m, T_K: float = 300.0, n: float = N_SILICA,
+def brillouin_phonon_number(lambda_m, T_K: float = T_REF, n: float = N_SILICA,
                             v_a: float = V_ACOUSTIC_SILICA):
     """Thermal-equilibrium acoustic-phonon occupation n_th = 1 / (exp(h nu_B / kT) - 1) at the
     Brillouin shift nu_B(lambda). Because h nu_B << kT at GHz shifts (h nu_B / kT ~ 1.8e-3 at
@@ -190,7 +191,7 @@ def sbs_threshold_W(a_eff_m2: float, *, g_b: float = G_B_EFFECTIVE, length_m: fl
 
 def sbs_gain_exponent(result: SteadyStateResult, fiber: FiberSpec, signal_lambda_m: float, *,
                       g_b: float = G_B_EFFECTIVE, C: float = 21.0, K: float = 1.0,
-                      T_K: float = 300.0) -> dict:
+                      T_K: float = T_REF) -> dict:
     """Accumulated SBS gain exponent of an ACTIVE amplifier from a converged SteadyStateResult:
 
         G_B = (g_B / A_eff) integral_0^L P_signal(z) dz     (trapezoidal, over the signal profile)

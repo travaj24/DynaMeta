@@ -29,6 +29,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from dynameta.optics.fiber_amp.steady_state import (FiberAmplifier, Signal, SteadyStateResult)
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["CompressionCurve", "SlopeEfficiency", "GainSpectrum",
            "gain_compression_curve", "saturation_output_power", "power_conversion_efficiency",
@@ -104,7 +105,7 @@ def _true_pumps(amp: FiberAmplifier):
         import warnings
         warnings.warn("pump aggregate: %d Pump channel(s) at a signal wavelength look "
                       "like double-pass mirror injections and are EXCLUDED from pump "
-                      "accounting (audit R5)" % len(dropped), stacklevel=3)
+                      "accounting (audit R5)" % len(dropped), AdvisoryWarning, stacklevel=3)
     return true
 
 

@@ -53,7 +53,8 @@ from dynameta.constants import H_PLANCK
 
 __all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
            "ase_output_psd", "noise_figure", "detector_noise_variances",
-           "spectral_noise_figure", "ase_spectrum_bidirectional", "ase_self_consistent"]
+           "spectral_noise_figure", "ase_spectrum_bidirectional", "ase_self_consistent",
+           "ase_self_consistent_zresolved"]   # audit V-21 (already on the soa facade)
 
 
 def inversion_factor_nsp(rho_GS):

@@ -375,8 +375,10 @@ def make_lumenairy_bor_solver(*, n_radial: int = 256, absorption: bool = False):
     old default that ALWAYS forces n_radial = 256 over the spec's own value); it emits a
     DeprecationWarning at construction. Migrate to make_bor_spec_solver(n_radial=...)."""
     import warnings
+
+    from dynameta.warning_types import DynaMetaDeprecationWarning
     warnings.warn("make_lumenairy_bor_solver is deprecated (audit V-19): it is a BorStackSpec -> "
                   "BorResult solver, not a make_lumenairy_*_solver run_pipeline seam; use "
                   "make_bor_spec_solver (same behaviour; pass n_radial=256 to keep this alias's forced "
-                  "default)", DeprecationWarning, stacklevel=2)
+                  "default)", DynaMetaDeprecationWarning, stacklevel=2)
     return make_bor_spec_solver(n_radial=int(n_radial), absorption=absorption)

@@ -23,14 +23,18 @@ from __future__ import annotations
 
 import numpy as np
 
+from dynameta.warning_types import UnreliableResultWarning
+
 __all__ = ["transfer_derivatives", "transfer_derivatives_fd", "TransferFitWarning",
            "harmonic_amplitudes", "sndr_db", "enob",
            "sndr_vs_drive", "optimal_drive_power", "predistort", "pattern_penalty_dB",
            "sfdr_dB", "thermal_drift_budget_K", "facet_gain_ripple_dB", "ripple_enob_ceiling"]
 
 
-class TransferFitWarning(RuntimeWarning):
-    """The sampled transfer-curve derivatives are not resolved by the grid (audit A-23)."""
+class TransferFitWarning(UnreliableResultWarning):
+    """The sampled transfer-curve derivatives are not resolved by the grid (audit A-23). Rebased
+    from RuntimeWarning onto `dynameta.warning_types.UnreliableResultWarning` (still a RuntimeWarning)
+    by audit V-17, 2026-11-02."""
 
 
 def _cubic_derivs(P_in, P_out, P0, k):

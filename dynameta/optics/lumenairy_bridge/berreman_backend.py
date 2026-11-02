@@ -87,6 +87,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["design_to_berreman_layers", "make_lumenairy_berreman_solver",
            "berreman_result_to_optical_result", "BerremanLayeredSolver"]
@@ -241,7 +242,7 @@ def _solve_berreman_stack(lum, layers, n_super, n_sub, lambda_m, theta, phi, *, 
             la = np.asarray(st.layer_absorption())
         except Exception as exc:                      # pragma: no cover - defensive
             warnings.warn("Berreman bridge: per-layer absorption unavailable ({}); "
-                          "A_independent left unset".format(exc), stacklevel=2)
+                          "A_independent left unset".format(exc), AdvisoryWarning, stacklevel=2)
     return R, T, Jr, Jt, la
 
 

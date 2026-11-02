@@ -127,7 +127,7 @@ def make_lumenairy_emt_screen_solver(*, order: int = 0, absorption: bool = False
         return berreman(design, None, ebr, lambda_m, None, None)
 
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub):
-        _require_eps_convention(eps_by_region, "make_lumenairy_emt_solver")   # audit V-5
+        _require_eps_convention(eps_by_region, "make_lumenairy_emt_screen_solver")   # audit V-5; X-23: real name
         return _solve_at(design, eps_by_region, lambda_m)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
