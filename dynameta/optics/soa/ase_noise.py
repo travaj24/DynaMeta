@@ -206,8 +206,10 @@ def ase_spectrum_bidirectional(g_slices_nu, gsp_slices_nu, dz_m, nu_grid_Hz, dnu
     slices (g_sp > 0 there); the two agree exactly for an above-transparency profile."""
     g = np.atleast_2d(np.asarray(g_slices_nu, dtype=np.float64))
     gsp = np.atleast_2d(np.asarray(gsp_slices_nu, dtype=np.float64))
-    if g.shape[0] == 1 and g.shape[1] != 1 and gsp.shape == g.shape:
-        pass                                                 # (1,K) is a single slice, K bands
+    # Shapes: atleast_2d makes a (K,) input ONE slice of K bands, (1, K), which is already the
+    # (N_slices, K) layout; an (N,) profile for a single band (K = 1) arrives as (1, N) and is
+    # re-laid as (N, 1) by the reshape below. (Audit A-19: a dead `if ...: pass` stood here whose
+    # comment described the first case as if the branch handled it; nothing needs handling.)
     nu = np.atleast_1d(np.asarray(nu_grid_Hz, dtype=np.float64))
     dnu = np.atleast_1d(np.asarray(dnu_grid_Hz, dtype=np.float64))
     if g.shape[1] != nu.size:                                # accept (N,) for K=1 column form

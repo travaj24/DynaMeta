@@ -3,6 +3,7 @@
 a falsifiable gate, kept small so the suite runs in CI. Grouped by build phase."""
 
 import numpy as np
+import pytest
 
 from dynameta.core.numerics import trapz   # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.constants import C_LIGHT, H_PLANCK
@@ -602,7 +603,7 @@ def test_gnlse_dispersive_broadening():
     t0, beta2 = 1e-12, 20e-27
     LD = dispersion_length(t0, beta2)
     p = gaussian_pulse(t, t0_s=t0, peak_power_W=1.0)
-    out = propagate_gnlse(p, 2.0 * LD, beta2_s2_m=beta2, n_steps=400).output
+    out = propagate_gnlse(p, 2.0 * LD, beta2_s2_per_m=beta2, n_steps=400).output
     analytic = p.fwhm_s() * np.sqrt(1.0 + 2.0 ** 2)     # T0 sqrt(1+(z/L_D)^2)
     assert abs(out.fwhm_s() - analytic) / analytic < 0.02
 
@@ -612,7 +613,7 @@ def test_gnlse_spm_preserves_envelope_and_broadens_spectrum():
     gamma, P0 = 3e-3, 100.0
     L = 4.5 * np.pi / (gamma * P0)              # phi_max = 4.5 pi -> 5 spectral peaks
     p = gaussian_pulse(t, t0_s=2e-12, peak_power_W=P0)
-    out = propagate_gnlse(p, L, gamma_W_m=gamma, n_steps=600).output
+    out = propagate_gnlse(p, L, gamma_per_W_m=gamma, n_steps=600).output
     assert np.max(np.abs(out.power_W - p.power_W)) / p.peak_power_W < 1e-6   # SPM preserves |A|
     _, S = out.spectrum()
     S = S / S.max()
@@ -627,14 +628,14 @@ def test_gnlse_fundamental_soliton_shape_invariant():
     assert abs(soliton_order(t0, P0, beta2, gamma) - 1.0) < 1e-9
     z0 = (np.pi / 2.0) * dispersion_length(t0, beta2)
     p = sech_pulse(t, t0_s=t0, peak_power_W=P0)
-    out = propagate_gnlse(p, z0, beta2_s2_m=beta2, gamma_W_m=gamma, n_steps=600).output
+    out = propagate_gnlse(p, z0, beta2_s2_per_m=beta2, gamma_per_W_m=gamma, n_steps=600).output
     assert np.max(np.abs(out.power_W - p.power_W)) / p.peak_power_W < 0.02
 
 
 def test_gnlse_energy_conservation_and_flat_gain():
     t = _pulse_grid()
     p = gaussian_pulse(t, t0_s=0.5e-12, peak_power_W=500.0)
-    r = propagate_gnlse(p, 5.0, beta2_s2_m=15e-27, beta3_s3_m=0.1e-39, gamma_W_m=3e-3, n_steps=800)
+    r = propagate_gnlse(p, 5.0, beta2_s2_per_m=15e-27, beta3_s3_per_m=0.1e-39, gamma_per_W_m=3e-3, n_steps=800)
     assert abs(r.output.energy_J - p.energy_J) / p.energy_J < 1e-9      # lossless -> conserved
     rg = propagate_gnlse(p, 1.0, gain_per_m=2.3, n_steps=200)
     assert abs(rg.output.energy_J / p.energy_J - np.exp(2.3)) / np.exp(2.3) < 1e-6
@@ -697,7 +698,7 @@ def test_strehl_of_transform_limited_is_one():
 def test_cpa_linear_recompression_recovers_seed():
     t = _cpa_grid()
     seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=10.0, lambda0_m=1.03e-6)
-    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=0.0,
+    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_per_W_m=0.0,
                   n_steps=250)
     assert r.stretch_factor > 10.0                              # genuinely stretched
     assert r.strehl > 0.98                                      # matched compressor recovers TL
@@ -707,7 +708,7 @@ def test_cpa_linear_recompression_recovers_seed():
 def test_cpa_stretching_lowers_b_integral():
     t = _cpa_grid()
     seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=10.0)
-    B = [cpa_chain(seed, stretch_gdd_s2=st, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=3e-3,
+    B = [cpa_chain(seed, stretch_gdd_s2=st, amp_length_m=2.0, gain_per_m=1.15, gamma_per_W_m=3e-3,
                    n_steps=250).b_integral_rad for st in (1e-25, 3e-25, 9e-25)]
     assert B[0] > B[1] > B[2]                                   # more stretch -> lower B
 
@@ -715,14 +716,14 @@ def test_cpa_stretching_lowers_b_integral():
 def test_cpa_b_integral_penalty_and_scaling():
     t = _cpa_grid()
     seed = gaussian_pulse(t, t0_s=1e-13, peak_power_W=2000.0)
-    out = [cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_W_m=g,
+    out = [cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gain_per_m=1.15, gamma_per_W_m=g,
                      n_steps=400) for g in (0.0, 1e-3, 3e-3, 1e-2)]
     strehls = [o.strehl for o in out]
     assert strehls[0] > 0.98 and strehls[-1] < 0.9             # B of a few rad spoils compression
     assert all(strehls[i] > strehls[i + 1] for i in range(len(strehls) - 1))
     # B scales linearly with gamma (unsaturated, gain off)
-    a = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=3e-3, n_steps=250)
-    b = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_W_m=6e-3, n_steps=250)
+    a = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_per_W_m=3e-3, n_steps=250)
+    b = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, gamma_per_W_m=6e-3, n_steps=250)
     assert abs(b.b_integral_rad / a.b_integral_rad - 2.0) < 1e-3
 
 
@@ -844,7 +845,7 @@ def test_beta3_sign_matches_physical_convention():
     t0 = 1e-13
     p = gaussian_pulse(t, t0_s=t0, peak_power_W=1.0)
     b3L = 8e-40                                            # -> expected shift 20 fs
-    out = propagate_gnlse(p, 10.0, beta3_s3_m=b3L / 10.0, n_steps=200).output
+    out = propagate_gnlse(p, 10.0, beta3_s3_per_m=b3L / 10.0, n_steps=200).output
 
     def centroid(pulse):
         w = pulse.power_W
@@ -1046,7 +1047,7 @@ def test_fn_opt_in_is_off_by_default_and_inert_when_off():
     p = gaussian_pulse(t, t0_s=1e-12, energy_J=1e-6, lambda0_m=1.03e-6)
     assert SaturableGain(1.0, 1e-6, 1e13).frantz_nodvik is False
     assert SaturableGain(1.0, 1e-6, 1e13).recovery_time_s == np.inf
-    kw = dict(beta2_s2_m=15e-27, beta3_s3_m=0.1e-39, gamma_W_m=3e-3, loss_per_m=0.05,
+    kw = dict(beta2_s2_per_m=15e-27, beta3_s3_per_m=0.1e-39, gamma_per_W_m=3e-3, loss_per_m=0.05,
               n_steps=60, store_slices=4)
     for shp in ("parabolic", "lorentzian", "gaussian"):
         a = propagate_gnlse(p, 1.5, saturable_gain=SaturableGain(1.7, 1e-9, 1e13, shp), **kw)
@@ -1078,7 +1079,7 @@ def test_fn_composes_with_the_cpa_chain():
     t = _cpa_grid(8192)
     seed = gaussian_pulse(t, t0_s=1e-13, energy_J=1e-9, lambda0_m=1.03e-6)
     sg_flat = SaturableGain(2.0, 2e-9, np.inf, frantz_nodvik=True)
-    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_m=20e-27,
+    r = cpa_chain(seed, stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_per_m=20e-27,
                   saturable_gain=sg_flat, n_steps=300)
     want = float(frantz_nodvik_output_energy(seed.energy_J, np.exp(2.0 * 2.0), 2e-9))
     assert abs(r.amplified.energy_J / want - 1.0) < 1e-6
@@ -1086,7 +1087,7 @@ def test_fn_composes_with_the_cpa_chain():
     assert abs(r.compressed.energy_J / r.amplified.energy_J - 1.0) < 1e-9   # phase-only optics
     # with a real band + Kerr the chain still produces a sane CPA result, and FN extracts MORE
     # than the CW law does (the -27% under-extraction is what this feature closes)
-    common = dict(stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_m=20e-27, gamma_W_m=1e-3,
+    common = dict(stretch_gdd_s2=3e-25, amp_length_m=2.0, beta2_s2_per_m=20e-27, gamma_per_W_m=1e-3,
                   n_steps=300)
     band = dict(g_small_per_m=2.0, e_sat_J=2e-9, gain_bandwidth_rad_s=6e13, shape="parabolic")
     r_cw = cpa_chain(seed, saturable_gain=SaturableGain(**band), **common)
@@ -1231,7 +1232,7 @@ def test_fn_finite_recovery_branch_is_first_order_and_inf_is_the_exact_spelling(
     def field(ns, tau):
         p = gaussian_pulse(td, t0_s=200e-15, energy_J=3.0 * esat, lambda0_m=1.03e-6)
         sg = SaturableGain(_FN_G0_PER_M, esat, np.inf, "parabolic", 0.0, True, tau)
-        return propagate_gnlse(p, _FN_L, beta2_s2_m=1.0e-24, gamma_W_m=3.0e-4,
+        return propagate_gnlse(p, _FN_L, beta2_s2_per_m=1.0e-24, gamma_per_W_m=3.0e-4,
                                saturable_gain=sg, n_steps=ns).output.field
 
     got = {}
@@ -1363,7 +1364,7 @@ def test_fn_wrap_guard_fires_when_the_pulse_straddles_the_window_edge():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             out = propagate_gnlse(Pulse(t, np.roll(p0.field, k), 1.03e-6), _FN_L,
-                                  beta2_s2_m=beta2, saturable_gain=sg, n_steps=ns).output
+                                  beta2_s2_per_m=beta2, saturable_gain=sg, n_steps=ns).output
         wraps = [w for w in caught if "not contained in the time window" in str(w.message)]
         return np.roll(out.field, -k), out.energy_J, wraps
 
@@ -1448,3 +1449,34 @@ def test_fn_relative_band_filter_over_saturation_is_pinned():
     # the error is a WING effect and it grows with wing energy and saturation, one-signed
     assert -0.140 < err["worst"] < -0.128, err                 # measured -13.39%
     assert err["worst"] < err["shipped"] < err["centre_only"]
+
+
+# ============ Audit 2026-07-25 X-30: the derived summary fields have a reader ============
+
+def test_x30_metrics_summary_fields_match_their_definitions():
+    """X-30: GainSpectrum's peak / flatness / tilt -- the quantities gain_spectrum exists to
+    produce -- and CompressionCurve's small-signal gain / input saturation power and
+    SlopeEfficiency's threshold had NO reader anywhere, and three of the dataclasses were built
+    positionally. Each is checked here against its definition, recomputed from the arrays the
+    same result returns."""
+    from dynameta.optics.fiber_amp.metrics import (gain_compression_curve, gain_spectrum,
+                                                   slope_efficiency)
+    amp = FiberAmplifier(ER, FiberSpec(1.6e-6, 0.22, 8.0e24, 8.0), [Pump(0.10, 0.98e-6)],
+                         [Signal(1e-5, 1.55e-6)], None)
+    gs = gain_spectrum(amp, [1.530e-6, 1.545e-6, 1.560e-6, 1.565e-6])
+    assert gs.peak_lambda_m == gs.lambda_m[int(np.argmax(gs.gain_dB))]
+    assert gs.flatness_dB == float(np.ptp(gs.gain_dB)) and gs.flatness_dB > 0.0
+    x = gs.lambda_m * 1e9
+    ls = float(np.sum((x - x.mean()) * (gs.gain_dB - gs.gain_dB.mean())) / np.sum((x - x.mean()) ** 2))
+    assert gs.tilt_dB_per_nm == pytest.approx(ls, rel=1e-9)        # least-squares slope, dB/nm
+    assert np.isnan(gain_spectrum(amp, [1.55e-6]).tilt_dB_per_nm)
+    cc = gain_compression_curve(amp, np.geomspace(1e-7, 3e-2, 9))
+    assert cc.small_signal_gain_dB == cc.gain_dB[0]
+    assert cc.p_in_W[0] < cc.p_sat_in_W < cc.p_in_W[-1]
+    # the 3 dB point: input and output saturation powers sit on the curve at g0 - 3 dB
+    assert 10.0 * np.log10(cc.p_sat_out_W / cc.p_sat_in_W) == pytest.approx(
+        cc.small_signal_gain_dB - cc.compression_dB, abs=1e-9)
+    se = slope_efficiency(amp, [2e-3, 5e-3, 2e-2, 5e-2, 1e-1], saturating_signal_W=1e-3)
+    above = se.signal_out_W > 1e-3
+    assert not above[0] and above.any()
+    assert se.threshold_pump_W == se.pump_W[int(np.argmax(above))]

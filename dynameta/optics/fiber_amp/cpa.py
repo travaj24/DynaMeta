@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from dynameta.optics.fiber_amp.pulse import Pulse, propagate_gnlse, SaturableGain
+from dynameta.optics.fiber_amp.pulse import Pulse, propagate_gnlse, SaturableGain, _v12
 
 __all__ = ["apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResult", "cpa_chain"]
 
@@ -70,18 +70,26 @@ class CPAResult:
 
 
 def cpa_chain(seed: Pulse, *, stretch_gdd_s2: float, amp_length_m: float,
-              beta2_s2_m: float = 0.0, beta3_s3_m: float = 0.0, gamma_W_m: float = 0.0,
+              beta2_s2_per_m: Optional[float] = None, beta3_s3_per_m: Optional[float] = None,
+              gamma_per_W_m: Optional[float] = None,
               gain_per_m: float = 0.0, saturable_gain: Optional[SaturableGain] = None,
               compress_gdd_s2: Optional[float] = None, compress_tod_s3: float = 0.0,
-              n_steps: int = 400) -> CPAResult:
+              n_steps: int = 400, beta2_s2_m: Optional[float] = None,
+              beta3_s3_m: Optional[float] = None,
+              gamma_W_m: Optional[float] = None) -> CPAResult:
     """Run seed -> stretch(+GDD) -> amplify(gain-GNLSE) -> compress through the amplifier. The
     amplifier is length amp_length_m with beta2/beta3 dispersion, Kerr gamma, and either a flat
     gain_per_m or a SaturableGain. If compress_gdd_s2 is None the compressor is set to undo the
     stretcher plus the amplifier's linear GDD: -(stretch_gdd + beta2 * amp_length). Returns every
-    stage, the B-integral, and the recompressed Strehl / duration."""
+    stage, the B-integral, and the recompressed Strehl / duration. Units and the deprecated
+    beta2_s2_m= / beta3_s3_m= / gamma_W_m= spellings (audit V-12) as in pulse.propagate_gnlse."""
+    beta2_s2_m = _v12("cpa_chain", beta2_s2_per_m, beta2_s2_m, "beta2_s2_m", 0.0)
+    beta3_s3_m = _v12("cpa_chain", beta3_s3_per_m, beta3_s3_m, "beta3_s3_m", 0.0)
+    gamma_W_m = _v12("cpa_chain", gamma_per_W_m, gamma_W_m, "gamma_W_m", 0.0)
     stretched = apply_spectral_phase(seed, stretch_gdd_s2)
-    amp = propagate_gnlse(stretched, amp_length_m, beta2_s2_m=beta2_s2_m, beta3_s3_m=beta3_s3_m,
-                          gamma_W_m=gamma_W_m, gain_per_m=gain_per_m,
+    amp = propagate_gnlse(stretched, amp_length_m, beta2_s2_per_m=beta2_s2_m,
+                          beta3_s3_per_m=beta3_s3_m, gamma_per_W_m=gamma_W_m,
+                          gain_per_m=gain_per_m,
                           saturable_gain=saturable_gain, n_steps=n_steps)
     if compress_gdd_s2 is None:
         compress_gdd_s2 = -(stretch_gdd_s2 + beta2_s2_m * amp_length_m)
