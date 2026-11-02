@@ -244,6 +244,8 @@ def test_gate7_high_q_etalon_window_does_not_collapse(n_slab, rel_tol):
       5.0:  27.291776 vs 27.118423  (+0.639%)
       7.0:  54.970929 vs 54.601815  (+0.676%)      <- pre-fix: ValueError
      10.0: 110.302227 vs 109.588241 (+0.652%)      <- pre-fix: ValueError
+    (Those are pencil values: the refinement was inert until 2026-11-02. With it live: 13.227533
+    (-1.006%), 27.202982 (+0.312%), 55.205207 (+1.105%), 110.408333 (+0.748%).)
     """
     L = 1.0e-6
     er = fdtd_etalon_ringdown(n_slab, L, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
@@ -332,7 +334,7 @@ def test_gate9_high_q_window_span_scope_limit_warns():
     """FIX-VERIFY W1 item 9.  ``max_fit_samples = 1200`` at 20 samples/period is 60 carrier
     periods, i.e. only ``60 pi / Q`` amplitude e-foldings: 13.7 at n_slab = 3.5 but 1.1 at
     n_slab = 20.  That is where the extraction breaks -- Q = 169.9 against the Fabry-Perot 455.2
-    (-62.7%) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
+    (-62.7%; 252.8 / -44.5% since the 2026-11-02 refinement fix) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
     says so."""
     with pytest.warns(RuntimeWarning) as rec:
         er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
@@ -357,10 +359,18 @@ def test_gate7_cross_platform_q_anchor_unchanged():
     Q-2 remediation must NOT move it: the window is byte-identical there (the late-time floor IS
     a genuine plateau, floor/env_start = 9.95e-13, so the plateau test passes and the decade rule
     is not binding) and the refinement's design matrix is unchanged (all 6 pencil modes are
-    oscillatory, so `rest` was empty even pre-fix)."""
+    oscillatory, so `rest` was empty even pre-fix).
+
+    RE-PINNED 2026-11-02 (wave-6): 13.351015 was the RAW PENCIL Q -- the refinement was inert
+    (nfev = 1 in SI units, see test_nls_refinement_moves_optical_poles_toward_truth), so the
+    cross-platform agreement of the anchor came from the pencil alone. With the refinement live
+    the dominant Q is the NLS optimum 13.227533 (-0.92% from the pencil; -1.01% vs the
+    Fabry-Perot 13.361960, inside gate 7's 3%), refit RMS 2.44e-3 -> 1.93e-3 of the window's
+    peak-to-peak, and independent of the seed to <= 8e-10 (test_nls_refinement_makes_the_fdtd_
+    q_seed_independent) -- which is what makes it a platform-stable anchor."""
     er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                               resolution=30)
-    assert er.q == pytest.approx(13.351015, rel=1e-4)
+    assert er.q == pytest.approx(13.227533, rel=1e-4)
     assert er.window == (9840, 31980)
 
 
@@ -616,3 +626,105 @@ def test_q22_ringdown_q_reproduces_fdtd_etalon_ringdown_bitwise():
                               resolution=30)
     assert ringdown_q(er.signal_used, er.dt_used, pencil_frac=0.4, svd_tol=1e-6,
                       amp_floor=5e-2, real_signal=True) == (er.f0_Hz, er.q)
+
+
+# ---- wave-6 (2026-11-02): the VARPRO refinement must actually MOVE poles ----------------------
+
+def _one_mode_optical_trace(rng_seed, sigma=0.05, n_samp=600, dt=1e-16, f0=2.0e14, q=40.0):
+    """One damped optical-frequency cosine (omega ~ 1.3e15, gamma ~ 3e13 rad/s -- the SI scale
+    of every FDTD trace) plus white noise of std `sigma` (the peak is 1)."""
+    t = np.arange(n_samp) * dt
+    w = 2.0 * np.pi * f0
+    g = w / q
+    y = (np.exp(-0.5 * g * t) * np.cos(w * t + 0.3)
+         + sigma * np.random.default_rng(rng_seed).standard_normal(n_samp))
+    return y, dt, complex(-0.5 * g, w), g
+
+
+def _pole_err(m, s_true, g):
+    """|s_fit - s_true| / gamma for the mode nearest the true line (s = -gamma/2 + i omega)."""
+    return abs(complex(-0.5 * m.gamma_rad_s, m.omega_rad_s) - s_true) / g
+
+
+def test_nls_refinement_moves_optical_poles_toward_truth():
+    """wave-1 Q-22 finding, fixed 2026-11-02: `_nls_refine_real` was INERT on every optical trace.
+    In SI units (omega ~ 1e15, gamma/2 ~ 1e13 rad/s) the raw gradient was under gtol = 1e-14, so
+    least_squares stopped at nfev = 1 (status 1, dx = 0) and the "refined" pole was the pencil
+    pole bit-for-bit. The optimizer now works in sample time on the peak-normalized trace.
+
+    Truth-anchored, over 24 noise realizations of a known pole (Q 40, 5% noise): the refined
+    (maximum-likelihood) pole must be closer to the truth than the pencil pole ON AVERAGE.
+    Measured at the fix: mean |ds|/gamma 1.173e-2 pencil -> 1.102e-2 refined (ratio 0.939; the
+    TLS pencil at L = 0.4 N is already near-efficient, so the margin is honest, not large).
+    Pre-fix the ratio is EXACTLY 1.0 (no pole moves), which fails the < 0.97 bar."""
+    err_seed, err_ref = [], []
+    for sd in range(24):
+        y, dt, s_true, g = _one_mode_optical_trace(sd)
+        seed = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+        refined, note = _nls_refine_real(y, dt, seed)
+        assert note == "", note
+        err_seed.append(_pole_err(seed[0], s_true, g))
+        err_ref.append(_pole_err(refined[0], s_true, g))
+    ratio = float(np.mean(err_ref) / np.mean(err_seed))
+    assert ratio < 0.97, (ratio, np.mean(err_seed), np.mean(err_ref))
+
+
+def test_nls_refinement_forgets_its_seed():
+    """The documented purpose of the refinement (platform stability): the NLS optimum is a
+    property of the DATA, so a perturbed pencil seed -- the stand-in for a different LAPACK build
+    -- must land on the same refined pole, and far closer to the truth than that seed. Measured
+    at the fix: seed off by +0.2% in omega and +20% in gamma (|ds|/gamma 0.11) refines to within
+    ~1e-9 relative of the pencil-seeded optimum. Pre-fix the perturbed seed came back unchanged."""
+    import dataclasses
+    y, dt, s_true, g = _one_mode_optical_trace(7)
+    seed = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    ref0, note0 = _nls_refine_real(y, dt, seed)
+    assert note0 == ""
+    bad = [dataclasses.replace(m, omega_rad_s=m.omega_rad_s * 1.002,
+                               gamma_rad_s=m.gamma_rad_s * 1.2,
+                               q=m.omega_rad_s * 1.002 / (m.gamma_rad_s * 1.2)) for m in seed]
+    ref1, note1 = _nls_refine_real(y, dt, bad)
+    assert note1 == "", note1
+    assert ref1[0].omega_rad_s == pytest.approx(ref0[0].omega_rad_s, rel=1e-8)
+    assert ref1[0].gamma_rad_s == pytest.approx(ref0[0].gamma_rad_s, rel=1e-6)
+    assert _pole_err(ref1[0], s_true, g) < 0.2 * _pole_err(bad[0], s_true, g)
+
+
+def test_nls_refinement_makes_the_fdtd_q_seed_independent():
+    """On a real FDTD etalon trace (n_slab = 3.5, all 6 pencil modes refined) the refined
+    dominant Q is independent of the seed: a 1e-4 / 1e-2 relative perturbation of every seed
+    gamma (the pencil's BLAS-dependent digits, exaggerated) moved the refined Q by <= 8e-10
+    (measured), against 1e-4 / 8e-3 for the seed itself. Pre-fix the refined Q moved one-for-one
+    with the seed (nfev = 1)."""
+    import dataclasses
+    er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                              resolution=30)
+    y, dt = er.signal_used, er.dt_used
+    seed = matrix_pencil(y, dt, pencil_frac=0.4, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    assert 1 <= len(seed) <= 6                       # premise: every mode is a refined mode
+    for eps in (1e-4, 1e-2):
+        bad = [dataclasses.replace(m, gamma_rad_s=m.gamma_rad_s * (1.0 + eps * (-1) ** i),
+                                   q=m.omega_rad_s / (m.gamma_rad_s * (1.0 + eps * (-1) ** i)))
+               for i, m in enumerate(seed)]
+        out, note = _nls_refine_real(y, dt, bad)
+        assert note == "", note
+        assert out[0].q == pytest.approx(er.q, rel=1e-7), (eps, out[0].q, er.q)
+
+
+
+def test_q21_degenerate_modes_are_split_by_index_not_by_value():
+    """audit Q-21 (fixed in wave 1, d602866, without a gate): _nls_refine_real split refined vs
+    fixed modes with `m not in osc`, i.e. dataclass VALUE equality, so a mode whose exact duplicate
+    was among the refined ones vanished from the design matrix AND from the output. Two
+    value-identical seed modes, max_refine = 1: both must come back (one refined, one fixed)."""
+    dt, n = 1e-3, np.arange(800)
+    t = n * dt
+    w = 2 * np.pi * 40.0
+    y = (np.exp(-2.0 * t) * np.cos(w * t + 0.3)
+         + 0.01 * np.random.default_rng(21).standard_normal(n.size))   # so a refit can improve
+    m = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)[0]
+    half = Mode(omega_rad_s=m.omega_rad_s, gamma_rad_s=m.gamma_rad_s, q=m.q,
+                amplitude=0.5 * m.amplitude, snr_est=m.snr_est)
+    out, note = _nls_refine_real(y, dt, [half, half], max_refine=1)
+    assert note == "", note
+    assert len(out) == 2
