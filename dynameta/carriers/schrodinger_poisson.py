@@ -44,18 +44,34 @@ def _fermi_log(x: np.ndarray) -> np.ndarray:
     return out
 
 
+_FD1_SERIES_K = np.arange(1, 41, dtype=np.float64)   # x < -1: e^x < 0.368, 0.368^41 ~ 1e-18
+
+
 def _fd1(x: np.ndarray) -> np.ndarray:
     """Complete Fermi-Dirac integral of order 1: F_1(x) = Int_0^inf t/(1+e^(t-x)) dt = -Li_2(-e^x).
-    Closed form via the dilogarithm: Li_2(w) = scipy.special.spence(1-w), so F_1(x) = -spence(1+e^x);
-    the large-x branch uses F_1(x) -> x^2/2 + pi^2/6 (Sommerfeld). Verified vs direct quadrature to
-    ~1e-14 and dF_1/dx = F_0 to ~1e-9. Used by the nonparabolic (Kane) 2D sub-band sheet density:
-    the m*(eps)=m*0(1+2 alpha eps) DOS gives n_s = pref0 (kT F_0 + 2 alpha kT^2 F_1)."""
+    Three branches, each accurate to a few ulp (gated against a 40-digit mpmath polylog and the
+    dF_1/dx = F_0 identity in tests/test_audit_2026_07_17_wave7_carriers.py, audit S1-18):
+      * x < -1: the alternating series -Li_2(-w) = sum_k (-1)^(k+1) w^k / k^2, w = e^x < 0.37 (40 terms);
+      * -1 <= x <= 40: the dilogarithm closed form Li_2(w) = scipy.special.spence(1-w), F_1 = -spence(1+e^x);
+      * x > 40: the Sommerfeld form x^2/2 + pi^2/6 (exact up to -F_1(-x) ~ e^-40 ~ 4e-18 relative x^2).
+    AUDIT S1-18 (wave-7, 2026-11-02): the spence branch used to run down to x = -700. Its argument
+    1 + e^x keeps e^x only to 2.2e-16 ABSOLUTE, so the relative error grew as 2.2e-16 e^-x: measured
+    1.0e-3 at x = -30, and F_1 = 0 EXACTLY for x < -36.7 (1 + e^x == 1.0) -- the "verified to ~1e-14"
+    claim held only for x >~ -5. Used by the nonparabolic (Kane) 2D sub-band sheet density, where the
+    m*(eps)=m*0(1+2 alpha eps) DOS gives n_s = pref0 (kT F_0 + 2 alpha kT^2 F_1): the non-degenerate
+    (high) sub-bands lost their whole 2 alpha kT nonparabolic share there."""
     from scipy.special import spence
     x = np.asarray(x, dtype=np.float64)
     out = np.empty_like(x)
     big = x > 40.0
+    small = x < -1.0
+    mid = ~(big | small)
     out[big] = 0.5 * x[big] ** 2 + (np.pi ** 2) / 6.0
-    out[~big] = -spence(1.0 + np.exp(np.clip(x[~big], -700.0, 40.0)))
+    out[mid] = -spence(1.0 + np.exp(x[mid]))
+    if np.any(small):
+        w = np.exp(x[small])[..., None]
+        k = _FD1_SERIES_K
+        out[small] = np.sum(np.where(k % 2.0 == 1.0, 1.0, -1.0) * w ** k / (k * k), axis=-1)
     return out
 
 
