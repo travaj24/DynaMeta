@@ -6,7 +6,7 @@ for conventions. Bodies are verbatim from the original module.
 from __future__ import annotations
 
 from dynameta.constants import EPS0, MU0
-
+from dynameta.optics.fdtd_nd.backends import check_scan_length
 
 
 def run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, lor=None,
@@ -23,6 +23,7 @@ def run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
     chi2/raman/gain (R15/R20) mirror the numpy kernel; their states extend the scan carry only when
     active (None -> identical carry/trace to the pre-R15 path), and remain DIFFERENTIABLE -- jax.grad
     flows through the SHG/Raman/gain polarizations like every other carry component."""
+    check_scan_length("run_2d_te_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)               # FDTD needs float64 to match the reference
     import jax.numpy as jnp
@@ -107,6 +108,3 @@ def run_2d_te_jax(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
     _, (eyL, hxL, eyR, hxR) = lax.scan(step, tuple(z0 for _ in range(8 + n_extra)),
                                        jnp.asarray(src))
     return eyL, hxL, eyR, hxR                               # JAX arrays (differentiable); dispatcher -> NumPy
-
-
-_run_2d_te_jax = run_2d_te_jax                              # back-compat alias (pre-promotion name)

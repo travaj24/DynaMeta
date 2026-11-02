@@ -6,12 +6,14 @@ for conventions. Bodies are verbatim from the original module.
 from __future__ import annotations
 
 from dynameta.constants import EPS0, MU0
+from dynameta.optics.fdtd_nd.backends import check_scan_length
 
 def run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml):
     """JAX (XLA lax.scan) 3D backend -- the SAME six-component physics as run_3d, but DIFFERENTIABLE end
     to end: a downstream jax.grad gives d(R,T)/d(geometry/material) for 3D inverse design. Functional
     (immutable .at[]) updates, float64 forced to match the reference. Returns the eight probe planes as JAX
     arrays (the dispatcher converts to NumPy; staying in JAX lets a caller grad straight through the loop)."""
+    check_scan_length("run_3d_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
@@ -73,9 +75,6 @@ def run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR
     return outs                                             # 8-tuple of (nsteps,nx,ny) JAX arrays
 
 
-_run_3d_jax = run_3d_jax                                    # back-compat alias (pre-promotion name)
-
-
 def run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
                        kx, ky, sx, sy):
     """JAX (XLA lax.scan) twin of _run_3d_oblique -- the full-vector COMPLEX-ENVELOPE oblique 3D engine
@@ -84,6 +83,7 @@ def run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_
     DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry/material) through the
     oblique 3D scan. (kx,ky)=0 reduces to the real normal-incidence response. Byte-equal to the NumPy
     reference to ~1e-9. Drude only. Returns the complex Ex,Ey probe planes at the left/right z-planes."""
+    check_scan_length("run_3d_oblique_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
@@ -149,8 +149,3 @@ def run_3d_oblique_jax(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_
     carry0 = tuple(zz for _ in range(13))
     _, (exL, eyL, exR, eyR) = lax.scan(step, carry0, jnp.asarray(src, dtype=jnp.complex128))
     return exL, eyL, exR, eyR
-
-
-_run_3d_oblique_jax = run_3d_oblique_jax                    # back-compat alias (pre-promotion name)
-
-
