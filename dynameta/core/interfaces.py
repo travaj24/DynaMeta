@@ -80,6 +80,9 @@ class OpticalResult:
     # r_yx); y-pol -> (r_xy, r_yy).  None unless requested; exactly 0j on a symmetry-reduced cell,
     # the only value its mirror symmetry admits (2026-09-25, exp31 chiral coax).
     r_cross:       Optional[complex] = None
+    # The linear solver that actually produced the field (FEM path): what linear_solver='auto' picked,
+    # after any fallback (e.g. 'pardiso' without MKL -> 'umfpack'). None on the other backends.
+    linear_solver: Optional[str] = None
 
 
 @runtime_checkable
