@@ -123,7 +123,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
                                                       require_lumenairy as _require_lumenairy)
-from dynameta.optics.rasterize import cell_axes, layer_eps_cell
+from dynameta.optics.rasterize import cell_axes, inclusion_mask, layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
@@ -455,15 +455,16 @@ def _rect_strip_tile(layer, design, lambda_m: float, px: float, py: float, bg):
     return xw, yw, tile
 
 
-def _tensor_raster(layer, X, Y, lambda_m: float, materials, bg):
+def _tensor_raster(layer, X, Y, lambda_m: float, materials, bg, period_x_m, period_y_m):
     """The hybrid engine's (Sx, Sy, 3, 3) eps_tensor_cell for an inclusion layer on a
     TENSOR background: the shared rasterizer's painting rule (contains_m masks in
     ASCENDING priority, so the highest priority wins overlaps) with every scalar
     inclusion as eps * I3.  (optics.rasterize.layer_eps_cell itself refuses a
-    tensor eps_by_region entry -- audit C5-2 -- so the tensor variant lives here.)"""
+    tensor eps_by_region entry -- audit C5-2 -- so the tensor variant lives here.)  The mask is the
+    shared rasterize.inclusion_mask, PERIODIC (a boundary-crossing inclusion wraps)."""
     cell = np.broadcast_to(np.asarray(bg, dtype=complex), X.shape + (3, 3)).copy()
     for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
-        mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
+        mask = inclusion_mask(inc, X, Y, period_x_m=period_x_m, period_y_m=period_y_m)
         cell[mask] = _painted(materials.get(inc.material).eps(lambda_m), True)
     return cell
 
@@ -574,10 +575,10 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                 X, Y = np.meshgrid(x, y, indexing="ij")
                 if _is_tensor(bg):
                     stack.add_layer(L.thickness_m, eps_tensor_cell=_tensor_raster(
-                        L, X, Y, lambda_m, design.materials, bg))
+                        L, X, Y, lambda_m, design.materials, bg, px, py))
                 else:
                     cell = layer_eps_cell(L, X, Y, lambda_m, design.materials,
-                                          eps_by_region)
+                                          eps_by_region, period_x_m=px, period_y_m=py)
                     stack.add_layer(L.thickness_m,
                                     eps_cell=np.asarray(cell, dtype=complex))
             names.append(L.name)
