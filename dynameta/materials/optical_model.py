@@ -351,7 +351,9 @@ def _resolve_gamma_omega(spec) -> Callable[[np.ndarray], np.ndarray]:
             return np.interp(om, w_tab, g_tab)
         return _interp
     g0 = float(spec)
-    return lambda omega: g0
+    # audit Q-29: an ARRAY omega gets an array of the same shape (gamma_at documents "scalar or
+    # array"; the old `lambda omega: g0` handed a scalar back for any input); a scalar stays a float.
+    return lambda omega: g0 if np.ndim(omega) == 0 else np.full(np.shape(omega), g0)
 
 
 @dataclass

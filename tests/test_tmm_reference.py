@@ -129,3 +129,28 @@ def test_design_layer_stack_extract_and_reject_inclusions():
                       electrodes=[], materials=reg)
     with pytest.raises(ValueError):
         design_layer_stack(d_struct, 1300e-9)
+
+
+# ---- audit Q-24 (2026-11-02): _pol_for's 'x' -> 's' is the NORMAL-INCIDENCE branch only ----------
+def test_q24_lab_x_at_oblique_incidence_is_refused_not_mapped_to_s():
+    """TmmLayeredSolver.solve duck-types its optical spec, so a non-OpticalSpec object could reach
+    _pol_for with polarization='x' at oblique incidence and silently get the s answer (vacuum /
+    n = 1.5 at 40 deg: R_s = 0.0772 returned where R_p = 0.0143; E along lab x has no s/p image
+    off normal). It raises now; 'x' at normal incidence and 'y'/'p' at oblique are unchanged."""
+    from types import SimpleNamespace
+    from dynameta.core.layered import LayeredStack
+    from dynameta.optics.tmm_reference import TmmLayeredSolver, _pol_for
+
+    def opt(p, th):
+        return SimpleNamespace(polarization=p, incidence_angle_deg=th, incidence_side="top")
+
+    st = LayeredStack(1.0, 1.5, [], period_x_m=1e-6, period_y_m=1e-6)
+    solver = TmmLayeredSolver()
+    assert _pol_for(opt("x", 0.0)) == "s" and _pol_for(opt("y", 40.0)) == "s"
+    assert _pol_for(opt("p", 40.0)) == "p"
+    r_s = solver.solve(st, 1e-6, opt("y", 40.0)).R
+    r_p = solver.solve(st, 1e-6, opt("p", 40.0)).R
+    assert r_s == pytest.approx(0.0772, abs=1e-4) and r_p == pytest.approx(0.0143, abs=1e-4)
+    assert solver.solve(st, 1e-6, opt("x", 0.0)).R == solver.solve(st, 1e-6, opt("y", 0.0)).R
+    with pytest.raises(ValueError, match="Q-24"):
+        solver.solve(st, 1e-6, opt("x", 40.0))
