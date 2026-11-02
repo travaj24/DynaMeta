@@ -364,7 +364,8 @@ jobs:
         # not-covered list -- and is dev-workstation-only). Every file
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
-        # which is exactly the T-5 failure mode.
+        # which is exactly the T-5 failure mode. (test_fem_symmetry_tensor added 2026-11-02 for
+        # v0.11.7: 55 s locally at 6 threads.)
         #
         # NOT PINNED, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg red every night
         # from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py. The crash
@@ -379,6 +380,7 @@ jobs:
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
             tests/test_contact_current.py tests/test_density_gradient.py \
             tests/test_devsim_smoke.py tests/test_electrothermal.py \
+            tests/test_fem_symmetry_tensor.py \
             tests/test_gated_builder.py tests/test_geometry_shapes.py \
             tests/test_hydro_fem.py tests/test_impact_ionization.py \
             tests/test_mesh_periodicity.py tests/test_mobility.py \

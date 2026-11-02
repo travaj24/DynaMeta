@@ -89,6 +89,8 @@ class OpticalSpec:
     # "ams"/"hypre" request a HYPRE auxiliary-space Maxwell (AMS) preconditioner (large-3D scaling,
     # the rung above BDDC); they require an NGSolve built with HYPRE and otherwise fall back to
     # bddc_gmres (the standard pip wheel lacks HYPRE) -- see docs/installing_hypre_windows.md.
+    # "sparsecholesky" is NGSolve's direct LDL^T: ~3x faster than umfpack for solve_fem's
+    # complex-symmetric normal-incidence matrix, refused by residual when the matrix is not symmetric.
     linear_solver:       Literal["umfpack", "sparsecholesky", "bddc_cg", "bddc_gmres", "ams", "hypre"] = "bddc_gmres"
     gmres_rtol:          float = 1e-6
     gmres_max_iter:      int = 800

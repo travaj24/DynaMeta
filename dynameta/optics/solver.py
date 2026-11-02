@@ -106,6 +106,25 @@ _TEST_KCROSS_SIGN = -1.0
 # film whose converged answer is R=0.959/T=1e-4, so a warning there is a TRUE positive, not fatigue.
 _FIT_RELRES_WARN = 5e-2
 
+# linear_solver='sparsecholesky' accepts a solve only at a DIRECT solver's residual. LDL^T on a
+# non-symmetric matrix reads one triangle and silently solves a different operator, so its relative
+# residual lands O(off-symmetric part), far above this; a genuine symmetric solve sits ~1e-12.
+_SPARSECHOLESKY_RELRES_MAX = 1e-8
+
+
+def _free_dof_relres(a, f, gfu, fes) -> float:
+    """||f - A u|| / ||f|| over the FREE DOFs only. The Dirichlet rows (PEC symmetry walls,
+    dirichlet= faces) are constrained, never solved -- f has entries there that A u does not
+    reproduce, so counting them reported a converged symmetry-cell solve as relres ~0.2 (measured
+    2026-09-25: flat LC stack on a quarter cell, GMRes R matched the direct solve to 1e-6 while the
+    all-DOF residual read 1.9e-1). Identical to the all-DOF residual when nothing is constrained."""
+    rvec = gfu.vec.CreateVector()
+    rvec.data = f.vec - a.mat * gfu.vec
+    free = np.fromiter(fes.FreeDofs(), dtype=bool, count=len(rvec))
+    rn = float(np.linalg.norm(rvec.FV().NumPy()[free]))
+    bn = float(np.linalg.norm(f.vec.FV().NumPy()[free]))
+    return rn / bn if bn > 0.0 else rn
+
 # Validated oblique envelope of the fixed-alpha HalfSpace z-PML, shared by solve_fem
 # (_incidence_geometry) and solve_fem_sourced (audit F-13: the sourced path used to carry NONE of
 # the incidence guards). Above this the PML reflection grows fast enough to VIOLATE energy
@@ -551,7 +570,24 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     interpolations per solve) -- returning None for all four. The r/R/t/T/A extraction is
     byte-identical. NOTE this also disables the energy-closure mismatch warning (it needs
     A_independent), so only opt out on throughput paths whose configuration a
-    diagnostics=True solve has already vetted (audit 6.2 perf)."""
+    diagnostics=True solve has already vetted (audit 6.2 perf).
+
+    Symmetry-reduced cells (Mesh3DSpec.symmetry != 'none') accept a TENSOR eps whose off-diagonal
+    part is MEASURED to vanish over the mesh (a diagonal tensor keeps both mirror parities, e.g. a
+    uniaxial director along x or y); an off-diagonal coupling raises. tensor_mirror_symmetric=True
+    lets the caller ASSERT the tensor field is mirror-symmetric about every wall
+    (eps(Mx) = M eps(x) M, e.g. a director tilted toward radial about the cell centre) -- unchecked;
+    it cannot be verified on the reduced mesh, which holds no mirrored points.
+
+    cross_pol=True (normal incidence, polarization 'x'/'y' only; raises otherwise) also extracts
+    result.r_cross, the 0-order reflection projected on the lab axis orthogonal to the drive. With r
+    it is one Jones column: x-pol -> (r_xx, r_yx), y-pol -> (r_xy, r_yy). On a symmetry-reduced cell
+    it is returned as exactly 0j -- the only value a mirror-symmetric structure admits -- rather than
+    fitted (the odd cross field does not average to zero over a reduced cell).
+
+    linear_solver='sparsecholesky' (NGSolve's LDL^T) is a direct solve for the complex-SYMMETRIC
+    matrix of a normal-incidence solve; oblique incidence falls back to 'umfpack' (advisory), and a
+    solve whose residual exceeds a direct solver's (a non-symmetric tensor eps) RAISES."""
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -559,6 +595,14 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # ---- incidence: plane wave, polar angle theta, azimuth phi (derived + validated) ----
     theta, phi, oblique, conical = _incidence_geometry(optical, n_super)
     pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
+    if cross_pol and (oblique or conical or pol_p):
+        # refuse BEFORE the solve: the cross axis is the lab axis orthogonal to a lab-'x'/'y' drive,
+        # defined only at normal incidence (no k_par); the p-pol branch extracts from the total-field
+        # p-pol ratio and has no cross projection (at normal incidence 'p' IS 'x' -- use 'x').
+        raise NotImplementedError(
+            "cross_pol=True needs NORMAL incidence (theta=0, azimuth 0) and polarization 'x' or 'y'; "
+            "got theta={:.3g} deg, azimuth={:.3g} deg, polarization={!r}.".format(
+                math.degrees(theta), math.degrees(phi), optical.polarization))
     envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p and not conical
     # in-plane wavevector k_par = (kx, ky) (vacuum dispersion; oblique requires n_super=1).
     kx = k0 * math.sin(theta) * math.cos(phi)
@@ -781,6 +825,16 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             .format("oblique incidence on a quasi-periodic (Bloch-phased) space"
                     if bloch_phased else "an anisotropic (tensor) eps"))
         _ls = "bddc_gmres"
+    if _ls == "sparsecholesky" and (bloch_phased or envelope):
+        # LDL^T needs a complex-SYMMETRIC matrix; a Bloch-phased space assembles HERMITIAN-not-symmetric
+        # and the envelope's modified curl is not symmetric either (audit F-9 above). Known before the
+        # factorization, so fall back to the other direct solver instead of factorizing to refuse.
+        _advise_once(
+            "sparsecholesky_nonsymmetric",
+            "linear_solver='sparsecholesky' is invalid for this solve: oblique incidence makes the "
+            "assembled matrix non-symmetric (LDL^T assumes complex-SYMMETRIC). Falling back to "
+            "'umfpack'. [reported once per process]")
+        _ls = "umfpack"
     if _ls in ("ams", "hypre"):
         if os.environ.get("DYNAMETA_AMG_OK"):
             pre = ng.Preconditioner(a, "hypre_ams")     # HCurl AMS (caller vouches the build has it)
@@ -804,18 +858,9 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         elif _ls == "sparsecholesky":
             # NGSolve's multithreaded LDL^T -- valid ONLY for a complex-SYMMETRIC matrix (normal
             # incidence, no Bloch phase, symmetric eps / PML product).  It does not check symmetry
-            # itself, so the RESIDUAL is measured and a solve that is not exact is REFUSED rather than
-            # returned (2026-09-25, exp31 coax: ~3x faster than umfpack at equal accuracy).
+            # itself, so the residual below REFUSES a solve that is not exact rather than returning it
+            # (2026-09-25, exp31 coax: ~3x faster than umfpack at equal accuracy).
             gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="sparsecholesky") * f.vec
-            _r = f.vec.CreateVector()
-            _r.data = f.vec - a.mat * gfu.vec
-            _fd = np.fromiter(fes.FreeDofs(), dtype=bool, count=len(_r))
-            _rr = float(np.linalg.norm(_r.FV().NumPy()[_fd]))
-            _fr = float(np.linalg.norm(f.vec.FV().NumPy()[_fd]))
-            if not (_rr <= 1e-8 * max(_fr, 1e-300)):
-                raise RuntimeError(
-                    "linear_solver='sparsecholesky' residual {:.2e} (relative) -- the matrix is not "
-                    "complex-symmetric for this solve; use 'umfpack'.".format(_rr / max(_fr, 1e-300)))
         elif _ls == "bddc_cg":
             inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
                                         maxiter=optical.gmres_max_iter)
@@ -829,18 +874,17 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # OS-1: bddc_gmres/bddc_cg can stop at maxsteps without reaching tol (the ill-conditioned
     # ENZ / lossy-metal regime) and silently return a wrong field. Independently measure the
     # relative residual ||b - A x|| / ||b|| and warn so a non-converged solve is not trusted.
-    if optical.linear_solver != "umfpack":
-        rvec = gfu.vec.CreateVector()
-        rvec.data = f.vec - a.mat * gfu.vec
-        # FREE DOFs only (2026-09-25 fix): the Dirichlet rows (PEC symmetry walls, dirichlet= faces) are
-        # constrained, never solved -- b has entries there that A x does not reproduce, so counting them
-        # reported a converged symmetry-cell solve as relres ~0.2 (measured: flat LC stack on a quarter
-        # cell, GMRes R matched the direct solve to 1e-6 while this check read 1.9e-1).
-        _free = np.fromiter(fes.FreeDofs(), dtype=bool, count=len(rvec))
-        rn = float(np.linalg.norm(rvec.FV().NumPy()[_free]))
-        bn = float(np.linalg.norm(f.vec.FV().NumPy()[_free]))
-        relres = rn / bn if bn > 0.0 else rn
-        if relres > 1e-3:
+    # sparsecholesky is direct but symmetry-ASSUMING: anything short of a direct solve's residual
+    # means the matrix was not complex-symmetric, and the answer is refused.
+    if _ls != "umfpack":
+        relres = _free_dof_relres(a, f, gfu, fes)
+        if _ls == "sparsecholesky":
+            if not relres <= _SPARSECHOLESKY_RELRES_MAX:
+                raise RuntimeError(
+                    "linear_solver='sparsecholesky' relative residual {:.2e} > {:.0e} -- the matrix "
+                    "is not complex-symmetric for this solve (e.g. a non-symmetric / gyrotropic "
+                    "tensor eps); use 'umfpack'.".format(relres, _SPARSECHOLESKY_RELRES_MAX))
+        elif not relres <= 1e-3:
             warnings.warn(
                 "solve_fem: iterative solver '{}' did not converge (relative residual {:.2e} "
                 "> 1e-3 after {} steps); R/T/A are unreliable. Use linear_solver='umfpack', "
@@ -872,9 +916,15 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
             r = complex(R0) + _reflection(mesh, gfu, kz_s, proj, kx_d, ky_d, geo)
             R = float(abs(r) ** 2)
-            if cross_pol:
-                if oblique or conical:
-                    raise NotImplementedError("cross_pol extraction is normal-incidence only")
+            if cross_pol and (getattr(geo, "sym_x", False) or getattr(geo, "sym_y", False)):
+                # a mirror-symmetric cell cannot convert x <-> y at normal incidence, so the 0-order
+                # cross-pol is EXACTLY zero. It must not be fitted: the cross component is ODD about the
+                # walls and averages to zero only over the FULL cell -- its evanescent odd orders leave
+                # a reduced-cell average (measured |r_cross| = 5.0e-3 on a quarter cell whose full-cell
+                # solve gives 2.4e-5).
+                r_cross = 0j
+            elif cross_pol:
+                # normal incidence only (validated up front), so proj is lab x or lab y exactly
                 _pc = (0.0, 1.0, 0.0) if optical.polarization == "x" else (1.0, 0.0, 0.0)
                 r_cross = _reflection(mesh, gfu, kz_s, _pc, kx_d, ky_d, geo)
             t_scat = _transmission(mesh, gfu, kz_sub, proj, kx_d, ky_d, geo)
@@ -962,8 +1012,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A,
-                          fit_relres=fit_relres,
-                          r_cross=(r_cross if cross_pol else None))
+                          fit_relres=fit_relres, r_cross=r_cross)
 
 
 @dataclass
@@ -1170,6 +1219,15 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             "ng.solvers.CGSolver runs COCG, which assumes complex-SYMMETRIC. Falling back to "
             "'bddc_gmres' (same BDDC preconditioner). [reported once per process]")
         _ls = "bddc_gmres"
+    if _ls == "sparsecholesky":
+        # OpticalSpec admits it for solve_fem's symmetric scattered-field solve; the sourced curl-curl
+        # operator is near-singular for low-loss / open-cavity problems (see the residual warning
+        # below), where a symmetry-ASSUMING factorization has no residual guard here. Direct anyway.
+        _advise_once(
+            "sparsecholesky_sourced",
+            "linear_solver='sparsecholesky' is a solve_fem option; solve_fem_sourced uses 'umfpack' "
+            "instead. [reported once per process]")
+        _ls = "umfpack"
     pre = ng.Preconditioner(a, "bddc") if _ls.startswith("bddc") else None
     gfu = ng.GridFunction(fes)
     t0 = time.time()
