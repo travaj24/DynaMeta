@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dynameta"
-version = "0.11.7"
+version = "0.12.0"
 description = "DynaMeta: declarative multi-physics simulation library for tunable metasurface modulators (DEVSIM carrier transport + Drude + NGSolve-FEM / TMM / FDTD optics, modulation mechanisms, LC director dynamics)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -25,7 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-solvers = ["devsim>=2.10", "ngsolve>=6.2", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve
+solvers = ["devsim>=2.10", "ngsolve>=6.2.2608", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve (6.2.2608: the release CI and the 0.12.0 solver timings were measured on)
+pardiso = ["mkl"]                                          # MKL-PARDISO for OpticalSpec(linear_solver="pardiso"/"auto"); NOTE ngsolve then makes pardiso its DEFAULT inverse for untyped Inverse() calls
 io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps dump+load (zarr 3.x needs py>=3.11)
 plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
