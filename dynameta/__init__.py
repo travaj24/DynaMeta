@@ -78,7 +78,7 @@ _dm_expose_tbb()
 del _dm_expose_tbb
 
 from dynameta.geometry import (
-    Design, UnitCell, Stack, Layer, Inclusion, Feature, Electrode,
+    Design, UnitCell, Stack, Layer, Inclusion, Feature, Taper, Electrode,
     CrossSection, Rectangle, Circle, Ellipse, RegularPolygon, Polygon,
     centered_rectangle, centered_square, centered_circle,
     Mesh2DSpec, Mesh3DSpec, OpticalSpec,
@@ -109,7 +109,7 @@ from dynameta.analysis import (
 __all__ = [
     "__version__",
     # geometry
-    "Design", "UnitCell", "Stack", "Layer", "Inclusion", "Feature", "Electrode",
+    "Design", "UnitCell", "Stack", "Layer", "Inclusion", "Feature", "Taper", "Electrode",
     "CrossSection", "Rectangle", "Circle", "Ellipse", "RegularPolygon", "Polygon",
     "centered_rectangle", "centered_square", "centered_circle",
     "Mesh2DSpec", "Mesh3DSpec", "OpticalSpec",

@@ -5,7 +5,9 @@ from dynameta.geometry.cross_section import (
     CrossSection, Rectangle, Circle, Ellipse, RegularPolygon, Polygon,
     centered_rectangle, centered_square, centered_circle,
 )
-from dynameta.geometry.stack import Inclusion, Layer, Feature, Stack
+from dynameta.geometry.stack import Inclusion, Layer, Feature, Stack, Taper
+from dynameta.geometry.guards import (UnsupportedGeometryError, require_supported_geometry,
+                                      require_untapered_layer, tapered_inclusions)
 from dynameta.geometry.electrode import Electrode
 from dynameta.geometry.specs import Mesh2DSpec, Mesh3DSpec, OpticalSpec
 from dynameta.geometry.design import Design
@@ -14,7 +16,9 @@ __all__ = [
     "UnitCell",
     "CrossSection", "Rectangle", "Circle", "Ellipse", "RegularPolygon", "Polygon",
     "centered_rectangle", "centered_square", "centered_circle",
-    "Inclusion", "Layer", "Feature", "Stack",
+    "Inclusion", "Layer", "Feature", "Stack", "Taper",
+    "UnsupportedGeometryError", "require_supported_geometry", "require_untapered_layer",
+    "tapered_inclusions",
     "Electrode",
     "Mesh2DSpec", "Mesh3DSpec", "OpticalSpec",
     "Design",
