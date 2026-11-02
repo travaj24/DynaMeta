@@ -534,6 +534,49 @@ def reduce_director(theta_zt_rad, *, t_index: int = -1, reduce: str = "profile")
     return director_to_extra_fields(col)
 
 
+def _onset_threshold_V(K11: float, K33: float, dEps: float, theta_b: float, v_lc_per_volt: float, *,
+                       K22: float = 0.0, twist_total_rad: float = 0.0, q0_d: float = 0.0) -> float:
+    """APPLIED voltage at which the anchored uniform state theta = theta_b (FIELD-AXIS) goes linearly
+    unstable -- the Freedericksz onset the BVP solvers seed their continuation ladder from and test
+    their wrong-branch safety net against. +inf when the field STABILISES that state.
+
+    Linearising the Frank + dielectric free energy about theta_b (eta = theta - theta_b, strong
+    anchoring, lowest mode sin(pi z/d)) gives the onset in LC voltage
+
+        eps0 V_lc^2 * (-dEps cos 2theta_b) = pi^2 K_eff(theta_b) + (1/2) f2''(theta_b) Phi^2
+                                             - 2 K22 (q0 d) Phi cos 2theta_b,
+        K_eff = K11 sin^2 + K33 cos^2,   f2 = sin^2 (K22 sin^2 + K33 cos^2)  (the chiral solver's f2),
+
+    with Phi = phi_top - phi_bottom (the imposed twist; 0 for the achiral solver). Planar anchoring
+    (theta_b = pi/2) is the SPLAY onset pi sqrt(K11/(eps0 dEps)) and, with twist, the classic TN
+    threshold pi sqrt([K11 + (K33 - 2 K22)(Phi/pi)^2 + 4 K22 (d/p)(Phi/pi)]/(eps0 dEps)); homeotropic
+    (theta_b = 0, dEps < 0, a VAN cell) is the BEND onset pi sqrt(K33/(eps0 |dEps|)). EXACT for
+    symmetric anchoring (theta_b in {0, pi/2}: the anchored state is then stationary); with a pretilt
+    the bifurcation is imperfect and this is the onset of the steep rise. v_lc_per_volt = V_lc / V_app
+    of the UNDEFORMED cell (the series-capacitance voltage division through fixed layers -- exact at
+    onset for planar geometry, an estimate for 'cyl', where E ~ 1/r).
+
+    AUDIT S1-13 (2026-07-17; fixed wave-7 2026-11-02): both solvers used pi sqrt(((K11 + K33)/2)/
+    (eps0 |dEps|)) for every anchoring and ignored the voltage division. For a planar cell with
+    K11 = 20 pN, K33 = 2 pN, dEps = 14.7 that is 0.742x the true 1.232 V onset, so the 1.3 V_th safety
+    net fired BELOW the real threshold and flagged the correct, untilted solution success=False
+    (measured at V = 1.20 V, 0.974 of the onset); and a cell the field cannot tilt (dEps < 0 with planar
+    anchoring) got a finite threshold and was flagged at every V > 1.3 V_th."""
+    s2, c2 = math.sin(theta_b) ** 2, math.cos(theta_b) ** 2
+    cos2 = math.cos(2.0 * theta_b)
+    drive = -float(dEps) * cos2                          # > 0: the field destabilises theta_b
+    if not (drive > 1e-30) or not (v_lc_per_volt > 0.0) or not math.isfinite(v_lc_per_volt):
+        return float("inf")
+    k_eff = K11 * s2 + K33 * c2
+    f2pp = (2.0 * cos2 * (2.0 * K22 * s2 + K33 * cos2)
+            + 2.0 * math.sin(2.0 * theta_b) ** 2 * (K22 - K33))
+    stiff = (math.pi ** 2 * k_eff + 0.5 * f2pp * twist_total_rad ** 2
+             - 2.0 * K22 * q0_d * twist_total_rad * cos2)
+    if stiff <= 0.0:
+        return 0.0                                       # unstable at zero field (over-twisted cell)
+    return math.sqrt(stiff / (EPS0 * drive)) / float(v_lc_per_volt)
+
+
 def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: float, V_app: float,
                          geo: "Optional[LCGeometry]" = None, geometry: str = "planar",
                          d_planar: "Optional[float]" = None,
@@ -597,9 +640,10 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     #      (solve_bvp then converges only the trivial theta=theta_b branch -> n_eff silently rails). We
     #      ramp the voltage up from ~1.05 V_th, carrying each converged tilted profile as the next seed.
     Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
-    # MAGNITUDE-based seeding threshold (finite for dEps<0 too; only used for seeding, not a reported #)
-    K_eff_mean = 0.5 * (K11 + K33)
-    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    # Freedericksz ONSET of the anchored state in APPLIED volts (seeds the ladder + the safety net; not a
+    # reported number). audit S1-13: was pi sqrt(((K11+K33)/2)/(eps0|dEps|)) -- see _onset_threshold_V.
+    V_th = _onset_threshold_V(K11, K33, dEps, theta_b,
+                              solve_lc_field_profile(np.full_like(z, theta_b), 1.0, geo, **fkw)[1])
     # tilt direction + the destabilized far anchoring the midplane swings toward: dEps>0 -> toward the
     # field (theta -> 0, homeotropic); dEps<0 -> toward planar (theta -> pi/2).
     sign = -1.0 if dEps >= 0.0 else 1.0
@@ -783,6 +827,14 @@ class LCChiralResult:
     theta_b_rad: float
     phi_bottom_rad: float
     phi_top_rad: float
+    # The phi'-dependent part of the Frank energy per unit plate area [J/m^2], in the COMPLETE-SQUARE
+    # convention: int [(1/2) K22 (sin^2 th phi' - q0)^2 + (1/2) K33 sin^2 th cos^2 th phi'^2] dz >= 0,
+    # ZERO for an undistorted planar helix at its natural pitch (phi' = q0, th = pi/2), and
+    # (1/2) K22 (Phi/d - q0)^2 d for a planar cell with total twist Phi. AUDIT S1-14 (2026-07-17; fixed
+    # wave-7 2026-11-02): it used to drop the constant (1/2) K22 q0^2 d of the Frank twist term
+    # (1/2) K22 (n . curl n + q0)^2, i.e. it was measured from an UNTWISTED cell -- and so went NEGATIVE
+    # (-(1/2) K22 q0^2 d) at the natural pitch. Legacy value = this - (1/2) K22 q0^2 d; identical when
+    # q0 = 0. The Euler-Lagrange equations (and every profile) never saw the constant.
     twist_energy_J_m2: float = 0.0
     n_eff: float = float("nan")
     success: bool = True
@@ -885,8 +937,10 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
 
     ph_seed = phi_a + (phi_b - phi_a) * u + (q0 * d_lc) * (u - u * u)   # linear + chiral bow (fixed BCs)
     Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
-    K_eff_mean = 0.5 * (K11 + K33)
-    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    # Freedericksz/TN ONSET in applied volts, incl. the imposed twist and the chiral bias (audit S1-13)
+    V_th = _onset_threshold_V(K11, K33, dEps, theta_b,
+                              solve_lc_field_profile(np.full_like(z, theta_b), 1.0, geo, **fkw)[1],
+                              K22=K22, twist_total_rad=phi_b - phi_a, q0_d=q0 * d_lc)
     sign = -1.0 if dEps >= 0.0 else 1.0                                # tilt direction toward the field
     reach = theta_b if dEps >= 0.0 else (0.5 * math.pi - theta_b)
     max_amp = min(abs(reach) * 0.98, math.radians(89.0))
@@ -913,8 +967,14 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
         return uniq
 
     def _twist_energy(th_, ph_):
+        # The phi'-dependent Frank energy per unit plate area in COMPLETE-SQUARE form (audit S1-14):
+        #   int [ (1/2) K22 (sin^2 th ph' - q0)^2 + (1/2) K33 sin^2 th cos^2 th ph'^2 ] dz
+        # = int [ (1/2) f2 ph'^2 - K22 q0 sin^2 th ph' ] dz + (1/2) K22 q0^2 d_lc.
+        # The constant is the Frank twist term's own (1/2) K22 q0^2; without it the number was the
+        # energy relative to an UNTWISTED cell and went NEGATIVE at the natural pitch.
         ph_z = np.gradient(ph_, z)
-        return float(trapz(0.5 * _f2(th_) * ph_z * ph_z - K22 * q0 * np.sin(th_) ** 2 * ph_z, z))
+        return float(trapz(0.5 * _f2(th_) * ph_z * ph_z - K22 * q0 * np.sin(th_) ** 2 * ph_z, z)
+                     + 0.5 * K22 * q0 * q0 * d_lc)
 
     def _energy(th_, ph_, Vk):
         try:
@@ -974,9 +1034,8 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
             message = ("chiral_director_profile_bvp: V={:.3g} > 1.3 V_th(~{:.3g}) but stayed ~untilted "
                        "(mean tilt {:.3g} rad)".format(Vmag, V_th, tilt))
     _E, V_lc = _field_at(th, float(V_app))
-    # twist elastic energy per unit plate area: integral of [ (1/2) f2 ph'^2 - K22 q0 sin^2 th ph' ] dz
-    ph_z = np.gradient(ph, z)
-    w_twist = float(trapz(0.5 * _f2(th) * ph_z * ph_z - K22 * q0 * np.sin(th) ** 2 * ph_z, z))
+    # twist elastic energy per unit plate area, complete-square convention (LCChiralResult, audit S1-14)
+    w_twist = _twist_energy(th, ph)
     neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
             if (n_o is not None and n_e is not None) else float("nan"))
     return LCChiralResult(V_app=float(V_app), V_lc=float(V_lc), z_m=z, theta_field_rad=th, phi_rad=ph,
