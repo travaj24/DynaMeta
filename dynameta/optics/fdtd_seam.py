@@ -14,7 +14,15 @@ carry the full multi-order / cross-pol power. SCOPE:
     are rasterized (CrossSection.contains_m) onto the (nx,ny,nz) eps grid -- this is where FDTD earns its
     keep (arbitrary geometry, vs TMM which is exact only for uniform stacks). The lateral grid carries
     REAL eps, so a LOSSY structured layer raises (lossy patterned -> FEM/RCWA);
-  * a VACUUM superstrate/substrate (non-vacuum semi-infinite end media raise -> a later increment);
+  * LOSSLESS semi-infinite end media (real n_super/n_sub, e.g. metasurface-on-glass) on BOTH entry points,
+    uniform or structured; an absorbing end medium raises (-> FEM/TMM). (This line used to say "a VACUUM
+    superstrate/substrate" -- stale since make_structured_lateral learned to paint the end-media pads.)
+  * the two run_pipeline entry points (audit S5-20, wave-7 2026-11-02) now accept the SAME inputs: the
+    per-wavelength make_fdtd_optical_solver and the sweep-aware FDTDSweepOpticalSolver.solve_sweep (which
+    run_pipeline PREFERS) both take a structured cell on lossless non-vacuum end media, and both honour
+    the bias eps of a structured layer (the sweep freezes it at the band centre, the per-wavelength path
+    at each lambda). Before, the sweep path raised on the first and silently dropped the second -- it
+    rasterized the NOMINAL materials whatever the bias.
   * strong metals / ENZ are impractical (a Drude band-edge index blows the grid up) -> keep FEM/RCWA there,
     exactly the build-vs-buy verdict (FDTD = broadband / nonlinear / transient, not the ENZ accumulation layer).
 ACCURACY: a laterally-uniform stack matches TMM to the FDTD discretization (~1e-4 near a reflection
@@ -558,10 +566,14 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     array over n_fit sample wavelengths} for bias-modulated carrier regions whose eps is not a plain
     material lambda-function (see run_fdtd_sweep). dispersive=False freezes eps at the band centre (exact
     only for a non-dispersive design). STRUCTURED cells stay frozen-at-centre (the lateral grid is real
-    eps; a lossy/dispersive structured layer is out of scope -> FEM/RCWA). Scope: vacuum end media; uniform
-    or structured (dim=3, vacuum end media only). Tip: request a band ~10-20% wider than your target so the
-    tapered edges fall out. LOSSLESS non-vacuum end media (real n_super/n_sub) are supported for uniform
-    stacks."""
+    eps, rasterized from `eps_by_region` at the band centre when given; a lossy/dispersive structured
+    layer is out of scope -> FEM/RCWA). Scope: LOSSLESS end media (real n_super/n_sub, e.g. glass), for
+    uniform stacks (dim 2 or 3) AND structured cells (dim=3) -- the same envelope as the per-wavelength
+    make_fdtd_optical_solver (audit S5-20, wave-7 2026-11-02: a structured cell on non-vacuum end media
+    used to raise here on a stale "the rasterizer drops the end-media pads" reason, while the
+    per-wavelength path solved it; make_structured_lateral has painted the pads since the
+    metasurface-on-glass fix, and validation/fdtd_structured_nonvacuum.py gates them). Tip: request a band
+    ~10-20% wider than your target so the tapered edges fall out."""
     ns, nb = complex(n_super), complex(n_sub)
     if abs(ns.imag) > _VAC_TOL or abs(nb.imag) > _VAC_TOL:
         raise NotImplementedError("fdtd_sweep_spectrum supports LOSSLESS end media; got n_super={:.4g}, "
@@ -575,12 +587,12 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     _guard_optical_spec(design, structured=structured)       # audit C5-7
     if structured and dim != 3:
         raise NotImplementedError("a structured cell (inclusions) needs dim=3; got dim={}.".format(dim))
-    if structured and (abs(ns.real - 1.0) > _VAC_TOL or abs(nb.real - 1.0) > _VAC_TOL):
-        raise NotImplementedError("non-vacuum end media + a structured cell is not yet supported "
-                                  "(the lateral rasterizer drops the end-media pads); use a uniform stack.")
     t_start = time.time()
     if structured:                                          # structured -> frozen-at-centre, real lateral eps
-        layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region)
+        # audit S5-20: the end-media pads are painted (n_super^2 / n_sub^2), exactly as the
+        # per-wavelength path does -- the former non-vacuum refusal here is gone
+        layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region,
+                                                     n_super=ns.real, n_sub=nb.real)
         res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
     else:
         if dispersive:                                      # fit one Drude pole per layer across the band
@@ -656,7 +668,9 @@ class FDTDSweepOpticalSolver:
     region included) at the SAME n_fit wavelengths the dispersive layer-fitter uses, so the broadband result
     reproduces the per-wavelength one to the Drude-fit accuracy (exact for a Drude carrier region + non-
     dispersive dielectrics; a strongly-dispersive dielectric is the single-pole-fit limit). Uniform stacks
-    only for the dispersive band; a structured cell still freezes at the band centre (one solve regardless)."""
+    only for the dispersive band; a structured cell still freezes at the band centre (one solve regardless)
+    -- at THIS BIAS's eps there (audit S5-20: solve_sweep used to drop the bias for a structured cell and
+    rasterize the nominal materials, while the per-wavelength __call__ honoured it)."""
 
     def __init__(self, *, dim: int = 2, resolution: int = 32, backend: str = "auto", courant: float = 0.5,
                  settle: float = 12.0, n_pad_wave: float = 4.0, n_fit: int = 7, band_pad: float = 0.08):
@@ -717,10 +731,19 @@ class FDTDSweepOpticalSolver:
                     break
             if vals is not None:
                 eps_band[L.name] = np.asarray(vals, dtype=complex)
+        # audit S5-20 (wave-7, 2026-11-02): a STRUCTURED cell is rasterized frozen at the band centre
+        # (fdtd_sweep_spectrum's lam_c = 0.5*(lo + hi), the same lo/hi as above) -- hand it THIS bias's
+        # eps there. eps_band only feeds the uniform dispersive fit, so a structured cell used to be
+        # rasterized from the NOMINAL materials: the bias modulation was silently dropped on the path
+        # run_pipeline prefers, while the per-wavelength __call__ honoured it. Uniform stacks are
+        # unchanged (eps_by_region stays None there: the dispersive fit refuses graded/tensor entries).
+        extra = {}
+        if design_has_inclusions(design):
+            extra["eps_by_region"] = assemble_eps_at(0.5 * (lo + hi))
         return run_fdtd_sweep(design, lams, dim=self.dim, resolution=self.resolution, backend=self.backend,
                               eps_band_by_region=(eps_band or None), band_pad=self.band_pad,
                               n_super=n_super, n_sub=n_sub, courant=self.courant, settle=self.settle,
-                              n_pad_wave=self.n_pad_wave, n_fit=self.n_fit)
+                              n_pad_wave=self.n_pad_wave, n_fit=self.n_fit, **extra)
 
 
 def make_fdtd_sweep_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
