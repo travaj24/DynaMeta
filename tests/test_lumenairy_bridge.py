@@ -148,8 +148,9 @@ def test_pmm_partial_y_rectangle_raises():
 def test_pmm2d_uniform_stack_matches_tmm_both_engines():
     # the 2-D crossed-PMM seam (audit 8.1-4) on a uniform lossy stack: both engines
     # reduce to TMM (R/T and the complex r, pinning layer order + Jones conventions);
-    # neither exposes a transmission Jones (t is None, the 1-D PMM precedent); the
-    # hybrid absorption surface fills per_region_absorption and closes the budget.
+    # since 2026-11-02 both also return the complex zeroth-order t (lumenairy's
+    # jones_transmission, was None in v1) and it matches TMM too; the hybrid
+    # absorption surface fills per_region_absorption and closes the budget.
     # The rigorous patch-referee gates live in validation/lumenairy_pmm2d_bridge.py.
     from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm2d_solver
     from dynameta.optics.tmm_reference import make_layered_tmm_solver
@@ -164,7 +165,7 @@ def test_pmm2d_uniform_stack_matches_tmm_both_engines():
         assert r_b.R == pytest.approx(r_t.R, abs=1e-8)
         assert r_b.T == pytest.approx(r_t.T, abs=1e-8)
         assert r_b.r == pytest.approx(r_t.r, abs=1e-8)
-        assert r_b.t is None                     # no transmission Jones in 2-D PMM
+        assert r_b.t == pytest.approx(r_t.t, abs=1e-8)   # t since 2026-11-02
     r_a = make_lumenairy_pmm2d_solver(engine="hybrid", degree=7, n_orders=2,
                                       absorption=True)(d, None, {}, lam,
                                                        1.0 + 0j, 1.5 + 0j)
