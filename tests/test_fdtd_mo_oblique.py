@@ -295,3 +295,73 @@ def test_mo_grid_sizing_is_wc_sign_invariant():
     hi_bg = MOLayer(thickness_m=300e-9, eps_xx=9.0, eps_yy=2.0, drude_wp_rad_s=1e14,
                     drude_gamma_rad_s=2e13, cyclotron_wc_rad_s=0.0)
     assert _mo_band_index_bound(hi_bg, w_band) >= 3.0
+
+
+def test_s2_14_mo_registers_materials_where_E_lives_and_is_the_unbiased_one():
+    """audit S2-14 (wave-7, 2026-11-02): fdtd_mo samples the layer eps at the Yee E-NODES
+    (zc = k*dz) while solve_fdtd_1d's uniform path / solve_fdtd_2d / solve_fdtd_3d sample at
+    (k + 1/2)*dz. Which is right? Every engine shares ONE staggering (E_k at k*dz, H at (k+1/2)*dz:
+    probe_cells rounds z/dz to an E index, the PEC/Mur sit on node 0) and every sibling de-embeds its
+    r0 phase in that node frame (exp(-2i n k0 (pad - k_pL*dz))). The eps that multiplies E_k fills
+    E_k's control volume [(k-1/2), (k+1/2)]*dz, whose centre IS the node -- so node sampling puts
+    the effective (half-node) interface within +-dz/2 of the true one with ZERO mean, and
+    (k + 1/2) sampling shifts the whole structure by -dz/2 on average, i.e. a reflection-phase
+    bias of 2 k0 (dz/2) = k0*dz. Measured here over 9 pad offsets (frac(pad/dz) 0..0.9, res 30):
+    node mean dphi_r = +0.005 rad, (k + 1/2) mean = -0.100 rad, k0*dz = 0.090. |R|, |T| cannot
+    tell them apart (a rigid translation; both carry the same thickness-rounding spread).
+    VERDICT: fdtd_mo is RIGHT and is kept; the siblings carry the -k0*dz r0-phase bias their
+    validation absorbs (validation/fdtd_seam_vs_tmm.py GATE 3: 15 deg, 'the half-cell limit').
+    This gate fails if fdtd_mo is "unified" onto the biased registration."""
+    pytest.importorskip("numba")
+    import tmm
+    from dynameta.constants import C_LIGHT
+    import dynameta.optics.fdtd_mo as fm
+    from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid
+    L1, L2, res, n_s, d, lam0 = 1.2e-6, 1.6e-6, 30, 2.0, 0.37e-6, 1.4e-6
+    layer = fm.MOLayer(thickness_m=d, eps_xx=n_s ** 2, eps_yy=n_s ** 2)
+    kk = 2.0 * np.pi / lam0
+    ref = tmm.coh_tmm("s", [1, n_s, 1], [np.inf, d * 1e9, np.inf], 0, lam0 * 1e9)
+    dphi = {0.0: [], 0.5: []}
+    dT = {0.0: [], 0.5: []}
+    for npw in np.linspace(3.0, 3.0 + 0.9 * (L1 / (res * n_s)) / L2, 9):     # pad sweeps 0.9 cell
+        dz, pad, zs, Lz, nz = z_grid([layer], L1, L2, res, npw, n_s)
+        dt = 0.5 * dz / C_LIGHT
+        i_src, i_pL, i_pR = probe_cells(pad, zs, dz)
+        f_min, f_max = C_LIGHT / L2, C_LIGHT / L1
+        tau, t0 = pulse_width(f_min, f_max, 14.0)
+        nsteps, _tg, src = source_pulse(0.5 * (f_min + f_max), tau, t0, source_amp=1.0, Lz=Lz, dt=dt)
+        one, zero = np.ones(nz), np.zeros(nz)
+        eLi, eRi = fm._run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, "y",
+                              "numba")
+        f = np.fft.rfftfreq(nsteps, dt)
+        incL, incR = np.conj(np.fft.rfft(eLi[:, 1])), np.conj(np.fft.rfft(eRi[:, 1]))
+        for off in (0.0, 0.5):
+            if off == 0.0:                            # the SHIPPED registration, via the public solve
+                zc = np.arange(nz) * dz
+            else:                                     # the siblings' (k + 1/2) registration
+                zc = (np.arange(nz) + 0.5) * dz
+            e = np.where((zc >= pad) & (zc < pad + d), n_s ** 2, 1.0)
+            eLt, eRt = fm._run_mo(e, e, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, "y",
+                                  "numba")
+            with np.errstate(divide="ignore", invalid="ignore"):     # out-of-band bins only
+                r = np.conj(np.fft.rfft(eLt[:, 1] - eLi[:, 1])) / incL
+                t = np.conj(np.fft.rfft(eRt[:, 1])) / incR
+            fi = C_LIGHT / lam0
+            rr = complex(np.interp(fi, f, r.real), np.interp(fi, f, r.imag))
+            tt = complex(np.interp(fi, f, t.real), np.interp(fi, f, t.imag))
+            dphi[off].append(np.angle(rr * np.exp(-2j * kk * (pad - i_pL * dz)) / ref["r"]))
+            dT[off].append(abs(tt) ** 2 - ref["T"])
+        if npw == 3.0:                                # the public solve uses exactly the node rule
+            res_pub = fm.solve_fdtd_mo_1d([layer], lambda_min_m=L1, lambda_max_m=L2, resolution=res,
+                                          n_pad_wave=npw, settle=14.0, backend="numba")
+            fi = C_LIGHT / lam0
+            r_pub = complex(np.interp(fi, res_pub.freqs_Hz, res_pub.r_co.real),
+                            np.interp(fi, res_pub.freqs_Hz, res_pub.r_co.imag))
+            assert np.angle(r_pub * np.exp(-2j * kk * (pad - i_pL * dz)) / ref["r"]) == pytest.approx(
+                dphi[0.0][0], abs=1e-9)
+    k0dz = kk * (L1 / (res * n_s))
+    m_node, m_ctr = float(np.mean(dphi[0.0])), float(np.mean(dphi[0.5]))
+    assert abs(m_node) < 0.25 * k0dz, (m_node, k0dz)                 # unbiased (measured +0.06 k0dz)
+    assert m_ctr == pytest.approx(-k0dz, rel=0.25), (m_ctr, k0dz)    # the dz/2 shift (measured -1.11)
+    # magnitudes cannot discriminate: both registrations agree with TMM to the same FP-fringe level
+    assert abs(np.mean(dT[0.0])) < 0.02 and abs(np.mean(dT[0.5])) < 0.02
