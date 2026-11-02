@@ -224,3 +224,36 @@ def test_tier2_linear_limit_rings_at_omega1():
     w_fdtd = max(cand, key=lambda x: abs(x.amplitude)).omega_rad_s
     # collocated-grid dispersion is looser than the staggered linear solver (~1%); gate 2%
     assert abs(w_fdtd - hf.bulk_plasmon_omega(1, slab)) / hf.bulk_plasmon_omega(1, slab) < 0.02
+
+
+def test_p17_confined_kx0_ringdown_marches_real_within_stated_tolerance():
+    """audit P-17: the confined kx = 0 ring-down (bulk_plasmon_resonances) marched complex128 fields
+    whose imaginary part is provably zero. _march_linear(real=True) now marches float64 there:
+    measured 1.3x on the march (7.6-8.1 s -> 5.9 s per mode, nz=69, 180831 steps). NOT bit-identical
+    -- numpy's complex division (a/b with Im b = 0) does not round like real a/b, so the rho trace
+    differs at <= ~4e-13 relative (the real path is the correctly rounded one), and the extracted
+    omega_m moved by 1.4e-14 relative. Pinned here at 1e-11 on a short run; real=True refuses a
+    case that is not provably real (kx != 0)."""
+    from dynameta.constants import EPS0
+    slab = hf.HydroSlab(eps_inf=1.0, wp=1.0e16, gamma=1e14, beta=1.0e6, thickness_m=5e-9)
+    dz = slab.thickness_m / 24.0
+    grid = hf._build_grid([slab], dz=dz, pad_m=4 * dz, n_super=1.0, n_sub=1.0)
+    nz, dt = grid.nz, 0.5 * dz / C_LIGHT
+    n0, n1 = int(round(grid.z_struct0 / dz)), int(round(grid.z_struct1 / dz))
+    zin = (np.arange(nz) * dz - grid.z_struct0) / slab.thickness_m
+    film = (np.arange(nz) >= n0) & (np.arange(nz) <= n1)
+    rho0 = np.zeros(nz, complex)
+    rho0[film] = np.cos(math.pi * zin[film])
+    rho0[film] -= rho0[film].mean()
+    ez0 = np.zeros(nz - 1, complex)
+    ez0[1:] = np.cumsum(rho0[1:nz - 1]) * dz / (EPS0 * slab.eps_inf)
+    ns = 4000
+    kw = dict(dt=dt, nsteps=ns, kx=0.0, i_src=nz // 2, src=np.zeros(ns, complex), i_pL=n0, i_pR=n1,
+              mur_v=C_LIGHT, nonlocal_on=True, rho_probe=n0 + 3, rho_init=rho0, ez_init=ez0)
+    a = hf._march_linear(grid, **kw)
+    b = hf._march_linear(grid, real=True, **kw)
+    assert b["rho"].dtype == np.complex128 and not np.any(b["rho"].imag)   # same contract
+    assert np.max(np.abs(a["rho"] - b["rho"])) <= 1e-11 * np.max(np.abs(a["rho"]))
+    assert np.max(np.abs(a["rho"].imag)) == 0.0                            # the premise: Im == 0
+    with pytest.raises(ValueError, match="P-17"):
+        hf._march_linear(grid, real=True, **dict(kw, kx=1e6))

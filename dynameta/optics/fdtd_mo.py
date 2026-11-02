@@ -39,8 +39,9 @@ from typing import List
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
-from dynameta.optics.fdtd_nd import HAVE_NUMBA, njit, resolve_backend
+from dynameta.optics.fdtd_nd import have_numba, njit, resolve_backend
 from dynameta.optics.fdtd_nd.spec import courant_guard         # audit D-11 (the 8th front end)
+from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
 
 
 @dataclass
@@ -187,7 +188,7 @@ def _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, 
     (jc00, jc01, jc10, jc11) = (Jc[:, 0, 0], Jc[:, 0, 1], Jc[:, 1, 0], Jc[:, 1, 1])
     (ma00, ma01, ma10, ma11) = (Ma[:, 0, 0], Ma[:, 0, 1], Ma[:, 1, 0], Ma[:, 1, 1])
     (mb00, mb01, mb10, mb11) = (Mb[:, 0, 0], Mb[:, 0, 1], Mb[:, 1, 0], Mb[:, 1, 1])
-    if backend == "numba" and HAVE_NUMBA:                       # JIT the hot time loop (same precompute)
+    if backend == "numba" and have_numba():                      # JIT the hot time loop (same precompute)
         ac = (lambda a: np.ascontiguousarray(a, dtype=np.float64))
         return _mo_loop_numba(ac(iv00), ac(iv01), ac(iv10), ac(iv11), ac(ep00), ac(ep01), ac(ep10), ac(ep11),
                               ac(jc00), ac(jc01), ac(jc10), ac(jc11), ac(ma00), ac(ma01), ac(ma10), ac(ma11),
@@ -273,12 +274,8 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
 
     n_max = max(1.0, max(_mo_band_index_bound(L, w_band) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     dt = courant * dz / C_LIGHT
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
 
     exx = np.ones(nz); eyy = np.ones(nz); wp = np.zeros(nz); gam = np.zeros(nz); wc = np.zeros(nz)
     zc = np.arange(nz) * dz
@@ -289,18 +286,13 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
         wp[m] = L.drude_wp_rad_s; gam[m] = L.drude_gamma_rad_s; wc[m] = L.cyclotron_wc_rad_s
         z += L.thickness_m
 
-    i_src = max(2, int(round(0.35 * pad / dz)))
-    i_pL = int(round(0.7 * pad / dz))
-    i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)          # audit D-15: shared (fdtd_nd/grid.py)
+    tau, t0 = pulse_width(f_min, f_max, settle)
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt)
 
     one = np.ones(nz); zero = np.zeros(nz)
     rb = resolve_backend(backend)                               # 'numba' = JIT loop; else NumPy reference
-    bk = "numba" if (rb == "numba" and HAVE_NUMBA) else "numpy"
+    bk = "numba" if (rb == "numba" and have_numba()) else "numpy"
     eL_i, eR_i = _run_mo(one, one, zero, zero, zero, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)   # vacuum
     eL_t, eR_t = _run_mo(exx, eyy, wp, gam, wc, dz, dt, nsteps, i_src, i_pL, i_pR, src, pol, bk)         # structure
 

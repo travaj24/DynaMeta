@@ -479,3 +479,18 @@ def test_d4_blazed_grating_deflects_toward_its_thickening_side():
         assert up[m] == pytest.approx(dn[-m], rel=1e-9)
         assert up[-m] == pytest.approx(dn[m], rel=1e-9)
     assert up[0] == pytest.approx(dn[0], rel=1e-9)
+
+
+def test_d20_generic_h_alias_never_pairs_across_named_series():
+    """audit D-20 (alias hygiene): a generic 'hx'/'h' used to pair with ANY E key, so a multi-series
+    trace with `reflected` but no `reflected_hx` silently borrowed an unrelated H (wrong Poynting
+    decomposition). It now pairs only in a single-series dict; named `<key>_hx` partners and every
+    solve_fdtd_* trace are unchanged."""
+    from dynameta.optics.harmonics import _extract
+    e, h, hx_other = np.ones((8, 2)), 2.0 * np.ones((8, 2)), 3.0 * np.ones((8, 2))
+    multi = {"dt": 1e-16, "transmitted": e, "transmitted_hx": h, "reflected": e, "hx": hx_other}
+    assert _extract(multi, None, "reflected")[1] is None                  # pre-fix: hx_other
+    assert np.array_equal(_extract(multi, None, "transmitted")[1], h)     # named partner wins
+    single = {"dt": 1e-16, "transmitted": e, "hx": hx_other}
+    assert np.array_equal(_extract(single, None, "transmitted")[1], hx_other)
+    assert np.array_equal(_extract({"dt": 1e-16, "ey": e, "h": h}, None, "transmitted")[1], h)

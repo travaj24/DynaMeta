@@ -101,7 +101,20 @@ def _extract(obj, dt, field):
             raise ValueError("harmonic diagnostics: trace dict has no {!r} (or transmitted/ey/e) "
                              "series".format(field))
         e = np.asarray(obj[key], dtype=float)
-        h = obj.get(key + "_hx", obj.get("hx", obj.get("h")))
+        # audit D-20 (alias hygiene): the H partner is the CO-LOCATED probe of the E series actually
+        # used -- `<key>_hx` for a named FDTD series. The generic "hx"/"h" aliases used to be the
+        # fallback for EVERY key, so a multi-series trace carrying `reflected` without
+        # `reflected_hx` but with a generic `hx` silently paired the reflected E with an unrelated H
+        # (a wrong Poynting order decomposition, no error). The generic H now pairs only in a
+        # SINGLE-series dict -- one with no `*_hx` keys at all, e.g. {'dt', 'transmitted'|'ey'|'e',
+        # 'hx'|'h'} -- where there is nothing else it could belong to. Every solve_fdtd_2d/1d
+        # time_trace is unaffected (each named 2-D series has its `_hx`; 1-D carries no H).
+        if key + "_hx" in obj:
+            h = obj[key + "_hx"]
+        elif not any(str(k).endswith("_hx") for k in obj):
+            h = obj.get("hx", obj.get("h"))
+        else:
+            h = None
         return e, (None if h is None else np.asarray(h, dtype=float)), dt
     if isinstance(obj, (tuple, list)):
         if len(obj) == 2 and np.isscalar(obj[1]):

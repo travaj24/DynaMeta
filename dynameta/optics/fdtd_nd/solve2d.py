@@ -26,10 +26,12 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0, T_REF
 from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_guard
-from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, have_jax, resolve_backend
+from dynameta.optics.fdtd_nd.backends import have_jax, have_numba, resolve_backend
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
 from dynameta.optics.fdtd_nd.cpml import cpml_z
+from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pulse_width,
+                                          source_pulse, z_grid)
 from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
 from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
@@ -528,9 +530,12 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     correctly normalized (T carries the n_sub/n_super flux ratio). Reduces byte-identically to vacuum
     at n_super=n_sub=1.
 
-    backend selects the compute kernel (see available_backends()): 'auto' (default-fastest CPU present),
-    'numpy' (reference), 'numba' (fused threaded CPU -- fastest for unit cells), 'cupy' (NVIDIA GPU),
-    'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. Every backend AGREES WITH THE NUMPY
+    backend selects the compute kernel (see available_backends()). The DEFAULT is 'numpy' (the
+    reference) -- audit P-16: this line used to read "'auto' (default-fastest CPU present)", which
+    read as "'auto' is the default"; it is not, and given D-7 below it deliberately stays 'numpy'
+    (the fast kernels are float64-floor-equal, not bit-identical). 'auto' picks the fastest CPU
+    backend present (numba, else numpy); also 'numba' (fused threaded CPU -- fastest for unit
+    cells), 'cupy' (NVIDIA GPU), 'jax' (differentiable XLA), or the 'cpu'/'gpu' aliases. Every backend AGREES WITH THE NUMPY
     REFERENCE TO THE FLOAT64 ROUNDING FLOOR on R/T, NOT bit-for-bit (audit D-7): the numba/CUDA kernels
     factor the E-update constant differently (`e0dt*eps_inf` vs `EPS0*eps_eff/dt`) and carry
     fastmath=True, which licenses reassociation. What is actually GATED: max|dR|,max|dT| < 1e-9 on a
@@ -546,21 +551,13 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
-
-    def _n_band_max(L):
-        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
-    n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    n_max = layer_band_index_max(layers, w_band, (n_super, n_sub))   # audit D-15: shared (grid.py)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     if nx is None:
         nx = max(4, int(round(period_x_m / dz)))
     dx = period_x_m / nx
     # 2D CFL: dt <= courant / (c sqrt(1/dx^2 + 1/dz^2))
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
-
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
 
     # z-profile, replicated over nx columns (laterally uniform unless lateral_eps_inf given)
     eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz)); chi3 = np.zeros((nx, nz))
@@ -578,6 +575,9 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     _hot_layers = [getattr(L, "hot_carrier", None) for L in layers]
     _have_hot = any(h is not None for h in _hot_layers)
     if _have_hot:
+        # lazy (keeps fdtd_nd import-light), but ONCE per solve -- audit D-20: this import statement
+        # used to sit inside the per-layer fill loop below and re-ran for every hot layer.
+        from dynameta.optics.hot_carrier import build_hot_carrier_tables
         hc_mat_idx = np.full((nx, nz), -1, dtype=np.int64)   # per-cell material id, -1 = not hot
         hc_G = np.zeros((nx, nz)); hc_Tl = np.zeros((nx, nz))
         hc_alpha = np.zeros((nx, nz)); hc_Te0 = np.full((nx, nz), T_REF, dtype=float)
@@ -609,7 +609,6 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         gkdn[:, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
         hc = getattr(L, "hot_carrier", None)
         if _have_hot and hc is not None:
-            from dynameta.optics.hot_carrier import build_hot_carrier_tables  # lazy: keep fdtd_nd import-light
             mi = hc_seen.get(id(hc))
             if mi is None:
                 mi = len(hc_tables)
@@ -667,18 +666,13 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                 "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
                     _n_lat, n_max, _n_lat / n_max - 1.0))
 
-    k_src = max(2, int(round((0.35 * pad) / dz)))
-    k_pL = int(round((0.7 * pad) / dz))
-    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15: shared (grid.py)
     _check_probe_placement("solve_fdtd_2d", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
 
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
+    tau, t0 = pulse_width(f_min, f_max, settle)
     t_ring = _window_memory_s("solve_fdtd_2d", layers, tau)  # audit C3-6 pole memory + D-10 caveat
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt, t_ring=t_ring)
 
     # Lorentz ADE coefficients (central difference): PL^{n+1} = C1 PL^n + C2 PL^{n-1} + C3 E^n, where the
     # pole eps += d_eps w0^2/(w0^2 - w^2 - i gl w). lor is applied to the STRUCTURE run only (the reference
@@ -847,8 +841,9 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     TM (Hy,Ex,Ez) -- the p-pol R/T come from the tangential-Ex up/down ratio. Because k_par is fixed, the
     physical angle varies with frequency: theta(f) = asin(k_par c/(2 pi f)); the result carries theta_deg(f)
     and the band mask excludes frequencies below the light line (k_par > w/c, evanescent). Vacuum ends.
-    angle_deg=0 reduces to the normal-incidence solver. backend selects the TE kernel (numpy/numba); TM is
-    the NumPy reference."""
+    angle_deg=0 reduces to the normal-incidence solver. backend selects the kernel for BOTH s and p
+    (numpy/numba/jax; default 'numpy' -- audit P-16: this used to say TM was NumPy-only, stale since
+    the TM numba + jax kernels landed; see _run_oblique)."""
     if pol not in ("s", "p"):
         pol = _accept_pol(pol, "solve_fdtd_2d_oblique")                 # audit V-8 / unification (b)
     if any(L.lorentz_delta_eps != 0.0 for L in layers):     # the oblique kernel carries Drude only
@@ -871,19 +866,11 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
-
-    def _n_band_max(L):
-        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
-    n_max = max(1.0, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    n_max = layer_band_index_max(layers, w_band)             # vacuum ends (no n_ends; audit X-18)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     dx = period_x_m / nx
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
     kx = (2.0 * np.pi * f_c / C_LIGHT) * np.sin(np.radians(angle_deg))   # fixed transverse wavevector
-
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
     eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz))
     zc = (np.arange(nz) + 0.5) * dz
     z = pad
@@ -892,17 +879,12 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
         eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
         z += L.thickness_m
 
-    k_src = max(2, int(round((0.35 * pad) / dz)))
-    k_pL = int(round((0.7 * pad) / dz))
-    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_2d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
+    tau, t0 = pulse_width(f_min, f_max, settle)
     t_ring = _window_memory_s("solve_fdtd_2d_oblique", layers, tau)   # audit C3-6 + D-10
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt, t_ring=t_ring)
 
     cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, nz)); zero = np.zeros((nx, nz))
@@ -913,7 +895,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # pick the requested fast/diff backend when available, else the NumPy reference.
     if rb == "jax" and have_jax():
         name = "jax"                                         # differentiable oblique scan (s + p)
-    elif rb == "numba" and HAVE_NUMBA:
+    elif rb == "numba" and have_numba():
         name = "numba"                                       # fused JIT oblique kernel (s + p)
     else:
         name = "numpy"
@@ -923,6 +905,8 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
                                               src, cpml, kx, pol)
     # complex envelope -> full FFT; take the positive-frequency half (the forward exp(-iwt) response).
     # rfftfreq gives the monotonic positive-frequency axis matching fft(...)[:nf] within the band.
+    # SIGN (audit V-22, idiom 3 in the package docstring): numpy bin +f here is the conjugate-mirror
+    # (omega, -k_par) partner -- exact for |R0|/|T0| of this laterally-uniform stack, not a phasor.
     nf = nsteps // 2 + 1
     f = np.fft.rfftfreq(nsteps, dt)
     mean = (lambda a: np.fft.fft(a.mean(axis=1))[:nf])
