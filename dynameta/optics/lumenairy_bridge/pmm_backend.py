@@ -55,7 +55,8 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
                           period_y_m: float, *, bg_eps=None) -> List[Tuple[float, complex]]:
     """Translate a lamellar (1-D) DynaMeta layer into PMM segments [(width_fraction, eps)].
     Every inclusion must be a Rectangle spanning the FULL y period (y-invariant grating
-    lines), lying inside [0, period_x] and mutually non-overlapping in x; gaps are filled
+    lines), at most one period wide (a line crossing x = 0 or x = period_x WRAPS into two
+    segments, 2026-11-02) and mutually non-overlapping in x; gaps are filled
     with the background eps. Anything else raises -- the honest 1-D scope."""
     px, py = float(period_x_m), float(period_y_m)
     bg = complex(bg_eps if bg_eps is not None
@@ -71,12 +72,34 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
             raise ValueError("PMM bridge: layer {!r} Rectangle does not span the full y "
                              "period (y-invariant grating lines required; got y in "
                              "[{:.3e}, {:.3e}] of {:.3e})".format(layer.name, ylo, yhi, py))
+        eps_inc = complex(design.materials.get(inc.material).eps(lambda_m))
         if xlo < -_REL_TOL * px or xhi > px * (1.0 + _REL_TOL):
-            raise ValueError("PMM bridge: layer {!r} Rectangle x-extent [{:.3e}, {:.3e}] "
-                             "leaves the cell [0, {:.3e}] (wrap-around is a follow-on)"
-                             .format(layer.name, xlo, xhi, px))
-        spans.append((max(xlo, 0.0), min(xhi, px),
-                      complex(design.materials.get(inc.material).eps(lambda_m))))
+            # PERIODIC WRAP (2026-11-02; this used to raise "wrap-around is a follow-on"): a
+            # boundary-crossing line is the SAME periodic structure as its two in-cell pieces
+            # [xlo', Px] + [0, xhi' - Px] after shifting xlo into [0, Px) -- the convention of the
+            # FEM mesher (_inclusion_solids_clipped) and of the RCWA bridge's periodic raster /
+            # analytic shapes. A line WIDER than the period would overlap its own image, which
+            # no segment list can paint -> refused; exactly one period wide = the whole cell.
+            # Gate (tests/test_lumenairy_shapes_sem_wrap.py): shifting every line by the same
+            # dx leaves R/T unchanged to ~1e-13 and agrees with the RCWA analytic path.
+            width = xhi - xlo
+            if width > px * (1.0 + _REL_TOL):
+                raise ValueError("PMM bridge: layer {!r} Rectangle x-width {:.3e} exceeds the "
+                                 "period {:.3e} -- it would overlap its own periodic image"
+                                 .format(layer.name, width, px))
+            if width >= px * (1.0 - _REL_TOL):
+                spans.append((0.0, px, eps_inc))
+                continue
+            lo = xlo - np.floor(xlo / px) * px          # in [0, Px)
+            hi = lo + width
+            if hi <= px * (1.0 + _REL_TOL):
+                spans.append((lo, min(hi, px), eps_inc))
+            else:
+                if px - lo > _REL_TOL * px:
+                    spans.append((lo, px, eps_inc))
+                spans.append((0.0, hi - px, eps_inc))
+            continue
+        spans.append((max(xlo, 0.0), min(xhi, px), eps_inc))
     spans.sort(key=lambda s: s[0])
     for (a_lo, a_hi, _), (b_lo, b_hi, _) in zip(spans, spans[1:]):
         if b_lo < a_hi - _REL_TOL * px:
