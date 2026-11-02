@@ -99,10 +99,13 @@ def cycles_to_failure(film: MechanicalProps, cte_sub_per_K: float, dT_K: float, 
                       C: float = 0.5, c_ductility: float = 0.6,
                       eps_elastic_offset: float = 0.0) -> float:
     """The film's cycling life at amplitude dT: BRITTLE first (one over-stress excursion cracks it:
-    sigma >= sigma_crit -> 0 cycles), else ductile Coffin-Manson on the plastic mismatch strain."""
+    sigma >= sigma_crit -> 0 cycles), else ductile Coffin-Manson on the plastic mismatch strain.
+    dT_K is the SIGNED excursion: a cooling swing (dT < 0) cycles the same strain range |dT| (audit
+    R-23: it used to raise inside plastic_strain_range although the stress model and the brittle
+    branch were already sign-agnostic)."""
     sig = abs(float(biaxial_stress_Pa(film, cte_sub_per_K, dT_K)))
     if sig >= film.sigma_crit_Pa:
         return 0.0                                          # cracks on the first excursion
-    d_eps = plastic_strain_range(film.cte_per_K, cte_sub_per_K, dT_K,
+    d_eps = plastic_strain_range(film.cte_per_K, cte_sub_per_K, abs(float(dT_K)),
                                  eps_elastic_offset=eps_elastic_offset)
     return float(coffin_manson_nf(d_eps, C=C, c_ductility=c_ductility))

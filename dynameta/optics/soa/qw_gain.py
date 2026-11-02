@@ -93,7 +93,7 @@ from scipy.optimize import brentq
 from scipy.special import expit
 
 from dynameta.constants import C_LIGHT, H_PLANCK, HBAR, KB, M_E, Q_E
-from dynameta.carriers.physics_equilibrium import invert_F12
+from dynameta.carriers.physics_equilibrium import effective_dos_m3, invert_F12
 from dynameta.optics.amp_noise import nf_from_nsp
 
 __all__ = [
@@ -189,8 +189,9 @@ class BulkGainParams:
 
 def _band_dos(m_rel: float, T_K: float) -> float:
     """Effective band density of states N_c or N_v [m^-3] in the normalized-F_1/2 convention
-    (N = N_dos * F_1/2(eta)); m_rel is the DOS mass in units of m0."""
-    return 2.0 * (m_rel * M_E * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
+    (N = N_dos * F_1/2(eta)); m_rel is the DOS mass in units of m0. Delegates to the single
+    carriers.physics_equilibrium.effective_dos_m3 (audit X-15; bit-identical)."""
+    return effective_dos_m3(m_rel * M_E, T_K)
 
 
 def band_edge_Eg_J(N_m3: float, params: BulkGainParams) -> float:

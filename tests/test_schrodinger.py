@@ -130,3 +130,30 @@ def test_open_body_and_neumann_mutually_exclusive():
     sp, z, n_bg, kw, _ = _open_body_setup()
     with pytest.raises(ValueError):
         sp.solve_self_consistent(bulk_buffer_m=8e-9, neumann_left=True, **kw)
+
+
+def test_c18_gate_to_psi_s_keeps_vg_over_256_after_bracket_expansion():
+    """AUDIT C-18 (2026-11-02): the gate -> psi_s bisection ran a FIXED 8 halvings of [0, hi], i.e.
+    bracket/256 -- Vg/256 unexpanded but Vg/4 once the bracket had doubled six times, so a root found
+    after expansion came back up to Vg/8 off. A synthetic linear column (residual = k psi - Vg, root
+    psi* = Vg/k beyond Vg) pins the documented Vg/256 resolution; pre-fix the error was 0.0125 Vg at
+    k = 1/19.3 and 0.075 Vg at k = 1/45.7 (bound 0.0039). The unexpanded case keeps exactly 8 halvings."""
+    from dynameta.carriers.sp_carrier import SchrodingerPoissonCarrier
+    from dynameta.constants import Q_E
+    car = SchrodingerPoissonCarrier(oxide_thk_m=2e-9, nz=21)
+    t = car.semi_thk_m
+    for k in (1.0 / 19.3, 1.0 / 45.7, 0.37, 3.0):
+        c = (k - 1.0) * car._C_ox / (Q_E * t)              # uniform excess density per volt of psi
+        calls = []
+
+        def column(sp, Nd, psi, c=c):
+            calls.append(psi)
+            return None, np.full(Nd.shape, car.n_bg_m3) + c * abs(psi)   # even in the gate sign
+        car._solve_column = column
+        for vg in (0.7, -1.3):
+            calls.clear()
+            psi = car._gate_to_psi_s(vg)
+            root = vg / k
+            assert abs(psi - root) <= abs(vg) / 256.0, (k, vg, psi, root)
+            if k > 1.0:                                     # bracketed at once: 1 + 2 + 8 solves
+                assert len(calls) == 11

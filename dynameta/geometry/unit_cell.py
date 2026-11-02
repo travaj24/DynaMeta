@@ -20,6 +20,8 @@ class UnitCell:
 
     @property
     def is_square(self) -> bool:
+        # RELATIVE ~4.5 ulp (two typed periods, ulp noise only); Design.device_symmetry's centring test
+        # is ABSOLUTE 1 pm by design -- see the note there (audit R-34)
         return abs(self.period_x_m - self.period_y_m) < 1e-15 * self.period_x_m
 
     @property
