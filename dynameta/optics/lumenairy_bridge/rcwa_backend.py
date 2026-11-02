@@ -43,7 +43,9 @@ Inclusion handling: laterally structured layers are RASTERIZED onto a (Sx, Sy) c
 the validated shared rasterizer (optics.rasterize, also the structured-FDTD painter:
 background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
-to the layer BACKGROUND only (rasterizer contract). The raster is PERIODIC (wrap-aware,
+to the layer BACKGROUND only (rasterizer contract) -- a uniform TENSOR override too (2026-11-02:
+the inclusions are painted over the tensor background as eps * I3 by
+optics.rasterize.layer_eps_tensor_cell, the PMM2D bridge's reading; this branch used to drop them). The raster is PERIODIC (wrap-aware,
 _shapes.periodic_layer_eps_cell, 2026-11-02): a boundary-crossing inclusion contributes its
 wrapped piece at the opposite edge -- the FEM mesher's convention. The shared rasterizer used to
 clip it, which solved a different (narrower) structure; byte-identical for inclusions inside the
@@ -92,7 +94,7 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.rasterize import cell_axes
+from dynameta.optics.rasterize import cell_axes, layer_eps_tensor_cell
 from dynameta.optics.lumenairy_bridge._shapes import (ShapesNotRepresentable,
                                                       layer_shapes_payload,
                                                       periodic_layer_eps_cell)
@@ -170,7 +172,9 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     applies to rasterized layers only (lumenairy shapes layers are Laurent by contract).
 
     Layer dispatch, in order: a structured (gridded) EpsField -> sliced eps_cell /
-    eps_tensor_cell slabs; a uniform tensor EpsField -> a tiled eps_tensor_cell; a uniform
+    eps_tensor_cell slabs; a uniform tensor EpsField -> a tiled eps_tensor_cell (on a layer WITH
+    inclusions: the tensor is the BACKGROUND and the inclusions are painted over it as eps * I3,
+    optics.rasterize.layer_eps_tensor_cell -- 2026-11-02, they used to be dropped); a uniform
     scalar EpsField -> eps; a graded laterally-uniform EpsField -> sliced uniform slabs;
     inclusions -> a rasterized eps_cell; else the material eps at lambda. Design layers are
     bottom -> top, the RCWA stack wants superstrate-side first -> reversed()."""
@@ -259,6 +263,30 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
                 names.append(L.name)
             continue
         if ef is not None and getattr(ef, "is_tensor", False):
+            if L.inclusions:
+                # a uniform TENSOR entry on a layer WITH inclusions is the layer BACKGROUND (the
+                # rasterizer's scalar-override contract, the FEM region semantics and the PMM2D
+                # bridge's reading); each scalar inclusion is painted over it as eps * I3 by the
+                # shared periodic tensor painter. Until 2026-11-02 this branch tiled the bare
+                # tensor over the WHOLE layer and DROPPED the inclusions: measured on a 600 nm
+                # cell, 250 nm LC layer (n_o 1.5 / n_e 1.7, azimuth 30 deg) holding a centred
+                # 300 nm eps-4 square, n_orders 6, x-pol: R 0.07647258774158677 with AND without
+                # the pillar, bit for bit (r too). lumenairy's analytic shapes take a SCALAR
+                # eps_background only, so a tensor-background layer is always rasterized
+                # ('analytic' refuses it, 'auto' rasterizes).
+                if inclusion_model == "analytic":
+                    raise ShapesNotRepresentable(
+                        "design_to_rcwa_stack(inclusion_model='analytic'): layer {!r} has a "
+                        "TENSOR background (uniform tensor eps_by_region entry) around its "
+                        "inclusions; lumenairy's analytic shapes take a scalar eps_background "
+                        "only (inclusion_model='auto' rasterizes such layers)".format(L.name))
+                x, y = cell_axes(sx, sy, px, py)
+                X, Y = np.meshgrid(x, y, indexing="ij")
+                cell = layer_eps_tensor_cell(L, X, Y, lambda_m, design.materials, ef.tensor,
+                                             period_x_m=px, period_y_m=py)
+                stack.add_layer(L.thickness_m, eps_tensor_cell=cell)
+                names.append(L.name)
+                continue
             cell = np.broadcast_to(np.asarray(ef.tensor, dtype=complex),
                                    (s_min_x, max(s_min_y, 1), 3, 3)).copy()
             stack.add_layer(L.thickness_m, eps_tensor_cell=cell)

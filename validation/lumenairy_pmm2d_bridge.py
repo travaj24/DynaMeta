@@ -53,9 +53,10 @@ GATE G (patterned ANISOTROPIC cell vs RCWA, 2026-11-02): a uniaxial LC backgroun
         [out-of-plane]) as a uniform tensor EpsField on a layer with an eps-4 pillar
         -- a centred square (union grid N = 4, (4, 4, 3, 3) cell) and a circle (curved
         shapes= map with a (3, 3) background_eps).  Oracle: lumenairy RCWAStack with
-        an (S, S, 3, 3) eps_tensor_cell painted directly from the shapes (DIRECT, not
-        through the RCWA bridge, whose uniform-tensor branch drops inclusions -- module
-        docstring of pmm2d_backend).  |R - R_pure| strictly shrinking over n_orders 6
+        an (S, S, 3, 3) eps_tensor_cell painted directly from the shapes (DIRECT; the
+        RCWA bridge dropped the inclusions of a uniform-tensor layer until 2026-11-02 --
+        it now paints this same raster and equals the oracle exactly, GATE O of
+        validation/lumenairy_pmm2d_taper_wrap).  |R - R_pure| strictly shrinking over n_orders 6
         -> 9 -> 12 for x AND y pol, < 4e-4 at 12, and the first-order (O(1/n),
         Laurent-only tensor path) Richardson value from 9 / 12 within 2e-4; hybrid
         (square) within 1.5e-4.  Discrimination: the MUTANT must fail the same

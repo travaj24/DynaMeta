@@ -39,8 +39,9 @@ entry point below scopes itself honestly and raises for the rest):
   the RCWAStack twin still traces the wavelength (its order count is the explicit static
   n_orders). Slant / out-of-plane tensors / stabilize / retain_internal raise upstream.
   Upstream pin: tests/unit/test_v5_14_2_jax_stacks.py. The PMM twin is SHIPPED (not skipped):
-  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the angle
-  and half-space parameters the RCWAStack twin cannot -- the two are complementary. ANGLE
+  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the
+  half-space indices the RCWAStack twin cannot (both trace the angle since 5.22) -- the two
+  are complementary. ANGLE
   NOTE (theta = 0; the ANGLE CAVEAT, RETIRED for lumenairy >= 5.50 on 2026-11-02): on
   lumenairy 5.22..5.49 the angle gradient is correct OFF-normal (AD==FD to ~6e-7 at theta
   0.15-0.4 rad) but WRONG at exactly theta = 0 -- the +/-m half-space orders are an exactly
@@ -381,10 +382,11 @@ def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     `layers` = [(spec, thickness), ...] superstrate-side first; spec is either a segment list
     [(width_fraction, eps), ...] (widths STATIC and summing to 1; eps scalar or in-plane
     (3, 3) tensor) or a bare eps for a uniform layer. Gradients flow through every jax-typed
-    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- the angle (at exactly
-    angle=0 only on lumenairy >= 5.50 with its cluster rule on: below 5.50 the +/-m
-    degeneracy made the theta=0 angle gradient wrong, see the module docstring's ANGLE NOTE)
-    and the half-space indices. STATIC: period, widths,
+    eps (re AND im), thickness, the angle (as the RCWAStack twin also does since lumenairy
+    5.22 -- re-measured 2026-11-02 through rcwa_stack_RT: AD == FD to 1.4e-8 rel at theta
+    0.25 rad; at exactly angle=0 only on lumenairy >= 5.50 with its cluster rule on: below 5.50
+    the +/-m degeneracy made the theta=0 angle gradient wrong, see the module docstring's
+    ANGLE NOTE) AND -- unlike the RCWAStack twin -- the half-space indices. STATIC: period, widths,
     degree, n_orders, and (lumenairy >= 5.30) the
     WAVELENGTH -- PMM sizes its propagating-order set from the wavelength, so the
     differentiable path raises NotImplementedError on a traced one rather than silently
