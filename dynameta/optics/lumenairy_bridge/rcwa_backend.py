@@ -52,9 +52,13 @@ clip it, which solved a different (narrower) structure; byte-identical for inclu
 closed cell.
 
 ANALYTIC SHAPES (2026-11-02, the follow-on this paragraph used to defer; lumenairy 5.50
-add_layer(shapes=, eps_background=)): `inclusion_model` = 'raster' (DEFAULT, unchanged numbers),
-'analytic' (every inclusion layer goes through lumenairy's exact form factors -- raises
-ShapesNotRepresentable when a layer cannot) or 'auto' (analytic where exact, raster otherwise).
+add_layer(shapes=, eps_background=)): `inclusion_model` = 'auto' (THE DEFAULT since v0.13.0 --
+analytic where exact, raster otherwise), 'raster' (the pre-0.13 default; reproduces those numbers
+bit for bit) or ('analytic': every inclusion layer goes through lumenairy's exact form factors -- raises
+ShapesNotRepresentable when a layer cannot). Why 'auto' became the default (user decision,
+2026-11-02): it removes the point raster's staircase error (~1e-3 in R on a 0.4-period line at
+S = 128, edges up to half a pixel off) wherever the geometry is exactly representable, and never
+refuses what the raster accepts.
 Rectangle / Circle / Ellipse map 1:1 (both sides axis-aligned; frame pin: absolute cell frame
 [0, P], lumenairy's default centre P/2 -- _shapes module docstring); polygons and OVERLAPPING
 inclusions (priority painting has no additive form-factor equivalent; lumenairy's own validator
@@ -160,15 +164,16 @@ def _add_shapes_layer(stack, L, design, lambda_m, eps_by_region, px, py, inclusi
 def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_orders: int = 11,
                          n_orders_y: Optional[int] = None, n_slices: Optional[int] = None,
                          cell_samples: Optional[int] = None, formulation: str = "laurent",
-                         inclusion_model: str = "raster"):
+                         inclusion_model: str = "auto"):
     """Translate a DynaMeta Design (+ optionally the bridge's eps_by_region) into a CONCRETE
     Lumenairy RCWAStack at one wavelength. Returns (stack, layer_names_top_first) where the
     name list is aligned with the Lumenairy layers (graded fields contribute several slabs
     per design layer) -- the key for mapping per-layer absorption back to design layers.
 
-    inclusion_model: 'raster' (default; the periodic point raster), 'analytic' (lumenairy
-    analytic shapes for EVERY inclusion layer, raises ShapesNotRepresentable otherwise) or
-    'auto' (analytic where exact, raster otherwise) -- see the module docstring. `formulation`
+    inclusion_model: 'auto' (default since v0.13.0: analytic where exact, raster otherwise),
+    'raster' (the periodic point raster -- the pre-0.13 default, reproduces those numbers) or
+    'analytic' (lumenairy analytic shapes for EVERY inclusion layer, raises
+    ShapesNotRepresentable otherwise) -- see the module docstring. `formulation`
     applies to rasterized layers only (lumenairy shapes layers are Laurent by contract).
 
     Layer dispatch, in order: a structured (gridded) EpsField -> sliced eps_cell /
@@ -396,7 +401,7 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                absorption: bool = False, stabilize: bool = False,
                                formulation: str = "laurent",
                                n_workers: Optional[int] = 1, blas_per_worker: int = 1,
-                               inclusion_model: str = "raster"):
+                               inclusion_model: str = "auto"):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy RCWA, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult
     PLUS the sweep-aware `solve_sweep` fast path (one result per wavelength, in order; end
