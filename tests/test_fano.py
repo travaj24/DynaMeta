@@ -52,8 +52,12 @@ def test_fano_roundtrip_all_q_regimes():
         assert abs(fit.omega0 - x0_true) / x0_true < 1e-4, "x0 off at q={}".format(q)
         assert abs(fit.gamma_fwhm - gamma_true) / gamma_true < 2e-2, "gamma off at q={}".format(q)
         assert abs(fit.q - q) <= 0.02 * abs(q) + 0.03, "q={} recovered as {}".format(q, fit.q)
-        # Q = |x0| / gamma consistency
-        assert fit.Q == pytest.approx(abs(fit.omega0) / fit.gamma_fwhm, rel=1e-12)
+        # Q against the GENERATING truth x0/gamma = 96.75 (audit T-18: this used to assert
+        # fit.Q == |fit.omega0| / fit.gamma_fwhm -- the definition analysis.py computes, verbatim, so
+        # it could only re-read the implementation). The bound is what the gamma and x0 tolerances
+        # above imply (|dQ/Q| <= |dgamma/gamma| + |dx0/x0|).
+        Q_true = x0_true / gamma_true
+        assert abs(fit.Q - Q_true) / Q_true < 2e-2 + 1e-4, "Q off at q={}".format(q)
         # background / amplitude recovered to a few percent
         assert fit.a_bg == pytest.approx(a_bg, abs=0.03)
         assert fit.b_bg == pytest.approx(b_bg, rel=0.05)
