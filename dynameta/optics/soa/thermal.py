@@ -18,10 +18,73 @@ SI; ASCII. (1-D fin / Ning-Lippi distributed-thermal SOA model.)
 from __future__ import annotations
 
 import numpy as np
-from scipy.linalg import lu_factor, lu_solve
+from scipy.linalg import lapack
 
 __all__ = ["thermal_profile_steady_1d", "thermal_profile_transient_1d", "sample_T_along_axis",
            "dome_analytic"]
+
+
+# TRIDIAGONAL fin operator (audit S3-22, wave-7 2026-11-02). Both solvers used to assemble a DENSE
+# (n, n) matrix in a Python loop and solve it densely (np.linalg.solve / lu_factor + lu_solve:
+# O(n^2) memory, O(n^3) factor, O(n^2) per implicit step) although the docstring promised a
+# tridiagonal solve. They now build only the three diagonals and use LAPACK's banded LU with
+# partial pivoting (dgbtrf once + dgbtrs per right-hand side: O(n) memory and work).
+# Measured vs the old dense path (HEAD 1b1f394 copy) and vs an EXACT rational (fractions.Fraction)
+# Thomas solve, 2026-11-02, kappaA 2e-5, Rth' 5e-4, L 1 mm, random q:
+#   * 'insulated': old vs new max|dT|/max|T - T0| 3.5e-15 (n = 60) .. 7.6e-15 (n = 2000, 400
+#     implicit steps) -- rounding only; kappaA = 0 bit-identical; n = 2, 3 bit-identical.
+#   * 'sunk': the new solve is EXACT to 1.0e-15 (n = 60) / 9.9e-15 (n = 300) / 6.1e-14 (n = 1000)
+#     where the OLD dense solve was off by 1.0e-12 / 3.1e-10 / 1.1e-9 (transient run to steady:
+#     old 2.6e-11 / 8.3e-10, new 1.0e-15 / 7.7e-15) -- see the Dirichlet elimination note in
+#     _fin_tridiag. So 'sunk' old-vs-new differs at the OLD error level (up to 1e-7 at n = 2000 x 400
+#     steps); the new value is the accurate one.
+#   * time (same box, loaded): steady n = 60 46 -> 13 us, n = 2000 79 ms -> 0.22 ms; transient
+#     n = 60 x 4000 steps 47 -> 14 ms, n = 2000 x 400 steps 455 -> 35 ms.
+def _fin_tridiag(n, diag, c, ends):
+    """(dl, d, du) of the fin operator with diagonal `diag` and couplings `c` (sub = super = c in
+    the interior). ends 'sunk' -> identity rows 0 and n-1 (Dirichlet theta = 0); 'insulated' ->
+    the 2nd-order mirror ghost doubles the single neighbour coupling (Neumann)."""
+    dl = np.full(n - 1, c, dtype=np.float64)
+    d = np.full(n, diag, dtype=np.float64)
+    du = np.full(n - 1, c, dtype=np.float64)
+    if ends == "sunk":
+        d[0] = 1.0; du[0] = 0.0                              # row 0:   theta_0 = rhs_0 (= 0)
+        d[-1] = 1.0; dl[-1] = 0.0                            # row n-1: theta_{n-1} = rhs_{n-1} (= 0)
+        # the facet values are KNOWN (theta = 0), so their couplings into rows 1 and n-2 multiply
+        # zero: drop them (symmetric Dirichlet elimination; mathematically identical). Kept, they
+        # make partial pivoting swap row 1 (|c| ~ 1e7-1e8) above the unit Dirichlet row, which cost
+        # the old dense solve 6.1e-12 (n = 60) and 3.8e-10 (n = 300) relative error vs an exact
+        # rational (Fraction) Thomas solve; eliminated, the banded solve is 1e-15-level.
+        if n > 2:
+            dl[0] = 0.0                                      # A[1, 0]
+            du[-1] = 0.0                                     # A[n-2, n-1]
+    elif ends == "insulated":
+        du[0] = 2.0 * c                                      # theta[-1] = theta[1] -> neighbour doubles
+        dl[-1] = 2.0 * c                                     # (exact lumped reduction at c=0 preserved)
+    else:
+        raise ValueError("ends must be 'sunk' or 'insulated'")
+    return dl, d, du
+
+
+def _tridiag_factor(dl, d, du, who):
+    """Banded LU (LAPACK dgbtrf, kl = ku = 1, partial pivoting) of the tridiagonal (dl, d, du).
+    (dgbtrf rather than the dedicated dgttrf: scipy 1.17's dgttrf wrapper rejects n = 2, which the
+    fin solvers accept.) Raises LinAlgError on an exactly singular pivot."""
+    n = d.size
+    ab = np.zeros((4, n))                                    # LAPACK band storage, kl extra fill row
+    ab[1, 1:] = du                                           # ab[kl + ku + i - j, j] = A[i, j]
+    ab[2, :] = d
+    ab[3, :-1] = dl
+    lu, piv, info = lapack.dgbtrf(ab, 1, 1)
+    if info != 0:
+        raise np.linalg.LinAlgError("{}: singular fin operator (dgbtrf info {})".format(who, info))
+    return lu, piv
+
+
+def _tridiag_solve(fac, b):
+    lu, piv = fac
+    x, info = lapack.dgbtrs(lu, 1, 1, np.asarray(b, dtype=np.float64), piv)
+    return x
 
 
 def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K, *, ends="sunk"):
@@ -29,7 +92,8 @@ def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K
     per-slice line dissipation [W/m] (length n). kappaA_W_m_K = kappa*A [W m / K] (longitudinal
     conduction); Rth_prime_K_m_W = the per-length thermal resistance to the sink [K m / W] (g_sub =
     1/Rth'). ends 'sunk' -> T(0)=T(L)=T0 (Dirichlet); 'insulated' -> dT/dz=0 (Neumann). Reduces to the
-    lumped per-slice T0 + q Rth' when kappaA -> 0 (insulated). Tridiagonal solve.
+    lumped per-slice T0 + q Rth' when kappaA -> 0 (insulated). Tridiagonal solve (LAPACK banded dgbtrf/
+    dgbtrs, O(n); audit S3-22).
 
     1-D LONGITUDINAL fin: conduction is resolved along z ONLY; transverse/vertical conduction to the
     sink is LUMPED into Rth_prime (per-length). For a true 2-D/3-D temperature field use the thermal
@@ -41,23 +105,13 @@ def thermal_profile_steady_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T0_K
         raise ValueError("thermal_profile_steady_1d: need >= 2 slices")
     c = float(kappaA_W_m_K) / (float(dz_m) ** 2)              # conduction coupling [W/(m K)]
     s = 1.0 / float(Rth_prime_K_m_W)                          # distributed sink [W/(m K)]
-    A = np.zeros((n, n))
-    b = -q.copy()                                            # theta = T - T0; sink/conduction on LHS
-    for k in range(n):
-        A[k, k] = -(2.0 * c + s)
-        if k > 0:
-            A[k, k - 1] = c
-        if k < n - 1:
-            A[k, k + 1] = c
-    if ends == "sunk":                                       # Dirichlet theta=0 at both facets
-        A[0, :] = 0.0; A[0, 0] = 1.0; b[0] = 0.0
-        A[-1, :] = 0.0; A[-1, -1] = 1.0; b[-1] = 0.0
-    elif ends == "insulated":                               # Neumann dT/dz=0: 2nd-order mirror ghost
-        A[0, 0] = -(2.0 * c + s); A[0, 1] = 2.0 * c          # theta[-1]=theta[1] -> neighbour doubles
-        A[-1, -1] = -(2.0 * c + s); A[-1, -2] = 2.0 * c      # (exact lumped reduction at c=0 preserved)
-    else:
+    if ends not in ("sunk", "insulated"):
         raise ValueError("thermal_profile_steady_1d: ends must be 'sunk' or 'insulated'")
-    theta = np.linalg.solve(A, b)
+    b = -q.copy()                                            # theta = T - T0; sink/conduction on LHS
+    if ends == "sunk":                                       # Dirichlet theta=0 at both facets
+        b[0] = 0.0; b[-1] = 0.0
+    fac = _tridiag_factor(*_fin_tridiag(n, -(2.0 * c + s), c, ends), "thermal_profile_steady_1d")
+    theta = _tridiag_solve(fac, b)
     return float(T0_K) + theta
 
 
@@ -81,29 +135,18 @@ def thermal_profile_transient_1d(q_per_m, dz_m, kappaA_W_m_K, Rth_prime_K_m_W, T
     c = float(kappaA_W_m_K) / (float(dz_m) ** 2)
     s = 1.0 / float(Rth_prime_K_m_W)
     a = float(C_line_J_m_K) / float(dt_s)                     # backward-Euler accumulation [W/(m K)]
-    M = np.zeros((n, n))                                      # M = (C'/dt) I - L
-    for k in range(n):
-        M[k, k] = a + 2.0 * c + s
-        if k > 0:
-            M[k, k - 1] = -c
-        if k < n - 1:
-            M[k, k + 1] = -c
-    if ends == "sunk":
-        M[0, :] = 0.0; M[0, 0] = 1.0
-        M[-1, :] = 0.0; M[-1, -1] = 1.0
-    elif ends == "insulated":
-        M[0, 0] = a + 2.0 * c + s; M[0, 1] = -2.0 * c        # mirror ghost (matches the steady solve)
-        M[-1, -1] = a + 2.0 * c + s; M[-1, -2] = -2.0 * c
-    else:
+    if ends not in ("sunk", "insulated"):
         raise ValueError("thermal_profile_transient_1d: ends must be 'sunk' or 'insulated'")
-    lu = lu_factor(M)                                        # factor once; reuse every step
+    # M = (C'/dt) I - L, tridiagonal (mirror ghost on 'insulated' matches the steady solve);
+    # factored ONCE (dgbtrf), O(n) dgbtrs per step (audit S3-22)
+    fac = _tridiag_factor(*_fin_tridiag(n, a + 2.0 * c + s, -c, ends), "thermal_profile_transient_1d")
     theta = (np.asarray(T_init, dtype=np.float64) - T0_K) if T_init is not None else np.zeros(n)
     hist = [T0_K + theta.copy()] if return_history else None
     for _ in range(int(n_steps)):
         rhs = a * theta + q
         if ends == "sunk":
             rhs[0] = 0.0; rhs[-1] = 0.0
-        theta = lu_solve(lu, rhs)
+        theta = _tridiag_solve(fac, rhs)
         if return_history:
             hist.append(T0_K + theta.copy())
     return np.array(hist) if return_history else (float(T0_K) + theta)

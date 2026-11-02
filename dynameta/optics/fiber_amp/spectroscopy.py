@@ -100,7 +100,7 @@ class RareEarthIon:
             return np.zeros_like(lam) if lam.ndim else 0.0
         return self.sigma_esa.sigma(lambda_m)
 
-    def sigma_e_mccumber(self, lambda_m, T_K: float = T_REF, eps_J: float = None):
+    def sigma_e_mccumber(self, lambda_m, T_K: float = T_REF, eps_J: Optional[float] = None):
         """Emission cross-section from absorption via McCumber (Phys.Rev.136:A954; Miniscalco-
         Quimby OL16:258): sigma_e(nu) = sigma_a(nu) exp((eps - h nu)/kT). eps = excitation
         chemical potential [J]; defaults to the zero-line photon energy h c / zero_line_m
@@ -510,7 +510,7 @@ class _McCumberScaledEmission:
 
 
 def at_temperature(ion: RareEarthIon, T_K: float, *, T_ref_K: float = T_REF,
-                   eps_J: float = None, tau_s: float = None) -> RareEarthIon:
+                   eps_J: Optional[float] = None, tau_s: Optional[float] = None) -> RareEarthIon:
     """Return a copy of ion at operating temperature T_K (docs sec.10). The emission cross-section
     is McCumber-scaled from T_ref_K to T (sigma_a and the zero line are held -- sigma_a's own
     thermal-broadening is second order); at T = T_ref_K the ion is byte-identical. Pass tau_s to
