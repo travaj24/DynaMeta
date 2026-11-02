@@ -38,7 +38,6 @@ from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.constants import HBAR, KB  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
 
@@ -50,12 +49,6 @@ from dynameta.geometry.guards import require_supported_geometry
 # the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
 # eps there.
 _EDGE_METAL_W_M = 1.5e-9
-
-
-def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
-    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass. Used for the
-    bipolar FD g-factor (N_c / N_v); for a non-degenerate diode its exact value barely matters (g~1)."""
-    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
 
 
 @dataclass
@@ -460,8 +453,8 @@ class LayeredDevsimBuilder:
             nd = (-1.0 if tr.acceptor else 1.0) * float(tr.n_bg_m3)
             ds.node_model(device=self.device, region=s.name, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = _effective_dos_m3(dos)
-        Nv = _effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
+        Nc = PE.effective_dos_m3(dos)                   # audit X-15: the single N_c (T_REF)
+        Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
         BP.setup_bipolar_region(
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),

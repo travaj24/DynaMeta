@@ -124,6 +124,15 @@ class SweepResults:
     @classmethod
     def load(cls, path: str, *, fmt: str = "auto") -> "SweepResults":
         arrays, attrs = load_arrays(path, fmt=fmt)
+        # audit R-22: `save` stamps a schema that load never read, so a store written under a future
+        # layout (or not by SweepResults at all) was pivoted as if it were schema 1. Unlike the
+        # solver cache (cache.py, which DISCARDS a stale store -- it is a re-computable memo) a
+        # results file is user data, so a mismatch RAISES instead of being silently dropped.
+        schema = attrs.get("schema")
+        if schema is None or int(schema) != _SCHEMA:
+            raise ValueError("SweepResults.load: {!r} has schema {!r}, this build reads schema {} "
+                             "(a store written by a different dynameta version, or not by "
+                             "SweepResults.save)".format(path, schema, _SCHEMA))
         labels = list(attrs.get("bias_labels", []))
         wl = np.asarray(arrays["wavelengths_nm"], dtype=float)
         flds = {}
