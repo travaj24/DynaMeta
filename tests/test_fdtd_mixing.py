@@ -221,13 +221,12 @@ def test_gate1_second_source_none_byte_identical():
     assert r_default.time_trace is None and r_none.time_trace is None
 
 
-def test_gate1_existing_fdtd_infra_gates_still_pass():
-    # re-run the pre-edit FDTD coverage gates (same pattern as ringdown/time-varying gate 1); the
-    # additive second_source path must not perturb them.
-    from test_audit_2026_07_17_infra import (test_fdtd_1d_dielectric_slab_vs_airy,
-                                             test_fdtd_1d_drude_slab_absorbs)
-    test_fdtd_1d_dielectric_slab_vs_airy()
-    test_fdtd_1d_drude_slab_absorbs()
+# Gate 1's "existing FDTD infra still passes" re-run is GONE (audit T-16, 2026-11-02): it
+# re-invoked test_audit_2026_07_17_infra's two FDTD test functions by cross-module import, so
+# the suite ran the same two marches again for zero coverage (pytest collects them in their
+# own module, which CI runs in the `solvers` job and every `test` leg) and the bare import
+# broke under --import-mode=importlib. The additive second_source path's non-perturbation is
+# gated bit-for-bit right above (test_gate1_second_source_none_byte_identical).
 
 
 def _bichromatic_1d(amp_rel):
