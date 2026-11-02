@@ -66,6 +66,7 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.constants import HBAR, KB
+from dynameta.geometry.guards import require_supported_geometry
 
 
 def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
@@ -250,7 +251,11 @@ class Stacked3DSpec:
         gate electrode footprint. The emitted CarrierField region is named after the Design's
         semiconductor layer so it matches the optics alignment source_region (-> run_pipeline,
         no hand alignment). Inclusions are allowed in non-semiconductor layers (e.g. the
-        patch); the semiconductor layer itself must be laterally uniform."""
+        patch); the semiconductor layer itself must be laterally uniform. Stack.features and tapered
+        inclusions are REFUSED (2026-11-02): a via came back as the via-free spec (measured), and a tapered
+        gate patch touches the oxide with its BOTTOM (narrower) section, which the electrode-footprint
+        gate_patch_frac does not see."""
+        require_supported_geometry(design, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
                       if design.material_role(L.background_material) == "semiconductor"]

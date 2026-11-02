@@ -70,6 +70,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
 from dynameta.optics.rasterize import cell_axes, layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
+from dynameta.geometry.guards import require_supported_geometry
 
 __all__ = ["design_to_pmm2d_stack", "make_lumenairy_pmm2d_solver", "layer_to_pure_cell",
            "pure_union_grid_n"]
@@ -191,6 +192,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
     see the module docstring); inclusions -> layer_to_pure_cell on the union
     grid (pure) / the shared rasterizer (hybrid, byte-identical geometry to the
     RCWA bridge); uniform scalar -> eps."""
+    require_supported_geometry(design, "design_to_pmm2d_stack")   # 2026-11-02: refuse Stack.features / Inclusion.taper
     lum = _require_lumenairy()
     _check_engine(engine)
     n_super, n_sub = end_media_indices(design, lambda_m)

@@ -40,6 +40,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.constants import HBAR, KB  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
+from dynameta.geometry.guards import require_supported_geometry
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
@@ -71,6 +72,10 @@ class _RegionSpec:
 class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device") -> None:
+        # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
+        # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
+        # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
+        require_supported_geometry(design, "LayeredDevsimBuilder")
         self.design = design
         self.mesh_name = mesh_name
         self.device = device_name
