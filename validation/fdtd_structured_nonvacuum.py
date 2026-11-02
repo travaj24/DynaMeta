@@ -21,6 +21,10 @@ GATE A (the fix, direct): a STRUCTURED layer whose inclusion == its background (
         had reverted to vacuum (the old bug) this would be wrong.
 GATE B (genuine structured on glass): a sub-wavelength dielectric pillar array on glass matches grcwa
         (RCWA, substrate eps=n_sub^2) and energy closes (R_flux + T_flux = 1, the flux carries n).
+GATE C (audit S5-20, wave-7 2026-11-02): the SAME structured-uniform cell through the SWEEP entry point
+        (fdtd_sweep_spectrum -- what run_pipeline's preferred FDTDSweepOpticalSolver calls) reproduces
+        TMM at LAM and the per-wavelength GATE A answer. That path used to RAISE on non-vacuum end media
+        + a structured cell, on the stale "the rasterizer drops the end-media pads" reason.
 
 Run: python -m validation.fdtd_structured_nonvacuum
 """
@@ -130,7 +134,20 @@ def main():
     print("[nv] B pillar on glass: FDTD R={:.4f} T={:.4f} | RCWA R={:.4f} T={:.4f} | |dR|={:.2e} |dT|={:.2e} "
           "R+T-1={:.2e} -> {}".format(Rf, Tf, Rr, Tr, dRb, dTb, en, "PASS" if gB else "FAIL"), flush=True)
 
-    ok = gA and gB
+    # --- GATE C: the sweep entry point (audit S5-20) on the GATE A cell -------------------------------
+    from dynameta.optics.fdtd_seam import fdtd_sweep_spectrum
+    sw = fdtd_sweep_spectrum(dA, lambda_min_m=LAM * (1.0 - 0.16), lambda_max_m=LAM * (1.0 + 0.16), dim=3,
+                             resolution=18, n_pad_wave=3.0, n_super=1.0 + 0j, n_sub=complex(N_SUB))
+    Rc = float(np.interp(LAM, sw.lambda_m, sw.R))
+    Tc = float(np.interp(LAM, sw.lambda_m, sw.T))
+    dRc, dTc = abs(Rc - ref["R"]), abs(Tc - ref["T"])
+    dRa = abs(Rc - resA.R)
+    gC = bool(dRc < 2e-2 and dTc < 2e-2 and dRa < 2e-2)
+    print("[nv] C sweep entry point, same cell on glass: FDTD R={:.4f} T={:.4f} | TMM |dR|={:.2e} |dT|={:.2e} "
+          "| vs per-wavelength GATE A |dR|={:.2e} -> {}".format(Rc, Tc, dRc, dTc, dRa,
+                                                             "PASS" if gC else "FAIL"), flush=True)
+
+    ok = gA and gB and gC
     print("[nv] *** STRUCTURED + NON-VACUUM FDTD: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 
