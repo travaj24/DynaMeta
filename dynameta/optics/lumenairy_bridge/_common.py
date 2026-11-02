@@ -5,7 +5,8 @@ Berreman backends imported its underscore helpers, and bor_backend copy-pasted t
 gate (drifting to its own floor). The shared surface now lives HERE under public names;
 rcwa_backend keeps underscore aliases for back-compat.
 
-ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.30.x span --
+ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.50.x span
+(the upper end is VERSION_VERIFIED_MAX, whose comment records each re-verification) --
 every audited path (the C5-1 asymmetric-profile gates, C4-2 conical guards, per-layer
 absorption, BOR, Berreman OOP, the D1 JAX-twin traced-source/uniform-eps surface, the A2
 public RCWAStack.layers accessor) was exercised against the installed 5.22 source, and
@@ -39,10 +40,10 @@ from typing import Tuple
 
 import numpy as np
 
-__all__ = ["VERSION_FLOOR", "VERSION_VERIFIED_MAX", "parse_version", "require_lumenairy",
-           "pol_row", "angles_rad", "guard_incidence_side", "guard_conical_ppol",
-           "p_basis_conversion", "stack_layer_records", "conical_synthesis",
-           "pol_tangential_unit", "require_halfspace_keywords"]
+# NO __all__ here (audit X-22, removed 2026-11-02): this is a PRIVATE module -- its consumers are
+# the sibling backends, which import names explicitly, and nothing star-imports it -- so the
+# list was dead metadata that only fed tests/test_api_surface.py's PUBLIC-name walk. The public
+# bridge surface is lumenairy_bridge/__init__.py's.
 
 _REQUIRED = object()      # sentinel: "this keyword-only argument was not supplied"
 
@@ -86,6 +87,10 @@ def require_halfspace_keywords(fn_name: str, legacy_positional, **named):
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
+# ONE SOURCE OF TRUTH (audit R-32): this tuple is the floor; pyproject.toml's `lumenairy>=`
+# dependency must state the same version, and tests/test_lumenairy_bridge_verify_550.py::
+# test_pyproject_lumenairy_floor_is_VERSION_FLOOR fails when the two drift (they were synced
+# by hand before). Bump BOTH in one commit.
 VERSION_FLOOR = (5, 22, 0)
 # SOFT CEILING (finding Q-16). The floor states the OLDEST verified surface; this is the
 # (major, minor) of the NEWEST release the bridge gates were re-run against. Re-verified at
@@ -117,12 +122,70 @@ VERSION_FLOOR = (5, 22, 0)
 #     NOT fixed upstream: re-measured at 5.42.1 as d(R+T)/dtheta = -3.0e-6 where the truth is
 #     exactly 0 (clean by theta ~ 1e-4), bit-identical to 5.31.0 -- so the ANGLE CAVEAT in
 #     rcwa_design.py stays, and this ceiling does not certify that path at exactly normal
-#     incidence.
+#     incidence. [FIXED UPSTREAM at 5.50.0 -- see below.]
+#
+# RE-VERIFIED AT 5.50.0 (2026-11-02), eight minor versions on, the same DIFFERENTIAL way:
+# lumenairy v5.42.1 (git archive of the tag) and the installed 5.50.0 (editable checkout at
+# v5.50.0-2-g4c449fc1; `git diff v5.50.0 -- lumenairy/` is EMPTY, the two commits are docs and
+# probes only) were each run under the SAME bridge, re-using the 5.42 A/B probes (whole bridged
+# surface, exact float reprs): 1207 numeric observables, 1199 bit-identical. Every probed
+# forward value (R, T, A, A_independent, r, t, phase, per-region absorption, Jones, per-order
+# efficiencies, on every engine) is bit-identical; the 8 that moved are all JAX reverse-mode
+# gradients. Three mechanisms in all, named here so the next reader can tell a KNOWN shift
+# from a new one (the probes' structured layers are mostly LOSSY, which is why the two
+# lossless-only last-bit moves below surfaced in the gates, not the probes):
+#   * THE GRADIENT SHIFT: 5.50.0 routes every degenerate eigen-solve of its differentiable
+#     solvers through a cluster-adjoint rule (CHANGELOG 5.50.0, "JAX gradients at symmetric
+#     points"; process/thread switch lumenairy.jax_cluster_rule, default ON). At the
+#     symmetric point it is the theta=0 FIX: d(R+T)/dtheta -2.987e-6 -> -2.0e-12 and
+#     dR/dtheta 7.5e-8 -> 2.8e-13 on the 5.42 probe fixture (truth 0); on the 5.30 fixture
+#     dR/dtheta 4.126e-3 / -2.073e-2 (rows 0/1) -> |.| <= 5.7e-13. Off it: dR/dtheta at theta = 1e-4 moved rel 3.0e-10, and
+#     the off-symmetric eps gradients (grating at 0.2 rad, PMM at 0.25 rad) moved in the last
+#     bit, rel <= 3.4e-16 (the routed reverse pass orders its ops differently; lumenairy
+#     states <= 4e-16 away from any symmetry). 5.50 with the rule OFF reproduces all 24
+#     angle gradients of 5.42.1 (theta 0 / 1e-4 / 1e-2; both fixtures, both rows, R and R+T)
+#     to the printed 4 digits, so the attribution is measured, not inferred.
+#   * SURFACE: every bridged symbol present; no removal, rename, positional reorder or flipped
+#     default on a pre-existing parameter. Additions are keyword-only, with defaults that
+#     left every probed forward bit-identical (PMM2DStackPure mu_*/symmetry/layer_grids/...,
+#     PMM2DStackHybrid truncation='rectangular', BORStack basis='fd', BORStack.add_layer
+#     tensor/segments).
+#     Two DEFAULT moves upstream that the bridge does NOT reach on its gated fixtures (the
+#     forwards above are bit-identical): PMMStack min_feature period*1e-5 -> 1e-3 (5.46 G2;
+#     only stacks with cross-layer walls 1e-5..1e-3 of a period apart, which now snap and
+#     WARN), and the 5.46 G1 guards now running on the PMM JAX twin (gain / evanescent
+#     incidence raise as on NumPy).
+#   * TWO LAST-BIT FORWARD SHIFTS, lossless structured RCWA layers only, both deterministic
+#     (two runs per tree identical) and bisected over extracted tags / commits:
+#     (a) 5.45.0, lumenairy 6709b7d9 + 885fa8ca (RCWA branch-cut rounds 1 and 3): a lossless
+#         layer's propagating modal root is now PINNED to the outgoing branch instead of
+#         being decided by the last bit of the eig output's Im(lam^2). Moves the 2-D conical
+#         pillar of lumenairy_rcwa_bridge GATE H by <= 2.4e-15 in R/T/r (printed |R+T-1|
+#         8.6e-14 -> 8.5e-14, bar 5e-3) and the JAX side of the lumenairy_rcwa_jax GATE A
+#         grating by <= 2.4e-16.
+#     (b) 5.46.0 (bisected to 5.45.1..5.47.0; there is no 5.46.0 tag), the RCWA H4 "last
+#         star applied to the source", documented to move answers <= 1.7e-15: the NumPy fast
+#         path of that GATE A grating, T by 8e-16. (a) + (b) together move GATE A's printed
+#         jax==numpy parity 1.44e-15 -> 2.11e-15 (bar 1e-12).
+#   * GATES: validation/lumenairy_*.py 9/9 PASS on 5.50.0; the same nine scripts on 5.42.1
+#     print identical gate lines except those two numbers (and elapsed time). The bridge
+#     pytest files (test_lumenairy_bridge, test_lumenairy_per_layer_grids, test_bridge) 71/71
+#     PASS; the theta=0 fix is gated, with a rule-OFF discrimination arm, in
+#     tests/test_lumenairy_bridge_verify_550.py.
+#   * CAVEATS. (1) The ANGLE CAVEAT is retired only for lumenairy >= 5.50 with the rule ON;
+#     the floor still admits 5.22..5.49, where it stands (rcwa_design.py ANGLE NOTE). Next to
+#     a Rayleigh anomaly the rule's accuracy at a degenerate point degrades (lumenairy: rel
+#     5e-8 .. ~1e-1 at relative wavelength distance 1e-3 .. 1e-7). (2) The rule costs gradient
+#     time where a cluster exists (lumenairy's table: 2.3-7.9x run, 2-6x compile). Measured
+#     on validation/lumenairy_berreman_jax.py (traced Berreman tensors are routed), same box,
+#     back to back: 5.50 rule ON 448 / 426 s, rule OFF (LUMENAIRY_JAX_CLUSTER_RULE=0) 171 s,
+#     5.42.1 177 s -- ~2.5x, all from the rule, gate numbers identical in every arm. That
+#     script is in run_all.SMOKE_EXCLUDED either way (its documented 145 s predates 5.50).
 # Above the ceiling the bridge still runs -- lumenairy is backward compatible in practice and
 # refusing would be worse -- but says so ONCE per process (a RuntimeWarning naming both
 # versions). Bumping this is the CHEAP half of the same correctness work: re-run
 # validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 42)
+VERSION_VERIFIED_MAX = (5, 50)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
@@ -171,9 +234,10 @@ def require_lumenairy():
             "lumenairy >= {} required (found {}); the bridge's audited fixes (graded-profile "
             "slab order, conical guards, per-layer absorption, Berreman OOP-oblique, BOR, the "
             "D1 JAX-twin traced-source/uniform-eps surface, the A2 public RCWAStack.layers "
-            "accessor) were validated on the 5.22..5.30 span only -- older releases were "
+            "accessor) were validated on the 5.22..{}.{} span only -- older releases were "
             "never exercised. pip install -U lumenairy".format(
-                ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
+                ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__,
+                VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1]))
     _warn_above_ceiling(lumenairy.__version__)
     return lumenairy
 
