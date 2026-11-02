@@ -3,12 +3,18 @@
 GATE A (unstructured == TMM): a 2-layer ASYMMETRIC lossy stack at normal + 30 deg y/p --
         the PMM seam's R/T/r match tmm_reference (< 1e-8; also pins the stack layer ORDER
         and the lab-basis -> Byrnes p-pol r conversion shared with the RCWA bridge).
-GATE B (the REFEREE role): a lossy metal lamellar grating in TM (E_x across the lines,
-        the slow-RCWA case): PMM (spectral, no Fourier floor, high degree) is the
-        reference; the RCWA bridge (1-D lamellar fast path) error |R - R_pmm| DECREASES
-        monotonically with n_orders and converges to < 2e-3 (measured 7.3e-4 at n = 32) --
-        two unrelated methods agreeing on a lossy metal TM cell; PMM adjudicating RCWA
-        truncation is the designed synergy.
+GATE B (the REFEREE role, rewritten 2026-11-02): a lossy metal lamellar grating (eps -20+2i,
+        50 % duty, 120 nm). PMM is the reference, SELF-CONVERGED first: TE in degree to 1e-10;
+        TM only ALGEBRAICALLY (a lossy-metal right-angle corner, Li & Granet JOSA A 28:738
+        (2011) Type I, Re tau = 0.534) -- the gate checks |R(96) - R(128)| < 2e-5 and uses
+        degree 128 (1.3e-5 below the extrapolated 0.508768). TE (E_y along the lines, Laurent
+        valid): RCWA-analytic (the 'auto' default) AND RCWA-raster (default lattice) both
+        decrease monotonically over n_orders 16/32/48 to < 3e-6 / < 2e-5. TM (E_x across the
+        lines): Li's inverse rule ('li', Li 1996 JOSA A 13:1870; 'auto' rasterizes it) decreases
+        monotonically over 32/64/128 to < 1.5e-3, at an algebraic rate (> 0.7; measured ~1.3,
+        ~2 Re tau); the LAURENT stall is printed, not gated as convergence, and the
+        discrimination legs are li >= 5x closer than Laurent at n = 128 and a 1 % duty change
+        moving the TM reference by > 10x the li error.
 GATE C (OOP tensor specialist vs ANALYTIC): a uniform GYROTROPIC slab (eps_xy = +i g, the
         MagnetoOpticModel convention) through the PMM seam as a (3,3) tensor layer -- the
         zeroth-order reflection Jones matches the hand-derived circular-eigenmode oracle
@@ -18,7 +24,8 @@ GATE C (OOP tensor specialist vs ANALYTIC): a uniform GYROTROPIC slab (eps_xy = 
 GATE D (scope guards): partial-y rectangle, structured-grid EpsField, and incidence_side=
         'bottom' all raise (conical is NO LONGER a guard -- GATE F solves it).
 GATE E (per-layer absorption): PMM at RCWA-bridge parity -- budget closure + the RCWA split
-        converging toward the PMM reference on a lossy metal-grating / lossy-spacer stack.
+        agreeing with the PMM reference on a lossy metal-grating / lossy-spacer stack (TE tight;
+        TM at n_orders 256, past Laurent's pre-asymptotic overshoot -- rewritten 2026-11-02).
 GATE F (CONICAL s/p synthesis, audit 8.1-1 / consumer-gap B): the bridge synthesizes the
         rotated s/p totals + co-pol r/t from lumenairy 5.22 per_order_amplitudes (the native
         lab rows are s/p mixtures at phi != 0). Three oracles: (1) a UNIFORM slab at conical
@@ -119,29 +126,74 @@ def main():
     print("[lpb] GATE A: unstructured vs TMM (normal + 30deg y/p): worst |d| = {:.2e} -> {}"
           .format(worstA, "PASS" if g_a else "FAIL"), flush=True)
 
-    # ---- GATE B: PMM as the convergence referee for RCWA (metal TM grating) ----
+    # ---- GATE B: PMM as the convergence referee for RCWA (metal lamellar grating) ----
+    # REWRITTEN 2026-11-02. The old gate ("RCWA/laurent TM converges to the PMM ref, 7.3e-4 at
+    # n = 32") passed by COINCIDENCE: at n_orders >= 32 the old raster lattice max(128, 4 N + 1)
+    # went ODD (S = 129), putting the line edges mid-pixel -- the realised duty was 65/129 =
+    # 0.50388, and that edge-quantization error (dR/d(duty) = 2.34 on TM here) happened to cancel
+    # most of Laurent's TM error. Properly sampled raster and analytic Laurent both sit at ~3e-2 at
+    # n = 32 (and 6.5e-3 at n = 128): Laurent's rule is the wrong factorization for E_x across a
+    # high-contrast wall (Li 1996), it converges only slowly and non-monotonically. Measured
+    # 2026-11-02, all vs the converged references below:
+    #   TE  n_orders      16       32       48     (Laurent valid)
+    #       analytic    3.5e-5   4.5e-6   1.3e-6
+    #       raster new  4.8e-5   1.7e-5   8.3e-6   (S = 128 / 256 / 384, max(128, 8 N))
+    #       raster old  4.8e-5   4.6e-3   3.1e-3   (S = 128 / 129 / 193 -- duty 0.5039 at 129:
+    #                                               dR/d(duty)_TE 1.19 x 0.00388 = 4.6e-3, exact)
+    #   TM  n_orders      32       64       128
+    #       li, raster  4.7e-3   1.7e-3   8.0e-4   (algebraic, ~N^-1.15 fitted over 256..768)
+    #       analytic L  3.0e-2   9.1e-3   6.5e-3   (overshoots: R 0.478 -> 0.518 -> 0.515 ... 0.509
+    #                                               at n = 768, from ABOVE; li comes from below)
+    # TM REFERENCE (is the ~4.6e-3 'li' "floor" the PMM ref or the RCWA? -- neither is buggy): the
+    # PMM is itself only algebraically convergent on this lossy-metal corner (Li & Granet 2011,
+    # Type I, Re tau 0.534 from lumenairy's classify_from_grating): bridge PMM degree 24/32/48/64/
+    # 96/128 = 0.508291/0.508511/0.508661/0.508710/0.508744/0.508755, fitted R_inf - c d^-2.17 ->
+    # 0.508768 (lumenairy pmm_efficiency_1d, 1 and 6 elements/region, agree to 1.5e-7); RCWA 'li'
+    # n_orders 256/384/512/768 = 0.508391/0.508524/0.508587/0.508647, fitted N^-1.15 -> 0.508747;
+    # Laurent closes in from above (0.50945 at 768). So the old degree-24 reference was 4.8e-4
+    # LOW, and 'li' at n = 32 is 5.0e-3 low simply because it converges as ~N^-1.15 (not a floor).
     lines = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 0.5 * PER, PER), material="metal")
     g_lays = [Layer("grating", 120e-9, "air", inclusions=[lines])]
-    d = _design(g_lays, pol="x")                          # E_x across the lines = TM
-    ref = make_lumenairy_pmm_solver(degree=24, n_orders=21)(d, None, {}, LAM,
-                                                            1.0 + 0j, 1.5 + 0j)
-    errs = []
-    for n in (8, 16, 32):
-        rc = make_lumenairy_rcwa_solver(n_orders=n)(d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-        errs.append(abs(rc.R - ref.R))
-        print("[lpb]   RCWA n_orders {:2d}: R = {:.5f} (PMM ref {:.5f}, |d| = {:.1e})"
-              .format(n, rc.R, ref.R, errs[-1]), flush=True)
-    r_li = make_lumenairy_rcwa_solver(n_orders=32, formulation="li")(
-        d, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-    print("[lpb]   (formulation='li' n_orders 32 for contrast: |d| = {:.1e})".format(
-        abs(r_li.R - ref.R)), flush=True)
-    # measured: the 1-D lamellar fast path converges to the spectral PMM reference at
-    # 7.3e-4 by n_orders = 32 -- two UNRELATED methods agreeing on a lossy metal TM cell
-    g_b = bool(errs[-1] < 2e-3 and errs[-1] < errs[1] < errs[0])
-    ok = ok and g_b
-    print("[lpb] GATE B: RCWA error vs PMM reference decreases ({:.1e} -> {:.1e}) and "
-          "converges < 2e-3 -> {}".format(errs[0], errs[-1], "PASS" if g_b else "FAIL"),
+    args_te = (_design(g_lays, pol="y"), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    args_tm = (_design(g_lays, pol="x"), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    pmm_te = [make_lumenairy_pmm_solver(degree=dg, n_orders=21)(*args_te).R for dg in (32, 48)]
+    pmm_tm = [make_lumenairy_pmm_solver(degree=dg, n_orders=21)(*args_tm).R for dg in (96, 128)]
+    ref_te, ref_tm = pmm_te[-1], pmm_tm[-1]
+    self_te, self_tm = abs(pmm_te[1] - pmm_te[0]), abs(pmm_tm[1] - pmm_tm[0])
+    print("[lpb]   PMM refs: TE R = {:.10f} (degree 32 -> 48: {:.1e}); TM R = {:.7f} (degree 96 "
+          "-> 128: {:.1e}, algebraic corner convergence)".format(ref_te, self_te, ref_tm, self_tm),
           flush=True)
+    te_n = (16, 32, 48)
+    e_ana = [abs(make_lumenairy_rcwa_solver(n_orders=n)(*args_te).R - ref_te) for n in te_n]
+    e_ras = [abs(make_lumenairy_rcwa_solver(n_orders=n, inclusion_model="raster")(*args_te).R
+                 - ref_te) for n in te_n]
+    print("[lpb]   TE |R - PMM| n_orders 16/32/48: analytic {} | raster (default S) {}".format(
+        " ".join("{:.1e}".format(e) for e in e_ana), " ".join("{:.1e}".format(e) for e in e_ras)),
+        flush=True)
+    tm_n = (32, 64, 128)
+    e_li = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation="li")(*args_tm).R - ref_tm)
+            for n in tm_n]
+    e_lau = [abs(make_lumenairy_rcwa_solver(n_orders=n)(*args_tm).R - ref_tm) for n in tm_n]
+    rate = float(np.log(e_li[0] / e_li[-1]) / np.log(tm_n[-1] / tm_n[0]))
+    print("[lpb]   TM |R - PMM| n_orders 32/64/128: li (raster) {} (rate N^-{:.2f}) | Laurent "
+          "(analytic, NOT gated as convergence) {}".format(
+              " ".join("{:.1e}".format(e) for e in e_li), rate,
+              " ".join("{:.1e}".format(e) for e in e_lau)), flush=True)
+    # discrimination: a 1 % duty change moves the TM reference far more than the li error
+    wide = Inclusion(shape=Rectangle(PER / 2.0, PER / 2.0, 0.51 * PER, PER), material="metal")
+    d_duty = abs(make_lumenairy_pmm_solver(degree=128, n_orders=21)(
+        _design([Layer("grating", 120e-9, "air", inclusions=[wide])], pol="x"), None, {}, LAM,
+        1.0 + 0j, 1.5 + 0j).R - ref_tm)
+    g_b = bool(self_te < 1e-9 and self_tm < 2e-5
+               and e_ana[0] > e_ana[1] > e_ana[2] and e_ana[2] < 3e-6
+               and e_ras[0] > e_ras[1] > e_ras[2] and e_ras[2] < 2e-5
+               and e_li[0] > e_li[1] > e_li[2] and e_li[2] < 1.5e-3 and rate > 0.7
+               and e_lau[-1] > 5.0 * e_li[-1] and d_duty > 10.0 * e_li[-1])
+    ok = ok and g_b
+    print("[lpb] GATE B: PMM refs self-converged; TE analytic + raster monotone to {:.1e} / {:.1e};"
+          " TM li monotone to {:.1e}; Laurent/li at 128 = {:.1f}x; 1 % duty moves TM R {:.1e} "
+          "-> {}".format(e_ana[2], e_ras[2], e_li[2], e_lau[-1] / e_li[-1], d_duty,
+                         "PASS" if g_b else "FAIL"), flush=True)
 
     # ---- GATE C: OOP gyrotropic tensor vs the analytic circular-eigenmode Jones ----
     eps_r, g = 5.0, 0.05
@@ -217,24 +269,43 @@ def main():
     close_p = abs(r_p.A_independent - r_p.A) if r_p.A_independent is not None else 1.0
     self_conv = max(abs(r_p.per_region_absorption[k] - r_p2.per_region_absorption[k])
                     for k in ("grating", "spacer")) if keys_ok else 1.0
-    # RCWA's per-layer split on a metal TM cell is Gibbs-limited at low orders (measured:
-    # grating 0.124 -> 0.068 -> 0.056 over n_orders 32/64/96 toward PMM's 0.0457, which is
-    # itself degree-stable at 2e-5) -- so the cross-engine leg demands CONVERGENCE TOWARD
-    # the PMM split (strictly shrinking |d|, direction-sensitive: a key-swap or
-    # mis-normalized PMM map would not be approached) plus agreement at n_orders=96.
+    # RCWA's per-layer split (absorption=True rasterizes under 'auto'; lumenairy integrates
+    # Im(eps)|E|^2 on a 64-point x grid, 8 z-midpoints per layer, normalised to 1 - R - T).
+    # REWRITTEN 2026-11-02. The old leg ("strictly shrinking over n_orders 32/64/96: grating
+    # 0.124 -> 0.068 -> 0.056 toward PMM 0.0457") rode the same ODD-lattice artifact as GATE B:
+    # S = 129/257/385 realised a duty of 0.5039/0.5019/0.5013, a drift that shrinks with N. On
+    # the 2026-11-02 lattice (S = 8 N: the geometry exact) the Laurent TM split is
+    # NON-MONOTONE -- distance to the degree-24 PMM split used here 0.020 / 0.049 / 0.033 at
+    # 32/64/96 and 5.0e-4 at 256; to the degree-128 split 0.011 / 3.2e-3 / 9.8e-4 / 1.7e-3 at
+    # 128/192/256/320 (Laurent's TM overshoot, cf. GATE B; 'li' is no cure here:
+    # its split wanders 0.049-0.060 on the grating, the E_x quadrature across the walls). PMM
+    # split, degree 24 -> 128: grating 0.045665 -> 0.045756, spacer 0.356931 -> 0.356455. So the
+    # TM leg is AGREEMENT past the transient (n_orders 256, < 3e-3) with the n = 64 overshoot
+    # printed, and a TE leg (Laurent valid) is the tight cross-engine check: |d| 5e-5 at n = 32
+    # (RCWA's split is quadrature-limited near 1e-4 in TE: 9e-5 at n = 96). A key swap or a
+    # mis-normalized map is off by >= 0.02 (TM) / 0.24 (TE) -- direction-sensitive either way.
+    def _split_dist(r_a, r_b):
+        return max(abs(r_a.per_region_absorption[k] - r_b.per_region_absorption[k])
+                   for k in ("grating", "spacer"))
     dists = []
-    for n in (32, 64, 96):
+    for n in (64, 256):
         r_r = make_lumenairy_rcwa_solver(n_orders=n, absorption=True)(
             d_abs, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-        dists.append(max(abs(r_p.per_region_absorption[k] - r_r.per_region_absorption[k])
-                         for k in ("grating", "spacer")) if keys_ok else 1.0)
+        dists.append(_split_dist(r_p, r_r) if keys_ok else 1.0)
+    d_te = _design(lossy_lays, pol="y", extra=(("lossy", complex(6.0, 0.8)),))
+    r_pte = make_lumenairy_pmm_solver(degree=24, n_orders=21, absorption=True)(
+        d_te, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    r_rte = make_lumenairy_rcwa_solver(n_orders=32, absorption=True)(
+        d_te, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    dist_te = _split_dist(r_pte, r_rte) if keys_ok else 1.0
     g_e = bool(keys_ok and close_p < 1e-6 and self_conv < 1e-3
-               and dists[2] < dists[1] < dists[0] and dists[2] < 1.5e-2)
+               and dists[1] < 3e-3 and dist_te < 3e-4)
     ok = ok and g_e
     print("[lpb] GATE E: PMM per-layer absorption -- budget closure {:.1e}; PMM degree-"
-          "stability {:.1e}; RCWA split converges toward PMM ({:.3f} -> {:.3f} -> {:.3f}, "
-          "final < 1.5e-2) [PMM grating/spacer = {:.4f}/{:.4f}] -> {}".format(
-              close_p, self_conv, dists[0], dists[1], dists[2],
+          "stability {:.1e}; RCWA split vs PMM: TM n_orders 64 {:.3f} (Laurent overshoot, "
+          "printed) -> 256 {:.1e} (< 3e-3); TE n_orders 32 {:.1e} (< 3e-4) [PMM TM grating/"
+          "spacer = {:.4f}/{:.4f}] -> {}".format(
+              close_p, self_conv, dists[0], dists[1], dist_te,
               r_p.per_region_absorption.get("grating", float("nan")) if keys_ok else float("nan"),
               r_p.per_region_absorption.get("spacer", float("nan")) if keys_ok else float("nan"),
               "PASS" if g_e else "FAIL"), flush=True)
