@@ -92,7 +92,7 @@ def solve_thermal_kirchhoff_fem(layers: List[ThermalLayer], k_of_T, *, period_x_
     # theta-problem: unit conductivity everywhere on the SAME mesh/loads as the linear path
     theta_layers = [ThermalLayer(name=L.name, thickness_m=L.thickness_m, k_thermal=1.0)
                     for L in layers]
-    mesh, fes, u, v, a, f, _ = build_thermal_forms(
+    mesh, fes, u, v, a, f, _, _lift = build_thermal_forms(   # theta lift is 0, not T_sink
         theta_layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
     th = ng.GridFunction(fes)                    # theta(T_sink) = 0 on the sink face (Dirichlet 0)
     with ng.TaskManager():

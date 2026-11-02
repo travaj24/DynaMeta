@@ -1114,3 +1114,88 @@ class TestF7WallPlug:
         for bad in dict(wallplug_efficiency=0.0), dict(wallplug_efficiency=1.5):
             with pytest.raises(ValueError, match="efficiency"):
                 PumpSource(**bad)
+
+
+class TestVerificationFollowups:
+    """The two constructive follow-ups of the audit's verification section (2026-11-02): the
+    log-sum-exp guard in `_propagate_fixed` and `TransientResult.assert_valid()`."""
+
+    @staticmethod
+    def _closed_form(z, g, s, bc, u):
+        """The pre-guard closed form, verbatim -- the byte-identity oracle for safe rows."""
+        from dynameta.optics.fiber_amp.dynamics import _cumtrapz2
+        P = np.empty_like(g)
+        fwd = u > 0.0
+        G = _cumtrapz2(g[fwd], z)
+        P[fwd] = np.exp(G) * (bc[fwd][:, None] + _cumtrapz2(s[fwd] * np.exp(-G), z))
+        zeta = z[-1] - z[::-1]
+        G = _cumtrapz2(g[~fwd][:, ::-1], zeta)
+        Pr = np.exp(G) * (bc[~fwd][:, None] + _cumtrapz2(s[~fwd][:, ::-1] * np.exp(-G), zeta))
+        P[~fwd] = Pr[:, ::-1]
+        return P
+
+    def test_propagate_fixed_is_unchanged_on_safe_rows_and_finite_past_709_nepers(self):
+        from dynameta.optics.fiber_amp.dynamics import _propagate_fixed, _propagate_rows_shifted
+        rng = np.random.default_rng(0)
+        z = np.linspace(0.0, 8.0, 201)
+        for _ in range(20):                              # every |G| << 700: byte-identical
+            K = int(rng.integers(2, 30))
+            g = rng.normal(0.0, 3.0, (K, z.size))
+            s = np.abs(rng.normal(0.0, 1e-9, (K, z.size)))
+            bc = np.abs(rng.normal(0.0, 1e-3, K))
+            u = np.where(np.arange(K) % 2 == 0, 1.0, -1.0)
+            assert np.array_equal(_propagate_fixed(z, g, s, bc, u),
+                                  self._closed_form(z, g, s, bc, u))
+        # the shifted recurrence IS the same discrete scheme (algebraic identity) -- 1e-12 on a
+        # row that both forms can evaluate
+        g = np.vstack([np.full(z.size, 40.0), np.linspace(-60.0, 30.0, z.size)])
+        s = np.full_like(g, 1e-9)
+        bc = np.array([1e-3, 2e-3])
+        np.testing.assert_allclose(_propagate_rows_shifted(z, g, s, bc),
+                                   self._closed_form(z, g, s, bc, np.ones(2)), rtol=1e-12)
+        # past the float64 exp range: a 900-neper gain from 1e-300 W is 7.33e90 W (representable;
+        # the closed form returned inf), a -900-neper absorber is ~0 W (the closed form: NaN)
+        z = np.linspace(0.0, 12.0, 241)
+        u = np.array([1.0, -1.0, 1.0, -1.0])
+        g = np.vstack([np.full(z.size, 75.0)] * 2 + [np.full(z.size, -75.0)] * 2)
+        bc = np.array([1e-300, 1e-300, 1.0, 1.0])
+        with np.errstate(over="ignore", invalid="ignore"):
+            old = self._closed_form(z, g, np.zeros_like(g), bc, u)
+        assert np.isinf(old[0, -1]) and np.isnan(old[2, -1])  # premise: the defect
+        P = _propagate_fixed(z, g, np.zeros_like(g), bc, u)
+        assert np.all(np.isfinite(P))
+        expect = math.exp(900.0 + math.log(1e-300))
+        assert P[0, -1] == pytest.approx(expect, rel=1e-11)
+        assert P[1, 0] == pytest.approx(expect, rel=1e-11)
+        assert 0.0 <= P[2, -1] < 1e-300 and 0.0 <= P[3, 0] < 1e-300
+
+    def test_long_reabsorbing_yb_transient_no_longer_trips_on_ieee754(self):
+        """The audit's case: the 2 W Yb reference stretched to 12 m. Its reabsorbing ASE bins reach
+        INT g dz = -1397 nepers, so EVERY step of the closed form went NaN and the A-7 monitor
+        reported "non-finite channel powers" on a march whose physical margins were fine (ASE/
+        launched 0.006, ASE gain integral 4.8)."""
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 12.0)
+        amp = FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)], [Signal(20e-3, 1.060e-6)],
+                             AseBand(1.02e-6, 1.10e-6, 24))
+        r = simulate_transient(amp, np.linspace(0.0, 2e-3, 21), n_nodes=81)
+        assert not r.meta["nonfinite_powers"]
+        assert r.meta["quasi_static_valid"]
+        assert r.meta["max_ase_gain_integral"] < 20.0 and r.meta["max_ase_to_launched"] < 1.0
+        assert r.assert_valid() is r                     # chains on a trustworthy march
+
+    def test_assert_valid_raises_naming_the_failed_criteria(self):
+        """A march that genuinely leaves its regime (8 m Yb seeded at nbar2 = 0.9: ASE gain
+        integral 214, ASE 9e86x the launched power) still RETURNS its arrays with the flag False --
+        the documented contract -- and assert_valid turns that into an exception."""
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 8.0)
+        amp = FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)], [Signal(20e-3, 1.060e-6)],
+                             AseBand(1.02e-6, 1.10e-6, 24))
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:   # the runaway also overflows numpy
+            warnings.simplefilter("always")
+            r = simulate_transient(amp, np.linspace(0.0, 2e-3, 21), n_nodes=81,
+                                   nbar2_0=np.full(81, 0.9))
+        assert any("OUT OF ITS VALID REGIME" in str(w.message) for w in caught)
+        assert r.meta["quasi_static_valid"] is False
+        with pytest.raises(RuntimeError, match="march_valid.*ASE gain integral"):
+            r.assert_valid()

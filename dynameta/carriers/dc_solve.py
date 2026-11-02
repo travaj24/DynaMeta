@@ -24,6 +24,8 @@ Pluggable Stage-1 DC solve methods.
              ground), gated_dd_builder.py (the reference metasurface). (The
              physics_drift_diffusion KNOWN LIMITATION marker this caveat once
              cited was removed 7e77f1c, 2026-06-02.) "newton" stays the default.
+             UNIPOLAR ONLY: a device carrying HoleContinuityEquation is REFUSED with a
+             ValueError naming method="newton" (audit C-15).
 
 Add new methods by extending solve_dc's dispatch.
 """
@@ -45,9 +47,11 @@ from dynameta.carriers.physics_bipolar_dd import warn_if_solution_exceeds_fd_cei
 
 POTENTIAL_EQ = "PotentialEquation"
 # The Gummel path is UNIPOLAR (electron-only): it freezes exactly these continuity equations during
-# the Poisson sub-solve. A bipolar device would also need HoleContinuityEquation frozen -- use the
-# Newton method (method="newton") for bipolar, which solves all equations together.
+# the Poisson sub-solve. A bipolar device is REFUSED (audit C-15, below) -- use method="newton".
 CARRIER_EQS = ("ElectronContinuityEquation",)
+# Continuity equations the Gummel splitting does NOT know how to freeze. Their presence on the device
+# means the "Poisson sub-solve" would really be a coupled Poisson+hole Newton -- not Gummel at all.
+_UNSUPPORTED_CARRIER_EQS = ("HoleContinuityEquation",)
 # Solution variables tracked for the Gummel convergence snapshot (electron-only -> no 'Holes'; there
 # is also no ElectronQFL -- Electrons is the solution variable, not a quasi-Fermi level; F7).
 _TRACK_VARS = ("Potential", "Electrons")
@@ -79,6 +83,29 @@ def solve_dc(device: str, *, method: str = "newton",
                       relative_error=rel_tol, maximum_iterations=max_iter)
             warn_if_solution_exceeds_fd_ceiling(device)         # audit C10-d (converged state)
             return
+        # audit C-15 (2026-11-02): REFUSE a bipolar device instead of silently running a non-Gummel
+        # splitting on it. CARRIER_EQS holds electrons only, so on a device that also carries
+        # HoleContinuityEquation step (1) solved Poisson COUPLED to the hole equation (electrons
+        # frozen), step (2) solved electrons+holes, and the convergence snapshot never looked at
+        # Holes. Measured on a 200 nm abrupt Si pn diode (+-1e23 m^-3, Boltzmann, DEVSIM 2.10):
+        # from the converged equilibrium, a 20 mV (and a 300 mV) forward step ran all 120 outer
+        # passes without converging and left Potential/Electrons/Holes 31x/9.6x/0.90x (max rel)
+        # away from the coupled-Newton answer. Implementing bipolar Gummel by ALSO freezing the hole
+        # density was tried and is worse: the density-frozen (linear) Poisson step diverges on the
+        # same diode at both biases (devsim "Convergence failure!", Holes off by 1.9e6x / 9.7e9x),
+        # the classic failure that makes textbook Gummel freeze the QUASI-FERMI potentials and solve
+        # a NONLINEAR Poisson (Gummel 1964; Selberherr, "Analysis and Simulation of Semiconductor
+        # Devices", Sec. 7.2). That is a different solver (Slotboom/QFL variables) with no
+        # validation in this repo, and the bipolar builders (devsim_3d, devsim_layered
+        # _solve_bipolar) already hard-route to Newton, so the honest option is to refuse loudly.
+        bipolar = sorted(set(_UNSUPPORTED_CARRIER_EQS) & R.equation_names(device))
+        if bipolar:
+            raise ValueError(
+                "solve_dc(method='gummel'): device {!r} carries {} -- it is BIPOLAR, and the Gummel "
+                "route is electron-only (it freezes {} only, so the 'Poisson' sub-solve would be a "
+                "coupled Poisson+hole Newton and the convergence test would never see Holes; audit "
+                "C-15). Use method='newton' (the coupled solve the bipolar builders already use)."
+                .format(device, bipolar, list(CARRIER_EQS)))
         # audit C-6: the signature default semiconductor_regions=() makes the Gummel convergence
         # test VACUOUS -- _snapshot returns {}, _max_rel_change({}, {}) == 0.0 < gummel_tol, and the
         # solver reports success after ONE outer pass having never checked that anything converged.

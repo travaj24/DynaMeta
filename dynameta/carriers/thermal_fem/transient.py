@@ -138,7 +138,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
     dt = t_end_s / n_steps
     time_dependent = (flux_of_t is not None) or (joule_of_t is not None)
 
-    mesh, fes, u, v, a, f, k_cf = build_thermal_forms(
+    mesh, fes, u, v, a, f, k_cf, g_bot = build_thermal_forms(
         layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
 
     # MASS term: int (rho*Cp/_S^2) u v dV' = _S * M_phys (matches the _S * (K, f) scaling; see header)
@@ -166,8 +166,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
         T.Set(ng.CoefficientFunction(float(T_init_K)))
     else:
         T.Set(T_init_K)
-    g_bot = ng.GridFunction(fes)
-    g_bot.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh.Boundaries("bot"))
+    # g_bot = the builder's sink lift (T_sink on the sink dofs; audit X-17)
     free = fes.FreeDofs()
     tvec = T.vec.FV().NumPy()
     gvec = g_bot.vec.FV().NumPy()

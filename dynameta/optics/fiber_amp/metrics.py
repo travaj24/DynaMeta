@@ -271,10 +271,23 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
                   probe_power_W: float = 1e-7, with_ase: bool = False) -> GainSpectrum:
     """Small-signal gain spectrum: a weak probe of power probe_power_W is placed, one wavelength
     at a time, on the amplifier (all its own signals removed so the probe does not saturate the
-    medium) and the gain recorded. ASE is off by default (small-signal gain is ASE-independent
-    and the sweep is much faster); set with_ase=True to include ASE loading."""
+    medium) and the gain recorded. A RamanStokes coupling is dropped with the signals that pump
+    it (audit A-14; the small-signal limit of SRS is zero). ASE is off by default (small-signal
+    gain is ASE-independent and the sweep is much faster); set with_ase=True to include ASE
+    loading."""
     lams = np.atleast_1d(np.asarray(probe_lambda_m, float))
-    base = _with(amp, signals=[])
+    # audit A-14 (2026-11-02): drop the Raman coupling BEFORE emptying the signal list. _with(amp,
+    # signals=[]) forwards `raman`, and FiberAmplifier.__init__ rejects a RamanStokes whose
+    # signal_index has no signal to point at, so gain_spectrum raised ValueError ("signal_index out
+    # of range") on EVERY Raman-coupled amplifier. Dropping it is the small-signal limit, not an
+    # approximation of convenience: SRS is pumped by the amplifier's own signal, which this sweep
+    # removes, and the exchange is bilinear in P_sig. Measured (Er, 8 m, 8e24 m^-3, 250 mW @ 980,
+    # RamanStokes(a_eff 1.5e-11), probes 1530/1550/1565 nm): re-targeting the coupling at the
+    # 1e-7 W probe instead moves the gain by <= 1.1e-7 dB (61.142 / 44.459 / 50.675 dB either way).
+    base = amp
+    if getattr(amp, "raman", None) is not None:
+        base = _rebuild(base, "without_raman")
+    base = _with(base, signals=[])
     if not with_ase:
         # THROUGH THE PROTOCOL (audit A-3 follow-on): this used to hand-roll a FiberAmplifier(
         # base.ion, ...) rebuild -- a fourth, divergent copy of the "what a clone must carry"

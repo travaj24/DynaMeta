@@ -290,7 +290,8 @@ class FiberAmplifier:
 
     # ---- type-preserving clone protocol ---------------------------------------------------
     def _clone(self, *, pumps: Optional[List[Pump]] = None,
-               signals: Optional[List[Signal]] = None, ase=_KEEP) -> "FiberAmplifier":
+               signals: Optional[List[Signal]] = None, ase=_KEEP,
+               raman=_KEEP) -> "FiberAmplifier":
         """Clone this amplifier with the pump list, signal list and/or ASE band swapped, carrying
         EVERY opt-in through: the ASE band, the ConcentrationModel, the normalised
         upconversion_C_up (audit S3-1/A-1: the raw-C_up spelling was dropped by clones that only
@@ -313,7 +314,8 @@ class FiberAmplifier:
                              self.signals if signals is None else list(signals),
                              self.ase if ase is _KEEP else ase,
                              upconversion_C_up=self.upconversion_C_up,
-                             concentration=self.concentration, raman=self.raman)
+                             concentration=self.concentration,
+                             raman=self.raman if raman is _KEEP else raman)
         new._Tz = self._Tz
         return new
 
@@ -339,6 +341,15 @@ class FiberAmplifier:
         temperature profile (audit A-5) -- carried through. Used by metrics.gain_spectrum, whose
         small-signal probe is ASE-independent and much faster without the band."""
         return self._clone(ase=None)
+
+    def without_raman(self) -> "FiberAmplifier":
+        """A copy with the RamanStokes coupling DROPPED (raman=None) and everything else carried
+        through. Used by metrics.gain_spectrum (audit A-14): the small-signal probe REPLACES the
+        amplifier's own signals, and the SRS exchange is pumped by exactly the signal that is
+        removed (it is bilinear, ~ P_sig (P_S + q_seed)), so in the small-signal limit it vanishes.
+        FiberAmplifier-only; ErYbAmplifier has no Raman coupling (gain_spectrum calls this only
+        when `amp.raman` is set)."""
+        return self._clone(raman=None)
 
     # ---- PUBLIC channel plan --------------------------------------------------------------
     def channel_plan(self) -> ChannelPlan:
