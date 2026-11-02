@@ -208,7 +208,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0, MU0
+from dynameta.constants import C_LIGHT, EPS0, MU0, Z0
 
 __all__ = [
     "beta_from_vf",
@@ -230,7 +230,8 @@ __all__ = [
     "sp_resonance_omega",
 ]
 
-Z0 = math.sqrt(MU0 / EPS0)          # free-space wave impedance [ohm]
+# Z0 (free-space wave impedance, ohm) is constants.Z0 -- audit F-21: this module carried a third
+# definition, sqrt(MU0/EPS0), 1 ulp (3.0e-16) from the 1/(EPS0 c) the rest of the library used.
 _L0 = 1.0e-9                        # length unit: mesh coordinates are in nm
 
 # hydro_layered_1d R/T probe planes (audit F-5): the probe node must sit STRICTLY inside its vacuum
