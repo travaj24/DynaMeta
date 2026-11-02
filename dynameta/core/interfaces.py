@@ -74,6 +74,12 @@ class OpticalResult:
     # warning text -- a converged solve reads ~1e-4..1e-3, an under-resolved one ~1e-2 and up. The
     # FEM path fills it; other backends leave it at 0.0.
     fit_relres:    float = 0.0
+    # Cross-polarised 0-order reflection (solve_fem(cross_pol=True), normal incidence only): the
+    # scattered reflected field projected onto the axis ORTHOGONAL to the incident polarisation (the
+    # layered background reflects no cross-pol).  With r it gives one Jones column: x-pol -> (r_xx,
+    # r_yx); y-pol -> (r_xy, r_yy).  None unless requested; exactly 0j on a symmetry-reduced cell,
+    # the only value its mirror symmetry admits (2026-09-25, exp31 chiral coax).
+    r_cross:       Optional[complex] = None
 
 
 @runtime_checkable
