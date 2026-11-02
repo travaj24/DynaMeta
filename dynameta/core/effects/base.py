@@ -93,13 +93,18 @@ class DeltaEffect:
     so ComposedEffect(background=base, deltas=[DeltaEffect(pockels, {'E': zeros(3)}), ...]) adds the
     background exactly once and each effect's shift on top. `baseline_fields` is the zero-drive
     reference for THIS effect (e.g. {'E': np.zeros(3)} for Pockels/Kerr, {'T': T_ref} for a
-    thermo-optic model)."""
+    thermo-optic model). It OVERRIDES those keys of the live bundle -- the reference is
+    eps({**fields, **baseline_fields}) -- so a multi-field model's delta is the shift due to the
+    overridden field(s) alone. AUDIT R-24 (2026-11-02): the baseline REPLACED the bundle, so a model
+    reading E and T with DeltaEffect(m, {'E': 0}) evaluated its reference with T absent (its default)
+    and the "E delta" leaked the whole T dependence. No bundled model was affected (the audit
+    measured exactly zero leak for ElectroAbsorptionModel); the full test suite is unchanged."""
     effect: EffectModel
     baseline_fields: dict
 
     def eps(self, fields: dict, lambda_m: float):
         return (as_tensor(self.effect.eps(fields, lambda_m))
-                - as_tensor(self.effect.eps(self.baseline_fields, lambda_m)))
+                - as_tensor(self.effect.eps({**fields, **self.baseline_fields}, lambda_m)))
 
 
 # ---- field-effect electro-optic mechanisms (Phase 1) -------------------------------------

@@ -9,10 +9,17 @@ description = "DynaMeta: declarative multi-physics simulation library for tunabl
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [{name = "Andrew Traverso"}]
+# audit R-33: deliberately NO upper bound (a requires-python cap makes resolvers back-track to old
+# releases instead of failing). The CI-TESTED interpreters are the per-version classifiers below
+# (the tests matrix: 3.10-3.13); 3.14 is the development interpreter (suite run there, not a CI leg).
 requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 # Core data model + bridge (`import dynameta`) imports as pure numpy/scipy; lumenairy
@@ -32,7 +39,11 @@ plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
-jax = ["jax>=0.11; python_version>='3.12'"]                                        # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend)
+# differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend).
+# audit R-33: jax/jaxlib >= 0.11 declare Requires-Python >= 3.12, so on 3.10/3.11 this extra installs
+# NOTHING and the jax paths (optics.topology_opt / inverse_design / *_design, the fdtd_nd jax
+# kernels) then fail with ModuleNotFoundError: 'jax' -- the differentiable stack needs Python >= 3.12.
+jax = ["jax>=0.11; python_version>='3.12'"]
 numba = ["numba>=0.58"]                                    # JIT/prange CPU kernels: 13 modules (fdtd_nd kernels2d/3d + oblique, soa, numba_env), 16 numba-gated tests, 1 parity oracle. OPTIONAL (every kernel has a numpy reference path) -- but audit T-3: it was declared by NO extra, so nothing could install it and all 16 gates ran nowhere. Installed by the `numba` CI leg.
 # threadpoolctl: lumenairy >= 5.30 (its audit M6 fix) warns ONCE when set_blas_threads /
 # rcwa_blas_threads is called without it (the BLAS-thread cap is silently INERT otherwise);

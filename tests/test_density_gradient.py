@@ -294,6 +294,11 @@ def test_dg_hard_wall_pin_is_a_ramped_device_parameter():
                 frac * pin * V_T, rel=1e-12)
             assert ds.get_parameter(device=dev, region=reg, name="b_dg") == pytest.approx(
                 frac * b_full, rel=1e-12)
+        # audit C-17: a pin that EXISTS but cannot be read must raise -- the bare `except
+        # Exception` took any such error for "no hard wall" and returned with the pin stale
+        ds.set_parameter(device=dev, name="wall_lambda_pin_full", value="not-a-number")
+        with pytest.raises(ValueError):
+            set_dg_gamma(dev, reg, 0.5)
     finally:
         try:
             _R.clear(dev)

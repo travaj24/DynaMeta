@@ -65,15 +65,7 @@ from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
-from dynameta.constants import HBAR, KB
 from dynameta.geometry.guards import require_supported_geometry
-
-
-def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
-    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass -- the
-    conduction N_c (or valence N_v) for the bipolar FD g-factor. (Same formula as the 2D builder;
-    for a non-degenerate diode its exact value barely matters, g~1.)"""
-    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
 
 
 @dataclass
@@ -502,8 +494,8 @@ class Devsim3DEquilibrium:
             nd = (-1.0 if s.acceptor else 1.0) * float(n_bg_m3)
             ds.node_model(device=self.device, region=region, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = _effective_dos_m3(s.dos_mass_kg)
-        Nv = _effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
+        Nc = PE.effective_dos_m3(s.dos_mass_kg)
+        Nv = PE.effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
@@ -578,8 +570,8 @@ class Devsim3DEquilibrium:
             # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
             # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
             # same correction (FDContactShift is the node model the contact installed).
-            _Nc = _effective_dos_m3(self.spec.dos_mass_kg)
-            _Nv = (_effective_dos_m3(float(self.spec.dos_mass_p_kg))
+            _Nc = PE.effective_dos_m3(self.spec.dos_mass_kg)
+            _Nv = (PE.effective_dos_m3(float(self.spec.dos_mass_p_kg))
                    if self.spec.dos_mass_p_kg else _Nc)
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction

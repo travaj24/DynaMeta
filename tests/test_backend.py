@@ -38,6 +38,22 @@ def test_numpy_path_does_not_import_jax_or_cupy():
     assert out.returncode == 0 and "clean" in out.stdout, out.stderr
 
 
+def test_r25_numpy_scalars_that_are_not_python_scalars_do_not_import_jax():
+    """audit R-25: np.float32 / np.int32 / np.complex64 / np.bool_ do not subclass a Python scalar,
+    so array_namespace fell through to is_jax_array and imported jax (flipping jax_enable_x64)."""
+    code = (
+        "import sys, numpy as np;"
+        "from dynameta.core.backend import array_namespace;"
+        "xs = (np.float32(1.0), np.int32(2), np.complex64(1j), np.bool_(True), np.float16(0.5));"
+        "assert all(array_namespace(x) is np for x in xs);"
+        "from dynameta.core.effects import ThermoOpticModel;"
+        "ThermoOpticModel(eps_ref=complex(12.1,0.0), dn_dT=1.8e-4).eps({'T':np.float32(350.0)}, 1.3e-6);"
+        "assert 'jax' not in sys.modules, 'jax imported by a numpy scalar';"
+        "print('clean')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0 and "clean" in out.stdout, out.stderr
+
+
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="jax not installed")
 def test_mixed_backend_raises():
     import jax.numpy as jnp

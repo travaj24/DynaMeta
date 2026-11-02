@@ -99,6 +99,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
         raise ValueError("run_pipeline: sweep must have at least one bias point and one wavelength "
                          "(got {} bias points, {} wavelengths)".format(
                              len(sweep.bias_points), len(sweep.wavelengths_nm)))
+    # audit R-27: validated FIRST -- it used to be checked only after every DEVSIM bias solve and the
+    # optical mesh build, so a typo cost the whole carrier sweep before the ValueError
+    if on_error not in ("raise", "skip"):
+        raise ValueError("run_pipeline: on_error must be 'raise' or 'skip', got {!r}".format(on_error))
     if carrier_solver is None:
         from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
         carrier_solver = LayeredDevsimBuilder(design)
@@ -177,9 +181,6 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     # 3) bridge + solve per (bias, wavelength)
     rows: List[SweepRow] = []
 
-    if on_error not in ("raise", "skip"):
-        raise ValueError("run_pipeline: on_error must be 'raise' or 'skip', got {!r}".format(on_error))
-
     def _failed_row(exc):
         # audit S5-5: in on_error='skip' a failed optical point becomes an all-NaN OpticalResult
         # row (the NaN-aware SweepResults containers were built for exactly this) instead of
@@ -201,7 +202,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
         # pop, not read: this loop is the sole consumer, so each bias's grids are freed once its
-        # optics finish -- peak memory no longer stacks every CarrierField under the optics solve
+        # optics finish and the held set SHRINKS as the sweep proceeds. Audit R-27: that is all it
+        # does -- the carriers are solved up front (DEVSIM is torn down before the mesh build), so
+        # the FIRST bias's optics (and the mesh build) still run with every CarrierField alive; the
+        # peak is unchanged, only the tail is lighter.
         # (duplicate labels can't KeyError: Sweep rejects them at construction)
         cf = fields.pop(bp.label)
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain

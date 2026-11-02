@@ -66,6 +66,26 @@ def test_sweepresults_save_load(fmt, tmp_path):
     assert np.allclose(sr.r, sr2.r) and np.allclose(sr.t, sr2.t)      # complex preserved
 
 
+@pytest.mark.parametrize("fmt", _FORMATS)
+def test_r22_sweepresults_load_checks_the_schema_it_stamps(fmt, tmp_path):
+    """audit R-22: save stamps attrs['schema'] but load never read it -- a store with a different
+    (future) schema or none at all was pivoted silently as schema 1. It must raise."""
+    sr = SweepResults.from_rows(_rows())
+    p = str(tmp_path / ("sweep" + _EXT[fmt]))
+    sr.save(p, fmt=fmt)
+    arrays, attrs = load_arrays(p, fmt=fmt)
+    for bad in (2, None):
+        q = str(tmp_path / ("bad{}{}".format(bad, _EXT[fmt])))
+        a2 = dict(attrs)
+        if bad is None:
+            a2.pop("schema")
+        else:
+            a2["schema"] = bad
+        save_arrays(q, arrays, a2, fmt=fmt)
+        with pytest.raises(ValueError, match="schema"):
+            SweepResults.load(q, fmt=fmt)
+
+
 def _design():
     from dynameta.geometry import Design, Layer, Stack, UnitCell
     from dynameta.materials import ConstantOptical, Material, MaterialRegistry

@@ -77,6 +77,17 @@ def F12_aymerich_humet_expr(eta_expr: str = "eta") -> str:
     return "(1.0 / ({} + {}))".format(A, B)
 
 
+def effective_dos_m3(m_dos_kg, T_K: float = T_REF):
+    """Effective band density of states N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS
+    mass -- the N_c (or N_v) of n = N F_1/2(eta), the x = n/N_c of the generalized-Einstein factor.
+    THE single implementation (audit X-15, 2026-11-02): it had four -- devsim_layered and devsim_3d
+    each carried a byte-identical private `_effective_dos_m3` with a T_K knob no caller ever set,
+    setup_phi_c0 re-typed it inline hard-pinned to T_REF, and optics.soa.qw_gain._band_dos a fourth
+    in m0 units. Every caller now evaluates this one body, with the same operand order, so all four
+    are bit-identical to what they computed before. Array-broadcasting in m_dos_kg / T_K."""
+    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * math.pi * HBAR ** 2)) ** 1.5
+
+
 def invert_F12(target: float, eta_min: float = -20.0, eta_max: float = 80.0,
                 tol: float = 1e-10) -> float:
     if target <= 0:
@@ -114,7 +125,7 @@ def invert_F12(target: float, eta_min: float = -20.0, eta_max: float = 80.0,
 def setup_phi_c0(device: str, region: str, n_bg_m3: float,
                   dos_mass_kg: float) -> float:
     """Set Phi_c0/N_c/N_D so n(V=0) = n_bg. Phi_c0 = -eta_bg * V_t."""
-    N_c = 2.0 * (dos_mass_kg * KB * T_REF / (2.0 * math.pi * HBAR**2))**1.5
+    N_c = effective_dos_m3(dos_mass_kg, T_REF)            # audit X-15: the single N_c
     eta_bg = invert_F12(n_bg_m3 / N_c)
     Phi_c0 = -eta_bg * V_T
     ds.set_parameter(device=device, region=region, name="Phi_c0", value=Phi_c0)

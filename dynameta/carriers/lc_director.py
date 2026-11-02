@@ -127,8 +127,10 @@ class DirectorProfile:
     V_th: float             # Freedericksz threshold
 
 
-def _B(theta_m: float, dEps: float, ep: float) -> float:
-    """The elliptic quadrature B(theta_m) (see module docstring), in CLOSED FORM:
+def _B(theta_max_rad: float, dEps: float, ep: float) -> float:
+    """The elliptic quadrature B(theta_m) (see module docstring), in CLOSED FORM. (theta_m is the
+    MATH symbol for the midplane tilt; the code identifiers are theta_max_rad -- audit V-23, the
+    `_m` suffix means metres in this library -- matching DirectorProfile.theta_max_rad.)
 
         B = K(m) / sqrt(dEps),   1 - m = cos^2(theta_m) * eps_perp / eps(theta_m),
 
@@ -146,14 +148,44 @@ def _B(theta_m: float, dEps: float, ep: float) -> float:
     upper bracket pi/2 - 1e-6, so the over-drive saturation test compared V against a value 42x too
     high. The closed form is within 2.3e-16 of the mpmath oracle at every one of those angles."""
     from scipy.special import ellipkm1
-    s2 = math.sin(theta_m) ** 2
-    c2 = math.cos(theta_m) ** 2
+    s2 = math.sin(theta_max_rad) ** 2
+    c2 = math.cos(theta_max_rad) ** 2
     one_minus_m = c2 * ep / (ep + dEps * s2)               # = 1 - m, formed without cancellation
     return float(ellipkm1(one_minus_m)) / math.sqrt(dEps)
 
 
-def _V_of_theta_m(theta_m: float, K: float, dEps: float, ep: float) -> float:
-    return 2.0 * np.sqrt(K / EPS0) * _B(theta_m, dEps, ep)
+def _V_of_theta_max(theta_max_rad: float, K: float, dEps: float, ep: float) -> float:
+    return 2.0 * np.sqrt(K / EPS0) * _B(theta_max_rad, dEps, ep)
+
+
+def _z_map(phi, theta_max_rad: float, dEps: float, ep: float) -> np.ndarray:
+    """The turning-point z-map A(phi) (z = (d/2) A(phi)/A(pi/2), sin theta = sin theta_m sin phi), in
+    CLOSED FORM:
+
+        A(phi) = int_0^phi sqrt(eps(theta)) / sqrt(1 - eta sin^2 p) dp
+               = sqrt(eps_perp) [ x R_F(X1, X2, X3) + (b/3) x^3 R_J(X1, X2, X3, 1) ],
+        x = sin phi, X1 = cos^2 phi, X2 = cos^2 phi + cos^2(theta_m) x^2, X3 = 1 + b x^2,
+        eta = sin^2 theta_m, b = eta dEps/eps_perp
+
+    (the first-integral dz = C sqrt(eps(theta) eps(theta_m)) dtheta / sqrt(sin^2 theta_m - sin^2 theta),
+    constants dropped because only the RATIO enters). Derivation: u = sin p, then u^2 = 1/(s + 1/x^2)
+    maps int_0^x (1 + b u^2) du / sqrt((1-u^2)(1-eta u^2)(1+b u^2)) onto Carlson's R_F + (b/3) R_J
+    (DLMF 19.16, 19.29). The numerator sqrt(eps) makes this a THIRD-kind integral (R_J, not the
+    F(phi, eta) of the constant-FIELD limit -- that limit, b -> 0, is z/(d/2) = F(phi, eta)/K(eta) and
+    is gated). X1 and X2 are formed directly from cos^2 (never 1 - sin^2), so the near-coincident pair
+    X1, X2 -> 0 that carries the log singularity at theta_m -> pi/2 is exact. Vectorised over phi.
+    AUDIT LC-profile (wave-6 follow-up of C-14, 2026-11-02): this was a 4001-point uniform-phi
+    cumulative trapezoid on the log-singular 1/sqrt(1 - eta sin^2 phi) -- its end A[-1] read 1.0095x
+    at theta_m = 89.99 deg, 1.669x at 89.999 and 13.81x at the bisection bracket pi/2 - 1e-6. The
+    closed form is within 4.4e-16 of a 40-digit mpmath quadrature at every (phi, theta_m) tested."""
+    from scipy.special import elliprf, elliprj
+    phi = np.asarray(phi, dtype=float)
+    x = np.sin(phi)
+    X1 = np.cos(phi) ** 2
+    X2 = X1 + math.cos(theta_max_rad) ** 2 * x * x         # = 1 - eta x^2, without cancellation
+    b = math.sin(theta_max_rad) ** 2 * dEps / ep
+    X3 = 1.0 + b * x * x
+    return math.sqrt(ep) * (x * elliprf(X1, X2, X3) + (b / 3.0) * x ** 3 * elliprj(X1, X2, X3, 1.0))
 
 
 def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m: float,
@@ -186,32 +218,39 @@ def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m:
                                V_applied=V, V_th=Vth)
     # bisect the monotone V(theta_m) for theta_m in (0, pi/2)
     lo, hi = 1e-6, 0.5 * np.pi - 1e-6
-    if _V_of_theta_m(hi, K, dEps, ep) < V:                # extreme over-drive: saturate near homeotropic
-        theta_m = hi
+    if _V_of_theta_max(hi, K, dEps, ep) < V:              # extreme over-drive: saturate near homeotropic
+        theta_max_rad = hi
     else:
         for _ in range(80):
             mid = 0.5 * (lo + hi)
-            if _V_of_theta_m(mid, K, dEps, ep) < V:
+            if _V_of_theta_max(mid, K, dEps, ep) < V:
                 lo = mid
             else:
                 hi = mid
-        theta_m = 0.5 * (lo + hi)
-    # reconstruct theta(z): the cumulative A(phi) maps phi in [0, pi/2] to z in [0, d/2]
-    s = np.sin(theta_m); s2 = s * s
-    phi = np.linspace(0.0, 0.5 * np.pi, 4001)
-    th_phi = np.arcsin(np.clip(s * np.sin(phi), -1.0, 1.0))
-    eps_th = ep + dEps * np.sin(th_phi) ** 2
-    eps_thm = ep + dEps * s2
-    integ = np.sqrt(eps_th * eps_thm / dEps) / np.sqrt(1.0 - s2 * np.sin(phi) ** 2)
-    A = np.concatenate([[0.0], np.cumsum(0.5 * (integ[1:] + integ[:-1]) * np.diff(phi))])
-    z_half = A / A[-1] * (0.5 * d)                        # z from 0 (surface) to d/2 (midplane)
-    nh = int(nz) // 2
-    zu = np.linspace(0.0, 0.5 * d, nh + 1)
-    th_u = np.interp(zu, z_half, th_phi)                  # tilt on the half grid
-    theta_full = np.concatenate([th_u, th_u[-2::-1]])     # mirror about the midplane
-    z_full = np.concatenate([zu, d - zu[-2::-1]])
-    theta = np.interp(z, z_full, theta_full)              # onto the requested uniform z grid
-    return DirectorProfile(z_m=z, theta_rad=theta, theta_max_rad=float(np.max(theta)),
+        theta_max_rad = 0.5 * (lo + hi)
+    # reconstruct theta(z) at every requested node: the closed-form z-map A(phi) (monotone, phi in
+    # [0, pi/2] -> z in [0, d/2]) is inverted by a vectorised bisection on the half-cell fraction of the
+    # node's distance to the nearer plate (the profile is symmetric about the midplane), then
+    # theta = atan2(sin theta_m sin phi, sqrt(1 - sin^2 theta_m sin^2 phi)) -- accurate to the last bit
+    # where arcsin(~1) is not. AUDIT LC-profile (wave-6, 2026-11-02): this was a uniform 4001-point
+    # phi grid + cumulative trapezoid + two np.interp passes; the log-singular integrand put the end of
+    # the z-map 1.67x high at theta_m = 89.999 deg (13.8x at the bracket), so above ~6.8 V_th the
+    # boundary layers came out several times too thin. See _z_map.
+    frac = np.clip(np.minimum(z, d - z) / (0.5 * d), 0.0, 1.0)
+    target = frac * float(_z_map(0.5 * np.pi, theta_max_rad, dEps, ep))
+    lo_p = np.zeros_like(z); hi_p = np.full_like(z, 0.5 * np.pi)
+    for _ in range(64):                                   # pi/2 / 2^64 ~ 1e-19 < ulp(pi/2)
+        mid = 0.5 * (lo_p + hi_p)
+        below = _z_map(mid, theta_max_rad, dEps, ep) < target
+        lo_p = np.where(below, mid, lo_p)
+        hi_p = np.where(below, hi_p, mid)
+    phi = 0.5 * (lo_p + hi_p)
+    phi[frac <= 0.0] = 0.0
+    phi[frac >= 1.0] = 0.5 * np.pi
+    sp = np.sin(phi)
+    cos_th = np.sqrt(np.cos(phi) ** 2 + math.cos(theta_max_rad) ** 2 * sp * sp)
+    theta = np.arctan2(math.sin(theta_max_rad) * sp, cos_th)
+    return DirectorProfile(z_m=z, theta_rad=theta, theta_max_rad=float(theta_max_rad),
                            V_applied=V, V_th=Vth)
 
 
