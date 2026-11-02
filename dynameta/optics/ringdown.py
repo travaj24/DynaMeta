@@ -453,6 +453,19 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
     or that sends a refined mode outside [0.5, 2] x its seed omega, to omega ~ 0, or to a
     non-positive/non-finite (omega, gamma) -- is REJECTED and the seed returned unchanged.
 
+    NONDIMENSIONAL PROBLEM (2026-11-02, the wave-1 Q-22 finding "the refinement is INERT").  The
+    optimizer works in SAMPLE time ``n = t / dt`` on the PEAK-NORMALIZED trace ``y / max|y|``, so
+    its unknowns are ``omega dt`` and ``gamma dt / 2`` (O(0.01..3) for any sampled ringdown) and
+    its residual is O(1).  The pre-fix SI parametrization (omega ~ 1e15, gamma/2 ~ 1e13 rad/s on
+    an optical trace, field amplitudes of whatever units the solver used) made the raw gradient
+    J^T r ~ 1e-15 -- under ``gtol = 1e-14`` before the first step -- so ``least_squares`` stopped
+    at nfev = 1 (status 1, dx = 0) on EVERY measured optical trace (FDTD n_slab 3.5/7/10 and the
+    synthetic ones): the documented refinement never moved a pole, and the platform-stability
+    claim above held only because the pencil itself happened to agree across builds.  Only the
+    LINEAR amplitudes were re-solved.  The scaled problem converges in ~4-10 evaluations; the
+    returned (omega, gamma, amplitude) are mapped back to SI exactly (divide by dt, multiply by
+    the peak), and every gate below runs in SI, unchanged.
+
     Modes are re-sorted by refined |amplitude|.  Returns ``(modes, note)`` where ``note`` is a
     short debug string ('' when the refinement was accepted).  Falls back to the input modes
     unchanged if scipy is unavailable or the fit fails."""
@@ -462,6 +475,10 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
         return seed, "no modes to refine"
     dt = float(dt)
     t = np.arange(y.size) * dt
+    n_t = np.arange(y.size, dtype=np.float64)           # SAMPLE time t / dt (nondimensional)
+    y_pk = float(np.max(np.abs(y))) if y.size else 0.0
+    y_pk = y_pk if (np.isfinite(y_pk) and y_pk > 0.0) else 1.0
+    y_n = y / y_pk                                      # peak-normalized data, O(1) residual
     is_osc = [bool(m.omega_rad_s * dt > _OMEGA_DC_TOL) for m in seed]
     # index-based split (finding Q-21: the old `m not in osc` used dataclass VALUE equality, so
     # two degenerate modes both landed in `osc` and `rest` silently lost one).
@@ -494,28 +511,32 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
     F = (np.column_stack(fixed_cols) if fixed_cols
          else np.empty((y.size, 0), dtype=np.float64))
 
-    def _design(w, h):
+    def _design(wn, hn):
+        # wn = omega dt, hn = gamma dt / 2: the columns exp(-hn n) (cos, sin)(wn n) are the SI
+        # exp(-gamma t / 2) (cos, sin)(omega t) up to rounding of the product.
         cols = np.empty((y.size, 2 * K + F.shape[1]), dtype=np.float64)
         for k in range(K):
-            e = np.exp(-np.abs(h[k]) * t)
-            cols[:, 2 * k] = e * np.cos(w[k] * t)
-            cols[:, 2 * k + 1] = e * np.sin(w[k] * t)
+            e = np.exp(-np.abs(hn[k]) * n_t)
+            cols[:, 2 * k] = e * np.cos(wn[k] * n_t)
+            cols[:, 2 * k + 1] = e * np.sin(wn[k] * n_t)
         if F.shape[1]:
             cols[:, 2 * K:] = F
         return cols
 
     def _resid(p):
         A = _design(p[:K], p[K:])
-        c, *_ = np.linalg.lstsq(A, y, rcond=None)
-        return A @ c - y
+        c, *_ = np.linalg.lstsq(A, y_n, rcond=None)
+        return A @ c - y_n
 
     try:
-        sol = least_squares(_resid, np.concatenate([w0, h0]), x_scale="jac",
+        sol = least_squares(_resid, np.concatenate([w0 * dt, h0 * dt]), x_scale="jac",
                             ftol=1e-14, xtol=1e-14, gtol=1e-14, max_nfev=400)
-        w, h = sol.x[:K], np.abs(sol.x[K:])
-        A = _design(w, h)
-        c, *_ = np.linalg.lstsq(A, y, rcond=None)
-        rms = float(np.sqrt(np.mean((A @ c - y) ** 2)))
+        wn, hn = sol.x[:K], np.abs(sol.x[K:])
+        w, h = wn / dt, hn / dt                         # back to SI [rad/s]
+        A = _design(wn, hn)
+        c_n, *_ = np.linalg.lstsq(A, y_n, rcond=None)
+        c = c_n * y_pk                                  # amplitudes back in the data's units
+        rms = float(np.sqrt(np.mean((A @ c_n - y_n) ** 2))) * y_pk
     except Exception:                                   # pragma: no cover - defensive
         return seed, "least_squares failed: seed kept"
 
@@ -819,9 +840,9 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
         dominant mode. ``max_fit_samples = 1200`` at ``target_samples_per_period = 20`` is 60
         carrier periods, i.e. only ``60 pi / Q`` nepers: 13.7 at n_slab = 3.5, 3.5 at 7, 1.7 at 10,
         0.75 at 15. THAT is the shipped scope limit. It is a CONSERVATIVE flag -- on these clean
-        traces the extraction still holds to +0.7% at n_slab = 10 and 15 -- but n_slab = 20 is
-        where it breaks: Q = 169.9 against the Fabry-Perot 455.2 (-62.7%), and the RMS tell flags
-        that one too (3.7e-2). Raise ``max_fit_samples`` (and ``settle`` for the extra record) to
+        traces the extraction still holds to +0.9% at n_slab = 10 and 15 -- but n_slab = 20 is
+        where it breaks: Q = 252.8 against the Fabry-Perot 455.2 (-44.5%; -62.7% before the
+        2026-11-02 refinement fix), and the RMS tell flags that one too (3.5e-2). Raise ``max_fit_samples`` (and ``settle`` for the extra record) to
         go higher; the pencil is O(N^3) in the fitted length, so this is a deliberate speed/range
         trade, not a bound of the method.
     """
@@ -919,9 +940,9 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                 "n_periods / Q nepers, so it shrinks as 1/Q: this is the max_fit_samples cap "
                 "meeting a high-Q cavity, NOT a limit of the method. Raise max_fit_samples (and "
                 "`settle` for the extra record) or lower target_samples_per_period. This is a "
-                "CONSERVATIVE flag -- on clean traces the extraction held to +0.7% at n_slab = 10 "
+                "CONSERVATIVE flag -- on clean traces the extraction held to +0.9% at n_slab = 10 "
                 "(1.7 nepers) and 15 (0.75) -- but it is where it breaks: n_slab = 20 returns "
-                "Q = 169.9 against a Fabry-Perot 455.2 (-62.7%).".format(
+                "Q = 252.8 against a Fabry-Perot 455.2 (-44.5%).".format(
                     nepers, _MIN_WINDOW_NEPERS, q, int(min(max_fit_samples, tail_d.size)),
                     int(target_samples_per_period)),
                 RuntimeWarning, stacklevel=2)

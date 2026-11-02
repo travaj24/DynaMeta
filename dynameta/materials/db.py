@@ -212,7 +212,12 @@ class DielectricDB:
         with_diel.sort(key=lambda r: _num_or(r.get("formation_energy_peratom"), 1e9))
         rec = with_diel[0]
         total = _first_num(rec, self._J_TOTAL)
-        elec = _first_num(rec, self._J_ELEC) or _avg_num(rec, self._J_ELEC_OPT)
+        # audit Q-25: no `or` on a float.  A non-positive electronic permittivity is unphysical
+        # (eps_inf >= 1), so a 0.0 there is JARVIS's "not computed" and falls back to the epsx/y/z
+        # average -- exactly what the old `or` did, now stated instead of implied.
+        elec = _first_num(rec, self._J_ELEC)
+        if elec is None or elec <= 0.0:
+            elec = _avg_num(rec, self._J_ELEC_OPT)
         ionic = _first_num(rec, self._J_IONIC)
         return DielectricRecord(
             formula=formula, eps_static=float(total), source="jarvis-dft",
@@ -247,7 +252,10 @@ class DielectricDB:
         docs = [d for d in docs if getattr(d, "e_total", None) is not None]
         if not docs:
             raise LookupError("Materials Project has no dielectric entry for {!r}".format(formula))
-        docs.sort(key=lambda d: (getattr(d, "energy_above_hull", None) or 1e9))
+        # audit Q-25 (the same `or`-on-a-float, where 0.0 IS the common legitimate value): the
+        # GROUND-STATE polymorph has energy_above_hull == 0.0, which `or 1e9` turned into 1e9 and
+        # sorted LAST, so any metastable polymorph on the hull's far side was returned instead.
+        docs.sort(key=lambda d: _num_or(getattr(d, "energy_above_hull", None), 1e9))
         d = docs[0]
         sym = getattr(d, "symmetry", None)
         spg = getattr(sym, "symbol", None) if sym is not None else None

@@ -101,8 +101,8 @@ Away from theta = 0 the correspondence is:
 
   * ``'y'`` <-> ``'s'`` and ``'p'`` <-> ``'p'`` **at azimuth phi = 0 only**;
   * ``'x'`` has NO s/p image at theta != 0 -- E along lab x is not transverse to an oblique x-z
-    wavevector (``OpticalSpec`` refuses it; ``tmm_reference._pol_for`` maps it to ``'s'`` and is
-    therefore valid only on the normal-incidence branch, sibling finding Q-24);
+    wavevector (``OpticalSpec`` refuses it; ``tmm_reference._pol_for`` maps it to ``'s'`` on the
+    normal-incidence branch only and, since 2026-11-02, raises off normal -- sibling finding Q-24);
   * at phi != 0 (CONICAL) the label ``'y'`` is genuinely ambiguous across the repo. The FEM
     solver and ``OpticalSpec`` read it as the ROTATED s-hat = ``(-sin phi, cos phi, 0)``
     (``optics/solver.py``, ``_common.pol_tangential_unit``), while the lumenairy bridge's
@@ -416,7 +416,7 @@ _add(Vocabulary(
                    public=False),
         EntryPoint("dynameta.optics.tmm_reference", "_pol_for", "polarization", public=False,
                    note="the lab_xyp -> sp bridge; 'x' -> 's' is the normal-incidence branch "
-                        "only (Q-24)"),
+                        "only, and raises off normal (Q-24)"),
         EntryPoint("dynameta.optics.lumenairy_bridge._common", "pol_row", "polarization",
                    public=False, note="the lab_xyp -> row bridge (_POL_ROW)"),
         EntryPoint("dynameta.optics.lumenairy_bridge._common", "p_basis_conversion", "pol",

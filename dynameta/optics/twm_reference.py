@@ -345,6 +345,14 @@ def phase_matching_sinc(dk: np.ndarray | float, length: float,
     1/|m| weight and their sinc, and the residual is the ~1% closed-form-vs-integrator tolerance
     the QPM gates carry (measured against a brute-force piecewise-exact quadrature: <= 1.1e-2
     relative wherever |Phi| >= 0.5, i.e. inside the main lobe of whichever order is matched).
+
+    LENGTH DEPENDENCE OF THAT TOLERANCE (audit Q-30, documented 2026-11-02). At the matched point
+    the closed form is EXACT (rounding, ~1e-15) when L is an integer multiple of Lambda/2: whole
+    domain pairs make every unmatched order integrate to zero. Any leftover partial domain does
+    not, and the relative error then scales as ~Lambda / (4 L) -- measured at dk = 2 pi/Lambda
+    against the piecewise-exact integral: 2.4e-2 at L = 10.25 Lambda, 5.0e-3 at 50.25 Lambda,
+    1.25e-3 at 200.25 Lambda (the audit's ~0.15% is one such length). A tolerance, not a bug: a
+    real crystal of a few hundred periods sits at the 1e-3 level.
     Used by ``spdc_design.jsa`` (the sinc(delta k L/2) phase-matching envelope) and by the
     undepleted closed forms below. ``dk`` may be an array."""
     dk = np.asarray(dk, dtype=float)
@@ -601,8 +609,9 @@ def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
             s = deff_sign(z)
             af = y[0] + 1j * y[1]
             ash = y[2] + 1j * y[3]
-            daf = 1j * (kf * scale * s) * ash * np.conj(af) * np.exp(1j * dk * z)
-            das = 1j * (ks * scale * s) * (af ** 2 / 2.0) * np.exp(-1j * dk * z)
+            e = np.exp(1j * dk * z)         # audit P-9: exp(-i dk z) is conj(e), bit for bit
+            daf = 1j * (kf * scale * s) * ash * np.conj(af) * e
+            das = 1j * (ks * scale * s) * (af ** 2 / 2.0) * np.conj(e)
             return [daf.real, daf.imag, das.real, das.imag]
 
         y0 = [b0[0].real, b0[0].imag, b0[1].real, b0[1].imag]
@@ -615,9 +624,12 @@ def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
             a1 = y[0] + 1j * y[1]
             a2 = y[2] + 1j * y[3]
             a3 = y[4] + 1j * y[5]
-            d1 = 1j * (k1 * scale * s) * a3 * np.conj(a2) * np.exp(1j * dk * z)
-            d2 = 1j * (k2 * scale * s) * a3 * np.conj(a1) * np.exp(1j * dk * z)
-            d3 = 1j * (k3 * scale * s) * a1 * a2 * np.exp(-1j * dk * z)
+            # audit P-9: ONE complex exponential per step -- d1 and d2 each recomputed exp(+i dk z)
+            # and d3 computed exp(-i dk z), which is conj(exp(+i dk z)) bit for bit (sin is odd).
+            e = np.exp(1j * dk * z)
+            d1 = 1j * (k1 * scale * s) * a3 * np.conj(a2) * e
+            d2 = 1j * (k2 * scale * s) * a3 * np.conj(a1) * e
+            d3 = 1j * (k3 * scale * s) * a1 * a2 * np.conj(e)
             return [d1.real, d1.imag, d2.real, d2.imag, d3.real, d3.imag]
 
         y0 = [b0[0].real, b0[0].imag, b0[1].real, b0[1].imag, b0[2].real, b0[2].imag]
@@ -642,8 +654,10 @@ def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
         I1 = spec.intensity(1, A1)
         I3 = spec.intensity(3, A3)
         I2 = np.zeros_like(I1)
-        N1 = np.array([spec.photon_flux(1, a) for a in A1])
-        N3 = np.array([spec.photon_flux(3, a) for a in A3])
+        # audit P-10: photon_flux is already vectorized (abs(A)**2 on the array); the per-element
+        # list comprehension built the same values one Python call at a time.
+        N1 = spec.photon_flux(1, A1)
+        N3 = spec.photon_flux(3, A3)
         N2 = np.zeros_like(N1)
         # 2 fundamental photons per SH photon: N1 + 2 N3 conserved
         mr13 = N1 + 2.0 * N3
@@ -655,9 +669,9 @@ def twm_propagate(spec: TWMSpec, amp1: complex, amp2: complex, amp3: complex,
         I1 = spec.intensity(1, A1)
         I2 = spec.intensity(2, A2)
         I3 = spec.intensity(3, A3)
-        N1 = np.array([spec.photon_flux(1, a) for a in A1])
-        N2 = np.array([spec.photon_flux(2, a) for a in A2])
-        N3 = np.array([spec.photon_flux(3, a) for a in A3])
+        N1 = spec.photon_flux(1, A1)                     # audit P-10 (vectorized, as above)
+        N2 = spec.photon_flux(2, A2)
+        N3 = spec.photon_flux(3, A3)
         mr13 = N1 + N3
         mr23 = N2 + N3
 

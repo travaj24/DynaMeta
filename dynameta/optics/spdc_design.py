@@ -71,6 +71,7 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
+from dynameta.core.numerics import trapz as _trapz1, trapz_axis as _trapz_axis
 from dynameta.optics.twm_reference import phase_matching_sinc
 
 __all__ = [
@@ -87,8 +88,11 @@ __all__ = [
 # equal 1/(2 pi) times the classical per-photon DFG/SFG efficiency (temporal-mode density).
 HELT_SIPE_PREFACTOR = 1.0 / (2.0 * math.pi)
 
-# numpy >=2.0 renamed trapz -> trapezoid; support both.
-_trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
+# The library's ONE floor-safe trapezoid is core.numerics (audit Q-19, 2026-11-02): this module used
+# to carry a third private `getattr(np, "trapezoid", np.trapz)` shim; the 2-D marginals use the
+# axis form `trapz_axis` (bit-identical to np.trapezoid(..., axis=)).  `_trapz` stays as an alias of
+# it (same call signature as the old shim, 1-D or axis=) for code that imported the private name.
+_trapz = _trapz_axis
 
 
 def _pump_amp_sq(pump_power_W: float, area_m2: float, n_p: float) -> float:
@@ -151,7 +155,7 @@ def pair_rate_from_sfg(omega_s_grid: np.ndarray, omega_p: float, d_eff: float, l
     G = kappa_s * kappa_i * Ap2 * length_m ** 2 * np.abs(phi) ** 2
 
     spectral = HELT_SIPE_PREFACTOR * G
-    R = float(_trapz(spectral, omega_s)) if omega_s.size > 1 else float(spectral[0])
+    R = _trapz1(spectral, omega_s) if omega_s.size > 1 else float(spectral[0])
     return {
         "spectral_density": spectral,           # dR/domega_s  (dimensionless)
         "rate_pairs_per_s": R,
@@ -563,8 +567,8 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
     ws = np.asarray(omega_s_grid, dtype=float)
     wi = np.asarray(omega_i_grid, dtype=float)
     P = jsi(jsa_matrix)
-    sig = _trapz(P, wi, axis=1)
-    idl = _trapz(P, ws, axis=0)
+    sig = _trapz_axis(P, wi, axis=1)
+    idl = _trapz_axis(P, ws, axis=0)
     WS, WI = np.meshgrid(ws, wi, indexing="ij")
     U, V = WS + WI, WS - WI
 
