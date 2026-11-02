@@ -40,7 +40,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
-from dynameta.warning_types import AdvisoryWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
@@ -559,19 +559,26 @@ class LayeredDevsimBuilder:
         # ohmic semiconductor contact does, so a GATED bipolar 2D device UNDER-ACCUMULATES (the 3D
         # gated-cap builder applies gate_bias = Vg + phi_bi). Warn LOUDLY rather than return a silently-
         # wrong profile. Bipolar p-n DIODES with ohmic semiconductor contacts are unaffected (validated).
+        # audit S5-16 (wave-7, 2026-11-02): the warn used to sit INSIDE `try: ... except Exception:
+        # pass` under an `import warnings as _w` alias. A warning escalated to an error (pytest
+        # filterwarnings=error, or a caller's filterwarnings('error', category=...)) IS an Exception, so
+        # the bare except SWALLOWED the very escalation it was asked for; and the alias hid the site from
+        # the V-17 census. Only the electrode inspection is guarded now; the warning is raised outside,
+        # as UnreliableResultWarning (the returned profile under-accumulates -- a UserWarning, its old
+        # implicit category, so existing filters still match).
         try:
-            import warnings as _w
             semi_layers = {L.name for L in d.stack.layers
                            if d.material_role(L.background_material) == "semiconductor"}
             gated = [E.name for E in d.electrodes if getattr(E, "role", "biased") != "ground"
                      and getattr(E, "layer", None) not in semi_layers]
-            if gated and bias.voltages:
-                _w.warn("LayeredDevsimBuilder bipolar solve: gate electrode(s) {} sit on a non-"
-                        "semiconductor layer and do NOT carry the bipolar built-in-potential offset, so a "
-                        "GATED bipolar 2D device under-accumulates. Use the 3D gated-cap builder "
-                        "(devsim_3d) for a quantitative gated-bipolar result.".format(gated), stacklevel=2)
-        except Exception:
-            pass
+        except Exception:                                     # noqa: BLE001 (diagnostic only)
+            gated = []
+        if gated and bias.voltages:
+            warnings.warn("LayeredDevsimBuilder bipolar solve: gate electrode(s) {} sit on a non-"
+                          "semiconductor layer and do NOT carry the bipolar built-in-potential offset, so a "
+                          "GATED bipolar 2D device under-accumulates. Use the 3D gated-cap builder "
+                          "(devsim_3d) for a quantitative gated-bipolar result.".format(gated),
+                          UnreliableResultWarning, stacklevel=2)
 
         # (1) seed the built-in (charge-neutral) potential + carriers, in the frame the ohmic
         # contacts PIN -- which carries the Fermi-Dirac degeneracy correction (with the sign the
@@ -706,8 +713,12 @@ class LayeredDevsimBuilder:
             if cc:
                 extras["contact_currents_A"] = cc
         except Exception as _e:                               # noqa: BLE001 (diagnostic)
-            import warnings as _w
-            _w.warn("contact-current extraction unavailable: {}".format(_e))
+            # audit S5-16 (wave-7, 2026-11-02): this was `import warnings as _w; _w.warn(...)` -- no
+            # category, no stacklevel, and the alias hid it from the V-17 census (which matches the
+            # literal `warnings.warn`). The CarrierField is complete; only the optional extras key is
+            # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
+            warnings.warn("contact-current extraction unavailable: {}".format(_e),
+                          AdvisoryWarning, stacklevel=2)
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=PE.T_REF, regions=regions, n_bg_by_region=n_bg_by_region,
