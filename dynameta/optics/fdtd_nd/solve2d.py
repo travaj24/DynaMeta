@@ -35,6 +35,7 @@ from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pul
 from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
 from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
+from dynameta.warning_types import UnreliableResultWarning
 
 
 
@@ -137,7 +138,7 @@ def _window_memory_s(entry_point, layers, tau) -> float:
                 "(measured 161x the passive residue at the same extended window) and above the "
                 "lasing threshold no finite window converges. Treat R/T as unconverged unless you "
                 "have checked the tail; audit D-10.".format(entry_point, min(amp)),
-                RuntimeWarning, stacklevel=3)
+                UnreliableResultWarning, stacklevel=3)
     return t_ring
 
 
@@ -253,7 +254,7 @@ def _check_probe_placement(entry_point, k_src, k_pL, k_pR, nz, npml, pad, dz,
         warnings.warn(
             "{}: npml={} is a thin CPML -- measured energy-budget error on a lossless slab is "
             "0.5-2.0 % at npml=4-5 versus <0.1 % at npml>=8 (audit D-3). Raise npml if you need "
-            "better than ~1 %.".format(entry_point, npml), RuntimeWarning, stacklevel=3)
+            "better than ~1 %.".format(entry_point, npml), UnreliableResultWarning, stacklevel=3)
 
     d_lo = npml - k_pL                                       # cells the R probe sits inside the low-z PML
     d_hi = k_pR - (nz - 1 - npml)                            # cells the T probe sits inside the high-z PML
@@ -305,7 +306,7 @@ def _check_probe_placement(entry_point, k_src, k_pL, k_pR, nz, npml, pad, dz,
             "deep scattered its band-edge bins by up to +-1.2 %. Raise n_pad_wave / resolution (or "
             "lower npml) if you need better than ~1 % there; audit D-3.".format(
                 entry_point, k_src, d_src, npml, _pml_atten(d_src, npml)),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)
 
 
 def _check_band(entry_point, band, f_min, f_max):
@@ -375,7 +376,7 @@ def _flux_ratios(entry_point, P_inc, P_refl, P_trans, band):
             "plane. This used to be hidden by an abs() on both the numerator and the denominator "
             "(audit D-9). Usual causes: probe planes inside the CPML or too thin an absorber (audit "
             "D-3), an evanescent/near-cutoff order (audit D-2), or a gain layer above threshold."
-            .format(entry_point, "; ".join(bad)), RuntimeWarning, stacklevel=3)
+            .format(entry_point, "; ".join(bad)), UnreliableResultWarning, stacklevel=3)
     return R_flux, T_flux
 
 

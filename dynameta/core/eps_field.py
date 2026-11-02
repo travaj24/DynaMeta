@@ -13,6 +13,35 @@ uses exp(-i*omega*t) (passive loss => Im(eps) > 0), matching NGSolve, so no
 buried sign flips (the old eps_loader negated eps_im at load time). It is
 ENFORCED, not merely recorded -- see `require_solver_time_convention`, which
 every optical backend calls on the `eps_by_region` seam it is handed.
+
+ANTI-GAIN POLICY -- what happens to Im(eps) < 0 (= GAIN under exp(-i omega t)) (audit V-10,
+2026-11-02). The audit counted five behaviours (raise / raise-downstream / warn / silent clamp /
+silent accept) for one stated convention. The convention was never in doubt; what differed was
+undocumented, and two sites (the inverted-population clamp in IntersubbandEffect, and the
+bleaching clamp's category) were not discoverable as "your number was altered". The policy is now
+ONE rule keyed on WHO can be wrong, and every consumer is in exactly one row:
+
+  (1) RAISE -- a PARAMETER that can only mean gain is a caller error: DrudeOptical / the
+      scattering-rate sum (negative damping, materials/optical_model.py, materials/scattering.py)
+      and the FDTD seam's single-pole inversion (optics/fdtd_seam._require_passive_eps -- the
+      Drude/Lorentz time march has no stable representation of an arbitrary gain eps, V-2).
+  (2) CLAMP + UnreliableResultWarning -- a DIFFERENTIAL effect model extrapolated past its passive
+      validity (ElectroAbsorptionModel's bleaching regime, IntersubbandEffect's inverted
+      population): the returned eps is NOT the model's raw value, so the category says so
+      (dynameta.warning_types.UnreliableResultWarning; the ISB site was a bare UserWarning with no
+      stacklevel before V-17).
+  (3) WARN, NO CLAMP -- a composition that CAN legitimately go active but usually means a modelling
+      slip: ComposedEffect (UnreliableResultWarning, the eigenvalue check) and graphene.sheet_rt
+      (RuntimeWarning: the returned R/T are exact for the active sheet; A < 0 says so).
+  (4) ACCEPT -- the linear FREQUENCY-DOMAIN solvers (solve_fem, tmm_reference, the lumenairy
+      bridge, nonlocal_tmm, resonance): an active layer is a physical input there (an SOA or a
+      pumped film is exactly that), the solve is well-posed, and the energy diagnostics report
+      A = 1 - R - T < 0 honestly. Refusing it would forbid gain modelling outright. (solve_fem's
+      GROSS-violation backstop still emits its "A << 0 (energy created)" FEMDiagnosticWarning
+      below A = -0.05: that guard exists for broken fits and cannot tell them from a genuinely
+      active stack, so on a strongly amplifying stack it is an expected advisory, not a refusal.)
+"Raise-downstream" in the audit's list was row (1) reached through a material model; it is the
+same rule. A new eps consumer picks its row here instead of inventing a sixth behaviour.
 """
 
 from __future__ import annotations

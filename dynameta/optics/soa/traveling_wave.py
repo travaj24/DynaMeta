@@ -33,6 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dynameta.constants import H_PLANCK
+from dynameta.warning_types import UnreliableResultWarning
 
 
 __all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression", "NonlinearLoss",
@@ -873,7 +874,7 @@ class TravelingWaveSOA:
             import warnings
             warnings.warn("steady_gain_dB: gain still drifting by {:.2e} dB over the last "
                           "tenth of the settle window -- raise settle_lifetimes".format(
-                              float(np.nanmax(tail) - np.nanmin(tail))), RuntimeWarning,
+                              float(np.nanmax(tail) - np.nanmin(tail))), UnreliableResultWarning,
                           stacklevel=2)
         return float(g[-1])
 

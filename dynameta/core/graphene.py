@@ -30,13 +30,14 @@ import numpy as np
 
 from dynameta.constants import Q_E, HBAR, KB, C_LIGHT, Z0
 from dynameta.core.backend import array_namespace
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 # Z0 (free-space wave impedance, ~376.730 ohm) is imported from constants (audit F-21); `graphene.Z0`
 # stays importable as before.
 SIGMA0 = Q_E ** 2 / (4.0 * HBAR)        # universal interband AC conductivity of graphene, ~6.085e-5 S
 
 
-def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = 300.0):
+def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = T_REF):
     """Complex sheet conductivity sigma(E_F, omega) [S] (Kubo, finite T) = intraband Drude +
     interband. `E_F_J` is the Fermi level relative to the Dirac point (J), `tau_s` the carrier
     relaxation time, `T_K` the temperature. Re(sigma) > 0 (passive, exp(-i omega t)).
@@ -88,7 +89,7 @@ def sheet_rt(n1, n2, sigma, *, theta_deg: float = 0.0):
 
 
 def gate_tuned_reflection(E_F_J, lambda_m, n1, n2, *, tau_s: float = 1.0e-13,
-                          T_K: float = 300.0):
+                          T_K: float = T_REF):
     """Convenience: sigma(E_F) -> (R, T, A) for a graphene sheet between n1 and n2 -- the gate-tuned
     graphene modulator response at one Fermi level."""
     s = graphene_sigma(E_F_J, lambda_m, tau_s=tau_s, T_K=T_K)

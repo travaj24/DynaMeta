@@ -447,6 +447,19 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
     return layers_for_grid, lateral_fn
 
 
+# DEFAULT `resolution` / `band_pad` ACROSS THE FDTD ENTRY POINTS (audit V-15, 2026-11-02). Cells per
+# lambda_min in the highest-index medium: 40 for solve_fdtd_1d / solve_fdtd_2d(_oblique) and
+# solve_fdtd_3d_mo, 60 for the 1-D magneto-optic solve_fdtd_mo_1d (the circular-branch index bound
+# is usually far above the linear one), 24 / 36 for solve_fdtd_3d / its oblique twin (cost ~ res^4),
+# 30 for ringdown's etalon, 32 for THIS seam (the run_pipeline default, a per-bias cost) and 11 for
+# inverse_design (a differentiable march repeated every iterate). These are cost choices for the
+# use each entry point serves, not one convergence target, so a resolution study through one
+# entry point does not transfer to another -- pass `resolution` explicitly when comparing.
+# `band_pad` (the solved band's widening beyond the served wavelengths) is 0.12 when run_fdtd_sweep
+# is called DIRECTLY and 0.08 through FDTDSweepOpticalSolver / make_fdtd_sweep_optical_solver,
+# which pass their own value. Not harmonized: either change moves every result served through that
+# path, and no measurement shows either one wrong (not re-measured in this pass); the divergence is
+# recorded here so a caller comparing the two paths pins it.
 def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
                              courant: float = 0.5, settle: float = 12.0, n_pad_wave: float = 4.0,
                              band_frac: float = 0.06):

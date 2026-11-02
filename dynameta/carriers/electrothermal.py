@@ -30,6 +30,7 @@ import ngsolve as ng
 from dynameta.carriers.electrostatics_fem import ElectrostaticLayer, solve_electrostatics_fem
 from dynameta.carriers.thermal_fem import (MESH_SCALE, ThermalLayer, ThermalResult,
                                            add_load_terms, build_thermal_forms, mean_T_per_layer)
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 SigmaSpec = Union[float, Callable[[float], float]]      # constant S/m, or sigma(T_K) -> S/m
 
@@ -118,7 +119,7 @@ def _sink_outflux_W(t_result, layers) -> float:
 
 
 def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: float, *,
-                                period_x_m: float, period_y_m: float, T_sink_K: float = 300.0,
+                                period_x_m: float, period_y_m: float, T_sink_K: float = T_REF,
                                 flux_W_m2: float = 0.0, max_iter: int = 50, tol_T_K: float = 1e-3,
                                 relax: float = 1.0, maxh_m: Optional[float] = None, order: int = 2,
                                 linear_solver: str = "umfpack") -> ElectroThermalResult:
@@ -206,7 +207,7 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
 
 def electrothermal_extra_fields(layers: List[ElectroThermalLayer], *, period_x_m: float,
                                 period_y_m: float, voltage_of_bias: Callable[[object], float],
-                                optical_region: str, T_sink_K: float = 300.0, flux_W_m2: float = 0.0,
+                                optical_region: str, T_sink_K: float = T_REF, flux_W_m2: float = 0.0,
                                 **picard_kw) -> Callable[[object], dict]:
     """Build an extra_fields closure fn(bias_point) -> {'T': <mean T of `optical_region`>} for
     pipeline.run_pipeline / core.bridge.assemble_eps. Pairs with an EffectEpsMap whose `optical_region`

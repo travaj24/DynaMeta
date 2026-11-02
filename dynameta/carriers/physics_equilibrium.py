@@ -20,20 +20,10 @@ import math
 # would silently corrupt every downstream carrier solve) is importable and TESTABLE without the
 # heavy solver stack. The ds.* call sites resolve through this shim on first devsim use.
 
-
-class _DevsimShim:
-    _mod = None
-
-    def __getattr__(self, name):
-        if _DevsimShim._mod is None:
-            import devsim as _devsim
-            _DevsimShim._mod = _devsim
-        return getattr(_DevsimShim._mod, name)
-
-
-ds = _DevsimShim()
-
+# audit X-23 (2026-11-02): the shim class was a character-for-character copy of eq_registry's; this
+# module already imports eq_registry, so it now shares that ONE lazy `ds` object.
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers.eq_registry import _DevsimShim, ds  # noqa: F401  (re-exported spelling)
 
 # Physical constants (SI): single source in core/constants. Re-exported here because several
 # carrier modules historically import Q_E / V_T / EPS0 / M_E from physics_equilibrium.
