@@ -86,6 +86,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       require_lumenairy as _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
+from dynameta.geometry.guards import require_supported_geometry
 
 __all__ = ["design_to_berreman_layers", "make_lumenairy_berreman_solver",
            "berreman_result_to_optical_result", "BerremanLayeredSolver"]
@@ -133,6 +134,7 @@ def design_to_berreman_layers(design, lambda_m: float, *, eps_by_region=None,
     constant (3,3) per slab); a uniform tensor EpsField -> its (3,3); a uniform scalar EpsField
     -> its scalar; lateral inclusions or a structured grid -> NotImplementedError (use RCWA/PMM);
     else the background material eps at lambda."""
+    require_supported_geometry(design, "design_to_berreman_layers")   # 2026-11-02: refuse Stack.features / Inclusion.taper
     _require_berreman()
     n_super, n_sub = end_media_indices(design, lambda_m)
     eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})

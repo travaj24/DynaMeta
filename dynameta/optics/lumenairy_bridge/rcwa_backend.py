@@ -75,6 +75,7 @@ from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
 from dynameta.optics.rasterize import cell_axes, layer_eps_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
+from dynameta.geometry.guards import require_supported_geometry
 
 __all__ = ["design_to_rcwa_stack", "make_lumenairy_rcwa_solver", "LumenairyStackSolver",
            "rcwa_result_to_optical_result"]
@@ -106,6 +107,7 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     scalar EpsField -> eps; a graded laterally-uniform EpsField -> sliced uniform slabs;
     inclusions -> a rasterized eps_cell; else the material eps at lambda. Design layers are
     bottom -> top, the RCWA stack wants superstrate-side first -> reversed()."""
+    require_supported_geometry(design, "design_to_rcwa_stack")   # 2026-11-02: refuse Stack.features / Inclusion.taper
     lum = _require_lumenairy()
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)
