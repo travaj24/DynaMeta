@@ -59,8 +59,26 @@ def graphene_sigma(E_F_J, lambda_m, *, tau_s: float = 1.0e-13, T_K: float = T_RE
     # interband (Falkovsky-Varlamov 2007): the EXACT finite-T universal-conductivity real part
     # Re = sigma0 sinh(hw/2kT)/(cosh(E_F/kT)+cosh(hw/2kT)) -- the thermal factor that -> a hard Pauli
     # step (sigma0 for hw>2E_F, 0 below) as T->0, with the correct (small) blocked-tail residual
-    # (an arctan smoothing overestimates that tail ~100x; audit GRAPH-1). Im is the matching KK log.
-    re = SIGMA0 * xp.sinh(hw / (2.0 * kT)) / (xp.cosh(EF / kT) + xp.cosh(hw / (2.0 * kT)))
+    # (an arctan smoothing overestimates that tail ~100x; audit GRAPH-1). Im: see below (an
+    # approximation -- the old "Im is the matching KK log" was true only at T = 0).
+    # OVERFLOW-SAFE form (audit S4-22, wave-7 2026-11-02, found by the Kubo-integral oracle):
+    # sinh(a) / (cosh(b) + cosh(a)), a = hw/2kT, b = E_F/kT, with numerator and denominator both
+    # scaled by 2 exp(-m), m = max(a, b), so every exponent is <= 0. The bare sinh/cosh overflowed
+    # once a or b passed ~710 -- at 1.55 um that is T < ~6.5 K -- and returned NaN (measured: T_K 3
+    # -> nan + RuntimeWarnings). Same value elsewhere to <= 2 ulp (measured max rel 4.2e-16 over
+    # E_F 0..1 eV x T 30..600 K x lambda 0.8..10 um, Re and Im).
+    a_ = hw / (2.0 * kT)
+    b_ = EF / kT
+    m_ = xp.maximum(b_, a_)
+    re = SIGMA0 * ((xp.exp(a_ - m_) - xp.exp(-a_ - m_))
+                   / (xp.exp(b_ - m_) + xp.exp(-b_ - m_) + xp.exp(a_ - m_) + xp.exp(-a_ - m_)))
+    # Im: the Falkovsky (2008) thermally SMOOTHED log, EXACT only as T -> 0. It is NOT the exact
+    # finite-T Kramers-Kronig partner of `re` (audit S4-22 oracle, tests/test_reconfigurable.py::
+    # test_s4_22_interband_kubo_vs_direct_quadrature): against direct quadrature of the
+    # Falkovsky-Varlamov Kubo integral, |dIm| / sigma0 at 1.55 um is <= 0.10 at 300 K (worst for
+    # 2 E_F within ~0.1 eV of hbar omega, the modulator's operating edge), <= 0.075 at 77 K,
+    # ~0.040 at the resonance 2 E_F = hbar omega for T <= 30 K, (8 ln2 / pi)(kT / hbar omega) ~
+    # 0.058 at E_F = 0, and O((kT/|hbar omega - 2 E_F|)^2) elsewhere. Re is exact (<= 4e-15 sigma0).
     im = -SIGMA0 * (1.0 / (2.0 * np.pi)) * xp.log((hw + 2.0 * EF) ** 2
                                                   / ((hw - 2.0 * EF) ** 2 + (2.0 * kT) ** 2))
     return sigma_intra + (re + 1j * im)

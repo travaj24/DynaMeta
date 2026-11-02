@@ -108,7 +108,7 @@ class DeltaEffect:
                 - as_tensor(self.effect.eps({**fields, **self.baseline_fields}, lambda_m)))
 
 
-# ---- field-effect electro-optic mechanisms (Phase 1) -------------------------------------
+# ---- shared helpers of the field-effect mechanisms (electro.py, electroabsorption.py) -----
 
 # Voigt index map for a SYMMETRIC 3x3 tensor: (i,j) -> contracted index I in 0..5
 # (1=xx,2=yy,3=zz,4=yz,5=xz,6=xy, here 0-based 0..5).

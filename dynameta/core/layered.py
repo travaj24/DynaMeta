@@ -162,6 +162,17 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     if not is_tensor and v.ndim != 3:
         raise ValueError("slice_eps_field: values_zyx must be (Nz,Ny,Nx) scalar or (Nz,Ny,Nx,3,3) tensor; "
                          "got shape {}.".format(v.shape))
+    # audit S4-21 (wave-7, 2026-11-02): normalize a DESCENDING z axis to ascending here, for every
+    # branch, exactly as slice_profile does for the laterally-uniform one. The structured-scalar
+    # and tensor branches used to take z as given: native intervals came out with NEGATIVE
+    # thickness (LayeredSlab refuses them -- a raise where the uniform branch silently worked) and
+    # the n_slices staircase interpolated with a reversed searchsorted. The output stays ASCENDING
+    # z (substrate side first), the documented contract every bridge reverses against.
+    dz_ = np.diff(z_m)
+    if z_m.size >= 2 and not (np.all(dz_ > 0) or np.all(dz_ < 0)):
+        raise ValueError("slice_eps_field: z_axis_u must be strictly monotonic.")
+    if z_m.size >= 2 and z_m[0] > z_m[-1]:
+        z_m, v = z_m[::-1], v[::-1]
     # tight tolerance (rtol=1e-12, atol=0): allclose(v, mean) collapses iff the relative lateral spread
     # <= rtol, so this keeps a grating as structured unless its modulation is essentially at the
     # round-off floor (~1e-16). np.allclose DEFAULTS (rtol=1e-5) would average any grating with relative
