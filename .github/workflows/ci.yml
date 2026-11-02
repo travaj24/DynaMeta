@@ -209,6 +209,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . "numpy==1.24.*" "scipy==1.10.*" "lumenairy==5.22.*" "pytest>=7.0" tmm pytest-xdist
+      # lumenairy 5.22 is OLDER than the 2026-11-02 bridge extensions (RCWA analytic shapes 5.31,
+      # PMM2D pure tensor 5.43 / per-layer grids + tapers 5.45 / curved shapes 5.50, BOR SEM 5.46).
+      # The bridge refuses those paths with LumenairyFeatureUnavailable naming the version, and their
+      # tests skip by name off the same table (_common.FEATURE_FLOORS; wave-7 2026-11-02, verified
+      # in a lumenairy-5.22.0 venv: the 11 bridge/geometry/layered/graphene test files 163 passed /
+      # 22 skipped, none errored; numpy 1.24 / scipy 1.10 themselves were NOT reproducible there).
       - name: Assert the floor is what actually got installed
         # The trip-wire that keeps this leg honest: `np.trapezoid` DOES NOT EXIST before numpy
         # 2.0, so its absence proves this interpreter really is on the pre-2.0 API surface. If a

@@ -15,6 +15,17 @@ import pytest
 HAVE_LUM = importlib.util.find_spec("lumenairy") is not None
 needs_lum = pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
 
+def _needs(feature):
+    """skipif below the bridge's MEASURED per-feature lumenairy floor (_common.FEATURE_FLOORS,
+    wave-7 2026-11-02): the CI `floor` leg installs lumenairy 5.22.*, older than every 2026-11-02
+    bridge extension, and the bridge refuses those paths there with LumenairyFeatureUnavailable."""
+    from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS, lumenairy_has
+    floor, what = FEATURE_FLOORS[feature]
+    return pytest.mark.skipif(not (HAVE_LUM and lumenairy_has(feature)),
+                              reason="needs lumenairy >= {} ({})".format(
+                                  ".".join(map(str, floor)), what))
+
+
 LAM = 1.31e-6
 PER = 600e-9
 
@@ -100,6 +111,7 @@ def test_pmm2d_ext_translation_helpers():
 
 
 @needs_lum
+@_needs("pmm2d_pure_tensor")
 def test_pmm2d_uniform_tensor_matches_berreman_full_jones():
     # GATE F (fast copy): a uniform asymmetric lossy in-plane tensor and a tilted-
     # director OOP tensor through BOTH engines vs the Berreman 4x4 bridge -- R/T/r/t
@@ -181,6 +193,7 @@ def test_pmm2d_t_power_closure_and_per_order_route():
 
 
 @needs_lum
+@_needs("pmm2d_pure_shapes")
 def test_pmm2d_circle_pillar_vs_rcwa_fff():
     # GATE I (fast copy): an eps-4 circle (r = 0.3 p) on the curved shapes= map vs the
     # RCWA bridge's FFF formulation.  Measured 2026-11-02: pure M = 5 6.0976e-3 vs
@@ -201,6 +214,7 @@ def test_pmm2d_circle_pillar_vs_rcwa_fff():
 
 
 @needs_lum
+@_needs("pmm2d_pure_shapes")
 def test_pmm2d_noncommensurate_rect_vs_rcwa_fff_and_per_layer():
     # GATE J (fast copy): walls 0.30 / 0.76 p x 0.295 / 0.665 p fit no uniform N <= 32
     # (v1 raised); 'auto' -> 'shapes' places them exactly.  Measured 2026-11-02: pure
@@ -225,6 +239,7 @@ def test_pmm2d_noncommensurate_rect_vs_rcwa_fff_and_per_layer():
 
 
 @needs_lum
+@_needs("pmm2d_pure_tensor")
 def test_pmm2d_patterned_tensor_pure_vs_hybrid():
     # GATE G (fast copy): an in-plane LC background (azimuth 30 deg) around a centred
     # eps-4 square pillar -- the (4, 4, 3, 3) union tensor cell on the pure engine vs

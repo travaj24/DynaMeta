@@ -188,6 +188,40 @@ def test_device_symmetry_sees_the_bottom_section():
     assert d.device_symmetry() == "c4v"
 
 
+def test_s4_27_device_symmetry_and_fem_hint_see_stack_features():
+    """audit S4-27 (wave-7, 2026-11-02): device_symmetry() / detect_symmetry_reduction() walked
+    the layer inclusions only, so a Stack.feature never demoted the verdict. On the old code an
+    OFF-CENTRE via on a c4v uniform stack still read 'c4v' and the FEM hint offered 'quarter' (the
+    mirror walls would cut the via in half and solve a different device). Now: centred square via
+    -> c4v (unchanged), centred rectangular via -> c2v, off-centre via -> none, a semiconductor
+    or polygonal feature -> no FEM reduction."""
+    from dynameta.geometry.cross_section import RegularPolygon
+    assert _uniform().device_symmetry() == "c4v"
+    assert _uniform().detect_symmetry_reduction() == "quarter"
+    assert _uniform([_via()]).device_symmetry() == "c4v"
+    rect = Feature("via", Rectangle(P / 2, P / 2, 100e-9, 60e-9), "Cu", 0.0, 150e-9)
+    assert _uniform([rect]).device_symmetry() == "c2v"
+    assert _uniform([rect]).detect_symmetry_reduction() == "half_x"
+    off = Feature("via", Rectangle(P / 2 + 40e-9, P / 2, 100e-9, 100e-9), "Cu", 0.0, 150e-9)
+    assert _uniform([off]).device_symmetry() == "none"
+    assert _uniform([off]).detect_symmetry_reduction() == "none"
+    poly = _uniform([Feature("via", RegularPolygon(P / 2, P / 2, 60e-9, 8), "Cu", 0.0, 150e-9)])
+    assert poly.device_symmetry() != "none" and poly.detect_symmetry_reduction() == "none"
+    from dynameta.materials import TransportModel
+    from dynameta.constants import M_E
+    reg = _reg()
+    reg.add(Material("semi", ConstantOptical(4.0 + 0j),
+                     transport=TransportModel(n_bg_m3=4e26, eps_static=9.0,
+                                              dos_mass_kg_of_n_m3=lambda n: 0.35 * M_E)))
+    u = _uniform()
+    st = Stack(layers=u.stack.layers, superstrate_material="air", substrate_material="glass",
+               features=[Feature("via", Rectangle(P / 2, P / 2, 100e-9, 100e-9), "semi", 0.0,
+                                 150e-9)])
+    d = Design(name="sv", unit_cell=u.unit_cell, stack=st, electrodes=[], materials=reg,
+               optical=u.optical)
+    assert d.device_symmetry() == "c4v" and d.detect_symmetry_reduction() == "none"
+
+
 # ================================================================================== cache key
 def test_cache_key_untapered_is_byte_identical_and_taper_is_keyed():
     from dynameta.cache import _key
@@ -306,6 +340,12 @@ def test_backend_refuses_unsupported_geometry(name, fn, kind):
         # add_tapered_pillar, gated in tests/test_lumenairy_pmm2d_taper_wrap.py) -- assert it is
         # translated, not refused (build only: the 8-slice solve is the dedicated test's job)
         from dynameta.optics.lumenairy_bridge import design_to_pmm2d_stack
+        from dynameta.optics.lumenairy_bridge._common import (LumenairyFeatureUnavailable,
+                                                              lumenairy_has)
+        if not lumenairy_has("pmm2d_pure_per_layer"):   # wave-7: per-layer grids need 5.45
+            with pytest.raises(LumenairyFeatureUnavailable, match=r"needs lumenairy >= 5\.45\.0"):
+                design_to_pmm2d_stack(d, LAM, n_modes=4)
+            return
         _, names = design_to_pmm2d_stack(d, LAM, n_modes=4)
         assert names == ["pil"] * 8 + ["film"]
         return

@@ -23,6 +23,17 @@ import pytest
 HAVE_LUM = importlib.util.find_spec("lumenairy") is not None
 pytestmark = pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
 
+def _needs(feature):
+    """skipif below the bridge's MEASURED per-feature lumenairy floor (_common.FEATURE_FLOORS,
+    wave-7 2026-11-02): the CI `floor` leg installs lumenairy 5.22.*, older than every 2026-11-02
+    bridge extension, and the bridge refuses those paths there with LumenairyFeatureUnavailable."""
+    from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS, lumenairy_has
+    floor, what = FEATURE_FLOORS[feature]
+    return pytest.mark.skipif(not (HAVE_LUM and lumenairy_has(feature)),
+                              reason="needs lumenairy >= {} ({})".format(
+                                  ".".join(map(str, floor)), what))
+
+
 LAM = 1.31e-6
 P = 500e-9
 
@@ -62,6 +73,7 @@ def _area_cell(S, contains, eps_in, eps_bg, k=16):
     return (eps_bg + (eps_in - eps_bg) * f).astype(complex)
 
 
+@_needs("rcwa_analytic_shapes")
 def test_analytic_disk_is_the_limit_of_the_area_raster_and_discriminates():
     """MEASURED 2026-11-02 (disk r = 160 nm off-centre in a 500 nm cell, eps 6+0.4i in 2.1, 200 nm,
     n_orders 5x5, theta 11 deg, y-pol): |dR| analytic vs area raster 2.8e-5 (S=128) -> 6.4e-6
@@ -105,6 +117,7 @@ def test_analytic_disk_is_the_limit_of_the_area_raster_and_discriminates():
         assert abs(w.R - ana.R) > 50.0 * errs[1], (w.R, ana.R, errs)
 
 
+@_needs("rcwa_analytic_shapes")
 def test_inclusion_model_auto_falls_back_and_analytic_refuses():
     """Polygons (no form factor) and OVERLAPPING inclusions (priority painting has no additive
     form-factor equivalent; lumenairy's own validator decides) rasterize under 'auto' and are
@@ -143,6 +156,7 @@ def test_inclusion_model_auto_falls_back_and_analytic_refuses():
     assert r.A_independent is not None and r.A_independent > 1e-3
 
 
+@_needs("rcwa_analytic_shapes")
 def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent():
     """lumenairy's shapes layers are LAURENT BY CONTRACT (RCWAStack.add_layer raises for
     formulation='li' with shapes=). 2026-11-02: under 'auto' a non-Laurent request ('li'/'fff')
@@ -173,6 +187,7 @@ def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent():
     assert (a.R, a.T, a.r) == (r.R, r.T, r.r)
 
 
+@_needs("rcwa_analytic_shapes")
 def test_default_raster_lattice_does_not_jump_at_high_n_orders():
     """The default raster lattice is S = max(128, 8 N) (2026-11-02; was max(128, 4 N + 1)).
     Fixture = validation/lumenairy_pmm_bridge GATE B (600 nm period, 50 % metal lines eps -20+2i
@@ -240,10 +255,12 @@ def test_periodic_raster_wraps_and_is_byte_identical_inside_the_cell():
     clipped = _solve(line(0.1 * P, w=0.2 * P), n_orders=11)
     assert wrapped.R == pytest.approx(centred.R, abs=1e-12)
     assert abs(clipped.R - centred.R) > 1e-2                     # what the clip used to solve
-    a0 = _solve(line(P / 2), n_orders=11, inclusion_model="analytic")
-    a1 = _solve(line(0.0), n_orders=11, inclusion_model="analytic")
-    a2 = _solve(line(0.1 * P), n_orders=11, inclusion_model="analytic")
-    assert max(abs(a1.R - a0.R), abs(a2.R - a0.R)) < 1e-12
+    from dynameta.optics.lumenairy_bridge._common import lumenairy_has
+    if lumenairy_has("rcwa_analytic_shapes"):    # wave-7: analytic shapes need lumenairy >= 5.31
+        a0 = _solve(line(P / 2), n_orders=11, inclusion_model="analytic")
+        a1 = _solve(line(0.0), n_orders=11, inclusion_model="analytic")
+        a2 = _solve(line(0.1 * P), n_orders=11, inclusion_model="analytic")
+        assert max(abs(a1.R - a0.R), abs(a2.R - a0.R)) < 1e-12
     # byte identity for an interior inclusion (incl. one touching the cell edge)
     d = _design([Inclusion(Circle(0.3 * P, 0.4 * P, 0.2 * P), "hi"),
                  Inclusion(Rectangle(0.9 * P, 0.5 * P, 0.2 * P, 0.3 * P), "mid", priority=2)])
@@ -266,6 +283,7 @@ def _two_lines(xs, pol, px=600e-9):
                    bg="air", theta=17.0, pol=pol, px=px, py=px, thk=220e-9)
 
 
+@_needs("rcwa_analytic_shapes")
 def test_pmm_wrap_is_origin_shift_invariant_and_matches_rcwa():
     """Shifting every line by the same dx (so one or both cross x = 0 / x = P and WRAP into two
     PMM segments) must not change R/T. MEASURED 2026-11-02 (600 nm cell, lines 0.35P of 6+0.4i and
@@ -309,6 +327,7 @@ def test_pmm_wrap_is_origin_shift_invariant_and_matches_rcwa():
 # (4) reverse translation
 # ---------------------------------------------------------------------------------------------
 
+@_needs("rcwa_analytic_shapes")
 def test_reverse_translation_of_shapes_tensor_and_uniform_cells_round_trips():
     """Design -> RCWAStack ('analytic') -> rcwa_stack_to_design must return the SAME CrossSections
     (exact field equality) and the same solve (to round-off); a uniform-tensor layer comes back as a
@@ -380,6 +399,7 @@ def _bor_spec(**kw):
                         n_sub=1.45, **kw)
 
 
+@_needs("bor_sem")
 def test_bor_fd_default_is_byte_identical_and_sem_is_gated():
     """basis='fd' (the default) forwards NOTHING new to lumenairy: R/T equal a BORStack built the
     pre-2026-11-02 way, bit for bit. 'sem' refuses a bare eps_profile (no walls to mesh on) and an
@@ -410,6 +430,7 @@ def test_bor_fd_default_is_byte_identical_and_sem_is_gated():
     assert np.allclose(sem_s.R, sem_r.R, rtol=0, atol=1e-12)
 
 
+@_needs("bor_sem")
 def test_bor_sem_vs_fresnel_and_vs_converging_fd_ladder():
     """(a) INDEPENDENT per-mode oracle: a uniform interface has no radial structure, so each
     incident mode reflects as a plane wave at its own polar angle -- SEM R[j] must land on the s-

@@ -3,9 +3,16 @@
 BRIDGE, not vendor: Lumenairy (>= 5.22, the single floor in _common.VERSION_FLOOR) is a REQUIRED dependency of dynameta but is
 imported lazily inside the functions -- importing this module (and base dynameta) stays
 fast and matplotlib-free; calling against a broken/outdated environment raises with an
-install hint. Conventions are IDENTICAL on both sides (public exp(-i omega t), Im(eps) > 0 for
-absorbers, metres, radians) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so no
-sign/unit translation happens here, only geometry/result adaptation.
+install hint. The PHYSICS conventions are IDENTICAL on both sides (public exp(-i omega t),
+Im(eps) > 0 for absorbers, metres) -- verified in docs/lumenairy_rcwa_port_wishlist.md -- so eps,
+lengths and the time convention cross unchanged. Three translations DO happen here (audit S4-11,
+wave-7 2026-11-02: this paragraph used to say "no sign translation happens here"): (1) incidence
+angles degrees -> radians (_common.angles_rad); (2) the polarization label -> lumenairy's lab Jones
+ROW (_common.pol_row); (3) for p-pol, the lab-basis Jones x-components are mapped onto the
+Byrnes-tmm p-hat-basis Fresnel amplitudes DynaMeta's FEM phases were validated against
+(_common.p_basis_conversion): r -> -r (lumenairy's r_xx is EXACTLY -r_p, a pi phase) and
+t -> t * cos(theta_i) / cos(theta_t) (the lab-x projection of the p-hat field). R/T need no
+conversion. 'x' / 'y' pass through (the bases coincide).
 
 Pinned cross-library contracts (first pinned at lumenairy 5.14.2, re-verified on the 5.22 floor; file:line refs in the roadmap):
 - RCWAStack(period, period_y=, n_superstrate=, n_substrate=, n_orders=, n_orders_y=):
@@ -52,7 +59,9 @@ clip it, which solved a different (narrower) structure; byte-identical for inclu
 closed cell.
 
 ANALYTIC SHAPES (2026-11-02, the follow-on this paragraph used to defer; lumenairy 5.50
-add_layer(shapes=, eps_background=)): `inclusion_model` = 'auto' (THE DEFAULT since v0.13.0 --
+add_layer(shapes=, eps_background=); FLOOR lumenairy 5.31 -- below it the shape validator that
+refuses overlaps is missing, so 'auto' rasterizes and 'analytic' raises
+LumenairyFeatureUnavailable, _common.FEATURE_FLOORS): `inclusion_model` = 'auto' (THE DEFAULT since v0.13.0 --
 analytic where exact, raster otherwise), 'raster' (the pre-0.13 default) or 'analytic' (every
 inclusion layer goes through lumenairy's exact form factors -- raises ShapesNotRepresentable when a
 layer cannot). Why 'auto' became the default (user decision, 2026-11-02): it removes the point
@@ -121,9 +130,11 @@ __all__ = ["design_to_rcwa_stack", "make_lumenairy_rcwa_solver", "LumenairyStack
 from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       conical_synthesis as _conical_synthesis,
                                                       guard_incidence_side as _guard_incidence_side,
+                                                      lumenairy_has as _lumenairy_has,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
-                                                      require_lumenairy as _require_lumenairy)
+                                                      require_lumenairy as _require_lumenairy,
+                                                      require_lumenairy_feature as _require_feature)
 from dynameta.warning_types import AdvisoryWarning
 
 
@@ -270,6 +281,15 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})
     inclusion_model = _check_inclusion_model(inclusion_model, "design_to_rcwa_stack")
     use_shapes = _check_model_formulation(inclusion_model, formulation, "design_to_rcwa_stack")
+    if use_shapes and not _lumenairy_has("rcwa_analytic_shapes"):
+        # wave-7 (2026-11-02): below lumenairy 5.31 add_layer(shapes=) exists but does NOT refuse
+        # overlapping shapes (measured on 5.22.0: two overlapping disks accepted, form factors
+        # ADDED), so the "lumenairy refused -> rasterize" decision below would silently build a
+        # wrong layer. 'auto' rasterizes every inclusion layer there; 'analytic' is refused.
+        if inclusion_model == "analytic":
+            _require_feature("rcwa_analytic_shapes",
+                             "design_to_rcwa_stack(inclusion_model='analytic')")
+        use_shapes = False
 
     def _y_invariant(ef):
         v = ef.values_zyx
@@ -301,8 +321,33 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
         utensor = ef is not None and getattr(ef, "is_tensor", False)
         return (bool(L.inclusions) and not _lamellar(L)) or grid_2d or utensor
 
+    def _laterally_uniform(L):
+        if L.inclusions:
+            return False
+        ef = eps_by_region.get(L.name)
+        if ef is None or getattr(ef, "is_uniform", True):
+            return True
+        v = ef.values_zyx
+        return v is None or bool(np.allclose(v, v[:, :1, :1], rtol=1e-12, atol=0.0))
+
     structured = any(_structured(L) for L in design.stack.layers)
     is_2d = any(_needs_2d(L) for L in design.stack.layers)
+    if is_2d and all(_laterally_uniform(L) for L in design.stack.layers):
+        # audit S4-12 (wave-7, 2026-11-02): a stack that is 2-D ONLY because it holds a uniform
+        # TENSOR layer (no inclusion, no laterally varying grid anywhere) is laterally UNIFORM, so
+        # its diffraction orders decouple exactly and only the specular order carries power; the
+        # caller's n_orders bought nothing but cost: (2N+1)^2 coupled orders for a planar layer.
+        # Clamp to lumenairy's minimum (1 per axis: 3 x 3 orders). MEASURED 2026-11-02 (lumenairy
+        # 5.50; air | ITO 30 nm | 800 nm biaxial-lossy LC (n_o 1.5, n_e 1.7, azimuth 30 deg, tilt
+        # 25 deg, +0.01i) | ITO 30 nm | glass, 1.31 um, n_orders 11), six x/y/p normal / 20 deg /
+        # conical (phi 35) cases: 17.1-24.8 s -> 0.004-0.011 s per solve (~3500x); R/T/r/t vs the
+        # old 23 x 23-order solve <= 8.4e-13, A_independent <= 5.7e-13, and vs the Berreman 4x4
+        # oracle (phi = 0) <= 1.4e-14 -- the clamped solve is the CLOSER one (the old residual is
+        # round-off accumulated over 529 coupled orders). Gate: tests/test_lumenairy_bridge.py::
+        # test_rcwa_uniform_tensor_stack_clamps_orders (LumenairyStackSolver clamps the same way:
+        # 0.007-0.011 s, <= 1.4e-14 from Berreman). Not rerouted to Berreman: the RCWA result
+        # keeps its own per-order / conical / absorption contract.
+        n_orders = n_orders_y = 1
     if is_2d:
         stack = lum.RCWAStack(px, period_y=py, n_superstrate=complex(n_super),
                               n_substrate=complex(n_sub), n_orders=int(n_orders),
@@ -314,6 +359,9 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
                               n_substrate=complex(n_sub), n_orders=int(n_orders))
         nx_o, ny_o = stack.n_orders_x, 0
 
+    # audit S4-17 (wave-7, 2026-11-02): the end media ride on the stack so the solver closure
+    # does not evaluate end_media_indices a second time per solve (same values, bit for bit)
+    stack.dynameta_end_media = (n_super, n_sub)
     s_min_x = _min_samples(nx_o)
     s_min_y = _min_samples(ny_o) if is_2d else 1
     # raster lattice (2026-11-02): default S = max(128, 8 N) per patterned axis
@@ -526,6 +574,9 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
             "make_lumenairy_rcwa_solver: absorption=True needs RCWAResult.layer_absorption(), "
             "which lumenairy does not provide for analytic-shape layers; use "
             "inclusion_model='auto' (rasterizes every layer when absorption=True) or 'raster'")
+    if inclusion_model == "analytic":            # wave-7: refused at construction below 5.31
+        _require_feature("rcwa_analytic_shapes",
+                         "make_lumenairy_rcwa_solver(inclusion_model='analytic')")
     model_eff = "raster" if absorption else inclusion_model
 
     def _solve_at(design, eps_by_region, lambda_m):
@@ -540,7 +591,7 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                             inclusion_model=model_eff)
         stack.set_source(lambda_m, theta=theta, phi=phi)
         res = stack.solve(retain_internal=absorption, stabilize=stabilize)
-        n_sup, n_sb = end_media_indices(design, lambda_m)
+        n_sup, n_sb = stack.dynameta_end_media      # audit S4-17: set by design_to_rcwa_stack
         rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
         return rcwa_result_to_optical_result(res, _pol_row(design.optical), t0=t0,
                                              layer_names=names, absorption=absorption,
@@ -625,11 +676,16 @@ class LumenairyStackSolver:
                 "LayeredStack (audit C5-8; the old code silently substituted px=py=lambda).")
         px = stack.period_x_m or float(lambda_m)          # period is irrelevant when uniform
         py = stack.period_y_m or float(lambda_m)
+        nox = self.n_orders
+        noy = int(self.n_orders_y if self.n_orders_y is not None else self.n_orders)
+        if structured and all(
+                slab.eps is not None or (slab.eps_tensor_cell is not None and bool(np.all(
+                    np.asarray(slab.eps_tensor_cell) == np.asarray(slab.eps_tensor_cell)[:1, :1])))
+                for slab in stack.slabs):
+            nox = noy = 1        # audit S4-12: laterally uniform tensor slabs only (see design_to_rcwa_stack)
         if structured:
             rs = lum.RCWAStack(px, period_y=py, n_superstrate=complex(stack.n_super),
-                               n_substrate=complex(stack.n_sub), n_orders=self.n_orders,
-                               n_orders_y=int(self.n_orders_y if self.n_orders_y is not None
-                                              else self.n_orders))
+                               n_substrate=complex(stack.n_sub), n_orders=nox, n_orders_y=noy)
         else:
             rs = lum.RCWAStack(px, n_superstrate=complex(stack.n_super),
                                n_substrate=complex(stack.n_sub), n_orders=self.n_orders)
@@ -646,6 +702,7 @@ class LumenairyStackSolver:
                              eps_tensor_cell=_meet_sampling(slab.eps_tensor_cell,
                                                             s_min_x, s_min_y))
             else:
+                _require_feature("rcwa_analytic_shapes", "LumenairyStackSolver (shapes slab)")
                 # analytic-shape slab (2026-11-02): the payload is lumenairy's own contract, so
                 # it passes through; lumenairy's validator rejects an overlap / over-period
                 # extent / malformed dict with a named ValueError before anything is solved
