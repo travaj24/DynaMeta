@@ -22,6 +22,17 @@ from dynameta.materials import ConstantOptical, Material, MaterialRegistry
 HAVE_LUM = importlib.util.find_spec("lumenairy") is not None
 needs_lum = pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
 
+def _needs(feature):
+    """skipif below the bridge's MEASURED per-feature lumenairy floor (_common.FEATURE_FLOORS,
+    wave-7 2026-11-02): the CI `floor` leg installs lumenairy 5.22.*, older than every 2026-11-02
+    bridge extension, and the bridge refuses those paths there with LumenairyFeatureUnavailable."""
+    from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS, lumenairy_has
+    floor, what = FEATURE_FLOORS[feature]
+    return pytest.mark.skipif(not (HAVE_LUM and lumenairy_has(feature)),
+                              reason="needs lumenairy >= {} ({})".format(
+                                  ".".join(map(str, floor)), what))
+
+
 LAM = 1.31e-6
 PER = 600e-9
 THK = 300e-9
@@ -178,6 +189,7 @@ def test_layer_eps_tensor_cell_is_the_shared_periodic_painter():
 
 # ============================================================================ lumenairy legs
 @needs_lum
+@_needs("pmm2d_pure_per_layer")
 def test_taper_scope_refusals_and_build():
     from dynameta.core.eps_field import EpsField
     from dynameta.optics.lumenairy_bridge import design_to_pmm2d_stack
@@ -205,6 +217,7 @@ def test_taper_scope_refusals_and_build():
 
 
 @needs_lum
+@_needs("pmm2d_pure_per_layer")
 def test_taper_zero_angle_staircase_and_discrimination():
     # GATES L / M (i) / N (fast copies, n_modes 4): a zero-angle taper IS the straight pillar (1
     # slice: bit for bit); add_tapered_pillar IS the explicit midpoint staircase built from N
@@ -230,6 +243,7 @@ def test_taper_zero_angle_staircase_and_discrimination():
 
 
 @needs_lum
+@_needs("pmm2d_pure_per_layer")
 def test_taper_absorption_keys_by_design_layer():
     from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm2d_solver
     r = _s(make_lumenairy_pmm2d_solver(n_modes=4, n_orders=3, taper_slices=2, absorption=True),
@@ -240,6 +254,7 @@ def test_taper_absorption_keys_by_design_layer():
 
 
 @needs_lum
+@_needs("pmm2d_pure_shapes")
 def test_wrapped_square_equals_centred_square():
     # GATE K1 (fast copy): the union grid N = 4 is invariant under a half-period shift, so a
     # square centred on the corner (4 pieces) / an edge (2 pieces) IS the centred square.
@@ -282,5 +297,10 @@ def test_rcwa_tensor_background_keeps_inclusions():
     st.set_source(LAM, theta=0.0, phi=0.0)
     assert abs(float(np.sum(st.solve().efficiencies()[1][0])) - with_p.R) < 1e-12
     assert _s(make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="auto"), d, ebr).R == with_p.R
-    with pytest.raises(ShapesNotRepresentable, match="TENSOR background"):
-        _s(make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="analytic"), d, ebr)
+    from dynameta.optics.lumenairy_bridge._common import LumenairyFeatureUnavailable, lumenairy_has
+    if lumenairy_has("rcwa_analytic_shapes"):
+        with pytest.raises(ShapesNotRepresentable, match="TENSOR background"):
+            _s(make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="analytic"), d, ebr)
+    else:                                         # wave-7: refused at construction below 5.31
+        with pytest.raises(LumenairyFeatureUnavailable, match=r"needs lumenairy >= 5\.31\.0"):
+            make_lumenairy_rcwa_solver(n_orders=4, inclusion_model="analytic")

@@ -26,6 +26,10 @@ Two engines behind one seam (``engine=``):
                    (which the 'shapes' merge refuses).
     'auto'      -- (default) 'union' when every patterned layer is Rectangle-only and
                    commensurate (BIT-IDENTICAL to v1), else 'shapes'.
+  LUMENAIRY FLOORS per route (wave-7, 2026-11-02; measured per release, _common.FEATURE_FLOORS):
+  'union' with scalar eps runs on the bridge floor 5.22; a TENSOR eps on the pure engine needs
+  5.43, 'per-layer' (and every taper) 5.45, 'shapes' 5.50. Below them the bridge raises
+  LumenairyFeatureUnavailable naming the route and both versions, before lumenairy is called.
 - ``'hybrid'`` (PMM2DStackHybrid): the Fourier-projected 2-D PMM (per-layer exact
   spectral-element walls, no union-grid constraint, but the FMM ``n_orders`` floor).
   It accepts RASTERIZED cells (the shared optics.rasterize painter, byte-identical
@@ -128,7 +132,8 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       guard_incidence_side as _guard_incidence_side,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
-                                                      require_lumenairy as _require_lumenairy)
+                                                      require_lumenairy as _require_lumenairy,
+                                                      require_lumenairy_feature as _require_feature)
 from dynameta.optics.rasterize import cell_axes, layer_eps_cell, layer_eps_tensor_cell
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
@@ -772,6 +777,21 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
         # layer-keyed eps_by_region still applies)
         design, shift = _canonical_pure_cell(design)
         mode = resolve_pure_grid(design, pure_grid, max_cells=pure_max_cells)
+        # wave-7 (2026-11-02): the pure-engine routes newer than the bridge floor (5.22) are
+        # refused with the version they need, BEFORE lumenairy is called -- they used to die
+        # inside it (TypeError layer_grids / ImportError Circle / a numpy broadcast error from a
+        # (3, 3) eps on <= 5.42). Floors measured per release: _common.FEATURE_FLOORS.
+        where = "design_to_pmm2d_stack(engine='pure', pure_grid={!r} -> {!r})".format(
+            pure_grid, mode)
+        if mode == "per-layer":
+            _require_feature("pmm2d_pure_per_layer", where)
+        elif mode == "shapes" and any(L.inclusions for L in design.stack.layers):
+            for L in design.stack.layers:        # a USER error (polygon) outranks the version
+                for inc in L.inclusions:
+                    _require_pure_kind(L, inc)
+            _require_feature("pmm2d_pure_shapes", where)
+        # (a TENSOR on the pure engine is gated where it is added -- _pure_tensor_gate -- so the
+        # bridge's own refusals of what the pure basis cannot represent still come first)
         stack = lum.PMM2DStackPure(px, py, n_superstrate=complex(n_super),
                                    n_substrate=complex(n_sub), n_modes=int(n_modes),
                                    **({} if n_orders is None
@@ -824,6 +844,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                                 "laterally-STRUCTURED tensor raster {}; the pure "
                                 "engine needs exact walls -- use engine='hybrid' "
                                 "or the RCWA bridge".format(L.name, cell.shape))
+                        _pure_tensor_gate(L)
                         stack.add_layer(slab.thickness_m, eps=cell[0, 0])
                     else:
                         stack.add_layer(slab.thickness_m, eps_tensor_cell=cell)
@@ -832,6 +853,8 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
         if L.inclusions:
             bg = _layer_background(L, design, lambda_m, ef)
             if engine == "pure":
+                if _is_tensor(bg):
+                    _pure_tensor_gate(L)
                 if any(getattr(inc, "taper", None) is not None for inc in L.inclusions):
                     stack.add_tapered_pillar(
                         L.thickness_m, n_slices=taper_slices, rule=taper_rule,
@@ -862,6 +885,7 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
             # Berreman, full Jones; a transpose is caught there)
             t33 = np.asarray(ef.tensor, dtype=complex).reshape(3, 3)
             if engine == "pure":
+                _pure_tensor_gate(L)
                 stack.add_layer(L.thickness_m, eps=t33)
             else:
                 stack.add_layer(L.thickness_m, eps_tensor_cell=t33[None, None].copy())
@@ -875,7 +899,18 @@ def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                                         .eps(lambda_m)))
         names.append(L.name)
     stack.dynameta_origin_shift_m = shift
+    # audit S4-17 (wave-7, 2026-11-02): the end media ride on the stack so the solver closure
+    # does not evaluate end_media_indices a second time per solve (same values, bit for bit)
+    stack.dynameta_end_media = (n_super, n_sub)
     return stack, names
+
+
+def _pure_tensor_gate(L) -> None:
+    """A (3, 3) permittivity on PMM2DStackPure needs lumenairy >= 5.43 (wave-7, 2026-11-02:
+    5.42.1 dies with a numpy broadcast error at solve / an eps_cell shape error)."""
+    _require_feature("pmm2d_pure_tensor",
+                     "design_to_pmm2d_stack(engine='pure'): TENSOR eps on layer {!r}".format(
+                         L.name))
 
 
 def _add_pure_patterned(stack, L, design, lambda_m: float, px: float, py: float, *,
@@ -977,7 +1012,7 @@ def make_lumenairy_pmm2d_solver(*, engine: str = "pure", n_modes: int = 8,
         row = _pol_row(design.optical)
         R = float(np.sum(R2[row]))
         T = float(np.sum(T2[row]))
-        n_sup, n_sb = end_media_indices(design, lambda_m)
+        n_sup, n_sb = stack.dynameta_end_media      # audit S4-17: set by design_to_pmm2d_stack
         rf, tf = _p_basis_conversion(getattr(design.optical, "polarization", "y"),
                                      theta, n_sup, n_sb)
         r = complex(np.asarray(jones)[row, row]) * complex(rf)

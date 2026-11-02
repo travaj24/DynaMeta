@@ -31,6 +31,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
+from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS as _FEATURE_FLOORS
 
 _SCALE = 1.0e6   # m -> um (lumenairy is unit-agnostic; microns match BOR's validated numeric regime)
 
@@ -179,7 +180,13 @@ class BorResult:
         propagates, else falls back to the sqrt(T) magnitude with phase 0. When per-layer absorption
         was retained (absorption=True), A_independent = sum_layers A for this mode and
         per_region_absorption maps each layer name -> its absorbed fraction (R + T + A_independent = 1
-        to machine precision); otherwise both are None and A is the 1 - R - T closure."""
+        to machine precision); otherwise both are None and A is the 1 - R - T closure.
+
+        R_flux / T_flux = R / T (audit S4-15, wave-7 2026-11-02): the BOR R/T ARE the order-summed
+        Poynting flux fractions, exactly as on the RCWA / PMM / PMM2D / Berreman bridges, which all
+        set R_flux=R, T_flux=T; this one left them None, so a consumer reading the flux fields
+        (the run_pipeline "all-orders flux" contract, core.interfaces.OpticalResult) got None from
+        BOR alone."""
         if self.angles_rad.size == 0:
             raise ValueError("BorResult has no propagating incident mode (raise r_max_m / k0)")
         i0 = int(np.argmin(self.angles_rad))
@@ -203,10 +210,12 @@ class BorResult:
             per_region = {nm: float(col[k]) for k, nm in enumerate(self.layer_names)}
         return OpticalResult(r=r, R=R, phase_deg=phase_deg, solve_time_s=self.solve_time_s,
                              t=t, T=T, A=float(1.0 - R - T), A_independent=A_ind,
-                             per_region_absorption=per_region)
+                             R_flux=R, T_flux=T, per_region_absorption=per_region)
 
 
-_SEM_FLOOR = (5, 46, 0)   # BORSemMeshError sliver conjunction (see BorStackSpec docstring)
+# BORSemMeshError sliver conjunction (see BorStackSpec docstring). ONE table since wave-7
+# (2026-11-02): _common.FEATURE_FLOORS['bor_sem'], which the tests gate on too.
+_SEM_FLOOR = _FEATURE_FLOORS["bor_sem"][0]
 
 
 def _basis_kwargs(spec: BorStackSpec) -> dict:

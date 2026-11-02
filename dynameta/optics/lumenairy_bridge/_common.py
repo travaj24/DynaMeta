@@ -267,6 +267,86 @@ def require_lumenairy():
     return lumenairy
 
 
+# PER-FEATURE FLOORS (wave-7, 2026-11-02). VERSION_FLOOR is the oldest lumenairy the bridge's
+# CORE surface runs on (the CI `floor` leg installs exactly 5.22.*); the 2026-11-02 bridge
+# extensions reach lumenairy API that is younger than that. Without a gate those paths died
+# inside lumenairy with an AttributeError / TypeError / ImportError -- or, worse, RAN WRONG (the
+# RCWA analytic-shape row). Each floor below was MEASURED 2026-11-02 by calling the raw lumenairy
+# API on the 5.22.0 wheel and on extracted release trees 5.42.1 / 5.43.0 / 5.44.0 / 5.45.0 /
+# 5.45.1 / 5.47.0 / 5.48.0 / 5.49.0 / 5.50.0 (there is no 5.46.0 tag), and bracketed by `git tag
+# --contains` on the commit that introduced the API:
+#   rcwa_analytic_shapes  5.31.0  RCWAStack.add_layer(shapes=) EXISTS at 5.22 but its shape
+#                                 validator (overlap / over-period extent / area > 1) arrived
+#                                 with lumenairy 636ae4f0 (W8) + d3941f55 (W9 exact predicates),
+#                                 both first tagged v5.31.0. On 5.22.0 two OVERLAPPING disks are
+#                                 ACCEPTED and their form factors ADDED -- a silently wrong layer
+#                                 under the bridge's default inclusion_model='auto', which relies
+#                                 on that refusal to decide "not representable -> rasterize".
+#   pmm2d_pure_tensor     5.43.0  PMM2DStackPure eps=(3, 3) / eps_cell (N, N, 3, 3): 5.42.1
+#                                 raises "operands could not be broadcast (72,) (3, 3)" at solve
+#                                 (eps=) or "eps_cell must be a 2-D (Nx, Ny) array" (eps_cell=);
+#                                 5.43.0 solves and matches the hybrid engine's Jones to 1e-6
+#                                 (the hybrid eps_tensor_cell path already works on 5.22).
+#   pmm2d_pure_per_layer  5.45.0  PMM2DStackPure(layer_grids='per-layer'), add_layer(x_walls=,
+#                                 y_walls=) and add_tapered_pillar: TypeError on 5.44.0.
+#   pmm2d_pure_shapes     5.50.0  lumenairy.elements.pmm.{Rect, Circle, Ellipse} and
+#                                 PMM2DStackPure.add_layer(shapes=, background_eps=): ImportError
+#                                 on 5.49.0 (curved cells shipped in 5.50.0).
+#   pmm_layer_grids       5.32.0  PMMStack(layer_grids=) -- the 2026-08-31 seam's own inline
+#                                 gate, folded into this table (test_lumenairy_per_layer_grids).
+#   bor_sem               5.46.0  BORStack(basis='sem') -- earlier SEM builds manufacture sliver
+#                                 elements (bor_backend._SEM_FLOOR, which reads this table).
+# A path that needs one of these calls require_lumenairy_feature, which raises
+# LumenairyFeatureUnavailable ("... needs lumenairy >= X (installed Y)") BEFORE lumenairy is
+# touched; tests gate on lumenairy_has(feature) with the same table, so the floor leg skips
+# them by name instead of erroring.
+FEATURE_FLOORS = {
+    "pmm_layer_grids": ((5, 32, 0), "the 1-D PMM per-layer spectral-element grid "
+                        "(PMMStack(layer_grids=), the 2026-08-31 seam)"),
+    "rcwa_analytic_shapes": ((5, 31, 0), "RCWA analytic shapes (add_layer(shapes=) with the "
+                             "overlap/extent validator the bridge relies on)"),
+    "pmm2d_pure_tensor": ((5, 43, 0), "a TENSOR permittivity on the PMM2D pure engine"),
+    "pmm2d_pure_per_layer": ((5, 45, 0), "the PMM2D pure engine's per-layer grids "
+                             "(layer_grids='per-layer' / x_walls= / add_tapered_pillar)"),
+    "pmm2d_pure_shapes": ((5, 50, 0), "the PMM2D pure engine's curved-cell shapes "
+                          "(add_layer(shapes=) with Rect / Circle / Ellipse)"),
+    "bor_sem": ((5, 46, 0), "BORStack(basis='sem')"),
+}
+
+
+class LumenairyFeatureUnavailable(NotImplementedError):
+    """The installed lumenairy is at or above the bridge floor (VERSION_FLOOR) but below the
+    floor of the specific feature a path needs (FEATURE_FLOORS)."""
+
+
+def lumenairy_version():
+    """(major, minor, patch) of the importable lumenairy, or None when it is not installed."""
+    try:
+        import lumenairy
+    except ImportError:
+        return None
+    return parse_version(lumenairy.__version__)
+
+
+def lumenairy_has(feature: str) -> bool:
+    """True when the importable lumenairy meets FEATURE_FLOORS[feature] (False if absent)."""
+    v = lumenairy_version()
+    return v is not None and v >= FEATURE_FLOORS[feature][0]
+
+
+def require_lumenairy_feature(feature: str, where: str) -> None:
+    """Raise LumenairyFeatureUnavailable naming the feature, its floor and the installed version
+    when lumenairy is older than FEATURE_FLOORS[feature] (no-op otherwise)."""
+    floor, what = FEATURE_FLOORS[feature]
+    v = lumenairy_version()
+    if v is not None and v >= floor:
+        return
+    import lumenairy
+    raise LumenairyFeatureUnavailable(
+        "{}: {} needs lumenairy >= {} (installed {}); pip install -U lumenairy".format(
+            where, what, ".".join(str(p) for p in floor), lumenairy.__version__))
+
+
 def _warn_above_ceiling(vstr) -> None:
     """One-time RuntimeWarning when the installed lumenairy is NEWER than the last version the
     bridge gates were re-run against (finding Q-16). Not an error: the bridge has no evidence
