@@ -42,7 +42,13 @@ class Mesh2DSpec:
 class Mesh3DSpec:
     """Stage-3 NGSolve OCC mesh. Superstrate/substrate MATERIALS come from the
     Stack; these are buffer thicknesses + element sizes only."""
-    pml_thk_m:               float = 400e-9
+    # z-PML thickness (0.12.0: 400 -> 1000 nm). The fixed-alpha (1+1j stretch) HalfSpace PML ends on a
+    # natural (reflecting) face, so what crosses it comes back attenuated by ~exp(-2 k n cos(theta) d).
+    # Measured vs exact TMM on a flat 100 nm metal mirror (R=0.977, maxh_pml 200 nm, 2026-11-02):
+    # |dR| at 400 nm = 3.0e-2 (1300 nm) / 5.2e-2 (1550 nm) / 6.5e-3 (1060 nm); at 1000 nm <= 4.9e-4
+    # at all three. Keep d >~ 0.65 lambda (2kd >~ 8) for longer wavelengths; never thin it for speed
+    # (the PML is meshed at maxh_pml_m, so the extra thickness costs few elements).
+    pml_thk_m:               float = 1000e-9
     superstrate_buffer_m:    float = 300e-9     # buffer above stack before top PML
     substrate_buffer_m:      float = 100e-9     # buffer below stack before bottom PML
     maxh_superstrate_m:      float = 120e-9
@@ -89,11 +95,27 @@ class OpticalSpec:
     # "ams"/"hypre" request a HYPRE auxiliary-space Maxwell (AMS) preconditioner (large-3D scaling,
     # the rung above BDDC); they require an NGSolve built with HYPRE and otherwise fall back to
     # bddc_gmres (the standard pip wheel lacks HYPRE) -- see docs/installing_hypre_windows.md.
-    # "sparsecholesky" is NGSolve's direct LDL^T: ~3x faster than umfpack for solve_fem's
+    # "sparsecholesky" is NGSolve's direct LDL^T: 2-3x faster than umfpack for solve_fem's
     # complex-symmetric normal-incidence matrix, refused by residual when the matrix is not symmetric.
-    linear_solver:       Literal["umfpack", "sparsecholesky", "bddc_cg", "bddc_gmres", "ams", "hypre"] = "bddc_gmres"
-    gmres_rtol:          float = 1e-6
+    # "pardiso" is MKL-PARDISO (`pip install mkl`; falls back to umfpack without it): any matrix,
+    # 1.2-1.6x over umfpack at ~40% of its memory.
+    # "auto" (the default since 0.12.0) picks per solve from the FREE-DOF count and the matrix symmetry:
+    # a direct solve up to auto_direct_max_dofs (sparsecholesky when symmetric, else pardiso, else
+    # umfpack up to 40k DOFs), bddc_gmres above. Measured 2026-11-02 (order-2 HCurl, 6 threads): direct
+    # wins below ~80-100k DOFs (63k: 5.6 s vs BDDC 8-11 s), BDDC above (136k: 9.3 s vs 25 s); peak
+    # memory per free DOF ~27 kB sparsecholesky / ~34 kB pardiso / ~81 kB umfpack / ~5 kB BDDC.
+    linear_solver:       Literal["auto", "umfpack", "sparsecholesky", "pardiso", "bddc_cg", "bddc_gmres",
+                                 "ams", "hypre"] = "auto"
+    auto_direct_max_dofs: int = 80_000
+    # RELATIVE residual target of the Krylov paths (0.12.0: it used to reach ngsolve.solvers.GMRes as
+    # `tol=`, which that function treats as an ABSOLUTE tolerance; now passed as `reltol=`). 1e-8 gives
+    # |dr| ~3e-9 against the direct solve on a 204k-DOF metal-pillar cell, 1.6x faster than the old setting.
+    gmres_rtol:          float = 1e-8
     gmres_max_iter:      int = 800
+    # NGSolve worker threads for the FEM solves (None: env DYNAMETA_FEM_THREADS, else NGSolve's default
+    # = every core). Process-global (ngsolve.SetNumThreads). Pin it when running several solves in
+    # parallel processes: umfpack does not thread at all (1 thread 10.4 s vs 6 threads 11.5 s at 68k DOFs).
+    num_threads:         Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.polarization not in ("x", "y", "p"):
@@ -132,3 +154,9 @@ class OpticalSpec:
             raise ValueError("incidence_side must be 'top' or 'bottom'")
         if self.ny_sym < 4:
             raise ValueError("ny_sym must be >= 4")
+        if self.num_threads is not None and int(self.num_threads) < 1:
+            raise ValueError("num_threads must be >= 1 or None, got {!r}".format(self.num_threads))
+        if int(self.auto_direct_max_dofs) < 0:
+            raise ValueError("auto_direct_max_dofs must be >= 0, got {!r}".format(self.auto_direct_max_dofs))
+        if not self.gmres_rtol > 0.0:
+            raise ValueError("gmres_rtol must be > 0, got {!r}".format(self.gmres_rtol))

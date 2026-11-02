@@ -65,6 +65,8 @@ import threading
 import time
 import warnings
 
+import dataclasses
+import functools
 from dataclasses import dataclass
 
 import numpy as np
@@ -124,6 +126,181 @@ def _free_dof_relres(a, f, gfu, fes) -> float:
     rn = float(np.linalg.norm(rvec.FV().NumPy()[free]))
     bn = float(np.linalg.norm(f.vec.FV().NumPy()[free]))
     return rn / bn if bn > 0.0 else rn
+
+
+_DIRECT_SOLVERS = ("umfpack", "sparsecholesky", "pardiso")
+# linear_solver='auto' keeps umfpack (the no-MKL non-symmetric fallback) to this many free DOFs: at
+# ~81 kB per DOF it is the memory-hungry direct solver (8 GB at 98k DOFs), and at 63k DOFs it no
+# longer beats BDDC-GMRes (10 s vs 8-11 s). See OpticalSpec.linear_solver.
+_AUTO_UMFPACK_MAX_DOFS = 40_000
+
+
+@functools.lru_cache(maxsize=1)
+def pardiso_available() -> bool:
+    """True when NGSolve's MKL-PARDISO inverse can run here (`pip install mkl`). ngsolve >= 6.2.2604
+    ships the ctypes wrapper (ngsolve/solvers/mkl_pardiso.py); it needs MKL's mkl_rt at run time."""
+    try:
+        from ngsolve.solvers import mkl_pardiso as _mp
+        _mp._find_mkl()
+        return _mp._pardiso is not None and _mp._mkl_free_buffers is not None
+    except Exception:                                         # noqa: BLE001 (capability probe)
+        return False
+
+
+def _apply_fem_threads(optical) -> None:
+    """Pin NGSolve's worker-thread count from OpticalSpec.num_threads, else env DYNAMETA_FEM_THREADS;
+    neither set leaves NGSolve's default (every core). ngsolve.SetNumThreads is process-global."""
+    n = getattr(optical, "num_threads", None)
+    if n is None:
+        env = os.environ.get("DYNAMETA_FEM_THREADS", "").strip()
+        if env:
+            try:
+                n = int(env)
+            except ValueError:
+                raise ValueError("DYNAMETA_FEM_THREADS must be a positive integer, got {!r}".format(env))
+            if n < 1:
+                raise ValueError("DYNAMETA_FEM_THREADS must be a positive integer, got {!r}".format(env))
+    if n is not None:
+        ng.SetNumThreads(int(n))
+
+
+def _tensor_is_symmetric(eps_cf, mesh) -> bool:
+    """Is a (3,3) eps CoefficientFunction symmetric (eps_ij == eps_ji) over the mesh? Measured as an L2
+    norm, like the symmetry-cell off-diagonal check: a gyrotropic / magneto-optic tensor is not."""
+    _asym = sum(ng.Integrate(ng.Norm(eps_cf[i, j] - eps_cf[j, i]) ** 2, mesh)
+                for i in range(3) for j in range(i + 1, 3))
+    _dia = sum(ng.Integrate(ng.Norm(eps_cf[i, i]) ** 2, mesh) for i in range(3))
+    return abs(_asym) <= 1e-24 * abs(_dia)
+
+
+def _auto_linear_solver(nfree: int, symmetric: bool, optical) -> str:
+    """linear_solver='auto': a direct solve up to auto_direct_max_dofs free DOFs (sparsecholesky for a
+    complex-symmetric matrix, else MKL-PARDISO, else umfpack up to _AUTO_UMFPACK_MAX_DOFS), BDDC-GMRes
+    above. See OpticalSpec.linear_solver for the measurements behind the thresholds."""
+    cap = int(optical.auto_direct_max_dofs)
+    if nfree <= cap:
+        if symmetric:
+            return "sparsecholesky"
+        if pardiso_available():
+            return "pardiso"
+        if nfree <= min(cap, _AUTO_UMFPACK_MAX_DOFS):
+            return "umfpack"
+    return "bddc_gmres"
+
+
+class FEMFactorCache:
+    """Carries the FESpaces and the direct factorization of solve_fem ACROSS calls on one mesh.
+
+    The factorization dominates a direct solve (assembly is <= 2% of it), so:
+
+    * the SAME matrix again -- same space, wavelength, in-plane k, eps CoefficientFunction object,
+      sheets and solver -- reuses the factorization EXACTLY (one back-substitution). The matrix does
+      not depend on the polarization, so x and y at normal incidence, or s and p at one oblique angle,
+      share it (solve_fem_pols). A symmetry-reduced cell is the exception: its PEC/PMC walls follow
+      the polarization, so each polarization has its own space and factorization.
+    * a DIFFERENT matrix on the same space -- the next wavelength, bias or LC state -- uses the stored
+      factorization as the GMRes PRECONDITIONER. Accepted only at a direct solve's free-DOF residual
+      (<= 1e-8); after `max_its` iterations without it, a fresh factorization replaces the stored one.
+      Measured 2026-11-02 (68k DOFs): fresh factorization 5.7 s; preconditioned +1 nm 0.29 s (4 its),
+      +50 nm 0.58 s (9 its), LC rotated 50 deg 1.9 s (25 its); |dr| <= 1e-12.
+
+    Only the direct solvers use it (umfpack / sparsecholesky / pardiso, explicit or picked by 'auto');
+    the BDDC paths ignore the factorization part. One cache serves ONE mesh: a call with a different
+    OpticalGeometry clears it. It holds up to `max_factorizations` factorizations in memory (~27 kB per
+    free DOF for sparsecholesky, ~81 kB for umfpack) until clear() or garbage collection.
+
+    stats counts 'factorizations', 'exact_reuses', 'preconditioned' (accepted GMRes solves) and
+    'stalled' (GMRes attempts that fell back to a fresh factorization)."""
+
+    def __init__(self, *, max_its: int = 30, rtol: float = 1e-10, precondition: bool = True,
+                 max_factorizations: int = 2):
+        if int(max_its) < 1 or int(max_factorizations) < 1 or not rtol > 0.0:
+            raise ValueError("FEMFactorCache: max_its and max_factorizations must be >= 1 and rtol > 0")
+        self.max_its = int(max_its)
+        self.rtol = float(rtol)
+        self.precondition = bool(precondition)
+        self.max_factorizations = int(max_factorizations)
+        self.clear()
+
+    def clear(self) -> None:
+        self._geo = None
+        self._spaces = {}              # space key -> FESpace
+        self._factors = {}             # space key -> (matrix key, eps_cf, inverse); insertion = LRU order
+        self.stats = {"factorizations": 0, "exact_reuses": 0, "preconditioned": 0, "stalled": 0}
+
+    def _bind(self, geo) -> None:
+        if self._geo is not geo:
+            self.clear()
+            self._geo = geo                # strong reference: identity checks stay valid while cached
+
+    def space(self, geo, key, build):
+        """The FESpace for `key` on `geo`, built on first use. Least-recently-used spaces beyond
+        max(4, 2 * max_factorizations) are dropped with their factorization (an oblique sweep needs
+        a new Bloch-phased space at every wavelength)."""
+        self._bind(geo)
+        fes = self._spaces.pop(key, None)
+        if fes is None:
+            fes = build()
+        self._spaces[key] = fes
+        while len(self._spaces) > max(4, 2 * self.max_factorizations):
+            old = next(iter(self._spaces))
+            self._spaces.pop(old)
+            self._factors.pop(old, None)
+        return fes
+
+    def _store(self, skey, mkey, eps_cf, inv, ls) -> None:
+        self._factors.pop(skey, None)
+        self._factors[skey] = (mkey, eps_cf, inv, ls)
+        while len(self._factors) > self.max_factorizations:
+            self._factors.pop(next(iter(self._factors)))
+
+
+def _direct_solve(a, f, gfu, fes, ls, *, cache=None, skey=None, mkey=None, eps_cf=None,
+                  explicit_sparsecholesky=False):
+    """Direct solve of a.mat u = f into gfu with ls in _DIRECT_SOLVERS, through `cache` when given
+    (exact reuse / preconditioned reuse / fresh factorization -- see FEMFactorCache; `mkey` is the
+    matrix key, `eps_cf` compared by identity). Returns the name of the solver that produced the
+    answer. A symmetry-ASSUMING sparsecholesky or a pivot-perturbed pardiso is accepted only at a
+    direct solver's residual: an explicit sparsecholesky RAISES above it (the matrix was not
+    complex-symmetric), anything else refactors with umfpack."""
+    if cache is not None and skey in cache._factors:
+        st_mkey, st_eps, st_inv, st_ls = cache._factors[skey]
+        if st_mkey == mkey and st_eps is eps_cf:
+            gfu.vec.data = st_inv * f.vec
+            cache.stats["exact_reuses"] += 1
+            return st_ls
+        if cache.precondition:
+            # the stored inverse was built on fes.FreeDofs() (zero on constrained rows), so it also
+            # restricts the iteration to the free DOFs; GMRes takes pre= OR freedofs=, not both
+            ng.solvers.GMRes(A=a.mat, b=f.vec, pre=st_inv, x=gfu.vec,
+                             reltol=cache.rtol, maxsteps=cache.max_its, printrates=False)
+            if _free_dof_relres(a, f, gfu, fes) <= _SPARSECHOLESKY_RELRES_MAX:
+                cache.stats["preconditioned"] += 1
+                return st_ls
+            cache.stats["stalled"] += 1
+            gfu.vec[:] = 0.0
+    inv = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse=ls)
+    gfu.vec.data = inv * f.vec
+    if ls != "umfpack":
+        relres = _free_dof_relres(a, f, gfu, fes)
+        if not relres <= _SPARSECHOLESKY_RELRES_MAX:
+            if ls == "sparsecholesky" and explicit_sparsecholesky:
+                raise RuntimeError(
+                    "linear_solver='sparsecholesky' relative residual {:.2e} > {:.0e} -- the matrix "
+                    "is not complex-symmetric for this solve (e.g. a non-symmetric / gyrotropic "
+                    "tensor eps); use 'umfpack'.".format(relres, _SPARSECHOLESKY_RELRES_MAX))
+            _advise_once(
+                "direct_residual_" + ls,
+                "solve_fem: the '{}' factorization left relative residual {:.2e} > {:.0e}; re-solving "
+                "with 'umfpack'. [reported once per process]".format(ls, relres,
+                                                                     _SPARSECHOLESKY_RELRES_MAX))
+            ls = "umfpack"
+            inv = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse=ls)
+            gfu.vec.data = inv * f.vec
+    if cache is not None:
+        cache._store(skey, mkey, eps_cf, inv, ls)
+        cache.stats["factorizations"] += 1
+    return ls
 
 # Validated oblique envelope of the fixed-alpha HalfSpace z-PML, shared by solve_fem
 # (_incidence_geometry) and solve_fem_sourced (audit F-13: the sourced path used to carry NONE of
@@ -528,7 +705,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False,
                 sheet_bcs: "dict | None" = None, diagnostics: bool = True,
                 _reuse_fes=None, tensor_mirror_symmetric: bool = False,
-                cross_pol: bool = False) -> OpticalResult:
+                cross_pol: bool = False,
+                factor_cache: "FEMFactorCache | None" = None) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
@@ -587,7 +765,16 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
 
     linear_solver='sparsecholesky' (NGSolve's LDL^T) is a direct solve for the complex-SYMMETRIC
     matrix of a normal-incidence solve; oblique incidence falls back to 'umfpack' (advisory), and a
-    solve whose residual exceeds a direct solver's (a non-symmetric tensor eps) RAISES."""
+    solve whose residual exceeds a direct solver's (a non-symmetric tensor eps) RAISES.
+    linear_solver='auto' (the default) picks a direct solver or BDDC-GMRes from the free-DOF count and
+    the matrix symmetry (OpticalSpec.linear_solver); 'pardiso' needs MKL and otherwise falls back to
+    'umfpack'. result.linear_solver names the solver that actually ran.
+
+    factor_cache (a FEMFactorCache) carries the FESpace and the direct factorization across calls on
+    the same mesh: the same matrix again (another polarization, see solve_fem_pols) is a single
+    back-substitution, and a nearby one (the next wavelength / bias / LC state) is solved by GMRes
+    preconditioned with the stored factorization, accepted only at a direct solve's residual."""
+    _apply_fem_threads(optical)
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
@@ -720,24 +907,36 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             pec.append("sym_x")                              # x-wall normal || E(x) -> PEC
         if getattr(geo, "sym_y", False) and optical.polarization == "y":
             pec.append("sym_y")                              # y-wall normal || E(y) -> PEC
-        base = ng.HCurl(mesh, order=order, complex=True, dirichlet="|".join(pec))
-        # any surviving periodic axis (half-cell) is plain-periodic at normal incidence (phase 1);
-        # a quarter cell has no periodic identification (n_px=n_py=0) -> the bare HCurl is the space.
-        fes = ng.Periodic(base) if (geo.n_px or geo.n_py) else base
+
+        def _build_space():
+            base = ng.HCurl(mesh, order=order, complex=True, dirichlet="|".join(pec))
+            # any surviving periodic axis (half-cell) is plain-periodic at normal incidence (phase 1);
+            # a quarter cell has no periodic identification (n_px=n_py=0) -> the bare HCurl is the space.
+            return ng.Periodic(base) if (geo.n_px or geo.n_py) else base
+        _skey = ("sym", order, tuple(pec))
     elif oblique and not envelope and (geo.n_px or geo.n_py):
         # quasi-periodic: u(minion=x=Px) = exp(+i kx Px) u(master=x=0). The phase
         # list is keyed per identification in idnr order, which netgen does NOT keep
         # in creation order -- _bloch_phase_list resolves + verifies the true order.
         phases = _bloch_phase_list(geo, kx, ky)
-        fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""), phase=phases)
+
+        def _build_space():
+            return ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""), phase=phases)
+        _skey = ("bloch", order, tuple(complex(p) for p in phases))
     elif _reuse_fes is not None:
         # NORMAL incidence (no oblique Bloch phases) -> the FESpace is wavelength-INDEPENDENT, so a
         # sweep solver may build it ONCE and reuse it here (the eps mass + RHS + factorization still
         # rebuild per wavelength, so R/T are byte-identical). Reuse is REFUSED for oblique above (the
         # Periodic Bloch phases depend on k0). See make_fem_optical_solver.
-        fes = _reuse_fes
+        def _build_space():
+            return _reuse_fes
+        _skey = ("given", id(_reuse_fes))        # the cache keeps _reuse_fes alive, so the id is stable
     else:
-        fes = ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""))
+        def _build_space():
+            return ng.Periodic(ng.HCurl(mesh, order=order, complex=True, dirichlet=""))
+        _skey = ("periodic", order)
+    fes = (factor_cache.space(geo, _skey, _build_space) if factor_cache is not None
+           else _build_space())
     # Is the space QUASI-periodic (Bloch phases != 1)? Only the oblique non-envelope branch above
     # builds one: the symmetry-reduced branch raises at oblique, _reuse_fes is refused at oblique,
     # and the plain-periodic fallbacks carry phase 1. Drives BOTH the BilinearForm(symmetric=) flag
@@ -762,7 +961,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # conj(phase) on the TEST (row) side and phase on the trial (column) side, so even a REAL
     # symmetric integrand assembles HERMITIAN, not symmetric -- measured max|A-A^T|/|A| = 0.406 for
     # HCurl (0.197 for H1) with a real eps, and with a complex (lossy) eps the matrix is NEITHER
-    # (0.411 / 0.038). The flag is inert in ngsolve 6.2.2604 (both builds return the identical
+    # (0.411 / 0.038). The flag is inert in ngsolve 6.2.2604 and 6.2.2608 (both builds return the identical
     # SparseMatrix<complex>), so this is a correctness statement, not a behaviour change today; it
     # stops any build that HONOURS the flag from symmetrizing a non-symmetric operator, and it is
     # the same condition the bddc_cg guard below uses.
@@ -807,6 +1006,19 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # default we DO NOT attempt it: warn and fall back to bddc_gmres. A user whose NGSolve IS built
     # with HYPRE/AMS opts in with DYNAMETA_AMG_OK=1 (see docs/installing_hypre_windows.md).
     _ls = optical.linear_solver
+    _auto = _ls == "auto"
+    if _auto:
+        # complex-symmetric matrix: no Bloch phase (Hermitian-not-symmetric, audit F-9 below), not the
+        # envelope's modified curl, and a symmetric eps (the UPML factors and sheet terms are symmetric)
+        _symmetric = (not bloch_phased and not envelope
+                      and (not eps_is_tensor or _tensor_is_symmetric(eps_cf, mesh)))
+        _ls = _auto_linear_solver(fes.FreeDofs().NumSet(), _symmetric, optical)
+    if _ls == "pardiso" and not pardiso_available():
+        _advise_once(
+            "pardiso_unavailable",
+            "linear_solver='pardiso' needs Intel MKL (`pip install mkl`, or the dynameta[pardiso] extra); "
+            "falling back to 'umfpack'. [reported once per process]")
+        _ls = "umfpack"
     if _ls == "bddc_cg" and (bloch_phased or eps_is_tensor):
         # audit F-9: ng.solvers.CGSolver is called without conjugate=, i.e. as COCG -- "a pseudo
         # inner product that makes CG work with complex SYMMETRIC matrices" (its own docstring).
@@ -853,43 +1065,41 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     t0 = time.time()
     with ng.TaskManager():
         a.Assemble(); f.Assemble()
-        if _ls == "umfpack":
-            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
-        elif _ls == "sparsecholesky":
-            # NGSolve's multithreaded LDL^T -- valid ONLY for a complex-SYMMETRIC matrix (normal
-            # incidence, no Bloch phase, symmetric eps / PML product).  It does not check symmetry
-            # itself, so the residual below REFUSES a solve that is not exact rather than returning it
-            # (2026-09-25, exp31 coax: ~3x faster than umfpack at equal accuracy).
-            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="sparsecholesky") * f.vec
+        if _ls in _DIRECT_SOLVERS:
+            # umfpack / sparsecholesky (NGSolve's multithreaded LDL^T, valid ONLY for a complex-SYMMETRIC
+            # matrix: normal incidence, no Bloch phase, symmetric eps / PML product -- it does not check
+            # symmetry itself, so _direct_solve refuses a solve short of a direct residual) / pardiso.
+            # The matrix key holds everything the bilinear form depends on besides the space (keyed
+            # separately) and the eps CoefficientFunction (compared by identity).
+            _mkey = (float(lambda_m), float(kx), float(ky), bool(envelope), bool(use_upml),
+                     tuple(sorted((str(_b), complex(_s)) for _b, _s in (sheet_bcs or {}).items())))
+            _ls = _direct_solve(a, f, gfu, fes, _ls, cache=factor_cache, skey=_skey, mkey=_mkey,
+                                eps_cf=eps_cf,
+                                explicit_sparsecholesky=(optical.linear_solver == "sparsecholesky"))
         elif _ls == "bddc_cg":
             inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
                                         maxiter=optical.gmres_max_iter)
             gfu.vec.data = inv * f.vec
         else:  # bddc_gmres / amg_gmres
+            # reltol: ngsolve.solvers.GMRes reads `tol=` as an ABSOLUTE tolerance on the preconditioned
+            # residual (it forwards tol -> atol); gmres_rtol is relative (CGSolver's tol= already was).
             ng.solvers.GMRes(A=a.mat, b=f.vec, pre=pre.mat, x=gfu.vec,
-                                tol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
+                                reltol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
                                 printrates=verbose)
     dt = time.time() - t0
 
     # OS-1: bddc_gmres/bddc_cg can stop at maxsteps without reaching tol (the ill-conditioned
     # ENZ / lossy-metal regime) and silently return a wrong field. Independently measure the
     # relative residual ||b - A x|| / ||b|| and warn so a non-converged solve is not trusted.
-    # sparsecholesky is direct but symmetry-ASSUMING: anything short of a direct solve's residual
-    # means the matrix was not complex-symmetric, and the answer is refused.
-    if _ls != "umfpack":
+    # The direct solvers checked their own residual in _direct_solve.
+    if _ls not in _DIRECT_SOLVERS:
         relres = _free_dof_relres(a, f, gfu, fes)
-        if _ls == "sparsecholesky":
-            if not relres <= _SPARSECHOLESKY_RELRES_MAX:
-                raise RuntimeError(
-                    "linear_solver='sparsecholesky' relative residual {:.2e} > {:.0e} -- the matrix "
-                    "is not complex-symmetric for this solve (e.g. a non-symmetric / gyrotropic "
-                    "tensor eps); use 'umfpack'.".format(relres, _SPARSECHOLESKY_RELRES_MAX))
-        elif not relres <= 1e-3:
+        if not relres <= 1e-3:
             warnings.warn(
                 "solve_fem: iterative solver '{}' did not converge (relative residual {:.2e} "
                 "> 1e-3 after {} steps); R/T/A are unreliable. Use linear_solver='umfpack', "
                 "raise gmres_max_iter, or refine the mesh.".format(
-                    optical.linear_solver, relres, optical.gmres_max_iter), stacklevel=2)
+                    _ls, relres, optical.gmres_max_iter), stacklevel=2)
 
     # Demodulation: phase_in_space holds the physical field E=u exp(i(kx x+ky y)) -> demod
     # by exp(-i(kx x+ky y)) to recover the 0-order Fourier coefficient. envelope already
@@ -945,41 +1155,44 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # integral, computed from the reconstructed TOTAL field. Best-effort -- a diagnostic
     # must not break the solve, so a failure warns (not silent) and yields None.
     # diagnostics=False (opt-out, audit 6.2): skip this + per_region + flux R/T entirely.
-    try:
-        A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                            geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                            roles=getattr(geo, "role_by_region", None))
-                         if diagnostics else None)
-    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-        warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
-        A_independent = None
-    # Per-region absorbed-power map (driver D2): the same loss integral split by material region
-    # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
-    try:
-        per_region_A = (None if A_independent is None else
-                        _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                               geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                               roles=getattr(geo, "role_by_region", None)))
-    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-        warnings.warn("per-region absorption map unavailable: {}".format(_e))
-        per_region_A = None
-    # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
-    # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
-    # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
-    # break the solve. Skipped for the envelope formulation (its modified curl != mesh curl).
-    # The flux band-averages Sz over the cladding buffer, which is z-CONSTANT only for LOSSLESS
-    # cladding; a lossy super/substrate makes Sz decay through the buffer and biases the ratio (same
-    # caveat _absorbed_fraction carries). Skip it (leave None) for the envelope formulation or a lossy
-    # cladding rather than report a silently-biased "independent" R/T.
-    lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
-    try:
-        if envelope or not lossless_clad or not diagnostics:
+    # The three diagnostics run under the TaskManager (0.12.0): their Integrate/Set calls were ~40% of
+    # a small solve's wall time single-threaded, ~5x less threaded (not bitwise: ~1e-15 reductions).
+    with ng.TaskManager():
+        try:
+            A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                                geo.period_x_nm, geo.period_y_nm, n_super=n_super,
+                                                roles=getattr(geo, "role_by_region", None))
+                             if diagnostics else None)
+        except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+            warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
+            A_independent = None
+        # Per-region absorbed-power map (driver D2): the same loss integral split by material region
+        # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
+        try:
+            per_region_A = (None if A_independent is None else
+                            _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                                   geo.period_x_nm, geo.period_y_nm, n_super=n_super,
+                                                   roles=getattr(geo, "role_by_region", None)))
+        except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+            warnings.warn("per-region absorption map unavailable: {}".format(_e))
+            per_region_A = None
+        # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
+        # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
+        # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
+        # break the solve. Skipped for the envelope formulation (its modified curl != mesh curl).
+        # The flux band-averages Sz over the cladding buffer, which is z-CONSTANT only for LOSSLESS
+        # cladding; a lossy super/substrate makes Sz decay through the buffer and biases the ratio
+        # (same caveat _absorbed_fraction carries). Skip it (leave None) for the envelope formulation
+        # or a lossy cladding rather than report a silently-biased "independent" R/T.
+        lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
+        try:
+            if envelope or not lossless_clad or not diagnostics:
+                R_flux = T_flux = None
+            else:
+                R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
+        except Exception as _e:                                   # noqa: BLE001 (diagnostic)
+            warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e))
             R_flux = T_flux = None
-        else:
-            R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
-    except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-        warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e))
-        R_flux = T_flux = None
     # Backstop sanity: a bad fit / near-grazing case can push R or T well outside [0,1] or make
     # A=1-R-T strongly negative (energy created). Thresholds are LOOSE (5e-2): the documented
     # non-angle-aware-PML oblique error and ordinary FEM numerical error put A slightly negative
@@ -1012,7 +1225,33 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A,
-                          fit_relres=fit_relres, r_cross=r_cross)
+                          fit_relres=fit_relres, r_cross=r_cross, linear_solver=_ls)
+
+
+def solve_fem_pols(geo: OpticalGeometry, lambda_m: float, eps_cf: ng.CoefficientFunction,
+                   optical: "OpticalSpec", pols=("x", "y"), *,
+                   factor_cache: "FEMFactorCache | None" = None, **kwargs) -> "dict":
+    """solve_fem for several polarizations of ONE incidence, sharing one factorization.
+
+    The FEM matrix does not depend on the polarization, only the right-hand side does, so with a
+    direct solver every polarization after the first is a single back-substitution (measured
+    2026-11-02: r_y from the shared factorization equals a separate solve_fem to <= 9e-16, at
+    0.02-0.2 s instead of a 1.6-34 s factorization). Pass cross_pol=True at normal incidence for the
+    full Jones matrix: {'x': (r_xx, r_yx), 'y': (r_xy, r_yy)} as (res.r, res.r_cross). At an oblique
+    angle, pols=('y', 'p') gives s and p. A symmetry-reduced cell gains nothing: its PEC/PMC walls
+    follow the polarization, so each polarization has its own space and factorization. BDDC-GMRes
+    solves (large cells under linear_solver='auto') do not share a factorization either.
+
+    Returns {pol: OpticalResult}. kwargs pass through to solve_fem; `factor_cache` (default: a fresh
+    FEMFactorCache for this call) may be shared with further calls on the same mesh."""
+    pols = tuple(pols)
+    if not pols or len(set(pols)) != len(pols):
+        raise ValueError("solve_fem_pols: pols must be a non-empty sequence of distinct polarizations, "
+                         "got {!r}".format(pols))
+    cache = factor_cache if factor_cache is not None else FEMFactorCache()
+    return {p: solve_fem(geo, lambda_m, eps_cf, dataclasses.replace(optical, polarization=p),
+                         factor_cache=cache, **kwargs)
+            for p in pols}
 
 
 @dataclass
@@ -1140,6 +1379,7 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             "sourced path has no UPML branch and mesh.SetPML's scalar coordinate stretch is wrong "
             "for an anisotropic medium. Use solve_fem (which builds the explicit UPML for tensor "
             "eps) for an incident-wave solve, or pass a scalar/diagonal eps here.")
+    _apply_fem_threads(optical)
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
     Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
@@ -1211,6 +1451,23 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             f += (1j * k0 * Z0 * (_K * v.Trace())) * ng.ds(definedon=mesh.Boundaries(_bnd))
 
     _ls = optical.linear_solver
+    if _ls == "auto":
+        # no symmetric fast path here (sparsecholesky is a solve_fem option, below), so 'auto' is
+        # pardiso / umfpack by size, else BDDC-GMRes -- the same thresholds as solve_fem
+        _ls = _auto_linear_solver(fes.FreeDofs().NumSet(), False, optical)
+    if _ls == "pardiso" and not pardiso_available():
+        _advise_once(
+            "pardiso_unavailable",
+            "linear_solver='pardiso' needs Intel MKL (`pip install mkl`, or the dynameta[pardiso] extra); "
+            "falling back to 'umfpack'. [reported once per process]")
+        _ls = "umfpack"
+    if _ls in ("ams", "hypre"):
+        # the sourced path has no AMS branch; it used to reach pre.mat with pre = None
+        _advise_once(
+            "ams_sourced",
+            "linear_solver='{}' is a solve_fem option; solve_fem_sourced uses 'bddc_gmres' instead. "
+            "[reported once per process]".format(_ls))
+        _ls = "bddc_gmres"
     if _ls == "bddc_cg" and bloch_phased:
         _advise_once(                                          # audit F-9 (see solve_fem)
             "bddc_cg_nonsymmetric",
@@ -1233,15 +1490,16 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
     t0 = time.time()
     with ng.TaskManager():
         a.Assemble(); f.Assemble()
-        if _ls == "umfpack":
-            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
+        if _ls in ("umfpack", "pardiso"):
+            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse=_ls) * f.vec
         elif _ls == "bddc_cg":
             inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
                                         maxiter=optical.gmres_max_iter)
             gfu.vec.data = inv * f.vec
         else:
+            # reltol, not tol (= ABSOLUTE in ngsolve.solvers.GMRes) -- see solve_fem
             ng.solvers.GMRes(A=a.mat, b=f.vec, pre=pre.mat, x=gfu.vec,
-                                tol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
+                                reltol=optical.gmres_rtol, maxsteps=optical.gmres_max_iter,
                                 printrates=verbose)
     dt = time.time() - t0
 
@@ -1707,19 +1965,22 @@ def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):
     return float(R_flux), float(T_flux)
 
 
-def make_fem_optical_solver(*, order=None, diagnostics=True):
-    """An `optical_solver` for run_pipeline backed by the FEM, with a SWEEP-AWARE fast path. At NORMAL
-    incidence the HCurl FESpace is wavelength-INDEPENDENT (no oblique Bloch phases), so solve_sweep
-    builds it ONCE and reuses it across the whole wavelength sweep -- avoiding the redundant FESpace
-    construction the per-call default repeats every wavelength (pass-2 audit perf finding). The eps
-    mass, RHS, and factorization still rebuild per wavelength, so R/T are BYTE-IDENTICAL to a per-call
-    solve_fem (only the k0-independent space build is amortized; the solve itself is not reusable).
-    Oblique/conical incidence falls back to a per-wavelength build (the Periodic Bloch phases depend
-    on k0). OPT-IN -- pass optical_solver=make_fem_optical_solver() to run_pipeline; the default FEM
-    path (pipeline._fem_optical_solver) is unchanged. `order` overrides design.mesh_3d.fem_order;
-    `diagnostics=False` threads the solve_fem diagnostics opt-out (A_independent/per-region/flux R/T
-    skipped on every solve of the sweep -- see solve_fem's caveat about the energy-closure warning)."""
+def make_fem_optical_solver(*, order=None, diagnostics=True, reuse_factorization=True):
+    """An `optical_solver` for run_pipeline backed by the FEM, with a SWEEP-AWARE fast path. One
+    FEMFactorCache serves every solve: the FESpace is built once per mesh (and per Bloch phase / wall
+    set), and with a direct solver (linear_solver='auto' below auto_direct_max_dofs, or an explicit
+    umfpack / sparsecholesky / pardiso) each further wavelength or bias is solved by GMRes
+    preconditioned with the stored factorization -- accepted only at a direct solve's residual, else
+    refactorized (0.12.0; measured 3-20x per extra point, |dr| <= 1e-12). reuse_factorization=False
+    keeps only the space reuse and factorizes every point. OPT-IN -- pass
+    optical_solver=make_fem_optical_solver() to run_pipeline (whose default FEM path carries its own
+    cache per run). `order` overrides design.mesh_3d.fem_order; `diagnostics=False` threads the
+    solve_fem diagnostics opt-out (A_independent/per-region/flux R/T skipped on every solve of the
+    sweep -- see solve_fem's caveat about the energy-closure warning). The solver's `factor_cache`
+    attribute exposes the cache (its stats, or clear() to release the factorization)."""
     from dynameta.optics.eps_assembler import assemble_eps_cf
+
+    cache = FEMFactorCache(precondition=bool(reuse_factorization))
 
     def _ord(design):
         return int(order) if order is not None else int(design.mesh_3d.fem_order)
@@ -1727,21 +1988,18 @@ def make_fem_optical_solver(*, order=None, diagnostics=True):
     def _solve(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
         eps_cf = assemble_eps_cf(geo, eps_by_region)
         return solve_fem(geo, lambda_m, eps_cf, design.optical, order=_ord(design),
-                         n_super=n_super, n_sub=n_sub, diagnostics=diagnostics)
+                         n_super=n_super, n_sub=n_sub, diagnostics=diagnostics, factor_cache=cache)
 
     def _solve_sweep(design, geo, assemble_at, lams, n_super, n_sub):
         od = _ord(design)
-        normal = abs(float(getattr(design.optical, "incidence_angle_deg", 0.0) or 0.0)) <= 1e-9
-        # build the wavelength-independent FESpace ONCE for normal incidence (identical to what
-        # solve_fem builds internally there); None -> oblique falls back to per-wavelength build.
-        fes = ng.Periodic(ng.HCurl(geo.mesh, order=od, complex=True, dirichlet="")) if normal else None
         out = []
         for lam in lams:
             eps_cf = assemble_eps_cf(geo, assemble_at(lam))
             out.append(solve_fem(geo, lam, eps_cf, design.optical, order=od,
                                  n_super=n_super, n_sub=n_sub, diagnostics=diagnostics,
-                                 _reuse_fes=fes))
+                                 factor_cache=cache))
         return out
 
     _solve.solve_sweep = _solve_sweep
+    _solve.factor_cache = cache
     return _solve
