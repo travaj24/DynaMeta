@@ -16,7 +16,7 @@ import numpy as np
 
 from dynameta.geometry.guards import require_untapered_layer
 
-__all__ = ["cell_axes", "layer_bg_eps", "layer_eps_cell"]
+__all__ = ["cell_axes", "layer_bg_eps", "layer_eps_cell", "inclusion_mask"]
 
 
 def cell_axes(nx, ny, period_x_m, period_y_m):
@@ -59,20 +59,29 @@ def layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region, *, period_x_
     FEM, the clipped one 2.7e-3). Every in-repo periodic caller passes both; an inclusion inside the
     closed cell paints byte-identically either way (its translates are never evaluated)."""
     require_untapered_layer(layer, "layer_eps_cell (lateral rasterizer)")
-    if (period_x_m is None) != (period_y_m is None):
-        raise ValueError("layer_eps_cell: pass both period_x_m and period_y_m, or neither")
     eps = np.full(X.shape, layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
     for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
-        mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
-        if period_x_m is not None:
-            px, py = float(period_x_m), float(period_y_m)
-            xlo, xhi, ylo, yhi = inc.shape.bbox_m()
-            dxs = [0.0] + ([px] if xlo < 0.0 else []) + ([-px] if xhi > px else [])
-            dys = [0.0] + ([py] if ylo < 0.0 else []) + ([-py] if yhi > py else [])
-            for dx in dxs:
-                for dy in dys:
-                    if dx or dy:
-                        # the shape contains p + (dx, dy) iff its translate by -(dx, dy) contains p
-                        mask |= np.asarray(inc.shape.contains_m(X - dx, Y - dy), dtype=bool)
+        mask = inclusion_mask(inc, X, Y, period_x_m=period_x_m, period_y_m=period_y_m)
         eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
     return eps
+
+
+def inclusion_mask(inc, X, Y, *, period_x_m=None, period_y_m=None):
+    """Boolean (X.shape) mask of one inclusion's CrossSection -- the ONE painting predicate every
+    rasterizer shares (layer_eps_cell; the PMM2D bridge's tensor raster). With both periods it is
+    PERIODIC: an inclusion whose bbox leaves the closed cell [0, Px] x [0, Py] also covers its
+    translates by -/+(Px, Py); without them it clips (see layer_eps_cell)."""
+    if (period_x_m is None) != (period_y_m is None):
+        raise ValueError("inclusion_mask/layer_eps_cell: pass both period_x_m and period_y_m, or neither")
+    mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
+    if period_x_m is not None:
+        px, py = float(period_x_m), float(period_y_m)
+        xlo, xhi, ylo, yhi = inc.shape.bbox_m()
+        dxs = [0.0] + ([px] if xlo < 0.0 else []) + ([-px] if xhi > px else [])
+        dys = [0.0] + ([py] if ylo < 0.0 else []) + ([-py] if yhi > py else [])
+        for dx in dxs:
+            for dy in dys:
+                if dx or dy:
+                    # the shape contains p + (dx, dy) iff its translate by -(dx, dy) contains p
+                    mask |= np.asarray(inc.shape.contains_m(X - dx, Y - dy), dtype=bool)
+    return mask
