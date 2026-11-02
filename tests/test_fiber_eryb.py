@@ -8,6 +8,7 @@ value, which the parameters put at ~0.85 (see eryb.py DISCREPANCY NOTE and gate 
 ErYbAmplifier is not re-exported from the package __init__, so it is imported from its module."""
 
 import numpy as np
+import pytest
 
 from dynameta.optics.fiber_amp import (
     erbium, ytterbium, FiberSpec, Pump, Signal, AseBand, FiberAmplifier,
@@ -267,3 +268,20 @@ def test_eryb_reseed_protocol_is_type_preserving_and_carries_every_optin():
             assert clone.__dict__[k] == a.__dict__[k] or clone.__dict__[k] is a.__dict__[k], k
     assert a.without_ase().ase is None and a.without_ase().yb_ase is None
     assert a.ase is not None and a.yb_ase is not None            # the original is untouched
+
+
+def test_a18_mixed_ase_mode_counts_are_refused():
+    # audit A-18: the two ASE bands were GENERATED with their own m_modes but every result
+    # carried ONE meta['m_modes'] (the Er band's), so a Yb band at m_modes = 1 beside an Er band
+    # at 2 came out at half its per-polarization PSD in noise.output_ase_spectrum. The
+    # polarization-mode count is a fiber property: the combination is refused.
+    fib = FiberSpec(3.0e-6, 0.20, 1.0e25, 3.0)
+    args = (ER, YB, fib, [Pump(1.0, 0.976e-6)], [Signal(1e-3, 1.56e-6)])
+    with pytest.raises(ValueError, match="m_modes"):
+        ErYbAmplifier(*args, AseBand(1.52e-6, 1.575e-6, 4, m_modes=2), n_yb_m3=1e26,
+                      yb_ase=AseBand(1.00e-6, 1.10e-6, 4, m_modes=1))
+    amp = ErYbAmplifier(*args, AseBand(1.52e-6, 1.575e-6, 4, m_modes=1), n_yb_m3=1e26,
+                        yb_ase=AseBand(1.00e-6, 1.10e-6, 4, m_modes=1))
+    assert amp.solve(n_nodes=41).meta["m_modes"] == 1
+    with pytest.raises(ValueError, match="m_modes"):       # the clone path refuses it too
+        amp._clone(yb_ase=AseBand(1.00e-6, 1.10e-6, 4, m_modes=2))

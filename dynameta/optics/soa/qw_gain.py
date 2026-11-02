@@ -275,17 +275,17 @@ def emission_gain_per_m(nu_Hz, N_m3: float, params: BulkGainParams):
     return float(g_e) if np.ndim(nu_Hz) == 0 else g_e
 
 
-def n_sp_inversion(nu_Hz: float, N_m3: float, params: BulkGainParams) -> float:
+def n_sp_inversion(nu_Hz, N_m3: float, params: BulkGainParams):
     """Population-inversion factor n_sp = g_e/(g_e - g_a) = f_c(1 - f_v)/(f_c - f_v) at (nu, N).
     -> 1 at full inversion, -> +inf approaching transparency from above (checked, never used as a
-    source term)."""
+    source term); +inf exactly AT transparency (f_c == f_v). A float for scalar nu, else an array
+    matching nu_Hz -- the material_gain_per_m / emission_gain_per_m contract (audit A-17: the
+    float() casts raised TypeError on the array input its siblings accept)."""
     f_c, f_v, _sq, _m = _occupations(np.asarray(nu_Hz, dtype=np.float64), N_m3, params)
-    f_c = float(f_c)
-    f_v = float(f_v)
     denom = f_c - f_v
-    if denom == 0.0:
-        return float("inf")
-    return f_c * (1.0 - f_v) / denom
+    with np.errstate(divide="ignore", invalid="ignore"):
+        n_sp = np.where(denom == 0.0, np.inf, f_c * (1.0 - f_v) / np.where(denom == 0.0, 1.0, denom))
+    return float(n_sp) if np.ndim(nu_Hz) == 0 else n_sp
 
 
 def gain_peak(N_m3: float, params: BulkGainParams, *, n_grid: int = 4001,

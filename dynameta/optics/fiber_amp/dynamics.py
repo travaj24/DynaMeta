@@ -152,13 +152,20 @@ class TransientResult:
         # gain: -inf is a legitimate DROPPED channel (signal_drive -> 0 W gives log10(0)); NaN is not
         if np.any(np.isnan(np.asarray(self.signal_gain_dB, float))):
             bad_arrays.append("signal_gain_dB")
-        if valid and not bad_arrays:
+        # the z mesh must resolve the gain profile (z_refine, 2026-11-02); absent on results that
+        # predate the monitor and on the co-doped march, which does not measure it
+        resolved = bool(m.get("mesh_resolved", True))
+        if valid and resolved and not bad_arrays:
             return self
         lim = m.get("validity_limits", {}) or {}
         parts = []
         if not valid:
             parts.append("meta['march_valid'] is False (ase_mode={!r})".format(
                 m.get("ase_mode", "quasi_static")))
+        if not resolved:
+            parts.append("meta['mesh_resolved'] is False (largest per-cell gain jump {:.3g}, "
+                         "z_refine {}; raise n_nodes or z_refine)".format(
+                             float(m.get("max_cell_gain_jump", float("nan"))), m.get("z_refine")))
         if m.get("nonfinite_powers"):
             parts.append("non-finite channel powers appeared during the march")
         if bad_arrays:
@@ -374,6 +381,35 @@ _VALIDITY_LIMITS = {"ase_to_launched": _ASE_TO_LAUNCHED_LIMIT,
 # an exception and becomes an OOM kill.
 _STORE_PROFILES_MAX_BYTES = 2 * 1024 ** 3
 
+# Spatial resolution of the single-ion march (z_refine; simulate_transient docstring). The measure
+# is the largest per-cell jump of the local gain, max_{k,j} |g_k(z_{j+1}) - g_k(z_j)| dz_j. Measured
+# 2026-11-02 against the constant-drive hold error |G(t_end) - G(0)| of a march started at
+# amp.solve()'s state (Yb 3 um / NA 0.12 / 6e25 m^-3 / 2 W @ 976 / 20 mW @ 1060 at 1, 4, 6 m; Er
+# references at 6 and 8 m; 31-321 nodes): 0.007 -> 0.0006 dB, 0.09 -> 0.004, 0.34 -> 0.017,
+# 0.72 -> 0.040, 1.26 -> 0.070, 2.2 -> 0.17, 3.1 -> 0.44, 7.0 -> 1.41 dB. That is the WORST case
+# measured (the long reabsorbing Yb tail amplifies a front error); an Er booster (2 um, 2e25, 6 m,
+# 120 mW) at 21 nodes holds to 0.0002 dB at a jump of 0.42, and its turn-on from nbar2 = 0.1 peaks
+# at 1.02 while the pump front crosses unbleached fiber, with the same 0.0002 dB endpoint. So
+# "auto" sizes the mesh to the conservative TARGET (worst-case hold ~0.01-0.02 dB), and the
+# per-step monitor flags only a GROSSLY unresolved mesh, above the LIMIT (worst case ~0.15 dB).
+_CELL_GAIN_TARGET = 0.25
+_CELL_GAIN_LIMIT = 2.0
+_Z_REFINE_MAX = 64
+
+
+def _cell_gain_jump(ch, na, mcc, n2, z):
+    """max_{k,j} |g_k(z_{j+1}) - g_k(z_j)| dz_j of the inversion-dependent gain on mesh z (the
+    z_refine sizing measure). Constant terms (background loss, the dark-ion absorption) cancel in
+    the difference and are left out; the photodarkening loss is a small inversion-dependent
+    correction and is left to the per-step monitor, which reads the full gain."""
+    if z.size < 2:
+        return 0.0
+    n2r = np.asarray(n2, float)[None, :]
+    se = ch.sigma_e[:, None] if mcc is None else ch.sigma_e[:, None] * mcc
+    g = ch.gamma[:, None] * na * (se * n2r - ch.sigma_a[:, None] * (1.0 - n2r)
+                                 - ch.sigma_esa[:, None] * n2r)
+    return float(np.max(np.abs(np.diff(g, axis=1)) * np.diff(z)))
+
 
 def _no_raman(amp):
     """The transient fixed-inversion propagator assumes per-channel LINEAR gain; the SRS
@@ -449,7 +485,8 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
                        store_profiles: bool = False,
                        ase_mode: str = "quasi_static",
                        ase_tol: float = 1e-6, ase_max_iter: int = 120,
-                       ase_step_residual: bool = False) -> TransientResult:
+                       ase_step_residual: bool = False,
+                       z_refine="auto") -> TransientResult:
     """March the amplifier's inversion nbar2(z, t) over t_grid. signal_drive(t) / pump_drive(t),
     if given, return the input-power vector (length = number of signals / pumps) at time t --
     step functions of them produce add/drop transients; default (None) holds the configured
@@ -510,9 +547,36 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     therefore lets noise.analyze_noise / detection.detection_noise run on a transient frame. The
     memory cost is Nt*K*Nz floats, so it is opt-in -- and a request above 2 GiB
     (_STORE_PROFILES_MAX_BYTES) is REFUSED with the shape, because past that point the allocation
-    stops raising and starts taking the process down with it."""
+    stops raising and starts taking the process down with it.
+
+    SPATIAL RESOLUTION -- z_refine (2026-11-02, the 2026-08-04 audit's Yb hold observation). The
+    march's fixed point is the fixed point of its DISCRETE propagator: the frozen gain is known at
+    the nodes and integrated by the trapezoid (g linear across a cell), so a cell that a pump-
+    depletion front crosses carries an O(dz^2 g'') error that the inversion update feeds back on
+    every step. On the 2 W / 976 nm Yb reference (3 um, NA 0.12, 6e25 m^-3; small-signal pump
+    absorption 128 /m against a 75 mm cell at n_nodes = 81) the march therefore relaxed from
+    amp.solve()'s state to its OWN fixed point at constant drive: 6 m 19.30 -> 17.90 dB, 4 m 19.33
+    -> 18.89 dB, identical for 11-801 time steps (dt-independent) and with or without ASE, and
+    converging at second order in dz (6 m: -1.41 / -0.17 / -0.040 / -0.010 dB at 81 / 161 / 321 /
+    641 nodes). The resolution measure is the largest per-cell jump of the local gain,
+    max_{k,j} |g_k(z_{j+1}) - g_k(z_j)| dz_j (dimensionless): the hold error tracks it (0.34 ->
+    0.017 dB, 0.72 -> 0.040, 1.26 -> 0.070, 2.2 -> 0.17, 7.0 -> 1.41 dB) and a reference EDFA sits
+    at 0.007. z_refine = "auto" (THE DEFAULT) marches on a mesh that subdivides every cell of the
+    n_nodes mesh r times, with r the smallest it finds (a power-law estimate, then doubling, capped
+    at _Z_REFINE_MAX) that brings the INITIAL profile's jump to <= _CELL_GAIN_TARGET; r = 1 -- every
+    amplifier already resolved at n_nodes -- is the old march byte for byte. Every returned array
+    is still on the n_nodes mesh (the coarse nodes are a subset of the fine ones). An int pins r
+    (1 = the old march). The jump is also MONITORED every step (a drive change can steepen a front
+    after the mesh was sized): meta['max_cell_gain_jump'], meta['mesh_resolved'] (False above
+    _CELL_GAIN_LIMIT, with a RuntimeWarning; TransientResult.assert_valid() raises on it) and
+    meta['z_refine'] report it. The co-doped march (simulate_transient_eryb) accepts only "auto"
+    or 1 and does not refine."""
     _no_raman(amp)
     ase_mode = march_ase.check_ase_mode(ase_mode)
+    if not (z_refine == "auto" or (isinstance(z_refine, (int, np.integer))
+                                   and not isinstance(z_refine, bool) and int(z_refine) >= 1)):
+        raise ValueError("simulate_transient: z_refine must be \"auto\" or an int >= 1; got %r"
+                         % (z_refine,))
     # DISPATCH (2026-09-13). The body below is the SINGLE-ION march: it reads _n_active, the
     # McCumber matrix and the ConcentrationModel, and advances ONE scalar reservoir per node. A
     # CO-DOPED amplifier has two coupled ion populations and no single nbar2, so it is handed to
@@ -523,6 +587,10 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     if not isinstance(amp, FiberAmplifier):
         from dynameta.optics.fiber_amp.eryb import ErYbAmplifier
         if isinstance(amp, ErYbAmplifier):
+            if z_refine != "auto" and int(z_refine) != 1:
+                raise NotImplementedError("simulate_transient: z_refine > 1 is implemented for "
+                                          "the single-ion march only; the co-doped march runs "
+                                          "on the n_nodes mesh")
             return simulate_transient_eryb(amp, t_grid, signal_drive=signal_drive,
                                            pump_drive=pump_drive, n_nodes=n_nodes,
                                            nbar2_0=nbar2_0, store_profiles=store_profiles,
@@ -581,6 +649,49 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     loss = ch.loss_per_m[:, None]
     ase_col = is_ase[:, None]
     src_pref = ase_col * (gam * na * sig_e * m * (hnu * ch.dnu_hz)[:, None])
+    # initial inversion: steady state at the first drive (interp to z), unless supplied
+    t0 = float(t_grid[0])
+    if nbar2_0 is not None:
+        n2 = np.broadcast_to(np.asarray(nbar2_0, float), z.shape).astype(float).copy()
+    else:
+        amp0 = _amp_with_boundary(amp, boundary(t0), sig_idx, pmp_idx, kind)
+        r0 = amp0.solve(n_nodes=n_nodes)
+        n2 = np.interp(z, r0.z_m, r0.nbar2_z)
+
+    # SPATIAL RESOLUTION (z_refine; docstring). Size the MARCH mesh from the initial profile's
+    # largest per-cell gain jump; r == 1 leaves z and n2 untouched, so an amplifier the n_nodes
+    # mesh already resolves takes the old march byte for byte. Otherwise the march runs on
+    # (n_nodes - 1) r + 1 nodes, which contain the n_nodes mesh as every r-th node, and every
+    # returned z-array is read back on those nodes (`zs` below).
+    z_user = z
+    n2_user = n2
+    if z_refine == "auto":
+        r = 1
+        jump = _cell_gain_jump(ch, na, amp._mcc_matrix(ch, z), n2, z)
+        while jump > _CELL_GAIN_TARGET and r < _Z_REFINE_MAX:
+            # the jump falls off as ~r^-1.65 while the front is under-resolved (measured 7.0 ->
+            # 2.2 -> 0.72 per doubling on the Yb reference); estimate with the slower 1.5, and
+            # at least double, so the loop normally runs once
+            r = int(min(_Z_REFINE_MAX,
+                        r * max(2, int(np.ceil((jump / _CELL_GAIN_TARGET) ** (1.0 / 1.5))))))
+            z = np.linspace(0.0, L, (n_nodes - 1) * r + 1)
+            if nbar2_0 is not None:
+                n2 = np.interp(z, z_user, n2_user)
+            else:
+                r0 = amp0.solve(n_nodes=z.size)
+                n2 = np.interp(z, r0.z_m, r0.nbar2_z)
+            jump = _cell_gain_jump(ch, na, amp._mcc_matrix(ch, z), n2, z)
+    else:
+        r = int(z_refine)
+        if r > 1:
+            z = np.linspace(0.0, L, (n_nodes - 1) * r + 1)
+            if nbar2_0 is not None:
+                n2 = np.interp(z, z_user, n2_user)
+            else:
+                r0 = amp0.solve(n_nodes=z.size)
+                n2 = np.interp(z, r0.z_m, r0.nbar2_z)
+    zs = slice(None, None, r)                      # march mesh -> the n_nodes mesh
+
     # Optional axial temperature profile (set_temperature_profile / thermal.solve_with_thermal_
     # feedback): the SAME (K, Nz) McCumber sigma_e scaling the steady solve applies, on every
     # sigma_e-proportional coefficient -- the local emission gain, the ASE spontaneous source and
@@ -633,18 +744,9 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         n2_ss = R_a / B
         return np.clip(n2_ss + (n2z - n2_ss) * np.exp(-B * dt), 0.0, 1.0)
 
-    # initial inversion: steady state at the first drive (interp to z), unless supplied
-    t0 = float(t_grid[0])
-    if nbar2_0 is not None:
-        n2 = np.broadcast_to(np.asarray(nbar2_0, float), z.shape).astype(float).copy()
-    else:
-        amp0 = _amp_with_boundary(amp, boundary(t0), sig_idx, pmp_idx, kind)
-        r0 = amp0.solve(n_nodes=n_nodes)
-        n2 = np.interp(z, r0.z_m, r0.nbar2_z)
-
     t_grid = np.asarray(t_grid, float)
     Nt = t_grid.size
-    n2_zt = np.empty((Nt, z.size))
+    n2_zt = np.empty((Nt, n_nodes))
     sig_out = np.empty((Nt, len(sig_idx)))
     pmp_out = np.empty((Nt, len(pmp_idx)))
     gain_dB = np.empty((Nt, len(sig_idx)))
@@ -690,13 +792,20 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     else:
         ase_fwd_idx = ase_bwd_idx = np.empty(0, int)
         ase_lam = ase_dnu = ase_f_zt = ase_b_zt = None
-    prof_zt = np.empty((Nt, ch.lambda_m.size, z.size)) if store_profiles else None
+    prof_zt = np.empty((Nt, ch.lambda_m.size, n_nodes)) if store_profiles else None
+    worst_cell_jump = 0.0
 
     for it in range(Nt):
         t = float(t_grid[it])
         bc = boundary(t)
         g, s = g_s(n2)
         P = _propagate_fixed(z, g, s, bc, u)
+        # spatial-resolution monitor (z_refine; read-only): the largest per-cell gain jump of
+        # the gain this step propagated through
+        with np.errstate(invalid="ignore"):
+            _jump = float(np.max(np.abs(np.diff(g, axis=1)) * dz)) if z.size > 1 else 0.0
+        if np.isfinite(_jump):
+            worst_cell_jump = max(worst_cell_jump, _jump)
         # --- validity monitor (read-only) ---
         # step_* are THIS step's margins (the running worst_* are unchanged); "auto" reads them
         # to decide whether this step needs the self-consistent solver.
@@ -725,7 +834,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             else:
                 nonfinite = True
                 step_nonfinite = True
-        n2_zt[it] = n2
+        n2_zt[it] = n2[zs]
         # audit F-2: keep the resolved ASE the frozen-inversion step just computed (forward at
         # z = L, backward at z = 0), and optionally the whole profile matrix. Read-only w.r.t. the
         # march -- nothing below this touches P or n2 -- so every previously returned array stays
@@ -735,7 +844,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         if ase_b_zt is not None:
             ase_b_zt[it] = P[ase_bwd_idx, 0]
         if prof_zt is not None:
-            prof_zt[it] = P
+            prof_zt[it] = P[:, zs]
         for j, i in enumerate(sig_idx):
             sig_out[it, j] = P[i, -1]
             gain_dB[it, j] = 10.0 * np.log10(P[i, -1] / max(bc[i], 1e-300))
@@ -842,9 +951,23 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             "propagation is already exact. See TransientResult.meta['quasi_static_valid'] "
             "(audit A-7).")
         warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
+    mesh_resolved = worst_cell_jump <= _CELL_GAIN_LIMIT
+    if not mesh_resolved:
+        warnings.warn(
+            "simulate_transient: the z mesh does NOT resolve the gain profile -- the largest "
+            "per-cell gain jump |dg| dz reached %.3g (limit %g; z_refine = %d on n_nodes = %d, "
+            "i.e. %d march nodes). The march then relaxes to the fixed point of its discrete "
+            "propagator rather than amp.solve()'s (measured: 1.4 dB low at a jump of 7 on a 6 m "
+            "Yb amplifier). Raise n_nodes or z_refine; meta['mesh_resolved'] is False."
+            % (worst_cell_jump, _CELL_GAIN_LIMIT, r, n_nodes, z.size),
+            RuntimeWarning, stacklevel=2)
     meta = _ase_mode_meta(ase_mode, ctrl, step_mode, switch_steps, t_grid, worst_step_resid,
                           ase_step_residual)
     meta.update({"n_signal": len(sig_idx), "n_pump": len(pmp_idx),
+                 # spatial resolution (z_refine): the subdivision the march ran at, the worst
+                 # per-cell gain jump it saw, and whether that stayed under _CELL_GAIN_LIMIT
+                 "z_refine": int(r), "max_cell_gain_jump": float(worst_cell_jump),
+                 "mesh_resolved": bool(mesh_resolved),
                  # audit A-7 validity flag: False => the frozen-inversion step left its regime
                  # and the long-time limit is NOT amp.solve()
                  "quasi_static_valid": not reasons,
@@ -861,8 +984,8 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
                  # actually used, so a frame handed to the noise layer is self-consistent rather
                  # than mixing a T_ref sigma_e with a hot nbar2 (the audit-A-6 trap, in
                  # transient form).
-                 "m_modes": int(m), "mcc": None if mcc is None else mcc.copy()})
-    return TransientResult(t_grid, z, n2_zt, sig_out, pmp_out, gain_dB, list(kind), meta=meta,
+                 "m_modes": int(m), "mcc": None if mcc is None else mcc[:, zs].copy()})
+    return TransientResult(t_grid, z_user, n2_zt, sig_out, pmp_out, gain_dB, list(kind), meta=meta,
                            ase_fwd_W=ase_f_zt, ase_bwd_W=ase_b_zt, ase_lambda_m=ase_lam,
                            ase_dnu_hz=ase_dnu, plan=amp.channel_plan(), power_zt=prof_zt)
 
