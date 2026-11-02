@@ -355,3 +355,110 @@ def test_p14_find_poles_memo_actually_suppresses_duplicate_evaluations():
     rz.find_poles(f, complex(2.0, -0.35), complex(1.0, 0.5))
     assert len(seen) == len(set(seen)), "a point was evaluated twice: the memo is not working"
     assert len(seen) > 500, "fixture too small to be a meaningful memo test"
+
+
+# ================================================================================================
+# wave-6 (2026-11-02): P-9, P-10, P-12 -- same contract, same frozen-oracle style
+# ================================================================================================
+def _twm_rhs_old(dk, k1, k2, k3, scale, s, z, y):
+    """FROZEN: twm_propagate's nondegenerate rhs before P-9 (exp(+i dk z) twice, exp(-i dk z))."""
+    a1 = y[0] + 1j * y[1]
+    a2 = y[2] + 1j * y[3]
+    a3 = y[4] + 1j * y[5]
+    d1 = 1j * (k1 * scale * s) * a3 * np.conj(a2) * np.exp(1j * dk * z)
+    d2 = 1j * (k2 * scale * s) * a3 * np.conj(a1) * np.exp(1j * dk * z)
+    d3 = 1j * (k3 * scale * s) * a1 * a2 * np.exp(-1j * dk * z)
+    return [d1.real, d1.imag, d2.real, d2.imag, d3.real, d3.imag]
+
+
+def test_p9_twm_rhs_is_bit_identical_with_one_exponential(monkeypatch):
+    """P-9: exp(-i dk z) is conj(exp(+i dk z)) BIT FOR BIT (sin is odd in libm), so the rhs now
+    takes one complex exponential per step. Gate: the live rhs (captured from solve_ivp) against
+    the frozen pre-P-9 body on 997 z values, every component byte-identical. Measured speed-up is
+    small -- 1.05x on the nondegenerate rhs, 1.02x degenerate, end-to-end inside noise (the audit's
+    1.3x did not reproduce on this box) -- the item is taken because it is free and exact."""
+    import dynameta.optics.twm_reference as tw
+    W1, W2 = 2 * np.pi * 2.5e14, 2 * np.pi * 1.9e14
+    spec = tw.TWMSpec(omega1=W1, omega2=W2, d_eff=1e-11, length=2e-4, n1=1.5, n2=1.5, n3=1.5,
+                      dk_override=3.0e4)
+    cap = {}
+    real = tw.solve_ivp
+
+    def spy(fun, *a, **k):
+        cap["f"] = fun
+        return real(fun, *a, **k)
+
+    monkeypatch.setattr(tw, "solve_ivp", spy)
+    tw.twm_propagate(spec, 3e8, 2e8, 1e7 + 0j)
+    scale = 3e8
+    y = np.array([1.0, 0.2, 0.6, -0.1, 0.03, 0.01]) + 0.3
+    k1, k2, k3 = spec.kappa(1), spec.kappa(2), spec.kappa(3)
+    for z in np.linspace(0.0, 2e-4, 997):
+        new = cap["f"](z, y)
+        old = _twm_rhs_old(spec.dk, k1, k2, k3, scale, 1.0, z, y)
+        assert [_bits(v) for v in new] == [_bits(v) for v in old]
+
+
+def test_p10_twm_photon_flux_vectorized_within_one_ulp():
+    """P-10: twm_propagate built N1/N2/N3 with a per-element list comprehension over the already
+    vectorized photon_flux. NOT bit-identical, by a stated tolerance: numpy's SIMD |complex| on an
+    ARRAY rounds differently from the scalar hypot in ~38% of elements (by 1 ulp of |A|), so N
+    (and the Manley-Rowe sums built from it) move by a few ulp after the square and the scale
+    factors -- max relative 7.6e-16 measured, bar 1e-15; the FIELDS A1..A3 are
+    untouched. Speed: n_out = 20001 -> 4.5x on the whole call (0.0755 -> 0.0169 s, interleaved
+    A/B min of 7); the default n_out = 129 is unaffected."""
+    from dynameta.optics.twm_reference import TWMSpec, twm_propagate
+    W1, W2 = 2 * np.pi * 2.5e14, 2 * np.pi * 1.9e14
+    spec = TWMSpec(omega1=W1, omega2=W2, d_eff=1e-11, length=8e-5, n1=1.5, n2=1.5, n3=1.5,
+                   dk_override=2.0e4)
+    res = twm_propagate(spec, 8e8, 8e8, 0j, n_out=2001)
+    for which, A, N in ((1, res.A1, res.N1), (2, res.A2, res.N2), (3, res.A3, res.N3)):
+        ref = np.array([spec.photon_flux(which, a) for a in A])     # FROZEN: the pre-P-10 form
+        assert N.shape == ref.shape and N.dtype == ref.dtype
+        assert np.max(np.abs(N - ref) / np.maximum(np.abs(ref), 1e-300)) <= 1e-15
+    assert np.array_equal(res.manley_rowe_13, res.N1 + res.N3)
+
+
+def _resample_old(nodes_m, fields, n_per_axis):
+    """FROZEN: core.resample.resample_to_grid before P-12 (a NearestNDInterpolator -- i.e. a fresh
+    cKDTree -- per field)."""
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+    from scipy.spatial import Delaunay
+    nodes = np.asarray(nodes_m, dtype=np.float64)
+    ndim = nodes.shape[1]
+    axes = [np.linspace(nodes[:, d].min(), nodes[:, d].max(), int(n_per_axis[d]))
+            for d in range(ndim)]
+    qpts = np.column_stack([m.ravel() for m in np.meshgrid(*axes, indexing="ij")])
+    out = {"axis_{}".format(d): axes[d] for d in range(ndim)}
+    tri = Delaunay(nodes)
+    for name, vals in fields.items():
+        vals = np.asarray(vals, dtype=np.float64)
+        grid = LinearNDInterpolator(tri, vals)(qpts).reshape(tuple(int(n) for n in n_per_axis))
+        nan = np.isnan(grid)
+        if nan.any():
+            grid[nan] = NearestNDInterpolator(nodes, vals)(qpts[nan.ravel()])
+        out[name] = grid
+    return out
+
+
+@pytest.mark.parametrize("ndim,grid", [(2, (120, 90)), (3, (24, 24, 18))])
+def test_p12_resample_nearest_fill_is_byte_identical_with_one_tree(ndim, grid):
+    """P-12: the nearest-neighbour fill outside the convex hull rebuilt its KD-tree for every field
+    (on the same nodes) and re-queried the same points. One tree, one query per distinct NaN mask
+    now -- byte-identical to the frozen per-field form, including a field that CARRIES NaN (its
+    mask differs and is re-queried). Measured 1.18-1.28x on 7 fields (2-D 4000 / 20000 nodes, 3-D
+    3000 nodes, interleaved A/B)."""
+    from dynameta.core.resample import resample_to_grid
+    rng = np.random.default_rng(12)
+    pts = rng.standard_normal((1500, ndim))
+    pts /= np.linalg.norm(pts, axis=1)[:, None]
+    pts *= (rng.random(1500) ** (1.0 / ndim))[:, None] * 1e-7       # a ball: many hull misses
+    fields = {"f{}".format(k): np.sin((k + 1) * 3e7 * pts[:, 0]) + 1e6 * k * pts[:, 1]
+              for k in range(4)}
+    fields["with_nan"] = fields["f0"].copy()
+    fields["with_nan"][::53] = np.nan
+    new = resample_to_grid(pts, fields, grid)
+    old = _resample_old(pts, fields, grid)
+    assert set(new) == set(old)
+    for k in old:
+        assert _bits(new[k]) == _bits(old[k]), k

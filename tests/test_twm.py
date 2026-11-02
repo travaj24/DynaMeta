@@ -473,3 +473,38 @@ def test_total_power_conserved_lossless():
     assert res.power_residual < 1e-10
     # explicit: max deviation of the summed intensity from its start
     assert np.max(np.abs(res.total_power - res.total_power[0])) / res.total_power[0] < 1e-10
+
+
+# ---- audit Q-30 (2026-11-02): the QPM closed form's documented LENGTH-dependent tolerance --------
+def test_q30_qpm_closed_form_is_exact_on_half_period_lengths_and_bounded_otherwise():
+    """At the first-order match dk = 2 pi/Lambda the square-wave closed form is exact (rounding)
+    when L is an integer multiple of Lambda/2 and otherwise off by ~Lambda/(4L) (the leftover
+    partial domain): measured 2.4e-2 / 5.0e-3 / 1.25e-3 at L = 10.25 / 50.25 / 200.25 Lambda
+    against the piecewise-exact integral. Pins the docstring's numbers both ways."""
+    import math
+    from dynameta.optics.twm_reference import phase_matching_sinc
+    lam = 1.0
+    g = 2.0 * math.pi / lam
+
+    def exact(dk, L):
+        edges = [0.0]
+        z = lam / 4.0
+        while z < L:
+            edges.append(z)
+            z += lam / 2.0
+        edges.append(L)
+        tot = 0j
+        for a, b in zip(edges[:-1], edges[1:]):
+            s = 1.0 if math.cos(2.0 * math.pi * 0.5 * (a + b) / lam) >= 0.0 else -1.0
+            tot += s * (np.exp(-1j * dk * a) - np.exp(-1j * dk * b)) / (1j * dk)
+        return tot / L
+
+    def rel(L):
+        e = exact(g, L)
+        return abs(phase_matching_sinc(g, L, lam) - e) / abs(e)
+
+    for L in (10.0, 10.5, 50.0, 200.0):
+        assert rel(L) < 1e-12
+    for L, bound in ((10.25, 2.5e-2), (50.25, 5.1e-3), (200.25, 1.3e-3)):
+        r = rel(L)
+        assert 0.9 * bound < r < bound, (L, r)

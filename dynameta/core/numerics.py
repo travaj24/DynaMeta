@@ -23,9 +23,11 @@ def trapz(y, x) -> float:
     import statements (`import numpy as onp; onp.trapezoid`), the `getattr(np, "trapezoid")`
     form, and the scipy spelling (`scipy.integrate.trapezoid`).
 
-    EXCEPTIONS, exhaustive (the guard's allow-list; both are floor-correct as written):
-      * `optics/spdc_design.py` keeps a `getattr(np, "trapezoid", np.trapz)` shim because it
-        needs the 2-D `axis=` form this scalar helper does not offer.
+    The N-D `axis=` reduction is :func:`trapz_axis` (same formula, same real-only rule); it
+    replaced `optics/spdc_design.py`'s own `getattr(np, "trapezoid", np.trapz)` shim (audit Q-19,
+    2026-11-02), which had been this guard's one library exception.
+
+    EXCEPTION, exhaustive (floor-correct as written):
       * `scipy.integrate.cumulative_trapezoid` (`fiber_amp/lma.py`) is a CUMULATIVE variant,
         not this scalar reduction, and scipy has carried that name since 1.6 -- well under the
         declared `scipy>=1.10` floor. Other cumulative variants live with their consumers
@@ -55,6 +57,35 @@ def trapz(y, x) -> float:
     y = np.asarray(y, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
     return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)))
+
+
+def trapz_axis(y, x, axis: int = -1) -> np.ndarray:
+    """Trapezoidal integral of a REAL N-D ``y`` along ``axis`` over the 1-D sample points ``x``
+    -- the ``axis=`` form of :func:`trapz` (audit Q-19: `optics/spdc_design.py` carried a third
+    private `getattr(np, "trapezoid", np.trapz)` shim for exactly this).  Same real-only rule as
+    :func:`trapz` (a complex ``y``/``x`` raises TypeError), same ``0.5*(y_i + y_{i+1})*dx`` term
+    -- an exact power-of-two rescaling of numpy's ``dx*(y_i + y_{i+1})/2`` -- and the same
+    ``np.add.reduce`` along the same axis, so it reproduces ``np.trapezoid(y, x, axis=axis)``
+    bit-for-bit on normal float64 input (measured on the spdc marginals: 0 differing elements).
+    Returns an ndarray (a 0-d one for 1-D ``y``; use :func:`trapz` for a Python float)."""
+    y = np.asarray(y)
+    x = np.asarray(x)
+    if np.iscomplexobj(y) or np.iscomplexobj(x):
+        raise TypeError(
+            "core.numerics.trapz_axis integrates a REAL integrand; got a complex {} (dtype {}). "
+            "Integrate y.real and y.imag separately (audit X-1)."
+            .format("y" if np.iscomplexobj(y) else "x",
+                    (y if np.iscomplexobj(y) else x).dtype))
+    y = np.asarray(y, dtype=np.float64)
+    ax = int(axis) % y.ndim
+    if x.ndim != 1 or x.size != y.shape[ax]:
+        raise ValueError("trapz_axis: x must be 1-D with y.shape[axis] = {} points; got x.shape "
+                         "{}".format(y.shape[ax], x.shape))
+    dx = np.diff(np.asarray(x, dtype=np.float64)).reshape(
+        [-1 if k == ax else 1 for k in range(y.ndim)])
+    lo = tuple(slice(None, -1) if k == ax else slice(None) for k in range(y.ndim))
+    hi = tuple(slice(1, None) if k == ax else slice(None) for k in range(y.ndim))
+    return np.sum(0.5 * (y[lo] + y[hi]) * dx, axis=ax)
 
 
 class ZeroInitBDF(BDF):

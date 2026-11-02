@@ -560,3 +560,85 @@ def test_rcwa_bridge_gmr_aaa_vs_fano():
     assert best.omega_tilde.imag < 0.0                     # decaying pole
     assert abs(best.omega_tilde.real - ff.omega0) <= 1e-3 * ff.omega0   # same resonance frequency
     assert abs(best.Q - ff.Q) <= 0.05 * ff.Q               # AAA Q vs fano_fit Q within ~5%
+
+
+# ------------------------------------------------------------------------------------------------
+# wave-6 hygiene (2026-11-02): audit Q-20 (max_degree semantics), Q-28 (decimation filter wipe-out
+# signal), Q-31 / P-13 (one full-grid AAA fit in sweep_and_extract)
+# ------------------------------------------------------------------------------------------------
+def test_q20_max_degree_caps_support_points_as_documented():
+    """audit Q-20: the parameter doc said "support points minus one" while the loop (and the
+    summary line) capped the SUPPORT-POINT count. The documentation was the defect -- moving the
+    code instead shifts every capped fit by one support point and lost a genuine pole on
+    test_froissart_threshold_scales_with_the_aaa_misfit_on_noisy_data (seed 1002: 3 of 4) -- so
+    the semantics are pinned here: tol=0 runs to exactly max_degree support points, degree
+    max_degree - 1. max_degree = 0 used to return an EMPTY fit (degree -1, max_error nan); it
+    raises now."""
+    z = np.linspace(0.0, 1.0, 100)
+    f = 1.0 / (z - 0.5 - 0.1j) + 0.3 / (z - 0.2 - 0.05j)
+    for k in (1, 2, 5, 10):
+        r = aaa(z, f, tol=0.0, max_degree=k)
+        assert r.support_points.size == k and r.degree == k - 1
+    with pytest.raises(ValueError, match="max_degree"):
+        aaa(z, f, max_degree=0)
+    assert "SUPPORT POINTS" in inspect.getdoc(aaa)
+
+
+def _q28_trace():
+    w0 = 1.0e15
+    p = complex(1.0 * w0, -0.005 * w0)
+    w = np.linspace(0.8 * w0, 1.2 * w0, 201)
+    f = 0.3 + 0.8 * w0 / (w - p)
+    rng = np.random.default_rng(28)
+    noise = rng.standard_normal(w.size) + 1j * rng.standard_normal(w.size)
+    return w, f + 1e-7 * float(np.max(np.abs(f))) * noise
+
+
+def test_q28_decimation_filter_wiping_out_every_candidate_is_not_silent():
+    """audit Q-28: like the Froissart filter, the decimation-stability filter could remove EVERY
+    candidate and return [] -- indistinguishable from "no resonance here". Forced here with a
+    stability_rtol (1e-14) tighter than the 1e-7-noise pole jitter between the full and the
+    decimated fit: pre-fix [] and silence; now [] plus a RuntimeWarning naming the filter. The
+    default rtol keeps the pole and stays silent."""
+    import warnings
+    w, f = _q28_trace()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert len(find_resonances(w, f)) == 1
+    with pytest.warns(RuntimeWarning, match="decimation-stability filter removed ALL"):
+        assert find_resonances(w, f, stability_rtol=1e-14) == []
+
+
+def test_p13_q31_sweep_and_extract_fits_the_full_grid_once(monkeypatch):
+    """audit P-13 / Q-31: sweep_and_extract ran the full-grid AAA fit a second time, on the same
+    sorted samples with the same tol / max_degree, only to attach it to SweepResult. It now
+    reuses find_resonances' own fit: exactly one full-grid aaa call (plus the decimated
+    stability fit), and the attached approximant is bit-identical to a fresh fit. Measured on a
+    20-pole, 953-sample sweep that runs AAA to its cap: 5.41 s -> 3.09 s (1.75x, interleaved
+    A/B, min of 5), resonances and approximant bit-identical on 4 sweeps."""
+    import dynameta.optics.aaa_poles as ap
+    w0 = 1.0e15
+    poles = [complex(0.8 * w0, -0.004 * w0), complex(1.1 * w0, -0.002 * w0)]
+
+    def solver(w):
+        return 0.2 + sum((0.7 + 0.1j * k) * w0 / (w - p) for k, p in enumerate(poles))
+
+    sizes = []
+    real_aaa = ap.aaa
+
+    def spy(z, f, **kw):
+        sizes.append(np.asarray(z).size)
+        return real_aaa(z, f, **kw)
+
+    monkeypatch.setattr(ap, "aaa", spy)
+    res = ap.sweep_and_extract(solver, 0.6 * w0, 1.6 * w0)
+    n = res.omega.size
+    assert sorted(sizes) == sorted([n, (n + 1) // 2]), sizes     # full grid ONCE + decimated
+    monkeypatch.setattr(ap, "aaa", real_aaa)
+    fresh = aaa(res.omega.astype(np.complex128), res.response, tol=1e-11, max_degree=100)
+    for fld in ("support_points", "support_values", "weights", "poles", "residues", "zeros",
+                "errors"):
+        assert np.array_equal(getattr(res.approximant, fld), getattr(fresh, fld)), fld
+    assert len(res.resonances) == 2
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        ap.sweep_and_extract(solver, 0.6 * w0, 1.6 * w0, not_a_kwarg=1)

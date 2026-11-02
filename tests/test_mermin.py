@@ -434,3 +434,18 @@ def test_extended_drude_in_tmm_three_layer_stack():
         DrudeOptical(eps_inf=EPS_INF, m_opt_kg=M_OPT, gamma_rad_s=GAMMA_DC).eps(lam, n_m3=N_ITO)))
     _, _, A_plain = stack_rta(1.0, [(n_plain, 50e-9)], 1.5, lam, theta_deg=0.0, pol="s")
     assert A < A_plain
+
+
+# ---- audit Q-29 (2026-11-02): a scalar gamma spec broadcasts over an array omega -----------------
+def test_q29_gamma_at_returns_the_shape_of_its_input():
+    """ExtendedDrudeOptical.gamma_at documents "scalar or array", but the scalar-gamma branch of
+    _resolve_gamma_omega returned the bare scalar for ANY input. Array in -> array of that shape;
+    scalar in -> Python float; eps() byte-identical to DrudeOptical (the constant-gamma path)."""
+    import numpy as _np
+    from dynameta.materials.optical_model import DrudeOptical, ExtendedDrudeOptical
+    m = ExtendedDrudeOptical(eps_inf=3.9, m_opt_kg=3.2e-31, gamma_omega=1.5e14)
+    assert isinstance(m.gamma_at(1e15), float) and m.gamma_at(1e15) == 1.5e14
+    g = m.gamma_at(_np.ones((2, 3)) * 1e15)
+    assert isinstance(g, _np.ndarray) and g.shape == (2, 3) and _np.all(g == 1.5e14)
+    assert m.eps(1.55e-6, n_m3=5e26) == DrudeOptical(
+        eps_inf=3.9, m_opt_kg=3.2e-31, gamma_rad_s=1.5e14).eps(1.55e-6, n_m3=5e26)

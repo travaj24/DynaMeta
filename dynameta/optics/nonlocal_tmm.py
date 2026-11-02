@@ -136,6 +136,7 @@ from typing import Callable, NamedTuple, Sequence, Union
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
+from dynameta.optics.tmm_reference import _check_energy_budget   # ONE energy-budget rule (Q-23)
 
 __all__ = [
     "beta_from_vf",
@@ -246,7 +247,9 @@ def kL_squared(omega, layer: HydroLayer) -> complex:
 
     ``beta_eff**2`` carries the GNOR diffusion knob.  For a real omega above ``omega_p /
     sqrt(eps_inf)`` the real part is positive (a propagating bulk plasmon); below it the
-    longitudinal wave is evanescent."""
+    longitudinal wave is evanescent.  At ``beta = D = 0`` it is infinite and this raises
+    ``ZeroDivisionError`` -- there is no longitudinal wave; the stack routines treat that layer
+    as the local Drude metal (audit Q-18)."""
     w = complex(omega)
     num = w * w + 1j * layer.gamma * w - layer.wp * layer.wp / layer.eps_inf
     return num / beta_eff_squared(w, layer)
@@ -282,9 +285,20 @@ def _csc(p: complex) -> complex:
 # ------------------------------------------------------------------------------------------------
 # Per-medium out-of-plane wavevector and admittance
 # ------------------------------------------------------------------------------------------------
-def _kz(eps: complex, k0: complex, k_par: complex) -> complex:
-    """Out-of-plane wavevector on the principal (outgoing) branch -- see module branch note."""
-    return np.sqrt(eps * k0 * k0 - k_par * k_par + 0j)
+# AUDIT Q-19 (2026-11-02): `_kz`, `_admittance` and `k_par_from_angle` were VERBATIM copies of
+# optics.resonance's (and the `_admittance` twins had already diverged once -- V-3/V-8).  ONE
+# implementation now lives in optics.resonance and this module uses it: `_kz` (principal branch,
+# cmath.sqrt -- bit-identical to the np.sqrt(... + 0j) this module had on every reachable argument
+# class, audit P-6) and `_admittance` (reduced Y: s ~ kz, p ~ eps/kz; raises off-vocabulary)
+# are imported below; `k_par_from_angle` keeps this module's public signature as a one-line
+# delegate.  The resonance module imports nothing from here, so there is no cycle.  NOT
+# bit-identical, by a stated tolerance: the square root itself is (0 of 2400 values differ when
+# the shared kz is re-wrapped as np.complex128), but kz is now a Python complex, so downstream
+# divisions such as eps/kz run CPython's complex division instead of numpy's.  Measured on 2400
+# stack_rt / pole_function values (p and s, oblique, complex omega, GNOR): 647 differ, max
+# relative change 2.4e-14.  Gate: test_nonlocal_tmm.py::test_q19_one_kz_admittance_kpar.
+from dynameta.optics.resonance import _admittance, _kz  # noqa: E402
+from dynameta.optics.resonance import k_par_from_angle as _res_k_par_from_angle  # noqa: E402
 
 
 # The ONE polarization vocabulary of this module (audit V-3/V-8): the 'sp' family of
@@ -318,25 +332,6 @@ def _accept_pol(pol, where: str, param: str = "pol") -> str:
     on the happy path (the import is lazy, inside the widening/failure branch)."""
     from dynameta.core.polarization import accept_pol
     return accept_pol(pol, "sp", where=where, param=param, extra=_POL_NO_DEFAULT)
-
-
-def _admittance(eps: complex, kz: complex, pol: str) -> complex:
-    """Physical optical admittance ``Y = H_tan / E_tan`` for a forward wave (H_tan is H_y for
-    p-pol, and -H_x for s-pol, so both polarizations share the same sign pattern):
-    p-pol (TM) ``Y = omega*eps0*eps / kz``; s-pol (TE) ``Y = kz / (omega*mu0)``.  The
-    reflectance / transmittance built from these reproduce the exact Fresnel power coefficients
-    (validated against ``tmm`` in the tests).
-
-    AUDIT V-3/V-8: RAISES on any other ``pol``.  This twin used to fall through to S-pol while the
-    verbatim copy in ``optics.resonance`` fell through to P-pol, so the two modules returned
-    DIFFERENT physics for the same off-vocabulary string (``"TE"``, ``"TM"``, ``"x"``, ``"P"``).
-    Both now raise -- the stricter behaviour, and the one this module's public entry points
-    (``stack_rt``, ``pole_function``) already had."""
-    if pol not in ("p", "s"):
-        pol = _accept_pol(pol, "_admittance")
-    if pol == "p":
-        return eps / kz          # reduced by the common omega*eps0 (cancels in every ratio used)
-    return kz                    # reduced by the common 1/(omega*mu0)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -422,15 +417,27 @@ def _hydro_char_matrix_p(omega: complex, layer: HydroLayer, k0: complex,
     return np.array([[M00, M01 * wep], [M10 / wep, M11]], dtype=np.complex128)
 
 
+def _is_local_limit(layer: HydroLayer) -> bool:
+    """True when ``beta_eff**2 = beta**2 + D*(gamma - i*omega)`` vanishes IDENTICALLY, i.e.
+    ``beta == 0`` and ``D == 0``: no pressure, no diffusion, no longitudinal wave (k_L is
+    infinite).  AUDIT Q-18: such a layer IS the local Drude metal the ``HydroLayer`` docstring
+    promises -- the ABC matrix's longitudinal terms are all ``~ L1 ~ 1/k_z_L -> 0`` (with ``csc p
+    -> 0``, ``cot p`` bounded), so its exact limit is the local Abeles matrix at ``eps_T`` -- but
+    evaluated as written ``kL_squared`` divides by ``beta_eff**2 = 0`` and every p-pol call raised
+    ``ZeroDivisionError``."""
+    return layer.beta == 0 and layer.D == 0
+
+
 def _layer_matrix(omega: complex, layer: Layer, k0: complex, k_par: complex,
                   pol: str) -> np.ndarray:
     """Characteristic matrix for one layer.  Dielectric -> local; hydrodynamic metal in s-pol
     -> local with eps = eps_T (no longitudinal coupling in TE); hydrodynamic metal in p-pol ->
-    the effective ABC matrix."""
+    the effective ABC matrix, or -- in the exact local limit ``beta = D = 0`` (audit Q-18) -- the
+    local matrix at ``eps_T``, which is that matrix's beta -> 0 limit."""
     if isinstance(layer, DielectricLayer):
         return _local_char_matrix(complex(layer.eps), layer.thickness_m, k0, k_par, pol)
     if isinstance(layer, HydroLayer):
-        if pol == "p":
+        if pol == "p" and not _is_local_limit(layer):
             return _hydro_char_matrix_p(omega, layer, k0, k_par)
         return _local_char_matrix(eps_transverse(omega, layer), layer.thickness_m,
                                   k0, k_par, pol)
@@ -478,8 +485,10 @@ class RTA(NamedTuple):
 def k_par_from_angle(n_super, omega, theta_rad) -> float:
     """In-plane wavevector ``k_par = Re(n_super) (omega/c) sin(theta)`` [1/m].  ``n_super`` must
     be a real (lossless) incidence index for ``theta`` to be a real angle.  Hold this FIXED
-    when continuing to complex omega (the QNM/pole convention)."""
-    return float(np.real(n_super) * (omega / C_LIGHT) * math.sin(theta_rad))
+    when continuing to complex omega (the QNM/pole convention).  Delegates to the ONE
+    implementation, :func:`dynameta.optics.resonance.k_par_from_angle` (audit Q-19); kept as a
+    wrapper only so this module's ``omega`` keyword keeps working."""
+    return _res_k_par_from_angle(n_super, omega, theta_rad)
 
 
 def _rt_from_matrix(M: np.ndarray, Y_super: complex, Y_sub: complex):
@@ -501,7 +510,7 @@ def _rt_from_matrix(M: np.ndarray, Y_super: complex, Y_sub: complex):
 
 
 def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
-             theta_rad: float = 0.0, k_par_m=None) -> RTA:
+             theta_rad: float = 0.0, k_par_m=None, check_energy: bool = True) -> RTA:
     """Reflectance / transmittance / absorptance of ``super | layers | sub`` at ``omega``.
 
     Parameters
@@ -520,6 +529,13 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     k_par_m : float or complex, optional
         Explicit in-plane wavevector [1/m]; overrides ``theta_rad`` (pass this, held fixed, for
         complex-omega pole work).
+    check_energy : bool
+        ENERGY-BUDGET GUARD (audit Q-23, 2026-11-02): the ``tmm_reference`` policy, through its
+        ``_check_energy_budget`` -- on the REAL axis with a propagating lossless incidence, a
+        non-finite or < -1e-6 R, T or A raises ValueError instead of returning a negative
+        "absorptance" (an interior gain layer, ``gamma < 0`` or ``Im(eps) < 0``, used to pass
+        silently here while the TMM oracle raised).  Complex ``omega``, evanescent incidence and
+        a lossy superstrate are not checked.  ``False`` for a deliberate gain medium.
 
     Returns
     -------
@@ -544,6 +560,8 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     R = float(abs(r) ** 2)
     denom = Y_super.real
     T = float(abs(t) ** 2 * (Y_sub.real / denom)) if denom != 0.0 else float("nan")
+    if check_energy and w.imag == 0.0 and denom > 0.0 and eps_super.imag == 0.0:
+        _check_energy_budget(R, T, where="nonlocal_tmm.stack_rt")            # audit Q-23
     A = 1.0 - R - T
     return RTA(r=r, t=t, R=R, T=T, A=A, D_pole=D_pole)
 
@@ -575,18 +593,31 @@ def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub
     be MISSED.  ``Q - P`` has a SIMPLE pole there, so multiplying by ``sin(k_z_L d)`` cancels it
     (infinity*0 -> a finite NON-zero value, introducing NO spurious zero) and leaves an analytic
     function whose only zeros are the physical scattering poles.  Branch-cut-free in the layer
-    wavevectors (even in ``k_z_T`` / ``k_z_L``); the only omega-plane non-analyticities are the
-    end-media light lines and, for p-pol, the ``eps_T = 0`` admittance point -- place the search
-    box to exclude both (as ``resonance.find_poles`` already requires for local stacks).  Intended
+    wavevectors (even in ``k_z_T`` / ``k_z_L``); the omega-plane non-analyticities are the
+    end-media light lines, for p-pol the ``eps_T = 0`` admittance point, AND (audit Q-26,
+    2026-11-02 -- this list used to stop at the first two) the ZEROS of each hydrodynamic layer's
+    ``d00 = C_T - L1 sin(q) csc(p)`` (``_hydro_char_matrix_p``: every entry of the layer matrix
+    carries ``1/d00``).  Those are NOT removed by the ``sin(k_z_L d)`` clearing: they sit just off
+    the standing-wave points, where ``sin p = L1 sin(q) / C_T`` is small, and can be simple poles
+    of the returned function.  Measured on a 2 nm Drude film (eps_inf 1, wp 1.37e16, gamma 1e14,
+    beta 1.07e6, k_par 2e7): at m = 1 the d00 zero is at p/pi = 1.00016 and ``|D * d00|`` is
+    constant to 2e-4 for offsets 1e-6..1e-8 (a simple pole of D, inside any box drawn around the
+    m = 1 mode); at m = 2 (p/pi = 1.99992) the residue vanishes and D stays finite.  Place the
+    search box to exclude all of them (as ``resonance.find_poles`` already requires for the light
+    lines of local stacks), or check the winding count against a refinement.  Intended
     for GENUINE nonlocal stacks (finite ``beta``); in the ``beta -> 0`` local limit there is no
-    bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there)."""
+    bulk-plasmon pole and ``sin(k_z_L d)`` overflows (bulk plasmons do not exist there).  The EXACT
+    local limit ``beta = D = 0`` is handled (audit Q-18): such a layer is the local Drude layer
+    and contributes no clearing factor."""
     if pol not in ("p", "s"):
         pol = _accept_pol(pol, "pole_function")          # audit V-3/V-8: one vocabulary, one message
     kpar = complex(k_par_m)
     eps_super = complex(n_super) ** 2
     eps_sub = complex(n_sub) ** 2
     # p-pol hydrodynamic layers whose csc pole must be cleared from the pole function.
-    hydro_p = [layer for layer in layers if pol == "p" and isinstance(layer, HydroLayer)]
+    # A layer in the exact local limit (beta = D = 0, audit Q-18) has no ABC and no csc pole.
+    hydro_p = [layer for layer in layers if pol == "p" and isinstance(layer, HydroLayer)
+               and not _is_local_limit(layer)]
 
     def D(omega):
         w = complex(omega)
