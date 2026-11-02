@@ -92,6 +92,15 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     Exn, Eyn, Ezn = xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz)), xp.empty((nx, ny, nz))
     kes, bes, ces = ke[:, :, 1:], be[:, :, 1:], ce[:, :, 1:]     # CPML interior views (E-grid)
     khs, bhs, chs = kh[:, :, :-1], bh[:, :, :-1], ch[:, :, :-1]  # CPML interior views (H-grid)
+    # audit P-8 (2026-11-02): the Kerr eps_eff block (|E|^2, eps_eff, ce_dt, denom: 9 full-grid
+    # ufunc passes) ran every step even with chi3 identically 0 -- the default, linear case. Gate
+    # it on an EXACT zero test (as P-1 does in 2-D) and fill ce_dt/denom ONCE with the same ops on
+    # eps_inf, which is what eps_inf + 3*0*|E|^2 equals for finite fields: all eight probe arrays
+    # bit-identical (tobytes). Measured 16x16x100, 200 steps: 0.179 -> 0.167 s (the 4.3 % share).
+    do_kerr = bool(xp.any(chi3))
+    if not do_kerr:
+        xp.multiply(eps_inf, EPS0, out=ce_dt); xp.divide(ce_dt, dt, out=ce_dt)
+        xp.add(ce_dt, bJ_h, out=denom)
 
     def _dfwd(F, axis, d, out):
         """(xp.roll(F, -1, axis) - F) / d without the roll/temporary allocations (same values:
@@ -121,7 +130,12 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     exR, eyR, hxR, hyR = xp.empty(sh), xp.empty(sh), xp.empty(sh), xp.empty(sh)
     for n in range(nsteps):
         # ---------------- H update: dH/dt = -(1/mu) curl E ----------------
-        # Hx: -(dEz/dy - dEy/dz) ; dEy/dz is CPML-stretched
+        # Hx: -(dEz/dy - dEy/dz) ; dEy/dz is CPML-stretched.
+        # audit D-22: unlike 2-D (kernels2d.py updates only Hx[:, :-1]), the 3-D Hx at the LAST z
+        # cell IS updated -- by the transverse dEz/dy alone (sEy_dz[..., -1] stays 0). Both are
+        # right for their component sets: that Hx sits at z = (nz-1/2) dz, beyond the PEC plane
+        # k = nz-1, and feeds only Ey[..., nz-1] (zeroed every step) and Ez[..., nz-1] (also past
+        # the PEC), so nothing reaches the domain; 2-D TE has no Ez, so its copy has no term at all.
         xp.subtract(Ey[:, :, 1:], Ey[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dEy/dz
         xp.multiply(chs, dzb, out=tz)
         xp.multiply(bhs, psi_Hx[:, :, :-1], out=psi_Hx[:, :, :-1])
@@ -151,16 +165,19 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
         if do_raman:
             Qnew = R1 * Q + R2 * Qp + R3 * (Ex ** 2 + Ey ** 2 + Ez ** 2)
             Qp = Q; Q = Qnew
-        # eps_eff = eps_inf + 3 chi3 |E|^2 (standard chi3, C3-2) -> ce_dt, denom
-        xp.multiply(Ex, Ex, out=f1)
-        xp.multiply(Ey, Ey, out=f2)
-        xp.add(f1, f2, out=f1)
-        xp.multiply(Ez, Ez, out=f2)
-        xp.add(f1, f2, out=f1)                               # |E|^2
-        xp.multiply(chi3_3, f1, out=f1)
-        xp.add(eps_inf, f1, out=f1)                          # eps_eff
-        xp.multiply(f1, EPS0, out=ce_dt); xp.divide(ce_dt, dt, out=ce_dt)
-        xp.add(ce_dt, bJ_h, out=denom)
+        # eps_eff = eps_inf + 3 chi3 |E|^2 (standard chi3, C3-2) -> ce_dt, denom.
+        # audit P-8: with chi3 identically 0 (do_kerr False, an EXACT zero test) eps_eff IS eps_inf
+        # for finite fields, so ce_dt/denom are loop-invariant and were filled once before the loop.
+        if do_kerr:
+            xp.multiply(Ex, Ex, out=f1)
+            xp.multiply(Ey, Ey, out=f2)
+            xp.add(f1, f2, out=f1)
+            xp.multiply(Ez, Ez, out=f2)
+            xp.add(f1, f2, out=f1)                           # |E|^2
+            xp.multiply(chi3_3, f1, out=f1)
+            xp.add(eps_inf, f1, out=f1)                      # eps_eff
+            xp.multiply(f1, EPS0, out=ce_dt); xp.divide(ce_dt, dt, out=ce_dt)
+            xp.add(ce_dt, bJ_h, out=denom)
         # Ex: (dHz/dy - dHy/dz) ; dHy/dz CPML-stretched
         xp.subtract(Hy[:, :, 1:], Hy[:, :, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)  # dHy/dz
         xp.multiply(ces, dzb, out=tz)
@@ -280,9 +297,6 @@ def run_3d(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, sr
     return exL, eyL, hxL, hyL, exR, eyR, hxR, hyR
 
 
-_run_3d = run_3d                                             # back-compat alias (pre-promotion name)
-
-
 def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ky, sx, sy):
     """Full-vector 3D-FDTD at OBLIQUE incidence via the complex-envelope Bloch method with a 2D transverse
     wavevector (kx,ky): the physical field = envelope * exp(i(kx x + ky y)), so EVERY x-derivative gains
@@ -350,8 +364,6 @@ def _run_3d_oblique(eps_inf, wp, gam, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
         exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
         exR[n] = Ex[:, :, k_pR]; eyR[n] = Ey[:, :, k_pR]
     return exL, eyL, exR, eyR
-
-
 
 
 def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, pol):
@@ -448,5 +460,3 @@ def _run_3d_mo(exx, eyy, ezz, wp, gam, wc, dx, dy, dz, dt, nsteps, k_src, k_pL, 
         exL[n] = Ex[:, :, k_pL]; eyL[n] = Ey[:, :, k_pL]
         exR[n] = Ex[:, :, k_pR]; eyR[n] = Ey[:, :, k_pR]
     return exL, eyL, exR, eyR
-
-
