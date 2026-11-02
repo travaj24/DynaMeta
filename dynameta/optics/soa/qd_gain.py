@@ -52,6 +52,8 @@ Pure numpy/scipy; no FDTD, no DEVSIM, no metasurface seam.
 
 from __future__ import annotations
 
+import functools
+import threading
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -63,19 +65,75 @@ from dynameta.core.numerics import ZeroInitBDF
 
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
-# Self-contained guarded import (mirrors optics.fdtd_nd.backends) so the module imports without
-# numba; selected via QDGainModel(fast=True). The numpy rhs_fields stays the reference and the
-# parity is asserted by validation/qd_soa_numba_parity.py.
-try:                                                          # pragma: no cover - env dependent
-    from numba import njit as _njit
-    _HAVE_NUMBA = True
-except Exception:                                             # pragma: no cover
-    _HAVE_NUMBA = False
+# Selected via QDGainModel(fast=True). The numpy rhs_fields stays the reference and the parity is
+# asserted by validation/qd_soa_numba_parity.py.
+#
+# LAZY (audit V-14, soa half, 2026-11-02 -- the fdtd_nd half is optics.fdtd_nd.backends). This
+# block used to `from numba import njit` at module load, so every `import dynameta.optics.soa`
+# paid numba (measured 0.34 s of `dynameta.optics.soa.qd_gain`'s 0.35 s self+children in
+# -X importtime; whole-package import 1.06-1.11 s -> see the V-14 row) although the default
+# QDGainModel(fast=False) never touches it. Self-contained on purpose (importing
+# optics.fdtd_nd.backends would pull the fdtd_nd package in): `_njit(...)` returns a `_LazyJit`
+# that applies the SAME numba.njit options to the SAME function on first call -- so the compiled
+# kernels (and the on-disk `cache=True` entries, keyed on the function's file and qualname) are
+# what they were -- or returns the plain Python function when numba is absent (the old shim);
+# `_HAVE_NUMBA` is a PEP 562 module attribute (`_have_numba()` internally), so
+# `from dynameta.optics.soa.qd_gain import _HAVE_NUMBA` keeps working. No prange here.
+_NUMBA_OK = None
+_JIT_LOCK = threading.Lock()
 
-    def _njit(*a, **k):
-        def _wrap(f):
-            return f
-        return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
+
+def _have_numba():
+    """True if numba imports (cached; the import is done once, on first ask -- audit V-14)."""
+    global _NUMBA_OK
+    if _NUMBA_OK is None:
+        try:                                                  # pragma: no cover - env dependent
+            import numba                                      # noqa: F401
+            _NUMBA_OK = True
+        except Exception:                                     # pragma: no cover
+            _NUMBA_OK = False
+    return _NUMBA_OK
+
+
+class _LazyJit:
+    """numba.njit(*jit_args, **jit_kwargs)(py_func), built on first call (audit V-14)."""
+
+    def __init__(self, py_func, jit_args, jit_kwargs):
+        self._disp = None
+        self.py_func = py_func
+        self._jit_args, self._jit_kwargs = jit_args, jit_kwargs
+        functools.update_wrapper(self, py_func)
+
+    def _dispatcher(self):
+        if self._disp is None:
+            with _JIT_LOCK:
+                if self._disp is None:
+                    if _have_numba():
+                        import numba
+                        self._disp = numba.njit(*self._jit_args, **self._jit_kwargs)(self.py_func)
+                    else:                                     # pragma: no cover - no-numba shim
+                        self._disp = self.py_func
+        return self._disp
+
+    def __call__(self, *args, **kwargs):
+        return self._dispatcher()(*args, **kwargs)
+
+
+def _njit(*args, **kwargs):
+    """Drop-in for `numba.njit` (bare or with options) that defers the import + compile."""
+    if len(args) == 1 and callable(args[0]) and not kwargs:
+        return _LazyJit(args[0], (), {})
+
+    def _wrap(f):
+        return _LazyJit(f, args, kwargs)
+    return _wrap
+
+
+def __getattr__(name):                                        # PEP 562: lazy module attribute
+    if name == "_HAVE_NUMBA":
+        return _have_numba()
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+
 
 __all__ = ["QDGainParams", "QDGainModel", "SelfHeating"]
 
@@ -634,9 +692,9 @@ class QDGainModel:
         # numpy reference). Default OFF so results are byte-stable across machines (numba-present or
         # not); opt in with fast=True for long transient runs. Explicit fast=True without numba is
         # an error (don't silently fall back to slow numpy when speed was requested).
-        if fast and not _HAVE_NUMBA:
+        if fast and not _have_numba():
             raise RuntimeError("QDGainModel(fast=True) requires numba (pip install numba)")
-        self._use_numba = bool(fast) and _HAVE_NUMBA
+        self._use_numba = bool(fast) and _have_numba()
         # inhomogeneous size groups: Gaussian-weighted frequencies about nu0
         sig = p.fwhm_inhom_Hz / (2.0 * np.sqrt(2.0 * np.log(2.0)))
         if p.n_groups == 1:

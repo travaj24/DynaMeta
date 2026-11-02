@@ -115,8 +115,9 @@ def _hankel(y: np.ndarray, L: int) -> np.ndarray:
 # default pencil_frac = 0.4 the Hankel matrix is 0.6N x 0.4N and `np.linalg.svd` allocates its
 # own copy of it plus U (0.6N x 0.4N, computed by LAPACK and never read here) and Vh
 # (0.4N x 0.4N).  Measured: N = 8000 -> 13.8 s and ~370 MB; N = 20000 -> ~4 min and ~2.3 GB.
-# The repo's own front end `fdtd_etalon_ringdown` decimates and caps at max_fit_samples = 1200,
-# but `matrix_pencil` / `ringdown_q` are exported for arbitrary traces and
+# The repo's own front end `fdtd_etalon_ringdown` decimates and keeps its fit under
+# _FIT_SAMPLES_BUDGET = 6000 samples (coarsening the stride first), but `matrix_pencil` /
+# `ringdown_q` are exported for arbitrary traces and
 # `solve_fdtd_1d(..., return_time_trace=True)` hands out traces of exactly the length that blows
 # this up.  So the workspace estimate below is checked BEFORE anything large is allocated and a
 # too-long trace RAISES (it never silently decimates -- decimation is an accuracy change and must
@@ -216,7 +217,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     INFORMATION here: the pencil fits poles, so a trace decimated to ~8-10 samples per period of
     the highest mode of interest carries the same poles at a fraction of the cost -- which is
     exactly what :func:`fdtd_etalon_ringdown` does (it decimates to
-    ``target_samples_per_period`` and caps at ``max_fit_samples = 1200``).
+    ``target_samples_per_period`` and, by default, fits the whole data-driven window under a
+    6000-sample budget -- see ``_FIT_SAMPLES_BUDGET``).
     """
     y_full = np.asarray(signal)
     dt = float(dt)
@@ -252,9 +254,9 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
             "(Hankel {} x {}, {} bytes/sample), over the {:.2f} GB budget -- and the fit is "
             "O(N^3) in time (N = 8000 measures 13.8 s, N = 20000 extrapolates to ~4 min). "
             "DECIMATE the trace first (keep >= ~8 samples per period of the highest mode, e.g. "
-            "`signal[::k]` with `dt*k`, which is what fdtd_etalon_ringdown does at "
-            "max_fit_samples = 1200), shorten it with `t_start`, or -- if you really do have the "
-            "memory -- pass `max_bytes` above {:.2f}e9. About {} samples fit the current budget."
+            "`signal[::k]` with `dt*k`, which is what fdtd_etalon_ringdown does), shorten it "
+            "with `t_start`, or -- if you really do have the memory -- pass `max_bytes` above "
+            "{:.2f}e9. About {} samples fit the current budget."
             .format(N, need / 1e9, N - L, L + 1, y.dtype.itemsize, budget / 1e9,
                     budget / 1e9, n_fit))
 
@@ -410,6 +412,23 @@ _FIT_AMP_SANITY = 20.0
 # A window must span a few amplitude e-foldings for gamma (hence Q) to be observable rather than
 # extrapolated; see fdtd_etalon_ringdown's SCOPE note.
 _MIN_WINDOW_NEPERS = 3.0
+# DEFAULT FIT LENGTH (2026-11-02, wave-6 H6b). fdtd_etalon_ringdown used to TRUNCATE the decimated
+# window at a fixed max_fit_samples = 1200, which at n_slab = 20 fit only the first 0.42 true
+# e-foldings of a 3176-sample window and returned Q = 252.8 against Fabry-Perot 439.5 (-44.5%).
+# The default is now the WHOLE data-driven window. This budget only keeps the O(N^3) pencil in
+# check on an unusually long record; measured on the n_slab = 20 trace (pencil + VARPRO, all
+# modes): 1200 samples 1.1 s, 3176 1.3 s, 4730 1.9 s, 6352 4.5 s, 7940 9.6 s, and the shipped
+# windows at 20 samples/period are 1845 / 2500 / 4838 / 4937 / 4891 / 3176 samples for
+# n_slab = 3.5 / 5 / 7 / 10 / 15 / 20 -- all under it, so it never binds on a shipped config.
+# Over budget the stride is COARSENED first (down to _MIN_SAMPLES_PER_PERIOD at the band centre),
+# which keeps the decay span -- the thing Q needs -- instead of cutting it: on the same traces
+# 8 samples/period over the whole window gave Q within 0.03-0.25 percentage points of 20
+# samples/period (n_slab 3.5/7/10/15/20: -1.25 / +1.13 / +0.74 / +0.66 / +0.69% vs FP, against
+# -1.01 / +1.09 / +0.70 / +0.63 / +0.63% at 20 samples/period). Only past that is the window
+# truncated (and the span guard says so).
+_FIT_SAMPLES_BUDGET = 6000
+_MIN_SAMPLES_PER_PERIOD = 8
+_LEGACY_FIT_SAMPLES = 1200                  # the start_frac (fixed-fraction window) path only
 
 
 def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode]) -> dict:
@@ -789,7 +808,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                          settle: float = 12.0, use: str = "reflected",
                          start_frac: Optional[float] = None,
                          target_samples_per_period: int = 20,
-                         max_fit_samples: int = 1200, pencil_frac: float = 0.4,
+                         max_fit_samples: Optional[int] = None, pencil_frac: float = 0.4,
                          svd_tol: float = 1e-6, max_modes: Optional[int] = None,
                          amp_floor: float = 5e-2, refine: bool = True,
                          max_refine: int = 6) -> EtalonRingdown:
@@ -815,7 +834,13 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                      begins at or before the envelope peak, and whatever it produces is scored by
                      the absolute fit-quality tells below.
       target_samples_per_period : decimation target (>= ~8 to stay above Nyquist).
-      max_fit_samples : cap on the number of decimated samples fed to the pencil (speed).
+      max_fit_samples : None (default) = fit the WHOLE data-driven window; only past the
+                     ``_FIT_SAMPLES_BUDGET`` (6000-sample) pencil budget is the stride coarsened
+                     (to >= 8 samples/period) and, failing that, the window cut. An int is a hard
+                     TRUNCATION of the decimated window (the pre-2026-11-02 default was 1200, which
+                     cut the n_slab = 20 fit to 0.42 true e-foldings: Q -44.5%) -- see below. On
+                     the legacy ``start_frac`` path None keeps that 1200 cut: that window has no
+                     data-driven end and would otherwise run into the float64 floor.
       refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
                      (default True) -- makes the reported (f0, Q) a platform-stable property
                      of the trace rather than of the LAPACK build (see _nls_refine_real).
@@ -837,14 +862,19 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
         on the shipped n_slab = 3.5..15 etalons, versus 8.4e-3..1.4e-1 and 10..5.7e3 on windows
         that cut into the driven pulse.
       * WINDOW SPAN -- the fitted window should cover at least ~3 amplitude e-foldings of the
-        dominant mode. ``max_fit_samples = 1200`` at ``target_samples_per_period = 20`` is 60
-        carrier periods, i.e. only ``60 pi / Q`` nepers: 13.7 at n_slab = 3.5, 3.5 at 7, 1.7 at 10,
-        0.75 at 15. THAT is the shipped scope limit. It is a CONSERVATIVE flag -- on these clean
-        traces the extraction still holds to +0.9% at n_slab = 10 and 15 -- but n_slab = 20 is
-        where it breaks: Q = 252.8 against the Fabry-Perot 455.2 (-44.5%; -62.7% before the
-        2026-11-02 refinement fix), and the RMS tell flags that one too (3.5e-2). Raise ``max_fit_samples`` (and ``settle`` for the extra record) to
-        go higher; the pencil is O(N^3) in the fitted length, so this is a deliberate speed/range
-        trade, not a bound of the method.
+        dominant mode. Until 2026-11-02 the default ``max_fit_samples = 1200`` TRUNCATED the fit to
+        60 carrier periods at 20 samples/period, i.e. ``60 pi / Q`` nepers (13.9 at n_slab = 3.5,
+        3.5 at 7, 1.7 at 10, 0.75 at 15), and at n_slab = 20 that is where it broke: 0.42 TRUE
+        e-foldings, ~29 near-equal etalon modes unseparated, Q = 252.8 against the Fabry-Perot
+        455.2 (-44.5%), RMS tell 3.5e-2. Raising ``settle`` did NOT help at that cap (the window
+        starts later and the cut is the same length: settle 24 gave Q = 5408). The default now
+        fits the whole data-driven window (1845..4937 decimated samples on the shipped configs,
+        0.25-2.4 s of pencil next to a 3-53 s FDTD march), measured vs Fabry-Perot at n_slab
+        3.5/5/7/10/15/20: -1.01/+0.31/+1.09/+0.70/+0.63/+0.63%, spans 21.3/14.5/14.0/6.9/3.1/1.10
+        nepers. n_slab = 20 still WARNS (1.10 < 3): the window ends at the march's numeric floor
+        (settle 24 gives the same 3176-sample, 1.11-neper window and Q 441.29, so `settle` is not a
+        lever either), and the flag is CONSERVATIVE -- that Q is +0.6%. An explicit int
+        ``max_fit_samples`` that truncates the window says so in the warning.
     """
     from dynameta.optics.fdtd import solve_fdtd_1d, FDTDLayer
 
@@ -889,9 +919,30 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
 
     # decimate to ~target_samples_per_period at the band center (keeps the pencil small + fast)
     stride = max(1, int(round((1.0 / f_c) / (target_samples_per_period * dt))))
+    truncated = False
+    whole_window = max_fit_samples is None and start_frac is None
+    if whole_window:
+        # DEFAULT: fit the WHOLE data-driven window (see _FIT_SAMPLES_BUDGET). Over the pencil
+        # budget, coarsen the stride before cutting the window: Q lives in the decay SPAN, not in
+        # the samples per period.
+        n_cap = _FIT_SAMPLES_BUDGET
+        if -(-tail.size // stride) > n_cap:
+            stride_max = max(stride, int((1.0 / f_c) / (_MIN_SAMPLES_PER_PERIOD * dt)))
+            stride = min(stride_max, -(-tail.size // n_cap))
+    else:
+        # An explicit cap -- or the LEGACY start_frac path, whose window has no data-driven END
+        # (it runs to the end of the record, into the float64 floor), so it keeps its pre-2026-11-02
+        # 1200-sample cut and its numbers unchanged. (Uncut at start_frac = 0.2, n_slab = 3.5, it
+        # fits 4393 samples down into the floor: Q 13.2975 -> 13.2950 plus a GROWING-pole advisory.)
+        n_cap = _LEGACY_FIT_SAMPLES if max_fit_samples is None else int(max_fit_samples)
+        if n_cap < 16:
+            raise ValueError("fdtd_etalon_ringdown: max_fit_samples must be None (the whole "
+                             "data-driven window) or an int >= 16; got {!r}"
+                             .format(max_fit_samples))
     tail_d = tail[::stride]
-    if tail_d.size > max_fit_samples:
-        tail_d = tail_d[:max_fit_samples]
+    if tail_d.size > n_cap:
+        tail_d = tail_d[:n_cap]
+        truncated = True
     dt_d = dt * stride
     tail_d = tail_d - np.mean(tail_d)                   # remove any DC / slow ABC drift
 
@@ -932,19 +983,32 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     if modes and np.isfinite(q) and t_used.size > 1:
         nepers = 0.5 * modes[0].gamma_rad_s * float(t_used[-1])     # FIELD e-foldings spanned
         if nepers < _MIN_WINDOW_NEPERS:
+            if truncated and whole_window:
+                why = ("The whole data-driven window ({} samples at {} samples/period) exceeds the "
+                       "{}-sample pencil budget even at the coarsest stride, so the fit was cut "
+                       "to its first {}. Pass an explicit larger max_fit_samples (the pencil is "
+                       "O(N^3) in it) or shorten the record.".format(
+                           -(-tail.size // stride), _MIN_SAMPLES_PER_PERIOD,
+                           _FIT_SAMPLES_BUDGET, n_cap))
+            elif truncated:
+                why = ("The fit was TRUNCATED to max_fit_samples = {} decimated samples of the {} "
+                       "the window holds -- that cap, not the record, limits the span (at "
+                       "n_slab = 20 the old default cap 1200 gave Q = 252.8 vs Fabry-Perot 455.2, "
+                       "-44.5%). Pass max_fit_samples=None with start_frac=None to fit the whole "
+                       "data-driven window.".format(n_cap, -(-tail.size // stride)))
+            else:
+                why = ("This is the WHOLE data-driven window ({} decimated samples at stride {}), "
+                       "which ends where the envelope reaches the march's numeric floor: neither "
+                       "max_fit_samples nor a longer record lengthens it (measured at n_slab = 20: "
+                       "settle 24 gave the same 3176-sample, 1.11-neper window, Q 441.29). It is a "
+                       "CONSERVATIVE flag -- that whole-window fit at n_slab = 20 (1.10 nepers) "
+                       "measured Q = 442.24 vs Fabry-Perot 439.46 (+0.6%).".format(
+                           tail_d.size, stride))
             warnings.warn(
                 "fdtd_etalon_ringdown: the fitted window spans only {:.2f} amplitude e-foldings "
                 "(nepers) of the dominant mode, under the ~{:g} below which the decay rate -- "
                 "hence Q = {:.4g} -- is weakly constrained (the fit interpolates a decay it barely "
-                "sees). The span is {} decimated samples at {} samples/period, i.e. pi * "
-                "n_periods / Q nepers, so it shrinks as 1/Q: this is the max_fit_samples cap "
-                "meeting a high-Q cavity, NOT a limit of the method. Raise max_fit_samples (and "
-                "`settle` for the extra record) or lower target_samples_per_period. This is a "
-                "CONSERVATIVE flag -- on clean traces the extraction held to +0.9% at n_slab = 10 "
-                "(1.7 nepers) and 15 (0.75) -- but it is where it breaks: n_slab = 20 returns "
-                "Q = 252.8 against a Fabry-Perot 455.2 (-44.5%).".format(
-                    nepers, _MIN_WINDOW_NEPERS, q, int(min(max_fit_samples, tail_d.size)),
-                    int(target_samples_per_period)),
+                "sees). {}".format(nepers, _MIN_WINDOW_NEPERS, q, why),
                 RuntimeWarning, stacklevel=2)
 
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
