@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import EPS0, MU0
-from dynameta.optics.fdtd_nd.backends import HAVE_NUMBA, njit, prange
+from dynameta.optics.fdtd_nd.backends import njit, prange
 
 
 def _launch_with_retry(launch, reset, blocks, sm, need):
@@ -160,7 +160,17 @@ def _te2d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
 #     caps the grid at the co-resident block count (~#SMs), so this WINS on small / unit-cell grids (~3.4x
 #     vs the threaded CPU on a metasurface unit cell @ RTX 4070 Ti) but is occupancy-limited on very large
 #     volumes -- prefer the 'cupy' backend (unlimited blocks) there. ---
-if HAVE_NUMBA:
+_COOP_CUDA = None
+
+
+def _coop_cuda_kernel():
+    """Build (once) and return the cooperative numba-CUDA kernel. LAZY (audit V-14): this block
+    used to run at import time under `if HAVE_NUMBA:`, so every `import dynameta.optics.fdtd_nd`
+    paid the 0.39 s `numba.cuda` import whether or not a GPU (or the 'numba-cuda' backend) was
+    ever used. The kernel body is unchanged; only its definition moved inside this builder."""
+    global _COOP_CUDA
+    if _COOP_CUDA is not None:
+        return _COOP_CUDA
     from numba import cuda as _cuda
 
     @_cuda.jit(fastmath=True)
@@ -235,6 +245,9 @@ if HAVE_NUMBA:
                 ii += nthreads
             grid.sync()
 
+    _COOP_CUDA = _te2d_coop_cuda
+    return _COOP_CUDA
+
 
 def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
                nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor,
@@ -248,6 +261,7 @@ def _te2d_cuda(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dz, dt,
     Cooperative launch -> blocks must be co-resident: use <= #SMs blocks (1/SM, always safe) with
     grid-stride."""
     from numba import cuda
+    _te2d_coop_cuda = _coop_cuda_kernel()
     nx, nz = eps_inf.shape
     dev = (lambda a: cuda.to_device(np.ascontiguousarray(a, dtype=np.float64)))
     Ey = dev(np.zeros((nx, nz))); Hx = dev(np.zeros((nx, nz))); Hz = dev(np.zeros((nx, nz)))

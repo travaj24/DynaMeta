@@ -309,8 +309,15 @@ def _drude_coeffs(wp, gam, eps_inf, beta2, dt):
 
 
 def _march_linear(grid: _Grid, *, dt, nsteps, kx, i_src, src, i_pL, i_pR, mur_v,
-                  nonlocal_on=True, rho_probe=None, rho_init=None, ez_init=None):
+                  nonlocal_on=True, rho_probe=None, rho_init=None, ez_init=None, real=False):
     """March the fixed-kx linear TM hydro-FDTD; return complex probe traces.
+
+    ``real=True`` (audit P-17) marches float64 instead of complex128. It is legal only when every
+    input is real -- kx == 0, real material coefficients, real source and seeds (raises otherwise)
+    -- because then the imaginary part of every field is identically zero for all time and the
+    complex march spends half its arithmetic on zeros. The real parts follow the SAME operations,
+    so the returned traces (cast back to complex128) are bit-identical to the complex march; the
+    confined kx = 0 ring-down in bulk_plasmon_resonances is the one caller.
 
     ``nonlocal_on`` False drops the pressure/continuity (rho) entirely -> the LOCAL Drude reduced
     solver (gate 1 reference).  Records the tangential E_x at the left/right probes (amplitude-
@@ -325,26 +332,37 @@ def _march_linear(grid: _Grid, *, dt, nsteps, kx, i_src, src, i_pL, i_pR, mur_v,
                                                 grid.beta2_i, dt)
     aJh, bJh, e0eh, denomh, bph = _drude_coeffs(grid.wp_h, grid.gam_h, grid.eps_inf_h,
                                                 grid.beta2_h, dt)
+    dtype = np.complex128
+    if real:                                                 # audit P-17: provably-real march
+        coeffs = (aJi, bJi, e0ei, denomi, bpi, aJh, bJh, e0eh, denomh, bph)
+        seeds = [a for a in (src, rho_init, ez_init) if a is not None]
+        if float(kx) != 0.0 or any(np.any(np.imag(np.asarray(a)) != 0.0) for a in coeffs + tuple(seeds)):
+            raise ValueError("_march_linear(real=True) needs kx == 0 and real coefficients, source and "
+                             "seeds (the imaginary part is then identically zero); audit P-17")
+        dtype = np.float64
+        ikx = 0.0
+        (aJi, bJi, e0ei, denomi, bpi, aJh, bJh, e0eh, denomh, bph) = (np.real(a) for a in coeffs)
+        src = np.real(np.asarray(src))
 
-    Ex = np.zeros(nz, dtype=np.complex128)
-    Ez = np.zeros(nz - 1, dtype=np.complex128)
-    Jx = np.zeros(nz, dtype=np.complex128)
-    Jz = np.zeros(nz - 1, dtype=np.complex128)
-    Hy = np.zeros(nz - 1, dtype=np.complex128)
-    rho = np.zeros(nz, dtype=np.complex128)
+    Ex = np.zeros(nz, dtype=dtype)
+    Ez = np.zeros(nz - 1, dtype=dtype)
+    Jx = np.zeros(nz, dtype=dtype)
+    Jz = np.zeros(nz - 1, dtype=dtype)
+    Hy = np.zeros(nz - 1, dtype=dtype)
+    rho = np.zeros(nz, dtype=dtype)
     if rho_init is not None:
-        rho[:] = rho_init
+        rho[:] = np.real(rho_init) if real else rho_init
     if ez_init is not None:
-        Ez[:] = ez_init
+        Ez[:] = np.real(ez_init) if real else ez_init
 
-    curl_x = np.zeros(nz, dtype=np.complex128)
-    divJ = np.zeros(nz, dtype=np.complex128)
-    drho_dz = np.zeros(nz - 1, dtype=np.complex128)
+    curl_x = np.zeros(nz, dtype=dtype)
+    divJ = np.zeros(nz, dtype=dtype)
+    drho_dz = np.zeros(nz - 1, dtype=dtype)
 
     mur = (mur_v * dt - dz) / (mur_v * dt + dz)
-    eL = np.empty(nsteps, dtype=np.complex128)
-    eR = np.empty(nsteps, dtype=np.complex128)
-    rho_tr = np.empty(nsteps, dtype=np.complex128) if rho_probe is not None else None
+    eL = np.empty(nsteps, dtype=dtype)
+    eR = np.empty(nsteps, dtype=dtype)
+    rho_tr = np.empty(nsteps, dtype=dtype) if rho_probe is not None else None
 
     for n in range(nsteps):
         exL0, exL1 = Ex[0], Ex[1]
@@ -395,6 +413,9 @@ def _march_linear(grid: _Grid, *, dt, nsteps, kx, i_src, src, i_pL, i_pR, mur_v,
         eR[n] = Ex[i_pR]
         if rho_tr is not None:
             rho_tr[n] = rho[rho_probe]
+    if real:                                                 # same complex128 contract to callers
+        eL, eR = eL.astype(np.complex128), eR.astype(np.complex128)
+        rho_tr = None if rho_tr is None else rho_tr.astype(np.complex128)
     out = {"eL": eL, "eR": eR}
     if rho_tr is not None:
         out["rho"] = rho_tr
@@ -507,6 +528,7 @@ def solve_tm_spectrum(slabs: Sequence[Slab], *, kx_per_m: float,
 
     # The single-sided source exp(-i w_c t) (physical omega > 0 under exp(-i omega t)) lands at
     # numpy's NEGATIVE fftfreq bins, so the PHYSICAL angular frequency is omega = -2 pi fftfreq.
+    # (audit V-22: idiom 2 of the FDTD-family sign convention, dynameta.optics.fdtd_nd docstring.)
     f_np = np.fft.fftfreq(nsteps, dt)
     omega = -2.0 * math.pi * f_np
     f_phys = -f_np
@@ -590,10 +612,13 @@ def bulk_plasmon_resonances(slab: HydroSlab, *, m_list=(1, 3, 5),
         prof[[n0, n1]] = 0.0                            # keep the probe strictly interior
         rho_probe = int(np.argmax(prof))
 
+        # audit P-17: kx = 0, real seeds, zero source and a real HydroSlab -> the march is provably
+        # real; real=True runs it in float64 (bit-identical traces, see _march_linear).
         tr = _march_linear(grid, dt=dt, nsteps=nsteps, kx=0.0, i_src=nz // 2,
                            src=np.zeros(nsteps, dtype=np.complex128),
                            i_pL=n0, i_pR=n1, mur_v=C_LIGHT, nonlocal_on=True,
-                           rho_probe=rho_probe, rho_init=rho0, ez_init=ez0)
+                           rho_probe=rho_probe, rho_init=rho0, ez_init=ez0,
+                           real=(complex(eps_inf).imag == 0.0))
         y = tr["rho"][::step]
         modes = matrix_pencil(y, dt * step, svd_tol=svd_tol, amp_floor=amp_floor, max_modes=6)
         cand = [x for x in modes if x.omega_rad_s > 0.9 * wp]

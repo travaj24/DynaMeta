@@ -574,3 +574,36 @@ def test_twm_reference_crosscheck(opa_runs):
     gL_selfform = (CHI2 * g["Ap_field"] / (2.0 * _OPA["n_med"] * C_LIGHT)) * np.sqrt(ws * wi) * L_OPA
     assert abs(gL_twm / gL_selfform - 1.0) < 1e-12          # oracle == closed form, dk = 0
     assert 0.3 < g["gL_ref"] / gL_twm < 3.0                 # FDTD-measured gL vs the oracle
+
+
+def test_d19_a_later_second_pulse_extends_the_window_instead_of_being_truncated():
+    """audit D-19: `second_source`'s own tau_s / t0_s did not enter the run length, which was sized
+    from the PRIMARY pulse alone (2 t0 + 4 transits + 200 tau = 393.7 tau on this fixture). A second
+    pulse launched at 380 tau therefore never reached the right probe before the record ended:
+    measured pre-fix, max|incident_right| after t0_s was ~0 (the record holds the primary only) --
+    no warning, and the second colour silently absent from every mixing band. Its end
+    (t0_s + settle*tau_s) and tail (200 tau_s) now size the window (761.7 tau here); the default
+    second pulse keeps the single-pulse window bit-for-bit, and a pulse switched on abruptly at
+    t = 0 (t0_s < 3 tau_s) warns."""
+    lam_min, lam_max = 0.9e-6, 1.9e-6
+    f_min, f_max = C_LIGHT / lam_max, C_LIGHT / lam_min
+    tau = 1.0 / (np.pi * (f_max - f_min))
+    f2 = 0.5 * (f_min + f_max) / 1.37
+    lay = [FDTDLayer(thickness_m=0.30e-6, eps_inf=4.0)]
+    kw = dict(lambda_min_m=lam_min, lambda_max_m=lam_max, resolution=30, return_time_trace=True)
+    r1 = solve_fdtd_1d(lay, **kw)
+    r_def = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2))       # default tau_s, t0_s
+    assert r_def.time_trace["t"].size == r1.time_trace["t"].size        # window unchanged
+    t02 = 380.0 * tau
+    r = solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, tau_s=tau, t0_s=t02))
+    t = r.time_trace["t"]
+    assert t[-1] > t02 + 12.0 * tau                                     # pulse fully inside (pre-fix: 394 tau)
+    x = np.asarray(r.time_trace["incident_right"], float)
+    late = np.abs(x[t > t02]).max() / np.abs(x).max()
+    assert late > 0.3, late                                             # the 2nd pulse IS recorded
+    tail = np.abs(x[-x.size // 50:]).max() / np.abs(x).max()
+    assert tail < 1e-6, tail                                            # rung down, not cut mid-pulse
+    with pytest.warns(UserWarning, match="abrupt turn-on"):
+        solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, tau_s=tau, t0_s=1.5 * tau))
+    with pytest.raises(ValueError, match="tau_s"):
+        solve_fdtd_1d(lay, **kw, second_source=dict(f_hz=f2, tau_s=0.0))
