@@ -32,6 +32,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from dynameta.core.units import NM_PER_M
+from dynameta.geometry.guards import require_supported_geometry
 
 S = NM_PER_M   # m -> nm (tmm's d_list uses the same unit as the wavelength); single source
 
@@ -135,6 +136,8 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
     both orderings, only R and T are wrong. This helper was the last unreversed member of
     the C5-1 flip family; the 2026-07-17 sweep missed it because it checked the CONSUMERS
     of tmm_reference and never the extractor inside it)."""
+    # 2026-11-02: a Stack.features via ran here and returned the via-free stack (measured bit-identical)
+    require_supported_geometry(design, "design_layer_stack (TMM)")
     layers = []
     for L in reversed(design.stack.layers):          # superstrate side first (audit C5-1/V-1)
         if L.inclusions:
@@ -281,6 +284,9 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
     extractor). Slabs are ordered superstrate-side first (the Stack lists bottom->top, so
     reversed)."""
     from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
+    # 2026-11-02: Stack.features were silently dropped here (make_layered_tmm_solver's R/T with a
+    # metal via was bit-identical to the via-free stack); tapers are inclusions, refused below anyway
+    require_supported_geometry(design, "layered_stack_from_design (TMM)")
     slabs_top_down = []
     names_top_down = []                              # design layer name per slab (audit C5-4)
     for L in reversed(design.stack.layers):          # superstrate side first
