@@ -31,7 +31,8 @@ Module map (phased build; each phase ships with discrimination-proven validation
            lifetimes, ESA, overlap Gamma, the local N2/N upper-level fraction.
   Phase 2  steady_state          : the z-resolved two-point BVP -- coupled pump / signal /
            forward+backward ASE power ODEs; gain, output power, pump depletion, N2(z).
-  Phase 3  ase / noise           : spectral ASE (spontaneous seeding 2 h nu d-nu / mode),
+  Phase 3  ase / noise           : spectral ASE (spontaneous seeding h nu d-nu PER polarization
+           mode, m h nu d-nu per bin with m = AseBand.m_modes, 2 by default -- audit A-21),
            inversion factor n_sp, noise figure NF = (2 n_sp (G-1) + 1)/G, OSNR.
   Phase 4  metrics               : saturated output power, gain compression/tilt, power
            conversion efficiency, slope + quantum efficiency, gain flatness.

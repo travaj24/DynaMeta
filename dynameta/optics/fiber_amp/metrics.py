@@ -156,7 +156,10 @@ def gain_compression_curve(amp: FiberAmplifier, p_in_W: Sequence[float], *, sign
         p_sat_in = float(np.exp(xs))
         p_sat_out = float(np.interp(xs, [x0, x1], [np.log(p_out[k - 1]), np.log(p_out[k])]))
         p_sat_out = float(np.exp(p_sat_out))
-    return CompressionCurve(p_in, p_out, gdB, g0, p_sat_out, p_sat_in, compression_dB)
+    # keyword construction (audit X-30: seven floats/arrays in a row were built positionally)
+    return CompressionCurve(p_in_W=p_in, p_out_W=p_out, gain_dB=gdB, small_signal_gain_dB=g0,
+                            p_sat_out_W=p_sat_out, p_sat_in_W=p_sat_in,
+                            compression_dB=compression_dB)
 
 
 def saturation_output_power(amp: FiberAmplifier, *, signal_index: int = 0,
@@ -254,7 +257,8 @@ def slope_efficiency(amp: FiberAmplifier, pump_W: Sequence[float], *, signal_ind
     # (tests/test_fiber_chain.py pins that message), rather than here.
     lam_p = effective_pump_lambda_m(amp.pumps)
     lam_s = amp.signals[signal_index].lambda_m
-    return SlopeEfficiency(pump, s_out, slope, thr, stokes_limit(lam_p, lam_s))
+    return SlopeEfficiency(pump_W=pump, signal_out_W=s_out, slope=slope, threshold_pump_W=thr,
+                           stokes_limit=stokes_limit(lam_p, lam_s))
 
 
 # ---- gain spectrum / flatness --------------------------------------------------------------
@@ -303,7 +307,8 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
     peak = float(lams[int(np.argmax(gdB))])
     flat = float(np.max(gdB) - np.min(gdB))
     tilt = float(np.polyfit(lams * 1e9, gdB, 1)[0]) if lams.size >= 2 else np.nan
-    return GainSpectrum(lams, gdB, peak, flat, tilt)
+    return GainSpectrum(lambda_m=lams, gain_dB=gdB, peak_lambda_m=peak, flatness_dB=flat,
+                        tilt_dB_per_nm=tilt)
 
 
 def gain_flatness(result: SteadyStateResult) -> float:
