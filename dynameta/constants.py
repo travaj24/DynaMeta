@@ -25,6 +25,10 @@ H_PLANCK = 6.62607015e-34     # Planck constant, J s (exact SI definition; sever
 M_E     = 9.1093837015e-31    # electron rest mass, kg
 C_LIGHT = 2.99792458e8        # speed of light in vacuum, m/s
 MU0     = 1.0 / (EPS0 * C_LIGHT ** 2)   # vacuum permeability, H/m (= 1/(eps0 c^2); the FDTD modules used to re-derive this locally)
+Z0      = 1.0 / (EPS0 * C_LIGHT)        # free-space wave impedance, ohm (~376.730; = sqrt(MU0/EPS0)). Audit
+                                        # F-21 (2026-11-02): optics/solver.py (twice), optics/shg_fem.py,
+                                        # optics/hydro_fem.py and core/graphene.py each re-derived it; the
+                                        # hydro_fem copy as sqrt(MU0/EPS0), 1 ulp from this one.
 T_REF   = 300.0               # reference temperature, K
 V_T     = KB * T_REF / Q_E    # thermal voltage at T_REF, V
 KB_EV_K = 8.617333262e-5      # Boltzmann constant, eV/K. KB and Q_E are both EXACT in the 2019 SI,

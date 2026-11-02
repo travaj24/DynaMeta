@@ -70,7 +70,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
-SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
+SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag",
         "reference_modulator_spectrum"}
 # The `_` prefix excludes a file from EVERY tier (see _gated), and it carries TWO opposite
 # meanings: a legitimately SHARED FIXTURE (imported by other validations, never run on its own)
