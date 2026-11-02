@@ -27,7 +27,7 @@ from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
 # a short-window note -- data-dependent, e.g. n_slab 3.5 and 10.0 warn here while 5.0 and 7.0 do
 # not, so pinning them per test would be brittle. Both diagnostics have their OWN dedicated gates
 # in this file (test_gate10b_growing_poles_are_dropped_and_do_not_overflow,
-# test_gate9_high_q_window_span_scope_limit_warns), which use `pytest.warns` and are therefore
+# test_gate9_default_fits_the_whole_window_not_a_1200_sample_cut), which use `pytest.warns` and are
 # unaffected by these marks -- as is test_gate10c's local `simplefilter("error")`.
 pytestmark = [pytest.mark.filterwarnings("ignore:matrix_pencil"),
               pytest.mark.filterwarnings("ignore:fdtd_etalon_ringdown")]
@@ -244,7 +244,10 @@ def test_gate7_high_q_etalon_window_does_not_collapse(n_slab, rel_tol):
       7.0:  54.970929 vs 54.601815  (+0.676%)      <- pre-fix: ValueError
      10.0: 110.302227 vs 109.588241 (+0.652%)      <- pre-fix: ValueError
     (Those are pencil values: the refinement was inert until 2026-11-02. With it live: 13.227533
-    (-1.006%), 27.202982 (+0.312%), 55.205207 (+1.105%), 110.408333 (+0.748%).)
+    (-1.006%), 27.202982 (+0.312%), 55.205207 (+1.105%), 110.408333 (+0.748%). With the WHOLE
+    data-driven window fit by default (wave-6 H6b, 2026-11-02; was a 1200-sample cut): 13.227438
+    (-1.007%), 27.202936 (+0.312%), 55.196766 (+1.090%), 110.349763 (+0.695%) -- 3.5 unchanged to
+    7e-6, the other three closer to Fabry-Perot.)
     """
     L = 1.0e-6
     er = fdtd_etalon_ringdown(n_slab, L, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
@@ -329,57 +332,128 @@ def test_gate9_fit_quality_tells_are_silent_on_every_shipped_config():
         assert "UNRELIABLE" not in er.refine_note, (n_slab, er.refine_note)
 
 
-def test_gate9_high_q_window_span_scope_limit_warns():
-    """FIX-VERIFY W1 item 9.  ``max_fit_samples = 1200`` at 20 samples/period is 60 carrier
-    periods, i.e. only ``60 pi / Q`` amplitude e-foldings: 13.7 at n_slab = 3.5 but 1.1 at
-    n_slab = 20.  That is where the extraction breaks -- Q = 169.9 against the Fabry-Perot 455.2
-    (-62.7%; 252.8 / -44.5% since the 2026-11-02 refinement fix) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
-    says so.  The bias is the max_fit_samples cap, not the record length -- see the @slow gate
-    below (n_slab = 20 at max_fit_samples = 4800: +0.6% vs Fabry-Perot)."""
-    with pytest.warns(RuntimeWarning) as rec:
-        er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
-                                  resolution=30)
-    msgs = [str(w.message) for w in rec]
-    m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
-    assert er.q < 0.6 * _fp_closed_form_q(20.0, m)              # it IS biased low
-    assert any("e-foldings" in s for s in msgs), msgs
-    nepers = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
-    assert nepers < 3.0
+def _memoize_fdtd_march(monkeypatch):
+    """Run each distinct etalon march ONCE per test: fdtd_etalon_ringdown imports solve_fdtd_1d
+    from dynameta.optics.fdtd at call time and only READS the result, so a memoizing wrapper lets
+    one test compare several fit settings on the very same trace."""
+    import dynameta.optics.fdtd as fdtd_mod
+    real, cache = fdtd_mod.solve_fdtd_1d, {}
 
-    # the shipped low-index configs are comfortably inside the envelope
-    for n_slab, lo in ((3.5, 10.0), (7.0, 3.0)):
+    def memo(layers, **kw):
+        key = (tuple((ly.eps_inf, ly.thickness_m) for ly in layers), tuple(sorted(kw.items())))
+        if key not in cache:
+            cache[key] = real(layers, **kw)
+        return cache[key]
+    monkeypatch.setattr(fdtd_mod, "solve_fdtd_1d", memo)
+
+
+def test_gate9_default_fits_the_whole_window_not_a_1200_sample_cut():
+    """wave-6 H6b (2026-11-02). ``max_fit_samples`` defaulted to 1200, a hard TRUNCATION of the
+    decimated data-driven window: at n_slab = 10 that is 1200 of 4937 samples, 1.67 amplitude
+    e-foldings, and the span guard fired on a shipped gate-7 config. The default (None) now fits the
+    whole window: 4937 samples, 6.88 nepers, no span warning, Q 110.4083 -> 110.3498 (+0.748% ->
+    +0.695% vs Fabry-Perot 109.5882). FAILS on the old default (1200 samples, 1.67 nepers, warns).
+    The explicit legacy cap still truncates -- and its warning now says the cap did it. (This
+    replaces the n_slab = 20 span test that ran a ~55 s march in the PR tier: n_slab = 10 is 21 s,
+    and the n_slab = 20 case is the @slow gate below.)"""
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        er = fdtd_etalon_ringdown(10.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30)
+    assert not [str(w.message) for w in rec if "e-foldings" in str(w.message)]
+    assert er.signal_used.size > 4000, er.signal_used.size   # 4937 measured; the old cut was 1200
+    nep = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
+    assert nep > 5.0, nep                                     # 6.88 measured (1.67 at the old cut)
+    m = int(round(2.0 * np.pi * er.f0_Hz * 10.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(10.0, m) - 1.0) < 0.03, (er.q, m)
+
+    with pytest.warns(RuntimeWarning, match="TRUNCATED to max_fit_samples = 1200"):
+        e1 = fdtd_etalon_ringdown(10.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30, max_fit_samples=1200)
+    assert e1.signal_used.size == 1200
+    assert 0.5 * e1.modes[0].gamma_rad_s * float(e1.t_used[-1]) < 3.0      # 1.67 measured
+    # the flag is conservative: at 1.67 nepers the extraction still holds (+0.748%)
+    m1 = int(round(2.0 * np.pi * e1.f0_Hz * 10.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(e1.q / _fp_closed_form_q(10.0, m1) - 1.0) < 0.03
+
+    # the shipped low-index configs are comfortably inside the envelope at the default
+    for n_slab, lo in ((3.5, 15.0), (7.0, 10.0)):            # 21.3 / 14.0 nepers measured
         e2 = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                   resolution=30)
         assert 0.5 * e2.modes[0].gamma_rad_s * float(e2.t_used[-1]) > lo, n_slab
 
+    with pytest.raises(ValueError, match="max_fit_samples must be None"):
+        fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                             resolution=30, max_fit_samples=8)
+
+
+def test_gate9_over_budget_window_coarsens_the_stride_before_cutting(monkeypatch):
+    """The default's pencil budget (_FIT_SAMPLES_BUDGET = 6000) never binds on a shipped config
+    (largest window 4937 samples), so it is exercised here by LOWERING it on the n_slab = 7 trace
+    (4838 samples at 20 samples/period, 14.0 nepers, Q 55.1968, +1.090% vs Fabry-Perot 54.6018):
+      budget 2000: the stride is coarsened (~20 -> ~8 samples/period) instead of cutting the
+                   window: the whole 14.0 nepers kept, Q inside the 3% gate (Q lives in the decay
+                   SPAN, not in the samples per period);
+      budget  300: even 8 samples/period overflows it, so the window is cut, and the span warning
+                   names the budget -- not max_fit_samples -- as the reason."""
+    import dynameta.optics.ringdown as rd_mod
+    _memoize_fdtd_march(monkeypatch)
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
+    ref = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert ref.signal_used.size > 4000                     # premise: over the 2000 budget below
+    nep_ref = 0.5 * ref.modes[0].gamma_rad_s * float(ref.t_used[-1])
+
+    monkeypatch.setattr(rd_mod, "_FIT_SAMPLES_BUDGET", 2000)
+    er = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert er.signal_used.size <= 2000
+    assert er.dt_used > 2.0 * ref.dt_used                  # coarser stride, not a cut
+    assert er.window == ref.window
+    nep = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
+    assert nep == pytest.approx(nep_ref, rel=0.05), (nep, nep_ref)
+    m = int(round(2.0 * np.pi * er.f0_Hz * 7.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(7.0, m) - 1.0) < 0.03, (er.q, m)
+
+    monkeypatch.setattr(rd_mod, "_FIT_SAMPLES_BUDGET", 300)
+    with pytest.warns(RuntimeWarning, match="pencil budget"):
+        e3 = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert e3.signal_used.size == 300
+
 
 @pytest.mark.slow
-def test_gate9_n20_bias_is_the_fit_sample_cap_not_the_record():
-    """WHY n_slab = 20 reads Q = 252.8 against Fabry-Perot 455.2 (-44.5%), measured 2026-11-02 (the
-    wave-2 hand-off asked: record too short for Q ~ 450, or more pencil modes than max_refine?).
-
-    NEITHER. The default record is long enough: the data-driven window holds 3176 decimated samples
-    (1.1 amplitude e-foldings of the true mode), but ``max_fit_samples = 1200`` truncates the fit to
-    the first 1200 -- 0.42 TRUE e-foldings, over which a comb of ~29 near-equal-amplitude etalon modes
-    (the top eight within 25% of each other in amplitude) cannot be separated; the refit RMS tell fires (3.5e-2). Measured
-    (dominant mode vs Fabry-Perot at its own order m):
-        max_fit_samples 1200 (default)       Q 252.83 vs 455.15 (m 29)  -44.5%   UNRELIABLE FIT
+def test_gate9_n20_default_matches_fabry_perot(monkeypatch):
+    """n_slab = 20 (Q ~ 440) at the DEFAULT settings (wave-6 H6b, 2026-11-02). Until then the
+    default fit was cut at max_fit_samples = 1200 of the 3176 decimated samples the data-driven
+    window holds -- 0.42 TRUE e-foldings, over which a comb of ~29 near-equal-amplitude etalon modes (the top
+    eight within 25% of each other) cannot be separated -- and Q came out 252.8 against Fabry-Perot
+    455.2 (-44.5%, m 29; RMS tell 3.5e-2, UNRELIABLE FIT). The wave-2 hand-off asked: record too
+    short for Q ~ 450, or more pencil modes than max_refine? NEITHER. Measured on this one trace:
+        max_fit_samples 1200 (old default)   Q 252.83 vs 455.15 (m 29)  -44.5%   UNRELIABLE FIT
         max_fit_samples 2400                 Q 442.18 vs 439.46 (m 28)  +0.6%
-        max_fit_samples 4800 (= all 3176)    Q 442.24 vs 439.46 (m 28)  +0.6%
+        None = whole window, 3176 (default)  Q 442.24 vs 439.46 (m 28)  +0.6%
         settle 24 (2x record), cap 1200      Q 5408   (window later, 0.04 nepers) -- WORSE
-        settle 24 / 48, cap 4800 / all       Q 441.29 / 441.20                       +0.4%
-        max_refine 20 (pencil: 34 modes)     Q 442.35 -- max_refine is not the lever (+0.03%)
-    So the fix is the documented one -- raise max_fit_samples -- and `settle` (record length) is NOT
-    needed. The pencil cost of 3176 vs 1200 samples is invisible next to the FDTD march (67 s vs 68 s
-    total). @slow: one ~70 s march; nightly (a) runs it. The span guard still warns (1.1 < 3
-    nepers): it is a CONSERVATIVE flag and this is a case it over-calls."""
-    with pytest.warns(RuntimeWarning, match="e-foldings"):
-        er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
-                                  resolution=30, max_fit_samples=4800)
+        settle 24, None (whole window)       Q 441.29 vs 439.46 (m 28)  +0.4%  (SAME 3176 samples)
+        max_refine 20 (pencil: 34 modes)     Q 442.35 -- max_refine is not the lever
+    The cut was the problem, not the record length. The pencil cost of 3176 vs 1200 samples is
+    invisible next to the ~55-70 s FDTD march. The span guard still warns (1.10 < 3 nepers -- the
+    window ends at the march's numeric floor, so a longer record does not lengthen it): a
+    CONSERVATIVE flag this case over-calls. FAILS on the old default
+    (Q -44.5%). @slow: one march, memoized for the legacy-cap contrast; nightly (a) runs it."""
+    _memoize_fdtd_march(monkeypatch)
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
+    with pytest.warns(RuntimeWarning, match="WHOLE data-driven window"):
+        er = fdtd_etalon_ringdown(20.0, 1.0e-6, **kw)
     assert "UNRELIABLE" not in er.refine_note, er.refine_note
-    assert er.signal_used.size < 4800                       # the whole data-driven window was fit
+    assert er.signal_used.size > 3000                       # the whole window (3176), not 1200
     m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
     assert abs(er.q / _fp_closed_form_q(20.0, m) - 1.0) < 0.03, (er.q, m)
+    # the contrast on the SAME trace: the legacy cap IS the -44.5% bias, and it is flagged
+    with pytest.warns(RuntimeWarning) as rec:
+        e1 = fdtd_etalon_ringdown(20.0, 1.0e-6, max_fit_samples=1200, **kw)
+    m1 = int(round(2.0 * np.pi * e1.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert e1.q < 0.6 * _fp_closed_form_q(20.0, m1)
+    assert "UNRELIABLE" in e1.refine_note
+    assert any("TRUNCATED" in str(w.message) for w in rec)
 
 
 def test_gate7_cross_platform_q_anchor_unchanged():
@@ -396,10 +470,15 @@ def test_gate7_cross_platform_q_anchor_unchanged():
     the dominant Q is the NLS optimum 13.227533 (-0.92% from the pencil; -1.01% vs the
     Fabry-Perot 13.361960, inside gate 7's 3%), refit RMS 2.44e-3 -> 1.93e-3 of the window's
     peak-to-peak, and independent of the seed to <= 8e-10 (test_nls_refinement_makes_the_fdtd_
-    q_seed_independent) -- which is what makes it a platform-stable anchor."""
+    q_seed_independent) -- which is what makes it a platform-stable anchor.
+
+    RE-PINNED 2026-11-02 (wave-6 H6b): the default fit is now the WHOLE data-driven window (1845
+    decimated samples, 21.3 nepers) instead of its first 1200 (13.9): 13.227533 -> 13.227438
+    (-7.2e-6 relative; -1.007% vs Fabry-Perot). Same window, same refinement: the extra 645
+    samples sit deep in a decay the first 1200 had already pinned, so the anchor barely moves."""
     er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                               resolution=30)
-    assert er.q == pytest.approx(13.227533, rel=1e-4)
+    assert er.q == pytest.approx(13.227438, rel=1e-4)
     assert er.window == (9840, 31980)
 
 

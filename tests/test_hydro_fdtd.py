@@ -141,7 +141,8 @@ def test_gate3_energy_budget_lossless():
                                cells_per_vacuum=50, min_periods=50, run_damping_times=3.0)
     assert res.omega.size >= 5
     assert np.max(np.abs(res.A)) < 2e-3, "lossless energy leak {:.2e}".format(np.max(np.abs(res.A)))
-    assert np.all(res.R + res.T > 0.99)
+    # audit T-20: a trailing `assert np.all(res.R + res.T > 0.99)` was dropped -- A = 1 - R - T by
+    # construction (solve_tm_spectrum), so |A| < 2e-3 already forces R + T > 0.998.
 
 
 def test_gate3_lossy_physical():
@@ -160,7 +161,8 @@ def test_gate3_lossy_physical():
     res = hf.solve_tm_spectrum([lossy], kx_per_m=0.0, lambda_min_m=650e-9, lambda_max_m=750e-9,
                                cells_per_vacuum=40, min_periods=40)
     assert res.omega.size >= 5
-    assert np.all(res.R >= -1e-9) and np.all(res.T >= -1e-9) and np.all(res.A >= -1e-9)
+    # audit T-20: `A >= -1e-9` used to sit beside `A > 0` (strictly stronger) -- dropped.
+    assert np.all(res.R >= -1e-9) and np.all(res.T >= -1e-9)
     assert np.all(res.A > 0.0)                                # a lossy metal absorbs
     worst = 0.0
     for i, w in enumerate(res.omega):

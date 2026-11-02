@@ -265,6 +265,29 @@ def test_v14_importing_the_fdtd_family_does_not_import_numba():
     assert out.stdout.split() == ["False", "True"], out.stdout
 
 
+def test_v14_importing_optics_soa_does_not_import_numba():
+    """audit V-14, the soa half (wave-6 H6b, 2026-11-02): soa/qd_gain.py imported numba at module
+    load for the opt-in QDGainModel(fast=True) kernels -- `import dynameta.optics.soa` measured
+    1.06-1.11 s with numba loaded, 0.74 s without (numba 0.34 s in -X importtime). The two kernels
+    now JIT on first call with the same njit options (bit-identical step_slices output vs the
+    eager module, ng = 1 and 41), and the private `_HAVE_NUMBA` the tests import still resolves.
+    Lives here beside its fdtd_nd sibling above. FAILS on the eager import (first line 'True')."""
+    import subprocess
+    import sys
+    code = ("import sys, dynameta.optics.soa\n"
+            "print('numba' in sys.modules)\n"
+            "from dynameta.optics.soa import qd_gain as Q\n"
+            "print(type(Q._qd_carrier_rk4_numba).__name__, type(Q._qd_carrier_rk4_eh_numba).__name__)\n"
+            "m = Q.QDGainModel(Q.QDGainParams())\n"
+            "print('numba' in sys.modules)\n"
+            "h = Q._HAVE_NUMBA\n"
+            "print(h == ('numba' in sys.modules))\n")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    # import AND a default (fast=False) model build stay numba-free; the flag resolves on demand
+    assert out.stdout.split() == ["False", "_LazyJit", "_LazyJit", "False", "True"], out.stdout
+
+
 def test_v14_lazy_njit_kernel_keeps_its_docstring_and_compiles_on_call():
     from dynameta.optics.fdtd_nd import backends, kernels2d_numba
     k = kernels2d_numba._te2d_numba
