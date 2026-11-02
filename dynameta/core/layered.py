@@ -122,12 +122,38 @@ def slice_profile(eps_of_z, z_m, *, n_slices: Optional[int] = None) -> List[Laye
     return slabs
 
 
+def _z_slab_samples(v, z_m, n_slices: Optional[int]):
+    """(thickness_m, v_mid) per slab for a z-sampled array v (leading axis z, ascending z_m): the
+    native intervals with the endpoint average (n_slices=None), or a uniform n_slices staircase
+    over [z[0], z[-1]] sampled at each slab midpoint by linear interpolation in z -- the same rule
+    slice_profile applies to a scalar profile (np.interp), extended to cells and tensor cells."""
+    if n_slices is None:
+        return [(float(z_m[k + 1] - z_m[k]), 0.5 * (v[k] + v[k + 1])) for k in range(z_m.size - 1)]
+    n = int(n_slices)
+    if n < 1:
+        raise ValueError("slice_eps_field: n_slices must be >= 1, got {!r}".format(n_slices))
+    z0, z1 = float(z_m[0]), float(z_m[-1])
+    dt = (z1 - z0) / n
+    out = []
+    for k in range(n):
+        zc = z0 + (k + 0.5) * dt
+        j = int(np.clip(np.searchsorted(z_m, zc, side="right") - 1, 0, z_m.size - 2))
+        w = (zc - z_m[j]) / (z_m[j + 1] - z_m[j])
+        out.append((dt, (1.0 - w) * v[j] + w * v[j + 1]))
+    return out
+
+
 def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int] = None
                     ) -> List[LayeredSlab]:
     """Slice a gridded EpsField (values_zyx (Nz,Ny,Nx), axes in target units) into LayeredSlabs.
     For a laterally-UNIFORM field each slab is a scalar (the xy-mean of the z-slice); a
     laterally-structured field yields an `eps_cell` per slab. Axis lengths are converted to
-    metres via `metres_per_unit` (the EpsField axes are in the solver's units, e.g. nm)."""
+    metres via `metres_per_unit` (the EpsField axes are in the solver's units, e.g. nm).
+    n_slices (every branch: scalar, structured scalar and tensor) resamples to a uniform staircase
+    of that many slabs, midpoint-sampled by linear interpolation in z; None keeps one slab per
+    native interval. AUDIT R-29 (2026-11-02): the tensor and structured-scalar branches ignored
+    n_slices (one slab per native interval regardless), so a slab-count convergence study through
+    the RCWA/PMM/Berreman/TMM bridges silently did nothing on a grating or an LC layer."""
     if eps_field.is_uniform:
         raise ValueError("slice_eps_field: EpsField is a uniform scalar (nothing to slice).")
     v = np.asarray(eps_field.values_zyx, dtype=np.complex128)        # (Nz, Ny, Nx) or (Nz, Ny, Nx, 3, 3)
@@ -148,21 +174,20 @@ def slice_eps_field(eps_field, metres_per_unit: float, *, n_slices: Optional[int
     if is_tensor:
         # one eps_tensor_cell (Ny,Nx,3,3)->(Nx,Ny,3,3) per native z-slice; uniform -> a 1x1x3x3 cell.
         slabs = []
-        for k in range(z_m.size - 1):
-            avg = 0.5 * (v[k] + v[k + 1])                            # (Ny, Nx, 3, 3)
+        for dz, avg in _z_slab_samples(v, z_m, n_slices):             # avg: (Ny, Nx, 3, 3)
             if laterally_uniform:
                 cell = avg.mean(axis=(0, 1)).reshape(1, 1, 3, 3)
             else:
                 cell = np.transpose(avg, (1, 0, 2, 3))               # (Nx, Ny, 3, 3) -- explicit, never bare T
-            slabs.append(LayeredSlab(float(z_m[k + 1] - z_m[k]), eps_tensor_cell=cell))
+            slabs.append(LayeredSlab(dz, eps_tensor_cell=cell))
         return slabs
     if laterally_uniform:
         return slice_profile(v.mean(axis=(1, 2)), z_m, n_slices=n_slices)
-    # structured scalar: one eps_cell (Ny,Nx)->(Nx,Ny) per native z-slice (n_slices resampling NA)
+    # structured scalar: one eps_cell (Ny,Nx)->(Nx,Ny) per slab
     slabs = []
-    for k in range(z_m.size - 1):
-        cell = np.transpose(0.5 * (v[k] + v[k + 1]), (1, 0))         # (Nx, Ny) -- explicit, never bare T
-        slabs.append(LayeredSlab(float(z_m[k + 1] - z_m[k]), eps_cell=cell))
+    for dz, avg in _z_slab_samples(v, z_m, n_slices):
+        cell = np.transpose(avg, (1, 0))                             # (Nx, Ny) -- explicit, never bare T
+        slabs.append(LayeredSlab(dz, eps_cell=cell))
     return slabs
 
 

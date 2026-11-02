@@ -43,7 +43,13 @@ class IdentityLift(FieldLift):
     def apply(self, n_3d, x_m, v_m, *, n_bg):
         arr = np.asarray(n_3d, dtype=np.float64)
         if arr.ndim != 3:
-            raise ValueError("IdentityLift expects a 3D carrier array")
+            # audit R-30: name the knob and the 2-D/3-D cause, not just the shape
+            raise ValueError(
+                "IdentityLift (OpticalSpec.lift='identity') expects a NATIVE 3-D carrier field "
+                "(Nx, Ny, Nz), got a {}-D array of shape {}. A 2-D DEVSIM solve (lateral x vertical) "
+                "must be lifted to 3-D: set OpticalSpec.lift='auto' (or 'extrude' for a "
+                "y-invariant grating, 'separable_xy' for a centered c4v device on a square cell)."
+                .format(arr.ndim, arr.shape))
         ny = arr.shape[1]
         y_m = np.linspace(0.0, 1.0, ny)   # caller overrides axes if needed
         return arr, np.asarray(x_m), y_m, np.asarray(v_m)
