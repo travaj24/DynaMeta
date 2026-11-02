@@ -237,15 +237,24 @@ def test_structured_lateral_grid_and_dispatch_guard():
     from dynameta.geometry.cross_section import Circle
     from dynameta.optics.fdtd_seam import design_has_inclusions, make_structured_lateral
     P = 220e-9
-    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, 60e-9), "m0")])])
-    # the m0 inclusion sits in an air background layer; give the layer an air bg via a 2nd uniform material
+    # wave-6 (T-item): the inclusion used to be "m0" -- the SAME material as the layer background
+    # (eps 4) -- so "patterned eps inside the structure band" only ever checked a uniform eps-4 slab.
+    # An AIR disk in the eps-4 layer makes the pattern real and the assertions discriminating.
+    r = 60e-9
+    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, r), "air")])])
     assert design_has_inclusions(d)
     layers, lateral_fn = make_structured_lateral(d, LAM)
-    eps = lateral_fn(40, 40, 60, (np.arange(60) + 0.5) * 10e-9, 100e-9, 150e-9)
-    assert eps.shape == (40, 40, 60)
+    n = 40
+    eps = lateral_fn(n, n, 60, (np.arange(60) + 0.5) * 10e-9, 100e-9, 150e-9)
+    assert eps.shape == (n, n, 60)
     inb = (((np.arange(60) + 0.5) * 10e-9) >= 100e-9) & (((np.arange(60) + 0.5) * 10e-9) < 250e-9)
     assert eps[:, :, ~inb].max() <= 1.0 + 1e-9                  # vacuum pad outside the structure
-    assert eps[:, :, inb].max() > 1.0                          # patterned eps inside the structure band
+    band = eps[:, :, inb]
+    assert abs(band.max() - 4.0) < 1e-9 and abs(band.min() - 1.0) < 1e-9   # BOTH materials present
+    assert abs(band[n // 2, n // 2, :] - 1.0).max() < 1e-9      # disk centre -> air, every z slice
+    assert abs(band[0, 0, :] - 4.0).max() < 1e-9                # cell corner -> the eps-4 background
+    fill = float(np.mean(np.abs(band[:, :, 0] - 1.0) < 1e-9))
+    assert abs(fill - np.pi * r ** 2 / P ** 2) < 0.02           # the disk's area, to the 40x40 grid
     # dim=2 + inclusions must raise
     with pytest.raises(NotImplementedError):
         make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)

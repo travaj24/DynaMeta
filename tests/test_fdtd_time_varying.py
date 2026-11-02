@@ -334,3 +334,64 @@ def test_d17_enz_index_below_courant_is_refused_not_marched_to_nan():
     with pytest.raises(ValueError, match="n > 0"):
         run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else float("nan"),
                                   **common)
+
+
+# ============================================================================================
+# audit D-18 / V-18 (wave-6, 2026-11-02)
+# ============================================================================================
+
+def test_d18_uniform_z_edges_with_time_varying_hook_collapses_instead_of_raising():
+    """D-18: the hooks-vs-nonuniform refusal ran BEFORE the uniform-limit detection, so the
+    documented bit-identity grid `uniform_z_edges(...)` was refused with a time-varying hook even
+    though it collapses to the supported uniform kernel. It now runs, bit-identical to the solve
+    without z_edges; a genuinely nonuniform grid is still refused."""
+    from dynameta.optics.fdtd import uniform_z_edges
+    layers, kw = _slab_kwargs()
+    wp0, g0 = layers[0].drude_wp_rad_s, layers[0].drude_gamma_rad_s
+    hook = dict(drude_of_t=lambda t: (wp0 * (1.0 + 0.2 * (t > 3e-14)), g0))
+    ze = uniform_z_edges(layers, lambda_min_m=kw["lambda_min_m"], lambda_max_m=kw["lambda_max_m"],
+                         resolution=kw["resolution"])
+    r_ref = solve_fdtd_1d(layers, **kw, **hook)
+    r_ze = solve_fdtd_1d(layers, **kw, **hook, z_edges=ze)              # raised pre-fix
+    assert r_ze.R.tobytes() == r_ref.R.tobytes() and r_ze.T.tobytes() == r_ref.T.tobytes()
+    assert np.array_equal(r_ze.band, r_ref.band)
+    with pytest.raises(NotImplementedError, match="time-varying hooks"):
+        solve_fdtd_1d(layers, **kw, **hook, refine={0: 2.0})            # really nonuniform
+
+
+def test_v18_drude_of_t_accepts_the_transient_optics_drudeoptical_contract():
+    """V-18: `drude_of_t` meant (wp, gamma) in solve_fdtd_1d and a DrudeOptical in
+    transient_optics (the carrier-heating hook), so the latter could not be handed to the FDTD path
+    transient_optics itself recommends. The DrudeOptical form now converts through
+    DrudeOptical.wp_gamma at `drude_n_m3` and is BIT-IDENTICAL to the equivalent tuple hook (it
+    raised `cannot unpack` pre-fix); the two consistency checks raise."""
+    from dynameta.constants import M_E
+    from dynameta.materials.optical_model import DrudeOptical
+    n = 2.0e25
+    m0, g0 = 0.35 * M_E, 5.0e13
+    hot = DrudeOptical(eps_inf=4.0, m_opt_kg=lambda nn: 0.45 * M_E + 0.0 * nn, gamma_rad_s=8.0e13)
+    cold = DrudeOptical(eps_inf=4.0, m_opt_kg=m0, gamma_rad_s=g0)
+    wp_c, g_c = cold.wp_gamma(n)
+    wp_h, g_h = hot.wp_gamma(n)
+    assert wp_c == pytest.approx(np.sqrt(n * 1.602176634e-19 ** 2 / (8.8541878128e-12 * m0)), rel=1e-9)
+    # the FDTD Drude pole built from wp_gamma IS the DrudeOptical's eps (to rounding)
+    lam = 1.3e-6
+    w = 2.0 * np.pi * C_LIGHT / lam
+    assert complex(4.0 - wp_c ** 2 / (w ** 2 + 1j * w * g_c)) == pytest.approx(
+        complex(cold.eps(lam, n_m3=n)), rel=1e-12)
+    layers = [FDTDLayer(thickness_m=0.30e-6, eps_inf=4.0, drude_wp_rad_s=wp_c, drude_gamma_rad_s=g_c)]
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.45e-6, resolution=30)
+    t1 = 4e-14
+    r_tuple = solve_fdtd_1d(layers, **kw, drude_of_t=lambda t: (wp_h, g_h) if t > t1 else (wp_c, g_c))
+    r_obj = solve_fdtd_1d(layers, **kw, drude_n_m3=n, drude_of_t=lambda t: hot if t > t1 else cold)
+    assert r_obj.R.tobytes() == r_tuple.R.tobytes() and r_obj.T.tobytes() == r_tuple.T.tobytes()
+    r_static = solve_fdtd_1d(layers, **kw)
+    assert not np.array_equal(r_obj.R[r_obj.band], r_static.R[r_static.band])  # the switch is live
+    with pytest.raises(ValueError, match="drude_n_m3"):
+        solve_fdtd_1d(layers, **kw, drude_of_t=lambda t: cold)
+    with pytest.raises(ValueError, match="eps_inf"):
+        solve_fdtd_1d(layers, **kw, drude_n_m3=n,
+                      drude_of_t=lambda t: DrudeOptical(eps_inf=3.0, m_opt_kg=m0, gamma_rad_s=g0))
+    with pytest.raises(ValueError, match="two owners"):
+        solve_fdtd_1d(layers, **kw, drude_n_m3=n, eps_inf_of_t=lambda t: 4.0,
+                      drude_of_t=lambda t: cold)

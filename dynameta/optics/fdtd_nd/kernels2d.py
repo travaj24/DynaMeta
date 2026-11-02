@@ -10,7 +10,6 @@ import numpy as np
 from dynameta.constants import EPS0, MU0
 
 
-
 def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
               chi2=None, raman=None, gain=None, gain_dyn=None, gain_dyn_out=None, hot=None, hot_out=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
@@ -43,6 +42,11 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
              rate equations by conservative forward Euler (every term appears +/- once, so
              sum(N) drifts only at the per-step rounding floor). gain_dyn_out (a dict) receives
              'dN_snap' = N2 - N1 captured at snap_step and 'Npop_final'.
+             KERNEL-LEVEL API ONLY (audit D-16): no solve_* front end builds gain_dyn -- FDTDLayer
+             carries no pump/population fields, and the front ends' two-run R/T normalization does
+             not apply to a lasing / saturating cavity. Drive it through this exported kernel the
+             way validation/fdtd_gain_saturation.py and validation/fdtd_lasing_cavity.py do (with
+             laser_gain.FourLevelSystem for the coefficients); numpy/cupy path only.
       hot:   opt-in per-cell HOT-CARRIER two-temperature ADE (roadmap 2.1; NUMPY reference path only).
              A dict {mask,(nx,nz) float 0/1; mat_idx,(nx,nz) int material id (-1 off); tables, a list of
              per-material (Te_grid,U_grid,wp_ratio,gam_ratio) lookup arrays; G,(nx,nz) e-ph coupling
@@ -177,6 +181,9 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
     denom_lin = cE_lin + bJ / 2.0
     for n in range(nsteps):
         # H update: dHx/dt = (1/mu0) (CPML-stretched dEy/dz) ; dHz/dt = -(1/mu0) dEy/dx (periodic x)
+        # (audit D-22: Hx[:, nz-1] is never updated here and stays 0 -- it sits beyond the PEC plane
+        #  and TE has no Ez to drive it; kernels3d.py DOES update its last-cell Hx, by dEz/dy, and is
+        #  equally right. The asymmetry is deliberate; see the note there.)
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz                      # at H positions k=0..nz-2
         psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
         Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
@@ -283,6 +290,12 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         if do_drude:
             Jy = Jynew
         Eynew[:, k_src] += src[n]            # soft plane source (uniform in x -> normal-incidence plane wave)
+        # audit D-14: this reference kernel advances the ADE state (Jy above, from the PRE-zero
+        # Eynew, and PL/PG/P2/Q/PR) on the PEC cells k = 0 / nz-1 too, which the numba and CUDA
+        # kernels (E loop k in [1, nz-2]) do not. Inert -- that state feeds only E on those two
+        # cells, which the next line zeroes every step -- but it is one reason the backends agree
+        # to ~1e-9/1e-12, not bit-for-bit (D-7). Do not "fix" one copy without the others; see the
+        # matching note in kernels2d_numba.py. (wave-6: the wave-4 note existed only there.)
         Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0  # PEC backing the CPML
         Ey = Eynew
         # record E_y and H_x at the probe planes; AVERAGE H_x (at k+/-1/2) onto the E_y plane (at k) so
@@ -316,6 +329,3 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             hot_out["U_l_final"] = np.zeros((nx, nz))        # fixed bath: no lattice reservoir
             hot_out["sub_outflow_int"] = np.zeros((nx, nz))
     return eyL, hxL, eyR, hxR
-
-
-_run_2d_te = run_2d_te                                       # back-compat alias (pre-promotion name)

@@ -501,3 +501,17 @@ def test_lat_gate8_slowed_relax_same_G_and_matches_2ode():
     peakTe = max(Te_lat.max() - T_REF, 1e-9); peakTl = max(Tl_lat.max() - T_REF, 1e-9)
     assert np.max(np.abs(Te_rk - Te_lat)) / peakTe < 5e-3    # full electron trajectory (measured ~7e-4)
     assert np.max(np.abs(Tl_rk - Tl_lat)) / peakTl < 5e-3    # full lattice trajectory  (measured ~1e-4)
+
+
+def test_d21_lattice_colder_than_te0_is_refused():
+    """audit D-21: the T_e(U_e) table starts at T_e0 and np.interp clamps below it, so with
+    T_l < T_e0 and G > 0 the coupling drained U_e without bound while T_e stayed pinned at T_e0.
+    Measured pre-fix on this module's ENZ film (G = 8e16, T_l = 200 K, T_e0 = 300 K): U_e_final
+    = -7.4e6 J/m^3 against an absorbed 5.0e-11 J/m^3, and a flat (false) 300 K T_e map. Now refused
+    at construction; T_l >= T_e0, and G = 0 (no coupling, nothing drains), stay allowed."""
+    kw = dict(n_m3=N_M3, m0_kg=M0, alpha_per_eV=ALPHA, T_e0_K=300.0)
+    with pytest.raises(ValueError, match="D-21"):
+        HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=200.0, **kw)
+    HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=300.0, **kw)
+    HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=400.0, **kw)
+    HotCarrierParams(ttm=_ttm(0.0), T_l_K=200.0, **kw)

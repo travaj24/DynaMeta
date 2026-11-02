@@ -224,3 +224,172 @@ def test_d8_host_driver_routes_through_the_shared_retry_helper():
     assert "_launch_with_retry" in calls
     names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     assert {"_launch", "_reset"} <= names
+
+
+# =====================================================================================================
+# wave-6 (2026-11-02): X-16, V-14, D-15, P-7, D-13
+# =====================================================================================================
+
+@pytest.mark.parametrize("name", ["run_2d_te_jax", "run_2d_te_oblique_jax", "run_2d_tm_oblique_jax",
+                                  "run_3d_jax", "run_3d_oblique_jax"])
+def test_x16_jax_kernels_refuse_a_src_that_disagrees_with_nsteps(name):
+    """audit X-16: lax.scan marches len(src) steps and `nsteps` was silently ignored. The guard
+    fires before any jax import, so this runs without jax too."""
+    import dynameta.optics.fdtd_nd as F
+    fn = getattr(F, name)
+    nz = 20
+    two_d = name.startswith("run_2d")
+    shape = (2, nz) if two_d else (2, 2, nz)
+    a = np.ones(shape)
+    cp = F.cpml_z(nz, 1e-8, 1e-17, 4)
+    common = (a, 0 * a, 0 * a) if "oblique" in name else (a, 0 * a, 0 * a, 0 * a)
+    grid = (1e-8, 1e-8) if two_d else (1e-8, 1e-8, 1e-8)
+    tail = {"run_2d_te_oblique_jax": (0.0,), "run_2d_tm_oblique_jax": (0.0,),
+            "run_3d_oblique_jax": (0.0, 0.0, 0.0, 1.0)}.get(name, ())
+    with pytest.raises(ValueError, match="X-16"):
+        fn(*common, *grid, 1e-17, 7, 5, 6, 14, np.zeros(9), cp, *tail)
+
+
+def test_v14_importing_the_fdtd_family_does_not_import_numba():
+    """audit V-14: fdtd_nd imported numba (+ numba.cuda) eagerly -- measured ~0.7 s of the
+    1.4-1.5 s `import dynameta.optics.fdtd_nd` (now 0.66-0.79 s). The kernels JIT lazily, and the
+    public HAVE_NUMBA / prange still resolve (on first access)."""
+    import subprocess
+    import sys
+    code = ("import sys, dynameta.optics.fdtd_nd as F, dynameta.optics.fdtd, dynameta.optics.fdtd_mo\n"
+            "print('numba' in sys.modules)\n"
+            "h = F.HAVE_NUMBA\n"
+            "print(h == ('numba' in sys.modules))\n")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["False", "True"], out.stdout
+
+
+def test_v14_lazy_njit_kernel_keeps_its_docstring_and_compiles_on_call():
+    from dynameta.optics.fdtd_nd import backends, kernels2d_numba
+    k = kernels2d_numba._te2d_numba
+    assert isinstance(k, backends._LazyJit) and "Numba CPU kernel" in k.__doc__
+    assert k.py_func.__name__ == "_te2d_numba"
+
+
+def test_d15_source_probe_and_grid_blocks_are_single_sourced():
+    """audit D-15 census: the source envelope, the pad-fraction probe placement and the z-grid
+    sizing now live ONLY in fdtd_nd/grid.py; a re-typed copy in any front end fails here."""
+    import pathlib
+    import dynameta.optics as O
+    root = pathlib.Path(O.__file__).parent
+    files = [root / "fdtd.py", root / "fdtd_mo.py"] + sorted((root / "fdtd_nd").glob("*.py"))
+    # each group = one block, in every spelling the front ends had drifted into. (The NONUNIFORM
+    # 1-D branch places its probes by searchsorted on z_edges -- a different rule, deliberately.)
+    groups = (("np.exp(-((tgrid - t0) / tau) ** 2)",),
+              ("int(round((0.35 * pad) / dz))", "int(round(0.35 * pad / dz))"),
+              ("int(round((0.7 * pad) / dz))", "int(round(0.7 * pad / dz))"),
+              ("int(round((pad + z_struct + 0.3 * pad) / dz))",),
+              ("Lz = 2.0 * pad + z_struct",), ("/ (resolution * n_max)",),
+              ("1.0 / (np.pi * (f_max - f_min))",))
+    for grp in groups:
+        hits = [f.name for f in files for line in f.read_text(encoding="utf-8").splitlines()
+                if any(p in line for p in grp) and not line.lstrip().startswith("#")]
+        assert hits == ["grid.py"], (grp, hits)
+
+
+def _te_oblique_pre_p7(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+    # VERBATIM loop of oblique2d._run_2d_te_oblique before audit P-7 (2026-11-02)
+    from dynameta.constants import EPS0, MU0
+    nx, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    z = (lambda: np.zeros((nx, nz), dtype=complex))
+    Ey, Hx, Hz, Jy, psi_hxz, psi_eyz = z(), z(), z(), z(), z(), z()
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    eyL = np.empty((nsteps, nx), complex); hxL = np.empty((nsteps, nx), complex)
+    eyR = np.empty((nsteps, nx), complex); hxR = np.empty((nsteps, nx), complex)
+    cmu = dt / MU0; ikx = 1j * kx
+    for n in range(nsteps):
+        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
+        psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
+        Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
+        Hz += -cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx + ikx * Ey)
+        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
+        psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
+        curl = np.zeros((nx, nz), complex)
+        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        curl -= (Hz - np.roll(Hz, 1, axis=0)) / dx + ikx * Hz
+        denom = EPS0 * eps_inf / dt + bJ / 2.0
+        Eynew = (EPS0 * eps_inf / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+        Jy = aJ * Jy + bJ * (Eynew + Ey)
+        Eynew[:, k_src] += src[n]
+        Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0
+        Ey = Eynew
+        eyL[n] = Ey[:, k_pL]; hxL[n] = 0.5 * (Hx[:, k_pL] + Hx[:, k_pL - 1])
+        eyR[n] = Ey[:, k_pR]; hxR[n] = 0.5 * (Hx[:, k_pR] + Hx[:, k_pR - 1])
+    return eyL, hxL, eyR, hxR
+
+
+def _tm_oblique_pre_p7(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+    # VERBATIM loop of oblique2d._run_2d_tm_oblique before audit P-7 (2026-11-02)
+    from dynameta.constants import EPS0, MU0
+    nx, nz = eps_inf.shape
+    (ke, be, ce), (kh, bh, ch) = cpml
+    z = (lambda: np.zeros((nx, nz), dtype=complex))
+    Ex, Ez, Hy, Jx, Jz, psi_hyz, psi_exz = z(), z(), z(), z(), z(), z(), z()
+    aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
+    exL = np.empty((nsteps, nx), complex); hyL = np.empty((nsteps, nx), complex)
+    exR = np.empty((nsteps, nx), complex); hyR = np.empty((nsteps, nx), complex)
+    cmu = dt / MU0; ikx = 1j * kx; e0dt = EPS0 / dt
+    for n in range(nsteps):
+        dEx_dz = (Ex[:, 1:] - Ex[:, :-1]) / dz
+        psi_hyz[:, :-1] = bh[:-1] * psi_hyz[:, :-1] + ch[:-1] * dEx_dz
+        dEz_dx = (np.roll(Ez, -1, axis=0) - Ez) / dx + ikx * Ez
+        Hy[:, :-1] += cmu * (dEz_dx[:, :-1] - (dEx_dz / kh[:-1] + psi_hyz[:, :-1]))
+        dHy_dz = (Hy[:, 1:] - Hy[:, :-1]) / dz
+        psi_exz[:, 1:] = be[1:] * psi_exz[:, 1:] + ce[1:] * dHy_dz
+        curlx = np.zeros((nx, nz), complex)
+        curlx[:, 1:] = -(dHy_dz / ke[1:] + psi_exz[:, 1:])
+        denom = e0dt * eps_inf + bJ / 2.0
+        Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+        Jx = aJ * Jx + bJ * (Exn + Ex)
+        Exn[:, k_src] += src[n]
+        Exn[:, 0] = 0.0; Exn[:, -1] = 0.0
+        Ex = Exn
+        curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx + ikx * Hy
+        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
+        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Ez = Ezn
+        exL[n] = Ex[:, k_pL]; hyL[n] = 0.5 * (Hy[:, k_pL] + Hy[:, k_pL - 1])
+        exR[n] = Ex[:, k_pR]; hyR[n] = 0.5 * (Hy[:, k_pR] + Hy[:, k_pR - 1])
+    return exL, hyL, exR, hyR
+
+
+@pytest.mark.parametrize("drude", [False, True])
+def test_p7_oblique_numpy_kernels_bit_identical_to_the_pre_hoist_loop(drude):
+    """audit P-7: the hoisted oblique NumPy kernels (TE and TM, passive and Drude) reproduce the
+    pre-hoist loop above BIT-FOR-BIT (tobytes)."""
+    from dynameta.optics.fdtd_nd import cpml_z
+    from dynameta.optics.fdtd_nd import oblique2d as OB
+    nx, nz, ns = 4, 60, 300
+    eps = np.ones((nx, nz)); eps[:, 25:35] = 3.0
+    wp = np.zeros((nx, nz)); gm = np.zeros((nx, nz))
+    if drude:
+        wp[:, 25:35] = 1.5e15; gm[:, 25:35] = 1e14
+    dz, dx = 20e-9, 100e-9
+    dt = 0.5 / (2.998e8 * np.sqrt(1 / dx ** 2 + 1 / dz ** 2))
+    cp = cpml_z(nz, dz, dt, 8)
+    src = np.sin(np.arange(ns) * 0.2) * np.exp(-((np.arange(ns) - 60) / 20.0) ** 2)
+    args = (eps, wp, gm, dx, dz, dt, ns, 10, 15, 45, src, cp, 2e6)
+    for new, old in ((OB._run_2d_te_oblique, _te_oblique_pre_p7),
+                     (OB._run_2d_tm_oblique, _tm_oblique_pre_p7)):
+        for a, b in zip(new(*args), old(*args)):
+            assert a.tobytes() == b.tobytes()
+
+
+def test_d13_cpml_is_plain_fdtd_off_the_pml_because_c_is_zero_not_because_b_is_one():
+    """audit D-13 (docstring): off the PML alpha = alpha_max, so b != 1 there; c == 0 EXACTLY is
+    what keeps the interior plain FDTD. Pins the corrected statement."""
+    from dynameta.optics.fdtd_nd import cpml_z
+    dz = 20e-9
+    (ke, be, ce), (kh, bh, ch) = cpml_z(100, dz, 0.5 * dz / 2.998e8, 12)
+    mid = slice(13, -13)
+    assert np.all(ce[mid] == 0.0) and np.all(ch[mid] == 0.0) and np.all(ke[mid] == 1.0)
+    assert np.all(be[mid] < 1.0) and float(1.0 - be[50]) == pytest.approx(7.5e-7, rel=0.01)
