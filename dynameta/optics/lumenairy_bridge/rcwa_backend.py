@@ -43,8 +43,28 @@ Inclusion handling: laterally structured layers are RASTERIZED onto a (Sx, Sy) c
 the validated shared rasterizer (optics.rasterize, also the structured-FDTD painter:
 background + priority-ordered inclusion overpainting).
 Inclusion eps comes from the material registry at lambda; an eps_by_region override applies
-to the layer BACKGROUND only (rasterizer contract). The Lumenairy analytic-shapes fast path
-is a documented follow-on (requires the shape-frame pin + disjointness mapping).
+to the layer BACKGROUND only (rasterizer contract). The raster is PERIODIC (wrap-aware,
+_shapes.periodic_layer_eps_cell, 2026-11-02): a boundary-crossing inclusion contributes its
+wrapped piece at the opposite edge -- the FEM mesher's convention. The shared rasterizer clips
+it, which solved a different (narrower) structure; byte-identical for inclusions inside the
+closed cell.
+
+ANALYTIC SHAPES (2026-11-02, the follow-on this paragraph used to defer; lumenairy 5.50
+add_layer(shapes=, eps_background=)): `inclusion_model` = 'raster' (DEFAULT, unchanged numbers),
+'analytic' (every inclusion layer goes through lumenairy's exact form factors -- raises
+ShapesNotRepresentable when a layer cannot) or 'auto' (analytic where exact, raster otherwise).
+Rectangle / Circle / Ellipse map 1:1 (both sides axis-aligned; frame pin: absolute cell frame
+[0, P], lumenairy's default centre P/2 -- _shapes module docstring); polygons and OVERLAPPING
+inclusions (priority painting has no additive form-factor equivalent; lumenairy's own validator
+decides) stay rasterized. Same Laurent direct-rule factorization as an eps_cell layer, so the
+analytic layer is the S -> infinity limit of an AREA-AVERAGED raster at fixed n_orders: MEASURED
+(disk r = 0.32 P, eps 6+0.4i in 2.1, n_orders 5x5, theta 0.2 rad): |dR| 1.1e-4 / 2.8e-5 / 6.4e-6 /
+1.7e-6 at S = 64/128/256/512 (O(S^-2)), while a 1 % radius error moves R by 1.9e-3 and a 1 %
+background error by 1.8e-3 (tests/test_lumenairy_shapes_sem_wrap.py). The bridge's POINT-sampled
+raster at its default S = 128 is 3.8e-5 off the exact geometry on the same disk (Gauss-circle
+area noise, O(S^-4/3)) -- the analytic path is the more accurate one. lumenairy 5.50 does not
+reconstruct layer_absorption() on shapes layers (NotImplementedError), so absorption=True
+with 'auto' rasterizes every layer and with 'analytic' is refused up front.
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident E_x,
 1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo -- {'s','p'} is
@@ -72,7 +92,10 @@ import numpy as np
 from dynameta.core.interfaces import OpticalResult
 from dynameta.core.layered import (LayeredStack, collapse_regions_to_layers,
                                    slice_eps_field)
-from dynameta.optics.rasterize import cell_axes, layer_eps_cell
+from dynameta.optics.rasterize import cell_axes
+from dynameta.optics.lumenairy_bridge._shapes import (ShapesNotRepresentable,
+                                                      layer_shapes_payload,
+                                                      periodic_layer_eps_cell)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
@@ -94,13 +117,57 @@ def _min_samples(n_orders: int) -> int:
     return 4 * int(n_orders) + 1
 
 
+_INCLUSION_MODELS = ("raster", "analytic", "auto")
+
+
+def _check_inclusion_model(inclusion_model: str, where: str) -> str:
+    if str(inclusion_model) not in _INCLUSION_MODELS:
+        raise ValueError("{}: inclusion_model must be one of {}, got {!r}".format(
+            where, _INCLUSION_MODELS, inclusion_model))
+    return str(inclusion_model)
+
+
+def _add_shapes_layer(stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model):
+    """Try to add design layer L as an ANALYTIC-shape RCWA layer. True on success; False when
+    the layer is not exactly representable and inclusion_model == 'auto' (the caller
+    rasterizes); ShapesNotRepresentable when inclusion_model == 'analytic'. lumenairy's add_layer
+    validator (disjointness, extent <= period, cumulative area <= 1) is the single authority on
+    what the additive form factors can paint; it raises BEFORE appending, so a refused layer
+    leaves the stack untouched."""
+    from dynameta.optics.rasterize import layer_bg_eps
+    try:
+        bg = layer_bg_eps(L, lambda_m, design.materials, eps_by_region)
+        bg, shapes = layer_shapes_payload(L, lambda_m, design.materials, bg, px, py,
+                                          stack_period_y_m=float(stack.period_y))
+        try:
+            stack.add_layer(L.thickness_m, shapes=shapes, eps_background=bg)
+        except ValueError as exc:
+            raise ShapesNotRepresentable(
+                "layer {!r}: lumenairy refused the analytic shapes ({})".format(L.name, exc)
+            ) from exc
+    except ShapesNotRepresentable as exc:
+        if inclusion_model == "analytic":
+            raise ShapesNotRepresentable(
+                "design_to_rcwa_stack(inclusion_model='analytic'): layer {!r} is not exactly "
+                "representable by lumenairy analytic shapes -- {} (inclusion_model='auto' "
+                "rasterizes such layers)".format(L.name, exc)) from exc
+        return False
+    return True
+
+
 def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_orders: int = 11,
                          n_orders_y: Optional[int] = None, n_slices: Optional[int] = None,
-                         cell_samples: Optional[int] = None, formulation: str = "laurent"):
+                         cell_samples: Optional[int] = None, formulation: str = "laurent",
+                         inclusion_model: str = "raster"):
     """Translate a DynaMeta Design (+ optionally the bridge's eps_by_region) into a CONCRETE
     Lumenairy RCWAStack at one wavelength. Returns (stack, layer_names_top_first) where the
     name list is aligned with the Lumenairy layers (graded fields contribute several slabs
     per design layer) -- the key for mapping per-layer absorption back to design layers.
+
+    inclusion_model: 'raster' (default; the periodic point raster), 'analytic' (lumenairy
+    analytic shapes for EVERY inclusion layer, raises ShapesNotRepresentable otherwise) or
+    'auto' (analytic where exact, raster otherwise) -- see the module docstring. `formulation`
+    applies to rasterized layers only (lumenairy shapes layers are Laurent by contract).
 
     Layer dispatch, in order: a structured (gridded) EpsField -> sliced eps_cell /
     eps_tensor_cell slabs; a uniform tensor EpsField -> a tiled eps_tensor_cell; a uniform
@@ -115,6 +182,7 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     # mesh-region-keyed dicts (the run_pipeline/FEM bridge output: 'ito_inpatch',
     # 'grating__incl0', ...) collapse to design-layer keys; identity when already layer-keyed
     eps_by_region = collapse_regions_to_layers(design, eps_by_region or {})
+    inclusion_model = _check_inclusion_model(inclusion_model, "design_to_rcwa_stack")
 
     def _y_invariant(ef):
         v = ef.values_zyx
@@ -197,9 +265,14 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
             names.append(L.name)
             continue
         if L.inclusions:
+            if inclusion_model != "raster" and _add_shapes_layer(
+                    stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model):
+                names.append(L.name)
+                continue
             x, y = cell_axes(sx, sy, px, py)
             X, Y = np.meshgrid(x, y, indexing="ij")
-            cell = layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region)
+            cell = periodic_layer_eps_cell(L, X, Y, lambda_m, design.materials, eps_by_region,
+                                           px, py)
             stack.add_layer(L.thickness_m, eps_cell=np.asarray(cell, dtype=complex),
                             formulation=formulation)
             names.append(L.name)
@@ -294,7 +367,8 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
                                cell_samples: Optional[int] = None,
                                absorption: bool = False, stabilize: bool = False,
                                formulation: str = "laurent",
-                               n_workers: Optional[int] = 1, blas_per_worker: int = 1):
+                               n_workers: Optional[int] = 1, blas_per_worker: int = 1,
+                               inclusion_model: str = "raster"):
     """Build an `optical_solver` for run_pipeline backed by Lumenairy RCWA, with the exact
     seam signature fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult
     PLUS the sweep-aware `solve_sweep` fast path (one result per wavelength, in order; end
@@ -316,7 +390,18 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
     blas_per_worker=1 would be a silent single-thread performance regression -- so serial and
     parallel agree exactly when blas_per_worker equals the ambient BLAS thread count and to
     ~1e-13 otherwise. No physics claim rests on those bits. Default n_workers=1 = the serial
-    path, byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths)."""
+    path, byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths).
+
+    inclusion_model ('raster' default | 'analytic' | 'auto'): forwarded to design_to_rcwa_stack.
+    lumenairy 5.50 has no layer_absorption() on analytic-shape layers, so with absorption=True
+    'auto' rasterizes every layer and 'analytic' is refused here, at construction."""
+    inclusion_model = _check_inclusion_model(inclusion_model, "make_lumenairy_rcwa_solver")
+    if absorption and inclusion_model == "analytic":
+        raise ValueError(
+            "make_lumenairy_rcwa_solver: absorption=True needs RCWAResult.layer_absorption(), "
+            "which lumenairy does not provide for analytic-shape layers; use "
+            "inclusion_model='auto' (rasterizes every layer when absorption=True) or 'raster'")
+    model_eff = "raster" if absorption else inclusion_model
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
@@ -326,7 +411,8 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
         stack, names = design_to_rcwa_stack(design, lambda_m, eps_by_region=eps_by_region,
                                             n_orders=n_orders, n_orders_y=n_orders_y,
                                             n_slices=n_slices, cell_samples=cell_samples,
-                                            formulation=formulation)
+                                            formulation=formulation,
+                                            inclusion_model=model_eff)
         stack.set_source(lambda_m, theta=theta, phi=phi)
         res = stack.solve(retain_internal=absorption, stabilize=stabilize)
         n_sup, n_sb = end_media_indices(design, lambda_m)
@@ -385,9 +471,11 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
 class LumenairyStackSolver:
     """LayeredStackSolver backed by Lumenairy RCWA -- the SECOND concrete implementation of
     the layered seam (TmmLayeredSolver is the first) and the first consumer of the
-    structured LayeredSlab specs (eps_cell / eps_tensor_cell), which were stubbed in the
-    data model awaiting exactly this backend. `shapes` slabs raise until the analytic-shape
-    payload contract is pinned (documented follow-on)."""
+    structured LayeredSlab specs (eps_cell / eps_tensor_cell / shapes), which were stubbed in
+    the data model awaiting exactly this backend. A `shapes` slab carries the lumenairy
+    analytic-shape payload VERBATIM (a list of {'shape', 'eps', geometry, 'center'} dicts in
+    metres, absolute cell frame, + eps_background -- the contract pinned in _shapes; produced
+    from a Design layer by _shapes.layer_to_shapes_slab). Wired 2026-11-02; it used to raise."""
 
     def __init__(self, *, n_orders: int = 11, n_orders_y: Optional[int] = None,
                  stabilize: bool = False):
@@ -433,10 +521,11 @@ class LumenairyStackSolver:
                              eps_tensor_cell=_meet_sampling(slab.eps_tensor_cell,
                                                             s_min_x, s_min_y))
             else:
-                raise NotImplementedError(
-                    "LumenairyStackSolver: analytic-shape slabs are not wired yet (the "
-                    "shapes payload contract is a documented follow-on); rasterize to "
-                    "eps_cell instead")
+                # analytic-shape slab (2026-11-02): the payload is lumenairy's own contract, so
+                # it passes through; lumenairy's validator rejects an overlap / over-period
+                # extent / malformed dict with a named ValueError before anything is solved
+                rs.add_layer(slab.thickness_m, shapes=list(slab.shapes),
+                             eps_background=complex(slab.eps_background))
         theta, phi = _angles_rad(optical)
         pol = getattr(optical, "polarization", "y")
         rs.set_source(lambda_m, theta=theta, phi=phi)

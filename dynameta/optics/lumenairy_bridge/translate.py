@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
+import numpy as np
 
 from dynameta.geometry import Design, Layer, Stack, UnitCell
 from dynameta.geometry.specs import OpticalSpec
@@ -90,18 +91,43 @@ def _index_to_eps_model(n_spec) -> object:
     return ConstantOptical(complex(n_spec) ** 2)
 
 
+def _uniform_cell_value(cell):
+    """The single value of a laterally-UNIFORM (Sx, Sy[, 3, 3]) cell, else None (exact compare:
+    a cell that varies by one ulp is patterned -- no tolerance is a faithful inverse)."""
+    c = np.asarray(cell)
+    flat = c.reshape((c.shape[0] * c.shape[1],) + c.shape[2:])
+    return flat[0].copy() if bool(np.all(flat == flat[:1])) else None
+
+
 def rcwa_stack_to_design(stack, *, name: str = "lumenairy_import",
                          layer_names: Optional[List[str]] = None,
-                         polarization: str = "y") -> Design:
+                         polarization: str = "y", return_eps_by_region: bool = False):
     """Translate a Lumenairy RCWAStack into a DynaMeta Design, so the SAME device runs
     through DynaMeta's carriers/thermal/reliability/effects axes (and back through the RCWA
     bridge for optics -- the round-trip is gated in validation/lumenairy_translate.py).
 
-    v1 scope: UNIFORM (scalar or dispersive-callable) layers. Patterned layers ('iso',
-    'tensor', 'shapes') raise NotImplementedError -- a rasterized eps_cell has no faithful
-    inverse into DynaMeta's analytic Inclusion vocabulary; reconstructing shapes from grids
-    is a documented follow-on. Identical non-dispersive layer eps values share one material;
-    dispersive layers get one material each (callables are not comparable).
+    SCOPE (v2, 2026-11-02 -- v1 translated UNIFORM layers only), per lumenairy layer kind:
+      * 'uniform' (scalar or dispersive callable) -> a plain Layer (unchanged);
+      * 'shapes' (analytic form factors) -> a Layer whose background is eps_background and whose
+        Inclusions are the EXACT CrossSections (rectangle -> Rectangle, disk -> Circle, ellipse ->
+        Ellipse; same absolute cell frame, _shapes contract). lumenairy guarantees the list is
+        DISJOINT, so priority order is immaterial and DynaMeta's over-painting reproduces the
+        additive form factors point for point. Dispersive shape / background eps -> CallableOptical.
+        On a 1-D stack only full-period_y rectangles are faithful (lumenairy y-AVERAGES anything
+        else there, a structure no Inclusion list describes) -- others are refused;
+      * 'tensor' that is laterally UNIFORM (the add_layer(eps=(3,3)) entry, or a constant cell) ->
+        a Layer + a uniform TENSOR EpsField in the returned eps_by_region (DynaMeta materials are
+        scalar, so a tensor has no Material image). Needs return_eps_by_region=True, which changes
+        the return to (design, eps_by_region); without it the layer is refused with that hint.
+        The layer's background_material is a scalar PLACEHOLDER (the diagonal mean) named
+        'mat_tensor_placeholder_<layer>' -- the EpsField is the source of truth;
+      * 'iso' (eps_cell) that is laterally UNIFORM -> a plain Layer (a constant cell IS a uniform
+        slab, exactly).
+    STILL REFUSED (NotImplementedError, with the reason): a PATTERNED eps_cell / eps_tensor_cell
+    -- a rasterized grid has no faithful inverse into DynaMeta's analytic Inclusion vocabulary
+    (any shape fitted to pixels is a guess about sub-pixel geometry the grid never stored) -- and
+    a dispersive (callable) tensor. Identical non-dispersive eps values share one material;
+    dispersive ones get one material each (callables are not comparable).
 
     Lumenairy stacks are built SUPERSTRATE-side first; DynaMeta Stacks are bottom-to-top --
     the layer list is reversed here, and layer_names (when given) follows the LUMENAIRY
@@ -113,42 +139,103 @@ def rcwa_stack_to_design(stack, *, name: str = "lumenairy_import",
     {'te','tm'} -- see dynameta.core.polarization."""
     from dynameta.optics.lumenairy_bridge._common import stack_layer_records
     layers_rec = stack_layer_records(stack)
-    bad = [i for i, L in enumerate(layers_rec) if L.kind != "uniform"]
-    if bad:
-        raise NotImplementedError(
-            "rcwa_stack_to_design v1 translates UNIFORM layers only; layers {} have kinds "
-            "{} (a rasterized cell has no faithful inverse into Inclusion shapes -- "
-            "follow-on)".format(bad, [layers_rec[i].kind for i in bad]))
     if layer_names is not None and len(layer_names) != len(layers_rec):
         raise ValueError("layer_names must match the stack's {} layers".format(
             len(layers_rec)))
+    px = float(stack.period_x)
+    py = float(stack.period_y)
 
+    # ---- refusals FIRST (nothing is built for a stack that cannot be translated) ----
+    plan = []                                             # (kind, payload) per record
+    bad = []
+    for i, rec in enumerate(layers_rec):
+        disp = bool(rec.dispersive) or callable(rec.data)
+        if rec.kind == "uniform":
+            plan.append(("uniform", rec.data))
+        elif rec.kind == "shapes":
+            bg, shapes = rec.data
+            if stack.is_1d:
+                partial = [k for k, sh in enumerate(shapes)
+                           if sh.get("shape") != "rectangle"
+                           or float(sh["size"][1]) < py * (1.0 - 1e-12)]
+                if partial:
+                    bad.append((i, "1-D stack shapes {} are not full-period_y rectangles; "
+                                   "lumenairy solves their y-AVERAGE, which no Inclusion "
+                                   "list describes".format(partial)))
+                    continue
+            plan.append(("shapes", (bg, shapes)))
+        elif rec.kind == "iso" and not disp and _uniform_cell_value(rec.data) is not None:
+            plan.append(("uniform", complex(_uniform_cell_value(rec.data))))
+        elif rec.kind == "tensor" and not disp and _uniform_cell_value(rec.data) is not None:
+            if not return_eps_by_region:
+                bad.append((i, "a uniform TENSOR layer has no scalar-Material image; pass "
+                               "return_eps_by_region=True to receive it as a tensor EpsField "
+                               "(the return becomes (design, eps_by_region))"))
+                continue
+            plan.append(("tensor", np.asarray(_uniform_cell_value(rec.data), dtype=complex)))
+        elif rec.kind == "tensor" and disp:
+            bad.append((i, "a dispersive (callable) tensor layer has no DynaMeta image (an "
+                           "EpsField is concrete at one wavelength)"))
+        else:
+            bad.append((i, "a PATTERNED rasterized {} cell has no faithful inverse into "
+                           "DynaMeta's analytic Inclusion shapes (a shape fitted to pixels "
+                           "guesses sub-pixel geometry the grid never stored)".format(
+                               "eps_tensor" if rec.kind == "tensor" else "eps")))
+    if bad:
+        raise NotImplementedError(
+            "rcwa_stack_to_design: {} layer(s) cannot be translated faithfully -- {}".format(
+                len(bad), "; ".join("layer {} ({}): {}".format(i, layers_rec[i].kind, why)
+                                   for i, why in bad)))
+
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry import Inclusion
+    from dynameta.optics.lumenairy_bridge._shapes import shape_to_cross_section
     reg = MaterialRegistry()
     reg.add(Material("superstrate", _index_to_eps_model(stack.n_superstrate)))
     reg.add(Material("substrate", _index_to_eps_model(stack.n_substrate)))
 
     const_pool = {}                                       # eps value -> material name
+
+    def _material(spec, disp_name):
+        """A pooled ConstantOptical for a concrete eps; one CallableOptical per dispersive spec."""
+        if callable(spec):
+            reg.add(Material(disp_name, lumenairy_eps_to_optical_model(spec)))
+            return disp_name
+        key = complex(spec)
+        if key not in const_pool:
+            mname = "mat_eps_{}".format(len(const_pool))
+            const_pool[key] = mname
+            reg.add(Material(mname, ConstantOptical(key)))
+        return const_pool[key]
+
     dm_layers: List[Layer] = []
-    for i, rec in enumerate(layers_rec):                  # lumenairy order: top-first
+    eps_by_region = {}
+    for i, (rec, (kind, payload)) in enumerate(zip(layers_rec, plan)):   # lumenairy: top-first
         lname = layer_names[i] if layer_names else "layer_{}".format(i)
-        if rec.dispersive or callable(rec.data):
-            mname = "mat_" + lname
-            reg.add(Material(mname, lumenairy_eps_to_optical_model(rec.data)))
-        else:
-            key = complex(rec.data)
-            if key not in const_pool:
-                mname = "mat_eps_{}".format(len(const_pool))
-                const_pool[key] = mname
-                reg.add(Material(mname, ConstantOptical(key)))
-            mname = const_pool[key]
-        dm_layers.append(Layer(lname, float(rec.thickness), mname))
+        if kind == "uniform":
+            # (the v1 naming, unchanged: 'mat_' + layer for a dispersive layer)
+            dm_layers.append(Layer(lname, float(rec.thickness),
+                                   _material(payload, "mat_" + lname)))
+        elif kind == "shapes":
+            bg, shapes = payload
+            incs = [Inclusion(shape=shape_to_cross_section(sh, px, py),
+                              material=_material(sh["eps"], "mat_{}_shape{}".format(lname, k)))
+                    for k, sh in enumerate(shapes)]
+            dm_layers.append(Layer(lname, float(rec.thickness),
+                                   _material(bg, "mat_{}_bg".format(lname)), inclusions=incs))
+        else:                                             # uniform tensor
+            mname = "mat_tensor_placeholder_{}".format(lname)
+            reg.add(Material(mname, ConstantOptical(complex(np.trace(payload) / 3.0))))
+            dm_layers.append(Layer(lname, float(rec.thickness), mname))
+            eps_by_region[lname] = EpsField(tensor=payload.copy())
 
     dm_layers.reverse()                                   # DynaMeta wants bottom-to-top
     cell = (UnitCell.square(stack.period_x) if stack.is_1d
             or stack.period_y == stack.period_x
             else UnitCell(period_x_m=stack.period_x, period_y_m=stack.period_y))
-    return Design(name=name, unit_cell=cell,
-                  stack=Stack(layers=dm_layers, superstrate_material="superstrate",
-                              substrate_material="substrate"),
-                  electrodes=[], materials=reg,
-                  optical=OpticalSpec(polarization=polarization, incidence_angle_deg=0.0))
+    design = Design(name=name, unit_cell=cell,
+                    stack=Stack(layers=dm_layers, superstrate_material="superstrate",
+                                substrate_material="substrate"),
+                    electrodes=[], materials=reg,
+                    optical=OpticalSpec(polarization=polarization, incidence_angle_deg=0.0))
+    return (design, eps_by_region) if return_eps_by_region else design

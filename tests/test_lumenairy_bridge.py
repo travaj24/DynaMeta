@@ -954,8 +954,10 @@ def test_make_lumenairy_bor_solver_overrides_n_radial_and_threads_absorption():
     so a spec can omit/disagree with it and (b) thread `absorption` into solve_bor -- both gated
     against solve_bor itself on the same spec."""
     from dataclasses import replace
-    from dynameta.optics.lumenairy_bridge import (BorLayer, BorStackSpec,
-                                                  make_lumenairy_bor_solver, solve_bor)
+    # audit V-19 (2026-11-02): the factory is now make_bor_spec_solver; the old name is a
+    # DeprecationWarning alias, gated in tests/test_lumenairy_shapes_sem_wrap.py
+    from dynameta.optics.lumenairy_bridge import (BorLayer, BorStackSpec, solve_bor)
+    from dynameta.optics.lumenairy_bridge import make_bor_spec_solver as make_lumenairy_bor_solver
     spec = BorStackSpec(layers=[BorLayer(thickness_m=0.6e-6, eps=complex(1.8 ** 2), name="slab")],
                         azimuthal_order_m=1, r_max_m=40e-6, n_radial=32, n_super=1.0, n_sub=1.0)
     got = make_lumenairy_bor_solver(n_radial=48)(spec, 1.0e-6)
