@@ -91,12 +91,12 @@ def test_gate1_first_spacing_is_exact_dz():
     assert float(np.diff(ze)[0]) == dz            # bit-exact (arange(nz)[1]*dz - 0)
 
 
-def test_gate1_existing_fdtd_infra_gates_still_pass():
-    # the additive nonuniform path must not perturb the pre-existing coverage gates
-    from test_audit_2026_07_17_infra import (test_fdtd_1d_dielectric_slab_vs_airy,
-                                             test_fdtd_1d_drude_slab_absorbs)
-    test_fdtd_1d_dielectric_slab_vs_airy()
-    test_fdtd_1d_drude_slab_absorbs()
+# Gate 1's "existing FDTD infra still passes" re-run is GONE (audit T-16, 2026-11-02): it
+# re-invoked test_audit_2026_07_17_infra's two FDTD test functions by cross-module import, so
+# the suite ran the same two marches again for zero coverage (pytest collects them in their
+# own module, which CI runs in the `solvers` job and every `test` leg) and the bare import
+# broke under --import-mode=importlib. The nonuniform path's uniform-limit byte-identity is
+# gated above (test_gate1_uniform_edges_byte_identical).
 
 
 def test_gate1_time_trace_on_nonuniform_grid():
