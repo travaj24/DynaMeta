@@ -123,6 +123,7 @@ __all__ = [
 # the spelling this module's own API reads in, but it is the same function object as `pole_q`, so
 # there is exactly one docstring, one convention and nothing left to drift.
 from dynameta.optics.resonance import pole_q as q_from_pole                 # noqa: E402
+from dynameta.warning_types import UnreliableResultWarning
 
 
 # ------------------------------------------------------------------------------------------------
@@ -634,7 +635,7 @@ def _find_resonances_and_fit(omega_real, response, *, residue_floor, stability_c
                     "below the threshold -- lower froissart_frac (or set it to 0) to keep it, and "
                     "see the froissart_frac note in this docstring.".format(
                         len(cand), eff_frac, float(froissart_frac),
-                        _aaa_misfit(res, f)), RuntimeWarning, stacklevel=_stacklevel)
+                        _aaa_misfit(res, f)), UnreliableResultWarning, stacklevel=_stacklevel)
             cand = kept
             if not cand:
                 return [], res
@@ -682,7 +683,7 @@ def _find_resonances_and_fit(omega_real, response, *, residue_floor, stability_c
                 "A resonance only a few samples wide is not resolved by the decimated grid: "
                 "sample it more densely, loosen stability_rtol, or pass stability_check=False."
                 .format(len(cand), int(dec_poles.size), float(stability_rtol)),
-                RuntimeWarning, stacklevel=_stacklevel)
+                UnreliableResultWarning, stacklevel=_stacklevel)
         cand = stable
 
     out = [Resonance(omega_tilde=p, Q=q_from_pole(p), residue=r) for p, r in cand]
@@ -702,7 +703,7 @@ def _find_resonances_and_fit(omega_real, response, *, residue_floor, stability_c
                     "extrapolation -- widen the sweep to >= ~3-5 FWHM (module OPERATING "
                     "ENVELOPE).".format(rr.omega_tilde.real, fwhm, fwhm / span, span,
                                         broad_warn_frac, rr.Q),
-                    RuntimeWarning, stacklevel=_stacklevel)
+                    UnreliableResultWarning, stacklevel=_stacklevel)
     return out, res
 
 

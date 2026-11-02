@@ -22,6 +22,7 @@ import numpy as np
 from dynameta.constants import C_LIGHT
 from dynameta.core.layered import LayeredSlab, LayeredStack
 from dynameta.optics.tmm_reference import layered_rta
+from dynameta.warning_types import UnreliableResultWarning
 
 
 def rc_accumulation(times_s, n_off: float, n_on: float, tau_s: float):
@@ -195,4 +196,4 @@ def _warn_if_not_adiabatic(stack, t, factor: float) -> None:
             "TMM solve and the returned R(t) will look smooth and plausible while being wrong. "
             "Use the FDTD path (a time-varying eps hook) for sub-round-trip drives, or pass "
             "adiabatic_rt_factor=0 to silence this.".format(dt_min, factor, t_rt),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)

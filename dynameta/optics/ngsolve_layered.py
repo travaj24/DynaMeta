@@ -49,6 +49,7 @@ from dynameta.core.units import NM, NM_PER_M
 from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 S = NM_PER_M   # m -> nm (OCC works in nm); single source = core.units.NM_PER_M
 
@@ -305,7 +306,7 @@ class LayeredOpticalBuilder:
                 warnings.warn(
                     "this design is {} at normal incidence -- you can set mesh_3d.symmetry={!r} to "
                     "solve a symmetry-reduced cell ({}) at the SAME R/T. It is OPT-IN; the full "
-                    "periodic cell is being meshed.".format(d.device_symmetry(), avail, frac),
+                    "periodic cell is being meshed.".format(d.device_symmetry(), avail, frac), AdvisoryWarning,
                     stacklevel=2)
         Px_mesh = 0.5 * Px if sym_x else Px
         Py_mesh = 0.5 * Py if sym_y else Py

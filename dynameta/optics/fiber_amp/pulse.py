@@ -25,9 +25,11 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT
 from dynameta.optics.fiber_amp.dynamics import frantz_nodvik_instantaneous_gain
+from dynameta.warning_types import DynaMetaDeprecationWarning, UnreliableResultWarning
 
 __all__ = ["Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "SaturableGain", "raman_response_freq"]
+           "soliton_order", "propagate_gnlse", "PropagationResult", "SaturableGain",
+           "raman_response_freq"]   # audit V-21: PropagationResult is propagate_gnlse's RETURN type
 
 
 @dataclass
@@ -154,7 +156,7 @@ def _v12(fn: str, new_val, old_val, old: str, default=None):
         if new_val is not None:
             raise TypeError("%s: got both %s= and its deprecated alias %s=" % (fn, new, old))
         warnings.warn("%s: %s= is deprecated (it reads as the reciprocal unit); use %s= "
-                      "(audit V-12)" % (fn, old, new), DeprecationWarning, stacklevel=3)
+                      "(audit V-12)" % (fn, old, new), DynaMetaDeprecationWarning, stacklevel=3)
         return old_val
     if new_val is None:
         if default is None:
@@ -251,7 +253,7 @@ def _guard_raman_sampling(dt_s: float, model: str) -> None:
             "red shift, with a plausible-looking result. Refine dt (more time points over the "
             "same window) or drop the Raman term and call the run Kerr-only.".format(
                 model, dt_s, tau, n_per_tau, _RAMAN_MIN_SAMPLES_PER_TAU),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)
 
 
 # ---- the GNLSE split-step propagator -------------------------------------------------------
@@ -468,7 +470,7 @@ def _warn_fn_wrap(ratio: float) -> None:
         "contained pulse changes the extracted energy by 43.8% (audit W5-4). Re-centre the pulse "
         "in t (np.roll / np.fft.fftshift) or widen the window until the edges are dark.".format(
             _FN_EDGE_SAMPLE_DIVISOR, ratio, _FN_EDGE_POWER_TOL),
-        RuntimeWarning, stacklevel=3)
+        UnreliableResultWarning, stacklevel=3)
 
 
 @dataclass

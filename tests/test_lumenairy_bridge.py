@@ -777,9 +777,16 @@ def test_pmm2d_pure_absorption_budget():
                            superstrate_material="air", substrate_material="glass"),
                electrodes=[], materials=reg,
                optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
-    off = make_lumenairy_pmm2d_solver(engine="pure")(d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    # audit X-27 (2026-11-02): n_modes=4, not the default 8. Every assertion here is STRUCTURAL
+    # (the off-switch, the region keys, the budget identity A_independent == A, A > 1e-3), and
+    # all of them hold at any resolution: measured A = 0.0930 / 0.0918 / 0.0910 / 0.0907 at
+    # n_modes 3 / 4 / 6 / 8, |A_independent - A| = 3e-15 at n_modes 3 and 4, 5e-14 at 8. The default
+    # cost 120-180 s per solve on the dev box (765 s for this test under load, the file's
+    # largest single item); n_modes=4 costs 1-11 s.
+    off = make_lumenairy_pmm2d_solver(engine="pure", n_modes=4)(
+        d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
     assert off.per_region_absorption is None and off.A_independent is None
-    on = make_lumenairy_pmm2d_solver(engine="pure", absorption=True)(
+    on = make_lumenairy_pmm2d_solver(engine="pure", n_modes=4, absorption=True)(
         d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
     assert set(on.per_region_absorption) == {"spacer", "patch"}
     assert on.A_independent is not None and abs(on.A_independent - on.A) < 1e-6

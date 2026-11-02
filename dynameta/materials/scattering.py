@@ -18,6 +18,7 @@ from typing import Callable, Optional, Union
 import numpy as np
 
 from dynameta.constants import Q_E, M_E, HBAR
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 _N_FLOOR = 1.0e10        # mirror the ITO DOS-mass closure floor (avoid 0**(1/3) edge)
 
@@ -95,7 +96,7 @@ class MatthiessenGamma:
     """
     gamma_const_rad_s: float = 0.0
     gamma_phonon_300K_rad_s: float = 0.0
-    T_K: float = 300.0
+    T_K: float = T_REF
     debye_T_K: float = 0.0
     bh_prefactor_rad_s: float = 0.0
     bh_n_ref_m3: float = 1.0e27

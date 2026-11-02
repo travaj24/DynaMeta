@@ -40,6 +40,7 @@ import numpy as np
 
 from dynameta.constants import EPS0
 from dynameta.core.numerics import trapz
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = [
     "DirectorProfile", "LCGeometry", "LCStaticResult",
@@ -87,7 +88,7 @@ def haller_order_parameter(T_K: float, T_NI_K: float, *, beta: float = 0.22) -> 
     return float((1.0 - T_K / T_NI_K) ** float(beta))
 
 
-def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = 300.0, T_NI_K: float = 380.0,
+def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = T_REF, T_NI_K: float = 380.0,
                      beta: float = 0.22) -> float:
     """Frank elastic constant at temperature T from its value K_ref at T_ref. The Frank constants scale
     as the SQUARE of the order parameter, K(T) = K_ref [S(T)/S(T_ref)]^2 (the standard mean-field result;
@@ -100,7 +101,7 @@ def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = 300.0, T_NI_K
     return float(K_ref) * (S / S_ref) ** 2
 
 
-def gamma1_of_temperature(gamma1_ref: float, T_K: float, *, T_ref_K: float = 300.0,
+def gamma1_of_temperature(gamma1_ref: float, T_K: float, *, T_ref_K: float = T_REF,
                           E_a_eV: float = 0.4, T_NI_K: "Optional[float]" = None,
                           beta: float = 0.22) -> float:
     """Rotational viscosity gamma1(T) = gamma1_ref * exp((E_a/kB)(1/T - 1/T_ref)) * [S(T)/S(T_ref)]

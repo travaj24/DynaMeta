@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dynameta.optics.fiber_amp.steady_state import SteadyStateResult
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["ThermalModel", "quantum_defect_fraction", "net_forward_flux", "heat_load_per_m",
            "total_heat_W", "radial_temperature_rise", "peak_temperature_rise",
@@ -75,7 +76,7 @@ class ThermalModel:
     core_k_W_mK: float = 1.38
     clad_k_W_mK: float = 1.38
     h_conv_W_m2K: float = 1000.0
-    T_coolant_K: float = 300.0
+    T_coolant_K: float = T_REF
 
     def __post_init__(self):
         for nm, v in (("core_k_W_mK", self.core_k_W_mK), ("clad_k_W_mK", self.clad_k_W_mK),
@@ -131,7 +132,7 @@ def thermo_optic_phase_rad(P_heat_W: float, lambda_m: float, *, dndt: float = DN
 
 
 def solve_with_thermal_feedback(amp, model: ThermalModel, b_outer_m: float, *,
-                                T_ref_K: float = 300.0, max_iter: int = 12,
+                                T_ref_K: float = T_REF, max_iter: int = 12,
                                 tol_K: float = 0.2, relax: float = 0.7, **solve_kw):
     """SELF-CONSISTENT distributed-temperature solve: iterate
         solve -> Q(z) = heat_load_per_m -> T(z) = T_coolant + Q(z) * (core + clad + convection

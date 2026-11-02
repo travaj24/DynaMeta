@@ -66,6 +66,7 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 
 @dataclass
@@ -355,7 +356,7 @@ class Stacked3DSpec:
                     warnings.warn(
                         "from_design: gate footprint {:.3g}x{:.3g} m is not square; it is "
                         "collapsed to a centered square of the larger side (gate_patch_frac is "
-                        "a single scalar).".format(wx, wy))
+                        "a single scalar).".format(wx, wy), AdvisoryWarning, stacklevel=2)
                 frac = min(1.0, max(wx / cell.period_x_m, wy / cell.period_y_m))
         # gate/body electrode names so run_pipeline's BiasPoint (keyed by electrode name)
         # maps to the right contact instead of silently defaulting Vg=0 (verifier HIGH).
@@ -517,7 +518,7 @@ class Devsim3DEquilibrium:
                 warnings.warn(
                     "Devsim3DEquilibrium.solve: BiasPoint has voltages {} but neither gate_name "
                     "'{}' nor body_name '{}' is among them -- solving at Vg=0. Check the electrode "
-                    "names.".format(sorted(bias.voltages), gn, bn))
+                    "names.".format(sorted(bias.voltages), gn, bn), AdvisoryWarning, stacklevel=2)
             else:
                 unknown = [k for k in bias.voltages if k not in (gn, bn)]
                 if unknown:
@@ -525,7 +526,7 @@ class Devsim3DEquilibrium:
                         "Devsim3DEquilibrium.solve: BiasPoint voltage key(s) {} match neither "
                         "gate_name '{}' nor body_name '{}' and are SILENTLY IGNORED -- the stacked "
                         "builder drives only the gate and body contact. Check the electrode "
-                        "names.".format(unknown, gn, bn))
+                        "names.".format(unknown, gn, bn), AdvisoryWarning, stacklevel=2)
         vg = float(bias.voltages.get(gn, 0.0))
         vb = float(bias.voltages.get(bn, 0.0))
         ds.set_parameter(device=self.device, name="body_bias", value=vb)

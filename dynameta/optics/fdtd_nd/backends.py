@@ -144,7 +144,7 @@ def have_jax():
             except RuntimeError as e:
                 import warnings
                 warnings.warn(str(e) + " -- the jax backend is DISABLED for this session",
-                              RuntimeWarning)
+                              RuntimeWarning, stacklevel=2)
                 _JAX_OK = False
                 return _JAX_OK
             _JAX_OK = True

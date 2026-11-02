@@ -149,14 +149,15 @@ from dynameta.optics.fiber_amp.dynamics import (TransientResult, amplifier_satur
                                                saturation_energy, simulate_transient,
                                                simulate_transient_eryb)
 from dynameta.optics.fiber_amp.calibration import (CrossSectionTable, EDFA_CBAND_TARGETS,
-                                                  calibration_report,
+                                                  calibration_report, CalibrationReport,
                                                   dB_per_m_to_per_m, giles_calibrated_fiber,
                                                   ion_from_cross_sections, ytterbium_melkumov,
                                                   er_yb_phosphosilicate_reference)
 from dynameta.optics.fiber_amp.detection import BeatNoiseResult, detection_noise
 from dynameta.optics.fiber_amp.pulse import (Pulse, gaussian_pulse, sech_pulse,
                                             dispersion_length, nonlinear_length, soliton_order,
-                                            propagate_gnlse, raman_response_freq, SaturableGain)
+                                            propagate_gnlse, raman_response_freq, SaturableGain,
+                                            PropagationResult)
 from dynameta.optics.fiber_amp.cpa import (apply_spectral_phase, transform_limited, strehl_ratio,
                                           CPAResult, cpa_chain)
 from dynameta.optics.fiber_amp.nonlinear_limits import (TMI_C0_DEFAULT, brillouin_shift_hz,
@@ -243,10 +244,11 @@ __all__ = ["ASE_MODES", "SelfConsistentControl", "StepReport",
            "frantz_nodvik_instantaneous_gain",
            "CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
            "ytterbium_melkumov", "er_yb_phosphosilicate_reference",
-           "calibration_report", "dB_per_m_to_per_m", "EDFA_CBAND_TARGETS",
+           "calibration_report", "CalibrationReport", "dB_per_m_to_per_m", "EDFA_CBAND_TARGETS",
            "BeatNoiseResult", "detection_noise",
            "Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "raman_response_freq", "SaturableGain",
+           "soliton_order", "propagate_gnlse", "PropagationResult", "raman_response_freq",
+           "SaturableGain",
            "apply_spectral_phase", "transform_limited", "strehl_ratio", "CPAResult", "cpa_chain",
            "brillouin_shift_hz", "brillouin_linewidth_hz", "sbs_threshold_W",
            "sbs_gain_exponent", "srs_threshold_W", "srs_gain_exponent", "tmi_threshold_W",

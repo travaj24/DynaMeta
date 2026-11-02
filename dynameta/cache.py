@@ -22,6 +22,7 @@ import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
 from dynameta.io.store import load_arrays, preload_backend, save_arrays
+from dynameta.warning_types import UnreliableResultWarning
 
 # packed-vector layout (NaN = the field was None): the OpticalResult scalar fields + split complex r/t
 _VEC = ("R", "phase_deg", "solve_time_s", "T", "A", "A_independent", "R_flux", "T_flux",
@@ -270,7 +271,7 @@ class OpticalSolverCache:
                 "OpticalSolverCache: the inner solver is a factory closure with no "
                 "cache_fingerprint and tag='' -- two solvers from the same factory with "
                 "different settings would share cache keys. Pass a distinguishing tag= or "
-                "stamp solver.cache_fingerprint (audit S5-2).", stacklevel=3)
+                "stamp solver.cache_fingerprint (audit S5-2).", UnreliableResultWarning, stacklevel=3)
         self.fmt = fmt
         self.autosave = bool(autosave)
         self.autosave_every = max(1, int(autosave_every))

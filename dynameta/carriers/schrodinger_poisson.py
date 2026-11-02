@@ -28,6 +28,8 @@ import numpy as np
 # Physical constants (SI): single source in core/constants. `Q` is this module's local alias
 # for the elementary charge (used pervasively in the band-physics expressions, e.g. -Q*phi).
 from dynameta.constants import EPS0, KB, HBAR, M_E, Q_E as Q  # noqa: F401
+from dynameta.warning_types import UnreliableResultWarning
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 
 def _fermi_log(x: np.ndarray) -> np.ndarray:
@@ -73,7 +75,7 @@ class SchrodingerPoisson1D:
     (g_v=1), spin g_s=2, parabolic m* (caveat: ITO is nonparabolic at 1e26-1e27 m^-3 --
     pass a density-dependent m* or accept sub-band-spacing error)."""
 
-    def __init__(self, z_m: np.ndarray, m_eff_kg: float, *, T_K: float = 300.0,
+    def __init__(self, z_m: np.ndarray, m_eff_kg: float, *, T_K: float = T_REF,
                  g_s: int = 2, g_v: int = 1):
         z = np.asarray(z_m, dtype=np.float64)
         if z.ndim != 1 or z.size < 5:
@@ -182,7 +184,7 @@ class SchrodingerPoisson1D:
                 ">5kT above E_F={:.4f} eV (E_F-E_top={:.1f} kT); n_states={} likely truncates "
                 "the occupied sub-band ladder and UNDER-counts the density. Increase "
                 "n_states.".format(E.size - 1, E[-1] / Q, E_F_J / Q,
-                                   (E_F_J - E[-1]) / (KB * self.T), n_states), stacklevel=2)
+                                   (E_F_J - E[-1]) / (KB * self.T), n_states), UnreliableResultWarning, stacklevel=2)
         # keep states that are actually localized (small amplitude at the Dirichlet edge[s]). With a
         # Neumann body (node 0 free), psi need NOT vanish at z=0, so only the RIGHT (gate) edge is a wall.
         if neumann_left:
@@ -394,7 +396,7 @@ class SchrodingerPoisson1D:
                 "SchrodingerPoisson.solve_self_consistent did NOT converge after {} outer "
                 "iterations ({}). The returned (phi, n) is unreliable and sensitive to "
                 "max_outer; try a smaller `relax`, a larger bound_tol (slab mode), or more "
-                "iterations.".format(max_outer, "; ".join(why)), stacklevel=2)
+                "iterations.".format(max_outer, "; ".join(why)), UnreliableResultWarning, stacklevel=2)
         U = -Q * phi + U_band
         result = self.density(U, E_F_J, m_eff_z_kg=m_eff_z_kg, n_states=n_states, bound_tol=bound_tol,
                               alpha_np_per_eV=alpha_np_per_eV, neumann_left=neumann_left)

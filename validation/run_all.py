@@ -232,6 +232,11 @@ SMOKE = {
     # audit X-19: cheap smoke wrappers for two optics modules that had NO validation script at all,
     # so their only oracle was the test written beside the implementation in the same commit
     "nonlocal_hydro_material", "resonance_pole_finder",
+    # audit X-19, same class: optics.harmonics and optics.spdc_design, each gated against in-file
+    # closed forms (Parseval / Gaussian-tail / cos(pi f dt); Gaussian Schmidt K / sinc^2 FWHM / Si).
+    # Wall-clock MEASURED 2026-11-02 (this box, cold start, per script):
+    #   harmonics_spectral_diagnostics 1.0 s | spdc_design_jsa 2.1 s
+    "harmonics_spectral_diagnostics", "spdc_design_jsa",
 }
 
 # Solver-free validations DELIBERATELY outside SMOKE, with the reason (audit X-26: "add them to

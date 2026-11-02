@@ -133,6 +133,7 @@ from dynameta.optics.rasterize import cell_axes, layer_eps_cell, layer_eps_tenso
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["design_to_pmm2d_stack", "make_lumenairy_pmm2d_solver", "layer_to_pure_cell",
            "pure_union_grid_n", "resolve_pure_grid"]
@@ -709,6 +710,11 @@ def _tapered_pillar_kwargs(L, design, lambda_m: float, px: float, py: float, bg)
                 y_bounds_top=(t[2], t[3]))
 
 
+# `degree=11` here vs 16 for the 1-D design_to_pmm_stack (audit V-15): it reaches ONLY
+# engine='hybrid' (a 2-D tensor-product basis, so lower by design). The DEFAULT engine='pure' never
+# reads `degree` -- its resolution knob is `n_modes` (measured 2026-11-02 on a 400 nm Rectangle
+# patch cell: R identical to every printed digit at degree 6 / 8). The 1-D spread is quantified in
+# pmm_backend's V-15 note.
 def design_to_pmm2d_stack(design, lambda_m: float, *, engine: str = "pure",
                           eps_by_region=None, n_modes: int = 8, degree: int = 11,
                           n_orders: Optional[int] = None, formulation: str = "li",
@@ -990,7 +996,7 @@ def make_lumenairy_pmm2d_solver(*, engine: str = "pure", n_modes: int = 8,
             except Exception as exc:              # pragma: no cover - defensive
                 import warnings
                 warnings.warn("lumenairy PMM2D bridge: per-layer absorption "
-                              "unavailable ({}); A_independent left unset".format(exc),
+                              "unavailable ({}); A_independent left unset".format(exc), AdvisoryWarning,
                               stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=time.perf_counter() - t0, t=t, T=T,

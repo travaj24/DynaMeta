@@ -18,6 +18,7 @@ from dynameta.constants import Q_E as _Q_E   # elementary charge, C
 
 
 from dynameta.core.numerics import trapz as _trapz   # shared (np.trapz removed in NumPy 2.x)
+from dynameta.warning_types import UnreliableResultWarning
 
 
 def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
@@ -113,7 +114,7 @@ def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
     if np.any(C_per <= 0.0):
         warnings.warn("lumped_rc_bandwidth: non-positive capacitance encountered "
                       "(depletion branch?); f_3dB is NaN there. Pass the accumulation-"
-                      "branch (C>0) capacitance for a physical bandwidth.", stacklevel=2)
+                      "branch (C>0) capacitance for a physical bandwidth.", UnreliableResultWarning, stacklevel=2)
     R = float(sheet_resistance_ohm_sq) * float(path_length_m) / float(pad_width_m)
     C_cell = C_per * float(cell_area_m2)
     with np.errstate(divide="ignore", invalid="ignore"):

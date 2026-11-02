@@ -72,6 +72,7 @@ import math
 import warnings
 
 from dynameta.constants import EPS0, C_LIGHT, Q_E, M_E, Z0
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = ["rudnick_stern_surface_chi", "rudnick_stern_flat_shg", "shg_two_step",
            "rudnick_stern_flat_sfg", "sfg_two_step", "sfg_field_transverse_kx",
@@ -269,8 +270,7 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     geo = LayeredOpticalBuilder(design).build()
     mesh = geo.mesh
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     # (1) linear solve at the fundamental
     ebr_w = eps_at(lambda_fund_m)
@@ -315,6 +315,17 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
 # ---------------------------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------------------------
+def _default_eps_at(design, geo):
+    """The default `eps_at(lambda_m) -> {region: EpsField}` of every two-step entry point: each mesh
+    region's material eps at that wavelength (audit X-23, 2026-11-02 -- this closure was re-typed
+    verbatim inside shg_two_step, the two-color SFG/DFG entry point and shg_structured_two_step)."""
+    regions = geo.mesh.GetMaterials()
+
+    def eps_at(lam_m):
+        return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in regions}
+    return eps_at
+
+
 def _region_epsfield(design, geo, region, lambda_m):
     from dynameta.core.eps_field import EpsField
     mat = geo.material_by_region.get(region)
@@ -568,10 +579,8 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     th1, th2 = math.radians(t1_deg), math.radians(t2_deg)
 
     geo = LayeredOpticalBuilder(design).build()
-    mesh = geo.mesh
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     # (1) two linear fundamental solves (the existing plane-wave path, one per color). Their fields
     #     are sampled ANALYTICALLY (the Sipe closed form, as in shg_two_step) rather than from an
@@ -1015,7 +1024,7 @@ def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_z
             "surface-SHG extraction: the E_z standoff band (up to {:.3g} nm above the metal) crosses "
             "a MATERIAL INTERFACE, so no single eps_above describes it and the two-wave fit mixes two "
             "dispersions. Reduce standoff_nm/n_standoff below the cap thickness. (audit F-11)"
-            .format(float(ds[-1])), stacklevel=2)
+            .format(float(ds[-1])), UnreliableResultWarning, stacklevel=2)
     eps_above_mean = complex(_np.mean(eps_seen)) if eps_seen else 1.0 + 0j
     z_mean = float(_np.mean(z_s))
     # demodulate the SH transverse Bloch phase exp(i kx_2w x), kx_2w = 2 kx_fund, then FFT over x.
@@ -1141,8 +1150,7 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     mesh = geo.mesh
     _ensure_bloch_dirs(geo)                          # robust Bloch-idnr detection for thin grating layers
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     theta_deg = float(getattr(design.optical, "incidence_angle_deg", 0.0) or 0.0)
     pol = getattr(design.optical, "polarization", "p")
@@ -1204,7 +1212,7 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
             "(eps_above={:.4g}), so 'sheet_order_power'/'sheet_nonspecular' -- the analytic "
             "flat-metal-in-VACUUM physical-optics estimate (Sipe denominator beta1 + beta2/eps_2w) "
             "-- are approximate. The extracted 'sheet' and the FEM 'p_up_by_order' account for the "
-            "cap. (audit F-11)".format(complex(sheet["eps_above"])), stacklevel=2)
+            "cap. (audit F-11)".format(complex(sheet["eps_above"])), UnreliableResultWarning, stacklevel=2)
 
     base = {"sheet": sheet, "sheet_order_power": sheet_order_power,
             "sheet_nonspecular": float(sheet_nonspec), "E_perp_in": complex(E_perp_in),

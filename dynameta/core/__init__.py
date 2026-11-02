@@ -13,6 +13,8 @@ geometry-DEPENDENT crossings stay strict and go through `normalize_pol` explicit
 """
 
 from dynameta.core.units import UnitScale, SI, NM
+from dynameta.warning_types import (DynaMetaWarning, UnreliableResultWarning, AdvisoryWarning,
+                                         DynaMetaDeprecationWarning)
 from dynameta.core.backend import (
     array_namespace, backend_name, to_numpy, to_backend,
     is_numpy_array, is_cupy_array, is_jax_array, CUPY_AVAILABLE, JAX_AVAILABLE,
@@ -47,6 +49,7 @@ from dynameta.core.polarization import (
 
 __all__ = [
     "UnitScale", "SI", "NM",
+    "DynaMetaWarning", "UnreliableResultWarning", "AdvisoryWarning", "DynaMetaDeprecationWarning",
     "array_namespace", "backend_name", "to_numpy", "to_backend",
     "is_numpy_array", "is_cupy_array", "is_jax_array", "CUPY_AVAILABLE", "JAX_AVAILABLE",
     "EpsField",
