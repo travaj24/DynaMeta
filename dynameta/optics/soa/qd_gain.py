@@ -52,15 +52,13 @@ Pure numpy/scipy; no FDTD, no DEVSIM, no metasurface seam.
 
 from __future__ import annotations
 
-import functools
-import threading
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E
+from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E, T_REF
 from dynameta.core.numerics import ZeroInitBDF
 
 
@@ -72,61 +70,19 @@ from dynameta.core.numerics import ZeroInitBDF
 # block used to `from numba import njit` at module load, so every `import dynameta.optics.soa`
 # paid numba (measured 0.34 s of `dynameta.optics.soa.qd_gain`'s 0.35 s self+children in
 # -X importtime; whole-package import 1.06-1.11 s -> see the V-14 row) although the default
-# QDGainModel(fast=False) never touches it. Self-contained on purpose (importing
-# optics.fdtd_nd.backends would pull the fdtd_nd package in): `_njit(...)` returns a `_LazyJit`
-# that applies the SAME numba.njit options to the SAME function on first call -- so the compiled
-# kernels (and the on-disk `cache=True` entries, keyed on the function's file and qualname) are
-# what they were -- or returns the plain Python function when numba is absent (the old shim);
-# `_HAVE_NUMBA` is a PEP 562 module attribute (`_have_numba()` internally), so
-# `from dynameta.optics.soa.qd_gain import _HAVE_NUMBA` keeps working. No prange here.
-_NUMBA_OK = None
-_JIT_LOCK = threading.Lock()
-
-
-def _have_numba():
-    """True if numba imports (cached; the import is done once, on first ask -- audit V-14)."""
-    global _NUMBA_OK
-    if _NUMBA_OK is None:
-        try:                                                  # pragma: no cover - env dependent
-            import numba                                      # noqa: F401
-            _NUMBA_OK = True
-        except Exception:                                     # pragma: no cover
-            _NUMBA_OK = False
-    return _NUMBA_OK
-
-
-class _LazyJit:
-    """numba.njit(*jit_args, **jit_kwargs)(py_func), built on first call (audit V-14)."""
-
-    def __init__(self, py_func, jit_args, jit_kwargs):
-        self._disp = None
-        self.py_func = py_func
-        self._jit_args, self._jit_kwargs = jit_args, jit_kwargs
-        functools.update_wrapper(self, py_func)
-
-    def _dispatcher(self):
-        if self._disp is None:
-            with _JIT_LOCK:
-                if self._disp is None:
-                    if _have_numba():
-                        import numba
-                        self._disp = numba.njit(*self._jit_args, **self._jit_kwargs)(self.py_func)
-                    else:                                     # pragma: no cover - no-numba shim
-                        self._disp = self.py_func
-        return self._disp
-
-    def __call__(self, *args, **kwargs):
-        return self._dispatcher()(*args, **kwargs)
-
-
-def _njit(*args, **kwargs):
-    """Drop-in for `numba.njit` (bare or with options) that defers the import + compile."""
-    if len(args) == 1 and callable(args[0]) and not kwargs:
-        return _LazyJit(args[0], (), {})
-
-    def _wrap(f):
-        return _LazyJit(f, args, kwargs)
-    return _wrap
+# QDGainModel(fast=False) never touches it. `_njit(...)` returns a `_LazyJit` that applies the
+# SAME numba.njit options to the SAME function on first call -- so the compiled kernels (and the
+# on-disk `cache=True` entries, keyed on the function's file and qualname) are what they were --
+# or returns the plain Python function when numba is absent; `_HAVE_NUMBA` is a PEP 562 module
+# attribute (`_have_numba()` internally), so `from dynameta.optics.soa.qd_gain import
+# _HAVE_NUMBA` keeps working. No prange here.
+# ONE shim (wave-7, 2026-11-02): this module used to carry its own copy of the lazy shim (it
+# could not import optics.fdtd_nd.backends' copy without pulling the FDTD package into
+# `import dynameta.optics.soa`). Both now import the single implementation from dynameta.numba_env
+# (stdlib-only, and already loaded by `import dynameta`), so the soa import stays numba-free
+# (tests/test_fdtd_backend_contracts.py::test_v14_importing_optics_soa_does_not_import_numba).
+from dynameta.numba_env import _LazyJit, have_numba as _have_numba  # noqa: E402,F401
+from dynameta.numba_env import njit as _njit                        # noqa: E402
 
 
 def __getattr__(name):                                        # PEP 562: lazy module attribute
@@ -135,7 +91,10 @@ def __getattr__(name):                                        # PEP 562: lazy mo
     raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
 
 
-__all__ = ["QDGainParams", "QDGainModel", "SelfHeating"]
+# Leakage / ManyBody are public QDGainModel(...) options (soa/__init__ re-exports them) -- listed
+# here too (wave-7, 2026-11-02; H6a leftover) so `from qd_gain import *` and the __all__ census
+# see every public dataclass of this module.
+__all__ = ["QDGainParams", "QDGainModel", "SelfHeating", "Leakage", "ManyBody"]
 
 
 @_njit(cache=True, fastmath=True)
@@ -364,7 +323,7 @@ class QDGainParams:
     # spectral discretization
     n_groups: int = 41               # inhomogeneous size groups (odd -> a group sits on nu0)
     span_sigma: float = 3.0          # half-width of the group grid in inhomogeneous sigmas
-    T_K: float = 300.0
+    T_K: float = T_REF               # = 300.0 K exactly (dynameta.constants, X-24)
     # electron/hole occupation split (opt-in, Phase-6 gain fidelity). With eh_split the dots carry
     # SEPARATE electron f_c and hole f_v occupations per state; gain -> (f_c+f_v-1), spontaneous ->
     # f_c f_v, n_sp -> f_c f_v/(f_c+f_v-1). The tau_*_s above are the ELECTRON times; the hole times
@@ -551,7 +510,7 @@ class SelfHeating:
     Cth_J_K: float = 1.0e-9           # heat capacity [J/K] (transient only; tau_th = Rth Cth)
     dnu0_dT_Hz_K: float = 0.0         # gain-peak red-shift coef [Hz/K] (>=0: nu falls as T rises)
     dg_dT_frac_per_K: float = 0.0     # fractional peak-gain coef (1/g) dg/dT [1/K] (<=0 physical)
-    T0_K: float = 300.0               # ambient / heat-sink reference [K]
+    T0_K: float = T_REF               # ambient / heat-sink reference [K] (= 300.0, X-24)
     V_j_V: float = 0.9                # junction bias for P_elec = I V_j [V]
     eta_extraction: float = 1.0       # optical-extraction fraction removed from P_diss [0,1]
     w_relax: float = 0.5              # steady Picard under-relaxation in (0,1]
@@ -1002,12 +961,6 @@ class QDGainModel:
         gi = pref * ((osc * x / (1.0 + x * x)) @ inv)               # index partner (Im, KK)
         return (g if np.ndim(nu_Hz) else float(g[0]), gi if np.ndim(nu_Hz) else float(gi[0]))
 
-    def power_to_photon_density(self, P_W: float, nu_Hz: float) -> float:
-        """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided
-        power P at frequency nu -- the density that actually depletes the dots."""
-        p = self.p
-        return float(p.Gamma * P_W / (p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2))
-
     # ---- rate equations ----
     def rhs_fields(self, N_w, rho_ES, rho_GS, I_A, S_conf_m3, nu_s_Hz, ls_gs=None, ls_es=None):
         """Vectorized rate equations over a stack of z-slices -- the single source of truth
@@ -1421,10 +1374,21 @@ class QDGainModel:
         return self.p.alpha_lef + 0.5 * sl * inv_mean         # alpha(rho_mean), slope d(alpha)/d(rho)
 
     def photon_density(self, P_W, nu_Hz):
-        """Confined photon density S_conf [m^-3] for guided power P (scalar or array)."""
+        """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided power P
+        [W] at frequency nu [Hz] -- the density that actually depletes the dots. Array-safe: a
+        scalar P and nu return a Python float, any array argument returns the broadcast ndarray.
+
+        ONE implementation (audit S3-19, wave-7 2026-11-02): `power_to_photon_density` used to be a
+        second copy of this formula with DIVERGENT array handling -- it wrapped the result in
+        float(), so an array P raised TypeError there while this method returned an array (and a
+        0-d ndarray for a scalar). It is now an alias of this method. Same operation order as both
+        old copies -> bit-identical values (scalar: old float() result; array: old ndarray)."""
         p = self.p
-        return p.Gamma * np.asarray(P_W, dtype=np.float64) / (
+        S = p.Gamma * np.asarray(P_W, dtype=np.float64) / (
             p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2)
+        return S if np.ndim(S) else float(S)
+
+    power_to_photon_density = photon_density              # back-compat alias (audit S3-19)
 
     def init_slices(self, n_slices: int, I_A):
         """Per-slice carrier state initialized to the unsaturated steady state at injection I.

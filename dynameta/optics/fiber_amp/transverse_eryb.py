@@ -374,7 +374,7 @@ class ResolvedErYbAmplifier:
                  concentration=None, rate_temperature=None, yb_stark_thermal=None,
                  tau32_s: Optional[float] = None, upconversion_via_4i11_2: bool = False,
                  er_4i11_2_zero_line_m: float = 977.0e-9, yb_sigma_e_scale: float = 1.0,
-                 er_profile: DopantSpec = None, yb_profile: DopantSpec = None,
+                 er_profile: Optional[DopantSpec] = None, yb_profile: Optional[DopantSpec] = None,
                  signal_modes: Optional[Sequence] = None, uniform_illumination: bool = False,
                  n_quad: int = 24, n_azimuthal: int = 32, r_max_m: Optional[float] = None):
         # THE mean-field twin, built FIRST: it owns every constructor validation (n_yb > 0,
