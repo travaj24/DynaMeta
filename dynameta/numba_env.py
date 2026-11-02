@@ -43,19 +43,29 @@ day. The cache key carries the numba AND tbb versions (plus the probe source and
 version), so a runtime upgrade invalidates a stale negative verdict.
 
 No import-time side effects: call ensure_working_threading_layer() explicitly (tests/conftest
-does) BEFORE the first parallel kernel launch of the process."""
+does) BEFORE the first parallel kernel launch of the process.
+
+LAZY NJIT SHIM (audit V-14 leftover, wave-7 2026-11-02). This module also owns the ONE shared
+lazy `njit` / `have_numba` / `prange` shim (see the block at the bottom). It used to exist twice --
+optics/fdtd_nd/backends.py and a self-contained copy in optics/soa/qd_gain.py (the soa copy could
+not import the fdtd_nd one without pulling the FDTD package into `import dynameta.optics.soa`).
+This module imports only the stdlib, and `import dynameta` already loads it, so both consumers
+import the shim from here at zero extra cost and neither one imports numba until a kernel is
+called."""
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
-__all__ = ["ensure_working_threading_layer"]
+__all__ = ["ensure_working_threading_layer", "have_numba", "njit", "prange"]
 
 # Sacrificial-child source: expose TBB DLLs, run the SMALLEST member of the failing kernel
 # class (a tiny chi2 solve through the numba FDTD backend), report the layer that served it.
@@ -236,3 +246,94 @@ def ensure_working_threading_layer(*, timeout_s: float = 180.0, ttl_s: float = 8
         except Exception:
             pass
     return _apply(verdict, why)
+
+
+# --------------------------------------------------------------------------------------------------
+# Shared LAZY numba.njit shim (audit V-14; single-sourced here wave-7 2026-11-02 -- it was duplicated
+# verbatim-in-spirit in optics/fdtd_nd/backends.py and optics/soa/qd_gain.py, which re-export it).
+# Importing numba costs 0.32-0.34 s (plus 0.39 s for numba.cuda on the FDTD side), so nothing here
+# imports numba until a numba kernel is CALLED or `have_numba()` is asked:
+#   * `njit(...)` returns a `_LazyJit` that applies the SAME numba.njit options to the SAME Python
+#     function on first call (or first non-dunder attribute access, e.g. `.signatures`) -- so the
+#     compiled kernels and their `cache=True` on-disk entries (keyed on the function's file and
+#     qualname) are exactly what an eager `@numba.njit(...)` produced -- or returns the plain
+#     Python function when numba is absent (the old no-numba shim);
+#   * `prange` is a placeholder that behaves as `range` from Python and is swapped for
+#     `numba.prange` in the kernel module's globals just before that module's first compile (numba
+#     resolves `prange` from the function's globals at compile time -> same IR as before). Kernels
+#     whose module never binds `prange` (soa/qd_gain.py) are untouched by the swap.
+# --------------------------------------------------------------------------------------------------
+_NUMBA_OK = None
+_JIT_LOCK = threading.Lock()
+
+
+def have_numba():
+    """True if numba imports (cached; the import is done once, on first ask -- audit V-14)."""
+    global _NUMBA_OK
+    if _NUMBA_OK is None:
+        try:                                                 # pragma: no cover - env dependent
+            import numba                                     # noqa: F401
+            _NUMBA_OK = True
+        except Exception:                                    # pragma: no cover
+            _NUMBA_OK = False
+    return _NUMBA_OK
+
+
+class _PrangePlaceholder:
+    """`range` from plain Python; replaced by `numba.prange` in a kernel module's globals right
+    before that module's first numba compile (see `_LazyJit._dispatcher`)."""
+
+    def __call__(self, *args):
+        return range(*args)
+
+    def __repr__(self):
+        return "<dynameta lazy prange placeholder>"
+
+
+prange = _PrangePlaceholder()
+
+
+class _LazyJit:
+    """A numba.njit-decorated kernel whose decoration (and hence `import numba`) is deferred to the
+    first call. Attribute access other than the wrapped function's metadata (`__doc__`, `__name__`,
+    `py_func`, ...) is forwarded to the real dispatcher, compiling it first."""
+
+    def __init__(self, py_func, jit_args, jit_kwargs):
+        self._disp = None
+        self.py_func = py_func
+        self._jit_args = jit_args
+        self._jit_kwargs = jit_kwargs
+        functools.update_wrapper(self, py_func)
+
+    def _dispatcher(self):
+        if self._disp is None:
+            with _JIT_LOCK:
+                if self._disp is None:
+                    if have_numba():
+                        import numba
+                        g = self.py_func.__globals__
+                        if isinstance(g.get("prange"), _PrangePlaceholder):
+                            g["prange"] = numba.prange
+                        self._disp = numba.njit(*self._jit_args, **self._jit_kwargs)(self.py_func)
+                    else:                                    # pragma: no cover -- the old no-numba shim
+                        self._disp = self.py_func
+        return self._disp
+
+    def __call__(self, *args, **kwargs):
+        return self._dispatcher()(*args, **kwargs)
+
+    def __getattr__(self, name):
+        if name.startswith("__") or name in ("_disp", "py_func", "_jit_args", "_jit_kwargs"):
+            raise AttributeError(name)
+        return getattr(self._dispatcher(), name)
+
+
+def njit(*args, **kwargs):
+    """Drop-in for `numba.njit` (bare `@njit` or `@njit(**options)`) that defers the numba import
+    and compile to the first call (audit V-14)."""
+    if len(args) == 1 and callable(args[0]) and not kwargs:
+        return _LazyJit(args[0], (), {})
+
+    def _wrap(f):
+        return _LazyJit(f, args, kwargs)
+    return _wrap

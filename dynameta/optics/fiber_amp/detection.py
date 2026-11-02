@@ -17,6 +17,7 @@ noise.py. Pure numpy; SI units. docs/fiber_amp_model_spec.md sec.11.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 
@@ -68,11 +69,11 @@ class BeatNoiseResult:
 
 def detection_noise(result: SteadyStateResult, signal_lambda_m: float, *,
                     optical_bw_Hz: float, electrical_bw_Hz: float,
-                    quantum_efficiency: float = 1.0, responsivity_A_W: float = None,
-                    m_modes: int = None,
+                    quantum_efficiency: float = 1.0, responsivity_A_W: Optional[float] = None,
+                    m_modes: Optional[int] = None,
                     dark_current_A: float = 0.0,
                     tia_current_noise_A_rtHz: float = 0.0,
-                    load_ohm: float = None, temperature_K: float = T_REF,
+                    load_ohm: Optional[float] = None, temperature_K: float = T_REF,
                     apd_gain: float = 1.0, apd_excess_noise_F: float = 1.0) -> BeatNoiseResult:
     """Beat-noise analysis of the amplified signal at a photodetector. optical_bw_Hz is the
     filter bandwidth in front of the diode; electrical_bw_Hz the receiver bandwidth. Detector is
