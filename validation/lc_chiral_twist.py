@@ -9,7 +9,8 @@ GATE A (decouple regression): with phi_top = phi_bottom and q0 = 0 the twist dec
 GATE B (pure twist, no field): a 90 deg twisted cell at V = 0, planar (theta = pi/2), q0 = 0 has the
         elastic minimizer phi(z) = phi_t z/d LINEAR with theta flat, and twist energy (1/2) K22 phi_t^2 / d.
 GATE C (cholesteric undistorted helix): with q0 != 0 and the plate azimuths matched to the natural pitch
-        the helix is undistorted, phi'(z) = q0 uniform, and the twist free energy = -(1/2) K22 q0^2 d.
+        the helix is undistorted, phi'(z) = q0 uniform, and it stores NO twist energy (complete-square
+        convention, audit S1-14; the legacy reading was -(1/2) K22 q0^2 d, measured from an untwisted cell).
 GATE D (TN Freedericksz): in a 90 deg TN under field the midplane tilt grows MONOTONICALLY toward
         homeotropic with voltage (the dielectric torque acts on theta; twist preserves the polar angle).
 GATE E (Gooch-Tarry optic): the 90 deg TN crossed-polarizer transmission has its first minimum (dark
@@ -60,16 +61,19 @@ def main():
           "(1/2)K22 phi^2/d {:.4e} -> {}".format(dlin, dflat, ch2.twist_energy_J_m2, w_an,
                                                  "OK" if g_b else "FAIL"), flush=True)
 
-    # GATE C: cholesteric undistorted helix -> phi' = q0, energy = -(1/2) K22 q0^2 d
+    # GATE C: cholesteric undistorted helix -> phi' = q0, and (complete-square convention, audit S1-14,
+    # wave-7 2026-11-02) ZERO stored twist energy -- the legacy number was -(1/2) K22 q0^2 d, the energy
+    # measured from an untwisted cell. |E| is judged against that scale.
     q0 = cholesteric_q0(8e-6)
     ch3 = chiral_director_profile_bvp(V_app=0.0, phi_bottom_rad=0.0, phi_top_rad=q0 * K["d_planar"],
                                       q0_rad_m=q0, **{**K, "theta_b_rad": 0.5 * math.pi})
     phz = np.gradient(ch3.phi_rad, ch3.z_m)
-    w_ch = -0.5 * K["K22"] * q0 * q0 * K["d_planar"]
-    g_c = float(np.max(np.abs(phz - q0))) / q0 < 1e-6 and abs(ch3.twist_energy_J_m2 - w_ch) / abs(w_ch) < 1e-6
-    print("[ct] C cholesteric: q0={:.0f} rad/m, max|phi'-q0|/q0={:.1e}, twist_E {:.4e} vs -(1/2)K22 q0^2 d "
-          "{:.4e} -> {}".format(q0, float(np.max(np.abs(phz - q0))) / q0, ch3.twist_energy_J_m2, w_ch,
-                                "OK" if g_c else "FAIL"), flush=True)
+    w_scale = 0.5 * K["K22"] * q0 * q0 * K["d_planar"]
+    g_c = float(np.max(np.abs(phz - q0))) / q0 < 1e-6 and abs(ch3.twist_energy_J_m2) / w_scale < 1e-6
+    print("[ct] C cholesteric: q0={:.0f} rad/m, max|phi'-q0|/q0={:.1e}, twist_E {:.4e} (|E|/((1/2)K22 q0^2 d"
+          " = {:.4e}) = {:.1e}) -> {}".format(q0, float(np.max(np.abs(phz - q0))) / q0, ch3.twist_energy_J_m2,
+                                             w_scale, abs(ch3.twist_energy_J_m2) / w_scale,
+                                             "OK" if g_c else "FAIL"), flush=True)
 
     # GATE D: TN Freedericksz -- midplane tilt grows monotonically with field
     tilts = []

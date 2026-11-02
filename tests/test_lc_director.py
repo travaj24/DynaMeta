@@ -367,13 +367,16 @@ def test_chiral_pure_twist_is_linear_with_analytic_energy():
 
 
 def test_chiral_cholesteric_undistorted_helix():
-    # q0 != 0 with matched plate azimuths -> phi' = q0 uniform, energy = -(1/2) K22 q0^2 d.
+    # q0 != 0 with matched plate azimuths -> phi' = q0 uniform. The twist energy is reported in the
+    # complete-square convention (audit S1-14, wave-7 2026-11-02): an UNDISTORTED helix stores none,
+    # so it is 0 to the solve's accuracy, not the legacy -(1/2) K22 q0^2 d (the untwisted-cell reference).
     q0 = cholesteric_q0(8e-6)
     ch = chiral_director_profile_bvp(V_app=0.0, phi_bottom_rad=0.0, phi_top_rad=q0 * _CK["d_planar"],
                                      q0_rad_m=q0, **{**_CK, "theta_b_rad": 0.5 * np.pi})
     phz = np.gradient(ch.phi_rad, ch.z_m)
     assert np.max(np.abs(phz - q0)) / q0 < 1e-5
-    assert ch.twist_energy_J_m2 == pytest.approx(-0.5 * _CK["K22"] * q0 * q0 * _CK["d_planar"], rel=1e-5)
+    scale = 0.5 * _CK["K22"] * q0 * q0 * _CK["d_planar"]
+    assert abs(ch.twist_energy_J_m2) < 1e-5 * scale
 
 
 def test_chiral_tn_freedericksz_monotone():
