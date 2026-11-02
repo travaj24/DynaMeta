@@ -40,6 +40,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
@@ -157,7 +158,7 @@ class LayeredDevsimBuilder:
             warnings.warn(
                 "layered full-edge contact needed for layer(s) {} but the design has no metal "
                 "material to form the edge-metal strip; falling back to the weak 2-node contact "
-                "(gated DD / 2D bipolar may not converge).".format(sorted(fe)))
+                "(gated DD / 2D bipolar may not converge).".format(sorted(fe)), AdvisoryWarning, stacklevel=2)
         # y-edge grounds are not resolved in the 2D (x,z) cross-section -> they get no full-edge
         # ohmic ground (and the legacy contact placement mis-locates them at the x-hi edge), so a
         # gated DD device with only a y-edge ground may not converge. Warn rather than fail silently.
@@ -169,7 +170,7 @@ class LayeredDevsimBuilder:
                     warnings.warn(
                         "electrode '{}': a y-edge ground on a drift-diffusion layer is not resolved "
                         "in the 2D (x,z) builder -- no full-edge ohmic ground is formed and gated DD "
-                        "may not converge. Use an x_lo/x_hi edge ground.".format(E.name))
+                        "may not converge. Use an x_lo/x_hi edge ground.".format(E.name), AdvisoryWarning, stacklevel=2)
         specs: List[_RegionSpec] = []
         for L in d.stack.layers:
             zlo, zhi = z_iv[L.name]
@@ -235,9 +236,6 @@ class LayeredDevsimBuilder:
                 specs.append(_RegionSpec(name, inc.material, role,
                                           xlo, xhi, zlo, zhi))
         return specs
-
-    def _meshed(self) -> List[_RegionSpec]:
-        return self._specs
 
     def _nearest_nonmetal(self, layer_name: str) -> Tuple[str, float]:
         """For a metal-gate electrode on `layer_name`, find the nearest meshed
@@ -398,7 +396,7 @@ class LayeredDevsimBuilder:
                             "layered drift-diffusion on semiconductor '{}': no full-edge ohmic "
                             "ground (only a weak 2-node edge ground) -- a gated device may not "
                             "converge; add an edge GROUND electrode on this layer, or use the "
-                            "equilibrium physics mode for DC gate accumulation.".format(s.name))
+                            "equilibrium physics mode for DC gate accumulation.".format(s.name), AdvisoryWarning, stacklevel=2)
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
@@ -667,7 +665,7 @@ class LayeredDevsimBuilder:
                 "set_ssac_gate('{}'): this contact is a drift-diffusion ohmic carrier contact -- "
                 "repointing it circuit-driven replaces only its Potential Dirichlet and leaves the "
                 "Electrons pin in place. Drive the modulating GATE (a dielectric contact), not the "
-                "carrier ground.".format(electrode_name))
+                "carrier ground.".format(electrode_name), AdvisoryWarning, stacklevel=2)
         from dynameta.carriers import ac_analysis as _AC
         # drop the bias-Dirichlet contact equation (live) and its stale registry record, then attach
         # the circuit-driven replacement (setup_circuit_contact records the new one).

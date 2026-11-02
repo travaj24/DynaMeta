@@ -73,6 +73,7 @@ import numpy as np
 from dynameta.constants import C_LIGHT, EPS0
 from dynameta.core.numerics import trapz as _trapz1, trapz_axis as _trapz_axis
 from dynameta.optics.twm_reference import phase_matching_sinc
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "pair_rate_from_sfg",
@@ -625,7 +626,7 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
                 "unaffected. See audit Q-13.".format(
                     key, measure_ratio, _ROTATED_MEASURE_MAX_RATIO, bin_fraction,
                     _ROTATED_MIN_BIN_FRACTION, val),
-                RuntimeWarning, stacklevel=2)
+                UnreliableResultWarning, stacklevel=2)
         elif not resolved:
             warnings.warn(
                 "heralded_bandwidths: '{}' is NOT resolved by this grid -- the marginal is still "
@@ -633,7 +634,7 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
                 "a property of the window ({:.6g} wide), not of the pair. Returning nan. Widen "
                 "the omega grids (or, for the rotated widths, make them span enough that the "
                 "joint spectrum decays inside the inscribed window). See audit "
-                "Q-13.".format(key, val), RuntimeWarning, stacklevel=2)
+                "Q-13.".format(key, val), UnreliableResultWarning, stacklevel=2)
         out[key] = float(val) if resolved else float("nan")
         out[key + "_resolved"] = resolved
     # Historical aliases: the rotated widths under their geometric names.

@@ -196,4 +196,5 @@ __all__ = [
     "CUPY_AVAILABLE", "JAX_AVAILABLE",
     "is_numpy_array", "is_cupy_array", "is_jax_array",
     "array_namespace", "backend_name", "to_numpy", "to_backend",
+    "require_jax_011",                  # audit V-21: public helper, imported by 2 other modules
 ]

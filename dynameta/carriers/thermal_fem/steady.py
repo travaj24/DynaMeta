@@ -12,6 +12,7 @@ import numpy as np
 import ngsolve as ng
 
 from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, build_thermal_forms, mean_T_per_layer
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 @dataclass
 class ThermalResult:
@@ -28,7 +29,7 @@ class ThermalResult:
 
 
 def solve_thermal_fem(layers: List[ThermalLayer], *, period_x_m: float, period_y_m: float,
-                      flux_W_m2: float = 0.0, T_sink_K: float = 300.0,
+                      flux_W_m2: float = 0.0, T_sink_K: float = T_REF,
                       joule_W_m3: Optional[Union[float, Dict[str, float], object]] = None,
                       maxh_m: Optional[float] = None, order: int = 2,
                       linear_solver: str = "umfpack") -> ThermalResult:

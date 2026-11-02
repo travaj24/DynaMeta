@@ -23,6 +23,8 @@ from dynameta.constants import C_LIGHT, H_PLANCK, KB
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m
+from dynameta.warning_types import AdvisoryWarning
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["Pump", "Signal", "AseBand", "RamanStokes", "FiberAmplifier", "SteadyStateResult",
            "ChannelPlan"]
@@ -173,7 +175,7 @@ class RamanStokes:
     a_eff_m2: Optional[float] = None
     dnu_eff_hz: float = 5.0e12
     shift_hz: float = 13.2e12
-    T_K: float = 300.0
+    T_K: float = T_REF
 
 
 @dataclass(frozen=True)
@@ -278,7 +280,7 @@ class FiberAmplifier:
                 warnings.warn("FiberAmplifier: upconversion_C_up=%.3g is OVERRIDDEN by "
                               "ConcentrationModel.c_up_m3_s=%.3g (the model wins; pass "
                               "C_up through the ConcentrationModel only -- audit B1)"
-                              % (float(upconversion_C_up), concentration.c_up_m3_s),
+                              % (float(upconversion_C_up), concentration.c_up_m3_s), AdvisoryWarning,
                               stacklevel=2)
             self.upconversion_C_up = float(concentration.c_up_m3_s)
             self._n_active = concentration.active_density(fiber.n_t_m3)
@@ -429,7 +431,7 @@ class FiberAmplifier:
         return ch, np.asarray(bc), u, is_ase, kind
 
     # ---- distributed temperature profile (McCumber z-scaling) ----------------------------
-    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = 300.0):
+    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = T_REF):
         """Impose an axial temperature profile T(z) on the gain medium. Every
         sigma_e-proportional coefficient (local emission gain, stimulated-emission rate, ASE
         spontaneous source) is scaled per-z by the McCumber factor
@@ -519,17 +521,6 @@ class FiberAmplifier:
             dP[rm["i_st"]] += u[rm["i_st"]] * ex     # loses Manley-Rowe-weighted power
             dP[rm["i_sig"]] -= u[rm["i_sig"]] * rm["ratio"] * ex
         return dP
-
-    # back-compat single-call forms (reference/diagnostic surface)
-    def _nbar2(self, ch: ChannelSet, P):
-        """Metastable fraction from the full local power vector P (K,) at one z (scalar)."""
-        self._tau_s = ch.tau_s
-        return self._nbar2_c(self._coeffs(ch), np.asarray(P, float))
-
-    def _dP_full(self, ch: ChannelSet, P):
-        """dP_k/dz [W/m] for every channel from the full local power vector P (K,)."""
-        self._tau_s = ch.tau_s
-        return self._dP_full_c(self._coeffs(ch), ch.u, np.asarray(P, float))
 
     def _nbar2_profile(self, ch: ChannelSet, P, mcc_mat=None):
         """nbar2 at each z given the full power profile P (K, M); mcc_mat (K, M) optional."""

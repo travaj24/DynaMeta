@@ -39,6 +39,15 @@ plot = ["matplotlib>=3.7"]
 materials-db = ["jarvis-tools", "mp-api", "refractiveindex"]  # DielectricDB + refractiveindex.info lookup
 reference = ["tmm"]                                        # coherent-TMM oracle (optics.tmm_reference)
 lumenairy = []                                             # back-compat alias: lumenairy is now a CORE dependency
+# audit X-25 (2026-11-02): KEPT as an empty alias on purpose -- `pip install dynameta[lumenairy]`
+# predates lumenairy becoming core (v0.5) and still appears in old install lines; deleting the key
+# turns those into a pip "does not provide the extra" warning for no gain. It installs nothing extra.
+# CUPY (the GPU array backend: core.backend's CUPY_AVAILABLE, the fdtd_nd 'cupy' kernels) is
+# deliberately in NO extra: its wheel name is CUDA-major specific (cupy-cuda11x / cupy-cuda12x / ...)
+# and the right one depends on the user's driver, so an extra would install the wrong build or fail
+# on every CPU-only machine. Install the cupy-cudaXXx wheel matching your CUDA toolkit. cupy is never
+# imported at module import (core.backend and fdtd_nd probe it lazily; an explicit backend='cupy'
+# or 'gpu' without it raises a clear error naming the install; 'auto' resolves to a CPU backend).
 # differentiable backends: 0.11 REQUIRED (0.10 APIs broken; runtime-guarded in core.backend).
 # audit R-33: jax/jaxlib >= 0.11 declare Requires-Python >= 3.12, so on 3.10/3.11 this extra installs
 # NOTHING and the jax paths (optics.topology_opt / inverse_design / *_design, the fdtd_nd jax

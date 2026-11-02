@@ -33,6 +33,7 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK, KB, Q_E
 from dynameta.optics.soa.qd_gain import QDGainParams
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["VARSHNI_PARAMS", "B_LO_10MEV_HZ", "varshni_eg_ev", "d_eg_dT_ev_per_K",
            "gain_peak_drift_nm_per_K", "fwhm_hom_at_temperature", "qd_params_at_temperature"]
@@ -82,7 +83,7 @@ def d_eg_dT_ev_per_K(T_K: float, material: Union[str, Tuple[float, float, float]
 
 
 def gain_peak_drift_nm_per_K(lambda_nm: float, material: Union[str, Tuple[float, float, float]] = "InAs",
-                             T_K: float = 300.0) -> float:
+                             T_K: float = T_REF) -> float:
     """Gain-peak wavelength drift |dlambda/dT| [nm/K] at emission wavelength lambda_nm, from the
     Varshni gap slope: dlambda/dT = (lambda^2/(h c)) |dEg/dT|. (E = h c/lambda -> dlambda =
     -(lambda^2/hc) dE; the QD peak tracks the gap even though the QD emission energy > Eg by the

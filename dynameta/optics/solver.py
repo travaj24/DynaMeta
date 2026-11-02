@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING
 from dynameta.constants import Z0
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.ngsolve_layered import OpticalGeometry, S
+from dynameta.warning_types import AdvisoryWarning, DynaMetaWarning, UnreliableResultWarning
 
 if TYPE_CHECKING:                       # type-only; OpticalSpec lives in geometry (no runtime dep)
     from dynameta.geometry.specs import OpticalSpec
@@ -317,9 +318,12 @@ _OBLIQUE_PML_ADVICE = (
     "per process; re-enable with warnings.simplefilter('always', FEMDiagnosticWarning)]")
 
 
-class FEMDiagnosticWarning(UserWarning):
+class FEMDiagnosticWarning(DynaMetaWarning):
     """Category for solve_fem's ADVISORY diagnostics (regime advisories, fit/energy-closure quality
-    flags) as distinct from a plain UserWarning about a caller mistake (audit F-15).
+    flags) as distinct from a plain UserWarning about a caller mistake (audit F-15). Rebased onto
+    the library-wide `dynameta.warning_types.DynaMetaWarning` (itself a UserWarning, so every existing
+    filter still matches) by audit V-17, 2026-11-02; not split into the advisory/unreliable halves
+    because callers (and tests/conftest.py) already filter it as one class.
 
     A 40-wavelength oblique sweep used to emit one identical PML advisory per solve with no new
     information after the first. Two things fix that: the advisories are now emitted at most ONCE
@@ -1078,7 +1082,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 "solve_fem: iterative solver '{}' did not converge (relative residual {:.2e} "
                 "> 1e-3 after {} steps); R/T/A are unreliable. Use linear_solver='umfpack', "
                 "raise gmres_max_iter, or refine the mesh.".format(
-                    _ls, relres, optical.gmres_max_iter), stacklevel=2)
+                    _ls, relres, optical.gmres_max_iter), UnreliableResultWarning, stacklevel=2)
 
     # Demodulation: the solve holds the physical field E=u exp(i(kx x+ky y)) -> the extractors
     # demodulate by exp(-i(kx x+ky y)) to recover the 0-order Fourier coefficient.
@@ -1144,7 +1148,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                                                 roles=getattr(geo, "role_by_region", None))
                              if diagnostics else None)
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
+            warnings.warn("independent absorption diagnostic unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
             A_independent = None
         # Per-region absorbed-power map (driver D2): the same loss integral split by material region
         # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
@@ -1154,7 +1158,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                                                    geo.period_x_nm, geo.period_y_nm, n_super=n_super,
                                                    roles=getattr(geo, "role_by_region", None)))
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("per-region absorption map unavailable: {}".format(_e))
+            warnings.warn("per-region absorption map unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
             per_region_A = None
         # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
         # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
@@ -1171,7 +1175,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             else:
                 R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e))
+            warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
             R_flux = T_flux = None
     # Backstop sanity: a bad fit / near-grazing case can push R or T well outside [0,1] or make
     # A=1-R-T strongly negative (energy created). Thresholds are LOOSE (5e-2): the documented
@@ -1492,7 +1496,7 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             "curl-curl operator is near-singular for low-loss / open-cavity source problems (the "
             "DIRECT current route especially); use the scattered-field route (bg_field/eps_ref) with "
             "a metal-filled cell, linear_solver='umfpack', or refine.".format(
-                optical.linear_solver, relres), stacklevel=2)
+                optical.linear_solver, relres), UnreliableResultWarning, stacklevel=2)
 
     # ---- radiated 0-order amplitudes + per-port power (total field = bg_field + gfu) ----
     total = gfu if bg_field is None else (bg_field + gfu)

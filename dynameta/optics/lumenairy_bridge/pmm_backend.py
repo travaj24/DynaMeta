@@ -46,6 +46,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["design_to_pmm_stack", "make_lumenairy_pmm_solver", "layer_to_pmm_segments"]
 
@@ -118,6 +119,19 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
     return [(w / total, e) for w, e in segs]              # exact unit sum for PMM's check
 
 
+# DEFAULT `degree` ACROSS THE THREE PMM ENTRY POINTS (audit V-15, measured 2026-11-02). The same
+# lumenairy spectral-element engine is reached at three different default polynomial degrees:
+# design_to_pmm_stack / make_lumenairy_pmm_solver 16 (this file), the differentiable
+# rcwa_design.pmm_stack_RT / pmm_stack_jones 12, and the 2-D pmm2d_backend 11 (hybrid engine only;
+# its default pure engine converges in n_modes instead). The difference is
+# deliberate (a jit-traced solve and a 2-D tensor-product basis pay superlinearly per degree) but
+# it is NOT free, so a convergence study through one entry point does not transfer to its sibling.
+# Measured through pmm_stack_RT (period 0.8 um, 1310 nm, superstrate 1, substrate 1.45, 21 orders)
+# against degree 32: the E_x row (field ACROSS the walls, edge-singular) converges only
+# algebraically -- |dR| = 1.5e-4 / 6.4e-5 / 1.4e-5 at degree 12 / 16 / 24 on a 400 nm Si
+# lamellar grating, 6.8e-4 / 3.0e-4 / 6.6e-5 on a 100 nm Au one -- while the E_y row is at
+# 9e-8 / 1e-8 / 4e-10 (Si). So degree 12 vs 16 moves R by ~1e-4 (dielectric) to ~4e-4 (metal):
+# pin `degree` explicitly when comparing results across entry points.
 def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
                         degree: int = 16, n_orders: int = 21,
                         n_slices: Optional[int] = None,
@@ -281,7 +295,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
             except Exception as exc:                          # pragma: no cover - defensive
                 import warnings
                 warnings.warn("lumenairy PMM bridge: per-layer absorption unavailable ({}); "
-                              "A_independent left unset".format(exc), stacklevel=2)
+                              "A_independent left unset".format(exc), AdvisoryWarning, stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=time.perf_counter() - t0, t=t, T=T,
                              A=1.0 - R - T, A_independent=a_ind, R_flux=R, T_flux=T,

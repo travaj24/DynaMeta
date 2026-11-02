@@ -95,6 +95,7 @@ import numpy as np
 from dynameta.optics.lumenairy_bridge._common import _REQUIRED
 from dynameta.optics.lumenairy_bridge._common import \
     require_halfspace_keywords as _require_halfspace_keywords
+from dynameta.optics.lumenairy_bridge._common import require_angles_rad as _require_angles_rad
 from dynameta.optics.lumenairy_bridge._common import require_lumenairy as _require_lumenairy
 
 __all__ = ["rcwa_grating_RT", "rcwa_stack_RT", "rcwa_stack_jones", "pmm_stack_RT",
@@ -211,6 +212,7 @@ def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength
     _require_halfspace_keywords("rcwa_grating_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     _reject_grating_pol(polarization, "rcwa_grating_RT")                # audit V-8
+    _require_angles_rad("rcwa_grating_RT", polar=(("angle", angle),))   # audit V-25
     _require_jax_x64("rcwa_grating_RT", eps_ridge, eps_groove, n_substrate, n_superstrate,
                      depth, wavelength, angle)                      # audit R-14
     lum = _require_lumenairy()
@@ -272,6 +274,7 @@ def _solve_rcwa_stack(layers, wavelength, *, n_substrate, n_superstrate, period_
                       theta, phi, n_orders, n_orders_y, formulation, fn_name):
     _require_jax_x64(fn_name, wavelength, theta, phi,
                      *[e for e, _t in layers], *[t for _e, t in layers])   # audit R-14
+    _require_angles_rad(fn_name, polar=(("theta", theta),), azimuth=(("phi", phi),))  # audit V-25
     lum = _require_lumenairy()
     _require_static(fn_name, n_substrate=n_substrate, n_superstrate=n_superstrate,
                     period_x=period_x, period_y=period_y)
@@ -345,6 +348,7 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
                      degree, n_orders, fn_name):
     _require_jax_x64(fn_name, wavelength, angle, n_substrate, n_superstrate,
                      *[t for _s, t in layers])                            # audit R-14
+    _require_angles_rad(fn_name, polar=(("angle", angle),))               # audit V-25
     lum = _require_lumenairy()
     if _is_jaxish(period):
         raise TypeError(
@@ -370,6 +374,8 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
     return st.solve()
 
 
+# `degree=12` here vs 16 in pmm_backend.design_to_pmm_stack and 11 in pmm2d_backend: deliberate
+# (jit cost per degree), measured consequence in pmm_backend's V-15 note (audit V-15).
 def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
                  n_superstrate=_REQUIRED, period, angle=0.0,
                  degree=12, n_orders=21, row=0):

@@ -14,6 +14,7 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT, HBAR, H_PLANCK
 from dynameta.core.backend import array_namespace, is_numpy_array
+from dynameta.warning_types import UnreliableResultWarning
 
 @runtime_checkable
 class EffectModel(Protocol):
@@ -75,7 +76,7 @@ class ComposedEffect:
                     "ComposedEffect.eps: the composed permittivity has a NEGATIVE imaginary eigenvalue "
                     "(min {:.2e}) -- with exp(-iwt) that is GAIN, not loss. A DeltaEffect is lowering "
                     "Im(eps) below the background absorption; check the bleaching/FK/QCSE delta or the "
-                    "background Im.".format(float(np.min(anti_im))), RuntimeWarning, stacklevel=2)
+                    "background Im.".format(float(np.min(anti_im))), UnreliableResultWarning, stacklevel=2)
         return total
 
 

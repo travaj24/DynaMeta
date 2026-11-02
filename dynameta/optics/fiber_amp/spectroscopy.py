@@ -18,6 +18,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from dynameta.constants import C_LIGHT, H_PLANCK, KB
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["CrossSectionModel", "RareEarthIon", "erbium", "ytterbium",
            "at_temperature", "multiphonon_lifetime"]
@@ -99,7 +100,7 @@ class RareEarthIon:
             return np.zeros_like(lam) if lam.ndim else 0.0
         return self.sigma_esa.sigma(lambda_m)
 
-    def sigma_e_mccumber(self, lambda_m, T_K: float = 300.0, eps_J: float = None):
+    def sigma_e_mccumber(self, lambda_m, T_K: float = T_REF, eps_J: float = None):
         """Emission cross-section from absorption via McCumber (Phys.Rev.136:A954; Miniscalco-
         Quimby OL16:258): sigma_e(nu) = sigma_a(nu) exp((eps - h nu)/kT). eps = excitation
         chemical potential [J]; defaults to the zero-line photon energy h c / zero_line_m
@@ -124,7 +125,7 @@ class _McCumberEmission:
 
     __slots__ = ("sigma_a", "eps_J", "T_K")
 
-    def __init__(self, sigma_a, eps_J: float, T_K: float = 300.0):
+    def __init__(self, sigma_a, eps_J: float, T_K: float = T_REF):
         self.sigma_a = sigma_a
         self.eps_J = float(eps_J)
         self.T_K = float(T_K)
@@ -156,7 +157,7 @@ class _McCumberAbsorptionHybrid:
 
     __slots__ = ("sigma_a_tab", "sigma_e", "eps_J", "T_K", "crossover_m")
 
-    def __init__(self, sigma_a_tab, sigma_e, eps_J: float, T_K: float = 300.0,
+    def __init__(self, sigma_a_tab, sigma_e, eps_J: float, T_K: float = T_REF,
                  crossover_m: float = 1.000e-6):
         self.sigma_a_tab = sigma_a_tab
         self.sigma_e = sigma_e
@@ -508,7 +509,7 @@ class _McCumberScaledEmission:
         return out if out.ndim else float(out)
 
 
-def at_temperature(ion: RareEarthIon, T_K: float, *, T_ref_K: float = 300.0,
+def at_temperature(ion: RareEarthIon, T_K: float, *, T_ref_K: float = T_REF,
                    eps_J: float = None, tau_s: float = None) -> RareEarthIon:
     """Return a copy of ion at operating temperature T_K (docs sec.10). The emission cross-section
     is McCumber-scaled from T_ref_K to T (sigma_a and the zero line are held -- sigma_a's own

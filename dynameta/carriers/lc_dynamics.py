@@ -71,6 +71,7 @@ from dynameta.core.numerics import resolve_ivp_method
 from dynameta.carriers.lc_director import (
     LCGeometry, compute_lc_geometry, solve_lc_field_profile, flexo_direct_torque,
     n_eff_from_theta_profile)
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "LCDynamics", "LCDynamicsResult",
@@ -399,7 +400,7 @@ class LCDynamics:
                     "LCDynamics backflow: gamma1={:.6g} Pa s is inconsistent with the Leslie identity "
                     "gamma1 = alpha3 - alpha2 = {:.6g} Pa s ({:+.1f}%); the effective-viscosity "
                     "reduction assumes one self-consistent coefficient set (audit C-2)".format(
-                        g1, g1_leslie, 100.0 * (g1 / g1_leslie - 1.0)), RuntimeWarning, stacklevel=2)
+                        g1, g1_leslie, 100.0 * (g1 / g1_leslie - 1.0)), UnreliableResultWarning, stacklevel=2)
 
         t_eval = np.asarray(t_eval, dtype=float)
         if t_eval.size < 5 or not np.all(np.diff(t_eval) > 0):
@@ -464,7 +465,7 @@ class LCDynamics:
                         "this cell (min gamma1_eff/gamma1 = {:.3g}); the local backflow reduction is "
                         "thermodynamically invalid there (audit C-2/N4)".format(
                             _G1_EFF_FLOOR_FRAC, float(np.min(g1_raw)) / g1),
-                        RuntimeWarning, stacklevel=2)
+                        UnreliableResultWarning, stacklevel=2)
             else:
                 g1_eff = g1
             dth_dt = torque / g1_eff
