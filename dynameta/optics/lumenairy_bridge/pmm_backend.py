@@ -45,6 +45,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       require_lumenairy as _require_lumenairy)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
+from dynameta.geometry.guards import require_supported_geometry
 
 __all__ = ["design_to_pmm_stack", "make_lumenairy_pmm_solver", "layer_to_pmm_segments"]
 
@@ -119,6 +120,7 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     the caller asks for the speed explicitly and knows what it costs. (Bridge audit
     2026-08-31 vs lumenairy 5.42.1; conical and layer_absorption() verified unchanged on the
     per-layer path.)"""
+    require_supported_geometry(design, "design_to_pmm_stack")   # 2026-11-02: refuse Stack.features / Inclusion.taper
     lum = _require_lumenairy()
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)

@@ -102,6 +102,13 @@ class Design:
                 s = inc.shape.intrinsic_symmetry()
                 if _SYM_ORDER[s] < _SYM_ORDER[sym]:
                     sym = s
+                # a tapered inclusion is as symmetric as the LESS symmetric of its two faces (a square
+                # top over a rectangular base is c2v); its bottom shares the top's centre (Taper
+                # validation), so only the shape symmetry can drop. taper=None: unchanged.
+                if getattr(inc, "taper", None) is not None:
+                    sb = inc.taper.bottom.intrinsic_symmetry()
+                    if _SYM_ORDER[sb] < _SYM_ORDER[sym]:
+                        sym = sb
         return sym
 
     def detect_symmetry_reduction(self) -> str:

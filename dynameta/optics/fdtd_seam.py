@@ -50,6 +50,7 @@ from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
+from dynameta.geometry.guards import require_supported_geometry
 
 _VAC_TOL = 1e-9   # max |Im(n)| of an END medium treated as lossless (audit S2-13: matches the kernel's own guard; the old 1e-3 silently truncated a weakly-absorbing substrate, biasing T ~2% high)
 
@@ -173,6 +174,9 @@ def _guard_optical_spec(design, *, structured: bool) -> None:
     incidence polarization is provably irrelevant for a laterally-UNIFORM stack (any pol
     accepted); a STRUCTURED cell is solved with a y-polarized source, so only 'y' is
     accepted there."""
+    # 2026-11-02: the 2-D FDTD solver returned R/T bit-identical to the via-free design for a
+    # Stack.features via (measured); every seam entry point runs this guard, so refuse here too.
+    require_supported_geometry(design, "FDTD seam")   # 2026-11-02: Stack.features / Inclusion.taper
     opt = getattr(design, "optical", None)
     if opt is None:
         return
@@ -216,6 +220,7 @@ def design_to_fdtd_layers(design, lambda_m: float, *, eps_by_region: Optional[Di
     inclusions raises (laterally structured -> FEM, or a future rasterizing FDTD adapter)."""
     from dynameta.core.layered import slice_eps_field
     from dynameta.optics.tmm_reference import S as _S_NM
+    require_supported_geometry(design, "design_to_fdtd_layers")   # 2026-11-02: Stack.features / Inclusion.taper
     layers = []
     for L in reversed(design.stack.layers):                # incidence order: superstrate side first
         if getattr(L, "inclusions", None):
@@ -337,6 +342,7 @@ def _design_to_fdtd_layers_dispersive(design, lambda_min_m, lambda_max_m, *, eps
     FDTD Drude pole, so the broadband FDTD reproduces the material dispersion across the whole band (not
     just at the centre). eps_band_by_region: optional {layer_name -> complex array over the n_fit sample
     wavelengths} for bias-modulated / carrier regions whose eps is not a plain material lambda-function."""
+    require_supported_geometry(design, "FDTD dispersive sweep")   # 2026-11-02: Stack.features / Inclusion.taper
     lams = np.linspace(lambda_min_m, lambda_max_m, int(n_fit))
     layers = []
     for L in reversed(design.stack.layers):                # incidence order: superstrate side first
@@ -406,6 +412,7 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
     pads must be painted HERE (else they'd revert to vacuum and break the non-vacuum reference). Layers run
     from z=pad superstrate-first, matching solve_fdtd_3d. The lateral grid carries REAL eps only -> a lossy
     inclusion raises."""
+    require_supported_geometry(design, "make_structured_lateral (FDTD)")   # 2026-11-02: Stack.features / Inclusion.taper
     mats = design.materials
     layers_sf = list(reversed(design.stack.layers))         # incidence order: superstrate side first
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
