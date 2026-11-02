@@ -154,7 +154,7 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
     # Thermal mesh + stiffness factored ONCE; each Picard iteration rebuilds only the Joule load and
     # re-solves on the SAME mesh/factorization -> the const-sigma loop is a machine-exact no-op (no
     # re-meshing noise between iterations) and the solve is cheap.
-    mesh_t, fes_t, _u, v_t, a_t, _f0, _k = build_thermal_forms(
+    mesh_t, fes_t, _u, v_t, a_t, _f0, _k, T_lift = build_thermal_forms(
         tstack, Px, Py, flux_W_m2, T_sink_K, None, maxh_m, order)
     T_layer = np.full(len(layers), float(T_sink_K), dtype=np.float64)
     residual_history: List[float] = []
@@ -175,7 +175,7 @@ def solve_electrothermal_picard(layers: List[ElectroThermalLayer], applied_V: fl
             f = ng.LinearForm(fes_t)
             add_load_terms(f, v_t, mesh_t, flux_W_m2, Qdict)
             f.Assemble()
-            Tg.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh_t.Boundaries("bot"))
+            Tg.vec.data = T_lift.vec        # restart from the sink lift (audit X-17)
             res = f.vec - a_t.mat * Tg.vec
             Tg.vec.data += inv * res
             T_new = mean_T_per_layer(mesh_t, Tg, tstack)

@@ -400,3 +400,48 @@ def test_chiral_rejects_bad_constants():
     with pytest.raises(ValueError):
         chiral_director_profile_bvp(V_app=1.0, K11=1e-12, K22=-1e-12, K33=1e-12, eps_para=10.0,
                                     eps_perp=4.0, d_planar=4e-6)
+
+
+def test_c14_elliptic_B_is_exact_up_to_the_bisection_bracket():
+    """AUDIT C-14 (2026-11-02): the 1201-point uniform-phi trapezoid over-estimated B(theta_m) by
+    1.15x at 89.99 deg, 3.56x at 89.999 deg and 42.09x at the bisection's upper bracket
+    pi/2 - 1e-6 (endpoint log singularity). The closed form K(m)/sqrt(dEps) is checked against an
+    INDEPENDENT reduction -- Carlson's R_F(0, 1-eta, 1+g eta), a different special function -- and
+    against a direct high-precision quadrature of the module-docstring integrand."""
+    from scipy.special import elliprf
+    from scipy.integrate import quad
+    from dynameta.carriers.lc_director import _B
+    for dEps, ep in ((DEPS, EP), (10.0, 5.0), (0.5, 3.0)):
+        g = dEps / ep
+        for tm in (np.radians(1.0), np.radians(45.0), np.radians(89.0), np.radians(89.9),
+                   np.radians(89.99), np.radians(89.999), 0.5 * np.pi - 1e-6):
+            eta = np.sin(tm) ** 2
+            eps_m = ep + dEps * eta
+            ref = np.sqrt(eps_m / (dEps * ep)) * elliprf(0.0, np.cos(tm) ** 2, 1.0 + g * eta)
+            assert _B(tm, dEps, ep) == pytest.approx(ref, rel=1e-13), (dEps, ep, np.degrees(tm))
+            # direct quadrature, split so the endpoint singularity sits on an interval boundary
+            f = lambda p: (np.sqrt(eps_m / (dEps * (ep + dEps * eta * np.sin(p) ** 2)))
+                           / np.sqrt(np.cos(tm) ** 2 + eta * np.cos(p) ** 2))   # 1 - eta sin^2 p
+            brk = [0.0, 0.25 * np.pi, 0.5 * np.pi - 1e-2, 0.5 * np.pi - 1e-4, 0.5 * np.pi]
+            direct = sum(quad(f, a, b, epsabs=0.0, epsrel=1e-13, limit=200)[0]
+                         for a, b in zip(brk, brk[1:]))
+            assert _B(tm, dEps, ep) == pytest.approx(direct, rel=1e-10), (dEps, ep, np.degrees(tm))
+    # theta_m -> 0 limit: K(0) = pi/2, so V -> V_th exactly
+    assert _B(1e-9, DEPS, EP) == pytest.approx(0.5 * np.pi / np.sqrt(DEPS), rel=1e-15)
+
+
+def test_c14_over_drive_tilt_obeys_deulings_law():
+    """AUDIT C-14: at V = 8 V_th the bisection must return the theta_m of Deuling's law
+    V/V_th = (2/pi) K(m), 1 - m = cos^2(theta_m) eps_perp/eps(theta_m) (K33 = K11). With the
+    biased quadrature the 42x-high V(theta_m) curve put the root at a SMALLER tilt."""
+    from scipy.special import ellipkm1
+    Vth = freedericksz_threshold_V(K, DEPS)
+    for r in (3.0, 8.0):
+        tm = director_profile(K, DEPS, EP, D, r * Vth).theta_max_rad
+        one_minus_m = np.cos(tm) ** 2 * EP / (EP + DEPS * np.sin(tm) ** 2)
+        # rel 1e-7, not tighter: theta_max is arcsin(sin theta_m) of the reconstruction, and arcsin
+        # near 1 costs ~eps/cos(theta_m) -- measured 8.3e-9 at 8 V_th (theta_m = 89.9987 deg)
+        assert (2.0 / np.pi) * ellipkm1(one_minus_m) == pytest.approx(r, rel=1e-7), r
+    # past the bracket's V (~(2/pi) K at pi/2 - 1e-6, ~9.1 V_th here) the tilt saturates at the bracket
+    assert director_profile(K, DEPS, EP, D, 50.0 * Vth).theta_max_rad == pytest.approx(
+        0.5 * np.pi - 1e-6, abs=1e-9)                      # same arcsin round-off, 4.4e-11 measured

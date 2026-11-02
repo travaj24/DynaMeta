@@ -162,3 +162,69 @@ def test_gummel_still_converges_on_the_ohmic_bar():
             _teardown(dev, mesh)
     a, b = fields["newton"], fields["gummel"]
     assert float(np.max(np.abs(a - b) / np.maximum(np.maximum(np.abs(a), np.abs(b)), 1e-6))) < 1e-6
+
+
+def _build_pn_diode():
+    """A 200 nm abrupt Si pn diode (+-1e23 m^-3, Boltzmann) on the bipolar physics, seeded at the
+    charge-neutral equilibrium and solved there by coupled Newton -- the C-15 measurement device."""
+    from dynameta.carriers import physics_bipolar_dd as BP
+    _SEQ[0] += 1
+    tag = "pn{}".format(_SEQ[0])
+    mesh, dev, reg = "dcm_" + tag, "dcd_" + tag, "bulk"
+    devsim.create_1d_mesh(mesh=mesh)
+    devsim.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=2e-9, tag="lo")
+    devsim.add_1d_mesh_line(mesh=mesh, pos=200e-9, ps=2e-9, tag="hi")
+    devsim.add_1d_contact(mesh=mesh, name="lo", tag="lo", material="metal")
+    devsim.add_1d_contact(mesh=mesh, name="hi", tag="hi", material="metal")
+    devsim.add_1d_region(mesh=mesh, material="Si", region=reg, tag1="lo", tag2="hi")
+    devsim.finalize_mesh(mesh=mesh)
+    devsim.create_device(mesh=mesh, device=dev)
+    devsim.node_model(device=dev, region=reg, name="NetDoping",
+                      equation="1e23*(x<100e-9) - 1e23*(x>=100e-9)")
+    BP.setup_bipolar_region(dev, reg, eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1e16,
+                            mobility_n_m2Vs=0.135, mobility_p_m2Vs=0.048, tau_n_s=1e-7,
+                            tau_p_s=1e-7, fd_enhancement=False)
+    BP.setup_equilibrium_seed_models(dev, reg)
+    for c in ("lo", "hi"):
+        BP.setup_contact_ohmic_bipolar(dev, c)
+    devsim.node_model(device=dev, region=reg, name="_seed_psi",
+                      equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(dev, reg)))
+    for var, src in (("Potential", "_seed_psi"), ("Electrons", "IntrinsicElectrons"),
+                     ("Holes", "IntrinsicHoles")):
+        devsim.set_node_values(device=dev, region=reg, name=var,
+                               values=devsim.get_node_model_values(device=dev, region=reg, name=src))
+    devsim.solve(type="dc", absolute_error=1e10, relative_error=1e-10, maximum_iterations=60)
+    return mesh, dev, reg
+
+
+def test_c15_gummel_refuses_a_bipolar_device_before_touching_it():
+    """audit C-15 (2026-11-02): CARRIER_EQS is electron-only, so on a bipolar device the 'Poisson'
+    sub-solve was a coupled Poisson+hole Newton and the convergence snapshot never saw Holes. On
+    this diode a 20 mV forward step ran all 120 outer passes unconverged (Potential 31x off
+    Newton). solve_dc(method='gummel') must now REFUSE, naming the hole equation and method='newton',
+    BEFORE any sub-solve: the live equations and every solution variable are left untouched. (Pre-fix
+    this call -- capped at 2 outer passes -- raised RuntimeError 'did not converge' after mutating
+    the state.)"""
+    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers.dc_solve import solve_dc
+    mesh, dev, reg = _build_pn_diode()
+    try:
+        devsim.set_parameter(device=dev, name="lo_bias", value=0.02)
+        before = {v: np.asarray(devsim.get_node_model_values(device=dev, region=reg, name=v))
+                  for v in ("Potential", "Electrons", "Holes")}
+        eqs = set(devsim.get_equation_list(device=dev, region=reg))
+        assert "HoleContinuityEquation" in eqs and eqs == set(_R.equation_names(dev))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="BIPOLAR.*HoleContinuityEquation|"
+                                                 "HoleContinuityEquation.*BIPOLAR"):
+                solve_dc(dev, method="gummel", gummel_outer_max=2, semiconductor_regions=[reg])
+        assert set(devsim.get_equation_list(device=dev, region=reg)) == eqs
+        for v, a in before.items():
+            assert np.array_equal(
+                np.asarray(devsim.get_node_model_values(device=dev, region=reg, name=v)), a), v
+        # ... and the route the error names does solve the same step
+        solve_dc(dev, method="newton", abs_tol=1e10, rel_tol=1e-10, max_iter=60,
+                 semiconductor_regions=[reg])
+    finally:
+        _teardown(dev, mesh)
