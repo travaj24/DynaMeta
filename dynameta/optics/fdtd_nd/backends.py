@@ -5,8 +5,8 @@ for conventions. Bodies are verbatim from the original module.
 """
 from __future__ import annotations
 
-import functools
-import threading
+from dynameta.numba_env import (  # noqa: F401 -- re-exported; the ONE shared shim
+    _LazyJit, _PrangePlaceholder, have_numba, njit, prange)
 
 # Optional Numba fast CPU kernel (the fused single-pass, prange-threaded backend). Numba JITs the whole
 # timestep into one compiled function -> no per-op kernel/launch overhead (the cure for the small-grid
@@ -30,80 +30,9 @@ import threading
 #   * `HAVE_NUMBA` is a module attribute computed on first access (PEP 562 `__getattr__`), so
 #     `from dynameta.optics.fdtd_nd import HAVE_NUMBA` keeps working; internal code calls
 #     `have_numba()` instead, so importing the package never triggers the probe.
-_NUMBA_OK = None
-_JIT_LOCK = threading.Lock()
-
-
-def have_numba():
-    """True if numba imports (cached; the import is done once, on first ask -- audit V-14)."""
-    global _NUMBA_OK
-    if _NUMBA_OK is None:
-        try:
-            import numba                                     # noqa: F401
-            _NUMBA_OK = True
-        except Exception:                                    # pragma: no cover
-            _NUMBA_OK = False
-    return _NUMBA_OK
-
-
-class _PrangePlaceholder:
-    """`range` from plain Python; replaced by `numba.prange` in a kernel module's globals right
-    before that module's first numba compile (see `_LazyJit._dispatcher`)."""
-
-    def __call__(self, *args):
-        return range(*args)
-
-    def __repr__(self):
-        return "<fdtd_nd lazy prange placeholder>"
-
-
-prange = _PrangePlaceholder()
-
-
-class _LazyJit:
-    """A numba.njit-decorated kernel whose decoration (and hence `import numba`) is deferred to the
-    first call. Attribute access other than the wrapped function's metadata (`__doc__`, `__name__`,
-    `py_func`, ...) is forwarded to the real dispatcher, compiling it first."""
-
-    def __init__(self, py_func, jit_args, jit_kwargs):
-        self._disp = None
-        self.py_func = py_func
-        self._jit_args = jit_args
-        self._jit_kwargs = jit_kwargs
-        functools.update_wrapper(self, py_func)
-
-    def _dispatcher(self):
-        if self._disp is None:
-            with _JIT_LOCK:
-                if self._disp is None:
-                    if have_numba():
-                        import numba
-                        g = self.py_func.__globals__
-                        if isinstance(g.get("prange"), _PrangePlaceholder):
-                            g["prange"] = numba.prange
-                        self._disp = numba.njit(*self._jit_args, **self._jit_kwargs)(self.py_func)
-                    else:                                    # pragma: no cover -- the old no-numba shim
-                        self._disp = self.py_func
-        return self._disp
-
-    def __call__(self, *args, **kwargs):
-        return self._dispatcher()(*args, **kwargs)
-
-    def __getattr__(self, name):
-        if name.startswith("__") or name in ("_disp", "py_func", "_jit_args", "_jit_kwargs"):
-            raise AttributeError(name)
-        return getattr(self._dispatcher(), name)
-
-
-def njit(*args, **kwargs):
-    """Drop-in for `numba.njit` (bare `@njit` or `@njit(**options)`) that defers the numba import
-    and compile to the first call; see the module note above (audit V-14)."""
-    if len(args) == 1 and callable(args[0]) and not kwargs:
-        return _LazyJit(args[0], (), {})
-
-    def _wrap(f):
-        return _LazyJit(f, args, kwargs)
-    return _wrap
+# The shim itself (have_numba / prange / _LazyJit / njit) now lives ONCE in dynameta.numba_env
+# (wave-7 2026-11-02: soa/qd_gain.py carried a second copy) and is re-exported from here, so
+# `backends.njit`, `backends.prange`, `backends._LazyJit` resolve exactly as before.
 
 
 def __getattr__(name):                                       # PEP 562: lazy module attributes
