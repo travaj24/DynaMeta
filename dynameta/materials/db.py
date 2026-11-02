@@ -49,6 +49,7 @@ import os
 import re
 from dataclasses import dataclass, asdict
 from typing import Dict, Optional, Tuple, Union
+from dynameta.warning_types import UnreliableResultWarning
 
 
 # ---------------------------------------------------------------- record ----
@@ -156,7 +157,7 @@ class DielectricDB:
                 "component (JARVIS basis), an upper bound on the isotropic average for a "
                 "non-cubic crystal -- gate capacitance derived from it is overestimated. "
                 "Supply a measured override for quantitative work (audit S4-6).".format(
-                    rec.formula, rec.eps_static), stacklevel=2)
+                    rec.formula, rec.eps_static), UnreliableResultWarning, stacklevel=2)
         # Material is frozen; apply() is the one sanctioned in-place back-fill (see Material docstring)
         object.__setattr__(material, "eps_static_dc", rec.eps_static)
         try:

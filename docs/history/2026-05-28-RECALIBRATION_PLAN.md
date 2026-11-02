@@ -1,3 +1,8 @@
+> **HISTORICAL -- frozen 2026-05-28, moved here from the repo root on 2026-11-02 (audit X-28).**
+> Written before the v0.7/0.8/0.9 campaigns; many names it cites no longer exist. It is kept
+> as a record of how the project started, NOT as current documentation -- use README.md and
+> docs/ for that.
+
 # Stage 1 Recalibration Plan (2026-05-28)
 
 ## Background

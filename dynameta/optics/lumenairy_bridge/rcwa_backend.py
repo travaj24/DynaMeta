@@ -113,6 +113,7 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
                                                       require_lumenairy as _require_lumenairy)
+from dynameta.warning_types import AdvisoryWarning
 
 
 def _min_samples(n_orders: int) -> int:
@@ -383,7 +384,7 @@ def rcwa_result_to_optical_result(res, row: int, *, t0: float,
             a_ind = float(np.sum(la))
         except Exception as exc:                          # pragma: no cover - defensive
             warnings.warn("lumenairy bridge: per-layer absorption unavailable ({}); "
-                          "A_independent left unset".format(exc), stacklevel=2)
+                          "A_independent left unset".format(exc), AdvisoryWarning, stacklevel=2)
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                          solve_time_s=time.perf_counter() - t0, t=t, T=T, A=A,
                          A_independent=a_ind, R_flux=R, T_flux=T,

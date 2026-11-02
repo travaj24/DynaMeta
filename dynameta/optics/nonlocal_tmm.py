@@ -215,7 +215,7 @@ class DielectricLayer:
     thickness_m: float
 
 
-Layer = Union[HydroLayer, DielectricLayer]
+NonlocalLayer = Union[HydroLayer, DielectricLayer]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -428,7 +428,7 @@ def _is_local_limit(layer: HydroLayer) -> bool:
     return layer.beta == 0 and layer.D == 0
 
 
-def _layer_matrix(omega: complex, layer: Layer, k0: complex, k_par: complex,
+def _layer_matrix(omega: complex, layer: NonlocalLayer, k0: complex, k_par: complex,
                   pol: str) -> np.ndarray:
     """Characteristic matrix for one layer.  Dielectric -> local; hydrodynamic metal in s-pol
     -> local with eps = eps_T (no longitudinal coupling in TE); hydrodynamic metal in p-pol ->
@@ -444,7 +444,7 @@ def _layer_matrix(omega: complex, layer: Layer, k0: complex, k_par: complex,
     raise TypeError("layer must be a HydroLayer or DielectricLayer; got {!r}".format(type(layer)))
 
 
-def _stack_matrix(omega: complex, layers: Sequence[Layer], k0: complex, k_par: complex,
+def _stack_matrix(omega: complex, layers: Sequence[NonlocalLayer], k0: complex, k_par: complex,
                   pol: str) -> np.ndarray:
     """Total characteristic matrix of the stack, mapping (E_tan, H_tan) from the SUPERSTRATE
     face to the SUBSTRATE face.  ``layers`` are ordered superstrate-side first, so
@@ -509,7 +509,7 @@ def _rt_from_matrix(M: np.ndarray, Y_super: complex, Y_sub: complex):
     return r, t, D_pole
 
 
-def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
+def stack_rt(omega, layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
              theta_rad: float = 0.0, k_par_m=None, check_energy: bool = True) -> RTA:
     """Reflectance / transmittance / absorptance of ``super | layers | sub`` at ``omega``.
 
@@ -566,7 +566,7 @@ def stack_rt(omega, layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_s
     return RTA(r=r, t=t, R=R, T=T, A=A, D_pole=D_pole)
 
 
-def rta(omega, layers: Sequence[Layer], **kwargs):
+def rta(omega, layers: Sequence[NonlocalLayer], **kwargs):
     """Convenience wrapper returning just ``(R, T, A)`` from :func:`stack_rt`."""
     res = stack_rt(omega, layers, **kwargs)
     return res.R, res.T, res.A
@@ -575,7 +575,7 @@ def rta(omega, layers: Sequence[Layer], **kwargs):
 # ------------------------------------------------------------------------------------------------
 # Pole function (compatible with optics.resonance.find_poles)
 # ------------------------------------------------------------------------------------------------
-def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
+def pole_function(layers: Sequence[NonlocalLayer], *, pol: str = "p", n_super=1.0, n_sub=1.0,
                   k_par_m=0.0) -> Callable[[complex], complex]:
     """Return the analytic scattering-pole function (a closure holding ``k_par`` FIXED), whose
     ZEROS are the scattering poles of the hydrodynamic stack.  Feed it to
@@ -636,3 +636,18 @@ def pole_function(layers: Sequence[Layer], *, pol: str = "p", n_super=1.0, n_sub
         return complex(val)
 
     return D
+
+
+def __getattr__(name):
+    # audit V-11 (2026-11-02): `Layer` was this module's name for the HydroLayer | DielectricLayer UNION type, while
+    # `dynameta.Layer` / `dynameta.geometry.Layer` is the Design dataclass -- one name bound to three
+    # KINDS of object (the dataclass, resonance's (eps, d) tuple alias, nonlocal_tmm's union alias),
+    # two of them in public signatures. The alias is now `NonlocalLayer`; the old spelling still resolves,
+    # with a DeprecationWarning (it was never in __all__ and had zero readers outside this module).
+    if name == "Layer":
+        import warnings
+        from dynameta.warning_types import DynaMetaDeprecationWarning
+        warnings.warn("dynameta.optics.nonlocal_tmm.Layer is deprecated (audit V-11): it is not dynameta.Layer; use "
+                      "dynameta.optics.nonlocal_tmm.NonlocalLayer", DynaMetaDeprecationWarning, stacklevel=2)
+        return NonlocalLayer
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

@@ -4,7 +4,7 @@ Library-version (`metasurface_lib/`) experiments using the recalibrated
 physics. Counterpart to
 `Metasurface_Modulator/experiments/2026_05_28_recalibration/`.
 
-See `Metasurface_Lib/RECALIBRATION_PLAN.md` for the rationale.
+See `docs/history/2026-05-28-RECALIBRATION_PLAN.md` for the rationale.
 
 ## Subdirectories
 

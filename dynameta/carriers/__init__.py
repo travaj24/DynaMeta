@@ -6,6 +6,16 @@ package does NOT pull in `devsim` -- the pure-numpy/scipy submodules (e.g.
 `carriers.schrodinger_poisson`, `carriers.sp_carrier`) stay importable, and CI-testable,
 without the heavy solver stack installed. `from dynameta.carriers import
 LayeredDevsimBuilder` still works (the import happens on first attribute access).
+
+STAR IMPORT IS EAGER BY DEFINITION (audit V-13, 2026-11-02). `from dynameta.carriers import *`
+resolves EVERY name in `__all__`, and `__all__` names the DEVSIM builder and the DEVSIM physics
+submodules -- so the star form imports devsim (measured: devsim + scipy loaded, against scipy
+only for `import dynameta.carriers`), and on an install without devsim it raises that
+ImportError. The laziness above is a property of `import dynameta.carriers` and of NAMED imports
+(`from dynameta.carriers import schrodinger_poisson`), not of `*`. That is deliberate rather than
+fixed: `__all__` is the declared public surface (tests/test_api_surface.py walks it), and
+trimming the solver names out of it to make `*` cheap would un-declare the package's headline
+builder. Use named imports on a devsim-free install.
 """
 
 __all__ = ["LayeredDevsimBuilder", "physics_equilibrium", "ac_analysis", "transient",

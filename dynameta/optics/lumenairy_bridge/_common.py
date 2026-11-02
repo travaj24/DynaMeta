@@ -197,6 +197,31 @@ _CEILING_WARNED = False
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
 
 
+def require_angles_rad(where: str, *, polar=(), azimuth=()) -> None:
+    """Refuse an incidence angle that can only be DEGREES (audit V-25, 2026-11-02).
+
+    The differentiable `*_design.py` entry points take `angle` / `theta` / `phi` unsuffixed, in
+    RADIANS (lumenairy's own spelling), and the units were stated only in the module docstring --
+    while the design seam a user arrives from says `incidence_angle_deg=30`. Passing 30 there ran
+    a 30-RADIAN solve silently. A real polar incidence angle lies in [-pi/2, pi/2] and an azimuth in
+    [-2 pi, 2 pi], so anything outside is refused with the conversion spelled out (a degree value
+    below 1.57 / 6.28 is undetectable and still runs -- the rename that would close that is
+    deferred, see the audit entry). Only CONCRETE real values are checked: a jax tracer, or a
+    complex angle, cannot be read here and is passed through untouched, so nothing traced changes.
+    """
+    for kind, names, bound in (("polar", polar, 0.5 * np.pi), ("azimuth", azimuth, 2.0 * np.pi)):
+        for name, value in names:
+            try:
+                v = float(value)
+            except Exception:                    # noqa: BLE001 (tracer / complex: not checkable)
+                continue
+            if np.isfinite(v) and abs(v) > bound * (1.0 + 1e-12):
+                raise ValueError(
+                    "{}: {}={!r} is outside the {} range |{}| <= {:.6g} rad -- this argument is in "
+                    "RADIANS (lumenairy's convention), not degrees. Did you mean {}={!r}?".format(
+                        where, name, value, kind, name, bound, name, float(np.radians(v))))
+
+
 def _reject_pol(pol, where: str, param: str = "polarization"):
     """Raise the shared V-8 vocabulary error for a label outside {'x','y','p'}.  LAZY import,
     failure path only -- the bridge's import-light contract is untouched."""

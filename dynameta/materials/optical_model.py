@@ -30,6 +30,7 @@ import numpy as np
 
 # Physical constants (SI): single source in core/constants.
 from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E  # noqa: F401
+from dynameta.warning_types import UnreliableResultWarning
 
 MassOrFn  = Union[float, Callable[[np.ndarray], np.ndarray]]
 GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
@@ -265,7 +266,7 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     if not sol.success:
         warnings.warn("fit_drude_params: least_squares did not converge (status={}: {}); the returned "
                       "Drude parameters are the best-so-far iterate and may be unreliable.".format(
-                          sol.status, sol.message), RuntimeWarning, stacklevel=2)
+                          sol.status, sol.message), UnreliableResultWarning, stacklevel=2)
     lo, hi = np.asarray(bounds[0], float), np.asarray(bounds[1], float)
     span = np.where((hi - lo) > 0, hi - lo, 1.0)
     pinned = [nm for nm, x, l, h, s in zip(("eps_inf", "m_eff_ratio", "gamma_rad_s"), sol.x, lo, hi, span)
@@ -273,7 +274,7 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     if pinned:
         warnings.warn("fit_drude_params: parameter(s) {} pinned at a fit bound -- the Drude model likely "
                       "cannot represent the data (or the bounds are too tight); widen the bounds or "
-                      "check the input n,k.".format(pinned), RuntimeWarning, stacklevel=2)
+                      "check the input n,k.".format(pinned), UnreliableResultWarning, stacklevel=2)
     eps_inf, m_ratio, gamma = sol.x
     return {
         "eps_inf":      float(eps_inf),
@@ -756,7 +757,7 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
             "DISCONTINUOUS gamma(omega) never resolves at any N -- that is itself the tell; "
             "confirm by checking whether rms_norm falls under refinement.".format(
                 feature_pts, h, omega.size, _KK_MIN_FEATURE_PTS, rms_norm),
-            RuntimeWarning, stacklevel=2)
+            UnreliableResultWarning, stacklevel=2)
     return {
         "omega": omega, "re_model": re_model, "re_kk": re_kk, "residual": residual,
         "band_mask": band, "eps_inf_est": eps_inf_est, "scale": scale,
