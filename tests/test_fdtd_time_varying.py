@@ -43,6 +43,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 from scipy.signal import hilbert
 
 from dynameta.constants import C_LIGHT
@@ -288,3 +289,48 @@ def test_solve_fdtd_1d_layered_frequency_conversion_diagnostic():
     assert np.isfinite(d_step["input_centroid_Hz"])
     assert set(d_step) >= {"freqs_Hz", "input_spectrum", "output_spectrum",
                            "input_centroid_Hz", "output_centroid_Hz", "ratio"}
+
+
+# ============================================================================================
+# audit D-17 (2026-11-02): the uniform march's energy diagnostic is the leapfrog invariant at ONE
+# time level, and an index below `courant` (ENZ) is refused instead of marching to NaN.
+# ============================================================================================
+
+def test_d17_energy_diagnostic_is_the_time_centred_leapfrog_invariant():
+    """energy_t used to add |E^{n+1}|^2 to |H^{n+1/2}|^2 -- two time levels. Measured pre-fix
+    (relative peak-to-peak over the window): 7.5e-6 on a pure forward pulse in a constant medium
+    and 2.47e-2 after the fast n 1 -> 2 step (the forward + backward daughters carry a
+    standing-wave part, whose 2w ripple the mixed levels expose). The fixed diagnostic is the
+    discrete invariant of the interior Yee update: flat to round-off in both windows (~1e-15),
+    with only the D-preserving jump at the step itself."""
+    res, ref, n1, n2 = _fast_runs()
+    t = res.t_s
+    t_step = 8.0 * _TP1
+
+    def _p2p(e):
+        return float((e.max() - e.min()) / e.mean())
+
+    assert _p2p(ref.energy_t[t < t_step + 20 * _TP1]) < 1e-12
+    assert _p2p(res.energy_t[(t > t_step + 2 * _TP1) & (t < t_step + 20 * _TP1)]) < 1e-12
+    assert _p2p(res.energy_t[(t > t_step - 4 * _TP1) & (t < t_step - 0.5 * _TP1)]) < 1e-12
+
+
+def test_d17_enz_index_below_courant_is_refused_not_marched_to_nan():
+    """The "stable for any n>=1" comment was unchecked while index_of_t may go below 1 (ENZ).
+    Measured pre-fix at courant 0.5: n 1 -> 0.45 / 0.3 returned all-NaN fields and energy with no
+    error. The march is stable iff n >= courant: n = 0.6 must still run (ENZ is supported), 0.45
+    must raise naming the Courant number, and so must an n_init below courant."""
+    lam = 1.0e-6
+    tp = lam / C_LIGHT
+    common = dict(n_init=1.0, lambda_med_m=lam, domain_wavelengths=80, run_periods=12.0)
+    ok = run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else 0.6, **common)
+    assert np.all(np.isfinite(ok.energy_t)) and np.all(np.isfinite(ok.Ex_final))
+    assert ok.n_traj[-1] == 0.6
+    with pytest.raises(ValueError, match="Courant"):
+        run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else 0.45, **common)
+    with pytest.raises(ValueError, match="Courant"):
+        run_uniform_time_boundary(index_of_t=lambda t: 0.4, n_init=0.4, lambda_med_m=lam,
+                                  domain_wavelengths=80, run_periods=12.0)
+    with pytest.raises(ValueError, match="n > 0"):
+        run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else float("nan"),
+                                  **common)
