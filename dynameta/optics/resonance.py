@@ -92,6 +92,7 @@ from typing import Callable, List, NamedTuple, Sequence, Tuple, Union
 import numpy as np
 
 from dynameta.constants import C_LIGHT
+from dynameta.optics.tmm_reference import _check_energy_budget   # ONE energy-budget rule (Q-23)
 
 __all__ = [
     "drude_eps",
@@ -334,7 +335,8 @@ class SMatrix(NamedTuple):
 
 
 def layered_smatrix_complex(omega_rad_s, layers: Sequence[Layer], *, theta_rad: float = 0.0,
-                            pol: str = "s", n_super=1.0, n_sub=1.0, k_par_m=None) -> SMatrix:
+                            pol: str = "s", n_super=1.0, n_sub=1.0, k_par_m=None,
+                            check_energy: bool = True) -> SMatrix:
     """Complex-omega 2x2 scattering matrix of ``super | layers | sub``.
 
     Parameters
@@ -356,6 +358,15 @@ def layered_smatrix_complex(omega_rad_s, layers: Sequence[Layer], *, theta_rad: 
     k_par_m : float or complex, optional
         Explicit in-plane wavevector [1/m]; overrides ``theta_rad``.  Held fixed => the physically
         correct continuation for QNM/pole work.
+    check_energy : bool
+        ENERGY-BUDGET GUARD (audit Q-23, 2026-11-02 -- the policy of ``tmm_reference``, whose
+        ``_check_energy_budget`` this calls): on the REAL axis with a PROPAGATING lossless
+        incidence (``Im(omega) = 0``, ``Re(Y_super) > 0``, ``Im(eps_super) = 0``), R, T and
+        ``1 - R - T`` must be finite and >= -1e-6, else ValueError -- an interior ``Im(eps) < 0``
+        (a sign-convention slip = gain) used to return ``T > 1`` silently here while the TMM
+        oracle raised on the same stack.  Complex ``omega`` (pole work), evanescent incidence and
+        lossy superstrates are never checked (R/T are not energy fluxes there).  Pass ``False``
+        for a DELIBERATE gain medium.
 
     Returns
     -------
@@ -400,6 +411,8 @@ def layered_smatrix_complex(omega_rad_s, layers: Sequence[Layer], *, theta_rad: 
     # Power transmittance: |t|^2 times the outgoing/incoming admittance ratio (real parts).
     denom = Y_super.real
     T = float(abs(t) ** 2 * (Y_sub.real / denom)) if denom != 0.0 else float("nan")
+    if check_energy and omega.imag == 0.0 and denom > 0.0 and eps_super.imag == 0.0:
+        _check_energy_budget(R, T, where="layered_smatrix_complex")          # audit Q-23
     S = np.array([[M21 / M11, detM / M11],
                   [1.0 / M11, -M12 / M11]], dtype=np.complex128)
     return SMatrix(r=r, t=t, R=R, T=T, M11=M11, S=S)
@@ -460,6 +473,26 @@ def _stack_denominator(omega: complex, layers: Sequence[Layer], pol: str, n_supe
     for e_spec, d in layers:
         eps = _eval_eps(e_spec, omega)
         kz = _kz(eps, k0, kpar)
+        if kz == 0:
+            # AUDIT Q-17: a layer's OWN light line (kz = 0 exactly, e.g. eps k0^2 == k_par^2, or
+            # an eps = 0 layer at normal incidence) is a REMOVABLE singularity of D -- the entries
+            # are even in kz -- but sin(kz d)/Y and Y sin(kz d) evaluated as written are 0/0
+            # (ZeroDivisionError since the P-6 scalar rewrite; NaN before it, which reached
+            # find_poles' int(round(winding)) far from the cause).  Use the kz -> 0 limits:
+            #   s:  Y = kz       -> sin/Y -> d,               Y sin -> 0
+            #   p:  Y = eps/kz   -> sin/Y -> 0,               Y sin -> eps d     (eps != 0)
+            #   p, eps = 0 (then k_par = 0 too, kz^2 = eps k0^2):
+            #       Y = kz/k0^2  -> sin/Y -> k0^2 d,          Y sin -> 0
+            # Only the exact zero takes this branch, so every other evaluation is bit-identical.
+            dd = float(d)
+            if pol == "s":
+                m01, m10 = -1j * dd, 0j
+            elif eps != 0:
+                m01, m10 = 0j, -1j * eps * dd
+            else:
+                m01, m10 = -1j * k0 * k0 * dd, 0j
+            a, b, c_, d_ = _mat2_mul((a, b, c_, d_), (1.0 + 0j, m01, m10, 1.0 + 0j))
+            continue
         Y = _admittance(eps, kz, pol)
         phi = kz * float(d)
         c = complex(np.cos(phi))

@@ -167,15 +167,15 @@ def _trapezoid_offenders(tree, label):
 
 def test_no_direct_numpy_trapezoid_in_library():
     """The 'ONE home' claim, machine-checked over FIVE spellings (see _trapezoid_offenders).
-    Documented exception, exhaustive: optics/spdc_design.py, whose getattr shim is itself
-    floor-correct on BOTH sides (1.x has trapz, 2.x has trapezoid) and which needs the 2-D
-    `axis=` form core.numerics.trapz does not offer. fiber_amp/lma.py used to need a second
-    exemption for four bare scipy `trapezoid` calls; they were routed through core.numerics
-    instead (byte-identical), so the allow-list stays at one entry."""
+    NO exceptions since audit Q-19 (2026-11-02): optics/spdc_design.py's getattr shim -- the
+    allow-list's last entry, kept because it needed the 2-D `axis=` form -- now routes through
+    core.numerics.trapz_axis (bit-identical to np.trapezoid(..., axis=)). fiber_amp/lma.py used to
+    need a second exemption for four bare scipy `trapezoid` calls; they were routed through
+    core.numerics instead (byte-identical)."""
     import ast
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "dynameta"
-    allowed = {"spdc_design.py"}
+    allowed = set()
     offenders, scanned = [], 0
     for f in sorted(root.rglob("*.py")):
         if f.name in allowed:
@@ -342,3 +342,26 @@ def test_resolve_ivp_method_maps_only_bdf():
     for other in ("LSODA", "RK45", "Radau", "DOP853"):
         assert resolve_ivp_method(other) == other
     assert resolve_ivp_method(ZeroInitBDF) is ZeroInitBDF                # already a class
+
+
+def test_q19_trapz_axis_is_bit_identical_to_numpy_and_real_only():
+    """audit Q-19 (2026-11-02): optics/spdc_design.py's private getattr(np, "trapezoid", np.trapz)
+    shim -- the guard's last library exception -- now routes through core.numerics.trapz_axis.
+    Same formula as trapz, same reduction axis as numpy: byte-identical to np.trapezoid(...,
+    axis=) on the shapes the spdc marginals use (0 differing elements measured), and 1-D
+    trapz_axis == trapz. Complex input is refused as in trapz (audit X-1)."""
+    from dynameta.core.numerics import trapz, trapz_axis
+    rng = np.random.default_rng(19)
+    ref = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+    for shape in ((137, 201), (50, 300), (31, 7, 5)):
+        P = rng.random(shape) ** 3
+        for ax in range(-1, len(shape)):
+            x = np.sort(rng.random(shape[ax])) * 1e15
+            a, b = trapz_axis(P, x, axis=ax), ref(P, x, axis=ax)
+            assert a.shape == b.shape and a.tobytes() == b.tobytes(), (shape, ax)
+    y, x = rng.random(400), np.cumsum(rng.random(400))
+    assert float(trapz_axis(y, x)) == trapz(y, x)
+    with pytest.raises(TypeError):
+        trapz_axis(np.ones((3, 4)) + 0j, np.arange(4.0))
+    with pytest.raises(ValueError):
+        trapz_axis(np.ones((3, 4)), np.arange(3.0), axis=1)

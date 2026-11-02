@@ -46,3 +46,60 @@ def test_missing_backend_raises():
     db = DielectricDB(backend="mp", verbose=False)
     with pytest.raises(RuntimeError, match="mp-api"):
         db.eps_static("TiO2")
+
+
+# ---- audit Q-25 (2026-11-02): no `or` on a float that can legitimately be 0.0 --------------------
+def test_q25_mp_picks_the_ground_state_polymorph_with_zero_hull_energy(monkeypatch, tmp_path):
+    """`energy_above_hull or 1e9` turned the GROUND STATE's 0.0 into 1e9 and sorted it LAST, so a
+    metastable polymorph was returned. Fake MPRester, three polymorphs (0.05, 0.0, None eV)."""
+    import sys
+    import types
+    docs = [types.SimpleNamespace(material_id="mp-meta", e_total=30.0, e_ionic=None,
+                                  e_electronic=None, symmetry=None, energy_above_hull=0.05),
+            types.SimpleNamespace(material_id="mp-ground", e_total=20.0, e_ionic=None,
+                                  e_electronic=None, symmetry=None, energy_above_hull=0.0),
+            types.SimpleNamespace(material_id="mp-unknown", e_total=10.0, e_ionic=None,
+                                  e_electronic=None, symmetry=None, energy_above_hull=None)]
+
+    class _Summary:
+        def search(self, formula, fields):
+            return list(docs)
+
+    class _MPRester:
+        def __init__(self, api_key):
+            self.materials = types.SimpleNamespace(summary=_Summary())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    client = types.ModuleType("mp_api.client")
+    client.MPRester = _MPRester
+    monkeypatch.setitem(sys.modules, "mp_api", types.ModuleType("mp_api"))
+    monkeypatch.setitem(sys.modules, "mp_api.client", client)
+    db = DielectricDB(backend="mp", mp_api_key="x", cache_path=str(tmp_path / "c.json"),
+                      verbose=False)
+    rec = db._query_mp("TiO2")
+    assert rec.identifier == "mp-ground" and rec.eps_static == 20.0
+
+
+def test_q25_jarvis_electronic_eps_zero_sentinel_falls_back_explicitly(monkeypatch, tmp_path):
+    """The JARVIS electronic permittivity: 0.0 is unphysical (eps_inf >= 1) and means "not
+    computed", so it falls back to the epsx/y/z average -- what the old `or` did, now explicit;
+    a genuine value is used as is."""
+    import sys
+    import types
+    jar = types.ModuleType("jarvis.db.figshare")
+    jar.data = lambda name: []
+    for mod in ("jarvis", "jarvis.db"):
+        monkeypatch.setitem(sys.modules, mod, types.ModuleType(mod))
+    monkeypatch.setitem(sys.modules, "jarvis.db.figshare", jar)
+    db = DielectricDB(backend="jarvis", cache_path=str(tmp_path / "c.json"), verbose=False)
+    base = {"formula": "HfO2", "jid": "JVASP-1", "formation_energy_peratom": -3.0,
+            "dfpt_piezo_max_dielectric": 25.0, "epsx": 4.0, "epsy": 5.0, "epsz": 6.0}
+    db._jarvis_dataset = [dict(base, dfpt_piezo_max_dielectric_electronic=0.0)]
+    assert db._query_jarvis("HfO2").eps_electronic == 5.0
+    db._jarvis_dataset = [dict(base, dfpt_piezo_max_dielectric_electronic=4.4)]
+    assert db._query_jarvis("HfO2").eps_electronic == 4.4

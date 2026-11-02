@@ -21,7 +21,7 @@ call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDE
 (OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
 `normalize_pol`, which demands the azimuth and refuses rather than guess. This file also consumes OpticalSpec's lab
 {'x','y','p'} (TmmLayeredSolver / _pol_for); _pol_for's 'x' -> 's' leg is the NORMAL-INCIDENCE
-branch only (sibling finding Q-24).
+branch only, and it raises off normal (sibling finding Q-24, enforced 2026-11-02).
 """
 
 from __future__ import annotations
@@ -186,12 +186,25 @@ def _pol_for(optical) -> str:
     AUDIT V-8/Q-24: the 'x' -> 's' leg is the NORMAL-INCIDENCE branch only -- E along lab x is
     not transverse to an oblique x-z wavevector, which is why ``OpticalSpec`` rejects 'x' at
     theta != 0 and why ``core.polarization.normalize_pol('x', 'lab_xyp', to='sp', ...)`` demands
-    ``theta_deg`` and refuses off normal.  This helper is fed OpticalSpec-validated values, so it
-    keeps the cheap mapping and only VALIDATES the vocabulary (a label from the {'s','p'} or
-    {'te','tm'} family used to be mapped to 's' silently)."""
+    ``theta_deg`` and refuses off normal.  This helper VALIDATES the vocabulary (a label from the
+    {'s','p'} or {'te','tm'} family used to be mapped to 's' silently) and -- audit Q-24,
+    2026-11-02 -- now ENFORCES the normal-incidence branch too: ``TmmLayeredSolver.solve``
+    duck-types its ``optical`` argument, so an object that is not a validated OpticalSpec could
+    reach it with ``'x'`` at oblique incidence and get the s-pol answer silently (measured on a
+    vacuum/glass (n = 1.5) interface at 40 deg: R_s = 0.0772 returned, where R_p = 0.0143).  It raises
+    instead, as OpticalSpec and ``normalize_pol`` do."""
     p = getattr(optical, "polarization", "y")
     if p not in ("x", "y", "p"):
         _reject_pol(p, "_pol_for", vocabulary="lab_xyp", param="OpticalSpec.polarization")
+    if p == "x":
+        theta = float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0)
+        if theta != 0.0:
+            raise ValueError(
+                "_pol_for: OpticalSpec.polarization='x' at incidence_angle_deg={!r} has no s/p "
+                "image -- E along lab x is not transverse to an oblique x-z wavevector (audit "
+                "Q-24; OpticalSpec refuses it, and so does core.polarization.normalize_pol). The "
+                "'x' -> 's' mapping holds at normal incidence only; use 'y' (s) or 'p' (p)."
+                .format(theta))
     return "p" if p == "p" else "s"
 
 
