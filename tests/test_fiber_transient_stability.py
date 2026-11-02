@@ -194,12 +194,12 @@ def test_codoped_solve_defaults_to_a_converged_answer_and_warns_when_it_is_not()
 
 
 def test_codoped_march_seeds_from_a_converged_solve():
-    # OLD: the march seeded from solve()'s relax = 1.0 default and started at -6.5 dB. (21
+    # OLD: the march seeded from solve()'s relax = 1.0 default and started at -10.47 dB. (21
     # nodes on this core-pumped fiber are deliberately under-resolved -- jump 17.7 -- to keep the
     # relaxation solves cheap; that z-mesh warning is expected and is not what is under test.)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*z mesh does NOT resolve",
-                                category=UnreliableResultWarning)
+                                category=RuntimeWarning)
         tr = simulate_transient(_core(P=0.6), np.array([0.0, 1e-5]), n_nodes=21, z_refine=1)
     assert tr.meta["mesh_resolved"] is False
     assert float(tr.signal_gain_dB[0, 0]) > 15.0             # MEASURED 19.18 dB
@@ -309,7 +309,8 @@ def test_single_ion_counter_pumped_photon_number_closes_first_order_in_dt():
         out.append((abs(dN - fld) / phi_in, abs(dN) / phi_in))
     assert min(o[1] for o in out) > 0.3, out                  # PREMISE: really moving
     r = [o[0] for o in out]
-    # MEASURED 2026-11-02 at 161 nodes: 1.12e-3 / 5.03e-4 / 2.29e-4 -- ratios 2.2, 2.2
+    # MEASURED 2026-11-02 at 81 nodes: 1.04e-3 / 4.29e-4 / 1.56e-4 -- ratios 2.4, 2.8 (161
+    # nodes: 1.12e-3 / 5.03e-4 / 2.29e-4, ratios 2.2, 2.2 -- first order plus a small mesh term)
     assert r[0] < 3e-3 and r[-1] < 6e-4, r
     assert r[0] / r[1] > 1.7 and r[1] / r[2] > 1.7, r
 
