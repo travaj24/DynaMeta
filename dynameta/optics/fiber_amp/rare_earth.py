@@ -13,6 +13,7 @@ docs/fiber_amp_model_spec.md sec.1. Pure numpy; SI units; exp(-i omega t).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -39,7 +40,7 @@ class ChannelSet:
     gamma: np.ndarray                          # (K,) mode/dopant overlap
     loss_per_m: np.ndarray                     # (K,) background loss l_k [1/m]
     tau_s: float                               # upper-state lifetime [s] (from the ion)
-    sigma_esa: np.ndarray = None               # (K,) excited-state-absorption cross-section [m^2]
+    sigma_esa: Optional[np.ndarray] = None     # (K,) excited-state-absorption cross-section [m^2]
 
     def __post_init__(self):
         if self.sigma_esa is None:
