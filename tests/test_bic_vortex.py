@@ -307,3 +307,43 @@ def test_lumenairy_conical_jones_field_end_to_end():
     assert q == 0.0                                        # uniform symmetric slab: no vortex
     assert q == round(q * 2) / 2.0                         # a valid half-integer
     assert find_vortex_candidates(J) == []                 # no spurious singularity
+
+
+# ---- audit Q-27 (2026-11-02): a high charge must not alias to a CLEAN wrong integer ---------------
+@pytest.mark.parametrize("q", [4, 5, 6, -4, 8])
+def test_q27_charge_map_does_not_report_an_aliased_high_charge(q):
+    """radius = 2 loops (16 samples) resolve |q| <= 3. Past that the loop ALIASES without
+    tripping the angle guard: pre-fix the centred loop read 0.0 for q = 4 and -2.0 for q = 6 (the
+    vortex vanished from the map). The default two-radius cross-check (radius and 2 * radius)
+    reports nan there instead, and leaves NO wrong finite value anywhere on the map."""
+    n = 41
+    ax = np.linspace(-1.0, 1.0, n)
+    KX, KY = np.meshgrid(ax, ax, indexing="ij")
+    qmap = charge_map(q * np.arctan2(KY, KX), radius=2)
+    c = n // 2
+    assert np.isnan(qmap[c, c])
+    fin = np.isfinite(qmap)
+    assert fin.sum() > 0.4 * n * n and np.all(qmap[fin] == 0.0)      # measured >= 772 of 1681
+    # far from the core the map is still a usable zero map
+    assert qmap[5, 5] == 0.0
+
+
+@pytest.mark.parametrize("q", [1, 2, 3, -3])
+def test_q27_cross_check_keeps_resolvable_charges_exact(q):
+    """The cross-check is inert where radius 2 is already right: the centred loop keeps the exact
+    charge and every finite nonzero value is that charge (the old single-radius map also carried
+    junk half-integers on loops hugging the core; cross_check=False is that map, unchanged)."""
+    n = 41
+    ax = np.linspace(-1.0, 1.0, n)
+    KX, KY = np.meshgrid(ax, ax, indexing="ij")
+    phi = q * np.arctan2(KY, KX)
+    qmap = charge_map(phi, radius=2)
+    c = n // 2
+    assert qmap[c, c] == float(q)
+    nz = qmap[np.isfinite(qmap) & (qmap != 0.0)]
+    assert nz.size > 0 and np.all(nz == float(q))
+    single = charge_map(phi, radius=2, cross_check=False)
+    for i in range(2, n - 2):
+        for j in range(2, n - 2):
+            if np.isfinite(qmap[i, j]):
+                assert qmap[i, j] == single[i, j]
