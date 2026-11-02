@@ -889,3 +889,98 @@ def test_f9_bddc_cg_falls_back_on_a_bloch_phased_space():
     hits = [w for w in rec if "bddc_cg" in str(w.message)]
     assert len(hits) == 1 and issubclass(hits[0].category, S.FEMDiagnosticWarning)
     assert res.R is not None and np.isfinite(res.R)
+
+
+# --------------------------- wave-7 (2026-11-02): S6-17 / S6-18 perf rewrites ---------------------------
+
+def _synthetic_field(geo, order=2):
+    """A smooth complex HCurl GridFunction on the guard cell (no solve needed)."""
+    import ngsolve as ng
+    fes = ng.HCurl(geo.mesh, order=order, complex=True)
+    g = ng.GridFunction(fes)
+    g.Set(ng.CF((ng.exp(1j * 0.01 * ng.x) * ng.sin(0.003 * ng.z), ng.cos(0.02 * ng.y) + 1j * ng.z / 1e3,
+                 ng.x * ng.y / 1e5)))
+    return g
+
+
+def test_s6_17_batched_cell_average_is_bitwise_the_point_by_point_loop(monkeypatch):
+    """audit S6-17: _cell_average now locates + evaluates each probe plane in ONE batched NGSolve
+    call. Pinned BIT-FOR-BIT against the old Python double loop (re-implemented here verbatim) on
+    a GridFunction and on an E_bg + gfu CoefficientFunction, for a real and a complex projection
+    and zero / non-zero Bloch demodulation. Measured 3.1-4.3x per call (24 x 24: 67 -> 16 ms)."""
+    import ngsolve as ng
+    from dynameta.optics import solver as S
+    geo, _eps, _opt = _fem_cell()
+    g = _synthetic_field(geo)
+    cf = g + ng.CF((1.0, 2j, 0.5))
+    z0, z1 = geo.z_intervals_nm["superstrate"]
+    zp = np.linspace(z0 + 50.0, z1 - 50.0, 7)
+
+    def old_loop(field, proj, kx, ky, n):
+        xs = (np.arange(n) + 0.5) * (400.0 / n)
+        p0, p1, p2 = proj
+        out = []
+        for zv in zp:
+            vals = []
+            for xv in xs:
+                for yv in xs:
+                    E = field(geo.mesh(float(xv), float(yv), float(zv)))
+                    pv = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
+                    vals.append(pv * np.exp(-1j * (kx * xv + ky * yv)))
+            out.append(complex(np.mean(vals)))
+        return np.array(out)
+
+    for n in (6, 11):
+        monkeypatch.setattr(S, "_probe_grid_sizes", lambda *a, _n=n, **k: (_n, _n))
+        for field in (g, cf):
+            for proj, kx, ky in (((1.0, 0.0, 0.0), 0.0, 0.0), ((0.3 + 0.1j, 0.95, 0.0), 0.004, 0.001),
+                                 (np.array([0.2 - 0.7j, 0.1j, 1.0 + 0j]), 0.0, 0.002)):
+                new = S._cell_average(geo.mesh, field, zp, 400.0, 400.0, proj, kx, ky, kz_med=1.0)
+                assert np.array_equal(new, old_loop(field, proj, kx, ky, n)), (n, proj, kx, ky)
+    # a plane entirely OFF the mesh still fails loudly (OPT-7/F6), not with a silent 0+0j
+    with pytest.raises(RuntimeError, match="no valid field samples"):
+        S._cell_average(geo.mesh, g, np.array([1.0e7]), 400.0, 400.0, (1.0, 0.0, 0.0), 0.0, 0.0,
+                        kz_med=1.0)
+
+
+def test_s6_18_absorption_diagnostics_integrate_ONCE_and_split_exactly(monkeypatch):
+    """audit S6-18: solve_fem's default diagnostics integrated the identical loss density twice
+    (_absorbed_fraction over the non-PML union, then _per_region_absorption once per region). Now
+    ONE region-wise Integrate gives both, and A_independent == sum(map) EXACTLY (it held to ~1e-16
+    before). The values are pinned to the old two-pass integrals at 1e-14 (the TaskManager's own
+    run-to-run noise is 4.4e-16), a lossless region is exactly 0 and the PML is excluded."""
+    import re as _re
+    import ngsolve as ng
+    from dynameta.optics import solver as S
+    geo, eps_cf, _opt = _fem_cell()
+    g = _synthetic_field(geo)
+    k0, Px, Py = 2.0 * np.pi / 1200.0, 400.0, 400.0
+    calls = []
+    real_integrate = ng.Integrate
+
+    def counting(*a, **k):
+        calls.append(k.get("region_wise", False))
+        return real_integrate(*a, **k)
+
+    monkeypatch.setattr(ng, "Integrate", counting)
+    A, per = S._absorption_diagnostics(geo.mesh, g, eps_cf, k0, 0.0, Px, Py,
+                                       roles=getattr(geo, "role_by_region", None))
+    assert calls == [True], calls                       # ONE pass (old code: 1 + n_regions passes)
+    monkeypatch.setattr(ng, "Integrate", real_integrate)
+    assert A == sum(per.values())                       # the additivity contract, now exact
+    assert not any(r.startswith("pml") for r in per)
+    # the old two-pass reference, inlined (same CF, same normalization)
+    loss = S._loss_density_cf(eps_cf, g)
+    names = [m for m in per]
+    union = complex(ng.Integrate(loss, geo.mesh,
+                                 definedon=geo.mesh.Materials("|".join(_re.escape(m) for m in names))))
+    assert A == pytest.approx(union.real * k0 / (Px * Py), rel=1e-14, abs=0.0)
+    for m in names:
+        ref = complex(ng.Integrate(loss, geo.mesh, definedon=geo.mesh.Materials(_re.escape(m)))).real
+        assert per[m] == pytest.approx(ref * k0 / (Px * Py), rel=1e-14, abs=1e-300), m
+        if geo.material_by_region[m] == "air":
+            assert per[m] == 0.0, m                     # Im(eps) = 0 contributes exactly nothing
+    assert any(per[m] > 0.0 for m in names if geo.material_by_region[m] == "gold")
+    # the two thin wrappers are views of the SAME single implementation
+    assert S._absorbed_fraction(geo.mesh, g, eps_cf, k0, 0.0, Px, Py) == A
+    assert S._per_region_absorption(geo.mesh, g, eps_cf, k0, 0.0, Px, Py) == per

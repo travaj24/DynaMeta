@@ -1142,24 +1142,20 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # The three diagnostics run under the TaskManager (0.12.0): their Integrate/Set calls were ~40% of
     # a small solve's wall time single-threaded, ~5x less threaded (not bitwise: ~1e-15 reductions).
     with ng.TaskManager():
+        # A_independent + the per-region absorbed-power map (driver D2) come from ONE region-wise
+        # integration of the loss density (audit S6-18, wave-7 2026-11-02 -- see
+        # _absorption_diagnostics): the map is the per-region split and A_independent its sum, so
+        # sum(per_region_absorption.values()) == A_independent now holds EXACTLY.
         try:
-            A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                                geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                                roles=getattr(geo, "role_by_region", None))
-                             if diagnostics else None)
+            A_independent, per_region_A = (
+                _absorption_diagnostics(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                        geo.period_x_nm, geo.period_y_nm, n_super=n_super,
+                                        roles=getattr(geo, "role_by_region", None))
+                if diagnostics else (None, None))
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("independent absorption diagnostic unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
-            A_independent = None
-        # Per-region absorbed-power map (driver D2): the same loss integral split by material region
-        # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
-        try:
-            per_region_A = (None if A_independent is None else
-                            _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                                   geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                                   roles=getattr(geo, "role_by_region", None)))
-        except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("per-region absorption map unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
-            per_region_A = None
+            warnings.warn("independent absorption diagnostic (and per-region absorption map) "
+                          "unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
+            A_independent, per_region_A = None, None
         # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
         # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
         # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
@@ -1681,18 +1677,36 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med, standoff_
     xs = (np.arange(nx_g) + 0.5) * (Px / nx_g)
     ys = (np.arange(ny_g) + 0.5) * (Py / ny_g)
     p0, p1, p2 = proj
+    # audit S6-17 (wave-7, 2026-11-02): the probe grid is located and evaluated in ONE batched
+    # NGSolve call per z-plane (mesh(x_arr, y_arr, z_arr) -> a MeshPoint array; field(points) ->
+    # (n, 3)) instead of n_x * n_y Python-level mesh(x, y, z) + field() round trips. A point outside
+    # the mesh comes back with element nr == -1 and is dropped, exactly as the per-point
+    # try/except dropped it. BIT-IDENTICAL to the old loop (np.array_equal on every probe vector,
+    # gfu and E_bg + gfu fields, real and complex proj, zero and non-zero kx/ky, 6x6 and 24x24
+    # grids): the projection and the Bloch demodulation are written as explicit REAL arithmetic
+    # with the same operand order as the scalar complex products they replace (Python's complex
+    # multiply, then numpy's scalar complex multiply), because numpy's VECTOR complex multiply is
+    # not bitwise equal to its scalar one (measured 1.7e-16 relative). Measured on the
+    # tests/test_fem_speed.py-class cell: 3.1-4.3x per call (24x24: 67 -> 16 ms per 7-plane band).
+    # Any batch failure falls back to the old point-by-point loop for that plane.
+    XX, YY = np.meshgrid(xs, ys, indexing="ij")              # x outer, y inner == the old loop order
+    xf, yf = XX.ravel(), YY.ravel()
+    ph = np.exp(-1j * (kx * xf + ky * yf))                   # == the per-point scalar np.exp (bitwise)
     out = []
     for zv in z_probes:
-        vals = []
-        for xv in xs:
-            for yv in ys:
-                try:
-                    E = field(mesh(float(xv), float(yv), float(zv)))
-                    proj_val = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
-                    vals.append(proj_val * np.exp(-1j * (kx * xv + ky * yv)))
-                except Exception:
-                    pass
-        if not vals:
+        try:
+            vals = _cell_plane_batched(mesh, field, xf, yf, float(zv), (p0, p1, p2), ph)
+        except Exception:                                    # noqa: BLE001 -- per-point fallback
+            vals = []
+            for xv in xs:
+                for yv in ys:
+                    try:
+                        E = field(mesh(float(xv), float(yv), float(zv)))
+                        proj_val = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
+                        vals.append(proj_val * np.exp(-1j * (kx * xv + ky * yv)))
+                    except Exception:
+                        pass
+        if len(vals) == 0:
             # A whole z-plane with zero valid samples means the probe points all fell
             # outside the mesh (a geometry/units contract break) -- fail loudly instead
             # of feeding a silent 0+0j into the least-squares R/T fit (audit OPT-7/F6).
@@ -1702,6 +1716,44 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med, standoff_
                     float(zv)))
         out.append(complex(np.mean(vals)))
     return np.array(out)
+
+
+def _cell_plane_batched(mesh, field, xf, yf, zv, proj, ph):
+    """One z-plane of _cell_average, batched (audit S6-17): returns the complex samples
+    (proj . E) * ph over the probe points that lie inside the mesh, in the old loop's order.
+
+    The arithmetic reproduces the scalar code bit-for-bit: a proj weight that is a Python/numpy
+    COMPLEX multiplies as (pr*er - pi*ei, pr*ei + pi*er) (Python's complex product); a REAL weight
+    as (p*er, p*ei) (equal to the complex form with a zero imaginary part up to the sign of a
+    zero); the three terms are summed left to right; the demodulation is numpy's scalar complex
+    product (sr*cr - si*ci, sr*ci + si*cr). Each step is a separate float ufunc, so nothing is
+    FMA-contracted the way numpy's vector complex multiply is."""
+    pts = mesh(xf, yf, np.full(xf.size, zv))
+    ok = pts["nr"] >= 0                                       # outside the mesh -> nr == -1
+    if not np.any(ok):
+        return np.empty(0, dtype=complex)
+    E = np.asarray(field(pts[ok]))
+    if E.ndim != 2 or E.shape[1] < 3:
+        raise ValueError("batched field evaluation returned shape {}".format(E.shape))
+    sr = si = None
+    for p, Ek in zip(proj, (E[:, 0], E[:, 1], E[:, 2])):
+        er, ei = Ek.real, Ek.imag
+        if isinstance(p, complex):
+            tr = p.real * er - p.imag * ei
+            ti = p.real * ei + p.imag * er
+        else:
+            tr = p * er
+            ti = p * ei
+        if sr is None:
+            sr, si = tr, ti
+        else:
+            sr = sr + tr
+            si = si + ti
+    cr, ci = ph[ok].real, ph[ok].imag
+    vals = np.empty(sr.size, dtype=complex)
+    vals.real = sr * cr - si * ci
+    vals.imag = sr * ci + si * cr
+    return vals
 
 
 def _lstsq_2wave(M, Es, *, where):
@@ -1830,75 +1882,85 @@ def _non_pml_regions(mesh, roles=None):
     return [m for m in mats if not m.startswith("pml_")]
 
 
-def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
-    """Independently measured absorbed fraction (audit OPT-2): the normalized
-    volumetric loss integral
-        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area),
-    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave.
-    audit C3-7: the incident power in a dense superstrate is ~ n_super cos(theta) area,
-    so the normalization carries Re(n_super) (it used to omit it, inflating A -- and the
-    D2 per-region deposition -- by exactly Re(n_super) for a dense encapsulant; vacuum
-    incidence, the only supported oblique case, is byte-identical). This
-    is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
-    catches energy/numerics errors that the R/T extraction alone cannot. The PML
-    materials are excluded -- their stretched-coordinate eps would corrupt the integral
-    (and a lossy substrate makes the bottom-PML contribution spurious). NOTE: a lossy
-    super/substrate BUFFER (between the structure and its PML) is still integrated, so A is
+def _loss_density_cf(eps_cf, E_tot):
+    """Absorbed-power density CF ~ Im(E^* . eps . E) -- Im(eps)|E|^2 for a scalar eps. Uses the
+    plain vector product a*b (the sum a_i b_i, NO conjugation) with an explicit Conj(E_tot), NOT
+    ng.InnerProduct(.,Conj(E_tot)): InnerProduct now conjugates its 2nd argument, and the code only
+    worked because NGSolve happens to detect the already-Conj arg and skip the extra conjugate (the
+    'c2 is already a Conjugate' notice). a*Conj(E) makes E^* . (.) explicit and version-robust."""
+    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
+        # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
+        # reduces to it for eps = eps_scalar * I)
+        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E
+        return (q - ng.Conj(q)) / 2j
+    im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j                  # Im(eps) as a real CF
+    return im_eps * (E_tot * ng.Conj(E_tot))                  # Im(eps) |E|^2
+
+
+def _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
+    """(A_independent, {region_name: absorbed fraction}) from ONE region-wise volume integral of
+    the loss density over the PHYSICAL (non-PML) domain; (None, None) when there is nothing to
+    integrate. A_independent is the independently measured absorbed fraction (audit OPT-2):
+
+        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area)
+
+    for a unit-amplitude incident plane wave, and the map (driver D2) is the same integral
+    restricted to each material region. audit C3-7: the incident power in a dense superstrate is
+    ~ n_super cos(theta) area, so the normalization carries Re(n_super) (it used to omit it,
+    inflating A -- and the D2 per-region deposition -- by exactly Re(n_super) for a dense
+    encapsulant; vacuum incidence, the only supported oblique case, is byte-identical). This is a
+    genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T catches
+    energy/numerics errors that the R/T extraction alone cannot. The PML materials are excluded --
+    their stretched-coordinate eps would corrupt the integral (and a lossy substrate makes the
+    bottom-PML contribution spurious). A region with Im(eps) = 0 contributes exactly 0. NOTE: a
+    lossy super/substrate BUFFER (between the structure and its PML) is still integrated, so A is
     a clean measurement only for LOSSLESS cladding media (the validated cases); for a lossy
-    cladding treat A as qualitative (audit OS-4)."""
+    cladding treat A as qualitative (audit OS-4).
+
+    audit S6-18 (wave-7, 2026-11-02): solve_fem's default diagnostics used to integrate this
+    IDENTICAL integrand twice -- once over the union of the non-PML regions (_absorbed_fraction)
+    and again region by region (_per_region_absorption, one Integrate per region): 1 + n_regions
+    Integrate calls, two full sweeps of the physical elements. It is now ONE
+    Integrate(..., region_wise=True) pass, the per-domain sums aggregated by region NAME (a name
+    may label several mesh domains, exactly as mesh.Materials(name) selected them), and
+    A_independent := sum(map.values()), so the sum-equals-A_independent additivity contract is
+    now EXACT (it held to ~1e-16 before). Accuracy-neutral at the TaskManager's own run-to-run
+    level: the old code was already not bitwise reproducible (two identical old runs differ by up
+    to 4.4e-16 relative in their outputs), and old -> new moves A_independent and every region
+    value by at most ~1e-15 relative (measured -- see the wave-7 row of S6-18 in
+    docs/audit/2026-07-17-exhaustive-audit.md)."""
     # Exclude PML regions only (see _non_pml_regions: role-routed, name-prefix fallback -- a
     # physical material like 'pmlayer' is NOT dropped, OS-3). re.escape each surviving name so a
     # regex-metacharacter material name (e.g. 'ito.n+') is matched literally rather than silently
     # missed by mesh.Materials' regex (OS-2).
     non_pml = _non_pml_regions(mesh, roles)
-    if not non_pml:
-        return None
-    defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
-    # Use the plain vector product a*b (the sum a_i b_i, NO conjugation) with an explicit Conj(E_tot),
-    # NOT ng.InnerProduct(.,Conj(E_tot)): InnerProduct now conjugates its 2nd argument, and the code
-    # only worked because NGSolve happens to detect the already-Conj arg and skip the extra conjugate
-    # (the "c2 is already a Conjugate" notice). a*Conj(E) makes E^* . (.) explicit and version-robust.
-    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
-        # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
-        # reduces to it for eps = eps_scalar * I)
-        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E
-        loss = (q - ng.Conj(q)) / 2j
-    else:
-        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j              # Im(eps) as a real CF
-        loss = im_eps * (E_tot * ng.Conj(E_tot))              # Im(eps) |E|^2
-    integ = ng.Integrate(loss, mesh, definedon=defon)
     area = float(Px) * float(Py)
-    if area <= 0:
-        return None
+    if not non_pml or area <= 0:
+        return None, None
+    defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
+    by_domain = ng.Integrate(_loss_density_cf(eps_cf, E_tot), mesh, definedon=defon,
+                             region_wise=True)               # one entry per mesh.GetMaterials() slot
+    raw = {m: 0.0 for m in non_pml}
+    for name, val in zip(mesh.GetMaterials(), by_domain):
+        if name in raw:
+            raw[name] += complex(val).real
     n_cos = max(complex(n_super).real * math.cos(theta), 1e-12)   # C3-7 incident-power factor
-    return float(complex(integ).real * k0 / (n_cos * area))
+    scale = k0 / (n_cos * area)
+    per_region = {m: float(raw[m] * scale) for m in non_pml}
+    return float(sum(per_region.values())), per_region
+
+
+def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
+    """A_independent alone -- see :func:`_absorption_diagnostics` (the single implementation)."""
+    return _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=n_super,
+                                   roles=roles)[0]
 
 
 def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
-    """Per-region absorbed-power map (driver D2): the _absorbed_fraction integrand evaluated
-    region by region -- IDENTICAL loss CF, IDENTICAL normalization, restricted to one material
-    domain at a time -- so sum(values) equals A_independent EXACTLY (domain additivity of the
-    integral), each value is the fraction of the incident power deposited in that region, and a
-    region with Im(eps) = 0 contributes exactly 0. Same caveats as _absorbed_fraction (clean
-    only for lossless cladding; PML regions excluded). Returns {region_name: fraction}."""
-    non_pml = _non_pml_regions(mesh, roles)
-    area = float(Px) * float(Py)
-    if not non_pml or area <= 0:
-        return None
-    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
-        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E (see _absorbed_fraction)
-        loss = (q - ng.Conj(q)) / 2j
-    else:
-        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j
-        loss = im_eps * (E_tot * ng.Conj(E_tot))
-    # audit C3-7: same Re(n_super) incident-power factor as _absorbed_fraction (the two must
-    # stay IDENTICAL for the sum-equals-A_independent additivity contract)
-    scale = k0 / (max(complex(n_super).real * math.cos(theta), 1e-12) * area)
-    out = {}
-    for m in non_pml:
-        integ = ng.Integrate(loss, mesh, definedon=mesh.Materials(re.escape(m)))
-        out[m] = float(complex(integ).real * scale)
-    return out
+    """The per-region absorbed-power map alone ({region_name: fraction}; sums to A_independent
+    exactly) -- see :func:`_absorption_diagnostics` (the single implementation)."""
+    return _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=n_super,
+                                   roles=roles)[1]
 
 
 def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):

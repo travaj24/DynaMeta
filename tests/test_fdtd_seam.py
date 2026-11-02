@@ -1046,3 +1046,66 @@ def test_d12_refusal_fires_on_the_JUMP_not_on_the_mere_presence_of_the_hook():
         solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=late, **band)
     with pytest.raises(NotImplementedError, match=r"4 -> 4\.5"):
         solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5, **band)
+
+
+def test_s5_20_sweep_entry_point_accepts_and_honours_what_the_per_wavelength_one_does(monkeypatch):
+    """audit S5-20 (wave-7, 2026-11-02). run_pipeline PREFERS the sweep-aware solver, yet it (a)
+    RAISED on a structured cell over lossless non-vacuum end media (a stale 'the rasterizer drops
+    the end-media pads' reason) that the per-wavelength solver solves, and (b) rasterized a
+    structured cell from the NOMINAL materials whatever the bias -- eps_band feeds only the
+    uniform dispersive fit -- while the per-wavelength path rasterizes this bias's eps. Both FAIL
+    on the old code. The rasterizer is spied (no march): what it is HANDED is the contract; the
+    painted pads themselves are gated by validation/fdtd_structured_nonvacuum.py (GATE A/B vs
+    TMM / grcwa on glass, and its sweep-path GATE C)."""
+    import dynameta.optics.fdtd_seam as fs
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry.specs import OpticalSpec
+
+    class _Stop(Exception):
+        pass
+
+    seen = []
+
+    def spy(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0):
+        seen.append(dict(lam=lambda_m, ebr=eps_by_region, ns=n_super, nb=n_sub))
+        raise _Stop
+
+    monkeypatch.setattr(fs, "make_structured_lateral", spy)
+    P = 220e-9
+    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, 60e-9), "air")])])
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=0.0)
+    bias = {"s0": EpsField(scalar=5.3 + 0j)}                     # the bias-modulated background
+    lams = np.array([1.25e-6, 1.35e-6])
+    # (reference) the per-wavelength path: glass substrate accepted, bias eps handed over
+    with pytest.raises(_Stop):
+        fs.make_fdtd_optical_solver(dim=3)(d, None, bias, 1.3e-6, 1.0 + 0j, 1.5 + 0j)
+    assert seen[-1]["ebr"] is bias and (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # (a) the sweep spectrum on the SAME end media reaches the rasterizer, pads included
+    with pytest.raises(_Stop):
+        fs.fdtd_sweep_spectrum(d, lambda_min_m=1.2e-6, lambda_max_m=1.4e-6, dim=3,
+                               n_super=1.0 + 0j, n_sub=1.5 + 0j)
+    assert (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # (b) run_pipeline's preferred entry point hands the rasterizer THIS bias's eps, sampled at
+    #     the band centre the structured cell is frozen at
+    sw = fs.make_fdtd_sweep_optical_solver(dim=3, resolution=16)
+    asked = []
+
+    def assemble(lam):
+        asked.append(lam)
+        return bias
+
+    with pytest.raises(_Stop):
+        sw.solve_sweep(d, None, assemble, lams, 1.0 + 0j, 1.5 + 0j)
+    lo, hi = lams.min() * (1.0 - sw.band_pad), lams.max() * (1.0 + sw.band_pad)
+    assert seen[-1]["ebr"] is bias, "the sweep path dropped the bias eps of a structured cell"
+    assert seen[-1]["lam"] == pytest.approx(0.5 * (lo + hi), rel=1e-15)
+    assert any(lam == pytest.approx(0.5 * (lo + hi), rel=1e-15) for lam in asked)
+    assert (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # an ABSORBING end medium is still refused by both, before any rasterization
+    n_before = len(seen)
+    with pytest.raises(NotImplementedError, match="LOSSLESS"):
+        fs.fdtd_sweep_spectrum(d, lambda_min_m=1.2e-6, lambda_max_m=1.4e-6, dim=3,
+                               n_sub=1.5 + 0.01j)
+    with pytest.raises(NotImplementedError, match="LOSSLESS"):
+        fs.make_fdtd_optical_solver(dim=3)(d, None, bias, 1.3e-6, 1.0 + 0j, 1.5 + 0.01j)
+    assert len(seen) == n_before

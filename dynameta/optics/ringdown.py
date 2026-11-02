@@ -52,6 +52,9 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 from dynameta.constants import C_LIGHT
+# audit V-17 leftover (wave-7, 2026-11-02): the four unreliable-result warns below adopt
+# UnreliableResultWarning, still a RuntimeWarning subclass, so pytest.warns(RuntimeWarning) holds.
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "Mode",
@@ -200,7 +203,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     API as ``omega_rad_s = 0`` with ``gamma_rad_s = nan``.  ``z`` is therefore cast to
     ``complex128`` before the log, and the self-conjugate Nyquist pole is reported ONCE (no
     residue doubling) rather than being dropped by the conjugate collapse.
-    Growing poles (``|z| > 1``) are dropped with a ``RuntimeWarning`` unless ``allow_gain=True``:
+    Growing poles (``|z| > 1``) are dropped with an ``UnreliableResultWarning`` (a
+    ``RuntimeWarning`` subclass) unless ``allow_gain=True``:
     they contradict the documented ``gamma > 0``, and the residue Vandermonde ``z**n`` overflows
     to ``inf`` once ``|z|**(N-1)`` passes the float64 range (for ``|z| = 1.5`` that is ``N ~
     1750`` -- the audit note's ``1.5**1200`` is actually 2.04e211, finite; the threshold is
@@ -301,7 +305,7 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
             "the residue Vandermonde on a long trace. Pass allow_gain=True to keep them (an "
             "amplifying medium / an unstable simulation), or shorten the fit window.".format(
                 int(np.count_nonzero(growing)), float(absz.max())),
-            RuntimeWarning, stacklevel=2)
+            UnreliableResultWarning, stacklevel=2)
         z = z[~growing]
         absz = absz[~growing]
         if z.size == 0:
@@ -788,7 +792,8 @@ class EtalonRingdown:
     ``refine_note`` is a debug string: empty when the NLS (VARPRO) refinement was accepted, and
     otherwise the reason the PENCIL SEED was returned instead (finding Q-2's safety gate --
     e.g. "refined RMS ... > seed RMS ...").  It ALSO carries an ``UNRELIABLE FIT: ...`` prefix
-    (alongside a ``RuntimeWarning``) whenever the returned modes fail the ABSOLUTE goodness-of-fit
+    (alongside an ``UnreliableResultWarning``, a ``RuntimeWarning`` subclass) whenever the
+    returned modes fail the ABSOLUTE goodness-of-fit
     tells in ``_fit_quality`` -- the refinement gate is only RELATIVE to its own seed, so a
     source-contaminated window used to come back with an empty note and a 73-93%-wrong Q.
     ``window`` is the (i0, i1) sample window that was cut out of the raw FDTD trace."""
@@ -853,7 +858,8 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       the remaining kwargs pass through to matrix_pencil.
 
     OPERATING ENVELOPE (fix-verify W1 items 2 and 9). Two absolute checks run on the result and
-    each raises a ``RuntimeWarning`` AND annotates ``EtalonRingdown.refine_note``:
+    each raises an ``UnreliableResultWarning`` (a ``RuntimeWarning`` subclass) AND annotates
+    ``EtalonRingdown.refine_note``:
 
       * GOODNESS OF FIT -- ``_fit_quality``: reconstruction RMS vs the window's peak-to-peak, and
         summed |amplitude| vs the data peak. The refinement's own gate is RELATIVE (refit vs its
@@ -914,7 +920,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                 "start_frac=None (the data-driven window, which starts {:.0f} dB below the peak) "
                 "or a start_frac above {:.3f}.".format(
                     start_frac, i0, i_pk, i_pk / float(N), 50.0, i_pk / float(N)),
-                RuntimeWarning, stacklevel=2)
+                UnreliableResultWarning, stacklevel=2)
     tail = sig_full[i0:i1]
 
     # decimate to ~target_samples_per_period at the band center (keeps the pencil small + fast)
@@ -977,7 +983,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                  "or too short; (f0, Q) = ({:.4e} Hz, {:.4f}) is not trustworthy. Use "
                  "start_frac=None for the data-driven window.".format(f0, q))
         note = (note + " | " if note else "") + "UNRELIABLE FIT: " + "; ".join(bad)
-        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        warnings.warn(msg, UnreliableResultWarning, stacklevel=2)
 
     # ---- window-span scope guard (fix-verify W1 item 9) ------------------------------------
     if modes and np.isfinite(q) and t_used.size > 1:
@@ -1009,7 +1015,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                 "(nepers) of the dominant mode, under the ~{:g} below which the decay rate -- "
                 "hence Q = {:.4g} -- is weakly constrained (the fit interpolates a decay it barely "
                 "sees). {}".format(nepers, _MIN_WINDOW_NEPERS, q, why),
-                RuntimeWarning, stacklevel=2)
+                UnreliableResultWarning, stacklevel=2)
 
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
                           t_used=t_used, signal_used=tail_d, refine_note=note,

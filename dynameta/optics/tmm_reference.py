@@ -280,9 +280,17 @@ class TmmLayeredSolver:
         r, t = complex(res["r"]), complex(res["t"])
         R, T = float(res["R"]), float(res["T"])
         A = _check_energy_budget(R, T, where="TmmLayeredSolver")
+        # audit S5-21 (wave-7, 2026-11-02): A_independent used to be left None while the per-slab
+        # map was filled, breaking the OpticalResult contract sum(per_region_absorption) ==
+        # A_independent that every other producer (FEM, the Berreman/RCWA/PMM/BOR bridges) honours.
+        # The per-slab entries are tmm's in-layer Poynting-flux differences (absorp_in_each_layer),
+        # NOT the 1 - R - T closure, so their sum is a genuine second measure of A -- exactly the
+        # role A_independent plays elsewhere (measured |A - A_independent| ~1e-16 on lossy stacks).
+        pra = _per_layer_absorption(res)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=0.0, t=t, T=T, A=A,
-                             per_region_absorption=_per_layer_absorption(res))
+                             A_independent=float(sum(pra.values())),
+                             per_region_absorption=pra)
 
 
 def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None,

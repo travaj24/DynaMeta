@@ -26,8 +26,35 @@ def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, 
     Hz = np.zeros((nx, ny, nz), dtype=np.complex128)
     Jx = np.zeros((nx, ny, nz), dtype=np.complex128); Jy = np.zeros((nx, ny, nz), dtype=np.complex128)
     Jz = np.zeros((nx, ny, nz), dtype=np.complex128)
-    psi_Hx = np.zeros((nx, ny, nz), dtype=np.complex128); psi_Hy = np.zeros((nx, ny, nz), dtype=np.complex128)
-    psi_Ex = np.zeros((nx, ny, nz), dtype=np.complex128); psi_Ey = np.zeros((nx, ny, nz), dtype=np.complex128)
+    # audit S6-10 (wave-7, 2026-11-02): BANDED CPML memory. The four psi convolution grids were
+    # full (nx,ny,nz) but are identically +0.0 wherever the CPML c-coefficient is 0 (cpml_z sets
+    # c = 0 off the two npml slabs -- audit D-13; psi = b*(+0) + 0*d stays +0 for finite fields), so
+    # ~95% of them was dead memory (210 MB of complex128 at 64x64x800; 6.6 MB banded). zmap sends
+    # every z-plane with ce != 0 or ch != 0 to its own psi slot and EVERY c == 0 plane to ONE shared
+    # slot, which therefore stays +0+0j forever: the update arithmetic is the old code verbatim
+    # (only the z index of the psi storage changes). NOT bit-identical, though: under fastmath=True
+    # LLVM schedules / contracts the gathered loop differently, measured max |d probe| = 1.9e-16
+    # on |E| ~ 0.94 (two identical OLD compiles ARE bitwise equal, so this is the change) -- far
+    # inside the 1e-9 numba-vs-numpy contract (audit D-7) and gated against the numpy kernel at
+    # the same tolerance (tests/test_fdtd_backend_contracts.py::test_s6_10_numba_oblique_banded_cpml).
+    # Time: 64x64x800, 40 steps, 4 threads 2.78 -> 2.10-2.30 s (less memory traffic). The real
+    # normal-incidence _te3d_numba below was NOT banded: the same gather cost it 27 % (2.04 -> 2.59
+    # s, lost SIMD vectorization of the k loop) -- see the note there. Caveat: with non-finite
+    # fields (an already-diverged run) a NaN in the shared slot reaches every interior plane of
+    # that (i, j) column, where it used to stay in one plane.
+    zmap = np.empty(nz, dtype=np.int64)
+    nband = 0
+    for k in range(nz):
+        if ce[k] != 0.0 or ch[k] != 0.0:
+            zmap[k] = nband
+            nband += 1
+    for k in range(nz):
+        if not (ce[k] != 0.0 or ch[k] != 0.0):
+            zmap[k] = nband                               # the shared, forever-zero interior slot
+    psi_Hx = np.zeros((nx, ny, nband + 1), dtype=np.complex128)
+    psi_Hy = np.zeros((nx, ny, nband + 1), dtype=np.complex128)
+    psi_Ex = np.zeros((nx, ny, nband + 1), dtype=np.complex128)
+    psi_Ey = np.zeros((nx, ny, nband + 1), dtype=np.complex128)
     exL = np.empty((nsteps, nx, ny), dtype=np.complex128); eyL = np.empty((nsteps, nx, ny), dtype=np.complex128)
     exR = np.empty((nsteps, nx, ny), dtype=np.complex128); eyR = np.empty((nsteps, nx, ny), dtype=np.complex128)
     cmu = dt / MU0; e0dt = EPS0 / dt
@@ -39,18 +66,19 @@ def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, 
                 jp1 = j + 1 if j + 1 < ny else 0
                 for k in range(nz):
                     dyfEz = (Ez[i, jp1, k] - Ez[i, j, k]) / dy + iky * Ez[i, j, k]
+                    zk = zmap[k]
                     sEy = c0
                     if k < nz - 1:
                         dEy_dz = (Ey[i, j, k + 1] - Ey[i, j, k]) / dz
-                        psi_Hx[i, j, k] = bh[k] * psi_Hx[i, j, k] + ch[k] * dEy_dz
-                        sEy = dEy_dz / kh[k] + psi_Hx[i, j, k]
+                        psi_Hx[i, j, zk] = bh[k] * psi_Hx[i, j, zk] + ch[k] * dEy_dz
+                        sEy = dEy_dz / kh[k] + psi_Hx[i, j, zk]
                     Hx[i, j, k] -= cmu * (dyfEz - sEy)
                     dxfEz = (Ez[ip1, j, k] - Ez[i, j, k]) / dx + ikx * Ez[i, j, k]
                     sEx = c0
                     if k < nz - 1:
                         dEx_dz = (Ex[i, j, k + 1] - Ex[i, j, k]) / dz
-                        psi_Hy[i, j, k] = bh[k] * psi_Hy[i, j, k] + ch[k] * dEx_dz
-                        sEx = dEx_dz / kh[k] + psi_Hy[i, j, k]
+                        psi_Hy[i, j, zk] = bh[k] * psi_Hy[i, j, zk] + ch[k] * dEx_dz
+                        sEx = dEx_dz / kh[k] + psi_Hy[i, j, zk]
                     Hy[i, j, k] -= cmu * (sEx - dxfEz)
                     dxfEy = (Ey[ip1, j, k] - Ey[i, j, k]) / dx + ikx * Ey[i, j, k]
                     dyfEx = (Ex[i, jp1, k] - Ex[i, j, k]) / dy + iky * Ex[i, j, k]
@@ -63,12 +91,13 @@ def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, 
                     aJ = (1.0 - gam[i, j, k] * dt / 2.0) / (1.0 + gam[i, j, k] * dt / 2.0)
                     bJ = (EPS0 * wp[i, j, k] ** 2 * dt / 2.0) / (1.0 + gam[i, j, k] * dt / 2.0)
                     denom = e0dt * eps_inf[i, j, k] + bJ / 2.0
+                    zk = zmap[k]
                     dybHz = (Hz[i, j, k] - Hz[i, jm1, k]) / dy + iky * Hz[i, j, k]
                     sHy = c0
                     if k >= 1:
                         dHy_dz = (Hy[i, j, k] - Hy[i, j, k - 1]) / dz
-                        psi_Ex[i, j, k] = be[k] * psi_Ex[i, j, k] + ce[k] * dHy_dz
-                        sHy = dHy_dz / ke[k] + psi_Ex[i, j, k]
+                        psi_Ex[i, j, zk] = be[k] * psi_Ex[i, j, zk] + ce[k] * dHy_dz
+                        sHy = dHy_dz / ke[k] + psi_Ex[i, j, zk]
                     curlx = dybHz - sHy
                     exo = Ex[i, j, k]
                     exn = (e0dt * eps_inf[i, j, k] * exo + curlx - 0.5 * (1.0 + aJ) * Jx[i, j, k] - 0.5 * bJ * exo) / denom
@@ -77,8 +106,8 @@ def _run_3d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dy, dz, 
                     sHx = c0
                     if k >= 1:
                         dHx_dz = (Hx[i, j, k] - Hx[i, j, k - 1]) / dz
-                        psi_Ey[i, j, k] = be[k] * psi_Ey[i, j, k] + ce[k] * dHx_dz
-                        sHx = dHx_dz / ke[k] + psi_Ey[i, j, k]
+                        psi_Ey[i, j, zk] = be[k] * psi_Ey[i, j, zk] + ce[k] * dHx_dz
+                        sHx = dHx_dz / ke[k] + psi_Ey[i, j, zk]
                     curly = sHx - dxbHz
                     eyo = Ey[i, j, k]
                     eyn = (e0dt * eps_inf[i, j, k] * eyo + curly - 0.5 * (1.0 + aJ) * Jy[i, j, k] - 0.5 * bJ * eyo) / denom
@@ -123,6 +152,12 @@ def _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
     nlz = nz if has_lor else 1
     PLx = np.zeros((nlx, nly, nlz)); PLy = np.zeros((nlx, nly, nlz)); PLz = np.zeros((nlx, nly, nlz))
     PLpx = np.zeros((nlx, nly, nlz)); PLpy = np.zeros((nlx, nly, nlz)); PLpz = np.zeros((nlx, nly, nlz))
+    # audit S6-10 (wave-7, 2026-11-02) DEFERRED here: these four psi grids are +0.0 off the npml
+    # slabs (~100 MB dead at 64x64x800), but the banded storage that _run_3d_oblique_numba above
+    # now uses (one psi slot per c != 0 plane + a shared zero slot, indexed by zmap[k]) MEASURED
+    # +27 % on this kernel (2.04 -> 2.59 s, 64x64x800 x 60 steps, 4 threads): the gathered index
+    # defeats LLVM's SIMD vectorization of the contiguous k loop. A split-k-loop rewrite (PML-lo /
+    # interior / PML-hi bodies) would keep both, at the cost of triplicating the H/E bodies.
     psi_Hx = np.zeros((nx, ny, nz)); psi_Hy = np.zeros((nx, ny, nz))
     psi_Ex = np.zeros((nx, ny, nz)); psi_Ey = np.zeros((nx, ny, nz))
     sh = (nsteps, nx, ny)
