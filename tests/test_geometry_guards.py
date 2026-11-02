@@ -8,7 +8,9 @@ design_to_fdtd_layers and the 2-D FDTD solver ALL ran and returned R/T bit-ident
 via-free design; LayeredDevsimBuilder's region plan and Stacked3DSpec.from_design came back via-free
 too. Only LayeredOpticalBuilder refused (audit F-14). Every one of them now raises
 UnsupportedGeometryError (a NotImplementedError) through dynameta.geometry.guards, and the same for a
-tapered inclusion (no backend builds tapers yet; the PMM2D add_tapered_pillar mapping is a follow-on).
+tapered inclusion -- except the PMM2D PURE engine, which since 2026-11-02 (workstream B3) BUILDS a
+tapered Rectangle pillar via lumenairy's add_tapered_pillar (tests/test_lumenairy_pmm2d_taper_wrap.py);
+its hybrid engine keeps refusing (the 'pmm2d_hybrid' row below).
 
 BYTE-IDENTITY: a plain (untapered, feature-free) design is unchanged -- the cache key, the TMM and
 RCWA-bridge R/T/phase and the FEM builder's mesh were measured equal (repr) before/after the change;
@@ -282,6 +284,8 @@ def _backends():
         out += [("rcwa", mk(lb.make_lumenairy_rcwa_solver, n_orders=3)),
                 ("pmm", mk(lb.make_lumenairy_pmm_solver, degree=6, n_orders=5)),
                 ("pmm2d", mk(lb.make_lumenairy_pmm2d_solver, n_modes=4)),
+                ("pmm2d_hybrid", mk(lb.make_lumenairy_pmm2d_solver, engine="hybrid", degree=5,
+                                    n_orders=3)),
                 ("berreman", mk(lb.make_lumenairy_berreman_solver)),
                 ("emt_screen", mk(lb.make_lumenairy_emt_screen_solver)),
                 ("homogenize_lamellar_layers", lambda d: lb.homogenize_lamellar_layers(d, LAM))]
@@ -297,6 +301,14 @@ def _backends():
 @pytest.mark.parametrize("name,fn", _backends(), ids=[b[0] for b in _backends()])
 def test_backend_refuses_unsupported_geometry(name, fn, kind):
     _, d, pat = next(b for b in _bad_designs() if b[0] == kind)
+    if name == "pmm2d" and kind == "taper":
+        # the PMM2D PURE engine BUILDS this tapered Rectangle (2026-11-02, workstream B3: lumenairy
+        # add_tapered_pillar, gated in tests/test_lumenairy_pmm2d_taper_wrap.py) -- assert it is
+        # translated, not refused (build only: the 8-slice solve is the dedicated test's job)
+        from dynameta.optics.lumenairy_bridge import design_to_pmm2d_stack
+        _, names = design_to_pmm2d_stack(d, LAM, n_modes=4)
+        assert names == ["pil"] * 8 + ["film"]
+        return
     with pytest.raises(UnsupportedGeometryError, match=pat):
         _call(lambda: fn(d))
 
@@ -377,8 +389,11 @@ def test_plain_design_results_unchanged_tmm():
 def test_plain_design_results_unchanged_rcwa_bridge():
     from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
     r = make_lumenairy_rcwa_solver(n_orders=5)(_pillar(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
-    assert (r.R, r.T, r.phase_deg) == pytest.approx(
-        (0.1910304737839642, 0.7791097782748155, -123.94232228780875), abs=1e-12)
+    assert (r.R, r.T) == pytest.approx((0.1910304737839642, 0.7791097782748155), abs=1e-12)
+    # the phase is in DEGREES: one shared abs=1e-12 bounded it at 1.7e-14 rad, below the BLAS
+    # reduction-order spread (capping BLAS at 2 threads moves it 1.7e-11 deg = 3e-13 rad,
+    # measured 2026-11-02, R/T unmoved at 1e-12) -- a units mismatch in the pin, not a drift
+    assert r.phase_deg == pytest.approx(-123.94232228780875, abs=1e-9)
 
 
 @needs_ng

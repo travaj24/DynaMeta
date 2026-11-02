@@ -19,7 +19,9 @@ API:
   require_supported_geometry(design_or_stack, backend, *, features=False, taper=False)
       raise UnsupportedGeometryError (a NotImplementedError) naming the backend and the offending
       features / tapered inclusions; features=True / taper=True declare that the backend DOES
-      implement that field (none does yet -- the PMM2D add_tapered_pillar mapping is a follow-on).
+      implement that field (taper=True: only the PMM2D bridge's PURE engine, which maps ONE tapered
+      Rectangle per layer onto lumenairy's add_tapered_pillar staircase -- 2026-11-02, workstream B3;
+      every other backend, and the hybrid engine, still refuses).
   require_untapered_layer(layer, backend)
       the same taper refusal for LAYER-level helpers (rasterizers, per-layer EMT) that never see
       the Design.
