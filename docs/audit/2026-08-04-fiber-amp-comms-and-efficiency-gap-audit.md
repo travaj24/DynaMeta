@@ -993,6 +993,23 @@ constructive follow-ups rather than as findings:
   mentioning the flag in the `simulate_transient` return annotation -- would make the failure mode
   harder to miss.
 
+**Disposition of the two follow-ups (2026-11-02, wave-6).** Both implemented. (1) The overflow was
+reproduced, and it is wider than the gain side: on the 2 W Yb reference stretched to 8 / 12 m
+(n_nodes 81, marched from its own steady state) the REABSORBING ASE bins reach INT g dz = -900 /
+-1397 nepers, `exp(-G)` overflows, `exp(G) * inf` is NaN, and every step went non-finite -- so A-7
+tripped on IEEE-754 although the physical margins were fine (ASE/launched 0.006, ASE gain integral
+4.8). Rows with max|G| <= 700 keep the closed form (byte-identical; checked on random problems);
+other rows take the shifted recurrence P_{j+1} = e^{dG_j} P_j + dz_j/2 (s_j e^{dG_j} + s_{j+1}),
+algebraically the same trapezoid, which only exponentiates one step's gain. The same 12 m march is
+now finite and `quasi_static_valid`. (2) `TransientResult.assert_valid()` raises RuntimeError
+naming the failed criteria when `meta['march_valid']` is False or a returned array is non-finite
+(a -inf dB gain on a channel the drive switched off is allowed), and returns the result otherwise;
+the `simulate_transient` VALIDITY notes point to it. Gates:
+`tests/test_audit_2026_08_04_fiber_amp.py::TestVerificationFollowups` (three tests; all fail on the
+old module). Observation, not changed: on the same Yb reference the quasi-static march does NOT
+hold the steady state over 5 ms even on the unchanged closed-form path (4 m: 19.33 -> 18.89 dB vs
+`solve()` 19.29; 6 m: 19.30 -> 17.90 vs 19.24), unlike the 0.003 dB measured above on the EDFA.
+
 ## What was NOT found
 
 Stated explicitly, because the absence is the more important result: no error in the Giles

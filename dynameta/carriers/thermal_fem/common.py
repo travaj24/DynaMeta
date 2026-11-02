@@ -115,8 +115,23 @@ def _per_material_cf(mesh, by_name: Dict[str, float], what: str):
 def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3,
                         maxh_m, order) -> Tuple:
     """Build the shared mesh + H1 space + stiffness BilinearForm a + load LinearForm f (UNASSEMBLED)
-    used by BOTH the steady and transient solvers. Returns (mesh, fes, u, v, a, f, k_cf). Factoring
-    this out keeps solve_thermal_fem byte-identical -- it assembles the same a, f it always did."""
+    used by BOTH the steady and transient solvers, plus the SINK LIFT. Returns
+    (mesh, fes, u, v, a, f, k_cf, T_lift). Factoring this out keeps solve_thermal_fem byte-identical
+    -- it assembles the same a, f it always did.
+
+    T_lift is a GridFunction holding T_sink_K on the Dirichlet sink face ("bot") and 0 on every free
+    dof: the Dirichlet data of the problem. A steady solve is
+        T = GridFunction(fes); T.vec.data = T_lift.vec; T.vec.data += inv * (f.vec - a.mat * T.vec)
+    AUDIT X-17 (2026-11-02): T_sink_K used to be accepted and IGNORED (a and f do not depend on
+    it; measured: the returned forms were identical for T_sink_K = 300 and 1000), and each of the
+    four callers re-applied the sink by hand -- a caller that started from a zero GridFunction
+    solved with T_sink = 0 K (measured on a 200 nm / 100 nm stack at 1e8 W/m^2: mean layer T 7.1 /
+    14.3 K instead of 307.1 / 314.3 K). The lift now comes FROM T_sink_K, and every in-package
+    caller takes its sink values from it. T_sink_K must be finite and > 0 (kelvin)."""
+    T_sink = float(T_sink_K)
+    if not (np.isfinite(T_sink) and T_sink > 0.0):
+        raise ValueError("build_thermal_forms: T_sink_K must be a finite temperature > 0 K, got "
+                         "{!r} (audit X-17)".format(T_sink_K))
     mesh = _build_layered_mesh(layers, period_x_m, period_y_m, maxh_m)
 
     k_by = {L.name: L.k_thermal for L in layers}
@@ -131,7 +146,9 @@ def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, jou
     a += k_cf * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
     add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
-    return mesh, fes, u, v, a, f, k_cf
+    T_lift = ng.GridFunction(fes)
+    T_lift.Set(ng.CoefficientFunction(T_sink), definedon=mesh.Boundaries("bot"))
+    return mesh, fes, u, v, a, f, k_cf, T_lift
 
 
 _build_thermal_forms = build_thermal_forms   # DEPRECATED alias of the canonical public name (X-11)

@@ -837,9 +837,28 @@ class UniformTimeVaryingResult:
     incident_right: np.ndarray      # = transmitted (alias so the diagnostic's default reference works)
     i_pL: int
     i_pR: int
-    energy_t: np.ndarray            # total field energy vs step (0.5 eps0 eps Ex^2 + 0.5 mu0 Hy^2)
+    energy_t: np.ndarray            # total field energy at t_s + dt/2 (the leapfrog invariant
+                                    # 0.5 eps0 eps E^n.E^{n+1} + 0.5 mu0 |H^{n+1/2}|^2; audit D-17)
     k_rad_m: float                  # (conserved) spatial carrier wavenumber
     w_init_rad_s: float             # initial temporal carrier c*k/n_init
+
+
+def _check_uniform_index(n_val: float, S_vac: float, t_s: float) -> None:
+    """Audit D-17 (2026-11-02): the uniform march's 1-D Yee update is stable iff the Courant
+    number IN THE MEDIUM, S_vac / n = c dt / (n dz), is <= 1, i.e. n >= S_vac (= the `courant`
+    argument). The old "stable for any n>=1" comment was true but unchecked, and index_of_t may
+    legitimately go BELOW 1 -- the ENZ use case. Measured at courant 0.5 (n 1 -> n_low at 5
+    periods): n_low = 0.6 and 0.5 (S = 0.83, 1.0) march finitely, n_low = 0.45 and 0.3 (S = 1.11,
+    1.67) returned all-NaN fields and energy with no error. Raise instead, naming the fix."""
+    if not (np.isfinite(n_val) and n_val > 0.0):
+        raise ValueError("run_uniform_time_boundary: index_of_t returned n = {!r} at t = {:.4e} s; "
+                         "the uniform march needs a finite n > 0 (audit D-17).".format(n_val, t_s))
+    if S_vac / n_val > 1.0 + 1e-12:
+        raise ValueError(
+            "run_uniform_time_boundary: n = {:.6g} at t = {:.4e} s makes the in-medium Courant "
+            "number courant/n = {:.4g} > 1, so the Yee march is UNSTABLE (it returned NaN fields "
+            "silently before audit D-17). n < 1 (ENZ) is supported down to n = courant: pass "
+            "courant <= {:.6g}.".format(n_val, t_s, S_vac / n_val, n_val))
 
 
 def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR, n_update):
@@ -854,10 +873,12 @@ def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR
     eL = np.empty(nsteps); eR = np.empty(nsteps)
     energy = np.empty(nsteps); ntraj = np.empty(nsteps)
     curl = np.zeros(N)
+    S_max = c * dt / dz                                   # Courant number IN VACUUM
     for n in range(nsteps):
         if (n % n_update) == 0:
             new_n = float(index_of_t(tgrid[n]))
             if new_n != cur_n:
+                _check_uniform_index(new_n, S_max, tgrid[n])   # audit D-17: ENZ (n < 1) is legal
                 Ex *= (cur_n ** 2) / (new_n ** 2)            # D-preserving temporal boundary
                 cur_n = new_n; eps = cur_n ** 2
                 mur = (c / cur_n * dt - dz) / (c / cur_n * dt + dz)
@@ -869,9 +890,17 @@ def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR
         Enew = Ex + (dt / (EPS0 * eps)) * curl              # non-dispersive: eps0 eps dE/dt = curl H
         Enew[0] = Ex_oldL1 + mur * (Enew[1] - Ex_oldL0)
         Enew[-1] = Ex_oldR1 + mur * (Enew[-2] - Ex_oldR0)
+        # audit D-17 (2026-11-02): the energy is the leapfrog's own discrete invariant, centred on
+        # t_{n+1/2} where Hy lives: W = 1/2 mu0 |H^{n+1/2}|^2 + 1/2 eps0 eps E^n . E^{n+1}. It was
+        # 1/2 eps0 eps |E^{n+1}|^2 + 1/2 mu0 |H^{n+1/2}|^2, mixing two time levels -- an O(w dt)
+        # 2w ripple wherever the field has a standing-wave part (after a time reflection). The
+        # product form is exactly conserved by the interior Yee update (it equals the time-centred
+        # |E|^2 to O(dt^2)), so what remains in energy_t is the physics: the index change and what
+        # leaks through the Mur walls. Use the PRE-update E (already D-rescaled for this step).
+        energy[n] = (0.5 * EPS0 * eps * float(np.dot(Ex, Enew))
+                     + 0.5 * MU0 * float(np.dot(Hy, Hy)))
         Ex = Enew
         eL[n] = Ex[i_pL]; eR[n] = Ex[i_pR]
-        energy[n] = 0.5 * EPS0 * eps * float(np.sum(Ex ** 2)) + 0.5 * MU0 * float(np.sum(Hy ** 2))
     return Ex, Hy, eL, eR, energy, ntraj
 
 
@@ -898,7 +927,10 @@ def run_uniform_time_boundary(*, index_of_t, n_init: float, lambda_med_m: float,
     w_init = C_LIGHT * k / n0
     dz = lambda_med_m / cells_per_wavelength
     courant = courant_guard("run_uniform_time_boundary", courant)   # audit D-11 (the 6th copy)
-    dt = courant * dz / C_LIGHT                            # stable for any n>=1 (fastest speed <= c)
+    # stable iff n(t) >= courant at EVERY step (audit D-17): checked here for n_init and in the
+    # march for every new n (the old "stable for any n>=1" comment was never enforced)
+    dt = courant * dz / C_LIGHT
+    _check_uniform_index(n0, courant, 0.0)
     N = int(round(domain_wavelengths * cells_per_wavelength)) + 1
     z = np.arange(N) * dz
     z_c = 0.5 * (N - 1) * dz                               # pulse center: room for both daughters
