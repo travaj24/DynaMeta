@@ -1,6 +1,11 @@
 """
 Single source of the SI physical constants used across the library (CODATA 2018).
 
+CODATA 2022 (audit R-19, noted 2026-11-02 so a refresh is DELIBERATE): Q_E, KB, H_PLANCK, HBAR and
+C_LIGHT are exact/unchanged; EPS0 moves to 8.8541878188e-12 (+6.8e-10 rel), M_E to 9.1093837139e-31
+(+1.4e-9) and GAMMA_E_RAD_ST to 1.76085962784e11 (-1.2e-9). Any golden pinned tighter than ~1e-9
+that touches EPS0 / MU0 / M_E / GAMMA_E_RAD_ST must be re-recorded with such a refresh.
+
 The carrier (DEVSIM) and optical (NGSolve/Drude) sides previously re-declared these
 independently under inconsistent names (Q_E / Q / _Q_E for the elementary charge, plus a
 function-local EPS0 in physics_drift_diffusion), which risked a silent drift between the two
@@ -22,9 +27,12 @@ C_LIGHT = 2.99792458e8        # speed of light in vacuum, m/s
 MU0     = 1.0 / (EPS0 * C_LIGHT ** 2)   # vacuum permeability, H/m (= 1/(eps0 c^2); the FDTD modules used to re-derive this locally)
 T_REF   = 300.0               # reference temperature, K
 V_T     = KB * T_REF / Q_E    # thermal voltage at T_REF, V
-KB_EV_K = 8.617333262e-5      # Boltzmann constant, eV/K (CODATA-rounded literal, NOT computed as
-                              # KB/Q_E -- the quotient differs at ~1.5e-11 rel and downstream
-                              # Arrhenius pins are tighter; was re-declared in 8 reliability modules)
+KB_EV_K = 8.617333262e-5      # Boltzmann constant, eV/K. KB and Q_E are both EXACT in the 2019 SI,
+                              # so KB/Q_E = 8.617333262145179e-5 IS the exact value and this
+                              # literal is CODATA's 10-digit TRUNCATION of it (1.68e-11 rel low).
+                              # Kept as the literal ONLY for golden stability: downstream Arrhenius
+                              # pins were recorded with it (audit R-18 -- the old comment had the
+                              # rationale backwards). Was re-declared in 8 reliability modules.
 
 # Library-wide field time convention (Drude Im(eps) sign, NGSolve PML, FDTD ADEs). A string,
 # not physics -- lives here because this is the only no-import leaf every layer can reach

@@ -372,3 +372,10 @@ def test_extra_fields_2d_grid_lifts_not_transposes():
     assert ramp_x[-1] - ramp_x[0] > 0.05, "the T ramp must live on the x axis"
     assert np.allclose(vzyx[0, :, 0], vzyx[0, 0, 0]), "extras must be y-uniform"
     assert np.allclose(vzyx[0], vzyx[-1]), "v-uniform T stays z-uniform"
+
+
+def test_r30_identity_lift_error_names_the_spec_knob_and_the_dimension():
+    """audit R-30: lift='identity' on a 2-D carrier field raised 'IdentityLift expects a 3D carrier
+    array' -- naming neither OpticalSpec.lift nor the 2-D/3-D mismatch that caused it."""
+    with pytest.raises(ValueError, match=r"OpticalSpec\.lift='identity'.*2-D array.*lift='auto'"):
+        IdentityLift().apply(np.ones((4, 5)), np.linspace(0, 1, 4), np.linspace(0, 1, 5), n_bg=1.0)

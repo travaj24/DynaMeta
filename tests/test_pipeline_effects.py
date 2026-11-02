@@ -227,3 +227,22 @@ def test_nondispersive_end_media_keeps_sweep_fast_path():
     _run_sweep(d, rec)
     assert len(rec["sweep_nsub"]) == 1 and rec["per_call"] == []    # fast path used: ONE solve per bias
     assert abs(rec["sweep_nsub"][0] - 2.0) < 1e-12                  # n_sub = sqrt(4) = 2
+
+
+def test_r27_on_error_is_validated_before_any_carrier_solve():
+    """audit R-27: a bad on_error was rejected only after every carrier bias solve and the optical
+    mesh build -- on a real device, minutes of DEVSIM before a typo surfaced."""
+    calls = []
+
+    class _Counting(_StubCarrier):
+        def solve(self, bp):
+            calls.append(bp.label)
+            return super().solve(bp)
+
+    sweep = Sweep(bias_points=[BiasPoint(label="b0", voltages={"gate": 0.0})],
+                  wavelengths_nm=[LAM_NM])
+    with pytest.raises(ValueError, match="on_error"):
+        run_pipeline(_design(), sweep, verbose=False, carrier_solver=_Counting(),
+                     optical_builder=_StubBuilder(), optical_solver=_capturing_solver([]),
+                     on_error="skp")
+    assert calls == []

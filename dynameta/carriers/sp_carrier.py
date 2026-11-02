@@ -182,6 +182,7 @@ class SchrodingerPoissonCarrier:
         r_lo, r_hi = residual(lo), residual(hi)   # r_lo = -Vg < 0 (flat-band baseline -> N_exc(0)=0)
         grow = 0
         while r_lo * r_hi > 0.0 and grow < 6:      # depletion root lies beyond psi=Vg: expand bracket
+            lo, r_lo = hi, r_hi                     # the old top has r_lo's sign: the root is above it
             hi *= 2.0
             r_hi = residual(hi)
             grow += 1
@@ -191,7 +192,12 @@ class SchrodingerPoissonCarrier:
                 "Vg={:.3g} V. The oxide series-cap map is calibrated for accumulation; a depletion "
                 "bias on a degenerate film may not converge, so the surface potential (hence the "
                 "returned density) may be unreliable.".format(vg), stacklevel=2)
-        for _ in range(8):                          # ~bracket/256 resolution
+        # Vg/256 resolution whatever the expansion. AUDIT C-18 (2026-11-02): this was a fixed 8
+        # halvings of [0, hi], i.e. "bracket/256" -- Vg/256 unexpanded but Vg/4 after the six
+        # doublings (hi = 64 Vg), so an expanded root came back up to Vg/8 off. With lo advanced
+        # past each doubling the bracket is [2^(g-1), 2^g] Vg (g >= 1 doublings) and takes g - 1
+        # extra halvings; a counted loop, so the unexpanded case stays exactly the old 8 solves.
+        for _ in range(8 + max(grow - 1, 0)):
             mid = 0.5 * (lo + hi)
             if residual(mid) < 0.0:
                 lo = mid
