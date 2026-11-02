@@ -362,7 +362,7 @@ class CalibrationReport:
         return self.gain_ok and self.nf_ok
 
 
-def calibration_report(amp, targets: dict = None, *, gain_tol_dB: float = 3.0) -> CalibrationReport:
+def calibration_report(amp, targets: Optional[dict] = None, *, gain_tol_dB: float = 3.0) -> CalibrationReport:
     """Run a (calibrated) amplifier at the datasheet operating point and compare gain + noise
     figure to the targets. amp must already carry the pump/signal/ASE plan; the signal channel
     nearest targets['signal_nm'] is used. Passes if the gain is within gain_tol_dB of the target

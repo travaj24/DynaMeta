@@ -111,8 +111,8 @@ def _fwhm(x, y) -> float:
 
 # ---- pulse builders ------------------------------------------------------------------------
 
-def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: float = None,
-                   lambda0_m: float = 1.03e-6, chirp: float = 0.0) -> Pulse:
+def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: Optional[float] = None,
+                   energy_J: Optional[float] = None, lambda0_m: float = 1.03e-6, chirp: float = 0.0) -> Pulse:
     """Transform-limited (or linearly-chirped) Gaussian pulse A = sqrt(P0) exp[-(1+i C)/2 (t/t0)^2].
     t0_s is the 1/e half-width (FWHM = 2 sqrt(ln2) t0). Give peak_power_W or energy_J (for a
     Gaussian, energy = P0 t0 sqrt(pi)). chirp C is the dimensionless linear chirp parameter."""
@@ -125,8 +125,8 @@ def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: fl
     return Pulse(t, env.astype(np.complex128), lambda0_m)
 
 
-def sech_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: float = None,
-               lambda0_m: float = 1.03e-6) -> Pulse:
+def sech_pulse(t_s, *, t0_s: float, peak_power_W: Optional[float] = None,
+               energy_J: Optional[float] = None, lambda0_m: float = 1.03e-6) -> Pulse:
     """Hyperbolic-secant pulse A = sqrt(P0) sech(t/t0) (the soliton shape). For a sech,
     energy = 2 P0 t0 and FWHM = 1.7627 t0."""
     t = np.asarray(t_s, float)
@@ -476,8 +476,8 @@ def _warn_fn_wrap(ratio: float) -> None:
 @dataclass
 class PropagationResult:
     output: Pulse
-    z_m: np.ndarray = None                 # stored slice positions (if store_slices)
-    field_zt: np.ndarray = None            # (n_slice, N) complex field along z
+    z_m: Optional[np.ndarray] = None       # stored slice positions (if store_slices)
+    field_zt: Optional[np.ndarray] = None  # (n_slice, N) complex field along z
     b_integral_rad: float = 0.0            # accumulated peak nonlinear phase gamma INT P_pk dz
     meta: dict = field(default_factory=dict)
 
