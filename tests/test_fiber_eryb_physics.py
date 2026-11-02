@@ -149,8 +149,13 @@ def test_defaults_reproduce_v0_11_1_steady_closure_and_transient():
     assert abs(float(b.energy_balance_residual_W) / REF_PUMP_W
                - _V0111_RESID_OVER_PUMP) < _RESID_TOL_OVER_PUMP
 
+    # z_refine=1 (2026-11-02): these numbers were recorded on the n_nodes mesh, and at 21 nodes
+    # this fiber's per-cell gain jump (0.86 at t = 0) is over the "auto" target, so the DEFAULT
+    # now marches r = 3 from a re-solved seed (first-frame gain 13.829 vs 13.887 dB; a 1281-node
+    # solve gives 13.821). The claim pinned here is that the new physics defaults are the v0.11.1
+    # MODEL, so it is held on the v0.11.1 mesh.
     tr = simulate_transient(amp, np.linspace(0.0, 4e-3, 17), n_nodes=21,
-                            pump_drive=_pump_drive, store_profiles=True)
+                            pump_drive=_pump_drive, store_profiles=True, z_refine=1)
     assert tr.meta["quasi_static_valid"]
     got_t = {"tr_gain_first": float(tr.signal_gain_dB[0, 0]),
              "tr_gain_last": float(tr.signal_gain_dB[-1, 0]),
