@@ -383,9 +383,15 @@ def test_coarse_grid_from_a_cold_start_trips_the_quasi_static_flag():
     # single step carries the inversion across the ASE-clamped operating point does NOT: the
     # frozen-population step then propagates a gain the ASE it generates never gets to deplete.
     amp = _clad_amp()
-    with pytest.warns(RuntimeWarning, match="OUT OF ITS VALID REGIME"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         tr = simulate_transient(amp, np.linspace(0.0, 60e-3, 200), n_nodes=161,
                                 nbar2_0=(0.02, 0.02))
+    msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("OUT OF ITS VALID REGIME" in m for m in msgs), msgs
+    # since 2026-11-02 the step-stability monitor ALSO fires (x1.15 per step from time index 8):
+    # at these 0.3 ms steps the lagged coupling rings through the turn-on as well
+    assert any("GROWING swing" in m for m in msgs), msgs
     assert tr.meta["quasi_static_valid"] is False
     assert tr.meta["max_ase_to_launched"] > 1.0
     assert np.all(np.isfinite(tr.nbar2_zt))          # still returned, still bounded
@@ -434,19 +440,20 @@ def test_nbar2_0_tuple_must_be_a_pair():
         simulate_transient(amp, np.linspace(0.0, 1e-4, 3), n_nodes=21, nbar2_0=(0.1, 0.2, 0.3))
 
 
-def test_solve_accepts_relax_auto_without_changing_its_default():
-    # substitutability, not a new default: a caller written against FiberAmplifier passes
-    # relax="auto" straight through (the downstream solve_closed does exactly that), and this
-    # class used to answer with a ValueError. It now walks the same (1.0, 0.5, 0.25) ladder --
-    # while relax=1.0 STAYS the default here and still takes exactly one attempt.
+def test_solve_default_is_auto_and_bit_identical_where_relax_1_converges():
+    # substitutability: a caller written against FiberAmplifier passes relax="auto" straight
+    # through (the downstream solve_closed does exactly that), and this class used to answer with
+    # a ValueError. Since 2026-11-02 "auto" is also the DEFAULT here (the old relax = 1.0 default
+    # returned non-converged answers silently -- tests/test_fiber_transient_stability.py); on an
+    # amplifier that converges undamped the default still takes exactly one attempt at 1.0.
     amp = _clad_amp(bins=4)
-    pinned = amp.solve(n_nodes=81)
+    pinned = amp.solve(n_nodes=81, relax=1.0)
     assert pinned.meta["relax"] == 1.0
     assert pinned.meta["relax_attempts"] == (1.0,)
-    auto = amp.solve(n_nodes=81, relax="auto")
-    assert auto.meta["relax_attempts"][0] == 1.0
-    # this amplifier converges on the first rung, so "auto" must return the SAME numbers as the
-    # default -- the ladder is a path, not a different fixed point
+    auto = amp.solve(n_nodes=81)
+    assert auto.meta["relax_attempts"] == (1.0,)
+    # this amplifier converges on the first rung, so the "auto" default must return the SAME
+    # numbers as relax = 1.0 -- the ladder is a path, not a different fixed point
     assert np.array_equal(auto.power_W, pinned.power_W)
     assert np.array_equal(auto.nbar2_z, pinned.nbar2_z)
     with pytest.raises(ValueError, match='relax must be a number'):
@@ -635,7 +642,10 @@ class TestCoDopedHoldSpatialResolution:
         # the cladding-pumped reference sits at a jump of 0.033 on 81 nodes: "auto" must not touch
         # it -- not one bit, in any returned array or co-doped diagnostic
         amp = _clad_amp()
-        t = np.linspace(0.0, 4e-3, 9)
+        # 0.2 ms steps: this amplifier's lagged field coupling rings (growing) at dt >= 0.3 ms
+        # on 81 nodes, which the 2026-11-02 step-stability monitor flags -- the grid used to be
+        # 0.5 ms (9 points), i.e. a ringing march (tests/test_fiber_transient_stability.py)
+        t = np.linspace(0.0, 4e-3, 21)
         auto = simulate_transient(amp, t, n_nodes=81, store_profiles=True)
         old = simulate_transient(amp, t, n_nodes=81, store_profiles=True, z_refine=1)
         assert auto.meta["z_refine"] == 1 and auto.meta["mesh_resolved"]
