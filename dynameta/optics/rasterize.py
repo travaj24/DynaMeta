@@ -16,7 +16,7 @@ import numpy as np
 
 from dynameta.geometry.guards import require_untapered_layer
 
-__all__ = ["cell_axes", "layer_bg_eps", "layer_eps_cell", "inclusion_mask"]
+__all__ = ["cell_axes", "layer_bg_eps", "layer_eps_cell", "layer_eps_tensor_cell", "inclusion_mask"]
 
 
 def cell_axes(nx, ny, period_x_m, period_y_m):
@@ -66,9 +66,28 @@ def layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region, *, period_x_
     return eps
 
 
+def layer_eps_tensor_cell(layer, X, Y, lambda_m, materials, bg_tensor, *, period_x_m=None,
+                          period_y_m=None):
+    """The (nx, ny, 3, 3) COMPLEX eps_tensor_cell of one layer on a uniform TENSOR background: every
+    sample starts as `bg_tensor` (eps[i, j], i, j in (x, y, z) -- the EpsField.tensor layout) and each
+    (scalar) inclusion is overpainted as eps * I3 in ASCENDING priority through the shared
+    inclusion_mask (periodic when both periods are given) -- layer_eps_cell's painting rule, tensor-
+    valued. The ONE tensor painter (2026-11-02): the PMM2D hybrid engine's raster and the RCWA
+    bridge's uniform-tensor-plus-inclusions layer both call it. (layer_eps_cell itself keeps refusing
+    a tensor eps_by_region entry -- audit C5-2 -- because its consumers carry one scalar per sample.)
+    A TAPERED inclusion is refused, as in layer_eps_cell."""
+    require_untapered_layer(layer, "layer_eps_tensor_cell (lateral rasterizer)")
+    bg = np.asarray(bg_tensor, dtype=complex).reshape(3, 3)
+    cell = np.broadcast_to(bg, X.shape + (3, 3)).copy()
+    for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
+        mask = inclusion_mask(inc, X, Y, period_x_m=period_x_m, period_y_m=period_y_m)
+        cell[mask] = complex(materials.get(inc.material).eps(lambda_m)) * np.eye(3, dtype=complex)
+    return cell
+
+
 def inclusion_mask(inc, X, Y, *, period_x_m=None, period_y_m=None):
     """Boolean (X.shape) mask of one inclusion's CrossSection -- the ONE painting predicate every
-    rasterizer shares (layer_eps_cell; the PMM2D bridge's tensor raster). With both periods it is
+    rasterizer shares (layer_eps_cell; layer_eps_tensor_cell). With both periods it is
     PERIODIC: an inclusion whose bbox leaves the closed cell [0, Px] x [0, Py] also covers its
     translates by -/+(Px, Py); without them it clips (see layer_eps_cell)."""
     if (period_x_m is None) != (period_y_m is None):
