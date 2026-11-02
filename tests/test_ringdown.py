@@ -576,3 +576,43 @@ def test_gate10c_decaying_traces_take_the_unchanged_fast_path():
     assert len(got) == 2
     assert got[0][0] == pytest.approx(0.7, rel=1e-8) and got[0][1] == pytest.approx(0.008, rel=1e-6)
     assert got[1][0] == pytest.approx(1.9, rel=1e-8) and got[1][1] == pytest.approx(0.04, rel=1e-6)
+
+
+# ---- audit Q-22: ringdown_q and fdtd_etalon_ringdown are ONE definition of "the" ringdown Q --
+
+def test_q22_ringdown_q_matches_the_etalon_extraction_on_the_same_trace():
+    """audit Q-22 (2026-11-02). ringdown_q returned the RAW pencil dominant mode while
+    fdtd_etalon_ringdown refined (VARPRO) and re-ranked by the re-solved amplitudes, so the same
+    samples gave two different "ringdown Q"s. Measured pre-fix on two equal-amplitude modes (Q 40
+    and Q 25, 600 samples) plus 5% Gaussian noise (rng seed 106): ringdown_q 24.85 vs the
+    etalon path 40.18. Both now go through _pencil_modes."""
+    from dynameta.optics.ringdown import _nls_refine_real
+    dt = 1e-16
+    t = np.arange(600) * dt
+    w1, w2 = 2 * np.pi * 2.0e14, 2 * np.pi * 2.3e14
+    y = (np.exp(-w1 / 40.0 * t / 2) * np.cos(w1 * t + 0.3)
+         + np.exp(-w2 / 25.0 * t / 2) * np.cos(w2 * t - 1.0)
+         + 0.05 * np.random.default_rng(106).standard_normal(t.size))
+    kw = dict(svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    seed = matrix_pencil(y, dt, **kw)
+    refined, note = _nls_refine_real(y, dt, seed)
+    assert note == ""
+    # premise: on this trace the two orderings really do disagree (else the gate proves nothing)
+    assert seed[0].q != refined[0].q
+    f0, q = ringdown_q(y, dt, **kw)
+    assert (f0, q) == (refined[0].f_hz, refined[0].q)
+    assert abs(q / 40.0 - 1.0) < 0.02                       # and it is the Q-40 mode
+    # refine=False is the raw pencil, explicitly
+    assert ringdown_q(y, dt, refine=False, **kw) == (seed[0].f_hz, seed[0].q)
+    # a complex trace has no real-trace refinement: ringdown_q falls back to the pencil
+    yc = np.exp((-w1 / 80.0 - 1j * w1) * t)
+    assert ringdown_q(yc, dt) == (matrix_pencil(yc, dt)[0].f_hz, matrix_pencil(yc, dt)[0].q)
+
+
+def test_q22_ringdown_q_reproduces_fdtd_etalon_ringdown_bitwise():
+    """The FDTD side of Q-22: hand ringdown_q the very window fdtd_etalon_ringdown inverted, with
+    the pencil kwargs it used, and get its (f0, Q) back bit-for-bit."""
+    er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                              resolution=30)
+    assert ringdown_q(er.signal_used, er.dt_used, pencil_frac=0.4, svd_tol=1e-6,
+                      amp_floor=5e-2, real_signal=True) == (er.f0_Hz, er.q)

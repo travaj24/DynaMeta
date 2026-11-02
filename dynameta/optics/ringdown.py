@@ -37,6 +37,10 @@ CONVENTIONS (SI, exp(-i omega t) library convention -- decaying modes have Im(om
 Opt-in FDTD probe: solve_fdtd_1d(..., return_time_trace=True) attaches the recorded reflected/
 transmitted boundary time series (already computed for the R/T DFT) without changing any
 existing output; fdtd_etalon_ringdown() drives it and inverts the post-pulse tail.
+
+ONE ringdown Q (audit Q-22): ringdown_q and fdtd_etalon_ringdown extract modes through the same
+_pencil_modes path (matrix pencil + the real-trace VARPRO refinement + dominant-by-|amplitude|),
+so the same samples give the same (f0, Q) from both; matrix_pencil alone is the raw pencil.
 """
 
 from __future__ import annotations
@@ -550,14 +554,47 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
     return out, ""
 
 
-def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
+def _pencil_modes(signal, dt: float, *, refine: bool, max_refine: int, **pencil_kw) -> tuple:
+    """THE ringdown-mode extraction shared by ringdown_q and fdtd_etalon_ringdown (audit Q-22):
+    matrix_pencil, then -- on a REAL trace, when ``refine`` -- the VARPRO refinement
+    _nls_refine_real on the same samples the pencil fitted (after its ``t_start`` cut). Returns
+    ``(modes, note)``; ``note`` as in _nls_refine_real ('' when the refinement was accepted).
+    A COMPLEX trace has no real-trace refinement, so it returns the pencil modes with a note."""
+    modes = matrix_pencil(signal, dt, **pencil_kw)
+    if not (refine and modes):
+        return modes, ""
+    y = np.asarray(signal)
+    dt = float(dt)
+    t_start = float(pencil_kw.get("t_start", 0.0))
+    n0 = int(np.ceil(t_start / dt)) if t_start > 0.0 else 0     # matrix_pencil's own cut
+    y = y[max(0, min(n0, y.size - 1)):]
+    real_signal = pencil_kw.get("real_signal")
+    if real_signal is None:                             # matrix_pencil's own auto-detect
+        real_signal = not (np.iscomplexobj(y) and
+                           np.max(np.abs(y.imag)) > 1e-12 * (np.max(np.abs(y)) + 1e-300))
+    if not real_signal:
+        return modes, "complex trace: refinement not applicable, pencil modes returned"
+    return _nls_refine_real(np.real(y), dt, modes, max_refine=max_refine)
+
+
+def ringdown_q(signal: Sequence[complex], dt: float, *, refine: bool = True,
+               max_refine: int = 6, **kwargs) -> tuple:
     """Convenience: dominant-mode (f0_Hz, Q) of a ringdown trace. Extra kwargs pass through to
     matrix_pencil. Raises ValueError if no mode is found.
+
+    "The ringdown Q" is ONE definition in this module (audit Q-22): matrix_pencil followed, on a
+    real trace, by the same VARPRO refinement and dominant-mode choice fdtd_etalon_ringdown applies
+    (both go through _pencil_modes). So ``ringdown_q(er.signal_used, er.dt_used, <the pencil
+    kwargs fdtd_etalon_ringdown used>, real_signal=True)`` returns exactly ``(er.f0_Hz, er.q)``.
+    Before 2026-11-02 this wrapper returned the RAW pencil dominant mode, and the two disagreed on
+    the same trace whenever the refinement's re-solved amplitudes re-ranked the modes -- measured
+    on two equal-amplitude modes (Q 40 and 25) plus 5% noise: Q = 24.85 here vs 40.18 there.
+    ``refine=False`` gives the raw pencil dominant mode (``matrix_pencil(...)[0]``).
 
     Inherits :func:`matrix_pencil`'s O(N^3)/O(N^2) cost in the RAW trace length and its
     ``max_bytes`` big-N guard (audit P-3): a multi-thousand-sample FDTD trace should be decimated
     (or handed to :func:`fdtd_etalon_ringdown`, which decimates for you) before it gets here."""
-    modes = matrix_pencil(signal, dt, **kwargs)
+    modes, _ = _pencil_modes(signal, dt, refine=refine, max_refine=max_refine, **kwargs)
     if not modes:
         raise ValueError("matrix_pencil found no modes in the trace")
     m = modes[0]                                        # already sorted dominant-first
@@ -837,14 +874,13 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     dt_d = dt * stride
     tail_d = tail_d - np.mean(tail_d)                   # remove any DC / slow ABC drift
 
-    modes = matrix_pencil(tail_d, dt_d, pencil_frac=pencil_frac, svd_tol=svd_tol,
-                          max_modes=max_modes, amp_floor=amp_floor, real_signal=True)
     # NLS (VARPRO) refinement: the pencil seed's dominant-mode Q is sensitive to the LAPACK
     # build at marginal model orders (two correct BLAS stacks straddled a 12% gate on the same
-    # trace); the refined optimum is a property of the data and platform-stable.
-    note = ""
-    if refine and modes:
-        modes, note = _nls_refine_real(tail_d, dt_d, modes, max_refine=max_refine)
+    # trace); the refined optimum is a property of the data and platform-stable. Pencil +
+    # refinement go through _pencil_modes, the SAME path ringdown_q uses (audit Q-22).
+    modes, note = _pencil_modes(tail_d, dt_d, refine=refine, max_refine=max_refine,
+                                pencil_frac=pencil_frac, svd_tol=svd_tol, max_modes=max_modes,
+                                amp_floor=amp_floor, real_signal=True)
     t_used = np.arange(tail_d.size) * dt_d
     if modes:
         f0, q = modes[0].f_hz, modes[0].q
