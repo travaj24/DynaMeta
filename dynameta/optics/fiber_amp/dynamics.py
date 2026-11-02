@@ -93,6 +93,7 @@ import numpy as np
 from dynameta.constants import C_LIGHT, H_PLANCK
 from dynameta.optics.fiber_amp import march_ase
 from dynameta.optics.fiber_amp.steady_state import _relaxation_residuals
+from dynameta.warning_types import UnreliableResultWarning
 # ChannelPlan / SteadyStateResult are annotation targets on TransientResult (F-2/F-3): the
 # quoted forward references still need the names bound at module scope for ruff F821 and for
 # anyone resolving the annotations at runtime (the CI lint caught them unbound).
@@ -175,6 +176,12 @@ class TransientResult:
                 float(m["max_ase_to_launched"]), lim.get("ase_to_launched"),
                 float(m.get("max_ase_gain_integral", float("nan"))),
                 lim.get("ase_gain_integral")))
+        if m.get("oscillation_step") is not None:
+            parts.append("growing oscillation (ring) from time index {} (x{:.3g} per step{})"
+                         .format(m["oscillation_step"],
+                                 float(m.get("oscillation_growth_per_step") or float("nan")),
+                                 "; remedied by the latched self-consistent step"
+                                 if m.get("oscillation_latched_self_consistent") else ""))
         if m.get("ase_inner_nonconverged_steps"):
             parts.append("{} self-consistent step(s) did not reach ase_tol".format(
                 int(m["ase_inner_nonconverged_steps"])))
@@ -475,8 +482,225 @@ def _warn_unresolved_mesh(worst_cell_jump, r, n_nodes, nz, measured):
         "propagator rather than amp.solve()'s (measured: %s). Raise n_nodes or z_refine; "
         "meta['mesh_resolved'] is False."
         % (worst_cell_jump, _CELL_GAIN_LIMIT, r, n_nodes, nz, measured),
-        RuntimeWarning, stacklevel=3)
+        UnreliableResultWarning, stacklevel=3)
     return False
+
+
+# ---- step-stability monitor (2026-11-02) -------------------------------------------------------
+# WHAT IT CATCHES. The quasi-static step propagates the channels through the populations at the
+# START of the step and then advances the populations with those powers held fixed -- the field
+# is LAGGED one step behind the populations. The population update itself is exact (exponential)
+# at any dt, but the lag is not: once dt is long against the local population rate, a step slaves
+# each population to the quasi-equilibrium of the PREVIOUS step's powers, i.e. the march becomes
+# the undamped fixed-point iteration y <- y_eq(P(y)), and when that map's loop gain exceeds 1 the
+# march RINGS with a GROWING swing. That is a stability limit of the lagged coupling, not of the
+# rate equations: an amplifier's population dynamics are overdamped (no oscillatory mode), so a
+# state that keeps reversing direction step after step at constant drive is numerical, always.
+# MEASURED 2026-11-02, 81 nodes, constant drive, started at amp.solve():
+#   * cladding-pumped Er:Yb transient reference (2.8 um, N_Er 2e25, N_Yb 2e26, 4 m, 1 W at
+#     976 nm CO-pumped, 1 mW at 1550 nm, 8 C-band ASE bins): PERIOD 2, the alternating part of
+#     the signal gain growing per step x0.92 at dt = 0.2 ms, x1.00 at 0.25, x1.05 at 0.3, x1.10
+#     at 0.4, x1.18 at 0.8, x1.24 at 1.6 and x1.26 at 3.2 ms -- monotone in dt and saturating at
+#     the slaved-map loop gain ~1.27 (the large-dt limit is dt-independent). Over a FIXED 40 ms
+#     window the 0.4 ms march (100 steps, 1.10^100) therefore rings MORE (+-1.4 dB) than the
+#     0.8 ms one (50 steps, +-0.18 dB): more steps, not a stronger instability. The loop runs
+#     through the backward C-band ASE: the same march without ASE decays at x0.16 per step at
+#     0.8 ms. The audit-A-7 margins cannot see it -- the ASE is 1.8% of the LAUNCHED power (the
+#     1 W pump) against a limit of 1x, and INT g dz = 7.9 against 20 -- because what matters is
+#     the ASE against the input-end SATURATION power (~18x the 1 mW signal there), not against
+#     the launched total.
+#   * the same fiber COUNTER-pumped with two 0.5 mW signals (1550 / 1535 nm) and a 4-bin Yb
+#     band: stable at 0.2 ms, ringing at 0.4 ms (+-0.03 dB in 40 steps) and +45 / -83 dB at
+#     0.8 ms.
+#   * the single-ion Er counter-pumped point (1.6 um / NA 0.22 / 8e24 / 8 m, 100 mW at 980 nm
+#     backward, 2 x 0.1 mW, 12 ASE bins): stable at 0.2 and 0.4 ms (the start-up swing gone to
+#     1e-14 dB within 150 steps), a SLOW ring at 0.8 ms (x1.008 per step: the swing per 50-step
+#     block 0.0035 -> 0.0044 -> 0.0056 -> 0.0074 -> 0.0094 -> 0.0118 dB), and a fast ring of
+#     period ~4 (not 2) at 3.2 ms, 18.11 dB -> 15.6..21.6 dB within 80 steps.
+#   * NOT ONLY AT CONSTANT DRIVE: the first case started COLD (f2 = b2 = 0.02) on a grid that
+#     reaches 0.2 ms steps at 0.2 ms rings +-2.5 dB through the turn-on (27.7 / 20.7 / 26.8 /
+#     21.7 dB at 0.6-1.2 ms against a smooth 22.7 -> 24.0 dB at 10 us steps) -- the loop gain is
+#     a property of the OPERATING POINT, and the hot, ASE-heavy turn-on is less stable than the
+#     final state, where 0.2 ms holds.
+# The self-consistent step (ase_mode "self_consistent", or "auto" once this monitor trips) is
+# the field-implicit remedy: on the first case it holds the march to 24.4919 dB at every dt from
+# 0.2 to 3.2 ms, on the second to +0.0001 / +0.0002 dB of solve() at 0.8 and 3.2 ms.
+#
+# THE TEST. The change of the state's RATE, e_k = v_k - v_{k-1} with v_k = (y_k - y_{k-1}) /
+# (t_k - t_{k-1}) -- the second difference, divided by the step so a non-uniform t_grid (a log
+# grid, a fine-then-coarse grid) does not read as a kink -- removes a smooth transient's trend (a
+# smooth trajectory's e keeps its direction, flipping once at an inflection) and keeps any ring
+# at full size. (MEASURED: the undivided second difference false-tripped on a cold start whose
+# grid jumps from 26 us to 200 us steps.) A step ROTATES when e_k points against one
+# of e_{k-1} .. e_{k-_OSC_LAGS} (cosine below _OSC_COS): lag 1 catches period 2 (cos -1) and 3
+# (-0.5), lag 2 periods 4-6, lags 3-4 up to ~10. A GROWING RING is declared when at least
+# _OSC_ROT_MIN of the latest _OSC_WINDOW steps rotate AND the envelope max |e| over that window
+# exceeds _OSC_GROWTH times the previous window's AND sits above _OSC_FLOOR in max-norm x dt (below
+# that it is round-off at the fixed point). The envelope, not the step-to-step |e|, is what grows
+# for a ring of period > 2, whose real projection beats. A decaying ring (x0.92 per step at
+# 0.2 ms above: window ratio 0.51) is not flagged; neither is a smooth charge-up of any speed (no
+# sustained rotation). A drive that itself rotates at the grid scale (its own second difference
+# reversing on >= 2 of the window's steps -- Nyquist-rate forcing) can force a genuine ring, so
+# the monitor abstains on such a window. The window test needs 2 _OSC_WINDOW + 2 = 18 states, so
+# the commonest case, PERIOD 2, also has a FAST path: _OSC_P2_STEPS consecutive steps on which
+# e_k reverses against e_{k-1} AND is larger than it (the drive not reversing on that step)
+# declare it from the 7th state on -- the 13-state 3.2 ms march of the first case above is caught
+# there (time index 9, x1.25) and would slip through the window test alone.
+_OSC_P2_STEPS = 4
+_OSC_WINDOW = 8
+_OSC_LAGS = 4
+_OSC_ROT_MIN = 6
+_OSC_GROWTH = 1.05
+_OSC_COS = -0.5
+_OSC_FLOOR = 1.0e-10
+
+
+def _rotates(e, hist):
+    """True when vector e points against any of the vectors in hist (cosine < _OSC_COS)."""
+    ne = float(np.linalg.norm(e))
+    if ne == 0.0:
+        return False
+    for h in hist:
+        nh = float(np.linalg.norm(h))
+        if nh > 0.0 and float(np.dot(e, h)) < _OSC_COS * ne * nh:
+            return True
+    return False
+
+
+class _OscillationMonitor:
+    """The step-stability monitor of the block comment above -- one home, both marches. Feed it
+    the march state (any flat float array) and the drive vector at every recorded time index, in
+    order; it is read-only with respect to the march."""
+
+    def __init__(self):
+        self.y = []            # the last three states
+        self.b = []            # the last three drives
+        self.t = []            # ... and their times
+        self.first_step = None
+        self.first_growth = None
+        self.n_detections = 0
+        self._fresh_windows()
+
+    def _fresh_windows(self):
+        # a fresh pair of windows (start, after a detection, after a non-finite state), so each
+        # verdict is made on second differences the previous one did not see
+        self.e = []            # the last 2 _OSC_WINDOW rate changes e_k of the state
+        self.eb = []           # ... and the drive's
+        self.rot = []          # rotation flags of the latest _OSC_WINDOW steps
+        self.rotb = []
+        self.p2 = []           # |e_k| / |e_{k-1}| over the current run of growing reversals
+
+    def update(self, it, t, y, bc):
+        """Record state y at time index it / time t (driven by bc); True on the step a detection
+        fires."""
+        self.y.append(np.array(y, float, copy=True).ravel())
+        self.b.append(np.array(bc, float, copy=True).ravel())
+        self.t.append(float(t))
+        if len(self.y) > 3:
+            self.y.pop(0)
+            self.b.pop(0)
+            self.t.pop(0)
+        if len(self.y) < 3:
+            return False
+        h1, h2 = self.t[1] - self.t[0], self.t[2] - self.t[1]
+        if not (h1 > 0.0 and h2 > 0.0):
+            self._fresh_windows()
+            return False
+        e = (self.y[2] - self.y[1]) / h2 - (self.y[1] - self.y[0]) / h1
+        eb = (self.b[2] - self.b[1]) / h2 - (self.b[1] - self.b[0]) / h1
+        if not np.all(np.isfinite(e)):
+            self._fresh_windows()
+            return False
+        W = _OSC_WINDOW
+        # fast period-2 path (block comment)
+        if self.e:
+            ep = self.e[-1]
+            nep, ne = float(np.linalg.norm(ep)), float(np.linalg.norm(e))
+            if (ne > nep > 0.0 and float(np.max(np.abs(e))) * h2 > _OSC_FLOOR
+                    and float(np.dot(e, ep)) < _OSC_COS * ne * nep
+                    and not _rotates(eb, self.eb[-1:])):
+                self.p2.append(ne / nep)
+            else:
+                self.p2 = []
+        if len(self.p2) >= _OSC_P2_STEPS:
+            return self._detected(it, float(np.exp(np.mean(np.log(self.p2)))))
+        self.rot.append(_rotates(e, self.e[-_OSC_LAGS:]))
+        self.rotb.append(_rotates(eb, self.eb[-_OSC_LAGS:]))
+        self.e.append(e)
+        self.eb.append(eb)
+        if len(self.e) > 2 * W:
+            self.e.pop(0)
+            self.eb.pop(0)
+        if len(self.rot) > W:
+            self.rot.pop(0)
+            self.rotb.pop(0)
+        if len(self.e) < 2 * W:
+            return False
+        env_new = max(float(np.max(np.abs(v))) for v in self.e[W:])
+        env_old = max(float(np.max(np.abs(v))) for v in self.e[:W])
+        if (sum(self.rot) >= _OSC_ROT_MIN and sum(self.rotb) < 2 and env_new * h2 > _OSC_FLOOR
+                and env_new > _OSC_GROWTH * env_old):
+            return self._detected(it, (float((env_new / env_old) ** (1.0 / W)) if env_old > 0.0
+                                       else float("inf")))
+        return False
+
+    def _detected(self, it, growth):
+        self.n_detections += 1
+        if self.first_step is None:
+            self.first_step = int(it)
+            self.first_growth = float(growth)
+        self._fresh_windows()
+        return True
+
+    def reason(self):
+        return ("the march state rings with a GROWING swing (first detected at time index %d, "
+                "envelope x%.3g per step) -- the quasi-static step's lagged field coupling is "
+                "unstable at this time step" % (self.first_step, self.first_growth))
+
+    def meta(self):
+        return {"oscillation_step": self.first_step,
+                "oscillation_growth_per_step": self.first_growth,
+                "oscillation_detections": int(self.n_detections)}
+
+
+def _warn_oscillation(osc, ase_mode, stacklevel=3):
+    """The step-stability monitor's warning (one home, both marches)."""
+    msg = ("simulate_transient: " + osc.reason() + ". The swing is numerical (an amplifier's "
+           "population dynamics are overdamped) and grows without bound at this dt, so the "
+           "returned history is NOT trustworthy. Use ase_mode=\"auto\" (switches to the "
+           "field-implicit self-consistent step when this is detected) or \"self_consistent\", "
+           "or shorten the time step below the stability limit (MEASURED: 0.25 ms on a 4 m "
+           "cladding-pumped Er:Yb amplifier). meta['march_valid'] is False (ase_mode=%r)."
+           % ase_mode)
+    warnings.warn(msg, UnreliableResultWarning, stacklevel=stacklevel)
+    return msg
+
+
+def _converged_seed_solve(amp0, n):
+    """amp0.solve() for a march's default seed (nbar2_0=None), CONVERGED or refused -- one home,
+    both marches. relax is pinned to "auto" (the ladder 1.0 -> 0.5 -> 0.25, whose first rung is
+    the plain iteration, so a seed that converged undamped is the same bits) rather than
+    inherited from the class default, and a seed that still does not converge is REFUSED: a
+    march started there would present the relaxation's last iterate as a physical t0 state and
+    then spend its first milliseconds 'evolving' away from a non-answer. MEASURED 2026-11-02 on
+    the core-pumped 2 m co-doped reference at 1 W: the co-doped class default (then relax = 1.0)
+    returned an unconverged -4.98 dB seed (endpoint residual 1.3e6) against the converged
+    +20.75 dB. The solve's own UnreliableResultWarning is folded into this error instead of
+    being raised next to it."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UnreliableResultWarning)
+        r0 = amp0.solve(n_nodes=n, relax="auto")
+    if not r0.meta.get("converged", True):
+        raise RuntimeError(
+            "simulate_transient: the steady-state seed (amp.solve(n_nodes=%d, relax=\"auto\") "
+            "at the first drive) did NOT converge (relax tried %s, endpoint residual %.3g, "
+            "profile residual %.3g), so there is no t0 state to march from. Pass an explicit "
+            "nbar2_0 -- a cold start such as nbar2_0=0.0 lets the march itself find the steady "
+            "state -- or make the steady problem converge (max_iter, a smaller relax via "
+            "amp.solve) and seed from its result."
+            % (n, r0.meta.get("relax_attempts"), float(r0.meta.get("endpoint_residual", np.nan)),
+               float(r0.meta.get("profile_residual", np.nan))))
+    return r0
 
 
 def _no_raman(amp):
@@ -725,7 +949,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         if nbar2_0 is not None:
             n2u = np.broadcast_to(np.asarray(nbar2_0, float), z_user.shape).astype(float).copy()
             return n2u if zz.size == n_nodes else np.interp(zz, z_user, n2u)
-        r0 = amp0.solve(n_nodes=zz.size)
+        r0 = _converged_seed_solve(amp0, zz.size)
         return np.interp(zz, r0.z_m, r0.nbar2_z)
 
     # SPATIAL RESOLUTION (z_refine; docstring). Size the MARCH mesh from the initial profile's
@@ -841,12 +1065,22 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
         ase_lam = ase_dnu = ase_f_zt = ase_b_zt = None
     prof_zt = np.empty((Nt, ch.lambda_m.size, n_nodes)) if store_profiles else None
     worst_cell_jump = 0.0
+    # step-stability monitor (2026-11-02; _OscillationMonitor): read-only, latches "auto" onto
+    # the self-consistent step on its first detection -- the co-doped march's wiring, verbatim
+    osc = _OscillationMonitor()
+    osc_latched = False
+    osc_unremedied = False
 
     for it in range(Nt):
         t = float(t_grid[it])
         bc = boundary(t)
         g, s = g_s(n2)
         P = _propagate_fixed(z, g, s, bc, u)
+        if osc.update(it, t, n2, bc):
+            if ase_mode == "auto" and not osc_latched:
+                osc_latched = True
+            else:
+                osc_unremedied = True
         # spatial-resolution monitor (z_refine; read-only): the largest per-cell gain jump of
         # the gain this step propagated through
         worst_cell_jump = max(worst_cell_jump, _max_cell_jump(g, dz))
@@ -909,7 +1143,7 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             # which is the predictive half of the switch criterion (a cold start looks perfectly
             # healthy right up to the step that inverts the fiber).
             n2_exp = None
-            take_sc = ase_mode == "self_consistent"
+            take_sc = ase_mode == "self_consistent" or osc_latched
             if not take_sc:
                 n2_exp = advance(n2, P, dt)
                 gi_proj = 0.0
@@ -972,16 +1206,16 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     # quasi-static one; the other two step through that regime on purpose. march_valid is the
     # flag to test in those modes (and is identical to quasi_static_valid in the default one).
     if ase_mode == "quasi_static":
-        march_valid = not reasons
+        march_valid = not reasons and not osc_unremedied
     else:
         sc_reasons = _self_consistent_reasons(ctrl, nonfinite)
-        march_valid = not sc_reasons
+        march_valid = not sc_reasons and not osc_unremedied
         if sc_reasons:
             warnings.warn(
                 "simulate_transient(ase_mode=%r): the self-consistent ASE step did not close -- "
                 % ase_mode + "; ".join(sc_reasons) + ". Raise ase_max_iter, loosen ase_tol, or "
                 "shorten the time step; meta['march_valid'] is False and the returned arrays "
-                "must not be trusted.", RuntimeWarning, stacklevel=2)
+                "must not be trusted.", UnreliableResultWarning, stacklevel=2)
     if reasons and ase_mode == "quasi_static":
         warn_msg = (
             "simulate_transient: the quasi-static (frozen-inversion) step is OUT OF ITS VALID "
@@ -994,7 +1228,8 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
             "or narrow/disable the ASE band. Sub-stepping does not help -- the frozen-gain "
             "propagation is already exact. See TransientResult.meta['quasi_static_valid'] "
             "(audit A-7).")
-        warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
+        warnings.warn(warn_msg, UnreliableResultWarning, stacklevel=2)
+    osc_msg = _warn_oscillation(osc, ase_mode) if osc_unremedied else None
     mesh_resolved = _warn_unresolved_mesh(worst_cell_jump, r, n_nodes, z.size,
                                           "1.4 dB low at a jump of 7 on a 6 m Yb amplifier")
     meta = _ase_mode_meta(ase_mode, ctrl, step_mode, switch_steps, t_grid, worst_step_resid,
@@ -1006,10 +1241,14 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
                  "mesh_resolved": bool(mesh_resolved),
                  # audit A-7 validity flag: False => the frozen-inversion step left its regime
                  # and the long-time limit is NOT amp.solve()
-                 "quasi_static_valid": not reasons,
+                 # (and False when the step-stability monitor fired on a quasi-static step)
+                 "quasi_static_valid": not reasons and osc.first_step is None,
                  # the flag for THIS march: identical to quasi_static_valid in the default mode,
                  # and the one to test in the other two
                  "march_valid": bool(march_valid),
+                 "oscillation_warning": osc_msg,
+                 "oscillation_latched_self_consistent": osc_latched,
+                 **osc.meta(),
                  "max_ase_to_launched": float(worst_ase_ratio),
                  "max_ase_gain_integral": float(worst_gain_integral),
                  "nonfinite_powers": bool(nonfinite),
@@ -1082,6 +1321,12 @@ def _amp_with_boundary(amp, bc, sig_idx, pmp_idx, kind):
 #      ~ k_tr^2 N_Er N_Yb tau_Er tau_Yb >> 1 and diverges (eryb module docstring). A split march
 #      is therefore stability-limited to dt well inside 1/(k_tr N_Er) ~ 250 us, which is the regime
 #      the whole two-timescale design exists to leave.
+#      CORRECTION 2026-11-02: all of the above is stability AT THE FROZEN POWERS of the step. The
+#      march as a whole also lags the FIELD one step behind the populations, and that coupling
+#      has its own, separate limit -- MEASURED: the 4 m / 1 W cladding-pumped reference rings with
+#      period 2 and a growing swing for dt >= 0.3 ms (x1.27 per step in the slaved large-dt limit,
+#      through the backward C-band ASE). See _OscillationMonitor, which now flags it, and the
+#      self-consistent step, which removes it.
 #   4. It needs NO nonlinear solve. A safeguarded implicit Euler with a Newton iteration per node
 #      is the other admissible choice and is equally stable, but it costs an inner loop per node
 #      per step with a convergence test that can fail, and it is only first-order accurate on the
@@ -1394,14 +1639,28 @@ def simulate_transient_eryb(amp, t_grid, *,
         """Frozen-population gain g (K, Nz) and spontaneous source s (K, Nz) -- term for term the
         bracket of eryb._dP, so the march and the steady solve propagate the SAME operator. With
         an explicit 4I11/2 that bracket absorbs from n1 = 1 - f2 - f3 and emits from n3 at a
-        level-3 channel, which is what the `f3` argument carries."""
+        level-3 channel, which is what the `f3` argument carries.
+
+        PHOTODARKENING (2026-11-02). The bracket of eryb._dP also subtracts the Yb photodarkening
+        equilibrium gray loss pd_loss_per_m * bbar^pd_exponent at the population-weighted Yb
+        inversion whenever a ConcentrationModel is attached; this function used to stop short
+        of it, so a march started at amp.solve()'s state was NOT at its own fixed point with
+        photodarkening on. MEASURED on the 3 m / 1 W cladding-pumped reference (pd_exponent 1,
+        161 nodes, 40 ms hold): at pd_loss_per_m = 0.4 /m solve() 13.669 dB against the march's
+        13.854 dB (+0.185 dB), at 0.02 /m +0.010 dB. `b2` here IS that population-weighted
+        inversion (every caller passes fc b2c + (1 - fc) b2nc), and a ConcentrationModel without
+        photodarkening subtracts an exact 0.0, so every pd-free march is unchanged bit for bit."""
         f, b = f2[None, :], b2[None, :]
         if f3 is None:
             g = (g_e_er * f - g_a_er * (1.0 - f) + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
+            if amp.concentration is not None:
+                g = g - amp.concentration.photodarkening_loss_per_m(b2)[None, :]
             return g, s_er_col * f + s_yb_col * b
         f3c = f3[None, :]
         g = (g_e_er2 * f + g_e_er3 * f3c - g_a_er * (1.0 - f - f3c)
              + g_e_yb * b - g_a_yb * (1.0 - b) - loss_col)
+        if amp.concentration is not None:
+            g = g - amp.concentration.photodarkening_loss_per_m(b2)[None, :]
         return g, s_er2_col * f + s_er3_col * f3c + s_yb_col * b
 
     # ---- seed the reservoirs ---------------------------------------------------------------
@@ -1426,7 +1685,7 @@ def simulate_transient_eryb(amp, t_grid, *,
         b2n = None
         f3 = None
         if nbar2_0 is None:
-            r0 = amp0.solve(n_nodes=zz.size)
+            r0 = _converged_seed_solve(amp0, zz.size)
             f2 = np.interp(zz, r0.z_m, np.asarray(r0.nbar2_z, float))
             if n3:
                 f3 = np.interp(zz, r0.z_m, np.asarray(r0.meta["er_4i11_2_z"], float))
@@ -1674,6 +1933,13 @@ def simulate_transient_eryb(amp, t_grid, *,
         ase_fwd_idx = ase_bwd_idx = np.empty(0, int)
         ase_lam = ase_dnu = ase_f_zt = ase_b_zt = None
     prof_zt = np.empty((Nt, K, n_nodes)) if store_profiles else None
+    # step-stability monitor (2026-11-02; block comment at _OscillationMonitor): read-only in
+    # every mode; in "auto" its first detection LATCHES the self-consistent step for the rest of
+    # the march (the instability is a property of dt and the operating point, so stepping back
+    # to the lagged step after a sticky window would only re-arm it).
+    osc = _OscillationMonitor()
+    osc_latched = False
+    osc_unremedied = False
 
     for it in range(Nt):
         t = float(t_grid[it])
@@ -1681,6 +1947,12 @@ def simulate_transient_eryb(amp, t_grid, *,
         bb = b2 if b2n is None else fc * b2 + (1.0 - fc) * b2n
         g, s = g_s(f2, bb, f3)
         P = _propagate_fixed(z, g, s, bc, u)
+        if osc.update(it, t, np.concatenate([v for v in (f2, f3, b2, b2n) if v is not None]),
+                      bc):
+            if ase_mode == "auto" and not osc_latched:
+                osc_latched = True
+            else:
+                osc_unremedied = True
         # spatial-resolution monitor (z_refine; read-only): the largest per-cell gain jump of
         # the gain this step propagated through -- the single-ion monitor, the same kernel
         worst_cell_jump = max(worst_cell_jump, _max_cell_jump(g, dz))
@@ -1747,7 +2019,7 @@ def simulate_transient_eryb(amp, t_grid, *,
             # which is the predictive half of the switch criterion (a cold start looks perfectly
             # healthy right up to the step that inverts the fiber).
             y_exp = None
-            take_sc = ase_mode == "self_consistent"
+            take_sc = ase_mode == "self_consistent" or osc_latched
             if not take_sc:
                 y_exp = advance(y, P, dt)
                 gi_proj = 0.0
@@ -1814,16 +2086,16 @@ def simulate_transient_eryb(amp, t_grid, *,
     # Only the quasi-static mode treats the audit-A-7 margins as a reason to distrust the result;
     # the other two step through that regime on purpose (see simulate_transient).
     if ase_mode == "quasi_static":
-        march_valid = not reasons
+        march_valid = not reasons and not osc_unremedied
     else:
         sc_reasons = _self_consistent_reasons(ctrl, nonfinite)
-        march_valid = not sc_reasons
+        march_valid = not sc_reasons and not osc_unremedied
         if sc_reasons:
             warnings.warn(
                 "simulate_transient(ase_mode=%r): the self-consistent ASE step did not close on "
                 "this co-doped amplifier -- " % ase_mode + "; ".join(sc_reasons) + ". Raise "
                 "ase_max_iter, loosen ase_tol, or shorten the time step; meta['march_valid'] is "
-                "False and the returned arrays must not be trusted.", RuntimeWarning,
+                "False and the returned arrays must not be trusted.", UnreliableResultWarning,
                 stacklevel=2)
     if reasons and ase_mode == "quasi_static":
         warn_msg = (
@@ -1836,7 +2108,8 @@ def simulate_transient_eryb(amp, t_grid, *,
             "narrow/disable the ASE bands. Sub-stepping does not help -- the frozen-population "
             "propagation is already exact. See TransientResult.meta['quasi_static_valid'] "
             "(audit A-7, co-doped extension).")
-        warnings.warn(warn_msg, RuntimeWarning, stacklevel=2)
+        warnings.warn(warn_msg, UnreliableResultWarning, stacklevel=2)
+    osc_msg = _warn_oscillation(osc, ase_mode) if osc_unremedied else None
 
     mesh_resolved = _warn_unresolved_mesh(
         worst_cell_jump, r, n_nodes, z.size,
@@ -1849,8 +2122,12 @@ def simulate_transient_eryb(amp, t_grid, *,
             # spatial resolution (z_refine): exactly the single-ion march's three keys
             "z_refine": int(r), "max_cell_gain_jump": float(worst_cell_jump),
             "mesh_resolved": bool(mesh_resolved),
-            "quasi_static_valid": not reasons,
+            # False also when the step-stability monitor fired on a quasi-static step, even if
+            # "auto" then remedied it (march_valid stays True in that case)
+            "quasi_static_valid": not reasons and osc.first_step is None,
             "march_valid": bool(march_valid),
+            "oscillation_warning": osc_msg, "oscillation_latched_self_consistent": osc_latched,
+            **osc.meta(),
             "max_ase_to_launched": float(worst_ase_ratio),
             "max_ase_gain_integral": float(worst_gain_integral),
             "nonfinite_powers": bool(nonfinite),
