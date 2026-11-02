@@ -27,6 +27,8 @@ from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_g
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
+from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pulse_width,
+                                          source_pulse, z_grid)
 # audit D-3 / D-15: the absorber-thickness + probe-placement rule and the empty-band backstop are
 # SINGLE-SOURCED in solve2d (all three 3-D front ends below call the same helper), so the wave-3
 # redesign -- npml floor, attenuation-budget probe clearance, source demoted to a warning -- lands
@@ -89,7 +91,8 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     and a homogeneous-superstrate incident reference (T carries the n_sub/n_super flux ratio). Reduces
     byte-identically to vacuum at n_super=n_sub=1.
 
-    backend: 'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path), 'numpy' (reference),
+    backend: default 'numpy' (the reference; audit P-16 -- not 'auto', and given D-7 it stays so),
+    'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path),
     'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU. A Lorentz pole
     (lorentz_delta_eps) is carried by the numpy/numba/cupy 3D kernels (per E-component); the jax 3D backend
     does not yet, and raises if a Lorentz layer is run on it."""
@@ -103,11 +106,8 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
-
-    def _n_band_max(L):
-        return max(abs(np.sqrt(L.eps_at(w))) for w in w_band)
-    n_max = max(1.0, n_super, n_sub, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    n_max = layer_band_index_max(layers, w_band, (n_super, n_sub))   # audit D-15: shared (grid.py)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     if nx is None:
         nx = max(4, int(round(period_x_m / dz)))
     if ny is None:
@@ -116,11 +116,6 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     dy = period_y_m / ny
     # 3D CFL: dt <= courant / (c sqrt(1/dx^2 + 1/dy^2 + 1/dz^2))
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
-
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
 
     shape = (nx, ny, nz)
     eps_inf = np.ones(shape); wp = np.zeros(shape); gam = np.zeros(shape); chi3 = np.zeros(shape)
@@ -164,18 +159,13 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
                 "eps_inf to the lateral pattern max so n_max/dz are derived from it.".format(
                     _n_lat, n_max, _n_lat / n_max - 1.0))
 
-    k_src = max(2, int(round((0.35 * pad) / dz)))
-    k_pL = int(round((0.7 * pad) / dz))
-    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_3d", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
 
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
+    tau, t0 = pulse_width(f_min, f_max, settle)
     t_ring = _window_memory_s("solve_fdtd_3d", layers, tau)   # audit C3-6 + D-10
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt, t_ring=t_ring)
 
     # Lorentz ADE coefficients (central difference, per E-component); applied to the STRUCTURE run only.
     # d_eps=0 everywhere -> lor=None -> the path is byte-identical to the no-Lorentz solve.
@@ -297,8 +287,8 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
-    n_max = max(1.0, max(max(abs(np.sqrt(L.eps_at(w))) for w in w_band) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    n_max = layer_band_index_max(layers, w_band)             # vacuum ends (audit X-18)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     dx = period_x_m / nx; dy = period_y_m / ny
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
     k_par = (2.0 * np.pi * f_c / C_LIGHT) * np.sin(np.radians(angle_deg))
@@ -306,10 +296,6 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     kx, ky = k_par * np.cos(phi), k_par * np.sin(phi)
     sx, sy = -np.sin(phi), np.cos(phi)                           # s-pol in-plane E direction
 
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
     eps_inf = np.ones((nx, ny, nz)); wp = np.zeros((nx, ny, nz)); gam = np.zeros((nx, ny, nz))
     zc = (np.arange(nz) + 0.5) * dz
     z = pad
@@ -317,17 +303,12 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
         m = (zc >= z) & (zc < z + L.thickness_m)
         eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
         z += L.thickness_m
-    k_src = max(2, int(round((0.35 * pad) / dz)))
-    k_pL = int(round((0.7 * pad) / dz))
-    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_3d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
+    tau, t0 = pulse_width(f_min, f_max, settle)
     t_ring = _window_memory_s("solve_fdtd_3d_oblique", layers, tau)   # audit C3-6 + D-10
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau + t_ring) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt, t_ring=t_ring)
     cpml = cpml_z(nz, dz, dt, npml)
     one = np.ones((nx, ny, nz)); zero = np.zeros((nx, ny, nz))
     bk = resolve_backend(backend)
@@ -349,7 +330,7 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     nf = nsteps // 2 + 1
     f = np.fft.rfftfreq(nsteps, dt)
     proj = (lambda ex, ey: sx * ex.mean(axis=(1, 2)) + sy * ey.mean(axis=(1, 2)))   # s-pol of the x,y-mean
-    meanf = (lambda a: np.fft.fft(a)[:nf])
+    meanf = (lambda a: np.fft.fft(a)[:nf])                    # magnitudes only: audit V-22 idiom 3
     inc_L = meanf(proj(exL_i, eyL_i)); inc_R = meanf(proj(exR_i, eyR_i))
     refl = meanf(proj(exL_t - exL_i, eyL_t - eyL_i)); trans = meanf(proj(exR_t, eyR_t))
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -437,13 +418,9 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
             return max(n_circ, np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
         return max(np.sqrt(L.eps_xx), np.sqrt(L.eps_yy), 1.0)
     n_max = max(1.0, max(_ncell(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave, n_max)
     dx = period_x_m / nx; dy = period_y_m / ny
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dy ** 2 + 1.0 / dz ** 2))
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
     o = np.ones((nx, ny, nz)); zr = np.zeros((nx, ny, nz))
     exx, eyy, ezz = o.copy(), o.copy(), o.copy()
     wp, gam, wc = zr.copy(), zr.copy(), zr.copy()
@@ -483,17 +460,12 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
                 "index {:.3f} from `layers` -- dz is under-resolved by {:.0%}. Size the `layers` "
                 "eps_xx/eps_yy to the lateral pattern max so n_max/dz are derived from it.".format(
                     _n_lat, n_max, _n_lat / n_max - 1.0))
-    k_src = max(2, int(round(0.35 * pad / dz)))
-    k_pL = int(round(0.7 * pad / dz))
-    k_pR = int(round((pad + z_struct + 0.3 * pad) / dz))
+    k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_3d_mo", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
-    tau = 1.0 / (np.pi * (f_max - f_min))
-    t0 = settle * tau
+    tau, t0 = pulse_width(f_min, f_max, settle)
     t_ring = _window_memory_s("solve_fdtd_3d_mo", layers, tau)   # audit C3-6 + D-10
-    nsteps = int(round((2.0 * t0 + 4.0 * Lz / C_LIGHT + 200 * tau + t_ring) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt, t_ring=t_ring)
     cpml = cpml_z(nz, dz, dt, npml)
     exL_i, eyL_i, exR_i, eyR_i = _run_3d_mo(o, o, o, zr, zr, zr, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR,
                                             src, cpml, pol)                                  # vacuum

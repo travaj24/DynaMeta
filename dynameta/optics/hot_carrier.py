@@ -78,7 +78,8 @@ class HotCarrierParams:
       m0_kg         band-edge effective mass
       alpha_per_eV  Kane nonparabolicity (0 -> m* == m0, no plasma shift)
       T_l_K         lattice temperature: the FIXED bath (c_l None) or the INITIAL lattice temp
-                    T_l0 and the substrate-bath reference (c_l set)
+                    T_l0 and the substrate-bath reference (c_l set); must be >= T_e0_K when
+                    G_e_l > 0 (audit D-21: the T_e table cannot go below T_e0)
       T_e0_K        cold electron temperature -- the wp0/gamma0 anchor (U_e == 0 here)
       gamma_p       gamma(T_e) = gamma0 (T_e/T_e0)^gamma_p exponent (0 -> no damping shift)
       mass_exponent kane_mass_of_Te exponent
@@ -116,6 +117,21 @@ class HotCarrierParams:
             raise ValueError("HotCarrierParams: require 0 < T_e0_K < Te_max_K")
         if self.T_l_K <= 0.0:
             raise ValueError("HotCarrierParams: T_l_K must be > 0")
+        # audit D-21: the T_e(U_e) table starts AT T_e0 (U = 0) -- build_hot_carrier_tables cannot
+        # represent T_e < T_e0, and the kernel's np.interp CLAMPS there. With a lattice colder than
+        # T_e0 and G_e_l > 0, the coupling -G (T_e - T_l) drains U_e below 0 while T_e stays pinned
+        # at T_e0, so the drain never shuts off: measured on the test_fdtd_hot_carrier ENZ film
+        # (G = 8e16, T_l = 200 K, T_e0 = 300 K) U_e ended at -7.4e6 J/m^3 against an absorbed
+        # 5.0e-11 J/m^3 -- energy pumped into an un-modelled reservoir, every heated cell, with the
+        # reported T_e map a flat (and false) 300 K. Refuse rather than mis-solve.
+        if self.T_l_K < self.T_e0_K and self.ttm.G_e_l > 0.0:
+            raise ValueError(
+                "HotCarrierParams: T_l_K={:g} K is BELOW T_e0_K={:g} K with G_e_l={:g} > 0. The "
+                "T_e lookup table starts at T_e0 (U_e = 0) and clamps below it, so the electron "
+                "gas would cool into an un-modelled reservoir (U_e -> large negative while T_e "
+                "stays pinned at T_e0; audit D-21). Anchor the cold Drude state at the bath: set "
+                "T_e0_K = T_l_K (and take the layer's drude_wp/gamma at that temperature).".format(
+                    self.T_l_K, self.T_e0_K, self.ttm.G_e_l))
         if int(self.n_table) < 8:
             raise ValueError("HotCarrierParams: n_table must be >= 8")
         if int(self.n_update) < 1:

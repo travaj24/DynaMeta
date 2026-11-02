@@ -180,6 +180,32 @@ class DrudeOptical(OpticalModel):
         if n_m3 is None:
             raise ValueError("DrudeOptical.eps requires n_m3 (carrier density).")
         n = np.asarray(n_m3, dtype=np.float64)
+        m, g = self._mass_gamma(n)
+        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        omega_p2 = n * Q_E * Q_E / (EPS0 * m)
+        return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
+
+    def wp_gamma(self, n_m3: float):
+        """(omega_p, gamma) [rad/s] at the scalar carrier density `n_m3` -- the pair the FDTD Drude
+        ADE consumes (FDTDLayer.drude_wp_rad_s / drude_gamma_rad_s, and solve_fdtd_1d's
+        `drude_of_t` hook). omega_p = sqrt(n e^2 / (eps0 m_opt(n))), so
+        eps_inf - omega_p^2/(w^2 + i w gamma) is THIS model's eps(n) (to rounding).
+
+        audit V-18 (2026-11-02): the name `drude_of_t` carried two return contracts -- a
+        (wp, gamma) tuple in optics.fdtd.solve_fdtd_1d and a DrudeOptical in
+        transient_optics.optical_transient_response -- so the carrier-heating hook the latter
+        documents could not be handed to the FDTD path its own docstring recommends for a
+        sub-round-trip drive. This method is the ONE conversion between them; solve_fdtd_1d now
+        accepts either return type (with `drude_n_m3=` for the DrudeOptical form) and routes the
+        object form through here."""
+        n = float(n_m3)
+        if not (np.isfinite(n) and n > 0.0):
+            raise ValueError("DrudeOptical.wp_gamma: n_m3 must be finite and > 0; got {!r}".format(n_m3))
+        m, g = self._mass_gamma(np.asarray(n, dtype=np.float64))
+        return float(np.sqrt(n * Q_E * Q_E / (EPS0 * float(m)))), float(g)
+
+    def _mass_gamma(self, n):
+        """(m_opt, gamma) at density array/scalar `n`, validated (shared by eps and wp_gamma)."""
         m = (np.asarray(self.m_opt_kg(n), dtype=np.float64)
               if callable(self.m_opt_kg) else float(self.m_opt_kg))
         g = (np.asarray(self.gamma_rad_s(n), dtype=np.float64)
@@ -193,9 +219,7 @@ class DrudeOptical(OpticalModel):
             raise ValueError("DrudeOptical.eps: gamma_rad_s must be finite and >= 0 (a negative damping "
                              "gives Im(eps) < 0 = gain under exp(-i omega t)); a callable gamma_rad_s(n) "
                              "returned a negative/non-finite value.")
-        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
-        omega_p2 = n * Q_E * Q_E / (EPS0 * m)
-        return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
+        return m, g
 
 
 def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,

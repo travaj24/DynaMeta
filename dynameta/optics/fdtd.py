@@ -29,6 +29,7 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
 from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
                                           hot_carrier_guard)
+from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
 
 
 @dataclass
@@ -183,11 +184,8 @@ def _grid_metrics(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave):
             eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
         return abs(np.sqrt(eps))
     n_max = max(1.0, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave,
+                                       n_max)                 # audit D-15: shared with 2-D/3-D
     return dz, pad, z_struct, Lz, nz, n_max, f_min, f_max
 
 
@@ -448,6 +446,42 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     return eL, eR
 
 
+def _fdtd_drude_hook(drude_of_t, n_m3, eps_inf_layer, eps_hook_on):
+    """Normalize a `drude_of_t` hook to the (wp, gamma) contract `_run_tv` consumes (audit V-18).
+
+    THE ONE CONVENTION. `drude_of_t(t)` may return either
+      * a (wp, gamma) pair [rad/s] -- the original solve_fdtd_1d contract, passed through UNCHANGED
+        (same objects, so the march is bit-identical to the pre-shim path); or
+      * a materials.optical_model.DrudeOptical -- the transient_optics.optical_transient_response
+        contract (e.g. the carrier_heating Te(t) hook) -- converted at the carrier density
+        `drude_n_m3` through DrudeOptical.wp_gamma, the single (n, m_opt, gamma) -> (wp, gamma) map.
+    The object form carries its own eps_inf; since this hook moves only wp/gamma (J continuous), that
+    eps_inf must equal the time-varying layer's and the eps_inf_of_t hook must not also be supplied
+    (two owners of eps_inf). Both are checked rather than silently resolved."""
+    def hook(t):
+        out = drude_of_t(t)
+        if hasattr(out, "wp_gamma") and hasattr(out, "eps_inf"):
+            if n_m3 is None:
+                raise ValueError(
+                    "solve_fdtd_1d: drude_of_t returned a {} (the transient_optics contract) but "
+                    "drude_n_m3 was not given -- the (wp, gamma) the FDTD Drude ADE needs depend on "
+                    "the carrier density; pass drude_n_m3= (audit V-18).".format(type(out).__name__))
+            if eps_hook_on:
+                raise ValueError(
+                    "solve_fdtd_1d: a DrudeOptical-returning drude_of_t carries its own eps_inf, so it "
+                    "cannot be combined with eps_inf_of_t (two owners of the layer's eps_inf); "
+                    "return (wp, gamma) tuples instead (audit V-18).")
+            if not np.isclose(float(out.eps_inf), float(eps_inf_layer), rtol=1e-12, atol=0.0):
+                raise ValueError(
+                    "solve_fdtd_1d: drude_of_t returned a DrudeOptical with eps_inf={:g}, but the "
+                    "time-varying layer has eps_inf={:g}; this hook moves only wp/gamma (J is "
+                    "continuous), so the background must match -- use eps_inf_of_t for an eps_inf "
+                    "change (audit V-18).".format(float(out.eps_inf), float(eps_inf_layer)))
+            return out.wp_gamma(n_m3)
+        return out
+    return hook
+
+
 def _second_carrier_hz(spec, f_min, f_max):
     """Resolve the second-carrier frequency [Hz] of a bichromatic source (roadmap 4.2).
 
@@ -481,6 +515,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
                   return_time_trace: bool = False,
                   eps_inf_of_t=None, drude_of_t=None,
                   time_varying_layer: int = 0, n_update: int = 1,
+                  drude_n_m3: Optional[float] = None,
                   z_edges: Optional[np.ndarray] = None, refine: Optional[dict] = None,
                   transition_cells: int = 8) -> FDTD1DResult:
     """Broadband R(f)/T(f) of the layered `layers` (vacuum super/substrate) over
@@ -496,7 +531,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         is realized D-PRESERVING (D continuous, E jumps E_new=E_old*eps_old/eps_new -- THE physically
         correct temporal-boundary condition, Morgenthaler IRE Trans. MTT 6:167 (1958); see _run_tv).
       * drude_of_t(t) -> (wp, gamma) for that layer; the polarization current J is CONTINUOUS, only the
-        J-update coefficients take the new wp/gamma.
+        J-update coefficients take the new wp/gamma. It may instead return a DrudeOptical (the
+        transient_optics / carrier_heating hook contract), converted at the carrier density
+        `drude_n_m3` via DrudeOptical.wp_gamma -- audit V-18; see _fdtd_drude_hook for the one
+        convention and its two consistency checks.
     `n_update` re-derives the affected coefficients every n_update steps (INSTANTANEOUS-PARAMETER
     approximation; see _run_tv for the cost + the rigorous-formulation note). An `eps_inf_of_t` that
     actually JUMPS eps_inf is REFUSED when the designated layer also carries a Kerr chi3
@@ -598,15 +636,6 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         dz_primal = np.diff(z_edges)
         if np.any(dz_primal <= 0.0):
             raise ValueError("solve_fdtd_1d: z_edges must be strictly increasing")
-        # combinations NOT supported with the nonuniform grid in this pass (raise loudly, see docstring)
-        if (eps_inf_of_t is not None) or (drude_of_t is not None):
-            raise NotImplementedError(
-                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
-                "time-varying hooks (eps_inf_of_t/drude_of_t) in this pass; use the uniform grid.")
-        if second_source is not None:
-            raise NotImplementedError(
-                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
-                "bichromatic second_source in this pass; use the uniform grid.")
         # UNIFORM-LIMIT byte-identity (gate 1): an essentially-uniform z_edges must reproduce the legacy
         # scalar path EXACTLY. np.diff of any positional grid carries ~1e-13 ULP noise, so we must NOT
         # feed those diffs to the run; detect uniformity, take the single spacing as the scalar dz, and
@@ -617,6 +646,19 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             nz = int(z_edges.size)
             nonuniform = False
             dz_primal = None
+        # combinations NOT supported with the nonuniform grid in this pass (raise loudly, see docstring).
+        # audit D-18: these refusals used to run BEFORE the uniform-limit detection above, so a
+        # z_edges that collapses back to the supported uniform kernel (uniform_z_edges(...), the
+        # documented bit-identity gate) was still refused with the time-varying hooks or a
+        # second_source. They now fire only on a grid that is genuinely nonuniform.
+        if nonuniform and ((eps_inf_of_t is not None) or (drude_of_t is not None)):
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "time-varying hooks (eps_inf_of_t/drude_of_t) in this pass; use the uniform grid.")
+        if nonuniform and second_source is not None:
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "bichromatic second_source in this pass; use the uniform grid.")
 
     if not nonuniform:
         dt = courant * dz / C_LIGHT
@@ -636,9 +678,8 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             if kerr:
                 chi3[m] = L.chi3_m2_V2
             z += L.thickness_m
-        i_src = max(2, int(round((0.35 * pad) / dz)))
-        i_pL = int(round((0.7 * pad) / dz))                # left probe: between source and structure
-        i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))  # right probe: in the sub vacuum
+        # source / left probe (between source and structure) / right probe (in the sub vacuum)
+        i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)  # audit D-15: shared with 2-D/3-D
     else:
         # nonuniform primal grid: E nodes = z_edges (material colocated at nodes); H on the dual grid.
         # single global dt from the SMALLEST cell (Courant S = c dt / dz_min <= 1, guarded).
@@ -672,6 +713,11 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # OPT-IN (roadmap 2.2): cell mask of the designated time-varying layer. Built only when a hook is
     # supplied, so the default (no-hook) path below is byte-for-byte the legacy code.
     _hooks_on = (eps_inf_of_t is not None) or (drude_of_t is not None)
+    if drude_of_t is not None:                             # audit V-18: accept both hook contracts
+        drude_of_t = _fdtd_drude_hook(drude_of_t, drude_n_m3,
+                                      layers[time_varying_layer].eps_inf
+                                      if 0 <= time_varying_layer < len(layers) else float("nan"),
+                                      eps_inf_of_t is not None)
     tv_mask = None
     if _hooks_on:
         tv_mask = np.zeros(nz, dtype=bool)
@@ -685,24 +731,43 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             raise ValueError("solve_fdtd_1d: time_varying_layer={} designates no grid cells".format(
                 time_varying_layer))
 
-    # modulated-Gaussian source covering [f_min, f_max]
-    tau = 1.0 / (np.pi * (f_max - f_min))              # pulse width ~ inverse bandwidth
-    t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    # modulated-Gaussian source covering [f_min, f_max] (pulse width ~ inverse bandwidth)
+    tau, t0 = pulse_width(f_min, f_max, settle)        # audit D-15: shared with 2-D/3-D
 
     # OPT-IN bichromatic source (roadmap 4.2): ADD a second carrier to the SAME injected waveform. This
     # block only runs when second_source is supplied, so `src` (and every downstream array) is byte-
     # identical to the legacy single-color path when it is None. The reference (vacuum) run below reuses
     # this same composite `src`, so the incident field it records carries both colors (per-color incident
     # powers -> harmonics.mixing_spectrum on incident_left/incident_right).
+    # audit D-19: the second pulse's own tau_s / t0_s used to be ignored by the run length, which was
+    # sized from the PRIMARY pulse alone -- a later or longer second pulse was cut off mid-flight with
+    # no warning (spectral leakage into every mixing band). Its end (t0_s + settle*tau_s, the
+    # primary's 2*t0 rule) and its 200*tau_s ring-down tail now extend the window; the defaults
+    # (tau_s = tau, t0_s = t0) reproduce the single-pulse window bit-for-bit. A pulse centred too
+    # close to t = 0 (switched on abruptly at the start of the record) now warns.
     f_c2 = None
+    t_end2 = tail2 = None
     if second_source is not None:
         f_c2 = _second_carrier_hz(second_source, f_min, f_max)
         amp_rel = float(second_source.get("amplitude_rel", 1.0))
         tau2 = float(second_source.get("tau_s", tau))
         t02 = float(second_source.get("t0_s", t0))
+        if not (tau2 > 0.0 and np.isfinite(tau2) and np.isfinite(t02)):
+            raise ValueError("second_source: 'tau_s' must be finite and > 0 and 't0_s' finite; got "
+                             "tau_s={!r}, t0_s={!r}".format(tau2, t02))
+        t_end2, tail2 = t02 + settle * tau2, tau2
+        if t02 < 3.0 * tau2:                               # the record starts at t = 0
+            warnings.warn(
+                "solve_fdtd_1d bichromatic source: the second pulse is centred at t0_s={:.3g} s, "
+                "only {:.2f} of its widths tau_s={:.3g} s after t = 0, so the march switches it on "
+                "already at {:.1e} of its peak -- an abrupt turn-on that leaks broadband content "
+                "into every mixing band (audit D-19). Use t0_s >= 3-4 tau_s (the primary uses "
+                "settle*tau = {:.3g} s).".format(t02, t02 / tau2, tau2,
+                                                 float(np.exp(-(t02 / tau2) ** 2)), t0),
+                stacklevel=2)
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt,
+                                      t_end_s=t_end2, tail_tau_s=tail2)
+    if second_source is not None:
         src = src + (source_amp * amp_rel
                      * np.exp(-((tgrid - t02) / tau2) ** 2)
                      * np.cos(2.0 * np.pi * f_c2 * (tgrid - t02)))

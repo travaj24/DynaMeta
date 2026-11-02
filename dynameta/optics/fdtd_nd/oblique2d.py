@@ -23,8 +23,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import EPS0, MU0
-from dynameta.optics.fdtd_nd.backends import njit
-
+from dynameta.optics.fdtd_nd.backends import check_scan_length, njit
 
 
 # =====================================================================================================
@@ -37,8 +36,6 @@ from dynameta.optics.fdtd_nd.backends import njit
 # source). Validated vs s-pol TMM at theta(f). Vacuum ends; uniform or laterally-uniform (the envelope of a
 # plane wave has no transverse variation, so nx is small).
 # =====================================================================================================
-
-
 
 
 def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
@@ -55,19 +52,35 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     eyL = np.empty((nsteps, nx), complex); hxL = np.empty((nsteps, nx), complex)
     eyR = np.empty((nsteps, nx), complex); hxR = np.empty((nsteps, nx), complex)
     cmu = dt / MU0; ikx = 1j * kx
+    # audit P-7 (2026-11-02): the P-1 hoists, applied to this complex-dtype copy of the pattern --
+    # the per-step `np.zeros` curl, the two `np.roll` copies, `EPS0*eps_inf/dt` built twice and the
+    # loop-invariant denominator, and the Drude ADE run with wp identically 0 (bJ == 0 exactly, so
+    # Jy never leaves 0). Same arithmetic on the same operands, gated on an EXACT zero test like
+    # P-1: every probe array is BIT-IDENTICAL (tobytes) on a passive and a Drude fixture, TE and TM.
+    # Measured nx=8, nz=400, 800 steps: TE 0.186 -> 0.134 s, TM 0.218 -> 0.143 s passive; TE 0.178 ->
+    # 0.147 s, TM 0.219 -> 0.190 s Drude.
+    e0e = EPS0 * eps_inf / dt
+    denom = e0e + bJ / 2.0
+    do_drude = bool(np.any(wp))
+    curl = np.zeros((nx, nz), complex)            # column 0 stays 0; columns 1: are rewritten
+    Ey_roll = np.empty((nx, nz), complex)         # == np.roll(Ey, -1, axis=0), no per-step alloc
+    Hz_roll = np.empty((nx, nz), complex)         # == np.roll(Hz,  1, axis=0)
     for n in range(nsteps):
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
         psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
         Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
-        Hz += -cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx + ikx * Ey)      # dEy/dx -> d/dx + i kx
+        Ey_roll[:-1] = Ey[1:]; Ey_roll[-1] = Ey[0]
+        Hz += -cmu * ((Ey_roll - Ey) / dx + ikx * Ey)                      # dEy/dx -> d/dx + i kx
         dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
         psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
-        curl = np.zeros((nx, nz), complex)
-        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
-        curl -= (Hz - np.roll(Hz, 1, axis=0)) / dx + ikx * Hz              # dHz/dx -> d/dx + i kx
-        denom = EPS0 * eps_inf / dt + bJ / 2.0
-        Eynew = (EPS0 * eps_inf / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
-        Jy = aJ * Jy + bJ * (Eynew + Ey)
+        curl[:, 1:] = dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        Hz_roll[0] = Hz[-1]; Hz_roll[1:] = Hz[:-1]
+        curl -= (Hz - Hz_roll) / dx + ikx * Hz                             # dHz/dx -> d/dx + i kx
+        if do_drude:
+            Eynew = (e0e * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+            Jy = aJ * Jy + bJ * (Eynew + Ey)
+        else:                                                              # wp == 0: Jy stays 0
+            Eynew = (e0e * Ey + curl) / denom
         Eynew[:, k_src] += src[n]
         Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0
         Ey = Eynew
@@ -92,27 +105,40 @@ def _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     exL = np.empty((nsteps, nx), complex); hyL = np.empty((nsteps, nx), complex)
     exR = np.empty((nsteps, nx), complex); hyR = np.empty((nsteps, nx), complex)
     cmu = dt / MU0; ikx = 1j * kx; e0dt = EPS0 / dt
+    # audit P-7: the same hoists as the TE copy above (and as P-1) -- bit-identical probes.
+    e0e = e0dt * eps_inf
+    denom = e0e + bJ / 2.0
+    do_drude = bool(np.any(wp))
+    curlx = np.zeros((nx, nz), complex)           # column 0 stays 0; columns 1: are rewritten
+    Ez_roll = np.empty((nx, nz), complex)         # == np.roll(Ez, -1, axis=0)
+    Hy_roll = np.empty((nx, nz), complex)         # == np.roll(Hy,  1, axis=0)
     for n in range(nsteps):
         # H update: mu0 dHy/dt = dEz/dx - dEx/dz  (Hy at k+1/2; CPML-stretched dEx/dz)
         dEx_dz = (Ex[:, 1:] - Ex[:, :-1]) / dz
         psi_hyz[:, :-1] = bh[:-1] * psi_hyz[:, :-1] + ch[:-1] * dEx_dz
-        dEz_dx = (np.roll(Ez, -1, axis=0) - Ez) / dx + ikx * Ez            # dEz/dx -> d/dx + i kx
+        Ez_roll[:-1] = Ez[1:]; Ez_roll[-1] = Ez[0]
+        dEz_dx = (Ez_roll - Ez) / dx + ikx * Ez                            # dEz/dx -> d/dx + i kx
         Hy[:, :-1] += cmu * (dEz_dx[:, :-1] - (dEx_dz / kh[:-1] + psi_hyz[:, :-1]))
         # E update -- Ex: eps dEx/dt = -dHy/dz (CPML-stretched) - Jx
         dHy_dz = (Hy[:, 1:] - Hy[:, :-1]) / dz
         psi_exz[:, 1:] = be[1:] * psi_exz[:, 1:] + ce[1:] * dHy_dz
-        curlx = np.zeros((nx, nz), complex)
         curlx[:, 1:] = -(dHy_dz / ke[1:] + psi_exz[:, 1:])
-        denom = e0dt * eps_inf + bJ / 2.0
-        Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
-        Jx = aJ * Jx + bJ * (Exn + Ex)
+        if do_drude:
+            Exn = (e0e * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+            Jx = aJ * Jx + bJ * (Exn + Ex)
+        else:                                                              # wp == 0: Jx stays 0
+            Exn = (e0e * Ex + curlx) / denom
         Exn[:, k_src] += src[n]
         Exn[:, 0] = 0.0; Exn[:, -1] = 0.0                                  # PEC backing (tangential E)
         Ex = Exn
         # E update -- Ez: eps dEz/dt = +dHy/dx (periodic x) - Jz
-        curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx + ikx * Hy             # dHy/dx -> d/dx + i kx
-        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
-        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Hy_roll[0] = Hy[-1]; Hy_roll[1:] = Hy[:-1]
+        curlz = (Hy - Hy_roll) / dx + ikx * Hy                             # dHy/dx -> d/dx + i kx
+        if do_drude:
+            Ezn = (e0e * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
+            Jz = aJ * Jz + bJ * (Ezn + Ez)
+        else:
+            Ezn = (e0e * Ez + curlz) / denom
         Ez = Ezn
         exL[n] = Ex[:, k_pL]; hyL[n] = 0.5 * (Hy[:, k_pL] + Hy[:, k_pL - 1])
         exR[n] = Ex[:, k_pR]; hyR[n] = 0.5 * (Hy[:, k_pR] + Hy[:, k_pR - 1])
@@ -234,6 +260,7 @@ def run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry/material) straight through
     the oblique scan (the inverse-design path at angle). kx=0 with a real source stays real. Byte-equal to
     the NumPy kernel to ~1e-12. Drude only (no Lorentz/Kerr -- the oblique kernel carries Drude)."""
+    check_scan_length("run_2d_te_oblique_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)               # complex128 + match the reference
     import jax.numpy as jnp
@@ -273,14 +300,12 @@ def run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     return eyL, hxL, eyR, hxR
 
 
-_run_2d_te_oblique_jax = run_2d_te_oblique_jax               # back-compat alias (pre-promotion name)
-
-
 def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
     """JAX (XLA, lax.scan) twin of _run_2d_tm_oblique (p-pol complex-envelope Bloch): the SAME physics
     (in-plane Ex,Ez + Hy, d/dx -> d/dx + i kx, semi-implicit Drude ADE on Jx,Jz, CFS-CPML + PEC in z) as a
     single traced/compiled DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry) for
     the TM inverse-design path at angle. Byte-equal to the NumPy TM kernel to ~1e-12. Drude only."""
+    check_scan_length("run_2d_tm_oblique_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
@@ -323,9 +348,6 @@ def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     _, (exL, hyL, exR, hyR) = lax.scan(step, tuple(z0 for _ in range(7)),
                                        jnp.asarray(src, dtype=jnp.complex128))
     return exL, hyL, exR, hyR
-
-
-_run_2d_tm_oblique_jax = run_2d_tm_oblique_jax               # back-compat alias (pre-promotion name)
 
 
 def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s"):
