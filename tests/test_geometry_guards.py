@@ -388,7 +388,13 @@ def test_plain_design_results_unchanged_tmm():
 @needs_lum
 def test_plain_design_results_unchanged_rcwa_bridge():
     from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
-    r = make_lumenairy_rcwa_solver(n_orders=5)(_pillar(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
+    # inclusion_model='raster' EXPLICITLY: this pins the 810086b point-raster numbers (its purpose
+    # is byte-identity of the plain-design raster path). Since v0.13.0 the default is 'auto', which
+    # solves this rectangle pillar analytically (R 0.19094726805155943 -- 8.3e-5 from the S = 128
+    # raster, the raster's edge-quantization error; 2026-11-02). n_orders 5 <= 16, so the
+    # 2026-11-02 raster lattice max(128, 8 N) is the same S = 128 as at 810086b.
+    r = make_lumenairy_rcwa_solver(n_orders=5, inclusion_model="raster")(
+        _pillar(), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     assert (r.R, r.T) == pytest.approx((0.1910304737839642, 0.7791097782748155), abs=1e-12)
     # the phase is in DEGREES: one shared abs=1e-12 bounded it at 1.7e-14 rad, below the BLAS
     # reduction-order spread (capping BLAS at 2 threads moves it 1.7e-11 deg = 3e-13 rad,
