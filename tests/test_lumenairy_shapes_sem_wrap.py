@@ -127,7 +127,11 @@ def test_inclusion_model_auto_falls_back_and_analytic_refuses():
             design_to_rcwa_stack(d, LAM, n_orders=3, inclusion_model="analytic")
     stk, _ = design_to_rcwa_stack(ok, LAM, n_orders=3, inclusion_model="auto")
     assert [L.kind for L in stk.layers] == ["shapes"]
-    stk_r, _ = design_to_rcwa_stack(ok, LAM, n_orders=3)          # default stays the raster
+    # the DEFAULT is 'auto' since v0.13.0 (user decision 2026-11-02): the representable layer is
+    # the analytic one; 'raster' is the explicit opt-out
+    stk_d, _ = design_to_rcwa_stack(ok, LAM, n_orders=3)
+    assert [L.kind for L in stk_d.layers] == ["shapes"]
+    stk_r, _ = design_to_rcwa_stack(ok, LAM, n_orders=3, inclusion_model="raster")
     assert [L.kind for L in stk_r.layers] == ["iso"]
     with pytest.raises(ValueError, match="layer_absorption"):
         make_lumenairy_rcwa_solver(absorption=True, inclusion_model="analytic")
@@ -137,6 +141,80 @@ def test_inclusion_model_auto_falls_back_and_analytic_refuses():
     r = make_lumenairy_rcwa_solver(n_orders=3, absorption=True, inclusion_model="auto")(
         ok, None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
     assert r.A_independent is not None and r.A_independent > 1e-3
+
+
+def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent():
+    """lumenairy's shapes layers are LAURENT BY CONTRACT (RCWAStack.add_layer raises for
+    formulation='li' with shapes=). 2026-11-02: under 'auto' a non-Laurent request ('li'/'fff')
+    RASTERIZES the inclusion layer and the requested rule reaches lumenairy (it used to be
+    silently replaced by Laurent on the shapes path); 'analytic' + 'li'/'fff' raises ValueError,
+    in design_to_rcwa_stack AND at solver construction; 'auto' + 'laurent' stays analytic. The
+    rasterized layer carries the requested formulation ('fff' is lumenairy's alias of 'li')."""
+    from dynameta.geometry import Inclusion
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.lumenairy_bridge import design_to_rcwa_stack, make_lumenairy_rcwa_solver
+    d = _design([Inclusion(Circle(P / 2, P / 2, 150e-9), "hi")])
+    for form in ("fff", "li"):
+        stk, _ = design_to_rcwa_stack(d, LAM, n_orders=3, inclusion_model="auto",
+                                      formulation=form)
+        assert [L.kind for L in stk.layers] == ["iso"]
+        assert stk.layers[0].formulation == "li"
+        with pytest.raises(ValueError, match="requires formulation='laurent'"):
+            design_to_rcwa_stack(d, LAM, n_orders=3, inclusion_model="analytic",
+                                 formulation=form)
+        with pytest.raises(ValueError, match="requires formulation='laurent'"):
+            make_lumenairy_rcwa_solver(inclusion_model="analytic", formulation=form)
+    stk, _ = design_to_rcwa_stack(d, LAM, n_orders=3, inclusion_model="auto",
+                                  formulation="laurent")
+    assert [L.kind for L in stk.layers] == ["shapes"]
+    # auto + fff is the SAME solve as an explicit raster + fff (bit for bit)
+    a = _solve(d, n_orders=3, inclusion_model="auto", formulation="fff")
+    r = _solve(d, n_orders=3, inclusion_model="raster", formulation="fff")
+    assert (a.R, a.T, a.r) == (r.R, r.T, r.r)
+
+
+def test_default_raster_lattice_does_not_jump_at_high_n_orders():
+    """The default raster lattice is S = max(128, 8 N) (2026-11-02; was max(128, 4 N + 1)).
+    Fixture = validation/lumenairy_pmm_bridge GATE B (600 nm period, 50 % metal lines eps -20+2i
+    centred at P/2, 120 nm, air | glass 1.5, 1.31 um, normal incidence), TE (E_y along the lines,
+    where Laurent is the valid rule), oracle = the 1-D PMM (degree 32: self-converged to 1e-10 in
+    degree on this TE cell). MEASURED 2026-11-02 |R - PMM| at N = 16 / 32 / 48:
+      new default S (128 / 256 / 384)      4.8e-5 / 1.7e-5 / 8.3e-6   (monotone)
+      old lattice (128 / 129 / 193)        4.8e-5 / 4.6e-3 / 3.1e-3   (jumps ~100x at N = 32)
+    The old jump is EDGE QUANTIZATION, not aliasing: the odd lattice S = 4 N + 1 puts the edges
+    x = P/4, 3P/4 mid-pixel (realised duty 65/129 = 0.5039). cell_samples=128 is the documented way
+    to reproduce the old lattice (explicit values keep the old formula); the default is
+    byte-identical to it for N <= 16."""
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver
+    from dynameta.optics.lumenairy_bridge.pmm_backend import make_lumenairy_pmm_solver
+    per, lam = 600e-9, 1.31e-6
+    reg = MaterialRegistry()
+    for n, e in (("air", 1.0), ("glass", 2.25), ("metal", complex(-20.0, 2.0))):
+        reg.add(Material(n, ConstantOptical(complex(e))))
+    lines = Inclusion(shape=Rectangle(per / 2, per / 2, 0.5 * per, per), material="metal")
+    d = Design(name="gb", unit_cell=UnitCell.square(per),
+               stack=Stack(layers=[Layer("grating", 120e-9, "air", inclusions=[lines])],
+                           superstrate_material="air", substrate_material="glass"),
+               electrodes=[], materials=reg, optical=OpticalSpec(polarization="y"))
+    args = (d, None, {}, lam, 1.0 + 0j, 1.5 + 0j)
+    ref = make_lumenairy_pmm_solver(degree=32, n_orders=21)(*args).R
+
+    def err(n, **kw):
+        return abs(make_lumenairy_rcwa_solver(n_orders=n, inclusion_model="raster", **kw)(
+            *args).R - ref)
+    new = [err(n) for n in (16, 32, 48)]
+    old = [err(n, cell_samples=128) for n in (16, 32, 48)]
+    assert new[0] > new[1] > new[2], new                   # measured 4.8e-5 > 1.7e-5 > 8.3e-6
+    assert new[2] < 2e-5, new
+    assert old[1] > 50.0 * new[1], (old, new)              # the old lattice's jump (4.6e-3)
+    assert new[0] == old[0]                                # N <= 16: byte-identical lattices
+    # the analytic path (the 'auto' default here) converges monotonically below the raster
+    ana = [abs(make_lumenairy_rcwa_solver(n_orders=n)(*args).R - ref) for n in (16, 32, 48)]
+    assert ana[0] > ana[1] > ana[2] and ana[2] < 3e-6, ana  # measured 3.5e-5 / 4.5e-6 / 1.3e-6
 
 
 # ---------------------------------------------------------------------------------------------
