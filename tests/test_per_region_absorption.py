@@ -41,6 +41,12 @@ def test_tmm_solver_populates_map():
     res = TmmLayeredSolver().solve(_stack(), 1300e-9, _Opt())
     assert res.per_region_absorption is not None
     assert abs(sum(res.per_region_absorption.values()) - res.A) < 1e-9
+    # audit S5-21 (wave-7, 2026-11-02): the OpticalResult contract is sum(map) == A_independent;
+    # the TMM producer left A_independent None (FAILS on the old code). It is the in-layer flux
+    # measure, independent of the 1 - R - T closure A, and agrees with it to rounding.
+    assert res.A_independent is not None
+    assert res.A_independent == sum(res.per_region_absorption.values())
+    assert res.A_independent > 0.01 and abs(res.A_independent - res.A) < 1e-12
 
 
 def test_cache_drops_per_region_map():

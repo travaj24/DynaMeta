@@ -426,6 +426,48 @@ def test_signal_and_idler_marginals_are_untouched_by_the_q13_fix():
     assert np.array_equal(hb["idler_marginal"], _trapz(P, wsg, axis=0))
 
 
+def test_signal_idler_widths_on_a_COLLAPSED_axis_are_refused_not_reported_resolved():
+    """wave-7 (2026-11-02). The docstring promised the signal / idler widths were "unaffected" by
+    the bin-collapse defect; on that very example (a 5 rad/s span on a 1.2e15 rad/s carrier) each
+    AXIS rounds to 21 distinct float64 values, and the old code reported a Gaussian of signal
+    FWHM 1.1774 as 1.0848 (N = 100) / 1.0 (N = 400, 801) with signal_bandwidth_resolved True.
+    Two fixes, both pinned here:
+      (a) a supplied axis with repeated values -> signal / idler width nan + UnreliableResultWarning
+          + *_resolved False (FAILS on the old code: it returned a finite, 'resolved' width);
+      (b) the half-max crossings are interpolated as offsets, so an axis that DOES resolve its
+          samples but sits on a carrier is no longer rounded to the carrier's ulp: on the
+          21-distinct-value axis itself (JSA sampled at those values) the old code gave exactly
+          1.0, the offset form 1.18897, the same number the carrier-free axis gives."""
+    from dynameta.optics.spdc_design import _fwhm_resolved
+    from dynameta.warning_types import UnreliableResultWarning
+    true_fwhm = 2.0 * np.sqrt(np.log(2.0) / 2.0)                 # |f|^2 = exp(-2 x^2 - 2 y^2)
+    for N in (100, 400, 801):
+        xo = np.linspace(-2.5, 2.5, N)
+        g = 1.2e15 + xo
+        assert np.unique(g).size == 21                          # the collapse itself
+        F = np.exp(-xo[:, None] ** 2 - xo[None, :] ** 2)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            hb = heralded_bandwidths(F, g, g)
+        for k in ("signal_bandwidth", "idler_bandwidth"):
+            assert np.isnan(hb[k]) and hb[k + "_resolved"] is False, (N, k, hb[k])
+        msgs = [str(w.message) for w in rec if issubclass(w.category, UnreliableResultWarning)]
+        assert sum("distinct float64 values" in m for m in msgs) == 2, (N, msgs)
+        # bidirectional: the SAME JSA on carrier-OFFSET axes is resolved, right, and not flagged
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            ho = heralded_bandwidths(F, xo, xo)
+        assert not [w for w in rec if issubclass(w.category, RuntimeWarning)], N
+        assert ho["signal_bandwidth_resolved"] is True
+        assert ho["signal_bandwidth"] == pytest.approx(true_fwhm, rel=2e-3), N
+    # (b) the crossing arithmetic: a strictly-distinct 21-point axis on the carrier
+    xq = np.linspace(-2.5, 2.5, 21)
+    sig = np.exp(-2.0 * xq ** 2)
+    w_car, ok_car = _fwhm_resolved(1.2e15 + xq, sig)
+    w_off, _ = _fwhm_resolved(xq, sig)
+    assert ok_car and w_car == pytest.approx(w_off, rel=1e-12) and abs(w_car - 1.0) > 0.18, w_car
+
+
 # ------------------------------------------------------------------ gate 8: Schmidt number
 def test_schmidt_separable_matched_and_long_crystal():
     span, N = 5.0e12, 401

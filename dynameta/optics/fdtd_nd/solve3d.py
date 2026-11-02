@@ -44,12 +44,13 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
     """Run ONE 3D pass on the named backend, returning the eight probe planes as NumPy arrays (so the
     downstream FFT / R-T extraction is backend-agnostic). 'numba' = the fused threaded CPU kernel (the
     fast 3D path); 'numpy'/'cupy' = the vectorized reference loop. `lor`=(C1,C2,C3) per-cell Lorentz ADE
-    coefficients or None. (The jax 3D kernel does not carry the Lorentz ADE yet -> guarded upstream.)
-    chi2/raman/gain (R15/R20) run on the numpy/cupy vectorized path only in 3D; numba/jax raise."""
+    coefficients or None. chi2/raman/gain (R15/R20) run on the numpy/cupy vectorized path and on
+    jax in 3D (audit S2-12, wave-7 2026-11-02: the jax 3D kernel now carries lor/chi2/raman/gain,
+    ported from run_3d, parity-gated vs numpy); numba carries Lorentz only and raises on the rest."""
     (ke, be, ce), (kh, bh, ch) = cpml
     nonlinear3 = chi2 is not None or raman is not None or gain is not None
-    if nonlinear3 and name not in ("numpy", "cupy"):
-        raise NotImplementedError("3D chi2/Raman/gain run on backend='numpy' (or cupy) only; got "
+    if nonlinear3 and name not in ("numpy", "cupy", "jax"):
+        raise NotImplementedError("3D chi2/Raman/gain run on backend='numpy' (or cupy / jax) only; got "
                                   "backend={!r}".format(name))
     if name == "numba":
         has_lor = lor is not None
@@ -58,10 +59,8 @@ def _dispatch_3d(name, eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_
         return _te3d_numba(eps_inf, wp, gam, chi3, ke, be, ce, kh, bh, ch, dx, dy, dz, dt,
                            nsteps, k_src, k_pL, k_pR, src, C1, C2, C3, has_lor)
     if name == "jax":
-        if lor is not None:
-            raise NotImplementedError("the jax 3D backend does not carry the Lorentz ADE yet; use "
-                                      "backend='numba' or 'numpy' for a 3D Lorentz material.")
-        out = run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml)
+        out = run_3d_jax(eps_inf, wp, gam, chi3, dx, dy, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml,
+                         lor=lor, chi2=chi2, raman=raman, gain=gain)
         return tuple(np.asarray(v) for v in out)            # JAX arrays -> NumPy for the FFT/R-T stage
     if name == "cupy" and xp is np:
         import cupy as xp
@@ -94,8 +93,8 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     backend: default 'numpy' (the reference; audit P-16 -- not 'auto', and given D-7 it stays so),
     'auto'/'numba' (the fused threaded CPU kernel = the fast 3D path),
     'jax' (the differentiable XLA scan, for 3D inverse design), or 'cupy'/xp for the GPU. A Lorentz pole
-    (lorentz_delta_eps) is carried by the numpy/numba/cupy 3D kernels (per E-component); the jax 3D backend
-    does not yet, and raises if a Lorentz layer is run on it."""
+    (lorentz_delta_eps) is carried by the numpy/numba/cupy/jax 3D kernels (per E-component); chi2 / Raman /
+    gain by numpy/cupy/jax (audit S2-12, 2026-11-02: jax used to raise on all four)."""
     if abs(complex(n_super).imag) > 1e-9 or abs(complex(n_sub).imag) > 1e-9:   # mirror the FEM/2D guard
         raise NotImplementedError("solve_fdtd_3d: R/T and the energy budget are defined only for LOSSLESS "
                                   "end media (Im(n)=0); got n_super={}, n_sub={}.".format(n_super, n_sub))
