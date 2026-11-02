@@ -41,11 +41,22 @@ entry point below scopes itself honestly and raises for the rest):
   Upstream pin: tests/unit/test_v5_14_2_jax_stacks.py. The PMM twin is SHIPPED (not skipped):
   it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the angle
   and half-space parameters the RCWAStack twin cannot -- the two are complementary. ANGLE
-  CAVEAT (measured on 5.30.0, fix-verification 2026-07-27): the angle gradient is correct
-  OFF-normal (AD==FD to ~6e-7 at theta 0.15-0.4 rad) but INVALID at exactly theta = 0 -- the
-  +/-m order degeneracy breaks lumenairy's eig VJP there (AD dR/dtheta = 4.1e-3 on a
-  mirror-symmetric lossless fixture where symmetry AND energy conservation both force 0;
-  clean by theta ~ 1e-4). Differentiate the angle away from exact normal incidence.
+  NOTE (theta = 0; the ANGLE CAVEAT, RETIRED for lumenairy >= 5.50 on 2026-11-02): on
+  lumenairy 5.22..5.49 the angle gradient is correct OFF-normal (AD==FD to ~6e-7 at theta
+  0.15-0.4 rad) but WRONG at exactly theta = 0 -- the +/-m half-space orders are an exactly
+  degenerate pair there and the eig VJP returned a term set by whichever basis LAPACK picked
+  inside the pair (5.30.0: AD dR/dtheta = 4.1e-3, row 1 -2.07e-2, on a mirror-symmetric
+  lossless grating where symmetry forces 0; 5.31.0 / 5.42.1: d(R+T)/dtheta = -2.987e-6 on a
+  second one; clean by theta ~ 1e-4). lumenairy 5.50.0 fixed it upstream (CHANGELOG 5.50.0,
+  "JAX gradients at symmetric points": degenerate eigen-solves go through a cluster-adjoint
+  rule, switch lumenairy.jax_cluster_rule, default ON). Re-measured through THIS bridge on
+  both fixtures, both rows: |AD| <= 2.0e-12 at theta = 0, and switching the rule OFF
+  reproduces 4.126e-3 / -2.073e-2 -- gated, with that rule-off arm as the discrimination
+  check, in tests/test_lumenairy_bridge_verify_550.py. So: on >= 5.50 with the rule ON the
+  angle may be differentiated AT normal incidence; below 5.50 (still inside the bridge
+  floor) or with the rule off, keep it off exact normal incidence. Residual upstream limit:
+  next to a Rayleigh anomaly the rule's accuracy at the degenerate point degrades (lumenairy
+  measured 5e-8 .. ~1e-1 relative at relative wavelength distance 1e-3 .. 1e-7 from it).
 
 Convention: identical on both sides (public exp(-i omega t), Im(eps) > 0 lossy, metres,
 radians). Efficiency rows are keyed INCIDENT lab E_x (row 0) / E_y (row 1) -- never relabel
@@ -370,9 +381,10 @@ def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     `layers` = [(spec, thickness), ...] superstrate-side first; spec is either a segment list
     [(width_fraction, eps), ...] (widths STATIC and summing to 1; eps scalar or in-plane
     (3, 3) tensor) or a bare eps for a uniform layer. Gradients flow through every jax-typed
-    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- the angle (OFF-normal
-    only: at exactly angle=0 the eig VJP hits the +/-m degeneracy and the angle gradient is
-    invalid, see the module docstring) and the half-space indices. STATIC: period, widths,
+    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- the angle (at exactly
+    angle=0 only on lumenairy >= 5.50 with its cluster rule on: below 5.50 the +/-m
+    degeneracy made the theta=0 angle gradient wrong, see the module docstring's ANGLE NOTE)
+    and the half-space indices. STATIC: period, widths,
     degree, n_orders, and (lumenairy >= 5.30) the
     WAVELENGTH -- PMM sizes its propagating-order set from the wavelength, so the
     differentiable path raises NotImplementedError on a traced one rather than silently
