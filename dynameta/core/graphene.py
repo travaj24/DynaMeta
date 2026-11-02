@@ -28,10 +28,11 @@ import warnings
 
 import numpy as np
 
-from dynameta.constants import Q_E, HBAR, KB, EPS0, C_LIGHT
+from dynameta.constants import Q_E, HBAR, KB, C_LIGHT, Z0
 from dynameta.core.backend import array_namespace
 
-Z0 = 1.0 / (EPS0 * C_LIGHT)             # free-space wave impedance, ~376.730 ohm
+# Z0 (free-space wave impedance, ~376.730 ohm) is imported from constants (audit F-21); `graphene.Z0`
+# stays importable as before.
 SIGMA0 = Q_E ** 2 / (4.0 * HBAR)        # universal interband AC conductivity of graphene, ~6.085e-5 S
 
 
