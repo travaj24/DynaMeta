@@ -582,6 +582,18 @@ class ErYbAmplifier:
             raise ValueError("ErYbAmplifier: k_tr2_m3_s must be >= 0")
         if float(yb_migration_rate_per_s) < 0.0:
             raise ValueError("ErYbAmplifier: yb_migration_rate_per_s must be >= 0")
+        # Audit A-18 (2026-11-02): the polarization-mode count is a property of the FIBER (PM or
+        # not), not of a spectral band, and every result carries ONE meta['m_modes'] that the
+        # noise layer divides every ASE bin by. Two bands with different m_modes were each
+        # GENERATED with their own count but REPORTED with the Er band's -- measured: a Yb band
+        # at m_modes = 1 beside an Er band at 2 came out at half its per-polarization PSD in
+        # noise.output_ase_spectrum. Refuse the combination instead of collapsing it.
+        if (ase is not None and yb_ase is not None
+                and int(ase.m_modes) != int(yb_ase.m_modes)):
+            raise ValueError("ErYbAmplifier: ase.m_modes (%d) and yb_ase.m_modes (%d) differ; the "
+                             "polarization-mode count is a property of the fiber, and the noise "
+                             "layer reads one meta['m_modes'] for every ASE bin (audit A-18)"
+                             % (int(ase.m_modes), int(yb_ase.m_modes)))
         self.er_ion, self.yb_ion, self.fiber = er_ion, yb_ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase, self.yb_ase = ase, yb_ase

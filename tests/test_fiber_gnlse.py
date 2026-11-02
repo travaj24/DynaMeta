@@ -66,7 +66,7 @@ def _gordon_rate_hz_m(model, t0):
 def test_default_path_matches_pure_kerr_reference():
     # byte-level contract: raman=None, self_steepening=False is the ORIGINAL split-step
     p = _soliton(n=2048)
-    r = propagate_gnlse(p, 1.0, beta2_s2_m=B2, gamma_W_m=GAM, n_steps=400)
+    r = propagate_gnlse(p, 1.0, beta2_s2_per_m=B2, gamma_per_W_m=GAM, n_steps=400)
     # independent inline re-implementation of the legacy pure-Kerr symmetric split-step
     A = p.field.astype(np.complex128).copy()
     w = p.omega_rad_s()
@@ -83,7 +83,7 @@ def test_default_path_matches_pure_kerr_reference():
 def test_raman_only_red_shift_at_gordon_rate_and_energy_conserved():
     p = _soliton()
     L = 2.0
-    r = propagate_gnlse(p, L, beta2_s2_m=B2, gamma_W_m=GAM, raman="blow_wood", n_steps=1200)
+    r = propagate_gnlse(p, L, beta2_s2_per_m=B2, gamma_per_W_m=GAM, raman="blow_wood", n_steps=1200)
     shift = _centroid_shift_hz_per_m(p, r, L)
     assert shift < 0.0                                        # RED
     gord = _gordon_rate_hz_m("blow_wood", T0)
@@ -97,7 +97,7 @@ def test_raman_rate_scales_as_inverse_T0_fourth():
     for t0 in (T0, 1.3 * T0):
         p0 = abs(B2) / (GAM * t0 ** 2)
         p = _soliton(t0=t0, p0=p0)
-        r = propagate_gnlse(p, L, beta2_s2_m=B2, gamma_W_m=GAM, raman="blow_wood", n_steps=1200)
+        r = propagate_gnlse(p, L, beta2_s2_per_m=B2, gamma_per_W_m=GAM, raman="blow_wood", n_steps=1200)
         s.append(-_centroid_shift_hz_per_m(p, r, L))
     ratio = s[0] / s[1]
     assert abs(ratio / 1.3 ** 4 - 1.0) < 0.35, ratio          # Gordon 1/T0^4 scaling
@@ -106,8 +106,8 @@ def test_raman_rate_scales_as_inverse_T0_fourth():
 def test_lin_agrawal_model_shifts_at_least_as_fast():
     p = _soliton()
     L = 2.0
-    r_bw = propagate_gnlse(p, L, beta2_s2_m=B2, gamma_W_m=GAM, raman="blow_wood", n_steps=1200)
-    r_la = propagate_gnlse(p, L, beta2_s2_m=B2, gamma_W_m=GAM, raman="lin_agrawal", n_steps=1200)
+    r_bw = propagate_gnlse(p, L, beta2_s2_per_m=B2, gamma_per_W_m=GAM, raman="blow_wood", n_steps=1200)
+    r_la = propagate_gnlse(p, L, beta2_s2_per_m=B2, gamma_per_W_m=GAM, raman="lin_agrawal", n_steps=1200)
     s_bw = -_centroid_shift_hz_per_m(p, r_bw, L)
     s_la = -_centroid_shift_hz_per_m(p, r_la, L)
     assert s_la > 0.95 * s_bw                                 # bigger f_R (0.245) at least keeps pace
@@ -118,7 +118,7 @@ def test_lin_agrawal_model_shifts_at_least_as_fast():
 def test_self_steepening_trailing_edge_and_conservation():
     p = _soliton(p0=5.0 * P0)                                 # strong SPM, no dispersion
     t = p.t_s
-    r = propagate_gnlse(p, 0.5, gamma_W_m=GAM, self_steepening=True, n_steps=1500)
+    r = propagate_gnlse(p, 0.5, gamma_per_W_m=GAM, self_steepening=True, n_steps=1500)
     pw0, pw1 = p.power_W, r.output.power_W
     tc0 = np.sum(t * pw0) / np.sum(pw0)
     tc1 = np.sum(t * pw1) / np.sum(pw1)
@@ -133,9 +133,41 @@ def test_self_steepening_trailing_edge_and_conservation():
 def test_raman_plus_shock_conserves_photons_not_energy():
     p = _soliton()
     t = p.t_s
-    r = propagate_gnlse(p, 2.0, beta2_s2_m=B2, gamma_W_m=GAM, raman="blow_wood",
+    r = propagate_gnlse(p, 2.0, beta2_s2_per_m=B2, gamma_per_W_m=GAM, raman="blow_wood",
                         self_steepening=True, n_steps=1200)
     e_ratio = r.output.energy_J / p.energy_J
     ph_ratio = _photon_number(r.output, t) / _photon_number(p, t)
     assert e_ratio < 0.9995                                   # energy DOWN (phonons)
     assert abs(ph_ratio - 1.0) < 2e-3                         # photon number conserved
+
+
+def test_v12_unit_correct_names_and_deprecated_aliases():
+    """Audit V-12: beta2_s2_m / beta3_s3_m / gamma_W_m parsed as the reciprocal units (and
+    disagreed with soa's beta2_s2_per_m). The new spellings are canonical; the old ones are
+    deprecated aliases with an identical result, and passing both is an error."""
+    import pytest
+    from dynameta.optics.fiber_amp.cpa import cpa_chain
+    from dynameta.optics.fiber_amp.pulse import dispersion_length, nonlinear_length, soliton_order
+    p = _soliton(n=1024)
+    new = propagate_gnlse(p, 0.2, beta2_s2_per_m=B2, beta3_s3_per_m=1e-40, gamma_per_W_m=GAM,
+                          n_steps=50)
+    with pytest.warns(DeprecationWarning, match="V-12"):
+        old = propagate_gnlse(p, 0.2, beta2_s2_m=B2, beta3_s3_m=1e-40, gamma_W_m=GAM, n_steps=50)
+    assert np.array_equal(new.output.field, old.output.field)
+    with pytest.raises(TypeError, match="deprecated alias"):
+        propagate_gnlse(p, 0.2, beta2_s2_per_m=B2, beta2_s2_m=B2)
+    assert soliton_order(T0, 1.0, B2, GAM) == np.sqrt(dispersion_length(T0, B2)
+                                                     / nonlinear_length(1.0, GAM))
+    with pytest.warns(DeprecationWarning):
+        assert dispersion_length(T0, beta2_s2_m=B2) == dispersion_length(T0, B2)
+    with pytest.warns(DeprecationWarning):
+        assert nonlinear_length(1.0, gamma_W_m=GAM) == nonlinear_length(1.0, GAM)
+    with pytest.raises(TypeError, match="missing required argument"):
+        dispersion_length(T0)
+    a = cpa_chain(p, stretch_gdd_s2=1e-26, amp_length_m=0.2, beta2_s2_per_m=B2,
+                  gamma_per_W_m=GAM, n_steps=40)
+    with pytest.warns(DeprecationWarning):
+        b = cpa_chain(p, stretch_gdd_s2=1e-26, amp_length_m=0.2, beta2_s2_m=B2, gamma_W_m=GAM,
+                      n_steps=40)
+    assert np.array_equal(a.compressed.field, b.compressed.field)
+    assert a.meta["compress_gdd_s2"] == b.meta["compress_gdd_s2"]

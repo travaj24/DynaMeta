@@ -298,3 +298,22 @@ def test_noise_figure_db_still_requires_its_model_arguments():
         assert "nu_Hz" not in str(exc.value).split("Only nu_Hz")[0]     # nu_Hz is NOT required
     # and the complete call is unaffected
     assert np.isfinite(qw.noise_figure_db(DRIVE_A, None, L_M, ALPHA_I, p, nz=40))
+
+
+def test_a17_n_sp_inversion_takes_an_array_like_its_siblings():
+    # audit A-17: material_gain_per_m / emission_gain_per_m accept an array nu; n_sp_inversion
+    # forced float() on the occupations and raised TypeError on the same input.
+    p = BulkGainParams()
+    N = 2.0e24
+    nu = np.linspace(1.90e14, 1.97e14, 9)
+    v = qw.n_sp_inversion(nu, N, p)
+    assert isinstance(v, np.ndarray) and v.shape == nu.shape
+    for k, nk in enumerate(nu):
+        s = qw.n_sp_inversion(float(nk), N, p)
+        assert isinstance(s, float) and v[k] == s                     # scalar contract unchanged
+    # g_e / g_m is the same quantity where the medium has gain (the definition, independently)
+    gm = qw.material_gain_per_m(nu, N, p)
+    ge = qw.emission_gain_per_m(nu, N, p)
+    ok = gm > 0.0
+    assert np.any(ok)
+    np.testing.assert_allclose(v[ok], ge[ok] / gm[ok], rtol=1e-9)
