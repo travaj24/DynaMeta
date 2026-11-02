@@ -508,7 +508,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 *, order: int = 2, n_super: complex = 1.0 + 0j,
                 n_sub: complex = 1.0 + 0j, verbose: bool = False,
                 sheet_bcs: "dict | None" = None, diagnostics: bool = True,
-                _reuse_fes=None) -> OpticalResult:
+                _reuse_fes=None, tensor_mirror_symmetric: bool = False,
+                cross_pol: bool = False) -> OpticalResult:
     """Solve and extract reflection r/R and (if a transmitted wave reaches the
     substrate) transmission t/T. n_super/n_sub are the semi-infinite superstrate/
     substrate refractive indices = sqrt(eps).
@@ -554,6 +555,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
 
+    r_cross = None
     # ---- incidence: plane wave, polar angle theta, azimuth phi (derived + validated) ----
     theta, phi, oblique, conical = _incidence_geometry(optical, n_super)
     pol_p = optical.polarization == "p"        # p-pol: E in the x-z plane (Ex, Ez)
@@ -648,9 +650,23 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 "symmetry-reduced FEM mesh is NORMAL-incidence only (an oblique/conical wavevector "
                 "breaks the mirror symmetry); got theta={:.3g} deg.".format(math.degrees(theta)))
         if eps_is_tensor:
-            raise NotImplementedError(
-                "symmetry-reduced FEM mesh does not support a tensor (anisotropic/gyrotropic) eps -- "
-                "off-diagonal coupling breaks the mirror parity. Use the full periodic solve.")
+            # A tensor that is DIAGONAL in (x, y, z) keeps both mirror parities (its principal axes are
+            # the wall normals), so the PEC/PMC walls remain exact -- e.g. a uniaxial LC with the
+            # director along x or y. Only an OFF-DIAGONAL (x-y / x-z / y-z) coupling breaks the parity.
+            # MEASURE it over the mesh instead of refusing every tensor (2026-09-25, exp31 coax):
+            # refuse unless the off-diagonal L2 norm is < 1e-12 of the diagonal's.
+            _off = sum(ng.Integrate(ng.Norm(eps_cf[i, j]) ** 2, mesh)
+                       for i in range(3) for j in range(3) if i != j)
+            _dia = sum(ng.Integrate(ng.Norm(eps_cf[i, i]) ** 2, mesh) for i in range(3))
+            # tensor_mirror_symmetric=True: the CALLER asserts the tensor FIELD is mirror-symmetric
+            # about every symmetry wall (eps(Mx) = M eps(x) M, e.g. a director tilted toward RADIAL
+            # about a centred axis) -- off-diagonal terms are then allowed; the caller must verify it.
+            if not tensor_mirror_symmetric and not (abs(_off) <= 1e-24 * abs(_dia)):
+                raise NotImplementedError(
+                    "symmetry-reduced FEM mesh does not support an OFF-DIAGONAL tensor eps "
+                    "(anisotropic/gyrotropic coupling breaks the mirror parity; measured off-diagonal "
+                    "L2^2 {:.3g} vs diagonal {:.3g}). Use the full periodic solve, or rotate the "
+                    "frame so the tensor is diagonal.".format(abs(_off), abs(_dia)))
         if optical.polarization not in ("x", "y"):
             raise NotImplementedError(
                 "symmetry-reduced FEM mesh requires polarization 'x' or 'y' (got {!r}); the wall "
@@ -785,6 +801,21 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         a.Assemble(); f.Assemble()
         if _ls == "umfpack":
             gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="umfpack") * f.vec
+        elif _ls == "sparsecholesky":
+            # NGSolve's multithreaded LDL^T -- valid ONLY for a complex-SYMMETRIC matrix (normal
+            # incidence, no Bloch phase, symmetric eps / PML product).  It does not check symmetry
+            # itself, so the RESIDUAL is measured and a solve that is not exact is REFUSED rather than
+            # returned (2026-09-25, exp31 coax: ~3x faster than umfpack at equal accuracy).
+            gfu.vec.data = a.mat.Inverse(freedofs=fes.FreeDofs(), inverse="sparsecholesky") * f.vec
+            _r = f.vec.CreateVector()
+            _r.data = f.vec - a.mat * gfu.vec
+            _fd = np.fromiter(fes.FreeDofs(), dtype=bool, count=len(_r))
+            _rr = float(np.linalg.norm(_r.FV().NumPy()[_fd]))
+            _fr = float(np.linalg.norm(f.vec.FV().NumPy()[_fd]))
+            if not (_rr <= 1e-8 * max(_fr, 1e-300)):
+                raise RuntimeError(
+                    "linear_solver='sparsecholesky' residual {:.2e} (relative) -- the matrix is not "
+                    "complex-symmetric for this solve; use 'umfpack'.".format(_rr / max(_fr, 1e-300)))
         elif _ls == "bddc_cg":
             inv = ng.solvers.CGSolver(mat=a.mat, pre=pre.mat, tol=optical.gmres_rtol,
                                         maxiter=optical.gmres_max_iter)
@@ -801,8 +832,13 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     if optical.linear_solver != "umfpack":
         rvec = gfu.vec.CreateVector()
         rvec.data = f.vec - a.mat * gfu.vec
-        rn = float(np.linalg.norm(rvec.FV().NumPy()))
-        bn = float(np.linalg.norm(f.vec.FV().NumPy()))
+        # FREE DOFs only (2026-09-25 fix): the Dirichlet rows (PEC symmetry walls, dirichlet= faces) are
+        # constrained, never solved -- b has entries there that A x does not reproduce, so counting them
+        # reported a converged symmetry-cell solve as relres ~0.2 (measured: flat LC stack on a quarter
+        # cell, GMRes R matched the direct solve to 1e-6 while this check read 1.9e-1).
+        _free = np.fromiter(fes.FreeDofs(), dtype=bool, count=len(rvec))
+        rn = float(np.linalg.norm(rvec.FV().NumPy()[_free]))
+        bn = float(np.linalg.norm(f.vec.FV().NumPy()[_free]))
         relres = rn / bn if bn > 0.0 else rn
         if relres > 1e-3:
             warnings.warn(
@@ -836,6 +872,11 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
             r = complex(R0) + _reflection(mesh, gfu, kz_s, proj, kx_d, ky_d, geo)
             R = float(abs(r) ** 2)
+            if cross_pol:
+                if oblique or conical:
+                    raise NotImplementedError("cross_pol extraction is normal-incidence only")
+                _pc = (0.0, 1.0, 0.0) if optical.polarization == "x" else (1.0, 0.0, 0.0)
+                r_cross = _reflection(mesh, gfu, kz_s, _pc, kx_d, ky_d, geo)
             t_scat = _transmission(mesh, gfu, kz_sub, proj, kx_d, ky_d, geo)
             if t_scat is None:
                 t = T = A = None
@@ -921,7 +962,8 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                           solve_time_s=dt, t=t, T=T, A=A, A_independent=A_independent,
                           R_flux=R_flux, T_flux=T_flux, per_region_absorption=per_region_A,
-                          fit_relres=fit_relres)
+                          fit_relres=fit_relres,
+                          r_cross=(r_cross if cross_pol else None))
 
 
 @dataclass
