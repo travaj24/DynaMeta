@@ -365,22 +365,23 @@ jobs:
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
         # which is exactly the T-5 failure mode. (test_fem_symmetry_tensor added 2026-11-02 for
-        # v0.11.7: 55 s locally at 6 threads.)
+        # v0.11.7: 55 s locally at 6 threads; test_fem_speed added 2026-11-02 for v0.12.0: 60 s.)
         #
-        # NOT PINNED, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg red every night
-        # from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py. The crash
-        # was NOT an ngsolve regression against this repo's physics: the `nightly` job installs the
-        # same 6.2.2607 and its heavy FEM oracles pass. It was a test probe handing `None` to a
-        # CoefficientFunction multiply -- a TypeError on <= 6.2.2606, a null dereference on 6.2.2607.
-        # The probe now passes real numbers. Pinning ngsolve would have frozen a healthy release to
-        # preserve an invalid probe, so the floor in pyproject.toml stays `ngsolve>=6.2`.
+        # NOT PINNED to an old release, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg
+        # red every night from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py.
+        # The crash was NOT an ngsolve regression against this repo's physics: the `nightly` job
+        # installs the same 6.2.2607 and its heavy FEM oracles pass. It was a test probe handing
+        # `None` to a CoefficientFunction multiply -- a TypeError on <= 6.2.2606, a null dereference
+        # on 6.2.2607. The probe now passes real numbers. Pinning ngsolve would have frozen a healthy
+        # release to preserve an invalid probe. The FLOOR moved to `ngsolve>=6.2.2608` in v0.12.0
+        # (the release the 0.12.0 solver timings and this leg were verified on); it stays open above.
         run: |
           pytest -q -m "not slow" \
             tests/test_audit_2026_07_17_infra.py tests/test_audit_guards.py \
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
             tests/test_contact_current.py tests/test_density_gradient.py \
             tests/test_devsim_smoke.py tests/test_electrothermal.py \
-            tests/test_fem_symmetry_tensor.py \
+            tests/test_fem_symmetry_tensor.py tests/test_fem_speed.py \
             tests/test_gated_builder.py tests/test_geometry_shapes.py \
             tests/test_hydro_fem.py tests/test_impact_ionization.py \
             tests/test_mesh_periodicity.py tests/test_mobility.py \
@@ -400,6 +401,15 @@ jobs:
         # A capability skip here is informational (this is not the smoke tier), but with the extra
         # installed there should be none: an exit 42 means the install step silently did not take.
         run: python -m validation.run_all electrostatics_fem thermal_fem
+      - name: MKL-PARDISO path (linear_solver='pardiso' / 'auto' with MKL)
+        # LAST in this job on purpose: with MKL installed from pip, ngsolve makes pardiso its
+        # DEFAULT inverse for every untyped Inverse() call, so the module list above runs without it
+        # (the default user install). Every dynameta Inverse() names its solver, so this only adds the
+        # pardiso-gated tests (skipped above) and re-runs the auto-selection ones with MKL present.
+        run: |
+          pip install mkl
+          python -c "import dynameta.optics.solver as S; assert S.pardiso_available(), 'MKL-PARDISO did not load'"
+          pytest -q tests/test_fem_speed.py -k "pardiso or auto"
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

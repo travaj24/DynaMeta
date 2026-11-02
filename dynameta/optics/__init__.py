@@ -13,6 +13,9 @@ _LAZY = {
     "OpticalGeometry":       "dynameta.optics.ngsolve_layered",
     "assemble_eps_cf":       "dynameta.optics.eps_assembler",
     "solve_fem":             "dynameta.optics.solver",
+    "solve_fem_pols":        "dynameta.optics.solver",
+    "FEMFactorCache":        "dynameta.optics.solver",
+    "pardiso_available":     "dynameta.optics.solver",
 }
 __all__ = list(_LAZY)
 
