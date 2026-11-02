@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from dynameta.geometry.guards import require_untapered_layer
+
 __all__ = ["cell_axes", "layer_bg_eps", "layer_eps_cell"]
 
 
@@ -44,7 +46,10 @@ def layer_bg_eps(layer, lambda_m, materials, eps_by_region):
 
 def layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region):
     """The (nx,ny) COMPLEX eps cross-section of one layer: the background eps, overpainted by each
-    inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps."""
+    inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps.
+    A TAPERED inclusion is refused (2026-11-02): one z-invariant section per layer would paint its TOP
+    section as a straight wall."""
+    require_untapered_layer(layer, "layer_eps_cell (lateral rasterizer)")
     eps = np.full(X.shape, layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
     for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
         mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)

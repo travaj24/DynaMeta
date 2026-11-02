@@ -147,6 +147,11 @@ def _design_fingerprint(design) -> bytes:
         for inc in (getattr(L, "inclusions", []) or []):
             parts += [repr(getattr(inc, "shape", "")), str(getattr(inc, "material", "")),
                       str(getattr(inc, "priority", 0))]
+            # sidewall taper (2026-11-02): two designs differing ONLY in the bottom section must not
+            # share a key. Hashed only when PRESENT, so every untapered design keeps its pre-taper
+            # key byte-for-byte (existing on-disk caches stay valid).
+            if getattr(inc, "taper", None) is not None:
+                parts += ["taper", repr(inc.taper)]
     for ft in (getattr(design.stack, "features", []) or []):
         parts += ["feat", repr(getattr(ft, "shape", "")), str(getattr(ft, "material", "")),
                   repr(float(getattr(ft, "z_lo_m", 0.0))), repr(float(getattr(ft, "z_hi_m", 0.0))),

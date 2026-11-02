@@ -48,6 +48,7 @@ from netgen.meshing import BoundaryLayerParameters, MeshingStep, IdentificationT
 from dynameta.core.units import NM, NM_PER_M
 from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.geometry.design import Design
+from dynameta.geometry.guards import require_supported_geometry
 
 S = NM_PER_M   # m -> nm (OCC works in nm); single source = core.units.NM_PER_M
 
@@ -280,7 +281,7 @@ class LayeredOpticalBuilder:
     def build(self) -> OpticalGeometry:
         d = self.design
         self._check_layer_names(d)          # audit F-7 (reserved region names)
-        self._check_features(d)             # audit F-14 (silently ignored Stack.features)
+        self._check_features(d)             # audit F-14 (Stack.features) + Inclusion.taper (2026-11-02)
         spec = d.mesh_3d
         Px = d.unit_cell.period_x_m * S
         Py = d.unit_cell.period_y_m * S
@@ -596,23 +597,18 @@ class LayeredOpticalBuilder:
 
     @staticmethod
     def _check_features(d) -> None:
-        """RAISE if the Stack carries `Feature`s (audit F-14).
+        """RAISE if the Stack carries `Feature`s (audit F-14) or a tapered Inclusion (2026-11-02).
 
         `Design.__post_init__` validates every Feature's material and `Feature.__post_init__`
         validates its z-span, so a via / T-patch stem passes construction cleanly -- and then this
         builder never reads `d.stack.features` (it lays down layers only), so the feature simply is
         not in the mesh. A validated Design that silently loses a solid is worse than one that
         refuses to build. `Feature`'s own docstring promises support "in a later phase"; until then
-        say so at runtime instead of meshing a different device than the one described."""
-        feats = list(getattr(d.stack, "features", ()) or ())
-        if feats:
-            raise NotImplementedError(
-                "LayeredOpticalBuilder does not implement Stack.features yet, and would mesh the "
-                "layer stack WITHOUT the {} feature(s) ({}) -- a device different from the one the "
-                "Design describes. Model the feature as a Layer inclusion (Stack.layers[].inclusions), "
-                "or subclass the builder to add the feature solids. (Design validates Feature "
-                "materials and z-spans, so this cannot be caught at construction.)"
-                .format(len(feats), ", ".join(repr(f.name) for f in feats)))
+        say so at runtime instead of meshing a different device than the one described. The same
+        holds for `Inclusion.taper`: `_inclusion_solid` extrudes the TOP section straight, so a
+        tapered inclusion would mesh as a straight wall. Both refusals are worded once, in
+        dynameta.geometry.guards (UnsupportedGeometryError, a NotImplementedError)."""
+        require_supported_geometry(d, "LayeredOpticalBuilder")
 
     def _maxh(self, region_name: str, material: str, mesh_role: Optional[str] = None) -> float:
         """Per-region target element size (nm). Routing, most specific first:

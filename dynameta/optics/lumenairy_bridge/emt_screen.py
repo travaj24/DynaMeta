@@ -34,6 +34,7 @@ from typing import Optional
 import numpy as np
 
 from dynameta.core.eps_field import EpsField
+from dynameta.geometry.guards import require_supported_geometry, require_untapered_layer
 from dynameta.optics.lumenairy_bridge.berreman_backend import (_require_berreman,
                                                               make_lumenairy_berreman_solver)
 from dynameta.optics.lumenairy_bridge.pmm_backend import layer_to_pmm_segments
@@ -49,7 +50,9 @@ def rytov_tensor_for_layer(layer, design, lambda_m: float, period_x_m: float, pe
     Reuses layer_to_pmm_segments for the x-partition (raises if the layer is not a lamellar
     grating -- the EMT screen is 1-D, like the PMM bridge). order=2 adds the binary
     (period/lambda)^2 bulk-index correction (Lalanne & Lemercier-Lalanne 1996) and is defined
-    ONLY for a 2-segment (binary) grating; a multi-region cell with order=2 raises."""
+    ONLY for a 2-segment (binary) grating; a multi-region cell with order=2 raises. A TAPERED inclusion
+    raises (2026-11-02): the Rytov partition is z-invariant and would homogenize the TOP section."""
+    require_untapered_layer(layer, "rytov_tensor_for_layer (EMT screen)")
     lum = _require_berreman()                            # the bridge floor carries the EMT surface
     segs = layer_to_pmm_segments(layer, design, lambda_m, period_x_m, period_y_m, bg_eps=bg_eps)
     if order == 2:
@@ -80,7 +83,11 @@ def homogenize_lamellar_layers(design, lambda_m: float, *, order: int = 0,
     the result to make_lumenairy_berreman_solver / design_to_berreman_layers: the gratings are
     then solved as homogeneous anisotropic films (the microsecond EMT screen). A layer that
     already has an eps_by_region override is left as-is (an explicit modulation wins); a layer
-    whose inclusions are NOT lamellar is left untouched and will raise downstream (-> use RCWA)."""
+    whose inclusions are NOT lamellar is left untouched and will raise downstream (-> use RCWA).
+    Stack.features / a tapered inclusion raise UnsupportedGeometryError (2026-11-02: the EMT screen
+    returned R/T bit-identical to the via-free design for a metal via, measured) -- NOT a ValueError,
+    so the lamellar-detection fallback below can never swallow it."""
+    require_supported_geometry(design, "homogenize_lamellar_layers (EMT screen)")
     out = dict(eps_by_region or {})
     px = float(design.unit_cell.period_x_m)
     py = float(design.unit_cell.period_y_m)
