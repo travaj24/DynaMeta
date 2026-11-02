@@ -40,8 +40,9 @@ def _warn_calls(tree):
 # ============================================ V-17 ================================================
 
 # Sites in files another workstream owned during wave 6 (fixed there or in a follow-up). Matched by
-# (file, message prefix) so a line shift does not break the gate.
-_V17_PENDING = {("optics/fiber_amp/eryb.py", "'ErYbAmplifier: upconversion_C_up")}
+# (file, message prefix) so a line shift does not break the gate. EMPTY since 2026-11-02: the one
+# entry (eryb.py's C_up-override note) was fixed by the eryb_fix workstream (AdvisoryWarning).
+_V17_PENDING = set()
 
 
 def test_v17_category_hierarchy_keeps_every_old_category_as_a_base():
@@ -440,7 +441,7 @@ def test_x23_shape_methods_unchanged():
 # ============================================ X-24 ================================================
 
 _X24_TNAME = re.compile(r"^T(_K|_ref|_ref_K|0_K|_sink_K|_coolant_K)$")
-_X24_PENDING = {("optics/fiber_amp/eryb.py", "T_ref_K"), ("optics/soa/qd_gain.py", "T_K"),
+_X24_PENDING = {("optics/soa/qd_gain.py", "T_K"),
                 ("optics/soa/qd_gain.py", "T0_K")}          # another workstream's files in wave 6
 
 
