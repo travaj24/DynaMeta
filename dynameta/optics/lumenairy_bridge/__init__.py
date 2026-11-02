@@ -20,8 +20,8 @@ code translated at least nine quantities). What the bridge converts, and where:
     pick (_common.conical_synthesis; refused for the row-pick backends by guard_conical_ppol)
   * per-layer RECORDS on the reverse path (translate.py)
   * eps CELL rasterization from Design inclusions (periodic / wrap-aware since 2026-11-02,
-    _shapes.periodic_layer_eps_cell), or -- inclusion_model='analytic'|'auto' -- EXACT lumenairy
-    analytic shapes (Rectangle/Circle/Ellipse <-> rectangle/disk/ellipse, _shapes)
+    _shapes.periodic_layer_eps_cell), or -- inclusion_model='auto' (the default since v0.13.0) /
+    'analytic' -- EXACT lumenairy analytic shapes (Rectangle/Circle/Ellipse <-> rectangle/disk/ellipse, _shapes)
 
 A convention bug in any of those is a wrong number with a plausible R + T, which is why each
 has its own gate under validation/lumenairy_*.py.
