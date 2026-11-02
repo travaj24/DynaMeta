@@ -19,6 +19,9 @@ from dynameta.core.effects.base import (_E_vec, _photon_energy_J, kramers_kronig
                                         kramers_kronig_dn_rows)
 from dynameta.warning_types import UnreliableResultWarning
 
+
+# ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
+
 @dataclass
 class ElectroAbsorptionModel:
     """QCSE / MQW electro-absorption -- an EffectModel reading fields['E'] (uses the |E_z| field
@@ -557,7 +560,7 @@ class BursteinMossEdge:
         return (n_re + 1j * kappa) ** 2                                          # scalar grid (...,)
 
 
-# ---- reconfigurable: phase-change + liquid-crystal (Phase 4) -------------------------------
+# ---- Intersubband quantum eps_zz from sub-band wavefunctions (R7) -------------------------
 
 
 @dataclass

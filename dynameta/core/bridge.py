@@ -124,6 +124,27 @@ def assemble_eps(field: CarrierField,
         else:
             # 2D (x, v=through-stack) carrier solve -> the FieldLift synthesizes
             # the 2nd lateral axis (SeparableXY / Extrude).
+            # audit S4-18 (wave-7, 2026-11-02): the 2-D grid layout is (Nx, Nv) with the LATERAL
+            # axis fixed as 'x' (every 2-D carrier solver in the repo emits it that way), so
+            # stack_axis='x' named the lateral axis as the vertical one too: x_m and v_m were the
+            # SAME array, the lift extruded the lateral profile up the stack and the z-remap
+            # spread it over the region's thickness -- silently when Nx == Nv (measured: a 5 x 5
+            # grid returned a (5, 2, 5) field), else as a misleading eps_grid shape error later.
+            # Refuse it, and refuse a vertical
+            # axis the grid does not carry (that was a bare KeyError).
+            if ra.stack_axis == "x":
+                raise ValueError(
+                    "assemble_eps: region '{}' has stack_axis='x', but a 2-D carrier grid is "
+                    "(Nx, Nv) with the LATERAL axis 'x' -- the lateral and through-stack axes "
+                    "would be the same array (audit S4-18). Use the grid's other axis ({}) as "
+                    "stack_axis.".format(ra.mesh_region, sorted(
+                        k for k in reg.grid_axes_m if k != "x")))
+            for _k in ("x", ra.stack_axis):
+                if _k not in reg.grid_axes_m:
+                    raise ValueError(
+                        "assemble_eps: 2-D source region '{}' grid has no '{}' axis (have {}); "
+                        "the 2-D bridge needs lateral 'x' and the through-stack stack_axis={!r}"
+                        .format(ra.source_region, _k, sorted(reg.grid_axes_m), ra.stack_axis))
             x_m = np.asarray(reg.grid_axes_m["x"], dtype=np.float64)
             v_m = np.asarray(reg.grid_axes_m[ra.stack_axis], dtype=np.float64)
             n_3d, x3_m, y3_m, z3_m = lift.apply(n_grid, x_m, v_m, n_bg=n_bg)
@@ -135,12 +156,19 @@ def assemble_eps(field: CarrierField,
             # otherwise. Matching 2D extras are now extruded y-uniform onto the lifted
             # grid (exact ExtrudeLift semantics; for SeparableXY a 2D companion carries
             # no y-structure information anyway); other multi-D shapes raise.
+            # audit S4-23 (wave-7, 2026-11-02): the extrusion is a READ-ONLY broadcast VIEW, no
+            # longer a .copy() -- eps_grid only reads its field bundle (an in-place write into a
+            # view raises, never corrupts), and every elementwise response gives the same values
+            # from a stride-0 view as from the replicated copy. MEASURED (SeparableXY lift, Ny
+            # 256, 256 x 64 carrier grid, ThermoOptic 'T' extra through EffectEpsMap, 5 runs):
+            # the 33.5 MB (256 x 256 x 64 float64) copy per 2-D extra is gone -- tracemalloc peak
+            # 201.3 -> 167.8 MB, median 0.100 -> 0.071 s -- and the eps grid is bit-identical
+            # (np.array_equal). Gate: tests/test_bridge.py::test_s4_23_extras_are_broadcast_views.
             extras_lifted = {}
             for _k, _v in (extra_fields or {}).items():
                 _arr = np.asarray(_v)
                 if _arr.ndim == 2 and _arr.shape == np.shape(n_grid):
-                    extras_lifted[_k] = np.broadcast_to(
-                        _arr[:, None, :], np.shape(n_3d)).copy()
+                    extras_lifted[_k] = np.broadcast_to(_arr[:, None, :], np.shape(n_3d))
                 elif _arr.ndim >= 2:
                     raise ValueError(
                         "assemble_eps: extra field '{}' has shape {} which matches "

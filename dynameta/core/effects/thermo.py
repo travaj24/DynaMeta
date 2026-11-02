@@ -63,6 +63,3 @@ class AnisotropicThermoOpticModel:
                 xp.stack([zero, d[1], zero], axis=-1),
                 xp.stack([zero, zero, d[2]], axis=-1)]
         return xp.stack(rows, axis=-2)                       # (...,3,3) diagonal principal-axis tensor
-
-
-# ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------

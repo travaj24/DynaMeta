@@ -9,18 +9,26 @@ PMM's roles in DynaMeta (complementing the RCWA backend, not replacing it):
   out-of-plane (exz/eyz/ezx/ezy) couplings -- gyrotropic / slanted-LC cells that the RCWA
   in-plane tensor path cannot represent.
 
-Scope contract (v1, enforced loudly): 1-D devices only -- every patterned layer's
-inclusions must be Rectangles spanning the FULL y period (a lamellar grating), translated
-into PMM segments [(width_fraction, eps)]. Rasterized (gridded structured) EpsFields raise
-(PMM segments are analytic; use the RCWA bridge for grids). In-plane incidence only
+Scope contract (enforced loudly): 1-D devices only -- every patterned layer's inclusions must
+be Rectangles spanning the FULL y period (a lamellar grating; a line crossing the cell edge
+wraps into two segments), translated into PMM segments [(width_fraction, eps)]. Rasterized
+(gridded structured) EpsFields raise (PMM segments are analytic; use the RCWA bridge for
+grids). [audit S4-13, wave-7 2026-11-02: this paragraph used to say "In-plane incidence only
 (azimuth = 0; PMMStack has no conical source). PMM returns NO transmission Jones and no
-per-order complex amplitudes: OpticalResult.t is None (T comes from the order-summed
-efficiencies; r from the zeroth-order reflection Jones with the same lab-basis -> Byrnes
-p-pol conversion as the RCWA bridge -- gated in validation/lumenairy_pmm_bridge.py).
+per-order complex amplitudes: OpticalResult.t is None" -- all three false since lumenairy 5.22,
+whose PMMStack gained set_source(phi=), jones_transmission() and per_order_amplitudes().]
+Incidence: in-plane AND conical (azimuth != 0; the rotated s/p R/T/r/t are synthesized from
+the per-order complex amplitudes by the shared _common.conical_synthesis, lossless end media
+only -- see make_lumenairy_pmm_solver). r = the zeroth-order co-pol reflection Jones, t = the
+zeroth-order co-pol TRANSMISSION Jones (PMMStack.jones_transmission), both with the same
+lab-basis -> Byrnes p-pol conversion as the RCWA bridge at phi = 0; R/T = the order-summed
+efficiencies (gated in validation/lumenairy_pmm_bridge.py). absorption=True fills the per-layer
+split at phi = 0 only (audit S4-2).
 
-Cross-library pins (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor): PMMStack(period, n_substrate=, n_superstrate=
-[INDICES], degree=, n_orders=); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
-[scalar or (3,3)], slant_angle=); set_source(wavelength, theta=); solve() ->
+Cross-library pins (first pinned at lumenairy 5.14.2, re-verified on the 5.22 floor):
+PMMStack(period, n_substrate=, n_superstrate= [INDICES], degree=, n_orders=[, layer_grids=
+>= 5.32]); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
+[scalar or (3,3)], slant_angle=); set_source(wavelength, theta=, phi=); solve() ->
 (orders, R_eff(2, M), T_eff(2, M), jones_reflection(2, 2)) with rows/columns keyed
 INCIDENT E_x (0) / E_y (1) -- identical to the RCWA result layout. Dispersive callables
 force solve_vs_wavelength; this bridge rebuilds CONCRETE stacks per wavelength instead
@@ -42,7 +50,8 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       guard_incidence_side as _guard_incidence_side,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
-                                                      require_lumenairy as _require_lumenairy)
+                                                      require_lumenairy as _require_lumenairy,
+                                                      require_lumenairy_feature as _require_feature)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
 from dynameta.geometry.guards import require_supported_geometry
@@ -179,16 +188,17 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     # because there the speed-up genuinely does not exist.
     kw = {}
     if str(layer_grids) != "shared":
-        from dynameta.optics.lumenairy_bridge._common import parse_version
-        if parse_version(lum.__version__) < (5, 32, 0):
-            raise NotImplementedError(
-                "design_to_pmm_stack: layer_grids={!r} needs lumenairy >= 5.32 (installed "
-                "{}); the per-layer spectral-element grid and its non-conforming mortar do "
-                "not exist below that. Use the default 'shared' grid, or upgrade.".format(
-                    layer_grids, lum.__version__))
+        # the per-layer spectral-element grid and its non-conforming mortar do not exist below
+        # 5.32; use the default 'shared' grid there. (wave-7: the floor lives in the shared
+        # _common.FEATURE_FLOORS table; LumenairyFeatureUnavailable is a NotImplementedError.)
+        _require_feature("pmm_layer_grids",
+                         "design_to_pmm_stack(layer_grids={!r})".format(layer_grids))
         kw["layer_grids"] = str(layer_grids)
     stack = lum.PMMStack(px, n_substrate=complex(n_sub), n_superstrate=complex(n_super),
                          degree=int(degree), n_orders=int(n_orders), **kw)
+    # audit S4-17 (wave-7, 2026-11-02): the end media ride on the stack so the solver closure
+    # does not evaluate end_media_indices a second time per solve (same values, bit for bit)
+    stack.dynameta_end_media = (n_super, n_sub)
     names: List[str] = []
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
@@ -264,7 +274,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         orders, R2, T2, jones = stack.solve(stabilize=stabilize,
                                             retain_internal=absorption and abs(phi) <= 1e-12)
         row = _pol_row(design.optical)
-        n_sup, n_sb = end_media_indices(design, lambda_m)
+        n_sup, n_sb = stack.dynameta_end_media      # audit S4-17: set by design_to_pmm_stack
         rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
         if abs(phi) > 1e-12:
             # rotated s/p eigen-polarization: synthesize R/T + the co-pol zeroth-order r/t from

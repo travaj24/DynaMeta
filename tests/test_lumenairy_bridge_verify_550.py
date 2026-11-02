@@ -28,6 +28,7 @@ import importlib.util
 import pathlib
 import re
 
+import numpy as np
 import pytest
 
 HAVE_LUM = importlib.util.find_spec("lumenairy") is not None
@@ -116,3 +117,115 @@ def test_pyproject_lumenairy_floor_is_VERSION_FLOOR():
     hits = re.findall(r'"lumenairy\s*>=\s*([0-9][0-9.]*)"', deps.group(1))
     assert len(hits) == 1, "expected exactly one lumenairy floor in dependencies, got %r" % hits
     assert parse_version(hits[0]) == tuple(VERSION_FLOOR), (hits[0], VERSION_FLOOR)
+
+
+# ---------------------------------------------------------------------------------------------
+# (3) wave-7 (2026-11-02): PER-FEATURE lumenairy floors. The CI `floor` leg installs lumenairy
+# 5.22.*, older than every 2026-11-02 bridge extension; those paths used to die INSIDE lumenairy
+# (TypeError layer_grids, ImportError Circle, a numpy broadcast error on a pure (3, 3) eps) or --
+# the RCWA analytic-shape row -- RUN WRONG (5.22 accepts overlapping shapes and adds their form
+# factors, so the default inclusion_model='auto' built an additive layer where it should have
+# rasterized). The gates below spoof lumenairy.__version__ so they run on EVERY installed version:
+# the bridge must refuse BEFORE lumenairy is called (the spoof cannot change lumenairy's own
+# behaviour), with the feature, its floor and the installed version in the message. On the
+# pre-wave-7 code each of these fails: no LumenairyFeatureUnavailable exists, and with the
+# version spoofed below 5.31 'auto' still emitted a 'shapes' layer.
+# ---------------------------------------------------------------------------------------------
+
+def _spoof(monkeypatch, v):
+    import lumenairy
+    monkeypatch.setattr(lumenairy, "__version__", v)
+
+
+def _feature_design(incs, *, bg="lo", tensor_layer=False):
+    from dynameta.geometry import Design, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    reg = MaterialRegistry()
+    for n, e in (("air", 1.0), ("glass", 2.25), ("hi", 6.0 + 0.4j), ("lo", 2.1), ("mid", 3.2)):
+        reg.add(Material(n, ConstantOptical(complex(e))))
+    layers = [Layer("g", 200e-9, bg, inclusions=incs)]
+    return Design(name="ff", unit_cell=UnitCell(period_x_m=500e-9, period_y_m=500e-9),
+                  stack=Stack(layers=layers, superstrate_material="air",
+                              substrate_material="glass"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
+
+
+@pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
+def test_rcwa_analytic_shapes_floor_auto_rasterizes_and_analytic_refuses(monkeypatch):
+    from dynameta.geometry import Inclusion
+    from dynameta.geometry.cross_section import Circle, Ellipse, Rectangle
+    from dynameta.optics.lumenairy_bridge import (LumenairyFeatureUnavailable,
+                                                  LumenairyStackSolver, design_to_rcwa_stack,
+                                                  make_lumenairy_rcwa_solver)
+    from dynameta.optics.lumenairy_bridge._shapes import layer_to_shapes_slab
+    from dynameta.core.layered import LayeredStack
+    ok = _feature_design([Inclusion(Rectangle(120e-9, 250e-9, 150e-9, 300e-9), "hi"),
+                          Inclusion(Ellipse(360e-9, 250e-9, 80e-9, 160e-9), "mid")])
+    over = _feature_design([Inclusion(Circle(200e-9, 250e-9, 100e-9), "hi"),
+                            Inclusion(Circle(300e-9, 250e-9, 100e-9), "mid", priority=1)],
+                           bg="air")
+    _spoof(monkeypatch, "5.30.0")
+    for d in (ok, over):                       # 'auto' (the default) rasterizes below 5.31
+        stk, _ = design_to_rcwa_stack(d, 1.31e-6, n_orders=3)
+        assert [L.kind for L in stk.layers] == ["iso"]
+    with pytest.raises(LumenairyFeatureUnavailable,
+                       match=r"needs lumenairy >= 5\.31\.0 \(installed 5\.30\.0\)"):
+        design_to_rcwa_stack(ok, 1.31e-6, n_orders=3, inclusion_model="analytic")
+    with pytest.raises(LumenairyFeatureUnavailable, match=r">= 5\.31\.0"):
+        make_lumenairy_rcwa_solver(inclusion_model="analytic")
+    slab = layer_to_shapes_slab(ok.stack.layers[0], ok, 1.31e-6)
+    ls = LayeredStack(slabs=[slab], n_super=1.0, n_sub=1.5, period_x_m=500e-9,
+                      period_y_m=500e-9)
+    with pytest.raises(LumenairyFeatureUnavailable, match="shapes slab"):
+        LumenairyStackSolver(n_orders=3).solve(ls, 1.31e-6, ok.optical)
+    _spoof(monkeypatch, "5.31.0")              # at the floor: the analytic layer is back
+    stk, _ = design_to_rcwa_stack(ok, 1.31e-6, n_orders=3)
+    assert [L.kind for L in stk.layers] == ["shapes"]
+
+
+@pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
+def test_pmm2d_pure_feature_floors_refuse_with_the_version(monkeypatch):
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry import Inclusion, Taper
+    from dynameta.geometry.cross_section import Circle, Polygon, Rectangle
+    from dynameta.optics.lumenairy_bridge import (LumenairyFeatureUnavailable,
+                                                  design_to_pmm2d_stack)
+    circ = _feature_design([Inclusion(Circle(250e-9, 250e-9, 120e-9), "hi")])
+    sq = Rectangle(250e-9, 250e-9, 250e-9, 250e-9)
+    tap = _feature_design([Inclusion(sq, "hi", taper=Taper(bottom=Rectangle(
+        250e-9, 250e-9, 200e-9, 200e-9)))])
+    tens = _feature_design([Inclusion(sq, "hi")])
+    ebr = {"g": EpsField(tensor=(2.0 * np.eye(3) + 0.1 * np.eye(3)[[1, 0, 2]]).astype(complex))}
+    _spoof(monkeypatch, "5.49.0")
+    with pytest.raises(LumenairyFeatureUnavailable,
+                       match=r"'auto' -> 'shapes'.*needs lumenairy >= 5\.50\.0 \(installed 5\.49\.0\)"):
+        design_to_pmm2d_stack(circ, 1.31e-6, n_modes=4)
+    # a user error (no exact pure image) still outranks the version refusal
+    tri = _feature_design([Inclusion(Polygon([(1e-7, 1e-7), (4e-7, 1.2e-7), (2.5e-7, 4e-7)]),
+                                     "hi")])
+    with pytest.raises(ValueError, match="no EXACT image"):
+        design_to_pmm2d_stack(tri, 1.31e-6, n_modes=4)
+    _spoof(monkeypatch, "5.44.0")
+    with pytest.raises(LumenairyFeatureUnavailable, match=r"per-layer.*>= 5\.45\.0"):
+        design_to_pmm2d_stack(tap, 1.31e-6, n_modes=4)
+    with pytest.raises(LumenairyFeatureUnavailable, match=r"per-layer.*>= 5\.45\.0"):
+        design_to_pmm2d_stack(tens, 1.31e-6, n_modes=4, pure_grid="per-layer")
+    _spoof(monkeypatch, "5.42.1")              # union grid builds on 5.22+, a tensor does not
+    design_to_pmm2d_stack(tens, 1.31e-6, n_modes=4)
+    with pytest.raises(LumenairyFeatureUnavailable,
+                       match=r"TENSOR eps on layer 'g'.*>= 5\.43\.0 \(installed 5\.42\.1\)"):
+        design_to_pmm2d_stack(tens, 1.31e-6, n_modes=4, eps_by_region=ebr)
+    # the hybrid engine's eps_tensor_cell is 5.22-era: no refusal
+    design_to_pmm2d_stack(tens, 1.31e-6, engine="hybrid", degree=5, n_orders=3, eps_by_region=ebr)
+
+
+@pytest.mark.skipif(not HAVE_LUM, reason="lumenairy not installed")
+def test_feature_floor_table_is_sound():
+    from dynameta.optics.lumenairy_bridge._common import (FEATURE_FLOORS, VERSION_FLOOR,
+                                                          lumenairy_has, lumenairy_version)
+    for name, (floor, what) in FEATURE_FLOORS.items():
+        assert tuple(floor) > tuple(VERSION_FLOOR), name     # else it is not a feature floor
+        assert lumenairy_has(name) == (lumenairy_version() >= floor)
+        assert what
