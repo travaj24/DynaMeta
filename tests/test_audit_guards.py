@@ -124,35 +124,11 @@ def test_sweep_duplicate_bias_labels_raise():
           wavelengths_nm=[1300.0])                             # distinct labels fine
 
 
-def test_inband_bump_fixture_defeats_a_two_edge_check():
-    """AUDIT T-17/T-10: this checks the FIXTURE, not the guard -- it asserts that a substrate with
-    eps 4 -> 6 -> 4 has equal band-EDGE indices (so any two-edge dispersion check is blind to it)
-    while the band-CENTRE freeze point differs. It never calls run_pipeline, so on its own it
-    cannot tell the C5-12 fix from the code it replaced; it is kept as the fixture's precondition.
-
-    THE GUARD ITSELF is gated in tests/test_pipeline_effects.py::
-    test_inband_dispersion_bump_disables_sweep_fast_path, which drives this same fixture through
-    the real run_pipeline and is the only test in the suite that fails on the pre-fix form.
-    """
-    import numpy as np
-    from dynameta.geometry import Design, Layer, Stack, UnitCell
-    from dynameta.materials import Material, MaterialRegistry, ConstantOptical, TabulatedOptical
-    from dynameta.optics.tmm_reference import end_media_indices
-    reg = MaterialRegistry()
-    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
-    reg.add(Material("m", ConstantOptical(4.0 + 0j)))
-    reg.add(Material("bump", TabulatedOptical(lambda_m=np.array([1.20e-6, 1.325e-6, 1.45e-6]),
-                                              eps_complex=np.array([4.0 + 0j, 6.0 + 0j, 4.0 + 0j]))))
-    d = Design(name="t", unit_cell=UnitCell.square(300e-9),
-               stack=Stack(layers=[Layer("s", 100e-9, "m")],
-                           superstrate_material="air", substrate_material="bump"),
-               electrodes=[], materials=reg)
-    lams = [1.20e-6, 1.325e-6, 1.45e-6]
-    # edges are equal (the old check's blind spot)...
-    _, nb_lo = end_media_indices(d, lams[0])
-    _, nb_hi = end_media_indices(d, lams[-1])
-    assert abs(nb_lo - nb_hi) < 1e-12
-    # ...but the band-centre (freeze point) differs, which is what makes the fixture usable as a
-    # discriminator -- the flagging itself is asserted in test_pipeline_effects (see docstring).
-    _, nb_c = end_media_indices(d, 0.5 * (lams[0] + lams[-1]))
-    assert abs(nb_c - nb_lo) > 0.1
+# AUDIT T-17 (2026-11-02): `test_inband_bump_fixture_defeats_a_two_edge_check` lived here. It checked
+# only its own FIXTURE (equal band-edge indices, different band-centre one) and never called
+# run_pipeline, so it could not tell the C5-12 guard from the code it replaced -- and wave 3 (T-10)
+# moved those same fixture asserts, verbatim, into tests/test_pipeline_effects.py::
+# test_inband_dispersion_bump_disables_sweep_fast_path, where they precede the real run_pipeline
+# drive. It was a pure duplicate and is removed. The guard's two sampling halves are gated there:
+# the band-centre freeze point (that test) and every interior sweep wavelength
+# (test_interior_sweep_wavelength_bump_disables_sweep_fast_path).

@@ -219,6 +219,32 @@ def test_inband_dispersion_bump_disables_sweep_fast_path():
         assert abs(n_sub - nb_c) > 0.4                  # and NOT the frozen band-centre value
 
 
+def test_interior_sweep_wavelength_bump_disables_sweep_fast_path():
+    """AUDIT T-17 / C5-12, the OTHER half of the shipped check: it samples the end media at EVERY
+    sweep wavelength, not only at the edges and the band-centre freeze point. Here those three
+    agree exactly (eps 4 at 1200 / 1325 / 1450 nm) and only the INTERIOR sweep wavelength 1250 nm
+    differs (eps 6), so a check that sampled edges + centre would keep the fast path and solve
+    1250 nm at the frozen n_sub = 2.0 instead of sqrt(6) = 2.449. The two-edge test above cannot see
+    that defect (its only sweep points ARE the edges). Planted 2026-11-02 -- pipeline.py sampling
+    [lam_min, lam_max, lam_c] only: this test fails (no warning, .solve_sweep called once) while
+    every other test in this module and test_audit_guards.py stays green."""
+    lams = [1200.0, 1250.0, 1325.0, 1450.0]
+    sub = TabulatedOptical(lambda_m=np.array([1.20e-6, 1.25e-6, 1.30e-6, 1.325e-6, 1.45e-6]),
+                           eps_complex=np.array([4.0 + 0j, 6.0 + 0j, 4.0 + 0j, 4.0 + 0j, 4.0 + 0j]))
+    d = _design_sub(sub)
+    lam_c_m = 0.5 * (min(lams) + max(lams)) * 1e-9
+    edges_and_centre = [end_media_indices(d, lm)[1] for lm in (1.20e-6, 1.45e-6, lam_c_m)]
+    assert max(abs(n - 2.0) for n in edges_and_centre) < 1e-12      # blind spot of edges + centre
+    assert abs(end_media_indices(d, 1.25e-6)[1] - 6.0 ** 0.5) < 1e-12
+
+    rec = {"per_call": [], "sweep_nsub": []}
+    with pytest.warns(RuntimeWarning, match="DISPERSIVE"):
+        _run_sweep(d, rec, lams=lams)
+    assert rec["sweep_nsub"] == []                                  # fast path DISABLED
+    got = {round(lam_m * 1e9, 6): n_sub for lam_m, n_sub in rec["per_call"]}
+    assert abs(got[1250.0] - 6.0 ** 0.5) < 1e-12                    # 1250 nm solved at ITS n_sub
+
+
 def test_nondispersive_end_media_keeps_sweep_fast_path():
     # A CONSTANT substrate: end media are wavelength-independent, so the band-centre freeze is exact and
     # the one-broadband-solve-per-bias fast path is retained (no regression to the common case).

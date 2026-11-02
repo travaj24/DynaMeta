@@ -460,6 +460,51 @@ def test_f8_unmatched_boundary_really_assembles_to_zero():
     assert float(np.linalg.norm(f.vec.FV().NumPy())) == 0.0
 
 
+def test_f19_sub_nm_interface_pair_gets_two_names_not_one():
+    """AUDIT F-19. Interfaces were named iface_z<int(round(z))> unconditionally, so a 0.6 nm film
+    between z = 99.8 and 100.4 nm put BOTH planes under 'iface_z100' -- measured 3.2e5 nm^2 of
+    boundary, twice the 400 nm cell -- and a graphene sheet addressed to it was assembled on both
+    planes, silently doubled. Each name must now cover exactly ONE plane (one cell area), the
+    colliding pair is named with decimals, and every other interface keeps its integer name."""
+    pytest.importorskip("ngsolve")
+    import ngsolve as ng
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
+    from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder, _iface_names
+    from dynameta.optics.solver import _validate_sheet_bcs
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("diel", ConstantOptical(2.25 + 0j)))
+    reg.add(Material("thin", ConstantOptical(4.0 + 0j)))
+    stack = Stack(layers=[Layer("baseL", 99.8e-9, "diel"), Layer("thinL", 0.6e-9, "thin"),
+                          Layer("capL", 100e-9, "air")],
+                  superstrate_material="air", substrate_material="air")
+    m3 = Mesh3DSpec(pml_thk_m=400e-9, superstrate_buffer_m=400e-9, substrate_buffer_m=300e-9,
+                    maxh_superstrate_m=132e-9, maxh_substrate_m=132e-9, maxh_pml_m=240e-9,
+                    maxh_inclusion_m=108e-9, maxh_background_m=108e-9, maxh_metal_m=108e-9)
+    d = Design(name="f19", unit_cell=UnitCell.square(400e-9), stack=stack, electrodes=[],
+               materials=reg, mesh_3d=m3, optical=OpticalSpec(polarization="y"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geo = LayeredOpticalBuilder(d).build()
+    names = sorted({b for b in geo.mesh.GetBoundaries() if b.startswith("iface_z")})
+    cell = 400.0 * 400.0
+    for nm in names:                                   # one plane per name, never two
+        area = ng.Integrate(1.0, geo.mesh, definedon=geo.mesh.Boundaries(nm))
+        assert abs(area / cell - 1.0) < 1e-9, (nm, area / cell)
+    assert "iface_z99p8" in names and "iface_z100p4" in names and "iface_z100" not in names
+    for legacy in ("iface_z0", "iface_z200"):          # unaffected planes keep the integer name
+        assert legacy in names
+    _validate_sheet_bcs(geo.mesh, {"iface_z100p4": 1e-4})
+    with pytest.raises(ValueError, match="iface_z100p4"):   # the stale name now lists the real ones
+        _validate_sheet_bcs(geo.mesh, {"iface_z100": 1e-4})
+    # the helper: unique buckets are byte-identical to the old rule; duplicates of ONE plane share
+    assert _iface_names([0.0, 99.8, 100.4, 100.4 + 1e-9, -0.4]) == [
+        "iface_z0p0", "iface_z99p8", "iface_z100p4", "iface_z100p4", "iface_z-0p4"]
+    assert _iface_names([12.0, 300.0]) == ["iface_z12", "iface_z300"]
+
+
 def test_f15_oblique_pml_advisory_is_emitted_once_per_process():
     """The advisory describes the PML, not the solve: a sweep must not repeat it per wavelength.
     The per-solve REGIME GUARD (the 50 deg raise) stays unconditional."""

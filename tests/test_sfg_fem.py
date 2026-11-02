@@ -125,6 +125,7 @@ def test_nondegenerate_flat_vs_oracle():
             t1, t2, out["p_up_3w"], p_an, rel)
         # the FEM emission angle must equal the oracle's momentum-matched theta3
         assert abs(out["theta3_deg"] - orc["theta3_deg"]) < 1e-6
+        assert out["propagating"] is True and orc["propagating"] is True     # audit F-20
 
 
 # --------------------------------------------------------------------------------------------
@@ -207,3 +208,41 @@ def test_spol_selection_rule_both_processes():
         assert both_s["S_up"] == 0.0
         assert abs(both_s["E_perp_in_1"]) == 0.0 and abs(both_s["E_perp_in_2"]) == 0.0
         assert p["S_up"] > 1e6 * max(both_s["S_up"], 1e-300)   # p-pol strongly nonzero
+
+
+# --------------------------------------------------------------------------------------------
+# GATE 6 (audit F-20) -- an EVANESCENT DFG field is flagged and probed with its true polarization
+# --------------------------------------------------------------------------------------------
+def test_evanescent_dfg_is_flagged_and_its_amplitude_is_not_rescaled():
+    """DFG can put |K_par3| > k0_3: 1.0/2.0 um pumps at +30/-5 deg give sin(theta3) = 1.087, a mixing
+    field that DECAYS into the superstrate. sfg_two_step used to (a) drop the oracle's 'propagating'
+    flag, reporting theta3_deg = 90 as if it were an emission angle, and (b) clamp cos(theta3) to 0,
+    probing with (0, 0, -sin th3) -- not the wave's polarization -- so the fitted a_up came back
+    sin^2(th3) x the true amplitude. Measured (2026-11-02, this mesh): |a_up| / (Z0 |A_oracle|
+    e^(kappa z_sheet)) = 0.993 with the TM polarization vector (beta1, 0, -K_par3)/k0_3 (purely
+    imaginary cos th3), 1.174 with the old probe (sin^2 th3 = 1.182)."""
+    import cmath
+    from dynameta.optics.shg_fem import sfg_two_step
+
+    w1 = 2.0 * math.pi * C_LIGHT / 1000e-9
+    w2 = 2.0 * math.pi * C_LIGHT / 2000e-9
+    t1, t2 = 30.0, -5.0
+    d = _flat_gold_design(220e-9, t1)
+    out = sfg_two_step(d, omega1_rad_s=w1, omega2_rad_s=w2, chi_zzz=CHI,
+                       theta1_deg=t1, theta2_deg=t2, process="dfg")
+    orc = rudnick_stern_flat_sfg(w1, w2, t1, t2, EPS_W, EPS_W, EPS_W, CHI, process="dfg")
+    k3 = 2.0 * math.pi / (out["lambda_3_m"] * 1e9)                  # nm^-1
+    K = out["K_par3_per_nm"]
+    assert K / k3 > 1.05                                             # the regime under test
+    assert out["propagating"] is False and orc["propagating"] is False
+    assert out["p_up_3w"] == pytest.approx(0.0, abs=1e-12 * abs(out["P_z"]))   # nothing radiates
+    # the decaying wave's amplitude, referenced to z = 0 like the port fit: Z0 |A| e^(kappa z_sheet)
+    b1 = cmath.sqrt(k3 ** 2 - K ** 2)
+    b1 = b1 if b1.imag >= 0 else -b1
+    z_sheet = out["geo"].z_intervals_nm[out["metal_region"]][1]
+    expect = Z0 * abs(orc["A"]) * abs(cmath.exp(-1j * b1 * z_sheet))
+    ratio = abs(out["result_3"].a_up) / expect
+    assert abs(ratio - 1.0) < 0.03, ratio                            # old probe: 1.17 (sin^2 th3)
+    # and propagating emission still reports itself as such (same criterion as the oracle)
+    prop = rudnick_stern_flat_sfg(w1, w2, 30.0, 30.0, EPS_W, EPS_W, EPS_W, CHI, process="dfg")
+    assert prop["propagating"] is True

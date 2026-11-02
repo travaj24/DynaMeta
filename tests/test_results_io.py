@@ -39,11 +39,15 @@ def _rows():
 @pytest.mark.parametrize("fmt", _FORMATS)
 def test_store_roundtrip(fmt, tmp_path):
     p = str(tmp_path / ("s" + _EXT[fmt]))
-    arrays = {"R": np.random.rand(2, 4), "wl": np.linspace(1.4, 1.7, 4)}
+    # audit T-22: seeded (the suite's only unseeded RNG), and the round trip is pinned BIT-EXACT with
+    # the dtype: np.allclose (rtol 1e-5) passed a float32 downcast of the payload (rel error ~6e-8).
+    arrays = {"R": np.random.default_rng(20261102).random((2, 4)), "wl": np.linspace(1.4, 1.7, 4)}
     attrs = {"bias": ["off", "on"], "n": 2, "x": 3.14}
     save_arrays(p, arrays, attrs, fmt=fmt)
     a, m = load_arrays(p, fmt=fmt)
-    assert np.allclose(a["R"], arrays["R"]) and np.allclose(a["wl"], arrays["wl"])
+    for k in ("R", "wl"):
+        got = np.asarray(a[k])
+        assert got.dtype == arrays[k].dtype and np.array_equal(got, arrays[k]), k
     assert m["bias"] == ["off", "on"] and m["n"] == 2 and abs(m["x"] - 3.14) < 1e-9
 
 
