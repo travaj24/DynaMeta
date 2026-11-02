@@ -39,13 +39,17 @@ class SweepRow:
     result:       OpticalResult
 
 
-def _fem_optical_solver(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult:
-    """Default optical solve: assemble the NGSolve VoxelCoefficient + run the FEM."""
+def _fem_optical_solver(design, geo, eps_by_region, lambda_m, n_super, n_sub,
+                        factor_cache=None) -> OpticalResult:
+    """Default optical solve: assemble the NGSolve VoxelCoefficient + run the FEM. run_pipeline passes
+    one FEMFactorCache per run, so with a direct solver every bias/wavelength after the first is a
+    GMRes solve preconditioned by the stored factorization (see solver.FEMFactorCache)."""
     from dynameta.optics.eps_assembler import assemble_eps_cf
     from dynameta.optics.solver import solve_fem
     eps_cf = assemble_eps_cf(geo, eps_by_region)
     return solve_fem(geo, lambda_m, eps_cf, design.optical,
-                      order=design.mesh_3d.fem_order, n_super=n_super, n_sub=n_sub)
+                      order=design.mesh_3d.fem_order, n_super=n_super, n_sub=n_sub,
+                      factor_cache=factor_cache)
 
 
 def run_pipeline(design: Design, sweep: Sweep, *,
@@ -122,7 +126,17 @@ def run_pipeline(design: Design, sweep: Sweep, *,
             geo.mesh.ne, geo.mesh.nv, len(align.region_alignments),
             len(align.fixed_eps_regions)), flush=True)
 
-    solve_optics = optical_solver or _fem_optical_solver
+    if optical_solver is None:
+        # the default FEM path: one factorization cache for the whole run (one mesh, every bias and
+        # wavelength), released when the run returns
+        from dynameta.optics.solver import FEMFactorCache
+        _fcache = FEMFactorCache()
+
+        def solve_optics(design, geo, eps_by_region, lambda_m, n_super, n_sub):
+            return _fem_optical_solver(design, geo, eps_by_region, lambda_m, n_super, n_sub,
+                                       factor_cache=_fcache)
+    else:
+        solve_optics = optical_solver
     # a SWEEP-AWARE optical solver (e.g. make_fdtd_sweep_optical_solver) exposes solve_sweep: ONE broadband
     # solve per bias serves the whole wavelength list, instead of re-solving each wavelength.
     sweep_aware = hasattr(solve_optics, "solve_sweep")
