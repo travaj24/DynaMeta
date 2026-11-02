@@ -127,15 +127,29 @@ class DirectorProfile:
     V_th: float             # Freedericksz threshold
 
 
-def _B(theta_m: float, dEps: float, ep: float, nphi: int = 1201) -> float:
-    """The elliptic quadrature B(theta_m) (see module docstring); bounded for theta_m < pi/2."""
-    s2 = np.sin(theta_m) ** 2
-    phi = np.linspace(0.0, 0.5 * np.pi, int(nphi))
-    sp2 = np.sin(phi) ** 2
-    eps_th = ep + dEps * s2 * sp2                          # eps(theta(phi))
-    eps_thm = ep + dEps * s2                               # eps(theta_m)
-    integrand = np.sqrt(eps_thm / (dEps * eps_th)) / np.sqrt(1.0 - s2 * sp2)
-    return float(trapz(integrand, phi))
+def _B(theta_m: float, dEps: float, ep: float) -> float:
+    """The elliptic quadrature B(theta_m) (see module docstring), in CLOSED FORM:
+
+        B = K(m) / sqrt(dEps),   1 - m = cos^2(theta_m) * eps_perp / eps(theta_m),
+
+    K = complete elliptic integral of the first kind (parameter m). Derivation: with eta = sin^2
+    theta_m and g = dEps/eps_perp, B = sqrt(eps(theta_m)/(dEps eps_perp)) int_0^{pi/2} dphi /
+    sqrt((1 - eta sin^2 phi)(1 + g eta sin^2 phi)), and that integral is K(m)/sqrt(1 + g eta) with
+    m = eta (1 + g)/(1 + g eta) (t = cot^2 phi turns it into Carlson's R_F(0, 1 - eta, 1 + g eta)).
+    This is Deuling's splay-Freedericksz voltage law at K33 = K11, V/V_th = (2/pi) K(m) (Deuling 1972;
+    Blinov & Chigrinov, "Electrooptic Effects in LC Materials", Sec. 3.2). theta_m -> 0 gives K(0) =
+    pi/2 and V -> V_th exactly. 1 - m is formed DIRECTLY (cos^2, never 1 - sin^2) and passed to
+    scipy's ellipkm1, so the logarithmic divergence K ~ ln(4/sqrt(1-m)) at theta_m -> pi/2 is exact.
+    AUDIT C-14 (2026-11-02): this was a 1201-point uniform-phi trapezoid, exact (<= 2.4e-5) to 89.9
+    deg but blind to the endpoint log singularity above it -- measured vs a 40-digit mpmath quadrature
+    it over-estimated B by 1.15x at 89.99 deg, 3.56x at 89.999 deg and 42.09x at the bisection's
+    upper bracket pi/2 - 1e-6, so the over-drive saturation test compared V against a value 42x too
+    high. The closed form is within 2.3e-16 of the mpmath oracle at every one of those angles."""
+    from scipy.special import ellipkm1
+    s2 = math.sin(theta_m) ** 2
+    c2 = math.cos(theta_m) ** 2
+    one_minus_m = c2 * ep / (ep + dEps * s2)               # = 1 - m, formed without cancellation
+    return float(ellipkm1(one_minus_m)) / math.sqrt(dEps)
 
 
 def _V_of_theta_m(theta_m: float, K: float, dEps: float, ep: float) -> float:

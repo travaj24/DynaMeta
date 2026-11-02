@@ -130,6 +130,51 @@ class TransientResult:
     plan: Optional["ChannelPlan"] = None        # the channel structure every array is indexed by
     power_zt: Optional[np.ndarray] = None       # (Nt, K, Nz), only if store_profiles=True
 
+    def assert_valid(self) -> "TransientResult":
+        """Raise unless this march is trustworthy; return ``self`` so it chains
+        (``r = simulate_transient(...).assert_valid()``).
+
+        The march deliberately RETURNS its arrays when it leaves its regime (the audit-A-7
+        contract: flag + RuntimeWarning, arrays unchanged), so a consumer that forgets the flag
+        gets NaNs or a wrong-branch answer propagating into whatever it computes next. This is the
+        one-call check the 2026-08-04 audit asked for (verification section, 2026-11-02). It tests
+        THE flag for this march -- ``meta['march_valid']`` (identical to ``quasi_static_valid`` in
+        the default mode; in the self-consistent modes exceeding the A-7 margins is expected and is
+        NOT a failure) -- and, independently of any flag, that every returned power / inversion
+        array is finite and no gain is NaN (-inf dB is a channel the drive switched off). RuntimeError, naming the mode, the failed criteria and the two
+        A-7 margins against their limits."""
+        m = self.meta
+        valid = bool(m.get("march_valid", m.get("quasi_static_valid", True)))
+        bad_arrays = [name for name in ("nbar2_zt", "signal_out_W", "pump_out_W",
+                                        "ase_fwd_W", "ase_bwd_W", "power_zt")
+                      if getattr(self, name) is not None
+                      and not np.all(np.isfinite(np.asarray(getattr(self, name))))]
+        # gain: -inf is a legitimate DROPPED channel (signal_drive -> 0 W gives log10(0)); NaN is not
+        if np.any(np.isnan(np.asarray(self.signal_gain_dB, float))):
+            bad_arrays.append("signal_gain_dB")
+        if valid and not bad_arrays:
+            return self
+        lim = m.get("validity_limits", {}) or {}
+        parts = []
+        if not valid:
+            parts.append("meta['march_valid'] is False (ase_mode={!r})".format(
+                m.get("ase_mode", "quasi_static")))
+        if m.get("nonfinite_powers"):
+            parts.append("non-finite channel powers appeared during the march")
+        if bad_arrays:
+            parts.append("non-finite values in {}".format(", ".join(bad_arrays)))
+        if "max_ase_to_launched" in m:
+            parts.append("ASE/launched {:.3g} (limit {}), ASE gain integral {:.4g} (limit {})".format(
+                float(m["max_ase_to_launched"]), lim.get("ase_to_launched"),
+                float(m.get("max_ase_gain_integral", float("nan"))),
+                lim.get("ase_gain_integral")))
+        if m.get("ase_inner_nonconverged_steps"):
+            parts.append("{} self-consistent step(s) did not reach ase_tol".format(
+                int(m["ase_inner_nonconverged_steps"])))
+        raise RuntimeError("TransientResult.assert_valid: this march is NOT trustworthy -- "
+                           + "; ".join(parts) + ". See meta['validity_warning'] and the "
+                           "simulate_transient VALIDITY notes (audit A-7).")
+
     def ase_psd_1pol_W_Hz(self, direction: str = "fwd") -> np.ndarray:
         """(Nt, n_bins) single-POLARIZATION ASE power spectral density [W/Hz].
 
@@ -239,23 +284,65 @@ def _cumtrapz2(Y, x):
     return out
 
 
+# Rows whose cumulative gain integral stays within +-_G_SAFE nepers keep the closed vectorized
+# form exp(G) * (bc + cumtrapz(s exp(-G))); 700 sits under the float64 exp overflow at 709.78, so on
+# those rows neither factor can overflow (or underflow into a 0 * inf) and every result that was
+# ever finite is BYTE-IDENTICAL to before. Other rows take the shifted recurrence below.
+_G_SAFE = 700.0
+
+
+def _propagate_rows_shifted(z, g, s, bc):
+    """Forward-direction rows of _propagate_fixed by the SHIFTED (log-sum-exp) recurrence
+        P_{j+1} = e^{dG_j} P_j + dz_j/2 (s_j e^{dG_j} + s_{j+1}),   dG_j = dz_j (g_j + g_{j+1})/2,
+    which is ALGEBRAICALLY the same discrete integrating-factor trapezoid as the closed form
+    (multiply that form's step j+1 by e^{-G_{j+1}} e^{G_{j+1}}) but only ever exponentiates ONE
+    step's gain -- every e^{G(z) - G(z')} it implies is formed as a product of bounded factors, so
+    neither e^{G} (overflow) nor e^{-G} (underflow, or 0 * inf = NaN on an absorbing row) is ever
+    built. Audit 2026-08-04 (verification section, "the overflow is avoidable"; 2026-11-02)."""
+    dz = np.diff(z)
+    dG = 0.5 * (g[:, 1:] + g[:, :-1]) * dz
+    P = np.empty_like(g)
+    P[:, 0] = bc
+    for j in range(z.size - 1):
+        e = np.exp(dG[:, j])
+        P[:, j + 1] = e * P[:, j] + 0.5 * dz[j] * (s[:, j] * e + s[:, j + 1])
+    return P
+
+
 def _propagate_fixed(z, g, s, bc, u):
     """Powers P (K, Nz) for FIXED per-channel gain g(z) and source s(z) (both (K, Nz)) with
     boundary powers bc (K,) and directions u (K,). Exact integrating-factor solution of
     dP/dz = u (g P + s): forward channels seeded at z=0, backward at z=L. No iteration -- the
     gain does not depend on P here (that coupling lives in the slow nbar2 update). Vectorized
-    over the channel axis (each channel is an independent row problem)."""
+    over the channel axis (each channel is an independent row problem).
+
+    OVERFLOW GUARD (2026-11-02, the 2026-08-04 audit's verification follow-up). The closed form
+    exp(G) * (bc + cumtrapz(s exp(-G))) overflows in exp(G) and underflows in exp(-G) SEPARATELY
+    even when the product is representable: a row gaining past ~709 nepers returned inf, and an
+    ABSORBING row past -709 returned NaN (exp(G) -> 0 times a cumtrapz -> inf). Measured on the
+    Yb reference stretched to 8 / 12 m (3 um, NA 0.12, 6e25 m^-3, 2 W @ 976 nm, 20 mW @ 1060, 24
+    ASE bins 1020-1100 nm) marched from nbar2 = 0.9: every step went non-finite, so the A-7
+    monitor tripped on IEEE-754 ("non-finite channel powers") instead of on its physical criteria.
+    Rows with max|G| > _G_SAFE now take the shifted recurrence (_propagate_rows_shifted); all
+    other rows are unchanged to the bit."""
     P = np.empty_like(g)
     fwd = u > 0.0
-    if np.any(fwd):
-        G = _cumtrapz2(g[fwd], z)
-        P[fwd] = np.exp(G) * (bc[fwd][:, None] + _cumtrapz2(s[fwd] * np.exp(-G), z))
-    bwd = ~fwd
-    if np.any(bwd):
-        zeta = z[-1] - z[::-1]
-        G = _cumtrapz2(g[bwd][:, ::-1], zeta)
-        Pr = np.exp(G) * (bc[bwd][:, None] + _cumtrapz2(s[bwd][:, ::-1] * np.exp(-G), zeta))
-        P[bwd] = Pr[:, ::-1]
+    for sel, rev in ((fwd, False), (~fwd, True)):
+        if not np.any(sel):
+            continue
+        zz = (z[-1] - z[::-1]) if rev else z           # backward rows: march from z = L
+        gg = g[sel][:, ::-1] if rev else g[sel]
+        ss = s[sel][:, ::-1] if rev else s[sel]
+        b = bc[sel]
+        G = _cumtrapz2(gg, zz)
+        Pr = np.empty_like(gg)
+        safe = np.max(np.abs(G), axis=1) <= _G_SAFE
+        if np.any(safe):
+            Gs = G[safe]
+            Pr[safe] = np.exp(Gs) * (b[safe][:, None] + _cumtrapz2(ss[safe] * np.exp(-Gs), zz))
+        if not np.all(safe):
+            Pr[~safe] = _propagate_rows_shifted(zz, gg[~safe], ss[~safe], b[~safe])
+        P[sel] = Pr[:, ::-1] if rev else Pr
     return P
 
 
@@ -380,7 +467,9 @@ def simulate_transient(amp: FiberAmplifier, t_grid, *,
     meta['quasi_static_valid'] (bool), meta['max_ase_to_launched'], meta['max_ase_gain_integral'],
     meta['validity_limits'], meta['validity_warning'] -- and raises a RuntimeWarning when the flag
     goes False; the arrays are still returned (unchanged) but must not be trusted. See the module
-    docstring for the two measured failure cases and why sub-stepping cannot fix them.
+    docstring for the two measured failure cases and why sub-stepping cannot fix them. A consumer
+    that wants an EXCEPTION instead of a flag calls ``result.assert_valid()`` (returns the result,
+    raises RuntimeError naming the failed criteria; 2026-08-04 audit follow-up).
 
     ase_mode (2026-09-15) LIFTS that limit rather than only reporting it:
 

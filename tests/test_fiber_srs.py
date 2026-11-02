@@ -6,6 +6,8 @@ distributed-seed growth P_S(L) = q_seed (exp(k_r P0 L) - 1), and (ii) Manley-Row
 conservation P_sig/nu_sig + P_S/nu_S = const once seeding is negligible. The active-amplifier
 gate then checks the physical ceiling: above threshold the Stokes drains the amplified signal."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -112,3 +114,32 @@ def test_transient_refuses_raman():
                         raman=RamanStokes())
     with pytest.raises(NotImplementedError):
         simulate_transient(amp, np.linspace(0.0, 1e-3, 5))
+
+
+def test_a14_gain_spectrum_on_a_raman_coupled_amplifier():
+    """audit A-14 (2026-11-02): gain_spectrum built `_with(amp, signals=[])`, which forwarded the
+    RamanStokes coupling into a FiberAmplifier with no signal for `signal_index` to point at, so it
+    raised ValueError on EVERY Raman-coupled amplifier. The sweep removes the amplifier's own
+    signals -- exactly what pumps the SRS -- so the small-signal gain is the raman=None gain
+    (bitwise: the same clone), for any signal_index, and the caller's amplifier keeps its coupling.
+    Independent physics check: re-targeting the coupling at the weak probe itself (a full coupled
+    solve with the Stokes channel present) agrees to 1e-6 dB -- SRS is bilinear in P_sig."""
+    from dynameta.optics.fiber_amp.metrics import gain_spectrum
+    fib = FiberSpec(core_radius_m=3.0e-6, na=0.14, n_t_m3=8.0e24, length_m=8.0)
+    ion = erbium()
+    pumps = [Pump(0.25, 0.98e-6)]
+    lams = np.array([1.53e-6, 1.55e-6, 1.565e-6])
+    rs = RamanStokes(a_eff_m2=1.5e-11)
+    ref = gain_spectrum(FiberAmplifier(ion, fib, pumps, [Signal(1e-3, 1.55e-6)]), lams)
+    for sigs, idx in (([Signal(1e-3, 1.55e-6)], 0),
+                      ([Signal(1e-3, 1.54e-6), Signal(2e-3, 1.56e-6)], 1)):
+        amp = FiberAmplifier(ion, fib, pumps, sigs, raman=replace(rs, signal_index=idx))
+        gs = gain_spectrum(amp, lams)
+        assert np.array_equal(gs.gain_dB, ref.gain_dB)
+        assert amp.raman is not None and amp.raman.signal_index == idx   # caller's amp untouched
+    probe_r = []
+    for lam in lams:
+        r = FiberAmplifier(ion, fib, pumps, [Signal(1e-7, float(lam))], raman=rs).solve()
+        i = r.kind.index("signal")
+        probe_r.append(10.0 * np.log10(r.power_W[i, -1] / r.power_W[i, 0]))
+    assert np.max(np.abs(np.array(probe_r) - ref.gain_dB)) < 1e-6
