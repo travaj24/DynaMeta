@@ -51,8 +51,10 @@ from dynameta.geometry.cross_section import (Circle, CrossSection, Ellipse, Poly
 #   * taper=None (the default) is the ONLY spelling of an untapered inclusion; every existing
 #     Design is unchanged (eq/repr gain a trailing `taper=None`; the result-cache key hashes a
 #     taper only when one is present -- dynameta/cache.py).
-# Backends that cannot honour a taper REFUSE it (dynameta/geometry/guards.py); mapping it onto
-# PMM2DStackPure.add_tapered_pillar is a follow-on.
+# Backends that cannot honour a taper REFUSE it (dynameta/geometry/guards.py). The ONE that builds it
+# (2026-11-02, workstream B3): the PMM2D bridge's pure engine maps a single tapered Rectangle per
+# layer onto PMM2DStackPure.add_tapered_pillar (a z-staircase of exact-wall slices;
+# optics/lumenairy_bridge/pmm2d_backend.py, gated in validation/lumenairy_pmm2d_taper_wrap.py).
 _TAPER_CENTRE_TOL_M = 1e-12      # the same 1 pm absolute centring tolerance Design.device_symmetry uses
 _TAPER_SIZE_RTOL = 1e-12         # relative slack on "bottom no wider than top" (float round-off only)
 
