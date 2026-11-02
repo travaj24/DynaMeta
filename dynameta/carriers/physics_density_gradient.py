@@ -230,8 +230,10 @@ def set_dg_gamma(device: str, region: str, frac: float) -> None:
         raise ValueError("set_dg_gamma: frac must be in [0, 1]")
     b_full = float(ds.get_parameter(device=device, region=region, name="b_dg_full"))
     ds.set_parameter(device=device, region=region, name="b_dg", value=frac * b_full)
-    try:
-        pin_full = float(ds.get_parameter(device=device, name="wall_lambda_pin_full"))
-    except Exception:
+    # audit C-17: ask whether the hard wall exists instead of reading ANY DEVSIM error as "no hard
+    # wall" -- the bare `except Exception` would also swallow a real failure (bad device, a non-numeric
+    # pin) and leave the Lambda pin stale at its previous fraction while b_dg moved on.
+    if "wall_lambda_pin_full" not in ds.get_parameter_list(device=device):
         return                                          # no hard wall on this device
+    pin_full = float(ds.get_parameter(device=device, name="wall_lambda_pin_full"))
     ds.set_parameter(device=device, name="wall_lambda_pin", value=frac * pin_full)

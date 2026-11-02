@@ -146,6 +146,34 @@ def test_slice_eps_field_uniform_and_structured():
         layered_rta(stk, 1300e-9)
 
 
+def test_r29_slice_eps_field_honours_n_slices_on_every_branch():
+    """audit R-29: n_slices was silently ignored on the structured-scalar and tensor branches (one
+    slab per native interval regardless). It now resamples them the way slice_profile resamples a
+    scalar profile: a uniform staircase, midpoint-sampled by linear interpolation in z."""
+    class _EF:
+        def __init__(self, v_zyx, z_u):
+            self.values_zyx = np.asarray(v_zyx, dtype=complex)
+            self.z_axis_u = np.asarray(z_u, dtype=float)
+            self.is_uniform = False
+    z = [0.0, 30.0, 100.0]                                 # non-uniform native grid (nm)
+    vs = np.zeros((3, 2, 3), complex)                      # structured scalar (Nz, Ny, Nx)
+    vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 3.0; vs[2] = vs[0] + 10.0
+    ss = slice_eps_field(_EF(vs, z), 1e-9, n_slices=4)
+    assert len(ss) == 4 and all(s.thickness_m == pytest.approx(25e-9) for s in ss)
+    for k, s in enumerate(ss):
+        zc = 12.5 + 25.0 * k
+        off = np.interp(zc, z, [0.0, 3.0, 10.0])           # the per-cell offset, linear in z
+        assert np.allclose(s.eps_cell, (vs[0] + off).T)
+    assert len(slice_eps_field(_EF(vs, z), 1e-9)) == 2     # None keeps the native intervals
+    vt = np.zeros((3, 2, 3, 3, 3), complex)                # tensor (Nz, Ny, Nx, 3, 3), structured
+    vt[..., 0, 0] = vs; vt[..., 1, 1] = 2.0; vt[..., 2, 2] = 3.0
+    st = slice_eps_field(_EF(vt, z), 1e-9, n_slices=5)
+    assert len(st) == 5 and sum(s.thickness_m for s in st) == pytest.approx(100e-9)
+    assert np.allclose(st[0].eps_tensor_cell[..., 0, 0], (vs[0] + np.interp(10.0, z, [0, 3, 10])).T)
+    with pytest.raises(ValueError):
+        slice_eps_field(_EF(vs, z), 1e-9, n_slices=0)
+
+
 def test_layered_order_sensitivity_on_asymmetric_lossy_stack():
     # The graded_tmm_vs_fem validation uses a symmetric LOSSLESS profile, for which R is
     # order-INsensitive, so it cannot catch a slab-order / double-reversal regression (LTM-1).

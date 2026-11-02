@@ -23,11 +23,27 @@ def kirchhoff_theta(k_of_T, T_K, T_ref_K: float):
     return float(val)
 
 
-def invert_kirchhoff(k_of_T, theta_W_m: float, T_ref_K: float, *, T_max_K: float = 5000.0):
+def invert_kirchhoff(k_of_T, theta_W_per_m: Optional[float] = None,
+                     T_ref_K: Optional[float] = None, *, T_max_K: float = 5000.0,
+                     theta_W_m: Optional[float] = None):
     """T such that int_Tref^T k dT' = theta (brentq; theta monotone since k > 0). theta >= 0
-    (heating above the reference) up to theta(T_max_K); below-reference theta inverts too."""
+    (heating above the reference) up to theta(T_max_K); below-reference theta inverts too.
+    theta_W_per_m is the Kirchhoff potential in W/m. AUDIT V-23 (2026-11-02): it was spelled
+    `theta_W_m`, which collides with the library's `_m` = metres suffix; that keyword still works
+    (DeprecationWarning). Positional calls are unaffected."""
+    if theta_W_m is not None:
+        import warnings
+        if theta_W_per_m is not None:
+            raise TypeError("invert_kirchhoff: pass theta_W_per_m only (theta_W_m is its deprecated "
+                            "spelling)")
+        warnings.warn("invert_kirchhoff(theta_W_m=...) is deprecated; use theta_W_per_m= (the "
+                      "potential is in W/m, and `_m` means metres in dynameta -- audit V-23)",
+                      DeprecationWarning, stacklevel=2)
+        theta_W_per_m = theta_W_m
+    if theta_W_per_m is None or T_ref_K is None:
+        raise TypeError("invert_kirchhoff: theta_W_per_m and T_ref_K are required")
     from scipy.optimize import brentq
-    th = float(theta_W_m)
+    th = float(theta_W_per_m)
     if th == 0.0:
         return float(T_ref_K)
     lo, hi = (float(T_ref_K), float(T_max_K)) if th > 0.0 else (1.0, float(T_ref_K))

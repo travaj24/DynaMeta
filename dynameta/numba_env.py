@@ -24,9 +24,9 @@ directory via os.add_dll_directory when present, which makes TBB the default lay
 Cost control: (1) an explicit NUMBA_THREADING_LAYER always wins -- no probe; (2) POSIX skips
 by default (the breakage class is Windows DLL/runtime rot; CI pays nothing -- pass
 windows_only=False to probe anywhere); (3) no numba -> nothing to do; (4) a CONCLUSIVE verdict is
-CACHED per (python, numba version, tbb version, probe-source hash, dynameta version) key with a
-TTL, so even the broken machine pays the probe once a day and a healthy box pays one small-kernel
-JIT (~15-30 s) once a day.
+CACHED per (python, environment (sys.prefix, audit R-26), numba version, tbb version, probe-source
+hash, dynameta version) key with a TTL, so even the broken machine pays the probe once a day and a
+healthy box pays one small-kernel JIT (~15-30 s) once a day.
 
 AUDIT T-11 -- the verdict is no longer indiscriminate. Only two child outcomes are EVIDENCE
 about the threading layer, and they are the two documented failure modes:
@@ -78,9 +78,18 @@ _PROBE_SRC = (
 )
 
 
+def _prefix_tag() -> str:
+    """Short hash of the interpreter's environment (sys.prefix). AUDIT R-26: the verdict file lives
+    in the SHARED temp dir and was named by the Python version only, so two virtualenvs of the same
+    Python shared one verdict -- although the tbb runtime the verdict depends on is installed PER
+    environment (<sys.prefix>/Library/bin)."""
+    return hashlib.sha1(os.path.normcase(os.path.abspath(sys.prefix)).encode("utf-8")).hexdigest()[:8]
+
+
 def _cache_path() -> str:
     return os.path.join(tempfile.gettempdir(),
-                        "dynameta_numba_layer_probe_py{}{}.json".format(*sys.version_info[:2]))
+                        "dynameta_numba_layer_probe_py{}{}_{}.json".format(
+                            *sys.version_info[:2], _prefix_tag()))
 
 
 def _tbb_version() -> str:
@@ -109,9 +118,10 @@ def _dynameta_version() -> str:
 def _cache_key(numba_version: str) -> str:
     """AUDIT T-11: key the verdict on everything that can legitimately flip it -- the numba and
     tbb versions, the probe source itself and the dynameta version whose kernel it runs."""
-    return "numba-{}-tbb-{}-probe-{}-dm-{}".format(
+    return "numba-{}-tbb-{}-probe-{}-dm-{}-env-{}".format(
         numba_version, _tbb_version(),
-        hashlib.sha1(_PROBE_SRC.encode("utf-8")).hexdigest()[:8], _dynameta_version())
+        hashlib.sha1(_PROBE_SRC.encode("utf-8")).hexdigest()[:8], _dynameta_version(),
+        _prefix_tag())                                  # audit R-26: per-environment verdict
 
 
 def _stderr_tail(err: str, n_lines: int = 3, n_chars: int = 400) -> str:
@@ -198,7 +208,7 @@ def ensure_working_threading_layer(*, timeout_s: float = 180.0, ttl_s: float = 8
         return verdict
 
     try:
-        with open(cache, "r") as fh:
+        with open(cache, "r", encoding="utf-8") as fh:   # audit R-26
             d = json.load(fh)
         if d.get("key") == key and (time.time() - d.get("t", 0.0)) < ttl_s:
             cached = str(d.get("verdict", ""))
@@ -221,7 +231,7 @@ def ensure_working_threading_layer(*, timeout_s: float = 180.0, ttl_s: float = 8
         verdict, why = "probe-error:launch", "{}: {}".format(type(exc).__name__, exc)
     if not verdict.startswith("probe-error"):       # AUDIT T-11: cache CONCLUSIVE verdicts only
         try:
-            with open(cache, "w") as fh:
+            with open(cache, "w", encoding="utf-8") as fh:   # audit R-26
                 json.dump({"key": key, "t": time.time(), "verdict": verdict, "why": why}, fh)
         except Exception:
             pass
