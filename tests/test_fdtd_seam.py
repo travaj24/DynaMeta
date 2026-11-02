@@ -251,6 +251,35 @@ def test_structured_lateral_grid_and_dispatch_guard():
         make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
 
 
+def test_structured_lateral_wraps_a_boundary_crossing_inclusion():
+    # 2026-11-02: the shared rasterizer used to CLIP an inclusion crossing the cell edge (the RCWA
+    # bridge then solved a 0.2-period line for a 0.4-period one). A periodic cell must paint the
+    # crossing disk as the centred disk translated by half a period -- exactly, on an even grid.
+    import numpy as np
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.fdtd_seam import make_structured_lateral
+    from dynameta.optics.rasterize import cell_axes, layer_eps_cell
+    P, nx, nz = 220e-9, 44, 30
+    zc = (np.arange(nz) + 0.5) * 10e-9
+    lat = {}
+    for key, cx in (("edge", 0.0), ("centre", P / 2)):
+        d = _design([(4.0, 150e-9, [Inclusion(Circle(cx, P / 2, 60e-9), "air")])])
+        lat[key] = make_structured_lateral(d, LAM)[1](nx, nx, nz, zc, 50e-9, 150e-9)
+    # an air disk in an eps-4 layer (the inclusion must differ from the background, or every
+    # comparison below is vacuous)
+    assert lat["centre"].min() < 2.0
+    assert np.array_equal(lat["edge"], np.roll(lat["centre"], nx // 2, axis=0))
+    # discrimination: the un-periodic (clipped) paint keeps only half the disk
+    L = _design([(4.0, 150e-9, [Inclusion(Circle(0.0, P / 2, 60e-9), "air")])]).stack.layers[0]
+    X, Y = np.meshgrid(*cell_axes(nx, nx, P, P), indexing="ij")
+    reg = _design([(4.0, 150e-9, [])]).materials
+    n_wrap = int(np.sum(layer_eps_cell(L, X, Y, LAM, reg, {}, period_x_m=P, period_y_m=P).real < 2.0))
+    n_clip = int(np.sum(layer_eps_cell(L, X, Y, LAM, reg, {}).real < 2.0))
+    assert n_clip < 0.6 * n_wrap, (n_clip, n_wrap)
+    with pytest.raises(ValueError):
+        layer_eps_cell(L, X, Y, LAM, reg, {}, period_x_m=P)
+
+
 # ---- audit C5-2: the seam used to silently DROP graded/tensor eps_by_region entries ----
 
 def _graded_ef(nz=13, eps_lo=2.0, eps_hi=9.0, thick_nm=120.0):

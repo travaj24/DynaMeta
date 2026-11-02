@@ -44,14 +44,35 @@ def layer_bg_eps(layer, lambda_m, materials, eps_by_region):
     return complex(materials.get(layer.background_material).eps(lambda_m))
 
 
-def layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region):
+def layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region, *, period_x_m=None,
+                   period_y_m=None):
     """The (nx,ny) COMPLEX eps cross-section of one layer: the background eps, overpainted by each
     inclusion (CrossSection.contains_m mask) in ASCENDING priority so the highest priority wins overlaps.
     A TAPERED inclusion is refused (2026-11-02): one z-invariant section per layer would paint its TOP
-    section as a straight wall."""
+    section as a straight wall.
+
+    period_x_m / period_y_m make the paint PERIODIC (2026-11-02): an inclusion whose bbox leaves the
+    closed cell [0, Px] x [0, Py] also paints its translates by -/+(Px, Py), i.e. the piece that wraps
+    to the opposite edge -- the FEM mesher's convention, and the only reading a periodic solver can
+    have. Without them a boundary-crossing inclusion is CLIPPED: a 0.4-period line centred on x = 0
+    rasterized as a 0.2-period line (RCWA R 0.0552 vs 0.0951; the wrapped raster is 2.4e-4 from the
+    FEM, the clipped one 2.7e-3). Every in-repo periodic caller passes both; an inclusion inside the
+    closed cell paints byte-identically either way (its translates are never evaluated)."""
     require_untapered_layer(layer, "layer_eps_cell (lateral rasterizer)")
+    if (period_x_m is None) != (period_y_m is None):
+        raise ValueError("layer_eps_cell: pass both period_x_m and period_y_m, or neither")
     eps = np.full(X.shape, layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
     for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
         mask = np.asarray(inc.shape.contains_m(X, Y), dtype=bool)
+        if period_x_m is not None:
+            px, py = float(period_x_m), float(period_y_m)
+            xlo, xhi, ylo, yhi = inc.shape.bbox_m()
+            dxs = [0.0] + ([px] if xlo < 0.0 else []) + ([-px] if xhi > px else [])
+            dys = [0.0] + ([py] if ylo < 0.0 else []) + ([-py] if yhi > py else [])
+            for dx in dxs:
+                for dy in dys:
+                    if dx or dy:
+                        # the shape contains p + (dx, dy) iff its translate by -(dx, dy) contains p
+                        mask |= np.asarray(inc.shape.contains_m(X - dx, Y - dy), dtype=bool)
         eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
     return eps
