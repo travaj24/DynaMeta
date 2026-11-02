@@ -186,12 +186,11 @@ def test_gate5_fdtd_default_path_byte_identical():
     assert tt["dt"] > 0.0
 
 
-def test_gate5_existing_fdtd_infra_gates_still_pass():
-    # explicitly re-run the pre-edit FDTD coverage gates; they must be unaffected by the probe
-    from test_audit_2026_07_17_infra import (test_fdtd_1d_dielectric_slab_vs_airy,
-                                             test_fdtd_1d_drude_slab_absorbs)
-    test_fdtd_1d_dielectric_slab_vs_airy()
-    test_fdtd_1d_drude_slab_absorbs()
+# Gate 5 ("existing FDTD infra still passes") is GONE (audit T-16, 2026-11-02): it re-invoked
+# test_audit_2026_07_17_infra's two FDTD test functions by cross-module import, so the suite ran the
+# same two FDTD marches again for zero coverage (pytest already collects them in their own module)
+# and the bare `from test_audit_... import` breaks under --import-mode=importlib. The probe's
+# non-perturbation is gated directly above (default-off trace, bit-identical R/T).
 
 
 # ---- Gate 6: FDTD ETALON (matrix-pencil Q vs Fabry-Perot closed form) ----------------------
@@ -335,7 +334,8 @@ def test_gate9_high_q_window_span_scope_limit_warns():
     periods, i.e. only ``60 pi / Q`` amplitude e-foldings: 13.7 at n_slab = 3.5 but 1.1 at
     n_slab = 20.  That is where the extraction breaks -- Q = 169.9 against the Fabry-Perot 455.2
     (-62.7%; 252.8 / -44.5% since the 2026-11-02 refinement fix) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
-    says so."""
+    says so.  The bias is the max_fit_samples cap, not the record length -- see the @slow gate
+    below (n_slab = 20 at max_fit_samples = 4800: +0.6% vs Fabry-Perot)."""
     with pytest.warns(RuntimeWarning) as rec:
         er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                   resolution=30)
@@ -351,6 +351,35 @@ def test_gate9_high_q_window_span_scope_limit_warns():
         e2 = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                   resolution=30)
         assert 0.5 * e2.modes[0].gamma_rad_s * float(e2.t_used[-1]) > lo, n_slab
+
+
+@pytest.mark.slow
+def test_gate9_n20_bias_is_the_fit_sample_cap_not_the_record():
+    """WHY n_slab = 20 reads Q = 252.8 against Fabry-Perot 455.2 (-44.5%), measured 2026-11-02 (the
+    wave-2 hand-off asked: record too short for Q ~ 450, or more pencil modes than max_refine?).
+
+    NEITHER. The default record is long enough: the data-driven window holds 3176 decimated samples
+    (1.1 amplitude e-foldings of the true mode), but ``max_fit_samples = 1200`` truncates the fit to
+    the first 1200 -- 0.42 TRUE e-foldings, over which a comb of ~29 near-equal-amplitude etalon modes
+    (the top eight within 25% of each other in amplitude) cannot be separated; the refit RMS tell fires (3.5e-2). Measured
+    (dominant mode vs Fabry-Perot at its own order m):
+        max_fit_samples 1200 (default)       Q 252.83 vs 455.15 (m 29)  -44.5%   UNRELIABLE FIT
+        max_fit_samples 2400                 Q 442.18 vs 439.46 (m 28)  +0.6%
+        max_fit_samples 4800 (= all 3176)    Q 442.24 vs 439.46 (m 28)  +0.6%
+        settle 24 (2x record), cap 1200      Q 5408   (window later, 0.04 nepers) -- WORSE
+        settle 24 / 48, cap 4800 / all       Q 441.29 / 441.20                       +0.4%
+        max_refine 20 (pencil: 34 modes)     Q 442.35 -- max_refine is not the lever (+0.03%)
+    So the fix is the documented one -- raise max_fit_samples -- and `settle` (record length) is NOT
+    needed. The pencil cost of 3176 vs 1200 samples is invisible next to the FDTD march (67 s vs 68 s
+    total). @slow: one ~70 s march; nightly (a) runs it. The span guard still warns (1.1 < 3
+    nepers): it is a CONSERVATIVE flag and this is a case it over-calls."""
+    with pytest.warns(RuntimeWarning, match="e-foldings"):
+        er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30, max_fit_samples=4800)
+    assert "UNRELIABLE" not in er.refine_note, er.refine_note
+    assert er.signal_used.size < 4800                       # the whole data-driven window was fit
+    m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(20.0, m) - 1.0) < 0.03, (er.q, m)
 
 
 def test_gate7_cross_platform_q_anchor_unchanged():
