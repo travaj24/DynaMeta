@@ -1009,6 +1009,11 @@ the `simulate_transient` VALIDITY notes point to it. Gates:
 old module). Observation, not changed: on the same Yb reference the quasi-static march does NOT
 hold the steady state over 5 ms even on the unchanged closed-form path (4 m: 19.33 -> 18.89 dB vs
 `solve()` 19.29; 6 m: 19.30 -> 17.90 vs 19.24), unlike the 0.003 dB measured above on the EDFA.
+*Resolved the same day (wave-6):* the drift is spatial under-resolution of the march's discrete
+propagator at `n_nodes = 81` (dt-independent, present without ASE, second order in dz), not a
+physical transient; `simulate_transient(z_refine="auto")`, now the default, sizes the march mesh
+from the per-cell gain jump and the 6 m case holds to 0.006 dB. Details and gates: the
+2026-07-25 audit, entry after A-14.
 
 ## What was NOT found
 
