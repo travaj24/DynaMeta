@@ -434,7 +434,8 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
         z = pad
         for L in layers_sf:
             zmask = (zc >= z) & (zc < z + L.thickness_m)
-            cell = _layer_eps_cell(L, X, Y, lambda_m, mats, eps_by_region)
+            cell = _layer_eps_cell(L, X, Y, lambda_m, mats, eps_by_region, period_x_m=px,
+                                   period_y_m=py)    # periodic wrap (rasterize.layer_eps_cell)
             if np.max(np.abs(cell.imag)) > 1e-6 * (np.max(np.abs(cell.real)) + 1.0):
                 raise NotImplementedError(
                     "structured FDTD layer '{}' has lossy eps (Im != 0); the lateral grid carries real "

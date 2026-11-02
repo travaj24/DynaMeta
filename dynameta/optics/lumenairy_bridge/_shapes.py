@@ -38,14 +38,13 @@ Laurent truncation, and the crossing disk equals the centred one to 3e-14); the 
 wrapped one, i.e. the FEM confirms wrap is the right reading. For an inclusion inside the closed
 cell it is BYTE-IDENTICAL to layer_eps_cell (the translates are only evaluated for a bbox that
 leaves the cell; cell-centred samples are strictly inside (0, P), so a shape touching x = P picks
-up no translated sample). optics.rasterize itself (shared with the structured FDTD) is NOT
-touched here -- the FDTD clip is reported as an open issue, not silently changed under it.
+up no translated sample). The wrap itself now lives in optics.rasterize.layer_eps_cell
+(period_x_m/period_y_m), so the structured FDTD seam paints the same periodic geometry.
 """
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-import numpy as np
 
 __all__ = ["ShapesNotRepresentable", "cross_section_to_shape", "shape_to_cross_section",
            "layer_shapes_payload", "layer_to_shapes_slab", "periodic_layer_eps_cell"]
@@ -147,19 +146,9 @@ def periodic_layer_eps_cell(layer, X, Y, lambda_m: float, materials, eps_by_regi
     """optics.rasterize.layer_eps_cell with PERIODIC WRAP: each inclusion's mask is the union of
     contains_m over its (dx, dy) in {-Px, 0, Px} x {-Py, 0, Py} translates (only evaluated when
     its bbox leaves the closed cell), painted in ascending priority exactly as layer_eps_cell
-    does. Byte-identical to layer_eps_cell for every inclusion inside [0, Px] x [0, Py]."""
-    from dynameta.optics.rasterize import layer_bg_eps
-    px, py = float(period_x_m), float(period_y_m)
-    eps = np.full(X.shape, layer_bg_eps(layer, lambda_m, materials, eps_by_region), dtype=complex)
-    for inc in sorted(layer.inclusions, key=lambda i: getattr(i, "priority", 0)):
-        xlo, xhi, ylo, yhi = inc.shape.bbox_m()
-        dxs = [0.0] + ([px] if xlo < 0.0 else []) + ([-px] if xhi > px else [])
-        dys = [0.0] + ([py] if ylo < 0.0 else []) + ([-py] if yhi > py else [])
-        mask = np.zeros(X.shape, dtype=bool)
-        for dx in dxs:
-            for dy in dys:
-                # a shape centred at c contains the point p + (dx, dy) iff its translate by
-                # -(dx, dy) contains p; evaluating at shifted points needs no shape copy
-                mask |= np.asarray(inc.shape.contains_m(X - dx, Y - dy), dtype=bool)
-        eps[mask] = complex(materials.get(inc.material).eps(lambda_m))
-    return eps
+    does. Byte-identical to layer_eps_cell for every inclusion inside [0, Px] x [0, Py]. The wrap now
+    lives in the shared rasterizer (one implementation, so the structured FDTD seam gets it too);
+    this name is kept as its periodic spelling."""
+    from dynameta.optics.rasterize import layer_eps_cell
+    return layer_eps_cell(layer, X, Y, lambda_m, materials, eps_by_region,
+                          period_x_m=period_x_m, period_y_m=period_y_m)
