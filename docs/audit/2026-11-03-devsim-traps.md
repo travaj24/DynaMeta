@@ -249,6 +249,82 @@ Two tuning notes:
    element-based (non-Voronoi) volume and coupling. Until then, `Stacked3DSpec(interface_traps=...)`
    is correct in placement, but the sheet charge acts at about 0.8 of its strength.
 
+## 9. Per-level trap energy reference (follow-up, user-approved)
+
+**What.** `TrapLevel.energy_reference` and `InterfaceTraps.energy_reference` take one of:
+* `"intrinsic"`: the DEFAULT and the shipped behaviour, byte-identical. `energy_eV` is E_t - E_ie.
+* `"conduction"`: `energy_eV` is E_c - E_t >= 0.
+* `"valence"`: `energy_eV` is E_t - E_v >= 0.
+
+This is the same choice as Sentaurus Device's trap energy references `fromMidBandGap` / `fromCondBand`
+/ `fromValBand` (Synopsys, *Sentaurus Device User Guide*, chapter "Traps and Fixed Charges"). **Levels
+quoted from DLTS as an activation energy (E_c - E_t, E_t - E_v) should use the band-edge reference**
+[D. V. Lang, J. Appl. Phys. 45, 3023 (1974); Schroder, 3rd ed., ch. 5]. Such a level keeps its
+distance to the band edge it was measured from. The intrinsic reference instead ties it to E_ie, which
+in heavily doped material sits dEg/2 closer to the narrowed E_c.
+
+**One conversion, in the kernel.** `physics_traps.level_reference_densities(E, reference, n_i, V_t,
+N_c, N_v)` gives the numbers:
+
+    intrinsic : n1 = n_i exp(E/kT),  p1 = n_i exp(-E/kT)         (n1_p1, the shipped arithmetic)
+    conduction: n1 = N_c exp(-E/kT), p1 = n_i^2/n1
+    valence   : p1 = N_v exp(-E/kT), n1 = n_i^2/p1
+
+`srh_reference_densities(..., bgn, reference)` then applies BGN:
+* intrinsic: n1 and p1 x n_ie/n_i, as before;
+* conduction: n1 kept, p1' = n_ie^2/n1, because the narrowing moves the edge, not the DOS;
+* valence: the mirror.
+
+So n1' p1' = n_ie^2 on every reference. `srh_rate_expr` / `srh_occupancy_expr` pass `reference`
+through, so the bulk levels, every interface bin and the noise pair rate all use it.
+`equilibrium_trap_levels` tags a band-referenced charged level as `(E, N_t, kind, reference)`, while
+intrinsic levels keep the shipped 3-tuple. The neutrality root (`bipolar_options._neutral_root`, which
+serves the contacts, the seed and the 3-D phi_bi) reads it through `physics_traps.equilibrium_n1`, so
+contacts and transport use the same reference. N_c / N_v are the region's `n_dos_m3` / `n_dos_p_m3`.
+
+For `InterfaceTraps` with a band reference:
+* every energy (levels, `e_lo/e_hi`, `e_peak`, `neutral_level_eV`) is quoted in that coordinate;
+* `band_gap_eV` spans [0, E_g];
+* "above the neutral level" means toward E_c;
+* `charge="split"` requires an explicit `neutral_level_eV`.
+
+The built-in `srh_trap_energy_eV` channel keeps the intrinsic reference.
+
+**Finding (it corrects the premise of integration open item 1).** In this Boltzmann model, the split
+fraction gamma does NOT enter SRH at all, on either reference. The narrowed band diagram has
+`E_c - E_ie = kT ln(N_c/n_ie)` and `E_ie - E_v = kT ln(N_v/n_ie)` whatever gamma is: gamma moves both
+edges together relative to psi, and SRH is local in (n, p). The two references therefore differ by
+the gamma-independent factor `exp(dEg/2kT)` in n1 (and in p1), not by `exp(gamma dEg/kT)`. That
+gamma-dependent scaling describes a level held fixed in ABSOLUTE energy against the UNnarrowed edges,
+which neither reference (nor the user's choice) does. The gates pin gamma-independence explicitly.
+
+**Gates.** `tests/test_trap_energy_reference.py` has 15 tests. All 15 FAIL on f7c82db (12 failed +
+3 errors: the keyword does not exist there).
+* **(a)** p-type slab, N_A = 1e25 m^-3, Slotboom dEg = 60.5 meV (n_ie = 3.22 n_i), tau_n0 = 1e-10 s,
+  tau_p0 = 1e-6 s, level at E_c - 0.25 eV. The measured tau matches the closed form with
+  n1 = N_c exp(-0.25/kT), p1 = n_ie^2/n1 to -1.8e-7, for gamma = 0.2 and 0.8.
+  * The intrinsic reading of the same DLTS number (E_t - E_i = kT ln(N_c/n_i) - 0.25 eV) has n1 and p1
+    3.22x higher and tau = 6.695e-10 s against 2.767e-10 s, a factor **2.419**. Its closed form also
+    matches, to -5.7e-7. f7c82db can express only this reading.
+  * gamma = 0.2 and 0.8 give identical lifetimes (|ratio - 1| < 1e-8).
+* **(b)** With equivalent energies (narrowed diagram, as above), the node-evaluated n1'/p1' agree
+  across the three references to 1e-11. This holds with no BGN, with gamma = 0.5, and (finding) with
+  gamma = 0.2 and 0.8.
+* **(c)** n1' p1' = n_ie^2 node by node to 1e-12 on every reference, plus the numeric product to 1e-13.
+* **(d)** The default is byte-identical:
+  * the kernel strings with `reference="intrinsic"` are the shipped strings (pinned);
+  * the intrinsic number path is `n1_p1` itself;
+  * `equilibrium_trap_levels` returns the shipped 3-tuple;
+  * the existing `tests/test_traps.py` (25), `tests/test_devsim_phase_composition.py` and
+    `tests/test_bipolar_recombination_bgn_ionization.py` pass unchanged (counts in the report).
+* **(e)** Slotboom BGN with gamma = 0.2, N = 1e24 m^-3 (dEg = 29 meV). One case is an acceptor at
+  E_c - 0.10 eV (N_t = 5e23) in n-type; the other is the mirror, a donor at E_v + 0.10 eV in p-type.
+  * The scipy brentq root uses the Fermi occupancy written in the narrowed band diagram. The majority
+    density is compensated to 0.724 N.
+  * The simulated slab matches it at the centre AND at both contact nodes to 1.1e-15. This is the
+    trap-aware contact rule reading the same reference.
+  * The intrinsic reading of the same quoted level gives a majority density 8.3 % off.
+
 ## 8. Release-note lines
 
 * carriers: SRH recombination at an arbitrary trap energy (`setup_bipolar_region(srh_trap_energy_eV=)`,
@@ -267,3 +343,9 @@ Two tuning notes:
   against the closed form, compensation against a neutrality root, MOS LF C-V stretch-out and slope
   against Nicollian-Brews, dV_FB = -Q_f/C_ox, S = sigma v_th N_it, defaults-off byte identity (also
   against main), and 3-D interface wiring (3-D against 1-D D_it is a documented pre-existing 3-D mesh failure).
+* carriers: per-level trap energy reference, `TrapLevel(energy_reference=...)` and
+  `InterfaceTraps(energy_reference=...)`. The values are "intrinsic" (default, unchanged),
+  "conduction" (E_c - E_t) and "valence" (E_t - E_v), as in Sentaurus' fromMidBandGap / fromCondBand /
+  fromValBand. A band-referenced level keeps its distance to the NARROWED band edge under bandgap
+  narrowing: n1 = N_c exp(-(E_c - E_t)/kT), p1 = n_ie^2/n1, and n1 p1 = n_ie^2 on every reference.
+  Use it for DLTS-quoted levels. The contacts' neutrality root uses the same reference.
