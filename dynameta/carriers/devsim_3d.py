@@ -42,11 +42,13 @@ accumulation forms) is emitted as the CarrierField. The bands are ALIGNED by the
 (Stacked3DSpec.band_alignment: Fermi level flat, vacuum level continuous, per-region electron affinity),
 so the junction carries the work-function-difference built-in potential (audit S1-9, 2026-11-02;
 before it, psi = 0 was the exact equilibrium of every stack). The gate electrode keeps the BODY
-semiconductor's work function (flat band of the body at Vg = 0). SCOPE / remaining: the
-multi-semiconductor path is EQUILIBRIUM-only (the semi-semi carrier-continuity / thermionic-emission
-interface for drift_diffusion/bipolar_dd is not yet wired -- design note
-docs/audit/2026-11-02-s1-9-heterojunction-built-in-potential.md); from_design orders only a
-gate-ABOVE contiguous run.
+semiconductor's work function (flat band of the body at Vg = 0). v0.14.0 (D1a): the heterostack also
+runs UNIPOLAR DRIFT-DIFFUSION -- every extra region solves electron continuity and each
+semiconductor/semiconductor interface carries thermionic emission or the continuous-quasi-Fermi-level
+model (carriers.physics_heterojunction; Stacked3DSpec.heterointerface). SCOPE / remaining: the BIPOLAR
+heterostack stays refused (extra_semiconductors carry no hole parameters -- n_i, N_v, hole mobility,
+band gap, doping sign); from_design orders only a gate-ABOVE contiguous run. Design notes:
+docs/audit/2026-11-02-s1-9-heterojunction-built-in-potential.md, docs/audit/2026-11-03-devsim-heterojunctions.md.
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -81,6 +83,7 @@ from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import physics_traps as PT
+from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
@@ -166,8 +169,10 @@ class Stacked3DSpec:
     # diel... | gate], each semiconductor a DISTINCT region with Potential-continuity interfaces; the
     # gate-adjacent (LAST) semiconductor is where accumulation forms and is emitted as the CarrierField.
     # SCOPE: multi-semiconductor is supported for the EQUILIBRIUM solve (Potential continuity suffices
-    # for the local n(psi) closure); for physics in {drift_diffusion, bipolar_dd} the semiconductor-
-    # semiconductor carrier-continuity interface is not yet wired, so extra_semiconductors raises there.
+    # for the local n(psi) closure) and, since v0.14.0, for UNIPOLAR drift_diffusion (each extra region
+    # solves electron continuity with the primary's mobility; the semiconductor-semiconductor interfaces
+    # carry the `heterointerface` carrier model). bipolar_dd + extra_semiconductors still raises (the
+    # entries carry no hole parameters).
     # An entry may carry two OPTIONAL trailing fields, (..., n_bg_m3, chi_eV, dos_mass_kg): the region's
     # electron affinity [eV] and DOS mass [kg] (None/absent -> chi: same-material rule below; mass: the
     # primary's dos_mass_kg, the legacy behaviour). See band_alignment() for the equilibrium physics.
@@ -176,6 +181,10 @@ class Stacked3DSpec:
     # semiconductor is a DIFFERENT material (Anderson-rule band offset Delta E_c = chi_semi - chi_r);
     # None is fine for a same-material stack (zero offset by definition).
     chi_semi_eV:     Optional[float] = None
+    # v0.14.0 (D1a): the carrier model on each semiconductor/semiconductor interface of a DRIFT-DIFFUSION
+    # heterostack (carriers.physics_heterojunction): "thermionic", "continuous" (continuous quasi-Fermi
+    # level), or "auto" -- thermionic where the interface has a band offset, continuous where it does not.
+    heterointerface: str = "auto"
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
@@ -250,9 +259,9 @@ class Stacked3DSpec:
         out = {"semi": (phi0_semi, 0.0)}
         for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
             if chi is not None and self.chi_semi_eV is not None:
-                d_chi = float(self.chi_semi_eV) - float(chi)
+                chis = {"semi": float(self.chi_semi_eV), nm: float(chi)}
             elif mat == self.semi_material:
-                d_chi = 0.0                                   # same material: no band offset
+                chis = {"semi": 0.0, nm: 0.0}                 # same material: no band offset
             else:
                 raise ValueError(
                     "Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
@@ -260,8 +269,9 @@ class Stacked3DSpec:
                     "needs BOTH electron affinities (chi_semi_eV and the entry's 6th field chi_eV) -- there "
                     "is no neutral default for a heterojunction band offset (audit S1-9).".format(
                         nm, mat, self.semi_material))
-            phi_c = phi0_semi + d_chi
-            out[nm] = (phi_c, phi_c - _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm)))
+            # the ONE Anderson-rule implementation (v0.14.0; same operation order -> bit-identical)
+            out[nm] = HJ.anderson_alignment(
+                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))}, chis, "semi")[nm]
         return out
 
     def __post_init__(self):
@@ -322,15 +332,20 @@ class Stacked3DSpec:
                 if not (thk > 0.0) or not (eps >= 1.0) or not (nbg > 0.0):
                     raise ValueError("extra_semiconductors entry '{}' needs thickness>0, eps>=1, "
                                       "n_bg>0; got thk={}, eps={}, n_bg={}".format(nm, thk, eps, nbg))
-            if self.physics != "equilibrium":
-                # the semiconductor-semiconductor carrier-continuity interface is not yet wired for the
-                # DD/bipolar continuity equations (PE.setup_interface enforces only Potential continuity,
-                # which is exact for the equilibrium n(psi) closure). Fail loudly rather than silently
-                # drop carrier flux across the internal junction.
+            if self.physics == "bipolar_dd":
+                # v0.14.0: the semiconductor/semiconductor carrier interface exists (physics_heterojunction;
+                # drift_diffusion heterostacks use it), but a BIPOLAR heterostack also needs every extra
+                # region's hole statistics and doping, which the extra_semiconductors tuple does not carry.
                 raise ValueError(
-                    "extra_semiconductors (a multi-semiconductor heterostack) is supported only for "
-                    "physics='equilibrium'; got physics={!r}. The semi-semi carrier-continuity "
-                    "interface for drift_diffusion/bipolar_dd is not yet implemented.".format(self.physics))
+                    "extra_semiconductors (a multi-semiconductor heterostack) supports physics='equilibrium' "
+                    "and 'drift_diffusion'; got 'bipolar_dd'. Missing for a bipolar heterostack: per-region "
+                    "n_i, valence DOS mass, hole mobility, band gap and doping sign in extra_semiconductors "
+                    "(and the gate phi_bi frame across materials). Use the 2-D LayeredDevsimBuilder, which "
+                    "reads them from each layer's TransportModel.")
+        if self.heterointerface not in ("auto",) + HJ.HETERO_MODELS:
+            raise ValueError("Stacked3DSpec.heterointerface must be 'auto', 'thermionic' or 'continuous'; "
+                             "got {!r}".format(self.heterointerface))
+        if self.extra_semiconductors:
             self.band_alignment()        # audit S1-9: a heterojunction without affinities fails HERE, loudly
 
     def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
@@ -588,11 +603,17 @@ class Devsim3DEquilibrium:
             if role == "dielectric":
                 PE.setup_dielectric_region(self.device, name, eps)
             elif role == "semiconductor":
-                # an EXTRA gate-ward semiconductor (heterostack); equilibrium n(psi) physics with its
-                # OWN background density (the spec's extra_semiconductors n_bg). Multi-semiconductor is
-                # equilibrium-only (the post_init guard rejects DD/bipolar + extra_semiconductors).
-                PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
-                                               eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
+                # an EXTRA gate-ward semiconductor (heterostack) with its OWN background density and DOS
+                # mass (the spec's extra_semiconductors). Equilibrium n(psi) physics, or (v0.14.0) unipolar
+                # drift-diffusion with the primary's mobility (the post_init guard rejects bipolar).
+                if self._dd:
+                    DD.setup_semiconductor_region_dd(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
+                                                     eps_static=eps,
+                                                     dos_mass_kg=s.semiconductor_dos_mass_kg(name),
+                                                     mobility_m2Vs=s.mobility_m2Vs)
+                else:
+                    PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
+                                                   eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
             # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
         if s.extra_semiconductors:
             # audit S1-9 (wave-7, 2026-11-02): ALIGN THE BANDS. setup_semiconductor_region calibrates each
@@ -618,6 +639,9 @@ class Devsim3DEquilibrium:
             for (ifn, r0, r1) in self._iface_pairs:
                 if "semi" in (r0, r1) and (r0 in diel or r1 in diel):
                     PT.install_interface_traps(self.device, ifn, s.interface_traps)
+        self._hetero_ifaces = {}
+        if s.extra_semiconductors and self._dd:
+            self._wire_heterointerfaces()
         for c in ds.get_contact_list(device=self.device):
             # the "body" contact is on the semiconductor; for unipolar DD it must also pin the
             # electron density (Electrons = N_D), for bipolar it pins Electrons AND Holes to their
@@ -629,6 +653,30 @@ class Devsim3DEquilibrium:
             else:
                 PE.setup_contact(self.device, c)
         self._built = True
+
+    def _wire_heterointerfaces(self) -> None:
+        """v0.14.0 (D1a): the electron-continuity coupling of every semiconductor/semiconductor interface
+        of a drift-diffusion heterostack (physics_heterojunction). Offsets from band_alignment (Anderson
+        rule; only Phi_c DIFFERENCES enter, i.e. the affinity steps), Richardson constants from each
+        region's DOS mass, the FD log-activity on both sides (the bulk is FD-enhanced SG)."""
+        s = self.spec
+        ba = s.band_alignment()
+        semis = set(ba)
+        for (ifn, r0, r1) in self._iface_pairs:
+            if r0 not in semis or r1 not in semis:
+                continue
+            sides = [HJ.HeteroSide(r, ba[r][0], "N_c",
+                                   HJ.richardson_constant_Am2K2(s.semiconductor_dos_mass_kg(r)), fd=True)
+                     for r in list(ds.get_region_list(device=self.device, interface=ifn))]
+            model = s.heterointerface
+            if model == "auto":
+                model = ("thermionic" if abs(sides[0].phi_c_V - sides[1].phi_c_V) > 1e-9 else "continuous")
+            HJ.setup_heterointerface_carriers(self.device, ifn, sides[0], sides[1], model=model)
+            self._hetero_ifaces[ifn] = model
+
+    def heterointerfaces(self) -> Dict[str, str]:
+        """{interface: carrier model} wired on the semiconductor/semiconductor interfaces (DD only)."""
+        return dict(getattr(self, "_hetero_ifaces", {}))
 
     def _setup_bipolar_semi(self, region: str, n_bg_m3: float, eps_static: float) -> None:
         """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a 3D semiconductor
@@ -761,15 +809,16 @@ class Devsim3DEquilibrium:
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
             # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
             # gate in 0.25 V steps (coupled Newton at each step).
-            abs_tol = max(1e10, self.spec.n_bg_m3 * 1e-12)
+            semis = ["semi"] + [e[0] for e in self.spec.extra_semiconductor_entries()]
+            abs_tol = max(1e10, max(self.spec.semiconductor_nbg(r) for r in semis) * 1e-12)
             ds.set_parameter(device=self.device, name="gate_bias", value=0.0)
             solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
-                      max_iter=100, semiconductor_regions=["semi"])
+                      max_iter=100, semiconductor_regions=semis)
             n_steps = max(1, int(abs(vg) / 0.25 + 0.5))
             for k in range(1, n_steps + 1):
                 ds.set_parameter(device=self.device, name="gate_bias", value=vg * k / n_steps)
                 solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
-                          max_iter=100, semiconductor_regions=["semi"])
+                          max_iter=100, semiconductor_regions=semis)
         else:
             ds.set_parameter(device=self.device, name="gate_bias", value=vg)
             ds.solve(type="dc", solver_type="direct", absolute_error=1e10,

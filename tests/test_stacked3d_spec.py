@@ -36,14 +36,17 @@ def test_extra_semiconductors_unique_names():
                                             ("xs", "ITO", 5e-9, 9.5, 4e26)], **BASE)     # duplicate
 
 
-def test_multisemi_equilibrium_only_guard():
-    # multi-semiconductor is supported only for equilibrium (semi-semi carrier continuity for DD/bipolar
-    # is not yet wired) -- the spec must reject it loudly.
-    for phys, extra in (("drift_diffusion", {}),
-                        ("bipolar_dd", dict(n_i_m3=1e16, tau_srh_s=1e-7, mobility_p_m2Vs=0.02))):
-        with pytest.raises(ValueError):
-            Stacked3DSpec(physics=phys, extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26)],
-                          **extra, **BASE)
+def test_multisemi_bipolar_guard():
+    # v0.14.0 (D1a): a drift_diffusion heterostack is supported (physics_heterojunction carries the
+    # semi-semi carrier interface); a BIPOLAR heterostack is still refused, naming what is missing (the
+    # extra_semiconductors entries carry no hole statistics/doping).
+    s = Stacked3DSpec(physics="drift_diffusion", extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26)], **BASE)
+    assert s.heterointerface == "auto"
+    with pytest.raises(ValueError, match="hole mobility"):
+        Stacked3DSpec(physics="bipolar_dd", extra_semiconductors=[("xs", "ITO", 5e-9, 9.5, 4e26)],
+                      n_i_m3=1e16, tau_srh_s=1e-7, mobility_p_m2Vs=0.02, **BASE)
+    with pytest.raises(ValueError, match="heterointerface"):
+        Stacked3DSpec(heterointerface="tunnelling", **BASE)
 
 
 def test_heterostack_layer_stack_and_field_region():

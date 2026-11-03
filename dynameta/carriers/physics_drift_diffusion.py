@@ -60,7 +60,8 @@ from typing import Optional
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12)
+    Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12,
+    psi_offset_term)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
@@ -164,13 +165,14 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                   time_node_model="NCharge", variable_update="positive")
 
 
-def setup_contact_ohmic_dd(device: str, contact: str) -> None:
-    """Ohmic contact: pin Potential = bias, Electrons = N_D (charge-neutral n-type)."""
+def setup_contact_ohmic_dd(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
+    """Ohmic contact: pin Potential = bias (+ psi_offset_V, the heterostack frame shift s(r) of the
+    contact's region -- physics_heterojunction), Electrons = N_D (charge-neutral n-type)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     bias = "{}_bias".format(contact)
     cp = "{}_potential_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cp,
-                              equation="Potential - {}".format(bias))
+                              equation="Potential - {}".format(bias) + psi_offset_term(psi_offset_V))
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
                               equation="1")
     _R.record_contact_equation(device, contact, name="PotentialEquation",
