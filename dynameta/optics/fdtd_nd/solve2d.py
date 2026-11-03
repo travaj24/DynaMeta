@@ -30,8 +30,10 @@ from dynameta.optics.fdtd_nd.backends import have_jax, have_numba, resolve_backe
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, layer_masks, material_z, material_z_half,
-                                          pad_masks, probe_cells, pulse_width, source_pulse, z_grid)
+from dynameta.optics.fdtd_nd.grid import (ND_POLES, check_z_subcell, layer_band_index_max, layer_masks,
+                                          material_z, material_z_half, mix_profile, nd_region_values,
+                                          pad_masks, point_regions, probe_cells, pulse_width,
+                                          source_pulse, z_fill_fractions, z_grid)
 from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
 from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
@@ -380,7 +382,7 @@ def _flux_ratios(entry_point, P_inc, P_refl, P_trans, band):
     return R_flux, T_flux
 
 
-def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub):
+def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub, margin=0.0):
     """audit D-6: `lateral_eps_inf` REPLACES the whole eps_inf grid, so the painter owns the pads.
 
     The 2-D comment used to say the pattern is "applied in the structure region"; it is not (and the
@@ -397,7 +399,9 @@ def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub
     default vacuum end media only if the painter really did leave ones there -- which is the point:
     it also catches a painter that floods the WHOLE grid with the structure index."""
     eps = np.asarray(eps_grid, dtype=float)
-    lo, hi = pad_masks(zc, pad, z_struct)                    # superstrate / substrate pads (E nodes)
+    # superstrate / substrate pads (E nodes). margin = dz/2 on a z-subcell-averaged grid: the node next
+    # to a face is a MIXED cell there, so only nodes whose control volume is wholly pad are checked.
+    lo, hi = pad_masks(zc, pad, z_struct, margin)
     bad = []
     for mask, want, side, knob in ((lo, float(n_super) ** 2, "superstrate (low-z)", "n_super"),
                                    (hi, float(n_sub) ** 2, "substrate (high-z)", "n_sub")):
@@ -512,7 +516,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                   n_super: float = 1.0, n_sub: float = 1.0,
                   backend: str = "numpy", xp=np,
                   hot_out: Optional[dict] = None,
-                  return_time_trace: bool = False) -> FDTD2DResult:
+                  return_time_trace: bool = False, z_subcell: str = "average") -> FDTD2DResult:
     """Broadband R(f)/T(f) of a periodic (period_x_m) 2D-TE unit cell at NORMAL incidence. `layers`
     is the through-stack (z) profile; supply `lateral_eps_inf` (a FULL (nx, nz) grid, or a callable
     building the (nx, nz) eps_inf -- shape doc corrected per audit 6.3) to make a laterally-structured
@@ -524,7 +528,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     silently mis-normalized (audit D-6). A callable painter receives `zc` = the z positions the
     materials are registered at: the Yee E-NODES k*dz since 2026-11-02 (audit S2-14 siblings; they
     were the cell centres (k+1/2)*dz, a -dz/2 structure shift = a -n_super k0 dz bias on r0's phase;
-    see fdtd_nd.grid.material_z). Returns both the 0-order (specular, x-mean)
+    see fdtd_nd.grid.material_z). `z_subcell` 'average' (default, 2026-11-02) fill-averages each
+    node's z control volume (fdtd_nd.grid.mix_profile; the painter's own lateral raster is untouched,
+    and the pad check then skips the mixed face nodes); 'point' = the 2b7a002 point rule bit-for-bit.
+    Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
     n_super / n_sub (default 1 = vacuum) are the lossless semi-infinite superstrate / substrate indices
@@ -551,6 +558,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                                   "end media (Im(n)=0); got n_super={}, n_sub={} (use the FEM/TMM solver "
                                   "for an absorbing incidence/exit medium).".format(n_super, n_sub))
     courant = courant_guard("solve_fdtd_2d", courant)        # audit D-11 (CFL bound, shared)
+    z_subcell = check_z_subcell("solve_fdtd_2d", z_subcell)  # 'average' default | 'point' (2b7a002)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)      # sample the band (a Lorentz peak may be in-band)
@@ -598,7 +606,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # so the bundle carries c_l=None and the kernel takes the byte-identical fixed-bath path.
         hc_c_l = np.full((nx, nz), np.inf); hc_g_sub = np.zeros((nx, nz))
         _have_lat = False
-    for L, m in layer_masks(zc, pad, layers):
+    for L, m in (layer_masks(zc, pad, layers) if z_subcell == "point" else ()):
         eps_inf[:, m] = L.eps_inf
         wp[:, m] = L.drude_wp_rad_s
         gam[:, m] = L.drude_gamma_rad_s
@@ -631,6 +639,46 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                 _have_lat = True
                 hc_c_l[:, m] = float(hc.c_l_j_m3_k)
                 hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
+    hc_frac = None
+    if z_subcell != "point":
+        # z-SUBCELL AVERAGING (default, 2026-11-02; formulas + citations in fdtd_nd.grid): every
+        # channel of node k is the fill-fraction mix of its control volume [z_k - dz/2, z_k + dz/2]
+        # -- eps_inf arithmetic (tangential Ey), each pole's strength (Drude wp^2, Lorentz d_eps,
+        # Raman chi3R, gain kappa*dN) and chi2/chi3 fill-weighted with the pole shapes kept.
+        F_sub = z_fill_fractions(zc, pad, layers, dz=dz)
+        _m = mix_profile(F_sub, nd_region_values(layers, n_super, n_sub, kerr), poles=ND_POLES)
+        for _name, _arr in (("eps_inf", eps_inf), ("wp", wp), ("gam", gam), ("lw0", lw0), ("lgam", lgam),
+                            ("ldeps", ldeps), ("chi3", chi3), ("chi2", chi2g), ("chi3R", chi3R),
+                            ("rw", rw), ("rgam", rgam), ("gw", gw), ("gdw", gdw), ("gkdn", gkdn)):
+            _arr[...] = _m[_name][None, :]
+        if _have_hot:
+            # hot-carrier cells: the thermal model is per unit volume of the HOT material, so a mixed
+            # edge cell carries its hot fill fraction f as the kernel mask (the Drude current there is
+            # already f-weighted, so p_abs = J.E / f is the hot material's dissipation density, and the
+            # mask-weighted means / closures stay exact). Thermal parameters come from the cell's
+            # majority hot layer (exact unless two different hot layers share one cell).
+            _hot_ix = [i for i, h in enumerate(_hot_layers) if h is not None]
+            _Fh = F_sub[[i + 1 for i in _hot_ix]]
+            hc_frac = np.repeat(_Fh.sum(axis=0)[None, :], nx, axis=0)
+            _maj = np.asarray(_hot_ix)[np.argmax(_Fh, axis=0)]
+            for i in _hot_ix:
+                hc = _hot_layers[i]
+                m = (hc_frac[0] > 0.0) & (_maj == i)
+                mi = hc_seen.get(id(hc))
+                if mi is None:
+                    mi = len(hc_tables)
+                    hc_seen[id(hc)] = mi
+                    hc_tables.append(build_hot_carrier_tables(hc))
+                hc_mat_idx[:, m] = mi
+                hc_G[:, m] = float(hc.ttm.G_e_l)
+                hc_Tl[:, m] = float(hc.T_l_K)
+                hc_alpha[:, m] = float(hc.ttm.alpha_abs)
+                hc_Te0[:, m] = float(hc.T_e0_K)
+                hc_n_update = int(hc.n_update) if hc_n_update is None else min(hc_n_update, int(hc.n_update))
+                if hc.c_l_j_m3_k is not None:
+                    _have_lat = True
+                    hc_c_l[:, m] = float(hc.c_l_j_m3_k)
+                    hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
     if lateral_eps_inf is not None:
         # a laterally-structured grating: the pattern REPLACES THE WHOLE (nx, nz) eps_inf grid, PADS
         # INCLUDED -- not just the structure band (audit D-6: the comment here used to say "applied in
@@ -643,7 +691,8 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # into a raise; make_structured_lateral already paints the pads for you.
         lat = lateral_eps_inf(nx, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
-        _check_lateral_pads("solve_fdtd_2d", eps_inf, zc, pad, z_struct, n_super, n_sub)
+        _check_lateral_pads("solve_fdtd_2d", eps_inf, zc, pad, z_struct, n_super, n_sub,
+                            0.0 if z_subcell == "point" else 0.5 * dz)
     # PER-CELL LOSSY/graded eps (R4): a Drude (wp,gam) grid alongside eps_inf lets a slow drive (gate E,
     # T, PCM fraction) paint a graded ABSORBING eps the eps_inf-only lateral seam cannot carry. Each is a
     # callable(nx,nz,zc,pad,z_struct)->array or an (nx,nz) array (zero in the pads). Default None -> the
@@ -736,7 +785,8 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     # already carry any lateral (wp,gam) override, so the kernel's cold anchors match the painted structure.
     hot_bundle = None
     if _have_hot:
-        hot_bundle = {"mask": (hc_mat_idx >= 0).astype(float), "mat_idx": hc_mat_idx,
+        hot_bundle = {"mask": ((hc_mat_idx >= 0).astype(float) if hc_frac is None else hc_frac),
+                      "mat_idx": hc_mat_idx,
                       "tables": hc_tables, "G": hc_G, "Tl": hc_Tl, "alpha": hc_alpha,
                       "Te0": hc_Te0, "n_update": (hc_n_update if hc_n_update else 1),
                       "c_l": (hc_c_l if _have_lat else None),      # roadmap 5.7; None -> fixed-bath tier
@@ -840,7 +890,8 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 40,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                           source_amp: float = 1.0, npml: int = 12, nx: int = 8,
-                          backend: str = "numpy", pol: str = "s") -> FDTD2DObliqueResult:
+                          backend: str = "numpy", pol: str = "s",
+                          z_subcell: str = "average") -> FDTD2DObliqueResult:
     """Broadband reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence, via the
     complex-envelope Bloch method with a FIXED transverse wavevector k_par = (2 pi / lambda_c)
     sin(angle_deg) (angle_deg the physical angle at the band centre). pol='s' = TE (Ey,Hx,Hz); pol='p' =
@@ -869,6 +920,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # `!= 0.0` test would fire on every passive layer); guarded by the shared spec helper.
     hot_carrier_guard("solve_fdtd_2d_oblique", layers)
     courant = courant_guard("solve_fdtd_2d_oblique", courant)   # audit D-11
+    z_subcell = check_z_subcell("solve_fdtd_2d_oblique", z_subcell)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -883,13 +935,34 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     # -0.82 k0dz, p-pol -1.15 k0dz mean r-phase bias). p-pol ALSO marches the NORMAL Ez, which lives at
     # (k+1/2)*dz: it gets its OWN half-node maps (the per-component Yee assignment) -- with the node
     # maps on Ez too, p-pol kept a -0.30 k0dz bias at 30 deg (the Ez interfaces sat dz/2 off).
-    for L, m in layer_masks(material_z(nz, dz), pad, layers):
-        eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
+    _drude_vals = {"eps_inf": [1.0] + [L.eps_inf for L in layers] + [1.0],
+                   "wp": [0.0] + [L.drude_wp_rad_s for L in layers] + [0.0],
+                   "gam": [0.0] + [L.drude_gamma_rad_s for L in layers] + [0.0]}
+    if z_subcell == "point":                                 # opt-out: 2b7a002 point rule, bit-for-bit
+        for L, m in layer_masks(material_z(nz, dz), pad, layers):
+            eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
+    else:
+        # z-SUBCELL AVERAGING (default): the tangential channel (Ey for s, Ex for p) takes the
+        # ARITHMETIC fill mean, the Drude strength wp^2 fill-weighted (fdtd_nd.grid notes).
+        _zn = material_z(nz, dz)
+        _m = mix_profile(z_fill_fractions(_zn, pad, layers, dz=dz), _drude_vals, poles=(("wp", 2, ("gam",)),))
+        eps_inf[...] = _m["eps_inf"][None, :]; wp[...] = _m["wp"][None, :]; gam[...] = _m["gam"][None, :]
     ez_maps = None
     if pol == "p":
         ez_i = np.ones((nx, nz)); ez_w = np.zeros((nx, nz)); ez_g = np.zeros((nx, nz))
-        for L, m in layer_masks(material_z_half(nz, dz), pad, layers):
-            ez_i[:, m] = L.eps_inf; ez_w[:, m] = L.drude_wp_rad_s; ez_g[:, m] = L.drude_gamma_rad_s
+        _zh = material_z_half(nz, dz)
+        if z_subcell == "point":
+            for L, m in layer_masks(_zh, pad, layers):
+                ez_i[:, m] = L.eps_inf; ez_w[:, m] = L.drude_wp_rad_s; ez_g[:, m] = L.drude_gamma_rad_s
+        else:
+            # the NORMAL channel Ez (control volume [k dz, (k+1) dz] about its half node): the
+            # HARMONIC fill mean 1/eps = sum f/eps_r (Farjadpour 2006 / Oskooi 2009, perpendicular
+            # component). A mixed Ez cell touching a Drude region has no exact local ADE -> point
+            # sampled at the half node (mix_profile's documented fallback).
+            _mz = mix_profile(z_fill_fractions(_zh, pad, layers, dz=dz), _drude_vals,
+                              poles=(("wp", 2, ("gam",)),), harmonic=("eps_inf",),
+                              point_index=point_regions(_zh, pad, layers))
+            ez_i[...] = _mz["eps_inf"][None, :]; ez_w[...] = _mz["wp"][None, :]; ez_g[...] = _mz["gam"][None, :]
         ez_maps = (ez_i, ez_w, ez_g)
 
     k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
