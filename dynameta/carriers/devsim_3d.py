@@ -125,6 +125,8 @@ class Stacked3DSpec:
     dos_mass_p_kg:   Optional[float] = None    # VALENCE DOS mass -> N_v (bipolar FD g-factor); None -> N_c
     acceptor:        bool = False              # True -> uniform p-type (NetDoping = -n_bg); False -> n-type
     net_doping_expr: Optional[str] = None      # position-dependent junction (a DEVSIM node expression)
+    bipolar_options: Optional[object] = None   # audit R26/R27: carriers.bipolar_options.BipolarOptions
+                                               # (Auger/radiative/BGN/ionization/T_K/G); None -> SRH only
     body_net_doping_m3: Optional[float] = None # SIGNED net doping AT THE BODY CONTACT when
                                                # net_doping_expr is set (audit C2-1): phi_bi must be
                                                # derived from the doping the body contact actually
@@ -273,6 +275,13 @@ class Stacked3DSpec:
                                   "suppress recombination)")
             if not (self.mobility_p_m2Vs > 0.0):
                 raise ValueError("bipolar_dd 3D spec requires mobility_p_m2Vs > 0 (hole mobility)")
+        if self.bipolar_options is not None:
+            from dynameta.carriers.bipolar_options import BipolarOptions
+            if not isinstance(self.bipolar_options, BipolarOptions):
+                raise TypeError("Stacked3DSpec.bipolar_options must be a BipolarOptions, got {!r}"
+                                .format(type(self.bipolar_options).__name__))
+            if self.physics != "bipolar_dd":
+                raise ValueError("Stacked3DSpec.bipolar_options applies only to physics='bipolar_dd'")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -468,7 +477,8 @@ class Stacked3DSpec:
                 tau_srh_s=float(tr.tau_srh_s),
                 dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
                 acceptor=bool(tr.acceptor),
-                net_doping_expr=tr.net_doping_expr)
+                net_doping_expr=tr.net_doping_expr,
+                bipolar_options=getattr(tr, "bipolar_options", None))
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -607,7 +617,8 @@ class Devsim3DEquilibrium:
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
-            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            options=s.bipolar_options)                            # audit R26/R27 (None -> SRH only)
         BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
@@ -680,7 +691,10 @@ class Devsim3DEquilibrium:
             _Nc = PE.effective_dos_m3(self.spec.dos_mass_kg)
             _Nv = (PE.effective_dos_m3(float(self.spec.dos_mass_p_kg))
                    if self.spec.dos_mass_p_kg else _Nc)
-            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
+            # audit R26/R27: with BGN / incomplete ionization / T_K on, the body contact pins the
+            # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
+            phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
+                                                options=self.spec.bipolar_options)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
             # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
             # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.
