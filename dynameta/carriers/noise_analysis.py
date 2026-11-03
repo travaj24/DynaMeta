@@ -122,7 +122,10 @@ MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
 
 LIMITS: the DD source set only (no hot-carrier noise temperature, no trap-occupancy dynamics -- the
 fast-trap SRH reduction above; CHARGED trap levels are quasi-static, so the ssac response -- and with
-it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); cylindrical volume
+it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); a D1a
+THERMIONIC-EMISSION heterointerface (fluxterm) carries no noise source -- its shot noise
+2q(J_0->1 + J_1->0) is missing, so the FDT misses wherever the interface resistance matters (MEASURED
+-0.69 at 1 Hz with A* x 1e-6); the continuous-QFL heterointerface is covered (FDT 5.7e-6); cylindrical volume
 models and element-assembled currents are refused (the term mechanism's ElectronGenerationEdge
 edge_volume_model is a generation term and allowed); the FD-degenerate
 diffusion source uses mu kT/q (gate G: 3.7e-5 FDT residual in accumulation). Multi-region carrier

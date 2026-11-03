@@ -90,7 +90,7 @@ import numpy as np
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12)
+    Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12, psi_offset_term)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
@@ -911,24 +911,42 @@ def _options_contact_exprs(device: str, contact: str):
     return "Electrons - NeutralElectrons", "Holes - NeutralHoles"
 
 
-def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
+def contact_potential_residual(device: str, contact: str, drive_symbol: str,
+                               psi_offset_V: float = 0.0) -> str:
+    """THE one ohmic-contact rule for the Potential of a bipolar contact (DC and circuit recipes):
+
+        Potential = <drive> + s(r) + psi_eq,own(r)
+
+    s(r) = psi_offset_V is the region's Anderson frame shift (physics_heterojunction, D1a; the region's
+    neutral-bulk potential in the common heterostack frame), and psi_eq,own(r) is the built-in potential
+    of the contact node IN THE REGION'S OWN FRAME: the bipolar_options.equilibrium_fields root
+    (EquilibriumPotential: BGN band-edge split + incomplete-ionization neutrality + the trapped charge of
+    charged levels + the FD correction) when the region carries it, else the legacy closed form
+    (Boltzmann or FD, audit C-10). The two pieces are additive and disjoint -- s(r) is a constant of the
+    UNNARROWED Anderson alignment, psi_eq,own carries every doping-dependent shift -- so nothing is
+    counted twice (v0.14 integration). With psi_offset_V = 0 and no option fields the string is the
+    legacy one character-for-character."""
+    drv = drive_symbol + psi_offset_term(psi_offset_V)
+    if _options_contact_exprs(device, contact):
+        return "Potential - {} - EquilibriumPotential".format(drv)
+    shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
+    return "Potential - {} + {}".format(drv, _pot_offset(shift, CELEC, CHOLE))
+
+
+def setup_contact_ohmic_bipolar(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
     """Bipolar ohmic contact: pin Potential (with the built-in offset) and pin
     Electrons/Holes to their charge-neutral equilibrium values. The built-in offset follows the
     region's own statistics (audit C-10): Boltzmann when the region was set up with
     fd_enhancement=False, Fermi-Dirac (+ V_t Delta(n0/N_dos)) when it was set up with the g-factor
     on -- the boundary condition used to be Boltzmann either way, contradicting the interior model
-    by 0.17 V per degenerate contact at eta = 10."""
+    by 0.17 V per degenerate contact at eta = 10. psi_offset_V is the heterostack frame shift s(r) of
+    the contact's region (physics_heterojunction; 0 -> the string is unchanged)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
-    bias = "{}_bias".format(contact)
     _opt = _options_contact_exprs(device, contact)             # audit R26/R27 (None -> legacy)
-    shift = None if _opt else _fd_contact_shift(device, contact)  # audit C-10 (None -> Boltzmann)
 
-    # Potential: Dirichlet + built-in potential offset (reference n_i; FD-corrected when the
-    # region's transport uses the FD g-factor).
+    # Potential: Dirichlet + built-in potential offset (the one contact rule)
     cp = "{}_potential_dirichlet".format(contact)
-    pot_eq = "Potential - {b} + {off}".format(b=bias, off=_pot_offset(shift, CELEC, CHOLE))
-    if _opt:
-        pot_eq = "Potential - {b} - EquilibriumPotential".format(b=bias)
+    pot_eq = contact_potential_residual(device, contact, "{}_bias".format(contact), psi_offset_V)
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact,
                           name="{}:Potential".format(cp), equation="1")
@@ -973,7 +991,8 @@ def _check_drive(drive: str, source_name: str, who: str) -> str:
 def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
                                         node_name: str = "vac",
                                         source_name: str = "V1",
-                                        v_ac: float = 1.0, drive: str = "voltage") -> tuple:
+                                        v_ac: float = 1.0, drive: str = "voltage",
+                                        psi_offset_V: float = 0.0) -> tuple:
     """Circuit-driven bipolar ohmic contact -- the small-signal-AC (ssac) / transient analogue of
     setup_contact_ohmic_bipolar. The Potential is tied to a CIRCUIT NODE `node_name` (driven by an
     AC voltage source `source_name`) instead of a bias PARAMETER, and the Potential + Electron +
@@ -999,7 +1018,10 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     the frozen-carrier Poisson pre-solve (its KCL row has no DC current and is singular) and go
     straight to the coupled Newton from the equilibrium seed (measured: converges in 15 iterations
     on the 1305-node long diode of validation/devsim_noise.py). The default "voltage" is byte-
-    identical to the pre-v0.14 helper (the R26/R27 call-log digest gate covers it)."""
+    identical to the pre-v0.14 helper (the R26/R27 call-log digest gate covers it).
+
+    psi_offset_V: the heterostack frame shift s(r) of the contact's region (as for the DC twin; the
+    shared rule contact_potential_residual). 0 -> the string is unchanged."""
     source_name = _check_drive(drive, source_name, "setup_contact_ohmic_bipolar_circuit")
     ds.add_circuit_node(name=node_name, variable_update="default")
     if not (float(v_ac) > 0.0):
@@ -1013,11 +1035,8 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     # Potential: Dirichlet tied to the circuit node + built-in offset (reference n_i; FD-corrected
     # when the region's transport uses the FD g-factor -- audit C-10, same rule as the DC twin).
     _opt = _options_contact_exprs(device, contact)             # audit R26/R27 (None -> legacy)
-    shift = None if _opt else _fd_contact_shift(device, contact)
     cp = "{}_potential_circuit".format(contact)
-    pot_eq = "Potential - {n} + {off}".format(n=node_name, off=_pot_offset(shift, CELEC, CHOLE))
-    if _opt:
-        pot_eq = "Potential - {n} - EquilibriumPotential".format(n=node_name)
+    pot_eq = contact_potential_residual(device, contact, node_name, psi_offset_V)
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
                           equation="1")
