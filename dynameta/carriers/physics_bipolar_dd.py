@@ -776,10 +776,24 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
                                node_model=ch, edge_current_model="HoleCurrent")
 
 
+def _check_drive(drive: str, source_name: str, who: str) -> str:
+    """Validate a circuit contact's `drive` ("voltage" | "current") against DEVSIM's name-prefix
+    element typing (V... = voltage source, I... = current source). Returns source_name unchanged.
+    The voltage drive is not name-checked (the pre-v0.14 behaviour, byte-identical)."""
+    want = {"voltage": "V", "current": "I"}.get(drive)
+    if want is None:
+        raise ValueError("{}: drive must be 'voltage' or 'current'; got {!r}".format(who, drive))
+    if drive == "current" and not str(source_name).startswith(want):
+        raise ValueError("{}: a {} drive needs a source name starting with {!r} (DEVSIM types circuit "
+                         "elements by their first letter); got {!r}".format(who, drive, want,
+                                                                            source_name))
+    return source_name
+
+
 def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
                                         node_name: str = "vac",
                                         source_name: str = "V1",
-                                        v_ac: float = 1.0) -> tuple:
+                                        v_ac: float = 1.0, drive: str = "voltage") -> tuple:
     """Circuit-driven bipolar ohmic contact -- the small-signal-AC (ssac) / transient analogue of
     setup_contact_ohmic_bipolar. The Potential is tied to a CIRCUIT NODE `node_name` (driven by an
     AC voltage source `source_name`) instead of a bias PARAMETER, and the Potential + Electron +
@@ -793,13 +807,29 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     and ramp; acreal=1 is a unit AC excitation. Extract C(f), G(f) with
     ac_analysis.ssac_admittance(frequencies, source_name=source_name). Returns (source_name,
     node_name). (Validated: a reverse-biased diode's ssac junction C matches the analytic depletion
-    C_j; see validation/ac_diode.py.)"""
+    C_j; see validation/ac_diode.py.)
+
+    drive="current" (v0.14.0, noise_analysis) makes the source a CURRENT source instead (DEVSIM
+    infers the element type from the name, so `source_name` must then start with "I", e.g. "I1"):
+    the contact is then open-circuit for the small signal, its circuit node voltage `node_name` is
+    the free terminal voltage, and noise_analysis.noise_spectrum(output_node=node_name) is the
+    open-circuit voltage noise S_V. DEVSIM refuses an AC part on a current source, so such a contact
+    carries NO ssac excitation (v_ac is ignored; take Z = 1/Y from a voltage-driven twin). The DC
+    operating point is the source's DC CURRENT (ds.circuit_alter(name=source_name, value=I)); skip
+    the frozen-carrier Poisson pre-solve (its KCL row has no DC current and is singular) and go
+    straight to the coupled Newton from the equilibrium seed (measured: converges in 15 iterations
+    on the 1305-node long diode of validation/devsim_noise.py). The default "voltage" is byte-
+    identical to the pre-v0.14 helper (the R26/R27 call-log digest gate covers it)."""
+    source_name = _check_drive(drive, source_name, "setup_contact_ohmic_bipolar_circuit")
     ds.add_circuit_node(name=node_name, variable_update="default")
     if not (float(v_ac) > 0.0):
         raise ValueError("setup_contact_ohmic_bipolar_circuit: v_ac must be > 0; got {!r}".format(v_ac))
     # audit C6-2: carry the SAME v_ac ssac_admittance divides by (was hardcoded 1.0)
-    ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
-                       acreal=float(v_ac), acimag=0.0)
+    if drive == "current":                 # DEVSIM refuses an AC part on a current source
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0)
+    else:
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
+                           acreal=float(v_ac), acimag=0.0)
     # Potential: Dirichlet tied to the circuit node + built-in offset (reference n_i; FD-corrected
     # when the region's transport uses the FD g-factor -- audit C-10, same rule as the DC twin).
     _opt = _options_contact_exprs(device, contact)             # audit R26/R27 (None -> legacy)

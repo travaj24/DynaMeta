@@ -1,0 +1,497 @@
+"""
+Small-signal NOISE of a DEVSIM drift-diffusion device by the impedance-field method -- the noise
+companion of ac_analysis (DynaMeta v0.14.0, workstream D2a). Opt-in: nothing here runs unless it
+is called, and it only READS the device (its DC operating point and models are left unchanged).
+
+=====================================================================================================
+1. THE IMPEDANCE-FIELD METHOD (Shockley, Copeland & James, "The impedance field method of noise
+   calculation in active semiconductor devices", in Quantum Theory of Atoms, Molecules and the
+   Solid State, Academic Press 1966, pp. 537-563; Bonani & Ghione, "Noise in Semiconductor
+   Devices: Modeling and Simulation", Springer 2001, ch. 3 + 4).
+
+   Linearise the device about its DC point. A microscopic fluctuation s(r, omega) (a current-
+   density or a generation-rate fluctuation) perturbs the right-hand side of the small-signal
+   system; the terminal response is a LINEAR functional of it,
+        delta_out(omega) = integral G(r, omega) s(r, omega) d^3r,
+   G being the scalar (for rate sources) or vector (for current-density sources) Green's
+   function -- the "impedance field" when the output is an open-circuit voltage, the "admittance
+   field" when it is a short-circuit current. For spatially uncorrelated sources with one-sided
+   local spectral density K(r) [ <s(r) s*(r')> = K(r) delta(r - r') ] the output spectral density
+   is the incoherent sum
+        S_out(f) = integral |G(r, omega)|^2 K(r) d^3r.                       (Bonani-Ghione 3.x)
+   All densities here are ONE-SIDED (unilateral) in f, the convention of the SOA noise code
+   (optics/soa/noise_metrics.py) and of Bonani & Ghione's K values.
+
+   G for EVERY source location at once costs one linear solve per frequency: G is a row of
+   J(omega)^-1, i.e. the solution of the ADJOINT system J(omega)^T y = e_out, with
+   J(omega) = J_static + i omega J_dynamic the ssac matrix (the Green's-function / adjoint technique
+   of Bonani, Ghione, Pinto, Smith, IEEE TED 45, 261 (1998); DEVSIM manual sec. 9.2.3 "Noise and
+   sensitivity analysis" documents the native solve and its "<out>_<Equation>_real/_imag" fields).
+
+2. LOCAL NOISE SOURCES (Bonani & Ghione 2001, ch. 3; van der Ziel, "Noise in Solid State Devices
+   and Circuits", Wiley 1986).
+   * Diffusion (velocity-fluctuation) noise, per carrier, uncorrelated between carriers:
+        K_n = 4 q^2 D_n n,   K_p = 4 q^2 D_p p     [one-sided, per Cartesian component]
+     with the Einstein relation D = mu kT/q, i.e. K = 4 kT q mu n = 4 kT sigma_n -- the
+     Nyquist form, which is what makes the equilibrium output obey S = 4 kT Re(Y) (section 4).
+     Degenerate regions (FD g-factor on): the NOISE diffusivity stays mu kT/q (Price 1965; Bonani
+     & Ghione sec. 3.4: the Nyquist-consistent velocity-fluctuation source), NOT the generalized
+     g mu kT/q of the transport model -- so the FDT gate is exact only for g == 1 (Boltzmann).
+   * Generation-recombination (GR) noise, one Poissonian net process per mechanism:
+        K_gr = 2 (G + R)    [(m^-3 s^-1)^2 m^3 / Hz],
+     entering the electron and hole continuity equations FULLY CORRELATED (one event removes or
+     creates an electron AND a hole: delta gamma_n = delta gamma_p). For SRH this is the standard
+     reduction for a trap level whose occupancy follows the carriers instantaneously (the DEVSIM
+     SRH model has no trap-occupancy variable): with U = (np - n_ie^2)/D the split is
+     R = np/D, G = n_ie^2/D, so G + R = (np + n_ie^2)/D. The same split for Auger
+     ((C_n n + C_p p)(np +- n_ie^2)) and radiative (B (np +- n_ie^2)). At equilibrium
+     2(G + R) = 4 R_eq = 4 kT x (the linear-response GR conductance), so the GR source is exactly
+     Nyquist-consistent too. An external generation G_ext (BipolarOptions.generation_m3s) is
+     counted as a Poisson process (photogeneration shot noise) unless external_generation_shot=
+     False.
+   * Optional 1/f (Hooge 1969, Phys. Lett. A 29, 139; Hooge, IEEE TED 41, 1926 (1994)):
+        K_H = alpha_H J^2 / (n f)   per carrier,
+     OFF unless hooge_alpha is given. A uniform resistor then gives S_I/I^2 = alpha_H/(N f).
+
+3. DISCRETIZATION (the box / Scharfetter-Gummel scheme DEVSIM assembles).
+   * A current-density source on edge e (nodes 0 -> 1, Voronoi couple c_e, length L_e) is the
+     edge-projected fluctuation averaged over the edge volume c_e L_e, so <|dj_e|^2> = K_e/(c_e L_e);
+     it enters the residual of node 0 as +c_e dj_e and of node 1 as -c_e dj_e. Its Green's function
+     is c_e (y_0 - y_1) and its contribution is
+            S_e = (c_e / L_e) |y_0 - y_1|^2 K_e.
+     Sum_e c_e L_e (dy/L_e)^2 is the box scheme's discrete Dirichlet energy, so for a uniform bar the
+     edge sum reproduces 4 kT G EXACTLY in the discrete sense (measured |S/4kTG - 1| <= 8.9e-16 on
+     non-uniform 1-D, 2-D and unstructured 3-D tetra meshes; validation/devsim_noise.py gate A).
+   * THE EDGE CARRIER DENSITY. Inside an SG edge (linear psi, constant J) a distributed source
+     dj(x) reaches the nodes weighted by w(x) = exp(-(psi - psi_0)/V_t), and n(x) is the SG
+     interpolant; integrating K(x) w^2 / (int w)^2 over the edge gives, in closed form,
+            n_eff = 1/2 [ n_0 B(v) + n_1 B(-v) ],      v = vdiff_g (the edge's own SG argument),
+            p_eff = 1/2 [ p_0 B(-v_p) + p_1 B(v_p) ],
+     each node density times the Bernoulli factor it carries in the flux. At equilibrium the two
+     halves are equal (J = 0) and q mu n_eff is EXACTLY the SG edge conductance with respect to the
+     quasi-Fermi potential, so the discrete network is Nyquist-exact (a plain arithmetic average of
+     n_0, n_1 is not: it misses the junction's exponential profile). Off equilibrium it is the exact
+     SG-segment integral, so no extra assumption enters under bias.
+   * GR is a node source: residual perturbation -q V_i dU (electrons), +q V_i dU (holes), so
+            S_i = q^2 V_i |y_p,i - y_n,i|^2 2 (G + R)_i .
+   * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
+     serves 1-D (per unit area: A^2/Hz/m^2, like ssac's S/m^2), 2-D (per unit depth: A^2/Hz/m) and
+     3-D (absolute A^2/Hz).
+
+4. NATIVE vs CUSTOM -- what DEVSIM does and what this module adds.
+   DEVSIM 2.11's solve(type="noise", frequency=f, output_node=out) IS the adjoint solve of item 1:
+   it factors J(omega)^T, solves with the unit vector on `out`'s circuit equation, and stores y per
+   region equation as node models "<out>_<Equation>_real/_imag" (+ element gradients "_gradx/y/z",
+   which we do NOT use: they are element-interpolated and are zeroed on contact nodes). Verified
+   here against an independent scipy solve of (J_static + i omega J_dynamic)^T y = e_out built from
+   ds.get_matrix_and_rhs (tests/test_devsim_noise.py: 1.6e-15 electron field, 2.2e-15 minority-hole
+   field once the scipy reference is row/column equilibrated -- unequilibrated scipy is 2e-4 off on
+   the minority rows, UMFPACK scales internally). DEVSIM ships NO local noise
+   sources -- those (items 2-3) are this module. One fix-up is required: a contact node's bulk row
+   is dropped from the system (permutation row -1), so DEVSIM writes y = 0 there. For a GROUNDED
+   contact that is the right Green's function (its current is not measured); for a CIRCUIT contact
+   the edge current of a contact edge is assembled into the contact's circuit node instead, so the
+   correct y there is the adjoint value of that circuit node (read from the circuit solution
+   "noise_<out>_real/_imag"; +1 in the resistor, which the Johnson gate pins -- a wrong sign would
+   be off by a factor ~(1.9/0.1)^2 on the last edge).
+
+5. OUTPUTS. noise_spectrum(device, f, output_node="V1.I") -> S(f) at any circuit node: a voltage
+   source's branch current ("<V>.I", short-circuit current noise S_I [A^2/Hz]) or a node voltage of
+   a current-driven contact (open-circuit S_V [V^2/Hz]). terminal_noise() returns both S_I and the
+   Norton-to-Thevenin S_V = S_I / |Y|^2 of a voltage-driven two-terminal (Y from ac_analysis's
+   ssac, the same operating point). Per-mechanism, per-region totals always; per-node contribution
+   maps (|G|^2 K, edge halves split to their two nodes) with maps=True.
+
+MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
+  A Johnson-Nyquist S = 4kT G_dc: <= 8.9e-16 (bipolar 1-D, unipolar FD 1-D, bipolar 2-D, 3-D tetra).
+  B FDT on a long diode, 1 Hz - 10 GHz: S_I = 4kT Re Y to 4.5e-6, open-circuit S_V = 4kT Re(1/Y) to
+    1.0e-5; two regions + carrier-continuous interface to 5.8e-6; with Auger + radiative + BGN 2.3e-6.
+  C ideal long Si diode: S = 2qI coth(qV/2kT) to 2.0e-4 for 0.05-0.55 V (full shot 2qI forward);
+    van der Ziel S(f) = 4kT Re Y(f) - 2qI to 0.9 % up to omega tau = 126.
+  D SRH GR slab: GR part == ambipolar Lorentzian (with contact shorting) to 3e-5, f/f_c 1e-3 .. 100.
+  E biased resistor S = 4kT G (1 + 6e-6) vs forward diode S = 2qI = 0.502 x 4kT G_d.
+  F Hooge S = alpha I^2/(N f) to 7.6e-6.   G 2-D layered metasurface (FD ITO): FDT to 1.3e-11 at flat
+    band, 3.7e-5 at +2 V accumulation (the FD g-factor SG is Nyquist-consistent only to O(h^2)).
+
+LIMITS: the DD source set only (no hot-carrier noise temperature, no trap-occupancy dynamics -- the
+fast-trap SRH reduction above; trap levels from other workstreams are not seen unless they enter
+USRH); cylindrical (edge_volume_model) and element-assembled currents are refused; the FD-degenerate
+diffusion source uses mu kT/q (gate G: 3.7e-5 FDT residual in accumulation). Multi-region carrier
+interfaces work through DEVSIM's permuted rows (gate B3). A biased DD resistor is 4kT G only up to a
+physical drift/Debye-screening term (1.1e-3 at 1 um / 0.1 V, ~V^2 L^-2.7). Requires DEVSIM.
+"""
+
+from __future__ import annotations
+
+import math
+import types
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Optional, Sequence
+
+import numpy as np
+
+from dynameta.carriers.eq_registry import ds
+from dynameta.constants import KB, Q_E
+
+__all__ = ["NoiseSpectrum", "TerminalNoise", "noise_spectrum", "terminal_noise", "bernoulli",
+           "MECHANISMS"]
+
+#: the source mechanisms this module knows; "hooge" is evaluated only when hooge_alpha is given.
+MECHANISMS = ("diffusion_n", "diffusion_p", "gr", "hooge_n", "hooge_p")
+
+_EQ_N, _EQ_P = "ElectronContinuityEquation", "HoleContinuityEquation"
+
+
+def bernoulli(x):
+    """B(x) = x / (exp(x) - 1), B(0) = 1, evaluated without cancellation (expm1; series near 0)."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    small = np.abs(x) < 1e-8
+    out[small] = 1.0 - 0.5 * x[small]
+    xs = x[~small]
+    out[~small] = xs / np.expm1(xs)
+    return out
+
+
+@dataclass(frozen=True)
+class NoiseSpectrum:
+    """One-sided output noise spectral density at circuit node `output_node`.
+
+    S [A^2/Hz for a '<V>.I' branch current, V^2/Hz for a node voltage; per m^2 in 1-D, per m of
+    depth in 2-D]; by_mechanism / by_region / by_region_mechanism split S exactly (they sum to it).
+    maps (only with maps=True): {region: {"x","y","z": node coords, mechanism: (n_f, n_nodes)
+    per-node contributions, edge contributions split half to each end node}}."""
+    frequencies: np.ndarray
+    S: np.ndarray
+    output_node: str
+    kind: str                                            # "current" | "voltage"
+    by_mechanism: Dict[str, np.ndarray]
+    by_region: Dict[str, np.ndarray]
+    by_region_mechanism: Dict[str, Dict[str, np.ndarray]]
+    temperature_K: Dict[str, float]
+    maps: Optional[Dict[str, Dict[str, np.ndarray]]] = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class TerminalNoise:
+    """S_I (short-circuit current noise at the driven terminal) with the ssac admittance Y at the
+    same operating point, and S_V = S_I / |Y|^2 (open-circuit voltage noise, Norton -> Thevenin)."""
+    frequencies: np.ndarray
+    S_I: np.ndarray
+    S_V: np.ndarray
+    Y: np.ndarray
+    current: NoiseSpectrum
+
+
+# =====================================================================================================
+# device introspection
+# =====================================================================================================
+
+def _nv(device, region, name):
+    return np.asarray(ds.get_node_model_values(device=device, region=region, name=name),
+                      dtype=np.float64)
+
+
+def _ev(device, region, name):
+    return np.asarray(ds.get_edge_model_values(device=device, region=region, name=name),
+                      dtype=np.float64)
+
+
+def _param(device, region, name):
+    return float(ds.get_parameter(device=device, region=region, name=name))
+
+
+def _region_equations(device: str, region: str):
+    """The continuity equations of a carrier region ({} for Poisson-only / metal regions)."""
+    eqs = set(ds.get_equation_list(device=device, region=region))
+    out = {}
+    for eq, cur in ((_EQ_N, "ElectronCurrent"), (_EQ_P, "HoleCurrent")):
+        if eq not in eqs:
+            continue
+        cmd = ds.get_equation_command(device=device, region=region, name=eq)
+        if cmd.get("edge_model") != cur or cmd.get("element_model"):
+            raise NotImplementedError(
+                "noise_analysis: region {!r} equation {} assembles its current as edge_model={!r} "
+                "element_model={!r}; the noise sources are defined only for the edge-assembled "
+                "Scharfetter-Gummel current {!r}.".format(region, eq, cmd.get("edge_model"),
+                                                          cmd.get("element_model"), cur))
+        if cmd.get("edge_volume_model") or cmd.get("volume_model"):
+            raise NotImplementedError(
+                "noise_analysis: region {!r} equation {} uses a custom volume model (cylindrical "
+                "coordinates?); the edge/node source volumes would be inconsistent -- not "
+                "supported.".format(region, eq))
+        out[eq] = cmd
+    return out
+
+
+def _edge_nodes(device: str, region: str):
+    """(n0, n1) node indices of every edge, from DEVSIM's built-in node_index model."""
+    have = set(ds.get_edge_model_list(device=device, region=region))
+    made = "node_index@n0" not in have
+    if made:
+        ds.edge_from_node_model(device=device, region=region, node_model="node_index")
+    i0 = _ev(device, region, "node_index@n0").astype(np.int64)
+    i1 = _ev(device, region, "node_index@n1").astype(np.int64)
+    if made:
+        ds.delete_edge_model(device=device, region=region, name="node_index@n0")
+        ds.delete_edge_model(device=device, region=region, name="node_index@n1")
+    return i0, i1
+
+
+def _pair_rate(u_expr: str, ni2: str) -> str:
+    """Turn a detailed-balance net rate c (np - ni2) into its PAIR rate c (np + ni2) = G + R.
+    Raises if the builder's string no longer has the expected factor (never silently guess)."""
+    minus = "(Electrons*Holes - {})".format(ni2)
+    if u_expr.count(minus) != 1:
+        raise RuntimeError("noise_analysis: cannot split recombination term {!r} into G and R "
+                           "(expected exactly one {!r}).".format(u_expr, minus))
+    return u_expr.replace(minus, "(Electrons*Holes + {})".format(ni2))
+
+
+def _gr_pair_expr(device: str, region: str, external_generation_shot: bool) -> Optional[str]:
+    """DEVSIM expression for G + R [m^-3 s^-1] of every recombination mechanism the region carries,
+    built from the SAME builders the region was set up with (bipolar_options.srh_expr /
+    recombination_exprs -- one implementation per kernel). None for a region without SRH."""
+    if "USRH" not in ds.get_node_model_list(device=device, region=region):
+        return None
+    from dynameta.carriers.bipolar_options import recombination_exprs, srh_expr
+    nodes = set(ds.get_node_model_list(device=device, region=region))
+    params = set(ds.get_parameter_list(device=device, region=region))
+    bgn = "n_ie" in nodes
+    ni2 = "n_ie^2" if bgn else "n_i^2"
+    terms = [_pair_rate(srh_expr(bgn), ni2)]
+    # the options actually installed, read back from the parameters/fields install_bipolar_options set
+    opts = types.SimpleNamespace(
+        bgn=True if bgn else None,
+        auger=(types.SimpleNamespace(coulomb_enhanced="AugerGeeh" in nodes)
+               if "AugerCn" in params else None),
+        radiative=True if "B_rad" in params else None)
+    for ex in recombination_exprs(opts).values():
+        terms.append(_pair_rate(ex, ni2))
+    if external_generation_shot and "G_ext" in params:
+        terms.append("G_ext")
+    return " + ".join("({})".format(t) for t in terms)
+
+
+def _circuit_contacts(device: str):
+    """{contact: {equation: circuit_node}} for every contact equation coupled to a circuit node."""
+    out: Dict[str, Dict[str, str]] = {}
+    for c in ds.get_contact_list(device=device):
+        for eq in ds.get_contact_equation_list(device=device, contact=c):
+            cmd = ds.get_contact_equation_command(device=device, contact=c, name=eq)
+            if cmd.get("circuit_node"):
+                out.setdefault(c, {})[eq] = cmd["circuit_node"]
+    return out
+
+
+def _contact_nodes(device: str, region: str, contact: str) -> np.ndarray:
+    try:
+        el = ds.get_element_node_list(device=device, region=region, contact=contact)
+    except Exception:                                           # contact not on this region
+        return np.zeros(0, dtype=np.int64)
+    return np.unique(np.asarray([i for e in el for i in e], dtype=np.int64))
+
+
+# =====================================================================================================
+# core
+# =====================================================================================================
+
+class _RegionData:
+    """Frequency-independent source data of one carrier region (the DC operating point)."""
+
+    def __init__(self, device, region, eqs, *, mechanisms, hooge_alpha, external_generation_shot):
+        self.region = region
+        self.eqs = eqs
+        self.i0, self.i1 = _edge_nodes(device, region)
+        couple = _ev(device, region, "EdgeCouple")
+        length = _ev(device, region, "EdgeLength")
+        self.geo_edge = couple / length                         # c_e / L_e
+        self.vol = _nv(device, region, "NodeVolume")
+        self.n_nodes = self.vol.size
+        V_t = _param(device, region, "V_t")
+        self.T_K = V_t * Q_E / KB
+        self.edge_K: Dict[str, np.ndarray] = {}                 # mechanism -> K_e (per edge)
+        self.edge_eq: Dict[str, str] = {}
+        self.hooge: Dict[str, np.ndarray] = {}                  # mechanism -> K_e * f (1/f law)
+        edges = set(ds.get_edge_model_list(device=device, region=region))
+        if _EQ_N in eqs:
+            mu = _ev(device, region, "mu_n_edge") if "mu_n_edge" in edges else _param(
+                device, region, "mu_n")
+            v = _ev(device, region, "vdiff_g")
+            n_eff = 0.5 * (_ev(device, region, "Electrons@n0") * bernoulli(v)
+                           + _ev(device, region, "Electrons@n1") * bernoulli(-v))
+            if "diffusion_n" in mechanisms:
+                self.edge_K["diffusion_n"] = 4.0 * Q_E * Q_E * V_t * mu * n_eff
+                self.edge_eq["diffusion_n"] = _EQ_N
+            if hooge_alpha is not None and "hooge_n" in mechanisms:
+                J = _ev(device, region, "ElectronCurrent")
+                self.hooge["hooge_n"] = float(hooge_alpha) * J * J / n_eff
+                self.edge_eq["hooge_n"] = _EQ_N
+        if _EQ_P in eqs:
+            mu = _ev(device, region, "mu_p_edge") if "mu_p_edge" in edges else _param(
+                device, region, "mu_p")
+            v = _ev(device, region, "vdiff_gp")
+            p_eff = 0.5 * (_ev(device, region, "Holes@n0") * bernoulli(-v)
+                           + _ev(device, region, "Holes@n1") * bernoulli(v))
+            if "diffusion_p" in mechanisms:
+                self.edge_K["diffusion_p"] = 4.0 * Q_E * Q_E * V_t * mu * p_eff
+                self.edge_eq["diffusion_p"] = _EQ_P
+            if hooge_alpha is not None and "hooge_p" in mechanisms:
+                J = _ev(device, region, "HoleCurrent")
+                self.hooge["hooge_p"] = float(hooge_alpha) * J * J / p_eff
+                self.edge_eq["hooge_p"] = _EQ_P
+        self.gr = None                                          # 2 (G + R) per node
+        if "gr" in mechanisms and _EQ_N in eqs and _EQ_P in eqs:
+            ex = _gr_pair_expr(device, region, external_generation_shot)
+            if ex is not None:
+                nm = "_NoiseGRPairRate"
+                ds.node_model(device=device, region=region, name=nm, equation=ex)
+                self.gr = 2.0 * _nv(device, region, nm)
+                ds.delete_node_model(device=device, region=region, name=nm)
+
+
+def _green(device, region, out, eq, n_nodes, fixups):
+    """Complex adjoint field y of equation `eq` in `region` from DEVSIM's noise solve, with the
+    circuit-contact fix-up (see module doc, item 4)."""
+    base = "{}_{}".format(out, eq)
+    y = _nv(device, region, base + "_real") + 1j * _nv(device, region, base + "_imag")
+    for nodes, val in fixups.get((region, eq), ()):
+        if np.any(y[nodes] != 0.0):
+            raise RuntimeError(
+                "noise_analysis: DEVSIM wrote a nonzero impedance field on contact nodes of region "
+                "{!r} ({}); the contact fix-up assumes the documented zero (DEVSIM semantics "
+                "changed?) -- refusing to guess.".format(region, eq))
+        y[nodes] = val
+    return y
+
+
+def _cleanup_noise_models(device, regions, out):
+    for r in regions:
+        for nm in ds.get_node_model_list(device=device, region=r):
+            if nm.startswith(out + "_"):
+                ds.delete_node_model(device=device, region=r, name=nm)
+
+
+def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
+                   regions: Optional[Iterable[str]] = None,
+                   mechanisms: Sequence[str] = ("diffusion_n", "diffusion_p", "gr"),
+                   hooge_alpha: Optional[float] = None, external_generation_shot: bool = True,
+                   maps: bool = False) -> NoiseSpectrum:
+    """One-sided noise spectral density at circuit node `output_node` of `device`, at its CURRENT
+    DC operating point (solve DC first, exactly as for ac_analysis.ssac_admittance), by the
+    impedance-field method (module doc). `output_node` is a voltage source's branch current
+    ("V1.I": short-circuit terminal current noise S_I) or a circuit node voltage (open-circuit S_V
+    of a CURRENT-driven contact). `regions` defaults to every region carrying continuity equations.
+    `mechanisms` picks the local sources (MECHANISMS); "hooge_n"/"hooge_p" are added automatically
+    when hooge_alpha (the dimensionless Hooge parameter) is given. The DC state is not modified."""
+    freqs = np.atleast_1d(np.asarray(frequencies, dtype=np.float64))
+    if freqs.size == 0 or np.any(~np.isfinite(freqs)) or np.any(freqs <= 0.0):
+        raise ValueError("noise_spectrum: frequencies must be finite and > 0 Hz")
+    mech = set(mechanisms)
+    unknown = mech - set(MECHANISMS)
+    if unknown:
+        raise ValueError("noise_spectrum: unknown mechanism(s) {}; known: {}".format(
+            sorted(unknown), MECHANISMS))
+    if hooge_alpha is not None:
+        if not (math.isfinite(float(hooge_alpha)) and float(hooge_alpha) > 0.0):
+            raise ValueError("noise_spectrum: hooge_alpha must be finite and > 0")
+        mech |= {"hooge_n", "hooge_p"}
+    if output_node not in ds.get_circuit_node_list():
+        raise ValueError("noise_spectrum: {!r} is not a circuit node; have {} (attach a circuit "
+                         "contact first: ac_analysis.setup_circuit_contact / physics_bipolar_dd."
+                         "setup_contact_ohmic_bipolar_circuit / physics_drift_diffusion."
+                         "setup_contact_ohmic_dd_circuit).".format(
+                             output_node, list(ds.get_circuit_node_list())))
+    kind = "current" if output_node.endswith(".I") else "voltage"
+
+    all_regions = list(ds.get_region_list(device=device))
+    if regions is None:
+        regions = [r for r in all_regions if _region_equations(device, r)]
+    regions = list(regions)
+    data = []
+    for r in regions:
+        if r not in all_regions:
+            raise ValueError("noise_spectrum: unknown region {!r}".format(r))
+        eqs = _region_equations(device, r)
+        if not eqs:
+            raise ValueError("noise_spectrum: region {!r} has no continuity equation (no carrier "
+                             "noise sources)".format(r))
+        data.append(_RegionData(device, r, eqs, mechanisms=mech, hooge_alpha=hooge_alpha,
+                                external_generation_shot=external_generation_shot))
+
+    circ = _circuit_contacts(device)
+    contact_nodes = {}
+    for d in data:
+        for c, eqmap in circ.items():
+            nodes = _contact_nodes(device, d.region, c)
+            if nodes.size:
+                for eq, cn in eqmap.items():
+                    if eq in d.eqs:
+                        contact_nodes.setdefault((d.region, eq), []).append((nodes, cn))
+
+    present = sorted({m for d in data for m in list(d.edge_K) + list(d.hooge)}
+                     | ({"gr"} if any(d.gr is not None for d in data) else set()))
+    nf = freqs.size
+    by_rm = {d.region: {m: np.zeros(nf) for m in present} for d in data}
+    map_out = None
+    if maps:
+        map_out = {}
+        for d in data:
+            mm = {ax: _nv(device, d.region, ax) for ax in ("x", "y", "z")}
+            for m in present:
+                mm[m] = np.zeros((nf, d.n_nodes))
+            map_out[d.region] = mm
+
+    sol_re, sol_im = "noise_{}_real".format(output_node), "noise_{}_imag".format(output_node)
+    try:
+        for k, f in enumerate(freqs):
+            ds.solve(type="noise", frequency=float(f), output_node=output_node)
+            fix = {}
+            for key, lst in contact_nodes.items():
+                fix[key] = [(nodes, complex(
+                    float(ds.get_circuit_node_value(node=cn, solution=sol_re)),
+                    float(ds.get_circuit_node_value(node=cn, solution=sol_im))))
+                    for nodes, cn in lst]
+            for d in data:
+                ys = {eq: _green(device, d.region, output_node, eq, d.n_nodes, fix)
+                      for eq in d.eqs}
+                for m in present:
+                    if m in d.edge_K or m in d.hooge:
+                        y = ys[d.edge_eq[m]]
+                        K = d.edge_K[m] if m in d.edge_K else d.hooge[m] / float(f)
+                        s_e = d.geo_edge * np.abs(y[d.i0] - y[d.i1]) ** 2 * K
+                        by_rm[d.region][m][k] = float(np.sum(s_e))
+                        if maps:
+                            nm = np.zeros(d.n_nodes)
+                            np.add.at(nm, d.i0, 0.5 * s_e)
+                            np.add.at(nm, d.i1, 0.5 * s_e)
+                            map_out[d.region][m][k] = nm
+                    elif m == "gr" and d.gr is not None:
+                        s_i = Q_E * Q_E * d.vol * np.abs(ys[_EQ_P] - ys[_EQ_N]) ** 2 * d.gr
+                        by_rm[d.region][m][k] = float(np.sum(s_i))
+                        if maps:
+                            map_out[d.region][m][k] = s_i
+    finally:
+        _cleanup_noise_models(device, [d.region for d in data], output_node)
+
+    by_m = {m: sum(by_rm[r][m] for r in by_rm) for m in present}
+    by_r = {r: sum(by_rm[r][m] for m in present) for r in by_rm}
+    S = sum(by_m.values()) if by_m else np.zeros(nf)
+    return NoiseSpectrum(frequencies=freqs, S=np.asarray(S, dtype=np.float64),
+                         output_node=output_node, kind=kind, by_mechanism=by_m, by_region=by_r,
+                         by_region_mechanism=by_rm,
+                         temperature_K={d.region: d.T_K for d in data}, maps=map_out)
+
+
+def terminal_noise(device: str, frequencies, *, source_name: str = "V1", v_ac: float = 1.0,
+                   **kw) -> TerminalNoise:
+    """S_I(f) at the voltage-driven terminal `source_name` (noise_spectrum on '<source>.I'), the
+    ssac admittance Y(f) = G + i omega C at the same operating point (ac_analysis.ssac_admittance),
+    and the open-circuit S_V = S_I / |Y|^2 (a linear two-terminal's Norton -> Thevenin). Extra
+    keywords go to noise_spectrum."""
+    from dynameta.carriers.ac_analysis import ssac_admittance
+    sn = noise_spectrum(device, frequencies, output_node="{}.I".format(source_name), **kw)
+    f, C, G = ssac_admittance(sn.frequencies, source_name=source_name, v_ac=v_ac)
+    Y = G + 1j * 2.0 * np.pi * f * C
+    return TerminalNoise(frequencies=sn.frequencies, S_I=sn.S, S_V=sn.S / np.abs(Y) ** 2, Y=Y,
+                         current=sn)
