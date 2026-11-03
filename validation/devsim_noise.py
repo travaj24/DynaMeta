@@ -413,6 +413,59 @@ def gate_b_two_region(freqs=(1.0, 1e5, 1e7, 1e9)):
     return r_two, sn.S / sn1.S, sorted(sn.by_region)
 
 
+def hetero_two_region(model="continuous", *, ni_p=3e18, dchi_eV=0.05, astar_scale=1.0):
+    """The FDT diode as a HETEROjunction (v0.14 integration): r_n keeps the Ge-like statistics
+    (n_i 1e19), r_p has n_i = `ni_p` and an affinity `dchi_eV` lower (Anderson offsets from
+    physics_heterojunction.anderson_alignment, frame reference r_n), joined by the D1a carrier
+    interface `model` ("continuous" quasi-Fermi level or "thermionic" emission with the free-electron
+    Richardson constant x `astar_scale`). The 'hi' circuit contact on r_p pins bias + s(r_p) through the
+    shared contact rule (psi_offset_V). Solved at zero bias; returns (device, frames)."""
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers import physics_heterojunction as HJ
+    from dynameta.constants import M_E, V_T as VT_CODE    # the bipolar frame is written at V_T
+    lines, _ = _fdt_lines()
+    xj = lines[2][0]
+    fresh()
+    dev, mesh = "het", "het_m"
+    ds.create_1d_mesh(mesh=mesh)
+    for k, (pos, ps, tag) in enumerate(lines):
+        ds.add_1d_mesh_line(mesh=mesh, pos=pos, ps=ps, tag=tag or ("mid" if pos == xj else
+                                                                  "t{}".format(k)))
+    ds.add_1d_contact(mesh=mesh, name="lo", tag="lo", material="metal")
+    ds.add_1d_contact(mesh=mesh, name="hi", tag="hi", material="metal")
+    ds.add_1d_region(mesh=mesh, material="A", region="r_n", tag1="lo", tag2="mid")
+    ds.add_1d_region(mesh=mesh, material="B", region="r_p", tag1="mid", tag2="hi")
+    ds.add_1d_interface(mesh=mesh, name="jn", tag="mid")
+    ds.finalize_mesh(mesh=mesh)
+    ds.create_device(mesh=mesh, device=dev)
+    nis = {"r_n": FDT_NI, "r_p": float(ni_p)}
+    for r, nd in (("r_n", FDT_N), ("r_p", -FDT_N)):
+        ds.node_model(device=dev, region=r, name="NetDoping", equation="{:.6e}".format(nd))
+        with quiet():
+            BP.setup_bipolar_region(dev, r, eps_static=11.7, n_dos_m3=N_DOS, n_i_m3=nis[r],
+                                    mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=FDT_TAU,
+                                    tau_p_s=FDT_TAU, fd_enhancement=False)
+            BP.setup_equilibrium_seed_models(dev, r)
+    own = {r: float(VT_CODE * math.log(N_DOS / nis[r])) for r in nis}
+    fr = HJ.anderson_alignment(own, {"r_n": 4.0, "r_p": 4.0 - float(dchi_eV)}, "r_n")
+    a_star = float(astar_scale) * HJ.richardson_constant_Am2K2(M_E)
+    sides = [HJ.HeteroSide(r, fr[r][0], "N_dos", a_star, fd=False,
+                           phi_v_V=fr[r][0] - float(VT_CODE * math.log(N_DOS * N_DOS / nis[r] ** 2)),
+                           p_dos_param="N_dos_p", richardson_p=a_star) for r in ("r_n", "r_p")]
+    PE.setup_interface(dev, "jn")
+    HJ.setup_heterointerface_carriers(dev, "jn", sides[0], sides[1], model=model)
+    with quiet():
+        BP.setup_contact_ohmic_bipolar(dev, "lo", psi_offset_V=fr["r_n"][1])
+        BP.setup_contact_ohmic_bipolar_circuit(dev, "hi", node_name="vhi", source_name="V1",
+                                               psi_offset_V=fr["r_p"][1])
+    for r in ("r_n", "r_p"):
+        ds.node_model(device=dev, region=r, name="_seed_psi", equation="{} + ({!r})".format(
+            BP.equilibrium_seed_psi_expr(None), float(fr[r][1])))
+        _seed(dev, ("Potential", "Electrons", "Holes"), region=r)
+    _solve(1e8)
+    return dev, fr
+
+
 # long Si p+ n diode for the shot-noise gate: N_A = 1e25 (2 um, short side), N_D = 1e22, n-side
 # 5 L_p long (tau = 20 us, L_p = 157 um); low injection (p_n(0)/N_D = 1.7e-3 at 0.55 V).
 SHOT_TAU, SHOT_NA, SHOT_ND = 2e-5, 1e25, 1e22

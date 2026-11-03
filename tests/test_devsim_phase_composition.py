@@ -445,3 +445,158 @@ def test_element_pair_rate_reaches_nodes_with_the_residual_weights():
     want = (pair_btbt + pair_srh) * _v(dev, "NodeVolume")
     assert np.max(np.abs(P - want) / want) < 1e-12
     _wipe()
+
+
+# =====================================================================================================
+# (6) D1a heterojunctions x D1b BGN: one contact rule, BGN-aware interface, noise on a heterointerface
+# =====================================================================================================
+
+# a TEST BGN set (not a GaAs model): Slotboom form, 14.1 mV at 1e17 cm^-3, with DIFFERENT band-edge
+# splits on the two sides so the split itself is load-bearing
+_BGN_N = dict(kind="slotboom", E_ref_eV=0.02, N_ref_m3=1e23, C=0.5)
+
+
+@pytest.fixture(scope="module", params=["auto", "continuous"])
+def hetero_bgn(request):
+    """N-Al0.3Ga0.7As (gamma 0.3) / p-GaAs (gamma 0.7), 1e17 cm^-3 each, BGN on both sides, through the
+    2-D LayeredDevsimBuilder (D1a's gate-B device), solved at zero bias, with the 'auto' (= thermionic
+    here) and the 'continuous' interface model. MEASURED with the BGN interface terms removed: the
+    effective-offset gate misses by 5.66 meV on both models (0.24310 vs 0.24876 eV), while the
+    flat-E_F gate moves only to 2.05e-4 eV -- the battery drops where the minority density is below
+    the 1 m^-3 floor of that gate, so the offset gate is the load-bearing one."""
+    import dataclasses
+    import warnings
+    from validation.devsim_heterojunction import (ALGAAS, GAAS, column, stack_design, transport)
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.sweep import BiasPoint
+    N = 1e23
+    tp = dataclasses.replace(transport(GAAS, n_bg=N, physics="bipolar_dd", acceptor=True),
+                             bipolar_options=BO.BipolarOptions(bgn=BO.BGNModel(**_BGN_N,
+                                                                               conduction_fraction=0.7)))
+    tn = dataclasses.replace(transport(ALGAAS, n_bg=N, physics="bipolar_dd"),
+                             bipolar_options=BO.BipolarOptions(bgn=BO.BGNModel(**_BGN_N,
+                                                                               conduction_fraction=0.3)))
+    d = stack_design([("pgaas", "GaAs_p", 400e-9, tp), ("nalgaas", "AlGaAs_n", 400e-9, tn)])
+    _wipe()
+    b = LayeredDevsimBuilder(d, mesh_name="cmp_hjm", device_name="cmp_hjd",
+                             heterointerface=request.param)
+    out = {}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            b.solve(BiasPoint(label="v0", voltages={"anode": 0.0}), rel_tol=1e-8)
+        out["frames"] = b.band_frames()
+        out["ifaces"] = b.heterointerfaces()
+        for r in ("pgaas", "nalgaas"):
+            for nm in ("Potential", "Electrons", "Holes", "BgnDc", "BgnDv", "n_ie"):
+                out[(r, nm)] = column(b, r, nm)
+    finally:
+        b.teardown()
+        _wipe()
+    out["mats"] = {"pgaas": GAAS, "nalgaas": ALGAAS}
+    out["model"] = request.param
+    out["dEg"] = BO.BGNModel(**_BGN_N).delta_Eg_eV(N + 0.0)
+    return out
+
+
+def test_heterojunction_with_bgn_built_in_voltage_matches_band_diagram(hetero_bgn):
+    """q V_bi = W_p - W_n with the BGN band-edge shifts in the work functions: W_n = chi_A + gamma_A dEg
+    - kT eta(N_D/N_c,A), W_p = chi_G + E_g,G - (1 - gamma_G) dEg + kT eta(N_A/N_v,G) (direct FD
+    quadrature, the D1a oracle). Tolerance 2e-4 V (D1a's gate B: the g fit vs exact FD). Load-bearing:
+    BGN moves V_bi by (gamma_A + 1 - gamma_G) dEg = 8.5 mV."""
+    from validation.devsim_heterojunction import ALGAAS, GAAS, fd_eta, nc_m3
+    from dynameta.constants import V_T
+    h = hetero_bgn
+    assert h["ifaces"] == {"pgaas__nalgaas": "thermionic" if h["model"] == "auto" else "continuous"}
+    dEg = float(h["dEg"])
+    assert dEg == pytest.approx(0.02 * math.sqrt(0.5), rel=1e-12)
+    eta_n = fd_eta(1e23 / nc_m3(ALGAAS["me"]))
+    eta_p = fd_eta(1e23 / nc_m3(GAAS["mh"]))
+    w_n = ALGAAS["chi"] + 0.3 * dEg - eta_n * V_T
+    w_p = GAAS["chi"] + GAAS["eg"] - (1 - 0.7) * dEg + eta_p * V_T
+    _, psip = h[("pgaas", "Potential")]
+    _, psin = h[("nalgaas", "Potential")]
+    vbi_sim = psin[-1] - psip[0]
+    assert vbi_sim == pytest.approx(w_p - w_n, abs=2e-4)
+    vbi_no_bgn = (GAAS["chi"] + GAAS["eg"] + eta_p * V_T) - (ALGAAS["chi"] - eta_n * V_T)
+    assert abs(vbi_sim - vbi_no_bgn) > 5e-3
+
+
+def test_heterojunction_with_bgn_flat_fermi_level(hetero_bgn):
+    """Zero bias: E_Fn and E_Fp flat at 0 through both regions and across the interface, measured from
+    the SOLVED densities against the EFFECTIVE edges E_c,eff = q(Phi_c - psi) - q D_c, E_v,eff =
+    E_c,eff... (exact FD quadrature, D1a's tolerance 2e-4 eV). The interface reads E_F against the
+    effective edges (physics_heterojunction._bgn_interface_arguments); without it the junction carries a
+    D_c,A - D_c,G battery."""
+    from validation.devsim_heterojunction import fd_eta, nc_m3
+    from dynameta.constants import V_T
+    h = hetero_bgn
+    for r in ("pgaas", "nalgaas"):
+        mat = h["mats"][r]
+        _, psi = h[(r, "Potential")]
+        _, n = h[(r, "Electrons")]
+        _, p = h[(r, "Holes")]
+        _, dc = h[(r, "BgnDc")]
+        _, dv = h[(r, "BgnDv")]
+        ec = h["frames"][r][0] - psi - dc
+        ev = h["frames"][r][0] - psi - mat["eg"] + dv
+        checked = 0
+        for k in range(len(psi)):
+            if n[k] > 1.0:
+                assert abs(ec[k] + V_T * fd_eta(n[k] / nc_m3(mat["me"]))) < 2e-4, (r, k, "n")
+                checked += 1
+            if p[k] > 1.0:
+                assert abs(ev[k] - V_T * fd_eta(p[k] / nc_m3(mat["mh"]))) < 2e-4, (r, k, "p")
+        assert checked > 10
+
+
+def test_heterojunction_with_bgn_effective_offsets_at_the_interface(hetero_bgn):
+    """The interface relation itself: on the two node copies of the interface, E_c,eff - E_F and
+    E_v,eff - E_F read from the SOLVED densities (exact FD quadrature, E_F = 0) must differ by the
+    Anderson offsets PLUS the BGN band-edge shifts, dE_c,eff = dE_c - D_c,A + D_c,G and
+    dE_v,eff = dE_v + D_v,G - D_v,A (D1a's gate at 1e-6 eV). This is what the BGN-aware interface
+    arguments enforce; reading E_F against the unnarrowed edges misses by D_c,G - D_c,A = 5.7 meV."""
+    from validation.devsim_heterojunction import ALGAAS, DEC, DEV, GAAS, fd_eta, nc_m3
+    from dynameta.constants import V_T
+    h = hetero_bgn
+    _, n_g = h[("pgaas", "Electrons")]
+    _, p_g = h[("pgaas", "Holes")]
+    _, n_a = h[("nalgaas", "Electrons")]
+    _, p_a = h[("nalgaas", "Holes")]
+    dc_g, dc_a = h[("pgaas", "BgnDc")][1][-1], h[("nalgaas", "BgnDc")][1][0]
+    dv_g, dv_a = h[("pgaas", "BgnDv")][1][-1], h[("nalgaas", "BgnDv")][1][0]
+    ec_g = -V_T * fd_eta(n_g[-1] / nc_m3(GAAS["me"]))
+    ec_a = -V_T * fd_eta(n_a[0] / nc_m3(ALGAAS["me"]))
+    ev_g = V_T * fd_eta(p_g[-1] / nc_m3(GAAS["mh"]))
+    ev_a = V_T * fd_eta(p_a[0] / nc_m3(ALGAAS["mh"]))
+    assert abs(dc_g - dc_a) > 5e-3                                # the split differs across the junction
+    assert ec_a - ec_g == pytest.approx(DEC - dc_a + dc_g, abs=1e-6)
+    assert ev_g - ev_a == pytest.approx(DEV + dv_g - dv_a, abs=1e-6)
+
+
+def test_noise_fdt_on_a_continuous_qfl_heterointerface(noise_mod):
+    """The FDT diode as a heterojunction (n_i 1e19 | 3e18, affinity step 0.05 eV, frame shift
+    s(r_p) = 18.9 mV through the shared contact rule) with D1a's CONTINUOUS quasi-Fermi-level interface:
+    S_I = 4kT Re Y to 1e-4 over 1 Hz - 1 GHz (MEASURED <= 5.7e-6). Load-bearing: Re Y(1 Hz) is 3.06
+    against the homojunction's 6.78 S/m^2."""
+    V = noise_mod
+    dev, fr = V.hetero_two_region("continuous")
+    assert fr["r_p"][1] != 0.0
+    sn = V.noise(FDT_FREQS)
+    Y = V.ssac_Y(FDT_FREQS)
+    r = sn.S / (4 * V.KT * Y.real) - 1
+    assert np.max(np.abs(r)) < 1e-4, r
+    assert abs(Y.real[0] / 6.78 - 1) > 0.3
+
+
+@pytest.mark.xfail(strict=True, reason="LIMIT (documented): the thermionic-emission interface flux is a "
+                   "DEVSIM fluxterm with no noise source -- its shot noise 2q(J_0->1 + J_1->0) is not in "
+                   "noise_analysis' source set, so wherever the interface resistance matters the FDT "
+                   "misses (MEASURED S/4kT Re Y - 1 = -0.69 at 1 Hz with A* x 1e-6). Turns green when an "
+                   "interface TE source is added.")
+def test_noise_fdt_on_a_thermionic_heterointerface(noise_mod):
+    V = noise_mod
+    V.hetero_two_region("thermionic", astar_scale=1e-6)
+    sn = V.noise(FDT_FREQS[:2])
+    Y = V.ssac_Y(FDT_FREQS[:2])
+    assert np.max(np.abs(sn.S / (4 * V.KT * Y.real) - 1)) < 1e-4
