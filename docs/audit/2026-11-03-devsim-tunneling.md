@@ -211,7 +211,10 @@ MOS capacitor: 1-D, n-Si 1e24 / 5 nm SiO2, accumulation Vg = 4-9 V (E_ox 7.7e8-1
   `validation.bipolar_diode_2d`'s design through `LayeredDevsimBuilder` (+0.3 / -0.4 V). Potential,
   Electrons, Holes, the terminal current and the extras keys give SHA-256
   `f04091e800a41a5f...` on **both** main (5cbd998) and `wip/dv_tunnel`.
-* Related existing tests (`-n 2`, not slow) are listed with their result in the final report.
+* Related existing tests (`-n 2`, not slow; 9 files: wave-7 carriers, conventions, Gummel,
+  density-gradient, devsim smoke, gated builder, geometry guards, reliability ext, stacked-3D spec):
+  155 passed after one fix. The conventions gate X-24 caught two literal `T_K = 300.0` defaults in the
+  new code; they are now `T_REF`.
 * `ruff check` is clean on every changed file.
 
 ## 7. Open questions (decisions for the user)
