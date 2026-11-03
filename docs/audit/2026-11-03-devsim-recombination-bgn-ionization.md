@@ -159,7 +159,7 @@ R27-c error budget at 2e-3: SG discretization O((h/L_p)^2) <= 3e-4 at h <= 20 nm
 `exp((x - x_j)/L_p)`; low-injection terms ~1e-12.
 
 **Every gate fails on v0.13.0.** Running the file against the untouched main checkout gives
-20 failed, 1 passed (the passing one is off-a, which asserts the v0.13.0 digest). Each physics gate
+21 failed, 1 passed (the passing one is off-a, which asserts the v0.13.0 digest). Each physics gate
 also asserts its own "ON is load-bearing" margin, so a flag that was silently ignored could not pass.
 
 Fixture lessons recorded in the tests:
