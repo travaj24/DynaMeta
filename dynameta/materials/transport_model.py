@@ -83,6 +83,12 @@ class TransportModel:
     acceptor:                    bool = False
     net_doping_expr:             Optional[str] = None
     dos_mass_p_kg:               Optional[float] = None
+    # Bipolar-only SRH trap physics (D1c, 2026-11-03; carriers.physics_traps). srh_trap_energy_eV is
+    # E_t - E_i [eV] of the tau_srh_s channel (0.0 = the legacy midgap level, bit-identical);
+    # srh_traps is a tuple of physics_traps.TrapLevel -- extra discrete levels (own E_t, lifetimes or
+    # cross sections, density, acceptor/donor/neutral charge). Defaults leave the solve unchanged.
+    srh_trap_energy_eV:          float = 0.0
+    srh_traps:                   tuple = ()
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -99,3 +105,8 @@ class TransportModel:
             if missing:
                 raise ValueError("bipolar_dd physics requires {} (holes + recombination)".format(
                     ", ".join(missing)))
+        if (self.srh_traps or self.srh_trap_energy_eV) and self.physics != "bipolar_dd":
+            # the trap physics lives in the bipolar (n AND p) SRH model only; anywhere else it would
+            # be silently dropped by the builders
+            raise ValueError("srh_traps / srh_trap_energy_eV need physics='bipolar_dd' (got {!r})"
+                             .format(self.physics))

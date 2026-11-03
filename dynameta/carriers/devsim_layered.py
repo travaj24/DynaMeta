@@ -36,6 +36,7 @@ from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
+from dynameta.carriers import physics_traps as PT
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
@@ -65,7 +66,7 @@ class _RegionSpec:
 
 class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
-                  device_name: str = "ms_device") -> None:
+                  device_name: str = "ms_device", interface_traps=None) -> None:
         # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
         # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
         # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
@@ -73,6 +74,11 @@ class LayeredDevsimBuilder:
         self.design = design
         self.mesh_name = mesh_name
         self.device = device_name
+        # D1c (2026-11-03): interface traps, {key: physics_traps.InterfaceTraps (or a list)} with key an
+        # interface name ("<lower region>__<upper region>") or a 2-tuple of region names (any order).
+        # Installed on semiconductor(bipolar_dd)/dielectric interfaces after Potential continuity; an
+        # unknown key or a non-bipolar side raises at build. None (default) = no interface traps.
+        self.interface_traps = dict(interface_traps) if interface_traps else {}
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -430,6 +436,7 @@ class LayeredDevsimBuilder:
                     "3D builder.".format(r0, r1))
         for iface in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, iface)
+        self._install_interface_traps()
         for c in ds.get_contact_list(device=self.device):
             cr = self._contact_region.get(c)
             if cr in self._bipolar_regions:
@@ -439,6 +446,19 @@ class LayeredDevsimBuilder:
             else:
                 PE.setup_contact(self.device, c)            # pin Potential only
         self._built = True
+
+    def _install_interface_traps(self) -> None:
+        """D1c: attach the requested interface traps (physics_traps.install_interface_traps)."""
+        if not self.interface_traps:
+            return
+        by_pair = {frozenset((r0, r1)): "{}__{}".format(r0, r1) for r0, r1 in self._iface_pairs}
+        names = set(ds.get_interface_list(device=self.device))
+        for key, spec in self.interface_traps.items():
+            iface = key if isinstance(key, str) else by_pair.get(frozenset(key))
+            if iface not in names:
+                raise ValueError("interface_traps key {!r} matches no interface; built interfaces are "
+                                 "{}".format(key, sorted(names)))
+            PT.install_interface_traps(self.device, iface, spec)
 
     def _setup_bipolar_region(self, s, tr, dos: float) -> None:
         """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a semiconductor region.
@@ -457,7 +477,9 @@ class LayeredDevsimBuilder:
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
-            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
+            traps=tuple(getattr(tr, "srh_traps", ())) or None)
         BP.setup_equilibrium_seed_models(self.device, s.name)
 
     def _dielectric_eps_static(self, material_name: str) -> float:
