@@ -95,9 +95,10 @@ def _solve(ae, re=1e-5, mi=80):
 # =====================================================================================================
 
 def bipolar_1d(dev, lines, net_doping, *, n_i, tau, drive="voltage", presolve=True, ae=1e8,
-               options=None):
+               options=None, **region_kw):
     """1-D bipolar device on [(pos, ps, tag)]; 'lo' grounded ohmic, 'hi' circuit ohmic (source V1
-    or current source I1 on node 'vhi'); solved to equilibrium in the frame its contacts pin."""
+    or current source I1 on node 'vhi'); solved to equilibrium in the frame its contacts pin.
+    `region_kw` go to setup_bipolar_region (traps=, srh_trap_energy_eV=, btbt=: v0.14 integration)."""
     fresh()
     mesh = dev + "_m"
     ds.create_1d_mesh(mesh=mesh)
@@ -114,7 +115,7 @@ def bipolar_1d(dev, lines, net_doping, *, n_i, tau, drive="voltage", presolve=Tr
         BP.setup_bipolar_region(dev, "bulk", eps_static=11.7, n_dos_m3=N_DOS, n_i_m3=n_i,
                                 mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=tau,
                                 tau_p_s=tau, fd_enhancement=False,
-                                **({} if options is None else {"options": options}))
+                                **({} if options is None else {"options": options}), **region_kw)
         BP.setup_equilibrium_seed_models(dev, "bulk")
         BP.setup_contact_ohmic_bipolar(dev, "lo")
         BP.setup_contact_ohmic_bipolar_circuit(dev, "hi", node_name="vhi",
@@ -341,19 +342,20 @@ def _fdt_lines():
             "ifelse(x < {}, {}, {})".format(xj, FDT_N, -FDT_N))
 
 
-def gate_b_fdt(options=None, open_circuit=True, freqs=None):
+def gate_b_fdt(options=None, open_circuit=True, freqs=None, **region_kw):
     """(S_I/4kT Re Y, S_V/4kT Re(1/Y), Re Z) on the zero-bias long diode, 1 Hz - 10 GHz. With
-    `options` (BipolarOptions) the same identity tests the G + R split of every extra mechanism."""
+    `options` (BipolarOptions) -- or `region_kw` (traps=, btbt=, ...) -- the same identity tests the
+    G + R split of every extra mechanism."""
     freqs = FREQS_B if freqs is None else freqs
     lines, dop = _fdt_lines()
-    bipolar_1d("fdt", lines, dop, n_i=FDT_NI, tau=FDT_TAU, ae=1e8, options=options)
+    bipolar_1d("fdt", lines, dop, n_i=FDT_NI, tau=FDT_TAU, ae=1e8, options=options, **region_kw)
     sn = noise(freqs)
     sI = sn.S
     Y = ssac_Y(freqs)
     if not open_circuit:
         return sI / (4 * KT * Y.real), sn, Y
     bipolar_1d("fdt", lines, dop, n_i=FDT_NI, tau=FDT_TAU, ae=1e8, drive="current",
-               options=options)
+               options=options, **region_kw)
     sV = noise(freqs, output_node="vhi").S
     Z = 1.0 / Y
     return sI / (4 * KT * Y.real), sV / (4 * KT * Z.real), Z.real

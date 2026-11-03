@@ -123,8 +123,8 @@ def test_fdt_with_auger_radiative_bgn_options(monkeypatch):
     every term): S_I = 4kT Re Y holds (measured 2.3e-6 at 1 Hz, 1.5e-8 at 10 MHz), which requires the
     noise G + R of EVERY mechanism to be its own detailed-balance pair rate c (np + n_ie^2); GR carries
     54 % of S at 1 Hz. ON is load-bearing twice: the options move Re Y(1 Hz) from 6.78 to 11.41 S/m^2,
-    and with the Auger/radiative pair rates DROPPED from the noise (recombination_exprs patched to {})
-    the FDT breaks: S/(4kT Re Y) = 0.692 (gate: off by > 10 %)."""
+    and with the Auger/radiative pair rates DROPPED from the noise (their PTerm models filtered out
+    of the noise's term inventory) the FDT breaks: S/(4kT Re Y) = 0.692 (gate: off by > 10 %)."""
     from dynameta.carriers import bipolar_options as BO
     opts = BO.BipolarOptions(auger=BO.AugerModel(C_n_m6s=1e-38, C_p_m6s=1e-38),
                              radiative=BO.RadiativeModel(B_m3s=1e-16), bgn=BO.BGN_SI_SLOTBOOM_1977)
@@ -135,11 +135,17 @@ def test_fdt_with_auger_radiative_bgn_options(monkeypatch):
     r_off, _, Y_off = V.gate_b_fdt(options=None, open_circuit=False, freqs=ff)
     assert np.max(np.abs(r_off - 1)) < 1e-4
     assert Y_on.real[0] / Y_off.real[0] > 1.5
-    real = BO.recombination_exprs
+    from dynameta.carriers import noise_analysis as NA
+    real = NA._pair_term_models
+
+    def _drop(dev, reg, shot):                                  # noise-side only (device built)
+        out = real(dev, reg, shot)
+        out["node"] = [m for m in out["node"] if m not in ("PTerm_auger", "PTerm_radiative")]
+        return out
     V.bipolar_1d("fdt", *V._fdt_lines(), n_i=V.FDT_NI, tau=V.FDT_TAU, ae=1e8, options=opts)
-    monkeypatch.setattr(BO, "recombination_exprs", lambda o: {})   # noise-side only (device built)
+    monkeypatch.setattr(NA, "_pair_term_models", _drop)
     s_drop = V.noise([1.0]).S[0]
-    monkeypatch.setattr(BO, "recombination_exprs", real)
+    monkeypatch.setattr(NA, "_pair_term_models", real)
     assert abs(s_drop / (4 * V.KT * Y_on.real[0]) - 1) > 0.1
 
 

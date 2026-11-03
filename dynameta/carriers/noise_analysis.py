@@ -49,6 +49,13 @@ is called, and it only READS the device (its DC operating point and models are l
      Nyquist-consistent too. An external generation G_ext (BipolarOptions.generation_m3s) is
      counted as a Poisson process (photogeneration shot noise) unless external_generation_shot=
      False.
+     v0.14 integration: the sources come from the ONE additive term mechanism of the region
+     (physics_bipolar_dd.recombination_terms): the base SRH channel (physics_traps.srh_rate_expr(
+     pair=True)) plus the pair rate PTerm_* every term carries -- Auger, radiative, external G, each
+     bulk TrapLevel (any E_t), interface-trap surface SRH, and BTBT (edge/element assembled, its
+     Hurkx split (np +- n_ie^2)/((n + n_ie)(p + n_ie))). Each reaches a node's residual with the SAME
+     quadrature weights the continuity equations use (NodeVolume / EdgeNodeVolume / ElementNodeVolume).
+     A term without a pair rate makes noise_spectrum REFUSE the region (never silently noiseless).
    * Optional 1/f (Hooge 1969, Phys. Lett. A 29, 139; Hooge, IEEE TED 41, 1926 (1994)):
         K_H = alpha_H J^2 / (n f)   per carrier,
      OFF unless hooge_alpha is given. A uniform resistor then gives S_I/I^2 = alpha_H/(N f).
@@ -114,8 +121,10 @@ MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
     band, 3.7e-5 at +2 V accumulation (the FD g-factor SG is Nyquist-consistent only to O(h^2)).
 
 LIMITS: the DD source set only (no hot-carrier noise temperature, no trap-occupancy dynamics -- the
-fast-trap SRH reduction above; trap levels from other workstreams are not seen unless they enter
-USRH); cylindrical (edge_volume_model) and element-assembled currents are refused; the FD-degenerate
+fast-trap SRH reduction above; CHARGED trap levels are quasi-static, so the ssac response -- and with
+it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); cylindrical volume
+models and element-assembled currents are refused (the term mechanism's ElectronGenerationEdge
+edge_volume_model is a generation term and allowed); the FD-degenerate
 diffusion source uses mu kT/q (gate G: 3.7e-5 FDT residual in accumulation). Multi-region carrier
 interfaces work through DEVSIM's permuted rows (gate B3). A biased DD resistor is 4kT G only up to a
 physical drift/Debye-screening term (1.1e-3 at 1 um / 0.1 V, ~V^2 L^-2.7). Requires DEVSIM.
@@ -124,7 +133,6 @@ physical drift/Debye-screening term (1.1e-3 at 1 um / 0.1 V, ~V^2 L^-2.7). Requi
 from __future__ import annotations
 
 import math
-import types
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, Optional, Sequence
 
@@ -140,6 +148,9 @@ __all__ = ["NoiseSpectrum", "TerminalNoise", "noise_spectrum", "terminal_noise",
 MECHANISMS = ("diffusion_n", "diffusion_p", "gr", "hooge_n", "hooge_p")
 
 _EQ_N, _EQ_P = "ElectronContinuityEquation", "HoleContinuityEquation"
+# the additive-term composites physics_bipolar_dd wires into the edge volume slot (1-D BTBT): a
+# generation term, not a cylindrical volume -- allowed
+_EDGE_GEN = {_EQ_N: "ElectronGenerationEdge", _EQ_P: "HoleGenerationEdge"}
 
 
 def bernoulli(x):
@@ -197,6 +208,11 @@ def _ev(device, region, name):
                       dtype=np.float64)
 
 
+def _elv(device, region, name):
+    return np.asarray(ds.get_element_model_values(device=device, region=region, name=name),
+                      dtype=np.float64)
+
+
 def _param(device, region, name):
     return float(ds.get_parameter(device=device, region=region, name=name))
 
@@ -215,7 +231,7 @@ def _region_equations(device: str, region: str):
                 "element_model={!r}; the noise sources are defined only for the edge-assembled "
                 "Scharfetter-Gummel current {!r}.".format(region, eq, cmd.get("edge_model"),
                                                           cmd.get("element_model"), cur))
-        if cmd.get("edge_volume_model") or cmd.get("volume_model"):
+        if cmd.get("edge_volume_model") not in (None, "", _EDGE_GEN[eq]) or cmd.get("volume_model"):
             raise NotImplementedError(
                 "noise_analysis: region {!r} equation {} uses a custom volume model (cylindrical "
                 "coordinates?); the edge/node source volumes would be inconsistent -- not "
@@ -238,39 +254,67 @@ def _edge_nodes(device: str, region: str):
     return i0, i1
 
 
-def _pair_rate(u_expr: str, ni2: str) -> str:
-    """Turn a detailed-balance net rate c (np - ni2) into its PAIR rate c (np + ni2) = G + R.
-    Raises if the builder's string no longer has the expected factor (never silently guess)."""
-    minus = "(Electrons*Holes - {})".format(ni2)
-    if u_expr.count(minus) != 1:
-        raise RuntimeError("noise_analysis: cannot split recombination term {!r} into G and R "
-                           "(expected exactly one {!r}).".format(u_expr, minus))
-    return u_expr.replace(minus, "(Electrons*Holes + {})".format(ni2))
+def _pair_term_models(device: str, region: str, external_generation_shot: bool) -> Dict[str, list]:
+    """The PAIR-rate (G + R) models of every additive recombination term the region carries, by
+    assembly ({"node": [...], "edge": [...], "element": [(pair0, pair1), ...]}), read from the ONE term
+    mechanism (physics_bipolar_dd.recombination_terms) -- Auger, radiative, external G, every bulk
+    TrapLevel, interface-trap surface SRH, BTBT. A term WITHOUT a pair rate makes the noise refuse the
+    region (it would otherwise be silently noiseless and break the FDT)."""
+    from dynameta.carriers.bipolar_options import GEXT_TERM
+    from dynameta.carriers.physics_bipolar_dd import recombination_terms
+    terms = recombination_terms(device, region)
+    out: Dict[str, list] = {"node": [], "edge": [], "element": []}
+    for kind, entries in terms.items():
+        for name, (_rate, pm) in entries.items():
+            if pm is None:
+                raise RuntimeError(
+                    "noise_analysis: region {!r} carries the {} recombination term {!r} without a pair "
+                    "rate G + R (physics_bipolar_dd.add_recombination_term(..., pair=...)); its GR "
+                    "noise would be silently missing -- refusing.".format(region, kind, name))
+            if name == GEXT_TERM and not external_generation_shot:
+                continue                                        # deterministic external generation
+            out[kind].append(pm)
+    return out
 
 
-def _gr_pair_expr(device: str, region: str, external_generation_shot: bool) -> Optional[str]:
-    """DEVSIM expression for G + R [m^-3 s^-1] of every recombination mechanism the region carries,
-    built from the SAME builders the region was set up with (bipolar_options.srh_expr /
-    recombination_exprs -- one implementation per kernel). None for a region without SRH."""
-    if "USRH" not in ds.get_node_model_list(device=device, region=region):
-        return None
-    from dynameta.carriers.bipolar_options import recombination_exprs, srh_expr
+def _gr_pair_per_node(device: str, region: str, external_generation_shot: bool, n_nodes: int,
+                      i0, i1) -> Optional[np.ndarray]:
+    """Volume-integrated pair rate P_i = Int (G + R) [1/s] each node's residual receives, summed over
+    every recombination mechanism of the region, assembled with the SAME weights the continuity
+    equations use: NodeVolume for node terms (the base SRH channel -- physics_traps.srh_rate_expr(
+    pair=True), the one SRH kernel with the region's BGN substitution -- and every PTerm_*),
+    EdgeNodeVolume to both end nodes for edge terms, ElementNodeVolume to the element edge's
+    node0/node1 for element terms. None for a region without SRH."""
     nodes = set(ds.get_node_model_list(device=device, region=region))
-    params = set(ds.get_parameter_list(device=device, region=region))
-    bgn = "n_ie" in nodes
-    ni2 = "n_ie^2" if bgn else "n_i^2"
-    terms = [_pair_rate(srh_expr(bgn), ni2)]
-    # the options actually installed, read back from the parameters/fields install_bipolar_options set
-    opts = types.SimpleNamespace(
-        bgn=True if bgn else None,
-        auger=(types.SimpleNamespace(coulomb_enhanced="AugerGeeh" in nodes)
-               if "AugerCn" in params else None),
-        radiative=True if "B_rad" in params else None)
-    for ex in recombination_exprs(opts).values():
-        terms.append(_pair_rate(ex, ni2))
-    if external_generation_shot and "G_ext" in params:
-        terms.append("G_ext")
-    return " + ".join("({})".format(t) for t in terms)
+    if "USRH" not in nodes:
+        return None
+    from dynameta.carriers.physics_traps import srh_rate_expr
+    pm = _pair_term_models(device, region, external_generation_shot)
+    ex = " + ".join(["({})".format(srh_rate_expr(bgn="n_ie" in nodes, pair=True))] + pm["node"])
+    nm = "_NoiseGRPairRate"
+    ds.node_model(device=device, region=region, name=nm, equation=ex)
+    P = _nv(device, region, nm) * _nv(device, region, "NodeVolume")
+    ds.delete_node_model(device=device, region=region, name=nm)
+    if pm["edge"]:
+        w = sum(_ev(device, region, m) for m in pm["edge"]) * _ev(device, region, "EdgeNodeVolume")
+        np.add.at(P, i0, w)
+        np.add.at(P, i1, w)
+    if pm["element"]:
+        have = set(ds.get_element_model_list(device=device, region=region))
+        made = "node_index@en0" not in have
+        if made:
+            ds.element_from_node_model(device=device, region=region, node_model="node_index")
+        env = _elv(device, region, "ElementNodeVolume")
+        for k in (0, 1):
+            idx = _elv(device, region, "node_index@en{}".format(k)).astype(np.int64)
+            np.add.at(P, idx, sum(_elv(device, region, pair[k]) for pair in pm["element"]) * env)
+        if made:
+            for m in ds.get_element_model_list(device=device, region=region):
+                if m.startswith("node_index@en"):
+                    ds.delete_element_model(device=device, region=region, name=m)
+    if P.size != n_nodes:                                       # pragma: no cover - DEVSIM invariant
+        raise RuntimeError("noise_analysis: pair-rate size mismatch on region {!r}".format(region))
+    return P
 
 
 def _circuit_contacts(device: str):
@@ -340,14 +384,12 @@ class _RegionData:
                 J = _ev(device, region, "HoleCurrent")
                 self.hooge["hooge_p"] = float(hooge_alpha) * J * J / p_eff
                 self.edge_eq["hooge_p"] = _EQ_P
-        self.gr = None                                          # 2 (G + R) per node
+        self.gr = None                          # 2 Int (G + R) per node [1/s] (every mechanism)
         if "gr" in mechanisms and _EQ_N in eqs and _EQ_P in eqs:
-            ex = _gr_pair_expr(device, region, external_generation_shot)
-            if ex is not None:
-                nm = "_NoiseGRPairRate"
-                ds.node_model(device=device, region=region, name=nm, equation=ex)
-                self.gr = 2.0 * _nv(device, region, nm)
-                ds.delete_node_model(device=device, region=region, name=nm)
+            P = _gr_pair_per_node(device, region, external_generation_shot, self.n_nodes,
+                                  self.i0, self.i1)
+            if P is not None:
+                self.gr = 2.0 * P
 
 
 def _green(device, region, out, eq, n_nodes, fixups):
@@ -467,7 +509,7 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                             np.add.at(nm, d.i1, 0.5 * s_e)
                             map_out[d.region][m][k] = nm
                     elif m == "gr" and d.gr is not None:
-                        s_i = Q_E * Q_E * d.vol * np.abs(ys[_EQ_P] - ys[_EQ_N]) ** 2 * d.gr
+                        s_i = Q_E * Q_E * np.abs(ys[_EQ_P] - ys[_EQ_N]) ** 2 * d.gr
                         by_rm[d.region][m][k] = float(np.sum(s_i))
                         if maps:
                             map_out[d.region][m][k] = s_i

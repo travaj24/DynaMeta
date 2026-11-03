@@ -145,6 +145,17 @@ def edge_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
                           equation="simplify(diff({}, {}@{}))".format(eq, w, nd))
 
 
+def element_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
+    """Create an element (element-edge) model + its derivatives w.r.t. each NODE-SUFFIXED variable in
+    `wrt` (e.g. "Potential@en0" .. "Holes@en3"). DEVSIM's element assembler demands the derivative
+    w.r.t. EVERY element node of EVERY solution variable of the equation (a missing one is FATAL:
+    "Model: ...:Electrons@en1 MISSING"), so callers pass the full list; most simplify to 0."""
+    ds.element_model(device=device, region=region, name=name, equation=eq)
+    for v in wrt:
+        ds.element_model(device=device, region=region, name="{}:{}".format(name, v),
+                         equation="simplify(diff({}, {}))".format(eq, v))
+
+
 def node_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
     """Create a node model + its derivatives w.r.t. each variable in `wrt`."""
     ds.node_model(device=device, region=region, name=name, equation=eq)
