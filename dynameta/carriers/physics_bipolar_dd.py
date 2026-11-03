@@ -407,7 +407,8 @@ def setup_bipolar_region(device: str, region: str, *,
                          tau_n_s: float, tau_p_s: float,
                          fd_enhancement: bool = True,
                          n_dos_p_m3: "float | None" = None,
-                         options: "BipolarOptions | None" = None) -> None:
+                         options: "BipolarOptions | None" = None,
+                         btbt=None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
@@ -427,6 +428,10 @@ def setup_bipolar_region(device: str, region: str, *,
                          incomplete ionization, T_K, uniform generation; see carriers/bipolar_options).
                          None (default) -- or a bundle with every field None -- leaves every model
                          below BYTE-IDENTICAL to the SRH-only physics.
+      btbt             : None (default: NO band-to-band tunneling -- the models and equations are
+                         exactly the legacy ones) or a carriers.tunneling.BTBTParams: adds the local
+                         Kane/Hurkx BTBT net-recombination term to both continuity equations, coupled
+                         in the Newton (carriers/tunneling.py; D1d).
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
@@ -537,6 +542,9 @@ def setup_bipolar_region(device: str, region: str, *,
                               variable_name="Holes", edge_model="HoleCurrent",
                               node_model="HoleGeneration", time_node_model="PCharge",
                               variable_update="positive")
+    if btbt is not None:                                       # D1d: opt-in BTBT generation
+        from dynameta.carriers.tunneling import setup_btbt
+        setup_btbt(device, region, btbt)
 
     # --- audit R26/R27: opt-in Auger / radiative / BGN / incomplete ionization / T / G ----------
     # Installed LAST so it re-defines (by name) only the models it changes; the equations recorded

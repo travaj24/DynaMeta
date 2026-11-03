@@ -174,6 +174,13 @@ class Stacked3DSpec:
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
+    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams ->
+    # local Kane/Hurkx band-to-band generation in the 'semi' bipolar region (physics='bipolar_dd' only),
+    # coupled in the Newton with the ISOTROPIC element field. oxide_tunneling: a
+    # carriers.tunneling.OxideTunnelingParams -> every solve adds CarrierField.extras["oxide_tunneling"]
+    # (the gate-oxide tunneling current through 'oxide', post-processed from the converged field).
+    btbt: Optional[object] = None
+    oxide_tunneling: Optional[object] = None
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -265,6 +272,9 @@ class Stacked3DSpec:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
                               "'bipolar_dd'; got {!r}".format(self.physics))
+        if self.btbt is not None and self.physics != "bipolar_dd":
+            raise ValueError("Stacked3DSpec.btbt (band-to-band tunneling generation) needs "
+                             "physics='bipolar_dd'; got {!r}".format(self.physics))
         if self.physics == "bipolar_dd":
             # holes + recombination need an intrinsic density and positive lifetimes (the SRH
             # denominator is 0/0 at tau=0). Fail at construction, not deep in the Newton solve.
@@ -618,7 +628,8 @@ class Devsim3DEquilibrium:
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
             tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
-            options=s.bipolar_options)                            # audit R26/R27 (None -> SRH only)
+            options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
+            btbt=s.btbt)                                         # D1d: None -> no BTBT (byte-identical)
         BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
@@ -771,6 +782,14 @@ class Devsim3DEquilibrium:
             # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
             warnings.warn("contact-current extraction unavailable: {}".format(_e),
                           AdvisoryWarning, stacklevel=2)
+        if self.spec.oxide_tunneling is not None:            # D1d: opt-in; None adds no key
+            from dynameta.carriers.tunneling import oxide_tunneling_current
+            res = oxide_tunneling_current(self.device, "oxide", fdr, self.spec.oxide_tunneling)
+            k = int(np.argmax(np.abs(res["J_A_m2"])))
+            extras["oxide_tunneling"] = {"oxide": {
+                "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
+                "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
+                "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
             temperature_K=PE.T_REF, regions={rname: reg},

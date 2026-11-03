@@ -91,6 +91,11 @@ class TransportModel:
     # dynameta.carriers.bipolar_options.BipolarOptions. None (default) keeps the SRH-only physics
     # byte-identical. Read by the 2-D LayeredDevsimBuilder and the 3-D Stacked3DSpec.from_design.
     bipolar_options:             Optional["BipolarOptions"] = None
+    # Band-to-band tunneling (D1d, bipolar_dd only): None (default) = OFF, byte-identical; else a
+    # dynameta.carriers.tunneling.BTBTParams (e.g. SILICON_HURKX) -> the local Kane/Hurkx BTBT term
+    # in both continuity equations, coupled in the Newton. Typed loosely to keep this module
+    # devsim-free (the params class lives with the DEVSIM physics).
+    btbt:                        Optional[object] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -115,3 +120,7 @@ class TransportModel:
             if self.physics != "bipolar_dd":
                 raise ValueError("TransportModel.bipolar_options applies only to physics='bipolar_dd' "
                                  "(got {!r}); it would be silently ignored".format(self.physics))
+        if self.btbt is not None and self.physics != "bipolar_dd":
+            raise ValueError("btbt (band-to-band tunneling generation) needs physics='bipolar_dd' "
+                             "(it feeds the electron AND hole continuity equations); got physics={!r}"
+                             .format(self.physics))
