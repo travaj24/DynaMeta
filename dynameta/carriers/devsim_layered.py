@@ -516,7 +516,7 @@ class LayeredDevsimBuilder:
         if region in self._bipolar_regions:                 # psi = intrinsic level: E_c - E_i = kT ln(N_c/n_i)
             Nc = float(ds.get_parameter(device=self.device, region=region, name="N_dos"))
             ni = float(ds.get_parameter(device=self.device, region=region, name="n_i"))
-            return PE.V_T * float(np.log(Nc / ni))
+            return HJ.region_V_t(self.device, region) * float(np.log(Nc / ni))   # kT at the region's T_K
         if region in self._dd_regions:                      # contact pins n = N_D at psi = 0 (FD-SG frame)
             Nc = float(ds.get_parameter(device=self.device, region=region, name="N_c"))
             u = float(tr.n_bg_m3) / Nc
@@ -532,6 +532,20 @@ class LayeredDevsimBuilder:
         semis = [sp.name for sp in self._specs if sp.role == "semiconductor"]
         if not semis:
             return {}
+        # ONE temperature for the frame (v0.14 D1a follow-up): Fermi-level alignment across regions is an
+        # isothermal-equilibrium statement, so every semiconductor region must run at the same V_t (the
+        # region parameter the bulk installed from BipolarOptions.T_K; equilibrium / unipolar-DD regions
+        # are at T_REF). A mixed-temperature stack is refused, never aligned at 300 K silently.
+        vts = {r: HJ.region_V_t(self.device, r) for r in semis}
+        if len(semis) > 1 and len(set(vts.values())) > 1:
+            raise NotImplementedError(
+                "LayeredDevsimBuilder: the semiconductor regions run at different temperatures ({}). Missing: "
+                "a NON-ISOTHERMAL device model (heat flow, thermoelectric interface terms); Fermi-level "
+                "alignment across regions is defined only at one temperature. Give every semiconductor the "
+                "same T (BipolarOptions.T_K; equilibrium and unipolar drift-diffusion regions run at "
+                "T_REF = {} K and have no T_K).".format(
+                    ", ".join("{} {:.6g} K".format(r, HJ.temperature_of_V_t(v)) for r, v in sorted(vts.items())),
+                    PE.T_REF))
         own, chi = {}, {}
         for sp in self._specs:
             if sp.role != "semiconductor":
@@ -564,7 +578,7 @@ class LayeredDevsimBuilder:
         fd = float(ds.get_parameter(device=self.device, region=region, name="fd_enhancement")) > 0.0
         m_p = float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else m_n
         a_p = float(tr.richardson_p_Am2K2) if tr.richardson_p_Am2K2 else HJ.richardson_constant_Am2K2(m_p)
-        eg_eff = PE.V_T * float(np.log(Nc * Nv / ni ** 2))  # E_g/q the bulk statistics imply
+        eg_eff = HJ.region_V_t(self.device, region) * float(np.log(Nc * Nv / ni ** 2))  # E_g/q at the region's T
         return HJ.HeteroSide(region, phi_c, "N_dos", a_n, fd=fd, phi_v_V=phi_c - eg_eff,
                              p_dos_param="N_dos_p", richardson_p=a_p)
 
@@ -601,10 +615,11 @@ class LayeredDevsimBuilder:
                     if abs(eg - float(t.band_gap_eV)) > _HJ_EG_TOL_EV:
                         raise ValueError(
                             "LayeredDevsimBuilder: bipolar heterojunction material '{}' has band_gap_eV = "
-                            "{:.4f} but its statistics give E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV; the "
+                            "{:.4f} but its statistics give E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV at T = {:.6g} K (n_i_m3 must be the intrinsic density AT that temperature; N_c, N_v follow the DOS masses at T); the "
                             "valence offset would follow the statistics, not the stated gap. Set n_i_m3 = "
                             "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV).".format(
-                                nm, float(t.band_gap_eV), eg))
+                                nm, float(t.band_gap_eV), eg,
+                                HJ.temperature_of_V_t(HJ.region_V_t(self.device, sd.region))))
             model = self.heterointerface
             if model == "auto":
                 d_ec = abs(sd0.phi_c_V - sd1.phi_c_V)
@@ -613,6 +628,13 @@ class LayeredDevsimBuilder:
             iface = "{}__{}".format(r0, r1)
             HJ.setup_heterointerface_carriers(self.device, iface, sd0, sd1, model=model)
             self._hetero_ifaces[iface] = model
+
+    def _device_temperature_K(self) -> float:
+        """The temperature the semiconductor regions were solved at (their V_t; one value -- the frame
+        refuses a mixed-temperature stack), T_REF without semiconductors. It was always reported as
+        T_REF, also for a BipolarOptions.T_K device."""
+        semis = [sp.name for sp in self._specs if sp.role == "semiconductor"]
+        return HJ.temperature_of_V_t(HJ.region_V_t(self.device, semis[0])) if semis else PE.T_REF
 
     def band_frames(self) -> Dict[str, Tuple[float, float]]:
         """{semiconductor region: (Phi_c_V, s_V)} of the built device: E_c = q (Phi_c - psi) in the common
@@ -635,8 +657,18 @@ class LayeredDevsimBuilder:
             nd = (-1.0 if tr.acceptor else 1.0) * float(tr.n_bg_m3)
             ds.node_model(device=self.device, region=s.name, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = PE.effective_dos_m3(dos)                   # audit X-15: the single N_c (T_REF)
-        Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
+        # band DOS at the region's temperature: BipolarOptions.T_K -- the ONE temperature source, the same
+        # one that sets the region's V_t -- else T_REF (the default call, bit-identical). The builder
+        # derives N_c, N_v from the DOS MASSES, so this is what "supply N_c, N_v at T_K" means here
+        # (bipolar_options docstring item 4); n_i_m3 is a direct input and must be given at T_K.
+        _opts = getattr(tr, "bipolar_options", None)
+        _T = getattr(_opts, "T_K", None)
+        if _T is None:
+            Nc = PE.effective_dos_m3(dos)                   # audit X-15: the single N_c (T_REF)
+            Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
+        else:
+            Nc = PE.effective_dos_m3(dos, float(_T))
+            Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg), float(_T)) if tr.dos_mass_p_kg else Nc
         BP.setup_bipolar_region(
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
@@ -917,7 +949,7 @@ class LayeredDevsimBuilder:
             extras["oxide_tunneling"] = self._oxide_tunneling_extras()
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
-            temperature_K=PE.T_REF, regions=regions, n_bg_by_region=n_bg_by_region,
+            temperature_K=self._device_temperature_K(), regions=regions, n_bg_by_region=n_bg_by_region,
             unit_cell_m=(d.unit_cell.period_x_m, d.unit_cell.period_y_m), extras=extras)
 
     def _oxide_tunneling_extras(self) -> Dict[str, Dict[str, float]]:

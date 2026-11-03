@@ -281,8 +281,10 @@ Gate `test_heterojunction_with_bgn_effective_offsets_at_the_interface[auto|conti
 `dE_c,eff = dE_c - D_c,A + D_c,G` to 1e-6 eV. With the interface terms removed it misses by
 **5.66 meV** on both interface models (0.24310 vs 0.24876 eV).
 
-T_K != T_REF on a heterointerface with BGN is refused. The interface, including the Richardson T^2
-and the kT of the activities, is written at T_REF.
+T_K != T_REF on a heterointerface with BGN was refused here (the interface was written at T_REF), and
+without BGN it silently ran at T_REF. Superseded by the D1a temperature follow-up (wip/dv_hetero2): the
+interface now runs at the regions' V_t (one source, BipolarOptions.T_K) and a non-isothermal stack is
+refused -- docs/audit/2026-11-03-devsim-heterojunctions.md section 4b.
 
 **Noise on heterointerfaces.**
 * **Continuous-QFL heterointerface: covered.** On the FDT diode as a heterojunction (n_i 1e19 | 3e18,
