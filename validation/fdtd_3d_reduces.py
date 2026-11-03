@@ -48,6 +48,9 @@ LMIN, LMAX = 1200e-9, 1800e-9
 # Regenerate: python -m validation.fdtd_3d_reduces --regen-cgeom   (measured 2026-11-03, numpy = the fixture config).
 # Part (a) below is a REGRESSION bound; the physics gate is part (b), the observed order.
 C_GEOM_3D = 0.08735397979210943   # 2026-11-03, u = k/8: 0.087354 0.079760 0.059720 0.035424 0.044972 0.035414 0.059719 0.079699
+# The fixture IS the u = 0 member of its own sweep, so (a) sits at ratio 1 by construction; allow
+# cross-platform floating-point round-off only (a physics regression moves the ratio by percent).
+FP_ROUNDOFF = 1e-6
 
 
 def _gate_a_err(res, n_pad_wave=4.0, nx=4, backend="numpy", z_subcell="average"):
@@ -103,7 +106,7 @@ def main():
     e_lo = float(np.max(_gate_a_err(18, nx=2, backend="numba")[0]))
     e_hi = float(np.max(_gate_a_err(36, nx=2, backend="numba")[0]))
     order_a = float(np.log2(e_lo / e_hi))
-    gate_a = bool(ratio_a <= 1.0 and order_a >= 1.7 and en < 1e-3)
+    gate_a = bool(ratio_a <= 1.0 + FP_ROUNDOFF and order_a >= 1.7 and en < 1e-3)
     print("[f3] A uniform: 0-order max|d-Airy|={:.2e} flux max|d-Airy|={:.2e} max|R+T-1|={:.2e}; (a) max "
           "err/(C X^2)={:.3f} (C_geom={}) ; (b) order {:.2f} ({:.2e} -> {:.2e}, nx=ny=2 probe) -> {}".format(
               d0, df, en, ratio_a, C_GEOM_3D, order_a, e_lo, e_hi, "PASS" if gate_a else "FAIL"), flush=True)
