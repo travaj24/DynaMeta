@@ -139,8 +139,12 @@ on `tau_n/tau_p`. That is not a thermal distribution, and Poisson would carry a 
 charge at zero bias. So the occupancy, and with it the trapped charge, takes the same substitution as
 the rate. Gate `test_trapped_charge_uses_the_narrowed_occupancy` checks it to 1e-12.
 
-**Consequence (an open question for the user):** `E_t` is measured from the **narrowed effective
-intrinsic level**. This was already D1b's convention. With an asymmetric band-edge split
+**Consequence (RESOLVED by the per-level energy reference, wip/dv_traps2; see the D1c doc section
+9):** `E_t` is measured from the **narrowed effective intrinsic level** by default.
+Band-referenced levels (`energy_reference="conduction"/"valence"`) are now available. Correction to
+the next sentence: in this Boltzmann model gamma does not enter SRH at all (the narrowed E_c - E_ie is
+gamma-independent). The references differ by exp(dEg/2kT), and exp(gamma dEg/kT) would apply only to a
+level fixed against the UNnarrowed edges. This was already D1b's convention. With an asymmetric band-edge split
 (`conduction_fraction != 1/2`), a level pinned to E_c would scale as `exp(gamma dEg/kT)` instead of
 `exp(dEg/2kT)`. We ship the symmetric reference that D1b documented, and no other convention is
 invented here.
@@ -395,8 +399,9 @@ No test in the files above pinned the old 2-D zero-built-in-potential result. No
 
 ## 6. Open items carried forward (user decisions)
 
-1. **Trap energy reference under an asymmetric BGN split** (section 2.2): narrowed effective
-   intrinsic level (shipped) vs band-edge-pinned levels.
+1. **Trap energy reference under an asymmetric BGN split** (section 2.2): RESOLVED. The user chose
+   a per-level `energy_reference` (intrinsic default / conduction / valence); see D1c doc section 9.
+   gamma turns out not to enter SRH.
 2. **Trap kinetics** (D1c open question 3). The charged-trap FDT xfail pins the consequence for ssac
    and noise.
 3. **The devsim_3d mesh is not Delaunay** (D1c open question 4). Gate G2 still fails.
