@@ -457,7 +457,8 @@ class LayeredDevsimBuilder:
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
-            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv)
+            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            options=getattr(tr, "bipolar_options", None))       # audit R26/R27 (None -> SRH only)
         BP.setup_equilibrium_seed_models(self.device, s.name)
 
     def _dielectric_eps_static(self, material_name: str) -> float:
