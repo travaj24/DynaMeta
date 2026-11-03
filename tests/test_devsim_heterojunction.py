@@ -576,3 +576,174 @@ def test_3d_dd_heterostack_wires_thermionic_emission_and_keeps_a_flat_fermi_leve
     z = gated_3d[("z", 0.5)]
     top = z > z.max() - 1e-12
     assert np.mean(gated_3d[0.5]["xs"][1][top]) > 1.1 * np.mean(gated_3d[0.0]["xs"][1][top])
+
+
+# =====================================================================================================
+# TEMPERATURE (D1a follow-up): the heterointerface runs at the bulk's temperature (BipolarOptions.T_K ->
+# the region V_t, ONE source). At e46bd25 a T_K heterostack without BGN ran the interface, the Anderson
+# frame and the band-gap check at 300 K while the bulk ran at T_K.
+# =====================================================================================================
+T_GATES = (250.0, 350.0)
+
+
+def _T_iso(T, model):
+    """n-GaAs / N-Al0.3Ga0.7As, 1e17 cm^-3 each, bipolar (the physics that carries T_K) at T."""
+    return stack_design([("ngaas", "GaAs_n", 400e-9, transport(GAAS, n_bg=N_ISO, physics="bipolar_dd", T_K=T)),
+                         ("ntop", "Top_algaas", 400e-9, transport(ALGAAS, n_bg=N_ISO, physics="bipolar_dd",
+                                                                  T_K=T))],
+                        name="iso_T{:g}_{}".format(T, model))
+
+
+@pytest.fixture(scope="module")
+def isotype_T():
+    out = {}
+    for T in T_GATES:
+        for model in ("thermionic", "continuous"):
+            b = _builder(_T_iso(T, model), "isoT{:g}{}".format(T, model[0]), heterointerface=model)
+            try:
+                b.solve(_bias(0.0), rel_tol=1e-8)
+                prof = {r: (column(b, r, "Potential"), column(b, r, "Electrons")) for r in ("ngaas", "ntop")}
+                b.solve(_bias(+V_LR), rel_tol=1e-8)
+                jplus = current_density(b, None, "cathode")
+                b.solve(_bias(-V_LR), rel_tol=1e-8)
+                jminus = current_density(b, None, "cathode")
+                cf = b.solve(_bias(0.0), rel_tol=1e-8)
+                out[(T, model)] = dict(prof=prof, g=abs(jplus - jminus) / (2 * V_LR), ifaces=b.heterointerfaces(),
+                                       T_cf=cf.temperature_K)
+            finally:
+                b.teardown()
+    return out
+
+
+def _iso_oracle_T(prof, top, T):
+    """The isotype linear-response oracle at temperature T: bulk int dz/(q mu n_eq) (holes negligible) +
+    kT/(q J_s), J_s = A* T^2 exp(-phi_B/kT), phi_B from the solved barrier-side density with N_c(T)."""
+    from validation.devsim_heterojunction import thermal_voltage
+    vt = thermal_voltage(T)
+    (zg, _), (_, ng) = prof["ngaas"]
+    (zt, _), (_, nt) = prof["ntop"]
+    r_bulk = _trap(1.0 / (Q_E * GAAS["mu_n"] * ng), zg) + _trap(1.0 / (Q_E * top["mu_n"] * nt), zt)
+    phi_b = -vt * fd_eta(nt[0] / nc_m3(top["me"], T))                 # AlGaAs side holds the top
+    assert phi_b > -vt * fd_eta(ng[-1] / nc_m3(GAAS["me"], T))
+    js = richardson(top["me"]) * T ** 2 * math.exp(-phi_b / vt)
+    return r_bulk, vt / js, phi_b
+
+
+@pytest.mark.parametrize("T", T_GATES)
+def test_t_gate_a_isotype_te_conductance_follows_the_richardson_law_at_T(isotype_T, T):
+    """GATE T-a. The low-bias TE conductance at 250 K and 350 K equals 1/(R_bulk + kT/(q A* T^2
+    e^{-phi_B/kT})) at THAT T (phi_B from the solve, N_c(T) from the masses, A* T^2 with the real T).
+    At e46bd25 the builder evaluated N_c at 300 K while the bulk ran at T_K, so the band-gap check
+    refused the device (with an n_i at 300 K it would have run the interface silently at 300 K: a
+    (T/300)^2 Richardson prefactor and a 300 K kT in every barrier exponent)."""
+    r = isotype_T[(T, "thermionic")]
+    assert r["ifaces"] == {"ngaas__ntop": "thermionic"}
+    assert r["T_cf"] == pytest.approx(T, rel=1e-14)                  # the CarrierField reports the solved T
+    r_bulk, r_te, phi_b = _iso_oracle_T(r["prof"], ALGAAS, T)
+    assert r_te > 3.0 * r_bulk                                        # interface-limited
+    assert r["g"] == pytest.approx(1.0 / (r_bulk + r_te), rel=2e-3)
+    c = isotype_T[(T, "continuous")]
+    assert c["g"] > 3.0 / (r_bulk + r_te)                             # discriminating, as at 300 K
+    # the 300 K interface would miss by the prefactor alone: (T/300)^2 = 0.69 / 1.36
+    assert abs((T / T_REF) ** 2 - 1.0) > 0.3
+
+
+@pytest.fixture(scope="module")
+def pn_T():
+    out = {}
+    for T in T_GATES:
+        d = stack_design([("pgaas", "GaAs_p", 400e-9, transport(GAAS, n_bg=NA, physics="bipolar_dd",
+                                                                acceptor=True, T_K=T)),
+                          ("nalgaas", "AlGaAs_n", 400e-9, transport(ALGAAS, n_bg=ND, physics="bipolar_dd",
+                                                                    T_K=T))])
+        b = _builder(d, "pnT{:g}".format(T))
+        try:
+            b.solve(_bias(0.0), rel_tol=1e-8)
+            out[T] = {(r, nm): column(b, r, nm) for r in ("pgaas", "nalgaas")
+                      for nm in ("Potential", "Electrons", "Holes")}
+            out[(T, "frames")] = b.band_frames()
+        finally:
+            b.teardown()
+    return out
+
+
+@pytest.mark.parametrize("T", T_GATES)
+def test_t_gate_b_equilibrium_built_in_voltage_at_T_matches_the_band_diagram(pn_T, T):
+    """GATE T-b. N-AlGaAs / p-GaAs at 250 K and 350 K: q V_bi = W_p - W_n at T (N_c(T), N_v(T) from the
+    masses, eta by exact FD quadrature, kT at T); the conduction spike read from the SOLVED densities is
+    dE_c; E_Fn and E_Fp are flat at zero bias. Tolerances as at 300 K (2e-4 V)."""
+    from validation.devsim_heterojunction import thermal_voltage
+    vt = thermal_voltage(T)
+    r = pn_T[T]
+    _, psip = r[("pgaas", "Potential")]
+    _, psin = r[("nalgaas", "Potential")]
+    eta_n = fd_eta(ND / nc_m3(ALGAAS["me"], T))
+    eta_p = fd_eta(NA / nc_m3(GAAS["mh"], T))
+    vbi = (GAAS["chi"] + GAAS["eg"] + eta_p * vt) - (ALGAAS["chi"] - eta_n * vt)
+    assert psin[-1] - psip[0] == pytest.approx(vbi, abs=2e-4)
+    assert abs(vbi - 1.502232) > 0.01                                   # really a different T
+    _, n_p = r[("pgaas", "Electrons")]
+    _, n_n = r[("nalgaas", "Electrons")]
+    ec_g = -vt * fd_eta(n_p[-1] / nc_m3(GAAS["me"], T))
+    ec_a = -vt * fd_eta(n_n[0] / nc_m3(ALGAAS["me"], T))
+    assert ec_a - ec_g == pytest.approx(DEC, abs=1e-6)
+    fr = pn_T[(T, "frames")]
+    for reg, mat in (("pgaas", GAAS), ("nalgaas", ALGAAS)):
+        _, psi = r[(reg, "Potential")]
+        _, n = r[(reg, "Electrons")]
+        _, p = r[(reg, "Holes")]
+        ec = fr[reg][0] - psi
+        for k in range(0, len(psi), max(1, len(psi) // 25)):
+            # QFL defined above 1e3 m^-3: minority holes in the AlGaAs sit at ~1 m^-3 at 350 K, where the
+            # absolute Newton floor sets E_Fp to ~2e-4 eV (MEASURED 2.03e-4 at p = 1.45 m^-3)
+            if n[k] > 1e3:
+                assert abs(ec[k] + vt * fd_eta(n[k] / nc_m3(mat["me"], T))) < 2e-4, (reg, k, "n")
+            if p[k] > 1e3:
+                assert abs(ec[k] - mat["eg"] - vt * fd_eta(p[k] / nc_m3(mat["mh"], T))) < 2e-4, (reg, k, "p")
+
+
+def _T_refusal_design(kind):
+    if kind == "mixed_T":
+        layers = [("pgaas", "GaAs_p", 200e-9, transport(GAAS, n_bg=1e23, physics="bipolar_dd", acceptor=True,
+                                                        T_K=250.0)),
+                  ("nalgaas", "AlGaAs_n", 200e-9, transport(ALGAAS, n_bg=1e23, physics="bipolar_dd"))]
+    elif kind == "dd_next_to_T":               # unipolar DD has no T_K: it runs at T_REF (fast to set up,
+        layers = [("ngaas", "GaAs_n", 200e-9, transport(GAAS, n_bg=1e23, physics="drift_diffusion")),
+                  ("nalgaas", "AlGaAs_n", 200e-9, transport(ALGAAS, n_bg=1e23, physics="bipolar_dd", T_K=250.0))]
+    else:                                     # n_i supplied at 300 K for a 250 K bipolar heterojunction
+        layers = [("pgaas", "GaAs_p", 200e-9, transport(GAAS, n_bg=1e23, physics="bipolar_dd", acceptor=True,
+                                                        T_K=250.0, n_i_T_K=T_REF)),
+                  ("nalgaas", "AlGaAs_n", 200e-9, transport(ALGAAS, n_bg=1e23, physics="bipolar_dd", T_K=250.0,
+                                                            n_i_T_K=T_REF))]
+    return stack_design(layers, name="badT_" + kind)
+
+
+@pytest.mark.parametrize("kind,exc,match", [
+    ("mixed_T", NotImplementedError, "NON-ISOTHERMAL"),
+    ("dd_next_to_T", NotImplementedError, "NON-ISOTHERMAL"),
+    ("ni_at_300K", ValueError, "AT that temperature")])
+def test_t_gate_c_temperature_refusals_name_what_is_missing(kind, exc, match):
+    """GATE T-c. What is not implemented is refused, naming it: a mixed-temperature stack (two bipolar
+    regions at 250 K / 300 K; a unipolar-DD region -- no T_K, like an equilibrium one -- next to a 250 K
+    bipolar one; the frame refuses before the unipolar/bipolar interface refusal) --
+    no non-isothermal model; and an n_i given at 300 K for a 250 K heterojunction -- its statistics
+    contradict band_gap_eV at T."""
+    b = _builder(_T_refusal_design(kind), "badT_" + kind)
+    try:
+        with pytest.raises(exc, match=match):
+            b.build_device()
+    finally:
+        b.teardown()
+
+
+def test_t_gate_d_300K_interface_arithmetic_is_the_T_REF_arithmetic():
+    """GATE T-d (unit half; the solution-hash half is in the design note): at V_t = V_T the interface
+    temperature is EXACTLY T_REF and interface_models returns the same floats as the T_REF formula."""
+    from dynameta.carriers.physics_heterojunction import HeteroSide, interface_models, temperature_of_V_t
+    assert temperature_of_V_t(V_T) == T_REF
+    a, b = HeteroSide("a", 0.1, "N_c", 8.0e4), HeteroSide("b", 0.3431, "N_c", 1.1e5)
+    k0, k1, at2 = interface_models(a, b, "Electrons")
+    assert (k0, k1, at2) == ((0.3431 - 0.1) / V_T, 0.0, 1.1e5 * T_REF ** 2)
+    assert interface_models(a, b, "Electrons", V_T) == (k0, k1, at2)
+    k0t, _, at2t = interface_models(a, b, "Electrons", V_T * 250.0 / T_REF)
+    assert at2t == pytest.approx(1.1e5 * 250.0 ** 2, rel=1e-14) and k0t == pytest.approx(k0 * 1.2, rel=1e-13)
