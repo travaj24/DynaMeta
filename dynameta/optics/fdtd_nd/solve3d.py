@@ -27,8 +27,10 @@ from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_g
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pulse_width,
-                                          source_pulse, z_grid)
+from dynameta.optics.fdtd_nd.grid import (ND_POLES, check_z_subcell, mix_profile, nd_region_values,
+                                          z_fill_fractions,
+                                          layer_band_index_max, layer_masks, material_z, pad_masks,
+                                          probe_cells, pulse_width, source_pulse, z_grid)
 # audit D-3 / D-15: the absorber-thickness + probe-placement rule and the empty-band backstop are
 # SINGLE-SOURCED in solve2d (all three 3-D front ends below call the same helper), so the wave-3
 # redesign -- npml floor, attenuation-budget probe clearance, source demoted to a warning -- lands
@@ -78,12 +80,15 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
                   courant: float = 0.5, n_pad_wave: float = 4.0, settle: float = 12.0,
                   kerr: bool = False, source_amp: float = 1.0, npml: int = 12,
                   n_super: float = 1.0, n_sub: float = 1.0,
-                  backend: str = "numpy", xp=np) -> FDTD3DResult:
+                  backend: str = "numpy", xp=np, z_subcell: str = "average") -> FDTD3DResult:
     """Broadband R(f)/T(f) of a doubly-periodic (period_x_m x period_y_m) unit cell at NORMAL incidence,
     y-polarized. `layers` = the through-stack (z) profile; supply `lateral_eps_inf` (an (nx,ny,nz) array,
     or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a 2D-periodic structure, else the stack is
-    laterally UNIFORM (and the result reduces to 1D/TMM). Returns both the specular 0-order and the
-    total-flux (all (kx,ky) orders) R/T.
+    laterally UNIFORM (and the result reduces to 1D/TMM). `zc` = the material-registration z positions,
+    the Yee E-NODES k*dz since 2026-11-02 (audit S2-14 siblings; were (k+1/2)*dz -- see
+    fdtd_nd.grid.material_z). `z_subcell` 'average' (default, 2026-11-02) fill-averages each node's z
+    control volume (fdtd_nd.grid.mix_profile); 'point' = the 2b7a002 point rule bit-for-bit. Returns
+    both the specular 0-order and the total-flux (all (kx,ky) orders) R/T.
 
     n_super / n_sub (default 1 = vacuum): the lossless semi-infinite superstrate / substrate indices
     (metasurface-on-glass), filling the z-pads with n_super^2 / n_sub^2, with an impedance-matched CPML
@@ -102,6 +107,7 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     # plain passive Drude film and return a bit-identical result (audit C5-7 policy: raise loudly).
     hot_carrier_guard("solve_fdtd_3d", layers)
     courant = courant_guard("solve_fdtd_3d", courant)        # audit D-11
+    z_subcell = check_z_subcell("solve_fdtd_3d", z_subcell)  # 'average' default | 'point' (2b7a002)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -122,12 +128,14 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     chi2g = np.zeros(shape)                                                  # R15 SHG chi2 [m/V]
     chi3R = np.zeros(shape); rw = np.zeros(shape); rgam = np.zeros(shape)    # R15 Raman pole
     gw = np.zeros(shape); gdw = np.zeros(shape); gkdn = np.zeros(shape)      # R20 gain line
-    zc = (np.arange(nz) + 0.5) * dz
-    eps_inf[:, :, zc < pad] = n_super ** 2                   # fill the semi-infinite super/substrate pads
-    eps_inf[:, :, zc >= pad + z_struct] = n_sub ** 2
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): materials registered at the Yee E-NODES k*dz, the ONE shared
+    # convention (fdtd_nd.grid.material_z; was the cell centres (k+1/2)*dz = a -n k0 dz bias on r0's
+    # phase, measured -1.0 k0dz). `zc` is also what the lateral painter below receives.
+    zc = material_z(nz, dz)
+    _lo, _hi = pad_masks(zc, pad, z_struct)
+    eps_inf[:, :, _lo] = n_super ** 2                        # fill the semi-infinite super/substrate pads
+    eps_inf[:, :, _hi] = n_sub ** 2
+    for L, m in (layer_masks(zc, pad, layers) if z_subcell == "point" else ()):
         eps_inf[:, :, m] = L.eps_inf
         wp[:, :, m] = L.drude_wp_rad_s
         gam[:, :, m] = L.drude_gamma_rad_s
@@ -143,7 +151,16 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         gw[:, :, m] = L.gain_w_rad_s
         gdw[:, :, m] = L.gain_dw_rad_s
         gkdn[:, :, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
-        z += L.thickness_m
+    if z_subcell != "point":
+        # z-SUBCELL AVERAGING (default, 2026-11-02; fdtd_nd.grid notes): the SAME fill-fraction mix as
+        # solve_fdtd_2d. One eps array feeds Ex/Ey/Ez, so this is the tangential (arithmetic) channel;
+        # Ez is identically 0 on a laterally uniform stack (structured cells: documented limit).
+        _m = mix_profile(z_fill_fractions(zc, pad, layers, dz=dz), nd_region_values(layers, n_super, n_sub, kerr),
+                         poles=ND_POLES)
+        for _name, _arr in (("eps_inf", eps_inf), ("wp", wp), ("gam", gam), ("lw0", lw0), ("lgam", lgam),
+                            ("ldeps", ldeps), ("chi3", chi3), ("chi2", chi2g), ("chi3R", chi3R),
+                            ("rw", rw), ("rgam", rgam), ("gw", gw), ("gdw", gdw), ("gkdn", gkdn)):
+            _arr[...] = _m[_name][None, None, :]
     if lateral_eps_inf is not None:
         lat = lateral_eps_inf(nx, ny, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
@@ -261,7 +278,8 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
                           lambda_min_m: float, lambda_max_m: float, resolution: int = 36,
                           courant: float = 0.5, n_pad_wave: float = 6.0, settle: float = 12.0,
                           source_amp: float = 1.0, npml: int = 12, nx: int = 6,
-                          ny: int = 6, backend: str = "numpy") -> FDTD2DObliqueResult:
+                          ny: int = 6, backend: str = "numpy",
+                          z_subcell: str = "average") -> FDTD2DObliqueResult:
     """Broadband s-pol reflectance/transmittance of a laterally-uniform stack at OBLIQUE incidence in the
     FULL-VECTOR 3D engine, via the complex-envelope Bloch method with a 2D transverse wavevector
     k_par=(kx,ky), |k_par| = (2 pi/lambda_c) sin(angle_deg), azimuth phi=azimuth_deg (kx=|k_par|cos phi,
@@ -283,6 +301,7 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     # audit D-1: hot_carrier's sentinel is None (not 0.0), so it cannot join `_dropped`.
     hot_carrier_guard("solve_fdtd_3d_oblique", layers)
     courant = courant_guard("solve_fdtd_3d_oblique", courant)   # audit D-11
+    z_subcell = check_z_subcell("solve_fdtd_3d_oblique", z_subcell)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -296,12 +315,18 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     sx, sy = -np.sin(phi), np.cos(phi)                           # s-pol in-plane E direction
 
     eps_inf = np.ones((nx, ny, nz)); wp = np.zeros((nx, ny, nz)); gam = np.zeros((nx, ny, nz))
-    zc = (np.arange(nz) + 0.5) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
-        eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
-        z += L.thickness_m
+    # audit S2-14 siblings (2026-11-02): E-node registration, the shared convention (was (k+1/2)*dz).
+    if z_subcell == "point":                                 # opt-out: 2b7a002 point rule, bit-for-bit
+        for L, m in layer_masks(material_z(nz, dz), pad, layers):
+            eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
+    else:                                                    # z-subcell averaging (s-pol: tangential E)
+        _m = mix_profile(z_fill_fractions(material_z(nz, dz), pad, layers, dz=dz),
+                         {"eps_inf": [1.0] + [L.eps_inf for L in layers] + [1.0],
+                          "wp": [0.0] + [L.drude_wp_rad_s for L in layers] + [0.0],
+                          "gam": [0.0] + [L.drude_gamma_rad_s for L in layers] + [0.0]},
+                         poles=(("wp", 2, ("gam",)),))
+        eps_inf[...] = _m["eps_inf"][None, None, :]; wp[...] = _m["wp"][None, None, :]
+        gam[...] = _m["gam"][None, None, :]
     k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_3d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
@@ -375,7 +400,7 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
                      lambda_max_m: float, resolution: int = 40, courant: float = 0.5,
                      n_pad_wave: float = 6.0, settle: float = 14.0, pol: str = "y",
                      source_amp: float = 1.0, nx: int = 4, ny: int = 4, npml: int = 12,
-                     lateral_tensor=None) -> FDTD3DMOResult:
+                     lateral_tensor=None, z_subcell: str = "average") -> FDTD3DMOResult:
     """Broadband co/cross R/T + Faraday rotation of a 3D anisotropic / magneto-optic stack (the full-vector
     gyrotropic engine, _run_3d_mo). `layers` are MO layers (duck-typed: .thickness_m, .eps_xx, .eps_yy,
     optional .eps_zz, .drude_wp_rad_s, .drude_gamma_rad_s, .cyclotron_wc_rad_s); the magnetized-Drude
@@ -400,6 +425,7 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     # so this is a no-op there -- but the gyrotropic kernel has no hot-carrier path either).
     hot_carrier_guard("solve_fdtd_3d_mo", layers)
     courant = courant_guard("solve_fdtd_3d_mo", courant)     # audit D-11
+    z_subcell = check_z_subcell("solve_fdtd_3d_mo", z_subcell)
     f_min, f_max = C_LIGHT / lambda_max_m, C_LIGHT / lambda_min_m
     f_c = 0.5 * (f_min + f_max)
     w_band = 2.0 * np.pi * np.linspace(f_min, f_max, 9)
@@ -423,17 +449,34 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     o = np.ones((nx, ny, nz)); zr = np.zeros((nx, ny, nz))
     exx, eyy, ezz = o.copy(), o.copy(), o.copy()
     wp, gam, wc = zr.copy(), zr.copy(), zr.copy()
-    zc = (np.arange(nz) + 0.5) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): E-node registration, the shared convention -- now the SAME
+    # rule as its 1-D twin solve_fdtd_mo_1d (it used (k+1/2)*dz, so the "reduces to the 1-D fdtd_mo"
+    # comparison carried a dz/2 structure shift). `zc` is also what lateral_tensor receives.
+    zc = material_z(nz, dz)
+    for L, m in (layer_masks(zc, pad, layers) if z_subcell == "point" else ()):
         exx[:, :, m] = L.eps_xx; eyy[:, :, m] = L.eps_yy
         _ezz = getattr(L, "eps_zz", None)        # `is not None`, NOT truthiness: eps_zz=0 (z-ENZ) is valid
         ezz[:, :, m] = _ezz if _ezz is not None else 0.5 * (L.eps_xx + L.eps_yy)
         wp[:, :, m] = getattr(L, "drude_wp_rad_s", 0.0)
         gam[:, :, m] = getattr(L, "drude_gamma_rad_s", 0.0)
         wc[:, :, m] = getattr(L, "cyclotron_wc_rad_s", 0.0)
-        z += L.thickness_m
+    if z_subcell != "point":
+        # z-SUBCELL AVERAGING (default, 2026-11-02): as solve_fdtd_mo_1d -- exx/eyy (and the single-slot
+        # ezz, see the 3-D limit in fdtd_nd.grid) arithmetic, the magnetized-Drude strength wp^2
+        # fill-weighted with (gamma, wc) kept.
+        def _ezz_of(L):
+            _e = getattr(L, "eps_zz", None)
+            return _e if _e is not None else 0.5 * (L.eps_xx + L.eps_yy)
+        _m = mix_profile(z_fill_fractions(zc, pad, layers, dz=dz),
+                         {"exx": [1.0] + [L.eps_xx for L in layers] + [1.0],
+                          "eyy": [1.0] + [L.eps_yy for L in layers] + [1.0],
+                          "ezz": [1.0] + [_ezz_of(L) for L in layers] + [1.0],
+                          "wp": [0.0] + [getattr(L, "drude_wp_rad_s", 0.0) for L in layers] + [0.0],
+                          "gam": [0.0] + [getattr(L, "drude_gamma_rad_s", 0.0) for L in layers] + [0.0],
+                          "wc": [0.0] + [getattr(L, "cyclotron_wc_rad_s", 0.0) for L in layers] + [0.0]},
+                         poles=(("wp", 2, ("gam", "wc")),))
+        for _name, _arr in (("exx", exx), ("eyy", eyy), ("ezz", ezz), ("wp", wp), ("gam", gam), ("wc", wc)):
+            _arr[...] = _m[_name][None, None, :]
     if lateral_tensor is not None:
         # STRUCTURED override: a laterally-patterned per-cell tensor replaces the uniform per-layer fill.
         pat = lateral_tensor(nx, ny, nz, zc, pad, z_struct) if callable(lateral_tensor) else lateral_tensor

@@ -1066,8 +1066,9 @@ def test_s5_20_sweep_entry_point_accepts_and_honours_what_the_per_wavelength_one
 
     seen = []
 
-    def spy(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0):
-        seen.append(dict(lam=lambda_m, ebr=eps_by_region, ns=n_super, nb=n_sub))
+    def spy(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0, z_subcell="average"):
+        # z_subcell (2026-11-02): the seam forwards its z-subcell mode to the painter
+        seen.append(dict(lam=lambda_m, ebr=eps_by_region, ns=n_super, nb=n_sub, zs=z_subcell))
         raise _Stop
 
     monkeypatch.setattr(fs, "make_structured_lateral", spy)
