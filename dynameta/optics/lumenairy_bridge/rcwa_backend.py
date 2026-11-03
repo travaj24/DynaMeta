@@ -68,11 +68,12 @@ layer cannot). Why 'auto' became the default (user decision, 2026-11-02): it rem
 raster's edge-quantization error (each edge up to half a pixel off: ~1e-3 in R on a 0.4-period
 line at S = 128, up to 1.1e-2 on a 0.43-duty metal line, erratic in n_orders --
 _default_raster_samples) wherever the geometry is exactly representable, and never refuses what
-the raster accepts. FORMULATION RULE (2026-11-02): lumenairy's shapes layers are Laurent by
-contract (add_layer raises for formulation='li' with shapes=), so 'auto' uses them ONLY with
-formulation='laurent' and rasterizes every inclusion layer under 'li'/'fff' (honouring the rule
-the caller asked for -- the convergent one for TM on metal walls); 'analytic' + a non-Laurent
-formulation raises ValueError rather than silently solving Laurent. RASTER LATTICE (2026-11-02):
+the raster accepts. FORMULATION RULE (2026-11-02; relaxed for lumenairy >= 5.50.1, below):
+lumenairy <= 5.50.0 shapes layers are Laurent by contract (add_layer raises for
+formulation='li' with shapes=), so there 'auto' uses them ONLY with formulation='laurent' and
+rasterizes every inclusion layer under 'li'/'fff' (honouring the rule the caller asked for --
+the convergent one for TM on metal walls); 'analytic' + a non-Laurent formulation raises
+ValueError rather than silently solving Laurent. RASTER LATTICE (2026-11-02):
 default S = max(128, 8 N) per axis (was max(128, 4 N + 1); identical for N <= 16), measured in
 _default_raster_samples; 'raster' + cell_samples=128 reproduces the pre-0.13 numbers bit for bit.
 Rectangle / Circle / Ellipse map 1:1 (both sides axis-aligned; frame pin: absolute cell frame
@@ -84,9 +85,13 @@ analytic layer is the S -> infinity limit of an AREA-AVERAGED raster at fixed n_
 1.7e-6 at S = 64/128/256/512 (O(S^-2)), while a 1 % radius error moves R by 1.9e-3 and a 1 %
 background error by 1.8e-3 (tests/test_lumenairy_shapes_sem_wrap.py). The bridge's POINT-sampled
 raster at its default S = 128 is 3.8e-5 off the exact geometry on the same disk (Gauss-circle
-area noise, O(S^-4/3)) -- the analytic path is the more accurate one. lumenairy 5.50 does not
-reconstruct layer_absorption() on shapes layers (NotImplementedError), so absorption=True
-with 'auto' rasterizes every layer and with 'analytic' is refused up front.
+area noise, O(S^-4/3)) -- the analytic path is the more accurate one. LUMENAIRY 5.50.1 (2026-11-03, the
+fixes for this bridge's L-3 / L-4 findings) lifts both Laurent-era limits, each gated by
+_common.FEATURE_FLOORS: shapes layers take formulation='li' (1-D y-invariant shapes, 2-D
+axis-aligned rectangles; 'auto' rasterizes only the layers lumenairy refuses) and
+layer_absorption() works on them, so absorption=True keeps the analytic layers. Below 5.50.1 the
+old rules stand: 'li'/'fff' rasterizes every inclusion layer under 'auto' (refused under
+'analytic'), and absorption=True rasterizes every layer under 'auto' (refused under 'analytic').
 
 POLARIZATION VOCABULARY (audit V-8): this module speaks the integer lab `row` 0/1 (0 = incident E_x,
 1 = incident E_y) -- an INDEX, not a label. It is one of five spellings in the repo -- {'s','p'} is
@@ -194,16 +199,22 @@ def _check_inclusion_model(inclusion_model: str, where: str) -> str:
 def _check_model_formulation(inclusion_model: str, formulation: str, where: str) -> bool:
     """True when analytic shapes may be used for this (inclusion_model, formulation) pair.
 
-    lumenairy's shapes layers are LAURENT BY CONTRACT (RCWAStack.add_layer, 5.50: "Uniform /
-    shapes / tensor layers accept only the default" -- it raises ValueError for
-    formulation='li' with shapes=): the analytic form factors feed the direct-rule Toeplitz only.
-    So a non-Laurent request ('li' / 'fff', Li's inverse rule -- the convergent factorization for
-    TM on metal / high-contrast walls, Li 1996 JOSA A 13:1870) can only be honoured on a RASTERIZED
+    lumenairy >= 5.50.1 (FEATURE_FLOORS['rcwa_shapes_li'], lumenairy audit L-4) applies Li's
+    inverse rule ('li' / 'fff' -- the convergent factorization for TM on metal / high-contrast
+    walls, Li 1996 JOSA A 13:1870) to analytic shapes layers itself: 1-D stacks with y-invariant
+    shapes, 2-D stacks with axis-aligned rectangles. Anything else (a disk / ellipse under 'li' on
+    a 2-D stack) is refused by lumenairy's add_layer with ValueError, which _add_shapes_layer turns
+    into the usual per-layer decision: 'auto' rasterizes THAT layer (the raster's 'li' path takes
+    any pixel pattern), 'analytic' raises ShapesNotRepresentable. The requested rule is honoured
+    on every route.
+
+    Below 5.50.1 lumenairy's shapes layers are LAURENT BY CONTRACT (5.50.0 add_layer raises for
+    formulation='li' with shapes=), so a non-Laurent request can only be honoured on a RASTERIZED
     layer: 'auto' rasterizes every inclusion layer then (2026-11-02; it used to hand them to the
     Laurent-only shapes path and silently drop the requested rule), and 'analytic' refuses the
     combination outright instead of silently solving Laurent."""
     f = str(formulation).lower()
-    if f == "laurent":
+    if f == "laurent" or _lumenairy_has("rcwa_shapes_li"):
         return inclusion_model != "raster"
     if inclusion_model == "analytic":
         raise ValueError(
@@ -214,20 +225,23 @@ def _check_model_formulation(inclusion_model: str, formulation: str, where: str)
     return False
 
 
-def _add_shapes_layer(stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model):
+def _add_shapes_layer(stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model,
+                      formulation="laurent"):
     """Try to add design layer L as an ANALYTIC-shape RCWA layer. True on success; False when
     the layer is not exactly representable and inclusion_model == 'auto' (the caller
     rasterizes); ShapesNotRepresentable when inclusion_model == 'analytic'. lumenairy's add_layer
     validator (disjointness, extent <= period, cumulative area <= 1) is the single authority on
     what the additive form factors can paint; it raises BEFORE appending, so a refused layer
-    leaves the stack untouched."""
+    leaves the stack untouched. A non-Laurent `formulation` is forwarded (lumenairy >= 5.50.1,
+    _check_model_formulation); the Laurent call is the pre-5.50.1 call verbatim."""
     from dynameta.optics.rasterize import layer_bg_eps
     try:
         bg = layer_bg_eps(L, lambda_m, design.materials, eps_by_region)
         bg, shapes = layer_shapes_payload(L, lambda_m, design.materials, bg, px, py,
                                           stack_period_y_m=float(stack.period_y))
+        kw = {} if str(formulation).lower() == "laurent" else {"formulation": formulation}
         try:
-            stack.add_layer(L.thickness_m, shapes=shapes, eps_background=bg)
+            stack.add_layer(L.thickness_m, shapes=shapes, eps_background=bg, **kw)
         except ValueError as exc:
             raise ShapesNotRepresentable(
                 "layer {!r}: lumenairy refused the analytic shapes ({})".format(L.name, exc)
@@ -251,12 +265,12 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
     name list is aligned with the Lumenairy layers (graded fields contribute several slabs
     per design layer) -- the key for mapping per-layer absorption back to design layers.
 
-    inclusion_model: 'auto' (default since v0.13.0: analytic where exact AND formulation ==
-    'laurent', raster otherwise), 'raster' (the periodic point raster, the pre-0.13 default) or
-    'analytic' (lumenairy analytic shapes for EVERY inclusion layer, raises
-    ShapesNotRepresentable otherwise; ValueError with a non-Laurent formulation) -- see the
-    module docstring. lumenairy shapes layers are Laurent by contract, so a 'li'/'fff' request
-    rasterizes the inclusion layers under 'auto' (the requested rule is honoured, never dropped).
+    inclusion_model: 'auto' (default since v0.13.0: analytic where exact -- and, with
+    'li'/'fff', where lumenairy >= 5.50.1 takes Li's rule on that layer -- raster otherwise),
+    'raster' (the periodic point raster, the pre-0.13 default) or 'analytic' (lumenairy analytic
+    shapes for EVERY inclusion layer, raises ShapesNotRepresentable otherwise; ValueError with a
+    non-Laurent formulation below lumenairy 5.50.1) -- see the module docstring. The requested
+    factorization rule is honoured on every route, never dropped.
 
     cell_samples (the raster lattice, per patterned axis): None (default) = max(128, 8 N), N the
     axis' n_orders (2026-11-02, _default_raster_samples -- byte-identical to the pre-0.13
@@ -433,7 +447,8 @@ def design_to_rcwa_stack(design, lambda_m: float, *, eps_by_region=None, n_order
             continue
         if L.inclusions:
             if use_shapes and _add_shapes_layer(
-                    stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model):
+                    stack, L, design, lambda_m, eps_by_region, px, py, inclusion_model,
+                    formulation):
                 names.append(L.name)
                 continue
             x, y = cell_axes(sx, sy, px, py)
@@ -560,24 +575,27 @@ def make_lumenairy_rcwa_solver(*, n_orders: int = 11, n_orders_y: Optional[int] 
     path, byte-identical to the pre-threading bridge; None = min(cpu_count, n_wavelengths).
 
     inclusion_model ('auto' default since v0.13.0 | 'raster' | 'analytic'): forwarded to
-    design_to_rcwa_stack. Analytic shapes are used only with formulation='laurent' (lumenairy's
-    shapes layers are Laurent by contract): with 'li'/'fff', 'auto' rasterizes every inclusion
-    layer and 'analytic' is refused here, at construction. lumenairy 5.50 has no
-    layer_absorption() on analytic-shape layers, so with absorption=True 'auto' rasterizes every
-    layer and 'analytic' is refused here too. cell_samples: None = the default raster lattice
-    max(128, 8 N) per axis; an explicit value keeps the pre-0.13 formula max(cell_samples,
-    4 N + 1, 128) -- see design_to_rcwa_stack."""
+    design_to_rcwa_stack. With 'li'/'fff', analytic shapes need lumenairy >= 5.50.1 (Li's rule on
+    shapes layers -- 1-D y-invariant shapes / 2-D axis-aligned rectangles; other layers fall back
+    to the raster under 'auto'); below it 'auto' rasterizes every inclusion layer and 'analytic'
+    is refused here, at construction. absorption=True needs layer_absorption() on analytic-shape
+    layers, which lumenairy has from 5.50.1 (FEATURE_FLOORS['rcwa_shapes_absorption']); below it
+    'auto' rasterizes every layer when absorption=True and 'analytic' is refused here too.
+    cell_samples: None = the default raster lattice max(128, 8 N) per axis; an explicit value
+    keeps the pre-0.13 formula max(cell_samples, 4 N + 1, 128) -- see design_to_rcwa_stack."""
     inclusion_model = _check_inclusion_model(inclusion_model, "make_lumenairy_rcwa_solver")
     _check_model_formulation(inclusion_model, formulation, "make_lumenairy_rcwa_solver")
-    if absorption and inclusion_model == "analytic":
+    shapes_absorb = _lumenairy_has("rcwa_shapes_absorption")
+    if absorption and inclusion_model == "analytic" and not shapes_absorb:
         raise ValueError(
-            "make_lumenairy_rcwa_solver: absorption=True needs RCWAResult.layer_absorption(), "
-            "which lumenairy does not provide for analytic-shape layers; use "
-            "inclusion_model='auto' (rasterizes every layer when absorption=True) or 'raster'")
+            "make_lumenairy_rcwa_solver: absorption=True needs RCWAResult.layer_absorption() on "
+            "analytic-shape layers, which lumenairy provides from 5.50.1; use "
+            "inclusion_model='auto' (rasterizes every layer when absorption=True) or 'raster', "
+            "or pip install -U lumenairy")
     if inclusion_model == "analytic":            # wave-7: refused at construction below 5.31
         _require_feature("rcwa_analytic_shapes",
                          "make_lumenairy_rcwa_solver(inclusion_model='analytic')")
-    model_eff = "raster" if absorption else inclusion_model
+    model_eff = "raster" if (absorption and not shapes_absorb) else inclusion_model
 
     def _solve_at(design, eps_by_region, lambda_m):
         t0 = time.perf_counter()
