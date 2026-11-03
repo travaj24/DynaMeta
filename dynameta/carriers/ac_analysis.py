@@ -17,6 +17,14 @@ DEVSIM ssac convention (validated against an exact parallel-plate cap, C = eps0 
 validation/ac_capacitance.py): the voltage source 'V1' carries the device current at circuit node
 'V1.I'; with a unit AC excitation the admittance is Y = -I_source / V_ac, so
 C = -Im(I)/(omega*V_ac) (> 0 for a capacitor) and G = -Re(I)/V_ac. Requires DEVSIM.
+
+ROUND-OFF FLOOR OF G (D2b, docs/audit/2026-11-03-devsim-extended-precision.md). The ssac G of a
+junction can sit far below the floor of the double factorization: on a p+n diode (N_A 1e25 /
+N_D 1e22, n_i 1e16 m^-3, tau 20 us; true G0 = 2.58e-5 S/m^2) Re Y(1 Hz) is -0.27 S/m^2 driven at the
+p+ end and ~+-6e-5 driven at the n end. Extended precision does NOT lift it (DEVSIM solves the AC
+system in double; -0.073 / +6.0e-5, and an AdvisoryWarning says so). For the LOW-FREQUENCY
+CONDUCTANCE use the DC dI/dV (a +-0.1 mV central difference of solved DC terminal currents: G0 to
+1e-6 in either precision), and put the AC drive on the LIGHTLY doped contact.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import numpy as np
 import devsim as ds
 
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import extended_precision as _XP
 
 
 def setup_circuit_contact(device: str, contact: str, *,
@@ -84,7 +93,7 @@ def ssac_admittance(frequencies, *, source_name: str = "V1", v_ac: float = 1.0):
     C = np.empty(freqs.size)
     G = np.empty(freqs.size)
     for i, f in enumerate(freqs):
-        ds.solve(type="ac", frequency=float(f))
+        _XP.solve(type="ac", frequency=float(f))               # 128-bit assembly iff the device opted in
         i_re = float(ds.get_circuit_node_value(node=src_i, solution="ssac_real"))
         i_im = float(ds.get_circuit_node_value(node=src_i, solution="ssac_imag"))
         w = 2.0 * math.pi * float(f)
