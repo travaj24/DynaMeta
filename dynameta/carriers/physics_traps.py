@@ -115,16 +115,28 @@ _CHARGE_MODES = ("split", "acceptor", "donor", "none")
 # midgap channel, every bulk level and every interface sheet level, with or without bandgap
 # narrowing, for the net rate, the occupancy and the noise pair rate G + R).
 # ------------------------------------------------------------------------------------------------
-def srh_reference_densities(n1: str = "n1", p1: str = "p1", *, bgn: bool = False
-                            ) -> Tuple[str, str, str]:
+def srh_reference_densities(n1: str = "n1", p1: str = "p1", *, bgn: bool = False,
+                            scale: "str | None" = None) -> Tuple[str, str, str]:
     """(n1', p1', n_i'^2) -- THE single place the bandgap-narrowing substitution of D1b (audit R27)
     enters SRH: with BGN on, n_i^2 -> n_ie^2 and n1 -> n1 n_ie/n_i, p1 -> p1 n_ie/n_i (so
     n1' p1' = n_ie^2 and a level keeps its energy relative to the NARROWED effective intrinsic level:
     n1' = n_ie exp((E_t - E_i)/kT)). `n_ie` is the region's effective-intrinsic-density field
-    (bipolar_options). Without BGN the names are returned unchanged."""
+    (bipolar_options). Without BGN the names are returned unchanged.
+
+    `scale` (D2d, bipolar density-gradient, 2026-11-03): the name of a node model s multiplying the
+    intrinsic level on top of the BGN substitution -- n1 -> n1 s, p1 -> p1 s, n_i'^2 -> n_i'^2 s^2.
+    The density-gradient quantum potentials shift the band edges like BGN does, so detailed balance
+    needs n1' p1' = n_i'^2 = n p|_eq = n_i'^2 exp((Lambda_n + Lambda_p)/V_t), i.e.
+    s = exp((Lambda_n + Lambda_p)/(2 V_t)) (physics_density_gradient.setup_bipolar_dg). None (the
+    default) returns the strings above CHARACTER-FOR-CHARACTER."""
     if not bgn:
-        return n1, p1, "n_i^2"
-    return "{}*n_ie/n_i".format(n1), "{}*n_ie/n_i".format(p1), "n_ie^2"
+        out = (n1, p1, "n_i^2")
+    else:
+        out = ("{}*n_ie/n_i".format(n1), "{}*n_ie/n_i".format(p1), "n_ie^2")
+    if scale is None:
+        return out
+    return ("{}*{}".format(out[0], scale), "{}*{}".format(out[1], scale),
+            "{}*{}^2".format(out[2], scale))
 
 
 def _srh_denominator(n1: str, p1: str, taun: str, taup: str) -> str:
@@ -132,7 +144,7 @@ def _srh_denominator(n1: str, p1: str, taun: str, taup: str) -> str:
 
 
 def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup", *,
-                  bgn: bool = False, pair: bool = False) -> str:
+                  bgn: bool = False, pair: bool = False, scale: "str | None" = None) -> str:
     """The Shockley-Read-Hall net rate U = (n p - n_i^2)/(taup (n + n1) + taun (p + p1)) as a DEVSIM
     expression in the solution variables Electrons/Holes. The arguments are parameter names (or
     parenthesized sub-expressions). The DEFAULTS reproduce the legacy physics_bipolar_dd USRH string
@@ -143,8 +155,9 @@ def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str 
     names it is bipolar_options' former srh_expr(True) character-for-character.
     pair=True returns the PAIR rate G + R = (n p + n_i^2)/(...) instead of the net rate R - G: the
     fast-trap detailed-balance split R = n p/D, G = n_i^2/D that the noise module's GR source
-    2 (G + R) needs (noise_analysis; one kernel for both)."""
-    n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn)
+    2 (G + R) needs (noise_analysis; one kernel for both).
+    scale: the density-gradient intrinsic-level factor of srh_reference_densities (None: unchanged)."""
+    n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, scale=scale)
     return "(Electrons*Holes {} {})/{}".format("+" if pair else "-", ni2,
                                                _srh_denominator(n1e, p1e, taun, taup))
 
