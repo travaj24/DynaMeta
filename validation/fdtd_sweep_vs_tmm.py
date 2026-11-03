@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dynameta.geometry import Design, Layer, Stack, UnitCell
 from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+from dynameta.optics.fdtd_nd import available_backends
 from dynameta.optics.fdtd_seam import fdtd_sweep_spectrum
 from dynameta.optics.tmm_reference import layered_rta, layered_stack_from_design
 
@@ -52,9 +53,43 @@ def main():
         Tf = float(np.interp(lam, sw.lambda_m, sw.T))
         Rt, Tt, _ = layered_rta(layered_stack_from_design(d, float(lam)), float(lam))
         dR = max(dR, abs(Rf - Rt)); dT = max(dT, abs(Tf - Tt)); en = max(en, abs(Rf + Tf - 1.0))
-    gate1 = bool(dR < 6e-3 and dT < 6e-3 and en < 6e-3)
-    print("[fw] 1 spectrum vs TMM ({} wavelengths): max|dR|={:.2e} max|dT|={:.2e} max|R+T-1|={:.2e} -> {}".format(
-        targets.size, dR, dT, en, "PASS" if gate1 else "FAIL"), flush=True)
+    # 2026-11-03: the single-resolution pin (dR, dT < 6e-3) is replaced by a CONVERGENCE gate against
+    # the true-geometry TMM. (a) At res 28, per wavelength, max(|dR|, |dT|) <= C_REG_2D * X^2 with
+    # X = n_max k0 dz = 2 pi lambda_min / (res lambda) and C_REG_2D = 0.0802, the WORST registration-
+    # sweep constant of the 2-D normal-incidence engine (max over 8 midpoint sub-cell offsets and the
+    # band; 183 nm n = 2 slab and the gain line on it, band 1.2-1.6 um, res 30; docs/audit/2026-11-02-
+    # fdtd-registration.md "Convergence gates") -- NOT fitted to this stack. (b) observed order between
+    # res 28 and 56 >= 1.7 on a cheaper probe of the same engine (solve_fdtd_2d on the same three
+    # layers, nx = 2, numba; the 2x-res sweep of THIS config costs ~8x its ~21 s). Measured 2026-11-03:
+    # (a) worst ratio 2.68 -> FAILS: this four-interface near-AR stack (R 0.03) has a ~2.7x larger
+    # second-order constant than the registration slab; (b) 6.56e-3 -> 1.59e-3, order 2.05.
+    C_REG_2D = 0.0802
+    ratio_a = 0.0
+    for lam in targets:
+        Rf = float(np.interp(lam, sw.lambda_m, sw.R)); Tf = float(np.interp(lam, sw.lambda_m, sw.T))
+        Rt, Tt, _ = layered_rta(layered_stack_from_design(d, float(lam)), float(lam))
+        X = 2.0 * np.pi * LMIN / (28 * float(lam))
+        ratio_a = max(ratio_a, max(abs(Rf - Rt), abs(Tf - Tt)) / (C_REG_2D * X ** 2))
+    from dynameta.optics.fdtd_nd import FDTDLayer, solve_fdtd_2d
+    lay = [FDTDLayer(thickness_m=250e-9, eps_inf=2.2 ** 2), FDTDLayer(thickness_m=180e-9, eps_inf=1.5 ** 2),
+           FDTDLayer(thickness_m=250e-9, eps_inf=2.2 ** 2)]
+    ep = []
+    for res_p in (28, 56):
+        rp = solve_fdtd_2d(lay, period_x_m=220e-9, nx=2, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=res_p,
+                           n_pad_wave=4.0, backend="numba" if "numba" in available_backends() else "numpy")
+        e_p = 0.0
+        for lam in targets:
+            Rt, Tt, _ = layered_rta(layered_stack_from_design(d, float(lam)), float(lam))
+            fq = 299792458.0 / float(lam)
+            e_p = max(e_p, abs(float(np.interp(fq, rp.freqs_Hz, rp.R0)) - Rt),
+                      abs(float(np.interp(fq, rp.freqs_Hz, rp.T0)) - Tt))
+        ep.append(e_p)
+    order_1 = float(np.log2(ep[0] / ep[1]))
+    gate1 = bool(ratio_a <= 1.0 and order_1 >= 1.7 and en < 6e-3)
+    print("[fw] 1 spectrum vs TMM ({} wavelengths): max|dR|={:.2e} max|dT|={:.2e} max|R+T-1|={:.2e}; (a) max "
+          "err/(C X^2)={:.3f} (C={}) ; (b) order {:.2f} ({:.2e} -> {:.2e}, nx=2 probe) -> {}".format(
+              targets.size, dR, dT, en, ratio_a, C_REG_2D, order_1, ep[0], ep[1], "PASS" if gate1 else "FAIL"),
+          flush=True)
 
     # GATE 2: a single solve genuinely yields the whole dense spectrum (the per-wavelength seam would
     # need ~that many solves) -- the structural N-fold speedup.

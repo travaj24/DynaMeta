@@ -489,11 +489,32 @@ def test_gate7_cross_platform_q_anchor_unchanged():
     translation (the old cell-centre rule put both effective faces dz = 11.4 nm early; the node rule
     puts them on the true faces). Q is translation-invariant physically; the FITTED Q moves through
     the data-driven window's timing against the probe: 13.227438 -> 13.207623 (-0.15%; -1.007% ->
-    -1.155% vs Fabry-Perot 13.361960, inside gate 7's 3%)."""
+    -1.155% vs Fabry-Perot 13.361960, inside gate 7's 3%).
+
+    RE-PINNED 2026-11-03 (z-subcell averaging, the solve_fdtd_1d default): the slab's back face lies
+    EXACTLY on node 980 (pad/dz = 892.5, d/dz = 87.5), which now takes the 0.5/0.5 control-volume
+    mean, so the slab has its exact 87.5-cell thickness. 13.207623 -> 13.078561 (-1.155% -> -2.121%
+    vs Fabry-Perot at this res-30 grid, n k dz = 0.17). Farther at res 30 but CONVERGENT: the slow
+    companion gate below shows -0.253% at res 60 (order 3.1; point sampling: -0.370%, order 1.6)."""
     er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                               resolution=30)
-    assert er.q == pytest.approx(13.207623, rel=1e-4)
+    assert er.q == pytest.approx(13.078561, rel=1e-4)
     assert er.window == (9840, 31980)
+
+
+@pytest.mark.slow
+def test_gate7_anchor_converges_to_fabry_perot():
+    """Companion of the re-pinned anchor (2026-11-03): the n_slab = 3.5 etalon Q converges to the
+    closed-form Fabry-Perot Q between res 30 and res 60 with observed order >= 1.7. Measured:
+    |Q/Q_FP - 1| = 2.121% -> 0.253% (order 3.07); the 2b7a002 point rule gave 1.155% -> 0.370%
+    (order 1.64 -- it would fail this gate)."""
+    errs = []
+    for res in (30, 60):
+        er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=res)
+        m = int(round(2.0 * np.pi * er.f0_Hz * 3.5 * 1.0e-6 / (np.pi * C_LIGHT)))
+        errs.append(abs(er.q / _fp_closed_form_q(3.5, m) - 1.0))
+    assert errs[0] < 0.03 and errs[1] < 0.03, errs
+    assert np.log2(errs[0] / errs[1]) >= 1.7, errs
 
 
 def _synthetic_ringdown(n_samp=200000, dt=1.9e-17, f0=2.13e14, q=300.0, pulse_at=3000,

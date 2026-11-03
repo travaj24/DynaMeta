@@ -40,6 +40,13 @@ from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 C = 299792458.0
 LMIN, LMAX = 1200e-9, 1800e-9
 
+# GATE A convergence-gate constant (2026-11-03, z-subcell averaging): the WORST registration-sweep
+# constant of the 3-D normal-incidence engine, C = max over 8 midpoint sub-cell offsets AND over the
+# band of max(|dR|, |dT|) / X(f)^2, X = n_max k0(f) dz = 2 pi LMIN f / (res c) -- measured on the
+# 183 nm n = 2 slab, band 1.2-1.6 um, res 30 (docs/audit/2026-11-02-fdtd-registration.md, "Convergence
+# gates"). NOT fitted to this fixture.
+C_REG_3D = 0.0795
+
 
 def airy(f, n, d):
     k0 = 2 * np.pi * np.asarray(f) / C
@@ -63,9 +70,30 @@ def main():
     d0 = max(float(np.max(np.abs(rA.R0[mA] - Ra))), float(np.max(np.abs(rA.T0[mA] - Ta))))
     df = max(float(np.max(np.abs(rA.R_flux[mA] - Ra))), float(np.max(np.abs(rA.T_flux[mA] - Ta))))
     en = float(np.max(np.abs(rA.R_flux[mA] + rA.T_flux[mA] - 1.0)))
-    gate_a = bool(d0 < 5e-3 and df < 5e-3 and en < 1e-3)
-    print("[f3] A uniform: 0-order max|d-Airy|={:.2e} flux max|d-Airy|={:.2e} max|R+T-1|={:.2e} -> {}".format(
-        d0, df, en, "PASS" if gate_a else "FAIL"), flush=True)
+    # 2026-11-03: the single-resolution pin (d0, df < 5e-3) is replaced by a CONVERGENCE gate against
+    # the true-geometry Airy: (a) at THIS res, per frequency, error <= C_REG_3D * X(f)^2; (b) the observed
+    # order between res 18 and 36 >= 1.7, on a cheaper probe of the same engine (nx = ny = 2, numba:
+    # laterally uniform, so nx is irrelevant) -- the 2x-res run of THIS config would cost ~16x its
+    # ~21 s. Measured 2026-11-03: max err 6.26e-3 at res 18; (a) worst ratio err / (C X^2) = 1.10
+    # (at ~1.7 um, near this slab's reflectance maximum) -> FAILS by 10%: the 300 nm slab's second-order
+    # constant (0.087) is above the 183 nm registration slab's; (b) 6.22e-3 -> 1.54e-3, order 2.01.
+    X = 2.0 * np.pi * LMIN * rA.freqs_Hz[mA] / (18 * C)
+    err_f = np.maximum.reduce([np.abs(rA.R0[mA] - Ra), np.abs(rA.T0[mA] - Ta),
+                               np.abs(rA.R_flux[mA] - Ra), np.abs(rA.T_flux[mA] - Ta)])
+    ratio_a = float(np.max(err_f / (C_REG_3D * X ** 2)))
+    e_lo = e_hi = None
+    for res_p in (18, 36):
+        rp = solve_fdtd_3d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9, period_y_m=300e-9,
+                           nx=2, ny=2, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=res_p, backend="numba")
+        mp = rp.band
+        Rp, Tp = airy(rp.freqs_Hz[mp], n, d)
+        ep = max(float(np.max(np.abs(rp.R0[mp] - Rp))), float(np.max(np.abs(rp.T0[mp] - Tp))))
+        e_lo, e_hi = (ep, e_hi) if res_p == 18 else (e_lo, ep)
+    order_a = float(np.log2(e_lo / e_hi))
+    gate_a = bool(ratio_a <= 1.0 and order_a >= 1.7 and en < 1e-3)
+    print("[f3] A uniform: 0-order max|d-Airy|={:.2e} flux max|d-Airy|={:.2e} max|R+T-1|={:.2e}; (a) max "
+          "err/(C X^2)={:.3f} (C={}) ; (b) order {:.2f} ({:.2e} -> {:.2e}, nx=ny=2 probe) -> {}".format(
+              d0, df, en, ratio_a, C_REG_3D, order_a, e_lo, e_hi, "PASS" if gate_a else "FAIL"), flush=True)
 
     # GATE B: y-uniform binary grating -> the validated 2D-TE engine (Ey source, d/dy=0 == pure 2D-TE)
     PX = 700e-9
