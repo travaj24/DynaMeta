@@ -24,8 +24,9 @@ is called, and it only READS the device (its DC operating point and models are l
 
    G for EVERY source location at once costs one linear solve per frequency: G is a row of
    J(omega)^-1, i.e. the solution of the ADJOINT system J(omega)^T y = e_out, with
-   J(omega) = J_static + i omega J_dynamic the ssac matrix (Branin 1967's adjoint network; the
-   Green's-function technique of Bonani, Ghione, Pinto, Smith, IEEE TED 45, 261 (1998)).
+   J(omega) = J_static + i omega J_dynamic the ssac matrix (the Green's-function / adjoint technique
+   of Bonani, Ghione, Pinto, Smith, IEEE TED 45, 261 (1998); DEVSIM manual sec. 9.2.3 "Noise and
+   sensitivity analysis" documents the native solve and its "<out>_<Equation>_real/_imag" fields).
 
 2. LOCAL NOISE SOURCES (Bonani & Ghione 2001, ch. 3; van der Ziel, "Noise in Solid State Devices
    and Circuits", Wiley 1986).
