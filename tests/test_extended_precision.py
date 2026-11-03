@@ -19,7 +19,7 @@ must FAIL the same oracle (so the gate is load-bearing):
      byte for byte and extended_solver is off afterwards, also after a convergence failure.
 
 Fixtures are tiny 1-D devices (317 / 443 / 734 nodes) plus a 2-D build and a stubbed 3-D build; the
-file runs in 74 s at -n 2 (box A). devsim self-skips; the 3-D switch test also needs gmsh. On the
+file runs in ~75 s at -n 2 (box A). devsim self-skips; the 3-D switch test also needs gmsh. On the
 pre-D2b code every test errors at collection (no dynameta.carriers.extended_precision).
 """
 import functools
@@ -135,6 +135,49 @@ def test_gate_d_no_leakage_between_devices():
     assert h1 == h3
     assert all(h2[k] != h1[k] for k in h1), (h1, h2)
     assert not flag
+
+
+# =====================================================================================================
+# small-signal warning (coordinator decision 2026-11-03)
+# =====================================================================================================
+
+def test_small_signal_warning_fires_for_ssac_and_noise_only():
+    """On an opted-in device the 'ac' and 'noise' solves warn (one per frequency under 'always': two
+    each), while the DC build, the DC ramp and the transient do not."""
+    E.fingerprint_1d(True)
+    log = list(E.LAST_SMALL_SIGNAL_WARNINGS)
+    assert log.count("ssac") == 2 and log.count("noise") == 2, log
+    assert not {"dc0", "dc_fwd", "transient"} & set(log), log
+
+
+def test_small_signal_warning_never_fires_on_default_devices():
+    """The same five paths on a default device: no small-signal warning at all."""
+    E.fingerprint_1d(False)
+    assert E.LAST_SMALL_SIGNAL_WARNINGS == []
+
+
+def test_small_signal_warning_text_and_once_per_call_site():
+    """The message names the double factorization and both remedies; under the DEFAULT warnings
+    filter a 3-frequency ssac sweep (one call site) shows it once, attributed to ac_analysis."""
+    import warnings
+    from dynameta.carriers.ac_analysis import ssac_admittance
+    lines, dop = E._si_lines()
+    E.diode_1d("ws", lines, dop, extended=True, circuit=True, n_i=E.SI["n_i"], tau=E.SI["tau"],
+               eps_r=E.SI["eps_r"], mu_n=E.SI["mu_n"], mu_p=E.SI["mu_p"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        with E.quiet():
+            ssac_admittance([1.0, 1e3, 1e6])
+    hits = [w for w in caught if issubclass(w.category, AdvisoryWarning)]
+    assert len(hits) == 1, [str(w.message) for w in caught]
+    for word in ("DOUBLE", "DC dI/dV", "LIGHTLY doped"):
+        assert word in str(hits[0].message)
+    assert hits[0].filename.endswith("ac_analysis.py")
+
+
+def test_gate_b_extended_ssac_warns_and_dc_does_not():
+    """Gate B's extended run: the ssac warned, the DC conductance (+-0.1 mV solves) did not."""
+    assert _ppn(True)["small_signal_warnings"] == ["ssac"]
 
 
 def test_gate_d_solver_flag_restored_after_failure():

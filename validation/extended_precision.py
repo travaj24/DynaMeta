@@ -34,6 +34,7 @@ import math
 import os
 import sys
 import time
+import warnings
 
 import numpy as np
 import devsim as ds
@@ -83,6 +84,25 @@ def fresh() -> None:
         ds.delete_circuit()
     except Exception:                                           # noqa: BLE001 (no circuit)
         pass
+
+
+# XP.solve's AdvisoryWarning on an 'ac'/'noise' solve of an opted-in device (matched by text, so
+# --root on a pre-D2b checkout needs nothing new).
+SMALL_SIGNAL_MARK = "buys nothing -- DEVSIM factorizes"
+
+
+@contextlib.contextmanager
+def small_signal_warnings(log: list, tag: str):
+    """Record `tag` for every XP small-signal warning raised inside the block and swallow it;
+    re-emit every OTHER warning unchanged (pytest's filterwarnings=error still sees those)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        yield
+    for w in caught:
+        if SMALL_SIGNAL_MARK in str(w.message):
+            log.append(tag)
+        else:
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
 
 
 def solver_flag():
@@ -298,10 +318,13 @@ def gate_b_heavy_doping(extended, ae=1e8):
     except ds.error as ex:
         return {"converged": False, "error": str(ex).strip(), "G_oracle": oracle}
     from dynameta.carriers.ac_analysis import ssac_admittance
-    with quiet():
+    log = []
+    with quiet(), small_signal_warnings(log, "ssac"):
         _, _, G_ac = ssac_admittance([1.0])
-    return {"converged": True, "G_dc": dc_conductance(ae), "G_oracle": oracle,
-            "ReY_1Hz": float(G_ac[0])}
+    with small_signal_warnings(log, "dc"):
+        G_dc = dc_conductance(ae)
+    return {"converged": True, "G_dc": G_dc, "G_oracle": oracle, "ReY_1Hz": float(G_ac[0]),
+            "small_signal_warnings": log}
 
 
 # =====================================================================================================
@@ -327,31 +350,40 @@ def _h(*arrays) -> str:
     return m.hexdigest()[:16]
 
 
+# paths of the LAST fingerprint_1d run that raised XP's small-signal warning (one entry per warning)
+LAST_SMALL_SIGNAL_WARNINGS: list = []
+
+
 def fingerprint_1d(extended=False):
     """sha256 fingerprints of the 1-D Si diode through every DynaMeta solve path: DC (solve_dc) at
     0 and a 0.1 V forward ramp, ssac (ac_analysis), noise (noise_analysis, when present), transient
-    (transient_step). Returns {path: hex}. Tears the device down."""
+    (transient_step). Returns {path: hex}; the paths that raised XP's small-signal warning are left
+    in LAST_SMALL_SIGNAL_WARNINGS. Tears the device down."""
     from dynameta.carriers.ac_analysis import ssac_admittance
     from dynameta.carriers.transient import transient_step
+    log = LAST_SMALL_SIGNAL_WARNINGS
+    log.clear()
     lines, dop = _si_lines()
-    diode_1d("fp", lines, dop, n_i=SI["n_i"], tau=SI["tau"], eps_r=SI["eps_r"], mu_n=SI["mu_n"],
-             mu_p=SI["mu_p"], extended=extended, circuit=True)
+    with small_signal_warnings(log, "dc0"):
+        diode_1d("fp", lines, dop, n_i=SI["n_i"], tau=SI["tau"], eps_r=SI["eps_r"],
+                 mu_n=SI["mu_n"], mu_p=SI["mu_p"], extended=extended, circuit=True)
     out = {"dc0": _h(_nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"))}
-    for k in range(1, 5):                                  # forward 0.1 V: n end at -0.1 V
-        ds.circuit_alter(name="V1", value=-0.025 * k)
-        _solve("fp", 1e8, 1e-10)
+    with small_signal_warnings(log, "dc_fwd"):
+        for k in range(1, 5):                              # forward 0.1 V: n end at -0.1 V
+            ds.circuit_alter(name="V1", value=-0.025 * k)
+            _solve("fp", 1e8, 1e-10)
     out["dc_fwd"] = _h(_nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"),
                        [source_current()])
-    with quiet():
+    with quiet(), small_signal_warnings(log, "ssac"):
         f, C, G = ssac_admittance([1.0, 1e6])
     out["ssac"] = _h(C, G)
     try:
         from dynameta.carriers import noise_analysis as NA
-        with quiet():
+        with quiet(), small_signal_warnings(log, "noise"):
             out["noise"] = _h(NA.noise_spectrum(device="fp", frequencies=[1.0, 1e6]).S)
     except ImportError:
         out["noise"] = "n/a"
-    with quiet():
+    with quiet(), small_signal_warnings(log, "transient"):
         t, i = transient_step(-0.11, t_end=1e-9, dt0=1e-12, max_steps=200)
     out["transient"] = _h(t, i)
     fresh()

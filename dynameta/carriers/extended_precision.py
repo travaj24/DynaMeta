@@ -62,6 +62,16 @@ from dynameta.warning_types import AdvisoryWarning
 MODEL_PARAMETERS = ("extended_model", "extended_equation")
 # Global parameter: the Newton template (read at every solve / get_matrix_and_rhs call).
 SOLVER_PARAMETER = "extended_solver"
+# ds.solve types that are ONE linear solve (no Newton outer loop): DEVSIM factorizes them in double.
+SINGLE_LINEAR_SOLVE_TYPES = ("ac", "noise")
+SMALL_SIGNAL_MESSAGE = (
+    "extended_precision: a {kind!r} solve on an extended-precision device buys nothing -- DEVSIM "
+    "factorizes and solves the small-signal (ssac/noise) system in DOUBLE even with extended_solver "
+    "(its float128 preconditioners cast to double), so this answer has the same round-off floor as a "
+    "default device (p+n diode: Re Y(1 Hz) -0.073 extended vs -0.27 double, true +2.6e-5 S/m^2). For "
+    "the f -> 0 conductance use the DC dI/dV (a +-0.1 mV central difference of solved DC terminal "
+    "currents: G0 to 1e-6), and drive the LIGHTLY doped contact (3 decades lower floor than the p+ "
+    "end). docs/audit/2026-11-03-devsim-extended-precision.md.")
 
 
 def available() -> bool:
@@ -144,7 +154,9 @@ def solve(ds_module=None, **kwargs):
     written beyond the device scan -- results are byte-identical to a direct ds.solve. Every
     DynaMeta solve site calls this, so DC, transient (transient_dc + transient_bdf1 -- they must
     share one Newton type: DEVSIM keeps SEPARATE TimeData<double> / TimeData<float128> histories),
-    ssac and noise all follow the device's switch.
+    ssac and noise all follow the device's switch. An 'ac' or 'noise' solve on an opted-in device
+    raises an AdvisoryWarning (SMALL_SIGNAL_MESSAGE): it is one double factorization, so extended
+    precision does not lift its floor -- use the DC dI/dV for the f -> 0 conductance.
 
     `ds_module` (default: devsim) is the module whose `solve` is called -- a caller that resolves
     devsim through its own module attribute (transient.py, whose control-flow gates replace it with a
@@ -164,5 +176,9 @@ def solve(ds_module=None, **kwargs):
             "devices down first for a byte-identical default answer."
             .format([d for d, f in zip(devs, flags) if not f], [d for d, f in zip(devs, flags) if f]),
             AdvisoryWarning, stacklevel=2)
+    if kwargs.get("type") in SINGLE_LINEAR_SOLVE_TYPES:
+        # once per call site per process under the default warnings filter (stacklevel -> caller)
+        warnings.warn(SMALL_SIGNAL_MESSAGE.format(kind=kwargs.get("type")), AdvisoryWarning,
+                      stacklevel=2)
     with extended_solver(m):
         return m.solve(**kwargs)
