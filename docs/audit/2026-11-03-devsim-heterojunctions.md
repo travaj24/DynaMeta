@@ -156,6 +156,56 @@ spec, the isotype fixture, the model-name test). The slow 2-D equilibrium gate r
 Run cost (box A, measured --durations): whole file 609 s; the slow equilibrium fixture 457 s, the rest ~150 s
 (3-D 53 s, isotype set 32 s, homojunction pair 18 s, p-n 10 s + 15 s of oracle quadrature).
 
+## 4b. Temperature (follow-up on the integration tip e46bd25)
+
+**Defect.** With `BipolarOptions.T_K != T_REF` the bulk ran at `V_t = k T_K / q`, but the heterointerface
+did not: `interface_models` used `V_T` in the barrier offsets and `A* T_REF^2`; the Anderson frame
+(`V_T ln(N_c/n_i)`) and the band-gap check (`V_T ln(N_c N_v / n_i^2)`) used `V_T`; and the layered
+builder derived N_c, N_v from the DOS masses at T_REF. With BGN on this was refused (the integration
+refusal in `_bgn_interface_arguments`); WITHOUT BGN it was computed at 300 K silently (or, with an n_i
+given at T_K, refused by the band-gap check for the wrong reason).
+
+**Fix: one temperature source.** The region parameter `V_t`, which the bulk installs from
+`BipolarOptions.T_K` (`bipolar_options.install_option_fields`; V_T at T_REF otherwise, and for every
+equilibrium / unipolar-DD region, which have no T_K), is read by `physics_heterojunction.region_V_t` and
+used for:
+* the barrier offsets `k_i = (E_top - E_i)/kT` and the BGN-shifted tops (the BGN refusal is gone);
+* the Richardson prefactor `A* T^2` at `T = q V_t / k` (`temperature_of_V_t`: exactly `T_REF` when `V_t`
+  is `V_T`, so the 300 K floats are unchanged);
+* the Anderson frame of bipolar regions (`V_t ln(N_c/n_i)`) and `E_g,eff = V_t ln(N_c N_v / n_i^2)`;
+* the reported `CarrierField.temperature_K` (was always T_REF).
+The builder's bipolar N_c, N_v come from the DOS masses at `BipolarOptions.T_K` (the same source) --
+what "supply N_c, N_v at T_K" (bipolar_options item 4) means when the inputs are masses; `n_i_m3` is a
+direct input and must be given at T_K. The activity `L = ln u + Delta(u)` is dimensionless in
+`u = c/N`, so it needs no temperature of its own.
+
+**Refused, by name (no silent 300 K anywhere).**
+* A device whose semiconductor regions run at different temperatures (two T_K's, or a T_K bipolar region
+  next to an equilibrium / unipolar-DD region, which run at T_REF): `NotImplementedError` "NON-ISOTHERMAL"
+  -- Fermi-level alignment is an isothermal statement; a temperature step needs heat flow and the
+  thermoelectric terms of thermionic emission. `setup_heterointerface_carriers` refuses a two-temperature
+  interface the same way (for callers that bypass the builder).
+* An n_i inconsistent with band_gap_eV AT T_K: the band-gap check now evaluates at T and says
+  "n_i_m3 must be the intrinsic density AT that temperature".
+* Not changed: the 3-D builder (its heterostacks are unipolar DD, at T_REF; bipolar heterostacks stay
+  refused). `Stacked3DSpec` still derives the bipolar N_c from the mass at T_REF (bulk, not interface).
+
+| gate | oracle | measured | gated at |
+|---|---|---|---|
+| T-a isotype n-GaAs / N-AlGaAs (bipolar), 250 K | 1/(R_bulk + kT/(q A* T^2 e^{-phi_B/kT})) at T, phi_B = 0.2087 eV from the solve | +1.4e-4; continuous QFL misses by 15.6x | 2e-3 |
+| T-a, 350 K | same, phi_B = 0.2280 eV | +6.4e-5; continuous misses by 9.2x | 2e-3 |
+| T-b N-AlGaAs / p-GaAs V_bi, 250 K | W_p - W_n at T (N_c(T), N_v(T), FD quadrature) = 1.541861 V | 1.541899 V (+3.9e-5 V); dE_c from densities 5e-15 eV; flat E_F | 2e-4 V |
+| T-b, 350 K | = 1.460468 V | 1.460492 V (+2.5e-5 V); dE_c 7.9e-8 eV; flat E_F (QFL checked where the carrier > 1e3 m^-3; minority AlGaAs holes at ~1 m^-3 sit on the Newton floor, 2.0e-4 eV) | 2e-4 V |
+| T-c refusals | mixed T_K (250 / 300 K bipolar), unipolar DD (T_REF) next to 250 K bipolar, n_i given at 300 K for 250 K | NotImplementedError "NON-ISOTHERMAL" x2, ValueError "AT that temperature" | -- |
+| T-d 300 K | the existing gates' solutions | SHA-256 of every solution array of the p-n (0, 0.7, 0.8 V), homojunction pair and 10-device isotype fixtures: IDENTICAL on e46bd25 and this tree (430b827a..., 8dd9d065..., 90cdd513...) | identical |
+
+On e46bd25 (`git archive e46bd25` + the new test file): all 8 temperature tests fail. T-a and T-b are
+refused for the WRONG reason -- the band-gap check evaluates the 250/350 K n_i with the 300 K kT and the
+300 K N_c, N_v (E_g = 1.7229 eV vs 1.424); `ni_at_300K` shows the silent path: an n_i that is consistent
+at 300 K builds a 250 K heterojunction with NO error ("DID NOT RAISE") and runs its interface at 300 K;
+the two NON-ISOTHERMAL cases get the band-gap / unipolar-bipolar messages instead; T-d's helpers do not
+exist.
+
 ## 5. Limits
 
 * TE magnitude on a degenerate emitting side (MB tail, overestimates); equilibrium exact.
@@ -178,3 +228,6 @@ Run cost (box A, measured --durations): whole file 609 s; the slow equilibrium f
   or more semiconductor regions of different doping or affinity (single-semiconductor designs unchanged).
 * Still refused, by name: 2-D lateral sidewall interfaces, unipolar-next-to-bipolar interfaces, 3-D
   bipolar heterostacks, bipolar heterojunctions whose band gap disagrees with n_i.
+* Heterointerfaces honour `BipolarOptions.T_K` (Richardson A* T^2, every kT, the Anderson frame, the
+  band-gap check, N_c/N_v from the masses at T_K); a non-isothermal stack is refused. Before, a T_K
+  heterostack without BGN ran its interface at 300 K silently.
