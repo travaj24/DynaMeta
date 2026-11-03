@@ -18,7 +18,8 @@ the Zener current):
   J1  the assembled BTBT Jacobian == central finite differences of DEVSIM's own residual (1-D, 2-D, 3-D).
   I1  ISOTROPY: |E| exact (< 1e-14) for an oblique uniform field on 2-D triangles and 3-D tets, and the
       element-volume quadrature integrates a uniform field exactly.
-  L1  the 2-D layered builder (TransportModel.btbt, element path) == the 1-D edge path on the same x nodes.
+  L1  the 2-D layered builder (TransportModel.btbt, element path) CONVERGES to the 1-D edge path on the
+      same x nodes at second order in h (order >= 1.7, |gap| <= 2 C_inf h^2).
   F1  MOS cap, accumulation: post-processed E_ox == Gauss-law field from the semiconductor charge.
   F2  ln(J/E^2) vs 1/E is a straight line of slope -B_FN; J == closed form at the Gauss field.
   F3  FN below the barrier warns; tsu_esaki/schuegraf_hu dispatch == the kernels.
@@ -367,11 +368,18 @@ def test_j1_btbt_jacobian_matches_finite_differences(dim):
     assert np.linalg.norm(dr_on + jd_on) <= 1e-6 * np.linalg.norm(dr_on)
 
 
+# an integral A AND an integral B above 2^31 - 1: DEVSIM 2.11.2 clamps INTEGER literals to 2147483647, and the
+# pre-integration "%.17g" printed integral floats as integers (integration note 2.6). SILICON_HURKX is
+# non-integral (A_SI = 4000000000000000.5) and B < 2^31, so it never exercised the clamp; this set does.
+_INTEGRAL_BIG = BTBTParams(A_SI=4.0e15, B_V_per_m=3.0e9, P=2.5)
+
+
+@pytest.mark.parametrize("prm", [SILICON_HURKX, _INTEGRAL_BIG], ids=["hurkx", "integral_A_B_over_2^31"])
 @pytest.mark.parametrize("dim", [2, 3])
-def test_i1_element_field_is_isotropic_and_integrates_exactly(dim):
+def test_i1_element_field_is_isotropic_and_integrates_exactly(dim, prm):
     dev = "tz_iso{}".format(dim)
     try:
-        _mesh_device(dev, dim)
+        _mesh_device(dev, dim, btbt=prm)
         st, _ = _set_state(dev, dim, E0=1.5e8)
 
         def em(name):
@@ -380,7 +388,9 @@ def test_i1_element_field_is_isotropic_and_integrates_exactly(dim):
         n, p = st["Electrons"], st["Holes"]
         D = (n * p - ZNI ** 2) / ((n + ZNI) * (p + ZNI))
         nv = np.asarray(ds.get_node_model_values(device=dev, region="r", name="NodeVolume"))
-        ref = A_SI * 1.5e8 ** P_SI * math.exp(-B_SI / 1.5e8) * float(np.sum(D * nv))
+        # the coefficients are taken from prm only as the INTENDED values; a clamped A (2147483647 instead
+        # of 4e15) or B (2147483647 instead of 3e9) misses this by a factor 1.9e6 or e^(-5.7)
+        ref = prm.A_SI * 1.5e8 ** prm.P * math.exp(-prm.B_V_per_m / 1.5e8) * float(np.sum(D * nv))
         got = float(np.sum((em("BTBT_U0") + em("BTBT_U1")) * em("ElementNodeVolume")))
         assert got == pytest.approx(ref, rel=1e-12)                   # MEASURED 5e-15
         assert btbt_generation_current(dev, "r") == pytest.approx(-Q * ref, rel=1e-12)
@@ -389,9 +399,18 @@ def test_i1_element_field_is_isotropic_and_integrates_exactly(dim):
 
 
 # ------------------------------------------------------------------------------------------------
-# 2-D layered builder (element path) == 1-D (edge path) on the same x nodes
+# 2-D layered builder (element path) vs 1-D (edge path) on the same x nodes: a CONVERGENCE gate
 # ------------------------------------------------------------------------------------------------
-def test_l1_layered_builder_btbt_equals_1d_twin():
+# h -> |2-D/1-D - 1| of the BTBT current at -0.5 V, A = 4e15, B = 4e8 V/m. MEASURED 2026-11-03 on a UNIFORM
+# x mesh (gmsh-array triangles vs 1-D, identical nodes): 2 nm 3.247e-4, 1 nm 6.796e-5, 0.5 nm 1.611e-5,
+# 0.25 nm 3.972e-6 -> orders 2.26, 2.08, 2.02; gap/h^2 = 8.1e-5, 6.8e-5, 6.4e-5, 6.35e-5 nm^-2.
+_L1_C_INF_NM2 = 6.35e-5        # asymptotic gap / h^2 [nm^-2] (finest uniform pair)
+_L1_K_NM2 = 2.0 * _L1_C_INF_NM2
+
+
+def _l1_currents(h):
+    """BTBT current [A/m^2] at V = 0 and -0.5 V through the 2-D LayeredDevsimBuilder (x spacing h) and
+    through a 1-D twin built on the builder's exact x nodes."""
     from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
     from dynameta.constants import M_E
     from dynameta.geometry import Design, Electrode, Layer, Stack, UnitCell
@@ -399,10 +418,8 @@ def test_l1_layered_builder_btbt_equals_1d_twin():
     from dynameta.materials import ConstantOptical, Material, MaterialRegistry, TransportModel
     from dynameta.sweep import BiasPoint
     P, T, N, W = 120e-9, 4e-9, 1e24, 5e-9
-    # the 2-D builder's coupled Newton converges for the validation diode (1e24, 5 nm tanh grade), where
-    # the Si Hurkx field scale B = 1.9e9 V/m gives negligible BTBT; a test-only B = 4e8 V/m makes the
-    # term carry ~1e-2 A/m^2 so the comparison is of a REAL generation current (the gate is about the
-    # discretisation, which does not care about the parameter values)
+    # the builder's coupled Newton converges for the validation diode (1e24, 5 nm tanh grade), where the
+    # Si field scale B = 1.9e9 V/m gives negligible BTBT; the test-only B = 4e8 V/m makes it ~2.3e3 A/m^2
     prm = BTBTParams(A_SI=A_SI, B_V_per_m=4e8, P=2.5)
     expr = "{:.8e}*tanh((x - {:.8e})/{:.8e})".format(N, P / 2, W)
 
@@ -420,14 +437,21 @@ def test_l1_layered_builder_btbt_equals_1d_twin():
                            substrate_material="air"),
                electrodes=[Electrode("anode", "si", "x_lo", role="biased"),
                            Electrode("cathode", "si", "x_hi", role="ground", fixed_voltage_V=0.0)],
-               materials=reg, mesh_2d=Mesh2DSpec(x_spacing_feature_mid_m=2e-9, coarse_ps_m=2e-9))
+               materials=reg, mesh_2d=Mesh2DSpec(x_spacing_feature_mid_m=h, coarse_ps_m=2e-9))
     b = LayeredDevsimBuilder(d, mesh_name="tz_l1m", device_name="tz_l1d")
-    i2 = {}
+    i2, i1 = {}, {}
     try:
-        for V in (0.0, -0.5, -1.0):
+        for V in (0.0, -0.5):
             with _quiet():
                 b.solve(BiasPoint({"anode": V}, "v"))
             i2[V] = btbt_generation_current(b.device, "si") / T     # per depth / thickness -> A/m^2
+            if V == 0.0:                                          # the Kane prefactor integral (no D)
+                em_ = np.asarray(ds.get_element_model_values(device=b.device, region="si", name="BTBT_Emag"))
+                env = np.asarray(ds.get_element_model_values(device=b.device, region="si",
+                                                             name="ElementNodeVolume"))
+                with np.errstate(under="ignore"):
+                    i2["kane0"] = Q * float(np.sum(2.0 * env * prm.A_SI * em_ ** prm.P
+                                                   * np.exp(-prm.B_V_per_m / em_))) / T
         assert "BTBT_U0" in ds.get_element_model_list(device=b.device, region="si")
         xs = np.unique(np.round(np.asarray(ds.get_node_model_values(device=b.device, region="si",
                                                                     name="x")), 15))
@@ -459,19 +483,59 @@ def test_l1_layered_builder_btbt_equals_1d_twin():
             ds.set_node_values(device=dev, region="b", name=v,
                                values=ds.get_node_model_values(device=dev, region="b", name=m))
         _solve(1e13, 1e-10)
-        for V in (0.0, -0.5, -1.0):
+        for V in (0.0, -0.5):
             v0 = ds.get_parameter(device=dev, name="pc_bias")
-            for s in np.linspace(v0, V, 11)[1:]:
-                ds.set_parameter(device=dev, name="pc_bias", value=float(s))
+            for s_ in np.linspace(v0, V, 11)[1:]:
+                ds.set_parameter(device=dev, name="pc_bias", value=float(s_))
                 _solve(1e13, 1e-10)
-            i1 = btbt_generation_current(dev, "b")
-            if V == 0.0:
-                assert abs(i2[V]) < 1e-6 * abs(i2[-1.0])          # equilibrium: D-factor zero in 2-D too
-            else:
-                assert i1 > 1e-3                                  # a real generation current (A/m^2)
-                assert i2[V] == pytest.approx(i1, rel=1e-6)       # MEASURED 3e-9 .. 7e-9
+            i1[V] = btbt_generation_current(dev, "b")
     finally:
         _wipe(dev)
+    return i2, i1
+
+
+def test_l1_layered_builder_btbt_converges_to_the_1d_twin():
+    """The 2-D element path and the 1-D edge path are two CONSISTENT discretisations of the same
+    continuum; their BTBT currents must converge to each other at second order in the mesh spacing h.
+
+    WHY THEY DIFFER AT ALL (diagnosed 2026-11-03; integration note 2.9). On identical fields the two
+    INTEGRATED quadratures are algebraically equal on this y-invariant tensor mesh -- each right-triangle
+    cell's quadrant of node i lies wholly in that cell and carries the cell's field, so
+    sum_i D_i (U_l L_l + U_r L_r)/2 == sum_e U_e (D_0 + D_1)/2 L_e (MEASURED 6e-16 on the solved fields),
+    and the 2-D solution is y-invariant to 1e-15. What differs is the NODAL source: node i receives
+    sum_j pre_ij (L_ij/2) D_i (2-D, node-local) versus sum_j pre_ij (L_ij/2) (D_i + D_j)/2 (1-D, edge-mean).
+    The difference, delta_i = sum_j pre_ij L_ij (D_j - D_i)/4 = (h^2/4) d/dx(pre dD/dx) + O(h^4) on a
+    uniform mesh, is a conservative redistribution (it sums to zero), so it changes the current only
+    through the solution's response to it: O(h^2). With the true A the junction runs in the self-limited
+    regime (generated n, p ~ 0.1-0.3 n_i, D ~ -0.5) where D varies by orders of magnitude per node, so the
+    response is visible: the 1-D/2-D solutions differ by 0.2-0.8 % in n, p at the junction and 2x in the
+    minority tails, while WITHOUT BTBT they agree to 7.7e-7. The former 1e-6 gate passed only because
+    DEVSIM clamped the integral literal A = 4e15 to 2147483647 (a rate 1.9e6x lower: D ~ -1, no D
+    variation to redistribute).
+
+    GATE: (a) the observed order between h = 2 and 1 nm is >= 1.7 (MEASURED 2.21 on the builder; 2.26 ->
+    2.02 on a clean uniform mesh); (b) |gap(h)| <= K h^2 with K = 2 C_inf, C_inf = 6.35e-5 nm^-2 the
+    asymptotic constant of the clean uniform study (header above). The factor 2 covers the measured
+    preasymptotic excess (C = 1.28 C_inf at h = 2 nm, uniform) and the builder's non-uniform junction
+    spacing (its own constants: 7.0e-5 at 2 nm, 6.1e-5 nm^-2 at 1 nm). MEASURED gaps: 2.81e-4 (2 nm),
+    6.09e-5 (1 nm); bounds 5.1e-4, 1.27e-4. (c) the current is a REAL one (> 1e3 A/m^2: a clamped A
+    would give ~1e-3); (d) at EQUILIBRIUM the D factor suppresses the Kane prefactor integral to
+    |I(0)| <= 1e-4 of it and the residual SHRINKS with h. It is not 0 to roundoff (as in Z0) because this
+    fixture runs the Fermi-Dirac g-factor: the discrete FD equilibrium (edge-averaged g) puts n p off
+    n_i^2 at O(h^2) in the junction -- MEASURED on the 1-D twin I(0)/Kane = 6.4e-5 (2 nm), 1.6e-5 (1 nm),
+    order 1.97, vs 3.2e-16 with fd_enhancement=False; 2-D and 1-D carry the same residual (-6.01e-3 vs
+    -6.01e-3 A/m^2 at 2 nm), so it is the FD statistics, not the BTBT assembly."""
+    gaps, eq = {}, {}
+    for h_nm in (2.0, 1.0):
+        i2, i1 = _l1_currents(h_nm * 1e-9)
+        assert i1[-0.5] > 1e3 and i2[-0.5] > 1e3                      # MEASURED 2.26e3 / 2.31e3 A/m^2
+        eq[h_nm] = abs(i2[0.0]) / i2["kane0"]
+        assert eq[h_nm] <= 1e-4                                       # MEASURED 4.7e-5 (2 nm), 1.6e-5 (1 nm)
+        gaps[h_nm] = i2[-0.5] / i1[-0.5] - 1.0
+        assert abs(gaps[h_nm]) <= _L1_K_NM2 * h_nm ** 2, (h_nm, gaps[h_nm])
+    assert eq[1.0] < 0.5 * eq[2.0]                                    # the equilibrium residual converges
+    order = math.log(abs(gaps[2.0] / gaps[1.0])) / math.log(2.0)
+    assert order >= 1.7, (gaps, order)
 
 
 # ------------------------------------------------------------------------------------------------
