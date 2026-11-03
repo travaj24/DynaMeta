@@ -47,7 +47,11 @@ class TransportModel:
       eps_static           : static relative permittivity for DEVSIM Poisson
       dos_mass_kg_of_n_m3  : DENSITY-OF-STATES effective mass [kg], callable of
                               n; used for the conduction-band Nc / Fermi level
-      band_gap_eV, chi_eV  : informational band parameters
+      band_gap_eV, chi_eV  : band gap and electron affinity [eV]. LOAD-BEARING wherever two
+                              semiconductor regions meet (v0.13.0 3-D equilibrium alignment, v0.14.0
+                              DEVSIM heterointerfaces: Anderson rule Delta E_c = chi_0 - chi_1); a
+                              bipolar heterojunction also checks band_gap_eV against its statistics
+                              (E_g = kT ln(N_c N_v / n_i^2)). Informational for a single semiconductor.
       physics              : "equilibrium" (default) | "drift_diffusion"
       mobility_m2Vs_of_n_m3      : electron mobility (DD only)
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
@@ -83,6 +87,12 @@ class TransportModel:
     acceptor:                    bool = False
     net_doping_expr:             Optional[str] = None
     dos_mass_p_kg:               Optional[float] = None
+    # Heterointerface thermionic emission (v0.14.0, carriers.physics_heterojunction): the effective
+    # Richardson constants A* [A m^-2 K^-2] used when THIS material holds the barrier top of a
+    # semiconductor/semiconductor interface. None -> 4 pi q m* k^2/h^3 from the DOS mass (electrons:
+    # dos_mass_kg_of_n_m3(n_bg_m3); holes: dos_mass_p_kg, else the electron mass).
+    richardson_n_Am2K2:          Optional[float] = None
+    richardson_p_Am2K2:          Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -92,6 +102,10 @@ class TransportModel:
                 "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
         if self.field_dependent_mobility and self.v_sat_ms is None:
             raise ValueError("field_dependent_mobility=True requires v_sat_ms (saturation velocity, m/s)")
+        for nm in ("richardson_n_Am2K2", "richardson_p_Am2K2"):
+            v = getattr(self, nm)
+            if v is not None and not (np.isfinite(float(v)) and float(v) > 0.0):
+                raise ValueError("{} must be finite and > 0 (A m^-2 K^-2), got {!r}".format(nm, v))
         if self.physics == "bipolar_dd":
             missing = [nm for nm, v in (("hole_mobility_m2Vs_of_n_m3", self.hole_mobility_m2Vs_of_n_m3),
                                         ("n_i_m3", self.n_i_m3), ("tau_srh_s", self.tau_srh_s))

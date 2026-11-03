@@ -36,6 +36,7 @@ from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
+from dynameta.carriers import physics_heterojunction as HJ
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
@@ -63,9 +64,33 @@ class _RegionSpec:
     z_hi:     float
 
 
+# Band offsets below this (volts) count as ZERO for heterointerface="auto" (a same-crystal split).
+_HJ_ZERO_OFFSET_V = 1e-9
+# A bipolar heterojunction reads its band gap from its OWN statistics, E_g = kT ln(N_c N_v / n_i^2) (the
+# only gap consistent with the bulk model -- any other makes the interface a spurious battery). It must
+# agree with TransportModel.band_gap_eV to this tolerance or the build REFUSES (the inputs disagree).
+_HJ_EG_TOL_EV = 5e-3
+
+
 class LayeredDevsimBuilder:
+    """2-D (x, z) DEVSIM builder over a layered Design.
+
+    heterointerface (v0.14.0, workstream D1a) selects the carrier model on every z-stacked
+    semiconductor/semiconductor interface whose two regions BOTH solve carrier continuity
+    (physics_heterojunction): "thermionic" (Horio-Yanai / Yang-East-Haddad thermionic emission),
+    "continuous" (continuous quasi-Fermi levels, the drift-diffusion limit), or "auto" (default):
+    thermionic where the interface carries a band offset (|dE_c| or |dE_v| > 1 nV), continuous where it
+    does not (a same-crystal split, e.g. a p/n homojunction cut into two layers). Every semiconductor
+    region is placed in ONE Anderson-aligned frame (the reference is the region of the first GROUND
+    electrode on a semiconductor, else the first semiconductor region; a gate on a dielectric keeps
+    that reference's flat band), so adjacent equilibrium semiconductors now carry their built-in
+    potential (audit S1-9 2-D sibling) and every ohmic contact pins Potential at bias + s(region)."""
+
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
-                  device_name: str = "ms_device") -> None:
+                  device_name: str = "ms_device", heterointerface: str = "auto") -> None:
+        if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
+            raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
+                             .format(heterointerface))
         # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
         # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
         # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
@@ -73,6 +98,9 @@ class LayeredDevsimBuilder:
         self.design = design
         self.mesh_name = mesh_name
         self.device = device_name
+        self.heterointerface = heterointerface
+        self._frames: Dict[str, Tuple[float, float]] = {}   # semiconductor region -> (Phi_c_V, s_V)
+        self._hetero_ifaces: Dict[str, str] = {}             # interface -> carrier model wired on it
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -188,8 +216,11 @@ class LayeredDevsimBuilder:
                     "LayeredDevsimBuilder: layer '{}' has a NON-ambient background WITH "
                     "inclusions -- the 2D builder wires no lateral (sidewall) interfaces, "
                     "so the inclusion would be electrostatically isolated from its "
-                    "background with no warning (audit C2-3). Use the 3D builder "
-                    "(Stacked3DSpec.from_design) or make the background ambient.".format(L.name))
+                    "background with no warning (audit C2-3). Missing: splitting the background "
+                    "around the inclusion and wiring the vertical region-region interfaces (Potential "
+                    "and, for two transport semiconductors, the v0.14.0 heterointerface carrier "
+                    "equations). z-stacked semiconductor heterointerfaces ARE supported. Use the 3D "
+                    "builder (Stacked3DSpec.from_design) or make the background ambient.".format(L.name))
             if bg_ambient and n_incl >= 2:
                 bbs = [inc.shape.bbox_m() for inc in L.inclusions]
                 for i in range(n_incl):
@@ -326,7 +357,7 @@ class LayeredDevsimBuilder:
                         continue
                     z_if = a.z_hi if abs(a.z_hi - b.z_lo) < 1e-15 else b.z_hi
                     r0, r1 = (a.name, b.name) if a.z_hi <= b.z_lo + 1e-15 else (b.name, a.name)
-                    self._iface_pairs.append((r0, r1))       # for the semi-semi guard below
+                    self._iface_pairs.append((r0, r1))       # for the heterointerface wiring below
                     ds.add_2d_interface(mesh=self.mesh_name,
                                           name="{}__{}".format(r0, r1),
                                           region0=r0, region1=r1,
@@ -391,7 +422,10 @@ class LayeredDevsimBuilder:
                     # has an edge GROUND electrode) converges -- validation/gated_dd_2d.py. Without
                     # one, the only ground is a weak 2-node domain-boundary edge contact and a gated
                     # solve may not converge (use equilibrium mode, or add an edge ground here).
-                    if s.name not in self._dd_full_edge_grounds() or self._metal_material() is None:
+                    face = {self._contact_region.get(E.name) for E in self.design.electrodes
+                            if not E.is_edge}                    # metal-layer contact on a face: strong
+                    if s.name not in face and (s.name not in self._dd_full_edge_grounds()
+                                               or self._metal_material() is None):
                         warnings.warn(
                             "layered drift-diffusion on semiconductor '{}': no full-edge ohmic "
                             "ground (only a weak 2-node edge ground) -- a gated device may not "
@@ -412,33 +446,149 @@ class LayeredDevsimBuilder:
                 eps_r = self._dielectric_eps_static(s.material)
                 PE.setup_dielectric_region(self.device, s.name, eps_r)
             # metals: inert, no setup
-        # audit regrade 7.1 (semi-semi interfaces): PE.setup_interface wires POTENTIAL-only
-        # continuity, which is exact for equilibrium pairs and semiconductor-dielectric
-        # interfaces, but between two regions that BOTH solve carrier continuity it leaves
-        # Electrons/Holes with natural zero-flux walls -- a silently carrier-BLOCKING
-        # junction (a p-on-n stack shows ~zero forward current with converged, plausible
-        # output). The 3D twin hard-raises for exactly this; mirror it here. Model the
-        # junction as an in-region net_doping_expr in ONE layer instead.
-        semi_cc = self._dd_regions | self._bipolar_regions
-        for r0, r1 in self._iface_pairs:
-            if r0 in semi_cc and r1 in semi_cc:
-                raise NotImplementedError(
-                    "LayeredDevsimBuilder: regions '{}' and '{}' both solve carrier "
-                    "continuity, but the interface enforces Potential continuity ONLY -- "
-                    "carrier flux across the junction would be silently BLOCKED. Model the "
-                    "junction as a net_doping_expr inside one region, or use the guarded "
-                    "3D builder.".format(r0, r1))
+        # v0.14.0 (D1a): ONE Anderson-aligned frame for every semiconductor region (the 2-D sibling of
+        # audit S1-9 -- each region used to be neutral at psi = 0 in its own frame, so adjacent
+        # equilibrium semiconductors had NO built-in potential), then the carrier coupling of each
+        # semiconductor/semiconductor interface (thermionic emission or continuous quasi-Fermi level;
+        # this replaced the audit-regrade-7.1 refusal that stood here while the interface wired Potential
+        # only -- a silently carrier-BLOCKING junction). Contacts below pin Potential at bias + s(r).
+        self._frames = self._semiconductor_frames()
         for iface in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, iface)
+        self._wire_heterointerfaces()
         for c in ds.get_contact_list(device=self.device):
             cr = self._contact_region.get(c)
+            off = self._frames.get(cr, (0.0, 0.0))[1]
             if cr in self._bipolar_regions:
-                BP.setup_contact_ohmic_bipolar(self.device, c)  # pin Potential + Electrons + Holes
+                BP.setup_contact_ohmic_bipolar(self.device, c, psi_offset_V=off)  # Potential+Electrons+Holes
             elif cr in self._dd_regions:
-                DD.setup_contact_ohmic_dd(self.device, c)   # pin Potential + Electrons (=N_D)
+                DD.setup_contact_ohmic_dd(self.device, c, psi_offset_V=off)   # Potential + Electrons (=N_D)
             else:
-                PE.setup_contact(self.device, c)            # pin Potential only
+                PE.setup_contact(self.device, c, psi_offset_V=off)            # Potential only
         self._built = True
+
+    # ---- heterostacks (v0.14.0, D1a; physics_heterojunction) ----
+    def _reference_semiconductor(self, semis: List[str]) -> str:
+        """The frame reference: the region of the first GROUND electrode that sits on a semiconductor
+        (its contact frame is then unchanged), else the first semiconductor region in plan order."""
+        for E in self.design.electrodes:
+            if E.role == "ground" and self._contact_region.get(E.name) in semis:
+                return self._contact_region[E.name]
+        return semis[0]
+
+    def _own_phi_c(self, region: str, tr) -> float:
+        """The conduction edge (E_c = q(Phi_c - psi)) the region's physics implies in its own legacy
+        frame -- physics_heterojunction module docstring, item 1."""
+        if region in self._bipolar_regions:                 # psi = intrinsic level: E_c - E_i = kT ln(N_c/n_i)
+            Nc = float(ds.get_parameter(device=self.device, region=region, name="N_dos"))
+            ni = float(ds.get_parameter(device=self.device, region=region, name="n_i"))
+            return PE.V_T * float(np.log(Nc / ni))
+        if region in self._dd_regions:                      # contact pins n = N_D at psi = 0 (FD-SG frame)
+            Nc = float(ds.get_parameter(device=self.device, region=region, name="N_c"))
+            u = float(tr.n_bg_m3) / Nc
+            return -PE.V_T * (float(np.log(u)) + float(BP.fd_potential_shift(u)))
+        return float(ds.get_parameter(device=self.device, region=region, name="Phi_c0"))
+
+    def _semiconductor_frames(self) -> Dict[str, Tuple[float, float]]:
+        """{region: (Phi_c_V, s_V)} for every semiconductor region (Anderson rule, one frame), and the
+        frame shift applied to each region: equilibrium regions get Phi_c0 := Phi_c(r) (their n(psi)
+        closure then sits in the common frame); equilibrium + unipolar-DD regions are seeded at
+        Potential = s(r) (bipolar: in _solve_bipolar, on top of the built-in seed). s == 0 everywhere ->
+        nothing is touched (a single semiconductor, or a same-material same-doping stack)."""
+        semis = [sp.name for sp in self._specs if sp.role == "semiconductor"]
+        if not semis:
+            return {}
+        own, chi = {}, {}
+        for sp in self._specs:
+            if sp.role != "semiconductor":
+                continue
+            tr = self.design.materials.get(sp.material).transport
+            own[sp.name] = self._own_phi_c(sp.name, tr)
+            chi[sp.name] = float(tr.chi_eV)
+        frames = HJ.anderson_alignment(own, chi, self._reference_semiconductor(semis))
+        for r, (phi_c, s_v) in frames.items():
+            if s_v == 0.0:
+                continue
+            if r not in self._dd_regions:                   # equilibrium closure n = N_c F((psi-Phi_c0)/V_t)
+                ds.set_parameter(device=self.device, region=r, name="Phi_c0", value=float(phi_c))
+            if r not in self._bipolar_regions:
+                nn = len(ds.get_node_model_values(device=self.device, region=r, name="x"))
+                ds.set_node_values(device=self.device, region=r, name="Potential", values=[float(s_v)] * nn)
+        return frames
+
+    def _hetero_side(self, region: str) -> "HJ.HeteroSide":
+        sp = next(x for x in self._specs if x.name == region)
+        tr = self.design.materials.get(sp.material).transport
+        phi_c = self._frames[region][0]
+        m_n = float(tr.dos_mass_kg_of_n_m3(tr.n_bg_m3))
+        a_n = float(tr.richardson_n_Am2K2) if tr.richardson_n_Am2K2 else HJ.richardson_constant_Am2K2(m_n)
+        if region not in self._bipolar_regions:             # unipolar DD: electrons only, FD g always on
+            return HJ.HeteroSide(region, phi_c, "N_c", a_n, fd=True)
+        Nc = float(ds.get_parameter(device=self.device, region=region, name="N_dos"))
+        Nv = float(ds.get_parameter(device=self.device, region=region, name="N_dos_p"))
+        ni = float(ds.get_parameter(device=self.device, region=region, name="n_i"))
+        fd = float(ds.get_parameter(device=self.device, region=region, name="fd_enhancement")) > 0.0
+        m_p = float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else m_n
+        a_p = float(tr.richardson_p_Am2K2) if tr.richardson_p_Am2K2 else HJ.richardson_constant_Am2K2(m_p)
+        eg_eff = PE.V_T * float(np.log(Nc * Nv / ni ** 2))  # E_g/q the bulk statistics imply
+        return HJ.HeteroSide(region, phi_c, "N_dos", a_n, fd=fd, phi_v_V=phi_c - eg_eff,
+                             p_dos_param="N_dos_p", richardson_p=a_p)
+
+    def _wire_heterointerfaces(self) -> None:
+        """Carrier coupling on every z-stacked interface whose two regions BOTH solve carrier continuity.
+        Refuses (naming what is missing) a unipolar-DD / bipolar pair and a bipolar heterojunction whose
+        band_gap_eV disagrees with its own statistics."""
+        semi_cc = self._dd_regions | self._bipolar_regions
+        mat = {sp.name: sp.material for sp in self._specs}
+        for r0, r1 in self._iface_pairs:
+            if r0 not in self._frames or r1 not in self._frames:
+                continue                                    # not a semiconductor pair
+            t0 = self.design.materials.get(mat[r0]).transport
+            t1 = self.design.materials.get(mat[r1]).transport
+            if (mat[r0] != mat[r1] and float(t0.chi_eV) == float(t1.chi_eV) == 4.5
+                    and float(t0.band_gap_eV) == float(t1.band_gap_eV) == 3.6):
+                warnings.warn(
+                    "LayeredDevsimBuilder: semiconductors '{}' ({}) and '{}' ({}) meet at an interface and "
+                    "BOTH carry the TransportModel defaults chi_eV = 4.5, band_gap_eV = 3.6 -- the Anderson "
+                    "band offset is then ZERO by default, not by data. Set each material's affinity and "
+                    "gap.".format(r0, mat[r0], r1, mat[r1]), AdvisoryWarning, stacklevel=3)
+            if not (r0 in semi_cc and r1 in semi_cc):
+                continue                                    # an equilibrium side: Potential continuity only
+            if (r0 in self._bipolar_regions) != (r1 in self._bipolar_regions):
+                raise NotImplementedError(
+                    "LayeredDevsimBuilder: interface '{}'/'{}' joins a unipolar drift-diffusion region and a "
+                    "bipolar one. Missing: a hole boundary condition on the unipolar side (it has no Holes "
+                    "variable), so the bipolar side's holes would see a silent zero-flux wall. Make both "
+                    "regions physics='bipolar_dd' (or both 'drift_diffusion').".format(r0, r1))
+            sd0, sd1 = self._hetero_side(r0), self._hetero_side(r1)
+            if sd0.holes and mat[r0] != mat[r1]:
+                for sd, t, nm in ((sd0, t0, mat[r0]), (sd1, t1, mat[r1])):
+                    eg = sd.phi_c_V - sd.phi_v_V
+                    if abs(eg - float(t.band_gap_eV)) > _HJ_EG_TOL_EV:
+                        raise ValueError(
+                            "LayeredDevsimBuilder: bipolar heterojunction material '{}' has band_gap_eV = "
+                            "{:.4f} but its statistics give E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV; the "
+                            "valence offset would follow the statistics, not the stated gap. Set n_i_m3 = "
+                            "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV).".format(
+                                nm, float(t.band_gap_eV), eg))
+            model = self.heterointerface
+            if model == "auto":
+                d_ec = abs(sd0.phi_c_V - sd1.phi_c_V)
+                d_ev = abs(sd0.phi_v_V - sd1.phi_v_V) if sd0.holes else 0.0
+                model = "thermionic" if max(d_ec, d_ev) > _HJ_ZERO_OFFSET_V else "continuous"
+            iface = "{}__{}".format(r0, r1)
+            HJ.setup_heterointerface_carriers(self.device, iface, sd0, sd1, model=model)
+            self._hetero_ifaces[iface] = model
+
+    def band_frames(self) -> Dict[str, Tuple[float, float]]:
+        """{semiconductor region: (Phi_c_V, s_V)} of the built device: E_c = q (Phi_c - psi) in the common
+        Anderson frame and the region's frame shift (its neutral-bulk potential)."""
+        return dict(self._frames)
+
+    def heterointerfaces(self) -> Dict[str, str]:
+        """{interface: carrier model} for every semiconductor/semiconductor interface wired with carrier
+        transport ('thermionic' | 'continuous')."""
+        return dict(self._hetero_ifaces)
 
     def _setup_bipolar_region(self, s, tr, dos: float) -> None:
         """Attach 3-variable bipolar DD (Potential, Electrons, Holes + SRH) to a semiconductor region.
@@ -569,8 +719,11 @@ class LayeredDevsimBuilder:
         try:
             semi_layers = {L.name for L in d.stack.layers
                            if d.material_role(L.background_material) == "semiconductor"}
+            # v0.14.0: an electrode on a METAL layer whose contact lands on a bipolar semiconductor face is
+            # an ohmic contact (it carries phi_bi), not a gate -- judge by the contact's region.
             gated = [E.name for E in d.electrodes if getattr(E, "role", "biased") != "ground"
-                     and getattr(E, "layer", None) not in semi_layers]
+                     and getattr(E, "layer", None) not in semi_layers
+                     and self._contact_region.get(E.name) not in self._bipolar_regions]
         except Exception:                                     # noqa: BLE001 (diagnostic only)
             gated = []
         if gated and bias.voltages:
@@ -586,8 +739,11 @@ class LayeredDevsimBuilder:
         # Boltzmann seed contradicts an FD contact by 0.178 V per degenerate contact at eta = 10, and
         # this 2-D staged solve goes STRAIGHT into the coupled 3-variable Newton from it.
         for s in sorted(self._bipolar_regions):
-            ds.node_model(device=self.device, region=s, name="_seed_psi",
-                          equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(self.device, s)))
+            seed = BP.equilibrium_seed_psi_expr(BP.fd_shift_model(self.device, s))
+            s_v = self._frames.get(s, (0.0, 0.0))[1]        # v0.14.0 heterostack frame shift
+            if s_v != 0.0:
+                seed = "{} + ({!r})".format(seed, float(s_v))
+            ds.node_model(device=self.device, region=s, name="_seed_psi", equation=seed)
             ds.set_node_values(device=self.device, region=s, name="Potential",
                                values=ds.get_node_model_values(device=self.device, region=s, name="_seed_psi"))
             ds.set_node_values(device=self.device, region=s, name="Electrons",
