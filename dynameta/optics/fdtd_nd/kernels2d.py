@@ -122,6 +122,15 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             raise ValueError("hot-carrier and dynamic gain both re-touch the Drude coefficients; "
                              "they are mutually exclusive")
         hmask = np.asarray(hot["mask"], dtype=np.float64)    # (nx,nz) 1 on opted-in cells, 0 elsewhere
+        # z-subcell averaging (2026-11-02): a mixed edge cell carries its HOT FILL FRACTION f in (0, 1)
+        # as the mask. Its Drude current is already f-weighted (wp^2 scaled by f), so the hot material's
+        # own dissipation density is J.E / f; that is what heats U_e (per unit hot volume), and the
+        # mask-weighted means below then average over hot VOLUME. A 0/1 mask keeps the legacy
+        # expression hmask * J.E bit-for-bit.
+        if bool(np.all((hmask == 0.0) | (hmask == 1.0))):
+            h_weight = hmask
+        else:
+            h_weight = np.where(hmask > 0.0, 1.0 / np.where(hmask > 0.0, hmask, 1.0), 0.0)
         mat_idx = np.asarray(hot["mat_idx"])                 # (nx,nz) material id, -1 off
         htab = hot["tables"]                                 # list of (Te_grid,U_grid,wp_ratio,gam_ratio)
         Ghot = np.asarray(hot["G"], dtype=np.float64)        # (nx,nz) electron-phonon coupling [W/m^3/K]
@@ -155,6 +164,17 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             if do_lat:
                 Tl_mean = np.empty(nsteps)                    # (nsteps,) mask-averaged lattice temperature
                 sub_out_int = np.zeros((nx, nz))              # integrated lattice->substrate outflow rate
+            # OPT-IN per-cell diagnostic (2026-11-03): hot_out["record_cells"] = True before the call
+            # records, for every z row that holds hot cells, the x-mean RAW Drude work J.E and the
+            # hot-weighted T_e at every step, plus that row's hot fill fraction. Lets a test drive an
+            # EXACT per-cell 2-ODE oracle (a mean-field oracle is exact only for a uniform film).
+            _rec_cells = bool(hot_out.get("record_cells", False))
+            if _rec_cells:
+                _kz = np.nonzero((hmask > 0.0).any(axis=0))[0]
+                _on = (hmask[:, _kz] > 0.0).astype(np.float64)
+                _non = np.maximum(_on.sum(axis=0), 1.0)
+                _hw = np.maximum(hmask[:, _kz].sum(axis=0), 1e-300)
+                JE_cells = np.empty((nsteps, _kz.size)); Te_cells = np.empty((nsteps, _kz.size))
     # --- PER-STEP LOOP INVARIANTS, HOISTED (audit P-1) -------------------------------------------
     # The 1-D kernel already does exactly this (optics/fdtd.py, audit S2-17) and the 3-D kernel is
     # written with in-place `out=` throughout; the 2-D kernel was the only one still allocating a
@@ -299,7 +319,7 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         # average is the Drude absorption). Off-mask cells (non-Drude, or not opted in) carry mask 0 and,
         # for a Drude-off cell, J == 0, so p_abs == 0 and T_e stays at T_e0.
         if do_hot:
-            p_abs = hmask * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
+            p_abs = h_weight * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
             if do_lat:
                 coupling = Ghot * (Te_hot - Tlhot)         # W/m^3 leaving the electrons -> INTO the lattice
                 U_e += dt * (alpha_hot * p_abs - coupling)
@@ -308,13 +328,17 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             else:
                 U_e += dt * (alpha_hot * p_abs - Ghot * (Te_hot - Tlhot))
             if _rec:
-                pabs_mean[n] = float(p_abs.sum()) / msum
+                pabs_mean[n] = float((p_abs if h_weight is hmask else p_abs * hmask).sum()) / msum
                 Te_mean[n] = float((Te_hot * hmask).sum()) / msum
                 pabs_int += p_abs
                 E2_int += Eynew ** 2
                 if do_lat:
                     Tl_mean[n] = float((Tlhot * hmask).sum()) / msum
                     sub_out_int += sub_out                 # rate; * dt applied at the end
+                if _rec_cells:
+                    _je = ((0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew)))[:, _kz]
+                    JE_cells[n] = (_je * _on).sum(axis=0) / _non
+                    Te_cells[n] = (Te_hot[:, _kz] * hmask[:, _kz]).sum(axis=0) / _hw
             if (n % n_upd) == 0:                       # refresh T_e, (wp,gamma) and the Drude ADE coeffs
                 for mi in range(n_mat):
                     sel = (mat_idx == mi)
@@ -359,6 +383,11 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         hot_out["E2_int"] = E2_int                           # (nx,nz) time-integrated |E_y|^2 (fluence proxy)
         hot_out["Te_final"] = Te_hot.copy()                  # (nx,nz) final electron-temperature map
         hot_out["mask"] = hmask.astype(bool)                 # (nx,nz) opted-in-cell mask
+        if _rec_cells:                                       # opt-in per-cell diagnostic (see above)
+            hot_out["cell_z_index"] = _kz                    # (ncell,) z rows holding hot cells
+            hot_out["cell_fill"] = (hmask[:, _kz] * _on).sum(axis=0) / _non   # (ncell,) hot fill fraction
+            hot_out["cell_JE"] = JE_cells                    # (nsteps, ncell) RAW J.E (x-mean) [W/m^3]
+            hot_out["cell_Te"] = Te_cells                    # (nsteps, ncell) hot-weighted T_e [K]
         # roadmap 5.7 energy-closure + lattice probes. p_abs_int is the RAW J.E work into the film; the
         # tracked reservoirs receive the alpha_abs fraction of it, so the EXACT identity is
         #     U_e_final + U_l_final + sub_outflow_int == alpha_abs * p_abs_int

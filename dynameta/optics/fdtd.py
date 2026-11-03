@@ -29,7 +29,19 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
 from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
                                           hot_carrier_guard)
-from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
+from dynameta.optics.fdtd_nd.grid import (check_z_subcell, interface_node_fractions,  # D-15 + S2-14
+                                          layer_masks, material_z, mix_profile, probe_cells,
+                                          pulse_width, source_pulse, z_fill_fractions, z_grid)
+
+
+def _drude_kerr_values(layers, kerr):
+    """Per-region (pad, layers..., pad) values of the 1-D material channels + the Drude pole spec,
+    for fdtd_nd.grid.mix_profile (z-subcell averaging, 2026-11-02)."""
+    vals = {"eps_inf": [1.0] + [L.eps_inf for L in layers] + [1.0],
+            "wp": [0.0] + [L.drude_wp_rad_s for L in layers] + [0.0],
+            "gam": [0.0] + [L.drude_gamma_rad_s for L in layers] + [0.0],
+            "chi3": [0.0] + [(L.chi3_m2_V2 if kerr else 0.0) for L in layers] + [0.0]}
+    return vals, (("wp", 2, ("gam",)),)
 from dynameta.warning_types import UnreliableResultWarning
 
 
@@ -312,7 +324,7 @@ def uniform_z_edges(layers, *, lambda_min_m, lambda_max_m, resolution=40, n_pad_
 
 
 def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
-            tgrid, mask, eps_inf_of_t, drude_of_t, n_update):
+            tgrid, mask, eps_inf_of_t, drude_of_t, n_update, weight=None, tv_has_kerr=None):
     """Time-VARYING twin of `_run` (roadmap 2.2): the SAME Yee/ADE march, but the material of the
     `mask` cells may change DURING the march via the opt-in hooks, re-derived every `n_update` steps.
 
@@ -363,6 +375,13 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     # jump ACTUALLY fires (the raise is armed here, thrown in the update block below).
     _kerr_on_tv = bool(eps_inf_of_t is not None and mask is not None
                        and np.any(np.asarray(chi3)[mask] != 0.0))
+    if tv_has_kerr is not None and eps_inf_of_t is not None:
+        # z-subcell averaging: the hook layer's EDGE cells also hold a share of its neighbours, whose
+        # chi3 would trip the per-cell test above although the time-varying LAYER carries no Kerr. The
+        # refusal is about the layer (its own chi3); the neighbour's Kerr share in that one mixed
+        # cell is left out of the D-preserving rescale -- an O(f chi3 E^2) error on a single cell,
+        # the same order as the edge cell's own discretization (documented in the registration note).
+        _kerr_on_tv = bool(tv_has_kerr)
 
     def _refuse_kerr_jump(eps_old, eps_new):
         raise NotImplementedError(
@@ -399,6 +418,20 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     cur_eps = float(eps_inf[mask][0]) if mask.any() else 0.0
     cur_wp = float(wp[mask][0]) if mask.any() else 0.0
     cur_gam = float(gam[mask][0]) if mask.any() else 0.0
+    # z-subcell averaging (2026-11-02): `weight` = the time-varying layer's fill fraction per node.
+    # A mixed edge cell's material is (its static other-region share) + weight x (the layer's
+    # time-dependent value): eps_inf linearly, the Drude term as wp^2 with the wp^2-weighted gamma
+    # (the same single-pole rule as fdtd_nd.grid.mix_profile). None = the legacy boolean mask.
+    if weight is not None:
+        w_m = np.asarray(weight, dtype=float)[mask]
+        full = w_m == 1.0
+        if full.any():                                 # the layer's own (uniform) values
+            cur_eps = float(eps_inf[mask][full][0])
+            cur_wp = float(wp[mask][full][0])
+            cur_gam = float(gam[mask][full][0])
+        bg_eps = eps_inf[mask] - w_m * cur_eps
+        bg_w2 = wp[mask] ** 2 - w_m * cur_wp ** 2
+        bg_w2g = wp[mask] ** 2 * gam[mask] - w_m * cur_wp ** 2 * cur_gam
     for n in range(nsteps):
         # --- opt-in material update (every n_update steps); no-op when nothing actually changes ---
         if (n % n_update) == 0:
@@ -408,8 +441,13 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
                 if new_eps != cur_eps:
                     if _kerr_on_tv:                            # audit D-12: refuse the JUMP itself
                         _refuse_kerr_jump(cur_eps, new_eps)
-                    Ex[mask] *= cur_eps / new_eps               # D-preserving: E jumps, D continuous
-                    eps_inf[mask] = new_eps
+                    if weight is None:
+                        Ex[mask] *= cur_eps / new_eps           # D-preserving: E jumps, D continuous
+                        eps_inf[mask] = new_eps
+                    else:                                       # per-cell D-preserving rescale
+                        e_new = bg_eps + w_m * new_eps
+                        Ex[mask] *= eps_inf[mask] / e_new
+                        eps_inf[mask] = e_new
                     cur_eps = new_eps
                     e0e_lin = EPS0 * eps_inf / dt               # eps_inf-dependent coeffs re-derived
                     denom_lin = e0e_lin + bJ / 2.0
@@ -417,9 +455,17 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
                 _wp, _gam = drude_of_t(tt)
                 new_wp = float(_wp); new_gam = float(_gam)
                 if (new_wp != cur_wp) or (new_gam != cur_gam):
-                    wp[mask] = new_wp; gam[mask] = new_gam      # J itself is CONTINUOUS (untouched)
-                    aJ[mask] = (1.0 - new_gam * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
-                    bJ[mask] = (EPS0 * new_wp ** 2 * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                    if weight is None:
+                        wp[mask] = new_wp; gam[mask] = new_gam  # J itself is CONTINUOUS (untouched)
+                        aJ[mask] = (1.0 - new_gam * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                        bJ[mask] = (EPS0 * new_wp ** 2 * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                    else:                                       # fill-weighted single pole per cell
+                        w2 = np.maximum(bg_w2 + w_m * new_wp ** 2, 0.0)
+                        g_c = np.where(w2 > 0.0, (bg_w2g + w_m * new_wp ** 2 * new_gam)
+                                       / np.where(w2 > 0.0, w2, 1.0), new_gam)
+                        wp[mask] = np.sqrt(w2); gam[mask] = g_c
+                        aJ[mask] = (1.0 - g_c * dt / 2.0) / (1.0 + g_c * dt / 2.0)
+                        bJ[mask] = (EPS0 * w2 * dt / 2.0) / (1.0 + g_c * dt / 2.0)
                     cur_wp = new_wp; cur_gam = new_gam
                     denom_lin = e0e_lin + bJ / 2.0
         # --- the EXACT `_run` inner body (byte-identical when the block above did nothing) ---
@@ -518,7 +564,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
                   time_varying_layer: int = 0, n_update: int = 1,
                   drude_n_m3: Optional[float] = None,
                   z_edges: Optional[np.ndarray] = None, refine: Optional[dict] = None,
-                  transition_cells: int = 8) -> FDTD1DResult:
+                  transition_cells: int = 8, z_subcell: str = "average") -> FDTD1DResult:
     """Broadband R(f)/T(f) of the layered `layers` (vacuum super/substrate) over
     [c/lambda_max, c/lambda_min]. `resolution` = cells per lambda_min in the highest-index medium;
     `courant` the CFL fraction (<= 1, use ~0.5 for Drude); `n_pad_wave` vacuum padding (in lambda_max)
@@ -585,7 +631,12 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     pass: static materials (dielectric / Drude / Kerr) + return_time_trace. NOT supported (raises
     loudly): the time-varying hooks (eps_inf_of_t / drude_of_t) and the bichromatic second_source, and
     the 2-D z-grading (fdtd_nd) is the documented follow-up tier. z_edges and refine are mutually
-    exclusive; both None keeps the legacy uniform path byte-identical."""
+    exclusive; both None keeps the legacy uniform path byte-identical.
+
+    z_subcell (2026-11-02): 'average' (DEFAULT) = z-subcell averaging -- every E node takes the
+    fill-fraction mean of its control volume (arithmetic for the tangential E, pole strengths
+    fill-weighted; formulas and citations in fdtd_nd.grid), so a layer's thickness is no longer
+    rounded to whole cells; 'point' = the E-node point sampling of 2b7a002, bit-for-bit."""
     # The 1-D engine carries eps_inf + Drude + Kerr(chi3) ONLY. The Lorentz pole, chi2, Raman and the
     # gain line are honored solely by the 2-D-TE kernels (fdtd_nd); _run never reads those arrays, so
     # solving them here would SILENTLY drop the term and the FDTD eps would diverge from the layer's own
@@ -617,6 +668,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # so the default UNIFORM path marched courant > 1 to overflow-driven garbage. One shared guard,
     # ahead of both branches (S == courant on either -- see spec.courant_guard).
     courant = courant_guard("solve_fdtd_1d", courant)
+    z_subcell = check_z_subcell("solve_fdtd_1d", z_subcell)   # 'average' (default) | 'point' (2b7a002)
     # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
     # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
     dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
@@ -663,22 +715,35 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
 
     if not nonuniform:
         dt = courant * dz / C_LIGHT
-        # cell-wise material profile (structure centered, vacuum pads each side)  [legacy uniform build]
+        # node-wise material profile (structure from z = pad, vacuum pads each side). audit S2-14
+        # siblings (2026-11-02): registered at the Yee E-NODES k*dz (fdtd_nd.grid.material_z, the
+        # ONE convention every engine shares) -- this used to sample the CELL CENTRES (k+1/2)*dz,
+        # which shifted the structure -dz/2 on average against the node frame the probes and the
+        # Mur walls live in: a -k0*dz reflection-phase bias (measured -1.13 k0dz at res 30, -0.98
+        # at res 60 over 9 pad offsets; |R|/|T| unaffected). It also disagreed with this function's
+        # own nonuniform branch below, which always registered at its primal (E) nodes.
         eps_inf = np.ones(nz)
         wp = np.zeros(nz)
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = pad
-        zc = (np.arange(nz) + 0.5) * dz                    # cell centers
-        z = z0
-        for L in layers:
-            m = (zc >= z) & (zc < z + L.thickness_m)
-            eps_inf[m] = L.eps_inf
-            wp[m] = L.drude_wp_rad_s
-            gam[m] = L.drude_gamma_rad_s
-            if kerr:
-                chi3[m] = L.chi3_m2_V2
-            z += L.thickness_m
+        zc = material_z(nz, dz)                            # E-node positions (name kept: tv_mask below)
+        if z_subcell == "point":                           # opt-out: the 2b7a002 point rule, bit-for-bit
+            for L, m in layer_masks(zc, z0, layers):
+                eps_inf[m] = L.eps_inf
+                wp[m] = L.drude_wp_rad_s
+                gam[m] = L.drude_gamma_rad_s
+                if kerr:
+                    chi3[m] = L.chi3_m2_V2
+        else:
+            # z-SUBCELL AVERAGING (default, 2026-11-02): each node takes the fill-fraction mean of
+            # its control volume [z - dz/2, z + dz/2] -- arithmetic for this tangential Ex, the
+            # Drude / Kerr strengths fill-weighted (fdtd_nd.grid notes; Farjadpour 2006, Oskooi
+            # 2009, Hwang-Cangellaris 2001). Removes the O(k dz) thickness rounding of point sampling.
+            F_sub = z_fill_fractions(zc, z0, layers, dz=dz)
+            _v, _p = _drude_kerr_values(layers, kerr)
+            _m = mix_profile(F_sub, _v, poles=_p)
+            eps_inf, wp, gam, chi3 = _m["eps_inf"], _m["wp"], _m["gam"], _m["chi3"]
         # source / left probe (between source and structure) / right probe (in the sub vacuum)
         i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)  # audit D-15: shared with 2-D/3-D
     else:
@@ -698,15 +763,43 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = float(z_edges[0])
-        zpos = z0 + pad
-        for L in layers:
-            m = (z_edges >= zpos) & (z_edges < zpos + L.thickness_m)
+        # E-node point registration -- the SAME shared helper (and float accumulation) as every
+        # other engine (audit S2-14 siblings, 2026-11-02) ...
+        for L, m in (layer_masks(z_edges, z0 + pad, layers) if z_subcell == "point" else ()):
             eps_inf[m] = L.eps_inf
             wp[m] = L.drude_wp_rad_s
             gam[m] = L.drude_gamma_rad_s
             if kerr:
                 chi3[m] = L.chi3_m2_V2
-            zpos += L.thickness_m
+        # ... plus the interface TIE rule this grid needs: _march_graded snaps every material
+        # interface ONTO a node, and the half-open point rule then hands that node wholly to the
+        # region starting there -- the interface moves -h/2, a -k0*h_fine reflection-phase bias
+        # (measured -0.88 k0*h mean over pad offsets; it used to be this path's only registration
+        # error). The tie nodes take the control-volume arithmetic mean (Hwang & Cangellaris 2001):
+        # eps_inf and chi3 linearly, the Drude term as ONE pole with wp^2 = sum f wp_i^2 and the
+        # wp^2-weighted gamma (exact when at most one side is Drude or the gammas agree -- every
+        # metal/dielectric interface; a two-metal interface with unequal gammas gets the weighted
+        # single-pole approximation at that one node). Measured after: +-0.03 k0*h, O(h^2) in h.
+        _reg = ([(1.0, 0.0, 0.0, 0.0)]
+                + [(L.eps_inf, L.drude_wp_rad_s, L.drude_gamma_rad_s, L.chi3_m2_V2 if kerr else 0.0)
+                   for L in layers] + [(1.0, 0.0, 0.0, 0.0)])
+        for j, frs in (interface_node_fractions(z_edges, z0 + pad, layers).items()
+                       if z_subcell == "point" else ()):
+            e_ = sum(f * _reg[r + 1][0] for r, f in frs)
+            w2 = sum(f * _reg[r + 1][1] ** 2 for r, f in frs)
+            g_ = (sum(f * _reg[r + 1][1] ** 2 * _reg[r + 1][2] for r, f in frs) / w2) if w2 > 0.0 else 0.0
+            eps_inf[j], wp[j], gam[j] = e_, np.sqrt(w2), g_
+            chi3[j] = sum(f * _reg[r + 1][3] for r, f in frs)
+        if z_subcell != "point":
+            # z-SUBCELL AVERAGING (default): the FULL control-volume mean on the graded grid,
+            # V_j = [z_j - h_{j-1}/2, z_j + h_j/2] -- the general form of the tie rule above (it
+            # reduces to it when every interface sits on a node, as _march_graded makes them).
+            _mid = 0.5 * (z_edges[1:] + z_edges[:-1])
+            F_nu = z_fill_fractions(z_edges, z0 + pad, layers, lo=np.concatenate(([z_edges[0]], _mid)),
+                                    hi=np.concatenate((_mid, [z_edges[-1]])))
+            _v, _p = _drude_kerr_values(layers, kerr)
+            _m = mix_profile(F_nu, _v, poles=_p)
+            eps_inf, wp, gam, chi3 = _m["eps_inf"], _m["wp"], _m["gam"], _m["chi3"]
         i_src = max(2, int(np.searchsorted(z_edges, z0 + 0.35 * pad)))
         i_pL = int(np.searchsorted(z_edges, z0 + 0.7 * pad))
         i_pR = min(int(np.searchsorted(z_edges, z0 + pad + z_struct + 0.3 * pad)), nz - 1)
@@ -720,14 +813,19 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
                                       if 0 <= time_varying_layer < len(layers) else float("nan"),
                                       eps_inf_of_t is not None)
     tv_mask = None
+    tv_weight = None
     if _hooks_on:
         tv_mask = np.zeros(nz, dtype=bool)
-        zt = z0
-        for idx, L in enumerate(layers):
-            mm = (zc >= zt) & (zc < zt + L.thickness_m)
+        # the SAME node masks as the material fill above (audit S2-14 siblings: one helper, so the
+        # time-varying cells are exactly the cells that carry the layer's material)
+        for idx, (L, mm) in enumerate(layer_masks(zc, z0, layers)):
             if idx == time_varying_layer:
                 tv_mask = mm
-            zt += L.thickness_m
+        if z_subcell != "point" and 0 <= time_varying_layer < len(layers):
+            # z-subcell averaging: the time-varying layer's FILL FRACTION per node (its edge cells
+            # are partly that layer); _run_tv rescales only that share of each cell's material
+            tv_weight = z_fill_fractions(zc, z0, layers, dz=dz)[time_varying_layer + 1]
+            tv_mask = tv_weight > 0.0
         if not tv_mask.any():
             raise ValueError("solve_fdtd_1d: time_varying_layer={} designates no grid cells".format(
                 time_varying_layer))
@@ -785,7 +883,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         eL_inc, eR_inc = _run(z1, z0v, z0v, z0v, dz, dt, nsteps, i_src, i_pL, i_pR, src)
         if _hooks_on:
             eL_tot, eR_tot = _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
-                                     tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)))
+                                     tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)),
+                                     weight=tv_weight,
+                                     tv_has_kerr=(None if tv_weight is None else bool(
+                                         kerr and layers[time_varying_layer].chi3_m2_V2 != 0.0)))
         else:
             eL_tot, eR_tot = _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src)
 
@@ -893,7 +994,7 @@ def frequency_conversion_diagnostic(trace, *, band_Hz=None, output="transmitted"
 class UniformTimeVaryingResult:
     dt: float
     dz: float
-    z_m: np.ndarray                 # cell centers
+    z_m: np.ndarray                 # E-node positions k*dz (the comment said 'cell centers'; it never was)
     t_s: np.ndarray                 # time grid
     n_traj: np.ndarray              # index n(t) actually applied at each step
     Ex_final: np.ndarray            # final E snapshot (whole grid)
