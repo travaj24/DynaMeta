@@ -67,6 +67,13 @@ every converged DC/Gummel solve: max(Electrons)/N_dos and max(Holes)/N_dos_p fro
 (2) can see a gated accumulation cap, whose body doping sits below the ceiling while the gate drives
 the channel far past it -- the devsim_3d `Stacked3DSpec` case exactly.
 
+OPT-IN PHYSICS BEYOND SRH (audit R26/R27, v0.14.0): setup_bipolar_region(options=BipolarOptions(...))
+adds Auger / radiative recombination, apparent bandgap narrowing (band-edge quasi-fields in both SG
+currents + n_ie in every recombination term and contact), incomplete dopant ionization (N_D+ / N_A- in
+Poisson), a lattice temperature for V_t, and a uniform generation G. The formulation, citations and
+measured oracles live in carriers/bipolar_options.py and
+docs/audit/2026-11-03-devsim-recombination-bgn-ionization.md. options=None is byte-identical.
+
 Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
   (1) potential-only pre-solve (freeze carriers); (2) seed Electrons/Holes from the
   Boltzmann equilibrium node models; (3) coupled 3-variable Newton; (4) bias ramp.
@@ -76,6 +83,7 @@ Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
 from __future__ import annotations
 
 import warnings
+from typing import TYPE_CHECKING
 
 import numpy as np
 import devsim as ds
@@ -87,6 +95,9 @@ from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_einstein, g_expr_devsim
 from dynameta.warning_types import UnreliableResultWarning
+
+if TYPE_CHECKING:                                              # pragma: no cover - typing only
+    from dynameta.carriers.bipolar_options import BipolarOptions
 
 # --- audit C-10: the Fermi-Dirac degeneracy correction to the ohmic built-in potential ----------
 _FD_GL_N = 96                                                  # Gauss-Legendre nodes for Delta(u)
@@ -138,7 +149,8 @@ def fd_potential_shift(u):
 
 def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: float,
                             n_dos_p_m3: "float | None" = None,
-                            fd_enhancement: bool = True) -> float:
+                            fd_enhancement: bool = True,
+                            options: "BipolarOptions | None" = None) -> float:
     """The built-in potential [V] the bipolar ohmic contact PINS for a node of SIGNED net doping
     `net_doping_m3`, in the contact's own frame (n-type: +V_t ln(n0/n_i) plus the FD correction).
 
@@ -146,7 +158,19 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
     frame -- notably devsim_3d's gate offset phi_bi, which re-derived the Boltzmann log() and would
     otherwise re-open the very frame mismatch it exists to close (audit C2-1) as soon as the body is
     degenerate (audit C-10: 0.178 V at eta = 10). fd_enhancement=False returns the plain Boltzmann
-    value, matching the contact expression exactly."""
+    value, matching the contact expression exactly.
+
+    `options` (audit R26/R27): an ACTIVE BipolarOptions routes through the SAME numpy kernel the region
+    setup uses (bipolar_options.equilibrium_fields) -- BGN band-edge shift, incomplete-ionization
+    neutrality, and V_t at options.T_K -- so the 3-D gate frame follows the contact it references.
+    None (the default) or an inactive bundle is the legacy expression unchanged."""
+    if options is not None and options.active:
+        from dynameta.carriers.bipolar_options import equilibrium_fields
+        nd = float(n_dos_m3)
+        f = equilibrium_fields(np.array([float(net_doping_m3)]), n_i_m3=float(n_i_m3), N_c_m3=nd,
+                               N_v_m3=float(n_dos_p_m3) if n_dos_p_m3 else nd, options=options,
+                               fd_enhancement=fd_enhancement)
+        return float(f["psi_eq"][0])
     N = float(net_doping_m3)
     ni = float(n_i_m3)
     root = (N * N + 4.0 * ni * ni) ** 0.5
@@ -382,7 +406,8 @@ def setup_bipolar_region(device: str, region: str, *,
                          mobility_n_m2Vs: float, mobility_p_m2Vs: float,
                          tau_n_s: float, tau_p_s: float,
                          fd_enhancement: bool = True,
-                         n_dos_p_m3: "float | None" = None) -> None:
+                         n_dos_p_m3: "float | None" = None,
+                         options: "BipolarOptions | None" = None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
@@ -398,6 +423,10 @@ def setup_bipolar_region(device: str, region: str, *,
                          recombination (tau=0 would make the SRH denominator 0/0 -> NaN)
       fd_enhancement   : if True, apply the degenerate FD g-factor to BOTH currents;
                          if False, plain Boltzmann Scharfetter-Gummel (g==1).
+      options          : opt-in BipolarOptions (audit R26/R27: Auger, radiative, bandgap narrowing,
+                         incomplete ionization, T_K, uniform generation; see carriers/bipolar_options).
+                         None (default) -- or a bundle with every field None -- leaves every model
+                         below BYTE-IDENTICAL to the SRH-only physics.
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
@@ -509,6 +538,13 @@ def setup_bipolar_region(device: str, region: str, *,
                               node_model="HoleGeneration", time_node_model="PCharge",
                               variable_update="positive")
 
+    # --- audit R26/R27: opt-in Auger / radiative / BGN / incomplete ionization / T / G ----------
+    # Installed LAST so it re-defines (by name) only the models it changes; the equations recorded
+    # above reference models by name and pick the new definitions up. Off -> nothing runs here.
+    if options is not None and options.active:
+        from dynameta.carriers.bipolar_options import install_bipolar_options
+        install_bipolar_options(device, region, options, fd_enhancement=fd_enhancement)
+
 
 # Charge-neutral equilibrium carrier node models (SI). Used both to seed the
 # coupled solve and inside the contact pinning expression. The +1.0 floor keeps
@@ -520,7 +556,18 @@ CHOLE = "(1.0 + 0.5*abs(-NetDoping + (NetDoping^2 + 4 * n_i^2)^(0.5)))"
 def setup_equilibrium_seed_models(device: str, region: str) -> None:
     """Create IntrinsicElectrons/IntrinsicHoles node models (charge-neutral
     equilibrium) so the staged solve can seed Electrons/Holes before the coupled
-    Newton. n0 = majority on n-side, p0 = n_i^2/n0 (symmetric swap on p-side)."""
+    Newton. n0 = majority on n-side, p0 = n_i^2/n0 (symmetric swap on p-side).
+
+    audit R26/R27: a region whose BipolarOptions change the equilibrium (BGN: n0 p0 = n_ie^2;
+    incomplete ionization: neutrality with N_D+ / N_A-) carries the numpy charge-neutral root as the
+    fixed fields NeutralElectrons / NeutralHoles, and the seed takes THOSE (the same values its ohmic
+    contacts pin). Otherwise the closed-form strings below, unchanged."""
+    from dynameta.carriers.bipolar_options import options_contact_models
+    if options_contact_models(device, region):
+        ds.node_model(device=device, region=region, name="IntrinsicElectrons",
+                      equation="NeutralElectrons")
+        ds.node_model(device=device, region=region, name="IntrinsicHoles", equation="NeutralHoles")
+        return
     n0 = "ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(ce=CELEC, ch=CHOLE)
     p0 = "ifelse(NetDoping < 0, {ch}, n_i^2/{ce})".format(ce=CELEC, ch=CHOLE)
     ds.node_model(device=device, region=region, name="IntrinsicElectrons", equation=n0)
@@ -532,7 +579,14 @@ def fd_shift_model(device: str, region: str) -> "str | None":
     by setup_contact_ohmic_bipolar via _fd_contact_shift), else None. audit C-10.
 
     Staged solvers seed Potential from the charge-neutral equilibrium and MUST use the same offset
-    the contact pins; this is how they ask which frame the contact chose."""
+    the contact pins; this is how they ask which frame the contact chose.
+
+    audit R26/R27: a region with option-altered equilibrium carries `SeedPsiShift`, the per-node value s
+    for which equilibrium_seed_psi_expr(s) reproduces EXACTLY the potential its contacts pin (BGN band
+    edge + ionization neutrality + FD correction, from bipolar_options.equilibrium_fields); it takes
+    precedence, so every staged solver seeds in the right frame without a signature change."""
+    if "SeedPsiShift" in ds.get_node_model_list(device=device, region=region):
+        return "SeedPsiShift"
     return ("FDContactShift"
             if "FDContactShift" in ds.get_node_model_list(device=device, region=region) else None)
 
@@ -563,6 +617,17 @@ def _pot_offset(shift: "str | None", ce: str, ch: str) -> str:
             .format(ce=ce, ch=ch, s=shift))
 
 
+def _options_contact_exprs(device: str, contact: str):
+    """audit R26/R27: (electron, hole) contact residual strings pinning the option-equilibrium fields
+    when the contact's region carries them (BGN and/or incomplete ionization), else None -- in which
+    case every contact string below is the legacy one CHARACTER-FOR-CHARACTER. The Potential residual
+    in that mode is `Potential - bias - EquilibriumPotential` (derivative literal 1, as before)."""
+    from dynameta.carriers.bipolar_options import options_contact_models
+    if not options_contact_models(device, _contact_region(device, contact)):
+        return None
+    return "Electrons - NeutralElectrons", "Holes - NeutralHoles"
+
+
 def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
     """Bipolar ohmic contact: pin Potential (with the built-in offset) and pin
     Electrons/Holes to their charge-neutral equilibrium values. The built-in offset follows the
@@ -572,12 +637,15 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
     by 0.17 V per degenerate contact at eta = 10."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     bias = "{}_bias".format(contact)
-    shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
+    _opt = _options_contact_exprs(device, contact)             # audit R26/R27 (None -> legacy)
+    shift = None if _opt else _fd_contact_shift(device, contact)  # audit C-10 (None -> Boltzmann)
 
     # Potential: Dirichlet + built-in potential offset (reference n_i; FD-corrected when the
     # region's transport uses the FD g-factor).
     cp = "{}_potential_dirichlet".format(contact)
     pot_eq = "Potential - {b} + {off}".format(b=bias, off=_pot_offset(shift, CELEC, CHOLE))
+    if _opt:
+        pot_eq = "Potential - {b} - EquilibriumPotential".format(b=bias)
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact,
                           name="{}:Potential".format(cp), equation="1")
@@ -587,7 +655,7 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
     # Electrons pinned to n0 (n-side) or n_i^2/p0 (p-side); derivative literal "1".
     ce = "{}_electrons_dirichlet".format(contact)
     elec_eq = "Electrons - ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(
-        ce=CELEC, ch=CHOLE)
+        ce=CELEC, ch=CHOLE) if not _opt else _opt[0]
     ds.contact_node_model(device=device, contact=contact, name=ce, equation=elec_eq)
     ds.contact_node_model(device=device, contact=contact,
                           name="{}:Electrons".format(ce), equation="1")
@@ -597,7 +665,7 @@ def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
     # Holes pinned to p0 (p-side) or n_i^2/n0 (n-side); derivative literal "1".
     ch = "{}_holes_dirichlet".format(contact)
     hole_eq = "Holes - ifelse(NetDoping < 0, {ch}, n_i^2/{ce})".format(
-        ce=CELEC, ch=CHOLE)
+        ce=CELEC, ch=CHOLE) if not _opt else _opt[1]
     ds.contact_node_model(device=device, contact=contact, name=ch, equation=hole_eq)
     ds.contact_node_model(device=device, contact=contact,
                           name="{}:Holes".format(ch), equation="1")
@@ -631,9 +699,12 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
                        acreal=float(v_ac), acimag=0.0)
     # Potential: Dirichlet tied to the circuit node + built-in offset (reference n_i; FD-corrected
     # when the region's transport uses the FD g-factor -- audit C-10, same rule as the DC twin).
-    shift = _fd_contact_shift(device, contact)
+    _opt = _options_contact_exprs(device, contact)             # audit R26/R27 (None -> legacy)
+    shift = None if _opt else _fd_contact_shift(device, contact)
     cp = "{}_potential_circuit".format(contact)
     pot_eq = "Potential - {n} + {off}".format(n=node_name, off=_pot_offset(shift, CELEC, CHOLE))
+    if _opt:
+        pot_eq = "Potential - {n} - EquilibriumPotential".format(n=node_name)
     ds.contact_node_model(device=device, contact=contact, name=cp, equation=pot_eq)
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
                           equation="1")
@@ -644,7 +715,8 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     # Electrons / Holes pinned to charge-neutral equilibrium; their currents couple to the node.
     ce = "{}_electrons_circuit".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=ce,
-                          equation="Electrons - ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(
+                          equation=_opt[0] if _opt else
+                          "Electrons - ifelse(NetDoping > 0, {ce}, n_i^2/{ch})".format(
                               ce=CELEC, ch=CHOLE))
     ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
                           equation="1")
@@ -652,7 +724,8 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
                                edge_current_model="ElectronCurrent", circuit_node=node_name)
     ch = "{}_holes_circuit".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=ch,
-                          equation="Holes - ifelse(NetDoping < 0, {ch}, n_i^2/{ce})".format(
+                          equation=_opt[1] if _opt else
+                          "Holes - ifelse(NetDoping < 0, {ch}, n_i^2/{ce})".format(
                               ce=CELEC, ch=CHOLE))
     ds.contact_node_model(device=device, contact=contact, name="{}:Holes".format(ch),
                           equation="1")

@@ -19,9 +19,12 @@ when physics == "drift_diffusion".
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:                                    # pragma: no cover - typing only
+    from dynameta.carriers.bipolar_options import BipolarOptions
 
 
 MassFn = Callable[[np.ndarray], np.ndarray]
@@ -83,6 +86,11 @@ class TransportModel:
     acceptor:                    bool = False
     net_doping_expr:             Optional[str] = None
     dos_mass_p_kg:               Optional[float] = None
+    # audit R26/R27 (v0.14.0): opt-in Auger / radiative recombination, bandgap narrowing, incomplete
+    # ionization, T_K, uniform generation for the bipolar_dd path -- a
+    # dynameta.carriers.bipolar_options.BipolarOptions. None (default) keeps the SRH-only physics
+    # byte-identical. Read by the 2-D LayeredDevsimBuilder and the 3-D Stacked3DSpec.from_design.
+    bipolar_options:             Optional["BipolarOptions"] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -99,3 +107,11 @@ class TransportModel:
             if missing:
                 raise ValueError("bipolar_dd physics requires {} (holes + recombination)".format(
                     ", ".join(missing)))
+        if self.bipolar_options is not None:
+            from dynameta.carriers.bipolar_options import BipolarOptions
+            if not isinstance(self.bipolar_options, BipolarOptions):
+                raise TypeError("TransportModel.bipolar_options must be a carriers.bipolar_options."
+                                "BipolarOptions, got {!r}".format(type(self.bipolar_options).__name__))
+            if self.physics != "bipolar_dd":
+                raise ValueError("TransportModel.bipolar_options applies only to physics='bipolar_dd' "
+                                 "(got {!r}); it would be silently ignored".format(self.physics))
