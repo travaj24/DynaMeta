@@ -250,7 +250,7 @@ the two-Drude error bound and the point opt-out identity.
 | fdtd_seam_vs_tmm GATE 1 (dielectric R/T vs TMM) | 6e-3 | dR 4.05e-2, FAIL | dR 2.92e-3, PASS |
 | fdtd_drude_lorentz_vs_tmm GATE 2 (pure Lorentz) | 2e-2 | max dR0 2.82e-2, FAIL | max dR0 5.89e-4, PASS (GATE 1 Drude+Lorentz 4.98e-3 -> 8.80e-4) |
 | fdtd_graded_enz GATE 1 (graded ITO vs TMM) | 2e-2 | d 2.37e-2, FAIL | d 2.04e-4, PASS |
-| test_fdtd_hot_carrier::test_lat_gate8 (2-ODE) | 5e-3 | 7.53e-3, FAIL | 7.41e-3, FAIL (diagnosed below) |
+| test_fdtd_hot_carrier::test_lat_gate8 (2-ODE) | 5e-3 | 7.53e-3, FAIL | mean-field 7.41e-3 (diagnosed below); per-cell oracle 7.8e-4 / 6.8e-4, PASS (2026-11-03) |
 
 HOT-CARRIER GATE 8: STOPPED AND REPORTED, NOT FORCED. The film is 120 nm = 1.87 cells at the
 fixture's resolution 12; averaged it is two nodes of hot fill 0.934 / 0.936 (hot volume 120 nm,
@@ -265,6 +265,10 @@ oracle is exact only for a one-cell (spatially uniform) film, which the fixture 
 integrate the oracle per cell (measured 7.8e-4 < 5e-3), or refine the fixture.
 
 ### Moved pins and non-green items under averaging (STOP-AND-REPORT where a value moved away)
+
+(As of f7d7c47. The 2026-11-03 decisions below supersede the gate7 / gate8 / sweep / 3-D GATE A
+entries: gate7 re-pinned with a convergence companion, gate8 per-cell, the two validations
+converted to convergence gates.)
 
 Every move below was checked against its TRUE-geometry reference and against resolution. None was
 re-pinned: in each case either the averaged value at the fixture's resolution is FARTHER from the
@@ -306,13 +310,78 @@ or the gate's oracle itself is not a true-geometry reference.
   chi3 (the neighbour's share in that one cell is left out of the D-preserving rescale -- an
   O(f chi3 E^2) single-cell error). test_d12 passes unchanged.
 
-### Runs (from scratch, 2026-11-03, averaging default)
+### 2026-11-03 decisions and follow-ups
 
-The 22 FDTD-related test files incl. slow: 555 passed, 3 failed (test_lat_gate8, ringdown gate7,
-ringdown gate9 -- all above). The 41 validation/fdtd_* scripts: 38 PASS, 3 FAIL (fdtd_sweep_vs_tmm
-GATE 1 and fdtd_3d_reduces GATE A -- moved away at the fixture resolution, above -- and
-fdtd_gpu_nonlinear, the pre-existing CUDA 13.1 / numba header compile failure, unchanged).
-fdtd_effect_seam passed after its like-for-like reference fix (re-run on its own). ruff clean.
+THE TRADE (decision 1, kept as the method). Averaging is applied to EVERY interface cell, including
+a face that lands exactly on an E node: that node's control volume really is half/half (the
+Hwang-Cangellaris tie rule the refine grid already used). Restricting averaging to off-node cells
+would make the result jump as an interface crosses a node -- the sub-cell-offset discontinuity
+this change removes. Averaging therefore BOUNDS THE WORST OFFSET and makes the error a continuous
+function of the offset (1-D, 8 offsets, res 30: worst max|dR| 7.9e-3 point -> 1.9e-3 averaged),
+at the cost of a somewhat larger second-order constant on ALIGNED grids, where point sampling
+happens to realize the exact thickness (fdtd_3d_reduces GATE A: point 2.5e-3 vs averaged 6.3e-3 at
+res 18, both converging at order 2). Point sampling's near-exactness there is a property of that
+commensurate fixture, not of the method.
+
+CONVERGENCE GATES (decision 2). The single-resolution pins of fdtd_sweep_vs_tmm GATE 1 and
+fdtd_3d_reduces GATE A became: (a) per frequency, max(|dR|, |dT|) vs the TRUE-geometry reference
+<= C * X(f)^2 at the base resolution, X = n_max k0(f) dz = 2 pi lambda_min / (res lambda); (b)
+observed order >= 1.7 between res and 2 res. C is the registration-sweep worst case of that
+engine, max over the 8 midpoint offsets AND the band (183 nm n = 2 slab, band 1.2-1.6 um, res 30;
+measured 2026-11-03): 2-D normal 0.0794 (dielectric) / 0.0802 (gain line on n = 2) -> C_REG_2D =
+0.0802; res 60: 0.0700; 3-D normal C_REG_3D = 0.0795. Not fitted to either fixture.
+
+| gate | base res, runtime | max err | (a) worst err / (C X^2) | (b) probe | (b) order |
+| --- | --- | --- | --- | --- | --- |
+| fdtd_3d_reduces GATE A (300 nm n = 2 slab) | 18, 21 s (numpy 4x4) | 6.26e-3 | 1.10 -> FAIL | nx = ny = 2 numba, 6 s + 14 s | 2.01 (6.22e-3 -> 1.54e-3) |
+| fdtd_sweep_vs_tmm GATE 1 (2.2/1.5/2.2 near-AR stack) | 28, 21-28 s | 6.68e-3 | 2.68 -> FAIL | solve_fdtd_2d nx = 2 numba, 11 s + 24 s | 2.05 (6.56e-3 -> 1.59e-3) |
+
+The 2x-res run of either base config would more than double its validation (3-D ~16x, sweep ~8x),
+so (b) runs on the cheaper probe of the same engine. STOPPED AND REPORTED: part (a) FAILS on both
+with the registration constant. The error is cleanly second order in both (the ratio is the same at
+res 18 and res 36 for the 3-D slab, 1.09, located near its reflectance maximum at ~1.7 um), but the
+second-order CONSTANT is geometry dependent: 0.087 for the 300 nm slab and ~0.21 for the
+four-interface near-AR stack, against 0.080 for the 183 nm registration slab. A constant from one
+slab does not bound another geometry; no constant was fitted and no bar loosened. (Under the
+grid-level reading X = 2 pi / res, i.e. k0 at lambda_min, the 3-D gate would pass at 0.65 and the
+sweep would still fail at 1.65.)
+
+RINGDOWN gate7 (decision 3): re-pinned 13.207623 -> 13.078561 (-2.121% vs Fabry-Perot 13.361960 at
+res 30), with the new slow companion `test_gate7_anchor_converges_to_fabry_perot`: |Q/Q_FP - 1| =
+2.121% (res 30) -> 0.253% (res 60), order 3.07 >= 1.7 (point sampling: 1.155% -> 0.370%, order
+1.64, which would fail it).
+
+RINGDOWN gate9: DIAGNOSED, NOT CHANGED, STOPPED AND REPORTED. The hypothesis to test was that the
+start_frac window reaches the ~1e-15 float floor. It does not: at start_frac = 0.2 the 1200-sample
+window ends at |y| = 7.7e-7 of the trace peak (averaged; 6.2e-7 point). The dropped GROWING pole is
+a ZERO-FREQUENCY real pole with gamma = -3.0e7 1/s (vs the etalon modes' +1.0e14) and |amplitude|
+3.2e-3 of the window peak (point at start_frac 0.25: gamma -3.7e7, 1.1e-4; at 0.10: -6.7e11,
+3.1e-4): a slow non-oscillatory drift left after the window's mean subtraction (the 1st-order Mur
+walls' static residue is the likely source), fitted as an almost-flat exponential. The SAME latent
+behaviour exists under point sampling: start_frac 0.10 / 0.15 / 0.20 / 0.25 / 0.30 / 0.40 warn as
+yes / no / no / yes / yes / yes (point) and yes / no / yes / no / no / no (averaged). So it is not a
+noise-floor issue and the requested noise-floor fix would not address it; gate9 still fails on the
+averaged default and is left for a decision (candidates: detrend instead of mean-subtract, or
+treat |omega| ~ 0 poles as drift rather than modes).
+
+HOT-CARRIER gate8 (decision 4): `hot_out["record_cells"] = True` (opt-in) now returns per-z-row
+histories -- `cell_z_index`, `cell_fill` (hot fill), `cell_JE` (raw x-mean J.E), `cell_Te`.
+test_lat_gate8 drives an EXACT per-cell 2-ODE with each row's alpha J.E / f: 7.8e-4 / 6.8e-4 (bar
+5e-3); the same oracle with the fill ignored (raw J.E) gives 6.3e-2 / 5.2e-2 and fails the bar (asserted). The mean-field
+oracle keeps its own gate, `test_lat_gate8b_mean_field_oracle_on_an_aligned_one_cell_film`: film
+thickness = dz and pad/dz = m + 1/2, i.e. ONE pure hot node (fill 1 to 1e-12), where it is exact
+(measured 7.2e-4).
+
+### Runs (from scratch, 2026-11-03, after the 2026-11-03 decisions)
+
+The 22 FDTD-related test files incl. slow: 558 passed, 2 failed in the full run; one failure was a
+misplaced assertion in the new gate7 companion (fixed, test_ringdown.py re-run whole: 32 passed, 1
+failed) -> 559 passed, 1 failed: ringdown gate9 (diagnosed above, reported). The 41
+validation/fdtd_* scripts: 38 PASS, 3 FAIL -- fdtd_sweep_vs_tmm and fdtd_3d_reduces (convergence
+gate part (a) with the registration constant, above; part (b) orders 2.05 / 2.01 pass) and
+fdtd_gpu_nonlinear (the pre-existing CUDA 13.1 / numba header compile failure, unchanged).
+Runtimes: fdtd_sweep_vs_tmm 64 s (was 24 s; probe adds ~35 s), fdtd_3d_reduces 237-283 s (was
+251 s; probe ~20 s). ruff clean.
 
 ### Limits
 
