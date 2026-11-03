@@ -210,9 +210,11 @@ Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
    papers before quoting absolute J0 externally. The shipped validation fixtures use 1.0e10.
 3. **III-V radiative/Auger presets** were deliberately NOT shipped. Literature B for GaAs ranges about
    1e-10 to 7e-10 cm^3/s depending on photon recycling, and the user should choose.
-4. **Altermatt 1997 constants** (13 / 3.3e17 / 0.66, 7.5 / 7.0e17 / 0.63) are quoted from memory of the
-   paper and its common restatements. The PDF was not available offline; please verify before
-   external use.
+4. **Altermatt 1997 constants** (13 / 3.3e17 / 0.66, 7.5 / 7.0e17 / 0.63): VERIFIED 2026-11-03 against
+   the published restatement of Altermatt, Schmidt, Heiser & Aberle, J. Appl. Phys. 82, 4938 (1997)
+   on pv-manufacturing.org "Recombination processes" (g_eeh(n0) = 1 + 13[1 - tanh((n0/3.3e17)^0.66)],
+   g_ehh(p0) = 1 + 7.5[1 - tanh((p0/7.0e17)^0.63)], C_n = 2.8e-31 / C_p = 9.9e-32 cm^6/s Dziewior &
+   Schmid). The primary PDF itself was not reachable; resolved, no longer an open question.
 5. **Pearson-Bardeen alpha**: no default value is shipped (0 = off).
 
 ## Merge notes for the integrator
