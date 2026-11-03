@@ -38,6 +38,7 @@ from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import physics_traps as PT
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import extended_precision as XP
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.geometry.guards import require_supported_geometry
@@ -67,7 +68,7 @@ class _RegionSpec:
 class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
-                  interface_traps=None) -> None:
+                  interface_traps=None, extended_precision: bool = False) -> None:
         # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
         # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
         # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
@@ -85,6 +86,11 @@ class LayeredDevsimBuilder:
         # Installed on semiconductor(bipolar_dd)/dielectric interfaces after Potential continuity; an
         # unknown key or a non-bipolar side raises at build. None (default) = no interface traps.
         self.interface_traps = dict(interface_traps) if interface_traps else {}
+        # D2b (2026-11-03): extended_precision=True builds the device with DEVSIM's 128-bit model
+        # evaluation + equation assembly and solves it with the mixed-precision Newton (128-bit
+        # residual, double factorization) -- carriers/extended_precision.py. Device-scoped (it never
+        # reaches a later default device); False (default) leaves every solve byte-identical.
+        self.extended_precision = bool(extended_precision)
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -384,6 +390,8 @@ class LayeredDevsimBuilder:
 
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+        if self.extended_precision:                 # BEFORE any model: DEVSIM types models at creation
+            XP.enable(self.device)
 
         # per-region physics. Track drift-diffusion semiconductor regions so
         # their ohmic contacts also pin the electron quasi-Fermi level.

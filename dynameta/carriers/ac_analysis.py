@@ -27,6 +27,7 @@ import numpy as np
 import devsim as ds
 
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import extended_precision as _XP
 
 
 def setup_circuit_contact(device: str, contact: str, *,
@@ -84,7 +85,7 @@ def ssac_admittance(frequencies, *, source_name: str = "V1", v_ac: float = 1.0):
     C = np.empty(freqs.size)
     G = np.empty(freqs.size)
     for i, f in enumerate(freqs):
-        ds.solve(type="ac", frequency=float(f))
+        _XP.solve(type="ac", frequency=float(f))               # 128-bit assembly iff the device opted in
         i_re = float(ds.get_circuit_node_value(node=src_i, solution="ssac_real"))
         i_im = float(ds.get_circuit_node_value(node=src_i, solution="ssac_imag"))
         w = 2.0 * math.pi * float(f)
