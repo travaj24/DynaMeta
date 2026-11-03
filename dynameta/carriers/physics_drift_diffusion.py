@@ -186,3 +186,41 @@ def setup_contact_ohmic_dd(device: str, contact: str) -> None:
     # but made the unipolar terminal current unreadable -- exposed by a 3D resistor test.
     _R.record_contact_equation(device, contact, name="ElectronContinuityEquation",
                             node_model=ce, edge_current_model="ElectronCurrent")
+
+
+def setup_contact_ohmic_dd_circuit(device: str, contact: str, *, node_name: str = "vac",
+                                   source_name: str = "V1", v_ac: float = 1.0,
+                                   drive: str = "voltage") -> tuple:
+    """Circuit-driven twin of setup_contact_ohmic_dd (v0.14.0, for ac_analysis / noise_analysis on a
+    UNIPOLAR DD device): Potential tied to circuit node `node_name` (no bias parameter), Electrons
+    pinned to N_D, and BOTH the displacement (PotentialEdgeFlux) and the electron current
+    (ElectronCurrent) coupled into that node, so the source current '<source_name>.I' is the total
+    small-signal terminal current. drive="voltage" (source 'V...') or "current" (source 'I...', the
+    open-circuit terminal for S_V); see physics_bipolar_dd.setup_contact_ohmic_bipolar_circuit.
+    setup_contact_ohmic_dd itself is unchanged. Returns (source_name, node_name)."""
+    from dynameta.carriers.physics_bipolar_dd import _check_drive
+    source_name = _check_drive(drive, source_name, "setup_contact_ohmic_dd_circuit")
+    if not (float(v_ac) > 0.0):
+        raise ValueError("setup_contact_ohmic_dd_circuit: v_ac must be > 0; got {!r}".format(v_ac))
+    ds.add_circuit_node(name=node_name, variable_update="default")
+    if drive == "current":                 # DEVSIM refuses an AC part on a current source
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0)
+    else:
+        ds.circuit_element(name=source_name, n1=node_name, n2="0", value=0.0,
+                           acreal=float(v_ac), acimag=0.0)
+    cp = "{}_potential_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=cp,
+                          equation="Potential - {}".format(node_name))
+    ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cp),
+                          equation="1")
+    ds.contact_node_model(device=device, contact=contact, name="{}:{}".format(cp, node_name),
+                          equation="-1")
+    _R.record_contact_equation(device, contact, name="PotentialEquation", node_model=cp,
+                               edge_charge_model="PotentialEdgeFlux", circuit_node=node_name)
+    ce = "{}_electrons_circuit".format(contact)
+    ds.contact_node_model(device=device, contact=contact, name=ce, equation="Electrons - N_D")
+    ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
+                          equation="1")
+    _R.record_contact_equation(device, contact, name="ElectronContinuityEquation", node_model=ce,
+                               edge_current_model="ElectronCurrent", circuit_node=node_name)
+    return source_name, node_name
