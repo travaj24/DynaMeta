@@ -197,14 +197,24 @@ def setup_interface(device: str, interface: str) -> None:
                               interface_model="continuousPotential", type="continuous")
 
 
-def setup_contact(device: str, contact: str) -> None:
-    """Dirichlet Potential = <contact>_bias, with UNIQUE per-contact node-model
-    name + edge_charge_model (closes the displacement flux at contact/interface
-    corner nodes -- the empty-row fix)."""
+def psi_offset_term(psi_offset_V: float) -> str:
+    """The contact-Dirichlet term for a heterostack frame shift s(r) (physics_heterojunction): an ohmic
+    contact on region r pins Potential = bias + s(r). Returns "" for s == 0 so every contact string of a
+    single-semiconductor / same-frame device is CHARACTER-FOR-CHARACTER what it was (v0.14.0, D1a)."""
+    v = float(psi_offset_V)
+    if v != v or v in (float("inf"), float("-inf")):
+        raise ValueError("psi_offset_V must be finite, got {!r}".format(psi_offset_V))
+    return "" if v == 0.0 else " - ({!r})".format(v)
+
+
+def setup_contact(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
+    """Dirichlet Potential = <contact>_bias (+ psi_offset_V, the heterostack frame shift of the contact's
+    region), with UNIQUE per-contact node-model name + edge_charge_model (closes the displacement flux
+    at contact/interface corner nodes -- the empty-row fix)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
     cn = "{}_potential_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cn,
-                              equation="Potential - {}_bias".format(contact))
+                              equation="Potential - {}_bias".format(contact) + psi_offset_term(psi_offset_V))
     ds.contact_node_model(device=device, contact=contact, name="{}:Potential".format(cn),
                               equation="1")
     _R.record_contact_equation(device, contact, name="PotentialEquation",

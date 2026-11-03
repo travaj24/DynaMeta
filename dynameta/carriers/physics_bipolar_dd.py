@@ -81,7 +81,7 @@ import numpy as np
 import devsim as ds
 
 from dynameta.carriers.physics_equilibrium import (
-    Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12)
+    Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12, psi_offset_term)
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
@@ -563,15 +563,16 @@ def _pot_offset(shift: "str | None", ce: str, ch: str) -> str:
             .format(ce=ce, ch=ch, s=shift))
 
 
-def setup_contact_ohmic_bipolar(device: str, contact: str) -> None:
+def setup_contact_ohmic_bipolar(device: str, contact: str, *, psi_offset_V: float = 0.0) -> None:
     """Bipolar ohmic contact: pin Potential (with the built-in offset) and pin
     Electrons/Holes to their charge-neutral equilibrium values. The built-in offset follows the
     region's own statistics (audit C-10): Boltzmann when the region was set up with
     fd_enhancement=False, Fermi-Dirac (+ V_t Delta(n0/N_dos)) when it was set up with the g-factor
     on -- the boundary condition used to be Boltzmann either way, contradicting the interior model
-    by 0.17 V per degenerate contact at eta = 10."""
+    by 0.17 V per degenerate contact at eta = 10. psi_offset_V is the heterostack frame shift s(r) of
+    the contact's region (physics_heterojunction; 0 -> the string is unchanged)."""
     ds.set_parameter(device=device, name="{}_bias".format(contact), value=0.0)
-    bias = "{}_bias".format(contact)
+    bias = "{}_bias".format(contact) + psi_offset_term(psi_offset_V)
     shift = _fd_contact_shift(device, contact)                 # audit C-10 (None -> Boltzmann)
 
     # Potential: Dirichlet + built-in potential offset (reference n_i; FD-corrected when the
