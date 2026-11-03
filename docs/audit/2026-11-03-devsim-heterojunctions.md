@@ -140,6 +140,8 @@ algebra, Fermi-Dirac by direct quadrature, depletion approximation, Richardson l
 | 2-D equilibrium n+ GaAs (1e18) / n AlGaAs (1e16) (`slow`) | psi(AlGaAs) - psi(GaAs) = dE_c + kT(eta_A - eta_G) | 0.091516 V vs oracle 0.091511 V (+5e-6 V); discrete Gauss law over the stack to 1.3e-15 of the depletion charge (net charge -3.7e-3: the e^-5 field tail at the 300 nm AlGaAs contact) | 2e-3 V |
 | 3-D DD ITO (4e26) / AZO-like (1e26, chi + 0.12 eV), gated | E_Fn = 0 at every node of both regions at Vg = 0 and +0.5 V (no DC path) | max 3.2e-3 / 3.0e-3 eV (eta 17-23: the g fit's Delta vs exact FD, +0.55 % of Delta ~ 16); TE wired ('auto'); oxide-face accumulation x1.52 at +0.5 V | 5e-3 eV |
 
+| F (validation only, `python -m validation.devsim_heterojunction --3d`): same 3-D stack as EQUILIBRIUM vs DD-thermionic vs DD-continuous | no DC path: DD = equilibrium, TE = continuous | TE vs continuous max 1.5e-9 / 1.4e-9 rel (Vg 0 / +0.5 V); DD vs equilibrium 2.8e-3 / 2.1e-3 rel (FD g fit vs Aymerich-Humet closure); equilibrium build 521 s, DD builds 3 s | reported |
+
 1-D prototype (scratch, two same-material unipolar DD regions, 200 nm, 1e16 cm^-3): continuous model
 J(10 mV) = 4.005e7 A/m^2 = the ohmic `V/(L/(q mu n))` exactly; zero-offset TE 2.478e7 vs the analytic
 series value 2.46e7 (bulk + `kT/(q A* T^2 u e^Delta)`); TE with A* x 1e6 -> 4.005439e7 (1e-6).

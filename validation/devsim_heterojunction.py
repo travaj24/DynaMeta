@@ -23,8 +23,12 @@ equilibrium builder put every region at psi = 0 in its own frame, i.e. zero buil
           continuous-quasi-Fermi model must MISS it (the discriminating gate).
   GATE D  charge neutrality + the discrete Gauss law across the interface (no interface charge).
   GATE E  continuous vs thermionic converge as the barrier vanishes (zero offset, A* -> large).
+  GATE F  (--3d, heavy: the 3-D equilibrium build is ~9 min) a gated ITO / AZO-like 3-D heterostack as
+          equilibrium vs drift-diffusion (thermionic and continuous): no DC path, so DD must reproduce the
+          equilibrium profile. MEASURED 2026-11-03: TE vs continuous 1.5e-9, DD vs equilibrium 2.8e-3
+          (the FD g fit vs the Aymerich-Humet closure).
 
-Run: python -m validation.devsim_heterojunction
+Run: python -m validation.devsim_heterojunction [--3d]
 """
 from __future__ import annotations
 
