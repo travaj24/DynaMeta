@@ -460,11 +460,23 @@ def test_equilibrium_2d_stack_carries_its_built_in_potential(equilibrium_stack):
     assert abs(vbi) > 0.05
     print("[D1a equilibrium gate] V_bi solved {:.6f} V, oracle {:.6f} V".format(psia[-1] - psig[0], vbi))
     assert psia[-1] - psig[0] == pytest.approx(vbi, abs=2e-3)
-    # electrons spill from the high-E_c AlGaAs into the GaAs: depletion on the AlGaAs side, neutral overall
-    q_net = _trap(ng - EQ_NP, zg) + _trap(na - EQ_NN, za)
-    print("[D1a equilibrium gate] net charge / depletion charge = {:.2e}".format(
-        q_net / _trap(np.abs(na - EQ_NN), za)))
-    assert abs(q_net) < 1e-5 * _trap(np.abs(na - EQ_NN), za)
+    # electrons spill from the high-E_c AlGaAs into the GaAs: depletion on the AlGaAs side. The device is
+    # NOT exactly neutral -- the 1e16 cm^-3 AlGaAs (Debye length 41 nm) still carries a residual field at its
+    # top contact 300 nm from the interface (MEASURED net charge 3.7e-3 of the depletion charge, ~e^-5) --
+    # so the gate is the discrete GAUSS LAW over the whole stack: the space charge of all non-contact nodes
+    # (box weights; the interface node's two half-boxes) equals D(top contact edge) - D(bottom contact edge)
+    # with D continuous across the heterointerface (no interface charge).
+    rho_g = Q_E * (EQ_NP - ng)
+    rho_a = Q_E * (EQ_NN - na)
+    q_int = (_trap(rho_g, zg) - rho_g[0] * (zg[1] - zg[0]) / 2
+             + _trap(rho_a, za) - rho_a[-1] * (za[-1] - za[-2]) / 2)
+    d_bot = -GAAS["eps"] * EPS0 * (psig[1] - psig[0]) / (zg[1] - zg[0])
+    d_top = -ALGAAS["eps"] * EPS0 * (psia[-1] - psia[-2]) / (za[-1] - za[-2])
+    q_dep = Q_E * _trap(np.abs(na - EQ_NN), za)
+    print("[D1a equilibrium gate] net charge / depletion charge = {:.2e}; Gauss residual / depletion "
+          "charge = {:.2e}".format(q_int / q_dep, (q_int - (d_top - d_bot)) / q_dep))
+    assert abs(q_int - (d_top - d_bot)) < 1e-6 * q_dep
+    assert abs(q_int) < 1e-2 * q_dep                                    # neutral up to the e^-5 contact tail
     assert na[0] < EQ_NN
 
 
