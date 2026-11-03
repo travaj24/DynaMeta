@@ -181,6 +181,25 @@ def pad_masks(z_m, pad, z_struct, margin=0.0):
 Z_SUBCELL_MODES = ("average", "point")
 
 
+def subcell_offset_pads(dz, lambda_max_m, n=8, base_n_pad_wave=4.0):
+    """The REGISTRATION-SWEEP pads: `n_pad_wave` values putting pad/dz at m + (k + 1/2)/n,
+    k = 0..n-1, m = round(base_n_pad_wave * lambda_max / dz) -- MIDPOINT-uniform sub-cell offsets
+    of the structure's front face (pad = n_pad_wave * lambda_max). The ONE helper behind the
+    registration gates (tests/test_fdtd_registration.py) and the per-geometry convergence-gate
+    constants of the FDTD validations (2026-11-03)."""
+    m = round(base_n_pad_wave * lambda_max_m / dz)
+    return [(m + (k + 0.5) / n) * dz / lambda_max_m for k in range(int(n))]
+
+
+def second_order_constant(err, x):
+    """C = max(err / x^2): the worst second-order constant of an error sample `err` taken at the
+    grid phase steps `x` (X = n_max k0 dz). Used with `subcell_offset_pads` to pin a geometry's
+    convergence-gate constant -- no safety factor (2026-11-03)."""
+    err = np.asarray(err, dtype=float)
+    x = np.asarray(x, dtype=float)
+    return float(np.max(err / x ** 2))
+
+
 def check_z_subcell(where, mode):
     """Validate the `z_subcell` opt-out kwarg ('average' default; 'point' = the 2026-11-02 2b7a002
     E-node point sampling, bit-for-bit)."""
