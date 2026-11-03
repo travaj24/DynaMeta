@@ -35,7 +35,8 @@ from dynameta.carriers import devsim_env as E
 PKG = pathlib.Path(dynameta.__file__).resolve().parent
 REPO = PKG.parent
 HAVE_DEVSIM = importlib.util.find_spec("devsim") is not None
-_DEVSIM_ENV = ("DEVSIM_MATH_LIBS", "DEVSIM_BLAS_PREFIX", "DEVSIM_BLAS_SUFFIX", E.MODE_ENV)
+_DEVSIM_ENV = ("DEVSIM_MATH_LIBS", "DEVSIM_BLAS_PREFIX", "DEVSIM_BLAS_SUFFIX", "DEVSIM_NEW_SYMBOLIC",
+               E.MODE_ENV)
 
 _CHILD = "\n".join([
     "import json, os",
@@ -136,6 +137,7 @@ def test_resolution_order_mkl_then_scipy_then_devsim_default(fresh):
     assert E.configure_math_libs()["source"] == "mkl"
     assert os.environ["DEVSIM_MATH_LIBS"] == "/x/mkl_rt.3.dll"
     assert "DEVSIM_BLAS_PREFIX" not in os.environ          # MKL uses devsim's standard names
+    assert os.environ["DEVSIM_NEW_SYMBOLIC"] == "1"         # no PARDISO symbolic reuse (docstring)
     assert E.configure_math_libs()["source"] == "mkl"      # idempotent: the first call decides
 
     fresh.setattr(E, "_DECISION", None)
@@ -158,6 +160,14 @@ def test_resolution_order_mkl_then_scipy_then_devsim_default(fresh):
     fresh.setattr(E, "_scipy_openblas", lambda: None)
     assert E.configure_math_libs()["source"] == "devsim-default"
     assert "DEVSIM_MATH_LIBS" not in os.environ
+
+
+def test_mkl_pin_keeps_a_user_new_symbolic_setting(fresh):
+    fresh.setenv(E.MODE_ENV, "pin")
+    fresh.setenv("DEVSIM_NEW_SYMBOLIC", "0")
+    fresh.setattr(E, "_mkl_rt", lambda: "/x/mkl_rt.3.dll")
+    assert E.configure_math_libs()["source"] == "mkl"
+    assert os.environ["DEVSIM_NEW_SYMBOLIC"] == "0"
 
 
 def test_mode_off_posix_default_and_already_imported(fresh):

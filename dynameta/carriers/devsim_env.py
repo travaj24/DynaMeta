@@ -27,7 +27,14 @@ THE PIN (when the user has NOT set DEVSIM_MATH_LIBS -- a user value always wins,
   1. pip `mkl` installed in this environment -> DEVSIM_MATH_LIBS = that mkl_rt by FULL path. This
      is what devsim already picks when mkl is present (mkl_rt first, then MKL-PARDISO as the
      direct solver instead of UMFPACK -- measured: info['direct_solver'] == 'mkl_pardiso'); the
-     pin keeps that choice and only removes the PATH lookup.
+     pin keeps that choice and only removes the PATH lookup. It ALSO sets DEVSIM_NEW_SYMBOLIC=1
+     unless the user set it: DEVSIM (>= 2.6.0) otherwise reuses the PARDISO symbolic
+     factorisation from the second Newton iteration on, and with it
+     validation/bipolar_diode_2d.py did not converge at ANY bias (3/3 "Convergence failure!",
+     MEASURED in a pip-mkl venv, D0 2026-11-03). With a fresh symbolic factorisation per
+     iteration it converges, the currents match UMFPACK to <= 2e-16 relative, and DEVSIM's solve
+     time on that 18k-node device is 66 s against UMFPACK's 132 s
+     (docs/audit/2026-11-03-devsim-2.11-core.md, section 4).
   2. else the LP64 OpenBLAS bundled in the installed scipy wheel (scipy.libs/libscipy_openblas-
      <hash>.dll|.so; scipy is a core dependency), with DEVSIM_BLAS_PREFIX='scipy_' and
      DEVSIM_BLAS_SUFFIX='_' (devsim 2.11.1 issue #167 -- the documented way to use scipy's
@@ -176,6 +183,7 @@ def configure_math_libs() -> dict:
     mkl = _mkl_rt()
     if mkl is not None:
         os.environ["DEVSIM_MATH_LIBS"] = mkl
+        os.environ.setdefault("DEVSIM_NEW_SYMBOLIC", "1")   # PARDISO symbolic reuse: see docstring
         return _decide("mkl", mkl)
     ob = _scipy_openblas() if _devsim_honours_blas_prefix() else None
     if ob is not None:
