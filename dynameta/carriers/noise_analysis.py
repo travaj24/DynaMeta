@@ -131,6 +131,13 @@ edge_volume_model is a generation term and allowed); the FD-degenerate
 diffusion source uses mu kT/q (gate G: 3.7e-5 FDT residual in accumulation). Multi-region carrier
 interfaces work through DEVSIM's permuted rows (gate B3). A biased DD resistor is 4kT G only up to a
 physical drift/Debye-screening term (1.1e-3 at 1 um / 0.1 V, ~V^2 L^-2.7). Requires DEVSIM.
+
+LOW-FREQUENCY CONDUCTANCE FOR THE FDT (D2b, docs/audit/2026-11-03-devsim-extended-precision.md). The
+noise sum (all positive terms) stays exact where the ssac Re Y does not: a Si-like p+n diode has
+G0 = 2.58e-5 S/m^2 but Re Y(1 Hz) = -0.27 S/m^2 driven at the p+ end (~+-6e-5 at the n end). The
+noise solve is one double factorization like ssac, and extended precision does NOT lift that floor
+(an AdvisoryWarning says so on an opted-in device). Compare 4kT G against the DC dI/dV (+-0.1 mV
+central difference of solved DC terminal currents: G0 to 1e-6), and drive the LIGHTLY doped contact.
 """
 
 from __future__ import annotations
@@ -141,6 +148,7 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
+from dynameta.carriers import extended_precision as _XP
 from dynameta.carriers.eq_registry import ds
 from dynameta.constants import KB, Q_E
 
@@ -490,7 +498,7 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     sol_re, sol_im = "noise_{}_real".format(output_node), "noise_{}_imag".format(output_node)
     try:
         for k, f in enumerate(freqs):
-            ds.solve(type="noise", frequency=float(f), output_node=output_node)
+            _XP.solve(type="noise", frequency=float(f), output_node=output_node)  # 128-bit iff opted in
             fix = {}
             for key, lst in contact_nodes.items():
                 fix[key] = [(nodes, complex(
