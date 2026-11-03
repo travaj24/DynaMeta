@@ -41,11 +41,12 @@ FORMULATION (all SI; energies are measured from the intrinsic level E_i, + towar
    kind="neutral" keeps a level recombination-only (the legacy SRH assumption N_t -> 0).
 
 4. Interface traps at a semiconductor/insulator interface  [Nicollian & Brews, MOS (Metal Oxide
-   Semiconductor) Physics and Technology, Wiley 1982, Ch. 5-6 and 8]. A density D_it(E) [eV^-1 m^-2]
+   Semiconductor) Physics and Technology, Wiley 1982]. A density D_it(E) [eV^-1 m^-2]
    -- uniform over a band of the gap, Gaussian, or discrete levels -- is discretized into sheet levels
    N_it,k = D_it(E_k) dE_k [m^-2] (midpoint bins of width <= kT, edges aligned to the neutral level;
-   the midpoint rule on the thermally-smoothed integrand converges like exp(-2 pi^2 kT/dE), so dE = kT
-   is exact to ~1e-8 away from the band ends). Each sheet level has the SRH occupancy of item 3
+   the midpoint rule on the thermally-smoothed integrand converges like exp(-2 pi^2 kT/dE), a ~1e-8
+   ESTIMATED quadrature error at dE = kT away from the band ends -- the measured C-V gates, ~2e-4, are
+   mesh-limited, not bin-limited). Each sheet level has the SRH occupancy of item 3
    evaluated with the SURFACE densities n_s, p_s, and
        Q_it = q sum_{donor-like} N_it,k (1 - f_k) - q sum_{acceptor-like} N_it,k f_k  [+ Q_f fixed],
    with the Nicollian-Brews convention "acceptor-like above the neutral level E_0, donor-like below"
@@ -69,8 +70,8 @@ semiconductor row is the Gauss-law surface charge of the interface (MEASURED on 
 1): measured on the same stack they move charge ACROSS the interface (-2x and opposite signs), so they
 are the right tool for D1a's semiconductor/semiconductor thermionic current, NOT for a trapped sheet.
 The per-interface weighting is used instead of DEVSIM's built-in `SurfaceArea` node model because
-SurfaceArea is the SUM over ALL of a region's interfaces (MEASURED node-by-node equal to the sum of the
-per-interface areas, tests/test_traps.py::test_interface_node_area_2d): on a semiconductor touching a
+SurfaceArea is the SUM over ALL of a region's interfaces (MEASURED in 2-D node-by-node equal to the sum
+of the per-interface areas, tests/test_traps.py::test_interface_node_area_2d): on a semiconductor touching a
 gate oxide on top and a spacer on the side it would put the gate interface's D_it on the spacer's
 nodes as well. (DEVSIM assigns a node shared by two interfaces to the first one only; the area here
 follows DEVSIM's own element list, so it inherits that convention.)
@@ -83,6 +84,9 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
     trap-compensated material carries a boundary layer of a few Debye lengths.
   * Interface traps need a bipolar (n AND p) semiconductor side -- the SRH occupancy uses both.
     A semiconductor/semiconductor interface raises (heterojunctions are D1a's).
+  * On the devsim_3d gmsh mesh (not Delaunay: sum NodeVolume = 1.20 x the semiconductor volume, 1.29 x
+    the oxide's) a geometric sheet charge acts at ~0.8 of its 1-D effect -- a PRE-EXISTING 3-D
+    discretization defect, not the weighting here (validation/traps_oracles.py --3d, gate G2).
 """
 
 from __future__ import annotations

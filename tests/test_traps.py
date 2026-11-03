@@ -231,8 +231,9 @@ def test_srh_lifetime_vs_trap_energy(E):
     """Gate (a). n-type slab N_D = 1e21 m^-3 (E_F - E_i = +0.298 eV), tau_n0 = 3e-10, tau_p0 = 1e-10 s
     (asymmetric so E_t and -E_t differ), G = 1e24 m^-3/s (low injection, dp/n0 < 1e-4), L = 60 um.
     The closed form spans 1.0e-10 .. 5.6e-9 s over this E_t range; midgap-only SRH gives 1.0e-10 s at
-    every E_t, i.e. fails the -0.38/+0.3/+0.4 points by 2-55x. MEASURED: |rel err| <= 1.6e-5 (the
-    largest at +-0.4 eV: the low-injection residual dp/n0)."""
+    every E_t, i.e. fails the -0.38/+0.3/+0.4 points by 2-55x. MEASURED (validation/traps_oracles.py,
+    9 levels -0.4..+0.4 eV): |rel err| <= 2.1e-5, the largest at +-0.4 eV (the low-injection residual
+    dp/n0); 3e-7 near midgap."""
     tau_n0, tau_p0, G, L = 3e-10, 1e-10, 1e24, 60e-6
     dp, n0, p0 = _slab_tau("trp_tau", tau_n=tau_n0, tau_p=tau_p0, G=G, length=L,
                            srh_trap_energy_eV=E)
@@ -246,7 +247,7 @@ def test_srh_lifetime_vs_trap_energy(E):
 def test_multilevel_lifetime():
     """Two recombination-only levels at +0.35 and -0.3 eV (TrapLevel list), the built-in channel
     pushed to tau = 1e3 s: low-injection 1/tau = sum_k 1/tau_k with each tau_k from the closed form.
-    MEASURED rel err ~1e-6."""
+    MEASURED rel err -1.7e-7 (tau = 4.504e-10 s)."""
     lv = [PT.TrapLevel(energy_eV=0.35, tau_n0_s=2e-10, tau_p0_s=1e-10),
           PT.TrapLevel(energy_eV=-0.30, tau_n0_s=5e-10, tau_p0_s=4e-10)]
     G, L = 1e24, 60e-6
@@ -268,7 +269,7 @@ def test_trap_charge_compensation(case):
     solved by scipy.brentq on E_F (an independent Fermi-statistics oracle -- not the SRH occupancy
     expression the code uses). acceptor_in_n: N_D = 1e22, N_t = 6e21 at E_t - E_i = +0.33 eV (partly
     filled: n drops to ~4.1e21); donor_in_p: N_A = 1e22, N_t = 4e21 at -0.30 eV. Pre-D1c the centre
-    sits at the trap-free N_D / N_A (a 2.4x / 1.6x miss). MEASURED rel err ~1e-9."""
+    sits at the trap-free N_D / N_A (+62 % / +52 %). MEASURED rel err 0 / 1.1e-15."""
     from scipy.optimize import brentq
     if case == "acceptor_in_n":
         nnet, lv = 1e22, PT.TrapLevel(energy_eV=0.33, density_m3=6e21, kind="acceptor",
@@ -378,7 +379,7 @@ _PHIB = V_T * math.log(MOS_NA / NI)
 
 def _Qs(psi):
     b = psi / V_T
-    F = math.sqrt((math.exp(-b) + b - 1.0) + (_N0 / _P0) * (math.exp(b) - b - 1.0))
+    F = math.sqrt(max(0.0, (math.expm1(-b) + b) + (_N0 / _P0) * (math.expm1(b) - b)))
     return -math.copysign(1.0, psi) * math.sqrt(2.0) * MOS_EPSSI * EPS0 * V_T / _LD * F
 
 
@@ -416,8 +417,8 @@ def test_mos_dit_lf_cv_stretchout(mos_dit_cv):
     """Gate (c-i). Uniform D_it = 1e12 cm^-2 eV^-1 (C_it/C_ox = 0.46), split at E_i. The simulated
     (V_G, psi_s) must lie on the analytic V_G = psi_s - (Q_s(psi_s) + Q_it(psi_s))/C_ox (Sze's exact
     Boltzmann Q_s; N&B Q_it by the closed-form Fermi integral) -- accumulation -> depletion -> weak
-    inversion (psi_s from -0.08 to +0.66 V). MEASURED max |dV| = 1.5e-4 V (accumulation edge), and
-    the trap-free relation misses by 0.2-0.3 V over the same sweep."""
+    inversion (psi_s from -0.07 to +0.66 V). MEASURED max |dV| = 7.4e-5 V (accumulation edge); the
+    trap-free device misses this relation by up to 0.24 V."""
     V, P = mos_dit_cv
     va = np.array([p - (_Qs(p) + _Qit(p, DIT, EG)) / MOS_COX for p in P])
     assert np.max(np.abs(V - va)) < 5e-4
@@ -428,7 +429,7 @@ def test_mos_dit_lf_cv_stretchout(mos_dit_cv):
 def test_mos_dit_lf_cv_slope(mos_dit_cv):
     """Gate (c-i'). d psi_s/dV_G (centred differences of the sweep) vs the Nicollian-Brews LF
     relation C_ox/(C_ox + C_s + C_it), C_it = q^2 D_it (times the band-end Fermi factors). MEASURED
-    max rel err 2.3e-4 (median 7e-5); the C_it-free relation misses by 2-26 %."""
+    max rel err 2.3e-4 (median 6.2e-5); the trap-free device misses it by up to 35 %."""
     V, P = mos_dit_cv
     slope = np.gradient(P, V)
     ana = np.array([MOS_COX / (MOS_COX + _Cs(p) + _Cit(p, DIT, EG)) for p in P])
@@ -444,7 +445,7 @@ def test_mos_fixed_charge_flatband_shift():
     dV_FB = -Q_f/C_ox = -0.2321 V. V_FB is located where psi_s = 0 by interpolating each sweep. The
     trap-free device's V_FB is 0 by construction (checked). A linear interpolation of the 20 mV
     sweep is 1.3e-4 V off on curvature alone, so the crossing is a cubic through the six nearest
-    points. MEASURED |error| ~1e-6 V."""
+    points. MEASURED |error| 1.9e-6 V."""
     qf = Q * 5e15
     vgs = np.round(np.arange(-0.4, 0.1001, 0.02), 10)
 
@@ -559,7 +560,8 @@ def test_interface_closed_form_derivatives_match_numeric():
     """The hand-written Electrons/Holes derivatives of the interface charge and rate terms (the Newton
     Jacobian entries) equal centred finite differences of the term models themselves at a
     non-equilibrium state (4 levels, acceptor + donor bins, a fixed charge, recombination on).
-    Every term is node-local, so all nodes are perturbed at once. MEASURED max rel dev ~1e-9."""
+    Every term is node-local, so all nodes are perturbed at once. MEASURED max rel dev 1.4e-8 at
+    h = 1e-4 (h = 1e-6 is roundoff-limited at 9.5e-7, h = 1e-3 truncation-limited at 9.8e-7)."""
     dev = "trp_jac"
     _mos(dev, None)
     it = PT.InterfaceTraps(distribution="discrete", charge="split", neutral_level_eV=0.0,
@@ -574,7 +576,7 @@ def test_interface_closed_form_derivatives_match_numeric():
     for term in ("QTerm_it0", "RTerm_it0"):
         for w in ("Electrons", "Holes"):
             mine = _vals(dev, "si", "{}:{}".format(term, w))[mask]
-            h = 1e-6 * base[w]
+            h = 1e-4 * base[w]                                  # truncation/roundoff optimum
             vals = []
             for sgn in (+1.0, -1.0):
                 ds.set_node_values(device=dev, region="si", name=w, values=(base[w] + sgn * h).tolist())
