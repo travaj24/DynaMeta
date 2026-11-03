@@ -382,7 +382,8 @@ def setup_bipolar_region(device: str, region: str, *,
                          mobility_n_m2Vs: float, mobility_p_m2Vs: float,
                          tau_n_s: float, tau_p_s: float,
                          fd_enhancement: bool = True,
-                         n_dos_p_m3: "float | None" = None) -> None:
+                         n_dos_p_m3: "float | None" = None,
+                         btbt=None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
@@ -398,6 +399,10 @@ def setup_bipolar_region(device: str, region: str, *,
                          recombination (tau=0 would make the SRH denominator 0/0 -> NaN)
       fd_enhancement   : if True, apply the degenerate FD g-factor to BOTH currents;
                          if False, plain Boltzmann Scharfetter-Gummel (g==1).
+      btbt             : None (default: NO band-to-band tunneling -- the models and equations are
+                         exactly the legacy ones) or a carriers.tunneling.BTBTParams: adds the local
+                         Kane/Hurkx BTBT net-recombination term to both continuity equations, coupled
+                         in the Newton (carriers/tunneling.py; D1d).
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
@@ -508,6 +513,9 @@ def setup_bipolar_region(device: str, region: str, *,
                               variable_name="Holes", edge_model="HoleCurrent",
                               node_model="HoleGeneration", time_node_model="PCharge",
                               variable_update="positive")
+    if btbt is not None:                                       # D1d: opt-in BTBT generation
+        from dynameta.carriers.tunneling import setup_btbt
+        setup_btbt(device, region, btbt)
 
 
 # Charge-neutral equilibrium carrier node models (SI). Used both to seed the
