@@ -98,8 +98,18 @@ form). No tunnelling / thermionic-field emission (workstream D1d), no interface 
 v0.14 INTEGRATION: bandgap narrowing (D1b) composes as an effective band-edge field (Lundstrom &
 Schuelke 1983): the interface reads E_F against E_c - q D_c / E_v + q D_v of each node copy
 (_bgn_interface_arguments); the contacts compose s(r) with the region's own-frame equilibrium potential
-in ONE rule (physics_bipolar_dd.contact_potential_residual). A region at T_K != T_REF on a heterointerface
-with BGN is refused (the interface is written at T_REF). The TE fluxterm has no noise source in
+in ONE rule (physics_bipolar_dd.contact_potential_residual).
+
+TEMPERATURE (v0.14 D1a follow-up). The interface runs at the temperature of the regions it joins, read
+from ONE source: the region parameter `V_t` the bulk installed (V_T at T_REF by default, k T_K / q under
+BipolarOptions.T_K -- bipolar_options.install_option_fields). Every kT of the interface (the barrier
+offsets k_i = (E_top - E_i)/kT, the BGN-shifted tops) uses it, and the Richardson prefactor is
+A* T^2 at T = q V_t / k (exactly T_REF when V_t is V_T, so the 300 K strings are unchanged). The
+activity L = ln u + Delta(u) is dimensionless in u = c/N, with N the bulk's own band DOS parameter, so it
+needs no temperature of its own. The two sides of an interface must share ONE V_t: a NON-ISOTHERMAL
+interface (a temperature step) is refused -- it needs heat flow and the thermoelectric (Seebeck/Peltier)
+terms of thermionic emission, which are not modelled. Before this, a T_K region without BGN silently ran
+the interface at 300 K (and with BGN it was refused). The TE fluxterm has no noise source in
 noise_analysis (documented limit).
 """
 
@@ -114,8 +124,8 @@ from dynameta.carriers.eq_registry import ds
 from dynameta.carriers.einstein import GA, GB, GC, GD, g_expr_devsim
 from dynameta.constants import Q_E, KB, HBAR, M_E, T_REF, V_T
 
-__all__ = ["richardson_constant_Am2K2", "A_RICHARDSON_FREE", "HeteroSide", "anderson_alignment",
-           "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
+__all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_RICHARDSON_FREE",
+           "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
@@ -256,25 +266,43 @@ def setup_log_activity(device: str, region: str, carrier: str, dos_param: str, *
     return name
 
 
-def interface_models(side0: HeteroSide, side1: HeteroSide, carrier: str) -> Tuple[float, float, float]:
+def temperature_of_V_t(v_t: float) -> float:
+    """T [K] from a region's thermal voltage V_t = k T / q -- exactly T_REF when V_t is the library's
+    V_T (so the 300 K arithmetic is bit-identical), else q V_t / k."""
+    v = float(v_t)
+    if not (math.isfinite(v) and v > 0.0):
+        raise ValueError("V_t must be finite and > 0, got {!r}".format(v_t))
+    return T_REF if v == V_T else v * Q_E / KB
+
+
+def region_V_t(device: str, region: str) -> float:
+    """The ONE temperature source of a region: its `V_t` parameter as the bulk physics installed it."""
+    return float(ds.get_parameter(device=device, region=region, name="V_t"))
+
+
+def interface_models(side0: HeteroSide, side1: HeteroSide, carrier: str,
+                     V_t: float = V_T) -> Tuple[float, float, float]:
     """(k0, k1, A*T^2) for `carrier` in {'Electrons', 'Holes'}: k_i = (barrier top - band edge_i)/kT >= 0
     (one of them is 0) and the Richardson prefactor of the BARRIER side (the side holding the top; on a
-    zero offset, the smaller of the two -- the conservative choice, and symmetric)."""
+    zero offset, the smaller of the two -- the conservative choice, and symmetric), at the interface's
+    thermal voltage V_t (T = q V_t / k)."""
+    vt = float(V_t)
+    T = temperature_of_V_t(vt)
     if carrier == "Electrons":
         e0, e1 = side0.phi_c_V, side1.phi_c_V                     # E_c / q + psi
         top = max(e0, e1)
-        k0, k1 = (top - e0) / V_T, (top - e1) / V_T
+        k0, k1 = (top - e0) / vt, (top - e1) / vt
         a0, a1 = side0.richardson_n, side1.richardson_n
         a = a0 if e0 > e1 else (a1 if e1 > e0 else min(a0, a1))
     elif carrier == "Holes":
         e0, e1 = side0.phi_v_V, side1.phi_v_V                     # E_v / q + psi
         bot = min(e0, e1)                                          # hole barrier = LOWER valence edge
-        k0, k1 = (e0 - bot) / V_T, (e1 - bot) / V_T
+        k0, k1 = (e0 - bot) / vt, (e1 - bot) / vt
         a0, a1 = side0.richardson_p, side1.richardson_p
         a = a0 if e0 < e1 else (a1 if e1 < e0 else min(a0, a1))
     else:
         raise ValueError("carrier must be 'Electrons' or 'Holes'")
-    return k0, k1, float(a) * T_REF ** 2
+    return k0, k1, float(a) * T ** 2
 
 
 def _region_has(device: str, region: str, model: str) -> bool:
@@ -282,7 +310,7 @@ def _region_has(device: str, region: str, model: str) -> bool:
 
 
 def _bgn_interface_arguments(device: str, side0: HeteroSide, side1: HeteroSide, carrier: str,
-                             L0: str, L1: str):
+                             L0: str, L1: str, V_t: float = V_T):
     """(w0, w1) = (E_F,i - E_top)/kT on the two node copies when bandgap narrowing (D1b,
     bipolar_options) is on in either region, else (None, None).
 
@@ -304,24 +332,17 @@ def _bgn_interface_arguments(device: str, side0: HeteroSide, side1: HeteroSide, 
     has0, has1 = _region_has(device, side0.region, fld), _region_has(device, side1.region, fld)
     if not (has0 or has1):
         return None, None
-    for sd in (side0, side1):
-        vt = float(ds.get_parameter(device=device, region=sd.region, name="V_t"))
-        if vt != V_T:
-            raise NotImplementedError(
-                "setup_heterointerface_carriers: region {!r} runs at V_t = {!r} (BipolarOptions.T_K) but "
-                "the heterointerface model is written at T_REF (V_T = {!r}); a temperature-dependent "
-                "interface (Richardson T^2, kT in the activities) is not implemented.".format(
-                    sd.region, vt, V_T))
+    vt = float(V_t)                                          # the interface's (= both regions') V_t
     E0 = "({!r} {} {}@r0)".format(e0, sgn, fld) if has0 else "({!r})".format(e0)
     E1 = "({!r} {} {}@r1)".format(e1, sgn, fld) if has1 else "({!r})".format(e1)
     if carrier == "Electrons":                               # barrier top = higher effective E_c
         top = "ifelse({a} > {b}, {a}, {b})".format(a=E0, b=E1)
-        k0 = "({} - {})/{!r}".format(top, E0, V_T)
-        k1 = "({} - {})/{!r}".format(top, E1, V_T)
+        k0 = "({} - {})/{!r}".format(top, E0, vt)
+        k1 = "({} - {})/{!r}".format(top, E1, vt)
     else:                                                    # hole barrier = lower effective E_v
         bot = "ifelse({a} < {b}, {a}, {b})".format(a=E0, b=E1)
-        k0 = "({} - {})/{!r}".format(E0, bot, V_T)
-        k1 = "({} - {})/{!r}".format(E1, bot, V_T)
+        k0 = "({} - {})/{!r}".format(E0, bot, vt)
+        k1 = "({} - {})/{!r}".format(E1, bot, vt)
     return "({}@r0 - {})".format(L0, k0), "({}@r1 - {})".format(L1, k1)
 
 
@@ -342,6 +363,15 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
         raise ValueError("setup_heterointerface_carriers: interface {!r} joins {} (region0, region1) but "
                          "the sides were given as ({!r}, {!r})".format(interface, regs, side0.region,
                                                                      side1.region))
+    vts = [region_V_t(device, sd.region) for sd in (side0, side1)]
+    if vts[0] != vts[1]:
+        raise NotImplementedError(
+            "setup_heterointerface_carriers: interface {!r} joins {!r} at T = {:.6g} K and {!r} at "
+            "T = {:.6g} K (region V_t {!r} / {!r}, from BipolarOptions.T_K). Missing: a NON-ISOTHERMAL "
+            "interface model (heat flow and the thermoelectric terms of thermionic emission); give both "
+            "regions the same T_K.".format(interface, side0.region, temperature_of_V_t(vts[0]),
+                                          side1.region, temperature_of_V_t(vts[1]), vts[0], vts[1]))
+    vt = vts[0]
     carriers = [("Electrons", "ElectronContinuityEquation", "n", -1.0)]
     if side0.holes and side1.holes:
         carriers.append(("Holes", "HoleContinuityEquation", "p", +1.0))
@@ -350,8 +380,8 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
         dos1 = side1.n_dos_param if var == "Electrons" else side1.p_dos_param
         L0 = setup_log_activity(device, side0.region, var, dos0, fd=side0.fd)
         L1 = setup_log_activity(device, side1.region, var, dos1, fd=side1.fd)
-        k0, k1, at2 = interface_models(side0, side1, var)
-        w0, w1 = _bgn_interface_arguments(device, side0, side1, var, L0, L1)
+        k0, k1, at2 = interface_models(side0, side1, var, vt)
+        w0, w1 = _bgn_interface_arguments(device, side0, side1, var, L0, L1, vt)
         if w0 is None:                                       # no BGN on either side: D1a's strings
             w0 = "({L}@r0 - {k!r})".format(L=L0, k=k0)
             w1 = "({L}@r1 - {k!r})".format(L=L1, k=k1)

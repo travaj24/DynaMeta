@@ -51,14 +51,21 @@ DEC = GAAS["chi"] - ALGAAS["chi"]               # 0.2431 eV conduction-band offs
 DEV = (ALGAAS["eg"] - GAAS["eg"]) - DEC         # 0.1309 eV valence-band offset (AlGaAs lower)
 
 
-def nc_m3(m_rel: float) -> float:
+def thermal_voltage(T: float = T_REF) -> float:
+    """kT/q -- the library's V_T at T_REF (the same float), else KB T / Q_E."""
+    return V_T if T == T_REF else KB * T / Q_E
+
+
+def nc_m3(m_rel: float, T: float = T_REF) -> float:
     """Effective DOS 2 (m kT / 2 pi hbar^2)^(3/2) -- written out here (oracle side), not imported."""
     hbar = 1.054571817e-34
-    return 2.0 * (m_rel * M_E * KB * T_REF / (2.0 * math.pi * hbar ** 2)) ** 1.5
+    return 2.0 * (m_rel * M_E * KB * T / (2.0 * math.pi * hbar ** 2)) ** 1.5
 
 
-def n_i_m3(mat: dict) -> float:
-    return math.sqrt(nc_m3(mat["me"]) * nc_m3(mat["mh"])) * math.exp(-mat["eg"] / (2.0 * V_T))
+def n_i_m3(mat: dict, T: float = T_REF) -> float:
+    """sqrt(N_c N_v) exp(-E_g / 2kT) at T (the gap is taken T-independent: a model input, not a claim)."""
+    return (math.sqrt(nc_m3(mat["me"], T) * nc_m3(mat["mh"], T))
+            * math.exp(-mat["eg"] / (2.0 * thermal_voltage(T))))
 
 
 def richardson(m_rel: float) -> float:
@@ -92,7 +99,9 @@ def const_fn(v):
 
 
 def transport(mat: dict, *, n_bg: float, physics: str, acceptor: bool = False, net_doping_expr=None,
-        richardson_n=None):
+        richardson_n=None, T_K=None, n_i_T_K=None):
+    """T_K (bipolar only): BipolarOptions(T_K=T_K), n_i at T_K (or at n_i_T_K if given -- the refusal
+    gate supplies a WRONG-temperature n_i on purpose)."""
     from dynameta.materials import TransportModel
     kw = dict(n_bg_m3=n_bg, eps_static=mat["eps"], dos_mass_kg_of_n_m3=const_fn(mat["me"] * M_E),
               band_gap_eV=mat["eg"], chi_eV=mat["chi"], physics=physics,
@@ -100,9 +109,13 @@ def transport(mat: dict, *, n_bg: float, physics: str, acceptor: bool = False, n
     if richardson_n is not None:                    # (only when set: keeps the factory usable on v0.13.0,
         kw["richardson_n_Am2K2"] = richardson_n     #  where the fail-on-old check must reach the builder)
     if physics == "bipolar_dd":
+        t_ni = n_i_T_K if n_i_T_K is not None else (T_K if T_K is not None else T_REF)
         kw.update(hole_mobility_m2Vs_of_n_m3=const_fn(mat["mu_p"]), tau_srh_s=1.0,
-                  n_i_m3=n_i_m3(mat), dos_mass_p_kg=mat["mh"] * M_E, acceptor=acceptor,
+                  n_i_m3=n_i_m3(mat, t_ni), dos_mass_p_kg=mat["mh"] * M_E, acceptor=acceptor,
                   net_doping_expr=net_doping_expr)
+        if T_K is not None:
+            from dynameta.carriers.bipolar_options import BipolarOptions
+            kw["bipolar_options"] = BipolarOptions(T_K=float(T_K))
     return TransportModel(**kw)
 
 
