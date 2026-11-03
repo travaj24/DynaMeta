@@ -296,6 +296,13 @@ def require_lumenairy():
 #                                 gate, folded into this table (test_lumenairy_per_layer_grids).
 #   bor_sem               5.46.0  BORStack(basis='sem') -- earlier SEM builds manufacture sliver
 #                                 elements (bor_backend._SEM_FLOOR, which reads this table).
+#   rcwa_shapes_li        5.50.1  RCWAStack.add_layer(shapes=, formulation='li') -- Li's rule on
+#                                 analytic shapes (1-D stacks: y-invariant shapes; 2-D stacks:
+#                                 axis-aligned rectangles; lumenairy raises ValueError for the
+#                                 rest). 5.50.0 raises "shapes layers accept only the default".
+#                                 (lumenairy audit L-4, from this bridge's 2026-11-02 report.)
+#   rcwa_shapes_absorption 5.50.1 RCWAResult.layer_absorption() on a stack holding shapes=
+#                                 layers; NotImplementedError on 5.50.0 (lumenairy audit L-3).
 # A path that needs one of these calls require_lumenairy_feature, which raises
 # LumenairyFeatureUnavailable ("... needs lumenairy >= X (installed Y)") BEFORE lumenairy is
 # touched; tests gate on lumenairy_has(feature) with the same table, so the floor leg skips
@@ -311,6 +318,10 @@ FEATURE_FLOORS = {
     "pmm2d_pure_shapes": ((5, 50, 0), "the PMM2D pure engine's curved-cell shapes "
                           "(add_layer(shapes=) with Rect / Circle / Ellipse)"),
     "bor_sem": ((5, 46, 0), "BORStack(basis='sem')"),
+    "rcwa_shapes_li": ((5, 50, 1), "Li's factorization on RCWA analytic shapes layers "
+                       "(add_layer(shapes=, formulation='li'))"),
+    "rcwa_shapes_absorption": ((5, 50, 1), "per-layer absorption on RCWA analytic shapes layers "
+                               "(RCWAResult.layer_absorption with shapes=)"),
 }
 
 
