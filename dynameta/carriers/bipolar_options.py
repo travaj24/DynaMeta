@@ -301,7 +301,8 @@ IONIZATION_SI_P_B = IonizationModel(dE_D_eV=0.045, dE_A_eV=0.045,
 _ROOT_ITERS = 200       # bisection steps in ln n; the bracket spans < 400 e-folds -> < 1e-58 after 200
 
 
-def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=(), V_t=None):
+def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=(), V_t=None,
+                  N_c=None, N_v=None):
     """Charge-neutral equilibrium electron density n0 solving
          f(n) = n - n_ie^2/n - N_D+(n) + N_A-(n_ie^2/n) - Q_t(n)/q = 0
     (N_D+ = N_D, N_A- = N_A when ionization is False). `traps` = ((E_t - E_i [eV], N_t, kind), ...)
@@ -309,7 +310,10 @@ def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=()
     n1 = n_ie exp(E_t/kT) -- the steady-state SRH occupancy of physics_traps at n p = n_ie^2, the same
     n1 the rate uses: Q_t/q = -N_t f_t (acceptor-like), +N_t (1 - f_t) (donor-like). This is the
     charge-neutrality condition with trapped charge of Shockley & Read (1952) / Sze & Ng ch. 1, i.e.
-    the brentq oracle of the D1c compensation gate. Every term of f is STRICTLY increasing in n
+    the brentq oracle of the D1c compensation gate. A band-referenced level (a 4-tuple, see
+    physics_traps.equilibrium_trap_levels) takes its n1 from the band edge instead -- N_c exp(-E/kT), or
+    n_ie^2/(N_v exp(-E/kT)) -- through physics_traps.equilibrium_n1, the same conversion the rate uses
+    (N_c / N_v are then required). Every term of f is STRICTLY increasing in n
     (-Q_t/q too: +N_t n/(n + n1) and -N_t n1/(n + n1)), so the root is unique; bisection in ln n on
          [n_ie^2/S, S],   S = N_A + N_D + sum N_t + n_ie
     (f <= 0 at the lower end, >= 0 at the upper -- see the audit doc) converges unconditionally.
@@ -318,7 +322,8 @@ def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=()
     ni2 = n_ie * n_ie
     if traps:
         hi = np.log(N_A + N_D + sum(float(t[1]) for t in traps) + n_ie)
-        tl = [(float(N), n_ie * math.exp(float(E) / float(V_t)), kind) for E, N, kind in traps]
+        from dynameta.carriers.physics_traps import equilibrium_n1
+        tl = [(float(t[1]), equilibrium_n1(t, n_ie, V_t, N_c, N_v), t[2]) for t in traps]
     else:
         hi = np.log(N_A + N_D + n_ie)
         tl = []
@@ -408,7 +413,8 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     uq, inv = np.unique(key, axis=0, return_inverse=True)
     inv = np.asarray(inv).reshape(-1)
     n0u, p0u = _neutral_root(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
-                             ion is not None, traps=tuple(traps or ()), V_t=Vt)
+                             ion is not None, traps=tuple(traps or ()), V_t=Vt,
+                             N_c=float(N_c_m3), N_v=float(N_v_m3))
     n0 = n0u[inv].reshape(N.shape)
     p0 = p0u[inv].reshape(N.shape)
     # --- the potential the ohmic contact pins (Boltzmann frame + FD degeneracy + band-edge shift) ---
