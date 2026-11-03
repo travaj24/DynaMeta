@@ -1,4 +1,4 @@
-# DEVSIM phase integration: D1b + D1c + D1d + D2a consolidated (v0.14.0)
+# DEVSIM phase integration: D1b + D1c + D1d + D2a + D1a consolidated (v0.14.0)
 
 Branch `feat/devsim-2.11-v0.14` (worktree `DynaMeta_wt/dv_integ`). Merged on top of D1b (`d3a7012`,
 already on the branch):
@@ -8,11 +8,13 @@ already on the branch):
 | `71978e9` | merge `wip/dv_tunnel` (D1d: BTBT in the Newton, post-processed oxide tunneling) |
 | `2e4b8ee` | merge `wip/dv_traps` (D1c: SRH at E_t, multi-level trapped charge, interface traps) |
 | `6baa9a6` | merge `wip/dv_noise` (D2a: impedance-field small-signal noise) |
-| (this commit) | consolidation: one term mechanism, one SRH kernel, one contact rule, noise on the same inventory, composition gates |
+| `b5e8e47` | consolidation: one term mechanism, one SRH kernel, one contact rule, noise on the same inventory, composition gates |
+| `da7614f` | merge `wip/dv_hetero` (D1a: Anderson alignment, thermionic / continuous-QFL heterointerfaces), with the contact-rule and BGN-interface composition (section 2.8) |
+| (last commit) | the D1a x D1b / D2a composition gates, the hetero noise builder, this note's final counts |
 
-The three merge commits are plain unions of the conflicting hunks: keyword lists, dataclass fields
-and builder threading, each with its own validation. All of the design work is in the consolidation
-commit described below.
+The first three merge commits are plain unions of the conflicting hunks: keyword lists, dataclass
+fields and builder threading, each with its own validation. The design work for D1b/D1c/D1d/D2a is in
+`b5e8e47`; the D1a composition is in its merge commit `da7614f`.
 
 ## 1. What collided
 
@@ -237,10 +239,90 @@ still pass.
   was wrong at T != T_REF. The bulk installer uses the region's `V_t`; interface traps read the
   region parameter. For E = 0, or with T_K unset, the arithmetic is unchanged.
 
-## 3. Composition gates: `tests/test_devsim_phase_composition.py` (9 pass + 1 strict xfail)
+### 2.8 D1a heterojunctions x D1b BGN x the contact rule (merge `da7614f`)
 
-**Fixture.** A 1-D abrupt p+n+ junction (5e24 m^-3, 0.2 nm at the junction) with these opt-ins all
-on:
+**One contact rule.** `physics_bipolar_dd.contact_potential_residual` is used by both the DC and the
+circuit bipolar recipes:
+
+    Potential = <bias or circuit node> + s(r) + psi_eq,own(r)
+
+* `s(r)` is D1a's Anderson frame shift (`psi_offset_V`), computed by `anderson_alignment` from the
+  UNNARROWED material edges. It is the affinity rule, a property of the material.
+* `psi_eq,own(r)` is the contact node's equilibrium potential in the region's own (intrinsic-level)
+  frame. It comes from `equilibrium_fields` (BGN band-edge split + incomplete-ionization root +
+  charged-trap charge + FD) when the region carries it, otherwise from the legacy closed form.
+
+The two pieces are disjoint: `s` is a per-region constant of the alignment, and every
+doping-dependent shift lives in `psi_eq,own`. So nothing is counted twice, and there is no parallel
+offset path:
+* D1a's own `psi_offset_V` now feeds this one function.
+* The circuit recipe gained `psi_offset_V` (0 leaves the string unchanged).
+* The builder seed is `equilibrium_seed_psi_expr(SeedPsiShift or FD) + s`, the same composition.
+
+**Decision on D1b's merge note.** D1b's note said band offsets belong in the `vdiff_g` / `vdiff_gp`
+quasi-fields and in `psi_eq`.
+* The quasi-field part is satisfied trivially. D1a splits regions at every material change, so the
+  Anderson offset is constant inside a region; its in-region gradient, which is what the quasi-field
+  slots carry, is zero, and the jump sits on the interface, where D1a's interface condition carries
+  it.
+* The `psi_eq` part is the rule above.
+
+Moving the constant shift into `equilibrium_fields` as well would have been the double-counting
+path, so it was not done.
+
+**BGN at the heterointerface.** Lundstrom & Schuelke (IEEE TED 30, 1151 (1983)) treat affinity, gap
+and heavy-doping shifts as one effective band-edge field. Following that, the D1a interface
+activities read E_F against `E_c - q D_c` and `E_v + q D_v` of each node copy, and the TE barrier
+top is the larger effective conduction edge (the smaller effective valence edge for holes). This is
+implemented in `physics_heterojunction._bgn_interface_arguments`. Without BGN, D1a's strings are
+unchanged.
+
+Gate `test_heterojunction_with_bgn_effective_offsets_at_the_interface[auto|continuous]` checks
+`dE_c,eff = dE_c - D_c,A + D_c,G` to 1e-6 eV. With the interface terms removed it misses by
+**5.66 meV** on both interface models (0.24310 vs 0.24876 eV).
+
+T_K != T_REF on a heterointerface with BGN is refused. The interface, including the Richardson T^2
+and the kT of the activities, is written at T_REF.
+
+**Noise on heterointerfaces.**
+* **Continuous-QFL heterointerface: covered.** On the FDT diode as a heterojunction (n_i 1e19 | 3e18,
+  affinity step 0.05 eV, s(r_p) = 18.9 mV through the shared contact rule), S_I = 4kT Re Y holds to
+  <= 5.7e-6 over 1 Hz - 1 GHz.
+* **Thermionic-emission fluxterm: NOT covered.** It has no noise source: its shot noise
+  2q(J_0->1 + J_1->0) is missing. Where the interface resistance matters (A* x 1e-6), the FDT misses
+  by -0.69 at 1 Hz. This is pinned by a strict xfail and documented in `noise_analysis` and
+  `physics_heterojunction`.
+* With the free-electron A*, the same TE device holds the FDT to 5e-6, because the interface is then
+  not resistive. This is not evidence of coverage.
+
+**D1a behaviour change (S1-9 fix).** 2-D designs with two or more semiconductor regions of different
+doping or affinity now get Fermi-level alignment. No existing test in the files run here pinned the
+old zero-built-in-potential result; see section 5.
+
+### 2.9 Consequence of the 2.6 fix: D1d gate L1 now fails (reported, not changed)
+
+`test_devsim_tunneling.py::test_l1_layered_builder_btbt_equals_1d_twin` builds
+`BTBTParams(A_SI=4.0e15, B=4e8, P=2.5)`. A = 4.0e15 is an integral float, so before the fix it was
+written `"4000000000000000"` and clamped by DEVSIM to 2147483647. The gate therefore compared the 2-D
+element-path BTBT with the 1-D edge-path twin at a rate about 1.9e6 times smaller than its docstring
+says. In that perturbative regime the two agreed to 3e-9 .. 7e-9.
+
+With the true A, the current at -0.5 V is 2263.76 A/m^2 (1-D) against 2263.12 A/m^2 (2-D), a
+relative difference of -2.81e-4. The 1e-6 gate fails. Diagnosis:
+* **Not convergence.** The 2-D value is unchanged at rel_tol 1e-5, 1e-8 and 1e-10 (2263.123988991).
+* **Not the merge.** Restoring `%.17g` makes the gate pass again with the clamped A.
+* **The likely cause is the two quadratures themselves.** At a real generation level, the carriers
+  in the junction rise, D varies across each element, and the node-local D of the 2-D element path
+  and the edge-mean D of the 1-D path differ at O(h^2) of D's variation.
+
+The tolerance is not loosened and A is not changed here. Two options for the D1d owner or the user:
+* gate L1 at a quadrature-consistent tolerance derived from h;
+* gate it at the rate its docstring intends with a refined mesh.
+
+## 3. Composition gates: `tests/test_devsim_phase_composition.py` (16 pass + 2 strict xfail)
+
+**Fixture of the first five rows.** A 1-D abrupt p+n+ junction (5e24 m^-3, 0.2 nm at the junction)
+with these opt-ins all on:
 * BGN (Slotboom);
 * Auger (Dziewior-Schmid);
 * radiative (Trupke);
@@ -261,18 +343,53 @@ It is solved at 0.5 V reverse.
 | noise FDT, charged level, 100 kHz / 10 MHz | **strict xfail**: the D1c quasi-static trap charge makes ssac non-charge-conserving | 5.6e-3 / 6.6e-2 (documented D1c limit; turns green when trap kinetics land) |
 | noise FDT, BTBT at equilibrium | the D2a FDT diode with BTBT (A 1e12, B 1e7 V/m). The net rate is ~0 (D = 0) but the pair rate and the linear response are not. | <= 2.3e-6 (gate 1e-4). Re Y x1.39. Dropping the BTBT pair breaks the FDT. |
 | 2-D element pair weights | uniform field and density on triangles: the element-assembled BTBT + SRH pair reaches node i as pair x NodeVolume_i | 1e-12, pass |
+| hetero + BGN: V_bi (x2: `auto` = TE, `continuous`) | 2-D N-Al0.3Ga0.7As / p-GaAs (D1a's gate-B device), BGN on both sides with the test split gamma 0.3 / 0.7 (dEg 14.1 mV). Oracle: q V_bi = W_p - W_n with W_n = chi_A + gamma_A dEg - kT eta_n and W_p = chi_G + E_g - (1 - gamma_G) dEg + kT eta_p (exact FD quadrature). | 2e-4 V gate, pass on both models. BGN moves V_bi by 8.5 mV (> 5 mV asserted). |
+| hetero + BGN: flat E_F (x2) | E_Fn / E_Fp from the solved densities against the effective edges, both regions, 2e-4 eV | pass |
+| hetero + BGN: effective offsets at the interface (x2) | on the interface node copies, dE_c,eff = dE_c - D_c,A + D_c,G and dE_v,eff = dE_v + D_v,G - D_v,A | 1e-6 eV, pass. **Without the BGN interface terms it misses by 5.66 meV** (the load-bearing gate; the flat-E_F gate moves only to 2.05e-4) |
+| noise FDT, continuous-QFL heterointerface | the D2a FDT diode as a heterojunction (n_i 1e19 / 3e18, chi step 0.05 eV, s = 18.9 mV on the circuit contact), 1 Hz - 1 GHz | <= 5.7e-6 (gate 1e-4). Re Y 3.06 vs 6.78 (homojunction). |
+| noise FDT, thermionic heterointerface | **strict xfail (LIMIT)**: no noise source for the TE fluxterm | -0.69 at 1 Hz with A* x 1e-6 |
 
-## 4. Defaults-off guards (all against main `5cbd998`, untouched checkout)
+## 4. Defaults-off guards (all against main `5cbd998`, untouched checkout; run on the final tree)
 
 | Guard | Result |
 |---|---|
-| D1b call-log digest (217 DEVSIM calls, `tests/_bipolar_calllog.py`) | **identical**, NOT re-recorded (`test_defaults_off_call_log_is_v013_byte_identical` passes against the digest recorded on main) |
-| D1d solution arrays | D1d's hashing script was not committed. It was re-implemented over the same fixtures: `validation.bipolar_diode` FD at +0.3 / -0.5 V and the `bipolar_diode_2d` design through `LayeredDevsimBuilder` at +0.3 / -0.4 V. The 16 arrays are Potential / Electrons / Holes / anode current, plus the extras keys. See the release-check row below. |
-| D1c cross-version (`validation/traps_oracles.py` gate F, subprocess on main) | see section 5 |
+| D1b call-log digest (217 DEVSIM calls, `tests/_bipolar_calllog.py`) | **identical**. It was NOT re-recorded: `test_defaults_off_call_log_is_v013_byte_identical` passes against the digest recorded on main. This covers the circuit contact and the contact-rule refactor. |
+| D1d solution arrays | D1d's hashing script was not committed. It was re-implemented over the same fixtures: `validation.bipolar_diode` FD at +0.3 / -0.5 V and the `bipolar_diode_2d` design through `LayeredDevsimBuilder` at +0.3 / -0.4 V. The 16 arrays are Potential / Electrons / Holes / anode current, plus the extras keys. **SHA-256 `a500ca93d99a31b6...` on main AND on the final integration tree**, i.e. after the D1a merge too. |
+| D1c cross-version (`validation/traps_oracles.py` gate F, subprocess on main) | diode `f344b6b7...`, layered `792b1278...`, MOS `39553fc4...`: **identical** on main and the branch |
+| D1a homojunction limit (gate A in `tests/test_devsim_heterojunction.py`) | pass |
 
-## 5. Validation and regression counts
+## 5. Validation and regression counts (final tree, `pytest -n 2`)
 
-See the release-check table at the end of this file (filled from the runs).
+| Run | Result |
+|---|---|
+| D1b + D1d + kernels + D1c + D2a + composition (`test_bipolar_recombination_bgn_ionization`, `test_devsim_tunneling`, `test_tunneling_kernels`, `test_traps`, `test_devsim_noise`, `test_devsim_phase_composition`) | **117 passed, 1 failed, 2 xfailed** (strict). The failure is D1d's L1 (section 2.9). Per file: 22 / 17 + L1 / 18 / 25 / 19 / 16 + 2 xfail. |
+| `tests/test_devsim_heterojunction.py`, slow gate included | **19 passed** (642 s) |
+| Related regression set: devsim_smoke, gated_builder, stacked3d_spec, dc_solve_gummel, audit wave7 carriers / carriers hygiene / conventions / infra, solver_guards, validation_runner, reliability, reliability_ext, density_gradient, geometry_guards, api_surface | **227 passed, 1 failed** (section 5.1) |
+| `validation/traps_oracles.py --3d --main <main>` | A-F 9/9 PASS; G1 PASS; **G2 FAIL**, ratio 0.799: the known pre-existing devsim_3d mesh defect, left failing |
+| `validation/devsim_noise.py` | **PASS**: 11/11 gate lines, A-G, including G on the 2-D layered builder after the D1a merge |
+| `validation/devsim_heterojunction.py` gate F (3-D) | reported, matching D1a's record: TE vs continuous 1.506e-9 / 1.412e-9 (Vg 0 / +0.5 V), DD vs equilibrium 2.758e-3 / 2.093e-3; equilibrium build 554 s, DD builds 3.5 / 3.7 s |
+
+`validation/devsim_heterojunction.py` without `--3d` only re-runs the test file above, so it was run
+once, as that file. Gate F was run through its `report_3d()`.
+
+### 5.1 The one regression failure: environmental, not code
+
+`test_audit_2026_07_25_carriers_hygiene.py::test_v20_x21_every_advertised_carriers_name_resolves_in_a_fresh_process`
+spawns a fresh Python and imports every name in `dynameta.carriers`. Inside the full `-n 2` run, with
+another worker solving DEVSIM and four other agents on box A, that subprocess fails with
+`RuntimeError: Issues initializing DEVSIM.`. This is DEVSIM's own math-library initialisation; commit
+charge was 79 of 142 GB at the time.
+
+* It passes alone (1.1 s).
+* Its whole file passes under `-n 2` (2 passed, 3.7 s).
+
+It was seen twice, both times inside the large parallel run. This is reported as an environment
+failure, not rerun to green. No code path touched by this integration changes what that subprocess
+imports, except `noise_analysis`, which D2a added to `__all__` and which imports devsim lazily.
+
+### 5.2 D1a behaviour change
+
+No test in the files above pinned the old 2-D zero-built-in-potential result. Nothing was re-pinned.
 
 ## 6. Open items carried forward (user decisions)
 
@@ -286,3 +403,12 @@ See the release-check table at the end of this file (filled from the runs).
 5. The 1-D BTBT edge-mean D makes the discrete FDT exact only to O(h^2). Making the 1-D path
    node-local like 2-D/3-D would need a node-model field magnitude, which DEVSIM 1-D does not offer.
    This is recorded, not changed.
+6. **D1d gate L1** (section 2.9): fails after the literal fix, by 2.8e-4 against a 1e-6 gate. It
+   needs the D1d owner or the user to choose a quadrature-consistent tolerance or a refined mesh. Not
+   loosened here.
+7. **Noise source for thermionic-emission heterointerfaces** (section 2.8): the interface shot noise
+   2q(J_0->1 + J_1->0) is not in the source set. The strict xfail pins it.
+8. **Heterointerfaces at T_K != T_REF**: refused with BGN, and silently at T_REF without it (D1a's
+   interface is written at T_REF). A temperature-aware interface is a follow-up.
+9. **D1a open items** (3-D bipolar heterostacks, lateral sidewall interfaces, degenerate TE
+   magnitude) are unchanged.
