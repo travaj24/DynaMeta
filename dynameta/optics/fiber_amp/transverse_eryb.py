@@ -143,7 +143,7 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.steady_state import (AseBand, Pump, Signal, SteadyStateResult,
                                                     _KEEP, _RELAX_LADDER,
                                                     _frozen_profile_interp,
-                                                    _relaxation_residuals)
+                                                    _RtolContinuation, _relaxation_residuals)
 # The transverse geometry kernel -- ONE home for the grid, the profiles and the mode checks
 # (transverse.py), used verbatim so a co-doped solve and a single-ion solve integrate on
 # identical quadrature and can be compared node for node.
@@ -881,6 +881,7 @@ class ResolvedErYbAmplifier:
         last_prof = None
         converged = False
         end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
+        cont = _RtolContinuation(tol)              # integrator noise floor vs tol (steady_state)
         it = 0
         for it in range(max_iter):
             bwd_of = _frozen_profile_interp(P_bwd, z, L, n_nodes) if bwd.size else None
@@ -890,7 +891,7 @@ class ResolvedErYbAmplifier:
                 return self._dP(c, _assemble(Pf, Pb))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
-                           rtol=1e-7, atol=1e-15)
+                           rtol=cont.rtol, atol=1e-15)
             # the relax == 1.0 branch is taken verbatim so the default path performs NO arithmetic
             # on the arrays (audit F-14: a `1.0 * new + 0.0 * old` blend is not a no-op --
             # 0.0 * inf is NaN and -0.0 + 0.0 flips a sign).
@@ -903,7 +904,7 @@ class ResolvedErYbAmplifier:
                     return self._dP(c, _assemble(fwd_of(zz), Pb))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
-                               rtol=1e-7, atol=1e-15)
+                               rtol=cont.rtol, atol=1e-15)
                 new_bwd = sb.y[:, ::-1]
                 P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
@@ -914,6 +915,7 @@ class ResolvedErYbAmplifier:
                 if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
+                cont.update(end_resid, prof_resid)
             last_out = out
             last_prof = prof
 
@@ -939,7 +941,7 @@ class ResolvedErYbAmplifier:
                    else (self.yb_ase.m_modes if self.yb_ase is not None else 2))
         meta = {
             "converged": converged, "iterations": it + 1,
-            "endpoint_residual": end_resid, "profile_residual": prof_resid,
+            "endpoint_residual": end_resid, "profile_residual": prof_resid, "integrator_rtol": float(cont.rtol),
             "relax": float(relax), "min_power_W": float(np.min(P)),
             "dnu_hz": np.asarray(pl["dnu"], float).copy(), "m_modes": m_modes,
             # `gamma` is the QUADRATURE overlap actually used, not overlap_gamma -- the key name
