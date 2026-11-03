@@ -57,6 +57,7 @@ from dynameta.core.eps_field import require_solver_time_convention as _require_e
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
+from dynameta.optics.fdtd_nd.grid import layer_masks, pad_masks
 from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 from dynameta.geometry.guards import require_supported_geometry
 
@@ -437,11 +438,14 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
         xs, ys = _cell_axes(nx, ny, px, py)
         X, Y = np.meshgrid(xs, ys, indexing="ij")           # (nx,ny)
         eps = np.ones((nx, ny, nz))
-        eps[:, :, zc < pad] = ns2                           # superstrate semi-infinite pad (n_super^2)
-        eps[:, :, zc >= pad + z_struct] = nb2               # substrate semi-infinite pad (n_sub^2)
-        z = pad
-        for L in layers_sf:
-            zmask = (zc >= z) & (zc < z + L.thickness_m)
+        # `zc` = the z positions the solver registers materials at -- the Yee E-NODES k*dz since
+        # 2026-11-02 (audit S2-14 siblings; were the cell centres). The z slabs use the solver's OWN
+        # shared masks (fdtd_nd.grid), so the painted layers sit exactly where solve_fdtd_3d's
+        # laterally-uniform fill would put them; the LATERAL raster (layer_eps_cell) is unchanged.
+        lo, hi = pad_masks(zc, pad, z_struct)
+        eps[:, :, lo] = ns2                                 # superstrate semi-infinite pad (n_super^2)
+        eps[:, :, hi] = nb2                                 # substrate semi-infinite pad (n_sub^2)
+        for L, zmask in layer_masks(zc, pad, layers_sf):
             cell = _layer_eps_cell(L, X, Y, lambda_m, mats, eps_by_region, period_x_m=px,
                                    period_y_m=py)    # periodic wrap (rasterize.layer_eps_cell)
             if np.max(np.abs(cell.imag)) > 1e-6 * (np.max(np.abs(cell.real)) + 1.0):
@@ -449,7 +453,6 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
                     "structured FDTD layer '{}' has lossy eps (Im != 0); the lateral grid carries real "
                     "eps_inf only -> use FEM/RCWA for lossy structured cells.".format(L.name))
             eps[:, :, zmask] = cell.real[:, :, None]
-            z += L.thickness_m
         return eps
 
     return layers_for_grid, lateral_fn
