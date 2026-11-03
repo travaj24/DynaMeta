@@ -84,10 +84,11 @@ FORMULATION (literature, not improvised)
 
 DEVSIM mechanism (native): every quantity is an `interface_model` on the region node copies @r0/@r1
 with explicit derivative models; TE enters the continuity equations as a `fluxterm` interface equation
-(DEVSIM adds the integrated interface flux to region 0's equation and subtracts it from region 1's;
-the sign convention is the edge-model one -- conventional current from r0 into r1 -- and is gated by
-the homojunction-limit oracle, which fails with the opposite sign), the continuous model as a
-`continuous` one. Both are recorded through eq_registry under the continuity-equation names, so the
+(the integrated interface flux enters the two regions' equations with opposite signs; the model is
+written as the CONVENTIONAL current density from r0 into r1, the edge-model convention -- MEASURED, not
+assumed: on a zero-offset 1-D split it reproduces the analytic series interface resistance and with
+A* x 1e6 the continuous model to 1e-6; gates C/E pin it on the builder path), the continuous model as
+a `continuous` one. Both are recorded through eq_registry under the continuity-equation names, so the
 Gummel / staged freeze-and-reapply machinery sees them.
 
 LIMITS (stated, not hidden): the TE MAGNITUDE uses the Maxwell-Boltzmann Richardson tail -- on a
