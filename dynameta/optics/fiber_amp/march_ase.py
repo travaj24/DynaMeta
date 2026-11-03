@@ -86,6 +86,10 @@ from dynameta.optics.fiber_amp.steady_state import _relaxation_residuals
 # residual_views -- is the march's internal seam, called by dynamics through the module object
 # and gated directly in tests/test_march_self_consistent_ase.py; putting it in the package
 # facade would advertise a stepping API that only dynamics is in a position to drive.
+# audit V-21 (2026-11-02): the six unprefixed functions below (check_ase_mode, residual_views,
+# solve_self_consistent_step, predicted_step_ase_error, needs_ase_probe, auto_switch) are the
+# ENGINE seam that dynamics.simulate_transient(_eryb) calls as `march_ase.<name>`, not user API --
+# deliberately left out of __all__ (and therefore off the exhaustive fiber_amp facade, X-10).
 __all__ = ["ASE_MODES", "SelfConsistentControl", "StepReport"]
 
 ASE_MODES = ("quasi_static", "self_consistent", "auto")

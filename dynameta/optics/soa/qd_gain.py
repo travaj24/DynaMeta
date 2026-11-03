@@ -58,26 +58,43 @@ from typing import Optional, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E
+from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E, T_REF
 from dynameta.core.numerics import ZeroInitBDF
 
 
 # Optional numba fast path for the per-step carrier RK4 (the dominant traveling-wave cost ~70%).
-# Self-contained guarded import (mirrors optics.fdtd_nd.backends) so the module imports without
-# numba; selected via QDGainModel(fast=True). The numpy rhs_fields stays the reference and the
-# parity is asserted by validation/qd_soa_numba_parity.py.
-try:                                                          # pragma: no cover - env dependent
-    from numba import njit as _njit
-    _HAVE_NUMBA = True
-except Exception:                                             # pragma: no cover
-    _HAVE_NUMBA = False
+# Selected via QDGainModel(fast=True). The numpy rhs_fields stays the reference and the parity is
+# asserted by validation/qd_soa_numba_parity.py.
+#
+# LAZY (audit V-14, soa half, 2026-11-02 -- the fdtd_nd half is optics.fdtd_nd.backends). This
+# block used to `from numba import njit` at module load, so every `import dynameta.optics.soa`
+# paid numba (measured 0.34 s of `dynameta.optics.soa.qd_gain`'s 0.35 s self+children in
+# -X importtime; whole-package import 1.06-1.11 s -> see the V-14 row) although the default
+# QDGainModel(fast=False) never touches it. `_njit(...)` returns a `_LazyJit` that applies the
+# SAME numba.njit options to the SAME function on first call -- so the compiled kernels (and the
+# on-disk `cache=True` entries, keyed on the function's file and qualname) are what they were --
+# or returns the plain Python function when numba is absent; `_HAVE_NUMBA` is a PEP 562 module
+# attribute (`_have_numba()` internally), so `from dynameta.optics.soa.qd_gain import
+# _HAVE_NUMBA` keeps working. No prange here.
+# ONE shim (wave-7, 2026-11-02): this module used to carry its own copy of the lazy shim (it
+# could not import optics.fdtd_nd.backends' copy without pulling the FDTD package into
+# `import dynameta.optics.soa`). Both now import the single implementation from dynameta.numba_env
+# (stdlib-only, and already loaded by `import dynameta`), so the soa import stays numba-free
+# (tests/test_fdtd_backend_contracts.py::test_v14_importing_optics_soa_does_not_import_numba).
+from dynameta.numba_env import _LazyJit, have_numba as _have_numba  # noqa: E402,F401
+from dynameta.numba_env import njit as _njit                        # noqa: E402
 
-    def _njit(*a, **k):
-        def _wrap(f):
-            return f
-        return _wrap if not (len(a) == 1 and callable(a[0])) else a[0]
 
-__all__ = ["QDGainParams", "QDGainModel", "SelfHeating"]
+def __getattr__(name):                                        # PEP 562: lazy module attribute
+    if name == "_HAVE_NUMBA":
+        return _have_numba()
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+
+
+# Leakage / ManyBody are public QDGainModel(...) options (soa/__init__ re-exports them) -- listed
+# here too (wave-7, 2026-11-02; H6a leftover) so `from qd_gain import *` and the __all__ census
+# see every public dataclass of this module.
+__all__ = ["QDGainParams", "QDGainModel", "SelfHeating", "Leakage", "ManyBody"]
 
 
 @_njit(cache=True, fastmath=True)
@@ -306,7 +323,7 @@ class QDGainParams:
     # spectral discretization
     n_groups: int = 41               # inhomogeneous size groups (odd -> a group sits on nu0)
     span_sigma: float = 3.0          # half-width of the group grid in inhomogeneous sigmas
-    T_K: float = 300.0
+    T_K: float = T_REF               # = 300.0 K exactly (dynameta.constants, X-24)
     # electron/hole occupation split (opt-in, Phase-6 gain fidelity). With eh_split the dots carry
     # SEPARATE electron f_c and hole f_v occupations per state; gain -> (f_c+f_v-1), spontaneous ->
     # f_c f_v, n_sp -> f_c f_v/(f_c+f_v-1). The tau_*_s above are the ELECTRON times; the hole times
@@ -346,6 +363,13 @@ class QDGainParams:
     # legacy line) or 'sech' (area-conserving at equal FWHM: same oscillator strength / integrated gain,
     # but EXPONENTIAL wings that kill the spurious Lorentzian sub-gap absorption tail; dossier Topic 5).
     lineshape: str = "lorentzian"
+    # ---- HOLE detailed-balance ladder (audit A-15; opt-in, read ONLY by with_detailed_balance_taus
+    # and with_full_detailed_balance when eh_split). The hole level splits and wetting-layer mass
+    # differ from the electron ones (heavier holes, smaller splits), so one dE_ES_GS_eV / dE_WL_ES_eV
+    # cannot balance both ladders. None -> reuse the electron value (byte-identical).
+    dE_ES_GS_h_eV: Optional[float] = None     # hole ES - GS separation [eV] (None -> dE_ES_GS_eV)
+    dE_WL_ES_h_eV: Optional[float] = None     # hole WL - ES separation [eV] (None -> dE_WL_ES_eV)
+    m_wl_h_eff_kg: Optional[float] = None     # hole WL in-plane mass [kg] (None -> m_wl_eff_kg)
 
     def __post_init__(self):
         pos = ("N_q_m3", "V_a_m3", "A_mode_m2", "v_g_m_s", "tau_cap_s", "tau_esc_s",
@@ -379,6 +403,12 @@ class QDGainParams:
             raise ValueError("QDGainParams: dE_ES_GS_optical_eV must be >= 0 when set")
         if self.lineshape not in ("lorentzian", "sech"):
             raise ValueError("QDGainParams: lineshape must be 'lorentzian' or 'sech'")
+        for nm in ("dE_ES_GS_h_eV", "dE_WL_ES_h_eV"):
+            v = getattr(self, nm)
+            if v is not None and v < 0.0:
+                raise ValueError("QDGainParams: {} must be >= 0 when set".format(nm))
+        if self.m_wl_h_eff_kg is not None and not (self.m_wl_h_eff_kg > 0.0):
+            raise ValueError("QDGainParams: m_wl_h_eff_kg must be > 0 when set")
 
     def with_detailed_balance_taus(self) -> "QDGainParams":
         """Return a copy with tau_GS_ES fixed by detailed balance, so the dark
@@ -389,14 +419,19 @@ class QDGainParams:
         (hand-derived from setting the net ES<->GS exchange to zero with Fermi-Dirac
         occupancy ratios; the mu ratio is mu_GS/mu_ES, NOT its inverse). tau_esc is left as
         supplied (the WL is a continuum reservoir; its detailed-balance link needs the WL
-        effective DOS, a Phase-2 refinement)."""
+        effective DOS, a Phase-2 refinement).
+
+        HOLES (eh_split): the same rule on the hole ladder with the HOLE split dE_ES_GS_h_eV
+        (None -> the electron dE_ES_GS_eV, byte-identical; audit A-15)."""
         from dataclasses import replace
         x = self.dE_ES_GS_eV * Q_E / (KB * self.T_K)
         ratio = (self.mu_GS / self.mu_ES) * np.exp(x)
         updates = {"tau_GS_ES_s": float(self.tau_ES_GS_s * ratio)}
         if self.eh_split:                                     # holes get the same detailed-balance rule
             tau_rel_h = self.tau_rel_h_s if self.tau_rel_h_s is not None else self.tau_ES_GS_s
-            updates["tau_back_h_s"] = float(tau_rel_h * ratio)
+            ratio_h = ratio if self.dE_ES_GS_h_eV is None else (
+                (self.mu_GS / self.mu_ES) * np.exp(self.dE_ES_GS_h_eV * Q_E / (KB * self.T_K)))
+            updates["tau_back_h_s"] = float(tau_rel_h * ratio_h)
         return replace(self, **updates)
 
     def with_full_detailed_balance(self) -> "QDGainParams":
@@ -428,16 +463,34 @@ class QDGainParams:
         still rises as T falls (the exp dominates the T-linear sheet-DOS prefactor) and diverges as
         T -> 0 -- carriers freeze into the dots. This method is a SUPERSET of
         with_detailed_balance_taus (which stays byte-stable); opt in when the WL<->ES equilibrium at
-        the model T matters (e.g. the temperature model, temperature.qd_params_at_temperature)."""
+        the model T matters (e.g. the temperature model, temperature.qd_params_at_temperature).
+
+        HOLES (eh_split; audit A-15). The hole escape tau_esc_h_s is slaved by the SAME relation on
+        the hole ladder -- hole capture tau_cap_h_s (None -> tau_cap_s), hole WL mass m_wl_h_eff_kg
+        and hole split dE_WL_ES_h_eV (None -> the electron values) -- so an explicitly-set
+        tau_esc_h_s no longer survives unbalanced (it used to: only the electron escape was
+        slaved), and the ES<->GS hole back-transfer takes its own split (with_detailed_balance_
+        taus). With every hole parameter None the hole escape equals the electron one to the bit,
+        which is exactly what the engine already used for tau_esc_h_s = None."""
         from dataclasses import replace
         base = self.with_detailed_balance_taus()              # ES<->GS branch (byte-stable path)
         kT = KB * self.T_K
-        rho_wl_eff = self.m_wl_eff_kg * kT / (np.pi * HBAR * HBAR)   # 2-D sheet DOS [states/m^2], spin x2
         n_dot_2d = self.N_q_m3 * self.t_qd_m                        # sheet dot density [m^-2]
         A_dot = 1.0 / n_dot_2d                                     # WL area per dot [m^2]
-        inv_tau_esc = (1.0 / self.tau_cap_s) * ((rho_wl_eff * A_dot) / self.mu_ES) * np.exp(
-            -self.dE_WL_ES_eV * Q_E / kT)
-        return replace(base, tau_esc_s=float(1.0 / inv_tau_esc))
+
+        def _inv_tau_esc(m_wl, tau_cap, dE_eV):
+            rho_wl_eff = m_wl * kT / (np.pi * HBAR * HBAR)     # 2-D sheet DOS [states/m^2], spin x2
+            return (1.0 / tau_cap) * ((rho_wl_eff * A_dot) / self.mu_ES) * np.exp(-dE_eV * Q_E / kT)
+
+        updates = {"tau_esc_s": float(1.0 / _inv_tau_esc(self.m_wl_eff_kg, self.tau_cap_s,
+                                                         self.dE_WL_ES_eV))}
+        if self.eh_split:
+            inv_h = _inv_tau_esc(
+                self.m_wl_h_eff_kg if self.m_wl_h_eff_kg is not None else self.m_wl_eff_kg,
+                self.tau_cap_h_s if self.tau_cap_h_s is not None else self.tau_cap_s,
+                self.dE_WL_ES_h_eV if self.dE_WL_ES_h_eV is not None else self.dE_WL_ES_eV)
+            updates["tau_esc_h_s"] = float(1.0 / inv_h)
+        return replace(base, **updates)
 
 
 @dataclass(frozen=True)
@@ -457,7 +510,7 @@ class SelfHeating:
     Cth_J_K: float = 1.0e-9           # heat capacity [J/K] (transient only; tau_th = Rth Cth)
     dnu0_dT_Hz_K: float = 0.0         # gain-peak red-shift coef [Hz/K] (>=0: nu falls as T rises)
     dg_dT_frac_per_K: float = 0.0     # fractional peak-gain coef (1/g) dg/dT [1/K] (<=0 physical)
-    T0_K: float = 300.0               # ambient / heat-sink reference [K]
+    T0_K: float = T_REF               # ambient / heat-sink reference [K] (= 300.0, X-24)
     V_j_V: float = 0.9                # junction bias for P_elec = I V_j [V]
     eta_extraction: float = 1.0       # optical-extraction fraction removed from P_diss [0,1]
     w_relax: float = 0.5              # steady Picard under-relaxation in (0,1]
@@ -598,9 +651,9 @@ class QDGainModel:
         # numpy reference). Default OFF so results are byte-stable across machines (numba-present or
         # not); opt in with fast=True for long transient runs. Explicit fast=True without numba is
         # an error (don't silently fall back to slow numpy when speed was requested).
-        if fast and not _HAVE_NUMBA:
+        if fast and not _have_numba():
             raise RuntimeError("QDGainModel(fast=True) requires numba (pip install numba)")
-        self._use_numba = bool(fast) and _HAVE_NUMBA
+        self._use_numba = bool(fast) and _have_numba()
         # inhomogeneous size groups: Gaussian-weighted frequencies about nu0
         sig = p.fwhm_inhom_Hz / (2.0 * np.sqrt(2.0 * np.log(2.0)))
         if p.n_groups == 1:
@@ -907,12 +960,6 @@ class QDGainModel:
         g = pref * ((osc / (1.0 + x * x)) @ inv)                     # gain (Re of the complex line)
         gi = pref * ((osc * x / (1.0 + x * x)) @ inv)               # index partner (Im, KK)
         return (g if np.ndim(nu_Hz) else float(g[0]), gi if np.ndim(nu_Hz) else float(gi[0]))
-
-    def power_to_photon_density(self, P_W: float, nu_Hz: float) -> float:
-        """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided
-        power P at frequency nu -- the density that actually depletes the dots."""
-        p = self.p
-        return float(p.Gamma * P_W / (p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2))
 
     # ---- rate equations ----
     def rhs_fields(self, N_w, rho_ES, rho_GS, I_A, S_conf_m3, nu_s_Hz, ls_gs=None, ls_es=None):
@@ -1327,10 +1374,21 @@ class QDGainModel:
         return self.p.alpha_lef + 0.5 * sl * inv_mean         # alpha(rho_mean), slope d(alpha)/d(rho)
 
     def photon_density(self, P_W, nu_Hz):
-        """Confined photon density S_conf [m^-3] for guided power P (scalar or array)."""
+        """Confined photon density S_conf = Gamma P/(v_g h nu A_mode) [m^-3] for guided power P
+        [W] at frequency nu [Hz] -- the density that actually depletes the dots. Array-safe: a
+        scalar P and nu return a Python float, any array argument returns the broadcast ndarray.
+
+        ONE implementation (audit S3-19, wave-7 2026-11-02): `power_to_photon_density` used to be a
+        second copy of this formula with DIVERGENT array handling -- it wrapped the result in
+        float(), so an array P raised TypeError there while this method returned an array (and a
+        0-d ndarray for a scalar). It is now an alias of this method. Same operation order as both
+        old copies -> bit-identical values (scalar: old float() result; array: old ndarray)."""
         p = self.p
-        return p.Gamma * np.asarray(P_W, dtype=np.float64) / (
+        S = p.Gamma * np.asarray(P_W, dtype=np.float64) / (
             p.v_g_m_s * H_PLANCK * nu_Hz * p.A_mode_m2)
+        return S if np.ndim(S) else float(S)
+
+    power_to_photon_density = photon_density              # back-compat alias (audit S3-19)
 
     def init_slices(self, n_slices: int, I_A):
         """Per-slice carrier state initialized to the unsaturated steady state at injection I.

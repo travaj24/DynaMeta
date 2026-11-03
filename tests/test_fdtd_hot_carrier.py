@@ -462,42 +462,104 @@ def test_lat_gate7_mixed_material_fixed_bath_bit_identical():
         assert a.tobytes() == b.tobytes()                    # untouched fixed-bath arithmetic bit-exact
 
 
-def test_lat_gate8_slowed_relax_same_G_and_matches_2ode():
-    """ATTACK 8: the finite-lattice T_e tail sits above fixed bath for the RIGHT reason -- a REDUCED
-    (T_e - T_l) driving force, not a changed effective G.  (i) Before the lattice heats (at the T_e
-    peak) the finite-lattice and fixed-bath T_e coincide (same G, same driving force); the elevation
-    appears only in the tail as T_l rises.  (ii) The FULL T_e(t)/T_l(t) curves reproduce an INDEPENDENT
-    RK4 integration of the coupled 2-ODE (analytic T_e = sqrt(T_e0^2 + 2 U_e/gamma_e) inversion),
-    confirming the whole trajectory shape, not merely the tail sign."""
-    G, c_l = 8.0e16, 5.0e4
-    ho_fix, ho_lat = {}, {}
-    _solve([_hot_layer(G=G, gamma_p=1.0)], source_amp=3e8, hot_out=ho_fix)
-    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho_lat)
-    t = ho_lat["t"]; dt = float(t[1] - t[0])
-    Te_fix, Te_lat, Tl_lat, pabs = ho_fix["Te_mean"], ho_lat["Te_mean"], ho_lat["Tl_mean"], ho_lat["p_abs_mean"]
-    ip = int(np.argmax(Te_fix))
-    # (i) same G / driving force before the lattice heats -> curves coincide at the peak
-    assert (Tl_lat[ip] - T_REF) < 1.0                        # lattice barely moved at the electron peak
-    assert abs(Te_lat[ip] - Te_fix[ip]) / (Te_fix[ip] - T_REF) < 1e-3
-    tail = slice(ip + (len(Te_fix) - ip) // 2, None)
-    assert Te_lat[tail].mean() > Te_fix[tail].mean() + 0.5   # elevated tail (reduced driving force)
-    # (ii) independent RK4 of the coupled 2-ODE with the extracted half-step p_abs
+def _rk4_2ode(t, p_series, G, c_l):
+    """RK4 of the coupled electron/lattice 2-ODE dU_e/dt = p - G(T_e - T_l), dU_l/dt = G(T_e - T_l),
+    T_e = sqrt(T_e0^2 + 2 U_e/gamma_e) (analytic inversion), T_l = T_l0 + U_l/c_l, driven by the
+    half-step-centred p_series(t). Returns (T_e, T_l) on t."""
+    dt = float(t[1] - t[0])
     Te0 = Tl0 = T_REF
-    p_of = lambda tt: float(np.interp(tt, t + 0.5 * dt, pabs))
+    p_of = lambda tt: float(np.interp(tt, t + 0.5 * dt, p_series))
     Te_of = lambda Ue: np.sqrt(Te0 ** 2 + 2.0 * max(Ue, 0.0) / GAMMA_E)
+
     def deriv(tt, Ue, Ul):
         coup = G * (Te_of(Ue) - (Tl0 + Ul / c_l))
         return (p_of(tt) - coup, coup)
     Ue = Ul = 0.0
-    Te_rk = np.empty_like(Te_lat); Tl_rk = np.empty_like(Tl_lat)
+    Te = np.empty(len(t)); Tl = np.empty(len(t))
     for n in range(len(t)):
-        Te_rk[n] = Te_of(Ue); Tl_rk[n] = Tl0 + Ul / c_l
+        Te[n] = Te_of(Ue); Tl[n] = Tl0 + Ul / c_l
         k1 = deriv(t[n], Ue, Ul)
         k2 = deriv(t[n] + 0.5 * dt, Ue + 0.5 * dt * k1[0], Ul + 0.5 * dt * k1[1])
         k3 = deriv(t[n] + 0.5 * dt, Ue + 0.5 * dt * k2[0], Ul + 0.5 * dt * k2[1])
         k4 = deriv(t[n] + dt, Ue + dt * k3[0], Ul + dt * k3[1])
         Ue += dt / 6.0 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
         Ul += dt / 6.0 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
-    peakTe = max(Te_lat.max() - T_REF, 1e-9); peakTl = max(Tl_lat.max() - T_REF, 1e-9)
-    assert np.max(np.abs(Te_rk - Te_lat)) / peakTe < 5e-3    # full electron trajectory (measured ~7e-4)
-    assert np.max(np.abs(Tl_rk - Tl_lat)) / peakTl < 5e-3    # full lattice trajectory  (measured ~1e-4)
+    return Te, Tl
+
+
+def test_lat_gate8_slowed_relax_same_G_and_matches_2ode():
+    """ATTACK 8: the finite-lattice T_e tail sits above fixed bath for the RIGHT reason -- a REDUCED
+    (T_e - T_l) driving force, not a changed effective G.  (i) Before the lattice heats (at the T_e
+    peak) the finite-lattice and fixed-bath T_e coincide (same G, same driving force); the elevation
+    appears only in the tail as T_l rises.  (ii) EVERY hot cell's T_e(t) reproduces an INDEPENDENT RK4
+    integration of the coupled 2-ODE driven by THAT cell's own absorbed power.
+
+    RE-DESIGNED 2026-11-03 (z-subcell averaging): this film is 120 nm = 1.87 cells at resolution 12.
+    Point sampling rounded it to ONE cell (64 nm), where a single mean-field 2-ODE driven by the
+    mask-averaged p_abs is exact (measured 7.1e-4). Averaged, the film is two rows of hot fill 0.934 /
+    0.936 (120 nm of hot volume, exact) absorbing 5.39e6 / 4.20e6 J/m^3 -- a 25% gradient across the
+    ENZ film -- and the mean-field oracle is no longer an oracle (7.4e-3 vs this 5e-3 bar). The gate is
+    now PER CELL, from the opt-in hot_out["record_cells"] histories: each row is driven by its own hot
+    dissipation density alpha * J.E / f (f = its hot fill), measured 7.8e-4 / 6.8e-4 (the single-cell
+    level). Negative control: the same oracle driven by the RAW J.E (fill ignored) fails the bar. The
+    mean-field oracle keeps its own gate on an exactly grid-aligned one-cell film
+    (test_lat_gate8b_mean_field_oracle_on_an_aligned_one_cell_film)."""
+    G, c_l = 8.0e16, 5.0e4
+    ho_fix, ho_lat = {}, {"record_cells": True}
+    _solve([_hot_layer(G=G, gamma_p=1.0)], source_amp=3e8, hot_out=ho_fix)
+    _solve([_hot_layer(G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho_lat)
+    t = ho_lat["t"]
+    Te_fix, Te_lat, Tl_lat = ho_fix["Te_mean"], ho_lat["Te_mean"], ho_lat["Tl_mean"]
+    ip = int(np.argmax(Te_fix))
+    # (i) same G / driving force before the lattice heats -> curves coincide at the peak
+    assert (Tl_lat[ip] - T_REF) < 1.0                        # lattice barely moved at the electron peak
+    assert abs(Te_lat[ip] - Te_fix[ip]) / (Te_fix[ip] - T_REF) < 1e-3
+    tail = slice(ip + (len(Te_fix) - ip) // 2, None)
+    assert Te_lat[tail].mean() > Te_fix[tail].mean() + 0.5   # elevated tail (reduced driving force)
+    # (ii) per-cell exact oracle
+    fill, JE, Tc = ho_lat["cell_fill"], ho_lat["cell_JE"], ho_lat["cell_Te"]
+    assert fill.size == 2 and np.all((fill > 0.9) & (fill < 1.0)), fill        # two MIXED hot rows
+    peak = max(Te_lat.max() - T_REF, 1e-9)
+    alpha = 1.0                                              # _hc's TwoTempParams alpha_abs
+    for j in range(fill.size):
+        Te_rk, _ = _rk4_2ode(t, alpha * JE[:, j] / fill[j], G, c_l)
+        assert np.max(np.abs(Te_rk - Tc[:, j])) / peak < 5e-3, j      # measured 7.8e-4 / 6.8e-4
+        # negative control: ignore the hot fill (drive by the raw J.E of the mixed cell) -> fails
+        Te_bad, _ = _rk4_2ode(t, alpha * JE[:, j], G, c_l)
+        assert np.max(np.abs(Te_bad - Tc[:, j])) / peak > 5e-3, j
+
+
+def test_lat_gate8b_mean_field_oracle_on_an_aligned_one_cell_film():
+    """The mean-field 2-ODE (driven by the mask-averaged p_abs, compared with the mask-averaged T_e)
+    is exact for a spatially uniform film. Here the film is EXACTLY one grid cell thick and its faces
+    sit exactly on the control-volume boundaries (pad/dz = m + 1/2), so it is ONE pure hot node under
+    both z rules. Measured 2026-11-03 below; bar 5e-3 as gate 8."""
+    from dynameta.optics.fdtd_nd.grid import layer_band_index_max, z_grid
+    G, c_l = 8.0e16, 5.0e4
+    probe = _hot_layer(G=G, gamma_p=1.0, c_l=c_l)
+    w_band = 2.0 * np.pi * np.linspace(C_LIGHT / BAND["lambda_max_m"], C_LIGHT / BAND["lambda_min_m"], 9)
+    n_max = layer_band_index_max([probe], w_band, (1.0, 1.0))
+    dz = z_grid([probe], BAND["lambda_min_m"], BAND["lambda_max_m"], GRID["resolution"], 2.5, n_max)[0]
+    m = round(2.5 * BAND["lambda_max_m"] / dz)
+    npw = (m + 0.5) * dz / BAND["lambda_max_m"]               # pad/dz = m + 1/2: faces on CV boundaries
+    ho = {"record_cells": True}
+    _solve([_hot_layer(thick=dz, G=G, gamma_p=1.0, c_l=c_l)], source_amp=3e8, hot_out=ho, n_pad_wave=npw)
+    # one PURE hot node (fill 1 to float rounding: pad and dz carry ~1e-15 relative representation error)
+    assert ho["cell_fill"].size == 1 and abs(ho["cell_fill"][0] - 1.0) < 1e-12, ho["cell_fill"]
+    t, Te = ho["t"], ho["Te_mean"]
+    Te_rk, _ = _rk4_2ode(t, ho["p_abs_mean"], G, c_l)
+    assert np.max(np.abs(Te_rk - Te)) / max(Te.max() - T_REF, 1e-9) < 5e-3
+
+
+def test_d21_lattice_colder_than_te0_is_refused():
+    """audit D-21: the T_e(U_e) table starts at T_e0 and np.interp clamps below it, so with
+    T_l < T_e0 and G > 0 the coupling drained U_e without bound while T_e stayed pinned at T_e0.
+    Measured pre-fix on this module's ENZ film (G = 8e16, T_l = 200 K, T_e0 = 300 K): U_e_final
+    = -7.4e6 J/m^3 against an absorbed 5.0e-11 J/m^3, and a flat (false) 300 K T_e map. Now refused
+    at construction; T_l >= T_e0, and G = 0 (no coupling, nothing drains), stay allowed."""
+    kw = dict(n_m3=N_M3, m0_kg=M0, alpha_per_eV=ALPHA, T_e0_K=300.0)
+    with pytest.raises(ValueError, match="D-21"):
+        HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=200.0, **kw)
+    HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=300.0, **kw)
+    HotCarrierParams(ttm=_ttm(8.0e16), T_l_K=400.0, **kw)
+    HotCarrierParams(ttm=_ttm(0.0), T_l_K=200.0, **kw)

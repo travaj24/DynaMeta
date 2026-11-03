@@ -70,7 +70,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 # pure diagnostics (no PASS/FAIL gate) + this runner
-SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag", "oblique_sign_pml_diag",
+SKIP = {"run_all", "oblique_field_dump", "oblique_phase_diag",
         "reference_modulator_spectrum"}
 # The `_` prefix excludes a file from EVERY tier (see _gated), and it carries TWO opposite
 # meanings: a legitimately SHARED FIXTURE (imported by other validations, never run on its own)
@@ -232,6 +232,11 @@ SMOKE = {
     # audit X-19: cheap smoke wrappers for two optics modules that had NO validation script at all,
     # so their only oracle was the test written beside the implementation in the same commit
     "nonlocal_hydro_material", "resonance_pole_finder",
+    # audit X-19, same class: optics.harmonics and optics.spdc_design, each gated against in-file
+    # closed forms (Parseval / Gaussian-tail / cos(pi f dt); Gaussian Schmidt K / sinc^2 FWHM / Si).
+    # Wall-clock MEASURED 2026-11-02 (this box, cold start, per script):
+    #   harmonics_spectral_diagnostics 1.0 s | spdc_design_jsa 2.1 s
+    "harmonics_spectral_diagnostics", "spdc_design_jsa",
 }
 
 # Solver-free validations DELIBERATELY outside SMOKE, with the reason (audit X-26: "add them to
@@ -252,8 +257,12 @@ SMOKE_EXCLUDED = {
                                  "run_all, measured 2026-08-04 -- over the ~60 s smoke bar "
                                  "whenever the box is busy",
     "lumenairy_bor_bridge":      "62 s measured 2026-07-26 -- over the ~60 s per-script smoke bar",
-    "lumenairy_berreman_jax":    "145 s measured 2026-07-26 (jax jit warm-up + sweep)",
-    "lumenairy_pmm2d_bridge":    "268 s measured 2026-07-26 (2-D PMM cascade; the slowest gate)",
+    "lumenairy_berreman_jax":    "~430 s measured 2026-11-02 on lumenairy 5.50 (jax_cluster_rule; "
+                                 "145 s on 2026-07-26 before it) -- jax jit warm-up + sweep",
+    "lumenairy_pmm2d_bridge":    "~323 s measured 2026-11-02 for GATES A-J on a loaded box (268 s "
+                                 "on 2026-07-26 for A-E) -- 2-D PMM cascade",
+    "lumenairy_pmm2d_taper_wrap": "234 s measured 2026-11-02 (GATES K-O, BLAS 4 threads, shared "
+                                  "box) -- per-layer taper staircases + 600-px RCWA ladders",
     # Not a gate at all: it REPORTS predicted-vs-measured residuals against an external anchor
     # folder (the 2026-09-14 Er:Yb literature record) that is not in the repo, and exits 0 with a
     # message saying so when the folder is absent -- which is what CI would always see. It is

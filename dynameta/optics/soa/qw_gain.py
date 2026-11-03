@@ -93,8 +93,9 @@ from scipy.optimize import brentq
 from scipy.special import expit
 
 from dynameta.constants import C_LIGHT, H_PLANCK, HBAR, KB, M_E, Q_E
-from dynameta.carriers.physics_equilibrium import invert_F12
+from dynameta.carriers.physics_equilibrium import effective_dos_m3, invert_F12
 from dynameta.optics.amp_noise import nf_from_nsp
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "BulkGainParams",
@@ -189,8 +190,9 @@ class BulkGainParams:
 
 def _band_dos(m_rel: float, T_K: float) -> float:
     """Effective band density of states N_c or N_v [m^-3] in the normalized-F_1/2 convention
-    (N = N_dos * F_1/2(eta)); m_rel is the DOS mass in units of m0."""
-    return 2.0 * (m_rel * M_E * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
+    (N = N_dos * F_1/2(eta)); m_rel is the DOS mass in units of m0. Delegates to the single
+    carriers.physics_equilibrium.effective_dos_m3 (audit X-15; bit-identical)."""
+    return effective_dos_m3(m_rel * M_E, T_K)
 
 
 def band_edge_Eg_J(N_m3: float, params: BulkGainParams) -> float:
@@ -274,17 +276,17 @@ def emission_gain_per_m(nu_Hz, N_m3: float, params: BulkGainParams):
     return float(g_e) if np.ndim(nu_Hz) == 0 else g_e
 
 
-def n_sp_inversion(nu_Hz: float, N_m3: float, params: BulkGainParams) -> float:
+def n_sp_inversion(nu_Hz, N_m3: float, params: BulkGainParams):
     """Population-inversion factor n_sp = g_e/(g_e - g_a) = f_c(1 - f_v)/(f_c - f_v) at (nu, N).
     -> 1 at full inversion, -> +inf approaching transparency from above (checked, never used as a
-    source term)."""
+    source term); +inf exactly AT transparency (f_c == f_v). A float for scalar nu, else an array
+    matching nu_Hz -- the material_gain_per_m / emission_gain_per_m contract (audit A-17: the
+    float() casts raised TypeError on the array input its siblings accept)."""
     f_c, f_v, _sq, _m = _occupations(np.asarray(nu_Hz, dtype=np.float64), N_m3, params)
-    f_c = float(f_c)
-    f_v = float(f_v)
     denom = f_c - f_v
-    if denom == 0.0:
-        return float("inf")
-    return f_c * (1.0 - f_v) / denom
+    with np.errstate(divide="ignore", invalid="ignore"):
+        n_sp = np.where(denom == 0.0, np.inf, f_c * (1.0 - f_v) / np.where(denom == 0.0, 1.0, denom))
+    return float(n_sp) if np.ndim(nu_Hz) == 0 else n_sp
 
 
 def gain_peak(N_m3: float, params: BulkGainParams, *, n_grid: int = 4001,
@@ -504,7 +506,7 @@ def noise_figure_db(I_A: float, nu_Hz: float = None, L_m: float = None,
             "returned is the peak-wavelength noise figure, not the one you asked for. Pass "
             "nu_Hz=None to make that explicit (audit X-8).".format(
                 float(nu_Hz), C_LIGHT / float(nu_Hz) * 1e9, nu_pk, C_LIGHT / nu_pk * 1e9),
-            RuntimeWarning, stacklevel=2)
+            UnreliableResultWarning, stacklevel=2)
     modal = p.Gamma * g_pk
     if modal <= alpha_i_per_m:
         raise ValueError("noise_figure_db: modal gain Gamma*g_pk <= alpha_i (no net gain at peak)")

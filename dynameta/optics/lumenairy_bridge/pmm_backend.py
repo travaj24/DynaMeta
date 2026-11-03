@@ -9,18 +9,26 @@ PMM's roles in DynaMeta (complementing the RCWA backend, not replacing it):
   out-of-plane (exz/eyz/ezx/ezy) couplings -- gyrotropic / slanted-LC cells that the RCWA
   in-plane tensor path cannot represent.
 
-Scope contract (v1, enforced loudly): 1-D devices only -- every patterned layer's
-inclusions must be Rectangles spanning the FULL y period (a lamellar grating), translated
-into PMM segments [(width_fraction, eps)]. Rasterized (gridded structured) EpsFields raise
-(PMM segments are analytic; use the RCWA bridge for grids). In-plane incidence only
+Scope contract (enforced loudly): 1-D devices only -- every patterned layer's inclusions must
+be Rectangles spanning the FULL y period (a lamellar grating; a line crossing the cell edge
+wraps into two segments), translated into PMM segments [(width_fraction, eps)]. Rasterized
+(gridded structured) EpsFields raise (PMM segments are analytic; use the RCWA bridge for
+grids). [audit S4-13, wave-7 2026-11-02: this paragraph used to say "In-plane incidence only
 (azimuth = 0; PMMStack has no conical source). PMM returns NO transmission Jones and no
-per-order complex amplitudes: OpticalResult.t is None (T comes from the order-summed
-efficiencies; r from the zeroth-order reflection Jones with the same lab-basis -> Byrnes
-p-pol conversion as the RCWA bridge -- gated in validation/lumenairy_pmm_bridge.py).
+per-order complex amplitudes: OpticalResult.t is None" -- all three false since lumenairy 5.22,
+whose PMMStack gained set_source(phi=), jones_transmission() and per_order_amplitudes().]
+Incidence: in-plane AND conical (azimuth != 0; the rotated s/p R/T/r/t are synthesized from
+the per-order complex amplitudes by the shared _common.conical_synthesis, lossless end media
+only -- see make_lumenairy_pmm_solver). r = the zeroth-order co-pol reflection Jones, t = the
+zeroth-order co-pol TRANSMISSION Jones (PMMStack.jones_transmission), both with the same
+lab-basis -> Byrnes p-pol conversion as the RCWA bridge at phi = 0; R/T = the order-summed
+efficiencies (gated in validation/lumenairy_pmm_bridge.py). absorption=True fills the per-layer
+split at phi = 0 only (audit S4-2).
 
-Cross-library pins (first pinned at lumenairy 5.14.2, re-verified on the 5.21 floor): PMMStack(period, n_substrate=, n_superstrate=
-[INDICES], degree=, n_orders=); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
-[scalar or (3,3)], slant_angle=); set_source(wavelength, theta=); solve() ->
+Cross-library pins (first pinned at lumenairy 5.14.2, re-verified on the 5.22 floor):
+PMMStack(period, n_substrate=, n_superstrate= [INDICES], degree=, n_orders=[, layer_grids=
+>= 5.32]); add_layer(thickness, segments=[(w_frac, EPS)] | eps=
+[scalar or (3,3)], slant_angle=); set_source(wavelength, theta=, phi=); solve() ->
 (orders, R_eff(2, M), T_eff(2, M), jones_reflection(2, 2)) with rows/columns keyed
 INCIDENT E_x (0) / E_y (1) -- identical to the RCWA result layout. Dispersive callables
 force solve_vs_wavelength; this bridge rebuilds CONCRETE stacks per wavelength instead
@@ -42,9 +50,12 @@ from dynameta.optics.lumenairy_bridge._common import (angles_rad as _angles_rad,
                                                       guard_incidence_side as _guard_incidence_side,
                                                       p_basis_conversion as _p_basis_conversion,
                                                       pol_row as _pol_row,
-                                                      require_lumenairy as _require_lumenairy)
+                                                      require_lumenairy as _require_lumenairy,
+                                                      require_lumenairy_feature as _require_feature)
 from dynameta.optics.tmm_reference import S as _S_NM
 from dynameta.optics.tmm_reference import end_media_indices
+from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["design_to_pmm_stack", "make_lumenairy_pmm_solver", "layer_to_pmm_segments"]
 
@@ -55,7 +66,8 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
                           period_y_m: float, *, bg_eps=None) -> List[Tuple[float, complex]]:
     """Translate a lamellar (1-D) DynaMeta layer into PMM segments [(width_fraction, eps)].
     Every inclusion must be a Rectangle spanning the FULL y period (y-invariant grating
-    lines), lying inside [0, period_x] and mutually non-overlapping in x; gaps are filled
+    lines), at most one period wide (a line crossing x = 0 or x = period_x WRAPS into two
+    segments, 2026-11-02) and mutually non-overlapping in x; gaps are filled
     with the background eps. Anything else raises -- the honest 1-D scope."""
     px, py = float(period_x_m), float(period_y_m)
     bg = complex(bg_eps if bg_eps is not None
@@ -71,12 +83,34 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
             raise ValueError("PMM bridge: layer {!r} Rectangle does not span the full y "
                              "period (y-invariant grating lines required; got y in "
                              "[{:.3e}, {:.3e}] of {:.3e})".format(layer.name, ylo, yhi, py))
+        eps_inc = complex(design.materials.get(inc.material).eps(lambda_m))
         if xlo < -_REL_TOL * px or xhi > px * (1.0 + _REL_TOL):
-            raise ValueError("PMM bridge: layer {!r} Rectangle x-extent [{:.3e}, {:.3e}] "
-                             "leaves the cell [0, {:.3e}] (wrap-around is a follow-on)"
-                             .format(layer.name, xlo, xhi, px))
-        spans.append((max(xlo, 0.0), min(xhi, px),
-                      complex(design.materials.get(inc.material).eps(lambda_m))))
+            # PERIODIC WRAP (2026-11-02; this used to raise "wrap-around is a follow-on"): a
+            # boundary-crossing line is the SAME periodic structure as its two in-cell pieces
+            # [xlo', Px] + [0, xhi' - Px] after shifting xlo into [0, Px) -- the convention of the
+            # FEM mesher (_inclusion_solids_clipped) and of the RCWA bridge's periodic raster /
+            # analytic shapes. A line WIDER than the period would overlap its own image, which
+            # no segment list can paint -> refused; exactly one period wide = the whole cell.
+            # Gate (tests/test_lumenairy_shapes_sem_wrap.py): shifting every line by the same
+            # dx leaves R/T unchanged to ~1e-13 and agrees with the RCWA analytic path.
+            width = xhi - xlo
+            if width > px * (1.0 + _REL_TOL):
+                raise ValueError("PMM bridge: layer {!r} Rectangle x-width {:.3e} exceeds the "
+                                 "period {:.3e} -- it would overlap its own periodic image"
+                                 .format(layer.name, width, px))
+            if width >= px * (1.0 - _REL_TOL):
+                spans.append((0.0, px, eps_inc))
+                continue
+            lo = xlo - np.floor(xlo / px) * px          # in [0, Px)
+            hi = lo + width
+            if hi <= px * (1.0 + _REL_TOL):
+                spans.append((lo, min(hi, px), eps_inc))
+            else:
+                if px - lo > _REL_TOL * px:
+                    spans.append((lo, px, eps_inc))
+                spans.append((0.0, hi - px, eps_inc))
+            continue
+        spans.append((max(xlo, 0.0), min(xhi, px), eps_inc))
     spans.sort(key=lambda s: s[0])
     for (a_lo, a_hi, _), (b_lo, b_hi, _) in zip(spans, spans[1:]):
         if b_lo < a_hi - _REL_TOL * px:
@@ -94,6 +128,19 @@ def layer_to_pmm_segments(layer, design, lambda_m: float, period_x_m: float,
     return [(w / total, e) for w, e in segs]              # exact unit sum for PMM's check
 
 
+# DEFAULT `degree` ACROSS THE THREE PMM ENTRY POINTS (audit V-15, measured 2026-11-02). The same
+# lumenairy spectral-element engine is reached at three different default polynomial degrees:
+# design_to_pmm_stack / make_lumenairy_pmm_solver 16 (this file), the differentiable
+# rcwa_design.pmm_stack_RT / pmm_stack_jones 12, and the 2-D pmm2d_backend 11 (hybrid engine only;
+# its default pure engine converges in n_modes instead). The difference is
+# deliberate (a jit-traced solve and a 2-D tensor-product basis pay superlinearly per degree) but
+# it is NOT free, so a convergence study through one entry point does not transfer to its sibling.
+# Measured through pmm_stack_RT (period 0.8 um, 1310 nm, superstrate 1, substrate 1.45, 21 orders)
+# against degree 32: the E_x row (field ACROSS the walls, edge-singular) converges only
+# algebraically -- |dR| = 1.5e-4 / 6.4e-5 / 1.4e-5 at degree 12 / 16 / 24 on a 400 nm Si
+# lamellar grating, 6.8e-4 / 3.0e-4 / 6.6e-5 on a 100 nm Au one -- while the E_y row is at
+# 9e-8 / 1e-8 / 4e-10 (Si). So degree 12 vs 16 moves R by ~1e-4 (dielectric) to ~4e-4 (metal):
+# pin `degree` explicitly when comparing results across entry points.
 def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
                         degree: int = 16, n_orders: int = 21,
                         n_slices: Optional[int] = None,
@@ -119,6 +166,7 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     the caller asks for the speed explicitly and knows what it costs. (Bridge audit
     2026-08-31 vs lumenairy 5.42.1; conical and layer_absorption() verified unchanged on the
     per-layer path.)"""
+    require_supported_geometry(design, "design_to_pmm_stack")   # 2026-11-02: refuse Stack.features / Inclusion.taper
     lum = _require_lumenairy()
     n_super, n_sub = end_media_indices(design, lambda_m)
     px = float(design.unit_cell.period_x_m)
@@ -140,16 +188,17 @@ def design_to_pmm_stack(design, lambda_m: float, *, eps_by_region=None,
     # because there the speed-up genuinely does not exist.
     kw = {}
     if str(layer_grids) != "shared":
-        from dynameta.optics.lumenairy_bridge._common import parse_version
-        if parse_version(lum.__version__) < (5, 32, 0):
-            raise NotImplementedError(
-                "design_to_pmm_stack: layer_grids={!r} needs lumenairy >= 5.32 (installed "
-                "{}); the per-layer spectral-element grid and its non-conforming mortar do "
-                "not exist below that. Use the default 'shared' grid, or upgrade.".format(
-                    layer_grids, lum.__version__))
+        # the per-layer spectral-element grid and its non-conforming mortar do not exist below
+        # 5.32; use the default 'shared' grid there. (wave-7: the floor lives in the shared
+        # _common.FEATURE_FLOORS table; LumenairyFeatureUnavailable is a NotImplementedError.)
+        _require_feature("pmm_layer_grids",
+                         "design_to_pmm_stack(layer_grids={!r})".format(layer_grids))
         kw["layer_grids"] = str(layer_grids)
     stack = lum.PMMStack(px, n_substrate=complex(n_sub), n_superstrate=complex(n_super),
                          degree=int(degree), n_orders=int(n_orders), **kw)
+    # audit S4-17 (wave-7, 2026-11-02): the end media ride on the stack so the solver closure
+    # does not evaluate end_media_indices a second time per solve (same values, bit for bit)
+    stack.dynameta_end_media = (n_super, n_sub)
     names: List[str] = []
     for L in reversed(design.stack.layers):              # superstrate side first
         ef = eps_by_region.get(L.name)
@@ -225,7 +274,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
         orders, R2, T2, jones = stack.solve(stabilize=stabilize,
                                             retain_internal=absorption and abs(phi) <= 1e-12)
         row = _pol_row(design.optical)
-        n_sup, n_sb = end_media_indices(design, lambda_m)
+        n_sup, n_sb = stack.dynameta_end_media      # audit S4-17: set by design_to_pmm_stack
         rf, tf = _p_basis_conversion(pol, theta, n_sup, n_sb)
         if abs(phi) > 1e-12:
             # rotated s/p eigen-polarization: synthesize R/T + the co-pol zeroth-order r/t from
@@ -256,7 +305,7 @@ def make_lumenairy_pmm_solver(*, degree: int = 16, n_orders: int = 21,
             except Exception as exc:                          # pragma: no cover - defensive
                 import warnings
                 warnings.warn("lumenairy PMM bridge: per-layer absorption unavailable ({}); "
-                              "A_independent left unset".format(exc), stacklevel=2)
+                              "A_independent left unset".format(exc), AdvisoryWarning, stacklevel=2)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=time.perf_counter() - t0, t=t, T=T,
                              A=1.0 - R - T, A_independent=a_ind, R_flux=R, T_flux=T,

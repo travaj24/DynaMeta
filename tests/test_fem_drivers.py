@@ -191,3 +191,31 @@ def test_c9_time_dependent_load_hooks_are_recorded_and_suppress_the_steady_limit
     tr_repr = dataclasses.replace(tr_lam, flux_of_t=repr(tr_lam.flux_of_t))
     assert tr_repr.steady_limit_T is None
     pickle.loads(pickle.dumps(tr_repr))
+
+
+def test_x17_build_thermal_forms_carries_the_sink_temperature():
+    """audit X-17 (2026-11-02): build_thermal_forms(..., T_sink_K, ...) accepted the sink
+    temperature and IGNORED it -- the forms were identical for T_sink = 300 and 1000 K, and a
+    caller that started from a zero GridFunction (as the four in-package callers did not, each
+    re-applying the sink by hand) solved with the sink at 0 K: 7.1 / 14.3 K mean layer T on this
+    stack instead of 307.1 / 314.3. The builder now returns the sink lift built FROM T_sink_K, and
+    a solve started from it reproduces solve_thermal_fem; a non-physical sink is refused."""
+    import ngsolve as ng
+    from dynameta.carriers.thermal_fem import build_thermal_forms, mean_T_per_layer
+    lay = [ThermalLayer("sub", 200e-9, 1.4), ThermalLayer("top", 100e-9, 150.0)]
+    args = (lay, 200e-9, 200e-9, 1e8)
+    for T_sink in (300.0, 1000.0):
+        mesh, fes, u, v, a, f, k_cf, T_lift = build_thermal_forms(*args, T_sink, None, 60e-9, 2)
+        a.Assemble(); f.Assemble()
+        T = ng.GridFunction(fes)
+        T.vec.data = T_lift.vec
+        T.vec.data += a.mat.Inverse(fes.FreeDofs()) * (f.vec - a.mat * T.vec)
+        got = mean_T_per_layer(mesh, T, lay)
+        ref = solve_thermal_fem(lay, period_x_m=200e-9, period_y_m=200e-9, flux_W_m2=1e8,
+                                T_sink_K=T_sink, maxh_m=60e-9, order=2)
+        np.testing.assert_allclose(got, mean_T_per_layer(ref.mesh, ref.T, lay), rtol=1e-12)
+        # 1-D series oracle: the rise above the sink is T_sink-independent
+        assert got[0] - T_sink == pytest.approx(1e8 * 100e-9 / 1.4, rel=1e-6)
+    for bad in (0.0, -5.0, float("nan")):
+        with pytest.raises(ValueError, match="T_sink_K"):
+            build_thermal_forms(*args, bad, None, 60e-9, 2)

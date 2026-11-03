@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 
 def lidt_fluence_J_m2(tau_pulse_s, *, F_ref_J_m2: float, tau_ref_s: float):
@@ -47,7 +48,7 @@ class ThermalNode:
     R_th_K_W: float
     C_th_J_K: float
     area_m2: float
-    T_sink_K: float = 300.0
+    T_sink_K: float = T_REF
 
     def __post_init__(self):
         if not (self.R_th_K_W > 0.0 and self.C_th_J_K > 0.0 and self.area_m2 > 0.0

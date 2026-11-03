@@ -460,6 +460,51 @@ def test_f8_unmatched_boundary_really_assembles_to_zero():
     assert float(np.linalg.norm(f.vec.FV().NumPy())) == 0.0
 
 
+def test_f19_sub_nm_interface_pair_gets_two_names_not_one():
+    """AUDIT F-19. Interfaces were named iface_z<int(round(z))> unconditionally, so a 0.6 nm film
+    between z = 99.8 and 100.4 nm put BOTH planes under 'iface_z100' -- measured 3.2e5 nm^2 of
+    boundary, twice the 400 nm cell -- and a graphene sheet addressed to it was assembled on both
+    planes, silently doubled. Each name must now cover exactly ONE plane (one cell area), the
+    colliding pair is named with decimals, and every other interface keeps its integer name."""
+    pytest.importorskip("ngsolve")
+    import ngsolve as ng
+    from dynameta.materials import Material, MaterialRegistry, ConstantOptical
+    from dynameta.geometry import UnitCell, Stack, Layer, Design
+    from dynameta.geometry.specs import Mesh3DSpec, OpticalSpec
+    from dynameta.optics.ngsolve_layered import LayeredOpticalBuilder, _iface_names
+    from dynameta.optics.solver import _validate_sheet_bcs
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("diel", ConstantOptical(2.25 + 0j)))
+    reg.add(Material("thin", ConstantOptical(4.0 + 0j)))
+    stack = Stack(layers=[Layer("baseL", 99.8e-9, "diel"), Layer("thinL", 0.6e-9, "thin"),
+                          Layer("capL", 100e-9, "air")],
+                  superstrate_material="air", substrate_material="air")
+    m3 = Mesh3DSpec(pml_thk_m=400e-9, superstrate_buffer_m=400e-9, substrate_buffer_m=300e-9,
+                    maxh_superstrate_m=132e-9, maxh_substrate_m=132e-9, maxh_pml_m=240e-9,
+                    maxh_inclusion_m=108e-9, maxh_background_m=108e-9, maxh_metal_m=108e-9)
+    d = Design(name="f19", unit_cell=UnitCell.square(400e-9), stack=stack, electrodes=[],
+               materials=reg, mesh_3d=m3, optical=OpticalSpec(polarization="y"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geo = LayeredOpticalBuilder(d).build()
+    names = sorted({b for b in geo.mesh.GetBoundaries() if b.startswith("iface_z")})
+    cell = 400.0 * 400.0
+    for nm in names:                                   # one plane per name, never two
+        area = ng.Integrate(1.0, geo.mesh, definedon=geo.mesh.Boundaries(nm))
+        assert abs(area / cell - 1.0) < 1e-9, (nm, area / cell)
+    assert "iface_z99p8" in names and "iface_z100p4" in names and "iface_z100" not in names
+    for legacy in ("iface_z0", "iface_z200"):          # unaffected planes keep the integer name
+        assert legacy in names
+    _validate_sheet_bcs(geo.mesh, {"iface_z100p4": 1e-4})
+    with pytest.raises(ValueError, match="iface_z100p4"):   # the stale name now lists the real ones
+        _validate_sheet_bcs(geo.mesh, {"iface_z100": 1e-4})
+    # the helper: unique buckets are byte-identical to the old rule; duplicates of ONE plane share
+    assert _iface_names([0.0, 99.8, 100.4, 100.4 + 1e-9, -0.4]) == [
+        "iface_z0p0", "iface_z99p8", "iface_z100p4", "iface_z100p4", "iface_z-0p4"]
+    assert _iface_names([12.0, 300.0]) == ["iface_z12", "iface_z300"]
+
+
 def test_f15_oblique_pml_advisory_is_emitted_once_per_process():
     """The advisory describes the PML, not the solve: a sweep must not repeat it per wavelength.
     The per-solve REGIME GUARD (the 50 deg raise) stays unconditional."""
@@ -844,3 +889,100 @@ def test_f9_bddc_cg_falls_back_on_a_bloch_phased_space():
     hits = [w for w in rec if "bddc_cg" in str(w.message)]
     assert len(hits) == 1 and issubclass(hits[0].category, S.FEMDiagnosticWarning)
     assert res.R is not None and np.isfinite(res.R)
+
+
+# --------------------------- wave-7 (2026-11-02): S6-17 / S6-18 perf rewrites ---------------------------
+
+def _synthetic_field(geo, order=2):
+    """A smooth complex HCurl GridFunction on the guard cell (no solve needed)."""
+    import ngsolve as ng
+    fes = ng.HCurl(geo.mesh, order=order, complex=True)
+    g = ng.GridFunction(fes)
+    g.Set(ng.CF((ng.exp(1j * 0.01 * ng.x) * ng.sin(0.003 * ng.z), ng.cos(0.02 * ng.y) + 1j * ng.z / 1e3,
+                 ng.x * ng.y / 1e5)))
+    return g
+
+
+def test_s6_17_batched_cell_average_is_bitwise_the_point_by_point_loop(monkeypatch):
+    """audit S6-17: _cell_average now locates + evaluates each probe plane in ONE batched NGSolve
+    call. Pinned BIT-FOR-BIT against the old Python double loop (re-implemented here verbatim) on
+    a GridFunction and on an E_bg + gfu CoefficientFunction, for a real and a complex projection
+    and zero / non-zero Bloch demodulation. Measured 3.1-4.3x per call (24 x 24: 67 -> 16 ms)."""
+    pytest.importorskip("ngsolve")
+    import ngsolve as ng
+    from dynameta.optics import solver as S
+    geo, _eps, _opt = _fem_cell()
+    g = _synthetic_field(geo)
+    cf = g + ng.CF((1.0, 2j, 0.5))
+    z0, z1 = geo.z_intervals_nm["superstrate"]
+    zp = np.linspace(z0 + 50.0, z1 - 50.0, 7)
+
+    def old_loop(field, proj, kx, ky, n):
+        xs = (np.arange(n) + 0.5) * (400.0 / n)
+        p0, p1, p2 = proj
+        out = []
+        for zv in zp:
+            vals = []
+            for xv in xs:
+                for yv in xs:
+                    E = field(geo.mesh(float(xv), float(yv), float(zv)))
+                    pv = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
+                    vals.append(pv * np.exp(-1j * (kx * xv + ky * yv)))
+            out.append(complex(np.mean(vals)))
+        return np.array(out)
+
+    for n in (6, 11):
+        monkeypatch.setattr(S, "_probe_grid_sizes", lambda *a, _n=n, **k: (_n, _n))
+        for field in (g, cf):
+            for proj, kx, ky in (((1.0, 0.0, 0.0), 0.0, 0.0), ((0.3 + 0.1j, 0.95, 0.0), 0.004, 0.001),
+                                 (np.array([0.2 - 0.7j, 0.1j, 1.0 + 0j]), 0.0, 0.002)):
+                new = S._cell_average(geo.mesh, field, zp, 400.0, 400.0, proj, kx, ky, kz_med=1.0)
+                assert np.array_equal(new, old_loop(field, proj, kx, ky, n)), (n, proj, kx, ky)
+    # a plane entirely OFF the mesh still fails loudly (OPT-7/F6), not with a silent 0+0j
+    with pytest.raises(RuntimeError, match="no valid field samples"):
+        S._cell_average(geo.mesh, g, np.array([1.0e7]), 400.0, 400.0, (1.0, 0.0, 0.0), 0.0, 0.0,
+                        kz_med=1.0)
+
+
+def test_s6_18_absorption_diagnostics_integrate_ONCE_and_split_exactly(monkeypatch):
+    """audit S6-18: solve_fem's default diagnostics integrated the identical loss density twice
+    (_absorbed_fraction over the non-PML union, then _per_region_absorption once per region). Now
+    ONE region-wise Integrate gives both, and A_independent == sum(map) EXACTLY (it held to ~1e-16
+    before). The values are pinned to the old two-pass integrals at 1e-14 (the TaskManager's own
+    run-to-run noise is 4.4e-16), a lossless region is exactly 0 and the PML is excluded."""
+    pytest.importorskip("ngsolve")
+    import re as _re
+    import ngsolve as ng
+    from dynameta.optics import solver as S
+    geo, eps_cf, _opt = _fem_cell()
+    g = _synthetic_field(geo)
+    k0, Px, Py = 2.0 * np.pi / 1200.0, 400.0, 400.0
+    calls = []
+    real_integrate = ng.Integrate
+
+    def counting(*a, **k):
+        calls.append(k.get("region_wise", False))
+        return real_integrate(*a, **k)
+
+    monkeypatch.setattr(ng, "Integrate", counting)
+    A, per = S._absorption_diagnostics(geo.mesh, g, eps_cf, k0, 0.0, Px, Py,
+                                       roles=getattr(geo, "role_by_region", None))
+    assert calls == [True], calls                       # ONE pass (old code: 1 + n_regions passes)
+    monkeypatch.setattr(ng, "Integrate", real_integrate)
+    assert A == sum(per.values())                       # the additivity contract, now exact
+    assert not any(r.startswith("pml") for r in per)
+    # the old two-pass reference, inlined (same CF, same normalization)
+    loss = S._loss_density_cf(eps_cf, g)
+    names = [m for m in per]
+    union = complex(ng.Integrate(loss, geo.mesh,
+                                 definedon=geo.mesh.Materials("|".join(_re.escape(m) for m in names))))
+    assert A == pytest.approx(union.real * k0 / (Px * Py), rel=1e-14, abs=0.0)
+    for m in names:
+        ref = complex(ng.Integrate(loss, geo.mesh, definedon=geo.mesh.Materials(_re.escape(m)))).real
+        assert per[m] == pytest.approx(ref * k0 / (Px * Py), rel=1e-14, abs=1e-300), m
+        if geo.material_by_region[m] == "air":
+            assert per[m] == 0.0, m                     # Im(eps) = 0 contributes exactly nothing
+    assert any(per[m] > 0.0 for m in names if geo.material_by_region[m] == "gold")
+    # the two thin wrappers are views of the SAME single implementation
+    assert S._absorbed_fraction(geo.mesh, g, eps_cf, k0, 0.0, Px, Py) == A
+    assert S._per_region_absorption(geo.mesh, g, eps_cf, k0, 0.0, Px, Py) == per

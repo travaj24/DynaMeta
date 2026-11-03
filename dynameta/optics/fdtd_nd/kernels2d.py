@@ -10,7 +10,6 @@ import numpy as np
 from dynameta.constants import EPS0, MU0
 
 
-
 def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, xp=np, lor=None,
               chi2=None, raman=None, gain=None, gain_dyn=None, gain_dyn_out=None, hot=None, hot_out=None):
     """One 2D TE pass over a cell-wise (nx,nz) (eps_inf, wp, gamma, chi3) profile. Periodic in x (roll),
@@ -43,6 +42,11 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
              rate equations by conservative forward Euler (every term appears +/- once, so
              sum(N) drifts only at the per-step rounding floor). gain_dyn_out (a dict) receives
              'dN_snap' = N2 - N1 captured at snap_step and 'Npop_final'.
+             KERNEL-LEVEL API ONLY (audit D-16): no solve_* front end builds gain_dyn -- FDTDLayer
+             carries no pump/population fields, and the front ends' two-run R/T normalization does
+             not apply to a lasing / saturating cavity. Drive it through this exported kernel the
+             way validation/fdtd_gain_saturation.py and validation/fdtd_lasing_cavity.py do (with
+             laser_gain.FourLevelSystem for the coefficients); numpy/cupy path only.
       hot:   opt-in per-cell HOT-CARRIER two-temperature ADE (roadmap 2.1; NUMPY reference path only).
              A dict {mask,(nx,nz) float 0/1; mat_idx,(nx,nz) int material id (-1 off); tables, a list of
              per-material (Te_grid,U_grid,wp_ratio,gam_ratio) lookup arrays; G,(nx,nz) e-ph coupling
@@ -118,6 +122,15 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             raise ValueError("hot-carrier and dynamic gain both re-touch the Drude coefficients; "
                              "they are mutually exclusive")
         hmask = np.asarray(hot["mask"], dtype=np.float64)    # (nx,nz) 1 on opted-in cells, 0 elsewhere
+        # z-subcell averaging (2026-11-02): a mixed edge cell carries its HOT FILL FRACTION f in (0, 1)
+        # as the mask. Its Drude current is already f-weighted (wp^2 scaled by f), so the hot material's
+        # own dissipation density is J.E / f; that is what heats U_e (per unit hot volume), and the
+        # mask-weighted means below then average over hot VOLUME. A 0/1 mask keeps the legacy
+        # expression hmask * J.E bit-for-bit.
+        if bool(np.all((hmask == 0.0) | (hmask == 1.0))):
+            h_weight = hmask
+        else:
+            h_weight = np.where(hmask > 0.0, 1.0 / np.where(hmask > 0.0, hmask, 1.0), 0.0)
         mat_idx = np.asarray(hot["mat_idx"])                 # (nx,nz) material id, -1 off
         htab = hot["tables"]                                 # list of (Te_grid,U_grid,wp_ratio,gam_ratio)
         Ghot = np.asarray(hot["G"], dtype=np.float64)        # (nx,nz) electron-phonon coupling [W/m^3/K]
@@ -151,6 +164,17 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             if do_lat:
                 Tl_mean = np.empty(nsteps)                    # (nsteps,) mask-averaged lattice temperature
                 sub_out_int = np.zeros((nx, nz))              # integrated lattice->substrate outflow rate
+            # OPT-IN per-cell diagnostic (2026-11-03): hot_out["record_cells"] = True before the call
+            # records, for every z row that holds hot cells, the x-mean RAW Drude work J.E and the
+            # hot-weighted T_e at every step, plus that row's hot fill fraction. Lets a test drive an
+            # EXACT per-cell 2-ODE oracle (a mean-field oracle is exact only for a uniform film).
+            _rec_cells = bool(hot_out.get("record_cells", False))
+            if _rec_cells:
+                _kz = np.nonzero((hmask > 0.0).any(axis=0))[0]
+                _on = (hmask[:, _kz] > 0.0).astype(np.float64)
+                _non = np.maximum(_on.sum(axis=0), 1.0)
+                _hw = np.maximum(hmask[:, _kz].sum(axis=0), 1e-300)
+                JE_cells = np.empty((nsteps, _kz.size)); Te_cells = np.empty((nsteps, _kz.size))
     # --- PER-STEP LOOP INVARIANTS, HOISTED (audit P-1) -------------------------------------------
     # The 1-D kernel already does exactly this (optics/fdtd.py, audit S2-17) and the 3-D kernel is
     # written with in-place `out=` throughout; the 2-D kernel was the only one still allocating a
@@ -175,21 +199,58 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
     Hz_roll = xp.empty((nx, nz))                # == xp.roll(Hz,  1, axis=0)
     cE_lin = EPS0 * eps_inf / dt                # eps_eff == eps_inf when chi3 is identically 0
     denom_lin = cE_lin + bJ / 2.0
+    # --- PER-STEP SCRATCH, PREALLOCATED (audit S2-11 / S6-12, wave-7 2026-11-02) ------------------
+    # P-1 (above) removed the curl/roll allocations; the derivative, CPML-memory, H-update and
+    # E/J-update expressions still built ~12 fresh full-grid temporaries per step on the linear path
+    # (~20 with Drude) -- per-step DEVICE mallocs on the cupy path. Every expression below is now an
+    # out= ufunc chain that reproduces the old arithmetic operand-by-operand in the same order (only
+    # the commutative operand order of single * / + changes), the run_3d template (audit 6.2): the
+    # four probe arrays are BIT-IDENTICAL (tobytes) on the passive, Drude, Kerr, Lorentz, gain,
+    # chi2, Raman, dynamic-gain and hot-carrier paths (gate:
+    # tests/test_fdtd_backend_contracts.py::test_s2_11_2d_reference_kernel_prealloc_is_bit_identical).
+    # Ey/Jy ping-pong with Eyn/Jyn (fully overwritten every step). The opt-in Lorentz/gain/chi2/
+    # Raman/Kerr/hot-carrier blocks keep their own expressions, as run_3d's do. Measured (numpy,
+    # best of 5): 64 x 400 x 800 steps 1.0x (0.263 -> 0.258 s; small temporaries are recycled by the
+    # allocator), 256 x 1600 x 200 linear 4.74 -> 1.67 s (2.8x) / Drude 6.89 -> 2.05 s (3.4x),
+    # 1024 x 2000 x 40 linear 2.1x / Drude 2.3x -- the large-grid temporaries were fresh page-faulted
+    # allocations every step. Cost: ~5 grids held for the run (traced peak +10 %, 295 -> 328 MB at
+    # 1024 x 2000) instead of transiently.
+    dzb = xp.empty((nx, nz - 1)); tz = xp.empty((nx, nz - 1))      # (nz-1)-wide z-derivative scratch
+    f1 = xp.empty((nx, nz)); f2 = xp.empty((nx, nz))                # full-grid scratch
+    Eyn = xp.empty((nx, nz))                                        # E^{n+1} (ping-pong with Ey)
+    Jyn = xp.empty((nx, nz)) if do_drude else None                  # J^{n+1} (ping-pong with Jy)
+    khs, bhs, chs = kh[:-1], bh[:-1], ch[:-1]                       # CPML views (H-grid, k=0..nz-2)
+    kes, bes, ces = ke[1:], be[1:], ce[1:]                          # CPML views (E-grid, k=1..nz-1)
+    ncmu = -cmu
+    aJ1_h = 0.5 * (1.0 + aJ)                    # == the old inline 0.5 * (1.0 + aJ), once
+    bJ_half = 0.5 * bJ                          # == the old inline 0.5 * bJ
     for n in range(nsteps):
         # H update: dHx/dt = (1/mu0) (CPML-stretched dEy/dz) ; dHz/dt = -(1/mu0) dEy/dx (periodic x)
-        dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz                      # at H positions k=0..nz-2
-        psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
-        Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
+        # (audit D-22: Hx[:, nz-1] is never updated here and stays 0 -- it sits beyond the PEC plane
+        #  and TE has no Ez to drive it; kernels3d.py DOES update its last-cell Hx, by dEz/dy, and is
+        #  equally right. The asymmetry is deliberate; see the note there.)
+        xp.subtract(Ey[:, 1:], Ey[:, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)   # dEy/dz at k=0..nz-2
+        xp.multiply(chs, dzb, out=tz)                                   # psi = bh*psi + ch*dEy/dz
+        xp.multiply(bhs, psi_hxz[:, :-1], out=psi_hxz[:, :-1])
+        xp.add(psi_hxz[:, :-1], tz, out=psi_hxz[:, :-1])
+        xp.divide(dzb, khs, out=tz); xp.add(tz, psi_hxz[:, :-1], out=tz)            # Hx += cmu*(...)
+        xp.multiply(tz, cmu, out=tz)
+        xp.add(Hx[:, :-1], tz, out=Hx[:, :-1])
         Ey_roll[:-1] = Ey[1:]; Ey_roll[-1] = Ey[0]                  # roll(Ey, -1) into the buffer
-        Hz += -cmu * (Ey_roll - Ey) / dx
+        xp.subtract(Ey_roll, Ey, out=f1); xp.multiply(f1, ncmu, out=f1)             # Hz += -cmu*(..)/dx
+        xp.divide(f1, dx, out=f1)
+        xp.add(Hz, f1, out=Hz)
         # curl_y(H) = (CPML-stretched dHx/dz) - dHz/dx at the E_y points
-        dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz                      # at E positions k=1..nz-1
-        psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
+        xp.subtract(Hx[:, 1:], Hx[:, :-1], out=dzb); xp.divide(dzb, dz, out=dzb)   # dHx/dz at k=1..nz-1
+        xp.multiply(ces, dzb, out=tz)
+        xp.multiply(bes, psi_eyz[:, 1:], out=psi_eyz[:, 1:])
+        xp.add(psi_eyz[:, 1:], tz, out=psi_eyz[:, 1:])
         curl = curl_buf
         curl[:, 0] = 0.0                                            # only column 0 needs zeroing
-        curl[:, 1:] = dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        xp.divide(dzb, kes, out=tz); xp.add(tz, psi_eyz[:, 1:], out=curl[:, 1:])
         Hz_roll[0] = Hz[-1]; Hz_roll[1:] = Hz[:-1]                  # roll(Hz, 1) into the buffer
-        curl -= (Hz - Hz_roll) / dx
+        xp.subtract(Hz, Hz_roll, out=f1); xp.divide(f1, dx, out=f1)
+        xp.subtract(curl, f1, out=curl)
         # Lorentz ADE: PL^{n+1} = C1 PL^n + C2 PL^{n-1} + C3 E^n; its current dPL/dt enters the E-update
         if do_lor:
             PLnew = C1 * PL + C2 * PLp + C3 * Ey
@@ -239,17 +300,26 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         else:
             cE = cE_lin
             denom = denom_lin
+        # (audit S2-11: out= chains into the ping-pong buffers; same operands, same order)
+        Eynew = Eyn
+        xp.multiply(cE, Ey, out=f1); xp.add(f1, curl, out=f1)
         if do_drude:
-            Eynew = (cE * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
-            Jynew = aJ * Jy + bJ * (Eynew + Ey)        # (== Jy update below; split out so p_abs can read J^n)
+            # Eynew = (cE*Ey + curl - 0.5*(1+aJ)*Jy - 0.5*bJ*Ey) / denom
+            xp.multiply(aJ1_h, Jy, out=f2); xp.subtract(f1, f2, out=f1)
+            xp.multiply(bJ_half, Ey, out=f2); xp.subtract(f1, f2, out=f1)
+            xp.divide(f1, denom, out=Eynew)
+            # Jynew = aJ*Jy + bJ*(Eynew + Ey)  (== Jy update below; split out so p_abs can read J^n)
+            Jynew = Jyn
+            xp.add(Eynew, Ey, out=f2); xp.multiply(bJ, f2, out=f2)
+            xp.multiply(aJ, Jy, out=Jynew); xp.add(Jynew, f2, out=Jynew)
         else:                                          # wp identically 0 -> Jy stays exactly 0
-            Eynew = (cE * Ey + curl) / denom
+            xp.divide(f1, denom, out=Eynew)            # Eynew = (cE*Ey + curl) / denom
         # HOT-CARRIER two-temperature ADE (roadmap 2.1): local Drude Joule dissipation heats the electron
         # gas -> T_e -> (wp,gamma) shift. p_abs = J.E co-locates J and E at the step midpoint (its cycle
         # average is the Drude absorption). Off-mask cells (non-Drude, or not opted in) carry mask 0 and,
         # for a Drude-off cell, J == 0, so p_abs == 0 and T_e stays at T_e0.
         if do_hot:
-            p_abs = hmask * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
+            p_abs = h_weight * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
             if do_lat:
                 coupling = Ghot * (Te_hot - Tlhot)         # W/m^3 leaving the electrons -> INTO the lattice
                 U_e += dt * (alpha_hot * p_abs - coupling)
@@ -258,13 +328,17 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             else:
                 U_e += dt * (alpha_hot * p_abs - Ghot * (Te_hot - Tlhot))
             if _rec:
-                pabs_mean[n] = float(p_abs.sum()) / msum
+                pabs_mean[n] = float((p_abs if h_weight is hmask else p_abs * hmask).sum()) / msum
                 Te_mean[n] = float((Te_hot * hmask).sum()) / msum
                 pabs_int += p_abs
                 E2_int += Eynew ** 2
                 if do_lat:
                     Tl_mean[n] = float((Tlhot * hmask).sum()) / msum
                     sub_out_int += sub_out                 # rate; * dt applied at the end
+                if _rec_cells:
+                    _je = ((0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew)))[:, _kz]
+                    JE_cells[n] = (_je * _on).sum(axis=0) / _non
+                    Te_cells[n] = (Te_hot[:, _kz] * hmask[:, _kz]).sum(axis=0) / _hw
             if (n % n_upd) == 0:                       # refresh T_e, (wp,gamma) and the Drude ADE coeffs
                 for mi in range(n_mat):
                     sel = (mat_idx == mi)
@@ -280,11 +354,19 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
                 aJ = (1.0 - gam * dt / 2.0) / (1.0 + gam * dt / 2.0)
                 bJ = (EPS0 * wp ** 2 * dt / 2.0) / (1.0 + gam * dt / 2.0)
                 denom_lin = cE_lin + bJ / 2.0      # bJ moved: the hoisted denominator must follow
+                aJ1_h = 0.5 * (1.0 + aJ)           # ... and so must the two S2-11 hoists
+                bJ_half = 0.5 * bJ
         if do_drude:
-            Jy = Jynew
+            Jy, Jyn = Jynew, Jy                        # ping-pong: retired J^n is next step's out=
         Eynew[:, k_src] += src[n]            # soft plane source (uniform in x -> normal-incidence plane wave)
+        # audit D-14: this reference kernel advances the ADE state (Jy above, from the PRE-zero
+        # Eynew, and PL/PG/P2/Q/PR) on the PEC cells k = 0 / nz-1 too, which the numba and CUDA
+        # kernels (E loop k in [1, nz-2]) do not. Inert -- that state feeds only E on those two
+        # cells, which the next line zeroes every step -- but it is one reason the backends agree
+        # to ~1e-9/1e-12, not bit-for-bit (D-7). Do not "fix" one copy without the others; see the
+        # matching note in kernels2d_numba.py. (wave-6: the wave-4 note existed only there.)
         Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0  # PEC backing the CPML
-        Ey = Eynew
+        Ey, Eyn = Eynew, Ey                    # ping-pong: retired E^n is next step's out= target
         # record E_y and H_x at the probe planes; AVERAGE H_x (at k+/-1/2) onto the E_y plane (at k) so
         # the Poynting flux E_y*H_x co-locates spatially -- else the half-cell z-offset carries a
         # per-diffraction-order phase (each order has a different k_z) that does NOT cancel in the ratio.
@@ -301,6 +383,11 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         hot_out["E2_int"] = E2_int                           # (nx,nz) time-integrated |E_y|^2 (fluence proxy)
         hot_out["Te_final"] = Te_hot.copy()                  # (nx,nz) final electron-temperature map
         hot_out["mask"] = hmask.astype(bool)                 # (nx,nz) opted-in-cell mask
+        if _rec_cells:                                       # opt-in per-cell diagnostic (see above)
+            hot_out["cell_z_index"] = _kz                    # (ncell,) z rows holding hot cells
+            hot_out["cell_fill"] = (hmask[:, _kz] * _on).sum(axis=0) / _non   # (ncell,) hot fill fraction
+            hot_out["cell_JE"] = JE_cells                    # (nsteps, ncell) RAW J.E (x-mean) [W/m^3]
+            hot_out["cell_Te"] = Te_cells                    # (nsteps, ncell) hot-weighted T_e [K]
         # roadmap 5.7 energy-closure + lattice probes. p_abs_int is the RAW J.E work into the film; the
         # tracked reservoirs receive the alpha_abs fraction of it, so the EXACT identity is
         #     U_e_final + U_l_final + sub_outflow_int == alpha_abs * p_abs_int
@@ -316,6 +403,3 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             hot_out["U_l_final"] = np.zeros((nx, nz))        # fixed bath: no lattice reservoir
             hot_out["sub_outflow_int"] = np.zeros((nx, nz))
     return eyL, hxL, eyR, hxR
-
-
-_run_2d_te = run_2d_te                                       # back-compat alias (pre-promotion name)

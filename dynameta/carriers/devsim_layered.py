@@ -38,8 +38,9 @@ from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.dc_solve import solve_dc
-from dynameta.constants import HBAR, KB  # for the effective DOS N_c(N_v) from the DOS mass
 from dynameta.geometry.design import Design
+from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 # Width of the thin edge-metal strip inserted at a drift-diffusion semiconductor's grounded edge so
 # the ground becomes a region-region INTERFACE (full-line node capture) instead of a weak 2-node
@@ -49,12 +50,6 @@ from dynameta.geometry.design import Design
 # the ~1 nm slivers to the adjacent (ohmic-pinned, ~n_bg) value -- the physically correct unbiased
 # eps there.
 _EDGE_METAL_W_M = 1.5e-9
-
-
-def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
-    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass. Used for the
-    bipolar FD g-factor (N_c / N_v); for a non-degenerate diode its exact value barely matters (g~1)."""
-    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
 
 
 @dataclass
@@ -71,6 +66,10 @@ class _RegionSpec:
 class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device") -> None:
+        # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
+        # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
+        # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
+        require_supported_geometry(design, "LayeredDevsimBuilder")
         self.design = design
         self.mesh_name = mesh_name
         self.device = device_name
@@ -159,7 +158,7 @@ class LayeredDevsimBuilder:
             warnings.warn(
                 "layered full-edge contact needed for layer(s) {} but the design has no metal "
                 "material to form the edge-metal strip; falling back to the weak 2-node contact "
-                "(gated DD / 2D bipolar may not converge).".format(sorted(fe)))
+                "(gated DD / 2D bipolar may not converge).".format(sorted(fe)), AdvisoryWarning, stacklevel=2)
         # y-edge grounds are not resolved in the 2D (x,z) cross-section -> they get no full-edge
         # ohmic ground (and the legacy contact placement mis-locates them at the x-hi edge), so a
         # gated DD device with only a y-edge ground may not converge. Warn rather than fail silently.
@@ -171,7 +170,7 @@ class LayeredDevsimBuilder:
                     warnings.warn(
                         "electrode '{}': a y-edge ground on a drift-diffusion layer is not resolved "
                         "in the 2D (x,z) builder -- no full-edge ohmic ground is formed and gated DD "
-                        "may not converge. Use an x_lo/x_hi edge ground.".format(E.name))
+                        "may not converge. Use an x_lo/x_hi edge ground.".format(E.name), AdvisoryWarning, stacklevel=2)
         specs: List[_RegionSpec] = []
         for L in d.stack.layers:
             zlo, zhi = z_iv[L.name]
@@ -237,9 +236,6 @@ class LayeredDevsimBuilder:
                 specs.append(_RegionSpec(name, inc.material, role,
                                           xlo, xhi, zlo, zhi))
         return specs
-
-    def _meshed(self) -> List[_RegionSpec]:
-        return self._specs
 
     def _nearest_nonmetal(self, layer_name: str) -> Tuple[str, float]:
         """For a metal-gate electrode on `layer_name`, find the nearest meshed
@@ -400,7 +396,7 @@ class LayeredDevsimBuilder:
                             "layered drift-diffusion on semiconductor '{}': no full-edge ohmic "
                             "ground (only a weak 2-node edge ground) -- a gated device may not "
                             "converge; add an edge GROUND electrode on this layer, or use the "
-                            "equilibrium physics mode for DC gate accumulation.".format(s.name))
+                            "equilibrium physics mode for DC gate accumulation.".format(s.name), AdvisoryWarning, stacklevel=2)
                     DD.setup_semiconductor_region_dd(
                         self.device, s.name, n_bg_m3=tr.n_bg_m3,
                         eps_static=tr.eps_static, dos_mass_kg=dos,
@@ -455,8 +451,8 @@ class LayeredDevsimBuilder:
             nd = (-1.0 if tr.acceptor else 1.0) * float(tr.n_bg_m3)
             ds.node_model(device=self.device, region=s.name, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = _effective_dos_m3(dos)
-        Nv = _effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
+        Nc = PE.effective_dos_m3(dos)                   # audit X-15: the single N_c (T_REF)
+        Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
         BP.setup_bipolar_region(
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
@@ -563,19 +559,26 @@ class LayeredDevsimBuilder:
         # ohmic semiconductor contact does, so a GATED bipolar 2D device UNDER-ACCUMULATES (the 3D
         # gated-cap builder applies gate_bias = Vg + phi_bi). Warn LOUDLY rather than return a silently-
         # wrong profile. Bipolar p-n DIODES with ohmic semiconductor contacts are unaffected (validated).
+        # audit S5-16 (wave-7, 2026-11-02): the warn used to sit INSIDE `try: ... except Exception:
+        # pass` under an `import warnings as _w` alias. A warning escalated to an error (pytest
+        # filterwarnings=error, or a caller's filterwarnings('error', category=...)) IS an Exception, so
+        # the bare except SWALLOWED the very escalation it was asked for; and the alias hid the site from
+        # the V-17 census. Only the electrode inspection is guarded now; the warning is raised outside,
+        # as UnreliableResultWarning (the returned profile under-accumulates -- a UserWarning, its old
+        # implicit category, so existing filters still match).
         try:
-            import warnings as _w
             semi_layers = {L.name for L in d.stack.layers
                            if d.material_role(L.background_material) == "semiconductor"}
             gated = [E.name for E in d.electrodes if getattr(E, "role", "biased") != "ground"
                      and getattr(E, "layer", None) not in semi_layers]
-            if gated and bias.voltages:
-                _w.warn("LayeredDevsimBuilder bipolar solve: gate electrode(s) {} sit on a non-"
-                        "semiconductor layer and do NOT carry the bipolar built-in-potential offset, so a "
-                        "GATED bipolar 2D device under-accumulates. Use the 3D gated-cap builder "
-                        "(devsim_3d) for a quantitative gated-bipolar result.".format(gated), stacklevel=2)
-        except Exception:
-            pass
+        except Exception:                                     # noqa: BLE001 (diagnostic only)
+            gated = []
+        if gated and bias.voltages:
+            warnings.warn("LayeredDevsimBuilder bipolar solve: gate electrode(s) {} sit on a non-"
+                          "semiconductor layer and do NOT carry the bipolar built-in-potential offset, so a "
+                          "GATED bipolar 2D device under-accumulates. Use the 3D gated-cap builder "
+                          "(devsim_3d) for a quantitative gated-bipolar result.".format(gated),
+                          UnreliableResultWarning, stacklevel=2)
 
         # (1) seed the built-in (charge-neutral) potential + carriers, in the frame the ohmic
         # contacts PIN -- which carries the Fermi-Dirac degeneracy correction (with the sign the
@@ -669,7 +672,7 @@ class LayeredDevsimBuilder:
                 "set_ssac_gate('{}'): this contact is a drift-diffusion ohmic carrier contact -- "
                 "repointing it circuit-driven replaces only its Potential Dirichlet and leaves the "
                 "Electrons pin in place. Drive the modulating GATE (a dielectric contact), not the "
-                "carrier ground.".format(electrode_name))
+                "carrier ground.".format(electrode_name), AdvisoryWarning, stacklevel=2)
         from dynameta.carriers import ac_analysis as _AC
         # drop the bias-Dirichlet contact equation (live) and its stale registry record, then attach
         # the circuit-driven replacement (setup_circuit_contact records the new one).
@@ -710,8 +713,12 @@ class LayeredDevsimBuilder:
             if cc:
                 extras["contact_currents_A"] = cc
         except Exception as _e:                               # noqa: BLE001 (diagnostic)
-            import warnings as _w
-            _w.warn("contact-current extraction unavailable: {}".format(_e))
+            # audit S5-16 (wave-7, 2026-11-02): this was `import warnings as _w; _w.warn(...)` -- no
+            # category, no stacklevel, and the alias hid it from the V-17 census (which matches the
+            # literal `warnings.warn`). The CarrierField is complete; only the optional extras key is
+            # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
+            warnings.warn("contact-current extraction unavailable: {}".format(_e),
+                          AdvisoryWarning, stacklevel=2)
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=PE.T_REF, regions=regions, n_bg_by_region=n_bg_by_region,

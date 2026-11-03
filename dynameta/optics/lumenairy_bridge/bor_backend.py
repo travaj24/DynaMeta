@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from dynameta.core.interfaces import OpticalResult
+from dynameta.optics.lumenairy_bridge._common import FEATURE_FLOORS as _FEATURE_FLOORS
 
 _SCALE = 1.0e6   # m -> um (lumenairy is unit-agnostic; microns match BOR's validated numeric regime)
 
@@ -50,21 +51,36 @@ class BorLayer:
     """One z-layer of an axisymmetric stack (SI metres). EXACTLY one of: `rings` (a concentric BINARY
     ring grating (radial_period_m, duty, n_ridge, n_groove)); `eps_profile` (a callable r_m -> eps, a
     radial permittivity profile, r in METRES); or `eps` (a uniform scalar permittivity). exp(-i omega t),
-    so Im(eps) > 0 is loss."""
+    so Im(eps) > 0 is loss.
+
+    `segments` (2026-11-02, the fourth spelling): explicit annuli ((r_out_1_m, eps_1), ...,
+    (r_max_m, eps_K)) with strictly increasing r_out and the LAST r_out equal to the spec's r_max_m;
+    each eps a concrete scalar or the diagonal cylindrical triple (eps_rr, eps_phiphi, eps_zz). It is
+    the NATIVE spec of the SEM basis (walls become element boundaries), also valid on FD (a step
+    profile). Appended after `name` so positional BorLayer(...) calls keep their meaning."""
     thickness_m: float
     rings: Optional[Tuple[float, float, complex, complex]] = None
     eps_profile: Optional[Callable[[np.ndarray], np.ndarray]] = None
     eps: Optional[complex] = None
     name: Optional[str] = None
+    segments: Optional[Sequence[Tuple[float, object]]] = None
 
     def __post_init__(self) -> None:
-        given = [self.rings is not None, self.eps_profile is not None, self.eps is not None]
+        given = [self.rings is not None, self.eps_profile is not None, self.eps is not None,
+                 self.segments is not None]
         if sum(given) != 1:
-            raise ValueError("BorLayer needs EXACTLY one of rings / eps_profile / eps")
+            raise ValueError("BorLayer needs EXACTLY one of rings / eps_profile / eps / segments")
         if not (self.thickness_m > 0.0):
             raise ValueError("BorLayer: thickness_m must be > 0")
         if self.rings is not None and len(self.rings) != 4:
             raise ValueError("BorLayer.rings = (radial_period_m, duty, n_ridge, n_groove)")
+        if self.segments is not None:
+            r_prev = 0.0
+            for r_out, _e in self.segments:
+                if not float(r_out) > r_prev:
+                    raise ValueError("BorLayer.segments: r_out must be strictly increasing and > 0 "
+                                     "(got {!r} after {!r})".format(r_out, r_prev))
+                r_prev = float(r_out)
 
 
 @dataclass
@@ -72,13 +88,32 @@ class BorStackSpec:
     """An axisymmetric (body-of-revolution) stack: a z-list of BorLayers between semi-infinite super/
     substrate, solved at azimuthal order m on a radial domain [0, r_max_m] with n_radial points. r_max_m
     (the computational radius) sets the discrete incident-mode set (each mode = a cylindrical wave at a
-    quantized polar angle); take it >> the radial feature period so the rings are locally planar. SI."""
+    quantized polar angle); take it >> the radial feature period so the rings are locally planar. SI.
+
+    RADIAL BASIS (2026-11-02, lumenairy BORStack(basis=, degree=, elements_per_segment=, grade=)):
+    basis='fd' (DEFAULT -- the Yee-staggered finite-difference grid of n_radial points; NOTHING extra is
+    forwarded to lumenairy, so every pre-existing result is BYTE-IDENTICAL) or 'sem' (div-conforming
+    radial spectral elements whose element boundaries sit ON the ring walls -- no inverse-rule smearing,
+    ~2 orders cheaper at fixed accuracy per lumenairy's own convergence courtroom). On 'sem', n_radial
+    is unused; degree (>= 2), elements_per_segment (>= 1) and grade (Chebyshev grading toward walls)
+    control the mesh, and lumenairy caps each element at degree * lambda_local / 8 (its wavelength-
+    resolution cap), so a coarse spec cannot under-resolve a wide uniform region. 'sem' needs every layer
+    to carry wall positions (rings / eps / segments): a bare eps_profile callable is REFUSED (it has no
+    walls to mesh on). 'sem' needs lumenairy >= 5.46 (the release whose BORSemMeshError conjunction
+    stopped the +-1 wall-enrichment window from manufacturing sliver elements -- a silent up-to-5,428x
+    per-order error on 5.43-5.45; refused below that, not silently run). Gated in
+    tests/test_lumenairy_shapes_sem_wrap.py (SEM vs the planar Fresnel oracle per mode, SEM vs a
+    converging FD ladder on a ring grating, and the FD default byte-identical)."""
     layers: List[BorLayer]
     azimuthal_order_m: int
     r_max_m: float
     n_radial: int = 256
     n_super: complex = 1.0 + 0j
     n_sub: complex = 1.0 + 0j
+    basis: str = "fd"
+    degree: int = 8
+    elements_per_segment: int = 1
+    grade: bool = True
 
     def __post_init__(self) -> None:
         if not self.layers:
@@ -89,6 +124,22 @@ class BorStackSpec:
             raise ValueError("r_max_m must be > 0")
         if int(self.n_radial) < 16:
             raise ValueError("n_radial must be >= 16")
+        if self.basis not in ("fd", "sem"):
+            raise ValueError("BorStackSpec.basis must be 'fd' or 'sem', got {!r}".format(self.basis))
+        if int(self.degree) < 2:
+            raise ValueError("BorStackSpec.degree must be >= 2")
+        if int(self.elements_per_segment) < 1:
+            raise ValueError("BorStackSpec.elements_per_segment must be >= 1")
+        for i, L in enumerate(self.layers):
+            segs = getattr(L, "segments", None)
+            if segs is not None and abs(float(segs[-1][0]) - float(self.r_max_m)) > 1e-9 * float(self.r_max_m):
+                raise ValueError("BorStackSpec: layer {} segments end at r_out = {!r}, not at r_max_m = {!r}"
+                                 .format(i, segs[-1][0], self.r_max_m))
+            if self.basis == "sem" and L.eps_profile is not None:
+                raise ValueError(
+                    "BorStackSpec(basis='sem'): layer {} is a bare eps_profile callable, which carries no "
+                    "ring-wall positions for the spectral elements to sit on -- re-express it as "
+                    "segments=[(r_out_m, eps), ...] (or rings= / eps=), or use basis='fd'".format(i))
 
 
 @dataclass
@@ -129,7 +180,13 @@ class BorResult:
         propagates, else falls back to the sqrt(T) magnitude with phase 0. When per-layer absorption
         was retained (absorption=True), A_independent = sum_layers A for this mode and
         per_region_absorption maps each layer name -> its absorbed fraction (R + T + A_independent = 1
-        to machine precision); otherwise both are None and A is the 1 - R - T closure."""
+        to machine precision); otherwise both are None and A is the 1 - R - T closure.
+
+        R_flux / T_flux = R / T (audit S4-15, wave-7 2026-11-02): the BOR R/T ARE the order-summed
+        Poynting flux fractions, exactly as on the RCWA / PMM / PMM2D / Berreman bridges, which all
+        set R_flux=R, T_flux=T; this one left them None, so a consumer reading the flux fields
+        (the run_pipeline "all-orders flux" contract, core.interfaces.OpticalResult) got None from
+        BOR alone."""
         if self.angles_rad.size == 0:
             raise ValueError("BorResult has no propagating incident mode (raise r_max_m / k0)")
         i0 = int(np.argmin(self.angles_rad))
@@ -153,7 +210,31 @@ class BorResult:
             per_region = {nm: float(col[k]) for k, nm in enumerate(self.layer_names)}
         return OpticalResult(r=r, R=R, phase_deg=phase_deg, solve_time_s=self.solve_time_s,
                              t=t, T=T, A=float(1.0 - R - T), A_independent=A_ind,
-                             per_region_absorption=per_region)
+                             R_flux=R, T_flux=T, per_region_absorption=per_region)
+
+
+# BORSemMeshError sliver conjunction (see BorStackSpec docstring). ONE table since wave-7
+# (2026-11-02): _common.FEATURE_FLOORS['bor_sem'], which the tests gate on too.
+_SEM_FLOOR = _FEATURE_FLOORS["bor_sem"][0]
+
+
+def _basis_kwargs(spec: BorStackSpec) -> dict:
+    """The BORStack radial-basis keywords. EMPTY on the default basis='fd' -- the kwargs are only
+    forwarded when asked for, so the FD path is the pre-2026-11-02 call bit-for-bit (and keeps working
+    on every lumenairy down to the bridge floor, which predates basis=; the PMM layer_grids
+    precedent). 'sem' is version-gated at _SEM_FLOOR."""
+    if getattr(spec, "basis", "fd") == "fd":
+        return {}
+    import lumenairy
+    from dynameta.optics.lumenairy_bridge._common import parse_version
+    if parse_version(lumenairy.__version__) < _SEM_FLOOR:
+        raise NotImplementedError(
+            "BorStackSpec(basis='sem') needs lumenairy >= {} (installed {}): earlier SEM builds can "
+            "manufacture sliver elements that move per-order R by up to 5,428x the physical wall shift "
+            "with no warning. Use basis='fd' or upgrade.".format(
+                ".".join(str(v) for v in _SEM_FLOOR), lumenairy.__version__))
+    return dict(basis="sem", degree=int(spec.degree),
+                elements_per_segment=int(spec.elements_per_segment), grade=bool(spec.grade))
 
 
 def _scaled_stack(spec: BorStackSpec, lambda_m: float):
@@ -162,10 +243,18 @@ def _scaled_stack(spec: BorStackSpec, lambda_m: float):
     BORStack = _require_bor()
     k0_um = 2.0 * np.pi / (float(lambda_m) * _SCALE)
     s = BORStack(Rbig=float(spec.r_max_m) * _SCALE, m=int(spec.azimuthal_order_m),
-                 N=int(spec.n_radial), n_superstrate=complex(spec.n_super), n_substrate=complex(spec.n_sub))
+                 N=int(spec.n_radial), n_superstrate=complex(spec.n_super), n_substrate=complex(spec.n_sub),
+                 **_basis_kwargs(spec))
     for L in spec.layers:
         thk_um = float(L.thickness_m) * _SCALE
-        if L.rings is not None:
+        if getattr(L, "segments", None) is not None:
+            segs = []
+            for r_out, ev in L.segments:
+                ev = (tuple(complex(v) for v in ev) if isinstance(ev, (tuple, list)) else complex(ev))
+                segs.append((float(r_out) * _SCALE, ev))
+            segs[-1] = (s.Rbig, segs[-1][1])         # the SAME float lumenairy compares against
+            s.add_layer(thk_um, segments=segs)
+        elif L.rings is not None:
             period_m, duty, n_r, n_g = L.rings
             s.add_layer(thk_um, rings=(float(period_m) * _SCALE, float(duty), complex(n_r), complex(n_g)))
         elif L.eps_profile is not None:
@@ -247,16 +336,58 @@ def bor_result_to_optical_result(res: BorResult) -> OpticalResult:
     return res.fundamental_result()
 
 
-def make_lumenairy_bor_solver(*, n_radial: int = 256, absorption: bool = False):
-    """A BOR-PMM optical solver: `solve(spec_without_N, lambda_m) -> BorResult`, with n_radial supplied
-    here (so a spec can omit it). Mirrors the make_lumenairy_*_solver factories; the BOR axisymmetric
-    geometry is NOT the Cartesian LayeredStackSolver, so this returns a BorResult (per-mode), not a
-    single-channel OpticalResult -- call .fundamental_result() for the near-normal R/T. `absorption=True`
-    retains the per-layer absorbed-fraction map (A_independent + per_region_absorption on the fundamental,
-    R+T+sum A = 1 to machine precision); the reflection/transmission phase is threaded either way."""
-    def _solve(spec: BorStackSpec, lambda_m: float) -> BorResult:
-        if int(spec.n_radial) != int(n_radial):
+def make_bor_spec_solver(*, n_radial: Optional[int] = None, absorption: bool = False,
+                         basis: Optional[str] = None, degree: Optional[int] = None,
+                         elements_per_segment: Optional[int] = None):
+    """A BOR-PMM SPEC solver: `solve(spec: BorStackSpec, lambda_m) -> BorResult` (per incident mode).
+
+    AUDIT V-19 (2026-07-25 exhaustive audit, P3; fixed 2026-11-02): this used to be published ONLY as
+    `make_lumenairy_bor_solver`, a name that promises the make_lumenairy_*_solver SEAM contract --
+    fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult, run_pipeline-pluggable,
+    guard_incidence_side-checked -- while returning a (BorStackSpec, lambda_m) -> BorResult callable. A
+    body of revolution is not a Design/LayeredStack (different symmetry class, its own spec), so the fix
+    is the NAME, not a fake seam: this factory says what it builds, the old name stays as a deprecated
+    alias with its exact old behaviour (make_lumenairy_bor_solver below), and a caller that hands the
+    returned function the seam's arguments gets a TypeError naming the contract instead of an opaque
+    arity error. guard_incidence_side has nothing to guard here: a BorStackSpec has no OpticalSpec and
+    the incidence is from the superstrate by construction.
+
+    Each keyword left None keeps the SPEC's own value; a given one overrides it (n_radial, and the
+    radial-basis knobs basis / degree / elements_per_segment -- see BorStackSpec). `absorption=True`
+    retains the per-layer absorbed-fraction map (A_independent + per_region_absorption on the
+    fundamental, R+T+sum A = 1 to machine precision); the reflection/transmission phase is threaded
+    either way. Call .fundamental_result() for the near-normal R/T as an OpticalResult."""
+    over = {k: v for k, v in (("n_radial", n_radial), ("basis", basis), ("degree", degree),
+                              ("elements_per_segment", elements_per_segment)) if v is not None}
+
+    def _solve(spec: BorStackSpec, lambda_m: float, *seam_args) -> BorResult:
+        # *seam_args exists ONLY to turn the seam call fn(design, geo, eps_by_region, lambda_m,
+        # n_super, n_sub) into the named TypeError below instead of a bare arity error
+        if seam_args or not isinstance(spec, BorStackSpec):
+            raise TypeError(
+                "the BOR spec solver takes (spec: BorStackSpec, lambda_m) and returns a per-mode "
+                "BorResult; got a {} first argument. It is NOT a run_pipeline optical_solver (the "
+                "make_lumenairy_*_solver seam fn(design, geo, eps_by_region, lambda_m, n_super, n_sub)) "
+                "-- an axisymmetric stack is described by a BorStackSpec (audit V-19).".format(
+                    type(spec).__name__))
+        if any(getattr(spec, k) != v for k, v in over.items()):
             from dataclasses import replace
-            spec = replace(spec, n_radial=int(n_radial))
+            spec = replace(spec, **over)
         return solve_bor(spec, lambda_m, absorption=absorption)
+    _solve.seam = "bor_spec"
     return _solve
+
+
+def make_lumenairy_bor_solver(*, n_radial: int = 256, absorption: bool = False):
+    """DEPRECATED alias (audit V-19, 2026-11-02) of make_bor_spec_solver -- the old name implied the
+    make_lumenairy_*_solver run_pipeline seam, which this never was. Behaviour is UNCHANGED (including the
+    old default that ALWAYS forces n_radial = 256 over the spec's own value); it emits a
+    DeprecationWarning at construction. Migrate to make_bor_spec_solver(n_radial=...)."""
+    import warnings
+
+    from dynameta.warning_types import DynaMetaDeprecationWarning
+    warnings.warn("make_lumenairy_bor_solver is deprecated (audit V-19): it is a BorStackSpec -> "
+                  "BorResult solver, not a make_lumenairy_*_solver run_pipeline seam; use "
+                  "make_bor_spec_solver (same behaviour; pass n_radial=256 to keep this alias's forced "
+                  "default)", DynaMetaDeprecationWarning, stacklevel=2)
+    return make_bor_spec_solver(n_radial=int(n_radial), absorption=absorption)

@@ -133,10 +133,13 @@ def array_namespace(*arrays: Any) -> Any:
     # scalars/sequences -- which don't pin a backend, and whose numpy-SCALAR forms (np.float64,
     # np.complex128) subclass float/complex so they are caught here too -- and (2) check the cheap
     # import-free is_numpy_array BEFORE the heavy predicates. A genuine non-NumPy array (jax/cupy)
-    # is the only thing that reaches -- and thus imports -- its backend.
+    # is the only thing that reaches -- and thus imports -- its backend. AUDIT R-25 (2026-11-02):
+    # np.generic is skipped too -- np.float32 / np.int32 / np.complex64 / np.bool_ do NOT subclass a
+    # Python scalar, so they fell through to is_jax_array and a scalar-field effect imported jax
+    # (and, via _ensure_jax_x64, flipped jax_enable_x64 process-wide). They never pinned a backend.
     saw_jax = saw_cupy = saw_numpy = False
     for a in arrays:
-        if a is None or isinstance(a, (bool, int, float, complex, list, tuple)):
+        if a is None or isinstance(a, (bool, int, float, complex, list, tuple, np.generic)):
             continue
         if is_numpy_array(a):
             saw_numpy = True
@@ -193,4 +196,5 @@ __all__ = [
     "CUPY_AVAILABLE", "JAX_AVAILABLE",
     "is_numpy_array", "is_cupy_array", "is_jax_array",
     "array_namespace", "backend_name", "to_numpy", "to_backend",
+    "require_jax_011",                  # audit V-21: public helper, imported by 2 other modules
 ]

@@ -29,6 +29,20 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
 from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
                                           hot_carrier_guard)
+from dynameta.optics.fdtd_nd.grid import (check_z_subcell, interface_node_fractions,  # D-15 + S2-14
+                                          layer_masks, material_z, mix_profile, probe_cells,
+                                          pulse_width, source_pulse, z_fill_fractions, z_grid)
+
+
+def _drude_kerr_values(layers, kerr):
+    """Per-region (pad, layers..., pad) values of the 1-D material channels + the Drude pole spec,
+    for fdtd_nd.grid.mix_profile (z-subcell averaging, 2026-11-02)."""
+    vals = {"eps_inf": [1.0] + [L.eps_inf for L in layers] + [1.0],
+            "wp": [0.0] + [L.drude_wp_rad_s for L in layers] + [0.0],
+            "gam": [0.0] + [L.drude_gamma_rad_s for L in layers] + [0.0],
+            "chi3": [0.0] + [(L.chi3_m2_V2 if kerr else 0.0) for L in layers] + [0.0]}
+    return vals, (("wp", 2, ("gam",)),)
+from dynameta.warning_types import UnreliableResultWarning
 
 
 @dataclass
@@ -183,11 +197,8 @@ def _grid_metrics(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave):
             eps = eps - L.drude_wp_rad_s ** 2 / (w_min ** 2 + 1j * L.drude_gamma_rad_s * w_min)
         return abs(np.sqrt(eps))
     n_max = max(1.0, max(_n_band_max(L) for L in layers))
-    dz = lambda_min_m / (resolution * n_max)
-    pad = n_pad_wave * lambda_max_m
-    z_struct = float(sum(L.thickness_m for L in layers))
-    Lz = 2.0 * pad + z_struct
-    nz = int(round(Lz / dz)) + 1
+    dz, pad, z_struct, Lz, nz = z_grid(layers, lambda_min_m, lambda_max_m, resolution, n_pad_wave,
+                                       n_max)                 # audit D-15: shared with 2-D/3-D
     return dz, pad, z_struct, Lz, nz, n_max, f_min, f_max
 
 
@@ -313,7 +324,7 @@ def uniform_z_edges(layers, *, lambda_min_m, lambda_max_m, resolution=40, n_pad_
 
 
 def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
-            tgrid, mask, eps_inf_of_t, drude_of_t, n_update):
+            tgrid, mask, eps_inf_of_t, drude_of_t, n_update, weight=None, tv_has_kerr=None):
     """Time-VARYING twin of `_run` (roadmap 2.2): the SAME Yee/ADE march, but the material of the
     `mask` cells may change DURING the march via the opt-in hooks, re-derived every `n_update` steps.
 
@@ -364,6 +375,13 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     # jump ACTUALLY fires (the raise is armed here, thrown in the update block below).
     _kerr_on_tv = bool(eps_inf_of_t is not None and mask is not None
                        and np.any(np.asarray(chi3)[mask] != 0.0))
+    if tv_has_kerr is not None and eps_inf_of_t is not None:
+        # z-subcell averaging: the hook layer's EDGE cells also hold a share of its neighbours, whose
+        # chi3 would trip the per-cell test above although the time-varying LAYER carries no Kerr. The
+        # refusal is about the layer (its own chi3); the neighbour's Kerr share in that one mixed
+        # cell is left out of the D-preserving rescale -- an O(f chi3 E^2) error on a single cell,
+        # the same order as the edge cell's own discretization (documented in the registration note).
+        _kerr_on_tv = bool(tv_has_kerr)
 
     def _refuse_kerr_jump(eps_old, eps_new):
         raise NotImplementedError(
@@ -400,6 +418,20 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     cur_eps = float(eps_inf[mask][0]) if mask.any() else 0.0
     cur_wp = float(wp[mask][0]) if mask.any() else 0.0
     cur_gam = float(gam[mask][0]) if mask.any() else 0.0
+    # z-subcell averaging (2026-11-02): `weight` = the time-varying layer's fill fraction per node.
+    # A mixed edge cell's material is (its static other-region share) + weight x (the layer's
+    # time-dependent value): eps_inf linearly, the Drude term as wp^2 with the wp^2-weighted gamma
+    # (the same single-pole rule as fdtd_nd.grid.mix_profile). None = the legacy boolean mask.
+    if weight is not None:
+        w_m = np.asarray(weight, dtype=float)[mask]
+        full = w_m == 1.0
+        if full.any():                                 # the layer's own (uniform) values
+            cur_eps = float(eps_inf[mask][full][0])
+            cur_wp = float(wp[mask][full][0])
+            cur_gam = float(gam[mask][full][0])
+        bg_eps = eps_inf[mask] - w_m * cur_eps
+        bg_w2 = wp[mask] ** 2 - w_m * cur_wp ** 2
+        bg_w2g = wp[mask] ** 2 * gam[mask] - w_m * cur_wp ** 2 * cur_gam
     for n in range(nsteps):
         # --- opt-in material update (every n_update steps); no-op when nothing actually changes ---
         if (n % n_update) == 0:
@@ -409,8 +441,13 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
                 if new_eps != cur_eps:
                     if _kerr_on_tv:                            # audit D-12: refuse the JUMP itself
                         _refuse_kerr_jump(cur_eps, new_eps)
-                    Ex[mask] *= cur_eps / new_eps               # D-preserving: E jumps, D continuous
-                    eps_inf[mask] = new_eps
+                    if weight is None:
+                        Ex[mask] *= cur_eps / new_eps           # D-preserving: E jumps, D continuous
+                        eps_inf[mask] = new_eps
+                    else:                                       # per-cell D-preserving rescale
+                        e_new = bg_eps + w_m * new_eps
+                        Ex[mask] *= eps_inf[mask] / e_new
+                        eps_inf[mask] = e_new
                     cur_eps = new_eps
                     e0e_lin = EPS0 * eps_inf / dt               # eps_inf-dependent coeffs re-derived
                     denom_lin = e0e_lin + bJ / 2.0
@@ -418,9 +455,17 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
                 _wp, _gam = drude_of_t(tt)
                 new_wp = float(_wp); new_gam = float(_gam)
                 if (new_wp != cur_wp) or (new_gam != cur_gam):
-                    wp[mask] = new_wp; gam[mask] = new_gam      # J itself is CONTINUOUS (untouched)
-                    aJ[mask] = (1.0 - new_gam * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
-                    bJ[mask] = (EPS0 * new_wp ** 2 * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                    if weight is None:
+                        wp[mask] = new_wp; gam[mask] = new_gam  # J itself is CONTINUOUS (untouched)
+                        aJ[mask] = (1.0 - new_gam * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                        bJ[mask] = (EPS0 * new_wp ** 2 * dt / 2.0) / (1.0 + new_gam * dt / 2.0)
+                    else:                                       # fill-weighted single pole per cell
+                        w2 = np.maximum(bg_w2 + w_m * new_wp ** 2, 0.0)
+                        g_c = np.where(w2 > 0.0, (bg_w2g + w_m * new_wp ** 2 * new_gam)
+                                       / np.where(w2 > 0.0, w2, 1.0), new_gam)
+                        wp[mask] = np.sqrt(w2); gam[mask] = g_c
+                        aJ[mask] = (1.0 - g_c * dt / 2.0) / (1.0 + g_c * dt / 2.0)
+                        bJ[mask] = (EPS0 * w2 * dt / 2.0) / (1.0 + g_c * dt / 2.0)
                     cur_wp = new_wp; cur_gam = new_gam
                     denom_lin = e0e_lin + bJ / 2.0
         # --- the EXACT `_run` inner body (byte-identical when the block above did nothing) ---
@@ -448,6 +493,42 @@ def _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
     return eL, eR
 
 
+def _fdtd_drude_hook(drude_of_t, n_m3, eps_inf_layer, eps_hook_on):
+    """Normalize a `drude_of_t` hook to the (wp, gamma) contract `_run_tv` consumes (audit V-18).
+
+    THE ONE CONVENTION. `drude_of_t(t)` may return either
+      * a (wp, gamma) pair [rad/s] -- the original solve_fdtd_1d contract, passed through UNCHANGED
+        (same objects, so the march is bit-identical to the pre-shim path); or
+      * a materials.optical_model.DrudeOptical -- the transient_optics.optical_transient_response
+        contract (e.g. the carrier_heating Te(t) hook) -- converted at the carrier density
+        `drude_n_m3` through DrudeOptical.wp_gamma, the single (n, m_opt, gamma) -> (wp, gamma) map.
+    The object form carries its own eps_inf; since this hook moves only wp/gamma (J continuous), that
+    eps_inf must equal the time-varying layer's and the eps_inf_of_t hook must not also be supplied
+    (two owners of eps_inf). Both are checked rather than silently resolved."""
+    def hook(t):
+        out = drude_of_t(t)
+        if hasattr(out, "wp_gamma") and hasattr(out, "eps_inf"):
+            if n_m3 is None:
+                raise ValueError(
+                    "solve_fdtd_1d: drude_of_t returned a {} (the transient_optics contract) but "
+                    "drude_n_m3 was not given -- the (wp, gamma) the FDTD Drude ADE needs depend on "
+                    "the carrier density; pass drude_n_m3= (audit V-18).".format(type(out).__name__))
+            if eps_hook_on:
+                raise ValueError(
+                    "solve_fdtd_1d: a DrudeOptical-returning drude_of_t carries its own eps_inf, so it "
+                    "cannot be combined with eps_inf_of_t (two owners of the layer's eps_inf); "
+                    "return (wp, gamma) tuples instead (audit V-18).")
+            if not np.isclose(float(out.eps_inf), float(eps_inf_layer), rtol=1e-12, atol=0.0):
+                raise ValueError(
+                    "solve_fdtd_1d: drude_of_t returned a DrudeOptical with eps_inf={:g}, but the "
+                    "time-varying layer has eps_inf={:g}; this hook moves only wp/gamma (J is "
+                    "continuous), so the background must match -- use eps_inf_of_t for an eps_inf "
+                    "change (audit V-18).".format(float(out.eps_inf), float(eps_inf_layer)))
+            return out.wp_gamma(n_m3)
+        return out
+    return hook
+
+
 def _second_carrier_hz(spec, f_min, f_max):
     """Resolve the second-carrier frequency [Hz] of a bichromatic source (roadmap 4.2).
 
@@ -469,7 +550,7 @@ def _second_carrier_hz(spec, f_min, f_max):
             "band [{:.4g}, {:.4g}] Hz set by lambda_min_m/lambda_max_m -- the grid step, source "
             "bandwidth and trustworthy `band` mask are all sized from that band, so this color is "
             "under-resolved / un-normalized. Widen [lambda_min_m, lambda_max_m] to bracket both "
-            "colors.".format(f2, f_min, f_max), stacklevel=2)
+            "colors.".format(f2, f_min, f_max), UnreliableResultWarning, stacklevel=2)
     return f2
 
 
@@ -481,8 +562,9 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
                   return_time_trace: bool = False,
                   eps_inf_of_t=None, drude_of_t=None,
                   time_varying_layer: int = 0, n_update: int = 1,
+                  drude_n_m3: Optional[float] = None,
                   z_edges: Optional[np.ndarray] = None, refine: Optional[dict] = None,
-                  transition_cells: int = 8) -> FDTD1DResult:
+                  transition_cells: int = 8, z_subcell: str = "average") -> FDTD1DResult:
     """Broadband R(f)/T(f) of the layered `layers` (vacuum super/substrate) over
     [c/lambda_max, c/lambda_min]. `resolution` = cells per lambda_min in the highest-index medium;
     `courant` the CFL fraction (<= 1, use ~0.5 for Drude); `n_pad_wave` vacuum padding (in lambda_max)
@@ -496,7 +578,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         is realized D-PRESERVING (D continuous, E jumps E_new=E_old*eps_old/eps_new -- THE physically
         correct temporal-boundary condition, Morgenthaler IRE Trans. MTT 6:167 (1958); see _run_tv).
       * drude_of_t(t) -> (wp, gamma) for that layer; the polarization current J is CONTINUOUS, only the
-        J-update coefficients take the new wp/gamma.
+        J-update coefficients take the new wp/gamma. It may instead return a DrudeOptical (the
+        transient_optics / carrier_heating hook contract), converted at the carrier density
+        `drude_n_m3` via DrudeOptical.wp_gamma -- audit V-18; see _fdtd_drude_hook for the one
+        convention and its two consistency checks.
     `n_update` re-derives the affected coefficients every n_update steps (INSTANTANEOUS-PARAMETER
     approximation; see _run_tv for the cost + the rigorous-formulation note). An `eps_inf_of_t` that
     actually JUMPS eps_inf is REFUSED when the designated layer also carries a Kerr chi3
@@ -546,7 +631,12 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     pass: static materials (dielectric / Drude / Kerr) + return_time_trace. NOT supported (raises
     loudly): the time-varying hooks (eps_inf_of_t / drude_of_t) and the bichromatic second_source, and
     the 2-D z-grading (fdtd_nd) is the documented follow-up tier. z_edges and refine are mutually
-    exclusive; both None keeps the legacy uniform path byte-identical."""
+    exclusive; both None keeps the legacy uniform path byte-identical.
+
+    z_subcell (2026-11-02): 'average' (DEFAULT) = z-subcell averaging -- every E node takes the
+    fill-fraction mean of its control volume (arithmetic for the tangential E, pole strengths
+    fill-weighted; formulas and citations in fdtd_nd.grid), so a layer's thickness is no longer
+    rounded to whole cells; 'point' = the E-node point sampling of 2b7a002, bit-for-bit."""
     # The 1-D engine carries eps_inf + Drude + Kerr(chi3) ONLY. The Lorentz pole, chi2, Raman and the
     # gain line are honored solely by the 2-D-TE kernels (fdtd_nd); _run never reads those arrays, so
     # solving them here would SILENTLY drop the term and the FDTD eps would diverge from the layer's own
@@ -578,6 +668,7 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # so the default UNIFORM path marched courant > 1 to overflow-driven garbage. One shared guard,
     # ahead of both branches (S == courant on either -- see spec.courant_guard).
     courant = courant_guard("solve_fdtd_1d", courant)
+    z_subcell = check_z_subcell("solve_fdtd_1d", z_subcell)   # 'average' (default) | 'point' (2b7a002)
     # Grid metrics (dz, pad, z_struct, Lz, nz sized from the dispersive |n| over the band). Factored to
     # _grid_metrics so uniform_z_edges and this default path never drift; the floats are unchanged.
     dz, pad, z_struct, Lz, nz, n_max, f_min, f_max = _grid_metrics(
@@ -598,15 +689,6 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         dz_primal = np.diff(z_edges)
         if np.any(dz_primal <= 0.0):
             raise ValueError("solve_fdtd_1d: z_edges must be strictly increasing")
-        # combinations NOT supported with the nonuniform grid in this pass (raise loudly, see docstring)
-        if (eps_inf_of_t is not None) or (drude_of_t is not None):
-            raise NotImplementedError(
-                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
-                "time-varying hooks (eps_inf_of_t/drude_of_t) in this pass; use the uniform grid.")
-        if second_source is not None:
-            raise NotImplementedError(
-                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
-                "bichromatic second_source in this pass; use the uniform grid.")
         # UNIFORM-LIMIT byte-identity (gate 1): an essentially-uniform z_edges must reproduce the legacy
         # scalar path EXACTLY. np.diff of any positional grid carries ~1e-13 ULP noise, so we must NOT
         # feed those diffs to the run; detect uniformity, take the single spacing as the scalar dz, and
@@ -617,28 +699,53 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
             nz = int(z_edges.size)
             nonuniform = False
             dz_primal = None
+        # combinations NOT supported with the nonuniform grid in this pass (raise loudly, see docstring).
+        # audit D-18: these refusals used to run BEFORE the uniform-limit detection above, so a
+        # z_edges that collapses back to the supported uniform kernel (uniform_z_edges(...), the
+        # documented bit-identity gate) was still refused with the time-varying hooks or a
+        # second_source. They now fire only on a grid that is genuinely nonuniform.
+        if nonuniform and ((eps_inf_of_t is not None) or (drude_of_t is not None)):
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "time-varying hooks (eps_inf_of_t/drude_of_t) in this pass; use the uniform grid.")
+        if nonuniform and second_source is not None:
+            raise NotImplementedError(
+                "solve_fdtd_1d: the nonuniform-z grid (z_edges/refine) does not support the "
+                "bichromatic second_source in this pass; use the uniform grid.")
 
     if not nonuniform:
         dt = courant * dz / C_LIGHT
-        # cell-wise material profile (structure centered, vacuum pads each side)  [legacy uniform build]
+        # node-wise material profile (structure from z = pad, vacuum pads each side). audit S2-14
+        # siblings (2026-11-02): registered at the Yee E-NODES k*dz (fdtd_nd.grid.material_z, the
+        # ONE convention every engine shares) -- this used to sample the CELL CENTRES (k+1/2)*dz,
+        # which shifted the structure -dz/2 on average against the node frame the probes and the
+        # Mur walls live in: a -k0*dz reflection-phase bias (measured -1.13 k0dz at res 30, -0.98
+        # at res 60 over 9 pad offsets; |R|/|T| unaffected). It also disagreed with this function's
+        # own nonuniform branch below, which always registered at its primal (E) nodes.
         eps_inf = np.ones(nz)
         wp = np.zeros(nz)
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = pad
-        zc = (np.arange(nz) + 0.5) * dz                    # cell centers
-        z = z0
-        for L in layers:
-            m = (zc >= z) & (zc < z + L.thickness_m)
-            eps_inf[m] = L.eps_inf
-            wp[m] = L.drude_wp_rad_s
-            gam[m] = L.drude_gamma_rad_s
-            if kerr:
-                chi3[m] = L.chi3_m2_V2
-            z += L.thickness_m
-        i_src = max(2, int(round((0.35 * pad) / dz)))
-        i_pL = int(round((0.7 * pad) / dz))                # left probe: between source and structure
-        i_pR = int(round((pad + z_struct + 0.3 * pad) / dz))  # right probe: in the sub vacuum
+        zc = material_z(nz, dz)                            # E-node positions (name kept: tv_mask below)
+        if z_subcell == "point":                           # opt-out: the 2b7a002 point rule, bit-for-bit
+            for L, m in layer_masks(zc, z0, layers):
+                eps_inf[m] = L.eps_inf
+                wp[m] = L.drude_wp_rad_s
+                gam[m] = L.drude_gamma_rad_s
+                if kerr:
+                    chi3[m] = L.chi3_m2_V2
+        else:
+            # z-SUBCELL AVERAGING (default, 2026-11-02): each node takes the fill-fraction mean of
+            # its control volume [z - dz/2, z + dz/2] -- arithmetic for this tangential Ex, the
+            # Drude / Kerr strengths fill-weighted (fdtd_nd.grid notes; Farjadpour 2006, Oskooi
+            # 2009, Hwang-Cangellaris 2001). Removes the O(k dz) thickness rounding of point sampling.
+            F_sub = z_fill_fractions(zc, z0, layers, dz=dz)
+            _v, _p = _drude_kerr_values(layers, kerr)
+            _m = mix_profile(F_sub, _v, poles=_p)
+            eps_inf, wp, gam, chi3 = _m["eps_inf"], _m["wp"], _m["gam"], _m["chi3"]
+        # source / left probe (between source and structure) / right probe (in the sub vacuum)
+        i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)  # audit D-15: shared with 2-D/3-D
     else:
         # nonuniform primal grid: E nodes = z_edges (material colocated at nodes); H on the dual grid.
         # single global dt from the SMALLEST cell (Courant S = c dt / dz_min <= 1, guarded).
@@ -656,15 +763,43 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = float(z_edges[0])
-        zpos = z0 + pad
-        for L in layers:
-            m = (z_edges >= zpos) & (z_edges < zpos + L.thickness_m)
+        # E-node point registration -- the SAME shared helper (and float accumulation) as every
+        # other engine (audit S2-14 siblings, 2026-11-02) ...
+        for L, m in (layer_masks(z_edges, z0 + pad, layers) if z_subcell == "point" else ()):
             eps_inf[m] = L.eps_inf
             wp[m] = L.drude_wp_rad_s
             gam[m] = L.drude_gamma_rad_s
             if kerr:
                 chi3[m] = L.chi3_m2_V2
-            zpos += L.thickness_m
+        # ... plus the interface TIE rule this grid needs: _march_graded snaps every material
+        # interface ONTO a node, and the half-open point rule then hands that node wholly to the
+        # region starting there -- the interface moves -h/2, a -k0*h_fine reflection-phase bias
+        # (measured -0.88 k0*h mean over pad offsets; it used to be this path's only registration
+        # error). The tie nodes take the control-volume arithmetic mean (Hwang & Cangellaris 2001):
+        # eps_inf and chi3 linearly, the Drude term as ONE pole with wp^2 = sum f wp_i^2 and the
+        # wp^2-weighted gamma (exact when at most one side is Drude or the gammas agree -- every
+        # metal/dielectric interface; a two-metal interface with unequal gammas gets the weighted
+        # single-pole approximation at that one node). Measured after: +-0.03 k0*h, O(h^2) in h.
+        _reg = ([(1.0, 0.0, 0.0, 0.0)]
+                + [(L.eps_inf, L.drude_wp_rad_s, L.drude_gamma_rad_s, L.chi3_m2_V2 if kerr else 0.0)
+                   for L in layers] + [(1.0, 0.0, 0.0, 0.0)])
+        for j, frs in (interface_node_fractions(z_edges, z0 + pad, layers).items()
+                       if z_subcell == "point" else ()):
+            e_ = sum(f * _reg[r + 1][0] for r, f in frs)
+            w2 = sum(f * _reg[r + 1][1] ** 2 for r, f in frs)
+            g_ = (sum(f * _reg[r + 1][1] ** 2 * _reg[r + 1][2] for r, f in frs) / w2) if w2 > 0.0 else 0.0
+            eps_inf[j], wp[j], gam[j] = e_, np.sqrt(w2), g_
+            chi3[j] = sum(f * _reg[r + 1][3] for r, f in frs)
+        if z_subcell != "point":
+            # z-SUBCELL AVERAGING (default): the FULL control-volume mean on the graded grid,
+            # V_j = [z_j - h_{j-1}/2, z_j + h_j/2] -- the general form of the tie rule above (it
+            # reduces to it when every interface sits on a node, as _march_graded makes them).
+            _mid = 0.5 * (z_edges[1:] + z_edges[:-1])
+            F_nu = z_fill_fractions(z_edges, z0 + pad, layers, lo=np.concatenate(([z_edges[0]], _mid)),
+                                    hi=np.concatenate((_mid, [z_edges[-1]])))
+            _v, _p = _drude_kerr_values(layers, kerr)
+            _m = mix_profile(F_nu, _v, poles=_p)
+            eps_inf, wp, gam, chi3 = _m["eps_inf"], _m["wp"], _m["gam"], _m["chi3"]
         i_src = max(2, int(np.searchsorted(z_edges, z0 + 0.35 * pad)))
         i_pL = int(np.searchsorted(z_edges, z0 + 0.7 * pad))
         i_pR = min(int(np.searchsorted(z_edges, z0 + pad + z_struct + 0.3 * pad)), nz - 1)
@@ -672,37 +807,66 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     # OPT-IN (roadmap 2.2): cell mask of the designated time-varying layer. Built only when a hook is
     # supplied, so the default (no-hook) path below is byte-for-byte the legacy code.
     _hooks_on = (eps_inf_of_t is not None) or (drude_of_t is not None)
+    if drude_of_t is not None:                             # audit V-18: accept both hook contracts
+        drude_of_t = _fdtd_drude_hook(drude_of_t, drude_n_m3,
+                                      layers[time_varying_layer].eps_inf
+                                      if 0 <= time_varying_layer < len(layers) else float("nan"),
+                                      eps_inf_of_t is not None)
     tv_mask = None
+    tv_weight = None
     if _hooks_on:
         tv_mask = np.zeros(nz, dtype=bool)
-        zt = z0
-        for idx, L in enumerate(layers):
-            mm = (zc >= zt) & (zc < zt + L.thickness_m)
+        # the SAME node masks as the material fill above (audit S2-14 siblings: one helper, so the
+        # time-varying cells are exactly the cells that carry the layer's material)
+        for idx, (L, mm) in enumerate(layer_masks(zc, z0, layers)):
             if idx == time_varying_layer:
                 tv_mask = mm
-            zt += L.thickness_m
+        if z_subcell != "point" and 0 <= time_varying_layer < len(layers):
+            # z-subcell averaging: the time-varying layer's FILL FRACTION per node (its edge cells
+            # are partly that layer); _run_tv rescales only that share of each cell's material
+            tv_weight = z_fill_fractions(zc, z0, layers, dz=dz)[time_varying_layer + 1]
+            tv_mask = tv_weight > 0.0
         if not tv_mask.any():
             raise ValueError("solve_fdtd_1d: time_varying_layer={} designates no grid cells".format(
                 time_varying_layer))
 
-    # modulated-Gaussian source covering [f_min, f_max]
-    tau = 1.0 / (np.pi * (f_max - f_min))              # pulse width ~ inverse bandwidth
-    t0 = settle * tau
-    nsteps = int(round((2.0 * t0 + (Lz / C_LIGHT) * 4.0 + 200 * tau) / dt))
-    tgrid = np.arange(nsteps) * dt
-    src = source_amp * np.exp(-((tgrid - t0) / tau) ** 2) * np.cos(2.0 * np.pi * f_c * (tgrid - t0))
+    # modulated-Gaussian source covering [f_min, f_max] (pulse width ~ inverse bandwidth)
+    tau, t0 = pulse_width(f_min, f_max, settle)        # audit D-15: shared with 2-D/3-D
 
     # OPT-IN bichromatic source (roadmap 4.2): ADD a second carrier to the SAME injected waveform. This
     # block only runs when second_source is supplied, so `src` (and every downstream array) is byte-
     # identical to the legacy single-color path when it is None. The reference (vacuum) run below reuses
     # this same composite `src`, so the incident field it records carries both colors (per-color incident
     # powers -> harmonics.mixing_spectrum on incident_left/incident_right).
+    # audit D-19: the second pulse's own tau_s / t0_s used to be ignored by the run length, which was
+    # sized from the PRIMARY pulse alone -- a later or longer second pulse was cut off mid-flight with
+    # no warning (spectral leakage into every mixing band). Its end (t0_s + settle*tau_s, the
+    # primary's 2*t0 rule) and its 200*tau_s ring-down tail now extend the window; the defaults
+    # (tau_s = tau, t0_s = t0) reproduce the single-pulse window bit-for-bit. A pulse centred too
+    # close to t = 0 (switched on abruptly at the start of the record) now warns.
     f_c2 = None
+    t_end2 = tail2 = None
     if second_source is not None:
         f_c2 = _second_carrier_hz(second_source, f_min, f_max)
         amp_rel = float(second_source.get("amplitude_rel", 1.0))
         tau2 = float(second_source.get("tau_s", tau))
         t02 = float(second_source.get("t0_s", t0))
+        if not (tau2 > 0.0 and np.isfinite(tau2) and np.isfinite(t02)):
+            raise ValueError("second_source: 'tau_s' must be finite and > 0 and 't0_s' finite; got "
+                             "tau_s={!r}, t0_s={!r}".format(tau2, t02))
+        t_end2, tail2 = t02 + settle * tau2, tau2
+        if t02 < 3.0 * tau2:                               # the record starts at t = 0
+            warnings.warn(
+                "solve_fdtd_1d bichromatic source: the second pulse is centred at t0_s={:.3g} s, "
+                "only {:.2f} of its widths tau_s={:.3g} s after t = 0, so the march switches it on "
+                "already at {:.1e} of its peak -- an abrupt turn-on that leaks broadband content "
+                "into every mixing band (audit D-19). Use t0_s >= 3-4 tau_s (the primary uses "
+                "settle*tau = {:.3g} s).".format(t02, t02 / tau2, tau2,
+                                                 float(np.exp(-(t02 / tau2) ** 2)), t0), UnreliableResultWarning,
+                stacklevel=2)
+    nsteps, tgrid, src = source_pulse(f_c, tau, t0, source_amp=source_amp, Lz=Lz, dt=dt,
+                                      t_end_s=t_end2, tail_tau_s=tail2)
+    if second_source is not None:
         src = src + (source_amp * amp_rel
                      * np.exp(-((tgrid - t02) / tau2) ** 2)
                      * np.cos(2.0 * np.pi * f_c2 * (tgrid - t02)))
@@ -719,7 +883,10 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         eL_inc, eR_inc = _run(z1, z0v, z0v, z0v, dz, dt, nsteps, i_src, i_pL, i_pR, src)
         if _hooks_on:
             eL_tot, eR_tot = _run_tv(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src,
-                                     tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)))
+                                     tgrid, tv_mask, eps_inf_of_t, drude_of_t, max(1, int(n_update)),
+                                     weight=tv_weight,
+                                     tv_has_kerr=(None if tv_weight is None else bool(
+                                         kerr and layers[time_varying_layer].chi3_m2_V2 != 0.0)))
         else:
             eL_tot, eR_tot = _run(eps_inf, wp, gam, chi3, dz, dt, nsteps, i_src, i_pL, i_pR, src)
 
@@ -827,7 +994,7 @@ def frequency_conversion_diagnostic(trace, *, band_Hz=None, output="transmitted"
 class UniformTimeVaryingResult:
     dt: float
     dz: float
-    z_m: np.ndarray                 # cell centers
+    z_m: np.ndarray                 # E-node positions k*dz (the comment said 'cell centers'; it never was)
     t_s: np.ndarray                 # time grid
     n_traj: np.ndarray              # index n(t) actually applied at each step
     Ex_final: np.ndarray            # final E snapshot (whole grid)
@@ -837,9 +1004,28 @@ class UniformTimeVaryingResult:
     incident_right: np.ndarray      # = transmitted (alias so the diagnostic's default reference works)
     i_pL: int
     i_pR: int
-    energy_t: np.ndarray            # total field energy vs step (0.5 eps0 eps Ex^2 + 0.5 mu0 Hy^2)
+    energy_t: np.ndarray            # total field energy at t_s + dt/2 (the leapfrog invariant
+                                    # 0.5 eps0 eps E^n.E^{n+1} + 0.5 mu0 |H^{n+1/2}|^2; audit D-17)
     k_rad_m: float                  # (conserved) spatial carrier wavenumber
     w_init_rad_s: float             # initial temporal carrier c*k/n_init
+
+
+def _check_uniform_index(n_val: float, S_vac: float, t_s: float) -> None:
+    """Audit D-17 (2026-11-02): the uniform march's 1-D Yee update is stable iff the Courant
+    number IN THE MEDIUM, S_vac / n = c dt / (n dz), is <= 1, i.e. n >= S_vac (= the `courant`
+    argument). The old "stable for any n>=1" comment was true but unchecked, and index_of_t may
+    legitimately go BELOW 1 -- the ENZ use case. Measured at courant 0.5 (n 1 -> n_low at 5
+    periods): n_low = 0.6 and 0.5 (S = 0.83, 1.0) march finitely, n_low = 0.45 and 0.3 (S = 1.11,
+    1.67) returned all-NaN fields and energy with no error. Raise instead, naming the fix."""
+    if not (np.isfinite(n_val) and n_val > 0.0):
+        raise ValueError("run_uniform_time_boundary: index_of_t returned n = {!r} at t = {:.4e} s; "
+                         "the uniform march needs a finite n > 0 (audit D-17).".format(n_val, t_s))
+    if S_vac / n_val > 1.0 + 1e-12:
+        raise ValueError(
+            "run_uniform_time_boundary: n = {:.6g} at t = {:.4e} s makes the in-medium Courant "
+            "number courant/n = {:.4g} > 1, so the Yee march is UNSTABLE (it returned NaN fields "
+            "silently before audit D-17). n < 1 (ENZ) is supported down to n = courant: pass "
+            "courant <= {:.6g}.".format(n_val, t_s, S_vac / n_val, n_val))
 
 
 def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR, n_update):
@@ -854,10 +1040,12 @@ def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR
     eL = np.empty(nsteps); eR = np.empty(nsteps)
     energy = np.empty(nsteps); ntraj = np.empty(nsteps)
     curl = np.zeros(N)
+    S_max = c * dt / dz                                   # Courant number IN VACUUM
     for n in range(nsteps):
         if (n % n_update) == 0:
             new_n = float(index_of_t(tgrid[n]))
             if new_n != cur_n:
+                _check_uniform_index(new_n, S_max, tgrid[n])   # audit D-17: ENZ (n < 1) is legal
                 Ex *= (cur_n ** 2) / (new_n ** 2)            # D-preserving temporal boundary
                 cur_n = new_n; eps = cur_n ** 2
                 mur = (c / cur_n * dt - dz) / (c / cur_n * dt + dz)
@@ -869,9 +1057,17 @@ def _march_uniform(Ex, Hy, dz, dt, nsteps, index_of_t, n_init, tgrid, i_pL, i_pR
         Enew = Ex + (dt / (EPS0 * eps)) * curl              # non-dispersive: eps0 eps dE/dt = curl H
         Enew[0] = Ex_oldL1 + mur * (Enew[1] - Ex_oldL0)
         Enew[-1] = Ex_oldR1 + mur * (Enew[-2] - Ex_oldR0)
+        # audit D-17 (2026-11-02): the energy is the leapfrog's own discrete invariant, centred on
+        # t_{n+1/2} where Hy lives: W = 1/2 mu0 |H^{n+1/2}|^2 + 1/2 eps0 eps E^n . E^{n+1}. It was
+        # 1/2 eps0 eps |E^{n+1}|^2 + 1/2 mu0 |H^{n+1/2}|^2, mixing two time levels -- an O(w dt)
+        # 2w ripple wherever the field has a standing-wave part (after a time reflection). The
+        # product form is exactly conserved by the interior Yee update (it equals the time-centred
+        # |E|^2 to O(dt^2)), so what remains in energy_t is the physics: the index change and what
+        # leaks through the Mur walls. Use the PRE-update E (already D-rescaled for this step).
+        energy[n] = (0.5 * EPS0 * eps * float(np.dot(Ex, Enew))
+                     + 0.5 * MU0 * float(np.dot(Hy, Hy)))
         Ex = Enew
         eL[n] = Ex[i_pL]; eR[n] = Ex[i_pR]
-        energy[n] = 0.5 * EPS0 * eps * float(np.sum(Ex ** 2)) + 0.5 * MU0 * float(np.sum(Hy ** 2))
     return Ex, Hy, eL, eR, energy, ntraj
 
 
@@ -898,7 +1094,10 @@ def run_uniform_time_boundary(*, index_of_t, n_init: float, lambda_med_m: float,
     w_init = C_LIGHT * k / n0
     dz = lambda_med_m / cells_per_wavelength
     courant = courant_guard("run_uniform_time_boundary", courant)   # audit D-11 (the 6th copy)
-    dt = courant * dz / C_LIGHT                            # stable for any n>=1 (fastest speed <= c)
+    # stable iff n(t) >= courant at EVERY step (audit D-17): checked here for n_init and in the
+    # march for every new n (the old "stable for any n>=1" comment was never enforced)
+    dt = courant * dz / C_LIGHT
+    _check_uniform_index(n0, courant, 0.0)
     N = int(round(domain_wavelengths * cells_per_wavelength)) + 1
     z = np.arange(N) * dz
     z_c = 0.5 * (N - 1) * dz                               # pulse center: room for both daughters

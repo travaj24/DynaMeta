@@ -388,6 +388,23 @@ def test_self_consistent_march_is_second_order_in_the_z_mesh():
     assert 3.0 < ratio < 6.0, (gains, ratio)              # SECOND order, not first and not noise
 
 
+def test_steady_solve_converges_below_the_fixed_rtol_noise_floor():
+    """The relaxation residual of this 76.5 dB booster floors at ~24 x the integrator rtol
+    (MEASURED 2.45e-6 at the old fixed rtol = 1e-7), so the old solver could reach tol = 1e-6 only
+    by a noise dip -- the CI py3.10 build never got one and the march's converged-seed refusal
+    fired. steady_state._RtolContinuation tightens rtol on a stall. DISCRIMINATING: tol = 1e-7 sits
+    24x below the old floor, so the fixed-rtol solver cannot converge here on any build. MEASURED:
+    88 iterations, residuals 8.6e-8, rtol 1e-8."""
+    amp = _hot_yb().with_signals([Signal(1e-6, 1.03e-6)])
+    r = amp.solve(n_nodes=81, tol=1e-7, relax=1.0)
+    assert r.meta["converged"] is True
+    assert max(r.meta["endpoint_residual"], r.meta["profile_residual"]) < 1e-7
+    assert r.meta["integrator_rtol"] < 1e-7                  # the continuation actually fired
+    # a solve that converges without stalling never tightens (its result stays byte-identical)
+    clean = _hot_yb().solve(n_nodes=81)
+    assert clean.meta["converged"] is True and clean.meta["integrator_rtol"] == 1e-7
+
+
 # ==================== (4) "auto" ============================================================
 
 def test_auto_reproduces_the_self_consistent_march_on_the_codoped_failure_cases():

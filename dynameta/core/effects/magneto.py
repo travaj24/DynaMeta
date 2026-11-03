@@ -93,6 +93,3 @@ class VectorMagnetoOpticModel:
                 xp.stack([-1j * gz, e, 1j * gx], axis=-1),
                 xp.stack([1j * gy, -1j * gx, e], axis=-1)]
         return xp.stack(rows, axis=-2)                       # (...,3,3); Hermitian for real g
-
-
-# ---- Intersubband quantum eps_zz from sub-band wavefunctions (R7) -------------------------

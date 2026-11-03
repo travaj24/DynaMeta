@@ -265,6 +265,17 @@ is a statement about the sharpest edge in the march, not about the march.
    LSODA. This is inherited from the single-ion march, not new. Measured on the *core*-pumped
    point (the hard case): march-vs-solve gain deviation 5.79e-2 / 9.56e-3 / 5.96e-4 / 3.70e-5 dB
    at 161 / 401 / 1601 / 6401 nodes. On the cladding-pumped point 161 nodes already give 4.2e-4 dB.
+   **2026-11-02 addendum (z_refine).** That deviation is not static: the march RELAXES from
+   `solve()`'s state to the fixed point of its own discrete propagator, so at constant drive the
+   core-pumped point drifts -0.297 / -0.064 / -0.015 / -0.0037 dB over 40 ms at 81 / 161 / 321 /
+   641 nodes (3 m: -1.79 dB at 81), dt-independent, identical with the explicit 4I11/2 level and
+   with two Yb pools. The worst cell is the 976 nm pump at its depletion front, ~98% Yb absorption
+   in the cell exponent. `simulate_transient_eryb` now takes the single-ion `z_refine` ("auto" by
+   default; same shared sizing/monitor code, meta keys, warning and `assert_valid` integration):
+   the march mesh is subdivided until the initial per-cell jump of `g_s` is <= 0.25 (2 m at 81
+   nodes: r = 7, hold 0.0049 dB), returned arrays stay on `n_nodes`, and the cladding-pumped
+   point (jump 0.033) is untouched bit for bit. See the 2026-07-25 audit's Yb-hold entry and
+   `tests/test_fiber_eryb_transient.py::TestCoDopedHoldSpatialResolution`.
 3. **The quasi-static (frozen-population) step has the same audit-A-7 ASE limit as the single-ion
    march**, and a co-doped amplifier reaches it more easily because the transfer can invert Er
    hard. Measured: a cold start `(f2, b2) = (0.02, 0.02)` on a **uniform 300 us** grid lets one

@@ -383,9 +383,15 @@ def test_coarse_grid_from_a_cold_start_trips_the_quasi_static_flag():
     # single step carries the inversion across the ASE-clamped operating point does NOT: the
     # frozen-population step then propagates a gain the ASE it generates never gets to deplete.
     amp = _clad_amp()
-    with pytest.warns(RuntimeWarning, match="OUT OF ITS VALID REGIME"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         tr = simulate_transient(amp, np.linspace(0.0, 60e-3, 200), n_nodes=161,
                                 nbar2_0=(0.02, 0.02))
+    msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("OUT OF ITS VALID REGIME" in m for m in msgs), msgs
+    # since 2026-11-02 the step-stability monitor ALSO fires (x1.15 per step from time index 8):
+    # at these 0.3 ms steps the lagged coupling rings through the turn-on as well
+    assert any("GROWING swing" in m for m in msgs), msgs
     assert tr.meta["quasi_static_valid"] is False
     assert tr.meta["max_ase_to_launched"] > 1.0
     assert np.all(np.isfinite(tr.nbar2_zt))          # still returned, still bounded
@@ -434,19 +440,20 @@ def test_nbar2_0_tuple_must_be_a_pair():
         simulate_transient(amp, np.linspace(0.0, 1e-4, 3), n_nodes=21, nbar2_0=(0.1, 0.2, 0.3))
 
 
-def test_solve_accepts_relax_auto_without_changing_its_default():
-    # substitutability, not a new default: a caller written against FiberAmplifier passes
-    # relax="auto" straight through (the downstream solve_closed does exactly that), and this
-    # class used to answer with a ValueError. It now walks the same (1.0, 0.5, 0.25) ladder --
-    # while relax=1.0 STAYS the default here and still takes exactly one attempt.
+def test_solve_default_is_auto_and_bit_identical_where_relax_1_converges():
+    # substitutability: a caller written against FiberAmplifier passes relax="auto" straight
+    # through (the downstream solve_closed does exactly that), and this class used to answer with
+    # a ValueError. Since 2026-11-02 "auto" is also the DEFAULT here (the old relax = 1.0 default
+    # returned non-converged answers silently -- tests/test_fiber_transient_stability.py); on an
+    # amplifier that converges undamped the default still takes exactly one attempt at 1.0.
     amp = _clad_amp(bins=4)
-    pinned = amp.solve(n_nodes=81)
+    pinned = amp.solve(n_nodes=81, relax=1.0)
     assert pinned.meta["relax"] == 1.0
     assert pinned.meta["relax_attempts"] == (1.0,)
-    auto = amp.solve(n_nodes=81, relax="auto")
-    assert auto.meta["relax_attempts"][0] == 1.0
-    # this amplifier converges on the first rung, so "auto" must return the SAME numbers as the
-    # default -- the ladder is a path, not a different fixed point
+    auto = amp.solve(n_nodes=81)
+    assert auto.meta["relax_attempts"] == (1.0,)
+    # this amplifier converges on the first rung, so the "auto" default must return the SAME
+    # numbers as relax = 1.0 -- the ladder is a path, not a different fixed point
     assert np.array_equal(auto.power_W, pinned.power_W)
     assert np.array_equal(auto.nbar2_z, pinned.nbar2_z)
     with pytest.raises(ValueError, match='relax must be a number'):
@@ -563,3 +570,142 @@ def test_the_new_branches_are_structurally_unreachable_for_a_single_ion_amplifie
     assert isinstance(amp, FiberAmplifier) and not isinstance(amp, ErYbAmplifier)
     assert amp.channel_plan().channels is not None          # so the co-doped frame branch is dead
     assert "beta_yb_z" not in fr.meta and "sigma_a_yb" not in fr.meta
+
+
+# ==================== gate (g): z resolution of the co-doped march (z_refine) ===============
+
+class TestCoDopedHoldSpatialResolution:
+    """2026-11-02, the co-doped half of the 2026-08-04 audit's Yb-hold observation. The co-doped
+    march, like the single-ion one, relaxes from amp.solve()'s state to the fixed point of its
+    OWN discrete z propagator, and the error is set by the per-cell jump of the frozen-population
+    gain -- here the 976 nm pump at its depletion front, where the YTTERBIUM absorption dominates
+    the cell exponent. The core-pumped 2 m reference (_core_amp, ~240 /m small-signal pump
+    absorption) at n_nodes = 81 has a jump of 4.0 and loses 0.30 dB over 40 ms at constant drive;
+    z_refine="auto" sizes the march mesh from that jump (r = 7) and holds it to 0.005 dB. Every
+    gate here fails on the pre-z_refine module (no meta keys, no warning, no refinement, and
+    z_refine > 1 raised NotImplementedError)."""
+
+    T = np.linspace(0.0, 40e-3, 51)
+
+    def test_constant_drive_from_steady_state_holds_it(self):
+        amp = _core_amp()
+        r = simulate_transient(amp, self.T, n_nodes=81)
+        g = r.signal_gain_dB[:, 0]
+        # MEASURED 2026-11-02: hold 0.0049 dB over 40 ms at r = 7 (was 0.297 dB at r = 1), and
+        # 0.0052 dB from a 1281-node solve() (8.5119 dB); solve(641) is 8.5116
+        assert np.max(np.abs(g - g[0])) < 0.02
+        assert abs(g[-1] - float(amp.solve(n_nodes=641).signal_gain_dB[0])) < 0.02
+        assert r.meta["z_refine"] > 1 and r.meta["mesh_resolved"]
+        assert r.meta["max_cell_gain_jump"] < 0.25                           # the auto target
+        # every array is reported on the n_nodes mesh, the Yb reservoir included
+        assert r.nbar2_zt.shape == (51, 81) and r.z_m.size == 81
+        assert r.meta["beta_yb"].shape == (51, 81)
+        assert r.assert_valid() is r
+
+    def test_the_unrefined_march_drifts_and_is_flagged(self):
+        """The deliberately broken variant: z_refine=1 is the pre-fix march. Premise: it still
+        drifts; and it must no longer do so silently."""
+        amp = _core_amp()
+        with pytest.warns(RuntimeWarning, match="does NOT resolve the gain profile"):
+            r = simulate_transient(amp, self.T, n_nodes=81, z_refine=1)
+        g = r.signal_gain_dB[:, 0]
+        assert g[0] - g[-1] > 0.2                                            # measured 0.297
+        assert r.meta["mesh_resolved"] is False and r.meta["max_cell_gain_jump"] > 2.0
+        assert r.meta["z_refine"] == 1
+        assert r.meta["quasi_static_valid"]           # the A-7 margins never saw it
+        with pytest.raises(RuntimeError, match="mesh_resolved"):
+            r.assert_valid()
+
+    def test_drift_is_second_order_in_dz_and_refinement_is_the_finer_march(self):
+        amp = _core_amp()
+        drift, runs = [], {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # 81 nodes is the flagged case
+            for n in (81, 161, 321):
+                runs[n] = simulate_transient(amp, self.T, n_nodes=n, z_refine=1)
+                g = runs[n].signal_gain_dB[:, 0]
+                drift.append(float(g[0] - g[-1]))
+        # MEASURED 2026-11-02: 0.297 / 0.0636 / 0.0150 dB (jumps 4.0 / 1.3 / 0.34) -- 4.7x, 4.2x
+        assert drift[0] > drift[1] > drift[2] > 0.0, drift
+        assert drift[0] / drift[1] > 3.5 and drift[1] / drift[2] > 3.5, drift
+        # z_refine = 2 on 81 nodes IS the unrefined march on 161 (same mesh, same re-solved
+        # seed), read back on every second node -- the refinement is the finer march, nothing else
+        r2 = simulate_transient(amp, self.T, n_nodes=81, z_refine=2)
+        assert r2.meta["z_refine"] == 2 and r2.nbar2_zt.shape == (51, 81)
+        assert np.array_equal(r2.signal_gain_dB, runs[161].signal_gain_dB)
+        assert np.array_equal(r2.nbar2_zt, runs[161].nbar2_zt[:, ::2])
+        assert np.array_equal(r2.meta["beta_yb"], runs[161].meta["beta_yb"][:, ::2])
+        assert np.array_equal(r2.ase_bwd_W, runs[161].ase_bwd_W)
+        assert r2.meta["max_cell_gain_jump"] == runs[161].meta["max_cell_gain_jump"]
+
+    def test_a_resolved_co_doped_amplifier_is_byte_identical(self):
+        # the cladding-pumped reference sits at a jump of 0.033 on 81 nodes: "auto" must not touch
+        # it -- not one bit, in any returned array or co-doped diagnostic
+        amp = _clad_amp()
+        # 0.2 ms steps: this amplifier's lagged field coupling rings (growing) at dt >= 0.3 ms
+        # on 81 nodes, which the 2026-11-02 step-stability monitor flags -- the grid used to be
+        # 0.5 ms (9 points), i.e. a ringing march (tests/test_fiber_transient_stability.py)
+        t = np.linspace(0.0, 4e-3, 21)
+        auto = simulate_transient(amp, t, n_nodes=81, store_profiles=True)
+        old = simulate_transient(amp, t, n_nodes=81, store_profiles=True, z_refine=1)
+        assert auto.meta["z_refine"] == 1 and auto.meta["mesh_resolved"]
+        assert auto.meta["max_cell_gain_jump"] < 0.25
+        for name in ("nbar2_zt", "signal_out_W", "pump_out_W", "signal_gain_dB", "ase_fwd_W",
+                     "ase_bwd_W", "power_zt"):
+            assert np.array_equal(getattr(auto, name), getattr(old, name)), name
+        for key in ("beta_yb", "max_dt_times_rate", "max_population_overshoot",
+                    "max_cell_gain_jump"):
+            assert np.array_equal(auto.meta[key], old.meta[key]), key
+
+    def test_explicit_refine_from_a_seed_reports_on_n_nodes(self):
+        amp = _core_amp()
+        t = np.linspace(0.0, 2e-3, 5)
+        f2 = np.linspace(0.6, 0.1, 41)
+        b2 = np.linspace(0.3, 0.05, 41)
+        r = simulate_transient_eryb(amp, t, n_nodes=41, nbar2_0=(f2, b2), z_refine=4)
+        assert r.meta["z_refine"] == 4 and r.nbar2_zt.shape == (5, 41) and r.z_m.size == 41
+        # the caller's (n_nodes,) seed is interpolated onto the march mesh, whose every 4th node
+        # is an n_nodes node -- so frame 0 IS the seed
+        np.testing.assert_allclose(r.nbar2_zt[0], f2, rtol=0.0, atol=1e-15)
+        np.testing.assert_allclose(r.meta["beta_yb"][0], b2, rtol=0.0, atol=1e-15)
+        for bad in (0, -2, 1.5, "fine", True):
+            with pytest.raises(ValueError, match="z_refine"):
+                simulate_transient_eryb(amp, t, n_nodes=41, z_refine=bad)
+            with pytest.raises(ValueError, match="z_refine"):
+                simulate_transient(amp, t, n_nodes=41, z_refine=bad)
+
+    def test_one_refinement_implementation_serves_both_marches(self):
+        """Census (the consolidate-kernels rule): ONE resolution measure, ONE sizing loop, ONE
+        verdict, and BOTH marches route through each -- so a fix to any of them cannot land in
+        one march and miss the other."""
+        import inspect
+        from dynameta.optics.fiber_amp import dynamics as dyn
+        src = inspect.getsource(dyn)
+        assert src.count("np.abs(np.diff(g, axis=1))") == 1          # inside _max_cell_jump
+        assert src.count("def _max_cell_jump(") == 1
+        assert src.count("def _refined_march_mesh(") == 1
+        for fn in (dyn.simulate_transient, dyn.simulate_transient_eryb):
+            body = inspect.getsource(fn)
+            for helper in ("_refined_march_mesh(", "_max_cell_jump(", "_warn_unresolved_mesh(",
+                           "_check_z_refine("):
+                assert helper in body or (helper == "_max_cell_jump("
+                                          and "_cell_gain_jump(" in body), (fn.__name__, helper)
+
+    @pytest.mark.slow
+    def test_explicit_4i11_2_march_has_the_same_drift_and_the_same_cure(self):
+        """The explicit-4I11/2 path (tau32_s set: four reservoirs, eryb._fb_jacobian_n3) shares
+        the propagator, hence the defect. ~30 s quiet (the n3 steady solves dominate), more on a
+        loaded box -- hence slow; the shared machinery is gated in the fast tests above."""
+        amp = ErYbAmplifier(ER, YB, FiberSpec(2.8e-6, 0.20, 2.0e25, 2.0),
+                            [Pump(0.200, 0.976e-6, "fwd")], [Signal(0.5e-3, 1.550e-6)],
+                            AseBand(1.520e-6, 1.570e-6, 24), n_yb_m3=2.0e26, k_tr_m3_s=2.0e-22,
+                            yb_ase=AseBand(1.000e-6, 1.100e-6, 8), tau32_s=7.0e-6)
+        with pytest.warns(RuntimeWarning, match="does NOT resolve the gain profile"):
+            old = simulate_transient(amp, self.T, n_nodes=81, z_refine=1)
+        g_old = old.signal_gain_dB[:, 0]
+        assert g_old[0] - g_old[-1] > 0.2
+        new = simulate_transient(amp, self.T, n_nodes=81)
+        g = new.signal_gain_dB[:, 0]
+        assert np.max(np.abs(g - g[0])) < 0.02
+        assert new.meta["er_4i11_2"].shape == (51, 81)
+        assert new.assert_valid() is new

@@ -29,6 +29,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from dynameta.optics.fiber_amp.steady_state import (FiberAmplifier, Signal, SteadyStateResult)
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["CompressionCurve", "SlopeEfficiency", "GainSpectrum",
            "gain_compression_curve", "saturation_output_power", "power_conversion_efficiency",
@@ -104,7 +105,7 @@ def _true_pumps(amp: FiberAmplifier):
         import warnings
         warnings.warn("pump aggregate: %d Pump channel(s) at a signal wavelength look "
                       "like double-pass mirror injections and are EXCLUDED from pump "
-                      "accounting (audit R5)" % len(dropped), stacklevel=3)
+                      "accounting (audit R5)" % len(dropped), AdvisoryWarning, stacklevel=3)
     return true
 
 
@@ -156,7 +157,10 @@ def gain_compression_curve(amp: FiberAmplifier, p_in_W: Sequence[float], *, sign
         p_sat_in = float(np.exp(xs))
         p_sat_out = float(np.interp(xs, [x0, x1], [np.log(p_out[k - 1]), np.log(p_out[k])]))
         p_sat_out = float(np.exp(p_sat_out))
-    return CompressionCurve(p_in, p_out, gdB, g0, p_sat_out, p_sat_in, compression_dB)
+    # keyword construction (audit X-30: seven floats/arrays in a row were built positionally)
+    return CompressionCurve(p_in_W=p_in, p_out_W=p_out, gain_dB=gdB, small_signal_gain_dB=g0,
+                            p_sat_out_W=p_sat_out, p_sat_in_W=p_sat_in,
+                            compression_dB=compression_dB)
 
 
 def saturation_output_power(amp: FiberAmplifier, *, signal_index: int = 0,
@@ -254,7 +258,8 @@ def slope_efficiency(amp: FiberAmplifier, pump_W: Sequence[float], *, signal_ind
     # (tests/test_fiber_chain.py pins that message), rather than here.
     lam_p = effective_pump_lambda_m(amp.pumps)
     lam_s = amp.signals[signal_index].lambda_m
-    return SlopeEfficiency(pump, s_out, slope, thr, stokes_limit(lam_p, lam_s))
+    return SlopeEfficiency(pump_W=pump, signal_out_W=s_out, slope=slope, threshold_pump_W=thr,
+                           stokes_limit=stokes_limit(lam_p, lam_s))
 
 
 # ---- gain spectrum / flatness --------------------------------------------------------------
@@ -271,10 +276,23 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
                   probe_power_W: float = 1e-7, with_ase: bool = False) -> GainSpectrum:
     """Small-signal gain spectrum: a weak probe of power probe_power_W is placed, one wavelength
     at a time, on the amplifier (all its own signals removed so the probe does not saturate the
-    medium) and the gain recorded. ASE is off by default (small-signal gain is ASE-independent
-    and the sweep is much faster); set with_ase=True to include ASE loading."""
+    medium) and the gain recorded. A RamanStokes coupling is dropped with the signals that pump
+    it (audit A-14; the small-signal limit of SRS is zero). ASE is off by default (small-signal
+    gain is ASE-independent and the sweep is much faster); set with_ase=True to include ASE
+    loading."""
     lams = np.atleast_1d(np.asarray(probe_lambda_m, float))
-    base = _with(amp, signals=[])
+    # audit A-14 (2026-11-02): drop the Raman coupling BEFORE emptying the signal list. _with(amp,
+    # signals=[]) forwards `raman`, and FiberAmplifier.__init__ rejects a RamanStokes whose
+    # signal_index has no signal to point at, so gain_spectrum raised ValueError ("signal_index out
+    # of range") on EVERY Raman-coupled amplifier. Dropping it is the small-signal limit, not an
+    # approximation of convenience: SRS is pumped by the amplifier's own signal, which this sweep
+    # removes, and the exchange is bilinear in P_sig. Measured (Er, 8 m, 8e24 m^-3, 250 mW @ 980,
+    # RamanStokes(a_eff 1.5e-11), probes 1530/1550/1565 nm): re-targeting the coupling at the
+    # 1e-7 W probe instead moves the gain by <= 1.1e-7 dB (61.142 / 44.459 / 50.675 dB either way).
+    base = amp
+    if getattr(amp, "raman", None) is not None:
+        base = _rebuild(base, "without_raman")
+    base = _with(base, signals=[])
     if not with_ase:
         # THROUGH THE PROTOCOL (audit A-3 follow-on): this used to hand-roll a FiberAmplifier(
         # base.ion, ...) rebuild -- a fourth, divergent copy of the "what a clone must carry"
@@ -290,7 +308,8 @@ def gain_spectrum(amp: FiberAmplifier, probe_lambda_m: Sequence[float], *,
     peak = float(lams[int(np.argmax(gdB))])
     flat = float(np.max(gdB) - np.min(gdB))
     tilt = float(np.polyfit(lams * 1e9, gdB, 1)[0]) if lams.size >= 2 else np.nan
-    return GainSpectrum(lams, gdB, peak, flat, tilt)
+    return GainSpectrum(lambda_m=lams, gain_dB=gdB, peak_lambda_m=peak, flatness_dB=flat,
+                        tilt_dB_per_nm=tilt)
 
 
 def gain_flatness(result: SteadyStateResult) -> float:

@@ -90,18 +90,41 @@ class Design:
 
     def device_symmetry(self) -> str:
         """Coarse device point-group ('c4v' | 'c2v' | 'none'), the intersection
-        of the lattice symmetry with every inclusion's centered symmetry. Used
+        of the lattice symmetry with every inclusion's AND every Stack.feature's centered symmetry. Used
         to gate the carrier-field lift (SeparableXYLift requires 'c4v')."""
         sym = self.unit_cell.lattice_symmetry()
         cx, cy = self.unit_cell.center_m
+        # audit S4-27 (wave-7, 2026-11-02): Stack.features are solids of the device too (a via, a
+        # T-patch stem) -- they used to be skipped, so an OFF-CENTRE via left a c4v verdict
+        # standing (and with it the SeparableXY lift and the FEM quarter-cell hint). A feature
+        # demotes exactly like an inclusion: off-centre -> 'none', else its shape's symmetry.
+        for ft in self.stack.features:
+            fcx, fcy = ft.shape.center_m()
+            if abs(fcx - cx) > 1e-12 or abs(fcy - cy) > 1e-12:
+                return "none"
+            sf = ft.shape.intrinsic_symmetry()
+            if _SYM_ORDER[sf] < _SYM_ORDER[sym]:
+                sym = sf
         for L in self.stack.layers:
             for inc in L.inclusions:
                 scx, scy = inc.shape.center_m()
+                # ABSOLUTE 1e-12 m (1 pm) on purpose, vs UnitCell.is_square's RELATIVE 1e-15 (audit
+                # R-34): a centre is a sum of user offsets, so its round-off scales with the cell and
+                # 1 pm is ~1e-6 of any optical period (a "centred" inclusion typed as 150e-9 in a
+                # 300e-9 cell is bit-exact; one built as 1000e-9 - 850e-9 is 5e-23 m off), while the
+                # squareness test compares two typed literals and only needs to absorb ~ulp noise.
                 if abs(scx - cx) > 1e-12 or abs(scy - cy) > 1e-12:
                     return "none"
                 s = inc.shape.intrinsic_symmetry()
                 if _SYM_ORDER[s] < _SYM_ORDER[sym]:
                     sym = s
+                # a tapered inclusion is as symmetric as the LESS symmetric of its two faces (a square
+                # top over a rectangular base is c2v); its bottom shares the top's centre (Taper
+                # validation), so only the shape symmetry can drop. taper=None: unchanged.
+                if getattr(inc, "taper", None) is not None:
+                    sb = inc.taper.bottom.intrinsic_symmetry()
+                    if _SYM_ORDER[sb] < _SYM_ORDER[sym]:
+                        sym = sb
         return sym
 
     def detect_symmetry_reduction(self) -> str:
@@ -135,4 +158,9 @@ class Design:
             for inc in L.inclusions:
                 if inc.shape.kind not in ("rectangle", "circle"):
                     return "none"
+        for ft in self.stack.features:              # audit S4-27: the same scope rules for features
+            if self.material_role(ft.material) == "semiconductor":
+                return "none"
+            if ft.shape.kind not in ("rectangle", "circle"):
+                return "none"
         return "quarter" if devsym == "c4v" else "half_x"

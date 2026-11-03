@@ -1114,3 +1114,149 @@ class TestF7WallPlug:
         for bad in dict(wallplug_efficiency=0.0), dict(wallplug_efficiency=1.5):
             with pytest.raises(ValueError, match="efficiency"):
                 PumpSource(**bad)
+
+
+class TestVerificationFollowups:
+    """The two constructive follow-ups of the audit's verification section (2026-11-02): the
+    log-sum-exp guard in `_propagate_fixed` and `TransientResult.assert_valid()`."""
+
+    @staticmethod
+    def _closed_form(z, g, s, bc, u):
+        """The pre-guard closed form, verbatim -- the byte-identity oracle for safe rows."""
+        from dynameta.optics.fiber_amp.dynamics import _cumtrapz2
+        P = np.empty_like(g)
+        fwd = u > 0.0
+        G = _cumtrapz2(g[fwd], z)
+        P[fwd] = np.exp(G) * (bc[fwd][:, None] + _cumtrapz2(s[fwd] * np.exp(-G), z))
+        zeta = z[-1] - z[::-1]
+        G = _cumtrapz2(g[~fwd][:, ::-1], zeta)
+        Pr = np.exp(G) * (bc[~fwd][:, None] + _cumtrapz2(s[~fwd][:, ::-1] * np.exp(-G), zeta))
+        P[~fwd] = Pr[:, ::-1]
+        return P
+
+    def test_propagate_fixed_is_unchanged_on_safe_rows_and_finite_past_709_nepers(self):
+        from dynameta.optics.fiber_amp.dynamics import _propagate_fixed, _propagate_rows_shifted
+        rng = np.random.default_rng(0)
+        z = np.linspace(0.0, 8.0, 201)
+        for _ in range(20):                              # every |G| << 700: byte-identical
+            K = int(rng.integers(2, 30))
+            g = rng.normal(0.0, 3.0, (K, z.size))
+            s = np.abs(rng.normal(0.0, 1e-9, (K, z.size)))
+            bc = np.abs(rng.normal(0.0, 1e-3, K))
+            u = np.where(np.arange(K) % 2 == 0, 1.0, -1.0)
+            assert np.array_equal(_propagate_fixed(z, g, s, bc, u),
+                                  self._closed_form(z, g, s, bc, u))
+        # the shifted recurrence IS the same discrete scheme (algebraic identity) -- 1e-12 on a
+        # row that both forms can evaluate
+        g = np.vstack([np.full(z.size, 40.0), np.linspace(-60.0, 30.0, z.size)])
+        s = np.full_like(g, 1e-9)
+        bc = np.array([1e-3, 2e-3])
+        np.testing.assert_allclose(_propagate_rows_shifted(z, g, s, bc),
+                                   self._closed_form(z, g, s, bc, np.ones(2)), rtol=1e-12)
+        # past the float64 exp range: a 900-neper gain from 1e-300 W is 7.33e90 W (representable;
+        # the closed form returned inf), a -900-neper absorber is ~0 W (the closed form: NaN)
+        z = np.linspace(0.0, 12.0, 241)
+        u = np.array([1.0, -1.0, 1.0, -1.0])
+        g = np.vstack([np.full(z.size, 75.0)] * 2 + [np.full(z.size, -75.0)] * 2)
+        bc = np.array([1e-300, 1e-300, 1.0, 1.0])
+        with np.errstate(over="ignore", invalid="ignore"):
+            old = self._closed_form(z, g, np.zeros_like(g), bc, u)
+        assert np.isinf(old[0, -1]) and np.isnan(old[2, -1])  # premise: the defect
+        P = _propagate_fixed(z, g, np.zeros_like(g), bc, u)
+        assert np.all(np.isfinite(P))
+        expect = math.exp(900.0 + math.log(1e-300))
+        assert P[0, -1] == pytest.approx(expect, rel=1e-11)
+        assert P[1, 0] == pytest.approx(expect, rel=1e-11)
+        assert 0.0 <= P[2, -1] < 1e-300 and 0.0 <= P[3, 0] < 1e-300
+
+    def test_long_reabsorbing_yb_transient_no_longer_trips_on_ieee754(self):
+        """The audit's case: the 2 W Yb reference stretched to 12 m. Its reabsorbing ASE bins reach
+        INT g dz = -1397 nepers, so EVERY step of the closed form went NaN and the A-7 monitor
+        reported "non-finite channel powers" on a march whose physical margins were fine (ASE/
+        launched 0.006, ASE gain integral 4.8)."""
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 12.0)
+        amp = FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)], [Signal(20e-3, 1.060e-6)],
+                             AseBand(1.02e-6, 1.10e-6, 24))
+        r = simulate_transient(amp, np.linspace(0.0, 2e-3, 21), n_nodes=81)
+        assert not r.meta["nonfinite_powers"]
+        assert r.meta["quasi_static_valid"]
+        assert r.meta["max_ase_gain_integral"] < 20.0 and r.meta["max_ase_to_launched"] < 1.0
+        assert r.assert_valid() is r                     # chains on a trustworthy march
+
+    def test_assert_valid_raises_naming_the_failed_criteria(self):
+        """A march that genuinely leaves its regime (8 m Yb seeded at nbar2 = 0.9: ASE gain
+        integral 214, ASE 9e86x the launched power) still RETURNS its arrays with the flag False --
+        the documented contract -- and assert_valid turns that into an exception."""
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, 8.0)
+        amp = FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)], [Signal(20e-3, 1.060e-6)],
+                             AseBand(1.02e-6, 1.10e-6, 24))
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:   # the runaway also overflows numpy
+            warnings.simplefilter("always")
+            r = simulate_transient(amp, np.linspace(0.0, 2e-3, 21), n_nodes=81,
+                                   nbar2_0=np.full(81, 0.9))
+        assert any("OUT OF ITS VALID REGIME" in str(w.message) for w in caught)
+        assert r.meta["quasi_static_valid"] is False
+        with pytest.raises(RuntimeError, match="march_valid.*ASE gain integral"):
+            r.assert_valid()
+
+
+class TestYbHoldSpatialResolution:
+    """The verification section's last observation (2026-11-02): the 2 W Yb reference marched from
+    amp.solve()'s state at CONSTANT drive did not hold it (6 m: 19.30 -> 17.90 dB). Root cause: the
+    march's fixed point is that of its discrete z propagator, and n_nodes = 81 (75 mm cells against
+    a 128 /m small-signal pump absorption) does not resolve the pump-depletion front -- dt-
+    independent, present without ASE, second order in dz. simulate_transient(z_refine="auto")
+    sizes the march mesh from the per-cell gain jump and monitors it every step."""
+
+    @staticmethod
+    def _yb(L):
+        fib = FiberSpec(3.0e-6, 0.12, 6.0e25, L)
+        return FiberAmplifier(ytterbium(), fib, [Pump(2.0, 0.976e-6)], [Signal(20e-3, 1.060e-6)],
+                              AseBand(1.02e-6, 1.10e-6, 24))
+
+    def test_constant_drive_from_steady_state_holds_it(self):
+        amp = self._yb(6.0)
+        r = simulate_transient(amp, np.linspace(0.0, 5e-3, 51), n_nodes=81)
+        g = r.signal_gain_dB[:, 0]
+        # measured 0.0062 dB over 5 ms (was 1.406 dB); the old mesh error is ~1/r^2 smaller
+        assert np.max(np.abs(g - g[0])) < 0.02
+        assert abs(g[-1] - amp.solve(n_nodes=81).signal_gain_dB[0]) < 0.03   # measured 0.005
+        assert r.meta["z_refine"] > 1 and r.meta["mesh_resolved"]
+        assert r.meta["max_cell_gain_jump"] < 0.25                           # the auto target
+        assert r.nbar2_zt.shape == (51, 81) and r.z_m.size == 81             # reported on n_nodes
+        assert r.assert_valid() is r
+
+    def test_the_unrefined_march_drifts_and_is_flagged(self):
+        """The deliberately broken variant: z_refine=1 is the pre-fix march. It must still drift
+        (premise) and must no longer do so silently."""
+        amp = self._yb(6.0)
+        with pytest.warns(RuntimeWarning, match="does NOT resolve the gain profile"):
+            r = simulate_transient(amp, np.linspace(0.0, 5e-3, 51), n_nodes=81, z_refine=1)
+        g = r.signal_gain_dB[:, 0]
+        assert g[0] - g[-1] > 1.0                                             # measured 1.406
+        assert r.meta["mesh_resolved"] is False and r.meta["max_cell_gain_jump"] > 2.0
+        assert r.meta["quasi_static_valid"]           # the A-7 margins never saw it
+        with pytest.raises(RuntimeError, match="mesh_resolved"):
+            r.assert_valid()
+
+    def test_a_resolved_amplifier_is_byte_identical_and_explicit_refine_reports_on_n_nodes(self):
+        edfa = FiberAmplifier(erbium(), FiberSpec(1.6e-6, 0.22, 8.0e24, 8.0), [Pump(0.25, 0.98e-6)],
+                              [Signal(1e-5, 1.55e-6)], AseBand(1.52e-6, 1.57e-6, 20))
+        t = np.linspace(0.0, 4e-3, 9)
+        auto = simulate_transient(edfa, t, n_nodes=81)
+        old = simulate_transient(edfa, t, n_nodes=81, z_refine=1)
+        assert auto.meta["z_refine"] == 1
+        for name in ("nbar2_zt", "signal_out_W", "pump_out_W", "ase_fwd_W", "ase_bwd_W"):
+            assert np.array_equal(getattr(auto, name), getattr(old, name)), name
+        # an explicit subdivision from a supplied (n_nodes,) seed: arrays stay on the n_nodes mesh
+        # and the refined march lands on the same gain to well under the hold tolerance
+        seed = np.linspace(0.6, 0.2, 81)
+        fine = simulate_transient(edfa, t, n_nodes=81, nbar2_0=seed, z_refine=4)
+        coarse = simulate_transient(edfa, t, n_nodes=81, nbar2_0=seed, z_refine=1)
+        assert fine.meta["z_refine"] == 4 and fine.nbar2_zt.shape == (9, 81)
+        assert np.array_equal(fine.nbar2_zt[0], seed)
+        assert abs(fine.signal_gain_dB[-1, 0] - coarse.signal_gain_dB[-1, 0]) < 0.005
+        for bad in (0, -2, 1.5, "fine", True):
+            with pytest.raises(ValueError, match="z_refine"):
+                simulate_transient(edfa, t, n_nodes=81, z_refine=bad)

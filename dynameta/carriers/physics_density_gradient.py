@@ -110,9 +110,26 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
 
 def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
     """Bulk-ohmic DG contact: u = sqrt(n_contact), Lambda = 0 (no quantum correction in the
-    contact reservoir)."""
+    contact reservoir).
+
+    TERMINAL CURRENT (audit S1-5, 2026-07-17; fixed wave-7 2026-11-02). setup_dg_quantum_correction
+    re-points the REGION continuity at ElectronCurrentDG, but the ohmic CONTACT equation that
+    physics_drift_diffusion.setup_contact_ohmic_dd recorded still carried
+    edge_current_model='ElectronCurrent' -- the classical SG flux on psi alone. DEVSIM integrates the
+    contact's edge_current_model to report get_contact_current, so a DG device's terminal current
+    was read from the pre-quantum flux on the contact edges while the solve itself (node_model pin,
+    unchanged) was right. The two differ by the q mu n grad(Lambda) Bohm term on the contact edge:
+    measured on a 40 nm bar with a 4e26 -> 4e25 m^-3 step 3 nm from the right contact at 10 mV
+    (max |Lambda| 10 mV), the two terminal currents failed to conserve by |I_L + I_R|/|I_L| =
+    2.95e-2 before (the right one read the classical flux; 6.0e-3 with the step 6 nm away) and
+    4.4e-16 after, both now equal to the interior DG edge current to 2e-16. The contact's ElectronContinuityEquation is now
+    re-bound here with edge_current_model='ElectronCurrentDG' (same node_model, so the pinned
+    boundary condition -- and every converged solution -- is unchanged). Requires
+    setup_dg_quantum_correction on the contact's region FIRST (the documented order); raises if
+    ElectronCurrentDG does not exist there yet."""
     if not (n_contact_m3 > 0.0):
         raise ValueError("setup_contact_dg: n_contact_m3 must be > 0")
+    _repoint_contact_current_to_dg(device, contact)
     cu = "{}_qsqrtn_dirichlet".format(contact)
     ds.contact_node_model(device=device, contact=contact, name=cu,
                           equation="QSqrtN - {:.16e}".format(float(np.sqrt(n_contact_m3))))
@@ -124,6 +141,28 @@ def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
     ds.contact_node_model(device=device, contact=contact, name="{}:QLambda".format(cl),
                           equation="1")
     _R.record_contact_equation(device, contact, name="QLambdaEquation", node_model=cl)
+
+
+def _repoint_contact_current_to_dg(device: str, contact: str) -> None:
+    """audit S1-5: re-bind an ohmic contact's ElectronContinuityEquation so its edge_current_model is
+    the DG current (see setup_contact_dg). A contact with no recorded classical current (e.g. a bare
+    potential contact) is left untouched."""
+    entries = [e for e in _R.recorded(device, "ElectronContinuityEquation", scope="contact",
+                                      loc=contact)
+               if e["kwargs"].get("edge_current_model") == "ElectronCurrent"]
+    if not entries:
+        return
+    region = ds.get_region_list(device=device, contact=contact)[0]
+    if "ElectronCurrentDG" not in ds.get_edge_model_list(device=device, region=region):
+        raise ValueError(
+            "setup_contact_dg('{}'): region '{}' has no ElectronCurrentDG -- call "
+            "setup_dg_quantum_correction on it BEFORE setup_contact_dg, so the contact's terminal "
+            "current is read from the density-gradient flux (audit S1-5)".format(contact, region))
+    kw = dict(entries[-1]["kwargs"])
+    kw["edge_current_model"] = "ElectronCurrentDG"
+    ds.delete_contact_equation(device=device, contact=contact, name="ElectronContinuityEquation")
+    _R.forget(device, "ElectronContinuityEquation", loc=contact, scope="contact")
+    _R.record_contact_equation(device, contact, **kw)
 
 
 def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 15.0) -> None:
@@ -230,8 +269,10 @@ def set_dg_gamma(device: str, region: str, frac: float) -> None:
         raise ValueError("set_dg_gamma: frac must be in [0, 1]")
     b_full = float(ds.get_parameter(device=device, region=region, name="b_dg_full"))
     ds.set_parameter(device=device, region=region, name="b_dg", value=frac * b_full)
-    try:
-        pin_full = float(ds.get_parameter(device=device, name="wall_lambda_pin_full"))
-    except Exception:
+    # audit C-17: ask whether the hard wall exists instead of reading ANY DEVSIM error as "no hard
+    # wall" -- the bare `except Exception` would also swallow a real failure (bad device, a non-numeric
+    # pin) and leave the Lambda pin stale at its previous fraction while b_dg moved on.
+    if "wall_lambda_pin_full" not in ds.get_parameter_list(device=device):
         return                                          # no hard wall on this device
+    pin_full = float(ds.get_parameter(device=device, name="wall_lambda_pin_full"))
     ds.set_parameter(device=device, name="wall_lambda_pin", value=frac * pin_full)

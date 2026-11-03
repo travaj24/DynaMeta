@@ -95,6 +95,7 @@ numpy/scipy, ASCII-only.
 
 from __future__ import annotations
 
+import inspect
 import math
 import warnings
 from dataclasses import dataclass, field
@@ -122,6 +123,7 @@ __all__ = [
 # the spelling this module's own API reads in, but it is the same function object as `pole_q`, so
 # there is exactly one docstring, one convention and nothing left to drift.
 from dynameta.optics.resonance import pole_q as q_from_pole                 # noqa: E402
+from dynameta.warning_types import UnreliableResultWarning
 
 
 # ------------------------------------------------------------------------------------------------
@@ -283,8 +285,16 @@ def aaa(z_samples: Sequence[complex], f_samples: Sequence[complex], *, tol: floa
         Relative convergence tolerance on ``max|f|``.  Pass ``0.0`` to force fitting all the way to
         ``max_degree`` (used to DEMONSTRATE Froissart doublets on clean data).
     max_degree : int
-        Maximum number of support points minus one; capped internally at ``len(z)-1`` (and at
-        roughly ``len(z)//2`` so the Loewner system stays overdetermined).
+        Maximum number of SUPPORT POINTS (Chebfun's ``mmax``), so the approximant degree
+        (``AAAResult.degree`` = support points - 1) is at most ``max_degree - 1``; capped
+        internally at ``len(z)-1`` (and at roughly ``len(z)//2`` so the Loewner system stays
+        overdetermined).  Must be >= 1.  AUDIT Q-20 (2026-11-02): this line used to say "support
+        points minus one", one off from the loop (and from the summary above): ``tol=0,
+        max_degree=5`` returns degree 4.  The DOCUMENTATION was the defect -- making the code cap
+        the degree instead moves every capped fit by one support point and was measured to lose
+        a genuine pole on a noisy over-fit gate (test_aaa_poles.py seed 1002: 3 of 4) -- so the
+        semantics are kept and written down.  ``max_degree = 0`` used to return an EMPTY support
+        set (degree -1, ``max_error = nan``) silently; it now raises.
 
     Returns
     -------
@@ -318,6 +328,10 @@ def aaa(z_samples: Sequence[complex], f_samples: Sequence[complex], *, tol: floa
     u = (z - z0) / scale
 
     fmax = float(np.max(np.abs(f))) or 1.0
+    if int(max_degree) < 1:
+        raise ValueError("aaa: max_degree is the maximum number of SUPPORT POINTS and must be >= 1; "
+                         "got {!r} (0 used to return an empty, degree -1 fit with max_error = nan "
+                         "-- audit Q-20)".format(max_degree))
     hard_cap = min(int(max_degree), M - 1, max(1, M // 2))
 
     J = np.ones(M, dtype=bool)                                 # mask of non-support samples
@@ -566,6 +580,22 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
     list of Resonance
         Sorted by ascending ``Re(omega_tilde)``.
     """
+    return _find_resonances_and_fit(
+        omega_real, response, residue_floor=residue_floor, stability_check=stability_check,
+        tol=tol, max_degree=max_degree, band=band, band_margin=band_margin,
+        stability_rtol=stability_rtol, residue_rel_floor=residue_rel_floor,
+        im_atol_rel=im_atol_rel, froissart_frac=froissart_frac,
+        broad_warn_frac=broad_warn_frac, _stacklevel=3)[0]
+
+
+def _find_resonances_and_fit(omega_real, response, *, residue_floor, stability_check, tol,
+                             max_degree, band, band_margin, stability_rtol, residue_rel_floor,
+                             im_atol_rel, froissart_frac, broad_warn_frac,
+                             _stacklevel: int = 3) -> Tuple[List[Resonance], AAAResult]:
+    """:func:`find_resonances` plus the full-grid :class:`AAAResult` it fitted (audit P-13 /
+    Q-31): :func:`sweep_and_extract` used to re-run that SAME fit -- identical sorted inputs,
+    identical tol / max_degree, so a bit-identical result -- just to attach it to its
+    ``SweepResult``.  ``_stacklevel`` points every warning at the PUBLIC caller."""
     w = np.asarray(omega_real, dtype=np.float64).ravel()
     f = np.asarray(response).ravel()
     if w.shape != f.shape:
@@ -580,7 +610,7 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
     res = aaa(w.astype(np.complex128), f, tol=tol, max_degree=max_degree)
     cand = _physical_candidates(res, lo, hi, band_margin, im_atol)
     if not cand:
-        return []
+        return [], res
 
     # (ii) FROISSART pole-zero coincidence filter (the ACTUAL doublet signature; see the docstring).
     # A genuine weakly-coupled resonance has a small residue but NO near-coincident zero, so it
@@ -605,10 +635,10 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
                     "below the threshold -- lower froissart_frac (or set it to 0) to keep it, and "
                     "see the froissart_frac note in this docstring.".format(
                         len(cand), eff_frac, float(froissart_frac),
-                        _aaa_misfit(res, f)), RuntimeWarning, stacklevel=2)
+                        _aaa_misfit(res, f)), UnreliableResultWarning, stacklevel=_stacklevel)
             cand = kept
             if not cand:
-                return []
+                return [], res
 
     # (iii) residue floor.  ABSOLUTE (residue_floor) or, by default, a LOCAL relative floor: the
     # pole's Lorentzian peak height |residue|/|Im| must clear residue_rel_floor * (local |response|
@@ -626,7 +656,7 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
                 kept.append((p, r))
         cand = kept
     if not cand:
-        return []
+        return [], res
 
     # (iv) stability under decimation.
     if stability_check and w.size >= 8:
@@ -641,6 +671,19 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
             d = float(np.min(np.abs(dec_poles - p)))
             if d <= stability_rtol * abs(p):
                 stable.append((p, r))
+        if cand and not stable:
+            # AUDIT Q-28: like the Froissart filter above, this one could remove EVERY candidate
+            # and return [] with no signal -- indistinguishable from "no resonance in the band".
+            # A pole the full grid resolves but the 2x-decimated grid cannot (a line only a few
+            # samples wide) is exactly that case, so say so.
+            warnings.warn(
+                "aaa_poles.find_resonances: the decimation-stability filter removed ALL {} "
+                "candidate pole(s) that survived the earlier filters (the every-other-sample fit "
+                "found {} in-band pole(s), none within stability_rtol = {:.1e}); returning []. "
+                "A resonance only a few samples wide is not resolved by the decimated grid: "
+                "sample it more densely, loosen stability_rtol, or pass stability_check=False."
+                .format(len(cand), int(dec_poles.size), float(stability_rtol)),
+                UnreliableResultWarning, stacklevel=_stacklevel)
         cand = stable
 
     out = [Resonance(omega_tilde=p, Q=q_from_pole(p), residue=r) for p, r in cand]
@@ -660,8 +703,16 @@ def find_resonances(omega_real: Sequence[float], response, *, residue_floor: Opt
                     "extrapolation -- widen the sweep to >= ~3-5 FWHM (module OPERATING "
                     "ENVELOPE).".format(rr.omega_tilde.real, fwhm, fwhm / span, span,
                                         broad_warn_frac, rr.Q),
-                    RuntimeWarning, stacklevel=2)
-    return out
+                    UnreliableResultWarning, stacklevel=_stacklevel)
+    return out, res
+
+
+# find_resonances' keyword defaults NOT already explicit in sweep_and_extract's signature, read off
+# the public signature so there is ONE copy of them (sweep_and_extract calls the fit-returning core).
+_FIND_KW_DEFAULTS = {
+    k: v.default for k, v in inspect.signature(find_resonances).parameters.items()
+    if v.kind is inspect.Parameter.KEYWORD_ONLY
+    and k not in ("residue_floor", "stability_check", "tol", "max_degree", "band")}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -725,9 +776,15 @@ def sweep_and_extract(solver: Callable[[float], complex], omega_min: float, omeg
         f_use = f.real
     else:
         f_use = f
-    resonances = find_resonances(w, f_use, residue_floor=residue_floor,
-                                 stability_check=stability_check, tol=tol,
-                                 max_degree=max_degree, band=(omega_min, omega_max),
-                                 **find_kwargs)
-    approx = aaa(w.astype(np.complex128), f_use, tol=tol, max_degree=max_degree)
+    # ONE full-grid AAA fit (audit P-13 / Q-31): the approximant is the one find_resonances fitted
+    # on these very samples, not a second identical fit.
+    kw = dict(_FIND_KW_DEFAULTS)                       # find_resonances' own defaults, read once
+    unknown = set(find_kwargs) - set(kw)
+    if unknown:
+        raise TypeError("sweep_and_extract got unexpected keyword argument(s) {} (forwarded to "
+                        "find_resonances)".format(sorted(unknown)))
+    kw.update(find_kwargs)
+    resonances, approx = _find_resonances_and_fit(
+        w, f_use, residue_floor=residue_floor, stability_check=stability_check, tol=tol,
+        max_degree=max_degree, band=(omega_min, omega_max), _stacklevel=3, **kw)
     return SweepResult(resonances=resonances, omega=w, response=f_use, approximant=approx)

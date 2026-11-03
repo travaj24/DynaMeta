@@ -37,20 +37,28 @@ CONVENTIONS (SI, exp(-i omega t) library convention -- decaying modes have Im(om
 Opt-in FDTD probe: solve_fdtd_1d(..., return_time_trace=True) attaches the recorded reflected/
 transmitted boundary time series (already computed for the R/T DFT) without changing any
 existing output; fdtd_etalon_ringdown() drives it and inverts the post-pulse tail.
+
+ONE ringdown Q (audit Q-22): ringdown_q and fdtd_etalon_ringdown extract modes through the same
+_pencil_modes path (matrix pencil + the real-trace VARPRO refinement + dominant-by-|amplitude|),
+so the same samples give the same (f0, Q) from both; matrix_pencil alone is the raw pencil.
 """
 
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
 import numpy as np
 
 from dynameta.constants import C_LIGHT
+# audit V-17 leftover (wave-7, 2026-11-02): the four unreliable-result warns below adopt
+# UnreliableResultWarning, still a RuntimeWarning subclass, so pytest.warns(RuntimeWarning) holds.
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "Mode",
+    "Drift",
     "matrix_pencil",
     "ringdown_q",
     "EtalonRingdown",
@@ -84,6 +92,39 @@ class Mode:
         return self.omega_rad_s / (2.0 * np.pi)
 
 
+@dataclass
+class Drift:
+    """A NON-RESONANT slow term of a fitted trace (2026-11-03): a pencil pole whose frequency is
+    BELOW THE WINDOW'S FREQUENCY RESOLUTION, |omega| < omega_res = 2 pi / (N dt) with N the number
+    of fitted samples -- it completes less than one cycle in the window, so it is a drift / offset,
+    not a resonance. It is kept in every least-squares fit (it must absorb the slow component) but
+    never reported as a Mode, never enters (f0, Q), and is exempt from the growing-pole warning: a
+    slowly GROWING drift (e.g. a first-order Mur wall's unabsorbed static residue in an FDTD trace)
+    is not an amplifying resonance.
+
+    Fields: gamma_rad_s -- the rate in the Mode convention, term ~ exp(-gamma t / 2) (NEGATIVE =
+    growing); omega_rad_s -- its |omega| (< threshold_rad_s; 0 for a real pole); amplitude -- the
+    complex phasor amplitude (the real part for omega = 0); threshold_rad_s -- omega_res of the fit."""
+
+    gamma_rad_s: float
+    omega_rad_s: float
+    amplitude: complex
+    threshold_rad_s: float
+
+
+def _drift_reconstruction(n: int, dt: float, drift: Sequence["Drift"]) -> np.ndarray:
+    """Real reconstruction of drift terms, SIGNED rate (a growing drift grows)."""
+    t = np.arange(int(n)) * float(dt)
+    out = np.zeros(int(n), dtype=np.float64)
+    for d in drift:
+        e = np.exp(-0.5 * d.gamma_rad_s * t)
+        if d.omega_rad_s * dt > _OMEGA_DC_TOL:
+            out += e * (d.amplitude.real * np.cos(d.omega_rad_s * t) + d.amplitude.imag * np.sin(d.omega_rad_s * t))
+        else:
+            out += e * d.amplitude.real
+    return out
+
+
 # |z| in (1, 1 + _GAIN_TOL] is the numerical image of a LOSSLESS pole (gamma = 0), not gain:
 # snapped onto the unit circle. Above it the pole is genuinely growing -- see matrix_pencil's
 # DISCRETE-POLE DOMAIN note (finding Q-9).
@@ -111,8 +152,9 @@ def _hankel(y: np.ndarray, L: int) -> np.ndarray:
 # default pencil_frac = 0.4 the Hankel matrix is 0.6N x 0.4N and `np.linalg.svd` allocates its
 # own copy of it plus U (0.6N x 0.4N, computed by LAPACK and never read here) and Vh
 # (0.4N x 0.4N).  Measured: N = 8000 -> 13.8 s and ~370 MB; N = 20000 -> ~4 min and ~2.3 GB.
-# The repo's own front end `fdtd_etalon_ringdown` decimates and caps at max_fit_samples = 1200,
-# but `matrix_pencil` / `ringdown_q` are exported for arbitrary traces and
+# The repo's own front end `fdtd_etalon_ringdown` decimates and keeps its fit under
+# _FIT_SAMPLES_BUDGET = 6000 samples (coarsening the stride first), but `matrix_pencil` /
+# `ringdown_q` are exported for arbitrary traces and
 # `solve_fdtd_1d(..., return_time_trace=True)` hands out traces of exactly the length that blows
 # this up.  So the workspace estimate below is checked BEFORE anything large is allocated and a
 # too-long trace RAISES (it never silently decimates -- decimation is an accuracy change and must
@@ -158,7 +200,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                   real_signal: Optional[bool] = None,
                   omega_zero_tol: float = 1e-6,
                   allow_gain: bool = False,
-                  max_bytes: Optional[float] = None) -> List[Mode]:
+                  max_bytes: Optional[float] = None,
+                  drift_out: Optional[list] = None) -> List[Mode]:
     """Extract damped-exponential modes from a uniformly sampled trace by the matrix-pencil
     method (Hua & Sarkar 1990).
 
@@ -181,6 +224,11 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                     the `Mode` contract documents gamma > 0, and a growing pole additionally
                     OVERFLOWS the residue Vandermonde at large N (finding Q-9). See the
                     DISCRETE-POLE DOMAIN note below.
+      drift_out   : optional list that RECEIVES the drift terms (Drift objects): poles with
+                    |omega| < omega_res = 2 pi / (N dt) (N = fitted samples), i.e. below the
+                    window's frequency resolution. They stay in the residue fit, are exempt from
+                    the growing-pole warning, and are NEVER returned as Modes (2026-11-03; see
+                    Drift). Pass a list to see them; they are dropped from the output either way.
       max_bytes   : SVD workspace budget [bytes]; None uses `_PENCIL_MAX_BYTES` (2 GB). A trace
                     long enough to exceed it RAISES instead of allocating (audit P-3) -- see the
                     COST note below. `np.inf` disables the guard.
@@ -195,7 +243,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     API as ``omega_rad_s = 0`` with ``gamma_rad_s = nan``.  ``z`` is therefore cast to
     ``complex128`` before the log, and the self-conjugate Nyquist pole is reported ONCE (no
     residue doubling) rather than being dropped by the conjugate collapse.
-    Growing poles (``|z| > 1``) are dropped with a ``RuntimeWarning`` unless ``allow_gain=True``:
+    Growing poles (``|z| > 1``) are dropped with an ``UnreliableResultWarning`` (a
+    ``RuntimeWarning`` subclass) unless ``allow_gain=True``:
     they contradict the documented ``gamma > 0``, and the residue Vandermonde ``z**n`` overflows
     to ``inf`` once ``|z|**(N-1)`` passes the float64 range (for ``|z| = 1.5`` that is ``N ~
     1750`` -- the audit note's ``1.5**1200`` is actually 2.04e211, finite; the threshold is
@@ -212,7 +261,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     INFORMATION here: the pencil fits poles, so a trace decimated to ~8-10 samples per period of
     the highest mode of interest carries the same poles at a fraction of the cost -- which is
     exactly what :func:`fdtd_etalon_ringdown` does (it decimates to
-    ``target_samples_per_period`` and caps at ``max_fit_samples = 1200``).
+    ``target_samples_per_period`` and, by default, fits the whole data-driven window under a
+    6000-sample budget -- see ``_FIT_SAMPLES_BUDGET``).
     """
     y_full = np.asarray(signal)
     dt = float(dt)
@@ -248,9 +298,9 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
             "(Hankel {} x {}, {} bytes/sample), over the {:.2f} GB budget -- and the fit is "
             "O(N^3) in time (N = 8000 measures 13.8 s, N = 20000 extrapolates to ~4 min). "
             "DECIMATE the trace first (keep >= ~8 samples per period of the highest mode, e.g. "
-            "`signal[::k]` with `dt*k`, which is what fdtd_etalon_ringdown does at "
-            "max_fit_samples = 1200), shorten it with `t_start`, or -- if you really do have the "
-            "memory -- pass `max_bytes` above {:.2f}e9. About {} samples fit the current budget."
+            "`signal[::k]` with `dt*k`, which is what fdtd_etalon_ringdown does), shorten it "
+            "with `t_start`, or -- if you really do have the memory -- pass `max_bytes` above "
+            "{:.2f}e9. About {} samples fit the current budget."
             .format(N, need / 1e9, N - L, L + 1, y.dtype.itemsize, budget / 1e9,
                     budget / 1e9, n_fit))
 
@@ -287,17 +337,23 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     if np.any(marginal):
         z = np.where(marginal, z / np.where(absz > 0.0, absz, 1.0), z)
         absz = np.abs(z)
-    growing = absz > 1.0 + _GAIN_TOL
+    # DRIFT CLASSIFICATION (2026-11-03): a pole with |omega| below the window's frequency
+    # resolution omega_res = 2 pi / (N dt) completes < 1 cycle in the window -- non-resonant drift.
+    # Such poles are exempt from the growing-pole policy (kept in the fit, reported via drift_out).
+    omega_res = 2.0 * np.pi / (N * dt)
+    is_drift = np.abs(np.log(z).imag) / dt < omega_res
+    growing = (absz > 1.0 + _GAIN_TOL) & ~is_drift
     if np.any(growing) and not allow_gain:
         warnings.warn(
             "matrix_pencil: dropped {} GROWING pole(s) (|z| up to {:.6g} > 1, i.e. gamma < 0 and "
             "q < 0), which contradict the documented Mode contract (gamma > 0) and can overflow "
             "the residue Vandermonde on a long trace. Pass allow_gain=True to keep them (an "
             "amplifying medium / an unstable simulation), or shorten the fit window.".format(
-                int(np.count_nonzero(growing)), float(absz.max())),
-            RuntimeWarning, stacklevel=2)
+                int(np.count_nonzero(growing)), float(absz[growing].max())),
+            UnreliableResultWarning, stacklevel=2)
         z = z[~growing]
         absz = absz[~growing]
+        is_drift = is_drift[~growing]
         if z.size == 0:
             return []
     s = np.log(z) / dt                     # continuous poles s_k = -gamma/2 -/+ i omega_0
@@ -327,14 +383,14 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     resid = y - (recon.real if real_signal else recon)
     res_rms = float(np.sqrt(np.mean(np.abs(resid) ** 2)))
 
-    modes: List[Mode] = []
+    modes = []                                          # (omega, gamma, amp, is_drift)
     if real_signal:
         # Real signal: poles are real (Im s = 0) or exact conjugate pairs. Report each physical
         # mode once by taking the Im(s) < 0 representative (the exp(-i omega_0 t), i.e. positive
         # physical-frequency member) and doubling its residue; report a real pole (omega ~ 0) once.
         w_tol = omega_zero_tol / dt
         w_nyq = np.pi / dt
-        for si, Ri in zip(s, R):
+        for si, Ri, dr in zip(s, R, is_drift):
             omega = -si.imag
             gamma = -2.0 * si.real
             if abs(abs(si.imag) - w_nyq) <= w_tol:      # SELF-CONJUGATE Nyquist pole (finding Q-8)
@@ -350,17 +406,22 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                 amp = complex(Ri.real, 0.0)
             else:                                       # conjugate partner already counted
                 continue
-            modes.append((omega, gamma, amp))
+            modes.append((omega, gamma, amp, bool(dr)))
     else:
-        for si, Ri in zip(s, R):
-            modes.append((-si.imag, -2.0 * si.real, Ri))
+        for si, Ri, dr in zip(s, R, is_drift):
+            modes.append((-si.imag, -2.0 * si.real, Ri, bool(dr)))
 
     if not modes:
         return []
 
-    amax = max(abs(a) for _, _, a in modes)
+    amax = max(abs(m[2]) for m in modes)
     out: List[Mode] = []
-    for omega, gamma, amp in modes:
+    drift: List[Drift] = []
+    for omega, gamma, amp, dr in modes:
+        if dr:                                          # non-resonant drift: reported separately
+            drift.append(Drift(gamma_rad_s=float(gamma), omega_rad_s=float(abs(omega)),
+                               amplitude=complex(amp), threshold_rad_s=float(omega_res)))
+            continue
         if amax > 0.0 and abs(amp) < amp_floor * amax:
             continue                                    # residual/amplitude prune
         q = float(omega / gamma) if gamma != 0.0 else np.inf
@@ -368,6 +429,9 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
         out.append(Mode(omega_rad_s=float(omega), gamma_rad_s=float(gamma), q=q,
                         amplitude=complex(amp), snr_est=snr))
     out.sort(key=lambda m: abs(m.amplitude), reverse=True)
+    if drift_out is not None:
+        drift.sort(key=lambda d: abs(d.amplitude), reverse=True)
+        drift_out.extend(drift)
     return out
 
 
@@ -406,25 +470,49 @@ _FIT_AMP_SANITY = 20.0
 # A window must span a few amplitude e-foldings for gamma (hence Q) to be observable rather than
 # extrapolated; see fdtd_etalon_ringdown's SCOPE note.
 _MIN_WINDOW_NEPERS = 3.0
+# DEFAULT FIT LENGTH (2026-11-02, wave-6 H6b). fdtd_etalon_ringdown used to TRUNCATE the decimated
+# window at a fixed max_fit_samples = 1200, which at n_slab = 20 fit only the first 0.42 true
+# e-foldings of a 3176-sample window and returned Q = 252.8 against Fabry-Perot 439.5 (-44.5%).
+# The default is now the WHOLE data-driven window. This budget only keeps the O(N^3) pencil in
+# check on an unusually long record; measured on the n_slab = 20 trace (pencil + VARPRO, all
+# modes): 1200 samples 1.1 s, 3176 1.3 s, 4730 1.9 s, 6352 4.5 s, 7940 9.6 s, and the shipped
+# windows at 20 samples/period are 1845 / 2500 / 4838 / 4937 / 4891 / 3176 samples for
+# n_slab = 3.5 / 5 / 7 / 10 / 15 / 20 -- all under it, so it never binds on a shipped config.
+# Over budget the stride is COARSENED first (down to _MIN_SAMPLES_PER_PERIOD at the band centre),
+# which keeps the decay span -- the thing Q needs -- instead of cutting it: on the same traces
+# 8 samples/period over the whole window gave Q within 0.03-0.25 percentage points of 20
+# samples/period (n_slab 3.5/7/10/15/20: -1.25 / +1.13 / +0.74 / +0.66 / +0.69% vs FP, against
+# -1.01 / +1.09 / +0.70 / +0.63 / +0.63% at 20 samples/period). Only past that is the window
+# truncated (and the span guard says so).
+_FIT_SAMPLES_BUDGET = 6000
+_MIN_SAMPLES_PER_PERIOD = 8
+_LEGACY_FIT_SAMPLES = 1200                  # the start_frac (fixed-fraction window) path only
 
 
-def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode]) -> dict:
-    """ABSOLUTE goodness-of-fit of ``modes`` on the windowed trace ``y``: the reconstruction RMS
-    relative to the data's peak-to-peak, and the summed |amplitude| relative to the data's peak.
-    Both are scale-free and neither is a comparison against another (possibly equally bad) fit."""
+def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode], drift: Sequence[Drift] = ()) -> dict:
+    """ABSOLUTE goodness-of-fit of ``modes`` (+ the fit's non-resonant ``drift`` terms, which are
+    part of the model) on the windowed trace ``y``: the reconstruction RMS relative to the data's
+    peak-to-peak, and the summed |amplitude| relative to the data's peak. Both are scale-free and
+    neither is a comparison against another (possibly equally bad) fit."""
     y = np.asarray(y, dtype=np.float64)
     ptp = float(np.ptp(y))
     peak = float(np.max(np.abs(y))) if y.size else 0.0
-    rms = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, modes) - y) ** 2))) if modes \
-        else float(np.sqrt(np.mean(y ** 2)))
-    amp = float(sum(abs(m.amplitude) for m in modes))
+    if modes or drift:
+        rec = _real_reconstruction(y.size, dt, modes)
+        if drift:
+            rec = rec + _drift_reconstruction(y.size, dt, drift)
+        rms = float(np.sqrt(np.mean((rec - y) ** 2)))
+    else:
+        rms = float(np.sqrt(np.mean(y ** 2)))
+    amp = float(sum(abs(m.amplitude) for m in modes)) + float(sum(abs(d.amplitude) for d in drift))
     return {"rms": rms, "ptp": ptp, "peak": peak, "amp_sum": amp,
             "rms_rel": rms / ptp if ptp > 0.0 else float("inf"),
             "amp_rel": amp / peak if peak > 0.0 else float("inf")}
 
 
 def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
-                     max_refine: int = 6) -> tuple:
+                     max_refine: int = 6, fixed_extra: Sequence[Drift] = (),
+                     fixed_out: Optional[list] = None) -> tuple:
     """VARPRO refinement of pencil modes on a REAL trace: hold the mode COUNT fixed, optimize
     the nonlinear parameters (omega_k, gamma_k) by least squares with the linear (cos/sin)
     amplitudes solved exactly at each step. The pencil poles come out of an SVD subspace whose
@@ -449,6 +537,19 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
     or that sends a refined mode outside [0.5, 2] x its seed omega, to omega ~ 0, or to a
     non-positive/non-finite (omega, gamma) -- is REJECTED and the seed returned unchanged.
 
+    NONDIMENSIONAL PROBLEM (2026-11-02, the wave-1 Q-22 finding "the refinement is INERT").  The
+    optimizer works in SAMPLE time ``n = t / dt`` on the PEAK-NORMALIZED trace ``y / max|y|``, so
+    its unknowns are ``omega dt`` and ``gamma dt / 2`` (O(0.01..3) for any sampled ringdown) and
+    its residual is O(1).  The pre-fix SI parametrization (omega ~ 1e15, gamma/2 ~ 1e13 rad/s on
+    an optical trace, field amplitudes of whatever units the solver used) made the raw gradient
+    J^T r ~ 1e-15 -- under ``gtol = 1e-14`` before the first step -- so ``least_squares`` stopped
+    at nfev = 1 (status 1, dx = 0) on EVERY measured optical trace (FDTD n_slab 3.5/7/10 and the
+    synthetic ones): the documented refinement never moved a pole, and the platform-stability
+    claim above held only because the pencil itself happened to agree across builds.  Only the
+    LINEAR amplitudes were re-solved.  The scaled problem converges in ~4-10 evaluations; the
+    returned (omega, gamma, amplitude) are mapped back to SI exactly (divide by dt, multiply by
+    the peak), and every gate below runs in SI, unchanged.
+
     Modes are re-sorted by refined |amplitude|.  Returns ``(modes, note)`` where ``note`` is a
     short debug string ('' when the refinement was accepted).  Falls back to the input modes
     unchanged if scipy is unavailable or the fit fails."""
@@ -458,6 +559,10 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
         return seed, "no modes to refine"
     dt = float(dt)
     t = np.arange(y.size) * dt
+    n_t = np.arange(y.size, dtype=np.float64)           # SAMPLE time t / dt (nondimensional)
+    y_pk = float(np.max(np.abs(y))) if y.size else 0.0
+    y_pk = y_pk if (np.isfinite(y_pk) and y_pk > 0.0) else 1.0
+    y_n = y / y_pk                                      # peak-normalized data, O(1) residual
     is_osc = [bool(m.omega_rad_s * dt > _OMEGA_DC_TOL) for m in seed]
     # index-based split (finding Q-21: the old `m not in osc` used dataclass VALUE equality, so
     # two degenerate modes both landed in `osc` and `rest` silently lost one).
@@ -487,31 +592,47 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
         else:
             fixed_cols.append(e)                        # pure decay / DC-drift column
             fixed_map.append((i, 1))
+    # 2026-11-03: the pencil's non-resonant DRIFT terms (``fixed_extra``) are part of the model:
+    # FIXED columns (SIGNED rate -- a growing drift grows), amplitudes re-solved, never refined and
+    # never returned as modes (re-solved copies go to ``fixed_out``). Empty -> bit-identical.
+    for dft in fixed_extra:
+        e = np.exp(-0.5 * dft.gamma_rad_s * t)
+        if dft.omega_rad_s * dt > _OMEGA_DC_TOL:
+            fixed_cols.append(e * np.cos(dft.omega_rad_s * t))
+            fixed_cols.append(e * np.sin(dft.omega_rad_s * t))
+            fixed_map.append((dft, 2))
+        else:
+            fixed_cols.append(e)
+            fixed_map.append((dft, 1))
     F = (np.column_stack(fixed_cols) if fixed_cols
          else np.empty((y.size, 0), dtype=np.float64))
 
-    def _design(w, h):
+    def _design(wn, hn):
+        # wn = omega dt, hn = gamma dt / 2: the columns exp(-hn n) (cos, sin)(wn n) are the SI
+        # exp(-gamma t / 2) (cos, sin)(omega t) up to rounding of the product.
         cols = np.empty((y.size, 2 * K + F.shape[1]), dtype=np.float64)
         for k in range(K):
-            e = np.exp(-np.abs(h[k]) * t)
-            cols[:, 2 * k] = e * np.cos(w[k] * t)
-            cols[:, 2 * k + 1] = e * np.sin(w[k] * t)
+            e = np.exp(-np.abs(hn[k]) * n_t)
+            cols[:, 2 * k] = e * np.cos(wn[k] * n_t)
+            cols[:, 2 * k + 1] = e * np.sin(wn[k] * n_t)
         if F.shape[1]:
             cols[:, 2 * K:] = F
         return cols
 
     def _resid(p):
         A = _design(p[:K], p[K:])
-        c, *_ = np.linalg.lstsq(A, y, rcond=None)
-        return A @ c - y
+        c, *_ = np.linalg.lstsq(A, y_n, rcond=None)
+        return A @ c - y_n
 
     try:
-        sol = least_squares(_resid, np.concatenate([w0, h0]), x_scale="jac",
+        sol = least_squares(_resid, np.concatenate([w0 * dt, h0 * dt]), x_scale="jac",
                             ftol=1e-14, xtol=1e-14, gtol=1e-14, max_nfev=400)
-        w, h = sol.x[:K], np.abs(sol.x[K:])
-        A = _design(w, h)
-        c, *_ = np.linalg.lstsq(A, y, rcond=None)
-        rms = float(np.sqrt(np.mean((A @ c - y) ** 2)))
+        wn, hn = sol.x[:K], np.abs(sol.x[K:])
+        w, h = wn / dt, hn / dt                         # back to SI [rad/s]
+        A = _design(wn, hn)
+        c_n, *_ = np.linalg.lstsq(A, y_n, rcond=None)
+        c = c_n * y_pk                                  # amplitudes back in the data's units
+        rms = float(np.sqrt(np.mean((A @ c_n - y_n) ** 2))) * y_pk
     except Exception:                                   # pragma: no cover - defensive
         return seed, "least_squares failed: seed kept"
 
@@ -527,7 +648,10 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
             return seed, "refit left the seed omega basin (mode {}): seed kept".format(ref_idx[k])
 
     # --- the cross-cutting safety gate: never accept a refit worse than its own seed -------
-    rms_seed = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed) - y) ** 2)))
+    rec_seed = _real_reconstruction(y.size, dt, seed)
+    if fixed_extra:
+        rec_seed = rec_seed + _drift_reconstruction(y.size, dt, fixed_extra)
+    rms_seed = float(np.sqrt(np.mean((rec_seed - y) ** 2)))
     if not np.isfinite(rms) or rms > rms_seed:
         return seed, ("refined RMS {:.6e} > seed RMS {:.6e}: seed kept".format(rms, rms_seed))
 
@@ -541,25 +665,69 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
                         snr_est=float(abs(amp) / denom)))
     j = 2 * K
     for i, ncol in fixed_map:                           # seed (omega, gamma), re-solved amplitude
-        m = seed[i]
         amp = complex(c[j], c[j + 1]) if ncol == 2 else complex(c[j], 0.0)
         j += ncol
+        if isinstance(i, Drift):                        # a drift column: never a mode
+            if fixed_out is not None:
+                fixed_out.append(Drift(gamma_rad_s=i.gamma_rad_s, omega_rad_s=i.omega_rad_s,
+                                       amplitude=amp, threshold_rad_s=i.threshold_rad_s))
+            continue
+        m = seed[i]
         out.append(Mode(omega_rad_s=m.omega_rad_s, gamma_rad_s=m.gamma_rad_s, q=m.q,
                         amplitude=amp, snr_est=float(abs(amp) / denom)))
     out.sort(key=lambda m: abs(m.amplitude), reverse=True)
     return out, ""
 
 
-def ringdown_q(signal: Sequence[complex], dt: float, **kwargs) -> tuple:
+def _pencil_modes(signal, dt: float, *, refine: bool, max_refine: int, **pencil_kw) -> tuple:
+    """THE ringdown-mode extraction shared by ringdown_q and fdtd_etalon_ringdown (audit Q-22):
+    matrix_pencil, then -- on a REAL trace, when ``refine`` -- the VARPRO refinement
+    _nls_refine_real on the same samples the pencil fitted (after its ``t_start`` cut). Returns
+    ``(modes, note)``; ``note`` as in _nls_refine_real ('' when the refinement was accepted).
+    A COMPLEX trace has no real-trace refinement, so it returns the pencil modes with a note."""
+    drift: List[Drift] = []
+    modes = matrix_pencil(signal, dt, drift_out=drift, **pencil_kw)
+    if not (refine and modes):
+        return modes, "", drift
+    y = np.asarray(signal)
+    dt = float(dt)
+    t_start = float(pencil_kw.get("t_start", 0.0))
+    n0 = int(np.ceil(t_start / dt)) if t_start > 0.0 else 0     # matrix_pencil's own cut
+    y = y[max(0, min(n0, y.size - 1)):]
+    real_signal = pencil_kw.get("real_signal")
+    if real_signal is None:                             # matrix_pencil's own auto-detect
+        real_signal = not (np.iscomplexobj(y) and
+                           np.max(np.abs(y.imag)) > 1e-12 * (np.max(np.abs(y)) + 1e-300))
+    if not real_signal:
+        return modes, "complex trace: refinement not applicable, pencil modes returned", drift
+    drift_ref: List[Drift] = []
+    out, note = _nls_refine_real(np.real(y), dt, modes, max_refine=max_refine, fixed_extra=drift,
+                                 fixed_out=drift_ref)
+    return out, note, (drift_ref if drift_ref else drift)
+
+
+def ringdown_q(signal: Sequence[complex], dt: float, *, refine: bool = True,
+               max_refine: int = 6, **kwargs) -> tuple:
     """Convenience: dominant-mode (f0_Hz, Q) of a ringdown trace. Extra kwargs pass through to
     matrix_pencil. Raises ValueError if no mode is found.
+
+    "The ringdown Q" is ONE definition in this module (audit Q-22): matrix_pencil followed, on a
+    real trace, by the same VARPRO refinement and dominant-mode choice fdtd_etalon_ringdown applies
+    (both go through _pencil_modes). So ``ringdown_q(er.signal_used, er.dt_used, <the pencil
+    kwargs fdtd_etalon_ringdown used>, real_signal=True)`` returns exactly ``(er.f0_Hz, er.q)``.
+    Before 2026-11-02 this wrapper returned the RAW pencil dominant mode, and the two disagreed on
+    the same trace whenever the refinement's re-solved amplitudes re-ranked the modes -- measured
+    on two equal-amplitude modes (Q 40 and 25) plus 5% noise: Q = 24.85 here vs 40.18 there.
+    ``refine=False`` gives the raw pencil dominant mode (``matrix_pencil(...)[0]``).
 
     Inherits :func:`matrix_pencil`'s O(N^3)/O(N^2) cost in the RAW trace length and its
     ``max_bytes`` big-N guard (audit P-3): a multi-thousand-sample FDTD trace should be decimated
     (or handed to :func:`fdtd_etalon_ringdown`, which decimates for you) before it gets here."""
-    modes = matrix_pencil(signal, dt, **kwargs)
+    modes, _, drift = _pencil_modes(signal, dt, refine=refine, max_refine=max_refine, **kwargs)
     if not modes:
-        raise ValueError("matrix_pencil found no modes in the trace")
+        raise ValueError("matrix_pencil found no modes in the trace" + (
+            " (only {} non-resonant drift term(s) below the window's frequency resolution)".format(
+                len(drift)) if drift else ""))
     m = modes[0]                                        # already sorted dominant-first
     return m.f_hz, m.q
 
@@ -711,7 +879,8 @@ class EtalonRingdown:
     ``refine_note`` is a debug string: empty when the NLS (VARPRO) refinement was accepted, and
     otherwise the reason the PENCIL SEED was returned instead (finding Q-2's safety gate --
     e.g. "refined RMS ... > seed RMS ...").  It ALSO carries an ``UNRELIABLE FIT: ...`` prefix
-    (alongside a ``RuntimeWarning``) whenever the returned modes fail the ABSOLUTE goodness-of-fit
+    (alongside an ``UnreliableResultWarning``, a ``RuntimeWarning`` subclass) whenever the
+    returned modes fail the ABSOLUTE goodness-of-fit
     tells in ``_fit_quality`` -- the refinement gate is only RELATIVE to its own seed, so a
     source-contaminated window used to come back with an empty note and a 73-93%-wrong Q.
     ``window`` is the (i0, i1) sample window that was cut out of the raw FDTD trace."""
@@ -724,6 +893,7 @@ class EtalonRingdown:
     signal_used: np.ndarray
     refine_note: str = ""
     window: tuple = (0, 0)
+    drift: list = field(default_factory=list)       # non-resonant drift terms (Drift), 2026-11-03
 
 
 def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: float,
@@ -731,7 +901,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                          settle: float = 12.0, use: str = "reflected",
                          start_frac: Optional[float] = None,
                          target_samples_per_period: int = 20,
-                         max_fit_samples: int = 1200, pencil_frac: float = 0.4,
+                         max_fit_samples: Optional[int] = None, pencil_frac: float = 0.4,
                          svd_tol: float = 1e-6, max_modes: Optional[int] = None,
                          amp_floor: float = 5e-2, refine: bool = True,
                          max_refine: int = 6) -> EtalonRingdown:
@@ -757,7 +927,13 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                      begins at or before the envelope peak, and whatever it produces is scored by
                      the absolute fit-quality tells below.
       target_samples_per_period : decimation target (>= ~8 to stay above Nyquist).
-      max_fit_samples : cap on the number of decimated samples fed to the pencil (speed).
+      max_fit_samples : None (default) = fit the WHOLE data-driven window; only past the
+                     ``_FIT_SAMPLES_BUDGET`` (6000-sample) pencil budget is the stride coarsened
+                     (to >= 8 samples/period) and, failing that, the window cut. An int is a hard
+                     TRUNCATION of the decimated window (the pre-2026-11-02 default was 1200, which
+                     cut the n_slab = 20 fit to 0.42 true e-foldings: Q -44.5%) -- see below. On
+                     the legacy ``start_frac`` path None keeps that 1200 cut: that window has no
+                     data-driven end and would otherwise run into the float64 floor.
       refine       : NLS (VARPRO) refinement of the pencil modes on the windowed data
                      (default True) -- makes the reported (f0, Q) a platform-stable property
                      of the trace rather than of the LAPACK build (see _nls_refine_real).
@@ -770,7 +946,8 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
       the remaining kwargs pass through to matrix_pencil.
 
     OPERATING ENVELOPE (fix-verify W1 items 2 and 9). Two absolute checks run on the result and
-    each raises a ``RuntimeWarning`` AND annotates ``EtalonRingdown.refine_note``:
+    each raises an ``UnreliableResultWarning`` (a ``RuntimeWarning`` subclass) AND annotates
+    ``EtalonRingdown.refine_note``:
 
       * GOODNESS OF FIT -- ``_fit_quality``: reconstruction RMS vs the window's peak-to-peak, and
         summed |amplitude| vs the data peak. The refinement's own gate is RELATIVE (refit vs its
@@ -779,14 +956,19 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
         on the shipped n_slab = 3.5..15 etalons, versus 8.4e-3..1.4e-1 and 10..5.7e3 on windows
         that cut into the driven pulse.
       * WINDOW SPAN -- the fitted window should cover at least ~3 amplitude e-foldings of the
-        dominant mode. ``max_fit_samples = 1200`` at ``target_samples_per_period = 20`` is 60
-        carrier periods, i.e. only ``60 pi / Q`` nepers: 13.7 at n_slab = 3.5, 3.5 at 7, 1.7 at 10,
-        0.75 at 15. THAT is the shipped scope limit. It is a CONSERVATIVE flag -- on these clean
-        traces the extraction still holds to +0.7% at n_slab = 10 and 15 -- but n_slab = 20 is
-        where it breaks: Q = 169.9 against the Fabry-Perot 455.2 (-62.7%), and the RMS tell flags
-        that one too (3.7e-2). Raise ``max_fit_samples`` (and ``settle`` for the extra record) to
-        go higher; the pencil is O(N^3) in the fitted length, so this is a deliberate speed/range
-        trade, not a bound of the method.
+        dominant mode. Until 2026-11-02 the default ``max_fit_samples = 1200`` TRUNCATED the fit to
+        60 carrier periods at 20 samples/period, i.e. ``60 pi / Q`` nepers (13.9 at n_slab = 3.5,
+        3.5 at 7, 1.7 at 10, 0.75 at 15), and at n_slab = 20 that is where it broke: 0.42 TRUE
+        e-foldings, ~29 near-equal etalon modes unseparated, Q = 252.8 against the Fabry-Perot
+        455.2 (-44.5%), RMS tell 3.5e-2. Raising ``settle`` did NOT help at that cap (the window
+        starts later and the cut is the same length: settle 24 gave Q = 5408). The default now
+        fits the whole data-driven window (1845..4937 decimated samples on the shipped configs,
+        0.25-2.4 s of pencil next to a 3-53 s FDTD march), measured vs Fabry-Perot at n_slab
+        3.5/5/7/10/15/20: -1.01/+0.31/+1.09/+0.70/+0.63/+0.63%, spans 21.3/14.5/14.0/6.9/3.1/1.10
+        nepers. n_slab = 20 still WARNS (1.10 < 3): the window ends at the march's numeric floor
+        (settle 24 gives the same 3176-sample, 1.11-neper window and Q 441.29, so `settle` is not a
+        lever either), and the flag is CONSERVATIVE -- that Q is +0.6%. An explicit int
+        ``max_fit_samples`` that truncates the window says so in the warning.
     """
     from dynameta.optics.fdtd import solve_fdtd_1d, FDTDLayer
 
@@ -826,25 +1008,45 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                 "start_frac=None (the data-driven window, which starts {:.0f} dB below the peak) "
                 "or a start_frac above {:.3f}.".format(
                     start_frac, i0, i_pk, i_pk / float(N), 50.0, i_pk / float(N)),
-                RuntimeWarning, stacklevel=2)
+                UnreliableResultWarning, stacklevel=2)
     tail = sig_full[i0:i1]
 
     # decimate to ~target_samples_per_period at the band center (keeps the pencil small + fast)
     stride = max(1, int(round((1.0 / f_c) / (target_samples_per_period * dt))))
+    truncated = False
+    whole_window = max_fit_samples is None and start_frac is None
+    if whole_window:
+        # DEFAULT: fit the WHOLE data-driven window (see _FIT_SAMPLES_BUDGET). Over the pencil
+        # budget, coarsen the stride before cutting the window: Q lives in the decay SPAN, not in
+        # the samples per period.
+        n_cap = _FIT_SAMPLES_BUDGET
+        if -(-tail.size // stride) > n_cap:
+            stride_max = max(stride, int((1.0 / f_c) / (_MIN_SAMPLES_PER_PERIOD * dt)))
+            stride = min(stride_max, -(-tail.size // n_cap))
+    else:
+        # An explicit cap -- or the LEGACY start_frac path, whose window has no data-driven END
+        # (it runs to the end of the record, into the float64 floor), so it keeps its pre-2026-11-02
+        # 1200-sample cut and its numbers unchanged. (Uncut at start_frac = 0.2, n_slab = 3.5, it
+        # fits 4393 samples down into the floor: Q 13.2975 -> 13.2950 plus a GROWING-pole advisory.)
+        n_cap = _LEGACY_FIT_SAMPLES if max_fit_samples is None else int(max_fit_samples)
+        if n_cap < 16:
+            raise ValueError("fdtd_etalon_ringdown: max_fit_samples must be None (the whole "
+                             "data-driven window) or an int >= 16; got {!r}"
+                             .format(max_fit_samples))
     tail_d = tail[::stride]
-    if tail_d.size > max_fit_samples:
-        tail_d = tail_d[:max_fit_samples]
+    if tail_d.size > n_cap:
+        tail_d = tail_d[:n_cap]
+        truncated = True
     dt_d = dt * stride
     tail_d = tail_d - np.mean(tail_d)                   # remove any DC / slow ABC drift
 
-    modes = matrix_pencil(tail_d, dt_d, pencil_frac=pencil_frac, svd_tol=svd_tol,
-                          max_modes=max_modes, amp_floor=amp_floor, real_signal=True)
     # NLS (VARPRO) refinement: the pencil seed's dominant-mode Q is sensitive to the LAPACK
     # build at marginal model orders (two correct BLAS stacks straddled a 12% gate on the same
-    # trace); the refined optimum is a property of the data and platform-stable.
-    note = ""
-    if refine and modes:
-        modes, note = _nls_refine_real(tail_d, dt_d, modes, max_refine=max_refine)
+    # trace); the refined optimum is a property of the data and platform-stable. Pencil +
+    # refinement go through _pencil_modes, the SAME path ringdown_q uses (audit Q-22).
+    modes, note, drift = _pencil_modes(tail_d, dt_d, refine=refine, max_refine=max_refine,
+                                pencil_frac=pencil_frac, svd_tol=svd_tol, max_modes=max_modes,
+                                amp_floor=amp_floor, real_signal=True)
     t_used = np.arange(tail_d.size) * dt_d
     if modes:
         f0, q = modes[0].f_hz, modes[0].q
@@ -854,7 +1056,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     # ---- ABSOLUTE fit-quality tells (fix-verify W1 kill 2) ---------------------------------
     # _nls_refine_real only compares the refit against its own seed, so a window that is still
     # inside the driven pulse produced garbage from BOTH and reported refine_note = '' silently.
-    qual = _fit_quality(tail_d, dt_d, modes)
+    qual = _fit_quality(tail_d, dt_d, modes, drift)
     bad = []
     if not np.isfinite(qual["rms_rel"]) or qual["rms_rel"] > _FIT_RESID_TOL:
         bad.append("reconstruction RMS is {:.3e} of the window's peak-to-peak (limit {:.1e})"
@@ -869,27 +1071,40 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
                  "or too short; (f0, Q) = ({:.4e} Hz, {:.4f}) is not trustworthy. Use "
                  "start_frac=None for the data-driven window.".format(f0, q))
         note = (note + " | " if note else "") + "UNRELIABLE FIT: " + "; ".join(bad)
-        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        warnings.warn(msg, UnreliableResultWarning, stacklevel=2)
 
     # ---- window-span scope guard (fix-verify W1 item 9) ------------------------------------
     if modes and np.isfinite(q) and t_used.size > 1:
         nepers = 0.5 * modes[0].gamma_rad_s * float(t_used[-1])     # FIELD e-foldings spanned
         if nepers < _MIN_WINDOW_NEPERS:
+            if truncated and whole_window:
+                why = ("The whole data-driven window ({} samples at {} samples/period) exceeds the "
+                       "{}-sample pencil budget even at the coarsest stride, so the fit was cut "
+                       "to its first {}. Pass an explicit larger max_fit_samples (the pencil is "
+                       "O(N^3) in it) or shorten the record.".format(
+                           -(-tail.size // stride), _MIN_SAMPLES_PER_PERIOD,
+                           _FIT_SAMPLES_BUDGET, n_cap))
+            elif truncated:
+                why = ("The fit was TRUNCATED to max_fit_samples = {} decimated samples of the {} "
+                       "the window holds -- that cap, not the record, limits the span (at "
+                       "n_slab = 20 the old default cap 1200 gave Q = 252.8 vs Fabry-Perot 455.2, "
+                       "-44.5%). Pass max_fit_samples=None with start_frac=None to fit the whole "
+                       "data-driven window.".format(n_cap, -(-tail.size // stride)))
+            else:
+                why = ("This is the WHOLE data-driven window ({} decimated samples at stride {}), "
+                       "which ends where the envelope reaches the march's numeric floor: neither "
+                       "max_fit_samples nor a longer record lengthens it (measured at n_slab = 20: "
+                       "settle 24 gave the same 3176-sample, 1.11-neper window, Q 441.29). It is a "
+                       "CONSERVATIVE flag -- that whole-window fit at n_slab = 20 (1.10 nepers) "
+                       "measured Q = 442.24 vs Fabry-Perot 439.46 (+0.6%).".format(
+                           tail_d.size, stride))
             warnings.warn(
                 "fdtd_etalon_ringdown: the fitted window spans only {:.2f} amplitude e-foldings "
                 "(nepers) of the dominant mode, under the ~{:g} below which the decay rate -- "
                 "hence Q = {:.4g} -- is weakly constrained (the fit interpolates a decay it barely "
-                "sees). The span is {} decimated samples at {} samples/period, i.e. pi * "
-                "n_periods / Q nepers, so it shrinks as 1/Q: this is the max_fit_samples cap "
-                "meeting a high-Q cavity, NOT a limit of the method. Raise max_fit_samples (and "
-                "`settle` for the extra record) or lower target_samples_per_period. This is a "
-                "CONSERVATIVE flag -- on clean traces the extraction held to +0.7% at n_slab = 10 "
-                "(1.7 nepers) and 15 (0.75) -- but it is where it breaks: n_slab = 20 returns "
-                "Q = 169.9 against a Fabry-Perot 455.2 (-62.7%).".format(
-                    nepers, _MIN_WINDOW_NEPERS, q, int(min(max_fit_samples, tail_d.size)),
-                    int(target_samples_per_period)),
-                RuntimeWarning, stacklevel=2)
+                "sees). {}".format(nepers, _MIN_WINDOW_NEPERS, q, why),
+                UnreliableResultWarning, stacklevel=2)
 
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
                           t_used=t_used, signal_used=tail_d, refine_note=note,
-                          window=(int(i0), int(i1)))
+                          window=(int(i0), int(i1)), drift=list(drift))

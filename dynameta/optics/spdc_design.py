@@ -71,7 +71,9 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 
 from dynameta.constants import C_LIGHT, EPS0
+from dynameta.core.numerics import trapz as _trapz1, trapz_axis as _trapz_axis
 from dynameta.optics.twm_reference import phase_matching_sinc
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "pair_rate_from_sfg",
@@ -87,8 +89,11 @@ __all__ = [
 # equal 1/(2 pi) times the classical per-photon DFG/SFG efficiency (temporal-mode density).
 HELT_SIPE_PREFACTOR = 1.0 / (2.0 * math.pi)
 
-# numpy >=2.0 renamed trapz -> trapezoid; support both.
-_trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
+# The library's ONE floor-safe trapezoid is core.numerics (audit Q-19, 2026-11-02): this module used
+# to carry a third private `getattr(np, "trapezoid", np.trapz)` shim; the 2-D marginals use the
+# axis form `trapz_axis` (bit-identical to np.trapezoid(..., axis=)).  `_trapz` stays as an alias of
+# it (same call signature as the old shim, 1-D or axis=) for code that imported the private name.
+_trapz = _trapz_axis
 
 
 def _pump_amp_sq(pump_power_W: float, area_m2: float, n_p: float) -> float:
@@ -151,7 +156,7 @@ def pair_rate_from_sfg(omega_s_grid: np.ndarray, omega_p: float, d_eff: float, l
     G = kappa_s * kappa_i * Ap2 * length_m ** 2 * np.abs(phi) ** 2
 
     spectral = HELT_SIPE_PREFACTOR * G
-    R = float(_trapz(spectral, omega_s)) if omega_s.size > 1 else float(spectral[0])
+    R = _trapz1(spectral, omega_s) if omega_s.size > 1 else float(spectral[0])
     return {
         "spectral_density": spectral,           # dR/domega_s  (dimensionless)
         "rate_pairs_per_s": R,
@@ -270,17 +275,23 @@ def _fwhm_resolved(x: np.ndarray, y: np.ndarray) -> Tuple[float, bool]:
         return 0.0, False
     lo, hi = idx[0], idx[-1]
 
-    def _cross(i0, i1):
+    # The crossings are interpolated as OFFSETS from the bracketing sample (x[lo] / x[hi]) and only
+    # then added to the exact span x[hi] - x[lo] (wave-7, 2026-11-02). The old form interpolated in
+    # ABSOLUTE coordinates, so on a carrier-scale axis (omega ~ 1.2e15 rad/s, ulp 0.25 rad/s) each
+    # crossing was rounded to the carrier's ulp before the subtraction: a Gaussian whose sampled
+    # FWHM is 1.19 rad/s came back as exactly 1.0. Differences of neighbouring samples are exact
+    # (Sterbenz), so the offset form carries no carrier-scale rounding at all.
+    def _cross_off(i0, i1, ref):
         if i0 == i1:
-            return x[i0]
-        x0, x1, y0, y1 = x[i0], x[i1], y[i0], y[i1]
+            return 0.0
+        x0, x1, y0, y1 = x[i0] - x[ref], x[i1] - x[ref], y[i0], y[i1]
         if y1 == y0:
             return x0
         return x0 + (half - y0) * (x1 - x0) / (y1 - y0)
 
-    xl = _cross(lo - 1, lo) if lo > 0 else x[lo]
-    xr = _cross(hi, hi + 1) if hi < x.size - 1 else x[hi]
-    return abs(xr - xl), bool(lo > 0 and hi < x.size - 1)
+    dl = _cross_off(lo - 1, lo, lo) if lo > 0 else 0.0
+    dr = _cross_off(hi, hi + 1, hi) if hi < x.size - 1 else 0.0
+    return abs((x[hi] - x[lo]) + (dr - dl)), bool(lo > 0 and hi < x.size - 1)
 
 
 def _fwhm(x: np.ndarray, y: np.ndarray) -> float:
@@ -533,8 +544,14 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
 
     The guard is applied to BOTH rotated widths when EITHER axis trips: the two marginals come
     from one cell partition and one window, so the defect is a property of the grid, not of a
-    leg. The signal / idler marginals are unaffected -- they are ordinary trapezoid integrals on
-    the supplied axes and were never the subject of Q-13.
+    leg. The signal / idler marginals do not use the rotated binning -- they are ordinary
+    trapezoid integrals on the supplied axes -- so this guard does not touch them. They are NOT
+    immune to the bin-collapse cause, though (wave-7, 2026-11-02; the docstring used to call them
+    "unaffected"): the example above rounds 100 / 400 / 801 requested frequencies onto 21
+    distinct float64 values per AXIS, and a Gaussian of signal FWHM 1.1774 was reported as
+    1.0848 / 1.0 / 1.0 with ``signal_bandwidth_resolved`` True. A supplied axis with repeated
+    values is therefore refused on its own (signal / idler width nan + an
+    ``UnreliableResultWarning`` + ``*_resolved`` False); pass axes as offsets from the carrier.
 
     THIS IS A NECESSARY SCREEN, NOT AN ACCURACY CERTIFICATE, and the table above already shows
     both leaks. It is calibrated on ONE measured failure class -- the non-convergent error of
@@ -563,8 +580,8 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
     ws = np.asarray(omega_s_grid, dtype=float)
     wi = np.asarray(omega_i_grid, dtype=float)
     P = jsi(jsa_matrix)
-    sig = _trapz(P, wi, axis=1)
-    idl = _trapz(P, ws, axis=0)
+    sig = _trapz_axis(P, wi, axis=1)
+    idl = _trapz_axis(P, ws, axis=0)
     WS, WI = np.meshgrid(ws, wi, indexing="ij")
     U, V = WS + WI, WS - WI
 
@@ -598,8 +615,34 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
         "phase_matching_bandwidth": _fwhm_resolved(v_ax, v_marg),
     }
     _ROTATED = ("pump_bandwidth", "phase_matching_bandwidth")
+    # AXIS-COLLAPSE GUARD for the signal / idler widths (wave-7, 2026-11-02). The docstring used to
+    # promise they were "unaffected" by the grid defects above; on its OWN bin-collapse example
+    # (a 5 rad/s span on a 1.2e15 rad/s carrier) the 100 / 400 / 801 requested frequencies round
+    # to 21 distinct float64 values, and a separable Gaussian whose signal FWHM is 1.1774 came
+    # back as 1.0848 / 1.0 / 1.0 (-8 % to -15 %) with signal_bandwidth_resolved True. The axis
+    # no longer holds the frequencies the JSA was sampled at, so no quadrature on it is the
+    # marginal: a supplied axis with REPEATED values is refused exactly like a collapsed rotated
+    # coordinate (nan + UnreliableResultWarning + resolved False).
+    n_s_distinct, n_i_distinct = np.unique(ws).size, np.unique(wi).size
+    axis_collapsed = {"signal_bandwidth": (n_s_distinct < ws.size, n_s_distinct, ws.size),
+                      "idler_bandwidth": (n_i_distinct < wi.size, n_i_distinct, wi.size)}
     out = {}
     for key, (val, resolved) in widths.items():
+        if key in axis_collapsed and axis_collapsed[key][0]:
+            resolved = False
+            _, n_d, n_req = axis_collapsed[key]
+            warnings.warn(
+                "heralded_bandwidths: '{}' is NOT trustworthy -- its frequency axis holds only {} "
+                "distinct float64 values of the {} supplied (the grid spacing is below the "
+                "floating-point resolution of the carrier), so the axis no longer carries the "
+                "frequencies the JSA was sampled at and its marginal is a staircase. Returning nan "
+                "(the collapsed-axis number was {:.6g}). Pass the axes as OFFSETS from the carrier "
+                "(omega - omega_0), which float64 resolves, or widen the span.".format(
+                    key, n_d, n_req, val),
+                UnreliableResultWarning, stacklevel=2)
+            out[key] = float("nan")
+            out[key + "_resolved"] = False
+            continue
         # The grid defect is reported FIRST when both apply: an unresolved window is a statement
         # about how far the profile was sampled, but a non-constant quadrature measure means the
         # profile itself is not the marginal, which is the more fundamental cause to act on.
@@ -617,11 +660,12 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
                 "error that does NOT shrink under refinement; the second means the rotated "
                 "coordinate has aliased onto a handful of values and the profile is not the "
                 "physics at all. Returning nan (the window-limited number was {:.6g}). Resample "
-                "the JSA onto uniform omega_s / omega_i axes; the signal / idler widths are "
-                "unaffected. See audit Q-13.".format(
+                "the JSA onto uniform omega_s / omega_i axes; the signal / idler widths do not "
+                "use the rotated binning and are screened separately (axis collapse). See audit "
+                "Q-13.".format(
                     key, measure_ratio, _ROTATED_MEASURE_MAX_RATIO, bin_fraction,
                     _ROTATED_MIN_BIN_FRACTION, val),
-                RuntimeWarning, stacklevel=2)
+                UnreliableResultWarning, stacklevel=2)
         elif not resolved:
             warnings.warn(
                 "heralded_bandwidths: '{}' is NOT resolved by this grid -- the marginal is still "
@@ -629,7 +673,7 @@ def heralded_bandwidths(jsa_matrix: np.ndarray, omega_s_grid: np.ndarray,
                 "a property of the window ({:.6g} wide), not of the pair. Returning nan. Widen "
                 "the omega grids (or, for the rotated widths, make them span enough that the "
                 "joint spectrum decays inside the inscribed window). See audit "
-                "Q-13.".format(key, val), RuntimeWarning, stacklevel=2)
+                "Q-13.".format(key, val), UnreliableResultWarning, stacklevel=2)
         out[key] = float(val) if resolved else float("nan")
         out[key + "_resolved"] = resolved
     # Historical aliases: the rotated widths under their geometric names.

@@ -21,7 +21,7 @@ call changed by a bit -- `'s'`/`'p'` never touch the guard. The geometry-DEPENDE
 (OpticalSpec's lab `'x'`/`'y'`, the integer `row`) are still REFUSED: convert those YOURSELF with
 `normalize_pol`, which demands the azimuth and refuses rather than guess. This file also consumes OpticalSpec's lab
 {'x','y','p'} (TmmLayeredSolver / _pol_for); _pol_for's 'x' -> 's' leg is the NORMAL-INCIDENCE
-branch only (sibling finding Q-24).
+branch only, and it raises off normal (sibling finding Q-24, enforced 2026-11-02).
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from dynameta.core.units import NM_PER_M
+from dynameta.geometry.guards import require_supported_geometry
 
 S = NM_PER_M   # m -> nm (tmm's d_list uses the same unit as the wavelength); single source
 
@@ -135,6 +136,8 @@ def design_layer_stack(design, lambda_m: float) -> Tuple[complex, List[Tuple[com
     both orderings, only R and T are wrong. This helper was the last unreversed member of
     the C5-1 flip family; the 2026-07-17 sweep missed it because it checked the CONSUMERS
     of tmm_reference and never the extractor inside it)."""
+    # 2026-11-02: a Stack.features via ran here and returned the via-free stack (measured bit-identical)
+    require_supported_geometry(design, "design_layer_stack (TMM)")
     layers = []
     for L in reversed(design.stack.layers):          # superstrate side first (audit C5-1/V-1)
         if L.inclusions:
@@ -183,12 +186,25 @@ def _pol_for(optical) -> str:
     AUDIT V-8/Q-24: the 'x' -> 's' leg is the NORMAL-INCIDENCE branch only -- E along lab x is
     not transverse to an oblique x-z wavevector, which is why ``OpticalSpec`` rejects 'x' at
     theta != 0 and why ``core.polarization.normalize_pol('x', 'lab_xyp', to='sp', ...)`` demands
-    ``theta_deg`` and refuses off normal.  This helper is fed OpticalSpec-validated values, so it
-    keeps the cheap mapping and only VALIDATES the vocabulary (a label from the {'s','p'} or
-    {'te','tm'} family used to be mapped to 's' silently)."""
+    ``theta_deg`` and refuses off normal.  This helper VALIDATES the vocabulary (a label from the
+    {'s','p'} or {'te','tm'} family used to be mapped to 's' silently) and -- audit Q-24,
+    2026-11-02 -- now ENFORCES the normal-incidence branch too: ``TmmLayeredSolver.solve``
+    duck-types its ``optical`` argument, so an object that is not a validated OpticalSpec could
+    reach it with ``'x'`` at oblique incidence and get the s-pol answer silently (measured on a
+    vacuum/glass (n = 1.5) interface at 40 deg: R_s = 0.0772 returned, where R_p = 0.0143).  It raises
+    instead, as OpticalSpec and ``normalize_pol`` do."""
     p = getattr(optical, "polarization", "y")
     if p not in ("x", "y", "p"):
         _reject_pol(p, "_pol_for", vocabulary="lab_xyp", param="OpticalSpec.polarization")
+    if p == "x":
+        theta = float(getattr(optical, "incidence_angle_deg", 0.0) or 0.0)
+        if theta != 0.0:
+            raise ValueError(
+                "_pol_for: OpticalSpec.polarization='x' at incidence_angle_deg={!r} has no s/p "
+                "image -- E along lab x is not transverse to an oblique x-z wavevector (audit "
+                "Q-24; OpticalSpec refuses it, and so does core.polarization.normalize_pol). The "
+                "'x' -> 's' mapping holds at normal incidence only; use 'y' (s) or 'p' (p)."
+                .format(theta))
     return "p" if p == "p" else "s"
 
 
@@ -264,9 +280,17 @@ class TmmLayeredSolver:
         r, t = complex(res["r"]), complex(res["t"])
         R, T = float(res["R"]), float(res["T"])
         A = _check_energy_budget(R, T, where="TmmLayeredSolver")
+        # audit S5-21 (wave-7, 2026-11-02): A_independent used to be left None while the per-slab
+        # map was filled, breaking the OpticalResult contract sum(per_region_absorption) ==
+        # A_independent that every other producer (FEM, the Berreman/RCWA/PMM/BOR bridges) honours.
+        # The per-slab entries are tmm's in-layer Poynting-flux differences (absorp_in_each_layer),
+        # NOT the 1 - R - T closure, so their sum is a genuine second measure of A -- exactly the
+        # role A_independent plays elsewhere (measured |A - A_independent| ~1e-16 on lossy stacks).
+        pra = _per_layer_absorption(res)
         return OpticalResult(r=r, R=R, phase_deg=float(np.degrees(np.angle(r))),
                              solve_time_s=0.0, t=t, T=T, A=A,
-                             per_region_absorption=_per_layer_absorption(res))
+                             A_independent=float(sum(pra.values())),
+                             per_region_absorption=pra)
 
 
 def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=None,
@@ -281,6 +305,9 @@ def layered_stack_from_design(design, lambda_m, *, eps_by_region=None, n_slices=
     extractor). Slabs are ordered superstrate-side first (the Stack lists bottom->top, so
     reversed)."""
     from dynameta.core.layered import LayeredStack, LayeredSlab, slice_eps_field
+    # 2026-11-02: Stack.features were silently dropped here (make_layered_tmm_solver's R/T with a
+    # metal via was bit-identical to the via-free stack); tapers are inclusions, refused below anyway
+    require_supported_geometry(design, "layered_stack_from_design (TMM)")
     slabs_top_down = []
     names_top_down = []                              # design layer name per slab (audit C5-4)
     for L in reversed(design.stack.layers):          # superstrate side first

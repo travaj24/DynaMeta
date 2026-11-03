@@ -63,6 +63,9 @@ def test_fatigue_split_and_guards():
     assert np.isinf(coffin_manson_nf(0.0))
     assert cycles_to_failure(ito, 2.6e-6, 600.0) == 0.0                 # brittle over-stress
     assert 0.0 < cycles_to_failure(cu, 2.6e-6, 600.0) < np.inf          # ductile finite
+    # audit R-23: a COOLING excursion cycles the same strain range (it used to raise)
+    assert cycles_to_failure(cu, 2.6e-6, -600.0) == cycles_to_failure(cu, 2.6e-6, 600.0)
+    assert cycles_to_failure(ito, 2.6e-6, -600.0) == 0.0
     assert float(brittle_survival(0.0, sigma0_Pa=1e9, m_weibull=8.0)) == 1.0
     assert norris_landzberg_af(f_use_Hz=1e-4, f_test_Hz=1e-4, dT_use_K=50.0, dT_test_K=50.0,
                                Tmax_use_K=358.0, Tmax_test_K=358.0) == pytest.approx(1.0)

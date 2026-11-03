@@ -53,7 +53,8 @@ from dynameta.constants import H_PLANCK
 
 __all__ = ["inversion_factor_nsp", "inversion_factor_nsp_eh", "single_pass_gain",
            "ase_output_psd", "noise_figure", "detector_noise_variances",
-           "spectral_noise_figure", "ase_spectrum_bidirectional", "ase_self_consistent"]
+           "spectral_noise_figure", "ase_spectrum_bidirectional", "ase_self_consistent",
+           "ase_self_consistent_zresolved"]   # audit V-21 (already on the soa facade)
 
 
 def inversion_factor_nsp(rho_GS):
@@ -141,8 +142,20 @@ def noise_figure(G, n_sp, *, Gamma_g_per_m=None, alpha_i_per_m=0.0, eta_in=1.0):
     """Amplifier noise figure (linear, not dB). G the net power gain, n_sp the inversion
     factor. The internal-loss factor (Gamma g)/(Gamma g - alpha_i) and the input-coupling
     efficiency eta_in degrade the ideal high-gain 2 n_sp; with alpha_i = 0 and eta_in = 1,
-    NF = 2 n_sp (G-1)/G + 1/G -> 2 n_sp at high gain (3 dB at full inversion, n_sp = 1)."""
+    NF = 2 n_sp (G-1)/G + 1/G -> 2 n_sp at high gain (3 dB at full inversion, n_sp = 1).
+
+    alpha_i_per_m > 0 REQUIRES Gamma_g_per_m (the modal gain the loss factor is relative to):
+    audit S3-28 (wave-7, 2026-11-02) -- with Gamma_g_per_m=None the loss was silently dropped and
+    the lossless NF returned (e.g. G = 100, n_sp = 1.5, alpha_i = 60/m against a true Gamma g =
+    300/m: 4.74 dB reported vs the 5.71 dB the distributed-loss ASE actually gives). It now raises
+    ValueError instead of answering a different question; alpha_i_per_m < 0 also raises."""
     from dynameta.optics.amp_noise import nf_from_nsp
+    if alpha_i_per_m < 0.0:
+        raise ValueError("noise_figure: alpha_i_per_m must be >= 0")
+    if alpha_i_per_m > 0.0 and Gamma_g_per_m is None:
+        raise ValueError("noise_figure: alpha_i_per_m > 0 needs Gamma_g_per_m (the modal gain Gamma g "
+                         "[1/m]) -- the internal-loss factor Gamma g/(Gamma g - alpha_i) cannot be "
+                         "formed without it (audit S3-28: it used to be silently dropped)")
     loss = 1.0
     if Gamma_g_per_m is not None and alpha_i_per_m > 0.0:
         if Gamma_g_per_m <= alpha_i_per_m:
@@ -199,15 +212,22 @@ def ase_spectrum_bidirectional(g_slices_nu, gsp_slices_nu, dz_m, nu_grid_Hz, dnu
         dS/dz = +(Gamma g - alpha_i) S + Gamma g_sp h nu   forward  (BC S_f(.,0)=0, sweep 0..N-1)
         dS/dz = -(Gamma g - alpha_i) S - Gamma g_sp h nu   backward (BC S_b(.,L)=0, sweep N-1..0).
     No gain clamping (ASE-induced saturation lives in ase_self_consistent). m_pol is applied ONCE,
-    to the *_out / *_mean accumulators only. Returns a dict: S_f, S_b (per-pol, K) at the output /
-    input facet; S_f_out, S_b_out = m_pol * those; S_f_mean, S_b_mean (per-pol z-averaged PSD, for
-    the lumped self-consistency); G, Gg (net / gain-only single-pass gain per nu); NF (spectral
-    noise figure, forward); nu, dnu. Unlike ase_output_psd it correctly emits at sub-transparency
+    to the *_out facet totals ONLY; every other PSD stays PER-POLARIZATION. Returns a dict: S_f, S_b
+    (per-pol, K) at the output / input facet; S_f_out, S_b_out = m_pol * those (the collected total);
+    S_f_mean, S_b_mean (PER-POL z-averaged PSD -- NOT scaled by m_pol: their consumer
+    ase_self_consistent applies m_pol itself when it converts them to the confined ASE photon
+    density, so scaling here would double-count it); S_f_z, S_b_z (per-pol profiles, with
+    return_profile); G, Gg (net / gain-only single-pass gain per nu); NF (spectral noise figure,
+    forward); nu, dnu. (Audit S3-26, wave-7 2026-11-02: this docstring used to say m_pol was
+    applied "to the *_out / *_mean accumulators"; the CODE was right -- per-pol means, as the
+    consumer requires -- and the doc is now corrected and pinned by a test.) Unlike ase_output_psd it correctly emits at sub-transparency
     slices (g_sp > 0 there); the two agree exactly for an above-transparency profile."""
     g = np.atleast_2d(np.asarray(g_slices_nu, dtype=np.float64))
     gsp = np.atleast_2d(np.asarray(gsp_slices_nu, dtype=np.float64))
-    if g.shape[0] == 1 and g.shape[1] != 1 and gsp.shape == g.shape:
-        pass                                                 # (1,K) is a single slice, K bands
+    # Shapes: atleast_2d makes a (K,) input ONE slice of K bands, (1, K), which is already the
+    # (N_slices, K) layout; an (N,) profile for a single band (K = 1) arrives as (1, N) and is
+    # re-laid as (N, 1) by the reshape below. (Audit A-19: a dead `if ...: pass` stood here whose
+    # comment described the first case as if the branch handled it; nothing needs handling.)
     nu = np.atleast_1d(np.asarray(nu_grid_Hz, dtype=np.float64))
     dnu = np.atleast_1d(np.asarray(dnu_grid_Hz, dtype=np.float64))
     if g.shape[1] != nu.size:                                # accept (N,) for K=1 column form

@@ -39,11 +39,15 @@ def _rows():
 @pytest.mark.parametrize("fmt", _FORMATS)
 def test_store_roundtrip(fmt, tmp_path):
     p = str(tmp_path / ("s" + _EXT[fmt]))
-    arrays = {"R": np.random.rand(2, 4), "wl": np.linspace(1.4, 1.7, 4)}
+    # audit T-22: seeded (the suite's only unseeded RNG), and the round trip is pinned BIT-EXACT with
+    # the dtype: np.allclose (rtol 1e-5) passed a float32 downcast of the payload (rel error ~6e-8).
+    arrays = {"R": np.random.default_rng(20261102).random((2, 4)), "wl": np.linspace(1.4, 1.7, 4)}
     attrs = {"bias": ["off", "on"], "n": 2, "x": 3.14}
     save_arrays(p, arrays, attrs, fmt=fmt)
     a, m = load_arrays(p, fmt=fmt)
-    assert np.allclose(a["R"], arrays["R"]) and np.allclose(a["wl"], arrays["wl"])
+    for k in ("R", "wl"):
+        got = np.asarray(a[k])
+        assert got.dtype == arrays[k].dtype and np.array_equal(got, arrays[k]), k
     assert m["bias"] == ["off", "on"] and m["n"] == 2 and abs(m["x"] - 3.14) < 1e-9
 
 
@@ -64,6 +68,26 @@ def test_sweepresults_save_load(fmt, tmp_path):
     assert sr2.bias_labels == ["off", "on"]
     assert np.allclose(sr.R, sr2.R) and np.allclose(sr.T, sr2.T)
     assert np.allclose(sr.r, sr2.r) and np.allclose(sr.t, sr2.t)      # complex preserved
+
+
+@pytest.mark.parametrize("fmt", _FORMATS)
+def test_r22_sweepresults_load_checks_the_schema_it_stamps(fmt, tmp_path):
+    """audit R-22: save stamps attrs['schema'] but load never read it -- a store with a different
+    (future) schema or none at all was pivoted silently as schema 1. It must raise."""
+    sr = SweepResults.from_rows(_rows())
+    p = str(tmp_path / ("sweep" + _EXT[fmt]))
+    sr.save(p, fmt=fmt)
+    arrays, attrs = load_arrays(p, fmt=fmt)
+    for bad in (2, None):
+        q = str(tmp_path / ("bad{}{}".format(bad, _EXT[fmt])))
+        a2 = dict(attrs)
+        if bad is None:
+            a2.pop("schema")
+        else:
+            a2["schema"] = bad
+        save_arrays(q, arrays, a2, fmt=fmt)
+        with pytest.raises(ValueError, match="schema"):
+            SweepResults.load(q, fmt=fmt)
 
 
 def _design():

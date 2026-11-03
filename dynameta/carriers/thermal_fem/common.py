@@ -17,6 +17,7 @@ working. Do not add a call site on an underscored alias.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -28,6 +29,7 @@ import ngsolve as ng
 # a second home for the same float). Import them; do not re-bind them here.
 from dynameta.carriers.fem_mesh import MESH_SCALE      # noqa: F401 -- pass-through re-export: the
 from dynameta.carriers.fem_mesh import _S, build_layered_box_mesh   # package facade exports it
+from dynameta.warning_types import DynaMetaDeprecationWarning
 
 
 @dataclass
@@ -48,11 +50,34 @@ class ThermalLayerTwoTemp(ThermalLayer):
     rho_kg_m3 / Cp_J_kgK; the ELECTRON channel adds a volumetric heat capacity C_e_J_m3K [J/(m^3 K)]
     (volumetric because the degenerate-gas C_e = gamma_e*T_e is naturally volumetric -- the SAME
     convention as carrier_heating.TwoTempParams, the lumped reference), the electron-phonon coupling
-    G_e_l [W/(m^3 K)], and an optional electron conductivity k_electron (None -> k_thermal).
-    G_e_l = 0 decouples the fields (each evolves as an independent single-T problem)."""
+    G_e_l [W/(m^3 K)], and the electron conductivity k_electron [W/(m K)].
+    G_e_l = 0 decouples the fields (each evolves as an independent single-T problem).
+
+    k_electron: PASS IT (audit S1-11, 2026-07-17; fixed wave-7 2026-11-02). The two channels conduct
+    IN PARALLEL -- the G -> infinity limit is the single-T solve with k = k_e + k_l -- so the old
+    silent default k_electron=None -> k_e = k_thermal (the LATTICE value) doubled the stack's
+    conductivity in that limit (k = 2 k_thermal; measured on a 200 nm layer, k_thermal = 1, 1e8
+    W/m^2 top flux, G = 1e20: steady mean rise 5.00 K two-temp vs 10.0 K single-T -- exactly half)
+    with nothing to say a choice had been made. There is no physically neutral default (in a metal
+    the electrons carry most of the heat; in a dielectric k_e ~ 0), so k_electron=None now emits a
+    DynaMetaDeprecationWarning at construction; the legacy value is unchanged, so existing results
+    are byte-identical. Every in-repo caller already passed it explicitly. A provided k_electron
+    must be finite and >= 0 (0 = a non-conducting electron gas)."""
     G_e_l: float = 0.0           # electron-phonon coupling [W/(m^3 K)]
     C_e_J_m3K: float = 0.0       # volumetric electron heat capacity [J/(m^3 K)] (required > 0)
-    k_electron: Optional[float] = None   # electron thermal conductivity [W/(m K)]; None -> k_thermal
+    k_electron: Optional[float] = None   # electron thermal conductivity [W/(m K)] -- pass it (S1-11)
+
+    def __post_init__(self):
+        if self.k_electron is None:
+            warnings.warn(
+                "ThermalLayerTwoTemp('{}'): k_electron=None defaults the ELECTRON conductivity to the "
+                "LATTICE k_thermal={} W/(m K), so the two parallel channels conduct 2*k_thermal in the "
+                "strong-coupling limit. This implicit default is deprecated (audit S1-11): pass "
+                "k_electron explicitly.".format(self.name, self.k_thermal),
+                DynaMetaDeprecationWarning, stacklevel=3)
+        elif not (np.isfinite(float(self.k_electron)) and float(self.k_electron) >= 0.0):
+            raise ValueError("ThermalLayerTwoTemp('{}'): k_electron must be finite and >= 0 W/(m K), "
+                             "got {!r} (audit S1-11)".format(self.name, self.k_electron))
 
     def k_e(self) -> float:
         return self.k_thermal if self.k_electron is None else float(self.k_electron)
@@ -115,8 +140,23 @@ def _per_material_cf(mesh, by_name: Dict[str, float], what: str):
 def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3,
                         maxh_m, order) -> Tuple:
     """Build the shared mesh + H1 space + stiffness BilinearForm a + load LinearForm f (UNASSEMBLED)
-    used by BOTH the steady and transient solvers. Returns (mesh, fes, u, v, a, f, k_cf). Factoring
-    this out keeps solve_thermal_fem byte-identical -- it assembles the same a, f it always did."""
+    used by BOTH the steady and transient solvers, plus the SINK LIFT. Returns
+    (mesh, fes, u, v, a, f, k_cf, T_lift). Factoring this out keeps solve_thermal_fem byte-identical
+    -- it assembles the same a, f it always did.
+
+    T_lift is a GridFunction holding T_sink_K on the Dirichlet sink face ("bot") and 0 on every free
+    dof: the Dirichlet data of the problem. A steady solve is
+        T = GridFunction(fes); T.vec.data = T_lift.vec; T.vec.data += inv * (f.vec - a.mat * T.vec)
+    AUDIT X-17 (2026-11-02): T_sink_K used to be accepted and IGNORED (a and f do not depend on
+    it; measured: the returned forms were identical for T_sink_K = 300 and 1000), and each of the
+    four callers re-applied the sink by hand -- a caller that started from a zero GridFunction
+    solved with T_sink = 0 K (measured on a 200 nm / 100 nm stack at 1e8 W/m^2: mean layer T 7.1 /
+    14.3 K instead of 307.1 / 314.3 K). The lift now comes FROM T_sink_K, and every in-package
+    caller takes its sink values from it. T_sink_K must be finite and > 0 (kelvin)."""
+    T_sink = float(T_sink_K)
+    if not (np.isfinite(T_sink) and T_sink > 0.0):
+        raise ValueError("build_thermal_forms: T_sink_K must be a finite temperature > 0 K, got "
+                         "{!r} (audit X-17)".format(T_sink_K))
     mesh = _build_layered_mesh(layers, period_x_m, period_y_m, maxh_m)
 
     k_by = {L.name: L.k_thermal for L in layers}
@@ -131,7 +171,9 @@ def build_thermal_forms(layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, jou
     a += k_cf * ng.grad(u) * ng.grad(v) * ng.dx
     f = ng.LinearForm(fes)
     add_load_terms(f, v, mesh, flux_W_m2, joule_W_m3)
-    return mesh, fes, u, v, a, f, k_cf
+    T_lift = ng.GridFunction(fes)
+    T_lift.Set(ng.CoefficientFunction(T_sink), definedon=mesh.Boundaries("bot"))
+    return mesh, fes, u, v, a, f, k_cf, T_lift
 
 
 _build_thermal_forms = build_thermal_forms   # DEPRECATED alias of the canonical public name (X-11)

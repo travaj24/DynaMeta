@@ -50,6 +50,8 @@ from dynameta.core.carrier_field import (
 from dynameta.core.interfaces import RegionInfo
 from dynameta.core.numerics import trapz
 from dynameta.carriers.schrodinger_poisson import SchrodingerPoisson1D, HBAR, M_E, Q, EPS0
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 
 class SchrodingerPoissonCarrier:
@@ -59,7 +61,7 @@ class SchrodingerPoissonCarrier:
 
     def __init__(self, *, semi_thk_m: float = 12e-9, n_bg_m3: float = 4e26,
                  m_eff_kg: float = 0.35 * M_E, eps_static: float = 9.5,
-                 T_K: float = 300.0, lateral_m: float = 12e-9, semi_material: str = "ITO",
+                 T_K: float = T_REF, lateral_m: float = 12e-9, semi_material: str = "ITO",
                  nz: int = 601, n_lateral: int = 4, n_states: int = 80,
                  oxide_thk_m: Optional[float] = None, eps_oxide: float = 18.0,
                  alpha_np_per_eV: float = 0.0, g_s: int = 2, g_v: int = 1,
@@ -115,7 +117,7 @@ class SchrodingerPoissonCarrier:
             warnings.warn(
                 "SchrodingerPoissonCarrier: surface_potential_xy is used as the final "
                 "per-column surface potential; the oxide voltage division (oxide_thk_m/"
-                "eps_oxide) is NOT applied to it. Fold any oxide division into psi_xy.",
+                "eps_oxide) is NOT applied to it. Fold any oxide division into psi_xy.", AdvisoryWarning,
                 stacklevel=2)
         # bulk degenerate Fermi level (relative to the conduction-band edge E_c = 0). General form
         # k_F = (6 pi^2 n / (g_s g_v))^(1/3); the (3 pi^2 n)^(1/3) special case is g_s=2, g_v=1 (the
@@ -182,6 +184,7 @@ class SchrodingerPoissonCarrier:
         r_lo, r_hi = residual(lo), residual(hi)   # r_lo = -Vg < 0 (flat-band baseline -> N_exc(0)=0)
         grow = 0
         while r_lo * r_hi > 0.0 and grow < 6:      # depletion root lies beyond psi=Vg: expand bracket
+            lo, r_lo = hi, r_hi                     # the old top has r_lo's sign: the root is above it
             hi *= 2.0
             r_hi = residual(hi)
             grow += 1
@@ -190,8 +193,13 @@ class SchrodingerPoissonCarrier:
                 "SchrodingerPoissonCarrier: gate->psi_s bisection could not bracket a root for "
                 "Vg={:.3g} V. The oxide series-cap map is calibrated for accumulation; a depletion "
                 "bias on a degenerate film may not converge, so the surface potential (hence the "
-                "returned density) may be unreliable.".format(vg), stacklevel=2)
-        for _ in range(8):                          # ~bracket/256 resolution
+                "returned density) may be unreliable.".format(vg), UnreliableResultWarning, stacklevel=2)
+        # Vg/256 resolution whatever the expansion. AUDIT C-18 (2026-11-02): this was a fixed 8
+        # halvings of [0, hi], i.e. "bracket/256" -- Vg/256 unexpanded but Vg/4 after the six
+        # doublings (hi = 64 Vg), so an expanded root came back up to Vg/8 off. With lo advanced
+        # past each doubling the bracket is [2^(g-1), 2^g] Vg (g >= 1 doublings) and takes g - 1
+        # extra halvings; a counted loop, so the unexpanded case stays exactly the old 8 solves.
+        for _ in range(8 + max(grow - 1, 0)):
             mid = 0.5 * (lo + hi)
             if residual(mid) < 0.0:
                 lo = mid
