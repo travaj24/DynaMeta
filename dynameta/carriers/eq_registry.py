@@ -22,8 +22,9 @@ class _DevsimShim:
 
     def __getattr__(self, name):
         if _DevsimShim._mod is None:
-            import devsim as _devsim
-            _DevsimShim._mod = _devsim
+            # D0: through the ONE devsim import home (BLAS pinned before the first import)
+            from dynameta.carriers.devsim_env import import_devsim
+            _DevsimShim._mod = import_devsim()
         return getattr(_DevsimShim._mod, name)
 
 

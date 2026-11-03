@@ -28,8 +28,10 @@ import warnings
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
-import devsim as ds
+ds = import_devsim()
+
 
 from dynameta.constants import Q_E
 from dynameta.carriers import eq_registry as _R

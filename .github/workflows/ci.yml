@@ -385,7 +385,10 @@ jobs:
         # sweep, same day: test_audit_2026_07_25_cleanup (2 importorskip("ngsolve") cases),
         # test_dc_solve_gummel (module-level importorskip("devsim")) and
         # test_ngsolve_ellipse_primitive (netgen.occ) also ran nowhere -- added; the three together
-        # 28 passed in 6 s locally.)
+        # 28 passed in 6 s locally. test_devsim_env added 2026-11-03 for v0.14.0 (D0: the DEVSIM BLAS
+        # pin + the devsim 2.11.2 reset_devsim contract): 20 passed in 3.8 s locally on Windows and
+        # 20 passed in 3.6 s under WSL Ubuntu / py3.12 / devsim 2.11.2 -- on Linux the default leaves
+        # devsim's own loader search alone; the decoy gate runs with DYNAMETA_DEVSIM_BLAS=pin.)
         #
         # NOT PINNED to an old release, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg
         # red every night from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py.
@@ -402,7 +405,7 @@ jobs:
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
             tests/test_contact_current.py tests/test_dc_solve_gummel.py \
             tests/test_density_gradient.py \
-            tests/test_devsim_smoke.py tests/test_electrothermal.py \
+            tests/test_devsim_env.py tests/test_devsim_smoke.py tests/test_electrothermal.py \
             tests/test_fem_symmetry_tensor.py tests/test_fem_speed.py \
             tests/test_gated_builder.py tests/test_geometry_guards.py \
             tests/test_geometry_shapes.py \

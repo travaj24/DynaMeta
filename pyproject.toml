@@ -32,7 +32,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-solvers = ["devsim>=2.10", "ngsolve>=6.2.2608", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve (6.2.2608: the release CI and the 0.12.0 solver timings were measured on)
+solvers = ["devsim>=2.11.2", "ngsolve>=6.2.2608", "gmsh>=4.11"]   # Stage-1 DEVSIM + Stage-3 NGSolve (6.2.2608: the release CI and the 0.12.0 solver timings were measured on)
+# devsim 2.11.2 (D0, 2026-11-03): reset_devsim() keeps the UMFPACK solver (issue #169; validation/ac_capacitance
+# relies on it), DEVSIM_BLAS_PREFIX/SUFFIX exist (2.11.1, issue #167; carriers.devsim_env pins scipy's OpenBLAS
+# through them) and the math libraries load once, at import.
 pardiso = ["mkl"]                                          # MKL-PARDISO for OpticalSpec(linear_solver="pardiso"/"auto"); NOTE ngsolve then makes pardiso its DEFAULT inverse for untyped Inverse() calls
 io = ["h5py>=3.8", "zarr>=3.0; python_version>='3.11'"]    # CarrierField / eps dump+load (zarr 3.x needs py>=3.11)
 plot = ["matplotlib>=3.7"]
