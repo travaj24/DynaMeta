@@ -1,8 +1,25 @@
 """
-Spectral analysis helpers for reflection / transmission sweeps.
+Post-processing for modulator studies: the ELECTRICAL figures of merit of a gated device and the
+SPECTRAL analysis of its reflection / transmission sweeps. Pure numpy; no solver is run here --
+every function consumes results the pipeline / a Sweep already produced, and none is tied to a
+particular design.
 
-Generic post-processing utilities for the (wavelength, |r|^2) spectra that
-Stage 3 produces -- not tied to any particular design.
+(audit S5-22, wave-7 2026-11-02: this docstring used to describe only the spectral helpers --
+"Spectral analysis helpers for reflection / transmission sweeps" -- i.e. ~40 % of the file.)
+
+Electrical modulator FOMs (from CarrierFields at several gate biases):
+  gate_cv                      Q(Vg) = q INT (n - n_bg) dz and C = dQ/dVg from a bias sweep
+  sheet_resistance_ohm_sq      R_sheet = 1 / (q n mu t) of the accumulation / access layer
+  lumped_rc_bandwidth          f_3dB = 1 / (2 pi R C) of the lumped gate RC
+  switching_energy_per_area    E = C V^2 / 2 per switching event, per unit area
+  modulator_figure_of_merit    the combined contrast / capacitance / bandwidth / energy record
+
+Spectral analysis (of (wavelength, |r|^2) or (frequency, T) spectra):
+  resonance_dip / resonance_shift   dip location (+ width) and its bias-induced shift
+  fano_fit / FanoFit                Fano lineshape by variable projection (stable in q; the
+                                    q-reliability SNR flag is documented at _FANO_Q_TRUST_SNR)
+  lorentzian_fit / LorentzianFit    the symmetric-Lorentzian special case
+  quasi_bic_scaling                 the log-log Q ~ delta^exponent law of a quasi-BIC (canonical -2)
 """
 
 from __future__ import annotations
@@ -18,6 +35,7 @@ from dynameta.constants import Q_E as _Q_E   # elementary charge, C
 
 
 from dynameta.core.numerics import trapz as _trapz   # shared (np.trapz removed in NumPy 2.x)
+from dynameta.warning_types import UnreliableResultWarning
 
 
 def gate_cv(carrier_fields: Sequence, region: str, *, voltage_key: str,
@@ -113,7 +131,7 @@ def lumped_rc_bandwidth(C_F_per_m2, sheet_resistance_ohm_sq, *,
     if np.any(C_per <= 0.0):
         warnings.warn("lumped_rc_bandwidth: non-positive capacitance encountered "
                       "(depletion branch?); f_3dB is NaN there. Pass the accumulation-"
-                      "branch (C>0) capacitance for a physical bandwidth.", stacklevel=2)
+                      "branch (C>0) capacitance for a physical bandwidth.", UnreliableResultWarning, stacklevel=2)
     R = float(sheet_resistance_ohm_sq) * float(path_length_m) / float(pad_width_m)
     C_cell = C_per * float(cell_area_m2)
     with np.errstate(divide="ignore", invalid="ignore"):

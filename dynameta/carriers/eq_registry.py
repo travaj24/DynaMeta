@@ -78,7 +78,17 @@ def reapply_by_name(device: str, eq_name: str) -> None:
             ds.interface_equation(device=device, interface=e["loc"], **e["kwargs"])
 
 
-def forget(device: str, eq_name: str, *, loc: str = None) -> None:
+def recorded(device: str, eq_name: str, *, scope: str = None, loc: str = None) -> List[dict]:
+    """COPIES of the recorded entries for `eq_name` (optionally filtered by scope in {'region',
+    'contact', 'interface'} and by loc). Read-only view for callers that must re-point an existing
+    equation (e.g. physics_density_gradient.setup_contact_dg, audit S1-5) without reaching into _REG."""
+    return [{"scope": e["scope"], "loc": e["loc"], "name": e["name"], "kwargs": dict(e["kwargs"])}
+            for e in _REG.get(device, [])
+            if e["name"] == eq_name and (scope is None or e["scope"] == scope)
+            and (loc is None or e["loc"] == loc)]
+
+
+def forget(device: str, eq_name: str, *, loc: str = None, scope: str = None) -> None:
     """Drop recorded equation entries matching `eq_name` (and `loc`, if given) from the registry
     WITHOUT touching the live DEVSIM equation. Use when REPOINTING a contact -- e.g. swapping a
     bias-Dirichlet gate for a circuit-driven one: the caller ds.delete_contact_equation's the stale
@@ -89,8 +99,10 @@ def forget(device: str, eq_name: str, *, loc: str = None) -> None:
     reg = _REG.get(device)
     if not reg:
         return
+    # `scope` (optional, wave-7 2026-11-02) disambiguates a contact and a region that share a name
     _REG[device] = [e for e in reg
-                    if not (e["name"] == eq_name and (loc is None or e["loc"] == loc))]
+                    if not (e["name"] == eq_name and (loc is None or e["loc"] == loc)
+                            and (scope is None or e["scope"] == scope))]
 
 
 def edge_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:

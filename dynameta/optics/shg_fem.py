@@ -71,13 +71,12 @@ import cmath
 import math
 import warnings
 
-from dynameta.constants import EPS0, C_LIGHT, Q_E, M_E
+from dynameta.constants import EPS0, C_LIGHT, Q_E, M_E, Z0
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = ["rudnick_stern_surface_chi", "rudnick_stern_flat_shg", "shg_two_step",
            "rudnick_stern_flat_sfg", "sfg_two_step", "sfg_field_transverse_kx",
            "shg_structured_two_step"]
-
-_Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
 
 
 def rudnick_stern_surface_chi(a: float, b: float, omega: float,
@@ -271,8 +270,7 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     geo = LayeredOpticalBuilder(design).build()
     mesh = geo.mesh
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     # (1) linear solve at the fundamental
     ebr_w = eps_at(lambda_fund_m)
@@ -283,7 +281,7 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     # (2) locate the metal top surface + sample the normal fundamental field just inside it
     if metal_region is None:
         metal_region = _top_metal_region(geo, ebr_w)
-    z_lo, z_hi = geo.z_intervals_nm[metal_region]
+    z_hi = geo.z_intervals_nm[metal_region][1]                   # metal top face (nm)
     E_perp_in = _sample_normal_field_inside(mesh, res_w, geo, metal_region, design, lambda_fund_m,
                                             n_super, n_sub)
 
@@ -317,6 +315,17 @@ def shg_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
 # ---------------------------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------------------------
+def _default_eps_at(design, geo):
+    """The default `eps_at(lambda_m) -> {region: EpsField}` of every two-step entry point: each mesh
+    region's material eps at that wavelength (audit X-23, 2026-11-02 -- this closure was re-typed
+    verbatim inside shg_two_step, the two-color SFG/DFG entry point and shg_structured_two_step)."""
+    regions = geo.mesh.GetMaterials()
+
+    def eps_at(lam_m):
+        return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in regions}
+    return eps_at
+
+
 def _region_epsfield(design, geo, region, lambda_m):
     from dynameta.core.eps_field import EpsField
     mat = geo.material_by_region.get(region)
@@ -536,7 +545,9 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
 
     Returns dict with 'p_up_3w' (radiated mixing power over the cell, W, SI), 'E_perp_in_1',
     'E_perp_in_2' (the omega2 entry is the DFG-conjugated field used), 'P_z' (C/m), 'omega3',
-    'lambda_3_m', 'theta3_deg', 'K_par3_per_nm' (nm^-1), 'D_factor', 'process', 'metal_region',
+    'lambda_3_m', 'theta3_deg', 'propagating' (bool: False when |K_par3| > k0_3, an evanescent DFG
+    field -- theta3_deg is then the clamped +-90 and p_up_3w ~ 0, as in rudnick_stern_flat_sfg),
+    'K_par3_per_nm' (nm^-1), 'D_factor', 'process', 'metal_region',
     'geo', 'result_1'/'result_2' (fundamental OpticalResults), and 'result_3' (SH SourcedResult).
 
     DEGENERACY IDENTITY: sfg_two_step(w, w, theta, theta)['p_up_3w'] / 4 == shg_two_step(w)
@@ -568,10 +579,8 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     th1, th2 = math.radians(t1_deg), math.radians(t2_deg)
 
     geo = LayeredOpticalBuilder(design).build()
-    mesh = geo.mesh
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     # (1) two linear fundamental solves (the existing plane-wave path, one per color). Their fields
     #     are sampled ANALYTICALLY (the Sipe closed form, as in shg_two_step) rather than from an
@@ -590,7 +599,7 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     #     and eps(lambda_j); Sipe prescription, unit-amplitude incident to match solve_fem).
     if metal_region is None:
         metal_region = _top_metal_region(geo, ebr1)
-    z_lo, z_hi = geo.z_intervals_nm[metal_region]
+    z_hi = geo.z_intervals_nm[metal_region][1]                   # metal top face (nm)
     eps_w1 = _region_eps_scalar(design, geo, metal_region, lam1)
     eps_w2 = _region_eps_scalar(design, geo, metal_region, lam2)
     E1 = _ppol_normal_field_inside(1.0, th1, eps_w1) if pol1 == "p" else 0.0 + 0j
@@ -611,11 +620,28 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     E0_cf = _normal_sheet_vacuum_field(P_z, k0_3, K_par3, z_sheet, ng)
 
     # (4) sourced solve at omega3, radiating into the momentum-matched emission direction theta3
-    #     (sin theta3 = K_par3 / k0_3). probe_pol = the FULL up-going p-pol unit vector
-    #     (cos th3, 0, -sin th3) so solve_fem_sourced's p_up is the true p-pol flux (a
-    #     tangential-only projection under-counts by cos^2 th3).
+    #     (sin theta3 = K_par3 / k0_3). probe_pol = the FULL up-going p-pol polarization vector
+    #     (beta1, 0, -K_par3) / k0_3 = (cos th3, 0, -sin th3) so solve_fem_sourced's p_up is the true
+    #     p-pol flux (a tangential-only projection under-counts by cos^2 th3).
+    #
+    #     AUDIT F-20 (2026-11-02). DFG can put |K_par3| > k0_3 (K_par3 = k_par1 - k_par2 while
+    #     k0_3 = k0_1 - k0_2 is small): the mixing field is then EVANESCENT in the superstrate. The
+    #     old code clamped cos th3 = sqrt(max(0, 1 - sin^2)) to 0, so the probe became (0, 0, -sin th3)
+    #     with |sin th3| > 1 -- not the wave's polarization, so the projection scaled the fitted
+    #     amplitude by ~sin^2 th3 (measured a_up 1.174 x the true one at sin th3 = 1.087, where
+    #     sin^2 = 1.182) -- while theta3_deg was reported as the clamped +-90 with no flag. The polarization vector of a TM wave is
+    #     (beta1, 0, -K_par3) / k0_3 for ANY K_par3, with beta1 = sqrt(k0_3^2 - K_par3^2) on the
+    #     Im >= 0 (decaying-upward) branch: purely imaginary cos th3 when evanescent, and it still
+    #     satisfies cos^2 + sin^2 = 1, so the projection returns the true amplitude. Propagating
+    #     emission is BIT-IDENTICAL (real cos th3, same expression). 'propagating' is now returned
+    #     (the closed-form oracle rudnick_stern_flat_sfg always had it, same criterion); when it is
+    #     False, theta3_deg is the oracle's clamped +-90 and p_up_3w is ~0 (no radiated power).
     sin_th3 = K_par3 / k0_3
-    cos_th3 = math.sqrt(max(0.0, 1.0 - sin_th3 ** 2))
+    if abs(sin_th3) <= 1.0:
+        cos_th3 = math.sqrt(1.0 - sin_th3 ** 2)
+    else:
+        cos_th3 = 1j * math.sqrt(sin_th3 ** 2 - 1.0)            # beta1 / k0_3, Im > 0 branch
+    propagating = bool(complex(cos_th3).real > 1e-6)            # == oracle's Re(beta1) > 1e-6 k3
     eps_3_cf = assemble_eps_cf(geo, eps_at(lam3))
     res3 = solve_fem_sourced(geo, lam3, eps_3_cf, design.optical, order=order,
                               n_super=n_super, n_sub=n_sub, bg_field=E0_cf, eps_ref=1.0,
@@ -624,6 +650,7 @@ def sfg_two_step(design, *, omega1_rad_s: float, omega2_rad_s: float, chi_zzz: c
     return {"p_up_3w": res3.p_up, "E_perp_in_1": complex(E1), "E_perp_in_2": complex(E2_eff),
             "P_z": complex(P_z), "omega3": float(w3), "lambda_3_m": float(lam3),
             "theta3_deg": float(math.degrees(math.asin(max(-1.0, min(1.0, sin_th3))))),
+            "propagating": propagating,
             "K_par3_per_nm": float(K_par3), "D_factor": float(D_factor), "process": proc,
             "metal_region": metal_region, "geo": geo,
             "result_1": res1, "result_2": res2, "result_3": res3}
@@ -799,12 +826,14 @@ def _local_surface_height(mesh, eps_fund_cf, xv, yv, z_hi, z_lo, nscan=64):
     eps crosses into a metal (Re eps < 0), refined by bisection to sub-nm so a subsequent
     dielectric-side standoff never straddles the interface. Scans top-down from z_hi to z_lo;
     returns z_lo if the whole column is dielectric (base metal top at z_lo)."""
+    import numpy as _np
+
     def _is_metal(zv):
         try:
             return complex(eps_fund_cf(mesh(float(xv), float(yv), float(zv)))).real < 0.0
         except Exception:
             return None
-    zs = _np_linspace(z_hi, z_lo, nscan)
+    zs = _np.linspace(z_hi, z_lo, nscan)
     prev_air = float(z_hi)
     for zv in zs:
         m = _is_metal(zv)
@@ -824,11 +853,6 @@ def _local_surface_height(mesh, eps_fund_cf, xv, yv, z_hi, z_lo, nscan=64):
             return 0.5 * (a + b)
         prev_air = float(zv)
     return float(z_lo)
-
-
-def _np_linspace(a, b, n):
-    import numpy as _np
-    return _np.linspace(a, b, n)
 
 
 # --- straddle detection for the E_z standoff band (audit F-11) -----------------------------------
@@ -1000,7 +1024,7 @@ def _extract_surface_sheet_profile(mesh, geo, total_fund, eps_fund_cf, kx, chi_z
             "surface-SHG extraction: the E_z standoff band (up to {:.3g} nm above the metal) crosses "
             "a MATERIAL INTERFACE, so no single eps_above describes it and the two-wave fit mixes two "
             "dispersions. Reduce standoff_nm/n_standoff below the cap thickness. (audit F-11)"
-            .format(float(ds[-1])), stacklevel=2)
+            .format(float(ds[-1])), UnreliableResultWarning, stacklevel=2)
     eps_above_mean = complex(_np.mean(eps_seen)) if eps_seen else 1.0 + 0j
     z_mean = float(_np.mean(z_s))
     # demodulate the SH transverse Bloch phase exp(i kx_2w x), kx_2w = 2 kx_fund, then FFT over x.
@@ -1126,8 +1150,7 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     mesh = geo.mesh
     _ensure_bloch_dirs(geo)                          # robust Bloch-idnr detection for thin grating layers
     if eps_at is None:
-        def eps_at(lam_m):
-            return {rg: _region_epsfield(design, geo, rg, lam_m) for rg in mesh.GetMaterials()}
+        eps_at = _default_eps_at(design, geo)                        # audit X-23
 
     theta_deg = float(getattr(design.optical, "incidence_angle_deg", 0.0) or 0.0)
     pol = getattr(design.optical, "polarization", "p")
@@ -1189,7 +1212,7 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
             "(eps_above={:.4g}), so 'sheet_order_power'/'sheet_nonspecular' -- the analytic "
             "flat-metal-in-VACUUM physical-optics estimate (Sipe denominator beta1 + beta2/eps_2w) "
             "-- are approximate. The extracted 'sheet' and the FEM 'p_up_by_order' account for the "
-            "cap. (audit F-11)".format(complex(sheet["eps_above"])), stacklevel=2)
+            "cap. (audit F-11)".format(complex(sheet["eps_above"])), UnreliableResultWarning, stacklevel=2)
 
     base = {"sheet": sheet, "sheet_order_power": sheet_order_power,
             "sheet_nonspecular": float(sheet_nonspec), "E_perp_in": complex(E_perp_in),
@@ -1225,7 +1248,7 @@ def shg_structured_two_step(design, *, lambda_fund_m: float, chi_zzz: complex,
     theta_by_order = {}
     for m in range(-n_orders, n_orders + 1):
         K_m = kx_2w + m * G
-        p_m, _a, th_m = _sourced_order_power(mesh, total_sh, geo, k0_2w, K_m, _Z0)
+        p_m, _a, th_m = _sourced_order_power(mesh, total_sh, geo, k0_2w, K_m, Z0)
         if th_m is not None:
             p_by_order[m] = p_m
             theta_by_order[m] = th_m

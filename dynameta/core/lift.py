@@ -6,7 +6,8 @@ CARRIER DENSITY (not the eps) means the background automatically maps to the
 correct n_bg -> eps via the NToEpsMap, fixing the old grid-corner background bug.
 
 Lifts operate on n_2d shaped (Nx_lateral, Nv_vertical):
-  IdentityLift     : source already 3D (native 3D DEVSIM) -> pass through
+  IdentityLift     : source already 3D (native 3D DEVSIM) -> NO lift (a marker; the
+                      bridge's 3-D branch reads the field's own axes, apply() refuses)
   ExtrudeLift      : invariant along the 2nd lateral axis (1D gratings) -> repeat
   SeparableXYLift  : xy-product reconstruction; VALID ONLY for a centered,
                       4-fold (c4v) device on a SQUARE cell with a SINGLE-SIGN
@@ -37,16 +38,32 @@ class FieldLift:
 
 @dataclass
 class IdentityLift(FieldLift):
-    """For a native 3D carrier field already shaped (Nx, Ny, Nz). n_2d here is
-    actually the 3D array; axes are passed straight through."""
+    """The 'no lift' MARKER for a native 3-D carrier field (OpticalSpec.lift='identity').
+
+    audit S4-19 (wave-7, 2026-11-02): assemble_eps consumes a native 3-D field DIRECTLY, with the
+    field's own x / y / z axes, and never calls a lift on it -- so apply() never sees a 3-D array
+    in the pipeline. It used to accept one anyway and return a FABRICATED y axis,
+    linspace(0, 1, Ny) -- one METRE wide whatever the cell ("caller overrides axes if needed"),
+    with the vertical axis passed as `v_m`. A direct caller got a non-physical geometry silently.
+    apply() now has exactly one job, the R-30 error for the 2-D field that DOES reach it (a
+    2-D solve with lift='identity'); a 3-D array is refused with a pointer to assemble_eps,
+    because this signature has no y axis to return."""
 
     def apply(self, n_3d, x_m, v_m, *, n_bg):
         arr = np.asarray(n_3d, dtype=np.float64)
-        if arr.ndim != 3:
-            raise ValueError("IdentityLift expects a 3D carrier array")
-        ny = arr.shape[1]
-        y_m = np.linspace(0.0, 1.0, ny)   # caller overrides axes if needed
-        return arr, np.asarray(x_m), y_m, np.asarray(v_m)
+        if arr.ndim == 3:
+            raise ValueError(
+                "IdentityLift.apply: a native 3-D carrier field needs no lift -- assemble_eps "
+                "uses its own x/y/z grid axes directly (the 3-D branch never calls a lift), and "
+                "this signature carries no y axis to return (it used to fabricate "
+                "linspace(0, 1, Ny) metres; audit S4-19). Pass the field to assemble_eps.")
+        # audit R-30: name the knob and the 2-D/3-D cause, not just the shape
+        raise ValueError(
+            "IdentityLift (OpticalSpec.lift='identity') expects a NATIVE 3-D carrier field "
+            "(Nx, Ny, Nz), got a {}-D array of shape {}. A 2-D DEVSIM solve (lateral x vertical) "
+            "must be lifted to 3-D: set OpticalSpec.lift='auto' (or 'extrude' for a "
+            "y-invariant grating, 'separable_xy' for a centered c4v device on a square cell)."
+            .format(arr.ndim, arr.shape))
 
 
 @dataclass

@@ -48,6 +48,8 @@ from netgen.meshing import BoundaryLayerParameters, MeshingStep, IdentificationT
 from dynameta.core.units import NM, NM_PER_M
 from dynameta.core.alignment import GeometryAlignment, RegionAlignment
 from dynameta.geometry.design import Design
+from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 S = NM_PER_M   # m -> nm (OCC works in nm); single source = core.units.NM_PER_M
 
@@ -280,7 +282,7 @@ class LayeredOpticalBuilder:
     def build(self) -> OpticalGeometry:
         d = self.design
         self._check_layer_names(d)          # audit F-7 (reserved region names)
-        self._check_features(d)             # audit F-14 (silently ignored Stack.features)
+        self._check_features(d)             # audit F-14 (Stack.features) + Inclusion.taper (2026-11-02)
         spec = d.mesh_3d
         Px = d.unit_cell.period_x_m * S
         Py = d.unit_cell.period_y_m * S
@@ -304,7 +306,7 @@ class LayeredOpticalBuilder:
                 warnings.warn(
                     "this design is {} at normal incidence -- you can set mesh_3d.symmetry={!r} to "
                     "solve a symmetry-reduced cell ({}) at the SAME R/T. It is OPT-IN; the full "
-                    "periodic cell is being meshed.".format(d.device_symmetry(), avail, frac),
+                    "periodic cell is being meshed.".format(d.device_symmetry(), avail, frac), AdvisoryWarning,
                     stacklevel=2)
         Px_mesh = 0.5 * Px if sym_x else Px
         Py_mesh = 0.5 * Py if sym_y else Py
@@ -491,10 +493,11 @@ class LayeredOpticalBuilder:
         # center tolerance matches only true full-cell horizontal faces; semi-prism is skipped to avoid
         # clobbering its named boundary-layer faces.
         if not spec.semi_prism_thk_m:
-            for f in glued.faces:
-                c = f.center
-                if abs(c.x - 0.5 * Px_mesh) < 1e-3 * Px_mesh and abs(c.y - 0.5 * Py_mesh) < 1e-3 * Py_mesh:
-                    f.name = "iface_z{}".format(int(round(c.z)))
+            _ifaces = [f for f in glued.faces
+                       if abs(f.center.x - 0.5 * Px_mesh) < 1e-3 * Px_mesh
+                       and abs(f.center.y - 0.5 * Py_mesh) < 1e-3 * Py_mesh]
+            for f, nm in zip(_ifaces, _iface_names([f.center.z for f in _ifaces])):
+                f.name = nm
         # Name the SYMMETRY-WALL faces here, PRE-OCCGeometry, via f.name -- the SAME mechanism as the
         # iface_z naming above (an exterior face .bc() set AFTER OCCGeometry does NOT propagate to
         # mesh.GetBoundaries(), so the solver's dirichlet='sym_y' would silently match nothing -- the
@@ -596,23 +599,18 @@ class LayeredOpticalBuilder:
 
     @staticmethod
     def _check_features(d) -> None:
-        """RAISE if the Stack carries `Feature`s (audit F-14).
+        """RAISE if the Stack carries `Feature`s (audit F-14) or a tapered Inclusion (2026-11-02).
 
         `Design.__post_init__` validates every Feature's material and `Feature.__post_init__`
         validates its z-span, so a via / T-patch stem passes construction cleanly -- and then this
         builder never reads `d.stack.features` (it lays down layers only), so the feature simply is
         not in the mesh. A validated Design that silently loses a solid is worse than one that
         refuses to build. `Feature`'s own docstring promises support "in a later phase"; until then
-        say so at runtime instead of meshing a different device than the one described."""
-        feats = list(getattr(d.stack, "features", ()) or ())
-        if feats:
-            raise NotImplementedError(
-                "LayeredOpticalBuilder does not implement Stack.features yet, and would mesh the "
-                "layer stack WITHOUT the {} feature(s) ({}) -- a device different from the one the "
-                "Design describes. Model the feature as a Layer inclusion (Stack.layers[].inclusions), "
-                "or subclass the builder to add the feature solids. (Design validates Feature "
-                "materials and z-spans, so this cannot be caught at construction.)"
-                .format(len(feats), ", ".join(repr(f.name) for f in feats)))
+        say so at runtime instead of meshing a different device than the one described. The same
+        holds for `Inclusion.taper`: `_inclusion_solid` extrudes the TOP section straight, so a
+        tapered inclusion would mesh as a straight wall. Both refusals are worded once, in
+        dynameta.geometry.guards (UnsupportedGeometryError, a NotImplementedError)."""
+        require_supported_geometry(d, "LayeredOpticalBuilder")
 
     def _maxh(self, region_name: str, material: str, mesh_role: Optional[str] = None) -> float:
         """Per-region target element size (nm). Routing, most specific first:
@@ -682,6 +680,54 @@ class LayeredOpticalBuilder:
                   for r in self._geo.mesh.GetMaterials() if r not in spatial}
         return GeometryAlignment(unit_scale=NM, region_alignments=list(self._region_align),
                                   fixed_eps_regions=fixed)
+
+
+# Two interface z (nm) closer than this are the SAME plane (OCC face centres of one glued plane agree
+# to ~1e-12 nm); anything farther apart is a distinct interface and must get its own name.
+_IFACE_SAME_Z_NM = 1e-6
+
+
+def _iface_names(zs_nm) -> List[str]:
+    """Boundary names for the full-cell interface faces at heights `zs_nm` (nm), in input order.
+
+    The name is ``iface_z<int(round(z))>`` -- the documented, integer-nanometre form the solver's
+    ``sheet_bcs`` addressing and its F-8 validator advertise -- whenever that integer is UNIQUE to one
+    interface plane. AUDIT F-19 (2026-11-02): it used to be applied unconditionally, so two distinct
+    interfaces within the same 1 nm bucket (a sub-nm layer -- e.g. a 0.6 nm film between 99.8 and
+    100.4 nm, or a 0.34 nm 2-D-material slab) SHARED one name, and a sheet addressed to that name was
+    assembled on BOTH planes: measured, ``iface_z100`` spanned 2x the cell area (3.2e5 nm^2 on a
+    400 nm cell) -- a doubled graphene sheet, silently. Only the colliding planes are renamed, with
+    the fewest decimals (1..6) that tell them apart, the point written as ``p`` so the name stays a
+    literal under NGSolve's regex boundary matching: ``iface_z99p8`` / ``iface_z100p4``. Every name
+    of a geometry with no sub-nm interface pair is unchanged."""
+    zs = [float(z) for z in zs_nm]
+    planes: List[float] = []                       # distinct plane heights (first-seen representative)
+    for z in zs:
+        if not any(abs(z - p) <= _IFACE_SAME_Z_NM for p in planes):
+            planes.append(z)
+    buckets: Dict[int, List[float]] = {}
+    for p in planes:
+        buckets.setdefault(int(round(p)), []).append(p)
+    plane_name: Dict[float, str] = {}
+    for key, members in buckets.items():
+        if len(members) == 1:
+            plane_name[members[0]] = "iface_z{}".format(key)
+            continue
+        for nd in range(1, 7):
+            labels = ["{:.{}f}".format(p, nd) for p in members]
+            if len(set(labels)) == len(labels):
+                break
+        else:
+            raise ValueError(
+                "interface planes {} nm are distinct (> {:g} nm apart) but agree to 6 decimals, "
+                "so they cannot be given distinct iface_z names".format(members, _IFACE_SAME_Z_NM))
+        for p, lab in zip(members, labels):
+            plane_name[p] = "iface_z" + lab.replace(".", "p")
+    out = []
+    for z in zs:
+        rep = next(p for p in planes if abs(z - p) <= _IFACE_SAME_Z_NM)
+        out.append(plane_name[rep])
+    return out
 
 
 def _identify_periodic(shape, Px: float, Py: float, sym_x: bool = False,

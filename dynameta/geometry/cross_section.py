@@ -46,8 +46,30 @@ class CrossSection:
         raise NotImplementedError
 
 
+# audit X-23 (2026-11-02): two method-only mixins, so each shared method has ONE body. center_m
+# was re-typed in four shapes (Rectangle, Circle, Ellipse, RegularPolygon) and the vertex-based
+# bbox_m / contains_m in RegularPolygon and Polygon. No fields, so the dataclass layouts (and every
+# constructor signature / repr / eq) are unchanged.
+class _CenteredAt:
+    """center_m() for a shape that stores its centre as cx_m / cy_m."""
+
+    def center_m(self):
+        return (self.cx_m, self.cy_m)
+
+
+class _VertexShape:
+    """bbox_m() / contains_m() for a shape defined by vertices_m()."""
+
+    def bbox_m(self):
+        v = self.vertices_m()
+        return (v[:, 0].min(), v[:, 0].max(), v[:, 1].min(), v[:, 1].max())
+
+    def contains_m(self, x, y):
+        return _polygon_contains(self.vertices_m(), x, y)
+
+
 @dataclass
-class Rectangle(CrossSection):
+class Rectangle(_CenteredAt, CrossSection):
     cx_m: float
     cy_m: float
     width_m: float
@@ -58,9 +80,6 @@ class Rectangle(CrossSection):
         if not (self.width_m > 0.0 and self.height_m > 0.0):
             raise ValueError("Rectangle requires width_m>0 and height_m>0 (got {}, {})".format(
                 self.width_m, self.height_m))
-
-    def center_m(self):
-        return (self.cx_m, self.cy_m)
 
     def bbox_m(self):
         return (self.cx_m - self.width_m / 2, self.cx_m + self.width_m / 2,
@@ -76,7 +95,7 @@ class Rectangle(CrossSection):
 
 
 @dataclass
-class Circle(CrossSection):
+class Circle(_CenteredAt, CrossSection):
     cx_m: float
     cy_m: float
     radius_m: float
@@ -85,9 +104,6 @@ class Circle(CrossSection):
     def __post_init__(self):
         if not (self.radius_m > 0.0):
             raise ValueError("Circle requires radius_m>0 (got {})".format(self.radius_m))
-
-    def center_m(self):
-        return (self.cx_m, self.cy_m)
 
     def bbox_m(self):
         r = self.radius_m
@@ -102,7 +118,7 @@ class Circle(CrossSection):
 
 
 @dataclass
-class Ellipse(CrossSection):
+class Ellipse(_CenteredAt, CrossSection):
     cx_m: float
     cy_m: float
     rx_m: float
@@ -113,9 +129,6 @@ class Ellipse(CrossSection):
         if not (self.rx_m > 0.0 and self.ry_m > 0.0):
             raise ValueError("Ellipse requires rx_m>0 and ry_m>0 (got {}, {})".format(
                 self.rx_m, self.ry_m))
-
-    def center_m(self):
-        return (self.cx_m, self.cy_m)
 
     def bbox_m(self):
         return (self.cx_m - self.rx_m, self.cx_m + self.rx_m,
@@ -131,7 +144,7 @@ class Ellipse(CrossSection):
 
 
 @dataclass
-class RegularPolygon(CrossSection):
+class RegularPolygon(_CenteredAt, _VertexShape, CrossSection):
     cx_m: float
     cy_m: float
     radius_m: float          # circumradius
@@ -151,24 +164,15 @@ class RegularPolygon(CrossSection):
         return np.column_stack([self.cx_m + self.radius_m * np.cos(ang),
                                  self.cy_m + self.radius_m * np.sin(ang)])
 
-    def center_m(self):
-        return (self.cx_m, self.cy_m)
-
-    def bbox_m(self):
-        v = self.vertices_m()
-        return (v[:, 0].min(), v[:, 0].max(), v[:, 1].min(), v[:, 1].max())
-
     def intrinsic_symmetry(self):
         if self.n_sides % 4 == 0:
             return "c4v"
         return "c2v" if self.n_sides % 2 == 0 else "none"
 
-    def contains_m(self, x, y):
-        return _polygon_contains(self.vertices_m(), x, y)
 
 
 @dataclass
-class Polygon(CrossSection):
+class Polygon(_VertexShape, CrossSection):
     points_m: List[Tuple[float, float]]
     kind: str = field(default="polygon", init=False)
 
@@ -188,15 +192,9 @@ class Polygon(CrossSection):
         v = self.vertices_m()
         return (float(v[:, 0].mean()), float(v[:, 1].mean()))
 
-    def bbox_m(self):
-        v = self.vertices_m()
-        return (v[:, 0].min(), v[:, 0].max(), v[:, 1].min(), v[:, 1].max())
-
     def intrinsic_symmetry(self):
         return "none"   # conservative; arbitrary polygons aren't auto-classified
 
-    def contains_m(self, x, y):
-        return _polygon_contains(self.vertices_m(), x, y)
 
 
 def _polygon_contains(verts: np.ndarray, x, y):

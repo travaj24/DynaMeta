@@ -28,11 +28,13 @@ signal: power propagation (no phase), correct for the intensity-encoded OVMM gai
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
 
 from dynameta.constants import H_PLANCK
+from dynameta.warning_types import UnreliableResultWarning
 
 
 __all__ = ["TravelingWaveSOA", "TwoLevelSaturableGain", "UltrafastCompression", "NonlinearLoss",
@@ -183,7 +185,7 @@ class TravelingWaveSOA:
 
     def amplify(self, P_in, drive, *, nu_s_Hz: float = None, state0=None,
                 return_traces: bool = False, ultrafast=None, transport_tau_s: float = 0.0,
-                nl_loss=None, rc_tau_s: float = 0.0):
+                nl_loss=None, rc_tau_s: float = 0.0, _P_node0=None):
         """Amplify the input power waveform P_in (1-D array sampled at this engine's dt) at
         injection `drive`. `ultrafast` (an UltrafastCompression) adds the sub-ps SHB + carrier-
         heating gain compression on top of the carrier-density dynamics (None -> off, the
@@ -211,7 +213,12 @@ class TravelingWaveSOA:
         f_RC = 1/(2 pi tau_RC) that limits the direct-current-modulation bandwidth BEFORE the SCH
         transport / injection stage (so RC and transport_tau cascade). 0 -> no RC; and for a CONSTANT
         drive I_rc stays at the steady value, so the result is byte-identical (RC acts only on a
-        time-varying drive). I_rc inits at the steady drive (no startup transient)."""
+        time-varying drive). I_rc inits at the steady drive (no startup transient).
+
+        The returned dict also carries "P_node", the (nz+1,) field-node power snapshot after the last
+        step. Private `_P_node0` (with state0) resumes a run EXACTLY where a previous one stopped --
+        bit-identical to one long run for a constant drive with no ultrafast / transport / RC state
+        (those are not carried); saturation_curve's adaptive settle uses it (audit S3-23)."""
         nu = float(nu_s_Hz) if nu_s_Hz is not None else self.nu_s
         P_in = np.asarray(P_in, dtype=np.float64)
         if P_in.ndim != 1 or P_in.size < 2:
@@ -242,7 +249,7 @@ class TravelingWaveSOA:
         I_rc = np.asarray(I0, dtype=np.float64) if rc_tau > 0.0 else None   # inits at the steady drive
         # the device field starts empty (Pnode = 0); the first nz steps fill it (a startup
         # transient one transit time long -- t = nz*dt -- before P_out is meaningful)
-        Pnode = np.zeros(self.nz + 1)
+        Pnode = np.zeros(self.nz + 1) if _P_node0 is None else np.array(_P_node0, dtype=np.float64)
         P_out = np.empty(nt)
         g_zt = np.empty((nt, self.nz)) if return_traces else None
         h_uf = np.zeros(nt) if (return_traces and uf is not None) else None
@@ -282,14 +289,15 @@ class TravelingWaveSOA:
         with np.errstate(divide="ignore", invalid="ignore"):
             gain_dB = 10.0 * np.log10(np.where(P_in > 0.0, P_out / P_in, np.nan))
         out = {"t": t, "P_in": P_in, "P_out": P_out, "gain_dB": gain_dB, "dt": self.dt,
-               "state": state}
+               "state": state, "P_node": Pnode}
         if return_traces:
             out["g_zt"] = g_zt
             if h_uf is not None:
                 out["h_uf"] = h_uf                            # SHB+CH compression depth vs t
         return out
 
-    def saturation_curve(self, drive, P_in_W, *, nu_s_Hz: float = None, settle_transits: int = 60):
+    def saturation_curve(self, drive, P_in_W, *, nu_s_Hz: float = None, settle_transits: int = 60,
+                         rtol: float = 1.0e-3, max_settle_transits: int = None):
         """ABSOLUTE-power saturation characterization -- the observables an experimentalist reads off
         a measured gain-compression curve (which the density-only QDGainModel.saturation_curve does NOT
         give: it returns a confined photon DENSITY, not P_out in mW). For each CW input power in
@@ -300,23 +308,60 @@ class TravelingWaveSOA:
           G0_dB    : the unsaturated (small-signal) gain = gain at the LOWEST input power;
           Pin_sat3dB_dBm  : the INPUT saturation power -- input where gain = G0 - 3 dB (interpolated;
                             nan if the sweep never reaches 3 dB compression);
-          Psat_out_dBm    : the OUTPUT saturation power at that point (the usual datasheet 'P_sat,out').
+          Psat_out_dBm    : the OUTPUT saturation power at that point (the usual datasheet 'P_sat,out');
+          settle_transits_used, settle_rel_change : per input, the CW window actually run [transits]
+                            and the relative P_out change over its last half (the convergence check).
         The curve follows the canonical saturable-amplifier law G = G0 exp(-(G - 1) P_in / P_sat); this
         method PRODUCES the absolute observable, but its MAGNITUDE rides on the (uncalibrated) generic
         material parameters -- fit P_sat to a measured device to turn it into a device prediction.
-        settle_transits: CW samples per point = settle_transits * nz (long enough to reach steady
-        state; the first nz samples are the device-fill transient and are excluded by reading P_out
-        at the final, steady, sample)."""
+
+        SETTLE + CONVERGENCE GUARD (audit S3-23, wave-7 2026-11-02). Each point first runs
+        settle_transits * nz CW samples (the first nz are the device-fill transient) and reads P_out
+        at the final sample. It then CHECKS that the output has stopped moving: rel = |P_out(end) -
+        P_out(mid-window)| / P_out(end). For a monotone exponential approach the change over the last
+        half of the window bounds the remaining error at its end, so rel <= rtol certifies |P_out -
+        P_ss|/P_ss <= rtol. Not converged -> the run is CONTINUED exactly (state and field nodes
+        carried, bit-identical to one longer run) for as long again, doubling the window until rel <=
+        rtol or max_settle_transits (default 32 * settle_transits) is reached; then an
+        UnreliableResultWarning names the residual. Before this guard the window was a bare transit
+        count: measured on the qd_soa_saturation_power device (n_groups 15, L 3 mm, nz 40, 120 mA),
+        the 100 mW point relaxes with a ~30-transit time constant (the knee of the compression curve
+        is slowest) and the default 60 transits left a 2.5e-3 (0.011 dB) P_out error (20 transits:
+        2.9e-2), while 0.01-10 mW and 1 W were bit-converged by 20 -- which is why every validation
+        hard-coded settle_transits=400. A point converged at the first check is bit-identical to the
+        old single-window result (same samples, same final read)."""
         Pin = np.atleast_1d(np.asarray(P_in_W, dtype=np.float64)).copy()
         if Pin.ndim != 1 or Pin.size < 2 or np.any(Pin <= 0.0):
             raise ValueError("saturation_curve: P_in_W must be a 1-D array of >= 2 positive powers")
+        if not rtol > 0.0:
+            raise ValueError("saturation_curve: rtol must be > 0")
         order = np.argsort(Pin)                                # ascending input for monotone interp
         Pin = Pin[order]
         nt = max(8, int(settle_transits) * self.nz)
+        nt_cap = 32 * nt if max_settle_transits is None else max(nt, int(max_settle_transits) * self.nz)
         Pout = np.empty(Pin.size)
+        used = np.empty(Pin.size)
+        relchg = np.empty(Pin.size)
         for i, P in enumerate(Pin):
             r = self.amplify(np.full(nt, float(P)), drive, nu_s_Hz=nu_s_Hz)
-            Pout[i] = float(r["P_out"][-1])                    # CW steady-state output power [W]
+            total = nt
+            p_mid, p_end = float(r["P_out"][nt // 2 - 1]), float(r["P_out"][-1])
+            rel = abs(p_end - p_mid) / abs(p_end)
+            while rel > rtol and 2 * total <= nt_cap:          # continue EXACTLY for as long again
+                r = self.amplify(np.full(total, float(P)), drive, nu_s_Hz=nu_s_Hz,
+                                 state0=r["state"], _P_node0=r["P_node"])
+                total *= 2
+                p_mid, p_end = p_end, float(r["P_out"][-1])
+                rel = abs(p_end - p_mid) / abs(p_end)
+            if rel > rtol:
+                warnings.warn("saturation_curve: P_in = {:.3e} W not settled after {:g} transits (P_out "
+                              "moved by {:.2e} relative over the last half > rtol {:.1e}) -- raise "
+                              "settle_transits / max_settle_transits".format(
+                                  float(P), total / self.nz, rel, rtol),
+                              UnreliableResultWarning, stacklevel=2)
+            Pout[i] = p_end                                    # CW steady-state output power [W]
+            used[i] = total / self.nz
+            relchg[i] = rel
         gain_dB = 10.0 * np.log10(Pout / Pin)
         G0_dB = float(gain_dB[0])                              # smallest input -> unsaturated gain
         to_dBm = lambda P: 10.0 * np.log10(np.asarray(P) / 1.0e-3)
@@ -334,20 +379,23 @@ class TravelingWaveSOA:
             Psat_out_dBm = float(Pin_sat3dB_dBm + target)      # P_out = P_in * G(=G0-3dB) in dB
         return {"P_in_W": Pin, "P_out_W": Pout, "P_in_dBm": to_dBm(Pin), "P_out_dBm": to_dBm(Pout),
                 "gain_dB": gain_dB, "G0_dB": G0_dB, "Pin_sat3dB_dBm": Pin_sat3dB_dBm,
-                "Psat_out_dBm": Psat_out_dBm}
+                "Psat_out_dBm": Psat_out_dBm, "settle_transits_used": used,
+                "settle_rel_change": relchg}
 
-    def psat_vs_detuning(self, drive, P_in_W, nu_s_list_Hz, *, settle_transits: int = 60):
+    def psat_vs_detuning(self, drive, P_in_W, nu_s_list_Hz, *, settle_transits: int = 60,
+                         rtol: float = 1.0e-3, max_settle_transits: int = None):
         """Output saturation power P_sat,out [dBm] vs signal frequency -- the wavelength dependence of
         gain saturation an experimentalist maps by detuning the probe. Returns a dict: nu_s_Hz (the
         grid), G0_dB(nu) (unsaturated gain per detuning), Psat_out_dBm(nu). Off the gain peak the
         unsaturated gain falls and the saturation power shifts (the canonical blue-shift of P_sat with
         the gain roll-off), which the single-tone-at-nu0 saturation gates never exercised. Runs
-        saturation_curve once per frequency."""
+        saturation_curve once per frequency (with its convergence guard: rtol, max_settle_transits)."""
         nus = np.atleast_1d(np.asarray(nu_s_list_Hz, dtype=np.float64))
         G0 = np.empty(nus.size)
         Psat = np.empty(nus.size)
         for k, nu in enumerate(nus):
-            sc = self.saturation_curve(drive, P_in_W, nu_s_Hz=float(nu), settle_transits=settle_transits)
+            sc = self.saturation_curve(drive, P_in_W, nu_s_Hz=float(nu), settle_transits=settle_transits,
+                                       rtol=rtol, max_settle_transits=max_settle_transits)
             G0[k] = sc["G0_dB"]
             Psat[k] = sc["Psat_out_dBm"]
         return {"nu_s_Hz": nus, "G0_dB": G0, "Psat_out_dBm": Psat}
@@ -465,7 +513,8 @@ class TravelingWaveSOA:
         nl_loss (default None): a NonlinearLoss adding two-photon absorption (beta |A|^2/A_eff) and
         carrier-dependent free-carrier absorption (sigma_fca N_w) to the internal loss. None -> byte-
         identical. Not supported together with distributed GVD (gvd_segments>1 AND beta2!=0; raises);
-        with beta2=0 the gvd_segments setting is a no-op and nl_loss runs normally.
+        with beta2=0 the gvd_segments setting is a no-op and nl_loss runs normally. The same holds
+        for langevin=True and state0 (raise on the distributed-GVD path; audit S3-21 rider).
 
         eta_in (default 1.0): the INPUT coupling efficiency (fiber-to-chip), 0 < eta_in <= 1. The input
         field is attenuated by sqrt(eta_in) at the input facet (a coupling LOSS of -10 log10(eta_in) dB)
@@ -474,8 +523,9 @@ class TravelingWaveSOA:
         to-NF result), the value a datasheet quotes, rather than the internal-gain-only NF. The output
         dict reports the FIBER-referred input (A_in / P_in are what you passed, before the facet loss),
         so gain and NF are fiber-to-fiber. eta_in = 1.0 (default) is byte-identical (no scaling). Acts
-        only on the main (non-segmented) path. (The post-processing ase_noise.noise_figure already
-        carries the same 1/eta_in factor; this wires it into the time-domain Langevin engine too.)
+        on BOTH the main and the distributed-GVD (gvd_segments > 1) paths (audit S3-21: the segmented
+        path used to ignore it). (The post-processing ase_noise.noise_figure already carries the same
+        1/eta_in factor; this wires it into the time-domain Langevin engine too.)
 
         Convention exp(-i omega t): a complex baseband tone exp(-i 2 pi f t) sits at optical
         frequency nu_s + f; the FFT of A_out exposes the FWM products at 2 f1 - f2."""
@@ -497,17 +547,28 @@ class TravelingWaveSOA:
         if nl_loss is not None and nl_loss.active and beta2 != 0.0 and int(gvd_segments) > 1:
             raise NotImplementedError("amplify_coherent: nl_loss (TPA/FCA) with distributed GVD "
                                       "(gvd_segments>1) is not supported; use gvd_segments=1")
-        if beta2 != 0.0 and int(gvd_segments) > 1:
-            return self._amplify_coherent_segmented(
-                A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha_lef,
-                ultrafast=ultrafast, line_filter=line_filter)
-        nt = A_in.size
         eta = float(eta_in)                                   # input coupling efficiency (NF penalty)
         if not (0.0 < eta <= 1.0):
             raise ValueError("amplify_coherent: eta_in (input coupling efficiency) must be in (0, 1]")
         A_fiber = A_in                                        # fiber-referred input (reported as P_in)
         if eta != 1.0:
             A_in = A_in * np.sqrt(eta)                        # input-facet coupling LOSS into the device
+        # audit S3-21 (wave-7, 2026-11-02): the facet loss above used to sit AFTER this branch, so
+        # the distributed-GVD path (beta2 != 0, gvd_segments > 1) silently ignored eta_in -- the
+        # output was the eta_in = 1 output (field off by 1/sqrt(eta), gain/NF optimistic by
+        # -10 log10(eta) dB). Now both paths see the SAME device-referred input and report the SAME
+        # fiber-referred A_in/P_in. The segmented path also silently dropped `langevin`/`seed` (no
+        # noise at all) and `state0`; those now raise instead of returning a noiseless/fresh-carrier
+        # answer to a noisy/warm-start question.
+        if beta2 != 0.0 and int(gvd_segments) > 1:
+            if langevin or state0 is not None:
+                raise NotImplementedError(
+                    "amplify_coherent: langevin noise and state0 are not supported with distributed "
+                    "GVD (gvd_segments > 1 and beta2 != 0); use gvd_segments=1")
+            return self._amplify_coherent_segmented(
+                A_in, drive, int(gvd_segments), beta2, nu_s_Hz=nu, alpha_lef=alpha_lef,
+                ultrafast=ultrafast, line_filter=line_filter, A_fiber=A_fiber)
+        nt = A_in.size
         state = self.model.init_slices(self.nz, drive) if state0 is None else state0
         gam = self.model.gamma_confinement
         uf = self._uf_init(ultrafast)
@@ -589,7 +650,7 @@ class TravelingWaveSOA:
                 "P_out": np.abs(A_out) ** 2, "dt": self.dt, "state": state}
 
     def _amplify_coherent_segmented(self, A_in, drive, segments, beta2, *, nu_s_Hz, alpha_lef,
-                                    ultrafast, line_filter):
+                                    ultrafast, line_filter, A_fiber=None):
         """Distributed GVD: the symmetric Strang split refined to S sub-sections that interleave
         dispersion and gain S times instead of lumping all the dispersion at the two device ends:
 
@@ -609,7 +670,11 @@ class TravelingWaveSOA:
         samples of A_out are an S-DEPENDENT superposition of S separate startup ramps plus
         segment-boundary zeros. Only the steady tail A_out[nz:] (after the full nz-sample transit) is
         physical -- window past the first nz samples, exactly as for the monolithic amplify()/
-        amplify_coherent() (whose gain_dB is likewise meaningful only at CW steady state)."""
+        amplify_coherent() (whose gain_dB is likewise meaningful only at CW steady state).
+
+        A_in is the DEVICE-referred input (after the eta_in facet loss applied by amplify_coherent);
+        A_fiber (default: A_in) is the fiber-referred input reported as A_in/P_in (audit S3-21)."""
+        A_rep = A_in if A_fiber is None else A_fiber
         if int(segments) < 1 or self.nz % int(segments) != 0:
             raise ValueError("amplify_coherent(gvd_segments=S): S must be >= 1 and divide n_slices "
                              "({} % {} != 0)".format(self.nz, int(segments)))
@@ -629,7 +694,7 @@ class TravelingWaveSOA:
             field, state = r["A_out"], r["state"]
             field = np.fft.ifft(np.fft.fft(field) * (D_half if k == S - 1 else D_full))
         t = np.arange(nt) * self.dt
-        return {"t": t, "A_in": A_in, "A_out": field, "P_in": np.abs(A_in) ** 2,
+        return {"t": t, "A_in": A_rep, "A_out": field, "P_in": np.abs(A_rep) ** 2,
                 "P_out": np.abs(field) ** 2, "dt": self.dt, "state": state}
 
     def amplify_coherent_dualpol(self, A_te_in, A_tm_in, drive, *, nu_s_Hz=None, alpha_lef=None,
@@ -873,7 +938,7 @@ class TravelingWaveSOA:
             import warnings
             warnings.warn("steady_gain_dB: gain still drifting by {:.2e} dB over the last "
                           "tenth of the settle window -- raise settle_lifetimes".format(
-                              float(np.nanmax(tail) - np.nanmin(tail))), RuntimeWarning,
+                              float(np.nanmax(tail) - np.nanmin(tail))), UnreliableResultWarning,
                           stacklevel=2)
         return float(g[-1])
 

@@ -22,6 +22,7 @@ import numpy as np
 from dynameta.constants import C_LIGHT
 from dynameta.core.layered import LayeredSlab, LayeredStack
 from dynameta.optics.tmm_reference import layered_rta
+from dynameta.warning_types import UnreliableResultWarning
 
 
 def rc_accumulation(times_s, n_off: float, n_on: float, tau_s: float):
@@ -110,6 +111,9 @@ def optical_transient_response(times_s, n_of_t: Callable, lambda_m: float, *, dr
     `drude_of_t(t) -> DrudeOptical` (a per-instant Drude, e.g. carrier-heating Te(t)-dependent m*/Gamma from
     carriers.carrier_heating). The drude_of_t hook lets the SAME loop carry a time-varying material response
     without widening DrudeOptical.eps; drude_of_t=None preserves the fixed-drude_model path exactly.
+    The SAME hook can be handed to the FDTD path (optics.fdtd.solve_fdtd_1d(drude_of_t=...,
+    drude_n_m3=n)), which converts each DrudeOptical through DrudeOptical.wp_gamma (audit V-18:
+    the two `drude_of_t` contracts used to be incompatible).
 
     DEPTH ORIENTATION -- STATE IT (audit V-9). `enz_reflector_stack` documents that eps_ito runs
     AIR-SIDE-FIRST (eps_ito[0] adjacent to air, eps_ito[-1] adjacent to the gate oxide), which is
@@ -192,4 +196,4 @@ def _warn_if_not_adiabatic(stack, t, factor: float) -> None:
             "TMM solve and the returned R(t) will look smooth and plausible while being wrong. "
             "Use the FDTD path (a time-varying eps hook) for sub-round-trip drives, or pass "
             "adiabatic_rt_factor=0 to silence this.".format(dt_min, factor, t_rt),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)

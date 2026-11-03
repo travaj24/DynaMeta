@@ -65,7 +65,7 @@ fitting, Kramers-Kronig consistency checks).
 (Module map refreshed per audit 6.3; v0.8/v0.9 gap closed per audit R-9.)
 """
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 # Geometry + materials data model (lightweight)
 # Windows: expose the pip 'tbb' wheel's runtime DLLs (<prefix>/Library/bin) so numba's
@@ -78,7 +78,7 @@ _dm_expose_tbb()
 del _dm_expose_tbb
 
 from dynameta.geometry import (
-    Design, UnitCell, Stack, Layer, Inclusion, Feature, Electrode,
+    Design, UnitCell, Stack, Layer, Inclusion, Feature, Taper, Electrode,
     CrossSection, Rectangle, Circle, Ellipse, RegularPolygon, Polygon,
     centered_rectangle, centered_square, centered_circle,
     Mesh2DSpec, Mesh3DSpec, OpticalSpec,
@@ -109,7 +109,7 @@ from dynameta.analysis import (
 __all__ = [
     "__version__",
     # geometry
-    "Design", "UnitCell", "Stack", "Layer", "Inclusion", "Feature", "Electrode",
+    "Design", "UnitCell", "Stack", "Layer", "Inclusion", "Feature", "Taper", "Electrode",
     "CrossSection", "Rectangle", "Circle", "Ellipse", "RegularPolygon", "Polygon",
     "centered_rectangle", "centered_square", "centered_circle",
     "Mesh2DSpec", "Mesh3DSpec", "OpticalSpec",

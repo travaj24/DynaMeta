@@ -129,3 +129,53 @@ def test_cavity_design_formula_guards():
         pump_threshold_per_s(1e25, s)
     with pytest.raises(ValueError):                      # at/below threshold: no oscillation
         relaxation_oscillation_rad_s(1.0, 1e-13, 5e-12)
+
+
+def test_s2_7_lorentz_and_gain_ade_w0dt_guard_2d_and_3d():
+    """audit S2-7 (fixed in wave 4, 1154002, but never gated; tagged wave-7 2026-11-02). The
+    Lorentz and gain-line ADEs are the central-difference oscillator P^{n+1} = C1 P^n + C2 P^{n-1}
+    + C3 E^n; undamped, its characteristic roots z^2 - C1 z - C2 = 0 (C1 = 2 - (w0 dt)^2, C2 = -1)
+    leave the unit circle exactly when w0*dt > 2, so a far-above-band pole diverged silently. The
+    front ends refuse w0*dt > 1 (a 2x margin) in BOTH 2-D and 3-D, for BOTH ADEs.
+    Bidirectional: (i) the analytic bound the guard protects; (ii) the raw kernel, which has no
+    guard, really does blow up past it and stays bounded under it; (iii) the four front-end raises."""
+    from dynameta.optics.fdtd_nd import solve_fdtd_3d
+    from dynameta.optics.fdtd_nd.cpml import cpml_z
+    from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
+    # (i) spectral radius of the undamped recursion
+    for wdt, stable in ((0.5, True), (1.0, True), (1.9, True), (2.1, False), (3.5, False)):
+        rho = max(abs(np.roots([1.0, -(2.0 - wdt ** 2), 1.0])))
+        assert bool(rho <= 1.0 + 1e-12) is stable, (wdt, rho)
+    # (ii) the unguarded kernel: a 1x40 cell, a Lorentz pole on every interior cell
+    nx, nz, dz = 1, 40, 20e-9
+    dt = 0.5 * dz / 3.0e8
+    cp = cpml_z(nz, dz, dt, 8)
+    src = np.exp(-((np.arange(400) - 40) / 12.0) ** 2)
+
+    def peak(wdt):
+        w0 = wdt / dt
+        C1 = np.full((nx, nz), 2.0 - (w0 * dt) ** 2)
+        C2 = np.full((nx, nz), -1.0)
+        C3 = np.full((nx, nz), 8.854e-12 * 0.5 * (w0 * dt) ** 2)
+        one, zero = np.ones((nx, nz)), np.zeros((nx, nz))
+        with np.errstate(over="ignore", invalid="ignore"):
+            eL, _h, _e, _hr = run_2d_te(one, zero, zero, zero, 100e-9, dz, dt, 400, 12, 15, 30, src,
+                                        cp, lor=(C1, C2, C3))
+        return float(np.nanmax(np.abs(eL))) if np.all(np.isfinite(eL)) else np.inf
+
+    assert peak(0.9) < 10.0                            # under the guard: bounded
+    assert peak(2.5) > 1e6                             # past the analytic bound: diverges
+    # (iii) the front ends refuse it (w0*dt = 3.5 in 2-D / 2.7 in 3-D here)
+    kw = dict(lambda_min_m=1.0e-6, lambda_max_m=1.4e-6, resolution=16)
+    lor = FDTDLayer(150e-9, eps_inf=2.0, lorentz_w0_rad_s=1e17, lorentz_delta_eps=0.5,
+                    lorentz_gamma_rad_s=1e13)
+    gain = FDTDLayer(150e-9, eps_inf=2.0, gain_kappa_C2_kg=1e-8, gain_dN_m3=1e22,
+                     gain_w_rad_s=1e17, gain_dw_rad_s=1e13)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)            # the C3-6 window note
+        for L, what in ((lor, "Lorentz pole under-resolved"), (gain, "gain line under-resolved")):
+            with pytest.raises(ValueError, match=what):
+                solve_fdtd_2d([L], period_x_m=100e-9, **kw)
+            with pytest.raises(ValueError, match=what):
+                solve_fdtd_3d([L], period_x_m=100e-9, period_y_m=100e-9, **kw)

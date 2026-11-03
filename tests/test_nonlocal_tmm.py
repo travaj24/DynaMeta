@@ -359,3 +359,84 @@ def test_public_entry_points_validate_pol():
         assert nt.stack_rt(w, layers, pol=alias).r == nt.stack_rt(w, layers, pol=canonical).r
         assert (nt._admittance(4.0 + 0j, 1.2e7 + 0j, alias)
                 == nt._admittance(4.0 + 0j, 1.2e7 + 0j, canonical))
+
+
+# ------------------------------------------------------------------------------------------------
+# wave-6 hygiene (2026-11-02): audit Q-18 (beta = 0 local limit), Q-19 (one _kz / _admittance /
+# k_par_from_angle) and Q-23 (one energy-budget policy)
+# ------------------------------------------------------------------------------------------------
+def _q18_layer(beta, D=0.0):
+    return nt.HydroLayer(eps_inf=1.0, wp=1.37e16, gamma=1.0e14, beta=beta, thickness_m=5.0e-9,
+                         D=D)
+
+
+def test_q18_beta_zero_is_the_local_drude_limit_not_a_zero_division():
+    """audit Q-18: HydroLayer(beta=0) promised the local Drude metal but every p-pol call raised
+    ZeroDivisionError (kL_squared divides by beta_eff**2 = 0). It is now routed to the local
+    Abeles matrix at eps_T -- the exact beta -> 0 limit of the ABC matrix: bit-identical to a
+    DielectricLayer(eps_T) stack, and the beta -> 0 sequence converges onto it linearly
+    (measured |dr| 1.2e-7 / 1.2e-6 / 1.2e-5 at beta 1e2 / 1e3 / 1e4 m/s)."""
+    w = 1.0e16
+    spacer = nt.DielectricLayer(2.25, 1.0e-7)
+    kw = dict(pol="p", theta_rad=0.5, n_sub=1.5)
+    r0 = nt.stack_rt(w, [spacer, _q18_layer(0.0)], **kw)
+    eps_t = nt.eps_transverse(w, _q18_layer(0.0))
+    loc = nt.stack_rt(w, [spacer, nt.DielectricLayer(eps_t, 5.0e-9)], **kw)
+    assert (r0.r, r0.t, r0.D_pole) == (loc.r, loc.t, loc.D_pole)
+    d = [abs(nt.stack_rt(w, [spacer, _q18_layer(b)], **kw).r - r0.r) for b in (1e2, 1e3, 1e4)]
+    assert d[0] < d[1] < d[2] < 1e-4
+    assert d[1] / d[0] == pytest.approx(10.0, rel=0.05)
+    assert d[2] / d[1] == pytest.approx(10.0, rel=0.05)
+    # the pole function: no csc clearing for a local-limit layer -- it IS the local stack's
+    wc = 1.0e16 - 1.0e14j
+    f0 = nt.pole_function([_q18_layer(0.0)], k_par_m=1.0e6)
+    fl = nt.pole_function([nt.DielectricLayer(nt.eps_transverse(wc, _q18_layer(0.0)), 5.0e-9)],
+                          k_par_m=1.0e6)
+    assert f0(wc) == fl(wc)
+    # GNOR diffusion alone (beta = 0, D > 0) is still a genuine nonlocal layer
+    assert nt.stack_rt(w, [spacer, _q18_layer(0.0, D=1.0e-4)], **kw).r != r0.r
+
+
+def test_q19_one_kz_admittance_kpar():
+    """audit Q-19: `_kz`, `_admittance` and `k_par_from_angle` were verbatim copies in
+    nonlocal_tmm and resonance (the `_admittance` twins had already diverged once, V-3/V-8). ONE
+    implementation now: census (one `def` of each under dynameta/), identity of the objects, and
+    the wrapper keeps nonlocal_tmm's `omega` keyword. NOT bit-identical, by a stated tolerance:
+    the square root itself is (pinned below against the pre-Q-19 np.sqrt kernel), but kz is now a
+    Python complex so eps/kz runs CPython's complex division -- measured 647 of 2400 stack_rt /
+    pole_function values moved, max relative 2.4e-14."""
+    import pathlib
+    import re
+    from dynameta.optics import resonance as rz
+    assert nt._kz is rz._kz and nt._admittance is rz._admittance
+    assert (nt.k_par_from_angle(1.0, omega=2.0e15, theta_rad=0.3)
+            == rz.k_par_from_angle(1.0, 2.0e15, 0.3))
+    root = pathlib.Path(__file__).resolve().parents[1] / "dynameta"
+    defs = {"_kz": 0, "_admittance": 0, "k_par_from_angle": 0}
+    for f in root.rglob("*.py"):
+        txt = f.read_text(encoding="cp1252", errors="replace")
+        for name in defs:
+            defs[name] += len(re.findall("^def " + name + "[(]", txt, flags=re.M))
+    # k_par_from_angle: the implementation in resonance + the keyword-keeping delegate here
+    assert defs == {"_kz": 1, "_admittance": 1, "k_par_from_angle": 2}, defs
+    rng = np.random.default_rng(19)
+    for _ in range(200):
+        eps = complex(rng.uniform(-5, 10), rng.uniform(0, 2))
+        k0 = complex(rng.uniform(1e6, 2e7), rng.uniform(-1e5, 0))
+        kp = complex(rng.uniform(0, 3e7))
+        assert complex(np.sqrt(eps * k0 * k0 - kp * kp + 0j)) == nt._kz(eps, k0, kp)
+
+
+def test_q23_stack_rt_refuses_a_gain_layer_on_the_real_axis():
+    """audit Q-23 (see test_resonance's twin): stack_rt now shares tmm_reference's energy-budget
+    rule on the real axis -- a gamma < 0 hydrodynamic film or an Im(eps) < 0 dielectric (a gain
+    sign slip) used to come back with a NEGATIVE absorptance A and no signal."""
+    gain = nt.HydroLayer(eps_inf=1.0, wp=1.37e16, gamma=-2.0e14, beta=1.07e6,
+                         thickness_m=5.0e-9)
+    with pytest.raises(ValueError, match="energy budget"):
+        nt.stack_rt(1.5e16, [gain], pol="p", theta_rad=0.6)
+    with pytest.raises(ValueError, match="energy budget"):
+        nt.stack_rt(2.0e15, [nt.DielectricLayer(2.25 - 0.3j, 1.0e-6)])
+    res = nt.stack_rt(1.5e16, [gain], pol="p", theta_rad=0.6, check_energy=False)
+    assert res.A < 0.0                                     # what used to be returned silently
+    nt.stack_rt(1.5e16 - 1.0e14j, [gain], pol="p", k_par_m=1.0e7)   # complex omega: no check

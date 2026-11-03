@@ -38,9 +38,15 @@ the contacts from surface->volume adjacency. A MULTI-SEMICONDUCTOR heterostack u
 also supported (Stacked3DSpec.extra_semiconductors / from_design's contiguous gate-ward run): the
 body-most semiconductor is the primary 'semi', the rest are meshed gate-ward as distinct equilibrium
 regions with Potential-continuity interfaces, and the gate-adjacent semiconductor (where the
-accumulation forms) is emitted as the CarrierField. SCOPE / remaining: the multi-semiconductor path
-is EQUILIBRIUM-only (the semi-semi carrier-continuity interface for drift_diffusion/bipolar_dd is
-not yet wired); from_design orders only a gate-ABOVE contiguous run.
+accumulation forms) is emitted as the CarrierField. The bands are ALIGNED by the Anderson rule
+(Stacked3DSpec.band_alignment: Fermi level flat, vacuum level continuous, per-region electron affinity),
+so the junction carries the work-function-difference built-in potential (audit S1-9, 2026-11-02;
+before it, psi = 0 was the exact equilibrium of every stack). The gate electrode keeps the BODY
+semiconductor's work function (flat band of the body at Vg = 0). SCOPE / remaining: the
+multi-semiconductor path is EQUILIBRIUM-only (the semi-semi carrier-continuity / thermionic-emission
+interface for drift_diffusion/bipolar_dd is not yet wired -- design note
+docs/audit/2026-11-02-s1-9-heterojunction-built-in-potential.md); from_design orders only a
+gate-ABOVE contiguous run.
 
 gmsh notes: its OCC kernel cannot build at 1e-9-metre scale, so the geometry is
 built in NM and the mesh emitted SCALED to metres (Mesh.ScalingFactor); DEVSIM
@@ -51,9 +57,21 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+# audit S1-10 (2026-07-17; fixed wave-7 2026-11-02): devsim is a HARD dependency of this module -- the
+# physics modules imported just below (physics_drift_diffusion, physics_bipolar_dd, dc_solve) import it
+# at their top -- so the four in-method `import devsim as ds` lines this module used to carry were a
+# lazy-import ceremony that could never be lazy, and a devsim-free install got a raw "No module named
+# 'devsim'" from inside a sibling module. Import it ONCE here, first, with devsim_layered's friendly
+# hint (gated: tests/test_audit_2026_07_17_wave7_carriers.py::test_s1_10_*).
+try:
+    import devsim as ds
+except ImportError as _e:                                   # pragma: no cover - optional heavy solver
+    raise ImportError("dynameta.carriers.devsim_3d requires the optional 'devsim' package "
+                      "(pip install dynameta[solvers]); the pure-TMM / bring-your-own-solver paths "
+                      "do not import this module.") from _e
 
 from dynameta.core.carrier_field import (
     CarrierField, CarrierRegion, ELECTRON_DENSITY, POTENTIAL)
@@ -65,14 +83,8 @@ from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
-from dynameta.constants import HBAR, KB
-
-
-def _effective_dos_m3(m_dos_kg: float, T_K: float = 300.0) -> float:
-    """Effective band DOS N = 2 (m* kB T / (2 pi hbar^2))^(3/2) [m^-3] from a DOS mass -- the
-    conduction N_c (or valence N_v) for the bipolar FD g-factor. (Same formula as the 2D builder;
-    for a non-degenerate diode its exact value barely matters, g~1.)"""
-    return 2.0 * (m_dos_kg * KB * T_K / (2.0 * np.pi * HBAR ** 2)) ** 1.5
+from dynameta.geometry.guards import require_supported_geometry
+from dynameta.warning_types import AdvisoryWarning
 
 
 @dataclass
@@ -149,7 +161,14 @@ class Stacked3DSpec:
     # SCOPE: multi-semiconductor is supported for the EQUILIBRIUM solve (Potential continuity suffices
     # for the local n(psi) closure); for physics in {drift_diffusion, bipolar_dd} the semiconductor-
     # semiconductor carrier-continuity interface is not yet wired, so extra_semiconductors raises there.
-    extra_semiconductors: List[Tuple[str, str, float, float, float]] = field(default_factory=list)
+    # An entry may carry two OPTIONAL trailing fields, (..., n_bg_m3, chi_eV, dos_mass_kg): the region's
+    # electron affinity [eV] and DOS mass [kg] (None/absent -> chi: same-material rule below; mass: the
+    # primary's dos_mass_kg, the legacy behaviour). See band_alignment() for the equilibrium physics.
+    extra_semiconductors: List[tuple] = field(default_factory=list)
+    # Electron affinity [eV] of the PRIMARY semiconductor (audit S1-9). Needed only when an extra
+    # semiconductor is a DIFFERENT material (Anderson-rule band offset Delta E_c = chi_semi - chi_r);
+    # None is fine for a same-material stack (zero offset by definition).
+    chi_semi_eV:     Optional[float] = None
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
@@ -167,12 +186,69 @@ class Stacked3DSpec:
         semiconductor where the gate accumulation forms (= 'semi' when there are no extra semiconductors)."""
         return self.extra_semiconductors[-1][0] if self.extra_semiconductors else "semi"
 
+    def extra_semiconductor_entries(self) -> "List[Tuple[str, str, float, float, float, Optional[float], Optional[float]]]":
+        """extra_semiconductors normalised to 7-tuples (name, material, thickness_m, eps_static, n_bg_m3,
+        chi_eV or None, dos_mass_kg or None) -- the legacy 5-tuple form reads as (..., None, None)."""
+        return [tuple(e) + (None,) * (7 - len(e)) for e in self.extra_semiconductors]
+
     def semiconductor_nbg(self, region_name: str) -> float:
         """Background donor/intrinsic density for a semiconductor region ('semi' or an extra one)."""
-        for (nm, _mat, _thk, _eps, nbg) in self.extra_semiconductors:
+        for (nm, _mat, _thk, _eps, nbg, _chi, _m) in self.extra_semiconductor_entries():
             if nm == region_name:
                 return float(nbg)
         return float(self.n_bg_m3)
+
+    def semiconductor_dos_mass_kg(self, region_name: str) -> float:
+        """DOS effective mass of a semiconductor region (an extra one without its own -> the primary's)."""
+        for (nm, _mat, _thk, _eps, _nbg, _chi, m) in self.extra_semiconductor_entries():
+            if nm == region_name and m is not None:
+                return float(m)
+        return float(self.dos_mass_kg)
+
+    def band_alignment(self) -> "Dict[str, Tuple[float, float]]":
+        """EQUILIBRIUM band alignment of the semiconductor heterostack (audit S1-9, wave-7 2026-11-02):
+        {region: (Phi_c_V, psi_neutral_V)} for 'semi' and every extra semiconductor.
+
+        The equilibrium closure is n = N_c F_1/2((psi - Phi_c)/V_t) with E_F = 0, i.e. the conduction
+        edge is E_c = -q psi + q Phi_c. psi is the electrostatic potential and is CONTINUOUS across
+        every interface (Potential continuity), so -q psi is the vacuum level up to one constant and
+        E_c = E_vac - chi gives (Anderson rule) Phi_c(r) = Phi_c0(semi) + (chi_semi - chi_r)/q, with
+        Phi_c0(r) = -eta_bg(r) V_t the value that makes region r neutral at psi = 0. A neutral bulk of
+        region r therefore sits at psi_neutral(r) = Phi_c(r) - Phi_c0(r) = (W_semi - W_r)/q, W = chi +
+        (E_c - E_F)_neutral -- the built-in potential is the WORK-FUNCTION difference (Fermi-level
+        alignment). The primary keeps (Phi_c0(semi), 0), so the body contact and the single-
+        semiconductor solve are unchanged.
+
+        THE DEFECT THIS REPLACES: every region used its OWN Phi_c0(r), i.e. an implicit affinity
+        chi_r = eta_bg(r) kT that made ALL work functions equal, so psi = 0 was the exact equilibrium of
+        any stack -- no built-in potential even for an n+/n HOMOjunction of one material (which has
+        none of the band offset that this implied: a step of kT(eta_bg,semi - eta_bg,r) in E_c).
+
+        chi rule: a region of the SAME material as the primary has zero offset unless BOTH affinities are
+        given; a DIFFERENT material needs both chi_semi_eV and its own chi (raises otherwise -- there is no
+        neutral default for a heterojunction band offset)."""
+        from dynameta.carriers.physics_equilibrium import V_T as _VT, effective_dos_m3, invert_F12
+
+        def _phi_c0(n_bg, m):
+            return -invert_F12(float(n_bg) / effective_dos_m3(float(m))) * _VT
+
+        phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg)
+        out = {"semi": (phi0_semi, 0.0)}
+        for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
+            if chi is not None and self.chi_semi_eV is not None:
+                d_chi = float(self.chi_semi_eV) - float(chi)
+            elif mat == self.semi_material:
+                d_chi = 0.0                                   # same material: no band offset
+            else:
+                raise ValueError(
+                    "Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
+                    "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
+                    "needs BOTH electron affinities (chi_semi_eV and the entry's 6th field chi_eV) -- there "
+                    "is no neutral default for a heterojunction band offset (audit S1-9).".format(
+                        nm, mat, self.semi_material))
+            phi_c = phi0_semi + d_chi
+            out[nm] = (phi_c, phi_c - _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm)))
+        return out
 
     def __post_init__(self):
         # Sanity-check the relative permittivities so a bogus/omitted value fails at
@@ -203,7 +279,14 @@ class Stacked3DSpec:
                                   "thk={}, eps={}".format(mat, thk, eps))
         if self.extra_semiconductors:
             names = {"semi"}
-            for nm, mat, thk, eps, nbg in self.extra_semiconductors:
+            if any(len(tuple(e)) not in (5, 6, 7) for e in self.extra_semiconductors):
+                raise ValueError("extra_semiconductors entries are (name, material, thickness_m, eps_static, "
+                                 "n_bg_m3[, chi_eV[, dos_mass_kg]])")
+            for nm, mat, thk, eps, nbg, chi, m in self.extra_semiconductor_entries():
+                if chi is not None and not np.isfinite(float(chi)):
+                    raise ValueError("extra_semiconductors entry '{}': chi_eV must be finite".format(nm))
+                if m is not None and not (float(m) > 0.0):
+                    raise ValueError("extra_semiconductors entry '{}': dos_mass_kg must be > 0".format(nm))
                 if nm in names:
                     raise ValueError("extra_semiconductors region name '{}' is not unique (clashes with "
                                       "'semi' or another extra semiconductor)".format(nm))
@@ -220,6 +303,7 @@ class Stacked3DSpec:
                     "extra_semiconductors (a multi-semiconductor heterostack) is supported only for "
                     "physics='equilibrium'; got physics={!r}. The semi-semi carrier-continuity "
                     "interface for drift_diffusion/bipolar_dd is not yet implemented.".format(self.physics))
+            self.band_alignment()        # audit S1-9: a heterojunction without affinities fails HERE, loudly
 
     def layer_stack_nm(self) -> "List[Tuple[str, str, str, float, float, float]]":
         """The full ordered stack from the body up to the gate as
@@ -229,7 +313,7 @@ class Stacked3DSpec:
         out = [("semi", self.semi_material, "semiconductor", 0.0, self.semi_thk_m * 1e9,
                 float(self.eps_semi))]
         z = self.semi_thk_m * 1e9
-        for nm, mat, thk_m, eps, _nbg in self.extra_semiconductors:    # stacked gate-ward, before the oxide
+        for nm, mat, thk_m, eps, _nbg, _chi, _m in self.extra_semiconductor_entries():   # gate-ward, before the oxide
             out.append((nm, mat, "semiconductor", z, z + thk_m * 1e9, float(eps)))
             z += thk_m * 1e9
         for name, mat, thk_m, eps in self.dielectric_stack_m():
@@ -250,7 +334,11 @@ class Stacked3DSpec:
         gate electrode footprint. The emitted CarrierField region is named after the Design's
         semiconductor layer so it matches the optics alignment source_region (-> run_pipeline,
         no hand alignment). Inclusions are allowed in non-semiconductor layers (e.g. the
-        patch); the semiconductor layer itself must be laterally uniform."""
+        patch); the semiconductor layer itself must be laterally uniform. Stack.features and tapered
+        inclusions are REFUSED (2026-11-02): a via came back as the via-free spec (measured), and a tapered
+        gate patch touches the oxide with its BOTTOM (narrower) section, which the electrode-footprint
+        gate_patch_frac does not see."""
+        require_supported_geometry(design, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
                       if design.material_role(L.background_material) == "semiconductor"]
@@ -331,8 +419,11 @@ class Stacked3DSpec:
             if tri is None:
                 raise ValueError("extra semiconductor '{}' has no transport model".format(
                     Li.background_material))
+            # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
+            # the bands by the work-function difference (Stacked3DSpec.band_alignment)
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
-                                float(tri.eps_static), float(tri.n_bg_m3)))
+                                float(tri.eps_static), float(tri.n_bg_m3), float(tri.chi_eV),
+                                float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
@@ -358,7 +449,7 @@ class Stacked3DSpec:
                     warnings.warn(
                         "from_design: gate footprint {:.3g}x{:.3g} m is not square; it is "
                         "collapsed to a centered square of the larger side (gate_patch_frac is "
-                        "a single scalar).".format(wx, wy))
+                        "a single scalar).".format(wx, wy), AdvisoryWarning, stacklevel=2)
                 frac = min(1.0, max(wx / cell.period_x_m, wy / cell.period_y_m))
         # gate/body electrode names so run_pipeline's BiasPoint (keyed by electrode name)
         # maps to the right contact instead of silently defaulting Vg=0 (verifier HIGH).
@@ -387,7 +478,8 @@ class Stacked3DSpec:
                     field_region_name=layers[gate_adj_idx].name,   # the gate-adjacent (accumulation) layer
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
-                    extra_dielectrics=extra_diels, extra_semiconductors=extra_semis, **bip)
+                    extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
+                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None), **bip)
 
 
 class Devsim3DEquilibrium:
@@ -428,7 +520,6 @@ class Devsim3DEquilibrium:
                             ndim=3)]
 
     def build_device(self) -> None:
-        import devsim as ds
         self._build_mesh()                                      # sets _mesh_regions, _iface_pairs, _top_diel
         ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
         s = self.spec
@@ -467,8 +558,23 @@ class Devsim3DEquilibrium:
                 # OWN background density (the spec's extra_semiconductors n_bg). Multi-semiconductor is
                 # equilibrium-only (the post_init guard rejects DD/bipolar + extra_semiconductors).
                 PE.setup_semiconductor_region(self.device, name, n_bg_m3=s.semiconductor_nbg(name),
-                                               eps_static=eps, dos_mass_kg=s.dos_mass_kg)
+                                               eps_static=eps, dos_mass_kg=s.semiconductor_dos_mass_kg(name))
             # metal inclusions are inert (no physics) -- their Dirichlet-free boundary is fine
+        if s.extra_semiconductors:
+            # audit S1-9 (wave-7, 2026-11-02): ALIGN THE BANDS. setup_semiconductor_region calibrates each
+            # region's Phi_c0 so that region is neutral at psi = 0 -- equal work functions everywhere, so
+            # psi = 0 was the exact equilibrium of every heterostack and NO built-in potential formed. Re-set
+            # each extra region's Phi_c to the Anderson-rule value (Stacked3DSpec.band_alignment; the
+            # primary's is unchanged) and seed its Potential at its own neutral level, so the junction
+            # develops the work-function-difference built-in potential (gate:
+            # tests/test_audit_2026_07_17_wave7_carriers.py::test_s1_9_*).
+            for rname, (phi_c, psi_n) in s.band_alignment().items():
+                if rname == "semi":
+                    continue
+                ds.set_parameter(device=self.device, region=rname, name="Phi_c0", value=float(phi_c))
+                nn = len(ds.get_node_model_values(device=self.device, region=rname, name="x"))
+                ds.set_node_values(device=self.device, region=rname, name="Potential",
+                                   values=[float(psi_n)] * nn)
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
         for c in ds.get_contact_list(device=self.device):
@@ -489,7 +595,6 @@ class Devsim3DEquilibrium:
         junction expression if given, else uniform +n_bg donor / -n_bg acceptor), then the FD-enhanced
         Scharfetter-Gummel physics + the charge-neutral equilibrium seed models. Mirrors the 2D
         LayeredDevsimBuilder._setup_bipolar_region."""
-        import devsim as ds
         s = self.spec
         if s.net_doping_expr:
             ds.node_model(device=self.device, region=region, name="NetDoping", equation=s.net_doping_expr)
@@ -497,8 +602,8 @@ class Devsim3DEquilibrium:
             nd = (-1.0 if s.acceptor else 1.0) * float(n_bg_m3)
             ds.node_model(device=self.device, region=region, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = _effective_dos_m3(s.dos_mass_kg)
-        Nv = _effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
+        Nc = PE.effective_dos_m3(s.dos_mass_kg)
+        Nv = PE.effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
@@ -506,7 +611,6 @@ class Devsim3DEquilibrium:
         BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
-        import devsim as ds
         if not self._built:
             self.build_device()
         gn, bn = self.spec.gate_name, self.spec.body_name
@@ -520,7 +624,7 @@ class Devsim3DEquilibrium:
                 warnings.warn(
                     "Devsim3DEquilibrium.solve: BiasPoint has voltages {} but neither gate_name "
                     "'{}' nor body_name '{}' is among them -- solving at Vg=0. Check the electrode "
-                    "names.".format(sorted(bias.voltages), gn, bn))
+                    "names.".format(sorted(bias.voltages), gn, bn), AdvisoryWarning, stacklevel=2)
             else:
                 unknown = [k for k in bias.voltages if k not in (gn, bn)]
                 if unknown:
@@ -528,7 +632,7 @@ class Devsim3DEquilibrium:
                         "Devsim3DEquilibrium.solve: BiasPoint voltage key(s) {} match neither "
                         "gate_name '{}' nor body_name '{}' and are SILENTLY IGNORED -- the stacked "
                         "builder drives only the gate and body contact. Check the electrode "
-                        "names.".format(unknown, gn, bn))
+                        "names.".format(unknown, gn, bn), AdvisoryWarning, stacklevel=2)
         vg = float(bias.voltages.get(gn, 0.0))
         vb = float(bias.voltages.get(bn, 0.0))
         ds.set_parameter(device=self.device, name="body_bias", value=vb)
@@ -573,8 +677,8 @@ class Devsim3DEquilibrium:
             # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
             # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
             # same correction (FDContactShift is the node model the contact installed).
-            _Nc = _effective_dos_m3(self.spec.dos_mass_kg)
-            _Nv = (_effective_dos_m3(float(self.spec.dos_mass_p_kg))
+            _Nc = PE.effective_dos_m3(self.spec.dos_mass_kg)
+            _Nv = (PE.effective_dos_m3(float(self.spec.dos_mass_p_kg))
                    if self.spec.dos_mass_p_kg else _Nc)
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
@@ -647,8 +751,12 @@ class Devsim3DEquilibrium:
             if cc:
                 extras["contact_currents_A"] = cc
         except Exception as _e:                               # noqa: BLE001 (diagnostic)
-            import warnings as _w
-            _w.warn("contact-current extraction unavailable: {}".format(_e))
+            # audit S5-16 (wave-7, 2026-11-02): this was `import warnings as _w; _w.warn(...)` -- no
+            # category, no stacklevel, and the alias hid it from the V-17 census (which matches the
+            # literal `warnings.warn`). The CarrierField is complete; only the optional extras key is
+            # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
+            warnings.warn("contact-current extraction unavailable: {}".format(_e),
+                          AdvisoryWarning, stacklevel=2)
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
             temperature_K=PE.T_REF, regions={rname: reg},
@@ -656,7 +764,6 @@ class Devsim3DEquilibrium:
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m), extras=extras)
 
     def teardown(self) -> None:
-        import devsim as ds
         from dynameta.carriers import eq_registry as _R
         _R.clear(self.device)
         for dv in list(ds.get_device_list()):

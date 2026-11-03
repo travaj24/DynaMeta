@@ -76,9 +76,12 @@ def main():
     # inversion puts eps_inf = Re(eps) + Im(eps) and takes the excess back out through the pole. The
     # guard now reads the same DISPERSIVE band-peak index the `layers` path uses; the first-ever
     # full-tier nightly (2026-08-30) is what finally executed this script in CI and caught it.
+    # z_subcell="point" (2026-11-02): the painter below POINT-samples its z band, so the cell-for-cell
+    # identity is against the solver's POINT fill; the default z-subcell-averaged fill differs at the two
+    # face nodes by construction (this gate is about the lateral (eps_inf, wp, gam) plumbing).
     L = _eps_to_fdtd_layer(D, EPS_A, LAM)
     Rl, Tl = _flux_at(solve_fdtd_2d([L], period_x_m=PERIOD, nx=4, lambda_min_m=1200e-9,
-                                    lambda_max_m=1400e-9, resolution=34))
+                                    lambda_max_m=1400e-9, resolution=34, z_subcell="point"))
     Ra, Ta = _run_lateral(EPS_A, EPS_A, L)
     dA = max(abs(Ra - Rl), abs(Ta - Tl))
     g_a = dA < 1e-9

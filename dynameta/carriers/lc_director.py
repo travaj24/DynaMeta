@@ -40,6 +40,7 @@ import numpy as np
 
 from dynameta.constants import EPS0
 from dynameta.core.numerics import trapz
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = [
     "DirectorProfile", "LCGeometry", "LCStaticResult",
@@ -87,7 +88,7 @@ def haller_order_parameter(T_K: float, T_NI_K: float, *, beta: float = 0.22) -> 
     return float((1.0 - T_K / T_NI_K) ** float(beta))
 
 
-def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = 300.0, T_NI_K: float = 380.0,
+def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = T_REF, T_NI_K: float = 380.0,
                      beta: float = 0.22) -> float:
     """Frank elastic constant at temperature T from its value K_ref at T_ref. The Frank constants scale
     as the SQUARE of the order parameter, K(T) = K_ref [S(T)/S(T_ref)]^2 (the standard mean-field result;
@@ -100,7 +101,7 @@ def K_of_temperature(K_ref: float, T_K: float, *, T_ref_K: float = 300.0, T_NI_K
     return float(K_ref) * (S / S_ref) ** 2
 
 
-def gamma1_of_temperature(gamma1_ref: float, T_K: float, *, T_ref_K: float = 300.0,
+def gamma1_of_temperature(gamma1_ref: float, T_K: float, *, T_ref_K: float = T_REF,
                           E_a_eV: float = 0.4, T_NI_K: "Optional[float]" = None,
                           beta: float = 0.22) -> float:
     """Rotational viscosity gamma1(T) = gamma1_ref * exp((E_a/kB)(1/T - 1/T_ref)) * [S(T)/S(T_ref)]
@@ -127,19 +128,65 @@ class DirectorProfile:
     V_th: float             # Freedericksz threshold
 
 
-def _B(theta_m: float, dEps: float, ep: float, nphi: int = 1201) -> float:
-    """The elliptic quadrature B(theta_m) (see module docstring); bounded for theta_m < pi/2."""
-    s2 = np.sin(theta_m) ** 2
-    phi = np.linspace(0.0, 0.5 * np.pi, int(nphi))
-    sp2 = np.sin(phi) ** 2
-    eps_th = ep + dEps * s2 * sp2                          # eps(theta(phi))
-    eps_thm = ep + dEps * s2                               # eps(theta_m)
-    integrand = np.sqrt(eps_thm / (dEps * eps_th)) / np.sqrt(1.0 - s2 * sp2)
-    return float(trapz(integrand, phi))
+def _B(theta_max_rad: float, dEps: float, ep: float) -> float:
+    """The elliptic quadrature B(theta_m) (see module docstring), in CLOSED FORM. (theta_m is the
+    MATH symbol for the midplane tilt; the code identifiers are theta_max_rad -- audit V-23, the
+    `_m` suffix means metres in this library -- matching DirectorProfile.theta_max_rad.)
+
+        B = K(m) / sqrt(dEps),   1 - m = cos^2(theta_m) * eps_perp / eps(theta_m),
+
+    K = complete elliptic integral of the first kind (parameter m). Derivation: with eta = sin^2
+    theta_m and g = dEps/eps_perp, B = sqrt(eps(theta_m)/(dEps eps_perp)) int_0^{pi/2} dphi /
+    sqrt((1 - eta sin^2 phi)(1 + g eta sin^2 phi)), and that integral is K(m)/sqrt(1 + g eta) with
+    m = eta (1 + g)/(1 + g eta) (t = cot^2 phi turns it into Carlson's R_F(0, 1 - eta, 1 + g eta)).
+    This is Deuling's splay-Freedericksz voltage law at K33 = K11, V/V_th = (2/pi) K(m) (Deuling 1972;
+    Blinov & Chigrinov, "Electrooptic Effects in LC Materials", Sec. 3.2). theta_m -> 0 gives K(0) =
+    pi/2 and V -> V_th exactly. 1 - m is formed DIRECTLY (cos^2, never 1 - sin^2) and passed to
+    scipy's ellipkm1, so the logarithmic divergence K ~ ln(4/sqrt(1-m)) at theta_m -> pi/2 is exact.
+    AUDIT C-14 (2026-11-02): this was a 1201-point uniform-phi trapezoid, exact (<= 2.4e-5) to 89.9
+    deg but blind to the endpoint log singularity above it -- measured vs a 40-digit mpmath quadrature
+    it over-estimated B by 1.15x at 89.99 deg, 3.56x at 89.999 deg and 42.09x at the bisection's
+    upper bracket pi/2 - 1e-6, so the over-drive saturation test compared V against a value 42x too
+    high. The closed form is within 2.3e-16 of the mpmath oracle at every one of those angles."""
+    from scipy.special import ellipkm1
+    s2 = math.sin(theta_max_rad) ** 2
+    c2 = math.cos(theta_max_rad) ** 2
+    one_minus_m = c2 * ep / (ep + dEps * s2)               # = 1 - m, formed without cancellation
+    return float(ellipkm1(one_minus_m)) / math.sqrt(dEps)
 
 
-def _V_of_theta_m(theta_m: float, K: float, dEps: float, ep: float) -> float:
-    return 2.0 * np.sqrt(K / EPS0) * _B(theta_m, dEps, ep)
+def _V_of_theta_max(theta_max_rad: float, K: float, dEps: float, ep: float) -> float:
+    return 2.0 * np.sqrt(K / EPS0) * _B(theta_max_rad, dEps, ep)
+
+
+def _z_map(phi, theta_max_rad: float, dEps: float, ep: float) -> np.ndarray:
+    """The turning-point z-map A(phi) (z = (d/2) A(phi)/A(pi/2), sin theta = sin theta_m sin phi), in
+    CLOSED FORM:
+
+        A(phi) = int_0^phi sqrt(eps(theta)) / sqrt(1 - eta sin^2 p) dp
+               = sqrt(eps_perp) [ x R_F(X1, X2, X3) + (b/3) x^3 R_J(X1, X2, X3, 1) ],
+        x = sin phi, X1 = cos^2 phi, X2 = cos^2 phi + cos^2(theta_m) x^2, X3 = 1 + b x^2,
+        eta = sin^2 theta_m, b = eta dEps/eps_perp
+
+    (the first-integral dz = C sqrt(eps(theta) eps(theta_m)) dtheta / sqrt(sin^2 theta_m - sin^2 theta),
+    constants dropped because only the RATIO enters). Derivation: u = sin p, then u^2 = 1/(s + 1/x^2)
+    maps int_0^x (1 + b u^2) du / sqrt((1-u^2)(1-eta u^2)(1+b u^2)) onto Carlson's R_F + (b/3) R_J
+    (DLMF 19.16, 19.29). The numerator sqrt(eps) makes this a THIRD-kind integral (R_J, not the
+    F(phi, eta) of the constant-FIELD limit -- that limit, b -> 0, is z/(d/2) = F(phi, eta)/K(eta) and
+    is gated). X1 and X2 are formed directly from cos^2 (never 1 - sin^2), so the near-coincident pair
+    X1, X2 -> 0 that carries the log singularity at theta_m -> pi/2 is exact. Vectorised over phi.
+    AUDIT LC-profile (wave-6 follow-up of C-14, 2026-11-02): this was a 4001-point uniform-phi
+    cumulative trapezoid on the log-singular 1/sqrt(1 - eta sin^2 phi) -- its end A[-1] read 1.0095x
+    at theta_m = 89.99 deg, 1.669x at 89.999 and 13.81x at the bisection bracket pi/2 - 1e-6. The
+    closed form is within 4.4e-16 of a 40-digit mpmath quadrature at every (phi, theta_m) tested."""
+    from scipy.special import elliprf, elliprj
+    phi = np.asarray(phi, dtype=float)
+    x = np.sin(phi)
+    X1 = np.cos(phi) ** 2
+    X2 = X1 + math.cos(theta_max_rad) ** 2 * x * x         # = 1 - eta x^2, without cancellation
+    b = math.sin(theta_max_rad) ** 2 * dEps / ep
+    X3 = 1.0 + b * x * x
+    return math.sqrt(ep) * (x * elliprf(X1, X2, X3) + (b / 3.0) * x ** 3 * elliprj(X1, X2, X3, 1.0))
 
 
 def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m: float,
@@ -172,32 +219,39 @@ def director_profile(K_elastic: float, dEps_static: float, eps_perp: float, d_m:
                                V_applied=V, V_th=Vth)
     # bisect the monotone V(theta_m) for theta_m in (0, pi/2)
     lo, hi = 1e-6, 0.5 * np.pi - 1e-6
-    if _V_of_theta_m(hi, K, dEps, ep) < V:                # extreme over-drive: saturate near homeotropic
-        theta_m = hi
+    if _V_of_theta_max(hi, K, dEps, ep) < V:              # extreme over-drive: saturate near homeotropic
+        theta_max_rad = hi
     else:
         for _ in range(80):
             mid = 0.5 * (lo + hi)
-            if _V_of_theta_m(mid, K, dEps, ep) < V:
+            if _V_of_theta_max(mid, K, dEps, ep) < V:
                 lo = mid
             else:
                 hi = mid
-        theta_m = 0.5 * (lo + hi)
-    # reconstruct theta(z): the cumulative A(phi) maps phi in [0, pi/2] to z in [0, d/2]
-    s = np.sin(theta_m); s2 = s * s
-    phi = np.linspace(0.0, 0.5 * np.pi, 4001)
-    th_phi = np.arcsin(np.clip(s * np.sin(phi), -1.0, 1.0))
-    eps_th = ep + dEps * np.sin(th_phi) ** 2
-    eps_thm = ep + dEps * s2
-    integ = np.sqrt(eps_th * eps_thm / dEps) / np.sqrt(1.0 - s2 * np.sin(phi) ** 2)
-    A = np.concatenate([[0.0], np.cumsum(0.5 * (integ[1:] + integ[:-1]) * np.diff(phi))])
-    z_half = A / A[-1] * (0.5 * d)                        # z from 0 (surface) to d/2 (midplane)
-    nh = int(nz) // 2
-    zu = np.linspace(0.0, 0.5 * d, nh + 1)
-    th_u = np.interp(zu, z_half, th_phi)                  # tilt on the half grid
-    theta_full = np.concatenate([th_u, th_u[-2::-1]])     # mirror about the midplane
-    z_full = np.concatenate([zu, d - zu[-2::-1]])
-    theta = np.interp(z, z_full, theta_full)              # onto the requested uniform z grid
-    return DirectorProfile(z_m=z, theta_rad=theta, theta_max_rad=float(np.max(theta)),
+        theta_max_rad = 0.5 * (lo + hi)
+    # reconstruct theta(z) at every requested node: the closed-form z-map A(phi) (monotone, phi in
+    # [0, pi/2] -> z in [0, d/2]) is inverted by a vectorised bisection on the half-cell fraction of the
+    # node's distance to the nearer plate (the profile is symmetric about the midplane), then
+    # theta = atan2(sin theta_m sin phi, sqrt(1 - sin^2 theta_m sin^2 phi)) -- accurate to the last bit
+    # where arcsin(~1) is not. AUDIT LC-profile (wave-6, 2026-11-02): this was a uniform 4001-point
+    # phi grid + cumulative trapezoid + two np.interp passes; the log-singular integrand put the end of
+    # the z-map 1.67x high at theta_m = 89.999 deg (13.8x at the bracket), so above ~6.8 V_th the
+    # boundary layers came out several times too thin. See _z_map.
+    frac = np.clip(np.minimum(z, d - z) / (0.5 * d), 0.0, 1.0)
+    target = frac * float(_z_map(0.5 * np.pi, theta_max_rad, dEps, ep))
+    lo_p = np.zeros_like(z); hi_p = np.full_like(z, 0.5 * np.pi)
+    for _ in range(64):                                   # pi/2 / 2^64 ~ 1e-19 < ulp(pi/2)
+        mid = 0.5 * (lo_p + hi_p)
+        below = _z_map(mid, theta_max_rad, dEps, ep) < target
+        lo_p = np.where(below, mid, lo_p)
+        hi_p = np.where(below, hi_p, mid)
+    phi = 0.5 * (lo_p + hi_p)
+    phi[frac <= 0.0] = 0.0
+    phi[frac >= 1.0] = 0.5 * np.pi
+    sp = np.sin(phi)
+    cos_th = np.sqrt(np.cos(phi) ** 2 + math.cos(theta_max_rad) ** 2 * sp * sp)
+    theta = np.arctan2(math.sin(theta_max_rad) * sp, cos_th)
+    return DirectorProfile(z_m=z, theta_rad=theta, theta_max_rad=float(theta_max_rad),
                            V_applied=V, V_th=Vth)
 
 
@@ -480,6 +534,49 @@ def reduce_director(theta_zt_rad, *, t_index: int = -1, reduce: str = "profile")
     return director_to_extra_fields(col)
 
 
+def _onset_threshold_V(K11: float, K33: float, dEps: float, theta_b: float, v_lc_per_volt: float, *,
+                       K22: float = 0.0, twist_total_rad: float = 0.0, q0_d: float = 0.0) -> float:
+    """APPLIED voltage at which the anchored uniform state theta = theta_b (FIELD-AXIS) goes linearly
+    unstable -- the Freedericksz onset the BVP solvers seed their continuation ladder from and test
+    their wrong-branch safety net against. +inf when the field STABILISES that state.
+
+    Linearising the Frank + dielectric free energy about theta_b (eta = theta - theta_b, strong
+    anchoring, lowest mode sin(pi z/d)) gives the onset in LC voltage
+
+        eps0 V_lc^2 * (-dEps cos 2theta_b) = pi^2 K_eff(theta_b) + (1/2) f2''(theta_b) Phi^2
+                                             - 2 K22 (q0 d) Phi cos 2theta_b,
+        K_eff = K11 sin^2 + K33 cos^2,   f2 = sin^2 (K22 sin^2 + K33 cos^2)  (the chiral solver's f2),
+
+    with Phi = phi_top - phi_bottom (the imposed twist; 0 for the achiral solver). Planar anchoring
+    (theta_b = pi/2) is the SPLAY onset pi sqrt(K11/(eps0 dEps)) and, with twist, the classic TN
+    threshold pi sqrt([K11 + (K33 - 2 K22)(Phi/pi)^2 + 4 K22 (d/p)(Phi/pi)]/(eps0 dEps)); homeotropic
+    (theta_b = 0, dEps < 0, a VAN cell) is the BEND onset pi sqrt(K33/(eps0 |dEps|)). EXACT for
+    symmetric anchoring (theta_b in {0, pi/2}: the anchored state is then stationary); with a pretilt
+    the bifurcation is imperfect and this is the onset of the steep rise. v_lc_per_volt = V_lc / V_app
+    of the UNDEFORMED cell (the series-capacitance voltage division through fixed layers -- exact at
+    onset for planar geometry, an estimate for 'cyl', where E ~ 1/r).
+
+    AUDIT S1-13 (2026-07-17; fixed wave-7 2026-11-02): both solvers used pi sqrt(((K11 + K33)/2)/
+    (eps0 |dEps|)) for every anchoring and ignored the voltage division. For a planar cell with
+    K11 = 20 pN, K33 = 2 pN, dEps = 14.7 that is 0.742x the true 1.232 V onset, so the 1.3 V_th safety
+    net fired BELOW the real threshold and flagged the correct, untilted solution success=False
+    (measured at V = 1.20 V, 0.974 of the onset); and a cell the field cannot tilt (dEps < 0 with planar
+    anchoring) got a finite threshold and was flagged at every V > 1.3 V_th."""
+    s2, c2 = math.sin(theta_b) ** 2, math.cos(theta_b) ** 2
+    cos2 = math.cos(2.0 * theta_b)
+    drive = -float(dEps) * cos2                          # > 0: the field destabilises theta_b
+    if not (drive > 1e-30) or not (v_lc_per_volt > 0.0) or not math.isfinite(v_lc_per_volt):
+        return float("inf")
+    k_eff = K11 * s2 + K33 * c2
+    f2pp = (2.0 * cos2 * (2.0 * K22 * s2 + K33 * cos2)
+            + 2.0 * math.sin(2.0 * theta_b) ** 2 * (K22 - K33))
+    stiff = (math.pi ** 2 * k_eff + 0.5 * f2pp * twist_total_rad ** 2
+             - 2.0 * K22 * q0_d * twist_total_rad * cos2)
+    if stiff <= 0.0:
+        return 0.0                                       # unstable at zero field (over-twisted cell)
+    return math.sqrt(stiff / (EPS0 * drive)) / float(v_lc_per_volt)
+
+
 def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: float, V_app: float,
                          geo: "Optional[LCGeometry]" = None, geometry: str = "planar",
                          d_planar: "Optional[float]" = None,
@@ -543,9 +640,10 @@ def director_profile_bvp(*, K11: float, K33: float, eps_para: float, eps_perp: f
     #      (solve_bvp then converges only the trivial theta=theta_b branch -> n_eff silently rails). We
     #      ramp the voltage up from ~1.05 V_th, carrying each converged tilted profile as the next seed.
     Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
-    # MAGNITUDE-based seeding threshold (finite for dEps<0 too; only used for seeding, not a reported #)
-    K_eff_mean = 0.5 * (K11 + K33)
-    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    # Freedericksz ONSET of the anchored state in APPLIED volts (seeds the ladder + the safety net; not a
+    # reported number). audit S1-13: was pi sqrt(((K11+K33)/2)/(eps0|dEps|)) -- see _onset_threshold_V.
+    V_th = _onset_threshold_V(K11, K33, dEps, theta_b,
+                              solve_lc_field_profile(np.full_like(z, theta_b), 1.0, geo, **fkw)[1])
     # tilt direction + the destabilized far anchoring the midplane swings toward: dEps>0 -> toward the
     # field (theta -> 0, homeotropic); dEps<0 -> toward planar (theta -> pi/2).
     sign = -1.0 if dEps >= 0.0 else 1.0
@@ -729,6 +827,14 @@ class LCChiralResult:
     theta_b_rad: float
     phi_bottom_rad: float
     phi_top_rad: float
+    # The phi'-dependent part of the Frank energy per unit plate area [J/m^2], in the COMPLETE-SQUARE
+    # convention: int [(1/2) K22 (sin^2 th phi' - q0)^2 + (1/2) K33 sin^2 th cos^2 th phi'^2] dz >= 0,
+    # ZERO for an undistorted planar helix at its natural pitch (phi' = q0, th = pi/2), and
+    # (1/2) K22 (Phi/d - q0)^2 d for a planar cell with total twist Phi. AUDIT S1-14 (2026-07-17; fixed
+    # wave-7 2026-11-02): it used to drop the constant (1/2) K22 q0^2 d of the Frank twist term
+    # (1/2) K22 (n . curl n + q0)^2, i.e. it was measured from an UNTWISTED cell -- and so went NEGATIVE
+    # (-(1/2) K22 q0^2 d) at the natural pitch. Legacy value = this - (1/2) K22 q0^2 d; identical when
+    # q0 = 0. The Euler-Lagrange equations (and every profile) never saw the constant.
     twist_energy_J_m2: float = 0.0
     n_eff: float = float("nan")
     success: bool = True
@@ -831,8 +937,10 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
 
     ph_seed = phi_a + (phi_b - phi_a) * u + (q0 * d_lc) * (u - u * u)   # linear + chiral bow (fixed BCs)
     Vmag = abs(float(V_app)); sgn_V = 1.0 if float(V_app) >= 0.0 else -1.0
-    K_eff_mean = 0.5 * (K11 + K33)
-    V_th = (math.pi * math.sqrt(K_eff_mean / (EPS0 * abs(dEps)))) if abs(dEps) > 1e-30 else float("inf")
+    # Freedericksz/TN ONSET in applied volts, incl. the imposed twist and the chiral bias (audit S1-13)
+    V_th = _onset_threshold_V(K11, K33, dEps, theta_b,
+                              solve_lc_field_profile(np.full_like(z, theta_b), 1.0, geo, **fkw)[1],
+                              K22=K22, twist_total_rad=phi_b - phi_a, q0_d=q0 * d_lc)
     sign = -1.0 if dEps >= 0.0 else 1.0                                # tilt direction toward the field
     reach = theta_b if dEps >= 0.0 else (0.5 * math.pi - theta_b)
     max_amp = min(abs(reach) * 0.98, math.radians(89.0))
@@ -859,8 +967,14 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
         return uniq
 
     def _twist_energy(th_, ph_):
+        # The phi'-dependent Frank energy per unit plate area in COMPLETE-SQUARE form (audit S1-14):
+        #   int [ (1/2) K22 (sin^2 th ph' - q0)^2 + (1/2) K33 sin^2 th cos^2 th ph'^2 ] dz
+        # = int [ (1/2) f2 ph'^2 - K22 q0 sin^2 th ph' ] dz + (1/2) K22 q0^2 d_lc.
+        # The constant is the Frank twist term's own (1/2) K22 q0^2; without it the number was the
+        # energy relative to an UNTWISTED cell and went NEGATIVE at the natural pitch.
         ph_z = np.gradient(ph_, z)
-        return float(trapz(0.5 * _f2(th_) * ph_z * ph_z - K22 * q0 * np.sin(th_) ** 2 * ph_z, z))
+        return float(trapz(0.5 * _f2(th_) * ph_z * ph_z - K22 * q0 * np.sin(th_) ** 2 * ph_z, z)
+                     + 0.5 * K22 * q0 * q0 * d_lc)
 
     def _energy(th_, ph_, Vk):
         try:
@@ -920,9 +1034,8 @@ def chiral_director_profile_bvp(*, K11: float, K22: float, K33: float, eps_para:
             message = ("chiral_director_profile_bvp: V={:.3g} > 1.3 V_th(~{:.3g}) but stayed ~untilted "
                        "(mean tilt {:.3g} rad)".format(Vmag, V_th, tilt))
     _E, V_lc = _field_at(th, float(V_app))
-    # twist elastic energy per unit plate area: integral of [ (1/2) f2 ph'^2 - K22 q0 sin^2 th ph' ] dz
-    ph_z = np.gradient(ph, z)
-    w_twist = float(trapz(0.5 * _f2(th) * ph_z * ph_z - K22 * q0 * np.sin(th) ** 2 * ph_z, z))
+    # twist elastic energy per unit plate area, complete-square convention (LCChiralResult, audit S1-14)
+    w_twist = _twist_energy(th, ph)
     neff = (n_eff_from_theta_profile(th, z, n_o, n_e, model=opt_model, d_lc=d_lc)
             if (n_o is not None and n_e is not None) else float("nan"))
     return LCChiralResult(V_app=float(V_app), V_lc=float(V_lc), z_m=z, theta_field_rad=th, phi_rad=ph,

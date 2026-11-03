@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from dynameta.core.backend import array_namespace
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 @dataclass
 class ThermoOpticModel:
@@ -18,7 +19,7 @@ class ThermoOpticModel:
     common case for thermo-optic media); an anisotropic dn/dT would use a tensor variant."""
     eps_ref: complex     # permittivity at T_ref
     dn_dT: float         # dn/dT [1/K]
-    T_ref: float = 300.0
+    T_ref: float = T_REF
 
     def eps(self, fields: dict, lambda_m: float):
         if "T" not in fields or fields["T"] is None:
@@ -42,7 +43,7 @@ class AnisotropicThermoOpticModel:
     validation/lc_tilted_fem.py)."""
     eps_ref_diag: tuple        # (eps_xx, eps_yy, eps_zz) at T_ref
     dn_dT_diag: tuple          # (dn/dT_x, dn/dT_y, dn/dT_z) [1/K]
-    T_ref: float = 300.0
+    T_ref: float = T_REF
 
     def eps(self, fields: dict, lambda_m: float):
         if "T" not in fields or fields["T"] is None:
@@ -62,6 +63,3 @@ class AnisotropicThermoOpticModel:
                 xp.stack([zero, d[1], zero], axis=-1),
                 xp.stack([zero, zero, d[2]], axis=-1)]
         return xp.stack(rows, axis=-2)                       # (...,3,3) diagonal principal-axis tensor
-
-
-# ---- QCSE / MQW electro-absorption (Phase 3) ---------------------------------------------
