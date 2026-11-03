@@ -42,12 +42,12 @@ LMIN, LMAX = 1200e-9, 1800e-9
 
 # GATE A convergence-gate constant, PER GEOMETRY (2026-11-03 decision): the worst second-order
 # constant of THIS fixture's own stack (300 nm n = 2 slab, band LMIN-LMAX, res 18, nx = ny = 4) over
-# the 8 midpoint sub-cell offsets of its front face (fdtd_nd.grid.subcell_offset_pads, base
+# the 8 sub-cell offsets u = k/8, k = 0..7 (incl. u = 0 and 1/2) of its front face (fdtd_nd.grid.subcell_offset_pads, base
 # n_pad_wave 4) AND over the band: C = max of max(|dR0|,|dT0|,|dR_flux|,|dT_flux|) / X(f)^2 with
 # X = n_max k0(f) dz = 2 pi LMIN f / (res c) (fdtd_nd.grid.second_order_constant). No safety factor.
-# Regenerate: python -m validation.fdtd_3d_reduces --regen-cgeom   (measured 2026-11-03, numba).
+# Regenerate: python -m validation.fdtd_3d_reduces --regen-cgeom   (measured 2026-11-03, numpy = the fixture config).
 # Part (a) below is a REGRESSION bound; the physics gate is part (b), the observed order.
-C_GEOM_3D = 0.0854        # 2026-11-03: per offset 0.0854 0.0708 0.0470 0.0261 0.0261 0.0470 0.0709 0.0854
+C_GEOM_3D = 0.08735397979210943   # 2026-11-03, u = k/8: 0.087354 0.079760 0.059720 0.035424 0.044972 0.035414 0.059719 0.079699
 
 
 def _gate_a_err(res, n_pad_wave=4.0, nx=4, backend="numpy", z_subcell="average"):
@@ -73,7 +73,7 @@ def regen_c_geom(res=18):
     dz = LMIN / (res * n_max)
     cs = []
     for npw in subcell_offset_pads(dz, LMAX, 8, 4.0):
-        err, X, _en, _a, _b, _r = _gate_a_err(res, npw, nx=4, backend="numba")
+        err, X, _en, _a, _b, _r = _gate_a_err(res, npw, nx=4, backend="numpy")   # = the fixture config
         cs.append(second_order_constant(err, X))
     return max(cs), cs
 
@@ -202,7 +202,7 @@ def main():
 if __name__ == "__main__":
     if "--regen-cgeom" in sys.argv[1:]:
         c, per = regen_c_geom()
-        print("[f3] C_geom (GATE A, res 18, 8 offsets x band) = {:.4f}; per offset {}".format(
-            c, ", ".join("{:.4f}".format(v) for v in per)))
+        print("[f3] C_geom (GATE A, res 18, 8 offsets k/8 x band) = {!r}; per offset {}".format(
+            c, ", ".join("{:.6f}".format(v) for v in per)))
         raise SystemExit(0)
     raise SystemExit(0 if main() else 1)
