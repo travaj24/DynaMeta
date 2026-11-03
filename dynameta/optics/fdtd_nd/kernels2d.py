@@ -122,6 +122,15 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             raise ValueError("hot-carrier and dynamic gain both re-touch the Drude coefficients; "
                              "they are mutually exclusive")
         hmask = np.asarray(hot["mask"], dtype=np.float64)    # (nx,nz) 1 on opted-in cells, 0 elsewhere
+        # z-subcell averaging (2026-11-02): a mixed edge cell carries its HOT FILL FRACTION f in (0, 1)
+        # as the mask. Its Drude current is already f-weighted (wp^2 scaled by f), so the hot material's
+        # own dissipation density is J.E / f; that is what heats U_e (per unit hot volume), and the
+        # mask-weighted means below then average over hot VOLUME. A 0/1 mask keeps the legacy
+        # expression hmask * J.E bit-for-bit.
+        if bool(np.all((hmask == 0.0) | (hmask == 1.0))):
+            h_weight = hmask
+        else:
+            h_weight = np.where(hmask > 0.0, 1.0 / np.where(hmask > 0.0, hmask, 1.0), 0.0)
         mat_idx = np.asarray(hot["mat_idx"])                 # (nx,nz) material id, -1 off
         htab = hot["tables"]                                 # list of (Te_grid,U_grid,wp_ratio,gam_ratio)
         Ghot = np.asarray(hot["G"], dtype=np.float64)        # (nx,nz) electron-phonon coupling [W/m^3/K]
@@ -299,7 +308,7 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
         # average is the Drude absorption). Off-mask cells (non-Drude, or not opted in) carry mask 0 and,
         # for a Drude-off cell, J == 0, so p_abs == 0 and T_e stays at T_e0.
         if do_hot:
-            p_abs = hmask * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
+            p_abs = h_weight * (0.5 * (Jy + Jynew)) * (0.5 * (Ey + Eynew))
             if do_lat:
                 coupling = Ghot * (Te_hot - Tlhot)         # W/m^3 leaving the electrons -> INTO the lattice
                 U_e += dt * (alpha_hot * p_abs - coupling)
@@ -308,7 +317,7 @@ def run_2d_te(eps_inf, wp, gam, chi3, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src
             else:
                 U_e += dt * (alpha_hot * p_abs - Ghot * (Te_hot - Tlhot))
             if _rec:
-                pabs_mean[n] = float(p_abs.sum()) / msum
+                pabs_mean[n] = float((p_abs if h_weight is hmask else p_abs * hmask).sum()) / msum
                 Te_mean[n] = float((Te_hot * hmask).sum()) / msum
                 pabs_int += p_abs
                 E2_int += Eynew ** 2

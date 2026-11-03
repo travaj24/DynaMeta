@@ -133,9 +133,178 @@ def interface_node_fractions(z_nodes, z_start, layers, rtol=1e-9):
     return out
 
 
-def pad_masks(z_m, pad, z_struct):
-    """(superstrate, substrate) pad masks on the material positions: z < pad, z >= pad + z_struct."""
-    return z_m < pad, z_m >= pad + z_struct
+def pad_masks(z_m, pad, z_struct, margin=0.0):
+    """(superstrate, substrate) pad masks on the material positions: z < pad, z >= pad + z_struct.
+    `margin` > 0 keeps only the nodes whose control volume [z - margin, z + margin] lies WHOLLY in
+    the pad (the z-subcell-averaged grids, where the node next to a face is a mixed cell)."""
+    if margin == 0.0:
+        return z_m < pad, z_m >= pad + z_struct
+    return z_m + margin <= pad, z_m - margin >= pad + z_struct
+
+
+# =================================================================================================
+# z-SUBCELL AVERAGING (2026-11-02, the default since this date; z_subcell="point" opts out)
+# =================================================================================================
+# Point sampling (`material_z` + `layer_masks`) realizes every layer as a whole number of cells, so a
+# layer's thickness is rounded by up to one cell and |R|/|T| carry an O(k dz) per-geometry error that
+# depends on where the faces fall inside their cells (measured on the fdtd_seam_vs_tmm dielectric
+# stack at res 28: point-sampled R = 0.0132 / 0.0308 / 0.0711 against TMM 0.0305, depending only on
+# frac(pad/dz)). Subpixel smoothing removes it. Each E node k stands for its control volume
+# V_k = [z_k - h_-, z_k + h_+] (h_- = h_+ = dz/2 on a uniform grid); let f_r,k be the fraction of
+# V_k occupied by region r (superstrate pad, each layer, substrate pad).
+#
+#   TANGENTIAL E (Ex/Ey -- every normal-incidence engine, s-pol, the p-pol Ex): the field is
+#   continuous across a z-interface, so the cell's D = sum_r f_r eps_r E: the ARITHMETIC mean
+#       eps_k = sum_r f_r,k eps_r
+#   (Farjadpour et al., Opt. Lett. 31, 2972 (2006); Oskooi et al., Opt. Lett. 34, 2778 (2009): the
+#   parallel-field component of the anisotropic smoothing tensor; Hwang & Cangellaris, IEEE MWCL 11,
+#   158 (2001): the second-order effective eps of a tangential E at a dielectric interface).
+#   NORMAL E (the p-pol Ez half-node map): D is continuous, so 1/eps_k = sum_r f_r,k / eps_r -- the
+#   HARMONIC mean (the same papers' perpendicular component).
+#
+#   DISPERSIVE / NONLINEAR / GAIN LAYERS on the arithmetic channel: the polarization densities of
+#   parallel sub-layers add with their volume fractions, P = sum_r f_r P_r, so every term enters the
+#   cell scaled by its fill: eps_inf averages, and a pole's STRENGTH scales -- Drude wp^2, Lorentz
+#   delta_eps, the gain line's kappa*dN, chi2, chi3, Raman chi3R -- with its shape (gamma, w0, ...)
+#   kept. Exact whenever a cell holds at most one pole of each kind (every layer/dielectric face).
+#   A cell mixing two DIFFERENT poles of one kind (two Drude slices of a graded profile, say) gets
+#   ONE pole with the summed strength and the strength-weighted shape: for Drude,
+#   wp^2 = sum f wp_r^2 and gamma = sum f wp_r^2 gamma_r / wp^2, which matches
+#   sum_r f_r wp_r^2 / (w^2 + i gamma_r w) through first order in gamma/w -- the error is
+#   O(f(1-f) (dgamma/w)^2) of the cell's Drude term (measured in docs/audit/2026-11-02-fdtd-
+#   registration.md). The harmonic (Ez) channel has no exact local ADE for a mixed dispersive cell
+#   (the mean of 1/eps of a pole is not a pole), so a mixed Ez cell containing any Drude region
+#   falls back to POINT sampling at the Ez node (documented + gated, `mix_profile(harmonic=...)`).
+#   Lateral inclusion edges of structured cells are NOT smoothed (rasterize.layer_eps_cell is a
+#   point raster; recorded follow-up).
+
+Z_SUBCELL_MODES = ("average", "point")
+
+
+def check_z_subcell(where, mode):
+    """Validate the `z_subcell` opt-out kwarg ('average' default; 'point' = the 2026-11-02 2b7a002
+    E-node point sampling, bit-for-bit)."""
+    if mode not in Z_SUBCELL_MODES:
+        raise ValueError("{}: z_subcell must be one of {}, got {!r}".format(where, Z_SUBCELL_MODES, mode))
+    return mode
+
+
+def _region_bounds(z_start, layers):
+    """Layer boundaries with the EXACT float accumulation of `layer_masks`."""
+    b = [z_start]
+    z = z_start
+    for L in layers:
+        z = z + L.thickness_m
+        b.append(z)
+    return b
+
+
+def z_fill_fractions(z_m, z_start, layers, *, dz=None, lo=None, hi=None):
+    """F[r, k]: the fraction of node k's control volume occupied by region r (r = 0 superstrate pad,
+    1..n the layers, n+1 substrate pad; each column sums to 1). Uniform grid: pass `dz` (control
+    volume [z - dz/2, z + dz/2]); nonuniform: pass the volume ends `lo`, `hi` per node."""
+    z = np.asarray(z_m, dtype=float)
+    if lo is None:
+        lo, hi = z - 0.5 * dz, z + 0.5 * dz
+    lo = np.asarray(lo, dtype=float); hi = np.asarray(hi, dtype=float)
+    b = _region_bounds(z_start, layers)
+    edges = [-np.inf] + b + [np.inf]
+    width = hi - lo
+    F = np.empty((len(layers) + 2, z.size))
+    for r in range(len(layers) + 2):
+        ov = np.minimum(hi, edges[r + 1]) - np.maximum(lo, edges[r])
+        F[r] = np.where(ov > 0.0, ov, 0.0) / width
+    return F
+
+
+def point_regions(z_m, z_start, layers):
+    """Region index (0 = superstrate pad .. n+1 = substrate pad) holding each node under the
+    half-open point rule of `layer_masks`."""
+    return np.searchsorted(np.asarray(_region_bounds(z_start, layers)), np.asarray(z_m, dtype=float),
+                           side="right")
+
+
+ND_POLES = (("wp", 2, ("gam",)),                 # Drude: wp^2 fill-weighted, gamma shape
+            ("ldeps", 1, ("lw0", "lgam")),       # Lorentz: delta_eps fill-weighted, (w0, gamma) shape
+            ("chi3R", 1, ("rw", "rgam")),        # Raman: chi3R fill-weighted, (W_R, gamma_R) shape
+            ("gkdn", 1, ("gw", "gdw")))          # gain line: kappa*dN fill-weighted, (w_a, dw_a) shape
+
+
+def nd_region_values(layers, n_super, n_sub, kerr):
+    """Per-region (superstrate pad, layers..., substrate pad) values of every 2-D/3-D FDTDLayer
+    material channel, for `mix_profile(..., poles=ND_POLES)` (z-subcell averaging, 2026-11-02)."""
+    def col(get, pad_lo=0.0, pad_hi=0.0):
+        return [pad_lo] + [float(get(L)) for L in layers] + [pad_hi]
+    return {"eps_inf": col(lambda L: L.eps_inf, float(n_super) ** 2, float(n_sub) ** 2),
+            "wp": col(lambda L: L.drude_wp_rad_s), "gam": col(lambda L: L.drude_gamma_rad_s),
+            "lw0": col(lambda L: L.lorentz_w0_rad_s), "lgam": col(lambda L: L.lorentz_gamma_rad_s),
+            "ldeps": col(lambda L: L.lorentz_delta_eps),
+            "chi3": col(lambda L: L.chi3_m2_V2 if kerr else 0.0), "chi2": col(lambda L: L.chi2_m_V),
+            "chi3R": col(lambda L: L.raman_chi3_m2_V2), "rw": col(lambda L: L.raman_w_rad_s),
+            "rgam": col(lambda L: L.raman_gamma_rad_s), "gw": col(lambda L: L.gain_w_rad_s),
+            "gdw": col(lambda L: L.gain_dw_rad_s),
+            "gkdn": col(lambda L: L.gain_kappa_C2_kg * L.gain_dN_m3)}
+
+
+def mix_profile(F, values, *, poles=(), harmonic=(), point_index=None):
+    """Per-node material maps from region values and fill fractions -- THE one implementation of the
+    subcell rule above, consumed by every FDTD engine.
+
+    values: {name: per-region sequence (len n+2)}; an entry may itself be an array (e.g. a lateral
+            (nx, ny) raster per slab): the result then has shape value.shape + (nz,).
+    poles:  ((strength_name, power, shape_names), ...): the region strength enters as value**power
+            (Drude wp: power 2), is fill-weighted and mapped back (**1/power); each shape parameter
+            becomes the |strength|-weighted mean (exact when one region carries the pole).
+    harmonic: names averaged as 1/sum(f/v) (the normal-E channel); a mixed node whose regions carry
+            any nonzero pole strength falls back to the point value values[point_index[k]].
+    Nodes with a single region (max F == 1) take that region's values EXACTLY (no rounding)."""
+    F = np.asarray(F, dtype=float)
+    nreg, nz = F.shape
+    pure = F.max(axis=0) == 1.0
+    pure_r = np.argmax(F, axis=0)
+    mixed = ~pure
+    out = {}
+    pole_of = {}
+    for sname, power, shapes in poles:
+        pole_of[sname] = (power, shapes)
+    has_pole = np.zeros(nz, dtype=bool)                   # node touching a nonzero pole strength
+    for sname in pole_of:
+        nzr = np.array([bool(np.any(np.asarray(x, dtype=float) != 0.0)) for x in values[sname]])
+        if nzr.any():
+            has_pole |= (F[nzr] > 0.0).any(axis=0)
+    for name, vals in values.items():
+        V = np.asarray([np.asarray(x, dtype=float) for x in vals])          # (nreg, ...)
+        res = np.moveaxis(V[pure_r], 0, -1).copy()                          # pure: exact region value
+        if mixed.any():
+            Fm = F[:, mixed]                                                # (nreg, nmix)
+            Vx = np.moveaxis(V, 0, -1)                                      # (..., nreg)
+            if name in harmonic:
+                with np.errstate(divide="ignore"):
+                    inv = np.where(Vx != 0.0, 1.0 / np.where(Vx != 0.0, Vx, 1.0), np.inf)
+                mval = 1.0 / (inv @ Fm)
+            elif name in pole_of:                                         # pole STRENGTH: fill-weighted
+                mval = np.sqrt((Vx ** 2) @ Fm) if pole_of[name][0] == 2 else Vx @ Fm
+            else:
+                shape_of = [s for s, (p, shp) in pole_of.items() if name in shp]
+                if shape_of:
+                    sname = shape_of[0]
+                    S = np.abs(np.moveaxis(np.asarray([np.asarray(x, dtype=float)
+                                                       for x in values[sname]]), 0, -1)) ** pole_of[sname][0]
+                    w = S @ Fm
+                    num = (S * Vx) @ Fm
+                    mval = np.where(w > 0.0, num / np.where(w > 0.0, w, 1.0), Vx @ Fm)
+                else:
+                    mval = Vx @ Fm
+            res[..., mixed] = mval
+            if harmonic:
+                # normal-E channel: a mixed cell touching a dispersive region has no exact local ADE
+                # (mean of 1/eps of a pole is not a pole) -> EVERY field of that cell is POINT-sampled
+                # at the node (the documented fallback; gated in tests/test_fdtd_registration.py)
+                fb = mixed & has_pole
+                if fb.any():
+                    res[..., fb] = np.moveaxis(V[np.asarray(point_index)[fb]], 0, -1)
+        out[name] = res
+    return out
 
 
 def layer_band_index_max(layers, w_band, n_ends=()):

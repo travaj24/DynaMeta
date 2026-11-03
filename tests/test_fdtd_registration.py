@@ -182,7 +182,8 @@ def test_1d_mo_unchanged_by_the_shared_helper(monkeypatch):
         seen.setdefault("exx", []).append(np.array(exx))
         return real(exx, *a, **k)
     monkeypatch.setattr(fm, "_run_mo", spy)
-    fm.solve_fdtd_mo_1d(lay, lambda_min_m=L1, lambda_max_m=L2, resolution=12, n_pad_wave=3.0)
+    fm.solve_fdtd_mo_1d(lay, lambda_min_m=L1, lambda_max_m=L2, resolution=12, n_pad_wave=3.0,
+                        z_subcell="point")                         # the 2b7a002 rule (opt-out)
     from dynameta.optics.fdtd_nd.grid import z_grid
     dz, pad, _zs, _Lz, nz = z_grid(lay, L1, L2, 12, 3.0, NS)
     zc = np.arange(nz) * dz                                        # the pre-refactor inline rule
@@ -217,11 +218,11 @@ def test_2d_glass_superstrate_r0_phase_unbiased():
     assert abs(np.mean(d)) < 1.5 * BIAS_BAR * _k0dz(res), d
 
 
-def _obl_front(pol, angle, res, npw, backend, monkeypatch):
+def _obl_front(pol, angle, res, npw, backend, monkeypatch, z_subcell="average", layers=None):
     """r at LAM0 through the PUBLIC solve_fdtd_2d_oblique (its own material fill), by capturing the
     kernel probe lines it computes (the front end itself returns |R0|/|T0| only)."""
     import dynameta.optics.fdtd_nd.solve2d as S2
-    from dynameta.optics.fdtd_nd.grid import probe_cells, z_grid
+    from dynameta.optics.fdtd_nd.grid import probe_cells
     cap = []
     real = S2._run_oblique
 
@@ -230,12 +231,13 @@ def _obl_front(pol, angle, res, npw, backend, monkeypatch):
         cap.append((a, k, out))
         return out
     monkeypatch.setattr(S2, "_run_oblique", spy)
-    S2.solve_fdtd_2d_oblique(_layer(), period_x_m=0.1e-6, angle_deg=angle, lambda_min_m=L1,
-                             lambda_max_m=L2, resolution=res, n_pad_wave=npw, nx=4, backend=backend,
-                             pol=pol)
+    lay = _layer() if layers is None else layers
+    rs = S2.solve_fdtd_2d_oblique(lay, period_x_m=0.1e-6, angle_deg=angle, lambda_min_m=L1,
+                                  lambda_max_m=L2, resolution=res, n_pad_wave=npw, nx=4, backend=backend,
+                                  pol=pol, z_subcell=z_subcell)
     monkeypatch.setattr(S2, "_run_oblique", real)
     (a_i, _k_i, out_i), (a_t, k_t, out_t) = cap
-    dz, pad, zs, _Lz, _nz = z_grid(_layer(), L1, L2, res, npw, NS)
+    dz, pad, zs = a_i[5], npw * L2, float(sum(L.thickness_m for L in lay))   # the solve's own grid
     k_pL = probe_cells(pad, zs, dz)[1]
     dt, nsteps, kx = a_i[6], a_i[7], a_i[13]
     nf = nsteps // 2 + 1
@@ -245,6 +247,7 @@ def _obl_front(pol, angle, res, npw, backend, monkeypatch):
         rr = np.conj(mean(out_t[0] - out_i[0]) / mean(out_i[0]))
     th = float(np.degrees(np.arcsin(kx * C_LIGHT / (2.0 * np.pi * FI))))
     r = _at(f, rr) * np.exp(-2j * K0 * np.cos(np.radians(th)) * (pad - k_pL * dz))
+    _obl_front.last = rs                                           # the public |R0|/|T0| result
     return r, th, (a_t, k_t)
 
 
@@ -272,7 +275,8 @@ def test_2d_oblique_ppol_needs_its_own_ez_maps(monkeypatch):
     res, angle = 30, 30.0
     d_ship, d_single = [], []
     for npw in _npw_offsets(res, 4):
-        r, th, (a_t, k_t) = _obl_front("p", angle, res, npw, "numba", monkeypatch)
+        # the 2b7a002 POINT maps (z_subcell='point'): this gate is about the Ez REGISTRATION
+        r, th, (a_t, k_t) = _obl_front("p", angle, res, npw, "numba", monkeypatch, z_subcell="point")
         d_ship.append(_dphi(r, th, "p"))
         ez_i = k_t["ez"][0]
         dz, pad, _zs, _Lz, nz = z_grid(_layer(), L1, L2, res, npw, NS)
@@ -335,3 +339,310 @@ def test_3d_and_3d_mo_phase_unbiased():
     k = _k0dz(res)
     assert abs(np.mean(d3)) < BIAS_BAR * k, d3
     assert abs(np.mean(dmo)) < BIAS_BAR * k, dmo
+
+
+# =================================================================================================
+# z-SUBCELL AVERAGING (the default since 2026-11-02; z_subcell="point" = the 2b7a002 point rule)
+# =================================================================================================
+class _Lt:
+    def __init__(self, t):
+        self.thickness_m = t
+
+
+def test_mix_profile_rules():
+    """The shared rule (fdtd_nd.grid): arithmetic (tangential), harmonic (normal), fill-weighted pole
+    strengths with kept shapes, pure nodes exact, and the harmonic channel's dispersive fallback."""
+    from dynameta.optics.fdtd_nd.grid import mix_profile, point_regions, z_fill_fractions
+    z = np.arange(12) * 0.1
+    lay = [_Lt(0.33), _Lt(0.2)]
+    F = z_fill_fractions(z, 0.25, lay, dz=0.1)
+    assert np.allclose(F.sum(axis=0), 1.0, atol=1e-15)
+    assert F[1, 6] == pytest.approx(0.3) and F[2, 6] == pytest.approx(0.7)      # [0.55, 0.65] vs 0.58
+    m = mix_profile(F, {"e": [1.0, 4.0, 9.0, 1.0], "wp": [0.0, 2.0, 0.0, 0.0], "g": [0.0, 5.0, 0.0, 0.0]},
+                    poles=(("wp", 2, ("g",)),))
+    assert m["e"][6] == pytest.approx(0.3 * 4.0 + 0.7 * 9.0)                     # arithmetic
+    assert m["wp"][6] == pytest.approx(np.sqrt(0.3) * 2.0)                       # wp^2 scales with fill
+    assert m["g"][6] == 5.0                                                      # shape kept
+    assert m["e"][3] == 4.0 and m["e"][0] == 1.0                                 # pure nodes exact
+    h = mix_profile(F, {"e": [1.0, 4.0, 9.0, 1.0], "wp": [0.0] * 4, "g": [0.0] * 4},
+                    poles=(("wp", 2, ("g",)),), harmonic=("e",), point_index=point_regions(z, 0.25, lay))
+    assert h["e"][6] == pytest.approx(1.0 / (0.3 / 4.0 + 0.7 / 9.0))             # harmonic
+    hd = mix_profile(F, {"e": [1.0, 4.0, 9.0, 1.0], "wp": [0.0, 2.0, 0.0, 0.0], "g": [0.0, 5.0, 0.0, 0.0]},
+                     poles=(("wp", 2, ("g",)),), harmonic=("e",), point_index=point_regions(z, 0.25, lay))
+    assert hd["e"][6] == 9.0 and hd["wp"][6] == 0.0                              # Drude-mixed Ez -> point
+    #                                          (z = 0.6 lies in the second layer [0.58, 0.78))
+    assert hd["e"][8] == pytest.approx(1.0 / (0.3 / 9.0 + 0.7 / 1.0))            # non-dispersive -> harmonic
+
+
+def test_two_drude_single_pole_rule_error_is_second_order():
+    """A cell mixing two DIFFERENT Drude poles gets one pole: wp^2 = sum f wp_r^2, gamma = the
+    wp^2-weighted mean. Against the exact parallel sum sum_r f_r eps_r(w) the error is second order
+    in gamma/w: measured here 6.6e-5 relative to the Drude term for an ITO-like pair (gamma 1e14 /
+    2e14, w = 1.35e15 rad/s), below the (dgamma/w)^2 / 4 = 1.4e-3 estimate."""
+    from dynameta.optics.fdtd_nd.grid import mix_profile
+    F = np.array([[0.0], [0.4], [0.6], [0.0]])
+    wp1, wp2, g1, g2, w = 2.0e15, 1.5e15, 1.0e14, 2.0e14, 1.35e15
+    m = mix_profile(F, {"wp": [0.0, wp1, wp2, 0.0], "g": [0.0, g1, g2, 0.0]}, poles=(("wp", 2, ("g",)),))
+    dr = lambda wp, g: -wp ** 2 / (w ** 2 + 1j * g * w)
+    exact = 0.4 * dr(wp1, g1) + 0.6 * dr(wp2, g2)
+    single = dr(m["wp"][0], m["g"][0])
+    rel = abs(single - exact) / abs(exact)
+    assert rel < 0.25 * ((g2 - g1) / w) ** 2, rel
+
+
+def test_point_opt_out_reproduces_the_2b7a002_material_maps(monkeypatch):
+    """z_subcell='point' must hand every kernel EXACTLY the 2b7a002 point maps (layer_masks on
+    material_z, pads first). Checked by spying on the arrays each engine's kernel receives; the
+    end-to-end bit-identity of R/r0/r_co against an exported 2b7a002 package was also measured on all
+    seven engines (numpy backends; docs/audit/2026-11-02-fdtd-registration.md)."""
+    import dynameta.optics.fdtd as F1
+    import dynameta.optics.fdtd_nd.solve2d as S2
+    import dynameta.optics.fdtd_nd.solve3d as S3
+    from dynameta.optics.fdtd_nd import FDTDLayer
+    from dynameta.optics.fdtd_nd.grid import layer_band_index_max, layer_masks, material_z, z_grid
+    lay = [FDTDLayer(thickness_m=0.183e-6, eps_inf=4.0),
+           FDTDLayer(thickness_m=0.071e-6, eps_inf=2.0, drude_wp_rad_s=1.2e15, drude_gamma_rad_s=1e14)]
+    B = dict(lambda_min_m=L1, lambda_max_m=L2, resolution=12, n_pad_wave=3.0)
+
+    def want(nmax, n_super=1.0):
+        dz, pad, zs, _Lz, nz = z_grid(lay, L1, L2, 12, 3.0, nmax)
+        e = np.ones(nz); zc = material_z(nz, dz)
+        e[zc < pad] = n_super ** 2
+        for L, m in layer_masks(zc, pad, lay):
+            e[m] = L.eps_inf
+        return e
+    seen = []
+    real1 = F1._run
+    monkeypatch.setattr(F1, "_run", lambda e, *a, **k: (seen.append(np.array(e)), real1(e, *a, **k))[1])
+    F1.solve_fdtd_1d(lay, z_subcell="point", **B)
+    n1 = F1._grid_metrics(lay, L1, L2, 12, 3.0)[5]
+    assert seen[-1].tobytes() == want(n1).tobytes()
+    real2 = S2._dispatch_2d_te
+    monkeypatch.setattr(S2, "_dispatch_2d_te",
+                        lambda n, e, *a, **k: (seen.append(np.array(e)), real2(n, e, *a, **k))[1])
+    S2.solve_fdtd_2d(lay, period_x_m=0.1e-6, nx=2, z_subcell="point", **B)
+    wb = 2 * np.pi * np.linspace(C_LIGHT / L2, C_LIGHT / L1, 9)
+    n2 = layer_band_index_max(lay, wb, (1.0, 1.0))
+    assert seen[-1][0].tobytes() == want(n2).tobytes()
+    real3 = S3._dispatch_3d
+    monkeypatch.setattr(S3, "_dispatch_3d",
+                        lambda n, e, *a, **k: (seen.append(np.array(e)), real3(n, e, *a, **k))[1])
+    S3.solve_fdtd_3d(lay, period_x_m=0.1e-6, period_y_m=0.1e-6, nx=2, ny=2, z_subcell="point", **B)
+    assert seen[-1][0, 0].tobytes() == want(n2).tobytes()
+    # and the DEFAULT really differs at the faces (a mixed cell exists) while matching in the bulk
+    S2.solve_fdtd_2d(lay, period_x_m=0.1e-6, nx=2, **B)
+    avg, pt = seen[-1][0], want(n2)
+    assert np.any(avg != pt) and np.sum(avg != pt) <= 2 * (len(lay) + 1)
+
+
+def test_z_subcell_rejects_unknown_mode():
+    from dynameta.optics.fdtd import solve_fdtd_1d
+    with pytest.raises(ValueError, match="z_subcell"):
+        solve_fdtd_1d(_layer(), lambda_min_m=L1, lambda_max_m=L2, resolution=8, z_subcell="smooth")
+
+
+# ---- true-geometry gates: |R|, |T| and the r phase at EVERY sub-cell offset vs exact TMM of the TRUE
+# slab (d = 183 nm: 9.15 cells at res 30, NOT commensurate). Measured 2026-11-02 at 8 offsets, res 30
+# (res 60) -- point (2b7a002): 1-D max|dR| 7.9e-3 (2.3e-3), max|dphi| 0.073 (0.037) rad; average:
+# 1.9e-3 (3.9e-4), 0.0049 (0.0012) rad -- a ~4.8x / 4.1x drop per dz halving, O((k dz)^2). Bars:
+# |dR|, |dT| < 3e-3 and |dphi| < 0.1 k0dz per offset at res 30 (point fails both by 2.6x / 8x).
+# _ZSUB lets the whole battery be re-run on the point rule to prove each gate fails there:
+#   DYNAMETA_TEST_ZSUBCELL=point pytest tests/test_fdtd_registration.py -m "slow or not slow" -k true_geom
+import os  # noqa: E402
+
+_ZSUB = os.environ.get("DYNAMETA_TEST_ZSUBCELL", "average")
+DT = 0.183e-6
+RT_BAR = 3.0e-3
+PH_BAR = 0.10                      # x k0dz, per offset
+
+
+def _rt_true(eps, theta=0.0, pol="s", n_in=1.0):
+    """(r, R, T) of the TRUE slab DT (tangential-E characteristic matrix; same in/out media for T)."""
+    k0 = 2.0 * np.pi / LAM0
+    w = k0 * C_LIGHT
+    kx = k0 * n_in * np.sin(np.radians(theta))
+
+    def adm(e):
+        kz = np.sqrt(complex(e) * k0 ** 2 - kx ** 2)
+        kz = -kz if kz.imag < 0 else kz
+        return (kz / (w * MU0)) if pol == "s" else (w * EPS0 * e / kz), kz
+    Y, kz = adm(eps)
+    c, s = np.cos(kz * DT), np.sin(kz * DT)
+    M = np.array([[c, -1j * s / Y], [-1j * Y * s, c]])
+    Y0, Ys = adm(n_in ** 2)[0], adm(1.0)[0]
+    B, Cc = M[0, 0] + M[0, 1] * Ys, M[1, 0] + M[1, 1] * Ys
+    r, t = (Y0 * B - Cc) / (Y0 * B + Cc), 2 * Y0 / (Y0 * B + Cc)
+    return r, abs(r) ** 2, abs(t) ** 2 * Ys.real / Y0.real
+
+
+def _offs(res, n, nmax=NS):
+    dz = L1 / (res * nmax)
+    m = round(3.0 * L2 / dz)
+    return [(m + (k + 0.5) / n) * dz / L2 for k in range(n)]
+
+
+def _true_geom_1d(res, mode, n_off=8):
+    from dynameta.optics.fdtd import _grid_metrics, solve_fdtd_1d
+    from dynameta.optics.fdtd_nd import FDTDLayer
+    from dynameta.optics.fdtd_nd.grid import probe_cells
+    lay = [FDTDLayer(thickness_m=DT, eps_inf=NS ** 2)]
+    r_, R_, T_ = _rt_true(NS ** 2)
+    out = []
+    for npw in _offs(res, n_off):
+        r = solve_fdtd_1d(lay, lambda_min_m=L1, lambda_max_m=L2, resolution=res, n_pad_wave=npw,
+                          return_time_trace=True, z_subcell=mode)
+        tt = r.time_trace
+        dz, pad, zs, _Lz, _nz, *_ = _grid_metrics(lay, L1, L2, res, npw)
+        f = np.fft.rfftfreq(tt["t"].size, tt["dt"])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rr = np.conj(np.fft.rfft(tt["reflected"]) / np.fft.rfft(tt["incident_left"]))
+        rc = _at(f, rr) * np.exp(-2j * K0 * (pad - probe_cells(pad, zs, dz)[1] * dz))
+        out.append((float(np.interp(FI, r.freqs_Hz, r.R)) - R_, float(np.interp(FI, r.freqs_Hz, r.T)) - T_,
+                    float(np.angle(rc / r_))))
+    return np.abs(np.asarray(out)).max(axis=0)
+
+
+def test_true_geom_1d_matches_tmm_at_every_offset_and_converges():
+    e30 = _true_geom_1d(30, _ZSUB)
+    e60 = _true_geom_1d(60, _ZSUB)
+    assert e30[0] < RT_BAR and e30[1] < RT_BAR, e30
+    assert e30[2] < PH_BAR * _k0dz(30), e30
+    # O((k dz)^2): measured drop 4.8x (|R|), 4.8x (|T|), 4.1x (phase) per halving (point: 3.4x / 2.0x)
+    assert e30[0] / e60[0] > 3.0 and e30[1] / e60[1] > 3.0 and e30[2] / e60[2] > 3.0, (e30, e60)
+
+
+def test_true_geom_1d_point_rule_fails_the_same_bars():
+    """Discrimination inside the suite: the 2b7a002 point rule misses both bars at res 30."""
+    e = _true_geom_1d(30, "point")
+    assert e[0] > RT_BAR and e[2] > PH_BAR * _k0dz(30), e
+
+
+def _eps_true(L, w=2.0 * np.pi * FI):
+    """eps(w) of an FDTDLayer INCLUDING the gain line (== a Lorentz pole of strength
+    d_eps = -kappa dN / (eps0 w_a^2) on the kernel's own recursion)."""
+    e = L.eps_at(w)
+    if L.gain_dN_m3 != 0.0:
+        wa, dw = L.gain_w_rad_s, L.gain_dw_rad_s
+        e = e + (-L.gain_kappa_C2_kg * L.gain_dN_m3 / (EPS0 * wa ** 2)) * wa ** 2 / (wa ** 2 - w ** 2 - 1j * dw * w)
+    return e
+
+
+def _layer_kind(kind):
+    from dynameta.optics.fdtd_nd import FDTDLayer
+    W0 = 2.0 * np.pi * FI
+    kap = (1.602e-19) ** 2 / 9.109e-31
+    return {"diel": FDTDLayer(thickness_m=DT, eps_inf=NS ** 2),
+            "dl": FDTDLayer(thickness_m=DT, eps_inf=3.0, drude_wp_rad_s=0.9e15, drude_gamma_rad_s=8e13,
+                            lorentz_w0_rad_s=1.25e15, lorentz_gamma_rad_s=1.5e14, lorentz_delta_eps=0.6),
+            "dl_vac": FDTDLayer(thickness_m=DT, eps_inf=1.0, drude_wp_rad_s=0.9e15, drude_gamma_rad_s=8e13,
+                                lorentz_w0_rad_s=1.25e15, lorentz_gamma_rad_s=1.5e14, lorentz_delta_eps=1.5),
+            "gain_vac": FDTDLayer(thickness_m=DT, eps_inf=1.0, gain_w_rad_s=W0, gain_dw_rad_s=1.5e14,
+                                  gain_kappa_C2_kg=kap, gain_dN_m3=2e25)}[kind]
+
+
+def _nmax(lay, ends):
+    from dynameta.optics.fdtd_nd.grid import layer_band_index_max
+    return layer_band_index_max(lay, 2 * np.pi * np.linspace(C_LIGHT / L2, C_LIGHT / L1, 9), ends)
+
+
+def _true_geom_2d(kind, mode, res=30, n_off=4, n_super=1.0):
+    from dynameta.optics.fdtd_nd import solve_fdtd_2d
+    lay = [_layer_kind(kind)]
+    r_, R_, T_ = _rt_true(_eps_true(lay[0]), n_in=n_super)
+    out = []
+    for npw in _offs(res, n_off, _nmax(lay, (n_super, 1.0))):
+        r = solve_fdtd_2d(lay, period_x_m=0.1e-6, nx=2, lambda_min_m=L1, lambda_max_m=L2, resolution=res,
+                          n_pad_wave=npw, n_super=n_super, z_subcell=mode)
+        out.append((float(np.interp(FI, r.freqs_Hz, r.R0)) - R_, float(np.interp(FI, r.freqs_Hz, r.T0)) - T_,
+                    float(np.angle(_at(r.freqs_Hz, r.r0) / r_))))
+    return np.abs(np.asarray(out)).max(axis=0)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kind, n_super, rt_bar, ph_bar", [
+    ("diel", 1.0, RT_BAR, PH_BAR),        # measured avg 2.3e-3 / 0.06 k0dz; point 8.4e-3 / 0.81 k0dz
+    ("diel", 1.5, RT_BAR, 0.25),          # glass: avg 1.7e-3 / 0.18 k0dz (n_super-scaled dispersion);
+                                          #        point 4.6e-3 / 1.15 k0dz
+    ("dl", 1.0, 1.5e-3, PH_BAR),          # Drude+Lorentz on eps_inf 3: avg 6.1e-4 / 0.03; point 2.1e-2 / 0.62
+    # index-matched (eps_inf 1) slabs: ONLY the pole/gain STRENGTH fill weighting is tested. |r| is small
+    # there (weak contrast), so the r phase is ill-conditioned and only |R|, |T| are gated:
+    ("dl_vac", 1.0, 1.5e-3, None),        # ACCURACY only at res 30: avg max|dR| 8.1e-4 (res 60 2.2e-4,
+                                          # 3.7x); point 3.3e-4 is offset luck (res 60: 2.2e-3, no
+                                          # convergence) -- the dl / gain_vac rows are the discriminators
+    ("gain_vac", 1.0, 3.0e-3, None),      # avg max|dT| 1.6e-3 (res 60: 2.3e-4); point 4.4e-2
+])
+def test_true_geom_2d_matches_tmm_at_every_offset(kind, n_super, rt_bar, ph_bar):
+    e = _true_geom_2d(kind, _ZSUB, n_super=n_super)
+    assert e[0] < rt_bar and e[1] < rt_bar, (kind, e)
+    if ph_bar is not None:
+        assert e[2] < ph_bar * _k0dz(30), (kind, e)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("pol, angle", [("s", 30.0), ("p", 30.0), ("p", 50.0)])
+def test_true_geom_2d_oblique_tangential_and_harmonic_channels(pol, angle, monkeypatch):
+    """s: arithmetic Ey; p: arithmetic Ex + HARMONIC Ez. Measured 8 offsets, res 30 -- average:
+    max|dR| 2.1e-3 / 2.2e-3 / 1.7e-3, max|dphi| 0.04 / 0.04 / 0.02 k0dz; point: 4.6e-3 / 4.3e-3 /
+    2.7e-3 and 0.71 / 1.08 / 2.21 k0dz (the phase bar is the discriminating one at 50 deg)."""
+    pytest.importorskip("numba")
+    res = 30
+    out = []
+    for npw in _offs(res, 4):
+        r, th, _ = _obl_front(pol, angle, res, npw, "numba", monkeypatch, z_subcell=_ZSUB,
+                              layers=[_layer_kind("diel")])
+        rs = _obl_front.last
+        r_, R_, T_ = _rt_true(NS ** 2, th, pol)
+        out.append((float(np.interp(FI, rs.freqs_Hz, rs.R0)) - R_, float(np.interp(FI, rs.freqs_Hz, rs.T0)) - T_,
+                    float(np.angle(r / r_))))
+    e = np.abs(np.asarray(out)).max(axis=0)
+    assert e[0] < RT_BAR and e[1] < RT_BAR, e
+    assert e[2] < PH_BAR * _k0dz(res), e
+
+
+@pytest.mark.slow
+def test_true_geom_3d_and_3d_mo():
+    """solve_fdtd_3d and solve_fdtd_3d_mo, laterally uniform. Measured 8 offsets, res 30: average
+    max|dR| 2.3e-3, max|dphi| 0.06 k0dz (both); point 8.4e-3, 0.81 k0dz."""
+    pytest.importorskip("numba")
+    from dynameta.optics.fdtd_mo import MOLayer
+    from dynameta.optics.fdtd_nd import solve_fdtd_3d, solve_fdtd_3d_mo
+    from dynameta.optics.fdtd_nd.grid import probe_cells, z_grid
+    res = 30
+    r_, R_, T_ = _rt_true(NS ** 2)
+    o3, omo = [], []
+    for npw in _offs(res, 4):
+        kw = dict(period_x_m=0.1e-6, period_y_m=0.1e-6, nx=2, ny=2, lambda_min_m=L1, lambda_max_m=L2,
+                  resolution=res, n_pad_wave=npw, z_subcell=_ZSUB)
+        r = solve_fdtd_3d([_layer_kind("diel")], backend="numba", **kw)
+        o3.append((float(np.interp(FI, r.freqs_Hz, r.R0)) - R_, float(np.interp(FI, r.freqs_Hz, r.T0)) - T_,
+                   float(np.angle(_at(r.freqs_Hz, r.r0) / r_))))
+        lay = [MOLayer(thickness_m=DT, eps_xx=NS ** 2, eps_yy=NS ** 2)]
+        rm = solve_fdtd_3d_mo(lay, **kw)
+        dz, pad, zs, _Lz, _nz = z_grid(lay, L1, L2, res, npw, NS)
+        rc = _at(rm.freqs_Hz, rm.r_co) * np.exp(-2j * K0 * (pad - probe_cells(pad, zs, dz)[1] * dz))
+        omo.append((float(np.interp(FI, rm.freqs_Hz, rm.R)) - R_, float(np.interp(FI, rm.freqs_Hz, rm.T)) - T_,
+                    float(np.angle(rc / r_))))
+    for o in (o3, omo):
+        e = np.abs(np.asarray(o)).max(axis=0)
+        assert e[0] < RT_BAR and e[1] < RT_BAR and e[2] < PH_BAR * _k0dz(res), e
+
+
+@pytest.mark.slow
+def test_true_geom_ppol_drude_slab_ez_fallback(monkeypatch):
+    """p-pol 50 deg on a DRUDE slab: the Ez cells that mix vacuum and Drude have no exact harmonic ADE
+    and fall back to point sampling (fdtd_nd.grid.mix_profile); Ex is still arithmetic-averaged.
+    Measured 8 offsets, res 30: average max|dR| 1.7e-3, max|dT| 1.1e-3 (res 60: 2.4e-4 / 5.6e-4);
+    point 4.6e-3 / 4.1e-3. The r phase is NOT gated: |r_p| is small near this slab's Brewster angle
+    (eps 2.55 -> 58 deg), where the phase is ill-conditioned."""
+    pytest.importorskip("numba")
+    from dynameta.optics.fdtd_nd import FDTDLayer
+    lay = [FDTDLayer(thickness_m=DT, eps_inf=3.0, drude_wp_rad_s=0.9e15, drude_gamma_rad_s=8e13)]
+    res = 30
+    out = []
+    for npw in _offs(res, 4, _nmax(lay, ())):
+        r, th, _ = _obl_front("p", 50.0, res, npw, "numba", monkeypatch, z_subcell=_ZSUB, layers=lay)
+        rs = _obl_front.last
+        r_, R_, T_ = _rt_true(_eps_true(lay[0]), th, "p")
+        out.append((float(np.interp(FI, rs.freqs_Hz, rs.R0)) - R_, float(np.interp(FI, rs.freqs_Hz, rs.T0)) - T_))
+    e = np.abs(np.asarray(out)).max(axis=0)
+    assert e[0] < RT_BAR and e[1] < RT_BAR, e
