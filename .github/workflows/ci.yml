@@ -388,7 +388,9 @@ jobs:
         # 28 passed in 6 s locally. test_devsim_env added 2026-11-03 for v0.14.0 (D0: the DEVSIM BLAS
         # pin + the devsim 2.11.2 reset_devsim contract): 20 passed in 3.8 s locally on Windows and
         # 20 passed in 3.6 s under WSL Ubuntu / py3.12 / devsim 2.11.2 -- on Linux the default leaves
-        # devsim's own loader search alone; the decoy gate runs with DYNAMETA_DEVSIM_BLAS=pin.)
+        # devsim's own loader search alone; the decoy gate runs with DYNAMETA_DEVSIM_BLAS=pin.
+        # test_equilibrium_simplify_cache added the same day: its 2 fast cases take < 1 s; the
+        # @slow live-simplify case runs in the `nightly` job, step (a).)
         #
         # NOT PINNED to an old release, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg
         # red every night from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py.
@@ -405,7 +407,7 @@ jobs:
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
             tests/test_contact_current.py tests/test_dc_solve_gummel.py \
             tests/test_density_gradient.py \
-            tests/test_devsim_env.py tests/test_devsim_smoke.py tests/test_electrothermal.py \
+            tests/test_devsim_env.py tests/test_devsim_smoke.py tests/test_electrothermal.py             tests/test_equilibrium_simplify_cache.py \
             tests/test_fem_symmetry_tensor.py tests/test_fem_speed.py \
             tests/test_gated_builder.py tests/test_geometry_guards.py \
             tests/test_geometry_shapes.py \
@@ -458,7 +460,9 @@ jobs:
     #   (a) pytest -m slow         11 tests    ~818 s MEASURED (test_soa.py 719 s -- the Innolume
     #                                          co-fit dominates it -- plus test_harmonics.py 17 s;
     #                                          + test_ringdown.py n_slab = 20 52 s and
-    #                                          test_lumenairy_bridge_verify_550.py 30 s, 2026-11-02)
+    #                                          test_lumenairy_bridge_verify_550.py 30 s, 2026-11-02;
+    #                                          + test_equilibrium_simplify_cache.py 311 s, 2026-11-03:
+    #                                          ONE live DEVSIM simplify(), single-threaded, loaded box)
     #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
     #                                          test_graded_tensor_fem.py 258 s / 1 passed)
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
@@ -501,10 +505,12 @@ jobs:
           python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
           python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
       - name: (a) the @slow tests every PR leg deselects
-        # The 11 `-m slow` tests (8 in test_soa.py, 1 each in test_harmonics.py, test_ringdown.py
-        # and test_lumenairy_bridge_verify_550.py): the QD-SOA validation wrappers, the
-        # multi-minute Innolume co-fit, the blazed-grating FDTD deflection oracle, the n_slab = 20
-        # FDTD etalon ringdown Q vs Fabry-Perot, and the lumenairy-5.30 PMM-twin angle-gradient row.
+        # The 12 `-m slow` tests (8 in test_soa.py, 1 each in test_harmonics.py, test_ringdown.py,
+        # test_lumenairy_bridge_verify_550.py and test_equilibrium_simplify_cache.py): the QD-SOA
+        # validation wrappers, the multi-minute Innolume co-fit, the blazed-grating FDTD deflection
+        # oracle, the n_slab = 20 FDTD etalon ringdown Q vs Fabry-Perot, the lumenairy-5.30
+        # PMM-twin angle-gradient row, and (v0.14.0, D0) DEVSIM's live simplify() of the F_1/2
+        # Jacobian against the replayed string physics_equilibrium caches (string + bitwise values).
         # `-m "not slow"` on the four `test` legs is what makes them cheap; this is the other half.
         # PARTIAL OVERLAP with (c2) is deliberate and is not pure duplication: seven of these are
         # thin wrappers around validation modules (c2) also runs, but only the pytest route puts
