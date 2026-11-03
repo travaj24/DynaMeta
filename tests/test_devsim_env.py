@@ -50,7 +50,7 @@ _CHILD = "\n".join([
 
 def _expected_pin():
     """The library the default resolution picks in THIS environment (None: nothing pip-installed)."""
-    return E._mkl_rt() or E._scipy_openblas()
+    return E._mkl_rt() or (E._scipy_openblas() if E._devsim_honours_blas_prefix() else None)
 
 
 def _decoys(tmp_path):
