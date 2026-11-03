@@ -417,6 +417,33 @@ best, never u = 0. The 3-D fixture's own constant is 0.0874 > 0.0854; the sweep 
 land just inside (0.996). Not fixed here (no fitting, no safety factor): sampling the 8 offsets as
 k/8 (including u = 0) would make the sweep's worst case cover the aligned fixtures -- a decision.
 
+OFFSET SET FIXED (2026-11-03, third round). A worst case over offsets must include the offset where
+the per-offset constant peaks (u -> 0, a face on a node), so `fdtd_nd.grid.subcell_offset_pads`
+now steps the face through one cell in u = u0 + k/8, k = 0..7, anchored BITWISE at the fixture's own
+pad (n_pad_wave = base + k dz / (8 lambda_max); k = 0 IS the fixture). Both shipped fixtures are
+aligned (pad/dz = 336 and 216 to one ulp), so the set is u = k/8 including u = 0 and u = 1/2. (A
+first k/8 set built as m + k/8 missed the sweep fixture's pad by one ulp -- pad/dz 336.00000000000006
+vs 336.0 -- and the attained bound came out 1 + 1.7e-14; anchoring removes that.) The registration
+tables of tests/test_fdtd_registration.py do NOT use this helper and are unchanged: their MEAN-bias
+gates need the midpoint set, which is what cancels the point-sampling sawtooth. The helper is not
+on any engine code path (validations only), so the 41-script sweep was not re-run.
+
+| gate | per-offset constants, u = 0, 1/8, ..., 7/8 | C_geom (full precision, pinned) |
+| --- | --- | --- |
+| fdtd_3d_reduces A | 0.087354 0.079760 0.059720 0.035424 0.044972 0.035414 0.059719 0.079699 | 0.08735397979210943 |
+| fdtd_sweep_vs_tmm 1 | 0.214884 0.197138 0.157715 0.101686 0.079942 0.138427 0.185522 0.211053 | 0.21488435744194653 |
+
+The per-offset constant is largest at u = 0 for both (the fixture is its own worst case), smallest
+near u = 1/2 for the stack and u = 3/8, 5/8 for the slab. The 3-D regeneration now runs the fixture's
+own configuration (numpy, nx = ny = 4).
+
+Results with the k/8 constants (2026-11-03): fdtd_sweep_vs_tmm GATE 1 (a) 1.000 -- the bound is
+ATTAINED, the fixture being the u = 0 member of its own sweep -- PASS, (b) 6.56e-3 -> 1.59e-3, order
+2.05 PASS (65 s); under z_subcell="point" (b) is 3.02e-3 -> 3.99e-3, order -0.40: FAILS, as before.
+fdtd_3d_reduces GATE A (a) 1.000 PASS, (b) 6.22e-3 -> 1.55e-3, order 2.01 PASS (252 s). This
+supersedes the "STOPPED AND REPORTED" 3d_reduces item above. test_fdtd_registration.py (incl. slow)
+30 passed; no test file imports the changed helpers; ruff clean.
+
 RINGDOWN DRIFT RULE (decision 2). A pencil pole whose frequency is below the window's frequency
 resolution, |omega| < omega_res = 2 pi / (N dt) (N = fitted samples, dt their spacing), completes
 less than one cycle in the window: it is classified as NON-RESONANT DRIFT (`ringdown.Drift`). Drift

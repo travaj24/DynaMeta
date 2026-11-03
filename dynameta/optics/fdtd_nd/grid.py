@@ -182,13 +182,19 @@ Z_SUBCELL_MODES = ("average", "point")
 
 
 def subcell_offset_pads(dz, lambda_max_m, n=8, base_n_pad_wave=4.0):
-    """The REGISTRATION-SWEEP pads: `n_pad_wave` values putting pad/dz at m + (k + 1/2)/n,
-    k = 0..n-1, m = round(base_n_pad_wave * lambda_max / dz) -- MIDPOINT-uniform sub-cell offsets
-    of the structure's front face (pad = n_pad_wave * lambda_max). The ONE helper behind the
-    registration gates (tests/test_fdtd_registration.py) and the per-geometry convergence-gate
-    constants of the FDTD validations (2026-11-03)."""
-    m = round(base_n_pad_wave * lambda_max_m / dz)
-    return [(m + (k + 0.5) / n) * dz / lambda_max_m for k in range(int(n))]
+    """WORST-CASE offset sweep for the per-geometry convergence-gate constants of the FDTD
+    validations (2026-11-03): `n_pad_wave` values base_n_pad_wave + k dz / (n lambda_max),
+    k = 0..n-1, i.e. the front face (pad = n_pad_wave * lambda_max) stepped through one cell in
+    sub-cell offsets u = u0 + k/n, ANCHORED BITWISE at the fixture's own pad (k = 0 is the fixture).
+    For an aligned fixture (u0 = 0: pad/dz an integer, both shipped gates) the set is u = k/n,
+    INCLUDING u = 0 (a face exactly on an E node, the 0.5/0.5 cell -- where the averaged per-offset
+    constant peaks) and u = 1/2. A worst case over offsets must contain that peak: the first version
+    sampled the midpoints (k + 1/2)/n, which never reach u = 0, and the u = 0 fixture of
+    fdtd_3d_reduces exceeded its own C_geom (1.023); a k/n set built as m + k/n missed the fixture's
+    pad by one ulp (pad/dz 336.00000000000006 vs 336.0) and the attained bound came out 1 + 1.7e-14.
+    (The MEAN-bias registration gates of tests/test_fdtd_registration.py keep their own midpoint
+    offsets: there the midpoint set is what cancels the point-sampling sawtooth.)"""
+    return [base_n_pad_wave + k * dz / (n * lambda_max_m) for k in range(int(n))]
 
 
 def second_order_constant(err, x):

@@ -43,12 +43,12 @@ STACK = [(2.2 ** 2, 250e-9), (1.5 ** 2, 180e-9), (2.2 ** 2, 250e-9)]
 
 # GATE 1 convergence-gate constant, PER GEOMETRY (2026-11-03 decision): the worst second-order
 # constant of THIS stack (2.2/1.5/2.2, 250/180/250 nm, band 1100-1500 nm, res 28, the 9 target
-# wavelengths) over the 8 midpoint sub-cell offsets of its front face (fdtd_nd.grid.subcell_offset_pads,
+# wavelengths) over the 8 sub-cell offsets u = k/8, k = 0..7 (incl. u = 0 and 1/2) of its front face (fdtd_nd.grid.subcell_offset_pads,
 # base n_pad_wave 4): C = max of max(|dR|, |dT|) / X^2, X = n_max k0 dz = 2 pi LMIN / (RES lambda)
 # (fdtd_nd.grid.second_order_constant). No safety factor. Regenerate:
 #   python -m validation.fdtd_sweep_vs_tmm --regen-cgeom        (measured 2026-11-03)
 # Part (a) is a REGRESSION bound; the physics gate is part (b), the observed order.
-C_GEOM_SWEEP = 0.2157     # 2026-11-03: per offset 0.2087 0.1802 0.1302 0.0803 0.1102 0.1647 0.2010 0.2157
+C_GEOM_SWEEP = 0.21488435744194653  # 2026-11-03, u = k/8: 0.214884 0.197138 0.157715 0.101686 0.079942 0.138427 0.185522 0.211053
 
 
 def _sweep_err(d, n_pad_wave=4.0, z_subcell="average"):
@@ -143,7 +143,7 @@ def main():
 if __name__ == "__main__":
     if "--regen-cgeom" in sys.argv[1:]:
         c, per = regen_c_geom()
-        print("[fw] C_geom (GATE 1, res 28, 8 offsets x 9 wavelengths) = {:.4f}; per offset {}".format(
-            c, ", ".join("{:.4f}".format(v) for v in per)))
+        print("[fw] C_geom (GATE 1, res 28, 8 offsets k/8 x 9 wavelengths) = {!r}; per offset {}".format(
+            c, ", ".join("{:.6f}".format(v) for v in per)))
         raise SystemExit(0)
     raise SystemExit(0 if main() else 1)
