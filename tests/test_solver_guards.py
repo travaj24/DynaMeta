@@ -908,6 +908,7 @@ def test_s6_17_batched_cell_average_is_bitwise_the_point_by_point_loop(monkeypat
     call. Pinned BIT-FOR-BIT against the old Python double loop (re-implemented here verbatim) on
     a GridFunction and on an E_bg + gfu CoefficientFunction, for a real and a complex projection
     and zero / non-zero Bloch demodulation. Measured 3.1-4.3x per call (24 x 24: 67 -> 16 ms)."""
+    pytest.importorskip("ngsolve")
     import ngsolve as ng
     from dynameta.optics import solver as S
     geo, _eps, _opt = _fem_cell()
@@ -949,6 +950,7 @@ def test_s6_18_absorption_diagnostics_integrate_ONCE_and_split_exactly(monkeypat
     ONE region-wise Integrate gives both, and A_independent == sum(map) EXACTLY (it held to ~1e-16
     before). The values are pinned to the old two-pass integrals at 1e-14 (the TaskManager's own
     run-to-run noise is 4.4e-16), a lossless region is exactly 0 and the PML is excluded."""
+    pytest.importorskip("ngsolve")
     import re as _re
     import ngsolve as ng
     from dynameta.optics import solver as S
