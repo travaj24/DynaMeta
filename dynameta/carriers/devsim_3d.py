@@ -80,6 +80,7 @@ from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
+from dynameta.carriers import extended_precision as XP
 from dynameta.carriers import physics_traps as PT
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
@@ -186,6 +187,9 @@ class Stacked3DSpec:
     # (the gate-oxide tunneling current through 'oxide', post-processed from the converged field).
     btbt: Optional[object] = None
     oxide_tunneling: Optional[object] = None
+    # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
+    # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
+    extended_precision: bool = False
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -352,7 +356,7 @@ class Stacked3DSpec:
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
-                     interface_traps=None) -> "Stacked3DSpec":
+                     interface_traps=None, extended_precision: bool = False) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -512,7 +516,8 @@ class Stacked3DSpec:
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
                     chi_semi_eV=(float(tr.chi_eV) if extra_semis else None),
-                    interface_traps=interface_traps, **bip)
+                    interface_traps=interface_traps,
+                    extended_precision=bool(extended_precision), **bip)
 
 
 class Devsim3DEquilibrium:
@@ -566,6 +571,8 @@ class Devsim3DEquilibrium:
             ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
         ds.finalize_mesh(mesh=self.mesh_name)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+        if s.extended_precision:                    # BEFORE any model: DEVSIM types models at creation
+            XP.enable(self.device)
         self._dd = (s.physics == "drift_diffusion")
         self._bipolar = (s.physics == "bipolar_dd")
         if self._bipolar:
@@ -770,7 +777,7 @@ class Devsim3DEquilibrium:
                           max_iter=100, semiconductor_regions=["semi"])
         else:
             ds.set_parameter(device=self.device, name="gate_bias", value=vg)
-            ds.solve(type="dc", solver_type="direct", absolute_error=1e10,
+            XP.solve(type="dc", solver_type="direct", absolute_error=1e10,
                       relative_error=1e-5, maximum_iterations=80)
         # emit the GATE-ADJACENT semiconductor (where accumulation forms) -- 'semi' for a single
         # semiconductor, the last extra semiconductor for a heterostack.

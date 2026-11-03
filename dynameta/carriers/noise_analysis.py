@@ -130,6 +130,7 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
 
+from dynameta.carriers import extended_precision as _XP
 from dynameta.carriers.eq_registry import ds
 from dynameta.constants import KB, Q_E
 
@@ -445,7 +446,7 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     sol_re, sol_im = "noise_{}_real".format(output_node), "noise_{}_imag".format(output_node)
     try:
         for k, f in enumerate(freqs):
-            ds.solve(type="noise", frequency=float(f), output_node=output_node)
+            _XP.solve(type="noise", frequency=float(f), output_node=output_node)  # 128-bit iff opted in
             fix = {}
             for key, lst in contact_nodes.items():
                 fix[key] = [(nodes, complex(

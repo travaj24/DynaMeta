@@ -66,6 +66,8 @@ from __future__ import annotations
 import numpy as np
 import devsim as ds
 
+from dynameta.carriers import extended_precision as _XP
+
 
 _FLOOR_MSG = (
     "transient_step: at t={:.3e} s the step dt={:.3e} s fell below dt_floor_s={:.3e} s, so the "
@@ -152,7 +154,9 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
             "device's dielectric/RC time -- or lower dt_floor_s deliberately if you know "
             "the step is meaningful.".format(dt0, float(dt_floor_s)))
     # establish the transient initial condition at the current DC state
-    ds.solve(type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
+    # _XP.solve: transient_dc and every transient_bdf1 step MUST run the same Newton type -- DEVSIM
+    # keeps separate TimeData<double> / TimeData<float128> histories, so the switch is per device.
+    _XP.solve(type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
              maximum_iterations=maximum_iterations)
     ds.circuit_alter(name=source_name, value=float(v_to))            # the bias change
     src_i = "{}.I".format(source_name)
@@ -170,7 +174,7 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
         try:
             # info=True returns the per-equation errors and reports non-convergence as a RETURN
             # value; only hard solver errors (singular factorization, exp overflow) still raise.
-            info = ds.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
+            info = _XP.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
                             absolute_error=absolute_error, relative_error=relative_error,
                             maximum_iterations=maximum_iterations, info=True)
             if isinstance(info, dict) and not info.get("converged", True):
