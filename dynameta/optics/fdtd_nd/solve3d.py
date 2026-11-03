@@ -27,8 +27,8 @@ from dynameta.optics.fdtd_nd.spec import FDTDLayer, courant_guard, hot_carrier_g
 from dynameta.optics.fdtd_nd.backends import resolve_backend
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD3DMOResult, FDTD3DResult, _flux3d
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pulse_width,
-                                          source_pulse, z_grid)
+from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, layer_masks, material_z, pad_masks,
+                                          probe_cells, pulse_width, source_pulse, z_grid)
 # audit D-3 / D-15: the absorber-thickness + probe-placement rule and the empty-band backstop are
 # SINGLE-SOURCED in solve2d (all three 3-D front ends below call the same helper), so the wave-3
 # redesign -- npml floor, attenuation-budget probe clearance, source demoted to a warning -- lands
@@ -82,8 +82,9 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     """Broadband R(f)/T(f) of a doubly-periodic (period_x_m x period_y_m) unit cell at NORMAL incidence,
     y-polarized. `layers` = the through-stack (z) profile; supply `lateral_eps_inf` (an (nx,ny,nz) array,
     or a callable(nx,ny,nz,zc,pad,zstruct)->(nx,ny,nz)) to make a 2D-periodic structure, else the stack is
-    laterally UNIFORM (and the result reduces to 1D/TMM). Returns both the specular 0-order and the
-    total-flux (all (kx,ky) orders) R/T.
+    laterally UNIFORM (and the result reduces to 1D/TMM). `zc` = the material-registration z positions,
+    the Yee E-NODES k*dz since 2026-11-02 (audit S2-14 siblings; were (k+1/2)*dz -- see
+    fdtd_nd.grid.material_z). Returns both the specular 0-order and the total-flux (all (kx,ky) orders) R/T.
 
     n_super / n_sub (default 1 = vacuum): the lossless semi-infinite superstrate / substrate indices
     (metasurface-on-glass), filling the z-pads with n_super^2 / n_sub^2, with an impedance-matched CPML
@@ -122,12 +123,14 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
     chi2g = np.zeros(shape)                                                  # R15 SHG chi2 [m/V]
     chi3R = np.zeros(shape); rw = np.zeros(shape); rgam = np.zeros(shape)    # R15 Raman pole
     gw = np.zeros(shape); gdw = np.zeros(shape); gkdn = np.zeros(shape)      # R20 gain line
-    zc = (np.arange(nz) + 0.5) * dz
-    eps_inf[:, :, zc < pad] = n_super ** 2                   # fill the semi-infinite super/substrate pads
-    eps_inf[:, :, zc >= pad + z_struct] = n_sub ** 2
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): materials registered at the Yee E-NODES k*dz, the ONE shared
+    # convention (fdtd_nd.grid.material_z; was the cell centres (k+1/2)*dz = a -n k0 dz bias on r0's
+    # phase, measured -1.0 k0dz). `zc` is also what the lateral painter below receives.
+    zc = material_z(nz, dz)
+    _lo, _hi = pad_masks(zc, pad, z_struct)
+    eps_inf[:, :, _lo] = n_super ** 2                        # fill the semi-infinite super/substrate pads
+    eps_inf[:, :, _hi] = n_sub ** 2
+    for L, m in layer_masks(zc, pad, layers):
         eps_inf[:, :, m] = L.eps_inf
         wp[:, :, m] = L.drude_wp_rad_s
         gam[:, :, m] = L.drude_gamma_rad_s
@@ -143,7 +146,6 @@ def solve_fdtd_3d(layers: List[FDTDLayer], *, period_x_m: float, period_y_m: flo
         gw[:, :, m] = L.gain_w_rad_s
         gdw[:, :, m] = L.gain_dw_rad_s
         gkdn[:, :, m] = L.gain_kappa_C2_kg * L.gain_dN_m3
-        z += L.thickness_m
     if lateral_eps_inf is not None:
         lat = lateral_eps_inf(nx, ny, nz, zc, pad, z_struct) if callable(lateral_eps_inf) else np.asarray(lateral_eps_inf)
         eps_inf = np.asarray(lat, dtype=float)
@@ -296,12 +298,9 @@ def solve_fdtd_3d_oblique(layers: List[FDTDLayer], *, period_x_m: float, period_
     sx, sy = -np.sin(phi), np.cos(phi)                           # s-pol in-plane E direction
 
     eps_inf = np.ones((nx, ny, nz)); wp = np.zeros((nx, ny, nz)); gam = np.zeros((nx, ny, nz))
-    zc = (np.arange(nz) + 0.5) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): E-node registration, the shared convention (was (k+1/2)*dz).
+    for L, m in layer_masks(material_z(nz, dz), pad, layers):
         eps_inf[:, :, m] = L.eps_inf; wp[:, :, m] = L.drude_wp_rad_s; gam[:, :, m] = L.drude_gamma_rad_s
-        z += L.thickness_m
     k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_3d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
                            n_pad_wave, resolution)          # audit D-3
@@ -423,17 +422,17 @@ def solve_fdtd_3d_mo(layers, *, period_x_m: float, period_y_m: float, lambda_min
     o = np.ones((nx, ny, nz)); zr = np.zeros((nx, ny, nz))
     exx, eyy, ezz = o.copy(), o.copy(), o.copy()
     wp, gam, wc = zr.copy(), zr.copy(), zr.copy()
-    zc = (np.arange(nz) + 0.5) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): E-node registration, the shared convention -- now the SAME
+    # rule as its 1-D twin solve_fdtd_mo_1d (it used (k+1/2)*dz, so the "reduces to the 1-D fdtd_mo"
+    # comparison carried a dz/2 structure shift). `zc` is also what lateral_tensor receives.
+    zc = material_z(nz, dz)
+    for L, m in layer_masks(zc, pad, layers):
         exx[:, :, m] = L.eps_xx; eyy[:, :, m] = L.eps_yy
         _ezz = getattr(L, "eps_zz", None)        # `is not None`, NOT truthiness: eps_zz=0 (z-ENZ) is valid
         ezz[:, :, m] = _ezz if _ezz is not None else 0.5 * (L.eps_xx + L.eps_yy)
         wp[:, :, m] = getattr(L, "drude_wp_rad_s", 0.0)
         gam[:, :, m] = getattr(L, "drude_gamma_rad_s", 0.0)
         wc[:, :, m] = getattr(L, "cyclotron_wc_rad_s", 0.0)
-        z += L.thickness_m
     if lateral_tensor is not None:
         # STRUCTURED override: a laterally-patterned per-cell tensor replaces the uniform per-layer fill.
         pat = lateral_tensor(nx, ny, nz, zc, pad, z_struct) if callable(lateral_tensor) else lateral_tensor

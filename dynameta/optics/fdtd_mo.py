@@ -41,7 +41,8 @@ import numpy as np
 from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in constants (was re-derived here)
 from dynameta.optics.fdtd_nd import have_numba, njit, resolve_backend
 from dynameta.optics.fdtd_nd.spec import courant_guard         # audit D-11 (the 8th front end)
-from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
+from dynameta.optics.fdtd_nd.grid import (layer_masks, material_z, probe_cells, pulse_width,  # audit D-15
+                                          source_pulse, z_grid)                          # + S2-14
 
 
 @dataclass
@@ -278,22 +279,18 @@ def solve_fdtd_mo_1d(layers: List[MOLayer], *, lambda_min_m: float, lambda_max_m
     dt = courant * dz / C_LIGHT
 
     exx = np.ones(nz); eyy = np.ones(nz); wp = np.zeros(nz); gam = np.zeros(nz); wc = np.zeros(nz)
-    # Materials are registered at the Yee E-NODES (audit S2-14, wave-7 2026-11-02: KEPT, deliberately
-    # unlike solve_fdtd_1d's uniform path / solve_fdtd_2d / solve_fdtd_3d, which sample at (k+1/2)*dz).
-    # E_k sits at k*dz in every one of these engines (probe_cells rounds z/dz to an E index; the
-    # siblings de-embed r0 in that node frame), and eps_k fills E_k's control volume
-    # [(k-1/2), (k+1/2)]*dz, centred ON the node: node sampling is the unbiased registration. The
-    # (k+1/2) rule shifts the structure -dz/2 on average = a -k0*dz reflection-phase bias (measured
-    # -0.100 rad vs node +0.005 rad, k0*dz 0.090; |R|/|T| cannot tell them apart; solve_fdtd_2d on the
-    # same slab measured -0.095 rad -- the siblings carry that bias, a recorded follow-up). Gate:
-    # tests/test_fdtd_mo_oblique.py::test_s2_14_mo_registers_materials_where_E_lives_and_is_the_unbiased_one.
-    zc = np.arange(nz) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # Materials are registered at the Yee E-NODES (audit S2-14, wave-7 2026-11-02). E_k sits at k*dz
+    # in every engine (probe_cells rounds z/dz to an E index; r0 is de-embedded in that node frame),
+    # and eps_k fills E_k's control volume [(k-1/2), (k+1/2)]*dz, centred ON the node: node sampling
+    # is the unbiased registration (measured -0.100 rad for the old sibling (k+1/2) rule vs node
+    # +0.005 rad, k0*dz 0.090; |R|/|T| cannot tell them apart). This engine always used the nodes;
+    # since 2026-11-02 (the S2-14 sibling fix) every FDTD engine does, through the ONE shared helper
+    # fdtd_nd.grid.material_z / layer_masks -- bit-identical here (same expression, same float
+    # accumulation). Gates: tests/test_fdtd_mo_oblique.py::test_s2_14_* and
+    # tests/test_fdtd_registration.py.
+    for L, m in layer_masks(material_z(nz, dz), pad, layers):
         exx[m] = L.eps_xx; eyy[m] = L.eps_yy
         wp[m] = L.drude_wp_rad_s; gam[m] = L.drude_gamma_rad_s; wc[m] = L.cyclotron_wc_rad_s
-        z += L.thickness_m
 
     i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)          # audit D-15: shared (fdtd_nd/grid.py)
     tau, t0 = pulse_width(f_min, f_max, settle)

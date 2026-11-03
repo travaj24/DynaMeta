@@ -309,9 +309,11 @@ def test_s2_14_mo_registers_materials_where_E_lives_and_is_the_unbiased_one():
     bias of 2 k0 (dz/2) = k0*dz. Measured here over 9 pad offsets (frac(pad/dz) 0..0.9, res 30):
     node mean dphi_r = +0.005 rad, (k + 1/2) mean = -0.100 rad, k0*dz = 0.090. |R|, |T| cannot
     tell them apart (a rigid translation; both carry the same thickness-rounding spread).
-    VERDICT: fdtd_mo is RIGHT and is kept; the siblings carry the -k0*dz r0-phase bias their
-    validation absorbs (validation/fdtd_seam_vs_tmm.py GATE 3: 15 deg, 'the half-cell limit').
-    This gate fails if fdtd_mo is "unified" onto the biased registration."""
+    VERDICT: fdtd_mo is RIGHT and is kept; the siblings carried the -k0*dz r0-phase bias their
+    validation absorbed (validation/fdtd_seam_vs_tmm.py GATE 3: 15 deg, 'the half-cell limit').
+    FOLLOW-UP DONE 2026-11-02: every sibling now registers at the nodes through the shared
+    fdtd_nd.grid.material_z / layer_masks (tests/test_fdtd_registration.py, GATE 3b of that
+    validation). This gate fails if fdtd_mo is "unified" onto the biased registration."""
     pytest.importorskip("numba")
     import tmm
     from dynameta.constants import C_LIGHT

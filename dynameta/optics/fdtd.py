@@ -29,7 +29,9 @@ from dynameta.constants import C_LIGHT, EPS0, MU0  # MU0 single-sourced in const
 # inversion); re-exported at its old home so `from dynameta.optics.fdtd import FDTDLayer` keeps working.
 from dynameta.optics.fdtd_nd.spec import (FDTDLayer, courant_guard,  # noqa: F401 (re-export)
                                           hot_carrier_guard)
-from dynameta.optics.fdtd_nd.grid import probe_cells, pulse_width, source_pulse, z_grid   # audit D-15
+from dynameta.optics.fdtd_nd.grid import (interface_node_fractions, layer_masks,  # audit D-15 + S2-14
+                                          material_z, probe_cells, pulse_width, source_pulse,
+                                          z_grid)
 from dynameta.warning_types import UnreliableResultWarning
 
 
@@ -663,22 +665,25 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
 
     if not nonuniform:
         dt = courant * dz / C_LIGHT
-        # cell-wise material profile (structure centered, vacuum pads each side)  [legacy uniform build]
+        # node-wise material profile (structure from z = pad, vacuum pads each side). audit S2-14
+        # siblings (2026-11-02): registered at the Yee E-NODES k*dz (fdtd_nd.grid.material_z, the
+        # ONE convention every engine shares) -- this used to sample the CELL CENTRES (k+1/2)*dz,
+        # which shifted the structure -dz/2 on average against the node frame the probes and the
+        # Mur walls live in: a -k0*dz reflection-phase bias (measured -1.13 k0dz at res 30, -0.98
+        # at res 60 over 9 pad offsets; |R|/|T| unaffected). It also disagreed with this function's
+        # own nonuniform branch below, which always registered at its primal (E) nodes.
         eps_inf = np.ones(nz)
         wp = np.zeros(nz)
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = pad
-        zc = (np.arange(nz) + 0.5) * dz                    # cell centers
-        z = z0
-        for L in layers:
-            m = (zc >= z) & (zc < z + L.thickness_m)
+        zc = material_z(nz, dz)                            # E-node positions (name kept: tv_mask below)
+        for L, m in layer_masks(zc, z0, layers):
             eps_inf[m] = L.eps_inf
             wp[m] = L.drude_wp_rad_s
             gam[m] = L.drude_gamma_rad_s
             if kerr:
                 chi3[m] = L.chi3_m2_V2
-            z += L.thickness_m
         # source / left probe (between source and structure) / right probe (in the sub vacuum)
         i_src, i_pL, i_pR = probe_cells(pad, z_struct, dz)  # audit D-15: shared with 2-D/3-D
     else:
@@ -698,15 +703,32 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
         gam = np.zeros(nz)
         chi3 = np.zeros(nz)
         z0 = float(z_edges[0])
-        zpos = z0 + pad
-        for L in layers:
-            m = (z_edges >= zpos) & (z_edges < zpos + L.thickness_m)
+        # E-node point registration -- the SAME shared helper (and float accumulation) as every
+        # other engine (audit S2-14 siblings, 2026-11-02) ...
+        for L, m in layer_masks(z_edges, z0 + pad, layers):
             eps_inf[m] = L.eps_inf
             wp[m] = L.drude_wp_rad_s
             gam[m] = L.drude_gamma_rad_s
             if kerr:
                 chi3[m] = L.chi3_m2_V2
-            zpos += L.thickness_m
+        # ... plus the interface TIE rule this grid needs: _march_graded snaps every material
+        # interface ONTO a node, and the half-open point rule then hands that node wholly to the
+        # region starting there -- the interface moves -h/2, a -k0*h_fine reflection-phase bias
+        # (measured -0.88 k0*h mean over pad offsets; it used to be this path's only registration
+        # error). The tie nodes take the control-volume arithmetic mean (Hwang & Cangellaris 2001):
+        # eps_inf and chi3 linearly, the Drude term as ONE pole with wp^2 = sum f wp_i^2 and the
+        # wp^2-weighted gamma (exact when at most one side is Drude or the gammas agree -- every
+        # metal/dielectric interface; a two-metal interface with unequal gammas gets the weighted
+        # single-pole approximation at that one node). Measured after: +-0.03 k0*h, O(h^2) in h.
+        _reg = ([(1.0, 0.0, 0.0, 0.0)]
+                + [(L.eps_inf, L.drude_wp_rad_s, L.drude_gamma_rad_s, L.chi3_m2_V2 if kerr else 0.0)
+                   for L in layers] + [(1.0, 0.0, 0.0, 0.0)])
+        for j, frs in interface_node_fractions(z_edges, z0 + pad, layers).items():
+            e_ = sum(f * _reg[r + 1][0] for r, f in frs)
+            w2 = sum(f * _reg[r + 1][1] ** 2 for r, f in frs)
+            g_ = (sum(f * _reg[r + 1][1] ** 2 * _reg[r + 1][2] for r, f in frs) / w2) if w2 > 0.0 else 0.0
+            eps_inf[j], wp[j], gam[j] = e_, np.sqrt(w2), g_
+            chi3[j] = sum(f * _reg[r + 1][3] for r, f in frs)
         i_src = max(2, int(np.searchsorted(z_edges, z0 + 0.35 * pad)))
         i_pL = int(np.searchsorted(z_edges, z0 + 0.7 * pad))
         i_pR = min(int(np.searchsorted(z_edges, z0 + pad + z_struct + 0.3 * pad)), nz - 1)
@@ -722,12 +744,11 @@ def solve_fdtd_1d(layers: List[FDTDLayer], *, lambda_min_m: float, lambda_max_m:
     tv_mask = None
     if _hooks_on:
         tv_mask = np.zeros(nz, dtype=bool)
-        zt = z0
-        for idx, L in enumerate(layers):
-            mm = (zc >= zt) & (zc < zt + L.thickness_m)
+        # the SAME node masks as the material fill above (audit S2-14 siblings: one helper, so the
+        # time-varying cells are exactly the cells that carry the layer's material)
+        for idx, (L, mm) in enumerate(layer_masks(zc, z0, layers)):
             if idx == time_varying_layer:
                 tv_mask = mm
-            zt += L.thickness_m
         if not tv_mask.any():
             raise ValueError("solve_fdtd_1d: time_varying_layer={} designates no grid cells".format(
                 time_varying_layer))
@@ -893,7 +914,7 @@ def frequency_conversion_diagnostic(trace, *, band_Hz=None, output="transmitted"
 class UniformTimeVaryingResult:
     dt: float
     dz: float
-    z_m: np.ndarray                 # cell centers
+    z_m: np.ndarray                 # E-node positions k*dz (the comment said 'cell centers'; it never was)
     t_s: np.ndarray                 # time grid
     n_traj: np.ndarray              # index n(t) actually applied at each step
     Ex_final: np.ndarray            # final E snapshot (whole grid)

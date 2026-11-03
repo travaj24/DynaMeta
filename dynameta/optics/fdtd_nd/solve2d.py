@@ -30,8 +30,8 @@ from dynameta.optics.fdtd_nd.backends import have_jax, have_numba, resolve_backe
 from dynameta.optics.fdtd_nd.kernels2d_numba import _te2d_cuda, _te2d_numba
 from dynameta.optics.fdtd_nd.results import FDTD2DObliqueResult, FDTD2DResult, _flux
 from dynameta.optics.fdtd_nd.cpml import cpml_z
-from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, probe_cells, pulse_width,
-                                          source_pulse, z_grid)
+from dynameta.optics.fdtd_nd.grid import (layer_band_index_max, layer_masks, material_z, material_z_half,
+                                          pad_masks, probe_cells, pulse_width, source_pulse, z_grid)
 from dynameta.optics.fdtd_nd.kernels2d import run_2d_te
 from dynameta.optics.fdtd_nd.kernels2d_jax import run_2d_te_jax
 from dynameta.optics.fdtd_nd.oblique2d import _run_oblique
@@ -397,8 +397,7 @@ def _check_lateral_pads(entry_point, eps_grid, zc, pad, z_struct, n_super, n_sub
     default vacuum end media only if the painter really did leave ones there -- which is the point:
     it also catches a painter that floods the WHOLE grid with the structure index."""
     eps = np.asarray(eps_grid, dtype=float)
-    lo = zc < pad                                            # superstrate pad
-    hi = zc >= pad + z_struct                                # substrate pad
+    lo, hi = pad_masks(zc, pad, z_struct)                    # superstrate / substrate pads (E nodes)
     bad = []
     for mask, want, side, knob in ((lo, float(n_super) ** 2, "superstrate (low-z)", "n_super"),
                                    (hi, float(n_sub) ** 2, "substrate (high-z)", "n_sub")):
@@ -522,7 +521,10 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     z PADS INCLUDED (same as solve_fdtd_3d), so the painter OWNS the super/substrate pads and must fill
     zc < pad with n_super**2 and zc >= pad + z_struct with n_sub**2 -- optics.fdtd_seam
     .make_structured_lateral does it for you, and a painter that does not is now REFUSED rather than
-    silently mis-normalized (audit D-6). Returns both the 0-order (specular, x-mean)
+    silently mis-normalized (audit D-6). A callable painter receives `zc` = the z positions the
+    materials are registered at: the Yee E-NODES k*dz since 2026-11-02 (audit S2-14 siblings; they
+    were the cell centres (k+1/2)*dz, a -dz/2 structure shift = a -n_super k0 dz bias on r0's phase;
+    see fdtd_nd.grid.material_z). Returns both the 0-order (specular, x-mean)
     and the total-flux (all-diffraction-order) R/T.
 
     n_super / n_sub (default 1 = vacuum) are the lossless semi-infinite superstrate / substrate indices
@@ -566,11 +568,17 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
     chi2g = np.zeros((nx, nz))                                                       # R15 SHG chi2 [m/V]
     chi3R = np.zeros((nx, nz)); rw = np.zeros((nx, nz)); rgam = np.zeros((nx, nz))   # R15 Raman pole
     gw = np.zeros((nx, nz)); gdw = np.zeros((nx, nz)); gkdn = np.zeros((nx, nz))     # R20 gain line
-    zc = (np.arange(nz) + 0.5) * dz
+    # audit S2-14 siblings (2026-11-02): materials registered at the Yee E-NODES k*dz (the ONE shared
+    # convention, fdtd_nd.grid.material_z) -- this used to sample the cell centres (k+1/2)*dz, a
+    # -dz/2 structure shift = a -n k0 dz bias on r0's phase (measured -1.0 k0dz over 9 pad offsets).
+    # `zc` keeps its name: it is the z-position argument handed to the lateral painters below, which
+    # therefore paint the same nodes (optics.fdtd_seam.make_structured_lateral reads it as given).
+    zc = material_z(nz, dz)
     # fill the semi-infinite super/substrate pads with the end-media permittivity (so the incident wave is
     # truly in n_super and the structure sees the n_sub backing); vacuum (n=1) leaves this as ones
-    eps_inf[:, zc < pad] = n_super ** 2
-    eps_inf[:, zc >= pad + z_struct] = n_sub ** 2
+    _lo, _hi = pad_masks(zc, pad, z_struct)
+    eps_inf[:, _lo] = n_super ** 2
+    eps_inf[:, _hi] = n_sub ** 2
     # roadmap 2.1 hot-carrier per-cell scaffolding (opt-in). All None/-1 unless a layer carries a
     # HotCarrierParams; when every hot_carrier is None the bundle stays None so the run is byte-identical.
     _hot_layers = [getattr(L, "hot_carrier", None) for L in layers]
@@ -590,9 +598,7 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
         # so the bundle carries c_l=None and the kernel takes the byte-identical fixed-bath path.
         hc_c_l = np.full((nx, nz), np.inf); hc_g_sub = np.zeros((nx, nz))
         _have_lat = False
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    for L, m in layer_masks(zc, pad, layers):
         eps_inf[:, m] = L.eps_inf
         wp[:, m] = L.drude_wp_rad_s
         gam[:, m] = L.drude_gamma_rad_s
@@ -625,7 +631,6 @@ def solve_fdtd_2d(layers: List[FDTDLayer], *, period_x_m: float, nx: Optional[in
                 _have_lat = True
                 hc_c_l[:, m] = float(hc.c_l_j_m3_k)
                 hc_g_sub[:, m] = float(hc.g_sub_w_m3_k)
-        z += L.thickness_m
     if lateral_eps_inf is not None:
         # a laterally-structured grating: the pattern REPLACES THE WHOLE (nx, nz) eps_inf grid, PADS
         # INCLUDED -- not just the structure band (audit D-6: the comment here used to say "applied in
@@ -873,12 +878,19 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     dt = courant / (C_LIGHT * np.sqrt(1.0 / dx ** 2 + 1.0 / dz ** 2))
     kx = (2.0 * np.pi * f_c / C_LIGHT) * np.sin(np.radians(angle_deg))   # fixed transverse wavevector
     eps_inf = np.ones((nx, nz)); wp = np.zeros((nx, nz)); gam = np.zeros((nx, nz))
-    zc = (np.arange(nz) + 0.5) * dz
-    z = pad
-    for L in layers:
-        m = (zc >= z) & (zc < z + L.thickness_m)
+    # audit S2-14 siblings (2026-11-02): the tangential E (Ey for s, Ex for p) takes its materials at
+    # the Yee E-NODES k*dz (the shared convention; was the cell centres (k+1/2)*dz: measured s-pol 30 deg
+    # -0.82 k0dz, p-pol -1.15 k0dz mean r-phase bias). p-pol ALSO marches the NORMAL Ez, which lives at
+    # (k+1/2)*dz: it gets its OWN half-node maps (the per-component Yee assignment) -- with the node
+    # maps on Ez too, p-pol kept a -0.30 k0dz bias at 30 deg (the Ez interfaces sat dz/2 off).
+    for L, m in layer_masks(material_z(nz, dz), pad, layers):
         eps_inf[:, m] = L.eps_inf; wp[:, m] = L.drude_wp_rad_s; gam[:, m] = L.drude_gamma_rad_s
-        z += L.thickness_m
+    ez_maps = None
+    if pol == "p":
+        ez_i = np.ones((nx, nz)); ez_w = np.zeros((nx, nz)); ez_g = np.zeros((nx, nz))
+        for L, m in layer_masks(material_z_half(nz, dz), pad, layers):
+            ez_i[:, m] = L.eps_inf; ez_w[:, m] = L.drude_wp_rad_s; ez_g[:, m] = L.drude_gamma_rad_s
+        ez_maps = (ez_i, ez_w, ez_g)
 
     k_src, k_pL, k_pR = probe_cells(pad, z_struct, dz)       # audit D-15
     _check_probe_placement("solve_fdtd_2d_oblique", k_src, k_pL, k_pR, nz, npml, pad, dz,
@@ -903,7 +915,7 @@ def solve_fdtd_2d_oblique(layers: List[FDTDLayer], *, period_x_m: float, angle_d
     eyL_i, hxL_i, eyR_i, hxR_i = _run_oblique(name, one, zero, zero, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
                                               src, cpml, kx, pol)
     eyL_t, hxL_t, eyR_t, hxR_t = _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR,
-                                              src, cpml, kx, pol)
+                                              src, cpml, kx, pol, ez=ez_maps)
     # complex envelope -> full FFT; take the positive-frequency half (the forward exp(-iwt) response).
     # rfftfreq gives the monotonic positive-frequency axis matching fft(...)[:nf] within the band.
     # SIGN (audit V-22, idiom 3 in the package docstring): numpy bin +f here is the conjugate-mirror

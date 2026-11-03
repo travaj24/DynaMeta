@@ -481,10 +481,18 @@ def test_gate7_cross_platform_q_anchor_unchanged():
     RE-PINNED 2026-11-02 (wave-6 H6b): the default fit is now the WHOLE data-driven window (1845
     decimated samples, 21.3 nepers) instead of its first 1200 (13.9): 13.227533 -> 13.227438
     (-7.2e-6 relative; -1.007% vs Fabry-Perot). Same window, same refinement: the extra 645
-    samples sit deep in a decay the first 1200 had already pinned, so the anchor barely moves."""
+    samples sit deep in a decay the first 1200 had already pinned, so the anchor barely moves.
+
+    RE-PINNED 2026-11-02 (audit S2-14 siblings, docs/audit/2026-11-02-fdtd-registration.md):
+    solve_fdtd_1d now registers materials at the Yee E nodes. Here pad/dz = 892.5 and d/dz = 87.5
+    exactly, so the slab keeps its 88 cells under both rules and the change is a RIGID one-cell
+    translation (the old cell-centre rule put both effective faces dz = 11.4 nm early; the node rule
+    puts them on the true faces). Q is translation-invariant physically; the FITTED Q moves through
+    the data-driven window's timing against the probe: 13.227438 -> 13.207623 (-0.15%; -1.007% ->
+    -1.155% vs Fabry-Perot 13.361960, inside gate 7's 3%)."""
     er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                               resolution=30)
-    assert er.q == pytest.approx(13.227438, rel=1e-4)
+    assert er.q == pytest.approx(13.207623, rel=1e-4)
     assert er.window == (9840, 31980)
 
 
