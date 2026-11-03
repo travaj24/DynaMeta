@@ -83,6 +83,11 @@ class TransportModel:
     acceptor:                    bool = False
     net_doping_expr:             Optional[str] = None
     dos_mass_p_kg:               Optional[float] = None
+    # Band-to-band tunneling (D1d, bipolar_dd only): None (default) = OFF, byte-identical; else a
+    # dynameta.carriers.tunneling.BTBTParams (e.g. SILICON_HURKX) -> the local Kane/Hurkx BTBT term
+    # in both continuity equations, coupled in the Newton. Typed loosely to keep this module
+    # devsim-free (the params class lives with the DEVSIM physics).
+    btbt:                        Optional[object] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -99,3 +104,7 @@ class TransportModel:
             if missing:
                 raise ValueError("bipolar_dd physics requires {} (holes + recombination)".format(
                     ", ".join(missing)))
+        if self.btbt is not None and self.physics != "bipolar_dd":
+            raise ValueError("btbt (band-to-band tunneling generation) needs physics='bipolar_dd' "
+                             "(it feeds the electron AND hole continuity equations); got physics={!r}"
+                             .format(self.physics))
