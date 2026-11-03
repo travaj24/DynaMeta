@@ -156,7 +156,8 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
     # establish the transient initial condition at the current DC state
     # _XP.solve: transient_dc and every transient_bdf1 step MUST run the same Newton type -- DEVSIM
     # keeps separate TimeData<double> / TimeData<float128> histories, so the switch is per device.
-    _XP.solve(type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
+    # `ds` is passed so this module's control-flow gates (which replace transient.ds) still bite.
+    _XP.solve(ds, type="transient_dc", absolute_error=absolute_error, relative_error=relative_error,
              maximum_iterations=maximum_iterations)
     ds.circuit_alter(name=source_name, value=float(v_to))            # the bias change
     src_i = "{}.I".format(source_name)
@@ -174,7 +175,7 @@ def transient_step(v_to: float, *, t_end: float, dt0: float = 1.0e-14,
         try:
             # info=True returns the per-equation errors and reports non-convergence as a RETURN
             # value; only hard solver errors (singular factorization, exp overflow) still raise.
-            info = _XP.solve(type="transient_bdf1", tdelta=dt, charge_error=charge_error,
+            info = _XP.solve(ds, type="transient_bdf1", tdelta=dt, charge_error=charge_error,
                             absolute_error=absolute_error, relative_error=relative_error,
                             maximum_iterations=maximum_iterations, info=True)
             if isinstance(info, dict) and not info.get("converged", True):

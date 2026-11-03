@@ -72,14 +72,15 @@ def available() -> bool:
         return False
 
 
-def _get(name: str, device: "str | None" = None):
+def _get(name: str, device: "str | None" = None, m=ds):
     """A DEVSIM parameter value, or None when it was never set (DEVSIM raises on a missing name;
-    every extended_* consumer treats 'missing' exactly like False)."""
+    every extended_* consumer treats 'missing' exactly like False). `m` is the devsim module (or a
+    caller's stand-in for it)."""
     try:
         if device is None:
-            return ds.get_parameter(name=name)
-        return ds.get_parameter(device=device, name=name)
-    except ds.error:
+            return m.get_parameter(name=name)
+        return m.get_parameter(device=device, name=name)
+    except m.error:
         return None
 
 
@@ -112,10 +113,10 @@ def enable(device: str) -> None:
         ds.set_parameter(device=device, name=p, value=True)
 
 
-def is_enabled(device: str) -> bool:
+def is_enabled(device: str, m=ds) -> bool:
     """True when `device` assembles in 128-bit (its extended_equation resolves True -- device-level
     from `enable`, or a global setting the caller made by hand)."""
-    return bool(_get("extended_equation", device))
+    return bool(_get("extended_equation", device, m))
 
 
 def any_enabled() -> bool:
@@ -124,30 +125,37 @@ def any_enabled() -> bool:
 
 
 @contextmanager
-def extended_solver():
+def extended_solver(m=ds):
     """Run the enclosed DEVSIM calls with the global extended_solver ON, and restore its previous
     value (or False when it was never set -- every consumer reads 'missing' as False) on ANY exit,
     including a convergence failure. Re-entrant."""
-    prev = _get(SOLVER_PARAMETER)
-    ds.set_parameter(name=SOLVER_PARAMETER, value=True)
+    prev = _get(SOLVER_PARAMETER, None, m)
+    m.set_parameter(name=SOLVER_PARAMETER, value=True)
     try:
         yield
     finally:
-        ds.set_parameter(name=SOLVER_PARAMETER, value=bool(prev) if prev is not None else False)
+        m.set_parameter(name=SOLVER_PARAMETER, value=bool(prev) if prev is not None else False)
 
 
-def solve(**kwargs):
+def solve(ds_module=None, **kwargs):
     """ds.solve(**kwargs), through the extended (mixed-precision) Newton iff a live device opted in.
 
     Default path (no opted-in device): the bare ds.solve call, no parameter is read-modified-
     written beyond the device scan -- results are byte-identical to a direct ds.solve. Every
     DynaMeta solve site calls this, so DC, transient (transient_dc + transient_bdf1 -- they must
     share one Newton type: DEVSIM keeps SEPARATE TimeData<double> / TimeData<float128> histories),
-    ssac and noise all follow the device's switch."""
-    devs = list(ds.get_device_list())
-    flags = [is_enabled(d) for d in devs]
+    ssac and noise all follow the device's switch.
+
+    `ds_module` (default: devsim) is the module whose `solve` is called -- a caller that resolves
+    devsim through its own module attribute (transient.py, whose control-flow gates replace it with a
+    stand-in) passes it. A stand-in without `get_device_list` has no live device, so it takes the
+    default path."""
+    m = ds if ds_module is None else ds_module
+    lister = getattr(m, "get_device_list", None)
+    devs = list(lister()) if lister is not None else []
+    flags = [is_enabled(d, m) for d in devs]
     if not any(flags):
-        return ds.solve(**kwargs)
+        return m.solve(**kwargs)
     if not all(flags):
         warnings.warn(
             "extended_precision: live devices {} are default (double) while {} opted in; DEVSIM "
@@ -156,5 +164,5 @@ def solve(**kwargs):
             "devices down first for a byte-identical default answer."
             .format([d for d, f in zip(devs, flags) if not f], [d for d, f in zip(devs, flags) if f]),
             AdvisoryWarning, stacklevel=2)
-    with extended_solver():
-        return ds.solve(**kwargs)
+    with extended_solver(m):
+        return m.solve(**kwargs)
