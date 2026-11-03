@@ -115,7 +115,11 @@ jobs:
     # 2026-09-14: 75 -> 120. The coverage leg runs ~1.7x the three plain legs (73 min against
     # 35-53 min on main at 1bef664), so the old cap had two minutes of headroom and CANCELLED
     # a healthy py3.12 leg on run 34896908068 -- a shared-budget artifact, not a test verdict.
-    timeout-minutes: 120
+    # 2026-11-03 (v0.13.0): 120 -> 150. main measured 65-95 min on the coverage leg (runs
+    # 41479363891 / 41487439529) and v0.13.0 adds ~446 CPU-s of fast tests (summed per-test junit
+    # times, main vs branch, 68 changed files; mostly test_fdtd_registration + the bridge files),
+    # i.e. ~10-15 min more on this leg -- the old cap would keep ~1.1x on a slow runner.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +199,9 @@ jobs:
     name: floor pins (py3.10, oldest declared)
     runs-on: ubuntu-latest
     # 8:18 wall at -n 8 locally (~66 CPU-min); a 2-vCPU runner should land well inside this cap.
-    timeout-minutes: 60
+    # 2026-11-03 (v0.13.0): 60 -> 75. main measured 39-47 min here and v0.13.0 adds ~446 CPU-s of
+    # fast tests (see the `test` job), so the old cap would keep only ~1.2x.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
