@@ -51,6 +51,34 @@ def record_interface_equation(device: str, interface: str, **kwargs) -> None:
         {"scope": "interface", "loc": interface, "name": kwargs["name"], "kwargs": kwargs})
 
 
+def amend_region_equation(device: str, region: str, eq_name: str, **extra_kwargs) -> None:
+    """ADD terms to an already-recorded REGION equation (D1d, 2026-11-03): merge `extra_kwargs`
+    (e.g. edge_volume_model / volume_node0_model / volume_node1_model) into its recorded kwargs, then
+    delete + re-create the live DEVSIM equation from the merged record, so a later Gummel/staged
+    delete_by_name -> reapply_by_name re-creates it WITH the new terms. Refuses to silently REPLACE a
+    term the record already carries with a different model (two physics modules wiring the same
+    equation slot would otherwise drop one of them without a trace)."""
+    hits = [e for e in _REG.get(device, [])
+            if e["name"] == eq_name and e["scope"] == "region" and e["loc"] == region]
+    if len(hits) != 1:
+        raise ValueError("amend_region_equation: expected one recorded {!r} on region {!r}, found {}"
+                         .format(eq_name, region, len(hits)))
+    kw = hits[0]["kwargs"]
+    clash = {k: (kw[k], v) for k, v in extra_kwargs.items() if k in kw and kw[k] != v}
+    if clash:
+        raise ValueError("amend_region_equation: {!r} on {!r} already carries {} -- refusing to "
+                         "overwrite (compose the terms into one model instead)".format(
+                             eq_name, region, clash))
+    merged = dict(kw, **extra_kwargs)
+    ds.delete_equation(device=device, region=region, name=eq_name)
+    try:
+        ds.equation(device=device, region=region, **merged)
+    except Exception:
+        ds.equation(device=device, region=region, **kw)      # put the legacy equation back, then raise
+        raise
+    kw.update(extra_kwargs)                                  # record only what DEVSIM accepted
+
+
 def delete_by_name(device: str, eq_name: str) -> None:
     """Delete every recorded equation with this name (freezes that variable)."""
     for e in _REG.get(device, []):

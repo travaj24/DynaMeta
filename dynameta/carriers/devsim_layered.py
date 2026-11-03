@@ -65,7 +65,7 @@ class _RegionSpec:
 
 class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
-                  device_name: str = "ms_device") -> None:
+                  device_name: str = "ms_device", oxide_tunneling=None) -> None:
         # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
         # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
         # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
@@ -73,6 +73,11 @@ class LayeredDevsimBuilder:
         self.design = design
         self.mesh_name = mesh_name
         self.device = device_name
+        # D1d: optional gate-oxide tunneling POST-PROCESSOR (carriers.tunneling.OxideTunnelingParams).
+        # None (default) -> nothing is computed and CarrierField.extras is unchanged. When set, every
+        # solve adds extras["oxide_tunneling"] = {dielectric_region: summary} for each dielectric region
+        # sharing an interface with a semiconductor region (the converged field; no feedback).
+        self.oxide_tunneling = oxide_tunneling
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -458,7 +463,8 @@ class LayeredDevsimBuilder:
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
-            options=getattr(tr, "bipolar_options", None))       # audit R26/R27 (None -> SRH only)
+            options=getattr(tr, "bipolar_options", None),       # audit R26/R27 (None -> SRH only)
+            btbt=getattr(tr, "btbt", None))                 # D1d: None -> no BTBT (byte-identical)
         BP.setup_equilibrium_seed_models(self.device, s.name)
 
     def _dielectric_eps_static(self, material_name: str) -> float:
@@ -720,10 +726,32 @@ class LayeredDevsimBuilder:
             # missing -> AdvisoryWarning (a UserWarning, the old implicit category).
             warnings.warn("contact-current extraction unavailable: {}".format(_e),
                           AdvisoryWarning, stacklevel=2)
+        if self.oxide_tunneling is not None:                  # D1d: opt-in; None adds no key
+            extras["oxide_tunneling"] = self._oxide_tunneling_extras()
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=PE.T_REF, regions=regions, n_bg_by_region=n_bg_by_region,
             unit_cell_m=(d.unit_cell.period_x_m, d.unit_cell.period_y_m), extras=extras)
+
+    def _oxide_tunneling_extras(self) -> Dict[str, Dict[str, float]]:
+        """D1d: post-processed gate-oxide tunneling through every dielectric region that shares an
+        interface with a semiconductor region (carriers.tunneling.oxide_tunneling_current), as scalar
+        summaries per dielectric region: I_A (scaled by period_y to amperes), J_max_A_m2 (signed, at
+        the node of largest |J|), E_ox_max_V_m, V_ox_max_V, t_ox_m."""
+        from dynameta.carriers.tunneling import oxide_tunneling_current
+        roles = {s.name: s.role for s in self._specs}
+        out: Dict[str, Dict[str, float]] = {}
+        for r0, r1 in self._iface_pairs:
+            for ox, semi in ((r0, r1), (r1, r0)):
+                if roles.get(ox) == "dielectric" and roles.get(semi) == "semiconductor":
+                    res = oxide_tunneling_current(self.device, ox, semi, self.oxide_tunneling,
+                                                  depth_m=self.design.unit_cell.period_y_m)
+                    k = int(np.argmax(np.abs(res["J_A_m2"])))
+                    out[ox] = {"I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
+                               "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])),
+                               "V_ox_max_V": float(np.max(res["V_ox_V"])), "t_ox_m": float(res["t_ox_m"]),
+                               "semiconductor_region": semi, "model": res["model"]}
+        return out
 
     def teardown(self) -> None:
         _R.clear(self.device)
