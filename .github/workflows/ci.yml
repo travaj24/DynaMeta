@@ -386,8 +386,8 @@ jobs:
         # test_dc_solve_gummel (module-level importorskip("devsim")) and
         # test_ngsolve_ellipse_primitive (netgen.occ) also ran nowhere -- added; the three together
         # 28 passed in 6 s locally. test_devsim_env added 2026-11-03 for v0.14.0 (D0: the DEVSIM BLAS
-        # pin + the devsim 2.11.2 reset_devsim contract): 20 passed in 3.8 s locally on Windows and
-        # 20 passed in 3.6 s under WSL Ubuntu / py3.12 / devsim 2.11.2 -- on Linux the default leaves
+        # pin + the devsim 2.11.2 reset_devsim contract): 21 passed in 4-6 s locally on Windows and
+        # 21 passed in < 4 s under WSL Ubuntu / py3.12 / devsim 2.11.2 -- on Linux the default leaves
         # devsim's own loader search alone; the decoy gate runs with DYNAMETA_DEVSIM_BLAS=pin.
         # test_equilibrium_simplify_cache added the same day: its 2 fast cases take < 1 s; the
         # @slow live-simplify case runs in the `nightly` job, step (a).)
