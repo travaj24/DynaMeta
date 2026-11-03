@@ -42,11 +42,20 @@ sys.path.insert(0, HERE)
 
 from validation._harness import Harness                                 # noqa: E402
 
-_spec = importlib.util.spec_from_file_location("_trap_tests", os.path.join(HERE, "tests",
-                                                                          "test_traps.py"))
-T = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(T)
-PT = T.PT
+T = PT = None                       # tests/test_traps.py, loaded by _load() once devsim is known present
+
+
+def _load():
+    """Import the test module (its builders and closed forms). Deferred: it importorskips devsim,
+    which outside pytest would surface as a crash instead of the runner's exit-42 SKIP."""
+    global T, PT
+    if T is None:
+        spec = importlib.util.spec_from_file_location("_trap_tests", os.path.join(HERE, "tests",
+                                                                                "test_traps.py"))
+        T = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(T)
+        PT = T.PT
+    return T
 DEFAULT_MAIN = os.path.join(os.path.dirname(os.path.dirname(HERE)), "DynaMeta")
 
 
@@ -360,6 +369,9 @@ def main():
     ap.add_argument("--main", default=DEFAULT_MAIN)
     a = ap.parse_args()
     H = Harness("trp", "D1c TRAPS: bulk SRH(E_t), multi-level, trap charge, interface traps (D_it)")
+    H.require(importlib.util.find_spec("devsim") is not None, "devsim not installed")
+    H.require(importlib.util.find_spec("scipy") is not None, "scipy not installed")
+    _load()
 
     print("[trp] --- A: slab lifetime vs E_t (n-type 1e21, tau_n0 = 3e-10, tau_p0 = 1e-10 s)", flush=True)
     wa = gate_a(H)
