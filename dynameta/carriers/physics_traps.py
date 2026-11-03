@@ -90,9 +90,10 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
     modelling choice (see docs/audit/2026-11-03-devsim-phase-integration.md).
   * Interface traps need a bipolar (n AND p) semiconductor side -- the SRH occupancy uses both.
     A semiconductor/semiconductor interface raises (heterojunctions are D1a's).
-  * On the devsim_3d gmsh mesh (not Delaunay: sum NodeVolume = 1.20 x the semiconductor volume, 1.29 x
-    the oxide's) a geometric sheet charge acts at ~0.8 of its 1-D effect -- a PRE-EXISTING 3-D
-    discretization defect, not the weighting here (validation/traps_oracles.py --3d, gate G2).
+  * 3-D: on the devsim_3d tensor (Kuhn) mesh (D2c, v0.14.0 default) the 3-D sheet-charge shift equals
+    the 1-D one (validation/traps_oracles.py --3d, gates G2/G3). On the legacy mesher='gmsh' mesh DEVSIM's
+    node volumes over-count (sum NodeVolume = 1.20 x the semiconductor volume, 1.29 x the oxide's) and
+    a geometric sheet charge acts at ~0.8 of its 1-D effect (docs/audit/2026-11-03-devsim-3d-mesh.md).
 """
 
 from __future__ import annotations
@@ -413,10 +414,37 @@ def _semiconductor_side(device: str, interface: str) -> Tuple[str, str]:
     return semi[0], other
 
 
+def _triangle_node_areas(v: np.ndarray) -> np.ndarray:
+    """The three node shares of a triangle v (3, 3): circumcentric (Voronoi) for a non-obtuse triangle,
+    barycentric thirds for an obtuse one (see interface_node_area). Sums to the triangle area."""
+    a2 = 0.5 * float(np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0])))
+    out = np.empty(3)
+    for i in range(3):
+        j, k = (i + 1) % 3, (i + 2) % 3
+        # cot of the angle at k (opposite edge ij) and at j (opposite edge ik)
+        ukj, uki = v[j] - v[k], v[i] - v[k]
+        cot_k = float(np.dot(ukj, uki)) / (2.0 * a2)
+        ujk, uji = v[k] - v[j], v[i] - v[j]
+        cot_j = float(np.dot(ujk, uji)) / (2.0 * a2)
+        out[i] = (float(np.dot(v[j] - v[i], v[j] - v[i])) * cot_k
+                  + float(np.dot(v[k] - v[i], v[k] - v[i])) * cot_j) / 8.0
+    if np.any(out < 0.0):                                      # obtuse: the circumcentre is outside
+        return np.full(3, a2 / 3.0)
+    return out
+
+
 def interface_node_area(device: str, region: str, interface: str) -> np.ndarray:
     """Interface area [m^2 in 3-D, m in 2-D, 1 in 1-D] OWNED by each node of `region` on `interface`
     (0 elsewhere), from DEVSIM's interface element list: 1-D a point (1), 2-D half of each interface
-    edge, 3-D a third of each interface triangle. Cartesian coordinates only."""
+    edge, 3-D each interface triangle split CIRCUMCENTRICALLY (the Voronoi share of node i is
+    (|e_ij|^2 cot theta_k + |e_ik|^2 cot theta_j)/8), i.e. the interface face of node i's box-method
+    control volume -- the area the FV equations actually give that node. D2c (v0.14.0): this used to be
+    a third of each triangle, which on the tensor (Kuhn) mesh of devsim_3d gives the two nodes on a
+    face diagonal 1/3 of the face and the other two 1/6 (a 2x checkerboard in a laterally uniform
+    D_it; MEASURED psi_s scatter below); the circumcentric split gives each node exactly its quarter of
+    every adjacent rectangle and equals DEVSIM's SurfaceArea node-for-node. An OBTUSE triangle (only
+    on an unstructured mesh, e.g. mesher='gmsh') keeps the barycentric thirds, since its circumcentric
+    shares go negative. The total is the triangle area either way. Cartesian coordinates only."""
     elems = ds.get_element_node_list(device=device, region=region, interface=interface)
     x = np.asarray(ds.get_node_model_values(device=device, region=region, name="x"))
     y = np.asarray(ds.get_node_model_values(device=device, region=region, name="y"))
@@ -430,8 +458,7 @@ def interface_node_area(device: str, region: str, interface: str) -> np.ndarray:
         elif len(e) == 2:
             area[e] += 0.5 * float(np.linalg.norm(xyz[e[1]] - xyz[e[0]]))
         elif len(e) == 3:
-            a = 0.5 * float(np.linalg.norm(np.cross(xyz[e[1]] - xyz[e[0]], xyz[e[2]] - xyz[e[0]])))
-            area[e] += a / 3.0
+            area[e] += _triangle_node_areas(xyz[e])
         else:                                                  # pragma: no cover - not a DEVSIM surface
             raise ValueError("unexpected interface element with {} nodes".format(len(e)))
     if not np.any(area > 0.0):
