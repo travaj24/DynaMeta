@@ -164,7 +164,7 @@ Zener diode: 1-D abrupt p+n+, Na = Nd = 5e24 m^-3, 0.2 nm at the junction, Si Hu
 | Z5 | installed rate == numpy A E^P e^(-B/E) D on the solved arrays | 1e-15 | 1e-12 |
 | J1 | BTBT share of the assembled Jacobian (on - off) vs central FD of DEVSIM's residual (`get_matrix_and_rhs`) | 6e-9 (2-D), 1e-8 (3-D); share ~1 % | 1e-6 |
 | I1 | isotropy: oblique uniform field on 2-D triangles (30 deg) / 3-D Kuhn tets; quadrature identity Sum(U0+U1) ENV = Sum U(E0, D_i) V_i | abs(E) 8.9e-16; identity 5e-15 | 1e-14 / 1e-12 |
-| L1 | 2-D layered builder (element path, `TransportModel.btbt`) == 1-D twin (edge path) on the same x nodes | 3e-9 .. 7e-9 | 1e-6 |
+| L1 | 2-D layered builder (element path, `TransportModel.btbt`) CONVERGES to the 1-D twin (edge path) on the same x nodes (rewritten 2026-11-03, see section 8) | gap 2.81e-4 (2 nm), 6.09e-5 (1 nm): order 2.21 | order >= 1.7; abs(gap) <= 2 C_inf h^2 |
 
 | V_r [V] | q Int G [A/m^2] | analytic [A/m^2] | dev | delta_D |
 |---|---|---|---|---|
@@ -236,6 +236,75 @@ MOS capacitor: 1-D, n-Si 1e24 / 5 nm SiO2, accumulation Vg = 4-9 V (E_ox 7.7e8-1
      n_ie node model, pass it.
    * `amend_region_equation` refuses a second module wiring the same `volume_node*_model` slot. D1c
      traps that need a volume term must compose with it.
+
+## 8. Addendum (2026-11-03): gate L1 after the integer-literal fix
+
+The integration found that `btbt_rate_expr`'s `%.17g` wrote integral coefficients as integer literals,
+which DEVSIM 2.11.2 clamps to 2147483647 (integration note 2.6). The L1 fixture used A = 4.0e15, so the
+original L1 compared the two paths at a rate 1.9e6 times lower than intended. With the true A it failed:
+a 2.8e-4 gap against a 1e-6 gate.
+
+**Diagnosis.**
+
+* **Not the quadrature.** On identical fields the two integrated quadratures are algebraically equal on
+  this y-invariant tensor mesh. Each right-triangle cell's quadrant of node i lies wholly in that cell
+  and carries the cell's field. Measured on the solved fields: edge-mean = node-local to 6e-16. The 2-D
+  solution is y-invariant to 1e-15.
+* **The solutions differ.** Without BTBT, 2-D and 1-D agree to 7.7e-7. With it, n and p differ by
+  0.2-0.8 % in the junction and by a constant factor 0.465 in both minority tails (about 20 mV of
+  minority quasi-Fermi level).
+* **The cause is the nodal distribution of the source.** Node i receives
+  Sum_j pre_ij (L_ij/2) D_i on the 2-D element path and Sum_j pre_ij (L_ij/2) (D_i + D_j)/2 on the 1-D
+  edge path.
+  * The difference is delta_i = Sum_j pre_ij L_ij (D_j - D_i)/4 = (h^2/4) d/dx(pre dD/dx) + O(h^4).
+  * It is a conservative redistribution: it sums to zero, so it moves the current only through the
+    solution's response, at O(h^2).
+  * With the true A the junction is self-limited: the generated n, p ~ 0.1-0.3 n_i and D ~ -0.5. D then
+    changes by orders of magnitude per node, which makes the response visible. Under the clamped A,
+    D ~ -1 with nothing to redistribute.
+
+**Refinement study.** Clean uniform x mesh: gmsh-array triangles vs 1-D on identical nodes, -0.5 V,
+A = 4e15, B = 4e8 V/m.
+
+| h [nm] | I_2D [A/m^2] | I_1D [A/m^2] | gap | order | gap/h^2 [nm^-2] |
+|---|---|---|---|---|---|
+| 2.0 | 2259.9046 | 2260.6386 | -3.247e-4 | -- | 8.1e-5 |
+| 1.0 | 2307.9633 | 2308.1201 | -6.796e-5 | 2.26 | 6.8e-5 |
+| 0.5 | 2322.0945 | 2322.1319 | -1.611e-5 | 2.08 | 6.4e-5 |
+| 0.25 | 2325.7848 | 2325.7941 | -3.972e-6 | 2.02 | 6.35e-5 |
+
+The `LayeredDevsimBuilder` fixture itself (h = `x_spacing_feature_mid_m`) gives gaps of 2.81e-4,
+6.09e-5, 1.45e-5 and 2.56e-6 at 2, 1, 0.5 and 0.25 nm. Its junction spacing is not a clean refinement
+below 1 nm (max dx 0.63 nm and 0.44 nm, plus a 0.03 nm sliver), so the order is read from the uniform
+study.
+
+**The new gate.**
+* The observed order between 2 and 1 nm must be >= 1.7. Measured: 2.21.
+* abs(gap) <= 2 C_inf h^2, with C_inf = 6.35e-5 nm^-2 from the finest uniform pair. The factor 2
+  covers the preasymptotic excess (1.28 C_inf at 2 nm) and the builder's non-uniform junction spacing.
+* The current must be real: > 1e3 A/m^2, where a clamped A gives ~1e-3.
+* The equilibrium residual must be <= 1e-4 of the Kane prefactor integral and must shrink with h.
+
+**Mutation checks** (each reverted with `git checkout`):
+* Re-introducing `%.17g` fails L1 and both new integral-coefficient I1 cases.
+* A 10 % element-weight error fails L1 (gap -3.4e-2 at 2 nm).
+* Swapping the node assignment of D passes. It is another conservative O(h^2) redistribution, so a
+  consistent discretisation, which is correct behaviour for a convergence gate.
+
+**Equilibrium with the Fermi-Dirac g-factor (finding).** At V = 0 the L1 fixture carries a small BTBT
+current, -6.0e-3 A/m^2 at 2 nm, identical in 2-D and 1-D.
+* With `fd_enhancement=False` the discrete equilibrium has n p = n_i^2 to 4.6e-15 and BTBT/Kane = 3.2e-16.
+* With the FD g-factor, the discrete equilibrium (edge-averaged g) puts n p off n_i^2 at O(h^2) in the
+  junction: BTBT/Kane = 6.4e-5 at 2 nm and 1.6e-5 at 1 nm, order 1.97.
+* The 1.3 % maximum mismatch in the degenerate bulk does not shrink with h. It is the genuine failure of
+  mass action under FD statistics, and the Hurkx D (written with n_i) does not know it. It is harmless
+  there because the field and the Kane rate are about zero, but a degenerate high-field junction would
+  see it. Recorded as an open question; nothing changed.
+
+**Clamp audit of the other gates.** `SILICON_HURKX` has A_SI = 4000000000000000.5 (non-integral) and
+B = 1.9e9 < 2^31, so `%.17g` always printed it as a float literal. Z0-Z5, J1, I1 and W3 were never
+clamped and always discriminated. Only L1 used an integral A. I1 now also runs a set with an integral
+A AND an integral B above 2^31 (4e15 and 3e9), the direct regression gate for the literal fix.
 
 ## Release-note lines
 
