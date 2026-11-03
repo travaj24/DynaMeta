@@ -290,6 +290,14 @@ For `InterfaceTraps` with a band reference:
 
 The built-in `srh_trap_energy_eV` channel keeps the intrinsic reference.
 
+**Composition with density-gradient (00e2c39).** `srh_reference_densities` / `srh_rate_expr` also take
+the D2d `scale=` (s = exp((Lambda_n + Lambda_p)/2V_t)). The order is the reference conversion FIRST,
+then the DG scale: n1' -> n1' s, p1' -> p1' s, n_i'^2 -> n_i'^2 s^2. Every reference therefore keeps
+n1' p1' = n p|_eq. `scale=None` is the unscaled output character for character. Gate:
+`test_reference_composes_with_dg_scale`, symbolic plus numeric, for all 3 references x BGN on/off.
+DG applies the scale to the built-in USRH only. A band-referenced level that should follow ONE quantum
+band edge (n1 x exp(Lambda_n/V_t) for "conduction") would need a per-band scale, which is not modelled.
+
 **Finding (it corrects the premise of integration open item 1).** In this Boltzmann model, the split
 fraction gamma does NOT enter SRH at all, on either reference. The narrowed band diagram has
 `E_c - E_ie = kT ln(N_c/n_ie)` and `E_ie - E_v = kT ln(N_v/n_ie)` whatever gamma is: gamma moves both
@@ -298,8 +306,9 @@ the gamma-independent factor `exp(dEg/2kT)` in n1 (and in p1), not by `exp(gamma
 gamma-dependent scaling describes a level held fixed in ABSOLUTE energy against the UNnarrowed edges,
 which neither reference (nor the user's choice) does. The gates pin gamma-independence explicitly.
 
-**Gates.** `tests/test_trap_energy_reference.py` has 15 tests. All 15 FAIL on f7c82db (12 failed +
-3 errors: the keyword does not exist there).
+**Gates.** `tests/test_trap_energy_reference.py` has 16 tests. The original 15 all FAIL on f7c82db
+(12 failed + 3 errors: the keyword does not exist there). The 16th is the DG-scale composition gate,
+added after the rebase onto 00e2c39.
 * **(a)** p-type slab, N_A = 1e25 m^-3, Slotboom dEg = 60.5 meV (n_ie = 3.22 n_i), tau_n0 = 1e-10 s,
   tau_p0 = 1e-6 s, level at E_c - 0.25 eV. The measured tau matches the closed form with
   n1 = N_c exp(-0.25/kT), p1 = n_ie^2/n1 to -1.8e-7, for gamma = 0.2 and 0.8.
