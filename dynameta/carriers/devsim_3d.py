@@ -500,7 +500,8 @@ class Stacked3DSpec:
                 net_doping_expr=tr.net_doping_expr,
                 bipolar_options=getattr(tr, "bipolar_options", None),
                 srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
-                srh_traps=tuple(getattr(tr, "srh_traps", ())))
+                srh_traps=tuple(getattr(tr, "srh_traps", ())),
+                btbt=getattr(tr, "btbt", None))
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -726,7 +727,8 @@ class Devsim3DEquilibrium:
             # audit R26/R27: with BGN / incomplete ionization / T_K on, the body contact pins the
             # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
-                                                options=self.spec.bipolar_options)
+                                                options=self.spec.bipolar_options,
+                                                traps=self.spec.srh_traps)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
             # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
             # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.

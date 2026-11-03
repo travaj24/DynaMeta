@@ -80,8 +80,14 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
   * Quasi-static occupancy only: the trapped charge is an instantaneous function of (n, p). A DC sweep
     (the LF C-V) is exact; a transient or ssac solve is NOT charge-conserving with CHARGED traps (the
     capture current that fills a trap is not in the continuity time term). Trap kinetics are a follow-up.
-  * The bipolar ohmic contacts pin the TRAP-FREE charge-neutral densities, so a contact on heavily
-    trap-compensated material carries a boundary layer of a few Debye lengths.
+  * Ohmic contacts (v0.14 integration): with CHARGED bulk levels the contacts, the seed and the 3-D gate
+    frame pin the TRAP-AWARE charge-neutral root (bipolar_options.equilibrium_fields with the levels'
+    equilibrium Fermi occupancy, n1 = n_ie exp(E_t/kT)) -- the same rule as BGN / incomplete
+    ionization. Interface traps do not enter it (a sheet charge, not a bulk neutrality term).
+  * Bandgap narrowing (D1b): every rate, occupancy and pair rate here takes the region's n_ie
+    substitution through srh_reference_densities, so a level's E_t is measured from the NARROWED
+    effective intrinsic level; with an asymmetric band-edge split (conduction_fraction != 1/2) that is a
+    modelling choice (see docs/audit/2026-11-03-devsim-phase-integration.md).
   * Interface traps need a bipolar (n AND p) semiconductor side -- the SRH occupancy uses both.
     A semiconductor/semiconductor interface raises (heterojunctions are D1a's).
   * On the devsim_3d gmsh mesh (not Delaunay: sum NodeVolume = 1.20 x the semiconductor volume, 1.29 x
@@ -106,31 +112,60 @@ _CHARGE_MODES = ("split", "acceptor", "donor", "none")
 
 # ------------------------------------------------------------------------------------------------
 # Shared expression kernels (pure strings -- no DEVSIM needed; ONE implementation for the legacy
-# midgap channel, every bulk level and every interface sheet level).
+# midgap channel, every bulk level and every interface sheet level, with or without bandgap
+# narrowing, for the net rate, the occupancy and the noise pair rate G + R).
 # ------------------------------------------------------------------------------------------------
-def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup") -> str:
+def srh_reference_densities(n1: str = "n1", p1: str = "p1", *, bgn: bool = False
+                            ) -> Tuple[str, str, str]:
+    """(n1', p1', n_i'^2) -- THE single place the bandgap-narrowing substitution of D1b (audit R27)
+    enters SRH: with BGN on, n_i^2 -> n_ie^2 and n1 -> n1 n_ie/n_i, p1 -> p1 n_ie/n_i (so
+    n1' p1' = n_ie^2 and a level keeps its energy relative to the NARROWED effective intrinsic level:
+    n1' = n_ie exp((E_t - E_i)/kT)). `n_ie` is the region's effective-intrinsic-density field
+    (bipolar_options). Without BGN the names are returned unchanged."""
+    if not bgn:
+        return n1, p1, "n_i^2"
+    return "{}*n_ie/n_i".format(n1), "{}*n_ie/n_i".format(p1), "n_ie^2"
+
+
+def _srh_denominator(n1: str, p1: str, taun: str, taup: str) -> str:
+    return "({tp}*(Electrons + {n1}) + {tn}*(Holes + {p1}))".format(n1=n1, p1=p1, tn=taun, tp=taup)
+
+
+def srh_rate_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup", *,
+                  bgn: bool = False, pair: bool = False) -> str:
     """The Shockley-Read-Hall net rate U = (n p - n_i^2)/(taup (n + n1) + taun (p + p1)) as a DEVSIM
     expression in the solution variables Electrons/Holes. The arguments are parameter names (or
     parenthesized sub-expressions). The DEFAULTS reproduce the legacy physics_bipolar_dd USRH string
     CHARACTER-FOR-CHARACTER (tests/test_traps.py pins it). For a sheet level pass taun -> 1/S_n,
-    taup -> 1/S_p and the result is the surface rate [m^-2 s^-1]."""
-    return "(Electrons*Holes - n_i^2)/({tp}*(Electrons + {n1}) + {tn}*(Holes + {p1}))".format(
-        n1=n1, p1=p1, tn=taun, tp=taup)
+    taup -> 1/S_p and the result is the surface rate [m^-2 s^-1].
+
+    bgn=True applies the bandgap-narrowing substitution (srh_reference_densities); with the default
+    names it is bipolar_options' former srh_expr(True) character-for-character.
+    pair=True returns the PAIR rate G + R = (n p + n_i^2)/(...) instead of the net rate R - G: the
+    fast-trap detailed-balance split R = n p/D, G = n_i^2/D that the noise module's GR source
+    2 (G + R) needs (noise_analysis; one kernel for both)."""
+    n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn)
+    return "(Electrons*Holes {} {})/{}".format("+" if pair else "-", ni2,
+                                               _srh_denominator(n1e, p1e, taun, taup))
 
 
 def srh_occupancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun",
-                       taup: str = "taup") -> str:
+                       taup: str = "taup", *, bgn: bool = False) -> str:
     """Steady-state electron occupancy f_t = (taup n + taun p1)/(taup (n + n1) + taun (p + p1)) of an
     SRH level (Shockley & Read 1952) -- the SAME denominator as srh_rate_expr. Equals the Fermi
-    function of E_t at equilibrium."""
-    return ("({tp}*Electrons + {tn}*{p1})/({tp}*(Electrons + {n1}) + {tn}*(Holes + {p1}))"
-            .format(n1=n1, p1=p1, tn=taun, tp=taup))
+    function of E_t at equilibrium PROVIDED n1 p1 equals the equilibrium n p -- which is why it takes
+    the same `bgn` substitution as the rate (with BGN on n p = n_ie^2 at equilibrium; an occupancy
+    left on n_i would depend on taun/taup at equilibrium, i.e. not be a Fermi function)."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn)
+    return "({tp}*Electrons + {tn}*{p1})/{d}".format(tp=taup, tn=taun, p1=p1e,
+                                                     d=_srh_denominator(n1e, p1e, taun, taup))
 
 
-def n1_p1(energy_eV: float, n_i_m3: float) -> Tuple[float, float]:
-    """(n1, p1) = n_i exp(+-E/kT) for a level at E = E_t - E_i [eV]. E = 0 returns (n_i, n_i)
+def n1_p1(energy_eV: float, n_i_m3: float, V_t: float = V_T) -> Tuple[float, float]:
+    """(n1, p1) = n_i exp(+-E/kT) for a level at E = E_t - E_i [eV], kT/q = V_t (the region's thermal
+    voltage; V_T at T_REF by default, BipolarOptions.T_K otherwise). E = 0 returns (n_i, n_i)
     EXACTLY (exp(0.0) == 1.0), which is what keeps the legacy midgap channel bit-identical."""
-    e = float(energy_eV) / V_T
+    e = float(energy_eV) / float(V_t)
     return float(n_i_m3) * math.exp(e), float(n_i_m3) * math.exp(-e)
 
 
@@ -301,32 +336,55 @@ class InterfaceTraps:
 # ------------------------------------------------------------------------------------------------
 # DEVSIM installers
 # ------------------------------------------------------------------------------------------------
-def bulk_trap_models(device: str, region: str, traps: Sequence[TrapLevel], *,
-                     n_i_m3: float) -> Tuple[str, Optional[str]]:
-    """Set the per-level parameters (trap<k>_n1/_p1/_taun/_taup/_Nt) and the diagnostic occupancy
-    node models TrapOccupancy<k> on `region`; return (sum of the levels' SRH rate expressions, net
-    trapped-charge density expression in units of +q [m^-3] or None when no level is charged).
-    Called by physics_bipolar_dd.setup_bipolar_region(traps=...), which adds the rate to USRH and the
-    charge to the Poisson node charge."""
-    rates, charges = [], []
+def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, n_i_m3: float,
+                       V_t: float = V_T, bgn: bool = False) -> None:
+    """Install discrete bulk SRH levels on a bipolar region set up by
+    physics_bipolar_dd.setup_bipolar_region (which calls this with traps=...).
+
+    Per level k: parameters trap<k>_n1/_p1/_taun/_taup/_Nt (n1, p1 = n_i exp(+-E_t/kT) at the region's
+    V_t), the diagnostic occupancy TrapOccupancy<k>, and its rate as ONE recombination term
+    RTerm_trap<k> of the shared additive mechanism (physics_bipolar_dd.add_recombination_term) WITH
+    its pair rate G + R (so the noise GR source sees it -- noise_analysis). The charged levels' trapped
+    charge goes in as the single charge term QTerm_bulk_traps. Rate, occupancy and pair rate all come
+    from the ONE SRH kernel (srh_rate_expr / srh_occupancy_expr) with the region's BGN substitution
+    (bgn=True: n_i^2 -> n_ie^2, n1/p1 scaled by n_ie/n_i)."""
+    from dynameta.carriers import physics_bipolar_dd as _BP   # lazy: BP imports this module
+
+    charges = []
     for k, t in enumerate(traps):
         if not isinstance(t, TrapLevel):
             raise TypeError("traps must be TrapLevel instances; got {!r}".format(type(t).__name__))
         p = "trap{}_".format(k)
-        n1, p1 = n1_p1(t.energy_eV, n_i_m3)
+        n1, p1 = n1_p1(t.energy_eV, n_i_m3, V_t)
         tn, tp = t.lifetimes_s()
         for nm, v in (("n1", n1), ("p1", p1), ("taun", tn), ("taup", tp),
                       ("Nt", float(t.density_m3))):
             ds.set_parameter(device=device, region=region, name=p + nm, value=v)
         args = (p + "n1", p + "p1", p + "taun", p + "taup")
-        rates.append(srh_rate_expr(*args))
-        occ = srh_occupancy_expr(*args)
+        occ = srh_occupancy_expr(*args, bgn=bgn)
         ds.node_model(device=device, region=region, name="TrapOccupancy{}".format(k), equation=occ)
+        _BP.add_recombination_term(device, region, "trap{}".format(k), srh_rate_expr(*args, bgn=bgn),
+                                   pair=srh_rate_expr(*args, bgn=bgn, pair=True))
         if t.kind == "acceptor":
             charges.append("-{}Nt*{}".format(p, occ))
         elif t.kind == "donor":
             charges.append("{}Nt*(1 - {})".format(p, occ))
-    return " + ".join(rates), (" + ".join(charges) if charges else None)
+    if charges:
+        _BP.add_charge_term(device, region, "bulk_traps", " + ".join(charges))
+
+
+def equilibrium_trap_levels(traps) -> Tuple[Tuple[float, float, str], ...]:
+    """(energy_eV, N_t [m^-3], kind) of the CHARGED bulk levels -- what the charge-neutral equilibrium
+    of the ohmic contacts / seed / 3-D gate frame needs (bipolar_options.equilibrium_fields). Neutral
+    (recombination-only) levels carry no charge and are left out, so a trap set without charged levels
+    returns () and leaves the legacy contact rule in place."""
+    out = []
+    for t in (traps or ()):
+        if not isinstance(t, TrapLevel):
+            raise TypeError("traps must be TrapLevel instances; got {!r}".format(type(t).__name__))
+        if t.kind != "neutral":
+            out.append((float(t.energy_eV), float(t.density_m3), t.kind))
+    return tuple(out)
 
 
 def _semiconductor_side(device: str, interface: str) -> Tuple[str, str]:
@@ -412,16 +470,19 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
     ds.set_node_values(device=device, region=semi, name=a_name, values=[float(v) for v in weight])
 
     n_i = float(ds.get_parameter(device=device, region=semi, name="n_i"))
-    # Per sheet level k (one spec: shared capture ratio cr = c_n/c_p, c = sigma v_th), with
-    #   D_k = cr (n + n1_k) + p + p1_k:
-    #   f_k  = (cr n + p1_k)/D_k                     df/dn = cr (cr n1_k + p)/D_k^2,  df/dp = -(cr n + p1_k)/D_k^2
-    #   U_k  = N_k c_n (n p - n_i^2)/D_k             dU/dn = N_k c_n (p D_k - cr (n p - n_i^2))/D_k^2
-    #                                                dU/dp = N_k c_n (n D_k - (n p - n_i^2))/D_k^2
-    # (= the SRH kernel with tau -> 1/S: c_n N_k c_p/(c_n (n+n1) + c_p (p+p1)) = N_k c_n/D_k.)
+    V_t = float(ds.get_parameter(device=device, region=semi, name="V_t"))   # == V_T unless T_K is set
+    bgn = "n_ie" in ds.get_node_model_list(device=device, region=semi)      # BGN on this region (D1b)
+    # Per sheet level k (one spec: shared capture ratio cr = c_n/c_p, c = sigma v_th): the SRH kernel
+    # with taun -> 1, taup -> cr (tau -> 1/S scaled by c_n N_k), so with n1', p1', n_i'^2 the region's
+    # (BGN-substituted) reference densities and D_k = cr (n + n1'_k) + 1*(p + p1'_k):
+    #   f_k  = (cr n + p1'_k)/D_k                    df/dn = cr (cr n1'_k + p)/D_k^2,  df/dp = -(cr n + p1'_k)/D_k^2
+    #   U_k  = N_k c_n (n p - n_i'^2)/D_k            dU/dn = N_k c_n (p D_k - cr (n p - n_i'^2))/D_k^2
+    #                                                dU/dp = N_k c_n (n D_k - (n p - n_i'^2))/D_k^2
+    #   G_k + R_k = N_k c_n (n p + n_i'^2)/D_k       (the noise pair rate; srh_rate_expr(pair=True))
     # The derivatives are written out ANALYTICALLY: DEVSIM's simplify(diff()) of a ~45-level sum took
     # ~25 s per install (MEASURED, 1-D MOS, 2 x 22 bins) -- the closed forms build in well under 1 s.
     q_val, q_dn, q_dp = [], [], []                             # sheet charge [m^-2], units of +q
-    r_val, r_dn, r_dp = [], [], []                             # surface SRH rate [m^-2 s^-1]
+    r_val, r_dn, r_dp, r_pair = [], [], [], []                 # surface SRH rate [m^-2 s^-1]
     all_levels = []
     q_fixed = 0.0
     for si, s in enumerate(specs):
@@ -434,23 +495,27 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
         ds.set_parameter(device=device, region=semi, name=cnp, value=cn)
         for (e, nk, kind) in s.sheet_levels():
             all_levels.append((e, nk, kind))
-            n1, p1 = n1_p1(e, n_i)
-            d = "({cr}*(Electrons + {n1!r}) + Holes + {p1!r})".format(cr=cr, n1=n1, p1=p1)
-            num = "({cr}*Electrons + {p1!r})".format(cr=cr, p1=p1)
+            n1, p1 = (repr(v) for v in n1_p1(e, n_i, V_t))
+            n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn)
+            d = _srh_denominator(n1e, p1e, "1", cr)
+            num = "({cr}*Electrons + 1*{p1})".format(cr=cr, p1=p1e)
+            occ = srh_occupancy_expr(n1, p1, "1", cr, bgn=bgn)          # == num/d
             nk_s = repr(float(nk))
             if kind in ("acceptor", "donor"):
                 # acceptor: -N f ; donor: N (1 - f) -- both carry -N df in the derivatives
-                q_val.append(("-{n}*{num}/{d}" if kind == "acceptor" else "{n}*(1 - {num}/{d})")
-                             .format(n=nk_s, num=num, d=d))
-                q_dn.append("-{n}*{cr}*({cr}*{n1!r} + Holes)/({d}^2)".format(n=nk_s, cr=cr, n1=n1, d=d))
+                q_val.append(("-{n}*{f}" if kind == "acceptor" else "{n}*(1 - {f})")
+                             .format(n=nk_s, f=occ))
+                q_dn.append("-{n}*{cr}*({cr}*{n1} + Holes)/({d}^2)".format(n=nk_s, cr=cr, n1=n1e, d=d))
                 q_dp.append("{n}*{num}/({d}^2)".format(n=nk_s, num=num, d=d))
             if s.recombination:
                 k = "{}*{}".format(nk_s, cnp)
-                r_val.append("{k}*(Electrons*Holes - n_i^2)/{d}".format(k=k, d=d))
-                r_dn.append("{k}*(Holes*{d} - {cr}*(Electrons*Holes - n_i^2))/({d}^2)"
-                            .format(k=k, d=d, cr=cr))
-                r_dp.append("{k}*(Electrons*{d} - (Electrons*Holes - n_i^2))/({d}^2)"
-                            .format(k=k, d=d))
+                r_val.append("{k}*{u}".format(k=k, u=srh_rate_expr(n1, p1, "1", cr, bgn=bgn)))
+                r_pair.append("{k}*{u}".format(k=k, u=srh_rate_expr(n1, p1, "1", cr, bgn=bgn,
+                                                                      pair=True)))
+                r_dn.append("{k}*(Holes*{d} - {cr}*(Electrons*Holes - {ni2}))/({d}^2)"
+                            .format(k=k, d=d, cr=cr, ni2=ni2))
+                r_dp.append("{k}*(Electrons*{d} - (Electrons*Holes - {ni2}))/({d}^2)"
+                            .format(k=k, d=d, ni2=ni2))
     if q_fixed != 0.0:
         q_val.append(repr(q_fixed / Q_E))
 
@@ -468,6 +533,7 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
         rate = _sum(r_val)
         ds.node_model(device=device, region=semi, name="ItRecomb{}".format(j), equation=rate)
         _BP.add_recombination_term(device, semi, "it{}".format(j), "{}*{}".format(a_name, rate),
+                                   pair="{}*{}".format(a_name, _sum(r_pair)),
                                    derivs={"Electrons": "{}*{}".format(a_name, _sum(r_dn)),
                                            "Holes": "{}*{}".format(a_name, _sum(r_dp))})
     return {"region": semi, "insulator": other, "index": j, "levels": all_levels, "area": area}

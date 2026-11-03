@@ -10,11 +10,19 @@ default) never calls into this module, so every pre-existing bipolar result is b
 ONE IMPLEMENTATION PER KERNEL. The fixed (doping-only) fields -- Delta E_g, the band-edge split, the
 effective intrinsic density n_ie, the ionization reference densities, the charge-neutral equilibrium
 (n0, p0) and the contact/seed potential -- are evaluated ONCE, in numpy, by `equilibrium_fields`, which
-both the DEVSIM region setup (`install_bipolar_options`) and the scalar gate-frame helper
-`physics_bipolar_dd.ohmic_built_in_offset_V` call. The solution-dependent DEVSIM strings (the
+both the DEVSIM region setup (`install_option_fields` / `install_option_terms`) and the scalar
+gate-frame helper `physics_bipolar_dd.ohmic_built_in_offset_V` call -- and, since the v0.14
+integration, its charge-neutral root also carries the trapped charge of CHARGED physics_traps levels
+(one contact rule for BGN, incomplete ionization and traps). The solution-dependent DEVSIM strings (the
 recombination terms and the ionized-dopant charge) each come from one builder (`recombination_exprs`,
-`ionized_net_doping_expr`). Shared by the 1-D direct path, the 2-D LayeredDevsimBuilder and the 3-D
+`ionized_net_doping_expr`); the SRH kernel is physics_traps.srh_rate_expr (shared with every trap
+level and interface bin). Shared by the 1-D direct path, the 2-D LayeredDevsimBuilder and the 3-D
 Stacked3DSpec builder (they all route through setup_bipolar_region).
+
+COMPOSITION (v0.14 integration): Auger, radiative and the external G are ADDITIVE terms of
+physics_bipolar_dd.add_recombination_term (RTerm_auger / RTerm_radiative / RTerm_gext, each with its
+noise pair rate), the ionized-dopant charge re-bases physics_bipolar_dd.rebuild_poisson_charge; nothing
+here re-defines a composite by name, so options compose with trap levels, interface traps and BTBT.
 
 =====================================================================================================
 1. RECOMBINATION (R26). Net rates U [m^-3 s^-1], positive = recombination, added to SRH:
@@ -56,7 +64,7 @@ Stacked3DSpec builder (they all route through setup_bipolar_region).
    These are APPARENT narrowings: they were extracted assuming Boltzmann statistics and a specific
    reference n_i, so (a) they must be paired with the n_i the user passes (state it with the result),
    and (b) on a DEGENERATE region with the FD g-factor on, the degeneracy is partly counted twice --
-   `install_bipolar_options` warns when that correction is non-negligible. Schenk's 1998 many-body
+   `install_option_fields` warns when that correction is non-negligible. Schenk's 1998 many-body
    model (carrier-density-dependent band edges) is NOT implemented (see the audit doc, sec. Limits).
 
    EFFECTIVE INTRINSIC DENSITY + BAND-EDGE SPLIT (the classic error source; Lundstrom & Schuelke,
@@ -293,27 +301,47 @@ IONIZATION_SI_P_B = IonizationModel(dE_D_eV=0.045, dE_A_eV=0.045,
 _ROOT_ITERS = 200       # bisection steps in ln n; the bracket spans < 400 e-folds -> < 1e-58 after 200
 
 
-def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool):
+def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=(), V_t=None):
     """Charge-neutral equilibrium electron density n0 solving
-         f(n) = n - n_ie^2/n - N_D+(n) + N_A-(n_ie^2/n) = 0
-    (N_D+ = N_D, N_A- = N_A when ionization is False). f is STRICTLY increasing in n (each term is),
-    so the root is unique; bisection in ln n on the bracket
-         [n_ie^2/(N_A + N_D + n_ie), N_A + N_D + n_ie]
+         f(n) = n - n_ie^2/n - N_D+(n) + N_A-(n_ie^2/n) - Q_t(n)/q = 0
+    (N_D+ = N_D, N_A- = N_A when ionization is False). `traps` = ((E_t - E_i [eV], N_t, kind), ...)
+    are CHARGED bulk SRH levels with their equilibrium (Fermi) occupancy f_t = n/(n + n1),
+    n1 = n_ie exp(E_t/kT) -- the steady-state SRH occupancy of physics_traps at n p = n_ie^2, the same
+    n1 the rate uses: Q_t/q = -N_t f_t (acceptor-like), +N_t (1 - f_t) (donor-like). This is the
+    charge-neutrality condition with trapped charge of Shockley & Read (1952) / Sze & Ng ch. 1, i.e.
+    the brentq oracle of the D1c compensation gate. Every term of f is STRICTLY increasing in n
+    (-Q_t/q too: +N_t n/(n + n1) and -N_t n1/(n + n1)), so the root is unique; bisection in ln n on
+         [n_ie^2/S, S],   S = N_A + N_D + sum N_t + n_ie
     (f <= 0 at the lower end, >= 0 at the upper -- see the audit doc) converges unconditionally.
     Vectorized over arrays of equal shape. Returns (n0, p0 = n_ie^2/n0)."""
     N_D, N_A, n_ie, n1D, p1A = (np.asarray(a, dtype=np.float64) for a in (N_D, N_A, n_ie, n1D, p1A))
     ni2 = n_ie * n_ie
-    hi = np.log(N_A + N_D + n_ie)
+    if traps:
+        hi = np.log(N_A + N_D + sum(float(t[1]) for t in traps) + n_ie)
+        tl = [(float(N), n_ie * math.exp(float(E) / float(V_t)), kind) for E, N, kind in traps]
+    else:
+        hi = np.log(N_A + N_D + n_ie)
+        tl = []
     lo = np.log(ni2) - hi
+
     if ionization:
-        def f(ln_n):
+        def f0(ln_n):
             n = np.exp(ln_n)
             p = ni2 / n
             return n - p - N_D / (1.0 + g_D * n / n1D) + N_A / (1.0 + g_A * p / p1A)
     else:
-        def f(ln_n):
+        def f0(ln_n):
             n = np.exp(ln_n)
             return n - ni2 / n - N_D + N_A
+    if tl:
+        def f(ln_n):                                         # + (-Q_t/q), increasing in n
+            n = np.exp(ln_n)
+            out = f0(ln_n)
+            for N, n1, kind in tl:
+                out = out + (N * n / (n + n1) if kind == "acceptor" else -N * n1 / (n + n1))
+            return out
+    else:
+        f = f0                                               # the trap-free root, arithmetic unchanged
     for _ in range(_ROOT_ITERS):
         mid = 0.5 * (lo + hi)
         up = f(mid) > 0.0
@@ -328,9 +356,14 @@ def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool):
 
 def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: float,
                        options: BipolarOptions, fd_enhancement: bool,
-                       donors_m3=None, acceptors_m3=None) -> Dict[str, np.ndarray]:
+                       donors_m3=None, acceptors_m3=None, traps=()) -> Dict[str, np.ndarray]:
     """Every fixed (doping-only) field the options need, per node. Pure numpy. THE single source shared
     by the DEVSIM setup and by ohmic_built_in_offset_V (the 3-D gate frame).
+
+    `traps`: CHARGED bulk trap levels ((E_t - E_i [eV], N_t [m^-3], kind), ...; physics_traps.
+    equilibrium_trap_levels) whose equilibrium trapped charge enters the charge-neutral root (the ONE
+    contact rule for BGN, incomplete ionization and trapped charge). () = no trap term (the arithmetic
+    is then exactly the trap-free root's).
 
     Donors/Acceptors default to the net-doping split (N_D = max(N, 0), N_A = max(-N, 0)) -- a
     compensated region must pass them explicitly (or define 'Donors'/'Acceptors' node models).
@@ -375,7 +408,7 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     uq, inv = np.unique(key, axis=0, return_inverse=True)
     inv = np.asarray(inv).reshape(-1)
     n0u, p0u = _neutral_root(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
-                             ion is not None)
+                             ion is not None, traps=tuple(traps or ()), V_t=Vt)
     n0 = n0u[inv].reshape(N.shape)
     p0 = p0u[inv].reshape(N.shape)
     # --- the potential the ohmic contact pins (Boltzmann frame + FD degeneracy + band-edge shift) ---
@@ -414,28 +447,38 @@ def _ni2(bgn: bool) -> str:
 
 
 def srh_expr(bgn: bool) -> str:
-    """SRH with the effective intrinsic density. bgn=False is the shipped string CHARACTER-FOR-CHARACTER
-    (physics_bipolar_dd builds it there; this is only used when BGN is on). With BGN the trap reference
-    densities scale as n1 n_ie/n_i, p1 n_ie/n_i so n1 p1 = n_ie^2 (detailed balance in the narrowed gap,
-    and whatever trap level the n1/p1 PARAMETERS encode is kept relative to the narrowed midgap)."""
-    if not bgn:
-        return "(Electrons*Holes - n_i^2)/(taup*(Electrons + n1) + taun*(Holes + p1))"
-    return ("(Electrons*Holes - n_ie^2)/(taup*(Electrons + n1*n_ie/n_i) + "
-            "taun*(Holes + p1*n_ie/n_i))")
+    """The region's base SRH channel with the effective intrinsic density -- a NAME for the ONE SRH
+    kernel physics_traps.srh_rate_expr (v0.14 integration: the BGN substitution n_i^2 -> n_ie^2,
+    n1, p1 -> n1 n_ie/n_i, p1 n_ie/n_i lives there, shared with every TrapLevel and interface-trap
+    bin). bgn=False is the shipped string CHARACTER-FOR-CHARACTER; bgn=True the D1b string."""
+    from dynameta.carriers.physics_traps import srh_rate_expr
+    return srh_rate_expr(bgn=bool(bgn))
 
 
-def recombination_exprs(options: BipolarOptions) -> Dict[str, str]:
-    """{node model name: expression} of the extra recombination terms (Auger, radiative)."""
+# Name of the external-generation term in the additive mechanism (noise_analysis keys its
+# `external_generation_shot` switch on it).
+GEXT_TERM = "gext"
+
+
+def recombination_exprs(options: BipolarOptions, *, pair: bool = False) -> Dict[str, str]:
+    """{node model name: expression} of the extra recombination terms (Auger, radiative). pair=True
+    gives each process's PAIR rate G + R (n p - n_ie^2 -> n p + n_ie^2: the detailed-balance split the
+    noise GR source 2 (G + R) uses) -- one builder for the rate and its pair rate."""
     bgn = options.bgn is not None
+    sgn = "+" if pair else "-"
     out = {}
     if options.auger is not None:
         cn = "AugerCn*AugerGeeh" if options.auger.coulomb_enhanced else "AugerCn"
         cp = "AugerCp*AugerGehh" if options.auger.coulomb_enhanced else "AugerCp"
-        out["UAuger"] = "({cn}*Electrons + {cp}*Holes)*(Electrons*Holes - {ni2})".format(
-            cn=cn, cp=cp, ni2=_ni2(bgn))
+        out["UAuger"] = "({cn}*Electrons + {cp}*Holes)*(Electrons*Holes {s} {ni2})".format(
+            cn=cn, cp=cp, s=sgn, ni2=_ni2(bgn))
     if options.radiative is not None:
-        out["URad"] = "B_rad*(Electrons*Holes - {})".format(_ni2(bgn))
+        out["URad"] = "B_rad*(Electrons*Holes {} {})".format(sgn, _ni2(bgn))
     return out
+
+
+# additive-term names of the R26 rates (physics_bipolar_dd.add_recombination_term)
+_TERM_NAMES = {"UAuger": "auger", "URad": "radiative"}
 
 
 def ionized_net_doping_expr() -> str:
@@ -465,16 +508,11 @@ def _maybe_node_values(device: str, region: str, name: str):
 _BGN_FD_WARN_VT = 0.05
 
 
-def install_bipolar_options(device: str, region: str, options: BipolarOptions, *,
-                            fd_enhancement: bool) -> None:
-    """Attach the opted-in physics to a region ALREADY set up by setup_bipolar_region (which calls this
-    last, only when options.active). Re-defines -- never adds parallel copies of -- the models the
-    options change: vdiff_g / vdiff_gp (BGN quasi-fields), USRH (n_ie), PotentialNodeCharge
-    (ionized dopants), ElectronGeneration / HoleGeneration (extra recombination + G). DEVSIM equations
-    reference models BY NAME, so the equations recorded by the base setup pick the new ones up."""
-    o = options
-    if o.T_K is not None:
-        ds.set_parameter(device=device, region=region, name="V_t", value=o.V_t())
+def _region_fields(device: str, region: str, options: Optional[BipolarOptions], *,
+                   fd_enhancement: bool, traps=()) -> Dict[str, np.ndarray]:
+    """equilibrium_fields on a region's own parameters and doping (options None -> the inert bundle:
+    only the charged trap levels change the trap-free equilibrium)."""
+    o = options if options is not None else BipolarOptions()
     n_i = float(ds.get_parameter(device=device, region=region, name="n_i"))
     N_c = float(ds.get_parameter(device=device, region=region, name="N_dos"))
     N_v = float(ds.get_parameter(device=device, region=region, name="N_dos_p"))
@@ -486,12 +524,26 @@ def install_bipolar_options(device: str, region: str, options: BipolarOptions, *
         raise ValueError("install_bipolar_options: region {!r} defines only one of the 'Donors' / "
                          "'Acceptors' node models; define both (or neither: the NetDoping split)."
                          .format(region))
-    f = equilibrium_fields(net, n_i_m3=n_i, N_c_m3=N_c, N_v_m3=N_v, options=o,
-                           fd_enhancement=fd_enhancement, donors_m3=don, acceptors_m3=acc)
-    bgn = o.bgn is not None
+    return equilibrium_fields(net, n_i_m3=n_i, N_c_m3=N_c, N_v_m3=N_v, options=o,
+                              fd_enhancement=fd_enhancement, donors_m3=don, acceptors_m3=acc,
+                              traps=traps)
 
-    # --- BGN: n_ie field, band-edge quasi-fields in both SG currents, SRH in the narrowed gap ---
-    if bgn:
+
+def install_option_fields(device: str, region: str, options: BipolarOptions, *,
+                          fd_enhancement: bool) -> None:
+    """Stage 1 of the options (setup_bipolar_region calls it after the currents, BEFORE the
+    recombination models, only when options.active): V_t at T_K; under BGN the n_ie field and the
+    band-edge quasi-fields re-defining vdiff_g / vdiff_gp (a TRANSPORT change, not an additive term);
+    under incomplete ionization the reference fields, IonizedNetDoping and the Poisson composite
+    rebuilt on it (physics_bipolar_dd.rebuild_poisson_charge, which keeps every QTerm_*)."""
+    from dynameta.carriers.physics_bipolar_dd import rebuild_poisson_charge
+    o = options
+    if o.T_K is not None:
+        ds.set_parameter(device=device, region=region, name="V_t", value=o.V_t())
+    f = _region_fields(device, region, o, fd_enhancement=fd_enhancement)
+
+    # --- BGN: n_ie field, band-edge quasi-fields in both SG currents ---
+    if o.bgn is not None:
         if fd_enhancement and float(np.max(np.maximum(f["fd_n"], f["fd_p"]))) > _BGN_FD_WARN_VT:
             warnings.warn(
                 "install_bipolar_options: region {!r} combines an APPARENT bandgap-narrowing model "
@@ -500,7 +552,7 @@ def install_bipolar_options(device: str, region: str, options: BipolarOptions, *
                 "degeneracy is counted twice; use fd_enhancement=False with apparent BGN, or accept "
                 "the overlap knowingly.".format(region, o.bgn.kind,
                                                 float(np.max(np.maximum(f["fd_n"], f["fd_p"])))),
-                AdvisoryWarning, stacklevel=3)
+                AdvisoryWarning, stacklevel=4)
         _set_field(device, region, "n_ie", f["n_ie"])
         _set_field(device, region, "BgnDc", f["D_c_V"])
         _set_field(device, region, "BgnDv", f["D_v_V"])
@@ -510,7 +562,6 @@ def install_bipolar_options(device: str, region: str, options: BipolarOptions, *
                           "(vdiff + (BgnDc@n0 - BgnDc@n1)/V_t) / g_enh", ("Potential", "Electrons"))
         _edge_with_derivs(device, region, "vdiff_gp",
                           "(vdiff - (BgnDv@n0 - BgnDv@n1)/V_t) / g_enh_p", ("Potential", "Holes"))
-        _node_with_derivs(device, region, "USRH", srh_expr(True), ("Electrons", "Holes"))
 
     # --- incomplete ionization: Poisson charge with N_D+ - N_A- ---
     if o.ionization is not None:
@@ -522,35 +573,41 @@ def install_bipolar_options(device: str, region: str, options: BipolarOptions, *
         _set_field(device, region, "IonP1A", f["p1A"])
         _node_with_derivs(device, region, "IonizedNetDoping", ionized_net_doping_expr(),
                           ("Electrons", "Holes"))
-        _node_with_derivs(device, region, "PotentialNodeCharge",
-                          "-ElectronCharge * kahan3(Holes, -Electrons, IonizedNetDoping)",
-                          ("Electrons", "Holes"))
+        rebuild_poisson_charge(device, region)
 
-    # --- extra recombination + generation into both continuity equations ---
-    terms = ["USRH"]
-    if o.auger is not None:
-        ds.set_parameter(device=device, region=region, name="AugerCn", value=float(o.auger.C_n_m6s))
-        ds.set_parameter(device=device, region=region, name="AugerCp", value=float(o.auger.C_p_m6s))
-        if o.auger.coulomb_enhanced:
+
+def install_option_terms(device: str, region: str, options: Optional[BipolarOptions], *,
+                         fd_enhancement: bool, traps=()) -> None:
+    """Stage 2 (setup_bipolar_region, after USRH and the trap levels): Auger / radiative / external
+    generation as ADDITIVE terms (physics_bipolar_dd.add_recombination_term, each with its noise pair
+    rate; the diagnostics UAuger / URad keep their names), and -- when the equilibrium itself changes
+    (BGN, incomplete ionization, or CHARGED trap levels `traps`) -- the charge-neutral fields the
+    ohmic contacts and the seed pin (NeutralElectrons/Holes, EquilibriumPotential, SeedPsiShift).
+    options may be None (charged traps alone)."""
+    from dynameta.carriers.physics_bipolar_dd import add_recombination_term
+    o = options
+    if o is not None:
+        if o.auger is not None:
+            ds.set_parameter(device=device, region=region, name="AugerCn", value=float(o.auger.C_n_m6s))
+            ds.set_parameter(device=device, region=region, name="AugerCp", value=float(o.auger.C_p_m6s))
+        if o.radiative is not None:
+            ds.set_parameter(device=device, region=region, name="B_rad", value=float(o.radiative.B_m3s))
+        f = None
+        if o.auger is not None and o.auger.coulomb_enhanced:
+            f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps)
             _set_field(device, region, "AugerGeeh", f["g_eeh"])
             _set_field(device, region, "AugerGehh", f["g_ehh"])
-    if o.radiative is not None:
-        ds.set_parameter(device=device, region=region, name="B_rad", value=float(o.radiative.B_m3s))
-    for nm, ex in recombination_exprs(o).items():
-        _node_with_derivs(device, region, nm, ex, ("Electrons", "Holes"))
-        terms.append(nm)
-    if o.generation_m3s is not None:
-        ds.set_parameter(device=device, region=region, name="G_ext", value=float(o.generation_m3s))
-        terms.append("-G_ext")
-    if len(terms) > 1:
-        unet = " + ".join(terms).replace("+ -", "- ")
-        _node_with_derivs(device, region, "ElectronGeneration",
-                          "-ElectronCharge * ({})".format(unet), ("Electrons", "Holes"))
-        _node_with_derivs(device, region, "HoleGeneration",
-                          "+ElectronCharge * ({})".format(unet), ("Electrons", "Holes"))
-
-    # --- equilibrium fields the contacts + seed pin (only when the equilibrium itself changes) ---
-    if o.alters_equilibrium:
+        pairs = recombination_exprs(o, pair=True)
+        for nm, ex in recombination_exprs(o).items():
+            _node_with_derivs(device, region, nm, ex, ("Electrons", "Holes"))     # diagnostic name
+            add_recombination_term(device, region, _TERM_NAMES[nm], nm, pair=pairs[nm],
+                                   derivs={"Electrons": nm + ":Electrons", "Holes": nm + ":Holes"})
+        if o.generation_m3s is not None:
+            ds.set_parameter(device=device, region=region, name="G_ext", value=float(o.generation_m3s))
+            # Poisson generation (photogeneration shot noise) unless the noise call says otherwise
+            add_recombination_term(device, region, GEXT_TERM, "-G_ext", pair="G_ext")
+    if (o is not None and o.alters_equilibrium) or traps:
+        f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps)
         _set_field(device, region, "NeutralElectrons", f["n0"])
         _set_field(device, region, "NeutralHoles", f["p0"])
         _set_field(device, region, "EquilibriumPotential", f["psi_eq"])
@@ -570,4 +627,4 @@ __all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "Bipol
            "BGN_SI_SLOTBOOM_1977", "BGN_SI_KLAASSEN_1992", "BGN_SI_DEL_ALAMO_1985",
            "SI_DONOR_IONIZATION_EV", "SI_ACCEPTOR_IONIZATION_EV", "IONIZATION_SI_P_B",
            "equilibrium_fields", "srh_expr", "recombination_exprs", "ionized_net_doping_expr",
-           "install_bipolar_options", "options_contact_models"]
+           "install_option_fields", "install_option_terms", "options_contact_models", "GEXT_TERM"]

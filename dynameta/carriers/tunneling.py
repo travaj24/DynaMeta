@@ -116,11 +116,14 @@ class BTBTParams:
 SILICON_HURKX = BTBTParams.from_cgs(4.0e14, 1.9e7, 2.5)
 
 
-def hurkx_d_expr(n: str, p: str, n_i: str = "n_i") -> str:
+def hurkx_d_expr(n: str, p: str, n_i: str = "n_i", *, pair: bool = False) -> str:
     """The Hurkx factor D = (n p - n_i^2)/((n + n_i)(p + n_i)) as a DEVSIM expression. `n_i` is the
-    intrinsic-density symbol (a region parameter by default; pass a node-model name for an effective
-    n_i, e.g. under bandgap narrowing)."""
-    return "(({n})*({p}) - {ni}^2)/((({n}) + {ni})*(({p}) + {ni}))".format(n=n, p=p, ni=n_i)
+    intrinsic-density symbol (a region parameter by default; pass the node-suffixed effective density,
+    e.g. "n_ie@n0", under bandgap narrowing). pair=True gives the PAIR factor (n p + n_i^2)/(...): the
+    detailed-balance split R ~ n p, G ~ n_i^2 of the net rate, whose sum G + R is the noise GR source
+    (noise_analysis) -- the same split as the SRH kernel's pair rate."""
+    return "(({n})*({p}) {s} {ni}^2)/((({n}) + {ni})*(({p}) + {ni}))".format(
+        n=n, p=p, ni=n_i, s="+" if pair else "-")
 
 
 def btbt_rate_expr(params: BTBTParams, *, emag: str, d: str) -> str:
@@ -128,8 +131,15 @@ def btbt_rate_expr(params: BTBTParams, *, emag: str, d: str) -> str:
     A exp(P ln|E| - B/|E|) * D. `emag` names a model/expression for |E| (> 0 -- floored by the callers);
     `d` is the D-factor expression for the node(s) the term is assembled into (hurkx_d_expr at one
     node in 2-D/3-D, the mean of the two end nodes in 1-D). exp(P ln E - B/E) instead of
-    E^P exp(-B/E): one exponential, no overflow of E^P and no 0*inf at the floor."""
-    return "{A:.17g}*exp({P:.17g}*log({E}) - {B:.17g}/({E}))*({D})".format(
+    E^P exp(-B/E): one exponential, no overflow of E^P and no 0*inf at the floor.
+
+    Coefficients are written with "%.17e" (always a FLOAT literal). v0.14 integration fix: the former
+    "%.17g" printed an integral value as an INTEGER literal ("10000000000000000"), and DEVSIM 2.11.2's
+    parser CLAMPS integer literals above 2^31 - 1 to 2147483647 (MEASURED: "10000000000000000" ->
+    2147483647.0, "1e16" -> 1e16) -- so any A >= 2^31 or B >= 2^31 V/m that happens to be integral
+    was silently replaced. The shipped SILICON_HURKX (A = 4000000000000000.5, B = 1.9e9 < 2^31) was not
+    affected; the parsed doubles are identical, so its results are unchanged."""
+    return "{A:.17e}*exp({P:.17e}*log({E}) - {B:.17e}/({E}))*({D})".format(
         A=float(params.A_SI), P=float(params.P), B=float(params.B_V_per_m), E=emag, D=d)
 
 
@@ -144,64 +154,74 @@ def _require_bipolar(device: str, region: str):
 
 def setup_btbt(device: str, region: str, params: BTBTParams, *, n_i: str = "n_i") -> None:
     """Install the BTBT term (module header) into an EXISTING bipolar region: build the field-magnitude
-    and rate models with their derivatives, and re-bind ElectronContinuityEquation / HoleContinuity-
-    Equation with the extra volume term (recorded in the eq registry, so a Gummel/staged
-    delete_by_name -> reapply_by_name keeps it). Called by setup_bipolar_region(btbt=...)."""
+    and rate models (the diagnostics BTBT_Emag, BTBT_U / BTBT_U0, BTBT_U1) and add the rate through the
+    ONE additive term mechanism, physics_bipolar_dd.add_recombination_term (assembly "edge" in 1-D,
+    "element" in 2-D/3-D), with its noise pair rate. That mechanism wires the continuity equations'
+    volume slots once (eq_registry.amend_region_equation, recorded, so a Gummel/staged
+    delete_by_name -> reapply_by_name keeps them) and SUMS every term sharing a slot.
+    Called by setup_bipolar_region(btbt=...).
+
+    `n_i`: the intrinsic density in the Hurkx D -- a region PARAMETER name ("n_i", default) or a NODE
+    MODEL name ("n_ie" under bandgap narrowing: setup_bipolar_region passes it, so D vanishes at the
+    narrowed equilibrium n p = n_ie^2); a node model is evaluated at each D node (@n0/@n1 or
+    @en0/@en1)."""
     import devsim as ds
-    from dynameta.carriers import eq_registry as _R
+    from dynameta.carriers import physics_bipolar_dd as _BP
     from dynameta.carriers.eq_registry import edge_with_derivs
 
     if not isinstance(params, BTBTParams):
         raise TypeError("setup_btbt: params must be a BTBTParams (got {!r})".format(type(params)))
     _require_bipolar(device, region)
+    ni_node = n_i in ds.get_node_model_list(device=device, region=region)
+
+    def ni_at(sfx):
+        return n_i + sfx if ni_node else n_i
+
     dim = int(ds.get_dimension(device=device))
     if dim == 1:
         # the edge field IS the field in 1-D; D = mean of the two end-node values
+        if ni_node:
+            ds.edge_from_node_model(device=device, region=region, node_model=n_i)
         edge_with_derivs(device, region, "BTBT_Emag", "pow(ElectricField^2 + 1.0, 0.5)", ("Potential",))
-        d_avg = "0.5*({} + {})".format(hurkx_d_expr("Electrons@n0", "Holes@n0", n_i),
-                                       hurkx_d_expr("Electrons@n1", "Holes@n1", n_i))
-        u = btbt_rate_expr(params, emag="BTBT_Emag", d=d_avg)
+
+        def d_avg(pair):
+            return "0.5*({} + {})".format(
+                hurkx_d_expr("Electrons@n0", "Holes@n0", ni_at("@n0"), pair=pair),
+                hurkx_d_expr("Electrons@n1", "Holes@n1", ni_at("@n1"), pair=pair))
         wrt = ("Potential", "Electrons", "Holes")
-        edge_with_derivs(device, region, "BTBT_U", u, wrt)
-        edge_with_derivs(device, region, "BTBT_ElectronGeneration", "-ElectronCharge*BTBT_U", wrt)
-        edge_with_derivs(device, region, "BTBT_HoleGeneration", "ElectronCharge*BTBT_U", wrt)
-        _R.amend_region_equation(device, region, "ElectronContinuityEquation",
-                                 edge_volume_model="BTBT_ElectronGeneration")
-        _R.amend_region_equation(device, region, "HoleContinuityEquation",
-                                 edge_volume_model="BTBT_HoleGeneration")
+        edge_with_derivs(device, region, "BTBT_U", btbt_rate_expr(params, emag="BTBT_Emag",
+                                                                  d=d_avg(False)), wrt)
+        _BP.add_recombination_term(device, region, "btbt", "BTBT_U", assembly="edge",
+                                   pair=btbt_rate_expr(params, emag="BTBT_Emag", d=d_avg(True)))
         return
     if dim not in (2, 3):                                     # pragma: no cover - devsim dims are 1..3
         raise NotImplementedError("setup_btbt: dimension {}".format(dim))
+    from dynameta.carriers.eq_registry import element_with_derivs
     ens = ["@en{}".format(k) for k in range(dim + 1)]           # the element's nodes (en0/en1 = the edge)
     comps = ["ElectricField_{}".format(c) for c in "xyz"[:dim]]
     ds.element_from_edge_model(device=device, region=region, edge_model="ElectricField")
     ds.element_from_edge_model(device=device, region=region, edge_model="ElectricField",
                                derivative="Potential")
-
-    def emodel(name, eq, wrt):
-        ds.element_model(device=device, region=region, name=name, equation=eq)
-        for v in wrt:
-            ds.element_model(device=device, region=region, name="{}:{}".format(name, v),
-                             equation="simplify(diff({}, {}))".format(eq, v))
-
+    if ni_node:
+        ds.element_from_node_model(device=device, region=region, node_model=n_i)
     pot = ["Potential" + e for e in ens]
-    emodel("BTBT_Emag", "pow({} + 1.0, 0.5)".format(" + ".join(c + "^2" for c in comps)), pot)
+    element_with_derivs(device, region, "BTBT_Emag",
+                        "pow({} + 1.0, 0.5)".format(" + ".join(c + "^2" for c in comps)), pot)
     # DEVSIM's element assembler demands the derivative w.r.t. EVERY element node of EVERY solution
     # variable of the equation (MEASURED: "Model: ...:Electrons@en1 MISSING" is FATAL), so the carrier
     # derivatives are created on all ens, most of them simplifying to the literal 0.
     wrt = pot + ["Electrons" + e for e in ens] + ["Holes" + e for e in ens]
+    shares, pairs = [], []
     for k in (0, 1):                                          # node0 / node1 share of each element edge
         nd = "@en{}".format(k)
-        u = btbt_rate_expr(params, emag="BTBT_Emag", d=hurkx_d_expr("Electrons" + nd, "Holes" + nd, n_i))
-        emodel("BTBT_U{}".format(k), u, wrt)
-        emodel("BTBT_ElectronGeneration{}".format(k), "-ElectronCharge*BTBT_U{}".format(k), wrt)
-        emodel("BTBT_HoleGeneration{}".format(k), "ElectronCharge*BTBT_U{}".format(k), wrt)
-    _R.amend_region_equation(device, region, "ElectronContinuityEquation",
-                             volume_node0_model="BTBT_ElectronGeneration0",
-                             volume_node1_model="BTBT_ElectronGeneration1")
-    _R.amend_region_equation(device, region, "HoleContinuityEquation",
-                             volume_node0_model="BTBT_HoleGeneration0",
-                             volume_node1_model="BTBT_HoleGeneration1")
+        u = btbt_rate_expr(params, emag="BTBT_Emag",
+                           d=hurkx_d_expr("Electrons" + nd, "Holes" + nd, ni_at(nd)))
+        element_with_derivs(device, region, "BTBT_U{}".format(k), u, wrt)
+        shares.append("BTBT_U{}".format(k))
+        pairs.append(btbt_rate_expr(params, emag="BTBT_Emag",
+                                    d=hurkx_d_expr("Electrons" + nd, "Holes" + nd, ni_at(nd), pair=True)))
+    _BP.add_recombination_term(device, region, "btbt", tuple(shares), assembly="element",
+                               pair=tuple(pairs))
 
 
 def btbt_generation_current(device: str, region: str, *, depth_m: Optional[float] = None) -> float:

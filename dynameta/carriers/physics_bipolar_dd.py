@@ -17,6 +17,7 @@ DEVSIM sign convention (residual = q*divergence form), per docs/implementation_n
   SRH source          : USRH = (n p - n_i^2)/(taup (n + n1) + taun (p + p1))
                         ElectronGeneration = -q USRH  (into ElectronContinuityEquation)
                         HoleGeneration     = +q USRH  (into HoleContinuityEquation)
+                        (+ sum of the opt-in additive terms RTerm_*: see add_recombination_term)
 
 FD enhancement (accurate rational fit of the generalized-Einstein ratio g=F_1/2/F_-1/2
 in pow()s of the solution variable -- the only form DEVSIM differentiates without hanging;
@@ -151,7 +152,8 @@ def fd_potential_shift(u):
 def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: float,
                             n_dos_p_m3: "float | None" = None,
                             fd_enhancement: bool = True,
-                            options: "BipolarOptions | None" = None) -> float:
+                            options: "BipolarOptions | None" = None,
+                            traps=None) -> float:
     """The built-in potential [V] the bipolar ohmic contact PINS for a node of SIGNED net doping
     `net_doping_m3`, in the contact's own frame (n-type: +V_t ln(n0/n_i) plus the FD correction).
 
@@ -164,13 +166,20 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
     `options` (audit R26/R27): an ACTIVE BipolarOptions routes through the SAME numpy kernel the region
     setup uses (bipolar_options.equilibrium_fields) -- BGN band-edge shift, incomplete-ionization
     neutrality, and V_t at options.T_K -- so the 3-D gate frame follows the contact it references.
-    None (the default) or an inactive bundle is the legacy expression unchanged."""
-    if options is not None and options.active:
-        from dynameta.carriers.bipolar_options import equilibrium_fields
+    None (the default) or an inactive bundle is the legacy expression unchanged.
+
+    `traps` (v0.14 integration): the region's bulk physics_traps.TrapLevel sequence. CHARGED levels move
+    the charge-neutral equilibrium the contact pins (the same kernel, with the trapped charge in the
+    neutrality root), so a gate referenced to a trap-compensated body follows its contact too.
+    None / no charged level is the trap-free value unchanged."""
+    eq_traps = _PT.equilibrium_trap_levels(traps)
+    if (options is not None and options.active) or eq_traps:
+        from dynameta.carriers.bipolar_options import BipolarOptions, equilibrium_fields
         nd = float(n_dos_m3)
         f = equilibrium_fields(np.array([float(net_doping_m3)]), n_i_m3=float(n_i_m3), N_c_m3=nd,
-                               N_v_m3=float(n_dos_p_m3) if n_dos_p_m3 else nd, options=options,
-                               fd_enhancement=fd_enhancement)
+                               N_v_m3=float(n_dos_p_m3) if n_dos_p_m3 else nd,
+                               options=options if options is not None else BipolarOptions(),
+                               fd_enhancement=fd_enhancement, traps=eq_traps)
         return float(f["psi_eq"][0])
     N = float(net_doping_m3)
     ni = float(n_i_m3)
@@ -402,24 +411,41 @@ def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:
     return g_expr_devsim(var, dos, s)
 
 
-# --- additive extension terms (D1c traps, 2026-11-03) ----------------------------------------------
-# Extra space charge and extra recombination enter the bipolar region through NAMED node models:
+# --- the ONE additive term mechanism (D1c hooks, extended at the v0.14 integration) ------------------
+# Every opt-in physics term of a bipolar region enters through NAMED models, never by re-defining a
+# composite or an equation slot by hand:
 #   QTerm_<name> : a net positive charge DENSITY in units of +q [m^-3] (trapped charge, a sheet charge
 #                  weighted onto interface nodes, ...) -> PotentialNodeCharge = -q (p - n + N + sum QTerm)
-#   RTerm_<name> : a net recombination RATE [m^-3 s^-1] (surface SRH weighted onto interface nodes, a
-#                  generation term as a negative rate, ...) -> ElectronGeneration = -q (USRH + sum RTerm)
-# The composite models are REBUILT from whatever terms the region carries (sorted names, so the order
-# is deterministic), and the equations -- which reference the composites by name -- are untouched.
-# The term list is read back from DEVSIM's own model list, so it lives and dies with the device (no
-# module-level state to go stale across delete_device / re-create). With NO terms both composites
-# are the legacy strings character-for-character.
+#                  (N = IonizedNetDoping when incomplete ionization is on, else NetDoping)
+#   RTerm_<name> : a net recombination RATE [m^-3 s^-1] (Auger, radiative, a bulk trap level, surface
+#                  SRH weighted onto interface nodes, an external generation as a negative rate, ...)
+#                  -> ElectronGeneration = -q (USRH + sum RTerm), HoleGeneration = +q (...)
+#   PTerm_<name> : the PAIR rate G + R of RTerm_<name> (the noise GR source 2 (G + R) of
+#                  noise_analysis; omitted only when the caller gives no pair= -- the noise then
+#                  REFUSES the device rather than silently dropping the term)
+# A rate whose natural quadrature is not node-local (D1d BTBT: the field lives on edges/elements) uses
+# the SAME mechanism with assembly="edge" (1-D: edge models RTermEdge_<name>, composite
+# ElectronGenerationEdge into the equations' edge_volume_model) or assembly="element" (2-D/3-D:
+# element models RTermElem0_/RTermElem1_<name> = each element edge's node0/node1 share, composites
+# ElectronGenerationElem0/1 into volume_node0_model/volume_node1_model). The equation slot is wired
+# ONCE through eq_registry.amend_region_equation (which refuses to overwrite a slot another module
+# wired); later terms only rebuild the composite, so several terms SUM, never overwrite.
+# Composites are REBUILT from whatever terms the region carries (sorted names: deterministic order),
+# read back from DEVSIM's own model lists, so they live and die with the device (no module state).
+# With NO terms every composite is the legacy string character-for-character and no model, slot or
+# DEVSIM call is added (the defaults-off guards).
 _CHARGE_TERM_PREFIX = "QTerm_"
 _RECOMB_TERM_PREFIX = "RTerm_"
+_PAIR_TERM_PREFIX = "PTerm_"
+_EDGE_RTERM_PREFIX, _EDGE_PTERM_PREFIX = "RTermEdge_", "PTermEdge_"
+_ELEM_RTERM_PREFIX = ("RTermElem0_", "RTermElem1_")
+_ELEM_PTERM_PREFIX = ("PTermElem0_", "PTermElem1_")
+_ASSEMBLIES = ("node", "edge", "element")
 
 
-def _poisson_charge_expr(terms) -> str:
-    """Bipolar Poisson node charge -q (p - n + NetDoping [+ sum of QTerm_* models])."""
-    base = "kahan3(Holes, -Electrons, NetDoping)"
+def _poisson_charge_expr(terms, doping: str = "NetDoping") -> str:
+    """Bipolar Poisson node charge -q (p - n + <doping> [+ sum of QTerm_* models])."""
+    base = "kahan3(Holes, -Electrons, {})".format(doping)
     if not terms:
         return "-ElectronCharge * " + base                      # legacy string, unchanged
     return "-ElectronCharge * ({} + {})".format(base, " + ".join(terms))
@@ -450,6 +476,15 @@ def _term_with_derivs(device: str, region: str, model: str, expr: str, derivs) -
         ds.node_model(device=device, region=region, name="{}:{}".format(model, w), equation=derivs[w])
 
 
+def rebuild_poisson_charge(device: str, region: str) -> None:
+    """(Re)build PotentialNodeCharge from the region's doping model (IonizedNetDoping when incomplete
+    ionization installed it, else NetDoping) plus every QTerm_* charge term."""
+    doping = ("IonizedNetDoping" if "IonizedNetDoping" in ds.get_node_model_list(
+        device=device, region=region) else "NetDoping")
+    pne = _poisson_charge_expr(_region_terms(device, region, _CHARGE_TERM_PREFIX), doping)
+    _node_with_derivs(device, region, "PotentialNodeCharge", pne, ("Electrons", "Holes"))
+
+
 def add_charge_term(device: str, region: str, name: str, expr: str, *, derivs=None) -> str:
     """Add a net positive space-charge density `expr` [m^-3, units of +q; a DEVSIM node expression in
     Electrons/Holes and parameters] to a bipolar region's Poisson equation, as node model
@@ -458,22 +493,147 @@ def add_charge_term(device: str, region: str, name: str, expr: str, *, derivs=No
     (see _term_with_derivs). Returns the model name."""
     model = _CHARGE_TERM_PREFIX + name
     _term_with_derivs(device, region, model, expr, derivs)
-    pne = _poisson_charge_expr(_region_terms(device, region, _CHARGE_TERM_PREFIX))
-    _node_with_derivs(device, region, "PotentialNodeCharge", pne, ("Electrons", "Holes"))
+    rebuild_poisson_charge(device, region)
     return model
 
 
-def add_recombination_term(device: str, region: str, name: str, expr: str, *, derivs=None) -> str:
+def _element_wrt(device: str) -> list:
+    dim = int(ds.get_dimension(device=device))
+    ens = ["@en{}".format(k) for k in range(dim + 1)]
+    return [v + e for v in ("Potential", "Electrons", "Holes") for e in ens]
+
+
+def _wire_volume_slot(device: str, region: str, slots: dict) -> None:
+    """Point the continuity equations' edge/element volume slots at the term composites, ONCE.
+    `slots` maps an equation keyword to (electron composite, hole composite). A slot already carrying
+    the composite is left alone; one carrying a FOREIGN model makes amend_region_equation refuse."""
+    for eq, idx in (("ElectronContinuityEquation", 0), ("HoleContinuityEquation", 1)):
+        rec = _R.recorded(device, eq, scope="region", loc=region)
+        if len(rec) != 1:
+            raise ValueError("add_recombination_term: region {!r} has no recorded {} -- a bipolar "
+                             "drift-diffusion region (setup_bipolar_region) is required".format(
+                                 region, eq))
+        kw = rec[0]["kwargs"]
+        need = {k: v[idx] for k, v in slots.items() if kw.get(k) != v[idx]}
+        if need:
+            _R.amend_region_equation(device, region, eq, **need)
+
+
+def _rebuild_edge_composites(device: str, region: str) -> None:
+    terms = sorted(m for m in ds.get_edge_model_list(device=device, region=region)
+                   if m.startswith(_EDGE_RTERM_PREFIX) and ":" not in m)
+    r = "({})".format(" + ".join(terms))
+    wrt = ("Potential", "Electrons", "Holes")
+    _edge_with_derivs(device, region, "ElectronGenerationEdge", "-ElectronCharge*" + r, wrt)
+    _edge_with_derivs(device, region, "HoleGenerationEdge", "ElectronCharge*" + r, wrt)
+    _wire_volume_slot(device, region, {"edge_volume_model": ("ElectronGenerationEdge",
+                                                             "HoleGenerationEdge")})
+
+
+def _rebuild_element_composites(device: str, region: str) -> None:
+    wrt = _element_wrt(device)
+    have = ds.get_element_model_list(device=device, region=region)
+    slots = {}
+    for k, pre in enumerate(_ELEM_RTERM_PREFIX):
+        terms = sorted(m for m in have if m.startswith(pre) and ":" not in m)
+        r = "({})".format(" + ".join(terms))
+        en, hn = "ElectronGenerationElem{}".format(k), "HoleGenerationElem{}".format(k)
+        _R.element_with_derivs(device, region, en, "-ElectronCharge*" + r, wrt)
+        _R.element_with_derivs(device, region, hn, "ElectronCharge*" + r, wrt)
+        slots["volume_node{}_model".format(k)] = (en, hn)
+    _wire_volume_slot(device, region, slots)
+
+
+def add_recombination_term(device: str, region: str, name: str, expr, *, pair=None, derivs=None,
+                           assembly: str = "node") -> str:
     """Add a net recombination rate `expr` [m^-3 s^-1] (negative = generation) to BOTH continuity
-    equations of a bipolar region, as node model RTerm_<name> (+ derivatives), and rebuild
-    ElectronGeneration/HoleGeneration. Re-adding the same name REPLACES that term. `derivs` as in
-    add_charge_term. Returns the name."""
-    model = _RECOMB_TERM_PREFIX + name
-    _term_with_derivs(device, region, model, expr, derivs)
-    gn, gp = _generation_exprs(_region_terms(device, region, _RECOMB_TERM_PREFIX))
-    _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
-    _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
-    return model
+    equations of a bipolar region and rebuild the composite it sums into (see the block comment above).
+    Re-adding the same name REPLACES that term; distinct names always SUM.
+
+      assembly="node"    : `expr` a node expression -> RTerm_<name> (+ Electrons/Holes derivatives;
+                           `derivs` optionally the closed forms, as in add_charge_term).
+      assembly="edge"    : `expr` an edge expression (1-D field-driven rates) -> RTermEdge_<name>,
+                           assembled with EdgeNodeVolume into both end nodes (edge_volume_model).
+      assembly="element" : `expr` = (node0 share, node1 share) element expressions (2-D/3-D) ->
+                           RTermElem0_/RTermElem1_<name>, assembled with ElementNodeVolume into the
+                           element edge's node0 / node1 (volume_node0_model / volume_node1_model).
+      pair               : the PAIR rate G + R of the same process in the same form as `expr` (a
+                           2-tuple for "element"); it is the noise GR source (noise_analysis). Pass
+                           "0" for a deterministic term. None leaves the term without a pair rate and
+                           noise_analysis refuses the region (so no term can be silently noiseless).
+    Returns the (first) term model name."""
+    if assembly not in _ASSEMBLIES:
+        raise ValueError("add_recombination_term: assembly must be one of {}; got {!r}".format(
+            _ASSEMBLIES, assembly))
+    if assembly == "node":
+        model = _RECOMB_TERM_PREFIX + name
+        _term_with_derivs(device, region, model, expr, derivs)
+        pm = _PAIR_TERM_PREFIX + name
+        if pair is not None:
+            ds.node_model(device=device, region=region, name=pm, equation=pair)
+        elif pm in ds.get_node_model_list(device=device, region=region):
+            ds.delete_node_model(device=device, region=region, name=pm)      # no stale pair rate
+        gn, gp = _generation_exprs(_region_terms(device, region, _RECOMB_TERM_PREFIX))
+        _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
+        _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
+        return model
+    if derivs is not None:
+        raise ValueError("add_recombination_term: closed-form derivs are supported for node terms only")
+    if assembly == "edge":
+        model = _EDGE_RTERM_PREFIX + name
+        _edge_with_derivs(device, region, model, expr, ("Potential", "Electrons", "Holes"))
+        pm = _EDGE_PTERM_PREFIX + name
+        if pair is not None:
+            ds.edge_model(device=device, region=region, name=pm, equation=pair)
+        elif pm in ds.get_edge_model_list(device=device, region=region):
+            ds.delete_edge_model(device=device, region=region, name=pm)
+        _rebuild_edge_composites(device, region)
+        return model
+    exprs = tuple(expr)
+    pairs = tuple(pair) if pair is not None else (None, None)
+    if len(exprs) != 2 or len(pairs) != 2:
+        raise ValueError("add_recombination_term(assembly='element'): expr and pair are (node0, node1) "
+                         "share pairs")
+    wrt = _element_wrt(device)
+    have = ds.get_element_model_list(device=device, region=region)
+    for k in (0, 1):
+        _R.element_with_derivs(device, region, _ELEM_RTERM_PREFIX[k] + name, exprs[k], wrt)
+        pm = _ELEM_PTERM_PREFIX[k] + name
+        if pairs[k] is not None:
+            ds.element_model(device=device, region=region, name=pm, equation=pairs[k])
+        elif pm in have:
+            ds.delete_element_model(device=device, region=region, name=pm)
+    _rebuild_element_composites(device, region)
+    return _ELEM_RTERM_PREFIX[0] + name
+
+
+def recombination_terms(device: str, region: str) -> dict:
+    """Inventory of the region's additive recombination terms, read back from DEVSIM:
+    {"node": {name: (rate model, pair model | None)}, "edge": {...}, "element": {name: ((rate0,
+    rate1), (pair0, pair1) | None)}}. The base SRH channel USRH is not listed (it is always present
+    and its pair rate is physics_traps.srh_rate_expr(pair=True)). Used by noise_analysis and the
+    composition gate."""
+    nodes = set(ds.get_node_model_list(device=device, region=region))
+    edges = set(ds.get_edge_model_list(device=device, region=region))
+    elems = set()
+    if int(ds.get_dimension(device=device)) > 1:
+        elems = set(ds.get_element_model_list(device=device, region=region))
+
+    def names(models, prefix):
+        return sorted(m[len(prefix):] for m in models if m.startswith(prefix) and ":" not in m)
+
+    out = {"node": {}, "edge": {}, "element": {}}
+    for nm in names(nodes, _RECOMB_TERM_PREFIX):
+        pm = _PAIR_TERM_PREFIX + nm
+        out["node"][nm] = (_RECOMB_TERM_PREFIX + nm, pm if pm in nodes else None)
+    for nm in names(edges, _EDGE_RTERM_PREFIX):
+        pm = _EDGE_PTERM_PREFIX + nm
+        out["edge"][nm] = (_EDGE_RTERM_PREFIX + nm, pm if pm in edges else None)
+    for nm in names(elems, _ELEM_RTERM_PREFIX[0]):
+        pms = tuple(p + nm for p in _ELEM_PTERM_PREFIX)
+        out["element"][nm] = (tuple(p + nm for p in _ELEM_RTERM_PREFIX),
+                              pms if all(p in elems for p in pms) else None)
+    return out
 
 
 def setup_bipolar_region(device: str, region: str, *,
@@ -514,9 +674,18 @@ def setup_bipolar_region(device: str, region: str, *,
                          default 0.0 is the legacy midgap level BIT-identically (exp(0) == 1).
       traps            : optional sequence of physics_traps.TrapLevel -- extra discrete SRH levels,
                          each with its own E_t, lifetimes/cross sections, density and charge type.
-                         Their rates are ADDED to USRH and their trapped charge (acceptor -q N_t f_t,
-                         donor +q N_t (1 - f_t), steady-state SRH occupancy) to Poisson. None/empty
+                         Each level's rate is its own recombination term RTerm_trap<k> (with its noise
+                         pair rate) and the trapped charge (acceptor -q N_t f_t, donor +q N_t (1 - f_t),
+                         steady-state SRH occupancy) the charge term QTerm_bulk_traps; CHARGED levels
+                         also enter the ohmic-contact / seed charge-neutral equilibrium. None/empty
                          (default) leaves every model string exactly as before.
+
+    COMPOSITION (v0.14 integration): every opt-in term -- Auger, radiative, external G (options),
+    the trap levels, interface SRH (physics_traps.install_interface_traps), BTBT (btbt) -- enters
+    through the ONE additive mechanism (add_recombination_term / add_charge_term), so any combination
+    SUMS. Every SRH channel (the built-in one, each TrapLevel, each interface bin) comes from the ONE
+    kernel physics_traps.srh_rate_expr with the region's bandgap-narrowing substitution, and BTBT's
+    Hurkx D uses n_ie when BGN is on.
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
@@ -538,7 +707,12 @@ def setup_bipolar_region(device: str, region: str, *,
     ds.set_parameter(device=device, region=region, name="taup", value=tau_p_s)
     # SRH trap level of the built-in channel: n1 = n_i exp(E/kT), p1 = n_i exp(-E/kT) (D1c traps,
     # 2026-11-03). E = 0 (default) -> n_i * 1.0 == n_i exactly: the legacy midgap values, bit for bit.
-    _n1, _p1 = _PT.n1_p1(srh_trap_energy_eV, n_i_m3)
+    # kT of the region: BipolarOptions.T_K when set (V_T otherwise -- the same float), so a level keeps
+    # its energy at the simulated temperature.
+    _opt = options if (options is not None and options.active) else None
+    _vt = _opt.V_t() if _opt is not None else V_T
+    _bgn = _opt is not None and _opt.bgn is not None
+    _n1, _p1 = _PT.n1_p1(srh_trap_energy_eV, n_i_m3, _vt)
     ds.set_parameter(device=device, region=region, name="n1", value=_n1)  # SRH trap
     ds.set_parameter(device=device, region=region, name="p1", value=_p1)
     # audit C-10: the contact builders are called later and separately, and the ohmic built-in
@@ -603,20 +777,31 @@ def setup_bipolar_region(device: str, region: str, *,
     _edge_with_derivs(device, region, "HoleCurrent", jp,
                       ("Holes", "Potential"))                # Jp has no Electrons dependence
 
+    # --- audit R26/R27 fixed fields (BipolarOptions): T_K -> V_t, n_ie + the BGN band-edge quasi-fields
+    #     in both SG currents, the incomplete-ionization reference fields + IonizedNetDoping. Installed
+    #     BEFORE the recombination models, which reference n_ie. Off -> nothing runs here.
+    if _opt is not None:
+        from dynameta.carriers.bipolar_options import install_option_fields
+        install_option_fields(device, region, _opt, fd_enhancement=fd_enhancement)
+
     # --- SRH recombination: one node model into BOTH continuity equations ---
-    # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py);
-    # extra discrete levels (traps=...) are independent channels ADDED to it (physics_traps).
-    usrh = _PT.srh_rate_expr()
-    trap_charge = None
-    if traps:
-        _rates, trap_charge = _PT.bulk_trap_models(device, region, list(traps), n_i_m3=n_i_m3)
-        usrh = "{} + {}".format(usrh, _rates)
-    _node_with_derivs(device, region, "USRH", usrh, ("Electrons", "Holes"))
+    # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py); with
+    # BGN the SAME kernel applies the n_ie substitution. Extra discrete levels (traps=...) are
+    # independent channels, each its own additive term (physics_traps.install_bulk_traps).
+    _node_with_derivs(device, region, "USRH", _PT.srh_rate_expr(bgn=_bgn), ("Electrons", "Holes"))
     gn, gp = _generation_exprs(())
     _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
     _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
-    if trap_charge is not None:                                # trapped charge -> Poisson
-        add_charge_term(device, region, "bulk_traps", trap_charge)
+    if traps:
+        _PT.install_bulk_traps(device, region, list(traps), n_i_m3=n_i_m3, V_t=_vt, bgn=_bgn)
+
+    # --- audit R26/R27 terms (Auger, radiative, external G) through the same additive mechanism, the
+    #     ionized-dopant Poisson charge, and the charge-neutral equilibrium fields the contacts and
+    #     the seed pin (BGN / ionization / CHARGED trap levels). Off (and no charged trap) -> nothing.
+    _eq_traps = _PT.equilibrium_trap_levels(traps)
+    if _opt is not None or _eq_traps:
+        from dynameta.carriers.bipolar_options import install_option_terms
+        install_option_terms(device, region, _opt, fd_enhancement=fd_enhancement, traps=_eq_traps)
 
     # --- transient / AC charge: the d(q n)/dt time term of each continuity equation. NCharge =
     #     -q n (electron charge density), PCharge = +q p. Defined ALWAYS: a steady-state DC solve
@@ -639,14 +824,9 @@ def setup_bipolar_region(device: str, region: str, *,
                               variable_update="positive")
     if btbt is not None:                                       # D1d: opt-in BTBT generation
         from dynameta.carriers.tunneling import setup_btbt
-        setup_btbt(device, region, btbt)
-
-    # --- audit R26/R27: opt-in Auger / radiative / BGN / incomplete ionization / T / G ----------
-    # Installed LAST so it re-defines (by name) only the models it changes; the equations recorded
-    # above reference models by name and pick the new definitions up. Off -> nothing runs here.
-    if options is not None and options.active:
-        from dynameta.carriers.bipolar_options import install_bipolar_options
-        install_bipolar_options(device, region, options, fd_enhancement=fd_enhancement)
+        # the Hurkx D factor vanishes at equilibrium only with the region's OWN n p product: n_ie^2
+        # under BGN (D1d merge note), n_i^2 otherwise
+        setup_btbt(device, region, btbt, n_i="n_ie" if _bgn else "n_i")
 
 
 # Charge-neutral equilibrium carrier node models (SI). Used both to seed the
