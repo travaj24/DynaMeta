@@ -40,6 +40,43 @@ from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
 C = 299792458.0
 LMIN, LMAX = 1200e-9, 1800e-9
 
+# GATE A convergence-gate constant, PER GEOMETRY (2026-11-03 decision): the worst second-order
+# constant of THIS fixture's own stack (300 nm n = 2 slab, band LMIN-LMAX, res 18, nx = ny = 4) over
+# the 8 sub-cell offsets u = k/8, k = 0..7 (incl. u = 0 and 1/2) of its front face (fdtd_nd.grid.subcell_offset_pads, base
+# n_pad_wave 4) AND over the band: C = max of max(|dR0|,|dT0|,|dR_flux|,|dT_flux|) / X(f)^2 with
+# X = n_max k0(f) dz = 2 pi LMIN f / (res c) (fdtd_nd.grid.second_order_constant). No safety factor.
+# Regenerate: python -m validation.fdtd_3d_reduces --regen-cgeom   (measured 2026-11-03, numpy = the fixture config).
+# Part (a) below is a REGRESSION bound; the physics gate is part (b), the observed order.
+C_GEOM_3D = 0.08735397979210943   # 2026-11-03, u = k/8: 0.087354 0.079760 0.059720 0.035424 0.044972 0.035414 0.059719 0.079699
+
+
+def _gate_a_err(res, n_pad_wave=4.0, nx=4, backend="numpy", z_subcell="average"):
+    """(err(f), X(f), R+T-1 max, 0-order max err, flux max err, result) of the GATE A slab vs Airy."""
+    n, d = 2.0, 300e-9
+    r = solve_fdtd_3d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9, period_y_m=300e-9,
+                      nx=nx, ny=nx, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=res, n_pad_wave=n_pad_wave,
+                      backend=backend, z_subcell=z_subcell)
+    m = r.band
+    Ra, Ta = airy(r.freqs_Hz[m], n, d)
+    e0 = np.maximum(np.abs(r.R0[m] - Ra), np.abs(r.T0[m] - Ta))
+    ef = np.maximum(np.abs(r.R_flux[m] - Ra), np.abs(r.T_flux[m] - Ta))
+    X = 2.0 * np.pi * LMIN * r.freqs_Hz[m] / (res * C)
+    en = float(np.max(np.abs(r.R_flux[m] + r.T_flux[m] - 1.0)))
+    return np.maximum(e0, ef), X, en, float(e0.max()), float(ef.max()), r
+
+
+def regen_c_geom(res=18):
+    """The GATE A constant from the registration sweep of THIS geometry (see C_GEOM_3D)."""
+    from dynameta.optics.fdtd_nd.grid import layer_band_index_max, second_order_constant, subcell_offset_pads
+    L = [FDTDLayer(thickness_m=300e-9, eps_inf=4.0)]
+    n_max = layer_band_index_max(L, 2 * np.pi * np.linspace(C / LMAX, C / LMIN, 9), (1.0, 1.0))
+    dz = LMIN / (res * n_max)
+    cs = []
+    for npw in subcell_offset_pads(dz, LMAX, 8, 4.0):
+        err, X, _en, _a, _b, _r = _gate_a_err(res, npw, nx=4, backend="numpy")   # = the fixture config
+        cs.append(second_order_constant(err, X))
+    return max(cs), cs
+
 
 def airy(f, n, d):
     k0 = 2 * np.pi * np.asarray(f) / C
@@ -55,17 +92,21 @@ def main():
     print("[f3] === 3D full-vector FDTD: reduce-to-TMM, reduce-to-2D, 3D diffraction ===", flush=True)
 
     # GATE A: uniform non-dispersive slab -> Airy/TMM (0-order AND flux), R+T=1. 4x4 lateral = fast.
+    # 2026-11-03: the single-resolution pin (d0, df < 5e-3) is a CONVERGENCE gate against the
+    # true-geometry Airy. (a) REGRESSION bound: at THIS res, per frequency, error <= C_GEOM_3D * X(f)^2
+    # with this geometry's own registration-sweep constant (see C_GEOM_3D). (b) PHYSICS: observed
+    # order >= 1.7 between res 18 and 36, on a cheaper probe of the same engine (nx = ny = 2, numba;
+    # laterally uniform, so nx is irrelevant) -- the 2x-res run of THIS config costs ~16x its ~21 s.
     n, d = 2.0, 300e-9
-    rA = solve_fdtd_3d([FDTDLayer(thickness_m=d, eps_inf=n ** 2)], period_x_m=300e-9, period_y_m=300e-9,
-                       nx=4, ny=4, lambda_min_m=LMIN, lambda_max_m=LMAX, resolution=18)
-    mA = rA.band
-    Ra, Ta = airy(rA.freqs_Hz[mA], n, d)
-    d0 = max(float(np.max(np.abs(rA.R0[mA] - Ra))), float(np.max(np.abs(rA.T0[mA] - Ta))))
-    df = max(float(np.max(np.abs(rA.R_flux[mA] - Ra))), float(np.max(np.abs(rA.T_flux[mA] - Ta))))
-    en = float(np.max(np.abs(rA.R_flux[mA] + rA.T_flux[mA] - 1.0)))
-    gate_a = bool(d0 < 5e-3 and df < 5e-3 and en < 1e-3)
-    print("[f3] A uniform: 0-order max|d-Airy|={:.2e} flux max|d-Airy|={:.2e} max|R+T-1|={:.2e} -> {}".format(
-        d0, df, en, "PASS" if gate_a else "FAIL"), flush=True)
+    err_f, X, en, d0, df, rA = _gate_a_err(18)            # rA: also the GATE G numpy reference
+    ratio_a = float(np.max(err_f / (C_GEOM_3D * X ** 2)))
+    e_lo = float(np.max(_gate_a_err(18, nx=2, backend="numba")[0]))
+    e_hi = float(np.max(_gate_a_err(36, nx=2, backend="numba")[0]))
+    order_a = float(np.log2(e_lo / e_hi))
+    gate_a = bool(ratio_a <= 1.0 and order_a >= 1.7 and en < 1e-3)
+    print("[f3] A uniform: 0-order max|d-Airy|={:.2e} flux max|d-Airy|={:.2e} max|R+T-1|={:.2e}; (a) max "
+          "err/(C X^2)={:.3f} (C_geom={}) ; (b) order {:.2f} ({:.2e} -> {:.2e}, nx=ny=2 probe) -> {}".format(
+              d0, df, en, ratio_a, C_GEOM_3D, order_a, e_lo, e_hi, "PASS" if gate_a else "FAIL"), flush=True)
 
     # GATE B: y-uniform binary grating -> the validated 2D-TE engine (Ey source, d/dy=0 == pure 2D-TE)
     PX = 700e-9
@@ -159,4 +200,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--regen-cgeom" in sys.argv[1:]:
+        c, per = regen_c_geom()
+        print("[f3] C_geom (GATE A, res 18, 8 offsets k/8 x band) = {!r}; per offset {}".format(
+            c, ", ".join("{:.6f}".format(v) for v in per)))
+        raise SystemExit(0)
     raise SystemExit(0 if main() else 1)

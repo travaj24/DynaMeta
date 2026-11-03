@@ -46,7 +46,7 @@ so the same samples give the same (f0, Q) from both; matrix_pencil alone is the 
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -58,6 +58,7 @@ from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
     "Mode",
+    "Drift",
     "matrix_pencil",
     "ringdown_q",
     "EtalonRingdown",
@@ -89,6 +90,39 @@ class Mode:
     def f_hz(self) -> float:
         """Ordinary frequency omega_0 / (2 pi) [Hz]."""
         return self.omega_rad_s / (2.0 * np.pi)
+
+
+@dataclass
+class Drift:
+    """A NON-RESONANT slow term of a fitted trace (2026-11-03): a pencil pole whose frequency is
+    BELOW THE WINDOW'S FREQUENCY RESOLUTION, |omega| < omega_res = 2 pi / (N dt) with N the number
+    of fitted samples -- it completes less than one cycle in the window, so it is a drift / offset,
+    not a resonance. It is kept in every least-squares fit (it must absorb the slow component) but
+    never reported as a Mode, never enters (f0, Q), and is exempt from the growing-pole warning: a
+    slowly GROWING drift (e.g. a first-order Mur wall's unabsorbed static residue in an FDTD trace)
+    is not an amplifying resonance.
+
+    Fields: gamma_rad_s -- the rate in the Mode convention, term ~ exp(-gamma t / 2) (NEGATIVE =
+    growing); omega_rad_s -- its |omega| (< threshold_rad_s; 0 for a real pole); amplitude -- the
+    complex phasor amplitude (the real part for omega = 0); threshold_rad_s -- omega_res of the fit."""
+
+    gamma_rad_s: float
+    omega_rad_s: float
+    amplitude: complex
+    threshold_rad_s: float
+
+
+def _drift_reconstruction(n: int, dt: float, drift: Sequence["Drift"]) -> np.ndarray:
+    """Real reconstruction of drift terms, SIGNED rate (a growing drift grows)."""
+    t = np.arange(int(n)) * float(dt)
+    out = np.zeros(int(n), dtype=np.float64)
+    for d in drift:
+        e = np.exp(-0.5 * d.gamma_rad_s * t)
+        if d.omega_rad_s * dt > _OMEGA_DC_TOL:
+            out += e * (d.amplitude.real * np.cos(d.omega_rad_s * t) + d.amplitude.imag * np.sin(d.omega_rad_s * t))
+        else:
+            out += e * d.amplitude.real
+    return out
 
 
 # |z| in (1, 1 + _GAIN_TOL] is the numerical image of a LOSSLESS pole (gamma = 0), not gain:
@@ -166,7 +200,8 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                   real_signal: Optional[bool] = None,
                   omega_zero_tol: float = 1e-6,
                   allow_gain: bool = False,
-                  max_bytes: Optional[float] = None) -> List[Mode]:
+                  max_bytes: Optional[float] = None,
+                  drift_out: Optional[list] = None) -> List[Mode]:
     """Extract damped-exponential modes from a uniformly sampled trace by the matrix-pencil
     method (Hua & Sarkar 1990).
 
@@ -189,6 +224,11 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                     the `Mode` contract documents gamma > 0, and a growing pole additionally
                     OVERFLOWS the residue Vandermonde at large N (finding Q-9). See the
                     DISCRETE-POLE DOMAIN note below.
+      drift_out   : optional list that RECEIVES the drift terms (Drift objects): poles with
+                    |omega| < omega_res = 2 pi / (N dt) (N = fitted samples), i.e. below the
+                    window's frequency resolution. They stay in the residue fit, are exempt from
+                    the growing-pole warning, and are NEVER returned as Modes (2026-11-03; see
+                    Drift). Pass a list to see them; they are dropped from the output either way.
       max_bytes   : SVD workspace budget [bytes]; None uses `_PENCIL_MAX_BYTES` (2 GB). A trace
                     long enough to exceed it RAISES instead of allocating (audit P-3) -- see the
                     COST note below. `np.inf` disables the guard.
@@ -297,17 +337,23 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     if np.any(marginal):
         z = np.where(marginal, z / np.where(absz > 0.0, absz, 1.0), z)
         absz = np.abs(z)
-    growing = absz > 1.0 + _GAIN_TOL
+    # DRIFT CLASSIFICATION (2026-11-03): a pole with |omega| below the window's frequency
+    # resolution omega_res = 2 pi / (N dt) completes < 1 cycle in the window -- non-resonant drift.
+    # Such poles are exempt from the growing-pole policy (kept in the fit, reported via drift_out).
+    omega_res = 2.0 * np.pi / (N * dt)
+    is_drift = np.abs(np.log(z).imag) / dt < omega_res
+    growing = (absz > 1.0 + _GAIN_TOL) & ~is_drift
     if np.any(growing) and not allow_gain:
         warnings.warn(
             "matrix_pencil: dropped {} GROWING pole(s) (|z| up to {:.6g} > 1, i.e. gamma < 0 and "
             "q < 0), which contradict the documented Mode contract (gamma > 0) and can overflow "
             "the residue Vandermonde on a long trace. Pass allow_gain=True to keep them (an "
             "amplifying medium / an unstable simulation), or shorten the fit window.".format(
-                int(np.count_nonzero(growing)), float(absz.max())),
+                int(np.count_nonzero(growing)), float(absz[growing].max())),
             UnreliableResultWarning, stacklevel=2)
         z = z[~growing]
         absz = absz[~growing]
+        is_drift = is_drift[~growing]
         if z.size == 0:
             return []
     s = np.log(z) / dt                     # continuous poles s_k = -gamma/2 -/+ i omega_0
@@ -337,14 +383,14 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
     resid = y - (recon.real if real_signal else recon)
     res_rms = float(np.sqrt(np.mean(np.abs(resid) ** 2)))
 
-    modes: List[Mode] = []
+    modes = []                                          # (omega, gamma, amp, is_drift)
     if real_signal:
         # Real signal: poles are real (Im s = 0) or exact conjugate pairs. Report each physical
         # mode once by taking the Im(s) < 0 representative (the exp(-i omega_0 t), i.e. positive
         # physical-frequency member) and doubling its residue; report a real pole (omega ~ 0) once.
         w_tol = omega_zero_tol / dt
         w_nyq = np.pi / dt
-        for si, Ri in zip(s, R):
+        for si, Ri, dr in zip(s, R, is_drift):
             omega = -si.imag
             gamma = -2.0 * si.real
             if abs(abs(si.imag) - w_nyq) <= w_tol:      # SELF-CONJUGATE Nyquist pole (finding Q-8)
@@ -360,17 +406,22 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
                 amp = complex(Ri.real, 0.0)
             else:                                       # conjugate partner already counted
                 continue
-            modes.append((omega, gamma, amp))
+            modes.append((omega, gamma, amp, bool(dr)))
     else:
-        for si, Ri in zip(s, R):
-            modes.append((-si.imag, -2.0 * si.real, Ri))
+        for si, Ri, dr in zip(s, R, is_drift):
+            modes.append((-si.imag, -2.0 * si.real, Ri, bool(dr)))
 
     if not modes:
         return []
 
-    amax = max(abs(a) for _, _, a in modes)
+    amax = max(abs(m[2]) for m in modes)
     out: List[Mode] = []
-    for omega, gamma, amp in modes:
+    drift: List[Drift] = []
+    for omega, gamma, amp, dr in modes:
+        if dr:                                          # non-resonant drift: reported separately
+            drift.append(Drift(gamma_rad_s=float(gamma), omega_rad_s=float(abs(omega)),
+                               amplitude=complex(amp), threshold_rad_s=float(omega_res)))
+            continue
         if amax > 0.0 and abs(amp) < amp_floor * amax:
             continue                                    # residual/amplitude prune
         q = float(omega / gamma) if gamma != 0.0 else np.inf
@@ -378,6 +429,9 @@ def matrix_pencil(signal: Sequence[complex], dt: float, *, pencil_frac: float = 
         out.append(Mode(omega_rad_s=float(omega), gamma_rad_s=float(gamma), q=q,
                         amplitude=complex(amp), snr_est=snr))
     out.sort(key=lambda m: abs(m.amplitude), reverse=True)
+    if drift_out is not None:
+        drift.sort(key=lambda d: abs(d.amplitude), reverse=True)
+        drift_out.extend(drift)
     return out
 
 
@@ -435,23 +489,30 @@ _MIN_SAMPLES_PER_PERIOD = 8
 _LEGACY_FIT_SAMPLES = 1200                  # the start_frac (fixed-fraction window) path only
 
 
-def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode]) -> dict:
-    """ABSOLUTE goodness-of-fit of ``modes`` on the windowed trace ``y``: the reconstruction RMS
-    relative to the data's peak-to-peak, and the summed |amplitude| relative to the data's peak.
-    Both are scale-free and neither is a comparison against another (possibly equally bad) fit."""
+def _fit_quality(y: np.ndarray, dt: float, modes: Sequence[Mode], drift: Sequence[Drift] = ()) -> dict:
+    """ABSOLUTE goodness-of-fit of ``modes`` (+ the fit's non-resonant ``drift`` terms, which are
+    part of the model) on the windowed trace ``y``: the reconstruction RMS relative to the data's
+    peak-to-peak, and the summed |amplitude| relative to the data's peak. Both are scale-free and
+    neither is a comparison against another (possibly equally bad) fit."""
     y = np.asarray(y, dtype=np.float64)
     ptp = float(np.ptp(y))
     peak = float(np.max(np.abs(y))) if y.size else 0.0
-    rms = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, modes) - y) ** 2))) if modes \
-        else float(np.sqrt(np.mean(y ** 2)))
-    amp = float(sum(abs(m.amplitude) for m in modes))
+    if modes or drift:
+        rec = _real_reconstruction(y.size, dt, modes)
+        if drift:
+            rec = rec + _drift_reconstruction(y.size, dt, drift)
+        rms = float(np.sqrt(np.mean((rec - y) ** 2)))
+    else:
+        rms = float(np.sqrt(np.mean(y ** 2)))
+    amp = float(sum(abs(m.amplitude) for m in modes)) + float(sum(abs(d.amplitude) for d in drift))
     return {"rms": rms, "ptp": ptp, "peak": peak, "amp_sum": amp,
             "rms_rel": rms / ptp if ptp > 0.0 else float("inf"),
             "amp_rel": amp / peak if peak > 0.0 else float("inf")}
 
 
 def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
-                     max_refine: int = 6) -> tuple:
+                     max_refine: int = 6, fixed_extra: Sequence[Drift] = (),
+                     fixed_out: Optional[list] = None) -> tuple:
     """VARPRO refinement of pencil modes on a REAL trace: hold the mode COUNT fixed, optimize
     the nonlinear parameters (omega_k, gamma_k) by least squares with the linear (cos/sin)
     amplitudes solved exactly at each step. The pencil poles come out of an SVD subspace whose
@@ -531,6 +592,18 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
         else:
             fixed_cols.append(e)                        # pure decay / DC-drift column
             fixed_map.append((i, 1))
+    # 2026-11-03: the pencil's non-resonant DRIFT terms (``fixed_extra``) are part of the model:
+    # FIXED columns (SIGNED rate -- a growing drift grows), amplitudes re-solved, never refined and
+    # never returned as modes (re-solved copies go to ``fixed_out``). Empty -> bit-identical.
+    for dft in fixed_extra:
+        e = np.exp(-0.5 * dft.gamma_rad_s * t)
+        if dft.omega_rad_s * dt > _OMEGA_DC_TOL:
+            fixed_cols.append(e * np.cos(dft.omega_rad_s * t))
+            fixed_cols.append(e * np.sin(dft.omega_rad_s * t))
+            fixed_map.append((dft, 2))
+        else:
+            fixed_cols.append(e)
+            fixed_map.append((dft, 1))
     F = (np.column_stack(fixed_cols) if fixed_cols
          else np.empty((y.size, 0), dtype=np.float64))
 
@@ -575,7 +648,10 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
             return seed, "refit left the seed omega basin (mode {}): seed kept".format(ref_idx[k])
 
     # --- the cross-cutting safety gate: never accept a refit worse than its own seed -------
-    rms_seed = float(np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed) - y) ** 2)))
+    rec_seed = _real_reconstruction(y.size, dt, seed)
+    if fixed_extra:
+        rec_seed = rec_seed + _drift_reconstruction(y.size, dt, fixed_extra)
+    rms_seed = float(np.sqrt(np.mean((rec_seed - y) ** 2)))
     if not np.isfinite(rms) or rms > rms_seed:
         return seed, ("refined RMS {:.6e} > seed RMS {:.6e}: seed kept".format(rms, rms_seed))
 
@@ -589,9 +665,14 @@ def _nls_refine_real(y: np.ndarray, dt: float, modes: List[Mode], *,
                         snr_est=float(abs(amp) / denom)))
     j = 2 * K
     for i, ncol in fixed_map:                           # seed (omega, gamma), re-solved amplitude
-        m = seed[i]
         amp = complex(c[j], c[j + 1]) if ncol == 2 else complex(c[j], 0.0)
         j += ncol
+        if isinstance(i, Drift):                        # a drift column: never a mode
+            if fixed_out is not None:
+                fixed_out.append(Drift(gamma_rad_s=i.gamma_rad_s, omega_rad_s=i.omega_rad_s,
+                                       amplitude=amp, threshold_rad_s=i.threshold_rad_s))
+            continue
+        m = seed[i]
         out.append(Mode(omega_rad_s=m.omega_rad_s, gamma_rad_s=m.gamma_rad_s, q=m.q,
                         amplitude=amp, snr_est=float(abs(amp) / denom)))
     out.sort(key=lambda m: abs(m.amplitude), reverse=True)
@@ -604,9 +685,10 @@ def _pencil_modes(signal, dt: float, *, refine: bool, max_refine: int, **pencil_
     _nls_refine_real on the same samples the pencil fitted (after its ``t_start`` cut). Returns
     ``(modes, note)``; ``note`` as in _nls_refine_real ('' when the refinement was accepted).
     A COMPLEX trace has no real-trace refinement, so it returns the pencil modes with a note."""
-    modes = matrix_pencil(signal, dt, **pencil_kw)
+    drift: List[Drift] = []
+    modes = matrix_pencil(signal, dt, drift_out=drift, **pencil_kw)
     if not (refine and modes):
-        return modes, ""
+        return modes, "", drift
     y = np.asarray(signal)
     dt = float(dt)
     t_start = float(pencil_kw.get("t_start", 0.0))
@@ -617,8 +699,11 @@ def _pencil_modes(signal, dt: float, *, refine: bool, max_refine: int, **pencil_
         real_signal = not (np.iscomplexobj(y) and
                            np.max(np.abs(y.imag)) > 1e-12 * (np.max(np.abs(y)) + 1e-300))
     if not real_signal:
-        return modes, "complex trace: refinement not applicable, pencil modes returned"
-    return _nls_refine_real(np.real(y), dt, modes, max_refine=max_refine)
+        return modes, "complex trace: refinement not applicable, pencil modes returned", drift
+    drift_ref: List[Drift] = []
+    out, note = _nls_refine_real(np.real(y), dt, modes, max_refine=max_refine, fixed_extra=drift,
+                                 fixed_out=drift_ref)
+    return out, note, (drift_ref if drift_ref else drift)
 
 
 def ringdown_q(signal: Sequence[complex], dt: float, *, refine: bool = True,
@@ -638,9 +723,11 @@ def ringdown_q(signal: Sequence[complex], dt: float, *, refine: bool = True,
     Inherits :func:`matrix_pencil`'s O(N^3)/O(N^2) cost in the RAW trace length and its
     ``max_bytes`` big-N guard (audit P-3): a multi-thousand-sample FDTD trace should be decimated
     (or handed to :func:`fdtd_etalon_ringdown`, which decimates for you) before it gets here."""
-    modes, _ = _pencil_modes(signal, dt, refine=refine, max_refine=max_refine, **kwargs)
+    modes, _, drift = _pencil_modes(signal, dt, refine=refine, max_refine=max_refine, **kwargs)
     if not modes:
-        raise ValueError("matrix_pencil found no modes in the trace")
+        raise ValueError("matrix_pencil found no modes in the trace" + (
+            " (only {} non-resonant drift term(s) below the window's frequency resolution)".format(
+                len(drift)) if drift else ""))
     m = modes[0]                                        # already sorted dominant-first
     return m.f_hz, m.q
 
@@ -806,6 +893,7 @@ class EtalonRingdown:
     signal_used: np.ndarray
     refine_note: str = ""
     window: tuple = (0, 0)
+    drift: list = field(default_factory=list)       # non-resonant drift terms (Drift), 2026-11-03
 
 
 def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: float,
@@ -956,7 +1044,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     # build at marginal model orders (two correct BLAS stacks straddled a 12% gate on the same
     # trace); the refined optimum is a property of the data and platform-stable. Pencil +
     # refinement go through _pencil_modes, the SAME path ringdown_q uses (audit Q-22).
-    modes, note = _pencil_modes(tail_d, dt_d, refine=refine, max_refine=max_refine,
+    modes, note, drift = _pencil_modes(tail_d, dt_d, refine=refine, max_refine=max_refine,
                                 pencil_frac=pencil_frac, svd_tol=svd_tol, max_modes=max_modes,
                                 amp_floor=amp_floor, real_signal=True)
     t_used = np.arange(tail_d.size) * dt_d
@@ -968,7 +1056,7 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
     # ---- ABSOLUTE fit-quality tells (fix-verify W1 kill 2) ---------------------------------
     # _nls_refine_real only compares the refit against its own seed, so a window that is still
     # inside the driven pulse produced garbage from BOTH and reported refine_note = '' silently.
-    qual = _fit_quality(tail_d, dt_d, modes)
+    qual = _fit_quality(tail_d, dt_d, modes, drift)
     bad = []
     if not np.isfinite(qual["rms_rel"]) or qual["rms_rel"] > _FIT_RESID_TOL:
         bad.append("reconstruction RMS is {:.3e} of the window's peak-to-peak (limit {:.1e})"
@@ -1019,4 +1107,4 @@ def fdtd_etalon_ringdown(n_slab: float, thickness_m: float, *, lambda_min_m: flo
 
     return EtalonRingdown(modes=modes, f0_Hz=f0, q=q, dt_used=dt_d,
                           t_used=t_used, signal_used=tail_d, refine_note=note,
-                          window=(int(i0), int(i1)))
+                          window=(int(i0), int(i1)), drift=list(drift))

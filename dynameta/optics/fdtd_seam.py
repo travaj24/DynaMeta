@@ -57,6 +57,8 @@ from dynameta.core.eps_field import require_solver_time_convention as _require_e
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.fdtd import FDTDLayer
 from dynameta.optics.fdtd_nd import solve_fdtd_2d, solve_fdtd_3d
+from dynameta.optics.fdtd_nd.grid import (check_z_subcell, layer_masks, mix_profile, pad_masks,
+                                          z_fill_fractions)
 from dynameta.optics.rasterize import cell_axes, layer_bg_eps, layer_eps_cell
 from dynameta.geometry.guards import require_supported_geometry
 
@@ -410,7 +412,8 @@ def design_has_inclusions(design):
     return any(getattr(L, "inclusions", None) for L in design.stack.layers)
 
 
-def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0):
+def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0,
+                            z_subcell="average"):
     """For a laterally-STRUCTURED design, return (layers_for_grid, lateral_fn): `layers_for_grid` are the
     superstrate-first FDTDLayers (eps_inf = the layer's MAX real eps, for grid sizing / z-placement; no
     Drude -> the lateral path is lossless), and `lateral_fn(nx,ny,nz,zc,pad,zs)` paints the real
@@ -421,6 +424,7 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
     from z=pad superstrate-first, matching solve_fdtd_3d. The lateral grid carries REAL eps only -> a lossy
     inclusion raises."""
     require_supported_geometry(design, "make_structured_lateral (FDTD)")   # 2026-11-02: Stack.features / Inclusion.taper
+    z_subcell = check_z_subcell("make_structured_lateral", z_subcell)       # must match the solver's
     mats = design.materials
     layers_sf = list(reversed(design.stack.layers))         # incidence order: superstrate side first
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
@@ -437,20 +441,33 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
         xs, ys = _cell_axes(nx, ny, px, py)
         X, Y = np.meshgrid(xs, ys, indexing="ij")           # (nx,ny)
         eps = np.ones((nx, ny, nz))
-        eps[:, :, zc < pad] = ns2                           # superstrate semi-infinite pad (n_super^2)
-        eps[:, :, zc >= pad + z_struct] = nb2               # substrate semi-infinite pad (n_sub^2)
-        z = pad
+        # `zc` = the z positions the solver registers materials at -- the Yee E-NODES k*dz since
+        # 2026-11-02 (audit S2-14 siblings; were the cell centres). The z slabs use the solver's OWN
+        # shared masks (fdtd_nd.grid), so the painted layers sit exactly where solve_fdtd_3d's
+        # laterally-uniform fill would put them; the LATERAL raster (layer_eps_cell) is unchanged.
+        cells = []
         for L in layers_sf:
-            zmask = (zc >= z) & (zc < z + L.thickness_m)
             cell = _layer_eps_cell(L, X, Y, lambda_m, mats, eps_by_region, period_x_m=px,
                                    period_y_m=py)    # periodic wrap (rasterize.layer_eps_cell)
             if np.max(np.abs(cell.imag)) > 1e-6 * (np.max(np.abs(cell.real)) + 1.0):
                 raise NotImplementedError(
                     "structured FDTD layer '{}' has lossy eps (Im != 0); the lateral grid carries real "
                     "eps_inf only -> use FEM/RCWA for lossy structured cells.".format(L.name))
-            eps[:, :, zmask] = cell.real[:, :, None]
-            z += L.thickness_m
-        return eps
+            cells.append(cell.real)
+        if z_subcell == "point":                            # opt-out: the 2b7a002 point rule
+            lo, hi = pad_masks(zc, pad, z_struct)
+            eps[:, :, lo] = ns2                             # superstrate semi-infinite pad (n_super^2)
+            eps[:, :, hi] = nb2                             # substrate semi-infinite pad (n_sub^2)
+            for cell, (L, zmask) in zip(cells, layer_masks(zc, pad, layers_sf)):
+                eps[:, :, zmask] = cell[:, :, None]
+            return eps
+        # z-SUBCELL AVERAGING (default, 2026-11-02): each z node is the fill-fraction (arithmetic,
+        # tangential-channel) mix of the slab rasters its control volume overlaps -- the solver's own
+        # shared rule (fdtd_nd.grid.mix_profile). The LATERAL inclusion edges stay point-rastered.
+        dz = float(zc[1] - zc[0])
+        full = lambda v: np.full((nx, ny), float(v))
+        return mix_profile(z_fill_fractions(zc, pad, layers_sf, dz=dz),
+                           {"eps": [full(ns2)] + cells + [full(nb2)]})["eps"]
 
     return layers_for_grid, lateral_fn
 
@@ -470,7 +487,7 @@ def make_structured_lateral(design, lambda_m, *, eps_by_region=None, n_super=1.0
 # recorded here so a caller comparing the two paths pins it.
 def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str = "auto",
                              courant: float = 0.5, settle: float = 12.0, n_pad_wave: float = 4.0,
-                             band_frac: float = 0.06):
+                             band_frac: float = 0.06, z_subcell: str = "average"):
     """Build an `optical_solver` callable wrapping the 2D (dim=2) or 3D (dim=3) FDTD, for
     run_pipeline(optical_solver=make_fdtd_optical_solver(...)). Each (bias, wavelength) call freezes the
     materials at lambda_m, runs a narrow-band FDTD around lambda_m, and returns the 0-order R/T/phase at
@@ -499,12 +516,13 @@ def make_fdtd_optical_solver(*, dim: int = 2, resolution: int = 32, backend: str
         lo, hi = lambda_m * (1.0 - band_frac), lambda_m * (1.0 + band_frac)
         kw = dict(lambda_min_m=lo, lambda_max_m=hi, resolution=resolution, courant=courant,
                   settle=settle, n_pad_wave=n_pad_wave, backend=backend,
-                  n_super=ns.real, n_sub=nb.real)
+                  n_super=ns.real, n_sub=nb.real, z_subcell=z_subcell)
         px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
         t_start = time.time()
         if structured:
             layers, lateral_fn = make_structured_lateral(design, lambda_m, eps_by_region=eps_by_region,
-                                                         n_super=ns.real, n_sub=nb.real)
+                                                         n_super=ns.real, n_sub=nb.real,
+                                                         z_subcell=z_subcell)
             res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
         elif dim == 2:
             res = solve_fdtd_2d(design_to_fdtd_layers(design, lambda_m, eps_by_region=eps_by_region),
@@ -554,7 +572,8 @@ class FDTDSweepResult:
 
 def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=None, dim=2,
                         resolution=32, backend="auto", courant=0.5, settle=12.0, n_pad_wave=4.0,
-                        n_super=1.0 + 0j, n_sub=1.0 + 0j, dispersive=True, eps_band_by_region=None, n_fit=7):
+                        n_super=1.0 + 0j, n_sub=1.0 + 0j, dispersive=True, eps_band_by_region=None, n_fit=7,
+                        z_subcell="average"):
     """ONE broadband FDTD over [lambda_min_m, lambda_max_m] -> the WHOLE R/T spectrum, vs the per-wavelength
     OpticalSolver seam (make_fdtd_optical_solver) which re-solves each wavelength. This is FDTD's native
     strength: one solve serves the whole sweep -- the fast path for a wavelength sweep at a fixed bias
@@ -582,7 +601,7 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
     px, py = design.unit_cell.period_x_m, design.unit_cell.period_y_m
     kw = dict(lambda_min_m=lambda_min_m, lambda_max_m=lambda_max_m, resolution=resolution,
               courant=courant, settle=settle, n_pad_wave=n_pad_wave, backend=backend,
-              n_super=ns.real, n_sub=nb.real)
+              n_super=ns.real, n_sub=nb.real, z_subcell=z_subcell)
     structured = design_has_inclusions(design)
     _guard_optical_spec(design, structured=structured)       # audit C5-7
     if structured and dim != 3:
@@ -592,7 +611,7 @@ def fdtd_sweep_spectrum(design, *, lambda_min_m, lambda_max_m, eps_by_region=Non
         # audit S5-20: the end-media pads are painted (n_super^2 / n_sub^2), exactly as the
         # per-wavelength path does -- the former non-vacuum refusal here is gone
         layers, lateral_fn = make_structured_lateral(design, lam_c, eps_by_region=eps_by_region,
-                                                     n_super=ns.real, n_sub=nb.real)
+                                                     n_super=ns.real, n_sub=nb.real, z_subcell=z_subcell)
         res = solve_fdtd_3d(layers, period_x_m=px, period_y_m=py, lateral_eps_inf=lateral_fn, **kw)
     else:
         if dispersive:                                      # fit one Drude pole per layer across the band

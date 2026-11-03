@@ -237,7 +237,9 @@ def test_lateral_tensor_uniform_equals_layer_fill():
                 cyclotron_wc_rad_s=0.0)
     kw = dict(period_x_m=300e-9, period_y_m=300e-9, lambda_min_m=LMIN, lambda_max_m=LMAX,
               resolution=10, nx=4, ny=4, pol="y")
-    ref = solve_fdtd_3d_mo([L], **kw)
+    # z_subcell='point': this painter POINT-samples its z band, so it reproduces the point layer fill
+    # (the default z-subcell-averaged fill differs at the two face nodes by construction, 2026-11-02)
+    ref = solve_fdtd_3d_mo([L], z_subcell="point", **kw)
 
     def uniform(nx, ny, nz, zc, pad, z_struct):
         band = ((zc >= pad) & (zc < pad + z_struct))[None, None, :]
@@ -309,9 +311,11 @@ def test_s2_14_mo_registers_materials_where_E_lives_and_is_the_unbiased_one():
     bias of 2 k0 (dz/2) = k0*dz. Measured here over 9 pad offsets (frac(pad/dz) 0..0.9, res 30):
     node mean dphi_r = +0.005 rad, (k + 1/2) mean = -0.100 rad, k0*dz = 0.090. |R|, |T| cannot
     tell them apart (a rigid translation; both carry the same thickness-rounding spread).
-    VERDICT: fdtd_mo is RIGHT and is kept; the siblings carry the -k0*dz r0-phase bias their
-    validation absorbs (validation/fdtd_seam_vs_tmm.py GATE 3: 15 deg, 'the half-cell limit').
-    This gate fails if fdtd_mo is "unified" onto the biased registration."""
+    VERDICT: fdtd_mo is RIGHT and is kept; the siblings carried the -k0*dz r0-phase bias their
+    validation absorbed (validation/fdtd_seam_vs_tmm.py GATE 3: 15 deg, 'the half-cell limit').
+    FOLLOW-UP DONE 2026-11-02: every sibling now registers at the nodes through the shared
+    fdtd_nd.grid.material_z / layer_masks (tests/test_fdtd_registration.py, GATE 3b of that
+    validation). This gate fails if fdtd_mo is "unified" onto the biased registration."""
     pytest.importorskip("numba")
     import tmm
     from dynameta.constants import C_LIGHT
@@ -353,7 +357,8 @@ def test_s2_14_mo_registers_materials_where_E_lives_and_is_the_unbiased_one():
             dT[off].append(abs(tt) ** 2 - ref["T"])
         if npw == 3.0:                                # the public solve uses exactly the node rule
             res_pub = fm.solve_fdtd_mo_1d([layer], lambda_min_m=L1, lambda_max_m=L2, resolution=res,
-                                          n_pad_wave=npw, settle=14.0, backend="numba")
+                                          n_pad_wave=npw, settle=14.0, backend="numba",
+                                          z_subcell="point")   # the node POINT rule this gate is about
             fi = C_LIGHT / lam0
             r_pub = complex(np.interp(fi, res_pub.freqs_Hz, res_pub.r_co.real),
                             np.interp(fi, res_pub.freqs_Hz, res_pub.r_co.imag))
