@@ -30,6 +30,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
 from dynameta.materials import (Material, MaterialRegistry, DrudeOptical, ConstantOptical,
                                  TransportModel, M_E)
@@ -47,7 +48,7 @@ COMMON = dict(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, oxide
 
 
 def _zprofile(dev, region, zg):
-    import devsim as ds
+    ds = import_devsim()
     z = np.asarray(ds.get_node_model_values(device=dev, region=region, name="z"))
     n = np.asarray(ds.get_node_model_values(device=dev, region=region, name="Electrons"))
     return z, n
@@ -62,7 +63,7 @@ def _collapse(z, n, zg):
 
 
 def _gate_a():
-    import devsim as ds
+    ds = import_devsim()
     zg = np.linspace(0.0, TSEMI, 60)
     # single 16 nm semiconductor
     s1 = Devsim3DEquilibrium(Stacked3DSpec(semi_thk_m=TSEMI, **COMMON),
@@ -143,7 +144,7 @@ def _gate_b():
 
 
 def _gate_c():
-    import devsim as ds
+    ds = import_devsim()
     n_lo = 4.0e25
     spec = Stacked3DSpec(semi_thk_m=12e-9, extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, n_lo)],
                          **{**COMMON, "lateral_m": 4e-9, "oxide_thk_m": 4e-9, "grid_n": (3, 3, 17),

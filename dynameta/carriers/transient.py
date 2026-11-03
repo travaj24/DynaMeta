@@ -64,7 +64,9 @@ two classes be told apart here rather than guessed at.
 from __future__ import annotations
 
 import numpy as np
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 
 _FLOOR_MSG = (

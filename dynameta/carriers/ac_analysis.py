@@ -24,7 +24,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 from dynameta.carriers import eq_registry as _R
 

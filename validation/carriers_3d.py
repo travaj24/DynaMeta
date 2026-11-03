@@ -17,8 +17,10 @@ Run:  python -m validation.carriers_3d
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
+
+ds = import_devsim()
 import gmsh
-import devsim as ds
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers.physics_equilibrium import M_E, EPS0, Q_E
 
