@@ -23,11 +23,19 @@ import numpy as np
 import pytest
 
 devsim = pytest.importorskip("devsim")
-V = pytest.importorskip("validation.devsim_noise")
+# NOT importorskip: on code without noise_analysis the fixture module's ImportError must FAIL every
+# gate (importorskip would turn it into a silent skip).
+try:
+    import validation.devsim_noise as V
+    _IMPORT_ERROR = None
+except ImportError as _e:                                     # pragma: no cover - old code only
+    V, _IMPORT_ERROR = None, _e
 
 
 @pytest.fixture(autouse=True)
 def _clean():
+    if _IMPORT_ERROR is not None:
+        pytest.fail("noise_analysis unavailable: {!r}".format(_IMPORT_ERROR))
     V.fresh()
     V.set_bias._v = {}
     yield
@@ -141,6 +149,8 @@ def test_fdt_with_auger_radiative_bgn_options(monkeypatch):
 
 @pytest.fixture(scope="module")
 def shot_rows():
+    if _IMPORT_ERROR is not None:
+        pytest.fail("noise_analysis unavailable: {!r}".format(_IMPORT_ERROR))
     V.fresh()
     V.set_bias._v = {}
     try:
