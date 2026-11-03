@@ -27,7 +27,7 @@ DEVSIM's 128-bit model evaluation and equation assembly, and solves it with DEVS
 | `dynameta/carriers/devsim_3d.py` | `Stacked3DSpec.extended_precision` (default False), `from_design(..., extended_precision=False)`; `enable` at build; the equilibrium `ds.solve` routed through `XP.solve` |
 | `dynameta/carriers/dc_solve.py`, `ac_analysis.py`, `transient.py`, `noise_analysis.py` | `ds.solve` swapped for `XP.solve` (7 sites) |
 | `validation/extended_precision.py` (new) | oracles, 1-D builders, gates A-D, `--hashes` (cross-commit fingerprint), `--cost` |
-| `tests/test_extended_precision.py` (new) | 15 tests + 1 strict xfail, 74 s at `-n 2` |
+| `tests/test_extended_precision.py` (new) | 19 tests + 1 strict xfail, ~80 s at `-n 2` (with the dt-floor file) |
 
 ## Mechanism (DEVSIM documentation and source)
 
@@ -214,6 +214,19 @@ Three things are established about this floor:
 The low-frequency conductance that IS resolved is the DC `dI/dV`. It matches G0 to 1e-6 in either
 precision once the DC solve converges.
 
+**Guidance (coordinator decision).** This is now written in the `ac_analysis` and `noise_analysis`
+module docstrings. The D2a noise gates are unchanged.
+- For the low-frequency (f -> 0) conductance, use the DC `dI/dV`: a +-0.1 mV central difference of
+  solved DC terminal currents.
+- Put the AC or noise drive on the LIGHTLY doped contact. Its floor is about 3 decades lower than
+  driving the p+ end.
+
+**Warning.** On an opted-in device, an `ac` or `noise` solve through `XP.solve` raises an
+`AdvisoryWarning` that says the above.
+- It fires once per call site per process, under the default warnings filter.
+- It does not fire for DC or transient solves, or on default devices.
+- This is gated by `tests/test_extended_precision.py::test_small_signal_warning_*`.
+
 ### Default-off fingerprint (gate C)
 
 The fingerprint is a sha256 (first 16 hex digits) of every solved array, from
@@ -243,8 +256,9 @@ These files were run at `-n 2`, not slow: `test_dc_solve_gummel`, `test_devsim_n
   real devsim, bypassing it.
 - **Fix.** `XP.solve(ds_module, ...)` takes the caller's module, and `transient.py` passes its own
   `ds`. A stand-in without `get_device_list` takes the default path.
-- **Result.** That file now passes 6/6, and `tests/test_extended_precision.py` passes 15/15 plus
-  1 strict xfail (73 s).
+- **Result.** That file now passes 6/6, and `tests/test_extended_precision.py` passes 19/19 plus
+  1 strict xfail. With `test_transient_dt_floor` the run is 25 passed + 1 xfailed in 80 s. The D2a noise
+  gates (`test_devsim_noise.py`) are unchanged: 19/19 in 32 s.
 
 ## Cost (box A, DEVSIM 2.11.2, UMFPACK 5.1, OpenBLAS)
 
@@ -294,12 +308,11 @@ can hold.
 
 ## Open questions (user decisions)
 
-1. **The ssac and noise floor.** Should D2a's FDT gate (and users) be steered to the DC `dI/dV` for
-   the f -> 0 conductance, and to driving the lightly doped contact? Both are cheaper and more
-   effective than extended precision.
-2. **Builder-level ssac/noise with extended on.** These run, but carry the floor above. Warn when
-   `extended_precision=True` meets ssac, or leave it documented only?
-3. **Expose on `Design`/`TransportModel`?** Today the switch lives on the builders and the 3-D spec
+1. **The ssac and noise floor. DECIDED: document it.** Use the DC `dI/dV` and drive the lightly doped
+   contact. This is in the docstrings and above; the D2a gates are not changed.
+2. **ssac/noise with extended on. DECIDED: warn.** An `AdvisoryWarning` is raised on `ac` and
+   `noise` solves of opted-in devices, and gated.
+3. **Expose on `Design`/`TransportModel`? DEFERRED** (the coordinator will ask the user). Today the switch lives on the builders and the 3-D spec
    only. `run_pipeline` users cannot reach it without constructing the builder.
 
 ## Merge notes for the integrator
@@ -329,5 +342,6 @@ can hold.
 - **Cost.** 6.3x per Newton iteration in 1-D; 19-22x on the 2-D layered metasurface (76k nodes),
   with the same iteration counts.
 - **Known limit: ssac and noise are not fixed by extended precision.** DEVSIM solves the AC system
-  in double. Re Y(1 Hz) of a p+n diode goes from -0.27 to -0.073 S/m^2 against a true 2.6e-5. Use
-  the DC dI/dV for the f -> 0 conductance.
+  in double. Re Y(1 Hz) of a p+n diode goes from -0.27 to -0.073 S/m^2 against a true 2.6e-5.
+  - An `AdvisoryWarning` says so on opted-in devices.
+  - Use the DC dI/dV for the f -> 0 conductance, and drive the lightly doped contact.
