@@ -49,6 +49,9 @@ STACK = [(2.2 ** 2, 250e-9), (1.5 ** 2, 180e-9), (2.2 ** 2, 250e-9)]
 #   python -m validation.fdtd_sweep_vs_tmm --regen-cgeom        (measured 2026-11-03)
 # Part (a) is a REGRESSION bound; the physics gate is part (b), the observed order.
 C_GEOM_SWEEP = 0.21488435744194653  # 2026-11-03, u = k/8: 0.214884 0.197138 0.157715 0.101686 0.079942 0.138427 0.185522 0.211053
+# The fixture IS the u = 0 member of its own sweep, so (a) sits at ratio 1 by construction; allow
+# cross-platform floating-point round-off only (a physics regression moves the ratio by percent).
+FP_ROUNDOFF = 1e-6
 
 
 def _sweep_err(d, n_pad_wave=4.0, z_subcell="average"):
@@ -122,7 +125,7 @@ def main():
     # point rule (b) FAILS here (the staircase does not converge on this near-AR stack: see the doc).
     ratio_a = float(np.max(err_a / (C_GEOM_SWEEP * X_a ** 2)))
     order_1, ep = _probe_order(d)
-    gate1 = bool(ratio_a <= 1.0 and order_1 >= 1.7 and en < 6e-3)
+    gate1 = bool(ratio_a <= 1.0 + FP_ROUNDOFF and order_1 >= 1.7 and en < 6e-3)
     print("[fw] 1 spectrum vs TMM ({} wavelengths): max|dR|={:.2e} max|dT|={:.2e} max|R+T-1|={:.2e}; (a) max "
           "err/(C X^2)={:.3f} (C_geom={}) ; (b) order {:.2f} ({:.2e} -> {:.2e}, nx=2 probe) -> {}".format(
               targets.size, dR, dT, en, ratio_a, C_GEOM_SWEEP, order_1, ep[0], ep[1], "PASS" if gate1 else "FAIL"),
