@@ -94,6 +94,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_einstein, g_expr_devsim
+from dynameta.carriers import physics_traps as _PT
 from dynameta.warning_types import UnreliableResultWarning
 
 if TYPE_CHECKING:                                              # pragma: no cover - typing only
@@ -401,6 +402,80 @@ def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:
     return g_expr_devsim(var, dos, s)
 
 
+# --- additive extension terms (D1c traps, 2026-11-03) ----------------------------------------------
+# Extra space charge and extra recombination enter the bipolar region through NAMED node models:
+#   QTerm_<name> : a net positive charge DENSITY in units of +q [m^-3] (trapped charge, a sheet charge
+#                  weighted onto interface nodes, ...) -> PotentialNodeCharge = -q (p - n + N + sum QTerm)
+#   RTerm_<name> : a net recombination RATE [m^-3 s^-1] (surface SRH weighted onto interface nodes, a
+#                  generation term as a negative rate, ...) -> ElectronGeneration = -q (USRH + sum RTerm)
+# The composite models are REBUILT from whatever terms the region carries (sorted names, so the order
+# is deterministic), and the equations -- which reference the composites by name -- are untouched.
+# The term list is read back from DEVSIM's own model list, so it lives and dies with the device (no
+# module-level state to go stale across delete_device / re-create). With NO terms both composites
+# are the legacy strings character-for-character.
+_CHARGE_TERM_PREFIX = "QTerm_"
+_RECOMB_TERM_PREFIX = "RTerm_"
+
+
+def _poisson_charge_expr(terms) -> str:
+    """Bipolar Poisson node charge -q (p - n + NetDoping [+ sum of QTerm_* models])."""
+    base = "kahan3(Holes, -Electrons, NetDoping)"
+    if not terms:
+        return "-ElectronCharge * " + base                      # legacy string, unchanged
+    return "-ElectronCharge * ({} + {})".format(base, " + ".join(terms))
+
+
+def _generation_exprs(terms) -> "tuple[str, str]":
+    """(ElectronGeneration, HoleGeneration) = (-q R, +q R), R = USRH [+ sum of RTerm_* models]."""
+    if not terms:
+        return "-ElectronCharge * USRH", "+ElectronCharge * USRH"   # legacy strings, unchanged
+    r = "(USRH + {})".format(" + ".join(terms))
+    return "-ElectronCharge * " + r, "+ElectronCharge * " + r
+
+
+def _region_terms(device: str, region: str, prefix: str) -> list:
+    return sorted(m for m in ds.get_node_model_list(device=device, region=region)
+                  if m.startswith(prefix) and ":" not in m)
+
+
+def _term_with_derivs(device: str, region: str, model: str, expr: str, derivs) -> None:
+    """A term model + its Electrons/Holes derivatives: DEVSIM's simplify(diff()) by default, or the
+    caller's closed forms `derivs` = {"Electrons": ..., "Holes": ...} (a long sum -- e.g. ~45 interface
+    trap bins -- takes DEVSIM ~25 s to differentiate symbolically, the closed forms well under 1 s)."""
+    if derivs is None:
+        _node_with_derivs(device, region, model, expr, ("Electrons", "Holes"))
+        return
+    ds.node_model(device=device, region=region, name=model, equation=expr)
+    for w in ("Electrons", "Holes"):
+        ds.node_model(device=device, region=region, name="{}:{}".format(model, w), equation=derivs[w])
+
+
+def add_charge_term(device: str, region: str, name: str, expr: str, *, derivs=None) -> str:
+    """Add a net positive space-charge density `expr` [m^-3, units of +q; a DEVSIM node expression in
+    Electrons/Holes and parameters] to a bipolar region's Poisson equation, as node model
+    QTerm_<name> (+ its Electrons/Holes derivatives), and rebuild PotentialNodeCharge. Re-adding the
+    same name REPLACES that term. `derivs` optionally supplies closed-form Electrons/Holes derivatives
+    (see _term_with_derivs). Returns the model name."""
+    model = _CHARGE_TERM_PREFIX + name
+    _term_with_derivs(device, region, model, expr, derivs)
+    pne = _poisson_charge_expr(_region_terms(device, region, _CHARGE_TERM_PREFIX))
+    _node_with_derivs(device, region, "PotentialNodeCharge", pne, ("Electrons", "Holes"))
+    return model
+
+
+def add_recombination_term(device: str, region: str, name: str, expr: str, *, derivs=None) -> str:
+    """Add a net recombination rate `expr` [m^-3 s^-1] (negative = generation) to BOTH continuity
+    equations of a bipolar region, as node model RTerm_<name> (+ derivatives), and rebuild
+    ElectronGeneration/HoleGeneration. Re-adding the same name REPLACES that term. `derivs` as in
+    add_charge_term. Returns the name."""
+    model = _RECOMB_TERM_PREFIX + name
+    _term_with_derivs(device, region, model, expr, derivs)
+    gn, gp = _generation_exprs(_region_terms(device, region, _RECOMB_TERM_PREFIX))
+    _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
+    _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
+    return model
+
+
 def setup_bipolar_region(device: str, region: str, *,
                          eps_static: float, n_dos_m3: float, n_i_m3: float,
                          mobility_n_m2Vs: float, mobility_p_m2Vs: float,
@@ -408,7 +483,9 @@ def setup_bipolar_region(device: str, region: str, *,
                          fd_enhancement: bool = True,
                          n_dos_p_m3: "float | None" = None,
                          options: "BipolarOptions | None" = None,
-                         btbt=None) -> None:
+                         btbt=None,
+                         srh_trap_energy_eV: float = 0.0,
+                         traps=None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
@@ -432,6 +509,14 @@ def setup_bipolar_region(device: str, region: str, *,
                          exactly the legacy ones) or a carriers.tunneling.BTBTParams: adds the local
                          Kane/Hurkx BTBT net-recombination term to both continuity equations, coupled
                          in the Newton (carriers/tunneling.py; D1d).
+      srh_trap_energy_eV : E_t - E_i [eV] of the built-in SRH channel (tau_n_s, tau_p_s): n1 =
+                         n_i exp(E/kT), p1 = n_i exp(-E/kT) (Shockley-Read 1952 / Hall 1952). The
+                         default 0.0 is the legacy midgap level BIT-identically (exp(0) == 1).
+      traps            : optional sequence of physics_traps.TrapLevel -- extra discrete SRH levels,
+                         each with its own E_t, lifetimes/cross sections, density and charge type.
+                         Their rates are ADDED to USRH and their trapped charge (acceptor -q N_t f_t,
+                         donor +q N_t (1 - f_t), steady-state SRH occupancy) to Poisson. None/empty
+                         (default) leaves every model string exactly as before.
 
     The region must already carry a "NetDoping" node model (signed: +Nd donor,
     -Na acceptor). Build it before calling (the diode mesh sets it per-region).
@@ -451,8 +536,11 @@ def setup_bipolar_region(device: str, region: str, *,
     ds.set_parameter(device=device, region=region, name="n_i", value=n_i_m3)
     ds.set_parameter(device=device, region=region, name="taun", value=tau_n_s)
     ds.set_parameter(device=device, region=region, name="taup", value=tau_p_s)
-    ds.set_parameter(device=device, region=region, name="n1", value=n_i_m3)  # SRH trap
-    ds.set_parameter(device=device, region=region, name="p1", value=n_i_m3)
+    # SRH trap level of the built-in channel: n1 = n_i exp(E/kT), p1 = n_i exp(-E/kT) (D1c traps,
+    # 2026-11-03). E = 0 (default) -> n_i * 1.0 == n_i exactly: the legacy midgap values, bit for bit.
+    _n1, _p1 = _PT.n1_p1(srh_trap_energy_eV, n_i_m3)
+    ds.set_parameter(device=device, region=region, name="n1", value=_n1)  # SRH trap
+    ds.set_parameter(device=device, region=region, name="p1", value=_p1)
     # audit C-10: the contact builders are called later and separately, and the ohmic built-in
     # potential must follow the SAME statistics as the transport in this region. Record the choice
     # here (1.0 = Fermi-Dirac g-factor, 0.0 = Boltzmann) so setup_contact_ohmic_bipolar* can read it.
@@ -468,7 +556,7 @@ def setup_bipolar_region(device: str, region: str, *,
     ds.edge_from_node_model(device=device, region=region, node_model="Holes")
 
     # --- bipolar Poisson node charge: -q (p - n + NetDoping) ---
-    pne = "-ElectronCharge * kahan3(Holes, -Electrons, NetDoping)"
+    pne = _poisson_charge_expr(())
     _node_with_derivs(device, region, "PotentialNodeCharge", pne, ("Electrons", "Holes"))
     _poisson_edge_models(device, region)
     _R.record_region_equation(device, region, name="PotentialEquation",
@@ -516,12 +604,19 @@ def setup_bipolar_region(device: str, region: str, *,
                       ("Holes", "Potential"))                # Jp has no Electrons dependence
 
     # --- SRH recombination: one node model into BOTH continuity equations ---
-    usrh = "(Electrons*Holes - n_i^2)/(taup*(Electrons + n1) + taun*(Holes + p1))"
+    # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py);
+    # extra discrete levels (traps=...) are independent channels ADDED to it (physics_traps).
+    usrh = _PT.srh_rate_expr()
+    trap_charge = None
+    if traps:
+        _rates, trap_charge = _PT.bulk_trap_models(device, region, list(traps), n_i_m3=n_i_m3)
+        usrh = "{} + {}".format(usrh, _rates)
     _node_with_derivs(device, region, "USRH", usrh, ("Electrons", "Holes"))
-    gn = "-ElectronCharge * USRH"
-    gp = "+ElectronCharge * USRH"
+    gn, gp = _generation_exprs(())
     _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
     _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
+    if trap_charge is not None:                                # trapped charge -> Poisson
+        add_charge_term(device, region, "bulk_traps", trap_charge)
 
     # --- transient / AC charge: the d(q n)/dt time term of each continuity equation. NCharge =
     #     -q n (electron charge density), PCharge = +q p. Defined ALWAYS: a steady-state DC solve

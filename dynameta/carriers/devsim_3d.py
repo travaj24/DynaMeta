@@ -80,6 +80,7 @@ from dynameta.core.resample import resample_to_grid
 from dynameta.carriers import physics_equilibrium as PE
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers import physics_bipolar_dd as BP
+from dynameta.carriers import physics_traps as PT
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
@@ -122,6 +123,10 @@ class Stacked3DSpec:
     n_i_m3:          Optional[float] = None    # intrinsic carrier density (required for bipolar_dd)
     mobility_p_m2Vs: float = 0.001             # hole mobility (m^2/V/s; bipolar only)
     tau_srh_s:       float = 1.0e-7            # shared SRH lifetime (s; bipolar only); large -> suppress
+    srh_trap_energy_eV: float = 0.0            # E_t - E_i of that SRH channel [eV] (0 = legacy midgap; D1c)
+    srh_traps:       tuple = ()                # extra physics_traps.TrapLevel levels (bipolar only; D1c)
+    interface_traps: Optional[object] = None   # physics_traps.InterfaceTraps (or a list) on every
+                                               # semi/dielectric interface (bipolar only; D1c)
     dos_mass_p_kg:   Optional[float] = None    # VALENCE DOS mass -> N_v (bipolar FD g-factor); None -> N_c
     acceptor:        bool = False              # True -> uniform p-type (NetDoping = -n_bg); False -> n-type
     net_doping_expr: Optional[str] = None      # position-dependent junction (a DEVSIM node expression)
@@ -285,6 +290,10 @@ class Stacked3DSpec:
                                   "suppress recombination)")
             if not (self.mobility_p_m2Vs > 0.0):
                 raise ValueError("bipolar_dd 3D spec requires mobility_p_m2Vs > 0 (hole mobility)")
+        elif self.srh_traps or self.srh_trap_energy_eV or self.interface_traps is not None:
+            raise ValueError("Stacked3DSpec: srh_traps / srh_trap_energy_eV / interface_traps need "
+                             "physics='bipolar_dd' (the trap occupancy uses n AND p); got physics={!r}"
+                             .format(self.physics))
         if self.bipolar_options is not None:
             from dynameta.carriers.bipolar_options import BipolarOptions
             if not isinstance(self.bipolar_options, BipolarOptions):
@@ -342,7 +351,8 @@ class Stacked3DSpec:
 
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
-                     mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0) -> "Stacked3DSpec":
+                     mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
+                     interface_traps=None) -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -488,7 +498,9 @@ class Stacked3DSpec:
                 dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
                 acceptor=bool(tr.acceptor),
                 net_doping_expr=tr.net_doping_expr,
-                bipolar_options=getattr(tr, "bipolar_options", None))
+                bipolar_options=getattr(tr, "bipolar_options", None),
+                srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
+                srh_traps=tuple(getattr(tr, "srh_traps", ())))
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
@@ -499,7 +511,8 @@ class Stacked3DSpec:
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None), **bip)
+                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None),
+                    interface_traps=interface_traps, **bip)
 
 
 class Devsim3DEquilibrium:
@@ -597,6 +610,13 @@ class Devsim3DEquilibrium:
                                    values=[float(psi_n)] * nn)
         for itf in ds.get_interface_list(device=self.device):
             PE.setup_interface(self.device, itf)
+        if s.interface_traps is not None:
+            # D1c: D_it on every semi/dielectric interface (the gate oxide, and the sidewalls of any
+            # dielectric inclusion touching the semiconductor)
+            diel = {name for (name, _m, role, _e) in self._mesh_regions if role == "dielectric"}
+            for (ifn, r0, r1) in self._iface_pairs:
+                if "semi" in (r0, r1) and (r0 in diel or r1 in diel):
+                    PT.install_interface_traps(self.device, ifn, s.interface_traps)
         for c in ds.get_contact_list(device=self.device):
             # the "body" contact is on the semiconductor; for unipolar DD it must also pin the
             # electron density (Electrons = N_D), for bipolar it pins Electrons AND Holes to their
@@ -629,7 +649,8 @@ class Devsim3DEquilibrium:
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
             tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
             options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
-            btbt=s.btbt)                                         # D1d: None -> no BTBT (byte-identical)
+            btbt=s.btbt,                                         # D1d: None -> no BTBT (byte-identical)
+            srh_trap_energy_eV=float(s.srh_trap_energy_eV), traps=tuple(s.srh_traps) or None)
         BP.setup_equilibrium_seed_models(self.device, region)
 
     def solve(self, bias) -> CarrierField:
