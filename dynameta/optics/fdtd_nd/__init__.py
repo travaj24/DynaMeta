@@ -38,6 +38,25 @@ inverse-design-at-angle), plus a STRUCTURED
 per-component), and (2026-06-11) GPU NONLINEAR kernels (chi2/Raman/gain) on cupy + the numba-cuda
 cooperative kernel, hardware-validated (validation/fdtd_gpu_nonlinear.py, worst ~2e-15, dynamic gain
 exact). STILL DEFERRED: GPU performance work only (a fused 3D fast path).
+
+SPECTRAL SIGN CONVENTION -- the ONE statement for the whole FDTD family (audit V-22, 2026-11-02).
+The library convention is exp(-i omega t): a physical phasor X(omega), omega > 0, means
+x(t) = Re[X exp(-i omega t)]. numpy's FFT uses the kernel exp(-2 pi i f t), so a bin at numpy
+frequency f measures the exp(+2 pi i f t) content of the record -- the OPPOSITE sign. Three idioms
+follow, each correct for its own trace type; they must never be mixed bin-for-bin:
+  (1) REAL record (every normal-incidence front end, solve_fdtd_1d, fdtd_mo, results._flux,
+      harmonics): X(omega) = conj(rfft(x))[k] at omega = 2 pi rfftfreq[k] >= 0. Magnitudes need no
+      conj (|rfft| = |X|); every PHASE-bearing quantity must take it (solve2d/solve3d r0/t0,
+      fdtd_mo's Jones terms, harmonics' order labels -- audit D-4 was the one site that forgot).
+  (2) COMPLEX single-sided record driven by exp(-i w_c t) (hydro_fdtd): the response lives at
+      numpy's NEGATIVE bins; X(omega) = fft(x)[k] at omega = -2 pi fftfreq[k] (no conj).
+  (3) COMPLEX Bloch ENVELOPE with a REAL source (the oblique 2-D/3-D front ends, kx != 0): the
+      real carrier excites BOTH signs; numpy bin +f carries the (omega, -k_par) partner of the
+      physical (omega, +k_par) wave, i.e. the conjugate-mirror incidence. fft(x)[:nf] is therefore
+      exact for |R0|, |T0| of a laterally-uniform stack (R(k_par) = R(-k_par)), which is all
+      FDTD2DObliqueResult reports -- but it is NOT the exp(-i omega t) phasor at +k_par: a future
+      complex r0/t0 or a laterally-structured oblique cell must take the numpy -f bins instead.
+To compare or combine spectra across idioms convert each to the physical X(omega >= 0) first.
 """
 
 from __future__ import annotations
@@ -47,9 +66,8 @@ from __future__ import annotations
 # (_flux/_flux3d, the numba kernels, the dispatchers, ...) are imported sibling-to-sibling.
 from dynameta.optics.fdtd_nd.spec import FDTDLayer
 
-from dynameta.optics.fdtd_nd.backends import (HAVE_NUMBA, available_backends,
-                                              have_jax, have_numba_cuda, njit,
-                                              prange, resolve_backend)
+from dynameta.optics.fdtd_nd.backends import (available_backends, have_jax, have_numba,
+                                              have_numba_cuda, njit, resolve_backend)
 from dynameta.optics.fdtd_nd.cpml import cpml_z
 from dynameta.optics.fdtd_nd.results import (FDTD2DObliqueResult, FDTD2DResult,
                                              FDTD3DMOResult, FDTD3DResult)
@@ -68,8 +86,24 @@ from dynameta.optics.fdtd_nd.solve3d import (solve_fdtd_3d, solve_fdtd_3d_mo,
 # "unused import" hits here. Keep in sync when a re-export is added or dropped.
 __all__ = [
     "FDTD2DObliqueResult", "FDTD2DResult", "FDTD3DMOResult", "FDTD3DResult", "FDTDLayer",
-    "HAVE_NUMBA", "available_backends", "cpml_z", "have_jax", "have_numba_cuda", "njit",
+    "HAVE_NUMBA", "available_backends", "cpml_z", "have_jax", "have_numba", "have_numba_cuda", "njit",
     "prange", "resolve_backend", "run_2d_te", "run_2d_te_jax", "run_2d_te_oblique_jax",
     "run_2d_tm_oblique_jax", "run_3d", "run_3d_jax", "run_3d_oblique_jax", "solve_fdtd_2d",
     "solve_fdtd_2d_oblique", "solve_fdtd_3d", "solve_fdtd_3d_mo", "solve_fdtd_3d_oblique",
 ]
+
+
+def __getattr__(name):
+    """PEP 562 lazy attributes (audit V-14): `HAVE_NUMBA` and `prange` used to be bound by an
+    eager `import numba` at package import (~0.7 s with numba.cuda). They now resolve on first
+    access -- `HAVE_NUMBA` is `have_numba()`, `prange` is `numba.prange` when numba imports and
+    `range` otherwise (the old no-numba shim) -- so `from dynameta.optics.fdtd_nd import
+    HAVE_NUMBA` keeps working while a plain `import` no longer loads numba."""
+    if name == "HAVE_NUMBA":
+        return have_numba()
+    if name == "prange":
+        if have_numba():
+            import numba
+            return numba.prange
+        return range
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))

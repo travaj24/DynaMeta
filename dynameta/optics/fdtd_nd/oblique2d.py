@@ -23,8 +23,7 @@ from __future__ import annotations
 import numpy as np
 
 from dynameta.constants import EPS0, MU0
-from dynameta.optics.fdtd_nd.backends import njit
-
+from dynameta.optics.fdtd_nd.backends import check_scan_length, njit
 
 
 # =====================================================================================================
@@ -37,8 +36,6 @@ from dynameta.optics.fdtd_nd.backends import njit
 # source). Validated vs s-pol TMM at theta(f). Vacuum ends; uniform or laterally-uniform (the envelope of a
 # plane wave has no transverse variation, so nx is small).
 # =====================================================================================================
-
-
 
 
 def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
@@ -55,19 +52,35 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     eyL = np.empty((nsteps, nx), complex); hxL = np.empty((nsteps, nx), complex)
     eyR = np.empty((nsteps, nx), complex); hxR = np.empty((nsteps, nx), complex)
     cmu = dt / MU0; ikx = 1j * kx
+    # audit P-7 (2026-11-02): the P-1 hoists, applied to this complex-dtype copy of the pattern --
+    # the per-step `np.zeros` curl, the two `np.roll` copies, `EPS0*eps_inf/dt` built twice and the
+    # loop-invariant denominator, and the Drude ADE run with wp identically 0 (bJ == 0 exactly, so
+    # Jy never leaves 0). Same arithmetic on the same operands, gated on an EXACT zero test like
+    # P-1: every probe array is BIT-IDENTICAL (tobytes) on a passive and a Drude fixture, TE and TM.
+    # Measured nx=8, nz=400, 800 steps: TE 0.186 -> 0.134 s, TM 0.218 -> 0.143 s passive; TE 0.178 ->
+    # 0.147 s, TM 0.219 -> 0.190 s Drude.
+    e0e = EPS0 * eps_inf / dt
+    denom = e0e + bJ / 2.0
+    do_drude = bool(np.any(wp))
+    curl = np.zeros((nx, nz), complex)            # column 0 stays 0; columns 1: are rewritten
+    Ey_roll = np.empty((nx, nz), complex)         # == np.roll(Ey, -1, axis=0), no per-step alloc
+    Hz_roll = np.empty((nx, nz), complex)         # == np.roll(Hz,  1, axis=0)
     for n in range(nsteps):
         dEy_dz = (Ey[:, 1:] - Ey[:, :-1]) / dz
         psi_hxz[:, :-1] = bh[:-1] * psi_hxz[:, :-1] + ch[:-1] * dEy_dz
         Hx[:, :-1] += cmu * (dEy_dz / kh[:-1] + psi_hxz[:, :-1])
-        Hz += -cmu * ((np.roll(Ey, -1, axis=0) - Ey) / dx + ikx * Ey)      # dEy/dx -> d/dx + i kx
+        Ey_roll[:-1] = Ey[1:]; Ey_roll[-1] = Ey[0]
+        Hz += -cmu * ((Ey_roll - Ey) / dx + ikx * Ey)                      # dEy/dx -> d/dx + i kx
         dHx_dz = (Hx[:, 1:] - Hx[:, :-1]) / dz
         psi_eyz[:, 1:] = be[1:] * psi_eyz[:, 1:] + ce[1:] * dHx_dz
-        curl = np.zeros((nx, nz), complex)
-        curl[:, 1:] += dHx_dz / ke[1:] + psi_eyz[:, 1:]
-        curl -= (Hz - np.roll(Hz, 1, axis=0)) / dx + ikx * Hz              # dHz/dx -> d/dx + i kx
-        denom = EPS0 * eps_inf / dt + bJ / 2.0
-        Eynew = (EPS0 * eps_inf / dt * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
-        Jy = aJ * Jy + bJ * (Eynew + Ey)
+        curl[:, 1:] = dHx_dz / ke[1:] + psi_eyz[:, 1:]
+        Hz_roll[0] = Hz[-1]; Hz_roll[1:] = Hz[:-1]
+        curl -= (Hz - Hz_roll) / dx + ikx * Hz                             # dHz/dx -> d/dx + i kx
+        if do_drude:
+            Eynew = (e0e * Ey + curl - 0.5 * (1.0 + aJ) * Jy - 0.5 * bJ * Ey) / denom
+            Jy = aJ * Jy + bJ * (Eynew + Ey)
+        else:                                                              # wp == 0: Jy stays 0
+            Eynew = (e0e * Ey + curl) / denom
         Eynew[:, k_src] += src[n]
         Eynew[:, 0] = 0.0; Eynew[:, -1] = 0.0
         Ey = Eynew
@@ -76,13 +89,18 @@ def _run_2d_te_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     return eyL, hxL, eyR, hxR
 
 
-def _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+def _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ez=None):
     """Complex-envelope oblique 2D-TM (p-pol): the in-plane E (Ex, Ez) + the single H_y, all the PERIODIC
     Bloch envelope (physical field = envelope * exp(i kx x)), so every x-derivative gains a + i kx term.
     mu0 dHy/dt = dEz/dx - dEx/dz ; eps dEx/dt = -dHy/dz - Jx ; eps dEz/dt = +dHy/dx - Jz, with the
     semi-implicit Drude ADE on BOTH transverse + longitudinal E-components (Jx, Jz) and CFS-CPML on the z
     derivatives. Source + PEC on the tangential Ex (the dual of the TE Ey). Records the complex tangential
-    Ex and co-located Hy probe x-lines (the p-pol R/T come from the Ex up/down ratio, like TE's Ey)."""
+    Ex and co-located Hy probe x-lines (the p-pol R/T come from the Ex up/down ratio, like TE's Ey).
+
+    `ez` = optional (eps_inf, wp, gam) maps for the NORMAL component Ez, which lives at (k+1/2)*dz
+    while Ex lives on the node k*dz (audit S2-14 siblings, 2026-11-02): solve_fdtd_2d_oblique passes
+    the half-node registration (grid.material_z_half) -- the per-component Yee material assignment.
+    None = Ez uses the Ex maps (the pre-2026-11-02 single-array behaviour, bit-identical)."""
     nx, nz = eps_inf.shape
     (ke, be, ce), (kh, bh, ch) = cpml
     z = (lambda: np.zeros((nx, nz), dtype=complex))
@@ -92,27 +110,49 @@ def _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     exL = np.empty((nsteps, nx), complex); hyL = np.empty((nsteps, nx), complex)
     exR = np.empty((nsteps, nx), complex); hyR = np.empty((nsteps, nx), complex)
     cmu = dt / MU0; ikx = 1j * kx; e0dt = EPS0 / dt
+    # audit P-7: the same hoists as the TE copy above (and as P-1) -- bit-identical probes.
+    e0e = e0dt * eps_inf
+    denom = e0e + bJ / 2.0
+    do_drude = bool(np.any(wp))
+    if ez is None:                                # Ez shares the Ex maps (legacy, bit-identical)
+        aJz, bJz, e0ez, denz, do_drude_z = aJ, bJ, e0e, denom, do_drude
+    else:                                         # per-component: Ez on its own half-node maps
+        ezi, ezw, ezg = (np.asarray(a, dtype=float) for a in ez)
+        aJz = (1.0 - ezg * dt / 2.0) / (1.0 + ezg * dt / 2.0)
+        bJz = (EPS0 * ezw ** 2 * dt / 2.0) / (1.0 + ezg * dt / 2.0)
+        e0ez = e0dt * ezi
+        denz = e0ez + bJz / 2.0
+        do_drude_z = bool(np.any(ezw))
+    curlx = np.zeros((nx, nz), complex)           # column 0 stays 0; columns 1: are rewritten
+    Ez_roll = np.empty((nx, nz), complex)         # == np.roll(Ez, -1, axis=0)
+    Hy_roll = np.empty((nx, nz), complex)         # == np.roll(Hy,  1, axis=0)
     for n in range(nsteps):
         # H update: mu0 dHy/dt = dEz/dx - dEx/dz  (Hy at k+1/2; CPML-stretched dEx/dz)
         dEx_dz = (Ex[:, 1:] - Ex[:, :-1]) / dz
         psi_hyz[:, :-1] = bh[:-1] * psi_hyz[:, :-1] + ch[:-1] * dEx_dz
-        dEz_dx = (np.roll(Ez, -1, axis=0) - Ez) / dx + ikx * Ez            # dEz/dx -> d/dx + i kx
+        Ez_roll[:-1] = Ez[1:]; Ez_roll[-1] = Ez[0]
+        dEz_dx = (Ez_roll - Ez) / dx + ikx * Ez                            # dEz/dx -> d/dx + i kx
         Hy[:, :-1] += cmu * (dEz_dx[:, :-1] - (dEx_dz / kh[:-1] + psi_hyz[:, :-1]))
         # E update -- Ex: eps dEx/dt = -dHy/dz (CPML-stretched) - Jx
         dHy_dz = (Hy[:, 1:] - Hy[:, :-1]) / dz
         psi_exz[:, 1:] = be[1:] * psi_exz[:, 1:] + ce[1:] * dHy_dz
-        curlx = np.zeros((nx, nz), complex)
         curlx[:, 1:] = -(dHy_dz / ke[1:] + psi_exz[:, 1:])
-        denom = e0dt * eps_inf + bJ / 2.0
-        Exn = (e0dt * eps_inf * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
-        Jx = aJ * Jx + bJ * (Exn + Ex)
+        if do_drude:
+            Exn = (e0e * Ex + curlx - 0.5 * (1.0 + aJ) * Jx - 0.5 * bJ * Ex) / denom
+            Jx = aJ * Jx + bJ * (Exn + Ex)
+        else:                                                              # wp == 0: Jx stays 0
+            Exn = (e0e * Ex + curlx) / denom
         Exn[:, k_src] += src[n]
         Exn[:, 0] = 0.0; Exn[:, -1] = 0.0                                  # PEC backing (tangential E)
         Ex = Exn
         # E update -- Ez: eps dEz/dt = +dHy/dx (periodic x) - Jz
-        curlz = (Hy - np.roll(Hy, 1, axis=0)) / dx + ikx * Hy             # dHy/dx -> d/dx + i kx
-        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
-        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Hy_roll[0] = Hy[-1]; Hy_roll[1:] = Hy[:-1]
+        curlz = (Hy - Hy_roll) / dx + ikx * Hy                             # dHy/dx -> d/dx + i kx
+        if do_drude_z:
+            Ezn = (e0ez * Ez + curlz - 0.5 * (1.0 + aJz) * Jz - 0.5 * bJz * Ez) / denz
+            Jz = aJz * Jz + bJz * (Ezn + Ez)
+        else:
+            Ezn = (e0ez * Ez + curlz) / denz
         Ez = Ezn
         exL[n] = Ex[:, k_pL]; hyL[n] = 0.5 * (Hy[:, k_pL] + Hy[:, k_pL - 1])
         exR[n] = Ex[:, k_pR]; hyR[n] = 0.5 * (Hy[:, k_pR] + Hy[:, k_pR - 1])
@@ -171,8 +211,10 @@ def _te2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
 
 @njit(fastmath=True, cache=True)
 def _tm2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
-                        nsteps, k_src, k_pL, k_pR, src, kx):
-    """Fused, JIT-compiled COMPLEX-ENVELOPE oblique 2D-TM (p-pol) timestep -- the same physics as
+                        nsteps, k_src, k_pL, k_pR, src, kx, eps_z, wp_z, gam_z):
+    """(eps_z, wp_z, gam_z) = the Ez maps (half-node registration from solve_fdtd_2d_oblique; pass the
+    Ex maps for the legacy single-array behaviour -- audit S2-14 siblings 2026-11-02, see
+    _run_2d_tm_oblique). Fused, JIT-compiled COMPLEX-ENVELOPE oblique 2D-TM (p-pol) timestep -- the same physics as
     _run_2d_tm_oblique (in-plane Ex,Ez + Hy, Bloch envelope d/dx -> d/dx + i kx, semi-implicit Drude ADE on
     BOTH Jx,Jz, CFS-CPML + PEC in z), explicit-loop + compiled so the whole step is ONE pass. Fields
     complex128; kx=0 reduces to the real normal-incidence TM response. SERIAL (nx small for the smooth
@@ -215,11 +257,11 @@ def _tm2d_oblique_numba(eps_inf, wp, gam, ke, be, ce, kh, bh, ch, dx, dz, dt,
             im1 = i - 1 if i - 1 >= 0 else nx - 1
             for k in range(nz):
                 curlz = (Hy[i, k] - Hy[im1, k]) / dx + ikx * Hy[i, k]
-                aJ = (1.0 - gam[i, k] * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
-                bJ = (EPS0 * wp[i, k] ** 2 * dt / 2.0) / (1.0 + gam[i, k] * dt / 2.0)
-                denom = e0dt * eps_inf[i, k] + bJ / 2.0
+                aJ = (1.0 - gam_z[i, k] * dt / 2.0) / (1.0 + gam_z[i, k] * dt / 2.0)
+                bJ = (EPS0 * wp_z[i, k] ** 2 * dt / 2.0) / (1.0 + gam_z[i, k] * dt / 2.0)
+                denom = e0dt * eps_z[i, k] + bJ / 2.0
                 ezo = Ez[i, k]
-                ezn = (e0dt * eps_inf[i, k] * ezo + curlz - 0.5 * (1.0 + aJ) * Jz[i, k] - 0.5 * bJ * ezo) / denom
+                ezn = (e0dt * eps_z[i, k] * ezo + curlz - 0.5 * (1.0 + aJ) * Jz[i, k] - 0.5 * bJ * ezo) / denom
                 Jz[i, k] = aJ * Jz[i, k] + bJ * (ezn + ezo)
                 Ez[i, k] = ezn
         for i in range(nx):                                    # co-located probes (Hy averaged to E plane)
@@ -234,6 +276,7 @@ def run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry/material) straight through
     the oblique scan (the inverse-design path at angle). kx=0 with a real source stays real. Byte-equal to
     the NumPy kernel to ~1e-12. Drude only (no Lorentz/Kerr -- the oblique kernel carries Drude)."""
+    check_scan_length("run_2d_te_oblique_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)               # complex128 + match the reference
     import jax.numpy as jnp
@@ -273,14 +316,12 @@ def run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     return eyL, hxL, eyR, hxR
 
 
-_run_2d_te_oblique_jax = run_2d_te_oblique_jax               # back-compat alias (pre-promotion name)
-
-
-def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx):
+def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, ez=None):
     """JAX (XLA, lax.scan) twin of _run_2d_tm_oblique (p-pol complex-envelope Bloch): the SAME physics
     (in-plane Ex,Ez + Hy, d/dx -> d/dx + i kx, semi-implicit Drude ADE on Jx,Jz, CFS-CPML + PEC in z) as a
     single traced/compiled DIFFERENTIABLE complex128 time loop -- so jax.grad flows d(R,T)/d(geometry) for
     the TM inverse-design path at angle. Byte-equal to the NumPy TM kernel to ~1e-12. Drude only."""
+    check_scan_length("run_2d_tm_oblique_jax", src, nsteps)                  # audit X-16
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
@@ -294,6 +335,15 @@ def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     nx, nz = eps_inf.shape
     cmu = dt / MU0; ikx = 1j * kx; e0dt = EPS0 / dt
     denom = e0dt * eps_inf + bJ / 2.0
+    # `ez` = optional (eps_inf, wp, gam) Ez maps at the (k+1/2)*dz half nodes (audit S2-14 siblings,
+    # 2026-11-02; see _run_2d_tm_oblique). None = Ez shares the Ex maps (legacy).
+    if ez is None:
+        eps_z, aJz, bJz, denz = eps_inf, aJ, bJ, denom
+    else:
+        eps_z, wp_z, gam_z = (jnp.asarray(a) for a in ez)
+        aJz = (1.0 - gam_z * dt / 2.0) / (1.0 + gam_z * dt / 2.0)
+        bJz = (EPS0 * wp_z ** 2 * dt / 2.0) / (1.0 + gam_z * dt / 2.0)
+        denz = e0dt * eps_z + bJz / 2.0
 
     def step(carry, src_n):
         Ex, Ez, Hy, Jx, Jz, psi_hyz, psi_exz = carry
@@ -313,8 +363,8 @@ def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
         Exn = Exn.at[:, 0].set(0.0 + 0.0j).at[:, nz - 1].set(0.0 + 0.0j)
         # E update Ez: eps dEz/dt = +dHy/dx - Jz (dHy/dx -> d/dx + i kx)
         curlz = (Hy - jnp.roll(Hy, 1, axis=0)) / dx + ikx * Hy
-        Ezn = (e0dt * eps_inf * Ez + curlz - 0.5 * (1.0 + aJ) * Jz - 0.5 * bJ * Ez) / denom
-        Jz = aJ * Jz + bJ * (Ezn + Ez)
+        Ezn = (e0dt * eps_z * Ez + curlz - 0.5 * (1.0 + aJz) * Jz - 0.5 * bJz * Ez) / denz
+        Jz = aJz * Jz + bJz * (Ezn + Ez)
         out = (Exn[:, k_pL], 0.5 * (Hy[:, k_pL] + Hy[:, k_pL - 1]),
                Exn[:, k_pR], 0.5 * (Hy[:, k_pR] + Hy[:, k_pR - 1]))
         return (Exn, Ezn, Hy, Jx, Jz, psi_hyz, psi_exz), out
@@ -325,10 +375,8 @@ def run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_p
     return exL, hyL, exR, hyR
 
 
-_run_2d_tm_oblique_jax = run_2d_tm_oblique_jax               # back-compat alias (pre-promotion name)
-
-
-def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s"):
+def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx, pol="s",
+                 ez=None):
     """Run ONE complex-envelope oblique 2D pass on the named backend. pol='s' = TE (Ey,Hx,Hz); pol='p' =
     TM (Hy,Ex,Ez). Returns the four complex probe x-lines (tangential E + co-located tangential H).
     'numba' = the fused JIT kernel; 'jax' = the differentiable scan (TE and TM both have one of each);
@@ -339,21 +387,27 @@ def _run_oblique(name, eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, 
     fall through to the TE branch silently; the rejection is now named.  ACCEPTANCE UNIFICATION
     (b): 'te'/'tm' and mixed case are accepted here too, in THIS module's sense (te = E_y out of
     the 2-D plane = s), and normalized before the branch below.  A lab axis still raises.
-    solve_fdtd_2d_oblique normalizes first, so this guard only fires on a direct call."""
+    solve_fdtd_2d_oblique normalizes first, so this guard only fires on a direct call.
+
+    `ez` (p-pol only): optional (eps_inf, wp, gam) maps for the normal Ez at its own (k+1/2)*dz Yee
+    position (audit S2-14 siblings, 2026-11-02); None = Ez uses the Ex maps (legacy)."""
     if pol not in ("s", "p"):
         from dynameta.core.polarization import accept_pol
         pol = accept_pol(pol, "sp", where="_run_oblique", param="pol")
     if pol == "p":
         if name == "numba":
             (ke, be, ce), (kh, bh, ch) = cpml
-            return _tm2d_oblique_numba(np.asarray(eps_inf, float), np.asarray(wp, float),
-                                       np.asarray(gam, float), ke, be, ce, kh, bh, ch, dx, dz, dt,
-                                       nsteps, k_src, k_pL, k_pR, np.asarray(src, float), kx)
+            ei, w_, g_ = (np.asarray(a, float) for a in (eps_inf, wp, gam))
+            ezi, ezw, ezg = (ei, w_, g_) if ez is None else tuple(np.asarray(a, float) for a in ez)
+            return _tm2d_oblique_numba(ei, w_, g_, ke, be, ce, kh, bh, ch, dx, dz, dt,
+                                       nsteps, k_src, k_pL, k_pR, np.asarray(src, float), kx,
+                                       ezi, ezw, ezg)
         if name == "jax":
             out = run_2d_tm_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src,
-                                        cpml, kx)
+                                        cpml, kx, ez=ez)
             return tuple(np.asarray(v) for v in out)        # JAX -> NumPy for the FFT/R-T stage
-        return _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
+        return _run_2d_tm_oblique(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx,
+                                  ez=ez)
     if name == "jax":
         out = run_2d_te_oblique_jax(eps_inf, wp, gam, dx, dz, dt, nsteps, k_src, k_pL, k_pR, src, cpml, kx)
         return tuple(np.asarray(v) for v in out)            # JAX -> NumPy for the FFT/R-T stage

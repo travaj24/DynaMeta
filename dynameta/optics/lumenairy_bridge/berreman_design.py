@@ -43,6 +43,7 @@ made explicitly, through normalize_pol.
 from __future__ import annotations
 
 from dynameta.optics.lumenairy_bridge._common import _REQUIRED
+from dynameta.optics.lumenairy_bridge._common import require_angles_rad as _require_angles_rad
 from dynameta.optics.lumenairy_bridge._common import \
     require_halfspace_keywords as _require_halfspace_keywords
 from dynameta.optics.lumenairy_bridge.berreman_backend import _require_berreman
@@ -87,6 +88,7 @@ def berreman_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     _require_halfspace_keywords("berreman_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     _reject_row(row, "berreman_RT")                                     # audit V-8
+    _require_angles_rad("berreman_RT", polar=(("angle", angle),), azimuth=(("phi", phi),))  # V-25
     lum = _require_berreman()
     R, T, _Jr, _Jt = lum.berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength,
                                            angle=angle, phi=phi)
@@ -101,5 +103,7 @@ def berreman_jones(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED
     KEYWORD-ONLY half-space indices (audit V-4)."""
     _require_halfspace_keywords("berreman_jones", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
+    _require_angles_rad("berreman_jones", polar=(("angle", angle),),
+                        azimuth=(("phi", phi),))                        # audit V-25
     return _require_berreman().berreman_jones_1d(layers, n_substrate, n_superstrate, wavelength,
                                                  angle=angle, phi=phi)

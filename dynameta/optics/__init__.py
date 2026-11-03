@@ -4,6 +4,12 @@ The heavy ngsolve/netgen-dependent names are re-exported LAZILY (PEP 562) so tha
 `import dynameta.optics` -- and the pure `dynameta.optics.tmm_reference` submodule --
 work WITHOUT ngsolve installed (e.g. the numpy/scipy-only CI test environment). Each
 name imports its backing module only when first accessed.
+
+STAR IMPORT IS EAGER BY DEFINITION (audit V-13, 2026-11-02): every name in `__all__` below is an
+NGSolve name, so `from dynameta.optics import *` resolves all of them and imports netgen/ngsolve
+(measured: ngsolve + netgen loaded, against scipy only for `import dynameta.optics`); without the
+[solvers] extra it raises that ImportError. The lazy guarantee covers `import dynameta.optics`
+and NAMED submodule imports (`from dynameta.optics import tmm_reference`), not `*`.
 """
 
 import importlib

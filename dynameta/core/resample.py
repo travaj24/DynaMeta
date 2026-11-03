@@ -57,13 +57,26 @@ def resample_to_grid(nodes_m: np.ndarray,
     except Exception:
         tri = None                                            # degenerate/collinear -> let scipy handle
 
+    # The nearest-neighbour fill is hoisted the same way (audit P-12): NearestNDInterpolator(nodes,
+    # vals) built a fresh cKDTree over the SAME node coordinates for every field, and queried it
+    # for the SAME outside-the-hull points (the NaN mask depends on the geometry, not the values,
+    # unless a field itself carries NaN -- then the mask differs and is re-queried).  One tree,
+    # one query per distinct mask; `vals[index]` is exactly what NearestNDInterpolator returns.
+    tree = None
+    nn_mask = None
+    nn_idx = None
     for name, vals in fields.items():
         vals = np.asarray(vals, dtype=np.float64)
         lin = LinearNDInterpolator(tri if tri is not None else nodes, vals)
         grid = lin(qpts).reshape(tuple(int(n) for n in n_per_axis))
         nan = np.isnan(grid)
         if nan.any():
-            nn = NearestNDInterpolator(nodes, vals)
-            grid[nan] = nn(qpts[nan.ravel()])
+            if tree is None:
+                tree = NearestNDInterpolator(nodes, np.zeros(n_nodes)).tree
+            mask = nan.ravel()
+            if nn_mask is None or not np.array_equal(mask, nn_mask):
+                nn_mask = mask
+                _, nn_idx = tree.query(qpts[mask])
+            grid[nan] = vals[nn_idx]
         out[name] = grid
     return out

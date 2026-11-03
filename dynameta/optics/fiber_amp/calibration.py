@@ -26,10 +26,12 @@ import numpy as np
 
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec
+from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = ["CrossSectionTable", "ion_from_cross_sections", "giles_calibrated_fiber",
            "ytterbium_melkumov", "er_yb_phosphosilicate_reference",
-           "EDFA_CBAND_TARGETS", "calibration_report", "dB_per_m_to_per_m"]
+           "EDFA_CBAND_TARGETS", "calibration_report", "CalibrationReport",
+           "dB_per_m_to_per_m"]     # audit V-21: CalibrationReport is calibration_report's RETURN type
 
 _LN10_OVER_10 = np.log(10.0) / 10.0
 
@@ -80,7 +82,7 @@ class CrossSectionTable:
                               "peak) is held flat, which can manufacture gain from "
                               "nothing (audit R8)"
                               % (self.lambda_m[0] * 1e9, self.lambda_m[-1] * 1e9,
-                                 100.0 * edge / peak), stacklevel=2)
+                                 100.0 * edge / peak), UnreliableResultWarning, stacklevel=2)
         out = np.interp(lam, self.lambda_m, self.sigma_m2)      # flat-held outside range
         return out if out.ndim else float(out)
 
@@ -360,7 +362,7 @@ class CalibrationReport:
         return self.gain_ok and self.nf_ok
 
 
-def calibration_report(amp, targets: dict = None, *, gain_tol_dB: float = 3.0) -> CalibrationReport:
+def calibration_report(amp, targets: Optional[dict] = None, *, gain_tol_dB: float = 3.0) -> CalibrationReport:
     """Run a (calibrated) amplifier at the datasheet operating point and compare gain + noise
     figure to the targets. amp must already carry the pump/signal/ASE plan; the signal channel
     nearest targets['signal_nm'] is used. Passes if the gain is within gain_tol_dB of the target

@@ -5,7 +5,8 @@ Berreman backends imported its underscore helpers, and bor_backend copy-pasted t
 gate (drifting to its own floor). The shared surface now lives HERE under public names;
 rcwa_backend keeps underscore aliases for back-compat.
 
-ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.30.x span --
+ONE version floor (VERSION_FLOOR): the bridge is VERIFIED on the 5.22.x .. 5.50.x span
+(the upper end is VERSION_VERIFIED_MAX, whose comment records each re-verification) --
 every audited path (the C5-1 asymmetric-profile gates, C4-2 conical guards, per-layer
 absorption, BOR, Berreman OOP, the D1 JAX-twin traced-source/uniform-eps surface, the A2
 public RCWAStack.layers accessor) was exercised against the installed 5.22 source, and
@@ -39,10 +40,10 @@ from typing import Tuple
 
 import numpy as np
 
-__all__ = ["VERSION_FLOOR", "VERSION_VERIFIED_MAX", "parse_version", "require_lumenairy",
-           "pol_row", "angles_rad", "guard_incidence_side", "guard_conical_ppol",
-           "p_basis_conversion", "stack_layer_records", "conical_synthesis",
-           "pol_tangential_unit", "require_halfspace_keywords"]
+# NO __all__ here (audit X-22, removed 2026-11-02): this is a PRIVATE module -- its consumers are
+# the sibling backends, which import names explicitly, and nothing star-imports it -- so the
+# list was dead metadata that only fed tests/test_api_surface.py's PUBLIC-name walk. The public
+# bridge surface is lumenairy_bridge/__init__.py's.
 
 _REQUIRED = object()      # sentinel: "this keyword-only argument was not supplied"
 
@@ -86,6 +87,10 @@ def require_halfspace_keywords(fn_name: str, legacy_positional, **named):
 
 # The single bridge-wide floor (see module docstring). Bumping it is CORRECTNESS work:
 # raise it to whatever version the validation gates were actually re-run against.
+# ONE SOURCE OF TRUTH (audit R-32): this tuple is the floor; pyproject.toml's `lumenairy>=`
+# dependency must state the same version, and tests/test_lumenairy_bridge_verify_550.py::
+# test_pyproject_lumenairy_floor_is_VERSION_FLOOR fails when the two drift (they were synced
+# by hand before). Bump BOTH in one commit.
 VERSION_FLOOR = (5, 22, 0)
 # SOFT CEILING (finding Q-16). The floor states the OLDEST verified surface; this is the
 # (major, minor) of the NEWEST release the bridge gates were re-run against. Re-verified at
@@ -117,12 +122,70 @@ VERSION_FLOOR = (5, 22, 0)
 #     NOT fixed upstream: re-measured at 5.42.1 as d(R+T)/dtheta = -3.0e-6 where the truth is
 #     exactly 0 (clean by theta ~ 1e-4), bit-identical to 5.31.0 -- so the ANGLE CAVEAT in
 #     rcwa_design.py stays, and this ceiling does not certify that path at exactly normal
-#     incidence.
+#     incidence. [FIXED UPSTREAM at 5.50.0 -- see below.]
+#
+# RE-VERIFIED AT 5.50.0 (2026-11-02), eight minor versions on, the same DIFFERENTIAL way:
+# lumenairy v5.42.1 (git archive of the tag) and the installed 5.50.0 (editable checkout at
+# v5.50.0-2-g4c449fc1; `git diff v5.50.0 -- lumenairy/` is EMPTY, the two commits are docs and
+# probes only) were each run under the SAME bridge, re-using the 5.42 A/B probes (whole bridged
+# surface, exact float reprs): 1207 numeric observables, 1199 bit-identical. Every probed
+# forward value (R, T, A, A_independent, r, t, phase, per-region absorption, Jones, per-order
+# efficiencies, on every engine) is bit-identical; the 8 that moved are all JAX reverse-mode
+# gradients. Three mechanisms in all, named here so the next reader can tell a KNOWN shift
+# from a new one (the probes' structured layers are mostly LOSSY, which is why the two
+# lossless-only last-bit moves below surfaced in the gates, not the probes):
+#   * THE GRADIENT SHIFT: 5.50.0 routes every degenerate eigen-solve of its differentiable
+#     solvers through a cluster-adjoint rule (CHANGELOG 5.50.0, "JAX gradients at symmetric
+#     points"; process/thread switch lumenairy.jax_cluster_rule, default ON). At the
+#     symmetric point it is the theta=0 FIX: d(R+T)/dtheta -2.987e-6 -> -2.0e-12 and
+#     dR/dtheta 7.5e-8 -> 2.8e-13 on the 5.42 probe fixture (truth 0); on the 5.30 fixture
+#     dR/dtheta 4.126e-3 / -2.073e-2 (rows 0/1) -> |.| <= 5.7e-13. Off it: dR/dtheta at theta = 1e-4 moved rel 3.0e-10, and
+#     the off-symmetric eps gradients (grating at 0.2 rad, PMM at 0.25 rad) moved in the last
+#     bit, rel <= 3.4e-16 (the routed reverse pass orders its ops differently; lumenairy
+#     states <= 4e-16 away from any symmetry). 5.50 with the rule OFF reproduces all 24
+#     angle gradients of 5.42.1 (theta 0 / 1e-4 / 1e-2; both fixtures, both rows, R and R+T)
+#     to the printed 4 digits, so the attribution is measured, not inferred.
+#   * SURFACE: every bridged symbol present; no removal, rename, positional reorder or flipped
+#     default on a pre-existing parameter. Additions are keyword-only, with defaults that
+#     left every probed forward bit-identical (PMM2DStackPure mu_*/symmetry/layer_grids/...,
+#     PMM2DStackHybrid truncation='rectangular', BORStack basis='fd', BORStack.add_layer
+#     tensor/segments).
+#     Two DEFAULT moves upstream that the bridge does NOT reach on its gated fixtures (the
+#     forwards above are bit-identical): PMMStack min_feature period*1e-5 -> 1e-3 (5.46 G2;
+#     only stacks with cross-layer walls 1e-5..1e-3 of a period apart, which now snap and
+#     WARN), and the 5.46 G1 guards now running on the PMM JAX twin (gain / evanescent
+#     incidence raise as on NumPy).
+#   * TWO LAST-BIT FORWARD SHIFTS, lossless structured RCWA layers only, both deterministic
+#     (two runs per tree identical) and bisected over extracted tags / commits:
+#     (a) 5.45.0, lumenairy 6709b7d9 + 885fa8ca (RCWA branch-cut rounds 1 and 3): a lossless
+#         layer's propagating modal root is now PINNED to the outgoing branch instead of
+#         being decided by the last bit of the eig output's Im(lam^2). Moves the 2-D conical
+#         pillar of lumenairy_rcwa_bridge GATE H by <= 2.4e-15 in R/T/r (printed |R+T-1|
+#         8.6e-14 -> 8.5e-14, bar 5e-3) and the JAX side of the lumenairy_rcwa_jax GATE A
+#         grating by <= 2.4e-16.
+#     (b) 5.46.0 (bisected to 5.45.1..5.47.0; there is no 5.46.0 tag), the RCWA H4 "last
+#         star applied to the source", documented to move answers <= 1.7e-15: the NumPy fast
+#         path of that GATE A grating, T by 8e-16. (a) + (b) together move GATE A's printed
+#         jax==numpy parity 1.44e-15 -> 2.11e-15 (bar 1e-12).
+#   * GATES: validation/lumenairy_*.py 9/9 PASS on 5.50.0; the same nine scripts on 5.42.1
+#     print identical gate lines except those two numbers (and elapsed time). The bridge
+#     pytest files (test_lumenairy_bridge, test_lumenairy_per_layer_grids, test_bridge) 71/71
+#     PASS; the theta=0 fix is gated, with a rule-OFF discrimination arm, in
+#     tests/test_lumenairy_bridge_verify_550.py.
+#   * CAVEATS. (1) The ANGLE CAVEAT is retired only for lumenairy >= 5.50 with the rule ON;
+#     the floor still admits 5.22..5.49, where it stands (rcwa_design.py ANGLE NOTE). Next to
+#     a Rayleigh anomaly the rule's accuracy at a degenerate point degrades (lumenairy: rel
+#     5e-8 .. ~1e-1 at relative wavelength distance 1e-3 .. 1e-7). (2) The rule costs gradient
+#     time where a cluster exists (lumenairy's table: 2.3-7.9x run, 2-6x compile). Measured
+#     on validation/lumenairy_berreman_jax.py (traced Berreman tensors are routed), same box,
+#     back to back: 5.50 rule ON 448 / 426 s, rule OFF (LUMENAIRY_JAX_CLUSTER_RULE=0) 171 s,
+#     5.42.1 177 s -- ~2.5x, all from the rule, gate numbers identical in every arm. That
+#     script is in run_all.SMOKE_EXCLUDED either way (its documented 145 s predates 5.50).
 # Above the ceiling the bridge still runs -- lumenairy is backward compatible in practice and
 # refusing would be worse -- but says so ONCE per process (a RuntimeWarning naming both
 # versions). Bumping this is the CHEAP half of the same correctness work: re-run
 # validation/lumenairy_*.py and raise it.
-VERSION_VERIFIED_MAX = (5, 42)
+VERSION_VERIFIED_MAX = (5, 50)
 _CEILING_WARNED = False
 
 # The bridge's own vocabulary seam (audit V-8): the DynaMeta side speaks the OpticalSpec LAB-AXIS
@@ -132,6 +195,31 @@ _CEILING_WARNED = False
 # along lab x at phi = 0) -- which is why core.polarization refuses the row -> label inverse.
 # Map, converter and caveats: dynameta.core.polarization.
 _POL_ROW = {"x": 0, "y": 1, "p": 0}
+
+
+def require_angles_rad(where: str, *, polar=(), azimuth=()) -> None:
+    """Refuse an incidence angle that can only be DEGREES (audit V-25, 2026-11-02).
+
+    The differentiable `*_design.py` entry points take `angle` / `theta` / `phi` unsuffixed, in
+    RADIANS (lumenairy's own spelling), and the units were stated only in the module docstring --
+    while the design seam a user arrives from says `incidence_angle_deg=30`. Passing 30 there ran
+    a 30-RADIAN solve silently. A real polar incidence angle lies in [-pi/2, pi/2] and an azimuth in
+    [-2 pi, 2 pi], so anything outside is refused with the conversion spelled out (a degree value
+    below 1.57 / 6.28 is undetectable and still runs -- the rename that would close that is
+    deferred, see the audit entry). Only CONCRETE real values are checked: a jax tracer, or a
+    complex angle, cannot be read here and is passed through untouched, so nothing traced changes.
+    """
+    for kind, names, bound in (("polar", polar, 0.5 * np.pi), ("azimuth", azimuth, 2.0 * np.pi)):
+        for name, value in names:
+            try:
+                v = float(value)
+            except Exception:                    # noqa: BLE001 (tracer / complex: not checkable)
+                continue
+            if np.isfinite(v) and abs(v) > bound * (1.0 + 1e-12):
+                raise ValueError(
+                    "{}: {}={!r} is outside the {} range |{}| <= {:.6g} rad -- this argument is in "
+                    "RADIANS (lumenairy's convention), not degrees. Did you mean {}={!r}?".format(
+                        where, name, value, kind, name, bound, name, float(np.radians(v))))
 
 
 def _reject_pol(pol, where: str, param: str = "polarization"):
@@ -171,11 +259,92 @@ def require_lumenairy():
             "lumenairy >= {} required (found {}); the bridge's audited fixes (graded-profile "
             "slab order, conical guards, per-layer absorption, Berreman OOP-oblique, BOR, the "
             "D1 JAX-twin traced-source/uniform-eps surface, the A2 public RCWAStack.layers "
-            "accessor) were validated on the 5.22..5.30 span only -- older releases were "
+            "accessor) were validated on the 5.22..{}.{} span only -- older releases were "
             "never exercised. pip install -U lumenairy".format(
-                ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__))
+                ".".join(str(v) for v in VERSION_FLOOR), lumenairy.__version__,
+                VERSION_VERIFIED_MAX[0], VERSION_VERIFIED_MAX[1]))
     _warn_above_ceiling(lumenairy.__version__)
     return lumenairy
+
+
+# PER-FEATURE FLOORS (wave-7, 2026-11-02). VERSION_FLOOR is the oldest lumenairy the bridge's
+# CORE surface runs on (the CI `floor` leg installs exactly 5.22.*); the 2026-11-02 bridge
+# extensions reach lumenairy API that is younger than that. Without a gate those paths died
+# inside lumenairy with an AttributeError / TypeError / ImportError -- or, worse, RAN WRONG (the
+# RCWA analytic-shape row). Each floor below was MEASURED 2026-11-02 by calling the raw lumenairy
+# API on the 5.22.0 wheel and on extracted release trees 5.42.1 / 5.43.0 / 5.44.0 / 5.45.0 /
+# 5.45.1 / 5.47.0 / 5.48.0 / 5.49.0 / 5.50.0 (there is no 5.46.0 tag), and bracketed by `git tag
+# --contains` on the commit that introduced the API:
+#   rcwa_analytic_shapes  5.31.0  RCWAStack.add_layer(shapes=) EXISTS at 5.22 but its shape
+#                                 validator (overlap / over-period extent / area > 1) arrived
+#                                 with lumenairy 636ae4f0 (W8) + d3941f55 (W9 exact predicates),
+#                                 both first tagged v5.31.0. On 5.22.0 two OVERLAPPING disks are
+#                                 ACCEPTED and their form factors ADDED -- a silently wrong layer
+#                                 under the bridge's default inclusion_model='auto', which relies
+#                                 on that refusal to decide "not representable -> rasterize".
+#   pmm2d_pure_tensor     5.43.0  PMM2DStackPure eps=(3, 3) / eps_cell (N, N, 3, 3): 5.42.1
+#                                 raises "operands could not be broadcast (72,) (3, 3)" at solve
+#                                 (eps=) or "eps_cell must be a 2-D (Nx, Ny) array" (eps_cell=);
+#                                 5.43.0 solves and matches the hybrid engine's Jones to 1e-6
+#                                 (the hybrid eps_tensor_cell path already works on 5.22).
+#   pmm2d_pure_per_layer  5.45.0  PMM2DStackPure(layer_grids='per-layer'), add_layer(x_walls=,
+#                                 y_walls=) and add_tapered_pillar: TypeError on 5.44.0.
+#   pmm2d_pure_shapes     5.50.0  lumenairy.elements.pmm.{Rect, Circle, Ellipse} and
+#                                 PMM2DStackPure.add_layer(shapes=, background_eps=): ImportError
+#                                 on 5.49.0 (curved cells shipped in 5.50.0).
+#   pmm_layer_grids       5.32.0  PMMStack(layer_grids=) -- the 2026-08-31 seam's own inline
+#                                 gate, folded into this table (test_lumenairy_per_layer_grids).
+#   bor_sem               5.46.0  BORStack(basis='sem') -- earlier SEM builds manufacture sliver
+#                                 elements (bor_backend._SEM_FLOOR, which reads this table).
+# A path that needs one of these calls require_lumenairy_feature, which raises
+# LumenairyFeatureUnavailable ("... needs lumenairy >= X (installed Y)") BEFORE lumenairy is
+# touched; tests gate on lumenairy_has(feature) with the same table, so the floor leg skips
+# them by name instead of erroring.
+FEATURE_FLOORS = {
+    "pmm_layer_grids": ((5, 32, 0), "the 1-D PMM per-layer spectral-element grid "
+                        "(PMMStack(layer_grids=), the 2026-08-31 seam)"),
+    "rcwa_analytic_shapes": ((5, 31, 0), "RCWA analytic shapes (add_layer(shapes=) with the "
+                             "overlap/extent validator the bridge relies on)"),
+    "pmm2d_pure_tensor": ((5, 43, 0), "a TENSOR permittivity on the PMM2D pure engine"),
+    "pmm2d_pure_per_layer": ((5, 45, 0), "the PMM2D pure engine's per-layer grids "
+                             "(layer_grids='per-layer' / x_walls= / add_tapered_pillar)"),
+    "pmm2d_pure_shapes": ((5, 50, 0), "the PMM2D pure engine's curved-cell shapes "
+                          "(add_layer(shapes=) with Rect / Circle / Ellipse)"),
+    "bor_sem": ((5, 46, 0), "BORStack(basis='sem')"),
+}
+
+
+class LumenairyFeatureUnavailable(NotImplementedError):
+    """The installed lumenairy is at or above the bridge floor (VERSION_FLOOR) but below the
+    floor of the specific feature a path needs (FEATURE_FLOORS)."""
+
+
+def lumenairy_version():
+    """(major, minor, patch) of the importable lumenairy, or None when it is not installed."""
+    try:
+        import lumenairy
+    except ImportError:
+        return None
+    return parse_version(lumenairy.__version__)
+
+
+def lumenairy_has(feature: str) -> bool:
+    """True when the importable lumenairy meets FEATURE_FLOORS[feature] (False if absent)."""
+    v = lumenairy_version()
+    return v is not None and v >= FEATURE_FLOORS[feature][0]
+
+
+def require_lumenairy_feature(feature: str, where: str) -> None:
+    """Raise LumenairyFeatureUnavailable naming the feature, its floor and the installed version
+    when lumenairy is older than FEATURE_FLOORS[feature] (no-op otherwise)."""
+    floor, what = FEATURE_FLOORS[feature]
+    v = lumenairy_version()
+    if v is not None and v >= floor:
+        return
+    import lumenairy
+    raise LumenairyFeatureUnavailable(
+        "{}: {} needs lumenairy >= {} (installed {}); pip install -U lumenairy".format(
+            where, what, ".".join(str(p) for p in floor), lumenairy.__version__))
 
 
 def _warn_above_ceiling(vstr) -> None:

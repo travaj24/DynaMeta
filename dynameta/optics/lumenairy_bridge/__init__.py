@@ -19,7 +19,9 @@ code translated at least nine quantities). What the bridge converts, and where:
   * CONICAL incidence (azimuth != 0), which needs per-order Jones synthesis rather than a row
     pick (_common.conical_synthesis; refused for the row-pick backends by guard_conical_ppol)
   * per-layer RECORDS on the reverse path (translate.py)
-  * eps CELL rasterization from Design inclusions (optics.rasterize)
+  * eps CELL rasterization from Design inclusions (periodic / wrap-aware since 2026-11-02,
+    _shapes.periodic_layer_eps_cell), or -- inclusion_model='auto' (the default since v0.13.0) /
+    'analytic' -- EXACT lumenairy analytic shapes (Rectangle/Circle/Ellipse <-> rectangle/disk/ellipse, _shapes)
 
 A convention bug in any of those is a wrong number with a plausible R + T, which is why each
 has its own gate under validation/lumenairy_*.py.
@@ -36,6 +38,7 @@ from dynameta.optics.lumenairy_bridge.rcwa_design import (drude_eps_jax, pmm_sta
                                                           rcwa_stack_jones, rcwa_stack_RT)
 from dynameta.optics.lumenairy_bridge.bor_backend import (BorLayer, BorResult, BorStackSpec,
                                                           bor_result_to_optical_result,
+                                                          make_bor_spec_solver,
                                                           make_lumenairy_bor_solver, solve_bor)
 from dynameta.optics.lumenairy_bridge.emt_screen import (bruggeman_eps,
                                                         homogenize_lamellar_layers,
@@ -53,6 +56,9 @@ from dynameta.optics.lumenairy_bridge.rcwa_backend import (LumenairyStackSolver,
                                                            design_to_rcwa_stack,
                                                            make_lumenairy_rcwa_solver,
                                                            rcwa_result_to_optical_result)
+from dynameta.optics.lumenairy_bridge._common import LumenairyFeatureUnavailable
+from dynameta.optics.lumenairy_bridge._shapes import (ShapesNotRepresentable,
+                                                      layer_to_shapes_slab)
 from dynameta.optics.lumenairy_bridge.translate import (CallableOptical,
                                                         lumenairy_eps_to_optical_model,
                                                         optical_model_to_lumenairy_eps,
@@ -73,4 +79,6 @@ __all__ = ["LumenairyStackSolver", "design_to_rcwa_stack", "make_lumenairy_rcwa_
            "rcwa_grating_RT", "rcwa_stack_RT", "rcwa_stack_jones",
            "pmm_stack_RT", "pmm_stack_jones", "drude_eps_jax",
            "BorLayer", "BorResult", "BorStackSpec", "solve_bor", "bor_result_to_optical_result",
-           "make_lumenairy_bor_solver"]
+           "make_lumenairy_bor_solver", "make_bor_spec_solver", "ShapesNotRepresentable",
+           "LumenairyFeatureUnavailable",
+           "layer_to_shapes_slab"]

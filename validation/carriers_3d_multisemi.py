@@ -12,6 +12,15 @@ GATE B (from_design heterostack extraction, NO solve): a Design with TWO stacked
         under the gate yields a spec with the body-most as the primary 'semi', the gate-ward one as an
         extra_semiconductor, and the emitted field region named after the gate-adjacent layer; a Design
         whose two semiconductors are NON-contiguous (separated by a dielectric) is ambiguous -> raises.
+        (audit S1-9) The extracted extra entry carries the layer's own electron affinity + DOS mass, and
+        the spec the primary's affinity, so the equilibrium solve can align the bands.
+GATE C (built-in potential, SOLVER; audit S1-9, wave-7 2026-11-02): an n+/n ITO homojunction
+        (4e26 | 4e25 m^-3, 12 nm each) with the gate held at the n side's flat band. Equilibrium = flat
+        Fermi level, so each bulk must sit at its OWN neutral potential: psi(semi bulk) = 0 and
+        psi(xs bulk) = band_alignment()['xs'] = -0.448 V (the FD work-function difference; Boltzmann
+        would say V_t ln 10 = 0.060 V -- ITO is degenerate). Before S1-9 every region was calibrated
+        neutral at psi = 0 (an implicit conduction-band step that cancels the built-in potential), so
+        the junction carried NO drop and the n side bulk sat near 0 V.
 
 Run: python -m validation.carriers_3d_multisemi
 """
@@ -110,7 +119,11 @@ def _gate_b():
             and len(spec.extra_semiconductors) == 1
             and spec.extra_semiconductors[0][0] == "ito_top"
             and abs(spec.extra_semiconductors[0][2] - 5e-9) < 1e-12
-            and spec.oxide_material == "HfO2" and abs(spec.oxide_thk_m - 7e-9) < 1e-12)
+            and spec.oxide_material == "HfO2" and abs(spec.oxide_thk_m - 7e-9) < 1e-12
+            # audit S1-9: the affinity + DOS mass ride along (chi_eV = TransportModel's default 4.5)
+            and len(spec.extra_semiconductors[0]) == 7
+            and spec.extra_semiconductors[0][5] == 4.5 and spec.chi_semi_eV == 4.5
+            and abs(spec.extra_semiconductors[0][6] - 0.35 * M_E) < 1e-40)
     print("[ms] B from_design heterostack: primary='semi'({:.0f}nm) extra={} field='{}' oxide={}({:.0f}nm)"
           " -> {}".format(spec.semi_thk_m * 1e9,
                           [(e[0], "{:.0f}nm".format(e[2] * 1e9)) for e in spec.extra_semiconductors],
@@ -129,11 +142,38 @@ def _gate_b():
     return ok_h and raised
 
 
+def _gate_c():
+    import devsim as ds
+    n_lo = 4.0e25
+    spec = Stacked3DSpec(semi_thk_m=12e-9, extra_semiconductors=[("xs", "ITO", 12e-9, 9.5, n_lo)],
+                         **{**COMMON, "lateral_m": 4e-9, "oxide_thk_m": 4e-9, "grid_n": (3, 3, 17),
+                            "mesh_min_nm": 0.5, "mesh_max_nm": 2.0})
+    psi_x = spec.band_alignment()["xs"][1]
+    s = Devsim3DEquilibrium(spec, device_name="bi", mesh_name="bi_m")
+    s.solve(BiasPoint({"gate": psi_x, "body": 0.0}, "bi"))
+    out = {}
+    for reg, (zlo, zhi) in (("semi", (1e-9, 6e-9)), ("xs", (18e-9, 23e-9))):   # >= 6 nm from the junction
+        z = np.asarray(ds.get_node_model_values(device="bi", region=reg, name="z"))
+        p = np.asarray(ds.get_node_model_values(device="bi", region=reg, name="Potential"))
+        m = (z >= zlo) & (z <= zhi)
+        out[reg] = (float(p[m].min()), float(p[m].max()))
+    s.teardown()
+    dev_semi = max(abs(out["semi"][0]), abs(out["semi"][1]))
+    dev_xs = max(abs(out["xs"][0] - psi_x), abs(out["xs"][1] - psi_x))
+    g_c = psi_x < -0.3 and dev_semi < 5e-3 and dev_xs < 5e-3
+    print("[ms] C n+/n built-in potential: expected psi(xs bulk) = {:+.4f} V; semi bulk psi in [{:+.2e}, "
+          "{:+.2e}] V, xs bulk psi in [{:+.4f}, {:+.4f}] V (max dev {:.1e} / {:.1e} V) -> {}".format(
+              psi_x, out["semi"][0], out["semi"][1], out["xs"][0], out["xs"][1], dev_semi, dev_xs,
+              "OK" if g_c else "FAIL"), flush=True)
+    return g_c
+
+
 def main():
     print("[ms] === 3D multi-semiconductor heterostack (split-reduction + from_design) ===", flush=True)
     g_b = _gate_b()       # cheap (no solve) first
+    g_c = _gate_c()
     g_a = _gate_a()
-    ok = g_a and g_b
+    ok = g_a and g_b and g_c
     print("[ms] *** 3D MULTI-SEMICONDUCTOR: {} ***".format("PASS" if ok else "FAIL"), flush=True)
     return ok
 

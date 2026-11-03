@@ -172,8 +172,14 @@ def test_transient_flags_ase_dominance_at_a_tiny_signal_but_not_on_a_healthy_edf
     t = np.linspace(0.0, 25e-3, 400)
     tiny = _hot_yb().with_signals([Signal(1e-6, 1.03e-6)])
     G_ss = float(tiny.solve(n_nodes=81).signal_gain_dB[0])
-    with np.errstate(all="ignore"), pytest.warns(RuntimeWarning, match="OUT OF ITS VALID REGIME"):
+    with np.errstate(all="ignore"), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         tr = simulate_transient(tiny, t, n_nodes=81)
+    msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("OUT OF ITS VALID REGIME" in m for m in msgs), msgs
+    # since 2026-11-02 the step-stability monitor ALSO fires here (envelope x3.42 per step from
+    # time index 6): in this regime the lagged frozen-population step rings as well as drifts
+    assert any("GROWING swing" in m for m in msgs), msgs
     assert tr.meta["quasi_static_valid"] is False
     assert G_ss - float(tr.signal_gain_dB[-1, 0]) > 40.0
 

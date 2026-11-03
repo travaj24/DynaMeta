@@ -24,9 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import Q_E             # single-source CODATA (was re-declared here)
-
-from dynameta.constants import KB_EV_K   # eV/K, single source (audit 6.3)
+from dynameta.constants import KB_EV_K, Q_E    # single source (audit 6.3; one import, R-35)
 
 
 def trap_generation_rate_per_m2_s(I_sub_A: float, width_m: float, length_m: float, *,

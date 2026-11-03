@@ -148,8 +148,9 @@ def test_pmm_partial_y_rectangle_raises():
 def test_pmm2d_uniform_stack_matches_tmm_both_engines():
     # the 2-D crossed-PMM seam (audit 8.1-4) on a uniform lossy stack: both engines
     # reduce to TMM (R/T and the complex r, pinning layer order + Jones conventions);
-    # neither exposes a transmission Jones (t is None, the 1-D PMM precedent); the
-    # hybrid absorption surface fills per_region_absorption and closes the budget.
+    # since 2026-11-02 both also return the complex zeroth-order t (lumenairy's
+    # jones_transmission, was None in v1) and it matches TMM too; the hybrid
+    # absorption surface fills per_region_absorption and closes the budget.
     # The rigorous patch-referee gates live in validation/lumenairy_pmm2d_bridge.py.
     from dynameta.optics.lumenairy_bridge import make_lumenairy_pmm2d_solver
     from dynameta.optics.tmm_reference import make_layered_tmm_solver
@@ -164,7 +165,7 @@ def test_pmm2d_uniform_stack_matches_tmm_both_engines():
         assert r_b.R == pytest.approx(r_t.R, abs=1e-8)
         assert r_b.T == pytest.approx(r_t.T, abs=1e-8)
         assert r_b.r == pytest.approx(r_t.r, abs=1e-8)
-        assert r_b.t is None                     # no transmission Jones in 2-D PMM
+        assert r_b.t == pytest.approx(r_t.t, abs=1e-8)   # t since 2026-11-02
     r_a = make_lumenairy_pmm2d_solver(engine="hybrid", degree=7, n_orders=2,
                                       absorption=True)(d, None, {}, lam,
                                                        1.0 + 0j, 1.5 + 0j)
@@ -329,6 +330,124 @@ def test_emt_rytov_tensor_harmonic_arithmetic():
     assert t[1, 1] == pytest.approx(eps_par, abs=1e-12)
     assert t[0, 0] == pytest.approx(eps_perp, abs=1e-12)
     assert t[0, 0].real < t[1, 1].real                    # form birefringence: perp < par
+
+
+@needs_lum
+def test_rcwa_uniform_tensor_stack_clamps_orders():
+    """audit S4-12 (wave-7, 2026-11-02): a laterally UNIFORM stack that is 2-D only because it holds
+    a uniform tensor layer used to be solved with the caller's full (2N+1)^2 order set -- 529
+    coupled orders at the default n_orders 11, 17-25 s per solve for what is a planar problem. It
+    is now clamped to 1 order per axis (orders decouple exactly; only the specular one carries
+    power). Oracle: Berreman 4x4 on the same stack (measured <= 1.4e-14; the old 529-order solve
+    sat 8.4e-13 from the clamped one, ~3500x slower -- the timings live in the rcwa_backend
+    comment, not asserted here). On the old code n_orders_x stays 11 (fails the first assert).
+    Discrimination: the same tensor layer WITH a pillar is laterally structured and keeps the
+    requested orders; a wrong tensor orientation (x <-> y swap) misses Berreman by >> the bar."""
+    import numpy as np
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import (design_to_rcwa_stack,
+                                                  make_lumenairy_berreman_solver,
+                                                  make_lumenairy_rcwa_solver)
+    a, t = np.radians(30.0), np.radians(25.0)
+    dd = np.array([np.cos(t) * np.cos(a), np.cos(t) * np.sin(a), np.sin(t)])
+    eps = (1.5 ** 2 * np.eye(3) + (1.7 ** 2 - 1.5 ** 2) * np.outer(dd, dd)).astype(complex)         + 0.01j * np.eye(3)
+    reg = MaterialRegistry()
+    for n, e in (("air", 1.0), ("glass", 2.25), ("lc", 2.4), ("ito", 3.5 + 0.2j), ("hi", 4.0)):
+        reg.add(Material(n, ConstantOptical(complex(e))))
+    lam = 1.31e-6
+
+    def mk(pol, th, incs=()):
+        return Design(name="u", unit_cell=UnitCell.square(600e-9),
+                      stack=Stack(layers=[Layer("ito", 30e-9, "ito"),
+                                          Layer("lc", 800e-9, "lc", inclusions=list(incs)),
+                                          Layer("ito2", 30e-9, "ito")],
+                                  superstrate_material="air", substrate_material="glass"),
+                      electrodes=[], materials=reg,
+                      optical=OpticalSpec(polarization=pol, incidence_angle_deg=th))
+    ebr = {"lc": EpsField(tensor=eps)}
+    stk, _ = design_to_rcwa_stack(mk("y", 0.0), lam, eps_by_region=ebr, n_orders=11)
+    assert (stk.n_orders_x, stk.n_orders_y) == (1, 1)
+    pil = [Inclusion(Rectangle(300e-9, 300e-9, 200e-9, 200e-9), "hi")]
+    stk_p, _ = design_to_rcwa_stack(mk("y", 0.0, pil), lam, eps_by_region=ebr, n_orders=4)
+    assert (stk_p.n_orders_x, stk_p.n_orders_y) == (4, 4)
+    rcwa, berr = make_lumenairy_rcwa_solver(), make_lumenairy_berreman_solver()
+    for pol, th in (("x", 0.0), ("y", 0.0), ("y", 20.0), ("p", 20.0)):
+        d = mk(pol, th)
+        r, b = rcwa(d, None, ebr, lam, 1.0, 1.5), berr(d, None, ebr, lam, 1.0, 1.5)
+        assert max(abs(r.R - b.R), abs(r.T - b.T), abs(r.r - b.r), abs(r.t - b.t)) < 1e-12
+    sw = {"lc": EpsField(tensor=eps[[1, 0, 2]][:, [1, 0, 2]].copy())}
+    d = mk("x", 0.0)
+    assert abs(rcwa(d, None, sw, lam, 1.0, 1.5).R - berr(d, None, ebr, lam, 1.0, 1.5).R) > 1e-4
+    # the LayeredStack seam (LumenairyStackSolver) clamps the same way: record the orders it asks for
+    import lumenairy
+    from dynameta.core.layered import LayeredSlab, LayeredStack
+    from dynameta.optics.lumenairy_bridge import BerremanLayeredSolver, LumenairyStackSolver
+    seen = []
+    real = lumenairy.RCWAStack
+
+    class _Rec(real):
+        def __init__(self, *a, **k):
+            seen.append((k.get("n_orders"), k.get("n_orders_y")))
+            super().__init__(*a, **k)
+    stk = LayeredStack(1.0 + 0j, 1.5 + 0j, [LayeredSlab(30e-9, eps=3.5 + 0.2j),
+                                            LayeredSlab(800e-9, eps_tensor_cell=eps[None, None].copy()),
+                                            LayeredSlab(30e-9, eps=3.5 + 0.2j)],
+                       period_x_m=600e-9, period_y_m=600e-9)
+    o = OpticalSpec(polarization="p", incidence_angle_deg=20.0)
+    try:
+        lumenairy.RCWAStack = _Rec
+        r = LumenairyStackSolver(n_orders=11).solve(stk, lam, o)
+    finally:
+        lumenairy.RCWAStack = real
+    assert seen == [(1, 1)]
+    b = BerremanLayeredSolver().solve(stk, lam, o)
+    assert max(abs(r.R - b.R), abs(r.T - b.T), abs(r.r - b.r), abs(r.t - b.t)) < 1e-12
+
+
+@needs_lum
+def test_emt_rytov_order2_orientation_vs_hand_oracle():
+    """audit S4-16 (wave-7, 2026-11-02): order=2 Rytov ORIENTATION against a hand oracle, written
+    here from Lalanne & Lemercier-Lalanne, J. Mod. Opt. 43, 2063 (1996), binary grating, fill f of
+    eps1 in eps2, c = (pi^2 / 3)(period / lambda)^2 f^2 (1 - f)^2:
+        eps_par(2)  = eps_par(0)  + c (eps1 - eps2)^2                          (E ALONG the lamellae)
+        eps_perp(2) = eps_perp(0) + c (1/eps1 - 1/eps2)^2 eps_perp(0)^3 eps_par(0)  (E ACROSS)
+    The lamellae are partitioned along x (layer_to_pmm_segments), so xx must be PERP and yy PAR.
+    MEASURED 2026-11-02 (lumenairy 5.50, P 300 nm, 1.31 um, f 0.4 of 4+0.2i in air): xx - perp(2)
+    1.7e-18, yy - par(2) 0, off-diagonals 0; a TRANSPOSED convention (xx <-> yy) misses by 0.82,
+    dropping the correction by 0.036 (xx) / 0.090 (yy) -- all >= 1e13 x the bar. zz = par(2) is
+    lumenairy's choice (E_z is also tangential to the walls); it is printed, not part of the
+    orientation claim, which is about the two in-plane axes. Lossy eps1 so a conjugation slip
+    would also show (Im parts 0.0135 / 0.0919)."""
+    import numpy as np
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.optics.lumenairy_bridge import rytov_tensor_for_layer
+    P, lam, f = 300e-9, 1.31e-6, 0.4
+    e1, e2 = 4.0 + 0.2j, 1.0 + 0j
+    reg = MaterialRegistry()
+    for n, e in (("air", e2), ("hi", e1), ("glass", 2.25)):
+        reg.add(Material(n, ConstantOptical(complex(e))))
+    L = Layer("g", 200e-9, "air", inclusions=[Inclusion(Rectangle(P / 2, P / 2, f * P, P), "hi")])
+    d = Design(name="r2", unit_cell=UnitCell(period_x_m=P, period_y_m=P),
+               stack=Stack(layers=[L], superstrate_material="air", substrate_material="glass"),
+               electrodes=[], materials=reg, optical=OpticalSpec(polarization="x"))
+    t2 = rytov_tensor_for_layer(L, d, lam, P, P, order=2)
+    par0 = f * e1 + (1 - f) * e2
+    perp0 = 1.0 / (f / e1 + (1 - f) / e2)
+    c = (np.pi ** 2 / 3.0) * (P / lam) ** 2 * f ** 2 * (1 - f) ** 2
+    par2 = par0 + c * (e1 - e2) ** 2
+    perp2 = perp0 + c * (1 / e1 - 1 / e2) ** 2 * perp0 ** 3 * par0
+    assert abs(t2[0, 0] - perp2) < 1e-12 and abs(t2[1, 1] - par2) < 1e-12
+    assert np.max(np.abs(t2 - np.diag(np.diag(t2)))) == 0.0
+    # discrimination: the transposed tensor and the order-0 tensor both fail the same bar
+    assert abs(t2[1, 1] - perp2) > 0.5 and abs(t2[0, 0] - par2) > 0.5
+    assert abs(perp0 - perp2) > 1e-2 and abs(par0 - par2) > 1e-2
 
 
 @needs_lum
@@ -776,9 +895,16 @@ def test_pmm2d_pure_absorption_budget():
                            superstrate_material="air", substrate_material="glass"),
                electrodes=[], materials=reg,
                optical=OpticalSpec(polarization="y", incidence_angle_deg=0.0))
-    off = make_lumenairy_pmm2d_solver(engine="pure")(d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
+    # audit X-27 (2026-11-02): n_modes=4, not the default 8. Every assertion here is STRUCTURAL
+    # (the off-switch, the region keys, the budget identity A_independent == A, A > 1e-3), and
+    # all of them hold at any resolution: measured A = 0.0930 / 0.0918 / 0.0910 / 0.0907 at
+    # n_modes 3 / 4 / 6 / 8, |A_independent - A| = 3e-15 at n_modes 3 and 4, 5e-14 at 8. The default
+    # cost 120-180 s per solve on the dev box (765 s for this test under load, the file's
+    # largest single item); n_modes=4 costs 1-11 s.
+    off = make_lumenairy_pmm2d_solver(engine="pure", n_modes=4)(
+        d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
     assert off.per_region_absorption is None and off.A_independent is None
-    on = make_lumenairy_pmm2d_solver(engine="pure", absorption=True)(
+    on = make_lumenairy_pmm2d_solver(engine="pure", n_modes=4, absorption=True)(
         d, None, {}, 1.55e-6, 1.0 + 0j, 1.5 + 0j)
     assert set(on.per_region_absorption) == {"spacer", "patch"}
     assert on.A_independent is not None and abs(on.A_independent - on.A) < 1e-6
@@ -809,6 +935,10 @@ def test_bor_phase_and_absorption():
     assert ra.A_independent is not None and ra.A_independent > 1e-3
     assert "absorber" in ra.per_region_absorption
     assert abs(ra.R + ra.T + ra.A_independent - 1.0) < 1e-9        # closed budget
+    # audit S4-15 (wave-7, 2026-11-02): the flux fields every Cartesian bridge sets (R_flux=R,
+    # T_flux=T) were None here; the BOR R/T are the same order-summed flux fractions
+    for res in (r1, ra):
+        assert res.R_flux == res.R and res.T_flux == res.T
 
 
 @needs_lum
@@ -954,8 +1084,10 @@ def test_make_lumenairy_bor_solver_overrides_n_radial_and_threads_absorption():
     so a spec can omit/disagree with it and (b) thread `absorption` into solve_bor -- both gated
     against solve_bor itself on the same spec."""
     from dataclasses import replace
-    from dynameta.optics.lumenairy_bridge import (BorLayer, BorStackSpec,
-                                                  make_lumenairy_bor_solver, solve_bor)
+    # audit V-19 (2026-11-02): the factory is now make_bor_spec_solver; the old name is a
+    # DeprecationWarning alias, gated in tests/test_lumenairy_shapes_sem_wrap.py
+    from dynameta.optics.lumenairy_bridge import (BorLayer, BorStackSpec, solve_bor)
+    from dynameta.optics.lumenairy_bridge import make_bor_spec_solver as make_lumenairy_bor_solver
     spec = BorStackSpec(layers=[BorLayer(thickness_m=0.6e-6, eps=complex(1.8 ** 2), name="slab")],
                         azimuthal_order_m=1, r_max_m=40e-6, n_radial=32, n_super=1.0, n_sub=1.0)
     got = make_lumenairy_bor_solver(n_radial=48)(spec, 1.0e-6)

@@ -31,6 +31,7 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT
 from dynameta.optics.amp_noise import nf_from_psd
+from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["PassiveElement", "StageRecord", "ChainResult", "AmplifierChain"]
 
@@ -162,7 +163,7 @@ class AmplifierChain:
                     "AmplifierChain.solve: stages disagree on the ASE mode count "
                     "(m_modes = {}); the OSNR is referenced to the LAST amplifier stage's "
                     "m_modes = {} (it sets the ASE reaching the output). Pass m_out= "
-                    "explicitly to pin it.".format(m_seen, m_seen[-1]),
+                    "explicitly to pin it.".format(m_seen, m_seen[-1]), AdvisoryWarning,
                     stacklevel=2)
             m_ref = m_seen[-1] if m_seen else 2         # all-passive chain: keep the 2-pol default
         else:

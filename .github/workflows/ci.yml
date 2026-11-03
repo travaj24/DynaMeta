@@ -115,7 +115,11 @@ jobs:
     # 2026-09-14: 75 -> 120. The coverage leg runs ~1.7x the three plain legs (73 min against
     # 35-53 min on main at 1bef664), so the old cap had two minutes of headroom and CANCELLED
     # a healthy py3.12 leg on run 34896908068 -- a shared-budget artifact, not a test verdict.
-    timeout-minutes: 120
+    # 2026-11-03 (v0.13.0): 120 -> 150. main measured 65-95 min on the coverage leg (runs
+    # 41479363891 / 41487439529) and v0.13.0 adds ~446 CPU-s of fast tests (summed per-test junit
+    # times, main vs branch, 68 changed files; mostly test_fdtd_registration + the bridge files),
+    # i.e. ~10-15 min more on this leg -- the old cap would keep ~1.1x on a slow runner.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -141,9 +145,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'" "jax>=0.11; python_version >= '3.12'"
       - name: Run fast tests
-        # audit S6-3: the @slow tests (now 9 -- 8 in test_soa.py, 1 in test_harmonics.py) are
-        # excluded from all four legs; seven are wrappers whose underlying validation modules run
-        # once in the `smoke` job, and ALL NINE run in the `nightly` job, step (a).
+        # audit S6-3: the @slow tests (now 11 -- 8 in test_soa.py, 1 each in test_harmonics.py,
+        # test_ringdown.py and test_lumenairy_bridge_verify_550.py; recount with
+        # `pytest --collect-only -q -m slow tests/`, 2026-11-02) are excluded from all four legs;
+        # seven are wrappers whose underlying validation modules run once in the `smoke` job, and
+        # ALL ELEVEN run in the `nightly` job, step (a).
         if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
       # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
@@ -193,7 +199,9 @@ jobs:
     name: floor pins (py3.10, oldest declared)
     runs-on: ubuntu-latest
     # 8:18 wall at -n 8 locally (~66 CPU-min); a 2-vCPU runner should land well inside this cap.
-    timeout-minutes: 60
+    # 2026-11-03 (v0.13.0): 60 -> 75. main measured 39-47 min here and v0.13.0 adds ~446 CPU-s of
+    # fast tests (see the `test` job), so the old cap would keep only ~1.2x.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -207,6 +215,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . "numpy==1.24.*" "scipy==1.10.*" "lumenairy==5.22.*" "pytest>=7.0" tmm pytest-xdist
+      # lumenairy 5.22 is OLDER than the 2026-11-02 bridge extensions (RCWA analytic shapes 5.31,
+      # PMM2D pure tensor 5.43 / per-layer grids + tapers 5.45 / curved shapes 5.50, BOR SEM 5.46).
+      # The bridge refuses those paths with LumenairyFeatureUnavailable naming the version, and their
+      # tests skip by name off the same table (_common.FEATURE_FLOORS; wave-7 2026-11-02, verified
+      # in a lumenairy-5.22.0 venv: the 11 bridge/geometry/layered/graphene test files 163 passed /
+      # 22 skipped, none errored; numpy 1.24 / scipy 1.10 themselves were NOT reproducible there).
       - name: Assert the floor is what actually got installed
         # The trip-wire that keeps this leg honest: `np.trapezoid` DOES NOT EXIST before numpy
         # 2.0, so its absence proves this interpreter really is on the pre-2.0 API surface. If a
@@ -358,14 +372,20 @@ jobs:
       - name: Assert the solver stack really imported
         run: python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
       - name: Run the ngsolve/devsim-gated test modules
-        # The 25 modules that mention ngsolve or devsim, MINUS the three that dominate the clock
-        # (test_fem_drivers > 300 s and test_graded_tensor_fem > 240 s run in the `nightly` job,
+        # The modules that mention ngsolve or devsim (29 listed here as of 2026-11-02; 25 at
+        # first), MINUS the three that dominate the clock (test_fem_drivers > 300 s and test_graded_tensor_fem > 240 s run in the `nightly` job,
         # step (b1); test_shg_grating does not fit ANY hosted runner -- see the top-of-file
         # not-covered list -- and is dev-workstation-only). Every file
         # listed here was run locally against ngsolve 6.2.2606 + devsim 2.10.0 on 2026-07-26 and
         # passed. ADD NEW SOLVER-GATED MODULES HERE -- an unlisted one silently runs nowhere,
         # which is exactly the T-5 failure mode. (test_fem_symmetry_tensor added 2026-11-02 for
-        # v0.11.7: 55 s locally at 6 threads; test_fem_speed added 2026-11-02 for v0.12.0: 60 s.)
+        # v0.11.7: 55 s locally at 6 threads; test_fem_speed added 2026-11-02 for v0.12.0: 60 s;
+        # test_geometry_guards added 2026-11-02 -- its needs_ng / needs_devsim cases skip on the
+        # `test` legs, so without this line they ran nowhere: 48 passed in 1.1 s locally. Same
+        # sweep, same day: test_audit_2026_07_25_cleanup (2 importorskip("ngsolve") cases),
+        # test_dc_solve_gummel (module-level importorskip("devsim")) and
+        # test_ngsolve_ellipse_primitive (netgen.occ) also ran nowhere -- added; the three together
+        # 28 passed in 6 s locally.)
         #
         # NOT PINNED to an old release, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg
         # red every night from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py.
@@ -377,14 +397,18 @@ jobs:
         # (the release the 0.12.0 solver timings and this leg were verified on); it stays open above.
         run: |
           pytest -q -m "not slow" \
-            tests/test_audit_2026_07_17_infra.py tests/test_audit_guards.py \
+            tests/test_audit_2026_07_17_infra.py tests/test_audit_2026_07_25_cleanup.py \
+            tests/test_audit_guards.py \
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
-            tests/test_contact_current.py tests/test_density_gradient.py \
+            tests/test_contact_current.py tests/test_dc_solve_gummel.py \
+            tests/test_density_gradient.py \
             tests/test_devsim_smoke.py tests/test_electrothermal.py \
             tests/test_fem_symmetry_tensor.py tests/test_fem_speed.py \
-            tests/test_gated_builder.py tests/test_geometry_shapes.py \
+            tests/test_gated_builder.py tests/test_geometry_guards.py \
+            tests/test_geometry_shapes.py \
             tests/test_hydro_fem.py tests/test_impact_ionization.py \
             tests/test_mesh_periodicity.py tests/test_mobility.py \
+            tests/test_ngsolve_ellipse_primitive.py \
             tests/test_pipeline_effects.py tests/test_polarization_vocabulary.py \
             tests/test_qcse.py tests/test_sfg_fem.py \
             tests/test_shg_fem.py tests/test_solver_guards.py \
@@ -428,8 +452,10 @@ jobs:
     # (py3.14, ngsolve 6.2.2604 + devsim 2.10.0, each file run on its own, serially). That box has
     # far more cores and RAM than a GitHub-hosted runner (4 vCPU / 16 GB), so every local number
     # below is a FLOOR for the CI wall, not a forecast:
-    #   (a) pytest -m slow          9 tests    736 s MEASURED (test_soa.py 719 s -- the Innolume
-    #                                          co-fit dominates it -- plus test_harmonics.py 17 s)
+    #   (a) pytest -m slow         11 tests    ~818 s MEASURED (test_soa.py 719 s -- the Innolume
+    #                                          co-fit dominates it -- plus test_harmonics.py 17 s;
+    #                                          + test_ringdown.py n_slab = 20 52 s and
+    #                                          test_lumenairy_bridge_verify_550.py 30 s, 2026-11-02)
     #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
     #                                          test_graded_tensor_fem.py 258 s / 1 passed)
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
@@ -472,8 +498,10 @@ jobs:
           python -c "import ngsolve, devsim, gmsh; print('ngsolve', ngsolve.__version__, '| devsim', devsim.__version__, '| gmsh ok')"
           python -c "import h5py, zarr, jax; print('h5py', h5py.__version__, '| zarr', zarr.__version__, '| jax', jax.__version__)"
       - name: (a) the @slow tests every PR leg deselects
-        # The 9 `-m slow` tests (8 in test_soa.py, 1 in test_harmonics.py): the QD-SOA validation
-        # wrappers, the multi-minute Innolume co-fit, and the blazed-grating FDTD deflection oracle.
+        # The 11 `-m slow` tests (8 in test_soa.py, 1 each in test_harmonics.py, test_ringdown.py
+        # and test_lumenairy_bridge_verify_550.py): the QD-SOA validation wrappers, the
+        # multi-minute Innolume co-fit, the blazed-grating FDTD deflection oracle, the n_slab = 20
+        # FDTD etalon ringdown Q vs Fabry-Perot, and the lumenairy-5.30 PMM-twin angle-gradient row.
         # `-m "not slow"` on the four `test` legs is what makes them cheap; this is the other half.
         # PARTIAL OVERLAP with (c2) is deliberate and is not pure duplication: seven of these are
         # thin wrappers around validation modules (c2) also runs, but only the pytest route puts

@@ -376,7 +376,7 @@ def _strict_local_minima(field: np.ndarray, neighborhood: int, exclude_border: i
     return hits
 
 
-def charge_map(field, radius: int = 2) -> np.ndarray:
+def charge_map(field, radius: int = 2, *, cross_check: bool = True) -> np.ndarray:
     """Local topological charge on a small square loop centred at each interior grid vertex,
     returned as an (Nx, Ny) array (np.nan where the loop does not fit inside the grid, AND where
     the loop fails the sampling guard -- e.g. loops hugging or crossing a vortex core, whose
@@ -388,7 +388,24 @@ def charge_map(field, radius: int = 2) -> np.ndarray:
     block is centred on the vortex). NYQUIST NOTE: a loop of half-size R has P = 8 R boundary
     samples and resolves |q| <= (P/2 - 1)/2 = 2 R - 1/2 without aliasing, so choose
     R >= (2 |q| + 1) / 4; radius = 2 (16 points, |q| <= 3) is the robust default and resolves the
-    q = +-2 charges. Use radius = 1 for the sharpest localization when |q| <= 1."""
+    q = +-2 charges. Use radius = 1 for the sharpest localization when |q| <= 1.
+
+    TWO-RADIUS CROSS-CHECK (audit Q-27, 2026-11-02; ``cross_check=True``, the default). Past the
+    Nyquist bound the loop does not fail the angle guard -- it ALIASES to a clean wrong integer:
+    on an ideal q * atan2 vortex at radius = 2 (41 x 41 grid) the centred loop read q = 0.0 for
+    q = 4 and -2.0 for q = 6, the guard silent, i.e. the high-charge vortex vanished from the map.
+    Each vertex is therefore also evaluated on the loop of half-size ``2 * radius`` (32 samples at
+    the default) and set to nan where the two disagree. Measured on ideal q = 1..8 vortices
+    (41 x 41, radius 2), counting every finite value against the charge its loop truly encloses:
+    the cross-checked map has ZERO wrong finite values (q = 4..8 read nan at the centre; q = 1..3
+    keep their exact centre value), where a ``radius + 1`` check still let 16 agreeing wrong
+    values through around q = 4 (loops NEAR, not around, a fast-winding core alias too). The
+    two loops can still agree on a wrong value once the larger one aliases as well: at
+    ``|q| = 8 * radius`` (2q a multiple of BOTH loop lengths) the centre reads a clean 0 again
+    (measured, q = 16 at radius 2) -- the bound moved from |q| = 4 to 16. A vertex is also nan where
+    the loops legitimately enclose different vortices (one on the ring between them) or where
+    the larger loop does not fit in the grid -- "not verified at this scale", not 0.
+    ``cross_check=False`` is the single-radius map of before (about a third of the cost)."""
     arr = np.asarray(field)
     phi = polarization_angle_field(arr) if (arr.ndim == 3 and arr.shape[-1] == 2) else arr.astype(float)
     if phi.ndim != 2:
@@ -403,4 +420,20 @@ def charge_map(field, radius: int = 2) -> np.ndarray:
             except ValueError:
                 out[i, j] = np.nan     # undersampled loop (e.g. hugging / crossing a vortex
                                        # core): honestly undetermined, NOT a junk half-integer
+    if not cross_check:
+        return out
+    r2 = 2 * r                         # audit Q-27: a second loop that aliases DIFFERENTLY
+    for i in range(r, nx - r):
+        for j in range(r, ny - r):
+            if not np.isfinite(out[i, j]):
+                continue
+            if i < r2 or j < r2 or i >= nx - r2 or j >= ny - r2:
+                out[i, j] = np.nan     # the check loop does not fit: unverified
+                continue
+            try:
+                q2 = topological_charge(phi, (i - r2, i + r2, j - r2, j + r2))
+            except ValueError:
+                q2 = np.nan
+            if q2 != out[i, j]:
+                out[i, j] = np.nan     # radius-dependent: aliased, or a vortex between the loops
     return out

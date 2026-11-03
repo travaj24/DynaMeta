@@ -1017,3 +1017,49 @@ def test_q_budget_reports_the_dispersive_omega0_shift():
     # DISCRIMINATION: the bias grows with gamma/omega_0, which is the whole point of reporting it
     assert shifts[1] > shifts[0]
     assert shifts[1] < 0.05                     # still a small, usable split at gamma/w0 ~ 0.1
+
+
+# ------------------------------------------------------------------------------------------------
+# wave-6 hygiene (2026-11-02): audit Q-17 (removable light-line singularity) and Q-23 (one
+# energy-budget policy across the three layered oracles)
+# ------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("pol", ["s", "p"])
+@pytest.mark.parametrize("eps_layer,k_par", [(4.0, 2.0e6), (0.0, 0.0)])
+def test_q17_stack_denominator_is_finite_and_continuous_at_a_layer_light_line(pol, eps_layer,
+                                                                              k_par):
+    """audit Q-17. At k0 = 1e6 m^-1 a layer with eps k0^2 == k_par^2 EXACTLY (eps 4, k_par 2e6;
+    or an eps = 0 layer at normal incidence) has kz = 0, where sin(kz d)/Y and Y sin(kz d) are
+    0/0. D is EVEN in kz (the removable singularity the docstring promises), but pre-fix the
+    evaluation raised ZeroDivisionError (NaN before the P-6 scalar rewrite). Gate: D(omega0) is
+    finite and is the limit of D(omega0 (1 + h)) -- the offset error falls linearly with h."""
+    from dynameta.optics.resonance import _stack_denominator
+    w0 = C_LIGHT * 1.0e6
+    layers = [(2.0, 3.0e-7), (eps_layer, 1.0e-6)]
+    D0 = _stack_denominator(w0, layers, pol, 3.0, 1.5, k_par)
+    assert np.isfinite(D0.real) and np.isfinite(D0.imag) and D0 != 0
+    errs = [abs(_stack_denominator(w0 * (1.0 + h), layers, pol, 3.0, 1.5, k_par) / D0 - 1.0)
+            for h in (1e-6, 1e-8, 1e-10)]
+    # measured: 4.2e-6 / 4.2e-8 / 4.2e-10 (s, light line) ... 8.5e-7 / 8.5e-9 / 8.5e-11 (p, ENZ)
+    assert errs[0] < 1e-4 and errs[1] < 1e-6 and errs[2] < 1e-8, errs
+    assert errs[1] < 0.02 * errs[0] and errs[2] < 0.02 * errs[1]           # O(h): continuous
+
+
+def test_q23_layered_smatrix_complex_refuses_a_gain_layer_on_the_real_axis():
+    """audit Q-23: tmm_reference RAISED on an energy-budget violation while resonance and
+    nonlocal_tmm returned T > 1 / A < 0 silently on the SAME stack. Measured on a 1 um
+    Im(eps) = -0.3 slab (a sign-convention slip) at 2e15 rad/s: T = 4.22 from all three. All
+    three now share tmm_reference._check_energy_budget on the real axis; complex omega (pole work)
+    and an explicit check_energy=False (a deliberate gain medium) are untouched."""
+    gain = [(2.25 - 0.3j, 1.0e-6)]
+    with pytest.raises(ValueError, match="energy budget"):
+        layered_smatrix_complex(2.0e15, gain)
+    with pytest.raises(ValueError, match="energy budget"):
+        stack_rta(1.0, [((2.25 - 0.3j) ** 0.5, 1.0e-6)], 1.0, 2 * math.pi * C_LIGHT / 2.0e15)
+    sm = layered_smatrix_complex(2.0e15, gain, check_energy=False)
+    assert sm.T > 4.0                                                   # the gain is real physics
+    layered_smatrix_complex(2.0e15 - 1.0e13j, gain)                     # complex omega: no check
+    # a passive stack is untouched, bit for bit, with or without the guard
+    lossy = [(2.25 + 0.3j, 1.0e-6)]
+    a = layered_smatrix_complex(2.0e15, lossy, pol="p", theta_rad=0.4)
+    b = layered_smatrix_complex(2.0e15, lossy, pol="p", theta_rad=0.4, check_energy=False)
+    assert (a.r, a.t, a.R, a.T) == (b.r, b.t, b.R, b.T)

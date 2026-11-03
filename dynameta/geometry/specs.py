@@ -135,13 +135,18 @@ class OpticalSpec:
             raise NotImplementedError(
                 "oblique incidence requires polarization='y' (s-pol) or 'p' (p-pol); "
                 "'x' (E along x) is not transverse to an oblique x-z-plane wavevector.")
-        # Polar-angle cap: the fixed-alpha HalfSpace PML is validated to ~1% only through
-        # 30 deg and degrades badly toward grazing -- reject clearly-unsupported angles
-        # rather than return a silently-wrong result (audit conical-verifier).
+        # Polar-angle cap: a SOLVER-AGNOSTIC sanity bound (the spec feeds the FEM, TMM, RCWA and
+        # FDTD backends alike), not a validation claim. AUDIT R-28 (2026-11-02): the old comment
+        # justified 60 deg with the FEM PML's ~1%-through-30-deg figure, which covers none of
+        # 30-60. The per-backend envelopes are enforced where they live: the FEM advises at any
+        # oblique angle (~1% to 30 deg, ~3% at 45, measured vs tmm) and RAISES above 50 deg
+        # (optics.solver._FEM_THETA_MAX_DEG); the layered TMM is exact at any real angle. The cap
+        # only rejects near-grazing input no backend here is validated for (audit conical-verifier).
         if abs(self.incidence_angle_deg) > 60.0:
             raise NotImplementedError(
-                "incidence_angle_deg={:.1f} exceeds the supported range (|theta| <= 60 "
-                "deg); the fixed-alpha z-PML is validated to ~1% through 30 deg only."
+                "incidence_angle_deg={:.1f} exceeds the supported range (|theta| <= 60 deg, a "
+                "near-grazing bound shared by every backend); the FEM solver itself is "
+                "validated to ~1% through 30 deg (~3% at 45) and refuses above 50 deg."
                 .format(self.incidence_angle_deg))
         # Conical incidence (azimuth != 0) supports s-pol ('y', the in-plane Es rotates with phi)
         # AND p-pol ('p', the in-plane p-pol component splits over (cos phi, sin phi)); only 'x'

@@ -26,6 +26,7 @@ from dynameta.core.interfaces import OpticalResult, CarrierSolver, OpticalGeomet
 from dynameta.geometry.design import Design
 from dynameta.sweep import Sweep
 from dynameta.optics.tmm_reference import end_media_indices   # pure (no ngsolve); shared n_super/n_sub
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 # NOTE: the FEM trio (LayeredOpticalBuilder / assemble_eps_cf / solve_fem) and the default
 # DEVSIM carrier builder are imported LAZILY inside the functions below, so a pure
 # layered/TMM path (run_pipeline with carrier_solver + optical_builder + optical_solver all
@@ -99,6 +100,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
         raise ValueError("run_pipeline: sweep must have at least one bias point and one wavelength "
                          "(got {} bias points, {} wavelengths)".format(
                              len(sweep.bias_points), len(sweep.wavelengths_nm)))
+    # audit R-27: validated FIRST -- it used to be checked only after every DEVSIM bias solve and the
+    # optical mesh build, so a typo cost the whole carrier sweep before the ValueError
+    if on_error not in ("raise", "skip"):
+        raise ValueError("run_pipeline: on_error must be 'raise' or 'skip', got {!r}".format(on_error))
     if carrier_solver is None:
         from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
         carrier_solver = LayeredDevsimBuilder(design)
@@ -177,16 +182,13 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     # 3) bridge + solve per (bias, wavelength)
     rows: List[SweepRow] = []
 
-    if on_error not in ("raise", "skip"):
-        raise ValueError("run_pipeline: on_error must be 'raise' or 'skip', got {!r}".format(on_error))
-
     def _failed_row(exc):
         # audit S5-5: in on_error='skip' a failed optical point becomes an all-NaN OpticalResult
         # row (the NaN-aware SweepResults containers were built for exactly this) instead of
         # discarding every completed solve in the run.
         import warnings
         warnings.warn("run_pipeline: optical solve failed ({}); emitting NaN row "
-                      "(on_error='skip')".format(exc), stacklevel=2)
+                      "(on_error='skip')".format(exc), AdvisoryWarning, stacklevel=2)
         return OpticalResult(r=None, R=float("nan"), phase_deg=float("nan"), solve_time_s=0.0)
 
     def _emit(label, lam_nm, res):
@@ -201,7 +203,10 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     ef_keys0 = None                            # callable extra_fields key-set stability (see docstring)
     for bp in sweep.bias_points:
         # pop, not read: this loop is the sole consumer, so each bias's grids are freed once its
-        # optics finish -- peak memory no longer stacks every CarrierField under the optics solve
+        # optics finish and the held set SHRINKS as the sweep proceeds. Audit R-27: that is all it
+        # does -- the carriers are solved up front (DEVSIM is torn down before the mesh build), so
+        # the FIRST bias's optics (and the mesh build) still run with every CarrierField alive; the
+        # peak is unchanged, only the tail is lighter.
         # (duplicate labels can't KeyError: Sweep rejects them at construction)
         cf = fields.pop(bp.label)
         # the field-effect bundle for THIS bias (a callable resolves the per-bias E/T/state; a plain
@@ -215,7 +220,7 @@ def run_pipeline(design: Design, sweep: Sweep, *,
                 import warnings
                 warnings.warn("run_pipeline: extra_fields callable changed its key set at bias '{}' "
                               "({} vs {}) -- the driven effect terms silently differ across the sweep."
-                              .format(bp.label, sorted(keys), sorted(ef_keys0)), RuntimeWarning,
+                              .format(bp.label, sorted(keys), sorted(ef_keys0)), UnreliableResultWarning,
                               stacklevel=2)
         if sweep_aware and len(sweep.wavelengths_nm) > 1:
             # FAST PATH: ONE broadband solve for THIS bias serves the whole wavelength list. Hand the solver

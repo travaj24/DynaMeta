@@ -367,13 +367,16 @@ def test_chiral_pure_twist_is_linear_with_analytic_energy():
 
 
 def test_chiral_cholesteric_undistorted_helix():
-    # q0 != 0 with matched plate azimuths -> phi' = q0 uniform, energy = -(1/2) K22 q0^2 d.
+    # q0 != 0 with matched plate azimuths -> phi' = q0 uniform. The twist energy is reported in the
+    # complete-square convention (audit S1-14, wave-7 2026-11-02): an UNDISTORTED helix stores none,
+    # so it is 0 to the solve's accuracy, not the legacy -(1/2) K22 q0^2 d (the untwisted-cell reference).
     q0 = cholesteric_q0(8e-6)
     ch = chiral_director_profile_bvp(V_app=0.0, phi_bottom_rad=0.0, phi_top_rad=q0 * _CK["d_planar"],
                                      q0_rad_m=q0, **{**_CK, "theta_b_rad": 0.5 * np.pi})
     phz = np.gradient(ch.phi_rad, ch.z_m)
     assert np.max(np.abs(phz - q0)) / q0 < 1e-5
-    assert ch.twist_energy_J_m2 == pytest.approx(-0.5 * _CK["K22"] * q0 * q0 * _CK["d_planar"], rel=1e-5)
+    scale = 0.5 * _CK["K22"] * q0 * q0 * _CK["d_planar"]
+    assert abs(ch.twist_energy_J_m2) < 1e-5 * scale
 
 
 def test_chiral_tn_freedericksz_monotone():
@@ -400,3 +403,114 @@ def test_chiral_rejects_bad_constants():
     with pytest.raises(ValueError):
         chiral_director_profile_bvp(V_app=1.0, K11=1e-12, K22=-1e-12, K33=1e-12, eps_para=10.0,
                                     eps_perp=4.0, d_planar=4e-6)
+
+
+def test_c14_elliptic_B_is_exact_up_to_the_bisection_bracket():
+    """AUDIT C-14 (2026-11-02): the 1201-point uniform-phi trapezoid over-estimated B(theta_m) by
+    1.15x at 89.99 deg, 3.56x at 89.999 deg and 42.09x at the bisection's upper bracket
+    pi/2 - 1e-6 (endpoint log singularity). The closed form K(m)/sqrt(dEps) is checked against an
+    INDEPENDENT reduction -- Carlson's R_F(0, 1-eta, 1+g eta), a different special function -- and
+    against a direct high-precision quadrature of the module-docstring integrand."""
+    from scipy.special import elliprf
+    from scipy.integrate import quad
+    from dynameta.carriers.lc_director import _B
+    for dEps, ep in ((DEPS, EP), (10.0, 5.0), (0.5, 3.0)):
+        g = dEps / ep
+        for tm in (np.radians(1.0), np.radians(45.0), np.radians(89.0), np.radians(89.9),
+                   np.radians(89.99), np.radians(89.999), 0.5 * np.pi - 1e-6):
+            eta = np.sin(tm) ** 2
+            eps_m = ep + dEps * eta
+            ref = np.sqrt(eps_m / (dEps * ep)) * elliprf(0.0, np.cos(tm) ** 2, 1.0 + g * eta)
+            assert _B(tm, dEps, ep) == pytest.approx(ref, rel=1e-13), (dEps, ep, np.degrees(tm))
+            # direct quadrature, split so the endpoint singularity sits on an interval boundary
+            f = lambda p: (np.sqrt(eps_m / (dEps * (ep + dEps * eta * np.sin(p) ** 2)))
+                           / np.sqrt(np.cos(tm) ** 2 + eta * np.cos(p) ** 2))   # 1 - eta sin^2 p
+            brk = [0.0, 0.25 * np.pi, 0.5 * np.pi - 1e-2, 0.5 * np.pi - 1e-4, 0.5 * np.pi]
+            direct = sum(quad(f, a, b, epsabs=0.0, epsrel=1e-13, limit=200)[0]
+                         for a, b in zip(brk, brk[1:]))
+            assert _B(tm, dEps, ep) == pytest.approx(direct, rel=1e-10), (dEps, ep, np.degrees(tm))
+    # theta_m -> 0 limit: K(0) = pi/2, so V -> V_th exactly
+    assert _B(1e-9, DEPS, EP) == pytest.approx(0.5 * np.pi / np.sqrt(DEPS), rel=1e-15)
+
+
+def test_c14_over_drive_tilt_obeys_deulings_law():
+    """AUDIT C-14: at V = 8 V_th the bisection must return the theta_m of Deuling's law
+    V/V_th = (2/pi) K(m), 1 - m = cos^2(theta_m) eps_perp/eps(theta_m) (K33 = K11). With the
+    biased quadrature the 42x-high V(theta_m) curve put the root at a SMALLER tilt."""
+    from scipy.special import ellipkm1
+    Vth = freedericksz_threshold_V(K, DEPS)
+    for r in (3.0, 8.0):
+        tm = director_profile(K, DEPS, EP, D, r * Vth).theta_max_rad
+        one_minus_m = np.cos(tm) ** 2 * EP / (EP + DEPS * np.sin(tm) ** 2)
+        # rel 1e-7, not tighter: theta_max is arcsin(sin theta_m) of the reconstruction, and arcsin
+        # near 1 costs ~eps/cos(theta_m) -- measured 8.3e-9 at 8 V_th (theta_m = 89.9987 deg)
+        assert (2.0 / np.pi) * ellipkm1(one_minus_m) == pytest.approx(r, rel=1e-7), r
+    # past the bracket's V (~(2/pi) K at pi/2 - 1e-6, ~9.1 V_th here) the tilt saturates at the bracket
+    assert director_profile(K, DEPS, EP, D, 50.0 * Vth).theta_max_rad == pytest.approx(
+        0.5 * np.pi - 1e-6, abs=1e-9)                      # same arcsin round-off, 4.4e-11 measured
+
+
+def _theta_form_z_fraction(th, tm, dEps, ep):
+    """INDEPENDENT oracle for the half-cell z-fraction of tilt th: the first integral in the THETA
+    variable, z(th) ~ int_0^th sqrt(eps(t)) / sqrt(sin^2 tm - sin^2 t) dt, with t = tm - u^2 removing
+    the turning point and the near-singular sin(2 tm - u^2) ~ 2 (pi/2 - tm) + u^2 split out by
+    breakpoints -- a different variable, integrand and special-function-free route from _z_map's
+    Carlson R_F/R_J reduction."""
+    from scipy.integrate import quad
+
+    def f(u):
+        t = tm - u * u
+        return 2.0 * u * np.sqrt(ep + dEps * np.sin(t) ** 2) / np.sqrt(
+            np.sin(u * u) * np.sin(2.0 * tm - u * u))
+
+    def area(t_hi):
+        u0, u1 = np.sqrt(tm - t_hi), np.sqrt(tm)
+        dl = 0.5 * np.pi - tm
+        pts = sorted({u0, u1} | {np.sqrt(k * dl) for k in (0.1, 1.0, 10.0, 100.0)
+                                 if u0 < np.sqrt(k * dl) < u1})
+        return sum(quad(f, a, b, epsabs=0.0, epsrel=1e-11, limit=200)[0]
+                   for a, b in zip(pts, pts[1:]))
+
+    return area(th) / area(tm)
+
+
+def test_lc_profile_z_map_is_exact_up_to_the_bisection_bracket():
+    """AUDIT LC-profile (wave-6 follow-up of C-14, 2026-11-02): director_profile reconstructed theta(z)
+    with a 4001-point uniform-phi cumulative trapezoid on the log-singular 1/sqrt(1 - eta sin^2 phi);
+    its z-map end read 1.67x at theta_m = 89.999 deg and 13.8x at the bracket, and theta(z) was off by
+    up to 0.20 rad at 8 V_th / 0.37 rad at 9 V_th (vs 40-digit mpmath). Now a closed form (Carlson
+    R_F + R_J) inverted by bisection. Gate: every returned (z_i, theta_i) must satisfy the
+    independent theta-form quadrature z-fraction, three material sets, up to the bracket."""
+    from dynameta.carriers.lc_director import _V_of_theta_max
+    for dEps, ep in ((DEPS, EP), (10.0, 5.0), (0.5, 3.0)):
+        for tm in (np.radians(45.0), np.radians(89.9), np.radians(89.999), 0.5 * np.pi - 1e-6):
+            V = _V_of_theta_max(tm, K, dEps, ep) * (1.0 - 1e-15)    # just below the bracket's V
+            p = director_profile(K, dEps, ep, D, V, nz=21)
+            assert p.theta_max_rad == pytest.approx(tm, abs=1e-9)
+            tmr = p.theta_max_rad
+            zf = np.minimum(p.z_m, D - p.z_m) / (0.5 * D)
+            for zi, thi in zip(zf, p.theta_rad):
+                if 0.0 < zi < 1.0 - 1e-12:
+                    assert _theta_form_z_fraction(thi, tmr, dEps, ep) == pytest.approx(
+                        zi, abs=1e-9), (dEps, ep, np.degrees(tm), zi)
+            assert p.theta_rad[0] == 0.0 and p.theta_rad[-1] == 0.0
+            assert p.theta_rad[10] == pytest.approx(tmr, abs=1e-15)   # midplane node
+
+
+def test_lc_profile_analytic_limits():
+    """LC-profile: (a) weak relative anisotropy (dEps << eps_perp, constant-field limit) -- the
+    classical z/(d/2) = F(phi, eta)/K(eta), sin(phi) = sin(theta)/sin(theta_m); (b) just above V_th
+    -- the linearised Freedericksz mode theta = theta_m sin(pi z/d)."""
+    from scipy.special import ellipkinc, ellipk
+    from dynameta.carriers.lc_director import _V_of_theta_max
+    ep, dEps = 1e9, 1.0                                             # g = 1e-9
+    for tm in (np.radians(30.0), np.radians(80.0), np.radians(89.5)):
+        p = director_profile(K, dEps, ep, D, _V_of_theta_max(tm, K, dEps, ep), nz=41)
+        eta = np.sin(tm) ** 2
+        half = p.z_m <= 0.5 * D
+        phi = np.arcsin(np.clip(np.sin(p.theta_rad[half]) / np.sin(tm), 0.0, 1.0))
+        assert np.allclose(ellipkinc(phi, eta) / ellipk(eta), p.z_m[half] / (0.5 * D),
+                           rtol=0.0, atol=1e-8), np.degrees(tm)
+    tm = 1e-3
+    p = director_profile(K, DEPS, EP, D, _V_of_theta_max(tm, K, DEPS, EP), nz=41)
+    assert np.allclose(p.theta_rad, tm * np.sin(np.pi * p.z_m / D), rtol=0.0, atol=1e-8)

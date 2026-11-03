@@ -442,3 +442,55 @@ def test_qd_temperature_insensitivity_and_varshni_tracking():
     assert abs(peaks[1] - peaks[0]) / peaks[0] < 0.10          # deep dE -> peak gain T-insensitive
     varshni_50K = gain_peak_drift_nm_per_K(lams[0], "InAs") * 50.0
     assert np.isclose(lams[1] - lams[0], varshni_50K, rtol=0.10)   # peak wavelength tracks Varshni
+
+
+# ===================== AUDIT A-15: the HOLE ladder is detailed-balanced too =====================
+
+def test_a15_full_detailed_balance_slaves_the_hole_escape():
+    # With eh_split the hole ladder has its OWN capture time; an explicitly-set tau_esc_h_s used
+    # to survive with_full_detailed_balance unbalanced (only the electron escape was slaved).
+    p = QDGainParams(eh_split=True, tau_cap_h_s=0.4e-12, tau_esc_h_s=5.0e-12)
+    pf = p.with_full_detailed_balance()
+    # same WL mass / split as the electrons -> the balanced RATIO escape/capture is the electron's
+    assert pf.tau_esc_h_s != 5.0e-12
+    assert np.isclose(pf.tau_esc_h_s / 0.4e-12, pf.tau_esc_s / pf.tau_cap_s, rtol=1e-12)
+    # every hole parameter None -> the hole escape IS the electron escape to the bit (what the
+    # engine already used for tau_esc_h_s = None), and the excitonic path is untouched
+    q = QDGainParams(eh_split=True).with_full_detailed_balance()
+    assert q.tau_esc_h_s == q.tau_esc_s
+    assert QDGainParams().with_full_detailed_balance().tau_esc_h_s is None
+    with pytest.raises(ValueError, match="m_wl_h_eff_kg"):
+        QDGainParams(m_wl_h_eff_kg=0.0)
+
+
+def test_a15_dark_relaxation_balances_the_hole_ladder_at_its_own_energies():
+    # The test_dark_relaxation_reaches_boltzmann_equilibrium oracle on the HOLE ladder, with hole
+    # splits and WL mass different from the electrons': an internal-only dark system must relax
+    # each band to per-state Boltzmann occupations at ITS OWN energies. Before A-15 the explicit
+    # tau_esc_h_s survived and one dE_ES_GS_eV set both ES<->GS ladders.
+    from scipy.integrate import solve_ivp
+    from dynameta.constants import HBAR, M_E
+    dE_esgs_h, dE_wles_h, m_h = 0.025, 0.045, 0.30 * M_E
+    p = QDGainParams(n_groups=1, dE_ES_GS_eV=0.060, dE_WL_ES_eV=0.080, T_K=300.0,
+                     B_wl_m3_s=0.0, C_wl_m6_s=0.0, tau_sp_s=1.0e30, eh_split=True,
+                     tau_cap_h_s=0.4e-12, tau_esc_h_s=5.0e-12, tau_rel_h_s=0.8e-12,
+                     dE_ES_GS_h_eV=dE_esgs_h, dE_WL_ES_h_eV=dE_wles_h, m_wl_h_eff_kg=m_h)
+    pf = p.with_full_detailed_balance()
+    m = QDGainModel(pf)
+    ng = m.ng
+    y0 = np.zeros(2 + 4 * ng)
+    y0[0] = y0[1] = 1.0e21
+    y0[2:] = 1.0e-3
+    sol = solve_ivp(lambda t, y: m.rhs(y, 0.0, 0.0, pf.nu0_Hz), (0.0, 5.0e-8), y0,
+                    method="BDF", rtol=1e-11, atol=1e-16, t_eval=[5.0e-8])
+    y = sol.y[:, -1]
+    kT_eV = KB * 300.0 / Q_E
+    A_dot = 1.0 / (pf.N_q_m3 * pf.t_qd_m)
+    # electrons: the existing ladder, unchanged
+    assert abs(m.f_c_GS(y)[0] / m.f_c_ES(y)[0] / np.exp(0.060 / kT_eV) - 1.0) < 0.02
+    f_wl_e = (y[0] / pf.N_q_m3) / (pf.m_wl_eff_kg * KB * 300.0 / (np.pi * HBAR ** 2) * A_dot)
+    assert abs(m.f_c_ES(y)[0] / f_wl_e / np.exp(0.080 / kT_eV) - 1.0) < 0.05
+    # holes: at the HOLE energies and the HOLE WL density of states
+    assert abs(m.f_v_GS(y)[0] / m.f_v_ES(y)[0] / np.exp(dE_esgs_h / kT_eV) - 1.0) < 0.02
+    f_wl_h = (y[1] / pf.N_q_m3) / (m_h * KB * 300.0 / (np.pi * HBAR ** 2) * A_dot)
+    assert abs(m.f_v_ES(y)[0] / f_wl_h / np.exp(dE_wles_h / kT_eV) - 1.0) < 0.05

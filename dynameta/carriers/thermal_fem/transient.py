@@ -12,6 +12,7 @@ import numpy as np
 import ngsolve as ng
 
 from dynameta.carriers.thermal_fem.common import ThermalLayer, _S, add_load_terms, build_thermal_forms, mean_T_per_layer
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 @dataclass
 class ThermalTransientResult:
@@ -93,7 +94,7 @@ class ThermalTransientResult:
 
 def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float, period_y_m: float,
                                 t_end_s: float, dt_s: float, flux_W_m2: float = 0.0,
-                                T_sink_K: float = 300.0,
+                                T_sink_K: float = T_REF,
                                 joule_W_m3: Optional[Union[float, Dict[str, float], object]] = None,
                                 T_init_K: Optional[Union[float, object]] = None, theta: float = 1.0,
                                 maxh_m: Optional[float] = None, order: int = 2,
@@ -138,7 +139,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
     dt = t_end_s / n_steps
     time_dependent = (flux_of_t is not None) or (joule_of_t is not None)
 
-    mesh, fes, u, v, a, f, k_cf = build_thermal_forms(
+    mesh, fes, u, v, a, f, k_cf, g_bot = build_thermal_forms(
         layers, period_x_m, period_y_m, flux_W_m2, T_sink_K, joule_W_m3, maxh_m, order)
 
     # MASS term: int (rho*Cp/_S^2) u v dV' = _S * M_phys (matches the _S * (K, f) scaling; see header)
@@ -166,8 +167,7 @@ def solve_thermal_transient_fem(layers: List[ThermalLayer], *, period_x_m: float
         T.Set(ng.CoefficientFunction(float(T_init_K)))
     else:
         T.Set(T_init_K)
-    g_bot = ng.GridFunction(fes)
-    g_bot.Set(ng.CoefficientFunction(float(T_sink_K)), definedon=mesh.Boundaries("bot"))
+    # g_bot = the builder's sink lift (T_sink on the sink dofs; audit X-17)
     free = fes.FreeDofs()
     tvec = T.vec.FV().NumPy()
     gvec = g_bot.vec.FV().NumPy()

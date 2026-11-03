@@ -66,6 +66,20 @@ def test_delta_effect_prevents_background_double_count():
     assert np.allclose(comp.eps({"E": np.array([0.0, 0.0, Ez])}, 1300e-9), 4.0 * np.eye(3) + shift)
 
 
+def test_r24_delta_effect_baseline_overrides_only_its_own_fields():
+    """audit R-24: DeltaEffect's baseline REPLACED the bundle, so a model reading E and T evaluated
+    its E-reference with T at its default and the 'E delta' carried the full T dependence. The
+    baseline now overrides only its own keys."""
+    class _ET:                                                 # eps = 2 + a E_z + b (T - 300)
+        def eps(self, fields, lambda_m):
+            E = np.asarray(fields.get("E", np.zeros(3)), dtype=float)
+            T = float(fields.get("T", 300.0))
+            return complex(2.0 + 1e-8 * E[..., 2] + 1e-3 * (T - 300.0))
+    d = DeltaEffect(_ET(), {"E": np.zeros(3)})
+    got = as_tensor(d.eps({"E": np.array([0.0, 0.0, 2e6]), "T": 400.0}, 1300e-9))
+    assert np.allclose(got, 0.02 * np.eye(3), rtol=0.0, atol=1e-15)   # E shift only (pre-fix 0.12)
+
+
 def test_eps_field_tensor_flags():
     from dynameta.core.eps_field import EpsField
     ax = np.array([0.0, 1.0])

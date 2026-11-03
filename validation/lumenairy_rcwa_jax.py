@@ -9,7 +9,8 @@ TE/TM-decoupled / even-parity fast paths; the jax twin runs the general 2N casca
 of the non-JAX bridge is a genuinely different code path, the strongest available oracle).
 
 GATE A (twin == non-JAX bridge forward): rcwa_stack_RT on a lamellar grating stack (the SAME
-        128-sample rasterized cell the bridge builds) matches make_lumenairy_rcwa_solver's
+        128-sample rasterized cell the bridge builds with inclusion_model='raster' -- pinned
+        explicitly since the v0.13.0 'auto' default) matches make_lumenairy_rcwa_solver's
         R and T < 1e-10; a uniform lossy stack through the RAW uniform-eps path (5.22: no
         constant-cell lift) matches < 1e-10 too; the functional grating twin
         (rcwa_grating_RT) jax forward equals its own numpy forward < 1e-12.
@@ -53,7 +54,7 @@ PER = 600e-9
 T0 = 180e-9
 EPS_RIDGE = 6.0
 N_ORD = 5
-SX = 128                                  # the bridge's structured-cell sampling (pinned)
+SX = 128                                  # the bridge's raster sampling at N_ORD (pinned)
 
 
 def _design(thick, eps_ridge):
@@ -109,8 +110,17 @@ def main():
     cell0 = layer_eps_cell(d0.stack.layers[0], X, Y, LAM, d0.materials, {})
     mask = jnp.asarray(cell0 == complex(EPS_RIDGE))
 
+    # LIKE WITH LIKE (2026-11-02): the twin solves the rasterized cell, so the bridge side is
+    # pinned to inclusion_model='raster' at the SAME S. Since v0.13.0 the bridge default is
+    # 'auto', which would solve this lamellar ridge with lumenairy's ANALYTIC form factors -- a
+    # different discretization of the same geometry (the S -> inf limit of an area-averaged
+    # raster), not the twin's cell, so GATE A would compare two models instead of two code paths.
+    # The 2026-11-02 raster-lattice change (default S = max(128, 8 N)) does not touch this: an
+    # explicit cell_samples keeps the old max(cell_samples, 4 N + 1, 128) = 128 at N_ORD = 5, and
+    # the default would be 128 too (N <= 16).
     def bridge_R(thick, eps_ridge):
-        r = make_lumenairy_rcwa_solver(n_orders=N_ORD, cell_samples=SX)(
+        r = make_lumenairy_rcwa_solver(n_orders=N_ORD, cell_samples=SX,
+                                       inclusion_model="raster")(
             _design(float(thick), float(eps_ridge)), None, {}, LAM, 1.0 + 0j, 1.5 + 0j)
         return r.R, r.T
 

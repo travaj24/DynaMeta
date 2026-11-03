@@ -18,6 +18,9 @@ import pytest
 from scipy.signal import find_peaks, hilbert
 
 from dynameta.constants import C_LIGHT
+# audit V-17 leftover (wave-7, 2026-11-02): the ringdown unreliable-result warns are now
+# UnreliableResultWarning (a RuntimeWarning subclass); these pytest.warns pin the category.
+from dynameta.warning_types import UnreliableResultWarning
 from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
                                       fdtd_etalon_ringdown, _ringdown_window,
                                       _nls_refine_real, _real_reconstruction)
@@ -27,7 +30,7 @@ from dynameta.optics.ringdown import (Mode, matrix_pencil, ringdown_q,
 # a short-window note -- data-dependent, e.g. n_slab 3.5 and 10.0 warn here while 5.0 and 7.0 do
 # not, so pinning them per test would be brittle. Both diagnostics have their OWN dedicated gates
 # in this file (test_gate10b_growing_poles_are_dropped_and_do_not_overflow,
-# test_gate9_high_q_window_span_scope_limit_warns), which use `pytest.warns` and are therefore
+# test_gate9_default_fits_the_whole_window_not_a_1200_sample_cut), which use `pytest.warns` and are
 # unaffected by these marks -- as is test_gate10c's local `simplefilter("error")`.
 pytestmark = [pytest.mark.filterwarnings("ignore:matrix_pencil"),
               pytest.mark.filterwarnings("ignore:fdtd_etalon_ringdown")]
@@ -186,12 +189,11 @@ def test_gate5_fdtd_default_path_byte_identical():
     assert tt["dt"] > 0.0
 
 
-def test_gate5_existing_fdtd_infra_gates_still_pass():
-    # explicitly re-run the pre-edit FDTD coverage gates; they must be unaffected by the probe
-    from test_audit_2026_07_17_infra import (test_fdtd_1d_dielectric_slab_vs_airy,
-                                             test_fdtd_1d_drude_slab_absorbs)
-    test_fdtd_1d_dielectric_slab_vs_airy()
-    test_fdtd_1d_drude_slab_absorbs()
+# Gate 5 ("existing FDTD infra still passes") is GONE (audit T-16, 2026-11-02): it re-invoked
+# test_audit_2026_07_17_infra's two FDTD test functions by cross-module import, so the suite ran the
+# same two FDTD marches again for zero coverage (pytest already collects them in their own module)
+# and the bare `from test_audit_... import` breaks under --import-mode=importlib. The probe's
+# non-perturbation is gated directly above (default-off trace, bit-identical R/T).
 
 
 # ---- Gate 6: FDTD ETALON (matrix-pencil Q vs Fabry-Perot closed form) ----------------------
@@ -244,6 +246,11 @@ def test_gate7_high_q_etalon_window_does_not_collapse(n_slab, rel_tol):
       5.0:  27.291776 vs 27.118423  (+0.639%)
       7.0:  54.970929 vs 54.601815  (+0.676%)      <- pre-fix: ValueError
      10.0: 110.302227 vs 109.588241 (+0.652%)      <- pre-fix: ValueError
+    (Those are pencil values: the refinement was inert until 2026-11-02. With it live: 13.227533
+    (-1.006%), 27.202982 (+0.312%), 55.205207 (+1.105%), 110.408333 (+0.748%). With the WHOLE
+    data-driven window fit by default (wave-6 H6b, 2026-11-02; was a 1200-sample cut): 13.227438
+    (-1.007%), 27.202936 (+0.312%), 55.196766 (+1.090%), 110.349763 (+0.695%) -- 3.5 unchanged to
+    7e-6, the other three closer to Fabry-Perot.)
     """
     L = 1.0e-6
     er = fdtd_etalon_ringdown(n_slab, L, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
@@ -279,7 +286,7 @@ def test_gate9_contaminated_window_is_flagged_not_silent():
     from dynameta.optics.ringdown import _fit_quality, _FIT_RESID_TOL, _FIT_AMP_SANITY
 
     for n_slab, min_err in ((3.5, 0.50), (7.0, 0.50)):
-        with pytest.warns(RuntimeWarning) as rec:
+        with pytest.warns(UnreliableResultWarning) as rec:
             er = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                       resolution=30, start_frac=0.02)
         msgs = [str(w.message) for w in rec]
@@ -289,6 +296,9 @@ def test_gate9_contaminated_window_is_flagged_not_silent():
         # ... and it is flagged, twice: the window rule and the fit itself
         assert any("PEAKS at sample" in s for s in msgs), msgs
         assert any("does NOT describe the window" in s for s in msgs), msgs
+        # V-17 (wave-7): BOTH flags carry the unreliable-result category, not a bare RuntimeWarning
+        assert all(issubclass(w.category, UnreliableResultWarning) for w in rec
+                   if str(w.message).startswith("fdtd_etalon_ringdown")), [w.category for w in rec]
         assert "UNRELIABLE FIT" in er.refine_note, er.refine_note
         q = _fit_quality(er.signal_used, er.dt_used, er.modes)
         assert q["rms_rel"] > _FIT_RESID_TOL or q["amp_rel"] > _FIT_AMP_SANITY, q
@@ -328,27 +338,128 @@ def test_gate9_fit_quality_tells_are_silent_on_every_shipped_config():
         assert "UNRELIABLE" not in er.refine_note, (n_slab, er.refine_note)
 
 
-def test_gate9_high_q_window_span_scope_limit_warns():
-    """FIX-VERIFY W1 item 9.  ``max_fit_samples = 1200`` at 20 samples/period is 60 carrier
-    periods, i.e. only ``60 pi / Q`` amplitude e-foldings: 13.7 at n_slab = 3.5 but 1.1 at
-    n_slab = 20.  That is where the extraction breaks -- Q = 169.9 against the Fabry-Perot 455.2
-    (-62.7%) -- and it used to do so silently.  The span guard (and, here, the RMS tell too) now
-    says so."""
-    with pytest.warns(RuntimeWarning) as rec:
-        er = fdtd_etalon_ringdown(20.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
-                                  resolution=30)
-    msgs = [str(w.message) for w in rec]
-    m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
-    assert er.q < 0.6 * _fp_closed_form_q(20.0, m)              # it IS biased low
-    assert any("e-foldings" in s for s in msgs), msgs
-    nepers = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
-    assert nepers < 3.0
+def _memoize_fdtd_march(monkeypatch):
+    """Run each distinct etalon march ONCE per test: fdtd_etalon_ringdown imports solve_fdtd_1d
+    from dynameta.optics.fdtd at call time and only READS the result, so a memoizing wrapper lets
+    one test compare several fit settings on the very same trace."""
+    import dynameta.optics.fdtd as fdtd_mod
+    real, cache = fdtd_mod.solve_fdtd_1d, {}
 
-    # the shipped low-index configs are comfortably inside the envelope
-    for n_slab, lo in ((3.5, 10.0), (7.0, 3.0)):
+    def memo(layers, **kw):
+        key = (tuple((ly.eps_inf, ly.thickness_m) for ly in layers), tuple(sorted(kw.items())))
+        if key not in cache:
+            cache[key] = real(layers, **kw)
+        return cache[key]
+    monkeypatch.setattr(fdtd_mod, "solve_fdtd_1d", memo)
+
+
+def test_gate9_default_fits_the_whole_window_not_a_1200_sample_cut():
+    """wave-6 H6b (2026-11-02). ``max_fit_samples`` defaulted to 1200, a hard TRUNCATION of the
+    decimated data-driven window: at n_slab = 10 that is 1200 of 4937 samples, 1.67 amplitude
+    e-foldings, and the span guard fired on a shipped gate-7 config. The default (None) now fits the
+    whole window: 4937 samples, 6.88 nepers, no span warning, Q 110.4083 -> 110.3498 (+0.748% ->
+    +0.695% vs Fabry-Perot 109.5882). FAILS on the old default (1200 samples, 1.67 nepers, warns).
+    The explicit legacy cap still truncates -- and its warning now says the cap did it. (This
+    replaces the n_slab = 20 span test that ran a ~55 s march in the PR tier: n_slab = 10 is 21 s,
+    and the n_slab = 20 case is the @slow gate below.)"""
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        er = fdtd_etalon_ringdown(10.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30)
+    assert not [str(w.message) for w in rec if "e-foldings" in str(w.message)]
+    assert er.signal_used.size > 4000, er.signal_used.size   # 4937 measured; the old cut was 1200
+    nep = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
+    assert nep > 5.0, nep                                     # 6.88 measured (1.67 at the old cut)
+    m = int(round(2.0 * np.pi * er.f0_Hz * 10.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(10.0, m) - 1.0) < 0.03, (er.q, m)
+
+    with pytest.warns(UnreliableResultWarning, match="TRUNCATED to max_fit_samples = 1200"):
+        e1 = fdtd_etalon_ringdown(10.0, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                                  resolution=30, max_fit_samples=1200)
+    assert e1.signal_used.size == 1200
+    assert 0.5 * e1.modes[0].gamma_rad_s * float(e1.t_used[-1]) < 3.0      # 1.67 measured
+    # the flag is conservative: at 1.67 nepers the extraction still holds (+0.748%)
+    m1 = int(round(2.0 * np.pi * e1.f0_Hz * 10.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(e1.q / _fp_closed_form_q(10.0, m1) - 1.0) < 0.03
+
+    # the shipped low-index configs are comfortably inside the envelope at the default
+    for n_slab, lo in ((3.5, 15.0), (7.0, 10.0)):            # 21.3 / 14.0 nepers measured
         e2 = fdtd_etalon_ringdown(n_slab, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                                   resolution=30)
         assert 0.5 * e2.modes[0].gamma_rad_s * float(e2.t_used[-1]) > lo, n_slab
+
+    with pytest.raises(ValueError, match="max_fit_samples must be None"):
+        fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                             resolution=30, max_fit_samples=8)
+
+
+def test_gate9_over_budget_window_coarsens_the_stride_before_cutting(monkeypatch):
+    """The default's pencil budget (_FIT_SAMPLES_BUDGET = 6000) never binds on a shipped config
+    (largest window 4937 samples), so it is exercised here by LOWERING it on the n_slab = 7 trace
+    (4838 samples at 20 samples/period, 14.0 nepers, Q 55.1968, +1.090% vs Fabry-Perot 54.6018):
+      budget 2000: the stride is coarsened (~20 -> ~8 samples/period) instead of cutting the
+                   window: the whole 14.0 nepers kept, Q inside the 3% gate (Q lives in the decay
+                   SPAN, not in the samples per period);
+      budget  300: even 8 samples/period overflows it, so the window is cut, and the span warning
+                   names the budget -- not max_fit_samples -- as the reason."""
+    import dynameta.optics.ringdown as rd_mod
+    _memoize_fdtd_march(monkeypatch)
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
+    ref = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert ref.signal_used.size > 4000                     # premise: over the 2000 budget below
+    nep_ref = 0.5 * ref.modes[0].gamma_rad_s * float(ref.t_used[-1])
+
+    monkeypatch.setattr(rd_mod, "_FIT_SAMPLES_BUDGET", 2000)
+    er = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert er.signal_used.size <= 2000
+    assert er.dt_used > 2.0 * ref.dt_used                  # coarser stride, not a cut
+    assert er.window == ref.window
+    nep = 0.5 * er.modes[0].gamma_rad_s * float(er.t_used[-1])
+    assert nep == pytest.approx(nep_ref, rel=0.05), (nep, nep_ref)
+    m = int(round(2.0 * np.pi * er.f0_Hz * 7.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(7.0, m) - 1.0) < 0.03, (er.q, m)
+
+    monkeypatch.setattr(rd_mod, "_FIT_SAMPLES_BUDGET", 300)
+    with pytest.warns(UnreliableResultWarning, match="pencil budget"):
+        e3 = fdtd_etalon_ringdown(7.0, 1.0e-6, **kw)
+    assert e3.signal_used.size == 300
+
+
+@pytest.mark.slow
+def test_gate9_n20_default_matches_fabry_perot(monkeypatch):
+    """n_slab = 20 (Q ~ 440) at the DEFAULT settings (wave-6 H6b, 2026-11-02). Until then the
+    default fit was cut at max_fit_samples = 1200 of the 3176 decimated samples the data-driven
+    window holds -- 0.42 TRUE e-foldings, over which a comb of ~29 near-equal-amplitude etalon modes (the top
+    eight within 25% of each other) cannot be separated -- and Q came out 252.8 against Fabry-Perot
+    455.2 (-44.5%, m 29; RMS tell 3.5e-2, UNRELIABLE FIT). The wave-2 hand-off asked: record too
+    short for Q ~ 450, or more pencil modes than max_refine? NEITHER. Measured on this one trace:
+        max_fit_samples 1200 (old default)   Q 252.83 vs 455.15 (m 29)  -44.5%   UNRELIABLE FIT
+        max_fit_samples 2400                 Q 442.18 vs 439.46 (m 28)  +0.6%
+        None = whole window, 3176 (default)  Q 442.24 vs 439.46 (m 28)  +0.6%
+        settle 24 (2x record), cap 1200      Q 5408   (window later, 0.04 nepers) -- WORSE
+        settle 24, None (whole window)       Q 441.29 vs 439.46 (m 28)  +0.4%  (SAME 3176 samples)
+        max_refine 20 (pencil: 34 modes)     Q 442.35 -- max_refine is not the lever
+    The cut was the problem, not the record length. The pencil cost of 3176 vs 1200 samples is
+    invisible next to the ~55-70 s FDTD march. The span guard still warns (1.10 < 3 nepers -- the
+    window ends at the march's numeric floor, so a longer record does not lengthen it): a
+    CONSERVATIVE flag this case over-calls. FAILS on the old default
+    (Q -44.5%). @slow: one march, memoized for the legacy-cap contrast; nightly (a) runs it."""
+    _memoize_fdtd_march(monkeypatch)
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=30)
+    with pytest.warns(UnreliableResultWarning, match="WHOLE data-driven window"):
+        er = fdtd_etalon_ringdown(20.0, 1.0e-6, **kw)
+    assert "UNRELIABLE" not in er.refine_note, er.refine_note
+    assert er.signal_used.size > 3000                       # the whole window (3176), not 1200
+    m = int(round(2.0 * np.pi * er.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert abs(er.q / _fp_closed_form_q(20.0, m) - 1.0) < 0.03, (er.q, m)
+    # the contrast on the SAME trace: the legacy cap IS the -44.5% bias, and it is flagged
+    with pytest.warns(RuntimeWarning) as rec:
+        e1 = fdtd_etalon_ringdown(20.0, 1.0e-6, max_fit_samples=1200, **kw)
+    m1 = int(round(2.0 * np.pi * e1.f0_Hz * 20.0 * 1.0e-6 / (np.pi * C_LIGHT)))
+    assert e1.q < 0.6 * _fp_closed_form_q(20.0, m1)
+    assert "UNRELIABLE" in e1.refine_note
+    assert any("TRUNCATED" in str(w.message) for w in rec)
 
 
 def test_gate7_cross_platform_q_anchor_unchanged():
@@ -357,11 +468,53 @@ def test_gate7_cross_platform_q_anchor_unchanged():
     Q-2 remediation must NOT move it: the window is byte-identical there (the late-time floor IS
     a genuine plateau, floor/env_start = 9.95e-13, so the plateau test passes and the decade rule
     is not binding) and the refinement's design matrix is unchanged (all 6 pencil modes are
-    oscillatory, so `rest` was empty even pre-fix)."""
+    oscillatory, so `rest` was empty even pre-fix).
+
+    RE-PINNED 2026-11-02 (wave-6): 13.351015 was the RAW PENCIL Q -- the refinement was inert
+    (nfev = 1 in SI units, see test_nls_refinement_moves_optical_poles_toward_truth), so the
+    cross-platform agreement of the anchor came from the pencil alone. With the refinement live
+    the dominant Q is the NLS optimum 13.227533 (-0.92% from the pencil; -1.01% vs the
+    Fabry-Perot 13.361960, inside gate 7's 3%), refit RMS 2.44e-3 -> 1.93e-3 of the window's
+    peak-to-peak, and independent of the seed to <= 8e-10 (test_nls_refinement_makes_the_fdtd_
+    q_seed_independent) -- which is what makes it a platform-stable anchor.
+
+    RE-PINNED 2026-11-02 (wave-6 H6b): the default fit is now the WHOLE data-driven window (1845
+    decimated samples, 21.3 nepers) instead of its first 1200 (13.9): 13.227533 -> 13.227438
+    (-7.2e-6 relative; -1.007% vs Fabry-Perot). Same window, same refinement: the extra 645
+    samples sit deep in a decay the first 1200 had already pinned, so the anchor barely moves.
+
+    RE-PINNED 2026-11-02 (audit S2-14 siblings, docs/audit/2026-11-02-fdtd-registration.md):
+    solve_fdtd_1d now registers materials at the Yee E nodes. Here pad/dz = 892.5 and d/dz = 87.5
+    exactly, so the slab keeps its 88 cells under both rules and the change is a RIGID one-cell
+    translation (the old cell-centre rule put both effective faces dz = 11.4 nm early; the node rule
+    puts them on the true faces). Q is translation-invariant physically; the FITTED Q moves through
+    the data-driven window's timing against the probe: 13.227438 -> 13.207623 (-0.15%; -1.007% ->
+    -1.155% vs Fabry-Perot 13.361960, inside gate 7's 3%).
+
+    RE-PINNED 2026-11-03 (z-subcell averaging, the solve_fdtd_1d default): the slab's back face lies
+    EXACTLY on node 980 (pad/dz = 892.5, d/dz = 87.5), which now takes the 0.5/0.5 control-volume
+    mean, so the slab has its exact 87.5-cell thickness. 13.207623 -> 13.078561 (-1.155% -> -2.121%
+    vs Fabry-Perot at this res-30 grid, n k dz = 0.17). Farther at res 30 but CONVERGENT: the slow
+    companion gate below shows -0.253% at res 60 (order 3.1; point sampling: -0.370%, order 1.6)."""
     er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
                               resolution=30)
-    assert er.q == pytest.approx(13.351015, rel=1e-4)
+    assert er.q == pytest.approx(13.078561, rel=1e-4)
     assert er.window == (9840, 31980)
+
+
+@pytest.mark.slow
+def test_gate7_anchor_converges_to_fabry_perot():
+    """Companion of the re-pinned anchor (2026-11-03): the n_slab = 3.5 etalon Q converges to the
+    closed-form Fabry-Perot Q between res 30 and res 60 with observed order >= 1.7. Measured:
+    |Q/Q_FP - 1| = 2.121% -> 0.253% (order 3.07); the 2b7a002 point rule gave 1.155% -> 0.370%
+    (order 1.64 -- it would fail this gate)."""
+    errs = []
+    for res in (30, 60):
+        er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6, resolution=res)
+        m = int(round(2.0 * np.pi * er.f0_Hz * 3.5 * 1.0e-6 / (np.pi * C_LIGHT)))
+        errs.append(abs(er.q / _fp_closed_form_q(3.5, m) - 1.0))
+    assert errs[0] < 0.03 and errs[1] < 0.03, errs
+    assert np.log2(errs[0] / errs[1]) >= 1.7, errs
 
 
 def _synthetic_ringdown(n_samp=200000, dt=1.9e-17, f0=2.13e14, q=300.0, pulse_at=3000,
@@ -452,15 +605,25 @@ def _dc_contaminated_trace():
 
 
 def test_gate8_dc_contaminated_refinement_matches_truth():
+    """2026-11-03: the strong pure-decay drift is now classified as a non-resonant Drift (its
+    |omega| = 0 is below the window's frequency resolution 2 pi/(N dt)) and is carried as a FIXED
+    column of the refinement instead of being an omega = 0 Mode; the gate's substance -- every
+    pencil term enters the design matrix, no near-DC oscillator is invented -- is unchanged."""
+    from dynameta.optics.ringdown import _drift_reconstruction
     y, dt, truth = _dc_contaminated_trace()
-    seed = matrix_pencil(y, dt, svd_tol=1e-8, amp_floor=1e-3, real_signal=True)
-    # the scenario must actually exercise the bug: more modes than max_refine, DC dominant
+    drift = []
+    seed = matrix_pencil(y, dt, svd_tol=1e-8, amp_floor=1e-3, real_signal=True, drift_out=drift)
+    # the scenario must actually exercise the bug: more modes than max_refine, a DC drift present
     assert len(seed) > 6
-    assert seed[0].omega_rad_s * dt <= 1e-9, "the DC drift must be the largest-|A| pencil mode"
+    assert len(drift) == 1 and drift[0].omega_rad_s == 0.0, drift
+    assert abs(drift[0].amplitude) > max(abs(m.amplitude) for m in seed), "DC must dominate"
 
-    refined, note = _nls_refine_real(y, dt, seed, max_refine=6)
-    rms_seed = np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed) - y) ** 2))
-    rms_ref = np.sqrt(np.mean((_real_reconstruction(y.size, dt, refined) - y) ** 2))
+    drift_ref = []
+    refined, note = _nls_refine_real(y, dt, seed, max_refine=6, fixed_extra=drift, fixed_out=drift_ref)
+    rms_seed = np.sqrt(np.mean((_real_reconstruction(y.size, dt, seed)
+                                + _drift_reconstruction(y.size, dt, drift) - y) ** 2))
+    rms_ref = np.sqrt(np.mean((_real_reconstruction(y.size, dt, refined)
+                               + _drift_reconstruction(y.size, dt, drift_ref) - y) ** 2))
     # the cross-cutting safety gate: never worse than the seed
     assert rms_ref <= rms_seed, (rms_ref, rms_seed, note)
     assert rms_ref < 1e-6 * np.ptp(y)                            # and in fact essentially exact
@@ -478,9 +641,10 @@ def test_gate8_dc_contaminated_refinement_matches_truth():
     # the dominant OSCILLATORY mode is the A = 1.0 line, not an invented DC one
     dom = max(osc, key=lambda m: abs(m.amplitude))
     assert abs(dom.omega_rad_s / truth[0][0] - 1.0) < 1e-3
-    # the pure-decay drift is still represented (its own real-exponential column)
-    dc = [m for m in refined if m.omega_rad_s * dt <= 1e-9]
-    assert dc and abs(abs(dc[0].amplitude) / 2.5 - 1.0) < 1e-2
+    # the pure-decay drift is still represented (its own real-exponential column), as a Drift
+    assert not [m for m in refined if m.omega_rad_s * dt <= 1e-9]
+    assert drift_ref and abs(abs(drift_ref[0].amplitude) / 2.5 - 1.0) < 1e-2
+    assert drift_ref[0].gamma_rad_s == pytest.approx(2 * 0.6, rel=1e-6)   # y = 2.5 exp(-0.6 t)
 
 
 def test_gate8_refine_returns_seed_with_a_note_when_it_cannot_help():
@@ -539,7 +703,7 @@ def test_gate10b_growing_poles_are_dropped_and_do_not_overflow():
     Vandermonde)."""
     dt, n = 1e-15, np.arange(400)
     y_grow = np.exp(+0.02 * n) * np.cos(0.3 * n)
-    with pytest.warns(RuntimeWarning, match="GROWING pole"):
+    with pytest.warns(UnreliableResultWarning, match="GROWING pole"):
         modes = matrix_pencil(y_grow, dt)
     assert all(m.gamma_rad_s >= 0.0 and m.q >= 0.0 for m in modes)       # contract restored
     kept = matrix_pencil(y_grow, dt, allow_gain=True)
@@ -576,3 +740,212 @@ def test_gate10c_decaying_traces_take_the_unchanged_fast_path():
     assert len(got) == 2
     assert got[0][0] == pytest.approx(0.7, rel=1e-8) and got[0][1] == pytest.approx(0.008, rel=1e-6)
     assert got[1][0] == pytest.approx(1.9, rel=1e-8) and got[1][1] == pytest.approx(0.04, rel=1e-6)
+
+
+# ---- audit Q-22: ringdown_q and fdtd_etalon_ringdown are ONE definition of "the" ringdown Q --
+
+def test_q22_ringdown_q_matches_the_etalon_extraction_on_the_same_trace():
+    """audit Q-22 (2026-11-02). ringdown_q returned the RAW pencil dominant mode while
+    fdtd_etalon_ringdown refined (VARPRO) and re-ranked by the re-solved amplitudes, so the same
+    samples gave two different "ringdown Q"s. Measured pre-fix on two equal-amplitude modes (Q 40
+    and Q 25, 600 samples) plus 5% Gaussian noise (rng seed 106): ringdown_q 24.85 vs the
+    etalon path 40.18. Both now go through _pencil_modes."""
+    from dynameta.optics.ringdown import _nls_refine_real
+    dt = 1e-16
+    t = np.arange(600) * dt
+    w1, w2 = 2 * np.pi * 2.0e14, 2 * np.pi * 2.3e14
+    y = (np.exp(-w1 / 40.0 * t / 2) * np.cos(w1 * t + 0.3)
+         + np.exp(-w2 / 25.0 * t / 2) * np.cos(w2 * t - 1.0)
+         + 0.05 * np.random.default_rng(106).standard_normal(t.size))
+    kw = dict(svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    seed = matrix_pencil(y, dt, **kw)
+    refined, note = _nls_refine_real(y, dt, seed)
+    assert note == ""
+    # premise: on this trace the two orderings really do disagree (else the gate proves nothing)
+    assert seed[0].q != refined[0].q
+    f0, q = ringdown_q(y, dt, **kw)
+    assert (f0, q) == (refined[0].f_hz, refined[0].q)
+    assert abs(q / 40.0 - 1.0) < 0.02                       # and it is the Q-40 mode
+    # refine=False is the raw pencil, explicitly
+    assert ringdown_q(y, dt, refine=False, **kw) == (seed[0].f_hz, seed[0].q)
+    # a complex trace has no real-trace refinement: ringdown_q falls back to the pencil
+    yc = np.exp((-w1 / 80.0 - 1j * w1) * t)
+    assert ringdown_q(yc, dt) == (matrix_pencil(yc, dt)[0].f_hz, matrix_pencil(yc, dt)[0].q)
+
+
+def test_q22_ringdown_q_reproduces_fdtd_etalon_ringdown_bitwise():
+    """The FDTD side of Q-22: hand ringdown_q the very window fdtd_etalon_ringdown inverted, with
+    the pencil kwargs it used, and get its (f0, Q) back bit-for-bit."""
+    er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                              resolution=30)
+    assert ringdown_q(er.signal_used, er.dt_used, pencil_frac=0.4, svd_tol=1e-6,
+                      amp_floor=5e-2, real_signal=True) == (er.f0_Hz, er.q)
+
+
+# ---- wave-6 (2026-11-02): the VARPRO refinement must actually MOVE poles ----------------------
+
+def _one_mode_optical_trace(rng_seed, sigma=0.05, n_samp=600, dt=1e-16, f0=2.0e14, q=40.0):
+    """One damped optical-frequency cosine (omega ~ 1.3e15, gamma ~ 3e13 rad/s -- the SI scale
+    of every FDTD trace) plus white noise of std `sigma` (the peak is 1)."""
+    t = np.arange(n_samp) * dt
+    w = 2.0 * np.pi * f0
+    g = w / q
+    y = (np.exp(-0.5 * g * t) * np.cos(w * t + 0.3)
+         + sigma * np.random.default_rng(rng_seed).standard_normal(n_samp))
+    return y, dt, complex(-0.5 * g, w), g
+
+
+def _pole_err(m, s_true, g):
+    """|s_fit - s_true| / gamma for the mode nearest the true line (s = -gamma/2 + i omega)."""
+    return abs(complex(-0.5 * m.gamma_rad_s, m.omega_rad_s) - s_true) / g
+
+
+def test_nls_refinement_moves_optical_poles_toward_truth():
+    """wave-1 Q-22 finding, fixed 2026-11-02: `_nls_refine_real` was INERT on every optical trace.
+    In SI units (omega ~ 1e15, gamma/2 ~ 1e13 rad/s) the raw gradient was under gtol = 1e-14, so
+    least_squares stopped at nfev = 1 (status 1, dx = 0) and the "refined" pole was the pencil
+    pole bit-for-bit. The optimizer now works in sample time on the peak-normalized trace.
+
+    Truth-anchored, over 24 noise realizations of a known pole (Q 40, 5% noise): the refined
+    (maximum-likelihood) pole must be closer to the truth than the pencil pole ON AVERAGE.
+    Measured at the fix: mean |ds|/gamma 1.173e-2 pencil -> 1.102e-2 refined (ratio 0.939; the
+    TLS pencil at L = 0.4 N is already near-efficient, so the margin is honest, not large).
+    Pre-fix the ratio is EXACTLY 1.0 (no pole moves), which fails the < 0.97 bar."""
+    err_seed, err_ref = [], []
+    for sd in range(24):
+        y, dt, s_true, g = _one_mode_optical_trace(sd)
+        seed = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+        refined, note = _nls_refine_real(y, dt, seed)
+        assert note == "", note
+        err_seed.append(_pole_err(seed[0], s_true, g))
+        err_ref.append(_pole_err(refined[0], s_true, g))
+    ratio = float(np.mean(err_ref) / np.mean(err_seed))
+    assert ratio < 0.97, (ratio, np.mean(err_seed), np.mean(err_ref))
+
+
+def test_nls_refinement_forgets_its_seed():
+    """The documented purpose of the refinement (platform stability): the NLS optimum is a
+    property of the DATA, so a perturbed pencil seed -- the stand-in for a different LAPACK build
+    -- must land on the same refined pole, and far closer to the truth than that seed. Measured
+    at the fix: seed off by +0.2% in omega and +20% in gamma (|ds|/gamma 0.11) refines to within
+    ~1e-9 relative of the pencil-seeded optimum. Pre-fix the perturbed seed came back unchanged."""
+    import dataclasses
+    y, dt, s_true, g = _one_mode_optical_trace(7)
+    seed = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    ref0, note0 = _nls_refine_real(y, dt, seed)
+    assert note0 == ""
+    bad = [dataclasses.replace(m, omega_rad_s=m.omega_rad_s * 1.002,
+                               gamma_rad_s=m.gamma_rad_s * 1.2,
+                               q=m.omega_rad_s * 1.002 / (m.gamma_rad_s * 1.2)) for m in seed]
+    ref1, note1 = _nls_refine_real(y, dt, bad)
+    assert note1 == "", note1
+    assert ref1[0].omega_rad_s == pytest.approx(ref0[0].omega_rad_s, rel=1e-8)
+    assert ref1[0].gamma_rad_s == pytest.approx(ref0[0].gamma_rad_s, rel=1e-6)
+    assert _pole_err(ref1[0], s_true, g) < 0.2 * _pole_err(bad[0], s_true, g)
+
+
+def test_nls_refinement_makes_the_fdtd_q_seed_independent():
+    """On a real FDTD etalon trace (n_slab = 3.5, all 6 pencil modes refined) the refined
+    dominant Q is independent of the seed: a 1e-4 / 1e-2 relative perturbation of every seed
+    gamma (the pencil's BLAS-dependent digits, exaggerated) moved the refined Q by <= 8e-10
+    (measured), against 1e-4 / 8e-3 for the seed itself. Pre-fix the refined Q moved one-for-one
+    with the seed (nfev = 1).
+
+    2026-11-03: the etalon path now carries the pencil's non-resonant DRIFT terms as fixed columns
+    of the refinement (they used to be omega = 0 modes or dropped growing poles), so the perturbed
+    refits are given the same drift (er.drift) -- otherwise they solve a different model (13.0785606
+    without the drift columns vs er.q 13.0785451 with them, 1.2e-6 apart)."""
+    import dataclasses
+    er = fdtd_etalon_ringdown(3.5, 1.0e-6, lambda_min_m=1.2e-6, lambda_max_m=1.7e-6,
+                              resolution=30)
+    y, dt = er.signal_used, er.dt_used
+    seed = matrix_pencil(y, dt, pencil_frac=0.4, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)
+    assert 1 <= len(seed) <= 6                       # premise: every mode is a refined mode
+    for eps in (1e-4, 1e-2):
+        bad = [dataclasses.replace(m, gamma_rad_s=m.gamma_rad_s * (1.0 + eps * (-1) ** i),
+                                   q=m.omega_rad_s / (m.gamma_rad_s * (1.0 + eps * (-1) ** i)))
+               for i, m in enumerate(seed)]
+        out, note = _nls_refine_real(y, dt, bad, fixed_extra=er.drift)
+        assert note == "", note
+        assert out[0].q == pytest.approx(er.q, rel=1e-7), (eps, out[0].q, er.q)
+
+
+
+def test_q21_degenerate_modes_are_split_by_index_not_by_value():
+    """audit Q-21 (fixed in wave 1, d602866, without a gate): _nls_refine_real split refined vs
+    fixed modes with `m not in osc`, i.e. dataclass VALUE equality, so a mode whose exact duplicate
+    was among the refined ones vanished from the design matrix AND from the output. Two
+    value-identical seed modes, max_refine = 1: both must come back (one refined, one fixed)."""
+    dt, n = 1e-3, np.arange(800)
+    t = n * dt
+    w = 2 * np.pi * 40.0
+    y = (np.exp(-2.0 * t) * np.cos(w * t + 0.3)
+         + 0.01 * np.random.default_rng(21).standard_normal(n.size))   # so a refit can improve
+    m = matrix_pencil(y, dt, svd_tol=1e-6, amp_floor=5e-2, real_signal=True)[0]
+    half = Mode(omega_rad_s=m.omega_rad_s, gamma_rad_s=m.gamma_rad_s, q=m.q,
+                amplitude=0.5 * m.amplitude, snr_est=m.snr_est)
+    out, note = _nls_refine_real(y, dt, [half, half], max_refine=1)
+    assert note == "", note
+    assert len(out) == 2
+
+
+# ---- 2026-11-03: non-resonant DRIFT classification (|omega| < 2 pi / (N dt)) ------------------------
+
+def _resonance_plus_drift(drift_rate, drift_amp=0.05, n=3000, dt=1.0e-3):
+    """A 40 Hz resonance (gamma 3 1/s, Q = 83.78) plus a slow REAL drift drift_amp exp(-rate t / 2)
+    (rate < 0 = growing). The window resolves omega_res = 2 pi / (n dt) = 2.09 rad/s."""
+    t = np.arange(n) * dt
+    w, g = 2 * np.pi * 40.0, 3.0
+    y = np.exp(-g * t / 2.0) * np.cos(w * t + 0.3) + drift_amp * np.exp(-drift_rate * t / 2.0)
+    return y, dt, w, g
+
+
+def _growing_warnings(fn):
+    import warnings as _w
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        out = fn()
+    return out, [str(r.message) for r in rec if "GROWING" in str(r.message)]
+
+
+@pytest.mark.parametrize("drift_rate", [-0.1, +0.1])            # growing / decaying drift
+def test_drift_i_resonance_plus_slow_drift(drift_rate):
+    """(i) A decaying resonance plus a slow real drift: no growing-pole warning, Q recovered to fit
+    accuracy, the drift REPORTED (rate and amplitude). On the 2b7a002..f024801 fitter the growing
+    drift pole (rate -0.1) was dropped WITH a growing-pole warning (measured), and a decaying one
+    came back as an omega = 0 Mode."""
+    y, dt, w, g = _resonance_plus_drift(drift_rate)
+    drift = []
+    modes, warns = _growing_warnings(lambda: matrix_pencil(y, dt, drift_out=drift))
+    assert warns == [], warns
+    assert len(modes) == 1 and modes[0].omega_rad_s > 0.0
+    assert modes[0].q == pytest.approx(w / g, rel=1e-6)
+    assert len(drift) == 1 and drift[0].omega_rad_s < drift[0].threshold_rad_s
+    assert drift[0].threshold_rad_s == pytest.approx(2 * np.pi / (y.size * dt))
+    assert drift[0].gamma_rad_s == pytest.approx(drift_rate, rel=1e-4)
+    assert abs(drift[0].amplitude) == pytest.approx(0.05, rel=1e-4)
+    (f0, q), warns2 = _growing_warnings(lambda: ringdown_q(y, dt))
+    assert warns2 == [] and q == pytest.approx(w / g, rel=1e-6) and f0 == pytest.approx(40.0, rel=1e-8)
+
+
+def test_drift_ii_genuinely_growing_resonance_still_warns():
+    """(ii) A GROWING resonance with omega != 0 (gain) is not drift: the warning still fires."""
+    dt, n = 1.0e-3, 3000
+    t = np.arange(n) * dt
+    y = np.exp(+1.0 * t) * np.cos(2 * np.pi * 40.0 * t)
+    _modes, warns = _growing_warnings(lambda: matrix_pencil(y, dt))
+    assert warns, "a growing resonance must still be flagged"
+
+
+def test_drift_iii_drift_only_trace_returns_no_resonance():
+    """(iii) A drift-only trace: no resonance, the drift reported; ringdown_q refuses, naming it."""
+    dt, n = 1.0e-3, 3000
+    t = np.arange(n) * dt
+    y = 0.3 * np.exp(-0.2 * t)
+    drift = []
+    modes, warns = _growing_warnings(lambda: matrix_pencil(y, dt, drift_out=drift))
+    assert modes == [] and warns == []
+    assert len(drift) == 1 and drift[0].gamma_rad_s == pytest.approx(0.4, rel=1e-6)
+    assert abs(drift[0].amplitude) == pytest.approx(0.3, rel=1e-6)
+    with pytest.raises(ValueError, match="drift"):
+        ringdown_q(y, dt)

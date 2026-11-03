@@ -12,6 +12,7 @@ import numpy as np
 import ngsolve as ng
 
 from dynameta.carriers.thermal_fem.common import ThermalLayerTwoTemp, _S, _build_layered_mesh, mean_T_per_layer, _per_material_cf
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 @dataclass
 class ThermalTwoTempResult:
@@ -118,7 +119,7 @@ def _copy_component(V, u, idx):
 
 
 def solve_thermal_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, period_x_m: float,
-                              period_y_m: float, flux_W_m2: float = 0.0, T_sink_K: float = 300.0,
+                              period_y_m: float, flux_W_m2: float = 0.0, T_sink_K: float = T_REF,
                               source_e_W_m3: Optional[Union[float, Dict[str, float], object]] = None,
                               source_l_W_m3: Optional[Union[float, Dict[str, float], object]] = None,
                               maxh_m: Optional[float] = None, order: int = 2,
@@ -149,7 +150,7 @@ def solve_thermal_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, period_x_m: 
 
 def solve_thermal_transient_twotemp_fem(layers: List[ThermalLayerTwoTemp], *, period_x_m: float,
                                         period_y_m: float, t_end_s: float, dt_s: float,
-                                        flux_W_m2: float = 0.0, T_sink_K: float = 300.0,
+                                        flux_W_m2: float = 0.0, T_sink_K: float = T_REF,
                                         source_e_W_m3: Optional[Union[float, Dict[str, float],
                                                                       object]] = None,
                                         source_l_W_m3: Optional[Union[float, Dict[str, float],

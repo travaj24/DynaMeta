@@ -118,6 +118,18 @@ def load_carrier_field(path: Path) -> CarrierField:
             gg = grid_group[name]
             grid_axes = {a: np.asarray(gg["axes"][a][:])
                           for a in gg["axes"].array_keys()}
+            # audit S4-20 (wave-7, 2026-11-02): dump has always written `axis_order` (the
+            # grid_axes_m insertion order) and load never read it -- zarr's array_keys() come back
+            # in its own (sorted) order, so a field dumped as {'y', 'x'} reloaded as {'x', 'y'}
+            # while the file claimed otherwise. Honour it, and refuse a file whose stored axes do
+            # not match its own declaration. Files without the attr load as before.
+            if "axis_order" in gg.attrs:
+                order = json.loads(gg.attrs["axis_order"])
+                if sorted(order) != sorted(grid_axes):
+                    raise ValueError(
+                        "CarrierField grid '{}': axis_order {} does not match the stored axes "
+                        "{} ({})".format(name, order, sorted(grid_axes), path))
+                grid_axes = {a: grid_axes[a] for a in order}
             grid_fields = {f: np.asarray(gg["fields"][f][:])
                             for f in gg["fields"].array_keys()}
         regions[name] = CarrierRegion(

@@ -44,11 +44,12 @@ import numpy as np
 
 from dynameta.constants import HBAR, KB, Q_E
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 __all__ = ["quantum_potential_V", "dg_correct_density_1d", "dg_length_m"]
 
 
-def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = 300.0,
+def dg_length_m(m_eff_kg: float, *, gamma: float = 1.0, T_K: float = T_REF,
                 degeneracy_g: float = 1.0) -> float:
     """The DG dead-layer length L_q = sqrt(b/(g V_t)) = hbar sqrt(gamma/(6 m kB T g)) [m].
 
@@ -131,7 +132,7 @@ def quantum_potential_V(z_m, n_m3, m_eff_kg: float, *, gamma: float = 1.0) -> np
 
 
 def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
-                          T_K: float = 300.0, hard_wall: str = "left",
+                          T_K: float = T_REF, hard_wall: str = "left",
                           conserve_charge: bool = False, tol: float = 1e-6,
                           max_nodes: int = 100000) -> np.ndarray:
     """Quantum-corrected density n_dg(z) from the classical profile n_cl(z) via the frozen-
@@ -161,9 +162,10 @@ def dg_correct_density_1d(z_m, n_cl_m3, m_eff_kg: float, *, gamma: float = 1.0,
     zz = z[::-1] * -1.0 if flip else z                       # canonical: wall at zz[0]
     nn = n_cl[::-1] if flip else n_cl
     zz = zz - zz[0]
-    b = gamma * HBAR ** 2 / (6.0 * m_eff_kg * Q_E)
-    v_t = KB * T_K / Q_E
-    lq = np.sqrt(b / v_t)
+    # audit C-16: the length is the module's own public dg_length_m (Boltzmann g = 1, which is what
+    # this BVP closes with), not an inline re-derivation of the same sqrt(b/V_t) -- it also brings
+    # that function's m_eff/T_K validation. Equal to the old inline value to 1 ulp.
+    lq = dg_length_m(m_eff_kg, gamma=gamma, T_K=T_K)
     # NONDIMENSIONALIZE (v = u/sqrt(n_ref), x = z/L_q): u ~ 1e13 with u' ~ 1e22 defeats
     # solve_bvp's mixed-component tolerance; the scaled problem is O(1) in both components.
     n_ref = float(np.max(nn))

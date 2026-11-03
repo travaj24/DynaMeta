@@ -86,6 +86,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_einstein, g_expr_devsim
+from dynameta.warning_types import UnreliableResultWarning
 
 # --- audit C-10: the Fermi-Dirac degeneracy correction to the ohmic built-in potential ----------
 _FD_GL_N = 96                                                  # Gauss-Legendre nodes for Delta(u)
@@ -208,7 +209,7 @@ def _fd_contact_shift(device: str, contact: str):
             "degenerate contact at eta = 10). Set the parameter on the region (setup_bipolar_region "
             "does), or set fd_enhancement=0 to choose Boltzmann deliberately.".format(
                 region, _param, type(exc).__name__, str(exc)[:80], contact),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)
         return None
     name = "FDContactShift"
     if name in ds.get_node_model_list(device=device, region=region):
@@ -239,7 +240,7 @@ def _fd_contact_shift(device: str, contact: str):
             "is caught after each converged solve instead (audit C10-d, "
             "warn_if_solution_exceeds_fd_ceiling). Supply a larger N_dos, or drop fd_enhancement "
             "and accept the Boltzmann model knowingly.".format(float(np.max(u))),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)
     # Delta is a function of u alone, and a doping profile has few distinct values (usually one or
     # two), so evaluate the quadrature on the UNIQUE ratios: a 1e6-node 3-D body region would
     # otherwise allocate an (nnodes, 96) quadrature array.
@@ -364,7 +365,7 @@ def warn_if_solution_exceeds_fd_ceiling(device: str, regions=None, *, stacklevel
         "accumulation, or set fd_enhancement=False and accept the Boltzmann model knowingly.".format(
             region, var, "N_dos" if var == "Electrons" else "N_dos_p", u, eta, _FD_U_MAX, extra,
             g_pct, d_pct),
-        RuntimeWarning, stacklevel=stacklevel)
+        UnreliableResultWarning, stacklevel=stacklevel)
     return worst_u
 
 

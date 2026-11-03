@@ -25,9 +25,11 @@ import numpy as np
 
 from dynameta.constants import C_LIGHT
 from dynameta.optics.fiber_amp.dynamics import frantz_nodvik_instantaneous_gain
+from dynameta.warning_types import DynaMetaDeprecationWarning, UnreliableResultWarning
 
 __all__ = ["Pulse", "gaussian_pulse", "sech_pulse", "dispersion_length", "nonlinear_length",
-           "soliton_order", "propagate_gnlse", "SaturableGain", "raman_response_freq"]
+           "soliton_order", "propagate_gnlse", "PropagationResult", "SaturableGain",
+           "raman_response_freq"]   # audit V-21: PropagationResult is propagate_gnlse's RETURN type
 
 
 @dataclass
@@ -109,8 +111,8 @@ def _fwhm(x, y) -> float:
 
 # ---- pulse builders ------------------------------------------------------------------------
 
-def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: float = None,
-                   lambda0_m: float = 1.03e-6, chirp: float = 0.0) -> Pulse:
+def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: Optional[float] = None,
+                   energy_J: Optional[float] = None, lambda0_m: float = 1.03e-6, chirp: float = 0.0) -> Pulse:
     """Transform-limited (or linearly-chirped) Gaussian pulse A = sqrt(P0) exp[-(1+i C)/2 (t/t0)^2].
     t0_s is the 1/e half-width (FWHM = 2 sqrt(ln2) t0). Give peak_power_W or energy_J (for a
     Gaussian, energy = P0 t0 sqrt(pi)). chirp C is the dimensionless linear chirp parameter."""
@@ -123,8 +125,8 @@ def gaussian_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: fl
     return Pulse(t, env.astype(np.complex128), lambda0_m)
 
 
-def sech_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: float = None,
-               lambda0_m: float = 1.03e-6) -> Pulse:
+def sech_pulse(t_s, *, t0_s: float, peak_power_W: Optional[float] = None,
+               energy_J: Optional[float] = None, lambda0_m: float = 1.03e-6) -> Pulse:
     """Hyperbolic-secant pulse A = sqrt(P0) sech(t/t0) (the soliton shape). For a sech,
     energy = 2 P0 t0 and FWHM = 1.7627 t0."""
     t = np.asarray(t_s, float)
@@ -138,20 +140,55 @@ def sech_pulse(t_s, *, t0_s: float, peak_power_W: float = None, energy_J: float 
 
 # ---- characteristic lengths ----------------------------------------------------------------
 
-def dispersion_length(t0_s: float, beta2_s2_m: float) -> float:
-    """L_D = t0^2 / |beta2| [m]: the length over which dispersion appreciably broadens a pulse."""
-    return float(t0_s ** 2 / abs(beta2_s2_m))
+# Audit V-12 (2026-11-02): the GVD / TOD / Kerr parameters were spelled beta2_s2_m, beta3_s3_m and
+# gamma_W_m, which parse as s^2 * m, s^3 * m and W * m -- the RECIPROCAL units -- and disagreed with
+# soa.QDGainParams.beta2_s2_per_m for the same quantity. The unit-correct names are beta2_s2_per_m
+# [s^2/m], beta3_s3_per_m [s^3/m] and gamma_per_W_m [1/(W m)]; the old keywords are accepted as
+# DEPRECATED aliases (DeprecationWarning, identical result; passing both spellings is an error).
+_V12_RENAMES = {"beta2_s2_m": "beta2_s2_per_m", "beta3_s3_m": "beta3_s3_per_m",
+                "gamma_W_m": "gamma_per_W_m"}
 
 
-def nonlinear_length(peak_power_W: float, gamma_W_m: float) -> float:
-    """L_NL = 1 / (gamma P0) [m]: the length over which SPM imprints ~1 rad of nonlinear phase."""
-    return float(1.0 / (gamma_W_m * peak_power_W))
+def _v12(fn: str, new_val, old_val, old: str, default=None):
+    """Resolve a V-12 renamed argument: the new spelling wins; the old one is a deprecated alias."""
+    new = _V12_RENAMES[old]
+    if old_val is not None:
+        if new_val is not None:
+            raise TypeError("%s: got both %s= and its deprecated alias %s=" % (fn, new, old))
+        warnings.warn("%s: %s= is deprecated (it reads as the reciprocal unit); use %s= "
+                      "(audit V-12)" % (fn, old, new), DynaMetaDeprecationWarning, stacklevel=3)
+        return old_val
+    if new_val is None:
+        if default is None:
+            raise TypeError("%s: missing required argument %s" % (fn, new))
+        return default
+    return new_val
 
 
-def soliton_order(t0_s: float, peak_power_W: float, beta2_s2_m: float, gamma_W_m: float) -> float:
+def dispersion_length(t0_s: float, beta2_s2_per_m: Optional[float] = None, *,
+                      beta2_s2_m: Optional[float] = None) -> float:
+    """L_D = t0^2 / |beta2| [m]: the length over which dispersion appreciably broadens a pulse.
+    beta2 in s^2/m (beta2_s2_m= is the deprecated V-12 spelling)."""
+    b2 = _v12("dispersion_length", beta2_s2_per_m, beta2_s2_m, "beta2_s2_m")
+    return float(t0_s ** 2 / abs(b2))
+
+
+def nonlinear_length(peak_power_W: float, gamma_per_W_m: Optional[float] = None, *,
+                     gamma_W_m: Optional[float] = None) -> float:
+    """L_NL = 1 / (gamma P0) [m]: the length over which SPM imprints ~1 rad of nonlinear phase.
+    gamma in 1/(W m) (gamma_W_m= is the deprecated V-12 spelling)."""
+    gam = _v12("nonlinear_length", gamma_per_W_m, gamma_W_m, "gamma_W_m")
+    return float(1.0 / (gam * peak_power_W))
+
+
+def soliton_order(t0_s: float, peak_power_W: float, beta2_s2_per_m: Optional[float] = None,
+                  gamma_per_W_m: Optional[float] = None, *, beta2_s2_m: Optional[float] = None,
+                  gamma_W_m: Optional[float] = None) -> float:
     """Soliton order N = sqrt(L_D / L_NL) = sqrt(gamma P0 t0^2 / |beta2|). N=1 -> fundamental."""
-    return float(np.sqrt(dispersion_length(t0_s, beta2_s2_m)
-                         / nonlinear_length(peak_power_W, gamma_W_m)))
+    b2 = _v12("soliton_order", beta2_s2_per_m, beta2_s2_m, "beta2_s2_m")
+    gam = _v12("soliton_order", gamma_per_W_m, gamma_W_m, "gamma_W_m")
+    return float(np.sqrt(dispersion_length(t0_s, b2)
+                         / nonlinear_length(peak_power_W, gam)))
 
 
 # ---- delayed Raman response ----------------------------------------------------------------
@@ -216,7 +253,7 @@ def _guard_raman_sampling(dt_s: float, model: str) -> None:
             "red shift, with a plausible-looking result. Refine dt (more time points over the "
             "same window) or drop the Raman term and call the run Kerr-only.".format(
                 model, dt_s, tau, n_per_tau, _RAMAN_MIN_SAMPLES_PER_TAU),
-            RuntimeWarning, stacklevel=3)
+            UnreliableResultWarning, stacklevel=3)
 
 
 # ---- the GNLSE split-step propagator -------------------------------------------------------
@@ -433,24 +470,27 @@ def _warn_fn_wrap(ratio: float) -> None:
         "contained pulse changes the extracted energy by 43.8% (audit W5-4). Re-centre the pulse "
         "in t (np.roll / np.fft.fftshift) or widen the window until the edges are dark.".format(
             _FN_EDGE_SAMPLE_DIVISOR, ratio, _FN_EDGE_POWER_TOL),
-        RuntimeWarning, stacklevel=3)
+        UnreliableResultWarning, stacklevel=3)
 
 
 @dataclass
 class PropagationResult:
     output: Pulse
-    z_m: np.ndarray = None                 # stored slice positions (if store_slices)
-    field_zt: np.ndarray = None            # (n_slice, N) complex field along z
+    z_m: Optional[np.ndarray] = None       # stored slice positions (if store_slices)
+    field_zt: Optional[np.ndarray] = None  # (n_slice, N) complex field along z
     b_integral_rad: float = 0.0            # accumulated peak nonlinear phase gamma INT P_pk dz
     meta: dict = field(default_factory=dict)
 
 
-def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
-                    beta3_s3_m: float = 0.0, gamma_W_m: float = 0.0, loss_per_m: float = 0.0,
+def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_per_m: Optional[float] = None,
+                    beta3_s3_per_m: Optional[float] = None,
+                    gamma_per_W_m: Optional[float] = None, loss_per_m: float = 0.0,
                     gain_per_m: float = 0.0, gain_omega: Optional[Callable] = None,
                     saturable_gain: Optional["SaturableGain"] = None,
                     raman: Optional[str] = None, self_steepening: bool = False,
-                    n_steps: int = 400, store_slices: int = 0) -> PropagationResult:
+                    n_steps: int = 400, store_slices: int = 0,
+                    beta2_s2_m: Optional[float] = None, beta3_s3_m: Optional[float] = None,
+                    gamma_W_m: Optional[float] = None) -> PropagationResult:
     """Propagate a Pulse through length_m of fiber by the symmetric split-step Fourier method:
     exp(h/2 D) exp(h N) exp(h/2 D) per step, with D the linear (dispersion + gain/loss) operator
     in frequency and N the nonlinear operator in time. Gain options: a flat gain_per_m, a fixed
@@ -528,7 +568,13 @@ def propagate_gnlse(pulse: Pulse, length_m: float, *, beta2_s2_m: float = 0.0,
     photon-number-conserving, energy-decreasing form (Blow-Wood).
 
     Returns the output pulse, the accumulated B-integral, and optionally store_slices
-    field snapshots along z."""
+    field snapshots along z.
+
+    Units: beta2_s2_per_m [s^2/m], beta3_s3_per_m [s^3/m], gamma_per_W_m [1/(W m)], each 0 by
+    default; beta2_s2_m= / beta3_s3_m= / gamma_W_m= are their deprecated V-12 spellings."""
+    beta2_s2_m = _v12("propagate_gnlse", beta2_s2_per_m, beta2_s2_m, "beta2_s2_m", 0.0)
+    beta3_s3_m = _v12("propagate_gnlse", beta3_s3_per_m, beta3_s3_m, "beta3_s3_m", 0.0)
+    gamma_W_m = _v12("propagate_gnlse", gamma_per_W_m, gamma_W_m, "gamma_W_m", 0.0)
     A = pulse.field.astype(np.complex128).copy()
     w = pulse.omega_rad_s()
     dt = pulse.dt_s

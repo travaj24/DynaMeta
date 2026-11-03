@@ -34,7 +34,8 @@ from dynameta.optics.soa.metrics import (enob, facet_gain_ripple_dB, harmonic_am
                                          optimal_drive_power,
                                          pattern_penalty_dB, predistort, ripple_enob_ceiling,
                                          sfdr_dB, sndr_db, sndr_vs_drive, thermal_drift_budget_K,
-                                         transfer_derivatives)
+                                         TransferFitWarning, transfer_derivatives,
+                                         transfer_derivatives_fd)
 from dynameta.optics.soa.noise_metrics import (henry_factor, linewidth_from_field, rin_spectrum,
                                                schawlow_townes_henry_linewidth)
 from dynameta.optics.soa.qd_gain import (Leakage, ManyBody, QDGainModel, QDGainParams,
@@ -82,7 +83,8 @@ __all__ = [
            "detector_noise_variances", "sndr_db", "enob", "sndr_vs_drive", "optimal_drive_power",
            "predistort", "pattern_penalty_dB", "sfdr_dB", "thermal_drift_budget_K",
            "facet_gain_ripple_dB", "ripple_enob_ceiling",
-           "transfer_derivatives", "harmonic_amplitudes",
+           "transfer_derivatives", "transfer_derivatives_fd", "TransferFitWarning",
+           "harmonic_amplitudes",
            "rin_spectrum", "linewidth_from_field", "henry_factor",
            "schawlow_townes_henry_linewidth", "TransverseBPM", "qd_gain_table", "MaxwellBlochEnsemble",
            "CalibratedDevice", "DeviceTargets", "INNOLUME_BOA1310", "INNOLUME_BOA1310_TARGETS",

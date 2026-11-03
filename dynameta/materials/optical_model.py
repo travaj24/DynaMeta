@@ -30,6 +30,7 @@ import numpy as np
 
 # Physical constants (SI): single source in core/constants.
 from dynameta.constants import Q_E, EPS0, C_LIGHT, M_E  # noqa: F401
+from dynameta.warning_types import UnreliableResultWarning
 
 MassOrFn  = Union[float, Callable[[np.ndarray], np.ndarray]]
 GammaOrFn = Union[float, Callable[[np.ndarray], np.ndarray]]
@@ -180,6 +181,32 @@ class DrudeOptical(OpticalModel):
         if n_m3 is None:
             raise ValueError("DrudeOptical.eps requires n_m3 (carrier density).")
         n = np.asarray(n_m3, dtype=np.float64)
+        m, g = self._mass_gamma(n)
+        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
+        omega_p2 = n * Q_E * Q_E / (EPS0 * m)
+        return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
+
+    def wp_gamma(self, n_m3: float):
+        """(omega_p, gamma) [rad/s] at the scalar carrier density `n_m3` -- the pair the FDTD Drude
+        ADE consumes (FDTDLayer.drude_wp_rad_s / drude_gamma_rad_s, and solve_fdtd_1d's
+        `drude_of_t` hook). omega_p = sqrt(n e^2 / (eps0 m_opt(n))), so
+        eps_inf - omega_p^2/(w^2 + i w gamma) is THIS model's eps(n) (to rounding).
+
+        audit V-18 (2026-11-02): the name `drude_of_t` carried two return contracts -- a
+        (wp, gamma) tuple in optics.fdtd.solve_fdtd_1d and a DrudeOptical in
+        transient_optics.optical_transient_response -- so the carrier-heating hook the latter
+        documents could not be handed to the FDTD path its own docstring recommends for a
+        sub-round-trip drive. This method is the ONE conversion between them; solve_fdtd_1d now
+        accepts either return type (with `drude_n_m3=` for the DrudeOptical form) and routes the
+        object form through here."""
+        n = float(n_m3)
+        if not (np.isfinite(n) and n > 0.0):
+            raise ValueError("DrudeOptical.wp_gamma: n_m3 must be finite and > 0; got {!r}".format(n_m3))
+        m, g = self._mass_gamma(np.asarray(n, dtype=np.float64))
+        return float(np.sqrt(n * Q_E * Q_E / (EPS0 * float(m)))), float(g)
+
+    def _mass_gamma(self, n):
+        """(m_opt, gamma) at density array/scalar `n`, validated (shared by eps and wp_gamma)."""
         m = (np.asarray(self.m_opt_kg(n), dtype=np.float64)
               if callable(self.m_opt_kg) else float(self.m_opt_kg))
         g = (np.asarray(self.gamma_rad_s(n), dtype=np.float64)
@@ -193,9 +220,7 @@ class DrudeOptical(OpticalModel):
             raise ValueError("DrudeOptical.eps: gamma_rad_s must be finite and >= 0 (a negative damping "
                              "gives Im(eps) < 0 = gain under exp(-i omega t)); a callable gamma_rad_s(n) "
                              "returned a negative/non-finite value.")
-        omega = 2.0 * np.pi * C_LIGHT / float(lambda_m)
-        omega_p2 = n * Q_E * Q_E / (EPS0 * m)
-        return self.eps_inf - omega_p2 / (omega * omega + 1j * omega * g)
+        return m, g
 
 
 def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
@@ -241,7 +266,7 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     if not sol.success:
         warnings.warn("fit_drude_params: least_squares did not converge (status={}: {}); the returned "
                       "Drude parameters are the best-so-far iterate and may be unreliable.".format(
-                          sol.status, sol.message), RuntimeWarning, stacklevel=2)
+                          sol.status, sol.message), UnreliableResultWarning, stacklevel=2)
     lo, hi = np.asarray(bounds[0], float), np.asarray(bounds[1], float)
     span = np.where((hi - lo) > 0, hi - lo, 1.0)
     pinned = [nm for nm, x, l, h, s in zip(("eps_inf", "m_eff_ratio", "gamma_rad_s"), sol.x, lo, hi, span)
@@ -249,7 +274,7 @@ def fit_drude_params(*, n_m3, lambda_m, eps_re, eps_im,
     if pinned:
         warnings.warn("fit_drude_params: parameter(s) {} pinned at a fit bound -- the Drude model likely "
                       "cannot represent the data (or the bounds are too tight); widen the bounds or "
-                      "check the input n,k.".format(pinned), RuntimeWarning, stacklevel=2)
+                      "check the input n,k.".format(pinned), UnreliableResultWarning, stacklevel=2)
     eps_inf, m_ratio, gamma = sol.x
     return {
         "eps_inf":      float(eps_inf),
@@ -351,7 +376,9 @@ def _resolve_gamma_omega(spec) -> Callable[[np.ndarray], np.ndarray]:
             return np.interp(om, w_tab, g_tab)
         return _interp
     g0 = float(spec)
-    return lambda omega: g0
+    # audit Q-29: an ARRAY omega gets an array of the same shape (gamma_at documents "scalar or
+    # array"; the old `lambda omega: g0` handed a scalar back for any input); a scalar stays a float.
+    return lambda omega: g0 if np.ndim(omega) == 0 else np.full(np.shape(omega), g0)
 
 
 @dataclass
@@ -730,7 +757,7 @@ def check_kk(model, omega_grid, *, n_m3=None, metric_band=None, dc_skip: int = 2
             "DISCONTINUOUS gamma(omega) never resolves at any N -- that is itself the tell; "
             "confirm by checking whether rms_norm falls under refinement.".format(
                 feature_pts, h, omega.size, _KK_MIN_FEATURE_PTS, rms_norm),
-            RuntimeWarning, stacklevel=2)
+            UnreliableResultWarning, stacklevel=2)
     return {
         "omega": omega, "re_model": re_model, "re_kk": re_kk, "residual": residual,
         "band_mask": band, "eps_inf_est": eps_inf_est, "scale": scale,

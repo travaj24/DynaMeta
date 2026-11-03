@@ -83,6 +83,11 @@ def test_kirchhoff_roundtrip_and_guards():
     k = lambda T: 148.0 * (T / 300.0) ** (-1.3)
     assert abs(invert_kirchhoff(k, kirchhoff_theta(k, 600.0, 300.0), 300.0) - 600.0) < 1e-8
     assert invert_kirchhoff(k, 0.0, 300.0) == 300.0
+    # audit V-23: the potential keyword is theta_W_per_m; the old `_m` spelling is a deprecated alias
+    th = kirchhoff_theta(k, 450.0, 300.0)
+    assert invert_kirchhoff(k, theta_W_per_m=th, T_ref_K=300.0) == invert_kirchhoff(k, th, 300.0)
+    with pytest.warns(DeprecationWarning, match="theta_W_per_m"):
+        assert invert_kirchhoff(k, theta_W_m=th, T_ref_K=300.0) == invert_kirchhoff(k, th, 300.0)
     with pytest.raises(ValueError):
         solve_thermal_kirchhoff_fem([ThermalLayer("s", 1e-7, 1.0)], lambda T: 0.0,
                                     period_x_m=1e-7, period_y_m=1e-7)

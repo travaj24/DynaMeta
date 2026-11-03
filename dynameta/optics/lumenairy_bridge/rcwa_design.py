@@ -39,13 +39,25 @@ entry point below scopes itself honestly and raises for the rest):
   the RCWAStack twin still traces the wavelength (its order count is the explicit static
   n_orders). Slant / out-of-plane tensors / stabilize / retain_internal raise upstream.
   Upstream pin: tests/unit/test_v5_14_2_jax_stacks.py. The PMM twin is SHIPPED (not skipped):
-  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the angle
-  and half-space parameters the RCWAStack twin cannot -- the two are complementary. ANGLE
-  CAVEAT (measured on 5.30.0, fix-verification 2026-07-27): the angle gradient is correct
-  OFF-normal (AD==FD to ~6e-7 at theta 0.15-0.4 rad) but INVALID at exactly theta = 0 -- the
-  +/-m order degeneracy breaks lumenairy's eig VJP there (AD dR/dtheta = 4.1e-3 on a
-  mirror-symmetric lossless fixture where symmetry AND energy conservation both force 0;
-  clean by theta ~ 1e-4). Differentiate the angle away from exact normal incidence.
+  it is genuinely usable for 1-D lamellar gratings with gradients, and it traces the
+  half-space indices the RCWAStack twin cannot (both trace the angle since 5.22) -- the two
+  are complementary. ANGLE
+  NOTE (theta = 0; the ANGLE CAVEAT, RETIRED for lumenairy >= 5.50 on 2026-11-02): on
+  lumenairy 5.22..5.49 the angle gradient is correct OFF-normal (AD==FD to ~6e-7 at theta
+  0.15-0.4 rad) but WRONG at exactly theta = 0 -- the +/-m half-space orders are an exactly
+  degenerate pair there and the eig VJP returned a term set by whichever basis LAPACK picked
+  inside the pair (5.30.0: AD dR/dtheta = 4.1e-3, row 1 -2.07e-2, on a mirror-symmetric
+  lossless grating where symmetry forces 0; 5.31.0 / 5.42.1: d(R+T)/dtheta = -2.987e-6 on a
+  second one; clean by theta ~ 1e-4). lumenairy 5.50.0 fixed it upstream (CHANGELOG 5.50.0,
+  "JAX gradients at symmetric points": degenerate eigen-solves go through a cluster-adjoint
+  rule, switch lumenairy.jax_cluster_rule, default ON). Re-measured through THIS bridge on
+  both fixtures, both rows: |AD| <= 2.0e-12 at theta = 0, and switching the rule OFF
+  reproduces 4.126e-3 / -2.073e-2 -- gated, with that rule-off arm as the discrimination
+  check, in tests/test_lumenairy_bridge_verify_550.py. So: on >= 5.50 with the rule ON the
+  angle may be differentiated AT normal incidence; below 5.50 (still inside the bridge
+  floor) or with the rule off, keep it off exact normal incidence. Residual upstream limit:
+  next to a Rayleigh anomaly the rule's accuracy at the degenerate point degrades (lumenairy
+  measured 5e-8 .. ~1e-1 relative at relative wavelength distance 1e-3 .. 1e-7 from it).
 
 Convention: identical on both sides (public exp(-i omega t), Im(eps) > 0 lossy, metres,
 radians). Efficiency rows are keyed INCIDENT lab E_x (row 0) / E_y (row 1) -- never relabel
@@ -83,6 +95,7 @@ import numpy as np
 from dynameta.optics.lumenairy_bridge._common import _REQUIRED
 from dynameta.optics.lumenairy_bridge._common import \
     require_halfspace_keywords as _require_halfspace_keywords
+from dynameta.optics.lumenairy_bridge._common import require_angles_rad as _require_angles_rad
 from dynameta.optics.lumenairy_bridge._common import require_lumenairy as _require_lumenairy
 
 __all__ = ["rcwa_grating_RT", "rcwa_stack_RT", "rcwa_stack_jones", "pmm_stack_RT",
@@ -199,6 +212,7 @@ def rcwa_grating_RT(period, eps_ridge, eps_groove, depth, duty_cycle, wavelength
     _require_halfspace_keywords("rcwa_grating_RT", _legacy, wavelength=wavelength,
                                 n_substrate=n_substrate, n_superstrate=n_superstrate)
     _reject_grating_pol(polarization, "rcwa_grating_RT")                # audit V-8
+    _require_angles_rad("rcwa_grating_RT", polar=(("angle", angle),))   # audit V-25
     _require_jax_x64("rcwa_grating_RT", eps_ridge, eps_groove, n_substrate, n_superstrate,
                      depth, wavelength, angle)                      # audit R-14
     lum = _require_lumenairy()
@@ -260,6 +274,7 @@ def _solve_rcwa_stack(layers, wavelength, *, n_substrate, n_superstrate, period_
                       theta, phi, n_orders, n_orders_y, formulation, fn_name):
     _require_jax_x64(fn_name, wavelength, theta, phi,
                      *[e for e, _t in layers], *[t for _e, t in layers])   # audit R-14
+    _require_angles_rad(fn_name, polar=(("theta", theta),), azimuth=(("phi", phi),))  # audit V-25
     lum = _require_lumenairy()
     _require_static(fn_name, n_substrate=n_substrate, n_superstrate=n_superstrate,
                     period_x=period_x, period_y=period_y)
@@ -333,6 +348,7 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
                      degree, n_orders, fn_name):
     _require_jax_x64(fn_name, wavelength, angle, n_substrate, n_superstrate,
                      *[t for _s, t in layers])                            # audit R-14
+    _require_angles_rad(fn_name, polar=(("angle", angle),))               # audit V-25
     lum = _require_lumenairy()
     if _is_jaxish(period):
         raise TypeError(
@@ -358,6 +374,8 @@ def _solve_pmm_stack(layers, wavelength, *, n_substrate, n_superstrate, period, 
     return st.solve()
 
 
+# `degree=12` here vs 16 in pmm_backend.design_to_pmm_stack and 11 in pmm2d_backend: deliberate
+# (jit cost per degree), measured consequence in pmm_backend's V-15 note (audit V-15).
 def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
                  n_superstrate=_REQUIRED, period, angle=0.0,
                  degree=12, n_orders=21, row=0):
@@ -370,9 +388,11 @@ def pmm_stack_RT(layers, wavelength=_REQUIRED, *_legacy, n_substrate=_REQUIRED,
     `layers` = [(spec, thickness), ...] superstrate-side first; spec is either a segment list
     [(width_fraction, eps), ...] (widths STATIC and summing to 1; eps scalar or in-plane
     (3, 3) tensor) or a bare eps for a uniform layer. Gradients flow through every jax-typed
-    eps (re AND im), thickness, AND -- unlike the RCWAStack twin -- the angle (OFF-normal
-    only: at exactly angle=0 the eig VJP hits the +/-m degeneracy and the angle gradient is
-    invalid, see the module docstring) and the half-space indices. STATIC: period, widths,
+    eps (re AND im), thickness, the angle (as the RCWAStack twin also does since lumenairy
+    5.22 -- re-measured 2026-11-02 through rcwa_stack_RT: AD == FD to 1.4e-8 rel at theta
+    0.25 rad; at exactly angle=0 only on lumenairy >= 5.50 with its cluster rule on: below 5.50
+    the +/-m degeneracy made the theta=0 angle gradient wrong, see the module docstring's
+    ANGLE NOTE) AND -- unlike the RCWAStack twin -- the half-space indices. STATIC: period, widths,
     degree, n_orders, and (lumenairy >= 5.30) the
     WAVELENGTH -- PMM sizes its propagating-order set from the wavelength, so the
     differentiable path raises NotImplementedError on a traced one rather than silently

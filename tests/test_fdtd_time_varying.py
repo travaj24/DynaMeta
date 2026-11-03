@@ -43,6 +43,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 from scipy.signal import hilbert
 
 from dynameta.constants import C_LIGHT
@@ -102,13 +103,12 @@ def test_gate1_static_hooks_byte_identical():
         assert np.array_equal(r.T, r_base.T, equal_nan=True), v
 
 
-def test_gate1_existing_fdtd_infra_gates_still_pass():
-    # re-run the pre-edit FDTD coverage gates verbatim; the additive time-varying path must not
-    # perturb them (same pattern as tests/test_ringdown.py gate 5).
-    from test_audit_2026_07_17_infra import (test_fdtd_1d_dielectric_slab_vs_airy,
-                                             test_fdtd_1d_drude_slab_absorbs)
-    test_fdtd_1d_dielectric_slab_vs_airy()
-    test_fdtd_1d_drude_slab_absorbs()
+# Gate 1's "existing FDTD infra still passes" re-run is GONE (audit T-16, 2026-11-02): it
+# re-invoked test_audit_2026_07_17_infra's two FDTD test functions by cross-module import, so
+# the suite ran the same two marches again for zero coverage (pytest collects them in their
+# own module, which CI runs in the `solvers` job and every `test` leg) and the bare import
+# broke under --import-mode=importlib. The time-varying path's non-perturbation is gated
+# bit-for-bit right above (test_gate1_static_hooks_byte_identical).
 
 
 # ============================================================================================
@@ -288,3 +288,109 @@ def test_solve_fdtd_1d_layered_frequency_conversion_diagnostic():
     assert np.isfinite(d_step["input_centroid_Hz"])
     assert set(d_step) >= {"freqs_Hz", "input_spectrum", "output_spectrum",
                            "input_centroid_Hz", "output_centroid_Hz", "ratio"}
+
+
+# ============================================================================================
+# audit D-17 (2026-11-02): the uniform march's energy diagnostic is the leapfrog invariant at ONE
+# time level, and an index below `courant` (ENZ) is refused instead of marching to NaN.
+# ============================================================================================
+
+def test_d17_energy_diagnostic_is_the_time_centred_leapfrog_invariant():
+    """energy_t used to add |E^{n+1}|^2 to |H^{n+1/2}|^2 -- two time levels. Measured pre-fix
+    (relative peak-to-peak over the window): 7.5e-6 on a pure forward pulse in a constant medium
+    and 2.47e-2 after the fast n 1 -> 2 step (the forward + backward daughters carry a
+    standing-wave part, whose 2w ripple the mixed levels expose). The fixed diagnostic is the
+    discrete invariant of the interior Yee update: flat to round-off in both windows (~1e-15),
+    with only the D-preserving jump at the step itself."""
+    res, ref, n1, n2 = _fast_runs()
+    t = res.t_s
+    t_step = 8.0 * _TP1
+
+    def _p2p(e):
+        return float((e.max() - e.min()) / e.mean())
+
+    assert _p2p(ref.energy_t[t < t_step + 20 * _TP1]) < 1e-12
+    assert _p2p(res.energy_t[(t > t_step + 2 * _TP1) & (t < t_step + 20 * _TP1)]) < 1e-12
+    assert _p2p(res.energy_t[(t > t_step - 4 * _TP1) & (t < t_step - 0.5 * _TP1)]) < 1e-12
+
+
+def test_d17_enz_index_below_courant_is_refused_not_marched_to_nan():
+    """The "stable for any n>=1" comment was unchecked while index_of_t may go below 1 (ENZ).
+    Measured pre-fix at courant 0.5: n 1 -> 0.45 / 0.3 returned all-NaN fields and energy with no
+    error. The march is stable iff n >= courant: n = 0.6 must still run (ENZ is supported), 0.45
+    must raise naming the Courant number, and so must an n_init below courant."""
+    lam = 1.0e-6
+    tp = lam / C_LIGHT
+    common = dict(n_init=1.0, lambda_med_m=lam, domain_wavelengths=80, run_periods=12.0)
+    ok = run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else 0.6, **common)
+    assert np.all(np.isfinite(ok.energy_t)) and np.all(np.isfinite(ok.Ex_final))
+    assert ok.n_traj[-1] == 0.6
+    with pytest.raises(ValueError, match="Courant"):
+        run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else 0.45, **common)
+    with pytest.raises(ValueError, match="Courant"):
+        run_uniform_time_boundary(index_of_t=lambda t: 0.4, n_init=0.4, lambda_med_m=lam,
+                                  domain_wavelengths=80, run_periods=12.0)
+    with pytest.raises(ValueError, match="n > 0"):
+        run_uniform_time_boundary(index_of_t=lambda t: 1.0 if t < 5 * tp else float("nan"),
+                                  **common)
+
+
+# ============================================================================================
+# audit D-18 / V-18 (wave-6, 2026-11-02)
+# ============================================================================================
+
+def test_d18_uniform_z_edges_with_time_varying_hook_collapses_instead_of_raising():
+    """D-18: the hooks-vs-nonuniform refusal ran BEFORE the uniform-limit detection, so the
+    documented bit-identity grid `uniform_z_edges(...)` was refused with a time-varying hook even
+    though it collapses to the supported uniform kernel. It now runs, bit-identical to the solve
+    without z_edges; a genuinely nonuniform grid is still refused."""
+    from dynameta.optics.fdtd import uniform_z_edges
+    layers, kw = _slab_kwargs()
+    wp0, g0 = layers[0].drude_wp_rad_s, layers[0].drude_gamma_rad_s
+    hook = dict(drude_of_t=lambda t: (wp0 * (1.0 + 0.2 * (t > 3e-14)), g0))
+    ze = uniform_z_edges(layers, lambda_min_m=kw["lambda_min_m"], lambda_max_m=kw["lambda_max_m"],
+                         resolution=kw["resolution"])
+    r_ref = solve_fdtd_1d(layers, **kw, **hook)
+    r_ze = solve_fdtd_1d(layers, **kw, **hook, z_edges=ze)              # raised pre-fix
+    assert r_ze.R.tobytes() == r_ref.R.tobytes() and r_ze.T.tobytes() == r_ref.T.tobytes()
+    assert np.array_equal(r_ze.band, r_ref.band)
+    with pytest.raises(NotImplementedError, match="time-varying hooks"):
+        solve_fdtd_1d(layers, **kw, **hook, refine={0: 2.0})            # really nonuniform
+
+
+def test_v18_drude_of_t_accepts_the_transient_optics_drudeoptical_contract():
+    """V-18: `drude_of_t` meant (wp, gamma) in solve_fdtd_1d and a DrudeOptical in
+    transient_optics (the carrier-heating hook), so the latter could not be handed to the FDTD path
+    transient_optics itself recommends. The DrudeOptical form now converts through
+    DrudeOptical.wp_gamma at `drude_n_m3` and is BIT-IDENTICAL to the equivalent tuple hook (it
+    raised `cannot unpack` pre-fix); the two consistency checks raise."""
+    from dynameta.constants import M_E
+    from dynameta.materials.optical_model import DrudeOptical
+    n = 2.0e25
+    m0, g0 = 0.35 * M_E, 5.0e13
+    hot = DrudeOptical(eps_inf=4.0, m_opt_kg=lambda nn: 0.45 * M_E + 0.0 * nn, gamma_rad_s=8.0e13)
+    cold = DrudeOptical(eps_inf=4.0, m_opt_kg=m0, gamma_rad_s=g0)
+    wp_c, g_c = cold.wp_gamma(n)
+    wp_h, g_h = hot.wp_gamma(n)
+    assert wp_c == pytest.approx(np.sqrt(n * 1.602176634e-19 ** 2 / (8.8541878128e-12 * m0)), rel=1e-9)
+    # the FDTD Drude pole built from wp_gamma IS the DrudeOptical's eps (to rounding)
+    lam = 1.3e-6
+    w = 2.0 * np.pi * C_LIGHT / lam
+    assert complex(4.0 - wp_c ** 2 / (w ** 2 + 1j * w * g_c)) == pytest.approx(
+        complex(cold.eps(lam, n_m3=n)), rel=1e-12)
+    layers = [FDTDLayer(thickness_m=0.30e-6, eps_inf=4.0, drude_wp_rad_s=wp_c, drude_gamma_rad_s=g_c)]
+    kw = dict(lambda_min_m=1.2e-6, lambda_max_m=1.45e-6, resolution=30)
+    t1 = 4e-14
+    r_tuple = solve_fdtd_1d(layers, **kw, drude_of_t=lambda t: (wp_h, g_h) if t > t1 else (wp_c, g_c))
+    r_obj = solve_fdtd_1d(layers, **kw, drude_n_m3=n, drude_of_t=lambda t: hot if t > t1 else cold)
+    assert r_obj.R.tobytes() == r_tuple.R.tobytes() and r_obj.T.tobytes() == r_tuple.T.tobytes()
+    r_static = solve_fdtd_1d(layers, **kw)
+    assert not np.array_equal(r_obj.R[r_obj.band], r_static.R[r_static.band])  # the switch is live
+    with pytest.raises(ValueError, match="drude_n_m3"):
+        solve_fdtd_1d(layers, **kw, drude_of_t=lambda t: cold)
+    with pytest.raises(ValueError, match="eps_inf"):
+        solve_fdtd_1d(layers, **kw, drude_n_m3=n,
+                      drude_of_t=lambda t: DrudeOptical(eps_inf=3.0, m_opt_kg=m0, gamma_rad_s=g0))
+    with pytest.raises(ValueError, match="two owners"):
+        solve_fdtd_1d(layers, **kw, drude_n_m3=n, eps_inf_of_t=lambda t: 4.0,
+                      drude_of_t=lambda t: cold)

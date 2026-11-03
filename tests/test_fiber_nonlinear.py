@@ -306,3 +306,15 @@ def test_raman_response_warns_when_dt_cannot_resolve_the_kernel():
         warnings.simplefilter("error")
         _f_R, H_ok = raman_response_freq(4096, 2e-15)
     assert float(np.ptp(np.abs(H_ok))) > 0.1              # a genuinely dispersive response
+
+
+def test_a17_brillouin_phonon_number_takes_an_array_like_its_siblings():
+    # audit A-17: brillouin_shift_hz / brillouin_linewidth_hz are vectorized; the phonon number
+    # forced float() and raised TypeError on the same array input.
+    from dynameta.optics.fiber_amp.nonlinear_limits import brillouin_phonon_number
+    lam = np.array([1.06e-6, 1.30e-6, 1.55e-6])
+    n_vec = brillouin_phonon_number(lam, 300.0)
+    assert isinstance(n_vec, np.ndarray) and n_vec.shape == lam.shape
+    for k, lk in enumerate(lam):
+        n_k = brillouin_phonon_number(float(lk), 300.0)
+        assert isinstance(n_k, float) and n_vec[k] == n_k            # scalar contract unchanged

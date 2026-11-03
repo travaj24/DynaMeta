@@ -237,18 +237,56 @@ def test_structured_lateral_grid_and_dispatch_guard():
     from dynameta.geometry.cross_section import Circle
     from dynameta.optics.fdtd_seam import design_has_inclusions, make_structured_lateral
     P = 220e-9
-    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, 60e-9), "m0")])])
-    # the m0 inclusion sits in an air background layer; give the layer an air bg via a 2nd uniform material
+    # wave-6 (T-item): the inclusion used to be "m0" -- the SAME material as the layer background
+    # (eps 4) -- so "patterned eps inside the structure band" only ever checked a uniform eps-4 slab.
+    # An AIR disk in the eps-4 layer makes the pattern real and the assertions discriminating.
+    r = 60e-9
+    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, r), "air")])])
     assert design_has_inclusions(d)
     layers, lateral_fn = make_structured_lateral(d, LAM)
-    eps = lateral_fn(40, 40, 60, (np.arange(60) + 0.5) * 10e-9, 100e-9, 150e-9)
-    assert eps.shape == (40, 40, 60)
+    n = 40
+    eps = lateral_fn(n, n, 60, (np.arange(60) + 0.5) * 10e-9, 100e-9, 150e-9)
+    assert eps.shape == (n, n, 60)
     inb = (((np.arange(60) + 0.5) * 10e-9) >= 100e-9) & (((np.arange(60) + 0.5) * 10e-9) < 250e-9)
     assert eps[:, :, ~inb].max() <= 1.0 + 1e-9                  # vacuum pad outside the structure
-    assert eps[:, :, inb].max() > 1.0                          # patterned eps inside the structure band
+    band = eps[:, :, inb]
+    assert abs(band.max() - 4.0) < 1e-9 and abs(band.min() - 1.0) < 1e-9   # BOTH materials present
+    assert abs(band[n // 2, n // 2, :] - 1.0).max() < 1e-9      # disk centre -> air, every z slice
+    assert abs(band[0, 0, :] - 4.0).max() < 1e-9                # cell corner -> the eps-4 background
+    fill = float(np.mean(np.abs(band[:, :, 0] - 1.0) < 1e-9))
+    assert abs(fill - np.pi * r ** 2 / P ** 2) < 0.02           # the disk's area, to the 40x40 grid
     # dim=2 + inclusions must raise
     with pytest.raises(NotImplementedError):
         make_fdtd_optical_solver(dim=2)(d, None, {}, LAM, 1.0 + 0j, 1.0 + 0j)
+
+
+def test_structured_lateral_wraps_a_boundary_crossing_inclusion():
+    # 2026-11-02: the shared rasterizer used to CLIP an inclusion crossing the cell edge (the RCWA
+    # bridge then solved a 0.2-period line for a 0.4-period one). A periodic cell must paint the
+    # crossing disk as the centred disk translated by half a period -- exactly, on an even grid.
+    import numpy as np
+    from dynameta.geometry.cross_section import Circle
+    from dynameta.optics.fdtd_seam import make_structured_lateral
+    from dynameta.optics.rasterize import cell_axes, layer_eps_cell
+    P, nx, nz = 220e-9, 44, 30
+    zc = (np.arange(nz) + 0.5) * 10e-9
+    lat = {}
+    for key, cx in (("edge", 0.0), ("centre", P / 2)):
+        d = _design([(4.0, 150e-9, [Inclusion(Circle(cx, P / 2, 60e-9), "air")])])
+        lat[key] = make_structured_lateral(d, LAM)[1](nx, nx, nz, zc, 50e-9, 150e-9)
+    # an air disk in an eps-4 layer (the inclusion must differ from the background, or every
+    # comparison below is vacuous)
+    assert lat["centre"].min() < 2.0
+    assert np.array_equal(lat["edge"], np.roll(lat["centre"], nx // 2, axis=0))
+    # discrimination: the un-periodic (clipped) paint keeps only half the disk
+    L = _design([(4.0, 150e-9, [Inclusion(Circle(0.0, P / 2, 60e-9), "air")])]).stack.layers[0]
+    X, Y = np.meshgrid(*cell_axes(nx, nx, P, P), indexing="ij")
+    reg = _design([(4.0, 150e-9, [])]).materials
+    n_wrap = int(np.sum(layer_eps_cell(L, X, Y, LAM, reg, {}, period_x_m=P, period_y_m=P).real < 2.0))
+    n_clip = int(np.sum(layer_eps_cell(L, X, Y, LAM, reg, {}).real < 2.0))
+    assert n_clip < 0.6 * n_wrap, (n_clip, n_wrap)
+    with pytest.raises(ValueError):
+        layer_eps_cell(L, X, Y, LAM, reg, {}, period_x_m=P)
 
 
 # ---- audit C5-2: the seam used to silently DROP graded/tensor eps_by_region entries ----
@@ -1008,3 +1046,67 @@ def test_d12_refusal_fires_on_the_JUMP_not_on_the_mere_presence_of_the_hook():
         solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=late, **band)
     with pytest.raises(NotImplementedError, match=r"4 -> 4\.5"):
         solve_fdtd_1d([kerr_layer], kerr=True, eps_inf_of_t=lambda t: 4.5, **band)
+
+
+def test_s5_20_sweep_entry_point_accepts_and_honours_what_the_per_wavelength_one_does(monkeypatch):
+    """audit S5-20 (wave-7, 2026-11-02). run_pipeline PREFERS the sweep-aware solver, yet it (a)
+    RAISED on a structured cell over lossless non-vacuum end media (a stale 'the rasterizer drops
+    the end-media pads' reason) that the per-wavelength solver solves, and (b) rasterized a
+    structured cell from the NOMINAL materials whatever the bias -- eps_band feeds only the
+    uniform dispersive fit -- while the per-wavelength path rasterizes this bias's eps. Both FAIL
+    on the old code. The rasterizer is spied (no march): what it is HANDED is the contract; the
+    painted pads themselves are gated by validation/fdtd_structured_nonvacuum.py (GATE A/B vs
+    TMM / grcwa on glass, and its sweep-path GATE C)."""
+    import dynameta.optics.fdtd_seam as fs
+    from dynameta.core.eps_field import EpsField
+    from dynameta.geometry.specs import OpticalSpec
+
+    class _Stop(Exception):
+        pass
+
+    seen = []
+
+    def spy(design, lambda_m, *, eps_by_region=None, n_super=1.0, n_sub=1.0, z_subcell="average"):
+        # z_subcell (2026-11-02): the seam forwards its z-subcell mode to the painter
+        seen.append(dict(lam=lambda_m, ebr=eps_by_region, ns=n_super, nb=n_sub, zs=z_subcell))
+        raise _Stop
+
+    monkeypatch.setattr(fs, "make_structured_lateral", spy)
+    P = 220e-9
+    d = _design([(4.0, 150e-9, [Inclusion(Circle(P / 2, P / 2, 60e-9), "air")])])
+    d.optical = OpticalSpec(polarization="y", incidence_angle_deg=0.0)
+    bias = {"s0": EpsField(scalar=5.3 + 0j)}                     # the bias-modulated background
+    lams = np.array([1.25e-6, 1.35e-6])
+    # (reference) the per-wavelength path: glass substrate accepted, bias eps handed over
+    with pytest.raises(_Stop):
+        fs.make_fdtd_optical_solver(dim=3)(d, None, bias, 1.3e-6, 1.0 + 0j, 1.5 + 0j)
+    assert seen[-1]["ebr"] is bias and (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # (a) the sweep spectrum on the SAME end media reaches the rasterizer, pads included
+    with pytest.raises(_Stop):
+        fs.fdtd_sweep_spectrum(d, lambda_min_m=1.2e-6, lambda_max_m=1.4e-6, dim=3,
+                               n_super=1.0 + 0j, n_sub=1.5 + 0j)
+    assert (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # (b) run_pipeline's preferred entry point hands the rasterizer THIS bias's eps, sampled at
+    #     the band centre the structured cell is frozen at
+    sw = fs.make_fdtd_sweep_optical_solver(dim=3, resolution=16)
+    asked = []
+
+    def assemble(lam):
+        asked.append(lam)
+        return bias
+
+    with pytest.raises(_Stop):
+        sw.solve_sweep(d, None, assemble, lams, 1.0 + 0j, 1.5 + 0j)
+    lo, hi = lams.min() * (1.0 - sw.band_pad), lams.max() * (1.0 + sw.band_pad)
+    assert seen[-1]["ebr"] is bias, "the sweep path dropped the bias eps of a structured cell"
+    assert seen[-1]["lam"] == pytest.approx(0.5 * (lo + hi), rel=1e-15)
+    assert any(lam == pytest.approx(0.5 * (lo + hi), rel=1e-15) for lam in asked)
+    assert (seen[-1]["ns"], seen[-1]["nb"]) == (1.0, 1.5)
+    # an ABSORBING end medium is still refused by both, before any rasterization
+    n_before = len(seen)
+    with pytest.raises(NotImplementedError, match="LOSSLESS"):
+        fs.fdtd_sweep_spectrum(d, lambda_min_m=1.2e-6, lambda_max_m=1.4e-6, dim=3,
+                               n_sub=1.5 + 0.01j)
+    with pytest.raises(NotImplementedError, match="LOSSLESS"):
+        fs.make_fdtd_optical_solver(dim=3)(d, None, bias, 1.3e-6, 1.0 + 0j, 1.5 + 0.01j)
+    assert len(seen) == n_before

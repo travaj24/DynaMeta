@@ -146,6 +146,67 @@ def test_slice_eps_field_uniform_and_structured():
         layered_rta(stk, 1300e-9)
 
 
+def test_r29_slice_eps_field_honours_n_slices_on_every_branch():
+    """audit R-29: n_slices was silently ignored on the structured-scalar and tensor branches (one
+    slab per native interval regardless). It now resamples them the way slice_profile resamples a
+    scalar profile: a uniform staircase, midpoint-sampled by linear interpolation in z."""
+    class _EF:
+        def __init__(self, v_zyx, z_u):
+            self.values_zyx = np.asarray(v_zyx, dtype=complex)
+            self.z_axis_u = np.asarray(z_u, dtype=float)
+            self.is_uniform = False
+    z = [0.0, 30.0, 100.0]                                 # non-uniform native grid (nm)
+    vs = np.zeros((3, 2, 3), complex)                      # structured scalar (Nz, Ny, Nx)
+    vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 3.0; vs[2] = vs[0] + 10.0
+    ss = slice_eps_field(_EF(vs, z), 1e-9, n_slices=4)
+    assert len(ss) == 4 and all(s.thickness_m == pytest.approx(25e-9) for s in ss)
+    for k, s in enumerate(ss):
+        zc = 12.5 + 25.0 * k
+        off = np.interp(zc, z, [0.0, 3.0, 10.0])           # the per-cell offset, linear in z
+        assert np.allclose(s.eps_cell, (vs[0] + off).T)
+    assert len(slice_eps_field(_EF(vs, z), 1e-9)) == 2     # None keeps the native intervals
+    vt = np.zeros((3, 2, 3, 3, 3), complex)                # tensor (Nz, Ny, Nx, 3, 3), structured
+    vt[..., 0, 0] = vs; vt[..., 1, 1] = 2.0; vt[..., 2, 2] = 3.0
+    st = slice_eps_field(_EF(vt, z), 1e-9, n_slices=5)
+    assert len(st) == 5 and sum(s.thickness_m for s in st) == pytest.approx(100e-9)
+    assert np.allclose(st[0].eps_tensor_cell[..., 0, 0], (vs[0] + np.interp(10.0, z, [0, 3, 10])).T)
+    with pytest.raises(ValueError):
+        slice_eps_field(_EF(vs, z), 1e-9, n_slices=0)
+
+
+def test_s4_21_slice_eps_field_normalizes_descending_z_on_every_branch():
+    """audit S4-21 (wave-7, 2026-11-02): slice_profile (the laterally-uniform branch) normalized a
+    DESCENDING z axis, the structured-scalar and tensor branches did not -- native intervals came
+    out with negative thickness and LayeredSlab raised (n_slices interpolated on a reversed
+    searchsorted). Every branch must now return the SAME ascending-z slabs for the reversed
+    field; a non-monotonic axis raises. On the old code the first slice_eps_field below raises."""
+    class _EF:
+        def __init__(self, v_zyx, z_u):
+            self.values_zyx = np.asarray(v_zyx, dtype=complex)
+            self.z_axis_u = np.asarray(z_u, dtype=float)
+            self.is_uniform = False
+    z = np.array([0.0, 30.0, 100.0])
+    vs = np.zeros((3, 2, 3), complex)                      # structured scalar (Nz, Ny, Nx)
+    vs[0] = np.array([[1, 2, 3], [4, 5, 6]]); vs[1] = vs[0] + 3.0; vs[2] = vs[0] + 10.0 + 1j
+    vt = np.zeros((3, 2, 3, 3, 3), complex)                # structured tensor
+    vt[..., 0, 0] = vs; vt[..., 1, 1] = 2.0; vt[..., 2, 2] = 3.0; vt[..., 0, 1] = 0.1 * vs
+    vu = np.broadcast_to(np.array([4.0, 6.0, 9.0 + 0.5j])[:, None, None], (3, 2, 3))   # uniform
+    for v in (vs, vt, vu):
+        for n in (None, 4):
+            up = slice_eps_field(_EF(v, z), 1e-9, n_slices=n)
+            dn = slice_eps_field(_EF(v[::-1], z[::-1]), 1e-9, n_slices=n)
+            assert len(up) == len(dn)
+            for a, b in zip(up, dn):
+                assert a.thickness_m == b.thickness_m > 0
+                for f in ("eps", "eps_cell", "eps_tensor_cell"):
+                    fa, fb = getattr(a, f), getattr(b, f)
+                    assert (fa is None) == (fb is None)
+                    if fa is not None:
+                        assert np.array_equal(np.asarray(fa), np.asarray(fb))
+    with pytest.raises(ValueError, match="monotonic"):
+        slice_eps_field(_EF(vs, [0.0, 100.0, 30.0]), 1e-9)
+
+
 def test_layered_order_sensitivity_on_asymmetric_lossy_stack():
     # The graded_tmm_vs_fem validation uses a symmetric LOSSLESS profile, for which R is
     # order-INsensitive, so it cannot catch a slab-order / double-reversal regression (LTM-1).

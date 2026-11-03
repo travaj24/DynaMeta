@@ -372,3 +372,70 @@ def test_extra_fields_2d_grid_lifts_not_transposes():
     assert ramp_x[-1] - ramp_x[0] > 0.05, "the T ramp must live on the x axis"
     assert np.allclose(vzyx[0, :, 0], vzyx[0, 0, 0]), "extras must be y-uniform"
     assert np.allclose(vzyx[0], vzyx[-1]), "v-uniform T stays z-uniform"
+
+
+def test_r30_identity_lift_error_names_the_spec_knob_and_the_dimension():
+    """audit R-30: lift='identity' on a 2-D carrier field raised 'IdentityLift expects a 3D carrier
+    array' -- naming neither OpticalSpec.lift nor the 2-D/3-D mismatch that caused it."""
+    with pytest.raises(ValueError, match=r"OpticalSpec\.lift='identity'.*2-D array.*lift='auto'"):
+        IdentityLift().apply(np.ones((4, 5)), np.linspace(0, 1, 4), np.linspace(0, 1, 5), n_bg=1.0)
+
+
+def test_s4_18_stack_axis_x_aliasing_lateral_is_refused():
+    """audit S4-18 (wave-7, 2026-11-02): a 2-D carrier grid is (Nx, Nv) with lateral 'x'; with
+    stack_axis='x' the old bridge used the x axis as BOTH the lateral and the vertical axis.
+    MEASURED on the old code: with Nx == Nv (5 x 5, this fixture) it RETURNED a (5, 2, 5) gridded
+    EpsField, no error -- the lateral ramp re-used as the z profile; with Nx != Nv (6 x 4) it died
+    on an unrelated-looking eps_grid shape error. Now refused by name; a missing vertical axis is
+    a named ValueError instead of a KeyError; the default stack_axis='y' is unchanged."""
+    nx, nv = 5, 5
+    x = np.linspace(0.0, PERIOD, nx)
+    n2d = N_BG * (1.0 + np.linspace(0.0, 1.0, nx))[:, None] * np.ones((1, nv))
+    field = _field_2d(n2d, x, np.linspace(0.0, 10e-9, nv))
+    emap = MaterialEpsMap(_registry())
+    lift = ExtrudeLift(period_y_m=PERIOD)
+    with pytest.raises(ValueError, match="stack_axis='x'.*S4-18"):
+        assemble_eps(field, _align("ito", "ito", stack_axis="x"), emap, lift, 1300e-9,
+                     mesh_regions=["ito"])
+    with pytest.raises(ValueError, match="no 'z' axis"):
+        assemble_eps(field, _align("ito", "ito", stack_axis="z"), emap, lift, 1300e-9,
+                     mesh_regions=["ito"])
+    out = assemble_eps(field, _align("ito", "ito"), emap, lift, 1300e-9, mesh_regions=["ito"])
+    assert out["ito"].values_zyx.shape[0] == nv
+
+
+def test_s4_19_identity_lift_refuses_to_fabricate_a_y_axis():
+    """audit S4-19 (wave-7, 2026-11-02): IdentityLift.apply on a 3-D array returned a FABRICATED
+    y axis linspace(0, 1, Ny) (one metre wide); assemble_eps never calls it on 3-D data (its 3-D
+    branch reads the field's own axes, pinned by the identity-lift assemble tests above), so the
+    method now refuses instead of inventing geometry."""
+    with pytest.raises(ValueError, match="needs no lift.*S4-19"):
+        IdentityLift().apply(np.ones((4, 3, 5)), np.linspace(0, 1, 4), np.linspace(0, 1, 5),
+                             n_bg=1.0)
+
+
+def test_s4_23_extras_are_broadcast_views():
+    """audit S4-23 (wave-7, 2026-11-02): a 2-D (Nx, Nv) extra field is extruded onto the lifted
+    (Nx, Ny, Nv) grid as a READ-ONLY stride-0 broadcast view, not a materialized copy (33.5 MB
+    per extra at Ny 256 x 256 x 64; measured peak 201 -> 168 MB). The eps it produces is
+    bit-identical to the one from an explicitly replicated copy. On the old code the recorded
+    array owns a full copy (stride != 0), so the first assert fails."""
+    nx, nv = 16, 6
+    x = np.linspace(0.0, PERIOD, nx)
+    n2d = N_BG * (1.0 + 0.5 * np.exp(-((x - PERIOD / 2) / 50e-9) ** 2))[:, None] * np.ones((1, nv))
+    T2d = 300.0 + 40.0 * np.sin(np.pi * x / PERIOD)[:, None] * np.linspace(0, 1, nv)[None, :]
+    seen = {}
+
+    class _Rec:
+        def eps_grid(self, material, fields, lambda_m):
+            seen["T"] = fields["T"]
+            return 2.0 + 1e-3 * (np.asarray(fields["T"]) - 300.0) + 0.0 * np.asarray(fields["n"])
+
+    lift = SeparableXYLift(period_y_m=PERIOD, ny=32)
+    out = assemble_eps(_field_2d(n2d, x, np.linspace(0.0, 10e-9, nv)), _align("ito", "ito"),
+                       _Rec(), lift, 1300e-9, mesh_regions=["ito"], extra_fields={"T": T2d})
+    T = seen["T"]
+    assert T.shape == (nx, 32, nv) and T.strides[1] == 0 and not T.flags.writeable
+    n3d = lift.apply(n2d, x, np.linspace(0.0, 10e-9, nv), n_bg=N_BG)[0]
+    ref = 2.0 + 1e-3 * (np.repeat(T2d[:, None, :], 32, axis=1) - 300.0) + 0.0 * n3d
+    assert np.array_equal(out["ito"].values_zyx, np.transpose(ref, (2, 1, 0)).astype(complex))

@@ -6,23 +6,20 @@ _fem_optical_solver wrapper, which is the callable that satisfies the core.inter
 OpticalSolver seam.
 
 Incidence: a plane wave in the x-z plane (azimuth phi=0). Oblique incidence
-(theta != 0) is supported for s-polarization (E along y) by two selectable
-formulations (module global _OBLIQUE_FORMULATION), both reducing EXACTLY to the
-proven normal-incidence curl-curl form at theta=0:
+(theta != 0) solves for the PHYSICAL field E on a QUASI-periodic HCurl space
+ng.Periodic(HCurl, phase=[exp(i*kx*Px)]*n_px + [1]*n_py), reducing EXACTLY to the proven
+normal-incidence curl-curl form at theta=0. The identification order is
+f0(x=0).Identify(p(x=Px), tx=+Px), so master=x=0, minion=x=Px and the Bloch rule
+phase[idnr]=exp(i*k_par.(r_minion-r_master)) = exp(+i*kx*Px). The curl operator is the
+GENUINE curl, so the standard stretched-coordinate HalfSpace z-PML transforms it exactly.
+R/T are demodulated by exp(-i*kx*x).
 
-  "phase_in_space" (default): solve for the PHYSICAL field E on a QUASI-periodic
-      HCurl space ng.Periodic(HCurl, phase=[exp(i*kx*Px)]*n_px + [1]*n_py). The
-      identification order is f0(x=0).Identify(p(x=Px), tx=+Px), so master=x=0,
-      minion=x=Px and the Bloch rule phase[idnr]=exp(i*k_par.(r_minion-r_master))
-      = exp(+i*kx*Px). The curl operator is the GENUINE curl, so the standard
-      stretched-coordinate HalfSpace z-PML transforms it exactly (this is the key
-      advantage over the envelope route, whose algebraic transverse-phase term the
-      z-PML cannot transform consistently). R/T are demodulated by exp(-i*kx*x).
-
-  "envelope": solve for the envelope u with E=u*exp(i*kx*x), u plain-periodic, the
-      transverse phase carried by a modified curl curl(u)+i*k_par x u. Cleaner
-      periodicity but the z-PML mishandles the algebraic cross term at oblique
-      (R is under-captured) -- kept for reference/diagnostics.
+(Audit F-16, removed 2026-11-02: an alternative "envelope" formulation -- E = u exp(i kx x) with
+u plain-periodic and a modified curl curl(u) + i k_par x u -- used to sit beside this behind a
+module constant. The z-PML cannot transform its algebraic transverse-phase term, so it
+under-captured R at oblique; it was reachable only by editing the constant, and its only
+consumer, a sign/PML developer diagnostic, set a knob that is inert on this route. Recover it
+from git history if it is ever wanted as a reference.)
 
 p-pol (TM, E in the x-z plane) oblique and conical s-pol (azimuth phi != 0) are also
 implemented (each tmm-validated at phi=0 / phi-invariance).
@@ -74,22 +71,14 @@ import ngsolve as ng
 
 from typing import TYPE_CHECKING
 
-from dynameta.constants import C_LIGHT, EPS0
+from dynameta.constants import Z0
 from dynameta.core.interfaces import OpticalResult
 from dynameta.optics.ngsolve_layered import OpticalGeometry, S
+from dynameta.warning_types import AdvisoryWarning, DynaMetaWarning, UnreliableResultWarning
 
 if TYPE_CHECKING:                       # type-only; OpticalSpec lives in geometry (no runtime dep)
     from dynameta.geometry.specs import OpticalSpec
 
-# Oblique formulation: "phase_in_space" (physical field, genuine curl, standard
-# PML -- the validated route) or "envelope" (plain-periodic envelope, modified
-# curl -- diagnostic only). Both are identical at normal incidence. This is a module-level
-# switch (NOT a solve_fem kwarg): the "envelope" branch is reachable only by editing it here, so it
-# is effectively dead on the public path -- kept for reference/diagnostics, not for production use.
-_OBLIQUE_FORMULATION = "phase_in_space"
-# Sign of the transverse-phase term on the TEST envelope's modified curl (envelope
-# route only): trial carries exp(+i k_par.r) (+kcross), test the conjugate (-kcross).
-_TEST_KCROSS_SIGN = -1.0
 # Relative-residual threshold above which the two-wave (up/down) R/T fit is flagged unreliable: the
 # probe band is then not a clean up/down field (super/substrate buffer too thin -> undecayed
 # diffraction orders, or PML leak-back). Conservative -- the real failure mode gives O(1) residuals,
@@ -329,9 +318,12 @@ _OBLIQUE_PML_ADVICE = (
     "per process; re-enable with warnings.simplefilter('always', FEMDiagnosticWarning)]")
 
 
-class FEMDiagnosticWarning(UserWarning):
+class FEMDiagnosticWarning(DynaMetaWarning):
     """Category for solve_fem's ADVISORY diagnostics (regime advisories, fit/energy-closure quality
-    flags) as distinct from a plain UserWarning about a caller mistake (audit F-15).
+    flags) as distinct from a plain UserWarning about a caller mistake (audit F-15). Rebased onto
+    the library-wide `dynameta.warning_types.DynaMetaWarning` (itself a UserWarning, so every existing
+    filter still matches) by audit V-17, 2026-11-02; not split into the advisory/unreliable halves
+    because callers (and tests/conftest.py) already filter it as one class.
 
     A 40-wavelength oblique sweep used to emit one identical PML advisory per solve with no new
     information after the first. Two things fix that: the advisories are now emitted at most ONCE
@@ -538,7 +530,9 @@ def _validate_sheet_bcs(mesh, sheet_bcs) -> None:
     sheet simply is not there and the solve returns the SHEET-FREE answer -- numerically plausible,
     silently wrong. The builder's interior interfaces are named ``iface_z<int(round(z_nm))>``
     (ngsolve_layered), i.e. the caller has to guess an exact integer nanometre, so an off-by-one is
-    the expected mistake, not an exotic one.
+    the expected mistake, not an exotic one. (Two planes in one 1 nm bucket are named with decimals
+    instead -- ``iface_z99p8`` / ``iface_z100p4`` -- so neither silently carries the other's sheet;
+    audit F-19.)
 
     Names are NGSolve boundary PATTERNS (regexes, ``a|b`` alternation allowed), so matching is
     ``re.fullmatch`` against every boundary name. For a pattern that is a plain ``|``-alternation of
@@ -563,7 +557,9 @@ def _validate_sheet_bcs(mesh, sheet_bcs) -> None:
             "sheet_bcs boundary name(s) {} match no boundary of this mesh, so the conductive-sheet "
             "term would assemble to ZERO and the solve would silently return the SHEET-FREE answer. "
             "Available interface boundaries: {}. All mesh boundaries: {}. (Interfaces are named "
-            "'iface_z<z in nm, rounded to the nearest integer>' -- check the layer z you meant.)"
+            "'iface_z<z in nm, rounded to the nearest integer>' -- check the layer z you meant; "
+            "two planes in the same 1 nm bucket are named with decimals instead, e.g. "
+            "'iface_z99p8' / 'iface_z100p4' -- audit F-19.)"
             .format(", ".join(repr(b) for b in bad),
                     ", ".join(ifaces) if ifaces else "<none>", ", ".join(known)))
 
@@ -585,7 +581,7 @@ def _reject_pol_unless_lab(polarization, where: str):
 
 
 def _layered_background(polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
-                        eps_sup_c, eps_sub_c, n_super, n_sub, *, inc_phase=None):
+                        eps_sup_c, eps_sub_c, n_super, n_sub):
     """THE analytic layered (two-region Fresnel) background of the scattered-field formulation:
     the bare superstrate/substrate field E_bg the structure scatters off, its eps_bg(z), the
     incident-only field E_inc (the Poynting-flux reference) and, for the scalar polarizations, the
@@ -607,8 +603,8 @@ def _layered_background(polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
     field/relres/sheet diagnostic built on it described the wrong mode. Both callers now build the
     background here.
 
-    inc_phase overrides the transverse Bloch phase exp(i(kx x + ky y)) (solve_fem's diagnostic
-    "envelope" route passes 1.0, carrying the transverse phase in the operator instead).
+    The transverse Bloch phase exp(i(kx x + ky y)) is always carried by the field (the
+    `inc_phase` override existed only for the "envelope" formulation removed under audit F-16).
 
     AUDIT V-8: `polarization` is the OpticalSpec LAB-AXIS vocabulary {'x', 'y', 'p'} -- see
     dynameta.core.polarization for the map and for why 'y' is s-pol only at azimuth phi = 0 (at
@@ -617,7 +613,7 @@ def _layered_background(polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
     else = s-pol" fallthrough below is now unreachable for an off-vocabulary label: the accepted
     set is unchanged, the rejection is named."""
     _reject_pol_unless_lab(polarization, "_layered_background")
-    iph = ng.exp(1j * (kx * ng.x + ky * ng.y)) if inc_phase is None else inc_phase
+    iph = ng.exp(1j * (kx * ng.x + ky * ng.y))
     eps_bg = ng.IfPos(ng.z - z_int, eps_sup_c, eps_sub_c)
     # s-pol unit E (perpendicular to the plane of incidence); reduces to +y at phi=0
     es_x, es_y = -math.sin(phi), math.cos(phi)
@@ -790,7 +786,6 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             "cross_pol=True needs NORMAL incidence (theta=0, azimuth 0) and polarization 'x' or 'y'; "
             "got theta={:.3g} deg, azimuth={:.3g} deg, polarization={!r}.".format(
                 math.degrees(theta), math.degrees(phi), optical.polarization))
-    envelope = oblique and _OBLIQUE_FORMULATION == "envelope" and not pol_p and not conical
     # in-plane wavevector k_par = (kx, ky) (vacuum dispersion; oblique requires n_super=1).
     kx = k0 * math.sin(theta) * math.cos(phi)
     ky = k0 * math.sin(theta) * math.sin(phi)
@@ -821,7 +816,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     z_air_top = geo.z_super_interface_nm
     z_sub_top = geo.z_sub_interface_nm
     eps_is_tensor = (tuple(getattr(eps_cf, "dims", ())) == (3, 3))
-    use_upml = eps_is_tensor and not envelope
+    use_upml = eps_is_tensor
     try:
         mesh.UnSetPML("pml_top"); mesh.UnSetPML("pml_bot")
     except Exception:
@@ -860,12 +855,10 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     z_int = (geo.z_intervals_nm["substrate"][1] if "substrate" in geo.z_intervals_nm
               else geo.z_sub_interface_nm)                       # substrate-top interface (nm)
     eps_sup_c, eps_sub_c = complex(n_super) ** 2, complex(n_sub) ** 2
-    # transverse Bloch phase exp(i(kx x + ky y)); reduces to exp(i kx x) at phi=0
-    inc_x_phase = (1.0 if envelope else ng.exp(1j * (kx * ng.x + ky * ng.y)))
 
     E_bg, E_inc, eps_bg_cf, R0, T0 = _layered_background(
         optical.polarization, k0, kx, ky, phi, kz_s_c, kz_sub, z_int,
-        eps_sup_c, eps_sub_c, n_super, n_sub, inc_phase=inc_x_phase)
+        eps_sup_c, eps_sub_c, n_super, n_sub)
 
     # ---- periodic HCurl space ----
     if getattr(geo, "sym_x", False) or getattr(geo, "sym_y", False):
@@ -914,7 +907,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # a quarter cell has no periodic identification (n_px=n_py=0) -> the bare HCurl is the space.
             return ng.Periodic(base) if (geo.n_px or geo.n_py) else base
         _skey = ("sym", order, tuple(pec))
-    elif oblique and not envelope and (geo.n_px or geo.n_py):
+    elif oblique and (geo.n_px or geo.n_py):
         # quasi-periodic: u(minion=x=Px) = exp(+i kx Px) u(master=x=0). The phase
         # list is keyed per identification in idnr order, which netgen does NOT keep
         # in creation order -- _bloch_phase_list resolves + verifies the true order.
@@ -937,22 +930,13 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
         _skey = ("periodic", order)
     fes = (factor_cache.space(geo, _skey, _build_space) if factor_cache is not None
            else _build_space())
-    # Is the space QUASI-periodic (Bloch phases != 1)? Only the oblique non-envelope branch above
-    # builds one: the symmetry-reduced branch raises at oblique, _reuse_fes is refused at oblique,
-    # and the plain-periodic fallbacks carry phase 1. Drives BOTH the BilinearForm(symmetric=) flag
-    # and the bddc_cg guard (audit F-9).
-    bloch_phased = bool(oblique and not envelope and (geo.n_px or geo.n_py))
+    # Is the space QUASI-periodic (Bloch phases != 1)? Only the oblique branch above builds one: the
+    # symmetry-reduced branch raises at oblique, _reuse_fes is refused at oblique, and the
+    # plain-periodic fallbacks carry phase 1. Drives BOTH the BilinearForm(symmetric=) flag and the
+    # bddc_cg guard (audit F-9).
+    bloch_phased = bool(oblique and (geo.n_px or geo.n_py))
     u, v = fes.TrialFunction(), fes.TestFunction()
-
-    if envelope:
-        # modified curl: C(w)=curl(w)+i k_par x w, k_par=(kx,0,0) -> kcross(w)=
-        # 1j*(0,-kx w_z, kx w_y). Trial +kcross, test -kcross (conjugate phase).
-        def kcross(w):
-            return 1j * ng.CoefficientFunction((0.0, -kx * w[2], kx * w[1]))
-        curlE = ng.curl(u) + kcross(u)
-        curlV = ng.curl(v) + _TEST_KCROSS_SIGN * kcross(v)
-    else:
-        curlE, curlV = ng.curl(u), ng.curl(v)
+    curlE, curlV = ng.curl(u), ng.curl(v)
 
     # a tensor eps makes the matvec term (eps.u).v non-symmetric in general (e.g. magneto-optic);
     # assemble non-symmetric so NGSolve does not symmetrize it (only the scalar path is symmetric).
@@ -965,7 +949,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # SparseMatrix<complex>), so this is a correctness statement, not a behaviour change today; it
     # stops any build that HONOURS the flag from symmetrizing a non-symmetric operator, and it is
     # the same condition the bddc_cg guard below uses.
-    a = ng.BilinearForm(fes, symmetric=(not envelope) and not eps_is_tensor and not bloch_phased)
+    a = ng.BilinearForm(fes, symmetric=not eps_is_tensor and not bloch_phased)
     f = ng.LinearForm(fes)
     if eps_is_tensor:
         # anisotropic eps: (eps . E) . v expanded as the explicit scalar component sum
@@ -993,13 +977,12 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # background E_bg drives the scattered field, so the SAME term enters the RHS on E_bg.
     if sheet_bcs:
         _validate_sheet_bcs(mesh, sheet_bcs)                 # audit F-8 (silent no-op sheet)
-        _Z0 = 1.0 / (EPS0 * C_LIGHT)                         # free-space wave impedance (ohm), from constants.py
         for _bnd, _sigma in sheet_bcs.items():
             # sign: with exp(-i omega t) and Im(eps)>0 = loss, a passive sheet (Re sigma > 0) must
             # ABSORB, so the dissipative operator term is - i k0 Z0 sigma (E_tan . v_tan).
             _ds = ng.ds(definedon=mesh.Boundaries(_bnd))
-            a += (-1j * k0 * _Z0 * complex(_sigma) * (u.Trace() * v.Trace())) * _ds
-            f += (1j * k0 * _Z0 * complex(_sigma) * (E_bg * v.Trace())) * _ds
+            a += (-1j * k0 * Z0 * complex(_sigma) * (u.Trace() * v.Trace())) * _ds
+            f += (1j * k0 * Z0 * complex(_sigma) * (E_bg * v.Trace())) * _ds
     # C8: resolve the linear solver. "ams"/"hypre" request a HYPRE auxiliary-space-Maxwell (AMS)
     # preconditioner -- the rung above BDDC for large 3D -- but the standard pip NGSolve wheel is
     # built WITHOUT HYPRE and naively constructing it SEGFAULTS (not a catchable Python error). So by
@@ -1008,9 +991,9 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     _ls = optical.linear_solver
     _auto = _ls == "auto"
     if _auto:
-        # complex-symmetric matrix: no Bloch phase (Hermitian-not-symmetric, audit F-9 below), not the
-        # envelope's modified curl, and a symmetric eps (the UPML factors and sheet terms are symmetric)
-        _symmetric = (not bloch_phased and not envelope
+        # complex-symmetric matrix: no Bloch phase (Hermitian-not-symmetric, audit F-9 below) and a
+        # symmetric eps (the UPML factors and sheet terms are symmetric)
+        _symmetric = (not bloch_phased
                       and (not eps_is_tensor or _tensor_is_symmetric(eps_cf, mesh)))
         _ls = _auto_linear_solver(fes.FreeDofs().NumSet(), _symmetric, optical)
     if _ls == "pardiso" and not pardiso_available():
@@ -1037,10 +1020,10 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             .format("oblique incidence on a quasi-periodic (Bloch-phased) space"
                     if bloch_phased else "an anisotropic (tensor) eps"))
         _ls = "bddc_gmres"
-    if _ls == "sparsecholesky" and (bloch_phased or envelope):
+    if _ls == "sparsecholesky" and bloch_phased:
         # LDL^T needs a complex-SYMMETRIC matrix; a Bloch-phased space assembles HERMITIAN-not-symmetric
-        # and the envelope's modified curl is not symmetric either (audit F-9 above). Known before the
-        # factorization, so fall back to the other direct solver instead of factorizing to refuse.
+        # (audit F-9 above). Known before the factorization, so fall back to the other direct solver
+        # instead of factorizing to refuse.
         _advise_once(
             "sparsecholesky_nonsymmetric",
             "linear_solver='sparsecholesky' is invalid for this solve: oblique incidence makes the "
@@ -1071,7 +1054,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # symmetry itself, so _direct_solve refuses a solve short of a direct residual) / pardiso.
             # The matrix key holds everything the bilinear form depends on besides the space (keyed
             # separately) and the eps CoefficientFunction (compared by identity).
-            _mkey = (float(lambda_m), float(kx), float(ky), bool(envelope), bool(use_upml),
+            _mkey = (float(lambda_m), float(kx), float(ky), bool(use_upml),
                      tuple(sorted((str(_b), complex(_s)) for _b, _s in (sheet_bcs or {}).items())))
             _ls = _direct_solve(a, f, gfu, fes, _ls, cache=factor_cache, skey=_skey, mkey=_mkey,
                                 eps_cf=eps_cf,
@@ -1099,13 +1082,10 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
                 "solve_fem: iterative solver '{}' did not converge (relative residual {:.2e} "
                 "> 1e-3 after {} steps); R/T/A are unreliable. Use linear_solver='umfpack', "
                 "raise gmres_max_iter, or refine the mesh.".format(
-                    _ls, relres, optical.gmres_max_iter), stacklevel=2)
+                    _ls, relres, optical.gmres_max_iter), UnreliableResultWarning, stacklevel=2)
 
-    # Demodulation: phase_in_space holds the physical field E=u exp(i(kx x+ky y)) -> demod
-    # by exp(-i(kx x+ky y)) to recover the 0-order Fourier coefficient. envelope already
-    # holds u (kx=ky=0 in the demod).
-    kx_d = 0.0 if envelope else kx
-    ky_d = 0.0 if envelope else ky
+    # Demodulation: the solve holds the physical field E=u exp(i(kx x+ky y)) -> the extractors
+    # demodulate by exp(-i(kx x+ky y)) to recover the 0-order Fourier coefficient.
     # audit F-15: collect THIS solve's two-wave fit residuals and emit at most ONE warning naming
     # every offending band, instead of one warning per band. try/finally so an exception in the
     # extraction cannot leave a stale accumulator on the thread.
@@ -1116,7 +1096,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # p-pol up/down ratio (convention-robust). Project onto the transverse p-pol direction
             # (cos phi, sin phi) and 2D-demodulate by (kx, ky); at phi=0 this is the tangential-Ex
             # extraction. T carries the p-pol Poynting factor (Sz ~ |E_t|^2 eps/kz).
-            r, R, t, T = _ppol_extract(mesh, E_bg + gfu, kz_s, kz_sub, kx_d, ky_d, (cphi, sphi, 0.0),
+            r, R, t, T = _ppol_extract(mesh, E_bg + gfu, kz_s, kz_sub, kx, ky, (cphi, sphi, 0.0),
                                          geo, eps_sup_c, eps_sub_c)
             A = None if T is None else float(1.0 - R - T)
         else:
@@ -1124,7 +1104,7 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             # (1,0,0) for x-pol, or the (conical) s-pol unit vector Es=(es_x,es_y,0) for 'y'.
             proj = (1.0, 0.0, 0.0) if optical.polarization == "x" else (es_x, es_y, 0.0)
             # total amplitude = background (analytic R0/T0) + scattered (fitted from gfu)
-            r = complex(R0) + _reflection(mesh, gfu, kz_s, proj, kx_d, ky_d, geo)
+            r = complex(R0) + _reflection(mesh, gfu, kz_s, proj, kx, ky, geo)
             R = float(abs(r) ** 2)
             if cross_pol and (getattr(geo, "sym_x", False) or getattr(geo, "sym_y", False)):
                 # a mirror-symmetric cell cannot convert x <-> y at normal incidence, so the 0-order
@@ -1136,14 +1116,18 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
             elif cross_pol:
                 # normal incidence only (validated up front), so proj is lab x or lab y exactly
                 _pc = (0.0, 1.0, 0.0) if optical.polarization == "x" else (1.0, 0.0, 0.0)
-                r_cross = _reflection(mesh, gfu, kz_s, _pc, kx_d, ky_d, geo)
-            t_scat = _transmission(mesh, gfu, kz_sub, proj, kx_d, ky_d, geo)
+                r_cross = _reflection(mesh, gfu, kz_s, _pc, kx, ky, geo)
+            t_scat = _transmission(mesh, gfu, kz_sub, proj, kx, ky, geo)
             if t_scat is None:
                 t = T = A = None
             else:
                 t = complex(T0) + t_scat
-                kz_sup_med = complex(n_super) * k0 * math.cos(theta)
-                T = float(abs(t) ** 2 * (kz_sub.real / max(kz_sup_med.real, 1e-12)))
+                # audit V-24/F-21: the incidence-medium kz is kz_s, derived once above from the
+                # medium dispersion sqrt((n_super k0)^2 - k_par^2). This line used to re-derive it as
+                # n_super k0 cos(theta) -- the vacuum-dispersion form the kz_s comment rejects -- which
+                # agrees only because oblique incidence is guarded to n_super = 1 (exactly equal at
+                # normal incidence; ~1 ulp apart at oblique).
+                T = float(abs(t) ** 2 * (kz_sub.real / max(kz_s, 1e-12)))
                 A = float(1.0 - R - T)
     finally:
         _fit_ctx.acc = None
@@ -1158,40 +1142,36 @@ def solve_fem(geo: OpticalGeometry, lambda_m: float,
     # The three diagnostics run under the TaskManager (0.12.0): their Integrate/Set calls were ~40% of
     # a small solve's wall time single-threaded, ~5x less threaded (not bitwise: ~1e-15 reductions).
     with ng.TaskManager():
+        # A_independent + the per-region absorbed-power map (driver D2) come from ONE region-wise
+        # integration of the loss density (audit S6-18, wave-7 2026-11-02 -- see
+        # _absorption_diagnostics): the map is the per-region split and A_independent its sum, so
+        # sum(per_region_absorption.values()) == A_independent now holds EXACTLY.
         try:
-            A_independent = (_absorbed_fraction(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                                geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                                roles=getattr(geo, "role_by_region", None))
-                             if diagnostics else None)
+            A_independent, per_region_A = (
+                _absorption_diagnostics(mesh, E_bg + gfu, eps_cf, k0, theta,
+                                        geo.period_x_nm, geo.period_y_nm, n_super=n_super,
+                                        roles=getattr(geo, "role_by_region", None))
+                if diagnostics else (None, None))
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("independent absorption diagnostic unavailable: {}".format(_e))
-            A_independent = None
-        # Per-region absorbed-power map (driver D2): the same loss integral split by material region
-        # (sums to A_independent by additivity). Best-effort diagnostic like A_independent.
-        try:
-            per_region_A = (None if A_independent is None else
-                            _per_region_absorption(mesh, E_bg + gfu, eps_cf, k0, theta,
-                                                   geo.period_x_nm, geo.period_y_nm, n_super=n_super,
-                                                   roles=getattr(geo, "role_by_region", None)))
-        except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("per-region absorption map unavailable: {}".format(_e))
-            per_region_A = None
+            warnings.warn("independent absorption diagnostic (and per-region absorption map) "
+                          "unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
+            A_independent, per_region_A = None, None
         # Fit-INDEPENDENT Poynting-flux R/T (audit B-fix): reads the FULL z-power straight from the
         # field, so it is correct even when the transmitted wave is elliptical (off-diagonal /
         # gyrotropic) and the single-projection lstsq fit cannot. Best-effort -- a diagnostic must not
-        # break the solve. Skipped for the envelope formulation (its modified curl != mesh curl).
+        # break the solve.
         # The flux band-averages Sz over the cladding buffer, which is z-CONSTANT only for LOSSLESS
         # cladding; a lossy super/substrate makes Sz decay through the buffer and biases the ratio
-        # (same caveat _absorbed_fraction carries). Skip it (leave None) for the envelope formulation
-        # or a lossy cladding rather than report a silently-biased "independent" R/T.
+        # (same caveat _absorbed_fraction carries). Skip it (leave None) for a lossy cladding rather
+        # than report a silently-biased "independent" R/T.
         lossless_clad = abs(complex(n_super).imag) < 1e-9 and abs(complex(n_sub).imag) < 1e-9
         try:
-            if envelope or not lossless_clad or not diagnostics:
+            if not lossless_clad or not diagnostics:
                 R_flux = T_flux = None
             else:
                 R_flux, T_flux = _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo)
         except Exception as _e:                                   # noqa: BLE001 (diagnostic)
-            warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e))
+            warnings.warn("Poynting-flux R/T diagnostic unavailable: {}".format(_e), AdvisoryWarning, stacklevel=2)
             R_flux = T_flux = None
     # Backstop sanity: a bad fit / near-grazing case can push R or T well outside [0,1] or make
     # A=1-R-T strongly negative (energy created). Thresholds are LOOSE (5e-2): the documented
@@ -1382,7 +1362,6 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
     _apply_fem_threads(optical)
     k0 = 2.0 * math.pi / (lambda_m * S)        # nm^-1
     mesh = geo.mesh
-    Z0 = 1.0 / (EPS0 * C_LIGHT)                 # free-space wave impedance (ohm)
     kx, ky = float(k_par_per_nm[0]), float(k_par_per_nm[1])
     oblique = math.hypot(kx, ky) > 1e-12 * k0
     if oblique:
@@ -1513,7 +1492,7 @@ def solve_fem_sourced(geo: OpticalGeometry, lambda_m: float,
             "curl-curl operator is near-singular for low-loss / open-cavity source problems (the "
             "DIRECT current route especially); use the scattered-field route (bg_field/eps_ref) with "
             "a metal-filled cell, linear_solver='umfpack', or refine.".format(
-                optical.linear_solver, relres), stacklevel=2)
+                optical.linear_solver, relres), UnreliableResultWarning, stacklevel=2)
 
     # ---- radiated 0-order amplitudes + per-port power (total field = bg_field + gfu) ----
     total = gfu if bg_field is None else (bg_field + gfu)
@@ -1676,7 +1655,7 @@ def _probe_grid_sizes(Px, Py, kx, ky, kz_med, standoff_nm=None,
     return nx_g, ny_g
 
 
-def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None, standoff_nm=None):
+def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med, standoff_nm=None):
     """Transverse (x,y) cell-average of (proj . field), demodulated by exp(-i(kx x+ky y)),
     at each z. `proj` is a length-3 weight vector projecting the vector field onto the
     polarization of interest (the s-pol unit vector, or (1,0,0) for tangential Ex). The
@@ -1684,32 +1663,50 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None, stan
     equals the 0-order Fourier coefficient PLUS aliases of orders m = 0 (mod N) (audit
     C3-1: NOT exact orthogonality, as previously claimed -- a propagating substrate
     order-6 amplitude at 30% of r0 corrupted the fit silently at the old fixed 6x6).
-    Passing kz_med (the fitted wave's medium z-wavevector) sizes the grid so every
-    aliased order is evanescent at the probe planes; None keeps the legacy 6x6.
+    kz_med (the fitted wave's medium z-wavevector) sizes the grid so every aliased order is
+    evanescent at the probe planes. It is REQUIRED (audit F-17, 2026-11-02): kz_med=None used to
+    select the legacy fixed 6x6 grid -- the C3-1 aliasing defect -- but no caller passed None any
+    more (all five pass it), so that branch was unreachable and only waited to be re-entered by a
+    future caller that forgot the argument.
     standoff_nm (audit F-10) is the gap from the structure to the NEAREST probe plane; passing it
     upgrades that sizing from "evanescent" to "decayed by e^-3 at the probe" (see
     _probe_grid_sizes -- near cutoff the two are not remotely the same guarantee)."""
     # cell-centred probe grid: offset off the x=0 / y=0 periodic-boundary lines (where
     # quasi-periodic point evaluation can fail) by half a step (audit OPT-7).
-    if kz_med is not None:
-        nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med, standoff_nm=standoff_nm)
-    else:
-        nx_g = ny_g = 6
+    nx_g, ny_g = _probe_grid_sizes(Px, Py, kx, ky, kz_med, standoff_nm=standoff_nm)
     xs = (np.arange(nx_g) + 0.5) * (Px / nx_g)
     ys = (np.arange(ny_g) + 0.5) * (Py / ny_g)
     p0, p1, p2 = proj
+    # audit S6-17 (wave-7, 2026-11-02): the probe grid is located and evaluated in ONE batched
+    # NGSolve call per z-plane (mesh(x_arr, y_arr, z_arr) -> a MeshPoint array; field(points) ->
+    # (n, 3)) instead of n_x * n_y Python-level mesh(x, y, z) + field() round trips. A point outside
+    # the mesh comes back with element nr == -1 and is dropped, exactly as the per-point
+    # try/except dropped it. BIT-IDENTICAL to the old loop (np.array_equal on every probe vector,
+    # gfu and E_bg + gfu fields, real and complex proj, zero and non-zero kx/ky, 6x6 and 24x24
+    # grids): the projection and the Bloch demodulation are written as explicit REAL arithmetic
+    # with the same operand order as the scalar complex products they replace (Python's complex
+    # multiply, then numpy's scalar complex multiply), because numpy's VECTOR complex multiply is
+    # not bitwise equal to its scalar one (measured 1.7e-16 relative). Measured on the
+    # tests/test_fem_speed.py-class cell: 3.1-4.3x per call (24x24: 67 -> 16 ms per 7-plane band).
+    # Any batch failure falls back to the old point-by-point loop for that plane.
+    XX, YY = np.meshgrid(xs, ys, indexing="ij")              # x outer, y inner == the old loop order
+    xf, yf = XX.ravel(), YY.ravel()
+    ph = np.exp(-1j * (kx * xf + ky * yf))                   # == the per-point scalar np.exp (bitwise)
     out = []
     for zv in z_probes:
-        vals = []
-        for xv in xs:
-            for yv in ys:
-                try:
-                    E = field(mesh(float(xv), float(yv), float(zv)))
-                    proj_val = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
-                    vals.append(proj_val * np.exp(-1j * (kx * xv + ky * yv)))
-                except Exception:
-                    pass
-        if not vals:
+        try:
+            vals = _cell_plane_batched(mesh, field, xf, yf, float(zv), (p0, p1, p2), ph)
+        except Exception:                                    # noqa: BLE001 -- per-point fallback
+            vals = []
+            for xv in xs:
+                for yv in ys:
+                    try:
+                        E = field(mesh(float(xv), float(yv), float(zv)))
+                        proj_val = p0 * complex(E[0]) + p1 * complex(E[1]) + p2 * complex(E[2])
+                        vals.append(proj_val * np.exp(-1j * (kx * xv + ky * yv)))
+                    except Exception:
+                        pass
+        if len(vals) == 0:
             # A whole z-plane with zero valid samples means the probe points all fell
             # outside the mesh (a geometry/units contract break) -- fail loudly instead
             # of feeding a silent 0+0j into the least-squares R/T fit (audit OPT-7/F6).
@@ -1719,6 +1716,44 @@ def _cell_average(mesh, field, z_probes, Px, Py, proj, kx, ky, kz_med=None, stan
                     float(zv)))
         out.append(complex(np.mean(vals)))
     return np.array(out)
+
+
+def _cell_plane_batched(mesh, field, xf, yf, zv, proj, ph):
+    """One z-plane of _cell_average, batched (audit S6-17): returns the complex samples
+    (proj . E) * ph over the probe points that lie inside the mesh, in the old loop's order.
+
+    The arithmetic reproduces the scalar code bit-for-bit: a proj weight that is a Python/numpy
+    COMPLEX multiplies as (pr*er - pi*ei, pr*ei + pi*er) (Python's complex product); a REAL weight
+    as (p*er, p*ei) (equal to the complex form with a zero imaginary part up to the sign of a
+    zero); the three terms are summed left to right; the demodulation is numpy's scalar complex
+    product (sr*cr - si*ci, sr*ci + si*cr). Each step is a separate float ufunc, so nothing is
+    FMA-contracted the way numpy's vector complex multiply is."""
+    pts = mesh(xf, yf, np.full(xf.size, zv))
+    ok = pts["nr"] >= 0                                       # outside the mesh -> nr == -1
+    if not np.any(ok):
+        return np.empty(0, dtype=complex)
+    E = np.asarray(field(pts[ok]))
+    if E.ndim != 2 or E.shape[1] < 3:
+        raise ValueError("batched field evaluation returned shape {}".format(E.shape))
+    sr = si = None
+    for p, Ek in zip(proj, (E[:, 0], E[:, 1], E[:, 2])):
+        er, ei = Ek.real, Ek.imag
+        if isinstance(p, complex):
+            tr = p.real * er - p.imag * ei
+            ti = p.real * ei + p.imag * er
+        else:
+            tr = p * er
+            ti = p * ei
+        if sr is None:
+            sr, si = tr, ti
+        else:
+            sr = sr + tr
+            si = si + ti
+    cr, ci = ph[ok].real, ph[ok].imag
+    vals = np.empty(sr.size, dtype=complex)
+    vals.real = sr * cr - si * ci
+    vals.imag = sr * ci + si * cr
+    return vals
 
 
 def _lstsq_2wave(M, Es, *, where):
@@ -1847,75 +1882,85 @@ def _non_pml_regions(mesh, roles=None):
     return [m for m in mats if not m.startswith("pml_")]
 
 
-def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
-    """Independently measured absorbed fraction (audit OPT-2): the normalized
-    volumetric loss integral
-        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area),
-    over the PHYSICAL (non-PML) domain, for a unit-amplitude incident plane wave.
-    audit C3-7: the incident power in a dense superstrate is ~ n_super cos(theta) area,
-    so the normalization carries Re(n_super) (it used to omit it, inflating A -- and the
-    D2 per-region deposition -- by exactly Re(n_super) for a dense encapsulant; vacuum
-    incidence, the only supported oblique case, is byte-identical). This
-    is a genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T
-    catches energy/numerics errors that the R/T extraction alone cannot. The PML
-    materials are excluded -- their stretched-coordinate eps would corrupt the integral
-    (and a lossy substrate makes the bottom-PML contribution spurious). NOTE: a lossy
-    super/substrate BUFFER (between the structure and its PML) is still integrated, so A is
+def _loss_density_cf(eps_cf, E_tot):
+    """Absorbed-power density CF ~ Im(E^* . eps . E) -- Im(eps)|E|^2 for a scalar eps. Uses the
+    plain vector product a*b (the sum a_i b_i, NO conjugation) with an explicit Conj(E_tot), NOT
+    ng.InnerProduct(.,Conj(E_tot)): InnerProduct now conjugates its 2nd argument, and the code only
+    worked because NGSolve happens to detect the already-Conj arg and skip the extra conjugate (the
+    'c2 is already a Conjugate' notice). a*Conj(E) makes E^* . (.) explicit and version-robust."""
+    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
+        # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
+        # reduces to it for eps = eps_scalar * I)
+        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E
+        return (q - ng.Conj(q)) / 2j
+    im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j                  # Im(eps) as a real CF
+    return im_eps * (E_tot * ng.Conj(E_tot))                  # Im(eps) |E|^2
+
+
+def _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
+    """(A_independent, {region_name: absorbed fraction}) from ONE region-wise volume integral of
+    the loss density over the PHYSICAL (non-PML) domain; (None, None) when there is nothing to
+    integrate. A_independent is the independently measured absorbed fraction (audit OPT-2):
+
+        A = k0 * Int_V Im(eps) |E|^2 dV / (Re(n_super) * cos(theta) * cell_area)
+
+    for a unit-amplitude incident plane wave, and the map (driver D2) is the same integral
+    restricted to each material region. audit C3-7: the incident power in a dense superstrate is
+    ~ n_super cos(theta) area, so the normalization carries Re(n_super) (it used to omit it,
+    inflating A -- and the D2 per-region deposition -- by exactly Re(n_super) for a dense
+    encapsulant; vacuum incidence, the only supported oblique case, is byte-identical). This is a
+    genuine measurement (not 1-R-T): comparing it to the budget closure 1-R-T catches
+    energy/numerics errors that the R/T extraction alone cannot. The PML materials are excluded --
+    their stretched-coordinate eps would corrupt the integral (and a lossy substrate makes the
+    bottom-PML contribution spurious). A region with Im(eps) = 0 contributes exactly 0. NOTE: a
+    lossy super/substrate BUFFER (between the structure and its PML) is still integrated, so A is
     a clean measurement only for LOSSLESS cladding media (the validated cases); for a lossy
-    cladding treat A as qualitative (audit OS-4)."""
+    cladding treat A as qualitative (audit OS-4).
+
+    audit S6-18 (wave-7, 2026-11-02): solve_fem's default diagnostics used to integrate this
+    IDENTICAL integrand twice -- once over the union of the non-PML regions (_absorbed_fraction)
+    and again region by region (_per_region_absorption, one Integrate per region): 1 + n_regions
+    Integrate calls, two full sweeps of the physical elements. It is now ONE
+    Integrate(..., region_wise=True) pass, the per-domain sums aggregated by region NAME (a name
+    may label several mesh domains, exactly as mesh.Materials(name) selected them), and
+    A_independent := sum(map.values()), so the sum-equals-A_independent additivity contract is
+    now EXACT (it held to ~1e-16 before). Accuracy-neutral at the TaskManager's own run-to-run
+    level: the old code was already not bitwise reproducible (two identical old runs differ by up
+    to 4.4e-16 relative in their outputs), and old -> new moves A_independent and every region
+    value by at most ~1e-15 relative (measured -- see the wave-7 row of S6-18 in
+    docs/audit/2026-07-17-exhaustive-audit.md)."""
     # Exclude PML regions only (see _non_pml_regions: role-routed, name-prefix fallback -- a
     # physical material like 'pmlayer' is NOT dropped, OS-3). re.escape each surviving name so a
     # regex-metacharacter material name (e.g. 'ito.n+') is matched literally rather than silently
     # missed by mesh.Materials' regex (OS-2).
     non_pml = _non_pml_regions(mesh, roles)
-    if not non_pml:
-        return None
-    defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
-    # Use the plain vector product a*b (the sum a_i b_i, NO conjugation) with an explicit Conj(E_tot),
-    # NOT ng.InnerProduct(.,Conj(E_tot)): InnerProduct now conjugates its 2nd argument, and the code
-    # only worked because NGSolve happens to detect the already-Conj arg and skip the extra conjugate
-    # (the "c2 is already a Conjugate" notice). a*Conj(E) makes E^* . (.) explicit and version-robust.
-    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
-        # tensor eps: absorbed power density ~ Im(E^* . eps . E) (the scalar Im(eps)|E|^2 analog;
-        # reduces to it for eps = eps_scalar * I)
-        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E
-        loss = (q - ng.Conj(q)) / 2j
-    else:
-        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j              # Im(eps) as a real CF
-        loss = im_eps * (E_tot * ng.Conj(E_tot))              # Im(eps) |E|^2
-    integ = ng.Integrate(loss, mesh, definedon=defon)
     area = float(Px) * float(Py)
-    if area <= 0:
-        return None
+    if not non_pml or area <= 0:
+        return None, None
+    defon = mesh.Materials("|".join(re.escape(m) for m in non_pml))
+    by_domain = ng.Integrate(_loss_density_cf(eps_cf, E_tot), mesh, definedon=defon,
+                             region_wise=True)               # one entry per mesh.GetMaterials() slot
+    raw = {m: 0.0 for m in non_pml}
+    for name, val in zip(mesh.GetMaterials(), by_domain):
+        if name in raw:
+            raw[name] += complex(val).real
     n_cos = max(complex(n_super).real * math.cos(theta), 1e-12)   # C3-7 incident-power factor
-    return float(complex(integ).real * k0 / (n_cos * area))
+    scale = k0 / (n_cos * area)
+    per_region = {m: float(raw[m] * scale) for m in non_pml}
+    return float(sum(per_region.values())), per_region
+
+
+def _absorbed_fraction(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
+    """A_independent alone -- see :func:`_absorption_diagnostics` (the single implementation)."""
+    return _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=n_super,
+                                   roles=roles)[0]
 
 
 def _per_region_absorption(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=1.0 + 0j, roles=None):
-    """Per-region absorbed-power map (driver D2): the _absorbed_fraction integrand evaluated
-    region by region -- IDENTICAL loss CF, IDENTICAL normalization, restricted to one material
-    domain at a time -- so sum(values) equals A_independent EXACTLY (domain additivity of the
-    integral), each value is the fraction of the incident power deposited in that region, and a
-    region with Im(eps) = 0 contributes exactly 0. Same caveats as _absorbed_fraction (clean
-    only for lossless cladding; PML regions excluded). Returns {region_name: fraction}."""
-    non_pml = _non_pml_regions(mesh, roles)
-    area = float(Px) * float(Py)
-    if not non_pml or area <= 0:
-        return None
-    if tuple(getattr(eps_cf, "dims", ())) == (3, 3):
-        q = (eps_cf * E_tot) * ng.Conj(E_tot)                 # E^* . eps . E (see _absorbed_fraction)
-        loss = (q - ng.Conj(q)) / 2j
-    else:
-        im_eps = (eps_cf - ng.Conj(eps_cf)) / 2j
-        loss = im_eps * (E_tot * ng.Conj(E_tot))
-    # audit C3-7: same Re(n_super) incident-power factor as _absorbed_fraction (the two must
-    # stay IDENTICAL for the sum-equals-A_independent additivity contract)
-    scale = k0 / (max(complex(n_super).real * math.cos(theta), 1e-12) * area)
-    out = {}
-    for m in non_pml:
-        integ = ng.Integrate(loss, mesh, definedon=mesh.Materials(re.escape(m)))
-        out[m] = float(complex(integ).real * scale)
-    return out
+    """The per-region absorbed-power map alone ({region_name: fraction}; sums to A_independent
+    exactly) -- see :func:`_absorption_diagnostics` (the single implementation)."""
+    return _absorption_diagnostics(mesh, E_tot, eps_cf, k0, theta, Px, Py, n_super=n_super,
+                                   roles=roles)[1]
 
 
 def _poynting_flux_rt(fes, gfu, E_bg, E_inc, geo: OpticalGeometry):

@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dynameta.constants import KB as KB_J_K    # single-source CODATA (was re-declared here)
-
-from dynameta.constants import KB_EV_K, Q_E   # eV/K + charge, single source (audit 6.3)
+from dynameta.constants import KB as KB_J_K, KB_EV_K, Q_E   # single source (audit 6.3; one import, R-35)
 
 
 def korhonen_kappa_m2_s(T_K: float, *, D0_m2_s: float, Q_eV: float, B_Pa: float,

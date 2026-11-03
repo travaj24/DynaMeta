@@ -22,9 +22,10 @@ extension. Pure numpy; no devsim/ngsolve.
 from __future__ import annotations
 
 import numpy as np
+from dynameta.constants import T_REF   # audit X-24: one reference temperature
 
 
-def steady_layered_temperature(k_thermal, thickness_m, flux_W_m2, T_sink_K: float = 300.0):
+def steady_layered_temperature(k_thermal, thickness_m, flux_W_m2, T_sink_K: float = T_REF):
     """Per-layer MEAN temperature [K] for a layered stack under a steady heat flux conducted to a
     sink. Layers are ordered from the SINK side outward (index 0 adjacent to the sink); the flux
     `flux_W_m2` flows toward the sink. Returns one mean temperature per layer (input order)."""
@@ -42,7 +43,7 @@ def steady_layered_temperature(k_thermal, thickness_m, flux_W_m2, T_sink_K: floa
 
 
 def uniform_temperature_rise(power_per_area_W_m2, k_thermal, thickness_m,
-                              T_sink_K: float = 300.0) -> float:
+                              T_sink_K: float = T_REF) -> float:
     """Lumped temperature of an active region: T = T_sink + q * R_total, R_total = sum(d_i/k_i) to
     the sink (one number; the simplest thermo-optic drive). `power_per_area_W_m2` is the heater
     flux conducted to the sink (>= 0 in the intended regime; a negative value would drive T below

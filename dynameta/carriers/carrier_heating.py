@@ -278,8 +278,10 @@ class TwoTempParams:
 
 
 def two_temperature_response(times_s, intensity_of_t: Callable, params: TwoTempParams, *,
-                             T0_K: float = 300.0, max_step: Optional[float] = None):
-    """Integrate the TTM from t=0 to times_s[-1], sampled at times_s. `intensity_of_t(t)` is the pump
+                             T0_K: float = T_REF, max_step: Optional[float] = None):
+    """Integrate the TTM from times_s[0] (where Te = Tl = T0_K) to times_s[-1], sampled at times_s --
+    NOT from t = 0: a pump with intensity_of_t(t) > 0 before times_s[0] is never seen, so start the
+    grid before the pulse (audit C-13). `intensity_of_t(t)` is the pump
     drive (units matched to params.alpha_abs so alpha_abs*I is W/m^3). Returns (t_s, Te, Tl). Uses a
     stiff BDF integrator (G/C_e can be 1e12-1e14 1/s -> sub-ps). intensity == 0 -> Te == Tl == T0.
 
@@ -338,7 +340,7 @@ def carrier_heating_transient(times_s, intensity_of_t: Callable, lambda_m: float
                               drude0: DrudeOptical, ttm_params: TwoTempParams, n_m3: float,
                               alpha_per_eV: float, m0_kg: Optional[float] = None, g_s: int = 2,
                               g_v: int = 1, gamma_p: float = 1.0, mass_exponent: float = 1.0,
-                              build_stack: Optional[Callable] = None, T0_K: float = 300.0,
+                              build_stack: Optional[Callable] = None, T0_K: float = T_REF,
                               gamma_T_ref_K: Optional[float] = None):
     """Full carrier-heating ENZ transient: solve the TTM for T_e(t), then feed the existing
     transient_optics loop a per-instant DrudeOptical whose m_opt_kg / gamma_rad_s are CLOSURES capturing

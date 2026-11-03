@@ -261,15 +261,16 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, H_PLANCK, KB
+from dynameta.constants import C_LIGHT, H_PLANCK, KB, T_REF
 from dynameta.core.numerics import trapz          # audit X-1: floor-safe (np.trapezoid needs numpy>=2.0)
 from dynameta.optics.fiber_amp.rare_earth import ChannelSet
 from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, cladding_pump_overlap, overlap_gamma
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, Signal,
                                                     SteadyStateResult, _KEEP, _RELAX_LADDER,
                                                     _frozen_profile_interp,
-                                                    _relaxation_residuals)
+                                                    _RtolContinuation, _relaxation_residuals)
 
 __all__ = ["ErYbAmplifier", "RateTemperatureLaw", "YbStarkThermal",
            "YB_STARK_976_CANAT_DUSSARDIER", "RATE_ARRHENIUS_CHENG_2022",
@@ -582,6 +583,18 @@ class ErYbAmplifier:
             raise ValueError("ErYbAmplifier: k_tr2_m3_s must be >= 0")
         if float(yb_migration_rate_per_s) < 0.0:
             raise ValueError("ErYbAmplifier: yb_migration_rate_per_s must be >= 0")
+        # Audit A-18 (2026-11-02): the polarization-mode count is a property of the FIBER (PM or
+        # not), not of a spectral band, and every result carries ONE meta['m_modes'] that the
+        # noise layer divides every ASE bin by. Two bands with different m_modes were each
+        # GENERATED with their own count but REPORTED with the Er band's -- measured: a Yb band
+        # at m_modes = 1 beside an Er band at 2 came out at half its per-polarization PSD in
+        # noise.output_ase_spectrum. Refuse the combination instead of collapsing it.
+        if (ase is not None and yb_ase is not None
+                and int(ase.m_modes) != int(yb_ase.m_modes)):
+            raise ValueError("ErYbAmplifier: ase.m_modes (%d) and yb_ase.m_modes (%d) differ; the "
+                             "polarization-mode count is a property of the fiber, and the noise "
+                             "layer reads one meta['m_modes'] for every ASE bin (audit A-18)"
+                             % (int(ase.m_modes), int(yb_ase.m_modes)))
         self.er_ion, self.yb_ion, self.fiber = er_ion, yb_ion, fiber
         self.pumps, self.signals = list(pumps), list(signals)
         self.ase, self.yb_ase = ase, yb_ase
@@ -632,7 +645,7 @@ class ErYbAmplifier:
                               "through the ConcentrationModel only -- the single-ion audit-B1 "
                               "rule, now shared by both amplifier classes)"
                               % (float(upconversion_C_up), concentration.c_up_m3_s),
-                              stacklevel=2)
+                              AdvisoryWarning, stacklevel=2)
             self.upconversion_C_up = float(concentration.c_up_m3_s)
             # _n_er is the ACTIVE erbium everywhere below (the FiberAmplifier._n_active rule):
             # dark ions hold no gain and accept no transfer, they only absorb (see _coeffs).
@@ -831,7 +844,7 @@ class ErYbAmplifier:
         return 0.5 * (float(self.er_ion.eps_J) + self._eps3)
 
     # ---- distributed temperature profile (per-ion McCumber z-scaling) ---------------------
-    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = 300.0):
+    def set_temperature_profile(self, z_m, T_K, *, T_ref_K: float = T_REF):
         """Impose an axial temperature profile T(z) on the co-doped gain medium. EVERY
         sigma_e-proportional coefficient of BOTH ions (local emission gain, stimulated-emission
         rate, ASE spontaneous source) is scaled per-z by that ION's OWN McCumber factor
@@ -1595,19 +1608,31 @@ class ErYbAmplifier:
 
     # ---- solve (relaxation, mirrors FiberAmplifier.solve) --------------------------------
     def solve(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
-              method: str = "LSODA", relax=1.0) -> SteadyStateResult:
-        """Steady-state relaxation solve. `relax` is a number in (0, 1] -- DEFAULT 1.0, the plain
-        undamped Gauss-Seidel iteration, unchanged -- or the string "auto", which walks
-        steady_state._RELAX_LADDER (1.0, 0.5, 0.25) and returns the first attempt that CONVERGES,
-        exactly as FiberAmplifier.solve does, reporting the ladder entries tried on
-        `meta['relax_attempts']`.
+              method: str = "LSODA", relax="auto") -> SteadyStateResult:
+        """Steady-state relaxation solve. `relax` is the string "auto" -- THE DEFAULT since
+        2026-11-02, exactly FiberAmplifier.solve's: walk steady_state._RELAX_LADDER (1.0, 0.5,
+        0.25) and return the first attempt that CONVERGES, reporting the ladder entries tried on
+        `meta['relax_attempts']` -- or a number in (0, 1] to pin it and take exactly one attempt
+        (1.0 = the plain undamped Gauss-Seidel iteration).
 
-        WHY "auto" IS ACCEPTED BUT NOT THE DEFAULT (2026-09-13). Accepting it is what makes this
-        class substitutable in code written against FiberAmplifier -- a caller that passes the
-        single-ion default through (the downstream `solve_closed(amp, relax="auto")` pattern) used
-        to get a ValueError here. Making it the DEFAULT would be a behaviour flip for every
-        existing co-doped caller, so it is not: `relax=1.0` still takes exactly one attempt and
-        every previously-written call returns what it always did.
+        WHY THE DEFAULT MOVED FROM 1.0 TO "auto" (2026-11-02). It used to be 1.0 so that "every
+        previously-written call returns what it always did" (2026-09-13). That argument holds for
+        every CONVERGED call and fails for the rest: the ladder's first rung IS relax = 1.0, the
+        identical computation, so a call that converged at 1.0 returns the same result byte for
+        byte under "auto" -- the default flip changes ONLY the calls that did not converge, and
+        those were returning a non-answer SILENTLY (meta['converged'] False, no warning).
+        MEASURED on the core-pumped 2.8 um / N_Er 2e25 / N_Yb 2e26 / 2 m reference with 0.5 mW
+        at 1550 nm, 161 nodes: at 1 W of 976 nm relax = 1.0 ran out its 200 iterations at an
+        endpoint residual of 1.3e6 and returned -4.98 dB, where "auto" converges at relax = 0.5
+        to +20.75 dB; at 0.4 W relax = 1.0 stopped unconverged (residual 1.6e-3) at 17.275 dB
+        against "auto"'s converged 17.276 dB; at 0.2 W both converge at relax = 1.0 to the same
+        8.5066 dB. The co-doped transient march seeded from this default and inherited the
+        -5 dB state.
+
+        NON-CONVERGENCE IS NOW LOUD. Whatever `relax` is, a returned result whose
+        meta['converged'] is False raises an UnreliableResultWarning (a RuntimeWarning) naming
+        the final residuals; the result is still returned, unchanged, so a caller that inspects
+        meta['converged'] itself loses nothing.
 
         See _solve_once for the method and for what under-relaxation is."""
         if isinstance(relax, str):
@@ -1622,10 +1647,22 @@ class ErYbAmplifier:
                 if res.meta.get("converged"):
                     break
             res.meta["relax_attempts"] = tuple(attempts)
-            return res
-        res = self._solve_once(n_nodes=n_nodes, max_iter=max_iter, tol=tol, method=method,
-                               relax=relax)
-        res.meta["relax_attempts"] = (float(relax),)
+        else:
+            res = self._solve_once(n_nodes=n_nodes, max_iter=max_iter, tol=tol, method=method,
+                                   relax=relax)
+            res.meta["relax_attempts"] = (float(relax),)
+        if not res.meta.get("converged"):
+            import warnings
+            warnings.warn(
+                "ErYbAmplifier.solve: the relaxation did NOT converge (relax tried %s, %d "
+                "iterations, final endpoint residual %.3g / profile residual %.3g against tol "
+                "%g); the returned profile is the last iterate, not the steady state, and can be "
+                "dB off it. Raise max_iter, or pass relax=\"auto\" (the default) or a smaller "
+                "relax (0.25-0.1 for a counter-pumped or strongly bidirectional fiber); "
+                "meta['converged'] is False."
+                % (res.meta["relax_attempts"], int(res.meta["iterations"]),
+                   res.meta["endpoint_residual"], res.meta["profile_residual"], tol),
+                UnreliableResultWarning, stacklevel=2)
         return res
 
     def _solve_once(self, *, n_nodes: int = 201, max_iter: int = 200, tol: float = 1e-6,
@@ -1699,6 +1736,7 @@ class ErYbAmplifier:
         last_prof = None
         converged = False
         end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
+        cont = _RtolContinuation(tol)              # integrator noise floor vs tol (steady_state)
         it = 0
         for it in range(max_iter):
             bwd_of = _make_interp(P_bwd) if bwd.size else None
@@ -1708,7 +1746,7 @@ class ErYbAmplifier:
                 return self._dP(c, u, _assemble(Pf, Pb), _mcc_at(zz))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
-                           rtol=1e-7, atol=1e-15)
+                           rtol=cont.rtol, atol=1e-15)
             # Under-relaxation (audit F-14), mirroring steady_state._solve_once: the relax == 1.0
             # branch is taken verbatim so the default path performs NO arithmetic on the arrays
             # and stays byte-identical -- a `1.0 * new + 0.0 * old` blend would not, because
@@ -1722,7 +1760,7 @@ class ErYbAmplifier:
                     return self._dP(c, u, _assemble(fwd_of(zz), Pb), _mcc_at(zz))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
-                               rtol=1e-7, atol=1e-15)
+                               rtol=cont.rtol, atol=1e-15)
                 new_bwd = sb.y[:, ::-1]
                 P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
@@ -1736,6 +1774,7 @@ class ErYbAmplifier:
                 if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
+                cont.update(end_resid, prof_resid)
             last_out = out
             last_prof = prof
 
@@ -1758,7 +1797,7 @@ class ErYbAmplifier:
                 # value that produced them, and the most negative returned power (a fully absorbed
                 # channel sitting in integrator noise -- physically zero, but it will surprise a
                 # log or a sqrt).
-                "endpoint_residual": end_resid, "profile_residual": prof_resid,
+                "endpoint_residual": end_resid, "profile_residual": prof_resid, "integrator_rtol": float(cont.rtol),
                 "relax": float(relax), "min_power_W": float(np.min(P)),
                 "dnu_hz": pl["dnu"].copy(), "gamma": pl["gamma"].copy(), "m_modes": m_modes,
                 "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),

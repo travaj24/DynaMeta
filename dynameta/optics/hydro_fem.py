@@ -208,7 +208,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
-from dynameta.constants import C_LIGHT, EPS0, MU0
+from dynameta.constants import C_LIGHT, EPS0, MU0, Z0
 
 __all__ = [
     "beta_from_vf",
@@ -230,7 +230,8 @@ __all__ = [
     "sp_resonance_omega",
 ]
 
-Z0 = math.sqrt(MU0 / EPS0)          # free-space wave impedance [ohm]
+# Z0 (free-space wave impedance, ohm) is constants.Z0 -- audit F-21: this module carried a third
+# definition, sqrt(MU0/EPS0), 1 ulp (3.0e-16) from the 1/(EPS0 c) the rest of the library used.
 _L0 = 1.0e-9                        # length unit: mesh coordinates are in nm
 
 # hydro_layered_1d R/T probe planes (audit F-5): the probe node must sit STRICTLY inside its vacuum
@@ -266,6 +267,7 @@ from dynameta.optics.nonlocal_tmm import (                                  # no
     eps_transverse as _nt_eps_transverse,
     kL_squared as _nt_kL_squared,
 )
+from dynameta.warning_types import UnreliableResultWarning
 
 
 @dataclass(frozen=True)
@@ -328,6 +330,27 @@ def drude_eps(omega, params: HydroParams) -> complex:
     return params.eps_transverse(omega)
 
 
+def _require_nm(where: str, name: str, value) -> float:
+    """Validate a ``*_nm`` length argument (audit V-16, 2026-11-02).
+
+    This module is NANOMETRE-native (the NGSolve mesh coordinates, ``_L0``) while its sibling
+    ``hydro_fdtd`` -- which exports a function of the SAME name, ``bulk_plasmon_omega(m, slab)`` --
+    is SI metres. A caller moving between the two and passing ``d_nm=5e-9`` got a "5e-18 m" film
+    and a frequency ~1e9x too high, silently. No physical film or particle is thinner than 1 pm
+    (1e-3 nm), and every metre-valued nanophotonic length is far below that, so anything under it
+    is refused as a metres-for-nanometres slip."""
+    v = float(value)
+    if not (math.isfinite(v) and v > 0.0):
+        raise ValueError("{}: {} must be a finite length > 0 in NANOMETRES, got {!r}".format(
+            where, name, value))
+    if v < 1.0e-3:
+        raise ValueError(
+            "{}: {}={!r} is below 1 pm -- this argument is in NANOMETRES (hydro_fem is nm-native; "
+            "its sibling hydro_fdtd is SI metres). Did you pass metres? Use {}={!r}.".format(
+                where, name, value, name, v * 1.0e9))
+    return v
+
+
 def bulk_plasmon_omega(m: int, params: HydroParams, d_nm: float) -> float:
     """Undamped bulk-plasmon standing-wave frequency of a film of thickness ``d_nm`` from the
     quantization ``k_L d = m*pi`` (``gamma -> 0``, ``D -> 0``):
@@ -338,7 +361,7 @@ def bulk_plasmon_omega(m: int, params: HydroParams, d_nm: float) -> float:
     at ``k_L = m*pi/d`` this is the closed form above.  The ``1/d`` term is the nonlocal ENZ /
     bulk-plasmon BLUESHIFT (a thinner film -> higher omega).  Matches ``nonlocal_tmm``'s gate-2
     ``_bulk_plasmon_omega`` (odd ``m`` couple for a symmetric film -- the ABC selection rule)."""
-    d = d_nm * _L0
+    d = _require_nm("bulk_plasmon_omega", "d_nm", d_nm) * _L0      # audit V-16
     return math.sqrt(params.wp ** 2 / params.eps_inf + params.beta ** 2 * (m * math.pi / d) ** 2)
 
 
@@ -374,7 +397,7 @@ def cylinder_blueshift_raza(params: HydroParams, R_nm: float, eps_b: float = 1.0
     -> 1/(kappa R) -> 0``); the leading ``1/(kappa R)`` surface term is the blueshift above.  A
     POSITIVE (blue) shift scaling as ``1/R`` -- the nonlocal inverse-size signature.  (Exact vs this
     asymptotic: ~2-4% over R = 2.5-5 nm, kappa R = 18-30.)"""
-    R_m = float(R_nm) * _L0
+    R_m = _require_nm("cylinder_blueshift_raza", "R_nm", R_nm) * _L0   # audit V-16
     return (params.beta / (2.0 * params.wp * R_m)) * \
         math.sqrt(float(eps_b) * (params.eps_inf + float(eps_b)) / params.eps_inf)
 
@@ -666,7 +689,7 @@ def hydro_layered_1d(omega, params: HydroParams, d_nm: float, *, theta_rad: floa
         warnings.warn(
             "hydro_layered_1d: unphysical normal-incidence read-out R={:.4f}, T={:.4f}, "
             "A=1-R-T={:.4f} (independent A_volume={:.4f}); the plane-wave fit is unreliable on this "
-            "mesh. Prefer A_volume and check buffer_nm/metal_cells.".format(R, T, A, A_vol),
+            "mesh. Prefer A_volume and check buffer_nm/metal_cells.".format(R, T, A, A_vol), UnreliableResultWarning,
             stacklevel=2)
     return LayeredResult(R=R, T=T, A=A, A_volume=A_vol)
 
