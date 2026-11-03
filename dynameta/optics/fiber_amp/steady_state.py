@@ -89,6 +89,37 @@ def _relaxation_residuals(out, last_out, prof, last_prof):
     return end_resid, prof_resid
 
 
+_INTEGRATOR_RTOL = 1e-7
+
+
+class _RtolContinuation:
+    """Integrator-tolerance continuation for the relaxation solves -- the SINGLE HOME, shared by
+    FiberAmplifier, ErYbAmplifier, ResolvedFiberAmplifier and ResolvedErYbAmplifier (2026-11-03).
+
+    The relaxation residual cannot fall below the adaptive integrator's own noise, which the gain
+    amplifies: MEASURED on the 400 W Yb booster at a 1 uW signal (76.5 dB, 321 nodes) the floor is
+    ~24 x rtol -- 2.45e-6 at the fixed rtol = 1e-7 these solves used, i.e. ABOVE tol = 1e-6, so
+    that solve "converged" only when noise happened to dip under tol (iteration 89 on one build,
+    never on CI's py3.10 build). A residual that STALLS above tol therefore tightens rtol 10x (down
+    to tol * 1e-3) and the iteration continues from where it is: floors 2.35e-7 / 2.15e-8 at rtol
+    1e-8 / 1e-9. STALL = the best residual of the last 10 iterations is not even 2x below the best
+    of the 10 before -- a contracting iteration gains q^10 per window, noise on a floor does not.
+    A solve that converges without stalling never tightens, so its result is byte-identical."""
+
+    def __init__(self, tol):
+        self.rtol = _INTEGRATOR_RTOL
+        self.rtol_min = max(float(tol) * 1e-3, 1e-12)
+        self._hist = []
+
+    def update(self, end_resid, prof_resid):
+        """Record one NON-converged step's residuals; tighten rtol on a stall."""
+        self._hist.append(max(end_resid, prof_resid))
+        h = self._hist
+        if len(h) >= 20 and self.rtol > self.rtol_min and min(h[-10:]) > 0.5 * min(h[-20:-10]):
+            self.rtol = max(self.rtol * 0.1, self.rtol_min)
+            self._hist = []
+
+
 def _frozen_profile_interp(Y, z, L: float, n_nodes: int):
     """Lean frozen-profile interpolator on the UNIFORM mesh z = linspace(0, L, n_nodes): returns
     f(zz) -> Y[:, zz] by piecewise-linear lookup, for the relaxation sweeps that propagate one
@@ -647,6 +678,7 @@ class FiberAmplifier:
         last_prof = None
         converged = False
         end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
+        cont = _RtolContinuation(tol)              # integrator noise floor vs tol (see the class)
         for it in range(max_iter):
             bwd_of = _make_interp(P_bwd) if bwd.size else None
 
@@ -656,7 +688,7 @@ class FiberAmplifier:
                 return self._dP_full_c(c, u, _assemble(Pf, Pb), m)[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
-                           rtol=1e-7, atol=1e-15)
+                           rtol=cont.rtol, atol=1e-15)
             # Under-relaxation (audit F-14). The relax == 1.0 branch is taken verbatim so the
             # default path performs NO arithmetic on the arrays and stays byte-identical -- a
             # `1.0 * new + 0.0 * old` blend would not, because 0.0 * inf is NaN and -0.0 + 0.0
@@ -671,7 +703,7 @@ class FiberAmplifier:
                     return self._dP_full_c(c, u, _assemble(fwd_of(zz), Pb), m)[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
-                               rtol=1e-7, atol=1e-15)
+                               rtol=cont.rtol, atol=1e-15)
                 new_bwd = sb.y[:, ::-1]
                 P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
@@ -692,6 +724,7 @@ class FiberAmplifier:
                     converged = True
                     last_out = out
                     break
+                cont.update(end_resid, prof_resid)
             last_out = out
             last_prof = prof
 
@@ -711,6 +744,7 @@ class FiberAmplifier:
                                        # (physically zero, but it will surprise a log or a sqrt).
                                        "endpoint_residual": end_resid,
                                        "profile_residual": prof_resid,
+                                       "integrator_rtol": float(cont.rtol),
                                        "relax": float(relax),
                                        "min_power_W": float(np.min(P)),
                                        "dnu_hz": ch.dnu_hz.copy(),

@@ -270,7 +270,7 @@ from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 from dynameta.optics.fiber_amp.steady_state import (AseBand, ChannelPlan, Pump, Signal,
                                                     SteadyStateResult, _KEEP, _RELAX_LADDER,
                                                     _frozen_profile_interp,
-                                                    _relaxation_residuals)
+                                                    _RtolContinuation, _relaxation_residuals)
 
 __all__ = ["ErYbAmplifier", "RateTemperatureLaw", "YbStarkThermal",
            "YB_STARK_976_CANAT_DUSSARDIER", "RATE_ARRHENIUS_CHENG_2022",
@@ -1736,6 +1736,7 @@ class ErYbAmplifier:
         last_prof = None
         converged = False
         end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
+        cont = _RtolContinuation(tol)              # integrator noise floor vs tol (steady_state)
         it = 0
         for it in range(max_iter):
             bwd_of = _make_interp(P_bwd) if bwd.size else None
@@ -1745,7 +1746,7 @@ class ErYbAmplifier:
                 return self._dP(c, u, _assemble(Pf, Pb), _mcc_at(zz))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
-                           rtol=1e-7, atol=1e-15)
+                           rtol=cont.rtol, atol=1e-15)
             # Under-relaxation (audit F-14), mirroring steady_state._solve_once: the relax == 1.0
             # branch is taken verbatim so the default path performs NO arithmetic on the arrays
             # and stays byte-identical -- a `1.0 * new + 0.0 * old` blend would not, because
@@ -1759,7 +1760,7 @@ class ErYbAmplifier:
                     return self._dP(c, u, _assemble(fwd_of(zz), Pb), _mcc_at(zz))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
-                               rtol=1e-7, atol=1e-15)
+                               rtol=cont.rtol, atol=1e-15)
                 new_bwd = sb.y[:, ::-1]
                 P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
@@ -1773,6 +1774,7 @@ class ErYbAmplifier:
                 if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
+                cont.update(end_resid, prof_resid)
             last_out = out
             last_prof = prof
 
@@ -1795,7 +1797,7 @@ class ErYbAmplifier:
                 # value that produced them, and the most negative returned power (a fully absorbed
                 # channel sitting in integrator noise -- physically zero, but it will surprise a
                 # log or a sqrt).
-                "endpoint_residual": end_resid, "profile_residual": prof_resid,
+                "endpoint_residual": end_resid, "profile_residual": prof_resid, "integrator_rtol": float(cont.rtol),
                 "relax": float(relax), "min_power_W": float(np.min(P)),
                 "dnu_hz": pl["dnu"].copy(), "gamma": pl["gamma"].copy(), "m_modes": m_modes,
                 "sigma_a": pl["sa_er"].copy(), "sigma_e": pl["se_er"].copy(),

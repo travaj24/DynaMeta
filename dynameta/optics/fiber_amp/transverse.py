@@ -112,7 +112,7 @@ from dynameta.optics.fiber_amp.spectroscopy import RareEarthIon
 # module is supposed to do -- re-typing it would re-open exactly that defect.
 from dynameta.optics.fiber_amp.steady_state import (AseBand, FiberAmplifier, Pump, Signal,
                                                     _frozen_profile_interp,
-                                                    _relaxation_residuals)
+                                                    _RtolContinuation, _relaxation_residuals)
 from dynameta.optics.fiber_amp.waveguide import FiberSpec, mode_field_radius_m, overlap_gamma
 
 __all__ = ["RadialGrid", "ResolvedResult", "ResolvedFiberAmplifier", "mean_field_equivalent",
@@ -916,6 +916,7 @@ class ResolvedFiberAmplifier:
         last_prof = None
         converged = False
         end_resid = prof_resid = float("nan")     # final residuals, reported on meta (audit F-14)
+        cont = _RtolContinuation(tol)              # integrator noise floor vs tol (steady_state)
         it = 0
         for it in range(max_iter):
             bwd_of = _frozen_profile_interp(P_bwd, z, L, n_nodes) if bwd.size else None
@@ -925,7 +926,7 @@ class ResolvedFiberAmplifier:
                 return self._dP(c, _assemble(Pf, Pb))[fwd]
 
             sf = solve_ivp(rhs_f, (0.0, L), bc[fwd], t_eval=z, method=method,
-                           rtol=1e-7, atol=1e-15)
+                           rtol=cont.rtol, atol=1e-15)
             # Under-relaxation (audit F-14), mirroring steady_state._solve_once: the relax == 1.0
             # branch is taken verbatim so the default path performs NO arithmetic on the arrays
             # and stays byte-identical -- a `1.0 * new + 0.0 * old` blend would not, because
@@ -939,7 +940,7 @@ class ResolvedFiberAmplifier:
                     return self._dP(c, _assemble(fwd_of(zz), Pb))[bwd]
 
                 sb = solve_ivp(rhs_b, (L, 0.0), bc[bwd], t_eval=z[::-1], method=method,
-                               rtol=1e-7, atol=1e-15)
+                               rtol=cont.rtol, atol=1e-15)
                 new_bwd = sb.y[:, ::-1]
                 P_bwd = new_bwd if relax == 1.0 else relax * new_bwd + (1.0 - relax) * P_bwd
 
@@ -954,6 +955,7 @@ class ResolvedFiberAmplifier:
                 if end_resid < tol and prof_resid < tol:
                     converged = True
                     break
+                cont.update(end_resid, prof_resid)
             last_out = out
             last_prof = prof
 
@@ -995,7 +997,7 @@ class ResolvedFiberAmplifier:
                   # absorbed channel sitting in integrator noise -- physically zero, but it will
                   # surprise a log or a sqrt).
                   "endpoint_residual": end_resid,
-                  "profile_residual": prof_resid,
+                  "profile_residual": prof_resid, "integrator_rtol": float(cont.rtol),
                   "relax": float(relax),
                   "min_power_W": float(np.min(P)),
                   "dnu_hz": ch.dnu_hz.copy(),
