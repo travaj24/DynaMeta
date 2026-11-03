@@ -39,7 +39,8 @@ from dynameta.reliability.hci import trap_generation_rate_per_m2_s, hci_time_to_
 from dynameta.reliability.corrosion import (deal_grove_thickness_m, deal_grove_rate_arrhenius,
                                             peck_time_to_failure_s, peck_af)
 from dynameta.reliability.leakage import (OxideLeakageParams, fn_coefficients,
-                                          fowler_nordheim_current, direct_tunneling_current)
+                                          fowler_nordheim_current, direct_tunneling_current,
+                                          schuegraf_hu_current, tsu_esaki_current)
 
 __all__ = [
     "TddbParams", "tbd_e_model", "tbd_one_over_e", "weibull_area_scale",
@@ -57,4 +58,5 @@ __all__ = [
     "trap_generation_rate_per_m2_s", "hci_time_to_failure_s",
     "deal_grove_thickness_m", "deal_grove_rate_arrhenius", "peck_time_to_failure_s", "peck_af",
     "OxideLeakageParams", "fn_coefficients", "fowler_nordheim_current", "direct_tunneling_current",
+    "schuegraf_hu_current", "tsu_esaki_current",
 ]
