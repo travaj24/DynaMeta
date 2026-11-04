@@ -50,11 +50,16 @@ class TransportModel:
       eps_static           : static relative permittivity for DEVSIM Poisson
       dos_mass_kg_of_n_m3  : DENSITY-OF-STATES effective mass [kg], callable of
                               n; used for the conduction-band Nc / Fermi level
-      band_gap_eV, chi_eV  : band gap and electron affinity [eV]. LOAD-BEARING wherever two
-                              semiconductor regions meet (v0.13.0 3-D equilibrium alignment, v0.14.0
-                              DEVSIM heterointerfaces: Anderson rule Delta E_c = chi_0 - chi_1); a
-                              bipolar heterojunction also checks band_gap_eV against its statistics
-                              (E_g = kT ln(N_c N_v / n_i^2)). Informational for a single semiconductor.
+      band_gap_eV, chi_eV  : band gap and electron affinity [eV], default None (v0.14, user
+                              decision 2026-11-04; they were 3.6 / 4.5). LOAD-BEARING wherever two
+                              semiconductor regions of DIFFERENT materials share a device (v0.13.0 3-D
+                              equilibrium alignment, v0.14.0 DEVSIM heterointerfaces: Anderson rule
+                              Delta E_c = chi_0 - chi_1): the builders REFUSE such a device while a
+                              chi_eV is None, and a bipolar heterojunction refuses a None band_gap_eV
+                              (it also checks the value against E_g = kT ln(N_c N_v / n_i^2)). Not read
+                              for a single semiconductor or a same-material stack (zero offset by
+                              identity), so those need neither. No other consumer reads them
+                              (inventory 2026-11-04: docs/audit/2026-11-04-v0.14-user-decisions.md).
       physics              : "equilibrium" (default) | "drift_diffusion"
       mobility_m2Vs_of_n_m3      : electron mobility (DD only)
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
@@ -64,8 +69,8 @@ class TransportModel:
     n_bg_m3:                     float
     eps_static:                  float
     dos_mass_kg_of_n_m3:         MassFn
-    band_gap_eV:                 float = 3.6
-    chi_eV:                      float = 4.5
+    band_gap_eV:                 Optional[float] = None
+    chi_eV:                      Optional[float] = None
     physics:                     CarrierPhysics = "equilibrium"
     # Drift-diffusion only (Phase 4):
     mobility_m2Vs_of_n_m3:       Optional[MobilityFn] = None

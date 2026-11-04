@@ -282,20 +282,18 @@ class Stacked3DSpec:
         phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg)
         out = {"semi": (phi0_semi, 0.0)}
         for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
-            if chi is not None and self.chi_semi_eV is not None:
-                chis = {"semi": float(self.chi_semi_eV), nm: float(chi)}
-            elif mat == self.semi_material:
-                chis = {"semi": 0.0, nm: 0.0}                 # same material: no band offset
-            else:
-                raise ValueError(
-                    "Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
-                    "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
-                    "needs BOTH electron affinities (chi_semi_eV and the entry's 6th field chi_eV) -- there "
-                    "is no neutral default for a heterojunction band offset (audit S1-9).".format(
-                        nm, mat, self.semi_material))
-            # the ONE Anderson-rule implementation (v0.14.0; same operation order -> bit-identical)
+            # the ONE Anderson-rule implementation, same-material rule included (v0.14.0; same operation
+            # order -> bit-identical: a same-material region gets d_chi = 0.0 exactly as the {0.0, 0.0}
+            # this method used to pass)
             out[nm] = HJ.anderson_alignment(
-                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))}, chis, "semi")[nm]
+                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))},
+                {"semi": self.chi_semi_eV, nm: chi}, "semi",
+                materials={"semi": self.semi_material, nm: mat},
+                hint="Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
+                     "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
+                     "needs BOTH electron affinities -- set chi_semi_eV and the entry's 6th field chi_eV (from "
+                     "a Design: TransportModel.chi_eV of both materials, which defaults to None since v0.14) "
+                     "(audit S1-9).".format(nm, mat, self.semi_material))[nm]
         return out
 
     def __post_init__(self):
@@ -495,8 +493,11 @@ class Stacked3DSpec:
                     Li.background_material))
             # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
             # the bands by the work-function difference (Stacked3DSpec.band_alignment)
+            # v0.14 (user decision 2026-11-04): chi_eV defaults to None -- carried through as None so
+            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
-                                float(tri.eps_static), float(tri.n_bg_m3), float(tri.chi_eV),
+                                float(tri.eps_static), float(tri.n_bg_m3),
+                                (float(tri.chi_eV) if tri.chi_eV is not None else None),
                                 float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
@@ -557,7 +558,7 @@ class Stacked3DSpec:
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None),
+                    chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), **bip)
 

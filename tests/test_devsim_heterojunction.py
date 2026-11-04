@@ -510,18 +510,96 @@ def test_builder_rejects_unknown_interface_model():
         _builder(_mixed_or_bad("mixed"), "badmodel", heterointerface="tunnelling")
 
 
-def test_default_affinities_at_a_heterointerface_warn():
-    from dynameta.warning_types import AdvisoryWarning
-    a = transport(GAAS, n_bg=1e23, physics="drift_diffusion")
-    c = transport(ALGAAS, n_bg=1e23, physics="drift_diffusion")
-    for tm in (a, c):
-        tm.chi_eV, tm.band_gap_eV = 4.5, 3.6                       # the TransportModel defaults
-    b = _builder(stack_design([("l0", "M0", 200e-9, a), ("l1", "M1", 200e-9, c)]), "defchi")
+def _defaulted(tm, **kw):
+    """`tm` with the given fields put back to the TransportModel DEFAULT (read from the dataclass, so the
+    test exercises whatever the default is: None since v0.14, 4.5 / 3.6 on 6595bde)."""
+    import dataclasses
+    from dynameta.materials import TransportModel
+    dflt = {f.name: f.default for f in dataclasses.fields(TransportModel)}
+    return dataclasses.replace(tm, **{k: dflt[k] for k in kw})
+
+
+def _build_or_raise(layers, tag):
+    b = _builder(stack_design(layers), tag)
     try:
-        with pytest.warns(AdvisoryWarning, match="defaults chi_eV"):
-            b.build_device()
+        b.build_device()
+        return b._frames
     finally:
         b.teardown()
+
+
+def test_transport_model_has_no_default_affinity_or_gap():
+    """User decision 2026-11-04: chi_eV and band_gap_eV default to None (they were 4.5 / 3.6 -- a band
+    offset of ZERO by default, not by data). Fails on 6595bde."""
+    from dynameta.materials import TransportModel
+    tm = TransportModel(n_bg_m3=1e23, eps_static=12.9, dos_mass_kg_of_n_m3=lambda n: 0.067 * 9.109e-31)
+    assert tm.chi_eV is None and tm.band_gap_eV is None
+
+
+@pytest.mark.parametrize("which", ["one", "both"])
+def test_defaulted_affinity_at_a_heterointerface_refuses(which):
+    """A GaAs / AlGaAs drift-diffusion heterointerface with a DEFAULTED affinity must refuse to build,
+    naming the field to set. MEASURED on 6595bde (defaults 4.5 / 3.6): both cases build SILENTLY --
+    'both' with a zero offset (the old AdvisoryWarning needed BOTH gaps at the 3.6 default too, and
+    these gaps are explicit), 'one' with AlGaAs at chi = 4.5 against GaAs 4.07, i.e. a 0.43 eV
+    conduction-band offset of the WRONG sign taken from the default -- "DID NOT RAISE" there."""
+    a = transport(GAAS, n_bg=1e23, physics="drift_diffusion")
+    c = _defaulted(transport(ALGAAS, n_bg=1e23, physics="drift_diffusion"), chi_eV=None)
+    if which == "both":
+        a = _defaulted(a, chi_eV=None)
+    with pytest.raises(ValueError, match=r"set TransportModel\.chi_eV"):
+        _build_or_raise([("l0", "M0", 200e-9, a), ("l1", "M1", 200e-9, c)], "defchi_" + which)
+
+
+def test_defaulted_band_gap_at_a_bipolar_heterojunction_refuses():
+    """The bipolar heterojunction reads band_gap_eV (its valence offset is checked against it): a
+    defaulted gap refuses, naming band_gap_eV. On 6595bde the 3.6 default met the gap check and raised
+    the 'disagrees with its statistics' ValueError instead -- whose message does not say the gap was a
+    default; the match below requires the new wording, so it fails there."""
+    p = transport(GAAS, n_bg=1e23, physics="bipolar_dd", acceptor=True)
+    n = _defaulted(transport(ALGAAS, n_bg=1e23, physics="bipolar_dd"), band_gap_eV=None)
+    with pytest.raises(ValueError, match="has no band_gap_eV"):
+        _build_or_raise([("pgaas", "GaAs_p", 200e-9, p), ("nalgaas", "AlGaAs_n", 200e-9, n)], "defgap")
+
+
+def test_defaults_still_build_where_no_offset_is_read():
+    """Consumers that do not need the values keep working with the defaults: (a) a same-material
+    two-layer stack (zero offset by identity -- the frame is the one 4.5 - 4.5 gave, bit for bit);
+    (b) a UNIPOLAR heterojunction with explicit affinities and defaulted gaps (the gap is read only by
+    the bipolar check)."""
+    g = _defaulted(transport(GAAS, n_bg=1e23, physics="drift_diffusion"), chi_eV=None, band_gap_eV=None)
+    fr = _build_or_raise([("l0", "M0", 200e-9, g), ("l1", "M0", 200e-9, g)], "defhomo")
+    assert fr["l0"][1] == 0.0 and fr["l1"][1] == 0.0
+    a = _defaulted(transport(GAAS, n_bg=1e23, physics="drift_diffusion"), band_gap_eV=None)
+    c = _defaulted(transport(ALGAAS, n_bg=1e23, physics="drift_diffusion"), band_gap_eV=None)
+    fr = _build_or_raise([("l0", "M0", 200e-9, a), ("l1", "M1", 200e-9, c)], "defgap_uni")
+    assert fr["l1"][0] - fr["l0"][0] == pytest.approx(DEC, abs=1e-12)    # dE_c from the explicit chi
+
+
+def test_3d_from_design_refuses_a_defaulted_heterostack_affinity():
+    """Stacked3DSpec.from_design: an ITO / AZO-like heterostack whose AZO carries the defaulted chi_eV
+    refuses at spec construction (band_alignment), naming TransportModel.chi_eV; an ITO / ITO stack
+    with defaults builds (same-material rule). On 6595bde both affinities defaulted to 4.5 and the
+    heterostack built SILENTLY with zero offset -- fails there."""
+    import dataclasses
+    from dynameta.carriers.devsim_3d import Stacked3DSpec
+    from dynameta.materials import DrudeOptical, Material, TransportModel
+    from dynameta.constants import M_E
+    from validation.carriers_3d_multisemi import N_BG, _design
+    layers = [("mirror", 70e-9, "Al-Nd"), ("lower_hfo2", 7e-9, "HfO2"), ("ito_bot", 6e-9, "ITO"),
+              ("azo_top", 5e-9, "AZO"), ("upper_hfo2", 7e-9, "HfO2"), ("patch", 50e-9, "air")]
+    homo_d = _design([(n, t, "ITO" if m == "AZO" else m) for n, t, m in layers])
+    homo_d.materials.add(Material("AZO", DrudeOptical(eps_inf=3.8, m_opt_kg=0.3 * M_E, gamma_rad_s=1e14),
+                                  transport=TransportModel(n_bg_m3=N_BG / 4, eps_static=9.0,
+                                                           dos_mass_kg_of_n_m3=lambda n: 0.25 * M_E)))
+    d = dataclasses.replace(homo_d, stack=dataclasses.replace(
+        homo_d.stack, layers=[dataclasses.replace(L, background_material="AZO") if L.name == "azo_top" else L
+                              for L in homo_d.stack.layers]))
+    with pytest.raises(ValueError, match=r"electron affinities.*TransportModel\.chi_eV"):
+        Stacked3DSpec.from_design(d)
+    homo = Stacked3DSpec.from_design(homo_d)
+    assert homo.chi_semi_eV is None and homo.extra_semiconductors[0][5] is None
+    assert homo.band_alignment()["azo_top"][0] == homo.band_alignment()["semi"][0]
 
 
 # ---------------------------------------------------------------- 3-D: drift-diffusion heterostack
