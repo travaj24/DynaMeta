@@ -21,7 +21,9 @@ the fresh-process import crashed 9/72 times with 0xC0000005 right after
 `Loading "libopenblas.dll": ALL BLAS/LAPACK LOADED`: every OpenBLAS instance COMMITS ~32 MB per
 thread at load (Elmer's +995 MB / 31 threads; scipy's +738 MB / 23 threads; numpy's ILP64 copy
 +738 MB; ngsolve_openblas +3979 MB), a hygiene child holds ~6.9 GB of private commit with four of
-them, and the 2019 build dereferences a failed allocation where current builds return an error.
+them, and with the 2019 build that pressure ends in an access violation where the current builds
+raise an ordinary error. scipy's build also factorises 1.31x faster inside UMFPACK (18k-node 2-D
+bipolar diode: 72 s against Elmer's 94 s).
 
 THE PIN (when the user has NOT set DEVSIM_MATH_LIBS -- a user value always wins, untouched):
   1. pip `mkl` installed in this environment -> DEVSIM_MATH_LIBS = that mkl_rt by FULL path. This
@@ -33,8 +35,8 @@ THE PIN (when the user has NOT set DEVSIM_MATH_LIBS -- a user value always wins,
      validation/bipolar_diode_2d.py did not converge at ANY bias (3/3 "Convergence failure!",
      MEASURED in a pip-mkl venv, D0 2026-11-03). With a fresh symbolic factorisation per
      iteration it converges, the currents match UMFPACK to <= 2e-16 relative, and DEVSIM's solve
-     time on that 18k-node device is 66 s against UMFPACK's 132 s
-     (docs/audit/2026-11-03-devsim-2.11-core.md, section 4).
+     time on that 18k-node device is 57 s against UMFPACK's 73 s (66 s vs 132 s on a loaded box;
+     docs/audit/2026-11-03-devsim-2.11-core.md, section 4).
   2. else the LP64 OpenBLAS bundled in the installed scipy wheel (scipy.libs/libscipy_openblas-
      <hash>.dll|.so; scipy is a core dependency), with DEVSIM_BLAS_PREFIX='scipy_' and
      DEVSIM_BLAS_SUFFIX='_' (devsim 2.11.1 issue #167 -- the documented way to use scipy's
