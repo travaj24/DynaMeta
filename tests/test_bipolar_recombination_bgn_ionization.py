@@ -14,7 +14,8 @@ also asserts that its answer differs from the SRH-only / full-ionization / unnar
 than its own tolerance (the "ON is load-bearing" asserts, with the measured margins in the docstrings).
 
 The DEFAULTS-OFF gate hashes the ordered DEVSIM call log of two fixtures built through the public API
-without `options` (tests/_bipolar_calllog.py) against the digest recorded on v0.13.0.
+without `options` (tests/_bipolar_calllog.py) against the digest recorded on v0.13.0 and re-recorded
+2026-11-04 for the two-Bernoulli SG flux (numeric cross-version half: tests/test_devsim_sg_flux.py).
 
 Fixtures are tiny 1-D devices (< 1 s each except the 15 um long diode, ~2-4 s); devsim self-skips.
 """
@@ -580,15 +581,21 @@ def test_acceptor_freeze_out_p_type():
 # defaults OFF: byte-identical to v0.13.0
 # =====================================================================================================
 
-# sha256 of tests/_bipolar_calllog.record_call_log() recorded on v0.13.0 (main 5cbd998, 217 calls).
-_V013_CALLLOG_DIGEST = "ac63536efe5e7c0c7d5985446b72b6e456c97eb8aad5c367b56c77c596b0c6aa"
+# sha256 of tests/_bipolar_calllog.record_call_log(). Recorded on v0.13.0 (main 5cbd998, 217 calls:
+# ac63536e...b0c6aa) and RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux (sg_flux; user
+# decision): the logs differ ONLY in ElectronCurrent / HoleCurrent and their derivatives plus the new
+# Bern_g_m / Bern_gp_m models (measured diff of the two logs). The cross-version half -- the same
+# fixtures SOLVED, every field and terminal current vs 6595bde (= v0.13.0's flux) to the change's
+# measured round-off -- is tests/test_devsim_sg_flux.py::test_defaults_off_fixtures_equal_6595bde_*.
+_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
 
 
-def test_defaults_off_physics_definition_is_byte_identical_to_v0_13():
+def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_digest():
     """GATE R26/R27-off-a. The ordered log of every DEVSIM model / equation / parameter / solution call
     the bipolar API makes for two fixtures (FD + DC contacts; Boltzmann + a circuit contact), with no
-    `options`, hashes to the v0.13.0 digest -- every expression string and value character-for-character.
-    The recorder is SENSITIVE: the same fixtures with one option on change the digest."""
+    `options`, hashes to the recorded digest -- every expression string and value character-for-
+    character (v0.13.0's up to the 2026-11-04 flux re-record, see _CALLLOG_DIGEST). The recorder is
+    SENSITIVE: the same fixtures with one option on change the digest."""
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -597,8 +604,8 @@ def test_defaults_off_physics_definition_is_byte_identical_to_v0_13():
     finally:
         sys.path.pop(0)
     log = CL.record_call_log()
-    assert len(log) == 217
-    assert CL.digest(log) == _V013_CALLLOG_DIGEST
+    assert len(log) == 237
+    assert CL.digest(log) == _CALLLOG_DIGEST
 
 
 def test_inactive_options_bundle_is_bitwise_identical_to_none():

@@ -113,7 +113,9 @@ def test_gate_b_ssac_reaches_oracle_in_extended():
 def test_gate_c_default_path_never_writes_extended_parameters(monkeypatch):
     """Every DynaMeta solve path (solve_dc, ssac_admittance, noise_spectrum, transient_step) on a
     default device: no extended_* parameter is ever written, so DEVSIM runs exactly the double code it
-    ran before D2b. (Cross-commit sha256 of the same run: identical on all 7 fingerprints, audit note.)"""
+    ran before D2b. (Cross-commit sha256 of the same run: identical on all 7 fingerprints, audit note;
+    since the 2026-11-04 SG flux change the fingerprints differ from pre-change commits by design and
+    `python -m validation.extended_precision --compare <checkout>` compares the arrays numerically.)"""
     writes = []
     real = devsim.set_parameter
 

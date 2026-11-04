@@ -19,11 +19,13 @@ GATE B  Heavily doped p+n junction (N_A = 1e25, N_D = 1e22, Si-like n_i = 1e16 m
 GATE C  Default off: a fingerprint (sha256 of every solved array) of the DC / ssac / noise /
         transient paths on the 1-D diode and of the 2-D layered reference metasurface, to compare
         across commits (run with --hashes from a checkout of the base commit and from this one).
+        Since the 2026-11-04 SG flux change the hashes differ from the pre-change commits by
+        design; --compare DIR compares the same arrays NUMERICALLY against checkout DIR (TOL_C).
 GATE D  No leakage: default run -> extended run of the same device -> default run again in ONE
         process; the two default fingerprints are byte-identical and extended_solver is off.
 COST    Wall time extended / double on the 1-D diodes and the 2-D layered reference metasurface.
 
-Run: python -m validation.extended_precision [--hashes] [--cost]
+Run: python -m validation.extended_precision [--hashes] [--cost] [--compare DIR] [--dump PATH]
 """
 
 from __future__ import annotations
@@ -351,6 +353,18 @@ def _h(*arrays) -> str:
     return m.hexdigest()[:16]
 
 
+# --dump: the raw arrays behind each fingerprint (GATE C's numeric cross-commit comparison)
+_CAPTURE = None
+
+
+def _fp(key, names, *arrays) -> str:
+    """_h(*arrays), recording each array as '<key>:<name>' when a --dump run is capturing them."""
+    if _CAPTURE is not None:
+        for nm, a in zip(names.split(), arrays):
+            _CAPTURE[key + ":" + nm] = [float(x) for x in np.ravel(np.asarray(a, dtype=np.float64))]
+    return _h(*arrays)
+
+
 # paths of the LAST fingerprint_1d run that raised XP's small-signal warning (one entry per warning)
 LAST_SMALL_SIGNAL_WARNINGS: list = []
 
@@ -368,25 +382,25 @@ def fingerprint_1d(extended=False):
     with small_signal_warnings(log, "dc0"):
         diode_1d("fp", lines, dop, n_i=SI["n_i"], tau=SI["tau"], eps_r=SI["eps_r"],
                  mu_n=SI["mu_n"], mu_p=SI["mu_p"], extended=extended, circuit=True)
-    out = {"dc0": _h(_nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"))}
+    out = {"dc0": _fp("dc0", "Potential Electrons Holes", _nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"))}
     with small_signal_warnings(log, "dc_fwd"):
         for k in range(1, 5):                              # forward 0.1 V: n end at -0.1 V
             ds.circuit_alter(name="V1", value=-0.025 * k)
             _solve("fp", 1e8, 1e-10)
-    out["dc_fwd"] = _h(_nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"),
+    out["dc_fwd"] = _fp("dc_fwd", "Potential Electrons Holes I", _nv("fp", "Potential"), _nv("fp", "Electrons"), _nv("fp", "Holes"),
                        [source_current()])
     with quiet(), small_signal_warnings(log, "ssac"):
         f, C, G = ssac_admittance([1.0, 1e6])
-    out["ssac"] = _h(C, G)
+    out["ssac"] = _fp("ssac", "C G", C, G)
     try:
         from dynameta.carriers import noise_analysis as NA
         with quiet(), small_signal_warnings(log, "noise"):
-            out["noise"] = _h(NA.noise_spectrum(device="fp", frequencies=[1.0, 1e6]).S)
+            out["noise"] = _fp("noise", "S", NA.noise_spectrum(device="fp", frequencies=[1.0, 1e6]).S)
     except ImportError:
         out["noise"] = "n/a"
     with quiet(), small_signal_warnings(log, "transient"):
         t, i = transient_step(-0.11, t_end=1e-9, dt0=1e-12, max_steps=200)
-    out["transient"] = _h(t, i)
+    out["transient"] = _fp("transient", "t i", t, i)
     fresh()
     return out
 
@@ -403,8 +417,10 @@ def fingerprint_2d():
     for vg in (0.0, 2.0):
         with quiet():
             cf = b.solve(BiasPoint({"top_contact": vg}, "g"))
-        out["layered_vg{:+.0f}".format(vg)] = _h(*[a for r in sorted(cf.regions)
-                                                  for _, a in sorted(cf.regions[r].node_fields.items())])
+        key = "layered_vg{:+.0f}".format(vg)
+        fields = [("{}/{}".format(r, nm), a) for r in sorted(cf.regions)
+                  for nm, a in sorted(cf.regions[r].node_fields.items())]
+        out[key] = _fp(key, " ".join(nm for nm, _a in fields), *[a for _nm, a in fields])
     b.teardown()
     return out
 
@@ -459,7 +475,96 @@ def cost_2d(vgs=(0.0, 2.0)):
 
 # =====================================================================================================
 
+def _dump(path):
+    """--dump PATH: every fingerprinted array of the default (double) path, as JSON."""
+    global _CAPTURE
+    _CAPTURE = {}
+    fingerprint_1d(False)
+    fingerprint_2d()
+    import json
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_CAPTURE, f)
+    _CAPTURE = None
+
+
+# GATE C, numeric (2026-11-04). Up to v0.14-pre GATE C compared the sha256 fingerprints of the default
+# path across commits (--hashes, by hand). The two-Bernoulli SG flux (dynameta.carriers.sg_flux) changed
+# every flux's arithmetic on purpose, so --compare DIR replaces that with a numeric comparison of the
+# same arrays against a checkout DIR (dynameta imported from DIR, this file's fixtures), each array in
+# the metric its round-off lives in: Electrons / Holes and every other positive density entry-wise;
+# potentials (Potential, Lambda-like fields that cross 0) and the ssac C / G, noise S, transient t / i
+# and the DC source current relative to the array's max |.|. TOL_C per class, from the MEASURED move
+# (6595bde -> the sign-selected two-Bernoulli tree, 2026-11-04, scipy OpenBLAS) and the measured
+# solve-to-solve spread of the SAME code (40 extra converged DC passes + ssac on this diode):
+#  * dc (dc0, dc_fwd, layered_vg*: fields + DC current): moved <= 2.2e-15 -> 1e-13 (45x);
+#  * small_signal (ssac C, noise S, transient t / i): moved <= 3.5e-11 (noise S; C 9.5e-12, i 2.6e-11),
+#    same-code C spread ~4e-11 -> 1e-9 (29x);
+#  * ssac_G: moved 2.6e-6 of max |G|. Re Y at 1 Hz is round-off: the 1 Hz entry moved 0.4 % and on
+#    ONE tree it spreads 3.2e-4 (kahan3) / 5.7e-4 (this) std/mean over repeated converged passes and
+#    sits 2e-4 - 3e-3 off the extended-precision DC dI/dV oracle 3.61628e-3 S/m^2 in either form
+#    (DEVSIM solves ssac in double: audit note) -> 1e-4 of max |G| (38x). A physics change is caught by
+#    the dc class at 1e-13 long before it shows in G.
+TOL_C = {"dc": 1e-13, "small_signal": 1e-9, "ssac_G": 1e-4}
+
+
+def _c_class(key):
+    if key.startswith(("dc0:", "dc_fwd:", "layered_vg")):
+        return "dc"
+    return "ssac_G" if key == "ssac:G" else "small_signal"
+
+
+def _c_metric(key, old, new):
+    a, b = np.asarray(old), np.asarray(new)
+    if a.shape != b.shape:
+        return math.inf
+    if a.size == 0:
+        return 0.0
+    d = np.abs(b - a)
+    if np.all(a > 0) and key.rsplit(":", 1)[1].split("/")[-1] in (
+            "Electrons", "Holes", "electron_density_m3", "hole_density_m3"):
+        return float(np.max(d / a))
+    s = float(np.max(np.abs(a)))
+    return float(np.max(d) / s) if s > 0 else float(np.max(d))
+
+
+def compare_trees(root):
+    """{array key: metric} of this checkout's default path vs checkout `root` (subprocess each)."""
+    import json
+    import subprocess
+    import tempfile
+    out = {}
+    for tag, extra in (("old", ["--root", os.path.abspath(root)]), ("new", [])):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "--dump", path] + extra,
+                               capture_output=True, text=True, timeout=1800)
+            if r.returncode != 0:
+                raise RuntimeError("--dump on {} failed: {}".format(tag, r.stderr[-800:]))
+            with open(path, encoding="utf-8") as f:
+                out[tag] = json.load(f)
+        finally:
+            os.remove(path)
+    return {k: _c_metric(k, out["old"][k], out["new"].get(k, [])) for k in sorted(out["old"])}
+
+
 def main():
+    if "--dump" in sys.argv:
+        _dump(sys.argv[sys.argv.index("--dump") + 1])
+        return 0
+    if "--compare" in sys.argv:
+        rows = compare_trees(sys.argv[sys.argv.index("--compare") + 1])
+        bad = []
+        for k, m in rows.items():
+            tol = TOL_C[_c_class(k)]
+            print("[xp] GATE C {:44s} {:.2e} <= {:.0e} ({})".format(k, m, tol, _c_class(k)))
+            if not m <= tol:
+                bad.append(k)
+        ok = len(rows) == 16 and not bad
+        print("[xp] GATE C default path vs {}: {} arrays, {} over tolerance {} -> {}".format(
+            sys.argv[sys.argv.index("--compare") + 1], len(rows), len(bad), bad,
+            "PASS" if ok else "FAIL"))
+        return 0 if ok else 1
     if "--hashes" in sys.argv:
         fp = fingerprint_1d(False)
         fp.update(fingerprint_2d())
