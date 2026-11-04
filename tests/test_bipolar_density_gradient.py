@@ -358,7 +358,10 @@ def test_inversion_equilibrium_flat_qfls_and_np():
     """GATE E: inverted MOS, both carriers quantum at the wall: the modified quasi-Fermi levels are flat
     (measured 3.3e-16 / 5.6e-17 V on scipy's OpenBLAS, 4.3e-15 / 5.6e-17 V on Elmer's), n p = n_i^2
     exp((Ln + Lp)/V_t) at every node (7.1e-15 / 1.6e-13) and n_i^2 in the neutral bulk (4.2e-7, the
-    1e-6 solve tolerance). quantum_srh=False breaks detailed balance: phi drifts by 6 mV off the wall
+    1e-6 solve tolerance). Since the one SG kernel (2026-11-04) the classical seed state differs at
+    round-off and the readouts are 3.7e-15 / 5.6e-17 V and 1.5e-13 (the plain two-Bernoulli bracket
+    gives 3.0e-15 V / 1.1e-13 on the same tree): the double readout floor of phi = psi + Lambda -
+    V_t ln(n/n_i) at |Lambda_wall| = 0.71 V, and the n p check is that error over V_t. quantum_srh=False breaks detailed balance: phi drifts by 6 mV off the wall
     node.
     TIGHTENED 2026-11-03 from 1e-8 / 1e-7 to 1e-11 / 1e-10: the 1.7e-10 V and 6.4e-9 measured until
     then were not a solve floor but the kahan3 flux's B(v) + v cancellation on the electron wall edge
