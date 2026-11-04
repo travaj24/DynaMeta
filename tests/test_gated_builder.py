@@ -138,3 +138,120 @@ def test_bipolar3d_expr_requires_body_doping():
     from dynameta.carriers.devsim_3d import Stacked3DSpec
     spec = Stacked3DSpec(physics="bipolar_dd", n_i_m3=1e17, net_doping_expr="-1.0e23")
     assert spec.body_net_doping_m3 is None                     # guard fires at solve()
+
+
+# ---- v0.14.0 blocker (2026-11-04): solve() after set_ssac_gate ---------------------------------------
+# MEASURED on 6595bde before the fix (reference modulator, top_contact): solve(1 V) -> set_ssac_gate ->
+# circuit_alter(V1, 1 V) + DC solve -> builder.solve(2 V) returned the 1 V state -- every node Potential
+# equal to it to 1.1e-16 V, and 1.0 V (upper_al2o3) / 0.80 V (upper_hfo2) / 0.12 V (ito) off a fresh
+# builder solved at 2 V. The ramp wrote only the `top_contact_bias` parameter, which the circuit-driven
+# Dirichlet no longer reads. Fixed: solve() drives the electrode's circuit source (LayeredDevsimBuilder.
+# _drive). After the fix the two states agree to <= 6e-16 (relative, Electrons; absolute V, Potential)
+# for both physics, so the 1e-12 bound below is round-off with margin, not a fitted tolerance. Run in a
+# CHILD process: the DEVSIM circuit is process-global, and a leftover V1/vac would leak into every
+# later devsim test on the same worker.
+_SSAC_CHILD = r'''
+import json, sys
+import numpy as np
+from dynameta.carriers.devsim_env import import_devsim
+ds = import_devsim()
+from validation._reference_device import build_reference_modulator
+from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+from dynameta.carriers import ac_analysis as AC, eq_registry as R, devsim_3d as D3
+from dynameta.sweep import BiasPoint
+physics, GATE = sys.argv[1], "top_contact"
+
+def state(dev):
+    out = {}
+    for r in ds.get_region_list(device=dev):
+        for v in ("Potential", "Electrons"):
+            try:
+                out[r + ":" + v] = np.array(ds.get_node_model_values(device=dev, region=r, name=v))
+            except Exception:
+                pass                      # dielectric regions carry no Electrons
+    return out
+
+def wipe():
+    for d in list(ds.get_device_list()):
+        ds.delete_device(device=d)
+        R.clear(d)
+    for m in list(ds.get_mesh_list()):
+        ds.delete_mesh(mesh=m)
+    try:
+        ds.delete_circuit()
+    except Exception:
+        pass
+
+res = {}
+f = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="f_m", device_name="f_d")
+f.solve(BiasPoint({GATE: 2.0}, "g2"))
+ref = state("f_d")
+wipe()
+b = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="a_m", device_name="a_d")
+b.solve(BiasPoint({GATE: 1.0}, "g1"))
+b.set_ssac_gate(GATE, source_name="V1")
+ds.circuit_alter(name="V1", value=1.0)
+ds.solve(type="dc", solver_type="direct", absolute_error=1e18, relative_error=1e-5, maximum_iterations=60)
+cf = b.solve(BiasPoint({GATE: 2.0}, "g2"))
+got = state("a_d")
+res["vac"] = float(ds.get_circuit_node_value(node="vac", solution="dcop"))
+res["dev"] = {k: float(np.max(np.abs(got[k] - ref[k])) /
+                        (np.max(np.abs(ref[k])) if k.endswith("Electrons") else 1.0)) for k in ref}
+res["voltages"] = dict(cf.voltages)
+wipe()
+
+# a contact repointed circuit-driven OUTSIDE set_ssac_gate: solve() cannot know its source -> refuse
+r = LayeredDevsimBuilder(build_reference_modulator(physics), mesh_name="r_m", device_name="r_d")
+r.solve(BiasPoint({GATE: 1.0}, "g1"))
+ds.delete_contact_equation(device="r_d", contact=GATE, name="PotentialEquation")
+R.forget("r_d", "PotentialEquation", loc=GATE)
+AC.setup_circuit_contact("r_d", GATE, source_name="V1")
+try:
+    r.solve(BiasPoint({GATE: 2.0}, "g2"))
+    res["raw2d"] = "returned"
+except RuntimeError as e:
+    res["raw2d"] = str(e)
+wipe()
+
+# the 3-D builder has no set_ssac_gate: a circuit-driven gate must refuse, not go stale
+import validation.devsim_3d_mesh as V3
+s3 = D3.Devsim3DEquilibrium(V3._spec(physics="equilibrium"), device_name="c3d", mesh_name="c3m")
+s3.solve(BiasPoint({"gate": 0.5}, "g"))
+ds.delete_contact_equation(device="c3d", contact="gate", name="PotentialEquation")
+R.forget("c3d", "PotentialEquation", loc="gate")
+AC.setup_circuit_contact("c3d", "gate", source_name="V1")
+try:
+    s3.solve(BiasPoint({"gate": 1.0}, "g"))
+    res["raw3d"] = "returned"
+except RuntimeError as e:
+    res["raw3d"] = str(e)
+wipe()
+print("SSAC_RESULT " + json.dumps(res))
+'''
+
+
+@pytest.mark.parametrize("physics", ["equilibrium", "drift_diffusion"])
+def test_solve_after_set_ssac_gate_drives_the_circuit_source(physics):
+    """builder.solve(new bias) after set_ssac_gate equals a fresh builder solved at that bias (to
+    round-off), and the circuit node follows; a contact made circuit-driven behind the builder's back
+    (2-D raw setup_circuit_contact, or ANY circuit-driven contact on the 3-D builder, which has no
+    set_ssac_gate) is refused instead of silently returning the previous operating point.
+    On 6595bde: dev = 1.0 V, vac = 1.0 V (the stale 1 V state), and both raw solves 'returned'."""
+    pytest.importorskip("devsim")
+    import json
+    import os
+    import subprocess
+    import sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [repo] + [p for p in sys.path if isinstance(p, str) and p]))
+    p = subprocess.run([sys.executable, "-W", "error", "-c", _SSAC_CHILD, physics], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=900)
+    lines = [ln for ln in p.stdout.splitlines() if ln.startswith("SSAC_RESULT ")]
+    assert p.returncode == 0 and lines, (p.returncode, p.stdout[-1500:], p.stderr[-3000:])
+    res = json.loads(lines[-1][len("SSAC_RESULT "):])
+    assert abs(res["vac"] - 2.0) < 1e-12, res
+    assert res["voltages"] == {"top_contact": 2.0}
+    assert len(res["dev"]) >= 6 and max(res["dev"].values()) < 1e-12, res["dev"]
+    assert "not repointed with set_ssac_gate" in res["raw2d"], res["raw2d"]
+    assert "circuit-driven" in res["raw3d"] and "stale" in res["raw3d"], res["raw3d"]

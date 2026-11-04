@@ -19,8 +19,10 @@ name: CI
 #                                                              module self-skips on numpy 1.x)
 #   numba    windows 3.12 core+dev+[numba]                     16 numba tests + parity oracle ~8 min
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
-#   solvers  ubuntu  3.12 core+dev+plot+[solvers]              22 FEM/DEVSIM modules + 3 FEM  ~10 min
+#   solvers  ubuntu  3.12 core+dev+plot+[solvers]              31 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
+#   solvers- ubuntu  3.12 same as `solvers` + mpmath           the 13 v0.14 DEVSIM modules    ~10 min
+#   devsim                                                     (own job, see it)              (parallel)
 #   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~15 min
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
 #            DISPATCH ONLY                                     oracles                          on PRs)
@@ -392,6 +394,17 @@ jobs:
         # test_equilibrium_simplify_cache added the same day: its 2 fast cases take < 1 s; the
         # @slow live-simplify case runs in the `nightly` job, step (a).)
         #
+        # 2026-11-04 (v0.14.0 release blocker): the ADD-NEW-MODULES-HERE rule above had failed AGAIN --
+        # thirteen solver-gated files were on no leg, so every gate in them skipped everywhere. They
+        # now run in the `solvers-devsim` job below (this job's clock would have doubled), and
+        # tests/test_ci_solver_coverage.py -- on every `test` leg, no solvers needed -- FAILS when a
+        # file that importorskips/find_specs devsim/ngsolve/netgen/gmsh (or calls import_devsim) is
+        # named by no solver job. Measured runtime of THIS step (WSL Ubuntu py3.12, the `solvers`
+        # install, 4 cores of a 32-thread box loaded by other jobs): main's 29 files 505 s against
+        # 390-400 s for the same step on the runner (runs 41711437871 / 41699630892 / 41660301851), and
+        # this branch's 31 files 405 s (496 passed) -- the job stays ~8 min of its 45-min cap. v0.14.0
+        # adds test_gated_builder's ssac-gate child-process gate (2 cases, 33 s on Windows).
+        #
         # NOT PINNED to an old release, deliberately (2026-09-14). ngsolve 6.2.2607 turned this leg
         # red every night from 2026-09-09 with a SIGSEGV (exit 139) in test_polarization_vocabulary.py.
         # The crash was NOT an ngsolve regression against this repo's physics: the `nightly` job
@@ -439,6 +452,62 @@ jobs:
           pip install mkl
           python -c "import dynameta.optics.solver as S; assert S.pardiso_available(), 'MKL-PARDISO did not load'"
           pytest -q tests/test_fem_speed.py -k "pardiso or auto"
+
+  solvers-devsim:
+    # The v0.14.0 DEVSIM test modules (2026-11-04). Until this job they ran on NO leg: each one
+    # importorskips devsim, the `test`/`floor` legs do not install it, and the `solvers` job names its
+    # files explicitly and did not name these (CONFIRMED: grep of this file, and a fast-suite run with
+    # devsim/ngsolve/netgen/gmsh hidden -- every file below skipped there). A SEPARATE job rather than
+    # 13 more lines on `solvers`: that job's test step is 390-400 s on the runner and these add as
+    # much again, so one job would sit at ~2x its own history with the cap unchanged, and a red here
+    # attributes to the carrier/noise stack without reading through the FEM modules.
+    #
+    # MEASURED 2026-11-04, `-m "not slow"`, serial, this exact file list, WSL Ubuntu 24.04 / py3.12 /
+    # the `solvers` install (devsim 2.11.2 + OpenBLAS, ngsolve 6.2.2608, gmsh 4.15) on 4 cores of a
+    # loaded 32-thread box: 567 s wall, 242 passed / 3 xfailed / 3 skipped (the 3 mpmath oracles), and
+    # 488 s / 245 passed / 3 xfailed / 0 skipped on a second run WITH mpmath (installed below). Per
+    # file (first run): heterojunction 154 s, phase_composition 145, extended_precision 49,
+    # bipolar_density_gradient 46, tunneling 32, noise 30, traps 28,
+    # recombination_bgn_ionization 26, 3d_mesh 25, wave7_carriers 13, trap_energy_reference 8,
+    # conventions 7, noise_hooge 3. The same WSL setup ran main's `solvers` step in 505 s and this
+    # branch's in 405 s, against the runner's 390-400 s for main's -- WSL-on-this-box is ~1-1.3x the
+    # runner, so expect ~6-9 min here; 40 is a CAP ~3.5x the WSL upper bound (~11 min with the
+    # install), not a budget. (Windows dev box, py3.14, same list, serial, same load: 1098 s / 245
+    # passed -- heterojunction 321 s and phase_composition 316 s dominate; no CI leg runs devsim on
+    # Windows.) Their @slow cases (the equilibrium-heterostack built-in potential, the 3-D BTBT +
+    # oxide-tunneling wiring) run in the `nightly` job, step (a).
+    # + tests/test_devsim_sg_flux.py (the SG-kernel gates, merged after the timing above): 19 s serial on
+    #   the Windows dev box (9 tests; mpmath oracle), i.e. ~2 % of this job.
+    # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
+    # tests/test_ci_solver_coverage.py fails the PR otherwise.
+    name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # same system libs and install as `solvers` (+ mpmath, the independent high-precision oracle three
+      # of these gates use: wave7 carriers' Fermi-integral and bipolar DG's 2 closed-form checks)
+      - name: System libs (gmsh needs libGLU; devsim dlopens BLAS/LAPACK)
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libopenblas-dev liblapack-dev
+      - name: Install (core + dev + plot + solvers + mpmath)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,plot,solvers]" mpmath
+      - name: Assert the solver stack really imported
+        run: python -c "import ngsolve, devsim, gmsh, mpmath; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
+      - name: Run the v0.14 DEVSIM test modules
+        run: |
+          pytest -q -m "not slow" \
+            tests/test_audit_2026_07_17_wave7_carriers.py tests/test_audit_2026_07_25_conventions.py \
+            tests/test_bipolar_density_gradient.py tests/test_bipolar_recombination_bgn_ionization.py \
+            tests/test_devsim_3d_mesh.py tests/test_devsim_heterojunction.py \
+            tests/test_devsim_noise.py tests/test_devsim_noise_hooge.py \
+            tests/test_devsim_phase_composition.py tests/test_devsim_tunneling.py \
+            tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
+            tests/test_devsim_sg_flux.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
@@ -511,6 +580,12 @@ jobs:
         # oracle, the n_slab = 20 FDTD etalon ringdown Q vs Fabry-Perot, the lumenairy-5.30
         # PMM-twin angle-gradient row, and (v0.14.0, D0) DEVSIM's live simplify() of the F_1/2
         # Jacobian against the replayed string physics_equilibrium caches (string + bitwise values).
+        # RECOUNT 2026-11-04 (`pytest --collect-only -q -m slow tests/`): 27, not 12 -- the count above
+        # predates test_fdtd_registration's 11, test_fiber_eryb_transient's 1, test_ringdown's gate 7
+        # and the two @slow cases of the v0.14 DEVSIM modules the `solvers-devsim` job runs fast-only:
+        # test_devsim_heterojunction's equilibrium-stack built-in potential (2.4 s) and
+        # test_devsim_tunneling's 3-D BTBT + oxide-tunneling wiring (9.5 s), MEASURED under WSL
+        # Ubuntu / py3.12 on 4 cores -- so they add ~12 s here.
         # `-m "not slow"` on the four `test` legs is what makes them cheap; this is the other half.
         # PARTIAL OVERLAP with (c2) is deliberate and is not pure duplication: seven of these are
         # thin wrappers around validation modules (c2) also runs, but only the pytest route puts
