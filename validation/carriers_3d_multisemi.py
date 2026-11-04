@@ -13,7 +13,9 @@ GATE B (from_design heterostack extraction, NO solve): a Design with TWO stacked
         extra_semiconductor, and the emitted field region named after the gate-adjacent layer; a Design
         whose two semiconductors are NON-contiguous (separated by a dielectric) is ambiguous -> raises.
         (audit S1-9) The extracted extra entry carries the layer's own electron affinity + DOS mass, and
-        the spec the primary's affinity, so the equilibrium solve can align the bands.
+        the spec the primary's affinity, so the equilibrium solve can align the bands. Since v0.14
+        (user decision 2026-11-04) TransportModel.chi_eV defaults to None: this ITO/ITO stack carries
+        None through (same material -> zero offset by identity), it no longer reads a 4.5 default.
 GATE C (built-in potential, SOLVER; audit S1-9, wave-7 2026-11-02): an n+/n ITO homojunction
         (4e26 | 4e25 m^-3, 12 nm each) with the gate held at the n side's flat band. Equilibrium = flat
         Fermi level, so each bulk must sit at its OWN neutral potential: psi(semi bulk) = 0 and
@@ -121,9 +123,11 @@ def _gate_b():
             and spec.extra_semiconductors[0][0] == "ito_top"
             and abs(spec.extra_semiconductors[0][2] - 5e-9) < 1e-12
             and spec.oxide_material == "HfO2" and abs(spec.oxide_thk_m - 7e-9) < 1e-12
-            # audit S1-9: the affinity + DOS mass ride along (chi_eV = TransportModel's default 4.5)
+            # audit S1-9: the affinity + DOS mass ride along (v0.14: chi_eV defaults to None, carried
+            # through as None; same material -> band_alignment's zero offset)
             and len(spec.extra_semiconductors[0]) == 7
-            and spec.extra_semiconductors[0][5] == 4.5 and spec.chi_semi_eV == 4.5
+            and spec.extra_semiconductors[0][5] is None and spec.chi_semi_eV is None
+            and spec.band_alignment()["ito_top"][0] == spec.band_alignment()["semi"][0]
             and abs(spec.extra_semiconductors[0][6] - 0.35 * M_E) < 1e-40)
     print("[ms] B from_design heterostack: primary='semi'({:.0f}nm) extra={} field='{}' oxide={}({:.0f}nm)"
           " -> {}".format(spec.semi_thk_m * 1e9,
