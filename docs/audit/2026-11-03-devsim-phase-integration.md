@@ -357,6 +357,15 @@ It is solved at 0.5 V reverse.
 
 ## 4. Defaults-off guards (all against main `5cbd998`, untouched checkout; run on the final tree)
 
+> **2026-11-04: these byte-identity guards were converted on purpose.** The ONE SG flux kernel
+> (`dynameta.carriers.sg_flux`, user decision) changed every Scharfetter-Gummel flux string, so the
+> defaults-off definition and results can no longer be byte-identical to main. Each guard below now
+> pins (a) the re-recorded definition digest and (b) a NUMERIC comparison against the pre-change tree
+> at a tolerance derived from the change's measured round-off: the call-log digests ->
+> `tests/test_devsim_sg_flux.py` (fixtures solved vs 6595bde); D1d's solution arrays ->
+> `validation/sg_flux_cross_version.py` GATE B (vs main); D1c gate F -> numeric (`TOL_F`).
+> docs/audit/2026-11-04-sg-flux-two-bernoulli.md section 4. The table records the 2026-11-03 state.
+
 | Guard | Result |
 |---|---|
 | D1b call-log digest (217 DEVSIM calls, `tests/_bipolar_calllog.py`) | **identical**. It was NOT re-recorded: `test_defaults_off_call_log_is_v013_byte_identical` passes against the digest recorded on main. This covers the circuit contact and the contact-rule refactor. |

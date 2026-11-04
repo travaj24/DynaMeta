@@ -240,8 +240,10 @@ def test_dg_edge_flux_is_accurate_at_large_drift(carrier):
     node's density. Oracle: the flux bracket c@n1 B(-v) - c@n0 B(v) (electrons) / c@n1 B(v) -
     c@n0 B(-v) (holes) with a 40-digit mpmath B, at the v DEVSIM computed. Gate 1e-13. The kahan3
     form (B(-v) spelled B(v) + v) FAILS it: measured 1.9e-7 at v = -21, 6.5e-5 at -27.6, 100 % at
-    -40, so the gate fails on it for both carriers (physics_density_gradient._JN_DG_BIPOLAR); the
-    two-Bernoulli form measures 3.0e-16 (electrons) / 3.1e-16 (holes) on both OpenBLAS builds."""
+    -40, so the gate fails on it for both carriers; the two-Bernoulli form measured 3.0e-16
+    (electrons) / 3.1e-16 (holes) on both OpenBLAS builds (a4f00d9's plain bracket), and the ONE SG
+    kernel's sign-selected bracket (dynameta.carriers.sg_flux, 2026-11-04) 3.3e-16 / 2.2e-16. Every
+    other flux family: tests/test_devsim_sg_flux.py."""
     mp = pytest.importorskip("mpmath")
     from dynameta.carriers import physics_bipolar_dd as BP
     from dynameta.carriers import physics_density_gradient as DG
@@ -360,7 +362,7 @@ def test_inversion_equilibrium_flat_qfls_and_np():
     node.
     TIGHTENED 2026-11-03 from 1e-8 / 1e-7 to 1e-11 / 1e-10: the 1.7e-10 V and 6.4e-9 measured until
     then were not a solve floor but the kahan3 flux's B(v) + v cancellation on the electron wall edge
-    (|v| = 27.6; physics_density_gradient._JN_DG_BIPOLAR), so the new bounds fail the old flux by 16x /
+    (|v| = 27.6; the kernel is now dynameta.carriers.sg_flux), so the new bounds fail the old flux by 16x /
     64x in double and keep >= 600x margin (in the extended Newton the validation now runs, the old
     flux's loss would shrink to ~1e-22: test_dg_edge_flux_is_accurate_at_large_drift pins the flux
     itself)."""
