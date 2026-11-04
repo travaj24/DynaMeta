@@ -1,6 +1,6 @@
 """D2c (v0.14.0): the devsim_3d tensor (Kuhn) mesh gives DEVSIM exact box-method geometry.
 
-The pre-D2c gmsh mesh had 44-57 % non-well-centred tetrahedra; DEVSIM 2.11 sums the MAGNITUDES of each
+The pre-D2c gmsh mesh had 42-57 % non-well-centred tetrahedra; DEVSIM 2.11 sums the MAGNITUDES of each
 tet's circumcentric dual pieces, so sum NodeVolume over-counted (1.196 x semi, 1.293 x oxide) and
 integrated / sheet charge was ~20 % wrong. The heavy oracles (five topologies, the D1c trap gate G,
 the e46bd25 failure table) are validation/devsim_3d_mesh.py; docs/audit/2026-11-03-devsim-3d-mesh.md."""

@@ -20,9 +20,16 @@ Emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY: the native 3D-grid 
 assemble_eps places the (x,y,z) density with NO FieldLift synthesis (a lift applies to 2D
 fields only) -- the physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
 
-Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumulates/
--Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
-(DD: converges, sign-correct, reduces to the equilibrium accumulation to 0.8% at +1V).
+Validated: `validation/carriers_3d.py` (equilibrium: +Vg accumulates/-Vg depletes; on the D2c Kuhn-tensor
+mesh the box-method Gauss balance closes to 3.7e-6 = the Newton stop and lateral invariance is 3e-16 --
+the gmsh mesh gave 12 % / 1e-2); `validation/carriers_3d_dd.py` (DD: converges, sign-correct, reduces to
+the equilibrium accumulation at +1V); `validation/devsim_3d_mesh.py` (D2c: exact volumes, sheet charge,
+Gauss, 3-D == 1-D on the same z-lines).
+
+MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
+right-angled Kuhn tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
+(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). The gmsh paths below survive as
+mesher="gmsh" (legacy, UnreliableResultWarning).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -558,7 +565,8 @@ def _graded_axis(breaks, refine, h_min, h_max, dist_min=1.0, dist_max=6.0) -> np
     """A 1-D node axis through every breakpoint, sized like gmsh's Threshold field: h = h_min within
     dist_min of a refinement coordinate, linear to h_max at dist_max, h_max beyond (h_max everywhere when
     `refine` is empty). Each span between breakpoints gets ceil(int ds/h) cells placed at equal steps of
-    int ds/h -- a smooth grading that hits the breakpoints exactly."""
+    int ds/h -- a smooth grading that hits the breakpoints exactly. Coordinates in NANOMETRES (breakpoints
+    are de-duplicated at 1e-9 nm)."""
     b = np.unique(np.round(np.asarray(breaks, dtype=float), 9))
     out = [float(b[0])]
     for a0, a1 in zip(b[:-1], b[1:]):
@@ -1095,7 +1103,7 @@ class Devsim3DEquilibrium:
         midpoint, v1/v2 = face circumcentres - circumcentre), the MAGNITUDES of the circumcentric dual
         pieces, and ElementNodeVolume = couple * EdgeLength / 6 feeds EdgeNodeVolume and NodeVolume. On a
         tet whose circumcentre is outside it the signed pieces partly cancel but the magnitudes add, so the
-        volumes over-count. The gmsh meshes have 44-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
+        volumes over-count. The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
         oxide volume on the G2 cap); a Delaunay mesh does NOT help (gmsh Optimize=0: 0 of 17814 oxide faces
         non-Delaunay, still 1.289 x), and element assembly does not either (it uses the same couples).
         Every Kuhn tet of a box cell is right-angled with ALL FOUR faces right triangles, so every
