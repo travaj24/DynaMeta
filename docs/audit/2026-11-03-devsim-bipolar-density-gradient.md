@@ -200,6 +200,14 @@ failed under both BLAS builds). Gate: `test_dg_edge_flux_is_accurate_at_large_dr
 mpmath, measured 3e-16. The unipolar DG keeps `_JN_DG`, because its definition is pinned by a
 call-log digest.
 
+**Update 2026-11-04 (user decision): every SG flux now goes through one kernel,
+`dynameta.carriers.sg_flux`** -- the unipolar DG and the classical DD included (open item 5 below,
+resolved). `_JN_DG_BIPOLAR` / `_JP_DG_BIPOLAR` / `_JN_DG` are gone. The kernel evaluates B(v) and
+B(-v) like the form above but combines them sign-selected (the B(x) + x = B(-x) identity only on the
+non-negative argument, one shared Bernoulli per branch): the same large-|v| accuracy (this file's
+gate now measures 3.3e-16 / 2.2e-16) with ~4x less ssac round-off near equilibrium than the plain
+bracket. The upper-only clamp is kept. docs/audit/2026-11-04-sg-flux-two-bernoulli.md.
+
 **The validation runs the extended Newton.** In double, two of its convergence criteria are finer
 than the arithmetic:
 
@@ -446,7 +454,9 @@ and linear in gamma.
    switching the unipolar wall changes `setup_dg_hard_wall`'s call log and its characterization test.
    That was out of scope here.
 4. **Strong inversion** (Limits, first item): worth a quasi-Fermi-variable DG formulation?
-5. **The `kahan3` flux elsewhere (section 1.6).** The unipolar DG (`_JN_DG`) and the classical DD
+5. **RESOLVED 2026-11-04** (user decision; docs/audit/2026-11-04-sg-flux-two-bernoulli.md: one
+   kernel `sg_flux` for every family, digests re-recorded, numeric cross-version guards). Original
+   text: **The `kahan3` flux elsewhere (section 1.6).** The unipolar DG (`_JN_DG`) and the classical DD
    strings (`physics_bipolar_dd`, `physics_drift_diffusion`) still spell B(-v) as B(v) + v. That is
    harmless at classical |v|. A unipolar region given `setup_dg_insulator_wall` or
    `setup_dg_hard_wall` would carry the same wall-edge loss. Switching them changes the v0.13

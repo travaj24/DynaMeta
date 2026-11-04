@@ -246,6 +246,15 @@ checkout of 6baa9a6 with `--root`. In both runs `extended_solver` was never set 
 Gate D runs the extended version of the 1-D row set: all five fingerprints move. The default run
 after it reproduces the first column.
 
+> **2026-11-04: the fingerprints above are superseded by design.** The ONE SG flux kernel
+> (`dynameta.carriers.sg_flux`) changed every flux string, so the default-off sha256 differ from any
+> earlier commit. Gate C's cross-commit check is now numeric: `python -m validation.extended_precision
+> --compare <checkout>` dumps the same arrays from both trees (`--dump`) and gates each against
+> `TOL_C` (dc 1e-13, small-signal 1e-9, ssac G 1e-4 of max |G|; derivations next to `TOL_C`).
+> Measured vs 6595bde: DC <= 2.2e-15, noise S 3.5e-11, ssac C 9.5e-12, transient i 2.6e-11, ssac G
+> 2.6e-6 (Re Y at 1 Hz is round-off in double in either flux form).
+> docs/audit/2026-11-04-sg-flux-two-bernoulli.md.
+
 ### Regression on the touched paths
 
 These files were run at `-n 2`, not slow: `test_dc_solve_gummel`, `test_devsim_noise`,
@@ -325,7 +334,7 @@ can hold.
   attribute (as `transient.py`'s do), pass it: `XP.solve(ds, type=...)`.
 - **The cross-commit fingerprint.** `python validation/extended_precision.py --hashes` prints the
   default-off sha256. To compare against another commit, run it from that checkout with
-  `--root <that checkout>`.
+  `--root <that checkout>`. Since 2026-11-04 (SG flux kernel): `--compare <checkout>` (numeric).
 
 ## Release-note lines
 

@@ -5,8 +5,9 @@ It builds a small unipolar DG fixture through the PUBLIC physics_density_gradien
 v0.14-pre caller does (setup_dg_quantum_correction, setup_contact_dg, setup_dg_hard_wall,
 seed_dg_from_solution, set_dg_gamma) while intercepting every DEVSIM model-, equation-, parameter- and
 solution-defining call, and returns that ordered call log. The gate hashes it and compares to the
-digest recorded on the integration base e46bd25 (BEFORE the bipolar DG landed): equal digests mean the
-unipolar DG physics DEFINITION is character-for-character the pre-D2d one. No solve is run (solution
+digest recorded on the integration base e46bd25 (BEFORE the bipolar DG landed), re-recorded 2026-11-04
+for the two-Bernoulli SG flux (sg_flux): equal digests mean the unipolar DG physics DEFINITION is
+character-for-character the recorded one (solved cross-version comparison: tests/_sgflux_reference.py). No solve is run (solution
 values depend on the BLAS build); seed_dg_from_solution reads the setup-time Electrons values.
 
 Re-record (only when a sibling workstream changes the unipolar DG physics ON PURPOSE):
