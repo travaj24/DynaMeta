@@ -4,7 +4,7 @@ charge, sheet charge and the gate charge close on the 3-D builder. docs/audit/20
 
 THE DEFECT (pre-D2c): DEVSIM 2.11's 3-D ElementEdgeCouple sums the MAGNITUDES of each tetrahedron's
 circumcentric dual pieces (src/GeomModels/TetrahedronEdgeCouple.cc); ElementNodeVolume = couple * L/6
-feeds EdgeNodeVolume and NodeVolume. On the gmsh mesh's non-well-centred tets (44-57 %) the volumes and
+feeds EdgeNodeVolume and NodeVolume. On the gmsh mesh's non-well-centred tets (42-57 %) the volumes and
 couplings over-count. Stacked3DSpec.mesher = "tensor" (default since D2c) meshes a graded tensor grid
 split into right-angled Kuhn tets, on which every piece is >= 0.
 
