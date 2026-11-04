@@ -32,13 +32,38 @@ MobilityFn = Callable[[np.ndarray], np.ndarray]
 CarrierPhysics = Literal["equilibrium", "drift_diffusion", "bipolar_dd"]
 
 
+_TRAPSPEC_REFUSAL = (
+    "materials.TrapSpec(enabled=True) is not implemented: no solver path reads TransportModel.traps, so "
+    "the trap would be silently ignored (it always was; docs/audit/2026-11-03-devsim-traps.md section 7). "
+    "Use the DEVSIM trap physics instead (bipolar_dd only): bulk levels -> "
+    "TransportModel(srh_traps=(physics_traps.TrapLevel(...), ...)) and srh_trap_energy_eV= (the E_t of the "
+    "tau_srh_s channel), or Stacked3DSpec(srh_traps=..., srh_trap_energy_eV=...); interface traps -> "
+    "physics_traps.InterfaceTraps via LayeredDevsimBuilder(interface_traps={...}), "
+    "Stacked3DSpec(interface_traps=...) or Stacked3DSpec.from_design(..., interface_traps=...).")
+
+
 @dataclass
 class TrapSpec:
-    """Optional deep-level trap states in a semiconductor (Stage 1)."""
+    """LEGACY placeholder for deep-level traps -- NOT IMPLEMENTED (user decision 2026-11-04).
+
+    No solver path has ever read `TransportModel.traps`, so `enabled=True` used to be silently ignored.
+    Setting `enabled` to a true value now raises NotImplementedError naming what does work
+    (physics_traps.TrapLevel via TransportModel.srh_traps / srh_trap_energy_eV, physics_traps.
+    InterfaceTraps via the builders' interface_traps=). The check is in __setattr__, so it covers the
+    constructor AND a later `spec.enabled = True` -- the one place that cannot be bypassed short of
+    object.__setattr__; a check in TransportModel.__post_init__ or in a builder would miss mutation
+    after construction, or a consumer that forgets to check. enabled=False (the default) is unchanged
+    and stays inert. Mapping it onto TrapLevel was not done: "depth" has no stated reference (E_c?) and
+    E_i is not midgap when N_c != N_v (traps doc, section 7, item 1)."""
     enabled:             bool = False
     N_trap_acceptor_m3:  float = 1.0e24
     E_trap_depth_eV:     float = 0.30
     g_trap:              float = 1.0
+
+    def __setattr__(self, name, value):
+        if name == "enabled" and bool(value):
+            raise NotImplementedError(_TRAPSPEC_REFUSAL)
+        object.__setattr__(self, name, value)
 
 
 @dataclass
@@ -64,7 +89,7 @@ class TransportModel:
       mobility_m2Vs_of_n_m3      : electron mobility (DD only)
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
       tau_srh_s            : SRH lifetime [s] (DD only); None -> no SRH
-      traps                : optional trap states
+      traps                : LEGACY TrapSpec, read by no solver; enabled=True raises (TrapSpec doc)
     """
     n_bg_m3:                     float
     eps_static:                  float

@@ -60,6 +60,28 @@ def test_sheet_levels_uniform_split():
     assert tot == pytest.approx(1e16 * 0.05 * math.sqrt(2 * math.pi), rel=1e-5)   # +-5 sigma
 
 
+def test_legacy_trapspec_enabled_refuses_and_points_to_the_working_api():
+    """materials.TrapSpec was read by nothing: TransportModel(traps=TrapSpec(enabled=True)) built and solved
+    with the trap SILENTLY ignored (user decision 2026-11-04). enabled=True now raises at construction
+    AND on later mutation (TrapSpec.__setattr__), naming TrapLevel / InterfaceTraps and the keywords that
+    work. Fails on 6595bde (no raise). enabled=False (the default) is unchanged."""
+    from dynameta.materials import TransportModel, TrapSpec
+    with pytest.raises(NotImplementedError, match="TrapLevel") as ei:
+        TrapSpec(enabled=True)
+    msg = str(ei.value)
+    for kw in ("srh_traps", "srh_trap_energy_eV", "InterfaceTraps", "interface_traps"):
+        assert kw in msg, kw
+    off = TrapSpec()                                              # default: inert, as before
+    assert off.enabled is False and off.N_trap_acceptor_m3 == 1.0e24
+    with pytest.raises(NotImplementedError, match="not implemented"):
+        off.enabled = True                                        # mutation cannot bypass it
+    assert off.enabled is False
+    off.g_trap = 2.0                                              # other fields stay writable
+    tm = TransportModel(n_bg_m3=1e23, eps_static=11.7, dos_mass_kg_of_n_m3=lambda n: 1e-31,
+                        traps=TrapSpec(enabled=False))
+    assert tm.traps.enabled is False
+
+
 def test_spec_validation():
     with pytest.raises(ValueError):
         PT.TrapLevel(energy_eV=0.1, kind="acceptor", tau_n0_s=1e-9, tau_p0_s=1e-9)   # no density
