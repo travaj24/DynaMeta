@@ -47,17 +47,24 @@ ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned befo
 from dynameta.carriers import eq_registry as _R
 from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.eq_registry import node_with_derivs as _node_with_derivs
+from dynameta.carriers.density_gradient import GAMMA_WALL   # the hard-wall gamma (2026-11-04)
 from dynameta.constants import HBAR, Q_E
 
 __all__ = ["setup_dg_quantum_correction", "setup_contact_dg", "setup_dg_hard_wall",
-           "seed_dg_from_solution", "set_dg_gamma", "dg_b_coefficient",
+           "seed_dg_from_solution", "set_dg_gamma", "dg_b_coefficient", "GAMMA_WALL",
            # D2d: bipolar density-gradient
            "setup_bipolar_dg", "setup_contact_bipolar_dg", "setup_dg_insulator_wall",
            "seed_bipolar_dg", "bipolar_dg_carriers", "DG_SRH_TERM"]
 
 
 def dg_b_coefficient(m_eff_kg: float, gamma: float = 1.0) -> float:
-    """b = gamma hbar^2 / (6 m q) [V m^2]."""
+    """b = gamma hbar^2 / (6 m q) [V m^2].
+
+    Choosing gamma (default 1): b, and with it the quantum length L_q = sqrt(b/V_t), scale as gamma
+    and sqrt(gamma). gamma = 1 is the Wigner / Ancona value for smooth potentials (bulk problems,
+    literature comparisons); GAMMA_WALL (= (3 pi/4)/I^2 = 1.6717) makes the dark space at a hard
+    insulator wall equal the exact free-gas one (oxide-bounded accumulation / inversion layers).
+    Full guidance and the measured Schrodinger-Poisson comparison: setup_bipolar_dg."""
     if not (m_eff_kg > 0.0 and gamma >= 0.0):
         raise ValueError("density-gradient: m_eff_kg > 0 and gamma >= 0 required")
     return gamma * HBAR ** 2 / (6.0 * m_eff_kg * Q_E)
@@ -123,7 +130,25 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
                                 gamma: float = 1.0) -> None:
     """Add the (QSqrtN, QLambda) variables + equations and re-point the electron continuity at
     the quantum-shifted Scharfetter-Gummel current (module header). Requires the classical
-    unipolar setup on the region first. (Bipolar regions: setup_bipolar_dg.)"""
+    unipolar setup on the region first. (Bipolar regions: setup_bipolar_dg.)
+
+    Choosing gamma (the default stays gamma = 1; user decision 2026-11-04):
+      gamma scales b = gamma hbar^2/(6 m q) -- the quantum length L_q = hbar sqrt(gamma/(6 m kT)) over
+      which electrons are pushed off a wall (dark-space width ~ sqrt(gamma)); gamma = 0 with the DG
+      equations active reduces to the classical solution.
+      * gamma = 1 -- the Wigner / Ancona high-temperature value for SMOOTH potentials. Use it for
+        bulk / smooth-potential problems (the ohmic-contact bars of validation/dg_dd_in_newton.py)
+        and to compare with the literature.
+      * GAMMA_WALL (= 1.6717) -- matches the exact free-gas dark space at a hard insulator wall
+        (gamma = 1 gives 0.7734 of it). Use it for an accumulation / inversion layer against a gate
+        oxide. The Schrodinger-Poisson comparison that supports it (setup_bipolar_dg, GATE C: excess
+        sheet +5.6 % vs +21.3 %, centroid -5.1 % vs -17.5 % for electrons) was MEASURED with the
+        bipolar DG and setup_dg_insulator_wall. This unipolar kernel is the same
+        (_install_dg_variables), but GATE C was not rerun on a unipolar region, and its own wall,
+        setup_dg_hard_wall, is EXPERIMENTAL (its dead-layer profile is unvalidated) -- use
+        setup_dg_insulator_wall for a wall.
+      * Not validated: strong inversion, degenerate Fermi-Dirac beyond GATE C's regime, 2-D/3-D
+        walls. Details: setup_bipolar_dg."""
     b_full = dg_b_coefficient(m_eff_kg, gamma)
     _install_dg_variables(device, region, u="QSqrtN", lam="QLambda", carrier="Electrons",
                           b="b_dg", b_full=b_full)
@@ -440,18 +465,55 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
     m_eff_n_kg -> (QSqrtN, QLambda, b_dg), m_eff_p_kg -> (QSqrtP, QLambdaP, b_dg_p); the other
     carrier stays classical. b = gamma hbar^2/(6 m q) per carrier (dg_b_coefficient).
 
+    Choosing gamma (gamma_n, gamma_p; the default stays 1 -- user decision 2026-11-04):
+      What it does: gamma scales b = gamma hbar^2/(6 m q), i.e. the quantum length
+      L_q = hbar sqrt(gamma/(6 m kT)) over which a carrier is pushed off a wall; the dark-space width
+      and the missing sheet charge grow as sqrt(gamma). gamma = 0 is classical drift-diffusion.
+      * gamma = 1 (default) -- the Wigner / Ancona high-temperature value, derived for SMOOTH
+        potentials. Use it for bulk / smooth-potential problems (junctions, graded doping, no hard
+        wall) and whenever you compare with the literature, which uses 1. At a hard wall it
+        under-sizes the dark space: its deficit is 0.7734 of the exact quantum free gas (GATE B).
+      * GAMMA_WALL = (3 pi/4)/I^2 = 1.6717 (density_gradient.GAMMA_WALL, re-exported here) -- the
+        gamma whose DG dark space at an impenetrable wall equals the EXACT free-gas one. It is fixed a
+        priori by that limit, not fitted. Use it for accumulation / inversion layers against a gate
+        oxide (setup_dg_insulator_wall). MEASURED against self-consistent Schrodinger-Poisson (GATE C,
+        N = 1e24 m^-3, |psi_s - psi_b| = 0.15 V accumulation, FD-consistent DD; electrons / holes):
+            excess sheet density   gamma = 1: +21.3 % / +17.3 %    GAMMA_WALL: +5.6 % / +4.0 %
+            sheet centroid         gamma = 1: -17.5 % / -14.7 %    GAMMA_WALL: -5.1 % / -3.7 %
+            peak depth (x SP)      gamma = 1: 0.67 / 0.68          GAMMA_WALL: 0.84 / 0.82
+            (classical DD: sheet +177 % / +125 %, centroid -64 % / -56 %, peak AT the wall)
+        and at N = 1e23, 0.075 V GAMMA_WALL is within 1.5 % for both carriers.
+      * Not validated: STRONG INVERSION (the coupled Newton converges only up to weak inversion in
+        1-D: 0.60 V on 3e23 m^-3 p-type converges, 0.70 V fails -- so the "inversion" use of
+        GAMMA_WALL is the same wall physics, inferred, not measured); DEGENERATE Fermi-Dirac beyond
+        GATE C's regime (with fd_enhancement gamma also absorbs the degeneracy calibration; GATE C
+        peaks at c/N_c = 0.37-0.59 and lands within 5.6 %, a regime result, not a derivation);
+        GAMMA_WALL in a wall-free smooth-potential problem; 2-D / 3-D (only 1-D oracles).
+      Each carrier takes its own gamma; for one gate oxide pass GAMMA_WALL to both.
+      Doc: docs/audit/2026-11-03-devsim-bipolar-density-gradient.md (GATE B, GATE C, Limits).
+
     Each carrier gets the shared kernel (_install_dg_variables) and its continuity equation is
     re-pointed at the quantum-shifted SG flux (ElectronCurrentDG / HoleCurrentDG) built on the
     region's own quasi-field (vdiff_g / vdiff_gp: FD g-factor, BGN band edges and all -- header
     block above). The generation composites, time terms and BTBT slots of the equation are kept.
 
-    quantum_srh (default True): the built-in SRH channel's intrinsic level follows the quantum band
-    edges, n_i'^2 -> n_i'^2 exp((Lambda_n + Lambda_p)/V_t) (n1', p1' by the square root;
-    physics_traps.srh_reference_densities(scale=...)), entered through the ONE additive mechanism as
-    RTerm_dgsrh = U_SRH(quantum) - USRH (+ its pair rate). Without it U_SRH != 0 in EQUILIBRIUM
-    wherever Lambda != 0 (n p = n_i^2 e^((Ln+Lp)/V_t) there), i.e. detailed balance fails in the
-    quantum dark space. Only the BUILT-IN channel is corrected: Auger / radiative / trap levels /
-    interface traps / BTBT keep the classical n_i reference (doc: Limits).
+    quantum_srh (default True; kept by user decision 2026-11-04):
+      What it does: the built-in SRH channel's reference follows the quantum band edges. DG
+      equilibrium is n p = n_i^2 exp((Lambda_n + Lambda_p)/V_t), not n_i^2, so the SRH kernel is
+      re-referenced n_i'^2 -> n_i'^2 exp((Lambda_n + Lambda_p)/V_t) (n1', p1' by the square root;
+      physics_traps.srh_reference_densities(scale=...)), entered through the ONE additive mechanism as
+      RTerm_dgsrh = U_SRH(quantum) - USRH (+ its pair rate, so the noise inventory sees it). U_SRH
+      then vanishes in equilibrium everywhere: DG equilibrium is detailed-balance-consistent.
+      MEASURED (GATE E, inverted MOS, p-type 3e23 m^-3, psi_s - psi_b = 0.60 V, Lambda = -27.6 V_t at
+      the wall): max |phi_n| = 3.3e-16 V, max |phi_p| = 5.6e-17 V with it. With quantum_srh=False the
+      classical reference generates pairs in the dark space in equilibrium and the quasi-Fermi levels
+      are no longer flat: max |phi_n| = 6 mV off the wall node, max |phi_p| = 62 V at the wall node
+      (the doc's GATE E table; the classical reference is meaningless there).
+      When to turn it off: only to reproduce a code / paper that keeps the classical n_i^2 reference
+      under DG (a like-for-like comparison); never for physics.
+      Only the BUILT-IN channel is corrected: Auger / radiative / trap levels / interface traps /
+      BTBT keep the classical n_i reference (not in detailed balance inside the dark space; not
+      gated -- doc: Limits).
 
     Returns the tuple of DG carriers installed."""
     if m_eff_n_kg is None and m_eff_p_kg is None:

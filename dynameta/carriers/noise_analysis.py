@@ -48,7 +48,8 @@ is called, and it only READS the device (its DC operating point and models are l
      2(G + R) = 4 R_eq = 4 kT x (the linear-response GR conductance), so the GR source is exactly
      Nyquist-consistent too. An external generation G_ext (BipolarOptions.generation_m3s) is
      counted as a Poisson process (photogeneration shot noise) unless external_generation_shot=
-     False.
+     False (default True, kept by user decision 2026-11-04; see noise_spectrum's docstring for
+     when to switch it off).
      v0.14 integration: the sources come from the ONE additive term mechanism of the region
      (physics_bipolar_dd.recombination_terms): the base SRH channel (physics_traps.srh_rate_expr(
      pair=True)) plus the pair rate PTerm_* every term carries -- Auger, radiative, external G, each
@@ -436,7 +437,26 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     ("V1.I": short-circuit terminal current noise S_I) or a circuit node voltage (open-circuit S_V
     of a CURRENT-driven contact). `regions` defaults to every region carrying continuity equations.
     `mechanisms` picks the local sources (MECHANISMS); "hooge_n"/"hooge_p" are added automatically
-    when hooge_alpha (the dimensionless Hooge parameter) is given. The DC state is not modified."""
+    when hooge_alpha (the dimensionless Hooge parameter) is given. The DC state is not modified.
+
+    external_generation_shot (default True; kept by user decision 2026-11-04). Applies only to a
+    region carrying an external generation G_ext (BipolarOptions.generation_m3s, the additive term
+    bipolar_options.GEXT_TERM) and only through the "gr" mechanism.
+      True  -- G_ext is a POISSON process: every generated pair is an independent random event (the
+               photons of a coherent or thermal beam absorbed one at a time), so it contributes the
+               GR source K = 2 G_ext [(m^-3 s^-1)^2 m^3/Hz], fully correlated between the electron
+               and hole equations like every pair process. A photodiode that collects every pair then
+               shows the photocurrent shot noise S_I = 2 q I_ph on top of its dark noise. This is the
+               physical choice whenever G_ext stands for real optical absorption.
+      False -- G_ext is DETERMINISTIC: it still sets the DC operating point (n, p, and through them
+               every other source), but adds no noise of its own. Set it when G_ext is a modelling
+               device rather than a photon stream -- a prescribed drive or injection rate, a ramp /
+               continuation aid, a stand-in for a noiseless pump -- or when the source statistics are
+               accounted for elsewhere (sub-Poissonian light, a separate RIN term), so they are not
+               counted twice.
+    Not validated: no oracle in tests/ or validation/ exercises G_ext noise (the 2 q I_ph limit is the
+    textbook expectation, not a measured gate; docs/audit/2026-11-03-devsim-noise.md, open question
+    1)."""
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=np.float64))
     if freqs.size == 0 or np.any(~np.isfinite(freqs)) or np.any(freqs <= 0.0):
         raise ValueError("noise_spectrum: frequencies must be finite and > 0 Hz")
@@ -541,7 +561,10 @@ def terminal_noise(device: str, frequencies, *, source_name: str = "V1", v_ac: f
     """S_I(f) at the voltage-driven terminal `source_name` (noise_spectrum on '<source>.I'), the
     ssac admittance Y(f) = G + i omega C at the same operating point (ac_analysis.ssac_admittance),
     and the open-circuit S_V = S_I / |Y|^2 (a linear two-terminal's Norton -> Thevenin). Extra
-    keywords go to noise_spectrum."""
+    keywords go to noise_spectrum -- including external_generation_shot (default True: an external
+    generation G_ext is Poisson photogeneration and adds its shot noise 2 G_ext to the GR source;
+    False: G_ext is a deterministic drive that only sets the operating point -- noise_spectrum's
+    docstring says when to use which)."""
     from dynameta.carriers.ac_analysis import ssac_admittance
     sn = noise_spectrum(device, frequencies, output_node="{}.I".format(source_name), **kw)
     f, C, G = ssac_admittance(sn.frequencies, source_name=source_name, v_ac=v_ac)

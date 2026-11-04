@@ -27,9 +27,12 @@ the equilibrium accumulation at +1V); `validation/devsim_3d_mesh.py` (D2c: exact
 Gauss, 3-D == 1-D on the same z-lines).
 
 MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
-right-angled Kuhn tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
-(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). The gmsh paths below survive as
-mesher="gmsh" (legacy, UnreliableResultWarning).
+PATH (Kuhn) tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
+(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). It is the PATH structure that makes them
+exact, not right angles alone (correction 2026-11-04, doc section 10: the trirectangular corner tet is
+right-angled and DEVSIM gives it 2x its volume); tests/test_devsim_3d_mesh.py pins that every emitted tet
+is a path tet. The gmsh paths below survive as
+mesher="gmsh" (legacy, UnreliableResultWarning; kept only to reproduce pre-v0.14 numbers, removed in v0.15).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -64,6 +67,8 @@ reads MSH 2.2.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -159,11 +164,14 @@ class Stacked3DSpec:
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
     # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
-    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (right-angled) tetrahedra:
+    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (PATH) tetrahedra:
     # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
-    # every circumcentric piece >= 0). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
-    # reproduce old numbers: DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual pieces, so
-    # on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
+    # every circumcentric piece >= 0 -- a property of path tets, not of right-angled tets in general). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
+    # reproduce old numbers and REMOVED in v0.15 (user decision 2026-11-04; its warning stays an
+    # UnreliableResultWarning, not a DynaMetaDeprecationWarning: the numbers it returns are wrong, which
+    # is what that category means, while the deprecation class is for renamed spellings that still give
+    # the same answer -- docs/audit/2026-11-04-v0.14-user-decisions.md). DEVSIM 2.11 sums the MAGNITUDES
+    # of each tet's circumcentric dual pieces, so on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
     # the D1c gate-G2 cap) and integrated charge is ~20 % wrong (docs/audit/2026-11-03-devsim-3d-mesh.md).
     mesher:          str = "tensor"
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
@@ -279,20 +287,18 @@ class Stacked3DSpec:
         phi0_semi = _phi_c0(self.n_bg_m3, self.dos_mass_kg)
         out = {"semi": (phi0_semi, 0.0)}
         for (nm, mat, _thk, _eps, nbg, chi, _m) in self.extra_semiconductor_entries():
-            if chi is not None and self.chi_semi_eV is not None:
-                chis = {"semi": float(self.chi_semi_eV), nm: float(chi)}
-            elif mat == self.semi_material:
-                chis = {"semi": 0.0, nm: 0.0}                 # same material: no band offset
-            else:
-                raise ValueError(
-                    "Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
-                    "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
-                    "needs BOTH electron affinities (chi_semi_eV and the entry's 6th field chi_eV) -- there "
-                    "is no neutral default for a heterojunction band offset (audit S1-9).".format(
-                        nm, mat, self.semi_material))
-            # the ONE Anderson-rule implementation (v0.14.0; same operation order -> bit-identical)
+            # the ONE Anderson-rule implementation, same-material rule included (v0.14.0; same operation
+            # order -> bit-identical: a same-material region gets d_chi = 0.0 exactly as the {0.0, 0.0}
+            # this method used to pass)
             out[nm] = HJ.anderson_alignment(
-                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))}, chis, "semi")[nm]
+                {"semi": phi0_semi, nm: _phi_c0(nbg, self.semiconductor_dos_mass_kg(nm))},
+                {"semi": self.chi_semi_eV, nm: chi}, "semi",
+                materials={"semi": self.semi_material, nm: mat},
+                hint="Stacked3DSpec: extra semiconductor '{}' ({}) is a different material from the primary "
+                     "'semi' ({}); its equilibrium built-in potential is the work-function difference, which "
+                     "needs BOTH electron affinities -- set chi_semi_eV and the entry's 6th field chi_eV (from "
+                     "a Design: TransportModel.chi_eV of both materials, which defaults to None since v0.14) "
+                     "(audit S1-9).".format(nm, mat, self.semi_material))[nm]
         return out
 
     def __post_init__(self):
@@ -492,8 +498,11 @@ class Stacked3DSpec:
                     Li.background_material))
             # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
             # the bands by the work-function difference (Stacked3DSpec.band_alignment)
+            # v0.14 (user decision 2026-11-04): chi_eV defaults to None -- carried through as None so
+            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
-                                float(tri.eps_static), float(tri.n_bg_m3), float(tri.chi_eV),
+                                float(tri.eps_static), float(tri.n_bg_m3),
+                                (float(tri.chi_eV) if tri.chi_eV is not None else None),
                                 float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
@@ -554,7 +563,7 @@ class Stacked3DSpec:
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if extra_semis else None),
+                    chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), **bip)
 
@@ -651,6 +660,47 @@ def _write_msh22(path, P, groups3, groups2) -> None:
         f.write("\n".join(lines))
 
 
+def _gmsh_lists(P, groups3, groups2):
+    """The SAME mesh as _write_msh22, as DEVSIM's in-memory create_gmsh_mesh arguments (coordinates: flat
+    x, y, z; elements: flat [type (2 triangle, 3 tetrahedron), physical index, node indices...] in the
+    file's order -- triangles per 2-D group, then tets per 3-D group; physical_names in the file's tag
+    order). Coordinates pass as the same doubles the file writes with repr (exact round-trip), so the
+    device is bit-identical to the file route (tests/test_devsim_3d_mesh.py gate)."""
+    names = list(groups2) + list(groups3)
+    idx = {n: i for i, n in enumerate(names)}
+    coords = [float(v) for v in np.asarray(P, dtype=np.float64).reshape(-1)]
+    elements = []
+    for typ, groups in ((2, groups2), (3, groups3)):
+        for n, conn in groups.items():
+            for row in np.asarray(conn, dtype=int):
+                elements += [typ, idx[n]] + [int(v) for v in row]
+    return coords, elements, names
+
+
+def create_mesh_in_memory(mesh: str, P_m, groups3, groups2) -> None:
+    """ds.create_gmsh_mesh for (P [m], {region: tets}, {surface: triangles}) WITHOUT a file -- the route
+    the builder's default takes (no shared path to race on, and nothing for DEVSIM to keep open: on
+    Windows DEVSIM 2.11.2 never closes a gmsh FILE it read). For hand-built fixtures (tests,
+    validation) that use the Kuhn helpers below; region / contact / interface calls follow as usual."""
+    coords, elements, names = _gmsh_lists(P_m, groups3, groups2)
+    ds.create_gmsh_mesh(mesh=mesh, coordinates=coords, elements=elements, physical_names=names)
+
+
+def kuhn_bar_mesh(mesh: str, lengths_nm, h_nm: float, *, region: str = "semi",
+                  contacts=("left", "right")) -> None:
+    """A uniform LX x LY x LZ [nm] bar on the exact Kuhn-tensor mesh (cells of side <= h_nm, 6 path tets
+    each), metre coordinates, with the two x-end faces as gmsh surface groups contacts[0] (x = 0) and
+    contacts[1] (x = LX); loaded in memory (create_mesh_in_memory). The caller adds the region / contacts
+    / finalize_mesh. Shared by the 3-D resistor-type fixtures (validation/carriers_3d_resistor.py,
+    dd_field_mobility.py, devsim_noise.py) so none of them meshes with gmsh or writes a fixed file."""
+    ax = tuple(_graded_axis([0.0, float(ln)], [], float(h_nm), float(h_nm)) for ln in lengths_nm)
+    P, T, _cell = _kuhn_tets(*ax)
+    rid = np.zeros(tuple(len(a) - 1 for a in ax), dtype=int)
+    tri = {contacts[0]: _face_triangles(ax, 0, _cell_faces(rid, 0, "bottom", 0), plus=False),
+           contacts[1]: _face_triangles(ax, 0, _cell_faces(rid, 0, "top", 0), plus=True)}
+    create_mesh_in_memory(mesh, P * 1e-9, {region: T}, tri)
+
+
 class Devsim3DEquilibrium:
     """A 3D-DEVSIM CarrierSolver (equilibrium) over a Stacked3DSpec. Implements the
     `regions()` + `solve(bias)` CarrierSolver Protocol, emitting CarrierField(ndim=3).
@@ -664,8 +714,23 @@ class Devsim3DEquilibrium:
         self.spec = spec
         self.mesh_name = mesh_name
         self.device = device_name
-        self.msh_path = msh_path or os.path.join(
-            os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
+        # msh_path (user decision 2026-11-04; docs/audit/2026-11-04-v0.14-user-decisions.md, task 7). It
+        # defaulted to ONE FIXED file, ~/.dynameta/_devsim3d.msh, shared by every process and every build.
+        # MEASURED 2026-11-04 (Windows, DEVSIM 2.11.2), two processes building different 3-D devices
+        # with the default, 100 builds each: one build came back with the OTHER process's mesh (wrong node
+        # count) and 199 of 200 died with "DEVSIM FATAL"; sequential builds in one process were fine.
+        # Also measured: create_gmsh_mesh(file=) never closes the file -- it cannot be deleted after
+        # finalize_mesh, delete_device or delete_mesh (WinError 32; pure-devsim repro in the doc), so a
+        # per-build temporary FILE could not be cleaned up in-process on Windows.
+        # Now: an explicit msh_path is written, read and kept exactly as before; the default (None)
+        # hands the tensor mesh to DEVSIM IN MEMORY (create_gmsh_mesh(coordinates=, elements=,
+        # physical_names=) -- no file at all; bit-identical to the file route, gated) and gives the legacy
+        # gmsh mesher a fresh tempfile.mkdtemp directory per build (removed after the read where the OS
+        # allows it; on Windows DEVSIM's open handle keeps it until the process exits).
+        self.msh_path = msh_path
+        self._last_msh_path: Optional[str] = None     # the file the last build wrote (diagnostics)
+        self._msh_file: Optional[str] = msh_path      # the file the _build_mesh* writers write (a direct
+                                                      # _build_mesh() call needs an explicit msh_path)
         self._built = False
         s = spec
         # the emitted CarrierField region is the GATE-ADJACENT semiconductor (where accumulation forms):
@@ -688,20 +753,44 @@ class Devsim3DEquilibrium:
                             bbox_m=(0.0, s.lateral_m, 0.0, s.lateral_m, *self._z_semi),
                             ndim=3)]
 
-    def build_device(self) -> None:
-        self._build_mesh()                                      # sets _mesh_regions, _iface_pairs, _top_diel
-        ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
-        s = self.spec
-        for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
-            ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
-                              name="gate", material="metal")     # gate on the topmost (stack) dielectric
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
-                              name="body", material="metal")
-        for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
-            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
-        ds.finalize_mesh(mesh=self.mesh_name)
+    def _create_mesh_device(self) -> None:
+        """Build the mesh, hand it to DEVSIM (regions, contacts, interfaces) and create the device.
+        msh_path given: the file is written there, read, and kept (unchanged behaviour). msh_path None
+        (default): the tensor mesh goes to DEVSIM in memory (no file); the legacy gmsh mesher writes a
+        per-build tempfile.mkdtemp file, removed afterwards where the OS allows (__init__ comment)."""
+        tmpdir = None
+        path = self.msh_path
+        in_memory = path is None and self.spec.mesher == "tensor"
+        if path is None and not in_memory:
+            tmpdir = tempfile.mkdtemp(prefix="dynameta_devsim3d_{}_".format(os.getpid()))
+            path = os.path.join(tmpdir, "mesh.msh")
+        self._last_msh_path = path                              # None for the in-memory route
+        self._msh_file = path                                   # what the _build_mesh* writers write
+        try:
+            self._build_mesh()                                  # sets _mesh_regions, _iface_pairs, _top_diel
+            if in_memory:
+                coords, elements, names = _gmsh_lists(*self._mesh_data)
+                ds.create_gmsh_mesh(mesh=self.mesh_name, coordinates=coords, elements=elements,
+                                    physical_names=names)
+            else:
+                ds.create_gmsh_mesh(mesh=self.mesh_name, file=path)
+            for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
+                ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
+                                  name="gate", material="metal")     # gate on the topmost (stack) dielectric
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
+                                  name="body", material="metal")
+            for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
+                ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
+            ds.finalize_mesh(mesh=self.mesh_name)
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+
+    def build_device(self) -> None:
+        self._create_mesh_device()
+        s = self.spec
         if s.extended_precision:                    # BEFORE any model: DEVSIM types models at creation
             XP.enable(self.device)
         self._dd = (s.physics == "drift_diffusion")
@@ -1006,14 +1095,15 @@ class Devsim3DEquilibrium:
         warnings.warn(
             "Stacked3DSpec(mesher='gmsh'): the unstructured gmsh mesh has non-well-centred tetrahedra, on "
             "which DEVSIM 2.11's 3-D node volumes over-count (MEASURED sum NodeVolume 1.20-1.52 x the region "
-            "volume) and integrated charge is ~20 % wrong. Kept only to reproduce pre-v0.14 numbers; use "
-            "mesher='tensor' (docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
+            "volume) and integrated charge is ~20 % wrong. mesher='gmsh' is kept ONLY to reproduce pre-v0.14 "
+            "numbers and will be REMOVED in v0.15; use mesher='tensor', the default "
+            "(docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
         if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
             return self._build_mesh_incl()
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -1092,25 +1182,31 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)     # nm -> metre
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()
 
     def _build_mesh_tensor(self) -> None:
         """D2c (v0.14.0): the DEFAULT 3-D mesh -- a graded tensor-product grid split into Kuhn tetrahedra,
-        written as MSH 2.2 (metres) for create_gmsh_mesh. Same region / contact / interface names and the
+        kept as arrays (_mesh_data, handed to DEVSIM in memory) and written as MSH 2.2 (metres) only for an
+        explicit msh_path. Same region / contact / interface names and the
         same build_device hand-off (_mesh_regions, _iface_pairs, _top_diel) as the gmsh builders.
 
         WHY (MEASURED, docs/audit/2026-11-03-devsim-3d-mesh.md): DEVSIM 2.11's 3-D ElementEdgeCouple is
         0.5 (|v0 x v1| + |v0 x v2|) per tet edge (TetrahedronEdgeCouple.cc: v0 = circumcentre - edge
         midpoint, v1/v2 = face circumcentres - circumcentre), the MAGNITUDES of the circumcentric dual
         pieces, and ElementNodeVolume = couple * EdgeLength / 6 feeds EdgeNodeVolume and NodeVolume. On a
-        tet whose circumcentre is outside it the signed pieces partly cancel but the magnitudes add, so the
-        volumes over-count. The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
+        tet that is not (closed) well-centred some signed pieces are negative and partly cancel, but the
+        magnitudes add, so the volumes over-count. That includes tets whose circumcentre is INSIDE them but
+        that have an obtuse face (one over-counts 4.53x; correction 2026-11-04, doc section 10), not only
+        tets with the circumcentre outside. DEVSIM 2-D has the same construction (TriangleEdgeCouple.cc:74:
+        one obtuse triangle gives 11x); the 2-D builder is unaffected (rectilinear right triangles). The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
         oxide volume on the G2 cap); a Delaunay mesh does NOT help (gmsh Optimize=0: 0 of 17814 oxide faces
         non-Delaunay, still 1.289 x), and element assembly does not either (it uses the same couples).
-        Every Kuhn tet of a box cell is right-angled with ALL FOUR faces right triangles, so every
-        circumcentre (the cell centre, on the tet's main diagonal) and face circumcentre (a hypotenuse
-        midpoint) lies on the tet boundary: each piece is >= 0, magnitude == signed, and the volumes /
+        Every Kuhn (path) tet of a box cell has ALL FOUR faces right triangles and its circumcentre (the
+        cell centre) at the midpoint of its main-diagonal edge, so every face circumcentre (a hypotenuse
+        midpoint) and the tet circumcentre lie on the tet boundary: each piece is >= 0, magnitude == signed
+        (right angles alone do NOT suffice: the trirectangular corner tet has an equilateral face and its
+        circumcentre outside -- DEVSIM: exactly 2x), and the volumes /
         couples are the exact box-method ones (sum NodeVolume / region volume - 1 <= 1e-14; the axis
         edges carry the rectilinear dual areas, the face/body diagonals carry 0). A laterally uniform
         stack is then laterally invariant to round-off and reduces to the 1-D discretization on the same
@@ -1194,8 +1290,10 @@ class Devsim3DEquilibrium:
         self._iface_pairs = iface_pairs
         self._top_diel = stack[-1][0]
         self._mesh_axes_m = tuple(a * 1e-9 for a in ax)        # diagnostics / tests
-        os.makedirs(os.path.dirname(os.path.abspath(self.msh_path)), exist_ok=True)
-        _write_msh22(self.msh_path, P * 1e-9, groups3, tri)
+        self._mesh_data = (P * 1e-9, groups3, tri)             # the in-memory route (_create_mesh_device)
+        if self._msh_file is not None:                          # an explicit msh_path: the file, as before
+            os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
+            _write_msh22(self._msh_file, P * 1e-9, groups3, tri)
 
     def _build_mesh_incl(self) -> None:
         """Adjacency-based 3D OCC build supporting lateral material INCLUSIONS (centered pillars in a
@@ -1208,7 +1306,7 @@ class Devsim3DEquilibrium:
         from collections import defaultdict
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -1311,5 +1409,5 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()

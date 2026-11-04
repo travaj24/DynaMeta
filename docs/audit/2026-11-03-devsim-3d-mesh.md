@@ -5,15 +5,19 @@ e46bd25). DEVSIM 2.11.2, gmsh 4.15.2, box A.
 
 **Bottom line.**
 - **Root cause (read in DEVSIM's source, reproduced in numpy to 5 digits).** DEVSIM 2.11's 3-D
-  `ElementEdgeCouple` adds the MAGNITUDES of each tetrahedron's circumcentric dual pieces. On a tet whose
-  circumcentre lies outside it, the signed pieces partly cancel, but their magnitudes add. gmsh's
-  tetrahedra are 42-57 % such tets, so every 3-D volume and coupling was inflated (sum NodeVolume =
+  `ElementEdgeCouple` adds the MAGNITUDES of each tetrahedron's circumcentric dual pieces. On a tet that
+  is not (closed) well-centred, some signed pieces are negative and partly cancel, but their magnitudes
+  add. That is not only a tet whose circumcentre lies outside it: a tet with its circumcentre INSIDE but
+  an obtuse face over-counts too (4.53x on one such tet; correction 2026-11-04, section 10). gmsh's
+  tetrahedra are 42-57 % non-well-centred tets, so every 3-D volume and coupling was inflated (sum NodeVolume =
   1.196 x the semiconductor, 1.293 x the oxide on the D1c G2 cap).
 - **"Make the mesh Delaunay" does not fix it.** A gmsh mesh with 0 non-Delaunay faces still gives
   1.289 x. **Element assembly does not fix it either**: it uses the same couples.
 - **The fix is a mesh on which DEVSIM's formula is exact.** `Stacked3DSpec.mesher="tensor"` is now the
   default. It is a graded tensor-product grid through every layer, patch and inclusion boundary, with
-  each box split into the 6 right-angled Kuhn tetrahedra. Every circumcentric piece is then >= 0.
+  each box split into the 6 Kuhn (PATH) tetrahedra. Every circumcentric piece of a path tet is >= 0.
+  Being right-angled is not what makes them exact: the trirectangular corner tet (0,0,0), (1,0,0),
+  (0,1,0), (0,0,1) is right-angled and DEVSIM gives it exactly 2x its volume (section 10).
   Volumes and couplings are exact to 9e-16 on all five builder topologies, and every equation term
   (node, edge, element, interface) sees the same exact geometry.
 - **Gates.** All pass now, and all fail on e46bd25:
@@ -57,7 +61,11 @@ inherit the magnitude sum.
 **Consequence.** The box method needs a SIGNED circumcentric (Voronoi) partition. That partition is
 exact for any mesh, because the signed pieces of a tet sum to its volume. DEVSIM's unsigned sum is exact
 only when no piece is negative, that is, when every tet is "closed well-centred": its circumcentre lies
-in the closed tet, and each face circumcentre lies in its face.
+in the closed tet, and each face circumcentre lies in its face. (Correction 2026-11-04, section 10: the
+circumcentre lying inside the tet is NOT enough -- an obtuse face puts a face circumcentre outside its
+face, and that tet still over-counts, 4.53x on the worst one found.) DEVSIM 2-D has the same
+construction (`TriangleEdgeCouple.cc:74`, unsigned midpoint-to-circumcentre distance, with a 2013 TODO):
+one obtuse triangle gives 11x its area.
 - Delaunay is NOT sufficient. A Delaunay mesh guarantees a non-negative ASSEMBLED Voronoi coupling per
   edge (Bank and Rose, SIAM J. Numer. Anal. 24, 777 (1987); Selberherr, *Analysis and Simulation of
   Semiconductor Devices*, Springer 1984, ch. 6). The per-element pieces can still be negative, and
@@ -65,8 +73,11 @@ in the closed tet, and each face circumcentre lies in its face.
 - The DEVSIM manual says nothing on Delaunay or 3-D couples (https://devsim.net/models.html, Tables
   5.1-5.3).
 - `element_model` / `ElementEdgeCouple` / `ElementNodeVolume` assembly is therefore NOT an escape: it
-  uses the same unsigned couples. A custom signed (P1 cotangent) coupling would be exact in volume, but
-  its couplings go negative on 43-74 % of these gmsh tets (table below). That breaks the
+  uses the same unsigned couples. A custom P1-FEM (cotangent) coupling would be exact in volume, but
+  its couplings go negative on 43-74 % of these gmsh tets (table below). (Correction 2026-11-04: in 3-D
+  the P1-FEM cotangent couple is NOT the signed circumcentric couple edge by edge -- on a Kuhn tet they
+  are 1/6 vs 1/8 on the same edge; both partition the tet volume exactly. A signed CIRCUMCENTRIC coupling
+  is the other volume-exact alternative, equal to the Voronoi facet areas on a Delaunay mesh; section 10.) That breaks the
   Scharfetter-Gummel M-matrix property and the positivity of the carrier densities.
 
 ### 1.2 Measured (`validation/devsim_3d_mesh.py` building blocks; the G2 cap: 12 x 12 nm, Si 30 nm / SiO2 8 nm, mesh_min 0.5 nm)
@@ -91,7 +102,8 @@ Notes on the table:
 - The excess is set by the fraction of non-well-centred tets, not by mesh size. Refinement does not
   remove it, which matches D1c's 0.79 / 0.79 / 0.77 G2 ratios.
 - No `EdgeCouple` is ever negative (magnitudes), which is why D1c saw "no negative EdgeCouple".
-- The P1-cotangent column is the volume-exact element alternative, with its negative couplings.
+- The P1-cotangent column is one volume-exact element alternative, with its negative couplings. It is
+  P1-FEM, not the signed circumcentric partition (they differ edge by edge in 3-D; section 10).
 - Every gmsh variant leaves the volume excess between 1.20 and 1.52.
 
 ### 1.3 Why pointwise psi and n survived but integrated charge did not
@@ -139,6 +151,10 @@ So (c) is available exactly. That choice is `Stacked3DSpec.mesher="tensor"`, the
   - The tet circumcentre is the box centre, which is the midpoint of the tet's main-diagonal edge.
   - Each face circumcentre is a hypotenuse midpoint.
   - So every circumcentric piece is >= 0 (many are exactly 0), and magnitude equals signed.
+  - This is a property of the PATH structure, not of right angles: the corner tet of a cube, also
+    right-angled, has an equilateral face and its circumcentre outside, and DEVSIM gives it 2x
+    (section 10). `tests/test_devsim_3d_mesh.py` now pins that every tet the mesher emits, over the five
+    validation topologies, is a path tet.
   - The assembled couples are the rectilinear box-method ones: an axis edge carries its dual rectangle,
     and face and body diagonals carry 0.
   - The split of each box face along its min -> max diagonal is consistent between neighbours, so the
@@ -343,18 +359,83 @@ F_1/2), which took 151-153 s on both meshers back to back.
 - **Contacts on an inclusion.** An inclusion reaching the top or bottom face is not contacted. DEVSIM
   requires contact nodes on the contact's region, and the gmsh path got away with it only on coarse
   faces.
-- **Shared mesh file.** `msh_path` defaults to `~/.dynameta/_devsim3d.msh`, shared by every concurrent
-  process. This is pre-existing and unchanged. Concurrent 3-D builds on one box should pass their own
-  `msh_path`.
+- **Shared mesh file.** FIXED 2026-11-04 (docs/audit/2026-11-04-v0.14-user-decisions.md, task 7):
+  `msh_path` defaulted to `~/.dynameta/_devsim3d.msh`, shared by every concurrent process; the default
+  tensor mesh now reaches DEVSIM in memory (no file), bit-identical to the file route.
 
 ## 8. Open questions
 
-1. **Keep `mesher="gmsh"`?** It is kept, with a warning, for reproducing pre-v0.14 numbers. It could be
-   removed in v0.15, which would also drop gmsh from the default runtime path.
+1. **Keep `mesher="gmsh"`?** DECIDED 2026-11-04: kept in v0.14 only to reproduce pre-v0.14 numbers
+   (the warning says so) and removed in v0.15.
 2. **Upstream.** Report the magnitude sum in `TetrahedronEdgeCouple.cc` to DEVSIM. With signed pieces,
    volumes are exact on any mesh, although couplings can still go negative on non-Delaunay meshes.
 3. **2-D impact ionization.** Should 2-D move to the same element reconstruction? It would be isotropic
    for 2-D current patterns, but the 2-D pins would move. Left unchanged.
+
+## 10. Corrections and the fixture audit (2026-11-04)
+
+A separate verification (2026-11-04) read DEVSIM's source and ran pure-devsim reproductions. Evidence
+(session scratch, not in the repo): `C:\Users\Tesla\AppData\Local\Temp\claude\C--Users-Tesla\2446cd33-1dc4-4fe3-b419-8eafba706074\scratchpad\devsim_verify\`
+`DRAFT_upstream_issue.md` (the draft upstream report), `repro_inside_cc.py/.out`, `repro_volumes.py/.out`,
+`repro_2d.py/.out`, `issue_minimal.py/.out`, `repro_consequence.py/.out`, `geom_ref.py` (numpy reference:
+unsigned, signed and P1-FEM couples).
+
+**Confirmed.** DEVSIM sums UNSIGNED circumcentric pieces in 3-D (`TetrahedronEdgeCouple.cc:99`) AND in
+2-D (`TriangleEdgeCouple.cc:74`, with a 2013 TODO), unchanged since the first commit.
+
+**Three corrections to this note.**
+1. **The trigger is a NOT WELL-CENTRED element, not just "circumcentre outside".** A tet whose
+   circumcentre is inside it (barycentrics 0.151 / 0.489 / 0.037 / 0.323) but which has an obtuse face
+   gives DEVSIM sum NodeVolume = 4.53x its volume (`repro_inside_cc.out`); of 1526 random inside-
+   circumcentre tets, 541 over-count (`search_inside_cc.out`). Section 1.1's "closed well-centred"
+   condition was right; the bottom line and the `devsim_3d` docstrings that said "circumcentre outside"
+   are corrected.
+2. **PATH (Kuhn) tets are exact; not every right-angled tet is.** The trirectangular corner tet
+   (0,0,0), (1,0,0), (0,1,0), (0,0,1) gives exactly 2.0x; the 6 Kuhn tets of a cube give 1.0000, the 5-tet
+   (Delaunay) cube split 1.667x (`issue_minimal.out`). "Right-angled Kuhn tetrahedra" is now "path
+   tetrahedra" throughout, and a test pins that the mesher emits only path tets.
+3. **P1-FEM cotangent couples are NOT the circumcentric couples edge by edge in 3-D** (Kuhn tet: 1/6 vs
+   1/8 on the same edge, `repro_volumes.out` "sgn_vs_fem_couple 0.25"). Both partition the volume
+   exactly, which is all section 1.1 / 1.2 used them for; the "signed (P1 cotangent)" wording is
+   corrected. (In 2-D they coincide.)
+
+**DEVSIM 2-D has the same defect** (one obtuse triangle 11.1x; a Delaunay pair with an obtuse triangle
+1.71x, `repro_2d.out`). **DynaMeta's 2-D builder is unaffected:** `LayeredDevsimBuilder` uses DEVSIM's
+rectilinear `create_2d_mesh`, which splits each rectangle into two right triangles (no piece < 0).
+MEASURED on the D1a GaAs / AlGaAs stack (graded 0.5 -> 4 nm): sum NodeVolume / geometric area - 1 =
+0, 0, 0, 2.2e-16 on its four regions, every triangle non-obtuse -- pinned by
+`tests/test_devsim_3d_mesh.py::test_tensor_mesher_emits_only_path_tets_and_the_2d_builder_only_non_obtuse_triangles`.
+
+**Fixture audit (every DEVSIM mesh built outside `Stacked3DSpec(mesher="tensor")` and the 2-D builder;
+sum NodeVolume / geometric volume per region, the geometric volume from the region's own elements).**
+
+| fixture | mesh | before | after | action |
+|---|---|---|---|---|
+| `validation/dd_field_mobility.py` | gmsh 3-D bar, 5-8 nm | **1.1506** | 1 (exact) | moved to `devsim_3d.kuhn_bar_mesh`; gates re-derived (below) |
+| `validation/devsim_noise.py::unipolar_3d_resistor` (test A4) | gmsh 3-D bar, 14-20 nm | **1.2249** | 1 (exact) | moved to `kuhn_bar_mesh`; A4 now also gates G_dc = sigma A/L |
+| `validation/carriers_3d_resistor.py` default | Kuhn (file) | 1 | 1 | in memory (`kuhn_bar_mesh`) -- no fixed `~/.dynameta/_resistor_tensor.msh` |
+| `validation/carriers_3d_resistor.py --gmsh` | gmsh (legacy, intentional) | 1.1483 | 1.1483 | kept; per-run temp file |
+| `validation/carriers_3d.py` default / `--gmsh` | Kuhn / gmsh (legacy, intentional) | 1 / 1.2517-1.2843 | same | per-run temp file (was `validation/_moscap3d.msh`) |
+| `tests/test_devsim_3d_mesh.py::_bipolar_column` | Kuhn (file) | 1 | 1 | in memory -- no fixed `~/.dynameta/_d2c_<dev>.msh` |
+| `tests/test_devsim_3d_mesh.py` gmsh legacy cases, `validation/devsim_3d_mesh.py` M2 / M6 | gmsh | > 1.1 | same | intentional (they gate the defect); tmp paths |
+| `tests/test_devsim_tunneling.py::_mesh_device` | explicit 2-D right triangles / 3-D Kuhn, in memory | 1 / 1 | -- | exact already |
+| `validation/devsim_noise.py::bipolar_2d_resistor`, `validation/gated_dd_2d.py` | rectilinear `create_2d_mesh` | 1 | -- | exact already |
+| `LayeredDevsimBuilder` | rectilinear `create_2d_mesh` | 1 (<= 2.2e-16) | -- | pinned (above) |
+
+(`tests/test_traps.py` and `tests/test_devsim_phase_composition.py` build small rectilinear
+`create_2d_mesh` meshes -- the same right-triangle split, not separately measured.)
+
+**Gates that moved, and why they passed before.**
+- `dd_field_mobility` GATE A (low-bias Ohm) read 0.142 against a "< 0.16, mesh-limited" tolerance: it
+  absorbed the DEVSIM volume defect and called it discretization error, so it tested Ohm's law only to
+  16 %. On the exact mesh: 5.0e-16; gate now < 1e-6 (the Newton stop). GATE B could not match the
+  uniform-field q N v(E) A (I_hi / (q N v_sat A) = 1.16 vs the analytic 0.848) and its comment blamed carrier
+  redistribution; on the exact mesh the bar stays uniform and I_hi = q N v(E) A exactly (rel 0.0), so
+  gate B now checks it (< 1e-6) on top of the concavity signature. GATE C is a ratio of two solves on
+  the same mesh -- the defect cancels, it passed before and after (1.9e-16 -> 0).
+- `devsim_noise` A4 (S = 4kT G) is a ratio in which S and G use the same couplings, so it was exact on the
+  gmsh mesh too (MEASURED 1.1e-16 there; it tested the FDT identity, as it claimed), while its G was
+  1.2231 x sigma A/L -- the defect, not discretization. Now also G_dc = sigma A/L: MEASURED -2.2e-16 (gate 1e-9).
 
 ## 9. Release-note lines
 

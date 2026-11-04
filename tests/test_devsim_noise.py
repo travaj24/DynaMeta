@@ -80,12 +80,16 @@ def test_johnson_bipolar_2d():
 
 
 def test_johnson_unipolar_3d():
-    """GATE A4. 3-D unipolar ITO bar on an unstructured gmsh tetra mesh: S = 4kT G to 1.1e-16 (G is
-    the DEVSIM DC conductance of THAT mesh -- the bar's own Ohm's-law error vs sigma A/L is mesh-limited,
-    validation/carriers_3d_resistor.py -- and the noise identity holds on the same mesh exactly)."""
-    pytest.importorskip("gmsh")
-    r, _ = _johnson(V.unipolar_3d_resistor, 4e14)
+    """GATE A4. 3-D unipolar ITO bar 200 x 80 x 80 nm on the exact Kuhn-tensor mesh: S = 4kT G, and
+    (since 2026-11-04) G_dc = sigma A/L. Until then the bar was an unstructured gmsh mesh with sum
+    NodeVolume = 1.225 x its volume (DEVSIM's unsigned circumcentric pieces); S = 4kT G held there too,
+    because S and G are built from the same couplings and the defect cancels in the ratio -- so the old
+    gate tested the FDT identity (as it claimed) but not the conductance, which was off by the mesh
+    defect, not by discretization."""
+    r, G = _johnson(V.unipolar_3d_resistor, 4e14)
     assert np.max(np.abs(r - 1)) < 1e-9
+    sigma = 1.602176634e-19 * 4e26 * 0.004                     # q n mu of the bar (n_bg, mobility)
+    assert G == pytest.approx(sigma * (80e-9 * 80e-9) / 200e-9, rel=1e-9)     # MEASURED -2.2e-16
 
 
 # =====================================================================================================
