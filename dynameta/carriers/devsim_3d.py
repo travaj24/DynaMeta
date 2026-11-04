@@ -27,8 +27,11 @@ the equilibrium accumulation at +1V); `validation/devsim_3d_mesh.py` (D2c: exact
 Gauss, 3-D == 1-D on the same z-lines).
 
 MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
-right-angled Kuhn tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
-(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). The gmsh paths below survive as
+PATH (Kuhn) tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
+(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). It is the PATH structure that makes them
+exact, not right angles alone (correction 2026-11-04, doc section 10: the trirectangular corner tet is
+right-angled and DEVSIM gives it 2x its volume); tests/test_devsim_3d_mesh.py pins that every emitted tet
+is a path tet. The gmsh paths below survive as
 mesher="gmsh" (legacy, UnreliableResultWarning; kept only to reproduce pre-v0.14 numbers, removed in v0.15).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
@@ -161,14 +164,14 @@ class Stacked3DSpec:
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
     # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
-    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (right-angled) tetrahedra:
+    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (PATH) tetrahedra:
     # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
-    # every circumcentric piece >= 0). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
+    # every circumcentric piece >= 0 -- a property of path tets, not of right-angled tets in general). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
     # reproduce old numbers and REMOVED in v0.15 (user decision 2026-11-04; its warning stays an
     # UnreliableResultWarning, not a DynaMetaDeprecationWarning: the numbers it returns are wrong, which
     # is what that category means, while the deprecation class is for renamed spellings that still give
-    # the same answer -- docs/audit/2026-11-04-v0.14-user-decisions.md). DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual pieces, so
-    # on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
+    # the same answer -- docs/audit/2026-11-04-v0.14-user-decisions.md). DEVSIM 2.11 sums the MAGNITUDES
+    # of each tet's circumcentric dual pieces, so on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
     # the D1c gate-G2 cap) and integrated charge is ~20 % wrong (docs/audit/2026-11-03-devsim-3d-mesh.md).
     mesher:          str = "tensor"
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
@@ -674,6 +677,30 @@ def _gmsh_lists(P, groups3, groups2):
     return coords, elements, names
 
 
+def create_mesh_in_memory(mesh: str, P_m, groups3, groups2) -> None:
+    """ds.create_gmsh_mesh for (P [m], {region: tets}, {surface: triangles}) WITHOUT a file -- the route
+    the builder's default takes (no shared path to race on, and nothing for DEVSIM to keep open: on
+    Windows DEVSIM 2.11.2 never closes a gmsh FILE it read). For hand-built fixtures (tests,
+    validation) that use the Kuhn helpers below; region / contact / interface calls follow as usual."""
+    coords, elements, names = _gmsh_lists(P_m, groups3, groups2)
+    ds.create_gmsh_mesh(mesh=mesh, coordinates=coords, elements=elements, physical_names=names)
+
+
+def kuhn_bar_mesh(mesh: str, lengths_nm, h_nm: float, *, region: str = "semi",
+                  contacts=("left", "right")) -> None:
+    """A uniform LX x LY x LZ [nm] bar on the exact Kuhn-tensor mesh (cells of side <= h_nm, 6 path tets
+    each), metre coordinates, with the two x-end faces as gmsh surface groups contacts[0] (x = 0) and
+    contacts[1] (x = LX); loaded in memory (create_mesh_in_memory). The caller adds the region / contacts
+    / finalize_mesh. Shared by the 3-D resistor-type fixtures (validation/carriers_3d_resistor.py,
+    dd_field_mobility.py, devsim_noise.py) so none of them meshes with gmsh or writes a fixed file."""
+    ax = tuple(_graded_axis([0.0, float(ln)], [], float(h_nm), float(h_nm)) for ln in lengths_nm)
+    P, T, _cell = _kuhn_tets(*ax)
+    rid = np.zeros(tuple(len(a) - 1 for a in ax), dtype=int)
+    tri = {contacts[0]: _face_triangles(ax, 0, _cell_faces(rid, 0, "bottom", 0), plus=False),
+           contacts[1]: _face_triangles(ax, 0, _cell_faces(rid, 0, "top", 0), plus=True)}
+    create_mesh_in_memory(mesh, P * 1e-9, {region: T}, tri)
+
+
 class Devsim3DEquilibrium:
     """A 3D-DEVSIM CarrierSolver (equilibrium) over a Stacked3DSpec. Implements the
     `regions()` + `solve(bias)` CarrierSolver Protocol, emitting CarrierField(ndim=3).
@@ -1160,20 +1187,26 @@ class Devsim3DEquilibrium:
 
     def _build_mesh_tensor(self) -> None:
         """D2c (v0.14.0): the DEFAULT 3-D mesh -- a graded tensor-product grid split into Kuhn tetrahedra,
-        written as MSH 2.2 (metres) for create_gmsh_mesh. Same region / contact / interface names and the
+        kept as arrays (_mesh_data, handed to DEVSIM in memory) and written as MSH 2.2 (metres) only for an
+        explicit msh_path. Same region / contact / interface names and the
         same build_device hand-off (_mesh_regions, _iface_pairs, _top_diel) as the gmsh builders.
 
         WHY (MEASURED, docs/audit/2026-11-03-devsim-3d-mesh.md): DEVSIM 2.11's 3-D ElementEdgeCouple is
         0.5 (|v0 x v1| + |v0 x v2|) per tet edge (TetrahedronEdgeCouple.cc: v0 = circumcentre - edge
         midpoint, v1/v2 = face circumcentres - circumcentre), the MAGNITUDES of the circumcentric dual
         pieces, and ElementNodeVolume = couple * EdgeLength / 6 feeds EdgeNodeVolume and NodeVolume. On a
-        tet whose circumcentre is outside it the signed pieces partly cancel but the magnitudes add, so the
-        volumes over-count. The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
+        tet that is not (closed) well-centred some signed pieces are negative and partly cancel, but the
+        magnitudes add, so the volumes over-count. That includes tets whose circumcentre is INSIDE them but
+        that have an obtuse face (one over-counts 4.53x; correction 2026-11-04, doc section 10), not only
+        tets with the circumcentre outside. DEVSIM 2-D has the same construction (TriangleEdgeCouple.cc:74:
+        one obtuse triangle gives 11x); the 2-D builder is unaffected (rectilinear right triangles). The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
         oxide volume on the G2 cap); a Delaunay mesh does NOT help (gmsh Optimize=0: 0 of 17814 oxide faces
         non-Delaunay, still 1.289 x), and element assembly does not either (it uses the same couples).
-        Every Kuhn tet of a box cell is right-angled with ALL FOUR faces right triangles, so every
-        circumcentre (the cell centre, on the tet's main diagonal) and face circumcentre (a hypotenuse
-        midpoint) lies on the tet boundary: each piece is >= 0, magnitude == signed, and the volumes /
+        Every Kuhn (path) tet of a box cell has ALL FOUR faces right triangles and its circumcentre (the
+        cell centre) at the midpoint of its main-diagonal edge, so every face circumcentre (a hypotenuse
+        midpoint) and the tet circumcentre lie on the tet boundary: each piece is >= 0, magnitude == signed
+        (right angles alone do NOT suffice: the trirectangular corner tet has an equilateral face and its
+        circumcentre outside -- DEVSIM: exactly 2x), and the volumes /
         couples are the exact box-method ones (sum NodeVolume / region volume - 1 <= 1e-14; the axis
         edges carry the rectilinear dual areas, the face/body diagonals carry 0). A laterally uniform
         stack is then laterally invariant to round-off and reduces to the 1-D discretization on the same
