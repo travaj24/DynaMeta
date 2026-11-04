@@ -22,14 +22,16 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-import ngsolve as ng
 
+from dynameta.lazy_import import LazyModule
 # audit X-11: `_S` is the in-formula symbol for the nm mesh scale and MESH_SCALE is its spelled-out
 # name; BOTH are single-sourced in carriers.fem_mesh (this module used to re-declare `_S = MESH_SCALE`,
 # a second home for the same float). Import them; do not re-bind them here.
 from dynameta.carriers.fem_mesh import MESH_SCALE      # noqa: F401 -- pass-through re-export: the
 from dynameta.carriers.fem_mesh import _S, build_layered_box_mesh   # package facade exports it
 from dynameta.warning_types import DynaMetaDeprecationWarning
+
+ng = LazyModule("ngsolve")   # lazy (v0.14, 2026-11-04): ngsolve's OpenBLAS commits ~4 GB at load
 
 
 @dataclass
