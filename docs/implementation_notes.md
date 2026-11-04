@@ -20,6 +20,13 @@ AND the `vdiff` drift term moved from the `@n1` to the `@n0` node:
     ElectronCurrent = +q*mu_n*EdgeInverseLength*V_t*kahan3(Electrons@n1*Bern01, Electrons@n1*vdiff, -Electrons@n0*Bern01)
     HoleCurrent     = -q*mu_p*EdgeInverseLength*V_t*kahan3(Holes@n1*Bern01,    -Holes@n0*Bern01,    -Holes@n0*vdiff)
 
+(DEVSIM's bundled spelling. **DynaMeta no longer uses it as is** (2026-11-04): `B(vdiff) + vdiff`
+stands for `B(-vdiff)` and cancels catastrophically for `vdiff << 0` (1.9e-7 at -21, 100 % at -40).
+Every DynaMeta SG flux is built by `dynameta.carriers.sg_flux`, which evaluates both `B(vdiff)` and
+`B(-vdiff)` and uses the identity only on the non-negative argument -- the kahan3 line above for
+`vdiff >= 0`, its mirror `kahan3(n@n1*B(-v), -n@n0*B(-v), n@n0*v)` for `vdiff < 0`;
+docs/audit/2026-11-04-sg-flux-two-bernoulli.md.)
+
 SRH (one node model into BOTH continuity equations, opposite signs):
 
     USRH = (n*p - n_i^2) / (taup*(n + n1) + taun*(p + p1))     # n1=p1=n_i defaults

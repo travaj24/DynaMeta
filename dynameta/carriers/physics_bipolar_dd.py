@@ -8,11 +8,12 @@ Poisson / charge-neutral contacts in SI (the bundled simple_physics.py is CGS).
 Solution variables: Potential, Electrons, Holes (three coupled fields).
 
 DEVSIM sign convention (residual = q*divergence form), per docs/implementation_notes.md:
-  Jn = +q mu_n EdgeInvLength V_t [ Electrons@n1 B(vdiff) + Electrons@n1 vdiff
-                                   - Electrons@n0 B(vdiff) ]            (electrons)
-  Jp = -q mu_p EdgeInvLength V_t [ Holes@n1 B(vdiff) - Holes@n0 B(vdiff)
-                                   - Holes@n0 vdiff ]                   (holes; q->-q
-                                   AND the vdiff drift term on the @n0 node)
+  Jn = +q mu_n EdgeInvLength V_t [ Electrons@n1 B(-vdiff) - Electrons@n0 B(vdiff) ]   (electrons)
+  Jp = -q mu_p EdgeInvLength V_t [ Holes@n1 B(vdiff) - Holes@n0 B(-vdiff) ]           (holes; q->-q
+                                   AND the B(+-vdiff) roles swapped)
+  -- built by the ONE SG kernel (sg_flux, 2026-11-04): B(vdiff) and B(-vdiff) both, combined
+  sign-selected so the Bernoulli identity B(x) + x = B(-x) is only used for x >= 0. DEVSIM's bundled
+  kahan3(c@n1 B, c@n1 vdiff, -c@n0 B) spelling (used here until then) cancels for vdiff << 0.
   Poisson node charge : PotentialNodeCharge = -q (Holes - Electrons + NetDoping)
   SRH source          : USRH = (n p - n_i^2)/(taup (n + n1) + taun (p + p1))
                         ElectronGeneration = -q USRH  (into ElectronContinuityEquation)
@@ -94,6 +95,7 @@ ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned befo
 from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, _poisson_edge_models, require_positive, invert_F12, psi_offset_term)
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_einstein, g_expr_devsim
@@ -757,27 +759,27 @@ def setup_bipolar_region(device: str, region: str, *,
         ds.edge_model(device=device, region=region, name="g_enh", equation="1.0")
         ds.edge_model(device=device, region=region, name="g_enh_p", equation="1.0")
 
-    # --- electron current (FD-scaled Scharfetter-Gummel) ---
-    # vdiff_g = vdiff/g_enh ; Bern_g = B(vdiff_g) ; Jn scaled by g_enh.
+    # --- electron / hole currents (FD-scaled Scharfetter-Gummel), the ONE SG kernel (sg_flux) ---
+    # vdiff_g = vdiff/g_enh, vdiff_gp = vdiff/g_enh_p; Bern_g(p) = B(v), Bern_g(p)_m = B(-v);
+    #   Jn = +q mu_n ... g_enh   ( n@n1 B(-v) - n@n0 B(v) )   (Jn has no Holes dependence)
+    #   Jp = -q mu_p ... g_enh_p ( p@n1 B(v)  - p@n0 B(-v) )  (Jp has no Electrons dependence)
+    # Sign-selected two-Bernoulli bracket since 2026-11-04: the kahan3 spelling B(-v) = B(v) + v
+    # cancelled for v << 0 (1.9e-7 at v = -21, 100 % at -40; sg_flux header, docs/audit/2026-11-04-
+    # sg-flux-two-bernoulli.md).
     _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh",
                       ("Potential", "Electrons"))
-    _edge_with_derivs(device, region, "Bern_g", "B(vdiff_g)",
-                      ("Potential", "Electrons"))
-    jn = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
-          "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
-    _edge_with_derivs(device, region, "ElectronCurrent", jn,
-                      ("Electrons", "Potential"))            # Jn has no Holes dependence (no dead dJn/dp)
-
-    # --- hole current (q -> -q; vdiff drift term moved to @n0) ---
-    # vdiff_gp = vdiff/g_enh_p ; Bern_gp = B(vdiff_gp) ; Jp scaled by g_enh_p.
+    _SG.install_sg_current(device, region, carrier="electrons", density="Electrons",
+                           vdiff="vdiff_g", bern="Bern_g", bern_m="Bern_g_m",
+                           current="ElectronCurrent",
+                           prefactor="ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh",
+                           wrt=("Potential", "Electrons"), current_wrt=("Electrons", "Potential"))
     _edge_with_derivs(device, region, "vdiff_gp", "vdiff / g_enh_p",
                       ("Potential", "Holes"))
-    _edge_with_derivs(device, region, "Bern_gp", "B(vdiff_gp)",
-                      ("Potential", "Holes"))
-    jp = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
-          "kahan3(Holes@n1*Bern_gp, -Holes@n0*Bern_gp, -Holes@n0*vdiff_gp)")
-    _edge_with_derivs(device, region, "HoleCurrent", jp,
-                      ("Holes", "Potential"))                # Jp has no Electrons dependence
+    _SG.install_sg_current(device, region, carrier="holes", density="Holes",
+                           vdiff="vdiff_gp", bern="Bern_gp", bern_m="Bern_gp_m",
+                           current="HoleCurrent",
+                           prefactor="-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p",
+                           wrt=("Potential", "Holes"), current_wrt=("Holes", "Potential"))
 
     # --- audit R26/R27 fixed fields (BipolarOptions): T_K -> V_t, n_ie + the BGN band-edge quasi-fields
     #     in both SG currents, the incomplete-ionization reference fields + IonizedNetDoping. Installed

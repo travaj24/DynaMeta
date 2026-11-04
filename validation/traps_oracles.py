@@ -8,13 +8,14 @@ whose 1-D device builders and closed forms this script reuses so the two cannot 
           from a fixed Q_f vs -Q_f/C_ox
   GATE D  surface recombination velocity S == sigma v_th N_it (three decades of N_it)
   GATE E  OLD PHYSICS FAILS every one of A-D: the same oracles run with the traps OFF (which is the
-          pre-D1c code, byte-for-byte -- gate F) miss by the margins printed; and the pre-D1c MODULE
+          pre-D1c code, to round-off -- gate F) miss by the margins printed; and the pre-D1c MODULE
           (main, 5cbd998, via a subprocess on its own tree) cannot even express them (ImportError /
           TypeError).
-  GATE F  CROSS-VERSION BYTE IDENTITY: a 1-D Si diode (FD on, forward ramp), a 1-D MOS cap (gate
+  GATE F  CROSS-VERSION IDENTITY: a 1-D Si diode (FD on, forward ramp), a 1-D MOS cap (gate
           sweep into inversion onset) and a 2-D LayeredDevsimBuilder bipolar bar, solved on main and
-          on this branch with the traps OFF: sha256-identical Potential/Electrons/Holes/USRH/
-          PotentialNodeCharge arrays.
+          on this branch with the traps OFF: Potential/Electrons/Holes/USRH/PotentialNodeCharge
+          identical to round-off (TOL_F; sha256-identical until the 2026-11-04 two-Bernoulli SG flux,
+          which changed every flux's arithmetic on purpose -- the hashes are still printed).
   GATE G  (--3d) 3-D: G1 the Stacked3DSpec(interface_traps=...) weights are exact (sum = lateral^2,
           only on the semi/oxide face); G2 the D_it psi_s shift equals the 1-D cap's (5 %: the 3-D
           z-resolution); G3 (D2c tensor mesh only) the 3-D shift equals a 1-D solve on the 3-D mesh's
@@ -170,10 +171,20 @@ _FIXTURE = textwrap.dedent('''
         for dv in list(ds.get_device_list()): ds.delete_device(device=dv)
         for m in list(ds.get_mesh_list()): ds.delete_mesh(mesh=m)
         R.clear(d)
-    def h(dev, reg):
+    ARR = {}
+    def h(dev, reg, tag):
         out = hashlib.sha256()
         for k in ("Potential", "Electrons", "Holes", "USRH", "PotentialNodeCharge"):
-            out.update(np.asarray(ds.get_node_model_values(device=dev, region=reg, name=k)).tobytes())
+            a = np.asarray(ds.get_node_model_values(device=dev, region=reg, name=k))
+            out.update(a.tobytes())
+            ARR[tag + ":" + k] = [float(x) for x in a]
+        ARR[tag + ":NetDoping"] = [float(x) for x in
+                                   ds.get_node_model_values(device=dev, region=reg, name="NetDoping")]
+        # the size of each SRH term (np and n_i^2 cancel near equilibrium), AFTER the hash
+        ds.node_model(device=dev, region=reg, name="_usrh_scale", equation="(Electrons*Holes + n_i^2)/"
+                      "(taup*(Electrons + n1) + taun*(Holes + p1))")
+        ARR[tag + ":USRH_scale"] = [float(x) for x in
+                                    ds.get_node_model_values(device=dev, region=reg, name="_usrh_scale")]
         return out.hexdigest()
     def seed(dev, reg):
         ds.node_model(device=dev, region=reg, name="_s",
@@ -200,7 +211,7 @@ _FIXTURE = textwrap.dedent('''
     for v in (0.1, 0.2, 0.3, 0.4):
         ds.set_parameter(device="fx", name="a_bias", value=v)
         ds.solve(type="dc", absolute_error=1e18, relative_error=1e-8, maximum_iterations=80)
-    print("HASH diode", h("fx", "r"))
+    print("HASH diode", h("fx", "r", "diode"))
     # 2) 1-D MOS cap (p-Si / SiO2), Boltzmann, gate at +0.6 V from flat band
     clear("fx"); ds.create_1d_mesh(mesh="fm")
     ds.add_1d_mesh_line(mesh="fm", pos=0.0, ps=20e-9, tag="body")
@@ -226,7 +237,7 @@ _FIXTURE = textwrap.dedent('''
     for vg in np.arange(0.0, 0.601, 0.05):
         ds.set_parameter(device="fx", name="gate_bias", value=psib + vg)
         ds.solve(type="dc", absolute_error=1e12, relative_error=1e-10, maximum_iterations=80)
-    print("HASH mos", h("fx", "si"))
+    print("HASH mos", h("fx", "si", "mos"))
     clear("fx")
     # 3) 2-D LayeredDevsimBuilder bipolar bar (n-type Si, anode/cathode edge contacts), +0.05 V
     from dynameta.constants import M_E
@@ -251,17 +262,71 @@ _FIXTURE = textwrap.dedent('''
                materials=reg, mesh_2d=Mesh2DSpec())
     b = LayeredDevsimBuilder(d, mesh_name="fx2m", device_name="fx2")
     b.solve(BiasPoint({"an": 0.05}, "b"))
-    print("HASH layered", h("fx2", "si"))
+    print("HASH layered", h("fx2", "si", "layered"))
     b.teardown()
+    if len(sys.argv) > 1:                      # the arrays, for the numeric cross-version gate
+        import json
+        with open(sys.argv[1], "w") as f:
+            json.dump(ARR, f)
 ''')
 
 
 def _run_fixture(tree):
+    """(rc, {fixture: sha256}, {fixture:field: values}, stderr tail) of _FIXTURE run on `tree`."""
+    import json
+    import tempfile
     env = dict(os.environ, PYTHONPATH=tree)
-    r = subprocess.run([sys.executable, "-c", _FIXTURE], cwd=tree, env=env, capture_output=True,
-                       text=True, timeout=1800)
-    hashes = dict(line.split()[1:3] for line in r.stdout.splitlines() if line.startswith("HASH "))
-    return r.returncode, hashes, r.stderr[-400:]
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        r = subprocess.run([sys.executable, "-c", _FIXTURE, path], cwd=tree, env=env,
+                           capture_output=True, text=True, timeout=1800)
+        hashes = dict(line.split()[1:3] for line in r.stdout.splitlines() if line.startswith("HASH "))
+        arrays = {}
+        if r.returncode == 0:
+            with open(path, encoding="utf-8") as f:
+                arrays = json.load(f)
+    finally:
+        os.remove(path)
+    return r.returncode, hashes, arrays, r.stderr[-400:]
+
+
+# GATE F tolerance. Until 2026-11-04 gate F demanded sha256-identical arrays. The two-Bernoulli SG flux
+# (dynameta.carriers.sg_flux) changed every flux's arithmetic on purpose, so the traps-OFF solve can no
+# longer be bit-identical to main (kahan3) and the gate compares NUMERICALLY instead, each array in the
+# metric where its round-off lives: densities entry-wise relative; Potential relative to its max |.|;
+# PotentialNodeCharge relative to q (n + p + |N|) (its three terms cancel in neutral regions); USRH
+# relative to its term size (n p + n_i^2) / (taup (n + n1) + taun (p + p1)) (n p ~ n_i^2 near
+# equilibrium). MEASURED main 5cbd998 vs the two-Bernoulli tree (2026-11-04, scipy OpenBLAS): worst
+# 4.1e-15 (diode USRH; diode Electrons 3.9e-15, Potential <= 1.3e-16, PotentialNodeCharge <=
+# 2.2e-16), and 6595bde reproduced main's three sha256 exactly. TOL_F = 1e-13 (24x the worst); any
+# physics change of relative size >~ 1e-12 in the traps-OFF definition still fails it.
+TOL_F = 1e-13
+_Q = 1.602176634e-19
+
+
+def cross_version_rows(old, new):
+    """[(fixture:field, metric, ok)] of gate F (TOL_F comment)."""
+    rows = []
+    for key in sorted(k for k in old if k.split(":")[1] in ("Potential", "Electrons", "Holes", "USRH",
+                                                            "PotentialNodeCharge")):
+        tag, f = key.split(":")
+        a, b = np.asarray(old[key]), np.asarray(new.get(key, []))
+        if a.shape != b.shape:
+            rows.append((key, math.inf, False))
+            continue
+        d = np.abs(b - a)
+        if f in ("Electrons", "Holes"):
+            m = float(np.max(d / np.abs(a)))
+        elif f == "Potential":
+            m = float(np.max(d) / np.max(np.abs(a)))
+        elif f == "PotentialNodeCharge":
+            m = float(np.max(d / (_Q * (np.asarray(old[tag + ":Electrons"]) + np.asarray(old[tag + ":Holes"])
+                                         + np.abs(np.asarray(old[tag + ":NetDoping"]))))))
+        else:
+            m = float(np.max(d / np.asarray(old[tag + ":USRH_scale"])))
+        rows.append((key, m, m <= TOL_F))
+    return rows
 
 
 def _old_tree_rejects(tree):
@@ -422,15 +487,21 @@ def main():
         print("[trp]   old tree probe: " + " | ".join(out.split("\n")), flush=True)
         H.gate("E' old module cannot express traps", "IMPORT_FAIL" in out and "ET_KW False" in out,
                "physics_traps ImportError + no srh_trap_energy_eV keyword on {}".format(a.main))
-        print("[trp] --- F: cross-version byte identity (main vs this branch, traps OFF)", flush=True)
-        rc0, h0, e0 = _run_fixture(a.main)
-        rc1, h1, e1 = _run_fixture(HERE)
-        for k in sorted(set(h0) | set(h1)):
-            print("[trp]   {:6s} main {}  branch {}".format(k, h0.get(k, "-")[:16], h1.get(k, "-")[:16]),
-                  flush=True)
-        H.gate("F byte-identical vs main", rc0 == 0 and rc1 == 0 and h0 == h1 and len(h0) == 3,
-               "rc {} / {}, {} fixtures".format(rc0, rc1, len(h0)) + ("" if rc0 == rc1 == 0 else
-                                                                       " | " + e0 + " | " + e1))
+        print("[trp] --- F: cross-version identity to round-off (main vs this branch, traps OFF)",
+              flush=True)
+        rc0, h0, a0, e0 = _run_fixture(a.main)
+        rc1, h1, a1, e1 = _run_fixture(HERE)
+        for k in sorted(set(h0) | set(h1)):          # informational: the flux change moves the hashes
+            print("[trp]   {:6s} sha256 main {}  branch {}".format(k, h0.get(k, "-")[:16],
+                                                               h1.get(k, "-")[:16]), flush=True)
+        rows = cross_version_rows(a0, a1) if rc0 == rc1 == 0 else []
+        for key, m, _ok in rows:
+            print("[trp]   {:28s} {:.2e}".format(key, m), flush=True)
+        worst = max((r[1] for r in rows), default=math.inf)
+        H.gate("F identical to round-off vs main", rc0 == 0 and rc1 == 0 and len(h0) == 3
+               and len(rows) == 15 and all(r[2] for r in rows),
+               "rc {} / {}, {} arrays, worst {:.2e} <= {:.0e}".format(rc0, rc1, len(rows), worst, TOL_F)
+               + ("" if rc0 == rc1 == 0 else " | " + e0 + " | " + e1))
     else:
         H.skip("E'/F cross-version", "no main checkout at {} (--main)".format(a.main))
     if a.three_d:
