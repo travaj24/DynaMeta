@@ -29,15 +29,8 @@ V_APPLIED = 0.02                    # small -> ohmic
 def build_bar_tensor(mesh="bar", dev="bar_dev", h_nm=8.0):
     """The bar on the Kuhn-tensor mesh (devsim_3d's shared helpers), contacts on the two x-end faces."""
     from dynameta.carriers import devsim_3d as D3
-    path = os.path.join(os.path.expanduser("~"), ".dynameta", "_resistor_tensor.msh")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    ax = tuple(D3._graded_axis([0.0, ln], [], h_nm, h_nm) for ln in (LX, LY, LZ))
-    P, T, _cell = D3._kuhn_tets(*ax)
-    rid = np.zeros(tuple(len(a) - 1 for a in ax), dtype=int)
-    tri = {"left": D3._face_triangles(ax, 0, D3._cell_faces(rid, 0, "bottom", 0), plus=False),
-           "right": D3._face_triangles(ax, 0, D3._cell_faces(rid, 0, "top", 0), plus=True)}
-    D3._write_msh22(path, P * 1e-9, {"semi": T}, tri)
-    ds.create_gmsh_mesh(mesh=mesh, file=path)
+    # in memory (2026-11-04): no fixed ~/.dynameta/_resistor_tensor.msh shared by concurrent runs
+    D3.kuhn_bar_mesh(mesh, (LX, LY, LZ), h_nm, region="semi", contacts=("left", "right"))
     ds.add_gmsh_region(mesh=mesh, gmsh_name="semi", region="semi", material="ITO")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="left", region="semi", name="left", material="metal")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="right", region="semi", name="right", material="metal")
@@ -48,8 +41,8 @@ def build_bar_tensor(mesh="bar", dev="bar_dev", h_nm=8.0):
 def build_bar(mesh="bar", dev="bar_dev"):
     """The LEGACY unstructured gmsh bar (--gmsh): Ohm's law 14 % high (module docstring)."""
     import gmsh
-    path = os.path.join(os.path.expanduser("~"), ".dynameta", "_resistor.msh")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(prefix="dynameta_resistor_"), "bar.msh")   # per run (2026-11-04)
     gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
     gmsh.model.add("bar"); occ = gmsh.model.occ
     occ.addBox(0, 0, 0, LX, LY, LZ); occ.synchronize()

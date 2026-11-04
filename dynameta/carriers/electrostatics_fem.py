@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
-import ngsolve as ng
 
+from dynameta.lazy_import import LazyModule
 from dynameta.carriers.fem_mesh import _S, build_layered_box_mesh
 # _S: coordinate = metres * _S (nm); E[V/m] = -grad_mesh * _S (single-sourced in fem_mesh)
+
+ng = LazyModule("ngsolve")   # lazy (v0.14, 2026-11-04): ngsolve's OpenBLAS commits ~4 GB at load
 
 
 @dataclass

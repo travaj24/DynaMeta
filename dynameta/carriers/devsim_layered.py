@@ -548,14 +548,24 @@ class LayeredDevsimBuilder:
                 "T_REF = {} K and have no T_K).".format(
                     ", ".join("{} {:.6g} K".format(r, HJ.temperature_of_V_t(v)) for r, v in sorted(vts.items())),
                     PE.T_REF))
-        own, chi = {}, {}
+        own, chi, mats = {}, {}, {}
         for sp in self._specs:
             if sp.role != "semiconductor":
                 continue
             tr = self.design.materials.get(sp.material).transport
             own[sp.name] = self._own_phi_c(sp.name, tr)
-            chi[sp.name] = float(tr.chi_eV)
-        frames = HJ.anderson_alignment(own, chi, self._reference_semiconductor(semis))
+            chi[sp.name] = float(tr.chi_eV) if tr.chi_eV is not None else None
+            mats[sp.name] = sp.material
+        # v0.14 (user decision 2026-11-04): TransportModel.chi_eV defaults to None. Regions of ONE material
+        # align with zero offset whatever chi is (bit-identical to the old 4.5 - 4.5 = 0.0); two different
+        # materials need both affinities, else the build REFUSES here -- the old "offset zero by default,
+        # not by data" AdvisoryWarning (defaults detected by value, 4.5 / 3.6) is gone with the defaults.
+        frames = HJ.anderson_alignment(
+            own, chi, self._reference_semiconductor(semis), materials=mats,
+            hint="LayeredDevsimBuilder: the device has semiconductors of different materials ({}); set "
+                 "TransportModel.chi_eV (electron affinity, eV) on every one of them -- it defaults to None "
+                 "since v0.14 so a band offset is never zero by default.".format(
+                     ", ".join("{}: {} chi_eV={}".format(r, mats[r], chi[r]) for r in sorted(mats))))
         for r, (phi_c, s_v) in frames.items():
             if s_v == 0.0:
                 continue
@@ -595,13 +605,6 @@ class LayeredDevsimBuilder:
                 continue                                    # not a semiconductor pair
             t0 = self.design.materials.get(mat[r0]).transport
             t1 = self.design.materials.get(mat[r1]).transport
-            if (mat[r0] != mat[r1] and float(t0.chi_eV) == float(t1.chi_eV) == 4.5
-                    and float(t0.band_gap_eV) == float(t1.band_gap_eV) == 3.6):
-                warnings.warn(
-                    "LayeredDevsimBuilder: semiconductors '{}' ({}) and '{}' ({}) meet at an interface and "
-                    "BOTH carry the TransportModel defaults chi_eV = 4.5, band_gap_eV = 3.6 -- the Anderson "
-                    "band offset is then ZERO by default, not by data. Set each material's affinity and "
-                    "gap.".format(r0, mat[r0], r1, mat[r1]), AdvisoryWarning, stacklevel=3)
             if not (r0 in semi_cc and r1 in semi_cc):
                 continue                                    # an equilibrium side: Potential continuity only
             if (r0 in self._bipolar_regions) != (r1 in self._bipolar_regions):
@@ -613,6 +616,13 @@ class LayeredDevsimBuilder:
             sd0, sd1 = self._hetero_side(r0), self._hetero_side(r1)
             if sd0.holes and mat[r0] != mat[r1]:
                 for sd, t, nm in ((sd0, t0, mat[r0]), (sd1, t1, mat[r1])):
+                    if t.band_gap_eV is None:            # v0.14: no default gap (user decision 2026-11-04)
+                        raise ValueError(
+                            "LayeredDevsimBuilder: bipolar heterojunction '{}'/'{}': material '{}' has no "
+                            "band_gap_eV. The valence-band offset of a bipolar heterojunction needs both "
+                            "gaps; set TransportModel.band_gap_eV (eV, at the device temperature) -- it "
+                            "defaults to None since v0.14 so an offset is never set by a default.".format(
+                                r0, r1, nm))
                     eg = sd.phi_c_V - sd.phi_v_V
                     if abs(eg - float(t.band_gap_eV)) > _HJ_EG_TOL_EV:
                         raise ValueError(

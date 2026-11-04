@@ -182,7 +182,7 @@ NA.noise_spectrum(dev, freqs, output_node="vhi")                  # V^2/Hz
 **Device coverage.** Works on any DEVSIM device built by DynaMeta:
 - 1-D direct;
 - 2-D `LayeredDevsimBuilder` after `set_ssac_gate`;
-- 3-D gmsh (gate A4).
+- 3-D (gate A4; a gmsh tetra bar until 2026-11-04, now the exact Kuhn-tensor bar -- docs/audit/2026-11-03-devsim-3d-mesh.md section 10).
 
 **Current-drive DC solves.** DEVSIM refuses an AC part on a current source, and the frozen-carrier
 Poisson pre-solve is singular with a current drive. A current-driven contact therefore:
@@ -200,7 +200,7 @@ linear solve). Nothing compares the module with itself.
 | A1 | bipolar n-Si bar, 1-D, non-uniform mesh | S_I = 4kT G_dc | 8.9e-16 | 1e-9 |
 | A2 | unipolar ITO bar, FD g-factor, `setup_contact_ohmic_dd_circuit` | 4kT G_dc | 1.1e-16 | 1e-9 |
 | A3 | bipolar bar, 2-D triangles | 4kT G_dc (G_dc = sigma W/L) | 8.9e-16 | 1e-9 |
-| A4 | unipolar ITO bar, 3-D gmsh tetra | 4kT G_dc of that mesh | 1.1e-16 | 1e-9 |
+| A4 | unipolar ITO bar, 3-D (gmsh tetra until 2026-11-04, now exact Kuhn tets) | 4kT G_dc of that mesh; since 2026-11-04 also G_dc = sigma A/L | 1.1e-16 (gmsh) / 2.2e-16, G -2.2e-16 (Kuhn; the gmsh G was 1.2231 x sigma A/L) | 1e-9 |
 | B1 | long Ge-like p-n diode (n_i 1e19, tau 1 us), 0 V, 1 Hz-10 GHz; Re Z spans 0.148 -> 2.9e-6 Ohm m^2 | S_I = 4kT Re Y(f) | 4.5e-6 | 1e-4 |
 | B1 | same diode, current-driven contact (separate adjoint) | open-circuit S_V = 4kT Re(1/Y(f)) | 1.0e-5 | 1e-4 |
 | B2 | B1 diode + Auger (C 1e-38) + radiative (B 1e-16) + Slotboom BGN | 4kT Re Y | 2.3e-6 | 1e-4 |

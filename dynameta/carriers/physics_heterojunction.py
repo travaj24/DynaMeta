@@ -196,7 +196,8 @@ class HeteroSide:
 
 
 def anderson_alignment(own_phi_c_V: Mapping[str, float], chi_eV: Mapping[str, Optional[float]],
-                       ref: str) -> Dict[str, Tuple[float, float]]:
+                       ref: str, *, materials: Optional[Mapping[str, str]] = None,
+                       hint: str = "") -> Dict[str, Tuple[float, float]]:
     """Anderson electron-affinity rule: {region: (Phi_c_V, s_V)} in the frame of `ref`.
 
     own_phi_c_V[r] is the conduction edge region r's physics implies in its OWN legacy frame (see the
@@ -204,7 +205,15 @@ def anderson_alignment(own_phi_c_V: Mapping[str, float], chi_eV: Mapping[str, Op
     and the frame shift s(r) = Phi_c(r) - Phi_c,own(r) (the neutral-bulk potential of r). The
     reference keeps (Phi_c,own(ref), 0.0). THE single implementation: Stacked3DSpec.band_alignment
     (3-D) and LayeredDevsimBuilder (2-D) both call it; the operation order (phi_ref + d_chi, then
-    phi_c - own) is the one band_alignment shipped with in v0.13.0, so its numbers are bit-identical."""
+    phi_c - own) is the one band_alignment shipped with in v0.13.0, so its numbers are bit-identical.
+
+    A missing affinity (None) is refused -- there is no neutral default for a band offset -- with ONE
+    exception, the SAME-MATERIAL rule (`materials`: region -> material name): a region of the same
+    material as the reference has zero offset by identity, so its d_chi is 0.0 whether or not the
+    affinities are given (an n+/n homojunction needs no chi). It is the rule Stacked3DSpec.band_alignment
+    shipped with (S1-9, where it passed {0.0, 0.0} -> the same 0.0); since v0.14.0 TransportModel.chi_eV
+    defaults to None (user decision 2026-11-04) and the 2-D builder needs it too. `hint` is appended to
+    the refusal: the caller names the field the user must set."""
     phi_ref = float(own_phi_c_V[ref])
     out = {ref: (phi_ref, 0.0)}
     for r, own in own_phi_c_V.items():
@@ -212,10 +221,14 @@ def anderson_alignment(own_phi_c_V: Mapping[str, float], chi_eV: Mapping[str, Op
             continue
         cr, c0 = chi_eV.get(r), chi_eV.get(ref)
         if cr is None or c0 is None:
-            raise ValueError("anderson_alignment: region {!r} needs both electron affinities (its own and "
-                             "the reference {!r}'s); there is no neutral default for a band offset."
-                             .format(r, ref))
-        d_chi = float(c0) - float(cr)
+            if materials is not None and materials.get(r) is not None and materials.get(r) == materials.get(ref):
+                d_chi = 0.0                                 # same material: no band offset by identity
+            else:
+                raise ValueError("anderson_alignment: region {!r} needs both electron affinities (its own and "
+                                 "the reference {!r}'s); there is no neutral default for a band offset.{}"
+                                 .format(r, ref, (" " + hint) if hint else ""))
+        else:
+            d_chi = float(c0) - float(cr)
         phi_c = phi_ref + d_chi
         out[r] = (phi_c, phi_c - float(own))
     return out

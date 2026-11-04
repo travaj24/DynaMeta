@@ -3,12 +3,23 @@ drift-diffusion solve (roadmap R1). An ITO bar with ohmic ends: in a uniform res
 E = V/L, so the drift current is I = q N v(E) A with v(E) = mu_low E / (1+(mu_low E/v_sat)^b)^(1/b) --
 ohmic at low bias, saturating to q N v_sat A at high bias. Independent reference = that analytic v(E).
 
-GATE A (low-bias Ohm): mu_low E << v_sat -> I = V sigma A/L, sigma = q N mu_low; rel-diff < 0.16
-        (mesh-limited, same tol as carriers_3d_resistor).
-GATE B (high-bias saturation): at high V the current matches q N v(E) A (the same v(E) curve) to the
-        mesh tolerance AND grows strongly SUB-linearly vs V (the saturation signature).
+GATE A (low-bias Ohm): mu_low E << v_sat -> I = V sigma A/L, sigma = q N mu_low; rel-diff < 1e-6 (the
+        Newton stop, rel_tol 1e-6; MEASURED 5.0e-16).
+GATE B (high-bias saturation): at 4 V (mu_low E/v_sat = 1.6) the current equals q N v(E) A of the uniform
+        field E = V/L (rel < 1e-6; MEASURED 0.0) AND the J-V is concave (chord G 53 % of ohmic, below the
+        ohmic extrapolation) -- the saturation signature.
 GATE C (reduces to constant): field_mobility with a huge v_sat (mu -> mu_low everywhere) reproduces the
         constant-mobility (field_mobility=False) contact current to ~1e-6 -- the off-switch proof.
+
+MESH (2026-11-04). The bar was an unstructured gmsh mesh, on which DEVSIM sums the MAGNITUDES of the
+circumcentric dual pieces (TetrahedronEdgeCouple.cc:99), so its couplings / node volumes were inflated
+(MEASURED sum NodeVolume = 1.151 x the bar volume) and the low-bias current read 14.2 % HIGH -- which
+gate A's old "< 0.16, mesh-limited" tolerance absorbed: it was testing Ohm's law only to 16 % and calling
+the DEVSIM volume defect discretization error. Gate B could not match q N v(E) A either (I_hi/(qN v_sat A)
+read 1.16 against the uniform-field 0.848), which its comment attributed to carrier redistribution under
+the strong field; on the exact mesh the uniform bar stays uniform and the match is exact, so gate B now
+checks it. Gate C (a RATIO of two solves on the same mesh) passed because the defect cancels in it. The
+bar is now devsim_3d.kuhn_bar_mesh (exact Kuhn-tensor tets, in memory, no fixed file).
 
 Run: python -m validation.dd_field_mobility
 """
@@ -38,28 +49,8 @@ L = LX * 1e-9
 
 
 def _build(mesh, dev):
-    import gmsh
-    path = os.path.join(os.path.expanduser("~"), ".dynameta", "_dd_fieldmob.msh")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
-    gmsh.model.add("bar"); occ = gmsh.model.occ
-    occ.addBox(0, 0, 0, LX, LY, LZ); occ.synchronize()
-    for dim, tag in gmsh.model.getEntities(3):
-        gmsh.model.addPhysicalGroup(3, [tag], name="semi")
-    left, right = [], []
-    for dim, tag in gmsh.model.getEntities(2):
-        xc = occ.getCenterOfMass(dim, tag)[0]
-        if abs(xc) < 1e-4:
-            left.append(tag)
-        elif abs(xc - LX) < 1e-4:
-            right.append(tag)
-    gmsh.model.addPhysicalGroup(2, left, name="left")
-    gmsh.model.addPhysicalGroup(2, right, name="right")
-    gmsh.option.setNumber("Mesh.MeshSizeMin", 5.0); gmsh.option.setNumber("Mesh.MeshSizeMax", 8.0)
-    gmsh.model.mesh.generate(3)
-    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2); gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
-    gmsh.write(path); gmsh.finalize()
-    ds.create_gmsh_mesh(mesh=mesh, file=path)
+    from dynameta.carriers import devsim_3d as D3
+    D3.kuhn_bar_mesh(mesh, (LX, LY, LZ), 8.0, region="semi", contacts=("left", "right"))   # exact, in memory
     ds.add_gmsh_region(mesh=mesh, gmsh_name="semi", region="semi", material="ITO")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="left", region="semi", name="left", material="metal")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="right", region="semi", name="right", material="metal")
@@ -101,23 +92,24 @@ def main():
     _setup(dev, field_mobility=True, v_sat=V_SAT)
     I_lo = _current_at(dev, 0.01, abs_tol, 2)          # E=1e5 V/m: mu_low*E/vsat=0.004 -> ohmic
     relA = abs(I_lo - _I_ref(0.01)) / _I_ref(0.01)
-    g_a = relA < 0.16
-    print("[fm] A low-bias Ohm: I={:.3e} A ref={:.3e} rel={:.3f} -> {}".format(
+    g_a = relA < 1e-6
+    print("[fm] A low-bias Ohm: I={:.3e} A ref={:.3e} rel={:.2e} -> {}".format(
         I_lo, _I_ref(0.01), relA, "OK" if g_a else "FAIL"), flush=True)
 
-    # GATE B: velocity-saturation SIGNATURE. An exact match to the uniform-field q*N*v(E)*A formula is
-    # NOT expected at high bias -- the carrier density redistributes off N_bg under the strong field
-    # (ohmic contacts supply carriers), so that idealization only holds at low bias (Gate A). The robust,
-    # mesh-independent signature is a CONCAVE J-V: the chord conductance G=I/V drops with bias and the
-    # high-bias current falls below the ohmic linear extrapolation; the magnitude sits near q*N*v_sat*A.
+    # GATE B: the uniform-field q*N*v(E)*A at high bias AND the velocity-saturation SIGNATURE (a CONCAVE
+    # J-V: the chord conductance G=I/V drops with bias, the high-bias current falls below the ohmic
+    # extrapolation). On the gmsh mesh the match was impossible (I_hi/(qN v_sat A) = 1.16, the inflated
+    # couplings) and the old comment blamed carrier redistribution; on the exact Kuhn mesh the uniform bar
+    # stays uniform and I_hi equals q N v(E) A (MEASURED rel 0.0; module docstring, MESH).
     I_hi = _current_at(dev, 4.0, abs_tol, 24)          # E=4e7 V/m: mu_low*E/v_sat=1.6 -> v ~ 0.85 v_sat
     G_lo, G_hi = I_lo / 0.01, I_hi / 4.0
     I_lin = G_lo * 4.0                                  # constant-mobility ohmic extrapolation at 4 V
     I_sat = Q * N_BG * V_SAT * A
-    g_b = (G_hi < 0.85 * G_lo) and (I_hi < 0.9 * I_lin) and (0.7 < I_hi / I_sat < 1.6)
+    relB = abs(I_hi - _I_ref(4.0)) / _I_ref(4.0)
+    g_b = (G_hi < 0.85 * G_lo) and (I_hi < 0.9 * I_lin) and (relB < 1e-6)
     print("[fm] B saturation signature: G(V) {:.3e}->{:.3e} S ({:.0%} of ohmic), I_hi={:.3e} < ohmic "
-          "extrap {:.3e}; I_hi/(qN v_sat A)={:.2f} -> {}".format(
-              G_lo, G_hi, G_hi / G_lo, I_hi, I_lin, I_hi / I_sat, "OK" if g_b else "FAIL"), flush=True)
+          "extrap {:.3e}; I_hi/(qN v_sat A)={:.4f}, vs q N v(E) A rel={:.2e} -> {}".format(
+              G_lo, G_hi, G_hi / G_lo, I_hi, I_lin, I_hi / I_sat, relB, "OK" if g_b else "FAIL"), flush=True)
 
     # GATE C: reduces to the constant-mobility solve (huge v_sat -> mu == mu_low) to ~1e-6
     dev_off = _build("m_off", "dev_off")
