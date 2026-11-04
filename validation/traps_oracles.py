@@ -16,13 +16,13 @@ whose 1-D device builders and closed forms this script reuses so the two cannot 
           on this branch with the traps OFF: sha256-identical Potential/Electrons/Holes/USRH/
           PotentialNodeCharge arrays.
   GATE G  (--3d) 3-D: G1 the Stacked3DSpec(interface_traps=...) weights are exact (sum = lateral^2,
-          only on the semi/oxide face); G2 the D_it psi_s shift equals the 1-D
-          cap's. G2 FAILS (3-D 0.80 x the 1-D shift) for a PRE-EXISTING 3-D mesh defect: gmsh's
-          tetrahedra are not Delaunay, DEVSIM's Voronoi node volumes over-count the region volume
-          (1.20 x semi, 1.29 x oxide) and the discrete capacitances with them, so a geometric sheet
-          charge is diluted. A pure-Laplace 3-D sheet test (no carriers) shows the same (0.86); a
-          3-D gate shift of -Q/C_ox reproduces the 1-D answer, and mesh_min 0.25 / 0.5 / 1 nm leaves
-          the ratio at 0.79 / 0.79 / 0.77 -- not a discretization error that refinement removes.
+          only on the semi/oxide face); G2 the D_it psi_s shift equals the 1-D cap's (5 %: the 3-D
+          z-resolution); G3 (D2c tensor mesh only) the 3-D shift equals a 1-D solve on the 3-D mesh's
+          own z-lines to 1e-6 and psi_s is laterally invariant. Before D2c (v0.14.0) G2 FAILED at
+          0.80 x the 1-D shift: DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual
+          pieces, so on gmsh's non-well-centred tetrahedra the node volumes over-counted (1.20 x semi,
+          1.29 x oxide) and the discrete capacitances with them; refinement did not help (mesh_min
+          0.25 / 0.5 / 1 nm: 0.79 / 0.79 / 0.77). docs/audit/2026-11-03-devsim-3d-mesh.md.
 
 Run:  python -m validation.traps_oracles [--3d] [--main <path to a main checkout>]
 """
@@ -299,10 +299,12 @@ def gate_g(it=None, mesh_min_nm=0.5):
         sol = Devsim3DEquilibrium(spec, device_name="v3d", mesh_name="v3m")
         sol.build_device()
         sol.solve(BiasPoint({"gate": vg}, "g"))
+        diag["z_lines"] = getattr(sol, "_mesh_axes_m", (None, None, None))[2]   # tensor mesh only (D2c)
         z = T._vals("v3d", "semi", "z")
         pot = T._vals("v3d", "semi", "Potential")
         top, bot = z >= z.max() - 1e-15, z <= z.min() + 1e-15
         out = float(pot[top].mean() - pot[bot].mean())
+        diag.setdefault("psi_s_spread", []).append(float(np.ptp(pot[top])))   # lateral invariance
         if spec_it is not None:                                 # wiring + mesh diagnostics
             vol = T._vals("v3d", "semi", "NodeVolume")
             a_it = T._vals("v3d", "semi", "ItArea0") * vol
@@ -315,13 +317,19 @@ def gate_g(it=None, mesh_min_nm=0.5):
         sol.teardown()
         return out
 
-    def psi1d(spec_it):
+    def psi1d(spec_it, z_lines=None):
         dev, m = "v1d", "v1m"
         T._clear(dev)
         ds.create_1d_mesh(mesh=m)
-        ds.add_1d_mesh_line(mesh=m, pos=0.0, ps=1e-9, tag="body")
-        ds.add_1d_mesh_line(mesh=m, pos=tsi, ps=0.05e-9, tag="i")
-        ds.add_1d_mesh_line(mesh=m, pos=tsi + tox, ps=0.5e-9, tag="gate")
+        if z_lines is None:                                     # the fine 1-D reference mesh
+            ds.add_1d_mesh_line(mesh=m, pos=0.0, ps=1e-9, tag="body")
+            ds.add_1d_mesh_line(mesh=m, pos=tsi, ps=0.05e-9, tag="i")
+            ds.add_1d_mesh_line(mesh=m, pos=tsi + tox, ps=0.5e-9, tag="gate")
+        else:                                                   # EXACTLY the 3-D mesh's z-lines (gate G3)
+            zl = np.asarray(z_lines, dtype=float)
+            for k, zk in enumerate(zl):
+                tag = {0: "body", len(zl) - 1: "gate"}.get(k, "i" if abs(zk - tsi) < 1e-15 else None)
+                ds.add_1d_mesh_line(mesh=m, pos=float(zk), ps=1.0, **({"tag": tag} if tag else {}))
         ds.add_1d_contact(mesh=m, name="body", tag="body", material="metal")
         ds.add_1d_contact(mesh=m, name="gate", tag="gate", material="metal")
         ds.add_1d_region(mesh=m, material="Si", region="si", tag1="body", tag2="i")
@@ -355,10 +363,17 @@ def gate_g(it=None, mesh_min_nm=0.5):
     diag = {}
     a3, b3 = psi3d(None), psi3d(it)
     a1, b1 = psi1d(None), psi1d(it)
+    if diag.get("z_lines") is not None:                         # G3: the 1-D solve on the 3-D z-lines
+        a1z, b1z = psi1d(None, diag["z_lines"]), psi1d(it, diag["z_lines"])
+        diag["same_z"] = (a1z, b1z)
+        print("[trp]   1-D on the 3-D z-lines ({} nodes): psi_s {:.9f} -> {:.9f} V (shift {:+.9f}); 3-D "
+              "{:.9f} -> {:.9f} (shift {:+.9f}); 3-D lateral psi_s spread {:.1e} / {:.1e} V".format(
+                  len(diag["z_lines"]), a1z, b1z, b1z - a1z, a3, b3, b3 - a3, *diag["psi_s_spread"]),
+              flush=True)
     print("[trp]   psi_s(3-D) {:.6f} -> {:.6f} V (shift {:+.6f});  psi_s(1-D) {:.6f} -> {:.6f} V "
           "(shift {:+.6f})".format(a3, b3, b3 - a3, a1, b1, b1 - a1), flush=True)
     print("[trp]   3-D interface area: sum/lateral^2 - 1 = {:.1e}, all on the top face = {}, "
-          "per-node partition vs DEVSIM SurfaceArea max {:.1%} of a node (barycentric thirds vs DEVSIM's own split; same total); 3-D mesh sum(NodeVolume)/geometric volume: "
+          "per-node partition vs DEVSIM SurfaceArea max {:.1%} of a node (circumcentric split, D2c; same total); 3-D mesh sum(NodeVolume)/geometric volume: "
           "semi {:.3f}, oxide {:.3f}".format(diag["area_rel"], diag["on_top"], diag["vs_SurfaceArea"],
                                              diag["vol_semi"], diag["vol_ox"]), flush=True)
     return (b3 - a3), (b1 - a1), diag
@@ -425,14 +440,22 @@ def main():
         H.gate("G1 3-D interface wiring", dg["area_rel"] < 1e-12 and dg["on_top"],
                "total area exact ({:.0e}), every weighted node on the semi/oxide face".format(
                    dg["area_rel"]))
-        # G2 FAILS on the current 3-D mesh, for a PRE-EXISTING reason (docs/audit/2026-11-03-devsim-
-        # traps.md section 6): gmsh's tetrahedra are not Delaunay, so DEVSIM's Voronoi finite volumes
-        # over-count (sum NodeVolume = 1.20 x the semi volume, 1.29 x the oxide's) and the discrete
-        # capacitances with them; a GEOMETRIC sheet charge then acts at ~0.8 of its 1-D effect. Kept
-        # as a real gate (not relaxed) so it turns green when the 3-D mesh is fixed.
+        # G2 FAILED (ratio 0.80) on the pre-D2c gmsh mesh: DEVSIM 2.11 sums the MAGNITUDES of each
+        # tet's circumcentric dual pieces, so on gmsh's non-well-centred tets sum NodeVolume = 1.20 x the
+        # semi volume, 1.29 x the oxide's, and a GEOMETRIC sheet charge acted at ~0.8 of its 1-D effect.
+        # The D2c tensor (Kuhn) mesh makes the volumes exact (docs/audit/2026-11-03-devsim-3d-mesh.md).
+        # The 5 % tolerance covers the z-resolution difference only (3-D mesh_min 0.5 nm vs the 1-D
+        # reference's 0.05 nm at the interface; MEASURED 1.1 %); G3 removes it.
         H.gate("G2 3-D D_it shift == 1-D", abs(s3 - s1) < 0.05 * abs(s1) and abs(s1) > 5e-3,
                "{:+.5f} vs {:+.5f} V (ratio {:.3f}; 3-D mesh volume excess semi {:.3f} / oxide {:.3f})"
                .format(s3, s1, s3 / s1, dg["vol_semi"], dg["vol_ox"]))
+        if dg.get("same_z") is not None:
+            a1z, b1z = dg["same_z"]
+            s1z = b1z - a1z
+            H.gate("G3 3-D == 1-D on the same z-lines", abs(s3 - s1z) < 1e-6 * abs(s1z)
+                   and max(dg["psi_s_spread"]) < 1e-9,
+                   "shift {:+.9f} vs {:+.9f} V (rel {:.1e} < 1e-6); lateral psi_s spread {:.1e} V < 1e-9"
+                   .format(s3, s1z, abs(s3 / s1z - 1), max(dg["psi_s_spread"])))
     return H.summary("D1c TRAPS")
 
 
