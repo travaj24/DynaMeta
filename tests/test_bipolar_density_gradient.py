@@ -204,7 +204,10 @@ def test_bgn_quasi_fields_compose_with_the_quantum_potentials():
 def test_classical_limit_b0_reproduces_bipolar_dd():
     """GATE A: the bipolar DG ACTIVE at b = 0 reproduces the classical bipolar DD solution of a p-n
     diode (fields and the terminal current) to solver tolerance; Lambda_n = Lambda_p = 0. Measured:
-    max rel 1.2e-12 at +0.4 / +0.2 / -0.5 V."""
+    0 (bit-identical double readouts) at +0.4 / +0.2 / -0.5 V in the extended Newton the validation
+    runs since 2026-11-03. (The earlier 1.2e-12 in double held only because the DG flux then repeated
+    the classical kahan3 arithmetic bit for bit: the bipolar DG's two-Bernoulli flux differs from it at
+    the forward current's ~1e-8 double round-off floor and measured 2.2e-9 here -- validation _diode.)"""
     d = V.diode(gamma_fracs=(None, 0.0), biases=(0.4,))
     cl, dg = d[None][0.4], d[0.0][0.4]
     for k in ("Potential", "Electrons", "Holes"):
@@ -212,6 +215,69 @@ def test_classical_limit_b0_reproduces_bipolar_dd():
         assert np.max(np.abs(a - b) / np.abs(a)) < 1e-9, k
     assert abs(dg["I"] / cl["I"] - 1.0) < 1e-9
     assert dg["max_lam_Vt"] < 1e-12
+
+
+@pytest.mark.parametrize("carrier", ["electrons", "holes"])
+def test_dg_edge_flux_is_accurate_at_large_drift(carrier):
+    """The bipolar DG Scharfetter-Gummel flux keeps full precision at |v| ~ 20-40, where an insulator-
+    wall edge sits by construction (c@wall = 1e-12 c_cl -> |v| ~ 27.6). One 1 nm edge, the drift set
+    through the quantum potential on a flat psi; each Bernoulli term isolated by zeroing the other
+    node's density. Oracle: the flux bracket c@n1 B(-v) - c@n0 B(v) (electrons) / c@n1 B(v) -
+    c@n0 B(-v) (holes) with a 40-digit mpmath B, at the v DEVSIM computed. Gate 1e-13. The kahan3
+    form (B(-v) spelled B(v) + v) FAILS it: measured 1.9e-7 at v = -21, 6.5e-5 at -27.6, 100 % at
+    -40, so the gate fails on it for both carriers (physics_density_gradient._JN_DG_BIPOLAR); the
+    two-Bernoulli form measures 3.0e-16 (electrons) / 3.1e-16 (holes) on both OpenBLAS builds."""
+    mp = pytest.importorskip("mpmath")
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers import physics_density_gradient as DG
+    dev, mesh = "bdg_flux", "bdg_flux_m"
+    el = carrier == "electrons"
+    lam, c, cur, vd = (("QLambda", "Electrons", "ElectronCurrentDG", "vdiff_g_dg") if el else
+                       ("QLambdaP", "Holes", "HoleCurrentDG", "vdiff_gp_dg"))
+    mu, sgn = ("mu_n", 1.0) if el else ("mu_p", -1.0)
+    worst = 0.0
+    try:
+        V._drop(dev, mesh)
+        with V._quiet():
+            ds.create_1d_mesh(mesh=mesh)
+            ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=1e-9, tag="a")
+            ds.add_1d_mesh_line(mesh=mesh, pos=1e-9, ps=1e-9, tag="c")
+            ds.add_1d_contact(mesh=mesh, name="a", tag="a", material="metal")
+            ds.add_1d_contact(mesh=mesh, name="c", tag="c", material="metal")
+            ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="a", tag2="c")
+            ds.finalize_mesh(mesh=mesh)
+            ds.create_device(mesh=mesh, device=dev)
+            ds.node_model(device=dev, region="s", name="NetDoping", equation="1e22")
+            BP.setup_bipolar_region(dev, "s", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1e16,
+                                    mobility_n_m2Vs=0.1, mobility_p_m2Vs=0.04, tau_n_s=1e-7,
+                                    tau_p_s=1e-7, fd_enhancement=False)
+            DG.setup_bipolar_dg(dev, "s", m_eff_n_kg=V.MN, m_eff_p_kg=V.MP)
+            other = "Holes" if el else "Electrons"
+            for nm, val in (("Potential", 0.0), (other, 1e10), ("QSqrtN", 1.0), ("QSqrtP", 1.0),
+                            ("QLambda", 0.0), ("QLambdaP", 0.0)):
+                ds.set_node_values(device=dev, region="s", name=nm, values=[val, val])
+        vt = float(ds.get_parameter(device=dev, region="s", name="V_t"))
+        pref = sgn * float(ds.get_parameter(device=dev, region="s", name="ElectronCharge")) * float(
+            ds.get_parameter(device=dev, region="s", name=mu)) * vt * float(
+            ds.get_edge_model_values(device=dev, region="s", name="EdgeInverseLength")[0])
+
+        def B(x):                                     # 40 digits, scoped (no global mp.dps write)
+            with mp.workdps(40):
+                return +(x / mp.expm1(x)) if x != 0 else mp.mpf(1)
+
+        for v in (-40.0, -27.6, -21.0, -5.0, 0.3, 5.0, 21.0, 27.6, 40.0):
+            # electrons: v = (Lambda@n0 - Lambda@n1)/V_t ; holes: v = -(Lambda@n0 - Lambda@n1)/V_t
+            ds.set_node_values(device=dev, region="s", name=lam,
+                               values=[(v if el else -v) * vt, 0.0])
+            for c0, c1 in ((0.0, 1e20), (1e20, 0.0)):
+                ds.set_node_values(device=dev, region="s", name=c, values=[c0, c1])
+                vv = mp.mpf(float(ds.get_edge_model_values(device=dev, region="s", name=vd)[0]))
+                got = float(ds.get_edge_model_values(device=dev, region="s", name=cur)[0]) / pref
+                ref = (c1 * B(-vv) - c0 * B(vv)) if el else (c1 * B(vv) - c0 * B(-vv))
+                worst = max(worst, float(abs(got / ref - 1)))
+    finally:
+        V._drop(dev, mesh)
+    assert worst < 1e-13
 
 
 # ---- (b) analytic dark space ----------------------------------------------------------------------
@@ -273,12 +339,19 @@ def test_dg_density_is_the_dg_bvp_on_its_own_potential(carrier):
 
 def test_inversion_equilibrium_flat_qfls_and_np():
     """GATE E: inverted MOS, both carriers quantum at the wall: the modified quasi-Fermi levels are flat
-    (measured 1.7e-10 / 2.2e-16 V), n p = n_i^2 exp((Ln + Lp)/V_t) at every node (6.4e-9) and n_i^2 in
-    the neutral bulk (4.2e-7, the 1e-6 solve tolerance). quantum_srh=False breaks detailed balance:
-    phi drifts by 6 mV off the wall node."""
+    (measured 3.3e-16 / 5.6e-17 V on scipy's OpenBLAS, 4.3e-15 / 5.6e-17 V on Elmer's), n p = n_i^2
+    exp((Ln + Lp)/V_t) at every node (7.1e-15 / 1.6e-13) and n_i^2 in the neutral bulk (4.2e-7, the
+    1e-6 solve tolerance). quantum_srh=False breaks detailed balance: phi drifts by 6 mV off the wall
+    node.
+    TIGHTENED 2026-11-03 from 1e-8 / 1e-7 to 1e-11 / 1e-10: the 1.7e-10 V and 6.4e-9 measured until
+    then were not a solve floor but the kahan3 flux's B(v) + v cancellation on the electron wall edge
+    (|v| = 27.6; physics_density_gradient._JN_DG_BIPOLAR), so the new bounds fail the old flux by 16x /
+    64x in double and keep >= 600x margin (in the extended Newton the validation now runs, the old
+    flux's loss would shrink to ~1e-22: test_dg_edge_flux_is_accurate_at_large_drift pins the flux
+    itself)."""
     eq = V.inversion_equilibrium(quantum_srh=True)
-    assert eq["max_phi_n"] < 1e-8 and eq["max_phi_p"] < 1e-8
-    assert eq["np_quantum"] < 1e-7 and eq["np_bulk"] < 1e-6
+    assert eq["max_phi_n"] < 1e-11 and eq["max_phi_p"] < 1e-11
+    assert eq["np_quantum"] < 1e-10 and eq["np_bulk"] < 1e-6
     assert eq["classical_peak_nm"] == 0.0 and eq["inversion_peak_nm"] > 0.5
     eq0 = V.inversion_equilibrium(quantum_srh=False)
     assert eq0["max_phi_interior"] > 1e-4

@@ -140,9 +140,9 @@ DEVSIM solution is always what gets measured.
 
 | Gate | Fixture | Oracle | Measured | Gate tol | ON vs off |
 |---|---|---|---|---|---|
-| R26-a (x3) | n 1e25, SRH 1 us + D-S Auger + Trupke B, 150 um zero-flux slab, G = 1e24 / 1e30 / 1e33 (dp/n0 = 3e-9 .. 0.87) | brentq root of G = U_SRH + U_A + U_rad | 0, -4.4e-16, -1.1e-16 | 1e-9 | SRH-only root 29x / 32x / 229x larger |
-| R26-b (n, p) | Auger-only slab, low injection | tau_A = 1/(C n0^2) | -3.3e-9 / -4.9e-8 (= the dp/n0 injection term) | 1e-6 | SRH-only tau 1e3 s, 10 orders longer |
-| R26-c | Altermatt Coulomb-enhanced, n0 = 1e17 cm^-3 | 1/(g_eeh C_n n0^2), g_eeh = 8.4646 | -1.45e-7 | 1e-6 | 8.5x shorter than un-enhanced |
+| R26-a (x3) | n 1e25, SRH 1 us + D-S Auger + Trupke B, 150 um zero-flux slab, G = 1e24 / 1e30 / 1e33 (dp/n0 = 3e-9 .. 0.87) | brentq root of G = U_SRH + U_A + U_rad | 0, 2.2e-16, -1.1e-16 (bit-identical on both OpenBLAS builds) | 1e-9 | SRH-only root 29x / 32x / 229x larger |
+| R26-b (n, p) | Auger-only slab, low injection | tau_A = 1/(C n0^2) | -8.4e-9 / -4.9e-8 (= the dp/n0 injection term) | 1e-6 | SRH-only tau 1e3 s, 10 orders longer |
+| R26-c | Altermatt Coulomb-enhanced, n0 = 1e17 cm^-3 | 1/(g_eeh C_n n0^2), g_eeh = 8.4646 | -1.39e-7 | 1e-6 | 8.5x shorter than un-enhanced |
 | R26-d | radiative-dominated slab (90 % radiative), 3 mm | URad = B(np - n_i^2) at every node; root of G = U | 0 / 0 / 2.2e-16 | 1e-12 / 1e-9 | SRH-only 11.6x larger |
 | R27 formulas | Slotboom (old, Klaassen), del Alamo | re-typed formulas; cancellation-free light-doping branch | passes | 1e-12 / 1e-13 | |
 | R27-a | uniform n+ 1e19 cm^-3, zero-flux, holes kicked 3x | n p = n_ie^2 (n_ie^2/n_i^2 = 6.845) | 2.2e-16 | 1e-12 | an n_i-based SRH relaxes 5.8 off |
@@ -164,14 +164,29 @@ also asserts its own "ON is load-bearing" margin, so a flag that was silently ig
 
 Fixture lessons recorded in the tests:
 
-* A Potential-only contact pins psi at its EQUILIBRIUM value, so under injection a Debye layer forms
-  there. Measured at 1e24 with dp = 0.1 n0: n(0) = 1.44 n_bulk over about 25 nm. In a slab much
-  shorter than L, both quasi-Fermi levels are flat, so n p is uniform but n and p are not. The first
-  version of R26-a put an Auger root in such a slab and measured exactly the resulting 5e-4. The root
-  gates therefore use slabs of 20+ diffusion lengths.
-* A radiative-ONLY zero-flux slab pins its constant hole mode only through `dU/dp = B n0 ~ 1e4 /s`,
-  against a ~5e13 /s diffusion operator. UMFPACK declared that Jacobian singular mid-ramp. R26-d
-  therefore adds a weak SRH term (10 %) and keeps the radiative-only statement node-wise.
+* **The slab contact (corrected 2026-11-03).** The slabs first used a Potential-only contact, so no
+  carrier was pinned anywhere: a floating body. In 1-D steady state with zero flux at both ends, the
+  sum of all electron and hole continuity rows is identically zero (charge conservation), so the DC
+  Jacobian is rank-deficient by exactly one at every G. Measured on the R26-a ramp: the continuity
+  column sums are <= 1.1e-16 of the column norms in all 94 Newton matrices, and the physically scaled
+  smallest singular value is 1.3-1.6e-15. The body potential was then set by round-off. A 0.1 V body
+  shift re-converged in place; the far-end potential differed by 0.16 mV between scipy's and Elmer's
+  OpenBLAS; and R26-a[1e33] hit an exact zero pivot ("umfpack numeric failed") on scipy's OpenBLAS
+  only, after the DEVSIM 2.11 BLAS pin. The contact now pins psi and the MAJORITY density and leaves
+  the minority row zero-flux. The steady state is unchanged: the minority rows force
+  sum vol q (G - U) = 0, so the contact exchanges no net carriers (measured 3e-17 of q G L). The
+  scaled smallest singular value is now 1.5e-5, and the Newton matrices and results are bit-identical
+  on both OpenBLAS builds. `test_slab_is_well_posed` gates it and fails on the old fixture under both.
+* With that contact, a Debye layer one node thick forms under injection. Measured on R26-a at
+  G = 1e33: n(0) = 0.53 n_far and p(0) = 1.87 p_far, both within 1.5 % at the next node. In a slab
+  much shorter than L, both quasi-Fermi levels are flat, so n p is uniform but n and p are not. The
+  first version of R26-a put an Auger root in such a slab and measured a 5e-4 shift. The root gates
+  therefore use slabs of 20+ diffusion lengths.
+* A radiative-ONLY slab (tau_SRH = 1e3 s) first failed with UMFPACK declaring the Jacobian singular
+  mid-ramp. That was put down to its weak `dU/dp = B n0` pinning. It was the floating-body null mode:
+  on the old fixture the 200 nm radiative-only ramp still fails under both OpenBLAS builds, and on the
+  majority-contact fixture it lands on the brentq root (0, and 2.2e-16 for the 3 mm slab). R26-d
+  still adds a weak SRH term (10 %) and keeps the radiative-only statement node-wise.
 
 Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
 `test_dc_solve_gummel.py`, `test_audit_2026_07_17_wave7_carriers.py` and `test_api_surface.py` give

@@ -104,6 +104,21 @@ def _clamped_bernoulli(arg: str) -> str:
     return "B(ifelse({a} > 200, 200, ifelse({a} < -200, -200, {a})))".format(a=arg)
 
 
+def _upper_clamped_bernoulli(arg: str) -> str:
+    """B(arg) with the argument clamped at +200 ONLY -- the Bernoulli pair of the bipolar DG's two-
+    Bernoulli flux (_JN_DG_BIPOLAR). e^arg can overflow only for arg -> +inf, where B -> 0 anyway; for
+    arg -> -inf B(arg) -> -arg, finite, with slope -1. Clamping that side too (as _clamped_bernoulli
+    does) makes BOTH Bernoullis of the pair constant once |v| > 200, so a wall edge's flux -- the only
+    equation that sees the wall node's Lambda -- loses its whole Lambda dependence in a Newton
+    transient and UMFPACK meets an exact zero column (MEASURED 2026-11-03: GATE B flat_wall
+    "Convergence failure!" and inversion_equilibrium(quantum_srh=False) "umfpack numeric failed" under
+    both OpenBLAS builds with the two-sided clamp; the kahan3 form never noticed because its unclamped
+    c@n1 v term kept a slope). DEVSIM 2.11.2's own B / dBdx are overflow-safe at any argument
+    (measured B(1e5) = 0, B(-1e5) = 1e5, dBdx = -0 / -1, no inf/NaN), so the clamp is belt-and-braces;
+    it never binds at convergence."""
+    return "B(ifelse({a} > 200, 200, {a}))".format(a=arg)
+
+
 def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
                                 gamma: float = 1.0) -> None:
     """Add the (QSqrtN, QLambda) variables + equations and re-point the electron continuity at
@@ -136,6 +151,33 @@ _JN_DG = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
           "kahan3(Electrons@n1*Bern_g_dg, Electrons@n1*vdiff_g_dg, -Electrons@n0*Bern_g_dg)")
 _JP_DG = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
           "kahan3(Holes@n1*Bern_gp_dg, -Holes@n0*Bern_gp_dg, -Holes@n0*vdiff_gp_dg)")
+
+# The BIPOLAR DG fluxes (setup_bipolar_dg) in the TWO-BERNOULLI form
+#     Jn ~ n@n1 B(-v) - n@n0 B(v) ,   Jp ~ -( p@n1 B(v) - p@n0 B(-v) ) ,
+# NOT the kahan3 form above, which spells B(-v) as B(v) + v. That identity cancels catastrophically
+# for v << 0: B(v) ~ |v| and v ~ -|v| leave B(-v) ~ |v| e^-|v| as the difference of two O(|v|)
+# numbers, so its relative error is ~ eps |v| e^|v| -- MEASURED against mpmath on DEVSIM 2.11.2
+# (2026-11-03): 1.9e-7 at v = -21, 6.5e-5 at -27.6, 100 % at -40 (and dBdx(v) + 1, the Jacobian,
+# 3.8e-9 / 1.5e-6 / 34 %), while DEVSIM's own B(-v) and -dBdx(-v) stay <= 2.1e-16 at every v. A
+# classical DD edge never sees |v| ~ 20 (the mesh resolves the Debye length), but an insulator-wall
+# edge does BY CONSTRUCTION: the wall node holds c = u_floor^2 = 1e-12 c_cl, so its zero-flux edge
+# sits at |v| = ln(c@n1/c@n0) ~ 20-28 -- with v < 0 for ELECTRONS when the wall is the edge's n0
+# (for holes the kahan3 form multiplies the cancelling B(v) + v by the depleted p@n0, so the same
+# loss hits them on the opposite edge orientation, i.e. on any 2-D/3-D wall). Measured in GATE C
+# (validation/bipolar_density_gradient.py, p-type MOS, 1e24, 0.15 V): Lambda_n at the wall node --
+# fixed ONLY by that edge's flux (setup_dg_insulator_wall) -- converged linearly and then sat in a
+# period-3 Newton cycle at relative update 1.9-3.8e-7 for 100 iterations, against REL_ERR 1e-7, so
+# the solve passed or failed on the BLAS's round-off (fails with scipy's OpenBLAS, passed with
+# Elmer's in 23 iterations still dithering at 4.6-8.0e-8). The two-Bernoulli form has no
+# cancellation (its subtraction is the physical diffusion-drift balance, error eps |terms| as in
+# kahan3) and is algebraically the same flux. The UNIPOLAR DG keeps _JN_DG: its definition is pinned
+# character-for-character by tests/_dg_calllog.py and no validated unipolar recipe has a wall, but a
+# unipolar region given setup_dg_insulator_wall / setup_dg_hard_wall would carry the same loss (open:
+# docs/audit/2026-11-03-devsim-bipolar-density-gradient.md, sec. 1.6).
+_JN_DG_BIPOLAR = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
+                  "(Electrons@n1*Bern_g_dg_m - Electrons@n0*Bern_g_dg)")
+_JP_DG_BIPOLAR = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
+                  "(Holes@n1*Bern_gp_dg - Holes@n0*Bern_gp_dg_m)")
 
 
 def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
@@ -351,11 +393,15 @@ _BIPOLAR_DG = {
     "electrons": dict(u="QSqrtN", lam="QLambda", c="Electrons", b="b_dg",
                       eq="ElectronContinuityEquation", cur="ElectronCurrent",
                       cur_dg="ElectronCurrentDG", vd="vdiff_g_dg", bern="Bern_g_dg",
-                      vd_expr="vdiff_g + (QLambda@n0 - QLambda@n1)/(V_t*g_enh)", jexpr=_JN_DG),
+                      bern_m="Bern_g_dg_m",
+                      vd_expr="vdiff_g + (QLambda@n0 - QLambda@n1)/(V_t*g_enh)",
+                      jexpr=_JN_DG_BIPOLAR),
     "holes": dict(u="QSqrtP", lam="QLambdaP", c="Holes", b="b_dg_p",
                   eq="HoleContinuityEquation", cur="HoleCurrent",
                   cur_dg="HoleCurrentDG", vd="vdiff_gp_dg", bern="Bern_gp_dg",
-                  vd_expr="vdiff_gp - (QLambdaP@n0 - QLambdaP@n1)/(V_t*g_enh_p)", jexpr=_JP_DG),
+                  bern_m="Bern_gp_dg_m",
+                  vd_expr="vdiff_gp - (QLambdaP@n0 - QLambdaP@n1)/(V_t*g_enh_p)",
+                  jexpr=_JP_DG_BIPOLAR),
 }
 DG_SRH_TERM = "dgsrh"            # RTerm_dgsrh: the quantum detailed-balance correction to USRH
 
@@ -423,7 +469,9 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
                               b=sp["b"], b_full=dg_b_coefficient(m, g))
         wrt = ("Potential", sp["lam"], sp["c"])
         _edge_with_derivs(device, region, sp["vd"], sp["vd_expr"], wrt)
-        _edge_with_derivs(device, region, sp["bern"], _clamped_bernoulli(sp["vd"]), wrt)
+        _edge_with_derivs(device, region, sp["bern"], _upper_clamped_bernoulli(sp["vd"]), wrt)
+        _edge_with_derivs(device, region, sp["bern_m"],                # B(-v): see _JN_DG_BIPOLAR
+                          _upper_clamped_bernoulli("(-{})".format(sp["vd"])), wrt)
         _edge_with_derivs(device, region, sp["cur_dg"], sp["jexpr"], wrt)
         _repoint_region_current(device, region, sp["eq"], sp["cur_dg"])
         done.append(key)
