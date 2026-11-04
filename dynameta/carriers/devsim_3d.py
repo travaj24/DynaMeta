@@ -29,7 +29,7 @@ Gauss, 3-D == 1-D on the same z-lines).
 MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
 right-angled Kuhn tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
 (_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). The gmsh paths below survive as
-mesher="gmsh" (legacy, UnreliableResultWarning).
+mesher="gmsh" (legacy, UnreliableResultWarning; kept only to reproduce pre-v0.14 numbers, removed in v0.15).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -162,7 +162,10 @@ class Stacked3DSpec:
     # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (right-angled) tetrahedra:
     # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
     # every circumcentric piece >= 0). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
-    # reproduce old numbers: DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual pieces, so
+    # reproduce old numbers and REMOVED in v0.15 (user decision 2026-11-04; its warning stays an
+    # UnreliableResultWarning, not a DynaMetaDeprecationWarning: the numbers it returns are wrong, which
+    # is what that category means, while the deprecation class is for renamed spellings that still give
+    # the same answer -- docs/audit/2026-11-04-v0.14-user-decisions.md). DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual pieces, so
     # on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
     # the D1c gate-G2 cap) and integrated charge is ~20 % wrong (docs/audit/2026-11-03-devsim-3d-mesh.md).
     mesher:          str = "tensor"
@@ -1006,8 +1009,9 @@ class Devsim3DEquilibrium:
         warnings.warn(
             "Stacked3DSpec(mesher='gmsh'): the unstructured gmsh mesh has non-well-centred tetrahedra, on "
             "which DEVSIM 2.11's 3-D node volumes over-count (MEASURED sum NodeVolume 1.20-1.52 x the region "
-            "volume) and integrated charge is ~20 % wrong. Kept only to reproduce pre-v0.14 numbers; use "
-            "mesher='tensor' (docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
+            "volume) and integrated charge is ~20 % wrong. mesher='gmsh' is kept ONLY to reproduce pre-v0.14 "
+            "numbers and will be REMOVED in v0.15; use mesher='tensor', the default "
+            "(docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
         if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
             return self._build_mesh_incl()
         import gmsh

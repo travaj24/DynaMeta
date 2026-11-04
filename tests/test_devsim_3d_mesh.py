@@ -111,7 +111,10 @@ def test_legacy_gmsh_mesher_keeps_the_defect_and_warns(tmp_path):
         warnings.simplefilter("always")
         sol.build_device()
     try:
-        assert any(issubclass(x.category, UnreliableResultWarning) for x in w)
+        msgs = [str(x.message) for x in w if issubclass(x.category, UnreliableResultWarning)]
+        assert msgs
+        # user decision 2026-11-04: the warning states the legacy mesher's fate (fails on 6595bde)
+        assert any("pre-v0.14" in m and "REMOVED in v0.15" in m for m in msgs), msgs
         assert V._v("t3g", "semi", "NodeVolume").sum() / (V.L * V.L * V.TSI) > 1.1
     finally:
         sol.teardown()
