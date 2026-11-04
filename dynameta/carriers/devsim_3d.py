@@ -64,6 +64,8 @@ reads MSH 2.2.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -655,6 +657,23 @@ def _write_msh22(path, P, groups3, groups2) -> None:
         f.write("\n".join(lines))
 
 
+def _gmsh_lists(P, groups3, groups2):
+    """The SAME mesh as _write_msh22, as DEVSIM's in-memory create_gmsh_mesh arguments (coordinates: flat
+    x, y, z; elements: flat [type (2 triangle, 3 tetrahedron), physical index, node indices...] in the
+    file's order -- triangles per 2-D group, then tets per 3-D group; physical_names in the file's tag
+    order). Coordinates pass as the same doubles the file writes with repr (exact round-trip), so the
+    device is bit-identical to the file route (tests/test_devsim_3d_mesh.py gate)."""
+    names = list(groups2) + list(groups3)
+    idx = {n: i for i, n in enumerate(names)}
+    coords = [float(v) for v in np.asarray(P, dtype=np.float64).reshape(-1)]
+    elements = []
+    for typ, groups in ((2, groups2), (3, groups3)):
+        for n, conn in groups.items():
+            for row in np.asarray(conn, dtype=int):
+                elements += [typ, idx[n]] + [int(v) for v in row]
+    return coords, elements, names
+
+
 class Devsim3DEquilibrium:
     """A 3D-DEVSIM CarrierSolver (equilibrium) over a Stacked3DSpec. Implements the
     `regions()` + `solve(bias)` CarrierSolver Protocol, emitting CarrierField(ndim=3).
@@ -668,8 +687,23 @@ class Devsim3DEquilibrium:
         self.spec = spec
         self.mesh_name = mesh_name
         self.device = device_name
-        self.msh_path = msh_path or os.path.join(
-            os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
+        # msh_path (user decision 2026-11-04; docs/audit/2026-11-04-v0.14-user-decisions.md, task 7). It
+        # defaulted to ONE FIXED file, ~/.dynameta/_devsim3d.msh, shared by every process and every build.
+        # MEASURED 2026-11-04 (Windows, DEVSIM 2.11.2), two processes building different 3-D devices
+        # with the default, 100 builds each: one build came back with the OTHER process's mesh (wrong node
+        # count) and 199 of 200 died with "DEVSIM FATAL"; sequential builds in one process were fine.
+        # Also measured: create_gmsh_mesh(file=) never closes the file -- it cannot be deleted after
+        # finalize_mesh, delete_device or delete_mesh (WinError 32; pure-devsim repro in the doc), so a
+        # per-build temporary FILE could not be cleaned up in-process on Windows.
+        # Now: an explicit msh_path is written, read and kept exactly as before; the default (None)
+        # hands the tensor mesh to DEVSIM IN MEMORY (create_gmsh_mesh(coordinates=, elements=,
+        # physical_names=) -- no file at all; bit-identical to the file route, gated) and gives the legacy
+        # gmsh mesher a fresh tempfile.mkdtemp directory per build (removed after the read where the OS
+        # allows it; on Windows DEVSIM's open handle keeps it until the process exits).
+        self.msh_path = msh_path
+        self._last_msh_path: Optional[str] = None     # the file the last build wrote (diagnostics)
+        self._msh_file: Optional[str] = msh_path      # the file the _build_mesh* writers write (a direct
+                                                      # _build_mesh() call needs an explicit msh_path)
         self._built = False
         s = spec
         # the emitted CarrierField region is the GATE-ADJACENT semiconductor (where accumulation forms):
@@ -692,20 +726,44 @@ class Devsim3DEquilibrium:
                             bbox_m=(0.0, s.lateral_m, 0.0, s.lateral_m, *self._z_semi),
                             ndim=3)]
 
-    def build_device(self) -> None:
-        self._build_mesh()                                      # sets _mesh_regions, _iface_pairs, _top_diel
-        ds.create_gmsh_mesh(mesh=self.mesh_name, file=self.msh_path)
-        s = self.spec
-        for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
-            ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
-                              name="gate", material="metal")     # gate on the topmost (stack) dielectric
-        ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
-                              name="body", material="metal")
-        for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
-            ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
-        ds.finalize_mesh(mesh=self.mesh_name)
+    def _create_mesh_device(self) -> None:
+        """Build the mesh, hand it to DEVSIM (regions, contacts, interfaces) and create the device.
+        msh_path given: the file is written there, read, and kept (unchanged behaviour). msh_path None
+        (default): the tensor mesh goes to DEVSIM in memory (no file); the legacy gmsh mesher writes a
+        per-build tempfile.mkdtemp file, removed afterwards where the OS allows (__init__ comment)."""
+        tmpdir = None
+        path = self.msh_path
+        in_memory = path is None and self.spec.mesher == "tensor"
+        if path is None and not in_memory:
+            tmpdir = tempfile.mkdtemp(prefix="dynameta_devsim3d_{}_".format(os.getpid()))
+            path = os.path.join(tmpdir, "mesh.msh")
+        self._last_msh_path = path                              # None for the in-memory route
+        self._msh_file = path                                   # what the _build_mesh* writers write
+        try:
+            self._build_mesh()                                  # sets _mesh_regions, _iface_pairs, _top_diel
+            if in_memory:
+                coords, elements, names = _gmsh_lists(*self._mesh_data)
+                ds.create_gmsh_mesh(mesh=self.mesh_name, coordinates=coords, elements=elements,
+                                    physical_names=names)
+            else:
+                ds.create_gmsh_mesh(mesh=self.mesh_name, file=path)
+            for (name, mat, _role, _eps) in self._mesh_regions:     # layers + any lateral inclusions
+                ds.add_gmsh_region(mesh=self.mesh_name, gmsh_name=name, region=name, material=mat)
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="gate", region=self._top_diel,
+                                  name="gate", material="metal")     # gate on the topmost (stack) dielectric
+            ds.add_gmsh_contact(mesh=self.mesh_name, gmsh_name="body", region="semi",
+                                  name="body", material="metal")
+            for (ifn, r0, r1) in self._iface_pairs:                 # one interface per adjacent region pair
+                ds.add_gmsh_interface(mesh=self.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
+            ds.finalize_mesh(mesh=self.mesh_name)
+        finally:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         ds.create_device(mesh=self.mesh_name, device=self.device)
+
+    def build_device(self) -> None:
+        self._create_mesh_device()
+        s = self.spec
         if s.extended_precision:                    # BEFORE any model: DEVSIM types models at creation
             XP.enable(self.device)
         self._dd = (s.physics == "drift_diffusion")
@@ -1018,7 +1076,7 @@ class Devsim3DEquilibrium:
         import gmsh
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -1097,7 +1155,7 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)     # nm -> metre
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()
 
     def _build_mesh_tensor(self) -> None:
@@ -1199,8 +1257,10 @@ class Devsim3DEquilibrium:
         self._iface_pairs = iface_pairs
         self._top_diel = stack[-1][0]
         self._mesh_axes_m = tuple(a * 1e-9 for a in ax)        # diagnostics / tests
-        os.makedirs(os.path.dirname(os.path.abspath(self.msh_path)), exist_ok=True)
-        _write_msh22(self.msh_path, P * 1e-9, groups3, tri)
+        self._mesh_data = (P * 1e-9, groups3, tri)             # the in-memory route (_create_mesh_device)
+        if self._msh_file is not None:                          # an explicit msh_path: the file, as before
+            os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
+            _write_msh22(self._msh_file, P * 1e-9, groups3, tri)
 
     def _build_mesh_incl(self) -> None:
         """Adjacency-based 3D OCC build supporting lateral material INCLUSIONS (centered pillars in a
@@ -1213,7 +1273,7 @@ class Devsim3DEquilibrium:
         from collections import defaultdict
         s = self.spec
         Lnm = s.lateral_m * 1e9
-        os.makedirs(os.path.dirname(self.msh_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self._msh_file)), exist_ok=True)
         gmsh.initialize()
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("ms3d")
@@ -1316,5 +1376,5 @@ class Devsim3DEquilibrium:
         gmsh.model.mesh.generate(3)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
-        gmsh.write(self.msh_path)
+        gmsh.write(self._msh_file)
         gmsh.finalize()

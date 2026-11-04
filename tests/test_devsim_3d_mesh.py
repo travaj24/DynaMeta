@@ -104,6 +104,114 @@ def test_gauss_balance_and_lateral_invariance_of_the_bipolar_cap():
     assert r["psi_s_spread_V"] < 1e-9
 
 
+# ---- task 7 (user decision 2026-11-04): no shared default mesh file ---------------------------------
+_RACE_CHILD = r"""
+import os, sys, tempfile, time
+sys.path.insert(0, sys.argv[1])
+from dynameta.carriers.devsim_env import configure_math_libs, import_devsim
+configure_math_libs()
+ds = import_devsim()
+from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+from dynameta.constants import M_E
+nz, iters, go = int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+spec = Stacked3DSpec(semi_material="Si", oxide_material="SiO2", lateral_m=4e-9, semi_thk_m=8e-9,
+                     oxide_thk_m=2e-9, n_bg_m3=1e23, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E,
+                     mobility_m2Vs=0.135, grid_n=(4, 4, nz), mesh_min_nm=0.25 + 0.05 * (nz % 7), mesh_max_nm=1.0)
+def build(sol):                       # build_device's mesh/device step without the region physics
+    if hasattr(sol, "_create_mesh_device"):
+        return sol._create_mesh_device()
+    sol._build_mesh()                 # 6595bde: the same first lines of build_device, verbatim
+    ds.create_gmsh_mesh(mesh=sol.mesh_name, file=sol.msh_path)
+    for (name, mat, _r, _e) in sol._mesh_regions:
+        ds.add_gmsh_region(mesh=sol.mesh_name, gmsh_name=name, region=name, material=mat)
+    ds.add_gmsh_contact(mesh=sol.mesh_name, gmsh_name="gate", region=sol._top_diel, name="gate", material="metal")
+    ds.add_gmsh_contact(mesh=sol.mesh_name, gmsh_name="body", region="semi", name="body", material="metal")
+    for (ifn, r0, r1) in sol._iface_pairs:
+        ds.add_gmsh_interface(mesh=sol.mesh_name, gmsh_name=ifn, region0=r0, region1=r1, name=ifn)
+    ds.finalize_mesh(mesh=sol.mesh_name)
+    ds.create_device(mesh=sol.mesh_name, device=sol.device)
+def nodes_and_clear():
+    n = sum(len(ds.get_node_model_values(device=d, region=r, name="x"))
+            for d in ds.get_device_list() for r in ds.get_region_list(device=d))
+    for d in list(ds.get_device_list()):
+        ds.delete_device(device=d)
+    for m in list(ds.get_mesh_list()):
+        ds.delete_mesh(mesh=m)
+    return n
+build(Devsim3DEquilibrium(spec, mesh_name="m", device_name="d",
+                          msh_path=os.path.join(tempfile.mkdtemp(), "own.msh")))
+expected = nodes_and_clear()
+while not os.path.exists(go):
+    time.sleep(0.01)
+bad = 0
+for i in range(iters):
+    try:
+        build(Devsim3DEquilibrium(spec, mesh_name="m{}".format(i), device_name="d{}".format(i)))
+        bad += nodes_and_clear() != expected
+    except Exception:
+        bad += 1
+        nodes_and_clear()
+print("BAD", bad, "OF", iters, "EXPECTED", expected, flush=True)
+"""
+
+
+def test_two_processes_building_default_path_3d_devices_get_their_own_meshes(tmp_path):
+    """The default msh_path was ONE fixed file (~/.dynameta/_devsim3d.msh) for every process. MEASURED
+    on 6595bde (this harness, 100 builds per process): 1 build read the OTHER process's mesh and 199/200
+    died with 'DEVSIM FATAL'; with 25 builds each this gate fails there. Now the default tensor mesh goes
+    to DEVSIM in memory, so two concurrent processes with different devices both get their own mesh in
+    every build (MEASURED 0/100 + 0/100)."""
+    import subprocess
+    import time
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    child = tmp_path / "race_child.py"
+    child.write_text(_RACE_CHILD, encoding="utf-8")
+    go = tmp_path / "go.flag"
+    procs = [subprocess.Popen([sys.executable, str(child), repo, str(nz), "25", str(go)],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+             for nz in (21, 40)]
+    time.sleep(1.0)
+    go.write_text("go")
+    outs = [p.communicate(timeout=600)[0] for p in procs]
+    for out in outs:
+        line = [ln for ln in out.splitlines() if ln.startswith("BAD ")]
+        assert line and line[-1].startswith("BAD 0 OF 25"), out[-2000:]
+
+
+def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_path):
+    """Default msh_path: the tensor mesh reaches DEVSIM in memory (create_gmsh_mesh(coordinates=,
+    elements=, physical_names=)) -- no file is written, the old shared ~/.dynameta/_devsim3d.msh is
+    not touched -- and the device is BIT-IDENTICAL to the explicit-file route (node coordinates,
+    NodeVolume, EdgeCouple, the solved Potential; MEASURED 12 arrays / 5864 values array_equal). An
+    explicit msh_path still writes and keeps its file."""
+    import devsim as ds
+    from dynameta.sweep import BiasPoint
+    legacy = os.path.join(os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
+    before = os.path.getmtime(legacy) if os.path.exists(legacy) else None
+    got = []
+    for tag, kw in (("f", dict(msh_path=str(tmp_path / "f.msh"))), ("m", {})):
+        sol = D3.Devsim3DEquilibrium(V._spec(physics="drift_diffusion"), device_name="t3p" + tag,
+                                     mesh_name="t3pm" + tag, **kw)
+        sol.build_device()
+        try:
+            sol.solve(BiasPoint(label="g", voltages={"gate": 0.5}))
+            dev = "t3p" + tag
+            got.append({(r, nm): np.asarray(ds.get_node_model_values(device=dev, region=r, name=nm))
+                         for r in ds.get_region_list(device=dev)
+                         for nm in ("x", "y", "z", "NodeVolume", "Potential")})
+            got[-1].update({(r, "EdgeCouple"): np.asarray(ds.get_edge_model_values(device=dev, region=r,
+                                                                                    name="EdgeCouple"))
+                            for r in ds.get_region_list(device=dev)})
+            assert sol._last_msh_path == (kw.get("msh_path"))           # None: no file for the default
+        finally:
+            sol.teardown()
+    assert (tmp_path / "f.msh").exists()                                  # explicit path: written + kept
+    assert got[0].keys() == got[1].keys()
+    assert all(np.array_equal(got[0][k], got[1][k]) for k in got[0])
+    after = os.path.getmtime(legacy) if os.path.exists(legacy) else None
+    assert after == before                                                # the shared file is not written
+
+
 def test_legacy_gmsh_mesher_keeps_the_defect_and_warns(tmp_path):
     spec = V._spec(physics="drift_diffusion", mesher="gmsh")
     sol = D3.Devsim3DEquilibrium(spec, device_name="t3g", mesh_name="t3gm", msh_path=str(tmp_path / "g.msh"))
