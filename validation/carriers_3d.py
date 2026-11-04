@@ -35,7 +35,9 @@ LX_NM = LY_NM = 12.0          # small lateral box (physics is x,y-invariant) kee
 T_SEMI_NM, T_OX_NM = 12.0, 8.0
 T_OX = T_OX_NM * 1e-9                  # metres (Gauss check)
 N_BG, EPS_SEMI, EPS_OX, DOS = 4e26, 9.5, 18.0, 0.35 * M_E
-MSH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_moscap3d.msh")
+# per run (2026-11-04): this was a fixed validation/_moscap3d.msh shared by concurrent runs
+import tempfile  # noqa: E402
+MSH = os.path.join(tempfile.mkdtemp(prefix="dynameta_moscap3d_"), "moscap3d.msh")
 
 def build_mesh_tensor():
     """The cap on devsim_3d's Kuhn-tensor mesh: z graded 0.5 nm (within 1 nm of the interface) -> 3 nm

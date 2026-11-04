@@ -205,41 +205,16 @@ def bipolar_2d_resistor(dev="res2d", *, LX=1e-6, LY=0.4e-6, nd=1e23):
 
 
 def unipolar_3d_resistor(dev="res3d", *, LX=200.0, LY=80.0, LZ=80.0, n_bg=4e26):
-    """3-D unipolar DD bar (gmsh tetrahedra, nm units scaled to m). None if gmsh is missing."""
-    try:
-        import gmsh
-    except ImportError:
-        return None
+    """3-D unipolar DD bar [nm] on the exact Kuhn-tensor mesh (devsim_3d.kuhn_bar_mesh, 20 nm cells, in
+    memory). It was an unstructured gmsh mesh (14-20 nm) until 2026-11-04: MEASURED sum NodeVolume =
+    1.225 x the bar volume there (DEVSIM's unsigned circumcentric pieces), so G_dc was not sigma A/L --
+    gate A4's S = 4kT G still held, because the same couplings enter S and G (the ratio cancels the
+    defect). On this mesh G_dc = sigma A/L as well."""
+    from dynameta.carriers import devsim_3d as D3
     from dynameta.carriers.physics_equilibrium import M_E
     fresh()
-    path = os.path.join(os.path.expanduser("~"), ".dynameta", "_noise_resistor3d.msh")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 0)
-    gmsh.model.add("bar")
-    occ = gmsh.model.occ
-    occ.addBox(0, 0, 0, LX, LY, LZ)
-    occ.synchronize()
-    for _dim, tag in gmsh.model.getEntities(3):
-        gmsh.model.addPhysicalGroup(3, [tag], name="semi")
-    left, right = [], []
-    for dim, tag in gmsh.model.getEntities(2):
-        xc = occ.getCenterOfMass(dim, tag)[0]
-        if abs(xc) < 1e-4:
-            left.append(tag)
-        elif abs(xc - LX) < 1e-4:
-            right.append(tag)
-    gmsh.model.addPhysicalGroup(2, left, name="left")
-    gmsh.model.addPhysicalGroup(2, right, name="right")
-    gmsh.option.setNumber("Mesh.MeshSizeMin", 14.0)
-    gmsh.option.setNumber("Mesh.MeshSizeMax", 20.0)
-    gmsh.model.mesh.generate(3)
-    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
-    gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)
-    gmsh.write(path)
-    gmsh.finalize()
     mesh = dev + "_m"
-    ds.create_gmsh_mesh(mesh=mesh, file=path)
+    D3.kuhn_bar_mesh(mesh, (LX, LY, LZ), 20.0, region="semi", contacts=("left", "right"))
     ds.add_gmsh_region(mesh=mesh, gmsh_name="semi", region="bulk", material="ITO")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="left", region="bulk", name="lo", material="metal")
     ds.add_gmsh_contact(mesh=mesh, gmsh_name="right", region="bulk", name="hi", material="metal")
