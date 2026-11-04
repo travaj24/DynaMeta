@@ -249,7 +249,7 @@ independent reference where one exists.
 | `bridge_3d_field` | gate-side Re eps | 0.590 | 0.571 | follows n_top (above) |
 | `pipeline_3d_end_to_end` | gate-side Re eps (+1 V); optical dR | 0.714; 2.17e-4 | 0.571; 2.32e-4 | gmsh's interpolation onto the grid's top plane from unstructured nodes; tensor nodes lie on that plane |
 | `adversarial_pipeline_3d` | dR(+1 V - 0 V) | 9.4e-5 | 1.06e-4 | follows the accumulation |
-| `devsim_heterojunction` gate F (3-D, reported, not gated) | max abs(TE - continuous)/n at Vg 0 / +0.5 V | 1.506e-9 / 1.412e-9 (integration note) | **2.9e-16 / 2.9e-16** | no DC current (gate on an oxide), so both interface models carry zero interface flux and must give the same profile; the residue was the gmsh mesh's lateral non-invariance |
+| `devsim_heterojunction` gate F (3-D, reported, not gated) | max abs(TE - continuous)/n at Vg 0 / +0.5 V | 1.506e-9 / 1.412e-9 (integration note) | **2.9e-16 / 2.9e-16** | no DC current (gate on an oxide), so both interface models carry zero interface flux and must give the same profile (the gmsh residue of 1.5e-9 is gone) |
 | `devsim_heterojunction` gate F | max abs(DD - equilibrium)/n at Vg 0 / +0.5 V | 2.758e-3 / 2.093e-3 | 4.18e-3 / 2.35e-3 | not a geometry measure: the FD g-fit of the DD bulk against the Aymerich-Humet closure of the equilibrium (the script's own caveat, 0.8 % on ITO); it depends on where the nodes sit. No independent reference, recorded only |
 | `carriers_3d_from_design`, `from_design_multidielectric` | spec derivation only | -- | unchanged | -- |
 
