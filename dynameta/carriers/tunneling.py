@@ -165,7 +165,8 @@ def setup_btbt(device: str, region: str, params: BTBTParams, *, n_i: str = "n_i"
     MODEL name ("n_ie" under bandgap narrowing: setup_bipolar_region passes it, so D vanishes at the
     narrowed equilibrium n p = n_ie^2); a node model is evaluated at each D node (@n0/@n1 or
     @en0/@en1)."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     from dynameta.carriers import physics_bipolar_dd as _BP
     from dynameta.carriers.eq_registry import edge_with_derivs
 
@@ -229,7 +230,8 @@ def btbt_generation_current(device: str, region: str, *, depth_m: Optional[float
     quadrature weights the equations assemble (so in steady state it equals the BTBT share of the
     terminal current). 1-D: per unit area [A/m^2]; 2-D layered: per unit depth unless depth_m is given.
     Requires setup_btbt on the region."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     if depth_m is not None and not (depth_m > 0.0):
         raise ValueError("depth_m must be > 0 (or None to keep the mesh's native units)")
     dim = int(ds.get_dimension(device=device))
@@ -298,7 +300,8 @@ class OxideTunnelingParams:
 
 
 def _interface_between(device: str, region_a: str, region_b: str) -> str:
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     hits = [i for i in ds.get_interface_list(device=device)
             if set(ds.get_region_list(device=device, interface=i)) == {region_a, region_b}]
     if len(hits) != 1:
@@ -319,7 +322,8 @@ def oxide_tunneling_current(device: str, oxide_region: str, semiconductor_region
       area           the SurfaceArea weight of each node (1-D: 1; 2-D: m; 3-D: m^2)
       t_ox_m, normal_axis, interface, model.
     Requires a PLANAR interface normal to a coordinate axis (both builders' stacks are)."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     if not isinstance(params, OxideTunnelingParams):
         raise TypeError("oxide_tunneling_current: params must be an OxideTunnelingParams")
     if depth_m is not None and not (depth_m > 0.0):

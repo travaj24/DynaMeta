@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home
+
 try:
-    import devsim as ds
+    ds = import_devsim()
 except ImportError as _e:                                   # pragma: no cover - optional heavy solver
     raise ImportError("dynameta.carriers.devsim_layered requires the optional 'devsim' package "
                       "(pip install dynameta[solvers]); the pure-TMM / bring-your-own-solver paths "

@@ -54,9 +54,10 @@ from __future__ import annotations
 import warnings
 from contextlib import contextmanager
 
-import devsim as ds
-
+from dynameta.carriers.devsim_env import import_devsim
 from dynameta.warning_types import AdvisoryWarning
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 # Device-scoped parameters: model evaluation + equation assembly (read at model / equation creation).
 MODEL_PARAMETERS = ("extended_model", "extended_equation")

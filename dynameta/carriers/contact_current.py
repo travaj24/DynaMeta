@@ -22,7 +22,9 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim
+
+ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 __all__ = ["extract_contact_currents", "CONTINUITY_EQUATIONS"]
 

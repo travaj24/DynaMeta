@@ -8,7 +8,9 @@ python -m validation.carriers_3d_resistor
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import devsim as ds
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
+
+ds = import_devsim()
 from dynameta.carriers import physics_drift_diffusion as DD
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E

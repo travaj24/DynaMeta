@@ -31,9 +31,11 @@ import os
 import sys
 
 import numpy as np
-import devsim as ds
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
+
+ds = import_devsim()
 
 from dynameta.carriers import physics_bipolar_dd as BP
 from dynameta.carriers import eq_registry as _R

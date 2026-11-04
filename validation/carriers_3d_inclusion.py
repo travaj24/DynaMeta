@@ -21,6 +21,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home (BLAS pin)
 
 from dynameta.carriers.devsim_3d import Stacked3DSpec, Inclusion3D, Devsim3DEquilibrium
 from dynameta.core.carrier_field import ELECTRON_DENSITY
@@ -39,7 +40,7 @@ def main():
         extra_dielectrics=[("HfO2", 4e-9, 18.0)],                       # upper oxide (gate sits on it)
         inclusions=[Inclusion3D(name="pillar", material="HfO2", role="dielectric", eps=18.0,
                                  in_layer="oxide", x_frac=0.5, y_frac=0.5)])
-    import devsim as ds
+    ds = import_devsim()
     b = Devsim3DEquilibrium(spec, mesh_name="inc3_m", device_name="inc3_d")
     cf = b.solve(BiasPoint({"gate": VG, "body": 0.0}, "g"))
     regions = list(ds.get_region_list(device=b.device))

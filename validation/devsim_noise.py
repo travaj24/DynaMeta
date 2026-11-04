@@ -38,11 +38,12 @@ import os
 import sys
 
 import numpy as np
-import devsim as ds
 from scipy.constants import e as QE, k as KB
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.carriers.devsim_env import import_devsim  # noqa: E402
+ds = import_devsim()
 from dynameta.carriers import eq_registry as _R                           # noqa: E402
 from dynameta.carriers import noise_analysis as NA                        # noqa: E402
 from dynameta.carriers import physics_bipolar_dd as BP                    # noqa: E402
