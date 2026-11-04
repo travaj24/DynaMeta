@@ -65,10 +65,31 @@ def _drop(dev):
 
 
 def _device(dev, lines, net_doping, *, options=None, tau=1e-7, fd=False, ohmic=("lo", "hi"),
-            potential_only=(), n_i=NI, n_c=NC300, n_v=NV300, donors=None, acceptors=None,
+            majority_contact=(), n_i=NI, n_c=NC300, n_v=NV300, donors=None, acceptors=None,
             presolve=False):
     """1-D bipolar device on mesh `lines` [(pos, ps, tag)], seeded in the frame its contacts pin.
-    `potential_only` contacts pin Potential alone (zero carrier flux there: the uniform-G slabs)."""
+
+    `majority_contact` contacts (the uniform-G / zero-flux slabs) pin Potential AND the MAJORITY
+    carrier at their equilibrium seed values and leave the MINORITY carrier's row natural (zero flux):
+    a minority-blocking ohmic contact. WHY NOT A POTENTIAL-ONLY CONTACT (the fixture until 2026-11-03):
+    with no carrier pinned anywhere the slab is a FLOATING BODY -- in 1-D steady state with zero flux at
+    both ends the sum of ALL electron- and hole-continuity rows is identically 0 (the fluxes telescope,
+    q(G - U) enters the two with opposite signs: charge conservation), so the DC Jacobian is rank-
+    deficient by exactly one at EVERY G (MEASURED on the R26-a slab: |column sums of the continuity
+    rows| / |column| <= 1.1e-16 over all 94 Newton matrices of the G = 1e33 ramp; the physically scaled
+    smallest singular value 1.3-1.6e-15, its vector = the body potential with the carriers re-shuffled
+    at the contact node). The body's charge, i.e. its potential against the contact, is then set by
+    nothing but round-off: a 0.1 V body shift re-converged in place at G = 0, 1e27 and 1e30 (far-end n, p
+    unchanged to 1e-13), the far-end potential differed by 0.16 mV between the scipy and Elmer
+    OpenBLAS at G = 1e30, R26-b(p) moved from -4.87e-8 to -5.27e-8, and at G = 1.2e29 of the R26-a ramp
+    UMFPACK hit an exact zero pivot ("matrix is singular" -> umfpack numeric failed) on scipy's
+    OpenBLAS only. Pinning the majority density closes the null mode (the body's Fermi level = the
+    contact's) without changing the steady state: the minority rows stay zero-flux, so their sum
+    forces sum_nodes vol q (G - U) = 0 and the majority contact exchanges no NET carriers (measured
+    3e-17 of q G L). After the change the same ramp's scaled smallest singular value is 1.5e-5 (scaled
+    condition 2e5, from 2e15), its 93 Newton matrices are BIT-IDENTICAL on the two OpenBLAS builds
+    (they differed by 2.4e-11 after the first step and 6.5e-4 by the failing one), and so are the
+    results -- test_slab_is_well_posed."""
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
     from dynameta.carriers import physics_equilibrium as PE
@@ -95,18 +116,26 @@ def _device(dev, lines, net_doping, *, options=None, tau=1e-7, fd=False, ohmic=(
     BP.setup_equilibrium_seed_models(dev, "bulk")
     for c in ohmic:
         BP.setup_contact_ohmic_bipolar(dev, c)
-    for c in potential_only:
-        PE.setup_contact(dev, c)
     devsim.node_model(device=dev, region="bulk", name="_seed_psi",
                       equation=BP.equilibrium_seed_psi_expr(BP.fd_shift_model(dev, "bulk")))
     for var, src in (("Potential", "_seed_psi"), ("Electrons", "IntrinsicElectrons"),
                      ("Holes", "IntrinsicHoles")):
         devsim.set_node_values(device=dev, region="bulk", name=var,
                                values=devsim.get_node_model_values(device=dev, region="bulk", name=src))
-    for c in potential_only:                     # a Potential-only contact sits at the seed potential
+    for c in majority_contact:                   # psi + the majority carrier at their seed values
         i = 0 if c == "lo" else -1
+        PE.setup_contact(dev, c)
         devsim.set_parameter(device=dev, name="{}_bias".format(c),
                              value=float(_v(dev, "_seed_psi")[i]))
+        var, eq, cur = (("Electrons", "ElectronContinuityEquation", "ElectronCurrent")
+                        if _v(dev, "NetDoping")[i] > 0 else
+                        ("Holes", "HoleContinuityEquation", "HoleCurrent"))
+        cm = "{}_{}_majority".format(c, var.lower())
+        devsim.set_parameter(device=dev, name=cm + "_value", value=float(_v(dev, var)[i]))
+        devsim.contact_node_model(device=dev, contact=c, name=cm,
+                                  equation="{} - {}_value".format(var, cm))
+        devsim.contact_node_model(device=dev, contact=c, name="{}:{}".format(cm, var), equation="1")
+        _R.record_contact_equation(dev, c, name=eq, node_model=cm, edge_current_model=cur)
     if presolve:                                 # the 1-D diode recipe: frozen-carrier Poisson first
         for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
             _R.delete_by_name(dev, ceq)
@@ -129,10 +158,14 @@ def _v(dev, name):
 
 
 def _slab(dev, nd, options, tau, length=None):
-    """Uniform slab with ONE Potential-only contact: the carriers see zero flux on every boundary.
+    """Uniform slab with ONE minority-blocking majority contact (_device `majority_contact`): the
+    minority carrier sees zero flux on every boundary and the majority contact exchanges no net
+    carriers, so the steady state is the zero-flux one -- with the body's potential now FIXED (until
+    2026-11-03 a Potential-only contact left it floating: _device docstring, test_slab_is_well_posed).
 
-    The Potential contact pins psi at its EQUILIBRIUM value, so under injection a Debye layer forms
-    there (measured at 1e24, dp = 0.1 n0: n(0) = 1.44 n_bulk over ~25 nm). Two regimes:
+    The contact pins psi and the majority density at their EQUILIBRIUM values, so under injection a
+    one-node Debye layer forms there (measured on R26-a at G = 1e33, dp ~ 0.9 n0: n(0) = 0.53 n_far,
+    p(0) = 1.87 p_far, both within 1.5 % of the far value at the next node, 5 nm in). Two regimes:
       * length=None, a 200 nm slab << the diffusion length: both quasi-Fermi levels are flat, so n p is
         uniform (the layer included) but n and p separately are not -- fine for U ~ (n p - n_i^2) at low
         injection (the lifetime gates), NOT for an Auger/SRH root at high injection (the layer's extra
@@ -144,7 +177,7 @@ def _slab(dev, nd, options, tau, length=None):
     else:
         lines = [(0.0, 5e-9, "lo"), (2e-6, 100e-9, None), (length, length / 40.0, "hi")]
     _device(dev, lines, "{:.10e}".format(nd), options=options, tau=tau, ohmic=(),
-            potential_only=("lo",))
+            majority_contact=("lo",))
     _solve()
 
 
@@ -152,6 +185,44 @@ def _ramp_G(dev, G_target, n_steps=24):
     for g in np.logspace(math.log10(G_target) - 10.0, math.log10(G_target), n_steps):
         devsim.set_parameter(device=dev, region="bulk", name="G_ext", value=float(g))
         _solve()
+
+
+@pytest.mark.parametrize("nd,length,G", [(1e25, 150e-6, 1e30), (-1e25, None, 1e24)])
+def test_slab_is_well_posed(nd, length, G):
+    """GATE (2026-11-03): the uniform-G slab fixture has ONE DC solution, so its answer cannot depend on
+    round-off. The converged slab's BODY is shifted by +20 mV (psi at every node but the contact's,
+    carriers kept) and re-solved: it must come back to the reference state (|d psi| < 1e-9 V, carriers
+    to 1e-9; measured 0 V and <= 2.2e-16 on both the scipy and the Elmer OpenBLAS). On the potential-
+    only fixture (a floating body: _device docstring) this gate FAILS under BOTH libraries: with Elmer's
+    the n slab re-converged IN PLACE 1.56e-2 V off, every other case/library hit the singular Jacobian
+    ("umfpack numeric failed") -- the null mode that made R26-a[1e33] fail on scipy's OpenBLAS and pass
+    on Elmer's. Also pinned: the majority contact exchanges no NET carriers (sum over nodes of
+    vol q (G - U) = 0 to 1e-12 of q G L; measured 3.0e-17 / 1.2e-16), i.e. the zero-flux physics the
+    oracles assume is unchanged."""
+    from scipy.constants import e as qe
+    from dynameta.carriers.bipolar_options import (AUGER_SI_DZIEWIOR_SCHMID_1977, BipolarOptions,
+                                                   RADIATIVE_SI_TRUPKE_2003)
+    opts = BipolarOptions(auger=AUGER_SI_DZIEWIOR_SCHMID_1977, radiative=RADIATIVE_SI_TRUPKE_2003,
+                          generation_m3s=0.0)
+    dev = "wellposed"
+    names = ("Potential", "Electrons", "Holes")
+    try:
+        _slab(dev, nd, opts, 1e-6, length=length)
+        _ramp_G(dev, G, n_steps=8)
+        ref = {v: _v(dev, v) for v in names}
+        x, vol, eg = _v(dev, "x"), _v(dev, "NodeVolume"), _v(dev, "ElectronGeneration")
+        psi = ref["Potential"].copy()
+        psi[1:] += 0.02
+        for v, vals in (("Potential", psi), ("Electrons", ref["Electrons"]), ("Holes", ref["Holes"])):
+            devsim.set_node_values(device=dev, region="bulk", name=v, values=list(vals))
+        _solve()
+        new = {v: _v(dev, v) for v in names}
+    finally:
+        _drop(dev)
+    assert np.max(np.abs(new["Potential"] - ref["Potential"])) < 1e-9
+    for v in ("Electrons", "Holes"):
+        assert np.max(np.abs(new[v] / ref[v] - 1.0)) < 1e-9, v
+    assert abs(np.sum(vol * eg)) < 1e-12 * qe * G * (x.max() - x.min())
 
 
 # =====================================================================================================
@@ -170,8 +241,11 @@ def test_uniform_generation_root_srh_auger_radiative(G):
     uniform G from 1e24 (low injection, dp ~ 3e-9 n0) to 1e33 m^-3/s (HIGH injection, dp ~ 0.9 n0,
     where the C_p p and B terms and the injection dependence of every term all matter). 150 um slab
     (>= 23 diffusion lengths, so the far end is local). The excess density at the far node must equal
-    the scipy brentq root of G = U_SRH + U_A + U_rad to 1e-9 (measured 0, 4.4e-16, 1.1e-16 at the three
-    G: the far end is exactly local; the gate leaves 1e6x headroom for Newton-tolerance / BLAS changes).
+    the scipy brentq root of G = U_SRH + U_A + U_rad to 1e-9 (measured 0, 2.2e-16, -1.1e-16 at the three
+    G, bit-identical on the scipy and the Elmer OpenBLAS: the far end is exactly local). The old
+    "1e6x headroom for BLAS changes" was true of the COMPARISON only: on the floating-body fixture
+    (before 2026-11-03, _device docstring) the 1e33 ramp itself died at G = 1.2e29 on scipy's OpenBLAS
+    (exact zero pivot, "umfpack numeric failed"), so no tolerance headroom could have protected it.
     ON is load-bearing: the SRH-only root is 29x / 32x / 229x larger."""
     from dynameta.carriers.bipolar_options import (AUGER_SI_DZIEWIOR_SCHMID_1977, BipolarOptions,
                                                    RADIATIVE_SI_TRUPKE_2003)
@@ -202,7 +276,9 @@ def test_auger_low_injection_lifetime(polarity):
     """GATE R26-b. Auger-only slab (SRH tau = 1e3 s, i.e. 1/tau 11 orders under C n0^2), low injection:
     dp/G (n-type) must equal tau_A = 1/(C_n n0^2), and dn/G (p-type) 1/(C_p p0^2), to 1e-6 -- the
     neglected terms are the injection share dp/n0 (3.6e-9 n, 1.0e-8 p, entering Auger x2-3) and the
-    1/tau SRH share (3.6e-11 / 1e-10). Measured rel -3.3e-9 (n) / -4.9e-8 (p): exactly that size. ON is
+    1/tau SRH share (3.6e-11 / 1e-10). Measured rel -8.4e-9 (n) / -4.9e-8 (p) on both OpenBLAS builds:
+    exactly that size (the floating-body fixture gave -3.3e-9 (n) and a library-dependent -4.87e-8 /
+    -5.27e-8 (p): the free body potential moved the contact layer's share of the balance). ON is
     load-bearing: the SRH-only lifetime here is 1e3 s, >= 9.9 orders longer."""
     from dynameta.carriers.bipolar_options import AUGER_SI_DZIEWIOR_SCHMID_1977, BipolarOptions
     N0, G = 1e25, 1e24
@@ -225,7 +301,7 @@ def test_coulomb_enhanced_auger_lifetime_altermatt_1997():
     """GATE R26-c. Altermatt 1997 Coulomb-enhanced Auger at n0 = 1e17 cm^-3, where the enhancement is
     large: g_eeh = 1 + 13 [1 - tanh((n0/3.3e17)^0.66)] (re-typed here) = 8.465, so the low-injection
     lifetime is 1/(g_eeh C_n n0^2) -- the plain Dziewior-Schmid value is 8.5x longer. Gate 1e-6
-    (measured -1.45e-7 = the dp/n0 injection term at G = 1e20)."""
+    (measured -1.39e-7 = the dp/n0 injection term at G = 1e20; -1.45e-7 on the floating-body fixture)."""
     from dynameta.carriers.bipolar_options import AUGER_SI_ALTERMATT_1997, BipolarOptions
     N0, G = 1e23, 1e20
     dev = "r26c"
@@ -251,10 +327,13 @@ def test_radiative_slab_rate_is_B_np_minus_ni2():
     1e-12; (ii) at the far node URad + U_SRH(oracle) = G to 1e-9; (iii) the excess density there is the
     brentq root of G = B((n0+d)(p0+d) - n_i^2) + U_SRH to 1e-9 (measured 0 / 0 / 2.2e-16). ON is
     load-bearing: SRH-only gives an 11.6x larger excess density.
-    WHY NOT RADIATIVE-ONLY (tau_SRH = 1e3 s): the zero-flux slab's constant hole mode is then pinned
-    only by dU/dp = B n0 ~ 1e4 /s against a ~5e13 /s diffusion operator, and UMFPACK declared the
-    Jacobian singular mid-ramp (measured at G = 6e22, 1e24 m^-3, 200 nm) -- a conditioning limit of the
-    oracle FIXTURE, not of the model; (i) is still the radiative-only statement at every node."""
+    WHY SRH IS KEPT ON (tau 1e-4 s): the first radiative-only version (tau_SRH = 1e3 s) died with UMFPACK
+    declaring the Jacobian singular mid-ramp (G = 6e22, 1e24 m^-3, 200 nm). That was NOT the weak
+    dU/dp = B n0 pinning it was attributed to but the floating-body null mode of the then potential-only
+    fixture (_device docstring): re-measured 2026-11-03, the radiative-only 200 nm ramp to 1e24 still
+    fails on that fixture under both OpenBLAS builds and lands on the brentq root to 0 (and the 3 mm one
+    at 1e28 to 2.2e-16) on the majority-contact fixture. (i) is the radiative-only statement at every
+    node either way."""
     from dynameta.carriers.bipolar_options import BipolarOptions, RADIATIVE_SI_TRUPKE_2003
     nd, G, tau = 1e25, 1e28, 1e-4
     dev = "r26d"
@@ -311,16 +390,17 @@ def test_bgn_model_formulas_match_the_papers():
 
 
 def test_bgn_zero_flux_slab_relaxes_to_n_ie_squared():
-    """GATE R27-a. Uniform n+ slab (1e19 cm^-3) with ZERO carrier flux on every boundary, started with
-    the holes 3x off equilibrium: the only thing that can fix n p is detailed balance of the
-    recombination, so the steady state must sit at n p = n_ie^2 = n_i^2 exp(dEg/kT) with del Alamo's
+    """GATE R27-a. Uniform n+ slab (1e19 cm^-3) with ZERO hole flux on every boundary (one minority-
+    blocking majority contact: _device), started with the holes 3x off equilibrium: the only thing that
+    can fix n p is detailed balance of the recombination, so the steady state must sit at
+    n p = n_ie^2 = n_i^2 exp(dEg/kT) with del Alamo's
     dEg = 49.73 meV -- to 1e-12 (measured 2.2e-16). ON is load-bearing: n_ie^2/n_i^2 = 6.845 (an SRH
     still built on n_i^2 would relax to n_i^2, off by 5.8)."""
     from dynameta.carriers.bipolar_options import BGN_SI_DEL_ALAMO_1985, BipolarOptions
     dev = "r27a"
     try:
         _device(dev, [(0.0, 5e-9, "lo"), (100e-9, 5e-9, "hi")], "1e25",
-                options=BipolarOptions(bgn=BGN_SI_DEL_ALAMO_1985), ohmic=(), potential_only=("lo",))
+                options=BipolarOptions(bgn=BGN_SI_DEL_ALAMO_1985), ohmic=(), majority_contact=("lo",))
         devsim.set_node_values(device=dev, region="bulk", name="Holes",
                                values=list(3.0 * _v(dev, "Holes")))
         _solve()
