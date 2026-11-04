@@ -16,6 +16,14 @@ from dynameta.numba_env import ensure_working_threading_layer   # noqa: E402
 
 ensure_working_threading_layer()
 
+# D0 (2026-11-03): pin DEVSIM's BLAS before ANY test module's `importorskip("devsim")` / bare
+# `import devsim` can load it through a PATH search (dynameta.carriers.devsim_env docstring). It does
+# not import devsim; it exports DEVSIM_MATH_LIBS, so the fresh-process children the suite spawns
+# inherit the same library. A user-set DEVSIM_MATH_LIBS is left alone.
+from dynameta.carriers.devsim_env import configure_math_libs   # noqa: E402
+
+configure_math_libs()
+
 
 def pytest_configure(config):
     """audit T-13: exempt the FEM solver's ADVISORY warning category from the `error` policy.

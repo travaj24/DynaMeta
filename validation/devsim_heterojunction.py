@@ -151,7 +151,8 @@ def stack_design(layers, *, name="hj", ps_if=0.5e-9, coarse=4e-9, zone=150e-9):
 
 def column(builder, region, name):
     """(z, value) along the x = 0 mesh column of `region`, sorted by z."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     x = np.asarray(ds.get_node_model_values(device=builder.device, region=region, name="x"))
     y = np.asarray(ds.get_node_model_values(device=builder.device, region=region, name="y"))
     v = np.asarray(ds.get_node_model_values(device=builder.device, region=region, name=name))
@@ -167,7 +168,8 @@ def teardown(builder):
 def current_density(builder, cf, contact="cathode"):
     """Terminal current density [A/m^2] through `contact` (the 2-D contact current is per unit depth;
     divide by the cell width)."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     j = 0.0
     for eq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
         if eq in ds.get_contact_equation_list(device=builder.device, contact=contact):

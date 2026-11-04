@@ -37,7 +37,6 @@ import time
 import warnings
 
 import numpy as np
-import devsim as ds
 from scipy.constants import e as QE, k as KB, epsilon_0 as EPS0
 from scipy.integrate import quad
 from scipy.optimize import brentq
@@ -49,6 +48,8 @@ if "--root" in sys.argv:
 else:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dynameta.carriers.devsim_env import import_devsim  # noqa: E402
+ds = import_devsim()
 from dynameta.carriers import eq_registry as _R                           # noqa: E402
 from dynameta.carriers import physics_bipolar_dd as BP                    # noqa: E402
 from dynameta.carriers.dc_solve import solve_dc                           # noqa: E402

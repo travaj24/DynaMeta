@@ -87,7 +87,8 @@ def impact_generation_edges(device: str, region: str,
     [A/m^2], the FV weight EdgeCouple*EdgeLength, and q*G = alpha_n|J_n| + alpha_p|J_p| [A/m^3]
     (the spatial driver, e.g. for locating the hot-carrier injection zone). Requires the region
     to carry the bipolar edge models (ElectricField, ElectronCurrent, HoleCurrent)."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
 
     # audit 7.1 regrade (P2): the directional edge quadrature sum(alpha|J| EdgeCouple
     # EdgeLength) is EXACT on the 2D layered tensor mesh (2V weight identity, zero-couple

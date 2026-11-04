@@ -163,7 +163,8 @@ def gate_d(legacy=False):
 _FIXTURE = textwrap.dedent('''
     import hashlib, sys, math
     import numpy as np
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     from dynameta.carriers import physics_bipolar_dd as BP, physics_equilibrium as PE
     from dynameta.carriers import eq_registry as R
     def clear(d):
@@ -278,7 +279,8 @@ def _old_tree_rejects(tree):
 # ------------------------------------------------------------------------------------------------
 def gate_g(it=None, mesh_min_nm=0.5):
     """3-D full-gate bipolar cap vs the 1-D cap with the same stack: the trap-induced psi_s shift."""
-    import devsim as ds
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
     from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
     from dynameta.carriers import physics_bipolar_dd as BP
     from dynameta.carriers import physics_equilibrium as PE

@@ -68,8 +68,10 @@ import numpy as np
 # lazy-import ceremony that could never be lazy, and a devsim-free install got a raw "No module named
 # 'devsim'" from inside a sibling module. Import it ONCE here, first, with devsim_layered's friendly
 # hint (gated: tests/test_audit_2026_07_17_wave7_carriers.py::test_s1_10_*).
+from dynameta.carriers.devsim_env import import_devsim   # D0: the ONE devsim import home
+
 try:
-    import devsim as ds
+    ds = import_devsim()
 except ImportError as _e:                                   # pragma: no cover - optional heavy solver
     raise ImportError("dynameta.carriers.devsim_3d requires the optional 'devsim' package "
                       "(pip install dynameta[solvers]); the pure-TMM / bring-your-own-solver paths "
