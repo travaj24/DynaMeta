@@ -163,8 +163,7 @@ def gate_d(legacy=False):
 _FIXTURE = textwrap.dedent('''
     import hashlib, sys, math
     import numpy as np
-    from dynameta.carriers.devsim_env import import_devsim
-    ds = import_devsim()
+    import devsim as ds
     from dynameta.carriers import physics_bipolar_dd as BP, physics_equilibrium as PE
     from dynameta.carriers import eq_registry as R
     def clear(d):
