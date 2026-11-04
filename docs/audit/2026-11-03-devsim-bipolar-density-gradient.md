@@ -120,7 +120,7 @@ at +-200, which matters only during Newton transients.
 
 | | max abs(phi_n) | max abs(phi_p) |
 |---|---|---|
-| `quantum_srh=True` | 1.7e-10 V | 2.2e-16 V |
+| `quantum_srh=True` | 3.3e-16 V (1.7e-10 V before the flux fix, section 1.6) | 5.6e-17 V |
 | `quantum_srh=False` | 6 mV off the wall node | 62 V at the wall node (the classical reference is meaningless there) |
 
 ### 1.4 Boundary conditions
@@ -175,6 +175,45 @@ kernel's.
 
 Parameters are `b_dg` (electrons) and `b_dg_p` (holes), plus `*_full` for the gamma ramp
 (`set_dg_gamma`).
+
+### 1.6 Numerics: the wall-edge flux and the validation's precision (2026-11-03)
+
+**The flux is written with two Bernoulli functions.** The bipolar DG currents are
+
+    Jn ~ n@n1 B(-v) - n@n0 B(v) ,   Jp ~ -( p@n1 B(v) - p@n0 B(-v) )
+
+(`_JN_DG_BIPOLAR`, `_JP_DG_BIPOLAR`). The first version reused the classical `kahan3` strings,
+which spell B(-v) as B(v) + v. For v << 0 that is the difference of two O(|v|) numbers. Measured
+against mpmath on DEVSIM 2.11.2, it loses 1.9e-7 at v = -21, 6.5e-5 at v = -27.6 and 100 % at
+v = -40. DEVSIM's own B(-v) stays at 2e-16. A classical edge never sees |v| ~ 20. An insulator-wall
+edge does by construction: the wall node holds c = 1e-12 c_cl, so its zero-flux edge sits at
+|v| ~ 27.6.
+
+The wall node's Lambda is set only by that edge's flux. With the `kahan3` form it converged
+linearly, then sat in a period-3 Newton cycle at a relative update of 1.9-3.8e-7, against
+REL_ERR = 1e-7. GATE C (holes) passed or failed on BLAS round-off: it failed with scipy's OpenBLAS
+and passed with Elmer's. The same loss was GATE E's "1.7e-10 V" flatness. It is 4.4e-16 V with the
+two-Bernoulli form in double. The Bernoulli argument is clamped at +200 only. A two-sided clamp
+makes both Bernoullis constant beyond |v| = 200, so a wall edge loses its whole Lambda dependence in
+a Newton transient. That gave an exact zero column (GATE B and GATE E with `quantum_srh=False`
+failed under both BLAS builds). Gate: `test_dg_edge_flux_is_accurate_at_large_drift`, 1e-13 against
+mpmath, measured 3e-16. The unipolar DG keeps `_JN_DG`, because its definition is pinned by a
+call-log digest.
+
+**The validation runs the extended Newton.** In double, two of its convergence criteria are finer
+than the arithmetic:
+
+* DEVSIM's relative update is `|dx|/(|x| + 1e-10)`. That formula reproduces the reported RelError
+  node by node. Where the dark-space tail of Lambda passes ~1e-17 V (GATE B, 11-16 nm from the
+  wall), REL_ERR = 1e-7 therefore demands `|dLambda| < 1e-17 V`. That is below one ulp of the wall's
+  Lambda (-0.71 V).
+* ABS_ERR = 1e10 m^-3 is 0.6 ulp of GATE C's 7.5e25 accumulation peak. The converged update floor
+  measured 2-4 ulp (median) and up to 36 ulp.
+
+So the solves waited at round-off for a lucky iterate. `extended_precision.enable` on every device
+of `validation/bipolar_density_gradient.py` keeps both criteria as written and makes them
+attainable. Every gate number then agrees between the two BLAS builds, mostly bit for bit. GATE C's
+metrics move by <= 1e-15. The test file takes 63 s (54 s with double solves).
 
 ## 2. API (typical 1-D MOS)
 
@@ -304,9 +343,9 @@ quantum at the wall.
 
 | Quantity | Measured |
 |---|---|
-| max abs(phi_n), `phi_n = psi + Lambda_n - V_t ln(n/n_i)` | **1.7e-10 V** |
-| max abs(phi_p), `phi_p = psi - Lambda_p + V_t ln(p/n_i)` | **2.2e-16 V** |
-| `n p = n_i^2 exp((Ln+Lp)/V_t)` at every node | 6.4e-9 (log-form error) |
+| max abs(phi_n), `phi_n = psi + Lambda_n - V_t ln(n/n_i)` | **3.3e-16 V** (4.3e-15 on Elmer's OpenBLAS; 1.7e-10 V before section 1.6) |
+| max abs(phi_p), `phi_p = psi - Lambda_p + V_t ln(p/n_i)` | **5.6e-17 V** |
+| `n p = n_i^2 exp((Ln+Lp)/V_t)` at every node | 7.1e-15 / 1.6e-13 (6.4e-9 before section 1.6) |
 | `n p = n_i^2` in the neutral bulk | 4.2e-7, the 1e-6 solve tolerance |
 | Lambda at the wall | -27.6 V_t for both carriers |
 | Inversion peak | 1.74 nm off the wall; classical peak AT the wall |
@@ -407,6 +446,15 @@ and linear in gamma.
    switching the unipolar wall changes `setup_dg_hard_wall`'s call log and its characterization test.
    That was out of scope here.
 4. **Strong inversion** (Limits, first item): worth a quasi-Fermi-variable DG formulation?
+5. **The `kahan3` flux elsewhere (section 1.6).** The unipolar DG (`_JN_DG`) and the classical DD
+   strings (`physics_bipolar_dd`, `physics_drift_diffusion`) still spell B(-v) as B(v) + v. That is
+   harmless at classical |v|. A unipolar region given `setup_dg_insulator_wall` or
+   `setup_dg_hard_wall` would carry the same wall-edge loss. Switching them changes the v0.13
+   bipolar and e46bd25 DG call-log digests and moves every DD result at round-off.
+6. **Extended precision in the validation (section 1.6).** The validation's criteria are finer than
+   double precision. The alternative to the extended Newton is to change REL_ERR / ABS_ERR to
+   attainable values. That would loosen REL_ERR for every variable, because DEVSIM has one criterion
+   per solve.
 
 ## 7. Merge notes
 
@@ -430,6 +478,6 @@ and linear in gamma.
   centroid; the classical error is 55-177 %.
 - Detailed balance under DG: the built-in SRH channel follows the quantum band edges
   (`quantum_srh=True`, via `physics_traps.srh_reference_densities(scale=)`). Equilibrium
-  quasi-Fermi levels are flat to 2e-10 V.
+  quasi-Fermi levels are flat to 5e-15 V.
 - Limit: DG inversion layers converge only up to weak inversion in 1-D (minority chain pinned at the
   substrate contact). Accumulation and depletion converge for both carriers.
