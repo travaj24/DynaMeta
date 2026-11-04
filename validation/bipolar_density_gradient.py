@@ -30,7 +30,7 @@ GATE D (fixed point): Boltzmann accumulation (3e23, 0.1 V), both carriers: the c
         scipy solve_bvp) evaluated on the DG solution's OWN potential, to < 2e-3 of the peak.
 GATE E (equilibrium, bipolar): INVERSION (p-type 3e23, psi_s - psi_b = 0.60 V: n_s ~ 1e5 p_s), both carriers
         DG at the wall: the modified quasi-Fermi levels phi_n = psi + Lambda_n - V_t ln(n/n_i),
-        phi_p = psi - Lambda_p + V_t ln(p/n_i) are flat (|phi| < 1e-9 V), n p = n_i^2 exp((Ln+Lp)/V_t)
+        phi_p = psi - Lambda_p + V_t ln(p/n_i) are flat (|phi| < 1e-11 V), n p = n_i^2 exp((Ln+Lp)/V_t)
         at every node and n p = n_i^2 in the neutral bulk. With quantum_srh=False the classical SRH
         generates in the dark space and the QFLs are NOT flat (reported).
 GATE F (transport): a 1-D Si p-n diode (1e23 / 1e22) at +0.4 V and -0.5 V: DG changes the terminal
@@ -54,6 +54,7 @@ from dynameta.carriers.devsim_env import import_devsim  # noqa: E402
 ds = import_devsim()
 from dynameta.constants import HBAR, KB, M_E, Q_E, T_REF, V_T  # noqa: E402
 from dynameta.carriers import eq_registry as _R  # noqa: E402
+from dynameta.carriers import extended_precision as XP  # noqa: E402
 from dynameta.carriers import physics_bipolar_dd as BP  # noqa: E402
 from dynameta.carriers import physics_density_gradient as DG  # noqa: E402
 from dynameta.core.numerics import trapz  # noqa: E402
@@ -81,8 +82,10 @@ def _quiet():
 
 
 def _solve(rel=REL_ERR):
+    """XP.solve: the extended (mixed-precision) Newton -- every device of this module opts in (_bar,
+    _diode: the comments there give the measured double-precision floors)."""
     with _quiet():
-        ds.solve(type="dc", absolute_error=ABS_ERR, relative_error=rel, maximum_iterations=MAX_ITER)
+        XP.solve(type="dc", absolute_error=ABS_ERR, relative_error=rel, maximum_iterations=MAX_ITER)
 
 
 def _ramp_param(dev, reg, name, target, n_steps, *, min_frac=1.0 / 512):
@@ -166,6 +169,20 @@ def _bar(dev, mesh, length, *, ps_wall=0.05e-9, net_doping="0.0", n_i=NI_SI, fd=
         ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="wall", tag2="sub")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
+        # EXTENDED PRECISION for every wall device (2026-11-03). In double the criteria below are
+        # finer than the arithmetic: DEVSIM's relative update is |dx|/(|x| + 1e-10) (measured: it
+        # reproduces the reported RelError node by node), so where the DG dark-space tail of Lambda
+        # passes ~1e-17 V (GATE B, 11-16 nm from the wall) REL_ERR = 1e-7 demands |dLambda| < 1e-17 V,
+        # below one ulp of the wall's Lambda = -0.71 V (1.1e-16): GATE B then sat at relative
+        # 1.0-4.1e-7 for 100 iterations with every update at 1 ulp. And ABS_ERR = 1e10 m^-3 is 0.6 ulp
+        # of GATE C's 7.5e25 / 8.2e25 accumulation peak, while the converged update floor measured
+        # 3.9 / 2.1 ulp median, 36 / 8.4 max: the classical surface-potential steps waited 10-18
+        # iterations at relative 1e-15 for a lucky update and one step ran out (100) on Elmer's
+        # OpenBLAS. Pass/fail was decided by round-off, so it flipped with the BLAS. The mixed-precision
+        # Newton (carriers.extended_precision) keeps both criteria as written and makes them
+        # attainable: GATE B converges in 5/6/7 iterations, GATE C's classical steps in 6, its metrics
+        # move <= 1e-15 against the double run, and GATE C costs 18 s instead of ~8 s.
+        XP.enable(dev)
         ds.node_model(device=dev, region="s", name="NetDoping", equation=net_doping)
         BP.setup_bipolar_region(dev, "s", eps_static=EPS,
                                 n_dos_m3=n_dos if n_dos else nc_model(MN, GVN), n_i_m3=n_i,
@@ -408,6 +425,13 @@ def _diode(dev, mesh):
         ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="anode", tag2="cathode")
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
+        # extended precision here too (2026-11-03): the forward current is a ~3e-9 difference of the
+        # contact edges' drift and diffusion terms, so in double the total current density along ONE
+        # converged state is constant only to 3.5e-7 and the kahan3 and two-Bernoulli spellings of
+        # the same flux differ by 1.8e-8 / 6.2e-9 at the contact edges (measured). GATE A's 1e-9 then
+        # held only while the DG at b = 0 repeated the classical arithmetic bit for bit, and GATE F's
+        # I(gamma = 0.5) moved 6e-8 with the BLAS. In the extended Newton both are physics again.
+        XP.enable(dev)
         ds.node_model(device=dev, region="s", name="NetDoping",
                       equation="ifelse(x < {:.6e}, {:.6e}, {:.6e})".format(DIODE_XJ, -DIODE_NA,
                                                                           DIODE_ND))
@@ -581,7 +605,7 @@ def main():
 
     # GATE E
     eq = inversion_equilibrium(quantum_srh=True)
-    g_e = bool(eq["max_phi_n"] < 1e-8 and eq["max_phi_p"] < 1e-8 and eq["np_quantum"] < 1e-7
+    g_e = bool(eq["max_phi_n"] < 1e-11 and eq["max_phi_p"] < 1e-11 and eq["np_quantum"] < 1e-10
                and eq["np_bulk"] < 1e-6 and eq["inversion_peak_nm"] > 0.5
                and eq["classical_peak_nm"] == 0.0)
     eq0 = inversion_equilibrium(quantum_srh=False)
