@@ -9,8 +9,10 @@ sites -- this module is geometry only, so both solvers mesh byte-identically.
 
 from __future__ import annotations
 
-import netgen.occ as occ
-import ngsolve as ng
+from dynameta.lazy_import import LazyModule
+
+occ = LazyModule("netgen.occ")   # lazy (v0.14, 2026-11-04): ngsolve's OpenBLAS commits ~4 GB at load
+ng = LazyModule("ngsolve")
 
 MESH_SCALE = 1.0e9               # mesh unit: coordinate = metres * MESH_SCALE (nm)
 _S = MESH_SCALE                  # back-compat alias (pre-promotion private name)
