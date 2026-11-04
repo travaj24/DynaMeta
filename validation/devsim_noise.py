@@ -48,6 +48,7 @@ from dynameta.carriers import eq_registry as _R                           # noqa
 from dynameta.carriers import noise_analysis as NA                        # noqa: E402
 from dynameta.carriers import physics_bipolar_dd as BP                    # noqa: E402
 from dynameta.carriers import physics_drift_diffusion as DD               # noqa: E402
+from dynameta.core.numerics import trapz                                   # noqa: E402
 
 T = 300.0
 KT = KB * T
@@ -569,7 +570,7 @@ def gr_analytic(freqs, L, E):
     def _ratio(ll):            # cosh(x/lam)/cosh(L/2lam) without overflow (Re(1/lam) > 0)
         return (np.exp((ax - L / 2) / ll) * (1 + np.exp(-2 * ax / ll)) / (1 + np.exp(-L / ll)))
 
-    I2 = np.array([np.trapezoid(np.abs(t * (1 - _ratio(ll))) ** 2, x) for t, ll in zip(taut, lam)])
+    I2 = np.array([trapz(np.abs(t * (1 - _ratio(ll))) ** 2, x) for t, ll in zip(taut, lam)])
     return pref * I2 / L ** 2, pref * tau ** 2 / (L * (1 + (w * tau) ** 2))
 
 
