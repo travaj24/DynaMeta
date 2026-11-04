@@ -404,18 +404,55 @@ No test in the files above pinned the old 2-D zero-built-in-potential result. No
    gamma turns out not to enter SRH.
 2. **Trap kinetics** (D1c open question 3). The charged-trap FDT xfail pins the consequence for ssac
    and noise.
-3. **The devsim_3d mesh is not Delaunay** (D1c open question 4). Gate G2 still fails.
+3. **The devsim_3d mesh is not Delaunay** (D1c open question 4): RESOLVED by D2c (section 7). The
+   cause was DEVSIM summing couple-piece magnitudes, not Delaunay-ness; the tensor (Kuhn) mesher is
+   exact, and G2 passes (0.989; the rest is z-resolution, G3 = 0).
 4. D1b open questions 1-3 and 5, D1c open questions 1 and 3-4, D1d open questions 1-4 and D2a open
    questions 1-3 are unchanged. The D1c contact rule (D1c open question 2) is closed by section 2.4.
 5. The 1-D BTBT edge-mean D makes the discrete FDT exact only to O(h^2). Making the 1-D path
    node-local like 2-D/3-D would need a node-model field magnitude, which DEVSIM 1-D does not offer.
    This is recorded, not changed.
-6. **D1d gate L1** (section 2.9): fails after the literal fix, by 2.8e-4 against a 1e-6 gate. It
-   needs the D1d owner or the user to choose a quadrature-consistent tolerance or a refined mesh. Not
-   loosened here.
+6. **D1d gate L1** (section 2.9): RESOLVED by the D1d follow-up (tunneling doc section 8). L1 is
+   now a convergence gate at the true A: gap 2.81e-4 (2 nm) / 6.09e-5 (1 nm), order 2.21, gated at
+   order >= 1.7 and abs(gap) <= 2 C_inf h^2.
 7. **Noise source for thermionic-emission heterointerfaces** (section 2.8): the interface shot noise
    2q(J_0->1 + J_1->0) is not in the source set. The strict xfail pins it.
 8. **Heterointerfaces at T_K != T_REF**: refused with BGN, and silently at T_REF without it (D1a's
    interface is written at T_REF). A temperature-aware interface is a follow-up.
 9. **D1a open items** (3-D bipolar heterostacks, lateral sidewall interfaces, degenerate TE
    magnitude) are unchanged.
+
+## 7. Late merges: D0 core, D2c 3-D mesh, BLAS-sensitivity fixes (2026-11-03)
+
+| Merge | What | Doc |
+|---|---|---|
+| `1385d31` wip/dv_core | devsim >= 2.11.2; `carriers.devsim_env` is the one devsim import home (BLAS pinned before the first import; AST gate); `reset_devsim()` in `ac_capacitance`; `DEVSIM_NEW_SYMBOLIC=1` with MKL-PARDISO; Fermi-Jacobian `simplify()` cache | `2026-11-03-devsim-2.11-core.md` |
+| `c81cd3f` wip/dv_mesh3d | `Stacked3DSpec.mesher="tensor"` default (Kuhn tets: DEVSIM's magnitude-summed couples are exact, 9e-16); circumcentric 3-D interface trap areas; 3-D element impact ionization; `mesher="gmsh"` warns | `2026-11-03-devsim-3d-mesh.md` |
+| `6991e99` wip/dv_blasfix | R26/R27 slab fixture was a floating body (DC Jacobian rank-deficient by one at every G); bipolar DG wall-edge flux by two Bernoulli calls (kahan3 B(v)+v cancelled); DG validation in the extended Newton | recombination doc, DG doc section 1.6 |
+
+Integration fixes made at the merges:
+* The D1/D2 modules and validations imported devsim directly; routed through `devsim_env`
+  (extended_precision, tunneling, impact_ionization; 6 validations). The one string that is run on
+  main too (`traps_oracles._FIXTURE`, gate F) keeps its plain import (`3a56a0d`).
+* `validation/devsim_noise.py` integrates through `core.numerics.trapz` (numpy >= 1.24 floor gate).
+* `tests/_bipolar_calllog.record_call_log()` records in a CHILD process (`62c4097`). Its circuit-contact
+  fixture adds a process-global DEVSIM circuit that the process cannot drop (devsim 2.11.2, MEASURED):
+  a second recording died on "cl_n already exists" and left device cl_bz behind (7 unrelated DG /
+  Gummel / R26 failures on one xdist worker under `-n 3`); `delete_circuit()` raises an empty error
+  and the next circuit solve trips `NodeKeeper.cc:266 CIRCUIT_UNEXPECTED`; and no circuit node may be
+  added after an analysis has run with a circuit present. Digests unchanged.
+
+Why two D1/D2 gates flipped with the BLAS pin (both passed on Elmer's OpenBLAS, failed on scipy's):
+neither was a BLAS defect; both solves were singular or sub-ulp (R26-a: floating body; DG holes:
+wall-edge cancellation plus criteria finer than double). Both now give the same numbers under both
+libraries; new gates (`test_slab_is_well_posed`, `test_dg_edge_flux_is_accurate_at_large_drift`)
+fail on the old code under both.
+
+**Final tree `3a56a0d`** (devsim 2.11.2, scipy-OpenBLAS pin, Windows):
+* tests: every file that touches devsim or carriers (52 files, `-n 3`): **976 passed, 3 xfailed**
+  (strict: charged traps ssac at high f, TE heterointerface noise, extended-precision ssac).
+* validations: the 33 devsim validations, `run_all --tier full`: **33/33 PASS** (traps_oracles 9/9
+  after `3a56a0d`; `impact_ionization_isub` 1463 s is the longest).
+
+Open decisions added by these merges: D0 doc "Open questions" 1-2 and 4; D2c doc section 8; DG doc
+section 6 items 5-6.
