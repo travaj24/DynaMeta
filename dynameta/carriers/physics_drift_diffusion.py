@@ -8,8 +8,10 @@ hangs DEVSIM's expr system, whether via a node-model reference or inlined).
 
   Poisson:  div(eps grad psi) = q (n - N_D)
   SG (Boltzmann):  with vdiff = (psi@n0 - psi@n1)/V_t (the library's edge sign convention),
-                   Jn = q mu EdgeInvLength V_t [n@n1 B(-vdiff) - n@n0 B(vdiff)] -- equivalently the
-                   kahan3 form below via the Bernoulli identity B(x)+x = B(-x).
+                   Jn = q mu EdgeInvLength V_t [n@n1 B(-vdiff) - n@n0 B(vdiff)], built by the ONE
+                   SG kernel (sg_flux, 2026-11-04): B(+-vdiff) both, sign-selected so the identity
+                   B(x) + x = B(-x) is only used for x >= 0 (the former kahan3 spelling used it for
+                   every x and cancelled for vdiff << 0: 1.9e-7 at -21, 100 % at -40).
   FD enhancement:  replace vdiff by vdiff/g and scale the current by g,
                    g(n) = generalized-Einstein ratio F_1/2(eta)/F_-1/2(eta).
   Continuity: div(Jn) = 0 (DC, no recombination).
@@ -65,6 +67,7 @@ from dynameta.carriers.physics_equilibrium import (
     Q_E, EPS0, V_T, setup_phi_c0, _poisson_edge_models, require_positive, invert_F12,
     psi_offset_term)
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import (edge_with_derivs as _edge_with_derivs,
                                            node_with_derivs as _node_with_derivs)
 from dynameta.carriers.einstein import g_expr_devsim
@@ -134,8 +137,6 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                         "(Potential@n0 - Potential@n1)/V_t", ("Potential",))
     _edge_with_derivs(device, region, "vdiff_g", "vdiff / g_enh",
                         ("Potential", "Electrons"))
-    _edge_with_derivs(device, region, "Bern_g", "B(vdiff_g)",
-                        ("Potential", "Electrons"))
 
     # Enhanced SG current. FIELD-DEPENDENT MOBILITY (R1): when field_mobility is on, the scalar mu_n is
     # replaced by a Caughey-Thomas velocity-saturated edge model mu_n_edge(|E_par|) (mu_n stays the
@@ -151,9 +152,14 @@ def setup_semiconductor_region_dd(device: str, region: str, *,
                                       e_smooth="E_smooth", beta=ct_beta)
         _edge_with_derivs(device, region, "mu_n_edge", mu_expr, ("Potential",))
         mu_sym = "mu_n_edge"
-    jn = ("ElectronCharge*" + mu_sym + "*EdgeInverseLength*V_t*g_enh*"
-           "kahan3(Electrons@n1*Bern_g, Electrons@n1*vdiff_g, -Electrons@n0*Bern_g)")
-    _edge_with_derivs(device, region, "ElectronCurrent", jn, ("Electrons", "Potential"))
+    # Bern_g = B(vdiff_g), Bern_g_m = B(-vdiff_g): the ONE SG kernel (sg_flux; sign-selected two-
+    # Bernoulli bracket since 2026-11-04 -- the kahan3 B(v) + v spelling lost 1.9e-7 at v = -21 and
+    # 100 % at -40).
+    _SG.install_sg_current(device, region, carrier="electrons", density="Electrons",
+                           vdiff="vdiff_g", bern="Bern_g", bern_m="Bern_g_m",
+                           current="ElectronCurrent",
+                           prefactor="ElectronCharge*" + mu_sym + "*EdgeInverseLength*V_t*g_enh",
+                           wrt=("Potential", "Electrons"), current_wrt=("Electrons", "Potential"))
 
     # transient/AC charge: the d(q n)/dt time term (NCharge = -q n, the electron charge density).
     # Defined ALWAYS -- a steady-state DC solve ignores time_node_model, while a transient

@@ -5,8 +5,9 @@ seed_bipolar_dg). The physics oracles are the functions of validation/bipolar_de
 measured numbers: docs/audit/2026-11-03-devsim-bipolar-density-gradient.md.
 
 On the integration base e46bd25 every physics gate here FAILS (there is no hole quantum potential and
-no setup_bipolar_dg); the two defaults-off digest gates PASS there by construction (they pin that the
-pre-D2d definitions are unchanged)."""
+no setup_bipolar_dg); the two defaults-off digest gates PASSED there by construction (they pinned that
+the pre-D2d definitions were unchanged) until the 2026-11-04 two-Bernoulli flux re-recorded them (the
+cross-version numeric half: tests/test_devsim_sg_flux.py)."""
 import os
 import sys
 
@@ -20,31 +21,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import validation.bipolar_density_gradient as V  # noqa: E402
 
-# sha256 of tests/_dg_calllog.record_call_log(), recorded on the integration base e46bd25 (127 calls)
-# BEFORE the bipolar DG landed -- the UNIPOLAR in-Newton DG definition, character-for-character.
-_E46_DG_CALLLOG_DIGEST = "6bcbe9252bf140e301f4816a87ad6f91187eea5646be3b9c1901330856febad4"
-# sha256 of tests/_bipolar_calllog.record_call_log() recorded on v0.13.0 (main 5cbd998, 217 calls);
-# also the e46bd25 value -- the bipolar DD definition with no options.
-_V013_BIPOLAR_CALLLOG_DIGEST = "ac63536efe5e7c0c7d5985446b72b6e456c97eb8aad5c367b56c77c596b0c6aa"
+# sha256 of tests/_dg_calllog.record_call_log() -- the UNIPOLAR in-Newton DG definition, character-for-
+# character. RE-RECORDED 2026-11-04 (139 calls) for the two-Bernoulli SG flux (sg_flux; user decision):
+# the e46bd25 / 6595bde value 6bcbe925...febad4 (127 calls) is the kahan3 flux. The call logs differ
+# ONLY in the flux models (measured: the ElectronCurrent / ElectronCurrentDG strings and derivatives,
+# Bern_g_dg's clamp, the new Bern_g_m / Bern_g_dg_m and their derivatives; +12 calls). What the old
+# digest pinned numerically is kept by tests/test_devsim_sg_flux.py's cross-version gate (the fixture
+# SOLVED vs 6595bde, to the flux change's measured round-off).
+_DG_CALLLOG_DIGEST = "bc52c7927c657f04917d1c2d792ba5cfe8a7365ae10fb4f7352cc73537ff480a"
+_DG_CALLLOG_CALLS = 139
+# sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
+# RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
+# e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
+# ElectronCurrent / HoleCurrent and their derivatives plus Bern_g_m / Bern_gp_m (+20 calls).
+# Numerically pinned against 6595bde by tests/test_devsim_sg_flux.py.
+_BIPOLAR_CALLLOG_DIGEST = "3542731548315655dff28454e48cca4a2dcf69389e22881dad88a879bb205f80"
+_BIPOLAR_CALLLOG_CALLS = 237
 
 
 # ---- (e) defaults off: byte-identical ---------------------------------------------------------
 
-def test_unipolar_dg_definition_is_byte_identical_to_e46bd25():
+def test_unipolar_dg_definition_is_byte_identical_to_the_recorded_digest():
     """The shared kernel (_install_dg_variables), the generalized contact repoint and the hole-aware
     set_dg_gamma leave the UNIPOLAR DG's every DEVSIM definition call -- expression strings,
-    parameter values, equation bindings, in order -- exactly as on e46bd25."""
+    parameter values, equation bindings, in order -- exactly as recorded (e46bd25 up to the
+    2026-11-04 flux re-record; see _DG_CALLLOG_DIGEST)."""
     import _dg_calllog as CL
     log = CL.record_call_log()
-    assert len(log) == 127
-    assert CL.digest(log) == _E46_DG_CALLLOG_DIGEST
+    assert len(log) == _DG_CALLLOG_CALLS
+    assert CL.digest(log) == _DG_CALLLOG_DIGEST
 
 
 def test_bipolar_dd_without_dg_is_byte_identical():
-    """No bipolar DG requested -> the bipolar DD definition is the v0.13 / e46bd25 one (the D2d code
-    only runs from setup_bipolar_dg; the SRH kernel's new `scale` keyword defaults to None)."""
+    """No bipolar DG requested -> the bipolar DD definition is the recorded one (v0.13 / e46bd25 up to
+    the 2026-11-04 flux re-record; the D2d code only runs from setup_bipolar_dg; the SRH kernel's new
+    `scale` keyword defaults to None)."""
     import _bipolar_calllog as CL
-    assert CL.digest(CL.record_call_log()) == _V013_BIPOLAR_CALLLOG_DIGEST
+    log = CL.record_call_log()
+    assert len(log) == _BIPOLAR_CALLLOG_CALLS
+    assert CL.digest(log) == _BIPOLAR_CALLLOG_DIGEST
 
 
 def test_srh_kernel_scale_default_is_the_legacy_string():

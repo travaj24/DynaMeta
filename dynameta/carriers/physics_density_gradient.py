@@ -45,6 +45,7 @@ from dynameta.carriers.devsim_env import import_devsim
 ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned before the first import)
 
 from dynameta.carriers import eq_registry as _R
+from dynameta.carriers import sg_flux as _SG
 from dynameta.carriers.eq_registry import edge_with_derivs as _edge_with_derivs
 from dynameta.carriers.eq_registry import node_with_derivs as _node_with_derivs
 from dynameta.constants import HBAR, Q_E
@@ -95,28 +96,13 @@ def _install_dg_variables(device: str, region: str, *, u: str, lam: str, carrier
                               variable_update="default")
 
 
-def _clamped_bernoulli(arg: str) -> str:
-    """B(arg) with the argument CLAMPED at +-200 (e^200 ~ 7e86, far from overflow): near a hard wall
-    the log-singular Lambda makes Newton TRANSIENTS overflow B()'s exp; the clamp never binds at
-    convergence (|vdiff| <~ 30 there), and ifelse evaluates the unclamped branch with the EXACT same
-    arithmetic, so converged results are bit-identical (re-verified against the dg_dd_in_newton
-    gates)."""
-    return "B(ifelse({a} > 200, 200, ifelse({a} < -200, -200, {a})))".format(a=arg)
-
-
-def _upper_clamped_bernoulli(arg: str) -> str:
-    """B(arg) with the argument clamped at +200 ONLY -- the Bernoulli pair of the bipolar DG's two-
-    Bernoulli flux (_JN_DG_BIPOLAR). e^arg can overflow only for arg -> +inf, where B -> 0 anyway; for
-    arg -> -inf B(arg) -> -arg, finite, with slope -1. Clamping that side too (as _clamped_bernoulli
-    does) makes BOTH Bernoullis of the pair constant once |v| > 200, so a wall edge's flux -- the only
-    equation that sees the wall node's Lambda -- loses its whole Lambda dependence in a Newton
-    transient and UMFPACK meets an exact zero column (MEASURED 2026-11-03: GATE B flat_wall
-    "Convergence failure!" and inversion_equilibrium(quantum_srh=False) "umfpack numeric failed" under
-    both OpenBLAS builds with the two-sided clamp; the kahan3 form never noticed because its unclamped
-    c@n1 v term kept a slope). DEVSIM 2.11.2's own B / dBdx are overflow-safe at any argument
-    (measured B(1e5) = 0, B(-1e5) = 1e5, dBdx = -0 / -1, no inf/NaN), so the clamp is belt-and-braces;
-    it never binds at convergence."""
-    return "B(ifelse({a} > 200, 200, {a}))".format(a=arg)
+# The quantum-shifted SG fluxes go through the ONE SG kernel (sg_flux.install_sg_current) with
+# upper_clamp=True: B(min(v, 200)), a value no-op kept for the log-singular Lambda of a hard wall in
+# Newton transients (DEVSIM 2.11.2's B / dBdx are finite at any argument -- sg_flux header). The
+# unipolar DG's former TWO-SIDED clamp B(clamp(v, -200, 200)) is gone with its kahan3 flux: under
+# a4f00d9's plain two-Bernoulli bracket it froze BOTH Bernoullis once |v| > 200 and zeroed a wall
+# node's Jacobian column (MEASURED 2026-11-03 on the bipolar DG: "Convergence failure!" / "umfpack
+# numeric failed"); the kernel's sign-selected bracket keeps the linear c v term there anyway.
 
 
 def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
@@ -134,10 +120,11 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
                       ("Potential", "QLambda"))
     _edge_with_derivs(device, region, "vdiff_g_dg", "vdiff_dg / g_enh",
                       ("Potential", "QLambda", "Electrons"))
-    _edge_with_derivs(device, region, "Bern_g_dg", _clamped_bernoulli("vdiff_g_dg"),
-                      ("Potential", "QLambda", "Electrons"))
-    _edge_with_derivs(device, region, "ElectronCurrentDG", _JN_DG,
-                      ("Electrons", "Potential", "QLambda"))
+    _SG.install_sg_current(device, region, carrier="electrons", density="Electrons",
+                           vdiff="vdiff_g_dg", bern="Bern_g_dg", bern_m="Bern_g_dg_m",
+                           current="ElectronCurrentDG", prefactor=_PREF["electrons"],
+                           wrt=("Potential", "QLambda", "Electrons"),
+                           current_wrt=("Electrons", "Potential", "QLambda"), upper_clamp=True)
     ds.delete_equation(device=device, region=region, name="ElectronContinuityEquation")
     _R.forget(device, "ElectronContinuityEquation", loc=region)
     _R.record_region_equation(device, region, name="ElectronContinuityEquation",
@@ -145,39 +132,21 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
                               time_node_model="NCharge", variable_update="positive")
 
 
-# the quantum-shifted Scharfetter-Gummel fluxes -- the classical bipolar strings
-# (physics_bipolar_dd) with vdiff_g -> vdiff_g_dg and Bern_g -> Bern_g_dg (holes: _gp -> _gp_dg)
-_JN_DG = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
-          "kahan3(Electrons@n1*Bern_g_dg, Electrons@n1*vdiff_g_dg, -Electrons@n0*Bern_g_dg)")
-_JP_DG = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
-          "kahan3(Holes@n1*Bern_gp_dg, -Holes@n0*Bern_gp_dg, -Holes@n0*vdiff_gp_dg)")
-
-# The BIPOLAR DG fluxes (setup_bipolar_dg) in the TWO-BERNOULLI form
+# The quantum-shifted Scharfetter-Gummel fluxes: the classical prefactors (physics_bipolar_dd) on the
+# DG Bernoulli argument, through the ONE SG kernel (sg_flux) --
 #     Jn ~ n@n1 B(-v) - n@n0 B(v) ,   Jp ~ -( p@n1 B(v) - p@n0 B(-v) ) ,
-# NOT the kahan3 form above, which spells B(-v) as B(v) + v. That identity cancels catastrophically
-# for v << 0: B(v) ~ |v| and v ~ -|v| leave B(-v) ~ |v| e^-|v| as the difference of two O(|v|)
-# numbers, so its relative error is ~ eps |v| e^|v| -- MEASURED against mpmath on DEVSIM 2.11.2
-# (2026-11-03): 1.9e-7 at v = -21, 6.5e-5 at -27.6, 100 % at -40 (and dBdx(v) + 1, the Jacobian,
-# 3.8e-9 / 1.5e-6 / 34 %), while DEVSIM's own B(-v) and -dBdx(-v) stay <= 2.1e-16 at every v. A
-# classical DD edge never sees |v| ~ 20 (the mesh resolves the Debye length), but an insulator-wall
-# edge does BY CONSTRUCTION: the wall node holds c = u_floor^2 = 1e-12 c_cl, so its zero-flux edge
-# sits at |v| = ln(c@n1/c@n0) ~ 20-28 -- with v < 0 for ELECTRONS when the wall is the edge's n0
-# (for holes the kahan3 form multiplies the cancelling B(v) + v by the depleted p@n0, so the same
-# loss hits them on the opposite edge orientation, i.e. on any 2-D/3-D wall). Measured in GATE C
-# (validation/bipolar_density_gradient.py, p-type MOS, 1e24, 0.15 V): Lambda_n at the wall node --
-# fixed ONLY by that edge's flux (setup_dg_insulator_wall) -- converged linearly and then sat in a
-# period-3 Newton cycle at relative update 1.9-3.8e-7 for 100 iterations, against REL_ERR 1e-7, so
-# the solve passed or failed on the BLAS's round-off (fails with scipy's OpenBLAS, passed with
-# Elmer's in 23 iterations still dithering at 4.6-8.0e-8). The two-Bernoulli form has no
-# cancellation (its subtraction is the physical diffusion-drift balance, error eps |terms| as in
-# kahan3) and is algebraically the same flux. The UNIPOLAR DG keeps _JN_DG: its definition is pinned
-# character-for-character by tests/_dg_calllog.py and no validated unipolar recipe has a wall, but a
-# unipolar region given setup_dg_insulator_wall / setup_dg_hard_wall would carry the same loss (open:
-# docs/audit/2026-11-03-devsim-bipolar-density-gradient.md, sec. 1.6).
-_JN_DG_BIPOLAR = ("ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh*"
-                  "(Electrons@n1*Bern_g_dg_m - Electrons@n0*Bern_g_dg)")
-_JP_DG_BIPOLAR = ("-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p*"
-                  "(Holes@n1*Bern_gp_dg - Holes@n0*Bern_gp_dg_m)")
+# both Bernoullis evaluated, combined sign-selected (sg_flux header).
+# HISTORY. The bipolar DG switched first (a4f00d9, 2026-11-03, to the plain bracket above): the
+# kahan3 spelling B(-v) = B(v) + v cancels for v << 0 (relative error ~ eps |v| e^|v|: 1.9e-7 at
+# v = -21, 6.5e-5 at -27.6, 100 % at -40), and an insulator-wall edge sits at |v| = ln(c@n1/c@n0) ~ 20-28 BY CONSTRUCTION (the wall
+# node holds c = u_floor^2 = 1e-12 c_cl); GATE C (validation/bipolar_density_gradient.py) then sat in
+# a period-3 Newton cycle at relative update 1.9-3.8e-7 against REL_ERR 1e-7 and passed or failed
+# on the BLAS's round-off (docs/audit/2026-11-03-devsim-bipolar-density-gradient.md sec. 1.6). The
+# unipolar DG and every classical flux followed on 2026-11-04 (user decision), all through sg_flux,
+# whose sign-selected bracket replaced the plain one too (same large-|v| accuracy, 4x less ssac
+# round-off near equilibrium; docs/audit/2026-11-04-sg-flux-two-bernoulli.md).
+_PREF = {"electrons": "ElectronCharge*mu_n*EdgeInverseLength*V_t*g_enh",
+         "holes": "-ElectronCharge*mu_p*EdgeInverseLength*V_t*g_enh_p"}
 
 
 def setup_contact_dg(device: str, contact: str, n_contact_m3: float) -> None:
@@ -394,14 +363,12 @@ _BIPOLAR_DG = {
                       eq="ElectronContinuityEquation", cur="ElectronCurrent",
                       cur_dg="ElectronCurrentDG", vd="vdiff_g_dg", bern="Bern_g_dg",
                       bern_m="Bern_g_dg_m",
-                      vd_expr="vdiff_g + (QLambda@n0 - QLambda@n1)/(V_t*g_enh)",
-                      jexpr=_JN_DG_BIPOLAR),
+                      vd_expr="vdiff_g + (QLambda@n0 - QLambda@n1)/(V_t*g_enh)"),
     "holes": dict(u="QSqrtP", lam="QLambdaP", c="Holes", b="b_dg_p",
                   eq="HoleContinuityEquation", cur="HoleCurrent",
                   cur_dg="HoleCurrentDG", vd="vdiff_gp_dg", bern="Bern_gp_dg",
                   bern_m="Bern_gp_dg_m",
-                  vd_expr="vdiff_gp - (QLambdaP@n0 - QLambdaP@n1)/(V_t*g_enh_p)",
-                  jexpr=_JP_DG_BIPOLAR),
+                  vd_expr="vdiff_gp - (QLambdaP@n0 - QLambdaP@n1)/(V_t*g_enh_p)"),
 }
 DG_SRH_TERM = "dgsrh"            # RTerm_dgsrh: the quantum detailed-balance correction to USRH
 
@@ -469,10 +436,9 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
                               b=sp["b"], b_full=dg_b_coefficient(m, g))
         wrt = ("Potential", sp["lam"], sp["c"])
         _edge_with_derivs(device, region, sp["vd"], sp["vd_expr"], wrt)
-        _edge_with_derivs(device, region, sp["bern"], _upper_clamped_bernoulli(sp["vd"]), wrt)
-        _edge_with_derivs(device, region, sp["bern_m"],                # B(-v): see _JN_DG_BIPOLAR
-                          _upper_clamped_bernoulli("(-{})".format(sp["vd"])), wrt)
-        _edge_with_derivs(device, region, sp["cur_dg"], sp["jexpr"], wrt)
+        _SG.install_sg_current(device, region, carrier=key, density=sp["c"], vdiff=sp["vd"],
+                               bern=sp["bern"], bern_m=sp["bern_m"], current=sp["cur_dg"],
+                               prefactor=_PREF[key], wrt=wrt, upper_clamp=True)
         _repoint_region_current(device, region, sp["eq"], sp["cur_dg"])
         done.append(key)
     if quantum_srh:
