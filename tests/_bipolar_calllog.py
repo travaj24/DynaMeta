@@ -15,6 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import tempfile
 
 _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "contact_equation",
              "set_parameter", "node_solution", "edge_from_node_model", "add_circuit_node",
@@ -22,6 +26,28 @@ _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "cont
 
 
 def record_call_log():
+    """The call log, recorded in a CHILD process on the caller's sys.path (same dynameta, same BLAS
+    environment). The cl_bz fixture adds a process-global DEVSIM circuit (node cl_n, source Vcl) that
+    the caller's process could not get rid of (MEASURED 2026-11-03, devsim 2.11.2): a second
+    recording died on "cl_n already exists" and left device cl_bz behind for every later solve (7
+    unrelated DG / Gummel / R26 failures under -n 3); delete_circuit() raises an empty error and the
+    next circuit-coupled solve trips NodeKeeper.cc:266 CIRCUIT_UNEXPECTED; and once any analysis has
+    run with the circuit present, no later test may add a circuit node ("cannot be added once an
+    analysis has been performed"). JSON turns the log's tuples into lists, which dump identically, so
+    the digest is unchanged."""
+    fd, out = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if isinstance(p, str) and p))
+        subprocess.run([sys.executable, os.path.abspath(__file__), "--emit", out], env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        with open(out, encoding="utf-8") as f:
+            return json.load(f)
+    finally:
+        os.remove(out)
+
+
+def _record_in_this_process():
     import devsim as ds
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
@@ -85,9 +111,12 @@ def digest(log) -> str:
     return hashlib.sha256(json.dumps(log, sort_keys=False).encode("utf-8")).hexdigest()
 
 
-if __name__ == "__main__":                                  # pragma: no cover - re-recording aid
+if __name__ == "__main__" and sys.argv[1:2] == ["--emit"]:   # the child of record_call_log()
+    with open(sys.argv[2], "w", encoding="utf-8") as f:
+        json.dump(_record_in_this_process(), f)
+elif __name__ == "__main__":                                # pragma: no cover - re-recording aid
     import dynameta
-    lg = record_call_log()
+    lg = _record_in_this_process()
     print("dynameta:", dynameta.__file__)
     print("calls:", len(lg))
     print("digest:", digest(lg))
