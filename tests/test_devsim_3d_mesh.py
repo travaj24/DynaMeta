@@ -260,22 +260,37 @@ def test_two_processes_building_default_path_3d_devices_get_their_own_meshes(tmp
         assert line and line[-1].startswith("BAD 0 OF 25"), out[-2000:]
 
 
-def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_path):
+def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_path, monkeypatch):
     """Default msh_path: the tensor mesh reaches DEVSIM in memory (create_gmsh_mesh(coordinates=,
-    elements=, physical_names=)) -- no file is written, the old shared ~/.dynameta/_devsim3d.msh is
-    not touched -- and the device is BIT-IDENTICAL to the explicit-file route (node coordinates,
-    NodeVolume, EdgeCouple, the solved Potential; MEASURED 12 arrays / 5864 values array_equal). An
-    explicit msh_path still writes and keeps its file."""
+    elements=, physical_names=)) -- no file is written or read -- and the device is BIT-IDENTICAL to the
+    explicit-file route (node coordinates, NodeVolume, EdgeCouple, the solved Potential; MEASURED 12 arrays
+    / 5864 values array_equal). An explicit msh_path still writes and keeps its file. (The no-file check
+    spies on the writer and on create_gmsh_mesh's arguments rather than on ~/.dynameta/_devsim3d.msh's
+    mtime: other checkouts on a shared box still write that file -- the first version of this test
+    failed exactly that way in a full run, 2026-11-04.)"""
     import devsim as ds
     from dynameta.sweep import BiasPoint
-    legacy = os.path.join(os.path.expanduser("~"), ".dynameta", "_devsim3d.msh")
-    before = os.path.getmtime(legacy) if os.path.exists(legacy) else None
+    calls = {"write": 0, "file": []}
+    real_write, real_create = D3._write_msh22, D3.ds.create_gmsh_mesh
+
+    def spy_write(*a, **k):
+        calls["write"] += 1
+        return real_write(*a, **k)
+
+    def spy_create(**k):
+        calls["file"].append(k.get("file"))
+        return real_create(**k)
+    monkeypatch.setattr(D3, "_write_msh22", spy_write)
+    monkeypatch.setattr(D3.ds, "create_gmsh_mesh", spy_create)
     got = []
     for tag, kw in (("f", dict(msh_path=str(tmp_path / "f.msh"))), ("m", {})):
         sol = D3.Devsim3DEquilibrium(V._spec(physics="drift_diffusion"), device_name="t3p" + tag,
                                      mesh_name="t3pm" + tag, **kw)
+        n_write = calls["write"]
         sol.build_device()
         try:
+            assert calls["file"][-1] == kw.get("msh_path")              # None: the in-memory route
+            assert calls["write"] - n_write == (1 if kw else 0)          # no file written by default
             sol.solve(BiasPoint(label="g", voltages={"gate": 0.5}))
             dev = "t3p" + tag
             got.append({(r, nm): np.asarray(ds.get_node_model_values(device=dev, region=r, name=nm))
@@ -290,8 +305,6 @@ def test_default_mesh_path_is_in_memory_and_bit_identical_to_the_file_route(tmp_
     assert (tmp_path / "f.msh").exists()                                  # explicit path: written + kept
     assert got[0].keys() == got[1].keys()
     assert all(np.array_equal(got[0][k], got[1][k]) for k in got[0])
-    after = os.path.getmtime(legacy) if os.path.exists(legacy) else None
-    assert after == before                                                # the shared file is not written
 
 
 def test_legacy_gmsh_mesher_keeps_the_defect_and_warns(tmp_path):
