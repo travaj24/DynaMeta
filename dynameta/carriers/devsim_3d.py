@@ -916,6 +916,20 @@ class Devsim3DEquilibrium:
     def solve(self, bias) -> CarrierField:
         if not self._built:
             self.build_device()
+        # v0.14.0 (2026-11-04): this builder drives its two contacts ONLY through the gate_bias /
+        # body_bias parameters. A contact repointed circuit-driven (ac_analysis.setup_circuit_contact
+        # on self.device) no longer reads them, so the ramp below would be a no-op and solve() would
+        # return the previous operating point (the defect measured on the 2-D builder, whose
+        # set_ssac_gate now drives the source). There is no 3-D set_ssac_gate, and the bipolar gate
+        # carries a phi_bi offset a plain circuit node would not -- refuse rather than go stale.
+        from dynameta.carriers import eq_registry as _R
+        _circ = sorted(_R.circuit_driven_contacts(self.device))
+        if _circ:
+            raise RuntimeError(
+                "Devsim3DEquilibrium.solve: contact(s) {} are circuit-driven, so the gate_bias/body_bias "
+                "ramp cannot move them and solve() would return a stale operating point. Set the bias "
+                "with ds.circuit_alter + a direct DC solve, or solve() before repointing the contact."
+                .format(_circ))
         gn, bn = self.spec.gate_name, self.spec.body_name
         # Map the Design electrode names (BiasPoint keys) to the internal gate/body
         # contacts. The stacked builder drives ONLY these two, so warn on (a) a bias that

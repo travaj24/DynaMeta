@@ -165,6 +165,18 @@ def node_with_derivs(device: str, region: str, name: str, eq: str, wrt) -> None:
                       equation="simplify(diff({}, {}))".format(eq, w))
 
 
+def circuit_driven_contacts(device: str) -> Dict[str, str]:
+    """{contact: circuit node} for every contact whose recorded PotentialEquation is tied to a
+    circuit node (ac_analysis.setup_circuit_contact, the *_circuit ohmic twins). v0.14.0 (2026-11-04):
+    the builders' solve() drives contacts through their `<name>_bias` PARAMETER, which a circuit-driven
+    contact no longer reads -- they consult this to drive the circuit source instead, or to refuse."""
+    out: Dict[str, str] = {}
+    for e in _REG.get(device, []):
+        if e["scope"] == "contact" and e["name"] == "PotentialEquation"                 and e["kwargs"].get("circuit_node"):
+            out[e["loc"]] = e["kwargs"]["circuit_node"]
+    return out
+
+
 def equation_names(device: str) -> set:
     return {e["name"] for e in _REG.get(device, [])}
 

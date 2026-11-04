@@ -125,6 +125,8 @@ class LayeredDevsimBuilder:
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
+        # electrode -> circuit source that drives it, once set_ssac_gate repointed it (see _drive)
+        self._circuit_gates: Dict[str, str] = {}
         self._built = False
 
     # ---- region planning ----
@@ -721,6 +723,7 @@ class LayeredDevsimBuilder:
                 verbose: bool = False) -> CarrierField:
         if not self._built:
             self.build_device()
+        self._check_circuit_contacts()
         if self._bipolar_regions:
             return self._solve_bipolar(bias, grid_n_x=grid_n_x, grid_n_z=grid_n_z, rel_tol=rel_tol,
                                        max_iter=max_iter, v_step=v_step, abs_tol=abs_tol, verbose=verbose)
@@ -742,8 +745,7 @@ class LayeredDevsimBuilder:
                 dv = (target - v_now) / n_steps
                 for _ in range(n_steps):
                     v_now += dv
-                    ds.set_parameter(device=self.device, name="{}_bias".format(E.name),
-                                      value=v_now)
+                    self._drive(E.name, v_now)
                     solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
                               max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
 
@@ -767,7 +769,7 @@ class LayeredDevsimBuilder:
         for E in d.electrodes:
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
             zero[E.name] = v
-            ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
+            self._drive(E.name, v)
         solve_dc(self.device, method=method, abs_tol=abs_tol, rel_tol=rel_tol,
                   max_iter=max_iter, semiconductor_regions=semi, verbose=verbose)
         _ramp(zero)
@@ -836,7 +838,7 @@ class LayeredDevsimBuilder:
                                                                name="IntrinsicHoles"))
         for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
-            ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v)
+            self._drive(E.name, v)
         # (2) coupled 3-variable Newton at 0 bias, directly from the built-in seed.
         # solve_dc is the identical ds.solve call plus the C10-d solution-level FD-ceiling
         # check on the converged state (the layered bipolar path previously bypassed it).
@@ -852,12 +854,41 @@ class LayeredDevsimBuilder:
             dv = (target - v_now) / n_steps
             for _ in range(n_steps):
                 v_now += dv
-                ds.set_parameter(device=self.device, name="{}_bias".format(E.name), value=v_now)
+                self._drive(E.name, v_now)
                 solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=rel_tol,
                          max_iter=max_iter)
         if verbose:
             print("[carriers] bipolar staged solve done (bias={})".format(bias.voltages), flush=True)
         return self._to_carrier_field(bias, grid_n_x, grid_n_z)
+
+    def _drive(self, electrode: str, v: float) -> None:
+        """Set electrode `electrode` to `v` volts through whatever ACTUALLY pins its potential.
+
+        v0.14.0 blocker fix (2026-11-04, MEASURED before the fix): after set_ssac_gate the gate's
+        Potential Dirichlet reads the circuit node, not the `<name>_bias` parameter, so solve()'s ramp
+        -- which only wrote the parameter -- was a no-op for it and a later builder.solve(new bias)
+        silently returned the OLD operating point (reference modulator, 1 V -> solve(2 V): every node
+        Potential equal to the 1 V state to 1.1e-16 V, 1.0 V off a fresh 2 V solve in upper_al2o3).
+        A circuit-driven electrode is now driven by circuit_alter on its source (the parameter is
+        still written, so anything reading it stays consistent)."""
+        ds.set_parameter(device=self.device, name="{}_bias".format(electrode), value=float(v))
+        src = self._circuit_gates.get(electrode)
+        if src is not None:
+            ds.circuit_alter(name=src, value=float(v))
+
+    def _check_circuit_contacts(self) -> None:
+        """Refuse a solve() the builder cannot drive: an electrode repointed circuit-driven OUTSIDE
+        set_ssac_gate (a raw ac_analysis.setup_circuit_contact on self.device) has a source the
+        builder does not know, so its bias would silently not move (the stale-operating-point defect
+        _drive fixes for set_ssac_gate)."""
+        unknown = sorted(c for c in _R.circuit_driven_contacts(self.device)
+                         if c in self._contact_region and c not in self._circuit_gates)
+        if unknown:
+            raise RuntimeError(
+                "LayeredDevsimBuilder.solve: electrode(s) {} are circuit-driven but were not repointed "
+                "with set_ssac_gate, so solve() does not know the source that sets their potential and "
+                "would return a stale operating point. Use set_ssac_gate(name, source_name=...) or set "
+                "the bias with ds.circuit_alter + a direct DC solve.".format(unknown))
 
     def _dc_abs_tol(self) -> float:
         """Absolute Newton tolerance, scaled to the carrier density for DD.
@@ -890,7 +921,9 @@ class LayeredDevsimBuilder:
 
         Call AFTER build_device()/solve() (the contact must exist). Then set the DC operating point
         with ds.circuit_alter(name=source_name, value=Vg) + a DC solve before the ssac/transient
-        call. Returns (source_name, node_name).
+        call -- or with builder.solve(BiasPoint({electrode_name: Vg})), which (v0.14.0) ramps the
+        circuit source for this electrode instead of its now-unread bias parameter. Returns
+        (source_name, node_name).
 
         This is the first-class form of the post-solve delete_contact_equation + setup_circuit_contact
         reconfiguration. It also keeps the equation registry consistent -- forgets the stale
@@ -917,8 +950,10 @@ class LayeredDevsimBuilder:
         ds.delete_contact_equation(device=self.device, contact=electrode_name,
                                    name="PotentialEquation")
         _R.forget(self.device, "PotentialEquation", loc=electrode_name)
-        return _AC.setup_circuit_contact(self.device, electrode_name, source_name=source_name,
-                                         node_name=node_name)
+        out = _AC.setup_circuit_contact(self.device, electrode_name, source_name=source_name,
+                                        node_name=node_name)
+        self._circuit_gates[electrode_name] = source_name    # solve() now drives this source
+        return out
 
     def _to_carrier_field(self, bias, grid_n_x, grid_n_z) -> CarrierField:
         d = self.design
@@ -990,4 +1025,5 @@ class LayeredDevsimBuilder:
             ds.delete_device(device=dv)
         for m in list(ds.get_mesh_list()):
             ds.delete_mesh(mesh=m)
+        self._circuit_gates = {}
         self._built = False
