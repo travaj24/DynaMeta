@@ -80,7 +80,17 @@ The mapping raises if the factor is absent. There is one implementation per kern
 
 **1/f noise (opt-in, `hooge_alpha=`).** Hooge 1969; Hooge 1994:
 
-    K_H = alpha_H J^2 / (n f)    per carrier
+    K_H = alpha_H J J^T / (n f)    per carrier  (a RANK-ONE tensor along J)
+
+**CORRECTION 2026-11-04 (release blocker).** This record first wrote `alpha_H J^2 / (n f)` and the
+code summed it edge by edge like the diffusion source. Hooge noise is a fluctuation of the local
+conductivity, `delta j = xi J` with one scalar `xi` per point, so one element's edge currents are
+fully correlated; the edge sum dropped their cross terms and returned `cos^4 + sin^4` of the truth
+for a uniform field at angle theta to the mesh -- MEASURED 0.5000 at 45 deg on a uniform 2-D DD
+resistor with exact (right-isosceles) volumes, 1.0000 aligned; gate F, being 1-D, could not see it.
+The source is now assembled per element (`noise_analysis` module doc, item 3): exact at any
+orientation on well-centred meshes, identical to the old form in 1-D and for axis-aligned current.
+Gate: `tests/test_devsim_noise_hooge.py` (0 and 45 deg to 1e-8, measured 3.6e-10; old code 0.5).
 
 ### Discretization (box / Scharfetter-Gummel, DEVSIM's own volumes)
 
@@ -212,6 +222,7 @@ linear solve). Nothing compares the module with itself.
 | D2 | 400 L_D slab | plain Lorentzian: plateau 2(G+R) tau^2 (q(mu_n+mu_p)E)^2/L; S(f_c)/S(0) = 1/2 | 0.9925; 0.5010 | 1.5e-2; 0.01 |
 | E | biased 10 um resistor (0.1 V) vs forward diode | resistor S = 4kT G, not 2qI; diode S = 2qI = (1/2) 4kT G_d | 1 + 6e-6 (S/2qI = 0.517); 0.5043 / 0.5021 / 0.5028 at 0.45 / 0.5 / 0.55 V | 1e-4; 1e-2 |
 | F | biased 10 um resistor, alpha_H 2e-3, 1 Hz / 1 kHz / 1 MHz | Hooge alpha I^2/(N f) | 7.6e-6 | 1e-4 |
+| F2 | uniform 2-D DD resistor, right-isosceles lattice mesh, current at 0 and 45 deg to every edge (2026-11-04) | Hooge alpha I^2/(N f) | 3.6e-10 both (pre-fix 45 deg: 0.5) | 1e-8 |
 | G | 2-D layered reference metasurface (degenerate ITO, FD, 9 regions, edge-metal grounds), 1 GHz-1 PHz | 4kT Re Y at Vg 0 V; at +2 V (accumulation) | 1.3e-11; 3.7e-5 | 1e-9; 1e-3 |
 | adj | native noise field vs equilibrated scipy adjoint, 1 GHz | identity | 2.2e-15 | 1e-12 |
 
