@@ -20,9 +20,16 @@ Emits a `CarrierField(ndim=3)` the bridge consumes DIRECTLY: the native 3D-grid 
 assemble_eps places the (x,y,z) density with NO FieldLift synthesis (a lift applies to 2D
 fields only) -- the physically-correct route for non-separable topologies (vs 2D + `SeparableXYLift`).
 
-Validated: `validation/carriers_3d.py` (equilibrium: RelError~1e-8, +Vg accumulates/
--Vg depletes, Gauss to ~12%, lateral invariance ~1e-13); `validation/carriers_3d_dd.py`
-(DD: converges, sign-correct, reduces to the equilibrium accumulation to 0.8% at +1V).
+Validated: `validation/carriers_3d.py` (equilibrium: +Vg accumulates/-Vg depletes; on the D2c Kuhn-tensor
+mesh the box-method Gauss balance closes to 3.7e-6 = the Newton stop and lateral invariance is 3e-16 --
+the gmsh mesh gave 12 % / 1e-2); `validation/carriers_3d_dd.py` (DD: converges, sign-correct, reduces to
+the equilibrium accumulation at +1V); `validation/devsim_3d_mesh.py` (D2c: exact volumes, sheet charge,
+Gauss, 3-D == 1-D on the same z-lines).
+
+MESH (D2c, v0.14.0): Stacked3DSpec.mesher = "tensor" (default) -- a graded tensor-product grid split into
+right-angled Kuhn tetrahedra, on which DEVSIM 2.11's 3-D volumes and couplings are EXACT
+(_build_mesh_tensor; docs/audit/2026-11-03-devsim-3d-mesh.md). The gmsh paths below survive as
+mesher="gmsh" (legacy, UnreliableResultWarning).
 
 A centered GATE PATCH is supported (`gate_patch_frac` < 1: gated under the patch, free
 surface in the gap -> laterally-varying accumulation), and `Stacked3DSpec.from_design`
@@ -91,7 +98,7 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
-from dynameta.warning_types import AdvisoryWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
 @dataclass
@@ -151,6 +158,14 @@ class Stacked3DSpec:
                                           # topology the 2D+symmetrization path approximates).
     mesh_min_nm:     float = 0.5         # near the semi/oxide interface
     mesh_max_nm:     float = 3.0
+    # D2c (v0.14.0): the 3-D mesher. "tensor" (default) = a graded tensor-product grid through every
+    # layer/patch/inclusion boundary, each box cell split into the 6 Kuhn (right-angled) tetrahedra:
+    # DEVSIM's box-method volumes and couplings are then EXACT (sum NodeVolume = region volume to 1e-15,
+    # every circumcentric piece >= 0). "gmsh" = the pre-v0.14 unstructured gmsh mesh, kept ONLY to
+    # reproduce old numbers: DEVSIM 2.11 sums the MAGNITUDES of each tet's circumcentric dual pieces, so
+    # on its non-well-centred tets sum NodeVolume over-counts (MEASURED 1.196 x semi / 1.293 x oxide on
+    # the D1c gate-G2 cap) and integrated charge is ~20 % wrong (docs/audit/2026-11-03-devsim-3d-mesh.md).
+    mesher:          str = "tensor"
     grid_n:          Tuple[int, int, int] = (16, 16, 33)   # (nx, ny, nz) output grid
     field_region_name: str = "semi"      # emitted CarrierField region key (match the optics
                                           # alignment source_region for run_pipeline integration)
@@ -290,6 +305,11 @@ class Stacked3DSpec:
                               "permittivity); got {}".format(self.eps_oxide))
         if not (self.eps_semi >= 1.0):
             raise ValueError("Stacked3DSpec.eps_semi must be >= 1; got {}".format(self.eps_semi))
+        if self.mesher not in ("tensor", "gmsh"):
+            raise ValueError("Stacked3DSpec.mesher must be 'tensor' or 'gmsh'; got {!r}".format(self.mesher))
+        if not (0.0 < self.mesh_min_nm <= self.mesh_max_nm):
+            raise ValueError("Stacked3DSpec needs 0 < mesh_min_nm <= mesh_max_nm; got {} / {}".format(
+                self.mesh_min_nm, self.mesh_max_nm))
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
                               "'bipolar_dd'; got {!r}".format(self.physics))
@@ -373,7 +393,8 @@ class Stacked3DSpec:
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
-                     interface_traps=None, extended_precision: bool = False) -> "Stacked3DSpec":
+                     interface_traps=None, extended_precision: bool = False,
+                     mesher: str = "tensor") -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -531,11 +552,103 @@ class Stacked3DSpec:
                     physics=tr.physics, gate_patch_frac=float(frac),
                     field_region_name=layers[gate_adj_idx].name,   # the gate-adjacent (accumulation) layer
                     gate_name=gate_name, body_name=body_name,
-                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm,
+                    grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
                     chi_semi_eV=(float(tr.chi_eV) if extra_semis else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), **bip)
+
+
+# ---- D2c: tensor-product Kuhn mesh (the default 3-D mesh; see Devsim3DEquilibrium._build_mesh_tensor) ----
+_KUHN_PERMS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def _graded_axis(breaks, refine, h_min, h_max, dist_min=1.0, dist_max=6.0) -> np.ndarray:
+    """A 1-D node axis through every breakpoint, sized like gmsh's Threshold field: h = h_min within
+    dist_min of a refinement coordinate, linear to h_max at dist_max, h_max beyond (h_max everywhere when
+    `refine` is empty). Each span between breakpoints gets ceil(int ds/h) cells placed at equal steps of
+    int ds/h -- a smooth grading that hits the breakpoints exactly. Coordinates in NANOMETRES (breakpoints
+    are de-duplicated at 1e-9 nm)."""
+    b = np.unique(np.round(np.asarray(breaks, dtype=float), 9))
+    out = [float(b[0])]
+    for a0, a1 in zip(b[:-1], b[1:]):
+        sg = np.linspace(a0, a1, 2001)
+        if len(refine):
+            d = np.min(np.abs(sg[:, None] - np.asarray(refine, dtype=float)[None, :]), axis=1)
+            h = np.clip(h_min + (h_max - h_min) * (d - dist_min) / (dist_max - dist_min), h_min, h_max)
+        else:
+            h = np.full_like(sg, h_max)
+        w = np.concatenate([[0.0], np.cumsum(0.5 * (1.0 / h[1:] + 1.0 / h[:-1]) * np.diff(sg))])
+        n = max(1, int(np.ceil(w[-1] - 1e-9)))
+        out.extend(np.interp(np.linspace(0.0, w[-1], n + 1), w, sg)[1:-1].tolist())
+        out.append(float(a1))
+    return np.asarray(out)
+
+
+def _kuhn_tets(xs, ys, zs):
+    """Node coordinates (C order over (x, y, z)) and the 6 Kuhn tetrahedra of every box cell: for each
+    axis permutation (p0, p1, p2) the path c -> c+e_p0 -> c+e_p0+e_p1 -> c+(1,1,1). Every cell face is
+    split along its min-corner -> max-corner diagonal, so neighbouring cells are conforming. Returns
+    (P [n, 3], T [6 m, 4], the cell index of each tet)."""
+    nx, ny, nz = len(xs), len(ys), len(zs)
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+    P = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+    I, J, K = (g.ravel() for g in np.meshgrid(np.arange(nx - 1), np.arange(ny - 1), np.arange(nz - 1),
+                                               indexing="ij"))
+    tets = []
+    for perm in _KUHN_PERMS:
+        c = np.zeros((len(I), 3), dtype=int)
+        vs = [(I * ny + J) * nz + K]
+        for a in perm:
+            c[:, a] += 1
+            vs.append(((I + c[:, 0]) * ny + (J + c[:, 1])) * nz + (K + c[:, 2]))
+        tets.append(np.stack(vs, axis=1))
+    return P, np.stack(tets, axis=1).reshape(-1, 4), np.repeat(np.arange(len(I)), 6)
+
+
+def _cell_faces(rid, axis, side, region):
+    """(i, j, k) index arrays of the cells of region id `region` on the bottom / top domain face normal
+    to `axis`."""
+    idx = np.indices(rid.shape)
+    sel = (idx[axis] == (0 if side == "bottom" else rid.shape[axis] - 1)) & (rid == region)
+    return tuple(idx[d][sel] for d in range(3))
+
+
+def _face_triangles(ax, axis, cells, plus):
+    """The two triangles of each cell face normal to `axis` (the + side face when plus, else the - side),
+    split along the face's min -> max diagonal exactly as the Kuhn tets split it."""
+    ny, nz = len(ax[1]), len(ax[2])
+    base = np.stack([np.asarray(c, dtype=int) for c in cells], axis=1)
+    if plus:
+        base[:, axis] += 1
+    u, v = [d for d in range(3) if d != axis]
+    eu, ev = np.eye(3, dtype=int)[u], np.eye(3, dtype=int)[v]
+
+    def node(off):
+        q = base + off[None, :]
+        return (q[:, 0] * ny + q[:, 1]) * nz + q[:, 2]
+    n0, nu, nv, nm = node(0 * eu), node(eu), node(ev), node(eu + ev)
+    return np.concatenate([np.stack([n0, nu, nm], 1), np.stack([n0, nv, nm], 1)])
+
+
+def _write_msh22(path, P, groups3, groups2) -> None:
+    """MSH 2.2 ASCII: nodes (1-based, metres), tetrahedra per 3-D physical group, triangles per 2-D group."""
+    names = [(2, n) for n in groups2] + [(3, n) for n in groups3]
+    tag = {n: i + 1 for i, (_d, n) in enumerate(names)}
+    lines = ["$MeshFormat", "2.2 0 8", "$EndMeshFormat", "$PhysicalNames", str(len(names))]
+    lines += ['{} {} "{}"'.format(d, tag[n], n) for (d, n) in names]
+    lines += ["$EndPhysicalNames", "$Nodes", str(len(P))]
+    lines += ["{} {!r} {!r} {!r}".format(i + 1, float(p[0]), float(p[1]), float(p[2])) for i, p in enumerate(P)]
+    lines += ["$EndNodes", "$Elements"]
+    body = []
+    for typ, groups in ((2, groups2), (4, groups3)):
+        for n, conn in groups.items():
+            t = tag[n]
+            body += ["{} {} 2 {} {} {}".format(len(body) + 1 + r, typ, t, t, " ".join(str(int(v) + 1) for v in row))
+                     for r, row in enumerate(np.asarray(conn, dtype=int))]
+    lines += [str(len(body))] + body + ["$EndElements", ""]
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(lines))
 
 
 class Devsim3DEquilibrium:
@@ -888,6 +1001,13 @@ class Devsim3DEquilibrium:
 
     # ---- gmsh mesh (nm geometry -> metre mesh) ----
     def _build_mesh(self) -> None:
+        if self.spec.mesher == "tensor":                        # D2c default: exact box-method geometry
+            return self._build_mesh_tensor()
+        warnings.warn(
+            "Stacked3DSpec(mesher='gmsh'): the unstructured gmsh mesh has non-well-centred tetrahedra, on "
+            "which DEVSIM 2.11's 3-D node volumes over-count (MEASURED sum NodeVolume 1.20-1.52 x the region "
+            "volume) and integrated charge is ~20 % wrong. Kept only to reproduce pre-v0.14 numbers; use "
+            "mesher='tensor' (docs/audit/2026-11-03-devsim-3d-mesh.md).", UnreliableResultWarning, stacklevel=3)
         if self.spec.inclusions:                                # lateral inclusions -> adjacency-based build
             return self._build_mesh_incl()
         import gmsh
@@ -974,6 +1094,108 @@ class Devsim3DEquilibrium:
         gmsh.option.setNumber("Mesh.ScalingFactor", 1e-9)     # nm -> metre
         gmsh.write(self.msh_path)
         gmsh.finalize()
+
+    def _build_mesh_tensor(self) -> None:
+        """D2c (v0.14.0): the DEFAULT 3-D mesh -- a graded tensor-product grid split into Kuhn tetrahedra,
+        written as MSH 2.2 (metres) for create_gmsh_mesh. Same region / contact / interface names and the
+        same build_device hand-off (_mesh_regions, _iface_pairs, _top_diel) as the gmsh builders.
+
+        WHY (MEASURED, docs/audit/2026-11-03-devsim-3d-mesh.md): DEVSIM 2.11's 3-D ElementEdgeCouple is
+        0.5 (|v0 x v1| + |v0 x v2|) per tet edge (TetrahedronEdgeCouple.cc: v0 = circumcentre - edge
+        midpoint, v1/v2 = face circumcentres - circumcentre), the MAGNITUDES of the circumcentric dual
+        pieces, and ElementNodeVolume = couple * EdgeLength / 6 feeds EdgeNodeVolume and NodeVolume. On a
+        tet whose circumcentre is outside it the signed pieces partly cancel but the magnitudes add, so the
+        volumes over-count. The gmsh meshes have 42-57 % such tets (sum NodeVolume 1.196 / 1.293 x the semi /
+        oxide volume on the G2 cap); a Delaunay mesh does NOT help (gmsh Optimize=0: 0 of 17814 oxide faces
+        non-Delaunay, still 1.289 x), and element assembly does not either (it uses the same couples).
+        Every Kuhn tet of a box cell is right-angled with ALL FOUR faces right triangles, so every
+        circumcentre (the cell centre, on the tet's main diagonal) and face circumcentre (a hypotenuse
+        midpoint) lies on the tet boundary: each piece is >= 0, magnitude == signed, and the volumes /
+        couples are the exact box-method ones (sum NodeVolume / region volume - 1 <= 1e-14; the axis
+        edges carry the rectilinear dual areas, the face/body diagonals carry 0). A laterally uniform
+        stack is then laterally invariant to round-off and reduces to the 1-D discretization on the same
+        z-lines.
+
+        Grading: each axis passes through every geometric boundary (layer interfaces; patch and inclusion
+        edges laterally) and follows the gmsh Threshold rule it replaces -- size mesh_min_nm within 1 nm of
+        a refinement plane, linear to mesh_max_nm at 6 nm. z refines at the (last) semiconductor/dielectric
+        interface (as before); x/y refine at patch and inclusion edges and are otherwise uniform at
+        <= mesh_max_nm (a full-gate stack needs no lateral resolution)."""
+        s = self.spec
+        Lnm = s.lateral_m * 1e9
+        stack = s.layer_stack_nm()                              # [(name,mat,role,zlo,zhi,eps)] body->gate
+        frac = float(s.gate_patch_frac)
+        patterned = frac < 1.0 - 1e-9
+        ph = Lnm * frac / 2.0
+        z_of = {nm: (zlo, zhi) for (nm, _m, _r, zlo, zhi, _e) in stack}
+        xb, yb, xr, yr = [0.0, Lnm], [0.0, Lnm], [], []
+        if patterned:
+            for v in (Lnm / 2 - ph, Lnm / 2 + ph):
+                xb.append(v); yb.append(v); xr.append(v); yr.append(v)
+        inc_geo = []
+        for inc in s.inclusions:
+            if inc.in_layer not in z_of:
+                raise ValueError("Inclusion3D.in_layer '{}' is not a stack region {}".format(
+                    inc.in_layer, sorted(z_of)))
+            wx, wy = inc.x_frac * Lnm, inc.y_frac * Lnm
+            x0, y0 = Lnm / 2 - wx / 2, Lnm / 2 - wy / 2
+            inc_geo.append((inc, x0, x0 + wx, y0, y0 + wy) + tuple(z_of[inc.in_layer]))
+            xb += [x0, x0 + wx]; yb += [y0, y0 + wy]; xr += [x0, x0 + wx]; yr += [y0, y0 + wy]
+        zb = [0.0] + [L[4] for L in stack]
+        zr = [stack[k][3] for k in range(1, len(stack))
+              if stack[k - 1][2] == "semiconductor" and stack[k][2] == "dielectric"][-1:]
+        ax = [_graded_axis(b, r, s.mesh_min_nm, s.mesh_max_nm) for b, r in ((xb, xr), (yb, yr), (zb, zr))]
+        # the region of every box cell, by its centre (an inclusion footprint first, else the layer)
+        cx, cy, cz = [0.5 * (a[1:] + a[:-1]) for a in ax]
+        names = [L[0] for L in stack] + [inc.name for inc in s.inclusions]
+        CX, CY, CZ = np.meshgrid(cx, cy, cz, indexing="ij")
+        rid = np.full(CX.shape, -1, dtype=int)
+        for k, (_n, _m, _r, zlo, zhi, _e) in enumerate(stack):
+            rid[(CZ > zlo) & (CZ < zhi)] = k
+        for k, (_inc, x0, x1, y0, y1, zlo, zhi) in enumerate(inc_geo):
+            rid[(CX > x0) & (CX < x1) & (CY > y0) & (CY < y1) & (CZ > zlo) & (CZ < zhi)] = len(stack) + k
+        P, T, cell_of_tet = _kuhn_tets(*ax)
+        tet_rid = rid.ravel()[cell_of_tet]
+        groups3 = {names[k]: T[tet_rid == k] for k in range(len(names)) if np.any(tet_rid == k)}
+        tri = {}
+        # contacts: the domain top / bottom faces of the contact's OWN region (gate: the topmost dielectric,
+        # body: 'semi'); an inclusion reaching the top / bottom face is not contacted (DEVSIM refuses
+        # contact nodes off the contact region)
+        gate_f = _cell_faces(rid, axis=2, side="top", region=len(stack) - 1)
+        if patterned:                                           # the patch = top faces inside the footprint
+            fx, fy = cx[gate_f[0]], cy[gate_f[1]]
+            keep = (fx > Lnm / 2 - ph) & (fx < Lnm / 2 + ph) & (fy > Lnm / 2 - ph) & (fy < Lnm / 2 + ph)
+            gate_f = tuple(a[keep] for a in gate_f)
+        tri["gate"] = _face_triangles(ax, 2, gate_f, plus=True)
+        tri["body"] = _face_triangles(ax, 2, _cell_faces(rid, axis=2, side="bottom", region=0), plus=False)
+        pair_faces = {}                                         # {(r0, r1) sorted: {axis: [(i,j,k) of the - cell]}}
+        for a in range(3):
+            lo, hi = [slice(None)] * 3, [slice(None)] * 3
+            lo[a], hi[a] = slice(0, -1), slice(1, None)
+            r0, r1 = rid[tuple(lo)], rid[tuple(hi)]
+            for (i, j, k) in zip(*np.nonzero(r0 != r1)):
+                key = tuple(sorted((names[r0[i, j, k]], names[r1[i, j, k]])))
+                pair_faces.setdefault(key, {0: [], 1: [], 2: []})[a].append((i, j, k))
+
+        def _pair_tris(d):
+            return np.concatenate([_face_triangles(ax, a, tuple(np.asarray(v).T), plus=True)
+                                   for a, v in d.items() if v])
+        iface_pairs = []
+        if not s.inclusions:                                    # the stacked naming: if_k = stack[k-1] | stack[k]
+            for k in range(1, len(stack)):
+                tri["if_{}".format(k)] = _pair_tris(pair_faces[tuple(sorted((stack[k - 1][0], stack[k][0])))])
+                iface_pairs.append(("if_{}".format(k), stack[k - 1][0], stack[k][0]))
+        else:                                                   # the adjacency naming of _build_mesh_incl
+            for i, key in enumerate(sorted(pair_faces)):
+                tri["if_{}".format(i)] = _pair_tris(pair_faces[key])
+                iface_pairs.append(("if_{}".format(i), key[0], key[1]))
+        self._mesh_regions = [(nm, mt, rl, ep) for (nm, mt, rl, _zl, _zh, ep) in stack] + \
+                             [(inc.name, inc.material, inc.role, inc.eps) for inc in s.inclusions]
+        self._iface_pairs = iface_pairs
+        self._top_diel = stack[-1][0]
+        self._mesh_axes_m = tuple(a * 1e-9 for a in ax)        # diagnostics / tests
+        os.makedirs(os.path.dirname(os.path.abspath(self.msh_path)), exist_ok=True)
+        _write_msh22(self.msh_path, P * 1e-9, groups3, tri)
 
     def _build_mesh_incl(self) -> None:
         """Adjacency-based 3D OCC build supporting lateral material INCLUSIONS (centered pillars in a
