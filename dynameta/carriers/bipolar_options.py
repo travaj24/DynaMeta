@@ -108,6 +108,11 @@ here re-defines a composite by name, so options compose with trap levels, interf
 
 5. GENERATION. `generation_m3s` adds a uniform external generation G (region parameter `G_ext`,
    rampable with ds.set_parameter) to both continuity equations: U_net = U_SRH + U_A + U_rad - G.
+   NOISE: by default noise_analysis counts G as a Poisson process -- photogeneration shot noise, GR
+   source 2 G -- which is right when G stands for absorbed light. If G is a deterministic drive or a
+   modelling device (a prescribed injection, a continuation aid, a noiseless pump, or source
+   statistics handled elsewhere), call noise_analysis.noise_spectrum / terminal_noise with
+   external_generation_shot=False: G then sets the operating point but adds no noise of its own.
 """
 
 from __future__ import annotations
@@ -239,6 +244,10 @@ class BipolarOptions:
     bgn: Optional[BGNModel] = None
     ionization: Optional[IonizationModel] = None
     T_K: Optional[float] = None
+    # Uniform external generation G [m^-3 s^-1] (module doc item 5). Noise (user decision 2026-11-04):
+    # noise_analysis treats it as POISSON photogeneration (GR source 2 G, shot noise 2 q I_ph when
+    # every pair is collected) unless noise_spectrum / terminal_noise get external_generation_shot=
+    # False -- use False when G is a deterministic drive / modelling device, not a photon stream.
     generation_m3s: Optional[float] = None
 
     def __post_init__(self):
