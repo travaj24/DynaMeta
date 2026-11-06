@@ -85,6 +85,13 @@ class TransportModel:
                               for a single semiconductor or a same-material stack (zero offset by
                               identity), so those need neither. No other consumer reads them
                               (inventory 2026-11-04: docs/audit/2026-11-04-v0.14-user-decisions.md).
+      chi_reference_T_K    : the temperature [K] at which chi_eV (and band_gap_eV) were QUOTED. None =
+                              unstated, read as T_REF (300 K). No chi(T) model exists in v0.14, so a
+                              heterostack run at another temperature uses chi_eV unchanged; the 2-D
+                              builder therefore REFUSES a heterostack whose run T differs from this
+                              (LayeredDevsimBuilder(on_chi_temperature="refuse"), the default; "warn" /
+                              "off" proceed). Set it equal to the device T (BipolarOptions.T_K) when
+                              chi_eV is your value AT that T; that is the only thing it asserts.
       physics              : "equilibrium" (default) | "drift_diffusion"
       mobility_m2Vs_of_n_m3      : electron mobility (DD only)
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
@@ -142,6 +149,9 @@ class TransportModel:
     # dos_mass_kg_of_n_m3(n_bg_m3); holes: dos_mass_p_kg, else the electron mass).
     richardson_n_Am2K2:          Optional[float] = None
     richardson_p_Am2K2:          Optional[float] = None
+    # v0.14 row 3.2-10 (user decision 3, 2026-11-06): the temperature chi_eV was quoted at (see Args).
+    # An assert-only tag; None = unstated (T_REF). Read by physics_heterojunction.check_affinity_temperature.
+    chi_reference_T_K:           Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -151,6 +161,10 @@ class TransportModel:
                 "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
         if self.field_dependent_mobility and self.v_sat_ms is None:
             raise ValueError("field_dependent_mobility=True requires v_sat_ms (saturation velocity, m/s)")
+        if self.chi_reference_T_K is not None and not (np.isfinite(float(self.chi_reference_T_K))
+                                                       and float(self.chi_reference_T_K) > 0.0):
+            raise ValueError("chi_reference_T_K must be finite and > 0 (K), got {!r}"
+                             .format(self.chi_reference_T_K))
         for nm in ("richardson_n_Am2K2", "richardson_p_Am2K2"):
             v = getattr(self, nm)
             if v is not None and not (np.isfinite(float(v)) and float(v) > 0.0):

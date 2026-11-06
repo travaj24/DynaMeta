@@ -400,7 +400,7 @@ class Stacked3DSpec:
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
                      interface_traps=None, extended_precision: bool = False,
-                     mesher: str = "tensor") -> "Stacked3DSpec":
+                     mesher: str = "tensor", on_chi_temperature: str = "refuse") -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
         ALL the dielectric layers on the GATE side (the direction of the gate electrode), and
@@ -414,7 +414,12 @@ class Stacked3DSpec:
         patch); the semiconductor layer itself must be laterally uniform. Stack.features and tapered
         inclusions are REFUSED (2026-11-02): a via came back as the via-free spec (measured), and a tapered
         gate patch touches the oxide with its BOTTOM (narrower) section, which the electrode-footprint
-        gate_patch_frac does not see."""
+        gate_patch_frac does not see.
+
+        on_chi_temperature (v0.14 row 3.2-10): a 3-D heterostack runs at T_REF (bipolar_dd, the only
+        physics with a T_K, refuses extra semiconductors), so the check fires only when a material states
+        TransportModel.chi_reference_T_K != T_REF. Same three settings as LayeredDevsimBuilder
+        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature)."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
@@ -507,6 +512,13 @@ class Stacked3DSpec:
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
             raise ValueError("semiconductor '{}' has no transport model".format(semi_L.background_material))
+        _htr = {layers[i].background_material: design.materials.get(layers[i].background_material).transport
+                for i in semi_idxs}
+        if extra_semis and len({(t.chi_eV, t.band_gap_eV) for t in _htr.values()}) > 1:
+            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10)
+            HJ.check_affinity_temperature(
+                {m: getattr(t, "chi_reference_T_K", None) for m, t in _htr.items()},
+                PE.T_REF, mode=on_chi_temperature, owner="Stacked3DSpec.from_design")
         eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
         if eps_ox is None:
             raise ValueError("gate dielectric '{}' has no eps_static_dc".format(ox_L.background_material))
@@ -902,8 +914,11 @@ class Devsim3DEquilibrium:
             nd = (-1.0 if s.acceptor else 1.0) * float(n_bg_m3)
             ds.node_model(device=self.device, region=region, name="NetDoping",
                           equation="{:.10e}".format(nd))
-        Nc = PE.effective_dos_m3(s.dos_mass_kg)
-        Nv = PE.effective_dos_m3(float(s.dos_mass_p_kg)) if s.dos_mass_p_kg else Nc
+        # band DOS at the region's temperature (BipolarOptions.T_K, else T_REF): the ONE helper the 2-D
+        # builder uses. v0.14 row 3.2-7: this evaluated the masses at T_REF under T_K (N_c 1.31x high at
+        # 250 K), so the FD normalisation and the degenerate-body built-in potential were wrong.
+        from dynameta.carriers.bipolar_options import band_dos_at_T
+        Nc, Nv = band_dos_at_T(s.dos_mass_kg, s.dos_mass_p_kg, s.bipolar_options)
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
@@ -994,9 +1009,10 @@ class Devsim3DEquilibrium:
             # eta = 10, i.e. 0.178 V of spurious gate bias at nominal Vg = 0). Single-sourced with
             # the contact recipe via BP.ohmic_built_in_offset_V; the seed potential below takes the
             # same correction (FDContactShift is the node model the contact installed).
-            _Nc = PE.effective_dos_m3(self.spec.dos_mass_kg)
-            _Nv = (PE.effective_dos_m3(float(self.spec.dos_mass_p_kg))
-                   if self.spec.dos_mass_p_kg else _Nc)
+            # N_c, N_v at the region's T (the same helper as the body region; row 3.2-7)
+            from dynameta.carriers.bipolar_options import band_dos_at_T
+            _Nc, _Nv = band_dos_at_T(self.spec.dos_mass_kg, self.spec.dos_mass_p_kg,
+                                     self.spec.bipolar_options)
             # audit R26/R27: with BGN / incomplete ionization / T_K on, the body contact pins the
             # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
@@ -1087,9 +1103,11 @@ class Devsim3DEquilibrium:
                 "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
                 "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
                 "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
+        # the temperature the emitted region was solved at: its V_t (BipolarOptions.T_K on the bipolar
+        # path; exactly T_REF otherwise). v0.14 row 3.2-7: this always reported T_REF.
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=3,
-            temperature_K=PE.T_REF, regions={rname: reg},
+            temperature_K=HJ.temperature_of_V_t(HJ.region_V_t(self.device, fdr)), regions={rname: reg},
             n_bg_by_region={rname: self.spec.semiconductor_nbg(fdr)},
             unit_cell_m=(self.spec.lateral_m, self.spec.lateral_m), extras=extras)
 

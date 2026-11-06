@@ -38,7 +38,11 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
 
 COUPLING: SELF-CONSISTENT (inside the coupled Newton): the generation feeds the continuity equations
 with full analytic Jacobians (the derivative models are DEVSIM symbolic diffs; checked against finite
-differences in the tests). Temperature: fixed T_REF (no Eg(T)^1.5 scaling of B).
+differences in the tests). Temperature: fixed T_REF (no Eg(T)^1.5 scaling of B). On a region that runs
+at another temperature (BipolarOptions.T_K) setup_btbt still installs the T_REF parameters and emits an
+AdvisoryWarning saying so (v0.14 row 3.2-9); the E_g(T) scaling of B is planned for v0.15. Until then,
+for a T_K device supply A, B fitted AT that temperature (BTBTParams.from_cgs) -- the warning still fires,
+because the code cannot tell which temperature a parameter set belongs to.
 
 GATE-OXIDE TUNNELING CURRENT (post-processed)
 ---------------------------------------------
@@ -80,7 +84,7 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from dynameta.constants import Q_E, T_REF
+from dynameta.constants import Q_E, T_REF, V_T
 from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["BTBTParams", "SILICON_HURKX", "btbt_rate_expr", "hurkx_d_expr", "setup_btbt", "btbt_generation_current",
@@ -173,6 +177,17 @@ def setup_btbt(device: str, region: str, params: BTBTParams, *, n_i: str = "n_i"
     if not isinstance(params, BTBTParams):
         raise TypeError("setup_btbt: params must be a BTBTParams (got {!r})".format(type(params)))
     _require_bipolar(device, region)
+    # v0.14 row 3.2-9 (decision D-H4): the Kane/Hurkx A, B are T_REF numbers and are NOT scaled with the
+    # region's temperature (B ~ E_g^(3/2) moves with E_g(T)); say so instead of running silently.
+    vt = float(ds.get_parameter(device=device, region=region, name="V_t"))
+    if vt != V_T:
+        from dynameta.carriers.physics_heterojunction import temperature_of_V_t
+        warnings.warn(
+            "setup_btbt: region {!r} runs at T = {:.6g} K (BipolarOptions.T_K) but the BTBT parameters "
+            "(A, B, P) are used as given, i.e. as at T_REF = {} K: B ~ E_g^(3/2) is not rescaled with "
+            "E_g(T) (planned for v0.15). Supply A, B fitted at this temperature, or treat the BTBT "
+            "current as a T_REF estimate.".format(region, temperature_of_V_t(vt), T_REF),
+            AdvisoryWarning, stacklevel=3)
     ni_node = n_i in ds.get_node_model_list(device=device, region=region)
 
     def ni_at(sfx):
