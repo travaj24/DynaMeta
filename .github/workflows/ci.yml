@@ -506,8 +506,8 @@ jobs:
     # + tests/test_term_bookkeeping_v2.py (v0.15 term bookkeeping v2: single-carrier terms, extra-variable
     #   derivatives, the unified inventory): 3 s serial on the Windows dev box (12 tests).
     # + tests/test_btbt_nonlocal.py (v0.15 nonlocal BTBT, 1-D: every term-adding case in a child process,
-    #   tests/_btbt_nonlocal_child.py): ~47 s serial on the Windows dev box (20 tests, 2026-11-06; the two FDT
-    #   diode children ~10 s each). Its devsim-free half, tests/test_btbt_nonlocal_kernels.py (28 tests, 3 s),
+    #   tests/_btbt_nonlocal_child.py): ~52 s serial on the Windows dev box (21 tests, 2026-11-06; the two FDT
+    #   diode children ~10 s each). Its devsim-free half, tests/test_btbt_nonlocal_kernels.py (29 tests, 3 s),
     #   runs on every `test` leg.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.

@@ -396,8 +396,40 @@ def sc_equilibrium(opts):
     return out
 
 
+def sc_warn_T(opts):
+    """A region at T != T_REF gets ONE AdvisoryWarning naming the temperature; T_REF gets none."""
+    import warnings
+    from dynameta.carriers import btbt_nonlocal as NL
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers.bipolar_options import BipolarOptions
+    from dynameta.carriers.tunneling import SILICON_HURKX
+    ds = _ds()
+    out = {}
+    for tag, opt in (("T350", BipolarOptions(T_K=350.0)), ("Tref", None)):
+        dev = "zw" + tag
+        mesh = dev + "_m"
+        ds.create_1d_mesh(mesh=mesh)
+        ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=1e-9, tag="a")
+        ds.add_1d_mesh_line(mesh=mesh, pos=5e-8, ps=1e-9, tag="b")
+        ds.add_1d_contact(mesh=mesh, name="a", tag="a", material="metal")
+        ds.add_1d_contact(mesh=mesh, name="b", tag="b", material="metal")
+        ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="a", tag2="b")
+        ds.finalize_mesh(mesh=mesh)
+        ds.create_device(mesh=mesh, device=dev)
+        ds.node_model(device=dev, region="s", name="NetDoping", equation="ifelse(x < 2.5e-8, -1e24, 1e24)")
+        with _quiet():
+            BP.setup_bipolar_region(dev, "s", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1e16,
+                                    mobility_n_m2Vs=0.1, mobility_p_m2Vs=0.04, tau_n_s=1e-6, tau_p_s=1e-6,
+                                    fd_enhancement=False, options=opt)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            NL.setup_btbt_nonlocal(dev, "s", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
+        out[tag] = [(type(x.message).__name__, str(x.message)) for x in w]
+    return out
+
+
 SCENARIOS = {"defaults": sc_defaults, "fdt": sc_fdt, "zener": sc_zener, "flip": sc_flip,
-             "jacobian": sc_jacobian, "equilibrium": sc_equilibrium}
+             "jacobian": sc_jacobian, "equilibrium": sc_equilibrium, "warn_T": sc_warn_T}
 
 
 def run_child(scenario, **opts):
