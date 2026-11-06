@@ -13,35 +13,48 @@ into the Newton solve, so results are quantitative only for LOW multiplication (
 HCI-relevant operating regime) and the model cannot run avalanche breakdown. Off-switch is
 trivial: nothing here touches the solve.
 
-QUADRATURE (probed on the 2D layered mesh): DEVSIM's tensor mesh triangulates with ZERO-couple
-diagonals (the circumcenter of a right triangle sits on its hypotenuse), so the finite-volume
-mesh is effectively rectangular -- the x- and y-aligned edges each own exactly half the region
-volume via 2*EdgeNodeVolume, and sum(EdgeCouple*EdgeLength) = 2 * Volume. The directional edge
-quadrature
+QUADRATURE -- `quadrature=` on impact_generation_edges / substrate_current ("auto" by default):
 
-    I_sub = sum_edges alpha(|E_e|) |J_e| * EdgeCouple_e * EdgeLength_e
+  "element" (the 2-D and 3-D default since v0.14.0). DEVSIM's element_from_edge_model rebuilds, in every
+  triangle / tetrahedron, the vector E, J_n and J_p from their edge projections (the exact P1 gradient
+  for E; exact for any uniform vector), so |E| and |J| are ISOTROPIC, and
 
-is then EXACT for transport-aligned fields (verified to closed form on a constant-field bar:
-the aligned edges carry weight = the full volume, the perpendicular edges see E ~ 0 -> alpha
-masked to 0, the diagonals have zero couple). For a genuinely 2-D current pattern it is a
-first-order directional estimate. UNITS follow the D1 contact-current convention: the 2D
-layered mesh is in metres with implicit out-of-plane depth, so I_sub is per-unit-depth [A/m] --
-pass depth_m (the cell period_y) to scale to amperes.
+      I_sub = sum_{element edges} (alpha_n(|E|) |J_n| + alpha_p(|E|) |J_p|) * 2 ElementNodeVolume
 
-3-D (D2c, v0.14.0): ELEMENT-BASED. DEVSIM's element_from_edge_model rebuilds, in every tetrahedron, the
-vector E, J_n and J_p from their edge projections (the exact P1 gradient for E; exact for any uniform
-vector), so |E| and |J| are ISOTROPIC -- no directional masking, unlike the 2-D edge quadrature -- and
+  (2 sum ENV = the element volume). That identity is exact only on a mesh whose elements are well
+  centred (DEVSIM sums the MAGNITUDES of the circumcentric dual pieces), so the element path first runs
+  the shared check element_geometry.check_element_geometry and REFUSES (InexactElementGeometryError, a
+  NotImplementedError) any other mesh: the pre-D2c gmsh tets over-count 1.20-1.52 x, one obtuse
+  triangle 11 x. Exact meshes: the 2-D rectilinear tensor mesh (LayeredDevsimBuilder; right triangles,
+  zero-couple hypotenuses) and the 3-D Kuhn tensor mesh (Stacked3DSpec(mesher='tensor')). On the 2-D
+  right-triangle mesh both legs of a triangle take the (leg_x, leg_y) pair vector and the hypotenuse has
+  weight 0, so the integrand is alpha(sqrt(E_x^2 + E_y^2)) sqrt(J_x^2 + J_y^2) per triangle, weighted by
+  its area. ONE kernel (_impact_generation_elements) serves 2-D and 3-D. MEASURED (tests/
+  test_impact_ionization.py): a uniform field at 0/30/45/60 deg to the 2-D mesh matches alpha(E) J Area
+  to <= 1e-12; a harmonic (x^2 - y^2) field converges at second order to the Gauss-Legendre integral of
+  alpha(|E|)|J|; (tests/test_devsim_3d_mesh.py) a 3-D uniform-field bar matches alpha(E) J Volume to
+  1e-12 and a laterally uniform 3-D reverse diode equals the 1-D edge quadrature to 5e-10.
 
-    I_sub = sum_{element edges} (alpha_n(|E|) |J_n| + alpha_p(|E|) |J_p|) * 2 ElementNodeVolume
+  "edge" (the 1-D default; 2-D legacy, opt-in; refused in 3-D). The directional FV edge quadrature
 
-(sum 2*ENV = the region volume). That last identity is what the pre-D2c gmsh mesh broke (DEVSIM sums
-the magnitudes of each tet's circumcentric pieces: 2 sum ENV = 1.20-1.52 x the volume there), and what
-made the old 3-D edge quadrature read 1.8-3.1x low; so the 3-D path first checks 2 sum ENV against the
-true tetrahedron volumes from the element node list and REFUSES a mesh where they differ by > 1e-9 (use
-Stacked3DSpec(mesher='tensor'), exact to 1e-15). MEASURED (tests/test_devsim_3d_mesh.py): a 3-D
-uniform-field bar matches alpha(E) J Volume to 1e-12, and a laterally uniform 3-D reverse-biased p-n
-diode on the tensor mesh equals the 1-D edge quadrature on the same z-lines to 1e-12 -- per Kuhn tet the
-element field is the z-cell's edge field and the SG currents on its diagonal edges are exact projections.
+      I_sub = sum_edges alpha(|E_e|) |J_e| * EdgeCouple_e * EdgeLength_e .
+
+  In 1-D the edge IS the field direction and this is exact. On DEVSIM's 2-D tensor mesh the diagonals
+  have ZERO couple and the x- and y-edges each own the whole region volume (sum EdgeCouple*EdgeLength =
+  2 Volume), so under refinement it converges to
+
+      I_edge = Int [alpha(|E_x|) |J_x| + alpha(|E_y|) |J_y|] dA      (componentwise, NOT isotropic)
+
+  -- exact ONLY for mesh-aligned current (a constant-field bar, a laterally uniform stack). For a field at
+  angle t to the mesh I_edge/I_true = [cos t e^{-b/(E cos t)} + sin t e^{-b/(E sin t)}] / e^{-b/E}: 0.270
+  at 45 deg and b/E = 4 (MEASURED to 1e-12 in tests/test_impact_ionization.py), i.e. it under-reads
+  junction corners, current crowding at contacts and drain corners. It was the 2-D default before
+  v0.14.0; select it explicitly only to reproduce those numbers or for a mesh-aligned 2-D current. On 3-D
+  tets it read 1.8-3.1x low (audit 7.1), hence refused there.
+
+UNITS follow the D1 contact-current convention: the 2D layered mesh is in metres with implicit
+out-of-plane depth, so I_sub is per-unit-depth [A/m] -- pass depth_m (the cell period_y) to scale to
+amperes. A 3-D mesh gives [A].
 
 Si constants: van Overstraeten & de Man, Solid-State Electron. 13, 583 (1970), 300 K, in SI
 (beware the literature's cm units: a_n = 7.03e5 1/cm = 7.03e7 1/m, b_n = 1.231e6 V/cm =
@@ -56,7 +69,7 @@ from typing import Dict, Optional
 import numpy as np
 
 
-__all__ = ["ChynowethParams", "SILICON_VANOVERSTRAETEN", "impact_generation_edges",
+__all__ = ["ChynowethParams", "SILICON_VANOVERSTRAETEN", "QUADRATURES", "impact_generation_edges",
            "substrate_current"]
 
 
@@ -96,23 +109,52 @@ SILICON_VANOVERSTRAETEN = ChynowethParams(a_n_per_m=7.03e7, b_n_V_per_m=1.231e8,
                                           a_p_per_m=1.582e8, b_p_V_per_m=2.036e8)
 
 
-def impact_generation_edges(device: str, region: str,
-                            params: ChynowethParams) -> Dict[str, np.ndarray]:
+QUADRATURES = ("auto", "edge", "element")
+
+
+def _resolve_quadrature(dim: int, quadrature: str) -> str:
+    if quadrature not in QUADRATURES:
+        raise ValueError("impact ionization: quadrature must be one of {} (got {!r})".format(
+            QUADRATURES, quadrature))
+    if quadrature == "auto":
+        return "edge" if dim == 1 else "element"
+    if quadrature == "edge" and dim == 3:
+        raise ValueError("impact ionization: quadrature='edge' is not available in 3-D (it read 1.8-3.1x "
+                         "low on tetrahedra, audit 7.1); use 'element' (the default)")
+    if quadrature == "element" and dim == 1:
+        raise ValueError("impact ionization: quadrature='element' needs element models, which DEVSIM does "
+                         "not have in 1-D; use 'edge' (the default there, and exact in 1-D)")
+    return quadrature
+
+
+def impact_generation_edges(device: str, region: str, params: ChynowethParams, *,
+                            quadrature: str = "auto") -> Dict[str, np.ndarray]:
     """Per-edge impact-ionization profile on the SOLVED bipolar-DD region: |E| [V/m], |J_n|/|J_p|
-    [A/m^2], the FV weight EdgeCouple*EdgeLength (3-D: per ELEMENT edge, weight 2*ElementNodeVolume),
-    and q*G = alpha_n|J_n| + alpha_p|J_p| [A/m^3]
-    (the spatial driver, e.g. for locating the hot-carrier injection zone). Requires the region
-    to carry the bipolar edge models (ElectricField, ElectronCurrent, HoleCurrent)."""
+    [A/m^2], the FV volume weight of each entry, and q*G = alpha_n|J_n| + alpha_p|J_p| [A/m^3] (the
+    spatial driver, e.g. for locating the hot-carrier injection zone); I_sub = sum(qG * weight_volume).
+    Requires the region to carry the bipolar edge models (ElectricField, ElectronCurrent, HoleCurrent).
+
+    quadrature (module header):
+      "auto"    (default) 1-D -> "edge" (exact in 1-D); 2-D / 3-D -> "element".
+      "element" 2-D / 3-D: per ELEMENT EDGE the isotropic |E|, |J| of its triangle / tetrahedron,
+                weight 2*ElementNodeVolume. Correct for ANY current direction; refuses a mesh whose
+                element volumes are not exact (element_geometry.check_element_geometry). Use it for every
+                2-D / 3-D calculation -- junction corners, current crowding, drain corners, HCI inputs.
+      "edge"    1-D / 2-D: per region edge alpha(|E_e|)|J_e|, weight EdgeCouple*EdgeLength. In 2-D it
+                converges to Int [alpha(|E_x|)|J_x| + alpha(|E_y|)|J_y|] dA, NOT Int alpha(|E|)|J| dA:
+                valid ONLY when the current is mesh-aligned everywhere (a 1-D-like bar or a laterally
+                uniform stack); 0.270 of the truth at 45 deg and b/E = 4. Kept to reproduce pre-v0.14 2-D
+                numbers. Not available in 3-D."""
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
 
-    # audit 7.1 regrade (P2): the directional edge quadrature sum(alpha|J| EdgeCouple
-    # EdgeLength) is EXACT on the 2D layered tensor mesh (2V weight identity, zero-couple
-    # diagonals) but on 3D unstructured tets it read 1.8-3.1x LOW (a 1.6-2.1x OPTIMISTIC REL8
-    # lifetime). D2c (v0.14.0): 3-D now takes the d-consistent ELEMENT reconstruction (module
-    # header) on a mesh whose element volumes are exact, and refuses any other.
-    if int(ds.get_dimension(device=device)) == 3:
-        return _impact_generation_elements_3d(device, region, params)
+    # audit 7.1 regrade (P2): the directional edge quadrature sum(alpha|J| EdgeCouple EdgeLength) read
+    # 1.8-3.1x LOW on 3D unstructured tets, and in 2-D it is directional (row 3.2-12). v0.14.0: 2-D and
+    # 3-D take the d-consistent ELEMENT reconstruction (module header) on a mesh whose element volumes are
+    # exact, and refuse any other.
+    q = _resolve_quadrature(int(ds.get_dimension(device=device)), quadrature)
+    if q == "element":
+        return _impact_generation_elements(device, region, params)
 
     def em(name):
         return np.asarray(ds.get_edge_model_values(device=device, region=region, name=name),
@@ -126,36 +168,29 @@ def impact_generation_edges(device: str, region: str,
             "qG_A_m3": qG}
 
 
-def _impact_generation_elements_3d(device: str, region: str,
-                                   params: ChynowethParams) -> Dict[str, np.ndarray]:
-    """3-D element-based profile (module header): per ELEMENT EDGE the isotropic |E|, |J_n|, |J_p| of its
-    tetrahedron and the weight 2*ElementNodeVolume. Element models it creates are deleted again (models
-    that already existed, e.g. BTBT's ElectricField_x/y/z, are only read)."""
+def _impact_generation_elements(device: str, region: str,
+                                params: ChynowethParams) -> Dict[str, np.ndarray]:
+    """2-D / 3-D element-based profile (module header): per ELEMENT EDGE the isotropic |E|, |J_n|, |J_p| of
+    its triangle / tetrahedron and the weight 2*ElementNodeVolume, after the shared exact-volume check.
+    Element models it creates are deleted again (models that already existed, e.g. BTBT's
+    ElectricField_x/y/z, are only read)."""
     from dynameta.carriers.devsim_env import import_devsim
+    from dynameta.carriers.element_geometry import check_element_geometry
     ds = import_devsim()
+    dim = int(ds.get_dimension(device=device))
+    check_element_geometry(device, region, caller="impact_generation_edges/substrate_current ({}-D)"
+                           .format(dim))
 
     def elv(name):
         return np.asarray(ds.get_element_model_values(device=device, region=region, name=name),
                           dtype=np.float64)
     w = 2.0 * elv("ElementNodeVolume")
-    xyz = np.column_stack([np.asarray(ds.get_node_model_values(device=device, region=region, name=c),
-                                      dtype=np.float64) for c in ("x", "y", "z")])
-    tets = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=int)
-    d = xyz[tets[:, 1:]] - xyz[tets[:, :1]]
-    v_true = float(np.abs(np.linalg.det(d)).sum() / 6.0)
-    if not abs(w.sum() / v_true - 1.0) < 1e-9:
-        raise NotImplementedError(
-            "impact_generation_edges/substrate_current (3-D): DEVSIM's element volumes on region {!r} sum "
-            "to {:.4f} x the true tetrahedron volume, so any I_sub quadrature on this mesh is biased (the "
-            "pre-D2c gmsh mesh over-counts 1.20-1.52 x; audit 7.1 measured the old edge quadrature 1.8-3.1x "
-            "low). Build the device with Stacked3DSpec(mesher='tensor') (exact) -- "
-            "docs/audit/2026-11-03-devsim-3d-mesh.md.".format(region, w.sum() / v_true))
     have = set(ds.get_element_model_list(device=device, region=region))
     made = []
     try:
         mags = {}
         for m in ("ElectricField", "ElectronCurrent", "HoleCurrent"):
-            comps = [m + "_" + c for c in "xyz"]
+            comps = [m + "_" + c for c in "xyz"[:dim]]
             if not all(c in have for c in comps):
                 ds.element_from_edge_model(device=device, region=region, edge_model=m)
                 made += [c for c in comps if c not in have]
@@ -169,14 +204,16 @@ def _impact_generation_elements_3d(device: str, region: str,
 
 
 def substrate_current(device: str, region: str, params: ChynowethParams, *,
-                      depth_m: Optional[float] = None) -> float:
+                      depth_m: Optional[float] = None, quadrature: str = "auto") -> float:
     """Impact-generated (substrate) current I_sub = Int (alpha_n|J_n| + alpha_p|J_p|) dV over the
-    solved region, via the directional FV edge quadrature in 2-D and the element reconstruction in 3-D
-    (module header). 2D layered meshes return per-unit-depth [A/m]; pass depth_m = period_y_m to scale
-    to [A] (the D1 convention). A 3-D mesh is in metres: the result is [A], leave depth_m None.
-    Zero coefficients (or a field everywhere below the exponential's reach) give EXACTLY 0.0."""
+    solved region. quadrature as impact_generation_edges: the default "auto" is the edge quadrature in
+    1-D (exact) and the element reconstruction in 2-D / 3-D (isotropic, any current direction); "edge"
+    in 2-D is the legacy directional estimate, valid only for mesh-aligned current. 2D layered meshes
+    return per-unit-depth [A/m]; pass depth_m = period_y_m to scale to [A] (the D1 convention). A 3-D
+    mesh is in metres: the result is [A], leave depth_m None. Zero coefficients (or a field everywhere
+    below the exponential's reach) give EXACTLY 0.0."""
     if depth_m is not None and not (depth_m > 0.0):
         raise ValueError("depth_m must be > 0 (or None to keep per-unit-depth units)")
-    prof = impact_generation_edges(device, region, params)
+    prof = impact_generation_edges(device, region, params, quadrature=quadrature)
     i_sub = float(np.sum(prof["qG_A_m3"] * prof["weight_volume"]))
     return i_sub * (float(depth_m) if depth_m is not None else 1.0)

@@ -370,7 +370,10 @@ F_1/2), which took 151-153 s on both meshers back to back.
 2. **Upstream.** Report the magnitude sum in `TetrahedronEdgeCouple.cc` to DEVSIM. With signed pieces,
    volumes are exact on any mesh, although couplings can still go negative on non-Delaunay meshes.
 3. **2-D impact ionization.** Should 2-D move to the same element reconstruction? It would be isotropic
-   for 2-D current patterns, but the 2-D pins would move. Left unchanged.
+   for 2-D current patterns, but the 2-D pins would move. Left unchanged. **CLOSED 2026-11-06** (user decisions 2 and 54): 2-D now takes the same
+   element kernel by default; `quadrature="edge"` keeps the old form as an explicit option. The geometry
+   check is the shared `element_geometry.check_element_geometry` (also used by BTBT and the Hooge source).
+   See docs/audit/2026-11-06-v0.14-impact-ionization-2d.md.
 
 ## 10. Corrections and the fixture audit (2026-11-04)
 
