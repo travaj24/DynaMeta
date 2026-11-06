@@ -212,7 +212,9 @@ Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
   radiative need holes. Incomplete ionization and BGN are not meaningful for the degenerate,
   fixed-n_bg ITO model, which sits far above the Mott density.
 * The 2-D layered builder hardcodes `fd_enhancement=True`, so apparent BGN there is subject to the
-  double-counting advisory on degenerate layers.
+  double-counting advisory on degenerate layers. **Superseded 2026-11-06 (v0.15):**
+  `TransportModel.carrier_statistics` ("boltzmann" / "fermi_dirac") is threaded through both builders;
+  see `2026-11-06-v0.15-si-bundles.md`.
 * No 3-D (gmsh) solve with options was run in this workstream. Only the shared `phi_bi` kernel, the
   spec validation and the `from_design` threading are gated.
 
