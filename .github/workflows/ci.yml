@@ -147,11 +147,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'" "jax>=0.11; python_version >= '3.12'"
       - name: Run fast tests
-        # audit S6-3: the @slow tests (now 11 -- 8 in test_soa.py, 1 each in test_harmonics.py,
-        # test_ringdown.py and test_lumenairy_bridge_verify_550.py; recount with
-        # `pytest --collect-only -q -m slow tests/`, 2026-11-02) are excluded from all four legs;
-        # seven are wrappers whose underlying validation modules run once in the `smoke` job, and
-        # ALL ELEVEN run in the `nightly` job, step (a).
+        # audit S6-3: the @slow tests are excluded from all four legs. RECOUNT 2026-11-06
+        # (`pytest --collect-only -q -m slow tests/`): 27 -- 11 in test_fdtd_registration.py, 8 in
+        # test_soa.py, 2 in test_ringdown.py, 1 each in test_harmonics.py,
+        # test_lumenairy_bridge_verify_550.py, test_fiber_eryb_transient.py,
+        # test_equilibrium_simplify_cache.py, test_devsim_tunneling.py and test_temperature_fixes.py
+        # (the comment here said 11 from 2026-11-02 on). Seven of test_soa.py's are wrappers whose
+        # underlying validation modules run once in the `smoke` job, and ALL 27 run in the `nightly`
+        # job, step (a).
         if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
       # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
@@ -420,7 +423,8 @@ jobs:
             tests/test_bridge.py tests/test_carrier_heating.py tests/test_carriers_gfactor.py \
             tests/test_contact_current.py tests/test_dc_solve_gummel.py \
             tests/test_density_gradient.py \
-            tests/test_devsim_env.py tests/test_devsim_smoke.py tests/test_electrothermal.py             tests/test_equilibrium_simplify_cache.py \
+            tests/test_devsim_env.py tests/test_devsim_smoke.py tests/test_electrothermal.py \
+            tests/test_equilibrium_simplify_cache.py \
             tests/test_fem_symmetry_tensor.py tests/test_fem_speed.py \
             tests/test_gated_builder.py tests/test_geometry_guards.py \
             tests/test_geometry_shapes.py \
@@ -474,8 +478,11 @@ jobs:
     # runner, so expect ~6-9 min here; 40 is a CAP ~3.5x the WSL upper bound (~11 min with the
     # install), not a budget. (Windows dev box, py3.14, same list, serial, same load: 1098 s / 245
     # passed -- heterojunction 321 s and phase_composition 316 s dominate; no CI leg runs devsim on
-    # Windows.) Their @slow cases (the equilibrium-heterostack built-in potential, the 3-D BTBT +
-    # oxide-tunneling wiring) run in the `nightly` job, step (a).
+    # Windows.) The 3-D BTBT + oxide-tunneling wiring case (@slow, 9.5 s under WSL) runs in the `nightly`
+    # job, step (a). test_devsim_heterojunction's equilibrium-heterostack built-in potential is NO
+    # LONGER @slow (2026-11-06): its "~8 min/region" mark predates the replayed F_1/2 simplify() of
+    # 2026-11-03 -- MEASURED 2.4 s under WSL (2026-11-04) and 0.8 s on the Windows dev box (0.64 s call +
+    # 0.12 s fixture), so it now runs here, adding ~2.4 s to this step.
     # + tests/test_devsim_sg_flux.py (the SG-kernel gates, merged after the timing above): 19 s serial on
     #   the Windows dev box (9 tests; mpmath oracle), i.e. ~2 % of this job.
     # + tests/test_devsim_geometry.py (the opt-in exact-geometry workaround, devsim_geometry): 8 s serial
@@ -537,7 +544,8 @@ jobs:
     # (py3.14, ngsolve 6.2.2604 + devsim 2.10.0, each file run on its own, serially). That box has
     # far more cores and RAM than a GitHub-hosted runner (4 vCPU / 16 GB), so every local number
     # below is a FLOOR for the CI wall, not a forecast:
-    #   (a) pytest -m slow         11 tests    ~818 s MEASURED (test_soa.py 719 s -- the Innolume
+    #   (a) pytest -m slow         27 tests    (recount 2026-11-06; step (a) lists them) of which
+    #                                          ~818 s MEASURED for 11 (test_soa.py 719 s -- the Innolume
     #                                          co-fit dominates it -- plus test_harmonics.py 17 s;
     #                                          + test_ringdown.py n_slab = 20 52 s and
     #                                          test_lumenairy_bridge_verify_550.py 30 s, 2026-11-02;
@@ -591,12 +599,14 @@ jobs:
         # oracle, the n_slab = 20 FDTD etalon ringdown Q vs Fabry-Perot, the lumenairy-5.30
         # PMM-twin angle-gradient row, and (v0.14.0, D0) DEVSIM's live simplify() of the F_1/2
         # Jacobian against the replayed string physics_equilibrium caches (string + bitwise values).
-        # RECOUNT 2026-11-04 (`pytest --collect-only -q -m slow tests/`): 27, not 12 -- the count above
+        # RECOUNT 2026-11-06 (`pytest --collect-only -q -m slow tests/`): 27, not 12 -- the count above
         # predates test_fdtd_registration's 11, test_fiber_eryb_transient's 1, test_ringdown's gate 7
         # and the two @slow cases of the v0.14 DEVSIM modules the `solvers-devsim` job runs fast-only:
-        # test_devsim_heterojunction's equilibrium-stack built-in potential (2.4 s) and
-        # test_devsim_tunneling's 3-D BTBT + oxide-tunneling wiring (9.5 s), MEASURED under WSL
-        # Ubuntu / py3.12 on 4 cores -- so they add ~12 s here.
+        # test_devsim_tunneling's 3-D BTBT + oxide-tunneling wiring (9.5 s, MEASURED under WSL Ubuntu /
+        # py3.12 on 4 cores) and test_temperature_fixes' chi-toggle settings (~36 s on the Windows dev
+        # box). (The 2026-11-04 recount was also 27, with test_devsim_heterojunction's equilibrium-stack
+        # built-in potential, 2.4 s, instead of the chi-toggle test; that one is no longer @slow and
+        # runs in `solvers-devsim`.)
         # `-m "not slow"` on the four `test` legs is what makes them cheap; this is the other half.
         # PARTIAL OVERLAP with (c2) is deliberate and is not pure duplication: seven of these are
         # thin wrappers around validation modules (c2) also runs, but only the pytest route puts
