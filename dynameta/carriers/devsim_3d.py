@@ -104,6 +104,7 @@ from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
 from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
+from dynameta.carriers.tunneling import btbt_for_material as _btbt_for_material
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
@@ -215,7 +216,8 @@ class Stacked3DSpec:
     # lateral material INCLUSIONS embedded in a layer (centered pillars of a different material) -- the
     # non-separable carrier topology beyond the centered gate patch. Empty = a laterally-uniform stack.
     inclusions: List[Inclusion3D] = field(default_factory=list)
-    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams ->
+    # D1d tunneling (both OPT-IN; None = off, byte-identical). btbt: a carriers.tunneling.BTBTParams (or a
+    # v0.15 tuple of them, one summed term per process, e.g. GERMANIUM_KAO) ->
     # local Kane/Hurkx band-to-band generation in the 'semi' bipolar region (physics='bipolar_dd' only),
     # coupled in the Newton with the ISOTROPIC element field. oxide_tunneling: a
     # carriers.tunneling.OxideTunnelingParams -> every solve adds CarrierField.extras["oxide_tunneling"]
@@ -587,7 +589,8 @@ class Stacked3DSpec:
                 carrier_statistics=getattr(tr, "carrier_statistics", None),
                 srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
                 srh_traps=tuple(getattr(tr, "srh_traps", ())),
-                btbt=getattr(tr, "btbt", None))
+                # v0.15: scale_B_with_gap sets get B at the body T from the band-temperature model
+                btbt=_btbt_for_material(getattr(tr, "btbt", None), tr))
         return cls(semi_material=semi_L.background_material, oxide_material=ox_L.background_material,
                     lateral_m=min(cell.period_x_m, cell.period_y_m),
                     semi_thk_m=semi_L.thickness_m, oxide_thk_m=ox_L.thickness_m,
