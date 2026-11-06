@@ -527,6 +527,10 @@ jobs:
     #   tests/_btbt_nonlocal_child.py): ~75 s serial on the Windows dev box (23 tests, 2026-11-06; the two FDT
     #   diode children ~10 s each). Its devsim-free half, tests/test_btbt_nonlocal_kernels.py (33 tests, 3 s),
     #   runs on every `test` leg.
+    # + tests/test_fd_mode_complete.py (v0.15 statistics='fermi_dirac' completed: BTBT local/nonlocal, charged and
+    #   interface traps, thermionic FDT, the FD quasi-field transport; every device case in a child process,
+    #   tests/_fd_mode_child.py): 32 tests, 3.5 min with -n 2 on the Windows dev box (2026-11-06; ~6 min serial,
+    #   inferred; no single test above 42 s).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -562,7 +566,7 @@ jobs:
             tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py \
-            tests/test_btbt_nonlocal.py
+            tests/test_btbt_nonlocal.py tests/test_fd_mode_complete.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

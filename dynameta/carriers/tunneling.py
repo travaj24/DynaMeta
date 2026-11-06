@@ -87,6 +87,13 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
   (MEASURED: lines at x_j - 5.5 nm and x_j with ps = 0.2, 0.1 or 0.05 nm all gave a 0.128 nm edge ending at
   the junction line x_j, i.e. on the field peak).
 
+STATISTICS (v0.15 completion). Under statistics="fermi_dirac" D is f_n(E_ie) - f_p(E_ie) with the
+transport's own FD quasi-Fermi levels, D = (n p - n_ie^2)/((n + n_ie0 gamma_n)(p + n_ie0 gamma_p)) (hurkx_d_expr
+n_i_p=; zero exactly at the FD equilibrium), with its gamma derivatives on the edges / elements (exact Jacobian).
+The legacy statistics keep the v0.14 D (a fixed n_ie), whose D is not zero where the carriers are degenerate at
+the transport's equilibrium (MEASURED on the p+ 1e25 / n+ 1e26 m^-3 Zener: up to 1.08 of the one-way rate
+node-wise, but only ~7e-8 of the integrated BTBT exchange, which lives in the depleted high-field core).
+
 COUPLING: SELF-CONSISTENT (inside the coupled Newton): the generation feeds the continuity equations
 with full analytic Jacobians (the derivative models are DEVSIM symbolic diffs; checked against finite
 differences in the tests).
@@ -406,14 +413,26 @@ def btbt_for_material(btbt, transport_model):
     return tuple(out) if indexed else out[0]
 
 
-def hurkx_d_expr(n: str, p: str, n_i: str = "n_i", *, pair: bool = False) -> str:
+def hurkx_d_expr(n: str, p: str, n_i: str = "n_i", *, pair: bool = False, n_i_p: "str | None" = None) -> str:
     """The Hurkx factor D = (n p - n_i^2)/((n + n_i)(p + n_i)) as a DEVSIM expression. `n_i` is the
     intrinsic-density symbol (a region parameter by default; pass the node-suffixed effective density,
     e.g. "n_ie@n0", under bandgap narrowing). pair=True gives the PAIR factor (n p + n_i^2)/(...): the
     detailed-balance split R ~ n p, G ~ n_i^2 of the net rate, whose sum G + R is the noise GR source
-    (noise_analysis) -- the same split as the SRH kernel's pair rate."""
-    return "(({n})*({p}) {s} {ni}^2)/((({n}) + {ni})*(({p}) + {ni}))".format(
-        n=n, p=p, ni=n_i, s="+" if pair else "-")
+    (noise_analysis) -- the same split as the SRH kernel's pair rate.
+
+    D = n/(n + n_i) - n_i/(p + n_i) = f_n(E_i) - f_p(E_i): the electron and hole quasi-Fermi occupancies at
+    the intrinsic level (Boltzmann n = n_i exp((E_Fn - E_i)/kT)). `n_i_p` (v0.15, statistics="fermi_dirac")
+    gives the two bands their own densities: `n_i` -> the electron one (FDNiN = n_ie0 gamma_n), `n_i_p` the
+    hole one (FDNiP = n_ie0 gamma_p), D = (n p - n_iN n_iP)/((n + n_iN)(p + n_iP)), which is f_n(E_ie) -
+    f_p(E_ie) with the transport's OWN Fermi-Dirac quasi-Fermi levels (n/gamma_n is the Boltzmann-equivalent
+    density of the FD activity) -- zero exactly at the FD equilibrium n p = n_ie^2 = n_iN n_iP. (Sentaurus
+    Device's FD Hurkx replaces n p by n p/(gamma_n gamma_p): the same expression.) None (default) gives the
+    v0.14 string CHARACTER-FOR-CHARACTER."""
+    if n_i_p is None:
+        return "(({n})*({p}) {s} {ni}^2)/((({n}) + {ni})*(({p}) + {ni}))".format(
+            n=n, p=p, ni=n_i, s="+" if pair else "-")
+    return "(({n})*({p}) {s} {ni}*{nip})/((({n}) + {ni})*(({p}) + {nip}))".format(
+        n=n, p=p, ni=n_i, nip=n_i_p, s="+" if pair else "-")
 
 
 def btbt_rate_expr(params: BTBTParams, *, emag: str, d: str) -> str:
@@ -492,7 +511,14 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
     `n_i`: the intrinsic density in the Hurkx D -- a region PARAMETER name ("n_i", default) or a NODE
     MODEL name ("n_ie" under bandgap narrowing: setup_bipolar_region passes it, so D vanishes at the
     narrowed equilibrium n p = n_ie^2); a node model is evaluated at each D node (@n0/@n1 or
-    @en0/@en1)."""
+    @en0/@en1).
+
+    statistics="fermi_dirac" (v0.15 completion; the region carries bipolar_options.install_fd_detailed_balance's
+    FDNiN / FDNiP): D takes the FD form of hurkx_d_expr(n_i_p=...) -- f_n(E_ie) - f_p(E_ie) with the
+    transport's own FD quasi-Fermi levels, zero exactly at the FD equilibrium (`n_i` must then be the default
+    or "n_ie"). Those densities depend on the carriers: their edge / element derivative models
+    (FDNiN@n0:Electrons@n0, ..., the names DEVSIM's diff() looks up for a node-model reference -- MEASURED:
+    without them diff() silently returns 0) are created here, so the Jacobian is exact."""
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
     from dynameta.carriers import physics_bipolar_dd as _BP
@@ -510,10 +536,28 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
     # temperature and are NOT rescaled here; say so instead of running silently.
     vt = float(ds.get_parameter(device=device, region=region, name="V_t"))
     _warn_temperature(region, vt, sets)
-    ni_node = n_i in ds.get_node_model_list(device=device, region=region)
+    _nodes = set(ds.get_node_model_list(device=device, region=region))
+    fd = "FDNiN" in _nodes                     # statistics="fermi_dirac" (FD detailed balance)
+    if fd and n_i not in ("n_i", "n_ie"):
+        raise ValueError("setup_btbt: region {!r} runs statistics='fermi_dirac'; its Hurkx D uses the FD "
+                         "densities FDNiN / FDNiP, so n_i must be the default (got {!r})".format(region, n_i))
+    ni_node = n_i in _nodes
 
     def ni_at(sfx):
         return n_i + sfx if ni_node else n_i
+
+    def hurkx(nd, pair=False):             # D at one node of the edge / element ("@n0", "@en1", ...)
+        if fd:
+            return hurkx_d_expr("Electrons" + nd, "Holes" + nd, "FDNiN" + nd, pair=pair, n_i_p="FDNiP" + nd)
+        return hurkx_d_expr("Electrons" + nd, "Holes" + nd, ni_at(nd), pair=pair)
+
+    def fd_node_derivatives(sfxs, make_from, make_model):
+        # FDNiN@<s>:Electrons@<s>, FDNiP@<s>:Holes@<s>: the node derivative models carried to the edge/element
+        for nm, var in (("FDNiN", "Electrons"), ("FDNiP", "Holes")):
+            make_from(nm)
+            make_from("{}:{}".format(nm, var))
+            for sx in sfxs:
+                make_model("{nm}{s}:{v}{s}".format(nm=nm, v=var, s=sx), "{}:{}{}".format(nm, var, sx))
 
     def suffix(k):                         # "" for a single set: the v0.14 names, byte-identical
         return "_{}".format(k) if indexed else ""
@@ -521,14 +565,17 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
     dim = int(ds.get_dimension(device=device))
     if dim == 1:
         # the edge field IS the field in 1-D; D = mean of the two end-node values
-        if ni_node:
+        if fd:
+            fd_node_derivatives(
+                ("@n0", "@n1"),
+                lambda nm: ds.edge_from_node_model(device=device, region=region, node_model=nm),
+                lambda nm, eq: ds.edge_model(device=device, region=region, name=nm, equation=eq))
+        elif ni_node:
             ds.edge_from_node_model(device=device, region=region, node_model=n_i)
         edge_with_derivs(device, region, "BTBT_Emag", "pow(ElectricField^2 + 1.0, 0.5)", ("Potential",))
 
         def d_avg(pair):
-            return "0.5*({} + {})".format(
-                hurkx_d_expr("Electrons@n0", "Holes@n0", ni_at("@n0"), pair=pair),
-                hurkx_d_expr("Electrons@n1", "Holes@n1", ni_at("@n1"), pair=pair))
+            return "0.5*({} + {})".format(hurkx("@n0", pair), hurkx("@n1", pair))
         wrt = ("Potential", "Electrons", "Holes")
         for k, prm in enumerate(sets):
             rate = "BTBT_U" + suffix(k)
@@ -548,7 +595,11 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
     ds.element_from_edge_model(device=device, region=region, edge_model="ElectricField")
     ds.element_from_edge_model(device=device, region=region, edge_model="ElectricField",
                                derivative="Potential")
-    if ni_node:
+    if fd:
+        fd_node_derivatives(
+            ens, lambda nm: ds.element_from_node_model(device=device, region=region, node_model=nm),
+            lambda nm, eq: ds.element_model(device=device, region=region, name=nm, equation=eq))
+    elif ni_node:
         ds.element_from_node_model(device=device, region=region, node_model=n_i)
     pot = ["Potential" + e for e in ens]
     element_with_derivs(device, region, "BTBT_Emag",
@@ -561,12 +612,10 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
         shares, pairs = [], []
         for k in (0, 1):                                      # node0 / node1 share of each element edge
             nd = "@en{}".format(k)
-            u = btbt_rate_expr(prm, emag="BTBT_Emag",
-                               d=hurkx_d_expr("Electrons" + nd, "Holes" + nd, ni_at(nd)))
+            u = btbt_rate_expr(prm, emag="BTBT_Emag", d=hurkx(nd))
             element_with_derivs(device, region, "BTBT_U{}{}".format(k, suffix(i)), u, wrt)
             shares.append("BTBT_U{}{}".format(k, suffix(i)))
-            pairs.append(btbt_rate_expr(prm, emag="BTBT_Emag",
-                                        d=hurkx_d_expr("Electrons" + nd, "Holes" + nd, ni_at(nd), pair=True)))
+            pairs.append(btbt_rate_expr(prm, emag="BTBT_Emag", d=hurkx(nd, pair=True)))
         _BP.add_recombination_term(device, region, "btbt" + suffix(i), tuple(shares), assembly="element",
                                    pair=tuple(pairs))
 
