@@ -109,8 +109,11 @@ activity L = ln u + Delta(u) is dimensionless in u = c/N, with N the bulk's own 
 needs no temperature of its own. The two sides of an interface must share ONE V_t: a NON-ISOTHERMAL
 interface (a temperature step) is refused -- it needs heat flow and the thermoelectric (Seebeck/Peltier)
 terms of thermionic emission, which are not modelled. Before this, a T_K region without BGN silently ran
-the interface at 300 K (and with BGN it was refused). The TE fluxterm has no noise source in
-noise_analysis (documented limit).
+the interface at 300 K (and with BGN it was refused).
+NOISE (v0.15, plan 4.3.1): every thermionic flux model <iface>_HJ<n|p> carries a pair-rate interface model
+<iface>_HJ<n|p>_pair = |pref| (exp(w0) + exp(w1)) = J_01 + J_10 from the same strings
+(thermionic_flux_and_pair); noise_analysis turns it into the te_n / te_p shot-noise source (on by default)
+and refuses a fluxterm without it. The pair model is referenced by no equation: DC and ssac are unchanged.
 
 AFFINITY TEMPERATURE (v0.14 row 3.2-10, user decision 3 as modified 2026-11-06). Without a band-temperature
 model chi_eV is used as given at the device temperature. Each TransportModel can state the temperature its
@@ -141,7 +144,8 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_RICHARDSON_FREE",
            "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients", "AffinityTemperatureError",
-           "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags"]
+           "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags",
+           "TE_PAIR_SUFFIX", "pair_model_name", "thermionic_flux_and_pair"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
 # quasi-Fermi-level drift-diffusion limit.
@@ -465,6 +469,36 @@ def _bgn_interface_arguments(device: str, side0: HeteroSide, side1: HeteroSide, 
     return "({}@r0 - {})".format(L0, k0), "({}@r1 - {})".format(L1, k1)
 
 
+#: suffix of the PAIR-rate interface model every thermionic flux model carries (noise_analysis reads it)
+TE_PAIR_SUFFIX = "_pair"
+
+
+def pair_model_name(flux_model: str) -> str:
+    """Name of the pair-rate interface model of the fluxterm interface model `flux_model`: the
+    convention noise_analysis looks the model up by (a fluxterm on a continuity equation WITHOUT it makes
+    noise_spectrum refuse the device -- it would be silently noiseless)."""
+    return flux_model + TE_PAIR_SUFFIX
+
+
+def thermionic_flux_and_pair(pref: float, w0: str, w1: str) -> Tuple[str, str]:
+    """THE thermionic-emission strings, ONE source of truth for the flux and its noise (v0.15, plan 4.3.1):
+    (flux, pair) with
+
+        flux = pref (exp(w0) - exp(w1))       [A/m^2, conventional current r0 -> r1, the fluxterm model]
+        pair = |pref| (exp(w0) + exp(w1))     [A/m^2, J_01 + J_10, both Richardson streams counted]
+
+    built from the same w0 = (E_F,0 - E_top)/kT and w1 strings (BGN-effective edges included), so the pair
+    rate can never drift from the flux it belongs to. Each direction is an independent Poisson stream of
+    carriers over the barrier, so the interface current noise is S_J = 2 q pair / A (noise_analysis,
+    mechanisms te_n / te_p): 4kT G_int at zero bias, 2 q J in strong forward bias. Like the flux, the pair
+    rate uses the Maxwell-Boltzmann Richardson tail (exact equilibrium either way; on a DEGENERATE emitting
+    side the off-equilibrium shot magnitude is as approximate as the current, module LIMITS)."""
+    p = float(pref)
+    flux = "{p}*(exp({w0}) - exp({w1}))".format(p="{!r}".format(p), w0=w0, w1=w1)
+    pair = "{a}*(exp({w0}) + exp({w1}))".format(a="{!r}".format(abs(p)), w0=w0, w1=w1)
+    return flux, pair
+
+
 def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSide, side1: HeteroSide,
                                    *, model: str = "thermionic") -> None:
     """Wire the carrier-continuity coupling of one semiconductor/semiconductor interface (Potential is
@@ -472,7 +506,9 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
     Holes when BOTH sides carry them (a unipolar side next to a bipolar one is refused by the builders).
 
     model='thermionic': fluxterm J(0->1) = -/+ A*T^2 [exp(L_0 - k_0) - exp(L_1 - k_1)] (electrons /
-    holes, conventional current), the Horio-Yanai/Yang-East-Haddad interface condition.
+    holes, conventional current), the Horio-Yanai/Yang-East-Haddad interface condition, plus its pair-rate
+    model <name>_pair = A*T^2 [exp(L_0 - k_0) + exp(L_1 - k_1)] (thermionic_flux_and_pair; not referenced by
+    any equation, so the DC / ssac system is unchanged -- it is the te_n / te_p noise source).
     model='continuous': (L_0 - k_0) - (L_1 - k_1) = 0, continuous quasi-Fermi level.
     side0/side1 MUST be region0/region1 of `interface` (checked against DEVSIM)."""
     if model not in HETERO_MODELS:
@@ -507,8 +543,10 @@ def setup_heterointerface_carriers(device: str, interface: str, side0: HeteroSid
         name = "{}_HJ{}".format(interface, tag)
         if model == "thermionic":
             pref = "{!r}".format(qsign * at2)
-            ds.interface_model(device=device, interface=interface, name=name,
-                               equation="{p}*(exp({w0}) - exp({w1}))".format(p=pref, w0=w0, w1=w1))
+            flux, pair = thermionic_flux_and_pair(qsign * at2, w0, w1)
+            ds.interface_model(device=device, interface=interface, name=name, equation=flux)
+            # the noise pair rate J_01 + J_10 (noise_analysis' te_n / te_p source), from the SAME w0 / w1
+            ds.interface_model(device=device, interface=interface, name=pair_model_name(name), equation=pair)
             ds.interface_model(device=device, interface=interface, name="{}:{}@r0".format(name, var),
                                equation="{p}*exp({w0})*{L}:{v}@r0".format(p=pref, w0=w0, L=L0, v=var))
             ds.interface_model(device=device, interface=interface, name="{}:{}@r1".format(name, var),

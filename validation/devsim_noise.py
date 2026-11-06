@@ -27,6 +27,12 @@ GATE G  2-D LAYERED device (LayeredDevsimBuilder reference metasurface, degenera
         dielectric interfaces, edge-metal grounds) via set_ssac_gate: S_I = 4kT Re Y, 1 GHz - 1 PHz, at
         Vg = 0 (flat band) and Vg = +2 V (degenerate accumulation, where the FD g-factor SG is only
         approximately Nyquist-consistent).
+GATE H  THERMIONIC-interface shot noise (v0.15, plan 4.3.1): the te_n / te_p two-point source S = 2q(J_01 +
+        J_10) A per node pair. H1 the FDT on the heterojunction diode at A* x 1e-6 .. 1e2 (the TE share falls
+        monotonically, the total tends to the continuous-QFL model); H2 the coth law S = 2qJ coth(qV/2kT) on
+        the interface-dominated isotype n-GaAs / N-Al0.3Ga0.7As at +-1 .. 8 kT/q (DC J and V only); H3 the
+        FDT on the 2-D stack with a non-uniform lateral mesh, and EQUAL area shares must break it; H4 the
+        FDT on 3-D Kuhn stacks, jittered with exact geometry and split with shared interface nodes.
 
 Run: python -m validation.devsim_noise
 """
@@ -444,6 +450,276 @@ def hetero_two_region(model="continuous", *, ni_p=3e18, dchi_eV=0.05, astar_scal
     return dev, fr
 
 
+def _hetero_sides(dev, regs, chi, nis, astar_scale):
+    """Anderson frames + HeteroSides of bipolar (Boltzmann) regions (shared by the hetero fixtures)."""
+    from dynameta.carriers import physics_heterojunction as HJ
+    from dynameta.constants import M_E, V_T as VT_CODE    # the bipolar frame is written at V_T
+    own = {r: float(VT_CODE * math.log(N_DOS / nis[r])) for r in regs}
+    fr = HJ.anderson_alignment(own, chi, regs[0])
+    a_star = float(astar_scale) * HJ.richardson_constant_Am2K2(M_E)
+    sides = {r: HJ.HeteroSide(r, fr[r][0], "N_dos", a_star, fd=False,
+                              phi_v_V=fr[r][0] - float(VT_CODE * math.log(N_DOS * N_DOS / nis[r] ** 2)),
+                              p_dos_param="N_dos_p", richardson_p=a_star) for r in regs}
+    return fr, sides
+
+
+#: 1-D isotype n-GaAs / N-Al0.3Ga0.7As (v0.15 gate T-c): D1a gate C's materials and doping, 400 nm each
+ISO_ND, ISO_L, ISO_AE = 1e23, 400e-9, 1e10
+
+
+def hetero_isotype_1d(*, astar_scale=1e-6, dev="iso1d"):
+    """D1a gate C's isotype heterojunction (validation/devsim_heterojunction: GAAS / ALGAAS parameters,
+    N_D = 1e17 cm^-3 both sides, 400 nm each) as a 1-D BIPOLAR (Boltzmann, so every noise source is
+    Nyquist-exact) device: 'lo' grounded on the n-GaAs end, 'hi' (V1, circuit) on the N-AlGaAs end,
+    joined by the thermionic interface 'jn' with the barrier-side Richardson constant x astar_scale
+    (A* of each side's DOS mass). Solved at zero bias; returns the device name."""
+    from validation.devsim_heterojunction import ALGAAS, GAAS, n_i_m3, nc_m3
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers import physics_heterojunction as HJ
+    from dynameta.constants import M_E, V_T as VT_CODE
+    fresh()
+    mesh = dev + "_m"
+    ds.create_1d_mesh(mesh=mesh)
+    for pos, ps, tag in ((0.0, 4e-9, "lo"), (ISO_L, 0.25e-9, "mid"), (2 * ISO_L, 4e-9, "hi")):
+        ds.add_1d_mesh_line(mesh=mesh, pos=pos, ps=ps, tag=tag)
+    ds.add_1d_contact(mesh=mesh, name="lo", tag="lo", material="metal")
+    ds.add_1d_contact(mesh=mesh, name="hi", tag="hi", material="metal")
+    ds.add_1d_region(mesh=mesh, material="GaAs", region="ngaas", tag1="lo", tag2="mid")
+    ds.add_1d_region(mesh=mesh, material="AlGaAs", region="nalgaas", tag1="mid", tag2="hi")
+    ds.add_1d_interface(mesh=mesh, name="jn", tag="mid")
+    ds.finalize_mesh(mesh=mesh)
+    ds.create_device(mesh=mesh, device=dev)
+    mats = {"ngaas": GAAS, "nalgaas": ALGAAS}
+    nc = {r: nc_m3(m["me"]) for r, m in mats.items()}
+    nv = {r: nc_m3(m["mh"]) for r, m in mats.items()}
+    nis = {r: n_i_m3(m) for r, m in mats.items()}
+    for r, m in mats.items():
+        ds.node_model(device=dev, region=r, name="NetDoping", equation="{:.6e}".format(ISO_ND))
+        with quiet():
+            BP.setup_bipolar_region(dev, r, eps_static=m["eps"], n_dos_m3=nc[r], n_dos_p_m3=nv[r],
+                                    n_i_m3=nis[r], mobility_n_m2Vs=m["mu_n"], mobility_p_m2Vs=m["mu_p"],
+                                    tau_n_s=1e-6, tau_p_s=1e-6, fd_enhancement=False)
+            BP.setup_equilibrium_seed_models(dev, r)
+    own = {r: float(VT_CODE * math.log(nc[r] / nis[r])) for r in mats}
+    fr = HJ.anderson_alignment(own, {r: m["chi"] for r, m in mats.items()}, "ngaas")
+    sides = [HJ.HeteroSide(r, fr[r][0], "N_dos",
+                           float(astar_scale) * HJ.richardson_constant_Am2K2(mats[r]["me"] * M_E), fd=False,
+                           phi_v_V=fr[r][0] - float(VT_CODE * math.log(nc[r] * nv[r] / nis[r] ** 2)),
+                           p_dos_param="N_dos_p",
+                           richardson_p=float(astar_scale) * HJ.richardson_constant_Am2K2(mats[r]["mh"] * M_E))
+             for r in ("ngaas", "nalgaas")]
+    PE.setup_interface(dev, "jn")
+    HJ.setup_heterointerface_carriers(dev, "jn", sides[0], sides[1], model="thermionic")
+    with quiet():
+        BP.setup_contact_ohmic_bipolar(dev, "lo", psi_offset_V=fr["ngaas"][1])
+        BP.setup_contact_ohmic_bipolar_circuit(dev, "hi", node_name="vhi", source_name="V1",
+                                               psi_offset_V=fr["nalgaas"][1])
+    for r in mats:
+        ds.node_model(device=dev, region=r, name="_seed_psi", equation="{} + ({!r})".format(
+            BP.equilibrium_seed_psi_expr(None), float(fr[r][1])))
+        _seed(dev, ("Potential", "Electrons", "Holes"), region=r)
+    # at zero bias the terminal current is ~1e-10 A/m^2 of round-off, so the CIRCUIT's relative update
+    # never drops below ~1e-5 (MEASURED: it stalls at 1e-6 - 2e-5 while the device reaches 4e-15); the
+    # circuit criterion is therefore loosened here only -- Newton is past quadratic convergence by then
+    _solve(ISO_AE, 1e-3, 100)
+    return dev
+
+
+#: 2-D thermionic heterostack (v0.15 gate T-d): lateral width, partial top contact, junction, top
+H2D_LX, H2D_XC, H2D_YJ, H2D_YT = 1e-6, 0.3e-6, 0.3e-6, 0.4e-6
+H2D_AE = 1e9
+
+
+def hetero_2d_stack(*, astar_scale=1e-3, dchi_eV=0.1, nd=1e22, hx=10e-9, ratio=5.0, split_x=None,
+                    dev="h2d"):
+    """A z-stacked 2-D ISOTYPE heterostack (v0.15 plan 4.3.1, gate T-d): n-type (N_D `nd`, n_i 1e16)
+    bottom region 'r_lo' (y in [0, YJ]) under a top layer (y in [YJ, YT]) whose affinity is `dchi_eV`
+    lower, joined by D1a's THERMIONIC interface 'jn' (free-electron A* x `astar_scale`). The lateral
+    mesh is deliberately NON-UNIFORM: spacing hx over the contact (x < XC) growing to ratio*hx at
+    x = LX. Grounded contact 'lo' on the whole bottom face, circuit contact 'hi' (V1) only on the top
+    face over x < XC, so the current spreads and the adjoint field varies along the interface -- the
+    per-node interface areas are then load-bearing. split_x: split the top layer at x = split_x into
+    'r_hi' | 'r_hi2' (same material, carrier-continuous interface 'jv'), joined to r_lo by TWO
+    thermionic interfaces 'jn' and 'jn2' that meet the vertical one at the corner node (split_x, YJ).
+    Solved at zero bias; returns the device name."""
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers import physics_heterojunction as HJ
+    fresh()
+    mesh = dev + "_m"
+    LX, XC, YJ, YT = H2D_LX, H2D_XC, H2D_YJ, H2D_YT
+    ds.create_2d_mesh(mesh=mesh)
+    pad = 20e-9                                    # DEVSIM's 2-D recipe: inert pads outside the contacts
+    xlines = [(0.0, hx), (XC, hx), (LX, hx * ratio)]
+    if split_x is not None:
+        xlines.append((float(split_x), hx))
+    for pos, ps in sorted(xlines):
+        ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=pos, ps=ps)
+    for pos, ps in ((-pad, pad), (0.0, 20e-9), (YJ, 2e-9), (YT, 10e-9), (YT + pad, pad)):
+        ds.add_2d_mesh_line(mesh=mesh, dir="y", pos=pos, ps=ps)
+    tops = [("r_hi", 0.0, LX)] if split_x is None else [("r_hi", 0.0, split_x), ("r_hi2", split_x, LX)]
+    ds.add_2d_region(mesh=mesh, material="A", region="r_lo", xl=0.0, xh=LX, yl=0.0, yh=YJ)
+    for r, xl, xh in tops:
+        ds.add_2d_region(mesh=mesh, material="B", region=r, xl=xl, xh=xh, yl=YJ, yh=YT)
+    ds.add_2d_region(mesh=mesh, material="pad", region="pad_lo", xl=0.0, xh=LX, yl=-pad, yh=0.0)
+    ds.add_2d_region(mesh=mesh, material="pad", region="pad_hi", xl=0.0, xh=LX, yl=YT, yh=YT + pad)
+    ifaces = [("jn", "r_lo", tops[0])]
+    if split_x is not None:
+        ifaces.append(("jn2", "r_lo", tops[1]))
+    for name, r0, (r1, xl, xh) in ifaces:
+        ds.add_2d_interface(mesh=mesh, name=name, region0=r0, region1=r1, xl=xl, xh=xh, yl=YJ, yh=YJ,
+                            bloat=1e-12)
+    if split_x is not None:
+        ds.add_2d_interface(mesh=mesh, name="jv", region0="r_hi", region1="r_hi2", xl=split_x,
+                            xh=split_x, yl=YJ, yh=YT, bloat=1e-12)
+    ds.add_2d_contact(mesh=mesh, name="lo", material="metal", region="r_lo", xl=0.0, xh=LX, yl=0.0,
+                      yh=0.0, bloat=1e-12)
+    ds.add_2d_contact(mesh=mesh, name="hi", material="metal", region="r_hi", xl=0.0, xh=XC, yl=YT,
+                      yh=YT, bloat=1e-12)
+    ds.finalize_mesh(mesh=mesh)
+    ds.create_device(mesh=mesh, device=dev)
+    regs = ["r_lo"] + [t[0] for t in tops]
+    nis = {r: 1e16 for r in regs}
+    for r in regs:
+        ds.node_model(device=dev, region=r, name="NetDoping", equation="{:.6e}".format(nd))
+        with quiet():
+            BP.setup_bipolar_region(dev, r, eps_static=11.7, n_dos_m3=N_DOS, n_i_m3=nis[r],
+                                    mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=1e-7,
+                                    tau_p_s=1e-7, fd_enhancement=False)
+            BP.setup_equilibrium_seed_models(dev, r)
+    chi = {r: (4.0 if r == "r_lo" else 4.0 - float(dchi_eV)) for r in regs}
+    fr, sides = _hetero_sides(dev, regs, chi, nis, astar_scale)
+    for name, r0, (r1, _xl, _xh) in ifaces:
+        PE.setup_interface(dev, name)
+        HJ.setup_heterointerface_carriers(dev, name, sides[r0], sides[r1], model="thermionic")
+    if split_x is not None:
+        PE.setup_interface(dev, "jv")
+        HJ.setup_heterointerface_carriers(dev, "jv", sides["r_hi"], sides["r_hi2"], model="continuous")
+    with quiet():
+        BP.setup_contact_ohmic_bipolar(dev, "lo", psi_offset_V=fr["r_lo"][1])
+        BP.setup_contact_ohmic_bipolar_circuit(dev, "hi", node_name="vhi", source_name="V1",
+                                               psi_offset_V=fr["r_hi"][1])
+    for r in regs:
+        ds.node_model(device=dev, region=r, name="_seed_psi", equation="{} + ({!r})".format(
+            BP.equilibrium_seed_psi_expr(None), float(fr[r][1])))
+        _seed(dev, ("Potential", "Electrons", "Holes"), region=r)
+    _solve(H2D_AE)
+    return dev
+
+
+#: 3-D thermionic heterostack (v0.15 T0 / T-d): graded lateral axis [nm], junction and top z [nm]
+H3D_XS = (0.0, 20.0, 50.0, 100.0, 180.0, 300.0)
+H3D_ZJ, H3D_ZT = 300.0, 400.0
+H3D_AE = 1e8
+
+
+def hetero_3d_stack(*, astar_scale=1e-3, dchi_eV=0.1, nd=1e22, jitter=0.0, exact=None, split_i=None,
+                    seed=1, dev="h3d"):
+    """The 3-D twin of hetero_2d_stack on a hand-built Kuhn-tensor mesh (devsim_3d._kuhn_tets, in memory):
+    graded lateral axes H3D_XS (spacing ratio 6), bottom region 'r_lo' (z < ZJ) under the top layer
+    (affinity dchi_eV lower) through the thermionic interface 'jn' (z = ZJ); grounded 'lo' on the whole
+    bottom face, circuit 'hi' (V1) on the top face of the 2 x 2 corner cells only (spreading current).
+    jitter: move every interior node column laterally by up to jitter x (the smallest spacing) (seeded),
+    which makes the tets and the interface triangles non-well-centred; exact: regions to correct with
+    devsim_geometry.apply_exact_geometry(negative='warn') right after create_device. split_i: split the
+    top layer at x = H3D_XS[split_i] into 'r_hi' | 'r_hi2' (carrier-continuous interface 'jv'), with two
+    thermionic interfaces 'jn' / 'jn2' that SHARE the line of nodes (x_split, y, ZJ) with 'jv' (gmsh
+    surface groups are not de-duplicated the way the 2-D mesher assigns a shared node to one interface).
+    Solved at zero bias; returns the device name."""
+    import warnings
+    from dynameta.carriers import devsim_3d as D3
+    from dynameta.carriers import devsim_geometry as DG
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers import physics_heterojunction as HJ
+    fresh()
+    mesh = dev + "_m"
+    xs = np.asarray(H3D_XS, dtype=float)
+    ys = xs.copy()
+    zs = np.concatenate([np.linspace(0.0, 250.0, 11), np.linspace(250.0, H3D_ZJ, 11)[1:],
+                         np.linspace(H3D_ZJ, H3D_ZT, 6)[1:]])
+    P, T, cell = D3._kuhn_tets(xs, ys, zs)
+    nx, ny, nz = len(xs), len(ys), len(zs)
+    if jitter:
+        rng = np.random.default_rng(seed)
+        I, J, _K = (g.ravel() for g in np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz),
+                                                    indexing="ij"))
+        jx, jy = rng.uniform(-jitter, jitter, (nx, ny)), rng.uniform(-jitter, jitter, (nx, ny))
+        h = float(np.diff(xs).min())
+        P = P.copy()
+        ii, jj = (I > 0) & (I < nx - 1), (J > 0) & (J < ny - 1)
+        P[ii, 0] += jx[I[ii], J[ii]] * h
+        P[jj, 1] += jy[I[jj], J[jj]] * h
+    ci = cell // ((ny - 1) * (nz - 1))
+    kz = cell % (nz - 1)
+    top = 0.5 * (zs[kz] + zs[kz + 1]) > H3D_ZJ
+    groups3 = {"g_lo": T[~top]}
+    if split_i is None:
+        groups3["g_hi"] = T[top]
+    else:
+        groups3["g_hi"] = T[top & (ci < split_i)]
+        groups3["g_hi2"] = T[top & (ci >= split_i)]
+    kj = int(np.argmin(np.abs(zs - H3D_ZJ)))
+    ax = (xs, ys, zs)
+    I2, J2 = (g.ravel() for g in np.indices((nx - 1, ny - 1)))
+    full = np.ones(I2.size, dtype=bool) if split_i is None else (I2 < split_i)
+    groups2 = {"g_jn": D3._face_triangles(ax, 2, (I2[full], J2[full], np.full(int(full.sum()), kj - 1)),
+                                          plus=True)}
+    if split_i is not None:
+        groups2["g_jn2"] = D3._face_triangles(ax, 2, (I2[~full], J2[~full],
+                                                      np.full(int((~full).sum()), kj - 1)), plus=True)
+        Jv, Kv = (g.ravel() for g in np.indices((ny - 1, nz - 1)))
+        sel = zs[Kv] >= H3D_ZJ - 1e-9
+        groups2["g_jv"] = D3._face_triangles(ax, 0, (np.full(int(sel.sum()), split_i - 1), Jv[sel], Kv[sel]),
+                                             plus=True)
+    groups2["g_c_lo"] = D3._face_triangles(ax, 2, (I2, J2, np.zeros(I2.size, dtype=int)), plus=False)
+    sel = (I2 < 2) & (J2 < 2)
+    groups2["g_c_hi"] = D3._face_triangles(ax, 2, (I2[sel], J2[sel], np.full(int(sel.sum()), nz - 2)),
+                                           plus=True)
+    D3.create_mesh_in_memory(mesh, P * 1e-9, groups3, groups2)
+    tops = ["r_hi"] if split_i is None else ["r_hi", "r_hi2"]
+    for g, r in [("g_lo", "r_lo")] + [("g_" + t[2:], t) for t in tops]:
+        ds.add_gmsh_region(mesh=mesh, gmsh_name=g, region=r, material="A" if r == "r_lo" else "B")
+    ifaces = [("jn", "r_lo", "r_hi")] + ([] if split_i is None else [("jn2", "r_lo", "r_hi2")])
+    for name, r0, r1 in ifaces:
+        ds.add_gmsh_interface(mesh=mesh, gmsh_name="g_" + name, region0=r0, region1=r1, name=name)
+    if split_i is not None:
+        ds.add_gmsh_interface(mesh=mesh, gmsh_name="g_jv", region0="r_hi", region1="r_hi2", name="jv")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="g_c_lo", region="r_lo", name="lo", material="metal")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="g_c_hi", region="r_hi", name="hi", material="metal")
+    ds.finalize_mesh(mesh=mesh)
+    ds.create_device(mesh=mesh, device=dev)
+    for r in (exact or ()):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")              # negative shares are reported, not fatal here
+            DG.apply_exact_geometry(dev, r, negative="warn")
+    regs = ["r_lo"] + tops
+    nis = {r: 1e16 for r in regs}
+    for r in regs:
+        ds.node_model(device=dev, region=r, name="NetDoping", equation="{:.6e}".format(nd))
+        with quiet():
+            BP.setup_bipolar_region(dev, r, eps_static=11.7, n_dos_m3=N_DOS, n_i_m3=nis[r],
+                                    mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=1e-7,
+                                    tau_p_s=1e-7, fd_enhancement=False)
+            BP.setup_equilibrium_seed_models(dev, r)
+    chi = {r: (4.0 if r == "r_lo" else 4.0 - float(dchi_eV)) for r in regs}
+    fr, sides = _hetero_sides(dev, regs, chi, nis, astar_scale)
+    for name, r0, r1 in ifaces:
+        PE.setup_interface(dev, name)
+        HJ.setup_heterointerface_carriers(dev, name, sides[r0], sides[r1], model="thermionic")
+    if split_i is not None:
+        PE.setup_interface(dev, "jv")
+        HJ.setup_heterointerface_carriers(dev, "jv", sides["r_hi"], sides["r_hi2"], model="continuous")
+    with quiet():
+        BP.setup_contact_ohmic_bipolar(dev, "lo", psi_offset_V=fr["r_lo"][1])
+        BP.setup_contact_ohmic_bipolar_circuit(dev, "hi", node_name="vhi", source_name="V1",
+                                               psi_offset_V=fr["r_hi"][1])
+    for r in regs:
+        ds.node_model(device=dev, region=r, name="_seed_psi", equation="{} + ({!r})".format(
+            BP.equilibrium_seed_psi_expr(None), float(fr[r][1])))
+        _seed(dev, ("Potential", "Electrons", "Holes"), region=r)
+    _solve(H3D_AE)
+    return dev
+
+
 # long Si p+ n diode for the shot-noise gate: N_A = 1e25 (2 um, short side), N_D = 1e22, n-side
 # 5 L_p long (tau = 20 us, L_p = 157 um); low injection (p_n(0)/N_D = 1.7e-3 at 0.55 V).
 SHOT_TAU, SHOT_NA, SHOT_ND = 2e-5, 1e25, 1e22
@@ -645,6 +921,59 @@ def gate_g_layered(vg=0.0, freqs=None):
     return sn.S / (4 * KT * Y.real), Y.real, sn.by_region
 
 
+def gate_h_thermionic():
+    """GATE H (module doc): returns a dict of measured residuals (oracles: ssac Re Y, the coth law)."""
+    import dataclasses
+    out = {}
+    F = [1.0, 1e5, 1e7, 1e9]
+    hetero_two_region("continuous")
+    s_cont = noise(F).S
+    rows = []
+    for a in (1e-6, 1e-4, 1e-2, 1.0, 1e2):
+        hetero_two_region("thermionic", astar_scale=a)
+        sn = noise(F)
+        Y = ssac_Y(F)
+        te = sn.by_mechanism["te_n"] + sn.by_mechanism["te_p"]
+        rows.append((a, float(np.max(np.abs(sn.S / (4 * KT * Y.real) - 1))), float(te[0] / sn.S[0]),
+                     float(np.max(np.abs(sn.S / s_cont - 1)))))
+    out["H1"] = rows
+    coth = []
+    for sign in (+1, -1):
+        set_bias._v = {}
+        hetero_isotype_1d(astar_scale=1e-6)
+        for m in (1, 2, 4, 8):
+            set_bias(sign * m * VT, ISO_AE, step=0.01)
+            J = source_current()
+            coth.append((sign * m, float(noise([1.0]).S[0] / (2 * QE * abs(J) / math.tanh(m / 2.0)) - 1)))
+    set_bias._v = {}
+    out["H2"] = coth
+    hetero_2d_stack()
+    Y = ssac_Y([1.0, 1e6])
+    r2 = noise([1.0, 1e6]).S / (4 * KT * Y.real) - 1
+    orig = NA._interface_sources
+
+    def equal(device, rn, mech):
+        res = []
+        for src in orig(device, rn, mech):
+            sa = np.asarray(ds.get_node_model_values(device=device, region=src.region,
+                                                     name="SurfaceArea"))[src.rows[0].nodes]
+            res.append(dataclasses.replace(src, rate=src.rate * sa.mean() / sa))
+        return res
+    NA._interface_sources = equal
+    try:
+        r2e = noise([1.0, 1e6]).S / (4 * KT * Y.real) - 1
+    finally:
+        NA._interface_sources = orig
+    out["H3"] = (float(np.max(np.abs(r2))), float(np.min(np.abs(r2e))))
+    r3 = {}
+    for tag, kw in (("kuhn", {}), ("jitter_exact", dict(jitter=0.3, exact=("r_lo", "r_hi"))),
+                    ("split", dict(split_i=3))):
+        hetero_3d_stack(**kw)
+        r3[tag] = float(abs(noise([1.0]).S[0] / (4 * KT * ssac_Y([1.0]).real[0]) - 1))
+    out["H4"] = r3
+    return out
+
+
 # =====================================================================================================
 
 def main():
@@ -730,6 +1059,23 @@ def main():
                       sorted(byr)), flush=True)
         gate("G 2-D layered builder FDT at Vg={:+.0f} V (< {:.0e})".format(vg, tol),
              np.max(np.abs(rg - 1)) < tol)
+
+    h = gate_h_thermionic()
+    for a, r, share, dc in h["H1"]:
+        print("[t] H1 A* x {:g}: |S/(4kT Re Y) - 1| = {:.2e}  TE share {:.3e}  |S/S_cont - 1| = {:.2e}".format(
+            a, r, share, dc), flush=True)
+    gate("H1 TE interface FDT at every A* (< 1e-4), TE share and |S/S_cont - 1| monotone",
+         all(r < 1e-4 for _a, r, _s, _d in h["H1"])
+         and all(x[2] > y[2] and x[3] > y[3] for x, y in zip(h["H1"], h["H1"][1:])))
+    print("[t] H2 isotype coth law S/(2qJ coth(qV/2kT)) - 1 at V/(kT/q) = {}".format(
+        ", ".join("{:+d}: {:.1e}".format(m, r) for m, r in h["H2"])), flush=True)
+    gate("H2 isotype n-GaAs/N-AlGaAs coth law (< 3e-3)", all(abs(r) < 3e-3 for _m, r in h["H2"]))
+    print("[t] H3 2-D non-uniform interface FDT {:.2e}; equal shares {:.2e}".format(*h["H3"]), flush=True)
+    gate("H3 2-D TE FDT (< 1e-4) and equal area shares break it (> 1e-3)",
+         h["H3"][0] < 1e-4 and h["H3"][1] > 1e-3)
+    print("[t] H4 3-D TE FDT {}".format({k: "{:.1e}".format(v) for k, v in h["H4"].items()}), flush=True)
+    gate("H4 3-D TE FDT, Kuhn / jittered + exact geometry / shared nodes (< 1e-4)",
+         all(v < 1e-4 for v in h["H4"].values()))
 
     fresh()
     print("[t] *** DEVSIM NOISE: {} ***".format("PASS" if ok else "FAIL"), flush=True)

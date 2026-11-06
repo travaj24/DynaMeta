@@ -500,6 +500,8 @@ jobs:
     #   The devsim-free half, tests/test_band_temperature.py, runs on every `test` leg.
     #   (2026-11-06: the list's last line used to start after a literal backslash-n left by a merge, which
     #   bash passes to pytest as a stray argument "n" -- "file or directory not found"; fixed here.)
+    # + tests/test_devsim_noise_thermionic.py (v0.15 thermionic-interface shot noise, te_n / te_p, plan 4.3.1):
+    #   ~33 s serial on the Windows dev box (14 tests; 1-D / 2-D / 3-D in-memory heterostacks, no test above 7 s).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -531,7 +533,8 @@ jobs:
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
             tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
             tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py tests/test_custom_terms.py \
-            tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py
+            tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py \
+            tests/test_devsim_noise_thermionic.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
