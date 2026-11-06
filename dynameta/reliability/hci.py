@@ -15,9 +15,13 @@ here may legitimately be NEGATIVE (~ -0.1 to -0.2 eV) -- the one mechanism in th
 negative activation is physical and therefore allowed.
 
 DRIVER NOTE (stale text corrected per audit C6-5/6.3): the impact-ionization driver HAS shipped --
-carriers.impact_ionization (D4, van Overstraeten-de Man on the solved bipolar fields; 2D layered
-meshes only, the 3D tet quadrature is guarded) produces I_sub; it may also be supplied as an
-external parameter. Pure numpy; oracles in validation/reliability_hci.py.
+carriers.impact_ionization (D4, van Overstraeten-de Man on the solved bipolar fields) produces
+I_sub on 1-D, 2-D and 3-D DEVSIM devices; it may also be supplied as an external parameter. Since
+v0.14.0 the 2-D and 3-D I_sub is the isotropic ELEMENT quadrature (the old 2-D edge quadrature was
+directional: 0.27 of the truth for a 45-deg current at b/E = 4 -- 2-D lifetimes computed from it move),
+and it refuses a mesh whose element volumes are not exact (element_geometry.check_element_geometry;
+the 2-D rectilinear and 3-D Kuhn tensor meshes pass). Pure numpy; oracles in
+validation/reliability_hci.py.
 """
 
 from __future__ import annotations
