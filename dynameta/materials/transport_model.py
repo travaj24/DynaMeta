@@ -99,7 +99,14 @@ class TransportModel:
                               builder therefore REFUSES a heterostack whose run T differs from this
                               (LayeredDevsimBuilder(on_chi_temperature="refuse"), the default; "warn" /
                               "off" proceed). Set it equal to the device T (BipolarOptions.T_K) when
-                              chi_eV is your value AT that T; that is the only thing it asserts.
+                              chi_eV is your value AT that T; that is the only thing it asserts. With a
+                              band_temperature model it is the model's anchor T_ref instead (0.0 allowed).
+      band_temperature     : v0.15 opt-in materials.BandTemperature (default None = off): band_gap_eV, chi_eV
+                              (and, with derive_n_i, n_i_m3) are then values at chi_reference_T_K, evaluated
+                              at the device T by materials.band_data_at_T (Varshni gap change anchored at
+                              T_ref; chi moves by the REQUIRED affinity_fraction of it). A material carrying
+                              one satisfies the on_chi_temperature check. See materials/band_temperature.py
+                              for which anchor / affinity_fraction / derive_n_i to use when.
       physics              : "equilibrium" (default) | "drift_diffusion"
       mobility_m2Vs_of_n_m3      : electron mobility (DD only)
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
@@ -162,6 +169,10 @@ class TransportModel:
     chi_reference_T_K:           Optional[float] = None
     # v0.15 (decision 28): bipolar carrier statistics, see Args. None keeps every v0.14 result.
     carrier_statistics:          Optional[str] = None
+    # v0.15 (plan 4.3.3): opt-in band-temperature model -- a materials.band_temperature.BandTemperature
+    # (Varshni E_g(T) anchored at chi_reference_T_K, chi(T) by a required fraction of the gap change, optional
+    # derived n_i(T)). None (default) = band_gap_eV / chi_eV / n_i_m3 used as given at every T (bit-identical).
+    band_temperature:            Optional[object] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -171,10 +182,14 @@ class TransportModel:
                 "{} physics requires mobility_m2Vs_of_n_m3".format(self.physics))
         if self.field_dependent_mobility and self.v_sat_ms is None:
             raise ValueError("field_dependent_mobility=True requires v_sat_ms (saturation velocity, m/s)")
-        if self.chi_reference_T_K is not None and not (np.isfinite(float(self.chi_reference_T_K))
-                                                       and float(self.chi_reference_T_K) > 0.0):
-            raise ValueError("chi_reference_T_K must be finite and > 0 (K), got {!r}"
-                             .format(self.chi_reference_T_K))
+        if self.chi_reference_T_K is not None and not (
+                np.isfinite(float(self.chi_reference_T_K)) and (float(self.chi_reference_T_K) > 0.0 or (
+                    self.band_temperature is not None and float(self.chi_reference_T_K) == 0.0))):
+            raise ValueError("chi_reference_T_K must be finite and > 0 (K) -- 0 K only with a band_temperature "
+                             "model (data quoted at 0 K) -- got {!r}".format(self.chi_reference_T_K))
+        if self.band_temperature is not None:
+            from dynameta.materials.band_temperature import check_band_temperature
+            check_band_temperature(self)
         for nm in ("richardson_n_Am2K2", "richardson_p_Am2K2"):
             v = getattr(self, nm)
             if v is not None and not (np.isfinite(float(v)) and float(v) > 0.0):

@@ -194,6 +194,9 @@ here re-defines a composite by name, so options compose with trap levels, interf
    input given at T_K. Not temperature-scaled (v0.14): the BTBT parameters (physics at T_REF; setup_btbt
    warns under T_K) and the electron affinity chi (a heterostack refuses unless the material states the
    temperature chi was quoted at -- LayeredDevsimBuilder(on_chi_temperature=...)).
+   v0.15 (opt-in): a TransportModel.band_temperature model (materials.BandTemperature) evaluates E_g, chi
+   and, with derive_n_i=True, n_i at T_K from their values at chi_reference_T_K (materials.band_data_at_T;
+   anchored Varshni) -- then n_i_m3 is given at that reference T instead, and the chi guard is satisfied.
 
 5. GENERATION. `generation_m3s` adds a uniform external generation G (region parameter `G_ext`,
    rampable with ds.set_parameter) to both continuity equations: U_net = U_SRH + U_A + U_rad - G.
