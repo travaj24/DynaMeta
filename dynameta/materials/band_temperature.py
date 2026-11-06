@@ -309,9 +309,9 @@ def band_data_at_T(tr, T_K: float) -> BandData:
 
 def band_gap_ratio(tr, T_K: float, T0_K: float = T_REF) -> Optional[float]:
     """E_g(T) / E_g(T0) from the material's band-temperature model, or None when it has none -- the accessor
-    the BTBT temperature scaling reads (plan 5.2 item 2; the scaling itself is v0.15 item 4.1.2, and until
-    it lands setup_btbt keeps its v0.14 T_REF warning). T0_K defaults to T_REF, the temperature the
-    shipped BTBT parameter sets are quoted at."""
+    the BTBT temperature scaling reads (plan 5.2 item 2; v0.15 item 4.1.2: carriers.tunneling.btbt_for_material
+    for sets with scale_B_with_gap=True; without a model setup_btbt keeps its v0.14 warning). T0_K defaults
+    to T_REF, the temperature the shipped BTBT parameter sets are quoted at."""
     if getattr(tr, "band_temperature", None) is None:
         return None
     return band_data_at_T(tr, T_K).E_g_eV / band_data_at_T(tr, T0_K).E_g_eV
