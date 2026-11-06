@@ -975,6 +975,30 @@ def setup_oxide_tunneling(device: str, semiconductor_region: str, gate_contact: 
         layers.append(TunnelLayer(b.offset_eV(sem_mat, chi_eV), abs(z_far - z_near), b.m_tunnel_over_m0))
         z = z_far
         prev = reg
+    # ---- mesh quality (plan 4.1.1: the column drop on an unstructured mesh; MEASURED, audit note 5) ----
+    aligned = all(len(w[0]) == 1 for (_, _, W) in faces for w in W)
+    if dim > 1 and not aligned:
+        from dynameta.carriers.devsim_geometry import exact_geometry_applied
+        from dynameta.carriers.element_geometry import check_element_geometry
+        from dynameta.warning_types import UnreliableResultWarning
+        inexact = [r for r in [semi] + list(chain)
+                   if check_element_geometry(device, r, raise_error=False)["n_inexact"] > 0
+                   and not exact_geometry_applied(device, r)]
+        if inexact:
+            why = ("DEVSIM's box geometry is also inexact on {} (non-well-centred elements, "
+                   "devsim_geometry.apply_exact_geometry not applied): MEASURED on the gmsh Si / 2 nm SiO2 "
+                   "stack (Stacked3DSpec(mesher='gmsh'), 1.2 V) the lateral oxide-voltage spread over the "
+                   "interface was 5.1 % and the per-node current spread 92 %".format(inexact))
+        else:
+            why = ("MEASURED on the gmsh Si / 2 nm SiO2 stack WITH devsim_geometry.apply_exact_geometry: a 0.6 % "
+                   "lateral oxide-voltage spread (8.6x less than without it) still gives a 10 % per-node current "
+                   "spread")
+        warnings.warn(
+            "setup_oxide_tunneling: the mesh is not column-aligned (an interface node has no partner node on a "
+            "dielectric face above it), so the far-face potential is interpolated and the unstructured finite-"
+            "volume solution's lateral noise is amplified by the tunnel exponent (MEASURED |d ln J / d ln V_ox| ~ 15-18 over the nodes); "
+            "{}. Use a tensor mesh (Stacked3DSpec(mesher='tensor'), the 2-D layered builder) for quantitative "
+            "currents.".format(why), UnreliableResultWarning, stacklevel=2)
     # ---- supply, frame, gate ----
     fd = float(ds.get_parameter(device=device, region=semi, name="fd_enhancement")) > 0.0
     act = setup_log_activity(device, semi, "Electrons", "N_dos", fd=fd)

@@ -50,12 +50,71 @@ def _lst(a):
     return [float(x) for x in np.ravel(a)]
 
 
+def _tensor_mesh(mesh, dim, xs, L, W, n_lat):
+    """A laterally uniform 2-D (DEVSIM rectilinear triangles) or 3-D (Kuhn tetrahedra, in memory) mesh whose
+    normal-axis node set is EXACTLY xs (semiconductor [0, L], oxide [L, xs[-1]]), lateral width W with n_lat
+    nodes per lateral axis. Regions semi / oxide, contacts body (x = 0) / gate (top), interface semi_oxide.
+    In 2-D the normal axis is x (DEVSIM lines with ps = the local spacing: no inserted points); in 3-D it is z."""
+    ds = _ds()
+    top = float(xs[-1])
+    if dim == 2:
+        ds.create_2d_mesh(mesh=mesh)
+        pad = 10.0 * float(np.min(np.diff(xs)))         # DEVSIM 2-D contacts are boxes of mesh OUTSIDE the
+        ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=-pad, ps=pad)    # region they touch: inert pads
+        ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=top + pad, ps=pad)
+        for i, x in enumerate(xs):
+            ps = min(xs[i] - xs[i - 1] if i > 0 else np.inf, xs[i + 1] - xs[i] if i + 1 < xs.size else np.inf)
+            ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=float(x), ps=float(ps))
+        for y in np.linspace(0.0, W, n_lat):
+            ds.add_2d_mesh_line(mesh=mesh, dir="y", pos=float(y), ps=W / (n_lat - 1))
+        b = 1e-3 * float(np.min(np.diff(xs)))
+        ds.add_2d_region(mesh=mesh, material="Si", region="pad_lo", xl=-pad, xh=0.0, yl=0.0, yh=W, bloat=b)
+        ds.add_2d_region(mesh=mesh, material="metal", region="pad_hi", xl=top, xh=top + pad, yl=0.0, yh=W,
+                         bloat=b)
+        ds.add_2d_region(mesh=mesh, material="Si", region="semi", xl=0.0, xh=L, yl=0.0, yh=W, bloat=b)
+        ds.add_2d_region(mesh=mesh, material="SiO2", region="oxide", xl=L, xh=top, yl=0.0, yh=W, bloat=b)
+        ds.add_2d_interface(mesh=mesh, name="semi_oxide", region0="semi", region1="oxide", xl=L, xh=L, yl=0.0,
+                            yh=W, bloat=b)
+        ds.add_2d_contact(mesh=mesh, name="body", material="metal", region="semi", xl=0.0, xh=0.0, yl=0.0, yh=W,
+                          bloat=b)
+        ds.add_2d_contact(mesh=mesh, name="gate", material="metal", region="oxide", xl=top, xh=top, yl=0.0,
+                          yh=W, bloat=b)
+        ds.finalize_mesh(mesh=mesh)
+        return
+    from dynameta.carriers.devsim_3d import _face_triangles, _kuhn_tets, create_mesh_in_memory
+    lat = np.linspace(0.0, W, n_lat)
+    ax = (lat, lat, xs)
+    P, T, cell = _kuhn_tets(*ax)
+    cz = 0.5 * (xs[1:] + xs[:-1])
+    nx = ny = n_lat - 1
+    rid = np.zeros((nx, ny, cz.size), dtype=int)
+    rid[:, :, cz > L] = 1
+    tet_rid = rid.ravel()[cell]
+    k_if = int(np.nonzero(cz < L)[0].max())
+    I, J = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
+    I, J = I.ravel(), J.ravel()
+
+    def layer(k):
+        return (I, J, np.full(I.size, k))
+    tri = {"body": _face_triangles(ax, 2, layer(0), plus=False),
+           "gate": _face_triangles(ax, 2, layer(cz.size - 1), plus=True),
+           "semi_oxide": _face_triangles(ax, 2, layer(k_if), plus=True)}
+    create_mesh_in_memory(mesh, P, {"semi": T[tet_rid == 0], "oxide": T[tet_rid == 1]}, tri)
+    ds.add_gmsh_region(mesh=mesh, gmsh_name="semi", region="semi", material="Si")
+    ds.add_gmsh_region(mesh=mesh, gmsh_name="oxide", region="oxide", material="SiO2")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="body", region="semi", name="body", material="metal")
+    ds.add_gmsh_contact(mesh=mesh, gmsh_name="gate", region="oxide", name="gate", material="metal")
+    ds.add_gmsh_interface(mesh=mesh, gmsh_name="semi_oxide", region0="semi", region1="oxide", name="semi_oxide")
+    ds.finalize_mesh(mesh=mesh)
+
+
 class Dev:
-    """A 1-D MOS and its gate drive."""
+    """A 1-D MOS (or its laterally uniform 2-D / 3-D tensor-mesh twin) and its gate drive."""
 
     def __init__(self, name, *, doping=-1e23, L=1.0e-6, t_ox=2e-9, layers=None, gate_offset=0.0,
                  circuit=False, fd=False, tau=1e-6, h_if=0.05e-9, h_body=20e-9, h_ox=0.1e-9, eps_ox=3.9,
-                 source=None, node=None, dummy_circuit=False, v_ref=0.0, i_park=None, extended=False):
+                 source=None, node=None, dummy_circuit=False, v_ref=0.0, i_park=None, extended=False,
+                 dim=1, x_nodes=None, width=4e-9, n_lat=3):
         ds = _ds()
         from dynameta.carriers import eq_registry as _R
         from dynameta.carriers import physics_bipolar_dd as BP
@@ -68,6 +127,7 @@ class Dev:
         dev, mesh = name, name + "_m"
         _R.clear(dev)
         with _quiet():
+          if dim == 1:
             ds.create_1d_mesh(mesh=mesh)
             ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=h_body, tag="body")
             # an EXACTLY uniform h_if zone over the 10 nm next to the interface (the accumulation / inversion
@@ -91,6 +151,9 @@ class Dev:
                 ds.add_1d_interface(mesh=mesh, name="{}_{}".format(prev, reg), tag="if{}".format(k))
                 prev = reg
             ds.finalize_mesh(mesh=mesh)
+          else:                          # 2-D / 3-D tensor mesh on the SAME normal node set (one oxide)
+            _tensor_mesh(mesh, dim, np.asarray(x_nodes, dtype=float), L, width, n_lat)
+          with _quiet():
             ds.create_device(mesh=mesh, device=dev)
             if extended:                 # 128-bit models + equations (before any physics)
                 from dynameta.carriers import extended_precision as XP
@@ -652,9 +715,94 @@ def sc_stack(opts):
     return out
 
 
+def sc_dims(opts):
+    """2-D / 3-D == 1-D on tensor meshes: the 1-D device is solved first (then deleted -- DEVSIM solves every
+    live device together), its normal-axis node set is replicated laterally, and the same bias is solved.
+    ONE dimension per process (variant "2d" / "3d"); bias-parameter gates (no circuits)."""
+    dim = {"2d": 2, "3d": 3}[opts.get("variant", "2d")]
+    V, dop = float(opts.get("V", 1.0)), float(opts.get("doping", 1e24))
+    L = float(opts.get("L", 0.3e-6))
+    W = float(opts.get("width", 4e-9))
+    d1 = Dev("d1", doping=dop, L=L, h_body=float(opts.get("h_body", 10e-9)), h_if=0.1e-9)
+    t1 = install(d1)
+    d1.goto(V)
+    st1 = t1.state(d1.name)
+    xs = np.concatenate([d1.nv("semi", "x"), d1.nv("oxide", "x")[1:]])
+    ref = {"J": float(st1["te"].J[0]), "V_ox": float(-st1["d"][0, -1]), "n_s": float(st1["n_s"][0]),
+           "I_body": d1.body_current(), "n_nodes": int(xs.size)}
+    d1.close()
+    import time
+    t0 = time.time()
+    dn = Dev("dn", doping=dop, L=L, dim=dim, x_nodes=xs, width=W, n_lat=int(opts.get("n_lat", 3)),
+             dummy_circuit=True)
+    tn = install(dn)
+    dn.goto(V)
+    stn = tn.state(dn.name)
+    rep = report(dn)
+    out = {"ref": ref, "J": _lst(stn["te"].J), "V_ox": _lst(-stn["d"][:, -1]), "area": _lst(tn.area),
+           "W": W, "dim": dim, "I_gate": rep["I_gate"], "I_body": dn.body_current(),
+           "n_iface": int(tn.iface.size), "weights": [[int(j) for j in w[0]] for w in tn.faces[0][2]],
+           "wvals": [[float(v) for v in w[1]] for w in tn.faces[0][2]], "solve_s": time.time() - t0}
+    t1_ = time.time()
+    out["term"] = term_jacobian(dn, tn, circ=False)
+    out["jac_s"] = time.time() - t1_
+    return out
+
+
+def sc_gmsh(opts):
+    """The plan's mesh caveat, MEASURED: a laterally uniform Si / 2 nm SiO2 stack on the Stacked3DSpec
+    builder, mesher "gmsh" (DEVSIM's unsigned box geometry), "gmsh" + devsim_geometry.apply_exact_geometry
+    (negative='warn', hooked right after create_device as validation/devsim_geometry.py does), and the
+    "tensor" (Kuhn) default. The term is installed on the solved ideal-capacitor state and its kernel call
+    read (no re-solve): the lateral spread of V_ox and of J over the interface nodes."""
+    import tempfile
+    import warnings
+    from dynameta.carriers import devsim_geometry as G
+    from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+    from dynameta.constants import M_E
+    from dynameta.sweep import BiasPoint
+    ds = _ds()
+    var = opts.get("variant", "gmsh")
+    spec = Stacked3DSpec(semi_material="Si", oxide_material="SiO2", lateral_m=4e-9, semi_thk_m=20e-9,
+                         oxide_thk_m=2e-9, n_bg_m3=1e24, eps_semi=11.7, eps_oxide=3.9, dos_mass_kg=1.08 * M_E,
+                         dos_mass_p_kg=0.81 * M_E, physics="bipolar_dd", n_i_m3=1e16, mobility_m2Vs=0.1,
+                         mobility_p_m2Vs=0.04, tau_srh_s=1e-7, grid_n=(3, 3, 9), mesh_min_nm=0.5,
+                         mesh_max_nm=2.0, mesher="tensor" if var == "tensor" else "gmsh")
+    tmp = tempfile.mkdtemp(prefix="oxg_")
+    sol = Devsim3DEquilibrium(spec, device_name="g3", mesh_name="g3m",
+                              msh_path=None if var == "tensor" else os.path.join(tmp, "g3.msh"))
+    reps = {}
+    if var == "gmsh_exact":
+        orig = sol._create_mesh_device
+
+        def patched():
+            orig()
+            for r in ds.get_region_list(device=sol.device):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    rep = G.apply_exact_geometry(sol.device, r, negative="warn")
+                reps[r] = {"neg_couples": int(rep.n_negative_couples), "n_el": int(rep.n_elements)}
+        sol._create_mesh_device = patched
+    with _quiet(), warnings.catch_warnings():
+        warnings.simplefilter("ignore")                 # the gmsh mesher's own UnreliableResultWarning etc.
+        sol.solve(BiasPoint({"gate": float(opts.get("V", 1.2))}, "g"))
+    out = {"variant": var, "geometry": reps}
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        term = install(type("D", (), {"name": "g3"})(), dielectric_regions=["oxide"])
+    out["setup_warnings"] = [(type(x.message).__name__, str(x.message)[:300]) for x in w]
+    st = term.state("g3")
+    J = st["te"].J
+    Vox = -st["d"][:, -1]
+    out.update({"J": _lst(J), "V_ox": _lst(Vox), "area": _lst(term.area), "lateral_m2": 16e-18,
+                "J_spread": float(np.ptp(J) / np.mean(J)), "V_ox_spread": float(np.ptp(Vox) / np.mean(Vox)),
+                "I_over_area": float(np.sum(term.area * J) / 16e-18)})
+    return out
+
+
 SCENARIOS = {"balance": sc_balance, "balance_fd": sc_balance_fd, "inversion": sc_inversion,
              "conserve": sc_conserve, "ssac": sc_ssac, "fdt": sc_fdt,
-             "jac": sc_jac, "stack": sc_stack}
+             "jac": sc_jac, "stack": sc_stack, "dims": sc_dims, "gmsh": sc_gmsh}
 
 
 def run_child(scenario, **opts):
