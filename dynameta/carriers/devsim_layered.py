@@ -45,6 +45,7 @@ from dynameta.carriers import extended_precision as XP
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
 from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
+from dynameta.carriers.tunneling import btbt_for_material as _btbt_for_material
 from dynameta.geometry.guards import require_supported_geometry
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
@@ -732,7 +733,9 @@ class LayeredDevsimBuilder:
             tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s),
             fd_enhancement=stats != "boltzmann", statistics=stats, n_dos_p_m3=Nv,
             options=getattr(tr, "bipolar_options", None),       # audit R26/R27 (None -> SRH only)
-            btbt=getattr(tr, "btbt", None),                 # D1d: None -> no BTBT (byte-identical)
+            # D1d: None -> no BTBT (byte-identical). v0.15: a set with scale_B_with_gap gets B at the region T
+            # from the material's band-temperature model (tunneling.btbt_for_material; others pass unchanged)
+            btbt=_btbt_for_material(getattr(tr, "btbt", None), tr),
             srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
             traps=tuple(getattr(tr, "srh_traps", ())) or None)
         BP.setup_equilibrium_seed_models(self.device, s.name)

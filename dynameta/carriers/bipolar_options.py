@@ -201,6 +201,8 @@ here re-defines a composite by name, so options compose with trap levels, interf
    v0.15 (opt-in): a TransportModel.band_temperature model (materials.BandTemperature) evaluates E_g, chi
    and, with derive_n_i=True, n_i at T_K from their values at chi_reference_T_K (materials.band_data_at_T;
    anchored Varshni) -- then n_i_m3 is given at that reference T instead, and the chi guard is satisfied.
+   v0.15 (opt-in, decision 20): a BTBT set with scale_B_with_gap=True takes B (E_g(T)/E_g(300))^(3/2) from
+   that model (tunneling.btbt_for_material in the builders); otherwise setup_btbt still warns.
 
 5. GENERATION. `generation_m3s` adds a uniform external generation G (region parameter `G_ext`,
    rampable with ds.set_parameter) to both continuity equations: U_net = U_SRH + U_A + U_rad - G.
