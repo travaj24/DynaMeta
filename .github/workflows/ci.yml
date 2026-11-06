@@ -492,6 +492,8 @@ jobs:
     #   custom-equation dispatcher, every registering case in a child process, and the two-point noise
     #   source): 46 s serial together on the Windows dev box (26 tests; the defaults-off pair of child
     #   processes is 16 s of it).
+    # + tests/test_term_bookkeeping_v2.py (v0.15 term bookkeeping v2: single-carrier terms, extra-variable
+    #   derivatives, the unified inventory): 3 s serial on the Windows dev box (12 tests).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -523,7 +525,7 @@ jobs:
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
             tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
             tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py \
-            tests/test_custom_terms.py tests/test_noise_two_point.py
+            tests/test_custom_terms.py tests/test_noise_two_point.py tests/test_term_bookkeeping_v2.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

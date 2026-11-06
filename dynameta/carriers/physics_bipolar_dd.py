@@ -85,7 +85,7 @@ Staged solve: see solve_bipolar_diode in validation/bipolar_diode.py:
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple
 
 import numpy as np
 from dynameta.carriers.devsim_env import import_devsim
@@ -438,6 +438,32 @@ def _g_expr(var: str, s: str, dos: str = "N_dos") -> str:
 # read back from DEVSIM's own model lists, so they live and die with the device (no module state).
 # With NO terms every composite is the legacy string character-for-character and no model, slot or
 # DEVSIM call is added (the defaults-off guards).
+#
+# VERSION 2 (v0.15, plan item 4.0.2; P3 section 1.3.2 step K0, P1 section 0.3):
+#   RTermN_<name> / RTermP_<name> : a SINGLE-CARRIER rate (carrier="electron" / "hole"): it enters
+#                  ElectronGeneration only / HoleGeneration only (a kinetic trap captures the two carriers
+#                  at DIFFERENT rates R_n, R_p). PTermN_ / PTermP_ is its event rate for the noise, and
+#                  the region parameter _rtN_<name> / _rtP_<name> = "<partner equation>,<coeff>,<mech>"
+#                  records the OTHER row each event changes (or none) -- read back by
+#                  recombination_terms, so the noise source is rebuilt from DEVSIM, not module state.
+#                    ElectronGeneration = -q (USRH + sum RTerm_ + sum RTermN_)
+#                    HoleGeneration     = +q (USRH + sum RTerm_ + sum RTermP_)
+#                  With no N/P terms both strings are the version-1 strings character for character.
+#   wrt=(<var>, ...): a term (any carrier, and QTerm_ via add_charge_term) that depends on EXTRA node
+#                  solution variables (a trap occupancy) carries the derivative models <term>:<var>.
+#                  Each composite is then differentiated with respect to Electrons, Holes AND every var
+#                  for which one of its terms carries a derivative model (read back from DEVSIM's model
+#                  list) plus every var the composite already has a derivative for. MEASURED (devsim
+#                  2.11.2, 2026-11-06, docs/audit/2026-11-06-v0.15-term-bookkeeping-v2.md section 2):
+#                  simplify(diff(C, U)) of a composite naming model M gives the symbol M:U for ANY node
+#                  solution U, and the equation assembly consumes C:U for U's column (2.4e-16 against
+#                  the closed form) -- the chain rule through named models works. But a MISSING M:U
+#                  evaluates as 0 SILENTLY (the U column was 100 % wrong), and a C:U created BEFORE M:U
+#                  keeps a stale cached 0 until a solution it depends on changes. Hence every declared
+#                  var gets its <term>:<var> model (closed form, or DEVSIM's own diff) BEFORE the
+#                  composite derivatives are rebuilt, and a var that is not a node model is refused.
+#   "custom" kind: the region's live Python-assembled terms (custom_terms), with their noise capability
+#                  and Jacobian exactness, so the ONE inventory covers every term the noise must see.
 _CHARGE_TERM_PREFIX = "QTerm_"
 _RECOMB_TERM_PREFIX = "RTerm_"
 _PAIR_TERM_PREFIX = "PTerm_"
@@ -445,6 +471,11 @@ _EDGE_RTERM_PREFIX, _EDGE_PTERM_PREFIX = "RTermEdge_", "PTermEdge_"
 _ELEM_RTERM_PREFIX = ("RTermElem0_", "RTermElem1_")
 _ELEM_PTERM_PREFIX = ("PTermElem0_", "PTermElem1_")
 _ASSEMBLIES = ("node", "edge", "element")
+_CARRIERS = ("both", "electron", "hole")
+# single-carrier terms: carrier -> (rate prefix, pair prefix, partner-parameter prefix, own row, own c)
+_SINGLE = {"electron": ("RTermN_", "PTermN_", "_rtN_", "ElectronContinuityEquation", -1.0),
+           "hole": ("RTermP_", "PTermP_", "_rtP_", "HoleContinuityEquation", +1.0)}
+_BASE_VARS = ("Electrons", "Holes")
 
 
 def _poisson_charge_expr(terms, doping: str = "NetDoping") -> str:
@@ -455,12 +486,15 @@ def _poisson_charge_expr(terms, doping: str = "NetDoping") -> str:
     return "-ElectronCharge * ({} + {})".format(base, " + ".join(terms))
 
 
-def _generation_exprs(terms) -> "tuple[str, str]":
-    """(ElectronGeneration, HoleGeneration) = (-q R, +q R), R = USRH [+ sum of RTerm_* models]."""
-    if not terms:
-        return "-ElectronCharge * USRH", "+ElectronCharge * USRH"   # legacy strings, unchanged
-    r = "(USRH + {})".format(" + ".join(terms))
-    return "-ElectronCharge * " + r, "+ElectronCharge * " + r
+def _generation_exprs(terms, n_terms=(), p_terms=()) -> "tuple[str, str]":
+    """(ElectronGeneration, HoleGeneration) = (-q R_e, +q R_h), R_e = USRH [+ sum RTerm_ + sum RTermN_],
+    R_h = USRH [+ sum RTerm_ + sum RTermP_]. With no single-carrier terms R_e == R_h and both strings
+    are the version-1 strings (no terms: the legacy strings) character for character."""
+    def rate(names):
+        names = list(names)
+        return "(USRH + {})".format(" + ".join(names)) if names else "USRH"
+    return ("-ElectronCharge * " + rate(list(terms) + list(n_terms)),
+            "+ElectronCharge * " + rate(list(terms) + list(p_terms)))
 
 
 def _region_terms(device: str, region: str, prefix: str) -> list:
@@ -468,35 +502,88 @@ def _region_terms(device: str, region: str, prefix: str) -> list:
                   if m.startswith(prefix) and ":" not in m)
 
 
-def _term_with_derivs(device: str, region: str, model: str, expr: str, derivs) -> None:
-    """A term model + its Electrons/Holes derivatives: DEVSIM's simplify(diff()) by default, or the
-    caller's closed forms `derivs` = {"Electrons": ..., "Holes": ...} (a long sum -- e.g. ~45 interface
-    trap bins -- takes DEVSIM ~25 s to differentiate symbolically, the closed forms well under 1 s)."""
+def _check_wrt(device: str, region: str, wrt, who: str) -> tuple:
+    """The extra solution variables of a term, validated: each must already be a node model of the
+    region (a node_solution), because DEVSIM differentiates with respect to ANY symbol without
+    complaint -- an unknown one silently gives 0 (MEASURED, block comment above)."""
+    out = []
+    have = None
+    for v in (() if wrt is None else ((wrt,) if isinstance(wrt, str) else tuple(wrt))):
+        if v in _BASE_VARS or v in out:
+            continue
+        if have is None:
+            have = set(ds.get_node_model_list(device=device, region=region))
+        if not isinstance(v, str) or v not in have or ":" in v:
+            raise ValueError("{}: wrt variable {!r} is not a node solution of region {!r}; create it "
+                             "(ds.node_solution) before adding a term that depends on it".format(
+                                 who, v, region))
+        out.append(v)
+    return tuple(out)
+
+
+def _derivative_vars(device: str, region: str, models, composite: str) -> tuple:
+    """Electrons, Holes + every extra variable v for which one of `models` carries the derivative model
+    <model>:v, or for which `composite` already has <composite>:v (a var whose last term was replaced
+    keeps a derivative that DEVSIM re-differentiates to 0 instead of a stale one). Read from DEVSIM."""
+    have = ds.get_node_model_list(device=device, region=region)
+    owners = set(models) | {composite}
+    extra = sorted({m.split(":", 1)[1] for m in have if ":" in m and m.split(":", 1)[0] in owners}
+                   - set(_BASE_VARS))
+    return _BASE_VARS + tuple(extra)
+
+
+def _term_with_derivs(device: str, region: str, model: str, expr: str, derivs, wrt=()) -> None:
+    """A term model + its derivatives with respect to Electrons, Holes and every extra variable of
+    `wrt`: DEVSIM's simplify(diff()) by default, or the caller's closed forms `derivs` = {"Electrons":
+    ..., "Holes": ..., <each wrt var>: ...} (a long sum -- e.g. ~45 interface trap bins -- takes DEVSIM
+    ~25 s to differentiate symbolically, the closed forms well under 1 s). A closed-form dict must cover
+    every variable (a missing derivative model is a SILENT zero in DEVSIM). Derivative models of an
+    extra variable the term no longer depends on (a re-added term) are deleted, so no stale Jacobian
+    entry survives a replacement."""
+    wrt_all = _BASE_VARS + tuple(wrt)
+    if derivs is not None:
+        missing = [w for w in wrt_all if w not in derivs]
+        extra = sorted(set(derivs) - set(wrt_all))
+        if missing or extra:
+            raise ValueError("closed-form derivs of {!r} must give exactly {} (missing {}, not in wrt "
+                             "{}): DEVSIM treats a missing derivative model as 0".format(
+                                 model, list(wrt_all), missing, extra))
+    stale = [m for m in ds.get_node_model_list(device=device, region=region)
+             if m.startswith(model + ":") and m.split(":", 1)[1] not in wrt_all]
+    for m in stale:
+        ds.delete_node_model(device=device, region=region, name=m)
     if derivs is None:
-        _node_with_derivs(device, region, model, expr, ("Electrons", "Holes"))
+        _node_with_derivs(device, region, model, expr, wrt_all)
         return
     ds.node_model(device=device, region=region, name=model, equation=expr)
-    for w in ("Electrons", "Holes"):
+    for w in wrt_all:
         ds.node_model(device=device, region=region, name="{}:{}".format(model, w), equation=derivs[w])
 
 
 def rebuild_poisson_charge(device: str, region: str) -> None:
     """(Re)build PotentialNodeCharge from the region's doping model (IonizedNetDoping when incomplete
-    ionization installed it, else NetDoping) plus every QTerm_* charge term."""
+    ionization installed it, else NetDoping) plus every QTerm_* charge term, differentiated with respect
+    to Electrons, Holes and every extra variable a charge term carries a derivative for (add_charge_term
+    wrt=)."""
     doping = ("IonizedNetDoping" if "IonizedNetDoping" in ds.get_node_model_list(
         device=device, region=region) else "NetDoping")
-    pne = _poisson_charge_expr(_region_terms(device, region, _CHARGE_TERM_PREFIX), doping)
-    _node_with_derivs(device, region, "PotentialNodeCharge", pne, ("Electrons", "Holes"))
+    terms = _region_terms(device, region, _CHARGE_TERM_PREFIX)
+    pne = _poisson_charge_expr(terms, doping)
+    _node_with_derivs(device, region, "PotentialNodeCharge", pne,
+                      _derivative_vars(device, region, terms, "PotentialNodeCharge"))
 
 
-def add_charge_term(device: str, region: str, name: str, expr: str, *, derivs=None) -> str:
+def add_charge_term(device: str, region: str, name: str, expr: str, *, derivs=None, wrt=None) -> str:
     """Add a net positive space-charge density `expr` [m^-3, units of +q; a DEVSIM node expression in
     Electrons/Holes and parameters] to a bipolar region's Poisson equation, as node model
     QTerm_<name> (+ its Electrons/Holes derivatives), and rebuild PotentialNodeCharge. Re-adding the
-    same name REPLACES that term. `derivs` optionally supplies closed-form Electrons/Holes derivatives
-    (see _term_with_derivs). Returns the model name."""
+    same name REPLACES that term. `derivs` optionally supplies closed-form derivatives (see
+    _term_with_derivs). `wrt` names EXTRA node solution variables the charge depends on (a kinetic trap's
+    occupancy variable): the term then also carries <model>:<var> (from `derivs` or DEVSIM's diff) and
+    the Poisson composite is differentiated with respect to them. Returns the model name."""
     model = _CHARGE_TERM_PREFIX + name
-    _term_with_derivs(device, region, model, expr, derivs)
+    extra = _check_wrt(device, region, wrt, "add_charge_term")
+    _term_with_derivs(device, region, model, expr, derivs, extra)
     rebuild_poisson_charge(device, region)
     return model
 
@@ -548,8 +635,32 @@ def _rebuild_element_composites(device: str, region: str) -> None:
     _wire_volume_slot(device, region, slots)
 
 
+def _rebuild_generation(device: str, region: str) -> None:
+    """(Re)build ElectronGeneration / HoleGeneration (+ derivatives) from the region's node terms: the
+    shared RTerm_* in both, RTermN_* in the electron composite only, RTermP_* in the hole one only."""
+    both = _region_terms(device, region, _RECOMB_TERM_PREFIX)
+    nt = _region_terms(device, region, _SINGLE["electron"][0])
+    pt = _region_terms(device, region, _SINGLE["hole"][0])
+    gn, gp = _generation_exprs(both, nt, pt)
+    _node_with_derivs(device, region, "ElectronGeneration", gn,
+                      _derivative_vars(device, region, both + nt, "ElectronGeneration"))
+    _node_with_derivs(device, region, "HoleGeneration", gp,
+                      _derivative_vars(device, region, both + pt, "HoleGeneration"))
+
+
+def _single_partner(device: str, region: str, carrier: str, name: str):
+    """(partner equation | None, partner coefficient, mechanism) of a single-carrier node term, read back
+    from the region parameter add_recombination_term recorded."""
+    par = _SINGLE[carrier][2] + name
+    if par not in ds.get_parameter_list(device=device, region=region):
+        return None, 0.0, "gr"
+    eq, coeff, mech = str(ds.get_parameter(device=device, region=region, name=par)).split(",")
+    return (eq or None), float(coeff), mech
+
+
 def add_recombination_term(device: str, region: str, name: str, expr, *, pair=None, derivs=None,
-                           assembly: str = "node") -> str:
+                           assembly: str = "node", carrier: str = "both", wrt=None, partner=None,
+                           mechanism: str = "gr") -> str:
     """Add a net recombination rate `expr` [m^-3 s^-1] (negative = generation) to BOTH continuity
     equations of a bipolar region and rebuild the composite it sums into (see the block comment above).
     Re-adding the same name REPLACES that term; distinct names always SUM.
@@ -565,21 +676,80 @@ def add_recombination_term(device: str, region: str, name: str, expr, *, pair=No
                            2-tuple for "element"); it is the noise GR source (noise_analysis). Pass
                            "0" for a deterministic term. None leaves the term without a pair rate and
                            noise_analysis refuses the region (so no term can be silently noiseless).
-    Returns the (first) term model name."""
+
+    Version 2 (v0.15, plan 4.0.2; node assembly only). Which option for which calculation:
+      carrier="both" (default): one process removes (or creates) an electron AND a hole at the same node
+                           -- SRH through a fast level, Auger, radiative, external generation. Unchanged.
+      carrier="electron" / "hole": the process changes ONE carrier only -- the capture / emission branch
+                           of a KINETIC trap (R_n into the electron equation, R_p into the hole one, the
+                           trap's own equation balancing both), or a carrier exchange with a reservoir the
+                           device does not model. -> RTermN_<name> / RTermP_<name> (ElectronGeneration
+                           only / HoleGeneration only). `pair` is then that process's EVENT rate, both
+                           directions counted (e.g. c_n n (1 - f) + e_n f) [m^-3 s^-1]; its noise source is
+                           a two-point event (noise_analysis.TwoPointSource) on the carrier's own row (an
+                           electron event changes the electron row by -1, a hole event the hole row by
+                           +1: ElectronGeneration = -q R, HoleGeneration = +q R) and, when given, on
+      partner            : (equation, coeff) -- the OTHER row of the same region each event changes; coeff
+                           is its change per event in units of q in DEVSIM's sign convention for that row
+                           (a trap row with node model +q (R_n - R_p): +1 for the electron branch, -1 for
+                           the hole branch). None: the carrier leaves the modelled system (no second row;
+                           the terminal currents then do not balance -- a sink to nowhere does not
+                           conserve charge). The equation may be created after the term; noise_analysis
+                           refuses the region if it is missing when the noise is computed.
+      mechanism          : the noise_analysis.MECHANISMS key a single-carrier source is reported under
+                           ("gr" by default; a kinetic trap uses "trap_n" / "trap_p").
+      wrt                : EXTRA node solution variables the term depends on (a trap occupancy variable;
+                           any carrier, node assembly only). The term carries <model>:<var> for each (from
+                           `derivs`, which must then give them too, or DEVSIM's simplify(diff())), and the
+                           composites are differentiated with respect to them. The variable must exist (a
+                           node_solution) before the term is added: DEVSIM silently differentiates an
+                           unknown symbol to 0.
+    A name is either a pair term (carrier="both") or a single-carrier one; the electron and hole branches
+    of one process share it (RTermN_<name> + RTermP_<name>). Mixing is refused: there is no term removal,
+    and a fast-trap pair left beside its kinetic branches would double-count silently. Returns the
+    (first) term model name."""
     if assembly not in _ASSEMBLIES:
         raise ValueError("add_recombination_term: assembly must be one of {}; got {!r}".format(
             _ASSEMBLIES, assembly))
+    if carrier not in _CARRIERS:
+        raise ValueError("add_recombination_term: carrier must be one of {}; got {!r}".format(
+            _CARRIERS, carrier))
+    if assembly != "node" and (carrier != "both" or wrt is not None):
+        raise ValueError("add_recombination_term: carrier= and wrt= are supported for node terms only "
+                         "(assembly={!r})".format(assembly))
+    if (partner is not None or mechanism != "gr") and carrier == "both":
+        raise ValueError("add_recombination_term: partner= / mechanism= describe a SINGLE-carrier "
+                         "term's noise event; a carrier='both' term is a same-node pair ('gr')")
     if assembly == "node":
-        model = _RECOMB_TERM_PREFIX + name
-        _term_with_derivs(device, region, model, expr, derivs)
-        pm = _PAIR_TERM_PREFIX + name
+        extra = _check_wrt(device, region, wrt, "add_recombination_term")
+        if carrier == "both":
+            model, pm = _RECOMB_TERM_PREFIX + name, _PAIR_TERM_PREFIX + name
+        else:
+            model, pm = _SINGLE[carrier][0] + name, _SINGLE[carrier][1] + name
+            from dynameta.carriers.noise_analysis import MECHANISMS
+            if mechanism not in MECHANISMS:
+                raise ValueError("add_recombination_term: mechanism {!r} is not a noise_analysis."
+                                 "MECHANISMS key {}".format(mechanism, MECHANISMS))
+            p_eq, p_c = ("", 0.0) if partner is None else (str(partner[0]), float(partner[1]))
+            if partner is not None and (not p_eq or "," in p_eq or not np.isfinite(p_c) or p_c == 0.0):
+                raise ValueError("add_recombination_term: partner must be (equation name, finite nonzero "
+                                 "coeff); got {!r}".format(partner))
+        have = set(ds.get_node_model_list(device=device, region=region))
+        rivals = ((v[0] for v in _SINGLE.values()) if carrier == "both" else (_RECOMB_TERM_PREFIX,))
+        clash = [p + name for p in rivals if p + name in have]
+        if clash:
+            raise ValueError("add_recombination_term: region {!r} already carries {} under the name "
+                             "{!r}; a name is either a pair term (carrier='both') or a single-carrier "
+                             "one (pick a new name)".format(region, clash, name))
+        _term_with_derivs(device, region, model, expr, derivs, extra)
         if pair is not None:
             ds.node_model(device=device, region=region, name=pm, equation=pair)
         elif pm in ds.get_node_model_list(device=device, region=region):
             ds.delete_node_model(device=device, region=region, name=pm)      # no stale pair rate
-        gn, gp = _generation_exprs(_region_terms(device, region, _RECOMB_TERM_PREFIX))
-        _node_with_derivs(device, region, "ElectronGeneration", gn, ("Electrons", "Holes"))
-        _node_with_derivs(device, region, "HoleGeneration", gp, ("Electrons", "Holes"))
+        if carrier != "both":
+            ds.set_parameter(device=device, region=region, name=_SINGLE[carrier][2] + name,
+                             value="{},{!r},{}".format(p_eq, p_c, mechanism))
+        _rebuild_generation(device, region)
         return model
     if derivs is not None:
         raise ValueError("add_recombination_term: closed-form derivs are supported for node terms only")
@@ -611,12 +781,50 @@ def add_recombination_term(device: str, region: str, name: str, expr, *, pair=No
     return _ELEM_RTERM_PREFIX[0] + name
 
 
+class CarrierTerm(NamedTuple):
+    """One single-carrier node term of recombination_terms()["node_electron" / "node_hole"]."""
+    rate: str                         # RTermN_<name> / RTermP_<name>
+    pair: Optional[str]               # PTermN_<name> / PTermP_<name>; None = no noise model (refused)
+    partner_equation: Optional[str]   # the other row each event changes; None = none
+    partner_coeff: float              # its change per event in units of q (0.0 without a partner)
+    mechanism: str                    # the noise_analysis.MECHANISMS key of its source
+    own_equation: str                 # ElectronContinuityEquation / HoleContinuityEquation
+    own_coeff: float                  # -1.0 (electron) / +1.0 (hole): the carrier row's change per event
+
+
+class CustomTermRecord(NamedTuple):
+    """One live Python-assembled term of recombination_terms()["custom"] (carriers/custom_terms)."""
+    term: object                      # the custom_terms.CustomTerm
+    regions: Tuple[str, ...]          # regions of its declared rows; () = undeclared (listed everywhere)
+    noise_model: bool                 # it implements noise_sources (else noise_analysis refuses)
+    jacobian_exact: bool              # False: noise_analysis refuses (ssac / noise ARE its Jacobian)
+
+
+def _custom_records(device: str, region: str) -> dict:
+    """The live custom terms whose declared rows touch `region` -- or that declare no region row at all:
+    their footprint is unknown, so they are listed in EVERY region (never silently missed). Liveness is
+    custom_terms' DEVSIM-marker test; nothing is registered."""
+    from dynameta.carriers import custom_terms as _CT
+    out = {}
+    for t in _CT.live_terms(device):
+        regs = tuple(sorted({r for r, _eq in t.equations(device) if r is not None}))
+        if regs and region not in regs:
+            continue
+        out[t.name] = CustomTermRecord(
+            t, regs, type(t).noise_sources is not _CT.CustomTerm.noise_sources, bool(t.jacobian_exact))
+    return out
+
+
 def recombination_terms(device: str, region: str) -> dict:
     """Inventory of the region's additive recombination terms, read back from DEVSIM:
     {"node": {name: (rate model, pair model | None)}, "edge": {...}, "element": {name: ((rate0,
-    rate1), (pair0, pair1) | None)}}. The base SRH channel USRH is not listed (it is always present
-    and its pair rate is physics_traps.srh_rate_expr(pair=True)). Used by noise_analysis and the
-    composition gate."""
+    rate1), (pair0, pair1) | None)}, "node_electron": {name: CarrierTerm}, "node_hole": {name:
+    CarrierTerm}, "custom": {name: CustomTermRecord}}. The base SRH channel USRH is not listed (it is
+    always present and its pair rate is physics_traps.srh_rate_expr(pair=True)). "node_electron" /
+    "node_hole" are the single-carrier terms (add_recombination_term carrier=), "custom" the live
+    Python-assembled terms (custom_terms) writing rows of this region or declaring none. Used by
+    noise_analysis -- which refuses a term of ANY kind without a noise model -- and the composition
+    gate."""
     nodes = set(ds.get_node_model_list(device=device, region=region))
     edges = set(ds.get_edge_model_list(device=device, region=region))
     elems = set()
@@ -626,7 +834,7 @@ def recombination_terms(device: str, region: str) -> dict:
     def names(models, prefix):
         return sorted(m[len(prefix):] for m in models if m.startswith(prefix) and ":" not in m)
 
-    out = {"node": {}, "edge": {}, "element": {}}
+    out = {"node": {}, "edge": {}, "element": {}, "node_electron": {}, "node_hole": {}}
     for nm in names(nodes, _RECOMB_TERM_PREFIX):
         pm = _PAIR_TERM_PREFIX + nm
         out["node"][nm] = (_RECOMB_TERM_PREFIX + nm, pm if pm in nodes else None)
@@ -637,6 +845,13 @@ def recombination_terms(device: str, region: str) -> dict:
         pms = tuple(p + nm for p in _ELEM_PTERM_PREFIX)
         out["element"][nm] = (tuple(p + nm for p in _ELEM_RTERM_PREFIX),
                               pms if all(p in elems for p in pms) else None)
+    for carrier, key in (("electron", "node_electron"), ("hole", "node_hole")):
+        rp, pp, _par, own_eq, own_c = _SINGLE[carrier]
+        for nm in names(nodes, rp):
+            peq, pc, mech = _single_partner(device, region, carrier, nm)
+            out[key][nm] = CarrierTerm(rp + nm, pp + nm if pp + nm in nodes else None, peq, pc, mech,
+                                       own_eq, own_c)
+    out["custom"] = _custom_records(device, region)
     return out
 
 
