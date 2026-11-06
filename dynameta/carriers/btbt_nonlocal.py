@@ -68,19 +68,32 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
      that reaches it. A path is DISCARDED (and counted in last_stats) when it
        - leaves the region / reaches a non-contact region end before v = 1 ("boundary"; decision 24:
          specular reflection at interfaces is deferred),
-       - returns into the valence band (v <= 0 at a node before the end: "reentrant"),
+       - does not rise monotonically (v not increasing from node to node, or a nodal slope <= 0 along
+         it -- the band bends back: "reentrant"),
        - ends in an edge touching a CONTACT node ("contact": DEVSIM drops a contact node's bulk row,
          so the electron would be lost and charge not conserved),
        - is longer than max_length_m ("too_long").
      A smooth C^1 taper w(l) = 1 - (3 s^2 - 2 s^3), s = (l - 0.95 L_max)/(0.05 L_max), switches paths off
      over the last 5 % of max_length, so the Newton does not see a jump (P1 3.6); w = 1 EXACTLY for
      l <= 0.95 L_max (the uniform-field identity is untouched there).
-   * SEGMENT INTEGRALS IN CLOSED FORM (no quadrature error). On an edge v is linear, so
-       direct:  Int kappa ds and Int ds/kappa of kappa ~ sqrt(v (1 - v)) are arcsin forms, written with
-                theta = 4 arcsin(sqrt v) as F0 = theta/2, F1 = (theta - sin theta)/16, and their
-                DIFFERENCES over an edge in cancellation-free form (arcsin difference formula,
-                (x - sin x) by series); phonon: sqrt(v) and sqrt(1 - v) pieces in rationalised form.
+   * SEGMENT INTEGRALS IN CLOSED FORM (no quadrature error), two kinds:
+       EXPONENT integrals Int kappa ds (direct; Keldysh kappa_V, kappa_C) and the path length on the P1
+         band (v linear on each edge): arcsin / sqrt forms, written cancellation-free (kane_segment,
+         keldysh_segment: no arcsin of sqrt(v), (x - sin x) by series).
+       PREFACTOR integrals Int ds/kappa (C_d, C_p) IN v: Int r(v) K(v) dv with r = ds/dv interpolated
+         LINEARLY in v between the second-order nodal slopes of the path nodes (kane_moments,
+         keldysh_moments: closed-form zeroth and first moments of K). WHY NOT P1 here too (the plan's first
+         design; FINDING, tests/test_btbt_nonlocal_kernels.py N4b): K has an integrable 1/sqrt singularity
+         at a path end, where the P1 slope is the edge SECANT, off the true slope by O(h v''); the end
+         piece 2 sqrt(h/sigma) then carries an O(h^{3/2}) error (MEASURED order 1.3 against a continuum
+         oracle, 2.0 with the slope interpolation), and the secant JUMP between two edges makes the rate a
+         sqrt-kinked function of psi whenever a path end crosses a node (MEASURED: a DEVSIM dI/dV that
+         moved by 2.5e-4 between +-1 mV and +-0.1 mV differences). With r interpolated the rate is C^1
+         there and the scheme O(h^2) throughout. A uniform field has r constant: both forms coincide and
+         the uniform-field identity is untouched.
      The phonon path splits at x0 (v = v* = m_C/(m_V + m_C), the exact linear root).
+     A path must have v rising strictly from node to node and a positive nodal slope at every path node
+     (else it is discarded as "reentrant": a band that bends back is not one tunnelling path).
    * OCCUPANCIES from the transport's own quasi-Fermi levels: the log activities
      L_n = (E_Fn - E_C)/kT and L_p = (E_V - E_Fp)/kT of physics_heterojunction.setup_log_activity (FD
      when the region uses the FD g-factor, Boltzmann otherwise -- the SAME relation the drift-diffusion
@@ -98,8 +111,9 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
 4. JACOBIAN (decision 25). In 1-D the direction is a sign, fixed except where the nodal gradient
    crosses zero (measure zero, and there the rate is zero): the Jacobian is EXACT and the term declares
    jacobian_exact = True, so ssac and noise accept it. R depends on psi at every node of the path and at
-   the start node's two neighbours (gradient), on the end-point fraction t (implicit: v(l) = 1), on n at
-   the end edge's nodes and on p at the start node. The derivative of each closed-form segment integral
+   the start node's two neighbours (gradient), on psi at the neighbours of every path node (the nodal
+   slopes of the prefactor integrals), on the end-point fraction t (implicit: v(l) = 1), on n at the end
+   edge's nodes and on p at the start node. The derivative of each closed-form segment integral
    is taken by COMPLEX-STEP differentiation of the closed form (Squire & Trapp 1998: f'(x) = Im f(x+ih)/h,
    exact to round-off -- no subtractive cancellation, no step-size error); the chain rule through the
    path sums, the end point, the taper and the occupancies is written out. Gate N6 compares the
@@ -140,8 +154,9 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
 8. CONSTANTS. h = H_PLANCK and hbar = h/(2 pi) (NOT the rounded HBAR literal, which differs by 6e-10 and
    would break the uniform-field identity at ~1e-8 through B/F ~ 30).
 
-PUBLIC API: NonlocalBTBT, setup_btbt_nonlocal, btbt_nonlocal_generation,
-physical_from_fitted, fitted_from_physical, kane_segment, keldysh_segment, path_rates_1d, PROCESSES.
+PUBLIC API: NonlocalBTBT, setup_btbt_nonlocal, btbt_nonlocal_generation, physical_from_fitted,
+fitted_from_physical, kane_segment, keldysh_segment, kane_moments, keldysh_moments, path_rates_1d,
+PROCESSES, MECHANISM.
 Gates: tests/test_btbt_nonlocal_kernels.py (kernels, no DEVSIM), tests/test_btbt_nonlocal.py (DEVSIM,
 child processes: tests/_btbt_nonlocal_child.py). Audit note: docs/audit/2026-11-06-v0.15-nonlocal-btbt-1d.md.
 """
@@ -161,7 +176,7 @@ from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["NonlocalBTBT", "NonlocalPhysical", "setup_btbt_nonlocal", "btbt_nonlocal_generation",
            "physical_from_fitted", "fitted_from_physical", "kane_segment",
-           "keldysh_segment", "path_rates_1d", "PROCESSES", "MECHANISM"]
+           "keldysh_segment", "kane_moments", "keldysh_moments", "path_rates_1d", "PROCESSES", "MECHANISM"]
 
 PROCESSES = ("direct", "phonon")
 MECHANISM = "btbt_nl"                       # noise_analysis.TWO_POINT_MECHANISMS key (decision 9)
@@ -359,6 +374,41 @@ def keldysh_segment(wa, wb, L):
     return L * 2.0 / den, L * (2.0 / 3.0) * (wa + sa * sb + wb) / den
 
 
+def kane_moments(p0, p1):
+    """For K(v) = 1/sqrt(v (1 - v)) on a piece p0 -> p1 (0 <= p0 < p1 <= 1, not 0 -> 1 unless whole):
+    M0 = Int K dv and M1 = Int (v - p0) K dv / (p1 - p0), so that Int r(v) K dv = r0 M0 + (r1 - r0) M1
+    for r linear in v from r0 at p0 to r1 at p1 (section 3: the slope-interpolated prefactor integral).
+    With v = sin^2(phi), dphi = phi1 - phi0 = arctan(y) (y as in kane_segment):
+      M0 = 2 dphi,   Int (v - p0) K dv = cos(2 phi0) (dphi - sin(2 dphi)/2) + sin(2 phi0) sin^2(dphi),
+    divided by p1 - p0 = S sin(dphi), written cancellation-free (dphi - sin(2 dphi)/2 = 4 dphi^3 c3(2 dphi)).
+    Complex-safe."""
+    p0, p1 = np.asarray(p0), np.asarray(p1)
+    S = np.sqrt(p1 * (1.0 - p0)) + np.sqrt(p0 * (1.0 - p1))
+    C = np.sqrt((1.0 - p0) * (1.0 - p1)) + np.sqrt(p0 * p1)
+    whole = C.real == 0.0
+    y = (p1 - p0) / np.where(whole, 1.0, S * C)
+    dphi = np.where(whole, 0.5 * math.pi, np.arctan(np.where(whole, 0.0, y)))
+    sdphi = np.where(whole, 1.0, y / np.sqrt(1.0 + y * y))             # sin(arctan y)
+    c2, s2 = 1.0 - 2.0 * p0, 2.0 * np.sqrt(p0 * (1.0 - p0))
+    M1 = (c2 * 4.0 * dphi * dphi * _c3(2.0 * dphi) / _sinc(dphi) + s2 * sdphi) / S
+    return 2.0 * dphi, M1
+
+
+def keldysh_moments(w0, w1, rising: bool, dp=None):
+    """M0 = Int dv/sqrt(w) and M1 = Int (v - p0)/sqrt(w) dv / (p1 - p0) on a piece p0 -> p1 (p1 > p0) on
+    which w runs linearly from w0 to w1 (w = v: rising=True, kappa_V; w = 1 - v: rising=False, kappa_C):
+      M0 = 2 dp/(s0 + s1),  M1 = (2/3) dp (s1 + 2 s0)/(s0 + s1)^2 (rising) or (2/3) dp (2 s0 + s1)/(s0 + s1)^2,
+    s = sqrt(w), dp = p1 - p0 = |w1 - w0| (rationalised; no cancellation). Pass dp from the v values when
+    w = 1 - v (w0 - w1 would lose the relative accuracy of a short piece). Complex-safe."""
+    w0, w1 = np.asarray(w0), np.asarray(w1)
+    s0, s1 = np.sqrt(w0), np.sqrt(w1)
+    if dp is None:
+        dp = (w1 - w0) if rising else (w0 - w1)
+    den = s0 + s1
+    lead = (s1 + 2.0 * s0) if rising else (2.0 * s0 + s1)
+    return 2.0 * dp / den, (2.0 / 3.0) * dp * lead / (den * den)
+
+
 # =====================================================================================================
 # paths (1-D walker) and per-path rates
 # =====================================================================================================
@@ -380,13 +430,14 @@ class Paths:
     seg_first: np.ndarray
     seg_end: np.ndarray
     seg_phase: np.ndarray
+    direction: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))
     stats: Dict[str, int] = field(default_factory=dict)
 
 
 def nodal_gradient_1d(x, psi):
-    """Second-order nodal d(psi)/dx at the interior nodes 1..N-2: (h_- s_+ + h_+ s_-)/(h_- + h_+), and
-    its weights on psi_{i-1}, psi_i, psi_{i+1} (linear). Returns (g, wm, w0, wp), arrays of length N
-    (0 at the two end nodes)."""
+    """Nodal d(psi)/dx: second order at the interior nodes, (h_- s_+ + h_+ s_-)/(h_- + h_+) (the
+    derivative of the quadratic through the node and its two neighbours), the one-sided edge slope at
+    the two end nodes; and its weights on psi_{i-1}, psi_i, psi_{i+1} (linear). Returns (g, wm, w0, wp)."""
     x, psi = np.asarray(x, float), np.asarray(psi, float)
     n = x.size
     g = np.zeros(n)
@@ -398,6 +449,10 @@ def nodal_gradient_1d(x, psi):
     cm = hp / (hm * den)                                # weight of (psi_i - psi_{i-1})
     g[1:-1] = cp * (psi[2:] - psi[1:-1]) + cm * (psi[1:-1] - psi[:-2])
     wp[1:-1], wm[1:-1], w0[1:-1] = cp, -cm, cm - cp
+    if n >= 2:
+        h0, h1 = x[1] - x[0], x[-1] - x[-2]
+        g[0], w0[0], wp[0] = (psi[1] - psi[0]) / h0, -1.0 / h0, 1.0 / h0
+        g[-1], wm[-1], w0[-1] = (psi[-1] - psi[-2]) / h1, -1.0 / h1, 1.0 / h1
     return g, wm, w0, wp
 
 
@@ -412,7 +467,7 @@ def trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=None) ->
     # cheap screen: the potential reachable on each side must rise by Eg somewhere
     sufmax = np.maximum.accumulate(psi[::-1])[::-1]              # max(psi[k:])
     premax = np.maximum.accumulate(psi)                          # max(psi[:k+1])
-    starts, A, B, nodes_list, splits = [], [], [], [], []
+    starts, dirs, A, B, nodes_list, splits = [], [], [], [], [], []
     for i in np.flatnonzero(np.asarray(start_ok, bool)):
         if i <= 0 or i >= n - 1 or g[i] == 0.0:
             continue
@@ -435,7 +490,9 @@ def trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=None) ->
             stats["too_long" if truncated else "boundary"] += 1
             continue
         j = int(hit[0])
-        if np.any(v[:j] <= 0.0):
+        # v must rise strictly from node to node, with a positive nodal slope at every path node: the
+        # prefactor integrals are taken in v (section 3); a band that bends back is not a single path
+        if np.any(np.diff(np.concatenate(([0.0], v[:j + 1]))) <= 0.0) or np.any(d * g[ks[:j + 1]] <= 0.0):
             stats["reentrant"] += 1
             continue
         b = int(ks[j])
@@ -449,6 +506,7 @@ def trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=None) ->
             stats["contact"] += 1
             continue
         starts.append(int(i))
+        dirs.append(d)
         A.append(a)
         B.append(b)
         nodes_list.append(np.concatenate(([i], ks[:j + 1])))
@@ -457,7 +515,7 @@ def trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=None) ->
     stats["paths"] = len(starts)
     if not starts:
         e = np.zeros(0, dtype=np.int64)
-        return Paths(e, e, e, e, e, e, np.zeros(0), e.astype(bool), e.astype(bool), e, stats)
+        return Paths(e, e, e, e, e, e, np.zeros(0), e.astype(bool), e.astype(bool), e, e, stats)
     nseg = np.array([len(p) - 1 for p in nodes_list])
     seg_path = np.repeat(np.arange(len(starts)), nseg)
     allnodes = np.concatenate(nodes_list)
@@ -473,30 +531,43 @@ def trace_paths_1d(x, psi, Eg_V, max_length_m, start_ok, end_ok, v_star=None) ->
         phase = np.where(jloc < sp, 0, np.where(jloc == sp, 1, 2))
     return Paths(np.asarray(starts, np.int64), np.asarray(A, np.int64), np.asarray(B, np.int64),
                  seg_path, ka.astype(np.int64), kb.astype(np.int64), np.abs(x[kb] - x[ka]), first, end,
-                 phase, stats)
+                 phase, np.asarray(dirs, np.int64), stats)
 
 
-def _segment_accumulators(phys: NonlocalPhysical, va, vb, L, end, phase):
+def _segment_accumulators(phys: NonlocalPhysical, va, vb, ra, rb, L, end, phase):
     """Per-segment contributions to the path accumulators as functions of the segment's end values
-    (va, vb); complex-safe (section 4). direct: I0 = Int ds/k, I1 = Int k ds (k = kappa/K0), len, t;
+    (va, vb) and inverse slopes (ra, rb) = ds/dv at its nodes; complex-safe (section 4).
+    direct: I0 = Int ds/k (k = kappa/K0), I1 = Int k ds, len, t;
     phonon: IV, JV (kappa_V/KV over [0, x0]), IC, JC (kappa_C/KC over [x0, l]), len, t.
-    An END segment holds the piece from va to v = 1, of length t L with t = (1 - va)/(vb - va); the
-    phonon SPLIT segment (phase 1) holds the V piece up to v* (length tau L, tau = (v* - va)/(vb - va))
-    and the C piece from v* on. t is 1 (and constant) off the end segment."""
+    The EXPONENT integrals (I1, JV, JC) and the length are taken on the P1 band (v linear in s); the
+    PREFACTOR integrals (I0, IV, IC) in v, Int r(v) K(v) dv with r = ds/dv interpolated linearly in v
+    between the nodes' second-order slopes (section 3: O(h^2) and C^1 when a path end crosses a node,
+    where the P1 form is O(h^{3/2}) and has a sqrt kink). r = const = L/(vb - va) gives the P1 values.
+    An END segment holds the piece from va to v = 1 (fraction t = (1 - va)/(vb - va) of the edge); the
+    phonon SPLIT segment (phase 1) holds the V piece up to v* (fraction tau) and the C piece from v* on.
+    t is 1 (and constant) off the end segment."""
     one = np.ones_like(va)
     t = np.where(end, (1.0 - va) / np.where(end, vb - va, 1.0), one)
     Lp = L * t
     vhi = np.where(end, one, vb)
+    dr = rb - ra
     if phys.process == "direct":
-        i0, i1 = kane_segment(va, vhi, Lp)
+        i1 = kane_segment(va, vhi, Lp)[1]
+        m0, m1 = kane_moments(va, vhi)
+        i0 = ra * m0 + dr * t * m1
         return {"I0": i0, "I1": i1, "len": Lp, "t": t}
     vs = phys.v_star
     split = phase == 1
     tau = np.where(split, (vs - va) / np.where(split, vb - va, 1.0), np.where(phase == 0, t, 0.0 * t))
     vV = np.where(split, vs + 0.0 * va, vb)
-    IV, JV = keldysh_segment(va, vV, tau * L)
+    JV = keldysh_segment(va, vV, tau * L)[1]
+    m0, m1 = keldysh_moments(va, vV, rising=True)
+    IV = np.where(phase == 2, 0.0 * va, ra * m0 + dr * tau * m1)
     vC0 = np.where(split, vs + 0.0 * va, va)
-    IC, JC = keldysh_segment(1.0 - vC0, 1.0 - vhi, (t - tau) * L)
+    JC = keldysh_segment(1.0 - vC0, 1.0 - vhi, (t - tau) * L)[1]
+    m0, m1 = keldysh_moments(1.0 - vC0, 1.0 - vhi, rising=False, dp=vhi - vC0)
+    rC0 = ra + dr * tau * split
+    IC = np.where(phase == 0, 0.0 * va, rC0 * m0 + dr * (t - tau * split) * m1)
     return {"IV": IV, "JV": JV, "IC": IC, "JC": JC, "len": Lp, "t": t}
 
 
@@ -542,12 +613,15 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
     va = (psi[paths.seg_ka] - psi[i_s]) / Eg_V
     vb = (psi[paths.seg_kb] - psi[i_s]) / Eg_V
     va[paths.seg_first] = 0.0                                  # identically (not a variable there)
+    g, wm, w0, wp = nodal_gradient_1d(x, psi)
+    dirs = paths.direction[sp]
+    ra = Eg_V / (dirs * g[paths.seg_ka])                       # ds/dv at the nodes (> 0: walker)
+    rb = Eg_V / (dirs * g[paths.seg_kb])
     args = (paths.seg_L, paths.seg_end, paths.seg_phase)
-    acc = _segment_accumulators(phys, va, vb, *args)
+    acc = _segment_accumulators(phys, va, vb, ra, rb, *args)
     tot = {k: np.bincount(sp, weights=v, minlength=P) for k, v in acc.items() if k != "t"}
     t = acc["t"][paths.seg_end]                                # one end segment per path, in path order
     length = tot["len"]
-    g, wm, w0, wp = nodal_gradient_1d(x, psi)
     G = np.abs(g[i])
     if phys.process == "direct":
         K0 = phys.K0
@@ -574,32 +648,52 @@ def path_rates_1d(x, psi, Ln, Lp, phys: NonlocalPhysical, delta: float, max_leng
     dR_dacc["t"] = R_pre * sa * sa_ * (Ln[paths.b] - Ln[paths.a])
     # --- complex step through every segment closed form (section 4) ---
     h = _CS_H
-    da, db = {}, {}
+    dv_a, dv_b, dr_a, dr_b = {}, {}, {}, {}
     vac = va + 1j * h * (~paths.seg_first)
-    for k, v in _segment_accumulators(phys, vac, vb + 0j, *args).items():
-        da[k] = v.imag / h
-    for k, v in _segment_accumulators(phys, va + 0j, vb + 1j * h, *args).items():
-        db[k] = v.imag / h
-    dRa = sum(dR_dacc[k][sp] * da[k] for k in dR_dacc)
-    dRb = sum(dR_dacc[k][sp] * db[k] for k in dR_dacc)
-    dTa, dTb = da["t"], db["t"]
+    z = 0j
+    for k, v in _segment_accumulators(phys, vac, vb + z, ra + z, rb + z, *args).items():
+        dv_a[k] = v.imag / h
+    for k, v in _segment_accumulators(phys, va + z, vb + 1j * h, ra + z, rb + z, *args).items():
+        dv_b[k] = v.imag / h
+    for k, v in _segment_accumulators(phys, va + z, vb + z, ra + 1j * h, rb + z, *args).items():
+        dr_a[k] = v.imag / h
+    for k, v in _segment_accumulators(phys, va + z, vb + z, ra + z, rb + 1j * h, *args).items():
+        dr_b[k] = v.imag / h
+
+    def contract(dd, keys):
+        return sum(dR_dacc[k][sp] * dd[k] for k in keys)
+    keys = list(dR_dacc)
+    dRa, dRb = contract(dv_a, keys), contract(dv_b, keys)
+    dRra, dRrb = contract(dr_a, keys), contract(dr_b, keys)
+    dTa, dTb = dv_a["t"], dv_b["t"]
 
     def per_node(sa_seg, sb_seg):
-        """d/dv at each segment's upper node (the path nodes k_1..k_m): its b-derivative plus the
+        """d/d(value) at each segment's upper node (the path nodes k_1..k_m): its b-derivative plus the
         a-derivative of the next segment of the same path."""
         o = sb_seg.copy()
         o[:-1] += np.where(paths.seg_first[1:], 0.0, sa_seg[1:])
         return o
     dvR, dvT = per_node(dRa, dRb), per_node(dTa, dTb)
+    drR = per_node(dRra, dRrb)                                 # dR/dr at path nodes k_1..k_m
+    drR0 = dRra[paths.seg_first]                               # dR/dr at the start node (per path)
     dRdG = dfo * (R_pre / G)                                   # R is proportional to |grad E_V|
     sg = np.sign(g[i])
-    pe = np.concatenate([sp, np.arange(P), np.arange(P), np.arange(P)])
-    node = np.concatenate([paths.seg_kb, i, i - 1, i + 1])
+    # r_k = Eg_V/(d g_k): dr_k/dpsi_j = -r_k^2 d (dg_k/dpsi_j)/Eg_V, g_k linear in psi_{k-1}, psi_k, psi_{k+1}
+    kk = np.concatenate([paths.seg_kb, i])
+    rk = np.concatenate([rb, Eg_V / (paths.direction * g[i])])
+    dk = np.concatenate([dirs, paths.direction])
+    cr = np.concatenate([drR, drR0]) * (-rk * rk * dk / Eg_V)
+    pk = np.concatenate([sp, np.arange(P)])
+    pe = np.concatenate([sp, np.arange(P), np.arange(P), np.arange(P), pk, pk, pk])
+    node = np.concatenate([paths.seg_kb, i, i - 1, i + 1, kk - 1, kk, kk + 1])
     dR = np.concatenate([dvR / Eg_V,
                          -np.bincount(sp, weights=dvR, minlength=P) / Eg_V + dRdG * sg * w0[i],
-                         dRdG * sg * wm[i], dRdG * sg * wp[i]])
+                         dRdG * sg * wm[i], dRdG * sg * wp[i],
+                         cr * wm[kk], cr * w0[kk], cr * wp[kk]])
     dt = np.concatenate([dvT / Eg_V, -np.bincount(sp, weights=dvT, minlength=P) / Eg_V,
-                         np.zeros(P), np.zeros(P)])
+                         np.zeros(P), np.zeros(P), np.zeros(3 * kk.size)])
+    keep = (node >= 0) & (node < x.size)                       # one-sided ends have a zero weight outside
+    pe, node, dR, dt = pe[keep], node[keep], dR[keep], dt[keep]
     s_n = R_pre * sa * sa_
     out.update(jac={"pe": pe, "node": node, "dR": dR, "dt": dt},
                dR_dLn_a=s_n * (1.0 - t), dR_dLn_b=s_n * t, dR_dLp=R_pre * sb * sb_)

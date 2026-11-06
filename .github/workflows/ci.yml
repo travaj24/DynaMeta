@@ -505,6 +505,10 @@ jobs:
     #   ~2 min) runs nightly. tests/test_iii_v_presets_devsim.py (v0.15 III-V presets, 4 tests): ~5 s.
     # + tests/test_term_bookkeeping_v2.py (v0.15 term bookkeeping v2: single-carrier terms, extra-variable
     #   derivatives, the unified inventory): 3 s serial on the Windows dev box (12 tests).
+    # + tests/test_btbt_nonlocal.py (v0.15 nonlocal BTBT, 1-D: every term-adding case in a child process,
+    #   tests/_btbt_nonlocal_child.py): ~47 s serial on the Windows dev box (20 tests, 2026-11-06; the two FDT
+    #   diode children ~10 s each). Its devsim-free half, tests/test_btbt_nonlocal_kernels.py (28 tests, 3 s),
+    #   runs on every `test` leg.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -537,7 +541,8 @@ jobs:
             tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
             tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py tests/test_custom_terms.py \
             tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py \
-            tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py
+            tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
+            tests/test_btbt_nonlocal.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
