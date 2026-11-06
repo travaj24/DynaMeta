@@ -809,9 +809,10 @@ class LayeredDevsimBuilder:
         d = self.design
         method = d.mesh_2d.dc_method
         semi = sorted(self._dd_regions)
-        # abs_tol=None reaches solve_dc, which resolves dc_solve.default_abs_tol(device) on EVERY solve's
-        # pre-solve state (v0.15 decision 59: the builder's own n_bg * 1e-12 rule is retired -- one
-        # kernel; see default_abs_tol for when to pass an explicit float)
+        # abs_tol=None reaches solve_dc, which resolves dc_solve.default_abs_tol() -- over EVERY live
+        # device, as DEVSIM's joint Newton requires -- on every solve's pre-solve state (v0.15 decision
+        # 59: the builder's own n_bg * 1e-12 rule is retired -- one kernel; see default_abs_tol for
+        # when to pass an explicit float)
 
         def _targets():
             return {E.name: bias.voltages.get(
