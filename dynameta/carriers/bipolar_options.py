@@ -39,6 +39,10 @@ here re-defines a composite by name, so options compose with trap levels, interf
    Radiative  U_rad = B (n p - n_ie^2)
               Trupke et al., J. Appl. Phys. 94, 4930 (2003): Si, 300 K, low injection,
               B = 9.5e-15 cm^3/s.
+              v0.15: a B is INTERNAL (recycling-free) or EFFECTIVE (net of photon recycling); in a
+              direct-gap layer they differ (GaAs 2 um DH: 4.2x). RadiativeModel.kind labels it and
+              photon_recycling_factor P_r gives B = B_int (1 - P_r), applied once at the B_rad write.
+              III-V presets (GaAs, InP; internal): materials.semiconductor_presets.
 
    Low-injection lifetimes (n-type, n0 >> p0, the oracles' closed forms):
               1/tau = 1/tau_p(SRH) + C_n n0^2 + B n0      (tau_A = 1/(C_n n0^2), tau_rad = 1/(B n0)).
@@ -245,6 +249,11 @@ class AugerModel:
     x_eeh: float = 0.66
     x_ehh: float = 0.63
     source: str = ""
+    # v0.15 (plan 4.2.2): where the constants are in the source and how they were checked (the BGNModel
+    # vocabulary: "primary" = read in the primary text, "secondary" = via another paper or an abstract
+    # record only, "inferred", "unverified"). Documentation only; the defaults keep legacy presets as-is.
+    locator: str = ""
+    verification: str = "unverified"
 
     def __post_init__(self):
         for nm in ("C_n_m6s", "C_p_m6s"):
@@ -253,18 +262,92 @@ class AugerModel:
                 raise ValueError("AugerModel.{} must be finite and >= 0, got {!r}".format(nm, v))
         if self.C_n_m6s == 0.0 and self.C_p_m6s == 0.0:
             raise ValueError("AugerModel with C_n = C_p = 0 is a no-op; pass auger=None instead")
+        if self.verification not in _VERIFICATION:
+            raise ValueError("AugerModel.verification must be one of {}".format(_VERIFICATION))
+
+
+_RADIATIVE_KINDS = ("internal", "effective")
+RADIATIVE_INTERNAL_NO_RECYCLING_MESSAGE = (
+    "RadiativeModel [{source}] is an INTERNAL coefficient B_int (kind='internal') used as the net "
+    "radiative loss with no photon_recycling_factor: photon recycling is ignored, which OVERESTIMATES the "
+    "radiative loss of a thick direct-gap layer (GaAs 2 um double heterostructure: B_int / B_eff = 4.2x, "
+    "Niemeyer et al. 2019). Pass RadiativeModel.with_photon_recycling(P_r) with the layer's re-absorption "
+    "probability, or an effective (kind='effective') B measured on your structure. Region {region!r}.")
 
 
 @dataclass(frozen=True)
 class RadiativeModel:
-    """Band-to-band radiative U_rad = B (n p - n_ie^2) [SI: B in m^3/s]."""
+    """Band-to-band radiative U_rad = B (n p - n_ie^2) [SI: B in m^3/s].
+
+    INTERNAL vs EFFECTIVE B (v0.15, plan 4.2.2, decision 30). In a direct-gap layer a share P_r of the
+    emitted photons is re-absorbed (photon recycling) and re-creates a pair, so the NET loss is
+        B_eff = B_int (1 - P_r)          (Niemeyer et al., AIP Adv. 9, 045034 (2019), Eq. (1), f = P_r)
+    and P_r depends on the layer thickness and cladding (GaAs, 2 um Al0.7Ga0.3As/GaAs DH: P_r = 0.76,
+    B_int 3.3e-10 vs B_eff 0.78e-10 cm^3/s -- they differ 4.2x). DynaMeta has no re-absorption
+    (photon-transport) model, so a coefficient must say which one it is:
+      kind=None        (default) a legacy, unlabelled B, used as given (byte-identical to v0.14).
+      kind="effective" B_m3s IS the net coefficient of your structure (already recycling-corrected): used
+                       as given. A photon_recycling_factor with it is REFUSED (recycling subtracted twice).
+      kind="internal"  B_m3s is the material's intrinsic (recycling-free) B_int. With
+                       photon_recycling_factor = P_r in [0, 1) the kernel uses B_int (1 - P_r); without one
+                       it uses B_int and the region setup emits ONE AdvisoryWarning per region
+                       (RADIATIVE_INTERNAL_NO_RECYCLING_MESSAGE): the radiative loss is overestimated.
+    WHICH TO USE: a thin layer or an escape-dominated geometry (P_r ~ 0) -> the internal preset as is (and
+    accept the advisory) or with_photon_recycling(0.0); a thick direct-gap absorber / LED / laser layer ->
+    with_photon_recycling(P_r) with P_r for YOUR thickness and cladding (from a photon-transport
+    calculation or the literature for that structure); a B measured on your own structure -> kind=
+    "effective".
+    The factor is applied ONCE, at the B_rad parameter write (install_option_terms reads `net_B_m3s`);
+    there is no second expression.
+    NOISE CAVEAT: with recycling, an emitted-then-reabsorbed photon is a correlated pair event (the pair
+    vanishes and reappears elsewhere). noise_analysis counts U_rad as independent Poisson pair processes at
+    the NET rate B_eff (n p - n_ie^2), which is an approximation for a recycling layer (exact for P_r = 0).
+    locator / verification: as on BGNModel (where in the source; "primary" = read in the primary text)."""
     B_m3s: float
     source: str = ""
+    kind: Optional[str] = None
+    photon_recycling_factor: Optional[float] = None
+    locator: str = ""
+    verification: str = "unverified"
 
     def __post_init__(self):
         v = float(self.B_m3s)
         if not (math.isfinite(v) and v > 0.0):
             raise ValueError("RadiativeModel.B_m3s must be finite and > 0, got {!r}".format(v))
+        if self.kind is not None and self.kind not in _RADIATIVE_KINDS:
+            raise ValueError("RadiativeModel.kind must be None, 'internal' or 'effective', got {!r}"
+                             .format(self.kind))
+        if self.verification not in _VERIFICATION:
+            raise ValueError("RadiativeModel.verification must be one of {}".format(_VERIFICATION))
+        P = self.photon_recycling_factor
+        if P is not None:
+            if self.kind == "effective":
+                raise ValueError(
+                    "RadiativeModel: kind='effective' with photon_recycling_factor={!r} would subtract photon "
+                    "recycling TWICE -- an effective B is already net of re-absorption. Pass the internal "
+                    "B_int with kind='internal' and the factor, or the effective B alone.".format(P))
+            if self.kind != "internal":
+                raise ValueError(
+                    "RadiativeModel: a photon_recycling_factor needs kind='internal' (the factor turns an "
+                    "INTERNAL B_int into B_eff = B_int (1 - P_r)); this B is unlabelled (kind=None).")
+            p = float(P)
+            if not (math.isfinite(p) and 0.0 <= p < 1.0):
+                raise ValueError("RadiativeModel.photon_recycling_factor must be in [0, 1), got {!r}"
+                                 .format(P))
+
+    @property
+    def net_B_m3s(self) -> float:
+        """The coefficient the kernel uses [m^3/s]: B_int (1 - P_r) for kind='internal' with a factor, else
+        B_m3s unchanged (the SAME float, so a legacy model writes the same B_rad bits)."""
+        if self.kind == "internal" and self.photon_recycling_factor is not None:
+            return float(self.B_m3s) * (1.0 - float(self.photon_recycling_factor))
+        return self.B_m3s
+
+    def with_photon_recycling(self, P_r: float) -> "RadiativeModel":
+        """This INTERNAL coefficient with the layer's photon-recycling (re-absorption) probability P_r
+        (net B = B_int (1 - P_r)). Refused on an effective or unlabelled B (see the class doc)."""
+        import dataclasses
+        return dataclasses.replace(self, photon_recycling_factor=float(P_r))
 
 
 _BGN_BASES = ("total", "donors", "acceptors")
@@ -1237,7 +1320,11 @@ def install_option_terms(device: str, region: str, options: Optional[BipolarOpti
             ds.set_parameter(device=device, region=region, name="AugerCn", value=float(o.auger.C_n_m6s))
             ds.set_parameter(device=device, region=region, name="AugerCp", value=float(o.auger.C_p_m6s))
         if o.radiative is not None:
-            ds.set_parameter(device=device, region=region, name="B_rad", value=float(o.radiative.B_m3s))
+            # v0.15: the ONE place the photon-recycling factor is applied (RadiativeModel.net_B_m3s)
+            if o.radiative.kind == "internal" and o.radiative.photon_recycling_factor is None:
+                warnings.warn(RADIATIVE_INTERNAL_NO_RECYCLING_MESSAGE.format(
+                    source=o.radiative.source or "unlabelled", region=region), AdvisoryWarning, stacklevel=3)
+            ds.set_parameter(device=device, region=region, name="B_rad", value=float(o.radiative.net_B_m3s))
         f = None
         if o.auger is not None and o.auger.coulomb_enhanced:
             f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps,
