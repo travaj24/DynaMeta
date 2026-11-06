@@ -114,7 +114,7 @@ class Dev:
     def __init__(self, name, *, doping=-1e23, L=1.0e-6, t_ox=2e-9, layers=None, gate_offset=0.0,
                  circuit=False, fd=False, tau=1e-6, h_if=0.05e-9, h_body=20e-9, h_ox=0.1e-9, eps_ox=3.9,
                  source=None, node=None, dummy_circuit=False, v_ref=0.0, i_park=None, extended=False,
-                 dim=1, x_nodes=None, width=4e-9, n_lat=3):
+                 dim=1, x_nodes=None, width=4e-9, n_lat=3, ni=NI):
         ds = _ds()
         from dynameta.carriers import eq_registry as _R
         from dynameta.carriers import physics_bipolar_dd as BP
@@ -159,7 +159,7 @@ class Dev:
                 from dynameta.carriers import extended_precision as XP
                 XP.enable(dev)
             ds.node_model(device=dev, region="semi", name="NetDoping", equation="{:.6e}".format(doping))
-            BP.setup_bipolar_region(dev, "semi", eps_static=EPS_SI, n_dos_m3=NDOS, n_i_m3=NI,
+            BP.setup_bipolar_region(dev, "semi", eps_static=EPS_SI, n_dos_m3=NDOS, n_i_m3=ni,
                                     mobility_n_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_n_s=tau, tau_p_s=tau,
                                     fd_enhancement=fd)
             BP.setup_equilibrium_seed_models(dev, "semi")
@@ -862,10 +862,239 @@ def sc_builders(opts):
             "phi_c": terms[0].phi_c if terms else None}
 
 
+# =====================================================================================================
+# follow-up gates (O3, O5, O7, O9, O11, mesh refinement)
+# =====================================================================================================
+
+def sc_weakleak(opts):
+    """O3: the weak-leak limit. A low-doped n body (N_D 1e22, L 5 um) in accumulation; the oxide mass is
+    swept so J spans decades at FIXED electrostatics. For each mass: the term's kernel on the solved IDEAL
+    capacitor (term inactive: the post-processor's state) J_post, then the self-consistent solve J_sc.
+    variant "nosink": the electron-row entries are zeroed (no feedback) -- the refutation."""
+    from dynameta.carriers import custom_terms as CT
+    from dynameta.carriers.tunneling import DielectricBarrier
+    V = float(opts.get("V", 1.0))
+    out = []
+    for k, m in enumerate(opts.get("masses", [0.42, 0.36, 0.30, 0.25, 0.21, 0.18])):
+        d = Dev("wl{}".format(k), doping=float(opts.get("doping", 1e22)), L=float(opts.get("L", 5e-6)),
+                h_body=50e-9)
+        term = install(d, prm={"barriers": DielectricBarrier(3.1, "Si", m)})
+        if opts.get("variant") == "nosink":
+            orig = term.assemble
+
+            def assemble(device, what, timemode, orig=orig, term=term):
+                rcv, rv = orig(device, what, timemode)
+                if not rv:
+                    return rcv, rv
+                rows = set(int(r) for r in CT.node_rows(device, term.semi, EQN, term.iface))
+                rcv = [x for i in range(0, len(rcv), 3) for x in rcv[i:i + 3] if int(rcv[i]) not in rows]
+                rv = [x for i in range(0, len(rv), 2) for x in rv[i:i + 2] if int(rv[i]) not in rows]
+                return rcv, rv
+            term.assemble = assemble
+        term.active = False
+        d.goto(V)
+        solve(re_=1e-14)
+        J_post = float(term.state(d.name)["te"].J[0])
+        term.active = True
+        solve(re_=1e-14)
+        st = term.state(d.name)
+        out.append({"m": m, "J_post": J_post, "J_sc": float(st["te"].J[0]), "x_s": float(st["x_s"][0]),
+                    "dJdxs": float(st["te"].dJ_dxs[0])})
+        d.close()
+    return out
+
+
+def sc_positivity(opts):
+    """O5: an n body (N_D 1e25, n_i 1e15) under a strongly negative gate behind 3 nm SiO2: the surface
+    inverts (holes) and n_s falls > 20 decades below N_D while the tunnelling term is live. Reports the
+    converged ramp, min n, n_s, and the term's semiconductor-side current at n_s and at 10 n_s (same psi).
+    variant "seed": the converged state is perturbed to n_s x 1e10 and re-solved."""
+    ds = _ds()
+    d = Dev("pos", doping=1e25, ni=float(opts.get("ni", 1e12)), tau=1e-12, t_ox=float(opts.get("t_ox", 5e-9)))
+    term = install(d)
+    solve()
+    pts = []
+    for V in opts.get("V", [-1.0, -2.0, -3.0, -3.5]):
+        d.goto(V)
+        st = term.state(d.name)
+        pts.append({"V": V, "n_s": float(st["n_s"][0]), "n_min": float(np.min(d.nv("semi", "Electrons"))),
+                    "J": float(st["te"].J[0]), "J_fwd": float(st["te"].J_fwd[0]), "x_s": float(st["x_s"][0])})
+    i = int(term.iface[0])
+    n0 = float(d.nv("semi", "Electrons")[i])
+    f1 = float(term.state(d.name)["te"].J_fwd[0])
+    ds.set_node_value(device=d.name, region="semi", name="Electrons", index=i, value=10.0 * n0)
+    f10 = float(term.state(d.name)["te"].J_fwd[0])
+    out = {"pts": pts, "J_fwd_ratio": f10 / f1, "x_s": pts[-1]["x_s"],
+           "post_sh": float(post(d, "schuegraf_hu")["I"]),
+           "post_te": float(post(d, "tsu_esaki", E_F_eV=0.1, m_supply_over_m0=0.5)["I"])}
+    if opts.get("variant") == "seed":
+        ds.set_node_value(device=d.name, region="semi", name="Electrons", index=i, value=1e10 * n0)
+        solve()
+        out["n_s_reseeded"] = float(d.nv("semi", "Electrons")[i])
+    else:
+        ds.set_node_value(device=d.name, region="semi", name="Electrons", index=i, value=n0)
+    out["n_s_final"] = n0
+    return out
+
+
+def sc_newton(opts):
+    """O7: per-bias-step Newton iterations on an accumulation sweep (n-Si, 0 -> 1.4 V in 0.1 V steps) with
+    the term ("on"), without it ("off"), and with the term's face-potential Jacobian entries dropped
+    ("wrongjac": the residual is unchanged, only the Jacobian is wrong). ONE variant per process."""
+    from dynameta.carriers import custom_terms as CT
+    ds = _ds()
+    var = opts.get("variant", "on")
+    sweep = opts.get("sweep", "acc")                      # "acc": n-Si 0 -> 1.4 V; "inv": p-Si O4 sweep 0 -> 3 V
+    dop, tau, Vmax = (1e24, 1e-6, 1.4) if sweep == "acc" else (-1e23, float(opts.get("tau", 1e-6)), 3.0)
+    d = Dev("nw_" + var, doping=dop, tau=tau, L=1.5e-6 if sweep == "inv" else 1e-6)
+    if var != "off":
+        term = install(d)
+        if var == "wrongjac":
+            orig = term.assemble
+
+            def assemble(device, what, timemode):
+                rcv, rv = orig(device, what, timemode)
+                face = set()
+                for reg, nodes, _ in term.faces:
+                    face.update(int(c) for c in CT.node_columns(device, reg, "Potential", nodes))
+                rcv = [x for i in range(0, len(rcv), 3) for x in rcv[i:i + 3] if int(rcv[i + 1]) not in face]
+                return rcv, rv
+            term.assemble = assemble
+        if var == "wrongjac_n":                               # the n_s column (the sink's own) halved
+            orig_n = term.assemble
+
+            def assemble_n(device, what, timemode):
+                rcv, rv = orig_n(device, what, timemode)
+                cn = set(int(c) for c in CT.node_columns(device, term.semi, "Electrons", term.iface))
+                rcv = list(rcv)
+                for i in range(0, len(rcv), 3):
+                    if int(rcv[i + 1]) in cn:
+                        rcv[i + 2] *= 0.5
+                return rcv, rv
+            term.assemble = assemble_n
+        solve()
+    steps = []
+    for V in np.arange(0.1, Vmax + 0.01, 0.1):
+        d.set_gate(float(V))
+        with _quiet():
+            info = ds.solve(type="dc", absolute_error=1e14, relative_error=1e-12, maximum_iterations=80,
+                            info=True)
+        steps.append({"V": float(V), "converged": bool(info["converged"]), "n_it": len(info["iterations"]),
+                      "rel": [float(i["devices"][0]["relative_error"]) for i in info["iterations"]]})
+        if not info["converged"]:
+            break
+    return steps
+
+
+def sc_transient(opts):
+    """O9: the term in TRANSIENT (BDF1). Circuit gate, n-Si; DC at V0, then the source steps to V1 and
+    the device is integrated with geometric steps to t_end. Per accepted step: the source current, the
+    gate contact charge and the term's I_gate (its KCL entry). variant "off": the term is switched off
+    for the transient (its DC solve stays) -- the refutation."""
+    from dynameta.carriers import custom_terms as CT
+    ds = _ds()
+    V0, V1 = float(opts.get("V0", 0.8)), float(opts.get("V1", 1.0))
+    var = opts.get("variant", "on")
+    d = Dev("tr_" + var, doping=1e24, circuit=True)
+    term = install(d)
+    solve()
+    d.goto(V0)
+    solve(re_=1e-14)
+    q0 = float(ds.get_contact_charge(device=d.name, contact="gate", equation="PotentialEquation"))
+    with _quiet():
+        ds.solve(type="transient_dc", absolute_error=1e14, relative_error=1e-12, maximum_iterations=40)
+    if var == "off":
+        term.active = False
+    ds.circuit_alter(name=d.source, value=V1)
+    calls0 = CT._dispatch_calls
+    rec = []
+    dt = float(opts.get("dt0", 1e-14))
+    t = 0.0
+    while t < float(opts.get("t_end", 1.0)):
+        with _quiet():
+            info = ds.solve(type="transient_bdf1", tdelta=dt, charge_error=1e30, absolute_error=1e14,
+                            relative_error=1e-11, maximum_iterations=40, info=True)
+        if not info["converged"]:
+            # the circuit-only round-off stall of carriers/transient.py (its class 2: the device equations
+            # converged, the terminal-current RELATIVE test cannot, ~eps Q/(dt I)) -> grow dt, as it does
+            from dynameta.carriers.transient import _device_is_converged
+            if _device_is_converged(info, 1e-11, 1e14):
+                dt *= 4.0
+                continue
+            raise RuntimeError("transient step failed at t = {}".format(t))
+        t += dt
+        st = term.state(d.name) if term.active else None
+        rec.append({"t": t, "dt": dt, "I_src": d.source_current(),
+                    "Q_g": float(ds.get_contact_charge(device=d.name, contact="gate", equation="PotentialEquation")),
+                    "I_tun": float(np.sum(term.area * st["te"].J)) if st is not None else 0.0})
+        dt *= float(opts.get("growth", 1.5))
+    out = {"steps": rec, "Q0": q0, "dispatch_calls": CT._dispatch_calls - calls0}
+    term.active = True
+    solve(re_=1e-14)                                        # the DC operating point at V1
+    out["dc_I_src"] = d.source_current()
+    out["dc_Q_g"] = float(ds.get_contact_charge(device=d.name, contact="gate", equation="PotentialEquation"))
+    return out
+
+
+def sc_shot(opts):
+    """O11: the shot limit. Circuit gate, n-Si accumulation at V (qV_ox >> kT): S_I at low f against
+    2 q |I| and the mechanism split."""
+    from dynameta.carriers import ac_analysis as AC
+    from dynameta.carriers import noise_analysis as NA
+    V = float(opts.get("V", 1.0))
+    d = Dev("sh", doping=1e24, circuit=True)
+    term = install(d)
+    solve()
+    d.goto(V)
+    solve(re_=1e-14)
+    ff = opts.get("f", [1.0, 1e3])
+    sn = NA.noise_spectrum(d.name, ff, output_node=d.source + ".I")
+    f, C, G = AC.ssac_admittance(ff, source_name=d.source)
+    st = term.state(d.name)
+    return {"S": _lst(sn.S), "by_mechanism": {k: _lst(v) for k, v in sn.by_mechanism.items()},
+            "I_src": d.source_current(), "G": _lst(G), "x_s": float(st["x_s"][0]), "x_g": float(st["x_g"][0]),
+            "J": float(st["te"].J[0]), "S_kernel": float(st["te"].S[0]), "area": float(term.area[0]),
+            "theta_min_T": None}
+
+
+def sc_mesh(opts):
+    """Mesh refinement: (a) the OXIDE mesh h_ox = 0.5, 0.25, 0.1, 0.05 nm at a fixed semiconductor mesh --
+    the column drop of a charge-free oxide is exact on any oxide mesh; (b) the SEMICONDUCTOR surface zone
+    h_if = 0.2, 0.1, 0.05, 0.025 nm at a fixed oxide mesh. n-Si accumulation at V, Boltzmann. Also the
+    'wrong face' refutation: the kernel fed the potential of the oxide node NEXT TO the gate face."""
+    from dynameta.reliability.leakage import tsu_esaki_two_sided
+    V = float(opts.get("V", 1.0))
+    res = {"ox": [], "semi": []}
+    for k, hox in enumerate(opts.get("h_ox", [0.5e-9, 0.25e-9, 0.1e-9, 0.05e-9])):
+        d = Dev("mo{}".format(k), doping=1e24, h_ox=hox)
+        term = install(d)
+        d.goto(V)
+        solve(re_=1e-14)
+        st = term.state(d.name)
+        psi_ox = d.nv("oxide", "Potential")
+        x_ox = d.nv("oxide", "x")
+        o = np.argsort(x_ox)
+        wrong = st["d"].copy()
+        wrong[0, 0] = st["psi_s"][0] - psi_ox[o][-2]               # the node below the gate face
+        Jw = float(tsu_esaki_two_sided(term.grid, st["x_s"], st["x_g"], wrong, term.layers,
+                                       m_supply_over_m0=term.m_supply).J[0])
+        res["ox"].append({"h": hox, "J": float(st["te"].J[0]), "J_wrongface": Jw, "n_ox": int(x_ox.size)})
+        d.close()
+    for k, hif in enumerate(opts.get("h_if", [0.2e-9, 0.1e-9, 0.05e-9, 0.025e-9])):
+        d = Dev("ms{}".format(k), doping=1e24, h_if=hif)
+        term = install(d)
+        d.goto(V)
+        solve(re_=1e-14)
+        res["semi"].append({"h": hif, "J": float(term.state(d.name)["te"].J[0])})
+        d.close()
+    return res
+
+
 SCENARIOS = {"balance": sc_balance, "balance_fd": sc_balance_fd, "inversion": sc_inversion,
              "conserve": sc_conserve, "ssac": sc_ssac, "fdt": sc_fdt,
              "jac": sc_jac, "stack": sc_stack, "dims": sc_dims, "gmsh": sc_gmsh,
-             "builders": sc_builders}
+             "builders": sc_builders, "weakleak": sc_weakleak, "positivity": sc_positivity,
+             "newton": sc_newton, "transient": sc_transient, "shot": sc_shot, "mesh": sc_mesh}
 
 
 def run_child(scenario, **opts):

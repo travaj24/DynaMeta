@@ -570,3 +570,175 @@ def test_w_sc_builders_install_the_term_and_report_the_gate_current(case):
     cc = r["extras"]["contact_currents_A"]
     assert set(cc) == {"body", "gate"} and cc["gate"] == ox["I_A"]
     assert abs(cc["gate"] + cc["body"]) <= 1e-5 * cc["gate"]
+
+
+# =====================================================================================================
+# follow-up gates: O3 weak leak, O5 positivity, O7 Newton, O9 transient, O11 shot limit, mesh refinement
+# =====================================================================================================
+@pytest.fixture(scope="module")
+def weakleak():
+    return {v: _child("weakleak", variant=v) for v in ("sc", "nosink")}
+
+
+def test_o3_weak_leak_limit_is_first_order_in_the_leak(weakleak):
+    """O3: n body (N_D 1e22, L 5 um) in accumulation at 1 V; the oxide mass 0.42 -> 0.18 sweeps the leak J
+    over 3.4 decades (14.6 -> 3.4e4 A/m^2) at fixed electrostatics. delta = J_sc / J_post - 1, with J_post
+    the term's kernel on the solved IDEAL capacitor (the post-processor's state), must be a first-order
+    perturbation: |delta| = a J^s with s = 1 +- 0.05 (plan O3; s = 0 is no feedback, s = 2 a second-order
+    coupling). MEASURED s = 0.982, delta = -2.3e-6 .. -4.6e-3 (the sink lowers the surface quasi-Fermi
+    level, so delta < 0). The residual 1.8 % sublinearity is measured, not explained (the surface's
+    electrostatic response to the drained charge is J-dependent). OLD CODE / REFUTE: with the electron-row
+    entries removed (no feedback, the post-processor's physics) delta is round-off (<= 1e-15) at every
+    leak, so the slope gate fails."""
+    r = weakleak["sc"]
+    J = np.array([p["J_post"] for p in r])
+    d = np.array([p["J_sc"] / p["J_post"] - 1.0 for p in r])
+    assert J.max() / J.min() > 1e3 and np.all(d < 0.0)
+    s = np.polyfit(np.log(J), np.log(-d), 1)[0]
+    assert abs(s - 1.0) <= 0.05, s
+    assert abs(d[0]) < 1e-5 and abs(d[-1]) > 1e-3
+    dn = np.array([p["J_sc"] / p["J_post"] - 1.0 for p in weakleak["nosink"]])
+    assert np.all(np.abs(dn) <= 1e-14)
+
+
+@pytest.fixture(scope="module")
+def positivity():
+    return {v: _child("positivity", variant=v) for v in ("plain", "seed")}
+
+
+def test_o5_positivity_under_extreme_bias_and_j_proportional_to_n_s(positivity):
+    """O5: n body (N_D 1e25, n_i 1e12), 5 nm SiO2, gate ramped to -3.5 V with the term live. The surface
+    inverts and n_s falls 22 decades below N_D (MEASURED 1.58e3 m^-3). Newton converges at every step and
+    n > 0 everywhere (variable_update positive). The semiconductor-side current is proportional to n_s: at
+    the converged state J_fwd(10 n_s) / J_fwd(n_s) = 10 within 1e-12 (budget: the Boltzmann linearisation
+    ln(1 + e^x) = e^x (1 - e^x / 2 ...) at x_s = -51, i.e. e^-51, plus round-off; MEASURED 2.7e-15).
+    REFUTE: the converged state re-seeded with n_s x 1e10 re-converges to the same n_s (1e-9; MEASURED
+    6e-16). OLD CODE: the post-processor's supply does not scale with n_s; at this state it reports
+    |J| = 2.1e-6 A/m^2 (S-H) / 8.7e-7 (TE) against the self-consistent semiconductor emission of
+    6.9e-43 A/m^2."""
+    r = positivity["plain"]
+    last = r["pts"][-1]
+    assert [p["V"] for p in r["pts"]] == [-1.0, -2.0, -3.0, -3.5]
+    assert all(p["n_min"] > 0.0 for p in r["pts"])
+    assert last["n_s"] < 1e-20 * 1e25
+    assert abs(r["J_fwd_ratio"] / 10.0 - 1.0) <= 1e-12
+    assert abs(r["post_sh"]) > 1e20 * last["J_fwd"] and abs(r["post_te"]) > 1e20 * last["J_fwd"]
+    s = positivity["seed"]
+    assert s["n_s_reseeded"] == pytest.approx(s["n_s_final"], rel=1e-9)
+
+
+@pytest.fixture(scope="module")
+def newton():
+    out = {}
+    for tag, v, sweep, extra in (("acc_on", "on", "acc", {}), ("acc_off", "off", "acc", {}),
+                                 ("inv_on", "on", "inv", {}), ("inv_off", "off", "inv", {"tau": 1e-12}),
+                                 ("inv_wrong", "wrongjac_n", "inv", {})):
+        out[tag] = _child("newton", variant=v, sweep=sweep, **extra)
+    return out
+
+
+def test_o7_newton_quality(newton):
+    """O7. Plan budget: per bias step, iterations with the term <= iterations without it + 3. It protects
+    against a term whose Jacobian is right at the frozen state O6 checks but wrong along a sweep: such a
+    term still converges, slowly or not at all.
+    (a) n-Si accumulation, 0.1 -> 1.4 V in 0.1 V steps: MEASURED identical counts (5-7) with and without the
+        term, and every step converges quadratically (log e_(k+1) / log e_k >= 1.8 over the tail above
+        1e-12; MEASURED 2.45-3.19).
+    (b) The O4 deep-depletion sweep (p-Si, 0.1 -> 3 V), where the sink IS the interface node's electron
+        balance: <= the no-tunnelling count + 3 at every step. The no-term body is solved with tau 1e-12:
+        its DC state does not depend on tau, and that is the only tau at which it converges. MEASURED max
+        +3 (range -31..+3). REFUTE: the n_s column of the term's Jacobian halved (residual unchanged): the
+        Newton fails to converge at the 4th step (80 iterations)."""
+    a_on, a_off = newton["acc_on"], newton["acc_off"]
+    assert len(a_on) == len(a_off) == 14 and all(p["converged"] for p in a_on)
+    for p, q in zip(a_on, a_off):
+        assert p["n_it"] <= q["n_it"] + 3
+        e = [x for x in p["rel"] if x < 1e-2]
+        for e0, e1 in zip(e[:-1], e[1:]):
+            if e1 > 1e-12:
+                assert math.log(e1) / math.log(e0) >= 1.8, (p["V"], e)
+    i_on, i_off = newton["inv_on"], newton["inv_off"]
+    assert len(i_on) == len(i_off) == 30 and all(p["converged"] for p in i_on + i_off)
+    assert all(p["n_it"] <= q["n_it"] + 3 for p, q in zip(i_on, i_off))
+    w = newton["inv_wrong"]
+    assert not w[-1]["converged"] and len(w) < 30
+
+
+@pytest.fixture(scope="module")
+def transient():
+    return {v: _child("transient", variant=v) for v in ("on", "off")}
+
+
+def test_o9_transient_with_the_live_term_conserves_charge_and_relaxes_to_dc(transient):
+    """O9: the term IS live in transient. DEVSIM assembles its DC part at every BDF1 step (MEASURED 716
+    dispatcher calls over the transient); it is static (no TIME part). Circuit gate, n-Si, source step
+    0.8 -> 1.0 V, 65 geometric steps from 1e-14 s to 1.4 s.
+    (a) Charge balance of the BDF1 discretisation, telescoped step by step:
+        -Sum dt I_source = (Q_gate(T) - Q_gate(0)) + Sum dt I_tunnel,
+        with the tunnel current read from the term at each accepted step. Budget 4 eps N_steps Sum |terms|
+        (round-off of the sums); MEASURED 3.6e-15 against 22 C/m^2 per side. The wrong sign of the tunnel
+        term misses by 44 C/m^2.
+    (b) The final state equals the DC solve at 1.0 V: the source current to 1e-10. The transient has
+        relaxed (e^(-t/tau) ~ e^-7000, tau = C/G ~ 2e-4 s); the budget is the steps' relative tolerance
+        1e-11 x 10. MEASURED 0.0 relative. REFUTE (old code: a term absent from the transient): with the
+        term off during the transient the end current is 4e-13 A/m^2 against the DC -15.4 A/m^2 (-100 %),
+        while the capacitive charge identity still closes (9e-18). Only (b) sees it."""
+    r = transient["on"]
+    st = r["steps"]
+    dt = np.array([s["dt"] for s in st])
+    I = np.array([s["I_src"] for s in st])
+    It = np.array([s["I_tun"] for s in st])
+    Qg = np.array([s["Q_g"] for s in st])
+    lhs, rhs = -np.sum(dt * I), (Qg[-1] - r["Q0"]) + np.sum(dt * It)
+    budget = 4 * EPS * len(st) * (np.sum(np.abs(dt * I)) + np.sum(np.abs(dt * It)) + abs(Qg[-1]) + abs(r["Q0"]))
+    assert abs(lhs - rhs) <= budget
+    assert abs(lhs - ((Qg[-1] - r["Q0"]) - np.sum(dt * It))) > 1.0       # the sign is load-bearing
+    assert r["dispatch_calls"] > len(st)
+    assert I[-1] == pytest.approx(r["dc_I_src"], rel=1e-10)
+    assert Qg[-1] == pytest.approx(r["dc_Q_g"], rel=1e-10)
+    off = transient["off"]
+    assert abs(off["steps"][-1]["I_src"]) < 1e-6 * abs(off["dc_I_src"])
+
+
+def test_o11_shot_limit_of_the_gate_current_noise():
+    """O11: n-Si accumulation at 1 V, circuit gate, qV/kT = 38.7 (coth - 1 = 3e-17). The low-frequency
+    terminal noise is the full shot noise of the gate current, S_I = 2 q |I|. Plan budget: within 1 %; the
+    T(1 - T) partition correction is excluded by the T << 1 model, and the diffusion noise is computed
+    separately. MEASURED S_I / (2 q |I|) = 1 - 1.1e-8 at 1 Hz and 1 kHz; the diffusion share is
+    1.2e-9 / 3.1e-9. The tunnel source alone equals 2 q |I| to 1e-6 (budget: the circuit division of an
+    event at f << 1/(RC); MEASURED 1.2e-9). REFUTE: the equilibrium (Nyquist) form 4 kT G evaluated at
+    this bias is 0.250 x the shot noise (-75 %); without the source (old code) S_I is the diffusion noise
+    alone, 1e-9 x."""
+    r = _child("shot", V=1.0)
+    S = np.array(r["S"])
+    I = abs(r["I_src"])
+    t = np.array(r["by_mechanism"]["tunnel_ox"])
+    assert r["x_s"] - r["x_g"] > 30.0
+    assert np.all(np.abs(S / (2 * Q * I) - 1.0) <= 0.01)
+    assert np.all(np.abs(t / (2 * Q * I) - 1.0) <= 1e-6)
+    nyq = 4 * KB * 300.0 * np.array(r["G"]) / (2 * Q * I)
+    assert np.all(np.abs(nyq - 1.0) > 0.5)
+    assert np.all((S - t) / (2 * Q * I) < 1e-6)
+
+
+def test_mesh_refinement_oxide_independent_semiconductor_second_order():
+    """Mesh refinement, n-Si accumulation at 1 V.
+    (a) OXIDE mesh h_ox = 0.5, 0.25, 0.1, 0.05 nm. The column drop of a charge-free oxide is exact on any
+        oxide mesh (the 1-D FV potential is exactly linear in a uniform dielectric), so the derived order is
+        'independent': J equal to 1e-10. Budget: the Newton's rel 1e-14 on n times d ln J / d ln n = 0.77,
+        plus 1e-15 V in psi times |d ln J / dV| ~ 25 /V. MEASURED <= 6.7e-16. REFUTE: feeding the kernel
+        the potential of the oxide node NEXT to the gate face (a local gradient instead of the column drop)
+        moves J by 13 % across the same meshes.
+    (b) SEMICONDUCTOR surface zone h = 0.2, 0.1, 0.05, 0.025 nm. J converges at the Scharfetter-Gummel
+        order 2: the observed order of successive differences is >= 1.7. MEASURED 1.91, 1.98; J moves
+        -1.8 %, -0.45 %, -0.09 % against the finest mesh."""
+    r = _child("mesh", V=1.0)
+    Jo = np.array([p["J"] for p in r["ox"]])
+    assert np.all(np.abs(Jo / Jo[-1] - 1.0) <= 1e-10)
+    Jw = np.array([p["J_wrongface"] for p in r["ox"]])
+    assert np.ptp(Jw) / np.mean(Jw) > 0.05
+    Js = np.array([p["J"] for p in r["semi"]])
+    e = np.abs(np.diff(Js))
+    orders = np.log2(e[:-1] / e[1:])
+    assert np.all(orders >= 1.7), orders
+    assert abs(Js[-2] / Js[-1] - 1.0) < 0.01

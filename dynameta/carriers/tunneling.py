@@ -328,11 +328,17 @@ TUNNEL_COUPLINGS = ("post", "self_consistent")
 class DielectricBarrier:
     """One dielectric of a self-consistent tunnelling stack (v0.15, user decision 13): its FITTED
     conduction-band barrier height `barrier_eV` against the NAMED semiconductor material `against`, and
-    its tunnelling mass. On a device whose semiconductor IS `against` the barrier is used as given (it is
-    a fitted number, never re-derived from affinities -- so a user chi of 4.17 eV for Si cannot silently
-    turn the 3.1 eV fit into 3.22 eV). On any OTHER semiconductor the barrier is carried over by Anderson's
-    affinity rule, chi_d = chi_against - barrier_eV and offset = chi_s - chi_d, which needs BOTH affinities:
-    a None chi refuses (plan 5.4) -- there is no neutral default for a band offset."""
+    its tunnelling mass.
+      * On a device whose semiconductor IS `against`, the barrier is used AS GIVEN -- also when that
+        semiconductor's chi_eV is None (the v0.14 default): no affinity is needed, because none is derived.
+        It is a fitted number and is never re-derived from affinities, so a user chi of 4.17 eV for Si cannot
+        silently turn the 3.1 eV fit into 3.22 eV.
+      * On any OTHER semiconductor the barrier is carried over by Anderson's affinity rule,
+        chi_d = chi_against - barrier_eV and offset = chi_s - chi_d. That DERIVES an affinity and needs BOTH
+        chi values: if either is None it is REFUSED (plan 5.4) -- there is no neutral default for a band
+        offset.
+    The refusal therefore happens only when an affinity must actually be derived (user decision 13 as
+    accepted, 2026-11-06)."""
     barrier_eV: float
     against: str
     m_tunnel_over_m0: float
