@@ -968,7 +968,7 @@ class Devsim3DEquilibrium:
             # a raw gate at Vg sits only (Vg - phi_bi) above the bulk and the cap badly UNDER-accumulates
             # (measured 7x low before this fix). So drive gate_bias = applied_Vg + phi_bi; at applied_Vg=0
             # the gate equals the body node -> flat band -> the equilibrium profile.
-            abs_tol = max(1e13, self.spec.n_bg_m3 * 1e-12)
+            abs_tol = None        # dc_solve.default_abs_tol per solve (v0.15 decision 59; was max(1e13, n_bg 1e-12))
             ni = float(self.spec.n_i_m3)
             # audit C2-1: with net_doping_expr the (acceptor, n_bg_m3) scalars are DEAD as
             # doping definitions -- the body contact pins psi from the ACTUAL NetDoping node
@@ -1032,10 +1032,10 @@ class Devsim3DEquilibrium:
                          max_iter=100, semiconductor_regions=["semi"])
         elif getattr(self, "_dd", False):
             # 3D drift-diffusion: abs_tol scaled to the carrier density (SI continuity
-            # residual ~n_bg; the _dc_abs_tol lesson), zero-bias seed, then ramp the
-            # gate in 0.25 V steps (coupled Newton at each step).
+            # residual ~n_bg: dc_solve.default_abs_tol per solve, v0.15 decision 59; was
+            # max(1e10, max n_bg 1e-12)), zero-bias seed, then ramp the gate in 0.25 V steps.
             semis = ["semi"] + [e[0] for e in self.spec.extra_semiconductor_entries()]
-            abs_tol = max(1e10, max(self.spec.semiconductor_nbg(r) for r in semis) * 1e-12)
+            abs_tol = None
             ds.set_parameter(device=self.device, name="gate_bias", value=0.0)
             solve_dc(self.device, method="newton", abs_tol=abs_tol, rel_tol=1e-5,
                       max_iter=100, semiconductor_regions=semis)

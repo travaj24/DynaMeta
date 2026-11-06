@@ -730,7 +730,9 @@ class LayeredDevsimBuilder:
         d = self.design
         method = d.mesh_2d.dc_method
         semi = sorted(self._dd_regions)
-        abs_tol = self._dc_abs_tol() if abs_tol is None else abs_tol
+        # abs_tol=None reaches solve_dc, which resolves dc_solve.default_abs_tol(device) on EVERY solve's
+        # pre-solve state (v0.15 decision 59: the builder's own n_bg * 1e-12 rule is retired -- one
+        # kernel; see default_abs_tol for when to pass an explicit float)
 
         def _targets():
             return {E.name: bias.voltages.get(
@@ -783,10 +785,10 @@ class LayeredDevsimBuilder:
         (2) coupled 3-variable Newton at 0 bias DIRECTLY from that seed; (3) ramp the biased electrodes.
         The good built-in seed makes the coupled Newton converge without the 1D diode's separate frozen
         Poisson pre-solve -- which is under-determined on the 2D mesh with the inert edge-metal strips
-        (no Potential variable there) and diverges. The abs_tol is density-scaled (the _dc_abs_tol
-        lesson: the continuity residual is in carrier-density units ~n_bg)."""
+        (no Potential variable there) and diverges. abs_tol=None resolves dc_solve.default_abs_tol per
+        solve (the continuity residual is in carrier-density units ~n_bg; v0.15 decision 59 retired the
+        builder's max(n_bg * 1e-12, 1e13) rule)."""
         d = self.design
-        abs_tol = max(self._dc_abs_tol(), 1.0e13) if abs_tol is None else abs_tol
 
         # KNOWN LIMITATION (library audit): a GATE electrode on a non-semiconductor layer (a Potential-only
         # Dirichlet on an oxide) does NOT inject the bipolar built-in-potential offset phi_bi the way an
@@ -889,27 +891,6 @@ class LayeredDevsimBuilder:
                 "with set_ssac_gate, so solve() does not know the source that sets their potential and "
                 "would return a stale operating point. Use set_ssac_gate(name, source_name=...) or set "
                 "the bias with ds.circuit_alter + a direct DC solve.".format(unknown))
-
-    def _dc_abs_tol(self) -> float:
-        """Absolute Newton tolerance, scaled to the carrier density for DD.
-
-        In SI the electron-continuity residual is in carrier-density units
-        (~n_bg, ~1e26 m^-3). The absolute Newton update floors near
-        n_bg*machine_eps (~1e11 for n_bg~1e26), so the Boltzmann-era abs_tol=1e10
-        sits BELOW that precision floor and can never be satisfied -- the solve
-        spins to max_iter and raises Convergence failure even though the relative
-        update is ~1e-9. Scaling abs_tol to the carrier density puts it safely
-        above the floor so rel_tol becomes the binding (meaningful) gate.
-        Equilibrium mode (Poisson-only, V-unit residual) keeps the tight 1e10.
-        """
-        if not self._dd_regions:
-            return 1e10
-        n_scale = 0.0
-        for s in self._specs:
-            if s.name in self._dd_regions:
-                t = self.design.materials.get(s.material).transport
-                n_scale = max(n_scale, float(t.n_bg_m3))
-        return max(1e10, n_scale * 1e-12)
 
     def set_ssac_gate(self, electrode_name: str, *, source_name: str = "V1",
                       node_name: str = "vac") -> Tuple[str, str]:
