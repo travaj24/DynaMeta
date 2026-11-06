@@ -112,6 +112,17 @@ class TransportModel:
       hole_mobility_m2Vs_of_n_m3 : hole mobility (DD only)
       tau_srh_s            : SRH lifetime [s] (DD only); None -> no SRH
       traps                : LEGACY TrapSpec, read by no solver; enabled=True raises (TrapSpec doc)
+      hooge_alpha_n, hooge_alpha_p : v0.15 (plan 4.2.4, user decision 33) the material's Hooge 1/f
+                              parameter alpha_H for electrons / holes. None (default) = no Hooge source
+                              for that carrier -- there are NO per-material defaults. Read ONLY by
+                              LayeredDevsimBuilder.noise_spectrum(hooge="material"), which maps each
+                              carrier region to its material's pair (noise_analysis.noise_spectrum's
+                              hooge_alpha mapping); nothing else (DC, ssac, the other noise calls) reads
+                              them. Finite and > 0 when set; electrons need a carrier physics
+                              ('drift_diffusion' or 'bipolar_dd'), holes need 'bipolar_dd'. Values: Hooge
+                              1994 (IEEE TED 41, 1926) puts alpha_H ~ 1e-4 for a perfect lattice and
+                              1e-6 .. 1e-3 measured; the historical 2e-3 is a "poor samples" average,
+                              not a material value (noise_analysis module doc, item 2, for the ranges).
     """
     n_bg_m3:                     float
     eps_static:                  float
@@ -175,6 +186,10 @@ class TransportModel:
     # (Varshni E_g(T) anchored at chi_reference_T_K, chi(T) by a required fraction of the gap change, optional
     # derived n_i(T)). None (default) = band_gap_eV / chi_eV / n_i_m3 used as given at every T (bit-identical).
     band_temperature:            Optional[object] = None
+    # v0.15 (plan 4.2.4, decision 33): per-carrier Hooge alpha_H, no defaults (see Args). Read only by the
+    # 2-D builder's noise_spectrum(hooge="material"); None keeps every result bit-identical.
+    hooge_alpha_n:               Optional[float] = None
+    hooge_alpha_p:               Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
@@ -218,6 +233,17 @@ class TransportModel:
             if self.physics != "bipolar_dd":
                 raise ValueError("carrier_statistics applies only to physics='bipolar_dd' (got {!r}); it "
                                  "would be silently ignored".format(self.physics))
+        for nm, need in (("hooge_alpha_n", ("drift_diffusion", "bipolar_dd")),
+                         ("hooge_alpha_p", ("bipolar_dd",))):
+            v = getattr(self, nm)
+            if v is None:
+                continue
+            if isinstance(v, bool) or not (np.isfinite(float(v)) and float(v) > 0.0):
+                raise ValueError("{} must be finite and > 0 (dimensionless Hooge alpha_H), got {!r}"
+                                 .format(nm, v))
+            if self.physics not in need:
+                raise ValueError("{} needs physics in {} (the carrier it fluctuates must be solved); got "
+                                 "physics={!r}, so it would be silently ignored".format(nm, need, self.physics))
         if self.btbt is not None and self.physics != "bipolar_dd":
             raise ValueError("btbt (band-to-band tunneling generation) needs physics='bipolar_dd' "
                              "(it feeds the electron AND hole continuity equations); got physics={!r}"

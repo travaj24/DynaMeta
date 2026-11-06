@@ -65,6 +65,17 @@ is called, and it only READS the device (its DC operating point and models are l
      (derived here from Hooge's empirical law; for an ohmic conductor the adjoint field is the
      normalised potential, giving the familiar non-uniform-field form S_R/R^2 = alpha_H
      Int |E|^4 / (n f) / (Int |E|^2)^2), NOT isotropic like the diffusion source. A uniform resistor gives S_I/I^2 = alpha_H/(N f) at ANY orientation.
+     alpha_H IS A MATERIAL (AND SAMPLE) PARAMETER, NOT A CONSTANT (Hooge 1994, IEEE TED 41, 1926): about
+     1e-4 in a perfect lattice (his representative lattice value; alpha = (mu/mu_latt)^2 alpha_latt, his
+     Eq. 13, when other scattering lowers mu), 1e-6 .. 1e-3 measured. The historical 2e-3 (Hooge 1969) is,
+     per Hooge 1994, an average over "rather poor samples" -- do not use it as a default. Ranges quoted in the v0.15 plan's
+     literature review (P2 item 5; secondary, not re-checked here): epitaxial n-GaAs ~7e-5, InGaAs ~1e-5,
+     GaN 1e-4 .. 3e-3; ITO: no published alpha_H found. MOSFET-channel 1/f noise is number fluctuation
+     (McWhorter), not a Hooge source. There are no defaults (user decision 33; ATLAS's HOOGEN/HOOGEP also
+     default to 0): pass hooge_alpha as one float (every noise region, both carriers) or as a mapping
+     {region: alpha | (alpha_n, alpha_p)} (v0.15 plan 4.2.4); the 2-D builder resolves the per-material
+     TransportModel.hooge_alpha_n / hooge_alpha_p into that mapping (LayeredDevsimBuilder.noise_spectrum(
+     hooge="material")).
 
 3. DISCRETIZATION (the box / Scharfetter-Gummel scheme DEVSIM assembles).
    * A current-density source on edge e (nodes 0 -> 1, Voronoi couple c_e, length L_e) is the
@@ -240,7 +251,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -842,8 +853,63 @@ def _hooge_elements(device: str, region: str, i0, i1, couple, length):
     return E, C, V, nodes
 
 
+HoogeAlpha = Union[None, float, Mapping[str, Union[float, Tuple[Optional[float], Optional[float]]]]]
+
+
+def _positive_alpha(value, what: str) -> float:
+    a = float(value)
+    if not (math.isfinite(a) and a > 0.0):
+        raise ValueError("noise_spectrum: {} must be finite and > 0, got {!r}".format(what, value))
+    return a
+
+
+def _resolve_hooge_alpha(device: str, hooge_alpha: HoogeAlpha, all_regions):
+    """Validate noise_spectrum's hooge_alpha (v0.15 plan 4.2.4, user decision 33). Returns None (no Hooge),
+    the float (one alpha_H for both carriers in every noise region: the v0.14 path, unchanged), or
+    {region: (alpha_n, alpha_p)} for a mapping. A mapping value is a float (both carriers) or a pair
+    (alpha_n, alpha_p) whose entries may be None (no source for that carrier); every given alpha must be
+    finite and > 0, every key a region of the device carrying a continuity equation."""
+    if hooge_alpha is None:
+        return None
+    if not isinstance(hooge_alpha, Mapping):
+        if not (math.isfinite(float(hooge_alpha)) and float(hooge_alpha) > 0.0):
+            raise ValueError("noise_spectrum: hooge_alpha must be finite and > 0")
+        return hooge_alpha
+    out = {}
+    for region, value in hooge_alpha.items():
+        if region not in all_regions:
+            raise ValueError("noise_spectrum: hooge_alpha names unknown region {!r}; device regions: {}"
+                             .format(region, list(all_regions)))
+        if not _region_equations(device, region):
+            raise ValueError("noise_spectrum: hooge_alpha names region {!r}, which has no continuity "
+                             "equation (no carrier conductivity to fluctuate)".format(region))
+        if isinstance(value, (tuple, list)):
+            if len(value) != 2:
+                raise ValueError("noise_spectrum: hooge_alpha[{!r}] must be a float or a pair (alpha_n, "
+                                 "alpha_p); got {!r}".format(region, value))
+            out[region] = tuple(None if v is None else _positive_alpha(
+                v, "hooge_alpha[{!r}][{}]".format(region, k)) for k, v in enumerate(value))
+        else:
+            a = _positive_alpha(value, "hooge_alpha[{!r}]".format(region))
+            out[region] = (a, a)
+    return out
+
+
+def _region_hooge_alphas(hooge_alpha, region: str) -> Tuple[Optional[float], Optional[float]]:
+    """(alpha_n, alpha_p) of `region` from a _resolve_hooge_alpha result. A float gives float(alpha)
+    for both carriers -- the exact v0.14 arithmetic math.sqrt(float(alpha)), so the float path is
+    bit-identical; a region absent from a mapping gets (None, None): no Hooge source."""
+    if hooge_alpha is None:
+        return (None, None)
+    if not isinstance(hooge_alpha, dict):
+        return (float(hooge_alpha), float(hooge_alpha))
+    return hooge_alpha.get(region, (None, None))
+
+
 class _RegionData:
-    """Frequency-independent source data of one carrier region (the DC operating point)."""
+    """Frequency-independent source data of one carrier region (the DC operating point). hooge_alpha is
+    this region's (alpha_n, alpha_p), each a float or None (no Hooge source for that carrier):
+    _region_hooge_alphas."""
 
     def __init__(self, device, region, eqs, *, mechanisms, hooge_alpha, external_generation_shot):
         self.region = region
@@ -869,9 +935,9 @@ class _RegionData:
             if "diffusion_n" in mechanisms:
                 self.edge_K["diffusion_n"] = 4.0 * Q_E * Q_E * V_t * mu * n_eff
                 self.edge_eq["diffusion_n"] = _EQ_N
-            if hooge_alpha is not None and "hooge_n" in mechanisms:
+            if hooge_alpha[0] is not None and "hooge_n" in mechanisms:
                 J = _ev(device, region, "ElectronCurrent")
-                self.hooge["hooge_n"] = math.sqrt(float(hooge_alpha)) * J / np.sqrt(n_eff)
+                self.hooge["hooge_n"] = math.sqrt(hooge_alpha[0]) * J / np.sqrt(n_eff)
                 self.edge_eq["hooge_n"] = _EQ_N
         if _EQ_P in eqs:
             mu = _ev(device, region, "mu_p_edge") if "mu_p_edge" in edges else _param(
@@ -882,9 +948,9 @@ class _RegionData:
             if "diffusion_p" in mechanisms:
                 self.edge_K["diffusion_p"] = 4.0 * Q_E * Q_E * V_t * mu * p_eff
                 self.edge_eq["diffusion_p"] = _EQ_P
-            if hooge_alpha is not None and "hooge_p" in mechanisms:
+            if hooge_alpha[1] is not None and "hooge_p" in mechanisms:
                 J = _ev(device, region, "HoleCurrent")
-                self.hooge["hooge_p"] = math.sqrt(float(hooge_alpha)) * J / np.sqrt(p_eff)
+                self.hooge["hooge_p"] = math.sqrt(hooge_alpha[1]) * J / np.sqrt(p_eff)
                 self.edge_eq["hooge_p"] = _EQ_P
         # the Hooge source's element structure (module doc, item 3): one xi per element
         self.hooge_el = (_hooge_elements(device, region, self.i0, self.i1, couple, length)
@@ -927,7 +993,7 @@ def _cleanup_noise_models(device, regions, out):
 def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                    regions: Optional[Iterable[str]] = None,
                    mechanisms: Sequence[str] = DEFAULT_MECHANISMS,
-                   hooge_alpha: Optional[float] = None, external_generation_shot: bool = True,
+                   hooge_alpha: HoogeAlpha = None, external_generation_shot: bool = True,
                    maps: bool = False) -> NoiseSpectrum:
     """One-sided noise spectral density at circuit node `output_node` of `device`, at its CURRENT
     DC operating point (solve DC first, exactly as for ac_analysis.ssac_admittance), by the
@@ -948,6 +1014,20 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     hooge_alpha works in 1-D, 2-D and 3-D on any simplex shape (per-element P1 couples, module doc item
     3); on a non-well-centred 2-D / 3-D mesh (gmsh, Delaunay) apply devsim_geometry.apply_exact_geometry
     after create_device, as for every other source here, or DEVSIM's own DC / adjoint solve is off.
+
+    hooge_alpha (the dimensionless Hooge parameter alpha_H; default None = no 1/f source). Which form:
+      a float   -- one alpha_H for both carriers in every noise region (v0.14 behaviour, bit-identical):
+                   a single-material device, or a quick bound.
+      a mapping -- {region: alpha} (both carriers) or {region: (alpha_n, alpha_p)} (v0.15 plan 4.2.4,
+                   user decision 33): different materials or carriers have different alpha_H (module doc,
+                   item 2 -- ~1e-4 for a perfect lattice, 1e-6 .. 1e-3 measured; not the old 2e-3). A
+                   region ABSENT from the mapping, or a None entry of a pair, carries NO Hooge source
+                   (contributes exactly 0); a key that is not a region with a continuity equation, or a
+                   non-finite / non-positive alpha, raises ValueError. Regions left out of `regions` are
+                   ignored. With a mapping the per-region results are by_region_mechanism[r]["hooge_n" /
+                   "hooge_p"]; a series of regions r with lengths L_r gives S f = I^2 Sum_r (L_r/L)^2
+                   alpha_r / N_r (each region's resistance-fluctuation share; tests/test_noise_hooge_
+                   mapping.py), which reduces to alpha I^2 / N for one region.
 
     external_generation_shot (default True; kept by user decision 2026-11-04). Applies only to a
     region carrying an external generation G_ext (BipolarOptions.generation_m3s, the additive term
@@ -975,9 +1055,9 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     if unknown:
         raise ValueError("noise_spectrum: unknown mechanism(s) {}; known: {}".format(
             sorted(unknown), MECHANISMS))
+    all_regions = list(ds.get_region_list(device=device))
+    hooge_alpha = _resolve_hooge_alpha(device, hooge_alpha, all_regions)
     if hooge_alpha is not None:
-        if not (math.isfinite(float(hooge_alpha)) and float(hooge_alpha) > 0.0):
-            raise ValueError("noise_spectrum: hooge_alpha must be finite and > 0")
         mech |= {"hooge_n", "hooge_p"}
     if output_node not in ds.get_circuit_node_list():
         raise ValueError("noise_spectrum: {!r} is not a circuit node; have {} (attach a circuit "
@@ -987,7 +1067,6 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                              output_node, list(ds.get_circuit_node_list())))
     kind = "current" if output_node.endswith(".I") else "voltage"
 
-    all_regions = list(ds.get_region_list(device=device))
     if regions is None:
         regions = [r for r in all_regions if _region_equations(device, r)]
     regions = list(regions)
@@ -999,7 +1078,8 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
         if not eqs:
             raise ValueError("noise_spectrum: region {!r} has no continuity equation (no carrier "
                              "noise sources)".format(r))
-        data.append(_RegionData(device, r, eqs, mechanisms=mech, hooge_alpha=hooge_alpha,
+        data.append(_RegionData(device, r, eqs, mechanisms=mech,
+                                hooge_alpha=_region_hooge_alphas(hooge_alpha, r),
                                 external_generation_shot=external_generation_shot))
 
     circ = _circuit_contacts(device)

@@ -531,6 +531,11 @@ jobs:
     #   tests/conftest.py): ~25 s serial on the Windows dev box (3 tests, 3 child interpreters). The 11
     #   marked bitwise-of-two-solves tests elsewhere each pay one child (~4-5 s start-up + their own
     #   fixtures), measured 2026-11-06.
+    # + tests/test_noise_hooge_mapping.py (v0.15 4.2.4, per-region / per-carrier Hooge alpha): ~14 s serial
+    #   on the Windows dev box (6 tests), 2026-11-06.
+    # + tests/test_devsim_noise_method.py (v0.15 4.2.5, LayeredDevsimBuilder.noise_spectrum): ~50 s wall on
+    #   the Windows dev box (11 tests; one module fixture runs 7 child processes, two at a time: DEVSIM
+    #   circuits cannot be removed in-process), 2026-11-06.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -566,7 +571,8 @@ jobs:
             tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
-            tests/test_devsim_isolated.py tests/test_trap_kinetics.py
+            tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
+            tests/test_devsim_noise_method.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
