@@ -490,6 +490,42 @@ def test_bgn_long_diode_saturation_current():
     assert j0["bgn"] / j0["off"] == pytest.approx(nie2 / (NI * NI), rel=2e-3)
 
 
+@pytest.mark.parametrize("ND,NA", [(0.0, 1e25), (1e25, 1e24)])
+def test_del_alamo_on_p_type_and_compensated_slabs_uses_donors_only(ND, NA):
+    """GATE 3.2-4 (DEVSIM twin of tests/test_bipolar_materials_corrections.py; consolidated plan row
+    3.2-4). del Alamo's fit (IEEE TED ED-34, 1580 (1987) Eq. (11), re-typed in _dEg_del_alamo) is an
+    n-type fit in N_D. The R27-a fixture -- uniform slab, one minority-blocking majority contact, the
+    minority carrier kicked 3x -- relaxes to n p = n_i^2 exp(dEg(N_D)/kT) to 1e-12 (R27-a measured
+    2.2e-16): p+ 1e19 cm^-3 -> dEg = 0, n p = n_i^2; compensated N_D = 1e19 / N_A = 1e18 -> 49.73 meV,
+    n_ie^2/n_i^2 = 6.845. PRE-FIX (N_D + N_A basis) these were 6.845 (5.8 off) and 7.334 (+7.1 %).
+    Building the region emits exactly ONE AdvisoryWarning naming it (N_A > N_ref = 7e17: the fit has
+    no basis there). ADVERSARIAL: the pre-fix answer is asserted to be off by far more than 1e-12."""
+    import warnings
+    from dynameta.carriers.bipolar_options import BGN_SI_DEL_ALAMO_1985, BipolarOptions
+    from dynameta.warning_types import AdvisoryWarning
+    dev = "r27dap" if ND == 0.0 else "r27dac"
+    minority = "Electrons" if ND < NA else "Holes"
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _device(dev, [(0.0, 5e-9, "lo"), (100e-9, 5e-9, "hi")], "{:.10e}".format(ND - NA),
+                    options=BipolarOptions(bgn=BGN_SI_DEL_ALAMO_1985), ohmic=(),
+                    majority_contact=("lo",), donors="{:.10e}".format(ND),
+                    acceptors="{:.10e}".format(NA))
+        devsim.set_node_values(device=dev, region="bulk", name=minority,
+                               values=list(3.0 * _v(dev, minority)))
+        _solve()
+        n, p = _v(dev, "Electrons"), _v(dev, "Holes")
+    finally:
+        _drop(dev)
+    nie2 = NI * NI * math.exp(_dEg_del_alamo(ND / 1e6) / VT300)
+    assert np.max(np.abs(n * p / nie2 - 1.0)) < 1e-12
+    pre_fix = NI * NI * math.exp(_dEg_del_alamo((ND + NA) / 1e6) / VT300)
+    assert abs(pre_fix / nie2 - 1.0) > 0.07                        # adversarial: the old basis fails
+    assert [type(w.message) for w in caught] == [AdvisoryWarning], [str(w.message)[:100] for w in caught]
+    assert "'bulk'" in str(caught[0].message) and "N_D only" in str(caught[0].message)
+
+
 # =====================================================================================================
 # R27: incomplete ionization (freeze-out)
 # =====================================================================================================
@@ -575,6 +611,30 @@ def test_acceptor_freeze_out_p_type():
     root_p = ni * ni / _freeze_out_root(T, 0.0, NA)
     assert p_mid == pytest.approx(root_p, rel=1e-11)
     assert p_mid / NA < 0.5
+
+
+@pytest.mark.parametrize("N,expect", [(1e25, 1), (-1e25, 1), (1e24, 0)])
+def test_mott_advisory_once_per_region_above_the_mott_density(N, expect):
+    """GATE 3.2-11c (DEVSIM half; P2 item 4 I3). The legacy single-level model has no Mott transition:
+    building a region doped above the model's Mott density (Si:P 3.74e18, Si:B proxy 4.5e18 cm^-3) with
+    incomplete ionization on emits exactly ONE AdvisoryWarning naming the region; 1e18 cm^-3 is silent.
+    Pre-fix no advisory existed (the 1e19 regions built silently at 39 % ionized). The occupancy itself
+    is unchanged (the R27-d/e gates and the call-log digest are untouched)."""
+    import warnings
+    from dynameta.carriers.bipolar_options import BipolarOptions, IONIZATION_SI_P_B
+    from dynameta.warning_types import AdvisoryWarning
+    dev = "mott"
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _device(dev, [(0.0, 5e-9, "lo"), (100e-9, 5e-9, "hi")], "{:.10e}".format(N),
+                    options=BipolarOptions(ionization=IONIZATION_SI_P_B))
+    finally:
+        _drop(dev)
+    assert [type(w.message) for w in caught] == [AdvisoryWarning] * expect, \
+        [str(w.message)[:100] for w in caught]
+    if expect:
+        assert "'bulk'" in str(caught[0].message) and "Mott" in str(caught[0].message)
 
 
 # =====================================================================================================
@@ -744,10 +804,12 @@ def test_layered_builder_threads_options_into_the_region():
         except Exception:
             pass
         _R.clear(b.device)
-    # no warning: with incomplete ionization the 1e19 cm^-3 bar holds only n0 = 3.9e24 (39 % -- the
-    # no-Mott limit, see the audit doc), u = n0/N_c = 0.14 and an FD built-in correction of 0.047 V_t,
-    # just under the BGN+FD double-counting advisory (0.05 V_t; that one is gated separately below)
-    assert [(w.category.__name__, str(w.message)[:120]) for w in caught] == []
+    # ONE warning, the Mott advisory (v0.14 row 3.2-11): with incomplete ionization the 1e19 cm^-3 bar
+    # holds only n0 = 3.9e24 (39 % -- the no-Mott limit, above Si:P's 3.74e18) -- so u = n0/N_c = 0.14
+    # and an FD built-in correction of 0.047 V_t, just under the BGN+FD double-counting advisory
+    # (0.05 V_t; that one is gated separately below). n-type only: no del Alamo basis advisory.
+    assert [(w.category.__name__, "Mott" in str(w.message), "'si'" in str(w.message))
+            for w in caught] == [("AdvisoryWarning", True, True)], [str(w.message)[:120] for w in caught]
     assert {"UAuger", "n_ie", "IonizedNetDoping", "EquilibriumPotential", "SeedPsiShift"} <= models
     assert np.max(np.abs(n * p / nie ** 2 - 1.0)) < 1e-9
     assert "si" in cf.regions

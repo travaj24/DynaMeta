@@ -51,10 +51,11 @@ Low-injection lifetimes (n-type): `1/tau = 1/tau_p + C_n n0^2 + B n0`.
 
 ### Bandgap narrowing (R27)
 
-Apparent narrowing vs total dopant density `N = N_D + N_A`:
+Apparent narrowing vs a dopant density chosen by `BGNModel.doping_basis` (corrected 2026-11-06,
+see `2026-11-06-v0.14-materials-corrections.md`):
 
-    Slotboom:  dEg = E_ref [ ln(N/N_ref) + sqrt(ln^2(N/N_ref) + C) ]
-    del Alamo: dEg = E_ref ln(N/N_ref)   (N > N_ref),  0 otherwise
+    Slotboom:  dEg = E_ref [ ln(N/N_ref) + sqrt(ln^2(N/N_ref) + C) ],   N = N_D + N_A
+    del Alamo: dEg = E_ref ln(N_D/N_ref)   (N_D > N_ref),  0 otherwise   (n-type fit, N_D only)
 
 **Band-edge split and the drift-diffusion quasi-fields** (Lundstrom & Schuelke 1983; Selberherr 1984).
 A fraction `gamma` (`conduction_fraction`) of dEg lowers `E_c`, the rest raises `E_v`:
@@ -119,11 +120,11 @@ a uniform G (region parameter `G_ext`, rampable).
 | `AUGER_SI_DZIEWIOR_SCHMID_1977` | C_n = 2.8e-31, C_p = 0.99e-31 cm^6/s | Dziewior & Schmid, Appl. Phys. Lett. 31, 346 (1977) |
 | `AUGER_SI_ALTERMATT_1997` | same C + g_eeh/g_ehh (13, 3.3e17, 0.66 / 7.5, 7.0e17, 0.63) | Altermatt et al., J. Appl. Phys. 82, 4938 (1997) |
 | `RADIATIVE_SI_TRUPKE_2003` | B = 9.5e-15 cm^3/s | Trupke et al., J. Appl. Phys. 94, 4930 (2003) |
-| `BGN_SI_SLOTBOOM_1977` | 9 mV, 1e17 cm^-3, C = 0.5 | Slotboom & de Graaff, SSE 19, 857 (1976); IEEE TED 24, 1123 (1977) |
-| `BGN_SI_KLAASSEN_1992` | 6.92 mV, 1.3e17 cm^-3, C = 0.5 | Klaassen, Slotboom & de Graaff, SSE 35, 125 (1992) |
-| `BGN_SI_DEL_ALAMO_1985` | 18.7 mV, 7e17 cm^-3 | del Alamo, Swirhun & Swanson, SSE 28, 47 (1985) (n-type Si) |
+| `BGN_SI_SLOTBOOM_1977` | 9 mV, 1e17 cm^-3, C = 0.5 | Slotboom & de Graaff, SSE 19, 857 (1976); IEEE TED 24, 1123 (1977). Fitted on p-type transistor bases; reference n_i about 1.44e10 cm^-3 [inferred] (note added 2026-11-06) |
+| `BGN_SI_KLAASSEN_1992` | 6.92 mV, 1.3e17 cm^-3, C = 0.5 | Klaassen, Slotboom & de Graaff, SSE 35, 125 (1992); reference n_i 1.0e10 or 1.08e10 [unverified] |
+| `BGN_SI_DEL_ALAMO_1985` | 18.7 mV, 7e17 cm^-3, in N_D | del Alamo & Swanson, IEEE TED ED-34, 1580 (1987), Eq. (11); IEDM 1985 p. 290, Eq. (7). n-type (Si:P) only. **Corrected 2026-11-06:** the fit was cited as SSE 28, 47 and applied to N_D + N_A |
 | `IONIZATION_SI_P_B` | dE_D = 45 meV (P), dE_A = 45 meV (B), g_D = 2, g_A = 4 | Sze & Ng, Physics of Semiconductor Devices, 3rd ed. (2007), ch. 1 |
-| `SI_DONOR_IONIZATION_EV` / `SI_ACCEPTOR_IONIZATION_EV` | P 45, As 54, Sb 39 / B 45 meV | same |
+| `SI_DONOR_IONIZATION_EV` / `SI_ACCEPTOR_IONIZATION_EV` | P 45, As 54, Sb 42.74 / B 45 meV | Sze & Ng; Sb from Ramdas & Rodriguez, Rep. Prog. Phys. 44, 1297 (1981), Table 4 (**corrected 2026-11-06** from Sze & Ng's 39 meV) |
 
 The BGN parameter sets are **apparent** narrowings. They were extracted with Boltzmann statistics
 against a specific reference n_i, so a result is only meaningful with the n_i it is paired with (see
@@ -220,9 +221,16 @@ Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
 1. **Default parameter sets per material.** Nothing is auto-applied. Should `materials/` ship Si
    (and later GaAs/InP) `BipolarOptions` defaults, and which BGN model (old Slotboom vs Klaassen vs
    del Alamo) is the house choice?
-2. **Reference n_i pairing for apparent BGN.** Each set was fitted against a particular n_i at 300 K;
-   the commonly quoted modern pairing is n_i = 1.0e10 cm^-3 (Sproul & Green). Confirm against the
-   papers before quoting absolute J0 externally. The shipped validation fixtures use 1.0e10.
+2. **Reference n_i pairing for apparent BGN.** Each set was fitted against a particular n_i at 300 K.
+   **Corrected 2026-11-06:** the earlier statement here, "the commonly quoted modern pairing is
+   n_i = 1.0e10 cm^-3 (Sproul & Green)", was wrong. No shipped set was fitted with 1.0e10: old Slotboom
+   about 1.44e10 (fitted on p-type bases), del Alamo about 1.36-1.45e10 (both inferred from the
+   sources), Klaassen 1992 1.0e10 or 1.08e10 (unverified). The modern consensus value is 9.65e9 cm^-3
+   (Altermatt et al., J. Appl. Phys. 93, 1598 (2003)), and it belongs with Fermi-Dirac statistics and
+   a real narrowing. Pairing old Slotboom or del Alamo with 9.65e9 under-predicts n_ie^2 by about 2.3x
+   (about 21 meV). The presets stay unpaired (nothing checks n_i); see
+   `2026-11-06-v0.14-materials-corrections.md`. The shipped validation fixtures use 1.0e10 as a fixture
+   value only: their oracles take the same n_i, so no gate depends on the pairing.
 3. **III-V radiative/Auger presets** were deliberately NOT shipped. Literature B for GaAs ranges about
    1e-10 to 7e-10 cm^3/s depending on photon recycling, and the user should choose.
 4. **Altermatt 1997 constants** (13 / 3.3e17 / 0.66, 7.5 / 7.0e17 / 0.63): VERIFIED 2026-11-03 against
@@ -230,7 +238,10 @@ Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
    on pv-manufacturing.org "Recombination processes" (g_eeh(n0) = 1 + 13[1 - tanh((n0/3.3e17)^0.66)],
    g_ehh(p0) = 1 + 7.5[1 - tanh((p0/7.0e17)^0.63)], C_n = 2.8e-31 / C_p = 9.9e-32 cm^6/s Dziewior &
    Schmid). The primary PDF itself was not reachable; resolved, no longer an open question.
-5. **Pearson-Bardeen alpha**: no default value is shipped (0 = off).
+5. **Pearson-Bardeen alpha**: no default value is shipped (0 = off). Since 2026-11-06 an alpha that
+   zeroes the ionization energy below 1e17 cm^-3 raises `IonizationUnitsError` (the eV*cm vs eV*m
+   trap), `IonizationModel.pearson_bardeen(..., alpha_D_eVcm=...)` converts a literature value, and
+   regions above the Mott density get an advisory.
 
 ## Merge notes for the integrator
 
