@@ -800,9 +800,72 @@ def sc_gmsh(opts):
     return out
 
 
+def _gated_design(t_ox=2e-9):
+    """tests/test_devsim_tunneling._gated_design (Si 20 nm / SiO2 / metal gate, bipolar Si), with t_ox."""
+    from dynameta.constants import M_E
+    from dynameta.geometry import Design, Electrode, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import Mesh2DSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry, TransportModel
+
+    def c(v):
+        return lambda nn: np.full_like(np.asarray(nn, dtype=float), v)
+    reg = MaterialRegistry()
+    reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+    reg.add(Material("cmetal", ConstantOptical(-50 + 5j), is_metal=True))
+    reg.add(Material("SiO2", ConstantOptical(2.1 + 0j), eps_static_dc=3.9))
+    reg.add(Material("Si", ConstantOptical(12 + 0j), transport=TransportModel(
+        n_bg_m3=1e24, eps_static=11.7, dos_mass_kg_of_n_m3=c(1.08 * M_E), band_gap_eV=1.12, chi_eV=4.05,
+        physics="bipolar_dd", mobility_m2Vs_of_n_m3=c(MU_N), hole_mobility_m2Vs_of_n_m3=c(MU_P),
+        tau_srh_s=1e-7, n_i_m3=NI, dos_mass_p_kg=0.81 * M_E)))
+    stack = Stack(layers=[Layer("si", 20e-9, "Si"), Layer("ox", t_ox, "SiO2"), Layer("gm", 5e-9, "cmetal")],
+                  superstrate_material="air", substrate_material="air")
+    return Design(name="ot_gated", unit_cell=UnitCell.square(40e-9), stack=stack,
+                  electrodes=[Electrode("body", "si", "x_lo", role="ground", fixed_voltage_V=0.0),
+                              Electrode("gate", "gm", "full", role="biased")],
+                  materials=reg,
+                  mesh_2d=Mesh2DSpec(coarse_ps_m=0.5e-9, x_spacing_edge_m=5e-9, x_spacing_feature_mid_m=5e-9))
+
+
+def sc_builders(opts):
+    """The builders' self-consistent wiring: LayeredDevsimBuilder (2-D) and Stacked3DSpec (3-D tensor), each
+    with oxide_tunneling=OxideTunnelingParams(coupling='self_consistent', ...), solved at a gate bias."""
+    import warnings
+    from dynameta.carriers import tunneling as TN
+    from dynameta.sweep import BiasPoint
+    var = opts.get("variant", "2d")
+    V = float(opts.get("V", 1.2))
+    prm = params()
+    rec = []
+    with warnings.catch_warnings(record=True) as w, _quiet():
+        warnings.simplefilter("always")
+        if var == "2d":
+            from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+            b = LayeredDevsimBuilder(_gated_design(), mesh_name="ob2m", device_name="ob2", oxide_tunneling=prm)
+            cf = b.solve(BiasPoint({"gate": V}, "g"))
+            dev, scale = b.device, 1.0
+        else:
+            from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+            from dynameta.constants import M_E
+            spec = Stacked3DSpec(semi_material="Si", oxide_material="SiO2", lateral_m=4e-9, semi_thk_m=20e-9,
+                                 oxide_thk_m=2e-9, n_bg_m3=1e24, eps_semi=11.7, eps_oxide=3.9,
+                                 dos_mass_kg=1.08 * M_E, dos_mass_p_kg=0.81 * M_E, physics="bipolar_dd",
+                                 n_i_m3=NI, mobility_m2Vs=MU_N, mobility_p_m2Vs=MU_P, tau_srh_s=1e-7,
+                                 grid_n=(3, 3, 9), mesh_min_nm=0.5, mesh_max_nm=2.0, oxide_tunneling=prm)
+            b = Devsim3DEquilibrium(spec, device_name="ob3", mesh_name="ob3m")
+            cf = b.solve(BiasPoint({"gate": V}, "g"))
+            dev = b.device
+    rec = [(type(x.message).__name__, str(x.message)[:200]) for x in w]
+    terms = TN.oxide_tunneling_terms(dev)
+    return {"extras": {k: v for k, v in cf.extras.items() if k in ("oxide_tunneling", "contact_currents_A")},
+            "n_terms": len(terms), "warnings": rec, "chain": list(terms[0].chain) if terms else None,
+            "offsets": [l.offset_eV for l in terms[0].layers] if terms else None,
+            "phi_c": terms[0].phi_c if terms else None}
+
+
 SCENARIOS = {"balance": sc_balance, "balance_fd": sc_balance_fd, "inversion": sc_inversion,
              "conserve": sc_conserve, "ssac": sc_ssac, "fdt": sc_fdt,
-             "jac": sc_jac, "stack": sc_stack, "dims": sc_dims, "gmsh": sc_gmsh}
+             "jac": sc_jac, "stack": sc_stack, "dims": sc_dims, "gmsh": sc_gmsh,
+             "builders": sc_builders}
 
 
 def run_child(scenario, **opts):
