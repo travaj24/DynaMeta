@@ -486,3 +486,60 @@ def test_setup_refuses_non_bipolar_semiconductor_gates_and_registers_nothing():
                 ds.delete_mesh(mesh=d + "_m")
             _R.clear(d)
     assert CT.is_registered() == was
+
+
+# =====================================================================================================
+# 2-D / 3-D on tensor meshes, and the unstructured-mesh caveat
+# =====================================================================================================
+@pytest.fixture(scope="module")
+def dims():
+    return {v: _child("dims", variant=v) for v in ("2d", "3d")}
+
+
+@pytest.mark.parametrize("case", ["2d", "3d"])
+def test_o14_o15_tensor_meshes_equal_1d(dims, case):
+    """O14 / O15: the laterally uniform 2-D (DEVSIM rectilinear triangles) and 3-D (Kuhn tetrahedra) twins
+    of a 1-D accumulation MOS (n-Si, 2 nm SiO2, 1 V), on the SAME normal node set: every interface node's J
+    equals the 1-D J to 1e-6 (plan 4.1.1), the interface SurfaceArea weights sum to the cell face (1e-12),
+    the per-area gate and body currents equal the 1-D ones (1e-6), and the term's own Jacobian matches its
+    central differences (O6 budget) with the lateral column weights. MEASURED: J bit-identical (the box
+    method on right-triangle / Kuhn cells reduces to the 1-D scheme), areas exact, I_body/A 2e-16.
+    The column partner of each interface node is the coincident gate-face node (weight 1)."""
+    r = dims[case]
+    A = r["W"] ** (r["dim"] - 1)
+    J = np.asarray(r["J"])
+    assert r["n_iface"] == 3 ** (r["dim"] - 1)
+    assert np.all(np.abs(J / r["ref"]["J"] - 1.0) <= 1e-6)
+    assert sum(r["area"]) == pytest.approx(A, rel=1e-12)
+    assert r["I_gate"] / A == pytest.approx(r["ref"]["J"], rel=1e-6)
+    assert r["I_body"] / A == pytest.approx(r["ref"]["I_body"], rel=1e-6)
+    assert all(len(w) == 1 for w in r["weights"]) and all(v == [1.0] for v in r["wvals"])
+    for rec in r["term"]:
+        fd, fd2, Jj, F = (np.asarray(rec[k]) for k in ("fd", "fd2", "J", "F"))
+        tol = np.abs(fd - fd2) + 16 * EPS * np.abs(F) / rec["h"] + 8 * EPS * np.abs(Jj)
+        assert np.all(np.abs(fd - Jj) <= tol), (rec["col"], fd, Jj, tol)
+
+
+@pytest.fixture(scope="module")
+def gmsh_cases():
+    pytest.importorskip("gmsh")
+    return {v: _child("gmsh", variant=v) for v in ("tensor", "gmsh", "gmsh_exact")}
+
+
+def test_o15_unstructured_mesh_warns_and_the_exact_geometry_does_not_remove_the_spread(gmsh_cases):
+    """The plan's caveat, MEASURED on the Stacked3DSpec Si / 2 nm SiO2 stack at 1.2 V (4 nm cell, laterally
+    uniform): tensor mesh -- V_ox and J identical at every interface node; gmsh (DEVSIM's unsigned box
+    geometry) -- lateral V_ox spread 5.1 %, per-node J spread 92 %; gmsh + devsim_geometry.
+    apply_exact_geometry(negative='warn') -- 0.59 % and 10.5 % (8.6x / 8.8x less, NOT removed: the residual is
+    the unstructured FV solution's lateral noise, amplified ~15-18x by the tunnel exponent). So
+    setup_oxide_tunneling WARNS (UnreliableResultWarning) on any mesh that is not column-aligned, naming the
+    measured numbers, and stays silent on the tensor mesh. (The plan quoted 1.5 % -> ~37 % from the 4 nm
+    v0.14 stack.)"""
+    t, g, e = gmsh_cases["tensor"], gmsh_cases["gmsh"], gmsh_cases["gmsh_exact"]
+    assert t["setup_warnings"] == [] and t["J_spread"] < 1e-12 and t["V_ox_spread"] < 1e-12
+    assert g["V_ox_spread"] > 0.02 and g["J_spread"] > 0.3
+    assert e["V_ox_spread"] < g["V_ox_spread"] / 4 and e["J_spread"] < g["J_spread"] / 4
+    assert e["J_spread"] > 0.02                                  # reduced, not removed
+    for r in (g, e):
+        assert [w[0] for w in r["setup_warnings"]] == ["UnreliableResultWarning"]
+        assert "not column-aligned" in r["setup_warnings"][0][1]
