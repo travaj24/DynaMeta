@@ -23,11 +23,14 @@ the full value (set_dg_gamma). b_dg = 0 with the DG equations active reduces to 
 solution (Lambda-eq collapses to Lambda u = 0 -> Lambda = 0, the current to the classical SG).
 
 SCOPE (v1, validated): 1D/2D unipolar regions with ohmic contacts (u pinned to sqrt(n_contact),
-Lambda to 0 -- bulk contacts carry no quantum correction). The oxide-interface hard wall
-(u -> 0, the MOS dead layer) now has an EXPERIMENTAL implementation, setup_dg_hard_wall
-(contact-row pins; the pins are gated in tests/test_density_gradient.py, the resulting dead-layer
-PROFILE is not validated -- see its docstring); the validated post-hoc closure
-(carriers.density_gradient) remains the dead-layer tool.
+Lambda to 0 -- bulk contacts carry no quantum correction). The oxide-interface wall (u -> 0, the
+MOS dead layer) is setup_dg_insulator_wall (below; zero normal flux, unipolar and bipolar regions),
+seeded with seed_dg_from_solution(..., walls=(contact,)): on a unipolar region it reproduces the
+closed-form DG dark space (I = 1.187207 n0 L_q) to 2e-5 (tests/test_density_gradient.py, v0.15
+item 4.4.4). The former unipolar setup_dg_hard_wall rows (a pinned carrier row and a pinned
+Lambda: a carrier SINK that converged to a spurious wide-depletion branch) are retired: the name is
+a deprecated shim onto setup_dg_insulator_wall in v0.15 and is removed in v0.16
+(docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md).
 
 BIPOLAR (D2d, v0.14.0; end of this file): setup_bipolar_dg gives electrons AND holes their own quantum
 potential on a physics_bipolar_dd region (same kernel, _install_dg_variables), with the ohmic rows
@@ -130,9 +133,10 @@ def setup_dg_quantum_correction(device: str, region: str, *, m_eff_kg: float,
         oxide. The Schrodinger-Poisson comparison that supports it (setup_bipolar_dg, GATE C: excess
         sheet +5.6 % vs +21.3 %, centroid -5.1 % vs -17.5 % for electrons) was MEASURED with the
         bipolar DG and setup_dg_insulator_wall. This unipolar kernel is the same
-        (_install_dg_variables), but GATE C was not rerun on a unipolar region, and its own wall,
-        setup_dg_hard_wall, is EXPERIMENTAL (its dead-layer profile is unvalidated) -- use
-        setup_dg_insulator_wall for a wall.
+        (_install_dg_variables) and, with setup_dg_insulator_wall, gives the same solution as the
+        bipolar DG on the same bar (gated, tests/test_density_gradient.py), but GATE C itself was
+        not rerun on a unipolar region. For a wall use setup_dg_insulator_wall (the old
+        setup_dg_hard_wall is a deprecated shim onto it).
       * Not validated: strong inversion, degenerate Fermi-Dirac beyond GATE C's regime, 2-D/3-D
         walls. Details: setup_bipolar_dg."""
     b_full = dg_b_coefficient(m_eff_kg, gamma)
@@ -238,106 +242,72 @@ def _repoint_contact_current_to_dg(device: str, contact: str, *,
     _R.record_contact_equation(device, contact, **kw)
 
 
+# v0.15 (plan 4.4.4, decision 53): what the deprecation warning states -- the MEASURED change for a
+# device that used the old rows (docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md, sec. 1).
+HARD_WALL_DEPRECATION = (
+    "setup_dg_hard_wall is deprecated and will be removed in v0.16: it now installs "
+    "setup_dg_insulator_wall(device, contact), the zero-flux wall (lambda_pin_factor is ignored). "
+    "Results of a device built with it CHANGE: the old rows pinned the carrier row (n = u^2) and "
+    "Lambda (-lambda_pin_factor V_t), so the wall node was a carrier sink (measured wall-edge current "
+    "6e-3 to 1e-1 of q mu n0 V_t/L_q) and the solve converged to a spurious wide-depletion branch "
+    "(dead-layer deficit 23-28 n0 L_q); the insulator wall conserves carriers (wall current <= 1e-14 "
+    "of that scale) and reproduces the closed-form DG dark space, deficit 1.187207 n0 L_q, to 2e-5. "
+    "Call setup_dg_insulator_wall directly and seed with seed_dg_from_solution(device, region, "
+    "walls=(contact,)).")
+
+
 def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 15.0) -> None:
-    """EXPERIMENTAL / NOT YET VALIDATED (gated by tests/test_density_gradient.py::
-    test_dg_hard_wall_pins_the_wall_rows): the Newton landscape near the log-singular wall is so
-    flat that ramped solves stall on spurious wide-depletion states at practical tolerances -- the
-    discrete mechanics below are pinned and probed (that test asserts every one of them), but the
-    dead-layer PROFILE has NOT been validated against the post-hoc BVP: re-measured 2026-07-26,
-    the frozen-psi in-Newton profile differs from dg_correct_density_1d by max |dn|/N0 = 0.80 and
-    the self-consistent leg raises a DEVSIM convergence failure. The post-hoc closure
-    (carriers.density_gradient.dg_correct_density_1d) remains THE validated dead-layer tool.
+    """DEPRECATED (v0.15; removed in v0.16): a shim that installs setup_dg_insulator_wall(device,
+    contact) and issues a DeprecationWarning (HARD_WALL_DEPRECATION) stating the measured change.
+    Use setup_dg_insulator_wall directly, and seed_dg_from_solution(device, region, walls=(contact,))
+    for the wall-aware seed.
 
-    Oxide/insulator HARD WALL at `contact` for the in-Newton DG system (the MOS dead-layer
-    boundary): u -> 0 (a tiny positive floor) Dirichlet, plus a DEEP REGULARIZATION pin on
-    Lambda.
+    `lambda_pin_factor` is still VALIDATED (> 0, ValueError otherwise, before any warning) so an old
+    script with a bad value still fails loudly, but it is otherwise IGNORED: the insulator wall pins
+    no Lambda (its Lambda is whatever makes the wall-edge flux vanish) and creates no
+    wall_lambda_pin parameter.
 
-    Why a regularization and not a value: the equilibrium DG closure's first integral gives
-    (u')^2 = (V_t/b)(u^2 ln(u^2/n0) - u^2 + n0), so u'(wall) = sqrt(V_t n0 / b) is FINITE but
-    Lambda = V_t ln(u^2/n0) DIVERGES logarithmically at the wall -- there is no finite
-    physical wall value to pin (the tanh profile's finite b u''/u = -V_t belongs to a
-    DIFFERENT closure and does not solve this system). The wall node's Lambda row is
-    therefore pinned to the deep value -lambda_pin_factor * V_t: any pin a few V_t below the
-    first interior node's Lambda drives the wall-edge Scharfetter-Gummel density to ~ 0
-    (relative error e^(dLambda/V_t)). Insensitivity to the factor is a claim about the CONVERGED
-    profile and so is not gated while the profile itself is open (above); what IS gated is that
-    the pin is installed at zero depth and co-ramps with set_dg_gamma.
-
-    The ELECTRON row at the wall node is pinned to the SAME constraint as the bulk,
-    n = u^2 (the pinned u-floor then makes n(wall) = floor^2 ~ 0, the dead-layer endpoint).
-    The bulk (natural) continuity row at a bare contact node was measured NOT to behave as
-    the zero-flux row (n(wall) floated pin-dependently), hence the explicit pin. A Boltzmann
-    quasi-equilibrium pin n = N_D exp((Potential + QLambda)/V_t) is WRONG here: it would
-    evaluate the REGULARIZATION Lambda-pin as if it were the physical (log-divergent) wall
-    Lambda and return a finite density; n = u^2 references no Lambda and needs no
-    exponential. Potential keeps its natural bulk row (probed on DEVSIM 2.10.0: equations
-    without a contact_equation retain the bulk assembly -- no empty-row singularity).
-
-    Continuation plan (from cef01d9): tighter-tolerance damped Newton solves or a u_floor
-    continuation on the wall row; then the bipolar (hole) DG twin with
-    psi_eff,p = psi - Lambda_p. The four physics gates that plan has to clear are written out in
-    test_dg_hard_wall_pins_the_wall_rows' docstring (they used to live in a parked, never-executed
-    validation/_dg_hard_wall_wip.py -- audit X-6)."""
+    What the old rows were, and why they were retired (plan 4.4.4, decision 53): u = 1e-6 sqrt(N_D),
+    Lambda = -lambda_pin_factor V_t (a ramped device parameter) and the CARRIER row n = u^2 at the
+    wall node. The pinned carrier row made the wall node a carrier SINK whose SG current was driven
+    by the pinned Lambda jump, and the converged profile was a spurious wide-depletion branch.
+    MEASURED on this module's unipolar bar (frozen flat psi, gamma ramp to 1; tests/
+    test_density_gradient.py, docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md):
+        n0 = 1e21 m^-3 : old deficit 22.85 n0 L_q, wall current 6.3e-3 q mu n0 V_t/L_q;
+                         insulator wall 1.18723 (closed form 1.187207, +1.7e-5), current 3e-15
+        n0 = 4e26 (ITO): old deficit 28.0 n0 L_q, current 9.6e-2; insulator wall 0.346 (the FD
+                         g-factor shortens the dark space ~sqrt(g); gated against the FD first
+                         integral)
+    The old rows survive only as a test fixture (tests/_dg_legacy_wall.py) for the cross-version
+    flux gate and the negative controls."""
+    import warnings
     if not (lambda_pin_factor > 0.0):
         raise ValueError("setup_dg_hard_wall: lambda_pin_factor must be > 0")
-    from dynameta.constants import V_T
-    v_t = V_T   # single-source thermal voltage (audit S1-7)
-    # the pin is a DEVICE parameter so the gamma ramp can co-ramp it (a full-depth pin at the
-    # first small-gamma step makes the wall-edge Bernoulli overflow during Newton transients)
-    ds.set_parameter(device=device, name="wall_lambda_pin", value=0.0)
-    ds.set_parameter(device=device, name="wall_lambda_pin_full",
-                     value=float(lambda_pin_factor) * v_t)
-    # u is pinned to a TINY POSITIVE floor, not literal 0: the QSqrtN variable uses DEVSIM's
-    # variable_update='positive' (the validated unipolar-DG choice), which FORBIDS an exact
-    # zero ('Solution Variable has negative or zero value'). u_floor = 1e-6 sqrt(N_D) makes
-    # n(wall) ~ 1e-12 N_D -- physically indistinguishable from a hard zero.
-    region = ds.get_region_list(device=device, contact=contact)[0]
-    n_d = float(ds.get_parameter(device=device, region=region, name="N_D"))
-    u_floor = 1.0e-6 * np.sqrt(n_d)
-    cu = "{}_qsqrtn_wall".format(contact)
-    ds.contact_node_model(device=device, contact=contact, name=cu,
-                          equation="QSqrtN - {:.16e}".format(u_floor))
-    ds.contact_node_model(device=device, contact=contact, name="{}:QSqrtN".format(cu),
-                          equation="1")
-    _R.record_contact_equation(device, contact, name="QSqrtNEquation", node_model=cu)
-    cl = "{}_qlambda_wall".format(contact)
-    ds.contact_node_model(device=device, contact=contact, name=cl,
-                          equation="QLambda + wall_lambda_pin")
-    ds.contact_node_model(device=device, contact=contact, name="{}:QLambda".format(cl),
-                          equation="1")
-    _R.record_contact_equation(device, contact, name="QLambdaEquation", node_model=cl)
-    ce = "{}_electrons_wall".format(contact)
-    # the wall node's ELECTRON row is the SAME constraint as the bulk, n = u^2 (so the pinned
-    # u-floor makes n(wall) = floor^2 ~ 0, the dead-layer endpoint). The natural bulk
-    # continuity row at a bare contact node was measured to FLOAT (n(wall) pin-dependent),
-    # and a Boltzmann pin n = N_D exp((psi+Lambda)/V_t) is WRONG here: it would evaluate the
-    # REGULARIZATION Lambda-pin as if it were the physical (log-divergent) wall Lambda and
-    # return a finite density. n = u^2 references no Lambda and needs no exponential.
-    ds.contact_node_model(device=device, contact=contact, name=ce,
-                          equation="Electrons - QSqrtN*QSqrtN")
-    ds.contact_node_model(device=device, contact=contact, name="{}:Electrons".format(ce),
-                          equation="1")
-    ds.contact_node_model(device=device, contact=contact, name="{}:QSqrtN".format(ce),
-                          equation="-2*QSqrtN")
-    _R.record_contact_equation(device, contact, name="ElectronContinuityEquation",
-                               node_model=ce)
+    warnings.warn(HARD_WALL_DEPRECATION, DeprecationWarning, stacklevel=2)
+    setup_dg_insulator_wall(device, contact)
 
 
-def seed_dg_from_solution(device: str, region: str) -> None:
-    """Seed QSqrtN = sqrt(Electrons) (current solution) and QLambda = 0 -- call after the
-    CONVERGED classical solve, before the gamma ramp."""
-    n = np.asarray(ds.get_node_model_values(device=device, region=region, name="Electrons"))
-    ds.set_node_values(device=device, region=region, name="QSqrtN",
-                       values=list(np.sqrt(np.maximum(n, 0.0))))
-    ds.set_node_values(device=device, region=region, name="QLambda",
-                       values=[0.0] * n.size)
+def seed_dg_from_solution(device: str, region: str, *, walls=(),
+                          u_floor_rel: float = 1.0e-6) -> None:
+    """Seed the unipolar DG variables from the CURRENT (converged classical) solution -- call after
+    it, before the gamma ramp. The ONE seed kernel (_seed_dg, shared with seed_bipolar_dg):
+    QSqrtN = sqrt(Electrons), QLambda = 0; and, next to each insulator-wall contact in `walls`
+    (setup_dg_insulator_wall), the wall boundary-layer shape t(d) = max(tanh(d/L_q), u_floor_rel):
+    u = t sqrt(n), n = t^2 n, Lambda = V_t ln(t^2) (seed_bipolar_dg's docstring).
+
+    Which to use: walls=() (default) for a wall-free device (ohmic bars, junctions) -- exactly the
+    pre-v0.15 seed (same node values, gated); walls=(contact,) whenever the region has an insulator
+    wall: the flat seed against the wall converges too, but slower (measured on the 4e26 ITO bar's
+    first gamma step: 27 Newton iterations flat vs 4-23 seeded, both to the same solution)."""
+    _seed_dg(device, region, walls=walls, u_floor_rel=u_floor_rel, who="seed_dg_from_solution")
 
 
 def set_dg_gamma(device: str, region: str, frac: float) -> None:
-    """Scale b_dg to `frac` of its full value (the gamma-ramp convergence aid; frac in [0,1]).
-    When a hard wall is present (setup_dg_hard_wall), its Lambda pin co-ramps with the same
-    fraction -- a full-depth pin against a small-gamma bulk overflows the wall-edge
-    Bernoulli during Newton transients."""
+    """Scale b_dg (and a bipolar region's b_dg_p) to `frac` of its full value (the gamma-ramp
+    convergence aid; frac in [0,1]). LEGACY (removed with the setup_dg_hard_wall shim in v0.16): a
+    device that still carries the old hard wall's `wall_lambda_pin_full` device parameter (a script
+    that built the old rows itself) gets that pin co-ramped with the same fraction; no library code
+    creates the parameter any more, so for every wall this is a no-op."""
     if not (0.0 <= frac <= 1.0):
         raise ValueError("set_dg_gamma: frac must be in [0, 1]")
     # D2d: a bipolar DG region (setup_bipolar_dg) may carry the electron b_dg, the hole b_dg_p, or
@@ -416,6 +386,11 @@ def _repoint_region_current(device: str, region: str, eq: str, cur_dg: str) -> N
         raise ValueError("setup_bipolar_dg: region {!r} has no recorded {} -- a bipolar drift-"
                          "diffusion region (physics_bipolar_dd.setup_bipolar_region) is required"
                          .format(region, eq))
+    if rec[0]["kwargs"].get("node_model") in ("QE_n", "QE_p"):
+        # v0.15 (plan 4.4.3): re-pointing would bolt the DG flux onto the algebraic closure row
+        raise ValueError("setup_bipolar_dg: {} on region {!r} is closed by physics_bipolar_dd."
+                         "setup_quasi_equilibrium_carrier -- call setup_bipolar_dg BEFORE the closure "
+                         "(it then includes the carrier's Lambda)".format(eq, region))
     kw = dict(rec[0]["kwargs"])
     kw["edge_model"] = cur_dg
     ds.delete_equation(device=device, region=region, name=eq)
@@ -450,9 +425,13 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
             peak depth (x SP)      gamma = 1: 0.67 / 0.68          GAMMA_WALL: 0.84 / 0.82
             (classical DD: sheet +177 % / +125 %, centroid -64 % / -56 %, peak AT the wall)
         and at N = 1e23, 0.075 V GAMMA_WALL is within 1.5 % for both carriers.
-      * Not validated: STRONG INVERSION (the coupled Newton converges only up to weak inversion in
-        1-D: 0.60 V on 3e23 m^-3 p-type converges, 0.70 V fails -- so the "inversion" use of
-        GAMMA_WALL is the same wall physics, inferred, not measured); DEGENERATE Fermi-Dirac beyond
+      * STRONG INVERSION (v0.15, plan 4.4.3): the full coupled Newton converges only up to weak
+        inversion in 1-D (0.60 V on 3e23 m^-3 p-type; 0.70 V fails: a near-null minority mode). For a
+        MOS capacitor close the carriers with physics_bipolar_dd.setup_quasi_equilibrium_carrier
+        (AFTER this call; both carriers when both carry DG) -- it then reaches 1.3 V. Against the
+        Schrodinger-Poisson inversion oracle (validation/bipolar_density_gradient.py GATE G) GAMMA_WALL
+        is the better gamma there too; the measured fidelity is in that gate's output and the audit
+        note docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md. Not validated: DEGENERATE Fermi-Dirac beyond
         GATE C's regime (with fd_enhancement gamma also absorbs the degeneracy calibration; GATE C
         peaks at c/N_c = 0.37-0.59 and lands within 5.6 %, a regime result, not a derivation);
         GAMMA_WALL in a wall-free smooth-potential problem; 2-D / 3-D (only 1-D oracles).
@@ -489,6 +468,12 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
     if "Holes" not in ds.get_node_model_list(device=device, region=region):
         raise ValueError("setup_bipolar_dg: region {!r} is not a bipolar region (no Holes); use "
                          "setup_dg_quantum_correction for a unipolar one".format(region))
+    for key, m in (("electrons", m_eff_n_kg), ("holes", m_eff_p_kg)):
+        if m is not None:                    # refuse BEFORE installing anything (v0.15 plan 4.4.3)
+            rec = _R.recorded(device, _BIPOLAR_DG[key]["eq"], scope="region", loc=region)
+            if rec and rec[-1]["kwargs"].get("node_model") in ("QE_n", "QE_p"):
+                _repoint_region_current(device, region, _BIPOLAR_DG[key]["eq"],
+                                        _BIPOLAR_DG[key]["cur_dg"])      # raises the closure message
     done = []
     for key, m, g in (("electrons", m_eff_n_kg, gamma_n), ("holes", m_eff_p_kg, gamma_p)):
         if m is None:
@@ -581,9 +566,14 @@ def _contact_nodes(device: str, region: str, contact: str) -> np.ndarray:
     return np.unique(np.asarray([i for e in el for i in e], dtype=np.int64))
 
 
+# ---- walls: THE density-gradient insulator wall, for unipolar AND bipolar regions (D2d; since v0.15
+# also the unipolar wall -- setup_dg_hard_wall is a deprecated shim onto it; the name is kept,
+# decision 53 / D2-c) ---------------------------------------------------------------------------------
+
 def setup_dg_insulator_wall(device: str, contact: str, *, u_floor_rel: float = 1.0e-6) -> None:
     """IMPENETRABLE semiconductor/insulator wall for every DG carrier of the contact's region
-    (bipolar DG; D2d) -- the infinite-barrier limit of a gate oxide, where the confined carrier's
+    (unipolar setup_dg_quantum_correction or bipolar setup_bipolar_dg) -- the infinite-barrier limit
+    of a gate oxide, where the confined carrier's
     wavefunction (and so u = sqrt(c)) vanishes. `contact` is the DEVSIM contact tagging the
     semiconductor's boundary nodes there; its Potential row is the caller's (a surface-potential
     Dirichlet, a gate Robin row, or none = zero field), and NO current crosses it.
@@ -596,15 +586,19 @@ def setup_dg_insulator_wall(device: str, contact: str, *, u_floor_rel: float = 1
       * c row      : the NATURAL continuity row -- zero normal flux through the insulator.
     Lambda(wall) is therefore not pinned at all: it is the value that makes the wall edge's SG flux
     vanish with c(wall) = u_floor^2, i.e. Lambda_wall ~ V_t ln(u_floor^2 / c_cl) (the finite,
-    floor-dependent stand-in for the physical log divergence -- u Lambda -> 0 at the wall; see
-    setup_dg_hard_wall's docstring). The floor only fixes the wall node's own (dead) density; the
-    profile beyond the wall node does not depend on it (gated in tests/test_bipolar_density_gradient.py).
+    floor-dependent stand-in for the physical log divergence: the frozen-potential first integral
+    (u')^2 = (V_t/b)(u^2 ln(u^2/n0) - u^2 + n0) keeps u'(wall) finite while Lambda = V_t ln(u^2/n0)
+    diverges, u Lambda -> 0). The floor only fixes the wall node's own (dead) density; the profile
+    beyond the wall node does not depend on it (gated in tests/test_bipolar_density_gradient.py and,
+    unipolar, tests/test_density_gradient.py). Seed with seed_bipolar_dg / seed_dg_from_solution
+    (walls=(contact,)).
 
-    Why not setup_dg_hard_wall's rows: there the CARRIER row is pinned (c = u^2) and Lambda is pinned
-    to a regularization depth, so the wall node is a carrier SINK whose SG flux is driven by the pinned
-    Lambda jump -- the spurious wide-depletion branch it documents. Here the continuity row stays
-    natural, so the wall conserves carriers by construction. (setup_dg_hard_wall itself is untouched --
-    unipolar byte-identity.) Works on any region carrying DG carriers (unipolar QSqrtN included)."""
+    Why not the retired setup_dg_hard_wall rows: there the CARRIER row was pinned (c = u^2) and Lambda
+    to a regularization depth, so the wall node was a carrier SINK whose SG flux was driven by the
+    pinned Lambda jump -- a spurious wide-depletion branch (deficit 23-28 n0 L_q against the closed
+    form's 1.187). Here the continuity row stays natural, so the wall conserves carriers by
+    construction (wall-edge current <= 1e-14 of q mu n0 V_t/L_q, measured). On a carrier closed by
+    physics_bipolar_dd.setup_quasi_equilibrium_carrier the natural row IS the quasi-equilibrium row."""
     if not (0.0 < u_floor_rel < 1.0):
         raise ValueError("setup_dg_insulator_wall: u_floor_rel must be in (0, 1)")
     region = ds.get_region_list(device=device, contact=contact)[0]
@@ -646,10 +640,19 @@ def seed_bipolar_dg(device: str, region: str, *, walls=(), u_floor_rel: float = 
     (L_q = sqrt(b/V_t) of the carrier, at the CURRENT b): u = t sqrt(c_cl), c = t^2 c_cl and
     Lambda = V_t ln(t^2), the frozen-potential Boltzmann relation, so the seed's wall-edge fluxes
     already vanish. Seeding the flat classical profile against a wall overflows the first Newton
-    transients (the unipolar setup_dg_hard_wall experience)."""
+    transients (the retired unipolar hard wall's experience). The kernel (_seed_dg) is shared with
+    the unipolar seed_dg_from_solution."""
+    _seed_dg(device, region, walls=walls, u_floor_rel=u_floor_rel, who="seed_bipolar_dg")
+
+
+def _seed_dg(device: str, region: str, *, walls, u_floor_rel: float, who: str) -> None:
+    """THE density-gradient seed kernel (seed_bipolar_dg, seed_dg_from_solution): every DG carrier
+    of the region (bipolar_dg_carriers -- a unipolar region's QSqrtN + ElectronCurrentDG count as
+    'electrons'). walls=() writes u = 1.0 * sqrt(max(c, 0)) and Lambda = V_t ln(1) = 0.0: bitwise the
+    pre-v0.15 unipolar seed (gated)."""
     keys = bipolar_dg_carriers(device, region)
     if not keys:
-        raise ValueError("seed_bipolar_dg: region {!r} carries no bipolar DG carrier".format(region))
+        raise ValueError("{}: region {!r} carries no density-gradient carrier".format(who, region))
     v_t = float(ds.get_parameter(device=device, region=region, name="V_t"))
     nodes = set(ds.get_node_model_list(device=device, region=region))
     xyz = np.stack([np.asarray(ds.get_node_model_values(device=device, region=region, name=a))

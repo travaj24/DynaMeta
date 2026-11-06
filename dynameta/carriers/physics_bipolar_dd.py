@@ -1328,3 +1328,193 @@ def setup_contact_ohmic_bipolar_circuit(device: str, contact: str, *,
     _R.record_contact_equation(device, contact, name="HoleContinuityEquation", node_model=ch,
                                edge_current_model="HoleCurrent", circuit_node=node_name)
     return source_name, node_name
+
+
+# =================================================================================================
+# v0.15 (plan 4.4.3, decisions 48/49): the QUASI-EQUILIBRIUM carrier closure.
+#
+# A 1-D MOS capacitor in strong inversion has no DC current path, so its DC state is thermodynamic
+# equilibrium: the minority carrier's quasi-Fermi level is the body contact's everywhere. The full
+# drift-diffusion row carries that answer through an equation that pins the inversion layer only via
+# bulk minority diffusion and SRH generation -- a near-null mode of the DC Jacobian whose equilibrated
+# sigma_min falls ~e-fold per V_t of band bending (3.8e-11 at 0.30 V, 2.0e-17 at 0.76 V on 3e23 p-Si),
+# so Newton fails near 0.78-0.80 V in double precision (and DG near 0.70 V). Quasi-Fermi / Slotboom
+# variables are a change of variables of the SAME Jacobian and do not help (P4 1.1, measured). The
+# closure REMOVES the degree of freedom: the carrier's continuity row becomes the algebraic statement
+#     electrons:  R_n = phi_ref - [ (psi + D_c + Lambda_n) - V_t (ln(n/N_c) + Delta(n/N_c) + ln(N_c/n_i)) ]
+#     holes:      R_p = [ (psi - D_v - Lambda_p) + V_t (ln(p/N_v) + Delta(p/N_v) + ln(N_v/n_i)) ] - phi_ref
+# i.e. the carrier's own quasi-Fermi level (the bracket, the QE_n_imref / QE_p_imref node model) equals
+# phi_ref. The activity ln u + Delta(u) is physics_heterojunction.setup_log_activity -- the ONE DEVSIM
+# form of the Fermi-Dirac built-in correction (closed form with arctan by half-angle reductions; DEVSIM
+# has no atan) whose exact derivative g(u)/c is this row's Jacobian (plan 5.6: reused, not rewritten).
+# D_c / D_v are the bandgap-narrowing quasi-fields when the region carries them (BgnDc / BgnDv), Lambda
+# the density-gradient quantum potential when the region carries that DG carrier.
+#
+# Discrete exactness (Boltzmann): the zero-current Scharfetter-Gummel edge relation n1/n0 = exp(-v) of
+# the full model IS this row's ratio on every edge, so wherever the full model converges the two give
+# the same discrete solution (gated to 1e-10, tests/test_quasi_equilibrium.py). With the FD g-factor the
+# full model's edge-mean g makes them differ at O(h^2 g'), a discretization difference.
+# =================================================================================================
+
+_QE = {"electrons": dict(var="Electrons", eq="ElectronContinuityEquation", dos="N_dos", lam="QLambda",
+                         band="BgnDc", sign="+", model="QE_n"),
+       "holes": dict(var="Holes", eq="HoleContinuityEquation", dos="N_dos_p", lam="QLambdaP",
+                     band="BgnDv", sign="-", model="QE_p")}
+_QE_SAVED: dict = {}      # (device, region, eq) -> (eq_registry generation, recorded continuity kwargs)
+
+
+def quasi_equilibrium_carriers(device: str, region: str) -> tuple:
+    """The carriers of `region` currently closed by setup_quasi_equilibrium_carrier (() if none)."""
+    out = []
+    for key, sp in _QE.items():
+        rec = _R.recorded(device, sp["eq"], scope="region", loc=region)
+        if rec and rec[-1]["kwargs"].get("node_model") == sp["model"]:
+            out.append(key)
+    return tuple(out)
+
+
+def _ohmic_pins(device: str, region: str, eq: str) -> list:
+    """Contacts of `region` whose recorded contact equation `eq` PINS the carrier (a node_model)."""
+    out = []
+    for c in ds.get_contact_list(device=device):
+        if ds.get_region_list(device=device, contact=c)[0] != region:
+            continue
+        if any(e["kwargs"].get("node_model") for e in _R.recorded(device, eq, scope="contact", loc=c)):
+            out.append(c)
+    return out
+
+
+def setup_quasi_equilibrium_carrier(device: str, region: str, carrier: str, *, contact: str,
+                                    imref_shift: "str | None" = None,
+                                    allow_imref_split: bool = False) -> str:
+    """Replace `carrier`'s continuity row on `region` ("electrons" | "holes") by the QUASI-EQUILIBRIUM
+    closure: at every node its quasi-Fermi level equals that of the ohmic `contact` (section header
+    above). Returns the name of the node model holding the carrier's quasi-Fermi level [V]
+    (QE_n_imref / QE_p_imref). Opt-in: nothing changes unless called.
+
+    WHEN TO USE IT. A carrier with no DC current path -- the minority carrier of an MOS capacitor
+    (1-D or a laterally uniform 2-D slice) in depletion and inversion, the low-frequency (quasi-static)
+    C-V, a MOSFET channel slice with an imposed imref (imref_shift). There the closure is EXACT (the DC
+    state is equilibrium) and it removes the near-null mode that makes the full model fail in strong
+    inversion: on 3e23 m^-3 p-Si the classical DD fails at 0.78-0.80 V of band bending and the bipolar
+    density-gradient at 0.70 V; closed, both reach >= 1.3 V (tests/test_quasi_equilibrium.py,
+    validation/bipolar_density_gradient.py GATE G). NOT a transport model: any device that carries a
+    current of this carrier (a diode, a MOSFET with source and drain, a photodetector) must keep the
+    full continuity row -- the closure then gives a wrong current-free answer.
+
+    What follows from it:
+      * DC and ssac: allowed. The row has no time term, i.e. the carrier follows the bias
+        instantaneously -- ssac on a closed device IS the low-frequency C-V (gated against dQ/dV).
+      * transient: the carrier is quasi-static (infinitely fast generation); fine for slow ramps of a
+        capacitor, wrong for anything that resolves the minority response time.
+      * noise_analysis REFUSES a closed region (the row has no Scharfetter-Gummel current; the noise
+        sources are not defined).
+      * get_contact_current on the closed carrier's equation is meaningless (no continuity).
+      * Gummel (dc_solve method="gummel") freezes/thaws the closed row like any carrier row.
+
+    contact : the ohmic contact (setup_contact_ohmic_bipolar) whose quasi-Fermi level the carrier
+        shares: phi_ref = <contact>_bias + the contact node's own fixed imref offset, READ from the
+        contact node at setup (so it includes everything the contact pins: the CELEC/CHOLE +1 floor,
+        the FD built-in correction, BGN, a degenerate contact's Boltzmann product). Call AFTER a
+        converged DC solve of the region (the contact rows must hold), after any BipolarOptions /
+        traps and after physics_density_gradient.setup_bipolar_dg when DG is used (the carrier's
+        Lambda then enters; setup_bipolar_dg refuses to run on an already-closed carrier). A
+        circuit-driven contact has no bias parameter and is refused.
+    imref_shift : optional name of a DEVICE parameter V_ch [V] added to phi_ref -- the imref split of a
+        MOSFET channel slice (phi_n = phi_body + V_ch).
+    allow_imref_split : the region has more than one ohmic contact pinning this carrier. The closure
+        then forces ONE quasi-Fermi level on the whole region while the other contacts pin their own
+        (no current flows between them): refused unless you pass True, which states that you know
+        (e.g. a source/drain-tied channel slice at equal bias)."""
+    if carrier not in _QE:
+        raise ValueError("setup_quasi_equilibrium_carrier: carrier must be 'electrons' or 'holes', got "
+                         "{!r}".format(carrier))
+    sp = _QE[carrier]
+    who = "setup_quasi_equilibrium_carrier({!r}, {!r})".format(region, carrier)
+    nodes = set(ds.get_node_model_list(device=device, region=region))
+    rec = _R.recorded(device, sp["eq"], scope="region", loc=region)
+    if "Holes" not in nodes or len(rec) != 1:
+        raise ValueError("{}: a bipolar drift-diffusion region (setup_bipolar_region) is "
+                         "required".format(who))
+    if rec[0]["kwargs"].get("node_model") == sp["model"]:
+        raise ValueError("{}: the carrier is already closed".format(who))
+    if ds.get_region_list(device=device, contact=contact)[0] != region:
+        raise ValueError("{}: contact {!r} is not on region {!r}".format(who, contact, region))
+    pins = _ohmic_pins(device, region, sp["eq"])
+    if contact not in pins:
+        raise ValueError("{}: contact {!r} does not pin {} (an ohmic contact is required)".format(
+            who, contact, sp["var"]))
+    bias = "{}_bias".format(contact)
+    if (_R.circuit_driven_contacts(device).get(contact)
+            or bias not in ds.get_parameter_list(device=device)):
+        raise ValueError("{}: contact {!r} has no bias parameter {!r} (circuit-driven contacts are not "
+                         "supported as the quasi-Fermi reference)".format(who, contact, bias))
+    others = [c for c in pins if c != contact]
+    if others and not allow_imref_split:
+        raise ValueError(
+            "{}: region {!r} has further ohmic contacts pinning {} ({}). The closure imposes ONE "
+            "quasi-Fermi level (contact {!r}'s) on the whole region, so it cannot carry a current "
+            "between them -- it is not a transport model. Keep the continuity row, or pass "
+            "allow_imref_split=True if a single imref is what you mean.".format(
+                who, region, sp["var"], ", ".join(repr(c) for c in others), contact))
+    if imref_shift is not None and imref_shift not in ds.get_parameter_list(device=device):
+        raise ValueError("{}: imref_shift {!r} is not a device parameter".format(who, imref_shift))
+
+    from dynameta.carriers.physics_heterojunction import setup_log_activity
+    fd = float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) > 0.0
+    act = setup_log_activity(device, region, sp["var"], sp["dos"], fd=fd)
+    lam = sp["lam"] if sp["lam"] in nodes else None
+    band = sp["band"] if sp["band"] in nodes else None
+    s = sp["sign"]
+    psi_eff = "Potential" + "".join(" {} {}".format(s, t) for t in (band, lam) if t)
+    vt_act = "V_t*({} + log({}/n_i))".format(act, sp["dos"])
+    imref = sp["model"] + "_imref"
+    ds.node_model(device=device, region=region, name=imref,
+                  equation="({}) {} {}".format(psi_eff, "-" if s == "+" else "+", vt_act))
+    # the fixed offset of the contact node's own quasi-Fermi level against its bias
+    from dynameta.carriers.physics_density_gradient import _contact_nodes
+    idx = _contact_nodes(device, region, contact)
+    phi_c = np.asarray(ds.get_node_model_values(device=device, region=region, name=imref))[idx]
+    c_c = np.asarray(ds.get_node_model_values(device=device, region=region, name=sp["var"]))[idx]
+    if not (np.all(np.isfinite(phi_c)) and np.all(c_c > 0.0)):
+        raise ValueError("{}: the contact node's state is not a converged solution -- solve the region "
+                         "first".format(who))
+    offset = float(np.mean(phi_c)) - float(ds.get_parameter(device=device, name=bias))
+    off_name = sp["model"] + "_offset"
+    ds.set_parameter(device=device, region=region, name=off_name, value=offset)
+    phi_ref = "({} + {}{})".format(bias, off_name, " + " + imref_shift if imref_shift else "")
+    row = ("{} - {}".format(phi_ref, imref) if s == "+" else "{} - {}".format(imref, phi_ref))
+    m = sp["model"]
+    ds.node_model(device=device, region=region, name=m, equation=row)
+    # exact Jacobian, written out: dR/dc = V_t d(activity)/dc (= V_t g(u)/c), dR/dpsi = -/+1,
+    # dR/dLambda = -1 (both carriers: R_n = phi_ref - psi - Lambda_n + ..., R_p = psi - Lambda_p + ...)
+    ds.node_model(device=device, region=region, name="{}:{}".format(m, sp["var"]),
+                  equation="V_t*{}:{}".format(act, sp["var"]))
+    ds.node_model(device=device, region=region, name="{}:Potential".format(m),
+                  equation="-1" if s == "+" else "1")
+    if lam:
+        ds.node_model(device=device, region=region, name="{}:{}".format(m, lam), equation="-1")
+    _QE_SAVED[(device, region, sp["eq"])] = (_R.generation(device), dict(rec[0]["kwargs"]))
+    ds.delete_equation(device=device, region=region, name=sp["eq"])
+    _R.forget(device, sp["eq"], loc=region, scope="region")
+    _R.record_region_equation(device, region, name=sp["eq"], variable_name=sp["var"], node_model=m,
+                              variable_update="positive")
+    return imref
+
+
+def delete_quasi_equilibrium_carrier(device: str, region: str, carrier: str) -> None:
+    """Undo setup_quasi_equilibrium_carrier: re-create the carrier's recorded continuity equation
+    (every kwarg as it was: flux, generation composite, time term). The QE node models stay defined
+    (unused). Re-solve afterwards; the closed solution is the full model's equilibrium seed."""
+    if carrier not in _QE:
+        raise ValueError("delete_quasi_equilibrium_carrier: carrier must be 'electrons' or 'holes'")
+    sp = _QE[carrier]
+    saved = _QE_SAVED.get((device, region, sp["eq"]))
+    stale = saved is None or saved[0] != _R.generation(device)
+    if carrier not in quasi_equilibrium_carriers(device, region) or stale:
+        raise ValueError("delete_quasi_equilibrium_carrier: {!r} is not closed on region {!r}".format(
+            carrier, region))
+    ds.delete_equation(device=device, region=region, name=sp["eq"])
+    _R.forget(device, sp["eq"], loc=region, scope="region")
+    _R.record_region_equation(device, region, **saved[1])
+    del _QE_SAVED[(device, region, sp["eq"])]
