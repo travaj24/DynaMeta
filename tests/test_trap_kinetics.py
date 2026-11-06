@@ -1496,3 +1496,68 @@ def test_gate_step_transient_is_the_ng_circuit():
     assert tq[n - 1] < 1e-3 * taus and abs(last) < 0.1, (tq[n - 1] / taus, last)
     V.fresh()
     _R.clear("k25q")
+
+
+# ---------------------------------------------------------------------------------------------------
+# DC well-posedness (the floating-body hook, plan 4.4.2): the trap rows are candidates that are PINNED
+# ---------------------------------------------------------------------------------------------------
+def test_kinetic_trap_rows_are_pinned_candidates_of_the_well_posedness_check():
+    """The invariant of K1-K2 made a gate (well_posedness LOCAL candidates, v0.15 K3/K4): every free node-only
+    equation -- the kinetic trap rows TrapEquation_* (bulk) and ItEquation* (interface bins, masked) -- is a
+    static candidate checked row by row, and the numeric pass REFUTES it (no all-zero equilibrated row: each
+    row is pinned by its own capture and emission, d(R_n - R_p)/dw < 0, or by the off-interface mask), so a
+    kinetic device passes. ADVERSARIAL: the same device with the trap row's rate terms removed (TrapNode_trap0
+    and its derivatives = 0: no capture, no emission) raises IllPosedDCError naming TrapEquation_trap0 and
+    every node; and a FLOATING kinetic body (Potential-only contacts: no carrier is pinned) raises with the
+    trap rows in the conserved sum (the left null vector carries electron, hole and trap rows)."""
+    import test_traps as TT
+    from dynameta.carriers import well_posedness as WP
+    from dynameta.carriers import physics_equilibrium as PE
+    tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e22, kind="acceptor", tau_n0_s=3e-9, tau_p0_s=5e-9,
+                      dynamic=True)
+    dev = _diode("kwp", (tr,), lines=DIODE_LINES, doping=DIODE_DOP, ae=1e10)
+    rep = WP.check_dc_well_posed(dev)
+    rows = [g for g in rep.candidates if g[0].side == "row"]
+    assert [g[0].equation for g in rows] == ["TrapEquation_trap0"]
+    assert rep.well_posed and rep.assembled
+    ref = [m for m in rep.refuted if m.side == "row"]
+    assert ref and ref[0].r > 1e6 * WP.TOL_SINGULAR                  # refuted by many decades
+    nnode = len(_vals(dev, "x"))
+    for m in [m for m in ds.get_node_model_list(device=dev, region="r") if m.startswith("TrapNode_trap0")]:
+        ds.node_model(device=dev, region="r", name=m, equation="0")   # the row's rate terms removed
+    with pytest.raises(WP.IllPosedDCError, match="TrapEquation_trap0") as ei:
+        WP.check_dc_well_posed(dev)
+    assert "at {} node(s)".format(nnode) in str(ei.value)
+    V.fresh()
+    _R.clear(dev)
+    # the interface bins (masked region-wide rows) of the K2 MOS
+    psib = TT._mos("kwpm", PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12, dynamic=True, kinetic_bin_eV=0.2))
+    rep = WP.check_dc_well_posed("kwpm")
+    assert rep.well_posed and sum(g[0].equation.startswith("ItEquation") for g in rep.candidates) == 6
+    assert psib < 0.0
+    TT._clear("kwpm")
+    # a floating kinetic body: Potential-only contacts, nothing pins a carrier
+    m = "kfl_m"
+    ds.create_1d_mesh(mesh=m)
+    ds.add_1d_mesh_line(mesh=m, pos=0.0, ps=1e-8, tag="lo")
+    ds.add_1d_mesh_line(mesh=m, pos=2e-7, ps=1e-8, tag="hi")
+    ds.add_1d_contact(mesh=m, name="lo", tag="lo", material="metal")
+    ds.add_1d_contact(mesh=m, name="hi", tag="hi", material="metal")
+    ds.add_1d_region(mesh=m, material="Si", region="r", tag1="lo", tag2="hi")
+    with V.quiet():
+        ds.finalize_mesh(mesh=m)
+        ds.create_device(mesh=m, device="kfl")
+    ds.node_model(device="kfl", region="r", name="NetDoping", equation="1e22")
+    with V.quiet():
+        BP.setup_bipolar_region("kfl", "r", eps_static=11.7, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
+                                mobility_p_m2Vs=0.048, tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=False,
+                                traps=(tr,))
+        BP.setup_equilibrium_seed_models("kfl", "r")
+        PE.setup_contact("kfl", "lo")
+        PE.setup_contact("kfl", "hi")
+    _seed("kfl")
+    with pytest.raises(WP.IllPosedDCError, match="TrapEquation_trap0") as ei:
+        WP.check_dc_well_posed("kfl")
+    assert "conserved" in str(ei.value)
+    V.fresh()
+    _R.clear("kfl")

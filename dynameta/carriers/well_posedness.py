@@ -18,6 +18,14 @@ THE NULL MODES (exact, structural):
     connected component, and no row that depends on the ABSOLUTE potential (drift-diffusion: SG fluxes see
     only differences): v = 1 on its Potential columns gives J v == 0 -- a pure-Neumann Poisson. (An
     equilibrium-physics region, n = n(psi), is NOT singular: n(psi) fixes the level.)
+  * LOCAL (a node-only row with no DC coupling). An equation without an edge/element flux and with no
+    contact equation -- a kinetic trap's occupancy row TrapEquation_* / ItEquation* (physics_traps,
+    v0.15) -- is NEVER part of a conserved sum (no flux to telescope), but it is DC-singular node by node
+    when its row vanishes: the trap row is pinned only by its own capture and emission, d(R_n - R_p)/dw =
+    -[(n + n1')/tau_n0 + (p + p1')/tau_p0] (1 - f)^2 < 0 (the masked off-interface rows NodeVolume (w - 1)
+    are pinned by the mask). Such a row with its rate terms missing (a hand-built or edited trap equation)
+    leaves w undetermined: e_i is a left null vector. Every such row is checked individually (an all-zero
+    equilibrated row, r = 0).
 A NEAR-singular Jacobian (a weakly pinned minority -- the MOS inversion layer, coupled to the body only
 through generation ~1e-17 of the matrix scale: plan P4 1.1) is not a setup error and is never raised
 here: `diagnose_singular` explains it, and dc_solve.solve_dc appends that diagnosis to a stalled Newton
@@ -114,6 +122,12 @@ class NullMode:
 
     def describe(self) -> str:
         regs = sorted({b.region for b in self.weights})
+        if self.side == "row":
+            return ("the DC rows of {} in region(s) {} vanish at {} node(s) (no rate term pins their "
+                    "variable {} there: a node-only equation without capture / emission, e.g. a kinetic trap "
+                    "row whose terms were removed)".format(sorted({b.equation for b in self.weights}), regs,
+                                                            int(next(iter(self.weights.values()))),
+                                                            sorted({b.variable for b in self.weights})))
         if self.side == "right":
             return ("Potential of region(s) {} has no Dirichlet anywhere and no row depends on its "
                     "absolute level (pure-Neumann Poisson): J v = 0 for v = 1 on those Potential "
@@ -219,6 +233,9 @@ def _static(device: str):
             comps.setdefault(uf.find(k), []).append(k)
     for ks in comps.values():
         right.append(tuple(Block(device, r, e, POTENTIAL, "right") for r, e in ks))
+    # LOCAL candidates: every free node-only equation (no flux) -- a kinetic trap row -- row by row
+    for r, e in sorted(k for k in free if eqs[k][0] != POTENTIAL and not eqs[k][1]):
+        right.append((Block(device, r, e, eqs[(r, e)][0], "row"),))
     return key, left, right
 
 
@@ -273,9 +290,22 @@ def _null_modes(J, row, cp, eq, group: Sequence[Block], tol: float):
     equilibrated 2-norm, i.e. within round-off of the factorization's own backward error.
     Returns ([(r, {block: coeff})], best refuted mode or None)."""
     import scipy.sparse as sp
-    dr, dc, _, smax = eq
+    dr, dc, A_eq, smax = eq
     side = group[0].side
     n = J.shape[0]
+    if side == "row":                                   # one node-only block, row by row
+        blk = group[0]
+        k = np.asarray(ds.get_equation_numbers(device=blk.device, region=blk.region,
+                                               equation=blk.equation), dtype=np.int64)
+        k = k[(row[k] == k) | (cp[k] != 0)]
+        if k.size == 0:
+            return [], None
+        Ar = A_eq.tocsr()[k]
+        rnorm = np.sqrt(np.asarray(Ar.multiply(Ar).sum(axis=1)).ravel()) / smax
+        dead = rnorm <= tol
+        if np.any(dead):
+            return [(float(np.min(rnorm)), {blk: float(np.count_nonzero(dead))})], None
+        return [], (float(np.min(rnorm)), {blk: 0.0})
     idx, bid = [], []
     for b, blk in enumerate(group):
         if side == "left":
@@ -385,6 +415,11 @@ def _message(rep: WellPosedReport) -> str:
             "intended, acknowledge it with dynameta.carriers.well_posedness.allow_floating(device, region, "
             "reason=...) and prefer a transient solve from a known charge (there is no DC charge "
             "constraint row: decision 57).")
+    if any(m.side == "row" for m in rep.confirmed):
+        lines.append(
+            "  Fixes: give the node-only equation its rate terms back (a kinetic trap row needs its capture "
+            "and emission: physics_traps.install_bulk_traps / install_interface_traps build them), or remove "
+            "the equation (and its variable).")
     if any(m.side == "right" for m in rep.confirmed):
         lines.append(
             "  Fixes: give the component a Potential Dirichlet (physics_equilibrium.setup_contact or an "
