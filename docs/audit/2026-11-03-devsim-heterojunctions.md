@@ -217,6 +217,16 @@ v0.14 chi-temperature guard (`physics_heterojunction.affinity_temperature_tags`)
 E_c(T), TE conductance with an independent barrier, bitwise identity at T_ref): docs/audit/
 2026-11-06-v0.15-band-temperature.md, tests/test_band_temperature.py, tests/test_devsim_band_temperature.py.
 
+## 4c. Noise of a thermionic interface (v0.15, 2026-11-06)
+
+Each thermionic flux model `<iface>_HJ<n|p>` now carries a pair-rate interface model `<iface>_HJ<n|p>_pair`
+= A*T^2 (exp(w0) + exp(w1)) = J_01 + J_10, written from the same w0 / w1 strings
+(`physics_heterojunction.thermionic_flux_and_pair`). It is referenced by no equation, so DC and ssac are
+bit-identical (measured across versions). `noise_analysis` turns it into the shot-noise source
+S = 2q (J_01 + J_10) A |y_r0 - y_r1|^2 per node pair (mechanisms `te_n` / `te_p`, on by default; reported in
+`NoiseSpectrum.by_interface`), which closes the v0.14 strict xfail (the FDT missed by -0.69 at 1 Hz). Details,
+the measured interface areas and the gates: docs/audit/2026-11-06-v0.15-thermionic-shot-noise.md.
+
 ## 5. Limits
 
 * TE magnitude on a degenerate emitting side (MB tail, overestimates); equilibrium exact.
