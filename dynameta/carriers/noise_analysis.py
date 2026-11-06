@@ -91,18 +91,27 @@ is called, and it only READS the device (its DC operating point and models are l
      edge currents share ONE xi, so the edge form drops their cross terms. For a uniform field at angle
      theta to the mesh axes the edge sum is (cos^4 + sin^4) of the truth -- MEASURED on 6595bde (uniform
      2-D DD resistor on a right-isosceles mesh, exact DEVSIM volumes): S f N/(alpha I^2) = 1.0000 at
-     0 deg, 0.5000 at 45 deg; 0.688 on the gmsh-tet 3-D bar of gate A. Now, with c_eT the element edge
-     couple (ElementEdgeCouple), a_e = J_e / sqrt(n_eff) (the edge-projected current and the SG
-     density above) and V_T = Sum_e c_eT L_e / d (the element volume; d = dimension):
+     0 deg, 0.5000 at 45 deg; 0.688 on the gmsh-tet 3-D bar of gate A. Now, with a_e = J_e / sqrt(n_eff)
+     (the edge-projected current and the SG density above), V_T the element volume and c_eT the P1
+     (linear-FEM) element couple of edge e = (i, j) in T,
+            c_eT = -V_T L_e grad(lambda_i) . grad(lambda_j)      (lambda: barycentric coordinates),
             S_T = (alpha_H / f) |Sum_{e in T} c_eT a_e (y_0 - y_1)|^2 / V_T .
-     Sum_e c_eT L_e t_e t_e^T = V_T I on a well-centred element (the box-scheme identity), so for a
-     uniform J and n this is exactly V_T alpha_H (J . grad y)^2 / (n f) at any orientation. In 1-D the
-     element IS the edge (V = c L) and S_T is the old edge term identically; on a rectilinear 2-D
-     right-triangle mesh (and Kuhn tets in 3-D) every element holds one edge per axis, so an
-     axis-aligned current reproduces the edge sum too. MEASURED after the fix: 45 deg 1.0000 (to
-     3.6e-10, the 1 mV drift residual the aligned case also shows); 1-D gate F and the aligned 2-D
-     cases unchanged to round-off. Exact only on well-centred elements, like the volumes themselves:
-     the gmsh-tet 3-D bar of gate A (sum NodeVolume = 1.225 x its true volume) reads 1.055 (was 0.688).
+     Sum_e c_eT L_e t_e t_e^T = V_T I holds EXACTLY on every simplex in any dimension (it is
+     Sum_i x_i grad(lambda_i)^T = I), so Sum_e c_eT a_e (y_0 - y_1) = -V_T j_T . grad y_T with j_T the
+     element vector the edge projections determine (exact for a constant J / sqrt(n)) and grad y_T the
+     element gradient of the adjoint field: for a uniform J and n, S_T = V_T alpha_H (J . grad y)^2 / (n f)
+     at any orientation, on any element shape. WHY NOT DEVSIM's circumcentric ElementEdgeCouple (the
+     2026-11-04 form): in 2-D it IS the cotangent weight above (unsigned on obtuse triangles unless
+     devsim_geometry.apply_exact_geometry is applied), but in 3-D its per-element tensor has only the
+     right TRACE -- a Kuhn path tet gives diag(0.75, 1.5, 0.75) V_T, and an axis-aligned current on the
+     default Kuhn tensor mesh read S f N / (alpha I^2) = 1.125000 (MEASURED 2026-11-06; v0.14 blocker).
+     The couples come from the node coordinates (x, y, z), not from DEVSIM's geometry models. In 1-D the
+     element IS the edge (V = c L) and S_T is the old edge term identically. MEASURED after the fix
+     (tests/test_devsim_noise_hooge_3d.py): Kuhn bar -5.80e-9 (the SG density term v^2/12, derived
+     budget 5.81e-9), rotated Kuhn bar the same, an oblique rotated-lattice Delaunay box with exact
+     geometry 2.7e-9 (circumcentric: +0.055); 2-D results unchanged to <= 7e-16 (lattice 0 / 45 deg,
+     obtuse Delaunay with exact geometry). Like every source here it is only as good as DEVSIM's DC and
+     adjoint solve: on a non-well-centred mesh WITHOUT apply_exact_geometry those are wrong themselves.
    * GR is a node source: residual perturbation -q V_i dU (electrons), +q V_i dU (holes), so
             S_i = q^2 V_i |y_p,i - y_n,i|^2 2 (G + R)_i .
    * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
@@ -142,7 +151,8 @@ MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
   D SRH GR slab: GR part == ambipolar Lorentzian (with contact shorting) to 3e-5, f/f_c 1e-3 .. 100.
   E biased resistor S = 4kT G (1 + 6e-6) vs forward diode S = 2qI = 0.502 x 4kT G_d.
   F Hooge S = alpha I^2/(N f) to 7.6e-6 (1-D); 2-D at 0 and 45 deg to the mesh to 3.6e-10
-    (tests/test_devsim_noise_hooge.py; the pre-fix edge sum gave 0.5 at 45 deg).
+    (tests/test_devsim_noise_hooge.py; the pre-fix edge sum gave 0.5 at 45 deg); F3 3-D Kuhn bar to
+    5.8e-9 (validation gate F3, tests/test_devsim_noise_hooge_3d.py; circumcentric couples gave 1.125).
   G 2-D layered metasurface (FD ITO): FDT to 1.3e-11 at flat band, 3.7e-5 at +2 V accumulation (the
     FD g-factor SG is Nyquist-consistent only to O(h^2)).
 
@@ -378,11 +388,38 @@ def _contact_nodes(device: str, region: str, contact: str) -> np.ndarray:
 # core
 # =====================================================================================================
 
+def _p1_element_couples(X, a, b):
+    """P1 (linear-FEM) element edge couples of simplices -- the weights of the Hooge element sum
+    (module doc, item 3). X: (n_el, d+1, d) vertex coordinates; a, b: (n_el, k) local vertex indices of
+    each element edge's two ends. Returns (W, V): W[T, k] = -V_T L_k grad(lambda_a) . grad(lambda_b)
+    (signed; lambda the barycentric coordinates, L_k the edge length) and V_T = |det|/d! the element
+    volume. For every simplex in any dimension Sum_k W_k L_k t_k t_k^T = V_T I exactly (Sum_i x_i
+    grad(lambda_i)^T = I), which the circumcentric ElementEdgeCouple satisfies per element only in
+    2-D (there W IS it: L cot(theta)/2, signed). A degenerate (zero-volume) element gets W = V = 0."""
+    X = np.asarray(X, dtype=np.float64)
+    n_el, d = X.shape[0], X.shape[2]
+    D = X[:, 1:] - X[:, :1]                                     # rows: x_k - x_0, k = 1..d
+    det = np.linalg.det(D)
+    good = np.abs(det) > 1e-12 * np.prod(np.linalg.norm(D, axis=2), axis=1)
+    G = np.zeros((n_el, d + 1, d))
+    if np.any(good):
+        Dinv = np.linalg.inv(D[good])                           # column k-1 = grad(lambda_k)
+        G[good, 1:] = np.swapaxes(Dinv, 1, 2)
+        G[good, 0] = -G[good, 1:].sum(axis=1)
+    V = np.where(good, np.abs(det) / math.factorial(d), 0.0)
+    rows = np.arange(n_el)[:, None]
+    Ga, Gb = G[rows, a], G[rows, b]                             # (n_el, k, d)
+    L = np.linalg.norm(X[rows, b] - X[rows, a], axis=2)
+    return -V[:, None] * L * np.einsum("tkd,tkd->tk", Ga, Gb), V
+
+
 def _hooge_elements(device: str, region: str, i0, i1, couple, length):
     """Per-element view of the edges for the rank-one Hooge source (module doc, item 3):
-    (E, C, V, nodes) with E[T, k] the global edge index of element T's k-th edge, C[T, k] its element
-    couple c_eT, V[T] = Sum_k C L / d the element volume, nodes[T] the element's nodes. In 1-D DEVSIM
-    has no element models and the element IS the edge (C = EdgeCouple, V = c L)."""
+    (E, C, V, nodes) with E[T, k] the global edge index of element T's k-th edge, C[T, k] its P1 element
+    couple c_eT (_p1_element_couples: -V_T L grad(lambda_i) . grad(lambda_j), from the node coordinates;
+    NOT DEVSIM's circumcentric ElementEdgeCouple, which in 3-D gets only the trace of the element's
+    conductance tensor right), V[T] the element volume, nodes[T] the element's nodes. In 1-D DEVSIM has
+    no element models and the element IS the edge (C = EdgeCouple, V = c L)."""
     dim = int(ds.get_dimension(device=device))
     if dim == 1:
         return (np.arange(i0.size)[:, None], couple[:, None], couple * length,
@@ -393,7 +430,6 @@ def _hooge_elements(device: str, region: str, i0, i1, couple, length):
         ds.element_from_node_model(device=device, region=region, node_model="node_index")
     e0 = _elv(device, region, "node_index@en0").astype(np.int64)
     e1 = _elv(device, region, "node_index@en1").astype(np.int64)
-    cT = _elv(device, region, "ElementEdgeCouple")
     if made:
         for m in ds.get_element_model_list(device=device, region=region):
             if m.startswith("node_index@en"):
@@ -417,8 +453,11 @@ def _hooge_elements(device: str, region: str, i0, i1, couple, length):
                            "documented one -- the Hooge element assembly refuses to guess."
                            .format(region))
     E = order[pos].reshape(n_el, k)
-    C = cT.reshape(n_el, k)
-    return E, C, (C * length[E]).sum(axis=1) / dim, nodes
+    X = np.stack([_nv(device, region, ax) for ax in ("x", "y", "z")[:dim]], axis=1)[nodes]
+    a = np.argmax(nodes[:, :, None] == e0.reshape(n_el, k)[:, None, :], axis=1)
+    b = np.argmax(nodes[:, :, None] == e1.reshape(n_el, k)[:, None, :], axis=1)
+    C, V = _p1_element_couples(X, a, b)
+    return E, C, V, nodes
 
 
 class _RegionData:
@@ -510,6 +549,9 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     of a CURRENT-driven contact). `regions` defaults to every region carrying continuity equations.
     `mechanisms` picks the local sources (MECHANISMS); "hooge_n"/"hooge_p" are added automatically
     when hooge_alpha (the dimensionless Hooge parameter) is given. The DC state is not modified.
+    hooge_alpha works in 1-D, 2-D and 3-D on any simplex shape (per-element P1 couples, module doc item
+    3); on a non-well-centred 2-D / 3-D mesh (gmsh, Delaunay) apply devsim_geometry.apply_exact_geometry
+    after create_device, as for every other source here, or DEVSIM's own DC / adjoint solve is off.
 
     external_generation_shot (default True; kept by user decision 2026-11-04). Applies only to a
     region carrying an external generation G_ext (BipolarOptions.generation_m3s, the additive term
