@@ -43,7 +43,8 @@ FORMULATION (all SI; energies are measured from the intrinsic level E_i, + towar
 4. Interface traps at a semiconductor/insulator interface  [Nicollian & Brews, MOS (Metal Oxide
    Semiconductor) Physics and Technology, Wiley 1982]. A density D_it(E) [eV^-1 m^-2]
    -- uniform over a band of the gap, Gaussian, or discrete levels -- is discretized into sheet levels
-   N_it,k = D_it(E_k) dE_k [m^-2] (midpoint bins of width <= kT, edges aligned to the neutral level;
+   N_it,k = D_it(E_k) dE_k [m^-2] (midpoint bins of width <= kT at the REGION's T, edges aligned to the
+   neutral level;
    the midpoint rule on the thermally-smoothed integrand converges like exp(-2 pi^2 kT/dE), a ~1e-8
    ESTIMATED quadrature error at dE = kT away from the band ends -- the measured C-V gates, ~2e-4, are
    mesh-limited, not bin-limited). Each sheet level has the SRH occupancy of item 3
@@ -341,8 +342,11 @@ class InterfaceTraps:
                    the occupancy ratio c_n/c_p.
     recombination: install the surface SRH term (U_s into both continuity equations).
     fixed_charge_C_m2 : a FIXED sheet charge Q_f [C/m^2] (signed), e.g. oxide fixed charge.
-    bin_eV       : maximum quadrature bin width (default kT): the continuous D_it is integrated by the
-                   midpoint rule on bins aligned to the band ends and the neutral level.
+    bin_eV       : maximum quadrature bin width (default kT at the region's temperature): the continuous
+                   D_it is integrated by the midpoint rule on bins aligned to the band ends and the neutral
+                   level. install_interface_traps passes the region's kT (BipolarOptions.T_K), so the
+                   default bins are <= kT at any T (v0.14 row 3.2-8: they were the 300 K kT, 3.9 kT wide at
+                   77 K). Set it only to force finer bins; a value above kT coarsens the integral.
     energy_reference : the coordinate EVERY energy of this spec is quoted in (levels, e_lo/e_hi, e_peak,
                    neutral_level): "intrinsic" (default, E - E_i), "conduction" (E_c - E >= 0) or
                    "valence" (E - E_v >= 0); see TrapLevel. With a band reference, band_gap_eV spans
@@ -416,13 +420,23 @@ class InterfaceTraps:
         """The neutral level E_0 in the spec's coordinate (0.0 = E_i for the intrinsic reference)."""
         return float(self.neutral_level_eV) if self.neutral_level_eV is not None else 0.0
 
-    def sheet_levels(self) -> List[Tuple[float, float, str]]:
+    def sheet_levels(self, kT_eV: Optional[float] = None) -> List[Tuple[float, float, str]]:
         """Discretize D_it into sheet levels [(E_k [eV, in the spec's energy_reference], N_it,k [m^-2],
         kind_k)], kind in {acceptor, donor, neutral}. Bins never straddle the neutral level
         (charge='split'), so every bin has ONE charge type. "Above" the neutral level means toward E_c:
         a LARGER value for the intrinsic / valence coordinates, a SMALLER one for E_c - E.
-        Pure numpy -- usable devsim-free."""
-        dmax = float(self.bin_eV) if self.bin_eV is not None else V_T
+        Pure numpy -- usable devsim-free.
+
+        kT_eV: the thermal energy [eV] that sets the DEFAULT bin width (bin_eV=None) -- pass the
+        region's kT/q (V_t) when the device does not run at T_REF; install_interface_traps does. None
+        keeps kT(T_REF) = V_T (devsim-free callers at 300 K). Ignored when bin_eV is given."""
+        if self.bin_eV is not None:
+            dmax = float(self.bin_eV)
+        else:
+            dmax = float(kT_eV) if kT_eV is not None else V_T
+            if not (math.isfinite(dmax) and dmax > 0.0):
+                raise ValueError("InterfaceTraps.sheet_levels: kT_eV must be finite and > 0, got {!r}"
+                                 .format(kT_eV))
         e0 = self.neutral_level()
         toward_ec = -1.0 if self.energy_reference == "conduction" else 1.0
 
@@ -662,7 +676,7 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
         ds.set_parameter(device=device, region=semi, name=cr, value=cn / cp)
         ds.set_parameter(device=device, region=semi, name=cnp, value=cn)
         ref = s.energy_reference
-        for (e, nk, kind) in s.sheet_levels():
+        for (e, nk, kind) in s.sheet_levels(kT_eV=V_t):         # bins <= kT at the REGION's T (3.2-8)
             all_levels.append((e, nk, kind))
             n1, p1 = (repr(v) for v in level_reference_densities(e, ref, n_i_m3=n_i, V_t=V_t,
                                                                  N_c_m3=n_c, N_v_m3=n_v))
