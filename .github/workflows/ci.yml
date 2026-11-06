@@ -523,6 +523,10 @@ jobs:
     # + tests/test_devsim_oxide_tunneling_sc.py (v0.15 self-consistent gate-oxide tunnelling, every device
     #   case in a child process -- one DEVSIM circuit per child): 3.2 min serial on the Windows dev box
     #   (36 tests, 37 children of 1-18 s; the gmsh-mesh caveat gate needs gmsh, installed here).
+    # + tests/test_btbt_nonlocal.py (v0.15 nonlocal BTBT, 1-D: every term-adding case in a child process,
+    #   tests/_btbt_nonlocal_child.py): ~52 s serial on the Windows dev box (21 tests, 2026-11-06; the two FDT
+    #   diode children ~10 s each). Its devsim-free half, tests/test_btbt_nonlocal_kernels.py (29 tests, 3 s),
+    #   runs on every `test` leg.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -557,7 +561,8 @@ jobs:
             tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py \
             tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
-            tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py
+            tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py \
+            tests/test_btbt_nonlocal.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
