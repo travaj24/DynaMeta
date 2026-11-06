@@ -43,3 +43,56 @@ def pytest_configure(config):
         return
     config.addinivalue_line("filterwarnings",
                             "ignore::dynameta.optics.solver.FEMDiagnosticWarning")
+
+
+# v0.15 (plan 4.4.2, decision 55): every RAW devsim.solve(type="dc") a test makes runs the DC well-
+# posedness check first (dynameta.carriers.well_posedness.ensure_dc_well_posed, cached per equation-set
+# fingerprint), so a fixture that builds a FLOATING BODY -- the R26 slab with a Potential-only contact,
+# whose singular Jacobian let round-off and the BLAS build pick the answer until 2026-11-03 -- fails
+# with IllPosedDCError instead of passing by luck. dc_solve.solve_dc checks on its own; this covers the
+# fixtures that call devsim.solve / extended_precision.solve directly. Read-only: it never creates a
+# device or circuit (the process-global DEVSIM state, tests/_bipolar_calllog.py). Transient / ssac /
+# noise solves are not checked. Opt out per test with @pytest.mark.floating_ok("reason") (the device is
+# deliberately ill-posed, e.g. the gate that shows the old R26 fixture fails). The wrapper is installed
+# lazily, once devsim has been imported by a test module, so the solver-free legs never import it.
+_WELLPOSED = {"opt_out": False}
+
+
+def _install_dc_well_posedness_hook():
+    mod = sys.modules.get("devsim")
+    if mod is None or getattr(mod.solve, "_dynameta_wellposed", False):
+        return
+    from dynameta.carriers import well_posedness as _WP
+    orig = mod.solve
+
+    def solve(*args, **kwargs):
+        if kwargs.get("type") == "dc" and not _WELLPOSED["opt_out"]:
+            _WP.ensure_dc_well_posed()
+        return orig(*args, **kwargs)
+
+    solve._dynameta_wellposed = True
+    solve.__wrapped__ = orig
+    solve.__doc__ = orig.__doc__
+    mod.solve = solve
+
+
+def pytest_runtest_setup(item):
+    _install_dc_well_posedness_hook()
+    _WELLPOSED["opt_out"] = item.get_closest_marker("floating_ok") is not None
+
+
+def pytest_runtest_teardown(item, nextitem):
+    _WELLPOSED["opt_out"] = False
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """With DYNAMETA_WELLPOSED_STATS=<path>, append this process's well-posedness hook counters (calls,
+    seconds in the static / numeric passes, assemblies, raises, refuted candidates) as one JSON line --
+    the CI-time measurement of the audit note (each xdist worker appends its own line)."""
+    path = os.environ.get("DYNAMETA_WELLPOSED_STATS")
+    wp = sys.modules.get("dynameta.carriers.well_posedness")
+    if not path or wp is None:
+        return
+    import json
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(wp.STATS, pid=os.getpid())) + "\n")
