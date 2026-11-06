@@ -37,7 +37,8 @@ GATE F (transport): a 1-D Si p-n diode (1e23 / 1e22) at +0.4 V and -0.5 V: DG ch
         current by < 1e-2 relative and by no more than 2 max|Lambda|/V_t (first order), the change
         scales LINEARLY with gamma (ratio gamma=1 / gamma=0.5 within 2 +- 0.2), and the two terminal
         currents conserve to 1e-8 (both carriers' contacts read the DG flux).
-GATE G (v0.15 4.4.3, strong inversion through physics_bipolar_dd.setup_quasi_equilibrium_carrier):
+GATE G (v0.15 4.4.3, strong inversion through physics_bipolar_dd.setup_quasi_equilibrium_carrier; its
+        code lives here, it RUNS from validation/bipolar_dg_strong_inversion.py -- own nightly script):
         G1-3 every 50 mV step to 1.3 V in <= 12 Newton iterations (N_A 3e23 / 1e24, gamma 0.5 / 1 /
         gamma_wall, double and extended); a NEW Schrodinger-Poisson INVERSION oracle (sp_inversion:
         quantum electrons, classical holes, its own Trellakis Newton; self-checks: free-gas deficit and
@@ -536,6 +537,35 @@ def _nested_mesh(mesh, nseg, beta, length, *, tags=("wall", "sub")):
     return float(gaps[0])
 
 
+def _mesh_2d(mesh, mesh_nb, length, lateral, pad=5e-9):
+    """The 2-D twin of _nested_mesh (mos_qe(lateral=...)): every node of the nested 1-D x mesh is an x
+    line (ps = its larger neighbouring gap, so DEVSIM adds none), `lateral` are the y lines; inert pad
+    regions beyond both x ends carry the contacts (DEVSIM's 2-D contacts sit on an inter-region edge --
+    the pattern of tests/test_trap_kinetics.py and validation/devsim_noise)."""
+    nseg, beta = mesh_nb
+    xs = length * np.expm1(beta * np.arange(nseg + 1) / nseg) / np.expm1(beta)
+    xs = np.concatenate([[-pad], xs, [length + pad]])
+    gaps = np.diff(xs)
+    ds.create_2d_mesh(mesh=mesh)
+    for k, xk in enumerate(xs):
+        g = max(gaps[k - 1] if k > 0 else 0.0, gaps[k] if k < gaps.size else 0.0)
+        ds.add_2d_mesh_line(mesh=mesh, dir="x", pos=float(xk), ps=1.01 * float(g))
+    yl = np.asarray(lateral, dtype=float)
+    yg = np.diff(yl)
+    for k, yk in enumerate(yl):
+        g = max(yg[k - 1] if k > 0 else 0.0, yg[k] if k < yg.size else 0.0)
+        ds.add_2d_mesh_line(mesh=mesh, dir="y", pos=float(yk), ps=1.01 * float(g))
+    # The pad boxes stop 0.2 pad SHORT of the semiconductor edge: DEVSIM assigns a triangle to a region box
+    # with a tolerance, and a box ending exactly at x = 0 swallowed the first 0.05 nm semiconductor cell
+    # (its contact then did not exist -- measured; any box edge >~ 1e-10 m away from that cell is safe).
+    ds.add_2d_region(mesh=mesh, material="Si", region="s")
+    ds.add_2d_region(mesh=mesh, material="SiO2", region="pad_w", xl=-pad, xh=-0.2 * pad)
+    ds.add_2d_region(mesh=mesh, material="SiO2", region="pad_s", xl=length + 0.2 * pad, xh=length + pad)
+    ds.add_2d_contact(mesh=mesh, name="wall", region="s", material="metal", xl=0.0, xh=0.0, bloat=1e-13)
+    ds.add_2d_contact(mesh=mesh, name="sub", region="s", material="metal", xl=length, xh=length,
+                      bloat=1e-13)
+
+
 def qe_mesh(h0, length=QE_LEN, ratio=40.0):
     """(nseg, beta) of the nested mesh with first spacing ~h0 and last/first spacing `ratio`."""
     beta = float(np.log(ratio))
@@ -544,7 +574,7 @@ def qe_mesh(h0, length=QE_LEN, ratio=40.0):
 
 def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN, ext=False,
            rel=1e-5, close=("electrons",), tau=1e-7, step=0.05, dg_holes=False, tag="q",
-           closure=True, quantum_srh=True, probe=None, dg_at_target=False):
+           closure=True, quantum_srh=True, probe=None, dg_at_target=False, lateral=None, v_ch=None):
     """1-D p-type MOS (N_A), fixed surface potential psi_s = psi_b + delta at the wall, body ohmic
     'sub'. Classical solve at flat band; optionally the bipolar DG (electrons; holes too with dg_holes)
     at dg_gamma with setup_dg_insulator_wall, gamma-ramped at flat band; then the quasi-equilibrium
@@ -558,6 +588,13 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
     dg_at_target (one delta only): ramp the CLASSICAL full model to delta first and install the DG (and
     then the closure) there -- the D2d GATE E order, which the FULL DG model needs (its own psi ramp
     fails on the way to 0.6 V: "Matrix solve failed", measured).
+    lateral (v0.15 follow-up): a sequence of y positions [m] -> the SAME device as a 2-D tensor mesh
+    (create_2d_mesh: the x nodes of the 1-D mesh times these y lines, right triangles), laterally uniform,
+    wall and body contacts on the x = 0 / x = length edges against inert pad regions. Its records carry
+    "cols" = {y: dict(x, n, p, psi[, lam_n])} (each lateral line sorted by x; the top-level arrays are
+    the y = lateral[0] line) and Q / Q_gauss PER UNIT WIDTH.
+    v_ch: the electron closure gets imref_shift = a device parameter "v_ch" of this value [V] (the
+    channel-slice imref split phi_n = phi_body + V_ch).
     Raises the solver error of a failed step. ext: the extended-precision Newton (both criteria as
     written); abs_tol: dc_solve.default_abs_tol (plan 4.4.1)."""
     from dynameta.carriers.dc_solve import default_abs_tol
@@ -575,16 +612,22 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
 
     try:
         with _quiet():
-            ds.create_1d_mesh(mesh=mesh)
-            if mesh_nb == "p4":            # the P4 1.1 diagnosis mesh (_bar's lines: 268 nodes at 150 nm)
+            if lateral is not None:
+                _mesh_2d(mesh, mesh_nb or qe_mesh(0.05e-9, length), length, lateral)
+            else:
+                ds.create_1d_mesh(mesh=mesh)
+            if lateral is not None:
+                pass
+            elif mesh_nb == "p4":            # the P4 1.1 diagnosis mesh (_bar's lines: 268 nodes at 150 nm)
                 for pos, ps, tg in ((0.0, 0.05e-9, "wall"), (5e-9, 0.1e-9, None), (25e-9, 0.5e-9, None),
                                     (length, 2e-9, "sub")):
                     ds.add_1d_mesh_line(mesh=mesh, pos=pos, ps=ps, **({"tag": tg} if tg else {}))
             else:
                 _nested_mesh(mesh, *(mesh_nb or qe_mesh(0.05e-9, length)), length)
-            ds.add_1d_contact(mesh=mesh, name="wall", tag="wall", material="metal")
-            ds.add_1d_contact(mesh=mesh, name="sub", tag="sub", material="metal")
-            ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="wall", tag2="sub")
+            if lateral is None:
+                ds.add_1d_contact(mesh=mesh, name="wall", tag="wall", material="metal")
+                ds.add_1d_contact(mesh=mesh, name="sub", tag="sub", material="metal")
+                ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="wall", tag2="sub")
             ds.finalize_mesh(mesh=mesh)
             ds.create_device(mesh=mesh, device=dev)
             if ext:
@@ -621,8 +664,12 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
                         DG.seed_bipolar_dg(dev, "s", walls=("wall",))
                     solve()
             if closure:
+                if v_ch is not None:
+                    ds.set_parameter(device=dev, name="v_ch", value=float(v_ch))
                 for c in close:
-                    BP.setup_quasi_equilibrium_carrier(dev, "s", c, contact="sub")
+                    BP.setup_quasi_equilibrium_carrier(
+                        dev, "s", c, contact="sub",
+                        imref_shift="v_ch" if (v_ch is not None and c == "electrons") else None)
                 solve()
 
         if dg_at_target and len(deltas) != 1:
@@ -639,18 +686,36 @@ def mos_qe(N_A, deltas, *, fd=False, dg_gamma=None, mesh_nb=None, length=QE_LEN,
             if dg_at_target:
                 install()
             x = _get(dev, "s", "x")
-            o = np.argsort(x)
-            n, p = _get(dev, "s", "Electrons")[o], _get(dev, "s", "Holes")[o]
-            vol = _get(dev, "s", "NodeVolume")[o]
-            rho_v = Q_E * (p - n - N_A) * vol
+            width = 1.0
+            if lateral is None:
+                o = np.argsort(x)
+                interior = np.ones(x.size, bool)
+                interior[[o[0], o[-1]]] = False
+            else:
+                y = _get(dev, "s", "y")
+                width = float(lateral[-1] - lateral[0])
+                cols = {float(yc): np.flatnonzero(np.abs(y - yc) <= 1e-6 * width) for yc in lateral}
+                cols = {yc: ix[np.argsort(x[ix])] for yc, ix in cols.items()}
+                o = cols[float(lateral[0])]
+                interior = (x > x.min() + 1e-6 * length) & (x < x.max() - 1e-6 * length)
+            nn_, pp_ = _get(dev, "s", "Electrons"), _get(dev, "s", "Holes")
+            rho_v = Q_E * (pp_ - nn_ - N_A) * _get(dev, "s", "NodeVolume")
+            n, p = nn_[o], pp_[o]
             rec = {"delta": target, "x": x[o], "psi": _get(dev, "s", "Potential")[o], "n": n, "p": p,
-                   "Q": float(np.sum(rho_v)), "Q_interior": float(np.sum(rho_v[1:-1])),
+                   "Q": float(np.sum(rho_v)) / width, "Q_interior": float(np.sum(rho_v[interior])) / width,
                    "its": list(its), "psi_b": psi_b,
                    "Q_gauss": {c: float(ds.get_contact_charge(device=dev, contact=c,
-                                                              equation="PotentialEquation"))
+                                                              equation="PotentialEquation")) / width
                                for c in ("wall", "sub")}}
             if dg_gamma is not None:
                 rec["lam_n"] = _get(dev, "s", "QLambda")[o]
+            if lateral is not None:
+                fields = [("n", "Electrons"), ("p", "Holes"), ("psi", "Potential")]
+                if dg_gamma is not None:
+                    fields.append(("lam_n", "QLambda"))
+                vals = {k: _get(dev, "s", v) for k, v in fields}
+                rec["cols"] = {yc: dict(x=x[ix], **{k: a[ix] for k, a in vals.items()})
+                               for yc, ix in cols.items()}
             if probe is not None:
                 rec["probe"] = probe(dev)
             out.append(rec)
@@ -1110,7 +1175,7 @@ def main():
           "node -- the classical SRH reference breaks detailed balance in the dark space)".format(
               eq0["max_phi_n"], eq0["max_phi_p"], eq0["max_phi_interior"]), flush=True)
 
-    ok = gate_g() and ok
+    # GATE G (v0.15 4.4.3, ~8-11 min) runs as its own script: validation/bipolar_dg_strong_inversion.py
 
     print("[bdg] *** D2d BIPOLAR DENSITY-GRADIENT: {} *** ({:.0f} s)".format(
         "PASS" if ok else "FAIL", time.time() - t0), flush=True)
