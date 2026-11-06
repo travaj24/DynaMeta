@@ -224,6 +224,9 @@ class Stacked3DSpec:
     # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
     # (carriers/extended_precision.py). Device-scoped; False (default) is byte-identical.
     extended_precision: bool = False
+    # v0.15 (decision 28): bipolar carrier statistics -- None (the legacy FD g-factor, byte-identical) |
+    # "fermi_dirac" (FD transport + FD detailed balance) | "boltzmann"; see TransportModel.carrier_statistics.
+    carrier_statistics: Optional[str] = None
 
     def dielectric_stack_m(self) -> "List[Tuple[str, str, float, float]]":
         """Ordered gate-side dielectric layers from the semiconductor outward, as
@@ -343,6 +346,12 @@ class Stacked3DSpec:
                                 .format(type(self.bipolar_options).__name__))
             if self.physics != "bipolar_dd":
                 raise ValueError("Stacked3DSpec.bipolar_options applies only to physics='bipolar_dd'")
+        if self.carrier_statistics is not None:
+            if self.carrier_statistics not in ("boltzmann", "fermi_dirac"):
+                raise ValueError("Stacked3DSpec.carrier_statistics must be None, 'boltzmann' or "
+                                 "'fermi_dirac', got {!r}".format(self.carrier_statistics))
+            if self.physics != "bipolar_dd":
+                raise ValueError("Stacked3DSpec.carrier_statistics applies only to physics='bipolar_dd'")
         for mat, thk, eps in self.extra_dielectrics:
             if not (eps >= 1.0) or not (thk > 0.0):
                 raise ValueError("extra_dielectrics entry '{}' needs thickness>0 and eps>=1; got "
@@ -562,6 +571,7 @@ class Stacked3DSpec:
                 acceptor=bool(tr.acceptor),
                 net_doping_expr=tr.net_doping_expr,
                 bipolar_options=getattr(tr, "bipolar_options", None),
+                carrier_statistics=getattr(tr, "carrier_statistics", None),
                 srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
                 srh_traps=tuple(getattr(tr, "srh_traps", ())),
                 btbt=getattr(tr, "btbt", None))
@@ -922,7 +932,9 @@ class Devsim3DEquilibrium:
         BP.setup_bipolar_region(
             self.device, region, eps_static=float(eps_static), n_dos_m3=Nc, n_i_m3=float(s.n_i_m3),
             mobility_n_m2Vs=float(s.mobility_m2Vs), mobility_p_m2Vs=float(s.mobility_p_m2Vs),
-            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            tau_n_s=float(s.tau_srh_s), tau_p_s=float(s.tau_srh_s),
+            fd_enhancement=s.carrier_statistics != "boltzmann",  # v0.15 statistics (None -> legacy FD)
+            statistics=s.carrier_statistics, n_dos_p_m3=Nv,
             options=s.bipolar_options,                            # audit R26/R27 (None -> SRH only)
             btbt=s.btbt,                                         # D1d: None -> no BTBT (byte-identical)
             srh_trap_energy_eV=float(s.srh_trap_energy_eV), traps=tuple(s.srh_traps) or None)
@@ -1017,7 +1029,9 @@ class Devsim3DEquilibrium:
             # option-equilibrium potential; the SAME numpy kernel gives the gate reference here.
             phi_bi = BP.ohmic_built_in_offset_V(N_b, n_i_m3=ni, n_dos_m3=_Nc, n_dos_p_m3=_Nv,
                                                 options=self.spec.bipolar_options,
-                                                traps=self.spec.srh_traps)
+                                                traps=self.spec.srh_traps,
+                                                fd_enhancement=self.spec.carrier_statistics != "boltzmann",
+                                                statistics=self.spec.carrier_statistics)
             # The seed must sit in the frame the contact PINS, including the SIGN the FD correction
             # takes on a p-type body (audit C-10 residual: a bare +FDContactShift put the p-side
             # seed 2 V_t Delta = +0.355 V above the pinned potential). Single-sourced expression.

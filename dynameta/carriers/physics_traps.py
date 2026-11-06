@@ -652,6 +652,13 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
     n_i = float(ds.get_parameter(device=device, region=semi, name="n_i"))
     V_t = float(ds.get_parameter(device=device, region=semi, name="V_t"))   # == V_T unless T_K is set
     bgn = "n_ie" in ds.get_node_model_list(device=device, region=semi)      # BGN on this region (D1b)
+    if "FDGammaN" in ds.get_node_model_list(device=device, region=semi):
+        # v0.15 statistics="fermi_dirac": n_ie depends on the carriers, and the analytic derivatives
+        # below hold n_ie fixed -- not implemented rather than a silently wrong Jacobian
+        raise NotImplementedError(
+            "install_interface_traps: region {!r} runs statistics='fermi_dirac' (FD detailed balance, "
+            "solution-dependent n_ie); interface traps are implemented for the legacy statistics only "
+            "(TransportModel.carrier_statistics=None)".format(semi))
     n_c = float(ds.get_parameter(device=device, region=semi, name="N_dos"))   # band-referenced levels
     n_v = float(ds.get_parameter(device=device, region=semi, name="N_dos_p"))
     # Per sheet level k (one spec: shared capture ratio cr = c_n/c_p, c = sigma v_th): the SRH kernel

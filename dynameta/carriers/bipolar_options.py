@@ -70,11 +70,59 @@ here re-defines a composite by name, so options compose with trap levels, interf
               its validity range) per region in which some node has N_A > N_ref (where the fit would
               be needed and is not valid). Use a Slotboom/Klaassen
               set for a heavily doped p-type region.
-   These are APPARENT narrowings: they were extracted assuming Boltzmann statistics and a specific
-   reference n_i, so (a) they must be paired with the n_i the user passes (state it with the result),
-   and (b) on a DEGENERATE region with the FD g-factor on, the degeneracy is partly counted twice --
-   `install_option_fields` warns when that correction is non-negligible. Schenk's 1998 many-body
-   model (carrier-density-dependent band edges) is NOT implemented (see the audit doc, sec. Limits).
+   power_log  dEg = A [ln(N/N_ref)]^b + C_off for N > N_ref, else C_off (0 for N <= 0)   (v0.15)
+              Yan & Cuevas, J. Appl. Phys. 114, 044508 (2013), Eq. (3), Table I; n-type (Si:P), in N_D:
+                REAL narrowing for Fermi-Dirac statistics:   A = 0.042 meV, N_ref = 1e14 cm^-3, b = 3
+                APPARENT narrowing for Boltzmann statistics: A = 12.96 meV, N_ref = 1e17 cm^-3, b = 1
+              (C_off = 0 for both). The clamp "C_off below N_ref" is OUR choice: with b = 1 the term is
+              negative below N_ref and with b = 3 non-monotone there; the paper fits diffused regions
+              with N_D >= ~4e18 only.
+   The legacy sets (Slotboom, Klaassen, del Alamo) are APPARENT narrowings: they were extracted
+   assuming Boltzmann statistics and a specific reference n_i, so (a) they must be paired with the n_i
+   the user passes (state it with the result), and (b) on a DEGENERATE region with the FD g-factor on,
+   the degeneracy is partly counted twice -- `install_option_fields` warns when that correction is
+   non-negligible. Schenk's 1998 many-body model (carrier-density-dependent band edges) is NOT
+   implemented (see the audit doc, sec. Limits).
+
+   PAIRED SETS (v0.15, user decisions 26-29). A BGNModel that states `paired_n_i_m3` (and its
+   `paired_statistics`, `paired_T_K`, for FD also `paired_N_c_m3`/`paired_N_v_m3`) is CHECKED against
+   the region by ONE function, `check_bgn_pairing` (called by install_option_fields and by the 3-D gate
+   frame physics_bipolar_dd.ohmic_built_in_offset_V): a region n_i (or N_c, N_v) off by more than 1e-3,
+   another statistics, or |T - paired_T_K| > 0.5 K raises BGNPairingError, whose message gives the
+   n_i mismatch as a gap equivalent kT ln((n_i,paired/n_i)^2) (1.84 meV for 1.0e10 against 9.65e9).
+   BipolarOptions(allow_unpaired_bgn=True) turns the raise into one AdvisoryWarning per region -- use
+   it only with your own n_i(T) (and N_c, N_v) at T != 300 K, or to reproduce a paper that paired
+   differently. Legacy (unpaired) presets are never checked. The house Si pairing is Yan & Cuevas 2013
+   FD: dynameta.materials.semiconductor_presets.SI_PAIRING_YC2013_FD (n-type only: its p-type
+   constants, Yan & Cuevas, J. Appl. Phys. 116, 194505 (2014), have not been read, so a p-type node
+   with N_A > N_ref is REFUSED with BGNFitPendingError instead of silently getting 0).
+
+   STATISTICS (v0.15, decision 28; setup_bipolar_region(statistics=...), TransportModel.
+   carrier_statistics). Three choices -- which to use for which calculation:
+     None (default)  the legacy statistics, BYTE-IDENTICAL to v0.14: FD g-factor transport + FD contact
+                     potential (fd_enhancement=True), but every recombination term and the contacts pin
+                     the BOLTZMANN product n p = n_ie^2. On a DEGENERATE region that contradicts the
+                     transport's own equilibrium n p = n_ie^2 exp(-Delta(n/N_c) - Delta(p/N_v)) (zero
+                     current <=> ln n + Delta - psi_n/V_t = const), so a junction next to a degenerate
+                     layer carries a ZERO-BIAS current (MEASURED: -0.120 J0p at V = 0 on the R27-c long
+                     diode with a 1e19 cm^-3 emitter; exp(-Delta(0.357)) - 1 = -0.122). The FORWARD
+                     emitter J0 is the FD one (0.8789 of the Boltzmann J0, exp(-Delta) = 0.8781). Fine
+                     for non-degenerate devices and for every v0.14 result; not for a paired FD set.
+     "fermi_dirac"   FD transport AND FD detailed balance: n_ie becomes the solution-dependent node model
+                     n_ie = n_i exp(dEg/2kT) sqrt(gamma_n gamma_p), gamma = exp(-Delta(c/N)) (Delta in the
+                     closed form of physics_heterojunction.setup_log_activity, the transport's own
+                     integral of g), so SRH, Auger, radiative and (neutral) bulk trap rates vanish
+                     exactly where the transport is in equilibrium, and the contacts pin the FD
+                     charge-neutral root n0 p0 = n_ie0^2 gamma_n(n0) gamma_p(p0) -- Yan & Cuevas 2013
+                     Eq. (1) with the code's Delta. REQUIRED by an FD-paired BGN set (the house Si
+                     bundle). Not combined (refused): BTBT, CHARGED bulk trap levels and interface
+                     traps (their Jacobian / equilibrium charge assume a fixed n_ie). Its Delta is the
+                     rational g fit's: within 1 % of the exact F_1/2 offset only for eta >~ 8
+                     (physics_bipolar_dd "ACCURACY OF Delta"); at Si:P 1e19 / 1e20 cm^-3 (eta = -0.93 /
+                     2.43) n0 p0 is 0.42 % / 3.5 % low against Eq. (1) with exact F_1/2 (MEASURED).
+     "boltzmann"     fd_enhancement=False: Boltzmann transport and contacts. The right choice for an
+                     APPARENT (Boltzmann-extracted) BGN set on a degenerate layer -- it removes the
+                     double count the FD advisory reports -- and for the YC2013 Boltzmann pairing.
 
    REFERENCE n_i OF EACH SET (the pairing; these presets are LEGACY and UNPAIRED -- nothing checks the
    region's n_i against them). None of them was fitted with n_i = 1.0e10 cm^-3:
@@ -82,12 +130,15 @@ here re-defines a composite by name, so options compose with trap levels, interf
                     n_i(295 K) = 9.565e9]
      del Alamo      ~1.36-1.45e10 cm^-3 [inferred, TED 1987 Table II]
      Klaassen 1992  1.0e10 or 1.08e10 (Green 1990) -- not verified in the primary
+     Yan & Cuevas 2013 (both sets)  9.65e9 cm^-3, N_c 2.86e19, N_v 3.1e19 cm^-3 [primary, Sec. I, III.B]
+                                    -- PAIRED (checked, see below)
    The modern consensus n_i(300 K) is 9.65e9 cm^-3 (Altermatt et al., J. Appl. Phys. 93, 1598 (2003);
    Misiakos & Tsamakis 1993: 9.7 +/- 0.1e9), and it belongs with Fermi-Dirac statistics and a REAL
    (not apparent) narrowing. Pairing old Slotboom or del Alamo with 9.65e9 under-predicts n_ie^2 by
    ~2.3x (~21 meV of gap). Which n_i to pass for which calculation: the n_i the chosen set was fitted
-   with when you want the set's own n_ie (e.g. an emitter J0 against that paper's data); a FD-paired
-   modern set when you want the consensus n_i (not shipped yet).
+   with when you want the set's own n_ie (e.g. an emitter J0 against that paper's data); the FD-paired
+   Yan-Cuevas set (BGN_SI_YAN_CUEVAS_2013_FD with statistics="fermi_dirac", or the bundle
+   materials.semiconductor_presets.SI_PAIRING_YC2013_FD) when you want the consensus n_i.
 
    EFFECTIVE INTRINSIC DENSITY + BAND-EDGE SPLIT (the classic error source; Lundstrom & Schuelke,
    IEEE TED 30, 1151 (1983); Selberherr, "Analysis and Simulation of Semiconductor Devices" (1984),
@@ -217,21 +268,47 @@ class RadiativeModel:
 
 
 _BGN_BASES = ("total", "donors", "acceptors")
-_BGN_DEFAULT_BASIS = {"slotboom": "total", "del_alamo": "donors"}
+_BGN_DEFAULT_BASIS = {"slotboom": "total", "del_alamo": "donors", "power_log": "total"}
+_BGN_OUTSIDE = ("warn", "refuse")
+_STATISTICS = ("boltzmann", "fermi_dirac")
+_VERIFICATION = ("primary", "secondary", "inferred", "unverified")
+
+
+class BGNPairingError(ValueError):
+    """A PAIRED BGN set (BGNModel.paired_n_i_m3 set) used on a region whose n_i, N_c/N_v, carrier
+    statistics or temperature differ from the ones the set was fitted with (check_bgn_pairing). Override
+    with BipolarOptions(allow_unpaired_bgn=True) (one AdvisoryWarning instead)."""
+
+
+class BGNFitPendingError(NotImplementedError):
+    """A BGN set with outside_basis="refuse" met nodes of the doping type its fit does not cover (the
+    house Si set is n-type only until the p-type constants of Yan & Cuevas, J. Appl. Phys. 116, 194505
+    (2014) are read), where the narrowing is not negligible (other species > N_ref)."""
 
 
 @dataclass(frozen=True)
 class BGNModel:
-    """Apparent bandgap narrowing dEg(N), N chosen by `doping_basis`.
+    """Bandgap narrowing dEg(N), N chosen by `doping_basis`.
 
     kind: "slotboom" -> E_ref [ln(N/N_ref) + sqrt(ln^2(N/N_ref) + C)];
-          "del_alamo" -> E_ref ln(N/N_ref) for N > N_ref, else 0.
+          "del_alamo" -> E_ref ln(N/N_ref) for N > N_ref, else 0;
+          "power_log" -> A [ln(N/N_ref)]^b + offset for N > N_ref, else offset (0 for N <= 0), with
+                         A = E_ref_eV, b = exponent_b, offset = offset_eV (Yan & Cuevas 2013 Eq. (3)).
     conduction_fraction (gamma): share of dEg that LOWERS E_c (the rest raises E_v); 0.5 = symmetric.
     doping_basis: the density the fit is evaluated in -- "total" (N_D + N_A), "donors" (N_D) or
     "acceptors" (N_A). None (default) = the kind's own basis: "total" for slotboom (Slotboom/Klaassen
-    are used for both types), "donors" for del_alamo (an n-type-only fit in N_D, TED 1987 Eq. (11)).
-    Under a one-species basis, nodes where the OTHER species exceeds N_ref have no basis in the fit;
-    install_option_fields warns (UnreliableResultWarning) once per region (see `unsupported_nodes`)."""
+    are used for both types) and power_log, "donors" for del_alamo (an n-type-only fit in N_D, TED 1987
+    Eq. (11)). Under a one-species basis, nodes where the OTHER species exceeds N_ref have no basis in
+    the fit; install_option_fields warns (UnreliableResultWarning) once per region (see
+    `unsupported_nodes`).
+    outside_basis: what to do with such nodes when they are of the OTHER doping type (p-type nodes of a
+    donor-basis fit): "warn" (None, the default: the legacy behaviour above) or "refuse" (raise
+    BGNFitPendingError: the house Yan-Cuevas sets, whose p-type constants are pending).
+    PAIRING (all None/default = an unpaired legacy set, never checked): paired_n_i_m3 / paired_N_c_m3 /
+    paired_N_v_m3 [m^-3], paired_statistics ("fermi_dirac" = a REAL narrowing fitted with FD statistics,
+    "boltzmann" = an APPARENT one), paired_T_K: the inputs the fit was made with; check_bgn_pairing
+    refuses a region that differs (module doc item 2). locator / verification: where the constants are
+    in the source and how they were checked ("primary" = read in the primary text)."""
     kind: str
     E_ref_eV: float
     N_ref_m3: float
@@ -239,19 +316,76 @@ class BGNModel:
     conduction_fraction: float = 0.5
     source: str = ""
     doping_basis: Optional[str] = None
+    exponent_b: float = 1.0
+    offset_eV: float = 0.0
+    outside_basis: Optional[str] = None
+    paired_n_i_m3: Optional[float] = None
+    paired_N_c_m3: Optional[float] = None
+    paired_N_v_m3: Optional[float] = None
+    paired_statistics: Optional[str] = None
+    paired_T_K: float = 300.0
+    locator: str = ""
+    verification: str = "unverified"
 
     def __post_init__(self):
-        if self.kind not in ("slotboom", "del_alamo"):
-            raise ValueError("BGNModel.kind must be 'slotboom' or 'del_alamo', got {!r}".format(self.kind))
+        if self.kind not in ("slotboom", "del_alamo", "power_log"):
+            raise ValueError("BGNModel.kind must be 'slotboom', 'del_alamo' or 'power_log', got {!r}"
+                             .format(self.kind))
         if not (self.E_ref_eV > 0.0 and self.N_ref_m3 > 0.0 and self.C >= 0.0):
             raise ValueError("BGNModel needs E_ref_eV > 0, N_ref_m3 > 0, C >= 0")
         if not (0.0 <= self.conduction_fraction <= 1.0):
             raise ValueError("BGNModel.conduction_fraction must lie in [0, 1]")
+        if not (math.isfinite(self.exponent_b) and self.exponent_b > 0.0
+                and math.isfinite(self.offset_eV) and self.offset_eV >= 0.0):
+            raise ValueError("BGNModel needs a finite exponent_b > 0 and a finite offset_eV >= 0")
+        if self.kind != "power_log" and (self.exponent_b != 1.0 or self.offset_eV != 0.0):
+            raise ValueError("BGNModel.exponent_b / offset_eV apply to kind='power_log' only")
         if self.doping_basis is None:
             object.__setattr__(self, "doping_basis", _BGN_DEFAULT_BASIS[self.kind])
         elif self.doping_basis not in _BGN_BASES:
             raise ValueError("BGNModel.doping_basis must be one of {} (or None), got {!r}".format(
                 _BGN_BASES, self.doping_basis))
+        if self.outside_basis is None:
+            object.__setattr__(self, "outside_basis", "warn")
+        elif self.outside_basis not in _BGN_OUTSIDE:
+            raise ValueError("BGNModel.outside_basis must be one of {} (or None), got {!r}".format(
+                _BGN_OUTSIDE, self.outside_basis))
+        if self.paired_statistics is not None and self.paired_statistics not in _STATISTICS:
+            raise ValueError("BGNModel.paired_statistics must be one of {} (or None), got {!r}".format(
+                _STATISTICS, self.paired_statistics))
+        paired = (self.paired_n_i_m3, self.paired_statistics)
+        if (paired[0] is None) != (paired[1] is None):
+            raise ValueError("BGNModel: a paired set states BOTH paired_n_i_m3 and paired_statistics")
+        for nm in ("paired_n_i_m3", "paired_N_c_m3", "paired_N_v_m3"):
+            v = getattr(self, nm)
+            if v is not None and not (math.isfinite(float(v)) and float(v) > 0.0):
+                raise ValueError("BGNModel.{} must be finite and > 0, got {!r}".format(nm, v))
+        if self.paired_statistics == "fermi_dirac" and (self.paired_N_c_m3 is None
+                                                         or self.paired_N_v_m3 is None):
+            raise ValueError("BGNModel: an FD-paired set states paired_N_c_m3 and paired_N_v_m3 (the "
+                             "degeneracy n/N_c of its Eq. (1) depends on them)")
+        if not (math.isfinite(self.paired_T_K) and self.paired_T_K > 0.0):
+            raise ValueError("BGNModel.paired_T_K must be finite and > 0")
+        if self.verification not in _VERIFICATION:
+            raise ValueError("BGNModel.verification must be one of {}".format(_VERIFICATION))
+
+    @property
+    def paired(self) -> bool:
+        """True for a set that states the n_i (statistics, T) it was fitted with -- check_bgn_pairing
+        enforces those; False for the legacy unpaired sets (never checked)."""
+        return self.paired_n_i_m3 is not None
+
+    def refused_nodes(self, N_D_m3, N_A_m3):
+        """Boolean mask of the nodes outside_basis="refuse" refuses: nodes of the OTHER doping type
+        (N_A > N_D under "donors", N_D > N_A under "acceptors") whose other species exceeds N_ref, i.e.
+        where the missing fit would give a non-negligible narrowing. All False otherwise."""
+        shape = np.shape(np.asarray(N_D_m3))
+        if self.outside_basis != "refuse" or self.doping_basis == "total":
+            return np.zeros(shape, dtype=bool)
+        nd = np.asarray(N_D_m3, dtype=np.float64)
+        na = np.asarray(N_A_m3, dtype=np.float64)
+        other, own = (na, nd) if self.doping_basis == "donors" else (nd, na)
+        return (other > own) & (other > self.N_ref_m3)
 
     def basis_density_m3(self, N_D_m3, N_A_m3):
         """The density [m^-3] the fit is evaluated in, per node: N_D + N_A ("total"; the same
@@ -284,6 +418,11 @@ class BGNModel:
             # x + r loses everything to cancellation for x << 0 (light doping): use C/(r - x) there.
             val = np.where(x >= 0.0, x + r, self.C / np.where(x < 0.0, r - x, 1.0))
             out = np.where(pos, self.E_ref_eV * val, 0.0)
+        elif self.kind == "power_log":
+            # A x^b on x > 0 only (x <= 0 is clamped: negative for b = 1, non-monotone for b = 3); the
+            # offset applies to every doped node. One log and one pow: round-off ~ b * 1 ulp of x.
+            xb = np.power(np.where(x > 0.0, x, 0.0), self.exponent_b)
+            out = np.where(pos, np.where(x > 0.0, self.E_ref_eV * xb, 0.0) + self.offset_eV, 0.0)
         else:
             out = np.where(pos & (x > 0.0), self.E_ref_eV * x, 0.0)
         return out
@@ -384,6 +523,11 @@ class BipolarOptions:
     # every pair is collected) unless noise_spectrum / terminal_noise get external_generation_shot=
     # False -- use False when G is a deterministic drive / modelling device, not a photon stream.
     generation_m3s: Optional[float] = None
+    # v0.15 (decision 27): a PAIRED bgn (BGNModel.paired_n_i_m3) whose n_i / N_c, N_v / statistics / T
+    # differ from the region's raises BGNPairingError; True downgrades it to one AdvisoryWarning per
+    # region. Use it with your OWN n_i(T), N_c(T), N_v(T) at T != 300 K (decision 29), or to reproduce a
+    # paper that paired differently -- never to silence a mismatch you did not mean.
+    allow_unpaired_bgn: bool = False
 
     def __post_init__(self):
         if self.T_K is not None and not (math.isfinite(float(self.T_K)) and float(self.T_K) > 0.0):
@@ -455,6 +599,30 @@ BGN_SI_DEL_ALAMO_1985 = BGNModel(
     source="del Alamo & Swanson, IEEE TED ED-34, 1580 (1987), Eq. (11); del Alamo, Swirhun & Swanson, "
            "IEDM 1985, p. 290, Eq. (7); n-type (Si:P) only, in N_D; reference n_i ~1.36-1.45e10 cm^-3 "
            "[inferred]; unpaired")
+# Yan & Cuevas 2013 (v0.15, user decision 26 -- the HOUSE Si narrowing). Both sets were extracted from
+# the SAME 24 phosphorus diffusions (J0 matched with Klaassen mobility, n_i = 9.65e9 cm^-3 from Misiakos &
+# Tsamakis 1993, N_c = 2.86e19 / N_v = 3.1e19 cm^-3 at 300 K from Green 1990 -- Sec. I and III.B), so each is
+# PAIRED with those inputs and its statistics. n-type ONLY (in N_D): the p-type companion, J. Appl. Phys.
+# 116, 194505 (2014), has not been read, so p-type nodes above N_ref are refused (outside_basis).
+# Use the FD set with statistics="fermi_dirac" (the house bundle), the Boltzmann set with "boltzmann".
+_YC2013 = ("Yan & Cuevas, J. Appl. Phys. 114, 044508 (2013); n-type (Si:P) only, in N_D; fitted with "
+           "n_i = 9.65e9, N_c = 2.86e19, N_v = 3.1e19 cm^-3 at 300 K and Klaassen mobility; p-type "
+           "constants (JAP 116, 194505 (2014)) pending")
+BGN_SI_YAN_CUEVAS_2013_FD = BGNModel(
+    kind="power_log", E_ref_eV=0.042e-3, N_ref_m3=1.0e14 * _CM3, C=0.0, exponent_b=3.0, offset_eV=0.0,
+    doping_basis="donors", outside_basis="refuse",
+    paired_n_i_m3=9.65e9 * _CM3, paired_N_c_m3=2.86e19 * _CM3, paired_N_v_m3=3.1e19 * _CM3,
+    paired_statistics="fermi_dirac", paired_T_K=300.0,
+    locator="Eq. (3), Table I row 'Fermi-Dirac based BGN (this work)': A = 0.042 +/- 0.003 meV, "
+            "N_ref = 1e14 cm^-3, b = 3, C = 0; inputs Sec. I (N_c, N_v; Ref. 3) and Sec. III.B (n_i; Ref. 32)",
+    verification="primary", source=_YC2013 + "; REAL narrowing (Fermi-Dirac statistics)")
+BGN_SI_YAN_CUEVAS_2013_BOLTZMANN = BGNModel(
+    kind="power_log", E_ref_eV=12.96e-3, N_ref_m3=1.0e17 * _CM3, C=0.0, exponent_b=1.0, offset_eV=0.0,
+    doping_basis="donors", outside_basis="refuse",
+    paired_n_i_m3=9.65e9 * _CM3, paired_statistics="boltzmann", paired_T_K=300.0,
+    locator="Eq. (3), Table I row 'Boltzmann based apparent BGN (this work)': A = 12.96 +/- 0.70 meV, "
+            "N_ref = 1e17 cm^-3, b = 1, C = 0; n_i Sec. III.B (Ref. 32)",
+    verification="primary", source=_YC2013 + "; APPARENT narrowing (Boltzmann statistics)")
 # Ionization energies in Si [eV] (ground state 1s(A1) binding energies). Donors: P and As as tabulated in
 # Sze & Ng, "Physics of Semiconductor Devices", 3rd ed. (2007), ch. 1 (45, 54 meV below E_c; the
 # spectroscopic values of Ramdas & Rodriguez Table 4 are 45.59 / 53.76 meV, < 1 meV away, kept for the
@@ -465,6 +633,111 @@ SI_DONOR_IONIZATION_EV = {"P": 0.045, "As": 0.054, "Sb": 0.04274}
 SI_ACCEPTOR_IONIZATION_EV = {"B": 0.045}
 IONIZATION_SI_P_B = IonizationModel(dE_D_eV=0.045, dE_A_eV=0.045,
                                     source="Sze & Ng (2007): Si:P 45 meV, Si:B 45 meV; g_D=2, g_A=4")
+
+
+# =====================================================================================================
+# carrier statistics (v0.15, decision 28) and the ONE BGN pairing check (decisions 27, 29)
+# =====================================================================================================
+
+def resolve_statistics(statistics: Optional[str], fd_enhancement: bool) -> str:
+    """The region's statistics label from setup_bipolar_region's (statistics, fd_enhancement):
+    "boltzmann" (fd_enhancement False), "fermi_dirac" (FD transport + FD detailed balance; statistics=
+    "fermi_dirac") or "fermi_dirac_legacy" (statistics None with fd_enhancement True: the v0.14 model,
+    FD transport but the Boltzmann product n p = n_ie^2 in recombination and contacts). A statistics that
+    contradicts fd_enhancement raises (module doc item 2, STATISTICS)."""
+    if statistics is None:
+        return "fermi_dirac_legacy" if fd_enhancement else "boltzmann"
+    if statistics not in _STATISTICS:
+        raise ValueError("statistics must be None, 'boltzmann' or 'fermi_dirac', got {!r}".format(statistics))
+    if (statistics == "fermi_dirac") != bool(fd_enhancement):
+        raise ValueError("statistics={!r} contradicts fd_enhancement={!r}: 'fermi_dirac' needs the FD "
+                         "g-factor (fd_enhancement=True), 'boltzmann' needs fd_enhancement=False"
+                         .format(statistics, fd_enhancement))
+    return statistics
+
+
+_PAIR_REL_TOL = 1.0e-3      # n_i / N_c / N_v are quoted to 3 significant figures; 1e-3 of n_i = 0.05 meV
+_PAIR_T_TOL_K = 0.5         # decision 29: a fit is a 300 K statement
+
+
+def check_bgn_pairing(bgn: Optional[BGNModel], *, n_i_m3: float, N_c_m3: float, N_v_m3: float,
+                      statistics: str, T_K: Optional[float], allow: bool = False,
+                      region: str = "") -> Optional[str]:
+    """THE pairing check of a PAIRED BGN set (BGNModel.paired) against a region; equilibrium_fields calls
+    it, so the region setup (install_option_fields) and the 3-D gate frame (ohmic_built_in_offset_V)
+    share it. `statistics` is the resolve_statistics label, T_K the region temperature (None = T_REF).
+
+    Refused (BGNPairingError) when (a) |n_i/n_i,paired - 1| > 1e-3 -- the message gives n_ie^2's error
+    and its gap equivalent kT ln((n_i/n_i,paired)^2) at the paired T (1.84 meV for 1.0e10 against
+    9.65e9); (a') for an FD-paired set the same on N_c and N_v (the degeneracy n/N_c of Eq. (1)); (b) the
+    region statistics differ from the set's ("fermi_dirac_legacy" matches neither: it pins the Boltzmann
+    product the FD set's Eq. (1) corrects, and it double-counts an apparent set's degeneracy); (c)
+    |T - paired_T_K| > 0.5 K (no n_i(T) model: the fit is a 300 K statement). allow=True
+    (BipolarOptions.allow_unpaired_bgn) RETURNS the message instead (the caller warns once); an unpaired
+    or absent set returns None."""
+    if bgn is None or not bgn.paired:
+        return None
+    from dynameta.constants import T_REF
+    kT = KB * float(bgn.paired_T_K) / Q_E
+    bad = []
+    n_i = float(n_i_m3)
+    ref = float(bgn.paired_n_i_m3)
+    if abs(n_i / ref - 1.0) > _PAIR_REL_TOL:
+        bad.append("n_i = {:.4g} cm^-3 but the set was fitted with {:.4g} cm^-3: n_ie^2 is off by {:+.1f} %, "
+                   "a gap error of {:+.2f} meV".format(n_i / _CM3, ref / _CM3,
+                                                     100.0 * ((n_i / ref) ** 2 - 1.0),
+                                                     1e3 * kT * math.log((n_i / ref) ** 2)))
+    if bgn.paired_statistics == "fermi_dirac":
+        for nm, v, r in (("N_c", N_c_m3, bgn.paired_N_c_m3), ("N_v", N_v_m3, bgn.paired_N_v_m3)):
+            if abs(float(v) / float(r) - 1.0) > _PAIR_REL_TOL:
+                bad.append("{} = {:.4g} cm^-3 but the set was fitted with {:.4g} cm^-3 (the degeneracy "
+                           "n/N_c of its Fermi-Dirac n_ie)".format(nm, float(v) / _CM3, float(r) / _CM3))
+    if statistics != bgn.paired_statistics:
+        why = {("fermi_dirac", "fermi_dirac_legacy"):
+               "the legacy statistics pin the Boltzmann product n0 p0 = n_ie^2 in the contacts and in every "
+               "recombination term, not the Fermi-Dirac n0 p0 = n_ie^2 exp(-Delta_n - Delta_p) the set was "
+               "fitted with; pass statistics='fermi_dirac' (TransportModel.carrier_statistics)",
+               ("fermi_dirac", "boltzmann"):
+               "a REAL narrowing with Boltzmann statistics drops the degeneracy correction; pass "
+               "statistics='fermi_dirac' (TransportModel.carrier_statistics)",
+               ("boltzmann", "fermi_dirac_legacy"):
+               "an APPARENT (Boltzmann-extracted) narrowing on the FD g-factor counts the degeneracy twice; "
+               "pass statistics='boltzmann' (TransportModel.carrier_statistics)",
+               ("boltzmann", "fermi_dirac"):
+               "an APPARENT (Boltzmann-extracted) narrowing with FD statistics counts the degeneracy twice; "
+               "pass statistics='boltzmann' (TransportModel.carrier_statistics)"}
+        bad.append("the set is paired with {} statistics, the region runs {!r}: {}".format(
+            bgn.paired_statistics, statistics, why[(bgn.paired_statistics, statistics)]))
+    T = T_REF if T_K is None else float(T_K)
+    if abs(T - float(bgn.paired_T_K)) > _PAIR_T_TOL_K:
+        bad.append("the region runs at T = {:.6g} K but the fit is a {:.6g} K statement (no n_i(T) model "
+                   "is shipped)".format(T, float(bgn.paired_T_K)))
+    if not bad:
+        return None
+    msg = ("region {!r}: the PAIRED bandgap-narrowing set [{}] does not match the region: {}. Fix the "
+           "region inputs, or set BipolarOptions(allow_unpaired_bgn=True) to proceed with your own n_i "
+           "(and N_c, N_v) at this T.".format(region, bgn.source.split(";")[0], "; ".join(bad)))
+    if allow:
+        return msg
+    raise BGNPairingError(msg)
+
+
+def _refuse_outside_basis(bgn: BGNModel, N_D, N_A) -> None:
+    """Raise BGNFitPendingError if an outside_basis="refuse" set meets nodes of the other doping type
+    above N_ref (BGNModel.refused_nodes) -- the house Si sets on p-type nodes."""
+    bad = bgn.refused_nodes(N_D, N_A)
+    if np.any(bad):
+        other = np.asarray(N_A if bgn.doping_basis == "donors" else N_D, dtype=np.float64)
+        raise BGNFitPendingError(
+            "the {} bandgap-narrowing set [{}] covers {} material only; {} node(s) are {} with up to {:.3g} "
+            "cm^-3 > N_ref = {:.3g} cm^-3, where the narrowing is not negligible but its constants are not "
+            "available (for Si: the p-type fit of Yan & Cuevas, J. Appl. Phys. 116, 194505 (2014), has not "
+            "been read). Give the p-type region its own material with an explicit BGN choice, or wait for "
+            "the 2014 constants.".format(
+                bgn.kind, bgn.source.split(";")[0],
+                "n-type" if bgn.doping_basis == "donors" else "p-type", int(np.count_nonzero(bad)),
+                "p-type" if bgn.doping_basis == "donors" else "n-type",
+                float(np.max(other[bad])) / _CM3, bgn.N_ref_m3 / _CM3))
 
 
 # =====================================================================================================
@@ -532,11 +805,80 @@ def _neutral_root(N_D, N_A, n_ie, n1D, p1A, g_D, g_A, ionization: bool, traps=()
     return n0, ni2 / n0
 
 
+_ACT_NEWTON_ITERS = 100     # Newton steps for the activity inverse (quadratic: ~6-10 are used)
+
+
+def fd_activity_inverse(t):
+    """u >= 0 with L(u) = ln u + Delta(u) = t (vectorized): the inverse of the FD-enhanced transport's
+    log-activity (Delta = physics_bipolar_dd.fd_potential_shift, the integral of the SAME rational g the
+    edge models use). Newton in y = ln u on h(y) = y + Delta(e^y) - t, h'(y) = g(e^y) >= 1: h is convex
+    and increasing, and h(t) = Delta(e^t) >= 0, so Newton started at y = t never overshoots and
+    decreases monotonically to the root (stopped when the step is below 1e-15 in y)."""
+    from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
+    from dynameta.carriers.einstein import g_einstein
+    t = np.asarray(t, dtype=np.float64)
+    y = t.copy()
+    for _ in range(_ACT_NEWTON_ITERS):
+        u = np.exp(y)
+        step = (y + np.asarray(fd_potential_shift(u), dtype=np.float64) - t) / g_einstein(u)
+        y = y - step
+        if np.all(np.abs(step) < 1e-15):
+            break
+    return np.exp(y)
+
+
+def _neutral_root_fd(N_D, N_A, n_ie0, n1D, p1A, g_D, g_A, ionization: bool, N_c: float, N_v: float):
+    """Charge-neutral equilibrium of the FD detailed balance (statistics="fermi_dirac"): n0 solving
+         f(n) = n - p(n) - N_D+(n) + N_A-(p(n)) = 0,
+         L(p/N_v) = ln(n_ie0^2/(N_c N_v)) - L(n/N_c),   L(u) = ln u + Delta(u),
+    i.e. eta_n + eta_p = -E_g,eff/kT in the transport's own activity: n0 p0 = n_ie0^2 exp(-Delta(n0/N_c)
+    - Delta(p0/N_v)) -- Yan & Cuevas 2013 Eq. (1) with the code's Delta (n_ie0 = n_i exp(dEg/2kT)).
+    p(n) <= n_ie0^2/n is decreasing, so f is strictly increasing and the root unique. Bracket (bisection
+    in ln n): f >= 0 at S = N_A + N_D + n_ie0 (p <= n_ie0^2/S <= n_ie0); f <= 0 at n_ie0^2/S
+    exp(-Delta(S/N_v) - 1), where p > S. Returns (n0, p0)."""
+    from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
+    N_D, N_A, n_ie0, n1D, p1A = (np.asarray(a, dtype=np.float64) for a in (N_D, N_A, n_ie0, n1D, p1A))
+    t = np.log(n_ie0 * n_ie0 / (N_c * N_v))
+    S = N_A + N_D + n_ie0
+    hi = np.log(S)
+    lo = 2.0 * np.log(n_ie0) - hi - np.asarray(fd_potential_shift(S / N_v), dtype=np.float64) - 1.0
+
+    def p_of(ln_n):
+        u = np.exp(ln_n) / N_c
+        return N_v * fd_activity_inverse(t - (np.log(u) + np.asarray(fd_potential_shift(u), np.float64)))
+
+    def f(ln_n):
+        n = np.exp(ln_n)
+        p = p_of(ln_n)
+        if ionization:
+            return n - p - N_D / (1.0 + g_D * n / n1D) + N_A / (1.0 + g_A * p / p1A)
+        return n - p - N_D + N_A
+
+    for _ in range(_ROOT_ITERS):
+        mid = 0.5 * (lo + hi)
+        up = f(mid) > 0.0
+        hi = np.where(up, mid, hi)
+        lo = np.where(up, lo, mid)
+        if np.all(hi - lo < 1e-15):
+            break
+    ln_n = 0.5 * (lo + hi)
+    return np.exp(ln_n), p_of(ln_n)
+
+
 def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: float,
                        options: BipolarOptions, fd_enhancement: bool,
-                       donors_m3=None, acceptors_m3=None, traps=()) -> Dict[str, np.ndarray]:
+                       donors_m3=None, acceptors_m3=None, traps=(),
+                       statistics: Optional[str] = None) -> Dict[str, np.ndarray]:
     """Every fixed (doping-only) field the options need, per node. Pure numpy. THE single source shared
     by the DEVSIM setup and by ohmic_built_in_offset_V (the 3-D gate frame).
+
+    `statistics` (v0.15; resolve_statistics with fd_enhancement): None keeps the v0.14 arithmetic
+    BIT-identically (Boltzmann-product root n0 p0 = n_ie^2); "fermi_dirac" solves the FD detailed-balance
+    root n0 p0 = n_ie0^2 exp(-Delta(n0/N_c) - Delta(p0/N_v)) (_neutral_root_fd; CHARGED trap levels are
+    refused there). The ONE BGN pairing check (check_bgn_pairing) and the outside-basis refusal
+    (BGNFitPendingError) run here, so the region setup and the 3-D gate frame cannot disagree; with
+    BipolarOptions.allow_unpaired_bgn the pairing message is returned as 'pairing_advisory' (None when
+    the set matches or is unpaired) for install_option_fields to warn once.
 
     `traps`: CHARGED bulk trap levels ((E_t - E_i [eV], N_t [m^-3], kind), ...; physics_traps.
     equilibrium_trap_levels) whose equilibrium trapped charge enters the charge-neutral root (the ONE
@@ -546,9 +888,11 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     Donors/Acceptors default to the net-doping split (N_D = max(N, 0), N_A = max(-N, 0)) -- a
     compensated region must pass them explicitly (or define 'Donors'/'Acceptors' node models).
 
-    Returns arrays: V_t (scalar), dEg_eV, D_c_V, D_v_V, n_ie, N_D, N_A, n1D, p1A, n0, p0, fd_n, fd_p,
-    psi_eq (the potential the ohmic contact pins, V), seed_shift (V_t units, see physics_bipolar_dd.
-    equilibrium_seed_psi_expr), g_eeh, g_ehh."""
+    Returns arrays: V_t (scalar), dEg_eV, D_c_V, D_v_V, n_ie (the equilibrium effective intrinsic
+    density sqrt(n0 p0); under "fermi_dirac" it carries the degeneracy factors), n_ie0 (n_i exp(dEg/2kT),
+    the narrowing alone), N_D, N_A, n1D, p1A, n0, p0, fd_n, fd_p, psi_eq (the potential the ohmic contact
+    pins, V), seed_shift (V_t units, see physics_bipolar_dd.equilibrium_seed_psi_expr), g_eeh, g_ehh;
+    and pairing_advisory (str or None)."""
     N = np.asarray(net_doping_m3, dtype=np.float64)
     N_D = np.where(N > 0.0, N, 0.0) if donors_m3 is None else np.broadcast_to(
         np.asarray(donors_m3, dtype=np.float64), N.shape)
@@ -556,8 +900,20 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
         np.asarray(acceptors_m3, dtype=np.float64), N.shape)
     Vt = options.V_t()
     n_i = float(n_i_m3)
+    label = resolve_statistics(statistics, fd_enhancement)
+    fdc = label == "fermi_dirac"
+    # --- v0.15: the ONE pairing check + the outside-basis refusal (raise, or the advisory text) ---
+    pairing_msg = check_bgn_pairing(options.bgn, n_i_m3=n_i, N_c_m3=float(N_c_m3), N_v_m3=float(N_v_m3),
+                                    statistics=label, T_K=options.T_K,
+                                    allow=bool(options.allow_unpaired_bgn))
+    if fdc and traps:
+        raise NotImplementedError(
+            "statistics='fermi_dirac' with CHARGED bulk trap levels is not implemented: their "
+            "equilibrium occupancy n/(n + n1) assumes the Boltzmann product n p = n_ie^2. Use the legacy "
+            "statistics (statistics=None) or neutral levels.")
     # --- BGN: dEg, band-edge split, n_ie ---
     if options.bgn is not None:
+        _refuse_outside_basis(options.bgn, N_D, N_A)
         dEg = options.bgn.delta_Eg_eV(options.bgn.basis_density_m3(N_D, N_A))
         gam = float(options.bgn.conduction_fraction)
     else:
@@ -584,9 +940,13 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
                     np.broadcast_to(p1A, N.shape).ravel()], axis=1)
     uq, inv = np.unique(key, axis=0, return_inverse=True)
     inv = np.asarray(inv).reshape(-1)
-    n0u, p0u = _neutral_root(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
-                             ion is not None, traps=tuple(traps or ()), V_t=Vt,
-                             N_c=float(N_c_m3), N_v=float(N_v_m3))
+    if fdc:
+        n0u, p0u = _neutral_root_fd(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
+                                    ion is not None, N_c=float(N_c_m3), N_v=float(N_v_m3))
+    else:
+        n0u, p0u = _neutral_root(uq[:, 0], uq[:, 1], uq[:, 2], uq[:, 3], uq[:, 4], g_D, g_A,
+                                 ion is not None, traps=tuple(traps or ()), V_t=Vt,
+                                 N_c=float(N_c_m3), N_v=float(N_v_m3))
     n0 = n0u[inv].reshape(N.shape)
     p0 = p0u[inv].reshape(N.shape)
     # --- the potential the ohmic contact pins (Boltzmann frame + FD degeneracy + band-edge shift) ---
@@ -610,10 +970,11 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     else:
         g_eeh = np.ones_like(N)
         g_ehh = np.ones_like(N)
-    return dict(V_t=Vt, dEg_eV=dEg, D_c_V=D_c, D_v_V=D_v, n_ie=n_ie, N_D=N_D, N_A=N_A,
+    n_ie_eq = n_ie * np.exp(-0.5 * (fd_n + fd_p)) if fdc else n_ie
+    return dict(V_t=Vt, dEg_eV=dEg, D_c_V=D_c, D_v_V=D_v, n_ie=n_ie_eq, n_ie0=n_ie, N_D=N_D, N_A=N_A,
                 n1D=np.broadcast_to(n1D, N.shape), p1A=np.broadcast_to(p1A, N.shape),
                 n0=n0, p0=p0, fd_n=fd_n, fd_p=fd_p, psi_eq=psi_eq, seed_shift=seed_shift,
-                g_eeh=g_eeh, g_ehh=g_ehh)
+                g_eeh=g_eeh, g_ehh=g_ehh, pairing_advisory=pairing_msg)
 
 
 # =====================================================================================================
@@ -638,11 +999,14 @@ def srh_expr(bgn: bool) -> str:
 GEXT_TERM = "gext"
 
 
-def recombination_exprs(options: BipolarOptions, *, pair: bool = False) -> Dict[str, str]:
+def recombination_exprs(options: BipolarOptions, *, pair: bool = False,
+                        nie: Optional[bool] = None) -> Dict[str, str]:
     """{node model name: expression} of the extra recombination terms (Auger, radiative). pair=True
     gives each process's PAIR rate G + R (n p - n_ie^2 -> n p + n_ie^2: the detailed-balance split the
-    noise GR source 2 (G + R) uses) -- one builder for the rate and its pair rate."""
-    bgn = options.bgn is not None
+    noise GR source 2 (G + R) uses) -- one builder for the rate and its pair rate. `nie`: reference the
+    region's n_ie model (True) or n_i (False); None = whether the options carry a BGN (the v0.14 rule;
+    statistics="fermi_dirac" passes True: its n_ie carries the degeneracy factors)."""
+    bgn = options.bgn is not None if nie is None else bool(nie)
     sgn = "+" if pair else "-"
     out = {}
     if options.auger is not None:
@@ -738,7 +1102,7 @@ def mott_advisory(region: str, ion: IonizationModel, N_D_m3, N_A_m3, n0_m3, p0_m
 
 
 def _region_fields(device: str, region: str, options: Optional[BipolarOptions], *,
-                   fd_enhancement: bool, traps=()) -> Dict[str, np.ndarray]:
+                   fd_enhancement: bool, traps=(), statistics: Optional[str] = None) -> Dict[str, np.ndarray]:
     """equilibrium_fields on a region's own parameters and doping (options None -> the inert bundle:
     only the charged trap levels change the trap-free equilibrium)."""
     o = options if options is not None else BipolarOptions()
@@ -755,25 +1119,67 @@ def _region_fields(device: str, region: str, options: Optional[BipolarOptions], 
                          .format(region))
     return equilibrium_fields(net, n_i_m3=n_i, N_c_m3=N_c, N_v_m3=N_v, options=o,
                               fd_enhancement=fd_enhancement, donors_m3=don, acceptors_m3=acc,
-                              traps=traps)
+                              traps=traps, statistics=statistics)
+
+
+def install_fd_detailed_balance(device: str, region: str, base: str) -> str:
+    """statistics="fermi_dirac": the solution-dependent effective intrinsic density
+         n_ie = base * sqrt(gamma_n gamma_p),   gamma = (c/N) exp(-L(c/N)) = exp(-Delta(c/N)),
+    with L = ln u + Delta(u) the transport's own log-activity in CLOSED form
+    (physics_heterojunction.setup_log_activity, idempotent: a heterointerface on the region shares it)
+    and `base` the fixed part ("NieBgn" = n_i exp(dEg/2kT) under BGN, else the parameter "n_i"). Every
+    recombination string referencing n_ie (SRH, Auger, radiative, bulk trap levels, the noise pair
+    rates) then vanishes where n p = n_ie^2 -- exactly the zero-current equilibrium of the FD-enhanced
+    SG transport (d psi_n = g V_t d ln n => ln n + Delta - psi_n/V_t = const, likewise for holes).
+    DEVSIM differentiates a model reference through '<model>:<var>', so the derivatives are given in
+    closed form without cancellation: d ln gamma/dc = -(g - 1)/c = -(GA + GC s)/(N (1 + GB s + GD s^2)),
+    s = (c/N)^(1/3) (the rational g fit, carriers.einstein). Returns "n_ie"."""
+    from dynameta.carriers.einstein import GA, GB, GC, GD
+    from dynameta.carriers.physics_heterojunction import setup_log_activity
+    gam = []
+    for var, dos, tag in (("Electrons", "N_dos", "N"), ("Holes", "N_dos_p", "P")):
+        L = setup_log_activity(device, region, var, dos, fd=True)
+        s = "pow({}/{}, {!r})".format(var, dos, 1.0 / 3.0)
+        g_name = "FDGamma" + tag
+        dl_name = "FDdLnGamma" + tag
+        ds.node_model(device=device, region=region, name=g_name,
+                      equation="({v}/{d})*exp(-{L})".format(v=var, d=dos, L=L))
+        ds.node_model(device=device, region=region, name=dl_name,
+                      equation="-({a!r} + {c!r}*{s})/({d}*(1.0 + {b!r}*{s} + {dd!r}*{s}*{s}))".format(
+                          a=GA, c=GC, b=GB, dd=GD, s=s, d=dos))
+        ds.node_model(device=device, region=region, name="{}:{}".format(g_name, var),
+                      equation="{}*{}".format(g_name, dl_name))
+        gam.append((dl_name, var))
+    ds.node_model(device=device, region=region, name="n_ie",
+                  equation="{}*pow(FDGammaN*FDGammaP, 0.5)".format(base))
+    for dl_name, var in gam:
+        ds.node_model(device=device, region=region, name="n_ie:{}".format(var),
+                      equation="0.5*n_ie*{}".format(dl_name))
+    return "n_ie"
 
 
 def install_option_fields(device: str, region: str, options: BipolarOptions, *,
-                          fd_enhancement: bool) -> None:
+                          fd_enhancement: bool, statistics: Optional[str] = None) -> None:
     """Stage 1 of the options (setup_bipolar_region calls it after the currents, BEFORE the
-    recombination models, only when options.active): V_t at T_K; under BGN the n_ie field and the
-    band-edge quasi-fields re-defining vdiff_g / vdiff_gp (a TRANSPORT change, not an additive term);
-    under incomplete ionization the reference fields, IonizedNetDoping and the Poisson composite
-    rebuilt on it (physics_bipolar_dd.rebuild_poisson_charge, which keeps every QTerm_*)."""
+    recombination models, when options.active or statistics="fermi_dirac"): V_t at T_K; the pairing
+    check's advisory (allow_unpaired_bgn); under BGN the n_ie field and the band-edge quasi-fields
+    re-defining vdiff_g / vdiff_gp (a TRANSPORT change, not an additive term); under statistics=
+    "fermi_dirac" the solution-dependent n_ie (install_fd_detailed_balance); under incomplete ionization
+    the reference fields, IonizedNetDoping and the Poisson composite rebuilt on it
+    (physics_bipolar_dd.rebuild_poisson_charge, which keeps every QTerm_*)."""
     from dynameta.carriers.physics_bipolar_dd import rebuild_poisson_charge
     o = options
+    fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"
     if o.T_K is not None:
         ds.set_parameter(device=device, region=region, name="V_t", value=o.V_t())
-    f = _region_fields(device, region, o, fd_enhancement=fd_enhancement)
+    f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, statistics=statistics)
+    if f["pairing_advisory"] is not None:        # allow_unpaired_bgn: the refusal, downgraded, once
+        warnings.warn("install_bipolar_options: " + f["pairing_advisory"], AdvisoryWarning, stacklevel=4)
 
     # --- BGN: n_ie field, band-edge quasi-fields in both SG currents ---
     if o.bgn is not None:
-        if fd_enhancement and float(np.max(np.maximum(f["fd_n"], f["fd_p"]))) > _BGN_FD_WARN_VT:
+        if (fd_enhancement and o.bgn.paired_statistics != "fermi_dirac"
+                and float(np.max(np.maximum(f["fd_n"], f["fd_p"]))) > _BGN_FD_WARN_VT):
             warnings.warn(
                 "install_bipolar_options: region {!r} combines an APPARENT bandgap-narrowing model "
                 "({}) with the Fermi-Dirac g-factor on a degenerate doping (FD built-in correction up "
@@ -785,7 +1191,7 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
         msg = bgn_basis_advisory(region, o.bgn, f["N_D"], f["N_A"])
         if msg is not None:                      # the fit is used outside its validity range
             warnings.warn(msg, UnreliableResultWarning, stacklevel=4)
-        _set_field(device, region, "n_ie", f["n_ie"])
+        _set_field(device, region, "NieBgn" if fdc else "n_ie", f["n_ie0"] if fdc else f["n_ie"])
         _set_field(device, region, "BgnDc", f["D_c_V"])
         _set_field(device, region, "BgnDv", f["D_v_V"])
         for nm in ("BgnDc", "BgnDv"):
@@ -794,6 +1200,8 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
                           "(vdiff + (BgnDc@n0 - BgnDc@n1)/V_t) / g_enh", ("Potential", "Electrons"))
         _edge_with_derivs(device, region, "vdiff_gp",
                           "(vdiff - (BgnDv@n0 - BgnDv@n1)/V_t) / g_enh_p", ("Potential", "Holes"))
+    if fdc:                                      # FD detailed balance: n_ie from the solution
+        install_fd_detailed_balance(device, region, "NieBgn" if o.bgn is not None else "n_i")
 
     # --- incomplete ionization: Poisson charge with N_D+ - N_A- ---
     if o.ionization is not None:
@@ -813,15 +1221,17 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
 
 
 def install_option_terms(device: str, region: str, options: Optional[BipolarOptions], *,
-                         fd_enhancement: bool, traps=()) -> None:
+                         fd_enhancement: bool, traps=(), statistics: Optional[str] = None) -> None:
     """Stage 2 (setup_bipolar_region, after USRH and the trap levels): Auger / radiative / external
     generation as ADDITIVE terms (physics_bipolar_dd.add_recombination_term, each with its noise pair
     rate; the diagnostics UAuger / URad keep their names), and -- when the equilibrium itself changes
     (BGN, incomplete ionization, or CHARGED trap levels `traps`) -- the charge-neutral fields the
     ohmic contacts and the seed pin (NeutralElectrons/Holes, EquilibriumPotential, SeedPsiShift).
-    options may be None (charged traps alone)."""
+    options may be None (charged traps alone). statistics="fermi_dirac" always installs those fields
+    (the FD detailed-balance root) and points the recombination strings at the n_ie model."""
     from dynameta.carriers.physics_bipolar_dd import add_recombination_term
     o = options
+    fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"
     if o is not None:
         if o.auger is not None:
             ds.set_parameter(device=device, region=region, name="AugerCn", value=float(o.auger.C_n_m6s))
@@ -830,11 +1240,13 @@ def install_option_terms(device: str, region: str, options: Optional[BipolarOpti
             ds.set_parameter(device=device, region=region, name="B_rad", value=float(o.radiative.B_m3s))
         f = None
         if o.auger is not None and o.auger.coulomb_enhanced:
-            f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps)
+            f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps,
+                               statistics=statistics)
             _set_field(device, region, "AugerGeeh", f["g_eeh"])
             _set_field(device, region, "AugerGehh", f["g_ehh"])
-        pairs = recombination_exprs(o, pair=True)
-        for nm, ex in recombination_exprs(o).items():
+        nie = True if fdc else None
+        pairs = recombination_exprs(o, pair=True, nie=nie)
+        for nm, ex in recombination_exprs(o, nie=nie).items():
             _node_with_derivs(device, region, nm, ex, ("Electrons", "Holes"))     # diagnostic name
             add_recombination_term(device, region, _TERM_NAMES[nm], nm, pair=pairs[nm],
                                    derivs={"Electrons": nm + ":Electrons", "Holes": nm + ":Holes"})
@@ -842,8 +1254,9 @@ def install_option_terms(device: str, region: str, options: Optional[BipolarOpti
             ds.set_parameter(device=device, region=region, name="G_ext", value=float(o.generation_m3s))
             # Poisson generation (photogeneration shot noise) unless the noise call says otherwise
             add_recombination_term(device, region, GEXT_TERM, "-G_ext", pair="G_ext")
-    if (o is not None and o.alters_equilibrium) or traps:
-        f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps)
+    if (o is not None and o.alters_equilibrium) or traps or fdc:
+        f = _region_fields(device, region, o, fd_enhancement=fd_enhancement, traps=traps,
+                           statistics=statistics)
         _set_field(device, region, "NeutralElectrons", f["n0"])
         _set_field(device, region, "NeutralHoles", f["p0"])
         _set_field(device, region, "EquilibriumPotential", f["psi_eq"])
@@ -859,6 +1272,9 @@ def options_contact_models(device: str, region: "str | None") -> bool:
 
 
 __all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "IonizationUnitsError",
+           "BGNPairingError", "BGNFitPendingError", "BGN_SI_YAN_CUEVAS_2013_FD",
+           "BGN_SI_YAN_CUEVAS_2013_BOLTZMANN", "resolve_statistics", "check_bgn_pairing",
+           "fd_activity_inverse", "install_fd_detailed_balance",
            "BipolarOptions", "band_dos_at_T",
            "AUGER_SI_DZIEWIOR_SCHMID_1977", "AUGER_SI_ALTERMATT_1997", "RADIATIVE_SI_TRUPKE_2003",
            "BGN_SI_SLOTBOOM_1977", "BGN_SI_KLAASSEN_1992", "BGN_SI_DEL_ALAMO_1985",

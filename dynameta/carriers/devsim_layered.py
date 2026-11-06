@@ -705,11 +705,16 @@ class LayeredDevsimBuilder:
         # ONE helper shared with the 3-D builder (v0.14 row 3.2-7).
         from dynameta.carriers.bipolar_options import band_dos_at_T
         Nc, Nv = band_dos_at_T(dos, tr.dos_mass_p_kg, getattr(tr, "bipolar_options", None))
+        # v0.15 carrier statistics (TransportModel.carrier_statistics): None -> the legacy FD g-factor
+        # (fd_enhancement=True, statistics unset: byte-identical); "boltzmann" -> g == 1; "fermi_dirac"
+        # -> FD transport + FD detailed balance.
+        stats = getattr(tr, "carrier_statistics", None)
         BP.setup_bipolar_region(
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
-            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
+            tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s),
+            fd_enhancement=stats != "boltzmann", statistics=stats, n_dos_p_m3=Nv,
             options=getattr(tr, "bipolar_options", None),       # audit R26/R27 (None -> SRH only)
             btbt=getattr(tr, "btbt", None),                 # D1d: None -> no BTBT (byte-identical)
             srh_trap_energy_eV=float(getattr(tr, "srh_trap_energy_eV", 0.0)),
