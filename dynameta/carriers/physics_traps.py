@@ -106,7 +106,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from dynameta.constants import Q_E, V_T
-from dynameta.carriers.eq_registry import ds
+from dynameta.carriers.eq_registry import ds, node_with_derivs, record_region_equation
 
 _KINDS = ("acceptor", "donor", "neutral")
 # Where a level's energy is quoted from (the per-level ENERGY REFERENCE, v0.14 follow-up). Equivalent to
@@ -206,6 +206,66 @@ def srh_occupancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun",
                                                      d=_srh_denominator(n1e, p1e, taun, taup))
 
 
+def srh_capture_exprs(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup",
+                      f: str = "f", one_minus_f: str = "g", *, bgn: bool = False,
+                      reference: str = "intrinsic", scale: "str | None" = None,
+                      pair: bool = False) -> Tuple[str, str]:
+    """(R_n, R_p): the electron and hole CAPTURE-minus-EMISSION rates [m^-3 s^-1] of a level whose
+    electron occupancy is a VARIABLE (`f`, and `one_minus_f` = 1 - f spelled separately so a nearly
+    full level never cancels) -- the kinetic (finite capture and emission) twin of srh_rate_expr
+    [Shockley & Read, Phys. Rev. 87, 835 (1952); Hall, Phys. Rev. 87, 387 (1952)]:
+
+        R_n = [ n (1 - f) - n1' f ] / tau_n0        (net electron capture: c_n n (1-f) - e_n f)
+        R_p = [ p f - p1' (1 - f) ] / tau_p0        (net hole capture:     c_p p f - e_p (1-f))
+        N_t df/dt = R_n - R_p,
+
+    with emission by detailed balance, e_n = c_n n1', e_p = c_p p1', and n1', p1' EXACTLY the densities
+    of srh_reference_densities (energy reference, then BGN, then the DG scale) -- so the steady state
+    R_n = R_p gives f = srh_occupancy_expr and R_n = R_p = srh_rate_expr: the DC limit IS the
+    quasi-static model (tests/test_trap_kinetics.py, gate K1-1, every reference x BGN x DG scale). With
+    reference="conduction" e_n = sigma_n v_th N_c exp(-(E_c - E_t)/kT), the DLTS emission rate [Lang,
+    J. Appl. Phys. 45, 3023 (1974)]. For a sheet level pass taun -> 1, taup -> c_n/c_p and multiply by
+    N_it c_n (as install_interface_traps does for the quasi-static kernel).
+
+    pair=True returns the EVENT rates (P_n, P_p) instead: both directions of each exchange counted,
+    P_n = [n (1 - f) + n1' f]/tau_n0, P_p = [p f + p1' (1 - f)]/tau_p0 -- the Poisson rate of the
+    electron- and hole-exchange processes, the noise source of the kinetic trap (each a two-point event
+    between its carrier row and the trap row, noise_analysis.TwoPointSource)."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale)
+    s = "+" if pair else "-"
+    return ("(Electrons*{g} {s} {n1}*{f})/{tn}".format(g=one_minus_f, s=s, n1=n1e, f=f, tn=taun),
+            "(Holes*{f} {s} {p1}*{g})/{tp}".format(f=f, s=s, p1=p1e, g=one_minus_f, tp=taup))
+
+
+def srh_capture_derivs(n1: str, p1: str, taun: str, taup: str, f: str, one_minus_f: str, var: str,
+                       dfdx: str, *, bgn: bool = False, reference: str = "intrinsic",
+                       scale: "str | None" = None) -> Tuple[dict, dict]:
+    """Closed-form derivatives of srh_capture_exprs for physics_bipolar_dd.add_recombination_term(
+    derivs=...): ({Electrons, Holes, var} of R_n, the same of R_p), where `var` is the occupancy variable
+    x and `dfdx` the expression of df/dx (the kinetic levels use the odds x = w = f/(1-f): df/dw =
+    (1 - f)^2). n1', p1' are fixed fields here (the region's n_ie does not depend on the carriers --
+    install_bulk_traps refuses the FD-statistics regions where it does). R_n depends on (n, x), R_p on
+    (p, x):
+        dR_n/dn = (1 - f)/tau_n0          dR_n/dx = -(n + n1') (df/dx)/tau_n0
+        dR_p/dp = f/tau_p0                dR_p/dx = +(p + p1') (df/dx)/tau_p0."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference, scale=scale)
+    return ({"Electrons": "{}/{}".format(one_minus_f, taun), "Holes": "0",
+             var: "-(Electrons + {})*{}/{}".format(n1e, dfdx, taun)},
+            {"Electrons": "0", "Holes": "{}/{}".format(f, taup),
+             var: "(Holes + {})*{}/{}".format(p1e, dfdx, taup)})
+
+
+def srh_occupancy_odds_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup",
+                            *, bgn: bool = False, reference: str = "intrinsic") -> str:
+    """w_SS = f_SS/(1 - f_SS) of the steady-state occupancy srh_occupancy_expr, written as
+    (tau_p0 n + tau_n0 p1')/(tau_p0 n1' + tau_n0 p) (f_SS and 1 - f_SS share the SRH denominator) -- no
+    1 - f cancellation, finite and > 0 at n = p = 0. The exact seed of a kinetic level's occupancy
+    variable (seed_kinetic_traps); at equilibrium it is exp((E_F - E_t)/kT)."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    return "(({tp}*Electrons + {tn}*{p1})/({tp}*{n1} + {tn}*Holes))".format(
+        tp=taup, tn=taun, p1=p1e, n1=n1e)
+
+
 def n1_p1(energy_eV: float, n_i_m3: float, V_t: float = V_T) -> Tuple[float, float]:
     """(n1, p1) = n_i exp(+-E/kT) for a level at E = E_t - E_i [eV], kT/q = V_t (the region's thermal
     voltage; V_T at T_REF by default, BipolarOptions.T_K otherwise). E = 0 returns (n_i, n_i)
@@ -284,6 +344,23 @@ class TrapLevel:
                    (recombination only -- the legacy N_t -> 0 SRH assumption).
     tau_n0_s, tau_p0_s : capture lifetimes [s]; OR give sigma_n_m2, sigma_p_m2 [m^2] with v_th
                    [m/s] and density_m3, and tau_x0 = 1/(sigma_x v_th,x N_t). Explicit taus win.
+    dynamic      : False (default) -- QUASI-STATIC occupancy: f is the steady-state SRH value, an
+                   instantaneous function of (n, p). Exact at DC and for the low-frequency C-V, and the
+                   cheapest; the shipped model, character for character. Use it for DC sweeps, I-V,
+                   lifetimes, compensation, and for recombination-only (kind="neutral") levels in any
+                   analysis whose frequencies are far below the capture rates.
+                   True -- KINETIC occupancy (v0.15, plan 4.3.2): f becomes a solution variable (its
+                   odds w = f/(1-f) = exp(u), u the level's own quasi-Fermi level in kT, TrapW_trap<k>)
+                   with its own rate equation N_t df/dt = R_n - R_p (srh_capture_exprs). The DC result is the
+                   quasi-static one (to solver round-off), and transient / ssac become CHARGE-
+                   CONSERVING (the capture current enters the continuity rows). Use it for any
+                   transient or small-signal analysis of a CHARGED level (DLTS-like emission, C(omega)
+                   and G(omega) dispersion, terminal-current balance), and for a neutral level whose
+                   capture time is not short against the analysis time scale. Needs density_m3 > 0
+                   (N_t sets the stored charge), a bipolar region with the legacy statistics, and a
+                   seed (seed_kinetic_traps after the carriers are seeded). Noise: noise_spectrum
+                   REFUSES a device with kinetic levels until the trap g-r sources are validated (v0.15
+                   K3); restrict mechanisms= to leave them out knowingly.
     """
     energy_eV: float = 0.0
     density_m3: float = 0.0
@@ -295,6 +372,7 @@ class TrapLevel:
     v_th_n_ms: float = 1.0e5
     v_th_p_ms: float = 1.0e5
     energy_reference: str = "intrinsic"
+    dynamic: bool = False
 
     def __post_init__(self):
         _check_reference("TrapLevel", self.energy_reference, self.energy_eV)
@@ -304,6 +382,12 @@ class TrapLevel:
             raise ValueError("TrapLevel.energy_eV must be finite")
         if self.kind != "neutral" and not (float(self.density_m3) > 0.0):
             raise ValueError("a charged ({}) TrapLevel needs density_m3 > 0".format(self.kind))
+        if not isinstance(self.dynamic, bool):
+            raise TypeError("TrapLevel.dynamic must be a bool; got {!r}".format(self.dynamic))
+        if self.dynamic and not (float(self.density_m3) > 0.0 and math.isfinite(float(self.density_m3))):
+            raise ValueError("a kinetic TrapLevel (dynamic=True) needs a finite density_m3 > 0: N_t is the "
+                             "number of states whose occupancy is the new variable (also for kind="
+                             "'neutral')")
         self.lifetimes_s()                                     # validate now, not at device build
 
     def lifetimes_s(self) -> Tuple[float, float]:
@@ -351,6 +435,19 @@ class InterfaceTraps:
                    neutral_level): "intrinsic" (default, E - E_i), "conduction" (E_c - E >= 0) or
                    "valence" (E - E_v >= 0); see TrapLevel. With a band reference, band_gap_eV spans
                    [0, E_g] and charge="split" needs an explicit neutral_level_eV.
+    dynamic      : False (default) -- quasi-static occupancy (the shipped model, character for
+                   character): exact for DC and the LF C-V. True -- KINETIC bins (v0.15, plan 4.3.2): every
+                   sheet level of this spec gets its own occupancy variable (odds w, as TrapLevel(
+                   dynamic=True)) and rate equation N_it df/dt = R_n - R_p; use it for the conductance
+                   method (C(omega), G_p(omega)/omega of D_it -- Nicollian & Goetzberger 1967), interface
+                   transients and any ssac / transient analysis with charged D_it. Needs recombination=True
+                   (the capture IS the surface SRH). Cost: (bins) x (semiconductor-region nodes) extra
+                   unknowns, because DEVSIM 2.11 has no interface solution variable (a region-wide
+                   variable, masked off the interface); install_interface_traps refuses above
+                   KINETIC_UNKNOWN_BUDGET -- coarsen with kinetic_bin_eV, or raise the budget.
+    kinetic_bin_eV : bin width [eV] for a dynamic spec (default: as bin_eV, <= kT). A coarser bin cuts
+                   the unknown count; a continuum G_p/omega converges like h^2 in it (midpoint rule on
+                   the conductance integrand, validation/trap_kinetics.py), so kT is ~1e-3-accurate.
     """
     dit_eV_m2: float = 0.0
     distribution: str = "uniform"
@@ -370,9 +467,24 @@ class InterfaceTraps:
     fixed_charge_C_m2: float = 0.0
     bin_eV: Optional[float] = None
     energy_reference: str = "intrinsic"
+    dynamic: bool = False
+    kinetic_bin_eV: Optional[float] = None
 
     def __post_init__(self):
         _check_reference("InterfaceTraps", self.energy_reference, 0.0)
+        if not isinstance(self.dynamic, bool):
+            raise TypeError("InterfaceTraps.dynamic must be a bool; got {!r}".format(self.dynamic))
+        if self.kinetic_bin_eV is not None:
+            if not self.dynamic:
+                raise ValueError("InterfaceTraps.kinetic_bin_eV is the bin width of KINETIC bins; set "
+                                 "dynamic=True (or use bin_eV for the quasi-static quadrature)")
+            if not (math.isfinite(float(self.kinetic_bin_eV)) and float(self.kinetic_bin_eV) > 0.0):
+                raise ValueError("InterfaceTraps.kinetic_bin_eV must be finite and > 0")
+        if self.dynamic and not self.recombination:
+            raise ValueError("InterfaceTraps(dynamic=True) needs recombination=True: a kinetic bin fills "
+                             "and empties by capture from the bands, which IS the surface SRH (without it "
+                             "the trapped charge would change with no carrier current -- not "
+                             "charge-conserving)")
         if self.energy_reference != "intrinsic":
             for nm, v in (("e_lo_eV", self.e_lo_eV), ("e_hi_eV", self.e_hi_eV),
                           ("neutral_level_eV", self.neutral_level_eV)):
@@ -429,8 +541,11 @@ class InterfaceTraps:
 
         kT_eV: the thermal energy [eV] that sets the DEFAULT bin width (bin_eV=None) -- pass the
         region's kT/q (V_t) when the device does not run at T_REF; install_interface_traps does. None
-        keeps kT(T_REF) = V_T (devsim-free callers at 300 K). Ignored when bin_eV is given."""
-        if self.bin_eV is not None:
+        keeps kT(T_REF) = V_T (devsim-free callers at 300 K). Ignored when bin_eV (or, for a dynamic
+        spec, kinetic_bin_eV) is given."""
+        if self.dynamic and self.kinetic_bin_eV is not None:
+            dmax = float(self.kinetic_bin_eV)
+        elif self.bin_eV is not None:
             dmax = float(self.bin_eV)
         else:
             dmax = float(kT_eV) if kT_eV is not None else V_T
@@ -490,10 +605,47 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
     its pair rate G + R (so the noise GR source sees it -- noise_analysis). The charged levels' trapped
     charge goes in as the single charge term QTerm_bulk_traps. Rate, occupancy and pair rate all come
     from the ONE SRH kernel (srh_rate_expr / srh_occupancy_expr) with the region's BGN substitution
-    (bgn=True: n_i^2 -> n_ie^2, n1/p1 scaled by n_ie/n_i)."""
+    (bgn=True: n_i^2 -> n_ie^2, n1/p1 scaled by n_ie/n_i).
+
+    A KINETIC level (TrapLevel.dynamic=True; v0.15 plan 4.3.2) gets instead (k = its index, name
+    trap<k>): the node solution TrapW_trap<k> -- the occupancy ODDS w = f/(1-f) = exp(u), u = (E_Ft -
+    E_t)/kT the level's own quasi-Fermi level -- with f = TrapOccupancy<k> = w/(1+w), 1 - f =
+    TrapVacancy<k> = 1/(1+w) (no 1 - f cancellation), the steady-state diagnostics TrapOccupancySS<k> and
+    TrapWSS_trap<k> (its odds, the seed), the single-carrier terms RTermN_trap<k> = R_n (electron row
+    only) and RTermP_trap<k> = R_p (hole row only) of srh_capture_exprs with closed-form derivatives
+    (Electrons, Holes, w) and the trap row as their partner (+1 / -1, mechanism "trap_n" / "trap_p"),
+    and the equation TrapEquation_trap<k> (variable TrapW_trap<k>, variable_update "positive", recorded
+    in eq_registry):
+        time_node_model TrapCharge_trap<k> = -q N_t f       node_model TrapNode_trap<k> = +q (R_n - R_p)
+    i.e. N_t df/dt = R_n - R_p in DEVSIM's residual convention (d(time)/dt + node = 0) -- the stored charge
+    is exactly the Poisson charge, so a BDF step conserves charge to round-off. No fast-trap pair term
+    RTerm_trap<k> is installed for it (never counted twice). Charged kinetic levels carry their charge
+    -N_t f / +N_t (1 - f) in the separate charge term QTerm_kinetic_traps (derivatives with respect to w
+    only); QTerm_bulk_traps keeps the quasi-static levels, so a trap set without a kinetic level builds
+    exactly the shipped models. No event rate (pair) is attached yet: noise_spectrum refuses the region
+    (trap g-r noise is v0.15 K3).
+
+    WHY THE ODDS, NOT THE LOGIT u (plan decision 40 chose u; deviation MEASURED, docs/audit/2026-11-06-
+    v0.15-kinetic-traps.md section 2). The f-row is a sigmoid in u: Newton's linear step out of a
+    saturated level (f = 1 - 1e-12 emitting, the DLTS case; or 1e-12 filling) is df/(f(1-f)) ~ 1e10 and
+    exp(u) overflows -- DEVSIM aborts, and its only damping (log_damp) is hard-wired to 0.0259 per step.
+    In w the same steps converge in 4-16 iterations: DEVSIM's "positive" update bounds a step toward 0
+    to 3 decades, and the row is linear in f = w/(1+w) near w -> 0. Every property decision 40 wanted
+    is kept: 0 < f < 1 under any update (w > 0), no 1 - f cancellation, an exact seed (w_SS =
+    srh_occupancy_odds_expr), the equilibrium value exp((E_F - E_t)/kT).
+
+    WELL-POSEDNESS (for the static floating-body check): every trap row is pinned by its own capture
+    and emission -- d(R_n - R_p)/dw = -[(n + n1')/tau_n0 + (p + p1')/tau_p0] (1 - f)^2 < 0 strictly for
+    finite w -- so the DC Jacobian of TrapEquation_* has a nonzero diagonal at every node, contact nodes
+    included (the trap row is not replaced there: DEVSIM keeps a node-only equation's bulk row at a
+    contact node, P3 0.3). The trap rows are therefore DC well-posed candidates like the continuity
+    rows; a checker that lists equation variables must include TrapW_* (and the interface ItW*)."""
     from dynameta.carriers import physics_bipolar_dd as _BP   # lazy: BP imports this module
 
+    if any(isinstance(t, TrapLevel) and t.dynamic for t in traps):
+        _check_kinetic_region(device, region, "install_bulk_traps")
     charges = []
+    kin_q, kin_dq = [], {}
     for k, t in enumerate(traps):
         if not isinstance(t, TrapLevel):
             raise TypeError("traps must be TrapLevel instances; got {!r}".format(type(t).__name__))
@@ -512,6 +664,13 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
             ds.set_parameter(device=device, region=region, name=p + nm, value=v)
         args = (p + "n1", p + "p1", p + "taun", p + "taup")
         occ = srh_occupancy_expr(*args, bgn=bgn, reference=ref)
+        if t.dynamic:
+            var, f, g = _install_kinetic_level(device, region, k, p, args, occ, bgn=bgn, reference=ref)
+            if t.kind != "neutral":
+                kin_q.append(("-{}Nt*{}" if t.kind == "acceptor" else "{}Nt*{}").format(
+                    p, f if t.kind == "acceptor" else g))
+                kin_dq[var] = "-{}Nt*{}^2".format(p, g)           # both kinds: -N_t df/dw = -N_t (1-f)^2
+            continue
         ds.node_model(device=device, region=region, name="TrapOccupancy{}".format(k), equation=occ)
         _BP.add_recombination_term(device, region, "trap{}".format(k),
                                    srh_rate_expr(*args, bgn=bgn, reference=ref),
@@ -522,6 +681,186 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
             charges.append("{}Nt*(1 - {})".format(p, occ))
     if charges:
         _BP.add_charge_term(device, region, "bulk_traps", " + ".join(charges))
+    if kin_q:
+        _BP.add_charge_term(device, region, KINETIC_CHARGE_TERM, " + ".join(kin_q),
+                            wrt=tuple(kin_dq), derivs=dict(kin_dq, Electrons="0", Holes="0"))
+
+
+#: the charge term of the CHARGED kinetic bulk levels (QTerm_<this>); quasi-static ones stay in bulk_traps
+KINETIC_CHARGE_TERM = "kinetic_traps"
+#: (variable prefix, steady-state-odds seed prefix): every kinetic occupancy variable and its seed model
+_KINETIC_VARS = (("TrapW_", "TrapWSS_"), ("ItW", "ItWSS"))
+#: |u| = |ln w| ceiling: w = exp(u) leaves double range past |u| ~ 709 (and its Newton steps scale with w),
+#: so a seed beyond this is refused (a deep level at low T)
+U_LIMIT = 600.0
+#: default ceiling on the extra unknowns of KINETIC interface bins (bins x semiconductor-region nodes): the
+#: masked region-wide variables cost one unknown per region node per bin (DEVSIM 2.11 has no interface
+#: solution variable). Calibrated on box A (docs/audit/2026-11-06-v0.15-kinetic-traps.md, section K2);
+#: install_interface_traps(max_kinetic_unknowns=) overrides it per call.
+KINETIC_UNKNOWN_BUDGET = 200_000
+
+
+class TrapOccupancyRangeError(ValueError):
+    """A kinetic level's |u| = |ln w| = |E_Ft - E_t|/kT exceeds U_LIMIT at its seed: the level is so far
+    from the Fermi level (a deep level at low temperature) that its odds w = exp(u) leaves the double
+    range in the Newton. Use the quasi-static model (dynamic=False) for it -- its occupancy is then 0 or 1 to double
+    precision anyway."""
+
+
+def _check_kinetic_region(device: str, region: str, who: str) -> None:
+    """Kinetic occupancy needs the legacy statistics: the closed-form derivatives hold n_ie fixed, which
+    FD detailed balance (statistics='fermi_dirac') violates."""
+    if "FDGammaN" in ds.get_node_model_list(device=device, region=region):
+        raise NotImplementedError(
+            "{}: region {!r} runs statistics='fermi_dirac' (solution-dependent n_ie); kinetic traps "
+            "(dynamic=True) are implemented for the legacy statistics only".format(who, region))
+
+
+def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: str, *, bgn: bool,
+                           reference: str):
+    """The variable, models, single-carrier terms and equation of one kinetic bulk level (see
+    install_bulk_traps). Returns (variable, f model, 1 - f model)."""
+    from dynameta.carriers import physics_bipolar_dd as _BP
+    name = "trap{}".format(k)
+    var, eq = "TrapW_" + name, "TrapEquation_" + name
+    f, g = "TrapOccupancy{}".format(k), "TrapVacancy{}".format(k)
+    seed = "TrapWSS_" + name
+    ds.node_model(device=device, region=region, name="TrapOccupancySS{}".format(k), equation=occ)
+    ds.node_model(device=device, region=region, name=seed,
+                  equation=srh_occupancy_odds_expr(*args, bgn=bgn, reference=reference))
+    ds.node_solution(device=device, region=region, name=var)             # FIRST: the terms need it
+    ds.set_node_values(device=device, region=region, name=var,          # finite, > 0 until seeded
+                       values=ds.get_node_model_values(device=device, region=region, name=seed))
+    _occupancy_models(device, region, var, f, g)
+    rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference)
+    dn, dp = srh_capture_derivs(*args, f, g, var, g + "^2", bgn=bgn, reference=reference)
+    _BP.add_recombination_term(device, region, name, rn, carrier="electron", wrt=(var,), derivs=dn,
+                               partner=(eq, +1.0), mechanism="trap_n")
+    _BP.add_recombination_term(device, region, name, rp, carrier="hole", wrt=(var,), derivs=dp,
+                               partner=(eq, -1.0), mechanism="trap_p")
+    _trap_row(device, region, var, eq, "TrapNode_" + name, "TrapCharge_" + name, name, p + "Nt", g)
+    return var, f, g
+
+
+def _occupancy_models(device, region, var, f, g):
+    """f = w/(1+w) and 1 - f = 1/(1+w) of the odds variable w (+ their w-derivatives, for any model that
+    lets DEVSIM differentiate through them by name)."""
+    ds.node_model(device=device, region=region, name=f, equation="{w}/(1 + {w})".format(w=var))
+    ds.node_model(device=device, region=region, name=g, equation="1/(1 + {})".format(var))
+    ds.node_model(device=device, region=region, name="{}:{}".format(f, var), equation=g + "^2")
+    ds.node_model(device=device, region=region, name="{}:{}".format(g, var), equation="-" + g + "^2")
+
+
+def _trap_row(device, region, var, eq, node, time, term, nt, g, *, area=None, mask=None):
+    """The occupancy equation of one kinetic level / interface bin `term`: node model +q (R_n - R_p) [x
+    the interface weight, + the off-interface mask row (w - 1)] read through the term models by NAME
+    (DEVSIM's chain rule through named models, measured in 4.0.2), time model -q N f [x weight] with its
+    w-derivative -q N (1-f)^2, variable_update "positive" (w > 0: 0 < f < 1 under any update)."""
+    w = "" if area is None else "{}*".format(area)
+    expr = "ElectronCharge*(RTermN_{t} - RTermP_{t})".format(t=term)
+    if mask is not None:                       # off the interface: NodeVolume (w - 1) = 0 (w > 0 inert)
+        expr = "{} + {}*({} - 1)".format(expr, mask, var)
+    node_with_derivs(device, region, node, expr, ("Electrons", "Holes", var))
+    f = "({v}/(1 + {v}))".format(v=var)
+    ds.node_model(device=device, region=region, name=time,
+                  equation="-ElectronCharge*{}{}*{}".format(w, nt, f))
+    ds.node_model(device=device, region=region, name="{}:{}".format(time, var),
+                  equation="-ElectronCharge*{}{}*{}^2".format(w, nt, g))
+    record_region_equation(device, region, name=eq, variable_name=var, node_model=node,
+                           time_node_model=time, variable_update="positive")
+
+
+def kinetic_trap_variables(device: str, region: str) -> List[str]:
+    """The kinetic occupancy variables (TrapW_*, ItW*) of a region, read back from DEVSIM."""
+    have = set(ds.get_node_model_list(device=device, region=region))
+    # a variable is <prefix><suffix> WITH its seed model <seed prefix><suffix> (DEVSIM adds helper models
+    # such as <var>_prev after a solve; the seed model is what identifies an installed variable)
+    return sorted(m for m in have for v, s in _KINETIC_VARS
+                  if m.startswith(v) and not m.startswith(s) and s + m[len(v):] in have)
+
+
+#: the solve types whose answer a QUASI-STATIC charged trap makes wrong (plan decision 39): ssac, the noise
+#: solve, and a transient (advised once, at its transient_dc start, not at every step)
+QUASI_STATIC_ADVISED_SOLVES = ("ac", "noise", "transient_dc")
+QUASI_STATIC_TRAP_MESSAGE = (
+    "physics_traps: a {kind} solve with QUASI-STATIC CHARGED traps ({where}): their occupancy follows n and p "
+    "instantly, so the capture current that fills them is missing from the continuity time terms -- the "
+    "small-signal / transient / noise answer is NOT charge-conserving above the capture rate (measured: the "
+    "FDT misses by 6.6e-2 at 10 MHz; G_p of D_it is 0). Use TrapLevel(dynamic=True) / InterfaceTraps("
+    "dynamic=True) for the kinetic model; the quasi-static answer is exact only well below the capture "
+    "rates (DC, LF C-V).")
+
+
+def quasi_static_charged_traps(device: str, m=ds) -> List[Tuple[str, str]]:
+    """[(region, charge term)] of the device's QUASI-STATIC CHARGED traps -- the bulk levels' QTerm_bulk_traps
+    and every interface install's QTerm_it<j> whose charge depends on the carriers (a nonzero d/dn or d/dp
+    somewhere: a fixed oxide charge Q_f alone does not count, kinetic levels live in their own terms).
+    Read from DEVSIM, so it dies with the device. `m` is the devsim module (a stand-in without
+    get_device_list -- a control-flow test double -- has none)."""
+    out = []
+    try:
+        regions = m.get_region_list(device=device)
+    except Exception:                                           # pragma: no cover - not a device
+        return out
+    for r in regions:
+        have = set(m.get_node_model_list(device=device, region=r))
+        for t in sorted(t for t in have if ":" not in t and (
+                t == "QTerm_bulk_traps" or (t.startswith("QTerm_it") and t[8:].isdigit()))):
+            for v in ("Electrons", "Holes"):
+                d = "{}:{}".format(t, v)
+                if d in have and np.any(np.asarray(m.get_node_model_values(
+                        device=device, region=r, name=d)) != 0.0):
+                    out.append((r, t))
+                    break
+    return out
+
+
+def warn_if_quasi_static_traps(kind: str, m=ds, stacklevel: int = 3) -> None:
+    """The decision-39 advisory: an AdvisoryWarning when a solve of type `kind` (QUASI_STATIC_ADVISED_SOLVES)
+    runs while a live device carries quasi-static charged traps. Called by extended_precision.solve, the
+    one solve site every DynaMeta analysis goes through (ssac_admittance, noise_spectrum, transient_step)."""
+    if kind not in QUASI_STATIC_ADVISED_SOLVES:
+        return
+    lister = getattr(m, "get_device_list", None)
+    if lister is None:
+        return
+    hits = ["{}/{}".format(d, r) + ("" if t == "QTerm_bulk_traps" else " (interface)")
+            for d in lister() for r, t in quasi_static_charged_traps(d, m)]
+    if hits:
+        import warnings
+        from dynameta.warning_types import AdvisoryWarning
+        warnings.warn(QUASI_STATIC_TRAP_MESSAGE.format(kind=kind, where=", ".join(hits)), AdvisoryWarning,
+                      stacklevel=stacklevel)
+
+
+def seed_kinetic_traps(device: str, regions=None) -> dict:
+    """Seed every kinetic occupancy variable w (TrapW_*, ItW*) of `regions` (default: all) with its
+    steady-state value at the CURRENT carrier densities, w = f_SS/(1 - f_SS) (srh_occupancy_odds_expr)
+    -- exactly the quasi-static occupancy, so the first coupled Newton iterate is the quasi-static
+    state. Call it after the carriers are seeded and before the first DC solve (the builders do; a
+    hand-built device must), and again after any staged pre-solve that re-seeds the carriers. A DC solve
+    also converges from other seeds, but slower (the odds of a nearly full level grow ~2x per Newton
+    iteration). Refuses (TrapOccupancyRangeError) a seed with |ln w| > U_LIMIT. Returns {(region,
+    variable): max |ln w|}. Do NOT call it between transient steps: it would erase the trap memory the
+    kinetic model exists for."""
+    out = {}
+    for r in (ds.get_region_list(device=device) if regions is None else regions):
+        for var in kinetic_trap_variables(device, r):
+            pre, spre = next((v, s) for v, s in _KINETIC_VARS if var.startswith(v))
+            w = np.asarray(ds.get_node_model_values(device=device, region=r,
+                                                    name=spre + var[len(pre):]), dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lu = np.abs(np.log(w))
+            umax = float(np.max(lu)) if w.size else 0.0
+            if not (np.all(w > 0.0) and np.all(np.isfinite(lu)) and umax <= U_LIMIT):
+                raise TrapOccupancyRangeError(
+                    "seed_kinetic_traps: {!r} on region {!r} has |u| = |ln w| = |E_Ft - E_t|/kT = {:.4g} "
+                    "at its seed (limit {}): the occupancy odds would leave the double range in the "
+                    "Newton. Use dynamic=False for this level (its occupancy is 0 or 1 to double "
+                    "precision).".format(var, r, umax, U_LIMIT))
+            ds.set_node_values(device=device, region=r, name=var, values=w.tolist())
+            out[(r, var)] = umax
+    return out
 
 
 def equilibrium_trap_levels(traps) -> Tuple[Tuple[float, float, str], ...]:
@@ -619,7 +958,8 @@ def interface_node_area(device: str, region: str, interface: str) -> np.ndarray:
     return area
 
 
-def install_interface_traps(device: str, interface: str, traps) -> dict:
+def install_interface_traps(device: str, interface: str, traps, *,
+                            max_kinetic_unknowns: Optional[int] = None) -> dict:
     """Attach interface traps (one InterfaceTraps or a sequence of them) to a semiconductor/insulator
     `interface` of a built device. The semiconductor side must be a bipolar DD region; its Poisson node
     charge gains the sheet charge Q_it/q (+ the fixed Q_f/q) and both continuity equations gain the
@@ -632,13 +972,43 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
       ItCharge<j> : trapped + fixed sheet charge [C/m^2] at each interface node (meaningful where
                     ItArea<j> > 0),
       ItRecomb<j> : surface SRH rate U_s [m^-2 s^-1] (when recombination is on).
-    Returns {'region', 'insulator', 'index', 'levels', 'area'}."""
+    Returns {'region', 'insulator', 'index', 'levels', 'area'} (+ 'kinetic': the kinetic bins'
+    variables, in level order).
+
+    KINETIC bins (InterfaceTraps(dynamic=True); v0.15 plan 4.3.2, decision 41). Bin b of install j (b
+    counts the kinetic bins of every spec, in order) is a region-wide odds variable ItW<j>_<b> masked
+    off the interface (DEVSIM 2.11 has no interface solution variable: interface_equation only couples
+    two region rows, node_solution is region-scoped). Its row ItEquation<j>_<b> is
+        node  ItArea<j> q (R_n,b - R_p,b) + ItOffMask<j> (w - 1)       time  -q ItArea<j> N_it,b f_b
+    with R_n,b = N_b c_n [n_s (1-f) - n1' f], R_p,b = N_b c_p [p_s f - p1' (1-f)] (srh_capture_exprs on
+    the surface densities, tau -> 1/(c N_b)) entering the electron / hole rows as the single-carrier
+    terms RTermN_it<j>_<b> / RTermP_it<j>_<b> (partner the bin's row, mechanism trap_n / trap_p, no event
+    rate yet: noise_spectrum refuses). ItOffMask<j> is 1 where ItArea<j> = 0: there the row is
+    NodeVolume (w - 1) = 0, decoupled and diagonal (w = 1 is inert -- every term carries ItArea). The
+    trapped charge of the kinetic bins is QTerm_itk<j>; ItCharge<j> then includes it; ItOccupancy<j>_<b>
+    = f_b. COST: (kinetic bins) x (region nodes) unknowns; above `max_kinetic_unknowns` (default
+    KINETIC_UNKNOWN_BUDGET) the install is REFUSED before any DEVSIM model is created -- coarsen with
+    InterfaceTraps(kinetic_bin_eV=) or pass a larger budget knowingly. Seed with seed_kinetic_traps."""
     from dynameta.carriers import physics_bipolar_dd as _BP   # lazy: BP imports this module
 
     specs = [traps] if isinstance(traps, InterfaceTraps) else list(traps)
     if not specs or not all(isinstance(s, InterfaceTraps) for s in specs):
         raise TypeError("install_interface_traps: traps must be an InterfaceTraps or a sequence of them")
     semi, other = _semiconductor_side(device, interface)
+    if any(sp.dynamic for sp in specs):                        # refuse BEFORE any DEVSIM write
+        _check_kinetic_region(device, semi, "install_interface_traps")
+        vt0 = float(ds.get_parameter(device=device, region=semi, name="V_t"))
+        nbin = sum(len(sp.sheet_levels(kT_eV=vt0)) for sp in specs if sp.dynamic)
+        nnode = len(ds.get_node_model_values(device=device, region=semi, name="NodeVolume"))
+        budget = KINETIC_UNKNOWN_BUDGET if max_kinetic_unknowns is None else int(max_kinetic_unknowns)
+        if nbin * nnode > budget:
+            raise ValueError(
+                "install_interface_traps: {} kinetic interface bins x {} nodes of region {!r} = {} extra "
+                "unknowns exceeds the budget {} (each kinetic bin is a region-wide variable: DEVSIM has "
+                "no interface unknowns). Coarsen the kinetic bins (InterfaceTraps(kinetic_bin_eV=...)), "
+                "restrict the D_it band, or pass max_kinetic_unknowns= knowingly (cost: docs/audit/"
+                "2026-11-06-v0.15-kinetic-traps.md, section K2).".format(
+                    nbin, nnode, semi, nbin * nnode, budget))
     existing = [m for m in ds.get_node_model_list(device=device, region=semi)
                 if m.startswith("ItArea")]
     j = len(existing)
@@ -673,6 +1043,7 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
     q_val, q_dn, q_dp = [], [], []                             # sheet charge [m^-2], units of +q
     r_val, r_dn, r_dp, r_pair = [], [], [], []                 # surface SRH rate [m^-2 s^-1]
     all_levels = []
+    kinetic = []                                               # the dynamic specs' bins (installed below)
     q_fixed = 0.0
     for si, s in enumerate(specs):
         q_fixed += float(s.fixed_charge_C_m2)
@@ -687,6 +1058,9 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
             all_levels.append((e, nk, kind))
             n1, p1 = (repr(v) for v in level_reference_densities(e, ref, n_i_m3=n_i, V_t=V_t,
                                                                  N_c_m3=n_c, N_v_m3=n_v))
+            if s.dynamic:
+                kinetic.append((n1, p1, repr(float(nk)), kind, cr, cnp, ref))
+                continue
             n1e, p1e, ni2 = srh_reference_densities(n1, p1, bgn=bgn, reference=ref)
             d = _srh_denominator(n1e, p1e, "1", cr)
             num = "({cr}*Electrons + 1*{p1})".format(cr=cr, p1=p1e)
@@ -728,4 +1102,50 @@ def install_interface_traps(device: str, interface: str, traps) -> dict:
                                    pair="{}*{}".format(a_name, _sum(r_pair)),
                                    derivs={"Electrons": "{}*{}".format(a_name, _sum(r_dn)),
                                            "Holes": "{}*{}".format(a_name, _sum(r_dp))})
-    return {"region": semi, "insulator": other, "index": j, "levels": all_levels, "area": area}
+    out = {"region": semi, "insulator": other, "index": j, "levels": all_levels, "area": area}
+    if kinetic:
+        out["kinetic"] = _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val)
+    return out
+
+
+def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val):
+    """The masked region-wide variables, rows, single-carrier terms and charge term of the kinetic
+    interface bins of install j (see install_interface_traps). Returns the variables in bin order."""
+    from dynameta.carriers import physics_bipolar_dd as _BP
+    mask = "ItOffMask{}".format(j)
+    ds.node_solution(device=device, region=semi, name=mask)
+    ds.set_node_values(device=device, region=semi, name=mask,
+                       values=[0.0 if v > 0.0 else 1.0 for v in weight])
+    kq, kdq, made = [], {}, []
+    for b, (n1, p1, nk, kind, cr, cnp, ref) in enumerate(kinetic):
+        name = "it{}_{}".format(j, b)
+        var, eq = "ItW{}_{}".format(j, b), "ItEquation{}_{}".format(j, b)
+        f, g = "ItOccupancy{}_{}".format(j, b), "ItVacancy{}_{}".format(j, b)
+        seed = "ItWSS{}_{}".format(j, b)
+        ds.node_model(device=device, region=semi, name=seed, equation="(1 - {m})*{w} + {m}".format(
+            m=mask, w=srh_occupancy_odds_expr(n1, p1, "1", cr, bgn=bgn, reference=ref)))
+        ds.node_solution(device=device, region=semi, name=var)       # FIRST: the terms need it
+        ds.set_node_values(device=device, region=semi, name=var,
+                           values=ds.get_node_model_values(device=device, region=semi, name=seed))
+        _occupancy_models(device, semi, var, f, g)
+        k = "{}*{}*{}".format(a_name, nk, cnp)                       # ItArea N_b c_n (tau -> 1/S)
+        rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref)
+        dn, dp = srh_capture_derivs(n1, p1, "1", cr, f, g, var, g + "^2", bgn=bgn, reference=ref)
+        for carrier, r, d, c, mech in (("electron", rn, dn, +1.0, "trap_n"),
+                                       ("hole", rp, dp, -1.0, "trap_p")):
+            _BP.add_recombination_term(
+                device, semi, name, "{}*{}".format(k, r), carrier=carrier, wrt=(var,),
+                derivs={v: ("0" if e == "0" else "{}*{}".format(k, e)) for v, e in d.items()},
+                partner=(eq, c), mechanism=mech)
+        _trap_row(device, semi, var, eq, "ItNode{}_{}".format(j, b), "ItTrapCharge{}_{}".format(j, b),
+                  name, nk, g, area=a_name, mask=mask)
+        if kind in ("acceptor", "donor"):
+            kq.append(("-{n}*{f}" if kind == "acceptor" else "{n}*{g}").format(n=nk, f=f, g=g))
+            kdq[var] = "{}*(-{}*{}^2)".format(a_name, nk, g)             # both kinds: -N (1-f)^2
+        made.append(var)
+    if kq:
+        _BP.add_charge_term(device, semi, "itk{}".format(j), "{}*({})".format(a_name, " + ".join(kq)),
+                            wrt=tuple(kdq), derivs=dict(kdq, Electrons="0", Holes="0"))
+        ds.node_model(device=device, region=semi, name="ItCharge{}".format(j),
+                      equation="ElectronCharge*({})".format(" + ".join(list(q_val) + kq)))
+    return made
