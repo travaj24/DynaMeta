@@ -1,14 +1,19 @@
 """Recorder for the defaults-OFF identity gate of the UNIPOLAR in-Newton density-gradient model
 (tests/test_bipolar_density_gradient.py), the D2d twin of tests/_bipolar_calllog.py.
 
-It builds a small unipolar DG fixture through the PUBLIC physics_density_gradient API exactly as a
-v0.14-pre caller does (setup_dg_quantum_correction, setup_contact_dg, setup_dg_hard_wall,
-seed_dg_from_solution, set_dg_gamma) while intercepting every DEVSIM model-, equation-, parameter- and
+It builds a small unipolar DG fixture through the PUBLIC physics_density_gradient API
+(setup_dg_quantum_correction, setup_contact_dg, setup_dg_insulator_wall, seed_dg_from_solution with the
+wall-aware seed, set_dg_gamma) while intercepting every DEVSIM model-, equation-, parameter- and
 solution-defining call, and returns that ordered call log. The gate hashes it and compares to the
-digest recorded on the integration base e46bd25 (BEFORE the bipolar DG landed), re-recorded 2026-11-04
-for the two-Bernoulli SG flux (sg_flux): equal digests mean the unipolar DG physics DEFINITION is
-character-for-character the recorded one (solved cross-version comparison: tests/_sgflux_reference.py). No solve is run (solution
-values depend on the BLAS build); seed_dg_from_solution reads the setup-time Electrons values.
+recorded digest: equal digests mean the unipolar DG physics DEFINITION is character-for-character the
+recorded one (solved cross-version comparison: tests/_sgflux_reference.py). No solve is run (solution
+values depend on the BLAS build); the seed reads the setup-time Electrons values.
+
+History: digest recorded on e46bd25 (BEFORE the bipolar DG landed); re-recorded 2026-11-04 for the
+two-Bernoulli SG flux (sg_flux); re-recorded 2026-11-06 for v0.15 item 4.4.4 -- the fixture's wall is
+now setup_dg_insulator_wall (the retired setup_dg_hard_wall rows are gone; that name is a deprecated
+shim onto it, `hard_wall_shim=True` records the shim's log, gated equal) and the seed passes
+walls=("wall",).
 
 Re-record (only when a sibling workstream changes the unipolar DG physics ON PURPOSE):
     cd <a checkout of the reference code> && python <this file>
@@ -23,7 +28,7 @@ _RECORDED = ("node_model", "edge_model", "contact_node_model", "equation", "cont
              "delete_equation", "delete_contact_equation")
 
 
-def record_call_log():
+def record_call_log(*, hard_wall_shim: bool = False):
     import devsim as ds
     from dynameta.constants import M_E
     from dynameta.carriers import eq_registry as _R
@@ -66,8 +71,11 @@ def record_call_log():
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
         DG.setup_contact_dg(dev, "back", 4.0e26)
-        DG.setup_dg_hard_wall(dev, "wall", lambda_pin_factor=8.0)
-        DG.seed_dg_from_solution(dev, "bar")
+        if hard_wall_shim:              # v0.15: the deprecated name (a shim; the CALLER handles its warning)
+            DG.setup_dg_hard_wall(dev, "wall", lambda_pin_factor=8.0)
+        else:
+            DG.setup_dg_insulator_wall(dev, "wall")
+        DG.seed_dg_from_solution(dev, "bar", walls=("wall",))
         for fr in (0.25, 1.0):
             DG.set_dg_gamma(dev, "bar", fr)
         log.append(["dg_b_coefficient", repr(DG.dg_b_coefficient(mstar, 0.7))])
