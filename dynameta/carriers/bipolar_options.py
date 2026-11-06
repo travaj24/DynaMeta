@@ -50,22 +50,44 @@ here re-defines a composite by name, so options compose with trap levels, interf
    cited values are 300 K, and Dziewior-Schmid's own data are only weakly T-dependent. Altermatt 2005's
    injection-dependent B and Kerr-Cuevas/Richter ambipolar Auger are deliberately out of scope.
 
-2. BANDGAP NARROWING (R27). Apparent (electrically extracted) narrowing as a function of the TOTAL
-   dopant density N = N_D + N_A:
+2. BANDGAP NARROWING (R27). Apparent (electrically extracted) narrowing as a function of a dopant
+   density N chosen by the model's `doping_basis` -- the density the FIT was made in:
 
-   Slotboom   dEg = E_ref [ ln(N/N_ref) + sqrt( ln^2(N/N_ref) + C ) ]
+   Slotboom   dEg = E_ref [ ln(N/N_ref) + sqrt( ln^2(N/N_ref) + C ) ],   N = N_D + N_A ("total")
               Slotboom & de Graaff, Solid-State Electron. 19, 857 (1976) / IEEE TED 24, 1123 (1977):
-                E_ref = 9 mV, N_ref = 1e17 cm^-3, C = 0.5   ("old Slotboom")
-              Klaassen, Slotboom & de Graaff, Solid-State Electron. 35, 125 (1992) re-fit:
+                E_ref = 9 mV, N_ref = 1e17 cm^-3, C = 0.5   ("old Slotboom"; fitted on p-type
+                n-p-n transistor BASES, i.e. in N_A -- Swirhun, del Alamo & Swanson's Stanford/JPL
+                report (1986) sec. 3.2; applied here to N_D + N_A by the usual convention)
+              Klaassen, Slotboom & de Graaff, Solid-State Electron. 35, 125 (1992) re-fit (unified n/p):
                 E_ref = 6.92 mV, N_ref = 1.3e17 cm^-3, C = 0.5
-   del Alamo  dEg = E_ref ln(N/N_ref) for N > N_ref, else 0
-              del Alamo, Swirhun & Swanson, IEDM 1985 / Solid-State Electron. 28, 47 (1985) (n-type Si):
+   del Alamo  dEg = E_ref ln(N_D/N_ref) for N_D > N_ref, else 0,   N = N_D ("donors")
+              del Alamo & Swanson, IEEE TED ED-34, 1580 (1987), Eq. (11) (also del Alamo, Swirhun &
+              Swanson, IEDM 1985, p. 290, Eq. (7)); phosphorus-doped n-type Si ONLY:
                 E_ref = 18.7 mV, N_ref = 7e17 cm^-3
+              The fit has no basis on p-type or compensated material: it is evaluated in N_D only (a
+              p-type node gets dEg from its donors, i.e. 0 when uncompensated), and
+              `install_option_fields` emits one UnreliableResultWarning (the model is used outside
+              its validity range) per region in which some node has N_A > N_ref (where the fit would
+              be needed and is not valid). Use a Slotboom/Klaassen
+              set for a heavily doped p-type region.
    These are APPARENT narrowings: they were extracted assuming Boltzmann statistics and a specific
    reference n_i, so (a) they must be paired with the n_i the user passes (state it with the result),
    and (b) on a DEGENERATE region with the FD g-factor on, the degeneracy is partly counted twice --
    `install_option_fields` warns when that correction is non-negligible. Schenk's 1998 many-body
    model (carrier-density-dependent band edges) is NOT implemented (see the audit doc, sec. Limits).
+
+   REFERENCE n_i OF EACH SET (the pairing; these presets are LEGACY and UNPAIRED -- nothing checks the
+   region's n_i against them). None of them was fitted with n_i = 1.0e10 cm^-3:
+     old Slotboom   ~1.44e10 cm^-3 at 300 K [inferred from the source; the Stanford re-fit quotes
+                    n_i(295 K) = 9.565e9]
+     del Alamo      ~1.36-1.45e10 cm^-3 [inferred, TED 1987 Table II]
+     Klaassen 1992  1.0e10 or 1.08e10 (Green 1990) -- not verified in the primary
+   The modern consensus n_i(300 K) is 9.65e9 cm^-3 (Altermatt et al., J. Appl. Phys. 93, 1598 (2003);
+   Misiakos & Tsamakis 1993: 9.7 +/- 0.1e9), and it belongs with Fermi-Dirac statistics and a REAL
+   (not apparent) narrowing. Pairing old Slotboom or del Alamo with 9.65e9 under-predicts n_ie^2 by
+   ~2.3x (~21 meV of gap). Which n_i to pass for which calculation: the n_i the chosen set was fitted
+   with when you want the set's own n_ie (e.g. an emitter J0 against that paper's data); a FD-paired
+   modern set when you want the consensus n_i (not shipped yet).
 
    EFFECTIVE INTRINSIC DENSITY + BAND-EDGE SPLIT (the classic error source; Lundstrom & Schuelke,
    IEEE TED 30, 1151 (1983); Selberherr, "Analysis and Simulation of Semiconductor Devices" (1984),
@@ -97,10 +119,21 @@ here re-defines a composite by name, so options compose with trap levels, interf
    the extra nonlinearity is rational, so Newton keeps its quadratic convergence.
    Optional Pearson-Bardeen lowering (Pearson & Bardeen, Phys. Rev. 75, 865 (1949)):
               dE_D(N_D) = dE_D0 - alpha_D N_D^(1/3)   (clamped at 0), likewise for acceptors.
-   alpha defaults to 0 (off) -- no default value is shipped (see the audit doc's open questions).
+   alpha defaults to 0 (off) -- no default value is shipped: no primary-verified alpha exists (the
+   Silvaco ATLAS 2004 manual's 3.6e-8 / 3.037e-8 eV cm are a code default, not a measurement).
+   UNITS: the field is alpha in eV*m (SI densities), the literature quotes eV*cm; alpha[eV m] =
+   1e-2 alpha[eV cm]. Build from a quoted value with IonizationModel.pearson_bardeen(..., alpha_D_eVcm=)
+   -- an unconverted eV*cm number would zero the ionization energy above ~3e12 cm^-3 and the clamp would
+   hide it as full ionization, so the constructor REFUSES (IonizationUnitsError) any alpha that makes
+   the energy vanish below 1e17 cm^-3 (a genuine Pearson-Bardeen alpha vanishes it at ~2-3e18).
    NOT modelled: the Mott transition / impurity-band conduction (Altermatt 2006's fraction b of
    "non-localized" dopants), Fermi-Dirac occupancy of the dopant level at degeneracy (there N_D+ -> N_D
-   anyway), excited dopant states.
+   anyway), excited dopant states. Consequently the model FREEZES OUT WRONGLY above the Mott density
+   (Si:P N_crit = 3.74e18 cm^-3): a 1e19 cm^-3 Si:P layer is computed 39 % ionized at 300 K, whereas
+   metallic Si:P is fully ionized. `install_option_fields` emits one UnreliableResultWarning per region
+   in which a node above the model's N_mott still has a non-zero ionization energy. Use the model for
+   freeze-out below ~1e18 cm^-3 (cryogenic or moderately doped regions); above N_mott its ionized
+   fraction is not a prediction (Altermatt et al. 2006's model is the planned replacement).
 
 4. TEMPERATURE. `T_K` sets V_t = k T / q for the region (the default None keeps V_t = V_T at T_REF
    exactly). It does NOT rescale the material inputs: n_i, N_c (n_dos_m3), N_v (n_dos_p_m3), the
@@ -127,7 +160,7 @@ import numpy as np
 from dynameta.constants import KB, Q_E
 from dynameta.carriers.eq_registry import ds, node_with_derivs as _node_with_derivs, \
     edge_with_derivs as _edge_with_derivs
-from dynameta.warning_types import AdvisoryWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 # cm -> m conversions, spelled once (the literature quotes CGS)
 _CM3 = 1.0e6          # cm^-3 -> m^-3
@@ -178,19 +211,29 @@ class RadiativeModel:
             raise ValueError("RadiativeModel.B_m3s must be finite and > 0, got {!r}".format(v))
 
 
+_BGN_BASES = ("total", "donors", "acceptors")
+_BGN_DEFAULT_BASIS = {"slotboom": "total", "del_alamo": "donors"}
+
+
 @dataclass(frozen=True)
 class BGNModel:
-    """Apparent bandgap narrowing dEg(N_total).
+    """Apparent bandgap narrowing dEg(N), N chosen by `doping_basis`.
 
     kind: "slotboom" -> E_ref [ln(N/N_ref) + sqrt(ln^2(N/N_ref) + C)];
           "del_alamo" -> E_ref ln(N/N_ref) for N > N_ref, else 0.
-    conduction_fraction (gamma): share of dEg that LOWERS E_c (the rest raises E_v); 0.5 = symmetric."""
+    conduction_fraction (gamma): share of dEg that LOWERS E_c (the rest raises E_v); 0.5 = symmetric.
+    doping_basis: the density the fit is evaluated in -- "total" (N_D + N_A), "donors" (N_D) or
+    "acceptors" (N_A). None (default) = the kind's own basis: "total" for slotboom (Slotboom/Klaassen
+    are used for both types), "donors" for del_alamo (an n-type-only fit in N_D, TED 1987 Eq. (11)).
+    Under a one-species basis, nodes where the OTHER species exceeds N_ref have no basis in the fit;
+    install_option_fields warns (UnreliableResultWarning) once per region (see `unsupported_nodes`)."""
     kind: str
     E_ref_eV: float
     N_ref_m3: float
     C: float = 0.5
     conduction_fraction: float = 0.5
     source: str = ""
+    doping_basis: Optional[str] = None
 
     def __post_init__(self):
         if self.kind not in ("slotboom", "del_alamo"):
@@ -199,9 +242,34 @@ class BGNModel:
             raise ValueError("BGNModel needs E_ref_eV > 0, N_ref_m3 > 0, C >= 0")
         if not (0.0 <= self.conduction_fraction <= 1.0):
             raise ValueError("BGNModel.conduction_fraction must lie in [0, 1]")
+        if self.doping_basis is None:
+            object.__setattr__(self, "doping_basis", _BGN_DEFAULT_BASIS[self.kind])
+        elif self.doping_basis not in _BGN_BASES:
+            raise ValueError("BGNModel.doping_basis must be one of {} (or None), got {!r}".format(
+                _BGN_BASES, self.doping_basis))
+
+    def basis_density_m3(self, N_D_m3, N_A_m3):
+        """The density [m^-3] the fit is evaluated in, per node: N_D + N_A ("total"; the same
+        arithmetic as before the basis existed), N_D ("donors") or N_A ("acceptors")."""
+        if self.doping_basis == "donors":
+            return np.asarray(N_D_m3, dtype=np.float64)
+        if self.doping_basis == "acceptors":
+            return np.asarray(N_A_m3, dtype=np.float64)
+        return N_D_m3 + N_A_m3
+
+    def unsupported_nodes(self, N_D_m3, N_A_m3):
+        """Boolean mask of the nodes outside the fit's basis: under "donors", N_A > N_ref (p-type or
+        compensated nodes heavy enough that narrowing would matter -- the fit was made on
+        uncompensated n-type material only); under "acceptors", N_D > N_ref; never under "total"."""
+        if self.doping_basis == "donors":
+            return np.asarray(N_A_m3, dtype=np.float64) > self.N_ref_m3
+        if self.doping_basis == "acceptors":
+            return np.asarray(N_D_m3, dtype=np.float64) > self.N_ref_m3
+        return np.zeros(np.shape(np.asarray(N_D_m3)), dtype=bool)
 
     def delta_Eg_eV(self, N_total_m3):
-        """dEg [eV] for total dopant density N [m^-3] (array-broadcasting; 0 for N <= 0)."""
+        """dEg [eV] for the basis density N [m^-3] (array-broadcasting; 0 for N <= 0). The caller
+        passes `basis_density_m3(N_D, N_A)` -- equilibrium_fields does."""
         N = np.asarray(N_total_m3, dtype=np.float64)
         out = np.zeros_like(N)
         pos = N > 0.0
@@ -216,12 +284,45 @@ class BGNModel:
         return out
 
 
+class IonizationUnitsError(ValueError):
+    """A Pearson-Bardeen alpha that zeroes the ionization energy below 1e17 cm^-3: almost certainly a
+    literature eV*cm value passed into the eV*m field (IonizationModel.alpha_*_eVm)."""
+
+
+# Pearson-Bardeen units guard: the density at which dE0 - alpha N^(1/3) reaches 0 must not lie below
+# this. A genuine alpha puts it at ~1.8-3e18 cm^-3 (ATLAS 2004 example values), 1.3 decades above; an
+# unconverted eV*cm alpha puts it 6 decades lower (3.1e-8 with 45 meV: 3.1e12 cm^-3).
+_PB_MIN_ZERO_M3 = 1.0e17 * _CM3
+_PB_MIN_ZERO_CBRT = _PB_MIN_ZERO_M3 ** (1.0 / 3.0)     # [m^-1]
+_EVCM_TO_EVM = 1.0e-2           # alpha [eV m] = 1e-2 alpha [eV cm]  (N^(1/3) [m^-1] = 100 N^(1/3) [cm^-1])
+
+# Mott (metal-insulator) densities [m^-3] used by the freeze-out advisory, Si defaults:
+#   donors    3.74e18 cm^-3, Si:P (Altermatt et al., J. Appl. Phys. 100, 113714 (2006) / SISPAD 2006;
+#             del Alamo & Swanson, TED 1987: "about 3.7e18") -- the lowest documented donor value, so
+#             As (Altermatt's N_b proxy 9e18) and Sb are advised conservatively early;
+#   acceptors 4.5e18 cm^-3, Si:B -- Altermatt 2006's N_b used as the documented PROXY (the B Mott
+#             density itself is unverified).
+_SI_MOTT_D_M3 = 3.74e18 * _CM3
+_SI_MOTT_A_M3 = 4.5e18 * _CM3
+
+
 @dataclass(frozen=True)
 class IonizationModel:
     """Incomplete ionization of a single donor and a single acceptor species (Boltzmann occupancy).
 
     dE_D_eV / dE_A_eV: ionization energies E_c - E_D and E_A - E_v [eV]; g_D / g_A: degeneracy factors.
-    alpha_D_eVm / alpha_A_eVm: Pearson-Bardeen lowering dE(N) = dE0 - alpha N^(1/3) [eV m]; 0 = off."""
+    alpha_D_eVm / alpha_A_eVm: Pearson-Bardeen lowering dE(N) = dE0 - alpha N^(1/3) [eV m]; 0 = off.
+      A literature alpha is quoted in eV*cm: build with `IonizationModel.pearson_bardeen(...,
+      alpha_D_eVcm=...)`, which converts. Any alpha that makes dE vanish below 1e17 cm^-3 raises
+      IonizationUnitsError (the eV*cm-in-the-eV*m-field trap; it would otherwise read as full
+      ionization through the clamp).
+    N_mott_D_m3 / N_mott_A_m3: Mott densities [m^-3] for the freeze-out WARNING only (an
+      UnreliableResultWarning; the occupancy is unchanged): Si:P 3.74e18 and the Si:B proxy 4.5e18
+      cm^-3 by default; set them for another dopant or material, or math.inf to silence it.
+
+    Use this model for freeze-out in non-degenerate regions (cryogenic T, or N below ~1e18 cm^-3). It
+    has no Mott transition, so above N_mott its ionized fraction is not a prediction (1e19 cm^-3 Si:P
+    comes out 39 % ionized at 300 K; metallic Si:P is fully ionized)."""
     dE_D_eV: float
     dE_A_eV: float
     g_D: float = 2.0
@@ -229,11 +330,40 @@ class IonizationModel:
     alpha_D_eVm: float = 0.0
     alpha_A_eVm: float = 0.0
     source: str = ""
+    N_mott_D_m3: float = _SI_MOTT_D_M3
+    N_mott_A_m3: float = _SI_MOTT_A_M3
 
     def __post_init__(self):
         if not (self.dE_D_eV >= 0.0 and self.dE_A_eV >= 0.0 and self.g_D > 0.0 and self.g_A > 0.0
-                and self.alpha_D_eVm >= 0.0 and self.alpha_A_eVm >= 0.0):
-            raise ValueError("IonizationModel needs dE >= 0, g > 0, alpha >= 0")
+                and self.alpha_D_eVm >= 0.0 and self.alpha_A_eVm >= 0.0
+                and math.isfinite(self.alpha_D_eVm) and math.isfinite(self.alpha_A_eVm)):
+            raise ValueError("IonizationModel needs dE >= 0, g > 0, finite alpha >= 0")
+        if not (self.N_mott_D_m3 > 0.0 and self.N_mott_A_m3 > 0.0):
+            raise ValueError("IonizationModel.N_mott_*_m3 must be > 0 (math.inf disables the advisory)")
+        for sp, dE0, alpha in (("D", self.dE_D_eV, self.alpha_D_eVm), ("A", self.dE_A_eV, self.alpha_A_eVm)):
+            # dE0 - alpha N^(1/3) = 0 at N = (dE0/alpha)^3; compared in N^(1/3) (no overflow at tiny alpha)
+            if alpha > 0.0 and dE0 > 0.0 and dE0 / alpha < _PB_MIN_ZERO_CBRT:
+                raise IonizationUnitsError(
+                    "IonizationModel.alpha_{sp}_eVm = {a!r} zeroes the ionization energy at N = "
+                    "{nz:.3g} cm^-3 (< 1e17 cm^-3): alpha looks like eV*cm; this field is eV*m = "
+                    "1e-2 x eV*cm (alpha_{sp}_eVm = {conv!r}). Use IonizationModel.pearson_bardeen("
+                    "..., alpha_{sp}_eVcm=...) to pass a literature value.".format(
+                        sp=sp, a=alpha, nz=(dE0 / alpha) ** 3 / _CM3, conv=alpha * _EVCM_TO_EVM))
+
+    @classmethod
+    def pearson_bardeen(cls, dE_D_eV: float, dE_A_eV: float, *, alpha_D_eVcm: float = 0.0,
+                        alpha_A_eVcm: float = 0.0, **kw) -> "IonizationModel":
+        """Build from literature-unit Pearson-Bardeen coefficients: dE(N) = dE0 - alpha N^(1/3) with
+        alpha in eV*cm and N in cm^-3 (how papers and TCAD manuals quote it), converted once to the
+        eV*m field. Other IonizationModel fields pass through `kw`. The units guard still applies."""
+        return cls(dE_D_eV=dE_D_eV, dE_A_eV=dE_A_eV, alpha_D_eVm=float(alpha_D_eVcm) * _EVCM_TO_EVM,
+                   alpha_A_eVm=float(alpha_A_eVcm) * _EVCM_TO_EVM, **kw)
+
+    def ionization_energies_eV(self, N_D_m3, N_A_m3):
+        """(dE_D(N_D), dE_A(N_A)) [eV] with the Pearson-Bardeen lowering, clamped at 0 (per node)."""
+        dED = np.maximum(self.dE_D_eV - self.alpha_D_eVm * np.cbrt(N_D_m3), 0.0)
+        dEA = np.maximum(self.dE_A_eV - self.alpha_A_eVm * np.cbrt(N_A_m3), 0.0)
+        return dED, dEA
 
 
 @dataclass(frozen=True)
@@ -286,18 +416,29 @@ AUGER_SI_ALTERMATT_1997 = AugerModel(
     source="Altermatt et al., J. Appl. Phys. 82, 4938 (1997); Coulomb-enhanced, Si 300 K")
 RADIATIVE_SI_TRUPKE_2003 = RadiativeModel(
     B_m3s=9.5e-15 * _CM3S, source="Trupke et al., J. Appl. Phys. 94, 4930 (2003); Si 300 K")
+# The three BGN sets are LEGACY and UNPAIRED: none was fitted with n_i = 1.0e10 cm^-3 (module doc,
+# item 2: old Slotboom ~1.44e10, del Alamo ~1.36-1.45e10, Klaassen 1.0e10 or 1.08e10 unverified; the
+# modern n_i = 9.65e9 belongs with FD statistics and a real BGN).
 BGN_SI_SLOTBOOM_1977 = BGNModel(
     kind="slotboom", E_ref_eV=9.0e-3, N_ref_m3=1.0e17 * _CM3, C=0.5,
-    source="Slotboom & de Graaff, Solid-State Electron. 19, 857 (1976); IEEE TED 24, 1123 (1977)")
+    source="Slotboom & de Graaff, Solid-State Electron. 19, 857 (1976); IEEE TED 24, 1123 (1977); "
+           "fitted on p-type transistor bases (N_A), reference n_i ~1.44e10 cm^-3 [inferred]; unpaired")
 BGN_SI_KLAASSEN_1992 = BGNModel(
     kind="slotboom", E_ref_eV=6.92e-3, N_ref_m3=1.3e17 * _CM3, C=0.5,
-    source="Klaassen, Slotboom & de Graaff, Solid-State Electron. 35, 125 (1992)")
+    source="Klaassen, Slotboom & de Graaff, Solid-State Electron. 35, 125 (1992) [constants via "
+           "secondary sources]; reference n_i 1.0e10 or 1.08e10 cm^-3 [unverified]; unpaired")
 BGN_SI_DEL_ALAMO_1985 = BGNModel(
-    kind="del_alamo", E_ref_eV=18.7e-3, N_ref_m3=7.0e17 * _CM3,
-    source="del Alamo, Swirhun & Swanson, Solid-State Electron. 28, 47 (1985); n-type Si")
-# Ionization energies in Si [eV]: the measured shallow-impurity levels tabulated in Sze & Ng, "Physics
-# of Semiconductor Devices", 3rd ed. (2007), ch. 1 (P 45, As 54, Sb 39 meV below E_c; B 45 meV above E_v).
-SI_DONOR_IONIZATION_EV = {"P": 0.045, "As": 0.054, "Sb": 0.039}
+    kind="del_alamo", E_ref_eV=18.7e-3, N_ref_m3=7.0e17 * _CM3, doping_basis="donors",
+    source="del Alamo & Swanson, IEEE TED ED-34, 1580 (1987), Eq. (11); del Alamo, Swirhun & Swanson, "
+           "IEDM 1985, p. 290, Eq. (7); n-type (Si:P) only, in N_D; reference n_i ~1.36-1.45e10 cm^-3 "
+           "[inferred]; unpaired")
+# Ionization energies in Si [eV] (ground state 1s(A1) binding energies). Donors: P and As as tabulated in
+# Sze & Ng, "Physics of Semiconductor Devices", 3rd ed. (2007), ch. 1 (45, 54 meV below E_c; the
+# spectroscopic values of Ramdas & Rodriguez Table 4 are 45.59 / 53.76 meV, < 1 meV away, kept for the
+# existing gates); Sb 42.74 meV from the spectroscopic table, Ramdas & Rodriguez, Rep. Prog. Phys. 44,
+# 1297 (1981), Table 4 (Sze & Ng's 39 meV is an older, superseded value: 3.7 meV = 0.14 kT too shallow).
+# Acceptor: B 45 meV above E_v (Sze & Ng).
+SI_DONOR_IONIZATION_EV = {"P": 0.045, "As": 0.054, "Sb": 0.04274}
 SI_ACCEPTOR_IONIZATION_EV = {"B": 0.045}
 IONIZATION_SI_P_B = IonizationModel(dE_D_eV=0.045, dE_A_eV=0.045,
                                     source="Sze & Ng (2007): Si:P 45 meV, Si:B 45 meV; g_D=2, g_A=4")
@@ -394,7 +535,7 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     n_i = float(n_i_m3)
     # --- BGN: dEg, band-edge split, n_ie ---
     if options.bgn is not None:
-        dEg = options.bgn.delta_Eg_eV(N_D + N_A)
+        dEg = options.bgn.delta_Eg_eV(options.bgn.basis_density_m3(N_D, N_A))
         gam = float(options.bgn.conduction_fraction)
     else:
         dEg, gam = np.zeros_like(N), 0.5
@@ -407,8 +548,7 @@ def equilibrium_fields(net_doping_m3, *, n_i_m3: float, N_c_m3: float, N_v_m3: f
     # --- ionization reference densities ---
     ion = options.ionization
     if ion is not None:
-        dED = np.maximum(ion.dE_D_eV - ion.alpha_D_eVm * np.cbrt(N_D), 0.0)
-        dEA = np.maximum(ion.dE_A_eV - ion.alpha_A_eVm * np.cbrt(N_A), 0.0)
+        dED, dEA = ion.ionization_energies_eV(N_D, N_A)
         n1D = float(N_c_m3) * np.exp(-dED / Vt)
         p1A = float(N_v_m3) * np.exp(-dEA / Vt)
         g_D, g_A = float(ion.g_D), float(ion.g_A)
@@ -523,6 +663,57 @@ def _maybe_node_values(device: str, region: str, name: str):
 _BGN_FD_WARN_VT = 0.05
 
 
+def bgn_basis_advisory(region: str, bgn: BGNModel, N_D_m3, N_A_m3) -> Optional[str]:
+    """The advisory text when some node of `region` lies outside the BGN fit's doping basis
+    (BGNModel.unsupported_nodes: e.g. del Alamo -- an n-type-only fit in N_D -- on p-type or
+    compensated nodes with N_A > N_ref), else None. Pure numpy; install_option_fields emits it as an
+    UnreliableResultWarning (the fit is used outside its validity range; the result there may be
+    wrong), one per region."""
+    bad = bgn.unsupported_nodes(N_D_m3, N_A_m3)
+    if not np.any(bad):
+        return None
+    fit, other_name, other_type = (("N_D", "N_A", "p-type") if bgn.doping_basis == "donors"
+                                   else ("N_A", "N_D", "n-type"))
+    other = np.asarray(N_A_m3 if bgn.doping_basis == "donors" else N_D_m3, dtype=np.float64)
+    return ("install_bipolar_options: region {!r} uses the {} bandgap-narrowing fit, which is made in "
+            "{} only, but {} of {} nodes carry {} up to {:.3g} cm^-3 > N_ref = {:.3g} cm^-3 "
+            "({} or compensated material, where the fit has no basis). Those nodes get dEg from {} "
+            "alone (0 on an uncompensated {} node). For a heavily doped {} region use a "
+            "Slotboom/Klaassen set (doping_basis='total').".format(
+                region, bgn.kind, fit, int(np.count_nonzero(bad)), int(bad.size),
+                other_name, float(np.max(other[bad])) / _CM3, bgn.N_ref_m3 / _CM3, other_type, fit,
+                other_type, other_type))
+
+
+def mott_advisory(region: str, ion: IonizationModel, N_D_m3, N_A_m3, n0_m3, p0_m3, n1D_m3,
+                  p1A_m3) -> Optional[str]:
+    """The advisory text when some node of `region` is doped above the ionization model's Mott density
+    (IonizationModel.N_mott_*_m3) AND still has a non-zero ionization energy -- the single-level
+    Boltzmann model then freezes out where real (metallic) material is fully ionized -- else None.
+    Quotes the worst equilibrium non-ionized fraction g n0/(n1 + g n0). Pure numpy; install_option_fields
+    emits it as an UnreliableResultWarning (the ionized fraction there may be wrong), one per region."""
+    N_D = np.asarray(N_D_m3, dtype=np.float64)
+    N_A = np.asarray(N_A_m3, dtype=np.float64)
+    dED, dEA = ion.ionization_energies_eV(N_D, N_A)
+    parts = []
+    for name, N, Nm, dE, frac in (
+            ("N_D", N_D, ion.N_mott_D_m3, dED, ion.g_D * n0_m3 / (n1D_m3 + ion.g_D * n0_m3)),
+            ("N_A", N_A, ion.N_mott_A_m3, dEA, ion.g_A * p0_m3 / (p1A_m3 + ion.g_A * p0_m3))):
+        bad = (N > Nm) & (dE > 0.0)
+        if np.any(bad):
+            parts.append("{} up to {:.3g} cm^-3 > N_mott = {:.3g} cm^-3 on {} nodes, computed up to "
+                         "{:.0f} % NON-ionized".format(name, float(np.max(N[bad])) / _CM3, Nm / _CM3,
+                                                      int(np.count_nonzero(bad)),
+                                                      100.0 * float(np.max(np.asarray(frac)[bad]))))
+    if not parts:
+        return None
+    return ("install_bipolar_options: region {!r}: incomplete ionization above the Mott density ({}). "
+            "The single-level Boltzmann model has no Mott transition, so it freezes out there although "
+            "the metallic material is fully ionized; its ionized fraction is not a prediction above "
+            "N_mott. Use it below ~1e18 cm^-3, or set N_mott_D_m3/N_mott_A_m3 for this dopant "
+            "(math.inf silences this note).".format(region, "; ".join(parts)))
+
+
 def _region_fields(device: str, region: str, options: Optional[BipolarOptions], *,
                    fd_enhancement: bool, traps=()) -> Dict[str, np.ndarray]:
     """equilibrium_fields on a region's own parameters and doping (options None -> the inert bundle:
@@ -568,6 +759,9 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
                 "the overlap knowingly.".format(region, o.bgn.kind,
                                                 float(np.max(np.maximum(f["fd_n"], f["fd_p"])))),
                 AdvisoryWarning, stacklevel=4)
+        msg = bgn_basis_advisory(region, o.bgn, f["N_D"], f["N_A"])
+        if msg is not None:                      # the fit is used outside its validity range
+            warnings.warn(msg, UnreliableResultWarning, stacklevel=4)
         _set_field(device, region, "n_ie", f["n_ie"])
         _set_field(device, region, "BgnDc", f["D_c_V"])
         _set_field(device, region, "BgnDv", f["D_v_V"])
@@ -580,6 +774,10 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
 
     # --- incomplete ionization: Poisson charge with N_D+ - N_A- ---
     if o.ionization is not None:
+        msg = mott_advisory(region, o.ionization, f["N_D"], f["N_A"], f["n0"], f["p0"], f["n1D"],
+                            f["p1A"])
+        if msg is not None:                      # the model is used outside its validity range
+            warnings.warn(msg, UnreliableResultWarning, stacklevel=4)
         ds.set_parameter(device=device, region=region, name="IonGD", value=float(o.ionization.g_D))
         ds.set_parameter(device=device, region=region, name="IonGA", value=float(o.ionization.g_A))
         _set_field(device, region, "IonDonors", f["N_D"])
@@ -637,9 +835,11 @@ def options_contact_models(device: str, region: "str | None") -> bool:
     return "EquilibriumPotential" in ds.get_node_model_list(device=device, region=region)
 
 
-__all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "BipolarOptions",
+__all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "IonizationUnitsError",
+           "BipolarOptions",
            "AUGER_SI_DZIEWIOR_SCHMID_1977", "AUGER_SI_ALTERMATT_1997", "RADIATIVE_SI_TRUPKE_2003",
            "BGN_SI_SLOTBOOM_1977", "BGN_SI_KLAASSEN_1992", "BGN_SI_DEL_ALAMO_1985",
            "SI_DONOR_IONIZATION_EV", "SI_ACCEPTOR_IONIZATION_EV", "IONIZATION_SI_P_B",
            "equilibrium_fields", "srh_expr", "recombination_exprs", "ionized_net_doping_expr",
-           "install_option_fields", "install_option_terms", "options_contact_models", "GEXT_TERM"]
+           "install_option_fields", "install_option_terms", "options_contact_models", "GEXT_TERM",
+           "bgn_basis_advisory", "mott_advisory"]
