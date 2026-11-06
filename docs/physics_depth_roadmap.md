@@ -126,18 +126,15 @@ is now EXPERIMENTAL (cef01d9), parked. The corrections are folded into the lines
 - **In-Newton DG-DD** (4-variable DEVSIM Newton; `carriers/physics_density_gradient.py`): the
   Lambda-equation assembled Poisson-style (the recipe's blocker), gamma-ramped; classical
   reduction 5.6e-16, Lambda == independent FD stencil 8.4e-14, fixed-point decomposition 7.5e-16
-  (`dg_dd_in_newton.py`). Oxide-interface hard wall: EXPERIMENTAL contact-row pins
-  (`setup_dg_hard_wall`, commit cef01d9), parked (see Still-deferred below); bipolar twin queued
-  after; the post-hoc closure remains the dead-layer tool. Commit cde280a.
+  (`dg_dd_in_newton.py`). Oxide-interface wall: `setup_dg_insulator_wall` (v0.14 D2d; since v0.15 also the unipolar
+  wall -- the experimental `setup_dg_hard_wall` pins of cef01d9 are retired, see below). Commit cde280a.
 
-Still deferred (documented): DG oxide-interface hard wall + bipolar -- no longer unstarted:
-`setup_dg_hard_wall` exists EXPERIMENTAL (commit cef01d9) as contact-row pins, parked (Newton
-stalls / DEVSIM convergence failure on the log-singular boundary layer). Its discrete mechanics
-(u-floor pin, n = u^2 wall row, ramped Lambda pin) are now GATED in
-`tests/test_density_gradient.py::test_dg_hard_wall_pins_the_wall_rows`; the four physics gates the
-continuation plan must clear live in that test's docstring (audit X-6 -- they used to sit in a
-`_`-prefixed validation that `run_all` skipped in every tier, i.e. an export with no gate at all).
-Bipolar twin queued after. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
+DG oxide-interface wall + bipolar: DONE. The bipolar DG and its zero-flux `setup_dg_insulator_wall`
+landed in v0.14 (D2d); in v0.15 (item 4.4.4) the unipolar `setup_dg_hard_wall` rows (a pinned carrier
+row = a carrier sink, converging to a wide-depletion branch) were retired -- the name is a deprecated
+shim onto the insulator wall (removal in v0.16), which reproduces the closed-form dark space to 1.7e-5
+and conserves carriers (docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md). Strong inversion
+(v0.15 item 4.4.3): `physics_bipolar_dd.setup_quasi_equilibrium_carrier`. GPU nonlinear kernels (d646875), lasing/cavity gain dynamics (d588e50) and C(T) (cee64bd)
 shipped 2026-06-10 evening and left this list.
 
 ---
