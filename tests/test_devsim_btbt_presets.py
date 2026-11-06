@@ -11,13 +11,14 @@ Gates
       direct, Ge indirect, the Ge tuple and the computed InGaAs set. A 100x unit error or a P = 2 <-> 2.5
       swap misses by >= 0.5 (asserted on the oracle). The material eps / n_i below are FIXTURE values (the
       oracle uses the same numbers), not cited constants.
-      The Si Kao sets are NOT run through this estimate: the rate's decay length 1/k = (V_bi + V_r)/B is
-      0.1-0.5 nm for them at any doping with a measurable current, comparable to the 0.05-0.2 nm mesh, and
-      the 1-D comparison is not mesh-converged inside the budget (MEASURED, n_i = 1e19 so delta_D ~ 0: Si
-      direct, 1e26 m^-3, 0.3 V: +7.9 / +15.1 / +17.1 % at 0.2 / 0.1 / 0.05 nm; Si indirect, 1e25 m^-3:
-      +1.8 / +2.7 / +1.5 %, non-monotone; audit note). They get P4s, the
-      installed rate == numpy A E^P exp(-B/E) D with the PRINTED SI literals on a frozen state (rel 1e-12,
-      the Z5 budget), which catches a unit or P error exactly.
+  P4c the Si Kao sets peak within 1/k = (V_bi + V_r)/B = 0.14 / 0.55 nm of the junction, so their Zener gate is
+      a CONVERGENCE gate: observed order >= 1.7 on three uniform meshes and the Richardson limit within
+      1 % + delta_D. ROOT CAUSE of the earlier non-convergence (audit note): the add_1d_mesh_line ps-mesh put
+      a FIXED 0.128 nm edge on the field peak at every ps; the edge-midpoint quadrature then carries an
+      h-independent error (~ k h_e/2 - 1 + exp(-k h_e/2) = +8.8 % for an e^(-k|x|) rate; MEASURED +11 %).
+      The fixtures now use explicit uniform nodes (_nodes); that edge put back is the adversarial.
+  P4s the installed rate == numpy A E^P exp(-B/E) D with the PRINTED SI literals for the Si Kao sets on a
+      frozen state (rel 1e-12, the Z5 budget), which catches a unit or P error exactly.
   P5  composition: GERMANIUM_KAO as a tuple at a FROZEN state gives term rates and integrals BIT-equal to the
       single-set devices and a total == I_direct + I_indirect exactly; both terms carry a noise pair; the
       solved tuple current exceeds each process alone.
@@ -33,7 +34,7 @@ FAILS ON THE OLD CODE (66f6185, MEASURED by running this file there): collection
 (GERMANIUM_KAO_DIRECT and the other sets, btbt_at_temperature, tuples of sets do not exist). P7's digest is
 an IDENTITY gate: the helper tests/_btbt_calllog.py run against 66f6185 RECORDED it (306 calls), so it holds
 there by construction -- its sensitivity is the tuple-of-one adversarial.
-Runtime ~40 s.
+Runtime ~70 s.
 """
 import contextlib
 import dataclasses
@@ -93,17 +94,44 @@ def _solve(abs_err=1e12, rel_err=1e-10):
 # ------------------------------------------------------------------------------------------------
 # P4: the 1-D Zener per set
 # ------------------------------------------------------------------------------------------------
-def _zener(dev, btbt, N, ni, epsr, W, hj=0.2e-9):
-    """Abrupt symmetric p+n+ diode, Na = Nd = N, junction at L/2, spacing hj over [xj - W, xj + W]."""
+def _nodes(L, xj, W, h, junction_edge=None, h_out=2e-9, grow=1.15):
+    """Explicit 1-D node positions: UNIFORM spacing h over [xj - m h, xj + m h], m = round(W/h) (the
+    junction xj is a node), graded geometrically (x grow, capped at h_out) out to the contacts at 0 and L.
+    Explicit nodes, not add_1d_mesh_line(ps=...): DEVSIM's line mesher puts the remainder of a non-integer
+    interval / ps ratio into one edge next to the following line (MEASURED: a 0.128 nm edge left of the
+    junction at ps = 0.2, 0.1 and 0.05 nm alike), and that edge sits on the field PEAK (root cause in the
+    audit note). junction_edge (ADVERSARIAL only): replace the nodes inside (xj - junction_edge, xj) by one
+    node at xj - junction_edge, i.e. a FIXED-length edge on the peak that does not shrink with h."""
+    m = int(round(W / h))
+    inner = xj + h * np.arange(-m, m + 1)
+
+    def side(x0, sgn, stop):
+        out, s = [], h
+        while True:
+            s = min(s * grow, h_out)
+            nx = (out[-1] if out else x0) + sgn * s
+            if (nx <= 0.5 * s) if sgn < 0 else (nx >= stop - 0.5 * s):
+                return out + [0.0 if sgn < 0 else stop]
+            out.append(nx)
+    xs = np.concatenate([np.array(side(inner[0], -1.0, L)[::-1]), inner, np.array(side(inner[-1], 1.0, L))])
+    if junction_edge:
+        keep = (xs <= xj - junction_edge - 1e-15) | (xs >= xj - 1e-15)
+        xs = np.sort(np.concatenate([xs[keep], [xj - junction_edge]]))
+    return xs
+
+
+def _zener(dev, btbt, N, ni, epsr, W, hj=0.2e-9, junction_edge=None):
+    """Abrupt symmetric p+n+ diode, Na = Nd = N, junction node at L/2, uniform spacing hj over about
+    [xj - W, xj + W] (_nodes)."""
     _wipe()
     mesh = dev + "_m"
     L = max(200e-9, 6.0 * W)
     xj = 0.5 * L
+    xs = _nodes(L, xj, W, hj, junction_edge)
     ds.create_1d_mesh(mesh=mesh)
-    ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=2e-9, tag="pc")
-    for x in (xj - W, xj, xj + W):
-        ds.add_1d_mesh_line(mesh=mesh, pos=x, ps=hj)
-    ds.add_1d_mesh_line(mesh=mesh, pos=L, ps=2e-9, tag="nc")
+    for k, x in enumerate(xs):                       # ps larger than any gap: no subdivision
+        ds.add_1d_mesh_line(mesh=mesh, pos=float(x), ps=1.0,
+                            **({"tag": "pc"} if k == 0 else {"tag": "nc"} if k == xs.size - 1 else {}))
     ds.add_1d_contact(mesh=mesh, name="pc", tag="pc", material="metal")
     ds.add_1d_contact(mesh=mesh, name="nc", tag="nc", material="metal")
     ds.add_1d_region(mesh=mesh, material="Si", region="b", tag1="pc", tag2="nc")
@@ -157,9 +185,9 @@ def _analytic(sets, N, ni, epsr, Vr):
 
 GE = (16.0, 2.0e19)              # fixture eps_r, n_i [m^-3] (Ge-like; oracle uses the same)
 INGAAS = (13.9, 6.3e17)          # fixture eps_r, n_i (InGaAs-like)
-# name: (sets, N, (eps_r, n_i), reverse biases). MEASURED |dev| at 0.2 / 0.1 nm (audit note): Ge direct
-# 3.2e-3 / 1.1e-3, Ge indirect 2.2e-3 / 7.1e-4, Ge tuple 3.2e-3 / 1.1e-3, InGaAs 5.8e-4 / 8.8e-4 -- the 1 %
-# quadrature allowance of Z1 holds with >= 3x margin (k h = h B/(V_bi + V_r) <= 0.08 here).
+# name: (sets, N, (eps_r, n_i), reverse biases). MEASURED dev on the uniform explicit mesh at 0.2 / 0.1 nm (audit
+# note), max over the biases: Ge direct 2.3e-3 / 7.5e-4, Ge indirect 1.6e-3 / 3.9e-4, Ge tuple 2.3e-3 / 7.5e-4,
+# InGaAs 8.1e-4 / 2.0e-4 -- the 1 % quadrature allowance of Z1 holds with >= 4x margin ((k h)^2/12 <= 6e-4 here).
 P4_CASES = {
     "ge_direct": ((TN.GERMANIUM_KAO_DIRECT,), 1e24, GE, (0.3, 0.6, 1.0)),
     "ge_indirect": ((TN.GERMANIUM_KAO_INDIRECT,), 1e24, GE, (0.6, 0.8, 1.0)),
@@ -192,6 +220,52 @@ def test_p4_zener_matches_the_analytic_estimate_per_set(case):
         bad_P = [dataclasses.replace(s, P=4.5 - s.P) for s in sets]
         assert abs(I / _analytic(bad_A, N, ni, epsr, Vr)[0] - 1.0) > 0.5
         assert abs(I / _analytic(bad_P, N, ni, epsr, Vr)[0] - 1.0) > 0.5
+
+
+# The Si Kao sets peak within 1/k = (V_bi + V_r)/B = 0.14 nm (direct) / 0.55 nm (indirect) of the junction, so
+# the edge-midpoint quadrature's error, ~(k h)^2/12 for a rate e^(-k|x|) whose kink sits at an edge midpoint
+# (exactly: (kh/2) coth(kh/2) - 1), is NOT below 1 % at h = 0.1 nm. The gate is therefore a CONVERGENCE gate (as
+# L1): observed order >= 1.7 on three uniform meshes and the Richardson limit within Z1's 1 % + delta_D of the
+# analytic estimate. MEASURED dev at the three h (audit note): Si direct +1.017e-2 / +1.600e-3 / -5.50e-4
+# (orders 1.98, 1.99; limit -1.27e-3; (kh)^2/12 = 1.03e-2 / 2.6e-3 / 6.4e-4); Si indirect -1.374e-3 /
+# -3.782e-3 / -4.385e-3 (order 2.0; limit -4.59e-3, the generated-carrier D loss, delta_D = 5.5e-3).
+P4C_CASES = {
+    "si_direct": (TN.SILICON_KAO_DIRECT, 1e26, (0.05e-9, 0.025e-9, 0.0125e-9)),
+    "si_indirect": (TN.SILICON_KAO_INDIRECT, 1e25, (0.1e-9, 0.05e-9, 0.025e-9)),
+}
+SI = (11.7, 1.0e16)
+
+
+def _si_zener_current(prm, N, h, junction_edge=None, Vr=0.3):
+    epsr, ni = SI
+    W = math.ceil(_analytic((prm,), N, ni, epsr, 0.4)[3] / 0.2e-9) * 0.2e-9
+    try:
+        _zener("tbp_si_c", prm, N, ni, epsr, W, hj=h, junction_edge=junction_edge)
+        _ramp("tbp_si_c", 0.0, -Vr)
+        return TN.btbt_generation_current("tbp_si_c", "b")
+    finally:
+        _wipe()
+
+
+@pytest.mark.parametrize("case", list(P4C_CASES))
+def test_p4c_si_kao_zener_converges_to_the_analytic_estimate(case):
+    """GATE (root-caused 2026-11-06, audit note): on uniform meshes the Si Kao Zener current converges at second
+    order to the analytic estimate. FAILS on the previous fixture (add_1d_mesh_line ps-mesh, a fixed 0.128 nm
+    edge on the field peak): MEASURED Si direct (n_i 1e19) +7.9 / +15.1 / +17.1 % at 0.2 / 0.1 / 0.05 nm.
+    ADVERSARIAL: that fixed-length junction edge put back into the uniform mesh pins the error at +11 % (below)."""
+    prm, N, hs = P4C_CASES[case]
+    epsr, ni = SI
+    J, _em, dD, _w = _analytic((prm,), N, ni, epsr, 0.3)
+    I = [_si_zener_current(prm, N, h) for h in hs]
+    e1, e2 = I[0] - I[1], I[1] - I[2]
+    order = math.log(abs(e1 / e2)) / math.log(2.0)
+    assert e1 * e2 > 0 and order >= 1.7, (I, order)
+    lim = I[2] + (I[2] - I[1]) / 3.0                           # Richardson, p = 2
+    assert abs(lim / J - 1.0) <= 0.01 + dD, (lim / J - 1.0, dD)
+    assert abs(I[2] / J - 1.0) <= 0.01 + dD                     # the finest mesh is inside the budget too
+    if case == "si_direct":
+        bad = [_si_zener_current(prm, N, h, junction_edge=0.12827e-9) for h in hs[1:]]
+        assert all(b / J - 1.0 > 5.0 * (0.01 + dD) for b in bad), [b / J - 1.0 for b in bad]
 
 
 def _slab(dev, btbt, *, options=None, n=8, L=8e-9):
