@@ -97,7 +97,8 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
   * Quasi-static occupancy (the default): the trapped charge is an instantaneous function of (n, p). A DC
     sweep (the LF C-V) is exact; a transient or ssac solve is NOT charge-conserving with CHARGED traps (the
     capture current that fills a trap is not in the continuity time term) -- use dynamic=True there (item 5).
-  * Kinetic traps carry no noise source yet: noise_spectrum refuses them (v0.15 K3 adds the trap g-r events).
+  * Kinetic traps' noise: the capture / emission events (trap_n / trap_p); the McWhorter (border-trap) 1/f
+    spectrum is out of scope (decision 42).
   * Ohmic contacts (v0.14 integration): with CHARGED bulk levels the contacts, the seed and the 3-D gate
     frame pin the TRAP-AWARE charge-neutral root (bipolar_options.equilibrium_fields with the levels'
     equilibrium Fermi occupancy, n1 = n_ie exp(E_t/kT)) -- the same rule as BGN / incomplete
@@ -375,9 +376,10 @@ class TrapLevel:
                    and G(omega) dispersion, terminal-current balance), and for a neutral level whose
                    capture time is not short against the analysis time scale. Needs density_m3 > 0
                    (N_t sets the stored charge), a bipolar region with the legacy statistics, and a
-                   seed (seed_kinetic_traps after the carriers are seeded). Noise: noise_spectrum
-                   REFUSES a device with kinetic levels until the trap g-r sources are validated (v0.15
-                   K3); restrict mechanisms= to leave them out knowingly.
+                   seed (seed_kinetic_traps after the carriers are seeded). Noise: the capture /
+                   emission events are the trap g-r sources (mechanisms "trap_n" / "trap_p", in
+                   noise_analysis.DEFAULT_MECHANISMS): with a kinetic charged level S_I = 4kT Re Y holds at
+                   every frequency (the quasi-static level breaks it above the capture rate).
     """
     energy_eV: float = 0.0
     density_m3: float = 0.0
@@ -641,8 +643,8 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
     RTerm_trap<k> is installed for it (never counted twice). Charged kinetic levels carry their charge
     -N_t f / +N_t (1 - f) in the separate charge term QTerm_kinetic_traps (derivatives with respect to w
     only); QTerm_bulk_traps keeps the quasi-static levels, so a trap set without a kinetic level builds
-    exactly the shipped models. No event rate (pair) is attached yet: noise_spectrum refuses the region
-    (trap g-r noise is v0.15 K3).
+    exactly the shipped models. Each branch carries its EVENT rate (srh_capture_exprs(pair=True)), the
+    trap g-r noise source of noise_analysis (v0.15 K3): S = q^2 V [2 P_n |y_t - y_n|^2 + 2 P_p |y_p - y_t|^2].
 
     WHY THE ODDS, NOT THE LOGIT u (plan decision 40 chose u; deviation MEASURED, docs/audit/2026-11-06-
     v0.15-kinetic-traps.md section 2). The f-row is a sigmoid in u: Newton's linear step out of a
@@ -754,11 +756,15 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
                        values=ds.get_node_model_values(device=device, region=region, name=seed))
     _occupancy_models(device, region, var, f, g)
     rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference)
+    pn, pp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, pair=True)
     dn, dp = srh_capture_derivs(*args, f, g, var, g + "^2", bgn=bgn, reference=reference)
+    # the event rates P_n, P_p (both directions of each exchange) are the trap g-r noise sources (K3): an
+    # electron event changes the electron row by -1 and the trap row by +1, a hole event the hole row by +1
+    # and the trap row by -1 (TrapNode = +q (R_n - R_p)) -- noise_analysis's single-carrier sources
     _BP.add_recombination_term(device, region, name, rn, carrier="electron", wrt=(var,), derivs=dn,
-                               partner=(eq, +1.0), mechanism="trap_n")
+                               pair=pn, partner=(eq, +1.0), mechanism="trap_n")
     _BP.add_recombination_term(device, region, name, rp, carrier="hole", wrt=(var,), derivs=dp,
-                               partner=(eq, -1.0), mechanism="trap_p")
+                               pair=pp, partner=(eq, -1.0), mechanism="trap_p")
     _trap_row(device, region, var, eq, "TrapNode_" + name, "TrapCharge_" + name, name, p + "Nt", g)
     return var, f, g
 
@@ -1003,8 +1009,8 @@ def install_interface_traps(device: str, interface: str, traps, *,
         node  ItArea<j> q (R_n,b - R_p,b) + ItOffMask<j> (w - 1)       time  -q ItArea<j> N_it,b f_b
     with R_n,b = N_b c_n [n_s (1-f) - n1' f], R_p,b = N_b c_p [p_s f - p1' (1-f)] (srh_capture_exprs on
     the surface densities, tau -> 1/(c N_b)) entering the electron / hole rows as the single-carrier
-    terms RTermN_it<j>_<b> / RTermP_it<j>_<b> (partner the bin's row, mechanism trap_n / trap_p, no event
-    rate yet: noise_spectrum refuses). ItOffMask<j> is 1 where ItArea<j> = 0: there the row is
+    terms RTermN_it<j>_<b> / RTermP_it<j>_<b> (partner the bin's row, mechanism trap_n / trap_p, event
+    rates ItArea N_b c_n x srh_capture_exprs(pair=True): the noise source weight is then A_node). ItOffMask<j> is 1 where ItArea<j> = 0: there the row is
     NodeVolume (w - 1) = 0, decoupled and diagonal (w = 1 is inert -- every term carries ItArea). The
     trapped charge of the kinetic bins is QTerm_itk<j>; ItCharge<j> then includes it; ItOccupancy<j>_<b>
     = f_b. COST: (kinetic bins) x (region nodes) unknowns; above `max_kinetic_unknowns` (default
@@ -1151,13 +1157,14 @@ def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val):
         _occupancy_models(device, semi, var, f, g)
         k = "{}*{}*{}".format(a_name, nk, cnp)                       # ItArea N_b c_n (tau -> 1/S)
         rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref)
+        pn, pp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, pair=True)
         dn, dp = srh_capture_derivs(n1, p1, "1", cr, f, g, var, g + "^2", bgn=bgn, reference=ref)
-        for carrier, r, d, c, mech in (("electron", rn, dn, +1.0, "trap_n"),
-                                       ("hole", rp, dp, -1.0, "trap_p")):
+        for carrier, r, pr, d, c, mech in (("electron", rn, pn, dn, +1.0, "trap_n"),
+                                           ("hole", rp, pp, dp, -1.0, "trap_p")):
             _BP.add_recombination_term(
                 device, semi, name, "{}*{}".format(k, r), carrier=carrier, wrt=(var,),
                 derivs={v: ("0" if e == "0" else "{}*{}".format(k, e)) for v, e in d.items()},
-                partner=(eq, c), mechanism=mech)
+                pair="{}*{}".format(k, pr), partner=(eq, c), mechanism=mech)
         _trap_row(device, semi, var, eq, "ItNode{}_{}".format(j, b), "ItTrapCharge{}_{}".format(j, b),
                   name, nk, g, area=a_name, mask=mask)
         if kind in ("acceptor", "donor"):

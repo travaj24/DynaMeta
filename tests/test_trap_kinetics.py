@@ -554,12 +554,11 @@ def test_kinetic_jacobian_w_column_closed_form_and_fd():
 # ---------------------------------------------------------------------------------------------------
 # guards, refusals and the decision-39 advisory
 # ---------------------------------------------------------------------------------------------------
-def test_kinetic_noise_refused_until_k3_and_seed_range():
-    """noise_spectrum REFUSES a device with a kinetic level while the trap g-r sources are not validated
-    (v0.15 K3): the single-carrier terms carry no event rate, so the shipped "never silently noiseless" rule
-    fires for the default mechanisms -- and passes when trap_n / trap_p are left out knowingly. The
-    inventory lists the electron / hole branches with their partner row and mechanism (the K3 hook). A
-    seed with |ln w| > U_LIMIT raises TrapOccupancyRangeError, and fermi_dirac statistics refuse."""
+def test_kinetic_noise_inventory_and_seed_range():
+    """The inventory lists the electron / hole branches with their partner row, mechanism and (since K3)
+    their EVENT rates, so the default noise_spectrum includes trap_n / trap_p (their FDT gates are
+    tests/test_trap_noise.py); no fast-trap pair term exists for the kinetic level. A seed with |ln w| >
+    U_LIMIT raises TrapOccupancyRangeError, and fermi_dirac statistics refuse."""
     from dynameta.carriers import noise_analysis as NA
     tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e21, kind="acceptor", tau_n0_s=3e-7, tau_p0_s=5e-7,
                       dynamic=True)
@@ -568,13 +567,11 @@ def test_kinetic_noise_refused_until_k3_and_seed_range():
     tn, tp = terms["node_electron"]["trap0"], terms["node_hole"]["trap0"]
     assert (tn.partner_equation, tn.partner_coeff, tn.mechanism) == ("TrapEquation_trap0", 1.0, "trap_n")
     assert (tp.partner_equation, tp.partner_coeff, tp.mechanism) == ("TrapEquation_trap0", -1.0, "trap_p")
-    assert tn.pair is None and tp.pair is None and "trap0" not in terms["node"]   # no fast-trap pair
-    with pytest.raises(RuntimeError, match="without an event rate"):
-        with V.quiet():
-            NA.noise_spectrum(dev, [1e3])
+    assert (tn.pair, tp.pair) == ("PTermN_trap0", "PTermP_trap0") and "trap0" not in terms["node"]
+    assert {"trap_n", "trap_p"} <= set(NA.DEFAULT_MECHANISMS)
     with V.quiet():
-        s = NA.noise_spectrum(dev, [1e3], mechanisms=("diffusion_n", "diffusion_p", "gr"))
-    assert s.S[0] > 0.0
+        s = NA.noise_spectrum(dev, [1e3])
+    assert s.by_mechanism["trap_n"][0] > 0.0 and s.by_mechanism["trap_p"][0] > 0.0
     assert PT.kinetic_trap_variables(dev, "r") == ["TrapW_trap0"]
     ds.set_parameter(device=dev, region="r", name="trap0_p1", value=1e300)     # w ~ tau_n0 p1/(tau_n0 p): |ln w| > 600
     with pytest.raises(PT.TrapOccupancyRangeError):
