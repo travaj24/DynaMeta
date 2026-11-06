@@ -329,6 +329,7 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
 # defaults-off: the check and solve_dc's info=True path change no result
 # =====================================================================================================
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_check_and_the_info_path_leave_results_bit_identical():
     """Same-tree A/B (plan section 2 item 5 (i)). An ohmic n slab and the majority-pinned R26 slab (whose
     minority candidate makes the check ASSEMBLE the matrix): (a) check_dc_well_posed changes no node

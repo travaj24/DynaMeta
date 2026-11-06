@@ -129,6 +129,7 @@ def test_gate_c_default_path_never_writes_extended_parameters(monkeypatch):
     assert writes and not [w for w in writes if str(w).startswith("extended")]
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_gate_d_no_leakage_between_devices():
     """default -> extended -> default in one process. The extended run really differs (all five
     fingerprints move) and the second default run is byte-identical to the first; the global
