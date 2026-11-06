@@ -26,7 +26,7 @@ SCOPE (v1, validated): 1D/2D unipolar regions with ohmic contacts (u pinned to s
 Lambda to 0 -- bulk contacts carry no quantum correction). The oxide-interface wall (u -> 0, the
 MOS dead layer) is setup_dg_insulator_wall (below; zero normal flux, unipolar and bipolar regions),
 seeded with seed_dg_from_solution(..., walls=(contact,)): on a unipolar region it reproduces the
-closed-form DG dark space (I = 1.187207 n0 L_q) to 4e-5 (tests/test_density_gradient.py, v0.15
+closed-form DG dark space (I = 1.187207 n0 L_q) to 2e-5 (tests/test_density_gradient.py, v0.15
 item 4.4.4). The former unipolar setup_dg_hard_wall rows (a pinned carrier row and a pinned
 Lambda: a carrier SINK that converged to a spurious wide-depletion branch) are retired: the name is
 a deprecated shim onto setup_dg_insulator_wall in v0.15 and is removed in v0.16
@@ -251,7 +251,7 @@ HARD_WALL_DEPRECATION = (
     "Lambda (-lambda_pin_factor V_t), so the wall node was a carrier sink (measured wall-edge current "
     "6e-3 to 1e-1 of q mu n0 V_t/L_q) and the solve converged to a spurious wide-depletion branch "
     "(dead-layer deficit 23-28 n0 L_q); the insulator wall conserves carriers (wall current <= 1e-14 "
-    "of that scale) and reproduces the closed-form DG dark space, deficit 1.187207 n0 L_q, to 4e-5. "
+    "of that scale) and reproduces the closed-form DG dark space, deficit 1.187207 n0 L_q, to 2e-5. "
     "Call setup_dg_insulator_wall directly and seed with seed_dg_from_solution(device, region, "
     "walls=(contact,)).")
 
@@ -274,7 +274,7 @@ def setup_dg_hard_wall(device: str, contact: str, *, lambda_pin_factor: float = 
     MEASURED on this module's unipolar bar (frozen flat psi, gamma ramp to 1; tests/
     test_density_gradient.py, docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md):
         n0 = 1e21 m^-3 : old deficit 22.85 n0 L_q, wall current 6.3e-3 q mu n0 V_t/L_q;
-                         insulator wall 1.18716 (closed form 1.187207, -3.6e-5), current 4e-15
+                         insulator wall 1.18723 (closed form 1.187207, +1.7e-5), current 3e-15
         n0 = 4e26 (ITO): old deficit 28.0 n0 L_q, current 9.6e-2; insulator wall 0.346 (the FD
                          g-factor shortens the dark space ~sqrt(g); gated against the FD first
                          integral)
@@ -425,9 +425,13 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
             peak depth (x SP)      gamma = 1: 0.67 / 0.68          GAMMA_WALL: 0.84 / 0.82
             (classical DD: sheet +177 % / +125 %, centroid -64 % / -56 %, peak AT the wall)
         and at N = 1e23, 0.075 V GAMMA_WALL is within 1.5 % for both carriers.
-      * Not validated: STRONG INVERSION (the coupled Newton converges only up to weak inversion in
-        1-D: 0.60 V on 3e23 m^-3 p-type converges, 0.70 V fails -- so the "inversion" use of
-        GAMMA_WALL is the same wall physics, inferred, not measured); DEGENERATE Fermi-Dirac beyond
+      * STRONG INVERSION (v0.15, plan 4.4.3): the full coupled Newton converges only up to weak
+        inversion in 1-D (0.60 V on 3e23 m^-3 p-type; 0.70 V fails: a near-null minority mode). For a
+        MOS capacitor close the carriers with physics_bipolar_dd.setup_quasi_equilibrium_carrier
+        (AFTER this call; both carriers when both carry DG) -- it then reaches 1.3 V. Against the
+        Schrodinger-Poisson inversion oracle (validation/bipolar_density_gradient.py GATE G) GAMMA_WALL
+        is the better gamma there too; the measured fidelity is in that gate's output and the audit
+        note docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md. Not validated: DEGENERATE Fermi-Dirac beyond
         GATE C's regime (with fd_enhancement gamma also absorbs the degeneracy calibration; GATE C
         peaks at c/N_c = 0.37-0.59 and lands within 5.6 %, a regime result, not a derivation);
         GAMMA_WALL in a wall-free smooth-potential problem; 2-D / 3-D (only 1-D oracles).
@@ -464,6 +468,12 @@ def setup_bipolar_dg(device: str, region: str, *, m_eff_n_kg: "float | None" = N
     if "Holes" not in ds.get_node_model_list(device=device, region=region):
         raise ValueError("setup_bipolar_dg: region {!r} is not a bipolar region (no Holes); use "
                          "setup_dg_quantum_correction for a unipolar one".format(region))
+    for key, m in (("electrons", m_eff_n_kg), ("holes", m_eff_p_kg)):
+        if m is not None:                    # refuse BEFORE installing anything (v0.15 plan 4.4.3)
+            rec = _R.recorded(device, _BIPOLAR_DG[key]["eq"], scope="region", loc=region)
+            if rec and rec[-1]["kwargs"].get("node_model") in ("QE_n", "QE_p"):
+                _repoint_region_current(device, region, _BIPOLAR_DG[key]["eq"],
+                                        _BIPOLAR_DG[key]["cur_dg"])      # raises the closure message
     done = []
     for key, m, g in (("electrons", m_eff_n_kg, gamma_n), ("holes", m_eff_p_kg, gamma_p)):
         if m is None:
