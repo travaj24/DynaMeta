@@ -13,8 +13,9 @@ code runs on 6595bde):
        -0.5 V reverse on 'lo'.
   bz   cl_bz: the same diode, Boltzmann, 'hi' on a circuit node (source Vcl); hi at -0.3 V (forward)
        and +0.5 V (reverse), source current read from the circuit.
-  dg   dgcl: the unipolar in-Newton DG ITO bar (4e26), DG ohmic 'back', setup_dg_hard_wall on 'wall',
-       wall-aware taper seed (tests/test_density_gradient._hard_wall_bar's recipe), gamma ramp to 1.
+  dg   dgcl: the unipolar in-Newton DG ITO bar (4e26), DG ohmic 'back', the pre-v0.15 setup_dg_hard_wall
+       rows on 'wall' (since v0.15 the test fixture tests/_dg_legacy_wall.py; the library name is a shim
+       onto setup_dg_insulator_wall), wall-aware taper seed, gamma ramp to 1.
 
 Re-record (only on purpose, from a checkout of the reference code):
     PYTHONPATH=<reference tree> python tests/_sgflux_reference.py --record
@@ -177,6 +178,8 @@ def solve_fixtures():
     from dynameta.carriers import physics_density_gradient as DG
     from dynameta.carriers.physics_drift_diffusion import (setup_contact_ohmic_dd,
                                                            setup_semiconductor_region_dd)
+    sys.path.insert(0, HERE)
+    import _dg_legacy_wall as LW
     dev, mesh = "dgcl", "dgcl_m"
     _R.clear(dev)
     with _quiet():
@@ -194,7 +197,10 @@ def solve_fixtures():
         setup_contact_ohmic_dd(dev, "back")
         DG.setup_dg_quantum_correction(dev, "bar", m_eff_kg=mstar, gamma=1.0)
         DG.setup_contact_dg(dev, "back", 4.0e26)
-        DG.setup_dg_hard_wall(dev, "wall", lambda_pin_factor=8.0)
+        # the RETIRED hard-wall rows (v0.15: setup_dg_hard_wall is a shim onto the insulator wall),
+        # re-created call-for-call by the test fixture, so this flux gate still compares with the
+        # arrays recorded on 6595bde WITH those rows (tests/_dg_legacy_wall.py)
+        LW.install_legacy_hard_wall(dev, "wall", lambda_pin_factor=8.0)
         DG.seed_dg_from_solution(dev, "bar")
         z0 = np.asarray(nv(dev, "bar", "x"))
         u0 = np.asarray(nv(dev, "bar", "QSqrtN"))
@@ -205,6 +211,7 @@ def solve_fixtures():
     _perturb(ds, dev, "bar")
     for fr in (0.05, 0.1, 0.25, 0.5, 1.0):
         DG.set_dg_gamma(dev, "bar", fr)
+        LW.set_pin_fraction(dev, fr)          # the old co-ramp (set_dg_gamma's legacy branch, same value)
         solve(1e16, 1e-8, 200)
     for f in ("Potential", "Electrons", "QSqrtN", "QLambda"):
         out["dg:" + f] = nv(dev, "bar", f)

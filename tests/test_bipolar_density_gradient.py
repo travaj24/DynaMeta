@@ -28,8 +28,15 @@ import validation.bipolar_density_gradient as V  # noqa: E402
 # Bern_g_dg's clamp, the new Bern_g_m / Bern_g_dg_m and their derivatives; +12 calls). What the old
 # digest pinned numerically is kept by tests/test_devsim_sg_flux.py's cross-version gate (the fixture
 # SOLVED vs 6595bde, to the flux change's measured round-off).
-_DG_CALLLOG_DIGEST = "bc52c7927c657f04917d1c2d792ba5cfe8a7365ae10fb4f7352cc73537ff480a"
-_DG_CALLLOG_CALLS = 139
+# RE-RECORDED 2026-11-06 (133 calls; v0.15 item 4.4.4, decision 53): the fixture's wall is now
+# setup_dg_insulator_wall (setup_dg_hard_wall is a deprecated shim onto it -- its log is gated EQUAL in
+# tests/test_density_gradient.py) and the seed passes walls=("wall",). Diffed against the 139-call log of
+# 48cfbc9: the ONLY differences are the wall rows (no wall_lambda_pin / _full parameters and their two
+# set_dg_gamma co-ramp sets; the Lambda row 'Electrons - QSqrtN*QSqrtN' replaces 'QLambda +
+# wall_lambda_pin'; no pinned ElectronContinuityEquation contact row) and the seed's node values (plus
+# the seeded Electrons). Every region model, edge model and flux string is unchanged.
+_DG_CALLLOG_DIGEST = "44177947f156963dc9b52e5ad71ff8f6320b07494d8750eeefdbe52815ca8374"
+_DG_CALLLOG_CALLS = 133
 # sha256 of tests/_bipolar_calllog.record_call_log() -- the bipolar DD definition with no options.
 # RE-RECORDED 2026-11-04 (237 calls) for the two-Bernoulli SG flux: the v0.13.0 (main 5cbd998) /
 # e46bd25 / 6595bde value ac63536e...b0c6aa (217 calls) is the kahan3 flux; the logs differ only in
