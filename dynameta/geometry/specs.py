@@ -165,3 +165,57 @@ class OpticalSpec:
             raise ValueError("auto_direct_max_dofs must be >= 0, got {!r}".format(self.auto_direct_max_dofs))
         if not self.gmres_rtol > 0.0:
             raise ValueError("gmres_rtol must be > 0, got {!r}".format(self.gmres_rtol))
+
+
+@dataclass
+class CarrierSpec:
+    """Carrier-solver settings carried by a Design (v0.15, consolidated plan 4.2.6, user decision 37).
+    The builders (LayeredDevsimBuilder, Stacked3DSpec.from_design) and therefore run_pipeline read it;
+    nothing here changes the optical side or the optical cache key (cache._design_fingerprint never
+    hashes it -- extended precision reaches the optics only through the solved eps_by_region).
+
+    extended_precision: Optional[bool] = None  (None = not stated = OFF; byte-identical to v0.14)
+      True builds the carrier device with DEVSIM's 128-bit model evaluation + equation assembly and solves
+      it with the mixed-precision extended Newton (carriers/extended_precision.py). WHEN TO USE IT:
+        * currents far below the SG round-off floor -- wide-gap (GaN-like) generation / recombination /
+          leakage currents, where a double solve returns round-off (measured on a GaN-like junction:
+          1e5-1e9x off, wrong sign; extended matches the Sah-Noyce-Shockley oracle to < 1e-3), and
+        * heavily doped junctions that do not converge at DynaMeta's DC tolerance in double (1e25/1e22
+          p+n: converges at abs 1e8 only in extended).
+      NOT for: well-conditioned devices (the degenerate ITO reference metasurface agrees to 4e-16 in
+      either precision -- extended buys nothing), and NOT for ssac / noise: DEVSIM factorizes the
+      small-signal system in DOUBLE even in extended mode, so its floor stays (an AdvisoryWarning says
+      so; use the DC dI/dV for the f -> 0 conductance and drive the lightly doped contact).
+      COST (measured, docs/audit/2026-11-03-devsim-extended-precision.md): 6.3x per Newton iteration in
+      1-D, 18.5-21.8x on the 76k-node 2-D reference metasurface, identical iteration counts. With a
+      v0.15 custom term (carriers.custom_terms) the extended Newton converges LINEARLY (~12 iterations
+      to 7e-30; plan 5.9, decision 8: accepted) -- only the iteration count rises.
+
+    PRECEDENCE: an explicit builder argument (LayeredDevsimBuilder(extended_precision=...),
+    Stacked3DSpec.from_design(extended_precision=...)) wins. When it CONTRADICTS a value stated here
+    (True vs False, either way) the builder emits ONE AdvisoryWarning naming both; an unstated design
+    (None) never warns -- the v0.14 call LayeredDevsimBuilder(design, extended_precision=True) is
+    unchanged. carriers.extended_precision.resolve_design_flag is the one resolver.
+
+    PROCESS-GLOBAL DEVSIM STATE (why this is per DESIGN, not per material or per mesh). The opt-in itself
+    is device-scoped (DEVICE-level extended_model / extended_equation, cleared with the device), but
+    DEVSIM's extended_solver is GLOBAL and DEVSIM solves EVERY live device in ONE Newton. DynaMeta sets it
+    only for the duration of each solve, iff a live device opted in. Consequences:
+      * two designs that DISAGREE, built side by side in one process (two live builders): the default
+        device is solved by the extended Newton too (its answer moves off the double one). Every such
+        solve raises an AdvisoryWarning naming both devices. Tear one builder down first -- NOTE that
+        LayeredDevsimBuilder.teardown() deletes EVERY DEVSIM device and mesh in the process, not only its
+        own (gated: tests/test_extended_precision_design.py).
+      * designs run ONE AFTER ANOTHER (run_pipeline tears its builder down after the carrier sweep) are
+        independent: a default run after an extended one is bitwise equal to a fresh default run (gated).
+      * a per-material flag was REJECTED: regions of one device share one Newton, and mixed-precision
+        regions in one Newton have no gate. On the mesh spec (Mesh2DSpec) was REJECTED: the 3-D builder
+        would read a "2-D mesh" setting.
+    PROVENANCE: a builder with the setting on adds CarrierField.extras["extended_precision"] = True; off
+    adds no key (byte-identical CarrierField)."""
+    extended_precision: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        if self.extended_precision is not None and not isinstance(self.extended_precision, bool):
+            raise TypeError("CarrierSpec.extended_precision must be True, False or None (unstated = off), "
+                            "got {!r}".format(self.extended_precision))

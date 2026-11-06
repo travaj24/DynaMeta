@@ -106,7 +106,7 @@ class LayeredDevsimBuilder:
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
-                  extended_precision: bool = False, on_chi_temperature: str = "refuse") -> None:
+                  extended_precision: Optional[bool] = None, on_chi_temperature: str = "refuse") -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
                              .format(heterointerface))
@@ -138,7 +138,11 @@ class LayeredDevsimBuilder:
         # evaluation + equation assembly and solves it with the mixed-precision Newton (128-bit
         # residual, double factorization) -- carriers/extended_precision.py. Device-scoped (it never
         # reaches a later default device); False (default) leaves every solve byte-identical.
-        self.extended_precision = bool(extended_precision)
+        # v0.15 (plan 4.2.6, decision 37): None (default) follows Design.carriers.extended_precision
+        # (unstated = off); an explicit bool wins, with ONE AdvisoryWarning when it contradicts a stated
+        # design value (XP.resolve_design_flag; geometry.specs.CarrierSpec says when to use it).
+        self.extended_precision = XP.resolve_design_flag(design, extended_precision,
+                                                         "LayeredDevsimBuilder")
         self._specs: List[_RegionSpec] = self._region_specs()
         self._contact_region: Dict[str, str] = {}
         self._iface_pairs: List[tuple] = []                  # (region0, region1) per interface
@@ -1021,6 +1025,8 @@ class LayeredDevsimBuilder:
                           AdvisoryWarning, stacklevel=2)
         if self.oxide_tunneling is not None:                  # D1d: opt-in; None adds no key
             extras["oxide_tunneling"] = self._oxide_tunneling_extras()
+        if self.extended_precision:                           # v0.15 provenance; off adds no key
+            extras["extended_precision"] = True
         return CarrierField(
             bias_label=bias.label, voltages=dict(bias.voltages), ndim=2,
             temperature_K=self._device_temperature_K(), regions=regions, n_bg_by_region=n_bg_by_region,
