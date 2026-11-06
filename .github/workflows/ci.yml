@@ -480,6 +480,8 @@ jobs:
     #   the Windows dev box (9 tests; mpmath oracle), i.e. ~2 % of this job.
     # + tests/test_devsim_geometry.py (the opt-in exact-geometry workaround, devsim_geometry): 8 s serial
     #   on the Windows dev box (14 tests, in-memory meshes; scipy Qhull oracles).
+    # + tests/test_devsim_noise_hooge_3d.py (one P1 Hooge kernel for 2-D / 3-D, 2026-11-06): 10 s serial on
+    #   the Windows dev box (4 tests, in-memory Kuhn / Qhull meshes).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -509,7 +511,7 @@ jobs:
             tests/test_devsim_noise.py tests/test_devsim_noise_hooge.py \
             tests/test_devsim_phase_composition.py tests/test_devsim_tunneling.py \
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
-            tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py
+            tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py \n            tests/test_devsim_noise_hooge_3d.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
