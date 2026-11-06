@@ -149,7 +149,9 @@ class TransportModel:
     bipolar_options:             Optional["BipolarOptions"] = None
     # Band-to-band tunneling (D1d, bipolar_dd only): None (default) = OFF, byte-identical; else a
     # dynameta.carriers.tunneling.BTBTParams (e.g. SILICON_HURKX) -> the local Kane/Hurkx BTBT term
-    # in both continuity equations, coupled in the Newton. Typed loosely to keep this module
+    # in both continuity equations, coupled in the Newton; or a TUPLE of them, one term per process,
+    # summed (v0.15, e.g. tunneling.GERMANIUM_KAO). A set with scale_B_with_gap=True takes B at the
+    # region T from band_temperature (tunneling.btbt_for_material). Typed loosely to keep this module
     # devsim-free (the params class lives with the DEVSIM physics).
     btbt:                        Optional[object] = None
     # Bipolar-only SRH trap physics (D1c, 2026-11-03; carriers.physics_traps). srh_trap_energy_eV is

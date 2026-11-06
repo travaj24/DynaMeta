@@ -913,7 +913,9 @@ def setup_bipolar_region(device: str, region: str, *,
       btbt             : None (default: NO band-to-band tunneling -- the models and equations are
                          exactly the legacy ones) or a carriers.tunneling.BTBTParams: adds the local
                          Kane/Hurkx BTBT net-recombination term to both continuity equations, coupled
-                         in the Newton (carriers/tunneling.py; D1d).
+                         in the Newton (carriers/tunneling.py; D1d). v0.15: or a tuple of them, one
+                         summed term per process (tunneling.GERMANIUM_KAO); the sets are installed as
+                         given -- at a T_K region apply tunneling.btbt_at_temperature first.
       srh_trap_energy_eV : E_t - E_i [eV] of the built-in SRH channel (tau_n_s, tau_p_s): n1 =
                          n_i exp(E/kT), p1 = n_i exp(-E/kT) (Shockley-Read 1952 / Hall 1952). The
                          default 0.0 is the legacy midgap level BIT-identically (exp(0) == 1).
