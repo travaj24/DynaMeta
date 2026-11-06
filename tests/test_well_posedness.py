@@ -320,6 +320,7 @@ def test_mos_inversion_stall_carries_the_near_singular_diagnosis():
     msg = str(e.value)
     assert msg.startswith("Convergence failure!") and "near-singular DC Jacobian" in msg
     assert "mode in Electrons" in msg
+    assert "physics_bipolar_dd.setup_quasi_equilibrium_carrier" in msg     # the remedy is named (v0.15 4.4.3)
     ratio = float(msg.split("sigma_min/sigma_max = ")[1].split(")")[0])
     assert ratio <= 1e-15
     assert "near-singular" not in d30 and "mode in Electrons" in d30
