@@ -118,6 +118,30 @@ is called, and it only READS the device (its DC operating point and models are l
      3-D Kuhn tensor) pass.
    * GR is a node source: residual perturbation -q V_i dU (electrons), +q V_i dU (holes), so
             S_i = q^2 V_i |y_p,i - y_n,i|^2 2 (G + R)_i .
+   * THE GENERAL TWO-POINT SOURCE (v0.15, plan 4.0.1; user decisions 7 and 9). GR is one case of a
+     Poissonian event that changes SEVERAL residual rows at once. An event of total rate P [1/s, both
+     directions counted: G + R], which changes row r by q c_r (c_r = the row's stoichiometric
+     coefficient: the change of that row's residual per event in units of q, in DEVSIM's sign
+     convention for the row), has Green's function q Sum_r c_r y_r and contributes
+            S = q^2 2P |Sum_r c_r y_r|^2 .                        (shot noise of the event stream)
+     Same-node GR is {(y_p,i, +1), (y_n,i, -1)} with P_i = V_i (G + R)_i: a recombination removes an
+     electron (ElectronGeneration = -q U: c = -1) and a hole (HoleGeneration = +q U: c = +1). Only the
+     RELATIVE signs matter (|.|^2), and a wrong relative sign is an O(1) error that the FDT gates catch.
+     The rows may sit at different nodes, in different regions or equations, or be circuit nodes:
+       - thermionic emission across an interface: (y_r0,i, +1), (y_r1,i, -1) per carrier ("te_n/te_p");
+       - trap capture / emission: (y_t, ...), (y_n or y_p, ...) with the trap row ("trap_n/trap_p");
+       - oxide tunnelling: electron row of interface node i (-1) to the gate circuit row (+1)
+         ("tunnel_ox");
+       - nonlocal BTBT: hole row at the path start, electron rows of the end element's nodes with
+         barycentric weights w_k ("btbt_nl").
+     ONE kernel evaluates them all: two_point_psd(TwoPointSource, field). The built-in GR (SRH, every
+     PTerm_* term including BTBT, aggregated per node exactly as before) is evaluated through it, BIT-
+     IDENTICAL to the pre-v0.15 expression (the arithmetic is the same: c = +-1.0 products are exact,
+     y_p + (-y_n) == y_p - y_n, and the factors are multiplied in the old order q^2 |.|^2 (2P);
+     tests/test_noise_two_point.py). Live custom terms (carriers/custom_terms.py) contribute through
+     their noise_sources(); a live custom term WITHOUT one, or with jacobian_exact False, makes
+     noise_spectrum refuse the device. A row on a CIRCUIT contact's node is supported for the
+     continuity equations (the item-4 fix-up); for any other equation it is refused.
    * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
      serves 1-D (per unit area: A^2/Hz/m^2, like ssac's S/m^2), 2-D (per unit depth: A^2/Hz/m) and
      3-D (absolute A^2/Hz).
@@ -184,7 +208,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -193,10 +217,18 @@ from dynameta.carriers.eq_registry import ds
 from dynameta.constants import KB, Q_E
 
 __all__ = ["NoiseSpectrum", "TerminalNoise", "noise_spectrum", "terminal_noise", "bernoulli",
-           "MECHANISMS"]
+           "MECHANISMS", "DEFAULT_MECHANISMS", "TWO_POINT_MECHANISMS", "SourceRow", "TwoPointSource",
+           "two_point_psd"]
 
+#: the two-point (event) source mechanisms reserved for v0.15 (user decision 9: separate keys) --
+#: thermionic emission, trap capture/emission, oxide tunnelling, nonlocal BTBT. Each is evaluated only
+#: where a provider supplies its TwoPointSource (none in this tree yet, so they change nothing).
+TWO_POINT_MECHANISMS = ("te_n", "te_p", "trap_n", "trap_p", "tunnel_ox", "btbt_nl")
 #: the source mechanisms this module knows; "hooge" is evaluated only when hooge_alpha is given.
-MECHANISMS = ("diffusion_n", "diffusion_p", "gr", "hooge_n", "hooge_p")
+MECHANISMS = ("diffusion_n", "diffusion_p", "gr", "hooge_n", "hooge_p") + TWO_POINT_MECHANISMS
+#: noise_spectrum's default: every physical source except Hooge (opt-in through hooge_alpha). A caller
+#: that wraps noise_spectrum should inherit THIS tuple, so a new default-on source is never dropped.
+DEFAULT_MECHANISMS = ("diffusion_n", "diffusion_p", "gr") + TWO_POINT_MECHANISMS
 
 _EQ_N, _EQ_P = "ElectronContinuityEquation", "HoleContinuityEquation"
 # the additive-term composites physics_bipolar_dd wires into the edge volume slot (1-D BTBT): a
@@ -244,6 +276,96 @@ class TerminalNoise:
     S_V: np.ndarray
     Y: np.ndarray
     current: NoiseSpectrum
+
+
+# =====================================================================================================
+# the general two-point (event) source -- module doc, item 3 (v0.15, plan 4.0.1)
+# =====================================================================================================
+
+@dataclass(frozen=True)
+class SourceRow:
+    """One residual row every event of a TwoPointSource changes, vectorised over the events.
+
+    region   the region of a node row; None for a CIRCUIT row (then `equation` is the circuit node
+             name, e.g. the gate node of an oxide-tunnelling term, and `nodes` is ignored).
+    equation the region equation ("ElectronContinuityEquation", a trap equation, ...).
+    coeff    (n_events,) c_r: the change of this row's residual per event in units of q, in DEVSIM's
+             sign convention for the row (electron removed: -1 on the electron row; hole removed: +1 on
+             the hole row). A 0 entry is allowed (pads an event that touches fewer rows).
+    nodes    (n_events,) node index in `region` per event."""
+    region: Optional[str]
+    equation: str
+    coeff: np.ndarray
+    nodes: Optional[np.ndarray] = None
+
+
+@dataclass(frozen=True)
+class TwoPointSource:
+    """A set of independent Poissonian events, each changing every row in `rows` at once.
+
+    mechanism  a MECHANISMS key (by_mechanism bucket; filtered by noise_spectrum's `mechanisms`).
+    region     the region the events are attributed to (by_region, maps); must be a noise region.
+    rate       (n_events,) P [1/s; per m^2 in 1-D, per m in 2-D]: the volume-integrated TOTAL event
+               rate, both directions counted (G + R; for a two-way flux J_f + J_b over q).
+    rows       the affected rows (SourceRow), each vectorised over the same events.
+    map_nodes  (n_events,) node of `region` each event's contribution is mapped to (maps=True);
+               None -> rows[0].nodes.
+    Per event S = q^2 2P |Sum_r c_r y_r|^2 (two_point_psd)."""
+    mechanism: str
+    region: str
+    rate: np.ndarray
+    rows: Tuple[SourceRow, ...]
+    map_nodes: Optional[np.ndarray] = None
+
+
+def two_point_psd(source: TwoPointSource, field: Callable[[SourceRow], np.ndarray]) -> np.ndarray:
+    """THE kernel of every event source: per-event one-sided S = q^2 2P |Sum_r c_r y_r|^2, with
+    field(row) the complex adjoint value y_r of each event's row. The rows are summed in the order
+    given, the factors multiplied as q^2 |.|^2 (2P): for GR {(y_p, +1), (y_n, -1)} that is bit for bit
+    the pre-v0.15 expression q^2 |y_p - y_n|^2 2P."""
+    acc = None
+    for row in source.rows:
+        term = np.asarray(row.coeff, dtype=np.float64) * field(row)
+        acc = term if acc is None else acc + term
+    return Q_E * Q_E * np.abs(acc) ** 2 * (2.0 * np.asarray(source.rate, dtype=np.float64))
+
+
+def _gr_source(region: str, P: np.ndarray) -> TwoPointSource:
+    """The built-in same-node GR as a two-point source: P_i = Int (G + R) per node, rows (hole, +1),
+    (electron, -1) at the same node (module doc, item 3)."""
+    idx = np.arange(P.size, dtype=np.int64)
+    return TwoPointSource("gr", region, P, (SourceRow(region, _EQ_P, np.ones(P.size), idx),
+                                            SourceRow(region, _EQ_N, -np.ones(P.size), idx)), idx)
+
+
+def _custom_term_sources(device: str) -> List[TwoPointSource]:
+    """The TwoPointSources of every LIVE custom term on `device` (carriers/custom_terms.py). Refuses a
+    live term without a noise model or with an inexact Jacobian. Reads the Python registry only: it
+    never registers the dispatcher."""
+    from dynameta.carriers import custom_terms as _CT
+    out: List[TwoPointSource] = []
+    for term in _CT.live_terms(device):
+        if not term.rows_live(device):
+            continue
+        if not term.jacobian_exact:
+            raise RuntimeError(
+                "noise_analysis: custom term {!r} on {!r} declares jacobian_exact=False; the small-"
+                "signal / noise system IS its Jacobian -- refusing.".format(term.name, device))
+        srcs = term.noise_sources(device)
+        if srcs is None:
+            raise RuntimeError(
+                "noise_analysis: custom term {!r} on {!r} has no noise model (noise_sources() is "
+                "None); its fluctuation would be silently missing -- refusing.".format(
+                    term.name, device))
+        for s in srcs:
+            if not isinstance(s, TwoPointSource):
+                raise TypeError("noise_analysis: custom term {!r} returned {!r}, not a "
+                                "TwoPointSource".format(term.name, s))
+            if s.mechanism not in MECHANISMS:
+                raise ValueError("noise_analysis: custom term {!r} source mechanism {!r} is not a "
+                                 "MECHANISMS key".format(term.name, s.mechanism))
+            out.append(s)
+    return out
 
 
 # =====================================================================================================
@@ -516,12 +638,15 @@ class _RegionData:
         # the Hooge source's element structure (module doc, item 3): one xi per element
         self.hooge_el = (_hooge_elements(device, region, self.i0, self.i1, couple, length)
                          if self.hooge else None)
-        self.gr = None                          # 2 Int (G + R) per node [1/s] (every mechanism)
+        # built-in event sources of the region (module doc, item 3): the same-node GR, Int (G + R) per
+        # node [1/s] over every recombination mechanism. Providers of the v0.15 event mechanisms
+        # (te_*, trap_*) append their TwoPointSource here.
+        self.two_point: List[TwoPointSource] = []
         if "gr" in mechanisms and _EQ_N in eqs and _EQ_P in eqs:
             P = _gr_pair_per_node(device, region, external_generation_shot, self.n_nodes,
                                   self.i0, self.i1)
             if P is not None:
-                self.gr = 2.0 * P
+                self.two_point.append(_gr_source(region, P))
 
 
 def _green(device, region, out, eq, n_nodes, fixups):
@@ -548,7 +673,7 @@ def _cleanup_noise_models(device, regions, out):
 
 def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                    regions: Optional[Iterable[str]] = None,
-                   mechanisms: Sequence[str] = ("diffusion_n", "diffusion_p", "gr"),
+                   mechanisms: Sequence[str] = DEFAULT_MECHANISMS,
                    hooge_alpha: Optional[float] = None, external_generation_shot: bool = True,
                    maps: bool = False) -> NoiseSpectrum:
     """One-sided noise spectral density at circuit node `output_node` of `device`, at its CURRENT
@@ -557,7 +682,12 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     ("V1.I": short-circuit terminal current noise S_I) or a circuit node voltage (open-circuit S_V
     of a CURRENT-driven contact). `regions` defaults to every region carrying continuity equations.
     `mechanisms` picks the local sources (MECHANISMS); "hooge_n"/"hooge_p" are added automatically
-    when hooge_alpha (the dimensionless Hooge parameter) is given. The DC state is not modified.
+    when hooge_alpha (the dimensionless Hooge parameter) is given. The default, DEFAULT_MECHANISMS,
+    is every physical source: diffusion, GR and the v0.15 event keys (TWO_POINT_MECHANISMS), each
+    present only where the device carries it -- keep the default for an FDT-consistent total; name a
+    subset only to split S by mechanism. A device carrying a live custom term (custom_terms) gets
+    that term's event sources (module doc, item 3), and is REFUSED if the term has no noise model or
+    an inexact Jacobian. The DC state is not modified.
     hooge_alpha works in 1-D, 2-D and 3-D on any simplex shape (per-element P1 couples, module doc item
     3); on a non-well-centred 2-D / 3-D mesh (gmsh, Delaunay) apply devsim_geometry.apply_exact_geometry
     after create_device, as for every other source here, or DEVSIM's own DC / adjoint solve is off.
@@ -625,8 +755,43 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                     if eq in d.eqs:
                         contact_nodes.setdefault((d.region, eq), []).append((nodes, cn))
 
+    # every event source (module doc, item 3): built-in GR + live custom terms' noise_sources
+    tps = [s for d in data for s in d.two_point]
+    region_names = {d.region for d in data}
+    for s in _custom_term_sources(device):
+        if s.mechanism not in mech:
+            continue
+        if s.region not in all_regions:
+            raise ValueError("noise_spectrum: event source attributed to unknown region {!r}"
+                             .format(s.region))
+        if s.region in region_names:                    # a region the caller left out is skipped
+            tps.append(s)
+    tp_fixed = set(contact_nodes)                       # (region, eq) rows with a contact fix-up
+    circ_nodes = {}
+    for s in tps:
+        for row in s.rows:
+            if row.region is None:
+                if row.equation not in ds.get_circuit_node_list():
+                    raise ValueError("noise_spectrum: event source row on unknown circuit node {!r}"
+                                     .format(row.equation))
+                continue
+            if (row.region, row.equation) in tp_fixed:
+                continue
+            if row.region not in circ_nodes:
+                circ_nodes[row.region] = set()
+                for c in circ:
+                    circ_nodes[row.region].update(_contact_nodes(device, row.region, c).tolist())
+            used = np.asarray(row.nodes)[np.asarray(row.coeff) != 0.0]
+            if circ_nodes[row.region].intersection(used.tolist()):
+                raise NotImplementedError(
+                    "noise_spectrum: an event source row of {} on region {!r} sits on a circuit-"
+                    "contact node; only the continuity equations have the contact fix-up (module "
+                    "doc, item 4).".format(row.equation, row.region))
+    field_regions = sorted({row.region for s in tps for row in s.rows if row.region is not None}
+                           - region_names)
+
     present = sorted({m for d in data for m in list(d.edge_K) + list(d.hooge)}
-                     | ({"gr"} if any(d.gr is not None for d in data) else set()))
+                     | {s.mechanism for s in tps})
     nf = freqs.size
     by_rm = {d.region: {m: np.zeros(nf) for m in present} for d in data}
     map_out = None
@@ -648,9 +813,11 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                     float(ds.get_circuit_node_value(node=cn, solution=sol_re)),
                     float(ds.get_circuit_node_value(node=cn, solution=sol_im))))
                     for nodes, cn in lst]
+            yall = {}
             for d in data:
                 ys = {eq: _green(device, d.region, output_node, eq, d.n_nodes, fix)
                       for eq in d.eqs}
+                yall.update({(d.region, eq): y for eq, y in ys.items()})
                 for m in present:
                     if m in d.hooge:                    # rank-one source: one xi per element
                         y = ys[d.edge_eq[m]]
@@ -674,13 +841,24 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                             np.add.at(nm, d.i0, 0.5 * s_e)
                             np.add.at(nm, d.i1, 0.5 * s_e)
                             map_out[d.region][m][k] = nm
-                    elif m == "gr" and d.gr is not None:
-                        s_i = Q_E * Q_E * np.abs(ys[_EQ_P] - ys[_EQ_N]) ** 2 * d.gr
-                        by_rm[d.region][m][k] = float(np.sum(s_i))
-                        if maps:
-                            map_out[d.region][m][k] = s_i
+
+            def field(row):
+                if row.region is None:                  # circuit row: the circuit adjoint value
+                    return complex(float(ds.get_circuit_node_value(node=row.equation, solution=sol_re)),
+                                   float(ds.get_circuit_node_value(node=row.equation, solution=sol_im)))
+                key = (row.region, row.equation)
+                if key not in yall:
+                    yall[key] = _green(device, row.region, output_node, row.equation, None, fix)
+                return yall[key][np.asarray(row.nodes, dtype=np.int64)]
+
+            for s in tps:                               # every event source, ONE kernel
+                s_e = two_point_psd(s, field)
+                by_rm[s.region][s.mechanism][k] += float(np.sum(s_e))
+                if maps:
+                    np.add.at(map_out[s.region][s.mechanism][k],
+                              s.rows[0].nodes if s.map_nodes is None else s.map_nodes, s_e)
     finally:
-        _cleanup_noise_models(device, [d.region for d in data], output_node)
+        _cleanup_noise_models(device, [d.region for d in data] + field_regions, output_node)
 
     by_m = {m: sum(by_rm[r][m] for r in by_rm) for m in present}
     by_r = {r: sum(by_rm[r][m] for m in present) for r in by_rm}

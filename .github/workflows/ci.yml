@@ -488,6 +488,10 @@ jobs:
     #   ~36 s, runs nightly).
     # + tests/test_devsim_noise_hooge_3d.py (one P1 Hooge kernel for 2-D / 3-D, 2026-11-06): 10 s serial on
     #   the Windows dev box (4 tests, in-memory Kuhn / Qhull meshes).
+    # + tests/test_custom_terms.py + tests/test_noise_two_point.py (v0.15 shared infrastructure: the
+    #   custom-equation dispatcher, every registering case in a child process, and the two-point noise
+    #   source): 46 s serial together on the Windows dev box (26 tests; the defaults-off pair of child
+    #   processes is 16 s of it).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -518,7 +522,8 @@ jobs:
             tests/test_devsim_phase_composition.py tests/test_devsim_tunneling.py \
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
             tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
-            tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py
+            tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py \
+            tests/test_custom_terms.py tests/test_noise_two_point.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
