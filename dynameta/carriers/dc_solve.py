@@ -259,8 +259,10 @@ def _newton(device, abs_tol, rel_tol, max_iter):
     REPORTS non-convergence instead of raising; the device state is restored either way), re-raised
     as devsim.error -- with the near-singular diagnosis appended when the failure is a stall."""
     WP.ensure_dc_well_posed()
-    info = XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                    relative_error=rel_tol, maximum_iterations=max_iter, info=True)
+    from dynameta.carriers.physics_traps import kinetic_dc_form
+    with kinetic_dc_form():                 # v0.15: kinetic trap rows in their linear DC form (no-op without)
+        info = XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+                        relative_error=rel_tol, maximum_iterations=max_iter, info=True)
     if isinstance(info, dict) and not info.get("converged", True):
         msg = ("Convergence failure! (solve_dc: {} Newton iterations, absolute_error={:.4g}, "
                "relative_error={:.4g})".format(len(info.get("iterations") or ()), abs_tol, rel_tol))

@@ -118,6 +118,7 @@ LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -271,6 +272,14 @@ def srh_capture_derivs(n1: str, p1: str, taun: str, taup: str, f: str, one_minus
              var: "-(Electrons + {})*{}/{}".format(n1e, dfdx, taun)},
             {"Electrons": "0", "Holes": "{}/{}".format(f, taup),
              var: "(Holes + {})*{}/{}".format(p1e, dfdx, taup)})
+
+
+def srh_vacancy_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup", *,
+                     bgn: bool = False, reference: str = "intrinsic") -> str:
+    """1 - f_SS = (tau_p0 n1' + tau_n0 p)/(tau_p0 (n + n1') + tau_n0 (p + p1')) -- the steady-state vacancy of
+    srh_occupancy_expr written without the 1 - f subtraction (a nearly full level keeps its digits)."""
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    return "({tp}*{n1} + {tn}*Holes)/{d}".format(tp=taup, tn=taun, n1=n1e, d=_srh_denominator(n1e, p1e, taun, taup))
 
 
 def srh_occupancy_odds_expr(n1: str = "n1", p1: str = "p1", taun: str = "taun", taup: str = "taup",
@@ -688,9 +697,10 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
         if t.dynamic:
             var, f, g = _install_kinetic_level(device, region, k, p, args, occ, bgn=bgn, reference=ref)
             if t.kind != "neutral":
-                kin_q.append(("-{}Nt*{}" if t.kind == "acceptor" else "{}Nt*{}").format(
-                    p, f if t.kind == "acceptor" else g))
-                kin_dq[var] = "-{}Nt*{}^2".format(p, g)           # both kinds: -N_t df/dw = -N_t (1-f)^2
+                sgn, occm = ("-", f) if t.kind == "acceptor" else ("", g)
+                kin_q.append("{}{}Nt*{}".format(sgn, p, occm))
+                for v in ("Electrons", "Holes", var):   # through the occupancy models' own derivatives
+                    kin_dq.setdefault(v, []).append("{}{}Nt*{}:{}".format(sgn, p, occm, v))
             continue
         ds.node_model(device=device, region=region, name="TrapOccupancy{}".format(k), equation=occ)
         _BP.add_recombination_term(device, region, "trap{}".format(k),
@@ -704,7 +714,8 @@ def install_bulk_traps(device: str, region: str, traps: Sequence[TrapLevel], *, 
         _BP.add_charge_term(device, region, "bulk_traps", " + ".join(charges))
     if kin_q:
         _BP.add_charge_term(device, region, KINETIC_CHARGE_TERM, " + ".join(kin_q),
-                            wrt=tuple(kin_dq), derivs=dict(kin_dq, Electrons="0", Holes="0"))
+                            wrt=tuple(v for v in kin_dq if v not in ("Electrons", "Holes")),
+                            derivs={v: " + ".join(e) for v, e in kin_dq.items()})
 
 
 #: the charge term of the CHARGED kinetic bulk levels (QTerm_<this>); quasi-static ones stay in bulk_traps
@@ -754,10 +765,10 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
     ds.node_solution(device=device, region=region, name=var)             # FIRST: the terms need it
     ds.set_node_values(device=device, region=region, name=var,          # finite, > 0 until seeded
                        values=ds.get_node_model_values(device=device, region=region, name=seed))
-    _occupancy_models(device, region, var, f, g)
+    _occupancy_models(device, region, var, f, g, *args, bgn=bgn, reference=reference)
     rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference)
     pn, pp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, pair=True)
-    dn, dp = srh_capture_derivs(*args, f, g, var, g + "^2", bgn=bgn, reference=reference)
+    dn = dp = None          # DEVSIM's diff through the occupancy models (they carry n, p, w derivatives)
     # the event rates P_n, P_p (both directions of each exchange) are the trap g-r noise sources (K3): an
     # electron event changes the electron row by -1 and the trap row by +1, a hole event the hole row by +1
     # and the trap row by -1 (TrapNode = +q (R_n - R_p)) -- noise_analysis's single-carrier sources
@@ -765,26 +776,51 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
                                pair=pn, partner=(eq, +1.0), mechanism="trap_n")
     _BP.add_recombination_term(device, region, name, rp, carrier="hole", wrt=(var,), derivs=dp,
                                pair=pp, partner=(eq, -1.0), mechanism="trap_p")
-    _trap_row(device, region, var, eq, "TrapNode_" + name, "TrapCharge_" + name, name, p + "Nt", g)
+    _trap_row(device, region, var, eq, "TrapNode_" + name, "TrapCharge_" + name, name, p + "Nt", seed)
     return var, f, g
 
 
-def _occupancy_models(device, region, var, f, g):
-    """f = w/(1+w) and 1 - f = 1/(1+w) of the odds variable w (+ their w-derivatives, for any model that
-    lets DEVSIM differentiate through them by name)."""
-    ds.node_model(device=device, region=region, name=f, equation="{w}/(1 + {w})".format(w=var))
-    ds.node_model(device=device, region=region, name=g, equation="1/(1 + {})".format(var))
-    ds.node_model(device=device, region=region, name="{}:{}".format(f, var), equation=g + "^2")
-    ds.node_model(device=device, region=region, name="{}:{}".format(g, var), equation="-" + g + "^2")
+def _occupancy_models(device, region, var, f, g, n1, p1, taun, taup, *, bgn, reference):
+    """The occupancy models every kinetic term reads by name, BLENDED by the DC-form switch D
+    (KINETIC_DC_PARAMETER): f = D f_SS(n, p) + (1 - D) w/(1+w), 1 - f = D (1 - f_SS) + (1 - D)/(1+w). D = 0 --
+    every analysis -- is the kinetic occupancy (0 x f_SS = 0 exactly, so the values are w's); D = 1 -- inside
+    kinetic_dc_form only -- is the quasi-static occupancy, so the rates and the charge are the quasi-static
+    model. Derivatives in CLOSED FORM, without a 1 - f subtraction (DEVSIM's diff of w/(1+w) is 1/(1+w) -
+    w/(1+w)^2, which cancels for a full level: MEASURED 2e4 eps on the Poisson column): df/dw = (1 - D)/(1+w)^2,
+    df_SS/dn = tau_p0 (1 - f_SS)/Den, df_SS/dp = -tau_n0 f_SS/Den (Den the SRH denominator), and 1 - f the
+    negatives."""
+    if KINETIC_DC_PARAMETER not in ds.get_parameter_list(device=device, region=region):
+        ds.set_parameter(device=device, region=region, name=KINETIC_DC_PARAMETER, value=0.0)
+    d = KINETIC_DC_PARAMETER
+    n1e, p1e, _ = srh_reference_densities(n1, p1, bgn=bgn, reference=reference)
+    den = _srh_denominator(n1e, p1e, taun, taup)
+    fss = srh_occupancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference)
+    gss = srh_vacancy_expr(n1, p1, taun, taup, bgn=bgn, reference=reference)
+    gw = "(1/(1 + {}))".format(var)
+    for name, expr, sgn in ((f, "{d}*{s} + (1 - {d})*({w}/(1 + {w}))".format(d=d, s=fss, w=var), ""),
+                            (g, "{d}*{s} + (1 - {d})*{gw}".format(d=d, s=gss, gw=gw), "-")):
+        ds.node_model(device=device, region=region, name=name, equation=expr)
+        for v, e in (("Electrons", "{d}*{tp}*{g}/{den}".format(d=d, tp=taup, g=gss, den=den)),
+                     ("Holes", "-{d}*{tn}*{f}/{den}".format(d=d, tn=taun, f=fss, den=den)),
+                     (var, "(1 - {d})*{gw}^2".format(d=d, gw=gw))):
+            ds.node_model(device=device, region=region, name="{}:{}".format(name, v),
+                          equation="{}({})".format(sgn, e))
 
 
-def _trap_row(device, region, var, eq, node, time, term, nt, g, *, area=None, mask=None):
-    """The occupancy equation of one kinetic level / interface bin `term`: node model +q (R_n - R_p) [x
-    the interface weight, + the off-interface mask row (w - 1)] read through the term models by NAME
-    (DEVSIM's chain rule through named models, measured in 4.0.2), time model -q N f [x weight] with its
-    w-derivative -q N (1-f)^2, variable_update "positive" (w > 0: 0 < f < 1 under any update)."""
+def _trap_row(device, region, var, eq, node, time, term, nt, seed, *, area=None, mask=None):
+    """The occupancy equation of one kinetic level / interface bin `term`, variable_update "positive" (w > 0:
+    0 < f < 1 under any update), time model -q N w/(1+w) [x weight] (always the kinetic charge). Node model:
+        (1 - D) q (R_n - R_p) [x weight]  +  D (w - w_SS)  [+ the off-interface mask row (w - 1)]
+    D = 0 (every analysis): the physical row, read through the term models by NAME (DEVSIM's chain rule
+    through named models, measured in 4.0.2). D = 1 (kinetic_dc_form, the DC solves of dc_solve.solve_dc):
+    the rates are the quasi-static ones (R_n = R_p), and w is SLAVED to its steady state w_SS (the `seed`
+    model) -- with NO n, p derivative: w_SS carries no derivative model, which DEVSIM differentiates to 0
+    (MEASURED in 4.0.2: a missing model derivative is a silent zero, used here on purpose), so w lags the
+    carriers by one Newton iteration and can never feed back. The DC root is the same in both forms."""
     w = "" if area is None else "{}*".format(area)
-    expr = "ElectronCharge*(RTermN_{t} - RTermP_{t})".format(t=term)
+    d = KINETIC_DC_PARAMETER
+    expr = "(1 - {d})*ElectronCharge*(RTermN_{t} - RTermP_{t}) + {d}*({v} - {s})".format(d=d, t=term, v=var,
+                                                                                      s=seed)
     if mask is not None:                       # off the interface: NodeVolume (w - 1) = 0 (w > 0 inert)
         expr = "{} + {}*({} - 1)".format(expr, mask, var)
     node_with_derivs(device, region, node, expr, ("Electrons", "Holes", var))
@@ -792,9 +828,44 @@ def _trap_row(device, region, var, eq, node, time, term, nt, g, *, area=None, ma
     ds.node_model(device=device, region=region, name=time,
                   equation="-ElectronCharge*{}{}*{}".format(w, nt, f))
     ds.node_model(device=device, region=region, name="{}:{}".format(time, var),
-                  equation="-ElectronCharge*{}{}*{}^2".format(w, nt, g))
+                  equation="-ElectronCharge*{}{}*(1/(1 + {}))^2".format(w, nt, var))
     record_region_equation(device, region, name=eq, variable_name=var, node_model=node,
                            time_node_model=time, variable_update="positive")
+
+
+#: region parameter switching every kinetic level between its PHYSICAL form (0: the kinetic model, what the
+#: transient, ssac and noise solves see) and its DC form (1: the quasi-static model with w slaved to w_SS) --
+#: see kinetic_dc_form
+KINETIC_DC_PARAMETER = "KineticDCForm"
+
+
+@contextmanager
+def kinetic_dc_form(m=ds):
+    """Inside the block every kinetic level of every live device is in its DC FORM: its rates and charge use
+    the QUASI-STATIC occupancy f_SS(n, p) and its row slaves w to w_SS (_occupancy_models, _trap_row) -- the DC
+    Newton is then the quasi-static model's own, with w following one iteration behind and never feeding
+    back. Why: the physical row's linearization in w at a saturated level divides by (1 - f)^2, so a large
+    carrier change in one iteration -- a gated 2-D device going straight into the coupled Newton from its
+    neutral seed -- flings w past 1e150 ((1 - f)^2 underflows, the factorization fails) or, in a linear (1 + w)
+    form, lets the interface charge swing by q N_it per bin and the carriers diverge (both MEASURED on a gated
+    bipolar GaAs builder with kinetic interface bins; the quasi-static twin converges). The DC root is the SAME
+    (R_n = R_p <=> w = w_SS); only the Newton path changes. dc_solve.solve_dc
+    (hence every builder) wraps its Newton in this; a raw ds.solve(type='dc') uses the physical form (it
+    converges from a seeded state, tests/test_trap_kinetics.py). Never wrap a transient, ssac or noise solve:
+    their rows must be the physical ones. A no-op without kinetic traps (no parameter is touched)."""
+    hits = []
+    lister = getattr(m, "get_device_list", None)
+    for d in (lister() if lister is not None else ()):
+        for r in m.get_region_list(device=d):
+            if KINETIC_DC_PARAMETER in m.get_parameter_list(device=d, region=r):
+                hits.append((d, r))
+    for d, r in hits:
+        m.set_parameter(device=d, region=r, name=KINETIC_DC_PARAMETER, value=1.0)
+    try:
+        yield hits
+    finally:
+        for d, r in hits:
+            m.set_parameter(device=d, region=r, name=KINETIC_DC_PARAMETER, value=0.0)
 
 
 def kinetic_trap_variables(device: str, region: str) -> List[str]:
@@ -1154,26 +1225,25 @@ def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val):
         ds.node_solution(device=device, region=semi, name=var)       # FIRST: the terms need it
         ds.set_node_values(device=device, region=semi, name=var,
                            values=ds.get_node_model_values(device=device, region=semi, name=seed))
-        _occupancy_models(device, semi, var, f, g)
+        _occupancy_models(device, semi, var, f, g, n1, p1, "1", cr, bgn=bgn, reference=ref)
         k = "{}*{}*{}".format(a_name, nk, cnp)                       # ItArea N_b c_n (tau -> 1/S)
         rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref)
         pn, pp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, pair=True)
-        dn, dp = srh_capture_derivs(n1, p1, "1", cr, f, g, var, g + "^2", bgn=bgn, reference=ref)
-        for carrier, r, pr, d, c, mech in (("electron", rn, pn, dn, +1.0, "trap_n"),
-                                           ("hole", rp, pp, dp, -1.0, "trap_p")):
-            _BP.add_recombination_term(
-                device, semi, name, "{}*{}".format(k, r), carrier=carrier, wrt=(var,),
-                derivs={v: ("0" if e == "0" else "{}*{}".format(k, e)) for v, e in d.items()},
-                pair="{}*{}".format(k, pr), partner=(eq, c), mechanism=mech)
+        for carrier, r, pr, c, mech in (("electron", rn, pn, +1.0, "trap_n"), ("hole", rp, pp, -1.0, "trap_p")):
+            _BP.add_recombination_term(device, semi, name, "{}*{}".format(k, r), carrier=carrier, wrt=(var,),
+                                       pair="{}*{}".format(k, pr), partner=(eq, c), mechanism=mech)
         _trap_row(device, semi, var, eq, "ItNode{}_{}".format(j, b), "ItTrapCharge{}_{}".format(j, b),
-                  name, nk, g, area=a_name, mask=mask)
+                  name, nk, seed, area=a_name, mask=mask)
         if kind in ("acceptor", "donor"):
-            kq.append(("-{n}*{f}" if kind == "acceptor" else "{n}*{g}").format(n=nk, f=f, g=g))
-            kdq[var] = "{}*(-{}*{}^2)".format(a_name, nk, g)             # both kinds: -N (1-f)^2
+            sgn, occm = ("-", f) if kind == "acceptor" else ("", g)
+            kq.append("{}{}*{}".format(sgn, nk, occm))
+            for v in ("Electrons", "Holes", var):
+                kdq.setdefault(v, []).append("{}{}*{}:{}".format(sgn, nk, occm, v))
         made.append(var)
     if kq:
         _BP.add_charge_term(device, semi, "itk{}".format(j), "{}*({})".format(a_name, " + ".join(kq)),
-                            wrt=tuple(kdq), derivs=dict(kdq, Electrons="0", Holes="0"))
+                            wrt=tuple(v for v in kdq if v not in ("Electrons", "Holes")),
+                            derivs={v: "{}*({})".format(a_name, " + ".join(e)) for v, e in kdq.items()})
         ds.node_model(device=device, region=semi, name="ItCharge{}".format(j),
                       equation="ElectronCharge*({})".format(" + ".join(list(q_val) + kq)))
     return made
