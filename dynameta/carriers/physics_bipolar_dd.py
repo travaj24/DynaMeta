@@ -54,8 +54,17 @@ Comparing Delta(u) against the exact Fermi-Dirac offset eta - ln(F_1/2(eta)):
       0.85 % at eta = 10, and < 0.5 % for eta >= 15 -- the claim as originally written.
   * EXACT frame (u = F_1/2(eta) by quadrature, the physical oracle):
       eta = 10: +0.78 %   15: +0.60 %   20: +0.55 %   25: +0.50 %   32 (the ceiling): +0.40 %
-    i.e. the error is under 1 % everywhere degeneracy matters, but "< 0.5 % for eta >= 15" is an
-    artifact of the AH frame; against exact quadrature it does not reach 0.5 % until eta ~ 25.
+    and, in the MODERATELY degenerate range (re-measured 2026-11-06 against scipy quadrature of
+    F_1/2; the earlier "under 1 % everywhere degeneracy matters" was wrong there):
+      eta = -4: -0.21 %   -3: +1.03 %   -2: +2.30 %   -1: +3.35 %   0: +3.86 %   0.5: +3.88 %
+      1: +3.76 %   2: +3.27 %   3: +2.68 %   4: +2.15 %   5: +1.72 %   7: +1.16 %   8: +0.99 %
+    i.e. the relative error is ABOVE 1 % from eta ~ -3 to ~ 8 and peaks at +3.9 % near eta ~ 0.3. In
+    absolute terms (what enters exp(-Delta) and the built-in potential, in V_t units): 1.8e-4 at
+    eta = -3, 3.9e-3 at -1 (Si:P 1e19 cm^-3 sits at eta = -0.93: 4.2e-3), 1.0e-2 at 0, 3.1e-2 at 2
+    (Si:P 1e20 cm^-3, eta = 2.43: 3.6e-2), 4.9e-2 at 5, 5.3e-2 at 10. "< 0.5 % for
+    eta >= 15" is an artifact of the AH frame; against exact quadrature it does not reach 0.5 % until
+    eta ~ 25. A gate that touches eta in [-3, 8] must budget for this error explicitly (the v0.15 Si
+    bundle gates do: tests/test_si_bundles_devsim.py).
 The sign matters for the ceiling warning: Delta OVERSHOOTS the exact offset (positive error) all
 the way to eta ~ 50, where the error crosses zero (+0.009 % at eta = 50, -0.040 % at 52); only past
 that does it undershoot (-0.24 % at eta = 60, -1.20 % at 100). The g-FACTOR is the one that crosses
@@ -157,7 +166,7 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
                             n_dos_p_m3: "float | None" = None,
                             fd_enhancement: bool = True,
                             options: "BipolarOptions | None" = None,
-                            traps=None) -> float:
+                            traps=None, statistics: "str | None" = None) -> float:
     """The built-in potential [V] the bipolar ohmic contact PINS for a node of SIGNED net doping
     `net_doping_m3`, in the contact's own frame (n-type: +V_t ln(n0/n_i) plus the FD correction).
 
@@ -175,15 +184,20 @@ def ohmic_built_in_offset_V(net_doping_m3: float, *, n_i_m3: float, n_dos_m3: fl
     `traps` (v0.14 integration): the region's bulk physics_traps.TrapLevel sequence. CHARGED levels move
     the charge-neutral equilibrium the contact pins (the same kernel, with the trapped charge in the
     neutrality root), so a gate referenced to a trap-compensated body follows its contact too.
-    None / no charged level is the trap-free value unchanged."""
+    None / no charged level is the trap-free value unchanged.
+
+    `statistics` (v0.15): the region's setup_bipolar_region(statistics=...) -- "fermi_dirac" takes the
+    FD detailed-balance root, and a PAIRED BGN set in `options` is checked here by the SAME function
+    (bipolar_options.check_bgn_pairing, inside equilibrium_fields) the region setup uses, so the gate
+    frame refuses exactly what the body refuses. None keeps the legacy value."""
     eq_traps = _PT.equilibrium_trap_levels(traps)
-    if (options is not None and options.active) or eq_traps:
+    if (options is not None and options.active) or eq_traps or statistics is not None:
         from dynameta.carriers.bipolar_options import BipolarOptions, equilibrium_fields
         nd = float(n_dos_m3)
         f = equilibrium_fields(np.array([float(net_doping_m3)]), n_i_m3=float(n_i_m3), N_c_m3=nd,
                                N_v_m3=float(n_dos_p_m3) if n_dos_p_m3 else nd,
                                options=options if options is not None else BipolarOptions(),
-                               fd_enhancement=fd_enhancement, traps=eq_traps)
+                               fd_enhancement=fd_enhancement, traps=eq_traps, statistics=statistics)
         return float(f["psi_eq"][0])
     N = float(net_doping_m3)
     ni = float(n_i_m3)
@@ -649,7 +663,8 @@ def setup_bipolar_region(device: str, region: str, *,
                          options: "BipolarOptions | None" = None,
                          btbt=None,
                          srh_trap_energy_eV: float = 0.0,
-                         traps=None) -> None:
+                         traps=None,
+                         statistics: "str | None" = None) -> None:
     """Attach bipolar drift-diffusion physics to a semiconductor region.
 
     Parameters (all SI):
@@ -665,6 +680,17 @@ def setup_bipolar_region(device: str, region: str, *,
                          recombination (tau=0 would make the SRH denominator 0/0 -> NaN)
       fd_enhancement   : if True, apply the degenerate FD g-factor to BOTH currents;
                          if False, plain Boltzmann Scharfetter-Gummel (g==1).
+      statistics       : v0.15 carrier statistics (bipolar_options module doc, STATISTICS). None
+                         (default): the legacy model selected by fd_enhancement, BYTE-IDENTICAL (with
+                         fd_enhancement=True: FD transport + contact potential, but the Boltzmann
+                         product n p = n_ie^2 in recombination and contacts -- a degenerate layer next to
+                         a junction then carries a zero-bias current, -0.12 J0 at 1e19 cm^-3 Si).
+                         "fermi_dirac" (needs fd_enhancement=True): FD transport AND FD detailed balance
+                         (n_ie carries exp(-Delta/2) per carrier; contacts pin the FD root) -- use it on
+                         degenerate layers and with an FD-paired BGN set (the house Si bundle).
+                         "boltzmann" (needs fd_enhancement=False): Boltzmann everywhere -- use it with an
+                         APPARENT (Boltzmann-extracted) BGN set. "fermi_dirac" refuses btbt and CHARGED
+                         trap levels (not implemented with the solution-dependent n_ie).
       options          : opt-in BipolarOptions (audit R26/R27: Auger, radiative, bandgap narrowing,
                          incomplete ionization, T_K, uniform generation; see carriers/bipolar_options).
                          None (default) -- or a bundle with every field None -- leaves every model
@@ -713,9 +739,22 @@ def setup_bipolar_region(device: str, region: str, *,
     # 2026-11-03). E = 0 (default) -> n_i * 1.0 == n_i exactly: the legacy midgap values, bit for bit.
     # kT of the region: BipolarOptions.T_K when set (V_T otherwise -- the same float), so a level keeps
     # its energy at the simulated temperature.
+    from dynameta.carriers.bipolar_options import resolve_statistics
+    _fdc = resolve_statistics(statistics, fd_enhancement) == "fermi_dirac"   # validates the pair
     _opt = options if (options is not None and options.active) else None
+    if _fdc:
+        if btbt is not None or _PT.equilibrium_trap_levels(traps):
+            raise NotImplementedError(
+                "setup_bipolar_region: statistics='fermi_dirac' with {} is not implemented (its rate / "
+                "equilibrium charge assume a fixed n_ie, while FD detailed balance makes n_ie a function "
+                "of the carriers). Use statistics=None (the legacy statistics) for this region.".format(
+                    "band-to-band tunneling" if btbt is not None else "CHARGED trap levels"))
+        if _opt is None:                       # FD detailed balance alone still needs the option path
+            from dynameta.carriers.bipolar_options import BipolarOptions
+            _opt = options if options is not None else BipolarOptions()
     _vt = _opt.V_t() if _opt is not None else V_T
-    _bgn = _opt is not None and _opt.bgn is not None
+    # _bgn: the recombination strings reference the region's n_ie model (BGN, or FD detailed balance)
+    _bgn = _opt is not None and (_opt.bgn is not None or _fdc)
     _n1, _p1 = _PT.n1_p1(srh_trap_energy_eV, n_i_m3, _vt)
     ds.set_parameter(device=device, region=region, name="n1", value=_n1)  # SRH trap
     ds.set_parameter(device=device, region=region, name="p1", value=_p1)
@@ -724,6 +763,8 @@ def setup_bipolar_region(device: str, region: str, *,
     # here (1.0 = Fermi-Dirac g-factor, 0.0 = Boltzmann) so setup_contact_ohmic_bipolar* can read it.
     ds.set_parameter(device=device, region=region, name="fd_enhancement",
                      value=1.0 if fd_enhancement else 0.0)
+    if _fdc:                                   # v0.15: recorded ONLY when set (legacy log unchanged)
+        ds.set_parameter(device=device, region=region, name="fd_detailed_balance", value=1.0)
 
     # --- solution variables ---
     ds.node_solution(device=device, region=region, name="Potential")
@@ -786,7 +827,8 @@ def setup_bipolar_region(device: str, region: str, *,
     #     BEFORE the recombination models, which reference n_ie. Off -> nothing runs here.
     if _opt is not None:
         from dynameta.carriers.bipolar_options import install_option_fields
-        install_option_fields(device, region, _opt, fd_enhancement=fd_enhancement)
+        install_option_fields(device, region, _opt, fd_enhancement=fd_enhancement,
+                              **({"statistics": statistics} if _fdc else {}))
 
     # --- SRH recombination: one node model into BOTH continuity equations ---
     # srh_rate_expr() with its default names IS the legacy string (pinned in tests/test_traps.py); with
@@ -805,7 +847,8 @@ def setup_bipolar_region(device: str, region: str, *,
     _eq_traps = _PT.equilibrium_trap_levels(traps)
     if _opt is not None or _eq_traps:
         from dynameta.carriers.bipolar_options import install_option_terms
-        install_option_terms(device, region, _opt, fd_enhancement=fd_enhancement, traps=_eq_traps)
+        install_option_terms(device, region, _opt, fd_enhancement=fd_enhancement, traps=_eq_traps,
+                             **({"statistics": statistics} if _fdc else {}))
 
     # --- transient / AC charge: the d(q n)/dt time term of each continuity equation. NCharge =
     #     -q n (electron charge density), PCharge = +q p. Defined ALWAYS: a steady-state DC solve
