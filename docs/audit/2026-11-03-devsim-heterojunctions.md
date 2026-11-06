@@ -214,7 +214,10 @@ exist.
   bulk property (present in any FD region with a density gradient), not the interface.
 * 3-D DD heterostack: extra regions use the primary's mobility (no per-region field in the tuple).
 * Equilibrium-mode region setup costs minutes per region (DEVSIM symbolic differentiation of the
-  Aymerich-Humet F_1/2), so the equilibrium 2-D gate is marked `slow`.
+  Aymerich-Humet F_1/2), so the equilibrium 2-D gate is marked `slow`. **Superseded 2026-11-06:**
+  since D0 (2026-11-03, `physics_equilibrium` replays the stored simplify() result) the setup takes
+  well under a second; the gate measured 0.8 s on the Windows dev box and 2.4 s under WSL, is no
+  longer `slow`, and runs in the CI `solvers-devsim` job.
 
 ## 6. Release-note lines
 

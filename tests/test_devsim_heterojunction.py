@@ -446,7 +446,9 @@ def equilibrium_stack():
         b.teardown()
 
 
-@pytest.mark.slow       # equilibrium-region setup = DEVSIM symbolic diff of the F_1/2 closure, ~8 min/region
+# Not @slow since 2026-11-06: the "~8 min/region" DEVSIM simplify() of the F_1/2 closure is replayed from
+# its stored result since 2026-11-03 (physics_equilibrium); MEASURED 0.8 s on the Windows dev box, 2.4 s
+# under WSL (ci.yml solvers-devsim).
 def test_equilibrium_2d_stack_carries_its_built_in_potential(equilibrium_stack):
     """audit S1-9's 2-D sibling: adjacent EQUILIBRIUM semiconductors now sit in one Anderson frame, so a
     neutral bulk of region r sits at psi_bulk(r) = const - chi_r/q + eta_r kT/q (eta = (E_F - E_c)/kT by
