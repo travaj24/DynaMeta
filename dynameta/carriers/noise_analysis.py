@@ -134,6 +134,29 @@ is called, and it only READS the device (its DC operating point and models are l
          ("tunnel_ox");
        - nonlocal BTBT: hole row at the path start, electron rows of the end element's nodes with
          barycentric weights w_k ("btbt_nl").
+     THERMIONIC EMISSION (v0.15, plan 4.3.1; on by default, user decision 43). A D1a thermionic interface
+     (physics_heterojunction, a DEVSIM `fluxterm` on each continuity equation) carries two opposed,
+     independent Richardson streams J_01, J_10 at every node pair i, so P_i = A_i (J_01 + J_10)_i / q and
+            S_i = 2 q A_i (J_01 + J_10)_i |y_r0,i - y_r1,i|^2
+     -- 4kT G_int at zero bias (Nyquist for the interface element), 2qJ coth(qV/2kT) under bias (full shot
+     noise 2qJ in strong forward bias). J_01 + J_10 is the interface model <flux>_pair, written from the SAME
+     w0 / w1 strings as the flux (physics_heterojunction.thermionic_flux_and_pair); a fluxterm on a
+     continuity equation WITHOUT it makes noise_spectrum REFUSE (decision 44), as does a 'hybrid' interface
+     equation or a fluxterm on any other equation (no noise model). The node copies are DEVSIM's own pairs,
+     cross-checked against a coordinate pairing; A_i is EXACTLY the area DEVSIM's fluxterm assembly
+     multiplies the flux by -- each region's SurfaceArea (the surface_area_model) at the pair, read back
+     from DEVSIM (MEASURED against the assembled residual on 1-D, non-uniform 2-D and 3-D Kuhn, jittered and
+     exact-geometry meshes; devsim_geometry.apply_exact_geometry's overwritten 3-D SurfaceArea is what DEVSIM
+     then assembles) -- over the pairs DEVSIM actually loads (it skips a node copy where a contact or ANOTHER
+     interface solves the same equation; there SurfaceArea sums several interfaces). A geometric area DEVSIM
+     does not use would break the FDT: equal shares miss by 1.3-2.3 % on a non-uniform interface, loading the
+     skipped pairs by +151 % (tests/test_devsim_noise_thermionic.py). The two copies' areas must agree
+     (else DEVSIM's own flux does not conserve current -- e.g. the geometry correction applied to one of the
+     two regions -- and the noise refuses). The contribution is attributed to the INTERFACE
+     (NoiseSpectrum.by_interface; maps split each pair half to each node copy). The continuous-QFL interface
+     needs no source: it is the A* -> infinity limit (MEASURED S(A* x 1e6)/S_cont - 1 = 2.3e-12). Like the
+     flux, the pair rate uses the Maxwell-Boltzmann Richardson tail: exact at equilibrium, and on a
+     DEGENERATE emitting side the off-equilibrium shot magnitude is as approximate as the current itself.
      ONE kernel evaluates them all: two_point_psd(TwoPointSource, field). The built-in GR (SRH, every
      PTerm_* term including BTBT, aggregated per node exactly as before) is evaluated through it, BIT-
      IDENTICAL to the pre-v0.15 expression (the arithmetic is the same: c = +-1.0 products are exact,
@@ -183,13 +206,15 @@ MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
     5.8e-9 (validation gate F3, tests/test_devsim_noise_hooge_3d.py; circumcentric couples gave 1.125).
   G 2-D layered metasurface (FD ITO): FDT to 1.3e-11 at flat band, 3.7e-5 at +2 V accumulation (the
     FD g-factor SG is Nyquist-consistent only to O(h^2)).
+  H thermionic interfaces (v0.15): FDT to 3.0e-5 (1-D, A* x 1e-6 .. 1e2; the ssac 1 Hz floor), 5e-11 (2-D
+    non-uniform), 1.4e-11 (3-D); the isotype coth law S = 2qJ coth(qV/2kT) to 2.4e-6 at +-1 .. 8 kT/q.
 
 LIMITS: the DD source set only (no hot-carrier noise temperature, no trap-occupancy dynamics -- the
 fast-trap SRH reduction above; CHARGED trap levels are quasi-static, so the ssac response -- and with
-it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); a D1a
-THERMIONIC-EMISSION heterointerface (fluxterm) carries no noise source -- its shot noise
-2q(J_0->1 + J_1->0) is missing, so the FDT misses wherever the interface resistance matters (MEASURED
--0.69 at 1 Hz with A* x 1e-6); the continuous-QFL heterointerface is covered (FDT 5.7e-6); cylindrical volume
+it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); interface fluxes other
+than a fluxterm on a continuity equation (a 'hybrid' equation, a fluxterm on Poisson or a trap row) are
+refused, not modelled; DEVSIM itself drops the TE flux at node copies shared by two flux interfaces (gmsh
+interfaces meeting along a line), so those pairs carry neither current nor noise; cylindrical volume
 models and element-assembled currents are refused (the term mechanism's ElectronGenerationEdge
 edge_volume_model is a generation term and allowed); the FD-degenerate
 diffusion source uses mu kT/q (gate G: 3.7e-5 FDT residual in accumulation). Multi-region carrier
@@ -252,10 +277,14 @@ class NoiseSpectrum:
     """One-sided output noise spectral density at circuit node `output_node`.
 
     S [A^2/Hz for a '<V>.I' branch current, V^2/Hz for a node voltage; per m^2 in 1-D, per m of
-    depth in 2-D]; by_mechanism / by_region / by_region_mechanism split S exactly (they sum to it).
+    depth in 2-D]; by_mechanism splits S exactly (it sums to it), and so do by_region plus by_interface
+    together: S = Sum by_region + Sum_i Sum by_interface[i] = Sum by_mechanism. by_region /
+    by_region_mechanism hold the sources INSIDE the regions; by_interface {interface: {mechanism: S}}
+    the interface sources (thermionic emission te_n / te_p, v0.15; {} on a device without one).
     maps (only with maps=True): {region: {"x","y","z": node coords, mechanism: (n_f, n_nodes)
     per-node contributions, edge contributions split half to each end node, Hooge element
-    contributions split equally among the element's nodes}}."""
+    contributions split equally among the element's nodes, an interface event split half to each of
+    its two node copies}}."""
     frequencies: np.ndarray
     S: np.ndarray
     output_node: str
@@ -265,6 +294,7 @@ class NoiseSpectrum:
     by_region_mechanism: Dict[str, Dict[str, np.ndarray]]
     temperature_K: Dict[str, float]
     maps: Optional[Dict[str, Dict[str, np.ndarray]]] = field(default=None, repr=False)
+    by_interface: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -310,12 +340,17 @@ class TwoPointSource:
     rows       the affected rows (SourceRow), each vectorised over the same events.
     map_nodes  (n_events,) node of `region` each event's contribution is mapped to (maps=True);
                None -> rows[0].nodes.
+    interface  None (default): the source is a region source (by_region). An interface name: the events
+               belong to that INTERFACE (NoiseSpectrum.by_interface, not by_region; v0.15 plan 4.3.1) and
+               maps=True splits each event equally among its node rows (half to each copy of a two-row
+               interface event); `region` then only has to be one of the interface's regions.
     Per event S = q^2 2P |Sum_r c_r y_r|^2 (two_point_psd)."""
     mechanism: str
     region: str
     rate: np.ndarray
     rows: Tuple[SourceRow, ...]
     map_nodes: Optional[np.ndarray] = None
+    interface: Optional[str] = None
 
 
 def two_point_psd(source: TwoPointSource, field: Callable[[SourceRow], np.ndarray]) -> np.ndarray:
@@ -511,6 +546,173 @@ def _contact_nodes(device: str, region: str, contact: str) -> np.ndarray:
 
 
 # =====================================================================================================
+# interface (thermionic-emission) sources -- module doc, item 3 (v0.15, plan 4.3.1)
+# =====================================================================================================
+
+#: the event mechanism of a carrier flux across an interface, by continuity equation
+_TE_MECHANISM = {_EQ_N: "te_n", _EQ_P: "te_p"}
+#: DEVSIM interface-equation types that transfer a flux between the two regions' rows
+_FLUX_TYPES = ("fluxterm", "hybrid")
+
+
+def _interface_node_set(device: str, region: str, interface: str) -> np.ndarray:
+    try:
+        el = ds.get_element_node_list(device=device, region=region, interface=interface)
+    except Exception:                                           # interface not on this region
+        return np.zeros(0, dtype=np.int64)
+    return np.unique(np.asarray([i for e in el for i in e], dtype=np.int64))
+
+
+def _interface_pairs(device: str, interface: str, r0: str, r1: str):
+    """(i0, i1): DEVSIM's own node pairs of `interface` (node index in r0, in r1), in the order DEVSIM
+    reports interface-model values -- read back as the interface models node_index@r0 / node_index@r1.
+    CHECKED against an independent pairing: the two regions' interface nodes (get_element_node_list)
+    matched by coordinate (x, y, z) within 1e-12 of the device extent, which must be one-to-one and give
+    exactly DEVSIM's pairs. Any mismatch raises (the noise must never pair the wrong node copies)."""
+    idx = []
+    for k in (0, 1):
+        nm = "_NoiseIfaceNode{}".format(k)
+        ds.interface_model(device=device, interface=interface, name=nm,
+                           equation="node_index@r{}".format(k))
+        try:
+            idx.append(np.asarray(ds.get_interface_model_values(device=device, interface=interface,
+                                                                name=nm), dtype=np.float64)
+                       .astype(np.int64))
+        finally:
+            ds.delete_interface_model(device=device, interface=interface, name=nm)
+    i0, i1 = idx
+    sets = []
+    for r in (r0, r1):
+        X = np.stack([_nv(device, r, ax) for ax in ("x", "y", "z")], axis=1)
+        sets.append((_interface_node_set(device, r, interface), X))
+    (n0, X0), (n1, X1) = sets
+    tol = 1e-12 * max(float(np.ptp(X0, axis=0).max()), float(np.ptp(X1, axis=0).max()), 1e-300)
+    ok = (n0.size == n1.size == i0.size == i1.size and np.unique(i0).size == i0.size
+          and np.unique(i1).size == i1.size)
+    if ok:
+        a, b = X0[n0], X1[n1]
+        o0, o1 = np.lexsort(a.T[::-1]), np.lexsort(b.T[::-1])
+        ok = bool(np.all(np.abs(a[o0] - b[o1]) <= tol))
+        if ok:
+            partner = dict(zip(n0[o0].tolist(), n1[o1].tolist()))
+            ok = all(partner.get(int(u)) == int(v) for u, v in zip(i0, i1))
+    if not ok:
+        raise RuntimeError(
+            "noise_analysis: the node copies of interface {!r} ({!r} | {!r}) could not be paired one-to-"
+            "one by coordinate, or the coordinate pairing differs from DEVSIM's own interface pairs -- "
+            "refusing to guess which copies an interface event couples.".format(interface, r0, r1))
+    return i0, i1
+
+
+def _flux_active_pairs(device: str, interface: str, r0: str, r1: str, eq0: str, eq1: str, i0, i1):
+    """Mask of the pairs DEVSIM's fluxterm assembly actually loads (DEVSIM 2.11 InterfaceEquation.cc,
+    GetActiveNodesFromList, read in its source): a node copy is SKIPPED when a contact on the same
+    region at that node solves the same equation (RemoveContactNodesFromList), or when ANOTHER interface
+    at that node carries an equation of the same name on that region's side
+    (RemoveInterfaceNodesFromList); a pair is loaded only if both copies are active."""
+    act = np.ones(i0.size, dtype=bool)
+    for r, eq, idx in ((r0, eq0, i0), (r1, eq1, i1)):
+        bad = set()
+        for c in ds.get_contact_list(device=device):
+            if eq in ds.get_contact_equation_list(device=device, contact=c):
+                bad.update(_contact_nodes(device, r, c).tolist())
+        for oi in ds.get_interface_list(device=device):
+            if oi == interface:
+                continue
+            for k, rk in enumerate(ds.get_region_list(device=device, interface=oi)):
+                if rk != r:
+                    continue
+                names = [ds.get_interface_equation_command(device=device, interface=oi, name=e)
+                         .get("name{}".format(k))
+                         for e in ds.get_interface_equation_list(device=device, interface=oi)]
+                if eq in names:
+                    bad.update(_interface_node_set(device, r, oi).tolist())
+        if bad:
+            act &= ~np.isin(idx, np.fromiter(bad, dtype=np.int64))
+    return act
+
+
+def _interface_sources(device: str, region_names, mech) -> List[TwoPointSource]:
+    """The thermionic-emission (te_n / te_p) event sources of every carrier-flux interface joining two
+    noise regions (module doc, item 3; plan 4.3.1, user decisions 43 / 44).
+
+    For a fluxterm interface equation on a continuity equation, each node pair i carries two opposed,
+    independent Poisson streams (the Richardson currents J_01, J_10): total event rate
+    P_i = A_i (J_01 + J_10)_i / q, each event changing the r0 row by +q and the r1 row by -q (DEVSIM loads
+    the flux as +J A0 into r0 and -J A1 into r1), so S_i = 2 q A_i (J_01 + J_10)_i |y_r0,i - y_r1,i|^2 --
+    4kT G_int at zero bias, 2 q J in strong forward bias. The bookkeeping, each part checked:
+      * the pair rate is the interface model <flux model>_pair (physics_heterojunction.pair_model_name),
+        written from the SAME w0 / w1 strings as the flux (thermionic_flux_and_pair); a flux interface
+        WITHOUT it raises RuntimeError (decision 44: never silently noiseless);
+      * the node copies are DEVSIM's own pairs, cross-checked against a coordinate pairing
+        (_interface_pairs);
+      * A_i is the area DEVSIM's fluxterm assembly ACTUALLY multiplies the flux by: each region's
+        surface_area_model node model (SurfaceArea), read back from DEVSIM. It is therefore the
+        corrected area after devsim_geometry.apply_exact_geometry (which overwrites the 3-D SurfaceArea),
+        and it is NOT re-derived from the mesh (physics_traps.interface_node_area agrees with it on a
+        single interface, MEASURED, but is a different quantity at nodes shared with other interfaces).
+        A0 and A1 must agree on every loaded pair (1e-12 of max |A|), else DEVSIM's flux itself does not
+        conserve current (e.g. the geometry correction applied to one region only) and this raises;
+      * the pairs DEVSIM's assembly skips (_flux_active_pairs) carry no source (and their SurfaceArea,
+        which sums every interface of the region at a shared node, is never used).
+    A 'hybrid' flux, or a fluxterm on a non-continuity equation, has no noise model here:
+    NotImplementedError."""
+    from dynameta.carriers.physics_heterojunction import pair_model_name
+    out: List[TwoPointSource] = []
+    for iface in ds.get_interface_list(device=device):
+        regs = list(ds.get_region_list(device=device, interface=iface))
+        if len(regs) != 2 or not set(regs) <= set(region_names):
+            continue
+        r0, r1 = regs
+        for eqn in ds.get_interface_equation_list(device=device, interface=iface):
+            cmd = ds.get_interface_equation_command(device=device, interface=iface, name=eqn)
+            if cmd.get("type") not in _FLUX_TYPES:
+                continue
+            eq0, eq1 = cmd.get("name0") or eqn, cmd.get("name1") or eqn
+            mkey = _TE_MECHANISM.get(eq0)
+            if cmd.get("type") != "fluxterm" or mkey is None or eq1 != eq0:
+                raise NotImplementedError(
+                    "noise_analysis: interface {!r} carries a {!r} interface equation {!r} ({} -> {}); only "
+                    "a fluxterm between the same continuity equation of both regions has a noise model "
+                    "(the thermionic te_n / te_p source) -- refusing rather than leaving it silently "
+                    "noiseless.".format(iface, cmd.get("type"), eqn, eq0, eq1))
+            if mkey not in mech:
+                continue
+            flux = cmd.get("interface_model")
+            pair = pair_model_name(flux)
+            if pair not in ds.get_interface_model_list(device=device, interface=iface):
+                raise RuntimeError(
+                    "noise_analysis: interface {!r} carries the fluxterm {!r} on {} without a pair-rate "
+                    "model {!r} (J_01 + J_10, physics_heterojunction.thermionic_flux_and_pair); its shot "
+                    "noise would be silently missing -- refusing.".format(iface, flux, eq0, pair))
+            i0, i1 = _interface_pairs(device, iface, r0, r1)
+            sam = [str(ds.get_parameter(device=device, region=r, name="surface_area_model"))
+                   for r in regs]
+            act = _flux_active_pairs(device, iface, r0, r1, eq0, eq1, i0, i1)
+            A0, A1 = _nv(device, r0, sam[0])[i0], _nv(device, r1, sam[1])[i1]
+            scale = float(np.max(np.abs(A0[act]))) if np.any(act) else 0.0
+            if np.any(np.abs(A0[act] - A1[act]) > 1e-12 * scale):
+                raise RuntimeError(
+                    "noise_analysis: interface {!r}: DEVSIM multiplies the flux by {!r} of {!r} on one copy "
+                    "and of {!r} on the other, and they differ (max {:.3e} of {:.3e}): the interface current "
+                    "is not conserved (apply devsim_geometry.apply_exact_geometry to BOTH regions, or to "
+                    "neither) -- refusing.".format(iface, sam[0], r0, r1,
+                                                   float(np.max(np.abs(A0[act] - A1[act]))), scale))
+            pv = np.asarray(ds.get_interface_model_values(device=device, interface=iface, name=pair),
+                            dtype=np.float64)
+            if pv.size != i0.size:                              # pragma: no cover - DEVSIM invariant
+                raise RuntimeError("noise_analysis: pair-rate size mismatch on interface {!r}"
+                                   .format(iface))
+            i0a, i1a = i0[act], i1[act]
+            rate = pv[act] * A0[act] / Q_E
+            n = rate.size
+            out.append(TwoPointSource(mkey, r0, rate, (SourceRow(r0, eq0, np.ones(n), i0a),
+                                                       SourceRow(r1, eq1, -np.ones(n), i1a)),
+                                      i0a, interface=iface))
+    return out
+
+
+# =====================================================================================================
 # core
 # =====================================================================================================
 
@@ -685,9 +887,13 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     when hooge_alpha (the dimensionless Hooge parameter) is given. The default, DEFAULT_MECHANISMS,
     is every physical source: diffusion, GR and the v0.15 event keys (TWO_POINT_MECHANISMS), each
     present only where the device carries it -- keep the default for an FDT-consistent total; name a
-    subset only to split S by mechanism. A device carrying a live custom term (custom_terms) gets
-    that term's event sources (module doc, item 3), and is REFUSED if the term has no noise model or
-    an inexact Jacobian. The DC state is not modified.
+    subset only to split S by mechanism. Thermionic heterointerfaces (te_n / te_p, module doc item 3) are
+    included for every interface whose two regions are both noise regions, and reported in
+    NoiseSpectrum.by_interface (not by_region); since v0.15 they are on by default, which changes S for every
+    device with a thermionic interface (it was missing a physical source: the FDT failed). Leaving te_n / te_p
+    out of `mechanisms` drops them (and skips the pair-model check). A device carrying a live custom
+    term (custom_terms) gets that term's event sources (module doc, item 3), and is REFUSED if the term
+    has no noise model or an inexact Jacobian. The DC state is not modified.
     hooge_alpha works in 1-D, 2-D and 3-D on any simplex shape (per-element P1 couples, module doc item
     3); on a non-well-centred 2-D / 3-D mesh (gmsh, Delaunay) apply devsim_geometry.apply_exact_geometry
     after create_device, as for every other source here, or DEVSIM's own DC / adjoint solve is off.
@@ -755,9 +961,11 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                     if eq in d.eqs:
                         contact_nodes.setdefault((d.region, eq), []).append((nodes, cn))
 
-    # every event source (module doc, item 3): built-in GR + live custom terms' noise_sources
+    # every event source (module doc, item 3): built-in GR, thermionic interfaces (te_n / te_p, plan
+    # 4.3.1) + live custom terms' noise_sources
     tps = [s for d in data for s in d.two_point]
     region_names = {d.region for d in data}
+    tps.extend(_interface_sources(device, region_names, mech))
     for s in _custom_term_sources(device):
         if s.mechanism not in mech:
             continue
@@ -793,7 +1001,14 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
     present = sorted({m for d in data for m in list(d.edge_K) + list(d.hooge)}
                      | {s.mechanism for s in tps})
     nf = freqs.size
-    by_rm = {d.region: {m: np.zeros(nf) for m in present} for d in data}
+    # region totals carry the region sources; an interface source goes to by_interface instead
+    in_region = sorted({m for d in data for m in list(d.edge_K) + list(d.hooge)}
+                       | {s.mechanism for s in tps if s.interface is None})
+    by_rm = {d.region: {m: np.zeros(nf) for m in in_region} for d in data}
+    by_im: Dict[str, Dict[str, np.ndarray]] = {}
+    for s in tps:
+        if s.interface is not None:
+            by_im.setdefault(s.interface, {}).setdefault(s.mechanism, np.zeros(nf))
     map_out = None
     if maps:
         map_out = {}
@@ -818,7 +1033,7 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                 ys = {eq: _green(device, d.region, output_node, eq, d.n_nodes, fix)
                       for eq in d.eqs}
                 yall.update({(d.region, eq): y for eq, y in ys.items()})
-                for m in present:
+                for m in in_region:
                     if m in d.hooge:                    # rank-one source: one xi per element
                         y = ys[d.edge_eq[m]]
                         E, C, VT, el_nodes = d.hooge_el
@@ -853,20 +1068,31 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
 
             for s in tps:                               # every event source, ONE kernel
                 s_e = two_point_psd(s, field)
-                by_rm[s.region][s.mechanism][k] += float(np.sum(s_e))
-                if maps:
-                    np.add.at(map_out[s.region][s.mechanism][k],
-                              s.rows[0].nodes if s.map_nodes is None else s.map_nodes, s_e)
+                if s.interface is None:
+                    by_rm[s.region][s.mechanism][k] += float(np.sum(s_e))
+                    if maps:
+                        np.add.at(map_out[s.region][s.mechanism][k],
+                                  s.rows[0].nodes if s.map_nodes is None else s.map_nodes, s_e)
+                    continue
+                by_im[s.interface][s.mechanism][k] += float(np.sum(s_e))
+                if maps:                                # split equally among the event's node rows
+                    nrows = [row for row in s.rows if row.region is not None]
+                    for row in nrows:
+                        if row.region in map_out:
+                            np.add.at(map_out[row.region][s.mechanism][k], row.nodes,
+                                      s_e / len(nrows))
     finally:
         _cleanup_noise_models(device, [d.region for d in data] + field_regions, output_node)
 
-    by_m = {m: sum(by_rm[r][m] for r in by_rm) for m in present}
-    by_r = {r: sum(by_rm[r][m] for m in present) for r in by_rm}
+    by_m = {m: sum([by_rm[r][m] for r in by_rm if m in by_rm[r]]
+                   + [by_im[i][m] for i in by_im if m in by_im[i]]) for m in present}
+    by_r = {r: sum(by_rm[r][m] for m in in_region) for r in by_rm}
     S = sum(by_m.values()) if by_m else np.zeros(nf)
     return NoiseSpectrum(frequencies=freqs, S=np.asarray(S, dtype=np.float64),
                          output_node=output_node, kind=kind, by_mechanism=by_m, by_region=by_r,
                          by_region_mechanism=by_rm,
-                         temperature_K={d.region: d.T_K for d in data}, maps=map_out)
+                         temperature_K={d.region: d.T_K for d in data}, maps=map_out,
+                         by_interface=by_im)
 
 
 def terminal_noise(device: str, frequencies, *, source_name: str = "V1", v_ac: float = 1.0,
