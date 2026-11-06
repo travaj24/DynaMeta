@@ -584,19 +584,38 @@ def test_o3_weak_leak_limit_is_first_order_in_the_leak(weakleak):
     """O3: n body (N_D 1e22, L 5 um) in accumulation at 1 V; the oxide mass 0.42 -> 0.18 sweeps the leak J
     over 3.4 decades (14.6 -> 3.4e4 A/m^2) at fixed electrostatics. delta = J_sc / J_post - 1, with J_post
     the term's kernel on the solved IDEAL capacitor (the post-processor's state), must be a first-order
-    perturbation: |delta| = a J^s with s = 1 +- 0.05 (plan O3; s = 0 is no feedback, s = 2 a second-order
-    coupling). MEASURED s = 0.982, delta = -2.3e-6 .. -4.6e-3 (the sink lowers the surface quasi-Fermi
-    level, so delta < 0). The residual 1.8 % sublinearity is measured, not explained (the surface's
-    electrostatic response to the drained charge is J-dependent). OLD CODE / REFUTE: with the electron-row
-    entries removed (no feedback, the post-processor's physics) delta is round-off (<= 1e-15) at every
-    leak, so the slope gate fails."""
+    perturbation (plan O3; s = 0 is no feedback, s = 2 a second-order coupling).
+
+    THE DERIVED EXPECTATION (v0.15 follow-up, docs/audit/2026-11-06-v0.15-followups.md item 2). The leak
+    current crosses the neutral body, whose ohmic drop J R (R = int dx/(q mu_n n)) raises the electron
+    quasi-Fermi potential AND the potential of the body edge of the accumulation layer together (n = N_D is
+    pinned there) -- the surface sees the body contact biased by +J R. So to first order
+        delta_i = G_i R J_sc,i,     G_i = d ln J_post / d V_body  (ideal capacitor, gate fixed),
+    and G is MASS-DEPENDENT: it is the supply response (d ln J/d x_s = 0.77, nearly mass-independent) plus the
+    barrier response to the oxide-drop change that the accumulation layer's screening produces, which scales
+    with the WKB exponent ~ sqrt(m). MEASURED G = -5.03 /V at m = 0.42 -> -4.40 /V at 0.18, so the log-log
+    slope of |delta| vs J is 1 + d ln|G| / d ln J = 0.982, not 1: the "1.8 % sublinearity" is the parameter
+    sweep, not a nonlinearity. GATE: (a) delta_i / (G_i R J_sc,i) - 1 within |delta_i| + 3e-5 (the
+    second-order term ~ delta^2 plus R's and G's own accuracy: geometric-mean n per edge, Richardson-FD G;
+    MEASURED +1.0e-5 .. -1.35e-3); (b) the fitted slope within |delta_max| / ln(J_max/J_min) = 5.9e-4 of the
+    slope of the prediction (a ratio that drifts by at most |delta_max| over the range; MEASURED
+    0.98210 vs 0.98224). The plan's s = 1 +- 0.05 would let a 5 % mis-modelled feedback through; (b) does not.
+    OLD CODE / REFUTE: with the electron-row entries removed (no feedback, the post-processor's physics)
+    delta is round-off (<= 1e-15) at every leak (asserted), so neither (a) nor the slope can hold; an expected
+    slope of exactly 1 misses (b) by 30x (asserted)."""
     r = weakleak["sc"]
     J = np.array([p["J_post"] for p in r])
     d = np.array([p["J_sc"] / p["J_post"] - 1.0 for p in r])
     assert J.max() / J.min() > 1e3 and np.all(d < 0.0)
-    s = np.polyfit(np.log(J), np.log(-d), 1)[0]
-    assert abs(s - 1.0) <= 0.05, s
     assert abs(d[0]) < 1e-5 and abs(d[-1]) > 1e-3
+    pred = np.array([p["G"] * p["R_body"] * p["J_sc"] for p in r])
+    assert np.all(np.abs(d / pred - 1.0) <= np.abs(d) + 3e-5), d / pred - 1.0
+    s = np.polyfit(np.log(J), np.log(-d), 1)[0]
+    s_pred = np.polyfit(np.log(J), np.log(-pred), 1)[0]
+    budget = float(np.max(np.abs(d))) / math.log(J.max() / J.min())
+    assert abs(s - s_pred) <= budget, (s, s_pred, budget)
+    assert abs(s - 1.0) > 10.0 * budget                         # ADVERSARIAL: "slope exactly 1" misses
+    assert abs(s - 1.0) <= 0.05                                  # the plan's O3 statement still holds
     dn = np.array([p["J_sc"] / p["J_post"] - 1.0 for p in weakleak["nosink"]])
     assert np.all(np.abs(dn) <= 1e-14)
 
