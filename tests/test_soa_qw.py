@@ -24,8 +24,24 @@ ALPHA_I = 3000.0
 DRIVE_A = 130.0e-3
 
 
+# The DEVICE gates (3 and 8: 1500-1600 nm peak, BOA1004P-class gain) are statements about a
+# 1550-nm-band bulk active region, so they run on an explicit C-band device. Its gap is a
+# DEVICE-EFFECTIVE Varshni triple (0.816 eV, 2.9e-4 eV/K, 193 K -> Eg(298 K) = 0.7635 eV, band edge
+# ~1624 nm): the triple the library default carried until v0.14 under a wrong "Vurgaftman
+# In0.53Ga0.47As" label, kept here only as the device these gates were sized on -- NOT a material
+# law. Ga0.47In0.53As itself (the BulkGainParams() default since v0.14, Vurgaftman Eq. 4.1:
+# Eg(298 K) = 0.7380 eV) peaks at 1612.5 nm at this drive and gives 30.33 dB in gate 8 (MEASURED,
+# docs/audit/2026-11-06-v0.14-ingaas-gap.md) -- outside both windows, as a bulk InGaAs active region
+# should be. The material-agnostic gates (1, 2, 4-7) run on BOTH.
+CBAND_GAP = dict(Eg0_eV=0.816, varshni_alpha_eV_K=2.9e-4, varshni_beta_K=193.0)
+
+
 def _ref_params():
-    return BulkGainParams()
+    return BulkGainParams(**CBAND_GAP)
+
+
+BOTH_DEVICES = pytest.mark.parametrize("make", [_ref_params, BulkGainParams],
+                                       ids=["cband_ref", "default_InGaAs_LM"])
 
 
 def _peak_nu_and_Ntr(p):
@@ -39,8 +55,9 @@ def _peak_nu_and_Ntr(p):
 # --------------------------------------------------------------------------------------------------
 # gate 1 -- TRANSPARENCY (the sign trap)
 # --------------------------------------------------------------------------------------------------
-def test_gate1_transparency_and_fermi_identity():
-    p = _ref_params()
+@BOTH_DEVICES
+def test_gate1_transparency_and_fermi_identity(make):
+    p = make()
     nu_ref, N_tr = _peak_nu_and_Ntr(p)
 
     # N_tr in the dossier band
@@ -64,8 +81,9 @@ def test_gate1_transparency_and_fermi_identity():
 # --------------------------------------------------------------------------------------------------
 # gate 2 -- LOGARITHMIC GAIN LAW  g_pk = g0 ln(N/N_tr)
 # --------------------------------------------------------------------------------------------------
-def test_gate2_log_gain_fit():
-    p = _ref_params()
+@BOTH_DEVICES
+def test_gate2_log_gain_fit(make):
+    p = make()
     _nu_ref, N_tr = _peak_nu_and_Ntr(p)
     N = np.linspace(1.2, 3.0, 15) * N_tr
     g_pk = np.array([qw.gain_peak(Ni, p)[1] for Ni in N])
@@ -97,8 +115,9 @@ def test_gate3_connelly_device_gain():
 # --------------------------------------------------------------------------------------------------
 # gate 4 -- SATURATION  (output-referred -3 dB power; sub-linear in deep saturation)
 # --------------------------------------------------------------------------------------------------
-def test_gate4_saturation():
-    p = _ref_params()
+@BOTH_DEVICES
+def test_gate4_saturation(make):
+    p = make()
     N0 = qw.steady_state_N(DRIVE_A, p, P_W=0.0)
     nu_pk, _ = qw.gain_peak(N0, p)
 
@@ -117,8 +136,9 @@ def test_gate4_saturation():
 # --------------------------------------------------------------------------------------------------
 # gate 5 -- SUB-TRANSPARENCY ASE  (emission source finite/positive where net gain is absorbing)
 # --------------------------------------------------------------------------------------------------
-def test_gate5_sub_transparency_ase():
-    p = _ref_params()
+@BOTH_DEVICES
+def test_gate5_sub_transparency_ase(make):
+    p = make()
     nu_ref, N_tr = _peak_nu_and_Ntr(p)
 
     g_e = qw.emission_gain_per_m(nu_ref, 0.9 * N_tr, p)
@@ -138,9 +158,12 @@ def test_gate5_sub_transparency_ase():
 # --------------------------------------------------------------------------------------------------
 # gate 6 -- TEMPERATURE  (>10% peak-gain drop + Varshni red-shift, 298 -> 338 K at fixed I)
 # --------------------------------------------------------------------------------------------------
-def test_gate6_temperature_sensitivity():
-    p298 = replace(_ref_params(), T_K=298.0)
-    p338 = replace(_ref_params(), T_K=338.0)
+@BOTH_DEVICES
+def test_gate6_temperature_sensitivity(make):
+    # MEASURED v0.14: cband_ref drop 29.6 %, red-shift 33.1 nm (its uncited 2.9e-4/193 slope);
+    # default_InGaAs_LM drop 28.7 %, red-shift 44.8 nm (Vurgaftman dEg/dT = -0.350 meV/K at 300 K).
+    p298 = replace(make(), T_K=298.0)
+    p338 = replace(make(), T_K=338.0)
     N298 = qw.steady_state_N(DRIVE_A, p298)
     N338 = qw.steady_state_N(DRIVE_A, p338)
     nu298, g298 = qw.gain_peak(N298, p298)
@@ -156,8 +179,9 @@ def test_gate6_temperature_sensitivity():
 # --------------------------------------------------------------------------------------------------
 # gate 7 -- NOISE FIGURE  (in [4, 9] dB at the operating point, alpha_i > 0)
 # --------------------------------------------------------------------------------------------------
-def test_gate7_noise_figure():
-    p = _ref_params()
+@BOTH_DEVICES
+def test_gate7_noise_figure(make):
+    p = make()
     N0 = qw.steady_state_N(DRIVE_A, p)
     nu_pk, _ = qw.gain_peak(N0, p)
     nf_db = qw.noise_figure_db(DRIVE_A, nu_pk, L_M, ALPHA_I, p, nz=150)
