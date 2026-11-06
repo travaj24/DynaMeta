@@ -63,7 +63,7 @@ def test_closure_row_fd_activity_and_jacobian():
     form (setup_log_activity, reused -- plan 5.6); against the INDEPENDENT numpy Gauss-Legendre
     quadrature physics_bipolar_dd.fd_potential_shift the quasi-Fermi level -V_t[ln(n/n_i) + Delta(u)]
     (psi = 0) agrees to <= 1e-12 relative of V_t ln(n/n_i) + V_t Delta, u in [1e-6, 136] (budget:
-    the closed form's measured 2.7e-12 ABSOLUTE at u = 1e5, i.e. < 1e-14 relative here; MEASURED below).
+    the closed form's measured 2.7e-12 ABSOLUTE at u = 1e5, i.e. far below 1e-12 relative here).
     Jacobian: dR/dn = V_t g(u)/n against central finite differences (step 1e-6 n) to 1e-7 relative
     (truncation 1e-12, round-off ~V_t eps/1e-6 n); dR/dpsi = -1 exactly."""
     out = V.mos_qe(NA, (0.0,), fd=True, tag="row", probe=_probe_rows)[0]["probe"]
