@@ -118,6 +118,12 @@ def test_d0_refusals_fire_before_any_registration():
             _R.clear(d)
 
 
+def test_d0_temperature_advisory():
+    r = C.run_child("warn_T")
+    assert len(r["T350"]) == 1 and r["T350"][0][0] == "AdvisoryWarning" and "not at T_REF" in r["T350"][0][1]
+    assert r["Tref"] == []
+
+
 # =====================================================================================================
 # N3 detailed balance
 # =====================================================================================================

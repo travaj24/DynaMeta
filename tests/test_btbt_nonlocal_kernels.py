@@ -223,6 +223,36 @@ def test_spec_validation():
         NL.NonlocalBTBT((1e15, 1e9, 2.0), Eg_tun_eV=1.1)
 
 
+def test_walker_discards_and_counts():
+    """The walker's discard categories (module doc section 3), on crafted 1-D profiles: a band that bends
+    back before the end ("reentrant"), an end edge touching a node marked unusable (a contact: "contact"),
+    a path longer than max_length ("too_long"); a usable path is kept with the exact linear end root."""
+    ph = NL.physical_from_fitted(_spec(PHONON))
+    h = 1e-9
+    x = np.arange(12) * h
+    full = np.ones(12, bool)
+    # rises 0.3 V per node from node 2; node 4 dips: v at the path nodes is not increasing -> reentrant
+    psi = np.array([0, 0, 0.0, 0.3, 0.2, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7])
+    so = np.zeros(12, bool)
+    so[2] = True
+    p = NL.trace_paths_1d(x, psi, EG_EV, 1.0, so, full, v_star=None)
+    assert p.stats["reentrant"] == 1 and p.start.size == 0
+    # a monotone ramp: the path from node 2 ends between nodes 5 and 6 (1.12 V over 0.3 V steps)
+    psi = np.array([0, 0, 0.0, 0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7])
+    p = NL.trace_paths_1d(x, psi, EG_EV, 1.0, so, full)
+    assert p.start.tolist() == [2] and (p.a[0], p.b[0]) == (5, 6)
+    t = p.seg_L[p.seg_end][0]
+    assert abs(t - h) < 1e-24                                    # the end edge's full length is stored
+    ok = full.copy()
+    ok[6] = False                                               # node 6 is a contact
+    p = NL.trace_paths_1d(x, psi, EG_EV, 1.0, so, ok)
+    assert p.stats["contact"] == 1 and p.start.size == 0
+    p = NL.trace_paths_1d(x, psi, EG_EV, 3.5e-9, so, full)      # the path is 3.73 nm long
+    assert p.stats["too_long"] == 1 and p.start.size == 0
+    res = NL.path_rates_1d(x, psi, np.full(12, -300.0), np.full(12, -300.0), ph, 0.0, 1.0, so, full)
+    assert res["length"][0] == pytest.approx(3 * h + (EG_EV - 0.9) / 0.3 * h, rel=1e-14)
+
+
 # =====================================================================================================
 # N1 uniform field
 # =====================================================================================================
