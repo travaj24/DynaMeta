@@ -76,6 +76,16 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
     edge_volume_model (EdgeNodeVolume = L/2 to each node).
   |E| carries a 1 V/m floor, |E| = sqrt(E.E + 1 (V/m)^2), so its derivative is finite at E = 0 (and
   exp(-B/1 V/m) = 0 there); the bias it adds is < 1e-14 relative above 1e7 V/m.
+  MESH RESOLUTION (v0.15 root cause, docs/audit/2026-11-06-v0.15-btbt-presets.md). The rate falls off from the
+  field peak as exp(-k s), k = (B/E^2)|dE/ds| -- for an abrupt junction k = B/(V_bi + V_r): 1.4e9 /m for
+  SILICON_HURKX at 1.3 V, 7e9 /m for SILICON_KAO_DIRECT at 1.4 V. The quadrature (field at each edge midpoint,
+  which Gauss's law makes exact there) is second order, error ~ (k h)^2/12 on a uniform mesh around the peak
+  (MEASURED 1.02e-2 / 1.6e-3 at k h = 0.35 / 0.18), but an edge of FIXED length h_e lying on the peak leaves
+  an error ~ k h_e/2 - 1 + exp(-k h_e/2) that no refinement elsewhere removes (+11 % MEASURED for a 0.128 nm
+  edge with the Si direct set). Use uniform spacing h <= 0.35/k across the field peak for <= 1 %; in 1-D,
+  place explicit nodes there: add_1d_mesh_line with a ps that does not divide the interval leaves an odd edge
+  (MEASURED: lines at x_j - 5.5 nm and x_j with ps = 0.2, 0.1 or 0.05 nm all gave a 0.128 nm edge ending at
+  the junction line x_j, i.e. on the field peak).
 
 COUPLING: SELF-CONSISTENT (inside the coupled Newton): the generation feeds the continuity equations
 with full analytic Jacobians (the derivative models are DEVSIM symbolic diffs; checked against finite
