@@ -68,6 +68,49 @@ are unchanged, byte for byte):
   knee (qV), and a panel width of 1/4 of the SMALLER of kT and the WKB decay length 1/theta'. The
   deep tail is cut where theta rises 70 above its Fermi-level value (e^-70 ~ 4e-31 relative).
   Accuracy against an independent scipy.integrate.quad: see tests/test_tunneling_kernels.py.
+
+v0.15 (2026-11-06, plan item 4.1.1) -- the TWO-SIDED Tsu-Esaki kernel for the SELF-CONSISTENT gate-oxide
+tunnelling term (carriers/tunneling.py, coupling="self_consistent"). Additive; the functions above keep
+their results (wkb_trapezoid_exponent is now the one-layer call of wkb_layer_exponent -- the same algebra,
+re-associated: <= 4 ulp in theta, gated in tests/test_tunneling_kernels.py).
+
+* wkb_layer_exponent -- THE WKB exponent of one dielectric layer whose conduction edge is LINEAR across it
+  (a charge-free layer), for an electron of normal energy E: with A = U_a - E and B = U_b - E the barrier
+  heights at its two faces (either may be negative: a turning point inside the layer),
+
+      theta = 2 Int kappa dx = c f(A, B),   c = 4 sqrt(2 m) t / (3 hbar),
+      f = (A_+^(3/2) - B_+^(3/2)) / (A - B)
+        = (A + sqrt(AB) + B) / (sqrt A + sqrt B)          A, B > 0 (cancellation-free; A = B is the
+                                                          rectangular barrier 3 sqrt(A)/2 -> theta =
+                                                          2 sqrt(2 m A) t / hbar)
+        = A^(3/2) / (A - B)                                A > 0 >= B (the trapezoid exits inside)
+      with exact partial derivatives f_A = (sqrt A + 2 sqrt B) / (2 (sqrt A + sqrt B)^2) (both > 0), which
+      are CONTINUOUS across every turning-point switch (theta is C^1 in A and B; its second derivative
+      jumps there -- the reason the fixed grid below is fine but needs ~kT/4 panels near a kink).
+  A stack is the SUM over its layers, each with its own mass, thickness and Anderson band offset.
+
+* tsu_esaki_two_sided -- the two-sided supply integral (Tsu & Esaki, Appl. Phys. Lett. 22, 562 (1973);
+  the form re-derived in docs/audit/2026-11-06-v0.15-oxide-tunnelling.md section 2, and checked against
+  the Silvaco ATLAS manual's Eq. 3-144/3-145, a SECONDARY source -- the primary's equation number was not
+  read): with eps = E_x - E_c,s >= 0 the electron normal energy above the semiconductor conduction edge
+  at the interface, x_s = (E_Fs - E_c,s)/kT and x_g = (E_Fg - E_c,s)/kT the two Fermi levels,
+
+      J = (q m_s / (2 pi^2 hbar^3)) Int_0^inf T(eps) [N_s(eps) - N_g(eps)] d eps,
+      N_a(eps) = kT ln(1 + exp(x_a - eps/kT)) = Int_0^inf f(E_x + E_t - E_Fa) dE_t,
+
+  J > 0 for electrons flowing semiconductor -> gate. It is ZERO POINTWISE when x_s == x_g (detailed
+  balance by construction). Its shot noise, for T << 1 (the Landauer-Buttiker partition
+  f_s (1 - f_g) + f_g (1 - f_s), integrated over the transverse energy in closed form, audit note
+  section 2.3), is EXACTLY
+
+      S = 2 q J coth(Delta/2),   Delta = x_s - x_g     (per unit area)
+
+  -- 4 kT dJ/dV at equilibrium (the Nyquist value) and 2 q |J| for |Delta| >> 1. It is evaluated on a
+  FIXED energy grid (TunnelEnergyGrid: composite 12-point Gauss-Legendre panels of width step_kT * kT on
+  [0, eps_max]) so that J is a smooth (C^1) function of the state at every node of the grid, and the
+  analytic derivatives returned are the EXACT derivatives of the discrete sum (the Newton Jacobian and
+  the ssac / noise matrices are then consistent; the adaptive one-sided kernel above changes its panel
+  count with V and steps J(V) at the 1e-10 level).
 """
 
 from __future__ import annotations
@@ -80,7 +123,8 @@ from dynameta.constants import H_PLANCK, HBAR, KB, M_E, Q_E, T_REF
 
 __all__ = ["OxideLeakageParams", "fn_coefficients", "fowler_nordheim_current",
            "direct_tunneling_current", "schuegraf_hu_current", "wkb_trapezoid_exponent",
-           "tsu_esaki_current"]
+           "tsu_esaki_current", "wkb_layer_exponent", "TunnelLayer", "TunnelEnergyGrid",
+           "tunnel_energy_grid", "tsu_esaki_two_sided", "TwoSidedTE"]
 
 
 def fn_coefficients(m_ox_over_m0: float, phi_b_eV: float):
@@ -157,16 +201,44 @@ def wkb_trapezoid_exponent(eps_J, V_ox_V: float, t_ox_m: float, *, phi_b_eV: flo
     to the rectangular-barrier 2 sqrt(2 m_ox U0) t_ox / hbar)."""
     if not (V_ox_V > 0.0 and t_ox_m > 0.0):
         raise ValueError("wkb_trapezoid_exponent: V_ox_V and t_ox_m must be > 0")
-    m_ox = m_ox_over_m0 * M_E
-    qV = Q_E * float(V_ox_V)
-    F = float(V_ox_V) / float(t_ox_m)
     U0 = phi_b_eV * Q_E + np.asarray(eps_J, dtype=np.float64)
-    a = np.maximum(U0, 0.0)
-    b = np.maximum(U0 - qV, 0.0)
+    # v0.15: the one-layer call of THE layer kernel (A = U0 at the cathode face, B = U0 - qV at the anode)
+    return wkb_layer_exponent(U0, U0 - Q_E * float(V_ox_V), float(t_ox_m), m_ox_over_m0)
+
+
+def wkb_layer_exponent(A_J, B_J, t_m: float, m_over_m0: float, *, derivatives: bool = False):
+    """THE WKB exponent theta = 2 Int kappa dx [dimensionless] of ONE dielectric layer of thickness t_m
+    with a LINEAR conduction edge, for barrier heights A_J = U_a - E and B_J = U_b - E [J] above the
+    electron at the layer's two faces (module header, v0.15; either may be <= 0 -- a turning point inside
+    the layer, or the whole layer below E -> 0). derivatives=True also returns (dtheta/dA, dtheta/dB)
+    [1/J], continuous across every turning-point switch. Arrays broadcast."""
+    A = np.asarray(A_J, dtype=np.float64)
+    B = np.asarray(B_J, dtype=np.float64)
+    A, B = np.broadcast_arrays(A, B)
+    if not (t_m > 0.0 and m_over_m0 > 0.0):
+        raise ValueError("wkb_layer_exponent: t_m and m_over_m0 must be > 0")
+    c = 4.0 * np.sqrt(2.0 * m_over_m0 * M_E) * float(t_m) / (3.0 * HBAR)
+    a = np.maximum(A, 0.0)
+    b = np.maximum(B, 0.0)
     sa, sb = np.sqrt(a), np.sqrt(b)
-    trap = b > 0.0
-    diff = np.where(trap, qV * (a + sa * sb + b) / np.where(trap, sa + sb, 1.0), a * sa)
-    return 4.0 * np.sqrt(2.0 * m_ox) / (3.0 * HBAR * Q_E * F) * diff
+    both = (a > 0.0) & (b > 0.0)
+    only_a = (a > 0.0) & ~(b > 0.0)
+    only_b = (b > 0.0) & ~(a > 0.0)
+    s = np.where(both, sa + sb, 1.0)
+    dab = np.where(only_a, A - B, 1.0)                      # > 0 there (A > 0 >= B)
+    dba = np.where(only_b, B - A, 1.0)
+    f = np.where(both, (a + sa * sb + b) / s,
+                 np.where(only_a, a * sa / dab, np.where(only_b, b * sb / dba, 0.0)))
+    if not derivatives:
+        return c * f
+    s2 = s * s
+    fA = np.where(both, (sa + 2.0 * sb) / (2.0 * s2),
+                  np.where(only_a, sa * (0.5 * A - 1.5 * B) / (dab * dab),
+                           np.where(only_b, b * sb / (dba * dba), 0.0)))
+    fB = np.where(both, (sb + 2.0 * sa) / (2.0 * s2),
+                  np.where(only_a, a * sa / (dab * dab),
+                           np.where(only_b, sb * (0.5 * B - 1.5 * A) / (dba * dba), 0.0)))
+    return c * f, c * fA, c * fB
 
 
 _TE_GL_X, _TE_GL_W = np.polynomial.legendre.leggauss(12)
@@ -251,6 +323,164 @@ def tsu_esaki_current(V_ox_V, t_ox_m: float, *, phi_b_eV: float, E_F_eV: float,
             flat_out[i] = pref * _tsu_esaki_one(float(v), float(t_ox_m), phi_b_eV * Q_E,
                                                 E_F_eV * Q_E, float(m_ox_over_m0), kT)
     return out if out.ndim else float(out)
+
+
+# ---------------------------------------------------------------------------------------------------
+# v0.15: the two-sided Tsu-Esaki kernel on a FIXED energy grid (module header)
+# ---------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TunnelLayer:
+    """One dielectric layer of a tunnelling stack, semiconductor side first: its conduction-band offset
+    above the SEMICONDUCTOR conduction edge at a common potential [eV] (Anderson: chi_s - chi_layer; for
+    SiO2 on Si the Lenzlinger-Snow fit 3.1 eV), thickness [m] and tunnelling mass [m0]."""
+    offset_eV: float
+    thickness_m: float
+    m_over_m0: float
+
+    def __post_init__(self):
+        if not (self.offset_eV > 0.0 and self.thickness_m > 0.0 and self.m_over_m0 > 0.0):
+            raise ValueError("TunnelLayer: offset_eV, thickness_m and m_over_m0 must be > 0 (got {!r}, {!r}, "
+                             "{!r})".format(self.offset_eV, self.thickness_m, self.m_over_m0))
+
+
+@dataclass(frozen=True)
+class TunnelEnergyGrid:
+    """A FIXED quadrature grid in eps = E_x - E_c,s on [0, eps_max_J]: composite 12-point Gauss-Legendre
+    panels of width step_J (<= step_kT * kT). Build with tunnel_energy_grid."""
+    eps_J: np.ndarray
+    w_J: np.ndarray
+    kT_J: float
+    eps_max_J: float
+    step_J: float
+
+
+def tunnel_energy_grid(kT_J: float, eps_max_J: float, *, step_kT: float = 0.125) -> TunnelEnergyGrid:
+    """The fixed energy grid of tsu_esaki_two_sided: n = ceil(eps_max / (step_kT kT)) equal panels of the
+    12-point Gauss-Legendre rule on [0, eps_max]. step_kT = 0.25 (default) integrates the Fermi supply to
+    ~1e-15 and the C^1 turning-point kinks of theta to <= 1e-9 relative (MEASURED, K6 in
+    tests/test_tunneling_kernels.py); halve it for a tighter kink error (it falls as step^3.5)."""
+    if not (kT_J > 0.0 and eps_max_J > 0.0 and step_kT > 0.0):
+        raise ValueError("tunnel_energy_grid: kT_J, eps_max_J and step_kT must be > 0 (a T = 0 supply is not "
+                         "supported by the fixed grid; use tsu_esaki_current)")
+    n = int(np.ceil(float(eps_max_J) / (float(step_kT) * float(kT_J))))
+    if n * _TE_GL_X.size > _TE_MAX_NODES:
+        raise ValueError("tunnel_energy_grid: {} nodes exceed the {} ceiling (eps_max / (step_kT kT) too large)"
+                         .format(n * _TE_GL_X.size, _TE_MAX_NODES))
+    edges = np.linspace(0.0, float(eps_max_J), n + 1)
+    mid = 0.5 * (edges[1:] + edges[:-1])[:, None]
+    half = 0.5 * (edges[1:] - edges[:-1])[:, None]
+    return TunnelEnergyGrid(eps_J=(mid + half * _TE_GL_X).ravel(), w_J=(half * _TE_GL_W).ravel(),
+                            kT_J=float(kT_J), eps_max_J=float(eps_max_J), step_J=float(edges[1] - edges[0]))
+
+
+@dataclass(frozen=True)
+class TwoSidedTE:
+    """Result of tsu_esaki_two_sided, per interface node (arrays of shape (n,) unless stated).
+    J        net current density [A/m^2], > 0 for electrons semiconductor -> gate
+    J_fwd    the semiconductor -> gate one-way part (the N_s term) [A/m^2]; J_bwd the gate -> semiconductor
+             part (N_g); J = J_fwd - J_bwd
+    S        shot-noise PSD 2 q J coth(Delta/2) [A^2/(Hz m^2)] (module header), >= 0
+    dJ_dxs, dJ_dxg   dJ / dx_s, dJ / dx_g [A/m^2] (x = (E_F - E_c,s)/kT)
+    dJ_dd    (n, L) dJ / d d_k [A/m^2/V], d_k = psi_s - psi(face k), k = 1..L (face L = the gate face)
+    tail     integrand at the grid's top node times kT, over J_fwd + J_bwd (truncation diagnostic)"""
+    J: np.ndarray
+    J_fwd: np.ndarray
+    J_bwd: np.ndarray
+    S: np.ndarray
+    dJ_dxs: np.ndarray
+    dJ_dxg: np.ndarray
+    dJ_dd: np.ndarray
+    tail: np.ndarray
+
+
+def _softplus(z):
+    return np.logaddexp(0.0, z)
+
+
+def _logistic(z):
+    return np.exp(-np.logaddexp(0.0, -z))
+
+
+_NOISE_SMALL_DELTA = 1e-4     # |Delta| below this: (N_s - N_g) coth(Delta/2) by its O(Delta^2) series
+
+
+def tsu_esaki_two_sided(grid: TunnelEnergyGrid, x_s, x_g, d_V, layers, *, m_supply_over_m0: float = 1.0,
+                        chunk_nodes: int = 2_000_000) -> TwoSidedTE:
+    """Two-sided Tsu-Esaki current through a dielectric STACK on the fixed `grid` (module header, v0.15),
+    vectorised over n interface nodes, with the EXACT derivatives of the discrete sum.
+
+    x_s, x_g   (n,) (E_Fs - E_c,s)/kT and (E_Fg - E_c,s)/kT at each node (E_c,s: the semiconductor
+               conduction edge at the interface).
+    d_V        (n, L) psi_s - psi(face k), k = 1..L: the potential drop from the interface to the far face
+               of each layer (face L touches the gate). Layer j's conduction edge relative to E_c,s is
+               then q d_j + offset_j at its near face (d_0 = 0) and q d_(j+1) + offset_j at its far face.
+    layers     sequence of L TunnelLayer, semiconductor side first.
+    m_supply_over_m0  the transverse (supply) mass of the prefactor q m kT/(2 pi^2 hbar^3) -- one mass for
+               BOTH sides, as Tsu-Esaki's conserved transverse momentum requires (detailed balance).
+    The integral starts at eps = 0 (the semiconductor band bottom): the gate's band bottom must lie below
+    E_c,s (the caller checks; a metal gate's does). kT is the grid's."""
+    layers = tuple(layers)
+    L = len(layers)
+    if L < 1 or not all(isinstance(l, TunnelLayer) for l in layers):
+        raise ValueError("tsu_esaki_two_sided: layers must be a non-empty sequence of TunnelLayer")
+    xs = np.atleast_1d(np.asarray(x_s, dtype=np.float64))
+    xg = np.atleast_1d(np.asarray(x_g, dtype=np.float64))
+    d = np.asarray(d_V, dtype=np.float64).reshape(xs.size, L)
+    if xg.shape != xs.shape:
+        raise ValueError("tsu_esaki_two_sided: x_s and x_g must have the same shape")
+    kT = grid.kT_J
+    pref = Q_E * float(m_supply_over_m0) * M_E / (2.0 * np.pi ** 2 * HBAR ** 3)
+    e = grid.eps_J[None, :]
+    w = grid.w_J[None, :]
+    n = xs.size
+    J, Jf, Jb, S = (np.zeros(n) for _ in range(4))
+    dxs, dxg, tail = np.zeros(n), np.zeros(n), np.zeros(n)
+    dd = np.zeros((n, L))
+    step = max(1, int(chunk_nodes // max(e.size, 1)))
+    for lo in range(0, n, step):
+        sl = slice(lo, min(n, lo + step))
+        a_s = xs[sl, None] - e / kT
+        a_g = xg[sl, None] - e / kT
+        theta = np.zeros((a_s.shape[0], e.size))
+        dth = []                                               # dtheta/d d_k, k = 1..L
+        prev_fb = None
+        for j, lay in enumerate(layers):
+            off = lay.offset_eV * Q_E
+            Ua = off + (Q_E * d[sl, j - 1, None] if j > 0 else 0.0)
+            Ub = off + Q_E * d[sl, j, None]
+            th, tA, tB = wkb_layer_exponent(Ua - e, Ub - e, lay.thickness_m, lay.m_over_m0, derivatives=True)
+            theta += th
+            if j > 0:                                          # face j: far face of j-1, near face of j
+                dth.append(Q_E * (prev_fb + tA))
+            prev_fb = tB
+        dth.append(Q_E * prev_fb)                              # face L (the gate face)
+        with np.errstate(under="ignore"):
+            T = np.exp(-theta)
+        Ns = kT * _softplus(a_s)
+        Ng = kT * _softplus(a_g)
+        diff = Ns - Ng
+        wT = w * T
+        J[sl] = pref * np.sum(wT * diff, axis=1)
+        Jf[sl] = pref * np.sum(wT * Ns, axis=1)
+        Jb[sl] = pref * np.sum(wT * Ng, axis=1)
+        dxs[sl] = pref * np.sum(wT * kT * _logistic(a_s), axis=1)
+        dxg[sl] = -pref * np.sum(wT * kT * _logistic(a_g), axis=1)
+        for k in range(L):
+            dd[sl, k] = -pref * np.sum(wT * dth[k] * diff, axis=1)
+        delta = xs[sl] - xg[sl]
+        small = np.abs(delta) < _NOISE_SMALL_DELTA
+        big = ~small
+        Sv = np.zeros(delta.size)
+        Sv[big] = 2.0 * Q_E * J[sl][big] / np.tanh(0.5 * delta[big])
+        if np.any(small):                                      # (N_s - N_g) coth(D/2) -> 2 kT sigma(a_s - D/2)
+            mid = a_s[small] - 0.5 * delta[small, None]
+            Sv[small] = 2.0 * Q_E * pref * np.sum(wT[small] * 2.0 * kT * _logistic(mid), axis=1)
+        S[sl] = Sv
+        top = T[:, -1] * (Ns[:, -1] + Ng[:, -1]) * kT
+        tot = np.sum(wT * (Ns + Ng), axis=1)
+        tail[sl] = np.where(tot > 0.0, top / np.where(tot > 0.0, tot, 1.0), 0.0)
+    return TwoSidedTE(J=J, J_fwd=Jf, J_bwd=Jb, S=S, dJ_dxs=dxs, dJ_dxg=dxg, dJ_dd=dd, tail=tail)
 
 @dataclass(frozen=True)
 class OxideLeakageParams:
