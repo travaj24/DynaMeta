@@ -490,7 +490,9 @@ def _l1_currents(h):
             for s_ in np.linspace(v0, V, 11)[1:]:
                 ds.set_parameter(device=dev, name="pc_bias", value=float(s_))
                 _solve(1e13, 1e-10)
-            i1[V] = btbt_generation_current(dev, "b")
+            # a convergence study: at h = 2 nm, V = 0 the resolution advisory fires (MEASURED estimate +2.3 % of
+            # the gross rate); it is gated in tests/test_devsim_btbt_resolution.py, not here
+            i1[V] = btbt_generation_current(dev, "b", check_resolution=False)
     finally:
         _wipe(dev)
     return i2, i1

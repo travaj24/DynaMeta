@@ -19,8 +19,10 @@ flat-band ITO has uniform n, so the FD g-factor cancels -- gate G; the heterosta
 Nyquist-exact, the thermionic one included), so the residual is the round-off of two independent
 factorizations; 1e-9 is the plan's W2 tolerance (gate G recorded 1.3e-11). MEASURED: <= 7.8e-12 (modulator),
 <= 2.5e-12 (heterostack). W5: a fresh builder solved at 1 V (no circuit at all). W3: S_cell = period_y S_2D
-exactly; the independent 3-D check of P2 W3 is NOT run here (a 3-D tensor build of this stack is a nightly-
-size job) -- the scaling's exactness argument is in the method's docstring.
+exactly; the independent 3-D check of P2 W3 is NOT run (v0.15 follow-up, audit 2026-11-06-v0.15-followups item
+4: the modulator's 3-D twin is not y-invariant -- a 175 nm square patch in a 370 nm cell -- so S_3D != W S_2D by
+construction, and Devsim3DEquilibrium has no circuit-driven gate) -- the scaling's exactness argument is in the
+method's docstring. W7 (nightly, @slow): the 0 / +1 / 0 sequence on an extended-precision builder.
 
 OLD CODE (72e0fbd, MEASURED: this file + the child against `git archive 72e0fbd`): 11 of 11 fail (2 failed,
 9 errors) -- every child dies with ImportError (no OhmicContactNoiseError / noise_spectrum), and the two
@@ -147,6 +149,26 @@ def test_w4_sequence_0_1_0_gives_a_bitwise_repeat_and_leaves_the_state(runs):
     assert runs["wrap_ref"]["w2"]["digest"] == runs["wrap_ref"]["w0"]["digest"]
     assert runs["wrap_ref"]["restored"]
     assert runs["wrap_ref"]["circuit_after"] == {"circuit:V1.I": [0.0], "circuit:vac": [0.0]}
+
+
+@pytest.mark.slow
+def test_w7_extended_precision_sequence_0_1_0_repeats_bitwise():
+    """W7 (P2; v0.15 follow-up, nightly: MEASURED 4.1-4.3 min on the loaded Windows dev box -- the extended
+    build + solve ~86 s, the +1 V call's extended re-settle ramp ~130 s). seq_ref's 0 / +1 / 0 V sequence (bottom
+    gate +0.5 V, so the 0 V state is not the exactly representable flat band) on a builder with
+    extended_precision=True: the third result is bitwise the first and the second differs. Not implied by W4:
+    the method's restore writes the double-rounded state back into a device whose Newton runs in 128 bits, so
+    the third call's re-settle starts from a different representation than the first's (it still lands on the
+    same bits: MEASURED). The only warnings are the extended-precision 'noise solve buys nothing' advisory, one
+    per frequency per call (P2 W7: the method adds none of its own), and none at the build. Sensitivity: the
+    +1 V digest differs from the 0 V one, and the device really is extended (both asserted)."""
+    r = _run(("seq_xp",))["seq_xp"]
+    assert r["extended"] == [True, True]
+    assert r["seq"][2] == r["seq"][0] and r["seq"][1] != r["seq"][0]
+    assert r["warnings_build"] == []
+    calls = r["warnings_calls"]
+    assert len(calls) == 3 * 4 and all(c == "AdvisoryWarning" and "extended_precision: a 'noise' solve" in m
+                                       for c, m in calls), calls
 
 
 def test_w4_a_fresh_process_reproduces_the_second_call(runs):

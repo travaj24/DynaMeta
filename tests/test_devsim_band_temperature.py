@@ -481,3 +481,15 @@ def test_3d_from_design_reads_chi_and_n_i_through_the_band_model():
                                                    - eg_t / (2 * thermal_voltage(T)))
     assert spec.n_i_m3 == pytest.approx(expect, rel=1e-13)
     assert abs(spec.n_i_m3 / ni300 - 1.0) > 0.9                  # really moved (n_i(250)/n_i(300) ~ 0.03)
+
+
+def test_validation_cli_runs_the_temperature_section():
+    """v0.15 follow-up (P3 3.6): validation/devsim_heterojunction.py carries the --temperature section (this file,
+    every marker selected), and its no-flag run -- the one validation.run_all executes -- includes it."""
+    import os
+    from validation import devsim_heterojunction as VH
+    only = VH.pytest_files(["devsim_heterojunction", "--temperature"])
+    default = VH.pytest_files(["devsim_heterojunction"])
+    assert [os.path.basename(p) for p in only] == [os.path.basename(__file__)]
+    assert [os.path.basename(p) for p in default] == ["test_devsim_heterojunction.py", os.path.basename(__file__)]
+    assert all(os.path.isfile(p) for p in default)
