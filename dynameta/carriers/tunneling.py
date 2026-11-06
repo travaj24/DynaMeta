@@ -192,7 +192,7 @@ from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["BTBTParams", "SILICON_HURKX", "SILICON_KAO_DIRECT", "SILICON_KAO_INDIRECT", "GERMANIUM_KAO_DIRECT",
            "GERMANIUM_KAO_INDIRECT", "GERMANIUM_KAO", "IN053GA047AS_KANE", "BTBT_PROCESSES",
-           "BTBT_VERIFICATIONS", "kane_direct_params", "btbt_at_temperature", "btbt_for_material",
+           "BTBT_VERIFICATIONS", "BTBTDoubleCountError", "kane_direct_params", "btbt_at_temperature", "btbt_for_material",
            "btbt_rate_expr", "hurkx_d_expr", "setup_btbt", "btbt_generation_current",
            "OxideTunnelingParams", "oxide_tunneling_current", "TUNNEL_MODELS", "TUNNEL_COUPLINGS",
            "DielectricBarrier", "SIO2_ON_SI", "setup_oxide_tunneling", "OxideTunnelTerm",
@@ -205,6 +205,11 @@ __all__ = ["BTBTParams", "SILICON_HURKX", "SILICON_KAO_DIRECT", "SILICON_KAO_IND
 # ------------------------------------------------------------------------------------------------
 
 BTBT_PROCESSES = ("direct", "phonon_assisted")
+
+
+class BTBTDoubleCountError(ValueError):
+    """The local (setup_btbt) and the nonlocal (btbt_nonlocal.setup_btbt_nonlocal) BTBT models were asked for
+    the same region: both would count the same tunnelling. Each setup refuses the other's region."""
 BTBT_VERIFICATIONS = ("primary", "secondary", "computed")
 
 
@@ -495,6 +500,12 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
 
     sets, indexed = _btbt_sets(params, "setup_btbt")
     _require_bipolar(device, region)
+    from dynameta.carriers.btbt_nonlocal import has_live_nonlocal
+    if has_live_nonlocal(device, region):
+        raise BTBTDoubleCountError(
+            "setup_btbt: region {!r} of {!r} already carries a live NONLOCAL BTBT term "
+            "(btbt_nonlocal.setup_btbt_nonlocal); the local model would count the same tunnelling twice."
+            .format(region, device))
     # v0.14 row 3.2-9 (decision D-H4), kept by v0.15 decision 20: A, B are numbers at the set's quoted
     # temperature and are NOT rescaled here; say so instead of running silently.
     vt = float(ds.get_parameter(device=device, region=region, name="V_t"))
