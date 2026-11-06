@@ -511,6 +511,8 @@ jobs:
     #   ~55 s serial on the Windows dev box (11 tests, each < 15 s; one child process), 2026-11-06.
     #   The tests/conftest.py hook it pairs with checks every raw devsim.solve(type='dc') of THIS job too
     #   (cost measured in docs/audit/2026-11-06-v0.15-tolerance-wellposedness.md).
+    # + tests/test_devsim_noise_thermionic.py (v0.15 thermionic-interface shot noise, te_n / te_p, plan 4.3.1):
+    #   ~33 s serial on the Windows dev box (14 tests; 1-D / 2-D / 3-D in-memory heterostacks, no test above 7 s).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -544,7 +546,7 @@ jobs:
             tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py tests/test_custom_terms.py \
             tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py \
             tests/test_extended_precision_design.py tests/test_iii_v_presets_devsim.py tests/test_term_bookkeeping_v2.py \
-            tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py
+            tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
