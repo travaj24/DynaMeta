@@ -493,8 +493,8 @@ jobs:
     #   source): 46 s serial together on the Windows dev box (26 tests; the defaults-off pair of child
     #   processes is 16 s of it).
     # + tests/test_devsim_oxide_tunneling_sc.py (v0.15 self-consistent gate-oxide tunnelling, every device
-    #   case in a child process -- one DEVSIM circuit per child): ~2.5 min serial on the Windows dev box
-    #   (30 tests, 25 children of 2-18 s; the gmsh-mesh caveat gate needs gmsh, installed here).
+    #   case in a child process -- one DEVSIM circuit per child): 3.2 min serial on the Windows dev box
+    #   (36 tests, 37 children of 1-18 s; the gmsh-mesh caveat gate needs gmsh, installed here).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
