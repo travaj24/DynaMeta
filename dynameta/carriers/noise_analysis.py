@@ -181,8 +181,13 @@ is called, and it only READS the device (its DC operating point and models are l
      mechanism is requested, like the pair kinds. Every kind -- pair, single-carrier, custom -- is read
      from the ONE inventory physics_bipolar_dd.recombination_terms (its "custom" kind lists the live
      custom terms; tests/test_term_bookkeeping_v2.py, tests/test_custom_terms.py). A row on a CIRCUIT
-     contact's node is supported for the continuity equations (the item-4 fix-up); for any other
-     equation it is refused.
+     contact's node is supported for the continuity equations (the item-4 fix-up) and for any equation
+     the contact does not replace (no contact equation of that name: a kinetic trap row keeps its bulk
+     row there, so DEVSIM's adjoint is valid on it); a row of any other equation the contact replaces is
+     refused. KINETIC TRAPS (physics_traps dynamic=True, v0.15 K3): each level / interface bin is two such
+     single-carrier sources, electron exchange (P_n, rows electron -1 / trap +1, "trap_n") and hole
+     exchange (P_p, rows hole +1 / trap -1, "trap_p"): S = q^2 V [2 P_n |y_t - y_n|^2 + 2 P_p |y_p - y_t|^2]
+     -- with them the FDT holds at every frequency for a charged level (tests/test_trap_kinetics.py).
    * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
      serves 1-D (per unit area: A^2/Hz/m^2, like ssac's S/m^2), 2-D (per unit depth: A^2/Hz/m) and
      3-D (absolute A^2/Hz).
@@ -227,9 +232,9 @@ MEASURED (validation/devsim_noise.py; tests/test_devsim_noise.py):
   H thermionic interfaces (v0.15): FDT to 3.0e-5 (1-D, A* x 1e-6 .. 1e2; the ssac 1 Hz floor), 5e-11 (2-D
     non-uniform), 1.4e-11 (3-D); the isotype coth law S = 2qJ coth(qV/2kT) to 2.4e-6 at +-1 .. 8 kT/q.
 
-LIMITS: the DD source set only (no hot-carrier noise temperature, no trap-occupancy dynamics -- the
-fast-trap SRH reduction above; CHARGED trap levels are quasi-static, so the ssac response -- and with
-it the FDT -- holds only in the quasi-static regime, MEASURED 5.6e-3 at 100 kHz); interface fluxes other
+LIMITS: the DD source set only (no hot-carrier noise temperature); a QUASI-STATIC charged trap level
+(physics_traps default) makes the ssac response -- and with it the FDT -- hold only in the quasi-static
+regime (MEASURED 5.6e-3 at 100 kHz; an AdvisoryWarning says so): use dynamic=True; interface fluxes other
 than a fluxterm on a continuity equation (a 'hybrid' equation, a fluxterm on Poisson or a trap row) are
 refused, not modelled; DEVSIM itself drops the TE flux at node copies shared by two flux interfaces (gmsh
 interfaces meeting along a line), so those pairs carry neither current nor noise; cylindrical volume
@@ -555,7 +560,15 @@ def _single_carrier_sources(device: str, region: str, eqs, mechanisms) -> List[T
     one TwoPointSource per term whose mechanism is requested: P_i = NodeVolume_i x pair rate, rows
     (carrier row, -1 electron / +1 hole) and, when declared, (partner row, partner coeff) at the same
     node. Refuses a term without a pair rate (silently noiseless otherwise) and one whose carrier or
-    partner equation the region does not carry."""
+    partner equation the region does not carry.
+
+    CONTACT NODES (v0.15 K3). Where a contact REPLACES the carrier row but not the partner row (a kinetic
+    trap at an ohmic contact node: n, p are Dirichlet there, Poisson too), the event is invisible to the DC
+    and small-signal system -- the term's linearization sits only in rows the contact replaced, and the
+    partner row is decoupled (its adjoint is 0) -- so it carries no source there (P_i = 0). Counting it
+    would read the electron through the circuit fix-up as a terminal current: MEASURED +2.3e-3 on the FDT
+    of the gate-B diode with a kinetic charged level, exactly the two contact-node contributions. A term
+    WITHOUT a partner keeps its contact-node events (4.0.2's convention, tests/test_term_bookkeeping_v2.py)."""
     from dynameta.carriers.physics_bipolar_dd import recombination_terms
     terms = recombination_terms(device, region)
     out: List[TwoPointSource] = []
@@ -578,6 +591,11 @@ def _single_carrier_sources(device: str, region: str, eqs, mechanisms) -> List[T
                         "which the region does not carry (or is not a noise row) -- refusing.".format(
                             name, region, eq))
             P = _nv(device, region, t.pair) * _nv(device, region, "NodeVolume")
+            if t.partner_equation is not None:
+                for c in ds.get_contact_list(device=device):
+                    ceqs = ds.get_contact_equation_list(device=device, contact=c)
+                    if t.own_equation in ceqs and t.partner_equation not in ceqs:
+                        P[_contact_nodes(device, region, c)] = 0.0
             idx = np.arange(P.size, dtype=np.int64)
             rows = [SourceRow(region, t.own_equation, np.full(P.size, t.own_coeff), idx)]
             if t.partner_equation is not None:
@@ -1116,16 +1134,23 @@ def noise_spectrum(device: str, frequencies, *, output_node: str = "V1.I",
                 continue
             if (row.region, row.equation) in tp_fixed:
                 continue
-            if row.region not in circ_nodes:
-                circ_nodes[row.region] = set()
+            key = (row.region, row.equation)
+            if key not in circ_nodes:
+                # only a contact that REPLACES this equation's row (it carries a contact equation of that
+                # name) moves the row off the node; a node-only equation without a contact equation (a
+                # kinetic trap row) keeps its bulk row there, so DEVSIM's adjoint field is valid on it
+                # (v0.15 K3; the trap-row diagonal is nonzero at contact nodes, tests/test_trap_kinetics.py)
+                circ_nodes[key] = set()
                 for c in circ:
-                    circ_nodes[row.region].update(_contact_nodes(device, row.region, c).tolist())
+                    if row.equation in ds.get_contact_equation_list(device=device, contact=c):
+                        circ_nodes[key].update(_contact_nodes(device, row.region, c).tolist())
             used = np.asarray(row.nodes)[np.asarray(row.coeff) != 0.0]
-            if circ_nodes[row.region].intersection(used.tolist()):
+            if circ_nodes[key].intersection(used.tolist()):
                 raise NotImplementedError(
                     "noise_spectrum: an event source row of {} on region {!r} sits on a circuit-"
-                    "contact node; only the continuity equations have the contact fix-up (module "
-                    "doc, item 4).".format(row.equation, row.region))
+                    "contact node whose row of that equation the contact replaces; only the continuity "
+                    "equations have the contact fix-up (module doc, item 4).".format(row.equation,
+                                                                                    row.region))
     field_regions = sorted({row.region for s in tps for row in s.rows if row.region is not None}
                            - region_names)
 
