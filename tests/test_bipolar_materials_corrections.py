@@ -1,7 +1,7 @@
 """v0.14.0 corrections to the shipped bipolar material presets and the incomplete-ionization model
 (consolidated plan rows 3.2-4, 3.2-5, 3.2-11; audit note docs/audit/2026-11-06-v0.14-materials-
 corrections.md). Pure numpy -- no DEVSIM -- so these run on every `test` leg; the DEVSIM-solved twins
-(relaxed slabs, the per-region advisories) live in tests/test_bipolar_recombination_bgn_ionization.py.
+(relaxed slabs, the per-region UnreliableResultWarnings) live in tests/test_bipolar_recombination_bgn_ionization.py.
 
 EVERY ORACLE IS INDEPENDENT OF THE CODE UNDER TEST: literature constants are re-typed below in the
 units and with the equation/table numbers of the primary sources; freeze-out roots are solved with

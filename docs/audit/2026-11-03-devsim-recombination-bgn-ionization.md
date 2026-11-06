@@ -241,7 +241,7 @@ Other regression checks: `tests/test_devsim_smoke.py`, `test_stacked3d_spec.py`,
 5. **Pearson-Bardeen alpha**: no default value is shipped (0 = off). Since 2026-11-06 an alpha that
    zeroes the ionization energy below 1e17 cm^-3 raises `IonizationUnitsError` (the eV*cm vs eV*m
    trap), `IonizationModel.pearson_bardeen(..., alpha_D_eVcm=...)` converts a literature value, and
-   regions above the Mott density get an advisory.
+   regions above the Mott density emit an `UnreliableResultWarning`.
 
 ## Merge notes for the integrator
 

@@ -498,11 +498,11 @@ def test_del_alamo_on_p_type_and_compensated_slabs_uses_donors_only(ND, NA):
     minority carrier kicked 3x -- relaxes to n p = n_i^2 exp(dEg(N_D)/kT) to 1e-12 (R27-a measured
     2.2e-16): p+ 1e19 cm^-3 -> dEg = 0, n p = n_i^2; compensated N_D = 1e19 / N_A = 1e18 -> 49.73 meV,
     n_ie^2/n_i^2 = 6.845. PRE-FIX (N_D + N_A basis) these were 6.845 (5.8 off) and 7.334 (+7.1 %).
-    Building the region emits exactly ONE AdvisoryWarning naming it (N_A > N_ref = 7e17: the fit has
+    Building the region emits exactly ONE UnreliableResultWarning naming it (N_A > N_ref = 7e17: the fit has
     no basis there). ADVERSARIAL: the pre-fix answer is asserted to be off by far more than 1e-12."""
     import warnings
     from dynameta.carriers.bipolar_options import BGN_SI_DEL_ALAMO_1985, BipolarOptions
-    from dynameta.warning_types import AdvisoryWarning
+    from dynameta.warning_types import UnreliableResultWarning
     dev = "r27dap" if ND == 0.0 else "r27dac"
     minority = "Electrons" if ND < NA else "Holes"
     try:
@@ -522,7 +522,7 @@ def test_del_alamo_on_p_type_and_compensated_slabs_uses_donors_only(ND, NA):
     assert np.max(np.abs(n * p / nie2 - 1.0)) < 1e-12
     pre_fix = NI * NI * math.exp(_dEg_del_alamo((ND + NA) / 1e6) / VT300)
     assert abs(pre_fix / nie2 - 1.0) > 0.07                        # adversarial: the old basis fails
-    assert [type(w.message) for w in caught] == [AdvisoryWarning], [str(w.message)[:100] for w in caught]
+    assert [type(w.message) for w in caught] == [UnreliableResultWarning],         [str(w.message)[:100] for w in caught]
     assert "'bulk'" in str(caught[0].message) and "N_D only" in str(caught[0].message)
 
 
@@ -614,15 +614,15 @@ def test_acceptor_freeze_out_p_type():
 
 
 @pytest.mark.parametrize("N,expect", [(1e25, 1), (-1e25, 1), (1e24, 0)])
-def test_mott_advisory_once_per_region_above_the_mott_density(N, expect):
+def test_mott_warning_once_per_region_above_the_mott_density(N, expect):
     """GATE 3.2-11c (DEVSIM half; P2 item 4 I3). The legacy single-level model has no Mott transition:
     building a region doped above the model's Mott density (Si:P 3.74e18, Si:B proxy 4.5e18 cm^-3) with
-    incomplete ionization on emits exactly ONE AdvisoryWarning naming the region; 1e18 cm^-3 is silent.
-    Pre-fix no advisory existed (the 1e19 regions built silently at 39 % ionized). The occupancy itself
+    incomplete ionization on emits exactly ONE UnreliableResultWarning naming the region; 1e18 cm^-3 is silent.
+    Pre-fix no warning existed (the 1e19 regions built silently at 39 % ionized). The occupancy itself
     is unchanged (the R27-d/e gates and the call-log digest are untouched)."""
     import warnings
     from dynameta.carriers.bipolar_options import BipolarOptions, IONIZATION_SI_P_B
-    from dynameta.warning_types import AdvisoryWarning
+    from dynameta.warning_types import UnreliableResultWarning
     dev = "mott"
     try:
         with warnings.catch_warnings(record=True) as caught:
@@ -631,7 +631,7 @@ def test_mott_advisory_once_per_region_above_the_mott_density(N, expect):
                     options=BipolarOptions(ionization=IONIZATION_SI_P_B))
     finally:
         _drop(dev)
-    assert [type(w.message) for w in caught] == [AdvisoryWarning] * expect, \
+    assert [type(w.message) for w in caught] == [UnreliableResultWarning] * expect, \
         [str(w.message)[:100] for w in caught]
     if expect:
         assert "'bulk'" in str(caught[0].message) and "Mott" in str(caught[0].message)
@@ -804,12 +804,12 @@ def test_layered_builder_threads_options_into_the_region():
         except Exception:
             pass
         _R.clear(b.device)
-    # ONE warning, the Mott advisory (v0.14 row 3.2-11): with incomplete ionization the 1e19 cm^-3 bar
+    # ONE warning, the Mott-density UnreliableResultWarning (v0.14 row 3.2-11): with incomplete ionization the 1e19 cm^-3 bar
     # holds only n0 = 3.9e24 (39 % -- the no-Mott limit, above Si:P's 3.74e18) -- so u = n0/N_c = 0.14
     # and an FD built-in correction of 0.047 V_t, just under the BGN+FD double-counting advisory
-    # (0.05 V_t; that one is gated separately below). n-type only: no del Alamo basis advisory.
+    # (0.05 V_t; that one is gated separately below). n-type only: no del Alamo basis warning.
     assert [(w.category.__name__, "Mott" in str(w.message), "'si'" in str(w.message))
-            for w in caught] == [("AdvisoryWarning", True, True)], [str(w.message)[:120] for w in caught]
+            for w in caught] == [("UnreliableResultWarning", True, True)], [str(w.message)[:120] for w in caught]
     assert {"UAuger", "n_ie", "IonizedNetDoping", "EquilibriumPotential", "SeedPsiShift"} <= models
     assert np.max(np.abs(n * p / nie ** 2 - 1.0)) < 1e-9
     assert "si" in cf.regions
