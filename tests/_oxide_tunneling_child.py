@@ -870,9 +870,13 @@ def sc_weakleak(opts):
     """O3: the weak-leak limit. A low-doped n body (N_D 1e22, L 5 um) in accumulation; the oxide mass is
     swept so J spans decades at FIXED electrostatics. For each mass: the term's kernel on the solved IDEAL
     capacitor (term inactive: the post-processor's state) J_post, then the self-consistent solve J_sc.
-    variant "nosink": the electron-row entries are zeroed (no feedback) -- the refutation."""
+    variant "nosink": the electron-row entries are zeroed (no feedback) -- the refutation.
+    For the FIRST-ORDER PREDICTION (variant "sc"; v0.15 follow-up): on the ideal capacitor, G = d ln J_post /
+    d V_body by central differences (+-1e-4 and +-2e-4 V, Richardson) and the body's series resistance per
+    area R = Sum_edges h / (q mu_n sqrt(n0 n1)) of the solved state."""
     from dynameta.carriers import custom_terms as CT
     from dynameta.carriers.tunneling import DielectricBarrier
+    ds = _ds()
     V = float(opts.get("V", 1.0))
     out = []
     for k, m in enumerate(opts.get("masses", [0.42, 0.36, 0.30, 0.25, 0.21, 0.18])):
@@ -894,12 +898,26 @@ def sc_weakleak(opts):
         term.active = False
         d.goto(V)
         solve(re_=1e-14)
-        J_post = float(term.state(d.name)["te"].J[0])
+        st0 = term.state(d.name)
+        J_post = float(st0["te"].J[0])
+        extra = {}
+        if opts.get("variant") != "nosink":
+            x, n = d.nv("semi", "x"), d.nv("semi", "Electrons")
+            extra["R_body"] = float(np.sum(np.diff(x) / (Q * MU_N * np.sqrt(n[1:] * n[:-1]))))
+            lnJ = {}
+            for dv in (1e-4, -1e-4, 2e-4, -2e-4):
+                ds.set_parameter(device=d.name, name="body_bias", value=dv)
+                solve(re_=1e-14)
+                lnJ[dv] = math.log(float(term.state(d.name)["te"].J[0]))
+            ds.set_parameter(device=d.name, name="body_bias", value=0.0)
+            solve(re_=1e-14)
+            g1, g2 = (lnJ[1e-4] - lnJ[-1e-4]) / 2e-4, (lnJ[2e-4] - lnJ[-2e-4]) / 4e-4
+            extra.update(G=g1 + (g1 - g2) / 3.0, G_h=g1, dJdxs_post=float(st0["te"].dJ_dxs[0]))
         term.active = True
         solve(re_=1e-14)
         st = term.state(d.name)
-        out.append({"m": m, "J_post": J_post, "J_sc": float(st["te"].J[0]), "x_s": float(st["x_s"][0]),
-                    "dJdxs": float(st["te"].dJ_dxs[0])})
+        out.append(dict({"m": m, "J_post": J_post, "J_sc": float(st["te"].J[0]), "x_s": float(st["x_s"][0]),
+                         "dJdxs": float(st["te"].dJ_dxs[0])}, **extra))
         d.close()
     return out
 
