@@ -419,6 +419,16 @@ and linear in gamma.
   Accumulation and majority depletion converge for both carriers up to the strongest case tried
   (1e24 / 0.15 V, peak about 1e25 m^-3). Strong-inversion DG needs a lateral source (2-D MOSFET) or a
   quasi-Fermi / Slotboom-variable formulation (open).
+
+  **Update 2026-11-06 (v0.15 item 4.4.3): RESOLVED for the MOS capacitor.** The root cause is one
+  near-null mode of the DC Jacobian in the minority-electron block (equilibrated sigma_min 2.6e-16 at
+  0.70 V, measured), plus a weaker one in the hole block of the depletion region once the electrons are
+  removed (5.1e-8). Quasi-Fermi variables do not help (sigma_min x 1.7, measured): they are a change of
+  variables of the same Jacobian. `physics_bipolar_dd.setup_quasi_equilibrium_carrier` replaces a
+  carrier's continuity row by "its quasi-Fermi level equals the body contact's" -- exact for the DC
+  MOS-C (equilibrium) and the low-frequency C-V. With both carriers closed sigma_min = 1.5e-4 and the DG
+  reaches 1.3 V in <= 10 Newton iterations per 50 mV step in double precision.
+  docs/audit/2026-11-06-v0.15-dg-wall-strong-inversion.md.
 * **1-D only validated.** The kernel is dimension-agnostic (edge models). `seed_bipolar_dg` uses
   KD-tree wall distances. But no 2-D/3-D oracle was run.
 * **The wall is a contact-tagged boundary.** The Potential row is the caller's: Dirichlet psi_s in
@@ -449,11 +459,13 @@ and linear in gamma.
    a helper expose it?
 2. **`quantum_srh=True` by default.** I made the detailed-balance-consistent reference the default,
    because without it equilibrium is wrong in the dark space (GATE E). Keep it, or make it opt-in?
-3. **Retire the unipolar `setup_dg_hard_wall` rows?** `setup_dg_insulator_wall` already works on a
+3. **Retire the unipolar `setup_dg_hard_wall` rows?** DONE 2026-11-06 (v0.15 4.4.4: deprecated shim onto
+   `setup_dg_insulator_wall`, removal in v0.16). `setup_dg_insulator_wall` already works on a
    unipolar region carrying `QSqrtN`. Its zero-flux rows fix the known wide-depletion defect. But
    switching the unipolar wall changes `setup_dg_hard_wall`'s call log and its characterization test.
    That was out of scope here.
-4. **Strong inversion** (Limits, first item): worth a quasi-Fermi-variable DG formulation?
+4. **Strong inversion** (Limits, first item): worth a quasi-Fermi-variable DG formulation? CLOSED
+   2026-11-06: no -- measured not to help; the quasi-equilibrium closure (v0.15 4.4.3) is the route.
 5. **RESOLVED 2026-11-04** (user decision; docs/audit/2026-11-04-sg-flux-two-bernoulli.md: one
    kernel `sg_flux` for every family, digests re-recorded, numeric cross-version guards). Original
    text: **The `kahan3` flux elsewhere (section 1.6).** The unipolar DG (`_JN_DG`) and the classical DD

@@ -536,6 +536,9 @@ jobs:
     # + tests/test_devsim_noise_method.py (v0.15 4.2.5, LayeredDevsimBuilder.noise_spectrum): ~50 s wall on
     #   the Windows dev box (11 tests; one module fixture runs 7 child processes, two at a time: DEVSIM
     #   circuits cannot be removed in-process), 2026-11-06.
+    # + tests/test_quasi_equilibrium.py (v0.15 4.4.3, the strong-inversion closure): ~130 s at -n 2 on the
+    #   Windows dev box with its one @slow test (~90 s, closure == full model in extended precision) left to
+    #   `nightly`, i.e. ~110 s serial here (8 tests; the ssac case in a child process).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -572,7 +575,7 @@ jobs:
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
             tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
-            tests/test_devsim_noise_method.py
+            tests/test_devsim_noise_method.py tests/test_quasi_equilibrium.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
