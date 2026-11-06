@@ -155,6 +155,7 @@ def ab_pairs():
 
 
 @pytest.mark.parametrize("T", [None, 250.0])
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_band_model_at_its_reference_T_is_bit_identical_to_the_model_off_device(ab_pairs, T):
     """GATE H2-b and defaults-off check (i). A heterostack whose materials carry band-temperature models,
     run AT the models' reference temperature, is the model-off device bit for bit: the ordered log of every

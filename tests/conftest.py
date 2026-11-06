@@ -96,3 +96,63 @@ def pytest_sessionfinish(session, exitstatus):
     import json
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(dict(wp.STATS, pid=os.getpid())) + "\n")
+
+
+# v0.15 (2026-11-06): @pytest.mark.devsim_isolated("reason") runs ONE test in a fresh interpreter (its
+# own `python -m pytest <nodeid>`), so it sees no DEVSIM device left live by another test of the worker.
+# WHY: a DC solve iterates EVERY live DEVSIM device in one Newton (dc_solve.solve_dc docstring), so a
+# device that a module-scoped fixture keeps alive both affects the convergence of a later solve and is
+# itself moved by it (by ulps). A test that compares two SEPARATE solves BITWISE is therefore only
+# meaningful in a process with no unrelated live device: measured, test_devsim_tunneling.py::test_w1's
+# off/on potentials differed by 1.1e-16 V with two converged leftovers live, and agreed bitwise alone.
+# Under xdist which devices are live is a scheduling accident. The child runs the test unchanged (its
+# fixtures are rebuilt there, so it costs one interpreter + those fixtures); its outcome and output are
+# reported here. Inside the child (DYNAMETA_DEVSIM_ISOLATED_CHILD=1) the marker is a no-op.
+_ISOLATED_ENV = "DYNAMETA_DEVSIM_ISOLATED_CHILD"
+
+
+def pytest_runtest_protocol(item, nextitem):
+    if item.get_closest_marker("devsim_isolated") is None or os.environ.get(_ISOLATED_ENV):
+        return None
+    import subprocess
+    import time
+    from _pytest.reports import TestReport
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # an xdist worker's PYTEST_XDIST_* variables would make the child believe it is a worker too
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST") and k != "PYTEST_CURRENT_TEST"}
+    env[_ISOLATED_ENV] = "1"
+    env["PYTHONPATH"] = os.pathsep.join([repo] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+    item.ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    t0 = time.time()
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-rfEs",
+                        item.nodeid], cwd=repo, env=env, capture_output=True, text=True, timeout=3600)
+    t1 = time.time()
+    tail = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    status = ("passed" if r.returncode == 0 and " passed" in tail else
+              "skipped" if r.returncode == 0 and " skipped" in tail else "failed")
+    longrepr = None
+    if status == "failed":
+        longrepr = "devsim_isolated child (exit {}):\n{}\n{}".format(r.returncode, r.stdout[-6000:],
+                                                                    r.stderr[-3000:])
+    elif status == "skipped":
+        longrepr = (str(item.location[0]), int(item.location[1] or 0), "devsim_isolated child: " + tail)
+    # The session's setup stack still holds what the PREVIOUS item left for this one (its module
+    # fixtures, say): tear it down to what `nextitem` needs, as pytest's own teardown phase would --
+    # skipping this leaves the stack inconsistent ("previous item was not torn down properly" at the
+    # next module's setup, measured). Not the teardown HOOKS: this item never ran setup, and plugins'
+    # teardown hooks read stash keys their setup hooks write.
+    teardown_err = None
+    try:
+        item.session._setupstate.teardown_exact(nextitem)
+    except Exception as e:                                    # noqa: BLE001 (reported, not swallowed)
+        teardown_err = "devsim_isolated: teardown of the parent's fixtures failed: {!r}".format(e)
+    for when in ("setup", "call", "teardown"):
+        outcome = status if when == "call" else ("failed" if when == "teardown" and teardown_err else "passed")
+        lr = longrepr if when == "call" else (teardown_err if when == "teardown" else None)
+        rep = TestReport(item.nodeid, item.location, {k: 1 for k in item.keywords}, outcome, lr, when,
+                         sections=[("devsim_isolated child stdout", r.stdout[-3000:])] if when == "call" else (),
+                         duration=(t1 - t0) if when == "call" else 0.0, start=t0, stop=t1)
+        item.ihook.pytest_runtest_logreport(report=rep)
+    item.ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True

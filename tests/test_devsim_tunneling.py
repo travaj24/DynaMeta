@@ -702,6 +702,9 @@ def _gated_design():
                   mesh_2d=Mesh2DSpec(coarse_ps_m=1e-9, x_spacing_edge_m=5e-9, x_spacing_feature_mid_m=5e-9))
 
 
+@pytest.mark.devsim_isolated("bitwise off/on comparison of two separate builder solves: a device left "
+                              "live by another test is iterated by the same joint DEVSIM Newton and moves "
+                              "the answer by ulps (measured 1.1e-16 V with two leftovers live)")
 def test_w1_layered_oxide_tunneling_extras_and_default_off():
     from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
     from dynameta.sweep import BiasPoint

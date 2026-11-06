@@ -206,6 +206,7 @@ def _diode_state(dev, **kw):
     return models, out
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_defaults_off_byte_identical():
     """traps=None / traps=() / srh_trap_energy_eV=0.0 against the bare legacy call on a forward-biased
     1-D Si diode: the node-model inventory and every solved array (Potential, Electrons, Holes, USRH,

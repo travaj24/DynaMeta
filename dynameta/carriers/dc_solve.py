@@ -151,6 +151,12 @@ def solve_dc(device: str, *, method: str = "newton",
               verbose: bool = False) -> None:
     """One DC operating-point solve of every live DEVSIM device (DEVSIM's Newton is global).
 
+    A DC solve iterates EVERY live DEVSIM device, not only `device`: a device left live by earlier work
+    both affects this solve's convergence (it must meet the same absolute and relative tests) and is
+    itself moved by it (its values change by round-off although nothing about it was touched), so tear
+    down devices you no longer need, and compare two separate solves bitwise only in a process with no
+    unrelated device live (the test suite's @pytest.mark.devsim_isolated).
+
     abs_tol: None (default, v0.15) resolves through `default_abs_tol()` on the pre-solve state of
         EVERY live device (DEVSIM's Newton solves and tests them all against one absolute_error) --
         identical to the old fixed 1e10 while every live device has S < 8.8e22 m^-3 (extended devices:

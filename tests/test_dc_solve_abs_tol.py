@@ -176,19 +176,19 @@ def test_round_off_floor_is_inside_the_margin():
     assert 10.0 * worst <= DC.ABS_TOL_ULPS / 2, worst
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_light_doping_and_equilibrium_are_byte_identical():
     """G5-3 / G5-6: below the threshold the default IS the old 1e10 -- solve_dc(abs_tol=None) and the
     explicit abs_tol=1e10 give bitwise-equal arrays on a 1e22 slab (S = 1e22) and on a Poisson-only
     equilibrium device (abs in volts, S ~ 1 V). Just above (1e23: default 1.14e10) the iteration count
     and the answer agree with the explicit 1e10 run to rel_tol.
-    The default sizes EVERY live device (DEVSIM's Newton is joint), so the explicit reference is the
-    1e10 the old code used only when nothing heavier is live in this process (`ref`); with a heavier
-    device left by another module's fixture, 1e10 would stall that device's Newton and the honest
-    reference is the same default float (test_default_sizes_every_live_device)."""
+    Runs in a clean child process (devsim_isolated): the default sizes EVERY live device and a DC solve
+    iterates them all, so both the 1e10 reference and the bitwise comparison of two separate solves are
+    meaningful only with no unrelated device live (test_default_sizes_every_live_device)."""
     from dynameta.carriers import dc_solve as DC
     from dynameta.carriers import physics_equilibrium as EQ
-    others = DC.default_abs_tol()                       # nothing of this test is live yet
-    ref = 1e10 if others == 1e10 else others
+    assert not devsim.get_device_list()                 # the clean child
+    ref = 1e10
 
     def slab(dev, nd, abs_tol):
         steps, regs = F.r27a_slab(dev, nd=nd)
@@ -201,7 +201,7 @@ def test_light_doping_and_equilibrium_are_byte_identical():
 
     a, b = slab("abs_b1", 1e22, None), slab("abs_b2", 1e22, ref)
     assert all(np.array_equal(a[k], b[k]) for k in a)
-    hi_a, hi_b = slab("abs_b3", 1e23, None), slab("abs_b4", 1e23, max(ref, 1e10))
+    hi_a, hi_b = slab("abs_b3", 1e23, None), slab("abs_b4", 1e23, ref)
     assert all(np.max(np.abs(hi_a[k] - hi_b[k]) / np.abs(hi_b[k])) <= 1e-10 for k in hi_a)
 
     def eq(dev, abs_tol):
