@@ -344,3 +344,32 @@ def test_trapping_noise_lorentzian_of_a_resistor():
         build(False)
         sq = V.noise(ff[[0, 2]]).by_mechanism["gr"]
     assert sq[1] / sq[0] > 0.9, sq
+
+
+# =====================================================================================================
+# the one-call method: LayeredDevsimBuilder.noise_spectrum / terminal_noise with kinetic traps
+# =====================================================================================================
+def test_layered_builder_noise_with_kinetic_traps():
+    """LayeredDevsimBuilder.noise_spectrum / terminal_noise (plan 4.2.5) on a gated bipolar n-GaAs builder with a
+    kinetic bulk acceptor (TransportModel.srh_traps) AND kinetic interface bins (interface_traps=), run in a
+    child process (DEVSIM circuits are process-global: tests/_trap_noise_child.py): the builder seeds and
+    DC-solves the kinetic levels (solve_dc's DC form), noise_analysis.DEFAULT_MECHANISMS includes trap_n /
+    trap_p and the method inherits them (by_mechanism), and the FDT holds through the method per cell, S_I =
+    4kT Re Y to 1e-4 at 1 MHz / 100 MHz / 10 GHz (the D2a tolerance; the reference-device gate W2 reaches
+    1e-9 without traps). MEASURED: audit note. The trap sources dominate S here (> 99.9 %)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([repo] + [p for p in sys.path if isinstance(p, str) and p]))
+    r = subprocess.run([sys.executable, "-W", "error", os.path.join(repo, "tests", "_trap_noise_child.py"),
+                        "kinetic_builder"], cwd=repo, env=env, capture_output=True, text=True, timeout=900)
+    lines = [ln for ln in r.stdout.splitlines() if ln.startswith("TRAP_NOISE_RESULT ")]
+    assert r.returncode == 0 and lines, (r.returncode, r.stdout[-2000:], r.stderr[-3000:])
+    res = json.loads(lines[-1][len("TRAP_NOISE_RESULT "):])
+    assert "TrapW_trap0" in res["kinetic_vars"] and sum(v.startswith("ItW") for v in res["kinetic_vars"]) == 8
+    assert res["default_has_trap"] and {"trap_n", "trap_p"} <= set(res["mechanisms"])
+    assert min(res["trap_share"]) > 0.5
+    fdt = np.array(res["S_I"]) / (4.0 * KT * np.array(res["ReY"])) - 1.0
+    assert np.max(np.abs(fdt)) < 1e-4, fdt
