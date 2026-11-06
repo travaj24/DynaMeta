@@ -351,6 +351,8 @@ def _fd_residual_error(device, dim):
     return jd, dr
 
 
+@pytest.mark.floating_ok("assembly only: the contact-free device is never solved -- its one-iteration "
+                         "ds.solve just numbers the equations for get_matrix_and_rhs (v0.15 4.4.2 hook)")
 @pytest.mark.parametrize("dim", [1, 2, 3])
 def test_j1_btbt_jacobian_matches_finite_differences(dim):
     """The BTBT share of the Jacobian, isolated as (with BTBT) - (without), on the same state."""

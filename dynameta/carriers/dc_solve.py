@@ -43,6 +43,7 @@ ds = import_devsim()      # D0: devsim via its ONE import home (BLAS pinned befo
 
 from dynameta.carriers import eq_registry as R
 from dynameta.carriers import extended_precision as XP
+from dynameta.carriers import well_posedness as WP
 # audit C10-d: the Fermi-Dirac SOLUTION-level ceiling test. solve_dc is the one wrapper that owns a
 # CONVERGED state (both its methods return only after the solve succeeded), which is what the check
 # needs -- the doping-level test at contact setup runs before any solve and cannot see accumulation.
@@ -146,12 +147,18 @@ def solve_dc(device: str, *, method: str = "newton",
         devices are solved together on purpose, pass abs_tol=default_abs_tol() (all live devices). A
         float is passed to DEVSIM unchanged. The Gummel sub-solves use the same resolved value.
     rel_tol, max_iter: DEVSIM's relative_error / maximum_iterations, unchanged.
-    method: "newton" (coupled, the default) or "gummel" (unipolar only; module docstring)."""
+    method: "newton" (coupled, the default) or "gummel" (unipolar only; module docstring).
+
+    WELL-POSEDNESS (v0.15, plan 4.4.2): before the Newton every live device goes through
+    well_posedness.ensure_dc_well_posed (cached per equation-set fingerprint), which raises
+    IllPosedDCError (a ValueError) for an EXACTLY singular DC problem -- a floating body, a pure-Neumann
+    potential -- instead of letting round-off pick the answer. A Newton failure that STALLED (ran out of
+    iterations close to a solution) is re-raised as devsim.error with the conditioning diagnosis
+    (well_posedness.diagnose_singular: "near-singular DC Jacobian ... mode in Electrons ...") appended."""
     if method == "newton":
         if abs_tol is None:
             abs_tol = default_abs_tol(device)
-        XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                  relative_error=rel_tol, maximum_iterations=max_iter)
+        _newton(device, abs_tol, rel_tol, max_iter)
         warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d (converged state)
         return
     if method == "gummel":
@@ -167,8 +174,7 @@ def solve_dc(device: str, *, method: str = "newton",
         # No carrier equations present (e.g. equilibrium mode) -> Gummel is just
         # a Poisson solve; fall back to Newton.
         if not (set(CARRIER_EQS) & R.equation_names(device)):
-            XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
-                      relative_error=rel_tol, maximum_iterations=max_iter)
+            _newton(device, abs_tol, rel_tol, max_iter)
             warn_if_solution_exceeds_fd_ceiling(device)         # audit C10-d (converged state)
             return
         # audit C-15 (2026-11-02): REFUSE a bipolar device instead of silently running a non-Gummel
@@ -207,6 +213,7 @@ def solve_dc(device: str, *, method: str = "newton",
                 "converging (audit C-6). Pass the semiconductor region name(s), e.g. "
                 "semiconductor_regions=['semi'] -- devsim.get_region_list(device={!r}) lists "
                 "them.".format(list(_TRACK_VARS), device))
+        WP.ensure_dc_well_posed()           # the coupled problem; the sub-solves freeze a variable
         _gummel(device, abs_tol, rel_tol, gummel_inner_iter, gummel_outer_max,
                 gummel_tol, semiconductor_regions, verbose)
         # ONE check per solve_dc call, not one per outer iteration: _gummel raises unless the outer
@@ -214,6 +221,35 @@ def solve_dc(device: str, *, method: str = "newton",
         warn_if_solution_exceeds_fd_ceiling(device)             # audit C10-d
         return
     raise ValueError("unknown dc solve method: {!r}".format(method))
+
+
+# A failed Newton is a STALL (worth the conditioning diagnosis) when it used every iteration and ended
+# close to a solution -- the near-floating signature: the relative update wanders at 1e-6..1e-2
+# (MOS inversion at 0.80 V, tests/test_well_posedness.py) -- not when it diverged or aborted early.
+_STALL_REL = 1e-2
+
+
+def _stalled(info, max_iter) -> bool:
+    its = info.get("iterations") or ()
+    if len(its) < max_iter:
+        return False
+    last = [d.get("relative_error", np.inf) for d in its[-1].get("devices", ())]
+    return bool(last) and max(last) < _STALL_REL
+
+
+def _newton(device, abs_tol, rel_tol, max_iter):
+    """The coupled DC Newton: the well-posedness check, then DEVSIM's solve with info=True (it then
+    REPORTS non-convergence instead of raising; the device state is restored either way), re-raised
+    as devsim.error -- with the near-singular diagnosis appended when the failure is a stall."""
+    WP.ensure_dc_well_posed()
+    info = XP.solve(type="dc", solver_type="direct", absolute_error=abs_tol,
+                    relative_error=rel_tol, maximum_iterations=max_iter, info=True)
+    if isinstance(info, dict) and not info.get("converged", True):
+        msg = ("Convergence failure! (solve_dc: {} Newton iterations, absolute_error={:.4g}, "
+               "relative_error={:.4g})".format(len(info.get("iterations") or ()), abs_tol, rel_tol))
+        if _stalled(info, max_iter):
+            msg += "\n" + WP.diagnose_singular(device)
+        raise ds.error(msg)
 
 
 def _snapshot(device, regions):
