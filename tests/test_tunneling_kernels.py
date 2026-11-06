@@ -427,7 +427,7 @@ def _noise_ref(xs, xg, d, lay):
 def test_k11_pair_noise_is_the_landauer_buttiker_partition(xs, dlt):
     """K11: the kernel's S = 2 q J coth(Delta/2) (closed form of the transverse partition integral, audit
     note 2.3) == a nested quad over (E_x, E_t) of T [f_s (1 - f_g) + f_g (1 - f_s)]: 1e-8 (the nested quad
-    is converged to ~1e-11). Equilibrium: S == 4 kT dJ/dV with dJ/dV = (q/kT) dJ/dx_s, K9's derivative
+    is converged to ~1e-11; MEASURED <= 1.1e-10, the small-Delta series case). Equilibrium: S == 4 kT dJ/dV with dJ/dV = (q/kT) dJ/dx_s, K9's derivative
     (1e-12: the same sums). Delta = 45: S == 2 q J (coth - 1 ~ 6e-20). The small-Delta branch (|Delta|
     < 1e-4) is the O(Delta^2) series (case Delta = 3e-5). Refute: the 'one-sided' shot sum
     2 q (J_fwd + J_bwd), which drops the Pauli term -2 N_sg, overcounts the DEGENERATE (x_s = 2)
