@@ -21,8 +21,9 @@ the DEVSIM issue). The draft and the source excerpts are in the session scratchp
 - **Unchanged where DEVSIM is already exact.** On Kuhn tets and rectilinear right triangles nothing
   moves beyond round-off.
 - **Boundary caveat: real, measured, and handled by a policy.**
-  - The exact geometry can have negative ASSEMBLED couples and volumes. On the gmsh stack 1.3 % of
-    the edges are negative (worst -0.12 L^2) and no node volumes are. A random-point Delaunay square
+  - The exact geometry can have negative ASSEMBLED couples and volumes. On the gmsh stack about 1.0 %
+    of the edges are negative (124 / 13473 and 130 / 12746, worst -0.053 L^2; the validation table in
+    section 4 -- corrected 2026-11-06, an earlier draft said 1.3 % / -0.12 L^2) and no node volumes are. A random-point Delaunay square
     reaches -24 L and -6.7 h^2.
   - Default `raise`: refuse and report, device untouched.
   - **Recommended `warn`**, once the report has been read: exact values plus `UnreliableResultWarning`.
@@ -30,7 +31,8 @@ the DEVSIM issue). The draft and the source excerpts are in the session scratchp
 - **Cross-branch finding (the noise row, not this branch).** The per-element Hooge source is biased
   in 3-D on EVERY mesh, including the default Kuhn tensor mesh: **S f N / (alpha I^2) = 1.125**
   (MEASURED). The cause is that its tensor identity does not hold per element for circumcentric
-  couples in 3-D (section 5).
+  couples in 3-D (section 5). FIXED in v0.14.0 (merge ab3419e, docs/audit/2026-11-06-v0.14-hooge-3d.md:
+  P1 element couples; the Kuhn bar now reads 1 - 5.8e-9).
 
 ## 1. Feasibility: what DEVSIM lets a caller replace (read in src/, then tested)
 
@@ -182,7 +184,7 @@ The check's refusal message could add one line: "or call
 Cost: one pass over the elements in numpy, about 0.35 s for a 10k-tet region (MEASURED), plus one
 `set_element_values`.
 
-## 5. Cross-branch finding: the per-element Hooge source is biased in 3-D (not fixed here)
+## 5. Cross-branch finding: the per-element Hooge source is biased in 3-D (not fixed here; fixed in v0.14.0 by ab3419e)
 
 `noise_analysis` assembles Hooge per element as S_T ~ |sum_e c_eT a_e dy_e|^2 / V_T. Its docstring
 relies on "sum_e c_eT L_e t_e t_e^T = V_T I on a well-centred element".
@@ -230,5 +232,5 @@ No existing module changed. No digests moved.
 - Negative couples on non-conforming boundaries are reported. The default `negative='raise'`
   refuses; `negative='warn'` (recommended) keeps the exact values; `negative='clip'` keeps the
   M-matrix property at a measured cost.
-- Known issue (noise): the per-element 3-D Hooge 1/f source reads 1.125x on Kuhn tensor meshes. A
-  fix is proposed in the audit note.
+- (Resolved before release: the per-element 3-D Hooge 1/f source read 1.125x on Kuhn tensor meshes;
+  fixed in v0.14.0, docs/audit/2026-11-06-v0.14-hooge-3d.md.)
