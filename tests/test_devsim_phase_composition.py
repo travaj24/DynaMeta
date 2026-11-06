@@ -366,17 +366,23 @@ def test_noise_fdt_with_a_charged_trap_level_quasi_static(noise_mod):
     assert abs(Y_on.real[0] / Y_off.real[0] - 1) > 0.2
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="D1c limit: CHARGED traps are quasi-static (no trap-occupancy "
-                   "variable), so the ssac linear response is not charge-conserving above the "
-                   "quasi-static regime and the FDT cannot hold there (MEASURED S/4kT Re Y - 1 = "
-                   "5.6e-3 at 100 kHz, 6.6e-2 at 10 MHz). Turns green when trap kinetics land.")
 def test_noise_fdt_with_a_charged_trap_level_high_frequency(noise_mod):
+    """The former strict xfail (D1c limit), FLIPPED by the v0.15 kinetic traps (plan 4.3.2 K3/K4,
+    decision 39): with CHARGED_TRAP made kinetic (TrapLevel(dynamic=True), its capture / emission events the
+    trap_n / trap_p noise sources) S_I = 4kT Re Y holds at 100 kHz and 10 MHz to 1e-4 (MEASURED 9.6e-7 and
+    7.8e-9). The quasi-static level still misses (it is the default; MEASURED 5.6e-3 at 100 kHz, 6.6e-2 at
+    10 MHz -- the old xfail's numbers) and raises the decision-39 advisory. Full sweep and load-bearing
+    checks: tests/test_trap_noise.py."""
+    import dataclasses
     from dynameta.warning_types import AdvisoryWarning
     V = noise_mod
+    kin = dataclasses.replace(CHARGED_TRAP, dynamic=True)
+    r_k, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(kin,), srh_trap_energy_eV=-0.1)
+    assert np.max(np.abs(r_k - 1)) < 1e-4, r_k
     with pytest.warns(AdvisoryWarning, match="QUASI-STATIC CHARGED traps"):    # v0.15 decision 39
         r_on, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(CHARGED_TRAP,),
                                   srh_trap_energy_eV=-0.1)
-    assert np.max(np.abs(r_on - 1)) < 1e-4, r_on
+    assert np.min(np.abs(r_on - 1)) > 1e-3, r_on
 
 
 # BTBT params chosen so the 0.36 V built-in field (~2e6 V/m) of the FDT diode tunnels at a rate

@@ -149,6 +149,9 @@ def _seed(dev, names, region="bulk"):
     for nm in names:
         ds.set_node_values(device=dev, region=region, name=nm,
                            values=ds.get_node_model_values(device=dev, region=region, name=src[nm]))
+    if "Electrons" in names:                    # v0.15 kinetic trap levels follow their carriers (no-op else)
+        from dynameta.carriers.physics_traps import seed_kinetic_traps
+        seed_kinetic_traps(dev, [region])
 
 
 def unipolar_1d_resistor(dev="ures", *, L=1e-6, n_bg=5e26):

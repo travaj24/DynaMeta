@@ -26,6 +26,7 @@ Every gate's derivation, its measured value and its failure on the old code are 
 interface (K2, conductance method) gates follow below the bulk ones.
 """
 import contextlib
+import os
 import math
 
 import numpy as np
@@ -554,12 +555,11 @@ def test_kinetic_jacobian_w_column_closed_form_and_fd():
 # ---------------------------------------------------------------------------------------------------
 # guards, refusals and the decision-39 advisory
 # ---------------------------------------------------------------------------------------------------
-def test_kinetic_noise_refused_until_k3_and_seed_range():
-    """noise_spectrum REFUSES a device with a kinetic level while the trap g-r sources are not validated
-    (v0.15 K3): the single-carrier terms carry no event rate, so the shipped "never silently noiseless" rule
-    fires for the default mechanisms -- and passes when trap_n / trap_p are left out knowingly. The
-    inventory lists the electron / hole branches with their partner row and mechanism (the K3 hook). A
-    seed with |ln w| > U_LIMIT raises TrapOccupancyRangeError, and fermi_dirac statistics refuse."""
+def test_kinetic_noise_inventory_and_seed_range():
+    """The inventory lists the electron / hole branches with their partner row, mechanism and (since K3)
+    their EVENT rates, so the default noise_spectrum includes trap_n / trap_p (their FDT gates are
+    tests/test_trap_noise.py); no fast-trap pair term exists for the kinetic level. A seed with |ln w| >
+    U_LIMIT raises TrapOccupancyRangeError, and fermi_dirac statistics refuse."""
     from dynameta.carriers import noise_analysis as NA
     tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e21, kind="acceptor", tau_n0_s=3e-7, tau_p0_s=5e-7,
                       dynamic=True)
@@ -568,13 +568,11 @@ def test_kinetic_noise_refused_until_k3_and_seed_range():
     tn, tp = terms["node_electron"]["trap0"], terms["node_hole"]["trap0"]
     assert (tn.partner_equation, tn.partner_coeff, tn.mechanism) == ("TrapEquation_trap0", 1.0, "trap_n")
     assert (tp.partner_equation, tp.partner_coeff, tp.mechanism) == ("TrapEquation_trap0", -1.0, "trap_p")
-    assert tn.pair is None and tp.pair is None and "trap0" not in terms["node"]   # no fast-trap pair
-    with pytest.raises(RuntimeError, match="without an event rate"):
-        with V.quiet():
-            NA.noise_spectrum(dev, [1e3])
+    assert (tn.pair, tp.pair) == ("PTermN_trap0", "PTermP_trap0") and "trap0" not in terms["node"]
+    assert {"trap_n", "trap_p"} <= set(NA.DEFAULT_MECHANISMS)
     with V.quiet():
-        s = NA.noise_spectrum(dev, [1e3], mechanisms=("diffusion_n", "diffusion_p", "gr"))
-    assert s.S[0] > 0.0
+        s = NA.noise_spectrum(dev, [1e3])
+    assert s.by_mechanism["trap_n"][0] > 0.0 and s.by_mechanism["trap_p"][0] > 0.0
     assert PT.kinetic_trap_variables(dev, "r") == ["TrapW_trap0"]
     ds.set_parameter(device=dev, region="r", name="trap0_p1", value=1e300)     # w ~ tau_n0 p1/(tau_n0 p): |ln w| > 600
     with pytest.raises(PT.TrapOccupancyRangeError):
@@ -1499,3 +1497,283 @@ def test_gate_step_transient_is_the_ng_circuit():
     assert tq[n - 1] < 1e-3 * taus and abs(last) < 0.1, (tq[n - 1] / taus, last)
     V.fresh()
     _R.clear("k25q")
+
+
+# ---------------------------------------------------------------------------------------------------
+# DC well-posedness (the floating-body hook, plan 4.4.2): the trap rows are candidates that are PINNED
+# ---------------------------------------------------------------------------------------------------
+def test_kinetic_trap_rows_are_pinned_candidates_of_the_well_posedness_check():
+    """The invariant of K1-K2 made a gate (well_posedness LOCAL candidates, v0.15 K3/K4): every free node-only
+    equation -- the kinetic trap rows TrapEquation_* (bulk) and ItEquation* (interface bins, masked) -- is a
+    static candidate checked row by row, and the numeric pass REFUTES it (no all-zero equilibrated row: each
+    row is pinned by its own capture and emission, d(R_n - R_p)/dw < 0, or by the off-interface mask), so a
+    kinetic device passes. ADVERSARIAL: the same device with the trap row's rate terms removed (TrapNode_trap0
+    and its derivatives = 0: no capture, no emission) raises IllPosedDCError naming TrapEquation_trap0 and
+    every node; and a FLOATING kinetic body (Potential-only contacts: no carrier is pinned) raises with the
+    trap rows in the conserved sum (the left null vector carries electron, hole and trap rows)."""
+    import test_traps as TT
+    from dynameta.carriers import well_posedness as WP
+    from dynameta.carriers import physics_equilibrium as PE
+    tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e22, kind="acceptor", tau_n0_s=3e-9, tau_p0_s=5e-9,
+                      dynamic=True)
+    dev = _diode("kwp", (tr,), lines=DIODE_LINES, doping=DIODE_DOP, ae=1e10)
+    rep = WP.check_dc_well_posed(dev)
+    rows = [g for g in rep.candidates if g[0].side == "row"]
+    assert [g[0].equation for g in rows] == ["TrapEquation_trap0"]
+    assert rep.well_posed and rep.assembled
+    ref = [m for m in rep.refuted if m.side == "row"]
+    assert ref and ref[0].r > 1e6 * WP.TOL_SINGULAR                  # refuted by many decades
+    nnode = len(_vals(dev, "x"))
+    for m in [m for m in ds.get_node_model_list(device=dev, region="r") if m.startswith("TrapNode_trap0")]:
+        ds.node_model(device=dev, region="r", name=m, equation="0")   # the row's rate terms removed
+    with pytest.raises(WP.IllPosedDCError, match="TrapEquation_trap0") as ei:
+        WP.check_dc_well_posed(dev)
+    assert "at {} node(s)".format(nnode) in str(ei.value)
+    V.fresh()
+    _R.clear(dev)
+    # the interface bins (masked region-wide rows) of the K2 MOS
+    psib = TT._mos("kwpm", PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12, dynamic=True, kinetic_bin_eV=0.2))
+    rep = WP.check_dc_well_posed("kwpm")
+    assert rep.well_posed and sum(g[0].equation.startswith("ItEquation") for g in rep.candidates) == 6
+    assert psib < 0.0
+    TT._clear("kwpm")
+    # a floating kinetic body: Potential-only contacts, nothing pins a carrier
+    m = "kfl_m"
+    ds.create_1d_mesh(mesh=m)
+    ds.add_1d_mesh_line(mesh=m, pos=0.0, ps=1e-8, tag="lo")
+    ds.add_1d_mesh_line(mesh=m, pos=2e-7, ps=1e-8, tag="hi")
+    ds.add_1d_contact(mesh=m, name="lo", tag="lo", material="metal")
+    ds.add_1d_contact(mesh=m, name="hi", tag="hi", material="metal")
+    ds.add_1d_region(mesh=m, material="Si", region="r", tag1="lo", tag2="hi")
+    with V.quiet():
+        ds.finalize_mesh(mesh=m)
+        ds.create_device(mesh=m, device="kfl")
+    ds.node_model(device="kfl", region="r", name="NetDoping", equation="1e22")
+    with V.quiet():
+        BP.setup_bipolar_region("kfl", "r", eps_static=11.7, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
+                                mobility_p_m2Vs=0.048, tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=False,
+                                traps=(tr,))
+        BP.setup_equilibrium_seed_models("kfl", "r")
+        PE.setup_contact("kfl", "lo")
+        PE.setup_contact("kfl", "hi")
+    _seed("kfl")
+    with pytest.raises(WP.IllPosedDCError, match="TrapEquation_trap0") as ei:
+        WP.check_dc_well_posed("kfl")
+    assert "conserved" in str(ei.value)
+    V.fresh()
+    _R.clear("kfl")
+
+
+# ---------------------------------------------------------------------------------------------------
+# the DC form (physics_traps.kinetic_dc_form, inside dc_solve.solve_dc)
+# ---------------------------------------------------------------------------------------------------
+def test_dc_form_has_the_same_root_and_makes_the_gated_builder_converge(monkeypatch):
+    """dc_solve.solve_dc runs its Newton with every kinetic level in the DC FORM (quasi-static rates and
+    charge, w slaved to w_SS); every other solve sees the physical rows. GATES: (a) the root is the same --
+    the forward diode solved by solve_dc and by a raw ds.solve (physical form) agree to K1-2's 1e-10 / 1e-12 V,
+    and the switch is back at 0 afterwards; (b) the gated bipolar GaAs LayeredDevsimBuilder with kinetic interface bins
+    (tests/_trap_noise_child.design) converges and its zero-bias state equals the quasi-static build's to
+    1e-10. ADVERSARIAL: with the DC form disabled (kinetic_dc_form a no-op) the same builder's Newton FAILS
+    (MEASURED: w of the bins near the valence edge reached 1e190 and the carriers diverged in 60 iterations;
+    without the slaving, in the earlier linear (1 + w) form, the factorization hit an FPE)."""
+    import contextlib as _cl
+    import sys as _sys
+    from dynameta.carriers import dc_solve as DC
+    tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e22, kind="acceptor", tau_n0_s=3e-9, tau_p0_s=5e-9,
+                      dynamic=True)
+    out = {}
+    for how in ("raw", "solve_dc"):
+        dev = _diode("kdf", (tr,), lines=DIODE_LINES, doping=DIODE_DOP, ae=1e10)
+        for v in (-0.1, -0.2, -0.3):
+            ds.set_parameter(device=dev, name="lo_bias", value=v)
+            if how == "raw":
+                _solve(1e10)
+            else:
+                with V.quiet():
+                    DC.solve_dc(dev, abs_tol=1e10, rel_tol=1e-12, max_iter=100)
+        assert float(ds.get_parameter(device=dev, region="r", name=PT.KINETIC_DC_PARAMETER)) == 0.0
+        out[how] = {k: _vals(dev, k) for k in ("Potential", "Electrons", "Holes", "TrapOccupancy0")}
+        V.fresh()
+        _R.clear(dev)
+    assert np.max(np.abs(out["raw"]["Potential"] - out["solve_dc"]["Potential"])) < 1e-12
+    for k in ("Electrons", "Holes", "TrapOccupancy0"):
+        assert np.max(np.abs(out["raw"][k] / out["solve_dc"][k] - 1.0)) < 1e-10, k
+    # (b) the gated builder
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import _trap_noise_child as TN
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.sweep import BiasPoint
+    states = {}
+    for dyn in (False, True):
+        it = (PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
+                                dynamic=True, kinetic_bin_eV=0.2) if dyn else
+              PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
+                                bin_eV=0.2))
+        b = LayeredDevsimBuilder(TN.design(), mesh_name="kdfb_m", device_name="kdfb",
+                                 interface_traps={("gaas", "upper_hfo2"): it})
+        try:
+            with V.quiet():
+                b.solve(BiasPoint({}, "eq"), rel_tol=1e-10)
+            states[dyn] = {k: _vals("kdfb", k, "gaas") for k in ("Potential", "Electrons", "Holes")}
+        finally:
+            b.teardown()
+    assert np.max(np.abs(states[True]["Potential"] - states[False]["Potential"])) < 1e-12
+    for k in ("Electrons", "Holes"):
+        assert np.max(np.abs(states[True][k] / states[False][k] - 1.0)) < 1e-10, k
+    monkeypatch.setattr(PT, "kinetic_dc_form", lambda *a, **k: _cl.nullcontext())
+    b = LayeredDevsimBuilder(TN.design(), mesh_name="kdfc_m", device_name="kdfc",
+                             interface_traps={("gaas", "upper_hfo2"): PT.InterfaceTraps(
+                                 dit_eV_m2=1e16, band_gap_eV=1.42, sigma_n_m2=1e-19, sigma_p_m2=1e-19,
+                                 dynamic=True, kinetic_bin_eV=0.2)})
+    try:
+        with pytest.raises(Exception, match="onvergence|factoriz"):
+            with V.quiet():
+                b.solve(BiasPoint({}, "eq"))
+    finally:
+        b.teardown()
+
+
+def test_transient_integrated_charge_through_the_n_contact():
+    """K1-5, the integrated-charge half. The charge that flows through the n-side contact (V1) during the 0 -> 5 V
+    DLTS transient, integrated with the integrators' own rules (rectangle over the BDF1 ramp / damping steps,
+    trapezoid over the TR steps -- exact for the discrete scheme, so no quadrature error enters), against
+    q (Delta N_e + Delta N_t) from TWO INDEPENDENT DC solves (0 V and 5 V): every electron removed from the
+    device -- free electrons of the widened depletion region AND the electrons the traps emit -- leaves through
+    the n contact (the holes through the p contact). Budget: the emission not finished at t_end = 12 tau,
+    e^-12 |q Delta N_t| = 6e-8 of the total, the minority hole current at the n contact (bulk SRH off) and the
+    contact-node displacement (quasi-neutral ohmic contact), both below that; gated at 1e-6. MEASURED: equal
+    to the 7 printed digits (-8.475073e-4 C/m^2). OLD CODE: the quasi-static level passes q Delta N_e only
+    (-8.392464e-4): its trap electrons never cross the contact -- a 9.7e-3 miss (the K1-5 Kirchhoff miss)."""
+    q = 1.602176634e-19
+    res = {}
+    for dyn in (True, False):
+        V.fresh()
+        dev = _dl_device("kqi", (_dl_level(dyn),))
+        vol = _vals(dev, "NodeVolume")
+        k, tau, _finf, _f0 = (_dl_oracle(dev) if dyn else (res["k"], res["tau"], 0.0, 0.0))
+        s0 = (_vals(dev, "Electrons"), _vals(dev, "TrapOccupancy0"))
+        _dl_bias(0.0, DL_VR)
+        s1 = (_vals(dev, "Electrons"), _vals(dev, "TrapOccupancy0"))
+        _dl_bias(DL_VR, 0.0)
+        t, _f, i1, _i2, kind = _dl_transient(dev, k, tau, 1.0 / 25.0, n_tau=12.0, stall_ok=not dyn)
+        dt = np.diff(t)
+        integ = float(np.sum(np.where(kind[1:] < 2, dt * i1[1:], 0.5 * dt * (i1[1:] + i1[:-1]))))
+        dne = float(np.sum(vol * (s1[0] - s0[0])))
+        dnt = DL_NT * float(np.sum(vol * (s1[1] - s0[1])))
+        res.update({"k": k, "tau": tau, dyn: (integ, q * (dne + dnt), q * dne)})
+        V.fresh()
+        _R.clear(dev)
+    integ, oracle, free_only = res[True]
+    assert abs(integ / oracle - 1.0) < 1e-6, (integ, oracle)
+    assert abs(free_only / oracle - 1.0) > 1e-3                   # the traps' share is load-bearing
+    q_integ = res[False][0]
+    assert abs(q_integ / res[False][1] - 1.0) > 1e-3, (q_integ, res[False][1])
+
+
+def _gate_to_circuit(dev, gate_v):
+    """Repoint the Potential-only contact 'gate' to a circuit-driven one (V1 on node 'vac') at gate_v."""
+    from dynameta.carriers import ac_analysis as AC
+    ds.delete_contact_equation(device=dev, contact="gate", name="PotentialEquation")
+    _R.forget(dev, "PotentialEquation", loc="gate", scope="contact")
+    AC.setup_circuit_contact(dev, "gate")
+    ds.circuit_alter(name="V1", value=gate_v)
+
+
+def test_conductance_method_3d_stacked_spec_equals_1d():
+    """K2-6 in 3-D. Stacked3DSpec(physics='bipolar_dd', interface_traps=<the K2-1 kinetic single level>) -- the
+    builder's own tensor (Kuhn) mesh, bipolar region setup, interface install and seed -- a p-Si 1e17 cm^-3,
+    200 nm / 10 nm SiO2 cap of 4 x 4 nm, solved at V_G = 0.45 V, its gate then made circuit-driven at the
+    same potential: (a) Y_sc per area equals that of a 1-D device built on the 3-D mesh's z-lines with the
+    SAME region physics (Devsim3DEquilibrium._setup_bipolar_semi) and trap spec, at omega tau = 0.1, 1, 10, to
+    1e-6 (on the Kuhn mesh a laterally uniform stack reduces to the 1-D discretization on the same z-lines,
+    devsim_3d._build_mesh_tensor; the circumcentric interface shares are exact: the difference is round-off,
+    the plan's 1e-6); (b) G_p/omega against N&G (17) to 10x the K2-1 budget (R_h from the 3-D column's hole
+    profile). MEASURED: audit note."""
+    import types
+    from dynameta.carriers import ac_analysis as AC
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+    from dynameta.constants import M_E
+    from dynameta.sweep import BiasPoint
+    spec = Stacked3DSpec(semi_material="Si", oxide_material="SiO2", lateral_m=4e-9, semi_thk_m=200e-9,
+                         oxide_thk_m=MOS_TOX, n_bg_m3=MOS_NA, eps_semi=MOS_EPSSI, eps_oxide=MOS_EPSOX,
+                         dos_mass_kg=1.08 * M_E, physics="bipolar_dd", n_i_m3=NI, mobility_m2Vs=0.135,
+                         mobility_p_m2Vs=MOS_MUP, tau_srh_s=1e3, acceptor=True, interface_traps=_it_single(),
+                         mesh_min_nm=0.5, mesh_max_nm=5.0)
+    sol = Devsim3DEquilibrium(spec, mesh_name="k3d_m", device_name="k3d")
+    try:
+        sol.build_device()
+        with V.quiet():
+            sol.solve(BiasPoint(label="g", voltages={"gate": MOS_VG}))
+        dev = sol.device
+        gate_v = float(ds.get_parameter(device=dev, name="gate_bias"))
+        _gate_to_circuit(dev, gate_v)
+        _solve(1e12, 1e-8)
+        z = np.concatenate([_vals(dev, "z", "semi"), _vals(dev, "z", "oxide")])
+        x, yv = _vals(dev, "x", "semi"), _vals(dev, "y", "semi")
+        col = (x == x.min()) & (yv == yv.min())
+        zs = _vals(dev, "z", "semi")[col]
+        o = np.argsort(zs)
+        p_col = _vals(dev, "Holes", "semi")[col][o]
+        pot_col = _vals(dev, "Potential", "semi")[col][o]
+        psi_s, ps, ns = pot_col[-1] - pot_col[0], p_col[-1], _vals(dev, "Electrons", "semi")[col][o][-1]
+        cs, tau, _f0, mino = _ng_single_level(ps, ns)
+        r_h = float(np.trapezoid(1.0 / (QE * MOS_MUP * p_col), zs[o]))
+        freqs = np.array([0.1, 1.0, 10.0]) / tau / (2 * math.pi)
+        with V.quiet():
+            f3, C3, G3 = AC.ssac_admittance(freqs)
+        w = 2 * math.pi * np.asarray(f3)
+        ym3 = (G3 + 1j * w * C3) / spec.lateral_m ** 2
+    finally:
+        sol.teardown()
+        V.fresh()
+        _R.clear("k3d")
+    zl = np.unique(np.round(z, 18))
+    zi = float(np.max(np.unique(np.round(zs, 18))))
+    # the 1-D twin on the same z-lines, with the 3-D builder's own bipolar region setup
+    m = "k1d_m"
+    ds.create_1d_mesh(mesh=m)
+    for i, pos in enumerate(zl):
+        tag = "body" if i == 0 else ("i" if pos == zi else ("gate" if i == zl.size - 1 else None))
+        ds.add_1d_mesh_line(mesh=m, pos=float(pos), ps=1e-6, **({"tag": tag} if tag else {}))
+    ds.add_1d_contact(mesh=m, name="body", tag="body", material="metal")
+    ds.add_1d_contact(mesh=m, name="gate", tag="gate", material="metal")
+    ds.add_1d_region(mesh=m, material="Si", region="semi", tag1="body", tag2="i")
+    ds.add_1d_region(mesh=m, material="SiO2", region="oxide", tag1="i", tag2="gate")
+    ds.add_1d_interface(mesh=m, name="semi_oxide", tag="i")
+    with V.quiet():
+        ds.finalize_mesh(mesh=m)
+        ds.create_device(mesh=m, device="k1d")
+        Devsim3DEquilibrium._setup_bipolar_semi(types.SimpleNamespace(spec=spec, device="k1d"), "semi",
+                                                MOS_NA, MOS_EPSSI)
+        PE.setup_dielectric_region("k1d", "oxide", MOS_EPSOX)
+        PE.setup_interface("k1d", "semi_oxide")
+        PT.install_interface_traps("k1d", "semi_oxide", _it_single())
+        BP.setup_contact_ohmic_bipolar("k1d", "body")
+        AC.setup_circuit_contact("k1d", "gate")
+    assert len(_vals("k1d", "x", "semi")) * len(set(zip(x.tolist(), yv.tolist()))) == len(x)   # same z-lines
+    psib = float(np.min(pot_col))
+    ds.set_node_values(device="k1d", region="oxide", name="Potential",
+                       values=[psib] * len(_vals("k1d", "x", "oxide")))
+    ds.circuit_alter(name="V1", value=psib)
+    _seed("k1d", "semi")
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.delete_by_name("k1d", ceq)
+    _solve(1e-10, 1e-12)
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.reapply_by_name("k1d", ceq)
+    _solve(1e12, 1e-10)
+    for v in np.linspace(psib, gate_v, 30)[1:]:
+        ds.circuit_alter(name="V1", value=float(v))
+        _solve(1e12, 1e-10)
+    with V.quiet():
+        f1, C1, G1 = AC.ssac_admittance(freqs)
+    ym1 = G1 + 1j * w * C1
+    V.fresh()
+    _R.clear("k1d")
+    assert np.all(np.abs(ym3 / ym1 - 1.0) < 1e-6), ym3 / ym1 - 1.0
+    ysc = 1.0 / (1.0 / ym3 - 1.0 / (1j * w * MOS_COX))
+    wt = w * tau
+    ora = cs * wt / (1 + wt ** 2)
+    budget = np.array([_budget_ys(ww, 1j * ww * cs / (1 + 1j * ww * tau), psi_s, mino, r_h) for ww in w])
+    assert np.all(np.abs(ysc.real / w / ora - 1.0) <= 10.0 * budget), (ysc.real / w / ora - 1.0, budget)
