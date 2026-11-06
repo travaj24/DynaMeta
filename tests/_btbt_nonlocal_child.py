@@ -149,16 +149,17 @@ def g_rich(dv, ae=1e8):
 # =====================================================================================================
 
 def sc_defaults(opts):
-    """Importing the module registers nothing and pulls in neither custom_terms nor devsim."""
+    """Importing the module (on top of tunneling, which it imports -- and which since the v0.15 oxide-tunnelling
+    merge imports custom_terms itself, inertly) adds only itself, loads no devsim and registers nothing."""
     import importlib
-    mods_before = set(sys.modules)
+    importlib.import_module("dynameta.carriers.tunneling")
+    mid = set(sys.modules)
     importlib.import_module("dynameta.carriers.btbt_nonlocal")
-    new = set(sys.modules) - mods_before
+    new = sorted(m for m in set(sys.modules) - mid if m.startswith("dynameta"))
     from dynameta.carriers import custom_terms as CT
     return {"devsim_loaded": any(m == "devsim" or m.startswith("devsim.") or m.startswith("devsim_py")
-                                 for m in new),
-            "custom_terms_loaded_by_import": "dynameta.carriers.custom_terms" in new,
-            "registered": CT.is_registered()}
+                                 for m in sys.modules),
+            "new_dynameta_modules": new, "registered": CT.is_registered()}
 
 
 def sc_fdt(opts):
@@ -274,56 +275,10 @@ def sc_flip(opts):
     return {"hole_share": hs, "elec_share": es, "abs_share": habs}
 
 
-def fd_columns(dev, region, var, nodes, rows, h, term):
-    """The custom term's OWN Jacobian share J_on - J_off at `rows` x (var at `nodes`) against central
-    differences (steps h and 2h) of its own residual share rhs_on - rhs_off (get_matrix_and_rhs returns
-    rhs = -F, so FD = -J). Toggling term.active at the same state isolates the term. rhs_scale: the
-    round-off scale of the rows, max_r sum_k |J_on[r, k]| |x_k| over the solution variables. (The
-    method of tests/_custom_terms_child.fd_columns, restricted to Potential / Electrons / Holes: that
-    helper scans every node model with get_equation_numbers, which trips a DEVSIM circuit assertion on a
-    device without a circuit.)"""
-    import _custom_terms_child as CC
-    import scipy.sparse as sp
-    from dynameta.carriers import custom_terms as CT
-    ds = _ds()
-
-    def both():
-        term.active = False
-        off = CC.matrix()
-        term.active = True
-        on = CC.matrix()
-        return on, off
-    on, off = both()
-    Jon = sp.csc_matrix((on[0], on[1], on[2]))
-    Jc = Jon - sp.csc_matrix((off[0], off[1], off[2]))
-    xs = np.zeros(Jon.shape[1])
-    for v in ("Potential", "Electrons", "Holes"):
-        c = np.asarray(ds.get_equation_numbers(device=dev, region=region, variable=v))
-        ok = c >= 0
-        xs[c[ok]] = np.asarray(ds.get_node_model_values(device=dev, region=region, name=v))[ok]
-    R = float(np.max(np.abs(Jon[rows, :]) @ np.abs(xs)))
-    cols = CT.node_columns(dev, region, var, nodes)
-    out = []
-    for node, col in zip(nodes, cols):
-        x0 = list(ds.get_node_model_values(device=dev, region=region, name=var))[node]
-        hh = h(x0)
-        rec = {"node": int(node), "var": var, "h": hh, "J": _lst(Jc[rows, int(col)].toarray()),
-               "rhs_scale": R}
-        for tag, step in (("fd", hh), ("fd2", 2.0 * hh)):
-            share = []
-            for sgn in (+1.0, -1.0):
-                ds.set_node_value(device=dev, region=region, name=var, index=int(node), value=x0 + sgn * step)
-                on, off = both()
-                share.append(on[3][rows] - off[3][rows])
-            rec[tag] = _lst((share[0] - share[1]) / (2.0 * step))
-        ds.set_node_value(device=dev, region=region, name=var, index=int(node), value=x0)
-        out.append(rec)
-    return out
-
-
 def sc_jacobian(opts):
     """The term's share of DEVSIM's assembled Jacobian against central differences (steps h and 2h) of
-    DEVSIM's own residual, at a reverse-biased Zener (the tests/_custom_terms_child.fd_columns method)."""
+    DEVSIM's own residual, at a reverse-biased Zener (tests/_custom_terms_child.fd_columns, the shared helper)."""
+    import _custom_terms_child as CC
     from dynameta.carriers import btbt_nonlocal as NL
     from dynameta.carriers import custom_terms as CT
     from dynameta.carriers.tunneling import BTBTParams, SILICON_HURKX
@@ -358,9 +313,9 @@ def sc_jacobian(opts):
     rows = np.concatenate([CT.node_rows(dev, reg, "HoleContinuityEquation", perm[[i]]),
                            CT.node_rows(dev, reg, "ElectronContinuityEquation", perm[[a, b]])])
     psi_nodes = sorted({i - 1, i, i + 1, mid, a, b, b + d})
-    recs = fd_columns(dev, reg, "Potential", list(perm[psi_nodes]), rows, lambda x: 1e-5, term)
-    recs += fd_columns(dev, reg, "Electrons", list(perm[sorted({a, b})]), rows, lambda x: 1e-5 * x, term)
-    recs += fd_columns(dev, reg, "Holes", list(perm[[i]]), rows, lambda x: 1e-5 * x, term)
+    recs = CC.fd_columns(dev, reg, "Potential", list(perm[psi_nodes]), rows, lambda x: 1e-5, term)
+    recs += CC.fd_columns(dev, reg, "Electrons", list(perm[sorted({a, b})]), rows, lambda x: 1e-5 * x, term)
+    recs += CC.fd_columns(dev, reg, "Holes", list(perm[[i]]), rows, lambda x: 1e-5 * x, term)
     labels = {int(perm[i]): "start", int(perm[i - 1]): "start-1", int(perm[i + 1]): "start+1",
               int(perm[mid]): "mid", int(perm[a]): "a", int(perm[b]): "b", int(perm[b + d]): "beyond"}
     for r in recs:
@@ -428,8 +383,94 @@ def sc_warn_T(opts):
     return out
 
 
+def sc_reverse_refusal(opts):
+    """tunneling.setup_btbt on a region that carries a live nonlocal term: BTBTDoubleCountError, and the
+    region is unchanged (no BTBT_U model); on the OTHER region of no term (a second device) it installs."""
+    from dynameta.carriers import btbt_nonlocal as NL
+    from dynameta.carriers.tunneling import BTBTDoubleCountError, SILICON_HURKX, setup_btbt
+    ds = _ds()
+    dev = build_zener("zr")
+    NL.setup_btbt_nonlocal(dev, "b", NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12))
+    out = {}
+    try:
+        setup_btbt(dev, "b", SILICON_HURKX)
+        out["raised"] = None
+    except BTBTDoubleCountError as e:
+        out["raised"] = str(e)
+    out["models_after"] = sorted(m for m in ds.get_edge_model_list(device=dev, region="b") if m.startswith("BTBT"))
+    dev2 = build_zener("zr2")
+    setup_btbt(dev2, "b", SILICON_HURKX)                  # no nonlocal term there: installs
+    out["other_models"] = sorted(m for m in ds.get_edge_model_list(device=dev2, region="b")
+                                 if m.startswith("BTBT_U") and ":" not in m)
+    return out
+
+
+def sc_gap_material(opts):
+    """material= (the package gap kernel) vs the equivalent explicit Eg_tun_eV at T_REF: the solved Zener and
+    the term's rates are bit-identical; at T_K = 350 K with a band-temperature model the path gap follows
+    band_data_at_T and no advisory fires."""
+    import warnings
+    from dynameta.carriers import btbt_nonlocal as NL
+    from dynameta.carriers.tunneling import SILICON_HURKX
+    from dynameta.materials.band_temperature import BandTemperature, band_data_at_T
+    from dynameta.materials.transport_model import TransportModel
+    ds = _ds()
+    base = dict(n_bg_m3=1e24, eps_static=11.7, dos_mass_kg_of_n_m3=lambda n: 0.26 * 9.1093837015e-31,
+                band_gap_eV=float(opts["eg"]))
+    tm = TransportModel(**base)
+    out = {}
+    for tag in ("explicit", "material"):
+        dev = build_zener("zg" + tag)
+        if tag == "explicit":
+            spec = NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=float(tm.band_gap_eV))
+        else:
+            spec = NL.NonlocalBTBT(SILICON_HURKX, material=tm)
+        term = NL.setup_btbt_nonlocal(dev, "b", spec)
+        ds.set_parameter(device=dev, name="pc_bias", value=-0.9)
+        solve()
+        st, res = term.evaluate(dev)
+        out[tag] = {"R_hex": [float(v).hex() for v in res["R"]],
+                    "psi_hex": [float(v).hex() for v in st["psi"]], "Eg_path": term.phys.Eg_J / Q}
+        ds.delete_device(device=dev)
+    bt = BandTemperature(gap_law=tuple(opts["law"]), affinity_fraction=0.5)
+    tmT = TransportModel(**dict(base, band_temperature=bt))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        term = _zener_at_T(NL.NonlocalBTBT(SILICON_HURKX, material=tmT), 350.0)
+    out["T350"] = {"Eg_path": term.phys.Eg_J / Q, "Eg_set": term.phys.Eg_set_J / Q,
+                   "kernel_path": band_data_at_T(tmT, 350.0).E_g_eV,
+                   "kernel_set": band_data_at_T(tmT, 300.0).E_g_eV,
+                   "warnings": [str(x.message) for x in w]}
+    return out
+
+
+def _zener_at_T(spec, T_K):
+    """A Zener-like 1-D region at T_K (BipolarOptions.T_K) carrying the nonlocal term; returns the term."""
+    from dynameta.carriers import btbt_nonlocal as NL
+    from dynameta.carriers import physics_bipolar_dd as BP
+    from dynameta.carriers.bipolar_options import BipolarOptions
+    ds = _ds()
+    dev = "zT"
+    mesh = dev + "_m"
+    ds.create_1d_mesh(mesh=mesh)
+    ds.add_1d_mesh_line(mesh=mesh, pos=0.0, ps=1e-9, tag="a")
+    ds.add_1d_mesh_line(mesh=mesh, pos=5e-8, ps=1e-9, tag="b")
+    ds.add_1d_contact(mesh=mesh, name="a", tag="a", material="metal")
+    ds.add_1d_contact(mesh=mesh, name="b", tag="b", material="metal")
+    ds.add_1d_region(mesh=mesh, material="Si", region="s", tag1="a", tag2="b")
+    ds.finalize_mesh(mesh=mesh)
+    ds.create_device(mesh=mesh, device=dev)
+    ds.node_model(device=dev, region="s", name="NetDoping", equation="ifelse(x < 2.5e-8, -1e24, 1e24)")
+    with _quiet():
+        BP.setup_bipolar_region(dev, "s", eps_static=11.7, n_dos_m3=2.8e25, n_i_m3=1e16,
+                                mobility_n_m2Vs=0.1, mobility_p_m2Vs=0.04, tau_n_s=1e-6, tau_p_s=1e-6,
+                                fd_enhancement=False, options=BipolarOptions(T_K=T_K))
+    return NL.setup_btbt_nonlocal(dev, "s", spec)
+
+
 SCENARIOS = {"defaults": sc_defaults, "fdt": sc_fdt, "zener": sc_zener, "flip": sc_flip,
-             "jacobian": sc_jacobian, "equilibrium": sc_equilibrium, "warn_T": sc_warn_T}
+             "jacobian": sc_jacobian, "equilibrium": sc_equilibrium, "warn_T": sc_warn_T,
+             "reverse_refusal": sc_reverse_refusal, "gap_material": sc_gap_material}
 
 
 def run_child(scenario, **opts):
@@ -453,6 +494,11 @@ def run_child(scenario, **opts):
 if __name__ == "__main__":
     import warnings
     warnings.simplefilter("error")                       # warnings are errors, as in the suite
+    # the suite's DC well-posedness hook (tests/conftest.py, plan 4.4.2) on this child's raw DC solves too
+    if sys.argv[1] != "defaults" and not os.environ.get("NL_NO_HOOK"):   # defaults measures import side effects
+        import conftest
+        _ds()
+        conftest._install_dc_well_posedness_hook()
     _opts = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
     _res = SCENARIOS[sys.argv[1]](_opts)
     with open(sys.argv[2], "w", encoding="utf-8") as _f:
