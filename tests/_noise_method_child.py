@@ -6,7 +6,8 @@ digests of their float64 bytes where bitwise identity is the gate.
 
     python tests/_noise_method_child.py <scenario>
 
-Scenarios: plain_1V, hand_ref, wrap_ref, fresh1_ref, seq_ref (the reference gated-ITO modulator, validation/_reference_device)
+Scenarios: plain_1V, hand_ref, wrap_ref, fresh1_ref, seq_ref, seq_xp (the reference gated-ITO modulator,
+validation/_reference_device; seq_xp on an extended-precision builder, nightly)
 and hand_te, wrap_te (a gated bipolar n-GaAs / N-Al0.3Ga0.7As heterostack with a thermionic interface).
 "hand_*" is the documented hand recipe -- solve, set_ssac_gate, circuit_alter, a library DC re-settle
 (dc_solve.solve_dc with the builder's branch and tolerances), noise_analysis.noise_spectrum -- written out
@@ -202,6 +203,22 @@ def run(scenario):
             seq.append(NA.noise_spectrum(b.device, FF_REF, output_node="V1.I"))
         res["no_restore"] = {"digests": [digest(x) for x in seq],
                              "S_third_over_first": [float(v) for v in seq[2].S / seq[0].S]}
+    elif scenario == "seq_xp":
+        # P2 W7 (v0.15 follow-up; nightly): seq_ref's 0 / +1 / 0 V sequence on an EXTENDED-PRECISION builder.
+        # The restore writes the double-rounded state back, so the bitwise repeat is not implied by seq_ref.
+        import warnings
+        from dynameta.carriers import extended_precision as XP
+        from validation._reference_device import build_reference_modulator
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            b = LayeredDevsimBuilder(build_reference_modulator("drift_diffusion"), mesh_name="nx_m",
+                                     device_name="nx_d", extended_precision=True)
+            cf = b.solve(BiasPoint({GATE: 0.0, "bot_contact": 0.5}, "b05"))
+            n_build = len(rec)
+            res["seq"] = [digest(b.noise_spectrum(FF_REF, gate=GATE, vg=v, per_cell=False)) for v in (0.0, 1.0, 0.0)]
+        res["extended"] = [cf.extras.get("extended_precision"), bool(XP.is_enabled(b.device))]
+        res["warnings_build"] = [(w.category.__name__, str(w.message)[:120]) for w in rec[:n_build]]
+        res["warnings_calls"] = [(w.category.__name__, str(w.message)[:120]) for w in rec[n_build:]]
     elif scenario == "hand_te":
         b = LayeredDevsimBuilder(te_design(), mesh_name="nm_m", device_name="nm_d")
         b.solve(BiasPoint({}, "eq"))
