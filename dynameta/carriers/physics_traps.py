@@ -3,8 +3,10 @@ Trap physics for the bipolar drift-diffusion regions (physics_bipolar_dd): bulk 
 arbitrary trap energy E_t, several discrete levels each with its own capture parameters and density,
 the trapped charge those levels carry into Poisson, and interface traps (D_it) at a
 semiconductor/insulator interface -- their sheet charge Q_it(psi_s) and their surface SRH
-recombination. Quasi-static (steady-state) occupancy throughout. OPT-IN: nothing here runs unless a
-caller passes traps; the defaults reproduce the legacy midgap SRH model character-for-character.
+recombination. Quasi-static (steady-state) occupancy by default; KINETIC occupancy (finite capture and
+emission, an occupancy variable per level / bin, v0.15) with TrapLevel(dynamic=True) /
+InterfaceTraps(dynamic=True) -- section 5 below. OPT-IN: nothing here runs unless a caller passes traps;
+the defaults reproduce the legacy midgap SRH model character-for-character.
 
 FORMULATION (all SI; energies are measured from the intrinsic level E_i, + toward E_c, in eV)
 
@@ -59,6 +61,20 @@ FORMULATION (all SI; energies are measured from the intrinsic level E_i, + towar
    [Fitzgerald & Grove, Surf. Sci. 9, 347 (1968); Aberle, Glunz & Warta, J. Appl. Phys. 71, 4422
    (1992)]. Low-injection n-type: S_eff = (n0 + p0)/((n0 + n1)/S_p + (p0 + p1)/S_n) -> S_p.
 
+5. Kinetic traps (v0.15, plan 4.3.2; docs/audit/2026-11-06-v0.15-kinetic-traps.md). The occupancy is a
+   solution variable -- its odds w = f/(1-f) -- with N_t df/dt = R_n - R_p (srh_capture_exprs: R_n = [n (1-f)
+   - n1' f]/tau_n0, R_p = [p f - p1' (1-f)]/tau_p0; emission by detailed balance with the SAME n1', p1' as the
+   quasi-static kernel). R_n enters the electron row only, R_p the hole row only (physics_bipolar_dd's
+   single-carrier terms), the trap row balances both, and the stored charge -q N_t f IS the Poisson charge:
+   DC equals the quasi-static model (measured 1.4e-15), transient and ssac conserve charge (Kirchhoff to the
+   trap-free floor), and the conductance method G_p(omega)/omega of D_it follows Nicollian & Goetzberger
+   (Bell Syst. Tech. J. 46, 1055 (1967), eqs. 16-20) to the computed series-resistance budget. WHICH TO
+   USE: quasi-static for DC, I-V, lifetimes, compensation and the LF C-V; kinetic for any transient, ssac or
+   (from v0.15 K3) noise analysis of CHARGED levels -- a quasi-static charged trap in an 'ac' / 'noise' /
+   'transient_dc' solve raises an AdvisoryWarning (quasi_static_charged_traps). Kinetic levels need a seed
+   (seed_kinetic_traps, after the carriers are seeded; the builders do it) and refuse fermi_dirac statistics;
+   kinetic interface bins cost (bins) x (region nodes) unknowns, budgeted (KINETIC_UNKNOWN_BUDGET).
+
 DEVSIM REALIZATION. The sheet terms are applied on the SEMICONDUCTOR side of the interface as node
 models weighted by ItArea = A_node/NodeVolume, where A_node is the interface area each node owns
 (computed from DEVSIM's own interface element list: 1 in 1-D, half of each interface edge in 2-D, a third
@@ -78,9 +94,10 @@ nodes as well. (DEVSIM assigns a node shared by two interfaces to the first one 
 follows DEVSIM's own element list, so it inherits that convention.)
 
 LIMITS (documented in docs/audit/2026-11-03-devsim-traps.md):
-  * Quasi-static occupancy only: the trapped charge is an instantaneous function of (n, p). A DC sweep
-    (the LF C-V) is exact; a transient or ssac solve is NOT charge-conserving with CHARGED traps (the
-    capture current that fills a trap is not in the continuity time term). Trap kinetics are a follow-up.
+  * Quasi-static occupancy (the default): the trapped charge is an instantaneous function of (n, p). A DC
+    sweep (the LF C-V) is exact; a transient or ssac solve is NOT charge-conserving with CHARGED traps (the
+    capture current that fills a trap is not in the continuity time term) -- use dynamic=True there (item 5).
+  * Kinetic traps carry no noise source yet: noise_spectrum refuses them (v0.15 K3 adds the trap g-r events).
   * Ohmic contacts (v0.14 integration): with CHARGED bulk levels the contacts, the seed and the 3-D gate
     frame pin the TRAP-AWARE charge-neutral root (bipolar_options.equilibrium_fields with the levels'
     equilibrium Fermi occupancy, n1 = n_ie exp(E_t/kT)) -- the same rule as BGN / incomplete
@@ -446,8 +463,10 @@ class InterfaceTraps:
                    variable, masked off the interface); install_interface_traps refuses above
                    KINETIC_UNKNOWN_BUDGET -- coarsen with kinetic_bin_eV, or raise the budget.
     kinetic_bin_eV : bin width [eV] for a dynamic spec (default: as bin_eV, <= kT). A coarser bin cuts
-                   the unknown count; a continuum G_p/omega converges like h^2 in it (midpoint rule on
-                   the conductance integrand, validation/trap_kinetics.py), so kT is ~1e-3-accurate.
+                   the unknown count. The conductance G_p(omega) of a continuum converges like
+                   exp(-pi^2 kT/dE) in it (the omega tau(E) factor has poles at Im E = pi kT/2): MEASURED
+                   1e-5 .. 4e-5 at dE = kT, < 1e-9 at kT/2 (tests/test_trap_kinetics.py, K2-3) -- the LF
+                   charge alone converges twice as fast (D1c). Use kT/2 for a 1e-8 G_p, kT for 1e-4.
     """
     dit_eV_m2: float = 0.0
     distribution: str = "uniform"
@@ -695,8 +714,10 @@ _KINETIC_VARS = (("TrapW_", "TrapWSS_"), ("ItW", "ItWSS"))
 U_LIMIT = 600.0
 #: default ceiling on the extra unknowns of KINETIC interface bins (bins x semiconductor-region nodes): the
 #: masked region-wide variables cost one unknown per region node per bin (DEVSIM 2.11 has no interface
-#: solution variable). Calibrated on box A (docs/audit/2026-11-06-v0.15-kinetic-traps.md, section K2);
-#: install_interface_traps(max_kinetic_unknowns=) overrides it per call.
+#: solution variable). Calibrated on box A (docs/audit/2026-11-06-v0.15-kinetic-traps.md, section 4.3): a 2-D
+#: MOS DC Newton iteration costs ~0.3 s at 5e4, ~1.1 s at 1e5-3e5, 3.5 s at 6e5 extra unknowns; the install
+#: grows ~K^2 in the bin count K (4 s at 64 bins, 228 s at 200). install_interface_traps(max_kinetic_unknowns=)
+#: overrides it per call.
 KINETIC_UNKNOWN_BUDGET = 200_000
 
 

@@ -978,16 +978,24 @@ def _conductance_budget(w, psi_s, ps, cs, tau, minority, r_h):
          with the TRAP branch only: Y_s -> Y_s - R_h Y_s^2, Re off by R_h |Y_s|^2 = R_h C_s Re(Y_s)/tau,
          i.e. R_h C_s/tau relative (MEASURED to dominate at omega tau << 1: 1.27e-5 of the 1.4e-5 total);
     (iv) dielectric relaxation, w eps/(q mu_p N_A) (< 1e-8 here)."""
+    return _budget_ys(w, 1j * w * cs / (1.0 + 1j * w * tau), psi_s, minority, r_h)
+
+
+def _budget_ys(w, ys, psi_s, minority, r_h):
+    """The same budget for any trap admittance oracle Y_s (a single level, a binned sum, the continuum):
+    minority + [R_b |j w C_D + Y_s|^2 + R_h |Y_s|^2]/Re(Y_s) + w tau_d (first order in R_b and R_h; for a
+    single level |Y_s|^2/Re(Y_s) = C_s/tau)."""
     cd = _sze_cd(psi_s)
-    gp = cs * w * tau / (1.0 + (w * tau) ** 2) * w
     rb = MOS_TSI / (QE * MOS_MUP * MOS_NA)
     taud = MOS_EPSSI * EPS0 / (QE * MOS_MUP * MOS_NA)
-    return minority + rb * (w * (cd + cs)) ** 2 / gp + r_h * cs / tau + w * taud
+    return minority + (rb * abs(1j * w * cd + ys) ** 2 + r_h * abs(ys) ** 2) / ys.real + w * taud
 
 
-IT_SINGLE = PT.InterfaceTraps(distribution="discrete", levels=((IT_E, IT_N),), charge="acceptor",
-                              sigma_n_m2=IT_SN, sigma_p_m2=IT_SP, v_th_n_ms=IT_VTH, v_th_p_ms=IT_VTH,
-                              dynamic=True)
+def _it_single():
+    """The kinetic single level (a function, so the module still collects on code without `dynamic`)."""
+    return PT.InterfaceTraps(distribution="discrete", levels=((IT_E, IT_N),), charge="acceptor",
+                             sigma_n_m2=IT_SN, sigma_p_m2=IT_SP, v_th_n_ms=IT_VTH, v_th_p_ms=IT_VTH,
+                             dynamic=True)
 MOS_VG = 0.45                                             # gate above flat band: depletion, psi_s ~ 0.22 V
 WT = np.array([0.1, 0.3, 1.0, 3.0, 10.0])
 
@@ -997,7 +1005,7 @@ def mos_single():
     """The kinetic single-level MOS at V_G = 0.45 V: (psi_s, p_s, n_s, oracle tuple, omega, Y_sc) over
     omega tau = WT and the C_D-extraction point omega tau = 1e3, plus the LF point 1e-4."""
     V.fresh()
-    psib = _mos_ac("kmos", IT_SINGLE)
+    psib = _mos_ac("kmos", _it_single())
     _mos_vg(psib, 0.0, MOS_VG)
     psi_s, ps, ns = _mos_surface("kmos")
     orc = _ng_single_level(ps, ns)
@@ -1156,3 +1164,338 @@ def test_kinetic_interface_budget_refusal_and_advisory_scope():
     assert PT.quasi_static_charged_traps("kbud") == []             # kinetic bins + Q_f: no advisory
     V.fresh()
     _R.clear("kbud")
+
+
+# ---------------------------------------------------------------------------------------------------
+# K2-3: a uniform D_it continuum (N&G eqs. 18-20)
+# ---------------------------------------------------------------------------------------------------
+DIT, EG = 1e16, 1.12                                      # 1e12 cm^-2 eV^-1 across the Si gap, split at E_i
+WTM = np.array([0.3, 1.0, 1.98, 5.0, 20.0])              # omega tau_m
+
+
+def _continuum_oracles(w, ps, ns, levels):
+    """For holes (majority), with E_F at the surface from p_s (E_F - E_i = -kT ln(p_s/n_i)):
+    (a) the BINNED sum of N&G (17) over the simulated bins `levels` (E_k, N_k): Y_s = Sum_k j w C_k/(1 + j w
+        tau_k), C_k = q^2 N_k f_k (1-f_k)/kT, tau_k = (1 - f_k)/(c_p p_s), f_k the SRH steady state;
+    (b) the CONTINUUM integral of N&G (18) over the gap by scipy quad (exact Fermi f(E), tau(E));
+    (c) N&G (20) mirrored for holes: G_p/w = (q D/(2 w tau_m)) ln(1 + w^2 tau_m^2), tau_m = 1/(c_p p_s)
+        (derived here: with x = 1 - f, f (1-f) dE/kT = dx, so Y = j w q D Int_0^1 dx/(1 + j w tau_m x) =
+        (q D/tau_m) ln(1 + j w tau_m)); exact for an infinite band, so it differs from (b) by the tails
+        beyond the band ends, <= exp(-(E_F - E_v)/kT) + exp(-(E_c - E_F)/kT) of C_it.
+    Returns (Y_a complex, G_b/w, G_c/w, tail fraction)."""
+    from scipy.integrate import quad
+    cn, cp = IT_SN * IT_VTH, IT_SP * IT_VTH
+    efi = -V_T * math.log(ps / NI)
+    tau_m = 1.0 / (cp * ps)
+    ya = np.zeros(w.size, dtype=complex)
+    for e, nk, _kind in levels:
+        n1, p1 = NI * math.exp(e / V_T), NI * math.exp(-e / V_T)
+        f = (cn * ns + cp * p1) / (cn * (ns + n1) + cp * (ps + p1))
+        ck = QE * QE * nk * f * (1.0 - f) / (KB * 300.0)
+        tk = (1.0 - f) / (cp * ps)
+        ya += 1j * w * ck / (1.0 + 1j * w * tk)
+    gb = []
+    for ww in w:
+        def integrand(e):
+            f = 1.0 / (1.0 + math.exp((e - efi) / V_T))
+            t = (1.0 - f) * tau_m
+            return QE * DIT * f * (1.0 - f) / V_T * ww * t / (1.0 + (ww * t) ** 2)
+        gb.append(quad(integrand, -0.5 * EG, 0.5 * EG, points=[efi], epsabs=0.0, epsrel=1e-12, limit=400)[0])
+    gc = QE * DIT / (2.0 * w * tau_m) * np.log1p((w * tau_m) ** 2)
+    tail = math.exp(-(efi + 0.5 * EG) / V_T) + math.exp(-(0.5 * EG - efi) / V_T)
+    return ya, np.array(gb), gc, tail
+
+
+@pytest.mark.slow
+def test_conductance_method_continuum():
+    """K2-3 (slow, ~15 s). Uniform D_it = 1e12 cm^-2 eV^-1 over the gap, every kinetic bin at kT (44 region-
+    wide variables): G_p/omega = Re(Y_sc)/omega at omega tau_m = 0.3 ... 20 against
+    (a) the binned sum of N&G (17) over the simulated bins -- exact for the discretised model: tolerance 10x
+        the K2-1 budget with Y_s = the binned oracle;
+    (b) bin convergence, devsim-free: the binned sum at kT, kT/2, kT/4 (InterfaceTraps.sheet_levels) against
+        the continuum integral of N&G (18) by scipy quad (exact Fermi f(E), tau(E) = (1-f) tau_m) must
+        converge at least as h^2 (midpoint): error ratio >= 4 x 0.8 per halving (plan). FINDING: it
+        converges exponentially, but the CONDUCTANCE integrand's rate is half the occupancy's: the factor
+        omega tau/(1 + omega^2 tau^2), tau = (1-f) tau_m, has poles where 1 - f = +-i/(omega tau_m), i.e. at
+        Im E = (pi/2) kT (the Fermi function's own poles sit at pi kT), so the midpoint error is ~exp(-pi^2
+        kT/dE) = 5e-5 at dE = kT and 3e-9 at kT/2 (the D1c estimate exp(-2 pi^2 kT/dE) holds for the LF
+        charge only). MEASURED 1.2e-5 .. 4.0e-5 at kT, < 1e-9 at kT/2 and kT/4;
+    (c) N&G (20) mirrored for holes: |quad - closed form| <= the band-end tail bound (pure arithmetic), and
+        the simulated against (20) to 10x budget + the measured kT quadrature error (b) + the tail.
+    The peak of (20) sits at omega tau_m = 1.98 with 0.4024 q D (scipy, checked). OLD CODE: quasi-static bins
+    give G_p = 0. MEASURED (44 bins, psi_s = 0.264 V): device vs binned 1.3e-5, 9.8e-6, 5.3e-6, -2.5e-6,
+    -1.1e-5 (budget 1.4e-5 .. 3.0e-5); quad vs (20) <= 2e-12 (tail bound 1.5e-7 of C_it); G_p/omega at
+    omega tau_m = 1.98 = 0.40238 q D."""
+    from scipy.optimize import minimize_scalar
+    res = minimize_scalar(lambda x: -math.log1p(x * x) / (2.0 * x), bounds=(0.5, 5.0), method="bounded",
+                          options={"xatol": 1e-10})
+    assert res.x == pytest.approx(1.98, abs=5e-3) and -res.fun == pytest.approx(0.402, abs=5e-4)
+    V.fresh()
+    spec = dict(dit_eV_m2=DIT, band_gap_eV=EG, sigma_n_m2=IT_SN, sigma_p_m2=IT_SP, v_th_n_ms=IT_VTH,
+                v_th_p_ms=IT_VTH, dynamic=True)
+    it = PT.InterfaceTraps(**spec)
+    psib = _mos_ac("kcont", it)
+    _mos_vg(psib, 0.0, MOS_VG)
+    psi_s, ps, ns = _mos_surface("kcont")
+    r_h = _hole_path_resistance("kcont")
+    tau_m = 1.0 / (IT_SP * IT_VTH * ps)
+    w, y = _y_sc(WTM / tau_m / (2.0 * math.pi))
+    V.fresh()
+    _R.clear("kcont")
+    ya, gb, gc, tail = _continuum_oracles(w, ps, ns, it.sheet_levels())
+    efi = -V_T * math.log(ps / NI)
+    minority = max(IT_SN * (ns + NI * math.exp(e / V_T)) / (IT_SP * ps)
+                   for e, _n, _k in it.sheet_levels() if e < efi + 10.0 * V_T)
+    budget = np.array([_budget_ys(ww, yy, psi_s, minority, r_h) for ww, yy in zip(w, ya)])
+    gpw = y.real / w
+    assert np.all(np.abs(gpw / (ya.real / w) - 1.0) <= 10.0 * budget), (gpw / (ya.real / w) - 1, budget)   # (a)
+    errs = []
+    for h in (V_T, 0.5 * V_T, 0.25 * V_T):                                                          # (b)
+        lv = PT.InterfaceTraps(**dict(spec, kinetic_bin_eV=h)).sheet_levels()
+        errs.append(np.abs(_continuum_oracles(w, ps, ns, lv)[0].real / w / gb - 1.0))
+    for e1, e2 in zip(errs[:-1], errs[1:]):
+        assert np.all((e1 / e2 >= 0.8 * 4.0) | (e1 < 1e-10)), (e1, e2)
+    tail_rel = QE * DIT * tail * 0.5 / gc
+    assert np.all(np.abs(gb / gc - 1.0) <= tail_rel), (gb / gc - 1.0, tail_rel)                    # (c)
+    assert np.all(np.abs(gpw / gc - 1.0) <= 10.0 * budget + errs[0] + tail_rel)
+    assert gpw[2] == pytest.approx(-res.fun * QE * DIT, rel=10.0 * budget[2] + errs[0][2] + tail_rel[2])
+
+
+# ---------------------------------------------------------------------------------------------------
+# K2-6: 2-D wiring (masked region-wide variables on a laterally uniform 2-D MOS) and the builders
+# ---------------------------------------------------------------------------------------------------
+def _mos_2d(dev, it, ylines, *, lx=60e-9):
+    """The 1-D MOS above extruded to 2-D: 3 x-columns (lines at 0, lx/2, lx), the SAME y mesh lines as the
+    1-D x mesh (every 1-D node a y line, ps = its larger neighbouring gap, so DEVSIM adds none: its 2-D
+    line generator does NOT land on the graded 1-D positions by itself -- MEASURED, the line at t_si
+    came out 0.1 nm low), body contact on the bottom edge, circuit gate (V1) on the top edge (DEVSIM's 2-D contacts
+    sit on the boundary to inert pad regions, as validation/devsim_noise.bipolar_2d_resistor). Solved at
+    flat band. Returns psi_b."""
+    from dynameta.carriers import physics_equilibrium as PE
+    from dynameta.carriers import ac_analysis as AC
+    m = dev + "_m"
+    pad = 5e-9
+    ds.create_2d_mesh(mesh=m)
+    for xx in (0.0, 0.5 * lx, lx):
+        ds.add_2d_mesh_line(mesh=m, dir="x", pos=xx, ps=0.5 * lx)
+    yl = np.concatenate([[-pad], np.asarray(ylines, dtype=float), [MOS_TSI + MOS_TOX + pad]])
+    gap = np.diff(yl)
+    for i, pos in enumerate(yl):
+        ps = max(gap[i - 1] if i > 0 else 0.0, gap[i] if i < gap.size else 0.0)
+        ds.add_2d_mesh_line(mesh=m, dir="y", pos=float(pos), ps=float(ps) * 1.01)
+    ds.add_2d_region(mesh=m, material="Si", region="si", xl=0.0, xh=lx, yl=0.0, yh=MOS_TSI)
+    ds.add_2d_region(mesh=m, material="SiO2", region="ox", xl=0.0, xh=lx, yl=MOS_TSI, yh=MOS_TSI + MOS_TOX)
+    ds.add_2d_region(mesh=m, material="Si", region="pad_b", xl=0.0, xh=lx, yl=-pad, yh=0.0)
+    ds.add_2d_region(mesh=m, material="SiO2", region="pad_t", xl=0.0, xh=lx, yl=MOS_TSI + MOS_TOX,
+                     yh=MOS_TSI + MOS_TOX + pad)
+    ds.add_2d_interface(mesh=m, name="si_ox", region0="si", region1="ox", xl=0.0, xh=lx, yl=MOS_TSI,
+                        yh=MOS_TSI, bloat=1e-12)
+    ds.add_2d_contact(mesh=m, name="body", region="si", material="metal", xl=0.0, xh=lx, yl=0.0, yh=0.0,
+                      bloat=1e-10)
+    ds.add_2d_contact(mesh=m, name="gate", region="ox", material="metal", xl=0.0, xh=lx,
+                      yl=MOS_TSI + MOS_TOX, yh=MOS_TSI + MOS_TOX, bloat=1e-10)
+    with V.quiet():
+        ds.finalize_mesh(mesh=m)
+        ds.create_device(mesh=m, device=dev)
+    ds.node_model(device=dev, region="si", name="NetDoping", equation=repr(-MOS_NA))
+    with V.quiet():
+        BP.setup_bipolar_region(dev, "si", eps_static=MOS_EPSSI, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
+                                mobility_p_m2Vs=MOS_MUP, tau_n_s=1e3, tau_p_s=1e3, fd_enhancement=False)
+        BP.setup_equilibrium_seed_models(dev, "si")
+        PE.setup_dielectric_region(dev, "ox", MOS_EPSOX)
+        PE.setup_interface(dev, "si_ox")
+        BP.setup_contact_ohmic_bipolar(dev, "body")
+        AC.setup_circuit_contact(dev, "gate")
+        PT.install_interface_traps(dev, "si_ox", it)
+    psib = -V_T * math.log(MOS_NA / NI)
+    nox = len(_vals(dev, "x", "ox"))
+    ds.set_node_values(device=dev, region="ox", name="Potential", values=[psib] * nox)
+    ds.circuit_alter(name="V1", value=psib)
+    _seed(dev, "si")
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.delete_by_name(dev, ceq)
+    _solve(1e-10, 1e-12)
+    for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
+        _R.reapply_by_name(dev, ceq)
+    _solve(1e12, 1e-10)
+    return psib
+
+
+def test_conductance_method_2d_wiring():
+    """K2-6 (2-D; ~2 s). The single-level kinetic MOS (interface spacing 0.5 nm) and its extrusion to a
+    laterally uniform 2-D device (3 columns, every 1-D node a y line): the masked region-wide bin variable,
+    the half-edge interface weights (ItArea = A_node/NodeVolume) and the masked off-interface rows must
+    reproduce the 1-D Y_sc per unit area at omega tau = 0.1, 1, 10 to 1e-6 relative (on this tensor mesh
+    the per-node areas are exact and each column IS the 1-D problem: the difference is round-off; 1e-6 is
+    the plan's figure). FINDING: DEVSIM's 2-D mesher drops a mesh line ~0.1 nm from its neighbour (the
+    0.05 nm-graded 1-D mesh of K2-1 cannot be extruded: the t_si line vanished and with it the interface),
+    hence the 0.5 nm spacing here. The 3-D (Stacked3DSpec) ssac twin is NOT built (audit note, open items).
+    MEASURED: audit note (K2-6)."""
+    from dynameta.carriers import ac_analysis as AC
+    V.fresh()
+    psib = _mos_ac("kmos1", _it_single(), ps_i=0.5e-9)
+    _mos_vg(psib, 0.0, MOS_VG)
+    nodes = np.unique(np.concatenate([_vals("kmos1", "x", "si"), _vals("kmos1", "x", "ox")]))
+    _psi, ps, ns = _mos_surface("kmos1")
+    tau = _ng_single_level(ps, ns)[1]
+    freqs = np.array([0.1, 1.0, 10.0]) / tau / (2.0 * math.pi)
+    w1, y1 = _y_sc(freqs)
+    V.fresh()
+    _R.clear("kmos1")
+    lx = 60e-9
+    psib = _mos_2d("kmos2", _it_single(), list(nodes), lx=lx)
+    assert len(_vals("kmos2", "x", "si")) == 3 * int(np.sum(nodes <= MOS_TSI))
+    _mos_vg(psib, 0.0, MOS_VG)
+    pot = _vals("kmos2", "Potential", "si")
+    yy = _vals("kmos2", "y", "si")
+    assert np.max(pot[yy == yy.max()]) - np.min(pot[yy == yy.max()]) < 1e-12        # laterally uniform
+    with V.quiet():
+        f, C, G = AC.ssac_admittance(freqs)
+    wm = 2.0 * math.pi * np.asarray(f)
+    ym = (G + 1j * wm * C) / lx                                       # per unit area
+    ysc = 1.0 / (1.0 / ym - 1.0 / (1j * wm * MOS_COX))
+    assert np.all(np.abs(ysc / y1 - 1.0) < 1e-6), ysc / y1 - 1.0
+    assert len(PT.kinetic_trap_variables("kmos2", "si")) == 1
+    V.fresh()
+    _R.clear("kmos2")
+
+
+def test_builders_pass_kinetic_traps_through():
+    """The builders carry the new flags with no new keyword (P3 1.3.1): LayeredDevsimBuilder(interface_traps=
+    {...: InterfaceTraps(dynamic=True)}) + TransportModel(srh_traps=(TrapLevel(dynamic=True),)) build the
+    kinetic variables and equations, the builder seeds them (seed_kinetic_traps after its carrier seed), and
+    the zero-bias DC state equals the quasi-static build's to 1e-10 relative (K1-2's derivation)."""
+    import test_traps as TT
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.sweep import BiasPoint
+    out = {}
+    for dyn in (False, True):
+        lv = (PT.TrapLevel(energy_eV=0.2, density_m3=1e21, kind="acceptor", tau_n0_s=1e-8, tau_p0_s=1e-8,
+                           dynamic=dyn),)
+        # 0.1 eV bins (12): the builder's 5307-node region x 44 kT bins = 2.3e5 unknowns is above the
+        # default budget (the refusal fires -- MEASURED); the quasi-static twin uses the SAME bins
+        it = (PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12, dynamic=True, kinetic_bin_eV=0.1) if dyn
+              else PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12, bin_eV=0.1))
+        b = LayeredDevsimBuilder(TT._layered_bipolar_cap(lv), mesh_name="klay_m", device_name="klay",
+                                 interface_traps={("ox", "si"): it})
+        try:
+            b.solve(BiasPoint({}, "eq"), rel_tol=1e-10)
+            out[dyn] = {k: _vals("klay", k, "si") for k in ("Potential", "Electrons", "Holes")}
+            if dyn:
+                kv = PT.kinetic_trap_variables("klay", "si")
+                assert "TrapW_trap0" in kv and sum(v.startswith("ItW") for v in kv) == len(it.sheet_levels())
+                assert "TrapEquation_trap0" in ds.get_equation_list(device="klay", region="si")
+        finally:
+            b.teardown()
+    for k in out[False]:
+        rel = np.max(np.abs(out[True][k] - out[False][k]) / np.maximum(np.abs(out[False][k]), 1e-300))
+        assert rel < 1e-10 if k != "Potential" else np.max(np.abs(out[True][k] - out[False][k])) < 1e-12, (k, rel)
+
+
+# ---------------------------------------------------------------------------------------------------
+# K2-5: small-step gate transient = the N&G Fig. 6 circuit
+# ---------------------------------------------------------------------------------------------------
+def _gate_step(vg0, dv, taus, *, h_frac=0.02, n_tau=5.0, stall_ok=False):
+    """From the DC state at gate source vg0: transient_dc, a BDF1 ramp to vg0 + dv over 1e-6 tau*, BDF1
+    damping steps (1e-6 .. 5e-4 tau*, as _dl_transient), then the trapezoidal rule at h = h_frac tau* to
+    n_tau tau*. Returns (t_damp_end, t, i_g) of the TR samples with i_g = -I(V1) the current INTO the gate,
+    or, stall_ok, (None, t, i_g) of the damping samples up to the first step whose Newton cannot meet the
+    relative test (a current decayed to round-off -- the quasi-static twin)."""
+    ds.circuit_alter(name="V1", value=vg0)
+    _solve(1e12, 1e-10)
+    _solve(1e12, 1e-8, type="transient_dc")
+
+    def step(kind, dt):
+        with V.quiet():
+            r = ds.solve(type=kind, tdelta=dt, charge_error=1e30, absolute_error=1e30, relative_error=1e-6,
+                         maximum_iterations=60, info=True)
+        assert r["converged"] or stall_ok, (kind, dt)
+        return r["converged"]
+
+    t, tr = 0.0, 1e-6 * taus
+    for i in range(1, 11):
+        ds.circuit_alter(name="V1", value=vg0 + dv * i / 10)
+        step("transient_bdf1", tr / 10)
+        t += tr / 10
+    dd, damp = 1e-6 * taus, []
+    while dd < 5.1e-4 * taus:
+        if not step("transient_bdf1", dd):
+            break
+        t += dd
+        dd *= 2.0
+        damp.append((t, -float(ds.get_circuit_node_value(node="V1.I", solution="dcop"))))
+    if stall_ok:
+        return (None,) + tuple(np.array(damp).T)
+    t_d, rec = t, []
+    for _ in range(int(round(n_tau / h_frac))):
+        step("transient_tr", h_frac * taus)
+        t += h_frac * taus
+        rec.append((t, -float(ds.get_circuit_node_value(node="V1.I", solution="dcop"))))
+    return (t_d,) + tuple(np.array(rec).T)
+
+
+def test_gate_step_transient_is_the_ng_circuit():
+    """K2-5 (~7 s). A small gate step on the kinetic single-level MOS (V_G = 0.45 V) against the N&G
+    Fig. 6 circuit (C_ox in series with C_D || (R_s + C_s), R_s = tau/C_s; derived in the plan from N&G):
+    after the step the trap branch relaxes with tau* = tau C_th/(C_s + C_th), C_th = C_ox + C_D, and
+        i_g(t) = C_ox dV C_ox C_s / (C_th (C_th + C_s) tau*) exp(-t/tau*)
+    (C_D from the ssac at omega tau = 1e3 less the oracle's C_s/(1 + 1e6) -- K2-2's extraction, the Sze
+    check is there; C_s, tau from the DC surface state). The response is taken ANTISYMMETRIC, (i(+dV) -
+    i(-dV))/2 with dV = 0.1 mV: FINDING, a single step's first-order nonlinearity is ~2.4 (dV/2V_t) --
+    MEASURED symmetric/antisymmetric 4.7e-3 at 0.1 mV -- so the plan's single 1 mV step could not meet 2e-3;
+    the antisymmetric part leaves (dV/V_t)^2 = 1.5e-5. GATE over [tau*/10, 5 tau*]: err = i/i_or - 1 equals
+    the trapezoidal rule's own error E_TR(t) = expm1(-(t/tau*)(h/tau*)^2/12) to 2 % of it plus
+    10 x [(1 + t/tau*)(R_h C_s/tau + R_b (C_D + C_s)^2/(C_s tau)) + (dV/V_t)^2 + 1e-6] (the series resistances
+    of K2-1 shift tau* -- an error growing with t -- and the amplitude; the ramp 1e-6). MEASURED: max |err -
+    E_TR| = 7.9e-5 (3.5e-5 at 5 tau*, against a 1e-3 tolerance there). OLD CODE: the quasi-static level has
+    no R_s-C_s branch, so there is no tail: MEASURED 5.8 i_or at 3e-5 tau* (the instant trap capacitance
+    charging through the hole path), 5.8e-2 i_or at the last damping step that converges (< 1e-3 tau*), then
+    round-off -- a > 90 % miss (asserted < 10 %).
+    ADVERSARIAL: the oracle's C_s + 1 % breaks it."""
+    V.fresh()
+    psib = _mos_ac("k25", _it_single())
+    _mos_vg(psib, 0.0, MOS_VG)
+    psi_s, ps, ns = _mos_surface("k25")
+    cs, tau, _f0, _mino = _ng_single_level(ps, ns)
+    r_h = _hole_path_resistance("k25")
+    w, y = _y_sc(np.array([1e3]) / tau / (2.0 * math.pi))
+    cd = y.imag[0] / w[0] - cs / (1.0 + 1e6)
+    vg0, dv = psib + MOS_VG, 1e-4
+
+    def oracle(cs_):
+        cth = MOS_COX + cd
+        taus_ = tau * cth / (cs_ + cth)
+        return taus_, MOS_COX * dv * MOS_COX * cs_ / (cth * (cth + cs_)) / taus_
+
+    taus, amp = oracle(cs)
+    td, tp, ip = _gate_step(vg0, +dv, taus)
+    _td, _tm, im = _gate_step(vg0, -dv, taus)
+    ia = 0.5 * (ip - im)
+    assert np.max(np.abs(0.5 * (ip + im) / ia)[tp >= 0.1 * taus]) < 1e-2   # odd response dominates
+    sel = tp >= 0.1 * taus
+    e_tr = _tr_error(tp - td, 0.02, taus)
+    rb = MOS_TSI / (QE * MOS_MUP * MOS_NA)
+    tol = 0.02 * np.abs(e_tr) + 10.0 * ((1.0 + tp / taus) * (r_h * cs / tau + rb * (cd + cs) ** 2 / (cs * tau))
+                                        + (dv / V_T) ** 2 + 1e-6)
+    err = ia / (amp * np.exp(-tp / taus)) - 1.0
+    assert np.all(np.abs(err - e_tr)[sel] <= tol[sel]), np.max((np.abs(err - e_tr) / tol)[sel])
+    t2, a2 = oracle(1.01 * cs)                                   # adversarial: C_s + 1 %
+    bad = ia / (a2 * np.exp(-tp / t2)) - 1.0
+    assert np.max((np.abs(bad - e_tr) - tol)[sel]) > 0.0
+    V.fresh()
+    _R.clear("k25")
+    # old code: the quasi-static level (no capture branch) -- no exponential tail
+    qs_it = PT.InterfaceTraps(distribution="discrete", levels=((IT_E, IT_N),), charge="acceptor",
+                              sigma_n_m2=IT_SN, sigma_p_m2=IT_SP, v_th_n_ms=IT_VTH, v_th_p_ms=IT_VTH)
+    psib = _mos_ac("k25q", qs_it)
+    _mos_vg(psib, 0.0, MOS_VG)
+    _tq, tq, iq = _gate_step(vg0, +dv, taus, stall_ok=True)
+    _t2, tq2, iq2 = _gate_step(vg0, -dv, taus, stall_ok=True)
+    n = min(tq.size, tq2.size)
+    # the quasi-static trap charge is an INSTANT capacitance charged through the hole path (tau_RC = (R_h +
+    # R_b)(C_s + C_D) ~ 5e-11 s): its current is gone within the damping steps -- its last converged sample
+    # (the Newton then stalls on a current at round-off) is < 10 % of i_or while i_or(t) ~ amp there
+    last = 0.5 * (iq[n - 1] - iq2[n - 1]) / (amp * math.exp(-tq[n - 1] / taus))
+    assert tq[n - 1] < 1e-3 * taus and abs(last) < 0.1, (tq[n - 1] / taus, last)
+    V.fresh()
+    _R.clear("k25q")
