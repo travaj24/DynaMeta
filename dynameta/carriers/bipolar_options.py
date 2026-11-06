@@ -104,7 +104,12 @@ here re-defines a composite by name, so options compose with trap levels, interf
 
 4. TEMPERATURE. `T_K` sets V_t = k T / q for the region (the default None keeps V_t = V_T at T_REF
    exactly). It does NOT rescale the material inputs: n_i, N_c (n_dos_m3), N_v (n_dos_p_m3), the
-   mobilities and the lifetimes must be supplied AT T_K by the caller.
+   mobilities and the lifetimes must be supplied AT T_K by the caller. The builders (2-D
+   LayeredDevsimBuilder, 3-D Devsim3DEquilibrium) derive N_c, N_v from the DOS MASSES, so they evaluate
+   them at T_K through ONE helper, `band_dos_at_T` (N proportional to T^(3/2)); n_i_m3 stays a direct
+   input given at T_K. Not temperature-scaled (v0.14): the BTBT parameters (physics at T_REF; setup_btbt
+   warns under T_K) and the electron affinity chi (a heterostack refuses unless the material states the
+   temperature chi was quoted at -- LayeredDevsimBuilder(on_chi_temperature=...)).
 
 5. GENERATION. `generation_m3s` adds a uniform external generation G (region parameter `G_ext`,
    rampable with ds.set_parameter) to both continuity equations: U_net = U_SRH + U_A + U_rad - G.
@@ -272,6 +277,24 @@ class BipolarOptions:
         """Thermal voltage [V] at T_K (V_T at T_REF when T_K is None -- the SAME float)."""
         from dynameta.constants import V_T
         return V_T if self.T_K is None else KB * float(self.T_K) / Q_E
+
+
+def band_dos_at_T(m_n_kg: float, m_p_kg: Optional[float], options: Optional[BipolarOptions]):
+    """(N_c, N_v) [m^-3] of a bipolar region from its DOS masses at the region's temperature: options.T_K
+    when set, else T_REF -- the ONE temperature source, the same one that sets the region's V_t.
+    m_p_kg None -> N_v = N_c (the builders' long-standing default). THE single rule for both builders
+    (2-D LayeredDevsimBuilder._setup_bipolar_region, 3-D Devsim3DEquilibrium body + gate frame; v0.14
+    row 3.2-7: the 3-D path evaluated the masses at T_REF under T_K). The T_K=None call is the
+    T_REF-default effective_dos_m3 call, bit-identical to what both builders computed before."""
+    from dynameta.carriers.physics_equilibrium import effective_dos_m3
+    T = getattr(options, "T_K", None)
+    if T is None:
+        Nc = effective_dos_m3(float(m_n_kg))
+        Nv = effective_dos_m3(float(m_p_kg)) if m_p_kg else Nc
+    else:
+        Nc = effective_dos_m3(float(m_n_kg), float(T))
+        Nv = effective_dos_m3(float(m_p_kg), float(T)) if m_p_kg else Nc
+    return Nc, Nv
 
 
 # =====================================================================================================
@@ -637,7 +660,7 @@ def options_contact_models(device: str, region: "str | None") -> bool:
     return "EquilibriumPotential" in ds.get_node_model_list(device=device, region=region)
 
 
-__all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "BipolarOptions",
+__all__ = ["AugerModel", "RadiativeModel", "BGNModel", "IonizationModel", "BipolarOptions", "band_dos_at_T",
            "AUGER_SI_DZIEWIOR_SCHMID_1977", "AUGER_SI_ALTERMATT_1997", "RADIATIVE_SI_TRUPKE_2003",
            "BGN_SI_SLOTBOOM_1977", "BGN_SI_KLAASSEN_1992", "BGN_SI_DEL_ALAMO_1985",
            "SI_DONOR_IONIZATION_EV", "SI_ACCEPTOR_IONIZATION_EV", "IONIZATION_SI_P_B",
