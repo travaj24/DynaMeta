@@ -266,7 +266,10 @@ def test_defaults_off():
     and the existing digest gates (audit note)."""
     from dynameta.materials import TransportModel
     assert {f.name: f.default for f in dataclasses.fields(TransportModel)}["band_temperature"] is None
-    assert dataclasses.fields(TransportModel)[-1].name == "band_temperature"   # appended: positional order kept
+    # appended after carrier_statistics: positional order kept (v0.15 4.2.4 appends hooge_alpha_n/_p after it)
+    names = [f.name for f in dataclasses.fields(TransportModel)]
+    assert names[names.index("carrier_statistics") + 1] == "band_temperature"
+    assert names[names.index("band_temperature") + 1:] == ["hooge_alpha_n", "hooge_alpha_p"]
     assert _tm().band_temperature is None
 
 
