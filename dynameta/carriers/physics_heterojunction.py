@@ -112,14 +112,17 @@ terms of thermionic emission, which are not modelled. Before this, a T_K region 
 the interface at 300 K (and with BGN it was refused). The TE fluxterm has no noise source in
 noise_analysis (documented limit).
 
-AFFINITY TEMPERATURE (v0.14 row 3.2-10, user decision 3 as modified 2026-11-06). chi_eV is used as
-given at the device temperature: there is no chi(T) model (the Varshni E_g(T) / chi(T) band-temperature
-model is v0.15). Each TransportModel can state the temperature its chi was quoted at
-(`chi_reference_T_K`, None = unstated = T_REF); check_affinity_temperature compares it with the device
-T for every material of a heterostack and, on a mismatch, acts per the builder's
+AFFINITY TEMPERATURE (v0.14 row 3.2-10, user decision 3 as modified 2026-11-06). Without a band-temperature
+model chi_eV is used as given at the device temperature. Each TransportModel can state the temperature its
+chi was quoted at (`chi_reference_T_K`, None = unstated = T_REF); check_affinity_temperature compares it
+with the device T for every material of a heterostack and, on a mismatch, acts per the builder's
 `on_chi_temperature` toggle: "refuse" (default, AffinityTemperatureError), "warn" (AdvisoryWarning
 stating the size of the assumption) or "off" (silent). Materials of equal (chi_eV, band_gap_eV) -- one
 semiconductor at different dopings -- have no offset and are never checked.
+v0.15 (plan 4.3.3): a material with TransportModel.band_temperature (materials.BandTemperature) has its
+chi, E_g and (optionally) n_i EVALUATED at the device T (materials.band_data_at_T: Varshni anchored at
+chi_reference_T_K, chi moved by the required affinity_fraction of the gap change), so it satisfies the
+check (affinity_temperature_tags) and the toggle no longer applies to it; the others are checked as above.
 """
 
 from __future__ import annotations
@@ -138,7 +141,7 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["temperature_of_V_t", "region_V_t", "richardson_constant_Am2K2", "A_RICHARDSON_FREE",
            "HeteroSide", "anderson_alignment", "setup_log_activity", "setup_heterointerface_carriers", "interface_models",
            "HETERO_MODELS", "delta_closed_form_coefficients", "AffinityTemperatureError",
-           "CHI_TEMPERATURE_MODES", "check_affinity_temperature"]
+           "CHI_TEMPERATURE_MODES", "check_affinity_temperature", "affinity_temperature_tags"]
 
 # Interface carrier models: thermionic emission (Horio-Yanai / Yang-East-Haddad) or the continuous
 # quasi-Fermi-level drift-diffusion limit.
@@ -259,8 +262,9 @@ _ALGAAS_GAAS_DEG_MEV_PER_100K = 2.15
 
 class AffinityTemperatureError(NotImplementedError):
     """A heterostack runs at a temperature other than the one its electron affinities were quoted at, and
-    on_chi_temperature="refuse" (the default). Missing: a chi(T) model (v0.15). The message names the
-    materials, the toggle and the TransportModel field. A NotImplementedError, like the builder's other
+    on_chi_temperature="refuse" (the default), for a material WITHOUT a band-temperature model (v0.15:
+    TransportModel.band_temperature evaluates chi at T and is the physics remedy). The message names the
+    materials, the toggle and the TransportModel fields. A NotImplementedError, like the builder's other
     "this physics is not modelled" refusals (the non-isothermal stack)."""
 
 
@@ -286,7 +290,9 @@ def check_affinity_temperature(chi_T_K: Mapping[str, Optional[float]], T_K: floa
       "off"    : proceed silently. ONLY for users who have validated chi_eV at their T but cannot (or do
                not want to) tag every material -- e.g. a sweep over T with T-independent fitted offsets.
 
-    The chi_eV is None refusal (anderson_alignment) comes FIRST and is not affected by this toggle."""
+    The chi_eV is None refusal (anderson_alignment) comes FIRST and is not affected by this toggle. The
+    builders build chi_T_K with affinity_temperature_tags, so a material with a band-temperature model is
+    consistent by construction (its chi is evaluated at T)."""
     if mode not in CHI_TEMPERATURE_MODES:
         raise ValueError("on_chi_temperature must be one of {}; got {!r}".format(CHI_TEMPERATURE_MODES, mode))
     if mode == "off":
@@ -305,21 +311,33 @@ def check_affinity_temperature(chi_T_K: Mapping[str, Optional[float]], T_K: floa
     if mode == "refuse":
         raise AffinityTemperatureError(
             "{}: the heterostack runs at T = {:.6g} K but the electron affinities of {} were quoted at another "
-            "temperature, and they would be used unchanged (no chi(T) model; v0.15). Either set "
-            "TransportModel.chi_reference_T_K = {:.6g} on each material whose chi_eV is valid at that T, or pass "
-            "on_chi_temperature='warn' (proceed with a warning) / 'off' (proceed silently; for affinities you "
-            "have validated at T).".format(owner, T, which, T))
+            "temperature, and they would be used unchanged (those materials carry no band-temperature model). "
+            "Either give them TransportModel.band_temperature = materials.BandTemperature(...) (chi and E_g "
+            "evaluated at T), or set TransportModel.chi_reference_T_K = {:.6g} on each material whose chi_eV is "
+            "valid at that T, or pass on_chi_temperature='warn' (proceed with a warning) / 'off' (proceed "
+            "silently; for affinities you have validated at T).".format(owner, T, which, T))
     warnings.warn(
-        "{}: the heterostack runs at T = {:.6g} K with the electron affinities of {} used unchanged (no chi(T) "
-        "model; on_chi_temperature='warn'). Size of the assumption: Delta E_c(T) moves by gamma_chi x the "
-        "mismatch of the two gaps' temperature slopes -- for Al0.3Ga0.7As/GaAs (Vurgaftman et al. 2001 Varshni) "
-        "{:.2f} meV per 100 K in the gap difference, i.e. ~{:.1f}-{:.1f} meV in Delta E_c over |T - T_chi| = "
-        "{:.4g} K (gamma_chi = 1/2 .. 1); larger for Si/SiGe-type pairs. Set TransportModel.chi_reference_T_K "
-        "= {:.6g} once chi_eV is validated at T.".format(
+        "{}: the heterostack runs at T = {:.6g} K with the electron affinities of {} used unchanged (no "
+        "band-temperature model; on_chi_temperature='warn'). Size of the assumption: Delta E_c(T) moves by "
+        "gamma_chi x the mismatch of the two gaps' temperature slopes -- for Al0.3Ga0.7As/GaAs (Vurgaftman et "
+        "al. 2001 Varshni) {:.2f} meV per 100 K in the gap difference, i.e. ~{:.1f}-{:.1f} meV in Delta E_c over "
+        "|T - T_chi| = {:.4g} K (gamma_chi = 1/2 .. 1); larger for Si/SiGe-type pairs. Set "
+        "TransportModel.chi_reference_T_K = {:.6g} once chi_eV is validated at T, or give the materials a "
+        "TransportModel.band_temperature model (chi evaluated at T).".format(
             owner, T, which, _ALGAAS_GAAS_DEG_MEV_PER_100K,
             0.5 * _ALGAAS_GAAS_DEG_MEV_PER_100K * dT / 100.0, _ALGAAS_GAAS_DEG_MEV_PER_100K * dT / 100.0,
             dT, T),
         AdvisoryWarning, stacklevel=3)
+
+
+def affinity_temperature_tags(transports: Mapping[str, object], T_K: float) -> Dict[str, Optional[float]]:
+    """{material: the temperature its chi_eV holds at} for check_affinity_temperature -- the ONE place the
+    v0.15 band-temperature model meets the v0.14 guard: a material with TransportModel.band_temperature has
+    its chi evaluated AT T_K (materials.band_data_at_T), so its tag is T_K (consistent, whatever the toggle);
+    any other material keeps its chi_reference_T_K (None = unstated = T_REF), exactly as in v0.14."""
+    return {m: (float(T_K) if getattr(t, "band_temperature", None) is not None
+                else getattr(t, "chi_reference_T_K", None))
+            for m, t in transports.items()}
 
 
 # ---- DEVSIM node models: the bulk-consistent log-activity L = (E_F - E_band)/kT of one carrier --------

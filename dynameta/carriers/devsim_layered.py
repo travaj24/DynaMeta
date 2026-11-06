@@ -44,6 +44,7 @@ from dynameta.carriers import eq_registry as _R
 from dynameta.carriers import extended_precision as XP
 from dynameta.carriers.dc_solve import solve_dc
 from dynameta.geometry.design import Design
+from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
 from dynameta.geometry.guards import require_supported_geometry
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
@@ -92,8 +93,10 @@ class LayeredDevsimBuilder:
 
     on_chi_temperature (v0.14 row 3.2-10, user decision 3): what a HETEROSTACK (two or more different
     semiconductor materials) does when the device temperature (BipolarOptions.T_K; T_REF otherwise) differs
-    from the temperature its affinities were quoted at (TransportModel.chi_reference_T_K, None = T_REF).
-    chi_eV is used unchanged either way -- there is no chi(T) model in v0.14.
+    from the temperature its affinities were quoted at (TransportModel.chi_reference_T_K, None = T_REF), for
+    the materials WITHOUT a band-temperature model (their chi_eV is used unchanged at the device T). A
+    material with TransportModel.band_temperature (v0.15, materials.BandTemperature) has chi, E_g and,
+    optionally, n_i evaluated at the device T (materials.band_data_at_T) and is never subject to the toggle.
       "refuse" (default): raise physics_heterojunction.AffinityTemperatureError naming the materials, this
                toggle and the field. Use it unless you know your affinities; if chi_eV IS your value at the
                device T, tag the materials (chi_reference_T_K = T_K) instead of switching the check off.
@@ -573,7 +576,9 @@ class LayeredDevsimBuilder:
                 continue
             tr = self.design.materials.get(sp.material).transport
             own[sp.name] = self._own_phi_c(sp.name, tr)
-            chi[sp.name] = float(tr.chi_eV) if tr.chi_eV is not None else None
+            # v0.15: chi at the region's T (TransportModel.band_temperature); no model -> chi_eV unchanged
+            chi_T = band_data_at_T(tr, transport_temperature_K(tr)).chi_eV
+            chi[sp.name] = float(chi_T) if chi_T is not None else None
             mats[sp.name] = sp.material
         # v0.14 (user decision 2026-11-04): TransportModel.chi_eV defaults to None. Regions of ONE material
         # align with zero offset whatever chi is (bit-identical to the old 4.5 - 4.5 = 0.0); two different
@@ -589,12 +594,12 @@ class LayeredDevsimBuilder:
         # quoted there (after the chi_eV-is-None refusal above). Only a HETEROstack is checked: materials
         # whose (chi_eV, band_gap_eV) all agree are one semiconductor at different dopings (doping lives
         # in TransportModel, so a p/n homojunction is two material names), with no offset to drift.
+        # v0.15: a material with a band-temperature model has chi evaluated at T -> consistent (the tags).
         trs = {m: self.design.materials.get(m).transport for m in set(mats.values())}
         if len({(t.chi_eV, t.band_gap_eV) for t in trs.values()}) > 1:
-            HJ.check_affinity_temperature(
-                {m: getattr(t, "chi_reference_T_K", None) for m, t in trs.items()},
-                HJ.temperature_of_V_t(vts[semis[0]]), mode=self.on_chi_temperature,
-                owner="LayeredDevsimBuilder")
+            T_dev = HJ.temperature_of_V_t(vts[semis[0]])
+            HJ.check_affinity_temperature(HJ.affinity_temperature_tags(trs, T_dev), T_dev,
+                                          mode=self.on_chi_temperature, owner="LayeredDevsimBuilder")
         for r, (phi_c, s_v) in frames.items():
             if s_v == 0.0:
                 continue
@@ -645,7 +650,9 @@ class LayeredDevsimBuilder:
             sd0, sd1 = self._hetero_side(r0), self._hetero_side(r1)
             if sd0.holes and mat[r0] != mat[r1]:
                 for sd, t, nm in ((sd0, t0, mat[r0]), (sd1, t1, mat[r1])):
-                    if t.band_gap_eV is None:            # v0.14: no default gap (user decision 2026-11-04)
+                    # the gap AT the region's T: band_gap_eV as given, or the band-temperature model's E_g(T)
+                    eg_T = band_data_at_T(t, transport_temperature_K(t)).E_g_eV
+                    if eg_T is None:                     # v0.14: no default gap (user decision 2026-11-04)
                         raise ValueError(
                             "LayeredDevsimBuilder: bipolar heterojunction '{}'/'{}': material '{}' has no "
                             "band_gap_eV. The valence-band offset of a bipolar heterojunction needs both "
@@ -653,13 +660,16 @@ class LayeredDevsimBuilder:
                             "defaults to None since v0.14 so an offset is never set by a default.".format(
                                 r0, r1, nm))
                     eg = sd.phi_c_V - sd.phi_v_V
-                    if abs(eg - float(t.band_gap_eV)) > _HJ_EG_TOL_EV:
+                    if abs(eg - float(eg_T)) > _HJ_EG_TOL_EV:
                         raise ValueError(
                             "LayeredDevsimBuilder: bipolar heterojunction material '{}' has band_gap_eV = "
-                            "{:.4f} but its statistics give E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV at T = {:.6g} K (n_i_m3 must be the intrinsic density AT that temperature; N_c, N_v follow the DOS masses at T); the "
+                            "{:.4f} at T (as given, or from its band_temperature model) but its statistics give "
+                            "E_g = kT ln(N_c N_v / n_i^2) = {:.4f} eV at T = {:.6g} K (n_i_m3 must be the intrinsic "
+                            "density AT that temperature; N_c, N_v follow the DOS masses at T); the "
                             "valence offset would follow the statistics, not the stated gap. Set n_i_m3 = "
-                            "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV).".format(
-                                nm, float(t.band_gap_eV), eg,
+                            "sqrt(N_c N_v) exp(-E_g / 2kT) (or correct band_gap_eV; with a band_temperature model, "
+                            "derive_n_i=True derives n_i(T) from the n_i at chi_reference_T_K).".format(
+                                nm, float(eg_T), eg,
                                 HJ.temperature_of_V_t(HJ.region_V_t(self.device, sd.region))))
             model = self.heterointerface
             if model == "auto":
@@ -705,8 +715,10 @@ class LayeredDevsimBuilder:
         # ONE helper shared with the 3-D builder (v0.14 row 3.2-7).
         from dynameta.carriers.bipolar_options import band_dos_at_T
         Nc, Nv = band_dos_at_T(dos, tr.dos_mass_p_kg, getattr(tr, "bipolar_options", None))
+        # n_i at the region's T: n_i_m3 as given, or derived by the band-temperature model (derive_n_i=True)
+        n_i = band_data_at_T(tr, transport_temperature_K(tr)).n_i_m3
         BP.setup_bipolar_region(
-            self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
+            self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(n_i),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
             tau_n_s=float(tr.tau_srh_s), tau_p_s=float(tr.tau_srh_s), fd_enhancement=True, n_dos_p_m3=Nv,
