@@ -572,7 +572,7 @@ jobs:
             tests/test_dc_solve_abs_tol.py tests/test_well_posedness.py tests/test_devsim_noise_thermionic.py \
             tests/test_devsim_btbt_presets.py tests/test_devsim_oxide_tunneling_sc.py tests/test_btbt_nonlocal.py \
             tests/test_devsim_isolated.py tests/test_trap_kinetics.py tests/test_noise_hooge_mapping.py \
-            tests/test_devsim_noise_method.py
+            tests/test_devsim_noise_method.py tests/test_devsim_btbt_resolution.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision
