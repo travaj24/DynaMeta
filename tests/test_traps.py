@@ -145,6 +145,7 @@ def _seed(dev, region):
     for v, m in (("Potential", "_seed"), ("Electrons", "IntrinsicElectrons"),
                  ("Holes", "IntrinsicHoles")):
         ds.set_node_values(device=dev, region=region, name=v, values=_vals(dev, region, m).tolist())
+    PT.seed_kinetic_traps(dev, [region])      # v0.15 kinetic levels (tests/test_trap_kinetics.py); else no-op
 
 
 def _slab(dev, *, length, net_doping, tau_n, tau_p, ps_end=5e-8, ps_mid=1e-6, **kw):

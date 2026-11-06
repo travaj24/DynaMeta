@@ -68,6 +68,9 @@ MODEL_PARAMETERS = ("extended_model", "extended_equation")
 SOLVER_PARAMETER = "extended_solver"
 # ds.solve types that are ONE linear solve (no Newton outer loop): DEVSIM factorizes them in double.
 SINGLE_LINEAR_SOLVE_TYPES = ("ac", "noise")
+# the solve types the quasi-static charged-trap advisory covers (== physics_traps.QUASI_STATIC_ADVISED_SOLVES,
+# repeated here so the default path does not import physics_traps for a DC / BDF step)
+_QS_ADVISED = ("ac", "noise", "transient_dc")
 SMALL_SIGNAL_MESSAGE = (
     "extended_precision: a {kind!r} solve on an extended-precision device buys nothing -- DEVSIM "
     "factorizes and solves the small-signal (ssac/noise) system in DOUBLE even with extended_solver "
@@ -192,9 +195,16 @@ def solve(ds_module=None, **kwargs):
     `ds_module` (default: devsim) is the module whose `solve` is called -- a caller that resolves
     devsim through its own module attribute (transient.py, whose control-flow gates replace it with a
     stand-in) passes it. A stand-in without `get_device_list` has no live device, so it takes the
-    default path."""
+    default path.
+
+    An 'ac', 'noise' or 'transient_dc' solve while a live device carries QUASI-STATIC CHARGED traps raises
+    the decision-39 AdvisoryWarning (physics_traps.warn_if_quasi_static_traps; reads only, the solve itself
+    is unchanged): their small-signal / transient answer is not charge-conserving."""
     m = ds if ds_module is None else ds_module
     lister = getattr(m, "get_device_list", None)
+    if lister is not None and kwargs.get("type") in _QS_ADVISED:
+        from dynameta.carriers.physics_traps import warn_if_quasi_static_traps
+        warn_if_quasi_static_traps(kwargs.get("type"), m, stacklevel=3)
     devs = list(lister()) if lister is not None else []
     flags = [is_enabled(d, m) for d in devs]
     if not any(flags):
