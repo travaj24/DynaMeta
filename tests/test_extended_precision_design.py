@@ -51,7 +51,9 @@ SI = dict(P=300e-9, T=10e-9, NA=1e24, ND=1e24, n_i=1e16, mu_n=0.135, mu_p=0.048,
           Eg=1.12, mid=5e-9)
 # GaN-like: the 1-D gate A device of the D2b audit (n_i 1e-4 m^-3 = 1e-10 cm^-3), as a 2-D lateral diode.
 # Junction mesh 0.5 nm: the 1-D gate's nominal 1 nm gives +4.9e-3 on this 2-D mesh (measured; 0.5 nm:
-# +8.4e-4, 0.25 nm: +4.6e-4 at 1.0 V -- the residual ~4e-4 is the oracle's depletion approximation).
+# +8.4e-4, 0.25 nm: +4.6e-4 at 1.0 V). CAUSE (v0.15 follow-up, test_e4_mesh_cause_*): not the 2-D physics but
+# DEVSIM's line grading, which leaves a 0.77 nm remainder edge ending at the junction line, right on the
+# ~2.6 nm-wide SRH recombination peak; a clean uniform 1 nm junction band gives -6.4e-4.
 GAN = dict(P=2e-6, T=10e-9, NA=1e23, ND=1e23, n_i=1e-4, mu_n=0.10, mu_p=0.002, tau=1e-6, eps_r=9.7,
            Eg=3.4, mid=0.5e-9)
 EDGE_METAL_W = 1.5e-9          # devsim_layered._EDGE_METAL_W_M: the contacts sit at the strip interfaces
@@ -341,6 +343,75 @@ def _sns_oracle_A_per_m2(V, g):
     xm = brentq(lambda x: psi(x) - V / 2, -xp, xn)
     srh = quad(U, -xp, xm, limit=500, epsabs=0, epsrel=1e-12)[0] + quad(U, xm, xn, limit=500, epsabs=0, epsrel=1e-12)[0]
     return j_diff + QE * srh
+
+
+def _gan_1d_miss(xs, V=1.0):
+    """The GaN-like diode as a 1-D extended-precision device on the node set xs (contacts at xs[0], xs[-1],
+    junction at P/2), ramped to V: (anode current / oracle) - 1, the oracle of this file (W = P/2 - 1.5 nm)."""
+    import validation.extended_precision as VX
+    g = GAN
+    lines = [(float(x), 1.0, "lo" if k == 0 else "hi" if k == xs.size - 1 else None) for k, x in enumerate(xs)]
+    dop = "ifelse(x < {:.10e}, {:.10e}, {:.10e})".format(g["P"] / 2, -g["NA"], g["ND"])
+    dev = VX.diode_1d("e4c1", lines, dop, n_i=g["n_i"], tau=g["tau"], eps_r=g["eps_r"], mu_n=g["mu_n"],
+                      mu_p=g["mu_p"], extended=True, ae=1e8, re=1e-12, presolve=False)
+    try:
+        for k in range(1, 11):
+            devsim.set_parameter(device=dev, name="lo_bias", value=V * k / 10)
+            VX._solve(dev, 1e8, 1e-12, 60)
+        J = float(VX.edge_current(dev).mean())
+    finally:
+        VX.fresh()
+    return J / _sns_oracle_A_per_m2(V, g) - 1.0
+
+
+def _junction_band(h, h_odd, band=20e-9, grow=1.02, h_max=20e-9):
+    """Explicit nodes: uniform h over [P/2 - band, P/2 + band] with the junction a node, EXCEPT the one edge
+    ending at the junction from the p side, of length h_odd; graded (x grow, capped) out to the contacts."""
+    xj, lo, hi = GAN["P"] / 2, EDGE_METAL_W, GAN["P"] - EDGE_METAL_W
+    m = int(round(band / h))
+    right, left = [xj + h * k for k in range(m + 1)], [xj - h_odd - h * k for k in range(m)]
+
+    def out(x0, sgn, stop):
+        o, s_ = [], h
+        while True:
+            s_ = min(s_ * grow, h_max)
+            nx = (o[-1] if o else x0) + sgn * s_
+            if (nx <= stop + 0.5 * s_) if sgn < 0 else (nx >= stop - 0.5 * s_):
+                return o + [stop]
+            o.append(nx)
+    return np.array(sorted(out(left[-1], -1.0, lo) + left + right + out(right[-1], 1.0, hi)))
+
+
+def test_e4_mesh_cause_is_the_remainder_edge_on_the_recombination_peak():
+    """WHY E4 needs 0.5 nm where the 1-D gate meets 3e-3 at 1 nm (v0.15 follow-up, audit note
+    docs/audit/2026-11-06-v0.15-followups.md item 3). A characterisation gate: no code changed, so it holds on
+    the old code too. At 1.0 V the SRH current is the whole current (J_srh/J = 1 - 3.6e-13) and its integrand,
+    U ~ 1/(cosh((psi - V/2)/V_t) + 1), is a peak of width V_t/E = 1.29 nm at the junction (E = 2.0e7 V/m).
+      (a) DEVSIM's line grading (20 nm at the contact line -> 1 nm at the mid line) leaves a REMAINDER edge
+          ending at the junction: 0.7716 nm on the builder's x lines (the 1-D gate's lines leave 0.0099 nm).
+      (b) The 1-D device on the builder's OWN x-node set misses by > 3e-3 (MEASURED +4.944e-3, the 2-D
+          builder's +4.9e-3; at 0.5 nm +8.394e-4 vs the 2-D +8.39e-4): it is the node set, not the 2-D
+          element physics or the 2-D mesher dropping lines.
+      (c) A clean uniform 1 nm band through the junction meets the 3e-3 budget (MEASURED -6.39e-4; 0.5 nm
+          -1.64e-4, 0.25 nm -5.2e-5: second order -- so the audit's "residual ~4e-4 is the oracle's depletion
+          approximation" was the mesh too).
+      (d) ADVERSARIAL: that clean band with ONE 0.5 nm edge ending at the junction misses by > 3e-3 (MEASURED
+          +4.62e-3; 0.77 nm +3.49e-3, 0.2 nm +2.47e-3, 0.01 nm +1.3e-4): the remainder edge alone.
+    Budget 3e-3: the D2b gate-A tolerance E4 inherits."""
+    b = DL.LayeredDevsimBuilder(_diode(dict(GAN, mid=1e-9), True, name="gan"), mesh_name="e4cm",
+                                device_name="e4cd")
+    try:
+        b.build_device()
+        xs = np.unique(np.round(np.asarray(devsim.get_node_model_values(device="e4cd", region="pn", name="x")),
+                                15))
+    finally:
+        b.teardown()
+    i = int(np.argmin(np.abs(xs - GAN["P"] / 2)))
+    assert xs[i] == pytest.approx(GAN["P"] / 2, abs=1e-15)
+    assert abs((xs[i] - xs[i - 1]) - 0.7716e-9) < 1e-13 and abs((xs[i + 1] - xs[i]) - 1e-9) < 1e-13     # (a)
+    assert _gan_1d_miss(xs) > 3e-3                                                                        # (b)
+    assert abs(_gan_1d_miss(_junction_band(1e-9, 1e-9))) <= 3e-3                                          # (c)
+    assert _gan_1d_miss(_junction_band(1e-9, 0.5e-9)) > 3e-3                                              # (d)
 
 
 @pytest.mark.slow
