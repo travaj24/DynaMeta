@@ -26,13 +26,21 @@ from dynameta.constants import EPS0, Q_E, V_T  # noqa: E402
 NA = 3.0e23
 
 
-def _qs_boltzmann(delta, n_a=NA):
+def _qs_boltzmann(delta, n_a=NA, v_ch=0.0):
     """|Q_s| [C/m^2] of the classical Boltzmann MOS, Poisson's first integral (Kingston-Neustadter /
     Sze ch. 4 F-function, re-derived: E_s^2 = (2 q p0 V_t/eps)[(e^-x + x - 1) + (n0/p0)(e^x - x - 1)],
-    x = delta/V_t, Q_s = eps E_s by Gauss) with the DD's own neutral body p0 = CHOLE, n0 = n_i^2/p0."""
+    x = delta/V_t, Q_s = eps E_s by Gauss) with the DD's own neutral body p0 = CHOLE, n0 = n_i^2/p0.
+
+    v_ch: the IMREF SPLIT phi_n = phi_p + V_ch (the channel slice; plan G1-8). Derivation: holes keep the
+    body's quasi-Fermi level, p = p0 e^-x; the electrons' is shifted, n = n_b e^x with n_b = n0 e^(-V_ch/V_t)
+    (Boltzmann: n p = n_i^2 e^(-V_ch/V_t)). Gauss + E dE = (rho/eps) dpsi with E(bulk) = 0 give
+    eps E_s^2 / 2 = int_0^delta (-rho) dpsi = q V_t [p0 (e^-x + x - 1) + n_b (e^x - x - 1)], using the
+    bulk neutrality N_A = p0 - n_b. (The DD's bulk keeps N_A = p0 - n0 - 1, a residual charge
+    <= q (n0 + 1) = q 3.3e8 m^-3 -- a 1e-15 relative change of the integral, below every tolerance here.)
+    So the textbook F-function with n0 -> n0 e^(-V_ch/V_t)."""
     eps = V.EPS * EPS0
     p0 = 1.0 + 0.5 * (n_a + np.sqrt(n_a ** 2 + 4.0 * V.NI_SI ** 2))
-    n0 = V.NI_SI ** 2 / p0
+    n0 = V.NI_SI ** 2 / p0 * np.exp(-v_ch / V_T)
     x = delta / V_T
     f = (np.exp(-x) + x - 1.0) + (n0 / p0) * (np.exp(x) - x - 1.0)
     return float(np.sqrt(2.0 * Q_E * p0 * V_T * eps * f))
@@ -222,6 +230,70 @@ def test_dg_closure_reaches_strong_inversion_in_few_newton_iterations(ext):
     assert max(max(rec["probe"]) for rec in r) <= 1e-12
     n_inv = V.mos_sheet(r[-1])[0]
     assert n_inv > 1e16                                  # strong inversion reached (1.25e17 m^-2)
+
+
+def test_imref_split_reproduces_the_analytic_channel_slice_charge():
+    """G1-8: the closure's imref_shift (phi_n = phi_body + V_ch, the MOSFET channel slice) against the
+    analytic imref-split surface charge (_qs_boltzmann(v_ch=...), derived there): classical Boltzmann
+    closure, 3e23 p-Si, V_ch = 0.15 and 0.30 V, band bending 1.0 and 1.2 V, three NESTED meshes (1500 /
+    3000 / 6000 segments, beta = ln 1e3). Gates as G1-1: observed order >= 1.8, Richardson limit within
+    1e-5. MEASURED: order 2.00 at all four points, Richardson 1.8e-14 .. 1.7e-13. Refutation: the same
+    charge against the NO-split oracle (V_ch ignored) misses by 41 % (1.0 V) to 98 % (1.2 V, 0.3 V) --
+    far outside the 1e-5, so the gate sees the shift's sign and size. On 4aa3f3f the option existed but
+    only its guard was tested."""
+    beta = float(np.log(1e3))
+    for v_ch in (0.15, 0.30):
+        runs = [V.mos_qe(NA, (1.0, 1.2), mesh_nb=(nseg, beta), v_ch=v_ch, tag="split%d" % nseg)
+                for nseg in (1500, 3000, 6000)]
+        for i, d in enumerate((1.0, 1.2)):
+            ref = _qs_boltzmann(d, v_ch=v_ch)
+            q = [abs(r[i]["Q"]) for r in runs]
+            e = [abs(x / ref - 1.0) for x in q]
+            orders = [np.log2(e[k] / e[k + 1]) for k in range(2)]
+            rich = q[2] + (q[2] - q[1]) / 3.0
+            assert min(orders) >= 1.8, (v_ch, d, e)
+            assert abs(rich / ref - 1.0) <= 1e-5, (v_ch, d, rich / ref - 1.0)
+            assert abs(rich / _qs_boltzmann(d) - 1.0) > 0.1          # the no-split oracle must miss
+
+
+@pytest.mark.parametrize("case", ["classical", pytest.param("dg", marks=pytest.mark.slow)])
+def test_two_d_laterally_uniform_mos_equals_one_d(case):
+    """G1-7 (2-D leg): the SAME MOS capacitor on a 2-D tensor mesh (create_2d_mesh: the nested 1-D x nodes
+    times lateral y lines, right triangles, wall / body contacts against inert pads) equals the 1-D
+    device node for node on EVERY lateral line, with a graded lateral spacing 0.3 / 1 / 3 nm (the plan's
+    "no lateral artefact" refutation built in). Closure through the direct API (LayeredDevsimBuilder does
+    not reach it: no DG, and its gated-bipolar path is flagged unreliable -- audit note). Cases: classical
+    closure at 1.0 V (0.05 nm wall mesh, 4 lateral lines; ~13 s); DG gamma_wall on both carriers, both
+    closed, Fermi-Dirac, at 0.6 and 1.2 V (0.1 nm wall mesh, 3 lateral lines 0 / 0.3 / 1.3 nm, 0.1 V steps;
+    @slow, nightly: the 2-D DG Newton costs ~11x the 1-D one per iteration -- MEASURED 52 s vs 4.7 s for
+    the same six solves -- so the fine-mesh 1.3 V ramp would take ~15 min).
+    Tolerance 1e-10 relative in n, p (and Lambda_n to its max) and in the charge per width -- the right-
+    triangle box method reduces EXACTLY to the 1-D one for a laterally uniform field (zero hypotenuse
+    couples), so only round-off remains (MEASURED <= 9.1e-15 classical; see the DG assertion messages).
+    Refutation: the 2-D body doped 1e-6 higher must break it."""
+    if case == "classical":
+        y, kw, deltas = (0.0, 0.3e-9, 1.3e-9, 4.3e-9), {}, (1.0,)
+    else:
+        y, deltas = (0.0, 0.3e-9, 1.3e-9), (0.6, 1.2)
+        kw = dict(fd=True, dg_gamma=V.gamma_wall(), dg_holes=True, close=("electrons", "holes"),
+                  mesh_nb=V.qe_mesh(0.1e-9), step=0.1)
+    one = V.mos_qe(NA, deltas, tag="u1" + case, **kw)
+    two = V.mos_qe(NA, deltas, tag="u2" + case, lateral=y, **kw)
+    worst = 0.0
+    for a, b in zip(one, two):
+        assert len(b["cols"]) == len(y)
+        for col in b["cols"].values():
+            assert np.array_equal(col["x"], a["x"])
+            for k in ("n", "p"):
+                worst = max(worst, float(np.max(np.abs(col[k] / a[k] - 1.0))))
+            if "lam_n" in a:
+                worst = max(worst, float(np.max(np.abs(col["lam_n"] - a["lam_n"])) /
+                                         np.max(np.abs(a["lam_n"]))))
+        worst = max(worst, abs(b["Q"] / a["Q"] - 1.0))
+    assert worst <= 1e-10, worst
+    if case == "classical":
+        bad = V.mos_qe(NA * (1.0 + 1e-6), deltas, tag="u2bad", lateral=y)[0]
+        assert max(float(np.max(np.abs(c["p"] / one[0]["p"] - 1.0))) for c in bad["cols"].values()) > 1e-10
 
 
 def test_refusals_and_round_trip():
