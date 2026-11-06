@@ -409,7 +409,7 @@ class Stacked3DSpec:
     @classmethod
     def from_design(cls, design, *, gate_patch_frac=None, grid_n=(16, 16, 33),
                      mesh_min_nm: float = 0.5, mesh_max_nm: float = 3.0,
-                     interface_traps=None, extended_precision: bool = False,
+                     interface_traps=None, extended_precision: Optional[bool] = None,
                      mesher: str = "tensor", on_chi_temperature: str = "refuse") -> "Stacked3DSpec":
         """Derive a stacked 3D spec from a `Design`. Handles a MULTI-LAYER stack (e.g. the
         full reference mirror/Al2O3/HfO2/ITO/HfO2/Al2O3/patch): finds the semiconductor layer and
@@ -432,8 +432,13 @@ class Stacked3DSpec:
         ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature). v0.15: a
         material with TransportModel.band_temperature has chi evaluated at the region T (T_REF here; the
         bipolar body at BipolarOptions.T_K also gets its n_i from the model when derive_n_i=True) and is
-        not subject to the toggle (materials.band_data_at_T)."""
+        not subject to the toggle (materials.band_data_at_T).
+
+        extended_precision (v0.15, decision 37): None (default) follows Design.carriers.extended_precision
+        (unstated = off); an explicit bool wins, with ONE AdvisoryWarning when it contradicts a stated
+        design value (extended_precision.resolve_design_flag; geometry.specs.CarrierSpec)."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
+        extended_precision = XP.resolve_design_flag(design, extended_precision, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
                       if design.material_role(L.background_material) == "semiconductor"]
@@ -1125,6 +1130,8 @@ class Devsim3DEquilibrium:
                 "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
                 "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
                 "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
+        if self.spec.extended_precision:                      # v0.15 provenance; off adds no key
+            extras["extended_precision"] = True
         # the temperature the emitted region was solved at: its V_t (BipolarOptions.T_K on the bipolar
         # path; exactly T_REF otherwise). v0.14 row 3.2-7: this always reported T_REF.
         return CarrierField(
