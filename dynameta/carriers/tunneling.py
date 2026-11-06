@@ -124,7 +124,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -509,7 +509,10 @@ def oxide_tunneling_current(device: str, oxide_region: str, semiconductor_region
       E_ox_V_m       V_ox / t_ox [V/m] (the uniform field of a charge-free planar oxide)
       area           the SurfaceArea weight of each node (1-D: 1; 2-D: m; 3-D: m^2)
       t_ox_m, normal_axis, interface, model.
-    Requires a PLANAR interface normal to a coordinate axis (both builders' stacks are)."""
+    Requires a PLANAR interface normal to a coordinate axis (both builders' stacks are).
+    With params.coupling == "self_consistent" (v0.15) this returns the LIVE term's own kernel call instead
+    (the same keys plus coupling, I_gate, J_fwd/J_bwd, S, n_s, gate offset / barrier / work function), and
+    checks params.gate_work_function_eV against the contact offset when given."""
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
     if not isinstance(params, OxideTunnelingParams):
