@@ -206,6 +206,17 @@ at 300 K builds a 250 K heterojunction with NO error ("DID NOT RAISE") and runs 
 the two NON-ISOTHERMAL cases get the band-gap / unipolar-bipolar messages instead; T-d's helpers do not
 exist.
 
+## 4d. Band data at T (v0.15, 2026-11-06)
+
+The affinity, gap and intrinsic density of a heterostack material can now carry a temperature model:
+`TransportModel.band_temperature = materials.BandTemperature(gap_law, affinity_fraction, ...)` (Varshni
+gap change anchored at `chi_reference_T_K`, chi moved by the REQUIRED fraction gamma_chi of it, optional
+derived n_i). Both builders read band data through ONE kernel, `materials.band_data_at_T`: the Anderson frame
+chi, the bipolar band-gap check's E_g, the bipolar n_i (2-D and 3-D). A material with a model satisfies the
+v0.14 chi-temperature guard (`physics_heterojunction.affinity_temperature_tags`). Gates (V_bi(T), Delta
+E_c(T), TE conductance with an independent barrier, bitwise identity at T_ref): docs/audit/
+2026-11-06-v0.15-band-temperature.md, tests/test_band_temperature.py, tests/test_devsim_band_temperature.py.
+
 ## 5. Limits
 
 * TE magnitude on a degenerate emitting side (MB tail, overestimates); equilibrium exact.
