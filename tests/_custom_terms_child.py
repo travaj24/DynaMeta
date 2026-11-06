@@ -542,6 +542,57 @@ def sc_structural(opts):
     return res
 
 
+class _Anon(QFLBridge):
+    """A QFLBridge that declares NO rows (unknown footprint) and no noise model."""
+
+    def equations(self, device):
+        return ()
+
+    noise_sources = CustomTerm.noise_sources
+
+
+def _inv(dev, region):
+    from dynameta.carriers.physics_bipolar_dd import recombination_terms
+    return {n: [rec.term.name, list(rec.regions), rec.noise_model, rec.jacobian_exact]
+            for n, rec in recombination_terms(dev, region)["custom"].items()}
+
+
+def sc_inventory(opts):
+    """The "custom" kind of the ONE term inventory (physics_bipolar_dd.recombination_terms, plan 4.0.2):
+    which live terms each region lists, with which capability flags, and that noise_analysis refuses
+    through it -- a term declaring no rows (listed everywhere) without a noise model; then removal,
+    device re-creation."""
+    import validation.devsim_noise as V
+    res = {}
+    dev = build_resistor()
+    a, b = _node_at(dev, "bulk", XA_R), _node_at(dev, "bulk", XB_R)
+    mu = float(_ds().get_parameter(device=dev, region="bulk", name="mu_n"))
+    G = 1.602176634e-19 * mu * ND_RES / (XB_R - XA_R)
+    res["before"] = _inv(dev, "bulk")
+    CT.add_custom_term(dev, QFLBridge("bridge", "bulk", a, b, G))
+    CT.add_custom_term(dev, QFLBridge("inexact", "bulk", a, b, 0.0, jacobian_exact=False))
+    CT.add_custom_term(dev, _Anon("anon", "bulk", a, b, 0.0))
+    res["with"] = _inv(dev, "bulk")
+    V._solve(1e8, 1e-10)
+
+    def noise():
+        try:
+            V.noise([1.0])
+            return None
+        except Exception as e:                            # refusals are asserted by the test
+            return "{}: {}".format(type(e).__name__, e)
+    res["err_all"] = noise()
+    CT.remove_custom_term(dev, "anon")
+    res["err_inexact"] = noise()
+    CT.remove_custom_term(dev, "inexact")
+    res["after_remove"] = _inv(dev, "bulk")
+    res["err_none"] = noise()
+    V.fresh()
+    dev = build_resistor()                                 # same device name, re-created
+    res["recreated"] = _inv(dev, "bulk")
+    return res
+
+
 def sc_calllog(opts):
     """The D1b call-log digest fixtures recorded with the dispatcher registered FIRST (no term)."""
     if opts.get("register"):
@@ -554,7 +605,7 @@ def sc_calllog(opts):
 
 SCENARIOS = {"calllog": sc_calllog, "symbolic": sc_symbolic, "import": sc_import,
              "defaults": sc_defaults, "toy_a": sc_toy_a, "toy_b": sc_toy_b, "liveness": sc_liveness,
-             "structural": sc_structural}
+             "structural": sc_structural, "inventory": sc_inventory}
 
 
 def run_child(scenario, **opts):

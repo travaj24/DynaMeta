@@ -321,6 +321,26 @@ def test_noise_refuses_terms_without_noise_model_or_exact_jacobian():
     assert "jacobian_exact=False" in b["noise_error"] and "S" not in b
 
 
+def test_unified_inventory_lists_custom_terms_and_noise_refuses_through_it():
+    """Plan 4.0.2 (the "custom" kind; noise_analysis reads the ONE inventory, physics_bipolar_dd.
+    recombination_terms, instead of custom_terms.live_terms). A term is listed in the regions of the rows
+    it declares -- or, declaring none (unknown footprint), in EVERY region -- with its noise capability
+    (overrides noise_sources) and Jacobian exactness, read through custom_terms' DEVSIM-marker liveness.
+    The noise refusals fire through it (in name order): the undeclared no-noise term first, then the
+    inexact Jacobian; with both removed the noise runs. Re-creating the device under the same name lists
+    nothing (the marker parameter died with it). OLD CODE (8bbf36c): recombination_terms has no "custom"
+    key -> KeyError in the child (the test fails)."""
+    r = _child("inventory")
+    assert r["before"] == {}
+    assert r["with"] == {"anon": ["anon", [], False, True], "bridge": ["bridge", ["bulk"], True, True],
+                         "inexact": ["inexact", ["bulk"], True, False]}
+    assert "no noise model" in r["err_all"] and "'anon'" in r["err_all"]
+    assert "jacobian_exact=False" in r["err_inexact"] and "'inexact'" in r["err_inexact"]
+    assert r["err_none"] is None
+    assert r["after_remove"] == {"bridge": ["bridge", ["bulk"], True, True]}
+    assert r["recreated"] == {}
+
+
 def test_frozen_continuity_poisson_presolve_with_a_live_term(toy_b):
     """GATE C0(c). With the continuity equations deleted (eq_registry.delete_by_name, the frozen-carrier
     pre-solve), the live term reports rows_live False, the dispatcher still runs (MEASURED 2 calls) and

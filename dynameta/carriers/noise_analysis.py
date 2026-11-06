@@ -140,8 +140,15 @@ is called, and it only READS the device (its DC operating point and models are l
      y_p + (-y_n) == y_p - y_n, and the factors are multiplied in the old order q^2 |.|^2 (2P);
      tests/test_noise_two_point.py). Live custom terms (carriers/custom_terms.py) contribute through
      their noise_sources(); a live custom term WITHOUT one, or with jacobian_exact False, makes
-     noise_spectrum refuse the device. A row on a CIRCUIT contact's node is supported for the
-     continuity equations (the item-4 fix-up); for any other equation it is refused.
+     noise_spectrum refuse the device. SINGLE-CARRIER node terms (physics_bipolar_dd.
+     add_recombination_term carrier="electron"/"hole", v0.15 plan 4.0.2) are one source each: P_i =
+     V_i x their event rate, rows (own carrier row: -1 electron / +1 hole) and the declared partner row
+     (partner coeff), under their declared mechanism; one without an event rate is refused when its
+     mechanism is requested, like the pair kinds. Every kind -- pair, single-carrier, custom -- is read
+     from the ONE inventory physics_bipolar_dd.recombination_terms (its "custom" kind lists the live
+     custom terms; tests/test_term_bookkeeping_v2.py, tests/test_custom_terms.py). A row on a CIRCUIT
+     contact's node is supported for the continuity equations (the item-4 fix-up); for any other
+     equation it is refused.
    * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
      serves 1-D (per unit area: A^2/Hz/m^2, like ssac's S/m^2), 2-D (per unit depth: A^2/Hz/m) and
      3-D (absolute A^2/Hz).
@@ -339,19 +346,24 @@ def _gr_source(region: str, P: np.ndarray) -> TwoPointSource:
 
 
 def _custom_term_sources(device: str) -> List[TwoPointSource]:
-    """The TwoPointSources of every LIVE custom term on `device` (carriers/custom_terms.py). Refuses a
-    live term without a noise model or with an inexact Jacobian. Reads the Python registry only: it
-    never registers the dispatcher."""
-    from dynameta.carriers import custom_terms as _CT
+    """The TwoPointSources of every LIVE custom term on `device` (carriers/custom_terms.py), read from
+    the ONE term inventory (physics_bipolar_dd.recombination_terms(...)["custom"], over every region of
+    the device; a term declaring no region row is listed in every region, so none is missed). Refuses a
+    live term without a noise model or with an inexact Jacobian. Never registers the dispatcher."""
+    from dynameta.carriers.physics_bipolar_dd import recombination_terms
+    records = {}
+    for r in ds.get_region_list(device=device):
+        records.update(recombination_terms(device, r)["custom"])
     out: List[TwoPointSource] = []
-    for term in _CT.live_terms(device):
+    for _name, rec in sorted(records.items()):
+        term = rec.term
         if not term.rows_live(device):
             continue
-        if not term.jacobian_exact:
+        if not rec.jacobian_exact:
             raise RuntimeError(
                 "noise_analysis: custom term {!r} on {!r} declares jacobian_exact=False; the small-"
                 "signal / noise system IS its Jacobian -- refusing.".format(term.name, device))
-        srcs = term.noise_sources(device)
+        srcs = term.noise_sources(device) if rec.noise_model else None
         if srcs is None:
             raise RuntimeError(
                 "noise_analysis: custom term {!r} on {!r} has no noise model (noise_sources() is "
@@ -438,8 +450,8 @@ def _pair_term_models(device: str, region: str, external_generation_shot: bool) 
     from dynameta.carriers.physics_bipolar_dd import recombination_terms
     terms = recombination_terms(device, region)
     out: Dict[str, list] = {"node": [], "edge": [], "element": []}
-    for kind, entries in terms.items():
-        for name, (_rate, pm) in entries.items():
+    for kind in ("node", "edge", "element"):          # the same-node pair kinds (the others: below)
+        for name, (_rate, pm) in terms[kind].items():
             if pm is None:
                 raise RuntimeError(
                     "noise_analysis: region {!r} carries the {} recombination term {!r} without a pair "
@@ -489,6 +501,43 @@ def _gr_pair_per_node(device: str, region: str, external_generation_shot: bool, 
     if P.size != n_nodes:                                       # pragma: no cover - DEVSIM invariant
         raise RuntimeError("noise_analysis: pair-rate size mismatch on region {!r}".format(region))
     return P
+
+
+def _single_carrier_sources(device: str, region: str, eqs, mechanisms) -> List[TwoPointSource]:
+    """The event sources of the region's SINGLE-CARRIER node terms (physics_bipolar_dd.
+    add_recombination_term carrier="electron"/"hole"; recombination_terms "node_electron"/"node_hole"),
+    one TwoPointSource per term whose mechanism is requested: P_i = NodeVolume_i x pair rate, rows
+    (carrier row, -1 electron / +1 hole) and, when declared, (partner row, partner coeff) at the same
+    node. Refuses a term without a pair rate (silently noiseless otherwise) and one whose carrier or
+    partner equation the region does not carry."""
+    from dynameta.carriers.physics_bipolar_dd import recombination_terms
+    terms = recombination_terms(device, region)
+    out: List[TwoPointSource] = []
+    region_eqs = None
+    for kind in ("node_electron", "node_hole"):
+        for name, t in terms[kind].items():
+            if t.mechanism not in mechanisms:
+                continue
+            if t.pair is None:
+                raise RuntimeError(
+                    "noise_analysis: region {!r} carries the single-carrier term {!r} ({}) without an "
+                    "event rate (physics_bipolar_dd.add_recombination_term(..., pair=...)); its noise "
+                    "would be silently missing -- refusing.".format(region, name, t.rate))
+            if region_eqs is None:
+                region_eqs = set(ds.get_equation_list(device=device, region=region))
+            for eq in (t.own_equation, t.partner_equation):
+                if eq is not None and (eq not in region_eqs or (eq in (_EQ_N, _EQ_P) and eq not in eqs)):
+                    raise RuntimeError(
+                        "noise_analysis: the single-carrier term {!r} of region {!r} changes the {} row, "
+                        "which the region does not carry (or is not a noise row) -- refusing.".format(
+                            name, region, eq))
+            P = _nv(device, region, t.pair) * _nv(device, region, "NodeVolume")
+            idx = np.arange(P.size, dtype=np.int64)
+            rows = [SourceRow(region, t.own_equation, np.full(P.size, t.own_coeff), idx)]
+            if t.partner_equation is not None:
+                rows.append(SourceRow(region, t.partner_equation, np.full(P.size, t.partner_coeff), idx))
+            out.append(TwoPointSource(t.mechanism, region, P, tuple(rows), idx))
+    return out
 
 
 def _circuit_contacts(device: str):
@@ -647,6 +696,8 @@ class _RegionData:
                                   self.i0, self.i1)
             if P is not None:
                 self.two_point.append(_gr_source(region, P))
+        # single-carrier node terms (v0.15 plan 4.0.2): one event source each, on their own rows
+        self.two_point += _single_carrier_sources(device, region, eqs, mechanisms)
 
 
 def _green(device, region, out, eq, n_nodes, fixups):
