@@ -85,7 +85,10 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
   edge with the Si direct set). Use uniform spacing h <= 0.35/k across the field peak for <= 1 %; in 1-D,
   place explicit nodes there: add_1d_mesh_line with a ps that does not divide the interval leaves an odd edge
   (MEASURED: lines at x_j - 5.5 nm and x_j with ps = 0.2, 0.1 or 0.05 nm all gave a 0.128 nm edge ending at
-  the junction line x_j, i.e. on the field peak).
+  the junction line x_j, i.e. on the field peak). RUNTIME CHECK (v0.15 follow-up, 1-D): btbt_generation_current
+  estimates the quadrature error on the solved field (btbt_quadrature_error) and warns (UnreliableResultWarning,
+  naming the region and the worst edge) above BTBT_QUADRATURE_TOL = 1 %. It covers the field-factor
+  quadrature only, not the carrier (D) discretisation; 2-D/3-D are not checked (apply the rule above).
 
 COUPLING: SELF-CONSISTENT (inside the coupled Newton): the generation feeds the continuity equations
 with full analytic Jacobians (the derivative models are DEVSIM symbolic diffs; checked against finite
@@ -193,7 +196,8 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["BTBTParams", "SILICON_HURKX", "SILICON_KAO_DIRECT", "SILICON_KAO_INDIRECT", "GERMANIUM_KAO_DIRECT",
            "GERMANIUM_KAO_INDIRECT", "GERMANIUM_KAO", "IN053GA047AS_KANE", "BTBT_PROCESSES",
            "BTBT_VERIFICATIONS", "BTBTDoubleCountError", "kane_direct_params", "btbt_at_temperature", "btbt_for_material",
-           "btbt_rate_expr", "hurkx_d_expr", "setup_btbt", "btbt_generation_current",
+           "btbt_rate_expr", "hurkx_d_expr", "setup_btbt", "btbt_generation_current", "btbt_quadrature_error",
+           "BTBT_QUADRATURE_TOL",
            "OxideTunnelingParams", "oxide_tunneling_current", "TUNNEL_MODELS", "TUNNEL_COUPLINGS",
            "DielectricBarrier", "SIO2_ON_SI", "setup_oxide_tunneling", "OxideTunnelTerm",
            "oxide_tunneling_terms", "oxide_tunneling_gate_currents", "gate_offset_for_work_function",
@@ -500,6 +504,7 @@ def setup_btbt(device: str, region: str, params, *, n_i: str = "n_i") -> None:
 
     sets, indexed = _btbt_sets(params, "setup_btbt")
     _require_bipolar(device, region)
+    _INSTALLED_SETS[(device, region)] = sets          # read by the post-solve resolution check (no DEVSIM call)
     from dynameta.carriers.btbt_nonlocal import has_live_nonlocal
     if has_live_nonlocal(device, region):
         raise BTBTDoubleCountError(
@@ -586,14 +591,157 @@ def _btbt_rate_models(ds, device: str, region: str, dim: int):
     return out
 
 
+# (device, region) -> the BTBTParams tuple setup_btbt installed (the post-solve resolution check needs A, B, P)
+_INSTALLED_SETS: Dict[Tuple[str, str], Tuple[BTBTParams, ...]] = {}
+
+BTBT_QUADRATURE_TOL = 1e-2
+"""Relative quadrature-error estimate above which btbt_generation_current warns (UnreliableResultWarning):
+the module's MESH RESOLUTION budget (uniform h <= 0.35/k across the peak <-> (k h)^2/12 <= 1 %)."""
+
+
+_GL_T, _GL_W = np.polynomial.legendre.leggauss(16)        # 16-point Gauss-Legendre on [-1, 1]
+
+
+def btbt_quadrature_error(device: str, region: str, *, index: Optional[int] = None) -> Optional[dict]:
+    """A-posteriori estimate of the relative QUADRATURE error of the local BTBT current on the SOLVED state
+    (v0.15 follow-up; the hazard of the module header's MESH RESOLUTION paragraph). 1-D only (returns None in
+    2-D/3-D: the element rates have no 1-D ordering to interpolate along; there the h <= 0.35/k rule is the
+    user's to apply), and None when the region has no setup_btbt record or a zero gross rate.
+
+    The estimator: the edge field E_e is EXACT at the edge midpoint s_e (Gauss's law; MEASURED to 3e-4 in
+    docs/audit/2026-11-06-v0.15-btbt-presets.md). The continuum field on each half edge (e toward neighbour j)
+    is modelled by a quadratic through three midpoints containing e and j, the ENO choice (smaller second
+    difference) of the outward (e, j, j+-1) and inward (e-+1, e, j) stencils: EXACT for the piecewise-linear
+    field of uniformly doped depletion (the abrupt junction, whose FV peak sits at an edge midpoint) and for a
+    parabolic peak (a graded junction). f(E) = A E^P exp(-B/E) is integrated over each half edge by 16-point
+    Gauss-Legendre;
+    the Hurkx D is held at its edge value (|U_e|/f_e). Then
+        error = Sum_e |U_e| (h_e - Int_e f/f_e) / Sum_e |U_e| Int_e f/f_e,
+    the relative error of the edge-midpoint rule the equations assemble. For a rate e^(-k|s|) it reduces to
+    the derived (k h/2) coth(k h/2) - 1 ~ (k h)^2/12 on a uniform mesh with the peak at an edge midpoint, and
+    to the h-independent k h_e/2 - 1 + exp(-k h_e/2) for ONE edge of length h_e on the peak
+    (docs/audit/2026-11-06-v0.15-followups.md: derivation and the estimate against the measured Zener errors).
+
+    Returns {"error", "worst_edge_m" (x0, x1), "worst_k_per_m", "worst_kh", "max_neighbour_log_ratio"}: the
+    worst edge has the largest |U_e| |h_e - Int_e f/f_e|; k there is its steepest one-sided slope of ln f
+    between midpoints; the max neighbour log ratio is max |ln f_e - ln f_e+1| over edge pairs carrying a rate
+    >= 1e-3 of the peak.
+    """
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
+    if int(ds.get_dimension(device=device)) != 1:
+        return None
+    sets = _INSTALLED_SETS.get((device, region))
+    if sets is None:
+        return None
+    terms = _btbt_rate_models(ds, device, region, 1)
+    if len(terms) != len(sets):                               # a stale record (the region was rebuilt)
+        return None
+    pick = range(len(sets)) if index is None else [index]
+    x = np.asarray(ds.get_node_model_values(device=device, region=region, name="x"))
+    en = np.asarray(ds.get_element_node_list(device=device, region=region), dtype=int)
+    order = np.argsort(0.5 * (x[en[:, 0]] + x[en[:, 1]]))
+    en = en[order]
+    s = 0.5 * (x[en[:, 0]] + x[en[:, 1]])
+    lo, hi = np.minimum(x[en[:, 0]], x[en[:, 1]]), np.maximum(x[en[:, 0]], x[en[:, 1]])
+    h = 2.0 * np.asarray(ds.get_edge_model_values(device=device, region=region, name="EdgeNodeVolume"))[order]
+    E = np.asarray(ds.get_edge_model_values(device=device, region=region, name="BTBT_Emag"))[order]
+    n = s.size
+    idx = np.arange(n)
+    tq = 0.5 * (_GL_T + 1.0)                                  # Gauss points on [0, 1] (fraction of the half edge)
+    num = den = 0.0
+    contrib = np.zeros(n)
+    k_edge = np.zeros(n)
+    max_ratio = 0.0
+    for i in pick:
+        p = sets[i]
+        P, B = float(p.P), float(p.B_V_per_m)
+        g = P * np.log(E) - B / E                              # ln(f/A)
+        u = np.abs(np.asarray(ds.get_edge_model_values(device=device, region=region, name=terms[i][0])))[order]
+        if not np.any(u > 0.0):
+            continue
+        with np.errstate(divide="ignore"):
+            lu = np.log(u)                                    # -inf where the rate is 0 (exp -> 0 below)
+        cont = np.zeros(n)                                    # |D_e| Int_e f: the continuum share of edge e
+        for nb in (-1, 1):                                    # the two half edges, toward each neighbour
+            j = np.clip(idx + nb, 0, n - 1)
+            dist = np.where(j != idx, np.abs(s[j] - s), 1.0)
+            st = s[:, None] + nb * (0.5 * h)[:, None] * tq[None, :]          # the Gauss points of the half edge
+            # E there: the ENO choice of the two quadratics through three midpoints that contain e and j -- the
+            # OUTWARD (e, j, j +- 1) and the INWARD (e -+ 1, e, j) stencil -- taking the one with the smaller
+            # second divided difference. Exact for a piecewise-linear field whatever side of e its cusp lies on
+            # (the abrupt junction, FV peak at an edge midpoint) and for a parabolic peak (a graded junction);
+            # linear where neither stencil exists, constant where j does not.
+            lin = E[:, None] + (E[j] - E)[:, None] * (st - s[:, None]) / dist[:, None]
+            best, best_dd = lin, np.full(n, np.inf)
+            for a_, b_, c_ in ((idx, j, idx + 2 * nb), (idx - nb, idx, j)):
+                ok = (a_ >= 0) & (a_ < n) & (c_ >= 0) & (c_ < n) & (j != idx)
+                a_, c_ = np.clip(a_, 0, n - 1), np.clip(c_, 0, n - 1)
+                pts = (a_, b_, c_)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    dd = np.abs(((E[c_] - E[b_]) / (s[c_] - s[b_]) - (E[b_] - E[a_]) / (s[b_] - s[a_]))
+                                / (s[c_] - s[a_]))
+                    q = 0.0
+                    for r in range(3):
+                        term = E[pts[r]][:, None]
+                        for t_ in range(3):
+                            if t_ != r:
+                                term = term * (st - s[pts[t_]][:, None]) / (s[pts[r]] - s[pts[t_]])[:, None]
+                        q = q + term
+                take = ok & (dd < best_dd)
+                best = np.where(take[:, None], q, best)
+                best_dd = np.where(take, dd, best_dd)
+            Et = np.where((j != idx)[:, None], best, E[:, None])
+            Et = np.maximum(Et, 1.0)                                         # the model's own |E| floor
+            # ln(|D_e| A f(E_t)) = ln|U_e| + ln(f(E_t)/f_e): bounded, so no overflow in the far tail
+            lr = lu[:, None] + P * np.log(Et / E[:, None]) - B / Et + (B / E)[:, None]
+            cont += 0.5 * h * (0.5 * np.exp(lr) @ _GL_W)
+            k_edge = np.maximum(k_edge, np.where(u > 0.0, np.abs(g[j] - g) / dist, 0.0))
+        contrib += u * h - cont
+        num += float(np.sum(u * h - cont))
+        den += float(np.sum(cont))
+        sig = u >= 1e-3 * u.max()
+        pair = sig[:-1] | sig[1:]
+        if np.any(pair):
+            max_ratio = max(max_ratio, float(np.max(np.abs(np.diff(g))[pair])))
+    if not den > 0.0:
+        return None
+    w = int(np.argmax(np.abs(contrib)))
+    return {"error": num / den, "worst_edge_m": (float(lo[w]), float(hi[w])), "worst_k_per_m": float(k_edge[w]),
+            "worst_kh": float(k_edge[w] * h[w]), "max_neighbour_log_ratio": max_ratio}
+
+
+def _check_btbt_resolution(device: str, region: str, index: Optional[int]) -> None:
+    rep = btbt_quadrature_error(device, region, index=index)
+    if rep is None or not abs(rep["error"]) > BTBT_QUADRATURE_TOL:
+        return
+    from dynameta.warning_types import UnreliableResultWarning
+    x0, x1 = rep["worst_edge_m"]
+    warnings.warn(
+        "btbt_generation_current: region {!r} of {!r}: the local BTBT rate is under-resolved by the mesh -- "
+        "estimated quadrature error {:+.2%} of the BTBT current (budget {:.0%}). Worst edge [{:.6g}, {:.6g}] nm "
+        "(length {:.4g} nm, k h = {:.3g} with k = {:.3g} /m the decay rate of A E^P exp(-B/E) there); largest "
+        "change of the rate between neighbouring edges exp({:.3g}). Use UNIFORM spacing h <= 0.35/k across the "
+        "field peak, with explicit nodes (an add_1d_mesh_line ps that does not divide the interval leaves one "
+        "long edge, often on the peak); see the tunneling module header, MESH RESOLUTION.".format(
+            region, device, rep["error"], BTBT_QUADRATURE_TOL, x0 * 1e9, x1 * 1e9, (x1 - x0) * 1e9, rep["worst_kh"],
+            rep["worst_k_per_m"], rep["max_neighbour_log_ratio"]),
+        UnreliableResultWarning, stacklevel=3)
+
+
 def btbt_generation_current(device: str, region: str, *, depth_m: Optional[float] = None,
-                            index: Optional[int] = None) -> float:
+                            index: Optional[int] = None, check_resolution: bool = True) -> float:
     """q * Int G_BTBT dV over the solved region [A] (G = -U: positive = net GENERATION), with the SAME
     quadrature weights the equations assemble (so in steady state it equals the BTBT share of the
     terminal current). 1-D: per unit area [A/m^2]; 2-D layered: per unit depth unless depth_m is given.
     Requires setup_btbt on the region. With a tuple of sets: the SUM over the terms in tuple order (each
     term's integral as for a single set), or term `index` alone (its position in the tuple; a single set
-    is index 0)."""
+    is index 0).
+
+    check_resolution (default True; 1-D): estimate the quadrature error of this current on the solved state
+    (btbt_quadrature_error) and emit an UnreliableResultWarning naming the region and the worst edge when it
+    exceeds BTBT_QUADRATURE_TOL (1 %). The value returned is unchanged either way. Pass False only to skip the
+    check deliberately (e.g. a convergence study that is under-resolved by design)."""
     from dynameta.carriers.devsim_env import import_devsim
     ds = import_devsim()
     if depth_m is not None and not (depth_m > 0.0):
@@ -605,6 +753,8 @@ def btbt_generation_current(device: str, region: str, *, depth_m: Optional[float
             raise ValueError("btbt_generation_current: index must be an int in [0, {}), got {!r}".format(
                 len(terms), index))
         terms = [terms[index]]
+    if check_resolution:
+        _check_btbt_resolution(device, region, index)
     if dim == 1:
         w = 2.0 * np.asarray(ds.get_edge_model_values(device=device, region=region,
                                                       name="EdgeNodeVolume"))

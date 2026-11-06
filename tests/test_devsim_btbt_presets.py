@@ -242,7 +242,9 @@ def _si_zener_current(prm, N, h, junction_edge=None, Vr=0.3):
     try:
         _zener("tbp_si_c", prm, N, ni, epsr, W, hj=h, junction_edge=junction_edge)
         _ramp("tbp_si_c", 0.0, -Vr)
-        return TN.btbt_generation_current("tbp_si_c", "b")
+        # a convergence study, under-resolved BY DESIGN on its coarse mesh (h = 0.05 nm Si direct) and on the
+        # adversarial fixed junction edge: the resolution advisory is gated in tests/test_devsim_btbt_resolution.py
+        return TN.btbt_generation_current("tbp_si_c", "b", check_resolution=False)
     finally:
         _wipe()
 
