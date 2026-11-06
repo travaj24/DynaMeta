@@ -50,15 +50,26 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
      cut-off break that identity; they are later options.
    PARAMETERS. The model takes the SAME fitted set as the local model, a tunneling.BTBTParams (A, B, P):
    P = 2 selects the direct process, P = 2.5 the phonon-assisted one (no other P is defined by the
-   model). physical_from_fitted inverts Eqs. 495-496 (direct: m_r, g) or 497-498 (phonon: m_r and the
-   combination Lambda = g (1 + 2 N_op) D_op^2 / (rho eps_op), with m_V/m_C from mass_ratio_V_over_C), at
-   the gap Eg_tun_eV -- Sentaurus' "second parameter set". The same Eg_tun_eV is the gap of the path
-   (E_C - E_V along it), so a uniform field reproduces A F^P exp(-B/F) whatever the gap. The Sentaurus
-   Table 90 defaults of this model ARE the Hurkx Si numbers (tunneling.SILICON_HURKX, P = 2.5) with
-   eps_op = 0.037 eV.
+   model). physical_from_fitted inverts Eqs. 495-496 (direct: m_r, g -- the inverse of
+   tunneling.kane_direct_params, THE Kane kernel; fitted_from_physical calls it) or 497-498 (phonon: m_r
+   and the combination Lambda = g (1 + 2 N_op) D_op^2 / (rho eps_op), with m_V/m_C from
+   mass_ratio_V_over_C) -- Sentaurus' "second parameter set". The Sentaurus Table 90 defaults of this model
+   ARE the Hurkx Si numbers (tunneling.SILICON_HURKX, P = 2.5) with eps_op = 0.037 eV.
+   THE TUNNELLING GAP AND TEMPERATURE (NonlocalBTBT docstring). (A, B) are inverted at the gap of the
+   set's QUOTED temperature (BTBTParams.T_K, None = T_REF); the path uses the gap at the REGION's
+   temperature (Sentaurus N-2017.09 p. 440: "E_g(300K) ... is used solely for the definitions of the A and B
+   parameters ... The band gap that is used for the WKB integrals features all dependencies (for example
+   ... temperature)"). So the physical set (m_r, g / Lambda) is temperature-independent and, in a uniform
+   field, B scales as E_g^(3/2) -- exactly the local model's Eq. 478 scaling -- while A scales as
+   E_g^(-1/2) (direct) or E_g^(-7/4) (phonon), where Eq. 478 keeps A fixed (gated; the occupation of the
+   optical phonons, (1 + 2 N_op(T)) inside Lambda, is not rescaled: eps_op is not a parameter here).
+   The gap comes from ONE source: material= (the material's fundamental gap through
+   materials.band_temperature.band_data_at_T, the package's one gap kernel -- right for phonon-assisted sets
+   in indirect materials and direct sets in direct-gap materials) or Eg_tun_eV= (explicit, for the direct
+   process of an indirect material: its Gamma gap is not the fundamental gap and is not tabulated).
 
 3. DISCRETISATION (1-D)
-   * Band edges in the region frame: E_V = -q psi + const, E_C = E_V + E_g (E_g = Eg_tun_eV), linear on
+   * Band edges in the region frame: E_V = -q psi + const, E_C = E_V + E_g (E_g = the path gap), linear on
      each edge (psi is P1). In units of the gap, v(x) = (psi(x) - psi(x0))/E_g runs from 0 at the start
      to 1 at the end.
    * START NODES: every interior node of the region that is not a contact node. |grad E_V(0)| is the
@@ -147,9 +158,10 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
    per-path rate, the chain rule and the assembly are written over generic (path, segment) arrays).
    One region; a path does not cross a region boundary. Refused: the local model in the same region
    (double counting), bandgap narrowing in the region (the gap would vary along the path: not
-   implemented), statistics="fermi_dirac" (solution-dependent n_ie). A region at T != T_REF warns
-   (AdvisoryWarning): A, B (and so m_r, g) are used as given, like the local model.
-   Temperature: E_g,tun is used as given; supply it at the device temperature.
+   implemented), statistics="fermi_dirac" (solution-dependent n_ie) -- and tunneling.setup_btbt refuses a
+   region that carries a live nonlocal term (both raise tunneling.BTBTDoubleCountError). A region whose
+   temperature is not the set's quoted one warns (AdvisoryWarning) unless the gap follows a temperature law
+   (material= with a band-temperature model).
 
 8. CONSTANTS. h = H_PLANCK and hbar = h/(2 pi) (NOT the rounded HBAR literal, which differs by 6e-10 and
    would break the uniform-field identity at ~1e-8 through B/F ~ 30).
@@ -166,12 +178,12 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
-from dynameta.constants import H_PLANCK, Q_E, V_T
-from dynameta.carriers.tunneling import BTBTParams
+from dynameta.constants import H_PLANCK, M_E, Q_E
+from dynameta.carriers.tunneling import BTBTDoubleCountError, BTBTParams, kane_direct_params
 from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["NonlocalBTBT", "NonlocalPhysical", "setup_btbt_nonlocal", "btbt_nonlocal_generation",
@@ -193,14 +205,29 @@ _EQ_N, _EQ_P = "ElectronContinuityEquation", "HoleContinuityEquation"
 @dataclass(frozen=True)
 class NonlocalBTBT:
     """Options of the nonlocal path model (module doc). `params` is the SAME fitted set the local model
-    takes (tunneling.BTBTParams; P = 2 -> direct, P = 2.5 -> phonon-assisted); Eg_tun_eV is the gap at
-    which A, B are defined (Eqs. 495-498) AND the gap of the path. mass_ratio_V_over_C = m_V/m_C places
-    the phonon process' x0 (it does not change the uniform-field rate); 1.0 = the m0 -> infinity limit
-    of Eqs. 488-489. max_length_m: longer paths are switched off (smoothly, over the last 5 %)."""
+    takes (tunneling.BTBTParams; P = 2 -> direct, P = 2.5 -> phonon-assisted), quoted at
+    params.quoted_T_K. mass_ratio_V_over_C = m_V/m_C places the phonon process' x0 (it does not change the
+    uniform-field rate); 1.0 = the m0 -> infinity limit of Eqs. 488-489. max_length_m: longer paths are
+    switched off (smoothly, over the last 5 %).
+
+    THE TUNNELLING GAP -- give exactly ONE source (module doc, section 2, TEMPERATURE):
+      material   a materials.TransportModel: the gap is the material's FUNDAMENTAL gap from the ONE package
+                 gap kernel, materials.band_temperature.band_data_at_T -- at the set's quoted temperature
+                 to convert (A, B) into the physical set, and at the region's temperature for the path.
+                 Use it when the tunnelling gap IS the fundamental gap: a phonon-assisted set in an
+                 indirect material (Si, Ge: SILICON_HURKX, *_KAO_INDIRECT) or a direct set in a direct-gap
+                 material (GaAs, InAs, In0.53Ga0.47As: IN053GA047AS_KANE). With a band-temperature model
+                 on the material the temperature dependence is handled (no warning); without one the gap
+                 is band_gap_eV at every T.
+      Eg_tun_eV  an explicit gap [eV] AT params.quoted_T_K, used at every temperature. Use it when the
+                 tunnelling gap is NOT the fundamental gap: the DIRECT (Gamma) process of an indirect
+                 material -- SILICON_KAO_DIRECT, GERMANIUM_KAO_DIRECT, whose E_g is the Gamma gap (Ge
+                 ~0.8 eV, not its 0.66 eV L gap) -- which the package's gap law does not tabulate."""
     params: BTBTParams
-    Eg_tun_eV: float
+    Eg_tun_eV: Optional[float] = None
     mass_ratio_V_over_C: float = 1.0
     max_length_m: float = 20e-9
+    material: Optional[object] = None
 
     def __post_init__(self):
         if not isinstance(self.params, BTBTParams):
@@ -212,21 +239,50 @@ class NonlocalBTBT:
                              .format(self.params.P))
         if not (self.params.A_SI > 0.0):
             raise ValueError("NonlocalBTBT: A_SI must be > 0 (it sets the physical prefactor)")
-        for nm in ("Eg_tun_eV", "mass_ratio_V_over_C", "max_length_m"):
+        if (self.Eg_tun_eV is None) == (self.material is None):
+            raise ValueError("NonlocalBTBT: give exactly one tunnelling-gap source -- material= (the fundamental "
+                             "gap from the package gap law) or Eg_tun_eV= (an explicit gap, e.g. the Gamma gap "
+                             "of an indirect material's direct process)")
+        names = ("mass_ratio_V_over_C", "max_length_m") + (("Eg_tun_eV",) if self.material is None else ())
+        for nm in names:
             v = float(getattr(self, nm))
             if not (math.isfinite(v) and v > 0.0):
                 raise ValueError("NonlocalBTBT: {} must be finite and > 0, got {!r}".format(nm, v))
+        if self.material is not None:
+            eg = tunnelling_gaps(self, self.params.quoted_T_K)[0]   # resolvable at the quoted temperature
+            if not (math.isfinite(eg) and eg > 0.0):
+                raise ValueError("NonlocalBTBT: the material's gap at {} K is {!r}".format(
+                    self.params.quoted_T_K, eg))
 
     @property
     def process(self) -> str:
         return "direct" if float(self.params.P) == 2.0 else "phonon"
 
 
+def tunnelling_gaps(spec: NonlocalBTBT, T_K: float):
+    """(E_g at the set's quoted temperature, E_g of the path at T_K, temperature_handled) [eV]
+    (NonlocalBTBT docstring). material: both from materials.band_temperature.band_data_at_T (the one gap
+    kernel); handled = the material has a band-temperature model or T_K is the quoted temperature.
+    Eg_tun_eV: the same number twice; handled = T_K is the quoted temperature."""
+    T_set = spec.params.quoted_T_K
+    if spec.material is None:
+        g = float(spec.Eg_tun_eV)
+        return g, g, float(T_K) == T_set
+    from dynameta.materials.band_temperature import band_data_at_T
+    e_set = band_data_at_T(spec.material, T_set).E_g_eV
+    e_path = band_data_at_T(spec.material, float(T_K)).E_g_eV
+    if e_set is None or e_path is None:
+        raise ValueError("NonlocalBTBT: material has no band gap (band_gap_eV None and no absolute gap law)")
+    handled = getattr(spec.material, "band_temperature", None) is not None or float(T_K) == T_set
+    return float(e_set), float(e_path), handled
+
+
 @dataclass(frozen=True)
 class NonlocalPhysical:
     """The physical parameter set of the path model (Sentaurus' "first parameter set"), SI.
     direct: m_r and the degeneracy g; phonon: m_r, m_V, m_C and lam = g (1 + 2 N_op) D_op^2/(rho eps_op).
-    m_V = m_C = 2 m_r for the direct process (unused there)."""
+    m_V = m_C = 2 m_r for the direct process (unused there). Eg_J is the PATH gap (at the device
+    temperature); Eg_set_J the gap the fitted (A, B) were converted at (None: = Eg_J)."""
     process: str
     Eg_J: float
     m_r: float
@@ -234,6 +290,7 @@ class NonlocalPhysical:
     m_C: float
     g: float = 0.0
     lam: float = 0.0
+    Eg_set_J: Optional[float] = None
 
     @property
     def v_star(self) -> float:
@@ -265,38 +322,58 @@ class NonlocalPhysical:
                 * math.sqrt(self.m_V * self.m_C / (H_PLANCK * math.sqrt(2.0 * self.m_r * self.Eg_J))))
 
 
-def physical_from_fitted(spec: NonlocalBTBT) -> NonlocalPhysical:
-    """Invert Eqs. 495-496 (direct) or 497-498 (phonon) at E_g = spec.Eg_tun_eV, SI (F0 = 1 V/m, so
-    A_SI is per (V/m)^P):
+def physical_from_fitted(spec: NonlocalBTBT, *, T_K: Optional[float] = None) -> NonlocalPhysical:
+    """The physical set of `spec` for a device at T_K (None: the set's quoted temperature). (A, B) are
+    inverted at the gap of the QUOTED temperature (tunnelling_gaps; Sentaurus: "E_g(300 K) ... is used
+    solely for the definitions of A and B"), SI with F0 = 1 V/m:
       direct  B = pi^2 sqrt(m_r) E_g^(3/2)/(q h)                -> m_r;  A = g pi sqrt(m_r) q^2/(9 h^2 sqrt(E_g)) -> g
       phonon  B = 2^(7/2) pi sqrt(m_r) E_g^(3/2)/(3 q h)        -> m_r;  m_V = m_r (1 + r), m_C = m_r (1 + 1/r)
-              A = lam (m_V m_C)^(3/2) q^(5/2)/(2^(21/4) h^(5/2) m_r^(5/4) E_g^(7/4))                    -> lam."""
-    Eg = Q_E * float(spec.Eg_tun_eV)
+              A = lam (m_V m_C)^(3/2) q^(5/2)/(2^(21/4) h^(5/2) m_r^(5/4) E_g^(7/4))                    -> lam,
+    and the path uses the gap at T_K (Sentaurus: "the band gap used for the WKB integrals features all
+    dependencies"). The direct pair is the INVERSE of tunneling.kane_direct_params (the one forward kernel,
+    gated in tests/test_btbt_nonlocal_kernels.py); the phonon pair (Eqs. 497-498) exists only here."""
+    T = spec.params.quoted_T_K if T_K is None else float(T_K)
+    eg_set, eg_path, _ = tunnelling_gaps(spec, T)
+    Eg = Q_E * eg_set
     A, B = float(spec.params.A_SI), float(spec.params.B_V_per_m)
     h = H_PLANCK
     if spec.process == "direct":
         m_r = (Q_E * h * B / (math.pi ** 2 * Eg ** 1.5)) ** 2
         g = 9.0 * h * h * math.sqrt(Eg) * A / (math.pi * math.sqrt(m_r) * Q_E * Q_E)
-        return NonlocalPhysical("direct", Eg, m_r, 2.0 * m_r, 2.0 * m_r, g=g)
+        return NonlocalPhysical("direct", Q_E * eg_path, m_r, 2.0 * m_r, 2.0 * m_r, g=g, Eg_set_J=Eg)
     r = float(spec.mass_ratio_V_over_C)
     m_r = (3.0 * Q_E * h * B / (2.0 ** 3.5 * math.pi * Eg ** 1.5)) ** 2
     m_V, m_C = m_r * (1.0 + r), m_r * (1.0 + 1.0 / r)
     lam = (A * 2.0 ** 5.25 * h ** 2.5 * m_r ** 1.25 * Eg ** 1.75
            / ((m_V * m_C) ** 1.5 * Q_E ** 2.5))
-    return NonlocalPhysical("phonon", Eg, m_r, m_V, m_C, lam=lam)
+    return NonlocalPhysical("phonon", Q_E * eg_path, m_r, m_V, m_C, lam=lam, Eg_set_J=Eg)
 
 
-def fitted_from_physical(phys: NonlocalPhysical):
-    """(A_SI, B_V_per_m) of Eqs. 495-496 / 497-498 (the forward direction of physical_from_fitted)."""
-    Eg, h, m_r = phys.Eg_J, H_PLANCK, phys.m_r
+def fitted_from_physical(phys: NonlocalPhysical, *, at_path_gap: bool = False):
+    """(A_SI, B_V_per_m) of the physical set (the forward direction of physical_from_fitted), at the
+    conversion gap Eg_set_J (default) or at the path gap (at_path_gap=True: the uniform-field (A, B) the
+    model reproduces at the device temperature). Direct: tunneling.kane_direct_params, THE Kane kernel
+    (Eqs. 495-496); phonon: Eqs. 497-498."""
+    Eg = phys.Eg_J if (at_path_gap or phys.Eg_set_J is None) else phys.Eg_set_J
+    h, m_r = H_PLANCK, phys.m_r
     if phys.process == "direct":
-        A = phys.g * math.pi * math.sqrt(m_r) * Q_E ** 2 / (9.0 * h * h * math.sqrt(Eg))
-        B = math.pi ** 2 * math.sqrt(m_r) * Eg ** 1.5 / (Q_E * h)
-        return A, B
+        k = kane_direct_params(Eg / Q_E, m_r / M_E, phys.g, source="btbt_nonlocal.fitted_from_physical")
+        return k.A_SI, k.B_V_per_m
     A = (phys.lam * (phys.m_V * phys.m_C) ** 1.5 * Q_E ** 2.5
          / (2.0 ** 5.25 * h ** 2.5 * m_r ** 1.25 * Eg ** 1.75))
     B = 2.0 ** 3.5 * math.pi * math.sqrt(m_r) * Eg ** 1.5 / (3.0 * Q_E * h)
     return A, B
+
+
+def has_live_nonlocal(device: str, region: str) -> bool:
+    """True when `region` of `device` carries a LIVE nonlocal BTBT term (tunneling.setup_btbt refuses the
+    local model there). Never imports or registers custom_terms: a process that never imported it has no
+    term."""
+    import sys
+    ct = sys.modules.get("dynameta.carriers.custom_terms")
+    if ct is None or _TERM_CLASS is None:
+        return False
+    return any(isinstance(t, _TERM_CLASS) and t.region == region for t in ct.live_terms(device))
 
 
 # =====================================================================================================
@@ -727,11 +804,11 @@ def _term_class():
         jacobian_exact = True
         pattern_changes = True
 
-        def __init__(self, region: str, spec: NonlocalBTBT, name: str = MECHANISM):
+        def __init__(self, region: str, spec: NonlocalBTBT, name: str = MECHANISM, T_K: Optional[float] = None):
             super().__init__(name)
             self.region = region
             self.spec = spec
-            self.phys = physical_from_fitted(spec)
+            self.phys = physical_from_fitted(spec, T_K=T_K)   # the region's temperature, fixed at setup
             self.last_stats: Dict[str, int] = {}
 
         def equations(self, device):
@@ -755,7 +832,7 @@ def _term_class():
             end_ok = ok[perm]
             start_ok = end_ok.copy()
             start_ok[0] = start_ok[-1] = False
-            delta = math.log(par("N_dos") * par("N_dos_p") / par("n_i") ** 2) - self.spec.Eg_tun_eV / vt
+            delta = math.log(par("N_dos") * par("N_dos_p") / par("n_i") ** 2) - self.phys.Eg_J / Q_E / vt
             return {"perm": perm, "x": x[perm], "psi": nv("Potential")[perm],
                     "Ln": nv("HJ_L_Electrons")[perm], "Lp": nv("HJ_L_Holes")[perm],
                     "dLn": nv("HJ_L_Electrons:Electrons")[perm], "dLp": nv("HJ_L_Holes:Holes")[perm],
@@ -837,8 +914,9 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
 
     WHICH OPTION FOR WHICH CALCULATION. The process is P of spec.params: P = 2.5 (phonon-assisted, the
     Si/Ge indirect gap; tunneling.SILICON_HURKX is Sentaurus' default set of this model) or P = 2
-    (direct gap: III-V, the Ge direct process). Eg_tun_eV: the gap at which A, B were fitted (Si 1.12 eV
-    at 300 K). max_length_m: longer than the longest path that matters (the 20 nm default covers average
+    (direct gap: III-V, the Ge direct process). The gap: material= (fundamental gap from the package gap
+    kernel, temperature-aware with a band-temperature model) or Eg_tun_eV= (explicit; the Gamma gap of an
+    indirect material's direct process) -- NonlocalBTBT docstring. max_length_m: longer than the longest path that matters (the 20 nm default covers average
     fields above E_g/20 nm = 5.6e7 V/m in Si, where exp(-B/F) < 2e-15). Use the LOCAL model
     (tunneling.setup_btbt) instead for 2-D/3-D, for regions with bandgap narrowing, and where speed
     matters more than the nonlocal effects of the module doc, section 1."""
@@ -855,10 +933,11 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
     _require_bipolar(device, region)
     nodes = set(ds.get_node_model_list(device=device, region=region))
     edges = set(ds.get_edge_model_list(device=device, region=region))
-    if "BTBT_U" in edges or "BTBT_U" in nodes:
-        raise ValueError("setup_btbt_nonlocal: region {!r} already carries the LOCAL BTBT term "
-                         "(setup_btbt / btbt=...); both would count the same tunnelling twice.".format(
-                             region))
+    elems = set(ds.get_element_model_list(device=device, region=region)) if dim > 1 else set()
+    if any(m.startswith("BTBT_U") for m in nodes | edges | elems):
+        raise BTBTDoubleCountError(
+            "setup_btbt_nonlocal: region {!r} already carries the LOCAL BTBT term (setup_btbt / btbt=...); "
+            "both would count the same tunnelling twice.".format(region))
     if "BgnDc" in nodes or "n_ie" in nodes:
         raise NotImplementedError(
             "setup_btbt_nonlocal: region {!r} has bandgap narrowing / an effective n_ie; the gap would "
@@ -867,17 +946,23 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
     if "fd_detailed_balance" in set(ds.get_parameter_list(device=device, region=region)):
         raise NotImplementedError("setup_btbt_nonlocal: statistics='fermi_dirac' (solution-dependent "
                                   "n_ie) is not implemented with the nonlocal model.")
-    vt = float(ds.get_parameter(device=device, region=region, name="V_t"))
-    if vt != V_T:
+    from dynameta.carriers.physics_heterojunction import temperature_of_V_t
+    T = temperature_of_V_t(float(ds.get_parameter(device=device, region=region, name="V_t")))
+    eg_set, eg_path, handled = tunnelling_gaps(spec, T)
+    if not handled:
         warnings.warn(
-            "setup_btbt_nonlocal: region {!r} runs at V_t = {!r} V, not at T_REF; A, B and Eg_tun_eV are "
-            "used as given (m_r and the prefactor are not rescaled with temperature). Supply them at "
-            "this temperature.".format(region, vt), AdvisoryWarning, stacklevel=2)
+            "setup_btbt_nonlocal: region {!r} runs at T = {:.6g} K but the BTBT set is quoted at {:.6g} K and "
+            "the tunnelling gap has no temperature law ({}): A, B and the gap {:.6g} eV are used as given. Give "
+            "material= a TransportModel with a band-temperature model (materials.BandTemperature) to follow "
+            "E_g(T), or supply A, B and the gap at this temperature.".format(
+                region, T, spec.params.quoted_T_K,
+                "explicit Eg_tun_eV" if spec.material is None else "the material has no band_temperature",
+                eg_path), AdvisoryWarning, stacklevel=2)
     from dynameta.carriers.physics_heterojunction import setup_log_activity
     fd = float(ds.get_parameter(device=device, region=region, name="fd_enhancement")) != 0.0
     setup_log_activity(device, region, "Electrons", "N_dos", fd=fd)
     setup_log_activity(device, region, "Holes", "N_dos_p", fd=fd)
-    term = _term_class()(region, spec, name)
+    term = _term_class()(region, spec, name, T_K=T)
     _ct().add_custom_term(device, term)
     return term
 

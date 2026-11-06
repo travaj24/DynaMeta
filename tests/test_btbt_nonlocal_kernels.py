@@ -214,11 +214,101 @@ def test_n0c_conversion_round_trip_and_eqs_495_498():
     assert abs(NL.physical_from_fitted(_spec(PHONON)).m_r / 9.1093837015e-31 - 0.0551) < 5e-4
 
 
+def test_n0c_one_kane_kernel(monkeypatch):
+    """ONE implementation of Eqs. 495-496: fitted_from_physical's direct branch IS tunneling.kane_direct_params
+    (breaking that function breaks it), and physical_from_fitted is its exact inverse: kane_direct_params(E_g,
+    m_r, g) -> physical_from_fitted -> (m_r, g) to 1e-14 over random direct sets."""
+    from dynameta.carriers import tunneling as TN
+    rng = np.random.default_rng(13)
+    M0 = 9.1093837015e-31
+    for _ in range(25):
+        eg, mr, g = rng.uniform(0.3, 3.5), rng.uniform(0.01, 0.5), rng.uniform(0.5, 4.0)
+        kp = TN.kane_direct_params(eg, mr, g, source="test")
+        ph = NL.physical_from_fitted(NL.NonlocalBTBT(kp, Eg_tun_eV=eg))
+        assert abs(ph.m_r / (mr * M0) - 1) < 1e-14 and abs(ph.g / g - 1) < 1e-14
+        A, B = NL.fitted_from_physical(ph)
+        assert abs(A / kp.A_SI - 1) < 1e-14 and abs(B / kp.B_V_per_m - 1) < 1e-14
+
+    def broken(*a, **k):
+        raise RuntimeError("the one Kane kernel was called")
+    monkeypatch.setattr(NL, "kane_direct_params", broken)
+    with pytest.raises(RuntimeError, match="one Kane kernel"):
+        NL.fitted_from_physical(NL.physical_from_fitted(_spec(DIRECT)))
+
+
+def _material(eg, law=None):
+    from dynameta.materials.band_temperature import BandTemperature
+    from dynameta.materials.transport_model import TransportModel
+    bt = None if law is None else BandTemperature(gap_law=law, affinity_fraction=0.5)
+    return TransportModel(n_bg_m3=1e24, eps_static=11.7, dos_mass_kg_of_n_m3=lambda n: 1e-31, band_gap_eV=eg,
+                          band_temperature=bt)
+
+
+SI_LAW = (1.17, 4.73e-4, 636.0)          # Si Varshni triple (plan 5.3; P3's absolute Si constants) -- a test law
+
+
+def test_gap_from_the_package_gap_kernel():
+    """material= takes the gap from materials.band_temperature.band_data_at_T: at the set's quoted temperature
+    it is band_gap_eV, and the physical set equals the explicit-Eg_tun_eV one bit for bit."""
+    from dynameta.materials.band_temperature import band_data_at_T
+    for params in (DIRECT, PHONON):
+        a = NL.physical_from_fitted(_spec(params))
+        b = NL.physical_from_fitted(NL.NonlocalBTBT(params, material=_material(EG_EV), mass_ratio_V_over_C=RATIO))
+        assert a == b
+        tm = _material(EG_EV, SI_LAW)
+        ph = NL.physical_from_fitted(NL.NonlocalBTBT(params, material=tm, mass_ratio_V_over_C=RATIO), T_K=350.0)
+        assert ph.Eg_set_J == Q * band_data_at_T(tm, 300.0).E_g_eV
+        assert ph.Eg_J == Q * band_data_at_T(tm, 350.0).E_g_eV
+    with pytest.raises(ValueError, match="exactly one"):
+        NL.NonlocalBTBT(PHONON)
+    with pytest.raises(ValueError, match="exactly one"):
+        NL.NonlocalBTBT(PHONON, Eg_tun_eV=1.12, material=_material(1.12))
+
+
+@pytest.mark.parametrize("params", [DIRECT, PHONON], ids=["direct", "phonon"])
+def test_n1_uniform_field_at_another_temperature(params):
+    """A set quoted at 300 K on a 350 K device whose material has a band-temperature model: the physical set
+    (m_r, g or lam) is FIXED by the 300 K gap and the path sees E_g(350 K), so in a uniform field the model
+    reproduces A' F^P exp(-B'/F) with, from Eqs. 495-498 at fixed masses (re-derived here):
+      B' = B r^(3/2),  A' = A r^(-1/2) (direct, Eq. 495) or A r^(-7/4) (phonon, Eq. 497),  r = E_g(T)/E_g(T0).
+    B' is the local model's Eq. 478 scaling (tunneling.btbt_at_temperature with the same band_gap_ratio) to
+    round-off; A' is NOT (Eq. 478 keeps A fixed): MEASURED A'/A = r^(-1/2) = 1.006 / r^(-7/4) = 1.021 at
+    350 K for this law -- the difference between the two temperature models, by construction. Budget: the
+    N1 budget (8 eps nseg (1 + B/F) x 3) + 4 eps for the power-law references."""
+    from dataclasses import replace
+    from dynameta.carriers.tunneling import btbt_at_temperature
+    from dynameta.materials.band_temperature import band_gap_ratio
+    tm = _material(EG_EV, SI_LAW)
+    r = band_gap_ratio(tm, 350.0, 300.0)
+    spec = NL.NonlocalBTBT(params, material=tm, mass_ratio_V_over_C=RATIO, max_length_m=1.0)
+    ph = NL.physical_from_fitted(spec, T_K=350.0)
+    Bp = params.B_V_per_m * r ** 1.5
+    Ap = params.A_SI * r ** (-0.5 if params.P == 2.0 else -1.75)
+    assert abs(btbt_at_temperature(replace(params, scale_B_with_gap=True), 350.0, r).B_V_per_m / Bp - 1) < 4 * EPS
+    A2, B2 = NL.fitted_from_physical(ph, at_path_gap=True)
+    assert abs(A2 / Ap - 1) < 8 * EPS and abs(B2 / Bp - 1) < 8 * EPS
+    F, h = 1e8, 0.1e-9
+    N = int(round(4.0 / (F * h))) + 1
+    x = np.arange(N) * h
+    psi = F * (x - 0.5 * x[-1])
+    full = np.ones(N, bool)
+    so = full.copy()
+    so[0] = so[-1] = False
+    res = NL.path_rates_1d(x, psi, np.full(N, -300.0), np.full(N, -300.0), ph, 0.0, 1.0, so, full,
+                           derivatives=False)
+    nseg = ph.Eg_J / (Q * F * h) + 1
+    dev = np.max(np.abs(-res["R"] / (Ap * F ** params.P * math.exp(-Bp / F)) - 1.0))
+    print(params.P, "r", r, "A'/A", Ap / params.A_SI, "dev", dev)
+    assert dev <= 8 * EPS * nseg * (1.0 + Bp / F) * 3.0 + 4 * EPS * (1 + Bp / F)
+
+
 def test_spec_validation():
     with pytest.raises(ValueError, match="P = 2"):
         NL.NonlocalBTBT(BTBTParams(1e15, 1e9, 2.2), Eg_tun_eV=1.1)
     with pytest.raises(ValueError, match="Eg_tun_eV"):
         NL.NonlocalBTBT(DIRECT, Eg_tun_eV=0.0)
+    with pytest.raises(ValueError, match="exactly one"):
+        NL.NonlocalBTBT(DIRECT)
     with pytest.raises(TypeError):
         NL.NonlocalBTBT((1e15, 1e9, 2.0), Eg_tun_eV=1.1)
 

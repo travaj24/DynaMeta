@@ -8,8 +8,9 @@ in-process refusal tests fail at theirs (MEASURED by running this file against a
 The physical contrast is gated too: at V_r = 0.1 V the nonlocal Zener current is exactly 0 (no final state:
 every path is too long) while the local model gives 2.6e-2 A/m^2 (N7).
 
-  D0  defaults off: importing the module loads neither devsim nor custom_terms and registers nothing; every
-      refusal fires before any DEVSIM state changes (no registration).
+  D0  defaults off: importing the module adds only itself (beyond tunneling), loads no devsim and registers
+      nothing; every refusal fires before any DEVSIM state changes (no registration); the local model refuses a
+      region with a live nonlocal term (BTBTDoubleCountError); material= takes the gap from band_data_at_T.
   N3  detailed balance at V = 0 (Zener with E_g,tun = 0.9 eV < the 1.04 V built-in, so paths exist): |R|/one-way
       <= 64 eps x 60 (Boltzmann). Refute: the f_n frame offset delta shifted by 1e-3 kT breaks it. The legacy
       FD g-factor transport (fd_enhancement=True) is REPORTED: its zero-bias state is not a strict equilibrium
@@ -54,7 +55,8 @@ ZMU_N, VT = 0.135, 1.380649e-23 * 300.0 / Q
 
 def test_d0_import_is_inert():
     r = C.run_child("defaults")
-    assert r == {"devsim_loaded": False, "custom_terms_loaded_by_import": False, "registered": False}
+    assert r == {"devsim_loaded": False, "new_dynameta_modules": ["dynameta.carriers.btbt_nonlocal"],
+                 "registered": False}
 
 
 def _wipe():
@@ -70,7 +72,7 @@ def test_d0_refusals_fire_before_any_registration():
     from dynameta.carriers import eq_registry as _R
     from dynameta.carriers import physics_bipolar_dd as BP
     from dynameta.carriers.bipolar_options import BGN_SI_SLOTBOOM_1977, BipolarOptions
-    from dynameta.carriers.tunneling import SILICON_HURKX
+    from dynameta.carriers.tunneling import BTBTDoubleCountError, SILICON_HURKX
     spec = NL.NonlocalBTBT(SILICON_HURKX, Eg_tun_eV=1.12)
     _wipe()
     try:
@@ -106,7 +108,7 @@ def test_d0_refusals_fire_before_any_registration():
             return dev
         with pytest.raises(ValueError, match="no ElectronContinuityEquation"):
             NL.setup_btbt_nonlocal(oned("nl_plain", bipolar=False), "s", spec)
-        with pytest.raises(ValueError, match="LOCAL BTBT"):
+        with pytest.raises(BTBTDoubleCountError, match="LOCAL BTBT"):
             NL.setup_btbt_nonlocal(oned("nl_loc", btbt=SILICON_HURKX), "s", spec)
         with pytest.raises(NotImplementedError, match="bandgap narrowing"):
             NL.setup_btbt_nonlocal(oned("nl_bgn", options=BipolarOptions(bgn=BGN_SI_SLOTBOOM_1977)), "s", spec)
@@ -120,8 +122,30 @@ def test_d0_refusals_fire_before_any_registration():
 
 def test_d0_temperature_advisory():
     r = C.run_child("warn_T")
-    assert len(r["T350"]) == 1 and r["T350"][0][0] == "AdvisoryWarning" and "not at T_REF" in r["T350"][0][1]
+    assert len(r["T350"]) == 1 and r["T350"][0][0] == "AdvisoryWarning" and "no temperature law" in r["T350"][0][1]
     assert r["Tref"] == []
+
+
+def test_d0_local_after_nonlocal_is_refused():
+    """The reverse refusal (tunneling.setup_btbt): a region with a live nonlocal term refuses the local model
+    with BTBTDoubleCountError and gets no BTBT_U model; a region without one installs normally. OLD CODE
+    (merge base c6aa0a4 + this branch's nonlocal module, tunneling.py unpatched): setup_btbt installs the
+    second model silently -- MEASURED: raised None."""
+    r = C.run_child("reverse_refusal")
+    assert r["raised"] is not None and "NONLOCAL" in r["raised"]
+    assert not any(m.startswith("BTBT_U") for m in r["models_after"])
+    assert r["other_models"] == ["BTBT_U"]
+
+
+def test_d0_gap_from_material_kernel():
+    """material= (band_data_at_T) at T_REF gives the explicit-gap device bit for bit (solution and rates); at
+    350 K with a band-temperature model the term's path gap and conversion gap ARE band_data_at_T's values
+    and no temperature advisory fires (the explicit-gap device at 350 K warns: test_d0_temperature_advisory)."""
+    r = C.run_child("gap_material", eg=1.12, law=[1.17, 4.73e-4, 636.0])
+    assert r["explicit"]["R_hex"] == r["material"]["R_hex"] and r["explicit"]["psi_hex"] == r["material"]["psi_hex"]
+    t = r["T350"]
+    assert t["Eg_path"] == t["kernel_path"] and t["Eg_set"] == t["kernel_set"] and t["warnings"] == []
+    assert t["Eg_path"] < t["Eg_set"]
 
 
 # =====================================================================================================

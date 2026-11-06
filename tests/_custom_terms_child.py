@@ -223,6 +223,20 @@ def _lst(a):
     return [float(x) for x in np.ravel(a)]
 
 
+def _device_rows():
+    """1 + the largest equation number of any device equation of any live device (the circuit rows follow)."""
+    ds = _ds()
+    top = -1
+    for d in ds.get_device_list():
+        for r in ds.get_region_list(device=d):
+            for eq in ds.get_equation_list(device=d, region=r):
+                v = ds.get_equation_command(device=d, region=r, name=eq)["variable_name"]
+                c = np.asarray(ds.get_equation_numbers(device=d, region=r, variable=v))
+                if c.size:
+                    top = max(top, int(c.max()))
+    return top + 1
+
+
 def fd_columns(dev, region, var, nodes, rows, h, term):
     """The custom term's OWN Jacobian share J_on - J_off at `rows` x (var at `nodes`) against central
     differences (steps h and 2h) of its own residual share rhs_on - rhs_off (get_matrix_and_rhs returns
@@ -242,15 +256,20 @@ def fd_columns(dev, region, var, nodes, rows, h, term):
     Jon = sp.csc_matrix((on[0], on[1], on[2]))
     Jc = Jon - sp.csc_matrix((off[0], off[1], off[2]))
     x = np.zeros(Jon.shape[1])                            # the solution vector, column by column
-    for v in ds.get_node_model_list(device=dev, region=region):
-        try:
-            c = np.asarray(ds.get_equation_numbers(device=dev, region=region, variable=v))
-        except Exception:
-            continue
+    # the region's SOLUTION variables, read from its equation commands (not a scan of every node model)
+    for eq in ds.get_equation_list(device=dev, region=region):
+        v = ds.get_equation_command(device=dev, region=region, name=eq)["variable_name"]
+        c = np.asarray(ds.get_equation_numbers(device=dev, region=region, variable=v))
         ok = c >= 0
         x[c[ok]] = np.asarray(ds.get_node_model_values(device=dev, region=region, name=v))[ok]
-    for cn in ds.get_circuit_node_list():
-        x[CT.circuit_row(cn)] = float(ds.get_circuit_node_value(node=cn, solution="dcop"))
+    # circuit nodes ONLY if the process has a circuit: DEVSIM 2.11.2's get_circuit_node_list() in a process
+    # with no circuit trips the FATAL assertion NodeKeeper.cc:266 CIRCUIT_UNEXPECTED, reported by the NEXT
+    # DEVSIM call (MEASURED 2026-11-06 on the circuit-free 1-D Zener of tests/_btbt_nonlocal_child.py; the
+    # toy devices here all have a circuit, so it never showed). The circuit rows are the matrix rows beyond
+    # every device equation.
+    if Jon.shape[0] > _device_rows():
+        for cn in ds.get_circuit_node_list():
+            x[CT.circuit_row(cn)] = float(ds.get_circuit_node_value(node=cn, solution="dcop"))
     R = float(np.max(np.abs(Jon[rows, :]) @ np.abs(x)))
     cols = CT.node_columns(dev, region, var, nodes)
     out = []
