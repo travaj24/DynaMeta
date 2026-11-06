@@ -66,8 +66,9 @@ here re-defines a composite by name, so options compose with trap levels, interf
                 E_ref = 18.7 mV, N_ref = 7e17 cm^-3
               The fit has no basis on p-type or compensated material: it is evaluated in N_D only (a
               p-type node gets dEg from its donors, i.e. 0 when uncompensated), and
-              `install_option_fields` emits one AdvisoryWarning per region in which some node has
-              N_A > N_ref (where the fit would be needed and is not valid). Use a Slotboom/Klaassen
+              `install_option_fields` emits one UnreliableResultWarning (the model is used outside
+              its validity range) per region in which some node has N_A > N_ref (where the fit would
+              be needed and is not valid). Use a Slotboom/Klaassen
               set for a heavily doped p-type region.
    These are APPARENT narrowings: they were extracted assuming Boltzmann statistics and a specific
    reference n_i, so (a) they must be paired with the n_i the user passes (state it with the result),
@@ -129,8 +130,8 @@ here re-defines a composite by name, so options compose with trap levels, interf
    "non-localized" dopants), Fermi-Dirac occupancy of the dopant level at degeneracy (there N_D+ -> N_D
    anyway), excited dopant states. Consequently the model FREEZES OUT WRONGLY above the Mott density
    (Si:P N_crit = 3.74e18 cm^-3): a 1e19 cm^-3 Si:P layer is computed 39 % ionized at 300 K, whereas
-   metallic Si:P is fully ionized. `install_option_fields` emits one AdvisoryWarning per region in which
-   a node above the model's N_mott still has a non-zero ionization energy. Use the model for
+   metallic Si:P is fully ionized. `install_option_fields` emits one UnreliableResultWarning per region
+   in which a node above the model's N_mott still has a non-zero ionization energy. Use the model for
    freeze-out below ~1e18 cm^-3 (cryogenic or moderately doped regions); above N_mott its ionized
    fraction is not a prediction (Altermatt et al. 2006's model is the planned replacement).
 
@@ -159,7 +160,7 @@ import numpy as np
 from dynameta.constants import KB, Q_E
 from dynameta.carriers.eq_registry import ds, node_with_derivs as _node_with_derivs, \
     edge_with_derivs as _edge_with_derivs
-from dynameta.warning_types import AdvisoryWarning
+from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 # cm -> m conversions, spelled once (the literature quotes CGS)
 _CM3 = 1.0e6          # cm^-3 -> m^-3
@@ -225,7 +226,7 @@ class BGNModel:
     "acceptors" (N_A). None (default) = the kind's own basis: "total" for slotboom (Slotboom/Klaassen
     are used for both types), "donors" for del_alamo (an n-type-only fit in N_D, TED 1987 Eq. (11)).
     Under a one-species basis, nodes where the OTHER species exceeds N_ref have no basis in the fit;
-    install_option_fields advises once per region (see `unsupported_nodes`)."""
+    install_option_fields warns (UnreliableResultWarning) once per region (see `unsupported_nodes`)."""
     kind: str
     E_ref_eV: float
     N_ref_m3: float
@@ -315,9 +316,9 @@ class IonizationModel:
       alpha_D_eVcm=...)`, which converts. Any alpha that makes dE vanish below 1e17 cm^-3 raises
       IonizationUnitsError (the eV*cm-in-the-eV*m-field trap; it would otherwise read as full
       ionization through the clamp).
-    N_mott_D_m3 / N_mott_A_m3: Mott densities [m^-3] for the freeze-out ADVISORY only (the occupancy is
-      unchanged): Si:P 3.74e18 and the Si:B proxy 4.5e18 cm^-3 by default; set them for another
-      dopant or material, or math.inf to silence the advisory.
+    N_mott_D_m3 / N_mott_A_m3: Mott densities [m^-3] for the freeze-out WARNING only (an
+      UnreliableResultWarning; the occupancy is unchanged): Si:P 3.74e18 and the Si:B proxy 4.5e18
+      cm^-3 by default; set them for another dopant or material, or math.inf to silence it.
 
     Use this model for freeze-out in non-degenerate regions (cryogenic T, or N below ~1e18 cm^-3). It
     has no Mott transition, so above N_mott its ionized fraction is not a prediction (1e19 cm^-3 Si:P
@@ -665,7 +666,9 @@ _BGN_FD_WARN_VT = 0.05
 def bgn_basis_advisory(region: str, bgn: BGNModel, N_D_m3, N_A_m3) -> Optional[str]:
     """The advisory text when some node of `region` lies outside the BGN fit's doping basis
     (BGNModel.unsupported_nodes: e.g. del Alamo -- an n-type-only fit in N_D -- on p-type or
-    compensated nodes with N_A > N_ref), else None. Pure numpy; install_option_fields warns with it."""
+    compensated nodes with N_A > N_ref), else None. Pure numpy; install_option_fields emits it as an
+    UnreliableResultWarning (the fit is used outside its validity range; the result there may be
+    wrong), one per region."""
     bad = bgn.unsupported_nodes(N_D_m3, N_A_m3)
     if not np.any(bad):
         return None
@@ -687,7 +690,8 @@ def mott_advisory(region: str, ion: IonizationModel, N_D_m3, N_A_m3, n0_m3, p0_m
     """The advisory text when some node of `region` is doped above the ionization model's Mott density
     (IonizationModel.N_mott_*_m3) AND still has a non-zero ionization energy -- the single-level
     Boltzmann model then freezes out where real (metallic) material is fully ionized -- else None.
-    Quotes the worst equilibrium non-ionized fraction g n0/(n1 + g n0). Pure numpy."""
+    Quotes the worst equilibrium non-ionized fraction g n0/(n1 + g n0). Pure numpy; install_option_fields
+    emits it as an UnreliableResultWarning (the ionized fraction there may be wrong), one per region."""
     N_D = np.asarray(N_D_m3, dtype=np.float64)
     N_A = np.asarray(N_A_m3, dtype=np.float64)
     dED, dEA = ion.ionization_energies_eV(N_D, N_A)
@@ -756,8 +760,8 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
                                                 float(np.max(np.maximum(f["fd_n"], f["fd_p"])))),
                 AdvisoryWarning, stacklevel=4)
         msg = bgn_basis_advisory(region, o.bgn, f["N_D"], f["N_A"])
-        if msg is not None:
-            warnings.warn(msg, AdvisoryWarning, stacklevel=4)
+        if msg is not None:                      # the fit is used outside its validity range
+            warnings.warn(msg, UnreliableResultWarning, stacklevel=4)
         _set_field(device, region, "n_ie", f["n_ie"])
         _set_field(device, region, "BgnDc", f["D_c_V"])
         _set_field(device, region, "BgnDv", f["D_v_V"])
@@ -772,8 +776,8 @@ def install_option_fields(device: str, region: str, options: BipolarOptions, *,
     if o.ionization is not None:
         msg = mott_advisory(region, o.ionization, f["N_D"], f["N_A"], f["n0"], f["p0"], f["n1D"],
                             f["p1A"])
-        if msg is not None:
-            warnings.warn(msg, AdvisoryWarning, stacklevel=4)
+        if msg is not None:                      # the model is used outside its validity range
+            warnings.warn(msg, UnreliableResultWarning, stacklevel=4)
         ds.set_parameter(device=device, region=region, name="IonGD", value=float(o.ionization.g_D))
         ds.set_parameter(device=device, region=region, name="IonGA", value=float(o.ionization.g_A))
         _set_field(device, region, "IonDonors", f["N_D"])
