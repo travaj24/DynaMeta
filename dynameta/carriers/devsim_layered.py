@@ -129,6 +129,11 @@ class LayeredDevsimBuilder:
         # None (default) -> nothing is computed and CarrierField.extras is unchanged. When set, every
         # solve adds extras["oxide_tunneling"] = {dielectric_region: summary} for each dielectric region
         # sharing an interface with a semiconductor region (the converged field; no feedback).
+        # v0.15 (plan 4.1.1): OxideTunnelingParams(coupling="self_consistent", ...) instead INSTALLS the
+        # self-consistent term (tunneling.setup_oxide_tunneling) at build_device(), from every bipolar
+        # semiconductor region to every gate electrode it reaches through dielectric regions only; the
+        # extras then report the term's own kernel call (+ "coupling", "gate", "I_gate_A") and
+        # extras["contact_currents_A"] carries the gate's DC tunnelling current.
         self.oxide_tunneling = oxide_tunneling
         # D1c (2026-11-03): interface traps, {key: physics_traps.InterfaceTraps (or a list)} with key an
         # interface name ("<lower region>__<upper region>") or a 2-tuple of region names (any order).
@@ -516,7 +521,35 @@ class LayeredDevsimBuilder:
                 DD.setup_contact_ohmic_dd(self.device, c, psi_offset_V=off)   # Potential + Electrons (=N_D)
             else:
                 PE.setup_contact(self.device, c, psi_offset_V=off)            # Potential only
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            self._install_oxide_tunneling()
         self._built = True
+
+    def _install_oxide_tunneling(self) -> None:
+        """v0.15: the self-consistent oxide-tunnelling term from each bipolar semiconductor region to each
+        gate electrode it reaches through dielectric regions only (tunneling.dielectric_column), in the
+        builder's Anderson frame (band_frames) with the materials' affinities."""
+        from dynameta.carriers import tunneling as TN
+        mats = {sp.name: sp.material for sp in self._specs}
+        chi = {}
+        for sp in self._specs:
+            if sp.role == "semiconductor":
+                tr = self.design.materials.get(sp.material).transport
+                chi[sp.material] = tr.chi_eV
+        n = 0
+        for E in self.design.electrodes:
+            if E.is_edge or self._contact_region.get(E.name) in self._bipolar_regions | self._dd_regions:
+                continue
+            for semi in sorted(self._bipolar_regions):
+                if TN.dielectric_column(self.device, semi, E.name) is None:
+                    continue
+                TN.setup_oxide_tunneling(self.device, semi, E.name, self.oxide_tunneling,
+                                         semiconductor_material=mats[semi], chi_eV=chi,
+                                         phi_c_V=self._frames[semi][0])
+                n += 1
+        if n == 0:
+            raise ValueError("LayeredDevsimBuilder(oxide_tunneling=...coupling='self_consistent'): no gate "
+                             "electrode reaches a bipolar_dd semiconductor through dielectric regions")
 
     def _install_interface_traps(self) -> None:
         """D1c: attach the requested interface traps (physics_traps.install_interface_traps)."""
@@ -1033,9 +1066,20 @@ class LayeredDevsimBuilder:
         interface with a semiconductor region (carriers.tunneling.oxide_tunneling_current), as scalar
         summaries per dielectric region: I_A (scaled by period_y to amperes), J_max_A_m2 (signed, at
         the node of largest |J|), E_ox_max_V_m, V_ox_max_V, t_ox_m."""
-        from dynameta.carriers.tunneling import oxide_tunneling_current
+        from dynameta.carriers.tunneling import oxide_tunneling_current, oxide_tunneling_terms
         roles = {s.name: s.role for s in self._specs}
         out: Dict[str, Dict[str, float]] = {}
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            for t in oxide_tunneling_terms(self.device):           # the term's own kernel call
+                res = oxide_tunneling_current(self.device, t.chain[0], t.semi, self.oxide_tunneling,
+                                              depth_m=self.design.unit_cell.period_y_m)
+                k = int(np.argmax(np.abs(res["J_A_m2"])))
+                out[t.chain[0]] = {"I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
+                                   "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])),
+                                   "V_ox_max_V": float(np.max(res["V_ox_V"])), "t_ox_m": float(res["t_ox_m"]),
+                                   "semiconductor_region": t.semi, "model": res["model"],
+                                   "coupling": "self_consistent", "gate": t.gate, "I_gate_A": float(res["I_gate"])}
+            return out
         for r0, r1 in self._iface_pairs:
             for ox, semi in ((r0, r1), (r1, r0)):
                 if roles.get(ox) == "dielectric" and roles.get(semi) == "semiconductor":

@@ -104,6 +104,14 @@ add_custom_term() (or an explicit register_dispatcher()), never at import.
    against 4 without the term (MEASURED). The converged state is then exact to the double rounding of
    the term (contact charges cancel exactly, MEASURED). Budget maximum_iterations >= 60 for an extended
    device with custom terms; the double path is unchanged (quadratic).
+   WHERE THE TERM DOMINATES ITS ROWS IT STALLS (MEASURED, v0.15 oxide tunnelling, 2026-11-06): the
+   self-consistent tunnelling sink of a deep-depleted p-Si MOS (tests/_oxide_tunneling_child.py, O4
+   device at 3 V) IS the interface node's electron balance, and the 128-bit Newton then stalls at the
+   double floor -- relative error ~7e-16 for 120 iterations, never reaching the 1e-28 criterion -- while
+   the same term in accumulation (a weak sink beside ~1e13 A/m^2 SG flux terms) converged in 3 iterations
+   to 2e-32 and gave terminal currents exact to 0 ulp. The extended path cannot buy accuracy beyond the
+   double value of a term that sets its own row; check the term's share before relying on it (and expect
+   a non-converged extended solve there).
 
 PUBLIC API: CustomTerm, add_custom_term, remove_custom_term, live_terms, register_dispatcher,
 is_registered, node_rows, node_columns, circuit_row, DISPATCHER_NAME, STRUCTURAL_EPS, MARKER_PREFIX.
