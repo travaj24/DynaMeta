@@ -525,9 +525,10 @@ def _install_quantum_srh(device: str, region: str, carriers: tuple) -> None:
                       "exp(ifelse({a} > 200, 200, ifelse({a} < -200, -200, {a})))".format(a=arg),
                       tuple(lams))
     bgn = "n_ie" in ds.get_node_model_list(device=device, region=region)
-    rate = "({}) - USRH".format(srh_rate_expr(bgn=bgn, scale="DgNieFactor"))
-    pair = "({}) - ({})".format(srh_rate_expr(bgn=bgn, scale="DgNieFactor", pair=True),
-                                srh_rate_expr(bgn=bgn, pair=True))
+    fkw = {"fd": True} if "FDGammaN" in ds.get_node_model_list(device=device, region=region) else {}   # USRH's
+    rate = "({}) - USRH".format(srh_rate_expr(bgn=bgn, scale="DgNieFactor", **fkw))
+    pair = "({}) - ({})".format(srh_rate_expr(bgn=bgn, scale="DgNieFactor", pair=True, **fkw),
+                                srh_rate_expr(bgn=bgn, pair=True, **fkw))
     model = _BP.add_recombination_term(device, region, DG_SRH_TERM, rate, pair=pair)
     for lam in lams:
         ds.node_model(device=device, region=region, name="{}:{}".format(model, lam),
