@@ -559,7 +559,9 @@ def test_kinetic_noise_inventory_and_seed_range():
     """The inventory lists the electron / hole branches with their partner row, mechanism and (since K3)
     their EVENT rates, so the default noise_spectrum includes trap_n / trap_p (their FDT gates are
     tests/test_trap_noise.py); no fast-trap pair term exists for the kinetic level. A seed with |ln w| >
-    U_LIMIT raises TrapOccupancyRangeError, and fermi_dirac statistics refuse."""
+    U_LIMIT raises TrapOccupancyRangeError. REVISED 2026-11-06 (v0.15 FD-mode integration): fermi_dirac
+    statistics no longer refuse a kinetic level -- it installs with the exact FD emission densities (its
+    physics gates: tests/test_fd_mode_complete.py, the K-FD block)."""
     from dynameta.carriers import noise_analysis as NA
     tr = PT.TrapLevel(energy_eV=0.15, density_m3=2e21, kind="acceptor", tau_n0_s=3e-7, tau_p0_s=5e-7,
                       dynamic=True)
@@ -591,11 +593,12 @@ def test_kinetic_noise_inventory_and_seed_range():
         ds.create_device(mesh=m, device="kfd")
     ds.node_model(device="kfd", region="r", name="NetDoping", equation="1e24")
     lvn = PT.TrapLevel(energy_eV=0.1, density_m3=1e18, tau_n0_s=1e-9, tau_p0_s=1e-9, dynamic=True)
-    with pytest.raises(NotImplementedError, match="fermi_dirac"):
-        with V.quiet():
-            BP.setup_bipolar_region("kfd", "r", eps_static=11.7, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
-                                    mobility_p_m2Vs=0.048, tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=True,
-                                    statistics="fermi_dirac", traps=(lvn,))
+    with V.quiet():
+        BP.setup_bipolar_region("kfd", "r", eps_static=11.7, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
+                                mobility_p_m2Vs=0.048, tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=True,
+                                statistics="fermi_dirac", traps=(lvn,))
+    assert PT.kinetic_trap_variables("kfd", "r") == ["TrapW_trap0"]
+    assert "FDNiN" in ds.get_node_model_list(device="kfd", region="r")
 
 
 def test_quasi_static_charged_trap_advisory():

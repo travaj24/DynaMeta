@@ -255,13 +255,27 @@ def _edge_hole_current(dev):
     return float(jp[i]), float(xe[i])
 
 
+def _edge_hole_terms(dev):
+    """The magnitude of the larger of the two SG terms of that edge's hole flux, q mu_p V_t/L p_k B(+-v)
+    (the round-off scale of their difference)."""
+    x = _v(dev, "x")
+    xe = 0.5 * (x[:-1] + x[1:])
+    i = int(np.argmin(np.abs(xe - (_XJ + 20e-9))))
+    p = _v(dev, "Holes")
+    v = float(np.asarray(devsim.get_edge_model_values(device=dev, region="bulk", name="vdiff_gp"))[i])
+
+    def bern(z):
+        return z / math.expm1(z) if z != 0.0 else 1.0
+    return QE * MU_P * VT300 / float(x[i + 1] - x[i]) * max(p[i + 1] * bern(v), p[i] * bern(-v))
+
+
 def _zero_bias_jp(tag, ND, statistics, sc=1.0):
     dev = "g2" + tag
     try:
         _device(dev, _diode_lines(sc), "ifelse(x < {}, {}, {})".format(_XJ, -_NA_BASE, ND), tau=_TAU_D,
                 statistics=statistics, presolve=True)
         _solve(1e12, 1e-10)
-        return _edge_hole_current(dev)[0]
+        return _edge_hole_current(dev)[0], _edge_hole_terms(dev)
     finally:
         _drop(dev)
 
@@ -273,23 +287,26 @@ def test_fd_detailed_balance_removes_the_zero_bias_current(ND):
     The legacy statistics (None: FD g-factor transport, Boltzmann-product recombination and contacts)
     carry a hole current exp(-Delta) - 1 times J0p = q n_i^2 D_p/(N_D L_p) -- MEASURED -0.1198 / -0.6987
     J0p (exp(-Delta_fit) - 1 = -0.1219 / -0.7081: the long but finite emitter and the contact pin make up
-    the rest). statistics='fermi_dirac' (n_ie from the solution, the FD root at the contacts) leaves only
-    the O(h^2) discretisation residual of the edge-averaged g -- MEASURED +1.59e-6 / +4.86e-7 J0p on the
-    R27-c mesh, x4.03 / x4.08 smaller at h/2 and x4.03 / x4.00 larger at 2h (a clean h^2 convergence
-    study, 2026-11-06). Gate: the residual shrinks by 4 +/- 0.5 on halving h (it is discretisation, not
-    model) and is below 1e-4 J0p on the gate mesh (60x / 200x the measured residual, 3 decades below the
-    legacy current)."""
+    the rest). statistics='fermi_dirac' (n_ie from the solution, the FD root at the contacts, and -- since the
+    v0.15 FD-mode completion -- the FD quasi-field transport, physics_heterojunction.fd_quasi_field_expr,
+    whose discrete zero-current state IS the activity equilibrium) carries NO current: the residual is
+    round-off at every mesh. RE-RECORDED 2026-11-06 (docs/audit/2026-11-06-v0.15-fermi-dirac-mode-complete.md):
+    with the former edge-averaged g it was the O(h^2) discretisation residual, MEASURED +1.59e-6 / +4.86e-7 J0p
+    and x4.03 / x4.08 smaller at h/2 (the old gate asserted that h^2 shrinkage); now MEASURED 2.7e-12 /
+    4.4e-13 J0p, the same at h/2. BUDGET: the edge's hole flux is the difference of two SG terms of size T
+    (q mu_p V_t/L p B(+-v), computed from the solved state); its round-off is a few ulps of T -- 64 eps T --
+    at h and at h/2 (no h-dependence left)."""
     Dp = MU_P * VT300
     Lp = math.sqrt(Dp * _TAU_D)
     J0 = QE * NI * NI * Dp / (ND * Lp)
     from dynameta.carriers.physics_bipolar_dd import fd_potential_shift
     expected_legacy = math.expm1(-float(fd_potential_shift(ND / NC300)))
-    legacy = _zero_bias_jp("l", ND, None) / J0
-    fd_h = _zero_bias_jp("f", ND, "fermi_dirac") / J0
-    fd_h2 = _zero_bias_jp("h", ND, "fermi_dirac", sc=0.5) / J0
+    legacy = _zero_bias_jp("l", ND, None)[0] / J0
+    (fd_h, T_h), (fd_h2, T_h2) = (_zero_bias_jp(t, ND, "fermi_dirac", sc=s_) for t, s_ in (("f", 1.0), ("h", 0.5)))
+    eps = np.finfo(float).eps
     assert legacy == pytest.approx(expected_legacy, rel=3e-2)                # the defect, as described
-    assert abs(fd_h) < 1e-4 and abs(legacy) > 1e3 * abs(fd_h)
-    assert 3.5 < fd_h / fd_h2 < 4.5                                          # O(h^2) -> 0
+    assert abs(fd_h) <= 64.0 * eps * T_h and abs(fd_h2) <= 64.0 * eps * T_h2      # exact: round-off only [A/m^2]
+    assert abs(legacy) > 1e6 * abs(fd_h) / J0
 
 
 # =====================================================================================================
@@ -560,22 +577,25 @@ def _bare_region(dev, two_region=False, **kw):
         PE.setup_interface(dev, "si_ox")
 
 
-def test_fermi_dirac_refuses_btbt_charged_traps_and_interface_traps():
-    """GATE G6. statistics='fermi_dirac' makes n_ie a function of the carriers; the paths whose Jacobian or
-    equilibrium charge assume a fixed n_ie refuse (NotImplementedError) instead of running wrong: BTBT,
-    CHARGED bulk trap levels, interface traps. A NEUTRAL level is accepted (its rate references n_ie, whose
-    derivative models DEVSIM picks up). A contradictory (statistics, fd_enhancement) pair raises ValueError.
-    The same interface-trap install under the legacy statistics is accepted (the guard is specific)."""
+def test_fermi_dirac_accepts_btbt_charged_traps_and_interface_traps():
+    """GATE G6 (REVISED 2026-11-06 by the v0.15 FD-mode completion, which implements these paths: the
+    refusals the original gate asserted -- BTBT, CHARGED bulk trap levels, interface traps under
+    statistics='fermi_dirac' -- are gone; their physics is gated in tests/test_fd_mode_complete.py). Here:
+    each installs, with the FD models in place (FDNiN / FDNiP, the BTBT edge derivative copies, the charged
+    levels' FD-root contact fields), a NEUTRAL level still installs, and a contradictory (statistics,
+    fd_enhancement) pair still raises ValueError."""
     from dynameta.carriers import physics_traps as PT
     from dynameta.carriers.tunneling import SILICON_HURKX
     charged = PT.TrapLevel(energy_eV=0.1, density_m3=1e21, kind="acceptor", tau_n0_s=1e-9, tau_p0_s=1e-9)
     neutral = PT.TrapLevel(energy_eV=0.1, kind="neutral", tau_n0_s=1e-9, tau_p0_s=1e-9)
     its = PT.InterfaceTraps(dit_eV_m2=1e15, band_gap_eV=1.12, recombination=True)
     try:
-        with pytest.raises(NotImplementedError, match="band-to-band"):
-            _bare_region("g6a", statistics="fermi_dirac", btbt=SILICON_HURKX)
-        with pytest.raises(NotImplementedError, match="CHARGED"):
-            _bare_region("g6b", statistics="fermi_dirac", traps=(charged,))
+        _bare_region("g6a", statistics="fermi_dirac", btbt=SILICON_HURKX)
+        assert {"FDNiN@n0:Electrons@n0", "FDNiP@n1:Holes@n1", "BTBT_U"} <= set(
+            devsim.get_edge_model_list(device="g6a", region="bulk"))
+        _bare_region("g6b", statistics="fermi_dirac", traps=(charged,))
+        assert {"QTerm_bulk_traps", "NeutralElectrons"} <= set(devsim.get_node_model_list(device="g6b",
+                                                                                           region="bulk"))
         _bare_region("g6c", statistics="fermi_dirac", traps=(neutral,))
         assert {"n_ie", "n_ie:Electrons", "n_ie:Holes"} <= set(devsim.get_node_model_list(device="g6c",
                                                                                            region="bulk"))
@@ -584,8 +604,8 @@ def test_fermi_dirac_refuses_btbt_charged_traps_and_interface_traps():
         with pytest.raises(ValueError, match="contradicts"):
             _bare_region("g6e", statistics="fermi_dirac", fd_enhancement=False)
         _bare_region("g6f", two_region=True, statistics="fermi_dirac")
-        with pytest.raises(NotImplementedError, match="interface traps"):
-            PT.install_interface_traps("g6f", "si_ox", its)
+        PT.install_interface_traps("g6f", "si_ox", its)
+        assert "QTerm_it0" in devsim.get_node_model_list(device="g6f", region="bulk")
         _bare_region("g6g", two_region=True)
         PT.install_interface_traps("g6g", "si_ox", its)                     # legacy statistics: accepted
     finally:
