@@ -35,6 +35,47 @@ LIMITS (stated, not hidden):
     bipolar_dd "ACCURACY OF Delta"): n0 p0 is 0.42 % low at 1e19 and 3.5 % low at 1e20 cm^-3 against
     Eq. (1) with exact F_1/2. Inside the paper's +/-0.003 meV (7 %) uncertainty on A, but not exact.
 
+III-V RECOMBINATION PRESETS (v0.15, consolidated plan item 4.2.2, user decision 30; carriers.bipolar_options
+RadiativeModel / AugerModel). A radiative coefficient is either INTERNAL (the material's recycling-free
+B_int) or EFFECTIVE (the net loss of one structure, after photon recycling): B_eff = B_int (1 - P_r). For
+GaAs they differ ~4x (a 2 um double heterostructure: 3.3e-10 vs 0.78e-10 cm^3/s), so every preset here is
+LABELLED kind="internal" and its NAME ends in _INTERNAL. Give the layer's re-absorption probability with
+`preset.with_photon_recycling(P_r)` (applied ONCE, at the B_rad write); an internal B with no factor builds
+with one AdvisoryWarning per region (recycling ignored -> radiative loss overestimated).
+
+  RADIATIVE_GAAS_NIEMEYER_2019_INTERNAL  B_int = 3.3e-10 cm^3/s  [VERIFIED IN THE PRIMARY]
+      Niemeyer et al., "Measurement of the non-radiative
+      minority recombination lifetime and the effective radiative recombination coefficient in GaAs", AIP
+      Adv. 9, 045034 (2019): abstract + Sec. VI ("(3.3 +/- 0.6)e-10 cm^3/s" for p-type doping below 1e18
+      cm^-3; "(2.1 +/- 0.4)e-10" at 1e18, the degenerate roll-off, NOT modelled), Eq. (1) 1/tau_rad,eff =
+      (1 - f) B_rad / (N + dn) = B_eff / (N + dn) with the recycling factor f = 0.76 +/- 0.04 and the
+      directly measured B_eff = (0.78 +/- 0.07)e-10 cm^3/s, both for its 2 um Al0.7Ga0.3As/GaAs/Al0.7Ga0.3As
+      DH (Sec. II.A). Read 2026-11-06 on the publisher page (the abstract record also lists 3.3 and 0.76).
+      P_r = 0.76 belongs to THAT structure; it is not shipped as a default.
+  AUGER_GAAS_STRAUSS_1993  C_n = C_p = 3.5e-30 cm^6/s  [SECONDARY: abstract record only; split ASSUMED]
+      Strauss, Ruhle & Kohler, "Auger recombination in intrinsic GaAs", Appl. Phys. Lett. 62, 55 (1993):
+      the abstract (via the scilit / OUCI index records) gives an EFFECTIVE Auger coefficient
+      C_eff = (7 +/- 4)e-30 cm^6/s from time-resolved PL on INTRINSIC GaAs at high injection (n = p,
+      significant above ~2.5e19 cm^-3) and B = (1.7 +/- 0.2)e-10 cm^3/s (not shipped: structure-dependent).
+      The full text was NOT read. Reading C_eff as the ambipolar sum (U = C_eff n^3 at n = p, i.e.
+      C_n + C_p = C_eff), it is split EQUALLY by assumption (decision 30). A secondary user, Sachenko,
+      Kostylyov, Sokolovskyi & Shkrebtii ("Modeling key characteristics of high-efficiency gallium arsenide
+      solar cells", arXiv preprint 2026, Eq. (18) and its Ref. [28] = Strauss 1993), instead puts
+      C_e = C_h = 7e-30 EACH -- 2x our sum. The +/- 4 (57 %) covers neither reading decisively.
+  RADIATIVE_INP_SEMYONOV_2010_INTERNAL  B_int = 1.2e-10 cm^3/s  [VERIFIED IN THE PRIMARY (arXiv text)]
+      Semyonov, Subashiev, Chen & Luryi, "Radiation efficiency of heavily doped bulk n-InP semiconductor",
+      arXiv:1003.6095 (2010), Eq. (6): B_R = 1.2e-10 (1 - 0.092 n/n0) cm^3/s, n0 = 1e18 cm^-3, room T. B_R
+      is the recycling-REMOVED constant (B_R = B~ Phi / n, the measured rate times the effective recycling
+      factor Phi; text before Eq. (6)), so INTERNAL. Fitted on n-InP wafers with n = 2-8e18 cm^-3: 1.2e-10 is
+      the n -> 0 intercept (0.98e-10 at 2e18, 0.32e-10 at 8e18); the roll-off is documented, NOT modelled.
+      InP Auger is NOT shipped (the paper's Auger constant and the tabulated values are inconsistent).
+  DEFERRED (not shipped; decision 30): In0.53Ga0.47As (Ahrenkiel 1998 numbers seen by OCR only, recycling not
+  removed), GaN (B spread over three decades; the measured Auger values are InGaN), Ge (unsourced tabulated
+  values), and Varshni's 1967 GaAs B = 7.2e-10 (a calculation, ~2x the measurements; never a measured B).
+  Band parameters (gap, masses, n_i) for these materials are NOT bundled: the presets are recombination
+  coefficients only, to be combined with your own TransportModel (refs/vurgaftman2001 is the band source
+  to use when III-V bundles are added).
+
 Nothing here is applied automatically: TransportModel defaults are unchanged, MaterialRegistry never
 registers presets, and a value change gets a NEW preset name (the old name keeps its values).
 """
@@ -123,6 +164,45 @@ SI_EPS_STATIC = 11.7        # Si static permittivity, e.g. Sze & Ng (2007) [not 
 _AUGER = {"dziewior_schmid1977": "AUGER_SI_DZIEWIOR_SCHMID_1977", "altermatt1997": "AUGER_SI_ALTERMATT_1997"}
 
 
+# =====================================================================================================
+# III-V recombination presets (v0.15, plan 4.2.2, decision 30) -- see the module doc for the sources and
+# which constants were verified in the primary text. Constants typed in the units the papers quote.
+# =====================================================================================================
+
+def _iii_v_presets():
+    from dynameta.carriers.bipolar_options import AugerModel, RadiativeModel
+    cm3s, cm6s = 1.0e-6, 1.0e-12               # cm^3/s -> m^3/s, cm^6/s -> m^6/s
+    gaas_b = RadiativeModel(
+        B_m3s=3.3e-10 * cm3s, kind="internal",
+        source="INTERNAL (recycling-free) B_int, GaAs 300 K, p-type < 1e18 cm^-3: Niemeyer et al., AIP Adv. 9, "
+               "045034 (2019); NOT the effective B of a device layer (2 um DH: B_eff 0.78e-10 = 4.2x smaller)",
+        locator="abstract + Sec. VI: B_rad (3.3 +/- 0.6)e-10 cm^3/s below 1e18 cm^-3 ((2.1 +/- 0.4)e-10 at 1e18, "
+                "not modelled); Eq. (1): B_eff = (1 - f) B_rad, f = 0.76 +/- 0.04 and B_eff (0.78 +/- 0.07)e-10 "
+                "cm^3/s for its 2 um Al0.7Ga0.3As/GaAs DH",
+        verification="primary")
+    gaas_c = AugerModel(
+        C_n_m6s=3.5e-30 * cm6s, C_p_m6s=3.5e-30 * cm6s,
+        source="GaAs 300 K: Strauss, Ruhle & Kohler, Appl. Phys. Lett. 62, 55 (1993); ambipolar C_eff = "
+               "(7 +/- 4)e-30 cm^6/s (high injection, intrinsic GaAs) split EQUALLY by assumption",
+        locator="abstract only (index records): C_eff = (7 +/- 4)e-30 cm^6/s; full text not read; the "
+                "sum reading C_n + C_p = C_eff is assumed (Sachenko et al. 2026 use 7e-30 for EACH)",
+        verification="secondary")
+    inp_b = RadiativeModel(
+        B_m3s=1.2e-10 * cm3s, kind="internal",
+        source="INTERNAL (recycling-removed) B_R, n-InP 300 K: Semyonov, Subashiev, Chen & Luryi, "
+               "arXiv:1003.6095 (2010); n -> 0 intercept of a fit over n = 2-8e18 cm^-3",
+        locator="Eq. (6): B_R = 1.2e-10 (1 - 0.092 n/n0) cm^3/s, n0 = 1e18 cm^-3 (roll-off not modelled); "
+                "B_R = B~ Phi / n with Phi the effective recycling factor (text before Eq. (6), Table 1)",
+        verification="primary")
+    return gaas_b, gaas_c, inp_b
+
+
+RADIATIVE_GAAS_NIEMEYER_2019_INTERNAL, AUGER_GAAS_STRAUSS_1993, RADIATIVE_INP_SEMYONOV_2010_INTERNAL = \
+    _iii_v_presets()
+III_V_RECOMBINATION_PRESETS = (RADIATIVE_GAAS_NIEMEYER_2019_INTERNAL, AUGER_GAAS_STRAUSS_1993,
+                               RADIATIVE_INP_SEMYONOV_2010_INTERNAL)
+
+
 def silicon_bipolar_options(pairing: SiliconPairing = SI_PAIRING_YC2013_FD, *, auger: Optional[str] = None,
                             radiative: bool = False, bgn: bool = True, ionization=None,
                             conduction_fraction: float = 0.5, T_K: Optional[float] = None,
@@ -196,4 +276,6 @@ def silicon_transport(*, n_bg_m3: float, mobility_n_m2Vs, mobility_p_m2Vs, tau_s
 
 
 __all__ = ["SiliconPairing", "SI_PAIRING_YC2013_FD", "SI_PAIRING_YC2013_BOLTZMANN", "SI_PAIRINGS",
-           "SI_CHI_EV", "SI_EPS_STATIC", "silicon_bipolar_options", "silicon_transport"]
+           "SI_CHI_EV", "SI_EPS_STATIC", "silicon_bipolar_options", "silicon_transport",
+           "RADIATIVE_GAAS_NIEMEYER_2019_INTERNAL", "AUGER_GAAS_STRAUSS_1993",
+           "RADIATIVE_INP_SEMYONOV_2010_INTERNAL", "III_V_RECOMBINATION_PRESETS"]
