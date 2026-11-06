@@ -118,12 +118,14 @@ def test_analytic_disk_is_the_limit_of_the_area_raster_and_discriminates():
 
 
 @_needs("rcwa_analytic_shapes")
-def test_inclusion_model_auto_falls_back_and_analytic_refuses():
+def test_inclusion_model_auto_falls_back_and_analytic_refuses(monkeypatch):
     """Polygons (no form factor) and OVERLAPPING inclusions (priority painting has no additive
     form-factor equivalent; lumenairy's own validator decides) rasterize under 'auto' and are
     refused under 'analytic' with the reason; 'auto' on a representable layer IS the analytic
-    layer; absorption=True + 'analytic' is refused at construction (lumenairy 5.50 has no
-    layer_absorption on shapes layers); a typo'd model is refused."""
+    layer; BELOW lumenairy 5.50.1 (forced via _pre_5501) absorption=True + 'analytic' is refused
+    at construction (no layer_absorption on shapes layers there) -- the 5.50.1 routing is
+    test_shapes_absorption_*; a typo'd model is refused."""
+    _pre_5501(monkeypatch)
     from dynameta.geometry import Inclusion
     from dynameta.geometry.cross_section import Circle, Ellipse, Rectangle, RegularPolygon
     from dynameta.optics.lumenairy_bridge import (ShapesNotRepresentable, design_to_rcwa_stack,
@@ -156,17 +158,29 @@ def test_inclusion_model_auto_falls_back_and_analytic_refuses():
     assert r.A_independent is not None and r.A_independent > 1e-3
 
 
+def _pre_5501(monkeypatch):
+    """Route as on lumenairy <= 5.50.0: switch off the two 5.50.1 feature gates the RCWA bridge
+    reads (_common.FEATURE_FLOORS 'rcwa_shapes_li' / 'rcwa_shapes_absorption'), leaving every
+    other gate as installed -- so the Laurent-era routing stays covered on a 5.50.1 install."""
+    from dynameta.optics.lumenairy_bridge import _common, rcwa_backend
+    real = _common.lumenairy_has
+    monkeypatch.setattr(rcwa_backend, "_lumenairy_has", lambda f: False if f in (
+        "rcwa_shapes_li", "rcwa_shapes_absorption") else real(f))
+
+
 @_needs("rcwa_analytic_shapes")
-def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent():
-    """lumenairy's shapes layers are LAURENT BY CONTRACT (RCWAStack.add_layer raises for
-    formulation='li' with shapes=). 2026-11-02: under 'auto' a non-Laurent request ('li'/'fff')
-    RASTERIZES the inclusion layer and the requested rule reaches lumenairy (it used to be
-    silently replaced by Laurent on the shapes path); 'analytic' + 'li'/'fff' raises ValueError,
-    in design_to_rcwa_stack AND at solver construction; 'auto' + 'laurent' stays analytic. The
-    rasterized layer carries the requested formulation ('fff' is lumenairy's alias of 'li')."""
+def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent(monkeypatch):
+    """BELOW lumenairy 5.50.1 (forced via _pre_5501) lumenairy's shapes layers are LAURENT BY
+    CONTRACT (RCWAStack.add_layer raises for formulation='li' with shapes=). 2026-11-02: under
+    'auto' a non-Laurent request ('li'/'fff') RASTERIZES the inclusion layer and the requested
+    rule reaches lumenairy (it used to be silently replaced by Laurent on the shapes path);
+    'analytic' + 'li'/'fff' raises ValueError, in design_to_rcwa_stack AND at solver construction;
+    'auto' + 'laurent' stays analytic. The rasterized layer carries the requested formulation
+    ('fff' is lumenairy's alias of 'li'). The 5.50.1 routing: test_li_on_analytic_shapes_*."""
     from dynameta.geometry import Inclusion
     from dynameta.geometry.cross_section import Circle
     from dynameta.optics.lumenairy_bridge import design_to_rcwa_stack, make_lumenairy_rcwa_solver
+    _pre_5501(monkeypatch)
     d = _design([Inclusion(Circle(P / 2, P / 2, 150e-9), "hi")])
     for form in ("fff", "li"):
         stk, _ = design_to_rcwa_stack(d, LAM, n_orders=3, inclusion_model="auto",
@@ -185,6 +199,130 @@ def test_auto_is_formulation_aware_and_analytic_refuses_non_laurent():
     a = _solve(d, n_orders=3, inclusion_model="auto", formulation="fff")
     r = _solve(d, n_orders=3, inclusion_model="raster", formulation="fff")
     assert (a.R, a.T, a.r) == (r.R, r.T, r.r)
+
+
+def _metal_lines(pol):
+    """validation/lumenairy_pmm_bridge GATE B's cell: 600 nm period, 50 % metal lines eps -20+2i
+    centred at P/2 (full-y rectangles -> a 1-D stack), 120 nm, air | glass, normal incidence."""
+    from dynameta.geometry import Design, Inclusion, Layer, Stack, UnitCell
+    from dynameta.geometry.cross_section import Rectangle
+    from dynameta.geometry.specs import OpticalSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    p = 600e-9
+    reg = MaterialRegistry()
+    for n, e in (("air", 1.0), ("glass", 2.25), ("metal", complex(-20.0, 2.0))):
+        reg.add(Material(n, ConstantOptical(complex(e))))
+    return Design(name="m", unit_cell=UnitCell(period_x_m=p, period_y_m=p),
+                  stack=Stack(layers=[Layer("g", 120e-9, "air", inclusions=[
+                      Inclusion(Rectangle(p / 2, p / 2, p / 2, p), "metal")])],
+                      superstrate_material="air", substrate_material="glass"),
+                  electrodes=[], materials=reg,
+                  optical=OpticalSpec(polarization=pol, incidence_angle_deg=0.0))
+
+
+@_needs("rcwa_shapes_li")
+def test_li_on_analytic_shapes_routes_and_converges_on_tm_metal_lines():
+    """lumenairy 5.50.1 takes formulation='li' on analytic shapes layers (1-D: y-invariant shapes;
+    2-D: axis-aligned rectangles; lumenairy audit L-4, from this bridge's 2026-11-02 report).
+    ROUTING: 'auto' + 'li' now keeps the metal-line layer and a 2-D rectangle ANALYTIC with the
+    'li' rule; a disk under 'li' on a 2-D stack is refused by lumenairy, so 'auto' rasterizes that
+    layer (still 'li') and 'analytic' raises ShapesNotRepresentable naming it. On the pre-5.50.1
+    bridge every one of these rasterized (the routing asserts fail there).
+    PHYSICS (oracle: the 1-D PMM, degree 32 -- no factorization rule involved): TM (E_x across
+    the lines) on the metal-line cell, MEASURED 2026-11-03 |R - PMM| at N = 8 / 16 / 32:
+      'li'  analytic   2.37e-2 / 9.72e-3 / 4.86e-3   (converging; first-order metal-corner rate,
+                                                     lumenairy audit L-1)
+      'laurent' analytic 8.83e-2 / 2.37e-2 / 3.04e-2 (does NOT converge -- the reason 'li' exists)
+    so at N = 32 the analytic 'li' layer is 6x closer than Laurent."""
+    from dynameta.geometry import Inclusion
+    from dynameta.geometry.cross_section import Circle, Rectangle
+    from dynameta.optics.lumenairy_bridge import (ShapesNotRepresentable, design_to_rcwa_stack,
+                                                  make_lumenairy_pmm_solver,
+                                                  make_lumenairy_rcwa_solver)
+    lines = _metal_lines("x")
+    for form in ("li", "fff"):
+        stk, _ = design_to_rcwa_stack(lines, LAM, n_orders=8, formulation=form)
+        assert [(L.kind, L.formulation) for L in stk.layers] == [("shapes", "li")]
+    rect = _design([Inclusion(Rectangle(P / 2, P / 2, 200e-9, 260e-9), "hi")])
+    stk, _ = design_to_rcwa_stack(rect, LAM, n_orders=3, formulation="li")
+    assert [(L.kind, L.formulation) for L in stk.layers] == [("shapes", "li")]
+    disk = _design([Inclusion(Circle(P / 2, P / 2, 150e-9), "hi")])
+    stk, _ = design_to_rcwa_stack(disk, LAM, n_orders=3, formulation="li")
+    assert [(L.kind, L.formulation) for L in stk.layers] == [("iso", "li")]
+    with pytest.raises(ShapesNotRepresentable, match="g"):
+        design_to_rcwa_stack(disk, LAM, n_orders=3, inclusion_model="analytic", formulation="li")
+
+    ref = make_lumenairy_pmm_solver(degree=32, n_orders=21)(lines, None, {}, LAM, 1 + 0j,
+                                                              1.5 + 0j).R
+    err = {}
+    for form in ("li", "laurent"):
+        err[form] = [abs(make_lumenairy_rcwa_solver(n_orders=n, formulation=form)(
+            lines, None, {}, LAM, 1 + 0j, 1.5 + 0j).R - ref) for n in (8, 16, 32)]
+    assert err["li"][0] > err["li"][1] > err["li"][2], err
+    assert err["li"][2] < 6.0e-3, err                        # measured 4.86e-3
+    assert err["laurent"][2] > 5.0 * err["li"][2], err       # measured 3.04e-2 (6.3x)
+
+
+@_needs("rcwa_shapes_absorption")
+def test_shapes_absorption_keeps_analytic_layers_and_matches_an_area_raster(monkeypatch):
+    """lumenairy 5.50.1 reconstructs layer_absorption() on analytic shapes layers (audit L-3), so
+    absorption=True no longer forces the raster: the stack the solver builds keeps its 'shapes'
+    layer (it was 'iso' on the pre-5.50.1 bridge -- the routing assert fails there). ORACLE,
+    independent of the bridge: lumenairy's own RCWAStack on an AREA-AVERAGED eps_cell (16 x 16
+    sub-samples per pixel, built here) -- the Laurent direct rule on both sides, so its absorbed
+    fraction converges to the analytic layer's. MEASURED 2026-11-03 (lossy 150 x 300 nm rectangle
+    + r = 90 nm disk, eps 6+0.4i in 2.1, 200 nm, n_orders 5, theta 11 deg, y-pol): |dA| 1.31e-5 /
+    1.11e-5 / 2.32e-6 at S = 128 / 256 / 512 (converging, not monotone: the reference's own
+    sub-sample quantization). NOTE the default layer_absorption() RESCALES the per-layer integrals
+    to sum to 1 - R - T, so A_independent == 1 - R - T for ONE lossy layer by construction (a
+    vacuous check); the HONEST closure is the raw volume integral (return_raw=True), which on the
+    analytic layer is exact in-plane (form-factor series, nx-independent: 0.036730429782758 at
+    nx 64 / 128 / 256) and closes 1 - R - T = 0.036786 to 1.5e-3 relative -- the n_orders = 5
+    field-truncation error of the reconstruction."""
+    from dynameta.geometry import Inclusion
+    from dynameta.geometry.cross_section import Circle, Rectangle
+    import lumenairy as lum
+    from dynameta.optics.lumenairy_bridge import make_lumenairy_rcwa_solver, rcwa_backend
+    rect = (150e-9, 250e-9, 150e-9, 300e-9)               # cx, cy, w, h
+    disk = (370e-9, 250e-9, 90e-9)
+    d = _design([Inclusion(Rectangle(*rect), "hi"), Inclusion(Circle(*disk), "hi")])
+    kinds = []
+    real = rcwa_backend.design_to_rcwa_stack
+
+    def spy(*a, **k):
+        stk, names = real(*a, **k)
+        kinds.append([L.kind for L in stk.layers])
+        return stk, names
+    monkeypatch.setattr(rcwa_backend, "design_to_rcwa_stack", spy)
+    r = make_lumenairy_rcwa_solver(n_orders=5, absorption=True)(d, None, {}, LAM, 1 + 0j, 1.5 + 0j)
+    assert kinds == [["shapes"]]
+    assert r.per_region_absorption["g"] == pytest.approx(r.A_independent, abs=1e-15)
+
+    eh, eb = complex(6.0, 0.4), 2.1 + 0j
+    # honest closure: lumenairy's RAW analytic volume integral vs the budget (see the docstring)
+    st = lum.RCWAStack(P, period_y=P, n_superstrate=1.0 + 0j, n_substrate=1.5 + 0j,
+                       n_orders=5, n_orders_y=5)
+    st.add_layer(200e-9, shapes=[
+        dict(shape="rectangle", center=rect[:2], size=rect[2:], eps=eh),
+        dict(shape="disk", center=disk[:2], radius=disk[2], eps=eh)], eps_background=eb)
+    st.set_source(LAM, theta=np.deg2rad(11.0), phi=0.0)
+    raw = float(np.asarray(st.solve(retain_internal=True).layer_absorption(return_raw=True))[1, 0])
+    assert abs(raw - r.A_independent) / r.A_independent < 3.0e-3          # measured 1.5e-3
+
+    def inside(X, Y):
+        in_r = (np.abs(X - rect[0]) <= rect[2] / 2) & (np.abs(Y - rect[1]) <= rect[3] / 2)
+        return in_r | ((X - disk[0]) ** 2 + (Y - disk[1]) ** 2 <= disk[2] ** 2)
+    errs = []
+    for S in (128, 512):
+        st = lum.RCWAStack(P, period_y=P, n_superstrate=1.0 + 0j, n_substrate=1.5 + 0j,
+                           n_orders=5, n_orders_y=5)
+        st.add_layer(200e-9, eps_cell=_area_cell(S, inside, eh, eb))
+        st.set_source(LAM, theta=np.deg2rad(11.0), phi=0.0)
+        # (2, n_layers): row 1 = incident E_y (the bridge's _pol_row for 'y')
+        a_ref = float(np.asarray(st.solve(retain_internal=True).layer_absorption())[1, 0])
+        errs.append(abs(a_ref - r.A_independent))
+    assert errs[1] < 5.0e-6, errs                            # measured 2.32e-6
+    assert errs[0] / errs[1] > 3.0, errs                     # converging (measured 5.6)
 
 
 @_needs("rcwa_analytic_shapes")
