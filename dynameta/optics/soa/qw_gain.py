@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from typing import Optional, Tuple, Union
 
 import numpy as np
 from scipy.optimize import brentq
@@ -95,6 +96,7 @@ from scipy.special import expit
 from dynameta.constants import C_LIGHT, H_PLANCK, HBAR, KB, M_E, Q_E
 from dynameta.carriers.physics_equilibrium import effective_dos_m3, invert_F12
 from dynameta.optics.amp_noise import nf_from_nsp
+from dynameta.optics.soa.temperature import varshni_eg_ev
 from dynameta.warning_types import UnreliableResultWarning
 
 __all__ = [
@@ -122,11 +124,21 @@ __all__ = [
 class BulkGainParams:
     """Frozen material + minimal-geometry parameter set for the Connelly bulk / bulk-QW gain core.
 
-    Band structure (In0.53Ga0.47As lattice-matched / InGaAsP 1550 nm effective; Vurgaftman
-    JAP 89, 5815 (2001) Varshni row for In0.53Ga0.47As):
-      Eg0_eV               T = 0 K band gap [eV].
-      varshni_alpha_eV_K   Varshni alpha [eV/K]:  Eg(T) = Eg0 - alpha T^2 / (T + beta).
-      varshni_beta_K       Varshni beta  [K].
+    Band structure -- the gap E_g(T) comes from the ONE gap law, optics.soa.temperature.varshni_eg_ev:
+      gap_material         material spec handed to varshni_eg_ev (default "InGaAs_LM" =
+                           Ga0.47In0.53As lattice-matched to InP: Vurgaftman, Meyer & Ram-Mohan,
+                           JAP 89, 5815 (2001) Eq. (4.1) over the GaAs (Table I) and InAs (Table III)
+                           Varshni laws with C = 0.477 eV (Table XIII): 0.816 eV at 0 K, 0.737 eV at
+                           300 K, ~1.68 um band edge). Any binary name / (A, B, x, C_eV) ternary that
+                           varshni_eg_ev accepts works here.
+      Eg0_eV, varshni_alpha_eV_K, varshni_beta_K
+                           OPTIONAL device-effective Varshni override [eV, eV/K, K]: give ALL THREE
+                           to model an active region the material presets do not cover (e.g. an
+                           InGaAsP quaternary at a chosen 1.5x um band edge); they then replace
+                           gap_material. Default None (use gap_material). Audit 2026-11-06: these
+                           used to default to (0.816, 2.9e-4, 193) labelled "Varshni row for
+                           In0.53Ga0.47As" -- no such row exists in Vurgaftman, and the triple put the
+                           300 K gap 26 meV above the paper's alloy law (gain peak ~52 nm blue).
       bgs_coeff_eV_m       optional band-gap shrinkage: dEg = -bgs_coeff * N^(1/3) [eV]
                            (N in m^-3; default 0 -> OFF, opt-in many-body renormalization).
       m_e, m_dh            electron / (density-of-states) heavy-hole effective masses in units of m0.
@@ -157,16 +169,20 @@ class BulkGainParams:
 
     Geometry-sizing note: this steady-state core does NOT self-clamp the carrier density with ASE.
     The default V_active places the 130 mA / 600 um reference operating point at N0 ~ 1.4 x
-    transparency, where the UNCLAMPED small-signal chip gain is ~27 dB (the datasheet band). A
+    transparency, where the UNCLAMPED small-signal chip gain (alpha_i = 3000 /m) is 26.7 dB at a
+    1560 nm peak on the C-band device-effective gap the gates use (tests/test_soa_qw.py CBAND_GAP)
+    and 29.0 dB at a 1612 nm peak with the default Ga0.47In0.53As gap (MEASURED, v0.14 audit
+    2026-11-06): bulk lattice-matched InGaAs is an L-band gain medium, so model a 1550 nm device with
+    the explicit Varshni override (or a quaternary gap) rather than the default. A
     physically smaller active cross-section at 130 mA would drive N0 far above transparency and, in
     the absence of ASE gain-clamping, over-predict the gain -- so the effective volume is the honest
     knob here (equivalently an injection efficiency eta_i < 1); a full ASE-clamped device solve is
     the QDGainModel-style extension.
     """
 
-    Eg0_eV: float = 0.816
-    varshni_alpha_eV_K: float = 2.9e-4
-    varshni_beta_K: float = 193.0
+    Eg0_eV: Optional[float] = None
+    varshni_alpha_eV_K: Optional[float] = None
+    varshni_beta_K: Optional[float] = None
     bgs_coeff_eV_m: float = 0.0
     m_e: float = 0.045
     m_dh: float = 0.46
@@ -181,6 +197,22 @@ class BulkGainParams:
     V_active_m3: float = 8.5e-16
     A_xsec_m2: float = 1.4167e-12
     T_K: float = 298.0
+    gap_material: Union[str, Tuple] = "InGaAs_LM"
+
+    def __post_init__(self):
+        n_set = sum(v is not None for v in (self.Eg0_eV, self.varshni_alpha_eV_K, self.varshni_beta_K))
+        if n_set not in (0, 3):
+            raise ValueError("BulkGainParams: the Varshni override needs ALL THREE of Eg0_eV, "
+                             "varshni_alpha_eV_K, varshni_beta_K (got {} of 3); leave all None to use "
+                             "gap_material={!r}".format(n_set, self.gap_material))
+
+    @property
+    def gap_law(self):
+        """The material spec band_edge_Eg_J hands to temperature.varshni_eg_ev: the explicit
+        (Eg0, alpha, beta) override when given, else gap_material."""
+        if self.Eg0_eV is not None:
+            return (self.Eg0_eV, self.varshni_alpha_eV_K, self.varshni_beta_K)
+        return self.gap_material
 
     @property
     def v_g_m_s(self) -> float:
@@ -197,9 +229,11 @@ def _band_dos(m_rel: float, T_K: float) -> float:
 
 def band_edge_Eg_J(N_m3: float, params: BulkGainParams) -> float:
     """Temperature- and (optionally) density-dependent band gap [J]:
-    E_g = Eg0 - alpha T^2/(T + beta) - bgs_coeff N^(1/3) (Varshni + opt-in shrinkage)."""
+    E_g = Eg(T; params.gap_law) - bgs_coeff N^(1/3), with Eg(T) from temperature.varshni_eg_ev (the
+    Vurgaftman alloy rule for the default In0.53Ga0.47As, or the explicit Varshni override) and the
+    opt-in shrinkage."""
     p = params
-    eg_eV = p.Eg0_eV - p.varshni_alpha_eV_K * p.T_K ** 2 / (p.T_K + p.varshni_beta_K)
+    eg_eV = varshni_eg_ev(p.T_K, p.gap_law)
     if p.bgs_coeff_eV_m != 0.0 and N_m3 > 0.0:
         eg_eV -= p.bgs_coeff_eV_m * N_m3 ** (1.0 / 3.0)
     return eg_eV * Q_E
