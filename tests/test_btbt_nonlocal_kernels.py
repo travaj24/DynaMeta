@@ -14,11 +14,16 @@ MEASURED by running this file against an export of 66f6185):
        Refute: m_r perturbed by 1e-9 must fail it by the predicted B/F * 5e-10.
   N2   NO FINAL STATE: a 0.8 V tanh step (peak 4e8 V/m) gives R == 0.0 exactly (no path) while the local
        Kane rate integrates to > 1e7 A/m^2; a 1.13 V step switches the nonlocal rate on.
-  N4   INDEPENDENT CONTINUUM ORACLE on a graded (tanh) junction with smooth quasi-Fermi profiles: q Int R dx0
+  N4a  the DISCRETE model computed a second, independent way (np.interp + brentq + quad, no closed forms)
+       == the module per path, within quad's propagated error estimates (MEASURED ~1e-14).
+  N4b  INDEPENDENT CONTINUUM ORACLE on a graded (tanh) junction with smooth quasi-Fermi profiles: R(x0)
        from a scipy brentq/quad implementation of Eqs. 480-484 (direct) and 490-493 (phonon) typed here;
-       the module's discrete current converges to it at order >= 1.7 and the finest mesh lies within
-       2 C_inf h^2 (C_inf from the 0.05/0.025 nm pair, the L1 method). Refute: a first-order (one-sided)
-       start gradient drops the order to ~1. The nonlocal/local ratio is reported.
+       per-path error at nested start nodes converges at order >= 1.7 (MEASURED 2.0) and the 0.1 nm error
+       <= 2 C_inf h^2 (C_inf from the finest pair, the L1 method). Refutations: a first-order start gradient
+       (order 1.0) and the plain P1 prefactor integrals (order 1.3: the 1/sqrt end singularity, module doc
+       section 3) both fail it.
+  N4c  the integrated current q Sum R V converges to q Int R dx0 at order >= 1.7; the local/nonlocal ratio
+       on this junction is reported.
 """
 import math
 
@@ -121,6 +126,48 @@ def test_n0a_segment_integrals_match_quadrature():
     assert worst < 1e-13                                    # MEASURED 4.8e-16
 
 
+def test_n0a_prefactor_moments_match_quadrature():
+    """kane_moments / keldysh_moments (the slope-interpolated prefactor integrals, module doc section 3)
+    against quad in v, the 1/sqrt end singularities by quad's 'alg' weight (QAWS) on the piece that
+    touches them. Tolerance: quad's error estimate + 64 eps |ref| (+ 4 eps p1/dp |ref| for M1: the
+    reference rounds v - p0 at v ~ p1). MEASURED worst 5.6e-8 relative: M1 of the 1e-9-wide piece at 0.3,
+    inside that piece's reference-rounding allowance 2.7e-7; <= 4e-14 on every piece wider than 1e-3."""
+    rng = np.random.default_rng(5)
+    cases = [tuple(sorted(rng.uniform(0.0, 1.0, 2))) for _ in range(40)]
+    cases += [(0.0, 0.37), (0.0, 1.0), (0.55, 1.0), (0.3, 0.3 + 1e-9), (0.999, 1.0), (0.0, 1e-4), (0.2, 0.9)]
+    worst = 0.0
+    for p0, p1 in cases:
+        dp = p1 - p0
+        kq = dict(epsabs=0, epsrel=1e-13, limit=200)
+
+        def wq(f, kind):
+            """Int_p0^p1 f(v) K(v) dv, K's singular factors as QAWS weights where they touch the piece."""
+            a_ = -0.5 if (kind in ("kane", "V") and p0 == 0.0) else 0.0
+            b_ = -0.5 if (kind in ("kane", "C") and p1 == 1.0) else 0.0
+
+            def smooth(v):
+                k = 1.0
+                if kind in ("kane", "V") and a_ == 0.0:
+                    k /= math.sqrt(v)
+                if kind in ("kane", "C") and b_ == 0.0:
+                    k /= math.sqrt(1.0 - v)
+                return f(v) * k
+            if a_ == 0.0 and b_ == 0.0:
+                return quad(smooth, p0, p1, **kq)
+            return quad(smooth, p0, p1, weight="alg", wvar=(a_, b_), **kq)
+        for kind, got in (("kane", NL.kane_moments(p0, p1)), ("V", NL.keldysh_moments(p0, p1, True)),
+                          ("C", NL.keldysh_moments(1 - p0, 1 - p1, False, dp=p1 - p0))):
+            r0 = wq(lambda v: 1.0, kind)
+            r1 = wq(lambda v: (v - p0) / dp, kind)
+            for g_, (ref, err) in zip(got, (r0, r1)):
+                dev = abs(float(g_) - ref)
+                # + the reference's own rounding of (v - p0) at v ~ p1: eps p1/dp relative (M1 only)
+                tol = err + 64 * EPS * abs(ref) + (4 * EPS * p1 / dp * abs(ref) if g_ is got[1] else 0.0)
+                assert dev <= tol, (kind, p0, p1, g_, ref, err)
+                worst = max(worst, dev / abs(ref))
+    print("N0a moments worst", worst)
+
+
 def _rich(f, x, h):
     return (8.0 * (f(x + h) - f(x - h)) - (f(x + 2 * h) - f(x - 2 * h))) / (12.0 * h)
 
@@ -133,7 +180,9 @@ def test_n0b_complex_step_derivatives_match_richardson():
     worst = 0.0
     for _ in range(40):
         va, vb = rng.uniform(0.05, 0.95, 2)
-        for kern in (NL.kane_segment, NL.keldysh_segment):
+        for kern in (NL.kane_segment, NL.keldysh_segment, lambda a, b, L: NL.kane_moments(a, b),
+                     lambda a, b, L: NL.keldysh_moments(a, b, True),
+                     lambda a, b, L: NL.keldysh_moments(1 - a, 1 - b, False, dp=b - a)):
             for idx in (0, 1):
                 for which in ("a", "b"):
                     def f(v, which=which, idx=idx, kern=kern):
@@ -397,74 +446,99 @@ def oracle():
 
 # ---- N4a: the SAME discrete model, re-implemented independently -------------------------------------
 def _p1_oracle_rate(x, psi, Ln, Lp, i, process, consts):
-    """R at start node i of the P1 (piecewise-linear) band profile through the nodes, computed with
-    np.interp + brentq + quad (no closed form): |grad E_V(0)| = the 3-point nodal derivative (the
-    discretisation's definition, re-typed); path end = root of the interpolant; integrals piece by piece
-    between nodes, the 1/sqrt end pieces by QAWS (quad weight 'alg') with the smooth remainder; f_n from
-    L_n interpolated linearly at the end. Returns (R, relative error budget from quad's estimates)."""
+    """R at start node i of the DISCRETE model, computed with np.interp + brentq + quad (no closed form):
+    the band is the P1 (piecewise-linear) interpolant through the nodes; |grad E_V(0)| and the nodal
+    slopes are the 3-point nodal derivative (one-sided at the region ends) -- the discretisation's
+    definitions, re-typed; the path end and the phonon x0 are roots of the interpolant; the EXPONENT
+    integrals are quad over the P1 band, piece by piece; the PREFACTOR integrals Int dx/kappa are quad
+    IN v of r(v) K(v) with r = ds/dv interpolated linearly in v between the path nodes' slopes (module
+    doc section 3), the 1/sqrt end singularities by QAWS (quad weight 'alg'); f_n from L_n interpolated
+    linearly at the end. Returns (R, relative error budget from quad's error estimates)."""
     Eg_V = EG_EV
     Eg = Q * Eg_V
-    hm, hp = x[i] - x[i - 1], x[i + 1] - x[i]
-    grad = (hm / (hp * (hm + hp)) * (psi[i + 1] - psi[i]) + hp / (hm * (hm + hp)) * (psi[i] - psi[i - 1]))
-    assert grad > 0                                       # the tanh profile rises: paths run to +x
+    n = x.size
+
+    def grad(k):
+        if k == 0 or k == n - 1:
+            j = 1 if k == 0 else n - 1
+            return (psi[j] - psi[j - 1]) / (x[j] - x[j - 1])
+        hm, hp = x[k] - x[k - 1], x[k + 1] - x[k]
+        return (hm / (hp * (hm + hp)) * (psi[k + 1] - psi[k]) + hp / (hm * (hm + hp)) * (psi[k] - psi[k - 1]))
+    g0 = grad(i)
+    assert g0 > 0                                         # the tanh profile rises: paths run to +x
     k = i + int(np.flatnonzero(psi[i + 1:] - psi[i] >= Eg_V)[0]) + 1     # first node past the end
-    xe = brentq(lambda s: np.interp(s, x, psi) - psi[i] - Eg_V, x[k - 1], x[k], xtol=1e-26,
+    xe = brentq(lambda s_: np.interp(s_, x, psi) - psi[i] - Eg_V, x[k - 1], x[k], xtol=1e-26,
                 rtol=4 * EPS)
     l = xe - x[i]
+    vn = (psi[i:k + 1] - psi[i]) / Eg_V                   # v at the path nodes
+    rn = np.array([Eg_V / grad(m) for m in range(i, k + 1)])   # ds/dv at the path nodes
 
-    def v(s):
-        return (np.interp(s, x, psi) - psi[i]) / Eg_V
+    def v(s_):
+        return (np.interp(s_, x, psi) - psi[i]) / Eg_V
+
+    def r(vv):
+        return np.interp(vv, vn, rn)
     fn = 1.0 / (1.0 + math.exp(-(np.interp(xe, x, Ln) + DELTA)))
     fp = 1.0 / (1.0 + math.exp(Lp[i]))
     errs = []
 
-    def piecewise(f, a, b, sing_lo=None, sing_hi=None):
-        """Int_a^b f over the node pieces; sing_lo/sing_hi: (smooth remainder g, slope) for a 1/sqrt
-        singular first / last piece: f = g(s)/sqrt(slope (s - a)) or g(s)/sqrt(slope (b - s))."""
-        knots = np.concatenate(([a], x[(x > a) & (x < b)], [b]))
+    def in_s(f, a_, b_):
+        knots = np.concatenate(([a_], x[(x > a_) & (x < b_)], [b_]))
         tot = 0.0
-        for n, (p0, p1) in enumerate(zip(knots[:-1], knots[1:])):
-            if n == 0 and sing_lo is not None:
-                g, sl = sing_lo
-                r = quad(lambda s: g(s) / math.sqrt(sl), p0, p1, weight="alg", wvar=(-0.5, 0.0))
-            elif n == len(knots) - 2 and sing_hi is not None:
-                g, sl = sing_hi
-                r = quad(lambda s: g(s) / math.sqrt(sl), p0, p1, weight="alg", wvar=(0.0, -0.5))
-            else:
-                r = quad(f, p0, p1, epsabs=0, epsrel=1e-13, limit=100)
-            tot += r[0]
-            errs.append(r[1])
+        for p0, p1 in zip(knots[:-1], knots[1:]):
+            r_ = quad(f, p0, p1, epsabs=0, epsrel=1e-13, limit=100)
+            tot += r_[0]
+            errs.append(abs(r_[1]))
         return tot
-    s0 = (psi[i + 1] - psi[i]) / Eg_V / (x[i + 1] - x[i])          # v slope on the first piece
-    se = (psi[k] - psi[k - 1]) / Eg_V / (x[k] - x[k - 1])          # v slope on the end piece
+
+    def in_v(K, lo, hi, sing_lo, sing_hi):
+        """Int_lo^hi r(v) K(v) dv piece by piece between the node v's; K's 1/sqrt factor at lo (v^-1/2)
+        and/or hi ((1 - v)^-1/2) as a QAWS weight on the touching piece (K then omits it)."""
+        knots = np.concatenate(([lo], vn[(vn > lo) & (vn < hi)], [hi]))
+        tot = 0.0
+        for m, (p0, p1) in enumerate(zip(knots[:-1], knots[1:])):
+            wl = -0.5 if (sing_lo and m == 0) else 0.0
+            wh = -0.5 if (sing_hi and m == len(knots) - 2) else 0.0
+
+            def f(vv, wl=wl, wh=wh):
+                k_ = r(vv) * K(vv)
+                if sing_lo and wl == 0.0:
+                    k_ /= math.sqrt(vv - lo) if lo == 0.0 else 1.0
+                if sing_hi and wh == 0.0:
+                    k_ /= math.sqrt(1.0 - vv)
+                return k_
+            if wl or wh:
+                r_ = quad(f, p0, p1, weight="alg", wvar=(wl, wh), epsabs=0, epsrel=1e-13, limit=100)
+            else:
+                r_ = quad(f, p0, p1, epsabs=0, epsrel=1e-13, limit=100)
+            tot += r_[0]
+            errs.append(abs(r_[1]))
+        return tot
     if process == "direct":
         m_r, g = consts
         K0 = 2.0 * math.sqrt(m_r * Eg) / HB
-        I1 = piecewise(lambda s: K0 * math.sqrt(max(v(s) * (1 - v(s)), 0.0)), x[i], xe)
+        I1 = in_s(lambda s_: K0 * math.sqrt(max(v(s_) * (1 - v(s_)), 0.0)), x[i], xe)
         n1 = len(errs)
-        I0 = piecewise(lambda s: 1.0 / (K0 * math.sqrt(v(s) * (1 - v(s)))), x[i], xe,
-                       sing_lo=(lambda s: 1.0 / (K0 * math.sqrt(1 - v(s))), s0),
-                       sing_hi=(lambda s: 1.0 / (K0 * math.sqrt(v(s))), se))
+        # K = 1/(K0 sqrt(v (1 - v))); the sqrt(v) at 0 and sqrt(1 - v) at 1 are the QAWS weights
+        I0 = in_v(lambda vv: 1.0 / K0, 0.0, 1.0, True, True)
         budget = 2 * sum(errs[:n1]) + sum(errs[n1:]) / I0
-        R = Q * grad * g * math.pi / (36 * H) / I0 * math.exp(-2 * I1) * (fn - fp)
+        R = Q * g0 * g * math.pi / (36 * H) / I0 * math.exp(-2 * I1) * (fn - fp)
         return R, budget
     m_r, m_v, m_c, lam = consts
     kv = math.sqrt(2 * m_v * Eg) / HB
     kc = math.sqrt(2 * m_c * Eg) / HB
     vs = m_c / (m_v + m_c)                                 # kappa_V = kappa_C
     ks = i + int(np.flatnonzero((psi[i + 1:] - psi[i]) / Eg_V >= vs)[0]) + 1
-    xs = brentq(lambda s: v(s) - vs, x[ks - 1], x[ks], xtol=1e-26, rtol=4 * EPS)
-    JV = piecewise(lambda s: kv * math.sqrt(max(v(s), 0.0)), x[i], xs)
-    JC = piecewise(lambda s: kc * math.sqrt(max(1 - v(s), 0.0)), xs, xe)
+    xs = brentq(lambda s_: v(s_) - vs, x[ks - 1], x[ks], xtol=1e-26, rtol=4 * EPS)
+    JV = in_s(lambda s_: kv * math.sqrt(max(v(s_), 0.0)), x[i], xs)
+    JC = in_s(lambda s_: kc * math.sqrt(max(1 - v(s_), 0.0)), xs, xe)
     n1 = len(errs)
-    IV = piecewise(lambda s: 1.0 / (kv * math.sqrt(v(s))), x[i], xs,
-                   sing_lo=(lambda s: 1.0 / kv, s0))
-    IC = piecewise(lambda s: 1.0 / (kc * math.sqrt(1 - v(s))), xs, xe,
-                   sing_hi=(lambda s: 1.0 / kc, se))
+    IV = in_v(lambda vv: 1.0 / kv, 0.0, vs, True, False)
+    IC = in_v(lambda vv: 1.0 / kc, vs, 1.0, False, True)
     budget = 2 * sum(errs[:n1]) + sum(errs[n1:]) / min(IV, IC)
     Cp = (lam / (2 ** 6 * math.pi ** 2 * Eg) * math.sqrt(m_v * m_c / (H * l * math.sqrt(2 * m_r * Eg)))
           * l / (IV * IC))
-    return Q * grad * Cp * math.exp(-2 * JV - 2 * JC) * (fn - fp), budget
+    return Q * g0 * Cp * math.exp(-2 * JV - 2 * JC) * (fn - fp), budget
 
 
 @pytest.mark.parametrize("process", ["direct", "phonon"])
@@ -487,26 +561,6 @@ def test_n4a_module_equals_independent_p1_profile_oracle(process):
     print(process, "N4a worst", worst)
 
 
-def test_n4a_refute_first_order_gradient_breaks_the_identity(monkeypatch):
-    """Coarsen one interpolation: the start node's |grad E_V| from the one-sided (forward) edge slope, an
-    O(h) estimate, instead of the 3-point nodal derivative. The per-path identity must fail by O(h psi''/
-    psi') ~ 1e-2 (P1 3.5 proposed snapping the path end to a node; that is the same O(h) coarsening of a
-    different interpolation -- the gradient is the one that can be swapped cleanly)."""
-    real = NL.nodal_gradient_1d
-
-    def forward(x, psi):
-        g, wm, w0, wp = real(x, psi)
-        g = g.copy()
-        g[1:-1] = (psi[2:] - psi[1:-1]) / (x[2:] - x[1:-1])
-        return g, wm, w0, wp
-    monkeypatch.setattr(NL, "nodal_gradient_1d", forward)
-    x, psi, Ln, Lp = _grid(0.2e-9)
-    i = int(np.argmin(np.abs(x + 8e-9)))
-    res = _module_rates("direct", x, psi, Ln, Lp, [i])
-    ref, budget = _p1_oracle_rate(x, psi, Ln, Lp, i, "direct", _consts("direct"))
-    assert abs(res["R"][0] / ref - 1.0) > 1e3 * max(budget, 1e-12)
-
-
 # ---- N4b: convergence of the discrete model to the continuum --------------------------------------
 X0_NESTED = np.arange(-20e-9, -0.9e-9, 1.6e-9)            # nodes of every mesh below (nested)
 HS = [0.1e-9, 0.05e-9, 0.025e-9, 0.0125e-9]
@@ -526,30 +580,37 @@ def _per_path_errors(process, hs, forward_gradient=False, monkeypatch=None):
 
 @pytest.mark.parametrize("process", ["direct", "phonon"])
 def test_n4b_per_path_convergence_to_the_continuum(process):
-    """DERIVED ORDER 3/2, not 2 (a finding against plan 4.1.3's >= 1.7). The prefactor integrals
-    Int dx/kappa (direct, both ends) and Int dx/kappa_V, Int dx/kappa_C (phonon, one end each) have an
-    integrable 1/sqrt(v) singularity at a path end. On the P1 band profile the slope there is the edge
-    SECANT, off the true slope by O(h v''); near the end Int ds/sqrt(sigma s) = 2 sqrt(h/sigma), so the
-    end piece carries a relative error O(h) x O(sqrt h) absolute: the per-path rate error is O(h^{3/2})
-    (the quadratic-profile expansion gives (1/3) v'' h^{3/2}/sigma^{3/2} at the start), every other piece
-    (exponent integrals, path end, occupancies, start gradient) O(h^2). MEASURED on nested starts: the
-    phonon Int dx/kappa_V error halves by 2.83 = 2^{3/2} per refinement exactly; the per-path max error
-    is 5.7e-4 / 2.5e-4 / 1.0e-4 / 3.8e-5 (direct) at h = 0.1 .. 0.0125 nm, orders 1.19, 1.32, 1.38 ->
-    approaching 3/2 (the O(h^2) parts still add pre-asymptotically).
-    GATE: the least-squares order over the four meshes >= 1.2, which separates the derived 3/2 from the
-    O(h) of any first-order slip (the refutation below measures <= 1.0), and the finest-mesh error
-    <= rho_max h^{3/2} with rho_max = 2 max(|e| / h^{3/2}) over the two coarser meshes (the h^{3/2}-scaled
-    error must not grow under refinement beyond its pre-asymptotic drift; MEASURED drift <= 1.4x)."""
+    """Budget: O(h^2) discretisation (P1 exponent integrals, slope-interpolated prefactor integrals,
+    second-order nodal gradient, linear end root and E_Fn interpolation): the least-squares order of the
+    per-path maximum error over the nested starts (meshes 0.1 .. 0.0125 nm) >= 1.7, and the 0.1 nm error
+    <= 2 C_inf h^2 with C_inf = error/h^2 of the finest mesh (the L1-addendum method). MEASURED: ratios
+    3.9-4.1 per halving (order 2.0) for both processes.
+    FINDING (module doc section 3): with the prefactor integrals on the P1 band too -- the plan's first
+    design -- the order is 3/2 (MEASURED 1.30 / 1.37 over the same meshes): Int dx/kappa has an integrable
+    1/sqrt singularity at a path end, where the P1 slope is the edge SECANT, off by O(h v''), so the end
+    piece 2 sqrt(h/sigma) carries an O(h^{3/2}) error; the same secant jump makes the rate a sqrt-kinked
+    function of psi whenever a path end crosses a node (MEASURED: a DEVSIM dI/dV off by 2.5e-4 between
+    +-1 mV and +-0.1 mV differences). The refutation below re-creates that design."""
     err = _per_path_errors(process, HS)
     lh = np.log([h * 1e9 for h in HS])
     order = float(np.polyfit(lh, np.log(err), 1)[0])
-    rho = [e / (h * 1e9) ** 1.5 for e, h in zip(err, HS)]
-    print(process, "per-path max err", err, "order", order, "rho", rho)
-    assert order >= 1.2
-    assert rho[-1] <= 2.0 * max(rho[0], rho[1])
+    C_inf = err[-1] / (HS[-1] * 1e9) ** 2
+    print(process, "per-path max err", err, "order", order)
+    assert order >= 1.7
+    assert err[0] <= 2.0 * C_inf * (HS[0] * 1e9) ** 2
 
 
-def test_n4b_refute_first_order_gradient_drops_the_order(monkeypatch):
+def _p1_prefactor(monkeypatch):
+    """Re-create the P1 prefactor: ds/dv = the edge secant on every segment (r_a = r_b = L/(vb - va))."""
+    real = NL._segment_accumulators
+
+    def p1(phys, va, vb, ra, rb, L, end, phase):
+        sec = L / (vb - va)
+        return real(phys, va, vb, sec, sec, L, end, phase)
+    monkeypatch.setattr(NL, "_segment_accumulators", p1)
+
+
+def _forward_gradient(monkeypatch):
     real = NL.nodal_gradient_1d
 
     def forward(x, psi):
@@ -558,30 +619,38 @@ def test_n4b_refute_first_order_gradient_drops_the_order(monkeypatch):
         g[1:-1] = (psi[2:] - psi[1:-1]) / (x[2:] - x[1:-1])
         return g, wm, w0, wp
     monkeypatch.setattr(NL, "nodal_gradient_1d", forward)
+
+
+@pytest.mark.parametrize("variant", ["forward_gradient", "p1_prefactor"])
+def test_n4b_refutations_drop_the_order(monkeypatch, variant):
+    """Two coarsenings must fail N4b: the start gradient from the one-sided edge slope (O(h): MEASURED
+    order 1.0) and the plain P1 prefactor (O(h^{3/2}): MEASURED 1.3). (P1 3.5 proposed snapping the path
+    end to a node; both of these are the same kind of O(h^p < 2) coarsening, of interpolations that can
+    be swapped cleanly.)"""
+    (_forward_gradient if variant == "forward_gradient" else _p1_prefactor)(monkeypatch)
     err = _per_path_errors("direct", HS)
     order = float(np.polyfit(np.log([h * 1e9 for h in HS]), np.log(err), 1)[0])
-    print("forward-gradient per-path errors", err, "order", order)
-    assert order < 1.2
+    print(variant, "per-path errors", err, "order", order)
+    assert order < 1.6
 
 
 @pytest.mark.parametrize("process", ["direct", "phonon"])
-def test_n4c_integrated_current_report(oracle, process):
-    """A MEASUREMENT on the integrated current q Sum R V vs the continuum oracle's q Int R dx0 (its sign
-    mixes the h^{3/2} start term with the oscillating end terms, so its order is not a clean gate; the
-    per-path gate above is). The integrated relative error is the R-weighted mean of the per-path ones plus
-    the O(h^2) node-volume quadrature of Int R dx0, so |error| <= the per-path maximum; asserted against 2x
-    the maximum over the 12 sampled starts (the other starts are unsampled). Reported: the error at 0.4 and
-    0.1 nm and the local/nonlocal ratio on this junction."""
+def test_n4c_integrated_current_converges(oracle, process):
+    """q Sum R V (every interior start, node volume h) against the continuum oracle's q Int R dx0. Budget:
+    O(h^2) per path (N4b) plus the O(h^2) node-volume quadrature of the smooth Int R dx0: order between
+    0.4/0.2/0.1 nm >= 1.7 and |error(0.1 nm)| <= 2 C_inf h^2, C_inf from the 0.05/0.025 nm pair. Reported:
+    the local Kane rate (D = -1) integrated over the same junction, against the nonlocal oracle."""
     J_or = oracle[process]
-    e04 = _module_current(process, 0.4e-9) / J_or - 1.0
-    e01 = _module_current(process, 0.1e-9) / J_or - 1.0
-    per_path01 = _per_path_errors(process, [0.1e-9])[0]
+    hs = [0.4e-9, 0.2e-9, 0.1e-9, 0.05e-9, 0.025e-9]
+    err = [_module_current(process, h) / J_or - 1.0 for h in hs]
+    orders = [math.log(abs(err[k] / err[k + 1]), 2) for k in range(len(hs) - 1)]
+    C_inf = abs(err[-1]) / (hs[-1] * 1e9) ** 2
     params = DIRECT if process == "direct" else PHONON
 
     def loc(x):
         F = _dpsi(x)
         return params.A_SI * F ** params.P * math.exp(-params.B_V_per_m / F)
     J_loc = Q * quad(loc, -HALF, HALF, epsabs=0, epsrel=1e-10, limit=400, points=[0.0])[0]
-    print(process, "J_oracle", J_or, "err 0.4/0.1 nm", e04, e01, "local(D=-1)/nonlocal", J_loc / J_or)
-    assert abs(e01) <= 2.0 * per_path01
-    assert J_loc > 0 and J_or > 0
+    print(process, "J_oracle", J_or, "rel err", err, "orders", orders, "local(D=-1)/nonlocal", J_loc / J_or)
+    assert orders[0] >= 1.7 and orders[1] >= 1.7
+    assert abs(err[2]) <= 2.0 * C_inf * (hs[2] * 1e9) ** 2
