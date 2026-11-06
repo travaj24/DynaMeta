@@ -494,6 +494,12 @@ jobs:
     #   processes is 16 s of it).
     # + tests/test_si_bundles_devsim.py (v0.15 Si bundles / FD detailed balance, 10 tests): ~120 s serial
     #   on the loaded Windows dev box (2026-11-06; no single test above ~25 s).
+    # + tests/test_devsim_band_temperature.py (v0.15 band-temperature model on the builders, 2026-11-06): 55 s
+    #   serial on the Windows dev box (4 tests: the A/B identity fixture 33 s, the guard / band-gap-check
+    #   builds 21 s); its 5 @slow V_bi / Delta E_c / TE-conductance gates (~45 s) run nightly, step (a).
+    #   The devsim-free half, tests/test_band_temperature.py, runs on every `test` leg.
+    #   (2026-11-06: the list's last line used to start after a literal backslash-n left by a merge, which
+    #   bash passes to pytest as a stray argument "n" -- "file or directory not found"; fixed here.)
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -525,7 +531,7 @@ jobs:
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
             tests/test_devsim_sg_flux.py tests/test_devsim_geometry.py tests/test_devsim_element_geometry.py \
             tests/test_temperature_fixes.py tests/test_devsim_noise_hooge_3d.py tests/test_custom_terms.py \
-            tests/test_noise_two_point.py tests/test_si_bundles_devsim.py
+            tests/test_noise_two_point.py tests/test_si_bundles_devsim.py tests/test_devsim_band_temperature.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

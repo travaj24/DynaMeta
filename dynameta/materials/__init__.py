@@ -10,6 +10,9 @@ from dynameta.materials.mechanical import MechanicalProps
 from dynameta.materials.transport_model import (
     TransportModel, TrapSpec, CarrierPhysics,
 )
+from dynameta.materials.band_temperature import (
+    BandTemperature, BandData, band_data_at_T, band_gap_ratio, algaas_gap_law, varshni_eg_ev,
+)
 from dynameta.materials.material import Material, MaterialRegistry
 from dynameta.materials.db import (
     DielectricDB, DielectricRecord, normalize_formula,
@@ -21,6 +24,7 @@ __all__ = [
     "RefractiveIndexInfoOptical", "fit_drude_params", "M_E", "Q_E", "EPS0", "C_LIGHT",
     "KaneOpticalMass", "MatthiessenGamma", "ScatteringModel", "MechanicalProps",
     "TransportModel", "TrapSpec", "CarrierPhysics",
+    "BandTemperature", "BandData", "band_data_at_T", "band_gap_ratio", "algaas_gap_law", "varshni_eg_ev",
     "Material", "MaterialRegistry",
     "DielectricDB", "DielectricRecord", "normalize_formula",
 ]

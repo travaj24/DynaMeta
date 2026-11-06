@@ -103,6 +103,7 @@ from dynameta.carriers.dc_solve import solve_dc
 from dynameta.carriers.physics_equilibrium import M_E   # V_T dropped: the built-in offset now
 # comes from BP.ohmic_built_in_offset_V, the single source shared with the contact recipe (C-10)
 from dynameta.geometry.guards import require_supported_geometry
+from dynameta.materials.band_temperature import band_data_at_T, transport_temperature_K
 from dynameta.warning_types import AdvisoryWarning, UnreliableResultWarning
 
 
@@ -428,7 +429,10 @@ class Stacked3DSpec:
         on_chi_temperature (v0.14 row 3.2-10): a 3-D heterostack runs at T_REF (bipolar_dd, the only
         physics with a T_K, refuses extra semiconductors), so the check fires only when a material states
         TransportModel.chi_reference_T_K != T_REF. Same three settings as LayeredDevsimBuilder
-        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature)."""
+        ("refuse" default / "warn" / "off"; physics_heterojunction.check_affinity_temperature). v0.15: a
+        material with TransportModel.band_temperature has chi evaluated at the region T (T_REF here; the
+        bipolar body at BipolarOptions.T_K also gets its n_i from the model when derive_n_i=True) and is
+        not subject to the toggle (materials.band_data_at_T)."""
         require_supported_geometry(design, "Stacked3DSpec.from_design")
         layers = design.stack.layers
         semi_idxs = [i for i, L in enumerate(layers)
@@ -513,10 +517,12 @@ class Stacked3DSpec:
             # audit S1-9: carry the layer's OWN electron affinity + DOS mass, so the equilibrium solve aligns
             # the bands by the work-function difference (Stacked3DSpec.band_alignment)
             # v0.14 (user decision 2026-11-04): chi_eV defaults to None -- carried through as None so
-            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity
+            # band_alignment applies the same-material rule or refuses a defaulted heterojunction affinity.
+            # v0.15: chi at the region's T (band_temperature model); no model -> chi_eV unchanged
+            chi_i = band_data_at_T(tri, transport_temperature_K(tri)).chi_eV
             extra_semis.append((Li.name, Li.background_material, float(Li.thickness_m),
                                 float(tri.eps_static), float(tri.n_bg_m3),
-                                (float(tri.chi_eV) if tri.chi_eV is not None else None),
+                                (float(chi_i) if chi_i is not None else None),
                                 float(tri.dos_mass_kg_of_n_m3(tri.n_bg_m3))))
         tr = design.materials.get(semi_L.background_material).transport
         if tr is None:
@@ -524,9 +530,10 @@ class Stacked3DSpec:
         _htr = {layers[i].background_material: design.materials.get(layers[i].background_material).transport
                 for i in semi_idxs}
         if extra_semis and len({(t.chi_eV, t.band_gap_eV) for t in _htr.values()}) > 1:
-            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10)
+            # a heterostack (same rule as LayeredDevsimBuilder): chi is read at T_REF (row 3.2-10); a material
+            # with a band-temperature model has chi evaluated there (v0.15) -> consistent (the tags)
             HJ.check_affinity_temperature(
-                {m: getattr(t, "chi_reference_T_K", None) for m, t in _htr.items()},
+                HJ.affinity_temperature_tags(_htr, PE.T_REF),
                 PE.T_REF, mode=on_chi_temperature, owner="Stacked3DSpec.from_design")
         eps_ox = design.materials.get(ox_L.background_material).dc_permittivity()
         if eps_ox is None:
@@ -562,9 +569,10 @@ class Stacked3DSpec:
         # bipolar (holes + SRH): derive the hole mobility / intrinsic density / lifetime / valence DOS
         # from the transport model (the transport model's __post_init__ already required them).
         bip = {}
+        band = band_data_at_T(tr, transport_temperature_K(tr))     # v0.15; no model -> the inputs unchanged
         if tr.physics == "bipolar_dd":
             bip = dict(
-                n_i_m3=float(tr.n_i_m3),
+                n_i_m3=float(band.n_i_m3),
                 mobility_p_m2Vs=float(tr.hole_mobility_m2Vs_of_n_m3(n_bg)),
                 tau_srh_s=float(tr.tau_srh_s),
                 dos_mass_p_kg=(float(tr.dos_mass_p_kg) if tr.dos_mass_p_kg else None),
@@ -585,7 +593,7 @@ class Stacked3DSpec:
                     gate_name=gate_name, body_name=body_name,
                     grid_n=grid_n, mesh_min_nm=mesh_min_nm, mesh_max_nm=mesh_max_nm, mesher=mesher,
                     extra_dielectrics=extra_diels, extra_semiconductors=extra_semis,
-                    chi_semi_eV=(float(tr.chi_eV) if (extra_semis and tr.chi_eV is not None) else None),
+                    chi_semi_eV=(float(band.chi_eV) if (extra_semis and band.chi_eV is not None) else None),
                     interface_traps=interface_traps,
                     extended_precision=bool(extended_precision), **bip)
 
