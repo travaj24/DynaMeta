@@ -668,6 +668,7 @@ def test_defaults_off_physics_definition_is_byte_identical_to_the_recorded_diges
     assert CL.digest(log) == _CALLLOG_DIGEST
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_inactive_options_bundle_is_bitwise_identical_to_none():
     """GATE R26/R27-off-b. options=BipolarOptions() (every field None) must be the SAME device as
     options=None: same node-model list, and a forward-biased pn diode solves to BITWISE-identical

@@ -166,6 +166,7 @@ def test_e5_precedence_explicit_wins_one_advisory_on_contradiction(stated, expli
 # E1 / E2: equivalence and defaults off (tiny Si diode)
 # =====================================================================================================
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_e2_design_flag_equals_explicit_argument_bitwise_and_off_is_default(monkeypatch):
     """GATE E2 + E1 (same tree). sha256 of every node field + the anode current at +0.3 V:
     design-flag (CarrierSpec(True)) == explicit LayeredDevsimBuilder(design, extended_precision=True), bit
@@ -232,6 +233,7 @@ def _optics(design, geo, eps_by_region, lambda_m, n_super, n_sub):
     return OpticalResult(r=0j, R=0.0, phase_deg=0.0, solve_time_s=0.0)
 
 
+@pytest.mark.devsim_isolated("bitwise comparison of separate DEVSIM solves: a device left live by another test is iterated by the same joint Newton and moves the answer by ulps")
 def test_e3_run_pipeline_enables_once_and_leaks_nothing(monkeypatch):
     """GATE E3 + adversarial. run_pipeline(carrier_solver=None) on a design with CarrierSpec(True) over TWO
     bias points calls XP.enable exactly ONCE (spy wrapping the real call: one device build serves the
