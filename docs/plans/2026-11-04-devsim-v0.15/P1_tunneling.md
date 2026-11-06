@@ -378,7 +378,7 @@ SI conversion: `A_SI = A_cgs 1e6 100^-P`, `B_SI = 100 B` (`BTBTParams.from_cgs`)
 | Si, Sentaurus E2 / Hurkx default | 3.4e21 cm^-1 s^-1 V^-2 | 22.6 MV/cm | 2 | Sentaurus UG Table 89 (refs Liou, SSE 33, 971 (1990) for E1) | READ (vendor manual). Not recommended unless the user wants vendor parity |
 | Atlas BBT.STD | 9.6615e18 (units misprinted in the manual) | 3.0e7 V/cm | 2 | Keeney et al., IEDM 1990 p. 201 | SECONDARY with a units misprint, so **not shippable** |
 | In0.53Ga0.47As | none found as a primary local fit | | 2 | Smets et al., JAP 115, 184503 (2014), a NONLOCAL calibration (paywalled) | **No shippable primary.** The 1.3e20 / 5.7 MV/cm in Chen et al., Nanotechnology 33, 225205 (2022) is untraceable. Do not ship |
-| In0.53Ga0.47As, computed | from the Kane formula | | 2 | Eg(300 K), m_e, m_lh from Vurgaftman, Meyer, Ram-Mohan, JAP 89, 5815 (2001) | **Computable, UNVERIFIED inputs.** The sub-agent's masses are from memory. The repo's own Varshni row (0.816 eV, 2.9e-4, 193 K, giving Eg(300) = 0.763 eV) disagrees with the Eg0 = 0.822 eV quoted by Bizindavyi et al. (Eg(300) = 0.740). One of them is wrong; check against Vurgaftman Table before use |
+| In0.53Ga0.47As, computed | from the Kane formula | | 2 | Eg(300 K), m_e, m_lh from Vurgaftman, Meyer, Ram-Mohan, JAP 89, 5815 (2001) | **Computable, UNVERIFIED inputs.** The sub-agent's masses are from memory. [RESOLVED 2026-11-06, v0.14.0: the repo's old Varshni row (0.816 eV, 2.9e-4, 193 K, Eg(300) = 0.763 eV) was wrong; the SOA module now uses Vurgaftman 2001's alloy rule (binary Varshni + C = 0.477 eV), Eg(300) = 0.737 eV -- use that one function (docs/audit/2026-11-06-v0.14-ingaas-gap.md)] |
 
 ### 2.3 Design
 
@@ -647,7 +647,7 @@ In `tests/test_btbt_nonlocal.py`; 2-D is slow.
   * InGaAs only as a Kane-computed set from Vurgaftman 2001 inputs that have been READ.
   * Can you supply the Kao 2012, Vurgaftman 2001 and Hurkx 1992 PDFs?
 * **U2-2. Ge direct-A discrepancy.** The Kane formula gives +10 % vs Kao's printed A. Accept the printed value (recommended, cite as printed) and record the discrepancy, or hold the preset?
-* **U2-3. Temperature scaling of B** (Eg(T)^1.5, A constant). Recommend opt-in, only with a cited Varshni set. Also: the repo's `VARSHNI_PARAMS["InGaAs_LM"]` (Eg(300) = 0.763 eV) disagrees with the 0.740 eV implied by the Varshni constants Bizindavyi et al. quote. Should I open that as a separate finding against the SOA module?
+* **U2-3. Temperature scaling of B** (Eg(T)^1.5, A constant). Recommend opt-in, only with a cited Varshni set. Also: the repo's old `VARSHNI_PARAMS["InGaAs_LM"]` (Eg(300) = 0.763 eV) was wrong -- RESOLVED 2026-11-06 in v0.14.0 (Vurgaftman alloy rule, 0.737 eV at 300 K; docs/audit/2026-11-06-v0.14-ingaas-gap.md).
 
 **Item 3**
 
