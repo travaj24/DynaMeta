@@ -64,7 +64,7 @@ def _fdt_diode(traps, freqs=FREQS, mechanisms=None):
 
 def test_fdt_with_a_charged_kinetic_level_all_frequencies():
     """K3-1 (the plan's xfail flips). The gate-B diode with the CHARGED acceptor level made KINETIC: S_I =
-    4kT Re Y from 1 Hz to 1 GHz to 1e-4 (the D2a gate-B tolerance; ssac-limited). MEASURED max 2.4e-6.
+    4kT Re Y from 1 Hz to 1 GHz to 1e-4 (the D2a gate-B tolerance; ssac-limited). MEASURED max 1.6e-6.
     The quasi-static level misses by 9.9e-2 at 1 MHz (and raises the decision-39 advisory); the kinetic
     sources are a real share of S (trap_n + trap_p = 35 % at 100 kHz). The trap rows sit at the circuit
     contact's node (the trap row is kept there): the refusal is restricted to equations whose contact row
