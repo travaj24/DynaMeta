@@ -426,8 +426,13 @@ No test in the files above pinned the old 2-D zero-built-in-potential result. No
    order >= 1.7 and abs(gap) <= 2 C_inf h^2.
 7. **Noise source for thermionic-emission heterointerfaces** (section 2.8): the interface shot noise
    2q(J_0->1 + J_1->0) is not in the source set. The strict xfail pins it.
-8. **Heterointerfaces at T_K != T_REF**: refused with BGN, and silently at T_REF without it (D1a's
-   interface is written at T_REF). A temperature-aware interface is a follow-up.
+8. **Heterointerfaces at T_K != T_REF**: RESOLVED by the D1a temperature follow-up (merge `f7c82db`,
+   wip/dv_hetero2; heterojunction doc section 4b). The interface now runs at the regions' V_t (one
+   source, `BipolarOptions.T_K`): barrier offsets, the BGN-shifted tops (the BGN refusal is gone),
+   Richardson A* T^2, the Anderson frame and the band-gap check, with the bipolar N_c/N_v from the
+   masses at T_K. A non-isothermal stack is refused ("NON-ISOTHERMAL"), as is an n_i inconsistent with
+   band_gap_eV at T_K. Gates T-a..T-d in `tests/test_devsim_heterojunction.py`. (Corrected
+   2026-11-06; the item said "refused with BGN, and silently at T_REF without it -- a follow-up".)
 9. **D1a open items** (3-D bipolar heterostacks, lateral sidewall interfaces, degenerate TE
    magnitude) are unchanged.
 
