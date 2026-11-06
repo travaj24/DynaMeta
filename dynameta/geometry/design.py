@@ -24,7 +24,7 @@ from typing import Dict, List, Literal, Tuple
 from dynameta.geometry.unit_cell import UnitCell
 from dynameta.geometry.stack import Stack, Layer
 from dynameta.geometry.electrode import Electrode
-from dynameta.geometry.specs import Mesh2DSpec, Mesh3DSpec, OpticalSpec
+from dynameta.geometry.specs import CarrierSpec, Mesh2DSpec, Mesh3DSpec, OpticalSpec
 from dynameta.materials.material import MaterialRegistry
 
 
@@ -43,10 +43,15 @@ class Design:
     mesh_3d:     Mesh3DSpec = field(default_factory=Mesh3DSpec)
     optical:     OpticalSpec = field(default_factory=OpticalSpec)
     pretty_name: str = ""
+    # v0.15 (plan 4.2.6, decision 37): carrier-solver settings (extended precision). APPENDED after
+    # pretty_name so positional Design(...) calls are unchanged; the default (all unstated) is v0.14.
+    carriers:    CarrierSpec = field(default_factory=CarrierSpec)
 
     def __post_init__(self) -> None:
         if not self.pretty_name:
             self.pretty_name = self.name
+        if not isinstance(self.carriers, CarrierSpec):
+            raise TypeError("Design.carriers must be a CarrierSpec, got {!r}".format(self.carriers))
         # Every referenced material must be registered.
         used = {self.stack.superstrate_material, self.stack.substrate_material}
         for L in self.stack.layers:

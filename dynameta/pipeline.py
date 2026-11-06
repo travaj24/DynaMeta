@@ -68,7 +68,11 @@ def run_pipeline(design: Design, sweep: Sweep, *,
     the default 'raise' preserves the historical fail-fast behaviour.
 
     carrier_solver / optical_builder may be supplied to override the defaults
-    (bring-your-own); each must satisfy the corresponding core Protocol.
+    (bring-your-own); each must satisfy the corresponding core Protocol. The default carrier solver,
+    LayeredDevsimBuilder(design), follows design.carriers (v0.15): Design(...,
+    carriers=CarrierSpec(extended_precision=True)) runs the carrier sweep in DEVSIM extended precision
+    (geometry.specs.CarrierSpec: when to use it, its cost, and the process-global DEVSIM state). The
+    builder is torn down after the carrier sweep, so a later run_pipeline is unaffected.
 
     optical_solver: an optional callable
     ``fn(design, geo, eps_by_region, lambda_m, n_super, n_sub) -> OpticalResult`` that replaces
