@@ -283,6 +283,16 @@ not `importorskip`, so a missing module cannot become a skip.
 - **Hooge.** Opt-in, with a single alpha_H for both carriers. There is no mobility-fluctuation vs
   number-fluctuation distinction.
 
+### Interfaces (v0.15, 2026-11-06)
+
+- Carrier-continuous interfaces need no source (gate B3).
+- A D1a THERMIONIC interface (a DEVSIM `fluxterm` on each continuity equation) is a two-point event source,
+  S = 2q (J_01 + J_10) A |y_r0 - y_r1|^2 per node pair, mechanisms `te_n` / `te_p`, on by default, reported in
+  `NoiseSpectrum.by_interface` (not `by_region`). A is the area DEVSIM's fluxterm assembly multiplies the flux
+  by (the SurfaceArea node model, over the pairs DEVSIM loads). A fluxterm without its pair model, a `hybrid`
+  interface equation and a fluxterm on any other equation are refused. See
+  docs/audit/2026-11-06-v0.15-thermionic-shot-noise.md.
+
 ## Open questions (user decisions)
 
 1. **External generation default.** Should external generation `G_ext` count as Poisson
@@ -302,8 +312,8 @@ not `importorskip`, so a missing module cannot become a skip.
     `setup_contact_ohmic_bipolar_circuit`.
   - `physics_drift_diffusion.py`: an appended function.
   - `carriers/__init__.py`: an added `__all__` name.
-- **D1a heterojunctions.** Gate B3 shows carrier-continuous interfaces work. A heterojunction
-  interface with a thermionic or jump condition (not `continuous`) is not tested.
+- **D1a heterojunctions.** Gate B3 shows carrier-continuous interfaces work. Thermionic interfaces have
+  their own source since v0.15 (section "Interfaces"); any other interface flux is refused.
 - **D1c traps.** If trap rates live outside `USRH` or the BipolarOptions builders, they contribute
   NO GR noise, and FDT will flag it. The pattern for adding them is: give the trap model its own
   pair rate in `_gr_pair_expr`.

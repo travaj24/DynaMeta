@@ -589,14 +589,17 @@ def test_noise_fdt_on_a_continuous_qfl_heterointerface(noise_mod):
     assert abs(Y.real[0] / 6.78 - 1) > 0.3
 
 
-@pytest.mark.xfail(strict=True, reason="LIMIT (documented): the thermionic-emission interface flux is a "
-                   "DEVSIM fluxterm with no noise source -- its shot noise 2q(J_0->1 + J_1->0) is not in "
-                   "noise_analysis' source set, so wherever the interface resistance matters the FDT "
-                   "misses (MEASURED S/4kT Re Y - 1 = -0.69 at 1 Hz with A* x 1e-6). Turns green when an "
-                   "interface TE source is added.")
 def test_noise_fdt_on_a_thermionic_heterointerface(noise_mod):
+    """The same heterojunction FDT diode with D1a's THERMIONIC-emission interface at A* x 1e-6, where the
+    interface carries ~70 % of the noise: S_I = 4kT Re Y to 1e-4 over 1 Hz - 1 GHz (the D2a gate B budget;
+    MEASURED 3.0e-5 at 1 Hz -- the ssac low-frequency floor --, 2.8e-5, 2.2e-8, 3.4e-11). It was a strict xfail
+    through v0.14 (the fluxterm had no noise source: MEASURED -0.69 at 1 Hz); since v0.15 (plan 4.3.1) the
+    two opposed Richardson streams are a two-point source, S = 2q(J_01 + J_10) A |y_r0 - y_r1|^2 per pair
+    (noise_analysis te_n / te_p, on by default). Load-bearing: dropping te_n / te_p breaks it by -0.69."""
     V = noise_mod
     V.hetero_two_region("thermionic", astar_scale=1e-6)
-    sn = V.noise(FDT_FREQS[:2])
-    Y = V.ssac_Y(FDT_FREQS[:2])
+    sn = V.noise(FDT_FREQS)
+    Y = V.ssac_Y(FDT_FREQS)
     assert np.max(np.abs(sn.S / (4 * V.KT * Y.real) - 1)) < 1e-4
+    te = sn.by_mechanism["te_n"] + sn.by_mechanism["te_p"]
+    assert ((sn.S - te) / (4 * V.KT * Y.real) - 1)[0] < -0.5
