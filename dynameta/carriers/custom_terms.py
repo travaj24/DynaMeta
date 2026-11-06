@@ -66,8 +66,14 @@ add_custom_term() (or an explicit register_dispatcher()), never at import.
      noise_sources(device) -> [noise_analysis.TwoPointSource, ...] at the current DC point, or None
                        for "no noise model" (noise_analysis then REFUSES the device: a term without
                        its fluctuation would silently break the fluctuation-dissipation theorem).
+                       A subclass that does not override it declares "no noise model".
                        Coefficients c_r are the change of residual row r per event, in units of q, in
                        DEVSIM's sign convention for that row (noise_analysis.TwoPointSource).
+   THE INVENTORY (v0.15 plan 4.0.2). physics_bipolar_dd.recombination_terms(device, region)["custom"]
+   lists every live term whose equations() touch the region -- a term declaring NO region row is listed
+   in every region (its footprint is unknown) -- as CustomTermRecord(term, regions, noise_model,
+   jacobian_exact); noise_analysis reads its refusals from there, the same inventory as every
+   model-expressible term. Declare equations() so a term is attributed to its own regions only.
    SIGN RULE FOR CONSERVATION. A term that moves charge between rows must add EQUAL and OPPOSITE
    amounts to the rows it couples (in each row's own DEVSIM convention: an electron removed from node i
    adds -q x rate to the ElectronContinuityEquation row, like ElectronGeneration = -q U; a hole removed
