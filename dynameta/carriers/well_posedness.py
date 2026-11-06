@@ -572,7 +572,8 @@ def diagnose_singular(device: "str | None" = None, *, max_dense: int = 5000) -> 
     sel = a >= 0.01 * a.max() if a.size and a.max() > 0 else np.zeros(a.size, bool)
     span = "x in [{:.3g}, {:.3g}] nm".format(1e9 * x[sel].min(), 1e9 * x[sel].max()) if sel.any() else ""
     tail = (": a weakly pinned carrier / floating mode -- Newton cannot resolve it in double precision "
-            "(see dynameta.carriers.well_posedness; for an MOS inversion layer the remedy is the "
-            "quasi-equilibrium closure, plan 4.4.3)" if ratio < NEAR_SINGULAR else "")
+            "(see dynameta.carriers.well_posedness; for an MOS capacitor in inversion the remedy is "
+            "physics_bipolar_dd.setup_quasi_equilibrium_carrier -- close the minority carrier, and the "
+            "holes too when they carry a density-gradient potential)" if ratio < NEAR_SINGULAR else "")
     return "{}: mode in {} (device {!r}, region {!r}, {:.3g} of its mass), {}{}".format(
         head, var, d, r, m / mass_tot, span, tail)
