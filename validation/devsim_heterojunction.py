@@ -116,6 +116,9 @@ def transport(mat: dict, *, n_bg: float, physics: str, acceptor: bool = False, n
         if T_K is not None:
             from dynameta.carriers.bipolar_options import BipolarOptions
             kw["bipolar_options"] = BipolarOptions(T_K=float(T_K))
+            # v0.14 row 3.2-10: these oracles use chi as given at T_K (the band diagram is written with
+            # the SAME chi), so the material's chi IS quoted at T_K -- state it (else the builder refuses)
+            kw["chi_reference_T_K"] = float(T_K)
     return TransportModel(**kw)
 
 

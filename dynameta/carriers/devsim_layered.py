@@ -88,15 +88,32 @@ class LayeredDevsimBuilder:
     region is placed in ONE Anderson-aligned frame (the reference is the region of the first GROUND
     electrode on a semiconductor, else the first semiconductor region; a gate on a dielectric keeps
     that reference's flat band), so adjacent equilibrium semiconductors now carry their built-in
-    potential (audit S1-9 2-D sibling) and every ohmic contact pins Potential at bias + s(region)."""
+    potential (audit S1-9 2-D sibling) and every ohmic contact pins Potential at bias + s(region).
+
+    on_chi_temperature (v0.14 row 3.2-10, user decision 3): what a HETEROSTACK (two or more different
+    semiconductor materials) does when the device temperature (BipolarOptions.T_K; T_REF otherwise) differs
+    from the temperature its affinities were quoted at (TransportModel.chi_reference_T_K, None = T_REF).
+    chi_eV is used unchanged either way -- there is no chi(T) model in v0.14.
+      "refuse" (default): raise physics_heterojunction.AffinityTemperatureError naming the materials, this
+               toggle and the field. Use it unless you know your affinities; if chi_eV IS your value at the
+               device T, tag the materials (chi_reference_T_K = T_K) instead of switching the check off.
+      "warn"   : build, with an AdvisoryWarning stating the size of the assumption (~1.1-2.2 meV in
+               Delta E_c per 100 K for Al0.3Ga0.7As/GaAs, more for Si/SiGe) -- exploratory T sweeps.
+      "off"    : build silently -- for affinities you have validated at the device T.
+    Only materials whose (chi_eV, band_gap_eV) differ count as a heterostack (a p/n homojunction is two
+    material names of one semiconductor); single-material devices and the 300 K default are never affected."""
 
     def __init__(self, design: Design, *, mesh_name: str = "ms_mesh",
                   device_name: str = "ms_device", oxide_tunneling=None,
                   interface_traps=None, heterointerface: str = "auto",
-                  extended_precision: bool = False) -> None:
+                  extended_precision: bool = False, on_chi_temperature: str = "refuse") -> None:
         if heterointerface not in ("auto",) + HJ.HETERO_MODELS:
             raise ValueError("heterointerface must be 'auto', 'thermionic' or 'continuous'; got {!r}"
                              .format(heterointerface))
+        if on_chi_temperature not in HJ.CHI_TEMPERATURE_MODES:
+            raise ValueError("on_chi_temperature must be one of {}; got {!r}".format(
+                HJ.CHI_TEMPERATURE_MODES, on_chi_temperature))
+        self.on_chi_temperature = on_chi_temperature        # class docstring; v0.14 row 3.2-10
         # 2026-11-02: _region_specs plans layers + inclusions only -- a Stack.features via came back
         # as the via-free region list (measured), and a tapered inclusion would be a straight box at its
         # TOP section. Refuse before planning (single-sourced message: dynameta.geometry.guards).
@@ -568,6 +585,16 @@ class LayeredDevsimBuilder:
                  "TransportModel.chi_eV (electron affinity, eV) on every one of them -- it defaults to None "
                  "since v0.14 so a band offset is never zero by default.".format(
                      ", ".join("{}: {} chi_eV={}".format(r, mats[r], chi[r]) for r in sorted(mats))))
+        # v0.14 row 3.2-10: the affinities are used unchanged at the device T -- check that they were
+        # quoted there (after the chi_eV-is-None refusal above). Only a HETEROstack is checked: materials
+        # whose (chi_eV, band_gap_eV) all agree are one semiconductor at different dopings (doping lives
+        # in TransportModel, so a p/n homojunction is two material names), with no offset to drift.
+        trs = {m: self.design.materials.get(m).transport for m in set(mats.values())}
+        if len({(t.chi_eV, t.band_gap_eV) for t in trs.values()}) > 1:
+            HJ.check_affinity_temperature(
+                {m: getattr(t, "chi_reference_T_K", None) for m, t in trs.items()},
+                HJ.temperature_of_V_t(vts[semis[0]]), mode=self.on_chi_temperature,
+                owner="LayeredDevsimBuilder")
         for r, (phi_c, s_v) in frames.items():
             if s_v == 0.0:
                 continue
@@ -675,14 +702,9 @@ class LayeredDevsimBuilder:
         # one that sets the region's V_t -- else T_REF (the default call, bit-identical). The builder
         # derives N_c, N_v from the DOS MASSES, so this is what "supply N_c, N_v at T_K" means here
         # (bipolar_options docstring item 4); n_i_m3 is a direct input and must be given at T_K.
-        _opts = getattr(tr, "bipolar_options", None)
-        _T = getattr(_opts, "T_K", None)
-        if _T is None:
-            Nc = PE.effective_dos_m3(dos)                   # audit X-15: the single N_c (T_REF)
-            Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg)) if tr.dos_mass_p_kg else Nc
-        else:
-            Nc = PE.effective_dos_m3(dos, float(_T))
-            Nv = PE.effective_dos_m3(float(tr.dos_mass_p_kg), float(_T)) if tr.dos_mass_p_kg else Nc
+        # ONE helper shared with the 3-D builder (v0.14 row 3.2-7).
+        from dynameta.carriers.bipolar_options import band_dos_at_T
+        Nc, Nv = band_dos_at_T(dos, tr.dos_mass_p_kg, getattr(tr, "bipolar_options", None))
         BP.setup_bipolar_region(
             self.device, s.name, eps_static=float(tr.eps_static), n_dos_m3=Nc, n_i_m3=float(tr.n_i_m3),
             mobility_n_m2Vs=float(tr.mobility_m2Vs_of_n_m3(tr.n_bg_m3)),
