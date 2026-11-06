@@ -478,6 +478,9 @@ jobs:
     # oxide-tunneling wiring) run in the `nightly` job, step (a).
     # + tests/test_devsim_sg_flux.py (the SG-kernel gates, merged after the timing above): 19 s serial on
     #   the Windows dev box (9 tests; mpmath oracle), i.e. ~2 % of this job.
+    # + tests/test_devsim_element_geometry.py (the shared exact-element-volume check and its II / BTBT /
+    #   Hooge refusals, 2026-11-06): 4.4 s serial on the Windows dev box (9 tests; gmsh in memory).
+    #   tests/test_impact_ionization.py (in `solvers`) gained the 2-D quadrature gates: 2.3 s (12 tests).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -507,7 +510,7 @@ jobs:
             tests/test_devsim_noise.py tests/test_devsim_noise_hooge.py \
             tests/test_devsim_phase_composition.py tests/test_devsim_tunneling.py \
             tests/test_extended_precision.py tests/test_trap_energy_reference.py tests/test_traps.py \
-            tests/test_devsim_sg_flux.py
+            tests/test_devsim_sg_flux.py tests/test_devsim_element_geometry.py
 
   nightly:
     # WHERE THE WORK THE PR LEGS DROPPED ACTUALLY RUNS. Every "too slow for the PR tier" decision

@@ -102,7 +102,9 @@ is called, and it only READS the device (its DC operating point and models are l
      axis-aligned current reproduces the edge sum too. MEASURED after the fix: 45 deg 1.0000 (to
      3.6e-10, the 1 mV drift residual the aligned case also shows); 1-D gate F and the aligned 2-D
      cases unchanged to round-off. Exact only on well-centred elements, like the volumes themselves:
-     the gmsh-tet 3-D bar of gate A (sum NodeVolume = 1.225 x its true volume) reads 1.055 (was 0.688).
+     the gmsh-tet 3-D bar of gate A (sum NodeVolume = 1.225 x its true volume) read 1.055 (was 0.688),
+     so since v0.14.0 the Hooge source REFUSES such a mesh (element_geometry.check_element_geometry,
+     InexactElementGeometryError); the library meshes (2-D rectilinear, 3-D Kuhn tensor) pass.
    * GR is a node source: residual perturbation -q V_i dU (electrons), +q V_i dU (holes), so
             S_i = q^2 V_i |y_p,i - y_n,i|^2 2 (G + R)_i .
    * The edge/node volumes are DEVSIM's own EdgeCouple / EdgeLength / NodeVolume, so the same code
@@ -387,6 +389,11 @@ def _hooge_elements(device: str, region: str, i0, i1, couple, length):
     if dim == 1:
         return (np.arange(i0.size)[:, None], couple[:, None], couple * length,
                 np.stack([i0, i1], axis=1))
+    # V_T = Sum_k c_eT L_k / d = 2 Sum ENV is the TRUE element volume only on a well-centred element
+    # (the gmsh-tet bar read 1.055 instead of 1): refuse any other mesh (row 3.2-13, the shared check)
+    from dynameta.carriers.element_geometry import check_element_geometry
+    check_element_geometry(device, region, caller="noise_spectrum(hooge_alpha=...) ({}-D element "
+                           "assembly)".format(dim))
     have = set(ds.get_element_model_list(device=device, region=region))
     made = "node_index@en0" not in have
     if made:

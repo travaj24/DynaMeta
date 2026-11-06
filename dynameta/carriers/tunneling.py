@@ -28,8 +28,12 @@ Hurkx sec. IV / Schenk -- is a documented follow-up). Discretisation, by dimensi
     to 2e-16 on a 2-D tensor mesh), so |E| is ISOTROPIC -- unlike the edge-projected field the
     impact-ionization post-processor uses (impact_ionization.py: 1.8-3.1x low on 3-D tets). U is
     assembled per element edge into each end node's share of that element's volume
-    (volume_node0_model / volume_node1_model, weight ElementNodeVolume: sum 2*ENV = region volume
-    EXACTLY) with D evaluated at THAT node -- so a uniform field integrates exactly on any mesh.
+    (volume_node0_model / volume_node1_model, weight ElementNodeVolume) with D evaluated at THAT node --
+    so a uniform field integrates exactly on any mesh whose element volumes are exact (2 sum ENV = the
+    element volume). DEVSIM 2.11 breaks that identity on elements that are not well centred (it sums the
+    magnitudes of the circumcentric pieces: an obtuse triangle 11x, the old gmsh tets 1.2-1.5x), so
+    setup_btbt runs the shared element_geometry.check_element_geometry first and REFUSES such a mesh
+    (InexactElementGeometryError). The library meshes (2-D rectilinear tensor, 3-D Kuhn tensor) pass.
   * 1-D: DEVSIM has no element models in 1-D (element_from_edge_model raises), and there the edge
     field IS the field: U on each edge with D = the mean of its two end-node D values, assembled via
     edge_volume_model (EdgeNodeVolume = L/2 to each node).
@@ -197,6 +201,10 @@ def setup_btbt(device: str, region: str, params: BTBTParams, *, n_i: str = "n_i"
         return
     if dim not in (2, 3):                                     # pragma: no cover - devsim dims are 1..3
         raise NotImplementedError("setup_btbt: dimension {}".format(dim))
+    # the element assembly weights each element edge's rate by ElementNodeVolume: exact only on a
+    # well-centred mesh -- refuse any other (row 3.2-13, the shared check), BEFORE any model is created
+    from dynameta.carriers.element_geometry import check_element_geometry
+    check_element_geometry(device, region, caller="setup_btbt ({}-D element assembly)".format(dim))
     from dynameta.carriers.eq_registry import element_with_derivs
     ens = ["@en{}".format(k) for k in range(dim + 1)]           # the element's nodes (en0/en1 = the edge)
     comps = ["ElectricField_{}".format(c) for c in "xyz"[:dim]]
