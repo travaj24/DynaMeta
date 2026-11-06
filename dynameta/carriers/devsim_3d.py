@@ -1078,6 +1078,7 @@ class Devsim3DEquilibrium:
             ds.set_node_values(device=self.device, region="semi", name="Holes",
                                values=ds.get_node_model_values(device=self.device, region="semi",
                                                                name="IntrinsicHoles"))
+            PT.seed_kinetic_traps(self.device, ["semi"])   # v0.15: no-op without kinetic traps
             ds.set_parameter(device=self.device, name="gate_bias", value=phi_bi)   # flat band
             # audit C10-d: these two calls are `ds.solve(type='dc', solver_type='direct', ...)`
             # routed through solve_dc(method='newton'), which is that exact call plus the post-solve

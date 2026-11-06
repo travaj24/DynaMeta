@@ -353,23 +353,29 @@ CHARGED_TRAP = PT.TrapLevel(energy_eV=0.15, density_m3=2e21, kind="acceptor", ta
 def test_noise_fdt_with_a_charged_trap_level_quasi_static(noise_mod):
     """The same diode with an ACCEPTOR level (N_t 2e21 = 20 % of the doping; trap-aware contacts):
     in the quasi-static regime (1 Hz) S_I = 4kT Re Y to 1e-4 (MEASURED 1.4e-6), load-bearing (Re Y
-    1.57x). Above it see the strict xfail below."""
+    1.57x). Above it see the strict xfail below. v0.15 (decision 39): the noise and ssac solves with this
+    QUASI-STATIC charged level raise the AdvisoryWarning that they are not charge-conserving above the
+    capture rate (asserted; the kinetic twin is tests/test_trap_kinetics.py)."""
+    from dynameta.warning_types import AdvisoryWarning
     V = noise_mod
-    r_on, sn, Y_on = V.gate_b_fdt(open_circuit=False, freqs=[1.0], traps=(CHARGED_TRAP,),
-                                  srh_trap_energy_eV=-0.1)
+    with pytest.warns(AdvisoryWarning, match="QUASI-STATIC CHARGED traps"):
+        r_on, sn, Y_on = V.gate_b_fdt(open_circuit=False, freqs=[1.0], traps=(CHARGED_TRAP,),
+                                      srh_trap_energy_eV=-0.1)
     assert abs(r_on[0] - 1) < 1e-4, r_on
     _, _, Y_off = V.gate_b_fdt(open_circuit=False, freqs=[1.0])
     assert abs(Y_on.real[0] / Y_off.real[0] - 1) > 0.2
 
 
-@pytest.mark.xfail(strict=True, reason="D1c limit: CHARGED traps are quasi-static (no trap-occupancy "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="D1c limit: CHARGED traps are quasi-static (no trap-occupancy "
                    "variable), so the ssac linear response is not charge-conserving above the "
                    "quasi-static regime and the FDT cannot hold there (MEASURED S/4kT Re Y - 1 = "
                    "5.6e-3 at 100 kHz, 6.6e-2 at 10 MHz). Turns green when trap kinetics land.")
 def test_noise_fdt_with_a_charged_trap_level_high_frequency(noise_mod):
+    from dynameta.warning_types import AdvisoryWarning
     V = noise_mod
-    r_on, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(CHARGED_TRAP,),
-                              srh_trap_energy_eV=-0.1)
+    with pytest.warns(AdvisoryWarning, match="QUASI-STATIC CHARGED traps"):    # v0.15 decision 39
+        r_on, _, _ = V.gate_b_fdt(open_circuit=False, freqs=[1e5, 1e7], traps=(CHARGED_TRAP,),
+                                  srh_trap_energy_eV=-0.1)
     assert np.max(np.abs(r_on - 1)) < 1e-4, r_on
 
 

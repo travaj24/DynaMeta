@@ -918,6 +918,7 @@ class LayeredDevsimBuilder:
             ds.set_node_values(device=self.device, region=s, name="Holes",
                                values=ds.get_node_model_values(device=self.device, region=s,
                                                                name="IntrinsicHoles"))
+        PT.seed_kinetic_traps(self.device, sorted(self._bipolar_regions))   # v0.15: no-op without kinetic traps
         for E in d.electrodes:                              # bias = 0 (grounds at fixed) for equilibrium
             v = E.fixed_voltage_V if E.role == "ground" else 0.0
             self._drive(E.name, v)
