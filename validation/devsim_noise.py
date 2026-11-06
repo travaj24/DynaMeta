@@ -21,7 +21,8 @@ GATE D  GR noise, uniform SRH slab under bias: the GR part equals the ambipolar 
         400 L_D slab the plain Lorentzian plateau 2(G+R) tau^2 (q(mu_n+mu_p)E)^2/L and the corner.
 GATE E  Diffusion vs shot discriminant: a BIASED resistor keeps S = 4kT G (no shot noise; 2qI would
         be 1.93x larger at 0.1 V) while a forward diode gives S = 2qI = (1/2) 4kT G_d.
-GATE F  Hooge 1/f (opt-in): biased resistor, S_H = alpha_H I^2 / (N f), N = n L.
+GATE F  Hooge 1/f (opt-in): biased resistor, S_H = alpha_H I^2 / (N f), N = n L. F3: the same law on
+        the 3-D Kuhn-tensor bar (N = n V; it read 1.125 before the P1 element couples, 2026-11-06).
 GATE G  2-D LAYERED device (LayeredDevsimBuilder reference metasurface, degenerate FD ITO, 9 regions,
         dielectric interfaces, edge-metal grounds) via set_ssac_gate: S_I = 4kT Re Y, 1 GHz - 1 PHz, at
         Vg = 0 (flat band) and Vg = +2 V (degenerate accumulation, where the FD g-factor SG is only
@@ -594,6 +595,31 @@ def gate_f_hooge(alpha=2e-3, v=0.05, L=1e-5, nd=1e22):
     return sh / (alpha * I * I / (nd * L * ff))
 
 
+def gate_f3_hooge(alpha=2e-3, v=1e-3, n_bg=4e26, LX=200e-9, A=80e-9 * 80e-9):
+    """3-D Hooge on the default Kuhn-tensor bar (unipolar_3d_resistor, 960 tets): S_hooge f / (alpha
+    I^2 / N) - 1 at f = 1, 1e3 Hz with N = n_bg LX A (closed form), and its DERIVED budget. Budget: with
+    uniform n and a linear potential the SG current is exact and noise_analysis's SG edge density is
+    n_eff = n (v/2) coth(v/2) <= n (1 + v^2/12) (v = vdiff_g), so 1 - sqrt(n/n_eff) <= v^2/24 per edge;
+    every P1 element couple of a Kuhn tet is >= 0 (no sign-mixed amplification), hence |r - 1| <=
+    max v^2/12, plus 4 |I/I_ohm - 1| through the solved state and a 1e-11 summation floor. MEASURED
+    (2026-11-06): -5.80e-9 vs budget 5.81e-9 (the deviation IS the SG density term); 48886a7, with
+    DEVSIM's circumcentric element couples, +0.125 (the defect this gate exists for)."""
+    set_bias._v = {}
+    unipolar_3d_resistor()
+    ae = max(1e10, n_bg * 1e-12)
+    set_bias(v, ae)
+    I = source_current()
+    dev = ds.get_device_list()[0]
+    n = np.asarray(ds.get_node_model_values(device=dev, region="bulk", name="Electrons"))
+    vg = np.asarray(ds.get_edge_model_values(device=dev, region="bulk", name="vdiff_g"))
+    ohm = I / (QE * 0.004 * n_bg * v * A / LX) - 1.0
+    ff = np.array([1.0, 1e3])
+    sn = noise(ff, hooge_alpha=alpha)
+    r = sn.by_mechanism["hooge_n"] / (alpha * I * I / (n_bg * LX * A * ff)) - 1.0
+    budget = float(np.max(vg * vg)) / 12.0 + 4.0 * abs(ohm) + 1e-11
+    return r, budget, dict(n_spread=float(n.max() / n.min() - 1.0), ohm=float(ohm))
+
+
 FREQS_G = [1e9, 1e11, 1e13, 1e15]
 
 
@@ -690,6 +716,12 @@ def main():
     rh = gate_f_hooge()
     print("[t] F Hooge S_H f/(alpha I^2/N) = {}".format(np.round(rh, 6)), flush=True)
     gate("F Hooge 1/f (< 1e-4)", np.max(np.abs(rh - 1)) < 1e-4)
+
+    r3, b3, chk3 = gate_f3_hooge()
+    print("[t] F3 Hooge 3-D Kuhn bar: S_H f/(alpha I^2/N) - 1 = {}  budget {:.3e}  fixture {}".format(
+        np.array2string(r3, precision=3), b3, chk3), flush=True)
+    gate("F3 Hooge 1/f 3-D (|r - 1| <= derived SG budget; fixture n uniform, I ohmic < 1e-9)",
+         np.max(np.abs(r3)) <= b3 and abs(chk3["n_spread"]) < 1e-12 and abs(chk3["ohm"]) < 1e-9)
 
     for vg, tol in ((0.0, 1e-9), (2.0, 1e-3)):
         rg, ReY, byr = gate_g_layered(vg)
