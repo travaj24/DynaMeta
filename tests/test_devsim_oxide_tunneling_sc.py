@@ -543,3 +543,30 @@ def test_o15_unstructured_mesh_warns_and_the_exact_geometry_does_not_remove_the_
     for r in (g, e):
         assert [w[0] for w in r["setup_warnings"]] == ["UnreliableResultWarning"]
         assert "not column-aligned" in r["setup_warnings"][0][1]
+
+
+# =====================================================================================================
+# builder wiring
+# =====================================================================================================
+@pytest.mark.parametrize("case", ["2d", "3d"])
+def test_w_sc_builders_install_the_term_and_report_the_gate_current(case):
+    """LayeredDevsimBuilder(oxide_tunneling=...) and Stacked3DSpec(oxide_tunneling=...) with
+    coupling='self_consistent' install ONE term at build (Si / 2 nm SiO2 / metal gate, 1.2 V), in the
+    builder's own frame (phi_c = V_t ln(N_c/n_i) = 0.5625 V here, N_c = 2 (2 pi m kT/h^2)^(3/2) of the
+    1.08 m0 DOS mass, re-derived here) with the SiO2-on-Si barrier as given;
+    extras['oxide_tunneling'] reports the term's own kernel call (coupling, gate, I_gate_A) and
+    extras['contact_currents_A'] now carries the gate (DEVSIM's own gate current is 0 in DC), summing with
+    the body to the builders' Newton floor. MEASURED |gate + body| / gate = 3.5e-7 (2-D) / 1.4e-7 (3-D);
+    gate 1e-5 (a wiring gate -- the exact balance is O2). The 3-D tensor-mesh J_max equals the hand-built
+    gmsh-caveat fixture's tensor value (290.87 A/m^2). The post-processor default is test_w1/test_w3."""
+    r = _child("builders", variant=case)
+    assert r["n_terms"] == 1 and r["offsets"] == [3.1]
+    m, h = 1.08 * 9.1093837015e-31, 6.62607015e-34
+    Nc = 2.0 * (2.0 * math.pi * m * KB * 300.0 / h ** 2) ** 1.5
+    assert r["phi_c"] == pytest.approx(VT * math.log(Nc / 1e16), rel=1e-6)
+    ox = list(r["extras"]["oxide_tunneling"].values())[0]
+    assert ox["coupling"] == "self_consistent" and ox["gate"] == "gate" and ox["model"] == "tsu_esaki"
+    assert ox["I_A"] == ox["I_gate_A"] > 0.0
+    cc = r["extras"]["contact_currents_A"]
+    assert set(cc) == {"body", "gate"} and cc["gate"] == ox["I_A"]
+    assert abs(cc["gate"] + cc["body"]) <= 1e-5 * cc["gate"]

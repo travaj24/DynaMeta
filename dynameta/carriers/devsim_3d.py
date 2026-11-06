@@ -219,6 +219,9 @@ class Stacked3DSpec:
     # coupled in the Newton with the ISOTROPIC element field. oxide_tunneling: a
     # carriers.tunneling.OxideTunnelingParams -> every solve adds CarrierField.extras["oxide_tunneling"]
     # (the gate-oxide tunneling current through 'oxide', post-processed from the converged field).
+    # v0.15: OxideTunnelingParams(coupling="self_consistent", ...) installs the self-consistent term
+    # (tunneling.setup_oxide_tunneling, 'semi' -> 'gate') at build_device -- bipolar_dd, single semiconductor
+    # -- and the extras report its own kernel call (+ "coupling", "I_gate_A").
     btbt: Optional[object] = None
     oxide_tunneling: Optional[object] = None
     # D2b: DEVSIM 128-bit model evaluation + equation assembly, solved by the mixed-precision Newton
@@ -319,6 +322,14 @@ class Stacked3DSpec:
         if self.physics not in ("equilibrium", "drift_diffusion", "bipolar_dd"):
             raise ValueError("Stacked3DSpec.physics must be 'equilibrium', 'drift_diffusion' or "
                               "'bipolar_dd'; got {!r}".format(self.physics))
+        if getattr(self.oxide_tunneling, "coupling", "post") == "self_consistent":
+            if self.physics != "bipolar_dd":
+                raise ValueError("Stacked3DSpec.oxide_tunneling(coupling='self_consistent') needs "
+                                 "physics='bipolar_dd' (the sink is an electron-continuity term); got {!r}"
+                                 .format(self.physics))
+            if self.extra_semiconductors:
+                raise NotImplementedError("Stacked3DSpec: self-consistent oxide tunnelling on a 3-D "
+                                          "heterostack is not wired (v0.15): its Anderson frame is not passed")
         if self.btbt is not None and self.physics != "bipolar_dd":
             raise ValueError("Stacked3DSpec.btbt (band-to-band tunneling generation) needs "
                              "physics='bipolar_dd'; got {!r}".format(self.physics))
@@ -875,6 +886,10 @@ class Devsim3DEquilibrium:
                 DD.setup_contact_ohmic_dd(self.device, c)
             else:
                 PE.setup_contact(self.device, c)
+        if getattr(s.oxide_tunneling, "coupling", "post") == "self_consistent":   # v0.15, plan 4.1.1
+            from dynameta.carriers import tunneling as TN
+            TN.setup_oxide_tunneling(self.device, "semi", "gate", s.oxide_tunneling,
+                                     semiconductor_material=s.semi_material)
         self._built = True
 
     def _wire_heterointerfaces(self) -> None:
@@ -1103,6 +1118,9 @@ class Devsim3DEquilibrium:
                 "I_A": float(res["I"]), "J_max_A_m2": float(res["J_A_m2"][k]),
                 "E_ox_max_V_m": float(np.max(res["E_ox_V_m"])), "V_ox_max_V": float(np.max(res["V_ox_V"])),
                 "t_ox_m": float(res["t_ox_m"]), "semiconductor_region": fdr, "model": res["model"]}}
+            if res.get("coupling") == "self_consistent":         # v0.15: the term's own kernel call
+                extras["oxide_tunneling"]["oxide"].update(
+                    {"coupling": "self_consistent", "gate": "gate", "I_gate_A": float(res["I_gate"])})
         # the temperature the emitted region was solved at: its V_t (BipolarOptions.T_K on the bipolar
         # path; exactly T_REF otherwise). v0.14 row 3.2-7: this always reported T_REF.
         return CarrierField(

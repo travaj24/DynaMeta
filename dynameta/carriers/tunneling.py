@@ -135,7 +135,8 @@ from dynameta.warning_types import AdvisoryWarning
 __all__ = ["BTBTParams", "SILICON_HURKX", "btbt_rate_expr", "hurkx_d_expr", "setup_btbt", "btbt_generation_current",
            "OxideTunnelingParams", "oxide_tunneling_current", "TUNNEL_MODELS", "TUNNEL_COUPLINGS",
            "DielectricBarrier", "SIO2_ON_SI", "setup_oxide_tunneling", "OxideTunnelTerm",
-           "oxide_tunneling_terms", "oxide_tunneling_gate_currents", "gate_offset_for_work_function"]
+           "oxide_tunneling_terms", "oxide_tunneling_gate_currents", "gate_offset_for_work_function",
+           "dielectric_column"]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -686,6 +687,14 @@ class OxideTunnelTerm(CustomTerm):
         self._tail_warned = False
         self.last = None
 
+    @property
+    def gate_node(self):
+        """The gate's circuit node, read LIVE from the equation registry (None for a bias-parameter gate):
+        a gate repointed circuit-driven after installation (LayeredDevsimBuilder.set_ssac_gate) is picked
+        up at the next assembly."""
+        from dynameta.carriers import eq_registry as _R
+        return _R.circuit_driven_contacts(self.device).get(self.gate)
+
     # ---- protocol ----
     def equations(self, device):
         eqs = [(self.semi, _EQ_N)]
@@ -807,6 +816,39 @@ class OxideTunnelTerm(CustomTerm):
         return [TwoPointSource("tunnel_ox", self.semi, P, tuple(rows), self.iface.copy())]
 
 
+def dielectric_column(device: str, semiconductor_region: str, gate_contact: str) -> Optional[List[str]]:
+    """The dielectric regions from `semiconductor_region` to the region of `gate_contact`, in order (the
+    shortest chain of carrier-free regions joined by interfaces), or None when there is none. Used by
+    setup_oxide_tunneling and the builders to find which semiconductor a gate tunnels to."""
+    from dynameta.carriers.devsim_env import import_devsim
+    ds = import_devsim()
+    if gate_contact not in ds.get_contact_list(device=device):
+        return None
+    target = ds.get_region_list(device=device, contact=gate_contact)[0]
+    if _has_carriers(device, target):
+        return None
+    adj: Dict[str, List[str]] = {}
+    for i in ds.get_interface_list(device=device):
+        rr = list(ds.get_region_list(device=device, interface=i))
+        for r in rr:
+            adj.setdefault(r, []).extend(x for x in rr if x != r)
+    prev = {semiconductor_region: None}
+    queue = [semiconductor_region]
+    while queue:
+        cur = queue.pop(0)
+        for r in sorted(adj.get(cur, ())):
+            if r in prev or _has_carriers(device, r):
+                continue
+            prev[r] = cur
+            if r == target:
+                out = [r]
+                while prev[out[-1]] != semiconductor_region:
+                    out.append(prev[out[-1]])
+                return out[::-1]
+            queue.append(r)
+    return None
+
+
 def setup_oxide_tunneling(device: str, semiconductor_region: str, gate_contact: str,
                           params: OxideTunnelingParams, *, dielectric_regions: Optional[Sequence[str]] = None,
                           semiconductor_material: Optional[str] = None,
@@ -873,34 +915,11 @@ def setup_oxide_tunneling(device: str, semiconductor_region: str, gate_contact: 
             "continuity row are not modelled; use a metal gate on the dielectric".format(gate_contact,
                                                                                          gate_region))
     # ---- the dielectric column, semiconductor side first ----
-    itfs = list(ds.get_interface_list(device=device))
-
-    def nbrs(r):
-        out = []
-        for i in itfs:
-            rr = list(ds.get_region_list(device=device, interface=i))
-            if r in rr:
-                out += [x for x in rr if x != r]
-        return out
     if dielectric_regions is None:
-        chain, cur = [], semi
-        while True:
-            cand = [r for r in nbrs(cur) if r != semi and r not in chain]
-            carr = [r for r in cand if _has_carriers(device, r)]
-            if cur != semi and carr:
-                raise NotImplementedError(
-                    "setup_oxide_tunneling: the dielectric column from {!r} reaches the semiconductor region(s) "
-                    "{} before the gate: a semiconductor gate is REFUSED (user decision 17)".format(semi, carr))
-            cand = [r for r in cand if not _has_carriers(device, r)]
-            if len(cand) != 1:
-                raise ValueError("setup_oxide_tunneling: cannot walk the dielectric column from {!r} (at {!r}: "
-                                 "dielectric neighbours {}); pass dielectric_regions".format(semi, cur, cand))
-            chain.append(cand[0])
-            if cand[0] == gate_region:
-                break
-            cur = cand[0]
-            if len(chain) > 16:
-                raise ValueError("setup_oxide_tunneling: no dielectric column to the gate {!r}".format(gate_contact))
+        chain = dielectric_column(device, semi, gate_contact)
+        if chain is None:
+            raise ValueError("setup_oxide_tunneling: no column of dielectric regions joins {!r} to the gate {!r} "
+                             "(pass dielectric_regions)".format(semi, gate_contact))
     else:
         chain = list(dielectric_regions)
         if not chain or chain[-1] != gate_region:
@@ -1006,7 +1025,7 @@ def setup_oxide_tunneling(device: str, semiconductor_region: str, gate_contact: 
     if phi_c_V is None:
         phi_c_V = vt * math.log(float(ds.get_parameter(device=device, region=semi, name="N_dos"))
                                 / float(ds.get_parameter(device=device, region=semi, name="n_i")))
-    gate_node = _R.circuit_driven_contacts(device).get(gate_contact)
+    gate_node = _R.circuit_driven_contacts(device).get(gate_contact)       # (re-read live by the term)
     gate_param = "{}_bias".format(gate_contact)
     if gate_node is None and gate_param not in ds.get_parameter_list(device=device):
         raise ValueError("setup_oxide_tunneling: gate {!r} is neither circuit-driven nor driven by the bias "
@@ -1014,7 +1033,7 @@ def setup_oxide_tunneling(device: str, semiconductor_region: str, gate_contact: 
     grid = tunnel_energy_grid(Q_E * vt, params.energy_max_eV * Q_E, step_kT=params.energy_step_kT)
     term = OxideTunnelTerm(name or "oxtun_{}_{}".format(semi, gate_contact),
                semi=semi, chain=tuple(chain), iface=iface, area=area, faces=faces, layers=tuple(layers),
-               grid=grid, phi_c=float(phi_c_V), V_t=vt, gate=gate_contact, gate_node=gate_node,
+               grid=grid, phi_c=float(phi_c_V), V_t=vt, gate=gate_contact, device=device,
                gate_param=gate_param, gate_fermi_J=float(params.gate_fermi_energy_eV) * Q_E,
                m_supply=float(params.m_supply_over_m0), activity=act, axis=ax, interface=itf0,
                params=params, semiconductor_material=sem_mat,
