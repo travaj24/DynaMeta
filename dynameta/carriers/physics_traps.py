@@ -135,6 +135,18 @@ from dynameta.constants import Q_E, V_T
 from dynameta.carriers.eq_registry import ds, node_with_derivs, record_region_equation
 
 _KINDS = ("acceptor", "donor", "neutral")
+
+
+class NeutralKineticTrapError(ValueError):
+    """A KINETIC level (TrapLevel(dynamic=True)) or kinetic interface bins (InterfaceTraps(dynamic=True)) declared
+    chargeless (kind="neutral" / charge="none"). A level whose occupancy is a dynamic variable CHANGES ITS CHARGE
+    by -q with every electron it captures: it is neutral in at most one of its two states, so it is acceptor-like
+    (neutral when empty) or donor-like (neutral when full). "Neutral" is only the N_t -> 0 recombination-only
+    idealisation of the quasi-static model; kept with a finite stored occupancy it would hold N_t f in its own
+    row's time term but not in Poisson, and the small-signal system would not conserve charge (MEASURED on
+    d543fa9: Kirchhoff Y_V1 + Y_V2 off by 3.5e-3 of Y at 1 MHz, 2.8e5 x the trap-free floor; S/(4 kT Re Y) - 1 =
+    +0.39 at 1 MHz on the gate-B diode). Pick kind="acceptor" or "donor" (for N_t << the doping the choice moves
+    the DC state by O(q N_t) only), or keep dynamic=False for a recombination-only level."""
 # Where a level's energy is quoted from (the per-level ENERGY REFERENCE, v0.14 follow-up). Equivalent to
 # Sentaurus Device's trap EnergyMid reference keywords fromMidBandGap / fromCondBand / fromValBand
 # (Synopsys, "Sentaurus Device User Guide", chapter "Traps and Fixed Charges"):
@@ -424,7 +436,8 @@ class TrapLevel:
                    here). See level_reference_densities.
     density_m3   : N_t [m^-3] -- needed for a CHARGED level and to turn cross sections into lifetimes.
     kind         : "acceptor" (charge -q N_t f_t), "donor" (+q N_t (1 - f_t)) or "neutral"
-                   (recombination only -- the legacy N_t -> 0 SRH assumption).
+                   (recombination only -- the legacy N_t -> 0 SRH assumption; quasi-static only: a KINETIC
+                   level must be acceptor- or donor-like, NeutralKineticTrapError).
     tau_n0_s, tau_p0_s : capture lifetimes [s]; OR give sigma_n_m2, sigma_p_m2 [m^2] with v_th
                    [m/s] and density_m3, and tau_x0 = 1/(sigma_x v_th,x N_t). Explicit taus win.
     dynamic      : False (default) -- QUASI-STATIC occupancy: f is the steady-state SRH value, an
@@ -438,8 +451,9 @@ class TrapLevel:
                    quasi-static one (to solver round-off), and transient / ssac become CHARGE-
                    CONSERVING (the capture current enters the continuity rows). Use it for any
                    transient or small-signal analysis of a CHARGED level (DLTS-like emission, C(omega)
-                   and G(omega) dispersion, terminal-current balance), and for a neutral level whose
-                   capture time is not short against the analysis time scale. Needs density_m3 > 0
+                   and G(omega) dispersion, terminal-current balance), and for any level whose capture time
+                   is not short against the analysis time scale -- as an acceptor- or donor-like level (a
+                   kinetic level holds charge; kind="neutral" is refused). Needs density_m3 > 0
                    (N_t sets the stored charge), a bipolar region with the legacy statistics, and a
                    seed (seed_kinetic_traps after the carriers are seeded). Noise: the capture /
                    emission events are the trap g-r sources (mechanisms "trap_n" / "trap_p", in
@@ -468,10 +482,15 @@ class TrapLevel:
             raise ValueError("a charged ({}) TrapLevel needs density_m3 > 0".format(self.kind))
         if not isinstance(self.dynamic, bool):
             raise TypeError("TrapLevel.dynamic must be a bool; got {!r}".format(self.dynamic))
+        if self.dynamic and self.kind == "neutral":
+            raise NeutralKineticTrapError(
+                "TrapLevel(kind='neutral', dynamic=True): a kinetic level's charge changes by -q per captured "
+                "electron, so it must be kind='acceptor' (neutral when empty) or 'donor' (neutral when full); "
+                "'neutral' is the quasi-static N_t -> 0 recombination-only model (dynamic=False). See "
+                "physics_traps.NeutralKineticTrapError.")
         if self.dynamic and not (float(self.density_m3) > 0.0 and math.isfinite(float(self.density_m3))):
             raise ValueError("a kinetic TrapLevel (dynamic=True) needs a finite density_m3 > 0: N_t is the "
-                             "number of states whose occupancy is the new variable (also for kind="
-                             "'neutral')")
+                             "number of states whose occupancy is the new variable")
         self.lifetimes_s()                                     # validate now, not at device build
 
     def lifetimes_s(self) -> Tuple[float, float]:
@@ -566,6 +585,11 @@ class InterfaceTraps:
                                  "dynamic=True (or use bin_eV for the quasi-static quadrature)")
             if not (math.isfinite(float(self.kinetic_bin_eV)) and float(self.kinetic_bin_eV) > 0.0):
                 raise ValueError("InterfaceTraps.kinetic_bin_eV must be finite and > 0")
+        if self.dynamic and self.charge == "none":
+            raise NeutralKineticTrapError(
+                "InterfaceTraps(charge='none', dynamic=True): kinetic bins hold charge (-q per captured electron); "
+                "use charge='split', 'acceptor' or 'donor', or dynamic=False for recombination-only D_it. See "
+                "physics_traps.NeutralKineticTrapError.")
         if self.dynamic and not self.recombination:
             raise ValueError("InterfaceTraps(dynamic=True) needs recombination=True: a kinetic bin fills "
                              "and empties by capture from the bands, which IS the surface SRH (without it "

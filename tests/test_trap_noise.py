@@ -262,22 +262,25 @@ def test_native_noise_field_on_trap_rows_is_the_adjoint():
 # =====================================================================================================
 # K3-3: a nearly charge-free neutral kinetic level IS the fast-trap GR (gate D1's Lorentzian)
 # =====================================================================================================
-def test_neutral_kinetic_level_reproduces_the_ambipolar_gr_lorentzian():
+def test_dilute_kinetic_level_reproduces_the_ambipolar_gr_lorentzian():
     """K3-3 (~1 s). Gate D1's slab (validation/devsim_noise.py: n-type 1e22, n_i 1e21 -> p0 1e20,
     50 ambipolar diffusion lengths, 0.05 V) with the built-in SRH channel switched off (1e3 s) and the SAME
-    midgap level (tau_n0 = tau_p0 = 10 ns) as a NEUTRAL KINETIC TrapLevel of N_t = 1e13 m^-3: its g-r part
-    (trap_n + trap_p) must equal the closed-form ambipolar Lorentzian with contact shorting (gr_analytic --
-    the D1 oracle) at f/f_c = 1e-3 .. 100. Budget: gate D1's 1e-3 tolerance (D1 MEASURED 3e-5) plus the
-    kinetic corrections, which vanish as N_t -> 0: the stored charge O(N_t/p0) = 1e-7, and FINDING the
-    level's own exchange time tau_t = N_t tau_n0/(n0 + n1 + p0 + p1): the trap row's adjoint lags by
-    omega tau_t while |y_p - y_n| rolls off, an excess growing as (N_t omega)^2 -- MEASURED +0.223 / 2.2e-3
-    / < 1e-5 at 100 f_c for N_t = 1e15 / 1e14 / 1e13 (exactly N_t^2), +1.8e-3 at 30 f_c for 1e15. Extrapolated
-    to 1e13 at 100 f_c: 2.2e-5. Gated at 1e-3 + 10 N_t/p0. MEASURED (1e13): |gr/oracle - 1| <= 1.6e-5."""
+    midgap level (tau_n0 = tau_p0 = 10 ns) as a KINETIC ACCEPTOR-like TrapLevel of N_t = 1e17 m^-3 (1e-3 p0, 1e-5
+    N_D): its g-r part (trap_n + trap_p) must equal the closed-form ambipolar Lorentzian with contact shorting
+    (gr_analytic -- the D1 oracle) at f/f_c = 1e-3 .. 100. Budget: gate D1's 1e-3 tolerance (D1 MEASURED 3e-5)
+    plus the kinetic correction the fast-trap reduction drops, the level's own storage of carriers against the
+    minority density, N_t f0 (1 - f0)/p0 (f0 = n0/(n0 + n1) = 0.91 for this midgap level), gated at 10x it.
+    MEASURED: <= 1.5e-5 at N_t = 1e17; the correction grows linearly, 1.9e-4 / 2.0e-3 at N_t = 1e18 / 1e19 at
+    low f (inside 10x its bound: 8.3e-3 / 8.3e-2). CORRECTION of the K3 finding (2026-11-06): the excess that
+    grew as (N_t omega)^2 (+0.223 at 100 f_c for N_t = 1e15) was NOT a finite-speed effect -- it was the
+    kind='neutral' kinetic level, which stored N_t f in its trap row but not in Poisson (not charge-
+    conserving; now refused, NeutralKineticTrapError). The SAME level as an acceptor or a donor: -3.0e-5 at
+    100 f_c for N_t = 1e15 and 1e14 alike (MEASURED on d543fa9), i.e. the D1 floor."""
     n0, p0, Da, tau, GR2 = V.gr_constants()
     LD = math.sqrt(Da * tau)
     L = 50.0 * LD
-    nt = 1e13
-    lv = PT.TrapLevel(energy_eV=0.0, density_m3=nt, kind="neutral", tau_n0_s=V.GR_TAU, tau_p0_s=V.GR_TAU,
+    nt = 1e17
+    lv = PT.TrapLevel(energy_eV=0.0, density_m3=nt, kind="acceptor", tau_n0_s=V.GR_TAU, tau_p0_s=V.GR_TAU,
                       dynamic=True)
     V.bipolar_1d("grk", [(0.0, LD / 200, "lo"), (L / 2, LD / 10, None), (L, LD / 200, "hi")],
                  "{:.10e}".format(V.GR_ND), n_i=V.GR_NI, tau=1e3, presolve=False, ae=1e8, traps=(lv,))
@@ -288,7 +291,8 @@ def test_neutral_kinetic_level_reproduces_the_ambipolar_gr_lorentzian():
     sn = V.noise(ff)
     gr = sn.by_mechanism["trap_n"] + sn.by_mechanism["trap_p"]
     exact, _plain = V.gr_analytic(ff, L, V.GR_V / L)
-    assert np.max(np.abs(gr / exact - 1.0)) < 1e-3 + 10.0 * nt / p0, gr / exact - 1.0
+    f0 = n0 / (n0 + V.GR_NI)                                          # midgap: n1 = n_i
+    assert np.max(np.abs(gr / exact - 1.0)) < 1e-3 + 10.0 * nt * f0 * (1.0 - f0) / p0, gr / exact - 1.0
 
 
 # =====================================================================================================
