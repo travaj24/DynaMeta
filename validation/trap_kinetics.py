@@ -58,7 +58,7 @@ def main() -> int:
             for k in ("Electrons", "Holes", "TrapOccupancy0"):
                 worst = max(worst, float(np.max(np.abs(qs[k] - kn[k]) / np.abs(qs[k]))))
         return worst < 1e-10, "max rel n/p/f difference {:.2e} (tol 1e-10)".format(worst)
-    H.run("K1-2 DC identity (5 fixtures)", k12)
+    H.run("K1-2 DC identity (4 fixtures)", k12)
 
     def k14():
         TK.V.fresh()
@@ -88,7 +88,9 @@ def main() -> int:
                       ("K2-6 Stacked3DSpec == 1-D", TK.test_conductance_method_3d_stacked_spec_equals_1d),
                       ("K2-3 continuum (N&G 18-20)", TK.test_conductance_method_continuum),
                       ("well-posedness: trap rows pinned", TK.test_kinetic_trap_rows_are_pinned_candidates_of_the_well_posedness_check),
-                      ("K3-3 neutral level = GR Lorentzian", TN.test_neutral_kinetic_level_reproduces_the_ambipolar_gr_lorentzian),
+                      ("K3-3 dilute level = GR Lorentzian", TN.test_dilute_kinetic_level_reproduces_the_ambipolar_gr_lorentzian),
+                      ("kinetic level holds charge (ssac Kirchhoff, FDT at 1 MHz)",
+                       TK.test_a_kinetic_level_holds_charge_and_conserves_it_in_ssac),
                       ("K3-4 trapping Lorentzian", TN.test_trapping_noise_lorentzian_of_a_resistor),
                       ("K3-6 native adjoint on trap rows", TN.test_native_noise_field_on_trap_rows_is_the_adjoint)):
         def thunk(fn=fn):
