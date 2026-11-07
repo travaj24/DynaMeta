@@ -21,9 +21,10 @@ name: CI
 #   lint     ubuntu  3.12 ruff only (no science stack)         ruff check .                   <1 min
 #   solvers  ubuntu  3.12 core+dev+plot+[solvers]              31 FEM/DEVSIM modules + 3 FEM  ~10 min
 #                                                              validation oracles
-#   solvers- ubuntu  3.12 same as `solvers` + mpmath           the 13 v0.14 DEVSIM modules    ~10 min
-#   devsim                                                     (own job, see it)              (parallel)
-#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~15 min
+#   solvers- ubuntu  3.12 same as `solvers` + mpmath           39 DEVSIM modules (v0.14 +     ~23-35 min
+#   devsim                                                     v0.15; own job, see it)        (parallel;
+#                                                                                              ESTIMATE)
+#   nightly  ubuntu  3.12 core+dev+plot+[solvers]              @slow set + the 2 heavy FEM    ~21-26 min
 #            SCHEDULE +       +h5py/zarr/jax                   modules + the 4 heavy FEM       (never
 #            DISPATCH ONLY                                     oracles                          on PRs)
 #   nightly- ubuntu  3.12 same install as `nightly`            the FULL validation tier,      42-89 min
@@ -147,14 +148,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,plot]" "h5py>=3.8" "zarr>=3; python_version >= '3.11'" "jax>=0.11; python_version >= '3.12'"
       - name: Run fast tests
-        # audit S6-3: the @slow tests are excluded from all four legs. RECOUNT 2026-11-06
-        # (`pytest --collect-only -q -m slow tests/`): 27 -- 11 in test_fdtd_registration.py, 8 in
-        # test_soa.py, 2 in test_ringdown.py, 1 each in test_harmonics.py,
+        # audit S6-3: the @slow tests are excluded from all four legs. RECOUNT 2026-11-06, v0.15.0
+        # close-out (`pytest --collect-only -q -m slow tests/`, every optional package installed): 37 --
+        # 11 in test_fdtd_registration.py, 8 in test_soa.py, 5 in test_devsim_band_temperature.py, 2 each
+        # in test_ringdown.py and test_quasi_equilibrium.py, 1 each in test_harmonics.py,
         # test_lumenairy_bridge_verify_550.py, test_fiber_eryb_transient.py,
-        # test_equilibrium_simplify_cache.py, test_devsim_tunneling.py and test_temperature_fixes.py
-        # (the comment here said 11 from 2026-11-02 on). Seven of test_soa.py's are wrappers whose
-        # underlying validation modules run once in the `smoke` job, and ALL 27 run in the `nightly`
-        # job, step (a).
+        # test_equilibrium_simplify_cache.py, test_devsim_tunneling.py, test_temperature_fixes.py,
+        # test_devsim_noise_method.py, test_extended_precision_design.py and test_trap_kinetics.py
+        # (27 on 2026-11-06 before the v0.15 merges; 11 from 2026-11-02 on). Seven of test_soa.py's are
+        # wrappers whose underlying validation modules run once in the `smoke` job, and ALL 37 run in
+        # the `nightly` job, step (a). (The 12 DEVSIM ones are not collected on these legs at all: no
+        # devsim here.)
         if: matrix.python-version != '3.12'
         run: pytest tests/ -q -m "not slow"
       # audit T-4: pytest-cov was installed on every leg and invoked on none, so the coverage
@@ -544,6 +548,31 @@ jobs:
     #   interface traps, thermionic FDT, the FD quasi-field transport; every device case in a child process,
     #   tests/_fd_mode_child.py): 40 tests (incl. the kinetic-trap K-FD and builder gates), 4.5 min with -n 2
     #   on the Windows dev box (2026-11-06; ~8 min serial, inferred; no single test above 42 s).
+    # + the four files whose time was missing here, MEASURED serial `-m "not slow"` on the (shared,
+    #   loaded) Windows dev box at the v0.15.0 close-out, 2026-11-06 (pytest's own time):
+    #   tests/test_devsim_btbt_presets.py 69 s (12 tests), tests/test_devsim_btbt_resolution.py 13 s
+    #   (4), tests/test_trap_kinetics.py 111 s (40; its one @slow continuum gate runs nightly),
+    #   tests/test_trap_noise.py 63 s (12).
+    #   The @pytest.mark.devsim_isolated tests also grew their files: each marked test pays a fresh
+    #   interpreter (~4-5 s) plus its fixtures -- band temperature's A/B identity now ~33-34 s PER
+    #   parameter, tunnelling W1 ~6 -> 17.8 s (docs/audit/2026-11-06-v0.15-tolerance-wellposedness.md).
+    # TOTAL OF THIS STEP, ESTIMATED from the figures above (v0.15.0 close-out; NOT a measured run of
+    # the whole list): the 13 original modules 488-567 s under WSL (1098 s Windows); everything added
+    # since ~1730 s serial on the Windows dev box (fd_mode_complete ~480 s inferred, oxide tunnelling
+    # 192, quasi-equilibrium ~165, Si bundles ~120, trap kinetics 111, nonlocal BTBT 75, BTBT presets
+    # 69, abs-tol 65, trap noise 63, the rest <= 55 each), plus ~+40 s of devsim_isolated children.
+    # At the runner/WSL ratio of 0.5-0.8x the Windows box measured for these files: ~375-567 s +
+    # ~900-1420 s = ~21-33 min for the test step, ~23-35 min with the install, against the 40-min cap.
+    # That is over the ~30-min comfort line at its upper end: measure the next run, and if it is
+    # over ~30 min split this job in two by measured time (a balanced cut, Windows-box seconds:
+    # [the 13 v0.14 modules + sg_flux, geometry, element_geometry, temperature_fixes, hooge_3d,
+    # custom_terms, noise_two_point, term_bookkeeping, abs_tol, well_posedness, isolated, iii_v,
+    # extended_precision_design, thermionic, hooge_mapping, btbt_resolution] ~1440 s against
+    # [fd_mode_complete, oxide_tunneling_sc, quasi_equilibrium, si_bundles_devsim, trap_kinetics,
+    # btbt_nonlocal, btbt_presets, trap_noise, band_temperature, noise_method] ~1380 s), or run it
+    # `-n 2` with pytest-xdist (installed as the `floor` job does; a 17-file DEVSIM subset ran green
+    # 3 times at -n 3 after the all-live-devices tolerance fix, but this whole list has not been run
+    # under xdist). PROPOSED, NOT APPLIED.
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
@@ -564,7 +593,7 @@ jobs:
           pip install -e ".[dev,plot,solvers]" mpmath
       - name: Assert the solver stack really imported
         run: python -c "import ngsolve, devsim, gmsh, mpmath; print('ngsolve', ngsolve.__version__); print('devsim', devsim.__version__); print('gmsh ok')"
-      - name: Run the v0.14 DEVSIM test modules
+      - name: Run the DEVSIM test modules (v0.14 + v0.15)
         run: |
           pytest -q -m "not slow" \
             tests/test_audit_2026_07_17_wave7_carriers.py tests/test_audit_2026_07_25_conventions.py \
@@ -600,13 +629,18 @@ jobs:
     # (py3.14, ngsolve 6.2.2604 + devsim 2.10.0, each file run on its own, serially). That box has
     # far more cores and RAM than a GitHub-hosted runner (4 vCPU / 16 GB), so every local number
     # below is a FLOOR for the CI wall, not a forecast:
-    #   (a) pytest -m slow         27 tests    (recount 2026-11-06; step (a) lists them) of which
+    #   (a) pytest -m slow         37 tests    (recount 2026-11-06, v0.15.0; step (a) lists them) of which
     #                                          ~818 s MEASURED for 11 (test_soa.py 719 s -- the Innolume
     #                                          co-fit dominates it -- plus test_harmonics.py 17 s;
     #                                          + test_ringdown.py n_slab = 20 52 s and
     #                                          test_lumenairy_bridge_verify_550.py 30 s, 2026-11-02;
     #                                          + test_equilibrium_simplify_cache.py 311 s, 2026-11-03:
     #                                          ONE live DEVSIM simplify(), single-threaded, loaded box)
+    #                                          + the v0.15 DEVSIM @slow cases, ~11 min on the Windows dev
+    #                                          box (2026-11-06, from their audit notes): noise-method W7
+    #                                          261 s, quasi-equilibrium 2-D DG 138 s + closure == full
+    #                                          ~90 s, extended-precision E4 86 s, band-temperature H2
+    #                                          gates ~45 s, chi-toggle ~36 s, trap continuum 23 s
     #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
     #                                          test_graded_tensor_fem.py 258 s / 1 passed)
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
@@ -624,7 +658,9 @@ jobs:
     # (2026-07-28/29) with its worst parametrization deselected and memory-killed the runner both
     # times, taking (c1)/(c2) down with it -- it is dev-workstation-only now (top-of-file list).
     # What is left here -- (a)+(b1)+(c1) -- MEASURED 15 min INCLUDING the install on the runner
-    # (12:53 -> 13:08 in the same log). 90 is a 6x cap over that, not a budget.
+    # (12:53 -> 13:08 in the same log). 90 is a 6x cap over that, not a budget. v0.15 adds ~11 min of
+    # DEVSIM @slow cases to (a) (dev-box figure; ~6-9 min on the runner if the solvers-devsim ratio
+    # 0.5-0.8x holds -- INFERRED), so expect ~21-26 min: still ~3.5x under the cap.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -655,7 +691,12 @@ jobs:
         # oracle, the n_slab = 20 FDTD etalon ringdown Q vs Fabry-Perot, the lumenairy-5.30
         # PMM-twin angle-gradient row, and (v0.14.0, D0) DEVSIM's live simplify() of the F_1/2
         # Jacobian against the replayed string physics_equilibrium caches (string + bitwise values).
-        # RECOUNT 2026-11-06 (`pytest --collect-only -q -m slow tests/`): 27, not 12 -- the count above
+        # RECOUNT 2026-11-06, v0.15.0 close-out: 37 (per file in the `test` job's comment). The ten
+        # added since the 27 below are the v0.15 DEVSIM gates the `solvers-devsim` job runs fast-only:
+        # test_devsim_band_temperature's 5 H2 gates, test_quasi_equilibrium's 2, and one each in
+        # test_devsim_noise_method (W7), test_extended_precision_design (E4) and test_trap_kinetics
+        # (the D_it continuum); timings in this job's cap comment.
+        # Earlier RECOUNT 2026-11-06 (`pytest --collect-only -q -m slow tests/`): 27, not 12 -- the count above
         # predates test_fdtd_registration's 11, test_fiber_eryb_transient's 1, test_ringdown's gate 7
         # and the two @slow cases of the v0.14 DEVSIM modules the `solvers-devsim` job runs fast-only:
         # test_devsim_tunneling's 3-D BTBT + oxide-tunneling wiring (9.5 s, MEASURED under WSL Ubuntu /
