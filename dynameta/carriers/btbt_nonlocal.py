@@ -158,7 +158,7 @@ to DEVSIM; nothing changes unless setup_btbt_nonlocal() is called on a region.
    per-path rate, the chain rule and the assembly are written over generic (path, segment) arrays).
    One region; a path does not cross a region boundary. Refused: the local model in the same region
    (double counting), bandgap narrowing in the region (the gap would vary along the path: not
-   implemented), statistics="fermi_dirac" (solution-dependent n_ie) -- and tunneling.setup_btbt refuses a
+   implemented) -- and tunneling.setup_btbt refuses a
    region that carries a live nonlocal term (both raise tunneling.BTBTDoubleCountError). A region whose
    temperature is not the set's quoted one warns (AdvisoryWarning) unless the gap follows a temperature law
    (material= with a band-temperature model).
@@ -910,8 +910,10 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
     """Install the nonlocal path BTBT term (module doc) on an EXISTING 1-D bipolar region (call after
     physics_bipolar_dd.setup_bipolar_region and the contacts). Returns the custom term (its last_stats
     count the paths of the latest assembly). Refuses: a non-1-D device, a region without both continuity
-    equations, the local BTBT term in the same region (double counting), bandgap narrowing (BgnDc /
-    n_ie in the region) and statistics='fermi_dirac'. Warns (AdvisoryWarning) at T != T_REF.
+    equations, the local BTBT term in the same region (double counting) and bandgap narrowing (BgnDc /
+    a fixed n_ie in the region). Warns (AdvisoryWarning) at T != T_REF. statistics="fermi_dirac" (v0.15
+    completion) is supported: the occupancies are the FD log activities in the n_i frame, which is exactly
+    the FD equilibrium L_n + L_p = ln(n_i^2/(N_c N_v)) its contacts pin (module doc, section 3).
 
     WHICH OPTION FOR WHICH CALCULATION. The process is P of spec.params: P = 2.5 (phonon-assisted, the
     Si/Ge indirect gap; tunneling.SILICON_HURKX is Sentaurus' default set of this model) or P = 2
@@ -939,14 +941,14 @@ def setup_btbt_nonlocal(device: str, region: str, spec: NonlocalBTBT, *, name: s
         raise BTBTDoubleCountError(
             "setup_btbt_nonlocal: region {!r} already carries the LOCAL BTBT term (setup_btbt / btbt=...); "
             "both would count the same tunnelling twice.".format(region))
-    if "BgnDc" in nodes or "n_ie" in nodes:
+    fdc = "fd_detailed_balance" in set(ds.get_parameter_list(device=device, region=region))
+    # statistics="fermi_dirac" without BGN carries n_ie as its solution-dependent detailed-balance density
+    # (n_ie0 = n_i): the term needs nothing from it -- its occupancies are the transport's own FD activities
+    if "BgnDc" in nodes or "NieBgn" in nodes or ("n_ie" in nodes and not fdc):
         raise NotImplementedError(
             "setup_btbt_nonlocal: region {!r} has bandgap narrowing / an effective n_ie; the gap would "
             "vary along the path (the closed-form segment integrals assume a constant gap). Not "
             "implemented in v0.15.".format(region))
-    if "fd_detailed_balance" in set(ds.get_parameter_list(device=device, region=region)):
-        raise NotImplementedError("setup_btbt_nonlocal: statistics='fermi_dirac' (solution-dependent "
-                                  "n_ie) is not implemented with the nonlocal model.")
     from dynameta.carriers.physics_heterojunction import temperature_of_V_t
     T = temperature_of_V_t(float(ds.get_parameter(device=device, region=region, name="V_t")))
     eg_set, eg_path, handled = tunnelling_gaps(spec, T)
