@@ -806,6 +806,16 @@ def _region_fd(device: str, region: str) -> bool:
     return "FDGammaN" in ds.get_node_model_list(device=device, region=region)
 
 
+def _initial_odds(device: str, region: str, seed: str, fd: bool):
+    """The value a new occupancy variable holds until seed_kinetic_traps: its seed model w_SS at the current
+    carriers -- or, under statistics='fermi_dirac', 1.0 (f = 1/2): the FD seed reads ln(c/N), which is not
+    defined on carriers that are not set yet (0 at install; a FATAL FP exception, MEASURED). Either way the
+    seed call replaces it."""
+    if fd:
+        return [1.0] * len(ds.get_node_model_values(device=device, region=region, name="x"))
+    return ds.get_node_model_values(device=device, region=region, name=seed)
+
+
 def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: str, *, bgn: bool,
                            reference: str, fd: bool = False):
     """The variable, models, single-carrier terms and equation of one kinetic bulk level (see
@@ -820,7 +830,7 @@ def _install_kinetic_level(device: str, region: str, k: int, p: str, args, occ: 
                   equation=srh_occupancy_odds_expr(*args, bgn=bgn, reference=reference, fd=fd))
     ds.node_solution(device=device, region=region, name=var)             # FIRST: the terms need it
     ds.set_node_values(device=device, region=region, name=var,          # finite, > 0 until seeded
-                       values=ds.get_node_model_values(device=device, region=region, name=seed))
+                       values=_initial_odds(device, region, seed, fd))
     _occupancy_models(device, region, var, f, g, *args, bgn=bgn, reference=reference, fd=fd)
     rn, rp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, fd=fd)
     pn, pp = srh_capture_exprs(*args, f=f, one_minus_f=g, bgn=bgn, reference=reference, pair=True, fd=fd)
@@ -1302,8 +1312,7 @@ def _install_kinetic_bins(device, semi, j, a_name, weight, kinetic, bgn, q_val, 
         ds.node_model(device=device, region=semi, name=seed, equation="(1 - {m})*{w} + {m}".format(
             m=mask, w=srh_occupancy_odds_expr(n1, p1, "1", cr, bgn=bgn, reference=ref, fd=fd)))
         ds.node_solution(device=device, region=semi, name=var)       # FIRST: the terms need it
-        ds.set_node_values(device=device, region=semi, name=var,
-                           values=ds.get_node_model_values(device=device, region=semi, name=seed))
+        ds.set_node_values(device=device, region=semi, name=var, values=_initial_odds(device, semi, seed, fd))
         _occupancy_models(device, semi, var, f, g, n1, p1, "1", cr, bgn=bgn, reference=ref, fd=fd)
         k = "{}*{}*{}".format(a_name, nk, cnp)                       # ItArea N_b c_n (tau -> 1/S)
         rn, rp = srh_capture_exprs(n1, p1, "1", cr, f=f, one_minus_f=g, bgn=bgn, reference=ref, fd=fd)

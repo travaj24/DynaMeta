@@ -17,7 +17,7 @@ Jacobian gate knocks the FD degeneracy-factor derivatives out (the Jacobian a fi
 assemble) and must fail.
 
 All DEVSIM work runs in child processes (tests/_fd_mode_child.py: the nonlocal term's registration and the FDT
-circuits are process-global). Runtime ~4 min serial (measured), the FDT block ~2 min of it.
+circuits are process-global). Runtime 4.5 min with -n 2 (measured; 40 tests, none above 42 s).
 """
 import os
 import sys
@@ -193,6 +193,9 @@ def test_f_fdt_against_dc_conductance(opts):
     if "nonlocal_" in o:
         o["nonlocal"] = o.pop("nonlocal_")
     r = C.run_child("fdt", stats="fermi_dirac", dc=1, **o)
+    # the decision-39 advisory: quasi-static CHARGED levels in a noise / ssac solve (exact only well below the
+    # capture rates -- the 1 Hz identity gated here; the kinetic twin is gate K-FD-F)
+    assert (r["advisories"] > 0) == bool(o.get("traps")), r["advisories"]
     tol = 1e-4 if o.get("nonlocal") else _dc_budget(r)
     assert abs(r["fdt_dc"]) <= tol, (r["fdt_dc"], tol)
     if o.get("traps"):
@@ -229,7 +232,7 @@ def test_f_thermionic_heterostack_fdt(unipolar):
     is exact at equilibrium and Nyquist-consistent -- but the edge-averaged g of the FD transport: its discrete
     zero-current state is off the activity equilibrium by O(h^2) (a zero-bias battery, gate Z-hetero) and its
     edge conductance is not the noise module's q mu n_eff. With the FD quasi-field (bipolar
-    statistics='fermi_dirac', or unipolar fd_edge_g='consistent'): ssac Re Y vs S at 1 Hz and 1 MHz,
+    statistics='fermi_dirac', bipolar or unipolar): ssac Re Y vs S at 1 Hz and 1 MHz,
     +-1e-7 V (bipolar) / +-1e-6 V (unipolar) averaged. Budget 1e-9: ssac's ~1 S/m^2 floor over Re Y (1.9e10 /
     1.3e11 S/m^2) is < 1e-10, the even (V0/V_t)^2 term 1.5e-11 / 1.5e-9 x the curvature (resistor-like:
     << 1). MEASURED -1.1e-11 (bipolar, te share 99 %) and 9.1e-12 (unipolar ITO-like 3e26 / AZO-like 3e25,
@@ -319,3 +322,99 @@ def test_d_nonlocal_still_refuses_bgn_under_fermi_dirac():
     r = C.run_child("nonlocal_refusals")
     assert r["fd_plain"] == "ok"
     assert "bandgap narrowing" in r["fd_bgn"] and "bandgap narrowing" in r["legacy_bgn"]
+
+
+# =====================================================================================================
+# K-FD: KINETIC traps (bulk levels and interface bins, v0.15 4.3.2) under statistics='fermi_dirac'
+# (integration with the kinetic-traps work: the exact FD emission densities in srh_capture_exprs / odds /
+# vacancy / the DC-form occupancy derivatives)
+# =====================================================================================================
+
+_KIN = {"bulk": dict(traps=1, device="diode", kinetic=1, h=1e-9),
+        "interface": dict(device="mos", vg=-0.3, kinetic=1, h=1e-10, kbin=0.3)}   # 4 kinetic bins (cost)
+
+
+@pytest.mark.parametrize("key", sorted(_KIN))
+def test_kfd_zero_bias_detailed_balance_is_exact(key):
+    """GATE K-FD-Z. The Z devices with the levels / bins KINETIC (their occupancy odds a solution variable,
+    seeded and solved through the kinetic DC form, then the physical form): per exchange branch,
+    Int |R_n| (and |R_p|) over its one-way rate Int P/2 is round-off, 64 eps (1 + Lmax), on the converged
+    state; and node by node at an exact FD equilibrium with w re-seeded there. MEASURED FD: bulk 1.5e-16
+    (exact state 9.7e-15), interface (4 bins of 0.3 eV) 1.4e-15 (2.8e-15). SHOWN FAILING on the legacy statistics: the exact-state
+    worst node 1.10 (bulk) / 0.78 (interface), and the legacy interface device's hole branch 0.41 of
+    its exchange; the legacy bulk device carries the quasi-static row's imbalance
+    (bulk: 2.249e-4 A/m^2 of trap recombination at zero bias, the same as quasi-static, MEASURED)."""
+    r = _rb(stats="fermi_dirac", **_KIN[key])
+    assert r["residual"] <= 1e-12
+    b = _budget(r)
+    assert _ratio(r) <= b and r["eq_worst_local"] <= b, (_ratio(r), r["eq_worst_local"], b)
+    legacy = _rb(**_KIN[key])
+    assert legacy["eq_worst_local"] >= 0.5
+
+
+@pytest.mark.parametrize("key", sorted(_KIN))
+def test_kfd_jacobian_matches_central_differences(key):
+    """GATE K-FD-J. Off equilibrium (diode +0.3 V; MOS with the electrons x1.3), the full DEVSIM residual's
+    central differences against the assembled matrix, columns Potential / Electrons / Holes AND every kinetic
+    occupancy variable (TrapW_*, ItW*), criterion of gate J. MEASURED 7.0e-4 (bulk), 5.3e-4 (interface);
+    knocked-out FD derivatives 5.8e5 / 3.1e5 (fails)."""
+    o = {k: v for k, v in _KIN[key].items() if k != "h"}
+    r = C.run_child("jacobian", stats="fermi_dirac", knockout=1, **o)
+    assert any(v.startswith(("TrapW_", "ItW")) for v in r["variables"])
+    assert r["worst"] <= 1.0, r["where"]
+    assert r["ko_worst"] > 1.0
+
+
+@pytest.mark.parametrize("key", sorted(_KIN))
+def test_kfd_dc_equals_quasi_static_fd(key):
+    """GATE K-FD-DC (the K1 identity under FD). Same device, kinetic vs quasi-static, statistics='fermi_dirac'
+    (diode at +0.3 V; MOS at gate -0.3 V with the kinetic bins at the quasi-static bin width): potential to
+    64 eps |psi|max-ish (1e-14 V), carriers to 1e-12 relative (the Newton's last update), and the trap /
+    surface recombination current to 64 eps of the kinetic exchange rate (R_n equals U only to the trap row's
+    round-off, P eps). MEASURED dpsi 1.1e-16 / 1.1e-16 V, dn 1.8e-15 / 1.1e-15, dp 3.3e-15 / 1.3e-15,
+    |dI| 3.0e-9 A/m^2 of a 2.0e8 A/m^2 exchange (bulk) / 1.5e-8 of 1.2e7 (interface, at equilibrium)."""
+    o = {k: v for k, v in _KIN[key].items() if k not in ("h", "kinetic", "kbin")}   # bins as the quasi-static
+    r = C.run_child("dc_kinetic", stats="fermi_dirac", **o)
+    assert r["residual"] <= 1e-12
+    assert r["dpsi"] <= 1e-14 and r["dn"] <= 1e-12 and r["dp"] <= 1e-12, r
+    assert abs(r["I_kin"] - r["I_qs"]) <= 64.0 * EPS * r["one_way_kin"], r
+
+
+def test_kfd_trap_noise_fdt():
+    """GATE K-FD-F. The FDT diode with the three levels KINETIC under statistics='fermi_dirac': S(1 Hz) =
+    4 kT G_dc (Richardson DC conductance), the trap g-r branches (trap_n + trap_p) carrying >= 50 % of S
+    (MEASURED 69 %); budget _dc_budget. MEASURED 7.4e-12. SHOWN FAILING on the legacy statistics: -5.3e-3.
+    (FINDING outside this work, MEASURED in every statistics, Boltzmann included: with the NEUTRAL kinetic
+    level present, S/(4 kT Re Y) at 1 MHz is off by +0.33 -- a kind='neutral' kinetic level stores N_t f in
+    its trap row but not in Poisson, so the AC small-signal is not charge-conserving; the 1 Hz / DC identity
+    gated here is unaffected.)"""
+    o = dict(traps=1, trap_N=1e22, kinetic=1, dc=1)
+    r = C.run_child("fdt", stats="fermi_dirac", **o)
+    assert r["share"].get("trap_n", 0.0) + r["share"].get("trap_p", 0.0) >= 0.5
+    assert abs(r["fdt_dc"]) <= _dc_budget(r), (r["fdt_dc"], _dc_budget(r))
+    legacy = C.run_child("fdt", **o)
+    assert abs(legacy["fdt_dc"]) > 1e-3
+
+
+# =====================================================================================================
+# B: the unipolar consistent transport threaded through TransportModel and both builders
+# =====================================================================================================
+
+def test_b_unipolar_statistics_threaded_through_both_builders():
+    """GATE B. TransportModel(physics='drift_diffusion', carrier_statistics='fermi_dirac') gives every unipolar
+    region of the 2-D LayeredDevsimBuilder and of the 3-D Devsim3DEquilibrium (the primary and an extra
+    heterostack semiconductor, via Stacked3DSpec.from_design / the spec field) the FD quasi-field transport
+    (g_enh == 1, the Delta edge models); the default (None) keeps the averaged g. Its physics: gate F-TE
+    (unipolar). 'boltzmann' is refused for drift_diffusion (the unipolar model has no Boltzmann mode)."""
+    from dynameta.carriers.physics_equilibrium import M_E
+    from dynameta.materials.transport_model import TransportModel
+    r = C.run_child("builders")
+    for reg in (r["fd"], r["fd"]["3d_semi"], r["fd"]["3d_extra"]):
+        assert reg["g_is_one"] and reg["quasi_field"]
+    for reg in (r["legacy"], r["legacy"]["3d_semi"], r["legacy"]["3d_extra"]):
+        assert not reg["g_is_one"] and not reg["quasi_field"]
+    kw = dict(n_bg_m3=3e25, eps_static=9.0, dos_mass_kg_of_n_m3=lambda n: 0.3 * M_E,
+              physics="drift_diffusion", mobility_m2Vs_of_n_m3=lambda n: 3e-3)
+    assert TransportModel(carrier_statistics="fermi_dirac", **kw).carrier_statistics == "fermi_dirac"
+    with pytest.raises(ValueError, match="no Boltzmann mode"):
+        TransportModel(carrier_statistics="boltzmann", **kw)

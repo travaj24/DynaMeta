@@ -64,8 +64,18 @@ def _ev(dev, name, region="b"):
 
 
 def solve(ae=1e13, re_=1e-12, it=100):
+    """DC Newton. With kinetic traps on the device, first in physics_traps.kinetic_dc_form (the DC-form rows,
+    as dc_solve.solve_dc does), then in the PHYSICAL form from that root (the state every gate reads)."""
     ds = _ds()
+    from dynameta.carriers import physics_traps as PT
+    kin = any(PT.kinetic_trap_variables(d, r) for d in ds.get_device_list() for r in ds.get_region_list(device=d))
     with _quiet():
+        if kin:
+            with PT.kinetic_dc_form():
+                info = ds.solve(type="dc", solver_type="direct", absolute_error=ae, relative_error=re_,
+                                maximum_iterations=it, info=True)
+            if not info["converged"]:
+                raise RuntimeError("DC solve (kinetic DC form) did not converge")
         info = ds.solve(type="dc", solver_type="direct", absolute_error=ae, relative_error=re_,
                         maximum_iterations=it, info=True)
     if not info["converged"]:
@@ -95,13 +105,15 @@ def _traps(opts):
         return None
     tn, tp = opts.get("trap_tau", (1e-9, 4e-9))
     N = float(opts.get("trap_N", 3e23))
+    dyn = bool(opts.get("kinetic"))                 # TrapLevel(dynamic=True): the kinetic occupancy variable
     # a SHALLOW acceptor 0.05 eV below E_c (n1 = N_c exp(-0.05/kT) = 4e24 m^-3: comparable with n on the n+
     # side, where the FD emission density gamma_n n1 matters), a donor 0.06 eV above E_v, a neutral midgap level
     return (PT.TrapLevel(energy_eV=0.05, energy_reference="conduction", density_m3=N, kind="acceptor",
-                         tau_n0_s=tn, tau_p0_s=tp),
+                         tau_n0_s=tn, tau_p0_s=tp, dynamic=dyn),
             PT.TrapLevel(energy_eV=0.06, energy_reference="valence", density_m3=N, kind="donor",
-                         tau_n0_s=tp, tau_p0_s=tn),
-            PT.TrapLevel(energy_eV=0.0, kind="neutral", tau_n0_s=tn, tau_p0_s=tp))
+                         tau_n0_s=tp, tau_p0_s=tn, dynamic=dyn),
+            PT.TrapLevel(energy_eV=0.0, kind="neutral", tau_n0_s=tn, tau_p0_s=tp, dynamic=dyn,
+                         density_m3=N if dyn else 0.0))[:(2 if opts.get("no_neutral") else 3)]
 
 
 def _region_kw(opts):
@@ -142,6 +154,13 @@ def _seed(dev, region="b"):
     for v, m in (("Potential", "_seed"), ("Electrons", "IntrinsicElectrons"), ("Holes", "IntrinsicHoles")):
         ds.set_node_values(device=dev, region=region, name=v,
                            values=ds.get_node_model_values(device=dev, region=region, name=m))
+    _seed_kinetic(dev)
+
+
+def _seed_kinetic(dev):
+    from dynameta.carriers import physics_traps as PT
+    if any(PT.kinetic_trap_variables(dev, r) for r in _ds().get_region_list(device=dev)):
+        PT.seed_kinetic_traps(dev)
 
 
 def _presolve(dev, region="b"):
@@ -151,6 +170,7 @@ def _presolve(dev, region="b"):
     solve(1e10, 1e-10, 100)
     for ceq in ("ElectronContinuityEquation", "HoleContinuityEquation"):
         _R.reapply_by_name(dev, ceq)
+    _seed_kinetic(dev)
 
 
 def _lines_1d(ds, mesh, L, xj, h, w, coarse, tags=("pc", "nc")):
@@ -226,7 +246,10 @@ def build_mos(dev, opts):
         PE.setup_contact(dev, "gate")
         it = PT.InterfaceTraps(dit_eV_m2=float(opts.get("dit", 3e16)), band_gap_eV=1.12, charge="split",
                                sigma_n_m2=float(opts.get("sig_n", 1e-19)), sigma_p_m2=1e-20,
-                               fixed_charge_C_m2=float(opts.get("qf", 0.0)))
+                               fixed_charge_C_m2=float(opts.get("qf", 0.0)),
+                               **({"dynamic": True, "kinetic_bin_eV": (float(opts["kbin"]) if opts.get("kbin")
+                                                                        else None)}
+                                  if opts.get("kinetic") else {}))
         info = PT.install_interface_traps(dev, "si_ox", it)
         _seed(dev)
         psib = float(_v(dev, "_seed")[0])
@@ -267,6 +290,20 @@ def mechanism_balance(dev, prefix, region="b"):
             w = 2.0 * _ev(dev, "EdgeNodeVolume", region)
             net += float(np.sum(_ev(dev, rm, region) * w))
             one += 0.5 * float(np.sum(_ev(dev, pm, region) * w))
+    worst = None
+    for key in ("node_electron", "node_hole"):  # kinetic levels / bins: per branch, Int |R| over Int P/2
+        bn = bo = 0.0
+        for nm, ct in t[key].items():
+            if nm.startswith(prefix):
+                w = _v(dev, "NodeVolume", region)
+                bn += float(np.sum(np.abs(_v(dev, ct.rate, region)) * w))
+                bo += 0.5 * float(np.sum(_v(dev, ct.pair, region) * w))
+        if bo > 0.0:
+            r = bn / bo
+            if worst is None or r > worst[0] / worst[1]:
+                worst = (bn, bo)
+    if worst is not None:                          # the worse branch's (net, one-way)
+        net, one = worst
     return Q * net, Q * one
 
 
@@ -359,6 +396,7 @@ def sc_zero_bias(opts):
     out["x"] = _lst(_v(dev, "x"))
     out["construction_residual"] = exact_equilibrium(dev)
     out["Lmax"] = float(max(np.max(np.abs(_v(dev, "HJ_L_Electrons"))), np.max(np.abs(_v(dev, "HJ_L_Holes")))))
+    _seed_kinetic(dev)                                   # w = w_SS at the exact state: its equilibrium odds
     out["eq_net"], out["eq_one_way"], out["eq_max_path_ratio"] = balance()
     # node-wise worst |U| / (one-way) of every local term at the exact state
     t = _terms(dev)
@@ -373,6 +411,12 @@ def sc_zero_bias(opts):
             u, pr = _ev(dev, rm), _ev(dev, pm)
             ok = pr > 0
             worst = max(worst, float(np.max(np.abs(u[ok]) / (0.5 * pr[ok]))) if np.any(ok) else 0.0)
+    for key in ("node_electron", "node_hole"):
+        for nm, ct in t[key].items():
+            if nm.startswith(prefix):
+                u, pr = _v(dev, ct.rate), _v(dev, ct.pair)
+                ok = pr > 0
+                worst = max(worst, float(np.max(np.abs(u[ok]) / (0.5 * pr[ok]))) if np.any(ok) else 0.0)
     usrh = _v(dev, "USRH")
     out["eq_worst_local"] = worst
     out["eq_srh_max"] = float(np.max(np.abs(usrh)))
@@ -491,12 +535,53 @@ def sc_jacobian(opts):
         xj = 30e-9 if opts.get("device") != "diode" else 1e-6
         idx = np.argsort(np.abs(x - xj))[:int(opts.get("ncols", 6))]
         nodes = sorted(int(i) for i in idx if 0 < i < len(x) - 1)
-    out = {"residual": residual_scale(dev)}
-    out["worst"], out["where"] = jac_check(dev, "b", nodes)
+    from dynameta.carriers import physics_traps as PT
+    variables = ("Potential", "Electrons", "Holes") + tuple(PT.kinetic_trap_variables(dev, "b"))
+    out = {"residual": residual_scale(dev), "variables": list(variables)}
+    out["worst"], out["where"] = jac_check(dev, "b", nodes, variables=variables)
     if opts.get("knockout"):
         _knock_out_fd_derivatives(dev)
-        out["ko_worst"], out["ko_where"] = jac_check(dev, "b", nodes)
+        out["ko_worst"], out["ko_where"] = jac_check(dev, "b", nodes, variables=variables)
     return out
+
+
+def sc_dc_kinetic_vs_quasi_static(opts):
+    """DC: the device with KINETIC levels (or bins) at a forward / gate operating point equals the same
+    device with QUASI-STATIC ones (the K1 identity, now under opts['stats']): potential, carriers, and the
+    trap / surface recombination current."""
+    ds = _ds()
+    out = {}
+    for tag, kin in (("qs", False), ("kin", True)):
+        o = dict(opts, kinetic=kin)
+        if o.get("device") == "mos":
+            dev, _info = build_mos("dk" + tag, o)
+            prefix = "it"
+        else:
+            dev = build_junction("dk" + tag, o)
+            for k in range(1, 7):
+                ds.set_parameter(device=dev, name="nc_bias", value=-0.05 * k)
+                solve()
+            prefix = "trap"
+        t = _terms(dev)
+        w = _v(dev, "NodeVolume")
+        if kin:
+            cur = sum(float(np.sum(_v(dev, ct.rate) * w)) for nm, ct in t["node_electron"].items()
+                      if nm.startswith(prefix))
+        else:
+            cur = sum(float(np.sum(_v(dev, rm) * w)) for nm, (rm, pm) in t["node"].items() if nm.startswith(prefix))
+        one = 0.0
+        if kin:                                      # the fast exchange: the round-off scale of R_n vs U
+            for key in ("node_electron", "node_hole"):
+                one += sum(0.5 * float(np.sum(_v(dev, ct.pair) * w)) for nm, ct in t[key].items()
+                           if nm.startswith(prefix))
+        out[tag] = {"psi": _v(dev, "Potential"), "n": _v(dev, "Electrons"), "one": Q * one,
+                    "p": _v(dev, "Holes"), "I": Q * cur, "residual": residual_scale(dev)}
+        ds.delete_device(device=dev)
+    q, k = out["qs"], out["kin"]
+    return {"dpsi": float(np.max(np.abs(k["psi"] - q["psi"]))),
+            "dn": float(np.max(np.abs(k["n"] / q["n"] - 1.0))), "dp": float(np.max(np.abs(k["p"] / q["p"] - 1.0))),
+            "I_qs": q["I"], "I_kin": k["I"], "one_way_kin": k["one"],
+            "residual": max(q["residual"], k["residual"])}
 
 
 def sc_jacobian_2d(opts):
@@ -595,12 +680,39 @@ def sc_jacobian_nonlocal(opts):
 # ---------------------------------------------------------------------------------------------------
 
 def _solve_circuit(ae):
+    """DC Newton of a circuit device (relative 1e-9: the circuit current's own round-off); with kinetic traps
+    first in their DC form (as solve()), then the physical form."""
     ds = _ds()
+    from dynameta.carriers import physics_traps as PT
+    kin = any(PT.kinetic_trap_variables(d, r) for d in ds.get_device_list() for r in ds.get_region_list(device=d))
     with _quiet():
+        if kin:
+            with PT.kinetic_dc_form():
+                ds.solve(type="dc", solver_type="direct", absolute_error=ae, relative_error=1e-9,
+                         maximum_iterations=60, info=True)
         info = ds.solve(type="dc", solver_type="direct", absolute_error=ae, relative_error=1e-9,
                         maximum_iterations=60, info=True)
     if not info["converged"]:
         raise RuntimeError("DC solve did not converge")
+
+
+_ADVISED = []        # the quasi-static charged-trap advisories the noise / ssac solves raised (decision 39)
+
+
+def _advised(fn, *a):
+    """Run a noise / ssac call recording the decision-39 AdvisoryWarning (QUASI-STATIC charged traps: the
+    small-signal answer is exact only well below the capture rates); every other warning stays an error."""
+    import warnings
+    from dynameta.warning_types import AdvisoryWarning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", AdvisoryWarning)
+        out = fn(*a)
+    for w in caught:
+        if issubclass(w.category, AdvisoryWarning) and "QUASI-STATIC CHARGED traps" in str(w.message):
+            _ADVISED.append(str(w.message)[:80])
+        else:
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+    return out
 
 
 def fdt_ratio(ae, v0=1e-7, freqs=(1.0, 1e6)):
@@ -612,8 +724,8 @@ def fdt_ratio(ae, v0=1e-7, freqs=(1.0, 1e6)):
         ds.circuit_alter(name="V1", value=sg * v0)
         _solve_circuit(ae)
         _solve_circuit(ae)
-        sn = V.noise(list(freqs))
-        Y = V.ssac_Y(list(freqs))
+        sn = _advised(V.noise, list(freqs))
+        Y = _advised(V.ssac_Y, list(freqs))
         S = S + 0.5 * sn.S
         R = R + 0.5 * Y.real
         if share is None:
@@ -670,6 +782,7 @@ def sc_fdt(opts):
                                                          Eg_tun_eV=0.25, max_length_m=3e-7))
     r, share, ReY = fdt_ratio(ae)
     out = {"fdt": r, "share": share, "ReY": ReY, "residual": residual_scale(dev)}
+    out["advisories"] = len(_ADVISED)
     if opts.get("dc"):                         # DC conductance by Richardson (+-dv, +-2dv) and the noise at V0
         import validation.devsim_noise as V
         ds = _ds()
@@ -685,7 +798,7 @@ def sc_fdt(opts):
             ds.circuit_alter(name="V1", value=sg * 1e-7)
             _solve_circuit(ae)
             _solve_circuit(ae)
-            S = S + 0.5 * float(V.noise([1.0]).S[0])
+            S = S + 0.5 * float(_advised(V.noise, [1.0]).S[0])
         out["fdt_dc"] = S / (4.0 * V.KT * G) - 1.0
         out["G_dc"], out["G_spread"] = G, g1 - g2
     return out
@@ -752,7 +865,7 @@ def build_hetero(dev, opts):
 
 def build_hetero_unipolar(dev, opts):
     """1-D UNIPOLAR (physics_drift_diffusion) FD isotype heterostack, ITO-like N0 = 3e26 (eta 20) / AZO-like N1 m^-3,
-    affinity step dchi, thermionic interface; fd_edge_g of opts; 'lo' the circuit contact (V1) on r0."""
+    affinity step dchi, thermionic interface; opts["edge"] "consistent" = statistics="fermi_dirac"; 'lo' the circuit contact (V1) on r0."""
     import validation.devsim_noise as V
     ds = _ds()
     from dynameta.carriers import eq_registry as _R
@@ -781,7 +894,7 @@ def build_hetero_unipolar(dev, opts):
         ds.finalize_mesh(mesh=mesh)
         ds.create_device(mesh=mesh, device=dev)
         own = {}
-        kw = {} if opts.get("edge", "average") == "average" else {"fd_edge_g": opts["edge"]}
+        kw = {} if opts.get("edge", "average") == "average" else {"statistics": "fermi_dirac"}
         for r, N, m in (("r0", N0, 0.35), ("r1", N1, 0.28)):
             DD.setup_semiconductor_region_dd(dev, r, n_bg_m3=N, eps_static=9.0, dos_mass_kg=m * M_E,
                                              mobility_m2Vs=3e-3, **kw)
@@ -899,10 +1012,69 @@ def sc_nonlocal_refusals(opts):
     return out
 
 
+def _transport_markers(dev, region):
+    ds = _ds()
+    edges = set(ds.get_edge_model_list(device=dev, region=region))
+    g = np.asarray(ds.get_edge_model_values(device=dev, region=region, name="g_enh"))
+    return {"g_is_one": bool(np.all(g == 1.0)), "quasi_field": "HJ_Electrons_Delta@n0" in edges}
+
+
+def sc_builders(opts):
+    """TransportModel.carrier_statistics threaded to the UNIPOLAR drift-diffusion regions of both builders:
+    the 2-D LayeredDevsimBuilder (a 40 nm n 3e25 m^-3 bar, solved at 0 V) and the 3-D Devsim3DEquilibrium
+    (a small gated cell, built only). Returns, per statistics, the transport markers (g_enh == 1 and the
+    quasi-field edge models) of every unipolar region."""
+    import warnings
+    from dynameta.carriers.devsim_3d import Devsim3DEquilibrium, Stacked3DSpec
+    from dynameta.carriers.devsim_layered import LayeredDevsimBuilder
+    from dynameta.carriers.physics_equilibrium import M_E
+    from dynameta.geometry import Design, Electrode, Layer, Stack, UnitCell
+    from dynameta.geometry.specs import Mesh2DSpec
+    from dynameta.materials import ConstantOptical, Material, MaterialRegistry
+    from dynameta.materials.transport_model import TransportModel
+    from dynameta.sweep import BiasPoint
+    ds = _ds()
+    out = {}
+    for tag, st in (("legacy", None), ("fd", "fermi_dirac")):
+        tr = TransportModel(n_bg_m3=3e25, eps_static=9.0, dos_mass_kg_of_n_m3=lambda n: 0.3 * M_E,
+                            physics="drift_diffusion", mobility_m2Vs_of_n_m3=lambda n: 3e-3,
+                            carrier_statistics=st)
+        reg = MaterialRegistry()
+        reg.add(Material("air", ConstantOptical(1.0 + 0j)))
+        reg.add(Material("cmetal", ConstantOptical(-50.0 + 5.0j), is_metal=True))
+        reg.add(Material("TCO", ConstantOptical(4.0 + 0j), transport=tr))
+        stack = Stack(layers=[Layer("tco", 40e-9, "TCO")], superstrate_material="air", substrate_material="air")
+        els = [Electrode("anode", "tco", "x_lo", role="biased"),
+               Electrode("cathode", "tco", "x_hi", role="ground", fixed_voltage_V=0.0)]
+        d = Design(name="ub" + tag, unit_cell=UnitCell.square(300e-9), stack=stack, electrodes=els, materials=reg,
+                   mesh_2d=Mesh2DSpec())
+        b = LayeredDevsimBuilder(d, mesh_name="ubm" + tag, device_name="ubd" + tag)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")              # builder advisories (not under test)
+            with _quiet():
+                b.solve(BiasPoint({"anode": 0.0}, "eq"))
+        o = _transport_markers(b.device, "tco")
+        ds.delete_device(device=b.device)
+        spec = Stacked3DSpec(semi_material="ITO", oxide_material="HfO2", lateral_m=12e-9, semi_thk_m=12e-9,
+                             oxide_thk_m=8e-9, n_bg_m3=4e26, eps_semi=9.5, eps_oxide=18.0, dos_mass_kg=0.35 * M_E,
+                             physics="drift_diffusion", carrier_statistics=st,
+                             chi_semi_eV=4.4, extra_semiconductors=[("xs", "AZO", 5e-9, 9.0, 1e26, 4.3)])
+        c = Devsim3DEquilibrium(spec, mesh_name="u3m" + tag, device_name="u3d" + tag)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with _quiet():
+                c.build_device()
+        o["3d_semi"] = _transport_markers(c.device, "semi")
+        o["3d_extra"] = _transport_markers(c.device, "xs")
+        out[tag] = o
+    return out
+
+
 SCENARIOS = {"zero_bias": sc_zero_bias, "jacobian": sc_jacobian, "jacobian_2d": sc_jacobian_2d,
              "jacobian_nonlocal": sc_jacobian_nonlocal, "fdt": sc_fdt, "fdt_hetero": sc_fdt_hetero,
              "zero_bias_hetero": sc_zero_bias_hetero, "nondeg": sc_nondeg,
-             "nonlocal_refusals": sc_nonlocal_refusals}
+             "nonlocal_refusals": sc_nonlocal_refusals, "dc_kinetic": sc_dc_kinetic_vs_quasi_static,
+             "builders": sc_builders}
 
 
 def run_child(scenario, **opts):

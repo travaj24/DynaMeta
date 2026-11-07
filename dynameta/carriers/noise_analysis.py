@@ -39,7 +39,7 @@ is called, and it only READS the device (its DC operating point and models are l
      g mu kT/q of the transport model. With the legacy edge-averaged g the FDT is then exact only for
      g == 1 (Boltzmann) -- an O(h^2) residual next to degenerate gradients (MEASURED 6.8e-3 on an n+ 1e26 /
      3e25 m^-3 thermionic stack at h = 1 nm). With the FD quasi-field transport (statistics="fermi_dirac",
-     unipolar fd_edge_g="consistent"; physics_heterojunction.fd_quasi_field_expr) the edge conductance IS
+     unipolar statistics="fermi_dirac"; physics_heterojunction.fd_quasi_field_expr) the edge conductance IS
      q mu n_eff with the n_eff below, and the FDT is exact on degenerate edges too (MEASURED ~1e-11).
    * Generation-recombination (GR) noise, one Poissonian net process per mechanism:
         K_gr = 2 (G + R)    [(m^-3 s^-1)^2 m^3 / Hz],

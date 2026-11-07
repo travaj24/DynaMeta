@@ -93,6 +93,9 @@ class TransportModel:
                               no FD g-factor (an APPARENT, Boltzmann-extracted BGN set on a degenerate
                               layer -- removes the double count). Read by the 2-D LayeredDevsimBuilder
                               and Stacked3DSpec.from_design (carriers.bipolar_options module doc, item 2).
+                              drift_diffusion (v0.15 FD-mode integration): "fermi_dirac" selects the
+                              consistent FD quasi-field transport (physics_drift_diffusion.
+                              setup_semiconductor_region_dd(statistics=)); "boltzmann" is refused.
       chi_reference_T_K    : the temperature [K] at which chi_eV (and band_gap_eV) were QUOTED. None =
                               unstated, read as T_REF (300 K). No chi(T) model exists in v0.14, so a
                               heterostack run at another temperature uses chi_eV unchanged; the 2-D
@@ -230,9 +233,13 @@ class TransportModel:
             if self.carrier_statistics not in ("boltzmann", "fermi_dirac"):
                 raise ValueError("carrier_statistics must be None, 'boltzmann' or 'fermi_dirac', got {!r}"
                                  .format(self.carrier_statistics))
-            if self.physics != "bipolar_dd":
-                raise ValueError("carrier_statistics applies only to physics='bipolar_dd' (got {!r}); it "
-                                 "would be silently ignored".format(self.physics))
+            ok = (self.physics == "bipolar_dd"
+                  or (self.physics == "drift_diffusion" and self.carrier_statistics == "fermi_dirac"))
+            if not ok:
+                raise ValueError("carrier_statistics={!r} applies only to physics='bipolar_dd' (and "
+                                 "'fermi_dirac' to 'drift_diffusion': the consistent FD transport; the "
+                                 "unipolar model has no Boltzmann mode) -- got physics={!r}; it would be "
+                                 "silently ignored".format(self.carrier_statistics, self.physics))
         for nm, need in (("hooge_alpha_n", ("drift_diffusion", "bipolar_dd")),
                          ("hooge_alpha_p", ("bipolar_dd",))):
             v = getattr(self, nm)
