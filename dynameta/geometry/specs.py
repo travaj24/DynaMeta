@@ -188,8 +188,11 @@ class CarrierSpec:
       so; use the DC dI/dV for the f -> 0 conductance and drive the lightly doped contact).
       COST (measured, docs/audit/2026-11-03-devsim-extended-precision.md): 6.3x per Newton iteration in
       1-D, 18.5-21.8x on the 76k-node 2-D reference metasurface, identical iteration counts. With a
-      v0.15 custom term (carriers.custom_terms) the extended Newton converges LINEARLY (~12 iterations
-      to 7e-30; plan 5.9, decision 8: accepted) -- only the iteration count rises.
+      v0.15 custom term (carriers.custom_terms) the extended Newton converges LINEARLY (MEASURED: ~12
+      iterations to 7e-30 for a weak sink, 34 to 4e-31 for a link as strong as its row; budget
+      maximum_iterations >= 60; plan 5.9, decision 8: accepted), and where the term DOMINATES its rows
+      it stalls at the double floor (deep-depletion oxide tunnelling: rel ~7e-16 for 120 iterations) --
+      see carriers.custom_terms, item 5.
 
     PRECEDENCE: an explicit builder argument (LayeredDevsimBuilder(extended_precision=...),
     Stacked3DSpec.from_design(extended_precision=...)) wins. When it CONTRADICTS a value stated here
