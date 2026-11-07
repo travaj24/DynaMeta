@@ -542,8 +542,8 @@ jobs:
     #   imref-split oracle (~42 s) and the classical 2-D == 1-D case (~13 s); the 2-D DG case is @slow.
     # + tests/test_fd_mode_complete.py (v0.15 statistics='fermi_dirac' completed: BTBT local/nonlocal, charged and
     #   interface traps, thermionic FDT, the FD quasi-field transport; every device case in a child process,
-    #   tests/_fd_mode_child.py): 32 tests, 3.5 min with -n 2 on the Windows dev box (2026-11-06; ~6 min serial,
-    #   inferred; no single test above 42 s).
+    #   tests/_fd_mode_child.py): 40 tests (incl. the kinetic-trap K-FD and builder gates), 4.5 min with -n 2
+    #   on the Windows dev box (2026-11-06; ~8 min serial, inferred; no single test above 42 s).
     # ADD NEW DEVSIM MODULES HERE (or to `solvers`) WITH THEIR MEASURED TIME: the drift gate
     # tests/test_ci_solver_coverage.py fails the PR otherwise.
     name: solvers-devsim (DEVSIM v0.14 modules, py3.12)
