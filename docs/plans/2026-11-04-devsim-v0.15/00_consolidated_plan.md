@@ -1,5 +1,51 @@
 # DynaMeta DEVSIM work after v0.14: one consolidated plan for review
 
+## Status 2026-11-06 (v0.15.0 close-out)
+
+Release note: `docs/audit/2026-11-06-v0.15.0-release.md`. Each row names the audit note with the measured
+results (all under `docs/audit/`, prefix `2026-11-06-v0.15-`). The plan text below is kept as written; where
+the implementation found a plan statement wrong, it is listed at the end of this section.
+
+| Item | Status | Audit note |
+|---|---|---|
+| 4.0.1 two-point noise source | done | `two-point-source-custom-terms.md` |
+| 4.0.2 term bookkeeping v2 | done | `term-bookkeeping-v2.md` |
+| 4.0.3 custom-equation hook | done | `two-point-source-custom-terms.md` |
+| 4.0.4 one kernel per formula | done: one Varshni law (`materials.band_temperature`), one Kane kernel, the FD log activity reused, the exact-volume check (v0.14) | `band-temperature.md`, `nonlocal-btbt-1d.md` s.11 |
+| 4.1.1 self-consistent oxide tunnelling | done, except O13 (no measured stack J-V supplied; the validation stub skips) | `oxide-tunnelling.md`, `followups.md` item 2 |
+| 4.1.2 BTBT sets, tuples, T scaling | done (+ a post-solve 1-D resolution check); Kao primary still unread (strict xfail) | `btbt-presets.md`, `followups.md` item 1 |
+| 4.1.3 nonlocal BTBT | 1-D done; **2-D not done** (decision 21: after review); N14 (Jiao 2013 data) not built | `nonlocal-btbt-1d.md` |
+| 4.2.1 Si bundles, pairing, statistics switch | done, n-type only (Yan & Cuevas 2014 unread); `statistics="fermi_dirac"` completed for every mechanism; **its default is a pending decision** | `si-bundles.md`, `fermi-dirac-mode-complete.md` |
+| 4.2.2 III-V presets | done | `extended-precision-design-iii-v.md` |
+| 4.2.3 incomplete ionization | guard + advisory shipped in v0.14.0; Altermatt 2006 later | v0.14 notes |
+| 4.2.4 per-material Hooge alpha | done | `hooge-mapping-noise-method.md` |
+| 4.2.5 one-call noise method | done (dielectric gates; W7 @slow); P2 W3 3-D check not feasible; ohmic drive later | `hooge-mapping-noise-method.md`, `followups.md` item 4 |
+| 4.2.6 extended precision from the design | done (E7 covered by W7) | `extended-precision-design-iii-v.md`, `followups.md` item 3 |
+| 4.3.1 thermionic shot noise | done (on by default) | `thermionic-shot-noise.md` |
+| 4.3.2 kinetic traps K1-K4 | done (+ DC form, neutral kinetic levels refused); McWhorter out; the custom-equation interface spike not built | `kinetic-traps.md`, `trap-noise.md` |
+| 4.3.3 band temperature | done (+ `validation/devsim_heterojunction.py --temperature`) | `band-temperature.md`, `followups.md` item 5 |
+| 4.4.1 density-scaled tolerance | done (sized over every live device; `@pytest.mark.devsim_isolated`) | `tolerance-wellposedness.md` |
+| 4.4.2 floating-body detection | done (+ kinetic trap rows as local candidates); decision 57 deferred; circuit-level floating nodes not checked | `tolerance-wellposedness.md`, `trap-noise.md` |
+| 4.4.3 strong-inversion DG | done; **SP N_inv registered 10 % missed (+10.6..+11.7 %), documented vs fatal is a pending decision**; not reachable from `LayeredDevsimBuilder` | `dg-wall-strong-inversion.md` |
+| 4.4.4 retire the unipolar hard wall | done (deprecated shim; removal v0.16) | `dg-wall-strong-inversion.md` |
+| 4.4.5 2-D impact ionization on elements | done in v0.14.0 | `2026-11-06-v0.14-impact-ionization-2d.md` |
+| gmsh mesher removal (sections 1, 6.1, 6.2) | **not done**: `Stacked3DSpec(mesher="gmsh")` still exists and its warning still says "REMOVED in v0.15" | -- |
+| fifth validation shard / rebalance (5.8) | **not done**: still 4 shards; v0.15 adds `trap_kinetics` (193 s), `bipolar_dg_strong_inversion` (552 s) and the heterojunction `--temperature` section (155 s), dev-box times | -- |
+
+**Plan statements the implementation found wrong (measured; details in the notes named):**
+- 4.0.3 "about 12 iterations to 7e-30" holds for a weak sink only: a strong link took 34; a term that dominates its rows stalls at rel ~7e-16 in extended precision (`two-point-source-custom-terms.md` s.2, `oxide-tunnelling.md` s.8).
+- 4.1.1 "the adaptive grid steps J(V) by about 1e-10": measured <= 7e-15; the fixed grid is needed because only a fixed sum has an exact derivative. "gmsh: 1.5 % -> 37 %": 5.05 % V_ox spread / 92 % per-node J on the 2 nm stack (0.59 % / 10.5 % with the exact geometry).
+- 4.1.2 (P1 P6) "the direct share grows with field for Ge": it decreases (but stays > 1).
+- 4.1.3 "factor 2 at high field" holds only above ~2 V on the abrupt Si Zener; prefactor integrals on the P1 band converge at O(h^1.5) (integrated in v instead: order 2).
+- 4.2.4 gate "S f = I^2 Sum alpha_r / N_r" lacks the (L_r/L)^2 resistance-share weights (2.41x off on its fixture).
+- 4.2.6 the nightly GaN gate at a nominal 1 nm junction spacing misses (+4.9e-3); the cause is a 0.77 nm remainder edge left by DEVSIM's line grading (gate at 0.5 nm).
+- 4.3.1 gate "S = 2q(J + 2J_s)" with one J_s misses by -44..-57 % forward; the exact oracle is S = 2qJ coth(qV/2kT).
+- 4.3.2 the logit u = ln(f/(1-f)) (decision 40) overflows in Newton; the unknown is the odds w = f/(1-f) (|ln w| <= 600). The K2-1 adversarial ("must fail by c_n n_s/(c_p p_s)") does not refute for a starved minority; K3-4's contact shorting is a Debye-length effect, not 2 sqrt(D tau); a fixed 1e-12 adjoint tolerance is not derivable (kappa_1 = 2e11). The K3 "(N_t omega)^2 finite-speed" finding was the neutral kinetic level's missing Poisson charge (now refused).
+- 4.3.3 H2-c: P3's fallback (a larger-mismatch AlGaAs) would cross the Gamma-X crossover; the gate widens the temperature range (200 / 400 K) instead.
+- 4.4.1 (P4 1.1) "the absolute test is not binding": in double the MOS inversion fixture fails at 0.78 V on the absolute test.
+- 4.4.3 "sigma_min rises >= 1e8 (measured 3e11)": 1.9e8 with the electrons closed; the depleted holes are a second near-null mode, and P4's 1.45e-4 / 1.4e4 was in effect the both-closed system; quasi-Fermi variables gave x1.7 (P4: 0.65x). The registered N_inv tolerance is missed (above).
+- 4.4.4 (P4 G2-7) "degenerate ITO deficit in [0.7, 1.5] n0 L_q": the model's exact answer is 0.350 (FD g-factor); the planned negative control (re-install the pinned carrier row) is singular as written.
+
 This plan consolidates four detailed plans in this folder:
 - **P1**, tunnelling (`P1_tunneling.md`);
 - **P2**, materials and API (`P2_materials_api.md`);
