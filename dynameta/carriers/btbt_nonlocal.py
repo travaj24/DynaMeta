@@ -188,7 +188,8 @@ from dynameta.warning_types import AdvisoryWarning
 
 __all__ = ["NonlocalBTBT", "NonlocalPhysical", "setup_btbt_nonlocal", "btbt_nonlocal_generation",
            "physical_from_fitted", "fitted_from_physical", "kane_segment",
-           "keldysh_segment", "kane_moments", "keldysh_moments", "path_rates_1d", "PROCESSES", "MECHANISM"]
+           "keldysh_segment", "kane_moments", "keldysh_moments", "path_rates_1d", "PROCESSES", "MECHANISM",
+           "Paths", "trace_paths_1d", "nodal_gradient_1d", "tunnelling_gaps", "has_live_nonlocal"]
 
 PROCESSES = ("direct", "phonon")
 MECHANISM = "btbt_nl"                       # noise_analysis.TWO_POINT_MECHANISMS key (decision 9)
