@@ -107,13 +107,17 @@ def _traps(opts):
     N = float(opts.get("trap_N", 3e23))
     dyn = bool(opts.get("kinetic"))                 # TrapLevel(dynamic=True): the kinetic occupancy variable
     # a SHALLOW acceptor 0.05 eV below E_c (n1 = N_c exp(-0.05/kT) = 4e24 m^-3: comparable with n on the n+
-    # side, where the FD emission density gamma_n n1 matters), a donor 0.06 eV above E_v, a neutral midgap level
+    # side, where the FD emission density gamma_n n1 matters), a donor 0.06 eV above E_v, and a midgap level:
+    # neutral (recombination-only) when quasi-static, ACCEPTOR-like whenever the scenario involves kinetic levels
+    # (opts 'kinetic' or 'mid_acceptor': a kinetic level holds charge -- physics_traps.NeutralKineticTrapError,
+    # v0.15 neutral-kinetic fix -- and the quasi-static twin of a kinetic device must carry the same charge)
+    mid_acc = dyn or bool(opts.get("mid_acceptor"))
     return (PT.TrapLevel(energy_eV=0.05, energy_reference="conduction", density_m3=N, kind="acceptor",
                          tau_n0_s=tn, tau_p0_s=tp, dynamic=dyn),
             PT.TrapLevel(energy_eV=0.06, energy_reference="valence", density_m3=N, kind="donor",
                          tau_n0_s=tp, tau_p0_s=tn, dynamic=dyn),
-            PT.TrapLevel(energy_eV=0.0, kind="neutral", tau_n0_s=tn, tau_p0_s=tp, dynamic=dyn,
-                         density_m3=N if dyn else 0.0))[:(2 if opts.get("no_neutral") else 3)]
+            PT.TrapLevel(energy_eV=0.0, kind="acceptor" if mid_acc else "neutral", tau_n0_s=tn, tau_p0_s=tp,
+                         dynamic=dyn, density_m3=N if mid_acc else 0.0))[:(2 if opts.get("no_neutral") else 3)]
 
 
 def _region_kw(opts):
@@ -552,7 +556,7 @@ def sc_dc_kinetic_vs_quasi_static(opts):
     ds = _ds()
     out = {}
     for tag, kin in (("qs", False), ("kin", True)):
-        o = dict(opts, kinetic=kin)
+        o = dict(opts, kinetic=kin, mid_acceptor=1)
         if o.get("device") == "mos":
             dev, _info = build_mos("dk" + tag, o)
             prefix = "it"

@@ -384,10 +384,13 @@ def test_kfd_trap_noise_fdt():
     """GATE K-FD-F. The FDT diode with the three levels KINETIC under statistics='fermi_dirac': S(1 Hz) =
     4 kT G_dc (Richardson DC conductance), the trap g-r branches (trap_n + trap_p) carrying >= 50 % of S
     (MEASURED 69 %); budget _dc_budget. MEASURED 7.4e-12. SHOWN FAILING on the legacy statistics: -5.3e-3.
+    (v0.15 neutral-kinetic fix: the midgap kinetic level is now ACCEPTOR-like -- a kinetic level holds charge --
+    re-MEASURED share 69 %, 6.8e-12, legacy -5.4e-3.)
     (FINDING outside this work, MEASURED in every statistics, Boltzmann included: with the NEUTRAL kinetic
-    level present, S/(4 kT Re Y) at 1 MHz is off by +0.33 -- a kind='neutral' kinetic level stores N_t f in
-    its trap row but not in Poisson, so the AC small-signal is not charge-conserving; the 1 Hz / DC identity
-    gated here is unaffected.)"""
+    level present, S/(4 kT Re Y) at 1 MHz was off by +0.33 -- a kind='neutral' kinetic level stored N_t f in
+    its trap row but not in Poisson, so the AC small-signal was not charge-conserving. FIXED: a kinetic level
+    must be acceptor- or donor-like (physics_traps.NeutralKineticTrapError); the kinetic set here is the two
+    charged levels -- tests/test_trap_kinetics.py::test_a_kinetic_level_holds_charge_and_conserves_it_in_ssac.)"""
     o = dict(traps=1, trap_N=1e22, kinetic=1, dc=1)
     r = C.run_child("fdt", stats="fermi_dirac", **o)
     assert r["share"].get("trap_n", 0.0) + r["share"].get("trap_p", 0.0) >= 0.5

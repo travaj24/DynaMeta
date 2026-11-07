@@ -159,15 +159,21 @@ def _kernel_worst(reference, bgn, scale):
 
 
 def test_kinetic_spec_validation_and_defaults():
-    """The new spec fields: TrapLevel(dynamic=True) needs a finite density_m3 > 0 (also when neutral);
+    """The new spec fields: TrapLevel(dynamic=True) needs a finite density_m3 > 0 and a CHARGED kind
+    (kind='neutral' raises NeutralKineticTrapError, as does InterfaceTraps(charge='none', dynamic=True));
     `dynamic` must be a bool; InterfaceTraps(dynamic=True) needs recombination=True; kinetic_bin_eV only
     with dynamic=True, > 0, and it sets the bin width of a dynamic spec. Defaults: dynamic=False compares
     EQUAL to the shipped spec, and sheet_levels is unchanged for it."""
     with pytest.raises(ValueError, match="density_m3"):
-        PT.TrapLevel(energy_eV=0.1, kind="neutral", tau_n0_s=1e-9, tau_p0_s=1e-9, dynamic=True)
+        PT.TrapLevel(energy_eV=0.1, kind="acceptor", tau_n0_s=1e-9, tau_p0_s=1e-9, dynamic=True)
     with pytest.raises(TypeError):
         PT.TrapLevel(energy_eV=0.1, kind="neutral", tau_n0_s=1e-9, tau_p0_s=1e-9, dynamic=1)
-    lv = PT.TrapLevel(energy_eV=0.1, density_m3=1e18, kind="neutral", tau_n0_s=1e-9, tau_p0_s=1e-9,
+    with pytest.raises(PT.NeutralKineticTrapError, match="acceptor"):
+        PT.TrapLevel(energy_eV=0.1, density_m3=1e18, kind="neutral", tau_n0_s=1e-9, tau_p0_s=1e-9,
+                     dynamic=True)
+    with pytest.raises(PT.NeutralKineticTrapError):
+        PT.InterfaceTraps(dit_eV_m2=1e16, band_gap_eV=1.12, charge="none", dynamic=True)
+    lv = PT.TrapLevel(energy_eV=0.1, density_m3=1e18, kind="acceptor", tau_n0_s=1e-9, tau_p0_s=1e-9,
                       dynamic=True)
     assert lv.dynamic is True
     assert PT.TrapLevel(energy_eV=0.1, tau_n0_s=1e-9, tau_p0_s=1e-9) == \
@@ -293,8 +299,6 @@ DC_CASES = {
                                        tau_p0_s=5e-9), bias=("lo", (-0.1, -0.2, -0.3, -0.4)), ae=1e10),
     "donor": dict(trap=PT.TrapLevel(energy_eV=-0.2, density_m3=2e22, kind="donor", tau_n0_s=3e-9,
                                     tau_p0_s=5e-9), bias=("lo", (-0.1, -0.2, -0.3, -0.4)), ae=1e10),
-    "neutral": dict(trap=PT.TrapLevel(energy_eV=0.3, density_m3=1e21, kind="neutral", tau_n0_s=3e-9,
-                                      tau_p0_s=5e-9), bias=("lo", (-0.1, -0.2, -0.3, -0.4)), ae=1e10),
     # adversarial (P3 1.5): a deep level near E_c (n1/n0 = 1e3 on the n side), tau_n/tau_p = 1e6,
     # BGN on, the VALENCE reference
     "deep_valence_bgn": dict(trap=PT.TrapLevel(energy_eV=1.0, energy_reference="valence", density_m3=1e22,
@@ -352,13 +356,14 @@ def test_dc_identity_kinetic_equals_quasi_static(case):
 @pytest.mark.parametrize("E", [-0.38, 0.3])
 def test_d1c_lifetime_oracle_with_kinetic_levels(E):
     """K1-3 (a). D1c gate (a) -- the n-type slab lifetime against Schroder's closed form tau_p0 (1 + n1/n0)
-    + tau_n0 p1/n0 -- with the level KINETIC (a recombination-only TrapLevel, N_t = 1e18 m^-3 = 1e-3 n0
-    so its stored charge stays out of the balance, built-in channel at 1e3 s). The SAME tolerance as D1c
+    + tau_n0 p1/n0 -- with the level KINETIC (an acceptor-like level of N_t = 1e18 m^-3 = 1e-3 n0 -- a kinetic
+    level holds charge, NeutralKineticTrapError; its compensation enters through the measured n0 the closed
+    form takes -- built-in channel at 1e3 s). The SAME tolerance as D1c
     (1e-4; D1c MEASURED 2.1e-5 at +-0.4 eV, the dp/n0 residual): the physics is identical at DC.
     MEASURED: see the audit note (K1-3)."""
     import test_traps as TT
     tau_n0, tau_p0, G, L = 3e-10, 1e-10, 1e24, 60e-6
-    lv = PT.TrapLevel(energy_eV=E, density_m3=1e18, kind="neutral", tau_n0_s=tau_n0, tau_p0_s=tau_p0,
+    lv = PT.TrapLevel(energy_eV=E, density_m3=1e18, kind="acceptor", tau_n0_s=tau_n0, tau_p0_s=tau_p0,
                       dynamic=True)
     dp, n0, p0 = TT._slab_tau("ktau", tau_n=1e3, tau_p=1e3, G=G, length=L, traps=[lv])
     _tau, tau_full = TT._tau_closed_form(E, tau_n0, tau_p0, n0, p0)
@@ -593,7 +598,8 @@ def test_kinetic_noise_inventory_and_seed_range():
         ds.finalize_mesh(mesh=m)
         ds.create_device(mesh=m, device="kfd")
     ds.node_model(device="kfd", region="r", name="NetDoping", equation="1e24")
-    lvn = PT.TrapLevel(energy_eV=0.1, density_m3=1e18, tau_n0_s=1e-9, tau_p0_s=1e-9, dynamic=True)
+    lvn = PT.TrapLevel(energy_eV=0.1, density_m3=1e18, kind="acceptor", tau_n0_s=1e-9, tau_p0_s=1e-9,
+                       dynamic=True)
     with V.quiet():
         BP.setup_bipolar_region("kfd", "r", eps_static=11.7, n_dos_m3=NC, n_i_m3=NI, mobility_n_m2Vs=0.135,
                                 mobility_p_m2Vs=0.048, tau_n_s=1e-7, tau_p_s=1e-7, fd_enhancement=True,
@@ -1781,3 +1787,49 @@ def test_conductance_method_3d_stacked_spec_equals_1d():
     ora = cs * wt / (1 + wt ** 2)
     budget = np.array([_budget_ys(ww, 1j * ww * cs / (1 + 1j * ww * tau), psi_s, mino, r_h) for ww in w])
     assert np.all(np.abs(ysc.real / w / ora - 1.0) <= 10.0 * budget), (ysc.real / w / ora - 1.0, budget)
+
+
+def test_a_kinetic_level_holds_charge_and_conserves_it_in_ssac():
+    """A kinetic level is acceptor- or donor-like: kind='neutral' with dynamic=True is REFUSED
+    (NeutralKineticTrapError), because a level whose occupancy is a dynamic variable changes its charge by -q per
+    captured electron. GATES at 1 MHz (the DLTS device of K1-4, 0 V, both contacts circuit-driven, its level at
+    E_c - 0.3 eV with e_n = 1e6 /s, so it responds at 1 MHz): (a) Kirchhoff Y_V1 + Y_V2 = 0 to 10x the trap-free
+    ssac floor for the acceptor-like AND the donor-like kinetic level; (b) the FDT on the gate-B diode with the
+    same charge kinds kinetic, S_I = 4kT Re Y to 1e-4 at 1 Hz and 1 MHz. MEASURED: floor 1.3e-8; acceptor
+    3.5e-10, donor 4.3e-9; FDT acceptor 3.3e-8 at 1 MHz. FAILS ON d543fa9 (the refusal does not exist; the
+    neutral kinetic level it accepted broke Kirchhoff by 3.5e-3 of Y at 1 MHz -- 2.8e5 x the floor -- and the
+    FDT by +0.39: it stored N_t f in its trap row's time term but not in Poisson). Both the DC state and 1 Hz were
+    unaffected, which is why only the small-signal / noise gates saw it.)"""
+    from dynameta.carriers import extended_precision as XP
+    with pytest.raises(PT.NeutralKineticTrapError):
+        PT.TrapLevel(energy_eV=DL_EA, energy_reference="conduction", density_m3=DL_NT, kind="neutral",
+                     tau_n0_s=1.0 / (DL_CN * DL_NT), tau_p0_s=1.0 / (DL_CN * DL_NT), dynamic=True)
+
+    def kcl(traps):
+        V.fresh()
+        dev = _dl_device("kch", traps)
+        with V.quiet():
+            XP.solve(type="ac", frequency=1e6)
+        y = [complex(ds.get_circuit_node_value(node=s, solution="ssac_real"),
+                     ds.get_circuit_node_value(node=s, solution="ssac_imag")) for s in ("V1.I", "V2.I")]
+        V.fresh()
+        _R.clear(dev)
+        return abs(y[0] + y[1]) / abs(y[0])
+    floor = kcl(None)
+    for kind in ("acceptor", "donor"):
+        lv = PT.TrapLevel(energy_eV=DL_EA, energy_reference="conduction", density_m3=DL_NT, kind=kind,
+                          tau_n0_s=1.0 / (DL_CN * DL_NT), tau_p0_s=1.0 / (DL_CN * DL_NT), dynamic=True)
+        k = kcl((lv,))
+        assert k <= 10.0 * floor, (kind, k, floor)
+        V.bipolar_1d("fdt", *V._fdt_lines(), n_i=V.FDT_NI, tau=V.FDT_TAU, ae=1e8, traps=(dataclasses_replace(
+            lv, energy_eV=0.15, energy_reference="intrinsic", density_m3=2e21, tau_n0_s=3e-7, tau_p0_s=5e-7),))
+        sn = V.noise([1.0, 1e6])
+        Y = V.ssac_Y([1.0, 1e6])
+        r = sn.S / (4 * 1.380649e-23 * 300.0 * Y.real) - 1.0
+        assert np.max(np.abs(r)) < 1e-4, (kind, r)
+        V.fresh()
+
+
+def dataclasses_replace(obj, **kw):
+    import dataclasses
+    return dataclasses.replace(obj, **kw)
