@@ -640,7 +640,7 @@ jobs:
     #                                          box (2026-11-06, from their audit notes): noise-method W7
     #                                          261 s, quasi-equilibrium 2-D DG 138 s + closure == full
     #                                          ~90 s, extended-precision E4 86 s, band-temperature H2
-    #                                          gates ~45 s, chi-toggle ~36 s, trap continuum 23 s
+    #                                          gates ~45 s, trap continuum 23 s
     #   (b1) 2 heavy FEM modules    9 tests    431 s MEASURED (test_fem_drivers.py 173 s / 8 passed,
     #                                          test_graded_tensor_fem.py 258 s / 1 passed)
     #   (c1) 4 heavy FEM oracles               NOT re-measured here; the wave-3 probe that kept
